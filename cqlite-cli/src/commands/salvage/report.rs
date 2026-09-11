@@ -107,11 +107,38 @@ pub(super) fn exit_after_partial_failure(
     // SUBSEQUENT run into the same `--out` then fails with "not empty".
     let out_has_data_db = out_dir_has_data_db(&args.out);
     if reports.is_empty() {
-        if out_has_data_db {
-            std::process::exit(3);
-        }
-        // Genuinely nothing gathered and nothing on disk — no manifest
-        // exists to write.
+        // roborev, issue #4196, round-15 Medium finding 5 (an Opus
+        // whole-module audit): reaching THIS branch (`reports.is_empty()`)
+        // is ONLY possible via `execute_salvage_command`'s "every
+        // generation hard-errored inside `salvage_sstable`" path — the
+        // caller's OWN loop pushes every generation into either `reports`
+        // (`Ok(...)`) or `hard_errors` (`Err(...)`), never neither, so an
+        // empty `reports` here provably means every one hard-errored, i.e.
+        // a genuine `write_partition`/`finish()` I/O failure (disk full,
+        // EACCES), not a classified boundary/component refusal (THOSE
+        // always return `Ok(report)` with `report.refused` set — see this
+        // whole module's design D3 philosophy — and so are never absent
+        // from `reports`). `out_has_data_db == true` therefore means the
+        // writer got partway through before the I/O error struck. This IS
+        // exactly the case `execute_salvage_command`'s own doc comment
+        // already names for exit `1` ("a post-write failure struck before
+        // ANY report — refused or otherwise — had been gathered") — NOT
+        // exit `3`, which the CLI's `--help`/long_about documents as
+        // "check the manifest", false here: no `SalvageReport` was ever
+        // constructed for the failed generation(s) (the error propagated
+        // OUT of `salvage_sstable` before it could build one), so there is
+        // nothing to write INTO a manifest — `write_manifest_file`/
+        // `render_console` are not called below for exactly this reason
+        // (a table-dir input COULD still write a technically-valid empty
+        // `[]`, but a single-file input has no bare object to construct at
+        // all, and printing `[]` while a real I/O failure occurred would
+        // itself read as "nothing was ever attempted", which is false).
+        eprintln!(
+            "cqlite salvage: no manifest was produced — every generation hard-errored before a \
+             report could be built (see the error(s) above); inspect {} directly for whatever \
+             partial output was written",
+            args.out.display()
+        );
         std::process::exit(1);
     }
     // Best-effort: the caller already reported the failure that brought us
@@ -160,9 +187,25 @@ fn out_dir_has_data_db(out: &Path) -> bool {
 /// count: `is_table_dir` -> always a JSON array (one entry per generation,
 /// even when there is only one); a single `Data.db` input -> always a bare
 /// object (design D5's shape).
-fn manifest_json(reports: &[SalvageReport], is_table_dir: bool) -> anyhow::Result<String> {
+///
+/// Writes DIRECTLY to `writer` via `serde_json::to_writer_pretty` (roborev,
+/// issue #4196, round-15 Medium finding 4 — an Opus whole-module audit)
+/// rather than building one intermediate `String` via `to_string_pretty`
+/// first: with `losses` now capped per report (`recover::MAX_RESIDENT_LOSSES`),
+/// a table dir's `reports: Vec<SalvageReport>` stays `O(generations)` (real
+/// files under the input directory — not adversarially inflatable the way
+/// a corrupt Index.db's partition count is), but the FORMER shape still
+/// duplicated that whole, already-bounded structure a second time as one
+/// resident pretty-printed `String` before either writing it or printing
+/// it — streaming removes that second copy entirely for both the
+/// `--manifest` file and the `--out-format json` console path.
+fn write_manifest_json<W: std::io::Write>(
+    writer: W,
+    reports: &[SalvageReport],
+    is_table_dir: bool,
+) -> anyhow::Result<()> {
     if is_table_dir {
-        Ok(serde_json::to_string_pretty(reports)?)
+        serde_json::to_writer_pretty(writer, reports)?;
     } else {
         // roborev, issue #4196, round-6 Low finding: both callers (including
         // the failure path in `exit_after_partial_failure`) can in principle
@@ -172,8 +215,9 @@ fn manifest_json(reports: &[SalvageReport], is_table_dir: bool) -> anyhow::Resul
         let report = reports
             .first()
             .ok_or_else(|| anyhow::anyhow!("no salvage report to render (reports is empty)"))?;
-        Ok(serde_json::to_string_pretty(report)?)
+        serde_json::to_writer_pretty(writer, report)?;
     }
+    Ok(())
 }
 
 /// Write the JSON manifest (design D5) to `--manifest`, when given.
@@ -202,8 +246,10 @@ pub(super) fn write_manifest_file(
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
     }
-    let json = manifest_json(reports, is_table_dir).context("failed to serialize manifest")?;
-    std::fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    write_manifest_json(std::io::BufWriter::new(file), reports, is_table_dir)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -211,10 +257,14 @@ pub(super) fn write_manifest_file(
 /// stdout under `--out-format json`, else a text rendering to stderr.
 pub(super) fn render_console(reports: &[SalvageReport], args: &SalvageArgs, is_table_dir: bool) {
     match args.out_format {
-        SalvageOutFormatArg::Json => match manifest_json(reports, is_table_dir) {
-            Ok(text) => println!("{text}"),
-            Err(e) => eprintln!("cqlite salvage: failed to serialize manifest: {e}"),
-        },
+        SalvageOutFormatArg::Json => {
+            let stdout = std::io::stdout();
+            if let Err(e) = write_manifest_json(stdout.lock(), reports, is_table_dir) {
+                eprintln!("cqlite salvage: failed to serialize manifest: {e}");
+                return;
+            }
+            println!();
+        }
         SalvageOutFormatArg::Text => {
             for report in reports {
                 eprint!("{}", report.render_text());
@@ -252,6 +302,7 @@ mod tests {
                 written: 1,
             },
             losses: Vec::new(),
+            losses_truncated: 0,
             component_findings: Vec::new(),
             attempted: true,
             refused: None,

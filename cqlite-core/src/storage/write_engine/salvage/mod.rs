@@ -14,6 +14,7 @@
 mod boundaries;
 mod chunks;
 mod recover;
+mod recover_helpers;
 
 pub use boundaries::BoundarySourceKind;
 pub use recover::salvage_sstable;
@@ -187,6 +188,20 @@ pub struct SalvageReport {
     pub generation: u64,
     pub partitions: PartitionTotals,
     pub losses: Vec<Loss>,
+    /// How many lost partitions are NOT enumerated in `losses` above
+    /// (roborev, issue #4196, round-15 Medium finding 4 — an Opus
+    /// whole-module audit): `losses` caps at `recover::MAX_RESIDENT_LOSSES`
+    /// resident entries to keep a MASSIVELY-damaged input (a corrupt index
+    /// naming millions of lost partitions) bounded well under the crate's
+    /// <128 MB target — this is the AFFIRMATIVE count of everything past
+    /// that cap, never silent: `0` means `losses` names every lost
+    /// partition; a `losses.len() == MAX_RESIDENT_LOSSES` PLUS a non-zero
+    /// value here means truncation engaged. `partitions.lost` is always the
+    /// TRUE total (`losses.len() + losses_truncated`), never just
+    /// `losses.len()`. `#[serde(default)]` so a pre-round-15 manifest
+    /// (missing the field) still deserializes.
+    #[serde(default)]
+    pub losses_truncated: usize,
     pub component_findings: Vec<ComponentFinding>,
     /// `true` once the per-partition recovery loop began — DISTINCT from
     /// `partitions.total`, which is populated as soon as the boundary
@@ -294,7 +309,7 @@ impl SalvageReport {
                 self.partitions.written
             ));
         }
-        if self.losses.is_empty() {
+        if self.losses.is_empty() && self.losses_truncated == 0 {
             out.push_str("losses: 0 RECOGNISED\n");
         } else {
             out.push_str(&format!("losses: {}\n", self.losses.len()));
@@ -306,6 +321,18 @@ impl SalvageReport {
                     loss.class.manifest_label(),
                     loss.rows_decoded_before_failure,
                     loss.message
+                ));
+            }
+            // roborev, issue #4196, round-15 Medium finding 4: a truncated
+            // loss list must say so explicitly — the SAME affirmative
+            // disclosure this whole manifest already applies to an
+            // unmeasured/empty run, here for a run that measured MORE than
+            // it could afford to hold resident.
+            if self.losses_truncated > 0 {
+                out.push_str(&format!(
+                    "  ... {} more loss(es) truncated (not held resident; see \
+                     partitions.lost for the true total)\n",
+                    self.losses_truncated
                 ));
             }
         }

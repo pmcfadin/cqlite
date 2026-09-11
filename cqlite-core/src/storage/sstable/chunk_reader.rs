@@ -109,6 +109,37 @@ impl<R: Read + Seek> ChunkReader<R> {
             )));
         }
 
+        // roborev, issue #4196, round-15 Medium finding 2 (an Opus
+        // whole-module audit): `compressed_chunk_size` derives the LAST
+        // chunk's size as `total_file_size - start_offset` (`compression_info.rs`)
+        // — a `chunk_offsets` table corrupted SHORT (e.g. to a single entry
+        // while `Data.db` really holds thousands of chunks) makes the last
+        // (only) chunk's declared size the WHOLE REMAINING FILE, and
+        // `offset + size <= total_size` (the round-11 plausibility guard,
+        // `salvage/chunks.rs`) is satisfied BY CONSTRUCTION for exactly this
+        // shape — `size` is DERIVED from `total_size`, so it can never
+        // exceed it. Bound the allocation itself against the ONE
+        // authoritative per-chunk ceiling Cassandra's own writer never
+        // exceeds: `CompressedSequentialWriter` stores a chunk UNCOMPRESSED
+        // (at exactly `chunk_length` bytes) rather than emit a compressed
+        // payload larger than its declared uncompressed `chunk_length` — so
+        // a compressed chunk record legitimately wider than
+        // `chunk_length + 4` (the CRC trailer) can only be a corrupt
+        // `CompressionInfo.db`, never real Cassandra output. Applies to
+        // EVERY caller (`verify.rs`'s full-mode chunk walk gets the SAME
+        // protection, not just salvage's pre-flight).
+        let max_plausible_total_chunk_size = self.compression_info.chunk_length as u64 + 4;
+        if total_chunk_size > max_plausible_total_chunk_size {
+            return Err(Error::InvalidFormat(format!(
+                "Chunk {chunk_index} declares a {total_chunk_size}-byte record — exceeds the \
+                 {max_plausible_total_chunk_size}-byte maximum a real chunk_length={} \
+                 CompressionInfo.db can produce (chunk_length + 4-byte CRC); refusing to \
+                 allocate an unbounded chunk buffer (this is a CompressionInfo.db corruption, \
+                 not a Data.db one)",
+                self.compression_info.chunk_length
+            )));
+        }
+
         let chunk_size = (total_chunk_size - 4) as usize;
         let mut chunk_data = vec![0u8; chunk_size];
         self.reader.read_exact(&mut chunk_data).map_err(|e| {

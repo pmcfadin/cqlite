@@ -1,44 +1,50 @@
 //! The recovery loop: enumerate → chunk pre-flight → decode-at-offset →
-//! reconcile → write-or-record-loss (design D1, D2, D3).
+//! reconcile → write-or-record-loss (design D1, D2, D3). Helper functions
+//! (opening the reader, decoding + reconciling ONE partition, building a
+//! `Loss`, the pre-write ordering check) live in the sibling
+//! `recover_helpers` module (round 15, campsite rule / epic #1116).
 
-use super::boundaries::{enumerate_boundaries, BoundaryEntry};
+use super::boundaries::enumerate_boundaries;
 use super::chunks::{chunks_for_range, compressed_chunk_preflight, uncompressed_chunk_preflight};
+use super::recover_helpers::{
+    build_loss, component_unreadable_refusal, open_reader, reader_data_path, recover_one_partition,
+    token_out_of_order,
+};
 use super::{
     ComponentFinding, Loss, LossClass, PartitionTotals, Refusal, RefusalReason, SalvageOptions,
     SalvageReport,
 };
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
-use crate::storage::partition_key_codec::decode_partition_key_columns;
 use crate::storage::scan_cancel::ScanCancel;
-use crate::storage::sstable::reader::{
-    extract_sstable_base_name, PartitionAtOffsetOutcome, SSTableReader,
-};
+use crate::storage::sstable::reader::extract_sstable_base_name;
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::storage::sstable::writer::{SSTableFormat as WriterFormat, SSTableWriter};
-use crate::storage::write_engine::merge::{
-    classify_inputs, compute_baseline_min, KWayMerger, MergeEntry, MergeStep, SSTableRowIterator,
-    SSTableRowIteratorAdapter,
-};
-use crate::storage::write_engine::mutation::{DecoratedKey, Mutation};
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use crate::storage::write_engine::merge::{classify_inputs, compute_baseline_min};
+use std::path::Path;
 
-/// A run backed by a single already-decoded partition's `MergeEntry`s (the
-/// salvage recovery loop's own source, one per partition, per run of
-/// [`salvage_sstable`]) — the same shape the single-partition point-read path
-/// (`write_engine::merge::point_read`) uses to feed
-/// [`KWayMerger::from_row_iterators`], so a healthy partition reconciles
-/// through the IDENTICAL machinery `compact_sstables` uses (design D1, R1).
-struct SinglePartitionRun {
-    entries: VecDeque<MergeEntry>,
-}
-
-impl SSTableRowIterator for SinglePartitionRun {
-    fn next(&mut self) -> Option<Result<MergeEntry>> {
-        self.entries.pop_front().map(Ok)
-    }
-}
+/// The largest number of [`Loss`] entries [`salvage_sstable`] holds resident
+/// per generation (roborev, issue #4196, round-15 Medium finding 4 — an Opus
+/// whole-module audit): the boundary-entry count is `O(Index.db size)` (a
+/// ~4-byte minimum per entry), and each `Loss.key_hex` can independently be
+/// up to 131,070 hex chars (a `u16` `key_len` field, so a 65,535-byte raw
+/// key) — a damaged input where MOST partitions are lost (e.g. Medium
+/// finding 2's `chunk_table_bound` collapse, or any corrupt-offset index)
+/// made this `Vec<Loss>` grow WITHOUT bound: a ~10 MB corrupt index names
+/// ~2.5M lost partitions, several hundred MB once each is a `Loss` struct
+/// AND the manifest is serialized to a second, duplicate `String` via
+/// `serde_json::to_string_pretty` — well past the crate's <128 MB target,
+/// with no wrong data (D5's "every loss named" contract just needs a
+/// COUNTED truncation instead of literal enumeration past this cap, exactly
+/// like this same module's own `component_findings`/`losses: 0 RECOGNISED`
+/// affirmative-zero convention already does for the EMPTY case). 500
+/// entries leaves real headroom under the crate's <128 MB target even in
+/// the maximally-adversarial case (500 * 131,070 bytes ≈ 65.5 MB, versus
+/// the reader/writer's own buffers, the manifest's OWN second JSON copy,
+/// and everything else the process needs) while remaining generous for the
+/// overwhelming majority of real damaged inputs, whose partition counts and
+/// key sizes are nowhere near this adversarial extreme.
+const MAX_RESIDENT_LOSSES: usize = 500;
 
 /// Recover every completely-decodable partition of `input` (one `Data.db`
 /// file — a table dir with multiple generations is the CLI's concern, spec
@@ -99,6 +105,7 @@ pub async fn salvage_sstable(
         generation,
         partitions: PartitionTotals::default(),
         losses: Vec::new(),
+        losses_truncated: 0,
         component_findings: Vec::new(),
         attempted: false,
         refused: None,
@@ -251,6 +258,11 @@ pub async fn salvage_sstable(
     // merely "nothing failed to decode".
     let mut written = 0usize;
     let mut losses: Vec<Loss> = Vec::new();
+    // roborev, issue #4196, round-15 Medium finding 4: every loss beyond
+    // `MAX_RESIDENT_LOSSES` is COUNTED here rather than held resident — see
+    // that constant's doc for the memory-bound reasoning. Surfaced on
+    // `report.losses_truncated`.
+    let mut losses_truncated: usize = 0;
     // roborev, issue #4196, round-9 (spec R2.4/R3.1's own oracle: a
     // bit-flipped-but-still-parseable `Index.db`/`Partitions.db` entry can
     // be `data_offset`-ascending — `check_strictly_ascending` above already
@@ -292,7 +304,27 @@ pub async fn salvage_sstable(
             if data_length > entry.data_offset {
                 data_length
             } else {
-                entry.data_offset + 1
+                // roborev, issue #4196, round-15 Medium finding 3 (an Opus
+                // whole-module audit): `entry.data_offset` is an unsanitized
+                // VInt (`parse_big_index_entry` places no upper bound on it,
+                // and `check_strictly_ascending` enforces only ORDER, so
+                // `u64::MAX` is representable and legitimately the LARGEST
+                // value, satisfying strict ascent trivially). An uncompressed
+                // BIG input with NO `CRC.db` (a supported input —
+                // `ChunkCrcUnavailable` exists for exactly this) makes
+                // `uncompressed_chunk_preflight` return `data_length == 0`,
+                // which skips the `data_length > entry.data_offset` branch
+                // above UNCONDITIONALLY (0 is never greater than anything) —
+                // reaching this arm with `entry.data_offset == u64::MAX`
+                // panicked on the plain `+ 1` in every debug build (every
+                // test lane), instead of producing the classified
+                // `Truncated` loss this whole module exists to produce.
+                // `saturating_add` never overflows; the resulting
+                // `chunk_range_end == u64::MAX` still correctly names an
+                // implausible, unrepresentable range downstream (`chunks_for_range`
+                // is never reached here regardless — `chunk_size == 0` in
+                // lockstep with `data_length == 0`, round 14's fix).
+                entry.data_offset.saturating_add(1)
             }
         });
 
@@ -317,18 +349,22 @@ pub async fn salvage_sstable(
         // matching `decode_partition_at_offset_for_salvage`'s own
         // past-EOF signal one layer up).
         if data_length > 0 && entry.data_offset >= data_length {
-            losses.push(build_loss(
-                entry,
-                schema,
-                Vec::new(),
-                LossClass::Truncated,
-                0,
-                format!(
-                    "partition's declared start offset {} is at or past the measured data \
-                     length {} — the boundary source names an implausible position",
-                    entry.data_offset, data_length
-                ),
-            ));
+            if losses.len() < MAX_RESIDENT_LOSSES {
+                losses.push(build_loss(
+                    entry,
+                    schema,
+                    Vec::new(),
+                    LossClass::Truncated,
+                    0,
+                    format!(
+                        "partition's declared start offset {} is at or past the measured data \
+                         length {} — the boundary source names an implausible position",
+                        entry.data_offset, data_length
+                    ),
+                ));
+            } else {
+                losses_truncated += 1;
+            }
             continue;
         }
         let chunk_range_end = if data_length > 0 {
@@ -362,18 +398,22 @@ pub async fn salvage_sstable(
             // here too, for consistency, and name the failing subset in the
             // message text instead (where a human/consumer wanting "why"
             // still finds it, distinct from "where").
-            let bad_touched_desc = format!("{bad_touched:?}");
-            losses.push(build_loss(
-                entry,
-                schema,
-                touched_chunks,
-                LossClass::ChunkCrc,
-                0,
-                format!(
-                    "partition's byte range intersects a chunk that failed CRC validation \
-                     (failing chunk(s): {bad_touched_desc})"
-                ),
-            ));
+            if losses.len() < MAX_RESIDENT_LOSSES {
+                let bad_touched_desc = format!("{bad_touched:?}");
+                losses.push(build_loss(
+                    entry,
+                    schema,
+                    touched_chunks,
+                    LossClass::ChunkCrc,
+                    0,
+                    format!(
+                        "partition's byte range intersects a chunk that failed CRC validation \
+                         (failing chunk(s): {bad_touched_desc})"
+                    ),
+                ));
+            } else {
+                losses_truncated += 1;
+            }
             continue;
         }
 
@@ -394,19 +434,23 @@ pub async fn salvage_sstable(
                         // would otherwise reject as a hard `Err`.
                         // Classified here instead, as a loss, never
                         // reaching the writer.
-                        losses.push(build_loss(
-                            entry,
-                            schema,
-                            touched_chunks,
-                            LossClass::KeyMismatch,
-                            0,
-                            format!(
-                                "decoded key's token {} does not sort after the last partition \
-                                 actually written (token {last}); the boundary source and the \
-                                 data disagree on ordering",
-                                key.token
-                            ),
-                        ));
+                        if losses.len() < MAX_RESIDENT_LOSSES {
+                            losses.push(build_loss(
+                                entry,
+                                schema,
+                                touched_chunks,
+                                LossClass::KeyMismatch,
+                                0,
+                                format!(
+                                    "decoded key's token {} does not sort after the last \
+                                     partition actually written (token {last}); the boundary \
+                                     source and the data disagree on ordering",
+                                    key.token
+                                ),
+                            ));
+                        } else {
+                            losses_truncated += 1;
+                        }
                         continue;
                     }
                 }
@@ -450,14 +494,18 @@ pub async fn salvage_sstable(
                 // range intersects on EVERY loss class when known (compressed
                 // input), not just chunk-crc — useful for a manual look even
                 // when the CRC itself was clean but the decode still failed.
-                losses.push(build_loss(
-                    entry,
-                    schema,
-                    touched_chunks,
-                    class,
-                    rows_before,
-                    message,
-                ));
+                if losses.len() < MAX_RESIDENT_LOSSES {
+                    losses.push(build_loss(
+                        entry,
+                        schema,
+                        touched_chunks,
+                        class,
+                        rows_before,
+                        message,
+                    ));
+                } else {
+                    losses_truncated += 1;
+                }
             }
         }
     }
@@ -482,7 +530,14 @@ pub async fn salvage_sstable(
     }
 
     report.partitions.recovered = recovered;
-    report.partitions.lost = losses.len();
+    // roborev, issue #4196, round-15 Medium finding 4: `partitions.lost`
+    // is the TRUE total (resident `losses.len()` PLUS every one counted-
+    // but-not-retained past `MAX_RESIDENT_LOSSES`) — `report.losses` below
+    // holds only the resident subset, so keying this count off `losses.len()`
+    // alone would silently UNDER-report the real loss count the moment
+    // truncation engages, exactly the "every loss named" contract violation
+    // a counted truncation exists to avoid.
+    report.partitions.lost = losses.len() + losses_truncated;
     // roborev, issue #4196, round-13 Medium finding: surface the
     // recovered-but-not-written residue (the `Ok(None)` arm above) in the
     // manifest so a partial silent-drop run — some partitions `Ok(None)`,
@@ -491,6 +546,7 @@ pub async fn salvage_sstable(
     // both reporting `recovered=N lost=0` and exiting 0.
     report.partitions.written = written;
     report.losses = losses;
+    report.losses_truncated = losses_truncated;
 
     if written == 0 {
         // roborev, issue #4196, round-12 Low finding: the remedy text
@@ -518,279 +574,4 @@ pub async fn salvage_sstable(
     }
 
     Ok(report)
-}
-
-async fn open_reader(input: &Path) -> Result<SSTableReader> {
-    use crate::config::DiskAccessMode;
-    use crate::platform::Platform;
-    use crate::Config;
-    use std::sync::Arc;
-
-    let mut config = Config::default();
-    config.storage.use_mmap = false;
-    config.storage.disk_access_mode = DiskAccessMode::Buffered;
-    let platform = Arc::new(Platform::new(&config).await?);
-    SSTableReader::open(input, &config, platform).await
-}
-
-/// `input` names the `Data.db` file itself already (the salvage contract) —
-/// this alias exists only so the chunk-preflight call sites read clearly.
-fn reader_data_path(input: &Path) -> PathBuf {
-    input.to_path_buf()
-}
-
-/// Build a [`RefusalReason::ComponentUnreadable`] [`Refusal`] (roborev, issue
-/// #4196, batched finding b) — `context` names WHAT was being attempted
-/// (`"opening the input"`, `"reading the input's repair state
-/// (Statistics.db)"`, ...) and `error` is the underlying failure's `Display`,
-/// both folded into the remedy so an operator sees the actual cause rather
-/// than a generic "refused" with no lead. Unlike
-/// [`RefusalReason::BoundarySourceUnreadable`] this does NOT point at
-/// `cqlite rebuild --components index` (#4197) — the boundary source was
-/// fine here, so that remedy would send an operator at the wrong component;
-/// `cqlite verify --mode full` is named instead, to let the operator
-/// identify which component is actually damaged before deciding a next step.
-fn component_unreadable_refusal(context: &str, error: &dyn std::fmt::Display) -> Refusal {
-    Refusal {
-        reason: RefusalReason::ComponentUnreadable,
-        remedy: format!(
-            "component unreadable while {context}: {error} — run `cqlite verify --mode full` on \
-             this input to identify the damaged component; salvage cannot proceed without it"
-        ),
-    }
-}
-
-/// Decode + reconcile ONE partition. `Ok(Some((key, mutations)))` on success,
-/// `Ok(None)` when the partition decoded but reconciled to nothing to write,
-/// `Err((class, rows_decoded_before_failure, message))` names a loss.
-async fn recover_one_partition(
-    reader: &SSTableReader,
-    entry: &BoundaryEntry,
-    end_bound: Option<u64>,
-    schema: &TableSchema,
-    scan_cancel: &ScanCancel,
-) -> std::result::Result<Option<(DecoratedKey, Vec<Mutation>)>, (LossClass, usize, String)> {
-    let outcome = reader
-        .decode_partition_at_offset_for_salvage(
-            entry.data_offset,
-            end_bound,
-            entry.expected_key.as_deref(),
-            Some(schema),
-            scan_cancel,
-        )
-        .await
-        .map_err(|e| (LossClass::Decode, 0, e.to_string()))?;
-
-    let rows = match outcome {
-        PartitionAtOffsetOutcome::Rows(rows) => rows,
-        PartitionAtOffsetOutcome::KeyMismatch => {
-            return Err((
-                LossClass::KeyMismatch,
-                0,
-                "decoded key at this offset does not match the boundary source's key for this \
-                 slot"
-                    .to_string(),
-            ));
-        }
-        PartitionAtOffsetOutcome::DecodeError {
-            rows_decoded_before_failure,
-            error,
-        } => {
-            return Err((
-                LossClass::Decode,
-                rows_decoded_before_failure,
-                error.to_string(),
-            ));
-        }
-        PartitionAtOffsetOutcome::Truncated => {
-            return Err((
-                LossClass::Truncated,
-                0,
-                "partition's authoritative byte range extends past Data.db's actual end"
-                    .to_string(),
-            ));
-        }
-    };
-
-    let mut merge_entries = Vec::with_capacity(rows.len());
-    for (idx, row) in rows.into_iter().enumerate() {
-        match SSTableRowIteratorAdapter::build_merge_entry(0, row, schema) {
-            Ok(me) => merge_entries.push(me),
-            Err(e) => return Err((LossClass::Decode, idx, e.to_string())),
-        }
-    }
-
-    let run = SinglePartitionRun {
-        entries: merge_entries.into(),
-    };
-    let mut merger = KWayMerger::from_row_iterators(vec![Box::new(run)], schema)
-        .map_err(|e| (LossClass::Decode, 0, e.to_string()))?;
-    let reconciled = merger
-        .step()
-        .map_err(|e| (LossClass::Decode, 0, e.to_string()))?;
-    let (key, entries) = match reconciled {
-        MergeStep::Partition { key, rows } => (key, rows),
-        MergeStep::Complete => return Ok(None),
-    };
-    // roborev, issue #4196, round-7 Low finding: `step()` was previously
-    // called exactly once and the merger dropped — every row here came from
-    // ONE `decode_partition_at_offset_for_salvage` call for ONE boundary
-    // slot, so this MUST drain to `Complete` on the next step. A second
-    // `Partition` would mean the decoder fabricated rows spanning a
-    // partition boundary (e.g. a corrupted `END_OF_PARTITION` marker whose
-    // over-consumption still satisfied the compressed branch's `consumed <=
-    // end - offset` bound), and silently dropping the merger here would
-    // discard that second partition's rows from BOTH the output and the
-    // loss manifest — the exact "every partition accounted for" contract
-    // this tool exists to uphold.
-    match merger.step() {
-        Ok(MergeStep::Complete) => {}
-        Ok(MergeStep::Partition { .. }) => {
-            return Err((
-                LossClass::Decode,
-                entries.len(),
-                "boundary slot decoded rows spanning more than one partition key".to_string(),
-            ));
-        }
-        Err(e) => return Err((LossClass::Decode, entries.len(), e.to_string())),
-    }
-    if entries.is_empty() {
-        return Ok(None);
-    }
-
-    let mut mutations = Vec::with_capacity(entries.len());
-    for e in entries {
-        let m = KWayMerger::merge_entry_to_mutation(e, schema)
-            .map_err(|err| (LossClass::Decode, 0, err.to_string()))?;
-        mutations.push(m);
-    }
-    Ok(Some((key, mutations)))
-}
-
-fn build_loss(
-    entry: &BoundaryEntry,
-    schema: &TableSchema,
-    chunks: Vec<u64>,
-    class: LossClass,
-    rows_decoded_before_failure: usize,
-    message: String,
-) -> Loss {
-    // roborev, issue #4196: a BTI narrow (`DataOffset`) leaf carries no raw
-    // key at all (see `BoundaryEntry::diagnostic_prefix`'s doc) — reporting
-    // an empty `key_hex` there gave an operator nothing to locate the slot
-    // by. Fall back to the trie's byte-comparable prefix, clearly labelled
-    // as such (never presented as the raw key).
-    if let Some(key_bytes) = &entry.expected_key {
-        // roborev, issue #4196, round-6 Low finding: the Rust `Debug`
-        // spelling of the decoded column vector is unstable across refactors
-        // and not documented anywhere in the JSON manifest's contract — use
-        // `Value`'s own stable `Display` rendering instead, comma-joined
-        // `name=value` per column (matches the CLI's own row-value output).
-        let key = decode_partition_key_columns(key_bytes, schema).ok().map(
-            |cols: Vec<(String, crate::Value)>| {
-                cols.iter()
-                    .map(|(name, value)| format!("{name}={value}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            },
-        );
-        Loss {
-            key_hex: hex::encode(key_bytes),
-            key,
-            data_offset: entry.data_offset,
-            chunks,
-            class,
-            rows_decoded_before_failure,
-            message,
-        }
-    } else if let Some(prefix) = &entry.diagnostic_prefix {
-        Loss {
-            key_hex: hex::encode(prefix),
-            key: Some(
-                "(BTI trie byte-comparable prefix — the raw key is not carried by the boundary \
-                 source for this narrow partition; see Data.db at this offset)"
-                    .to_string(),
-            ),
-            data_offset: entry.data_offset,
-            chunks,
-            class,
-            rows_decoded_before_failure,
-            message,
-        }
-    } else {
-        Loss {
-            key_hex: String::new(),
-            key: None,
-            data_offset: entry.data_offset,
-            chunks,
-            class,
-            rows_decoded_before_failure,
-            message,
-        }
-    }
-}
-
-/// `true` when `candidate` does not token-sort strictly after
-/// `last_written` — mirrors `SSTableWriter::write_partition`'s own ordering
-/// check (`writer/mod.rs`: `key.token <= last_token`) so the SAME violation
-/// is caught HERE, before ever calling it, and classified as an ordinary
-/// `Loss` instead of surfacing as a hard `Err` deep in the write path
-/// (roborev, issue #4196, round-9 — three prior rounds independently
-/// surfaced the hard-`Err` propagation this prevents). Extracted as a pure
-/// function so the comparison is unit-testable directly: end-to-end, this
-/// code path is reachable ONLY via a corrupted BTI narrow leaf (no
-/// independent key to cross-check — every OTHER corruption class that could
-/// produce an out-of-order token is already caught EARLIER, either by
-/// `check_strictly_ascending` (offset monotonicity) or by
-/// `decode_partition_at_offset_for_salvage`'s own `expected_key` cross-check
-/// — see this module's `token_out_of_order` unit tests for the reasoning),
-/// which is hard to construct as a real end-to-end fixture; declared here
-/// rather than silently left untested.
-fn token_out_of_order(last_written: Option<i64>, candidate: i64) -> bool {
-    last_written.is_some_and(|last| candidate <= last)
-}
-
-#[cfg(test)]
-mod ordering_tests {
-    use super::token_out_of_order;
-
-    /// The common, healthy case: the first partition ever written has
-    /// nothing to compare against.
-    #[test]
-    fn first_partition_is_never_out_of_order() {
-        assert!(!token_out_of_order(None, i64::MIN));
-        assert!(!token_out_of_order(None, 0));
-        assert!(!token_out_of_order(None, i64::MAX));
-    }
-
-    /// A strictly-increasing token sequence — the normal case for every
-    /// partition after the first — never flags.
-    #[test]
-    fn strictly_increasing_tokens_pass() {
-        assert!(!token_out_of_order(Some(-100), -50));
-        assert!(!token_out_of_order(Some(0), 1));
-        assert!(!token_out_of_order(Some(i64::MIN), i64::MAX));
-    }
-
-    /// A DUPLICATE token — `SSTableWriter::write_partition` rejects `<=`,
-    /// not just `<`, so a repeat must flag too (two boundary entries naming
-    /// the same effective token, e.g. a Murmur3 hash collision on two
-    /// distinct keys — Cassandra's own token-order writer would never
-    /// legitimately produce this for the SAME table without an intervening
-    /// key, so seeing it here IS the corruption signal).
-    #[test]
-    fn duplicate_token_is_out_of_order() {
-        assert!(token_out_of_order(Some(42), 42));
-    }
-
-    /// A DECREASING token — the exact scenario this fix exists for: an
-    /// offset-ascending, individually-key-matching boundary source (so
-    /// NEITHER `check_strictly_ascending` NOR the per-entry key cross-check
-    /// catches it) whose corrupted narrow leaf nonetheless decodes a token
-    /// that sorts BEFORE what was already written.
-    #[test]
-    fn decreasing_token_is_out_of_order() {
-        assert!(token_out_of_order(Some(1000), 999));
-        assert!(token_out_of_order(Some(0), i64::MIN));
-    }
 }

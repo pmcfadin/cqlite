@@ -1623,6 +1623,209 @@ correctly formatted, no sweep needed. All three new files individually
 well under the ~800-line threshold (312 / 148 / 409) — no
 `CQLITE_ALLOW_FILE_GROWTH=1` needed for this file going forward.
 
+## Round 15 (Opus module audit) — 0 High, 5 Medium found against HEAD
+## `cd339b1ba`; all 5 fixed, 4 with dedicated regression tests, 1
+## (finding 5's TRIGGER only) documented as genuinely out of reach
+
+A whole-module Opus audit (`salvage/{mod,boundaries,chunks,recover}.rs`,
+cli `commands/salvage.rs`, and shared helpers `point_compaction.rs`,
+`chunk_reader.rs`, `compression_info.rs`, `index_reader/parse.rs`,
+`bti/parser/{partitions,rows}.rs`, `reader/crc.rs`, `read_at.rs`,
+`writer/mod.rs`, `merge/repair_state.rs`) ran against HEAD `cd339b1ba`
+(after round 14's fixes + the `salvage.rs` split) while the round-14 fix
+round was being prepared for push, per lead instruction — its 5 findings
+arrived as ONE batch, fixed together here.
+
+- [x] Medium (finding 1): whole-remaining-section materialization for the
+      LAST boundary entry (`end_bound: None`) — including an entry that is
+      only ARTIFICIALLY last because `Index.db`/`Partitions.db` was
+      truncated exactly on an entry boundary and parsed cleanly with fewer
+      real entries. `decode_partition_at_offset_for_salvage` resolves
+      `end` to the WHOLE remaining data section in this case (uncompressed:
+      `section_len`; compressed: `safe_data_length`) — bounded against the
+      REAL FILE SIZE by every existing guard (rounds 9/10/12), which a
+      short boundary source's `end` satisfies BY CONSTRUCTION, so none of
+      them catch it. Fixed: a new `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`
+      (128 MiB, matching `compression.rs::MAX_DECOMPRESSED_SIZE`'s
+      established convention) caps the materialized `[start, end)` span in
+      BOTH arms — the uncompressed `read_exact_at` and the compressed
+      `pull_chunk_window` — applied UNCONDITIONALLY (not just for
+      `end_bound: None`, since a corrupted-but-plausible-looking `Some`
+      gap is the same risk). The trade-off is stated explicitly in the
+      constant's own doc: a genuinely healthy partition wider than 128 MiB
+      classifies `Truncated` rather than recovers — a conservative, NAMED
+      loss, consistent with design D2/D3's "never guess" philosophy.
+      Factored the shared arithmetic into `exceeds_plausible_partition_span`
+      (unit-tested directly, 4 cases, since the COMPRESSED arm's trigger
+      needs a real multi-chunk fixture wider than 128 MB, impractical to
+      construct in a test) plus an end-to-end test for the UNCOMPRESSED
+      arm's wiring (`short_boundary_source_uncompressed_does_not_materialize_whole_section`,
+      `issue_4196_salvage_round15_bounds.rs`) using a SPARSE `File::set_len`
+      extension (no real bytes written) so the test itself allocates
+      nothing large.
+- [x] Medium (finding 2): pre-flight chunk buffer sized from a possibly-
+      short `chunk_offsets` table — `ChunkReader::read_chunk`'s allocation
+      is `compressed_chunk_size(chunk_index, total_size)`, and for the LAST
+      index this is `total_compressed_size - start_offset`
+      (`compression_info.rs`) — DERIVED from the real file size, so `chunk
+      count` corrupted DOWNWARD (e.g. to 1) makes the round-11 plausibility
+      guard (`offset + size <= total_size`) satisfied BY CONSTRUCTION for
+      exactly this shape. Fixed: `ChunkReader::read_chunk` now bounds the
+      declared record size against `chunk_length + 4` (the CRC trailer) —
+      the ONE authoritative per-chunk ceiling Cassandra's own
+      `CompressedSequentialWriter` never exceeds (a chunk that would
+      compress larger than its declared uncompressed `chunk_length` is
+      stored UNCOMPRESSED instead, never wider) — refusing with a named
+      `CompressionInfo.db corruption` error rather than allocating.
+      Applies to EVERY caller (`verify.rs`'s full-mode chunk walk gets the
+      SAME protection, not just salvage's pre-flight — confirmed via its
+      own `verify::` unit tests + `sstable_parity_corruption_verify.rs`
+      integration tests, all still passing). Test:
+      `short_chunk_offsets_table_does_not_materialize_whole_file` — uses
+      `test_comp.short_final_chunk` rather than `lz4_table` (measured while
+      developing this test: `lz4_table`'s real `Data.db`, 6,979 bytes, is
+      SMALLER than its own `chunk_length`, 16,384 — "the whole file"
+      truncated to one chunk never exceeds `chunk_length + 4` for that
+      fixture, so it never reaches this bound at all;
+      `short_final_chunk`'s `chunk_length=4096` with a real 12,444-byte
+      `Data.db` genuinely does).
+- [x] Medium (finding 3): `u64` overflow on `entry.data_offset + 1` — an
+      uncompressed BIG input with NO `CRC.db` (a SUPPORTED input,
+      `ChunkCrcUnavailable` exists for exactly this) makes
+      `uncompressed_chunk_preflight` return `data_length == 0`, which skips
+      the `data_length > entry.data_offset` branch UNCONDITIONALLY (`0` is
+      never greater than anything) — reaching the `else` arm with a
+      corrupted LAST entry's `data_offset` at `u64::MAX` (representable:
+      `parse_big_index_entry` places no upper bound, and
+      `check_strictly_ascending` enforces only ORDER) panicked the plain
+      `+ 1` in every DEBUG build (every test lane). Fixed:
+      `saturating_add(1)`. Test:
+      `implausible_offset_with_no_crc_db_does_not_panic` — the test
+      completing AT ALL (under the default debug test profile) is itself
+      half the assertion.
+- [x] Medium (finding 4): unbounded `losses`/`reports`/in-memory manifest —
+      the boundary-entry count is `O(Index.db size)` and each
+      `Loss.key_hex` can independently be up to 131,070 hex chars (a `u16`
+      `key_len`, so a 65,535-byte raw key); a damaged input where MOST
+      partitions are lost (e.g. finding 2's `chunk_table_bound` collapse,
+      or any corrupt-offset index) held every `Loss` resident without
+      bound — a ~10 MB corrupt index names ~2.5M lost partitions, several
+      hundred MB once multiplied out, THEN duplicated a second time via
+      `serde_json::to_string_pretty`. Fixed: a new `MAX_RESIDENT_LOSSES`
+      (500; `recover.rs`) caps resident `Loss` entries per report, with an
+      affirmative `SalvageReport.losses_truncated: usize` count (never
+      silence — `#[serde(default)]` so an old manifest still deserializes)
+      surfaced in both the JSON manifest and the text rendering
+      (`... N more loss(es) truncated`); `partitions.lost` is now the TRUE
+      total (`losses.len() + losses_truncated`), not just the resident
+      subset. Also streamed the JSON manifest serialization directly to
+      the file/stdout writer (`serde_json::to_writer_pretty` instead of
+      `to_string_pretty` + a second `std::fs::write`/`println!`) —
+      eliminates the "second full copy" duplication for BOTH the
+      `--manifest` file and the `--out-format json` console path.
+      `reports: Vec<SalvageReport>` itself stays `O(generations)` (real
+      files under the input directory, not adversarially inflatable the
+      way a corrupt Index.db's partition count is) — documented as the
+      correct, proportionate scope rather than a full manifest-shape
+      rewrite (the audit's own "if one suffices" phrasing). Test:
+      `losses_beyond_the_cap_are_counted_not_resident` — a SYNTHETIC
+      600-entry `Index.db` (hand-encoded via the documented
+      `[key_len][key][data_offset vint][promoted_len vint]` layout, every
+      entry's `data_offset` far past the real fixture's data length, so
+      every one classifies `Truncated` via the cheapest short-circuit, no
+      decode attempted) asserts exactly 500 resident + 100 counted, the
+      TRUE total in `partitions.lost`, and the disclosure text.
+- [x] Medium (finding 5): a genuine I/O failure (disk full, EACCES) inside
+      `write_partition`/`finish()` with `reports.is_empty()` (every
+      generation hard-errored — PROVABLY the only way this branch is
+      reached: `execute_salvage_command`'s loop pushes every generation
+      into either `reports` or `hard_errors`, never neither) AND
+      `out_dir_has_data_db()` true (a partial write happened before the
+      failure) exited **3** — the CLI's own `--help`/long_about documents
+      exit 3 as "check the manifest", false here: no `SalvageReport` was
+      ever constructed (the error propagated OUT of `salvage_sstable`
+      before it could build one), so `write_manifest_file`/`render_console`
+      are never called for this branch. `execute_salvage_command`'s OWN
+      doc comment already names this exact case for exit **1** ("a
+      post-write failure struck before ANY report — refused or otherwise —
+      had been gathered") — the bug was purely the exit-code CHOICE inside
+      `exit_after_partial_failure`'s `reports.is_empty()` branch. Fixed:
+      collapsed both `out_has_data_db` sub-cases to an unconditional exit
+      1 (matching the doc comment's own wording precisely — D3 does not
+      distinguish "nothing on disk" from "a real partial write" once
+      `reports.is_empty()`, only whether a report was ever gathered), with
+      a clear stderr message directing the operator to inspect `--out`
+      directly since no manifest exists to name.
+      **NOT test-covered end-to-end, reported per the lead's own
+      instruction rather than silently declared or silently closed.**
+      Three independent obstacles, each confirmed by direct investigation
+      before concluding this:
+      1. The CLI's own pre-check REFUSES immediately if `--out` is
+         non-empty BEFORE `salvage_sstable` is ever called — a real
+         `*-Data.db` cannot be pre-seeded into `--out` to simulate "partial
+         output already exists" without hitting a DIFFERENT, earlier exit-1
+         path first.
+      2. `exit_after_partial_failure(...) -> !` calls `std::process::exit`
+         directly (matching this whole module's "own the exit-code space
+         directly" design) — it cannot be called in-process from a unit
+         test without terminating the TEST PROCESS itself, so only a
+         subprocess (`assert_cmd`-style) test could observe its exit code.
+      3. Reaching `reports.is_empty()` WITH `out_has_data_db == true`
+         specifically needs a generation that writes ONE partition
+         successfully (so `Data.db` has real bytes) and THEN fails on a
+         LATER write or in `finish()` — a genuine disk-full/permission-
+         mid-stream fault this suite has no portable, deterministic way to
+         simulate (matches round-5's own established precedent language:
+         "needs a genuine I/O failure mid-write", and round-14's PR-body
+         note about this identical residual trigger).
+      The FIX itself is verified by code inspection (the reachability
+      argument above, proving `reports.is_empty()` implies "every
+      generation hard-errored") plus the unaffected existing tests
+      (`post_write_manifest_failure_with_*`, which exercise the OTHER,
+      non-empty-reports branch of the SAME function and pass unchanged).
+
+Also split `write_engine/salvage/recover.rs` (796 lines at round-14's HEAD,
+869 after this round's Medium-1/3/4 fixes — a file THIS PR CREATED, so the
+`CQLITE_ALLOW_FILE_GROWTH=1` opt-out — reserved for pre-existing files —
+does not apply): moved `SinglePartitionRun`, `open_reader`,
+`reader_data_path`, `component_unreadable_refusal`, `recover_one_partition`,
+`build_loss`, `token_out_of_order` (+ its `ordering_tests` module) into a
+new sibling `recover_helpers.rs` (318 lines) — a pure move, `pub(super)`
+visibility, no behavior changed. `recover.rs` itself is now 577 lines
+(`salvage_sstable` alone, the one function too large to split further
+without extracting NEW sub-functions from its body — deferred, real
+follow-up scope, not attempted under this round's time budget).
+`point_compaction.rs` (759 -> 871 lines from the Medium-1 fix + its 4 unit
+tests) is PRE-EXISTING (issue #2207, predates this PR) and stays under
+`CQLITE_ALLOW_FILE_GROWTH=1`, joining the existing disclosed-growth set.
+
+Re-verified after all fixes (`--locked` throughout while the split's own
+verification was ALSO running under the "no Cargo.lock rewrite" constraint
+the parallel audit needed): `cargo fmt` clean (`cqlite-core`, `cqlite-cli`);
+`cargo clippy --locked -p cqlite-core --lib --features write-support`
+clean; `cargo clippy --locked -p cqlite-core --test
+issue_4196_salvage_corruption_corpus --test issue_4196_salvage_oom_bounds
+--test issue_4196_salvage_round15_bounds --features write-support` clean;
+`cargo clippy --locked -p cqlite-cli --lib --bins --test salvage_cli_tests
+--features write-support` clean; `cargo test --locked -p cqlite-core --lib
+--features write-support` 4066 passed (was 4060 at round-14's HEAD; +4
+`point_compaction` unit tests + 2 `chunk_reader`/other net new, moved
+`ordering_tests` unchanged in count); all 5 salvage `cqlite-core` `--test`
+targets pass against the real corpus (corruption-corpus 8, oom-bounds 5,
+round15-bounds 4 NEW, healthy-parity 4, atomicity 1 = 22, was 18); `cqlite-cli`
+`commands::salvage::` unit tests 12 (unchanged, now under
+`commands::salvage::report::tests::` after the earlier split — confirmed
+by name in the test run, not just count); CLI integration `salvage_cli_tests`
+9/9 unchanged; `verify::` unit tests 30/30 unchanged;
+`sstable_parity_corruption_verify.rs` (exercises `ChunkReader` via
+`verify --mode full` against the real corpus) 3/3 unchanged, confirming
+finding 2's fix does not reject any legitimate real chunk;
+`test_salvage_no_resync_scan.sh` passes, now naming 5 production files
+(was 4, the new `recover_helpers.rs` correctly picked up).
+`scripts/agent-gate.sh`'s `write-tests` component gained the new
+`issue_4196_salvage_round15_bounds` target, registered next to its
+siblings (#3522).
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

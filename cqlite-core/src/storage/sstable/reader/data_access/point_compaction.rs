@@ -100,6 +100,53 @@ pub(crate) enum PartitionAtOffsetOutcome {
     Truncated,
 }
 
+/// The largest `[offset, end)` span `decode_partition_at_offset_for_salvage`
+/// will ever materialize for ONE partition, regardless of what the boundary
+/// source claims (roborev, issue #4196, round-15 Medium finding 1 — an Opus
+/// whole-module audit). Matches `compression.rs::MAX_DECOMPRESSED_SIZE`'s
+/// established 128 MiB convention (this crate's own <128 MB memory target).
+///
+/// **Why this exists**: for the LAST boundary entry (`end_bound: None`) —
+/// including an entry that is only ARTIFICIALLY last because `Index.db`/
+/// `Partitions.db` was truncated exactly on an entry boundary and parsed
+/// cleanly with fewer real entries — `end` resolves to the WHOLE remaining
+/// data section (`section_len` uncompressed, `safe_data_length` compressed),
+/// not one partition's worth. Every EXISTING guard (round 9's boundary-side
+/// clamp, round 10/12's `data_length`/`chunk_size` zero-fallbacks) bounds
+/// `end` against the REAL FILE SIZE, which is exactly what this trigger
+/// satisfies — a short boundary source's `end` is `<= safe_data_length` by
+/// construction, so it passes every one of them, then allocates the entire
+/// remaining multi-GB section (uncompressed: one `read_exact_at`; compressed:
+/// `pull_chunk_window` decompressing every remaining real chunk into one
+/// resident `Vec`) before the slot is ever classified.
+///
+/// **The trade-off, stated explicitly**: a genuinely healthy partition wider
+/// than 128 MiB is classified `Truncated` rather than recovered under this
+/// cap — a false loss, not silence or wrong data. Consistent with this
+/// tool's whole design philosophy (design D2/D3): salvage never guesses:
+/// a conservative, NAMED loss beats an unbounded allocation that starves or
+/// OOM-kills the process running it, on a file this tool exists specifically
+/// to recover from. Applied UNCONDITIONALLY to both the `end_bound: None`
+/// case the audit trigger names AND a `Some(end_bound)` case (a corrupted,
+/// still-plausible-looking middle boundary can name a gap just as wide) —
+/// the risk is the SPAN's width, not which resolution path produced it.
+pub(crate) const SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES: u64 = 128 * 1024 * 1024;
+
+/// `true` iff the half-open span `[start, end)` is wider than
+/// [`SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`] — factored out of BOTH the
+/// uncompressed and compressed arms of `decode_partition_at_offset_for_salvage`
+/// (roborev, issue #4196, round-15 Medium finding 1) so the ONE piece of
+/// arithmetic both bounds checks share is unit-testable directly, without
+/// needing an actual 128+ MB fixture for the compressed arm (which reaches
+/// this same check via `[window_base, end)`, a span this crate has no
+/// practical way to construct a REAL multi-chunk compressed fixture for in
+/// a test). `end < start` (never expected, both call sites establish
+/// `end > start`/`end >= offset` first) is defensively treated as
+/// NOT exceeding, via `saturating_sub`, rather than a panic or a wrap.
+pub(crate) fn exceeds_plausible_partition_span(start: usize, end: usize) -> bool {
+    (end.saturating_sub(start)) as u64 > SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES
+}
+
 impl SSTableReader {
     /// Probe one SSTable for a single partition, returning its compaction rows via
     /// an authoritative seek — or a prune / scan-fallback signal (issue #2207).
@@ -486,6 +533,17 @@ impl SSTableReader {
                 if offset_usize >= end || end > section_len {
                     return Ok(PartitionAtOffsetOutcome::Truncated);
                 }
+                // roborev, issue #4196, round-15 Medium finding 1: `end` is
+                // bounded against the REAL file (`section_len`) above, but
+                // NOT against one partition's plausible extent — for the
+                // LAST entry (`end_bound: None`, real or artificially last
+                // via a truncated boundary source), `end == section_len`
+                // unconditionally, materializing the WHOLE remaining data
+                // section in this one `Vec`. See
+                // `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`'s doc.
+                if exceeds_plausible_partition_span(offset_usize, end) {
+                    return Ok(PartitionAtOffsetOutcome::Truncated);
+                }
                 let mut buf = vec![0u8; end - offset_usize];
                 self.point_source
                     .read_exact_at(header_size + offset_usize as u64, &mut buf)?;
@@ -551,6 +609,18 @@ impl SSTableReader {
                     if end as u64 > safe_len {
                         return Ok(PartitionAtOffsetOutcome::Truncated);
                     }
+                }
+                // roborev, issue #4196, round-15 Medium finding 1: `end` is
+                // bounded against `safe_data_length` (the REAL file) above,
+                // but NOT against one partition's plausible extent —
+                // `pull_chunk_window` decompresses every real chunk in
+                // `[window_base, end)` into ONE resident `Vec`, so a short
+                // boundary source's `end == safe_data_length` (the
+                // `end_bound: None` arm above) materializes the WHOLE
+                // remaining data section before this slot is classified.
+                // See `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`'s doc.
+                if exceeds_plausible_partition_span(window_base, end) {
+                    return Ok(PartitionAtOffsetOutcome::Truncated);
                 }
                 compressed_end = Some(end);
                 let (window, reached_end) = self
@@ -755,5 +825,47 @@ impl SSTableReader {
         // rather than parse an incomplete partition (issue #2207 fail-safe).
         let reached_end = window_base + window.len() >= end;
         Ok((window, reached_end))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exceeds_plausible_partition_span, SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES};
+
+    /// roborev, issue #4196, round-15 Medium finding 1: the ONE piece of
+    /// arithmetic both the uncompressed and compressed arms of
+    /// `decode_partition_at_offset_for_salvage` share — unit-tested
+    /// directly since the COMPRESSED arm's trigger needs a real multi-chunk
+    /// compressed fixture wider than 128 MB, impractical to construct in a
+    /// test; the uncompressed arm's own end-to-end test
+    /// (`issue_4196_salvage_round15_bounds.rs`) proves the WIRING at one
+    /// real call site, and this proves the SHARED arithmetic is correct
+    /// for both.
+    #[test]
+    fn span_at_exactly_the_ceiling_does_not_exceed() {
+        let ceiling = SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES as usize;
+        assert!(!exceeds_plausible_partition_span(0, ceiling));
+        assert!(!exceeds_plausible_partition_span(1000, 1000 + ceiling));
+    }
+
+    #[test]
+    fn span_one_byte_past_the_ceiling_exceeds() {
+        let ceiling = SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES as usize;
+        assert!(exceeds_plausible_partition_span(0, ceiling + 1));
+        assert!(exceeds_plausible_partition_span(1000, 1000 + ceiling + 1));
+    }
+
+    #[test]
+    fn small_realistic_spans_never_exceed() {
+        assert!(!exceeds_plausible_partition_span(0, 0));
+        assert!(!exceeds_plausible_partition_span(0, 100));
+        assert!(!exceeds_plausible_partition_span(65536, 131072));
+    }
+
+    /// Defensive only — both real call sites establish `end >= start`
+    /// before reaching this check; an inverted span must not panic.
+    #[test]
+    fn inverted_span_does_not_panic_and_does_not_exceed() {
+        assert!(!exceeds_plausible_partition_span(100, 0));
     }
 }
