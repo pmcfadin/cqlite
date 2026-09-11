@@ -225,6 +225,38 @@ mod tests {
         std::fs::write(path, bytes).expect("write");
     }
 
+    /// APFS (macOS's default filesystem) refuses a path component that is not valid
+    /// UTF-8 outright, with EILSEQ ("Illegal byte sequence"), so the fixtures the
+    /// non-UTF-8 cases below need cannot exist there at all. That is a property of the
+    /// FILESYSTEM, not of the platform — a non-APFS volume mounted on a macOS host can
+    /// still hold such a name — which is why it is detected from the ERROR and skipped
+    /// LOUDLY, rather than hidden behind `#[ignore]` or `cfg(target_os)`, either of
+    /// which would also hide the case on the hosts that CAN run it (issue #4221).
+    fn is_non_utf8_name_refusal(e: &std::io::Error) -> bool {
+        e.raw_os_error() == Some(libc::EILSEQ)
+    }
+
+    /// The one line a skipping case prints, so a reader of a green log can tell a case
+    /// that RAN from one this filesystem refused to host.
+    fn skip_non_utf8_unsupported(what: &str) {
+        println!(
+            "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — {what} needs a host whose filesystem accepts them (e.g. Linux/ext4)"
+        );
+    }
+
+    /// `touch` for a name that may not be valid UTF-8. `false` means the filesystem
+    /// refused the NAME itself (EILSEQ); any other write failure is still a panic, so
+    /// this can never turn a real defect into a skip.
+    #[must_use]
+    fn touch_non_utf8(path: &Path, bytes: &[u8]) -> bool {
+        std::fs::create_dir_all(path.parent().expect("has a parent")).expect("mkdir");
+        match std::fs::write(path, bytes) {
+            Ok(()) => true,
+            Err(e) if is_non_utf8_name_refusal(&e) => false,
+            Err(e) => panic!("write: {e}"),
+        }
+    }
+
     /// The discriminating case for the "lexicographically first golden" pick: a
     /// directory holding an EARLIER golden for a generation that is not the one
     /// present. Taking the first sorted golden compared the CLI's reading of
@@ -324,13 +356,24 @@ mod tests {
         // it, because the CLI reading the staged directory certainly will.
         let odd = std::ffi::OsStr::from_bytes(b"nb-2-\xff-big-Data.db");
         assert!(odd.to_str().is_none(), "the staged name is not valid UTF-8");
-        std::fs::write(fixture.join(odd), b"y").expect("write");
-        let why = golden_path(&fixture).expect_err("two SSTables, one golden");
-        assert!(
-            why.contains("holds 2 *-Data.db files") && why.contains("exactly one SSTable per case"),
-            "a name it cannot read is still a second SSTable: {why}"
-        );
-        std::fs::remove_file(fixture.join(odd)).expect("unlink");
+        // Only this HALF of the case needs a filesystem that accepts the name; the
+        // symlink half below runs anywhere. So skip the half, not the case — skipping
+        // the whole test would silently drop the unreadable-ENTRY coverage too.
+        match std::fs::write(fixture.join(odd), b"y") {
+            Ok(()) => {
+                let why = golden_path(&fixture).expect_err("two SSTables, one golden");
+                assert!(
+                    why.contains("holds 2 *-Data.db files")
+                        && why.contains("exactly one SSTable per case"),
+                    "a name it cannot read is still a second SSTable: {why}"
+                );
+                std::fs::remove_file(fixture.join(odd)).expect("unlink");
+            }
+            Err(e) if is_non_utf8_name_refusal(&e) => {
+                skip_non_utf8_unsupported("the non-UTF-8 second-SSTable half of this case");
+            }
+            Err(e) => panic!("write: {e}"),
+        }
 
         // An entry the filesystem cannot DESCRIBE, in the fixture directory and in
         // the keyspace directory beside it.
@@ -376,8 +419,14 @@ mod tests {
             data_db.to_str().is_none() && golden.to_str().is_none(),
             "both staged names are not valid UTF-8, which is the whole subject"
         );
-        touch(&fixture.join(data_db), b"x");
-        touch(&fixture.join(golden), b"{}");
+        if !touch_non_utf8(&fixture.join(data_db), b"x") {
+            skip_non_utf8_unsupported("the non-UTF-8 golden-pairing assertion");
+            return;
+        }
+        assert!(
+            touch_non_utf8(&fixture.join(golden), b"{}"),
+            "the filesystem accepted the SSTable's non-UTF-8 name but refused its golden's"
+        );
         assert_eq!(
             golden_path(&fixture).expect("the golden is right there beside its SSTable"),
             fixture.join(golden),
@@ -387,10 +436,16 @@ mod tests {
         // And the pairing is still by NAME, not "any golden in the directory": a
         // differently-named golden does not satisfy this SSTable.
         let other = tmp.path().join("t-def");
-        touch(&other.join(data_db), b"x");
-        touch(
-            &other.join(std::ffi::OsStr::from_bytes(b"nb-2-\xff-big-Data.db.jsonl")),
-            b"{}",
+        assert!(
+            touch_non_utf8(&other.join(data_db), b"x"),
+            "this filesystem accepted the same non-UTF-8 name moments ago"
+        );
+        assert!(
+            touch_non_utf8(
+                &other.join(std::ffi::OsStr::from_bytes(b"nb-2-\xff-big-Data.db.jsonl")),
+                b"{}",
+            ),
+            "this filesystem accepted the same non-UTF-8 name moments ago"
         );
         golden_path(&other).expect_err("a golden for another generation does not pair");
     }
