@@ -53,6 +53,26 @@ if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   echo "FATAL: mktemp -d produced no usable directory ('$tmp'); refusing to run (paths would resolve under /)" >&2
   exit 1
 fi
+# NORMALIZE ONCE, HERE, rather than at every comparison (issue #4221, same defect family as
+# the `$TMPDIR//` normalization already applied to test_agent_gate_logdir_cleanup.sh). TWO
+# macOS-only discrepancies made five #3131 cases compare a path against ITSELF and disagree:
+#   1. `$TMPDIR` ends in a trailing slash there, so the template above yields a literal "//"
+#      (".../T//agent-gate-schemas.XXXXXX"), which every path built by STRING CONCATENATION
+#      off `$tmp` carries verbatim;
+#   2. `$TMPDIR` lives under the `/var` -> `/private/var` symlink, and the subject of these
+#      cases — test-data/scripts/fetch-datasets.sh — resolves the root it REPORTS with
+#      `cd ... && pwd -P` (fetch-datasets.sh:149,156,333,338,1154), i.e. physically.
+# So the script printed "/private/var/.../T/x" while the case expected "/var/.../T//x" —
+# the same directory, three textual differences, and the cases that compare the two
+# (3131-export-line, 3131-export-quoting, 3131-warm-cache, 3131-warm-cache-note,
+# 3131-remedy-quoting) FAILed on every macOS host for a reason unrelated to what they test.
+# `pwd -P` (not the plain `pwd` the logdir suite needed) because it must match the SUBJECT's
+# own resolution: collapsing the "//" alone would still leave /var vs /private/var.
+tmp=$(cd "$tmp" && pwd -P) || tmp=""
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  echo "FATAL: could not normalize the scratch root to its physical path; refusing to run" >&2
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
 
 # CHILD PROBE MODE. The scratch-root-guard case below re-invokes THIS script with a failing

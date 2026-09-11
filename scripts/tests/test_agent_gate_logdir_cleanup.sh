@@ -146,6 +146,23 @@ if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
   exit 1
 fi
+# NORMALIZE ONCE, HERE, RATHER THAN AT EVERY COMPARISON (issue #4221 item 3). macOS's
+# default `$TMPDIR` ends in a trailing slash, so the template above yields a `tmp` whose
+# path carries a literal "//" (e.g. ".../T//agent-gate-logdir.XXXXXX"). Every path this
+# suite builds by STRING CONCATENATION off `$tmp` (`$tmp/fakeroot`, `$tmp/td-...`, the
+# `find "$tmp" ...` scan) keeps that "//" verbatim — but a path the GATE ITSELF reports
+# does not: it reaches its own absolute paths through a real `cd`+`pwd`, and a shell's
+# `cd` collapses consecutive slashes as part of ordinary pathname resolution (verified:
+# `cd a//b && pwd` prints `a/b`) even without `-P`. So a suite built on `$tmp` and a gate
+# report built on a real `cd` disagreed on FORM for the exact same directory — not a
+# leak, a textual double-vs-single-slash mismatch. Collapsing `$tmp` to its canonical
+# form immediately, before anything is derived from it, makes every downstream
+# concatenation agree with what the gate's own `cd`+`pwd` would produce.
+tmp=$(cd "$tmp" && pwd) || tmp=""
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not normalize the scratch dir path — refusing to run\n'
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 # Fixture git must be ISOLATED from the invoker's environment, not merely given an
@@ -1182,6 +1199,37 @@ wait_for_logdir() {
   return 1
 }
 
+# Wait for the STUB's OWN readiness marker, not merely for its log directory.
+#
+# THE RACE THIS CLOSES (issue #4221). `wait_for_logdir` above returns as soon as the log
+# DIRECTORY exists, and the gate creates that during early start-up — BEFORE the #1825 slot is
+# granted (the same ordering that leaves a still-QUEUED run carrying the `RESULT: INCOMPLETE`
+# sentinel). The stub then calls `acquire_gate_slot`, which self-exempts for --lite/--delta/--only
+# but NOT for a full run (scripts/agent-gate.sh:26541-26543), so it can sit there for as long as
+# something else holds the cap. A `kill -TERM` delivered in that window kills a run that is still
+# starting up or still queued: it exits 1 during start-up instead of dying of the signal, and its
+# disposition then reads "early exit status 1 with diagnostic content" rather than the
+# signalled-with-evidence wording this case exists to assert. Measured at the commit that added
+# this helper, 10 consecutive runs on macOS: 1 passed, 9 failed on exactly that string. The odds
+# are WORSE inside a real gate, because the parent gate is itself holding a slot against a
+# default cap of 2 — which is why this reddened the gate of record rather than staying a
+# developer-shell curiosity.
+#
+# The stub already publishes readiness; this case simply never waited for it. It drops
+# "$CQLITE_GATE_STUB_RUNDIR/holding.$PID" (scripts/agent-gate.sh:26682) immediately AFTER
+# acquire_gate_slot returns and immediately BEFORE its sleep. Waiting for THAT file is a POSITIVE
+# signal that the run is past start-up and past the slot. A `sleep` long enough to "usually" cover
+# both would only re-introduce the same race at a different duration — which is the whole lesson.
+wait_for_stub_holding() {
+  local rundir="$1" tries="${2:-600}" i   # 600 * 0.05s = 30s bound
+  for ((i = 0; i < tries; i++)); do
+    set -- "$rundir"/holding.*
+    [ -e "$1" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 # (a) THE SUMMARY WRITE FAILS. An unwritable caller-known path (a missing parent
 #     directory — the same class as a full disk) makes emit_summary's authoritative
 #     write fail AFTER the block, and its declared disposition, are already composed.
@@ -1232,25 +1280,37 @@ env -u AGENT_GATE_PARENT_RUN_ID \
 sig_pid=$!
 if d11b=$(wait_for_logdir "$td11b"); then
   ok "AC11b: precondition — the signalled run created its bundle ($d11b)"
-  : >"$d11b/planted-component.result"
-  kill -TERM "$sig_pid" 2>/dev/null
-  wait "$sig_pid"; sig_rc=$?
-  if [ "$sig_rc" -ge 128 ]; then
-    ok "AC11b: precondition — the run really died of the signal (exit $sig_rc)"
+  # The bundle existing is NOT readiness — see wait_for_stub_holding. Signal only a run that
+  # has demonstrably passed start-up AND the #1825 slot, or this case measures the start-up
+  # race instead of the behaviour it names.
+  if wait_for_stub_holding "$td11b/rundir"; then
+    ok "AC11b: precondition — the stub is past start-up and holds its slot (readiness marker present)"
+    : >"$d11b/planted-component.result"
+    kill -TERM "$sig_pid" 2>/dev/null
+    wait "$sig_pid"; sig_rc=$?
+    if [ "$sig_rc" -ge 128 ]; then
+      ok "AC11b: precondition — the run really died of the signal (exit $sig_rc)"
+    else
+      bad "AC11b: precondition failed — the run exited $sig_rc, not of a signal; the case measured something else"
+    fi
+    if [ -d "$d11b" ]; then
+      ok "AC11b: a SIGTERMed run with evidence in its bundle KEPT it"
+    else
+      bad "AC11b: a SIGTERMed run's bundle was DELETED — the post-mortem case par excellence, removed by the cleanup"
+    fi
+    disp11b=$(artifact_field "$d11b" logdir-disposition)
+    case "$disp11b" in
+      RETAINED*evidence*) ok "AC11b: the signalled bundle NAMES its retention ($disp11b)" ;;
+      '') bad "AC11b: the signalled bundle published no disposition artifact" ;;
+      *) bad "AC11b: the signalled bundle named an unexpected reason ('$disp11b')" ;;
+    esac
   else
-    bad "AC11b: precondition failed — the run exited $sig_rc, not of a signal; the case measured something else"
+    # A TIMEOUT here is a REAL failure, not a skip: either the stub never got its slot within
+    # 30s or it died during start-up. Say which is being claimed, and do not TERM-and-assert
+    # anyway, because those assertions would be about a run in an unknown state.
+    bad "AC11b: precondition FAILED — no readiness marker under $td11b/rundir within 30s; the stub is still queued for an #1825 slot or died during start-up, so TERMing now would measure the start-up race rather than the signalled-bundle behaviour"
+    kill -TERM "$sig_pid" 2>/dev/null; wait "$sig_pid" 2>/dev/null || :
   fi
-  if [ -d "$d11b" ]; then
-    ok "AC11b: a SIGTERMed run with evidence in its bundle KEPT it"
-  else
-    bad "AC11b: a SIGTERMed run's bundle was DELETED — the post-mortem case par excellence, removed by the cleanup"
-  fi
-  disp11b=$(artifact_field "$d11b" logdir-disposition)
-  case "$disp11b" in
-    RETAINED*evidence*) ok "AC11b: the signalled bundle NAMES its retention ($disp11b)" ;;
-    '') bad "AC11b: the signalled bundle published no disposition artifact" ;;
-    *) bad "AC11b: the signalled bundle named an unexpected reason ('$disp11b')" ;;
-  esac
 else
   bad "AC11b: the signalled run never created a bundle — cannot measure"
   kill -TERM "$sig_pid" 2>/dev/null; wait "$sig_pid" 2>/dev/null
@@ -4303,11 +4363,33 @@ fi
 # before AC27/AC28/AC29 raised it by 34, 200 before AC25/AC26 raised it by 26); the floor is
 # what notices a DELETED CASE — every
 # case in this file contributes at least 5 verdicts — rather than a drifting count.
+#
+# TWO FLOORS, KEYED ON THE SAME AFFIRMATIVE CAPABILITY PROBE EVERY DEGRADED BRANCH ABOVE
+# ALREADY USES (issue #4221 item 3) — a single flat 259 was never actually reachable on a
+# degraded host: measured STABLY at 247 across 10 back-to-back runs on a macOS host with
+# OWNER_MARKER_CAPABLE=0 (this file's own declared Linux-only dependency), 27 short of the
+# full 274, not the 15-verdict margin the flat floor assumed. Guessing a wider flat margin
+# would only re-hide the exact defect this floor exists to catch (#3544's lesson) on the
+# capable branch, so each branch gets ITS OWN calibrated floor instead of one shared guess:
+# 259 where the capability is present (unchanged — every Linux-measured total above stays
+# covered).
+#
+# NO SLACK on the degraded branch (roborev job 3406, Medium): several cases collapse to
+# exactly ONE verdict when OWNER_MARKER_CAPABLE=0 — AC15 (~line 1501), AC16 (~line 1688),
+# AC17 (~line 1976) and AC20 (~line 2832) each emit a single `ok` on that branch — so a
+# 4-verdict margin (243) is blind to precisely the cases that are branch-specific to the
+# path this floor exists to protect: deleting any ONE of them (247 -> 246) would still
+# clear 243. The measured-stable total IS the floor here: 247, exactly.
 _total_verdicts=$((PASS + FAIL))
-if [ "$_total_verdicts" -ge 259 ]; then
-  ok "suite floor: $_total_verdicts verdicts reported (floor 259) — no case was silently dropped"
+if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
+  _floor=259
 else
-  bad "suite floor: only $_total_verdicts verdicts reported (floor 259) — at least one case was deleted or died before its assertions"
+  _floor=247
+fi
+if [ "$_total_verdicts" -ge "$_floor" ]; then
+  ok "suite floor: $_total_verdicts verdicts reported (floor $_floor) — no case was silently dropped"
+else
+  bad "suite floor: only $_total_verdicts verdicts reported (floor $_floor) — at least one case was deleted or died before its assertions"
 fi
 
 printf '\n%s\n' "scripts/tests/test_agent_gate_logdir_cleanup.sh   passed: $PASS  failed: $FAIL"
