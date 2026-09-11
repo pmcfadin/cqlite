@@ -4041,6 +4041,11 @@ _component_set_bounded() {
   # branch for a measurement that did not happen.
   local _cap_n
   _cap_n=$(head -c "$((_CS_CAP_MAX_BYTES + 1))" "$_CS_CAP_OUT" 2>/dev/null | wc -c 2>/dev/null)
+  # BSD `wc -c` (macOS) right-pads its count with leading spaces; GNU `wc -c` does not. Strip all
+  # whitespace before the numeric refusal check below so a macOS host's padded-but-valid count is
+  # not mistaken for the unmeasurable case — the `''|*[!0-9]*` refusal itself is unchanged and still
+  # fires closed on anything that isn't a bare digit string after stripping (#4220).
+  _cap_n=${_cap_n//[[:space:]]/}
   case "$_cap_n" in
     ''|*[!0-9]*)
       _component_set_replay_err
@@ -5805,8 +5810,13 @@ _component_set_probe_inner() {
   local _cs_complete=no _cs_obj_total="" _cs_obj_absent=""
   if _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1 \
      && _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-list --objects --missing=print --no-walk "$remote_sha" >"$csdir/objcensus" 2>/dev/null; then
+    # BSD `wc -c` (macOS) right-pads its count with leading spaces, which would otherwise always
+    # trip the `*[!0-9]*` case below and silently force the slow (correct but expensive) path on
+    # every macOS run. Strip whitespace before the numeric case-match (#4220).
     _cs_obj_total=$(wc -c <"$csdir/objcensus" 2>/dev/null)
+    _cs_obj_total=${_cs_obj_total//[[:space:]]/}
     _cs_obj_absent=$(sed -n '/^?/p' "$csdir/objcensus" 2>/dev/null | wc -c 2>/dev/null)
+    _cs_obj_absent=${_cs_obj_absent//[[:space:]]/}
     case "$_cs_obj_total" in ''|*[!0-9]*) _cs_obj_total=0 ;; esac
     case "$_cs_obj_absent" in ''|*[!0-9]*) _cs_obj_absent=1 ;; esac
     if [ "$_cs_obj_total" -gt 0 ] && [ "$_cs_obj_absent" -eq 0 ]; then _cs_complete=yes; fi
