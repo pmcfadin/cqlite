@@ -124,6 +124,22 @@ impl<R: Read + Seek> ChunkReader<R> {
         // `total_size`, so it can never exceed it. Bound the allocation
         // itself against the largest a REAL chunk record can legitimately
         // be, instead.
+        // roborev, issue #4196, round 22 Low finding: this function is also
+        // reachable from `verify.rs:1411`'s `read_all_chunks` (full-mode
+        // `cqlite verify`), not just salvage, so the wording here changes
+        // what THAT surface reports too — worth stating precisely rather
+        // than asserting a single cause. The previous message named
+        // CompressionInfo.db corruption as THE cause, but this shape has a
+        // SECOND legitimate explanation `compressed_chunk_size` cannot
+        // distinguish: for the LAST chunk, size is derived as
+        // `total_file_size - start_offset` (`compression_info.rs`), so a
+        // `Data.db` with appended/trailing bytes (a backup tool
+        // concatenating files, a partial write leaving trailing garbage)
+        // against an otherwise-INTACT `CompressionInfo.db` produces the
+        // IDENTICAL "last chunk's derived size exceeds the plausible
+        // maximum" shape a genuinely short `chunk_offsets` table does.
+        // State what is actually MEASURED and name both candidates, rather
+        // than asserting the one this code cannot establish.
         let max_plausible_total_chunk_size =
             max_plausible_total_chunk_size(&self.compression_info)?;
         if total_chunk_size > max_plausible_total_chunk_size {
@@ -131,8 +147,11 @@ impl<R: Read + Seek> ChunkReader<R> {
                 "Chunk {chunk_index} declares a {total_chunk_size}-byte record — exceeds the \
                  {max_plausible_total_chunk_size}-byte maximum a real {}, chunk_length={} \
                  CompressionInfo.db can produce (worst-case compressed size + 4-byte CRC); \
-                 refusing to allocate an unbounded chunk buffer (this is a CompressionInfo.db \
-                 corruption, not a Data.db one)",
+                 refusing to allocate an unbounded chunk buffer. Two candidate causes measured \
+                 from this fixture alone cannot distinguish between: a CompressionInfo.db \
+                 chunk_offsets table corrupted short (making the derived last-chunk size the \
+                 whole remaining file), or Data.db carrying trailing/appended bytes past its \
+                 real compressed data (growing that same derived size)",
                 self.compression_info.algorithm, self.compression_info.chunk_length
             )));
         }

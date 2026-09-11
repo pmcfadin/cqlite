@@ -776,6 +776,26 @@ async fn implausible_chunk_offset_table_does_not_oom() {
         "expected LossClass::ChunkCrc (every declared chunk position is implausible); got {:?}",
         report.losses[0]
     );
+    // roborev, issue #4196, round 22 Low finding: round-14's fix (above)
+    // only separated the AGGREGATE `ComponentFinding`'s wording — the
+    // PER-PARTITION `Loss.message` an operator actually acts on still said
+    // "failed CRC validation" for a chunk that was never even read. Every
+    // chunk here is IMPLAUSIBLE by construction, never genuinely
+    // CRC-checked, so the loss message must name CompressionInfo.db
+    // framing as the cause, never CRC validation.
+    assert!(
+        !report.losses[0].message.contains("failed CRC validation"),
+        "the per-partition loss message must not claim a CRC check happened for an implausibly-\
+         framed chunk that was never read; got: {}",
+        report.losses[0].message
+    );
+    assert!(
+        report.losses[0].message.contains("CompressionInfo.db")
+            && report.losses[0].message.contains("implausible"),
+        "the per-partition loss message must name CompressionInfo.db's implausible framing as \
+         the real cause; got: {}",
+        report.losses[0].message
+    );
 
     // roborev, issue #4196, round-14 Low finding: the finding's summary
     // detail must distinguish "implausible framing" (never read) from a

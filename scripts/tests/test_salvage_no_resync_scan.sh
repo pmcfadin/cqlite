@@ -54,9 +54,21 @@ hits=0
 scanned=0
 while IFS= read -r -d '' file; do
   # Exclude test code: any file under a `tests/` path component (unit tests
-  # may legitimately use these primitives to build/verify fixtures).
+  # may legitimately use these primitives to build/verify fixtures), OR a
+  # FLAT sibling file named `*_tests.rs` (roborev, issue #4196, round 22
+  # Low finding): the campsite-rule split pattern this codebase uses for an
+  # over-threshold `#[cfg(test)] mod tests;` (e.g.
+  # `chunks.rs` -> `chunks_tests.rs`, wired via `#[path = "chunks_tests.rs"]
+  # mod tests;` back in the PRODUCTION file) puts the `#[cfg(test)]`
+  # attribute on the DECLARATION in the production file, not inside the
+  # split-out file itself — so `*_tests.rs` satisfies NEITHER exclusion
+  # this guard previously had (no `*/tests/*` path component, no in-file
+  # `#[cfg(test)]` anchor), and was scanned as production code. Caught only
+  # because it happens to use none of the forbidden patterns today; a
+  # future fixture-building test added there would FAIL this
+  # merge-blocking gate component for a use its own doc calls legitimate.
   case "$file" in
-    */tests/*) continue ;;
+    */tests/* | *_tests.rs) continue ;;
   esac
   scanned=$((scanned + 1))
   # Track whether the current line is inside a `#[cfg(test)]` module via

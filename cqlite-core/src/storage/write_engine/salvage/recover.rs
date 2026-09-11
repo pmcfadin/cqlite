@@ -199,51 +199,63 @@ pub async fn salvage_sstable(
     // refusal-classification above fixed: it must not `?`-propagate a hard
     // `Err` that skips the manifest entirely.
     let mut component_findings: Vec<ComponentFinding> = Vec::new();
-    let (bad_chunks, chunk_size, data_length): (std::collections::BTreeSet<u64>, u64, u64) =
-        if let Some(ci) = reader.compression_info.as_deref() {
-            let preflight = match compressed_chunk_preflight(&reader_data_path(input), ci) {
-                Ok(p) => p,
-                Err(e) => {
-                    let mut report = report_skeleton(boundary_label, generation);
-                    report.refused = Some(component_unreadable_refusal(
-                        "the compressed chunk pre-flight (Data.db)",
-                        &Error::Io(e),
-                    ));
-                    return Ok(report);
-                }
-            };
-            component_findings.extend(preflight.findings);
-            (
-                preflight.bad_chunks,
-                preflight.chunk_size,
-                preflight.data_length,
-            )
-        } else {
-            let crc_path = dir.join(format!("{base}-CRC.db"));
-            let preflight = match uncompressed_chunk_preflight(
-                &reader_data_path(input),
-                &crc_path,
-                reader.calculate_header_size(),
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let mut report = report_skeleton(boundary_label, generation);
-                    report.refused = Some(component_unreadable_refusal(
-                        "the uncompressed chunk pre-flight (Data.db/CRC.db)",
-                        &e,
-                    ));
-                    return Ok(report);
-                }
-            };
-            component_findings.extend(preflight.findings);
-            (
-                preflight.bad_chunks,
-                preflight.chunk_size,
-                preflight.data_length,
-            )
+    // roborev, issue #4196, round 22 Low finding: `implausible_chunks` is a
+    // FOURTH element here, distinct from `bad_chunks` — see
+    // `ChunkPreflight::implausible_chunks`'s doc for why the per-partition
+    // `Loss.message` below must not reuse `bad_chunks`'s "failed CRC
+    // validation" wording for a chunk in THIS set (its CRC was never even
+    // computed).
+    let (bad_chunks, implausible_chunks, chunk_size, data_length): (
+        std::collections::BTreeSet<u64>,
+        std::collections::BTreeSet<u64>,
+        u64,
+        u64,
+    ) = if let Some(ci) = reader.compression_info.as_deref() {
+        let preflight = match compressed_chunk_preflight(&reader_data_path(input), ci) {
+            Ok(p) => p,
+            Err(e) => {
+                let mut report = report_skeleton(boundary_label, generation);
+                report.refused = Some(component_unreadable_refusal(
+                    "the compressed chunk pre-flight (Data.db)",
+                    &Error::Io(e),
+                ));
+                return Ok(report);
+            }
         };
+        component_findings.extend(preflight.findings);
+        (
+            preflight.bad_chunks,
+            preflight.implausible_chunks,
+            preflight.chunk_size,
+            preflight.data_length,
+        )
+    } else {
+        let crc_path = dir.join(format!("{base}-CRC.db"));
+        let preflight = match uncompressed_chunk_preflight(
+            &reader_data_path(input),
+            &crc_path,
+            reader.calculate_header_size(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let mut report = report_skeleton(boundary_label, generation);
+                report.refused = Some(component_unreadable_refusal(
+                    "the uncompressed chunk pre-flight (Data.db/CRC.db)",
+                    &e,
+                ));
+                return Ok(report);
+            }
+        };
+        component_findings.extend(preflight.findings);
+        (
+            preflight.bad_chunks,
+            preflight.implausible_chunks,
+            preflight.chunk_size,
+            preflight.data_length,
+        )
+    };
 
     let mut report = report_skeleton(boundary_label, generation);
     report.component_findings = component_findings;
@@ -489,7 +501,21 @@ pub async fn salvage_sstable(
             (Some(&first), Some(&last)) => bad_chunks.range(first..=last).copied().collect(),
             _ => Vec::new(),
         };
-        if !bad_touched.is_empty() {
+        // roborev, issue #4196, round 22 Low finding: a SEPARATE
+        // intersection against `implausible_chunks` — a chunk in THIS set
+        // was never even read (its own declared framing is nonsensical, a
+        // `CompressionInfo.db` fact), so reusing `bad_touched`'s "failed
+        // CRC validation" wording for it would be factually false. Both
+        // sets still classify `LossClass::ChunkCrc` (the chunk is
+        // genuinely untrustworthy either way), but the MESSAGE now names
+        // whichever cause(s) actually apply.
+        let implausible_touched: Vec<u64> = match (touched_chunks.first(), touched_chunks.last()) {
+            (Some(&first), Some(&last)) => {
+                implausible_chunks.range(first..=last).copied().collect()
+            }
+            _ => Vec::new(),
+        };
+        if !bad_touched.is_empty() || !implausible_touched.is_empty() {
             // roborev, issue #4196, round-10 Low finding: `Loss.chunks` is
             // documented (`mod.rs`) as the chunks this partition's byte
             // range INTERSECTS — every OTHER loss class passes the full
@@ -500,30 +526,48 @@ pub async fn salvage_sstable(
             // message text instead (where a human/consumer wanting "why"
             // still finds it, distinct from "where").
             if losses.len() < MAX_RESIDENT_LOSSES {
-                // `bad_touched` is bounded by the SAME clamp `touched_chunks`
-                // is (it is a subrange of it via `bad_chunks.range(..)`), so
-                // it needs the identical cap before formatting into the
-                // message text — otherwise a large intersecting range with
-                // many failing chunks could still produce a multi-KB
-                // `message` string per loss (roborev, issue #4196, round 17
-                // Medium finding).
-                let bad_touched_total = bad_touched.len();
-                let mut bad_touched_for_desc = bad_touched;
-                bad_touched_for_desc.truncate(MAX_CHUNKS_PER_LOSS);
-                let bad_touched_desc = if bad_touched_total > MAX_CHUNKS_PER_LOSS {
-                    format!(
-                        "{bad_touched_for_desc:?} (+{} more)",
-                        bad_touched_total - MAX_CHUNKS_PER_LOSS
-                    )
-                } else {
-                    format!("{bad_touched_for_desc:?}")
+                // Both `bad_touched` and `implausible_touched` are bounded
+                // by the SAME clamp `touched_chunks` is (each a subrange of
+                // it), but still need the identical per-list cap before
+                // formatting into the message text — otherwise a large
+                // intersecting range with many failing chunks could still
+                // produce a multi-KB `message` string per loss (roborev,
+                // issue #4196, round 17 Medium finding).
+                let describe = |mut chunks: Vec<u64>| -> String {
+                    let total = chunks.len();
+                    chunks.truncate(MAX_CHUNKS_PER_LOSS);
+                    if total > MAX_CHUNKS_PER_LOSS {
+                        format!("{chunks:?} (+{} more)", total - MAX_CHUNKS_PER_LOSS)
+                    } else {
+                        format!("{chunks:?}")
+                    }
+                };
+                // Name whichever cause(s) actually intersect this
+                // partition's range — never claim a cause that did not
+                // apply, and never omit one that did.
+                let cause_text = match (!bad_touched.is_empty(), !implausible_touched.is_empty()) {
+                    (true, false) => format!(
+                        "failed CRC validation (failing chunk(s): {})",
+                        describe(bad_touched)
+                    ),
+                    (false, true) => format!(
+                        "declared implausible framing in CompressionInfo.db, so it was never \
+                         read or CRC-checked (chunk(s): {})",
+                        describe(implausible_touched)
+                    ),
+                    (true, true) => format!(
+                        "failed CRC validation (failing chunk(s): {}) or was declared \
+                         implausible in CompressionInfo.db and never read (chunk(s): {})",
+                        describe(bad_touched),
+                        describe(implausible_touched)
+                    ),
+                    (false, false) => unreachable!(
+                        "the outer `if` already established at least one of the two is non-empty"
+                    ),
                 };
                 let (chunks_for_loss, message) = finalize_loss_chunks(
                     touched_chunks,
-                    format!(
-                        "partition's byte range intersects a chunk that failed CRC validation \
-                         (failing chunk(s): {bad_touched_desc})"
-                    ),
+                    format!("partition's byte range intersects a chunk that {cause_text}"),
                 );
                 losses.push(build_loss(
                     entry,
@@ -716,69 +760,5 @@ pub async fn salvage_sstable(
 }
 
 #[cfg(test)]
-mod chunks_cap_tests {
-    use super::{finalize_loss_chunks, MAX_CHUNKS_PER_LOSS};
-
-    /// Roborev, issue #4196, round 17 Medium finding: at or under the cap,
-    /// `chunks` and `message` must both pass through UNCHANGED — no
-    /// truncation note when nothing was truncated.
-    #[test]
-    fn at_or_under_the_cap_is_unchanged() {
-        let chunks: Vec<u64> = (0..MAX_CHUNKS_PER_LOSS as u64).collect();
-        let (out_chunks, out_message) =
-            finalize_loss_chunks(chunks.clone(), "original message".to_string());
-        assert_eq!(out_chunks, chunks);
-        assert_eq!(out_message, "original message");
-
-        // One under the cap too.
-        let fewer: Vec<u64> = (0..(MAX_CHUNKS_PER_LOSS as u64 - 1)).collect();
-        let (out_chunks, out_message) =
-            finalize_loss_chunks(fewer.clone(), "original message".to_string());
-        assert_eq!(out_chunks, fewer);
-        assert_eq!(out_message, "original message");
-    }
-
-    /// Over the cap: truncated to exactly `MAX_CHUNKS_PER_LOSS` entries
-    /// (the FIRST ones, order preserved), and the truncation is folded into
-    /// `message` — never silent, per the finding's own "cap/truncate-with-
-    /// a-count" wording.
-    #[test]
-    fn over_the_cap_truncates_and_notes_it_in_the_message() {
-        let total = MAX_CHUNKS_PER_LOSS + 500;
-        let chunks: Vec<u64> = (0..total as u64).collect();
-        let (out_chunks, out_message) =
-            finalize_loss_chunks(chunks.clone(), "original message".to_string());
-        assert_eq!(
-            out_chunks.len(),
-            MAX_CHUNKS_PER_LOSS,
-            "must truncate to exactly the cap, not silently keep growing"
-        );
-        assert_eq!(
-            out_chunks,
-            &chunks[..MAX_CHUNKS_PER_LOSS],
-            "the RETAINED entries must be the first N, in order — not an arbitrary subset"
-        );
-        assert!(
-            out_message.starts_with("original message"),
-            "the original message must still be present, not replaced"
-        );
-        assert!(
-            out_message.contains(&MAX_CHUNKS_PER_LOSS.to_string())
-                && out_message.contains(&total.to_string()),
-            "the truncation note must name both the cap and the true total, so an operator \
-             reading `Loss.chunks` is never silently told fewer intersecting chunks exist than \
-             really do; got: {out_message}"
-        );
-    }
-
-    /// Every real caller passes a NON-EMPTY `touched_chunks` (it only calls
-    /// `build_loss` inside branches gated on chunk data being available at
-    /// all), but the function itself must not special-case zero either.
-    #[test]
-    fn empty_chunks_is_a_no_op() {
-        let (out_chunks, out_message) =
-            finalize_loss_chunks(Vec::new(), "original message".to_string());
-        assert!(out_chunks.is_empty());
-        assert_eq!(out_message, "original message");
-    }
-}
+#[path = "recover_chunks_cap_tests.rs"]
+mod chunks_cap_tests;

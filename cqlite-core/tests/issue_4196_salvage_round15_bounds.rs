@@ -339,14 +339,34 @@ async fn short_chunk_offsets_table_does_not_materialize_whole_file() {
             report.losses.len()
         );
     }
+    // roborev, issue #4196, round 22 Low finding: `chunk_reader.rs`'s
+    // per-chunk message no longer ASSERTS a single cause it cannot
+    // establish — a `Data.db` with trailing/appended bytes against an
+    // otherwise-intact `CompressionInfo.db` produces the IDENTICAL
+    // "derived last-chunk size exceeds the plausible maximum" shape a
+    // short `chunk_offsets` table does, so the wording now names BOTH
+    // candidates rather than picking one. Still distinguishes this from a
+    // genuine Data.db CRC problem (never claims "failed CRC validation" or
+    // similar).
     assert!(
         report
             .component_findings
             .iter()
             .any(|f| f.class == "ChunkDecompressionError"
-                && f.detail.contains("CompressionInfo.db corruption")),
-        "expected the finding to name this a CompressionInfo.db corruption, not a Data.db CRC \
-         problem; got {:?}",
+                && f.detail.contains("chunk_offsets table corrupted short")
+                && f.detail.contains("trailing/appended bytes")),
+        "expected the finding to name BOTH candidate causes (a corrupted chunk_offsets table, \
+         or Data.db trailing/appended bytes) — measured, not a single cause asserted; got {:?}",
+        report.component_findings
+    );
+    assert!(
+        !report
+            .component_findings
+            .iter()
+            .any(|f| f.class == "ChunkDecompressionError"
+                && f.detail.contains("failed inline CRC32 validation")),
+        "must never claim a CRC check happened for a chunk whose size alone made it \
+         implausible (never actually read); got {:?}",
         report.component_findings
     );
 }

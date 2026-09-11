@@ -54,6 +54,16 @@ pub(super) struct ChunkPreflight {
     /// unrecoverable `chunk-crc` loss reporting "failed CRC validation",
     /// which is factually false (never validated at all). See
     /// `unverified_from` for that case instead.
+    ///
+    /// Also does NOT include a COMPRESSED input's implausibly-FRAMED chunks
+    /// (roborev, issue #4196, round 22 Low finding — the SAME conflation
+    /// this round already fixed for the uncompressed side, found to also
+    /// apply here): `compressed_chunk_preflight` records a chunk whose
+    /// declared `[offset, offset+size)` exceeds `Data.db`'s real length as
+    /// untrustworthy WITHOUT EVER READING IT (its own framing is already
+    /// nonsensical, so no CRC could be computed) — genuine damage in
+    /// `CompressionInfo.db`, not a CRC failure in `Data.db`. See
+    /// `implausible_chunks` for that case instead.
     pub(super) bad_chunks: BTreeSet<u64>,
     /// The first uncompressed chunk index `CRC.db` carries no entry for —
     /// `Some` when `CRC.db` is SHORTER than `Data.db` needs, `None` when
@@ -84,6 +94,22 @@ pub(super) struct ChunkPreflight {
         reason = "read only by this module's own tests; see doc above"
     )]
     pub(super) unverified_from: Option<u64>,
+    /// Compressed-input chunk indices whose DECLARED FRAMING
+    /// (`[offset, offset+size)`) exceeds `Data.db`'s real length —
+    /// genuinely untrustworthy (never handed to an allocation sized from
+    /// the untrusted field, round-11 Medium finding), but the damage is in
+    /// `CompressionInfo.db`'s offset table, never a CRC32 mismatch in
+    /// `Data.db` (this chunk's CRC is never even computed). `recover.rs`
+    /// still classifies a partition touching one of these `LossClass::ChunkCrc`
+    /// (the chunk IS genuinely untrustworthy either way — round 22 Low
+    /// finding's own suggested fix keeps the class), but names the REAL
+    /// cause in the per-partition `Loss.message` rather than reusing
+    /// `bad_chunks`'s "failed CRC validation" wording, which would be
+    /// factually false for a chunk whose CRC was never read at all. Always
+    /// empty for `uncompressed_chunk_preflight` (that path has no
+    /// equivalent per-chunk framing check; a similarly-shaped concern
+    /// there is `unverified_from`, a different cause again).
+    pub(super) implausible_chunks: BTreeSet<u64>,
     /// One finding per CAUSE (mismatch, unverified-tail), never conflated
     /// into one.
     pub(super) findings: Vec<ComponentFinding>,
@@ -172,6 +198,13 @@ pub(super) fn compressed_chunk_preflight(
     let mut chunk_reader = ChunkReader::new(reader, compression_info.clone(), total_size);
 
     let mut bad_chunks = BTreeSet::new();
+    // roborev, issue #4196, round 22 Low finding: SEPARATE from `bad_chunks`
+    // — corrects a conflation the round-14 Low finding below only partially
+    // fixed (it separated the COUNTS but not the SETS, so `recover.rs`'s
+    // per-partition `Loss.message` still read "failed CRC validation" for a
+    // chunk whose CRC was never even computed). See `ChunkPreflight::implausible_chunks`'s
+    // doc for the full reasoning.
+    let mut implausible_chunks = BTreeSet::new();
     let mut first_detail: Option<String> = None;
     // roborev, issue #4196, round-14 Low finding: the summary below used to
     // report every entry in `bad_chunks` as a CRC32 validation failure, but
@@ -212,7 +245,7 @@ pub(super) fn compressed_chunk_preflight(
             _ => false,
         };
         if !plausible {
-            bad_chunks.insert(i as u64);
+            implausible_chunks.insert(i as u64);
             implausible_count += 1;
             if first_detail.is_none() {
                 first_detail = Some(format!(
@@ -237,7 +270,12 @@ pub(super) fn compressed_chunk_preflight(
         detail: format!(
             "{} of {} chunk(s) untrustworthy ({crc_failure_count} CRC failure(s), \
              {implausible_count} implausible framing); first: {detail}",
-            bad_chunks.len(),
+            // roborev, issue #4196, round 22 Low finding: `bad_chunks` now
+            // holds ONLY genuine mismatches (`implausible_chunks` is
+            // separate) — the total here must still be the SUM of both
+            // causes, matching what this sentence actually claims
+            // ("chunk(s) untrustworthy", not "chunk(s) CRC-mismatched").
+            bad_chunks.len() + implausible_chunks.len(),
             chunk_reader.chunk_count()
         ),
     });
@@ -290,6 +328,7 @@ pub(super) fn compressed_chunk_preflight(
     Ok(ChunkPreflight {
         bad_chunks,
         unverified_from: None,
+        implausible_chunks,
         findings: finding.into_iter().collect(),
         chunk_size: compression_info.chunk_length as u64,
         data_length,
@@ -335,6 +374,7 @@ pub(super) async fn uncompressed_chunk_preflight(
             // parseable byte is undetectable without CRC.db, so the absence
             // is recorded as a named finding rather than silently skipped.
             unverified_from: None,
+            implausible_chunks: BTreeSet::new(),
             findings: vec![ComponentFinding {
                 class: "ChunkCrcUnavailable".to_string(),
                 component: "CRC.db".to_string(),
@@ -514,6 +554,7 @@ pub(super) async fn uncompressed_chunk_preflight(
     Ok(ChunkPreflight {
         bad_chunks,
         unverified_from,
+        implausible_chunks: BTreeSet::new(),
         findings,
         chunk_size,
         data_length,

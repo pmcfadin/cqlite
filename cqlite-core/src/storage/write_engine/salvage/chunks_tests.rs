@@ -10,17 +10,36 @@
 
 use super::{chunks_for_range, uncompressed_chunk_preflight, MAX_UNCOMPRESSED_BAD_CHUNKS};
 
-/// Roborev, issue #4196, round 17 Medium finding (second half): a
-/// `CRC.db` with ZERO real entries against a large `Data.db` makes
-/// EVERY chunk take the "no entry" `Err` arm — this must REFUSE the
-/// whole input once `bad_chunks` would otherwise grow past
-/// `MAX_UNCOMPRESSED_BAD_CHUNKS`, not silently keep tracking (or
-/// silently keep SCANNING) without bound. `Data.db` is
+/// Roborev, issue #4196, round 22 Low finding: this doc paragraph itself
+/// used to state the PRE-round-21 contract here, contradicting this
+/// function's own name and every assertion in its body — fixed to
+/// describe the CURRENT contract.
+///
+/// A `CRC.db` with ZERO real entries against a large `Data.db` makes the
+/// VERY FIRST chunk take the "no entry" `Err` arm — `uncompressed_chunk_preflight`
+/// STOPS scanning right there (`CrcDb`'s backing array is a flat,
+/// sequentially-indexed `Vec`, so a missing entry is always a monotonic
+/// tail — every later index would ALSO miss), reports `unverified_from ==
+/// Some(0)`, and returns `Ok` — the input is NOT refused; those partitions
+/// are attempted normally, same as a wholly-absent `CRC.db`. `Data.db` is
 /// SPARSE-EXTENDED via `File::set_len()` (logical length only, no real
 /// bytes written/allocated — the same technique
 /// `issue_4196_salvage_round15_bounds.rs` uses for its 128 MiB
 /// span-ceiling test) so this stays a fast, deterministic unit test
-/// rather than needing a genuinely multi-hundred-MB fixture.
+/// rather than needing a genuinely multi-hundred-MB fixture; it is
+/// comfortably past the size that would have crossed
+/// `MAX_UNCOMPRESSED_BAD_CHUNKS` under the PRE-round-21 behavior, proving
+/// the fix does not merely raise that threshold but removes it from this
+/// code path entirely.
+///
+/// **Round 17 Medium finding's ORIGINAL contract (superseded round 21,
+/// stated here for history only — do NOT restore it)**: this same
+/// scenario used to be required to REFUSE the whole input once
+/// `bad_chunks` grew past `MAX_UNCOMPRESSED_BAD_CHUNKS`, because "no
+/// entry" was conflated into the same set as a genuine CRC32 mismatch.
+/// Round 21 (roborev Medium finding) split the two: "no entry" is
+/// UNVERIFIED, not evidence of corruption, so refusing on it was itself
+/// the defect that round fixed.
 #[tokio::test]
 async fn short_crc_db_stops_early_and_reports_unverified_not_bad() {
     use crate::storage::sstable::reader::crc::MIN_CRC_CHUNK_SIZE;

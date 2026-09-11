@@ -2573,6 +2573,106 @@ module hierarchy tests reference by full path; re-ran `cargo fmt --all
 commit is not a "trust the earlier verification" claim, it was
 independently re-verified.
 
+## Round 22, roborev job 3404 — 4 Low found against HEAD `5f0780e86`; all
+## fixed
+
+None touched `chunk_reader.rs`'s `max_plausible_total_chunk_size` function
+itself (finding 2's line range, 112-135, falls entirely within
+`read_chunk`'s CALLING code — the error-message construction — confirmed
+by grep before triaging, not assumed) — the per-function stop rule did not
+trigger.
+
+**Low 1** — the SAME conflation round 21 fixed on the uncompressed side
+(implausible-framing vs genuine CRC failure) was ALSO present on the
+COMPRESSED side: `compressed_chunk_preflight` inserted BOTH causes into
+one `bad_chunks` set (the round-14 fix had only separated the AGGREGATE
+finding's counts, not the per-loss consumption), so `recover.rs` reported
+`class: chunk-crc` with "failed CRC validation" for a chunk that was never
+even read (its declared framing alone made it untrustworthy —
+`CompressionInfo.db` damage, not `Data.db`). Fix: added
+`ChunkPreflight::implausible_chunks: BTreeSet<u64>`, separate from
+`bad_chunks`; `recover.rs` now intersects a partition's range against
+BOTH sets independently and names whichever cause(s) actually apply
+(mismatch only, implausible only, or both) — `LossClass::ChunkCrc` stays
+the classification either way (the chunk IS genuinely untrustworthy), only
+the MESSAGE changed. Extended the existing round-14 fixture test
+(`implausible_chunk_offset_table_does_not_oom`) with new assertions on the
+PER-PARTITION `Loss.message` (not just the aggregate finding, which
+round-14 already covered) — verified the new assertions catch the pre-fix
+conflation by temporarily reverting the message-building change (scratch
+edit, discarded, never committed) and confirming the exact predicted
+failure.
+
+**Low 2** — `chunk_reader.rs`'s ceiling-exceeded message asserted "this is
+a CompressionInfo.db corruption, not a Data.db one" — a causal claim the
+code cannot actually establish: `compressed_chunk_size` derives the LAST
+chunk's size as `total_file_size - start_offset`, so a `Data.db` with
+trailing/appended bytes (a backup tool concatenating files, a partial
+write) against an INTACT `CompressionInfo.db` produces the IDENTICAL
+"derived size exceeds the plausible maximum" shape a genuinely-short
+`chunk_offsets` table does — and this code path is also reachable from
+`cqlite verify --mode full` (`verify.rs:1411`), not just salvage. Fix:
+reworded to state what is MEASURED and name both candidate causes rather
+than asserting one. Updated the ONE existing test asserting on the old
+wording (`issue_4196_salvage_round15_bounds.rs`'s
+`short_chunk_offsets_table_does_not_materialize_whole_file`) to match, and
+verified the new assertions catch the pre-fix single-cause wording via the
+same revert-and-confirm technique.
+
+**Low 3** — `scripts/tests/test_salvage_no_resync_scan.sh`'s test-code
+exclusion (`*/tests/*` path component, or an in-file `#[cfg(test)]`
+anchor) missed round 21's OWN `chunks_tests.rs` split: a flat sibling file
+whose `#[cfg(test)]` attribute lives on the `mod tests;` DECLARATION back
+in `chunks.rs`, satisfying NEITHER exclusion — so it was being scanned as
+PRODUCTION code by this merge-blocking gate component (harmless today only
+because it happens to use none of the forbidden patterns). Fix: excluded
+`*_tests.rs` too (and, since the `continue` happens before the `scanned`
+counter increments, this also correctly drops it from the affirmative-zero
+`scanned` count per the finding's second ask). Verified by temporarily
+reverting the script (via `git stash`, applied by SHA and dropped after —
+never a bare pop, per the worktree rule) and confirming it reports "6
+production file(s) scanned" pre-fix (wrongly including `chunks_tests.rs`)
+vs "5" post-fix.
+
+**Low 4** — `chunks_tests.rs`'s own `short_crc_db_stops_early_and_reports_unverified_not_bad`
+(round 21's rewritten test) still carried its PRE-round-21 leading doc
+paragraph ("this must REFUSE the whole input..."), directly contradicting
+the function's own name and every assertion in its body — only a LATER
+inline comment had the corrected rationale. Fix: rewrote the leading
+paragraph to state the CURRENT contract, kept the superseded round-17
+contract as an explicit "history only, do NOT restore" clause.
+
+`recover.rs` crossed 800 lines (828) from finding-1's fix. Same as
+`chunks.rs` in round 21 — a file THIS PR created, so SPLIT rather than
+opt-out: the `#[cfg(test)] mod chunks_cap_tests { .. }` block (round 17's
+own tests) moved to a new sibling `recover_chunks_cap_tests.rs` via the
+SAME `#[path = "..."]` wiring pattern `chunks.rs`/`chunks_tests.rs`
+established. `recover.rs` is now 764 lines, `recover_chunks_cap_tests.rs`
+75 — both comfortably under threshold. The NEW split file is ALSO
+correctly excluded by finding 3's OWN fix (the `*_tests.rs` glob is not
+filename-specific), confirmed via the same script re-run
+("5 production file(s) scanned" — 7 total salvage `.rs` files minus 2
+`*_tests.rs` siblings).
+
+Re-verified after all fixes: `cargo check --locked -p cqlite-core --lib
+--features write-support` clean; `RUSTFLAGS="-D warnings" cargo clippy
+--locked -p cqlite-core --lib --features write-support` clean; `cargo
+build --locked -p cqlite-cli --features write-support` clean; `cargo fmt
+--all --check` clean; `--lib` 4076/4076 (0 failed, unchanged count — this
+round's fixes touch existing tests/messages, no new unit tests beyond
+what the split relocated); `issue_4196_round16_chunk_size_ceiling` 1/1,
+`issue_4196_salvage_round15_bounds` 4/4 (with the reworded-message
+assertions), `issue_4196_salvage_oom_bounds` 5/5 (with the new
+per-partition-message assertions), `issue_4196_salvage_corruption_corpus`
+8/8, `issue_4196_salvage_healthy_parity` 4/4,
+`issue_4196_salvage_partition_atomicity` 1/1,
+`sstable_parity_corruption_verify` 3/3,
+`scripts/tests/test_salvage_no_resync_scan.sh` (re-run, "5 production
+file(s) scanned" — correctly excluding both `*_tests.rs` siblings now) —
+all pass, no regressions. `storage::write_engine::salvage::*` unit tests
+21/21 post-split, confirming both `#[path]`-wired test modules
+(`chunks::tests`, `recover::chunks_cap_tests`) still resolve correctly.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
