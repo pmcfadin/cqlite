@@ -146,6 +146,23 @@ if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
   exit 1
 fi
+# NORMALIZE ONCE, HERE, RATHER THAN AT EVERY COMPARISON (issue #4221 item 3). macOS's
+# default `$TMPDIR` ends in a trailing slash, so the template above yields a `tmp` whose
+# path carries a literal "//" (e.g. ".../T//agent-gate-logdir.XXXXXX"). Every path this
+# suite builds by STRING CONCATENATION off `$tmp` (`$tmp/fakeroot`, `$tmp/td-...`, the
+# `find "$tmp" ...` scan) keeps that "//" verbatim — but a path the GATE ITSELF reports
+# does not: it reaches its own absolute paths through a real `cd`+`pwd`, and a shell's
+# `cd` collapses consecutive slashes as part of ordinary pathname resolution (verified:
+# `cd a//b && pwd` prints `a/b`) even without `-P`. So a suite built on `$tmp` and a gate
+# report built on a real `cd` disagreed on FORM for the exact same directory — not a
+# leak, a textual double-vs-single-slash mismatch. Collapsing `$tmp` to its canonical
+# form immediately, before anything is derived from it, makes every downstream
+# concatenation agree with what the gate's own `cd`+`pwd` would produce.
+tmp=$(cd "$tmp" && pwd) || tmp=""
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not normalize the scratch dir path — refusing to run\n'
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 # Fixture git must be ISOLATED from the invoker's environment, not merely given an
@@ -4303,11 +4320,28 @@ fi
 # before AC27/AC28/AC29 raised it by 34, 200 before AC25/AC26 raised it by 26); the floor is
 # what notices a DELETED CASE — every
 # case in this file contributes at least 5 verdicts — rather than a drifting count.
+#
+# TWO FLOORS, KEYED ON THE SAME AFFIRMATIVE CAPABILITY PROBE EVERY DEGRADED BRANCH ABOVE
+# ALREADY USES (issue #4221 item 3) — a single flat 259 was never actually reachable on a
+# degraded host: measured STABLY at 247 across 8 back-to-back runs on a macOS host with
+# OWNER_MARKER_CAPABLE=0 (this file's own declared Linux-only dependency), 27 short of the
+# full 274, not the 15-verdict margin the flat floor assumed. Guessing a wider flat margin
+# would only re-hide the exact defect this floor exists to catch (#3544's lesson) on the
+# capable branch, so each branch gets ITS OWN calibrated floor instead of one shared guess:
+# 259 where the capability is present (unchanged — every Linux-measured total above stays
+# covered), 243 where it is absent (4 below the measured-stable 247, so a genuinely deleted
+# case — minimum 5 verdicts — still drops the total below it, while ordinary run-to-run
+# noise does not).
 _total_verdicts=$((PASS + FAIL))
-if [ "$_total_verdicts" -ge 259 ]; then
-  ok "suite floor: $_total_verdicts verdicts reported (floor 259) — no case was silently dropped"
+if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
+  _floor=259
 else
-  bad "suite floor: only $_total_verdicts verdicts reported (floor 259) — at least one case was deleted or died before its assertions"
+  _floor=243
+fi
+if [ "$_total_verdicts" -ge "$_floor" ]; then
+  ok "suite floor: $_total_verdicts verdicts reported (floor $_floor) — no case was silently dropped"
+else
+  bad "suite floor: only $_total_verdicts verdicts reported (floor $_floor) — at least one case was deleted or died before its assertions"
 fi
 
 printf '\n%s\n' "scripts/tests/test_agent_gate_logdir_cleanup.sh   passed: $PASS  failed: $FAIL"
