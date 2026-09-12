@@ -21,6 +21,14 @@ pub(super) struct SkippedInput {
 pub(super) struct SalvageDiscovery {
     pub(super) generations: Vec<PathBuf>,
     pub(super) skipped: Vec<SkippedInput>,
+    /// Generations named EXPLICITLY as a single-file input that carry no
+    /// sibling `-TOC.txt` publication barrier (roborev, issue #4196, round-22
+    /// Low finding). They ARE salvaged — an explicit file path overrides the
+    /// barrier, see [`discover_salvage_inputs`]'s doc — but the absence is
+    /// recorded so it reaches the manifest instead of vanishing. Always empty
+    /// for a table-directory input, where the same condition is a
+    /// [`SkippedInput`] instead.
+    pub(super) barrier_absent: Vec<PathBuf>,
 }
 
 /// `args.input` is a single `Data.db` file, or a table directory whose
@@ -38,13 +46,51 @@ pub(super) struct SalvageDiscovery {
 /// prevent every sibling generation from ever being attempted. Such an entry
 /// is instead named in [`SalvageDiscovery::skipped`] and excluded from
 /// `generations`; the caller still salvages every OTHER generation.
+///
+/// # The `-TOC.txt` publication barrier: enforced for a DIRECTORY, overridden
+/// for an explicit FILE — and NEVER silently
+///
+/// Roborev, issue #4196, round-22 Low finding: the single-file branch returned
+/// with no `-TOC.txt` probe at all, while the directory branch names a
+/// barrier-less generation as a [`SkippedInput`] that lands in the manifest and
+/// forces exit 3. So `salvage ./ks/t-<id>/nb-3-big-Data.db` salvaged an
+/// unpublished generation SILENTLY while `salvage ./ks/t-<id>/` on the same file
+/// named it and refused — an asymmetry nothing declared.
+///
+/// The resolution is deliberate, and it is not "make both refuse": an explicit
+/// file path is an operator's explicit choice, and salvaging an unpublished
+/// (partially flushed, interrupted) generation is a legitimate recovery
+/// scenario this tool should not be able to be talked out of. So the file branch
+/// SALVAGES it — and records the absence in
+/// [`SalvageDiscovery::barrier_absent`], which becomes an
+/// `UnpublishedInputGeneration` component finding in the manifest and, like the
+/// directory branch, an imperfect (exit 3) outcome: without the barrier salvage
+/// cannot know the generation was ever COMPLETELY written, so the run's premise
+/// is unverified and must not read as clean. Same exit code for the same file
+/// whichever way it is named; the difference is that the file form still
+/// recovers the data.
+///
+/// The probe needs the component prefix, so it fires only for a file actually
+/// named `*-Data.db`. Any other name has no derivable `-TOC.txt` sibling to look
+/// for and is left to the reader to reject on its own merits.
 pub(super) fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDiscovery> {
     use anyhow::Context;
 
     if input.is_file() {
+        let mut barrier_absent = Vec::new();
+        if let Some(base) = input
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix("-Data.db"))
+        {
+            if !input.with_file_name(format!("{base}-TOC.txt")).exists() {
+                barrier_absent.push(input.to_path_buf());
+            }
+        }
         return Ok(SalvageDiscovery {
             generations: vec![input.to_path_buf()],
             skipped: Vec::new(),
+            barrier_absent,
         });
     }
     if !input.is_dir() {
@@ -115,6 +161,9 @@ pub(super) fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDis
     Ok(SalvageDiscovery {
         generations: found.into_iter().map(|(_, p)| p).collect(),
         skipped,
+        // A directory input enforces the barrier (a barrier-less generation is
+        // a `SkippedInput` above), so there is never an overridden one here.
+        barrier_absent: Vec::new(),
     })
 }
 
@@ -241,6 +290,84 @@ mod tests {
             .unwrap_or_else(|e| panic!("write {prefix}-Data.db: {e}"));
         std::fs::write(dir.join(format!("{prefix}-TOC.txt")), b"Data.db\n")
             .unwrap_or_else(|e| panic!("write {prefix}-TOC.txt: {e}"));
+    }
+
+    /// Roborev, issue #4196, round-22 Low finding — an EXPLICITLY-named
+    /// `Data.db` with no sibling `-TOC.txt` is still salvaged (the operator
+    /// named it), but the missing publication barrier is RECORDED, never
+    /// silent. The directory branch's own behavior for the same file (a named
+    /// `SkippedInput`) is pinned by `salvage_cli_tests`.
+    #[test]
+    fn explicit_file_without_toc_txt_is_salvaged_but_the_barrier_absence_is_recorded() {
+        let temp = TempDir::new().expect("tempdir");
+        let data_db = temp.path().join("nb-3-big-Data.db");
+        std::fs::write(&data_db, b"data").expect("write Data.db");
+
+        let discovery = discover_salvage_inputs(&data_db).expect("discovery must succeed");
+        assert_eq!(
+            discovery.generations,
+            vec![data_db.clone()],
+            "an explicit file path must still be salvaged — the barrier is overridden, not enforced"
+        );
+        assert_eq!(
+            discovery.barrier_absent,
+            vec![data_db],
+            "the missing -TOC.txt must be RECORDED so it reaches the manifest"
+        );
+        assert!(discovery.skipped.is_empty());
+    }
+
+    /// The barrier PRESENT: nothing recorded. Without this the case above could
+    /// pass while recording the absence unconditionally.
+    #[test]
+    fn explicit_file_with_toc_txt_records_no_barrier_finding() {
+        let temp = TempDir::new().expect("tempdir");
+        published(temp.path(), "nb-3-big");
+        let data_db = temp.path().join("nb-3-big-Data.db");
+
+        let discovery = discover_salvage_inputs(&data_db).expect("discovery must succeed");
+        assert_eq!(discovery.generations, vec![data_db]);
+        assert!(
+            discovery.barrier_absent.is_empty(),
+            "a published generation has nothing to record; got {:?}",
+            discovery.barrier_absent
+        );
+    }
+
+    /// A file NOT named `*-Data.db` has no derivable `-TOC.txt` sibling to probe
+    /// for, so nothing is recorded (the reader rejects it on its own merits) —
+    /// the probe must not invent a component prefix.
+    #[test]
+    fn explicit_file_not_named_data_db_records_no_barrier_finding() {
+        let temp = TempDir::new().expect("tempdir");
+        let odd = temp.path().join("something-else.bin");
+        std::fs::write(&odd, b"data").expect("write file");
+
+        let discovery = discover_salvage_inputs(&odd).expect("discovery must succeed");
+        assert_eq!(discovery.generations, vec![odd]);
+        assert!(discovery.barrier_absent.is_empty());
+    }
+
+    /// A table-DIRECTORY input never overrides the barrier: the same
+    /// barrier-less generation is a named `SkippedInput` and
+    /// `barrier_absent` stays empty.
+    #[test]
+    fn directory_input_enforces_the_barrier_and_records_no_override() {
+        let temp = TempDir::new().expect("tempdir");
+        published(temp.path(), "nb-1-big");
+        std::fs::write(temp.path().join("nb-2-big-Data.db"), b"data").expect("write unpublished");
+
+        let discovery = discover_salvage_inputs(temp.path()).expect("discovery must succeed");
+        assert_eq!(discovery.generations.len(), 1, "only nb-1 is published");
+        assert_eq!(discovery.skipped.len(), 1);
+        assert!(discovery.skipped[0]
+            .path
+            .to_string_lossy()
+            .ends_with("nb-2-big-Data.db"));
+        assert!(
+            discovery.barrier_absent.is_empty(),
+            "a directory input ENFORCES the barrier; the override is the file form only"
+        );
     }
 
     /// Roborev, issue #4196, round-22 Low finding — TIED generation numbers

@@ -87,7 +87,17 @@ fn is_verification_gap_class(class: &str) -> bool {
     // `ChunkCrcUnavailable` covers BOTH chunk-CRC gaps `chunks.rs` names: a
     // wholly absent `CRC.db`, and a `CRC.db` whose entries stop short of what
     // `Data.db` needs (the unverified-tail finding).
-    matches!(class, "ChunkCrcUnavailable" | "UnverifiedEmptyDecode")
+    //
+    // `UnpublishedInputGeneration` (round-22 Low finding, see
+    // `record_unpublished_input_findings`): without the `-TOC.txt` publication
+    // barrier salvage cannot know the input generation was ever COMPLETELY
+    // written, so the run's premise is unverified — and a table-DIRECTORY input
+    // already exits 3 for exactly that condition, so this keeps `$?` the same
+    // for the same file whichever way it is named.
+    matches!(
+        class,
+        "ChunkCrcUnavailable" | "UnverifiedEmptyDecode" | "UnpublishedInputGeneration"
+    )
 }
 
 /// Attach table-dir-level facts (a discovery skip, or an in-loop hard error
@@ -129,6 +139,42 @@ pub(super) fn record_table_dir_level_findings(
                 "salvage hard-errored for this generation (not a classified refusal — the \
                  input itself, or the output writer, failed): {reason}"
             ),
+        });
+    }
+}
+
+/// Record an EXPLICITLY-named single-file input that carries no `-TOC.txt`
+/// publication barrier (roborev, issue #4196, round-22 Low finding).
+///
+/// The barrier is enforced for a table-DIRECTORY input (a barrier-less
+/// generation there is a named `SkippedInput`, never salvaged) and OVERRIDDEN for
+/// an explicit file path — salvaging an unpublished, partially-flushed
+/// generation is a legitimate recovery scenario. But it must not be silent: the
+/// absence lands in the manifest as an `UnpublishedInputGeneration` finding,
+/// which `is_verification_gap_class` also makes an imperfect (exit 3) outcome, so
+/// the exit code no longer depends on WHICH WAY the same file was named. See
+/// `discover_salvage_inputs`'s doc for the full reasoning.
+///
+/// Attached to the FIRST report, like every other input-level fact; a no-op when
+/// `reports` is empty or nothing was recorded.
+pub(super) fn record_unpublished_input_findings(
+    reports: &mut [SalvageReport],
+    barrier_absent: &[PathBuf],
+) {
+    let Some(first) = reports.first_mut() else {
+        return;
+    };
+    for path in barrier_absent {
+        first.component_findings.push(ComponentFinding {
+            class: "UnpublishedInputGeneration".to_string(),
+            component: path.display().to_string(),
+            detail:
+                "this generation has no sibling -TOC.txt (the publication barrier), so salvage \
+                 cannot know it was ever COMPLETELY written — it was salvaged anyway because it \
+                 was named EXPLICITLY as a file (a table-directory input skips such a generation \
+                 instead), and the recovered output may therefore come from an unpublished, \
+                 partially-flushed generation"
+                    .to_string(),
         });
     }
 }
@@ -338,7 +384,8 @@ pub(super) fn render_console(reports: &[SalvageReport], args: &SalvageArgs, is_t
 #[cfg(test)]
 mod tests {
     use super::{
-        out_dir_has_data_db, record_table_dir_level_findings, report_is_imperfect, SkippedInput,
+        out_dir_has_data_db, record_table_dir_level_findings, record_unpublished_input_findings,
+        report_is_imperfect, SkippedInput,
     };
     use cqlite_core::storage::write_engine::salvage::{
         ComponentFinding, PartitionTotals, Refusal, RefusalReason, SalvageReport,
@@ -422,6 +469,49 @@ mod tests {
         let mut report = clean_report();
         report.component_findings = vec![finding("UnverifiedEmptyDecode")];
         assert!(report_is_imperfect(&report));
+    }
+
+    /// Roborev, issue #4196, round-22 Low finding: an explicitly-named
+    /// `Data.db` with no `-TOC.txt` publication barrier is salvaged, recorded —
+    /// and imperfect, so `$?` matches what the same file gets through its table
+    /// DIRECTORY (which skips it and exits 3).
+    #[test]
+    fn record_unpublished_input_findings_attaches_and_makes_the_report_imperfect() {
+        let mut reports = vec![clean_report(), clean_report()];
+        let unpublished = PathBuf::from("/data/t/nb-3-big-Data.db");
+        record_unpublished_input_findings(&mut reports, std::slice::from_ref(&unpublished));
+
+        assert_eq!(reports[0].component_findings.len(), 1);
+        let f = &reports[0].component_findings[0];
+        assert_eq!(f.class, "UnpublishedInputGeneration");
+        assert!(
+            f.component.contains("nb-3-big-Data.db"),
+            "the finding must NAME the generation; got {f:?}"
+        );
+        assert!(
+            f.detail.contains("-TOC.txt"),
+            "the detail must name the missing component; got {f:?}"
+        );
+        assert!(
+            report_is_imperfect(&reports[0]),
+            "an unverifiable publication barrier must not read as a clean run"
+        );
+        assert!(
+            reports[1].component_findings.is_empty(),
+            "an input-level fact attaches to the FIRST report only"
+        );
+    }
+
+    #[test]
+    fn record_unpublished_input_findings_with_nothing_to_record_is_a_no_op() {
+        let mut reports = vec![clean_report()];
+        record_unpublished_input_findings(&mut reports, &[]);
+        assert!(reports[0].component_findings.is_empty());
+        assert!(!report_is_imperfect(&reports[0]));
+        // And an empty `reports` must not panic.
+        let mut empty: Vec<SalvageReport> = Vec::new();
+        record_unpublished_input_findings(&mut empty, &[PathBuf::from("/data/t/nb-1-big-Data.db")]);
+        assert!(empty.is_empty());
     }
 
     /// The EXCLUSIONS, pinned: `UnprovenByteParity` states a permanent,

@@ -106,6 +106,7 @@ here, and the class/message split is the recorded resolution.
 | every partition recovered AND every verification ran | output generation + manifest with `losses: 0 RECOGNISED` | 0 |
 | some partitions lost | output generation + manifest naming each loss | 3 |
 | a verification could NOT run (uncompressed input with no `CRC.db`, or a `CRC.db` shorter than `Data.db` needs) | output generation + manifest naming a `ChunkCrcUnavailable` component finding | 3 |
+| an explicitly-named `Data.db` with no sibling `-TOC.txt` (publication barrier absent) | SALVAGED anyway (an explicit file path is the operator's choice) + manifest naming an `UnpublishedInputGeneration` component finding | 3 |
 | boundary source unreadable (Index.db / Partitions.db corrupt, missing) | REFUSE: no Data.db written; manifest `refused: {reason: boundary-source-unreadable, remedy: "cqlite rebuild --components index (#4197)"}` | 2 |
 | zero partitions decodable | REFUSE: no Data.db; manifest lists every loss | 2 |
 | schema unresolvable, output dir not empty, input dir has no Data.db | usage error | 1 |
@@ -125,6 +126,16 @@ predicate and exit **3**; classes that mean "a verification RAN and found someth
 (`UnprovenByteParity`, #4217) are deliberately NOT, since their consequences already reach the exit
 code through `losses` or are true of every run. The designated set and each exclusion's reason live
 with `report_is_imperfect` in `cqlite-cli/src/commands/salvage/report.rs`.
+
+**The `-TOC.txt` publication barrier is enforced for a DIRECTORY input and overridden for an explicit
+FILE — never silently, either way** (roborev, issue #4196, round-22 Low finding). A table-directory
+input SKIPS a barrier-less generation (a named `SkippedInputGeneration`, not salvaged); a
+single-`Data.db` input named explicitly SALVAGES it, because recovering an unpublished,
+partially-flushed generation is a legitimate scenario an operator must be able to ask for. The
+absence is then recorded as an `UnpublishedInputGeneration` finding and counts as a verification gap,
+so `$?` is the same 3 for the same file whichever way it was named — the difference is that the file
+form still recovers the data. Previously the file branch did not probe for `-TOC.txt` at all, so that
+run was silent AND exited 0.
 Interrupted runs leave a `.salvage-incomplete` marker in `--out`; the writer's normal finish
 (TOC last) means a complete component set implies a completed run.
 

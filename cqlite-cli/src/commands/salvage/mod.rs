@@ -27,8 +27,8 @@ mod report;
 use discovery::{discover_salvage_inputs, table_name_from_input};
 use manifest_path::validate_manifest_path;
 use report::{
-    exit_after_partial_failure, record_table_dir_level_findings, render_console,
-    report_is_imperfect, write_manifest_file,
+    exit_after_partial_failure, record_table_dir_level_findings, record_unpublished_input_findings,
+    render_console, report_is_imperfect, write_manifest_file,
 };
 
 /// Execute the `salvage` command.
@@ -59,7 +59,9 @@ use report::{
 ///   genuine losses, a verification that could not run at all (an
 ///   uncompressed input with no `CRC.db` disables chunk-CRC loss detection
 ///   ENTIRELY, so its `losses: 0 RECOGNISED` means "unmeasured", never
-///   "clean"), another generation refused outright, or a published
+///   "clean"; an explicitly-named `Data.db` with no `-TOC.txt` publication
+///   barrier is salvaged but leaves "was this generation completely written?"
+///   unverifiable), another generation refused outright, or a published
 ///   generation was skipped at discovery. Check the manifest for which
 ///   generations wrote output: a table-dir input salvages each generation
 ///   SEPARATELY (D1), so "one generation refused" must not read as "nothing
@@ -283,6 +285,14 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         }
     } else {
         record_table_dir_level_findings(&mut reports, &discovery.skipped, &hard_errors);
+        // roborev, issue #4196, round-22 Low finding: an EXPLICIT single-file
+        // input with no sibling `-TOC.txt` is salvaged (the operator named it —
+        // an unpublished, partially-flushed generation is a legitimate recovery
+        // target) but never SILENTLY: the missing publication barrier is
+        // recorded here so it reaches the manifest, and it makes the run
+        // imperfect (exit 3) exactly as the same file does when reached through
+        // its table DIRECTORY. Always empty for a directory input.
+        record_unpublished_input_findings(&mut reports, &discovery.barrier_absent);
     }
 
     if let Err(e) = write_manifest_file(&reports, args, is_table_dir) {
