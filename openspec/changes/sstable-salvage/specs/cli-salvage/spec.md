@@ -9,7 +9,10 @@ codes scripts can branch on. All requirements are ADDED.
 > salvaged generation) are NOT implemented. R7.1-R7.4 and R8.2 are implemented and pass against real
 > fixtures via the compiled binary (`cqlite-cli/tests/salvage_cli_tests.rs`); R7.2's scenario runs
 > against the corpus's actual (total-loss) outcome rather than its literal partial-recovery text —
-> see that test's doc comment.
+> see that test's doc comment. R8.2's specific test is
+> `help_states_uncompressed_whole_partition_and_rebuild_boundaries` in that file, NAMED here because
+> the C-audit on this issue found this paragraph asserting R8.2 coverage while no test invoked
+> `salvage --help` at all — an unlocatable coverage claim reads exactly like a covered one.
 
 ## ADDED Requirements
 

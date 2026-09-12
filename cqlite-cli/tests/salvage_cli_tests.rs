@@ -737,6 +737,76 @@ fn usage_errors_exit_1() {
     );
 }
 
+/// R8.2 — the compiled binary's `salvage --help` STATES all three boundaries an
+/// operator has to know before pointing a recovery tool at a damaged file.
+///
+/// The C-audit on this issue found the cli delta spec claiming R8.2 "passes
+/// against real fixtures via the compiled binary
+/// (`cqlite-cli/tests/salvage_cli_tests.rs`)" while NO test in this file (or
+/// anywhere) ever invoked `salvage --help`. The help text itself was already
+/// correct (`cqlite-cli/src/cli_types.rs`, the `Commands::Salvage`
+/// `long_about`) — what was missing was anything pinning it, so a future edit
+/// could silently drop a boundary and the spec's claim would keep reading as
+/// covered.
+///
+/// The three boundaries, each asserted on the CURRENT wording:
+///
+///   1. output is UNCOMPRESSED, naming issue #1406 (the write-surface claim
+///      boundary in CLAUDE.md — CQLite's production writer never emits a
+///      `CompressionInfo.db`);
+///   2. whole-or-nothing partition recovery (design D2 — a prefix would
+///      resurrect data a later row's tombstone shadows);
+///   3. the rebuild remedy for a damaged boundary source (design D3's refusal
+///      arm — `cqlite rebuild --components index`, issue #4197).
+///
+/// Whitespace is COLLAPSED before matching: clap re-wraps `long_about` to the
+/// available width, so a raw `contains` on a multi-word phrase is a
+/// terminal-width-dependent assertion (green in a pipe, red under a narrower
+/// one). Collapsing keeps the assertion on the WORDS, which is what the
+/// requirement is about. Needs no fixtures, so it never skips.
+#[test]
+fn help_states_uncompressed_whole_partition_and_rebuild_boundaries() {
+    let output = run_cli(&["salvage", "--help"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "`salvage --help` must exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = collapse_whitespace(&String::from_utf8_lossy(&output.stdout));
+
+    for (boundary, phrase) in [
+        (
+            "uncompressed output / issue #1406",
+            "Output is UNCOMPRESSED (issue #1406) -- CQLite's production write surface never \
+             emits a CompressionInfo.db.",
+        ),
+        (
+            "whole-or-nothing partition recovery",
+            "A partition is recovered WHOLE OR NOT AT ALL: a partition whose decode fails at any \
+             row is skipped entirely",
+        ),
+        (
+            "rebuild remedy for a damaged boundary source",
+            "salvage REFUSES, writing no Data.db; the remedy is `cqlite rebuild --components \
+             index` (issue #4197) first.",
+        ),
+    ] {
+        assert!(
+            help.contains(&collapse_whitespace(phrase)),
+            "`salvage --help` must state the {boundary} boundary. Expected (whitespace-collapsed) \
+             phrase:\n  {phrase}\nHelp text was:\n{help}"
+        );
+    }
+}
+
+/// Every run of whitespace (clap's own wrapping included) collapsed to one
+/// space, ends trimmed — see
+/// [`help_states_uncompressed_whole_partition_and_rebuild_boundaries`].
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn single_data_db(dir: &Path) -> PathBuf {
     let mut found: Vec<PathBuf> = Vec::new();
     for e in std::fs::read_dir(dir).expect("read dir").flatten() {
