@@ -53,6 +53,52 @@ structurally always `0` (the buffering above means no caller can ever observe ot
 #4218 for reinstating a real count if the partition driver's buffering ever changes to incremental
 emission.
 
+### D2.1 The 128 MiB plausible-partition-span ceiling — a size-based refusal on HEALTHY input
+
+**The threshold.** `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES = 128 * 1024 * 1024`
+(`cqlite-core/src/storage/sstable/reader/data_access/point_compaction.rs`, `write-support`-gated),
+matching `compression.rs::MAX_DECOMPRESSED_SIZE`'s established convention and the crate's <128 MB
+memory target. It bounds the SPAN a single boundary-source slot may claim, checked by
+`exceeds_plausible_partition_span(start, end)` in BOTH arms of
+`decode_partition_at_offset_for_salvage` (uncompressed positional read, compressed chunk window)
+BEFORE anything is allocated.
+
+**The behaviour, including on healthy input.** A slot whose authoritative span is wider than the
+ceiling is REFUSED: `PartitionAtOffsetOutcome::SpanTooWide { span_bytes }` becomes a
+`Loss { class: "truncated" }` whose message names the real cause and the actual width
+(`… is N bytes wide, exceeding this salvage tool's 128 MiB plausible-partition-span ceiling —
+Data.db itself is intact; this is a size-based refusal, not evidence of truncation or corruption`).
+The run continues; the generation is still written; the exit code is D3's `3` (output with losses),
+or `2` if it was the only slot.
+
+**This is a documented DEVIATION from R1, not an implementation detail.** R1 says salvage of a
+healthy SSTable equals a no-purge compaction of it — and for a genuinely healthy partition wider
+than 128 MiB that is FALSE: the partition is lost. The trade-off is deliberate and is the same one
+D2/D3 make everywhere else — a conservative, NAMED, counted loss beats an unbounded allocation that
+starves or OOM-kills the process, on a file this tool exists to recover from. It is stated here
+because a silent data-loss policy on healthy input that appears in no spec or design text is
+indistinguishable, to a reader, from a bug.
+
+**Why the ceiling is needed at all** (round-15 audit): for the LAST boundary entry (`end_bound:
+None`) — including one that is only ARTIFICIALLY last because `Index.db`/`Partitions.db` was
+truncated exactly on an entry boundary and therefore parsed cleanly with fewer real entries — `end`
+resolves to the WHOLE remaining data section, not one partition's worth. Every other guard bounds
+`end` against the REAL FILE SIZE, which such a span satisfies by construction, so it passes all of
+them and then allocates the entire remaining multi-GB section before the slot is ever classified.
+The check is therefore applied UNCONDITIONALLY to both span-resolution paths, `Some(end_bound)`
+included: a corrupted-but-plausible middle boundary can name just as wide a gap, and the risk is the
+SPAN's width, not which path produced it.
+
+**Why `LossClass::Truncated` is reused, and why that is not a wording bug.** `LossClass` has no
+dedicated variant for a size-based refusal, and `Truncated` is the closest existing class — the
+outcome is, ultimately, "this partition was not recovered". But `Truncated`'s own canonical message
+("the partition's authoritative byte range extends past `Data.db`'s actual end") is FACTUALLY FALSE
+for this case: the file is intact. So the two share a class and NOT a message — the `SpanTooWide`
+arm in `salvage/recover_helpers.rs` emits its own text naming the ceiling and the span width, so an
+operator of a wide, healthy partition is never told their data is corrupt. Adding a distinct
+`LossClass` would change the D5 manifest's public `class` vocabulary; that is deliberately NOT done
+here, and the class/message split is the recorded resolution.
+
 ## D3. Failure contract
 
 | Situation | Behaviour | Exit |
