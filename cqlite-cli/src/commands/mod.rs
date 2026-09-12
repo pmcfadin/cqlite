@@ -25,6 +25,20 @@ pub mod docker;
 pub mod info;
 pub mod read_commitlog;
 pub mod read_sstable;
+// `cqlite salvage` (issue #4196): unlike `write.rs`, which gates individual
+// write-support items so the module stays unconditional, this file's content
+// is ENTIRELY write-support-dependent (it imports
+// `cqlite_core::storage::write_engine::salvage` at the top level), so the
+// whole module declaration is gated instead. `not(tombstones)` mirrors the
+// core module's OWN gate (roborev, issue #4196, round-7 High finding): the
+// core `write_engine::salvage` module is
+// `#[cfg(all(feature = "write-support", not(feature = "tombstones")))]`, so
+// this CLI module — its only cross-crate consumer — must vanish in lockstep
+// under `--all-features`, or `cqlite-cli/tombstones` (which forwards
+// `cqlite-core/tombstones`, see `Cargo.toml`) would compile against a core
+// item that no longer exists.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod salvage;
 pub mod verify;
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).
@@ -52,3 +66,49 @@ pub use query::{execute_query, execute_select_query};
 pub use read::{read_sstable, read_sstable_enhanced};
 pub(crate) use schema_load::load_schema_file;
 pub use support::{ParsedRow, QueryExecutor, QueryExecutorConfig, QueryResult, RealDataParser};
+
+/// Dispatch the `cqlite salvage` verb (issue #4196), or the informative
+/// "not built" error when this binary was built without it. Moved out of
+/// `main.rs` into this always-compiled module (roborev, issue #4196,
+/// round-8 Low finding: the cfg-gated dispatch block was growing an
+/// already-over-threshold `main.rs`, campsite rule/#1116) — the two-armed
+/// `not(tombstones)`-mirroring gate (round-7 High finding, see
+/// `salvage`'s module declaration above for why) lives here instead, so
+/// `main.rs` keeps a one-line call regardless of which arm compiles.
+pub async fn dispatch_salvage(
+    schema: Option<&std::path::Path>,
+    args: &crate::cli_types::SalvageArgs,
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    {
+        // `execute_salvage_command` owns its WHOLE exit-code space (0/1/2/3,
+        // design D3) via direct `std::process::exit` calls on every path,
+        // fallible or not (roborev, issue #4196: routing a usage error
+        // through `?` here would have sent it through `classify_error`'s
+        // `CliExitCode` enum instead, which has no variant equal to 1). It
+        // therefore never returns an `Err`.
+        salvage::execute_salvage_command(schema, args).await;
+        Ok(())
+    }
+    #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
+    {
+        // roborev, issue #4196, round 19 Low finding: this arm previously
+        // returned `Err(anyhow!(...))`, which `run_main`'s caller routes
+        // through `error::classify_error` — the EXACT indirection this
+        // function's own doc above says `execute_salvage_command` avoids
+        // ("it therefore never returns an Err"), broken by this ONE other
+        // arm. The message's substring "write" matches `classify_error`'s
+        // `CliExitCode::WriteError` branch (`error.rs:156-166`) — exit code
+        // 6, outside `dispatch_salvage`'s documented 0/1/2/3 space, even
+        // though this really is a usage error (the verb was invoked on a
+        // build that never compiled it in). Own the exit code directly
+        // instead, matching every OTHER salvage failure path.
+        let _ = (schema, args);
+        eprintln!(
+            "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
+             the salvage module cannot be built against, roborev issue #4196 round-7). Build \
+             with --features write-support (and without --features tombstones) to enable salvage."
+        );
+        std::process::exit(1);
+    }
+}

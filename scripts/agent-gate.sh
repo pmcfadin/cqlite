@@ -23501,6 +23501,23 @@ run_tooling_tests() {
     return 0
   fi
 
+  # `cqlite salvage` no-resync-scan guard (issue #4196, spec R4.3): partitions
+  # are located ONLY from the authoritative boundary source (`Index.db` /
+  # the `Partitions.db` trie), never by scanning `Data.db` for a plausible
+  # header (#3928 measured that inventing partitions). Pure grep, no
+  # cargo/python3/network needed.
+  echo ">>> [$name] bash scripts/tests/test_salvage_no_resync_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_salvage_no_resync_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (salvage no-resync-scan guard #4196); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -27135,7 +27152,19 @@ dispatch_component() {
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test write_read_roundtrip &&
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
-  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test compaction_integration' ;;
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test compaction_integration &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_healthy_parity &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_corruption_corpus &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_oom_bounds &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_round15_bounds &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_round16_chunk_size_ceiling &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_partition_atomicity' ;;
     cli-tests)
       # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
       # write-support) and a single-value annotation would be false for it — each pass

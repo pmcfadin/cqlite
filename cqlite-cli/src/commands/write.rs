@@ -446,9 +446,44 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
 /// statements and the FIRST `CREATE TABLE` is selected, applying any file-level
 /// keyspace from `CREATE KEYSPACE` / `USE` — so a realistic file with
 /// `CREATE TYPE` (and keyspace) statements before the table parses correctly
-/// (roborev #1031). JSON files fall back to `load_schema_file`.
+/// (roborev #1031). JSON files fall back to the QUIET single-statement loader
+/// (`load_schema_file_with_status(..., show_status = false)`) — see
+/// [`load_compaction_table_schema_for_table`]'s non-CQL branch for why the
+/// stdout-printing wrapper must never be used here.
+///
+/// Thin wrapper over [`load_compaction_table_schema_for_table`] with
+/// `target_table: None` (the historical "first table wins" behavior `compact`
+/// relies on) — kept as its own function so `compact`'s call site and its
+/// unit test below need no change. `compact`'s IS the only caller (roborev,
+/// issue #4196, round-13 Low finding: this was briefly `pub(crate)` with a
+/// comment claiming `commands::salvage` reused it too — salvage now calls
+/// [`load_compaction_table_schema_for_table`] directly instead, so that
+/// claim went stale; reverted to module-private since nothing outside
+/// `write.rs` needs this specific wrapper).
 #[cfg(feature = "write-support")]
 fn load_compaction_table_schema(schema_path: &Path) -> Result<cqlite_core::schema::TableSchema> {
+    load_compaction_table_schema_for_table(schema_path, None)
+}
+
+/// Like [`load_compaction_table_schema`], but SELECTS the `CREATE TABLE`
+/// statement matching `target_table` (case-insensitively) rather than always
+/// the first, when `target_table` is `Some`.
+///
+/// `commands::salvage` uses `Some(...)` (roborev, issue #4196, round-12 High
+/// finding: the ORIGINAL fix duplicated this whole function into
+/// `salvage.rs` as `resolve_salvage_table_schema`, WITHOUT the JSON-file
+/// fallback branch below — round-13 Medium finding: `cqlite --schema
+/// schema.json salvage …` regressed to a hard failure. Consolidated into
+/// ONE function instead, so the JSON fallback and the `USE`/`CREATE
+/// KEYSPACE` inference exist in exactly one place and cannot drift again).
+/// JSON schema files are inherently single-table (the format has no
+/// multi-statement concept at all), so `target_table` does not filter that
+/// branch — there is nothing to select among.
+#[cfg(feature = "write-support")]
+pub(crate) fn load_compaction_table_schema_for_table(
+    schema_path: &Path,
+    target_table: Option<&str>,
+) -> Result<cqlite_core::schema::TableSchema> {
     use cqlite_core::schema::cql_parser::{
         classify_statement, parse_create_table, split_cql_statements, StatementType,
     };
@@ -463,14 +498,36 @@ fn load_compaction_table_schema(schema_path: &Path) -> Result<cqlite_core::schem
         "cql" | "sql" | ""
     );
     if !is_cql {
-        // JSON (or other) — the single-statement loader handles it.
-        return crate::commands::load_schema_file(schema_path, false, None);
+        // JSON (or other) — the single-statement loader handles it; no
+        // table selection needed (see this function's doc).
+        //
+        // `load_schema_file_with_status(..., show_status = false)`, NEVER the
+        // `load_schema_file` wrapper (roborev, issue #4196, round-22 Medium
+        // finding): that wrapper hard-codes `show_status = true` and
+        // unconditionally `println!`s `📋 Loading schema from: …` and
+        // `📝 Parsing JSON schema format` to STDOUT. `salvage --out-format
+        // json` writes the D5 manifest — the machine-readable CONTRACT — to
+        // that same stdout, so `cqlite --schema s.json salvage … --out-format
+        // json | jq .` got two emoji lines before the JSON and failed to
+        // parse; every other salvage diagnostic already goes to stderr.
+        // Quiet is also what the `.cql` branch below does (it parses inline
+        // and prints nothing at all), so this makes the two branches of ONE
+        // function agree instead of diverging on stdout chatter — the #284 /
+        // #1506 quiet contract's intended entry point.
+        return crate::commands::schema_load::load_schema_file_with_status(
+            schema_path,
+            false,
+            None,
+            false,
+        );
     }
 
     let content = std::fs::read_to_string(schema_path)
         .with_context(|| format!("Failed to read schema file: {}", schema_path.display()))?;
 
     let mut file_keyspace: Option<String> = None;
+    let mut matched: Option<cqlite_core::schema::TableSchema> = None;
+    let mut all_tables: Vec<String> = Vec::new();
     for stmt in split_cql_statements(&content) {
         match classify_statement(&stmt) {
             StatementType::Other(ref kind) if kind == "use" => {
@@ -488,8 +545,15 @@ fn load_compaction_table_schema(schema_path: &Path) -> Result<cqlite_core::schem
                 }
             }
             StatementType::Other(ref kind) if kind == "create" => {
-                let lower = stmt.to_lowercase();
+                let lower = stmt.to_ascii_lowercase();
                 if lower.contains("create keyspace") {
+                    // roborev, issue #4196, round-13 Low finding:
+                    // `to_ascii_lowercase()` is BYTE-LENGTH-PRESERVING
+                    // (unlike `to_lowercase()`'s full Unicode case
+                    // mapping, e.g. `U+0130` -> 3 bytes from 2), so `pos`
+                    // computed against `lower` stays a valid byte offset
+                    // into the ORIGINAL `stmt` even when `stmt` contains
+                    // non-ASCII text before `EXISTS`/`KEYSPACE`.
                     let after = if let Some(pos) = lower.find("exists") {
                         &stmt[pos + 6..]
                     } else if let Some(pos) = lower.find("keyspace") {
@@ -511,24 +575,58 @@ fn load_compaction_table_schema(schema_path: &Path) -> Result<cqlite_core::schem
             }
             StatementType::CreateTable => {
                 if let Ok((_, mut ts)) = parse_create_table(&stmt) {
-                    if ts.keyspace.is_empty()
-                        || ts.keyspace == "unknown"
-                        || ts.keyspace == "default"
-                    {
-                        if let Some(ref ks) = file_keyspace {
-                            ts.keyspace = ks.clone();
+                    let selected = match target_table {
+                        Some(t) => ts.table.eq_ignore_ascii_case(t),
+                        None => matched.is_none(), // first table wins
+                    };
+                    if target_table.is_some() {
+                        all_tables.push(ts.table.clone());
+                    }
+                    if selected {
+                        if ts.keyspace.is_empty()
+                            || ts.keyspace == "unknown"
+                            || ts.keyspace == "default"
+                        {
+                            if let Some(ref ks) = file_keyspace {
+                                ts.keyspace = ks.clone();
+                            }
+                        }
+                        if target_table.is_some() && matched.is_some() {
+                            anyhow::bail!(
+                                "schema file {} declares table '{}' more than once",
+                                schema_path.display(),
+                                target_table.unwrap_or_default()
+                            );
+                        }
+                        matched = Some(ts);
+                        if target_table.is_none() {
+                            // Historical "first table wins" behavior returns
+                            // immediately, matching the pre-round-13 function
+                            // exactly (never scans the rest of the file).
+                            return Ok(matched.expect("just assigned"));
                         }
                     }
-                    return Ok(ts);
                 }
             }
             _ => {}
         }
     }
-    Err(anyhow::anyhow!(
-        "No CREATE TABLE statement found in {}",
-        schema_path.display()
-    ))
+    matched.ok_or_else(|| match target_table {
+        Some(t) => anyhow::anyhow!(
+            "schema file {} does not declare a CREATE TABLE for '{t}' (derived from the \
+             input's own directory name) — table(s) present: {}",
+            schema_path.display(),
+            if all_tables.is_empty() {
+                "(none)".to_string()
+            } else {
+                all_tables.join(", ")
+            }
+        ),
+        None => anyhow::anyhow!(
+            "No CREATE TABLE statement found in {}",
+            schema_path.display()
+        ),
+    })
 }
 
 /// Build a [`UdtRegistry`] from the `CREATE TYPE` statements in a CQL schema
@@ -827,5 +925,108 @@ mod issue_929_tests {
         write!(f, "CREATE TABLE test_ks.t (id int PRIMARY KEY, n text);\n").expect("write");
         let registry = udt_registry_from_schema_file(f.path(), "test_ks");
         assert_eq!(registry.total_udts(), 0);
+    }
+
+    /// roborev, issue #4196, round-13 Medium finding: `load_compaction_table_schema_for_table`
+    /// with `target_table: Some(...)` selects the MATCHING `CREATE TABLE` out of a
+    /// multi-table file rather than always the first, and is case-insensitive.
+    #[test]
+    fn selects_named_table_from_multi_table_schema_file() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".cql")
+            .tempfile()
+            .expect("temp file");
+        write!(
+            f,
+            "CREATE KEYSPACE test_ks WITH replication = {{'class':'SimpleStrategy'}};\n\
+             CREATE TABLE test_ks.first_table (id int PRIMARY KEY, a text);\n\
+             CREATE TABLE test_ks.second_table (id int PRIMARY KEY, b text);\n"
+        )
+        .expect("write schema");
+
+        let schema = load_compaction_table_schema_for_table(f.path(), Some("Second_Table"))
+            .expect("schema parses and matches case-insensitively");
+        assert_eq!(schema.table, "second_table");
+        assert!(schema.columns.iter().any(|c| c.name == "b"));
+        assert!(!schema.columns.iter().any(|c| c.name == "a"));
+    }
+
+    /// Selecting a table absent from the file fails closed and names the tables
+    /// that ARE present, rather than silently returning the first one.
+    #[test]
+    fn selecting_absent_table_fails_closed_naming_present_tables() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".cql")
+            .tempfile()
+            .expect("temp file");
+        write!(
+            f,
+            "CREATE TABLE test_ks.first_table (id int PRIMARY KEY, a text);\n"
+        )
+        .expect("write schema");
+
+        let err = load_compaction_table_schema_for_table(f.path(), Some("missing_table"))
+            .expect_err("no matching table");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("missing_table"), "{msg}");
+        assert!(msg.contains("first_table"), "{msg}");
+    }
+
+    /// roborev, issue #4196, round-13 Medium finding: a JSON schema file must
+    /// still resolve through `load_compaction_table_schema_for_table` (the
+    /// `--schema x.json salvage --table t` path) even with `target_table:
+    /// Some(...)` — JSON has no multi-statement concept, so the selector is a
+    /// pass-through to `load_schema_file`, not a hard failure.
+    #[test]
+    fn json_schema_file_resolves_regardless_of_target_table() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".json")
+            .tempfile()
+            .expect("temp file");
+        write!(
+            f,
+            r#"{{
+                "keyspace": "test_ks",
+                "table": "t",
+                "columns": {{
+                    "id": {{ "type": "int", "kind": "PartitionKey" }},
+                    "n": {{ "type": "text", "kind": "Regular" }}
+                }}
+            }}"#
+        )
+        .expect("write schema");
+
+        let schema = load_compaction_table_schema_for_table(f.path(), Some("t"))
+            .expect("JSON schema resolves even with a target_table filter");
+        assert_eq!(schema.keyspace, "test_ks");
+        assert_eq!(schema.table, "t");
+    }
+
+    /// roborev, issue #4196, round-13 Low finding: `CREATE KEYSPACE` name
+    /// extraction must use `to_ascii_lowercase()` (byte-length-preserving), not
+    /// `to_lowercase()`, so a non-ASCII comment/identifier before the KEYSPACE
+    /// keyword can't produce a byte offset that lands mid-character when sliced
+    /// out of the ORIGINAL (non-lowercased) statement.
+    #[test]
+    fn create_keyspace_with_non_ascii_prefix_does_not_panic_or_misparse() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".cql")
+            .tempfile()
+            .expect("temp file");
+        // U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE) lowercases to a 2-CODEPOINT,
+        // 3-byte sequence ("i" + combining dot) under full Unicode case folding —
+        // `to_lowercase()` would grow the byte length here; `to_ascii_lowercase()`
+        // leaves the non-ASCII bytes untouched, keeping offsets valid.
+        write!(
+            f,
+            "-- İ note\nCREATE KEYSPACE test_ks WITH replication = {{'class':'SimpleStrategy'}};\n\
+             CREATE TABLE test_ks.t (id int PRIMARY KEY, n text);\n"
+        )
+        .expect("write schema");
+
+        let schema = load_compaction_table_schema(f.path())
+            .expect("schema parses without panicking on the non-ASCII comment");
+        assert_eq!(schema.keyspace, "test_ks");
+        assert_eq!(schema.table, "t");
     }
 }

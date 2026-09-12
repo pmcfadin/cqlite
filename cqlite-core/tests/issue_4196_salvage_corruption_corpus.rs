@@ -1,0 +1,1020 @@
+//! Issue #4196 (spec R2, R4) — for a damaged input the set of lost partitions
+//! equals the set the format itself says is untrustworthy, and a damaged
+//! BOUNDARY SOURCE refuses rather than resyncs.
+//!
+//! Split (round-12, campsite rule / epic #1135) into TWO targets: this file
+//! keeps the corruption-corpus refusal/classification cases (chunk-CRC
+//! flip, damaged boundary source, `ComponentUnreadable` refusals, and the
+//! `LossClass::KeyMismatch` key-swap test);
+//! `issue_4196_salvage_oom_bounds.rs` holds the OOM/allocation-bound
+//! regression tests and the `LossClass::Truncated` past-EOF case that
+//! shares its code path. Shared fixture-resolution helpers live in
+//! `tests/support/salvage_corpus.rs`, used by BOTH targets.
+//!
+//! # Oracle (design D6)
+//!
+//! `test-data/datasets/corruption/test_comp_corrupt/*` — real Cassandra 5.0
+//! fixtures with exactly ONE component byte-flipped/truncated, captured
+//! alongside Cassandra's OWN `sstableverify` verdict
+//! (`corruption-manifest.yml`, issue #1236/#999). The expected loss set is
+//! computed HERE, independently, from the CLEAN source's `Index.db` entries
+//! (`corrupt_byte_fixture::index_partition_positions`, an on-disk-format
+//! walk, not code under test) and `CompressionInfo.db`'s chunk table — never
+//! from `salvage_sstable`'s own behaviour.
+//!
+//! Skip-clean when the corruption corpus is absent; `CQLITE_REQUIRE_FIXTURES=1`
+//! (#1094 doctrine) turns that into a hard failure.
+
+// `not(tombstones)`: see the matching note in
+// `issue_4196_salvage_healthy_parity.rs`.
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
+
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+use cqlite_core::storage::sstable::compression_info::CompressionInfo;
+use cqlite_core::storage::write_engine::salvage::{
+    salvage_sstable, LossClass, RefusalReason, SalvageOptions, SalvageReport,
+};
+use tempfile::TempDir;
+
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+#[path = "support/corrupt_byte_fixture.rs"]
+mod fixture;
+#[path = "support/salvage_corpus.rs"]
+mod salvage_corpus;
+
+use salvage_corpus::{
+    candidate_base_roots, no_data_db_anywhere, resolve_root_with_corpus_fixture, single_data_db,
+    skip_or_require, split_big_index_entries, table_schema, CLEAN_KEYSPACE, CLEAN_TABLE_DIR,
+    CORRUPT_KEYSPACE,
+};
+
+fn hex_of(b: &[u8]) -> String {
+    hex::encode(b)
+}
+
+/// The chunk index (compressed-domain `CompressionInfo.chunk_offsets`)
+/// containing `compressed_byte_offset`.
+fn compressed_chunk_index(chunk_offsets: &[u64], compressed_byte_offset: u64) -> usize {
+    chunk_offsets
+        .iter()
+        .rposition(|&off| off <= compressed_byte_offset)
+        .expect("byte offset precedes every chunk start")
+}
+
+/// R2.1 — compressed chunk CRC flip: the lost partition set is exactly the
+/// partitions whose decompressed-domain offset falls in the flipped chunk.
+#[tokio::test]
+async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
+    let Some(root) = resolve_root_with_corpus_fixture("data_db_bit_flip") else {
+        skip_or_require(
+            "data_db_bit_flip corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/data_db_bit_flip; searched {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    };
+    let clean_dir = root
+        .join("sstables")
+        .join(CLEAN_KEYSPACE)
+        .join(CLEAN_TABLE_DIR);
+    let corrupt_dir = root
+        .join("corruption")
+        .join(CORRUPT_KEYSPACE)
+        .join("data_db_bit_flip");
+
+    // Independent expected-loss computation (design D6): CompressionInfo.db's
+    // chunk table + Index.db's partition positions, from the CLEAN source.
+    let ci_bytes = std::fs::read(clean_dir.join("nb-1-big-CompressionInfo.db"))
+        .expect("read CompressionInfo.db");
+    let ci = CompressionInfo::parse(&ci_bytes).expect("parse CompressionInfo.db");
+    // PINNED constant, not derived on this run: `corruption-manifest.yml`'s
+    // `data_db_bit_flip` entry records `byte_offset: 64` for the
+    // ORIGINAL/CORRUPTED bytes it captured (`original_sha256`/
+    // `corrupted_sha256`) — a fact about THAT committed corpus generation,
+    // not something this test parses at run time. If the corpus is ever
+    // regenerated with a different mutation site, this constant (and the
+    // manifest's `byte_offset` field) must be updated together; a
+    // divergence would be caught by `expected_lost` coming back empty below
+    // (the assertion immediately following), not silently.
+    let manifest_byte_offset: u64 = 64;
+    let bad_chunk = compressed_chunk_index(&ci.chunk_offsets, manifest_byte_offset);
+
+    let mut clean_positions = fixture::index_partition_positions(&clean_dir);
+    clean_positions.sort_by_key(|(_, pos)| *pos);
+    // Range-based expected-loss derivation (roborev, issue #4196, round-5
+    // Low finding 6): a partition is lost if its BYTE RANGE intersects the
+    // bad chunk, not merely if its START offset does — matching
+    // `chunks_for_range`'s own intersection rule (`chunks.rs`), which is
+    // what `salvage_sstable` actually applies. A start-offset-only
+    // membership test happens to agree with range intersection on THIS
+    // fixture (exactly one partition) but would silently diverge on a
+    // multi-partition fixture where a partition starts in one chunk and
+    // extends into the bad one.
+    let chunk_length = ci.chunk_length as usize;
+    let mut expected_lost: BTreeSet<String> = BTreeSet::new();
+    for i in 0..clean_positions.len() {
+        let (key, pos) = &clean_positions[i];
+        let end = clean_positions
+            .get(i + 1)
+            .map(|(_, next_pos)| *next_pos)
+            .unwrap_or(ci.data_length as usize);
+        let start_chunk = pos / chunk_length;
+        let last_byte = end.saturating_sub(1).max(*pos);
+        let end_chunk = last_byte / chunk_length;
+        if (start_chunk..=end_chunk).contains(&bad_chunk) {
+            expected_lost.insert(hex_of(key));
+        }
+    }
+    assert!(
+        !expected_lost.is_empty(),
+        "expected-loss computation found zero intersecting partitions for chunk {bad_chunk} — \
+         the fixture or the derivation changed"
+    );
+
+    let schema = table_schema();
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+    let temp = TempDir::new().expect("tempdir");
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage must not error on a damaged Data.db (a classified loss, not an Err)");
+
+    // This corpus fixture (`test_comp.lz4_table`) happens to hold exactly ONE
+    // partition, whose decompressed offset (0) falls inside the flipped
+    // chunk — so the independently-derived expected-loss set can be EITHER a
+    // proper subset (partial recovery, spec R2.1) or the WHOLE partition set
+    // (total loss, spec R5.2's "nothing decodable refuses"), and the correct
+    // refusal state follows from which. Both are asserted here rather than
+    // assuming the corpus always demonstrates the partial case.
+    if expected_lost.len() == clean_positions.len() {
+        let refusal = report
+            .refused
+            .as_ref()
+            .expect("every partition lost must REFUSE (spec R5.2)");
+        assert_eq!(refusal.reason, RefusalReason::NothingDecodable);
+    } else {
+        assert!(
+            report.refused.is_none(),
+            "a partial chunk-CRC loss must not REFUSE; got {:?}",
+            report.refused
+        );
+    }
+    assert_eq!(
+        report.partitions.total,
+        clean_positions.len(),
+        "boundary enumeration total must equal the clean Index.db's partition count \
+         (Index.db is untouched by this fixture)"
+    );
+
+    let actual_lost: BTreeSet<String> = report.losses.iter().map(|l| l.key_hex.clone()).collect();
+    assert_eq!(
+        actual_lost, expected_lost,
+        "lost-partition key set differs from the independently-derived chunk-intersection set"
+    );
+    for loss in &report.losses {
+        assert_eq!(
+            loss.class,
+            LossClass::ChunkCrc,
+            "every loss from a chunk-CRC-only corruption must classify chunk-crc; got {:?} for \
+             key {}",
+            loss.class,
+            loss.key_hex
+        );
+    }
+    assert_eq!(
+        report.partitions.recovered,
+        report.partitions.total - report.losses.len()
+    );
+
+    assert!(
+        report
+            .component_findings
+            .iter()
+            .any(|f| f.class == "ChunkDecompressionError"),
+        "component_findings must name ChunkDecompressionError; got {:?}",
+        report.component_findings
+    );
+
+    eprintln!(
+        "[issue_4196] data_db_bit_flip: {} of {} partition(s) lost to chunk {bad_chunk} \
+         (independently derived), matching salvage's own loss set exactly.",
+        report.losses.len(),
+        report.partitions.total
+    );
+}
+
+/// R2.1 (roborev, issue #4196, round-13 Medium finding: NO test anywhere in
+/// this change exercised the UNCOMPRESSED bad-chunk path — the only format
+/// CQLite's own production writer emits, issue #1406) — an uncompressed
+/// `Data.db` with one real chunk-CRC mismatch (a byte flipped inside chunk
+/// 0, `CRC.db` left intact) loses exactly the partitions whose byte range
+/// intersects the bad chunk, classified `LossClass::ChunkCrc`, with an
+/// `UncompressedChunkCrcMismatch` component finding — mirroring the
+/// compressed case above, but exercising `uncompressed_chunk_preflight`
+/// (the `chunk_index`/`Index.db`-offset domain-alignment assumption its own
+/// doc calls out as the risky part) against a REAL CRC mismatch rather than
+/// only an absent/unopenable `CRC.db`.
+///
+/// Fixture built dynamically (no committed corpus fixture existed for this
+/// path) by copying the clean `test_comp.uncompressed_table` source into a
+/// tempdir and flipping one byte, mirroring
+/// `issue_1396_uncompressed_crc_verify.rs::plain_scan_over_chunk0_flipped_uncompressed_fixture_fails_fast`'s
+/// established construction.
+///
+/// # Why this case is NOT fail-closed, unlike its siblings (issue #3220)
+///
+/// The C-audit on issue #4196 asked for this case to become `must_run` on the
+/// grounds that `test_comp.uncompressed_table` is a committed fixture. Its
+/// `-Data.db` is indeed git-tracked — but this case ALSO needs
+/// `nb-1-big-CRC.db`, and that component is **not** committed:
+/// `.gitignore:180`'s `*.db` covers the whole corpus and only individually
+/// force-added files are tracked, so
+/// `git ls-files test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca70…/`
+/// lists nine files and no `CRC.db` (contrast
+/// `test-data/datasets/corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-CRC.db`,
+/// which IS tracked). A fresh checkout therefore cannot run this case at all, so
+/// making it unconditionally mandatory would red every unfetched checkout —
+/// exactly the false failure the fail-closed rule is not for. It stays skippable
+/// (hard under `CQLITE_REQUIRE_FIXTURES=1`, which the gate's dataset lanes set),
+/// and the skip below NAMES WHICH of the two causes fired rather than blaming a
+/// missing table for a missing component. Force-adding that 16-byte `CRC.db`
+/// would let this become `must_run`; that is a test-data change with its own
+/// parity-manifest/report consequences, so it is left as follow-up rather than
+/// smuggled into a review-fix round.
+#[tokio::test]
+async fn uncompressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
+    let Some(root) = candidate_base_roots()
+        .into_iter()
+        .find(|root| salvage_corpus::clean_uncompressed_table_dir(root).is_some())
+    else {
+        // Distinguish "the table is absent" from "the table is there but its
+        // un-committed CRC.db is not" — `clean_uncompressed_table_dir` requires
+        // both, and conflating them sends the reader to the wrong remedy.
+        let roots_with_table: Vec<PathBuf> = candidate_base_roots()
+            .into_iter()
+            .filter(|root| {
+                std::fs::read_dir(root.join("sstables").join(CLEAN_KEYSPACE))
+                    .map(|rd| {
+                        rd.flatten().any(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .starts_with("uncompressed_table-")
+                                && e.path().is_dir()
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        let reason = if roots_with_table.is_empty() {
+            format!(
+                "no candidate root carries sstables/{CLEAN_KEYSPACE}/uncompressed_table-* at all; \
+                 searched {:?}",
+                candidate_base_roots()
+            )
+        } else {
+            format!(
+                "sstables/{CLEAN_KEYSPACE}/uncompressed_table-* IS present under {roots_with_table:?} \
+                 but carries no nb-1-big-CRC.db, which this case needs and which is NOT git-tracked \
+                 (.gitignore's *.db; never force-added) — only a FETCHED corpus supplies it. \
+                 Remedy: bash test-data/scripts/fetch-datasets.sh, then export the \
+                 CQLITE_DATASETS_ROOT it prints"
+            )
+        };
+        skip_or_require(
+            "clean test_comp.uncompressed_table source (with CRC.db)",
+            &reason,
+        );
+        return;
+    };
+    let clean_dir =
+        salvage_corpus::clean_uncompressed_table_dir(&root).expect("checked present above");
+
+    // Independent expected-loss computation (design D6): the clean source's
+    // OWN Index.db entries + the REAL `CRC.db`-declared chunk size — never
+    // from `salvage_sstable`'s own behaviour.
+    let clean_crc_bytes = std::fs::read(clean_dir.join("nb-1-big-CRC.db")).expect("read CRC.db");
+    let chunk_size = u32::from_be_bytes([
+        clean_crc_bytes[0],
+        clean_crc_bytes[1],
+        clean_crc_bytes[2],
+        clean_crc_bytes[3],
+    ]) as usize;
+    let mut clean_positions = fixture::index_partition_positions(&clean_dir);
+    clean_positions.sort_by_key(|(_, pos)| *pos);
+    let clean_data_len = std::fs::metadata(clean_dir.join("nb-1-big-Data.db"))
+        .expect("stat clean Data.db")
+        .len() as usize;
+
+    // Flip one byte inside chunk 0 ([0, chunk_size)) but well past the
+    // parsed header buffer, matching issue_1396's own established offset —
+    // `open()` must still succeed; the mismatch surfaces on salvage.
+    let flip_at = 40_000usize;
+    assert!(
+        flip_at < chunk_size,
+        "flip offset must stay inside chunk 0 for this test's expected-loss derivation to hold"
+    );
+
+    let bad_chunk = 0usize;
+    let mut expected_lost: BTreeSet<String> = BTreeSet::new();
+    for i in 0..clean_positions.len() {
+        let (key, pos) = &clean_positions[i];
+        let end = clean_positions
+            .get(i + 1)
+            .map(|(_, next_pos)| *next_pos)
+            .unwrap_or(clean_data_len);
+        let start_chunk = pos / chunk_size;
+        let last_byte = end.saturating_sub(1).max(*pos);
+        let end_chunk = last_byte / chunk_size;
+        if (start_chunk..=end_chunk).contains(&bad_chunk) {
+            expected_lost.insert(hex_of(key));
+        }
+    }
+    assert!(
+        !expected_lost.is_empty(),
+        "expected-loss computation found zero intersecting partitions for chunk 0 — the fixture \
+         or the derivation changed"
+    );
+
+    let schema = salvage_corpus::table_schema_for("uncompressed_table");
+    let temp_src = TempDir::new().expect("tempdir");
+    for entry in std::fs::read_dir(&clean_dir)
+        .expect("read clean dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if name_str.ends_with(".db.jsonl") || name_str.ends_with(".db.txt") {
+            continue; // drop bulky/derived sidecars salvage never reads
+        }
+        std::fs::copy(entry.path(), temp_src.path().join(&name_str)).expect("copy component");
+    }
+    let corrupt_data_db = single_data_db(temp_src.path());
+    let mut bytes = std::fs::read(&corrupt_data_db).expect("read Data.db");
+    bytes[flip_at] ^= 0xFF;
+    std::fs::write(&corrupt_data_db, &bytes).expect("write chunk-0-flipped Data.db");
+
+    // roborev, issue #4196, round-14 Low finding: the `TempDir` must be
+    // bound to a local FIRST — the previous one-liner dropped it at the end
+    // of its own statement (a temporary), removing the directory before
+    // `out_root` was ever used; `SSTableWriter` recreates it via
+    // `create_dir_all`, but nothing then cleans it up (orphaned under
+    // `/tmp` on every run, unlike this test's siblings, which all bind
+    // their `TempDir` to a local).
+    let out_temp = TempDir::new().expect("tempdir");
+    let out_root = out_temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage must not error on a damaged Data.db (a classified loss, not an Err)");
+
+    assert_eq!(
+        report.partitions.total,
+        clean_positions.len(),
+        "boundary enumeration total must equal the clean Index.db's partition count \
+         (Index.db is untouched by this fixture)"
+    );
+
+    if expected_lost.len() == clean_positions.len() {
+        let refusal = report
+            .refused
+            .as_ref()
+            .expect("every partition lost must REFUSE (spec R5.2)");
+        assert_eq!(refusal.reason, RefusalReason::NothingDecodable);
+    } else {
+        assert!(
+            report.refused.is_none(),
+            "a partial chunk-CRC loss must not REFUSE; got {:?}",
+            report.refused
+        );
+    }
+
+    let actual_lost: BTreeSet<String> = report.losses.iter().map(|l| l.key_hex.clone()).collect();
+    assert_eq!(
+        actual_lost, expected_lost,
+        "lost-partition key set differs from the independently-derived chunk-intersection set"
+    );
+    for loss in &report.losses {
+        assert_eq!(
+            loss.class,
+            LossClass::ChunkCrc,
+            "every loss from a chunk-CRC-only corruption must classify chunk-crc; got {:?} for \
+             key {}",
+            loss.class,
+            loss.key_hex
+        );
+    }
+
+    assert!(
+        report
+            .component_findings
+            .iter()
+            .any(|f| f.class == "UncompressedChunkCrcMismatch"),
+        "component_findings must name UncompressedChunkCrcMismatch; got {:?}",
+        report.component_findings
+    );
+
+    eprintln!(
+        "[issue_4196] uncompressed_chunk_crc_flip: {} of {} partition(s) lost to chunk 0 \
+         (independently derived), matching salvage's own loss set exactly.",
+        report.losses.len(),
+        report.partitions.total
+    );
+}
+
+/// R4.1 — a damaged boundary source (`Index.db`) refuses; no `Data.db` is
+/// written under `--out`.
+#[tokio::test]
+async fn damaged_index_db_refuses_with_the_rebuild_remedy() {
+    let Some(root) = resolve_root_with_corpus_fixture("index_db_bit_flip_big") else {
+        skip_or_require(
+            "index_db_bit_flip_big corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/index_db_bit_flip_big; searched {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    };
+    let corrupt_dir = root
+        .join("corruption")
+        .join(CORRUPT_KEYSPACE)
+        .join("index_db_bit_flip_big");
+
+    let schema = table_schema();
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+    let temp = TempDir::new().expect("tempdir");
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage must not error on a damaged boundary source (a Refusal, not an Err)");
+
+    let refusal = report
+        .refused
+        .as_ref()
+        .expect("a damaged Index.db must produce a refusal");
+    assert_eq!(refusal.reason, RefusalReason::BoundarySourceUnreadable);
+    assert!(
+        refusal.remedy.contains("rebuild"),
+        "remedy must name `rebuild`; got {:?}",
+        refusal.remedy
+    );
+    assert!(
+        no_data_db_anywhere(&out_root),
+        "--out must contain no Data.db after a refusal"
+    );
+
+    eprintln!("[issue_4196] index_db_bit_flip_big: salvage refused as expected ({refusal:?}).");
+}
+
+/// Roborev, issue #4196 (batched finding b) — a component OTHER than the
+/// boundary source being unreadable (`CompressionInfo.db`, `Statistics.db`)
+/// must produce a classified [`RefusalReason::ComponentUnreadable`] with a
+/// remedy, not a hard `Err` `salvage_sstable` callers previously had to
+/// `?`-propagate (which meant NO manifest was ever produced for one of the
+/// likeliest damage modes this tool exists for). Shared by both fixtures
+/// below: assert the classified-refusal shape and that `--out` holds no
+/// `Data.db`, WITHOUT asserting a specific remedy component name (design D3
+/// does not specify one — only that the reason and remedy are both named).
+async fn assert_component_unreadable_refusal(
+    corrupt_fixture: &str,
+    out_root: &std::path::Path,
+) -> SalvageReport {
+    let root = resolve_root_with_corpus_fixture(corrupt_fixture)
+        .unwrap_or_else(|| panic!("caller must have already skip-checked {corrupt_fixture}"));
+    let corrupt_dir = root
+        .join("corruption")
+        .join(CORRUPT_KEYSPACE)
+        .join(corrupt_fixture);
+    let schema = table_schema();
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a damaged {corrupt_fixture} component (a \
+                 classified Refusal, not an Err): {e:#}"
+        )
+    });
+
+    let refusal = report.refused.as_ref().unwrap_or_else(|| {
+        panic!("a damaged non-boundary component must still produce a refusal; report={report:?}")
+    });
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::ComponentUnreadable,
+        "expected ComponentUnreadable (the boundary source itself is untouched by this fixture); \
+         got {:?}",
+        refusal.reason
+    );
+    assert!(
+        !refusal.remedy.is_empty(),
+        "remedy must be named, not empty"
+    );
+    assert!(
+        no_data_db_anywhere(out_root),
+        "--out must contain no Data.db after a refusal"
+    );
+    report
+}
+
+/// A corrupt `CompressionInfo.db` (bad chunk-table offset) is a component
+/// failure salvage meets while OPENING the reader (compressed-input chunk
+/// metadata is read eagerly) — must classify, not hard-error.
+#[tokio::test]
+async fn damaged_compression_info_db_refuses_as_classified() {
+    if resolve_root_with_corpus_fixture("compression_info_bad_offset").is_none() {
+        skip_or_require(
+            "compression_info_bad_offset corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/compression_info_bad_offset; searched {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    }
+    let temp = TempDir::new().expect("tempdir");
+    let out_root = temp.path().join("out");
+    let report =
+        assert_component_unreadable_refusal("compression_info_bad_offset", &out_root).await;
+    // Roborev, issue #4196, round-9 Low finding: `open_reader` (this
+    // fixture's failure point) fires BEFORE `report.partitions.total` is
+    // ever set — the counterpart to `damaged_statistics_db_refuses_as_classified`'s
+    // assertion below, proving BOTH directions of the `attempted` fix
+    // against real fixtures, not just the abstract reasoning in its doc.
+    assert!(
+        !report.attempted,
+        "open_reader fires BEFORE the per-partition loop's report.attempted = true; got {:?}",
+        report
+    );
+    let text = report.render_text();
+    assert!(
+        text.contains("NOT MEASURED"),
+        "attempted=false must render NOT MEASURED, never the (zero, unmeasured) partition \
+         numbers; got:\n{text}"
+    );
+    eprintln!(
+        "[issue_4196] compression_info_bad_offset: salvage refused as expected ({report:?})."
+    );
+}
+
+/// A corrupt `Statistics.db` header is a component failure salvage meets
+/// while classifying the input's repair state (`classify_inputs`) — must
+/// classify, not hard-error.
+#[tokio::test]
+async fn damaged_statistics_db_refuses_as_classified() {
+    if resolve_root_with_corpus_fixture("statistics_db_header_damage").is_none() {
+        skip_or_require(
+            "statistics_db_header_damage corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/statistics_db_header_damage; searched {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    }
+    let temp = TempDir::new().expect("tempdir");
+    let out_root = temp.path().join("out");
+    let report =
+        assert_component_unreadable_refusal("statistics_db_header_damage", &out_root).await;
+    // Roborev, issue #4196, round-9 Low finding: `classify_inputs` (this
+    // fixture's failure point) fires AFTER `report.partitions.total` is
+    // already set (boundary enumeration succeeded) — round-8's
+    // `partitions.total > 0` heuristic read this as "measured" and printed
+    // the (misleadingly zero-but-real-looking) partition numbers — but the
+    // per-partition loop itself NEVER RAN (`classify_inputs` fires BEFORE
+    // `report.attempted = true`, which sits immediately before the loop).
+    // MEASURED (empirically, this round): `partitions.total == 1` here
+    // (boundary enumeration DID succeed) while `attempted == false` (the
+    // loop never started) — exactly the divergence that made round-8's
+    // heuristic wrong, and exactly what `attempted` is for.
+    assert_eq!(
+        report.partitions.total, 1,
+        "boundary enumeration must have succeeded (this fixture's corruption is in \
+         Statistics.db, not Index.db); got {:?}",
+        report
+    );
+    assert!(
+        !report.attempted,
+        "classify_inputs fires BEFORE the per-partition loop's report.attempted = true, even \
+         though partitions.total is already populated; got {:?}",
+        report
+    );
+    let text = report.render_text();
+    assert!(
+        text.contains("NOT MEASURED"),
+        "attempted=false must render NOT MEASURED even though partitions.total > 0 — this is \
+         the EXACT case round-8's `partitions.total > 0` heuristic got wrong; got:\n{text}"
+    );
+    eprintln!(
+        "[issue_4196] statistics_db_header_damage: salvage refused as expected ({report:?})."
+    );
+}
+
+/// Roborev, issue #4196 (round-4 Medium finding 3) — the SAME
+/// `ComponentUnreadable` classification for a corrupt `CRC.db` (the
+/// uncompressed sibling of `CompressionInfo.db`/`Statistics.db` above): the
+/// committed corruption corpus has no dedicated `CRC.db`-corruption fixture
+/// (`digest_crc32_mismatch` is a DIFFERENT component, the whole-file
+/// `Digest.crc32`, not the per-chunk `CRC.db` sidecar `uncompressed_chunk_preflight`
+/// reads), so this test synthesizes the corruption itself: a healthy
+/// `test_basic.uncompressed_table` generation copied verbatim except its
+/// `CRC.db`, replaced with 2 garbage bytes — `CrcDb::open` rejects anything
+/// under its mandatory 4-byte chunk-size header with a typed
+/// `Error::Corruption`, guaranteed regardless of chunk-size/content.
+#[tokio::test]
+async fn damaged_crc_db_refuses_as_classified() {
+    const KEYSPACE: &str = "test_basic";
+    const TABLE_NAME: &str = "uncompressed_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "uncompressed_table fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path = datasets_root::schema_path("basic-types.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .expect("CREATE TABLE statement");
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-CRC.db") {
+            // The corruption under test: too short for CrcDb::open's
+            // mandatory 4-byte chunk-size header.
+            std::fs::write(corrupt_dir.join(&name), [0xff, 0x00]).expect("write corrupt CRC.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a damaged CRC.db (a classified Refusal, not an \
+                 Err): {e:#}"
+        )
+    });
+    let refusal = report.refused.as_ref().unwrap_or_else(|| {
+        panic!("a damaged CRC.db must still produce a refusal; report={report:?}")
+    });
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::ComponentUnreadable,
+        "expected ComponentUnreadable; got {:?}",
+        refusal.reason
+    );
+    assert!(
+        !refusal.remedy.is_empty(),
+        "remedy must be named, not empty"
+    );
+    assert!(
+        no_data_db_anywhere(&out_root),
+        "--out must contain no Data.db after a refusal"
+    );
+    eprintln!("[issue_4196] damaged CRC.db: salvage refused as expected ({report:?}).");
+}
+/// Roborev, issue #4196 (round-9, spec R4.2 — `LossClass::KeyMismatch` had
+/// no test anywhere in the change).
+///
+/// Spec R4.2's literal wording ("a temp copy of a healthy BIG fixture with
+/// ONE Index.db entry's POSITION pointed at a DIFFERENT partition's
+/// header") describes redirecting an entry's `data_offset`. That construction
+/// is geometrically IMPOSSIBLE against a well-formed, `check_strictly_ascending`-
+/// enforced boundary source (`boundaries.rs`): that guard requires the WHOLE
+/// entry sequence strictly increasing in `data_offset`, so no two entries can
+/// EVER share a value, and any single entry's redirected offset is bounded
+/// by its OWN immediate neighbours — i.e. it can only be moved somewhere
+/// inside the numeric gap `(entries[i-1].data_offset, entries[i+1].data_offset)`,
+/// which is EXACTLY where partition `i`'s own true header already lives, and
+/// nowhere else. There is no position a redirected offset can occupy that
+/// both satisfies strict ascending AND lands on a DIFFERENT, separately-
+/// enumerated partition's real header. (Checked at both the first and last
+/// entry too: entry 0 has no lower-bound neighbour but is upper-bounded by
+/// entry 1 — nothing precedes partition 0 in the data section, so that gap
+/// contains only partition 0's own header; the last entry has no upper
+/// bound but IS lower-bounded by its predecessor, which — being the
+/// SECOND-TO-LAST entry — leaves no smaller, already-enumerated partition's
+/// header still reachable above it either.)
+///
+/// This test instead achieves the IDENTICAL decoder-observable property the
+/// spec scenario exists to exercise — `decode_partition_at_offset_for_salvage`
+/// finds a key AT THE GIVEN, VALID, in-range OFFSET that disagrees with the
+/// boundary source's DECLARED key for that slot — via the functionally
+/// equivalent construction of swapping two entries' KEY portions instead
+/// (offsets are NEVER touched, so `check_strictly_ascending` sees the
+/// UNMODIFIED, still-valid clean sequence and never refuses). Entry 0 and
+/// entry 1's `[key_len][key]` byte spans are swapped in a copy of
+/// `test_basic.multi_partition_table`'s Index.db (a real, ~90-partition
+/// compressed BIG fixture, `basic-types.cql`); `Data.db`/`CompressionInfo.db`
+/// stay byte-for-byte unchanged. Both swapped slots decode their TRUE
+/// partition (offsets untouched) against the WRONG declared key -> BOTH
+/// classify `key-mismatch`. A THIRD, entirely untouched entry (entry 2)
+/// proves the spec's "the [other] partition is still recovered from its own
+/// index entry exactly once" property: an unrelated boundary-source
+/// corruption does not disturb a partition it never touched.
+#[tokio::test]
+async fn swapped_index_entry_keys_classify_key_mismatch() {
+    const KEYSPACE: &str = "test_basic";
+    const TABLE_NAME: &str = "multi_partition_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "multi_partition_table fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path = datasets_root::schema_path("basic-types.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .expect("CREATE TABLE statement");
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let clean_data_db = single_data_db(&fixture_dir);
+    let clean_index_db = fixture_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-Index.db"),
+    );
+    let clean_index_bytes = std::fs::read(&clean_index_db).expect("read clean Index.db");
+    let entries = split_big_index_entries(&clean_index_bytes);
+    assert!(
+        entries.len() >= 3,
+        "{KEYSPACE}.{TABLE_NAME}: need at least 3 partitions (two to swap, one untouched \
+         control); found {}",
+        entries.len()
+    );
+    let (e0_start, e0_key_end, e0_end) = entries[0];
+    let (e1_start, e1_key_end, e1_end) = entries[1];
+    assert_eq!(
+        e0_end, e1_start,
+        "entries[0] and entries[1] must be adjacent for this splice to be a pure key swap"
+    );
+
+    let mut corrupt_index_bytes = Vec::with_capacity(clean_index_bytes.len());
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[..e0_start]);
+    // entry 0's slot: entry 1's key + entry 0's own (unchanged) offset/promoted-index.
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e1_start..e1_key_end]);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e0_key_end..e0_end]);
+    // entry 1's slot: entry 0's key + entry 1's own (unchanged) offset/promoted-index.
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e0_start..e0_key_end]);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e1_key_end..e1_end]);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e1_end..]);
+    assert_eq!(
+        corrupt_index_bytes.len(),
+        clean_index_bytes.len(),
+        "a pure key swap must not change the file's total length"
+    );
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-Index.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_index_bytes)
+                .expect("write corrupted Index.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!("salvage must not hard-error on swapped Index.db keys (a Loss, not an Err): {e:#}")
+    });
+
+    let total = entries.len();
+    assert_eq!(
+        report.partitions.total, total,
+        "expected the untouched partition count; got {}",
+        report.partitions.total
+    );
+    assert_eq!(
+        report.losses.len(),
+        2,
+        "expected exactly the two swapped slots as losses; got {:?}",
+        report.losses
+    );
+    for loss in &report.losses {
+        assert_eq!(
+            loss.class,
+            LossClass::KeyMismatch,
+            "expected LossClass::KeyMismatch for the swapped slots; got {:?}",
+            loss
+        );
+    }
+    // R4.2's "the [other] partition is still recovered from its own index
+    // entry exactly once": every partition OTHER than the two swapped slots
+    // must be untouched, so `recovered` accounts for exactly `total - 2`.
+    assert_eq!(
+        report.partitions.recovered,
+        total - 2,
+        "every UNSWAPPED partition must still recover cleanly from its own, untouched entry"
+    );
+    assert!(
+        report.refused.is_none(),
+        "a partial loss on 2 of {total} partitions must not refuse the whole generation; got \
+         {:?}",
+        report.refused
+    );
+    eprintln!(
+        "[issue_4196] swapped Index.db entry keys: {} of {total} partitions classified \
+         key-mismatch as expected; {} recovered.",
+        report.losses.len(),
+        report.partitions.recovered
+    );
+}
+
+/// Roborev, issue #4196 (round-12 Low finding): every corruption/refusal
+/// case in this corpus file is BIG (`Index.db`/`CompressionInfo.db`/
+/// `Statistics.db`/`CRC.db`) — `bti_boundaries`'s OWN refusal paths
+/// (missing `Rows.db`, truncated inline key length, an overrunning
+/// declared `key_length`, a corrupt trie root) were exercised only by the
+/// healthy-path test (`salvage_of_healthy_bti_sstable_preserves_every_row`).
+///
+/// This test corrupts a REAL BTI fixture (`test_da.multiclustering_table`)
+/// by REMOVING `Rows.db` entirely while `Partitions.db`'s trie still
+/// references `RowsOffset` (wide-partition) leaves that need it —
+/// `bti_boundaries`'s own explicit check ("Rows.db is missing but
+/// Partitions.db references a RowsOffset leaf") must refuse
+/// `boundary-source-unreadable` with the `rebuild` remedy, exactly like the
+/// BIG `damaged_index_db_refuses_with_the_rebuild_remedy` case above, never
+/// hard-error or silently proceed as if the table were narrow-only.
+#[tokio::test]
+async fn damaged_bti_rows_db_missing_refuses_with_the_rebuild_remedy() {
+    const KEYSPACE: &str = "test_da";
+    const TABLE_NAME: &str = "multiclustering_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "multiclustering_table BTI fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path =
+        datasets_root::schema_path("multiclustering-table-bti.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .unwrap_or_else(|| {
+            cql.find(&format!("CREATE TABLE {TABLE_NAME}"))
+                .expect("CREATE TABLE statement")
+        });
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    let mut saw_rows_db = false;
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-Rows.db") {
+            // The corruption under test: omit it entirely.
+            saw_rows_db = true;
+            continue;
+        }
+        if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    assert!(
+        saw_rows_db,
+        "{KEYSPACE}.{TABLE_NAME}: fixture has no Rows.db to remove — this test's premise (a \
+         RowsOffset-leaf table) does not hold for this fixture"
+    );
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a missing Rows.db (a classified Refusal, not an \
+             Err): {e:#}"
+        )
+    });
+
+    let refusal = report
+        .refused
+        .as_ref()
+        .unwrap_or_else(|| panic!("a missing Rows.db must produce a refusal; report={report:?}"));
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::BoundarySourceUnreadable,
+        "expected BoundarySourceUnreadable; got {:?}",
+        refusal.reason
+    );
+    assert!(
+        refusal.remedy.contains("rebuild"),
+        "remedy must name `rebuild`; got {:?}",
+        refusal.remedy
+    );
+    assert!(
+        no_data_db_anywhere(&out_root),
+        "--out must contain no Data.db after a refusal"
+    );
+    eprintln!("[issue_4196] missing Rows.db (BTI): salvage refused as expected ({refusal:?}).");
+}

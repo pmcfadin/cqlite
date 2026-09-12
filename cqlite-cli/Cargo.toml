@@ -224,6 +224,14 @@ name = "cli_dml_integration_tests"
 path = "tests/cli_dml_integration_tests.rs"
 required-features = ["write-support"]
 
+# Issue #4196: spawns the pre-built `cqlite` binary via CARGO_BIN_EXE_cqlite
+# to observe `salvage`'s process::exit-based exit codes (0/1/2/3), so it must
+# be compiled with write-support for that binary to carry the verb at all.
+[[test]]
+name = "salvage_cli_tests"
+path = "tests/salvage_cli_tests.rs"
+required-features = ["write-support"]
+
 # Issue #1581: dhat-gated bounded-memory guard for the streaming query cutover.
 # Installs the dhat global allocator, so it must be its own opt-in test binary.
 [[test]]
@@ -263,6 +271,33 @@ experimental = ["cqlite-core/experimental"]
 cli-helpers = ["state_machine", "cqlite-core/cli-helpers"]
 # Issue #392: Write support (enables cqlite-core/write-support for CLI write operations)
 write-support = ["state_machine", "cqlite-core/write-support"]
+# Issue #4196 (roborev round-7 High finding): forwards cqlite-core/tombstones so
+# `commands::salvage` (gated `not(feature = "tombstones")` in lockstep with the
+# core module it wraps, `cqlite_core::storage::write_engine::salvage`) can be
+# gated out consistently under `--all-features` instead of failing to compile
+# (the core module vanishes, the CLI module referencing it does not).
+#
+# SUBTRACTIVE at this crate's public surface (roborev, issue #4196, round-13
+# Low finding, reworded round-16 — the round-13 wording overclaimed): enabling
+# this feature does NOT remove the `salvage` verb from the CLI's surface —
+# `Commands::Salvage(SalvageArgs)` is declared unconditionally in
+# `cli_types.rs`, so the verb stays PARSED and ADVERTISED in `--help` under
+# `--all-features` too. What it removes is only the HANDLER module
+# (`commands::salvage`, gated `not(feature = "tombstones")` in lockstep with
+# the core module it wraps): `cargo build -p cqlite-cli --all-features`
+# therefore ships a binary that still lists `salvage` in `--help` but FAILS AT
+# RUNTIME with a "not built" error naming this feature the moment it is
+# invoked (`dispatch_salvage`), with core's `SinglePartitionCompaction` /
+# point-read path compiled out underneath it. It also turns the five
+# `issue_4196_salvage_*`
+# / `salvage_cli_tests` test targets (each `#![cfg(all(write-support,
+# not(tombstones)))]`) into zero-test binaries under any `--all-features`
+# lane. No local gate component currently runs `cqlite-cli --all-features`
+# (the gate's `all-features-check` component is `cqlite-core`-only), so this
+# is not presently a false-green risk in CI — but a future `--all-features`
+# lane on this crate would need a zero-tests guard on those five targets
+# before it could be trusted (issue #4196 tasks.md, round-13).
+tombstones = ["cqlite-core/tombstones"]
 # Issue #705: Delta-export CDC subcommand (Epic #696 DS9).
 # Enables cqlite-core/delta-scan (DeltaRecord types, scan_delta API) and
 # cqlite-core/parquet (DeltaParquetWriter, arrow/parquet crates).

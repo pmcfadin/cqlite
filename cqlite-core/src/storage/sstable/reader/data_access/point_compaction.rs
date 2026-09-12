@@ -67,6 +67,127 @@ pub enum SinglePartitionCompaction {
     Rows(Vec<CompactionRow>),
 }
 
+/// Outcome of decoding a partition at a caller-supplied, already-authoritative
+/// offset — the primitive `salvage_sstable` builds its recovery loop on
+/// (issue #4196, design D1). See
+/// [`decode_partition_at_offset_for_salvage`](SSTableReader::decode_partition_at_offset_for_salvage).
+///
+/// `write-support`-gated: `salvage_sstable`, its only consumer, does not
+/// exist without that feature (`write_engine::salvage` is itself gated
+/// `all(feature = "write-support", not(feature = "tombstones"))`), so
+/// without this gate a `write-support`-off build (this module's OWN gate is
+/// only `not(tombstones)`) sees this as dead code / an unused re-export.
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+pub(crate) enum PartitionAtOffsetOutcome {
+    /// The partition decoded completely and — when the boundary source named
+    /// an independent key for this slot — its key matched.
+    Rows(Vec<CompactionRow>),
+    /// The decoded key at `offset` did not match the boundary source's key
+    /// for this slot (spec R4.2, loss class `key-mismatch`).
+    KeyMismatch,
+    /// A row failed to decode partway through the partition (design D2
+    /// atomicity). The caller MUST NOT write any row that had decoded
+    /// before the error (the resurrection-bug rationale in D2) — enforced
+    /// structurally, not by a count: `drive_partition_sliding`
+    /// (`reader/parsing/row_decoder/partition_driver.rs`, design note
+    /// "Finding 1 / issue #827") buffers every row of a partition locally
+    /// and forwards them to its caller ONLY on structural completion, so a
+    /// mid-partition error here is reached with NOTHING externally visible
+    /// yet — there is no partial row set to accidentally write.
+    ///
+    /// This variant previously carried a `rows_decoded_before_failure:
+    /// usize` field (roborev, issue #4196, round 21 — removed): it was
+    /// ALWAYS `0`, proven by an exhaustive scan (round 20) of a real
+    /// multi-row partition — the SAME buffering this doc now describes
+    /// means no caller could ever observe a nonzero value, so the field
+    /// was dead weight carrying a doc claim ("counts rows that HAD
+    /// decoded") the code could never satisfy. See issue #4218 for
+    /// reinstating a real count once the partition driver can report
+    /// incremental progress.
+    DecodeError { error: crate::error::Error },
+    /// The materialized window did not cover the partition's authoritative
+    /// `[offset, end)` — EOF before the resolved end, or no trustworthy end
+    /// could be established for the last partition (spec R2.3 `truncated`).
+    Truncated,
+    /// The partition's authoritative `[offset, end)` span exceeds
+    /// [`SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`] — a DISTINCT outcome from
+    /// [`Truncated`](Self::Truncated) (roborev, issue #4196, round 17 Low
+    /// finding): `Truncated`'s wording ("extends past Data.db's actual
+    /// end") is factually FALSE for this case — the file is intact, and the
+    /// span was refused as a memory-safety precaution, not because
+    /// anything ran out. Conflating the two told an operator of a
+    /// genuinely wide (but healthy) partition that their `Data.db` was
+    /// truncated when it was not.
+    SpanTooWide {
+        /// The refused span's width in bytes, for the loss message.
+        span_bytes: u64,
+    },
+}
+
+/// The largest `[offset, end)` span `decode_partition_at_offset_for_salvage`
+/// will ever materialize for ONE partition, regardless of what the boundary
+/// source claims (roborev, issue #4196, round-15 Medium finding 1 — an Opus
+/// whole-module audit). Matches `compression.rs::MAX_DECOMPRESSED_SIZE`'s
+/// established 128 MiB convention (this crate's own <128 MB memory target).
+///
+/// **Why this exists**: for the LAST boundary entry (`end_bound: None`) —
+/// including an entry that is only ARTIFICIALLY last because `Index.db`/
+/// `Partitions.db` was truncated exactly on an entry boundary and parsed
+/// cleanly with fewer real entries — `end` resolves to the WHOLE remaining
+/// data section (`section_len` uncompressed, `safe_data_length` compressed),
+/// not one partition's worth. Every EXISTING guard (round 9's boundary-side
+/// clamp, round 10/12's `data_length`/`chunk_size` zero-fallbacks) bounds
+/// `end` against the REAL FILE SIZE, which is exactly what this trigger
+/// satisfies — a short boundary source's `end` is `<= safe_data_length` by
+/// construction, so it passes every one of them, then allocates the entire
+/// remaining multi-GB section (uncompressed: one `read_exact_at`; compressed:
+/// `pull_chunk_window` decompressing every remaining real chunk into one
+/// resident `Vec`) before the slot is ever classified.
+///
+/// **The trade-off, stated explicitly**: a genuinely healthy partition wider
+/// than 128 MiB is classified `Truncated` rather than recovered under this
+/// cap — a false loss, not silence or wrong data. Consistent with this
+/// tool's whole design philosophy (design D2/D3): salvage never guesses:
+/// a conservative, NAMED loss beats an unbounded allocation that starves or
+/// OOM-kills the process running it, on a file this tool exists specifically
+/// to recover from. Applied UNCONDITIONALLY to both the `end_bound: None`
+/// case the audit trigger names AND a `Some(end_bound)` case (a corrupted,
+/// still-plausible-looking middle boundary can name a gap just as wide) —
+/// the risk is the SPAN's width, not which resolution path produced it.
+///
+/// `write-support`-gated (roborev, minimal-build finding against the
+/// rebased HEAD): both this constant and [`exceeds_plausible_partition_span`]
+/// below are used ONLY by [`decode_partition_at_offset_for_salvage`]'s two
+/// arms, which is itself `#[cfg(feature = "write-support")]` (see
+/// [`PartitionAtOffsetOutcome`]'s doc) — without that gate here too, a
+/// `write-support`-off build (`minimal-build`'s own
+/// `--no-default-features --features all-compression`) sees both items as
+/// genuinely dead code, since their sole consumer does not exist in that
+/// build. Matches the enum's and the crate-root re-exports'
+/// (`data_access/mod.rs`, `reader/mod.rs`) established gate exactly — this
+/// was the one declaration site in the chain missing it.
+#[cfg(feature = "write-support")]
+pub(crate) const SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES: u64 = 128 * 1024 * 1024;
+
+/// `true` iff the half-open span `[start, end)` is wider than
+/// [`SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`] — factored out of BOTH the
+/// uncompressed and compressed arms of `decode_partition_at_offset_for_salvage`
+/// (roborev, issue #4196, round-15 Medium finding 1) so the ONE piece of
+/// arithmetic both bounds checks share is unit-testable directly, without
+/// needing an actual 128+ MB fixture for the compressed arm (which reaches
+/// this same check via `[window_base, end)`, a span this crate has no
+/// practical way to construct a REAL multi-chunk compressed fixture for in
+/// a test). `end < start` (never expected, both call sites establish
+/// `end > start`/`end >= offset` first) is defensively treated as
+/// NOT exceeding, via `saturating_sub`, rather than a panic or a wrap.
+///
+/// `write-support`-gated for the same reason as the constant above.
+#[cfg(feature = "write-support")]
+pub(crate) fn exceeds_plausible_partition_span(start: usize, end: usize) -> bool {
+    (end.saturating_sub(start)) as u64 > SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES
+}
+
 impl SSTableReader {
     /// Probe one SSTable for a single partition, returning its compaction rows via
     /// an authoritative seek — or a prune / scan-fallback signal (issue #2207).
@@ -373,6 +494,306 @@ impl SSTableReader {
         Ok(Some(rows))
     }
 
+    /// Decode ONE partition at a caller-supplied, already-authoritative offset
+    /// for `salvage_sstable` (issue #4196, design D1). Unlike
+    /// [`SinglePartitionCompaction`], every anomaly is CLASSIFIED rather than
+    /// degraded to a scan fallback: salvage's caller enumerated `offset` from
+    /// the boundary source itself (`Index.db` / the `Partitions.db` trie), so
+    /// there is no alternative source to fall back to for this one slot — the
+    /// whole point of salvage is to name what is untrustworthy about it.
+    ///
+    /// `expected_key` is the boundary source's key for this slot when it
+    /// carries one independently (always for BIG; for BTI only a `RowsOffset`
+    /// leaf's inline key — see `salvage::boundaries`). `end_bound` is the NEXT
+    /// boundary entry's offset (exclusive), or `None` for the last partition
+    /// in the file. Reuses the SAME chunk-window materialization and
+    /// [`parse_one_partition_for_compaction`] decoder the point-read path uses
+    /// above (design D1) — never a fresh parser.
+    ///
+    /// [`parse_one_partition_for_compaction`]: crate::storage::sstable::reader::parsing::row_decoder::compaction::CompactionParser::parse_one_partition_for_compaction
+    ///
+    /// `write-support`-gated: see [`PartitionAtOffsetOutcome`]'s doc for why.
+    #[cfg(feature = "write-support")]
+    pub(crate) async fn decode_partition_at_offset_for_salvage(
+        &self,
+        offset: u64,
+        end_bound: Option<u64>,
+        expected_key: Option<&[u8]>,
+        schema: Option<&crate::schema::TableSchema>,
+        scan_cancel: &ScanCancel,
+    ) -> Result<PartitionAtOffsetOutcome> {
+        scan_cancel.check()?;
+
+        let offset_usize = offset as usize;
+        let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
+        let parser = self.build_v5_parser(false);
+
+        let chunk_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.chunk_length as usize)
+            .filter(|&len| len > 0);
+        // The full-consumption check below applies ONLY to the uncompressed
+        // branch: a compressed `window` is CHUNK-ALIGNED (`pull_chunk_window`
+        // materializes whole chunks), so it can legitimately extend past
+        // `end` into the next partition's leading bytes — `within + consumed
+        // == window.len()` would be WRONG there.
+        let is_uncompressed = chunk_length.is_none();
+        // roborev, issue #4196 (round-4 Medium): the DECOMPRESSED-domain
+        // `end` this slot's window must not be decoded past — same domain as
+        // `offset_usize`/`data_offset` (Index.db positions and
+        // `CompressionInfo.data_length` are both decompressed-domain).
+        // Populated only in the compressed arm below; the uncompressed arm
+        // already gets a full-consumption check (`is_uncompressed`, round 3).
+        let mut compressed_end: Option<usize> = None;
+
+        let (window, within, reached_end) = match chunk_length {
+            None => {
+                // Uncompressed: a BOUNDED positional read of `[offset, end)`
+                // only (roborev, issue #4196) — NOT `point_read_whole_section`,
+                // which materializes the ENTIRE data section. `recover_one_partition`
+                // calls this primitive once per boundary entry, so a whole-section
+                // read here would cost O(partitions x file_size) I/O and hold a
+                // full-file allocation resident per call, violating the <128 MB
+                // target and spec R6 for exactly the uncompressed case salvage is
+                // most likely to see (CQLite's own writer only emits uncompressed
+                // output). `end` is resolved from the SAME two sources the
+                // compressed branch uses (the next boundary entry, or the total
+                // data-section length for the last partition) and is NEVER
+                // silently clamped to the file's actual length: an `end` that
+                // exceeds what is really on disk IS the R2.3 truncation signal,
+                // reported as `Truncated` rather than masked by reading fewer
+                // bytes than the boundary source promised.
+                let header_size = self.calculate_header_size() as u64;
+                let file_len = self.point_source.len();
+                let section_len = file_len.saturating_sub(header_size) as usize;
+                let end = match end_bound {
+                    Some(e) => e as usize,
+                    None => section_len,
+                };
+                if offset_usize >= end || end > section_len {
+                    return Ok(PartitionAtOffsetOutcome::Truncated);
+                }
+                // roborev, issue #4196, round-15 Medium finding 1: `end` is
+                // bounded against the REAL file (`section_len`) above, but
+                // NOT against one partition's plausible extent — for the
+                // LAST entry (`end_bound: None`, real or artificially last
+                // via a truncated boundary source), `end == section_len`
+                // unconditionally, materializing the WHOLE remaining data
+                // section in this one `Vec`. See
+                // `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`'s doc.
+                if exceeds_plausible_partition_span(offset_usize, end) {
+                    return Ok(PartitionAtOffsetOutcome::SpanTooWide {
+                        span_bytes: (end - offset_usize) as u64,
+                    });
+                }
+                let mut buf = vec![0u8; end - offset_usize];
+                self.point_source
+                    .read_exact_at(header_size + offset_usize as u64, &mut buf)?;
+                (buf, 0usize, true)
+            }
+            Some(len) => {
+                let target_chunk = offset_usize / len;
+                let window_base = target_chunk * len;
+                let within = offset_usize - window_base;
+                // roborev, issue #4196, round-12 Medium finding: round 9/10's
+                // clamp lives in `chunks.rs`'s `compressed_chunk_preflight`,
+                // whose RETURNED `data_length` only bounds `recover.rs`'s OWN
+                // `chunk_range_end` (the chunk-CRC pre-flight's range) — it is
+                // never threaded into THIS function, so both the `None`
+                // (last-partition) case, which reads `ci.data_length` raw, and
+                // the `Some(e)` (non-last) case, which uses `end_bound` raw
+                // (a possibly-corrupted NEXT entry's `data_offset`), could
+                // still ask `pull_chunk_window` for a window past what the
+                // chunk table can really supply. `pull_chunk_window` has no
+                // pre-allocation (round 9/10/11's own tests already prove
+                // that), but it DOES decompress every remaining real chunk
+                // before giving up — for a genuinely large production
+                // `Data.db` that means materializing "the rest of the file"
+                // into one resident `Vec`, violating spec R6 ("one partition
+                // resident") and the <128 MB target. Compute the SAME clamp
+                // `chunks.rs` does (`chunk_count * chunk_length`, both
+                // already bounded by `CompressionInfo::parse`/`validate`)
+                // directly from the reader's own already-open
+                // `CompressionInfo` — no value needs threading from
+                // `recover.rs` at all — and refuse (`Truncated`) whenever the
+                // resolved `end`, from EITHER source, exceeds it.
+                let safe_data_length = self.compression_info.as_deref().map(|ci| {
+                    let chunk_table_bound =
+                        (ci.chunk_offsets.len() as u64).saturating_mul(ci.chunk_length as u64);
+                    // Mirrors `chunks.rs::compressed_chunk_preflight`'s OWN
+                    // zero-fallback exactly (roborev, issue #4196, round-12
+                    // Medium finding, second half found while regression-
+                    // testing the first): `ci.data_length` has no lower
+                    // bound either, so a ZEROED field must not be treated as
+                    // "0 bytes of real data" (which would make every
+                    // legitimate `end > 0` look implausible and refuse
+                    // EVERY partition, not just the corrupted one) — fall
+                    // back to the always-positive structural bound instead.
+                    if ci.data_length == 0 {
+                        chunk_table_bound
+                    } else {
+                        ci.data_length.min(chunk_table_bound)
+                    }
+                });
+                let end = match end_bound {
+                    Some(e) => e as usize,
+                    None => match safe_data_length
+                        .map(|l| l as usize)
+                        .filter(|&l| l > offset_usize)
+                    {
+                        Some(l) => l,
+                        // Last partition, no CompressionInfo bound to trust:
+                        // cannot establish a trustworthy end for this slot.
+                        None => return Ok(PartitionAtOffsetOutcome::Truncated),
+                    },
+                };
+                if let Some(safe_len) = safe_data_length {
+                    if end as u64 > safe_len {
+                        return Ok(PartitionAtOffsetOutcome::Truncated);
+                    }
+                }
+                // roborev, issue #4196, round-15 Medium finding 1: `end` is
+                // bounded against `safe_data_length` (the REAL file) above,
+                // but NOT against one partition's plausible extent —
+                // `pull_chunk_window` decompresses every real chunk in
+                // `[window_base, end)` into ONE resident `Vec`, so a short
+                // boundary source's `end == safe_data_length` (the
+                // `end_bound: None` arm above) materializes the WHOLE
+                // remaining data section before this slot is classified.
+                // See `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`'s doc.
+                if exceeds_plausible_partition_span(window_base, end) {
+                    return Ok(PartitionAtOffsetOutcome::SpanTooWide {
+                        span_bytes: (end - window_base) as u64,
+                    });
+                }
+                compressed_end = Some(end);
+                let (window, reached_end) = self
+                    .pull_chunk_window(target_chunk, window_base, end, scan_cancel)
+                    .await?;
+                (window, within, reached_end)
+            }
+        };
+
+        if within >= window.len() || !reached_end {
+            // The materialized window did not cover the resolved
+            // `[offset, end)` — EOF before the partition's authoritative end
+            // (a truncated Data.db, spec R2.3 `truncated`).
+            return Ok(PartitionAtOffsetOutcome::Truncated);
+        }
+
+        scan_cancel.check()?;
+
+        let mut rows: Vec<CompactionRow> = Vec::new();
+        let mut key_mismatch = false;
+        let decode_result = parser.parse_one_partition_for_compaction(
+            &window[within..],
+            owned_schema.as_ref(),
+            self,
+            true,
+            &mut |row: CompactionRow| {
+                if let Some(expected) = expected_key {
+                    if rows.is_empty() && !key_mismatch && row.key.as_bytes() != expected {
+                        key_mismatch = true;
+                    }
+                }
+                rows.push(row);
+                Ok(ControlFlow::Continue(()))
+            },
+        );
+
+        match decode_result {
+            Ok(step) => {
+                // roborev, issue #4196 (High): the uncompressed branch's
+                // `end` for the LAST partition comes from the file's ACTUAL
+                // length (`section_len`), not a declared one — a Data.db
+                // truncated mid-row therefore still satisfies `within <
+                // window.len() && reached_end` above (there is nothing left
+                // to compare against). `[within..]` is exactly ONE
+                // partition's bytes, so a genuinely complete decode must
+                // consume the WHOLE window; anything less is leftover bytes
+                // the parser did not account for, treated as `Truncated`
+                // rather than silently accepted as a short-but-clean
+                // partition (the D2 resurrection hazard: a partial row set
+                // written as if complete). `Done` (zero bytes consumed) is
+                // likewise suspicious when the window is non-empty.
+                if is_uncompressed {
+                    use crate::storage::sstable::reader::parsing::row_decoder::ParseStep;
+                    let fully_consumed = match step {
+                        ParseStep::Emitted(consumed) => within + consumed == window.len(),
+                        ParseStep::Done => within == window.len(),
+                        ParseStep::NeedMore => false, // unreachable at_final_chunk=true
+                    };
+                    if !fully_consumed {
+                        return Ok(PartitionAtOffsetOutcome::Truncated);
+                    }
+                } else if let Some(end) = compressed_end {
+                    // roborev, issue #4196 (round-4 Medium): the compressed
+                    // WINDOW is chunk-aligned and LEGITIMATELY extends past
+                    // `end` into the next partition's leading bytes (unlike
+                    // the uncompressed case above, so an equality check
+                    // against `window.len()` would be wrong) — but the
+                    // PARSER's own `consumed` count, decoded from
+                    // `window[within..]`, is a DIFFERENT quantity: it is how
+                    // many bytes THIS ONE partition's content actually
+                    // occupied, and for a healthy boundary source that is BY
+                    // DEFINITION exactly `end - offset` (`end` names where
+                    // the NEXT partition starts). round-11's Medium finding:
+                    // the original `consumed <= max_allowed` only rejected
+                    // OVER-consumption (decoding past `end` into the next
+                    // partition, the round-4 hazard) but silently ACCEPTED
+                    // under-consumption too — a corrupted/fabricated
+                    // `END_OF_PARTITION` marker that stops the parser EARLY
+                    // returns `Rows(prefix)` as if complete, exactly the D2
+                    // resurrection hazard the uncompressed branch's equality
+                    // check already guards against: the un-decoded tail can
+                    // carry a tombstone or later-timestamp cell shadowing
+                    // what was already accepted, with no `Loss` recorded.
+                    // Require EQUALITY, mirroring the uncompressed arm; a
+                    // `Done` covering a NON-EMPTY `[offset, end)` window
+                    // means nothing was consumed for bytes the boundary
+                    // source says exist — also suspicious, also `Truncated`.
+                    use crate::storage::sstable::reader::parsing::row_decoder::ParseStep;
+                    let max_allowed = end.saturating_sub(offset_usize);
+                    let fully_consumed = match step {
+                        ParseStep::Emitted(consumed) => consumed == max_allowed,
+                        ParseStep::Done => max_allowed == 0,
+                        ParseStep::NeedMore => false, // unreachable at_final_chunk=true
+                    };
+                    if !fully_consumed {
+                        return Ok(PartitionAtOffsetOutcome::Truncated);
+                    }
+                }
+                if key_mismatch {
+                    Ok(PartitionAtOffsetOutcome::KeyMismatch)
+                } else if rows.is_empty() && expected_key.is_some() {
+                    // roborev, issue #4196: the key cross-check above lives
+                    // INSIDE the row callback, so a decode that emits ZERO
+                    // rows never runs it — a garbage offset that happens to
+                    // parse as "no rows" would otherwise silently become an
+                    // accepted, nothing-to-write partition (indistinguishable
+                    // from a genuine empty reconciliation downstream) with
+                    // its key NEVER checked against the boundary source's
+                    // claim for this slot. When the boundary source names an
+                    // independent key, an empty decode cannot be trusted.
+                    Ok(PartitionAtOffsetOutcome::KeyMismatch)
+                } else {
+                    Ok(PartitionAtOffsetOutcome::Rows(rows))
+                }
+            }
+            Err(error) => {
+                if key_mismatch {
+                    // The very first row already disagreed with the boundary
+                    // source's key for this slot; that IS the finding — do not
+                    // also report a decode failure for it.
+                    Ok(PartitionAtOffsetOutcome::KeyMismatch)
+                } else {
+                    Ok(PartitionAtOffsetOutcome::DecodeError { error })
+                }
+            }
+        }
+    }
+
     /// Pull the decompressed chunks covering `[window_base, end)` starting at
     /// `target_chunk`, returning the concatenated bytes plus whether the window
     /// actually reached `end`. Never stitches to EOF: it stops as soon as the
@@ -446,5 +867,52 @@ impl SSTableReader {
         // rather than parse an incomplete partition (issue #2207 fail-safe).
         let reached_end = window_base + window.len() >= end;
         Ok((window, reached_end))
+    }
+}
+
+// `write-support`-gated to match the items under test — `cargo test --lib
+// --no-run` (minimal-build's compile check) enables `cfg(test)` even
+// without executing anything, so without this gate the module still fails
+// to compile in a `write-support`-off build once the const/fn above are
+// themselves gated.
+#[cfg(all(test, feature = "write-support"))]
+mod tests {
+    use super::{exceeds_plausible_partition_span, SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES};
+
+    /// roborev, issue #4196, round-15 Medium finding 1: the ONE piece of
+    /// arithmetic both the uncompressed and compressed arms of
+    /// `decode_partition_at_offset_for_salvage` share — unit-tested
+    /// directly since the COMPRESSED arm's trigger needs a real multi-chunk
+    /// compressed fixture wider than 128 MB, impractical to construct in a
+    /// test; the uncompressed arm's own end-to-end test
+    /// (`issue_4196_salvage_round15_bounds.rs`) proves the WIRING at one
+    /// real call site, and this proves the SHARED arithmetic is correct
+    /// for both.
+    #[test]
+    fn span_at_exactly_the_ceiling_does_not_exceed() {
+        let ceiling = SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES as usize;
+        assert!(!exceeds_plausible_partition_span(0, ceiling));
+        assert!(!exceeds_plausible_partition_span(1000, 1000 + ceiling));
+    }
+
+    #[test]
+    fn span_one_byte_past_the_ceiling_exceeds() {
+        let ceiling = SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES as usize;
+        assert!(exceeds_plausible_partition_span(0, ceiling + 1));
+        assert!(exceeds_plausible_partition_span(1000, 1000 + ceiling + 1));
+    }
+
+    #[test]
+    fn small_realistic_spans_never_exceed() {
+        assert!(!exceeds_plausible_partition_span(0, 0));
+        assert!(!exceeds_plausible_partition_span(0, 100));
+        assert!(!exceeds_plausible_partition_span(65536, 131072));
+    }
+
+    /// Defensive only — both real call sites establish `end >= start`
+    /// before reaching this check; an inverted span must not panic.
+    #[test]
+    fn inverted_span_does_not_panic_and_does_not_exceed() {
+        assert!(!exceeds_plausible_partition_span(100, 0));
     }
 }

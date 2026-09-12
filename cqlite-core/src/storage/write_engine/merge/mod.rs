@@ -430,8 +430,11 @@ mod constructors;
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub(crate) use constructors::merger_deferring_opens;
 mod producer_iter;
+// `pub(crate)` (issue #4196): `salvage_sstable` calls
+// `SSTableRowIteratorAdapter::build_merge_entry` directly to reuse the exact
+// CompactionRow -> MergeEntry conversion compaction uses.
 #[cfg(feature = "write-support")]
-use producer_iter::SSTableRowIteratorAdapter;
+pub(crate) use producer_iter::SSTableRowIteratorAdapter;
 
 /// Reader→merge row/cell conversion helpers for [`SSTableRowIteratorAdapter`]
 /// (issue #3139): `CompactionRow` → [`MergeEntry`] / [`RowData`] translation,
