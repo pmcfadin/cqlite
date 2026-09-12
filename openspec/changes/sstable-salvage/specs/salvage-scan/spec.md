@@ -5,8 +5,8 @@ uncompressed generation and account for every partition it could not. All requir
 
 > **DEFERRED SCENARIOS (issue #4196, roborev finding — not implemented in the #4196 PR, tracked as
 > follow-up work, NOT satisfied-by-reference despite being named below):** R2.2 (uncompressed chunk
-> CRC flip), R2.3 (truncated Data.db), R4.2 (key-at-offset-disagrees-with-index staging), R5.1
-> (input-sha256-unchanged listing), R6.1 (memory-budget lane entry). R1.1/R1.2, R2.1, R2.4, R3.1,
+> CRC flip), R2.3 (truncated Data.db), R4.2 (key-at-offset-disagrees-with-index staging), R6.1
+> (memory-budget lane entry). R1.1/R1.2, R2.1, R2.4, R3.1,
 > R4.1, R4.3 and R5.2 are implemented and pass against real fixtures
 > (`cqlite-core/tests/issue_4196_salvage_healthy_parity.rs`,
 > `issue_4196_salvage_corruption_corpus.rs`, `issue_4196_salvage_partition_atomicity.rs`,
@@ -28,6 +28,20 @@ uncompressed generation and account for every partition it could not. All requir
 > "every committed table under `test_basic`, `test_collections`, `test_tomb` and `test_da`" sweep
 > remains a per-case selection of four fixtures, not a corpus-wide one. Both are declared here
 > rather than left to be inferred from a green suite.
+>
+> **R5.1 is implemented, with its SWEEP scoped (C-audit on this issue).**
+> `cqlite-core/tests/issue_4196_salvage_output_input_contracts.rs::salvage_never_modifies_a_byte_of_its_input`
+> takes a per-file SHA-256 census of the input generation directory before and after a real salvage
+> run and asserts the set AND every digest unchanged, reporting a violation by component name. Its
+> scope is the two COMMITTED compressed fixtures (`test_comp.lz4_table` BIG/`nb`,
+> `test_da.multiclustering_table` BTI/`da`), both fail-closed per case — NOT the scenario's literal
+> "before every scenario above": the corruption lanes do not each carry their own digest census.
+> Salvage's production sources contain no write primitive aimed at the input, so this pins a property
+> that already holds rather than fixing a defect. The same target also pins the issue **#1406**
+> write-surface boundary (design D4), which had no test at all:
+> `salvaged_output_never_contains_a_compression_info_db` asserts a compressed input's `--out` tree
+> holds no `*-CompressionInfo.db` anywhere, with the compressed-input premise and the
+> a-generation-was-actually-written premise both asserted so it cannot pass vacuously.
 
 ## ADDED Requirements
 
