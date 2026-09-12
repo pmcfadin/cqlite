@@ -129,14 +129,42 @@ unrepaired and noted in the manifest.
 ```json
 { "input": "<path>", "output": "<dir>", "format": "nb|da", "compressed_input": true,
   "boundary_source": "index|bti-trie", "generation": 12,
-  "partitions": { "total": 1204, "recovered": 1198, "lost": 6 },
+  "partitions": { "total": 1204, "recovered": 1198, "lost": 6, "written": 1198 },
   "losses": [ { "key_hex": "…", "key": "<rendered when schema decodes it>", "data_offset": 88192,
                 "chunks": [12, 13], "class": "chunk-crc|decode|key-mismatch|truncated",
                 "message": "…" } ],
+  "losses_truncated": 0,
   "component_findings": [ { "class": "<VerifyErrorClass code>", "component": "…", "detail": "…" } ],
-  "refused": null | { "reason": "boundary-source-unreadable|nothing-decodable", "remedy": "…" },
+  "attempted": true,
+  "refused": null | { "reason": "boundary-source-unreadable|nothing-decodable|component-unreadable",
+                      "remedy": "…" },
   "now": "<RFC3339 of the run>", "cqlite_version": "…" }
 ```
+
+Field ORDER above is the serialization order of `SalvageReport`
+(`cqlite-core/src/storage/write_engine/salvage/mod.rs`), and every key was verified against a real
+manifest emitted by the compiled binary rather than read off the struct — R8 says the manifest SHALL
+follow §D5 exactly, so when the two disagree it is this block that is wrong. Four such drifts were
+fixed (C-audit on issue #4196; the audit named the first two):
+
+- **`losses_truncated`** (`usize`) — the AFFIRMATIVE count of lost partitions NOT enumerated in
+  `losses`, which caps at `recover::MAX_RESIDENT_LOSSES` resident entries so a massively-damaged
+  input stays bounded under the <128 MB target. `0` means `losses` names every lost partition;
+  `losses.len() == MAX_RESIDENT_LOSSES` together with a non-zero value here means truncation engaged.
+  `partitions.lost` is always the TRUE total (`losses.len() + losses_truncated`). `#[serde(default)]`,
+  so a pre-round-15 manifest still deserializes.
+- **`attempted`** (`bool`) — `true` once the per-partition recovery loop BEGAN. Distinct from
+  `partitions.total`, which is populated as soon as the boundary source is enumerated, i.e. before any
+  partition is examined: several `component-unreadable` refusals fire after `total` is set but before
+  the loop runs, so without this field a genuine zero-attempt refusal renders identically to a clean,
+  fully-measured, zero-loss run.
+- **`partitions.written`** (`usize`) — how many of `recovered` actually reached the output `Data.db`.
+  A partition that decoded but reconciled to nothing to write (a shadowed range tombstone with no
+  live data) counts toward `recovered` but NOT `written`, so `recovered > written` is a real,
+  non-error outcome that needs its own number.
+- **`refused.reason`** gained `component-unreadable` — a component OTHER than the boundary source was
+  unreadable, so `rebuild --components index` is NOT the remedy and the refusal names the damaged
+  component instead (`RefusalReason::manifest_label`).
 
 ## D6. Oracles (all Cassandra-written; expectations derived from the format, never from CQLite)
 
