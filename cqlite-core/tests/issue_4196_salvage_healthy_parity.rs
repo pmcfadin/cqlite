@@ -5,8 +5,10 @@
 //!
 //! # Oracle
 //!
-//! Committed, Cassandra-written fixtures — `test_basic.composite_key_table`
-//! (BIG/`nb`, LZ4) and `test_da.multiclustering_table` (BTI/`da`, LZ4).
+//! Cassandra-written fixtures — `test_basic.composite_key_table` (BIG/`nb`,
+//! LZ4) and `test_da.multiclustering_table` (BTI/`da`, LZ4). ("Cassandra-written"
+//! is not "git-committed": only two of this file's four fixtures are tracked
+//! binaries — see the per-case dataset doctrine below.)
 //! CQLite's `compact_sstables` is itself already byte-parity-proven against
 //! Cassandra elsewhere (issue #1017); this test's job is narrower and
 //! specific to #4196: that `salvage_sstable`'s independent recovery loop
