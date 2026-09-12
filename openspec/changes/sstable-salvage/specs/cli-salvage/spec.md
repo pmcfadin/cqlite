@@ -6,8 +6,10 @@ codes scripts can branch on. All requirements are ADDED.
 > **DEFERRED SCENARIOS (issue #4196, roborev finding — not implemented in the #4196 PR, tracked as
 > follow-up work):** R8.1's committed expected-manifest fixtures under
 > `cqlite-cli/tests/fixtures/salvage/` and R9.1 (`cqlite verify --mode full` + read-back of every
-> salvaged generation) are NOT implemented. R7.1-R7.4 and R8.2 are implemented and pass against real
-> fixtures via the compiled binary (`cqlite-cli/tests/salvage_cli_tests.rs`); R7.2's scenario runs
+> salvaged generation) are NOT implemented. R7.1-R7.7 and R8.2 are implemented and pass against real
+> fixtures via the compiled binary (`cqlite-cli/tests/salvage_cli_tests.rs`, plus
+> `cqlite-cli/tests/issue_4196_salvage_publication_barrier.rs` for R7.7 — its own target because the
+> first file sits at ~1420 of the ~1500-line #1135 threshold); R7.2's scenario runs
 > against the corpus's actual (total-loss) outcome rather than its literal partial-recovery text —
 > see that test's doc comment. R8.2's specific test is
 > `help_states_uncompressed_whole_partition_and_rebuild_boundaries` in that file, NAMED here because
@@ -20,8 +22,10 @@ codes scripts can branch on. All requirements are ADDED.
 
 The CLI SHALL provide `cqlite salvage <Data.db | table-dir> --out <dir> [--manifest <path>]
 [--out-format text|json]`, resolving the schema through the `--schema` global, salvaging each
-generation of a table dir separately, and exiting `0` only with zero losses, `3` with losses and
-output written, `2` when refused, `1` on usage errors.
+generation of a table dir separately, and exiting `0` only with zero losses AND every verification
+the run depends on having actually RUN, `3` with losses or with a verification GAP (output written
+either way), `2` when refused, `1` on usage errors — including a `--manifest` path that would
+destroy part of the input.
 
 #### Scenario: R7.1 healthy table dir, per-generation outputs
 - **Given** the built binary, `--dataset test_tomb`, table `resurrection_gc_positive` (2 generations)
@@ -47,6 +51,49 @@ output written, `2` when refused, `1` on usage errors.
 - **When** `--out` is a non-empty dir, or no `--schema` resolves the table, or the input dir has no
   `Data.db`
 - **Then** exit `1` with the cause on stderr and nothing written.
+
+#### Scenario: R7.5 a verification that could not RUN exits 3, not 0
+
+Roborev, issue #4196, round-22 Medium finding: `component_findings` influenced the exit code not at
+all, so an uncompressed input with no `CRC.db` — which disables chunk-CRC loss detection ENTIRELY —
+reported `losses: 0 RECOGNISED` and exited `0`, indistinguishable to `$?` from a fully CRC-verified
+clean run. D3's "an unmeasured run cannot read as clean" held for the rendered text only.
+
+- **Given** the committed uncompressed generation `test_comp/uncompressed_table` staged twice,
+  differing by exactly one file (`nb-1-big-CRC.db` absent / present)
+- **When** `cqlite salvage <staged-dir> --out <tmp> --out-format json` runs on each
+- **Then** the CRC-less leg exits `3` with a `ChunkCrcUnavailable` component finding in the manifest,
+  `losses: []`, and the output generation still written; and the CRC-ful leg exits `0` with no such
+  finding (`uncompressed_input_without_crc_db_exits_3_and_names_the_verification_gap` in
+  `cqlite-cli/tests/salvage_cli_tests.rs`).
+
+#### Scenario: R7.6 `--manifest` may not destroy part of the input
+
+Roborev, issue #4196, round-22 Low finding: `--out` was guarded fail-closed while `--manifest`
+accepted any path and is written with `File::create`, which truncates — so
+`--manifest <input-dir>/nb-1-big-Statistics.db` destroyed a component of the very input the tool
+exists to preserve, violating R5.1.
+
+- **Given** a staged healthy generation
+- **When** `--manifest` names a path that resolves inside the input directory, or an existing SSTable
+  component (`*.db` / `*-TOC.txt` / `*-Digest.crc32`)
+- **Then** exit `1` naming the collision on stderr, every input file byte-identical, nothing written
+  under `--out`; and the documented `--manifest <--out>/salvage.json` invocation still exits `0` and
+  writes the manifest
+  (`manifest_inside_the_input_is_refused_and_the_input_is_untouched`, same file).
+
+#### Scenario: R7.7 an explicit `Data.db` overrides the publication barrier, but never silently
+
+Roborev, issue #4196, round-22 Low finding: the single-FILE input path did not probe for the sibling
+`-TOC.txt` at all, so it salvaged an unpublished generation SILENTLY at exit `0`, while the
+table-DIRECTORY path on the same file named it a skipped input and exited `3`.
+
+- **Given** a staged healthy generation whose `-TOC.txt` has been removed
+- **When** `cqlite salvage <that Data.db> --out <tmp> --out-format json` runs
+- **Then** the generation IS salvaged (an explicit file path is the operator's choice) AND exit is
+  `3` with an `UnpublishedInputGeneration` component finding in the manifest, matching what the same
+  file gets through its table directory; with the `-TOC.txt` present the same input exits `0` with no
+  such finding (`cqlite-cli/tests/issue_4196_salvage_publication_barrier.rs`).
 
 ### Requirement: R8 — The manifest is the contract, text is a rendering
 
