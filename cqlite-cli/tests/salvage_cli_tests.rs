@@ -1288,3 +1288,136 @@ fn uncompressed_input_without_crc_db_exits_3_and_names_the_verification_gap() {
         "with CRC.db present there is no chunk-CRC gap to report; classes={classes2:?}"
     );
 }
+
+/// `file name -> bytes` for every file directly under `dir`.
+fn read_dir_bytes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {dir:?}: {e}"))
+        .flatten()
+    {
+        if entry.path().is_file() {
+            let bytes = std::fs::read(entry.path())
+                .unwrap_or_else(|e| panic!("read {:?}: {e}", entry.path()));
+            out.insert(entry.file_name().to_string_lossy().to_string(), bytes);
+        }
+    }
+    assert!(!out.is_empty(), "{dir:?}: nothing to read");
+    out
+}
+
+/// Roborev, issue #4196, round-22 Low finding — spec R5.1 (the input is not
+/// modified) extended to `--manifest`.
+///
+/// R5.1's existing pin
+/// (`cqlite-core/tests/issue_4196_salvage_output_input_contracts.rs::salvage_never_modifies_a_byte_of_its_input`)
+/// digests the input around a `salvage_sstable` call, so it is structurally
+/// blind to a CLI FLAG: `--manifest` is a `cqlite-cli` concept the core API has
+/// no parameter for. `--out` was guarded fail-closed while `--manifest` accepted
+/// any path and was written with `create_dir_all(parent)` + `File::create` —
+/// which TRUNCATES — so `--manifest <input-dir>/nb-1-big-Statistics.db`
+/// destroyed a component of the very input the tool exists to preserve. The
+/// digest half of the assertion is the same one R5.1 makes; the vehicle is the
+/// flag.
+#[test]
+fn manifest_inside_the_input_is_refused_and_the_input_is_untouched() {
+    // COMMITTED fixture (issue #3220) — fails closed, never skips.
+    let clean_dir = resolve_committed_fixture(LZ4_TABLE_FIXTURE, LZ4_TABLE_COMPONENTS);
+    let schema = schemas_dir().join("compression-parity.cql");
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp
+        .path()
+        .join("lz4_table-25801a0071a911f19b3225f9984c6a77");
+    stage_generation(&clean_dir, &input_dir, "nb-1-big-");
+
+    let victim = input_dir.join("nb-1-big-Statistics.db");
+    assert!(
+        victim.is_file(),
+        "the case needs a real component at {victim:?} to protect"
+    );
+    let before = read_dir_bytes(&input_dir);
+
+    let out = temp.path().join("out");
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        victim.to_str().unwrap(),
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a --manifest path inside the input directory is a USAGE error (exit 1) — it must be \
+         refused before any I/O, never accepted and truncated; stdout={}\nstderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("nb-1-big-Statistics.db"),
+        "stderr must NAME the collision so the operator can see WHICH file was about to be \
+         destroyed; got: {stderr}"
+    );
+
+    // R5.1: byte-identical, and the file SET unchanged.
+    let after = read_dir_bytes(&input_dir);
+    for (name, bytes) in &before {
+        match after.get(name) {
+            None => panic!("input component {name:?} was REMOVED from {input_dir:?} (spec R5.1)"),
+            Some(now) => assert!(
+                now == bytes,
+                "input component {name:?} was MODIFIED ({} bytes -> {} bytes) — a refused \
+                 --manifest must never have opened it (spec R5.1)",
+                bytes.len(),
+                now.len()
+            ),
+        }
+    }
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "the input file SET must be unchanged (spec R5.1)"
+    );
+    assert!(
+        !out.exists()
+            || std::fs::read_dir(&out)
+                .map(|mut rd| rd.next().is_none())
+                .unwrap_or(true),
+        "nothing may be written under --out when the run is refused as a usage error"
+    );
+
+    // The DOCUMENTED pattern still works — a guard that also refused
+    // `--manifest <--out>/salvage.json` would break `--help`'s own example.
+    let temp2 = TempDir::new().expect("tempdir");
+    let input_dir2 = temp2
+        .path()
+        .join("lz4_table-25801a0071a911f19b3225f9984c6a77");
+    stage_generation(&clean_dir, &input_dir2, "nb-1-big-");
+    let out2 = temp2.path().join("out");
+    let manifest2 = out2.join("salvage.json");
+    let output2 = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir2.to_str().unwrap(),
+        "--out",
+        out2.to_str().unwrap(),
+        "--manifest",
+        manifest2.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output2.status.code(),
+        Some(0),
+        "the documented `--manifest <--out>/salvage.json` invocation must still succeed; \
+         stderr={}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
+    assert!(
+        manifest2.is_file(),
+        "the documented invocation must actually write the manifest to {manifest2:?}"
+    );
+}

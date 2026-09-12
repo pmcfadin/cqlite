@@ -4,6 +4,11 @@
 //! rendering. Split out of `salvage.rs` (round 15, campsite rule / epic
 //! #1116) when that file crossed the ~800-line source threshold — a PURE
 //! MOVE, no behavior changed by the split.
+//!
+//! `--manifest` PATH SAFETY (does the operator's chosen path collide with the
+//! input?) lives in the sibling [`super::manifest_path`], split out the same way
+//! in round 22 when the guard added there took THIS file past the same
+//! threshold.
 
 use std::path::{Path, PathBuf};
 
@@ -274,6 +279,10 @@ fn write_manifest_json<W: std::io::Write>(
 }
 
 /// Write the JSON manifest (design D5) to `--manifest`, when given.
+///
+/// The path is validated by [`super::manifest_path::validate_manifest_path`] up
+/// front, before any salvage work — a `--manifest` inside the input directory
+/// never reaches this function (spec R5.1: `File::create` truncates).
 ///
 /// A failure here is a HARD error (roborev, issue #4196): D5/R8 make the
 /// manifest THE contract, so a run that reports 0/3 while silently failing

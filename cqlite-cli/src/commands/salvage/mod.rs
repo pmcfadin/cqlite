@@ -21,9 +21,11 @@ use cqlite_core::storage::write_engine::salvage::{salvage_sstable, SalvageOption
 use crate::cli_types::SalvageArgs;
 
 mod discovery;
+mod manifest_path;
 mod report;
 
 use discovery::{discover_salvage_inputs, table_name_from_input};
+use manifest_path::validate_manifest_path;
 use report::{
     exit_after_partial_failure, record_table_dir_level_findings, render_console,
     report_is_imperfect, write_manifest_file,
@@ -105,6 +107,18 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             );
             std::process::exit(1);
         }
+    }
+
+    // roborev, issue #4196, round-22 Low finding: `--out` is guarded above,
+    // but `--manifest` accepted ANY path and is written with
+    // `create_dir_all(parent)` + `File::create`, which TRUNCATES
+    // unconditionally — so `--manifest ./damaged-table-dir/nb-1-big-Statistics.db`
+    // destroyed a component of the very input this tool exists to preserve
+    // (spec R5.1). Checked HERE, before a single byte is read or written, so
+    // the refusal is a plain usage error and nothing has happened yet.
+    if let Err(collision) = validate_manifest_path(args) {
+        eprintln!("cqlite salvage: {collision}");
+        std::process::exit(1);
     }
 
     // roborev, issue #4196, round-12 High finding: `load_compaction_table_schema`

@@ -587,6 +587,12 @@ pub struct SalvageArgs {
     /// Write the JSON manifest (design D5 shape) to this path. A single-Data.db
     /// input writes one manifest object; a table-dir input writes a JSON array,
     /// one entry per generation salvaged.
+    ///
+    /// REFUSED (exit 1) when the path resolves inside the INPUT directory, or
+    /// already exists and is named like an SSTable component (`*.db`,
+    /// `*-TOC.txt`, `*-Digest.crc32`): the manifest is created with
+    /// `File::create`, which truncates, and salvage must not modify a byte of
+    /// its input (spec R5.1) — roborev, issue #4196, round-22 Low finding.
     #[arg(long)]
     pub manifest: Option<PathBuf>,
     /// Console rendering of the same manifest (text to stderr, or JSON to
