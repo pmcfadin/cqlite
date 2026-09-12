@@ -23,8 +23,17 @@
 //! on-disk property. See
 //! `salvage_of_healthy_bti_sstable_preserves_every_row`'s doc.
 //!
-//! Dataset doctrine (issue #719): SKIP when a fixture is genuinely absent;
-//! `CQLITE_REQUIRE_FIXTURES=1` turns that into a hard failure.
+//! Dataset doctrine, PER CASE (issues #719 / #3220 — never one suite-wide rule,
+//! which cannot see a case skipping behind its siblings):
+//!
+//!   * a case whose `-Data.db` is GIT-TRACKED fails CLOSED unconditionally, not
+//!     gated on `CQLITE_REQUIRE_FIXTURES` — absent means broken checkout, not
+//!     unfetched dataset. That is `test_comp.uncompressed_table` and
+//!     `test_da.multiclustering_table` here, each verified with `git ls-files`;
+//!   * a case backed only by the FETCHED corpus (`test_basic.composite_key_table`,
+//!     `test_basic.uncompressed_table` — committed JSONL sidecars, no tracked
+//!     binary) skips when absent, and `CQLITE_REQUIRE_FIXTURES=1` turns that skip
+//!     into a hard failure.
 
 // `not(tombstones)`: `salvage_sstable`'s decode-at-offset primitive is gated
 // the same way (see `write_engine::salvage`'s module doc) — this target must
@@ -148,6 +157,18 @@ fn first_diff(a: &[u8], b: &[u8]) -> Option<usize> {
 /// that point (consistent with the ~6.07-bytes/partition average across the
 /// whole 607-byte difference) — pointing at a small, fixed-size encoder
 /// field, not a structural defect.
+///
+/// `committed_fixture` (issue #3220, C-audit finding on this issue) —
+/// `true` when this case's `-Data.db` is GIT-TRACKED, which makes its absence a
+/// broken checkout rather than an unfetched dataset, and therefore a FAIL
+/// regardless of `CQLITE_REQUIRE_FIXTURES`. Verified per case with `git
+/// ls-files`, not assumed from the keyspace name: of the tables this file
+/// touches only `test_comp.uncompressed_table` is committed
+/// (`test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca70…/nb-1-big-Data.db`);
+/// `test_basic.composite_key_table` and `test_basic.uncompressed_table` carry
+/// committed JSONL sidecars but NO tracked binary (`.gitignore`'s `*.db` covers
+/// them and neither was force-added), so those two keep the skip route. Making
+/// them mandatory would red every checkout that has not fetched the corpus.
 async fn assert_healthy_salvage_matches_no_purge_compaction(
     keyspace: &str,
     table: &str,
@@ -155,8 +176,18 @@ async fn assert_healthy_salvage_matches_no_purge_compaction(
     out_generation: u64,
     byte_for_byte: &[&str],
     require_byte_parity: bool,
+    committed_fixture: bool,
 ) {
     let Some(root) = datasets_root::sstables_root_for_table(keyspace, table) else {
+        if committed_fixture {
+            panic!(
+                "COMMITTED fixture {keyspace}.{table} is absent — its *-Data.db is git-tracked, \
+                 so this is a broken checkout, NOT an unfetched dataset, and must never skip \
+                 (issue #3220, fail-closed UNCONDITIONALLY, not gated on \
+                 CQLITE_REQUIRE_FIXTURES); {}",
+                datasets_root::describe_search(keyspace, table)
+            );
+        }
         if require_fixtures_strict() {
             panic!(
                 "CQLITE_REQUIRE_FIXTURES=1 but {keyspace}.{table} is absent; {}",
@@ -353,7 +384,8 @@ async fn salvage_of_healthy_big_sstable_matches_no_purge_compaction() {
         "basic-types.cql",
         4196,
         &["Data.db", "Index.db", "Summary.db", "CRC.db"],
-        true, // require_byte_parity
+        true,  // require_byte_parity
+        false, // committed_fixture: NOT git-tracked (JSONL sidecar only)
     )
     .await;
 }
@@ -389,6 +421,15 @@ async fn salvage_of_healthy_uncompressed_big_sstable_matches_no_purge_compaction
         4197,
         &["Data.db", "Index.db", "Summary.db", "CRC.db"],
         true, // require_byte_parity
+        // committed_fixture: nb-1-big-Data.db IS git-tracked (verified with
+        // `git ls-files`), so an absence here is a broken checkout and this
+        // case fails closed unconditionally. Its `nb-1-big-CRC.db` is NOT
+        // committed, which does not matter for THIS case: salvage records an
+        // absent input CRC.db as a component finding and proceeds, and the
+        // output CRC.db is written by the writer. Verified by running this
+        // target with CQLITE_DATASETS_ROOT unset, against the checkout's own
+        // CRC.db-less copy: PASSes, 1 partition recovered.
+        true,
     )
     .await;
 }
@@ -416,6 +457,7 @@ async fn salvage_of_healthy_uncompressed_zero_clustering_columns_content_only() 
         4198,
         &["Data.db", "Index.db", "Summary.db", "CRC.db"],
         false, // require_byte_parity — see this test's doc
+        false, // committed_fixture: NOT git-tracked (JSONL sidecar only)
     )
     .await;
 }
@@ -766,20 +808,25 @@ async fn salvage_of_healthy_bti_sstable_preserves_every_row() {
     const TABLE: &str = "multiclustering_table";
     const SCHEMA_FILE: &str = "multiclustering-table-bti.cql";
 
-    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE) else {
-        if require_fixtures_strict() {
+    // COMMITTED fixture (issue #3220, C-audit finding): every component this
+    // case needs — `da-2-bti-{Data,Partitions,Rows,Statistics,Filter,
+    // CompressionInfo,Digest.crc32,TOC.txt}` AND the `da-2-bti-Data.db.jsonl`
+    // golden the Cassandra oracle below reads — is git-tracked (verified with
+    // `git ls-files`). So an absence is a broken checkout, not an unfetched
+    // dataset, and this case fails closed UNCONDITIONALLY rather than skipping
+    // under a `CQLITE_REQUIRE_FIXTURES` gate. `resolve_table_generation_dir`
+    // resolves by EVIDENCE across every candidate root and its `Err` carries
+    // the full search diagnostic; a fleet `/data/datasets` that lacks this very
+    // table (#3032) is exactly why a keyspace-granular resolver must not be
+    // used here.
+    let fixture_dir =
+        datasets_root::resolve_table_generation_dir(KEYSPACE, TABLE).unwrap_or_else(|searched| {
             panic!(
-                "CQLITE_REQUIRE_FIXTURES=1 but {KEYSPACE}.{TABLE} is absent; {}",
-                datasets_root::describe_search(KEYSPACE, TABLE)
-            );
-        }
-        eprintln!("[issue_4196] {KEYSPACE}.{TABLE} fixture absent (dataset not fetched); skipping");
-        return;
-    };
-    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE}: no usable generation directory"));
+                "COMMITTED fixture {KEYSPACE}.{TABLE} is absent — its *-Data.db and \
+                 *-Data.db.jsonl golden are git-tracked, so this is a broken checkout, NOT an \
+                 unfetched dataset, and must never skip. {searched}"
+            )
+        });
 
     let schema = table_schema(SCHEMA_FILE, TABLE, KEYSPACE);
     let data_db = single_data_db(&fixture_dir);

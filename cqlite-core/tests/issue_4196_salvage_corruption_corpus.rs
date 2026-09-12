@@ -30,6 +30,7 @@
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
 use cqlite_core::storage::write_engine::salvage::{
@@ -230,19 +231,69 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
 /// tempdir and flipping one byte, mirroring
 /// `issue_1396_uncompressed_crc_verify.rs::plain_scan_over_chunk0_flipped_uncompressed_fixture_fails_fast`'s
 /// established construction.
+///
+/// # Why this case is NOT fail-closed, unlike its siblings (issue #3220)
+///
+/// The C-audit on issue #4196 asked for this case to become `must_run` on the
+/// grounds that `test_comp.uncompressed_table` is a committed fixture. Its
+/// `-Data.db` is indeed git-tracked — but this case ALSO needs
+/// `nb-1-big-CRC.db`, and that component is **not** committed:
+/// `.gitignore:180`'s `*.db` covers the whole corpus and only individually
+/// force-added files are tracked, so
+/// `git ls-files test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca70…/`
+/// lists nine files and no `CRC.db` (contrast
+/// `test-data/datasets/corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-CRC.db`,
+/// which IS tracked). A fresh checkout therefore cannot run this case at all, so
+/// making it unconditionally mandatory would red every unfetched checkout —
+/// exactly the false failure the fail-closed rule is not for. It stays skippable
+/// (hard under `CQLITE_REQUIRE_FIXTURES=1`, which the gate's dataset lanes set),
+/// and the skip below NAMES WHICH of the two causes fired rather than blaming a
+/// missing table for a missing component. Force-adding that 16-byte `CRC.db`
+/// would let this become `must_run`; that is a test-data change with its own
+/// parity-manifest/report consequences, so it is left as follow-up rather than
+/// smuggled into a review-fix round.
 #[tokio::test]
 async fn uncompressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
     let Some(root) = candidate_base_roots()
         .into_iter()
         .find(|root| salvage_corpus::clean_uncompressed_table_dir(root).is_some())
     else {
-        skip_or_require(
-            "clean test_comp.uncompressed_table source",
-            &format!(
-                "no candidate root carries sstables/{CLEAN_KEYSPACE}/uncompressed_table-*; \
+        // Distinguish "the table is absent" from "the table is there but its
+        // un-committed CRC.db is not" — `clean_uncompressed_table_dir` requires
+        // both, and conflating them sends the reader to the wrong remedy.
+        let roots_with_table: Vec<PathBuf> = candidate_base_roots()
+            .into_iter()
+            .filter(|root| {
+                std::fs::read_dir(root.join("sstables").join(CLEAN_KEYSPACE))
+                    .map(|rd| {
+                        rd.flatten().any(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .starts_with("uncompressed_table-")
+                                && e.path().is_dir()
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        let reason = if roots_with_table.is_empty() {
+            format!(
+                "no candidate root carries sstables/{CLEAN_KEYSPACE}/uncompressed_table-* at all; \
                  searched {:?}",
                 candidate_base_roots()
-            ),
+            )
+        } else {
+            format!(
+                "sstables/{CLEAN_KEYSPACE}/uncompressed_table-* IS present under {roots_with_table:?} \
+                 but carries no nb-1-big-CRC.db, which this case needs and which is NOT git-tracked \
+                 (.gitignore's *.db; never force-added) — only a FETCHED corpus supplies it. \
+                 Remedy: bash test-data/scripts/fetch-datasets.sh, then export the \
+                 CQLITE_DATASETS_ROOT it prints"
+            )
+        };
+        skip_or_require(
+            "clean test_comp.uncompressed_table source (with CRC.db)",
+            &reason,
         );
         return;
     };

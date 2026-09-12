@@ -30,6 +30,26 @@ fn datasets_root() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The one COMMITTED fixture this file's generation-discovery cases stage from:
+/// `test_comp.lz4_table`'s whole `nb-1-big-*` component set is git-tracked
+/// (`git ls-files test-data/datasets/sstables/test_comp/`), so those cases fail
+/// closed rather than skip.
+const LZ4_TABLE_FIXTURE: &str = "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77";
+
+/// The git-tracked components of [`LZ4_TABLE_FIXTURE`] the staging cases copy.
+/// Listed explicitly (rather than "whatever is in the directory") so a fixture
+/// that regenerates with a component MISSING fails by NAME.
+const LZ4_TABLE_COMPONENTS: &[&str] = &[
+    "nb-1-big-Data.db",
+    "nb-1-big-Index.db",
+    "nb-1-big-Summary.db",
+    "nb-1-big-Statistics.db",
+    "nb-1-big-CompressionInfo.db",
+    "nb-1-big-Filter.db",
+    "nb-1-big-Digest.crc32",
+    "nb-1-big-TOC.txt",
+];
+
 /// Every candidate BASE root (the `CQLITE_DATASETS_ROOT` corpus, then the
 /// checkout's own committed corpus) — issue #3220 doctrine, mirrored from
 /// the sibling core corpus test's `candidate_base_roots()` /
@@ -61,6 +81,38 @@ fn resolve_fixture(relative_fixture: &str) -> Option<PathBuf> {
         .into_iter()
         .map(|root| root.join(relative_fixture))
         .find(|dir| usable(dir))
+}
+
+/// Like [`resolve_fixture`], but for a fixture whose binaries are GIT-TRACKED:
+/// an absence is a broken checkout, not an unfetched dataset, so it FAILS
+/// unconditionally instead of skipping — never gated on
+/// `CQLITE_REQUIRE_FIXTURES` (issue #3220; C-audit finding on issue #4196).
+///
+/// `committed_components` names the components the caller actually needs, and
+/// each is asserted PRESENT: a candidate root can carry a same-named directory
+/// holding only the JSONL sidecar, or (as `test_comp.uncompressed_table`'s
+/// un-force-added `nb-1-big-CRC.db` shows) a partial component set. "The
+/// directory resolved" is not "the fixture is usable", and a case that fails
+/// closed on absence must not then fail obscurely on incompleteness.
+fn resolve_committed_fixture(relative_fixture: &str, committed_components: &[&str]) -> PathBuf {
+    let dir = resolve_fixture(relative_fixture).unwrap_or_else(|| {
+        panic!(
+            "COMMITTED fixture {relative_fixture} is absent — its binaries are git-tracked, so \
+             this is a broken checkout, NOT an unfetched dataset, and must never skip (issue \
+             #3220, fail-closed UNCONDITIONALLY, not gated on CQLITE_REQUIRE_FIXTURES). Searched \
+             candidate base roots: {:?}",
+            candidate_base_roots()
+        )
+    });
+    for component in committed_components {
+        let path = dir.join(component);
+        assert!(
+            path.is_file(),
+            "COMMITTED fixture {relative_fixture} resolved to {dir:?} but component {component} \
+             is missing — a resolved directory is not a usable fixture"
+        );
+    }
+    dir
 }
 
 fn skip_or_require(what: &str, reason: &str) -> bool {
@@ -320,14 +372,10 @@ fn post_write_manifest_failure_with_all_refused_exits_2_not_1() {
 /// rather than aborting the whole run on the malformed one.
 #[test]
 fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
-    const FIXTURE: &str = "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77";
-    let Some(clean_dir) = resolve_fixture(FIXTURE) else {
-        skip_or_require(
-            "lz4_table fixture",
-            &format!("no candidate root carries {FIXTURE}"),
-        );
-        return;
-    };
+    // COMMITTED fixture: `test_comp.lz4_table`'s whole `nb-1-big-*` component
+    // set is git-tracked (verified with `git ls-files`), so this case fails
+    // closed unconditionally rather than skipping (issue #3220).
+    let clean_dir = resolve_committed_fixture(LZ4_TABLE_FIXTURE, LZ4_TABLE_COMPONENTS);
     let schema = schemas_dir().join("compression-parity.cql");
     let temp = TempDir::new().expect("tempdir");
     let input_dir = temp.path().join("input");
@@ -424,14 +472,8 @@ fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
 /// with zero trace.
 #[test]
 fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
-    const FIXTURE: &str = "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77";
-    let Some(clean_dir) = resolve_fixture(FIXTURE) else {
-        skip_or_require(
-            "lz4_table fixture",
-            &format!("no candidate root carries {FIXTURE}"),
-        );
-        return;
-    };
+    // COMMITTED fixture — see the sibling test above (issue #3220).
+    let clean_dir = resolve_committed_fixture(LZ4_TABLE_FIXTURE, LZ4_TABLE_COMPONENTS);
     let schema = schemas_dir().join("compression-parity.cql");
     let temp = TempDir::new().expect("tempdir");
     let input_dir = temp.path().join("input");
