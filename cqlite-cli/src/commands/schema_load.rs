@@ -16,6 +16,23 @@ use std::path::Path;
 /// honoring the #284 quiet/tty contract should call
 /// [`load_schema_file_with_status`] instead so the status can be suppressed under
 /// `--quiet` / non-TTY.
+///
+/// # A handler whose STDOUT is a machine-readable contract must never call this
+///
+/// Roborev, issue #4196, round-22 Medium finding — the concrete instance:
+/// `commands::write::load_compaction_table_schema_for_table`'s JSON branch
+/// delegated HERE, so `cqlite --schema s.json salvage … --out-format json` got
+/// `📋 Loading schema from: …` and `📝 Parsing JSON schema format` on STDOUT
+/// ahead of the design-D5 salvage manifest — which is written to that same
+/// stdout as THE machine-readable contract — and `| jq .` failed to parse. Every
+/// other salvage diagnostic already goes to stderr. A `.cql` schema was
+/// unaffected (that path parses inline and prints nothing), which is exactly why
+/// it went unnoticed.
+///
+/// The status lines are not merely noise in that case, they are CORRUPTION of a
+/// documented output format, so the rule is stronger than "prefer the quiet
+/// variant": a handler that writes structured data to stdout MUST call
+/// [`load_schema_file_with_status`] with `show_status = false`.
 pub(crate) fn load_schema_file(
     schema_path: &Path,
     auto_detect: bool,

@@ -447,9 +447,8 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
 /// keyspace from `CREATE KEYSPACE` / `USE` — so a realistic file with
 /// `CREATE TYPE` (and keyspace) statements before the table parses correctly
 /// (roborev #1031). JSON files fall back to the QUIET single-statement loader
-/// (`load_schema_file_with_status(..., show_status = false)`) — see
-/// [`load_compaction_table_schema_for_table`]'s non-CQL branch for why the
-/// stdout-printing wrapper must never be used here.
+/// (`schema_load::load_schema_file_with_status(..., show_status = false)`, whose
+/// doc records why the stdout-printing wrapper must never be used here).
 ///
 /// Thin wrapper over [`load_compaction_table_schema_for_table`] with
 /// `target_table: None` (the historical "first table wins" behavior `compact`
@@ -498,22 +497,12 @@ pub(crate) fn load_compaction_table_schema_for_table(
         "cql" | "sql" | ""
     );
     if !is_cql {
-        // JSON (or other) — the single-statement loader handles it; no
-        // table selection needed (see this function's doc).
-        //
-        // `load_schema_file_with_status(..., show_status = false)`, NEVER the
-        // `load_schema_file` wrapper (roborev, issue #4196, round-22 Medium
-        // finding): that wrapper hard-codes `show_status = true` and
-        // unconditionally `println!`s `📋 Loading schema from: …` and
-        // `📝 Parsing JSON schema format` to STDOUT. `salvage --out-format
-        // json` writes the D5 manifest — the machine-readable CONTRACT — to
-        // that same stdout, so `cqlite --schema s.json salvage … --out-format
-        // json | jq .` got two emoji lines before the JSON and failed to
-        // parse; every other salvage diagnostic already goes to stderr.
-        // Quiet is also what the `.cql` branch below does (it parses inline
-        // and prints nothing at all), so this makes the two branches of ONE
-        // function agree instead of diverging on stdout chatter — the #284 /
-        // #1506 quiet contract's intended entry point.
+        // JSON (or other) — the single-statement loader handles it; no table
+        // selection needed (see this function's doc). QUIET (`show_status =
+        // false`), NEVER the stdout-printing `load_schema_file` wrapper
+        // (roborev, issue #4196, round-22 Medium finding): `salvage
+        // --out-format json` writes the D5 manifest to that same stdout. Full
+        // reasoning in `schema_load::load_schema_file`'s doc.
         return crate::commands::schema_load::load_schema_file_with_status(
             schema_path,
             false,
