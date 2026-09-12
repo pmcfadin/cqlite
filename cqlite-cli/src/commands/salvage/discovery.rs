@@ -26,7 +26,8 @@ pub(super) struct SalvageDiscovery {
 /// `args.input` is a single `Data.db` file, or a table directory whose
 /// generations (BIG `nb-*-big-Data.db` AND BTI `da-*-bti-Data.db`, each with
 /// a sibling `TOC.txt` publication barrier) are salvaged separately, oldest
-/// generation first for deterministic output.
+/// generation first — then, for a TIE, by path — for deterministic output on
+/// every filesystem (roborev, issue #4196, round-22 Low finding).
 ///
 /// A file whose generation number cannot be parsed out of its name is NEVER
 /// folded into the sortable set at sort key `0` (roborev, issue #4196,
@@ -110,11 +111,34 @@ pub(super) fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDis
             }),
         }
     }
-    found.sort_by_key(|(g, _)| *g);
+    sort_generations(&mut found);
     Ok(SalvageDiscovery {
         generations: found.into_iter().map(|(_, p)| p).collect(),
         skipped,
     })
+}
+
+/// Order the discovered generations TOTALLY: generation number ascending, then
+/// PATH ascending as a tiebreak.
+///
+/// Roborev, issue #4196, round-22 Low finding: this was
+/// `found.sort_by_key(|(g, _)| *g)` — the generation ALONE. `sort_by_key` is
+/// STABLE, so tied generations kept `read_dir` order, which is filesystem- and
+/// platform-dependent. A mixed-format mid-migration table dir holding both
+/// `nb-1-big-Data.db` and `da-1-bti-Data.db` (the exact case
+/// [`discover_salvage_inputs`]'s loop scans BOTH families for) therefore
+/// salvaged in a non-reproducible order, contradicting that function's own
+/// "oldest generation first for deterministic output" contract — and with it the
+/// D5 manifest ARRAY's entry order, which is a machine-readable output.
+///
+/// Factored out as its own function specifically so the property can be tested
+/// as ORDER-INVARIANCE (`sort_generations` produces the same result from any
+/// input permutation) rather than through `read_dir`: the end-to-end version of
+/// this test PASSES on macOS/APFS even with the tie-blind sort restored, because
+/// that filesystem happened to enumerate the entries in the expected order — a
+/// test that cannot fail on the machine running it proves nothing.
+fn sort_generations(found: &mut [(u64, PathBuf)]) {
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 }
 
 /// Derive the target table's DIRECTORY NAME from `input` — either `input`
@@ -204,9 +228,107 @@ fn is_table_id_suffix(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_table_id_dir, table_name_from_input};
+    use super::{
+        discover_salvage_inputs, is_table_id_dir, sort_generations, table_name_from_input,
+    };
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    /// Stage a published generation: `<prefix>-Data.db` plus its `-TOC.txt`
+    /// publication barrier (contents irrelevant — discovery reads names only).
+    fn published(dir: &Path, prefix: &str) {
+        std::fs::write(dir.join(format!("{prefix}-Data.db")), b"data")
+            .unwrap_or_else(|e| panic!("write {prefix}-Data.db: {e}"));
+        std::fs::write(dir.join(format!("{prefix}-TOC.txt")), b"Data.db\n")
+            .unwrap_or_else(|e| panic!("write {prefix}-TOC.txt: {e}"));
+    }
+
+    /// Roborev, issue #4196, round-22 Low finding — TIED generation numbers
+    /// must order DETERMINISTICALLY, and the order must not depend on the order
+    /// the entries were DISCOVERED in.
+    ///
+    /// This is the case that actually FAILS under the old
+    /// `sort_by_key(|(g, _)| *g)`: that sort is STABLE, so it returns tied
+    /// entries in input order — i.e. a DIFFERENT answer per permutation, which
+    /// in `discover_salvage_inputs` is whatever `read_dir` yields on the
+    /// operator's filesystem. Asserted as ORDER-INVARIANCE over every
+    /// permutation of a tied pair, so it cannot pass by luck.
+    ///
+    /// The end-to-end sibling test below (through a real `read_dir`) is
+    /// deliberately NOT the primary pin: it passes on macOS/APFS even with the
+    /// defect restored, because that filesystem happened to enumerate the
+    /// entries in the expected order — measured, not assumed.
+    #[test]
+    fn tied_generations_sort_identically_from_every_input_permutation() {
+        let nb = PathBuf::from("/data/t/nb-1-big-Data.db");
+        let da = PathBuf::from("/data/t/da-1-bti-Data.db");
+        // `da-…` < `nb-…` lexicographically, so path order is the tiebreak.
+        let expected = vec![(1u64, da.clone()), (1u64, nb.clone())];
+        for input in [
+            vec![(1u64, nb.clone()), (1u64, da.clone())],
+            vec![(1u64, da.clone()), (1u64, nb.clone())],
+        ] {
+            let mut found = input.clone();
+            sort_generations(&mut found);
+            assert_eq!(
+                found, expected,
+                "tied generations must sort to ONE canonical order whatever order they were \
+                 discovered in (input was {input:?}) — a stable sort on the generation alone \
+                 returns them in discovery order, which is `read_dir`'s, which is the \
+                 filesystem's"
+            );
+        }
+    }
+
+    /// The same ordering end to end, through a real `read_dir`, and covering the
+    /// NUMERIC half (generation 2 before 10, never lexicographic). The FULL
+    /// ordering is asserted, not just the first element.
+    ///
+    /// Weaker than its sibling above by construction — see that test's doc.
+    #[test]
+    fn tied_generations_order_by_path_and_the_full_order_is_deterministic() {
+        let temp = TempDir::new().expect("tempdir");
+        let dir = temp.path();
+        // Written in an order that is neither the expected output order nor its
+        // reverse, so a pass cannot be an artifact of insertion order.
+        published(dir, "nb-2-big");
+        published(dir, "nb-1-big");
+        published(dir, "da-1-bti");
+        published(dir, "da-10-bti");
+
+        let discovery = discover_salvage_inputs(dir).expect("discovery must succeed");
+        let names: Vec<String> = discovery
+            .generations
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                // generation 1, tie broken by path: `da-` sorts before `nb-`
+                "da-1-bti-Data.db".to_string(),
+                "nb-1-big-Data.db".to_string(),
+                // then 2, then 10 — NUMERIC, never lexicographic ("10" < "2")
+                "nb-2-big-Data.db".to_string(),
+                "da-10-bti-Data.db".to_string(),
+            ],
+            "generations must be ordered by generation number, then by path"
+        );
+        assert!(
+            discovery.skipped.is_empty(),
+            "every staged generation is published and well-named; got {:?}",
+            discovery
+                .skipped
+                .iter()
+                .map(|s| s.path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
 
     /// A syntactically valid Cassandra table id: exactly 32 lowercase hex chars.
     const ID: &str = "9f3a1b2c4d5e6f708192a3b4c5d6e7e9";
