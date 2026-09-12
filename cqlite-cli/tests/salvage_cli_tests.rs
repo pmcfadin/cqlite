@@ -965,3 +965,125 @@ fn unmatched_directory_name_without_table_flag_fails_closed() {
         "--out must contain nothing when schema resolution itself failed before any I/O"
     );
 }
+
+/// Copy every component of ONE generation (`prefix`, e.g. `"nb-1-big-"`) out of
+/// a resolved fixture directory into `dest`, skipping the human-readable
+/// SIDECARS the corpus keeps alongside the real components
+/// (`*-Data.db.jsonl`, `*-Statistics.db.txt`) — they are not SSTable
+/// components and a salvage input directory must not carry them.
+///
+/// Returns the names copied, and asserts a `*-Data.db` was among them: a
+/// staging helper that silently produced an EMPTY input directory would turn
+/// every case built on it into an exit-1 "no published *-Data.db" run that
+/// asserts nothing about the property under test.
+fn stage_generation(clean_dir: &Path, dest: &Path, prefix: &str) -> Vec<String> {
+    std::fs::create_dir_all(dest).unwrap_or_else(|e| panic!("create {dest:?}: {e}"));
+    let mut copied = Vec::new();
+    for entry in std::fs::read_dir(clean_dir)
+        .unwrap_or_else(|e| panic!("read {clean_dir:?}: {e}"))
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(prefix) || name.ends_with(".jsonl") || name.ends_with(".db.txt") {
+            continue;
+        }
+        std::fs::copy(entry.path(), dest.join(&name))
+            .unwrap_or_else(|e| panic!("copy {name}: {e}"));
+        copied.push(name);
+    }
+    assert!(
+        copied.iter().any(|n| n.ends_with("-Data.db")),
+        "staging {clean_dir:?} with prefix {prefix:?} copied no *-Data.db — every case built on \
+         this helper would then measure an exit-1 empty-input run instead of its own property; \
+         copied={copied:?}"
+    );
+    copied.sort();
+    copied
+}
+
+/// Roborev, issue #4196, round-22 Medium finding — with a JSON `--schema`
+/// file, the `--out-format json` manifest must be the ONLY thing on STDOUT.
+///
+/// Design D5 makes the JSON manifest the machine-readable contract, and every
+/// other salvage diagnostic already goes to stderr. The defect: the non-CQL
+/// branch of `load_compaction_table_schema_for_table` delegated to the
+/// `load_schema_file` WRAPPER, which hard-codes `show_status = true` and
+/// unconditionally `println!`s `📋 Loading schema from: …` and `📝 Parsing
+/// JSON schema format` to stdout — so `cqlite --schema s.json salvage …
+/// --out-format json | jq .` got two emoji lines before the JSON and failed to
+/// parse. A `.cql` schema was unaffected (that branch parses inline and prints
+/// nothing), which is exactly why this went unnoticed: every other case in
+/// this file uses a `.cql` schema.
+///
+/// Asserted as the PARSE, not as the absence of a string: "stdout is valid
+/// JSON" is the property a consumer depends on, and it holds for no other
+/// prefix either. The two emoji lines are then additionally named so a
+/// failure says WHICH regression came back.
+#[test]
+fn json_schema_file_leaves_stdout_pure_json() {
+    // COMMITTED fixture (issue #3220) — fails closed, never skips.
+    let clean_dir = resolve_committed_fixture(LZ4_TABLE_FIXTURE, LZ4_TABLE_COMPONENTS);
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp
+        .path()
+        .join("lz4_table-25801a0071a911f19b3225f9984c6a77");
+    stage_generation(&clean_dir, &input_dir, "nb-1-big-");
+
+    // The JSON schema form the CLI's own loader accepts (`schema_load.rs`'s
+    // `parse_json_schema`): keyspace, table, and `columns: {name -> {type,
+    // kind}}`. Same table shape as `compression-parity.cql`'s `lz4_table`.
+    let schema = temp.path().join("lz4_table.json");
+    std::fs::write(
+        &schema,
+        br#"{
+  "keyspace": "test_comp",
+  "table": "lz4_table",
+  "columns": {
+    "pk":   {"type": "int",  "kind": "PartitionKey"},
+    "ck":   {"type": "int",  "kind": "ClusteringColumn"},
+    "body": {"type": "text", "kind": "Regular"}
+  }
+}"#,
+    )
+    .expect("write JSON schema");
+
+    let out = temp.path().join("out");
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--out-format",
+        "json",
+    ]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a healthy generation with a JSON --schema must exit 0; stdout={stdout}\nstderr={stderr}"
+    );
+    let manifest: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout must parse as the D5 JSON manifest and NOTHING else — schema-loading status \
+             chatter on stdout corrupts the machine-readable contract: {e}\nstdout was:\n{stdout}"
+        )
+    });
+    assert!(
+        manifest
+            .as_array()
+            .map(|entries| entries.len() == 1)
+            .unwrap_or(false),
+        "expected a one-entry JSON array (table-dir input, one generation); got {manifest}"
+    );
+    for chatter in ["Loading schema from", "Parsing JSON schema"] {
+        assert!(
+            !stdout.contains(chatter),
+            "stdout must carry no schema-loading status line ({chatter:?} found) — it belongs on \
+             stderr, like every other salvage diagnostic; stdout was:\n{stdout}"
+        );
+    }
+}
