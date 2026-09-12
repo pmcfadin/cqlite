@@ -15,6 +15,14 @@
 //! two share the real reconciliation/conversion code rather than two
 //! implementations that happen to agree on one fixture (design D1).
 //!
+//! The BTI case additionally asserts R1.1's OTHER half — the salvaged output's
+//! decode against the fixture's committed `*-Data.db.jsonl` `sstabledump`
+//! golden. That half is not decoration: without it the BTI lane was a
+//! CQLite-written + CQLite-read round trip, which is invariant to a uniform
+//! framing error (CLAUDE.md's #3042 blind spot) and therefore cannot validate an
+//! on-disk property. See
+//! `salvage_of_healthy_bti_sstable_preserves_every_row`'s doc.
+//!
 //! Dataset doctrine (issue #719): SKIP when a fixture is genuinely absent;
 //! `CQLITE_REQUIRE_FIXTURES=1` turns that into a hard failure.
 
@@ -412,6 +420,309 @@ async fn salvage_of_healthy_uncompressed_zero_clustering_columns_content_only() 
     .await;
 }
 
+// ===========================================================================
+// The Cassandra-written oracle for the BTI healthy path (spec R1.1).
+//
+// #3042 doctrine: a CQLite-WRITTEN + CQLite-READ round trip is INVARIANT to a
+// uniform framing/serialization error — both sides make the identical mistake,
+// the round trip closes, and the test stays green while real Cassandra-written
+// data reads wrong. The BTI healthy-path test below used to compare CQLite's
+// decode of the input against CQLite's decode of CQLite's own output and
+// nothing else, so it could not validate an on-disk property at all.
+//
+// The oracle here is the committed `*-Data.db.jsonl` — real `sstabledump`
+// output over the real Cassandra 5.0.2 `da` fixture, committed beside its
+// Data.db. Every expectation below is read out of THAT file; nothing is
+// derived from CQLite's own behaviour or hardcoded from a previous CQLite run.
+// ===========================================================================
+
+/// The logical content of one `test_da.multiclustering_table` row, keyed by its
+/// full primary key: `(pk, bucket, seq) -> payload`.
+///
+/// A `BTreeMap` (not a `Vec`) so the comparison is set-equality in BOTH
+/// directions — a salvaged output missing a row and a salvaged output
+/// fabricating one are distinct, separately-reported failures.
+type MulticlusteringRows = std::collections::BTreeMap<(i32, String, i32), String>;
+
+/// Parse the committed `sstabledump` golden of `test_da.multiclustering_table`
+/// into [`MulticlusteringRows`].
+///
+/// FAILS CLOSED on every shape this extractor does not fully model, rather than
+/// silently comparing a subset: an unexpected key on a partition object (e.g. a
+/// `deletion_info` a regenerated fixture grew), a row `type` other than `row`,
+/// a clustering that is not `[text, int]`, a cell carrying anything beyond
+/// `name`/`value`, a row with more than the one `payload` cell, or a duplicate
+/// primary key. A golden whose shape drifts must red this lane, not quietly
+/// narrow what it proves.
+fn load_multiclustering_golden(path: &Path) -> MulticlusteringRows {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!(
+            "the sstabledump golden {path:?} is committed beside its Data.db and must read \
+             (it is THE Cassandra-written oracle for this lane — a missing golden is a hard \
+             failure, never a skip): {e}"
+        )
+    });
+    let mut out = MulticlusteringRows::new();
+    let mut partitions = 0usize;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let doc: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("golden {path:?} line is not JSON: {e}"));
+        partitions += 1;
+
+        let partition = doc
+            .get("partition")
+            .and_then(|p| p.as_object())
+            .unwrap_or_else(|| panic!("golden {path:?}: partition object missing"));
+        for key in partition.keys() {
+            assert!(
+                matches!(key.as_str(), "key" | "position"),
+                "golden {path:?}: unmodelled partition field {key:?} — this extractor compares \
+                 live rows only, so a partition-level tombstone/deletion must red this lane \
+                 rather than be silently dropped from the oracle"
+            );
+        }
+        let pk_rendered = partition
+            .get("key")
+            .and_then(|k| k.as_array())
+            .and_then(|a| match a.as_slice() {
+                [one] => one.as_str(),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("golden {path:?}: partition key is not a single-component array")
+            });
+        // sstabledump renders an `int` partition key as a decimal STRING.
+        let pk: i32 = pk_rendered
+            .parse()
+            .unwrap_or_else(|e| panic!("golden {path:?}: partition key {pk_rendered:?}: {e}"));
+
+        for row in doc
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .unwrap_or_else(|| panic!("golden {path:?}: rows array missing"))
+        {
+            let row = row
+                .as_object()
+                .unwrap_or_else(|| panic!("golden {path:?}: row is not an object"));
+            for key in row.keys() {
+                assert!(
+                    matches!(
+                        key.as_str(),
+                        "type" | "position" | "clustering" | "liveness_info" | "cells"
+                    ),
+                    "golden {path:?}: unmodelled row field {key:?} (pk={pk}) — a row deletion or \
+                     range bound must red this lane rather than be dropped from the oracle"
+                );
+            }
+            assert_eq!(
+                row.get("type").and_then(|t| t.as_str()),
+                Some("row"),
+                "golden {path:?}: unmodelled row type (pk={pk}); this oracle covers live \
+                 clustered rows only"
+            );
+            let clustering = row
+                .get("clustering")
+                .and_then(|c| c.as_array())
+                .unwrap_or_else(|| panic!("golden {path:?}: clustering missing (pk={pk})"));
+            let (bucket, seq) = match clustering.as_slice() {
+                [b, s] => (
+                    b.as_str()
+                        .unwrap_or_else(|| {
+                            panic!("golden {path:?}: clustering[0] (bucket text) is not a string")
+                        })
+                        .to_string(),
+                    i32::try_from(s.as_i64().unwrap_or_else(|| {
+                        panic!("golden {path:?}: clustering[1] (seq int) is not an integer")
+                    }))
+                    .unwrap_or_else(|e| panic!("golden {path:?}: clustering[1] out of i32: {e}")),
+                ),
+                other => panic!(
+                    "golden {path:?}: clustering arity {} — this table declares \
+                     PRIMARY KEY (pk, bucket, seq); got {other:?}",
+                    other.len()
+                ),
+            };
+
+            let cells = row
+                .get("cells")
+                .and_then(|c| c.as_array())
+                .unwrap_or_else(|| panic!("golden {path:?}: cells missing (pk={pk})"));
+            let [cell] = cells.as_slice() else {
+                panic!(
+                    "golden {path:?}: expected exactly ONE cell per row (the single `payload` \
+                     column); got {} for pk={pk} {bucket}/{seq}",
+                    cells.len()
+                );
+            };
+            let cell = cell
+                .as_object()
+                .unwrap_or_else(|| panic!("golden {path:?}: cell is not an object"));
+            for key in cell.keys() {
+                assert!(
+                    matches!(key.as_str(), "name" | "value"),
+                    "golden {path:?}: unmodelled cell field {key:?} — a cell tombstone, TTL or \
+                     cell path must red this lane rather than be dropped from the oracle"
+                );
+            }
+            assert_eq!(
+                cell.get("name").and_then(|n| n.as_str()),
+                Some("payload"),
+                "golden {path:?}: unexpected cell column (pk={pk})"
+            );
+            let payload = cell
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("golden {path:?}: payload value is not a string"))
+                .to_string();
+
+            let previous = out.insert((pk, bucket.clone(), seq), payload);
+            assert!(
+                previous.is_none(),
+                "golden {path:?}: duplicate primary key ({pk}, {bucket}, {seq}) — a map-shaped \
+                 oracle would silently drop one of them"
+            );
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "golden {path:?} yielded ZERO rows — a present-but-empty oracle must never pass \
+         (issue #3220 / CLAUDE.md's 0-rows-when-present rule)"
+    );
+    eprintln!(
+        "[issue_4196] Cassandra oracle {path:?}: {partitions} partition(s), {} row(s).",
+        out.len()
+    );
+    out
+}
+
+/// Project CQLite's compaction-row decode of a `test_da.multiclustering_table`
+/// SSTable onto the same `(pk, bucket, seq) -> payload` shape the golden is
+/// parsed into.
+///
+/// `subject` names what is being decoded, for the diagnostics. Fails closed on
+/// any row shape this projection does not model (a tombstone, a range marker, a
+/// complex column, a missing or wrongly-typed key component) — a salvaged
+/// output that emitted one of those is a real defect, not something to skip.
+fn decoded_as_multiclustering_rows(
+    subject: &str,
+    rows: &[cqlite_core::storage::sstable::reader::CompactionRow],
+) -> MulticlusteringRows {
+    use cqlite_core::storage::sstable::reader::CompactionRowData;
+    use cqlite_core::types::Value;
+
+    let mut out = MulticlusteringRows::new();
+    for row in rows {
+        // `pk int` — a single-component partition key is stored as its raw
+        // 4-byte big-endian serialization (Cassandra's Int32Type), which is
+        // also what sstabledump renders as a decimal string.
+        let key_bytes = row.key.as_bytes();
+        let pk_bytes: [u8; 4] = key_bytes.try_into().unwrap_or_else(|_| {
+            panic!(
+                "{subject}: partition key is {} byte(s), expected the 4-byte Int32Type \
+                 serialization of `pk int`; bytes={key_bytes:02x?}",
+                key_bytes.len()
+            )
+        });
+        let pk = i32::from_be_bytes(pk_bytes);
+
+        let CompactionRowData::Live {
+            simple, complex, ..
+        } = &row.row_data
+        else {
+            panic!(
+                "{subject}: pk={pk} decoded to a non-live row ({:?}) — this fixture is a healthy, \
+                 tombstone-free Cassandra write, so anything else means salvage changed the \
+                 content",
+                row.row_data
+            );
+        };
+        assert!(
+            complex.is_empty(),
+            "{subject}: pk={pk} carries complex (multi-cell) columns, but this table declares only \
+             scalars; got {complex:?}"
+        );
+
+        let cell = |column: &str| -> &Value {
+            &simple
+                .iter()
+                .find(|c| c.column == column)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{subject}: pk={pk} row has no `{column}` cell; columns present: {:?}",
+                        simple.iter().map(|c| &c.column).collect::<Vec<_>>()
+                    )
+                })
+                .value
+        };
+        let bucket = cell("bucket")
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{subject}: pk={pk} `bucket` is not text: {:?}",
+                    cell("bucket")
+                )
+            })
+            .to_string();
+        let seq = match cell("seq") {
+            Value::Integer(v) => *v,
+            other => panic!("{subject}: pk={pk} `seq` is not an int: {other:?}"),
+        };
+        let payload = cell("payload")
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{subject}: pk={pk} `payload` is not text: {:?}",
+                    cell("payload")
+                )
+            })
+            .to_string();
+
+        let previous = out.insert((pk, bucket.clone(), seq), payload);
+        assert!(
+            previous.is_none(),
+            "{subject}: duplicate primary key ({pk}, {bucket}, {seq}) — a reconciled read must \
+             surface each row once"
+        );
+    }
+    out
+}
+
+/// Report the FIRST difference in each direction between the Cassandra oracle
+/// and CQLite's decode of the salvaged output, by primary key — a bare
+/// `assert_eq!` on two 468-entry maps prints two walls of text with the
+/// difference buried in them.
+fn assert_rows_match_golden(
+    subject: &str,
+    golden: &MulticlusteringRows,
+    decoded: &MulticlusteringRows,
+) {
+    if let Some(missing) = golden.keys().find(|k| !decoded.contains_key(*k)) {
+        panic!(
+            "{subject}: LOST row {missing:?} — present in the Cassandra sstabledump oracle, \
+             absent from CQLite's decode of the salvaged output ({} of {} oracle rows present)",
+            decoded.len(),
+            golden.len()
+        );
+    }
+    if let Some(extra) = decoded.keys().find(|k| !golden.contains_key(*k)) {
+        panic!(
+            "{subject}: FABRICATED row {extra:?} — present in CQLite's decode of the salvaged \
+             output, absent from the Cassandra sstabledump oracle"
+        );
+    }
+    if let Some((key, want)) = golden.iter().find(|(k, v)| decoded.get(*k) != Some(*v)) {
+        panic!(
+            "{subject}: row {key:?} VALUE differs from the Cassandra sstabledump oracle:\n  \
+             oracle:  {want:?}\n  decoded: {:?}",
+            decoded.get(key)
+        );
+    }
+    assert_eq!(
+        decoded, golden,
+        "{subject}: differs from the Cassandra sstabledump oracle"
+    );
+}
+
 /// BTI counterpart of the above. `compact_sstables` (design note discovered
 /// while implementing #4196) always emits BIG output regardless of the
 /// input's on-disk format — `cqlite compact` has no format-preservation
@@ -422,12 +733,29 @@ async fn salvage_of_healthy_uncompressed_zero_clustering_columns_content_only() 
 /// hand-waved; a `compact_sstables` format-preservation option is
 /// out-of-scope follow-up work, not a #4196 blocker.
 ///
-/// The oracle here instead is CQLite's own compaction-row decoder applied to
-/// BOTH the original input and salvage's output: every [`CompactionRow`]
-/// salvage's boundary-source-driven recovery loop wrote must decode back out
-/// byte-identically to what a full scan of the ORIGINAL input decodes —
-/// proving salvage lost nothing and fabricated nothing for a healthy BTI
-/// input, independent of `compact_sstables`'s BIG-only limitation.
+/// This test therefore carries TWO oracles, and the ORDER of the two matters:
+///
+/// 1. **The Cassandra-written one (spec R1.1; the one that can fail).** The
+///    committed `da-2-bti-Data.db.jsonl` — real `sstabledump` output over this
+///    real Cassandra 5.0.2 `da` fixture — is parsed into every
+///    `(pk, bucket, seq) -> payload` row it contains, and CQLite's decode of the
+///    SALVAGED OUTPUT must equal that set exactly, in both directions (nothing
+///    lost, nothing fabricated).
+/// 2. **The CQLite-vs-CQLite round trip (retained, but NOT sufficient on its
+///    own).** Salvage's output decodes to the same `CompactionRow`s a full scan
+///    of the ORIGINAL input decodes.
+///
+/// Why (2) alone was a defect, per CLAUDE.md's #3042 blind spot: a
+/// CQLite-WRITTEN + CQLite-READ round trip is INVARIANT to a uniform
+/// framing/serialization error. Both sides make the identical mistake, the round
+/// trip closes, and the test stays green while real Cassandra-written data reads
+/// wrong — so (2) can validate self-consistency but can NEVER validate an
+/// on-disk property. That is not hypothetical for BTI: #3002 (a `Rows.db`
+/// row-index root base two bytes low) was masked for exactly this reason by a
+/// compensating encoder defect, undetectable by a symmetric test by
+/// construction. (1) is the half that makes this lane an on-disk assertion; it
+/// closed the C-audit's #3042 doctrine finding on this issue AND R1.1's missing
+/// Cassandra-side half in one change.
 #[tokio::test]
 async fn salvage_of_healthy_bti_sstable_preserves_every_row() {
     use cqlite_core::platform::Platform;
@@ -512,9 +840,38 @@ async fn salvage_of_healthy_bti_sstable_preserves_every_row() {
         "{KEYSPACE}.{TABLE}: salvage output rows differ in content from the original input"
     );
 
+    // ---------------------------------------------------------------------
+    // Oracle 1 (spec R1.1) — the CASSANDRA-WRITTEN sstabledump golden.
+    //
+    // Everything above this point is CQLite-written + CQLite-read, and so is
+    // invariant to a uniform framing error (#3042). This block is what makes
+    // the lane an assertion about the salvaged BYTES: the committed
+    // `*-Data.db.jsonl` beside the SOURCE Data.db is real `sstabledump` output
+    // over the real Cassandra 5.0.2 `da` fixture, and CQLite's decode of the
+    // SALVAGED output must reproduce every row it names, and no other.
+    // ---------------------------------------------------------------------
+    let golden_path = {
+        let mut p = data_db.clone().into_os_string();
+        p.push(".jsonl");
+        PathBuf::from(p)
+    };
+    let golden = load_multiclustering_golden(&golden_path);
+    let decoded = decoded_as_multiclustering_rows(
+        &format!("{KEYSPACE}.{TABLE} salvaged output ({salvage_data_db:?})"),
+        &output_rows,
+    );
+    assert_rows_match_golden(
+        &format!("{KEYSPACE}.{TABLE} salvaged output"),
+        &golden,
+        &decoded,
+    );
+
     eprintln!(
         "[issue_4196] {KEYSPACE}.{TABLE}: healthy BTI salvage preserved all {} row(s) \
-         byte-identically (compaction-row decode); 0 losses.",
-        input_rows.len()
+         byte-identically (compaction-row decode); 0 losses. Salvaged output also matches the \
+         Cassandra-written sstabledump golden {golden_path:?} exactly ({} row(s), both \
+         directions).",
+        input_rows.len(),
+        golden.len()
     );
 }

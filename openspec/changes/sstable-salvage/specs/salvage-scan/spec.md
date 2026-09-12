@@ -17,6 +17,17 @@ uncompressed generation and account for every partition it could not. All requir
 > ship one that could only ever read `0` — see R2.4/R3.1 below and
 > `issue_4196_salvage_partition_atomicity.rs`'s module doc for the full derivation, and issue #4218
 > for reinstating a real count if that ever becomes possible.
+>
+> **R1.1's SECOND half (dump parity with the `*-Data.db.jsonl` golden) is implemented for the BTI
+> `da` case ONLY**, in `salvage_of_healthy_bti_sstable_preserves_every_row` (C-audit on this issue:
+> the BTI case previously compared CQLite's decode of the input against CQLite's decode of CQLite's
+> own output and nothing else — a symmetric round trip, invariant to a uniform framing error per
+> CLAUDE.md's #3042 blind spot, so it could not validate an on-disk property at all). The BIG cases
+> in that file assert the FIRST half (byte parity against `compact_sstables`, itself byte-parity
+> -proven against Cassandra under #1017) and do NOT compare against their goldens; R1.1's literal
+> "every committed table under `test_basic`, `test_collections`, `test_tomb` and `test_da`" sweep
+> remains a per-case selection of four fixtures, not a corpus-wide one. Both are declared here
+> rather than left to be inferred from a green suite.
 
 ## ADDED Requirements
 
