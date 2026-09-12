@@ -20,16 +20,69 @@ use super::discovery::SkippedInput;
 /// `salvage_sstable` fixture for each case.
 ///
 /// A report is imperfect when it refused outright, when it names a genuine
-/// `Loss`, OR when `recovered > written` — a partition that decoded but
+/// `Loss`, when `recovered > written` — a partition that decoded but
 /// reconciled to nothing to write (`recover.rs`'s `Ok(None)` arm) is not a
 /// `Loss` and not a `refused` report on its own, but it IS a partial silent
 /// drop when it happens alongside other partitions that DID write: without
 /// this third arm such a run read as "every partition recovered" and exited
-/// 0, even though one partition's content silently never reached the output.
+/// 0, even though one partition's content silently never reached the output —
+/// OR when it carries a VERIFICATION-GAP finding
+/// ([`is_verification_gap_class`]).
 pub(super) fn report_is_imperfect(report: &SalvageReport) -> bool {
     report.refused.is_some()
         || !report.losses.is_empty()
         || report.partitions.recovered > report.partitions.written
+        || report
+            .component_findings
+            .iter()
+            .any(|f| is_verification_gap_class(&f.class))
+}
+
+/// The `component_findings` classes that mean **a verification did not run** —
+/// so a report carrying one is IMPERFECT (exit 3), never a clean exit 0.
+///
+/// Roborev, issue #4196, round-22 Medium finding: `component_findings`
+/// influenced NOTHING about the exit code. An uncompressed input with no
+/// `CRC.db` (`chunks.rs`'s `uncompressed_chunk_preflight` early return) emits
+/// `ChunkCrcUnavailable` and returns `chunk_size: 0, data_length: 0`, which
+/// disables chunk-CRC loss detection ENTIRELY — so the run reported
+/// `losses: 0 RECOGNISED` and exited 0, byte-for-byte indistinguishable from a
+/// fully CRC-verified clean run. Same for the short-`CRC.db` tail. design.md
+/// D3 claims "an unmeasured run cannot read as clean": true of `render_text`,
+/// false of `$?`, which is what every script actually branches on. The design
+/// already escalates the analogous skipped-generation anomaly from 0 to 3, so
+/// this was internally inconsistent too.
+///
+/// # What is DELIBERATELY not in this set, and why
+///
+/// The predicate is "verification DID NOT RUN", not "something is imperfect
+/// about the input" — the excluded classes are excluded on that distinction,
+/// each for a stated reason:
+///
+/// * `UncompressedChunkCrcMismatch` / `ChunkDecompressionError` — verification
+///   RAN and found a real failure. Its consequence for the OUTPUT is already
+///   carried by the `Loss` entries for every partition the bad chunk
+///   intersects, which `report_is_imperfect` covers directly; a bad chunk that
+///   no partition intersects genuinely leaves "every partition recovered"
+///   true and measured.
+/// * `UnprovenByteParity` — a PERMANENT, input-independent property of the
+///   zero-clustering-column table SHAPE (issue #4217), true of every run
+///   including a perfect one. Folding it in would make exit 3 the normal
+///   outcome for such a table and drain the code of its meaning.
+/// * `SkippedInputGeneration` / `SalvageGenerationFailed` — table-dir-level
+///   facts that `execute_salvage_command` already forces to exit 3 directly
+///   from `discovery.skipped` / `hard_errors`, before ever consulting a
+///   report's findings.
+///
+/// `UnverifiedEmptyDecode` IS in the set even though it is redundant today
+/// (its `Ok(None)` arm always makes `recovered > written` as well): the
+/// property "a decode that could not be cross-checked is not a clean run"
+/// should not depend on that counter coincidence continuing to hold.
+fn is_verification_gap_class(class: &str) -> bool {
+    // `ChunkCrcUnavailable` covers BOTH chunk-CRC gaps `chunks.rs` names: a
+    // wholly absent `CRC.db`, and a `CRC.db` whose entries stop short of what
+    // `Data.db` needs (the unverified-tail finding).
+    matches!(class, "ChunkCrcUnavailable" | "UnverifiedEmptyDecode")
 }
 
 /// Attach table-dir-level facts (a discovery skip, or an in-loop hard error
@@ -279,10 +332,20 @@ mod tests {
         out_dir_has_data_db, record_table_dir_level_findings, report_is_imperfect, SkippedInput,
     };
     use cqlite_core::storage::write_engine::salvage::{
-        PartitionTotals, Refusal, RefusalReason, SalvageReport,
+        ComponentFinding, PartitionTotals, Refusal, RefusalReason, SalvageReport,
     };
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// One `component_findings` entry of `class`, with placeholder
+    /// component/detail — the predicate under test reads the CLASS only.
+    fn finding(class: &str) -> ComponentFinding {
+        ComponentFinding {
+            class: class.to_string(),
+            component: "CRC.db".to_string(),
+            detail: "detail".to_string(),
+        }
+    }
 
     /// A minimal, otherwise-clean report — every test below overrides just
     /// the field(s) under test, so a change to `SalvageReport`'s shape
@@ -324,6 +387,53 @@ mod tests {
             remedy: "inspect the losses above".to_string(),
         });
         assert!(report_is_imperfect(&report));
+    }
+
+    /// roborev, issue #4196, round-22 Medium finding: a report whose
+    /// chunk-CRC verification NEVER RAN (no `CRC.db` for an uncompressed
+    /// input, or a `CRC.db` shorter than `Data.db` needs) must be imperfect —
+    /// otherwise `losses: 0 RECOGNISED` + exit 0 is indistinguishable from a
+    /// fully CRC-verified clean run, and the affirmative-zero doctrine holds
+    /// only for the rendered text and not for `$?`.
+    #[test]
+    fn chunk_crc_unavailable_finding_makes_an_otherwise_clean_report_imperfect() {
+        let mut report = clean_report();
+        report.component_findings = vec![finding("ChunkCrcUnavailable")];
+        assert!(report.refused.is_none());
+        assert!(report.losses.is_empty());
+        assert_eq!(report.partitions.recovered, report.partitions.written);
+        assert!(
+            report_is_imperfect(&report),
+            "a run whose chunk-CRC validation did not run at all must not read as clean"
+        );
+    }
+
+    #[test]
+    fn unverified_empty_decode_finding_makes_a_report_imperfect() {
+        let mut report = clean_report();
+        report.component_findings = vec![finding("UnverifiedEmptyDecode")];
+        assert!(report_is_imperfect(&report));
+    }
+
+    /// The EXCLUSIONS, pinned: `UnprovenByteParity` states a permanent,
+    /// input-independent caveat about the zero-clustering-column table shape
+    /// (#4217) that is true of every run including a perfect one, and
+    /// `UncompressedChunkCrcMismatch` means verification RAN and found
+    /// something — its output consequence already reaches the exit code
+    /// through the `Loss` entries for every partition the bad chunk
+    /// intersects. Folding either in would make exit 3 the normal outcome for
+    /// a whole class of healthy tables and drain the code of meaning.
+    #[test]
+    fn non_verification_gap_findings_alone_do_not_make_a_report_imperfect() {
+        for class in ["UnprovenByteParity", "UncompressedChunkCrcMismatch"] {
+            let mut report = clean_report();
+            report.component_findings = vec![finding(class)];
+            assert!(
+                !report_is_imperfect(&report),
+                "{class} is deliberately NOT a verification-gap class — see \
+                 `is_verification_gap_class`'s doc for why"
+            );
+        }
     }
 
     /// roborev, issue #4196, round-13 Medium finding: `recovered > written`

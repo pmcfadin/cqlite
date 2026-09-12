@@ -47,10 +47,17 @@ use report::{
 ///   published generation was actually attempted (a discovery-level SKIP —
 ///   an unparseable generation number, see `discover_salvage_inputs` — rules
 ///   this out even when every ATTEMPTED generation was itself perfect;
-///   roborev, issue #4196, round-4 Medium finding 5).
+///   roborev, issue #4196, round-4 Medium finding 5), AND every verification
+///   the run depends on actually RAN (a `ChunkCrcUnavailable`-class
+///   component finding rules it out too — roborev, issue #4196, round-22
+///   Medium finding; see [`report::report_is_imperfect`] and the
+///   verification-gap class set beside it).
 /// * `3` — SOME `Data.db` was written (at least one generation produced
 ///   output), but not every partition of every generation was recovered —
-///   genuine losses, another generation refused outright, or a published
+///   genuine losses, a verification that could not run at all (an
+///   uncompressed input with no `CRC.db` disables chunk-CRC loss detection
+///   ENTIRELY, so its `losses: 0 RECOGNISED` means "unmeasured", never
+///   "clean"), another generation refused outright, or a published
 ///   generation was skipped at discovery. Check the manifest for which
 ///   generations wrote output: a table-dir input salvages each generation
 ///   SEPARATELY (D1), so "one generation refused" must not read as "nothing

@@ -50,6 +50,30 @@ const LZ4_TABLE_COMPONENTS: &[&str] = &[
     "nb-1-big-TOC.txt",
 ];
 
+/// The COMMITTED **uncompressed** fixture — the only input class for which
+/// chunk-CRC validation is a thing at all (a compressed input's integrity comes
+/// from `CompressionInfo.db` + the per-chunk checksum inside the compressed
+/// frame, never from `CRC.db`).
+const UNCOMPRESSED_TABLE_FIXTURE: &str =
+    "sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77";
+
+/// The git-tracked components of [`UNCOMPRESSED_TABLE_FIXTURE`].
+///
+/// `nb-1-big-CRC.db` is deliberately ABSENT from this list: it was never
+/// force-added to git (the corpus's `.gitignore` covers `*.db`, and the
+/// force-add missed it), so it is present only in a FETCHED dataset root. Every
+/// case below therefore controls `CRC.db`'s presence explicitly rather than
+/// inheriting whichever root resolved.
+const UNCOMPRESSED_TABLE_COMPONENTS: &[&str] = &[
+    "nb-1-big-Data.db",
+    "nb-1-big-Index.db",
+    "nb-1-big-Summary.db",
+    "nb-1-big-Statistics.db",
+    "nb-1-big-Filter.db",
+    "nb-1-big-Digest.crc32",
+    "nb-1-big-TOC.txt",
+];
+
 /// Every candidate BASE root (the `CQLITE_DATASETS_ROOT` corpus, then the
 /// checkout's own committed corpus) — issue #3220 doctrine, mirrored from
 /// the sibling core corpus test's `candidate_base_roots()` /
@@ -1086,4 +1110,181 @@ fn json_schema_file_leaves_stdout_pure_json() {
              stderr, like every other salvage diagnostic; stdout was:\n{stdout}"
         );
     }
+}
+
+/// Every `component_findings` class in `entries[0]` of a table-dir manifest.
+fn finding_classes(entry: &serde_json::Value) -> Vec<String> {
+    entry
+        .get("component_findings")
+        .and_then(|f| f.as_array())
+        .unwrap_or_else(|| panic!("entry missing 'component_findings' array: {entry}"))
+        .iter()
+        .map(|f| {
+            f.get("class")
+                .and_then(|c| c.as_str())
+                .unwrap_or_else(|| panic!("finding missing 'class': {f}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// Parse a one-generation table-dir manifest off stdout and return that entry.
+fn single_manifest_entry(stdout: &str) -> serde_json::Value {
+    let manifest: serde_json::Value = serde_json::from_str(stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{stdout}"));
+    let entries = manifest
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a JSON array (table-dir input); got {manifest}"))
+        .clone();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly ONE manifest entry; got {entries:?}"
+    );
+    entries[0].clone()
+}
+
+/// Roborev, issue #4196, round-22 Medium finding (the most important of that
+/// round) — a VERIFICATION THAT NEVER RAN must not exit 0.
+///
+/// An uncompressed input with no `CRC.db` sends
+/// `chunks.rs::uncompressed_chunk_preflight` down its early-return arm: it
+/// emits a `ChunkCrcUnavailable` component finding and returns `chunk_size: 0,
+/// data_length: 0`, which disables chunk-CRC loss detection ENTIRELY. Before
+/// this fix `component_findings` influenced the exit code not at all, so the
+/// run reported `losses: 0 RECOGNISED` and exited **0** — indistinguishable, to
+/// the `$?` every script branches on, from a fully CRC-verified clean run.
+/// design.md D3's "an unmeasured run cannot read as clean" was true of
+/// `render_text` and false of the exit code.
+///
+/// Both legs run against the SAME fixture, and the difference between them is
+/// exactly one file:
+///
+/// * **gap leg** — `CRC.db` absent: exit 3, `ChunkCrcUnavailable` in the
+///   manifest, and the output generation still WRITTEN (this is a verification
+///   gap, not a loss — the partitions are recovered normally).
+/// * **control leg** — `CRC.db` present: exit 0 and NO `ChunkCrcUnavailable`.
+///   Without it "exit 3" could just be this fixture's permanent outcome and the
+///   gap leg would prove nothing. `CRC.db` is not git-tracked for this fixture
+///   (see [`UNCOMPRESSED_TABLE_COMPONENTS`]), so the control leg needs a fetched
+///   dataset root and is `skip_or_require`d — a hard failure under
+///   `CQLITE_REQUIRE_FIXTURES=1`, never a silent pass.
+#[test]
+fn uncompressed_input_without_crc_db_exits_3_and_names_the_verification_gap() {
+    // COMMITTED fixture (issue #3220) — fails closed, never skips.
+    let clean_dir =
+        resolve_committed_fixture(UNCOMPRESSED_TABLE_FIXTURE, UNCOMPRESSED_TABLE_COMPONENTS);
+    // Premise: the fixture really is UNCOMPRESSED. A compressed input never
+    // reaches the CRC.db path at all, so this case would be vacuous.
+    assert!(
+        !clean_dir.join("nb-1-big-CompressionInfo.db").exists(),
+        "{clean_dir:?} must be an UNCOMPRESSED generation (no CompressionInfo.db) for the \
+         chunk-CRC path to be reachable at all"
+    );
+    let schema = schemas_dir().join("compression-parity.cql");
+    let fixture_dir_name = "uncompressed_table-25a5ca7071a911f19b3225f9984c6a77";
+
+    // ---- gap leg: CRC.db absent ----
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp.path().join(fixture_dir_name);
+    stage_generation(&clean_dir, &input_dir, "nb-1-big-");
+    let staged_crc = input_dir.join("nb-1-big-CRC.db");
+    if staged_crc.exists() {
+        std::fs::remove_file(&staged_crc).expect("remove staged CRC.db");
+    }
+    assert!(
+        !staged_crc.exists(),
+        "the gap leg requires CRC.db to be ABSENT from the input"
+    );
+
+    let out = temp.path().join("out");
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--out-format",
+        "json",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "an uncompressed input with NO CRC.db had its chunk-CRC validation disabled entirely, so \
+         its `losses: 0 RECOGNISED` means UNMEASURED, not clean — it must exit 3, never 0 \
+         (design D3's affirmative-zero doctrine applies to $?, not only to the rendered text); \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    let entry = single_manifest_entry(&stdout);
+    let classes = finding_classes(&entry);
+    assert!(
+        classes.iter().any(|c| c == "ChunkCrcUnavailable"),
+        "the manifest must NAME the verification gap as a ChunkCrcUnavailable finding — the exit \
+         code alone does not tell an operator WHICH check did not run; classes={classes:?} \
+         entry={entry}"
+    );
+    // The gap is NOT a loss: the partitions are recovered and written normally.
+    assert_eq!(
+        entry.get("losses").and_then(|l| l.as_array()).map(Vec::len),
+        Some(0),
+        "a CRC.db gap must not be reported as a loss; entry={entry}"
+    );
+    let out_table_dir = discover_output_table_dir(&out);
+    assert!(
+        std::fs::read_dir(&out_table_dir)
+            .map(|rd| rd
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().ends_with("-Data.db")))
+            .unwrap_or(false),
+        "exit 3 here means 'written, but a verification did not run' — the generation must still \
+         be on disk under {out_table_dir:?}"
+    );
+
+    // ---- control leg: the same fixture WITH CRC.db -> exit 0 ----
+    let source_crc = clean_dir.join("nb-1-big-CRC.db");
+    if !source_crc.is_file() {
+        skip_or_require(
+            "the uncompressed_table CRC.db control leg",
+            &format!(
+                "{source_crc:?} is absent (CRC.db is not git-tracked for this fixture; a \
+                      fetched dataset root carries it)"
+            ),
+        );
+        return;
+    }
+    let temp2 = TempDir::new().expect("tempdir");
+    let input_dir2 = temp2.path().join(fixture_dir_name);
+    stage_generation(&clean_dir, &input_dir2, "nb-1-big-");
+    assert!(
+        input_dir2.join("nb-1-big-CRC.db").is_file(),
+        "the control leg requires CRC.db to be PRESENT in the input"
+    );
+    let out2 = temp2.path().join("out");
+    let output2 = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir2.to_str().unwrap(),
+        "--out",
+        out2.to_str().unwrap(),
+        "--out-format",
+        "json",
+    ]);
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert_eq!(
+        output2.status.code(),
+        Some(0),
+        "with CRC.db present the SAME fixture must exit 0 — otherwise the gap leg's exit 3 is \
+         just this fixture's permanent outcome and proves nothing; stdout={stdout2}\n\
+         stderr={stderr2}"
+    );
+    let classes2 = finding_classes(&single_manifest_entry(&stdout2));
+    assert!(
+        !classes2.iter().any(|c| c == "ChunkCrcUnavailable"),
+        "with CRC.db present there is no chunk-CRC gap to report; classes={classes2:?}"
+    );
 }

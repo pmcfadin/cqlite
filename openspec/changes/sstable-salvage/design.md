@@ -103,14 +103,28 @@ here, and the class/message split is the recorded resolution.
 
 | Situation | Behaviour | Exit |
 |---|---|---|
-| every partition recovered | output generation + manifest with `losses: 0 RECOGNISED` | 0 |
+| every partition recovered AND every verification ran | output generation + manifest with `losses: 0 RECOGNISED` | 0 |
 | some partitions lost | output generation + manifest naming each loss | 3 |
+| a verification could NOT run (uncompressed input with no `CRC.db`, or a `CRC.db` shorter than `Data.db` needs) | output generation + manifest naming a `ChunkCrcUnavailable` component finding | 3 |
 | boundary source unreadable (Index.db / Partitions.db corrupt, missing) | REFUSE: no Data.db written; manifest `refused: {reason: boundary-source-unreadable, remedy: "cqlite rebuild --components index (#4197)"}` | 2 |
 | zero partitions decodable | REFUSE: no Data.db; manifest lists every loss | 2 |
 | schema unresolvable, output dir not empty, input dir has no Data.db | usage error | 1 |
 
 Never a shorter output presented as success: exit 0 is reachable ONLY with an empty loss list,
 and the loss list is affirmative (`0 RECOGNISED`) so an unmeasured run cannot read as clean.
+
+**That holds for `$?`, not only for the rendered text** (roborev, issue #4196, round-22 Medium
+finding). The affirmative-zero doctrine was originally implemented in `render_text` alone:
+`component_findings` influenced the exit code not at all, so an uncompressed input with NO `CRC.db`
+— which makes `uncompressed_chunk_preflight` return `chunk_size: 0, data_length: 0` and disables
+chunk-CRC loss detection ENTIRELY — reported `losses: 0 RECOGNISED` and exited **0**, indistinguishable
+to any script from a fully CRC-verified clean run. The classes that mean "a verification did not run"
+(today `ChunkCrcUnavailable`, `UnverifiedEmptyDecode`) are therefore folded into the imperfect
+predicate and exit **3**; classes that mean "a verification RAN and found something"
+(`UncompressedChunkCrcMismatch`) or that state a permanent input-independent caveat
+(`UnprovenByteParity`, #4217) are deliberately NOT, since their consequences already reach the exit
+code through `losses` or are true of every run. The designated set and each exclusion's reason live
+with `report_is_imperfect` in `cqlite-cli/src/commands/salvage/report.rs`.
 Interrupted runs leave a `.salvage-incomplete` marker in `--out`; the writer's normal finish
 (TOC last) means a complete component set implies a completed run.
 
