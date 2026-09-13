@@ -232,6 +232,18 @@ name = "salvage_cli_tests"
 path = "tests/salvage_cli_tests.rs"
 required-features = ["write-support"]
 
+# Issue #4196 (roborev L3): the publication-barrier cases drive the compiled
+# binary the same way salvage_cli_tests does, so they carry the same feature
+# requirement. Declared EXPLICITLY rather than left to cargo's auto-discovery:
+# auto-discovered, this target compiles at default features with its whole body
+# #[cfg]-gated out, runs 0 tests, and the gate's cli-tests component FAILs CLOSED
+# on it (#2039 zero-tests guard). A silently-empty test target is exactly what
+# that guard exists to catch.
+[[test]]
+name = "issue_4196_salvage_publication_barrier"
+path = "tests/issue_4196_salvage_publication_barrier.rs"
+required-features = ["write-support"]
+
 # Issue #1581: dhat-gated bounded-memory guard for the streaming query cutover.
 # Installs the dhat global allocator, so it must be its own opt-in test binary.
 [[test]]
