@@ -71,6 +71,19 @@
 //! integrity checks and length-preserving. The needle partition's identity is
 //! derived from `Index.db`'s own recorded positions
 //! (`corrupt_byte_fixture::index_partition_positions`), not assumed.
+//!
+//! # BOTH format families, because R2.4 names both
+//!
+//! The scenario names `BIG_COMPOSITE` **and** `BTI_MULTICLUSTERING`. The `da`
+//! leg (`corrupt_row_in_a_bti_partition_loses_it_whole_never_a_prefix`) stages
+//! the committed `test_da.multiclustering_table` through the SAME `stage_spec`
+//! mutation path, because `bti_scan_with_metadata_cancellable` reaches the row
+//! parse by a DIFFERENT route than BIG's `sequential_scan` (issue #3782) — a
+//! property proven on `nb` alone says nothing about `da`. BTI has no
+//! `Index.db`, so that leg derives the needle's identity from the committed
+//! `*-Data.db.jsonl` `sstabledump` golden's own per-partition `position`
+//! instead; see the section header above that test for why that is the
+//! equivalent authoritative record and not a substitute oracle.
 
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
@@ -84,7 +97,7 @@ mod datasets_root;
 #[path = "support/corrupt_byte_fixture.rs"]
 mod fixture;
 
-use fixture::{BIG_COMPOSITE, FIX_KS, FIX_TABLE};
+use fixture::{FixtureSpec, BIG_COMPOSITE, BTI_MULTICLUSTERING, FIX_KS, FIX_TABLE};
 
 fn require_fixtures_strict() -> bool {
     matches!(
@@ -93,18 +106,24 @@ fn require_fixtures_strict() -> bool {
     )
 }
 
-fn table_schema() -> cqlite_core::schema::TableSchema {
-    let schema_path =
-        datasets_root::schema_path(BIG_COMPOSITE.schema_file).expect("committed CQL schema");
+/// The `TableSchema` for an arbitrary [`FixtureSpec`], read from its COMMITTED
+/// CQL file (`test-data/schemas/`, resolved checkout-relative — never derived
+/// from `CQLITE_DATASETS_ROOT`, per #3131).
+fn schema_for(spec: &FixtureSpec) -> cqlite_core::schema::TableSchema {
+    let schema_path = datasets_root::schema_path(spec.schema_file).expect("committed CQL schema");
     let cql = std::fs::read_to_string(schema_path).expect("read schema");
     let start = cql
-        .find(&format!("CREATE TABLE IF NOT EXISTS {FIX_TABLE}"))
+        .find(&format!("CREATE TABLE IF NOT EXISTS {}", spec.table))
         .expect("CREATE TABLE statement");
     let end = start + cql[start..].find(';').expect("statement terminator") + 1;
     let mut t = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
         .expect("parse CREATE TABLE");
-    t.keyspace = FIX_KS.to_string();
+    t.keyspace = spec.keyspace.to_string();
     t
+}
+
+fn table_schema() -> cqlite_core::schema::TableSchema {
+    schema_for(&BIG_COMPOSITE)
 }
 
 fn single_data_db(dir: &std::path::Path) -> PathBuf {
@@ -298,6 +317,289 @@ async fn corrupt_row_loses_the_needle_partition_whole_never_a_prefix() {
     eprintln!(
         "[issue_4196] {FIX_KS}.{FIX_TABLE}: needle partition (key_hex={needle_hex}) lost whole \
          (class decode), zero rows in output, every other partition byte-matches the control."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R2.4's BTI (`da`) leg — the C-audit's B1.
+//
+// The scenario names TWO fixtures, `BIG_COMPOSITE` **and**
+// `BTI_MULTICLUSTERING`, because the `da` full scan reaches the same row parse
+// by a DIFFERENT route: `bti_scan_with_metadata_cancellable` stitches the whole
+// data section and calls `parse_block_with_cell_metadata`, where BIG goes
+// through `sequential_scan`/`parse_block` (issue #3782). A partition-atomicity
+// property proven only on `nb` says nothing about `da`.
+//
+// # Why the needle's identity comes from the sstabledump GOLDEN here
+//
+// The BIG leg derives it from `Index.db`'s own recorded positions. BTI has NO
+// `Index.db` — its partition index is the `Partitions.db` trie, which this
+// harness deliberately does not re-implement. The equivalent AUTHORITATIVE
+// Cassandra-written record is the committed `da-2-bti-Data.db.jsonl`
+// `sstabledump` golden: every `partition` object carries the `position` (the
+// UNCOMPRESSED data-file offset) Cassandra itself reported for that partition.
+// So the derivation stays Cassandra-written bytes (#3041/#3042) — never a scan
+// for a byte pattern (#28) and never CQLite's own output.
+//
+// The fixture is FULLY git-tracked (9 components incl. `Data.db`,
+// `Partitions.db`, `Rows.db` and the golden), so this leg fails CLOSED
+// unconditionally — unlike the BIG leg beside it, whose fixture is fetched.
+// ---------------------------------------------------------------------------
+
+/// Every `(partition key as declared `int` pk, UNCOMPRESSED data-section
+/// position)` pair the committed `sstabledump` golden records, in file order.
+///
+/// Strict by construction: a golden whose shape drifts (a non-`int`-shaped key,
+/// a missing `position`, a non-ascending position list, zero partitions) FAILS
+/// by name rather than yielding a plausible-but-wrong needle.
+fn golden_partition_positions(fixture_dir: &std::path::Path) -> Vec<(i32, usize)> {
+    let golden = {
+        let mut found: Option<PathBuf> = None;
+        for e in std::fs::read_dir(fixture_dir)
+            .expect("read fixture dir")
+            .flatten()
+        {
+            if e.file_name().to_string_lossy().ends_with("-Data.db.jsonl") {
+                found = Some(e.path());
+                break;
+            }
+        }
+        found.unwrap_or_else(|| {
+            panic!(
+                "{fixture_dir:?}: no *-Data.db.jsonl sstabledump golden — it is committed beside \
+                 the Data.db and is THE Cassandra-written oracle for this leg's partition \
+                 positions; a missing golden is a broken checkout, never a skip"
+            )
+        })
+    };
+    let text = std::fs::read_to_string(&golden).unwrap_or_else(|e| panic!("read {golden:?}: {e}"));
+    let mut out: Vec<(i32, usize)> = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("{golden:?}: not JSON: {e}"));
+        let partition = v
+            .get("partition")
+            .and_then(|p| p.as_object())
+            .unwrap_or_else(|| panic!("{golden:?}: partition object missing"));
+        let key_array = partition
+            .get("key")
+            .and_then(|k| k.as_array())
+            .unwrap_or_else(|| panic!("{golden:?}: partition key missing"));
+        assert_eq!(
+            key_array.len(),
+            1,
+            "{golden:?}: this table declares a SINGLE-column `pk int` partition key; a \
+             {}-component key means the fixture is not the one this derivation applies to",
+            key_array.len()
+        );
+        let pk: i32 = key_array[0]
+            .as_str()
+            .unwrap_or_else(|| panic!("{golden:?}: sstabledump renders an `int` pk as a string"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{golden:?}: pk is not an i32: {e}"));
+        let position = partition
+            .get("position")
+            .and_then(|p| p.as_u64())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{golden:?}: partition {pk} has no `position` — the needle's identity is \
+                        derived from it, so its absence must fail loudly"
+                )
+            }) as usize;
+        if let Some((prev_pk, prev)) = out.last() {
+            assert!(
+                position > *prev,
+                "{golden:?}: partition positions must ASCEND (pk {pk} at {position} follows pk \
+                 {prev_pk} at {prev}); the needle derivation below is a reverse scan over an \
+                 ordered list"
+            );
+        }
+        out.push((pk, position));
+    }
+    assert!(
+        out.len() >= 2,
+        "{golden:?}: this leg needs at least TWO partitions — with one, 'the needle is lost and \
+         every OTHER partition survives' is unobservable; got {}",
+        out.len()
+    );
+    out
+}
+
+/// The committed `test_da.multiclustering_table` generation directory, or a hard
+/// failure. Its binaries are git-tracked, so absence is a broken checkout and
+/// must never skip (#3220) — this is deliberately NOT gated on
+/// `CQLITE_REQUIRE_FIXTURES`.
+fn bti_generation_dir() -> PathBuf {
+    let (ks, table) = (BTI_MULTICLUSTERING.keyspace, BTI_MULTICLUSTERING.table);
+    datasets_root::sstables_root_for_table(ks, table)
+        .map(|root| datasets_root::table_generation_dirs(&root, ks, table))
+        .and_then(|dirs| dirs.into_iter().next())
+        .unwrap_or_else(|| {
+            panic!(
+                "COMMITTED fixture {ks}.{table} is absent — its Data.db, Partitions.db, Rows.db \
+                 and sstabledump golden are all git-tracked, so this is a broken checkout, NOT an \
+                 unfetched dataset, and must never skip (#3220). {}",
+                datasets_root::describe_search(ks, table)
+            )
+        })
+}
+
+/// R2.4 (BTI half) + R3.1: the same property as the BIG leg above, on a real
+/// Cassandra 5.0 **`da`/BTI** fixture staged through the SAME
+/// `stage_spec`/mutation/measurement path — the needle partition is lost WHOLE
+/// (class `decode`), salvage's output holds ZERO rows for it, and every OTHER
+/// partition is recovered and byte-matches the pristine control.
+#[tokio::test]
+async fn corrupt_row_in_a_bti_partition_loses_it_whole_never_a_prefix() {
+    let fixture_dir = bti_generation_dir();
+    let (ks, table) = (BTI_MULTICLUSTERING.keyspace, BTI_MULTICLUSTERING.table);
+
+    // Cassandra's OWN recorded partition positions, before anything is staged.
+    let golden_positions = golden_partition_positions(&fixture_dir);
+
+    let staged = fixture::stage_spec(&BTI_MULTICLUSTERING, &fixture_dir, "salvage-atomicity-bti");
+
+    // The needle partition: the LAST golden partition whose recorded position is
+    // <= the mutation's decompressed offset (positions ascend, asserted above,
+    // so this is the partition CONTAINING that offset).
+    let (needle_pk, needle_pos) = golden_positions
+        .iter()
+        .rfind(|(_, pos)| *pos <= staged.mutated_offset)
+        .copied()
+        .unwrap_or_else(|| {
+            panic!(
+                "no golden partition starts at or before the mutated offset {} — the mutation \
+                 landed outside every partition this oracle knows about",
+                staged.mutated_offset
+            )
+        });
+    // A single-column `int` partition key serializes as its 4-byte big-endian
+    // value (`Int32Type`), with no composite framing — so this is the on-disk
+    // key the manifest reports in `key_hex`.
+    let needle_key = needle_pk.to_be_bytes().to_vec();
+    let needle_hex = hex::encode(&needle_key);
+
+    let schema = schema_for(&BTI_MULTICLUSTERING);
+
+    let mutated_data_db = single_data_db(&staged.mutated_dir);
+    let temp = TempDir::new().expect("tempdir");
+    let mutated_out_root = temp.path().join("mutated-out");
+    let mutated_report = salvage_sstable(
+        &mutated_data_db,
+        &mutated_out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage of the mutated BTI fixture must not error (a classified loss, not an Err)");
+
+    // R2.4: exactly the needle partition is lost, class `decode`.
+    let needle_loss = mutated_report
+        .losses
+        .iter()
+        .find(|l| l.key_hex == needle_hex)
+        .unwrap_or_else(|| {
+            panic!(
+                "needle partition (pk={needle_pk}, key_hex={needle_hex}, golden position \
+                 {needle_pos}) is not in the loss list: {:?}",
+                mutated_report.losses
+            )
+        });
+    assert_eq!(
+        needle_loss.class,
+        LossClass::Decode,
+        "needle partition loss must classify `decode`; got {:?}",
+        needle_loss
+    );
+    let other_losses: Vec<_> = mutated_report
+        .losses
+        .iter()
+        .filter(|l| l.key_hex != needle_hex)
+        .collect();
+    assert!(
+        other_losses.is_empty(),
+        "only the needle partition should be lost; also lost: {other_losses:?}"
+    );
+    // UNCONDITIONALLY, never behind an `if recovered > 0` (the #3220 vacuity
+    // class): a fixture change that silently dropped every OTHER partition too
+    // must red this test rather than let it pass having compared nothing.
+    assert_eq!(
+        mutated_report.partitions.recovered,
+        golden_positions.len() - 1,
+        "expected every partition except the needle to be recovered ({} golden partitions)",
+        golden_positions.len()
+    );
+    assert!(
+        mutated_report.refused.is_none(),
+        "a partial loss with real survivors must not refuse; got {:?}",
+        mutated_report.refused
+    );
+
+    // R3.1: ZERO rows for the needle partition in the output -- never a prefix.
+    let mutated_out_table_dir = mutated_out_root.join(&schema.keyspace).join(&schema.table);
+    let salvaged_data_db = single_data_db(&mutated_out_table_dir);
+    let mutated_rows = decode_all_rows(&salvaged_data_db, &schema).await;
+    let needle_rows_in_output: Vec<_> = mutated_rows
+        .iter()
+        .filter(|r| r.key.as_bytes() == needle_key.as_slice())
+        .collect();
+    assert!(
+        needle_rows_in_output.is_empty(),
+        "output must hold ZERO rows for the needle partition (a prefix would resurrect data \
+         shadowed by whatever made this partition undecodable); found {}",
+        needle_rows_in_output.len()
+    );
+
+    // Every OTHER partition matches the pristine CONTROL byte-for-byte.
+    let control_out_root = temp.path().join("control-out");
+    let control_data_db = single_data_db(&staged.control_dir);
+    let control_report = salvage_sstable(
+        &control_data_db,
+        &control_out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage of the pristine BTI control must succeed cleanly");
+    assert!(
+        control_report.losses.is_empty(),
+        "control fixture salvage must have zero losses; got {:?}",
+        control_report.losses
+    );
+    let control_out_table_dir = control_out_root.join(&schema.keyspace).join(&schema.table);
+    let control_salvaged_data_db = single_data_db(&control_out_table_dir);
+    let control_rows = decode_all_rows(&control_salvaged_data_db, &schema).await;
+    assert!(
+        !control_rows.is_empty(),
+        "the control must decode a NON-ZERO number of rows, or the comparison below is vacuous"
+    );
+    let control_rows_minus_needle: Vec<_> = control_rows
+        .iter()
+        .filter(|r| r.key.as_bytes() != needle_key.as_slice())
+        .cloned()
+        .collect();
+    assert!(
+        control_rows_minus_needle.len() < control_rows.len(),
+        "the control must actually CONTAIN the needle partition (pk={needle_pk}), or 'the needle \
+         is lost' compares nothing"
+    );
+    assert_eq!(
+        mutated_rows.len(),
+        control_rows_minus_needle.len(),
+        "every OTHER partition's row count must match the control minus the needle"
+    );
+    assert_eq!(
+        &mutated_rows, &control_rows_minus_needle,
+        "every OTHER partition's rows must byte-match the control (minus the needle partition, \
+         which is a total loss)"
+    );
+
+    eprintln!(
+        "[issue_4196] {ks}.{table} (da/BTI): needle partition pk={needle_pk} \
+         (key_hex={needle_hex}, golden position {needle_pos}) lost whole (class decode), zero rows \
+         in output, {} of {} partitions recovered and byte-matching the control.",
+        mutated_report.partitions.recovered,
+        golden_positions.len()
     );
 }
 

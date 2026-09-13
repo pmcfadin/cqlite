@@ -584,10 +584,18 @@ fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
 /// `issue_4196_salvage_corruption_corpus.rs`'s core-level test for the same
 /// discovery), so it exercises the TOTAL-loss exit-2 arm (spec R5.2) rather
 /// than R7.2's literal partial-recovery exit-3 scenario text — documented
-/// here rather than asserting a code this fixture cannot produce. No corpus
-/// fixture demonstrates a genuinely PARTIAL chunk-crc loss today; that arm
-/// (exit 3, output still written despite losses) is a declared gap tracked
-/// as a follow-up.
+/// here rather than asserting a code this fixture cannot produce.
+///
+/// R7.2's PARTIAL arm (exit 3 with the output still written despite losses) is
+/// NO LONGER a gap and is NOT covered here: it is
+/// `issue_4196_salvage_publication_barrier.rs::damaged_input_exits_3_with_losses_and_a_complete_generation_set`,
+/// which corrupts one chunk of the committed 3-partition
+/// `test_da.multiclustering_table` so exactly one partition intersects it. The
+/// claim this comment used to make — that no corpus fixture demonstrates a
+/// genuinely partial chunk-crc loss — was wrong: that fixture is git-tracked,
+/// and this change's own
+/// `issue_4196_salvage_corruption_corpus.rs::swapped_index_entry_keys_classify_key_mismatch`
+/// already produced a partial loss at the core level.
 #[test]
 fn damaged_input_manifest_names_every_loss() {
     const FIXTURE: &str = "corruption/test_comp_corrupt/data_db_bit_flip";

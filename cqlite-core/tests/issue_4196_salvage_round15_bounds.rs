@@ -34,7 +34,9 @@
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
-use cqlite_core::storage::write_engine::salvage::{salvage_sstable, LossClass, SalvageOptions};
+use cqlite_core::storage::write_engine::salvage::{
+    salvage_sstable, LossClass, RefusalReason, SalvageOptions,
+};
 use tempfile::TempDir;
 
 #[path = "support/datasets_root.rs"]
@@ -42,7 +44,7 @@ mod datasets_root;
 #[path = "support/salvage_corpus.rs"]
 mod salvage_corpus;
 
-use salvage_corpus::{single_data_db, skip_or_require, table_schema_for};
+use salvage_corpus::{no_data_db_anywhere, single_data_db, skip_or_require, table_schema_for};
 
 /// Copy every component of `src` into a fresh temp dir, EXCLUDING `CRC.db`
 /// and the bulky `.jsonl`/`.txt` sidecars — the "no CRC.db" precondition
@@ -566,11 +568,52 @@ async fn losses_beyond_the_cap_are_counted_not_resident() {
     // past the real data length) → a total loss → REFUSED, not a
     // partial-recovery report — spec R5.2. The manifest still names the
     // resident/truncated split via `losses`/`losses_truncated`.
+    //
+    // C intent audit (N6) — R5.2's THREE clauses, pinned TOGETHER and
+    // UNCONDITIONALLY on a git-tracked fixture. They were previously covered
+    // only in aggregate: `reason == NothingDecodable` was asserted solely
+    // inside a data-dependent `if expected_lost.len() == clean_positions.len()`
+    // in two CORPUS-GATED tests (a branch that can be skipped as a whole and
+    // then not taken even when it runs — the #3220 vacuity class), and neither
+    // of those also asserted no-`Data.db`.
+    let refusal = report.refused.as_ref().unwrap_or_else(|| {
+        panic!(
+            "every partition is implausible by construction — expected a total-loss refusal; got \
+             {report:?}"
+        )
+    });
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::NothingDecodable,
+        "R5.2 names this refusal specifically: the boundary source was READABLE and every named \
+         partition was lost. `BoundarySourceUnreadable` here would mean the synthetic Index.db \
+         failed to walk at all, which is a different defect wearing the same exit code; got {:?}",
+        refusal
+    );
     assert!(
-        report.refused.is_some(),
-        "every partition is implausible by construction — expected a total-loss refusal; got \
-         {:?}",
-        report
+        no_data_db_anywhere(&out_root),
+        "R5.2: a refusal writes NO Data.db anywhere under {out_root:?} — a partial or empty \
+         generation left behind would be published by an operator's next `mv`"
+    );
+    // The manifest still EXISTS and names the refusal — a refusal is a
+    // reported outcome, not an absence of output (design D5).
+    let manifest = serde_json::to_value(&report).expect("the report serializes to the D5 manifest");
+    assert_eq!(
+        manifest
+            .get("refused")
+            .and_then(|r| r.get("reason"))
+            .and_then(|r| r.as_str()),
+        Some(RefusalReason::NothingDecodable.manifest_label()),
+        "the manifest must name the refusal in its kebab-case vocabulary (R7.3); manifest={manifest}"
+    );
+    assert!(
+        !manifest
+            .get("refused")
+            .and_then(|r| r.get("remedy"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .is_empty(),
+        "a refusal must carry an operator-facing remedy; manifest={manifest}"
     );
     assert_eq!(
         report.losses.len(),

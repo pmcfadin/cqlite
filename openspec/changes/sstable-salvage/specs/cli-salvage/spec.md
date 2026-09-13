@@ -8,10 +8,30 @@ codes scripts can branch on. All requirements are ADDED.
 > `cqlite-cli/tests/fixtures/salvage/` and R9.1 (`cqlite verify --mode full` + read-back of every
 > salvaged generation) are NOT implemented. R7.1-R7.7 and R8.2 are implemented and pass against real
 > fixtures via the compiled binary (`cqlite-cli/tests/salvage_cli_tests.rs`, plus
-> `cqlite-cli/tests/issue_4196_salvage_publication_barrier.rs` for R7.7 — its own target because the
-> first file sits at ~1420 of the ~1500-line #1135 threshold); R7.2's scenario runs
-> against the corpus's actual (total-loss) outcome rather than its literal partial-recovery text —
-> see that test's doc comment. R8.2's specific test is
+> `cqlite-cli/tests/issue_4196_salvage_publication_barrier.rs` for R7.7 and R7.2's partial-loss arm —
+> its own target because the first file sits at ~1420 of the ~1500-line #1135 threshold).
+>
+> **R7.2 now covers BOTH arms, across two targets (C intent audit on this issue).**
+> `salvage_cli_tests.rs::damaged_input_manifest_names_every_loss` runs against the corpus's actual
+> outcome for `data_db_bit_flip`, which is a TOTAL loss (one partition, entirely inside the flipped
+> chunk) and so exits **2** — it accepts `2 || 3` and its exit-3 branch never executes. The C audit
+> found that design D3's central row — "some partitions lost and some recovered → exit 3 with a
+> complete generation set still written" — was therefore unexercised end-to-end at the CLI, and that
+> the previous justification for the gap ("no corpus fixture demonstrates a genuinely PARTIAL
+> chunk-crc loss today") was wrong in two ways: this change's own
+> `issue_4196_salvage_corruption_corpus.rs::swapped_index_entry_keys_classify_key_mismatch` already
+> produces a partial loss at the core level, and the committed, fully git-tracked
+> `test_da.multiclustering_table` holds THREE partitions. The partial arm is now
+> `issue_4196_salvage_publication_barrier.rs::damaged_input_exits_3_with_losses_and_a_complete_generation_set`,
+> which corrupts one compressed chunk of that fixture — leaving the chunk's CRC trailer alone, the
+> same bit-rot model R2.1 uses — and asserts exit **exactly 3**, one `chunk-crc` loss naming the
+> partition with its `data_offset` and intersecting chunk index, `partitions.recovered == 2`,
+> `refused: null`, and a COMPLETE generation set: every component the output's own `TOC.txt` names.
+> The corrupted chunk is chosen by DERIVATION from two Cassandra-written components (the committed
+> `sstabledump` golden's per-partition `position` and `CompressionInfo.db`'s chunk table) so exactly
+> one partition can intersect it, every step of that derivation is asserted, and a control leg on the
+> same UNCORRUPTED staging exits 0 — so exit 3 cannot be dismissed as that fixture's permanent
+> outcome. R8.2's specific test is
 > `help_states_uncompressed_whole_partition_and_rebuild_boundaries` in that file, NAMED here because
 > the C-audit on this issue found this paragraph asserting R8.2 coverage while no test invoked
 > `salvage --help` at all — an unlocatable coverage claim reads exactly like a covered one.

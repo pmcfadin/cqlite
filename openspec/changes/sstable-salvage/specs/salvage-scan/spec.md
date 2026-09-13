@@ -3,20 +3,96 @@
 `cqlite-core` SHALL recover every completely-decodable partition of a damaged SSTable into a fresh
 uncompressed generation and account for every partition it could not. All requirements are ADDED.
 
-> **DEFERRED SCENARIOS (issue #4196, roborev finding — not implemented in the #4196 PR, tracked as
-> follow-up work, NOT satisfied-by-reference despite being named below):** R2.2 (uncompressed chunk
-> CRC flip), R2.3 (truncated Data.db), R4.2 (key-at-offset-disagrees-with-index staging), R6.1
-> (memory-budget lane entry). R1.1/R1.2, R2.1, R2.4, R3.1,
-> R4.1, R4.3 and R5.2 are implemented and pass against real fixtures
-> (`cqlite-core/tests/issue_4196_salvage_healthy_parity.rs`,
+> **DEFERRED AND SCOPED SCENARIOS (issue #4196) — corrected in BOTH directions by the C intent audit
+> on this issue, which found this block simultaneously under-claiming two scenarios and over-claiming
+> one. A note that misreports coverage is worse than no note, because it is what stops the next
+> reader looking.**
+>
+> **IMPLEMENTED, with a declared construction deviation:**
+>
+> * **R2.2** (uncompressed chunk CRC flip) is **implemented** —
+>   `issue_4196_salvage_corruption_corpus.rs::uncompressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions`.
+>   It does NOT use the scenario's named `test_comp_corrupt/uncompressed_data_bit_flip`: it flips one
+>   byte inside chunk 0 of a temp copy of clean `test_comp.uncompressed_table`, deriving the expected
+>   loss set from that source's own `Index.db` positions and the real `CRC.db`-declared chunk size,
+>   and asserts the `UncompressedChunkCrcMismatch` finding. Because it needs that table's `CRC.db`,
+>   which is NOT git-tracked, the case is skippable (hard under `CQLITE_REQUIRE_FIXTURES=1`, which the
+>   gate's dataset lanes set). The named corpus fixture IS fully committed, so switching to it would
+>   make this case fail-closed; that swap is NOT a fixture substitution alone — the committed fixture
+>   carries its flip pre-applied at a byte the test does not know (chunk **1**, per
+>   `corruption-manifest.yml`'s `byte_offset: 70000`) and holds a single partition spanning every
+>   chunk, so the expected-loss derivation, the skip block and the partial-vs-total assertions all
+>   change with it. Carried as a follow-up line on **#4229** rather than done here.
+> * **R4.2** (key at offset disagrees with the index) is **implemented** —
+>   `issue_4196_salvage_corruption_corpus.rs::swapped_index_entry_keys_classify_key_mismatch`. It does
+>   NOT use the scenario's literal offset-repoint construction, which is unreachable:
+>   `enumerate_boundaries`' `check_strictly_ascending` guard refuses the whole generation before any
+>   slot is classified. The equivalent construction swaps two adjacent entries' `[key_len][key]` spans
+>   and leaves every `data_offset` untouched, so both slots decode their true partition against a
+>   wrong declared key and both classify `key-mismatch`; a third, entirely untouched entry is the
+>   control for the scenario's "the partition is still recovered from its OWN index entry exactly
+>   once".
+> * **R2.4** is implemented for **BOTH** format families the scenario names. The BIG (`nb`) leg is
+>   `issue_4196_salvage_partition_atomicity.rs::corrupt_row_loses_the_needle_partition_whole_never_a_prefix`
+>   (`BIG_COMPOSITE` / `test_basic.composite_key_table`, fetched corpus, skippable); the BTI (`da`)
+>   leg is `::corrupt_row_in_a_bti_partition_loses_it_whole_never_a_prefix` (`BTI_MULTICLUSTERING` /
+>   `test_da.multiclustering_table`, FULLY git-tracked, so fail-closed unconditionally). The C audit
+>   found the BTI leg absent while this block listed R2.4 as passing — the `da`
+>   decode-at-offset path had no partition-atomicity coverage at all, which matters because
+>   `bti_scan_with_metadata_cancellable` reaches the row parse by a different route than BIG's
+>   `sequential_scan` (issue #3782). Declared deviation: BTI has no `Index.db`, so that leg derives
+>   the needle partition's identity from the committed `*-Data.db.jsonl` `sstabledump` golden's own
+>   per-partition `position` — Cassandra's own record of the uncompressed data-file offset — rather
+>   than from a re-implementation of the `Partitions.db` trie.
+>
+> **NOT IMPLEMENTED:**
+>
+> * **R2.3** (truncated `Data.db`) is **NOT implemented** and is **NOT satisfied by reference**. The
+>   corpus's only truncation fixture, `test_comp_corrupt/data_db_truncation`, is COMPRESSED, and
+>   `compressed_chunk_preflight` walks every declared chunk before the per-partition loop runs — a
+>   chunk whose bytes no longer exist fails to READ and lands in `bad_chunks`, so the loop's
+>   `chunk-crc` short-circuit fires and `LossClass::Truncated`'s own path is unreachable through it. A
+>   naive uncompressed byte-truncation has the same problem one layer down (a mid-row cut is a hard
+>   decode `Err` → `LossClass::Decode`). `Truncated` is reached ONLY via
+>   `decode_partition_at_offset_for_salvage`'s early `offset_usize >= end` check. The class IS pinned,
+>   by that route, in
+>   `issue_4196_salvage_oom_bounds.rs::index_entry_offset_past_eof_classifies_truncated`; the
+>   scenario's own fixture and its "dump equals golden minus the truncated set" assertion are not.
+>   The C audit's N5 recorded that this deferral previously named NO tracking issue anywhere, which is
+>   indistinguishable from an oversight six weeks on — it is carried as a follow-up line on **#4229**.
+> * **R6.1** (memory-budget dhat lane entry) — owner ruling 2026-09-13, tracked as **#4229**.
+>
+> **R1.1, R1.2, R2.1, R3.1, R4.1 (scoped — see below), R4.3 and R5.2 are implemented and pass against
+> real fixtures** (`cqlite-core/tests/issue_4196_salvage_healthy_parity.rs`,
 > `issue_4196_salvage_corruption_corpus.rs`, `issue_4196_salvage_partition_atomicity.rs`,
+> `issue_4196_salvage_output_input_contracts.rs`, `issue_4196_salvage_round15_bounds.rs`,
 > `scripts/tests/test_salvage_no_resync_scan.sh`) — R3.1's fixture demonstrates the zero-output-rows
-> safety property unconditionally. Round 20 (roborev) proved the scenario text's original
-> `rows_decoded_before_failure >= 2` clause UNREACHABLE by construction (an exhaustive scan of a
-> real multi-row partition), and round 21 removed the manifest field it referred to rather than
-> ship one that could only ever read `0` — see R2.4/R3.1 below and
+> safety property unconditionally, on both format families. Round 20 (roborev) proved the scenario
+> text's original `rows_decoded_before_failure >= 2` clause UNREACHABLE by construction (an exhaustive
+> scan of a real multi-row partition), and round 21 removed the manifest field it referred to rather
+> than ship one that could only ever read `0` — see R2.4/R3.1 below and
 > `issue_4196_salvage_partition_atomicity.rs`'s module doc for the full derivation, and issue #4218
 > for reinstating a real count if that ever becomes possible.
+>
+> **R4.1's fixture set is SCOPED to one of the three it names (C audit).** `index_db_bit_flip_big` is
+> driven at BOTH layers — `issue_4196_salvage_corruption_corpus.rs::damaged_index_db_refuses_with_the_rebuild_remedy`
+> and `salvage_cli_tests.rs::refusal_exit_2_no_data_db_written`. `bti_partitions_footer_flip` and
+> `bti_rows_truncation` are exercised by NO #4196 test; the BTI refusal arm is covered instead by a
+> SUBSTITUTE, `::damaged_bti_rows_db_missing_refuses_with_the_rebuild_remedy`, which removes `Rows.db`
+> from the committed `test_da.multiclustering_table` while `Partitions.db` still references a
+> `RowsOffset` leaf. The substitution is deliberate and is the stronger choice: neither named BTI
+> corpus fixture has its `*.db` binaries git-tracked (only `Digest.crc32` and `TOC.txt` are), so a
+> test on them would skip-clean on any unfetched checkout, whereas the substitute fails closed on
+> committed bytes. Declared here rather than left to be inferred from a green suite.
+>
+> **R5.2's three clauses are pinned TOGETHER and unconditionally (C audit N6).**
+> `issue_4196_salvage_round15_bounds.rs::losses_beyond_the_cap_are_counted_not_resident` asserts
+> `RefusalReason::NothingDecodable`, no `Data.db` anywhere under `--out`, and a D5 manifest still
+> naming the refusal in its kebab-case vocabulary with a non-empty remedy — on a git-tracked fixture,
+> outside any data-dependent branch. Previously those clauses were covered only in aggregate, with
+> `reason == NothingDecodable` asserted solely inside an `if expected_lost.len() ==
+> clean_positions.len()` in two corpus-gated tests. The scenario's stated fixture (a `data_db_bit_flip`
+> copy with every chunk's CRC trailer zeroed) is still not built.
 >
 > **R1.1's SECOND half (dump parity with the `*-Data.db.jsonl` golden) is implemented for the BTI
 > `da` case ONLY**, in `salvage_of_healthy_bti_sstable_preserves_every_row` (C-audit on this issue:
