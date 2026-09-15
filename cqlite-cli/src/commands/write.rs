@@ -985,13 +985,8 @@ mod issue_929_tests {
         assert!(msg.contains("first_table"), "{msg}");
     }
 
-    /// roborev, issue #4196, round-13 Medium finding: a JSON schema file must
-    /// still resolve through `load_compaction_table_schema_for_table` (the
-    /// `--schema x.json salvage --table t` path) even with `target_table:
-    /// Some(...)` — JSON has no multi-statement concept, so the selector is a
-    /// pass-through to `load_schema_file`, not a hard failure.
-    #[test]
-    fn json_schema_file_resolves_regardless_of_target_table() {
+    /// A JSON schema file declaring `table`, for the tests below.
+    fn json_schema_declaring(table: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::Builder::new()
             .suffix(".json")
             .tempfile()
@@ -1000,7 +995,7 @@ mod issue_929_tests {
             f,
             r#"{{
                 "keyspace": "test_ks",
-                "table": "t",
+                "table": "{table}",
                 "columns": {{
                     "id": {{ "type": "int", "kind": "PartitionKey" }},
                     "n": {{ "type": "text", "kind": "Regular" }}
@@ -1008,11 +1003,64 @@ mod issue_929_tests {
             }}"#
         )
         .expect("write schema");
+        f
+    }
 
+    /// roborev, issue #4196, round-13 Medium finding: a JSON schema file must
+    /// still resolve through `load_compaction_table_schema_for_table` (the
+    /// `--schema x.json salvage --table t` path) even with `target_table:
+    /// Some(...)` — JSON has no multi-statement concept, so there is nothing for
+    /// the selector to do, and that must not be a hard failure.
+    ///
+    /// RENAMED in round 23: this was
+    /// `json_schema_file_resolves_regardless_of_target_table`, whose name
+    /// asserted the defect below WAS the contract, and which passed `Some("t")`
+    /// against a file declaring `"table": "t"` — self-confirming, exercising no
+    /// mismatch at all. The positive case is kept; the name now says what is
+    /// actually guaranteed.
+    #[test]
+    fn json_schema_file_resolves_when_its_declared_table_matches_the_target() {
+        let f = json_schema_declaring("t");
         let schema = load_compaction_table_schema_for_table(f.path(), Some("t"))
-            .expect("JSON schema resolves even with a target_table filter");
+            .expect("JSON schema whose declared table matches the target resolves");
         assert_eq!(schema.keyspace, "test_ks");
         assert_eq!(schema.table, "t");
+    }
+
+    /// roborev, issue #4196, round-23 High finding (confirmed by an independent
+    /// Cassandra-format expert review): a JSON `--schema` declaring a DIFFERENT
+    /// table than the one being salvaged must FAIL CLOSED, naming both. Before
+    /// the fix this returned table `b`'s column set for table `a`'s data and
+    /// salvage reported a confidently clean recovery at exit 0.
+    #[test]
+    fn json_schema_declaring_another_table_fails_closed_naming_both() {
+        let f = json_schema_declaring("b");
+        let err = load_compaction_table_schema_for_table(f.path(), Some("a"))
+            .expect_err("a JSON schema for table 'b' must not be accepted for table 'a'");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("'b'"), "must name the DECLARED table: {msg}");
+        assert!(msg.contains("'a'"), "must name the TARGET table: {msg}");
+    }
+
+    /// The table cross-check is case-insensitive, matching the CQL branch's own
+    /// selector (`eq_ignore_ascii_case`) — Cassandra folds unquoted identifiers
+    /// to lowercase, and the JSON format cannot express a quoted one at all.
+    #[test]
+    fn json_schema_table_match_is_case_insensitive() {
+        let f = json_schema_declaring("T");
+        let schema = load_compaction_table_schema_for_table(f.path(), Some("t"))
+            .expect("declared 'T' must satisfy target 't'");
+        assert_eq!(schema.table, "T", "the declared spelling is preserved");
+    }
+
+    /// `target_table: None` (the `compact` path) is a no-op for the cross-check:
+    /// a JSON schema still loads with no target to compare against.
+    #[test]
+    fn json_schema_with_no_target_table_still_loads() {
+        let f = json_schema_declaring("anything");
+        let schema =
+            load_compaction_table_schema_for_table(f.path(), None).expect("no target to check");
+        assert_eq!(schema.table, "anything");
     }
 
     /// roborev, issue #4196, round-13 Low finding: `CREATE KEYSPACE` name
