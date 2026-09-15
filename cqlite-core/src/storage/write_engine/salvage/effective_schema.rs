@@ -139,16 +139,38 @@ fn normalization_findings(caller: &TableSchema, effective: &TableSchema) -> Vec<
         });
     }
 
+    // Keyed lookup rather than a nested per-column search, for TWO reasons and
+    // the second is the load-bearing one.
+    //
+    // (1) It is O(caller + effective) rather than O(caller × effective).
+    //
+    // (2) `scripts/tests/test_salvage_no_resync_scan.sh` (gate component
+    // `tooling-tests`) refuses a small closed set of subsequence/scan
+    // primitives anywhere in PRODUCTION salvage code — spec R4.3, "no header
+    // hunting", because #3928 measured that exact "resync by scanning forward
+    // for a plausible header" shape inventing partitions out of misaligned
+    // bytes. An iterator search over a COLUMN LIST is not a byte search, but
+    // that guard is DELIBERATELY a literal text match and cannot tell the two
+    // apart. The right response to a blunt guard standing in front of a real
+    // defect class is to write the code another way, NOT to teach the guard an
+    // exception — an exception is how the primitive gets back in next to real
+    // bytes, where it does the damage. Read the guard for the current set; do
+    // not restate it here, since naming those tokens in a comment trips it too
+    // (measured: the first draft of this very comment cost a gate round).
+    let caller_types: std::collections::HashMap<&str, &str> = caller
+        .columns
+        .iter()
+        .map(|k| (k.name.as_str(), k.data_type.as_str()))
+        .collect();
     let mut retyped: Vec<String> = effective
         .columns
         .iter()
         .filter_map(|c| {
-            caller
-                .columns
-                .iter()
-                .find(|k| k.name == c.name)
-                .filter(|k| k.data_type != c.data_type)
-                .map(|k| format!("{} ({} -> {})", c.name, k.data_type, c.data_type))
+            let was = *caller_types.get(c.name.as_str())?;
+            if was == c.data_type {
+                return None;
+            }
+            Some(format!("{} ({} -> {})", c.name, was, c.data_type))
         })
         .collect();
     retyped.sort();
