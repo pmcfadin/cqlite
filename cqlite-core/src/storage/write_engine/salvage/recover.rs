@@ -6,6 +6,7 @@
 
 use super::boundaries::enumerate_boundaries;
 use super::chunks::{chunks_for_range, compressed_chunk_preflight, uncompressed_chunk_preflight};
+use super::effective_schema::effective_salvage_schema;
 use super::recover_helpers::{
     build_loss, component_unreadable_refusal, open_reader, reader_data_path, recover_one_partition,
     token_out_of_order,
@@ -261,6 +262,27 @@ pub async fn salvage_sstable(
     report.component_findings = component_findings;
     report.partitions.total = boundaries.entries.len();
 
+    // roborev, issue #4196, round 23 High finding: normalize the caller's
+    // schema against THIS generation's own serialization header — the two
+    // steps `compact_sstables` runs unconditionally before decode
+    // (`merge/mod.rs`) and salvage ran neither of, silently dropping a static
+    // column the header declares but a stale `--schema` omits. Why each step
+    // matters, and the exactly-bounded UDT-registry residual: see
+    // `effective_schema`'s module doc. `schema` is deliberately SHADOWED by
+    // the effective one from here down, so no site below can reach the
+    // un-normalized schema — a normalized decode feeding an unnormalized
+    // writer would merely MOVE the divergence.
+    let input_paths = vec![input.to_path_buf()];
+    let (effective_schema, schema_findings) = match effective_salvage_schema(schema, &input_paths) {
+        Ok(pair) => pair,
+        Err(refusal) => {
+            report.refused = Some(refusal);
+            return Ok(report);
+        }
+    };
+    report.component_findings.extend(schema_findings);
+    let schema = &effective_schema;
+
     // roborev, issue #4196, round 19 Medium finding: for a ZERO-clustering-
     // column schema, salvage's output is content-parity-proven against
     // `compact_sstables` (the byte-parity-proven-vs-Cassandra path) but NOT
@@ -315,7 +337,6 @@ pub async fn salvage_sstable(
             return Ok(report);
         }
     };
-    let input_paths = vec![input.to_path_buf()];
     let repair_state = match classify_inputs(&input_paths) {
         Ok(rs) => rs,
         Err(e) => {

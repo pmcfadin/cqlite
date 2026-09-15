@@ -13,6 +13,7 @@
 
 mod boundaries;
 mod chunks;
+mod effective_schema;
 mod recover;
 mod recover_helpers;
 
@@ -24,6 +25,14 @@ use serde::{Deserialize, Serialize};
 /// Options for a salvage run. Reserved for future recovery-policy knobs;
 /// empty today — design D2 fixes partition atomicity as the one recovery
 /// policy and does not make it configurable.
+///
+/// The one knob already identified for it is an optional
+/// [`UdtRegistry`](crate::schema::UdtRegistry) (follow-up work): salvage
+/// normalizes the caller's schema against the input's own serialization header
+/// (`effective_schema`), which covers every UDT column the header declares,
+/// but a UDT column added AFTER the input was written appears in no header and
+/// is therefore left bare in the recovered generation's header. See
+/// `effective_schema`'s module doc for the precise bound on that residual.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SalvageOptions {}
 
