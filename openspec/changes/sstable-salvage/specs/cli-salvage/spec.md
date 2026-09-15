@@ -102,6 +102,104 @@ exists to preserve, violating R5.1.
   writes the manifest
   (`manifest_inside_the_input_is_refused_and_the_input_is_untouched`, same file).
 
+#### Scenario: R7.8 EVERY destructive path argument is resolved and checked by ONE guard
+
+Roborev, issue #4196, round-23 — two High/Medium findings and one more Medium, all confirmed by an
+independent Cassandra/SSTable-format expert review **with working reproductions against the compiled
+binary and real Cassandra-written bytes**. R7.6's guard was correct about the property it checked and
+checked the wrong things: it validated narrow local proxies — does this literal path *exist*, is its
+own *parent* inside the input, is its *file name* component-shaped — rather than the invariant that
+matters, namely *will any write this run performs land on a byte the operator did not intend to
+overwrite, once every path is fully resolved and once the run's OWN planned outputs are counted*.
+Three reproduced consequences, each of which **exited `0` with a clean console summary**:
+
+1. `--manifest <--out>/<ks>/<tbl>/nb-1-big-Data.db` passed validation (that path did not exist yet),
+   the run recovered every partition and wrote the real `Data.db`, then `write_manifest_file`
+   truncated it to **607 bytes of manifest JSON**. Validation ran before the work; the write ran
+   after. R7.6's own "a non-existent component-named path outside the input is allowed" test pinned
+   this as intended, on a rationale ("nothing would be truncated") true at validation time and false
+   at write time.
+2. A **symlink** named `salvage.json` — not component-shaped, so the name rule never fired, and with
+   its own parent outside the input, so the `parent()` containment rule never fired either — pointed
+   at a real `nb-1-big-Statistics.db` **inside the input**. `File::create` followed it: **5265 → 531
+   bytes** on the reviewer's fixture, **4847 → 619** on the committed one.
+3. `--out <input>/recovered` wrote a full recovered generation **inside the input tree**, which a
+   re-run then rediscovers as an additional generation to salvage.
+
+- **Given** a staged healthy generation
+- **When** any destructive path argument (`--manifest`, `--out`) is supplied
+- **Then** it is **resolved before it is judged** — canonicalized when it exists, so a symlink is
+  followed to its target; otherwise resolved through its nearest EXISTING ancestor with the
+  remaining components applied lexically (`.` dropped, `..` popped, so a traversal through a
+  not-yet-existing directory cannot escape) — and refused when the resolved path lands on or inside
+  EITHER the input's own directory OR the run's own planned output generation
+  `<--out>/<keyspace>/<table>/`
+  (`f1_manifest_inside_the_planned_output_generation_is_refused_and_out_stays_empty`,
+  `f4a_manifest_symlink_into_the_input_is_refused_and_the_victim_is_byte_identical`,
+  `f5_out_inside_the_input_tree_is_refused_and_the_input_gains_no_recovered_dir` in
+  `cqlite-cli/tests/issue_4196_salvage_write_guard.rs`).
+- **And** the refusal exits `1`, names the **resolved victim** rather than only the path typed, and
+  says whether the collision was with the INPUT or with the run's own OUTPUT — the operator's next
+  action differs.
+- **And** resolution **FAILS CLOSED**: an unresolvable candidate is REFUSED with the cause named,
+  never admitted. This includes a **dangling symlink**, for which `canonicalize` reports a plain
+  `NotFound` while `File::create` follows it and creates the target
+  (`an_unresolvable_candidate_is_refused_with_a_named_reason`, `write_guard.rs`). The ONE preserved
+  allow is an input that is neither an existing directory nor an existing file — nothing to protect,
+  not a failure to decide (`a_nonexistent_input_protects_nothing`).
+- **And** the check is re-applied **immediately before `File::create`**, not only at argument-parse
+  time: a path that does not exist yet is indistinguishable from one that never will until the run
+  itself creates it, so a single up-front check cannot close consequence (1) whatever it validates.
+- **And** the guard is ONE helper serving every path argument. Two independently-maintained guards
+  drifting is precisely how consequences (1) and (3) arose — `--manifest` had a containment check and
+  `--out` never got the equivalent.
+- **And** the legitimate invocations still WORK, asserted positively, because a guard that refuses
+  everything is not a fix: `--manifest <--out>/salvage.json` and `--manifest <unrelated-dir>/m.json`
+  both exit `0`, write a parseable non-empty D5 manifest, AND leave exactly one recovered `*-Data.db`
+  under `--out` which **must not itself parse as JSON** — consequence (1)'s exact failure shape,
+  checked affirmatively (`both_documented_manifest_locations_still_succeed_and_recover_real_bytes`).
+- **And** the residual is NAMED, not implied closed: resolution-then-open narrows but does not close
+  the TOCTOU window, since `canonicalize` is a snapshot. `O_NOFOLLOW` on the final open is tracked as
+  **#4231** and deliberately not a blocker here — the realistic hazard is a stale symlink from an
+  earlier run, which resolution does stop; an adversary racing the guard is not this tool's threat
+  model.
+
+#### Scenario: R7.9 a `--schema` declaring a DIFFERENT table is refused, whatever the file format
+
+Roborev, issue #4196: round 12 hardened the CQL branch of `load_compaction_table_schema_for_table`
+against selecting the wrong table's `CREATE TABLE`, and round 23 found the JSON branch had never
+been given the equivalent — it discarded `target_table` entirely, so `--schema s.json` declaring
+table `b` was accepted for an input of table `a` and reported a clean recovery. The round-23 expert
+review rates this **borderline High rather than Medium** because it COMPOUNDS with R1.3: once salvage
+trusts the input's own header, decoding table `a`'s partitions with table `b`'s column layout is a
+wrong-table recovery whose only remaining safety net is the normalization. Both therefore ship in the
+same round.
+
+The root cause was reasoning recorded in a doc comment — *"JSON schema files are inherently
+single-table … so `target_table` does not filter that branch — there is nothing to select among"* —
+which conflates **nothing to SELECT among** (true: one table per JSON file) with **nothing to
+VALIDATE** (false: that one table can still disagree with the table being salvaged). The comment is
+corrected in the same change, because a comment that licenses the defect is where it returns.
+
+- **Given** a `--schema` file, CQL or JSON, and a target table derived from `--table` when given and
+  otherwise from the input directory's `<table>-<32-hex-id>` name
+- **When** the file's declared table does not match the target
+- **Then** the load FAILS CLOSED with a message naming BOTH tables, for **either** file format
+  (`json_schema_declaring_another_table_fails_closed_naming_both`, and the pre-existing
+  `selecting_absent_table_fails_closed_naming_present_tables` for CQL, in
+  `cqlite-cli/src/commands/write.rs`).
+- **And** validation is reached by BOTH branches through ONE unconditional post-load step that the
+  public entry point cannot return without — selection stays per-format, validation does not — so a
+  future third branch cannot reintroduce the gap by omission (`schema_load::assert_table_matches`).
+- **And** a matching table still loads, including a case-insensitive match
+  (`json_schema_file_resolves_when_its_declared_table_matches_the_target`,
+  `json_schema_table_match_is_case_insensitive`), and a caller with no target table is unaffected
+  (`json_schema_with_no_target_table_still_loads` — `compact`'s "first table wins" is unchanged).
+- **And** the case-folding residual is recorded at the comparison site rather than hidden: Cassandra
+  preserves case for QUOTED identifiers, but the JSON schema format has no quoting concept at all,
+  so two tables differing only by case in a quoted name compare equal here. Unexpressible in that
+  format either way; named, not silently accepted.
+
 #### Scenario: R7.7 an explicit `Data.db` overrides the publication barrier, but never silently
 
 Roborev, issue #4196, round-22 Low finding: the single-FILE input path did not probe for the sibling
@@ -130,6 +228,10 @@ The JSON manifest SHALL follow design.md §D5 exactly and the text output MUST b
 - **When** `cqlite salvage --help` runs
 - **Then** it states: output is uncompressed (#1406), a partition is recovered whole or not at
   all, and a damaged Index/Partitions component needs `rebuild` first.
+- **And** (round 23) the `--out` and `--manifest` flags state what R7.8 REFUSES and why — that a
+  path is resolved before it is judged, that landing inside the input or inside the run's own planned
+  output is refused, and that `<--out>/salvage.json` is the recommended manifest location. Help that
+  understates the refusals sends the operator to file a bug against a working guard.
 
 ### Requirement: R9 — The salvaged output is a valid SSTable
 
