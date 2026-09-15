@@ -581,18 +581,32 @@ pub struct SalvageArgs {
     /// test fixtures) needs this flag named explicitly.
     #[arg(long)]
     pub table: Option<String>,
-    /// Output directory (keyspace/table/ is appended, matching --schema)
+    /// Output directory (keyspace/table/ is appended, matching --schema).
+    ///
+    /// REFUSED (exit 1) when it resolves INSIDE the input tree: salvage writes
+    /// only the recovered generation and must not modify a byte of its input
+    /// (spec R5.1), and an output nested in the input is then discovered as one
+    /// more generation to salvage on the next run. Point it at a sibling of the
+    /// table directory, or anywhere on another volume — salvage must stay
+    /// re-runnable on an input it has not altered (roborev, issue #4196,
+    /// round-23 finding F5).
     #[arg(long)]
     pub out: PathBuf,
-    /// Write the JSON manifest (design D5 shape) to this path. A single-Data.db
-    /// input writes one manifest object; a table-dir input writes a JSON array,
-    /// one entry per generation salvaged.
+    /// Write the JSON manifest (design D5 shape) to this path; recommended
+    /// value `<--out>/salvage.json`. A single-Data.db input writes one manifest
+    /// object; a table-dir input writes a JSON array, one entry per generation
+    /// salvaged.
     ///
-    /// REFUSED (exit 1) when the path resolves inside the INPUT directory, or
-    /// already exists and is named like an SSTable component (`*.db`,
-    /// `*-TOC.txt`, `*-Digest.crc32`): the manifest is created with
-    /// `File::create`, which truncates, and salvage must not modify a byte of
-    /// its input (spec R5.1) — roborev, issue #4196, round-22 Low finding.
+    /// The manifest is created with `File::create`, which TRUNCATES
+    /// unconditionally, so the path is REFUSED (exit 1) when it resolves inside
+    /// the INPUT directory, inside the run's OWN planned output generation
+    /// `<--out>/<keyspace>/<table>/`, or onto an existing file named like an
+    /// SSTable component (`*.db`, `*-TOC.txt`, `*-Digest.crc32`). The path is
+    /// RESOLVED first — symlinks followed, `..` applied — so a link named
+    /// `salvage.json` cannot reach past the check, and a path that cannot be
+    /// resolved is refused rather than allowed. Salvage must not modify a byte
+    /// of any SSTable it can reach (spec R5.1) — roborev, issue #4196,
+    /// round-22 Low finding and round-23 findings F1/F4.
     #[arg(long)]
     pub manifest: Option<PathBuf>,
     /// Console rendering of the same manifest (text to stderr, or JSON to
