@@ -244,6 +244,20 @@ name = "issue_4196_salvage_publication_barrier"
 path = "tests/issue_4196_salvage_publication_barrier.rs"
 required-features = ["write-support"]
 
+# Issue #4196 (roborev round-23 findings F1/F4a/F5, each REPRODUCED against the
+# compiled binary and real Cassandra-written bytes by an independent
+# Cassandra-format expert review): the destructive-write containment cases drive
+# `cqlite` via CARGO_BIN_EXE_cqlite to observe salvage's process::exit codes and
+# then inspect the bytes on disk, so they carry the same feature requirement.
+# Declared EXPLICITLY rather than left to cargo's auto-discovery, for the same
+# reason as the target above: auto-discovered, it compiles at default features
+# with its whole body #[cfg]-gated out, runs 0 tests, and the gate's cli-tests
+# component FAILs CLOSED on it (#2039 zero-tests guard).
+[[test]]
+name = "issue_4196_salvage_write_guard"
+path = "tests/issue_4196_salvage_write_guard.rs"
+required-features = ["write-support"]
+
 # Issue #1581: dhat-gated bounded-memory guard for the streaming query cutover.
 # Installs the dhat global allocator, so it must be its own opt-in test binary.
 [[test]]
