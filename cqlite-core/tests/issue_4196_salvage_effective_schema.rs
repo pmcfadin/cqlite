@@ -111,16 +111,15 @@ fn header_columns(data_db: &Path, subject: &str) -> (BTreeSet<String>, BTreeSet<
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_else(|| panic!("{subject}: Data.db path has no file name"));
-        data_db.with_file_name(format!(
-            "{}Statistics.db",
-            name.trim_end_matches("Data.db")
-        ))
+        data_db.with_file_name(format!("{}Statistics.db", name.trim_end_matches("Data.db")))
     };
     let bytes = std::fs::read(&stats_path)
         .unwrap_or_else(|e| panic!("{subject}: Statistics.db {stats_path:?} unreadable: {e}"));
     let (_, stats) =
-        cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(&bytes, None)
-            .unwrap_or_else(|e| panic!("{subject}: Statistics.db {stats_path:?} unparseable: {e}"));
+        cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+            &bytes, None,
+        )
+        .unwrap_or_else(|e| panic!("{subject}: Statistics.db {stats_path:?} unparseable: {e}"));
     let all: BTreeSet<String> = stats
         .serialization_header_columns
         .iter()
@@ -233,8 +232,10 @@ async fn salvage_with_a_stale_schema_matches_compaction_on_the_effective_column_
     );
 
     // ---- The assertion the defect fails ----
-    let (compact_columns, compact_statics) =
-        header_columns(&single_data_db(&compact_out), "the compaction oracle's output");
+    let (compact_columns, compact_statics) = header_columns(
+        &single_data_db(&compact_out),
+        "the compaction oracle's output",
+    );
     let (salvage_columns, salvage_statics) =
         header_columns(&single_data_db(&salvage_out), "the salvaged output");
 
@@ -278,14 +279,15 @@ async fn salvage_with_a_stale_schema_matches_compaction_on_the_effective_column_
     use std::sync::Arc;
     let config = cqlite_core::Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
-    let compact_rows = SSTableReader::open(&single_data_db(&compact_out), &config, platform.clone())
-        .await
-        .expect("open compaction-oracle output")
-        // Decoded with the FULL schema (what a correctly-configured reader has),
-        // so a dropped static cell shows up as a content difference too.
-        .iterate_all_partitions_for_compaction(Some(&full))
-        .await
-        .expect("decode compaction-oracle rows");
+    let compact_rows =
+        SSTableReader::open(&single_data_db(&compact_out), &config, platform.clone())
+            .await
+            .expect("open compaction-oracle output")
+            // Decoded with the FULL schema (what a correctly-configured reader has),
+            // so a dropped static cell shows up as a content difference too.
+            .iterate_all_partitions_for_compaction(Some(&full))
+            .await
+            .expect("decode compaction-oracle rows");
     let salvage_rows = SSTableReader::open(&single_data_db(&salvage_out), &config, platform)
         .await
         .expect("open salvaged output")
