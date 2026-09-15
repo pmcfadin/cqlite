@@ -163,7 +163,8 @@ impl WriteGuard {
         candidate: &Path,
         remedy: &str,
     ) -> Result<(), String> {
-        self.resolve_disjoint(subject, candidate, remedy).map(|_| ())
+        self.resolve_disjoint(subject, candidate, remedy)
+            .map(|_| ())
     }
 
     /// Refuse `candidate` when the path it will ACTUALLY be written to lands

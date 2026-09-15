@@ -53,10 +53,7 @@ use super::write_guard::{WriteGuard, MANIFEST_REMEDY};
 /// bytes to 531 bytes of manifest JSON, exit 0, clean summary (round-23 F4a).
 ///
 /// Returns the collision, NAMED, for the caller to print before exiting 1.
-pub(super) fn validate_manifest_path(
-    args: &SalvageArgs,
-    guard: &WriteGuard,
-) -> Result<(), String> {
+pub(super) fn validate_manifest_path(args: &SalvageArgs, guard: &WriteGuard) -> Result<(), String> {
     let Some(manifest) = &args.manifest else {
         return Ok(());
     };
@@ -223,7 +220,10 @@ mod tests {
         );
         assert_eq!(collision_for_input(&input, &out.join("salvage.json")), None);
         // And a plain sibling path outside the input.
-        assert_eq!(collision_for_input(&input, &temp.path().join("m.json")), None);
+        assert_eq!(
+            collision_for_input(&input, &temp.path().join("m.json")),
+            None
+        );
         // Still allowed with the run's real planned output root in play: the
         // manifest lives BESIDE the recovered generation, never inside it.
         let output_dir = out.join("ks").join("mytable");

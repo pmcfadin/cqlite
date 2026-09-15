@@ -31,11 +31,11 @@ mod write_guard;
 
 use discovery::{discover_salvage_inputs, table_name_from_input};
 use manifest_path::validate_manifest_path;
-use write_guard::{WriteGuard, OUT_REMEDY};
 use report::{
     exit_after_partial_failure, record_table_dir_level_findings, record_unpublished_input_findings,
     render_console, report_is_imperfect, write_manifest_file,
 };
+use write_guard::{WriteGuard, OUT_REMEDY};
 
 /// Execute the `salvage` command.
 ///
