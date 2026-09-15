@@ -142,6 +142,42 @@ empty in the affirmative form.
 - **Then** `report.losses` is empty AND `report.partitions.total == recovered > 0`, and the text
   rendering reads `losses: 0 RECOGNISED` — a report with `total == 0` on a table with rows FAILs.
 
+#### Scenario: R1.3 a stale caller schema is normalized from the input's OWN header
+
+Roborev, issue #4196, round-23 High finding, confirmed by an independent Cassandra/SSTable-format
+expert review with a working reproduction. `compact_sstables` normalizes the caller's schema against
+the input SSTable headers BEFORE decode — `effective_compaction_schema` then
+`apply_udt_marshals_from_inputs` — and `salvage_sstable` did NEITHER, so a `--schema` disagreeing
+with the on-disk serialization header decoded against the wrong layout and re-encoded with a
+divergent header while the manifest reported every partition `recovered`. For a recovery tool a
+confidently-clean manifest over silently wrong bytes is the worst failure shape, and salvage is
+one-shot: there is no second chance once the input is gone.
+
+The reproduced instance needed **no UDT column at all** — a hand-written schema simply OMITTING
+`static_data TEXT STATIC` produced an output whose header declared that column NOWHERE (8981 bytes
+against compaction's 10432), at exit `0`, reporting `recovered=100 lost=0`. So the two skipped calls
+are INDEPENDENT hazards: static columns present in the input header but absent from the caller's
+schema, and UDT marshal shape. Neither may be closed alone.
+
+- **Given** the committed Cassandra 5.0-written `test_basic.static_columns_table` and a caller
+  `TableSchema` from which its static column has been REMOVED
+- **When** `salvage_sstable` and `compact_sstables` each run over that input with THAT schema
+- **Then** the two agree on the output serialization header's column set, the omitted static column
+  is present in both — the expectation read out of the INPUT's own `Statistics.db` header, never
+  from CQLite's prior salvage behavior (#3042: a CQLite-written + CQLite-read round-trip is
+  INVARIANT to this defect class and cannot serve as its oracle) — and every decoded row is equal
+  (`salvage_with_a_stale_schema_matches_compaction_on_the_effective_column_set` in
+  `cqlite-core/tests/issue_4196_salvage_effective_schema.rs`; per-case, hard-fails under
+  `CQLITE_REQUIRE_FIXTURES=1`).
+- **And** the normalized schema reaches BOTH the decoder and the output writer, so a normalized
+  decode feeding an unnormalized writer is impossible by construction rather than by discipline.
+- **And** a normalization that CANNOT be completed is a classified REFUSAL that still carries the
+  manifest — `report.refused` names the component and the cause — never a silent success and never a
+  bare error that discards the losses and findings already gathered.
+- **And** a self-healed run stays exit `0`, exactly as `compact` does: the
+  `SchemaNormalizedFromHeader` finding it records is operator-visible in the manifest but is NOT a
+  verification gap.
+
 ### Requirement: R2 — Losses are exactly the partitions the format says are untrustworthy
 
 For a damaged input, the set of lost partitions SHALL equal the set derived from the healthy
