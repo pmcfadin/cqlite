@@ -115,24 +115,34 @@ impl WriteGuard {
     pub(super) fn new(input: &Path, output_dir: Option<&Path>) -> Result<Self, String> {
         let mut protected = Vec::with_capacity(2);
 
-        // The input DIRECTORY, when there is one to protect at all.
-        let input_dir = if input.is_dir() {
-            Some(input.to_path_buf())
-        } else if input.is_file() {
-            input.parent().map(Path::to_path_buf)
+        // The input DIRECTORY, when there is one to protect at all. Resolve the
+        // input ITSELF and take the parent for a FILE input, never the reverse:
+        // `Path::parent()` of a bare relative `nb-1-big-Data.db` is `""` (which
+        // round 22 then failed to canonicalize, and so failed OPEN), and the
+        // directory to protect for a SYMLINKED input file is the one holding the
+        // bytes that will actually be read. A resolved path is already
+        // canonical, so its parent needs no second resolution.
+        let input_dir = if input.is_dir() || input.is_file() {
+            let resolved = resolve_write_target(input).map_err(|why| {
+                format!(
+                    "the input {} could not be resolved, so salvage cannot prove any write is \
+                     safe: {why}. Refusing rather than guessing (spec R5.1: the input is not \
+                     modified)",
+                    input.display()
+                )
+            })?;
+            if input.is_dir() {
+                Some(resolved)
+            } else {
+                // `None` only for a `Data.db` sitting at the filesystem root,
+                // which has no enclosing generation directory to protect.
+                resolved.parent().map(Path::to_path_buf)
+            }
         } else {
             None
         };
         if let Some(dir) = input_dir {
-            let resolved = resolve_write_target(&dir).map_err(|why| {
-                format!(
-                    "the input directory {} could not be resolved, so salvage cannot prove any \
-                     write is safe: {why}. Refusing rather than guessing (spec R5.1: the input is \
-                     not modified)",
-                    dir.display()
-                )
-            })?;
-            protected.push((INPUT_LABEL, resolved));
+            protected.push((INPUT_LABEL, dir));
         }
 
         // The run's own planned output generation directory. It normally does
@@ -552,6 +562,35 @@ mod tests {
         let empty = WriteGuard::new(Path::new(""), None).expect("an empty input path is not fatal");
         assert_eq!(
             empty.assert_disjoint("--manifest", Path::new("m.json"), MANIFEST_REMEDY),
+            Ok(())
+        );
+    }
+
+    /// A SYMLINKED input file protects the directory holding the bytes that will
+    /// actually be READ, not the directory the link happens to sit in — the input
+    /// is resolved before its parent is taken.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_input_file_protects_the_real_generation_directory() {
+        let temp = TempDir::new().expect("tempdir");
+        let (input, _out) = staged(&temp);
+        let link = temp.path().join("nb-1-big-Data.db");
+        std::os::unix::fs::symlink(input.join("nb-1-big-Data.db"), &link).expect("create symlink");
+        let guard = WriteGuard::new(&link, None).expect("guard builds for a symlinked file input");
+        assert!(
+            guard
+                .assert_disjoint(
+                    "--manifest",
+                    &input.join("nb-1-big-Statistics.db"),
+                    MANIFEST_REMEDY
+                )
+                .is_err(),
+            "the REAL generation directory must be protected, not the link's own parent"
+        );
+        // And the link's own parent (the temp root) is NOT protected by
+        // accident — that would refuse the documented sibling `--out`.
+        assert_eq!(
+            guard.assert_disjoint("--out", &temp.path().join("out"), OUT_REMEDY),
             Ok(())
         );
     }
