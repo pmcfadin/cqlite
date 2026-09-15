@@ -192,23 +192,18 @@ mod tests {
     use crate::schema::{Column, TableSchema};
 
     fn schema(columns: &[(&str, &str)]) -> TableSchema {
-        TableSchema {
-            keyspace: "ks".to_string(),
-            table: "t".to_string(),
-            partition_keys: Vec::new(),
-            clustering_keys: Vec::new(),
-            columns: columns
-                .iter()
-                .map(|(name, data_type)| Column {
-                    name: (*name).to_string(),
-                    data_type: (*data_type).to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                })
-                .collect(),
-            ..TableSchema::default()
-        }
+        let mut s = TableSchema::new_for_testing("ks", "t");
+        s.columns = columns
+            .iter()
+            .map(|(name, data_type)| Column {
+                name: (*name).to_string(),
+                data_type: (*data_type).to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            })
+            .collect();
+        s
     }
 
     /// The healthy case: an up-to-date schema normalizes to itself, so a clean
