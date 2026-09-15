@@ -475,11 +475,32 @@ fn load_compaction_table_schema(schema_path: &Path) -> Result<cqlite_core::schem
 /// schema.json salvage …` regressed to a hard failure. Consolidated into
 /// ONE function instead, so the JSON fallback and the `USE`/`CREATE
 /// KEYSPACE` inference exist in exactly one place and cannot drift again).
-/// JSON schema files are inherently single-table (the format has no
-/// multi-statement concept at all), so `target_table` does not filter that
-/// branch — there is nothing to select among.
+///
+/// A JSON schema file is inherently single-table (the format has no
+/// multi-statement concept at all), so `target_table` cannot SELECT within that
+/// branch — but "nothing to select among" is NOT "nothing to validate", and
+/// conflating the two is exactly how the round-23 High finding got in: the one
+/// table a JSON file declares can still disagree with the table actually being
+/// salvaged. So SELECTION is per-branch while VALIDATION is not: whichever
+/// branch loads the schema, this wrapper hands it to the single unconditional
+/// [`schema_load::assert_table_matches`], which is where a wrong-table `--schema`
+/// now fails closed for CQL and JSON alike.
 #[cfg(feature = "write-support")]
 pub(crate) fn load_compaction_table_schema_for_table(
+    schema_path: &Path,
+    target_table: Option<&str>,
+) -> Result<cqlite_core::schema::TableSchema> {
+    let schema = load_compaction_table_schema_selected(schema_path, target_table)?;
+    crate::commands::schema_load::assert_table_matches(&schema, target_table, schema_path)?;
+    Ok(schema)
+}
+
+/// The per-branch SELECTION half of [`load_compaction_table_schema_for_table`]:
+/// picks a schema out of the file, and performs no cross-check against
+/// `target_table` beyond that. Never call this directly — its result is
+/// unvalidated (roborev, issue #4196, round-23 High finding).
+#[cfg(feature = "write-support")]
+fn load_compaction_table_schema_selected(
     schema_path: &Path,
     target_table: Option<&str>,
 ) -> Result<cqlite_core::schema::TableSchema> {
@@ -497,8 +518,11 @@ pub(crate) fn load_compaction_table_schema_for_table(
         "cql" | "sql" | ""
     );
     if !is_cql {
-        // JSON (or other) — the single-statement loader handles it; no table
-        // selection needed (see this function's doc). QUIET (`show_status =
+        // JSON (or other) — the single-statement loader handles it. There is
+        // nothing to SELECT here (one table per file), and the caller
+        // cross-checks the declared table against `target_table`, so this
+        // branch must NOT be read as "target_table is irrelevant to JSON".
+        // QUIET (`show_status =
         // false`), NEVER the stdout-printing `load_schema_file` wrapper
         // (roborev, issue #4196, round-22 Medium finding): `salvage
         // --out-format json` writes the D5 manifest to that same stdout. Full
