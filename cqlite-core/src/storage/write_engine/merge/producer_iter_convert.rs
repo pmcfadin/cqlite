@@ -33,7 +33,12 @@ impl SSTableRowIteratorAdapter {
     /// it inline. Populates the clustering key from the decoded cells so wide-row
     /// (clustering) partitions reconcile per `(pk, ck)` instead of collapsing
     /// into one row.
-    pub(super) fn build_merge_entry(
+    // `pub(crate)` (issue #4196): `salvage_sstable` — a SIBLING of `merge`
+    // under `write_engine`, not a descendant — calls this directly to reuse
+    // the exact CompactionRow -> MergeEntry translation compaction uses, so a
+    // healthy salvage run reconciles byte-identically to `compact_sstables`
+    // (design D1, spec R1).
+    pub(crate) fn build_merge_entry(
         run_index: usize,
         compaction_row: crate::storage::sstable::reader::compaction_row::CompactionRow,
         schema: &TableSchema,

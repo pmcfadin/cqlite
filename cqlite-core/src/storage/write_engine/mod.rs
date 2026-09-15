@@ -38,6 +38,17 @@ pub mod merge_policy;
 pub mod mutation;
 #[cfg(feature = "write-support")]
 pub(crate) mod reconcile_rules;
+// `cqlite salvage` (issue #4196, epic #4192): recovers every completely-
+// decodable partition of a damaged SSTable, from an authoritative boundary
+// source, into a fresh generation. Its recovery loop is built on the
+// point-read seek primitive (`SSTableReader::decode_partition_at_offset_for_salvage`),
+// which is itself `not(tombstones)` like every other consumer of that seek
+// machinery in `reader/data_access/point_compaction.rs` — see that module's
+// own gate for the rationale. The manifest TYPES (`SalvageReport`, `Loss`,
+// ...) carry no such dependency but are declared alongside the function for
+// one coherent module rather than splitting a type-only sibling.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod salvage;
 #[cfg(feature = "write-support")]
 pub mod wal;
 
