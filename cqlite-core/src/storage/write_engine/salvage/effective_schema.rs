@@ -66,9 +66,12 @@ const NORMALIZED_CLASS: &str = "SchemaNormalizedFromHeader";
 
 /// How many column names a single finding's `detail` enumerates before
 /// folding the rest into a count. `serialization_header_columns` comes from a
-/// possibly-DAMAGED `Statistics.db`, so its length is not bounded by the real
-/// table's width — the same manifest-size discipline `recover.rs` applies to
-/// `losses`/`Loss.chunks` (an affirmative count, never a silent drop).
+/// possibly-DAMAGED `Statistics.db`, so its length is NOT bounded by the real
+/// table's width: it is bounded only by that file's size (the header parser
+/// sanity-checks every name/type length against the remaining buffer, and each
+/// column consumes at least two bytes), which is far more than a manifest
+/// should print. Same discipline `recover.rs` applies to `losses` /
+/// `Loss.chunks` — an affirmative count, never a silent drop.
 const MAX_NAMED_COLUMNS: usize = 32;
 
 /// The effective decode+write schema for a salvage run: `schema` normalized
