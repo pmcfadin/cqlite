@@ -12,7 +12,11 @@
 //! changed by the split: [`discovery`] resolves `args.input` into the
 //! generations to salvage and derives a target table name; [`report`]
 //! decides the exit code, attaches table-dir-level findings, and renders
-//! the JSON/text manifest.
+//! the JSON/text manifest; [`write_guard`] owns the ONE decision "will this
+//! write land on a byte the operator did not name for overwriting?" for
+//! EVERY destructive path the command takes (`--out` and `--manifest`
+//! alike — round 23), and [`manifest_path`] the one extra rule specific to
+//! the manifest.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +27,11 @@ use crate::cli_types::SalvageArgs;
 mod discovery;
 mod manifest_path;
 mod report;
+mod write_guard;
 
 use discovery::{discover_salvage_inputs, table_name_from_input};
 use manifest_path::validate_manifest_path;
+use write_guard::{WriteGuard, OUT_REMEDY};
 use report::{
     exit_after_partial_failure, record_table_dir_level_findings, record_unpublished_input_findings,
     render_console, report_is_imperfect, write_manifest_file,
@@ -85,6 +91,43 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         std::process::exit(1);
     };
 
+    // roborev, issue #4196, round-23 finding F5 (confirmed by an independent
+    // Cassandra-format expert review): the emptiness probe below was the ENTIRE
+    // `--out` guard — it asked whether `--out` was safe to POPULATE and never
+    // WHERE it pointed. So `--out <input>/recovered` wrote a full recovered
+    // generation INSIDE the input tree the tool exists to preserve (spec R5.1),
+    // and a re-run then discovered that output as one more generation to
+    // salvage. Checked through the SHARED containment guard, not a second
+    // hand-rolled containment check: `--manifest` and `--out` drifting apart is
+    // exactly how F1 and F5 both happened.
+    //
+    // The boundary is the LITERAL `input` argument (its parent for a
+    // single-`Data.db` input), not "the keyspace/table tree" — this CLI cannot
+    // enumerate that tree, and inventing a notion of "all this table's
+    // generations" it does not have would refuse legitimate layouts.
+    //
+    // Checked FIRST, before emptiness: "your --out is inside the input" is the
+    // more specific and more dangerous condition, and for `--out <input>`
+    // (non-empty, so the probe below would fire) it is also the more useful
+    // message. Only ONE direction needs checking here — an `--out` that
+    // CONTAINS the input is already refused by the emptiness probe, since a real
+    // input directory makes it non-empty by construction.
+    //
+    // The output GENERATION directory (`<--out>/<keyspace>/<table>/`) cannot be
+    // known yet — it needs the schema — so the manifest's own check runs later,
+    // once it is.
+    let out_guard = match WriteGuard::new(&args.input, None) {
+        Ok(guard) => guard,
+        Err(why) => {
+            eprintln!("cqlite salvage: {why}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(collision) = out_guard.assert_disjoint("--out", &args.out, OUT_REMEDY) {
+        eprintln!("cqlite salvage: {collision}");
+        std::process::exit(1);
+    }
+
     // roborev, issue #4196, round-8 Low finding: `if let Ok(...)` silently
     // proceeded whenever `--out` existed but could not be READ at all
     // (permissions, or a non-directory file at that path) — the guard
@@ -109,18 +152,6 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             );
             std::process::exit(1);
         }
-    }
-
-    // roborev, issue #4196, round-22 Low finding: `--out` is guarded above,
-    // but `--manifest` accepted ANY path and is written with
-    // `create_dir_all(parent)` + `File::create`, which TRUNCATES
-    // unconditionally — so `--manifest ./damaged-table-dir/nb-1-big-Statistics.db`
-    // destroyed a component of the very input this tool exists to preserve
-    // (spec R5.1). Checked HERE, before a single byte is read or written, so
-    // the refusal is a plain usage error and nothing has happened yet.
-    if let Err(collision) = validate_manifest_path(args) {
-        eprintln!("cqlite salvage: {collision}");
-        std::process::exit(1);
     }
 
     // roborev, issue #4196, round-12 High finding: `load_compaction_table_schema`
@@ -172,6 +203,41 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             std::process::exit(1);
         }
     };
+
+    // roborev, issue #4196, round-22 Low finding + round-23 finding F1 (HIGH,
+    // REPRODUCED against the compiled binary by an independent Cassandra-format
+    // expert review): `--manifest` accepted ANY path and is written with
+    // `create_dir_all(parent)` + `File::create`, which TRUNCATES
+    // unconditionally — so `--manifest ./damaged-table-dir/nb-1-big-Statistics.db`
+    // destroyed a component of the very input this tool exists to preserve
+    // (spec R5.1), and `--manifest <out>/<keyspace>/<table>/nb-1-big-Data.db`
+    // destroyed the run's OWN RECOVERED OUTPUT: 100 partitions recovered, the
+    // real `Data.db` written, then overwritten with 607 bytes of manifest JSON,
+    // console `recovered=100 lost=0`, exit 0.
+    //
+    // Closing that needs the run's PLANNED OUTPUT among the protected paths, and
+    // the planned output is `<--out>/<keyspace>/<table>/` — `recover.rs`
+    // documents that `SSTableWriter` nests every generation there. That is only
+    // knowable once the schema is resolved, which is why this check moved BELOW
+    // the schema load (round 23) rather than sitting beside the `--out` guard.
+    // It is still before a single byte is read or written — `--out` is untouched
+    // and discovery has not run — so the refusal remains a plain usage error
+    // with nothing to undo. `--out` ITSELF is deliberately not protected: the
+    // documented, `--help`-advertised invocation is
+    // `--manifest <--out>/salvage.json`, which lives BESIDE the recovered
+    // generation, never inside it.
+    let output_dir = args.out.join(&schema.keyspace).join(&schema.table);
+    let write_guard = match WriteGuard::new(&args.input, Some(&output_dir)) {
+        Ok(guard) => guard,
+        Err(why) => {
+            eprintln!("cqlite salvage: {why}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(collision) = validate_manifest_path(args, &write_guard) {
+        eprintln!("cqlite salvage: {collision}");
+        std::process::exit(1);
+    }
 
     // The manifest shape follows the INPUT KIND (design D5: "a table-dir
     // input writes a JSON array, one entry per generation"), never the
@@ -281,7 +347,7 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             // behavior exactly (probe `--out` directly; exit 3 if something
             // was still written despite every generation reporting
             // failure, else exit 1 — genuinely nothing gathered).
-            exit_after_partial_failure(&reports, args, is_table_dir);
+            exit_after_partial_failure(&reports, args, is_table_dir, &write_guard);
         }
     } else {
         record_table_dir_level_findings(&mut reports, &discovery.skipped, &hard_errors);
@@ -295,7 +361,7 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         record_unpublished_input_findings(&mut reports, &discovery.barrier_absent);
     }
 
-    if let Err(e) = write_manifest_file(&reports, args, is_table_dir) {
+    if let Err(e) = write_manifest_file(&reports, args, is_table_dir, &write_guard) {
         eprintln!(
             "cqlite salvage: failed to write manifest to {}: {e:#}",
             args.manifest
@@ -303,7 +369,7 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
                 .map(|p| p.display().to_string())
                 .unwrap_or_default()
         );
-        exit_after_partial_failure(&reports, args, is_table_dir);
+        exit_after_partial_failure(&reports, args, is_table_dir, &write_guard);
     }
     render_console(&reports, args, is_table_dir);
 

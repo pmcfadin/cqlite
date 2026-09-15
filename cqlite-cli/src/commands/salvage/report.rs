@@ -5,10 +5,13 @@
 //! #1116) when that file crossed the ~800-line source threshold — a PURE
 //! MOVE, no behavior changed by the split.
 //!
-//! `--manifest` PATH SAFETY (does the operator's chosen path collide with the
-//! input?) lives in the sibling [`super::manifest_path`], split out the same way
-//! in round 22 when the guard added there took THIS file past the same
-//! threshold.
+//! `--manifest` PATH SAFETY (will the operator's chosen path destroy bytes they
+//! did not name for overwriting?) lives in the sibling [`super::manifest_path`],
+//! split out the same way in round 22 when the guard added there took THIS file
+//! past the same threshold, over the containment mechanism shared with `--out` in
+//! [`super::write_guard`] (round 23). This file's only stake in it is the
+//! RE-CHECK immediately before the truncating `File::create` — see
+//! [`write_manifest_file`].
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +20,7 @@ use cqlite_core::storage::write_engine::salvage::{ComponentFinding, SalvageRepor
 use crate::cli_types::{SalvageArgs, SalvageOutFormatArg};
 
 use super::discovery::SkippedInput;
+use super::write_guard::{WriteGuard, MANIFEST_REMEDY};
 
 /// Does this ONE generation's report make the overall run imperfect (exit 3
 /// rather than 0)? Factored out of `execute_salvage_command` (roborev, issue
@@ -195,6 +199,7 @@ pub(super) fn exit_after_partial_failure(
     reports: &[SalvageReport],
     args: &SalvageArgs,
     is_table_dir: bool,
+    guard: &WriteGuard,
 ) -> ! {
     // roborev, issue #4196 (round-5 Medium finding 2): `reports` only
     // reflects generations that returned `Ok(...)` — a generation that
@@ -249,7 +254,7 @@ pub(super) fn exit_after_partial_failure(
     // here to stderr; a second failure writing/rendering what WAS gathered
     // is not separately fatal — `reports` being non-empty already means
     // there is something worth a manifest, either way below.
-    let _ = write_manifest_file(reports, args, is_table_dir);
+    let _ = write_manifest_file(reports, args, is_table_dir, guard);
     render_console(reports, args, is_table_dir);
     let any_output_written = out_has_data_db || reports.iter().any(|r| r.refused.is_none());
     if any_output_written {
@@ -330,6 +335,24 @@ fn write_manifest_json<W: std::io::Write>(
 /// front, before any salvage work — a `--manifest` inside the input directory
 /// never reaches this function (spec R5.1: `File::create` truncates).
 ///
+/// It is RE-CHECKED here, immediately before `File::create`, against the SAME
+/// [`WriteGuard`] (roborev, issue #4196, round-23 finding F1 — HIGH, REPRODUCED
+/// against the compiled binary by an independent Cassandra-format expert
+/// review). The up-front check alone cannot close this: at validation time a
+/// path under the run's own output directory DOES NOT EXIST YET, and a path that
+/// does not exist yet is indistinguishable from one that never will — until the
+/// run itself creates it. Between the two checks the salvage loop has created
+/// `<--out>/<keyspace>/<table>/` and written the recovered `Data.db` into it, so
+/// this is the first moment the collision is observable as a real file. Without
+/// it, a perfect guard still loses to WHEN it ran: the manifest overwrote the
+/// recovered `Data.db` with 607 bytes of JSON and the run reported
+/// `recovered=100 lost=0`, exit 0.
+///
+/// A refusal here is an ordinary `Err`, which the caller already treats as a
+/// manifest-write failure (exit 3 once real output exists, per
+/// [`exit_after_partial_failure`]) — the recovered generation is intact and the
+/// operator is told which path was refused; only the manifest is missing.
+///
 /// A failure here is a HARD error (roborev, issue #4196): D5/R8 make the
 /// manifest THE contract, so a run that reports 0/3 while silently failing
 /// to write it — most reachably a refusal, where `--out` is never created
@@ -342,12 +365,18 @@ pub(super) fn write_manifest_file(
     reports: &[SalvageReport],
     args: &SalvageArgs,
     is_table_dir: bool,
+    guard: &WriteGuard,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
 
     let Some(path) = &args.manifest else {
         return Ok(());
     };
+    // Round-23 F1: the last decision before the truncating `File::create`, not
+    // just the first one at start-up — see this function's doc.
+    if let Err(collision) = guard.assert_disjoint("--manifest", path, MANIFEST_REMEDY) {
+        anyhow::bail!(collision);
+    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)

@@ -1,109 +1,99 @@
 //! `--manifest` path SAFETY for `cqlite salvage` (issue #4196) — refusing a
-//! manifest path that would destroy part of the input, before any work is done.
+//! manifest path that would destroy bytes the operator did not name for
+//! overwriting, before any work is done.
 //!
 //! Split out of [`super::report`] (round 22, campsite rule / epic #1116) when
 //! adding this guard took that file past the ~800-line source threshold — and
 //! it is a genuine responsibility seam either way: `report` decides the exit
 //! code and RENDERS the manifest, this module decides whether the manifest may
-//! be written where the operator asked at all. A PURE MOVE of the guard plus
-//! its unit tests; no behavior changed by the split.
+//! be written where the operator asked at all.
+//!
+//! The CONTAINMENT decision itself moved out again in round 23, into the shared
+//! [`super::write_guard`]: `--manifest` and `--out` were two independently
+//! maintained guards, which is exactly how the round-23 F1/F5 findings happened
+//! (a manifest aimed at the run's own recovered `Data.db` truncated it after a
+//! clean-looking salvage, and `--out` was never checked for WHERE it pointed at
+//! all). What is left here is the ONE rule specific to the manifest: its own
+//! `*.db`/`-TOC.txt`/`-Digest.crc32` name-shape taboo.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::cli_types::SalvageArgs;
 
-/// Refuse a `--manifest` path that would DESTROY part of the input, BEFORE any
-/// work is done (roborev, issue #4196, round-22 Low finding).
+use super::write_guard::{WriteGuard, MANIFEST_REMEDY};
+
+/// Refuse a `--manifest` path that would DESTROY bytes the operator did not
+/// name for overwriting, BEFORE any work is done (roborev, issue #4196,
+/// round-22 Low finding; round-23 findings F1/F4, both REPRODUCED against the
+/// compiled binary and real Cassandra-written SSTable bytes by an independent
+/// Cassandra-format expert review).
 ///
-/// `--out` is guarded fail-closed (`execute_salvage_command` exits 1 on a
-/// non-empty directory), but `--manifest` accepted ANY path and
-/// [`super::report::write_manifest_file`] then `create_dir_all(parent)` +
-/// `File::create`s it — which TRUNCATES unconditionally. `--manifest
-/// ./damaged-table-dir/nb-1-big-Statistics.db` therefore destroyed a component
-/// of the very input the tool exists to preserve, violating spec R5.1 (the
-/// input is not modified) — the contract this branch just pinned with a test.
-/// Salvage runs on data its operator has already lost once; the second, better
-/// attempt must still be possible.
+/// [`super::report::write_manifest_file`] does `create_dir_all(parent)` +
+/// `File::create` — which TRUNCATES unconditionally — so `--manifest
+/// ./damaged-table-dir/nb-1-big-Statistics.db` destroyed a component of the very
+/// input the tool exists to preserve, violating spec R5.1 (the input is not
+/// modified). Salvage runs on data its operator has already lost once; the
+/// second, better attempt must still be possible.
 ///
 /// Two independent refusals, either one sufficient — the second is not
 /// redundant, since a path can reach an SSTable component without resolving
-/// inside THIS input's directory (a component of a DIFFERENT generation, or a
-/// symlink):
+/// inside any PROTECTED directory (a component of a DIFFERENT generation, or a
+/// different table entirely):
 ///
-/// 1. the manifest's directory resolves INSIDE the input's own directory (the
-///    input dir itself, or anything below it) — salvage writes only under
-///    `--out`, never into its input, whatever the file is called;
-/// 2. the manifest path ALREADY EXISTS and is named like an SSTable component
-///    (`*.db`, `*-TOC.txt`, `*-Digest.crc32`).
+/// 1. the manifest RESOLVES into a protected root — the input's own directory,
+///    or the run's own planned output generation directory ([`WriteGuard`]);
+/// 2. the RESOLVED manifest path ALREADY EXISTS and is named like an SSTable
+///    component (`*.db`, `*-TOC.txt`, `*-Digest.crc32`).
+///
+/// Both now read the RESOLVED path, never the literal argument. Round 22
+/// canonicalized only the manifest's PARENT for (1) and pattern-matched only its
+/// `file_name()` for (2), so a SYMLINK named `salvage.json` whose own parent sat
+/// outside the input walked past both halves and `File::create` followed it into
+/// a real Cassandra-written `nb-1-big-Statistics.db` INSIDE the input — 5265
+/// bytes to 531 bytes of manifest JSON, exit 0, clean summary (round-23 F4a).
 ///
 /// Returns the collision, NAMED, for the caller to print before exiting 1.
-pub(super) fn validate_manifest_path(args: &SalvageArgs) -> Result<(), String> {
+pub(super) fn validate_manifest_path(
+    args: &SalvageArgs,
+    guard: &WriteGuard,
+) -> Result<(), String> {
     let Some(manifest) = &args.manifest else {
         return Ok(());
     };
-    manifest_path_collision(&args.input, manifest).map_or(Ok(()), Err)
+    manifest_path_collision(manifest, guard).map_or(Ok(()), Err)
 }
 
-/// [`validate_manifest_path`]'s decision, over plain paths so it is unit-testable
-/// without a whole `SalvageArgs`. `Some(reason)` = refuse.
-fn manifest_path_collision(input: &Path, manifest: &Path) -> Option<String> {
-    // (2) first: it needs no canonicalization of the input at all, so it still
-    // fires for an input path that does not resolve.
-    if manifest.exists()
-        && manifest
+/// [`validate_manifest_path`]'s decision, over a plain path so it is
+/// unit-testable without a whole `SalvageArgs`. `Some(reason)` = refuse.
+fn manifest_path_collision(manifest: &Path, guard: &WriteGuard) -> Option<String> {
+    // (1) containment, which also RESOLVES the path once (following symlinks)
+    // and fails CLOSED on any resolution ambiguity — round 23 F4b: the previous
+    // `let (Ok(..), Ok(..)) = ... else { return None }` made every unresolvable
+    // path an ALLOW, in a guard that documented itself as fail-closed.
+    let resolved = match guard.resolve_disjoint("--manifest", manifest, MANIFEST_REMEDY) {
+        Ok(resolved) => resolved,
+        Err(collision) => return Some(collision),
+    };
+
+    // (2) the name-shape taboo, applied to the RESOLVED path: an EXISTING
+    // SSTable component anywhere — including outside every protected root — is
+    // someone's data, and `File::create` would truncate it.
+    if resolved.exists()
+        && resolved
             .file_name()
             .and_then(|n| n.to_str())
             .map(looks_like_sstable_component)
             .unwrap_or(false)
     {
         return Some(format!(
-            "--manifest {} names an EXISTING SSTable component — writing the manifest would \
-             TRUNCATE it. Salvage must not modify a byte of any SSTable it can reach (spec \
-             R5.1); point --manifest at a path of its own, e.g. <--out>/salvage.json",
-            manifest.display()
+            "--manifest {} resolves to {}, an EXISTING SSTable component — writing the manifest \
+             would TRUNCATE it. Salvage must not modify a byte of any SSTable it can reach (spec \
+             R5.1); {MANIFEST_REMEDY}",
+            manifest.display(),
+            resolved.display()
         ));
     }
 
-    // (1) containment. The input DIRECTORY is `input` itself (a table dir) or,
-    // for a single `Data.db` FILE, its parent; the manifest's is its parent,
-    // since the manifest file itself need not exist yet. `canonicalize` on
-    // both, so `./x/../x`, a trailing slash and a symlinked corpus root all
-    // compare correctly.
-    //
-    // A path that is NEITHER an existing directory nor an existing file has no
-    // input directory to protect, and this arm must not INVENT one: taking
-    // `parent()` unconditionally made a typo'd input (`salvage ./no-such-dir
-    // --manifest ./m.json`) resolve its "input dir" to the enclosing
-    // directory, which then contains the manifest — a spurious refusal, caught
-    // by `a_nonexistent_input_does_not_break_the_guard`. `discover_salvage_inputs`
-    // reports the missing input on its own; there is nothing here to destroy.
-    let input_dir = if input.is_dir() {
-        input.to_path_buf()
-    } else if input.is_file() {
-        input.parent()?.to_path_buf()
-    } else {
-        return None;
-    };
-    let manifest_parent = match manifest.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        // `--manifest salvage.json` — the current working directory.
-        _ => PathBuf::from("."),
-    };
-    let (Ok(input_dir), Ok(manifest_dir)) =
-        (input_dir.canonicalize(), manifest_parent.canonicalize())
-    else {
-        return None;
-    };
-    if manifest_dir.starts_with(&input_dir) {
-        return Some(format!(
-            "--manifest {} resolves inside the INPUT directory {} — salvage writes only under \
-             --out and must not modify a byte of its input (spec R5.1), and File::create would \
-             truncate whatever is at that path. Point --manifest outside the input, e.g. \
-             <--out>/salvage.json",
-            manifest.display(),
-            input_dir.display()
-        ));
-    }
     None
 }
 
@@ -114,11 +104,14 @@ fn looks_like_sstable_component(name: &str) -> bool {
     name.ends_with(".db") || name.ends_with("-TOC.txt") || name.ends_with("-Digest.crc32")
 }
 
-/// Roborev, issue #4196, round-22 Low finding — [`manifest_path_collision`]'s
-/// two refusals and, just as importantly, what it must NOT refuse.
+/// Roborev, issue #4196, round-22 Low finding and round-23 findings F1/F4 (the
+/// latter confirmed by an independent Cassandra-format expert review with a
+/// working reproduction) — [`manifest_path_collision`]'s two refusals and, just
+/// as importantly, what it must NOT refuse.
 #[cfg(test)]
 mod tests {
     use super::manifest_path_collision;
+    use crate::commands::salvage::write_guard::{WriteGuard, OUTPUT_LABEL};
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -139,6 +132,15 @@ mod tests {
         (input, out)
     }
 
+    /// The two-argument shape every round-22 case was written against: protect
+    /// the INPUT only, with no planned output root in play. The output root is
+    /// supplied explicitly by the round-23 F1 case below, which is the only one
+    /// whose subject it is.
+    fn collision_for_input(input: &Path, manifest: &Path) -> Option<String> {
+        let guard = WriteGuard::new(input, None).expect("the guard must build for this input");
+        manifest_path_collision(manifest, &guard)
+    }
+
     /// The exact destructive invocation the finding names: `--manifest` aimed
     /// at a component of the input.
     #[test]
@@ -146,7 +148,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let (input, _out) = staged(&temp);
         let manifest = input.join("nb-1-big-Statistics.db");
-        let collision = manifest_path_collision(&input, &manifest)
+        let collision = collision_for_input(&input, &manifest)
             .expect("a --manifest aimed at an input component must be refused");
         assert!(
             collision.contains("nb-1-big-Statistics.db"),
@@ -169,7 +171,7 @@ mod tests {
         ] {
             let manifest = input.join(component);
             assert!(
-                manifest_path_collision(&data_db, &manifest).is_some(),
+                collision_for_input(&data_db, &manifest).is_some(),
                 "{component} must be refused for a single-Data.db input too (the input directory \
                  is the file's parent)"
             );
@@ -182,13 +184,13 @@ mod tests {
     fn a_plain_json_path_inside_the_input_dir_is_refused() {
         let temp = TempDir::new().expect("tempdir");
         let (input, _out) = staged(&temp);
-        let collision = manifest_path_collision(&input, &input.join("salvage.json"))
+        let collision = collision_for_input(&input, &input.join("salvage.json"))
             .expect("a manifest inside the input dir must be refused");
         assert!(collision.contains("INPUT directory"), "got: {collision}");
         // ...and below it, too.
         let nested = input.join("snapshots").join("salvage.json");
         std::fs::create_dir_all(input.join("snapshots")).expect("create nested dir");
-        assert!(manifest_path_collision(&input, &nested).is_some());
+        assert!(collision_for_input(&input, &nested).is_some());
     }
 
     /// `./x/../x` and a trailing slash must not defeat the containment check —
@@ -203,7 +205,7 @@ mod tests {
             .join("nb-1-big-Statistics.db");
         std::fs::create_dir_all(input.join("snapshots")).expect("create nested dir");
         assert!(
-            manifest_path_collision(&input, &sneaky).is_some(),
+            collision_for_input(&input, &sneaky).is_some(),
             "a `..` traversal back into the input dir must still be refused"
         );
     }
@@ -219,27 +221,83 @@ mod tests {
             !out.exists(),
             "the documented pattern has --out not yet created"
         );
-        assert_eq!(
-            manifest_path_collision(&input, &out.join("salvage.json")),
-            None
-        );
+        assert_eq!(collision_for_input(&input, &out.join("salvage.json")), None);
         // And a plain sibling path outside the input.
+        assert_eq!(collision_for_input(&input, &temp.path().join("m.json")), None);
+        // Still allowed with the run's real planned output root in play: the
+        // manifest lives BESIDE the recovered generation, never inside it.
+        let output_dir = out.join("ks").join("mytable");
+        let guard = WriteGuard::new(&input, Some(&output_dir)).expect("guard builds");
         assert_eq!(
-            manifest_path_collision(&input, &temp.path().join("m.json")),
+            manifest_path_collision(&out.join("salvage.json"), &guard),
             None
         );
     }
 
-    /// A component-NAMED path that does NOT exist yet, outside the input, is
-    /// allowed: nothing would be truncated. (Odd, but not this guard's business
-    /// — refusing it would be a name-shape taboo rather than a real collision.)
+    /// Round-23 F1 (HIGH, REPRODUCED) — a manifest resolving under the run's OWN
+    /// planned output directory is REFUSED, and the refusal names it.
+    ///
+    /// This case REPLACES round 22's
+    /// `a_nonexistent_component_named_path_outside_the_input_is_allowed`, whose
+    /// stated rationale ("nothing would be truncated") was true at VALIDATION
+    /// time and false at WRITE time: the run itself creates the file, so
+    /// `--manifest <out>/<keyspace>/<table>/nb-1-big-Data.db` recovered 100
+    /// partitions, wrote the real `Data.db`, then overwrote it with 607 bytes of
+    /// manifest JSON — console `partitions: total=100 recovered=100 lost=0`,
+    /// exit 0. A guard that only ever asks about paths that exist ALREADY cannot
+    /// see the run's own output; the protected set has to include it.
     #[test]
-    fn a_nonexistent_component_named_path_outside_the_input_is_allowed() {
+    fn a_manifest_under_the_planned_output_root_is_refused() {
         let temp = TempDir::new().expect("tempdir");
         let (input, out) = staged(&temp);
-        assert_eq!(
-            manifest_path_collision(&input, &out.join("nb-9-big-Data.db")),
-            None
+        let output_dir = out.join("ks").join("mytable");
+        let guard = WriteGuard::new(&input, Some(&output_dir)).expect("guard builds");
+        for candidate in [
+            output_dir.join("nb-1-big-Data.db"),
+            output_dir.join("salvage.json"),
+            output_dir.clone(),
+        ] {
+            let collision = manifest_path_collision(&candidate, &guard).unwrap_or_else(|| {
+                panic!(
+                    "a --manifest resolving under the planned output root must be refused: \
+                     {candidate:?}"
+                )
+            });
+            assert!(
+                collision.contains(&candidate.display().to_string())
+                    && collision.contains(OUTPUT_LABEL),
+                "the refusal must NAME the path and the output root it collided with; got: \
+                 {collision}"
+            );
+        }
+    }
+
+    /// Round-23 F4a (MEDIUM, REPRODUCED DESTRUCTIVELY) — a SYMLINK named
+    /// `salvage.json` pointing at a component INSIDE the input is refused.
+    ///
+    /// Neither round-22 rule could see it: rule 2 inspected only
+    /// `manifest.file_name()`, so a link *named* `salvage.json` was not
+    /// component-shaped, and rule 1 canonicalized only `manifest.parent()` —
+    /// never the manifest entry itself — so a link whose own parent sits outside
+    /// the input passed both. `File::create` then followed it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_named_salvage_json_into_the_input_is_refused() {
+        let temp = TempDir::new().expect("tempdir");
+        let (input, _out) = staged(&temp);
+        let victim = input.join("nb-1-big-Statistics.db");
+        let link = temp.path().join("salvage.json");
+        std::os::unix::fs::symlink(&victim, &link).expect("create symlink");
+        assert!(
+            link.file_name().and_then(|n| n.to_str()) == Some("salvage.json"),
+            "the case needs a link whose own NAME is innocuous"
+        );
+        let collision = collision_for_input(&input, &link)
+            .expect("a symlink into the input must be refused (spec R5.1)");
+        assert!(
+            collision.contains("nb-1-big-Statistics.db"),
+            "the refusal must name the RESOLVED victim, not just the link the operator typed; \
+             got: {collision}"
         );
     }
 
@@ -254,7 +312,7 @@ mod tests {
         std::fs::create_dir_all(&other).expect("create other dir");
         let victim = other.join("nb-1-big-Index.db");
         std::fs::write(&victim, b"someone else's data").expect("write victim");
-        assert!(manifest_path_collision(&input, &victim).is_some());
+        assert!(collision_for_input(&input, &victim).is_some());
     }
 
     /// An input that does not exist at all cannot be destroyed, so the
@@ -266,11 +324,11 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let missing = temp.path().join("no-such-table-dir");
         assert_eq!(
-            manifest_path_collision(&missing, &temp.path().join("m.json")),
+            collision_for_input(&missing, &temp.path().join("m.json")),
             None
         );
         assert_eq!(
-            manifest_path_collision(Path::new(""), Path::new("m.json")),
+            collision_for_input(Path::new(""), Path::new("m.json")),
             None
         );
     }
