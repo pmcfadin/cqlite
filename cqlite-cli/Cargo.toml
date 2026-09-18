@@ -258,6 +258,19 @@ name = "issue_4196_salvage_write_guard"
 path = "tests/issue_4196_salvage_write_guard.rs"
 required-features = ["write-support"]
 
+# Issue #4196 (roborev job 3785 HIGH finding): the wrong-table --schema cases
+# drive the compiled binary the same way the two targets above do, so they
+# carry the same feature requirement. Declared EXPLICITLY for the same
+# reason: auto-discovered, it compiles at default features with its whole
+# body #[cfg]-gated out, runs 0 tests, and the gate's cli-tests component
+# FAILs CLOSED on it (#2039 zero-tests guard) -- but Pass 1 (default
+# features, no required-features) never reaches that guard for an
+# UNDECLARED target at all, so it reported a silent 0-test PASS instead.
+[[test]]
+name = "issue_4196_salvage_table_validation"
+path = "tests/issue_4196_salvage_table_validation.rs"
+required-features = ["write-support"]
+
 # Issue #1581: dhat-gated bounded-memory guard for the streaming query cutover.
 # Installs the dhat global allocator, so it must be its own opt-in test binary.
 [[test]]
