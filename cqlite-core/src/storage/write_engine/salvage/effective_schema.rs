@@ -117,32 +117,13 @@ pub(super) fn effective_salvage_schema(
 fn normalization_findings(caller: &TableSchema, effective: &TableSchema) -> Vec<ComponentFinding> {
     let mut findings = Vec::new();
 
-    let mut restored: Vec<&str> = effective
-        .columns
-        .iter()
-        .filter(|c| !caller.columns.iter().any(|k| k.name == c.name))
-        .map(|c| c.name.as_str())
-        .collect();
-    restored.sort_unstable();
-    if !restored.is_empty() {
-        findings.push(ComponentFinding {
-            class: NORMALIZED_CLASS.to_string(),
-            component: "Statistics.db".to_string(),
-            detail: format!(
-                "{} column(s) present in the input's serialization header but ABSENT from the \
-                 supplied schema were re-added to the effective decode/write schema, so their \
-                 cells are recovered instead of silently dropped: {} — the supplied schema is \
-                 stale for this generation",
-                restored.len(),
-                render_names(&restored)
-            ),
-        });
-    }
-
-    // Keyed lookup rather than a nested per-column search, for TWO reasons and
-    // the second is the load-bearing one.
+    // ONE keyed lookup over `caller.columns`, hoisted above BOTH blocks below
+    // (job 3759 roborev finding — `restored` used to run its own nested
+    // per-column search; the map already built here for `retyped` makes that
+    // redundant), for TWO reasons and the second is the load-bearing one.
     //
-    // (1) It is O(caller + effective) rather than O(caller × effective).
+    // (1) It is O(caller + effective) rather than O(caller × effective) —
+    // now for BOTH `restored` and `retyped`, not just the latter.
     //
     // (2) `scripts/tests/test_salvage_no_resync_scan.sh` (gate component
     // `tooling-tests`) refuses a small closed set of subsequence/scan
@@ -162,6 +143,29 @@ fn normalization_findings(caller: &TableSchema, effective: &TableSchema) -> Vec<
         .iter()
         .map(|k| (k.name.as_str(), k.data_type.as_str()))
         .collect();
+
+    let mut restored: Vec<&str> = effective
+        .columns
+        .iter()
+        .filter(|c| !caller_types.contains_key(c.name.as_str()))
+        .map(|c| c.name.as_str())
+        .collect();
+    restored.sort_unstable();
+    if !restored.is_empty() {
+        findings.push(ComponentFinding {
+            class: NORMALIZED_CLASS.to_string(),
+            component: "Statistics.db".to_string(),
+            detail: format!(
+                "{} column(s) present in the input's serialization header but ABSENT from the \
+                 supplied schema were re-added to the effective decode/write schema, so their \
+                 cells are recovered instead of silently dropped: {} — the supplied schema is \
+                 stale for this generation",
+                restored.len(),
+                render_names(&restored)
+            ),
+        });
+    }
+
     let mut retyped: Vec<String> = effective
         .columns
         .iter()
