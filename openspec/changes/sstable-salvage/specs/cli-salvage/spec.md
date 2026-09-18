@@ -4,7 +4,7 @@
 codes scripts can branch on. All requirements are ADDED.
 
 > **DEFERRED SCENARIOS (issue #4196, roborev finding — not implemented in the #4196 PR, tracked as
-> follow-up work):** R8.1's committed expected-manifest fixtures under
+> follow-up work as **#4229**):** R8.1's committed expected-manifest fixtures under
 > `cqlite-cli/tests/fixtures/salvage/` and R9.1 (`cqlite verify --mode full` + read-back of every
 > salvaged generation) are NOT implemented. R7.1-R7.7 and R8.2 are implemented and pass against real
 > fixtures via the compiled binary (`cqlite-cli/tests/salvage_cli_tests.rs`, plus
