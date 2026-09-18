@@ -491,13 +491,31 @@ pub(super) async fn uncompressed_chunk_preflight(
         }
     }
 
+    // job 3759 roborev finding: `total_chunks_estimate` (from `data_len`,
+    // filesystem metadata — a trusted source, and cheap: no extra read or
+    // hash) is hoisted ABOVE both findings below, because the mismatch
+    // finding's denominator needs it too — see that finding's own comment.
+    let total_chunks_estimate = data_len.div_ceil(chunk_size.max(1));
     let mut findings = Vec::new();
     if let Some(detail) = first_mismatch_detail {
+        // job 3759 roborev finding: the loop's own `chunk_index` at exit is
+        // the count of chunks the scan actually VERIFIED before it stopped
+        // (early, via `unverified_from`'s `break`, or the file's own true
+        // end) — NOT the file's total chunk count, unless the scan ran to
+        // completion. The wording used to conflate the two ("N of M chunk(s)
+        // failed CRC.db validation" with M = `chunk_index`), which reads
+        // "M chunks total" while `chunk_index` in fact measures "chunks
+        // VERIFIED", understating the denominator whenever a `CRC.db`
+        // shorter than `Data.db` needs stopped the scan early. Naming BOTH
+        // counts — verified, and the file's real total (estimated from its
+        // size, matching `ChunkCrcUnavailable`'s own wording below) — says
+        // what each number actually measures rather than picking one.
         findings.push(ComponentFinding {
             class: "UncompressedChunkCrcMismatch".to_string(),
             component: "Data.db".to_string(),
             detail: format!(
-                "{} of {} chunk(s) failed CRC.db validation; first: {detail}",
+                "{} of {} CRC-verified chunk(s) failed validation (~{total_chunks_estimate} \
+                 chunk(s) total in Data.db, estimated from its real size); first: {detail}",
                 bad_chunks.len(),
                 chunk_index
             ),
@@ -506,12 +524,8 @@ pub(super) async fn uncompressed_chunk_preflight(
     // roborev, issue #4196, round 21 Medium finding: a DISTINCT finding
     // from the mismatch one above — matching the wholly-absent-`CRC.db`
     // wording pattern (`ChunkCrcUnavailable`), scoped to the uncovered
-    // TAIL only. `total_chunks_estimate` uses `data_len` (filesystem
-    // metadata, a trusted source) rather than continuing to read/hash the
-    // rest of the file just to count it — the whole point of stopping
-    // early.
+    // TAIL only.
     if let Some(from) = unverified_from {
-        let total_chunks_estimate = data_len.div_ceil(chunk_size.max(1));
         findings.push(ComponentFinding {
             class: "ChunkCrcUnavailable".to_string(),
             component: "CRC.db".to_string(),

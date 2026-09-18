@@ -179,6 +179,106 @@ async fn genuinely_corrupt_crc_db_still_refuses_at_the_cap() {
     );
 }
 
+/// job 3759 roborev finding: the `UncompressedChunkCrcMismatch` finding's
+/// denominator used to be `chunk_index` — the loop's own counter at exit,
+/// which is the number of chunks the scan actually VERIFIED before it
+/// stopped, NOT the file's real total chunk count — worded as "N of M
+/// chunk(s) failed CRC.db validation", reading as "M chunks total". A
+/// `CRC.db` shorter than `Data.db` needs stops the scan EARLY (see
+/// `short_crc_db_stops_early_and_reports_unverified_not_bad` above), so
+/// `chunk_index` at that point UNDERSTATES the file's true chunk count.
+///
+/// This constructs exactly that gap: `Data.db` is genuinely 5 chunks (real
+/// size, `MIN_CRC_CHUNK_SIZE` each — only chunk 0 needs REAL bytes, since
+/// the scan never reads past chunk 1; the rest is a sparse `set_len`
+/// extension, same technique as the test above), `CRC.db` covers only
+/// chunk 0 with a DELIBERATELY WRONG value (a genuine mismatch), and has NO
+/// entry for chunk 1 (an unverified tail) — so the scan stops at
+/// `chunk_index == 1` having verified exactly ONE chunk, while the file's
+/// real total is 5. The fixed wording must name BOTH numbers rather than
+/// letting the verified count stand in for the total.
+#[tokio::test]
+async fn mismatch_finding_names_verified_and_total_chunk_counts_separately() {
+    use crate::storage::sstable::reader::crc::MIN_CRC_CHUNK_SIZE;
+
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let data_path = temp.path().join("nb-1-big-Data.db");
+    let crc_path = temp.path().join("nb-1-big-CRC.db");
+
+    let chunk_size = MIN_CRC_CHUNK_SIZE as u64;
+    let total_chunks = 5u64;
+
+    // Chunk 0: REAL zero bytes (the scan actually reads and hashes this
+    // one). Chunks 1..5: a SPARSE extension — never read, since the scan
+    // stops at chunk 1's missing CRC.db entry before ever hashing it.
+    let file = std::fs::File::create(&data_path).expect("create Data.db");
+    file.set_len(chunk_size).expect("size chunk 0");
+    std::fs::write(&data_path, vec![0u8; chunk_size as usize]).expect("write chunk 0");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&data_path)
+        .expect("reopen Data.db");
+    file.set_len(total_chunks * chunk_size)
+        .expect("sparse-extend Data.db to its real total size");
+
+    // CRC.db: header + exactly ONE entry (chunk 0), deliberately WRONG —
+    // a genuine mismatch — with NO entry for chunk 1 onward.
+    let real_crc = crc32fast::hash(&vec![0u8; chunk_size as usize]);
+    let wrong_crc = !real_crc;
+    let mut crc_db_bytes = (chunk_size as i32).to_be_bytes().to_vec();
+    crc_db_bytes.extend_from_slice(&wrong_crc.to_be_bytes());
+    std::fs::write(&crc_path, &crc_db_bytes).expect("write CRC.db");
+
+    let preflight = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        uncompressed_chunk_preflight(&data_path, &crc_path, 0),
+    )
+    .await
+    .expect("must not hang")
+    .expect("one genuine mismatch plus an unverified tail must not refuse the whole input");
+
+    assert_eq!(
+        preflight.bad_chunks.len(),
+        1,
+        "exactly one genuine mismatch (chunk 0) was ever verified; got {:?}",
+        preflight.bad_chunks
+    );
+    assert_eq!(
+        preflight.unverified_from,
+        Some(1),
+        "the scan must stop at chunk 1 (CRC.db's first missing entry); got {:?}",
+        preflight.unverified_from
+    );
+
+    let mismatch = preflight
+        .findings
+        .iter()
+        .find(|f| f.class == "UncompressedChunkCrcMismatch")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an UncompressedChunkCrcMismatch finding; got {:?}",
+                preflight.findings
+            )
+        });
+    assert!(
+        mismatch
+            .detail
+            .contains("1 of 1 CRC-verified chunk(s) failed validation"),
+        "the denominator must say what it measured — chunks VERIFIED, not the file's real \
+         total — since only 1 of the file's 5 real chunks was ever checked; got: {}",
+        mismatch.detail
+    );
+    assert!(
+        mismatch
+            .detail
+            .contains(&format!("~{total_chunks} chunk(s) total in Data.db")),
+        "the wording must ALSO name the file's real total chunk count ({total_chunks}), \
+         estimated from its real size, so an operator is not misled into reading the verified \
+         count as the total; got: {}",
+        mismatch.detail
+    );
+}
+
 /// roborev, issue #4196, round-14 Medium finding: a zero-byte `Data.db`
 /// (`total_scanned == 0`) must return `chunk_size: 0` ALONGSIDE
 /// `data_length: 0` — not a real, positive `chunk_size` sourced
