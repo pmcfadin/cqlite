@@ -590,3 +590,202 @@ fn assert_manifest_run_succeeded(
         recovered[0]
     );
 }
+
+/// Issue #4196 C-audit gap (R7.8, case a) — a `--manifest` SYMLINK whose own
+/// immediate link target does NOT exist yet, but which lexically sits INSIDE
+/// the input directory, must be refused rather than allowed through as "just
+/// a not-yet-existing path".
+///
+/// This is [`write_guard::resolve_write_target`]'s `dangling_symlink_reason`
+/// branch, proven only by the inline unit test
+/// `write_guard::tests::an_unresolvable_candidate_is_refused_with_a_named_reason`
+/// (no gate component executes an inline `#[cfg(test)]` module) — `NotFound`
+/// is ambiguous between "does not exist yet" (an ALLOW, e.g. the documented
+/// `<--out>/salvage.json`) and "a dangling symlink" (a REFUSAL, since
+/// `File::create` would FOLLOW it and create its target wherever that points,
+/// even inside the input this tool exists to preserve). Only an end-to-end run
+/// through the compiled binary can show the CLI actually reaches this branch
+/// rather than, say, treating the symlink's `NotFound` as "safe to create".
+#[cfg(unix)]
+#[test]
+fn manifest_dangling_symlink_into_input_is_refused_and_target_not_created() {
+    let clean_dir = resolve_committed_fixture();
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = stage_input(&clean_dir, temp.path());
+    let before = read_dir_bytes(&input_dir);
+
+    // The link's own PARENT sits outside the input (so the round-22
+    // parent-only check would have allowed it), and its immediate target —
+    // read directly off the link, never canonicalized, since canonicalize
+    // fails on a dangling target — is a file that does not exist yet but
+    // lexically sits INSIDE the input directory.
+    let link_dir = temp.path().join("manifests");
+    std::fs::create_dir_all(&link_dir).expect("create link dir");
+    let link = link_dir.join("salvage.json");
+    let dangling_target = input_dir.join("not-yet-written.json");
+    std::os::unix::fs::symlink(&dangling_target, &link).expect("create dangling symlink");
+    assert!(
+        !dangling_target.exists(),
+        "the case needs a DANGLING target: absent on disk at {dangling_target:?}"
+    );
+    assert!(
+        link.symlink_metadata()
+            .expect("the link must exist as an entry")
+            .file_type()
+            .is_symlink(),
+        "the case needs a real SYMLINK at {link:?}"
+    );
+
+    let out = temp.path().join("out");
+    let output = run_salvage(&input_dir, &out, Some(&link));
+    let (stdout, stderr) = stdio(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a dangling --manifest symlink is a USAGE error (exit 1), the same shape as F4a's refusal \
+         of a symlink whose target already exists; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains(as_arg(&link)),
+        "the refusal must NAME the path the operator typed; got: {stderr}"
+    );
+    assert!(
+        stderr.contains(as_arg(&dangling_target)),
+        "the refusal must NAME the link's target — the operator needs to see where the write \
+         would actually have landed, inside the input directory; got: {stderr}"
+    );
+
+    assert!(
+        !dangling_target.exists(),
+        "a refused run must never have created the dangling symlink's target at \
+         {dangling_target:?}"
+    );
+    assert!(
+        link.symlink_metadata()
+            .expect("the link must still exist")
+            .file_type()
+            .is_symlink(),
+        "a refused run must not have replaced the symlink with a regular file"
+    );
+    assert_input_byte_identical(&input_dir, &before);
+    assert_out_unpopulated(&out);
+}
+
+/// Issue #4196 C-audit gap (R7.8, case b) — a `--manifest` path that walks
+/// through a directory that does NOT exist yet and rejoins (`..`) back into
+/// the input is refused, exactly like an existing-ancestor traversal — proven
+/// only by the inline unit test
+/// `write_guard::tests::a_traversal_through_a_nonexistent_dir_still_resolves_into_the_input`.
+///
+/// Naive re-joining of a not-yet-existing path would leave the `..` components
+/// in the result, and a containment check keyed on string prefixes would then
+/// read `<out>/nope/../../<input-dir>/m.json` as living under `<out>` while the
+/// write in fact lands inside the input — this is the LEXICAL resolution
+/// [`write_guard::resolve_write_target`] performs instead, checked here through
+/// the compiled binary rather than the resolver alone.
+#[test]
+fn manifest_traversal_through_nonexistent_dir_resolves_into_input_and_is_refused() {
+    let clean_dir = resolve_committed_fixture();
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = stage_input(&clean_dir, temp.path());
+    let before = read_dir_bytes(&input_dir);
+
+    let out = temp.path().join("out");
+    // <out>/nonexistent-dir/../../<FIXTURE_DIR_NAME>/m.json -> lexically
+    // inside the input, even though neither `out` nor `nonexistent-dir`
+    // exists yet.
+    let manifest = out
+        .join("nonexistent-dir")
+        .join("..")
+        .join("..")
+        .join(FIXTURE_DIR_NAME)
+        .join("m.json");
+    assert!(
+        !out.join("nonexistent-dir").exists(),
+        "the case needs a traversal through a directory that does not exist yet"
+    );
+
+    let output = run_salvage(&input_dir, &out, Some(&manifest));
+    let (stdout, stderr) = stdio(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a --manifest traversal that lexically resolves into the input is a USAGE error (exit 1); \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains(as_arg(&manifest)),
+        "the refusal must NAME the path the operator typed; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("INPUT"),
+        "the refusal must say the INPUT boundary was crossed; got: {stderr}"
+    );
+
+    assert!(
+        !manifest.exists(),
+        "a refused --manifest must never have been created at {manifest:?}"
+    );
+    assert_out_unpopulated(&out);
+    assert_input_byte_identical(&input_dir, &before);
+}
+
+/// Issue #4196 C-audit gap (R7.8, case c) — an `--input` that exists NOWHERE
+/// contributes no protected entry (`WriteGuard::new`'s ONE documented
+/// exception: "nothing to destroy" is not "cannot decide"), proven only by the
+/// inline unit test `write_guard::tests::a_nonexistent_input_protects_nothing`.
+/// End-to-end, that must still mean the RUN fails closed — never a panic,
+/// never a silent success, and never a write under `--out` — even though the
+/// guard itself raises no objection.
+#[test]
+fn nonexistent_input_protects_nothing_and_the_run_still_fails_closed() {
+    let temp = TempDir::new().expect("tempdir");
+    let input = temp.path().join("no-such-input-dir");
+    assert!(
+        !input.exists(),
+        "the case needs an --input that does not exist at all: {input:?}"
+    );
+    let out = temp.path().join("out");
+
+    // --table named explicitly so this case isolates "the input does not
+    // exist" from the unrelated table-name-derivation question — the schema
+    // already declares FIXTURE_TABLE, so a clean run would otherwise resolve
+    // it.
+    let schema = schema_path();
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
+        .args([
+            "--schema",
+            as_arg(&schema),
+            "salvage",
+            as_arg(&input),
+            "--out",
+            as_arg(&out),
+            "--table",
+            FIXTURE_TABLE,
+        ])
+        .output()
+        .expect("failed to execute cqlite binary");
+    let (stdout, stderr) = stdio(&output);
+
+    assert!(
+        !output.status.success(),
+        "a nonexistent --input must fail closed rather than report success; \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains(as_arg(&input)),
+        "the refusal must NAME the missing input path; got: {stderr}"
+    );
+
+    assert_out_unpopulated(&out);
+    assert!(
+        !out.exists()
+            || std::fs::read_dir(&out)
+                .map(|mut rd| rd.next().is_none())
+                .unwrap_or(true),
+        "a refused run for a nonexistent input must leave --out untouched (absent, or created but \
+         empty); out={out:?}"
+    );
+}
