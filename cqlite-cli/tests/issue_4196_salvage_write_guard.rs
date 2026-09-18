@@ -789,3 +789,76 @@ fn nonexistent_input_protects_nothing_and_the_run_still_fails_closed() {
          empty); out={out:?}"
     );
 }
+
+/// Every run of whitespace (clap's own wrapping included) collapsed to one
+/// space, ends trimmed — clap re-wraps a doc comment to the terminal width, so
+/// a raw `contains` on a multi-word phrase is a terminal-width-dependent
+/// assertion (green in a pipe, red under a narrower one).
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Issue #4196 C-audit gap (R8.2) — `salvage --help` must STATE the
+/// destructive-write containment this file otherwise only PROVES by running
+/// the binary: the `--out` refusal, that a candidate path is RESOLVED first
+/// (symlinks followed, `..` applied — the exact mechanism
+/// `write_guard::resolve_write_target` implements and this file's traversal/
+/// dangling-symlink cases exercise), that the run's own planned output
+/// generation is one of the things checked for containment, and the
+/// documented `<--out>/salvage.json` location.
+///
+/// `help_states_uncompressed_whole_partition_and_rebuild_boundaries`
+/// (`salvage_cli_tests.rs`) already pins the top-level `long_about`'s three
+/// boundaries (uncompressed output, whole-or-nothing recovery, the rebuild
+/// remedy); this is the "And" clause the C-audit found unpinned — the
+/// PER-ARGUMENT doc comments on `SalvageArgs::out` and `SalvageArgs::manifest`
+/// (`cli_types.rs:584-609`), which clap ALSO prints under `salvage --help`
+/// (verified directly: `cqlite salvage --help` includes an `Options:` section
+/// listing `--out` and `--manifest` each followed by their own doc comment).
+/// A future edit that dropped one of these from the doc comment would compile
+/// fine and previously had nothing pinning the resulting silent narrowing of
+/// what the tool promises to protect.
+#[test]
+fn help_states_the_out_and_manifest_write_containment_boundaries() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
+        .args(["salvage", "--help"])
+        .output()
+        .expect("failed to execute cqlite binary");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "`salvage --help` must exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = collapse_whitespace(&String::from_utf8_lossy(&output.stdout));
+
+    for (boundary, phrase) in [
+        (
+            "the --out refusal for a path resolving inside the input tree",
+            "REFUSED (exit 1) when it resolves INSIDE the input tree: salvage writes only the \
+             recovered generation and must not modify a byte of its input",
+        ),
+        (
+            "--manifest is RESOLVED first, symlinks followed and `..` applied",
+            "The path is RESOLVED first — symlinks followed, `..` applied — so a link named \
+             `salvage.json` cannot reach past the check, and a path that cannot be resolved is \
+             refused rather than allowed.",
+        ),
+        (
+            "--manifest containment against the run's OWN planned output generation",
+            "the path is REFUSED (exit 1) when it resolves inside the INPUT directory, inside the \
+             run's OWN planned output generation `<--out>/<keyspace>/<table>/`, or onto an \
+             existing file named like an SSTable component",
+        ),
+        (
+            "the documented <--out>/salvage.json manifest location",
+            "recommended value `<--out>/salvage.json`",
+        ),
+    ] {
+        assert!(
+            help.contains(&collapse_whitespace(phrase)),
+            "`salvage --help` must state the {boundary} boundary. Expected (whitespace-collapsed) \
+             phrase:\n  {phrase}\nHelp text was:\n{help}"
+        );
+    }
+}
