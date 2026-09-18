@@ -712,3 +712,187 @@ fn data_db_exists_under(dir: &Path) -> bool {
     }
     false
 }
+
+/// `CQLITE_REQUIRE_FIXTURES=1` turns a SKIP below into a hard failure (issue
+/// #719 dataset doctrine) — the two cases below use the NON-committed
+/// `index_db_bit_flip_big` corruption fixture (only its `TOC.txt` and
+/// `Digest.crc32` are git-tracked; `Data.db`/`Index.db`/etc. are gitignored),
+/// unlike every other fixture in this file.
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+fn skip_or_require(what: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!("CQLITE_REQUIRE_FIXTURES=1 but {what} unavailable: {reason}");
+    }
+    eprintln!("[SKIP] {what}: {reason}");
+}
+
+/// Like [`resolve_committed_fixture`], but for a fixture whose binaries are
+/// NOT all git-tracked: `None` rather than a panic when no candidate root
+/// carries it, so the caller can SKIP (unless `CQLITE_REQUIRE_FIXTURES=1`).
+fn resolve_optional_fixture(relative: &str) -> Option<PathBuf> {
+    candidate_base_roots()
+        .into_iter()
+        .map(|root| root.join(relative))
+        .find(|dir| dir.join("nb-1-big-Data.db").is_file())
+}
+
+/// `--schema compression-parity.cql salvage --table lz4_table <input> --out
+/// <out>` — every case below explicitly names `--table` since the synthetic
+/// `input` directories they build are never named after a real table.
+fn run_cli_for_table_dir(input: &Path, out: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
+        .args([
+            "--schema",
+            schema_path(&LZ4_TABLE)
+                .to_str()
+                .expect("schema path is utf-8"),
+            "salvage",
+            "--table",
+            "lz4_table",
+            input.to_str().expect("input path is utf-8"),
+            "--out",
+            out.to_str().expect("out path is utf-8"),
+        ])
+        .output()
+        .expect("failed to execute cqlite binary")
+}
+
+/// job 3759 roborev finding — `execute_salvage_command`'s own documented
+/// exit-3 contract explicitly lists "a published generation was skipped at
+/// discovery" as one of the exit-3 causes, alongside "another generation
+/// refused outright". `all_refused` (the exit-2 arm) used to consult only
+/// `hard_errors` and `reports`, never `discovery.skipped` — so a table-dir
+/// run where every ATTEMPTED generation refused AND a SIBLING generation was
+/// SKIPPED at discovery (no `-TOC.txt`) exited 2 ("EVERY generation
+/// refused"), contradicting that same documented contract for the skip that
+/// was sitting right beside it.
+#[test]
+fn all_attempted_generations_refused_plus_a_skipped_sibling_exits_3_not_2() {
+    const CORRUPT_FIXTURE: &str = "corruption/test_comp_corrupt/index_db_bit_flip_big";
+    let Some(corrupt_dir) = resolve_optional_fixture(CORRUPT_FIXTURE) else {
+        skip_or_require(
+            "index_db_bit_flip_big fixture",
+            &format!("no candidate root carries {CORRUPT_FIXTURE}"),
+        );
+        return;
+    };
+    let clean_dir = resolve_committed_fixture(&LZ4_TABLE);
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp.path().join("input");
+    std::fs::create_dir_all(&input_dir).expect("create input dir");
+
+    // Generation 1: the corrupt (refusing) fixture, kept at its own
+    // numbering — ATTEMPTED, and refused (boundary-source-unreadable).
+    for entry in std::fs::read_dir(&corrupt_dir)
+        .expect("read corrupt dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("nb-1-big-") {
+            std::fs::copy(entry.path(), input_dir.join(&name)).expect("copy corrupt component");
+        }
+    }
+
+    // Generation 2: a real, healthy generation renumbered nb-2-big-*, with
+    // its -TOC.txt DELIBERATELY OMITTED — SKIPPED at discovery, never
+    // attempted at all.
+    for component in LZ4_TABLE.components {
+        if *component == "nb-1-big-TOC.txt" {
+            continue;
+        }
+        let Some(suffix) = component.strip_prefix("nb-1-big-") else {
+            continue;
+        };
+        std::fs::copy(
+            clean_dir.join(component),
+            input_dir.join(format!("nb-2-big-{suffix}")),
+        )
+        .unwrap_or_else(|e| panic!("copy {component}: {e}"));
+    }
+    assert!(
+        !input_dir.join("nb-2-big-TOC.txt").exists(),
+        "the case needs generation 2 to have NO -TOC.txt sibling"
+    );
+
+    let out = temp.path().join("out");
+    let output = run_cli_for_table_dir(&input_dir, &out);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "every ATTEMPTED generation refused, plus a SKIPPED sibling, must exit 3 (the documented \
+         exit-3 cause \"a published generation was skipped at discovery\"), never 2 (\"every \
+         generation refused\" — which was true only of the ATTEMPTED set, never the whole table \
+         dir); stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("nb-2-big-Data.db") || stdout.contains("nb-2-big-Data.db"),
+        "the skipped generation 2 must be NAMED somewhere in the run's output; \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !data_db_exists_under(&out),
+        "neither the refused generation 1 nor the never-attempted, skipped generation 2 may have \
+         written a Data.db under --out"
+    );
+}
+
+/// The CONTROL leg: the SAME two refused generations, with NO skip anywhere
+/// — must still exit 2, unchanged by the fix above. Without this, the fix
+/// could have made every multi-generation refusal exit 3 regardless of
+/// whether a skip actually occurred, which would just move the bug rather
+/// than fix it.
+#[test]
+fn all_attempted_generations_refused_with_no_skip_still_exits_2() {
+    const CORRUPT_FIXTURE: &str = "corruption/test_comp_corrupt/index_db_bit_flip_big";
+    let Some(corrupt_dir) = resolve_optional_fixture(CORRUPT_FIXTURE) else {
+        skip_or_require(
+            "index_db_bit_flip_big fixture",
+            &format!("no candidate root carries {CORRUPT_FIXTURE}"),
+        );
+        return;
+    };
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp.path().join("input");
+    std::fs::create_dir_all(&input_dir).expect("create input dir");
+
+    // Two generations, both copies of the same corrupt (refusing) fixture —
+    // no generation is skipped at discovery.
+    for gen_label in ["nb-1-big-", "nb-2-big-"] {
+        for entry in std::fs::read_dir(&corrupt_dir)
+            .expect("read corrupt dir")
+            .flatten()
+        {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(suffix) = name_str.strip_prefix("nb-1-big-") {
+                std::fs::copy(entry.path(), input_dir.join(format!("{gen_label}{suffix}")))
+                    .expect("copy fixture component");
+            }
+        }
+    }
+
+    let out = temp.path().join("out");
+    let output = run_cli_for_table_dir(&input_dir, &out);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "every generation refused, with NO skip anywhere, must still exit 2 (unchanged control); \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !data_db_exists_under(&out),
+        "no generation may have written a Data.db when every one refused"
+    );
+}

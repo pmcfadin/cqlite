@@ -386,7 +386,21 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // claiming "no Data.db anywhere" without probing would be a guess, so
     // fall through to `any_imperfect` (exit 3) instead whenever a hard
     // error occurred, regardless of what the SUCCESSFUL reports say.
+    //
+    // Gated on `discovery.skipped.is_empty()` too (job 3759 roborev finding):
+    // this function's own exit-3 contract, spelled out above, explicitly
+    // lists "a published generation was skipped at discovery" as one of the
+    // exit-3 causes — but `all_refused` previously consulted only
+    // `hard_errors` and `reports`, so a table-dir run where every ATTEMPTED
+    // generation refused AND a sibling generation was SKIPPED at discovery
+    // (missing `-TOC.txt` barrier, or an unparseable generation number)
+    // exited 2 ("EVERY generation refused"), contradicting the documented
+    // exit-3 contract for exactly that skip. Folding the skip in here means
+    // `all_refused` can only be true when there was truly nothing else going
+    // on, and the skip alone is enough to route through `any_imperfect`
+    // (exit 3) instead.
     let all_refused = hard_errors.is_empty()
+        && discovery.skipped.is_empty()
         && !reports.is_empty()
         && reports.iter().all(|r| r.refused.is_some());
     // roborev, issue #4196 (round-4 Medium, finding 5): a run where every
