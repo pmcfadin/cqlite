@@ -28,7 +28,7 @@ Or build from source:
 git clone https://github.com/pmcfadin/cqlite
 cd cqlite/bindings/node
 npm install
-npm run build      # requires Rust 1.85+
+npm run build      # requires Rust 1.95+
 ```
 
 ## The core pattern

@@ -285,7 +285,7 @@ pub fn build_multigen_sized(k: usize, mix: OverlapMix, ck_per_gen: usize) -> Mul
 
     assert!(k >= 1, "k must be >= 1");
     assert!(
-        ck_per_gen >= 2 && ck_per_gen % 4 == 0,
+        ck_per_gen >= 2 && ck_per_gen.is_multiple_of(4),
         "ck_per_gen must be a positive multiple of 4 (the mixes split by halves and by slot % 4)"
     );
     let schema = parse_cql_schema(OVERLAP_TABLE_CQL).expect("parse overlap-fixture schema");
@@ -491,7 +491,7 @@ fn generation_mutations(
                 // k made generation g's composition depend on the arm's depth, so
                 // the k=1 anchor was measured on a different tombstone population
                 // than the k>1 arms (roborev, issue #2043).
-                if generation % 2 == 0 {
+                if generation.is_multiple_of(2) {
                     out.push(cell_tombstone(
                         pk,
                         ck,
@@ -576,7 +576,7 @@ fn blended_row(
     use cqlite_core::types::Value;
 
     let (partition, clustering) = keys(pk, ck);
-    let ops = if generation % 2 == 0 {
+    let ops = if generation.is_multiple_of(2) {
         vec![
             CellOperation::Write {
                 column: "v0".to_string(),

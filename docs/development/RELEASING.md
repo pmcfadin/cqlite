@@ -23,7 +23,7 @@ Before releasing, ensure you have:
 - **Repository admin access** (required for GitHub environment setup - contact @pmcfadin if needed)
 - **PyPI account** with owner permissions on the `cqlite-py` project
 - **Git push access** to create and push tags
-- **Rust 1.85+** installed (required for Python bindings build)
+- **Rust 1.95+** installed (required for Python bindings build)
 
 ## One-Time Setup (First Release Only)
 

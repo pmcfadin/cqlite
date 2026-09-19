@@ -4,7 +4,7 @@ Thank you for your interest in contributing to CQLite! This project aims to beco
 
 ## Prerequisites
 
-- **Rust 1.85+** (check with `rustc --version`)
+- **Rust 1.95+** (check with `rustc --version`)
 - **Docker** (for test data generation)
 - **Git**
 
@@ -45,7 +45,7 @@ Clippy must pass with warnings treated as errors (matching CI):
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 ```
 
-Configuration is in `.clippy.toml` (MSRV: 1.85.0).
+Configuration is in `.clippy.toml` (MSRV: 1.95.0).
 
 ### Code Standards
 

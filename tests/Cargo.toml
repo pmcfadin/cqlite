@@ -2,6 +2,7 @@
 name = "cqlite-integration-tests"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "Comprehensive test suite for CQLite Cassandra 5+ compatibility"
 

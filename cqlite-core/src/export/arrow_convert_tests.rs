@@ -1260,11 +1260,11 @@ fn the_trusted_path_returns_the_same_batch_as_the_validating_path() {
 /// `try_new` on an empty array list … is arrow's, not this crate's"), which left
 /// `a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry`'s `Ok` arm
 /// — and its "the batch reports 0 rows" assertion — reachable only in theory.
-/// This test settles it by EXECUTION: at arrow 53.4.1 the `Ok` arm is
+/// This test settles it by EXECUTION: at arrow 59.3.0 the `Ok` arm is
 /// UNREACHABLE, so both paths of that test take the `(Err, Err)` arm and only
 /// its agreement property is live.
 ///
-/// The corroborating source is `arrow-array-53.4.1`
+/// The corroborating source is `arrow-array-59.3.0`
 /// `src/record_batch.rs:294-300`: the row count is
 /// `options.row_count.or_else(|| columns.first().map(|c| c.len()))`, so with no
 /// columns and no explicit count there is nothing to derive it from. Arrow's own
@@ -1282,7 +1282,7 @@ fn arrow_refuses_a_zero_column_batch_unless_given_an_explicit_row_count() {
 
     // (a) No row count and no column: REFUSED.
     let err = RecordBatch::try_new(Arc::clone(&schema), vec![])
-        .expect_err("arrow 53.4.1 refuses a zero-column batch with no explicit row count");
+        .expect_err("arrow 59.3.0 refuses a zero-column batch with no explicit row count");
     assert_eq!(
         err.to_string(),
         "Invalid argument error: must either specify a row count or at least one column"

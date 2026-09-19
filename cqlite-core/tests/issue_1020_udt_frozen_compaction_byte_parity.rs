@@ -765,7 +765,7 @@ fn assert_crc_db_prefix_parity(table: &str, ref_dir: &Path, out_dir: &Path) {
     );
     let suffix = &cass[ours.len()..];
     assert!(
-        suffix.len() % 4 == 0 && suffix.iter().all(|&b| b == 0),
+        suffix.len().is_multiple_of(4) && suffix.iter().all(|&b| b == 0),
         "{table}: CRC.db divergent suffix is NOT trailing empty-chunk CRC32=0 groups: \
          suffix={} (cass={} ours={})",
         hex(suffix),

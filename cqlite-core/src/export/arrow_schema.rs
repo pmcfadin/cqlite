@@ -94,7 +94,7 @@ pub(crate) fn cql_type_to_arrow_field(
         CqlType::Duration => {
             // NOTE: The Parquet format's INTERVAL logical type does not support
             // nanosecond precision (only months + days + milliseconds).  The
-            // `parquet` crate v53 therefore refuses to write
+            // `parquet` crate v59 therefore refuses to write
             // `Interval(MonthDayNano)` and returns an NYI error at write time.
             //
             // Arrow `Interval(MonthDayNano)` is the correct *Arrow* type for
@@ -211,7 +211,7 @@ pub(crate) fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
             ArrowDataType::Decimal128(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)
         }
         CqlType::Varint => ArrowDataType::Decimal128(DECIMAL_MAX_PRECISION, 0),
-        // Duration: Utf8 fallback (parquet crate v53 MonthDayNano NYI)
+        // Duration: Utf8 fallback (parquet crate v59 MonthDayNano NYI)
         CqlType::Duration => ArrowDataType::Utf8,
         CqlType::Uuid | CqlType::TimeUuid => ArrowDataType::FixedSizeBinary(16),
         // Inet: canonical text form

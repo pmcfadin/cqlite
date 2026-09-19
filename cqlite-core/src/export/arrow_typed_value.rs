@@ -354,7 +354,7 @@ pub(crate) fn build_typed_value_array(
             Ok(Arc::new(builder.finish()))
         }
         CqlType::Duration => {
-            // Serialise as Utf8 text (parquet crate v53 MonthDayNano NYI).
+            // Serialise as Utf8 text (parquet crate v59 MonthDayNano NYI).
             let arr: Vec<Option<String>> = values
                 .iter()
                 .filter_map(|opt| {

@@ -338,7 +338,7 @@ fn assert_marker_grammar(data: &[u8]) {
 /// here rather than silently producing a fixture that fails for the wrong reason.
 fn reseal_crc(crc_db: &[u8], data: &[u8], verify_only: bool) -> Vec<u8> {
     assert!(
-        crc_db.len() > CRC_HEADER_LEN && (crc_db.len() - CRC_HEADER_LEN) % 4 == 0,
+        crc_db.len() > CRC_HEADER_LEN && (crc_db.len() - CRC_HEADER_LEN).is_multiple_of(4),
         "CRC.db must be a 4-byte chunk-size header plus one 4-byte CRC32 per chunk; got {} bytes",
         crc_db.len()
     );

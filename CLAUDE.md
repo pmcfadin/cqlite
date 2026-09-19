@@ -501,7 +501,7 @@ same name keeps its 25 cfg sites) and `wasm` with its three wasm32-only deps —
   non-destructively. No `schemas` sibling is needed (#3131).
 - **Clippy failures**: run with `RUSTFLAGS="-D warnings"` to match CI
 - **Parsing issues**: `docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`
-- **Python bindings**: Rust 1.85+, Python 3.9+, `pip install maturin`, then
+- **Python bindings**: Rust 1.95+, Python 3.9+, `pip install maturin`, then
   `cd bindings/python && maturin develop --profile dev`
 
 ## Resources

@@ -663,7 +663,7 @@ fn assert_component_bytes(table: &str, ref_dir: &Path, out_dir: &Path, suffix: &
 fn assert_crc_db_carries_compaction_trailer(table: &str, ref_dir: &Path) {
     let cass = read_component(ref_dir, "CRC.db");
     assert!(
-        cass.len() >= 12 && cass.len() % 4 == 0,
+        cass.len() >= 12 && cass.len().is_multiple_of(4),
         "{table}: CRC.db golden too short / misaligned for header + chunk + trailer \
          (len={}, hex={})",
         cass.len(),

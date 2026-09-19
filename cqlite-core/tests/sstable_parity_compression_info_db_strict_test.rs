@@ -411,7 +411,7 @@ fn compression_info_db_strict_byte_parity() {
         if info.data_length > info.chunk_length as u64 {
             saw_multi_chunk = true;
         }
-        if info.data_length % info.chunk_length as u64 != 0 {
+        if !info.data_length.is_multiple_of(info.chunk_length as u64) {
             saw_partial_final = true;
         }
         match ci.file_name().and_then(|n| n.to_str()) {

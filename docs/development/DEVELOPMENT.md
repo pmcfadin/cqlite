@@ -37,7 +37,7 @@ cqlite/
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.95+
 - Python 3.9+ (for Python bindings)
 - Node.js 18+ (for Node.js bindings)
 - maturin (`pip install maturin`) for Python builds

@@ -3,6 +3,7 @@ name = "memory-safety-runner"
 publish = false
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Memory safety testing tools for CQLite (Miri, Valgrind, AddressSanitizer)"
 
 [dependencies]

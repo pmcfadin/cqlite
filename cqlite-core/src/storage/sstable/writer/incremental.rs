@@ -174,7 +174,10 @@ impl SSTableWriter {
         self.queue_bti_partition(key, data_offset, promoted_blocks, partition_tombstone);
 
         self.summary_writer.note_partition(key);
-        if self.summary_sample_counter % self.summary_sample_interval == 0 {
+        if self
+            .summary_sample_counter
+            .is_multiple_of(self.summary_sample_interval)
+        {
             self.summary_writer
                 .add_entry(key, entry_info.index_offset)?;
         }

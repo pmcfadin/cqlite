@@ -2,6 +2,7 @@
 name = "cassandra-parity"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 publish = false
 license.workspace = true
 description = "Lint, coverage, and report tooling for the CQLite ↔ Cassandra parity manifest (epics #966/#967)"

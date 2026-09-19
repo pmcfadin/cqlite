@@ -220,7 +220,7 @@ fn parse_blob(s: &str) -> Result<Value, Error> {
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(Error::Parse(format!(
             "blob hex string has odd length: {:?}",
             s

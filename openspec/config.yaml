@@ -11,7 +11,7 @@ context: |
   bindings/node (napi-rs), cqlite-flight (Arrow Flight + Trino). Planned: M6
   WASM bindings, M7 perf validation + v1.0 API freeze.
 
-  Tech stack: Rust (edition 2021, MSRV 1.85+), tokio async, thiserror errors,
+  Tech stack: Rust (edition 2021, MSRV 1.95+), tokio async, thiserror errors,
   Arrow/Parquet export. Memory target <128MB for large files.
 
   NON-NEGOTIABLE doctrine (every change must respect these):

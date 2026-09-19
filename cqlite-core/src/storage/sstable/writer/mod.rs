@@ -735,15 +735,15 @@ impl SSTableWriter {
         // [`Self::queue_bti_partition`] (see `bti_state`).
         self.queue_bti_partition(&key, data_offset, &promoted_blocks, partition_tombstone);
 
-        // Track every partition for first_key / last_key / total_partition_count.
-        // These fields must cover the full SSTable, not just sampled entries.
-        // (Issue #666: first/last keys in Summary.db must span the whole SSTable
-        //  so Cassandra's range queries cover all partitions.)
+        // Track every partition for Summary.db bounds, not only sampled entries.
+        // Cassandra range queries must cover the full SSTable span (Issue #666).
         self.summary_writer.note_partition(&key);
 
-        // Sample for Summary.db (every Nth entry, where N = summary_sample_interval)
-        // CRITICAL: Use the actual index_offset from entry_info, not an estimate
-        if self.summary_sample_counter % self.summary_sample_interval == 0 {
+        // Sample Summary.db every Nth entry; use entry_info's actual index_offset.
+        if self
+            .summary_sample_counter
+            .is_multiple_of(self.summary_sample_interval)
+        {
             self.summary_writer
                 .add_entry(&key, entry_info.index_offset)?;
         }

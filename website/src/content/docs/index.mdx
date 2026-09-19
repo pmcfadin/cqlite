@@ -32,7 +32,7 @@ CQLite is a Rust library for reading Apache Cassandra 5.0 SSTable files directly
     ```
   </TabItem>
   <TabItem label="cargo install">
-    Build from crates.io with a Rust 1.85+ toolchain:
+    Build from crates.io with a Rust 1.95+ toolchain:
 
     ```bash
     cargo install cqlite-cli      # installs the `cqlite` binary
