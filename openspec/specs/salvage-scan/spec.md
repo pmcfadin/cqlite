@@ -1,0 +1,160 @@
+# salvage-scan Specification
+
+## Purpose
+TBD - created by archiving change sstable-salvage. Update Purpose after archive.
+## Requirements
+### Requirement: R1 — Salvage of a healthy SSTable equals a no-purge compaction of it
+
+`salvage_sstable` SHALL produce, for an input that verifies clean, output byte-identical to
+`compact_sstables` over that single input with purging disabled, and a report whose loss list is
+empty in the affirmative form.
+
+#### Scenario: R1.1 byte parity with compaction and dump parity with the golden
+- **Given** every committed table under `test_basic`, `test_collections`, `test_tomb` and `test_da`
+  (BIG compressed, BIG uncompressed where present, BTI), roots resolved per table
+- **When** `salvage_sstable` and `compact_sstables(purge_safe=false, gc_before=None, now=None)`
+  each run into a temp dir
+- **Then** every output component is byte-equal between the two, and the salvage output's
+  compaction-row dump equals the fixture's `*-Data.db.jsonl` golden
+  (`cqlite-core/tests/issue_4196_salvage_healthy_parity.rs`, per-case assertion, fail-closed on a
+  missing committed fixture).
+
+#### Scenario: R1.2 affirmative empty loss list
+- **When** R1.1's salvage runs
+- **Then** `report.losses` is empty AND `report.partitions.total == recovered > 0`, and the text
+  rendering reads `losses: 0 RECOGNISED` — a report with `total == 0` on a table with rows FAILs.
+
+#### Scenario: R1.3 a stale caller schema is normalized from the input's OWN header
+
+Roborev, issue #4196, round-23 High finding, confirmed by an independent Cassandra/SSTable-format
+expert review with a working reproduction. `compact_sstables` normalizes the caller's schema against
+the input SSTable headers BEFORE decode — `effective_compaction_schema` then
+`apply_udt_marshals_from_inputs` — and `salvage_sstable` did NEITHER, so a `--schema` disagreeing
+with the on-disk serialization header decoded against the wrong layout and re-encoded with a
+divergent header while the manifest reported every partition `recovered`. For a recovery tool a
+confidently-clean manifest over silently wrong bytes is the worst failure shape, and salvage is
+one-shot: there is no second chance once the input is gone.
+
+The reproduced instance needed **no UDT column at all** — a hand-written schema simply OMITTING
+`static_data TEXT STATIC` produced an output whose header declared that column NOWHERE (8981 bytes
+against compaction's 10432), at exit `0`, reporting `recovered=100 lost=0`. So the two skipped calls
+are INDEPENDENT hazards: static columns present in the input header but absent from the caller's
+schema, and UDT marshal shape. Neither may be closed alone.
+
+- **Given** the committed Cassandra 5.0-written `test_basic.static_columns_table` and a caller
+  `TableSchema` from which its static column has been REMOVED
+- **When** `salvage_sstable` and `compact_sstables` each run over that input with THAT schema
+- **Then** the two agree on the output serialization header's column set, the omitted static column
+  is present in both — the expectation read out of the INPUT's own `Statistics.db` header, never
+  from CQLite's prior salvage behavior (#3042: a CQLite-written + CQLite-read round-trip is
+  INVARIANT to this defect class and cannot serve as its oracle) — and every decoded row is equal
+  (`salvage_with_a_stale_schema_matches_compaction_on_the_effective_column_set` in
+  `cqlite-core/tests/issue_4196_salvage_effective_schema.rs`; per-case, hard-fails under
+  `CQLITE_REQUIRE_FIXTURES=1`).
+- **And** the normalized schema reaches BOTH the decoder and the output writer, so a normalized
+  decode feeding an unnormalized writer is impossible by construction rather than by discipline.
+- **And** a normalization that CANNOT be completed is a classified REFUSAL that still carries the
+  manifest — `report.refused` names the component and the cause — never a silent success and never a
+  bare error that discards the losses and findings already gathered.
+- **And** a self-healed run stays exit `0`, exactly as `compact` does: the
+  `SchemaNormalizedFromHeader` finding it records is operator-visible in the manifest but is NOT a
+  verification gap.
+
+### Requirement: R2 — Losses are exactly the partitions the format says are untrustworthy
+
+For a damaged input, the set of lost partitions SHALL equal the set derived from the healthy
+source's boundary positions and chunk table, and every other partition SHALL be recovered
+intact.
+
+#### Scenario: R2.1 compressed chunk CRC flip
+- **Given** `test_comp_corrupt/data_db_bit_flip` and its clean source
+- **When** the test computes, from the clean source's `Index.db` positions and `CompressionInfo.db`
+  chunk table, the partitions whose byte range intersects the flipped chunk, and salvage runs on
+  the corrupt copy
+- **Then** `report.losses` keys == that set with class `chunk-crc`, the output dump == golden minus
+  that set, and `report.component_findings` contains `ChunkDecompressionError`
+  (`cqlite-core/tests/issue_4196_salvage_corruption_corpus.rs`; skip-clean when the corpus is
+  absent, FAIL present-but-wrong, hard-required under `CQLITE_REQUIRE_FIXTURES=1`).
+
+#### Scenario: R2.2 uncompressed chunk CRC flip
+- **Given** `test_comp_corrupt/uncompressed_data_bit_flip`
+- **When** salvage runs
+- **Then** as R2.1 using `CRC.db`'s chunk size, finding class `UncompressedChunkCrcMismatch`.
+
+#### Scenario: R2.3 truncated Data.db
+- **Given** `test_comp_corrupt/data_db_truncation`
+- **When** salvage runs
+- **Then** every partition whose range extends past EOF is a loss with class `truncated`, all
+  earlier partitions are recovered, and the dump equals golden minus the truncated set.
+
+#### Scenario: R2.4 decodable-but-corrupt row, BIG and BTI
+- **Given** `corrupt_byte_fixture::stage_control_and_mutated` for `BIG_COMPOSITE` and
+  `BTI_MULTICLUSTERING` (one byte flipped inside a compressed chunk, CRC recomputed)
+- **When** salvage runs on `mutated`
+- **Then** exactly the partition holding the needle is lost with class `decode`, every other
+  partition's dump equals `control`'s
+  (`cqlite-core/tests/issue_4196_salvage_partition_atomicity.rs`).
+
+### Requirement: R3 — A partition is recovered whole or not at all
+
+Salvage SHALL NOT write any row of a partition whose decode fails at any row.
+
+#### Scenario: R3.1 no prefix of a lost partition in the output
+- **Given** R2.4's mutated BIG fixture
+- **When** salvage runs
+- **Then** the output holds zero rows for that partition key (asserted by key seek on the output),
+  and the manifest names the loss with class `decode`. This holds BY CONSTRUCTION (design D2, round
+  20-21): the decode-at-offset path buffers a partition's rows locally and forwards them to the
+  writer only on structural completion, so a mid-partition failure is reached with nothing
+  externally visible to accidentally write — never asserted via a row-count field (issue #4218
+  tracks reinstating one if the underlying buffering ever becomes incremental).
+
+### Requirement: R4 — Boundaries come only from an authoritative source; otherwise refuse
+
+Salvage SHALL enumerate partitions from `Index.db` (BIG) or the `Partitions.db` trie (BTI) and
+SHALL refuse, writing no `Data.db`, when that source is unreadable; it SHALL NOT locate partitions
+by scanning bytes for a plausible header.
+
+#### Scenario: R4.1 damaged boundary source refuses with the rebuild remedy
+- **Given** `test_comp_corrupt/index_db_bit_flip_big`, `bti_partitions_footer_flip`,
+  `bti_rows_truncation`
+- **When** salvage runs on each
+- **Then** `report.refused.reason == boundary-source-unreadable`, `remedy` names `rebuild`
+  (#4197), and `--out` contains no `Data.db`.
+
+#### Scenario: R4.2 key at offset disagrees with the index
+- **Given** a temp copy of a healthy BIG fixture with one `Index.db` entry's position pointed at
+  a different partition's header
+- **When** salvage runs
+- **Then** that slot is a loss with class `key-mismatch`; the partition the offset actually
+  holds is still recovered from its OWN index entry exactly once.
+
+#### Scenario: R4.3 no header hunting
+- **Given** `scripts/tests/test_salvage_no_resync_scan.sh` (`tooling-tests`)
+- **When** it greps `cqlite-core/src/storage/write_engine/salvage/` for any byte-pattern search
+  primitive (`memchr`, `windows(`, `find(|b|`, `position(|b|`) outside tests
+- **Then** none is present; any hit FAILs naming the line.
+
+### Requirement: R5 — The input is never modified and nothing is recovered from nothing
+
+Salvage SHALL open its input read-only and MUST refuse, writing no `Data.db`, when no partition decodes.
+
+#### Scenario: R5.1 input sha256 listing unchanged
+- **Given** a recursive sha256 listing of the input dir before every scenario above
+- **Then** the listing is identical afterwards.
+
+#### Scenario: R5.2 nothing decodable refuses
+- **Given** a temp copy of `data_db_bit_flip` with every chunk's CRC trailer zeroed
+- **When** salvage runs
+- **Then** `refused.reason == nothing-decodable`, every partition is in `losses`, no `Data.db`.
+
+### Requirement: R6 — Bounded memory
+
+Salvage SHALL hold at most one partition resident on the read side and one on the write side.
+
+#### Scenario: R6.1 wide partitions under the budget lane
+- **Given** `test_wide_rows` (every table) under the gate's `memory-budget` component (dhat)
+- **When** salvage runs
+- **Then** peak heap stays within the existing lane threshold for a single-input compaction of
+  the same table.
+
