@@ -694,6 +694,20 @@ cargo run --package cqlite-cli --features write-support -- \
   --schema test-data/schemas/basic-types.cql
 ```
 
+## Salvage a damaged SSTable (issue #4196, epic #4192)
+
+```bash
+# Salvage one Data.db (or a whole table dir — each generation is salvaged
+# separately, into the SAME --out root). --schema is the global flag.
+cargo run --package cqlite-cli --features write-support -- \
+  --schema test-data/schemas/basic-types.cql \
+  salvage ./damaged-table-dir --out /tmp/recovered --manifest /tmp/recovered/salvage.json
+
+# Exit codes: 0 = every partition recovered; 3 = output written with losses
+# (see the manifest); 2 = refused (a damaged Index.db/Partitions.db — no
+# Data.db written; remedy is `cqlite rebuild`, issue #4197); 1 = usage error.
+```
+
 ## Delta-export (CDC Parquet, Issue #705 / Epic #696 DS9)
 
 Requires `--features delta-export`. Schema must be a bare `CREATE TABLE` statement

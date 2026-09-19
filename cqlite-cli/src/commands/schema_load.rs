@@ -16,6 +16,23 @@ use std::path::Path;
 /// honoring the #284 quiet/tty contract should call
 /// [`load_schema_file_with_status`] instead so the status can be suppressed under
 /// `--quiet` / non-TTY.
+///
+/// # A handler whose STDOUT is a machine-readable contract must never call this
+///
+/// Roborev, issue #4196, round-22 Medium finding — the concrete instance:
+/// `commands::write::load_compaction_table_schema_for_table`'s JSON branch
+/// delegated HERE, so `cqlite --schema s.json salvage … --out-format json` got
+/// `📋 Loading schema from: …` and `📝 Parsing JSON schema format` on STDOUT
+/// ahead of the design-D5 salvage manifest — which is written to that same
+/// stdout as THE machine-readable contract — and `| jq .` failed to parse. Every
+/// other salvage diagnostic already goes to stderr. A `.cql` schema was
+/// unaffected (that path parses inline and prints nothing), which is exactly why
+/// it went unnoticed.
+///
+/// The status lines are not merely noise in that case, they are CORRUPTION of a
+/// documented output format, so the rule is stronger than "prefer the quiet
+/// variant": a handler that writes structured data to stdout MUST call
+/// [`load_schema_file_with_status`] with `show_status = false`.
 pub(crate) fn load_schema_file(
     schema_path: &Path,
     auto_detect: bool,
@@ -74,6 +91,65 @@ pub(crate) fn load_schema_file_with_status(
             extension
         )),
     }
+}
+
+/// Assert that a loaded schema really describes `target_table`.
+///
+/// Roborev, issue #4196, round-23 High finding (confirmed by an independent
+/// Cassandra-format expert review): `commands::write::load_compaction_table_schema_for_table`
+/// hardened only its CQL branch against selecting the wrong table. Its JSON
+/// branch discarded `target_table` entirely, so `cqlite --schema b.json salvage
+/// <input dir for table a>` decoded table `a`'s partitions with table `b`'s
+/// column layout and reported a confidently clean recovery at exit 0 — the
+/// worst failure shape for a data-recovery tool. The reasoning that let it in
+/// is worth naming: a JSON schema file IS inherently single-table, so there is
+/// "nothing to select among" — but that is not the same as nothing to
+/// VALIDATE. The one table it declares can still disagree with the table
+/// actually being salvaged.
+///
+/// So this is the ONE post-load check, called unconditionally on the way out of
+/// [`crate::commands::write::load_compaction_table_schema_for_table`] for BOTH
+/// branches, rather than a check embedded in one of them. `None` is a no-op:
+/// `compact` legitimately loads "the first table in the file" with no target.
+///
+/// The check is redundant-but-harmless for the CQL branch (its selector already
+/// matched case-insensitively), which is the point — a future branch cannot be
+/// added that bypasses it, and the CQL branch's richer "table(s) present: …"
+/// error still wins because that failure happens before any schema exists to
+/// check here.
+///
+/// Feature-gated in lockstep with its only caller so a `--no-default-features`
+/// build (no `write-support`, hence no compaction/salvage schema loading) does
+/// not carry it as dead code under `-D warnings`.
+#[cfg(feature = "write-support")]
+pub(crate) fn assert_table_matches(
+    schema: &TableSchema,
+    target_table: Option<&str>,
+    schema_path: &Path,
+) -> Result<()> {
+    let Some(target) = target_table else {
+        return Ok(());
+    };
+    // Case-INSENSITIVE by deliberate choice, with one named residual: Cassandra
+    // folds unquoted identifiers to lowercase at DDL parse time and preserves
+    // case exactly for quoted ones, but the JSON schema format has no quoting
+    // concept at all — its `"table"` field is a plain string with zero
+    // CQL-identifier semantics — so two distinct tables differing only by case
+    // in a QUOTED name (`"MyTable"` vs `"mytable"`, both legal) compare equal
+    // here. Rare in the wild, and unexpressible in this format either way.
+    if !schema.table.eq_ignore_ascii_case(target) {
+        anyhow::bail!(
+            "schema file {} declares table '{}', but the table being processed is '{}' \
+             — the wrong schema would decode this data with the wrong column layout. \
+             Pass a schema for '{}' (salvage takes the table name from --table when \
+             given, otherwise from the input directory name).",
+            schema_path.display(),
+            schema.table,
+            target,
+            target
+        );
+    }
+    Ok(())
 }
 
 /// Parse JSON schema format
