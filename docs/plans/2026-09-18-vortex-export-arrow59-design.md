@@ -62,6 +62,10 @@ Routing: oracle-driven (existing tests are the criterion) — GitHub issue + PR,
 
 ## Issue B — Vortex export (design-driven, OpenSpec change `vortex-export`, branches from A's merged head)
 
+This remains an **export-only 0.18** slice. It starts only after Issue A / #4236 (the Arrow 59
+revision) is merged; this document does not relax or replace that prerequisite. Vortex reading,
+including selective-read integration, is a later slice.
+
 ### Writer
 `cqlite-core/src/export/vortex.rs`, feature `vortex = ["arrow", "dep:vortex"]` (off by default,
 like `parquet`); `cqlite-cli` gains `ExportFormat::Vortex` (`cli.rs`) and a `vortex` feature
@@ -70,12 +74,40 @@ new variant forces an arm at each dispatcher (`export.rs`, `export_sstable.rs`, 
 which rejects it exactly as it rejects Parquet). `delta-export`'s own `DeltaOutFormat` stays
 Parquet-only — out of scope.
 
-Data flow: the writer consumes the SAME `RecordBatch` stream `arrow_convert` already produces for
-Parquet and Flight — no second CQL→Arrow mapping, no bridge (this is what the rev buys). Each
-batch: `vortex_arrow::from_arrow_batch` → Vortex array → `session.write_options().write(...)` with
-the default sampling compressor. Chunked shape mirrors `create_streaming_parquet_writer` /
-`write_chunk` / `finalize`, so the CLI streams both formats identically and memory stays bounded at
-one batch. Vortex features: `vortex-file` on; `vortex-cloud`, `vortex-tensor` off.
+Data flow: introduce one shared `QueryRow` → Arrow `RecordBatch` producer using the ordered
+`QueryMetadata.columns` schema. Parquet and Vortex consume those same batches; neither writer gets
+a second CQL→Arrow mapping, and no IPC bridge is introduced. The current CLI writer seam accepts
+`&[QueryRow]`, so the shared producer is an explicit adapter boundary rather than an assumption
+that the existing Parquet writer already exposes a batch stream. Each Vortex input batch is passed
+through the official Arrow-session extension importer,
+`session.arrow().from_arrow_record_batch(batch.clone(), batch.schema().as_ref())`, then the
+resulting array stream is written with `session.write_options().write(...)` and the default
+sampling compressor. The importer must remain the path that sees Arrow extension metadata such as
+`arrow.uuid`; no cast or metadata workaround is allowed.
+
+The query export path keeps the existing row-count chunk shape (10,000 rows by default) and
+backpressure. That is an **input batch** contract only: it bounds the rows handed to a writer and
+the shared Arrow conversion, but it does not prescribe Vortex's physical chunk boundaries,
+compressed array layout, or statistics granularity. The Vortex writer may choose its physical
+layout from each input stream according to its pinned default session. Cross-format correctness
+compares schema and logical values after normalizing physical chunk boundaries; it must not require
+Parquet row groups and Vortex chunks to align. The query path's memory statement is therefore
+limited to one in-flight input batch plus the existing bounded producer/channel buffers. Because
+the limit is row-count based, no byte-level `<128MB` guarantee is made for arbitrarily wide rows.
+The direct SSTable export path currently materializes all entries before handing chunks to a
+writer, so it is outside this bounded-memory claim unless separately refactored.
+
+Vortex features: `vortex-file` on; `vortex-cloud`, `vortex-tensor` off.
+
+### Ordering and schema contract
+
+The shared producer preserves the reconciled query stream's order: Cassandra token-ring order
+across partitions, followed by the schema-aware clustering comparator within each partition,
+including composite clustering columns, per-column `DESC`, and null/absent-value rules. It must not
+sort partitions by logical or lexical partition-key value to suit a physical layout. `QueryRow`
+values are name-keyed, so Arrow field and Vortex struct-field order comes from the ordered query
+schema, never from `HashMap` iteration. These order and field-position rules are part of the
+cross-format export contract.
 
 Type map: NONE added. Verified against `vortex-arrow/src/convert.rs` (2026-09-18): every Arrow
 type `arrow_schema.rs` emits converts — Map, Struct, List, Decimal128(38,9), Date32, Time64,
@@ -90,10 +122,11 @@ leaving no partial file. No compression knobs exposed in this slice.
 
 ### Oracles (the #3042 rule: writer+reader from one crate proves nothing about cqlite)
 - **Primary — cross-format differential**: for each of the 33 fixture tables, one `SELECT *`
-  exported to Parquet AND Vortex; both read back to Arrow with their own readers; compared
-  batch-for-batch on schema and values, full column set both directions (#3890). Parquet is
-  golden-proven against sstabledump JSONL, so equality anchors Vortex to Cassandra-written truth
-  transitively. Gate: named `--test` targets in a `write-tests`-style list, `CQLITE_REQUIRE_FIXTURES=1`.
+  exported to Parquet AND Vortex from the same shared input batches; both read back to Arrow with
+  their own readers; compared on schema and logical values after normalizing physical batch
+  boundaries, with the full column set in both directions (#3890). Parquet is golden-proven
+  against sstabledump JSONL, so equality anchors Vortex to Cassandra-written truth transitively.
+  Gate: named `--test` targets in a `write-tests`-style list, `CQLITE_REQUIRE_FIXTURES=1`.
 - **Independent reader, CI only**: Python bindings test reads the `.vortex` with the `vortex`
   Python package and deep-equals against the JSON export. Same codebase, different linkage — the
   test DECLARES that at run time rather than claiming a second oracle. Lives in the
