@@ -764,7 +764,7 @@ fn do_get_over_transport_enforces_limit() {
     // from flush 1 (even index) AND at least one from flush 2 (odd index).
     let keys = keys_of(&batches, "key");
     assert_eq!(keys.len(), limit as usize, "one key per returned row");
-    let from_flush1 = keys.iter().any(|k| key_index(k) % 2 == 0);
+    let from_flush1 = keys.iter().any(|k| key_index(k).is_multiple_of(2));
     let from_flush2 = keys.iter().any(|k| key_index(k) % 2 == 1);
     assert!(
         from_flush1 && from_flush2,

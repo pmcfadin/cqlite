@@ -130,7 +130,7 @@ async fn run_shape(
             // The assertion is stably green by construction and proves LIMIT push-
             // down reconciles ACROSS both flushes, not merely within one.
             let keys = support::column_strings(&batches, "key");
-            let from_flush1 = keys.iter().any(|k| support::key_index(k) % 2 == 0);
+            let from_flush1 = keys.iter().any(|k| support::key_index(k).is_multiple_of(2));
             let from_flush2 = keys.iter().any(|k| support::key_index(k) % 2 == 1);
             assert!(
                 from_flush1 && from_flush2,

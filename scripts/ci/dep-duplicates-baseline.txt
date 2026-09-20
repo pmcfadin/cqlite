@@ -29,19 +29,18 @@
 #   `crate <name> <n>`   once per duplicated crate, n >= 2
 #   blank lines and lines whose FIRST character is `#` are skipped
 #   the `crate` lines must COHERE with the totals (count == crates, sum == instances)
-instances 114
-crates 46
+instances 108
+crates 43
 crate anstream 2
 crate anstyle-parse 2
-crate base64 2
+crate base64 3
 crate bitflags 2
 crate console 2
 crate float-cmp 2
 crate foldhash 2
 crate getrandom 5
-crate hashbrown 5
+crate hashbrown 4
 crate heck 2
-crate indexmap 2
 crate itertools 3
 crate jiff-core 2
 crate libc 2
@@ -49,6 +48,7 @@ crate lru 2
 crate mio 2
 crate nix 2
 crate nom 2
+crate num-bigint 2
 crate predicates 2
 crate quick-xml 2
 crate r-efi 2
@@ -57,12 +57,9 @@ crate rand_chacha 2
 crate rand_core 3
 crate serde_spanned 2
 crate shlex 2
-crate socket2 2
 crate syn 4
 crate toml 2
 crate toml_datetime 2
-crate tower 2
-crate twox-hash 2
 crate unicode-width 2
 crate wasi 2
 crate windows-core 2

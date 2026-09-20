@@ -11,15 +11,14 @@
 //! row-engine arm of the benchmark consumes, so the two arms are compared over
 //! IDENTICAL batches by construction rather than by coincidence.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use datafusion::common::{DataFusionError, Result as DfResult, Statistics};
+use datafusion::common::{tree_node::TreeNodeRecursion, DataFusionError, Result as DfResult};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -50,7 +49,7 @@ pub struct CqliteScanExec {
     /// batches already have exactly the output shape.
     post_projection: Option<Arc<Vec<usize>>>,
     /// DataFusion plan properties (one unbounded-source-free, bounded partition).
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     /// Where the finished scan's measurements are published. `Mutex` because the
     /// plan is shared (`Arc`) and `execute` takes `&self`; contention is one lock
     /// per scan, not per batch.
@@ -78,12 +77,12 @@ impl CqliteScanExec {
             Some(indices) => project_schema(&producer_schema, Some(indices))?,
             None => producer_schema,
         };
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Ok(Self {
             producer,
             paths,
@@ -136,12 +135,17 @@ impl ExecutionPlan for CqliteScanExec {
         "CqliteScanExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
+    ) -> DfResult<TreeNodeRecursion> {
+        // This leaf scan owns no DataFusion physical expressions. Its filters
+        // are lowered into the existing CQLite ScanSpec before plan creation.
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -213,13 +217,6 @@ impl ExecutionPlan for CqliteScanExec {
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
-
-    fn statistics(&self) -> DfResult<Statistics> {
-        // No authoritative row count is available without scanning (issue #28: no
-        // guessing from file sizes or `Statistics.db` estimates), so report
-        // "unknown" rather than a fabricated estimate the optimizer would trust.
-        Ok(Statistics::new_unknown(&self.schema))
-    }
 }
 
 /// Select the output columns from a produced batch.
@@ -227,7 +224,7 @@ fn project_batch(batch: RecordBatch, projection: Option<&Vec<usize>>) -> DfResul
     match projection {
         Some(indices) => batch
             .project(indices)
-            .map_err(|e| DataFusionError::ArrowError(e, None)),
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None)),
         None => Ok(batch),
     }
 }

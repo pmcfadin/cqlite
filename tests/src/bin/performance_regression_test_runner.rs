@@ -340,7 +340,7 @@ impl PerformanceRegressionTester {
         let min_duration = sorted_durations[0];
         let max_duration = sorted_durations[len - 1];
         let mean_duration = sorted_durations.iter().sum::<f64>() / len as f64;
-        let median_duration = if len % 2 == 0 {
+        let median_duration = if len.is_multiple_of(2) {
             (sorted_durations[len / 2 - 1] + sorted_durations[len / 2]) / 2.0
         } else {
             sorted_durations[len / 2]
