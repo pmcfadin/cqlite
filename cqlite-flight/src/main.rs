@@ -163,8 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // port 0.
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let bound = listener.local_addr()?;
-    let incoming = TcpIncoming::from_listener(listener, true, None)
-        .map_err(|e| format!("failed to accept on {bound}: {e}"))?;
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
     cli::log_listening(bound);
     Server::builder()
         .max_concurrent_streams(max_concurrent_streams)

@@ -144,7 +144,9 @@ async fn run_shape(
                 .do_get(Ticket::new(support::scan_ticket()))
                 .await
                 .expect("do_get rpc");
-            let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+            let stream = resp
+                .into_inner()
+                .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
             let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
             // Read exactly one decoded batch, then drop everything without draining.
             let _ = rb.next().await;

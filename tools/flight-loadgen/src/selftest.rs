@@ -69,8 +69,7 @@ pub async fn serve_fixture() -> Result<SelfTestServer, String> {
     let addr = listener
         .local_addr()
         .map_err(|e| format!("local addr: {e}"))?;
-    let incoming =
-        TcpIncoming::from_listener(listener, true, None).map_err(|e| format!("incoming: {e}"))?;
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
     let handle = tokio::spawn(async move {
         Server::builder()
             .add_service(FlightServiceServer::new(svc))

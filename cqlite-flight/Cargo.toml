@@ -16,8 +16,8 @@ publish = false
 cqlite-core = { path = "../cqlite-core", features = ["arrow"] }
 
 arrow = { workspace = true, features = ["ipc"] }
-arrow-flight = "53"
-tonic = "0.12"
+arrow-flight = "59.3"
+tonic = "0.14.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # `CancellationToken` — an async-wakeable cooperative-cancellation signal so the
 # `do_get` merge producer's backpressure park (`ChannelSink::emit`) can race a
@@ -38,14 +38,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # DataFusion — OPTIONAL, behind the non-default `datafusion-spike` feature
-# (issue #2605). PINNED to 44.0.0 and deliberately NOT upgradeable here: DF 44 is
-# the LAST line that resolves `arrow` 53.x (verified: DF 44.0.0 -> arrow 53.4.1,
-# the EXACT version `cqlite-flight`/`arrow-flight 53` already use). DF >= 45 moves
-# to arrow 54, which forks the Arrow type graph — two structurally identical but
-# mutually incompatible `RecordBatch`/`Schema` types in one binary — and destroys
-# the whole premise of this spike, which is to hand DataFusion the batches the
-# EXISTING Flight producer already builds with ZERO conversion. If this ever fails
-# to build, report it; do NOT bump the major.
+# (issue #2605). PINNED to 44.0.0 through the Flight 59 migration. DF 44 still
+# resolves Arrow 53.x while the default Flight path now uses Arrow/Flight 59;
+# the DataFusion adapter remains disabled until stage (d) ports it to 55.1.0.
 #
 # `default-features = false` + an explicit feature list: the spike needs the
 # execution engine and the SQL front end, and nothing that would drag in a second
@@ -215,8 +210,9 @@ cqlite-flight = { path = ".", features = ["test-util"] }
 # the encoder's `FlightData` protobuf messages to a golden file, and the
 # transport test (`tests/do_get_transport_test.rs`) length-delimit-DECODES that
 # same committed golden to cross-check it against the live wire bytes; pinned
-# to the same prost line arrow-flight 53 uses so the `Message` impl unifies.
-prost = "0.13"
+# to the same prost line arrow-flight 59.3 uses so the `Message` impl unifies.
+prost = "0.14.1"
+flatbuffers = "25.12.19"
 
 # End-to-end Flight `do_get` throughput bench (issue #1494, AD5). Drives the
 # PUBLIC tonic `FlightService::do_get` RPC over a real loopback transport

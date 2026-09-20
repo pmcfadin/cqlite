@@ -37,7 +37,7 @@ use crate::wide_row_fixture as fx;
 /// not the `2 ×` growth factor — are the whole reported size.
 ///
 /// This is the case the published conversion was wrong about. Every `Utf8` /
-/// `Binary` array reports 1208 B at any length (arrow 53: the string builder's
+/// `Binary` array reports 1208 B at any length (arrow 59: the string builder's
 /// 1 KiB default values buffer + offsets + struct overhead), so a two-`text`
 /// batch of three short rows reports 2416 B against the old
 /// `2 × payload + 1024 × 2` = 2186 B bound. Under #2821's fail-closed

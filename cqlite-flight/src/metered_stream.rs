@@ -46,7 +46,7 @@ impl<T> Stream for ReceiverStream<T> {
 ///
 /// * Releasing at the top of every `poll_next` (the obvious implementation) is
 ///   correct ONLY for a consumer that drops batch N before asking for N+1. That
-///   happens to be exactly what `FlightDataEncoder` does (arrow-flight 53.4.1,
+///   happens to be exactly what `FlightDataEncoder` does (arrow-flight 59.3.0,
 ///   `encode.rs:400-436`: it polls `inner` only once its `FlightData` queue is
 ///   empty, and `encode_batch` consumes and drops the `RecordBatch`) — but
 ///   `MeteredDoGetStream` is `pub(crate)` and polled directly in tests, and a

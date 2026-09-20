@@ -78,7 +78,9 @@ pub async fn do_get_drain(
         }
     };
 
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    let stream = resp
+        .into_inner()
+        .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
     let mut rows: u64 = 0;
     let mut bytes: u64 = 0;

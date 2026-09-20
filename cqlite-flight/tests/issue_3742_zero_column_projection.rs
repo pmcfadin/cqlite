@@ -292,7 +292,9 @@ fn drive_batches(data_dir: &std::path::Path, ticket: Vec<u8>) -> Result<Vec<Reco
             .do_get(Request::new(Ticket::new(ticket)))
             .await
             .map_err(|s| s.to_string())?;
-        let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+        let stream = resp
+            .into_inner()
+            .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
         let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
         let mut out = Vec::new();
         while let Some(item) = rb.next().await {

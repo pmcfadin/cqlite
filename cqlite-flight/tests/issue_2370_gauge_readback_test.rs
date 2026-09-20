@@ -109,7 +109,9 @@ fn phase_active_and_in_flight_read_true_concurrent_count_then_settle() {
                     .do_get(Ticket::new(support::scan_ticket()))
                     .await
                     .expect("do_get rpc");
-                let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+                let stream = resp
+                    .into_inner()
+                    .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
                 let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
                 // Read ONE batch so the RPC is provably in flight and streaming.
                 let first = rb.next().await;
