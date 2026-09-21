@@ -85,35 +85,48 @@ function countDataDbFiles(writeDir) {
 describe('Auto-flush cliff wiring (Issue #1620)', () => {
   test('tiny flushThreshold triggers a real flush during execute() (no manual flush)', async () => {
     const env = setup();
+    let db;
+    let inserted = 0;
     try {
-      const db = await Database.open(env.dataDir, {
+      db = await Database.open(env.dataDir, {
         schema: env.schema,
         writable: true,
         writeDir: env.writeDir,
         flushThreshold: 4096, // 4 KB — crossed after a handful of inserts
       });
 
-      const TOTAL = 2000;
-      for (let i = 0; i < TOTAL; i++) {
+      // Bound the correctness probe instead of doing thousands of unnecessary
+      // writes. The assertion below must still reject an implementation that
+      // never flushes, so reaching the bound without a Data.db remains red.
+      const MAX_INSERTS = 128;
+      let dataDbCount = 0;
+      while (inserted < MAX_INSERTS) {
+        const i = inserted;
         const res = await db.execute(
           `INSERT INTO flush_test.items (id, name, value) VALUES (${i}, 'user${i}', ${i})`
         );
         expect(res.rowsAffected).toBe(1);
+        inserted += 1;
+
+        // Stop as soon as the async auto-flush is observable on disk.
+        dataDbCount = countDataDbFiles(env.writeDir);
+        if (dataDbCount >= 1) break;
       }
 
       // A real auto-flush must have fired: on-disk generation files exist.
-      // On main this is 0 because the runtime-present sync path never flushes.
-      const dataDbCount = countDataDbFiles(env.writeDir);
       expect(dataDbCount).toBeGreaterThanOrEqual(1);
 
       // The memtable was cleared by the flush(es), so its residual row count is
-      // far below the total inserted. `writeStats` is a synchronous getter.
+      // below the rows inserted before the first observed flush. `writeStats`
+      // is a synchronous getter.
       const stats = db.writeStats;
-      expect(Number(stats.memtableRows)).toBeLessThan(TOTAL);
-
-      await db.close();
+      expect(Number(stats.memtableRows)).toBeLessThan(inserted);
     } finally {
-      env.cleanup();
+      try {
+        if (db) await db.close();
+      } finally {
+        env.cleanup();
+      }
     }
   });
 
