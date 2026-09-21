@@ -14174,6 +14174,74 @@ scenarios:
         (upgraded partial -> byte_for_byte, strict: true; #1410 / PR #1726).
       target_suite: compaction_parity_tombstone_ttl
 
+  - id: cass.compaction.CompactionIteratorTest.open_ended_range_boundary_synthesis
+    title: "Open-ended range-tombstone boundary synthesis across generations"
+    status: mirrored
+    capability: compaction_merge
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionIteratorTest.java
+        - RangeTombstoneTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1383_rt_boundary_synthesis.rs
+        notes: >-
+          Issue #1383/#4243 mirrors Cassandra's open-ended ranges [Bottom,5) @ 10
+          and [3,Top] @ 20 across two flushed generations, with live rows that
+          exercise both surviving and shadowed cells. The major-compacted oracle
+          carries a synthesized boundary at ck=3. Range localDeletionTimes are
+          wall-clock-derived by Cassandra and are read from the committed JSONL
+          sidecar before CQLite compaction.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+      references:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_open_ended_boundary-b2d77220b54911f1b553796aae82c67f/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        CONTAINER_NAME=cqlite-4243-open-ended bash
+        test-data/scripts/generate-compaction-tombstone-ttl-parity.sh
+        --only rt_open_ended_boundary
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1383_rt_boundary_synthesis
+        crit5_cassandra_oracle_two_gen_open_ended_boundary
+      reference_paths:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_open_ended_boundary-b2d77220b54911f1b553796aae82c67f/nb-3-big-Data.db.jsonl
+      failure_artifacts:
+        - artifact.nightly_docker.byte_diff
+      known_limitations: >-
+        Statistics.db and Filter.db are required to be present but are not byte-compared;
+        Data.db, Index.db, Summary.db, and Digest.crc32 are byte-compared. The existing
+        Cassandra 5.0.2 compaction fixture family is retained; format semantics are
+        checked against the pinned Cassandra 5.0.8 source, and migrating the family to
+        5.0.8 is outside this issue.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/parity-regen-matrix.yml
+    scope:
+      gap: >-
+        Resolved: the missing #1383 open-ended Cassandra oracle is committed and the
+        criterion-5 byte comparison executes under strict fixture mode.
+      next_step: >-
+        Keep the fixture and JSONL sidecar synchronized with the generator; any byte
+        mismatch is a production compaction dependency and must not be relaxed here.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 4243
+
   - id: cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved
     title: "Row deletion markers preserved across compaction"
     status: planned

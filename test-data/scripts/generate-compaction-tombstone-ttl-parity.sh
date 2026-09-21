@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # generate-compaction-tombstone-ttl-parity.sh — Cassandra 5.0.2 TOMBSTONE / TTL
-# COMPACTION byte-parity fixtures (issue #1387, epic #973).
+# COMPACTION byte-parity fixtures (issue #1387, epic #973; #1383/#4243).
 #
 # This is the tombstone/TTL analogue of generate-compaction-parity.sh (issue
 # #1017, which pinned live-cell compaction byte parity). For each table it writes
@@ -42,7 +42,7 @@
 # Tables are UNCOMPRESSED (no CompressionInfo.db); PKs are int/(int,int).
 #
 # Usage:
-#   bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh [--out <dir>] [--dry-run]
+#   bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh [--out <dir>] [--only <table>] [--dry-run]
 #
 # Prerequisites: Docker (or podman) in PATH; ~4 GB RAM for the container.
 #
@@ -56,7 +56,7 @@
 # Data.db" error. The script prints the exact commands at exit.
 # ============================================================================
 #
-# Backs: issue #1387 (epic #973).
+# Backs: issue #1387 (epic #973) and issue #1383/#4243.
 
 set -euo pipefail
 
@@ -76,8 +76,11 @@ T_A=1000     # older generation
 T_B=2000     # newer generation (wins/shadows overlaps)
 T_DEL=3000   # explicit DELETE writetime (markedForDeleteAt)
 
-# All four tables under test.
-TABLES=(shadow_row_delete ttl_expired_live gc_purge_grace0 rt_cross_gen)
+# All tables under test. `--only` keeps a fixture-only regeneration from touching
+# the existing #1387 goldens when commissioning the #1383 oracle.
+ALL_TABLES=(shadow_row_delete ttl_expired_live gc_purge_grace0 rt_cross_gen rt_open_ended_boundary)
+TABLES=("${ALL_TABLES[@]}")
+ONLY_TABLE=""
 
 # gc_purge_grace0 is the ONLY table expected to lose its output entirely (the
 # purged tombstone leaves an empty SSTable). Cassandra emits NO Data.db when a
@@ -88,6 +91,7 @@ PURGE_EMPTY_TABLE="gc_purge_grace0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out)     OUT_DIR="$2"; shift 2 ;;
+    --only)    ONLY_TABLE="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1;   shift   ;;
     *) echo "[cttl] Unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -100,6 +104,17 @@ OUT_DIR="${OUT_DIR%/}"
 
 log()  { echo "[cttl] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 fail() { echo "[cttl][ERROR] $*" >&2; exit 1; }
+
+if [[ -n "$ONLY_TABLE" ]]; then
+  if [[ ! " ${ALL_TABLES[*]} " == *" $ONLY_TABLE "* ]]; then
+    fail "Unknown --only table '$ONLY_TABLE'; expected one of: ${ALL_TABLES[*]}"
+  fi
+  TABLES=("$ONLY_TABLE")
+fi
+
+table_enabled() {
+  [[ -z "$ONLY_TABLE" || "$ONLY_TABLE" == "$1" ]]
+}
 
 run() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -132,6 +147,9 @@ if [[ "$DRY_RUN" -eq 0 && "$REUSE" -eq 0 ]] && $ENGINE inspect "$CONTAINER_NAME"
 fi
 
 cleanup() {
+  if [[ -n "${TMPDIR_EXPORT:-}" && -d "$TMPDIR_EXPORT" ]]; then
+    rm -rf "$TMPDIR_EXPORT"
+  fi
   if [[ "$DRY_RUN" -eq 0 && "$REUSE" -eq 0 ]]; then
     log "Cleaning up container..."
     $ENGINE rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -255,6 +273,31 @@ insert_rt_cross_gen() {
   flush_ks
 }
 
+# (e) rt_open_ended_boundary: issue #1383/#4243's open-ended cross-generation
+# boundary. The two ranges are deliberately the same ranges used by
+# cqlite-core/tests/issue_1383_rt_boundary_synthesis.rs:
+#   A: [Bottom,5) @ 10, with rows ck=2/1/6
+#   B: [3,Top] @ 20, with the row ck=4
+# The rows exercise both surviving and shadowed cells while the two ranges force
+# Cassandra to emit a boundary marker at ck=3. LDT remains wall-clock-derived;
+# the CQLite oracle test reads it from the committed JSONL sidecar.
+insert_rt_open_ended_boundary() {
+  log "=== rt_open_ended_boundary: group A ([Bottom,5) + live rows) ==="
+  cql "DELETE FROM rt_open_ended_boundary USING TIMESTAMP 10 WHERE id = 1 AND ck < 5"
+  cql "INSERT INTO rt_open_ended_boundary (id, ck, v) VALUES (1, 2, 'ck2-ts15') USING TIMESTAMP 15"
+  cql "INSERT INTO rt_open_ended_boundary (id, ck, v) VALUES (1, 1, 'ck1-ts5') USING TIMESTAMP 5"
+  cql "INSERT INTO rt_open_ended_boundary (id, ck, v) VALUES (1, 6, 'ck6-ts25') USING TIMESTAMP 25"
+  flush_ks
+  # Cassandra derives localDeletionTime from the coordinator wall clock, not
+  # from USING TIMESTAMP. Keep the two range LDTs in distinct seconds so the
+  # byte-parity test can identify both deletion-time pairs unambiguously.
+  run sleep 2
+  log "=== rt_open_ended_boundary: group B ([3,Top] + shadowed row) ==="
+  cql "DELETE FROM rt_open_ended_boundary USING TIMESTAMP 20 WHERE id = 1 AND ck >= 3"
+  cql "INSERT INTO rt_open_ended_boundary (id, ck, v) VALUES (1, 4, 'ck4-ts15') USING TIMESTAMP 15"
+  flush_ks
+}
+
 major_compact() {
   local table="$1"
   log "=== Major-compacting $KEYSPACE.$table ==="
@@ -342,10 +385,11 @@ apply_schema "$ROOT/schemas/compaction-tombstone-ttl-parity.cql"
 log "Disabling autocompaction for $KEYSPACE..."
 run $ENGINE exec "$CONTAINER_NAME" nodetool disableautocompaction "$KEYSPACE"
 
-insert_shadow_row_delete
-insert_ttl_expired_live
-insert_gc_purge_grace0
-insert_rt_cross_gen
+table_enabled shadow_row_delete && insert_shadow_row_delete
+table_enabled ttl_expired_live && insert_ttl_expired_live
+table_enabled gc_purge_grace0 && insert_gc_purge_grace0
+table_enabled rt_cross_gen && insert_rt_cross_gen
+table_enabled rt_open_ended_boundary && insert_rt_open_ended_boundary
 
 for table in "${TABLES[@]}"; do
   major_compact "$table"
@@ -357,23 +401,23 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
+  mkdir -p "$OUT_DIR"
+  FINAL_SSTABLES_DIR="$SSTABLES_DIR"
+  TMPDIR_EXPORT=$(mktemp -d "$OUT_DIR/.cttl-export.XXXXXX")
+  # Validate and produce every sidecar in isolation. --only must not remove or
+  # regenerate another table's previously committed golden.
+  SSTABLES_DIR="$TMPDIR_EXPORT/staged"
   mkdir -p "$SSTABLES_DIR"
-
-  TMPDIR_EXPORT="$OUT_DIR/.cttl_export_tmp"
-  rm -rf "$TMPDIR_EXPORT"
-  mkdir -p "$TMPDIR_EXPORT"
 
   if $ENGINE exec "$CONTAINER_NAME" bash -lc 'tar -C /var/lib/cassandra -cf - data' \
       | tar -C "$TMPDIR_EXPORT" -xf -; then
     if [[ -d "$TMPDIR_EXPORT/data/$KEYSPACE" ]]; then
-      rm -rf "$SSTABLES_DIR/$KEYSPACE"
       mkdir -p "$SSTABLES_DIR/$KEYSPACE"
       cp -r "$TMPDIR_EXPORT/data/$KEYSPACE/." "$SSTABLES_DIR/$KEYSPACE/"
       log "$KEYSPACE SSTables placed in $SSTABLES_DIR/$KEYSPACE"
     else
       fail "Expected $TMPDIR_EXPORT/data/$KEYSPACE but it was not found. Export failed."
     fi
-    rm -rf "$TMPDIR_EXPORT"
   else
     fail "tar export from container failed."
   fi
@@ -413,10 +457,23 @@ Major compaction did not collapse inputs into one output."
       -v "$SSTABLES_DIR:/data" \
       "$CASSANDRA_IMAGE" \
       bash -lc "/opt/cassandra/tools/bin/sstablemetadata /data/${rel}" \
-      > "$stats_base" 2>/dev/null || true
+      | sed 's/[[:blank:]]*$//' > "$stats_base"
   done < <(find "$SSTABLES_DIR/$KEYSPACE" -name "*-Data.db" -not -name "._*" -print0)
 
   find "$SSTABLES_DIR/$KEYSPACE" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+
+  # Publish only explicitly selected tables after the staged export passed.
+  mkdir -p "$FINAL_SSTABLES_DIR/$KEYSPACE"
+  for table in "${TABLES[@]}"; do
+    for old in "$FINAL_SSTABLES_DIR/$KEYSPACE/$table-"*; do
+      [[ ! -d "$old" ]] || rm -rf "$old"
+    done
+    for generated in "$SSTABLES_DIR/$KEYSPACE/$table-"*; do
+      [[ -d "$generated" ]] || fail "No staged directory for $table"
+      cp -R "$generated" "$FINAL_SSTABLES_DIR/$KEYSPACE/"
+    done
+  done
+  SSTABLES_DIR="$FINAL_SSTABLES_DIR"
 
   log "=== $KEYSPACE generation COMPLETE ==="
   log "SSTables: $SSTABLES_DIR/$KEYSPACE"
