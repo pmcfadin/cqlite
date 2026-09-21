@@ -8,11 +8,11 @@
 
 use cqlite_core::{
     error::{Error, Result},
-    parser::header::CassandraVersion,
+    parser::{header::CassandraVersion, vint::encode_vuint},
     schema::{Column, KeyColumn, TableSchema},
     storage::sstable::compression_info::CompressionInfo,
     storage::sstable::row_cell_state_machine::RowCellStateMachine,
-    types::ComparatorType,
+    types::{ComparatorType, Value},
 };
 
 /// Test that modern BIG v5 format does not use header heuristics
@@ -142,98 +142,68 @@ fn test_compression_info_no_alternative_format_modern() {
     }
 }
 
-/// Test that RowCellStateMachine prevents blob fallbacks for modern formats
+/// Test that RowCellStateMachine prevents blob fallbacks for modern formats.
+///
+/// The input is a synthetic state-machine fixture. It exercises CQLite's
+/// schema-driven error boundary; it is not a Cassandra SSTable oracle.
 #[test]
 fn test_row_cell_state_machine_no_blob_fallback_modern() {
-    // Create a schema with known column types
-    let schema = TableSchema {
-        keyspace: "test_ks".to_string(),
-        table: "test_table".to_string(),
-        partition_keys: vec![KeyColumn {
-            name: "id".to_string(),
-            data_type: "UUID".to_string(),
-            position: 0,
-        }],
-        clustering_keys: vec![],
-        columns: vec![
-            Column {
-                name: "id".to_string(),
-                data_type: "UUID".to_string(),
-                nullable: false,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "name".to_string(),
-                data_type: "TEXT".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-        ],
-        comments: std::collections::HashMap::new(),
-        dropped_columns: std::collections::HashMap::new(),
-    };
+    let schema = create_modern_text_schema();
+    let invalid_column_data = create_mock_invalid_column_data("name", &[0xFF; 4]);
 
-    // Test BIG v5 format
-    let mut state_machine = RowCellStateMachine::with_schema_and_version(
-        schema.clone(),
-        ComparatorType::Blob,
-        CassandraVersion::V5_0NewBig,
-    );
+    for version in [CassandraVersion::V5_0NewBig, CassandraVersion::V5_0Bti] {
+        let mut state_machine = RowCellStateMachine::with_schema_and_version(
+            schema.clone(),
+            ComparatorType::Blob,
+            version,
+        );
 
-    // Create data that would normally fall back to blob in legacy parsing
-    let invalid_column_data = create_mock_invalid_column_data("name", "INVALID_DATA");
-
-    match state_machine.process(&invalid_column_data) {
-        Err(Error::Schema(msg)) => {
-            // The state machine properly rejects invalid data instead of falling back to blob.
-            // Accept any error message that indicates proper schema-based parsing was attempted.
-            assert!(
-                msg.contains("Blob fallback is disabled")
-                    || msg.contains("Schema is required")
-                    || msg.contains("modern format")
-                    || msg.contains("Data corruption"),
-                "Error message should indicate blob fallback is disabled or parsing failed: {}",
-                msg
-            );
-            println!("✅ BIG v5 format properly prevents blob fallback: {}", msg);
-        }
-        Ok(_) => {
-            panic!("BIG v5 format should fail instead of falling back to blob");
-        }
-        Err(e) => {
-            panic!("Unexpected error type: {:?}", e);
+        match state_machine.process(&invalid_column_data) {
+            Err(Error::Schema(msg)) => {
+                assert!(
+                    msg.contains("Failed to parse column 'name'") && msg.contains("modern format"),
+                    "{version:?} should report the schema-driven modern-format text failure: {msg}"
+                );
+            }
+            Ok(_) => {
+                panic!("{version:?} must reject invalid TEXT instead of returning a blob");
+            }
+            Err(error) => {
+                panic!("{version:?} returned the wrong error type: {error:?}");
+            }
         }
     }
+}
 
-    // Test BTI format
-    let mut state_machine_bti = RowCellStateMachine::with_schema_and_version(
-        schema,
-        ComparatorType::Blob,
-        CassandraVersion::V5_0Bti,
-    );
+/// Positive control for the same synthetic VInt-framed row used by the
+/// rejection test above. The schema must select TEXT and produce Value::Text.
+#[test]
+fn test_row_cell_state_machine_modern_schema_decodes_text() {
+    let schema = create_modern_text_schema();
+    let valid_column_data = create_mock_valid_column_data("name", "valid text");
 
-    match state_machine_bti.process(&invalid_column_data) {
-        Err(Error::Schema(msg)) => {
-            // The state machine properly rejects invalid data instead of falling back to blob.
-            // Accept any error message that indicates proper schema-based parsing was attempted.
-            assert!(
-                msg.contains("Blob fallback is disabled")
-                    || msg.contains("Schema is required")
-                    || msg.contains("modern format")
-                    || msg.contains("Data corruption"),
-                "Error message should indicate blob fallback is disabled or parsing failed: {}",
-                msg
-            );
-            println!("✅ BTI format properly prevents blob fallback: {}", msg);
-        }
-        Ok(_) => {
-            panic!("BTI format should fail instead of falling back to blob");
-        }
-        Err(e) => {
-            panic!("Unexpected error type: {:?}", e);
-        }
+    for version in [CassandraVersion::V5_0NewBig, CassandraVersion::V5_0Bti] {
+        let mut state_machine = RowCellStateMachine::with_schema_and_version(
+            schema.clone(),
+            ComparatorType::Blob,
+            version,
+        );
+
+        let consumed = state_machine
+            .process(&valid_column_data)
+            .unwrap_or_else(|error| panic!("{version:?} rejected valid TEXT: {error:?}"));
+        assert_eq!(consumed, valid_column_data.len());
+        assert!(state_machine.is_complete());
+
+        let parsed_row = state_machine
+            .take_parsed_row()
+            .expect("completed state machine should expose its parsed row");
+        let parsed_value = parsed_row
+            .clustering_rows
+            .first()
+            .and_then(|row| row.columns.get("name"))
+            .expect("valid TEXT row should contain the name column");
+        assert_eq!(parsed_value, &Value::text("valid text"));
     }
 }
 
@@ -338,6 +308,41 @@ fn test_legacy_formats_without_feature() {
 
 // Helper functions to create mock data
 
+fn create_modern_text_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "UUID".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "UUID".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "name".to_string(),
+                data_type: "TEXT".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: std::collections::HashMap::new(),
+        dropped_columns: std::collections::HashMap::new(),
+    }
+}
+
+fn append_unsigned_vint(data: &mut Vec<u8>, value: u64) {
+    data.extend_from_slice(&encode_vuint(value));
+}
+
 fn create_mock_big_v5_header() -> Vec<u8> {
     let mut header = Vec::new();
 
@@ -401,7 +406,7 @@ fn create_mock_legacy_header() -> Vec<u8> {
     header
 }
 
-fn create_mock_invalid_column_data(column_name: &str, _invalid_data: &str) -> Vec<u8> {
+fn create_mock_invalid_column_data(column_name: &str, invalid_data: &[u8]) -> Vec<u8> {
     let mut data = Vec::new();
 
     // Create a proper row structure that contains invalid column data
@@ -410,31 +415,31 @@ fn create_mock_invalid_column_data(column_name: &str, _invalid_data: &str) -> Ve
     data.extend_from_slice(&42i64.to_be_bytes()); // Timestamp
 
     // Partition key: component count (1) + component length (1) + component ("k")
-    data.push(0x02); // 1 component (vint encoded: 1 -> 2 in zigzag)
-    data.push(0x02); // 1 byte length (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One component
+    append_unsigned_vint(&mut data, 1); // One-byte component
     data.push(b'k'); // Component data
 
     // Clustering row count: 1 (one clustering row with invalid column)
-    data.push(0x02); // 1 row (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One row
 
     // Clustering row data
     // Clustering key length and key
-    data.push(0x02); // 1 byte length (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One-byte clustering key
     data.push(b'c'); // Clustering key data
 
     // Row timestamp (8 bytes)
     data.extend_from_slice(&42i64.to_be_bytes());
 
     // Column count: 1
-    data.push(0x02); // 1 column (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One column
 
     // Column name length and name
-    data.push((column_name.len() as u8) << 1); // vint encoded length
+    append_unsigned_vint(&mut data, column_name.len() as u64);
     data.extend_from_slice(column_name.as_bytes());
 
     // Column value length and invalid data that can't be parsed as TEXT
-    data.push(0x08); // 4 bytes (vint encoded: 4 -> 8 in zigzag)
-    data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // Invalid UTF-8 data for TEXT column
+    append_unsigned_vint(&mut data, invalid_data.len() as u64);
+    data.extend_from_slice(invalid_data); // Invalid UTF-8 data for TEXT column
 
     data
 }
@@ -448,30 +453,30 @@ fn create_mock_valid_column_data(column_name: &str, value: &str) -> Vec<u8> {
     data.extend_from_slice(&42i64.to_be_bytes()); // Timestamp
 
     // Partition key: component count (1) + component length (1) + component ("k")
-    data.push(0x02); // 1 component (vint encoded: 1 -> 2 in zigzag)
-    data.push(0x02); // 1 byte length (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One component
+    append_unsigned_vint(&mut data, 1); // One-byte component
     data.push(b'k'); // Component data
 
     // Clustering row count: 1 (one clustering row with valid column)
-    data.push(0x02); // 1 row (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One row
 
     // Clustering row data
     // Clustering key length and key
-    data.push(0x02); // 1 byte length (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One-byte clustering key
     data.push(b'c'); // Clustering key data
 
     // Row timestamp (8 bytes)
     data.extend_from_slice(&42i64.to_be_bytes());
 
     // Column count: 1
-    data.push(0x02); // 1 column (vint encoded: 1 -> 2 in zigzag)
+    append_unsigned_vint(&mut data, 1); // One column
 
     // Column name length and name
-    data.push((column_name.len() as u8) << 1); // vint encoded length
+    append_unsigned_vint(&mut data, column_name.len() as u64);
     data.extend_from_slice(column_name.as_bytes());
 
     // Column value length and valid UTF-8 data
-    data.push((value.len() as u8) << 1); // vint encoded length
+    append_unsigned_vint(&mut data, value.len() as u64);
     data.extend_from_slice(value.as_bytes());
 
     data
