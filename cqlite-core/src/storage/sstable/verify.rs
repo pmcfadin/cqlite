@@ -1708,22 +1708,34 @@ fn check_inline_chunk_crc(
         if let Err(e) = chunk_reader.read_chunk(i) {
             let finding_index = findings.len();
             findings.push(classify_data_error("Data.db", &e));
-            let phys_offset = info.compressed_chunk_offset(i).unwrap_or(0);
-            let phys_len = info.compressed_chunk_size(i, total_size).unwrap_or(0);
-            let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
-            let logical_end = ((i as u64).saturating_add(1))
-                .saturating_mul(info.chunk_length as u64)
-                .min(info.data_length)
-                .max(logical_start);
-            pending_locations.push(PendingLocation {
-                finding_index,
-                component: "Data.db".to_string(),
-                byte_offset: phys_offset,
-                byte_len: phys_len,
-                chunk_index: Some(i),
-                damaged_logical: (logical_start, logical_end),
-                logical_len: info.data_length,
-            });
+            // Issue #4194, roborev round-3 LOW finding: `compressed_chunk_size`
+            // returns `None` precisely when the chunk_offsets table is corrupt
+            // enough that the checked subtraction underflows — the case this
+            // check exists to detect. `.unwrap_or(0)` used to collapse that
+            // into a fabricated `byte_len: 0`, indistinguishable from a
+            // legitimately empty range and pointing an operator at the wrong
+            // bytes ("never a guess" — this module's own doc). Skip the
+            // location entirely when either physical lookup is unmeasurable;
+            // the finding itself (chunk `i`, the decode error) is unaffected.
+            if let (Some(phys_offset), Some(phys_len)) = (
+                info.compressed_chunk_offset(i),
+                info.compressed_chunk_size(i, total_size),
+            ) {
+                let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
+                let logical_end = ((i as u64).saturating_add(1))
+                    .saturating_mul(info.chunk_length as u64)
+                    .min(info.data_length)
+                    .max(logical_start);
+                pending_locations.push(PendingLocation {
+                    finding_index,
+                    component: "Data.db".to_string(),
+                    byte_offset: phys_offset,
+                    byte_len: phys_len,
+                    chunk_index: Some(i),
+                    damaged_logical: (logical_start, logical_end),
+                    logical_len: info.data_length,
+                });
+            }
             break;
         }
     }

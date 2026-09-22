@@ -123,17 +123,21 @@ pub const BOUNDARY_SOURCE_UNREADABLE: &str = "boundary-source-unreadable";
 /// the resolved set, which would under-report the intersecting partitions.
 ///
 /// **This is the COMMON case for a `DataOffset` leaf whose finding is
-/// Data.db-anchored** (roborev round-1 MEDIUM finding), not an edge case:
-/// `check_inline_chunk_crc`/`check_uncompressed_crc_db` fire BEFORE the
-/// FULL-mode row scan (Check 7) runs, so `verify.rs`'s `scan_position_map`
-/// — the only source that can resolve a `DataOffset` leaf's raw key — is
-/// `None` at exactly the moment a chunk/offset-anchored finding needs it.
-/// A BTI table whose intersecting leaves are `DataOffset` (narrow
-/// partitions) therefore reports `Unresolved(PARTITION_KEY_UNAVAILABLE)`
-/// for its chunk-CRC findings even with a perfectly healthy boundary
-/// source; a `RowsOffset` leaf (wide partitions) resolves its key INLINE
-/// from `Rows.db` and is unaffected. See
-/// `issue_4194_verify_location.rs`'s
+/// Data.db-anchored** (roborev round-1 MEDIUM finding), not an edge case —
+/// though NOT for the reason an earlier draft of this doc claimed (roborev
+/// round-3 LOW finding: location resolution happens in `finalize_locations`,
+/// which runs AFTER the FULL-mode row scan, so `scan_position_map` is
+/// already populated by the time any location resolves, whenever the scan
+/// succeeds). The actual cause: a `Data.db` corrupt enough to fail the
+/// chunk-CRC check is, in practice, ALSO corrupt enough to fail the full row
+/// scan on the SAME bytes — so the scan errors, `scan_position_map` stays
+/// `None`, and a `DataOffset` leaf's raw key (recoverable ONLY through that
+/// map) is unavailable. A BTI table whose intersecting leaves are
+/// `DataOffset` (narrow partitions) therefore commonly reports
+/// `Unresolved(PARTITION_KEY_UNAVAILABLE)` for its chunk-CRC findings even
+/// with a perfectly healthy boundary source; a `RowsOffset` leaf (wide
+/// partitions) resolves its key INLINE from `Rows.db` and is unaffected by
+/// whether the scan succeeds. See `issue_4194_verify_location.rs`'s
 /// `bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves` for the
 /// positive (`RowsOffset`) case this module's tests cover.
 pub const PARTITION_KEY_UNAVAILABLE: &str =
@@ -199,7 +203,17 @@ pub fn resolve_partitions(
     // damaged range `[first_bad_chunk_start, logical_len)` can intersect
     // essentially every partition in the file, and `hits` materializing all of
     // them before ever being capped would defeat the point.
+    //
+    // `seen` dedups by raw key DURING accumulation (roborev round-3 LOW
+    // finding): a POST-hoc `dedup_by` after the cap made `truncated` count
+    // pre-dedup entries — a boundary source naming the same raw key twice
+    // (defensive-only in practice; not an expected shape) would consume TWO
+    // cap slots and could render e.g. "40 partition(s) (+60 more, capped)"
+    // when only 100 DISTINCT partitions actually intersect. Deduping here
+    // means a duplicate is recognized before it can occupy a slot OR inflate
+    // `truncated`, and the final list needs no further dedup pass.
     let mut hits: Vec<KeyRef> = Vec::new();
+    let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
     let mut unknown = false;
     let mut truncated = 0usize;
     for (i, (start, key)) in sorted_boundary_entries.iter().enumerate() {
@@ -211,8 +225,12 @@ pub fn resolve_partitions(
         if ranges_intersect(damaged, extent) {
             match key {
                 Some(k) => {
+                    let raw: &[u8] = k;
+                    if !seen.insert(raw) {
+                        continue; // same partition identity already accounted for
+                    }
                     if hits.len() < MAX_RESOLVED_KEYS {
-                        hits.push(KeyRef::from_raw(k));
+                        hits.push(KeyRef::from_raw(raw));
                     } else {
                         truncated += 1;
                     }
@@ -226,7 +244,6 @@ pub fn resolve_partitions(
         return PartitionResolution::Unresolved(PARTITION_KEY_UNAVAILABLE.to_string());
     }
     hits.sort_by(|a, b| a.key_hex.cmp(&b.key_hex));
-    hits.dedup_by(|a, b| a.key_hex == b.key_hex);
     PartitionResolution::Resolved {
         keys: hits,
         truncated,
@@ -348,6 +365,33 @@ mod tests {
                 assert_eq!(truncated, 10);
             }
             other => panic!("expected a capped Resolved set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_raw_keys_do_not_inflate_the_truncated_count() {
+        // roborev round-3 LOW finding: a boundary source naming the SAME raw
+        // key at two different offsets (defensive-only in practice) must not
+        // consume two cap slots or count as two omissions.
+        let e: Vec<BoundaryEntry> = vec![
+            (0, Some(Arc::from(b"dup".as_slice()))),
+            (10, Some(Arc::from(b"dup".as_slice()))),
+            (20, Some(Arc::from(b"unique".as_slice()))),
+        ];
+        let res = resolve_partitions((0, 30), &e, 30);
+        match res {
+            PartitionResolution::Resolved { keys, truncated } => {
+                assert_eq!(truncated, 0, "no key exceeds MAX_RESOLVED_KEYS here");
+                let mut hexes: Vec<&str> = keys.iter().map(|k| k.key_hex.as_str()).collect();
+                hexes.sort();
+                hexes.dedup();
+                assert_eq!(
+                    hexes.len(),
+                    keys.len(),
+                    "the resolved set must already be deduped by raw key identity: {keys:?}"
+                );
+            }
+            other => panic!("expected Resolved, got {other:?}"),
         }
     }
 

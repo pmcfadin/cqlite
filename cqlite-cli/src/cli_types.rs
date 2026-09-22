@@ -403,7 +403,7 @@ pub enum Commands {
     },
     /// Verify every SSTable table directory under a data directory in one pass (issue #4194)
     #[command(
-        long_about = "Walk every <keyspace>/<table>-<id>/ directory under <data-dir>, verify EVERY SSTable generation found there (not just the first) with the same check pipeline as `cqlite verify`, and report one row per generation: severity ok|degraded|corrupt|unreadable, plus a data-dir-wide exit code. `degraded` names a CQLite-only detection (e.g. a Filter.db false negative) that is not proof of unreadability -- it alone never trips a non-zero exit. A table directory with zero readable generations (no readable Data.db, unopenable directory) is a row with severity `unreadable`, never a silently-dropped entry. Exit 0 = every row ok; 2 = any row corrupt or unreadable, OR zero generations were found under <data-dir> at all (degraded rows are OK-adjacent, see design.md S2); 1 = usage error (<data-dir> missing or not a directory). --jobs bounds how many generations verify concurrently, saturating at the CLI's async-runtime thread count (verification's hot checks are blocking I/O) -- it never changes which rows appear or their severities. Example: cqlite sweep ./test-data/datasets/sstables --mode full --out json --jobs 4"
+        long_about = "Walk every <keyspace>/<table>-<id>/ directory under <data-dir>, verify EVERY SSTable generation found there (not just the first) with the same check pipeline as `cqlite verify`, and report one row per generation: severity ok|degraded|corrupt|unreadable, plus a data-dir-wide exit code. `degraded` names a CQLite-only detection (e.g. a Filter.db false negative) that is not proof of unreadability -- it alone never trips a non-zero exit. A table directory with zero readable generations (no readable Data.db, unopenable directory) is a row with severity `unreadable`, never a silently-dropped entry. Exit 0 = every row ok; 2 = any row corrupt or unreadable, OR zero generations were found under <data-dir> at all (degraded rows are OK-adjacent, see design.md S2); 1 = usage error (<data-dir> missing or not a directory). --jobs bounds how many generations verify concurrently on the blocking thread pool (verification's hot checks are blocking I/O) -- it never changes which rows appear or their severities. Example: cqlite sweep ./test-data/datasets/sstables --mode full --out json --jobs 4"
     )]
     Sweep(SweepArgs),
     /// Export an SSTable generation as a delta-envelope Parquet file (Issue #705)
@@ -633,14 +633,13 @@ pub struct SweepArgs {
     /// Output format for the sweep report (same semantics as `verify --out`).
     #[arg(long, value_enum, default_value = "text")]
     pub out: VerifyOutputArg,
-    /// Bound how many SSTable generations are verified concurrently. Defaults
-    /// to the host's available parallelism. Never affects WHICH rows appear
-    /// or their severities — only how many single-generation `verify` calls
-    /// run at once (design.md §S3.2). Realized concurrency also saturates at
-    /// the number of OS threads the CLI's async runtime has, whichever is
-    /// smaller — verification's own hot checks use blocking file I/O, so a
-    /// `--jobs` value above that thread count buys no further parallelism
-    /// (roborev round-2 LOW finding).
+    /// Bound how many SSTable generations are verified concurrently, on
+    /// tokio's blocking thread pool (verification's own hot checks use
+    /// blocking file I/O, so each runs on a dedicated blocking-pool thread
+    /// rather than an async worker — roborev round-2/round-3 LOW findings).
+    /// Defaults to the host's available parallelism. Never affects WHICH
+    /// rows appear or their severities — only how many single-generation
+    /// `verify` calls run at once (design.md §S3.2).
     #[arg(long)]
     pub jobs: Option<usize>,
 }

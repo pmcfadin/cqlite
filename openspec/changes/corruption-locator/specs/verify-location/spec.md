@@ -8,7 +8,9 @@ name the reason rather than guess when those sources cannot be trusted. All requ
 
 ### Requirement: L1 — Located findings name their intersecting partitions
 
-A `VerifyFinding` anchored to a `Data.db` byte range (`ChunkDecompressionError`, `UncompressedChunkCrcMismatch`, or a truncation-classified `DigestMismatch`/`UnexpectedEof`) SHALL carry a `location.partitions` set equal to the partitions computed independently from the healthy source's boundary positions and chunk table, never from CQLite's own behaviour on the corrupt copy.
+A `VerifyFinding` anchored to a `Data.db` byte range (`ChunkDecompressionError`, `UncompressedChunkCrcMismatch`, or a truncation-classified `ChunkOffsetOutOfBounds`) SHALL carry a `location.partitions` set equal to the partitions computed independently from the healthy source's boundary positions and chunk table, never from CQLite's own behaviour on the corrupt copy.
+
+Deviation from this requirement's original draft (roborev round-3 MEDIUM finding): the truncation-anchored class is `ChunkOffsetOutOfBounds` (from `check_compression_info`'s declared-offset-vs-`Data.db`-length bounds check), not `DigestMismatch`/`UnexpectedEof` — verified directly against the real `test_comp_corrupt/data_db_truncation` fixture. `DigestMismatch` is a whole-file CRC with no per-chunk anchor and is never located; `cqlite-cli/tests/verify_location_cli_tests.rs` asserts its `location` is `null`.
 
 #### Scenario: L1.1 compressed chunk CRC flip names the intersecting partitions
 - **Given** `test_comp_corrupt/data_db_bit_flip` and its clean source `lz4_table`
@@ -34,15 +36,23 @@ A `VerifyFinding` anchored to a `Data.db` byte range (`ChunkDecompressionError`,
 - **Given** `test_comp_corrupt/data_db_truncation`
 - **When** the test computes, from the clean source's `Index.db` positions, every partition whose
   range extends past the corrupted file's actual size, and `verify_sstable` runs on the corrupt copy
-- **Then** the truncation-classified finding's `location.partitions` deep-equals that set.
+- **Then** the `ChunkOffsetOutOfBounds` finding's `location.partitions` deep-equals that set (only the
+  FIRST out-of-bounds chunk is located — the most inclusive range — per §L1's OOM-bound follow-up
+  requirement below; every other `ChunkOffsetOutOfBounds` finding in the same report carries
+  `location: None`).
 
-#### Scenario: L1.4 the decodable-but-corrupt needle partition, BIG and BTI
-- **Given** `corrupt_byte_fixture::stage_control_and_mutated` for `BIG_COMPOSITE` and
-  `BTI_MULTICLUSTERING` (one byte flipped inside a compressed chunk, CRC recomputed, #3782)
-- **When** `verify_sstable` runs on `mutated`
-- **Then** the resulting finding's `location.partitions` is `Resolved` with exactly the needle
-  partition (the one holding the flipped clustering-key byte), verified against
-  `index_partition_positions(control)` (BIG) / the BTI trie walk over `control` (BTI).
+#### DECLARED GAP — Scenario L1.4 (the decodable-but-corrupt needle partition, BIG and BTI) is NOT implemented
+- **Given** `corrupt_byte_fixture::stage_control_and_mutated` for `BIG_COMPOSITE` (a text
+  clustering-value byte flipped inside a compressed chunk, CRC recomputed, #3782)
+- **Measured directly** (a throwaway probe against the real `BIG_COMPOSITE` fixture, recorded in
+  `cqlite-core/tests/issue_4194_verify_location.rs`'s module doc): that mutation produces exactly one
+  finding, `VerifyErrorClass::RowScanFailed` (an invalid-UTF-8 clustering-value decode failure
+  surfacing through `classify_scan_error_class`'s generic fallback), carrying **no byte offset
+  anywhere in its message/error chain**. `RowScanFailed` is not one of the three chunk/offset-anchored
+  classes §L1 locates, and giving it a location would mean plumbing a byte offset out of the
+  row-decode path — a new boundary-source-adjacent primitive this change's own non-goals rule out
+  ("no new boundary-source primitive for BTI … the existing full trie walk is reused as-is").
+  Tracked as a follow-up rather than implemented in this change.
 
 ### Requirement: L2 — A damaged boundary source poisons every location, never a guess
 
@@ -98,3 +108,20 @@ bytes for a plausible header.
   as it did before this change (`cqlite-cli/tests/verify_location_cli_tests.rs`, named in the gate's
   `cli-tests` list per #3522 — no manual edit needed since `cli-tests` enumerates the
   `cqlite-cli/tests/*.rs` glob).
+
+### Requirement: L5 — Resolved partition sets are bounded (roborev round-2 MEDIUM finding)
+
+`location.partitions`'s `Resolved` set SHALL NOT grow unbounded: a truncation's damaged range can
+intersect essentially every partition in a large table, so `PartitionResolution::Resolved` SHALL cap
+the materialized key list at a fixed limit (`MAX_RESOLVED_KEYS = 100`) and SHALL carry an explicit
+count of how many additional intersecting partitions were not materialized (`0` when nothing was
+omitted), bounded DURING accumulation, not only in the final output.
+
+#### Scenario: L5.1 a badly truncated table's resolved set is capped, not unbounded
+- **Given** a boundary source with more than `MAX_RESOLVED_KEYS` partitions all intersecting one
+  finding's damaged range
+- **When** `resolve_partitions` resolves that finding's location
+- **Then** `location.partitions` is `Resolved` with exactly `MAX_RESOLVED_KEYS` keys and a `truncated`
+  count naming how many more intersected
+  (`cqlite-core/src/storage/sstable/verify_location.rs`'s
+  `resolved_set_is_capped_and_names_the_truncated_count`).
