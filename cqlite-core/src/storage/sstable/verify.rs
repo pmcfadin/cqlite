@@ -607,11 +607,20 @@ async fn verify_components(
                             ));
                         }
                     }
-                    scan_position_map = Some(
-                        scan_partitions
-                            .into_iter()
-                            .collect::<std::collections::HashMap<_, _>>(),
-                    );
+                    // Issue #4194, roborev round-4 MEDIUM finding: only built
+                    // when it can actually be USED — BTI with at least one
+                    // pending location. Previously retained unconditionally
+                    // (including for BIG, which never reads it, and for the
+                    // overwhelmingly common clean-file case), materializing a
+                    // whole-table position->key map — tens of MB on a large
+                    // table — for zero benefit.
+                    if components.format == SsTableFormat::Bti && !pending_locations.is_empty() {
+                        scan_position_map = Some(
+                            scan_partitions
+                                .into_iter()
+                                .collect::<std::collections::HashMap<_, _>>(),
+                        );
+                    }
                 }
                 Err(e) => findings.push(classify_scan_error(&components, &e)),
             }

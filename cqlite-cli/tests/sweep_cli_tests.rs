@@ -399,6 +399,22 @@ fn an_unreadable_keyspace_directory_is_its_own_unreadable_row() {
     std::fs::set_permissions(&locked_ks, std::fs::Permissions::from_mode(0o000))
         .expect("chmod 000 the keyspace dir");
 
+    // roborev round-4 LOW finding: `chmod 000` is a no-op against DAC as
+    // root (any containerized CI lane commonly runs as root) — `read_dir`
+    // would then succeed, no `ks_locked` row would appear, and the test
+    // would fail for a reason unrelated to the code under test. Probe
+    // directly rather than asserting a permission model this process might
+    // not be subject to.
+    if std::fs::read_dir(&locked_ks).is_ok() {
+        std::fs::set_permissions(&locked_ks, std::fs::Permissions::from_mode(0o755))
+            .expect("restore keyspace dir permissions");
+        eprintln!(
+            "SKIP: chmod 000 did not make {} unreadable (running as root?)",
+            locked_ks.display()
+        );
+        return;
+    }
+
     let output = run_sweep(staging.path(), "json", None);
     // Always restore permissions before any assertion can panic/return, so
     // TempDir's own Drop cleanup can still remove the directory.
