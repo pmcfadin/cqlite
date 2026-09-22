@@ -15828,6 +15828,46 @@ run_component() { # run_component <name> <cmd...>
 # passes. See the block in run_python_bindings for the full mechanism.
 _PB_NOFILE_MIN=4096
 
+# _gate_raise_nofile_limit (issue #4221, roborev job 4263 finding 1): raise the
+# launchd-inherited open-file SOFT limit ONCE, in the gate's OWN top-level shell,
+# before ANY component runs. A bash `ulimit` change is inherited by every process
+# forked afterward, so calling this exactly once here — before launch_components
+# forks either lane — reaches every component in one place, not just
+# python-bindings. The gap this closes: the guard originally lived ONLY inside
+# run_python_bindings, so every OTHER component sharing the SAME launchd-inherited
+# 256-file cap (core-tests, cli-tests, node-bindings, flight-tests, the parity
+# lanes — all of which read the same corpus through the same reader that swallows
+# EMFILE into an empty result set) still ran at 256. Any of those whose assertion is
+# weaker than an exact row count (or whose corpus is larger than the one measured
+# when this guard was written) could silently PASS on truncated data.
+# Best-effort, not fail-closed: an inability to raise the limit here is reported to
+# gate stdout so a reader of a red run has the context, but does not abort the
+# whole gate on its own — run_python_bindings keeps its own fail-closed re-assert
+# (below) as the backstop for the one component already known to need it exactly.
+# `-S` on every call is load-bearing, not decoration — see the full mechanism note
+# inside run_python_bindings; setting soft-only never touches the hard ceiling.
+_gate_raise_nofile_limit() {
+  local want="$_PB_NOFILE_MIN" cur eff
+  cur=$(ulimit -S -n 2>/dev/null || printf '')
+  if [ "$cur" != unlimited ]; then
+    case "$cur" in
+      ''|*[!0-9]*) : ;;
+      *) [ "$cur" -lt "$want" ] && ulimit -S -n "$want" 2>/dev/null || : ;;
+    esac
+  fi
+  eff=$(ulimit -S -n 2>/dev/null || printf '')
+  if [ "$eff" != unlimited ]; then
+    case "$eff" in
+      ''|*[!0-9]*)
+        echo "agent-gate: WARNING open-file limit UNMEASURABLE (got ${eff:-<no value>}) at gate start-up — components other than python-bindings run without this guard's raise (#4221)" ;;
+      *)
+        if [ "$eff" -lt "$want" ]; then
+          echo "agent-gate: WARNING open-file limit is $eff, below the $want this guard wants, and could not be raised at gate start-up (#4221) — components other than python-bindings run without this guard's raise"
+        fi ;;
+    esac
+  fi
+}
+
 run_python_bindings() {
   local name=python-bindings
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -15954,6 +15994,16 @@ run_python_bindings() {
     tail -40 "$log"
     echo "--- end of $name output ---"
   fi
+  # Publish the EFFECTIVE open-file limit pytest actually ran under (#4221, roborev job
+  # 4263 finding 2) onto the SUMMARY row itself, via the same channel file-size's
+  # OPT-OUT disclosure uses (#3402) — not just the `>>>` stdout line below, which lands
+  # in gate.log, a file the documented contract says an agent never reads (only the ONE
+  # `AGENT-GATE SUMMARY` block is retained). Without this, the effective limit was
+  # invisible in the one artifact anyone actually reads on a PASS, defeating the point of
+  # measuring it. Call BEFORE record_result so the detail is in place before the row is
+  # rendered; empty only when pytest was never reached (the maturin build failed).
+  [ -n "$nofile_eff" ] && _record_status_detail "$name" \
+    "open-files: $nofile_eff (required >= $_PB_NOFILE_MIN)"
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
   # Report the EFFECTIVE open-file limit pytest actually ran under (#4221), so a future
@@ -27656,6 +27706,11 @@ SIDE_LANE_PID=""
 # (or bash < 4.3) collapses to the historical strictly-sequential run. file-size
 # already ran inline before the dataset preflight and is skipped here.
 launch_components() {
+  # Raise the open-file limit ONCE, for the whole gate process tree, before either
+  # lane below forks anything (#4221, roborev job 4263 finding 1) — see
+  # _gate_raise_nofile_limit for why this must happen here rather than only inside
+  # run_python_bindings.
+  _gate_raise_nofile_limit
   local -a main_lane=() side_lane=()
   local c
   for c in "${COMPONENTS[@]}"; do

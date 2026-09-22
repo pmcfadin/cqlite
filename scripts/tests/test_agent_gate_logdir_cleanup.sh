@@ -1270,13 +1270,26 @@ fi
 #     here is anyone's evidence" arm and its bundle was DELETED. Reproduced here with
 #     a planted component result standing in for the component logs a real run has:
 #     the bundle holds EVIDENCE, so the signal must leave it alone.
+#
+# `--only <name>` (roborev job 4263 finding 3): acquire_gate_slot self-exempts
+# unconditionally when $ONLY is non-empty (scripts/agent-gate.sh, `[ -n "$ONLY" ] &&
+# return 0`) — the stub never reaches real dispatch, so the component name is never
+# used for anything but that exemption check. Without it this stub ran as a FULL
+# run, subject to the #1825 slot cap same as its own parent gate: when this case
+# executes INSIDE the gate of record (already holding one of the default two
+# slots), a single peer gate on the box makes the stub queue for longer than
+# wait_for_stub_holding's 30s bound, and the timeout branch below could not tell
+# "still queued" from "died during start-up" — a host-caused red in the very gate
+# of record this commit set out to stop producing. Slot-exempting removes the
+# queue outright, making the 30s bound a genuine start-up assertion instead of a
+# race with an unrelated peer's concurrency.
 td11b="$tmp/td-signalled"; mkdir -p "$td11b"
 env -u AGENT_GATE_PARENT_RUN_ID \
     TMPDIR="$td11b" \
     AGENT_GATE_SUMMARY_FILE="$tmp/signalled-summary.txt" \
     CQLITE_GATE_STUB_RUNDIR="$td11b/rundir" \
     CQLITE_GATE_STUB_SLEEP=30 \
-    bash "$FAKE_GATE" >"$td11b.out" 2>&1 &
+    bash "$FAKE_GATE" --only file-size >"$td11b.out" 2>&1 &
 sig_pid=$!
 if d11b=$(wait_for_logdir "$td11b"); then
   ok "AC11b: precondition — the signalled run created its bundle ($d11b)"
@@ -1308,7 +1321,7 @@ if d11b=$(wait_for_logdir "$td11b"); then
     # A TIMEOUT here is a REAL failure, not a skip: either the stub never got its slot within
     # 30s or it died during start-up. Say which is being claimed, and do not TERM-and-assert
     # anyway, because those assertions would be about a run in an unknown state.
-    bad "AC11b: precondition FAILED — no readiness marker under $td11b/rundir within 30s; the stub is still queued for an #1825 slot or died during start-up, so TERMing now would measure the start-up race rather than the signalled-bundle behaviour"
+    bad "AC11b: precondition FAILED — no readiness marker under $td11b/rundir within 30s; the stub is slot-exempt (--only) so this is NOT a #1825 queue wait — it died during start-up, so TERMing now would measure the start-up race rather than the signalled-bundle behaviour"
     kill -TERM "$sig_pid" 2>/dev/null; wait "$sig_pid" 2>/dev/null || :
   fi
 else
