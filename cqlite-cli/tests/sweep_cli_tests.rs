@@ -300,6 +300,91 @@ fn s1_4_a_directory_with_no_data_db_is_an_unreadable_row_never_an_omission() {
 }
 
 // ---------------------------------------------------------------------------
+// roborev round-1 MEDIUM finding — an UNREADABLE KEYSPACE directory is its
+// own row, never a silent omission (the guarantee previously held only one
+// level down, at the table dir).
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_keyspace_directory_is_its_own_unreadable_row() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(clean) = require_lz4_table() else {
+        return;
+    };
+    let staging = TempDir::new().expect("create staging dir");
+    // One healthy table under a READABLE keyspace, so the sweep also proves
+    // it did not stop at the first unreadable keyspace.
+    copy_generation(&clean, &staging.path().join("ks_ok").join("table-a"));
+
+    let locked_ks = staging.path().join("ks_locked");
+    std::fs::create_dir_all(locked_ks.join("table-b")).expect("create locked keyspace dir");
+    // Remove read+execute so `read_dir` on `ks_locked` itself fails (the
+    // TABLE dir underneath stays populated but unreachable).
+    std::fs::set_permissions(&locked_ks, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod 000 the keyspace dir");
+
+    let output = run_sweep(staging.path(), "json", None);
+    // Always restore permissions before any assertion can panic/return, so
+    // TempDir's own Drop cleanup can still remove the directory.
+    std::fs::set_permissions(&locked_ks, std::fs::Permissions::from_mode(0o755))
+        .expect("restore keyspace dir permissions");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2 with an unreadable keyspace present"
+    );
+    let value = parse_json(&output);
+    let rows = value["rows"].as_array().expect("rows array");
+    let locked_row = rows
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().contains("ks_locked"))
+        .unwrap_or_else(|| panic!("no row for the unreadable ks_locked directory: {value}"));
+    assert_eq!(locked_row["severity"], "unreadable");
+    assert!(
+        locked_row["cause"]
+            .as_str()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false),
+        "unreadable keyspace row must name a cause: {locked_row}"
+    );
+    let ok_row = rows
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().contains("table-a"))
+        .unwrap_or_else(|| panic!("readable keyspace's table row missing: {value}"));
+    assert_eq!(ok_row["severity"], "ok");
+}
+
+// ---------------------------------------------------------------------------
+// roborev round-1 MEDIUM finding — zero table directories found must not
+// read as a clean sweep (affirmative-zero doctrine).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zero_table_directories_found_is_not_a_clean_sweep() {
+    let staging = TempDir::new().expect("create staging dir");
+    // The data dir exists but has no keyspace/table subdirectories at all.
+    let output = run_sweep(staging.path(), "json", None);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a zero-row sweep must not exit 0"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a zero-row sweep must not print a report claiming to have swept something: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no table directories"),
+        "stderr did not name the empty-sweep condition: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // S2.2 — usage error on a missing data dir
 // ---------------------------------------------------------------------------
 
@@ -395,12 +480,32 @@ fn s4_2_text_rendering_matches_the_json_rows() {
 
     let value = parse_json(&json_output);
     let text_stdout = String::from_utf8_lossy(&text_output.stdout);
+    // roborev round-1 MEDIUM finding: a whole-stdout `.contains(path) &&
+    // .contains(severity)` is satisfied by the trailing `totals: ok=… …`
+    // line ALONE (every severity token also appears there), so the original
+    // form could not detect a row rendered with the WRONG severity. Assert
+    // the pairing on the SPECIFIC per-row line instead: the row's own text
+    // line (identified by containing its path, excluding the "totals:"
+    // line) must START WITH that row's severity token (`print_text` always
+    // renders `{severity:<11}{path}…` or `ok{pad}{path}` — severity first).
+    let row_lines: Vec<&str> = text_stdout
+        .lines()
+        .filter(|l| !l.starts_with("totals:"))
+        .collect();
     for row in value["rows"].as_array().unwrap() {
         let path = row["path"].as_str().unwrap();
         let severity = row["severity"].as_str().unwrap();
+        let matching: Vec<&&str> = row_lines.iter().filter(|l| l.contains(path)).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one text line for row {path}, found {}: {text_stdout}",
+            matching.len()
+        );
         assert!(
-            text_stdout.contains(path) && text_stdout.contains(severity),
-            "text output missing row {path} ({severity}): {text_stdout}"
+            matching[0].trim_start().starts_with(severity),
+            "row line for {path} does not start with its severity {severity}: {:?}",
+            matching[0]
         );
     }
 }

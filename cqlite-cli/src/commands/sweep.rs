@@ -64,14 +64,27 @@ struct SweepRow {
 /// structurally (readdir only — no `Data.db` content is touched here), so a
 /// directory that turns out unreadable still becomes exactly one row later,
 /// never a silent omission (design.md §D3).
-fn discover_table_dirs(data_dir: &Path) -> Result<Vec<PathBuf>> {
+///
+/// `unreadable_keyspaces` (roborev round-1 MEDIUM finding): a keyspace
+/// directory this walk cannot even `read_dir` used to be silently skipped —
+/// no row, no cause, no exit-code effect, "totals: ok=N, exit 0" for a sweep
+/// that never looked under it. Returning it separately, by (path, cause), lets
+/// the caller turn it directly into an `unreadable` [`SweepRow`] WITHOUT
+/// calling `verify_sstable` on it (there is nothing under it to verify).
+struct Discovered {
+    table_dirs: Vec<PathBuf>,
+    unreadable_keyspaces: Vec<(PathBuf, String)>,
+}
+
+fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
     if !data_dir.is_dir() {
         anyhow::bail!(
             "sweep target does not exist or is not a directory: {}",
             data_dir.display()
         );
     }
-    let mut dirs = Vec::new();
+    let mut table_dirs = Vec::new();
+    let mut unreadable_keyspaces = Vec::new();
     let keyspaces = std::fs::read_dir(data_dir)
         .map_err(|e| anyhow::anyhow!("cannot read data dir {}: {e}", data_dir.display()))?;
     for ks_entry in keyspaces.flatten() {
@@ -79,18 +92,24 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Vec<PathBuf>> {
         if !ks_path.is_dir() {
             continue;
         }
-        let Ok(tables) = std::fs::read_dir(&ks_path) else {
-            continue; // unreadable keyspace dir: no table dirs discoverable under it
-        };
-        for table_entry in tables.flatten() {
-            let table_path = table_entry.path();
-            if table_path.is_dir() {
-                dirs.push(table_path);
+        match std::fs::read_dir(&ks_path) {
+            Ok(tables) => {
+                for table_entry in tables.flatten() {
+                    let table_path = table_entry.path();
+                    if table_path.is_dir() {
+                        table_dirs.push(table_path);
+                    }
+                }
             }
+            Err(e) => unreadable_keyspaces.push((ks_path, e.to_string())),
         }
     }
-    dirs.sort();
-    Ok(dirs)
+    table_dirs.sort();
+    unreadable_keyspaces.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Discovered {
+        table_dirs,
+        unreadable_keyspaces,
+    })
 }
 
 /// Map a completed [`VerifyReport`] to its severity + cause (design.md §D3):
@@ -150,13 +169,29 @@ async fn verify_one(
 /// attempted); `2` if any row is `corrupt`/`unreadable`; `0` otherwise
 /// (`degraded` rows alone never trip a non-zero exit).
 pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
-    let dirs = match discover_table_dirs(&args.data_dir) {
+    let discovered = match discover_table_dirs(&args.data_dir) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };
+
+    // Issue #4194, roborev round-1 MEDIUM finding: a keyspace directory this
+    // walk could not even `read_dir` becomes its own `unreadable` row here,
+    // directly — never passed to `verify_sstable` (there is nothing under it
+    // to verify) and never silently absent from `rows`.
+    let mut rows: Vec<SweepRow> = discovered
+        .unreadable_keyspaces
+        .into_iter()
+        .map(|(path, cause)| SweepRow {
+            path,
+            severity: Severity::Unreadable,
+            cause: Some(cause),
+            findings: Vec::new(),
+        })
+        .collect();
+    let dirs = discovered.table_dirs;
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -193,7 +228,7 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
         });
     }
 
-    let mut rows: Vec<SweepRow> = Vec::with_capacity(set.len());
+    rows.reserve(set.len());
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok(row) => rows.push(row),
@@ -211,6 +246,22 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
         }
     }
     rows.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // Issue #4194, roborev round-1 MEDIUM finding: a data dir that exists but
+    // holds zero table directories previously produced `totals: ok=0 …` and
+    // exit 0 — a "clean bill of health" indistinguishable from an all-healthy
+    // corpus, for a sweep that verified NOTHING. Pointing `sweep` one level
+    // too high (or at an unpopulated root) must not read as success —
+    // affirmative-zero doctrine, and the "never let a dataset-dependent
+    // operation pass on an empty dataset" rule.
+    if rows.is_empty() {
+        eprintln!(
+            "Error: no table directories found under {} (expected <keyspace>/<table>-<id>/ \
+             subdirectories) — nothing was verified",
+            args.data_dir.display()
+        );
+        std::process::exit(2);
+    }
 
     match args.out {
         VerifyOutputArg::Text => print_text(&rows),

@@ -80,7 +80,7 @@ bytes for a plausible header.
 
 ### Requirement: L4 — Additive report shape; the existing parity guard is unaffected
 
-`VerifyFinding`/`VerifyReport`'s pre-existing fields, `Display` output, and CLI text/JSON rendering SHALL be unchanged by this addition, and `location` SHALL render in the CLI's text and JSON output only when present.
+`VerifyFinding`/`VerifyReport`'s pre-existing fields, `Display` output, and CLI text/JSON rendering SHALL be unchanged by this addition. `location` SHALL be absent from the text rendering unless present; in JSON the `location` key is always present on every finding object (matching the existing `rows_scanned`/`toc_components` convention of an always-present, `null`-when-absent field) and its VALUE SHALL be `null` unless a location was resolved for that finding (roborev round-1 clarification: "only when present" in an earlier draft of this requirement was ambiguous between "key omitted" and "value null" — the implementation, matching every other optional field this report already emits, is the latter).
 
 #### Scenario: L4.1 the existing corruption parity suite is unaffected
 - **Given** `cqlite-core/tests/sstable_parity_corruption_verify.rs` (issue #1236, unmodified by this

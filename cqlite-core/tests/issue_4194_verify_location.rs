@@ -580,6 +580,117 @@ async fn l2_2_corrupt_bti_boundary_source_unresolves_every_location() {
 }
 
 // ---------------------------------------------------------------------------
+// roborev round-1 MEDIUM finding — a BTI location that actually RESOLVES.
+//
+// Before this test, no case exercised a BTI `Resolved` outcome: `l2_2` only
+// asserts the `Unresolved(BOUNDARY_SOURCE_UNREADABLE)` path, and L1.4 is a
+// declared gap. Reuses `iterate_partitions_in_bti_file` /
+// `resolve_rows_db_entry` — EXISTING, separately-tested production BTI trie
+// primitives (the same ones `check_bti_structure`/the clustering read path
+// already depend on) — as the independent oracle, since hand-rolling a
+// from-scratch byte-comparable trie walker for this one test is a
+// disproportionate undertaking; this is "reuse of already-validated
+// infrastructure", not "testing the new location-resolution code against
+// itself" (#3041/#3042 concerns the latter).
+// ---------------------------------------------------------------------------
+
+/// `(raw partition key, LOGICAL Data.db position)` for every `RowsOffset`
+/// leaf in a BTI `Partitions.db`/`Rows.db` pair (`DataOffset` leaves are
+/// skipped — their raw key is only recoverable through a Data.db scan, which
+/// this oracle deliberately does not perform).
+fn oracle_bti_rows_offset_positions(
+    partitions_path: &Path,
+    rows_path: &Path,
+) -> Vec<(Vec<u8>, u64)> {
+    use cqlite_core::storage::sstable::bti::{
+        iterate_partitions_in_bti_file, resolve_rows_db_entry, BtiPartitionLocation,
+    };
+    use std::io::Cursor;
+
+    let partitions_bytes = std::fs::read(partitions_path).expect("read Partitions.db");
+    let rows_bytes = std::fs::read(rows_path).expect("read Rows.db");
+    let mut cursor = Cursor::new(&partitions_bytes);
+    let entries = iterate_partitions_in_bti_file(&mut cursor).expect("walk Partitions.db trie");
+
+    let mut out = Vec::new();
+    for (_, location) in entries {
+        if let BtiPartitionLocation::RowsOffset(off) = location {
+            let header =
+                resolve_rows_db_entry(&rows_bytes, off as usize).expect("resolve Rows.db entry");
+            let key_length =
+                u16::from_be_bytes([rows_bytes[off as usize], rows_bytes[off as usize + 1]])
+                    as usize;
+            let key_start = off as usize + 2;
+            let key = rows_bytes[key_start..key_start + key_length].to_vec();
+            out.push((key, header.data_position));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
+    let Some(clean) = clean_source_dir("test_da", "wide_table-") else {
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean wide_table source is absent"
+        );
+        eprintln!("SKIP: clean wide_table source absent");
+        return;
+    };
+    if !clean.join("da-2-bti-CompressionInfo.db").is_file() {
+        eprintln!("SKIP: wide_table fixture is not compressed (no CompressionInfo.db)");
+        return;
+    }
+
+    let (chunk_length, data_length, _offsets) =
+        oracle_compression_info(&clean.join("da-2-bti-CompressionInfo.db"));
+    let positions = oracle_bti_rows_offset_positions(
+        &clean.join("da-2-bti-Partitions.db"),
+        &clean.join("da-2-bti-Rows.db"),
+    );
+    let expected = expected_intersecting_keys((0, chunk_length), &positions, data_length);
+    if expected.is_empty() {
+        // Every leaf intersecting chunk 0 is a `DataOffset` leaf (or there are
+        // none) on this fixture — not the shape this test targets. Refuse to
+        // fabricate a pass over an untested branch; a future fixture swap
+        // must re-derive this rather than silently green over a gap.
+        panic!(
+            "oracle computed zero RowsOffset-leaf partitions intersecting chunk 0 of wide_table \
+             — this test needs a fixture where chunk 0 intersects at least one RowsOffset leaf; \
+             re-derive against the current fixture rather than skip"
+        );
+    }
+
+    let staging = tempfile::Builder::new()
+        .prefix("cqlite-4194-bti-resolve-")
+        .tempdir()
+        .expect("create staging temp dir");
+    let staged = staging.path().join("da-2-bti");
+    copy_generation(&clean, &staged);
+    bit_flip_first_byte(&staged.join("da-2-bti-Data.db"));
+
+    let report = run_verify(&staged).await;
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.class == VerifyErrorClass::ChunkDecompressionError)
+        .unwrap_or_else(|| {
+            panic!(
+                "no ChunkDecompressionError finding in {:#?}",
+                report.findings
+            )
+        });
+    let loc = finding
+        .location
+        .as_ref()
+        .expect("ChunkDecompressionError finding must carry a location");
+    assert_eq!(loc.component, "Data.db");
+    assert_eq!(loc.chunk_index, Some(0));
+    assert_eq!(resolved_keys(&loc.partitions), expected);
+}
+
+// ---------------------------------------------------------------------------
 // L2.3 — a healthy boundary source with no finding never fabricates an
 // Unresolved marker
 // ---------------------------------------------------------------------------

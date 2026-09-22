@@ -669,7 +669,10 @@ async fn finalize_locations(
     scan_position_map: Option<&std::collections::HashMap<u64, Vec<u8>>>,
     platform: Arc<Platform>,
 ) {
-    let boundary_healthy = match components.format {
+    // `mut`: the BIG arm below can additionally downgrade this to `false`
+    // after consulting `IndexReader::is_fully_parsed()` (roborev round-1
+    // MEDIUM finding — see the comment at that check).
+    let mut boundary_healthy = match components.format {
         SsTableFormat::Big => !findings
             .iter()
             .any(|f| f.class == VerifyErrorClass::IndexEntryCorrupt),
@@ -685,8 +688,11 @@ async fn finalize_locations(
     // per partition the boundary source names — built only when the boundary
     // source is healthy (an unhealthy one is never read for this purpose,
     // matching the fail-closed contract regardless of what re-reading it
-    // might yield).
-    let boundary_entries: Option<Vec<verify_location::BoundaryEntry>> = if !boundary_healthy {
+    // might yield). Keys are `Arc<[u8]>` (roborev round-1 MEDIUM finding): BIG
+    // reuses `PartitionIndexEntry::raw_key`/`key_digest`'s ALREADY-`Arc`
+    // storage via a refcount bump, never an `O(key_len)` byte copy that would
+    // double the resident partition-index memory for a large table.
+    let mut boundary_entries: Option<Vec<verify_location::BoundaryEntry>> = if !boundary_healthy {
         None
     } else {
         match components.format {
@@ -694,16 +700,30 @@ async fn finalize_locations(
                 use crate::storage::sstable::index_reader::IndexReader;
                 let index_path = components.path(dir, "Index.db");
                 match IndexReader::open(&index_path, platform).await {
+                    // Issue #4194, roborev round-1 MEDIUM finding: `IndexReader`
+                    // uses a DIFFERENT parser from `check_big_index`'s structural
+                    // walk above, and per Check 4's own doc it "silently
+                    // TRUNCATES the partition list on the first malformed
+                    // Index.db entry" (issue #2302) — exposed via
+                    // `is_fully_parsed()`. `check_big_index` seeing no
+                    // `IndexEntryCorrupt` does NOT mean `IndexReader` parsed the
+                    // whole file; if the two parsers disagree, presenting a
+                    // partial prefix as `Resolved` is a confident WRONG answer,
+                    // exactly what the fail-closed contract (§D2) exists to
+                    // prevent. Downgrade `boundary_healthy` itself (not just
+                    // this arm's `None`) so every OTHER pending location in
+                    // this report is poisoned too, matching "fully trusted or
+                    // not at all".
+                    Ok(reader) if !reader.is_fully_parsed() => {
+                        boundary_healthy = false;
+                        None
+                    }
                     Ok(reader) => Some(
                         reader
                             .get_partition_entries()
                             .iter()
                             .map(|e| {
-                                let raw = e
-                                    .raw_key
-                                    .as_deref()
-                                    .map(|k| k.to_vec())
-                                    .unwrap_or_else(|| e.key_digest.to_vec());
+                                let raw = e.raw_key.clone().unwrap_or_else(|| e.key_digest.clone());
                                 (e.data_offset, Some(raw))
                             })
                             .collect(),
@@ -715,8 +735,10 @@ async fn finalize_locations(
                 leaves
                     .iter()
                     .map(|leaf| {
-                        let key = leaf.inline_raw_key.clone().or_else(|| {
-                            scan_position_map.and_then(|m| m.get(&leaf.data_position).cloned())
+                        let key = leaf.inline_raw_key.as_deref().map(Arc::from).or_else(|| {
+                            scan_position_map
+                                .and_then(|m| m.get(&leaf.data_position))
+                                .map(|k| Arc::from(k.as_slice()))
                         });
                         (leaf.data_position, key)
                     })
@@ -724,6 +746,15 @@ async fn finalize_locations(
             }),
         }
     };
+    // `resolve_partitions` requires its input pre-sorted ascending by
+    // `data_offset` (roborev round-1 MEDIUM finding — sort ONCE here rather
+    // than on every pending-location call): BIG's on-disk parse order is
+    // ascending by convention but not a documented guarantee, and BTI leaves
+    // come from a byte-comparable-KEY-order DFS trie walk, which is NOT
+    // Data.db offset order at all.
+    if let Some(entries) = boundary_entries.as_mut() {
+        entries.sort_by_key(|(offset, _)| *offset);
+    }
 
     for p in pending {
         let location = verify_location::resolve_location(
@@ -1073,6 +1104,23 @@ fn check_compression_info(
         }
     };
     let mut offset_out_of_bounds = false;
+    // Issue #4194, roborev round-1 HIGH finding: a location is attached ONLY
+    // to the FIRST out-of-bounds chunk. This loop has no cap on how many
+    // `ChunkOffsetOutOfBounds` findings it can push (one per bad chunk offset,
+    // unbounded on a maliciously/severely truncated CompressionInfo.db), and
+    // attaching a `Resolved(Vec<KeyRef>)` to EVERY one of them — each holding
+    // a hex string for every partition from that chunk to EOF — makes the
+    // resident location data O(bad_chunks × partitions_past_eof): quadratic
+    // in the corruption's own severity, materialized as ONE `VerifyFinding`
+    // per bad chunk and then serialized into a single JSON line, directly
+    // contradicting this change's own <128 MB / no-data-dir-wide-structure
+    // posture. The FIRST out-of-bounds chunk's range IS the most inclusive
+    // (design.md §D1's `[new_eof, original_logical_length)` — every later
+    // chunk's range is a strict subset), so it alone already answers "which
+    // partitions does this truncation touch"; every subsequent
+    // `ChunkOffsetOutOfBounds` finding still fires (unchanged corruption
+    // signal) but is left `location: None`.
+    let mut first_out_of_bounds_located = false;
     for (i, &offset) in info.chunk_offsets.iter().enumerate() {
         // Every chunk record is at least its 4-byte inline CRC, so the offset
         // itself must leave room for that. Offsets at/after EOF are corrupt.
@@ -1087,24 +1135,27 @@ fn check_compression_info(
                     i, offset, offset, data_len
                 ),
             ));
-            // Issue #4194: this is the truncation-anchored finding this
-            // corruption class actually produces (verified against the real
-            // `test_comp_corrupt/data_db_truncation` fixture — the boundary
-            // source's declared LOGICAL length (`data_length`) is the extent
-            // every partition past this chunk's logical start is measured
-            // against; design.md §D1's "new_eof .. original_logical_length"
-            // derivation, computed here rather than deferred since `info` is
-            // only in scope in this function).
-            let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
-            pending_locations.push(PendingLocation {
-                finding_index,
-                component: "Data.db".to_string(),
-                byte_offset: offset,
-                byte_len: 4,
-                chunk_index: Some(i),
-                damaged_logical: (logical_start, info.data_length.max(logical_start)),
-                logical_len: info.data_length,
-            });
+            if !first_out_of_bounds_located {
+                first_out_of_bounds_located = true;
+                // Issue #4194: this is the truncation-anchored finding this
+                // corruption class actually produces (verified against the real
+                // `test_comp_corrupt/data_db_truncation` fixture — the boundary
+                // source's declared LOGICAL length (`data_length`) is the extent
+                // every partition past this chunk's logical start is measured
+                // against; design.md §D1's "new_eof .. original_logical_length"
+                // derivation, computed here rather than deferred since `info` is
+                // only in scope in this function).
+                let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
+                pending_locations.push(PendingLocation {
+                    finding_index,
+                    component: "Data.db".to_string(),
+                    byte_offset: offset,
+                    byte_len: 4,
+                    chunk_index: Some(i),
+                    damaged_logical: (logical_start, info.data_length.max(logical_start)),
+                    logical_len: info.data_length,
+                });
+            }
         }
     }
 
