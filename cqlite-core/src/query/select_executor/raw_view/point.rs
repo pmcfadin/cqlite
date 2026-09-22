@@ -5,7 +5,10 @@
 //! 1. [`SSTableReader::read_single_partition_for_compaction`] resolves the
 //!    partition via the SAME bloom/BTI-pruned, offset-seeked primitive the
 //!    Flight point-read path uses — never a full-table scan (spec: "pushed to
-//!    the point-read path, never a scan").
+//!    the point-read path, never a scan"). Not present on the `tombstones`
+//!    build (epic #951: that build compiles out the seek machinery entirely),
+//!    which always takes the honest scan+filter fallback below instead —
+//!    same rows, never a targeted access path.
 //! 2. `IndexUnavailable` (no random-access index) degrades to scanning THIS
 //!    ONE candidate's compaction stream, filtered to the requested key(s) —
 //!    the same fail-safe `read_single_partition_for_compaction`'s own callers
@@ -17,7 +20,7 @@ use super::row_map::{map_compaction_row, RawViewSource};
 use crate::query::result::QueryRow;
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
-use crate::storage::sstable::reader::{CompactionRow, SSTableReader, SinglePartitionCompaction};
+use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::Result;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -29,6 +32,7 @@ use std::sync::Arc;
 /// that primitive's private seek path. `None` on any lookup miss/error: the
 /// column is best-effort metadata, not a correctness signal (rows are already
 /// resolved independently).
+#[cfg_attr(feature = "tombstones", allow(dead_code))]
 async fn resolve_position(reader: &SSTableReader, pk_bytes: &[u8]) -> Option<i64> {
     let offset = if reader.is_bti() {
         reader
@@ -46,14 +50,44 @@ async fn resolve_position(reader: &SSTableReader, pk_bytes: &[u8]) -> Option<i64
     offset.and_then(|off| i64::try_from(off).ok())
 }
 
+/// Scan `reader`'s WHOLE compaction stream, forwarding only rows whose
+/// partition key equals `pk_bytes` — the fail-safe every point-key path
+/// (targeted or not) falls back to when no random-access index can be used.
+/// `position` is `None` (no index was consulted).
+async fn scan_and_filter_one_reader(
+    reader: &SSTableReader,
+    schema: &TableSchema,
+    pk_bytes: &[u8],
+    scan_cancel: &ScanCancel,
+    out: &mut Vec<QueryRow>,
+) -> Result<()> {
+    let source = RawViewSource::from_reader(reader, None);
+    let mut matched: Vec<CompactionRow> = Vec::new();
+    reader
+        .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |crow| {
+            if crow.key.as_bytes() == pk_bytes {
+                matched.push(crow);
+            }
+            Ok(ControlFlow::Continue(()))
+        })
+        .await?;
+    for row in matched {
+        out.extend(map_compaction_row(row, schema, &source)?);
+    }
+    Ok(())
+}
+
 /// Probe every candidate generation for one partition key, returning every
 /// physical row found (unreconciled).
+#[cfg(not(feature = "tombstones"))]
 async fn point_rows_for_key(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     pk_bytes: &[u8],
     scan_cancel: &ScanCancel,
 ) -> Result<Vec<QueryRow>> {
+    use crate::storage::sstable::reader::SinglePartitionCompaction;
+
     let mut out = Vec::new();
     for reader in readers {
         scan_cancel.check()?;
@@ -73,21 +107,29 @@ async fn point_rows_for_key(
                 }
             }
             SinglePartitionCompaction::IndexUnavailable => {
-                let source = RawViewSource::from_reader(reader, None);
-                let mut matched: Vec<CompactionRow> = Vec::new();
-                reader
-                    .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |crow| {
-                        if crow.key.as_bytes() == pk_bytes {
-                            matched.push(crow);
-                        }
-                        Ok(ControlFlow::Continue(()))
-                    })
-                    .await?;
-                for row in matched {
-                    out.extend(map_compaction_row(row, schema, &source)?);
-                }
+                scan_and_filter_one_reader(reader, schema, pk_bytes, scan_cancel, &mut out).await?;
             }
         }
+    }
+    Ok(out)
+}
+
+/// The `tombstones`-build counterpart (epic #951 "honest paths"): that build
+/// compiles out the seek machinery entirely, so every candidate is scanned
+/// and filtered — the SAME fail-safe the default build's `IndexUnavailable`
+/// arm uses, applied to every reader. Rows are byte-identical either way;
+/// only the access path (never reported as targeted) differs.
+#[cfg(feature = "tombstones")]
+async fn point_rows_for_key(
+    readers: &[Arc<SSTableReader>],
+    schema: &TableSchema,
+    pk_bytes: &[u8],
+    scan_cancel: &ScanCancel,
+) -> Result<Vec<QueryRow>> {
+    let mut out = Vec::new();
+    for reader in readers {
+        scan_cancel.check()?;
+        scan_and_filter_one_reader(reader, schema, pk_bytes, scan_cancel, &mut out).await?;
     }
     Ok(out)
 }
