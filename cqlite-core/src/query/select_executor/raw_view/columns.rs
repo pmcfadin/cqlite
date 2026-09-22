@@ -6,6 +6,7 @@ use crate::query::result::ColumnInfo;
 use crate::schema::{CqlType, TableSchema};
 use std::collections::HashSet;
 
+pub(in crate::query::select_executor) use crate::query::raw_view_naming::strip_raw_view_suffix;
 /// Suffix that marks a table reference as the raw-SSTable-view name for its
 /// base table (design.md D1 — a naming convention over the existing flat
 /// `keyspace.table` namespace, never a new grammar). The single source of
@@ -14,7 +15,6 @@ use std::collections::HashSet;
 /// schema check (issue #199) recognizes a raw-view name too, instead of
 /// rejecting every raw-view query before `SelectExecutor` can intercept it.
 pub(in crate::query::select_executor) use crate::query::raw_view_naming::RAW_SSTABLE_VIEW_SUFFIX as RAW_VIEW_SUFFIX;
-pub(in crate::query::select_executor) use crate::query::raw_view_naming::strip_raw_view_suffix;
 
 /// `true` for a CQL type whose cells are individually addressable (a
 /// non-frozen list/set/map/UDT) — the column gets the `_complex_deletion`
@@ -62,7 +62,11 @@ pub(in crate::query::select_executor) fn raw_view_columns(base: &TableSchema) ->
     // `TableSchema::columns` carries EVERY declared column, key columns
     // included (issue #4222 research pass) — skip the ones already emitted
     // above so a key column is never duplicated as a "non-key" metadata quad.
-    for col in base.columns.iter().filter(|c| !key_names.contains(c.name.as_str())) {
+    for col in base
+        .columns
+        .iter()
+        .filter(|c| !key_names.contains(c.name.as_str()))
+    {
         push(&mut columns, col.name.clone(), &col.data_type);
         push(&mut columns, format!("{}_timestamp", col.name), "bigint");
         push(&mut columns, format!("{}_ttl", col.name), "int");
@@ -97,11 +101,7 @@ pub(in crate::query::select_executor) fn raw_view_columns(base: &TableSchema) ->
 
     push(&mut columns, "row_timestamp".to_string(), "bigint");
     push(&mut columns, "row_ttl".to_string(), "int");
-    push(
-        &mut columns,
-        "row_local_deletion_time".to_string(),
-        "int",
-    );
+    push(&mut columns, "row_local_deletion_time".to_string(), "int");
     push(&mut columns, "row_tombstone".to_string(), "text");
 
     push(

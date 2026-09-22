@@ -41,7 +41,10 @@ async fn open_db_with_byte_budget(max_result_bytes: u64) -> Database {
         core_config,
         table_directory_filter: Some(format!("/{KEYSPACE}/")),
     };
-    ingest(cfg).await.expect("ingestion of the fixture").database
+    ingest(cfg)
+        .await
+        .expect("ingestion of the fixture")
+        .database
 }
 
 /// THE RED CASE: a no-predicate `_raw_sstable_data` query (the full-scan
@@ -55,7 +58,10 @@ async fn full_scan_over_budget_returns_result_too_large() {
     let outcome = db.execute(&query).await;
     match outcome {
         Err(Error::ResultTooLarge { budget_bytes, .. }) => {
-            assert_eq!(budget_bytes, 1, "the reported budget must be the CONFIGURED one");
+            assert_eq!(
+                budget_bytes, 1,
+                "the reported budget must be the CONFIGURED one"
+            );
         }
         Err(other) => panic!(
             "expected Error::ResultTooLarge under a 1-byte budget, got a DIFFERENT error: {other}"
