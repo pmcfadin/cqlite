@@ -149,7 +149,7 @@ pub async fn rebuild_components(
         }
     }
 
-    let entries = match boundaries::enumerate_partitions(&reader).await {
+    let entries = match boundaries::enumerate_partitions(&reader, schema).await {
         Ok(e) => e,
         Err(err) => return Ok(make_report(Some(data_corrupt_refusal(err, None)))),
     };
@@ -202,8 +202,15 @@ pub async fn rebuild_components(
         if want_index || want_summary || want_statistics {
             for (i, (offset, key)) in entries.iter().enumerate() {
                 let end_bound = entries.get(i + 1).map(|(o, _)| *o);
-                match decode::decode_one_partition(&reader, *offset, end_bound, key, schema, &scan_cancel)
-                    .await
+                match decode::decode_one_partition(
+                    &reader,
+                    *offset,
+                    end_bound,
+                    key,
+                    schema,
+                    &scan_cancel,
+                )
+                .await
                 {
                     Ok(Some((_, mutations))) => {
                         for m in &mutations {
@@ -236,6 +243,26 @@ pub async fn rebuild_components(
         } else {
             None
         };
+        // Declared gap, discovered empirically against real fixtures while
+        // validating this change (beyond design.md's own §D2 table, which
+        // named `bloom_filter_fp_chance` as the one recoverable Filter.db
+        // parameter and implicitly assumed `expected_keys` == the final
+        // distinct partition count): Cassandra's ACTUAL `Filter.db` bit-array
+        // size is sized from `estimatedKeys` at WRITE time, which — for an
+        // SSTable produced by compaction — is an ESTIMATE derived from the
+        // INPUT sstables' own key counts (`getApproximateKeyCount`), not a
+        // recount of the truly final distinct partition set. Two committed
+        // fixtures verified empirically both carry a LARGER original bit
+        // array than `entries.len()` would produce (e.g.
+        // `test_basic.uncompressed_table`: original 16 longs vs 10 longs
+        // computed here, same recovered fp_chance/hash_count). `expected_keys`
+        // is therefore NOT reliably recoverable from Data.db alone for a
+        // compaction-produced input, and rebuild uses the actual distinct
+        // partition count instead — CORRECT for membership (a smaller filter
+        // never produces a false NEGATIVE, only a possibly-different false-
+        // positive rate than the original), but not necessarily byte-identical.
+        // `bloom_filter_fp_chance`'s own classification below is unaffected —
+        // it is a genuinely separate axis from this one.
         let mut filter_writer = if want_filter {
             Some(FilterWriter::new(
                 options.out_dir.join(format!("{base}-Filter.db")),
@@ -264,9 +291,15 @@ pub async fn rebuild_components(
         for (i, (offset, key)) in entries.iter().enumerate() {
             let end_bound = entries.get(i + 1).map(|(o, _)| *o);
             let this_end = end_bound.unwrap_or(section_len);
-            let decoded =
-                decode::decode_one_partition(&reader, *offset, end_bound, key, schema, &scan_cancel)
-                    .await;
+            let decoded = decode::decode_one_partition(
+                &reader,
+                *offset,
+                end_bound,
+                key,
+                schema,
+                &scan_cancel,
+            )
+            .await;
             let (decorated_key, mut mutations) = match decoded {
                 Ok(Some(pair)) => pair,
                 Ok(None) => continue,
@@ -314,7 +347,8 @@ pub async fn rebuild_components(
             };
 
             if let Some(iw) = index_writer.as_mut() {
-                let entry_info = iw.add_partition_with_promoted(&decorated_key, *offset, &blocks)?;
+                let entry_info =
+                    iw.add_partition_with_promoted(&decorated_key, *offset, &blocks)?;
                 if let Some(sw) = summary_writer.as_mut() {
                     sw.note_partition(&decorated_key);
                     if summary_sample_counter % sample_interval == 0 {
@@ -377,7 +411,15 @@ pub async fn rebuild_components(
     }
 
     if want_statistics {
-        write_statistics_component(dir, &base, options, schema, is_bti, &mut stats_acc, &mut report)?;
+        write_statistics_component(
+            dir,
+            &base,
+            options,
+            schema,
+            is_bti,
+            &mut stats_acc,
+            &mut report,
+        )?;
     }
 
     if want(Component::Digest) {
@@ -433,7 +475,11 @@ fn write_statistics_component(
         .clone()
         .unwrap_or_else(|| dir.join(format!("{base}-Statistics.db")));
     let repair = statistics::recover_repair_state(&stats_path);
-    stats_acc.set_repair_state(repair.repaired_at, repair.pending_repair, repair.is_transient);
+    stats_acc.set_repair_state(
+        repair.repaired_at,
+        repair.pending_repair,
+        repair.is_transient,
+    );
 
     let out_path = options.out_dir.join(format!("{base}-Statistics.db"));
     let writer = if is_bti {
@@ -467,7 +513,10 @@ fn write_statistics_component(
         );
     }
     for field in ["repaired_at", "pending_repair", "is_transient"] {
-        fields.insert(field.to_string(), repair.provenance.manifest_label().to_string());
+        fields.insert(
+            field.to_string(),
+            repair.provenance.manifest_label().to_string(),
+        );
     }
     for field in ["origin_host", "compaction_ancestry"] {
         fields.insert(
@@ -475,6 +524,8 @@ fn write_statistics_component(
             FieldProvenance::Lost.manifest_label().to_string(),
         );
     }
-    report.classification.insert("statistics".to_string(), fields);
+    report
+        .classification
+        .insert("statistics".to_string(), fields);
     Ok(())
 }

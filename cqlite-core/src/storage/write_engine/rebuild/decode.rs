@@ -86,7 +86,9 @@ pub(super) async fn decode_one_partition(
 
     let mut merge_entries = Vec::with_capacity(rows.len());
     for row in rows {
-        merge_entries.push(SSTableRowIteratorAdapter::build_merge_entry(0, row, schema)?);
+        merge_entries.push(SSTableRowIteratorAdapter::build_merge_entry(
+            0, row, schema,
+        )?);
     }
     let run = SinglePartitionRun {
         entries: merge_entries.into(),

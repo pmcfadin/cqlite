@@ -14,6 +14,7 @@
 
 use super::{Refusal, RefusalReason};
 use crate::error::{Error, Result};
+use crate::schema::TableSchema;
 use crate::storage::sstable::chunk_reader::ChunkReader;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::SSTableReader;
@@ -75,8 +76,19 @@ pub(super) fn compressed_chunk_preflight(
 /// partition header, an out-of-range length field, ...) IS the R5 "cannot be
 /// trusted" signal for an uncompressed input — the caller classifies it as
 /// [`RefusalReason::DataCorrupt`].
-pub(super) async fn enumerate_partitions(reader: &SSTableReader) -> Result<Vec<(u64, Vec<u8>)>> {
-    let entries = reader.distinct_partition_keys_with_positions().await?;
+///
+/// `schema` is passed through explicitly (issue #4197) rather than relying
+/// on the reader's own header-derived resolution, which depends on
+/// `Statistics.db` being present at OPEN time — exactly the component
+/// rebuild may be asked to regenerate, or relocate for repair-field
+/// recovery (spec R4.2).
+pub(super) async fn enumerate_partitions(
+    reader: &SSTableReader,
+    schema: &TableSchema,
+) -> Result<Vec<(u64, Vec<u8>)>> {
+    let entries = reader
+        .distinct_partition_keys_with_positions(Some(schema))
+        .await?;
     if entries.len() < 2 {
         return Ok(entries);
     }
