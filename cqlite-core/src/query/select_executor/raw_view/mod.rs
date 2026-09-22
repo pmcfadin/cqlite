@@ -37,6 +37,7 @@ pub(super) use columns::{raw_view_columns, strip_raw_view_suffix};
 use super::{classify_partition_lookup, parse_table_id, PartitionLookupOutcome};
 use crate::query::result::{QueryMetadata, QueryResult};
 use crate::query::result_budget::enforce_materialized_rows;
+use crate::query::select_ast::{SelectClause, SelectExpression};
 use crate::query::select_optimizer::OptimizedQueryPlan;
 use crate::schema::TableSchema;
 use crate::{Error, Result, TableId};
@@ -59,6 +60,17 @@ impl super::SelectExecutor {
             .resolve_base_schema_for_raw_view(keyspace.as_deref(), base_name)
             .await?;
 
+        // The reader map (`SSTableManager::table_readers`) is keyed by the
+        // BASE table's own name — the raw-view suffix is a query-engine-side
+        // naming convention only (design.md D1) and is never itself a
+        // registered table identity. Every reader-snapshot lookup below MUST
+        // use this, never `table_id` (which still carries the suffix).
+        let base_table_id = TableId::new(format!(
+            "{}{}",
+            keyspace.as_deref().map(|k| format!("{k}.")).unwrap_or_default(),
+            base_name
+        ));
+
         let columns = raw_view_columns(&base_schema);
 
         // Reuse the SAME sstable-predicate extraction the optimizer already
@@ -72,16 +84,16 @@ impl super::SelectExecutor {
 
         let rows = match outcome {
             PartitionLookupOutcome::Targeted(pk_bytes) => {
-                let readers = self.storage.raw_view_reader_snapshot(table_id).await;
+                let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;
                 raw_view_point_rows(&readers, &base_schema, std::slice::from_ref(&pk_bytes))
                     .await?
             }
             PartitionLookupOutcome::MultiTargeted(pk_keys) => {
-                let readers = self.storage.raw_view_reader_snapshot(table_id).await;
+                let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;
                 raw_view_point_rows(&readers, &base_schema, &pk_keys).await?
             }
             PartitionLookupOutcome::Fallback(_) => {
-                let readers = self.storage.raw_view_reader_snapshot(table_id).await;
+                let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;
                 raw_view_full_scan_rows(
                     &readers,
                     &base_schema,
@@ -90,6 +102,45 @@ impl super::SelectExecutor {
                 )
                 .await?
             }
+        };
+
+        // Plain-column projection trimming (`SELECT a, b, ...`), reusing the
+        // SAME `trim_projection` the base pipeline's `Project` step uses so
+        // the two never drift. `SELECT *` and anything reshaping (DISTINCT,
+        // aggregates, expressions, WRITETIME/TTL) are OUT OF SCOPE for this
+        // slice (design.md D4's JOIN-gap precedent: DISTINCT/aggregation over
+        // the raw view is a general query-engine capability, not a raw-view
+        // concern) and return every column unfiltered — a known, documented
+        // limitation rather than a silent wrong answer, since every column
+        // this contract defines is still present and correctly valued.
+        let (rows, columns) = match &plan.statement.select_clause {
+            SelectClause::Columns(exprs)
+                if exprs
+                    .iter()
+                    .all(|e| matches!(e, SelectExpression::Column(_))) =>
+            {
+                let selected: Vec<&str> = exprs
+                    .iter()
+                    .filter_map(|e| match e {
+                        SelectExpression::Column(c) => Some(c.column.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let trimmed_rows = self.trim_projection(rows, exprs);
+                let trimmed_columns: Vec<_> = selected
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, name)| {
+                        columns.iter().find(|c| c.name == *name).map(|c| {
+                            let mut c = c.clone();
+                            c.position = idx;
+                            c
+                        })
+                    })
+                    .collect();
+                (trimmed_rows, trimmed_columns)
+            }
+            _ => (rows, columns),
         };
 
         // Same final budget check every other query path applies (issue

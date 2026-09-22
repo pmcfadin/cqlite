@@ -274,12 +274,21 @@ fn insert_simple_cell(
         return;
     }
 
-    let tombstone_kind = match &cell.value {
-        Value::Tombstone(info) => Some(match info.tombstone_type {
-            TombstoneType::TtlExpiration => "expired",
-            _ => "cell",
-        }),
-        _ => None,
+    // A tombstoned cell's authoritative local-deletion-time lives on
+    // `TombstoneInfo` (`Value::Tombstone(info).local_deletion_time`), NOT on
+    // `SimpleCell::local_deletion_time` (which the decoder leaves `None` for
+    // a tombstone — that field is populated for a LIVE expiring cell). Prefer
+    // the tombstone's own field when the cell is a tombstone; fall back to
+    // the cell's own field otherwise (the live-TTL case).
+    let (tombstone_kind, tombstone_ldt) = match &cell.value {
+        Value::Tombstone(info) => (
+            Some(match info.tombstone_type {
+                TombstoneType::TtlExpiration => "expired",
+                _ => "cell",
+            }),
+            Some(saturating_i32(info.local_deletion_time)),
+        ),
+        _ => (None, None),
     };
     values.insert(cell.column.clone(), live_value);
     values.insert(
@@ -292,7 +301,7 @@ fn insert_simple_cell(
             Value::Integer(saturating_i32(ttl as i64)),
         );
     }
-    if let Some(ldt) = cell.local_deletion_time {
+    if let Some(ldt) = tombstone_ldt.or(cell.local_deletion_time) {
         values.insert(format!("{}_local_deletion_time", cell.column), Value::Integer(ldt));
     }
     if let Some(kind) = tombstone_kind {
