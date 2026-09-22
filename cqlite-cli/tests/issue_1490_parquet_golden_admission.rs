@@ -1436,7 +1436,12 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
     // from the EILSEQ skip below would exit the whole function and silently discard that
     // second block's coverage too — `break 'non_utf8` exits only this block instead (roborev
     // job 3406, Medium).
+    // `allow(unused_labels)` (roborev job 4272 follow-up, found by gate r4 on Linux): the
+    // ONLY `break 'non_utf8` site is compiled OUT on Linux, where EILSEQ is required rather
+    // than skippable (`#[cfg(target_os = "linux")] panic!` supersedes it — see below), so
+    // the label is genuinely unused on exactly that target. Not a dead label anywhere else.
     #[cfg(unix)]
+    #[allow(unused_labels)]
     'non_utf8: {
         use std::os::unix::ffi::OsStrExt;
 
