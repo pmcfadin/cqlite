@@ -53,7 +53,17 @@ fn table_name_from_input(input: &Path) -> Option<String> {
 /// containment guard, which must compare real filesystem identity (symlinks
 /// resolved, `..` applied), not raw argument strings.
 fn resolve_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
-    let mut current = path.to_path_buf();
+    // roborev finding (Medium): a bare relative single-component path (e.g.
+    // `rebuilt`, as opposed to `./rebuilt`) has `parent() == Some("")` —
+    // walking up from `""` fails to canonicalize AND has no `file_name()`,
+    // so the loop below returned `Err(NotFound)` for a perfectly valid
+    // path. Anchor a relative `path` onto the current directory FIRST, so
+    // every ancestor walked is a non-empty, real filesystem path.
+    let mut current = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     let mut suffix: Vec<std::ffi::OsString> = Vec::new();
     loop {
         match current.canonicalize() {
@@ -213,6 +223,15 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
         );
         std::process::exit(1);
     }
+    // Spec R7.3: a non-empty `--out` is a usage error — rebuild never
+    // overwrites same-named component files from an unrelated generation
+    // silently.
+    if let Ok(mut rd) = std::fs::read_dir(out) {
+        if rd.next().is_some() {
+            eprintln!("cqlite rebuild: --out {} is not empty", out.display());
+            std::process::exit(1);
+        }
+    }
 
     let Some(schema_path) = schema_path else {
         eprintln!("cqlite rebuild: --schema is required (the global --schema flag)");
@@ -277,6 +296,16 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
 
     let mut reports = Vec::with_capacity(generations.len());
     let mut any_refused = false;
+    // roborev finding (Medium): generations are rebuilt sequentially and
+    // each one's output was committed to disk before the next was
+    // attempted — a LATER generation refusing left EARLIER ones' output
+    // sitting under `--out`, contradicting this command's own documented
+    // exit-2 contract ("nothing written") and design D3. Track every
+    // generation's own output directory and, on the FIRST refusal, stop
+    // attempting further generations and remove every already-written
+    // one — `--out` ends up holding nothing whenever the run's overall
+    // exit is 2, matching a single-`Data.db` input's behavior exactly.
+    let mut written_out_dirs: Vec<PathBuf> = Vec::new();
     for data_db_path in &generations {
         let out_dir = if generations.len() > 1 {
             out.join(
@@ -291,15 +320,21 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
             out.clone()
         };
         let options = RebuildOptions {
-            out_dir,
+            out_dir: out_dir.clone(),
             statistics_recovery_source: None,
         };
         match rebuild_components(data_db_path, &schema, &components, &options).await {
             Ok(report) => {
-                if report.refused.is_some() {
-                    any_refused = true;
-                }
+                let refused = report.refused.is_some();
                 reports.push(report);
+                if refused {
+                    any_refused = true;
+                    for written in &written_out_dirs {
+                        let _ = std::fs::remove_dir_all(written);
+                    }
+                    break;
+                }
+                written_out_dirs.push(out_dir);
             }
             Err(e) => {
                 eprintln!("cqlite rebuild: {e}");

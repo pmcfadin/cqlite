@@ -37,16 +37,72 @@ fn golden_partition_count(data_db: &std::path::Path) -> usize {
     text.lines().filter(|l| !l.trim().is_empty()).count()
 }
 
-/// R4.4 — `statistics` is never implied by a bare `--components` omission;
-/// needs no dataset.
+/// R4.4 — `statistics` is never implied by a bare `--components` omission.
+///
+/// roborev finding (Medium): the original version of this test asserted
+/// only `Component::parse_list("index,digest")` excludes `Statistics` — a
+/// tautology over the PARSER, never exercising `rebuild_components` at
+/// all. R4.4's actual claim is that a request omitting `statistics`
+/// attempts NO `Statistics.db` write and never reports it in
+/// `regenerated` — asserted here against the real function.
 #[tokio::test]
 async fn statistics_opt_in_enforced() {
+    let Some(fixture_dir) = fixture_dir_or_skip() else {
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but {KEYSPACE}.{TABLE} is absent; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE)
+            );
+        }
+        eprintln!("[issue_4197] {KEYSPACE}.{TABLE} fixture absent; skipping");
+        return;
+    };
+    let schema = table_schema(SCHEMA_FILE, TABLE, KEYSPACE);
     let temp = TempDir::new().expect("tempdir");
-    // A component request that omits `statistics` must never attempt it —
-    // asserted structurally against `Component::parse_list`, no I/O needed.
-    let requested = Component::parse_list("index,digest").unwrap();
+    let working = copy_fixture_dir(&fixture_dir, temp.path());
+    let data_db = single_data_db(&working);
+    let out = temp.path().join("out");
+    let options = RebuildOptions {
+        out_dir: out.clone(),
+        statistics_recovery_source: None,
+    };
+
+    let requested = Component::parse_list("digest").unwrap();
     assert!(!requested.contains(&Component::Statistics));
-    drop(temp);
+    let report = rebuild_components(&data_db, &schema, &requested, &options)
+        .await
+        .expect("rebuild must succeed");
+    assert!(report.refused.is_none(), "refused: {:?}", report.refused);
+    assert!(
+        !report.regenerated.iter().any(|c| c == "statistics"),
+        "statistics must never appear in `regenerated` when not requested; report={report:?}"
+    );
+    // Statistics.db still lands under `--out` (untouched components are
+    // always copied verbatim, spec R7.1's "complete component set"), but it
+    // must be the ORIGINAL's bytes UNCHANGED — never a freshly-recomputed
+    // one, since `statistics` was never requested.
+    let original_stats = std::fs::read(fixture_dir.join(format!(
+        "{}Statistics.db",
+        single_data_db(&fixture_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .trim_end_matches("Data.db")
+    )))
+    .expect("original fixture must carry a Statistics.db");
+    let prefix = data_db
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .trim_end_matches("Data.db")
+        .to_string();
+    let copied_stats = std::fs::read(out.join(format!("{prefix}Statistics.db")))
+        .expect("Statistics.db must still be copied verbatim into --out");
+    assert_eq!(
+        original_stats, copied_stats,
+        "Statistics.db under --out must be an untouched verbatim copy when `statistics` was \
+         never requested"
+    );
 }
 
 /// R4.1 — aggregates recomputed correctly (partition_count against the

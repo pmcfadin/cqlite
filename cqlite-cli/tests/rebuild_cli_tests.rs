@@ -6,11 +6,14 @@
 //! D3's exit codes via `std::process::exit`, which only a subprocess can
 //! observe.
 //!
-//! Dataset doctrine (issue #719/#3220): both fixtures this file drives
-//! (`test_comp.lz4_table`, `test_comp_corrupt/data_db_bit_flip`) are
-//! GIT-TRACKED (mirrors `salvage_cli_tests.rs`'s own committed set), so an
-//! absence here is a broken checkout and fails closed unconditionally —
-//! never gated on `CQLITE_REQUIRE_FIXTURES`.
+//! Dataset doctrine (issue #719/#3220), PER FIXTURE (roborev finding —
+//! the two are NOT symmetric): `test_comp.lz4_table`'s whole `nb-1-big-*`
+//! component set is GIT-TRACKED, so its absence is a broken checkout and
+//! fails closed unconditionally. `test_comp_corrupt/data_db_bit_flip`'s
+//! `Data.db` is NOT tracked (`git ls-files` shows only `Digest.crc32` and
+//! `TOC.txt` committed) — it needs the FETCHED corpus, so it SKIPS when
+//! absent (mirrors `salvage_cli_tests.rs`'s own `resolve_fixture`), turning
+//! into a hard failure only under `CQLITE_REQUIRE_FIXTURES=1`.
 
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
@@ -62,6 +65,33 @@ fn resolve_committed_fixture(relative: &str) -> PathBuf {
                  broken checkout, not an unfetched dataset, and must never skip"
             )
         })
+}
+
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// FETCHED-corpus-only fixture resolution (unlike [`resolve_committed_fixture`]):
+/// `None` when absent from every candidate root, unless
+/// `CQLITE_REQUIRE_FIXTURES=1` — mirrors `salvage_cli_tests.rs`'s
+/// `resolve_fixture` (roborev finding — `data_db_bit_flip`'s `Data.db` is
+/// NOT git-tracked, so treating it as committed made this test panic on
+/// any checkout that has not run `fetch-datasets.sh`).
+fn resolve_fixture_or_skip(relative: &str) -> Option<PathBuf> {
+    let found = candidate_base_roots()
+        .into_iter()
+        .map(|root| root.join(relative))
+        .find(|dir| usable(dir));
+    if found.is_none() && require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but fixture {relative} is absent under every candidate \
+             root"
+        );
+    }
+    found
 }
 
 fn schemas_dir() -> PathBuf {
@@ -200,7 +230,13 @@ fn healthy_data_db_rebuild_exit_0() {
 /// written to `--out`.
 #[test]
 fn damaged_data_db_exits_2_naming_salvage() {
-    let fixture_dir = resolve_committed_fixture(CORRUPT_DATA_DB_FIXTURE);
+    let Some(fixture_dir) = resolve_fixture_or_skip(CORRUPT_DATA_DB_FIXTURE) else {
+        eprintln!(
+            "[SKIP] corruption fixture {CORRUPT_DATA_DB_FIXTURE} unavailable (dataset not \
+             fetched)"
+        );
+        return;
+    };
     let data_db = std::fs::read_dir(&fixture_dir)
         .expect("read fixture dir")
         .flatten()
