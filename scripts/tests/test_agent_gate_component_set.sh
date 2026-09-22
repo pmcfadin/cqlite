@@ -1920,6 +1920,40 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# THE CAP CHECK TOLERATES A BSD-STYLE PADDED `wc -c` (issue #4220). macOS ships BSD `wc`, which
+# right-pads its byte count with leading spaces (`wc -c` -> "     42" rather than GNU's "42"). The
+# cap-refusal check is a TEXTUAL case-match ('' | *[!0-9]*), so an unstripped padded count always
+# matched the `*[!0-9]*` arm and refused every capture through this path — not only oversized ones
+# — turning every bounded call into an RC-198 replay-refusal on any BSD-`wc` host. Reproduced here
+# with a `wc` SHIM that pads deterministically regardless of the host's own `wc` (so this case is
+# not itself host-dependent, and stays meaningful on a GNU-`wc` CI runner too): a small, legitimate
+# capture must still return RC 0 with its bytes intact once the numeric check strips whitespace
+# before matching.
+# Single-sourced from `mkbin` (roborev job 3406, Medium) rather than a second, hand-rolled
+# tool list: a curated PATH missing a tool the gate legitimately needs (the first draft here
+# omitted `gtimeout`, `mkbin`'s own documented macOS bound-mechanism fallback) makes the
+# invocation fail for a reason unrelated to the padded-wc property this case measures — and
+# the `PATH="$padwc_bin"` prefix below governs the lookup of the outer `timeout` itself, not
+# just what the gate calls. `mkbin padwc wc` omits only `wc`, which is replaced below.
+padwc_bin=$(mkbin padwc wc)
+padwc_real=$(command -v wc)
+cat >"$padwc_bin/wc" <<EOF
+#!/usr/bin/env bash
+out=\$("$padwc_real" "\$@")
+printf '   %s\n' "\$out"
+EOF
+chmod +x "$padwc_bin/wc"
+padwc_out="$tmp/padwc.out"; padwc_rc=""
+PATH="$padwc_bin" timeout 30 bash "$GATE" --component-set-bounded-run 10 "$osz_small" >"$padwc_out" 2>/dev/null; padwc_rc=$?
+padwc_line=$(sed -n 's/^RC: //p' "$padwc_out" 2>/dev/null)
+if [ "$padwc_rc" != 124 ] && [ "$padwc_line" = 0 ] && grep -q 'component-set-small' "$padwc_out" 2>/dev/null; then
+  ok "4220-padded-wc-cap: a BSD-style padded 'wc -c' count (leading spaces) is stripped before the numeric refusal check, so a legitimate small capture still returns RC 0 with its bytes replayed rather than being misread as unmeasurable"
+else
+  bad "4220-padded-wc-cap: expected RC=0 with 'component-set-small' replayed under a padded-wc PATH (got rc='$padwc_rc' line='$padwc_line')"
+  printf '%s\n' "$padwc_out"
+fi
+
+# ---------------------------------------------------------------------------
 # THE STDERR REPLAY IS BOUNDED TOO, AND IT TRUNCATES WHERE STDOUT REFUSES (roborev job 299, Medium).
 # The stdout cap above left stderr as a bare `cat`, which is the SAME defect on the other stream: a
 # descendant that outlives a SUCCESSFUL child keeps the stderr fd it inherited, and `cat` on a

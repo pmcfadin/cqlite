@@ -1431,8 +1431,18 @@ fn a_field_the_structure_description_does_not_cover_is_refused() {
 fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
     // A non-UTF-8 entry name: the deterministic instance of "cannot read this
     // entry". It used to be dropped by a `filter_map(|e| e.file_name().to_str())`.
+    // A LABELED block, not a bare one: this function has a SECOND, independent #[cfg(unix)]
+    // block below (the unlistable-directory case), which runs fine on APFS. A bare `return`
+    // from the EILSEQ skip below would exit the whole function and silently discard that
+    // second block's coverage too — `break 'non_utf8` exits only this block instead (roborev
+    // job 3406, Medium).
+    // `allow(unused_labels)` (roborev job 4272 follow-up, found by gate r4 on Linux): the
+    // ONLY `break 'non_utf8` site is compiled OUT on Linux, where EILSEQ is required rather
+    // than skippable (`#[cfg(target_os = "linux")] panic!` supersedes it — see below), so
+    // the label is genuinely unused on exactly that target. Not a dead label anywhere else.
     #[cfg(unix)]
-    {
+    #[allow(unused_labels)]
+    'non_utf8: {
         use std::os::unix::ffi::OsStrExt;
 
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -1444,7 +1454,30 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
         let unreadable = tmp.path().join(std::ffi::OsStr::from_bytes(
             std::mem::take(&mut raw).as_slice(),
         ));
-        std::fs::write(&unreadable, b"").expect("write non-UTF-8 named entry");
+        // APFS (macOS's default filesystem) refuses a non-UTF-8 path component outright — the
+        // fixture this case needs cannot exist there at all, which is a filesystem property, not
+        // a platform one (a non-APFS volume mounted on a macOS host can still create it). Detect
+        // exactly that error (EILSEQ, "Illegal byte sequence") and skip loudly rather than
+        // #[ignore] or cfg(target_os), which would hide the case on hosts that CAN run it.
+        if let Err(e) = std::fs::write(&unreadable, b"") {
+            if e.raw_os_error() == Some(libc::EILSEQ) {
+                // Required, not skippable, on Linux/ext4 — the gate-of-record filesystem,
+                // where this is NOT expected (roborev job 4272, Medium). `#[cfg]`, never a
+                // runtime `cfg!()` check, so neither arm leaves unreachable code behind a
+                // diverging panic under the other target (clippy assertions_on_constants /
+                // unreachable_code, both denied under -D warnings).
+                #[cfg(target_os = "linux")]
+                panic!("EILSEQ on Linux/ext4 is a real regression, not the APFS-only case this skip exists for (#4221)");
+                #[cfg(not(target_os = "linux"))]
+                {
+                    println!(
+                        "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
+                    );
+                    break 'non_utf8;
+                }
+            }
+            panic!("write non-UTF-8 named entry: {e}");
+        }
 
         let err =
             parquet_parity::fixture_root::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())

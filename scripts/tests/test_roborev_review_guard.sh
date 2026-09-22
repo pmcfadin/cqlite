@@ -1214,13 +1214,19 @@ run_wrapper() { # run_wrapper [--wrapper <path>] <work-dir> [extra wrapper args.
   OUT="$tmp/out-$CASE_N.txt"
   INVOKED="$tmp/invoked-$CASE_N.txt"
   # The observer writes beside the transcript, so the stub is told which record to wait on (FIX 4).
+  # PLAIN ASSIGNMENT, not an `--log`-arg scan (roborev job 61, issue #4206 round 2). The scan
+  # this replaced (`for _rw_i in $(seq 1 $#)` -> `${!_rw_i}`) existed to let a caller override
+  # WRAPPER_LOG_PATH by passing `--log <path>` in "$@". It never could: NONE of this file's 264
+  # `run_wrapper` call sites pass `--log` (verified: `grep -c` over every call site), and the
+  # invocation below hardcodes its OWN `--log "$tmp/transcript-$CASE_N.txt"` immediately before
+  # "$@", so a case that did pass one would hand the wrapper two `--log` flags rather than
+  # override it — the scan was dead code with no reachable caller. Dead code is also where the
+  # bug lived: the GNU/BSD `seq` divergence this round fixed was in a loop nothing ever drove
+  # past zero elements, and the scan's OWN indirect expansion had a second, sibling out-of-bounds
+  # read (`${!_rw_next}` past `$#` when `--log` was the last arg) that a first fix pass missed
+  # for the same reason — nothing exercises this loop's body. Removing the scan removes both
+  # defects at the root instead of patching the second one in code nothing calls.
   WRAPPER_LOG_PATH="$tmp/transcript-$CASE_N.txt"
-  for _rw_i in $(seq 1 $#); do
-    if [ "${!_rw_i}" = "--log" ]; then
-      _rw_next=$((_rw_i + 1))
-      WRAPPER_LOG_PATH="${!_rw_next}"
-    fi
-  done
   : >"$INVOKED"
   # The sanctioned invocation reviews the RANGE <base>..HEAD, so the job record's
   # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
@@ -6981,8 +6987,18 @@ assert_says 'case (jd1) --help says to verify git_ref, never the id alone' "VERI
 assert_says 'case (jd1) --help records the measurement behind it' "'job=265' on two lanes"
 # THE PRESCRIBED COMMANDS MUST BE ONES THAT WORK. `show <id> --json` NESTS the fields under `.job`,
 # so a top-level jq over that payload prints nulls — a check whose output cannot show what it claims.
+# The `|` pipes are ESCAPED (issue #4206): an unescaped `|` is ERE alternation, and the pattern's
+# trailing `|` left an EMPTY alternative — one broken regex, two symptoms. An empty alternative
+# matches the EMPTY STRING, so under GNU grep (every hosted CI lane is Linux) this assertion
+# matched every line of $OUT unconditionally: a VACUOUS PASS, the exact failure class this suite
+# exists to catch, and it has been silently passing this way for as long as the pattern has
+# existed. Under BSD grep (macOS's `/usr/bin/grep`) the same malformed regex is refused outright
+# with `empty (sub)expression`, so the assertion could never even RUN there. `assert_says` was
+# additionally unreachable on macOS for an unrelated reason: the earlier BSD-`seq` crash in
+# `run_wrapper` (same issue) aborted the suite before case (jd1) ever ran, so the vacuous pass
+# was never locally observable on this platform either.
 assert_says 'case (jd1) --help prescribes the NESTED .job projection' \
-  "roborev show <id> --json | jq '\.job |"
+  "roborev show <id> --json \| jq '\.job \|"
 assert_says 'case (jd1) --help names the nesting trap' "NESTS git_ref/status/token_usage"
 # THE TOP-LEVEL id IS THE REVIEW ROW'S OWN SEQUENCE, measured over ten records: asking for 9
 # returns id=8 with job_id=9. A human reading it manufactures the very doubt the check removes.
