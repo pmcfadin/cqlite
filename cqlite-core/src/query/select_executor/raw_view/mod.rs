@@ -105,6 +105,25 @@ impl super::SelectExecutor {
             }
         };
 
+        // Post-scan predicate backstop (mirrors the base pipeline's own
+        // partition-targeted paths): `classify_partition_lookup` only prunes
+        // by the PARTITION-key predicate(s), so any ADDITIONAL predicate in
+        // the WHERE clause (a clustering-key equality/range, or a predicate
+        // on a non-key column) is evaluated here against every produced row.
+        // Reuses the SAME `evaluate_predicates` the base scan applies, so the
+        // two never drift. A predicate over a column absent from a
+        // synthetic row (e.g. a clustering equality against a
+        // `partition_tombstone` row, which carries no clustering columns)
+        // correctly evaluates `Unknown`/false and drops that row — the same
+        // treatment an ordinary sparse row gets today.
+        let mut filtered = Vec::with_capacity(rows.len());
+        for row in rows {
+            if super::evaluate_predicates(&row, &plan.sstable_predicates)? {
+                filtered.push(row);
+            }
+        }
+        let rows = filtered;
+
         // Plain-column projection trimming (`SELECT a, b, ...`), reusing the
         // SAME `trim_projection` the base pipeline's `Project` step uses so
         // the two never drift. `SELECT *` and anything reshaping (DISTINCT,

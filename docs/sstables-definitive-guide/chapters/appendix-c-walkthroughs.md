@@ -104,4 +104,51 @@ sstabledump nb-1-big-Index.db | head -n 50
 sstableverify /var/lib/cassandra/data/ks/table-uuid/
 ```
 
+## Walkthrough: the raw SSTable view (`cqlite query`, issue #4222)
+
+Every physical row CQLite has already decoded for a table is queryable,
+UNRECONCILED, one row per physical row per SSTable generation, via a suffixed
+table name in the SAME `cqlite query` SQL surface — no new CLI flag, no new
+grammar. `<keyspace>.<table>_raw_sstable_data` carries every base column plus
+per-cell write timestamp/TTL/local-deletion-time/tombstone-kind metadata, row-
+and partition-level deletion facts, range tombstones as their own rows, and
+source SSTable identity (`sstable`, `generation`, `format`, `position`) — the
+facts a reconciled `SELECT` on the base table discards at the reconciliation
+boundary.
+
+Worked example against the committed `test_tomb.resurrection_gc_positive`
+fixture (2 generations: gen-1 all-live, gen-2 carries a row tombstone, a cell
+tombstone, and a partition tombstone):
+
+```bash
+cqlite --schema test-data/schemas/tombstone-parity.cql \
+  --data-dir test-data/datasets/sstables \
+  --query "SELECT generation, ck, row_kind, row_tombstone, val_tombstone, \
+           val_timestamp, val_local_deletion_time, sstable \
+           FROM test_tomb.resurrection_gc_positive_raw_sstable_data \
+           WHERE pk = 1" \
+  --out table
+```
+
+A base-table `SELECT` on the SAME key reconciles to the current live/
+tombstoned state (one logical row per clustering key); the raw view instead
+returns every physical row EVERY generation contributed for that key — 7 rows
+for `pk = 1` above (5 live gen-1 rows, plus gen-2's row-tombstone and
+cell-tombstone rows) — so an operator can see exactly which generation wrote
+what, and when, without running `sstabledump` once per generation by hand.
+
+A `WHERE <partition key> = <literal>` predicate is pushed to the SAME
+per-generation point-read primitives the base table uses (bloom/BTI-pruned,
+never a full scan); a bare `SELECT * FROM ..._raw_sstable_data` with no
+predicate is a bounded, streaming full-corpus scan under the same
+`max_result_bytes` budget every other query obeys. An unresolvable base table
+fails closed with a typed schema/table error (CLI exit code 3), never a
+silent empty result.
+
+See `openspec/changes/raw-sstable-view/design.md` for the full column
+contract and design rationale; out of scope: reconciliation ("winner" verdict
+— issue #4193), CommitLog/memtable-resident data (issue #4205), and literal
+SQL `JOIN` syntax (the query engine has no `JOIN` executor at all — issue
+#4249).
+
 Align outputs with the toy `test_basic/simple_table` used in examples elsewhere in this guide.
