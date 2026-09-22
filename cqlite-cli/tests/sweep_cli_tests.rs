@@ -91,11 +91,37 @@ fn copy_generation(src: &Path, dst: &Path) {
     }
 }
 
+/// Like [`copy_generation`], but renames every copied component's base-name
+/// PREFIX (e.g. `nb-1-big-` -> `nb-2-big-`), so a SECOND generation can be
+/// staged into the SAME table directory as a first (roborev round-2 HIGH
+/// finding's regression test — `discover_table_dirs` must enumerate BOTH).
+fn copy_generation_renamed(src: &Path, dst: &Path, old_base: &str, new_base: &str) {
+    std::fs::create_dir_all(dst).expect("create staging dir");
+    let old_prefix = format!("{old_base}-");
+    let new_prefix = format!("{new_base}-");
+    for e in std::fs::read_dir(src).expect("read fixture dir").flatten() {
+        if !e.path().is_file() {
+            continue;
+        }
+        let name = e.file_name();
+        let name = name.to_str().expect("utf8 filename");
+        let renamed = name
+            .strip_prefix(&old_prefix)
+            .map(|suffix| format!("{new_prefix}{suffix}"))
+            .unwrap_or_else(|| panic!("{name} does not start with {old_prefix}"));
+        std::fs::copy(e.path(), dst.join(renamed)).expect("copy renamed fixture component");
+    }
+}
+
 /// Flip one bit of the first byte of `Data.db` in `dir` in place — no CRC
 /// recompute, so the chunk-CRC check fails (the same technique
 /// `issue_4194_verify_location.rs`'s L2.2 case uses).
 fn corrupt_data_db(dir: &Path) {
-    let path = dir.join("nb-1-big-Data.db");
+    corrupt_data_db_for_base(dir, "nb-1-big");
+}
+
+fn corrupt_data_db_for_base(dir: &Path, base_name: &str) {
+    let path = dir.join(format!("{base_name}-Data.db"));
     let mut bytes = std::fs::read(&path).expect("read Data.db to corrupt");
     bytes[0] ^= 0x01;
     std::fs::write(&path, bytes).expect("write corrupted Data.db");
@@ -229,6 +255,54 @@ fn s1_2_one_corrupted_copy_makes_exactly_that_row_corrupt() {
         .find(|r| r["path"].as_str().unwrap().contains("healthy-table"))
         .expect("healthy-table row present");
     assert_eq!(healthy_row["severity"], "ok");
+}
+
+// ---------------------------------------------------------------------------
+// roborev round-2 HIGH finding — a table directory holding MULTIPLE
+// generations gets one row PER GENERATION, not one row for the whole
+// directory (which would silently report only the lexicographically-first
+// generation's verdict).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn s1_5_a_table_directory_with_two_generations_reports_two_rows() {
+    let Some(clean) = require_lz4_table() else {
+        return;
+    };
+    let staging = TempDir::new().expect("create staging dir");
+    let table_dir = staging.path().join("ks1").join("multi-gen-table");
+    // Two generations in the SAME directory: nb-1-big-* (healthy) and
+    // nb-2-big-* (corrupted) — the exact shape a real compacted table
+    // directory has before the old generation is removed.
+    copy_generation(&clean, &table_dir);
+    copy_generation_renamed(&clean, &table_dir, "nb-1-big", "nb-2-big");
+    corrupt_data_db_for_base(&table_dir, "nb-2-big");
+
+    let output = run_sweep(staging.path(), "json", None);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2 with the second generation corrupted"
+    );
+    let value = parse_json(&output);
+    let rows = value["rows"].as_array().expect("rows array");
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected exactly one row PER GENERATION (two in this one directory): {value}"
+    );
+
+    let gen1_row = rows
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().contains("nb-1-big-Data.db"))
+        .unwrap_or_else(|| panic!("no row for the first generation: {value}"));
+    assert_eq!(gen1_row["severity"], "ok");
+
+    let gen2_row = rows
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().contains("nb-2-big-Data.db"))
+        .unwrap_or_else(|| panic!("no row for the second (corrupted) generation: {value}"));
+    assert_eq!(gen2_row["severity"], "corrupt");
 }
 
 // ---------------------------------------------------------------------------

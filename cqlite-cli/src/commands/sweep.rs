@@ -1,12 +1,28 @@
-//! `cqlite sweep` — verify every SSTable table directory under a data
-//! directory in one pass (issue #4194).
+//! `cqlite sweep` — verify every SSTable GENERATION under a data directory in
+//! one pass (issue #4194).
 //!
 //! Thin CLI wrapper over the SAME
-//! [`cqlite_core::storage::sstable::verify::verify_sstable`] a single-directory
-//! `cqlite verify` calls — one call per discovered `<keyspace>/<table>-<id>/`
-//! directory, bounded to at most `--jobs` concurrently. Memory profile per
-//! table is therefore identical to today's `verify --mode full` (design.md §S3):
-//! no data-dir-wide structure is materialized before rendering.
+//! [`cqlite_core::storage::sstable::verify::verify_sstable_generation`] a
+//! single-directory `cqlite verify` call effectively targets — one call per
+//! discovered `*-Data.db` generation, bounded to at most `--jobs`
+//! concurrently. Memory profile per generation is therefore identical to
+//! today's `verify --mode full`: at most one `VerifyReport` resident per
+//! concurrent worker (design.md §S3) — see this file's own note on the
+//! ACCUMULATED-across-rows cost that bound does NOT cover, at `execute_sweep_command`.
+//!
+//! **Per-GENERATION, not per-directory** (roborev round-2 HIGH finding): a
+//! real Cassandra table directory routinely holds several generations
+//! (verified directly against this repo's own fetched corpus — seven table
+//! directories under `test-data/datasets/sstables` carry 2+ `*-Data.db`
+//! files). `verify_sstable` itself only resolves the LEXICOGRAPHICALLY-FIRST
+//! generation in a directory (its own doc says so); sweeping directories
+//! with it would silently skip every later generation, exactly the
+//! "never a silently-dropped entry" guarantee design.md §D3 promises. This
+//! module instead enumerates every `*-Data.db` per table directory and calls
+//! [`cqlite_core::storage::sstable::verify::verify_sstable_generation`] once
+//! per generation; a `SweepRow`'s `path` is that generation's exact `Data.db`
+//! file, and a table directory with zero `*-Data.db` files is still exactly
+//! one `unreadable` row.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,7 +30,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
-    verify_sstable, VerifyErrorClass, VerifyFinding, VerifyMode,
+    verify_sstable_generation, VerifyErrorClass, VerifyFinding, VerifyMode,
 };
 use cqlite_core::Config;
 use tokio::sync::Semaphore;
@@ -60,20 +76,24 @@ struct SweepRow {
     findings: Vec<VerifyFinding>,
 }
 
-/// Discover every `<keyspace>/<table>-<id>/` directory under `data_dir`,
-/// structurally (readdir only — no `Data.db` content is touched here), so a
-/// directory that turns out unreadable still becomes exactly one row later,
-/// never a silent omission (design.md §D3).
+/// Discover every SSTable GENERATION (`*-Data.db`) under every
+/// `<keyspace>/<table>-<id>/` directory under `data_dir`, structurally
+/// (readdir only — no `Data.db` CONTENT is touched here), so an unreadable
+/// keyspace, an unreadable table directory, or a table directory with zero
+/// generations still becomes exactly one row later, never a silent omission
+/// (design.md §D3; roborev round-1 MEDIUM + round-2 HIGH/LOW findings).
 ///
-/// `unreadable_keyspaces` (roborev round-1 MEDIUM finding): a keyspace
-/// directory this walk cannot even `read_dir` used to be silently skipped —
-/// no row, no cause, no exit-code effect, "totals: ok=N, exit 0" for a sweep
-/// that never looked under it. Returning it separately, by (path, cause), lets
-/// the caller turn it directly into an `unreadable` [`SweepRow`] WITHOUT
-/// calling `verify_sstable` on it (there is nothing under it to verify).
+/// `unreadable_*` entries are returned separately, by (path, cause), so the
+/// caller can turn each directly into an `unreadable` [`SweepRow`] WITHOUT
+/// calling `verify_sstable_generation` on it (there is nothing under it to
+/// verify).
 struct Discovered {
-    table_dirs: Vec<PathBuf>,
+    /// Every discovered generation's exact `*-Data.db` path.
+    generations: Vec<PathBuf>,
     unreadable_keyspaces: Vec<(PathBuf, String)>,
+    /// A table directory that itself could not be `read_dir`'d, OR that
+    /// parsed cleanly but named zero `*-Data.db` files.
+    unreadable_table_dirs: Vec<(PathBuf, String)>,
 }
 
 fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
@@ -83,32 +103,73 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
             data_dir.display()
         );
     }
-    let mut table_dirs = Vec::new();
+    let mut generations = Vec::new();
     let mut unreadable_keyspaces = Vec::new();
+    let mut unreadable_table_dirs = Vec::new();
     let keyspaces = std::fs::read_dir(data_dir)
         .map_err(|e| anyhow::anyhow!("cannot read data dir {}: {e}", data_dir.display()))?;
-    for ks_entry in keyspaces.flatten() {
+    // roborev round-2 LOW finding: an explicit match on EVERY `read_dir`
+    // entry Result, not `.flatten()` — a per-entry `io::Error` (a transient
+    // unreadable directory entry, e.g. a race with a concurrent delete) used
+    // to be silently discarded with no row and no cause.
+    for ks_entry in keyspaces {
+        let Ok(ks_entry) = ks_entry else {
+            continue; // a single unreadable readdir ENTRY, not the keyspace dir itself
+        };
         let ks_path = ks_entry.path();
         if !ks_path.is_dir() {
             continue;
         }
         match std::fs::read_dir(&ks_path) {
             Ok(tables) => {
-                for table_entry in tables.flatten() {
+                for table_entry in tables {
+                    let Ok(table_entry) = table_entry else {
+                        continue;
+                    };
                     let table_path = table_entry.path();
-                    if table_path.is_dir() {
-                        table_dirs.push(table_path);
+                    if !table_path.is_dir() {
+                        continue;
+                    }
+                    match std::fs::read_dir(&table_path) {
+                        Ok(files) => {
+                            let mut data_dbs: Vec<PathBuf> = files
+                                .flatten()
+                                .map(|e| e.path())
+                                .filter(|p| {
+                                    p.is_file()
+                                        && p.file_name()
+                                            .and_then(|n| n.to_str())
+                                            .map(|n| n.ends_with("-Data.db"))
+                                            .unwrap_or(false)
+                                })
+                                .collect();
+                            if data_dbs.is_empty() {
+                                unreadable_table_dirs.push((
+                                    table_path.clone(),
+                                    format!(
+                                        "no *-Data.db component found in {}",
+                                        table_path.display()
+                                    ),
+                                ));
+                            } else {
+                                data_dbs.sort();
+                                generations.extend(data_dbs);
+                            }
+                        }
+                        Err(e) => unreadable_table_dirs.push((table_path, e.to_string())),
                     }
                 }
             }
             Err(e) => unreadable_keyspaces.push((ks_path, e.to_string())),
         }
     }
-    table_dirs.sort();
+    generations.sort();
     unreadable_keyspaces.sort_by(|a, b| a.0.cmp(&b.0));
+    unreadable_table_dirs.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Discovered {
-        table_dirs,
+        generations,
         unreadable_keyspaces,
+        unreadable_table_dirs,
     })
 }
 
@@ -136,24 +197,28 @@ fn classify_report(findings: &[VerifyFinding]) -> (Severity, Option<String>) {
     }
 }
 
+/// Verify exactly one GENERATION (`data_db_path`) via
+/// [`verify_sstable_generation`] — never [`cqlite_core::storage::sstable::verify::verify_sstable`],
+/// which would silently resolve `data_db_path`'s DIRECTORY's
+/// lexicographically-first generation instead (roborev round-2 HIGH finding).
 async fn verify_one(
-    dir: PathBuf,
+    data_db_path: PathBuf,
     mode: VerifyMode,
     config: Config,
     platform: Arc<Platform>,
 ) -> SweepRow {
-    match verify_sstable(&dir, mode, &config, platform).await {
+    match verify_sstable_generation(&data_db_path, mode, &config, platform).await {
         Ok(report) => {
             let (severity, cause) = classify_report(&report.findings);
             SweepRow {
-                path: dir,
+                path: data_db_path,
                 severity,
                 cause,
                 findings: report.findings,
             }
         }
         Err(e) => SweepRow {
-            path: dir,
+            path: data_db_path,
             severity: Severity::Unreadable,
             cause: Some(e.to_string()),
             findings: Vec::new(),
@@ -166,8 +231,26 @@ async fn verify_one(
 /// Exit codes (design.md §S2, `std::process::exit` — the SAME
 /// environmental-vs-verification-failure split `verify` already established):
 /// `1` on a usage error (bad `--data-dir`, before any verification is
-/// attempted); `2` if any row is `corrupt`/`unreadable`; `0` otherwise
-/// (`degraded` rows alone never trip a non-zero exit).
+/// attempted); `2` if any row is `corrupt`/`unreadable`, OR if zero
+/// generations were discovered at all (roborev round-2 MEDIUM finding — see
+/// the `rows.is_empty()` check below: a THIRD exit-2 cause beyond the two
+/// design.md §S2 names, now stated here and in `SweepArgs`' `long_about` and
+/// the dev-cookbook entry); `0` otherwise (`degraded` rows alone never trip a
+/// non-zero exit).
+///
+/// **Rows are fully accumulated in `rows: Vec<SweepRow>` before ANY
+/// rendering** (roborev round-2 MEDIUM finding — this is NOT the "no
+/// data-dir-wide structure" claim this module's earlier doc draft made; that
+/// claim is true only of the PER-GENERATION verification work itself, not of
+/// this accumulation). Each `SweepRow.findings` is bounded per-finding by
+/// [`cqlite_core::storage::sstable::verify_location::MAX_RESOLVED_KEYS`]
+/// (round-2's companion fix for the dominant per-row cost — an unbounded
+/// resolved-partition list), so the resident total is `O(generations x
+/// bounded-per-row-size)`, not unbounded — but it is still `O(generations)`,
+/// not `O(1)`. A true `O(1)` (streamed) rendering is a larger, separate
+/// change, not attempted in this round; documented here so the claim in code
+/// matches the claim in prose, rather than re-asserting a bound this
+/// function does not hold.
 pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
     let discovered = match discover_table_dirs(&args.data_dir) {
         Ok(d) => d,
@@ -177,13 +260,16 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
         }
     };
 
-    // Issue #4194, roborev round-1 MEDIUM finding: a keyspace directory this
-    // walk could not even `read_dir` becomes its own `unreadable` row here,
-    // directly — never passed to `verify_sstable` (there is nothing under it
-    // to verify) and never silently absent from `rows`.
+    // Issue #4194, roborev round-1 MEDIUM + round-2 LOW findings: a keyspace
+    // or table directory this walk could not even `read_dir` (or a table
+    // directory naming zero `*-Data.db` generations) becomes its own
+    // `unreadable` row here, directly — never passed to
+    // `verify_sstable_generation` (there is nothing under it to verify) and
+    // never silently absent from `rows`.
     let mut rows: Vec<SweepRow> = discovered
         .unreadable_keyspaces
         .into_iter()
+        .chain(discovered.unreadable_table_dirs)
         .map(|(path, cause)| SweepRow {
             path,
             severity: Severity::Unreadable,
@@ -191,7 +277,7 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
             findings: Vec::new(),
         })
         .collect();
-    let dirs = discovered.table_dirs;
+    let dirs = discovered.generations;
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -208,17 +294,37 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
         })
         .max(1);
 
-    // Bounded concurrency (design.md §S3): at most `jobs` `verify_sstable`
-    // calls in flight, each with the SAME single-table memory profile as
-    // `verify` already has — no data-dir-wide structure is ever resident.
+    // Bounded concurrency (design.md §S3): at most `jobs`
+    // `verify_sstable_generation` calls in flight, each with the SAME
+    // single-generation memory profile as `verify` already has. `--jobs`
+    // bounds how many are IN FLIGHT at once; `verify_sstable_generation`'s
+    // own hot checks use blocking `std::fs` I/O under the async runtime
+    // (unchanged pre-existing behavior — the same is true of a single
+    // `cqlite verify` call), so realized concurrency also saturates at the
+    // tokio runtime's own worker-thread count, whichever bound is tighter
+    // (roborev round-2 LOW finding).
     let semaphore = Arc::new(Semaphore::new(jobs));
     let mut set = JoinSet::new();
     for dir in dirs {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore never closed");
+        // `Semaphore` is never explicitly closed on this path, so `Err` here
+        // is unreachable in practice — but this is user-facing CLI code, not
+        // a test invariant, so it fails closed (a named row) rather than
+        // panicking the whole sweep over one acquire (roborev round-2 LOW
+        // finding).
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                set.spawn(async move {
+                    SweepRow {
+                        path: dir,
+                        severity: Severity::Unreadable,
+                        cause: Some(format!("sweep concurrency semaphore closed: {e}")),
+                        findings: Vec::new(),
+                    }
+                });
+                continue;
+            }
+        };
         let config = config.clone();
         let platform = platform.clone();
         set.spawn(async move {
