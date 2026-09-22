@@ -1457,12 +1457,19 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
         if let Err(e) = std::fs::write(&unreadable, b"") {
             if e.raw_os_error() == Some(libc::EILSEQ) {
                 // Required, not skippable, on Linux/ext4 — the gate-of-record filesystem,
-                // where this is NOT expected (roborev job 4272, Medium).
-                assert!(!cfg!(target_os = "linux"), "EILSEQ on Linux/ext4 is a real regression, not the APFS-only case this skip exists for (#4221)");
-                println!(
-                    "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
-                );
-                break 'non_utf8;
+                // where this is NOT expected (roborev job 4272, Medium). `#[cfg]`, never a
+                // runtime `cfg!()` check, so neither arm leaves unreachable code behind a
+                // diverging panic under the other target (clippy assertions_on_constants /
+                // unreachable_code, both denied under -D warnings).
+                #[cfg(target_os = "linux")]
+                panic!("EILSEQ on Linux/ext4 is a real regression, not the APFS-only case this skip exists for (#4221)");
+                #[cfg(not(target_os = "linux"))]
+                {
+                    println!(
+                        "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
+                    );
+                    break 'non_utf8;
+                }
             }
             panic!("write non-UTF-8 named entry: {e}");
         }
