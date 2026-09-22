@@ -415,6 +415,24 @@ impl StorageEngine {
         self.sstables.partition_key_shape(table_id).await
     }
 
+    /// Snapshot the resolved [`SSTableReader`](sstable::reader::SSTableReader) set
+    /// for `table_id` (issue #4222, raw SSTable view).
+    ///
+    /// A thin passthrough to [`SSTableManager::resolve_reader_snapshot`] — the
+    /// raw view's point-key and full-scan row producers need the per-generation
+    /// readers DIRECTLY (never through [`scan`](Self::scan)/[`scan_partition`]
+    /// (Self::scan_partition), which RECONCILE across generations) so they can
+    /// emit one row per physical row per generation. `pub(crate)`: this bypasses
+    /// every reconciliation guarantee `StorageEngine`'s other methods provide, so
+    /// it is deliberately not part of the public API — only the query engine's
+    /// raw-view producer (`query::select_executor::raw_view`) calls it.
+    pub(crate) async fn raw_view_reader_snapshot(
+        &self,
+        table_id: &TableId,
+    ) -> Vec<Arc<sstable::reader::SSTableReader>> {
+        self.sstables.resolve_reader_snapshot(table_id).await.0
+    }
+
     /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
     ///
     /// Like [`scan_partition`](Self::scan_partition) but pushes a single-column
