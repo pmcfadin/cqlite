@@ -8,17 +8,13 @@ use std::collections::HashSet;
 
 /// Suffix that marks a table reference as the raw-SSTable-view name for its
 /// base table (design.md D1 — a naming convention over the existing flat
-/// `keyspace.table` namespace, never a new grammar).
-pub(in crate::query::select_executor) const RAW_VIEW_SUFFIX: &str = "_raw_sstable_data";
-
-/// Strip [`RAW_VIEW_SUFFIX`] from a bare table name (no keyspace segment),
-/// returning the base table name when the suffix is present and stripping it
-/// leaves a non-empty name. `None` for an ordinary table reference.
-pub(in crate::query::select_executor) fn strip_raw_view_suffix(table_name: &str) -> Option<&str> {
-    table_name
-        .strip_suffix(RAW_VIEW_SUFFIX)
-        .filter(|base| !base.is_empty())
-}
+/// `keyspace.table` namespace, never a new grammar). The single source of
+/// truth lives in [`crate::query::raw_view_naming`] — shared with
+/// `Database::has_schema_for_table`/`schema_status`, so the CLI's pre-flight
+/// schema check (issue #199) recognizes a raw-view name too, instead of
+/// rejecting every raw-view query before `SelectExecutor` can intercept it.
+pub(in crate::query::select_executor) use crate::query::raw_view_naming::RAW_SSTABLE_VIEW_SUFFIX as RAW_VIEW_SUFFIX;
+pub(in crate::query::select_executor) use crate::query::raw_view_naming::strip_raw_view_suffix;
 
 /// `true` for a CQL type whose cells are individually addressable (a
 /// non-frozen list/set/map/UDT) — the column gets the `_complex_deletion`

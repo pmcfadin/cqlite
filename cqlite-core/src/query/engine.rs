@@ -714,14 +714,28 @@ impl QueryEngine {
         );
     }
 
-    /// Check if schema is available for a table
+    /// Check if schema is available for a table.
+    ///
+    /// Issue #4222: a `_raw_sstable_data` name is never itself a registered
+    /// schema (only its BASE table is) — strip the suffix first, so the
+    /// CLI's issue #199 pre-flight check (the caller of this method) does
+    /// not reject a raw-view query before `SelectExecutor` ever intercepts
+    /// it (design.md D6).
     pub async fn has_schema_for_table(&self, table: &str) -> bool {
-        self.schema_manager.get_table_schema(table).await.is_ok()
+        let resolve_table = crate::query::raw_view_naming::strip_raw_view_suffix(table)
+            .unwrap_or(table);
+        self.schema_manager
+            .get_table_schema(resolve_table)
+            .await
+            .is_ok()
     }
 
-    /// Get detailed schema status for debugging
+    /// Get detailed schema status for debugging (issue #4222: same
+    /// raw-view-suffix stripping as [`Self::has_schema_for_table`]).
     pub async fn schema_status(&self, table: &str) -> SchemaStatus {
-        match self.schema_manager.get_table_schema(table).await {
+        let resolve_table =
+            crate::query::raw_view_naming::strip_raw_view_suffix(table).unwrap_or(table);
+        match self.schema_manager.get_table_schema(resolve_table).await {
             Ok(schema) => SchemaStatus::Available {
                 keyspace: schema.keyspace.clone(),
                 table: schema.table.clone(),

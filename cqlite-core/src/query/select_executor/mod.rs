@@ -529,6 +529,23 @@ impl SelectExecutor {
         // previous query cannot satisfy a test assertion against this one.
         crate::query::access_path::reset();
 
+        // Issue #4222 (design.md D6): a `_raw_sstable_data` FROM-clause
+        // reference has no dedicated streaming producer of its own (its
+        // producers are internally bounded/streaming — D9 — but only the
+        // materializing `execute()` entry point intercepts the suffix
+        // today). Route through the SAME `execute_and_stream` fallback this
+        // function already uses for ORDER BY/GROUP BY ("falls back to full
+        // execution then streams results") rather than falling through to
+        // the generic `SSTableScan` step below, which resolves schema/reader
+        // state for the LITERAL suffixed name and silently scans nothing.
+        if let Some(ref from_clause) = plan.statement.from_clause {
+            let table_id = self.extract_table_id(from_clause)?;
+            let (_, bare_table_name) = parse_table_id(&table_id);
+            if strip_raw_view_suffix(&bare_table_name).is_some() {
+                return self.execute_and_stream(plan, config).await;
+            }
+        }
+
         // Issue #1578 (D2): route ANY aggregate through `execute_and_stream`, which
         // delegates to `execute`. For a GROUP-BY-free aggregate `execute` runs the
         // O(1) fold (`try_execute_global_aggregate`) — no whole-table buffer — so
