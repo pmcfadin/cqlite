@@ -74,6 +74,12 @@ pub use verify::{
     verify_sstable, verify_sstable_generation, VerifyErrorClass, VerifyFinding, VerifyMode,
     VerifyReport,
 };
+// Corruption-location resolution for `VerifyFinding` (issue #4194): a sibling
+// of `verify` rather than added to it, since `verify.rs` is already well over
+// the ~800-line campsite target (epic #1116). Its types are re-exported
+// through `verify` (see `verify.rs`'s own re-export) so `VerifyFinding.location`
+// stays reachable via the existing `verify` module path.
+mod verify_location;
 
 // M5: SSTable writer components (Issue #359)
 #[cfg(feature = "write-support")]

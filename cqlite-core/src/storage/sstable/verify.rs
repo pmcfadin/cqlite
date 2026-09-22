@@ -42,11 +42,17 @@
 use crate::platform::Platform;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
+use crate::storage::sstable::verify_location;
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Config, Error, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+// Corruption-location types (issue #4194), re-exported through `verify` so
+// `VerifyFinding.location`'s type is reachable via the existing `verify`
+// module path — no caller-visible new import path for the common case.
+pub use crate::storage::sstable::verify_location::{KeyRef, Location, PartitionResolution};
 
 /// Verification depth. QUICK and FULL are intentionally distinct — see the
 /// module docs. A QUICK success MUST NOT be presented as FULL corruption
@@ -201,6 +207,12 @@ pub struct VerifyFinding {
     /// Human-readable message including locating context (offset / chunk index
     /// / checksum field / missing-component name).
     pub detail: String,
+    /// Which `Data.db` byte range and partitions this finding is anchored to,
+    /// when it has a natural byte range (issue #4194). `None` for a finding
+    /// with no chunk/offset anchor (e.g. `MissingComponent`,
+    /// `StatisticsHeaderCorrupt`) — additive: every pre-#4194 finding site
+    /// that does not explicitly populate this leaves it `None`, unchanged.
+    pub location: Option<Location>,
 }
 
 impl VerifyFinding {
@@ -213,6 +225,7 @@ impl VerifyFinding {
             class,
             component: component.into(),
             detail: detail.into(),
+            location: None,
         }
     }
 }
@@ -225,8 +238,39 @@ impl std::fmt::Display for VerifyFinding {
             self.class.code(),
             self.component,
             self.detail
-        )
+        )?;
+        if let Some(loc) = &self.location {
+            write!(f, " (location: {})", format_location(loc))?;
+        }
+        Ok(())
     }
+}
+
+/// Human-readable one-line rendering of a [`Location`] for text output
+/// (`VerifyFinding`'s `Display` impl and the CLI's text renderer, issue #4194).
+pub fn format_location(loc: &Location) -> String {
+    let chunk = loc
+        .chunk_index
+        .map(|c| format!("chunk {c}, "))
+        .unwrap_or_default();
+    let partitions = match &loc.partitions {
+        PartitionResolution::Resolved(keys) if keys.is_empty() => "0 partitions".to_string(),
+        PartitionResolution::Resolved(keys) => {
+            format!(
+                "{} partition(s): {}",
+                keys.len(),
+                keys.iter()
+                    .map(|k| k.key_hex.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        PartitionResolution::Unresolved(cause) => format!("partitions unresolved ({cause})"),
+    };
+    format!(
+        "{}: {}offset 0x{:x} len {} — {}",
+        loc.component, chunk, loc.byte_offset, loc.byte_len, partitions
+    )
 }
 
 /// Structured outcome of a verification run. Serialise this for CI artifacts.
@@ -285,6 +329,34 @@ impl VerifyReport {
             )
         }
     }
+}
+
+/// A chunk/offset-anchored finding awaiting location resolution (issue #4194).
+///
+/// Pushed alongside its finding at the check site — where the physical byte
+/// range and the LOGICAL (decompressed) damaged range are cheaply computable
+/// from local context (`CompressionInfo`, the CRC.db chunk grid) — because
+/// whether the boundary source (`Index.db` / `Partitions.db`) can be TRUSTED
+/// is only knowable once every check has run (design.md §D2). Resolved in one
+/// pass at the end of [`verify_components`] by [`finalize_locations`].
+struct PendingLocation {
+    /// Index into `findings` of the finding this location belongs to.
+    finding_index: usize,
+    /// Component the byte range belongs to — always `"Data.db"` today.
+    component: String,
+    /// Physical (on-disk) start of the damaged range.
+    byte_offset: u64,
+    /// Physical (on-disk) length of the damaged range.
+    byte_len: u64,
+    /// The chunk index the damage falls in, when the component has a chunk grid.
+    chunk_index: Option<usize>,
+    /// The damaged range in `Data.db` LOGICAL (decompressed) offset space —
+    /// the space `Index.db`/the BTI trie address (see `verify_location`'s
+    /// module doc for why this differs from the physical range above).
+    damaged_logical: (u64, u64),
+    /// The boundary source's declared total LOGICAL length, bounding the last
+    /// boundary entry's extent.
+    logical_len: u64,
 }
 
 /// Resolved set of component files for one SSTable generation in a directory.
@@ -380,6 +452,14 @@ async fn verify_components(
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
     let mut findings: Vec<VerifyFinding> = Vec::new();
+    // Issue #4194: chunk/offset-anchored findings awaiting location
+    // resolution, resolved in one pass at the end (`finalize_locations`) once
+    // every check has run and the boundary source's own health is known.
+    let mut pending_locations: Vec<PendingLocation> = Vec::new();
+    // Cloned up front (cheap: an `Arc` bump) so it survives the `platform`
+    // move into `full_row_scan_partitions` below, for `finalize_locations`'s
+    // own `IndexReader::open` re-read of `Index.db` (BIG).
+    let platform_for_location = platform.clone();
 
     // ---- Check 1: TOC.txt completeness + component presence ----------------
     let toc_components = check_toc_and_presence(dir, &components, &mut findings)?;
@@ -388,7 +468,8 @@ async fn verify_components(
     check_digest(dir, &components, &mut findings)?;
 
     // ---- Check 3: CompressionInfo.db parse + chunk-offset bounds -----------
-    let compression_info = check_compression_info(dir, &components, &mut findings)?;
+    let compression_info =
+        check_compression_info(dir, &components, &mut findings, &mut pending_locations)?;
 
     // ---- Check 4: index structure (Index.db for BIG, BTI tries for BTI) ----
     //
@@ -417,10 +498,17 @@ async fn verify_components(
 
     let mut rows_scanned = None;
 
+    // Issue #4194: the position -> raw-key map recovered by the FULL-mode row
+    // scan (populated below, `None` in QUICK mode or when the scan does not
+    // run) — used by `finalize_locations` to resolve a BTI `DataOffset`
+    // leaf's raw key (its identity is only recoverable through the scan; a
+    // `RowsOffset` leaf's key is already inline on `bti_leaves`).
+    let mut scan_position_map: Option<std::collections::HashMap<u64, Vec<u8>>> = None;
+
     if mode == VerifyMode::Full {
         // ---- Check 5: inline Data.db chunk CRC validation (#998) -----------
         if let Some(info) = compression_info.as_ref() {
-            check_inline_chunk_crc(&components, info, &mut findings)?;
+            check_inline_chunk_crc(&components, info, &mut findings, &mut pending_locations)?;
         } else if components.format == SsTableFormat::Big {
             // ---- Check 5b: uncompressed CRC.db per-chunk validation (#1396) --
             // An uncompressed BIG SSTable (no CompressionInfo.db) carries a CRC.db
@@ -428,7 +516,7 @@ async fn verify_components(
             // — the uncompressed analogue of the inline chunk-CRC check above.
             // Replaces the prior behavior where CRC.db was only name-whitelisted
             // (recognized as a component) but never content-validated.
-            check_uncompressed_crc_db(dir, &components, &mut findings).await;
+            check_uncompressed_crc_db(dir, &components, &mut findings, &mut pending_locations).await;
         }
 
         // ---- Check 6a: Statistics.db parse ---------------------------------
@@ -490,9 +578,11 @@ async fn verify_components(
                     // corruption that keeps a leaf's emitted prefix but rewrites its
                     // payload to a different partition. Resolving the payload closes
                     // both gaps.
-                    if let Some(leaves) = bti_leaves {
-                        if let Some(detail) =
-                            bti_partition_identity_mismatch(&leaves, &scan_partitions)
+                    //
+                    // Issue #4194: borrowed (not moved) — `bti_leaves` is needed
+                    // again by `finalize_locations` below.
+                    if let Some(leaves) = bti_leaves.as_ref() {
+                        if let Some(detail) = bti_partition_identity_mismatch(leaves, &scan_partitions)
                         {
                             findings.push(VerifyFinding::new(
                                 VerifyErrorClass::BtiRootPointerCorrupt,
@@ -501,6 +591,8 @@ async fn verify_components(
                             ));
                         }
                     }
+                    scan_position_map =
+                        Some(scan_partitions.into_iter().collect::<std::collections::HashMap<_, _>>());
                 }
                 Err(e) => findings.push(classify_scan_error(&components, &e)),
             }
@@ -525,6 +617,21 @@ async fn verify_components(
         } // end: if !compression_metadata_corrupt
     }
 
+    // Issue #4194: resolve every pending location in one pass, now that every
+    // check has run and the boundary source's own health is fully known.
+    if !pending_locations.is_empty() {
+        finalize_locations(
+            dir,
+            &components,
+            &mut findings,
+            pending_locations,
+            bti_leaves.as_deref(),
+            scan_position_map.as_ref(),
+            platform_for_location,
+        )
+        .await;
+    }
+
     Ok(VerifyReport {
         directory: dir.to_path_buf(),
         base_name: components.base_name,
@@ -534,6 +641,97 @@ async fn verify_components(
         toc_components,
         rows_scanned,
     })
+}
+
+/// Resolve every [`PendingLocation`] in one pass and write the result back
+/// onto its owning finding (issue #4194, design.md §D1/§D2).
+///
+/// The boundary source is either fully trusted for this whole report or not
+/// trusted at all — never partially: `boundary_healthy` is a single decision
+/// (no `Index.db`/BTI-trie-corrupt finding present) applied uniformly to every
+/// pending location, so a damaged boundary source poisons ALL of them with
+/// [`verify_location::BOUNDARY_SOURCE_UNREADABLE`], never just the finding
+/// that happens to be nearest the damage.
+async fn finalize_locations(
+    dir: &Path,
+    components: &ComponentSet,
+    findings: &mut [VerifyFinding],
+    pending: Vec<PendingLocation>,
+    bti_leaves: Option<&[BtiResolvedLeaf]>,
+    scan_position_map: Option<&std::collections::HashMap<u64, Vec<u8>>>,
+    platform: Arc<Platform>,
+) {
+    let boundary_healthy = match components.format {
+        SsTableFormat::Big => !findings
+            .iter()
+            .any(|f| f.class == VerifyErrorClass::IndexEntryCorrupt),
+        SsTableFormat::Bti => !findings.iter().any(|f| {
+            matches!(
+                f.class,
+                VerifyErrorClass::BtiRootPointerCorrupt | VerifyErrorClass::BtiTrieCorrupt
+            )
+        }),
+    };
+
+    // Boundary entries: `(logical Data.db position, raw key when known)`, one
+    // per partition the boundary source names — built only when the boundary
+    // source is healthy (an unhealthy one is never read for this purpose,
+    // matching the fail-closed contract regardless of what re-reading it
+    // might yield).
+    let boundary_entries: Option<Vec<(u64, Option<Vec<u8>>)>> = if !boundary_healthy {
+        None
+    } else {
+        match components.format {
+            SsTableFormat::Big => {
+                use crate::storage::sstable::index_reader::IndexReader;
+                let index_path = components.path(dir, "Index.db");
+                match IndexReader::open(&index_path, platform).await {
+                    Ok(reader) => Some(
+                        reader
+                            .get_partition_entries()
+                            .iter()
+                            .map(|e| {
+                                let raw = e
+                                    .raw_key
+                                    .as_deref()
+                                    .map(|k| k.to_vec())
+                                    .unwrap_or_else(|| e.key_digest.to_vec());
+                                (e.data_offset, Some(raw))
+                            })
+                            .collect(),
+                    ),
+                    Err(_) => None,
+                }
+            }
+            SsTableFormat::Bti => bti_leaves.map(|leaves| {
+                leaves
+                    .iter()
+                    .map(|leaf| {
+                        let key = leaf.inline_raw_key.clone().or_else(|| {
+                            scan_position_map.and_then(|m| m.get(&leaf.data_position).cloned())
+                        });
+                        (leaf.data_position, key)
+                    })
+                    .collect()
+            }),
+        }
+    };
+
+    for p in pending {
+        let location = verify_location::resolve_location(
+            &p.component,
+            p.byte_offset,
+            p.byte_len,
+            p.chunk_index,
+            boundary_healthy,
+            p.damaged_logical,
+            boundary_entries.as_deref(),
+            p.logical_len,
+        );
+        if let Some(f) = findings.get_mut(p.finding_index) {
+            f.location = Some(location);
+        }
+    }
 }
 
 /// Read all regular files in `dir`, returning `(all_files, data_files)` where
@@ -826,6 +1024,7 @@ fn check_compression_info(
     dir: &Path,
     components: &ComponentSet,
     findings: &mut Vec<VerifyFinding>,
+    pending_locations: &mut Vec<PendingLocation>,
 ) -> Result<Option<CompressionInfo>> {
     let ci_path = components.path(dir, "CompressionInfo.db");
     if !ci_path.exists() {
@@ -871,6 +1070,7 @@ fn check_compression_info(
         // itself must leave room for that. Offsets at/after EOF are corrupt.
         if offset.saturating_add(4) > data_len {
             offset_out_of_bounds = true;
+            let finding_index = findings.len();
             findings.push(VerifyFinding::new(
                 VerifyErrorClass::ChunkOffsetOutOfBounds,
                 "CompressionInfo.db",
@@ -879,6 +1079,25 @@ fn check_compression_info(
                     i, offset, offset, data_len
                 ),
             ));
+            // Issue #4194: this is the truncation-anchored finding this
+            // corruption class actually produces (verified against the real
+            // `test_comp_corrupt/data_db_truncation` fixture — the boundary
+            // source's declared LOGICAL length (`data_length`) is the extent
+            // every partition past this chunk's logical start is measured
+            // against; design.md §D1's "new_eof .. original_logical_length"
+            // derivation, computed here rather than deferred since `info` is
+            // only in scope in this function).
+            let logical_start =
+                (i as u64).saturating_mul(info.chunk_length as u64);
+            pending_locations.push(PendingLocation {
+                finding_index,
+                component: "Data.db".to_string(),
+                byte_offset: offset,
+                byte_len: 4,
+                chunk_index: Some(i),
+                damaged_logical: (logical_start, info.data_length.max(logical_start)),
+                logical_len: info.data_length,
+            });
         }
     }
 
@@ -1373,6 +1592,7 @@ fn check_inline_chunk_crc(
     components: &ComponentSet,
     info: &CompressionInfo,
     findings: &mut Vec<VerifyFinding>,
+    pending_locations: &mut Vec<PendingLocation>,
 ) -> Result<()> {
     use crate::storage::sstable::chunk_reader::ChunkReader;
     use std::fs::File;
@@ -1408,9 +1628,35 @@ fn check_inline_chunk_crc(
     // separately by the full row scan (Check 7), so we deliberately do NOT
     // re-decompress here (that would false-positive on the last/incompressible
     // chunk's size bookkeeping for some BTI Data.db files).
+    //
+    // Issue #4194: reads chunk-by-chunk (rather than `read_all_chunks()` in one
+    // call) so the FAILING chunk's index is known directly from the loop
+    // variable — never parsed back out of the error message text (no-heuristics
+    // mandate, issue #28) — for the location this finding carries. Fails fast
+    // on the first bad chunk, same as `read_all_chunks()` did.
     let mut chunk_reader = ChunkReader::new(reader, info.clone(), total_size);
-    if let Err(e) = chunk_reader.read_all_chunks() {
-        findings.push(classify_data_error("Data.db", &e));
+    for i in 0..chunk_reader.chunk_count() {
+        if let Err(e) = chunk_reader.read_chunk(i) {
+            let finding_index = findings.len();
+            findings.push(classify_data_error("Data.db", &e));
+            let phys_offset = info.compressed_chunk_offset(i).unwrap_or(0);
+            let phys_len = info.compressed_chunk_size(i, total_size).unwrap_or(0);
+            let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
+            let logical_end = ((i as u64).saturating_add(1))
+                .saturating_mul(info.chunk_length as u64)
+                .min(info.data_length)
+                .max(logical_start);
+            pending_locations.push(PendingLocation {
+                finding_index,
+                component: "Data.db".to_string(),
+                byte_offset: phys_offset,
+                byte_len: phys_len,
+                chunk_index: Some(i),
+                damaged_logical: (logical_start, logical_end),
+                logical_len: info.data_length,
+            });
+            break;
+        }
     }
     Ok(())
 }
@@ -1430,6 +1676,7 @@ async fn check_uncompressed_crc_db(
     dir: &Path,
     components: &ComponentSet,
     findings: &mut Vec<VerifyFinding>,
+    pending_locations: &mut Vec<PendingLocation>,
 ) {
     use crate::storage::sstable::reader::crc::CrcDb;
     use tokio::io::AsyncReadExt;
@@ -1509,6 +1756,7 @@ async fn check_uncompressed_crc_db(
         match crc.crc_for_chunk(chunk_index) {
             Ok(expected) => {
                 if computed != expected {
+                    let finding_index = findings.len();
                     findings.push(VerifyFinding::new(
                         VerifyErrorClass::UncompressedChunkCrcMismatch,
                         "Data.db",
@@ -1516,6 +1764,17 @@ async fn check_uncompressed_crc_db(
                             "uncompressed CRC32 mismatch for chunk {chunk_index} at Data.db offset 0x{offset:x} ({filled} bytes): expected=0x{expected:08x} (CRC.db), computed=0x{computed:08x}"
                         ),
                     ));
+                    // Issue #4194: uncompressed, so physical == logical offset
+                    // space — the CRC.db grid IS the chunk grid (design.md §D1).
+                    pending_locations.push(PendingLocation {
+                        finding_index,
+                        component: "Data.db".to_string(),
+                        byte_offset: offset,
+                        byte_len: filled as u64,
+                        chunk_index: Some(chunk_index),
+                        damaged_logical: (offset, offset + filled as u64),
+                        logical_len: data_len,
+                    });
                     // Report the first failing chunk and stop (matches the
                     // fail-fast read-path posture; naming one chunk is sufficient).
                     return;
