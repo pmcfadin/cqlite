@@ -27,7 +27,7 @@ clap = { workspace = true }
 # Async runtime
 # `io-std` + `io-util` back the async stdin loop in the interactive writable
 # session (issue #1693); `signal` backs its Ctrl-C graceful-shutdown handler.
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal", "io-std", "io-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal", "io-std", "io-util", "sync"] }
 
 # Error handling
 thiserror = { workspace = true }

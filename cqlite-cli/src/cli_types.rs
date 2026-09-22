@@ -401,6 +401,11 @@ pub enum Commands {
         #[arg(long, value_enum, default_value = "text")]
         out: VerifyOutputArg,
     },
+    /// Verify every SSTable table directory under a data directory in one pass (issue #4194)
+    #[command(
+        long_about = "Walk every <keyspace>/<table>-<id>/ directory under <data-dir>, verify each with the same check pipeline as `cqlite verify`, and report one row per table: severity ok|degraded|corrupt|unreadable, plus a data-dir-wide exit code. `degraded` names a CQLite-only detection (e.g. a Filter.db false negative) that is not proof of unreadability -- it alone never trips a non-zero exit. A table directory verify cannot even open (no readable Data.db, unopenable directory) is a row with severity `unreadable`, never a silently-dropped entry. Exit 0 = every row ok; 2 = any row corrupt or unreadable (degraded rows are OK-adjacent, see design.md S2); 1 = usage error (<data-dir> missing or not a directory). --jobs bounds how many tables verify concurrently -- it never changes which rows appear or their severities. Example: cqlite sweep ./test-data/datasets/sstables --mode full --out json --jobs 4"
+    )]
+    Sweep(SweepArgs),
     /// Export an SSTable generation as a delta-envelope Parquet file (Issue #705)
     #[command(name = "delta-export")]
     #[command(
@@ -613,6 +618,27 @@ pub struct SalvageArgs {
     /// stdout) — independent of `--manifest`.
     #[arg(long, value_enum, default_value = "text")]
     pub out_format: SalvageOutFormatArg,
+}
+
+// Arguments for the sweep subcommand (issue #4194)
+#[derive(Args, Debug, Clone)]
+pub struct SweepArgs {
+    /// Data directory to walk — every `<keyspace>/<table>-<id>/` directory
+    /// under it is verified, one row per directory.
+    pub data_dir: PathBuf,
+    /// Verification mode applied to every table (same semantics as `verify
+    /// --mode`).
+    #[arg(long, value_enum, default_value = "full")]
+    pub mode: VerifyModeArg,
+    /// Output format for the sweep report (same semantics as `verify --out`).
+    #[arg(long, value_enum, default_value = "text")]
+    pub out: VerifyOutputArg,
+    /// Bound how many table directories are verified concurrently. Defaults
+    /// to the host's available parallelism. Never affects WHICH rows appear
+    /// or their severities — only how many single-table `verify` calls run
+    /// at once (design.md §S3.2).
+    #[arg(long)]
+    pub jobs: Option<usize>,
 }
 
 // Arguments for the export-sstable subcommand (Issue #392)

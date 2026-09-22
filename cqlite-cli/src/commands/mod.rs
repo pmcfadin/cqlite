@@ -39,6 +39,7 @@ pub mod read_sstable;
 // item that no longer exists.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod salvage;
+pub mod sweep;
 pub mod verify;
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).
