@@ -271,6 +271,19 @@ name = "issue_4196_salvage_table_validation"
 path = "tests/issue_4196_salvage_table_validation.rs"
 required-features = ["write-support"]
 
+# Issue #4197: drives the compiled `cqlite` binary via CARGO_BIN_EXE_cqlite to
+# observe `rebuild`'s process::exit-based exit codes, so it must be compiled
+# with write-support for that binary to carry the verb at all. Declared
+# EXPLICITLY rather than left to cargo's auto-discovery, for the same reason
+# as the salvage targets above: auto-discovered, this target compiles at
+# default features with its whole body `#![cfg(all(feature = "write-support",
+# not(feature = "tombstones")))]`-gated out, runs 0 tests, and the gate's
+# cli-tests component FAILs CLOSED on it (#2039 zero-tests guard).
+[[test]]
+name = "rebuild_cli_tests"
+path = "tests/rebuild_cli_tests.rs"
+required-features = ["write-support"]
+
 # Issue #1581: dhat-gated bounded-memory guard for the streaming query cutover.
 # Installs the dhat global allocator, so it must be its own opt-in test binary.
 [[test]]
