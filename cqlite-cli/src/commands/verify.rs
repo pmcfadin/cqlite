@@ -10,7 +10,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
-    verify_sstable, Location, PartitionResolution, VerifyFinding, VerifyMode, VerifyReport,
+    format_location, verify_sstable, Location, PartitionResolution, VerifyFinding, VerifyMode,
+    VerifyReport,
 };
 use cqlite_core::Config;
 
@@ -57,38 +58,16 @@ fn print_text(report: &VerifyReport) {
         for f in &report.findings {
             println!("  - [{}] {}: {}", f.class.code(), f.component, f.detail);
             if let Some(loc) = &f.location {
-                println!("      location: {}", format_location_text(loc));
+                // Issue #4194, roborev round-1 LOW finding: this used to be a
+                // second, near-identical renderer (`format_location_text`)
+                // that had already drifted from core's own `format_location`
+                // (different separator, different "0 partitions" wording).
+                // `format_location` is `pub` and re-exported exactly so the
+                // CLI never needs its own copy.
+                println!("      location: {}", format_location(loc));
             }
         }
     }
-}
-
-/// Human-readable one-line rendering of a [`Location`] for `--out text`
-/// (issue #4194): names the chunk index and every resolved partition key, or
-/// the named cause when unresolved — never a silent empty line.
-fn format_location_text(loc: &Location) -> String {
-    let chunk = loc
-        .chunk_index
-        .map(|c| format!("chunk {c}, "))
-        .unwrap_or_default();
-    let partitions = match &loc.partitions {
-        PartitionResolution::Resolved(keys) if keys.is_empty() => {
-            "0 intersecting partitions".to_string()
-        }
-        PartitionResolution::Resolved(keys) => format!(
-            "{} partition(s): {}",
-            keys.len(),
-            keys.iter()
-                .map(|k| k.key_hex.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        PartitionResolution::Unresolved(cause) => format!("partitions unresolved ({cause})"),
-    };
-    format!(
-        "{} {}offset 0x{:x} len {} — {}",
-        loc.component, chunk, loc.byte_offset, loc.byte_len, partitions
-    )
 }
 
 fn print_json(report: &VerifyReport) {

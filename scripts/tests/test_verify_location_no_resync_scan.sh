@@ -7,9 +7,29 @@
 # bytes for a plausible partition header. This guard greps
 # `cqlite-core/src/storage/sstable/verify_location.rs` for any byte-pattern
 # search primitive OUTSIDE test code and FAILs naming the line if one is
-# found. Modeled directly on `sstable-salvage`'s
-# `test_salvage_no_resync_scan.sh` (issue #4196, spec R4.3) — same mechanism,
-# a single-file target rather than a directory.
+# found. Modeled on `sstable-salvage`'s `test_salvage_no_resync_scan.sh`
+# (issue #4196, spec R4.3), single-file rather than directory-wide.
+#
+# SCOPE, both declared explicitly (roborev round-1 LOW finding):
+# - This guard scans ONLY `verify_location.rs`, not `verify.rs` — the
+#   partition-resolution LOGIC (what this spec item governs) lives entirely
+#   in `verify_location.rs`; `verify.rs`'s new code (`PendingLocation`,
+#   `finalize_locations`) computes byte RANGES from already-decoded
+#   `CompressionInfo`/chunk-index/offset fields, never scans `Data.db` bytes,
+#   and carries none of the forbidden patterns either (verified by eye at
+#   review time) — but is out of this guard's MECHANICAL reach.
+# - The `#[cfg(test)]` exclusion skips from the file's FIRST such marker to
+#   EOF wholesale, not via brace-counting: `verify_location.rs` has exactly
+#   ONE top-level `#[cfg(test)] mod tests { .. }`, at the end of the file
+#   (verified at write time), so "skip the tail from the marker" is exact
+#   for this file and immune to the brace-counting fragility a `format!`
+#   string containing a literal `{{`/`}}` could otherwise trip (the
+#   salvage guard's directory-wide brace tracker exists because THAT guard
+#   must tolerate a `#[cfg(test)]` block appearing mid-file, in more than
+#   one file). If a second `#[cfg(test)]` block is ever added ABOVE the
+#   trailing one, this guard would incorrectly treat everything from the
+#   FIRST such marker onward as test code — re-adopt the brace-counting form
+#   (or split the file) if that ever happens.
 #
 # Registered in the gate's `tooling-tests` component (no cargo/network needed
 # — a pure grep, so it always runs).
@@ -30,32 +50,17 @@ fi
 PATTERNS=("memchr" ".windows(" "find(|" "position(|")
 
 hits=0
-in_test_mod=0
-seen_open=0
-depth=0
 line_no=0
+in_test_tail=0
 while IFS= read -r line; do
   line_no=$((line_no + 1))
-  if [ "$in_test_mod" -eq 1 ]; then
-    opens=$(grep -o '{' <<<"$line" | wc -l)
-    closes=$(grep -o '}' <<<"$line" | wc -l)
-    depth=$((depth + opens - closes))
-    if [ "$depth" -gt 0 ]; then
-      seen_open=1
-    fi
-    if [ "$seen_open" -eq 1 ] && [ "$depth" -le 0 ]; then
-      in_test_mod=0
-    elif [ "$seen_open" -eq 0 ] && [[ "$line" == *';'* ]]; then
-      in_test_mod=0
-    fi
+  if [ "$in_test_tail" -eq 1 ]; then
     continue
   fi
   stripped="${line// /}"
   stripped="${stripped//$'\t'/}"
   if [ "$stripped" = '#[cfg(test)]' ]; then
-    in_test_mod=1
-    seen_open=0
-    depth=0
+    in_test_tail=1
     continue
   fi
   for pat in "${PATTERNS[@]}"; do
@@ -66,10 +71,11 @@ while IFS= read -r line; do
   done
 done <"$TARGET"
 
-if [ "$in_test_mod" -eq 1 ]; then
-  echo "FAIL - $TARGET: brace tracker for a #[cfg(test)] block never returned to depth 0 by EOF \
-(unbalanced or miscounted braces) — refusing rather than silently trusting the scan"
-  hits=$((hits + 1))
+if [ "$in_test_tail" -eq 0 ]; then
+  echo "FAIL - $TARGET: no '#[cfg(test)]' marker found — this guard's exact-tail-skip scope \
+assumes exactly one, at the end of the file; refusing rather than silently scanning either \
+too much or too little"
+  exit 1
 fi
 
 if [ "$hits" -gt 0 ]; then

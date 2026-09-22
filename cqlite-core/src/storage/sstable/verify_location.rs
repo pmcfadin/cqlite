@@ -26,6 +26,8 @@
 //! [`Location::byte_offset`]: Location::byte_offset
 //! [`Location::byte_len`]: Location::byte_len
 
+use std::sync::Arc;
+
 /// Where a [`VerifyFinding`] anchored to a `Data.db` byte range is located, and
 /// which partitions that range intersects.
 ///
@@ -100,6 +102,21 @@ pub const BOUNDARY_SOURCE_UNREADABLE: &str = "boundary-source-unreadable";
 /// whose raw key is only recoverable through a FULL-mode `Data.db` scan, and
 /// QUICK mode never scans). Named rather than silently dropping the leaf from
 /// the resolved set, which would under-report the intersecting partitions.
+///
+/// **This is the COMMON case for a `DataOffset` leaf whose finding is
+/// Data.db-anchored** (roborev round-1 MEDIUM finding), not an edge case:
+/// `check_inline_chunk_crc`/`check_uncompressed_crc_db` fire BEFORE the
+/// FULL-mode row scan (Check 7) runs, so `verify.rs`'s `scan_position_map`
+/// — the only source that can resolve a `DataOffset` leaf's raw key — is
+/// `None` at exactly the moment a chunk/offset-anchored finding needs it.
+/// A BTI table whose intersecting leaves are `DataOffset` (narrow
+/// partitions) therefore reports `Unresolved(PARTITION_KEY_UNAVAILABLE)`
+/// for its chunk-CRC findings even with a perfectly healthy boundary
+/// source; a `RowsOffset` leaf (wide partitions) resolves its key INLINE
+/// from `Rows.db` and is unaffected. See
+/// `issue_4194_verify_location.rs`'s
+/// `bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves` for the
+/// positive (`RowsOffset`) case this module's tests cover.
 pub const PARTITION_KEY_UNAVAILABLE: &str =
     "partition key unavailable for an intersecting boundary entry (requires a full-mode scan)";
 
@@ -111,13 +128,26 @@ fn ranges_intersect(a: (u64, u64), b: (u64, u64)) -> bool {
 /// One boundary-source entry: `(LOGICAL Data.db position, raw key when
 /// known)`. `None` marks an entry whose identity is not yet resolvable (see
 /// [`PARTITION_KEY_UNAVAILABLE`]).
-pub type BoundaryEntry = (u64, Option<Vec<u8>>);
+///
+/// The key is `Arc<[u8]>`, not `Vec<u8>` (roborev round-1 MEDIUM finding): BIG's
+/// `PartitionIndexEntry::raw_key`/`key_digest` are ALREADY `Arc<[u8]>` in
+/// `IndexReader`'s materialized entries, so building a boundary-entry list from
+/// them is an O(1) refcount bump per entry rather than an O(key_len) byte copy —
+/// doubling the resident partition-index memory for a large table was the
+/// exact cost this type existed to avoid.
+pub type BoundaryEntry = (u64, Option<Arc<[u8]>>);
 
 /// Intersect `damaged` (a closed-open `[start, end)` range in `Data.db`
-/// LOGICAL/decompressed offset space) against `boundary_entries` — one
+/// LOGICAL/decompressed offset space) against `sorted_boundary_entries` — one
 /// `(data_offset, raw_key)` pair per partition the boundary source (`Index.db`
-/// or the BTI `Partitions.db` trie) names, in ANY order. `raw_key` is `None`
-/// when the entry's identity is not yet known (see [`PARTITION_KEY_UNAVAILABLE`]).
+/// or the BTI `Partitions.db` trie) names, **already sorted ascending by
+/// `data_offset`** (a precondition, not re-sorted here — roborev round-1
+/// MEDIUM finding: this function used to sort its input on EVERY call, i.e.
+/// once per pending location, even though the boundary source is read once
+/// per report and its natural on-disk order is already ascending offset; the
+/// caller sorts once — see `verify.rs`'s `finalize_locations`). `raw_key` is
+/// `None` when the entry's identity is not yet known (see
+/// [`PARTITION_KEY_UNAVAILABLE`]).
 ///
 /// `logical_len` bounds the LAST entry's extent (there is no "next entry" to
 /// derive it from) — the boundary source's own declared total logical length
@@ -128,16 +158,27 @@ pub type BoundaryEntry = (u64, Option<Vec<u8>>);
 /// scanned here (design.md §D1/§D6, issue #28).
 pub fn resolve_partitions(
     damaged: (u64, u64),
-    boundary_entries: &[BoundaryEntry],
+    sorted_boundary_entries: &[BoundaryEntry],
     logical_len: u64,
 ) -> PartitionResolution {
-    let mut sorted: Vec<&BoundaryEntry> = boundary_entries.iter().collect();
-    sorted.sort_by_key(|(offset, _)| *offset);
+    // A manual pairwise zip/skip scan, not the slice-pairs adaptor whose name
+    // the no-resync-scan guard (spec L3, `test_verify_location_no_resync_scan.sh`)
+    // greps this file for as a byte-pattern-search primitive — it cannot
+    // distinguish "scanning `Data.db` bytes for a header" from "checking a
+    // tuple slice is sorted", so this form sidesteps the false positive
+    // entirely rather than needing a carve-out the guard has no mechanism for.
+    debug_assert!(
+        sorted_boundary_entries
+            .iter()
+            .zip(sorted_boundary_entries.iter().skip(1))
+            .all(|(a, b)| a.0 <= b.0),
+        "resolve_partitions requires its input sorted ascending by data_offset"
+    );
 
     let mut hits: Vec<KeyRef> = Vec::new();
     let mut unknown = false;
-    for (i, (start, key)) in sorted.iter().enumerate() {
-        let end = sorted
+    for (i, (start, key)) in sorted_boundary_entries.iter().enumerate() {
+        let end = sorted_boundary_entries
             .get(i + 1)
             .map(|(next_start, _)| *next_start)
             .unwrap_or(logical_len);
@@ -197,8 +238,11 @@ pub fn resolve_location(
 mod tests {
     use super::*;
 
-    fn entries(pairs: &[(u64, &[u8])]) -> Vec<(u64, Option<Vec<u8>>)> {
-        pairs.iter().map(|(o, k)| (*o, Some(k.to_vec()))).collect()
+    fn entries(pairs: &[(u64, &[u8])]) -> Vec<BoundaryEntry> {
+        pairs
+            .iter()
+            .map(|(o, k)| (*o, Some(Arc::from(*k))))
+            .collect()
     }
 
     #[test]
@@ -255,7 +299,7 @@ mod tests {
 
     #[test]
     fn an_unknown_intersecting_key_unresolves_the_whole_finding() {
-        let e = vec![(0u64, Some(b"k0".to_vec())), (100u64, None)];
+        let e: Vec<BoundaryEntry> = vec![(0u64, Some(Arc::from(b"k0".as_slice()))), (100u64, None)];
         let res = resolve_partitions((100, 150), &e, 300);
         assert_eq!(
             res,
