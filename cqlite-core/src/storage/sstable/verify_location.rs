@@ -212,6 +212,17 @@ pub fn resolve_partitions(
     // when only 100 DISTINCT partitions actually intersect. Deduping here
     // means a duplicate is recognized before it can occupy a slot OR inflate
     // `truncated`, and the final list needs no further dedup pass.
+    //
+    // `seen` is itself BOUNDED to MAX_RESOLVED_KEYS entries (roborev round-4
+    // LOW finding): round-3's fix grew it unboundedly — O(distinct
+    // intersecting partitions) — which is exactly the O(partitions) growth
+    // the MAX_RESOLVED_KEYS cap (round 2) exists to eliminate for the
+    // truncation case this module's own doc describes (a damaged range
+    // spanning essentially the whole file). Once `hits` reaches the cap,
+    // dedup stops (a duplicate found past the cap is defensive-only and
+    // simply counts as one more `truncated` entry, a minor over-count
+    // accepted in exchange for a hard memory bound) rather than growing
+    // `seen` to match the file's full partition count.
     let mut hits: Vec<KeyRef> = Vec::new();
     let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
     let mut unknown = false;
@@ -226,12 +237,11 @@ pub fn resolve_partitions(
             match key {
                 Some(k) => {
                     let raw: &[u8] = k;
-                    if !seen.insert(raw) {
-                        continue; // same partition identity already accounted for
-                    }
                     if hits.len() < MAX_RESOLVED_KEYS {
-                        hits.push(KeyRef::from_raw(raw));
-                    } else {
+                        if seen.insert(raw) {
+                            hits.push(KeyRef::from_raw(raw));
+                        }
+                    } else if !seen.contains(raw) {
                         truncated += 1;
                     }
                 }

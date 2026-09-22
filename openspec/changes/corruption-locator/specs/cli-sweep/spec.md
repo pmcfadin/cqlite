@@ -4,6 +4,23 @@
 severity and cause for each, and exit non-zero when anything short of fully healthy is found. All
 requirements are ADDED.
 
+## Scope notes (roborev round-4 findings, not fixed — declared boundaries)
+
+- **The walk is exactly two levels deep and does NOT descend into a `.<index-name>/`
+  secondary-index subdirectory, `snapshots/`, or `backups/`.** A real Cassandra table directory can
+  hold secondary-index generations in such a subdirectory; those are silently absent from the sweep
+  today (no row, no cause) — an actual gap in the "never a silently-dropped entry" guarantee this
+  change otherwise holds itself to, not something this change's own tests would catch, since none of
+  the committed/fetched corpus fixtures carry a secondary index. Descending into (or at minimum
+  emitting one labelled "not walked" row per) such a subdirectory is a follow-up, not attempted here.
+- **A table directory with zero generations is classified `unreadable` (exit 2) regardless of
+  cause** — this does not distinguish "genuinely broken" from "this table has simply never been
+  flushed", which is the NORMAL state of many tables (most `system*` tables) on a live, healthy
+  Cassandra node. Sweeping a live data directory will therefore report a number of `unreadable` rows
+  that are not corruption. Whether an "empty, never-flushed" severity distinct from `unreadable`
+  should exist is a product question for the owner, not decided in this change — S1.4's existing,
+  tested behavior (a zero-generation directory is `unreadable`) is unchanged.
+
 ## ADDED Requirements
 
 ### Requirement: S1 — The verb, its walk, and its severities
@@ -83,12 +100,17 @@ exit `1` on a usage error (e.g. `<data-dir>` does not exist, or is not a directo
 ### Requirement: S3 — Sweep memory stays bounded
 
 Sweep SHALL hold at most one table's `VerifyReport` (and the FULL-mode scan behind it) fully
-resident per concurrent worker, and `--jobs` SHALL bound the number of tables verified concurrently.
-Every completed row's `VerifyReport.findings` (including every `Location`) IS additionally
-accumulated in `rows: Vec<SweepRow>` for the duration of the sweep, ahead of any rendering — bounded
-per-row by `MAX_RESOLVED_KEYS` (spec verify-location L5) but `O(generations)` overall, not `O(1)`
-(roborev round-2 MEDIUM finding — a true streamed/`O(1)` render is a separate, larger change, not
-attempted in this change; `execute_sweep_command`'s own doc states this bound precisely).
+resident per concurrent worker, and `--jobs` SHALL bound the number of tables verified concurrently,
+CLAMPED to a fixed maximum (`MAX_JOBS = 8`) regardless of source — a single `verify` check
+(`check_digest`, Check 2, runs in QUICK mode too) reads the WHOLE `Data.db` into memory, so peak
+resident memory scales with `jobs x largest Data.db`, not `O(1)` in `jobs` (roborev round-4 MEDIUM
+finding — an earlier draft of this requirement asserted the per-worker bound alone, without stating
+that `jobs` itself must therefore be bounded too). Every completed row's `VerifyReport.findings`
+(including every `Location`) IS additionally accumulated in `rows: Vec<SweepRow>` for the duration of
+the sweep, ahead of any rendering — bounded per-row by `MAX_RESOLVED_KEYS` (spec verify-location L5)
+but `O(generations)` overall, not `O(1)` (roborev round-2 MEDIUM finding — a true streamed/`O(1)`
+render is a separate, larger change, not attempted in this change; `execute_sweep_command`'s own doc
+states this bound precisely).
 
 #### DECLARED GAP — Scenario S3.1 (wide tables under the memory-budget lane) has NO implementing target
 - **Given** `test_wide_rows` (every table) swept with `--mode full --jobs 1`

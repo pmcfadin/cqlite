@@ -644,6 +644,15 @@ async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
         return;
     };
     if !clean.join("da-2-bti-CompressionInfo.db").is_file() {
+        // roborev round-4 MEDIUM finding: this is the ONLY case covering a
+        // BTI `Resolved` location (L2.2 covers only `Unresolved`; L1.4 is a
+        // declared gap) — under CQLITE_REQUIRE_FIXTURES=1 this whole branch
+        // must hard-fail, not silently vanish behind a green suite, matching
+        // every other gate in this file (#1094 doctrine).
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but wide_table is not compressed (no CompressionInfo.db)"
+        );
         eprintln!("SKIP: wide_table fixture is not compressed (no CompressionInfo.db)");
         return;
     }

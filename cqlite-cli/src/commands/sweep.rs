@@ -5,10 +5,16 @@
 //! [`cqlite_core::storage::sstable::verify::verify_sstable_generation`] a
 //! single-directory `cqlite verify` call effectively targets — one call per
 //! discovered `*-Data.db` generation, bounded to at most `--jobs`
-//! concurrently. Memory profile per generation is therefore identical to
-//! today's `verify --mode full`: at most one `VerifyReport` resident per
-//! concurrent worker (design.md §S3) — see this file's own note on the
-//! ACCUMULATED-across-rows cost that bound does NOT cover, at `execute_sweep_command`.
+//! concurrently (`--jobs` is clamped to `MAX_JOBS`, see
+//! `execute_sweep_command` — NOT "identical to `verify --mode full`"'s
+//! memory profile multiplied by an unbounded `--jobs`, an earlier draft of
+//! this doc's claim; roborev round-4 MEDIUM finding: `check_digest` reads
+//! the WHOLE `Data.db` into memory even in QUICK mode, so peak RSS is
+//! genuinely `jobs x largest Data.db`, not `O(1)` regardless of `jobs`).
+//! Each generation's own resident structure (one `VerifyReport`, including
+//! its FULL-mode scan) is otherwise identical to `verify --mode full`'s
+//! (design.md §S3) — see this file's own note on the ACCUMULATED-across-rows
+//! cost that bound does NOT cover, at `execute_sweep_command`.
 //!
 //! **Per-GENERATION, not per-directory** (roborev round-2 HIGH finding): a
 //! real Cassandra table directory routinely holds several generations
@@ -114,18 +120,23 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
     // with no row and no cause, the exact silent omission the comment
     // claimed to fix. `DirEntry::path()` is unavailable on an `Err`, so the
     // row names the PARENT directory the failing entry was under, not the
-    // entry itself — still one row, never a silent skip.
+    // entry itself.
+    //
+    // Aggregated to ONE row per PARENT, not one row per failing entry
+    // (roborev round-4 LOW finding): the original per-entry form pushed
+    // MULTIPLE rows sharing the identical synthesized
+    // `<parent>/<unreadable directory entry>` path, which `rows.sort_by(path)`
+    // cannot distinguish and which names nothing real on disk — matching
+    // the count+last-error pattern already used one level down for
+    // `unreadable_file_entries`.
+    let mut unreadable_ks_entries = 0usize;
+    let mut last_ks_entry_error: Option<String> = None;
     for ks_entry in keyspaces {
         let ks_entry = match ks_entry {
             Ok(e) => e,
             Err(e) => {
-                unreadable_keyspaces.push((
-                    data_dir.join("<unreadable directory entry>"),
-                    format!(
-                        "unreadable directory entry under {}: {e}",
-                        data_dir.display()
-                    ),
-                ));
+                unreadable_ks_entries += 1;
+                last_ks_entry_error = Some(e.to_string());
                 continue;
             }
         };
@@ -135,17 +146,14 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
         }
         match std::fs::read_dir(&ks_path) {
             Ok(tables) => {
+                let mut unreadable_table_entries = 0usize;
+                let mut last_table_entry_error: Option<String> = None;
                 for table_entry in tables {
                     let table_entry = match table_entry {
                         Ok(e) => e,
                         Err(e) => {
-                            unreadable_table_dirs.push((
-                                ks_path.join("<unreadable directory entry>"),
-                                format!(
-                                    "unreadable directory entry under {}: {e}",
-                                    ks_path.display()
-                                ),
-                            ));
+                            unreadable_table_entries += 1;
+                            last_table_entry_error = Some(e.to_string());
                             continue;
                         }
                     };
@@ -204,9 +212,30 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
                         Err(e) => unreadable_table_dirs.push((table_path, e.to_string())),
                     }
                 }
+                if unreadable_table_entries > 0 {
+                    unreadable_table_dirs.push((
+                        ks_path.clone(),
+                        format!(
+                            "{unreadable_table_entries} unreadable directory entry(ies) under {} \
+                             (last error: {})",
+                            ks_path.display(),
+                            last_table_entry_error.unwrap_or_default()
+                        ),
+                    ));
+                }
             }
             Err(e) => unreadable_keyspaces.push((ks_path, e.to_string())),
         }
+    }
+    if unreadable_ks_entries > 0 {
+        unreadable_keyspaces.push((
+            data_dir.to_path_buf(),
+            format!(
+                "{unreadable_ks_entries} unreadable directory entry(ies) under {} (last error: {})",
+                data_dir.display(),
+                last_ks_entry_error.unwrap_or_default()
+            ),
+        ));
     }
     generations.sort();
     unreadable_keyspaces.sort_by(|a, b| a.0.cmp(&b.0));
@@ -330,6 +359,23 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
         VerifyModeArg::Quick => VerifyMode::Quick,
         VerifyModeArg::Full => VerifyMode::Full,
     };
+    // Issue #4194, roborev round-4 MEDIUM findings (two, one fix): clamped to
+    // MAX_JOBS regardless of source (default OR user-supplied `--jobs`).
+    // (1) `check_digest` (Check 2, runs in QUICK mode too) reads the WHOLE
+    // `Data.db` into a `Vec<u8>` — peak RSS is `jobs x largest Data.db`, not
+    // "identical to `verify --mode full`" as this module's own doc claimed;
+    // an unclamped default (`available_parallelism()`) against real,
+    // GB-sized production SSTables on a many-core box is an OOM risk `verify`
+    // alone never had (it only ever processes one generation). (2) each
+    // generation runs on `spawn_blocking` + `Handle::block_on`, and
+    // `verify_one`'s OWN async awaits (`tokio::fs::metadata`/`File::open`,
+    // `IndexReader::open`) are themselves implemented via `spawn_blocking` —
+    // an UNBOUNDED `--jobs` past tokio's `max_blocking_threads` (default
+    // 512) can occupy every blocking-pool thread with OUTER tasks parked in
+    // `block_on`, each waiting on an INNER blocking task that can never be
+    // scheduled: a permanent hang with no output. `MAX_JOBS` sits far below
+    // that default, so this clamp closes both.
+    const MAX_JOBS: usize = 8;
     let jobs = args
         .jobs
         .unwrap_or_else(|| {
@@ -337,7 +383,7 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
                 .map(|n| n.get())
                 .unwrap_or(1)
         })
-        .max(1);
+        .clamp(1, MAX_JOBS);
 
     // Bounded concurrency (design.md §S3): at most `jobs`
     // `verify_sstable_generation` calls in flight, each with the SAME

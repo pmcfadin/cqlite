@@ -403,7 +403,7 @@ pub enum Commands {
     },
     /// Verify every SSTable table directory under a data directory in one pass (issue #4194)
     #[command(
-        long_about = "Walk every <keyspace>/<table>-<id>/ directory under <data-dir>, verify EVERY SSTable generation found there (not just the first) with the same check pipeline as `cqlite verify`, and report one row per generation: severity ok|degraded|corrupt|unreadable, plus a data-dir-wide exit code. `degraded` names a CQLite-only detection (e.g. a Filter.db false negative) that is not proof of unreadability -- it alone never trips a non-zero exit. A table directory with zero readable generations (no readable Data.db, unopenable directory) is a row with severity `unreadable`, never a silently-dropped entry. Exit 0 = every row ok; 2 = any row corrupt or unreadable, OR zero generations were found under <data-dir> at all (degraded rows are OK-adjacent, see design.md S2); 1 = usage error (<data-dir> missing or not a directory). --jobs bounds how many generations verify concurrently on the blocking thread pool (verification's hot checks are blocking I/O) -- it never changes which rows appear or their severities. Example: cqlite sweep ./test-data/datasets/sstables --mode full --out json --jobs 4"
+        long_about = "Walk every <keyspace>/<table>-<id>/ directory under <data-dir> (exactly two levels; a `.<index-name>/` secondary-index subdirectory, `snapshots/`, or `backups/` is NOT descended into and contributes no row -- out of scope for this verb), verify EVERY SSTable generation found there (not just the first) with the same check pipeline as `cqlite verify`, and report one row per generation: severity ok|degraded|corrupt|unreadable, plus a data-dir-wide exit code. `degraded` names a CQLite-only detection (e.g. a Filter.db false negative) that is not proof of unreadability -- it alone never trips a non-zero exit. A table directory with zero readable generations (no readable Data.db, unopenable directory, OR a table that has genuinely never been flushed -- e.g. sweeping a live Cassandra data directory will report many such rows for untouched system tables) is a row with severity `unreadable`, never a silently-dropped entry. Exit 0 = every row ok; 2 = any row corrupt or unreadable, OR zero generations were found under <data-dir> at all (degraded rows are OK-adjacent, see design.md S2); 1 = usage error (<data-dir> missing or not a directory). --jobs bounds how many generations verify concurrently on the blocking thread pool, clamped to a fixed maximum of 8 regardless of source (peak memory scales with jobs -- verification reads a whole Data.db into memory even in quick mode) -- it never changes which rows appear or their severities. Example: cqlite sweep ./test-data/datasets/sstables --mode full --out json --jobs 4"
     )]
     Sweep(SweepArgs),
     /// Export an SSTable generation as a delta-envelope Parquet file (Issue #705)
@@ -637,9 +637,13 @@ pub struct SweepArgs {
     /// tokio's blocking thread pool (verification's own hot checks use
     /// blocking file I/O, so each runs on a dedicated blocking-pool thread
     /// rather than an async worker — roborev round-2/round-3 LOW findings).
-    /// Defaults to the host's available parallelism. Never affects WHICH
-    /// rows appear or their severities — only how many single-generation
-    /// `verify` calls run at once (design.md §S3.2).
+    /// Defaults to the host's available parallelism, CLAMPED to a fixed
+    /// maximum of 8 regardless of source — a `verify` check reads a whole
+    /// `Data.db` into memory even in QUICK mode, so peak RSS scales with
+    /// `jobs`, and an unbounded value also risks exhausting the async
+    /// runtime's blocking-thread pool (roborev round-4 MEDIUM findings).
+    /// Never affects WHICH rows appear or their severities — only how many
+    /// single-generation `verify` calls run at once (design.md §S3.2).
     #[arg(long)]
     pub jobs: Option<usize>,
 }
