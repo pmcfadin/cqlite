@@ -46,6 +46,10 @@ mod limit_pushdown;
 mod lookup;
 mod numeric_acc;
 mod predicate;
+/// The raw SSTable view (`<keyspace>.<table>_raw_sstable_data`, issue #4222) —
+/// see the module's own doc for the interception point and fail-closed
+/// contract.
+mod raw_view;
 mod row_build;
 mod schemaless_point;
 mod stream_agg;
@@ -86,6 +90,7 @@ use lookup::{
     classify_partition_lookup, honest_targeted_path, sort_metadata_rows_by_token,
     sort_rows_by_token, PartitionLookupOutcome,
 };
+use raw_view::strip_raw_view_suffix;
 use row_build::{column_info_from_type_str, parse_cql_type_str, parse_table_id};
 use value_ops::{compare_values_ordering, const_arithmetic, eval_arithmetic};
 use writetime_ttl::{
