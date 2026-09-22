@@ -96,9 +96,7 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Vec<PathBuf>> {
 /// Map a completed [`VerifyReport`] to its severity + cause (design.md §D3):
 /// `FilterFalseNegative`-only is `Degraded`; any other non-empty finding set
 /// is `Corrupt`. A closed function of `VerifyErrorClass`, stated once.
-fn classify_report(
-    findings: &[VerifyFinding],
-) -> (Severity, Option<String>) {
+fn classify_report(findings: &[VerifyFinding]) -> (Severity, Option<String>) {
     if findings.is_empty() {
         return (Severity::Ok, None);
     }
@@ -119,7 +117,12 @@ fn classify_report(
     }
 }
 
-async fn verify_one(dir: PathBuf, mode: VerifyMode, config: Config, platform: Arc<Platform>) -> SweepRow {
+async fn verify_one(
+    dir: PathBuf,
+    mode: VerifyMode,
+    config: Config,
+    platform: Arc<Platform>,
+) -> SweepRow {
     match verify_sstable(&dir, mode, &config, platform).await {
         Ok(report) => {
             let (severity, cause) = classify_report(&report.findings);
@@ -163,7 +166,11 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
     };
     let jobs = args
         .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
         .max(1);
 
     // Bounded concurrency (design.md §S3): at most `jobs` `verify_sstable`
@@ -172,7 +179,11 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(jobs));
     let mut set = JoinSet::new();
     for dir in dirs {
-        let permit = semaphore.clone().acquire_owned().await.expect("semaphore never closed");
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore never closed");
         let config = config.clone();
         let platform = platform.clone();
         set.spawn(async move {
@@ -236,7 +247,12 @@ fn print_text(rows: &[SweepRow]) {
                     cause
                 );
                 for f in &row.findings {
-                    println!("             - [{}] {}: {}", f.class.code(), f.component, f.detail);
+                    println!(
+                        "             - [{}] {}: {}",
+                        f.class.code(),
+                        f.component,
+                        f.detail
+                    );
                 }
             }
         }

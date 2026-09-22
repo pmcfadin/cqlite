@@ -109,15 +109,29 @@ fn corrupt_data_db(dir: &Path) {
 fn corrupt_filter_db_false_negative(dir: &Path) {
     let path = dir.join("nb-1-big-Filter.db");
     let mut bytes = std::fs::read(&path).expect("read Filter.db to corrupt");
-    assert!(bytes.len() > 8, "Filter.db too short to hold the manifest-pinned bit");
-    assert_eq!(bytes[8] & 0x10, 0x10, "expected bit 0x10 set at byte 8 before the flip");
+    assert!(
+        bytes.len() > 8,
+        "Filter.db too short to hold the manifest-pinned bit"
+    );
+    assert_eq!(
+        bytes[8] & 0x10,
+        0x10,
+        "expected bit 0x10 set at byte 8 before the flip"
+    );
     bytes[8] &= !0x10;
     std::fs::write(&path, bytes).expect("write corrupted Filter.db");
 }
 
 fn run_sweep(data_dir: &Path, out: &str, jobs: Option<usize>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cqlite"));
-    cmd.args(["sweep", &data_dir.display().to_string(), "--mode", "full", "--out", out]);
+    cmd.args([
+        "sweep",
+        &data_dir.display().to_string(),
+        "--mode",
+        "full",
+        "--out",
+        out,
+    ]);
     if let Some(j) = jobs {
         cmd.args(["--jobs", &j.to_string()]);
     }
@@ -148,13 +162,20 @@ fn s1_1_and_s4_1_all_healthy_sweep_is_all_ok_with_affirmative_zero_totals() {
     copy_generation(&clean, &staging.path().join("ks1").join("table-b"));
 
     let output = run_sweep(staging.path(), "json", None);
-    assert_eq!(output.status.code(), Some(0), "expected exit 0 for an all-healthy sweep");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "expected exit 0 for an all-healthy sweep"
+    );
     let value = parse_json(&output);
     let rows = value["rows"].as_array().expect("rows array");
     assert_eq!(rows.len(), 2, "expected one row per table dir: {value}");
     for row in rows {
         assert_eq!(row["severity"], "ok", "expected every row ok: {row}");
-        assert!(row["cause"].is_null(), "an ok row must not carry a cause: {row}");
+        assert!(
+            row["cause"].is_null(),
+            "an ok row must not carry a cause: {row}"
+        );
     }
     // Affirmative-zero (S4.1): every severity key present even at 0.
     let totals = &value["totals"];
@@ -181,7 +202,11 @@ fn s1_2_one_corrupted_copy_makes_exactly_that_row_corrupt() {
     corrupt_data_db(&corrupt_dir);
 
     let output = run_sweep(staging.path(), "json", None);
-    assert_eq!(output.status.code(), Some(2), "expected exit 2 with one corrupt row");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2 with one corrupt row"
+    );
     let value = parse_json(&output);
     let rows = value["rows"].as_array().expect("rows array");
     assert_eq!(rows.len(), 2);
@@ -193,7 +218,9 @@ fn s1_2_one_corrupted_copy_makes_exactly_that_row_corrupt() {
     assert_eq!(corrupt_row["severity"], "corrupt");
     let findings = corrupt_row["findings"].as_array().expect("findings array");
     assert!(
-        findings.iter().any(|f| f["class"] == "ChunkDecompressionError"),
+        findings
+            .iter()
+            .any(|f| f["class"] == "ChunkDecompressionError"),
         "corrupt row did not name ChunkDecompressionError: {corrupt_row}"
     );
 
@@ -249,13 +276,24 @@ fn s1_4_a_directory_with_no_data_db_is_an_unreadable_row_never_an_omission() {
     std::fs::write(dir.join("stray.txt"), b"not an sstable component").expect("write stray file");
 
     let output = run_sweep(staging.path(), "json", None);
-    assert_eq!(output.status.code(), Some(2), "expected exit 2 for an unreadable row");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2 for an unreadable row"
+    );
     let value = parse_json(&output);
     let rows = value["rows"].as_array().expect("rows array");
-    assert_eq!(rows.len(), 1, "the directory must still produce exactly one row: {value}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the directory must still produce exactly one row: {value}"
+    );
     assert_eq!(rows[0]["severity"], "unreadable");
     assert!(
-        rows[0]["cause"].as_str().map(|c| !c.is_empty()).unwrap_or(false),
+        rows[0]["cause"]
+            .as_str()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false),
         "unreadable row must name a cause: {}",
         rows[0]
     );
@@ -271,7 +309,11 @@ fn s2_2_usage_error_on_a_missing_data_dir() {
         .args(["sweep", "/does/not/exist/cqlite-4194-sweep-test"])
         .output()
         .expect("spawn cqlite sweep");
-    assert_eq!(output.status.code(), Some(1), "expected exit 1 on a missing data dir");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected exit 1 on a missing data dir"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("does not exist") || stderr.contains("not a directory"),
@@ -305,13 +347,23 @@ fn s3_2_jobs_bounds_concurrency_not_which_rows_appear() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| (r["path"].as_str().unwrap().to_string(), r["severity"].as_str().unwrap().to_string()))
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap().to_string(),
+                r["severity"].as_str().unwrap().to_string(),
+            )
+        })
         .collect();
     let mut rows_4jobs: Vec<(String, String)> = parse_json(&out_4jobs)["rows"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| (r["path"].as_str().unwrap().to_string(), r["severity"].as_str().unwrap().to_string()))
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap().to_string(),
+                r["severity"].as_str().unwrap().to_string(),
+            )
+        })
         .collect();
     rows_1job.sort();
     rows_4jobs.sort();

@@ -108,6 +108,11 @@ fn ranges_intersect(a: (u64, u64), b: (u64, u64)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// One boundary-source entry: `(LOGICAL Data.db position, raw key when
+/// known)`. `None` marks an entry whose identity is not yet resolvable (see
+/// [`PARTITION_KEY_UNAVAILABLE`]).
+pub type BoundaryEntry = (u64, Option<Vec<u8>>);
+
 /// Intersect `damaged` (a closed-open `[start, end)` range in `Data.db`
 /// LOGICAL/decompressed offset space) against `boundary_entries` — one
 /// `(data_offset, raw_key)` pair per partition the boundary source (`Index.db`
@@ -123,10 +128,10 @@ fn ranges_intersect(a: (u64, u64), b: (u64, u64)) -> bool {
 /// scanned here (design.md §D1/§D6, issue #28).
 pub fn resolve_partitions(
     damaged: (u64, u64),
-    boundary_entries: &[(u64, Option<Vec<u8>>)],
+    boundary_entries: &[BoundaryEntry],
     logical_len: u64,
 ) -> PartitionResolution {
-    let mut sorted: Vec<&(u64, Option<Vec<u8>>)> = boundary_entries.iter().collect();
+    let mut sorted: Vec<&BoundaryEntry> = boundary_entries.iter().collect();
     sorted.sort_by_key(|(offset, _)| *offset);
 
     let mut hits: Vec<KeyRef> = Vec::new();
@@ -166,7 +171,7 @@ pub fn resolve_location(
     chunk_index: Option<usize>,
     boundary_source_healthy: bool,
     damaged_logical: (u64, u64),
-    boundary_entries: Option<&[(u64, Option<Vec<u8>>)]>,
+    boundary_entries: Option<&[BoundaryEntry]>,
     logical_len: u64,
 ) -> Location {
     let partitions = if !boundary_source_healthy {
@@ -193,10 +198,7 @@ mod tests {
     use super::*;
 
     fn entries(pairs: &[(u64, &[u8])]) -> Vec<(u64, Option<Vec<u8>>)> {
-        pairs
-            .iter()
-            .map(|(o, k)| (*o, Some(k.to_vec())))
-            .collect()
+        pairs.iter().map(|(o, k)| (*o, Some(k.to_vec()))).collect()
     }
 
     #[test]
@@ -217,10 +219,7 @@ mod tests {
         let res = resolve_partitions((90, 110), &e, 300);
         assert_eq!(
             res,
-            PartitionResolution::Resolved(vec![
-                KeyRef::from_raw(b"k0"),
-                KeyRef::from_raw(b"k1"),
-            ])
+            PartitionResolution::Resolved(vec![KeyRef::from_raw(b"k0"), KeyRef::from_raw(b"k1"),])
         );
     }
 
