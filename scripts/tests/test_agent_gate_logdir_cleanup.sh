@@ -1321,7 +1321,17 @@ if d11b=$(wait_for_logdir "$td11b"); then
     # A TIMEOUT here is a REAL failure, not a skip: either the stub never got its slot within
     # 30s or it died during start-up. Say which is being claimed, and do not TERM-and-assert
     # anyway, because those assertions would be about a run in an unknown state.
+    #
+    # FOUR `bad`s, matching the FOUR verdicts the success branch above reports (roborev
+    # job 4272, Low) — one per assertion this branch could not take, not one. A single
+    # `bad` here dropped the suite's total verdict count by 3 against the "NO SLACK"
+    # degraded floor (see the suite-floor assertion near the end of this file), so a
+    # readiness timeout ALSO tripped "at least one case was deleted or died before its
+    # assertions" — a second, misleading failure pointing away from the real cause.
     bad "AC11b: precondition FAILED — no readiness marker under $td11b/rundir within 30s; the stub is slot-exempt (--only) so this is NOT a #1825 queue wait — it died during start-up, so TERMing now would measure the start-up race rather than the signalled-bundle behaviour"
+    bad "AC11b: cannot measure — the run died before reaching readiness, so whether it would die OF THE SIGNAL cannot be claimed"
+    bad "AC11b: cannot measure — the run died before reaching readiness, so whether its bundle would survive a SIGNAL cannot be claimed"
+    bad "AC11b: cannot measure — the run died before reaching readiness, so its disposition artifact cannot be claimed"
     kill -TERM "$sig_pid" 2>/dev/null; wait "$sig_pid" 2>/dev/null || :
   fi
 else

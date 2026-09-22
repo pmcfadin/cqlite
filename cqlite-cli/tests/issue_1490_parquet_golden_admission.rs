@@ -1456,6 +1456,9 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
         // #[ignore] or cfg(target_os), which would hide the case on hosts that CAN run it.
         if let Err(e) = std::fs::write(&unreadable, b"") {
             if e.raw_os_error() == Some(libc::EILSEQ) {
+                // Required, not skippable, on Linux/ext4 — the gate-of-record filesystem,
+                // where this is NOT expected (roborev job 4272, Medium).
+                assert!(!cfg!(target_os = "linux"), "EILSEQ on Linux/ext4 is a real regression, not the APFS-only case this skip exists for (#4221)");
                 println!(
                     "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
                 );

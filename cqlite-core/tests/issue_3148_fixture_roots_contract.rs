@@ -466,6 +466,9 @@ fn non_utf8_override_is_rejected_fail_closed() {
     // #[ignore] or cfg(target_os), which would hide the case on hosts that CAN run it.
     if let Err(e) = std::fs::create_dir(&raw) {
         if e.raw_os_error() == Some(libc::EILSEQ) {
+            // Required, not skippable, on Linux/ext4 — the gate-of-record filesystem, where
+            // this is NOT expected (roborev job 4272, Medium).
+            assert!(!cfg!(target_os = "linux"), "EILSEQ on Linux/ext4 is a real regression, not the APFS-only case this skip exists for (#4221)");
             println!(
                 "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
             );

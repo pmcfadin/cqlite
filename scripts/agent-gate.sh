@@ -10220,11 +10220,12 @@ _record_status_detail() {
 # sentence was written last. The honest scope is stated here and the C1 residual is explained
 # at the LC_ALL=C pin below.
 #
-# DEFENCE IN DEPTH, stated as such rather than implied: the one writer today (run_file_size)
-# emits fixed wording, a count and a bare filename — no repository PATH and no
-# caller-controlled value — so no REACHABLE input carries a control character at all. This
-# boundary exists so the NEXT writer cannot reintroduce the row-injection route by not
-# thinking about it.
+# DEFENCE IN DEPTH, stated as such rather than implied: every writer today (run_file_size,
+# and run_python_bindings's open-files detail added by #4221) emits fixed wording plus
+# GATE-COMPUTED values — a count and a bare filename for the former, an integer ulimit
+# reading for the latter — no repository PATH and no caller-controlled value in either, so
+# no REACHABLE input carries a control character at all. This boundary exists so the NEXT
+# writer cannot reintroduce the row-injection route by not thinking about it.
 # NOT BEHAVIOURALLY TESTED ON THIS PLATFORM, and that is DECLARED rather than papered over
 # (roborev job 20, L2). A test was written for this pin and then DELETED: GNU `tr` is
 # byte-wise, so for every input any writer here can produce, `[:cntrl:]` selects the same
@@ -15827,32 +15828,60 @@ run_component() { # run_component <name> <cmd...>
 # contribution to the EMFILE class without quietly becoming the reason a leaky reader
 # passes. See the block in run_python_bindings for the full mechanism.
 _PB_NOFILE_MIN=4096
+# The MEASURED failure floor (issue #4221, roborev job 4272 finding 2): ten
+# test_parity.py cases FAILed as "got 0, expected N" at exactly `ulimit -n 256`, and
+# passed unrestricted. Nothing between 257 and $_PB_NOFILE_MIN was ever bisected, so a
+# host whose HARD ceiling caps the soft raise somewhere in that unvalidated band is not
+# known-bad — only at-or-below this floor is. Distinguishing the two matters because
+# the earlier form FAILed the whole band on a threshold ("not a measured requirement")
+# that was never meant to be a pass/fail line, with a remedy ("relaunch with a higher
+# soft limit") an operator cannot follow when the CEILING, not the harness, is what
+# capped the raise.
+_PB_NOFILE_FLOOR=256
 
 # _gate_raise_nofile_limit (issue #4221, roborev job 4263 finding 1): raise the
 # launchd-inherited open-file SOFT limit ONCE, in the gate's OWN top-level shell,
-# before ANY component runs. A bash `ulimit` change is inherited by every process
-# forked afterward, so calling this exactly once here — before launch_components
-# forks either lane — reaches every component in one place, not just
-# python-bindings. The gap this closes: the guard originally lived ONLY inside
-# run_python_bindings, so every OTHER component sharing the SAME launchd-inherited
-# 256-file cap (core-tests, cli-tests, node-bindings, flight-tests, the parity
-# lanes — all of which read the same corpus through the same reader that swallows
-# EMFILE into an empty result set) still ran at 256. Any of those whose assertion is
-# weaker than an exact row count (or whose corpus is larger than the one measured
-# when this guard was written) could silently PASS on truncated data.
+# before either lane in launch_components forks. A bash `ulimit` change is inherited
+# by every process forked afterward, so calling this exactly once here reaches every
+# LAUNCHED-COMPONENT in one place, not just python-bindings. The gap this closes: the
+# guard originally lived ONLY inside run_python_bindings, so every OTHER component
+# sharing the SAME launchd-inherited 256-file cap (core-tests, cli-tests,
+# node-bindings, flight-tests, the parity lanes — all of which read the same corpus
+# through the same reader that swallows EMFILE into an empty result set) still ran at
+# 256. Any of those whose assertion is weaker than an exact row count (or whose
+# corpus is larger than the one measured when this guard was written) could silently
+# PASS on truncated data.
+# NARROWER than "before ANY component runs" (roborev job 4272, Low): `run_file_size`
+# and the dataset/schemas preflights execute inline BEFORE launch_components is ever
+# reached, and `--lite`/`--delta` never call launch_components (or this function) at
+# all — their executors, including the `--lite` python tier, still run at whatever
+# the launchd-inherited limit already was. Both residuals are real; this function
+# does not reach them.
 # Best-effort, not fail-closed: an inability to raise the limit here is reported to
 # gate stdout so a reader of a red run has the context, but does not abort the
 # whole gate on its own — run_python_bindings keeps its own fail-closed re-assert
 # (below) as the backstop for the one component already known to need it exactly.
 # `-S` on every call is load-bearing, not decoration — see the full mechanism note
 # inside run_python_bindings; setting soft-only never touches the hard ceiling.
+# HARD-LIMIT-AWARE (roborev job 4272, Medium): raising toward $_PB_NOFILE_MIN can
+# only ever reach the process's HARD ceiling, so on a host/container whose hard
+# `nofile` sits below it (1024/2048 are common non-macOS defaults) an unprivileged
+# raise to $_PB_NOFILE_MIN necessarily fails — that is a HOST LIMITATION, not this
+# guard refusing, and is reported as such rather than folded into the same "could not
+# raise" wording a genuine harness-side failure gets.
 _gate_raise_nofile_limit() {
-  local want="$_PB_NOFILE_MIN" cur eff
+  local want="$_PB_NOFILE_MIN" floor="$_PB_NOFILE_FLOOR" cur hard target eff
   cur=$(ulimit -S -n 2>/dev/null || printf '')
+  hard=$(ulimit -H -n 2>/dev/null || printf '')
+  target="$want"
+  case "$hard" in
+    unlimited|''|*[!0-9]*) : ;;
+    *) [ "$hard" -lt "$want" ] && target="$hard" ;;
+  esac
   if [ "$cur" != unlimited ]; then
     case "$cur" in
       ''|*[!0-9]*) : ;;
-      *) [ "$cur" -lt "$want" ] && ulimit -S -n "$want" 2>/dev/null || : ;;
+      *) [ "$cur" -lt "$target" ] && ulimit -S -n "$target" 2>/dev/null || : ;;
     esac
   fi
   eff=$(ulimit -S -n 2>/dev/null || printf '')
@@ -15861,8 +15890,10 @@ _gate_raise_nofile_limit() {
       ''|*[!0-9]*)
         echo "agent-gate: WARNING open-file limit UNMEASURABLE (got ${eff:-<no value>}) at gate start-up — components other than python-bindings run without this guard's raise (#4221)" ;;
       *)
-        if [ "$eff" -lt "$want" ]; then
-          echo "agent-gate: WARNING open-file limit is $eff, below the $want this guard wants, and could not be raised at gate start-up (#4221) — components other than python-bindings run without this guard's raise"
+        if [ "$eff" -le "$floor" ]; then
+          echo "agent-gate: WARNING open-file limit is $eff, at or below the $floor measured-failing floor, and could not be raised at gate start-up (#4221) — components other than python-bindings run without this guard's raise"
+        elif [ "$eff" -lt "$want" ]; then
+          echo "agent-gate: NOTE open-file limit is $eff (above the $floor measured-failing floor but below the $want this guard prefers) at gate start-up — capped by this host's HARD nofile ceiling ($hard), a host limitation rather than a guard failure (#4221)"
         fi ;;
     esac
   fi
@@ -15934,10 +15965,14 @@ run_python_bindings() {
     # reader would ever need, so this guard cannot become the reason a leaky reader
     # looks green.
     #
-    # FAIL-CLOSED: if the limit cannot be brought to $_PB_NOFILE_MIN, the component FAILs
+    # FAIL-CLOSED: below the MEASURED floor ($_PB_NOFILE_FLOOR), the component FAILs
     # naming the observed value rather than running — continuing would re-enter exactly
     # the silently-wrong state this guard exists to prevent, and a component that reports
-    # `got 0, expected N` for an environmental reason is the worst of both outcomes.
+    # `got 0, expected N` for an environmental reason is the worst of both outcomes. Above
+    # the floor but below $_PB_NOFILE_MIN (roborev job 4272, Medium) is UNVALIDATED, not
+    # known-bad — nothing between 257 and $_PB_NOFILE_MIN was ever bisected — so that band
+    # runs pytest rather than refusing to, and the effective value is still recorded so a
+    # reader can see the run had less headroom than the guard prefers.
     # `-S` on EVERY ulimit call below is load-bearing, not decoration: bash's `ulimit -n N`
     # with neither -S nor -H sets the SOFT **and HARD** limits together, so the bare form
     # would permanently lower launchd's `unlimited` hard limit to $_PB_NOFILE_MIN for this
@@ -15946,29 +15981,41 @@ run_python_bindings() {
     # soft limit with the bare form could not raise it again — `cannot modify limit:
     # Operation not permitted` — which is the same trap one step earlier.) Reading with
     # `-S` likewise asks the question this guard actually cares about.
-    local nofile_out
-    nofile_out=$(mktemp "${TMPDIR:-/tmp}/agent-gate-nofile.XXXXXX")
+    # A FIXED path under $LOG_DIR (roborev job 4272, Low), not `mktemp` under $TMPDIR:
+    # mktemp's result went unchecked (an mktemp failure died inside `set -euo pipefail`
+    # on `printf … >""`, FAILing the component for a reason the log never named), and a
+    # sidecar outside $LOG_DIR fell outside the disposition machinery that manages this
+    # run's bundle, leaking on a SIGTERM mid-pytest. Same pattern as $pbv_reach above.
+    local nofile_out="$LOG_DIR/$name.nofile-eff"
+    rm -f "$nofile_out"
     if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" _PB_NOFILE_MIN="$_PB_NOFILE_MIN" \
-       _PB_NOFILE_OUT="$nofile_out" bash -c '
+       _PB_NOFILE_FLOOR="$_PB_NOFILE_FLOOR" _PB_NOFILE_OUT="$nofile_out" bash -c '
         set -euo pipefail
         want="$_PB_NOFILE_MIN"
+        floor="$_PB_NOFILE_FLOOR"
         cur=$(ulimit -S -n 2>/dev/null || printf "")
+        hard=$(ulimit -H -n 2>/dev/null || printf "")
+        target="$want"
+        case "$hard" in
+          unlimited|""|*[!0-9]*) : ;;
+          *) if [ "$hard" -lt "$want" ]; then target="$hard"; fi ;;
+        esac
         if [ "$cur" != unlimited ]; then
           case "$cur" in
             ""|*[!0-9]*) : ;;
-            *) if [ "$cur" -lt "$want" ]; then ulimit -S -n "$want" 2>/dev/null || : ; fi ;;
+            *) if [ "$cur" -lt "$target" ]; then ulimit -S -n "$target" 2>/dev/null || : ; fi ;;
           esac
         fi
         eff=$(ulimit -S -n 2>/dev/null || printf "")
-        printf "%s" "$eff" >"$_PB_NOFILE_OUT"
+        printf "%s" "$eff" >"$_PB_NOFILE_OUT" || { printf "agent-gate: could not write the open-file-limit sidecar (%s) — refusing to run pytest (#4221)\n" "$_PB_NOFILE_OUT"; exit 97; }
         if [ "$eff" != unlimited ]; then
           case "$eff" in
             ""|*[!0-9]*)
               printf "agent-gate: open-file limit UNMEASURABLE (got %s) — refusing to run pytest (#4221)\n" "${eff:-<no value>}"
               exit 97 ;;
             *)
-              if [ "$eff" -lt "$want" ]; then
-                printf "agent-gate: open-file limit %s is below the required %s and could not be raised — refusing to run pytest, because under a low limit this suite fails as '\''got 0, expected N'\'' rather than erroring (#4221). A gate launched via launchctl/launchd inherits a soft maxfiles of 256; relaunch with a higher soft limit.\n" "$eff" "$want"
+              if [ "$eff" -le "$floor" ]; then
+                printf "agent-gate: open-file limit %s is at or below the %s MEASURED-failing floor and could not be raised — refusing to run pytest, because at that floor this suite fails as '\''got 0, expected N'\'' rather than erroring (#4221). If this host'\''s HARD nofile ceiling ($hard) is below %s, that is a host limitation, not a harness bug — relaunch on a host with a higher hard limit; otherwise relaunch with a higher soft limit.\n" "$eff" "$floor" "$want"
                 exit 97
               fi ;;
           esac

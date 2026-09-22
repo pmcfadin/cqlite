@@ -233,7 +233,20 @@ mod tests {
     /// LOUDLY, rather than hidden behind `#[ignore]` or `cfg(target_os)`, either of
     /// which would also hide the case on the hosts that CAN run it (issue #4221).
     fn is_non_utf8_name_refusal(e: &std::io::Error) -> bool {
-        e.raw_os_error() == Some(libc::EILSEQ)
+        let refused = e.raw_os_error() == Some(libc::EILSEQ);
+        // On Linux (ext4, the CI gate-of-record filesystem — issue #4206/#4220/#4221's own
+        // astro-processor host) this refusal is NOT an expected filesystem limitation the way
+        // it is on APFS, so treating it as a skip there would let a real regression present as
+        // an environmental one on the one platform this repo actually gates on (roborev job
+        // 4272, Medium: "a CI-lane regression can never present as a skip"). Require the
+        // capability unconditionally on Linux instead of skipping.
+        assert!(
+            !(refused && cfg!(target_os = "linux")),
+            "a non-UTF-8 path component was refused (EILSEQ) on Linux/ext4, where this is NOT \
+             an expected filesystem limitation — a real regression, not the APFS-only \
+             environmental case this skip exists for (issue #4221, roborev job 4272)"
+        );
+        refused
     }
 
     /// The one line a skipping case prints, so a reader of a green log can tell a case
