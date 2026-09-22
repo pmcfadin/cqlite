@@ -108,16 +108,8 @@ pub(super) fn copy_untouched_components(
 
 /// Write the final `TOC.txt` — the publication barrier, always written
 /// LAST, after every other requested component (design D2/D4).
-pub(super) fn write_toc(
-    out_dir: &Path,
-    base: &str,
-    present: &[SSTableComponent],
-) -> Result<()> {
-    let entries: Vec<ComponentEntry> = present
-        .iter()
-        .cloned()
-        .map(ComponentEntry::new)
-        .collect();
+pub(super) fn write_toc(out_dir: &Path, base: &str, present: &[SSTableComponent]) -> Result<()> {
+    let entries: Vec<ComponentEntry> = present.iter().cloned().map(ComponentEntry::new).collect();
     let toc_path: PathBuf = out_dir.join(format!("{base}-TOC.txt"));
     TocWriter::new(toc_path).write(&entries)
 }

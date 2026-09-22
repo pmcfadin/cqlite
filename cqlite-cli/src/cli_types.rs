@@ -388,6 +388,11 @@ pub enum Commands {
         long_about = "Recover every completely-decodable partition of a damaged Data.db | table-dir into a fresh generation, from the authoritative boundary source (Index.db / the Partitions.db trie) -- never by scanning Data.db bytes for a plausible header. A partition is recovered WHOLE OR NOT AT ALL: a partition whose decode fails at any row is skipped entirely (a later row can carry a tombstone that shadows earlier ones already decoded, so writing a prefix would resurrect deleted data). Output is UNCOMPRESSED (issue #1406) -- CQLite's production write surface never emits a CompressionInfo.db. A damaged Index.db/Partitions.db means boundaries are unknown and salvage REFUSES, writing no Data.db; the remedy is `cqlite rebuild --components index` (issue #4197) first. --schema resolves through the global --schema flag, which may declare MULTIPLE tables; the target table is DERIVED from the input directory's own name (Cassandra's <table>-<id> convention) unless --table names it explicitly -- salvage FAILS CLOSED (never a silent guess) when neither resolves to exactly one matching CREATE TABLE. Exit 0 = every partition recovered AND every verification the run depends on actually RAN; 3 = output written with losses, OR with a verification GAP -- an uncompressed input with no CRC.db (or a CRC.db shorter than Data.db needs) disables chunk-CRC loss detection entirely, so its `losses: 0` means UNMEASURED, not clean; the manifest names the gap as a ChunkCrcUnavailable component finding (see --manifest); 2 = refused, no Data.db written; 1 = usage error. Example: cqlite --schema ks.tbl.cql salvage ./damaged-table-dir --out ./recovered --manifest ./recovered/salvage.json"
     )]
     Salvage(SalvageArgs),
+    /// Regenerate requested derived SSTable components from a healthy, unchanged Data.db (issue #4197)
+    #[command(
+        long_about = "Regenerate requested derived components (Index.db, Summary.db, Filter.db, Digest.crc32, TOC.txt, CRC.db, Statistics.db) from a healthy, UNCHANGED Data.db | table-dir -- Data.db is opened READ-ONLY and never modified. `--components` names EXACTLY which components to regenerate; `statistics` is opt-in only and its rebuild is LOSSY BY DECLARATION -- aggregate fields (min/max timestamp, min/max local-deletion-time, min/max TTL, partition/row/column counts, both estimated histograms, first/last key, has-partition-level-deletions) are recomputed from a full structural Data.db scan; repaired_at/pending_repair/is_transient are recovered when the original Statistics.db is readable, else lost; origin-host/compaction-ancestry are unconditionally lost (CQLite's own Statistics.db has no fields for either). Summary.db's min_index_interval is currently always recomputed to Cassandra's default 128 -- CQLite's own SSTableWriter hardcodes this value, so a table whose real min_index_interval was ever non-default will NOT get a byte-identical Summary.db; the manifest states this explicitly. A damaged Data.db (chunk-CRC failure, or a partition that fails to decode structurally while walking it) REFUSES -- nothing is written -- and names `cqlite salvage` (issue #4196) as the remedy. `--out` writes a COMPLETE, self-contained component set (every untouched original component, including Data.db itself, is copied verbatim alongside the freshly regenerated ones). `--in-place` REFUSES today, naming the #4195 dependency (`verify --mode audit` does not exist yet). BTI (`da`) input: `index` (Partitions.db/Rows.db) is NOT implemented in this release and is refused as a usage error; filter/digest/toc/statistics work normally; summary/crc are correctly reported `skipped_not_applicable` (BTI genuinely has neither). Exit 0 = every requested component regenerated (or correctly skipped_not_applicable); 2 = refused, nothing written; 1 = usage error. Example: cqlite --schema ks.tbl.cql rebuild ./table-dir --components index,digest,toc --out ./rebuilt"
+    )]
+    Rebuild(RebuildArgs),
     /// Verify SSTable integrity (compressed + corrupted) — epic #970, issue #1000
     #[command(
         long_about = "Enforce the CQLite verifier contract on one SSTable generation directory. QUICK mode checks component presence, TOC.txt completeness, Digest.crc32, CompressionInfo.db (+ chunk-offset bounds) and BTI trie structure. FULL mode adds inline Data.db chunk-CRC validation, Statistics.db/Summary.db parse, and a complete row scan that fails loudly on corrupt index/BTI components (no silent empty results). Exit code is non-zero when verification fails. Example: cqlite verify ./test-data/datasets/sstables/test_comp/lz4_table-xxx --mode full --out json"
@@ -614,6 +619,57 @@ pub struct SalvageArgs {
     /// stdout) — independent of `--manifest`.
     #[arg(long, value_enum, default_value = "text")]
     pub out_format: SalvageOutFormatArg,
+}
+
+/// Output format for the `rebuild` subcommand's console rendering (design
+/// D5: the manifest is the JSON contract; text is a rendering of it).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RebuildOutFormatArg {
+    /// Human-readable text (the default), to stderr.
+    Text,
+    /// The JSON manifest, to stdout.
+    Json,
+}
+
+// Arguments for the rebuild subcommand (issue #4197)
+#[derive(Args, Debug, Clone)]
+pub struct RebuildArgs {
+    /// `Data.db` file, or a table directory (each generation rebuilt
+    /// separately, one output component set per input generation).
+    pub input: PathBuf,
+    /// The table to rebuild, when `--schema` declares more than one. When
+    /// omitted, the table name is DERIVED from the input's own directory
+    /// name (Cassandra's `<table>-<32-hex-id>` convention), same rule as
+    /// `salvage --table`.
+    #[arg(long)]
+    pub table: Option<String>,
+    /// Comma-separated component list:
+    /// `index,summary,filter,digest,toc,crc,statistics`. `statistics` is
+    /// never implied by the ABSENCE of this flag defaulting to anything —
+    /// it must be named explicitly (spec R4.4); there is no default value.
+    #[arg(long, required = true)]
+    pub components: String,
+    /// Output directory. The regenerated components AND every untouched
+    /// original component (including `Data.db` itself, copied verbatim,
+    /// never modified) land here, so `--out` ends up holding a complete,
+    /// self-contained, independently-readable component set. Required
+    /// unless `--in-place` is passed (which refuses today regardless — see
+    /// that flag's doc).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Rebuild the components directly at their original location.
+    /// REFUSES today (exit 1), naming the dependency: the
+    /// temp-file/atomic-rename/audit protocol this flag would drive needs
+    /// `verify --mode audit` (issue #4195), which does not exist yet.
+    #[arg(long)]
+    pub in_place: bool,
+    /// Write the JSON manifest (design D5 shape) to this path.
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    /// Console rendering of the same manifest (text to stderr, or JSON to
+    /// stdout) — independent of `--manifest`.
+    #[arg(long, value_enum, default_value = "text")]
+    pub out_format: RebuildOutFormatArg,
 }
 
 // Arguments for the export-sstable subcommand (Issue #392)

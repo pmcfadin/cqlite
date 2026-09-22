@@ -153,6 +153,14 @@ pub struct RebuildOptions {
     /// `repairedAt`/`pendingRepair`/`isTransient` from, for spec R4.2's
     /// "renamed aside" recovery scenario. `None` (the default) reads the
     /// input's own expected sibling `Statistics.db` path.
+    ///
+    /// MUST keep the Cassandra `<version>-<generation>-<format>-` filename
+    /// convention (e.g. `nb-1-big-Statistics.db`) — `VersionGates::from_path`
+    /// derives the version/format gates needed to decode repair metadata
+    /// from the FILENAME itself, so an arbitrarily-renamed file (verified
+    /// empirically) is read as `lost` rather than `recovered`, even though
+    /// its bytes are perfectly intact. Moving it to a different DIRECTORY
+    /// with the same filename is the supported "renamed aside" shape.
     pub statistics_recovery_source: Option<PathBuf>,
 }
 
@@ -292,7 +300,10 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_component_naming_it() {
         let err = Component::parse_list("index,bogus").unwrap_err();
-        assert!(err.contains("bogus"), "error must name the bad token: {err}");
+        assert!(
+            err.contains("bogus"),
+            "error must name the bad token: {err}"
+        );
     }
 
     #[test]
