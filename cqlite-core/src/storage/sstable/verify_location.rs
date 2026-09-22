@@ -30,7 +30,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::platform::Platform;
-use crate::storage::sstable::verify::{BtiResolvedLeaf, ComponentSet, VerifyErrorClass, VerifyFinding};
+use crate::storage::sstable::verify::{
+    BtiResolvedLeaf, ComponentSet, VerifyErrorClass, VerifyFinding,
+};
 use crate::storage::sstable::version_gate::SsTableFormat;
 
 /// Where a [`VerifyFinding`] anchored to a `Data.db` byte range is located, and
