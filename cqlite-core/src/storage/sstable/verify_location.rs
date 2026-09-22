@@ -26,7 +26,12 @@
 //! [`Location::byte_offset`]: Location::byte_offset
 //! [`Location::byte_len`]: Location::byte_len
 
+use std::path::Path;
 use std::sync::Arc;
+
+use crate::platform::Platform;
+use crate::storage::sstable::verify::{BtiResolvedLeaf, ComponentSet, VerifyErrorClass, VerifyFinding};
+use crate::storage::sstable::version_gate::SsTableFormat;
 
 /// Where a [`VerifyFinding`] anchored to a `Data.db` byte range is located, and
 /// which partitions that range intersects.
@@ -96,6 +101,77 @@ impl KeyRef {
             rendered: None,
         }
     }
+}
+
+/// A chunk/offset-anchored finding awaiting location resolution (issue #4194).
+///
+/// Pushed alongside its finding at the check site — where the physical byte
+/// range and the LOGICAL (decompressed) damaged range are cheaply computable
+/// from local context (`CompressionInfo`, the CRC.db chunk grid) — because
+/// whether the boundary source (`Index.db` / `Partitions.db`) can be TRUSTED
+/// is only knowable once every check has run (design.md §D2). Resolved in one
+/// pass at the end of `verify_components` by [`finalize_locations`].
+///
+/// `pub(crate)` with `pub(crate)` fields (issue #4194 file-size relocation,
+/// #1116/#1135): constructed at each check site in `verify.rs`, resolved
+/// here — the type and its fields must be visible across that module
+/// boundary for straight struct-literal construction.
+pub(crate) struct PendingLocation {
+    /// Index into `findings` of the finding this location belongs to.
+    pub(crate) finding_index: usize,
+    /// Component the byte range belongs to — always `"Data.db"` today.
+    pub(crate) component: String,
+    /// Physical (on-disk) start of the damaged range.
+    pub(crate) byte_offset: u64,
+    /// Physical (on-disk) length of the damaged range.
+    pub(crate) byte_len: u64,
+    /// The chunk index the damage falls in, when the component has a chunk grid.
+    pub(crate) chunk_index: Option<usize>,
+    /// The damaged range in `Data.db` LOGICAL (decompressed) offset space —
+    /// the space `Index.db`/the BTI trie address (see this module's doc for
+    /// why this differs from the physical range above).
+    pub(crate) damaged_logical: (u64, u64),
+    /// The boundary source's declared total LOGICAL length, bounding the last
+    /// boundary entry's extent.
+    pub(crate) logical_len: u64,
+}
+
+/// Human-readable one-line rendering of a [`Location`] for text output
+/// (`VerifyFinding`'s `Display` impl and the CLI's text renderer, issue #4194).
+pub fn format_location(loc: &Location) -> String {
+    let chunk = loc
+        .chunk_index
+        .map(|c| format!("chunk {c}, "))
+        .unwrap_or_default();
+    let partitions = match &loc.partitions {
+        PartitionResolution::Resolved { keys, .. } if keys.is_empty() => "0 partitions".to_string(),
+        PartitionResolution::Resolved { keys, truncated } => {
+            // Issue #4194, roborev round-2 MEDIUM finding: `truncated` names
+            // how many more intersecting partitions exist beyond the
+            // `MAX_RESOLVED_KEYS` cap, so a badly truncated Data.db's report
+            // stays affirmative about what it omitted rather than silently
+            // showing a partial list as if it were complete.
+            let more = if *truncated > 0 {
+                format!(" (+{truncated} more, capped)")
+            } else {
+                String::new()
+            };
+            format!(
+                "{} partition(s){}: {}",
+                keys.len(),
+                more,
+                keys.iter()
+                    .map(|k| k.key_hex.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        PartitionResolution::Unresolved(cause) => format!("partitions unresolved ({cause})"),
+    };
+    format!(
+        "{}: {}offset 0x{:x} len {} — {}",
+        loc.component, chunk, loc.byte_offset, loc.byte_len, partitions
+    )
 }
 
 /// Lower-case hex encode, one `write!` per byte rather than one `String`
@@ -292,6 +368,131 @@ pub fn resolve_location(
         byte_len,
         chunk_index,
         partitions,
+    }
+}
+
+/// Resolve every [`PendingLocation`] in one pass and write the result back
+/// onto its owning finding (issue #4194, design.md §D1/§D2).
+///
+/// The boundary source is either fully trusted for this whole report or not
+/// trusted at all — never partially: `boundary_healthy` is a single decision
+/// (no `Index.db`/BTI-trie-corrupt finding present) applied uniformly to every
+/// pending location, so a damaged boundary source poisons ALL of them with
+/// [`BOUNDARY_SOURCE_UNREADABLE`], never just the finding that happens to be
+/// nearest the damage.
+///
+/// `pub(crate)` (issue #4194 file-size relocation): called from
+/// `verify.rs`'s `verify_components` once every check has run.
+pub(crate) async fn finalize_locations(
+    dir: &Path,
+    components: &ComponentSet,
+    findings: &mut [VerifyFinding],
+    pending: Vec<PendingLocation>,
+    bti_leaves: Option<&[BtiResolvedLeaf]>,
+    scan_position_map: Option<&std::collections::HashMap<u64, Vec<u8>>>,
+    platform: Arc<Platform>,
+) {
+    // `mut`: the BIG arm below can additionally downgrade this to `false`
+    // after consulting `IndexReader::is_fully_parsed()` (roborev round-1
+    // MEDIUM finding — see the comment at that check).
+    let mut boundary_healthy = match components.format {
+        SsTableFormat::Big => !findings
+            .iter()
+            .any(|f| f.class == VerifyErrorClass::IndexEntryCorrupt),
+        SsTableFormat::Bti => !findings.iter().any(|f| {
+            matches!(
+                f.class,
+                VerifyErrorClass::BtiRootPointerCorrupt | VerifyErrorClass::BtiTrieCorrupt
+            )
+        }),
+    };
+
+    // Boundary entries: `(logical Data.db position, raw key when known)`, one
+    // per partition the boundary source names — built only when the boundary
+    // source is healthy (an unhealthy one is never read for this purpose,
+    // matching the fail-closed contract regardless of what re-reading it
+    // might yield). Keys are `Arc<[u8]>` (roborev round-1 MEDIUM finding): BIG
+    // reuses `PartitionIndexEntry::raw_key`/`key_digest`'s ALREADY-`Arc`
+    // storage via a refcount bump, never an `O(key_len)` byte copy that would
+    // double the resident partition-index memory for a large table.
+    let mut boundary_entries: Option<Vec<BoundaryEntry>> = if !boundary_healthy {
+        None
+    } else {
+        match components.format {
+            SsTableFormat::Big => {
+                use crate::storage::sstable::index_reader::IndexReader;
+                let index_path = components.path(dir, "Index.db");
+                match IndexReader::open(&index_path, platform).await {
+                    // Issue #4194, roborev round-1 MEDIUM finding: `IndexReader`
+                    // uses a DIFFERENT parser from `check_big_index`'s structural
+                    // walk above, and per Check 4's own doc it "silently
+                    // TRUNCATES the partition list on the first malformed
+                    // Index.db entry" (issue #2302) — exposed via
+                    // `is_fully_parsed()`. `check_big_index` seeing no
+                    // `IndexEntryCorrupt` does NOT mean `IndexReader` parsed the
+                    // whole file; if the two parsers disagree, presenting a
+                    // partial prefix as `Resolved` is a confident WRONG answer,
+                    // exactly what the fail-closed contract (§D2) exists to
+                    // prevent. Downgrade `boundary_healthy` itself (not just
+                    // this arm's `None`) so every OTHER pending location in
+                    // this report is poisoned too, matching "fully trusted or
+                    // not at all".
+                    Ok(reader) if !reader.is_fully_parsed() => {
+                        boundary_healthy = false;
+                        None
+                    }
+                    Ok(reader) => Some(
+                        reader
+                            .get_partition_entries()
+                            .iter()
+                            .map(|e| {
+                                let raw = e.raw_key.clone().unwrap_or_else(|| e.key_digest.clone());
+                                (e.data_offset, Some(raw))
+                            })
+                            .collect(),
+                    ),
+                    Err(_) => None,
+                }
+            }
+            SsTableFormat::Bti => bti_leaves.map(|leaves| {
+                leaves
+                    .iter()
+                    .map(|leaf| {
+                        let key = leaf.inline_raw_key.as_deref().map(Arc::from).or_else(|| {
+                            scan_position_map
+                                .and_then(|m| m.get(&leaf.data_position))
+                                .map(|k| Arc::from(k.as_slice()))
+                        });
+                        (leaf.data_position, key)
+                    })
+                    .collect()
+            }),
+        }
+    };
+    // `resolve_partitions` requires its input pre-sorted ascending by
+    // `data_offset` (roborev round-1 MEDIUM finding — sort ONCE here rather
+    // than on every pending-location call): BIG's on-disk parse order is
+    // ascending by convention but not a documented guarantee, and BTI leaves
+    // come from a byte-comparable-KEY-order DFS trie walk, which is NOT
+    // Data.db offset order at all.
+    if let Some(entries) = boundary_entries.as_mut() {
+        entries.sort_by_key(|(offset, _)| *offset);
+    }
+
+    for p in pending {
+        let location = resolve_location(
+            &p.component,
+            p.byte_offset,
+            p.byte_len,
+            p.chunk_index,
+            boundary_healthy,
+            p.damaged_logical,
+            boundary_entries.as_deref(),
+            p.logical_len,
+        );
+        if let Some(f) = findings.get_mut(p.finding_index) {
+            f.location = Some(location);
+        }
     }
 }
 
