@@ -25,6 +25,9 @@ pub mod m2_select_validator;
 pub mod parser;
 pub mod planner;
 pub mod prepared;
+/// Shared `_raw_sstable_data` naming convention (issue #4222) — see the
+/// module's own doc for why this is not private to `select_executor`.
+pub(crate) mod raw_view_naming;
 pub mod result;
 pub(crate) mod result_budget;
 pub mod writetime_ttl_validator;
