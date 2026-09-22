@@ -52,7 +52,9 @@ use std::sync::Arc;
 // Corruption-location types (issue #4194), re-exported through `verify` so
 // `VerifyFinding.location`'s type is reachable via the existing `verify`
 // module path — no caller-visible new import path for the common case.
-pub use crate::storage::sstable::verify_location::{KeyRef, Location, PartitionResolution};
+pub use crate::storage::sstable::verify_location::{
+    KeyRef, Location, PartitionResolution, BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE,
+};
 
 /// Verification depth. QUICK and FULL are intentionally distinct — see the
 /// module docs. A QUICK success MUST NOT be presented as FULL corruption

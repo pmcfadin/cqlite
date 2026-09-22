@@ -23696,6 +23696,24 @@ run_tooling_tests() {
     return 0
   fi
 
+  # `cqlite verify`/`sweep` corruption-location no-resync-scan guard (issue
+  # #4194, spec verify-location L3): partition location resolution reads ONLY
+  # the boundary source's own decoded entries, never by scanning `Data.db`
+  # for a plausible header — same mechanism as the salvage guard above,
+  # scoped to the single `verify_location.rs` file. Pure grep, no
+  # cargo/python3/network needed.
+  echo ">>> [$name] bash scripts/tests/test_verify_location_no_resync_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (verify-location no-resync-scan guard #4194); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
