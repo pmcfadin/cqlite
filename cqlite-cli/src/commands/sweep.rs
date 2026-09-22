@@ -108,13 +108,26 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
     let mut unreadable_table_dirs = Vec::new();
     let keyspaces = std::fs::read_dir(data_dir)
         .map_err(|e| anyhow::anyhow!("cannot read data dir {}: {e}", data_dir.display()))?;
-    // roborev round-2 LOW finding: an explicit match on EVERY `read_dir`
-    // entry Result, not `.flatten()` — a per-entry `io::Error` (a transient
-    // unreadable directory entry, e.g. a race with a concurrent delete) used
-    // to be silently discarded with no row and no cause.
+    // roborev round-3 MEDIUM finding: round-2's `.flatten()` -> `let Ok(..)
+    // else { continue }` swap changed NOTHING observable — a per-entry
+    // `io::Error` (e.g. a race with a concurrent delete) still `continue`s
+    // with no row and no cause, the exact silent omission the comment
+    // claimed to fix. `DirEntry::path()` is unavailable on an `Err`, so the
+    // row names the PARENT directory the failing entry was under, not the
+    // entry itself — still one row, never a silent skip.
     for ks_entry in keyspaces {
-        let Ok(ks_entry) = ks_entry else {
-            continue; // a single unreadable readdir ENTRY, not the keyspace dir itself
+        let ks_entry = match ks_entry {
+            Ok(e) => e,
+            Err(e) => {
+                unreadable_keyspaces.push((
+                    data_dir.join("<unreadable directory entry>"),
+                    format!(
+                        "unreadable directory entry under {}: {e}",
+                        data_dir.display()
+                    ),
+                ));
+                continue;
+            }
         };
         let ks_path = ks_entry.path();
         if !ks_path.is_dir() {
@@ -123,8 +136,18 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
         match std::fs::read_dir(&ks_path) {
             Ok(tables) => {
                 for table_entry in tables {
-                    let Ok(table_entry) = table_entry else {
-                        continue;
+                    let table_entry = match table_entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            unreadable_table_dirs.push((
+                                ks_path.join("<unreadable directory entry>"),
+                                format!(
+                                    "unreadable directory entry under {}: {e}",
+                                    ks_path.display()
+                                ),
+                            ));
+                            continue;
+                        }
                     };
                     let table_path = table_entry.path();
                     if !table_path.is_dir() {
@@ -132,25 +155,47 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
                     }
                     match std::fs::read_dir(&table_path) {
                         Ok(files) => {
-                            let mut data_dbs: Vec<PathBuf> = files
-                                .flatten()
-                                .map(|e| e.path())
-                                .filter(|p| {
-                                    p.is_file()
-                                        && p.file_name()
-                                            .and_then(|n| n.to_str())
-                                            .map(|n| n.ends_with("-Data.db"))
-                                            .unwrap_or(false)
-                                })
-                                .collect();
+                            let mut data_dbs: Vec<PathBuf> = Vec::new();
+                            let mut unreadable_file_entries = 0usize;
+                            let mut last_file_entry_error: Option<String> = None;
+                            for file_entry in files {
+                                match file_entry {
+                                    Ok(e) => {
+                                        let p = e.path();
+                                        if p.is_file()
+                                            && p.file_name()
+                                                .and_then(|n| n.to_str())
+                                                .map(|n| n.ends_with("-Data.db"))
+                                                .unwrap_or(false)
+                                        {
+                                            data_dbs.push(p);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        unreadable_file_entries += 1;
+                                        last_file_entry_error = Some(e.to_string());
+                                    }
+                                }
+                            }
                             if data_dbs.is_empty() {
-                                unreadable_table_dirs.push((
-                                    table_path.clone(),
-                                    format!(
+                                let cause = match last_file_entry_error {
+                                    // At least one *-Data.db might have been
+                                    // among the unreadable entries — name
+                                    // that explicitly rather than a bare
+                                    // "not found" that would misattribute an
+                                    // I/O failure as a design absence.
+                                    Some(e) if unreadable_file_entries > 0 => format!(
+                                        "no *-Data.db component found in {} ({} directory \
+                                         entry(ies) unreadable, last error: {e})",
+                                        table_path.display(),
+                                        unreadable_file_entries
+                                    ),
+                                    _ => format!(
                                         "no *-Data.db component found in {}",
                                         table_path.display()
                                     ),
-                                ));
+                                };
+                                unreadable_table_dirs.push((table_path.clone(), cause));
                             } else {
                                 data_dbs.sort();
                                 generations.extend(data_dbs);
@@ -296,13 +341,22 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
 
     // Bounded concurrency (design.md §S3): at most `jobs`
     // `verify_sstable_generation` calls in flight, each with the SAME
-    // single-generation memory profile as `verify` already has. `--jobs`
-    // bounds how many are IN FLIGHT at once; `verify_sstable_generation`'s
-    // own hot checks use blocking `std::fs` I/O under the async runtime
-    // (unchanged pre-existing behavior — the same is true of a single
-    // `cqlite verify` call), so realized concurrency also saturates at the
-    // tokio runtime's own worker-thread count, whichever bound is tighter
-    // (roborev round-2 LOW finding).
+    // single-generation memory profile as `verify` already has.
+    //
+    // `spawn_blocking`, not `set.spawn` on the async worker threads (roborev
+    // round-2 LOW + round-3 LOW findings — round-2's fix was a doc-only
+    // caveat, judged insufficient): `verify_sstable_generation`'s hot checks
+    // use blocking `std::fs` I/O, so running them as ordinary async tasks
+    // would park every worker thread inside blocking I/O simultaneously at
+    // the default `--jobs` (`available_parallelism()`, which also sizes the
+    // runtime), starving every OTHER task on the runtime for the duration —
+    // not a deadlock (permits still release on completion), but a real cost
+    // this verb introduces beyond a single `cqlite verify` call. Each
+    // blocking-pool task drives the SAME async fn to completion via
+    // `Handle::block_on` from its OWN dedicated thread (never nested inside
+    // an async-worker poll, so this is the standard safe pattern for an
+    // async fn whose hot path is secretly synchronous) — `--jobs` now maps
+    // to blocking-pool concurrency, which is what the doc always claimed.
     let semaphore = Arc::new(Semaphore::new(jobs));
     let mut set = JoinSet::new();
     for dir in dirs {
@@ -327,8 +381,9 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
         };
         let config = config.clone();
         let platform = platform.clone();
-        set.spawn(async move {
-            let row = verify_one(dir, mode, config, platform).await;
+        let runtime = tokio::runtime::Handle::current();
+        set.spawn_blocking(move || {
+            let row = runtime.block_on(verify_one(dir, mode, config, platform));
             drop(permit);
             row
         });

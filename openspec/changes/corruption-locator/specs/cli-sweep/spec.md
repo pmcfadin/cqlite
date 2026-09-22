@@ -84,12 +84,23 @@ exit `1` on a usage error (e.g. `<data-dir>` does not exist, or is not a directo
 
 Sweep SHALL hold at most one table's `VerifyReport` (and the FULL-mode scan behind it) fully
 resident per concurrent worker, and `--jobs` SHALL bound the number of tables verified concurrently.
+Every completed row's `VerifyReport.findings` (including every `Location`) IS additionally
+accumulated in `rows: Vec<SweepRow>` for the duration of the sweep, ahead of any rendering — bounded
+per-row by `MAX_RESOLVED_KEYS` (spec verify-location L5) but `O(generations)` overall, not `O(1)`
+(roborev round-2 MEDIUM finding — a true streamed/`O(1)` render is a separate, larger change, not
+attempted in this change; `execute_sweep_command`'s own doc states this bound precisely).
 
-#### Scenario: S3.1 wide tables under the memory-budget lane
+#### DECLARED GAP — Scenario S3.1 (wide tables under the memory-budget lane) has NO implementing target
 - **Given** `test_wide_rows` (every table) swept with `--mode full --jobs 1`
-- **Then** peak heap stays within the existing `memory-budget` gate lane's threshold for a
-  single-table `verify --mode full` run — sweep with `--jobs 1` introduces no additional resident
-  structure beyond what running `verify` once per table already holds.
+- **Intended assertion**: peak heap stays within the existing `memory-budget` gate lane's threshold
+  for a single-table `verify --mode full` run.
+- **Status**: NOT IMPLEMENTED in this change. Integrating a new dhat-instrumented case with the
+  existing `memory-budget` gate component's conventions is a separate, non-trivial undertaking;
+  tracked as a follow-up rather than attempted here. The PER-WORKER bound this scenario would verify
+  (one `VerifyReport` at a time per concurrent worker) is unchanged from `verify --mode full`'s own,
+  already-bounded behavior — this change does not introduce new per-worker resident structure, only
+  the cross-row accumulation named above, which S3.1 as originally scoped would not have measured
+  either.
 
 #### Scenario: S3.2 --jobs bounds concurrency, not correctness
 - **Given** a temp dir with N ≥ 4 table directories (a mix of healthy and the S1.2 corrupted pair)
