@@ -252,6 +252,55 @@ fn damaged_data_db_exits_2_naming_salvage() {
     );
 }
 
+/// `--out` resolving INSIDE the input tree is refused (usage error), never
+/// silently allowed to overwrite a component in place — the bypass route
+/// `--in-place`'s own refusal exists to close.
+#[test]
+fn out_inside_input_tree_refuses() {
+    let table_dir = resolve_committed_fixture(LZ4_TABLE_FIXTURE);
+    let data_db = std::fs::read_dir(&table_dir)
+        .expect("read fixture dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with("-Data.db"))
+        .expect("fixture has a Data.db");
+    let schema = schemas_dir().join("compression-parity.cql");
+    let out = table_dir.join("nested-out");
+
+    let before: Vec<_> = std::fs::read_dir(&table_dir)
+        .expect("read fixture dir")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        data_db.to_str().unwrap(),
+        "--components",
+        "digest",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1), "must exit 1 (usage error)");
+    assert!(
+        !out.exists(),
+        "a refused --out must never be created on disk"
+    );
+    let after: Vec<_> = std::fs::read_dir(&table_dir)
+        .expect("read fixture dir")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the fixture directory must be untouched"
+    );
+}
+
 /// R7.3 — an unknown component name is a usage error, exit 1.
 #[test]
 fn unknown_component_is_usage_error() {

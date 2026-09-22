@@ -46,6 +46,37 @@ fn table_name_from_input(input: &Path) -> Option<String> {
     }
 }
 
+/// Resolve `path` to an absolute, symlink-resolved form even when `path`
+/// itself does not exist yet (`--out` is created lazily by the rebuild run) —
+/// canonicalizes the nearest EXISTING ancestor and reattaches the
+/// not-yet-created suffix components verbatim. Used by the `--out`
+/// containment guard, which must compare real filesystem identity (symlinks
+/// resolved, `..` applied), not raw argument strings.
+fn resolve_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match current.canonicalize() {
+            Ok(mut resolved) => {
+                for part in suffix.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(e) => {
+                let Some(name) = current.file_name().map(std::ffi::OsStr::to_os_string) else {
+                    return Err(e);
+                };
+                suffix.push(name);
+                let Some(parent) = current.parent().map(Path::to_path_buf) else {
+                    return Err(e);
+                };
+                current = parent;
+            }
+        }
+    }
+}
+
 /// Resolve `input` into the `Data.db` generation(s) to rebuild, oldest first.
 /// A single `Data.db` file is returned as-is; a directory is scanned for
 /// `*-big-Data.db` / `*-bti-Data.db` siblings (rebuild does not require a
@@ -135,6 +166,54 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
         eprintln!("cqlite rebuild: --out is required (unless --in-place, which refuses today)");
         std::process::exit(1);
     };
+
+    // `--out` must never resolve INSIDE the input tree (mirrors `salvage`'s
+    // own containment guard, roborev issue #4196 round-23 finding F5):
+    // `copy_untouched_components` copies every untouched component
+    // byte-for-byte, so `--out` pointed at (or inside) the input directory
+    // would silently overwrite a derived component IN PLACE — exactly the
+    // protocol `--in-place` gates behind `verify --mode audit` (#4195),
+    // bypassed here by naming the same directory as `--out` instead. Checked
+    // BEFORE anything else is attempted — nothing has been read or written
+    // yet, so the refusal has nothing to undo.
+    let input_root = if args.input.is_dir() {
+        args.input.clone()
+    } else {
+        args.input
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    let resolved_input = match resolve_existing_prefix(&input_root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "cqlite rebuild: cannot resolve input path {}: {e}",
+                input_root.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let resolved_out = match resolve_existing_prefix(out) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "cqlite rebuild: cannot resolve --out path {}: {e}",
+                out.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    if resolved_out.starts_with(&resolved_input) {
+        eprintln!(
+            "cqlite rebuild: --out {} resolves inside the input tree {} — rebuild must not \
+             modify a byte of its input; point --out at a sibling directory or another volume",
+            out.display(),
+            input_root.display()
+        );
+        std::process::exit(1);
+    }
+
     let Some(schema_path) = schema_path else {
         eprintln!("cqlite rebuild: --schema is required (the global --schema flag)");
         std::process::exit(1);
