@@ -708,6 +708,29 @@ cargo run --package cqlite-cli --features write-support -- \
 # Data.db written; remedy is `cqlite rebuild`, issue #4197); 1 = usage error.
 ```
 
+## Locate corruption + sweep a data directory (issue #4194, epic #4192)
+
+`cqlite verify --mode full` names WHICH partitions a chunk/offset-anchored
+finding touches (`location.partitions`), resolved from the healthy `Index.db`
+(BIG) / `Partitions.db` trie (BTI) — `Unresolved("boundary-source-unreadable")`
+when that boundary source is itself corrupt (never a guess). `cqlite sweep`
+runs `verify` over every table directory under a data dir in one pass.
+
+```bash
+# A single generation's located findings (JSON carries a `location` object on
+# each chunk/offset-anchored finding when present).
+cargo run --package cqlite-cli --features cli-helpers -- \
+  verify ./corrupted-table-dir --mode full --out json
+
+# Sweep every <keyspace>/<table>-<id>/ directory under a data dir.
+cargo run --package cqlite-cli --features cli-helpers -- \
+  sweep ./test-data/datasets/sstables --mode quick --out json --jobs 4
+
+# Exit codes: 0 = every row ok (a `degraded`-only sweep — e.g. a Filter.db
+# false negative, issue #1398 — still exits 0); 2 = any row corrupt/unreadable;
+# 1 = usage error (<data-dir> missing or not a directory).
+```
+
 ## Delta-export (CDC Parquet, Issue #705 / Epic #696 DS9)
 
 Requires `--features delta-export`. Schema must be a bare `CREATE TABLE` statement

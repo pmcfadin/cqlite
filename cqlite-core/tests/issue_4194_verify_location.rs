@@ -183,7 +183,10 @@ fn oracle_index_positions(path: &Path) -> Vec<(Vec<u8>, u64)> {
     while o + 2 <= b.len() {
         let key_len = u16::from_be_bytes([b[o], b[o + 1]]) as usize;
         o += 2;
-        assert!(o + key_len <= b.len(), "Index.db entry declares an over-long key");
+        assert!(
+            o + key_len <= b.len(),
+            "Index.db entry declares an over-long key"
+        );
         let key = b[o..o + key_len].to_vec();
         o += key_len;
         let (position, n) = read_unsigned_vint(&b, o);
@@ -192,7 +195,11 @@ fn oracle_index_positions(path: &Path) -> Vec<(Vec<u8>, u64)> {
         o += n + promoted_size as usize;
         out.push((key, position));
     }
-    assert!(!out.is_empty(), "Index.db of {} declares no partitions", path.display());
+    assert!(
+        !out.is_empty(),
+        "Index.db of {} declares no partitions",
+        path.display()
+    );
     out
 }
 
@@ -242,13 +249,17 @@ fn resolved_keys(res: &PartitionResolution) -> Vec<String> {
 
 #[tokio::test]
 async fn l1_1_compressed_chunk_crc_flip_names_intersecting_partitions() {
-    let Some(corrupt_dir) =
-        dataset_dir_or_gate("corruption/test_comp_corrupt/data_db_bit_flip", "data_db_bit_flip")
-    else {
+    let Some(corrupt_dir) = dataset_dir_or_gate(
+        "corruption/test_comp_corrupt/data_db_bit_flip",
+        "data_db_bit_flip",
+    ) else {
         return;
     };
     let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table-") else {
-        assert!(!require_fixtures(), "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent");
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent"
+        );
         eprintln!("SKIP: clean lz4_table source absent");
         return;
     };
@@ -259,14 +270,22 @@ async fn l1_1_compressed_chunk_crc_flip_names_intersecting_partitions() {
     // The manifest-pinned flip is at physical byte 64, inside chunk 0 — the
     // damaged LOGICAL range for chunk 0 is [0, chunk_length).
     let expected = expected_intersecting_keys((0, chunk_length), &positions, data_length);
-    assert!(!expected.is_empty(), "oracle computed zero intersecting partitions for chunk 0");
+    assert!(
+        !expected.is_empty(),
+        "oracle computed zero intersecting partitions for chunk 0"
+    );
 
     let report = run_verify(&corrupt_dir).await;
     let finding = report
         .findings
         .iter()
         .find(|f| f.class == VerifyErrorClass::ChunkDecompressionError)
-        .unwrap_or_else(|| panic!("no ChunkDecompressionError finding in {:#?}", report.findings));
+        .unwrap_or_else(|| {
+            panic!(
+                "no ChunkDecompressionError finding in {:#?}",
+                report.findings
+            )
+        });
     let loc = finding
         .location
         .as_ref()
@@ -310,14 +329,22 @@ async fn l1_2_uncompressed_chunk_crc_flip_uses_crc_db_grid() {
         (chunk_index + 1) * CRC_CHUNK_SIZE,
     );
     let expected = expected_intersecting_keys(damaged, &positions, logical_len);
-    assert!(!expected.is_empty(), "oracle computed zero intersecting partitions for chunk 1");
+    assert!(
+        !expected.is_empty(),
+        "oracle computed zero intersecting partitions for chunk 1"
+    );
 
     let report = run_verify(&corrupt_dir).await;
     let finding = report
         .findings
         .iter()
         .find(|f| f.class == VerifyErrorClass::UncompressedChunkCrcMismatch)
-        .unwrap_or_else(|| panic!("no UncompressedChunkCrcMismatch finding in {:#?}", report.findings));
+        .unwrap_or_else(|| {
+            panic!(
+                "no UncompressedChunkCrcMismatch finding in {:#?}",
+                report.findings
+            )
+        });
     let loc = finding
         .location
         .as_ref()
@@ -349,7 +376,10 @@ async fn l1_3_truncated_data_db_names_every_partition_past_new_eof() {
         return;
     };
     let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table-") else {
-        assert!(!require_fixtures(), "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent");
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent"
+        );
         eprintln!("SKIP: clean lz4_table source absent");
         return;
     };
@@ -371,7 +401,10 @@ async fn l1_3_truncated_data_db_names_every_partition_past_new_eof() {
     let new_eof_logical = (first_oob_chunk as u64) * chunk_length;
     let expected =
         expected_intersecting_keys((new_eof_logical, data_length), &positions, data_length);
-    assert!(!expected.is_empty(), "oracle computed zero partitions past the truncated EOF");
+    assert!(
+        !expected.is_empty(),
+        "oracle computed zero partitions past the truncated EOF"
+    );
 
     let report = run_verify(&corrupt_dir).await;
     // Multiple ChunkOffsetOutOfBounds findings fire (one per bad chunk,
@@ -380,7 +413,12 @@ async fn l1_3_truncated_data_db_names_every_partition_past_new_eof() {
         .findings
         .iter()
         .find(|f| f.class == VerifyErrorClass::ChunkOffsetOutOfBounds)
-        .unwrap_or_else(|| panic!("no ChunkOffsetOutOfBounds finding in {:#?}", report.findings));
+        .unwrap_or_else(|| {
+            panic!(
+                "no ChunkOffsetOutOfBounds finding in {:#?}",
+                report.findings
+            )
+        });
     let loc = finding
         .location
         .as_ref()
@@ -422,9 +460,10 @@ fn bit_flip_first_byte(path: &Path) {
 
 #[tokio::test]
 async fn l2_1_corrupt_big_index_db_unresolves_every_location() {
-    let Some(data_corrupt) =
-        dataset_dir_or_gate("corruption/test_comp_corrupt/data_db_bit_flip", "data_db_bit_flip")
-    else {
+    let Some(data_corrupt) = dataset_dir_or_gate(
+        "corruption/test_comp_corrupt/data_db_bit_flip",
+        "data_db_bit_flip",
+    ) else {
         return;
     };
     let Some(index_corrupt) = dataset_dir_or_gate(
@@ -462,7 +501,12 @@ async fn l2_1_corrupt_big_index_db_unresolves_every_location() {
         .findings
         .iter()
         .find(|f| f.class == VerifyErrorClass::ChunkDecompressionError)
-        .unwrap_or_else(|| panic!("no ChunkDecompressionError finding in {:#?}", report.findings));
+        .unwrap_or_else(|| {
+            panic!(
+                "no ChunkDecompressionError finding in {:#?}",
+                report.findings
+            )
+        });
     let loc = chunk_finding
         .location
         .as_ref()
@@ -517,7 +561,12 @@ async fn l2_2_corrupt_bti_boundary_source_unresolves_every_location() {
         .findings
         .iter()
         .find(|f| f.class == VerifyErrorClass::ChunkDecompressionError)
-        .unwrap_or_else(|| panic!("no ChunkDecompressionError finding in {:#?}", report.findings));
+        .unwrap_or_else(|| {
+            panic!(
+                "no ChunkDecompressionError finding in {:#?}",
+                report.findings
+            )
+        });
     let loc = chunk_finding
         .location
         .as_ref()
@@ -538,7 +587,10 @@ async fn l2_2_corrupt_bti_boundary_source_unresolves_every_location() {
 #[tokio::test]
 async fn l2_3_clean_fixture_has_no_findings_and_no_fabricated_location() {
     let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table-") else {
-        assert!(!require_fixtures(), "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent");
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent"
+        );
         eprintln!("SKIP: clean lz4_table source absent");
         return;
     };

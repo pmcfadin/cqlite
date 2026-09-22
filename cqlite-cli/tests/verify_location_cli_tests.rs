@@ -64,7 +64,14 @@ fn data_db_bit_flip_dir() -> Option<PathBuf> {
 
 fn run_verify(dir: &std::path::Path, out: &str) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
-        .args(["verify", &dir.display().to_string(), "--mode", "full", "--out", out])
+        .args([
+            "verify",
+            &dir.display().to_string(),
+            "--mode",
+            "full",
+            "--out",
+            out,
+        ])
         .output()
         .expect("spawn cqlite verify");
     // verify_sstable's contract (unchanged by this issue): exit 2 on any
@@ -109,8 +116,9 @@ fn cli_json_output_carries_a_location_object_with_chunk_index_and_partitions() {
         return;
     };
     let stdout = run_verify(&dir, "json");
-    let value: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("cqlite verify --out json did not emit valid JSON: {e}\n{stdout}"));
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("cqlite verify --out json did not emit valid JSON: {e}\n{stdout}")
+    });
     let findings = value["findings"].as_array().expect("findings array");
 
     let chunk_finding = findings
@@ -118,13 +126,21 @@ fn cli_json_output_carries_a_location_object_with_chunk_index_and_partitions() {
         .find(|f| f["class"] == "ChunkDecompressionError")
         .unwrap_or_else(|| panic!("no ChunkDecompressionError finding in {value}"));
     let location = &chunk_finding["location"];
-    assert!(!location.is_null(), "ChunkDecompressionError finding's location was null: {value}");
+    assert!(
+        !location.is_null(),
+        "ChunkDecompressionError finding's location was null: {value}"
+    );
     assert_eq!(location["chunk_index"], 0);
     assert_eq!(location["component"], "Data.db");
     let resolved = location["partitions"]["resolved"]
         .as_array()
-        .unwrap_or_else(|| panic!("location.partitions was not {{\"resolved\": [...]}}: {location}"));
-    assert!(!resolved.is_empty(), "resolved partitions array was empty: {location}");
+        .unwrap_or_else(|| {
+            panic!("location.partitions was not {{\"resolved\": [...]}}: {location}")
+        });
+    assert!(
+        !resolved.is_empty(),
+        "resolved partitions array was empty: {location}"
+    );
     assert!(
         resolved[0]["key_hex"].is_string(),
         "resolved partition entry missing key_hex: {location}"

@@ -72,7 +72,9 @@ fn format_location_text(loc: &Location) -> String {
         .map(|c| format!("chunk {c}, "))
         .unwrap_or_default();
     let partitions = match &loc.partitions {
-        PartitionResolution::Resolved(keys) if keys.is_empty() => "0 intersecting partitions".to_string(),
+        PartitionResolution::Resolved(keys) if keys.is_empty() => {
+            "0 intersecting partitions".to_string()
+        }
         PartitionResolution::Resolved(keys) => format!(
             "{} partition(s): {}",
             keys.len(),

@@ -53,7 +53,8 @@ use std::sync::Arc;
 // `VerifyFinding.location`'s type is reachable via the existing `verify`
 // module path — no caller-visible new import path for the common case.
 pub use crate::storage::sstable::verify_location::{
-    KeyRef, Location, PartitionResolution, BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE,
+    KeyRef, Location, PartitionResolution,
+    BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE,
 };
 
 /// Verification depth. QUICK and FULL are intentionally distinct — see the
@@ -518,7 +519,8 @@ async fn verify_components(
             // — the uncompressed analogue of the inline chunk-CRC check above.
             // Replaces the prior behavior where CRC.db was only name-whitelisted
             // (recognized as a component) but never content-validated.
-            check_uncompressed_crc_db(dir, &components, &mut findings, &mut pending_locations).await;
+            check_uncompressed_crc_db(dir, &components, &mut findings, &mut pending_locations)
+                .await;
         }
 
         // ---- Check 6a: Statistics.db parse ---------------------------------
@@ -584,7 +586,8 @@ async fn verify_components(
                     // Issue #4194: borrowed (not moved) — `bti_leaves` is needed
                     // again by `finalize_locations` below.
                     if let Some(leaves) = bti_leaves.as_ref() {
-                        if let Some(detail) = bti_partition_identity_mismatch(leaves, &scan_partitions)
+                        if let Some(detail) =
+                            bti_partition_identity_mismatch(leaves, &scan_partitions)
                         {
                             findings.push(VerifyFinding::new(
                                 VerifyErrorClass::BtiRootPointerCorrupt,
@@ -593,8 +596,11 @@ async fn verify_components(
                             ));
                         }
                     }
-                    scan_position_map =
-                        Some(scan_partitions.into_iter().collect::<std::collections::HashMap<_, _>>());
+                    scan_position_map = Some(
+                        scan_partitions
+                            .into_iter()
+                            .collect::<std::collections::HashMap<_, _>>(),
+                    );
                 }
                 Err(e) => findings.push(classify_scan_error(&components, &e)),
             }
@@ -680,7 +686,7 @@ async fn finalize_locations(
     // source is healthy (an unhealthy one is never read for this purpose,
     // matching the fail-closed contract regardless of what re-reading it
     // might yield).
-    let boundary_entries: Option<Vec<(u64, Option<Vec<u8>>)>> = if !boundary_healthy {
+    let boundary_entries: Option<Vec<verify_location::BoundaryEntry>> = if !boundary_healthy {
         None
     } else {
         match components.format {
@@ -1089,8 +1095,7 @@ fn check_compression_info(
             // against; design.md §D1's "new_eof .. original_logical_length"
             // derivation, computed here rather than deferred since `info` is
             // only in scope in this function).
-            let logical_start =
-                (i as u64).saturating_mul(info.chunk_length as u64);
+            let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
             pending_locations.push(PendingLocation {
                 finding_index,
                 component: "Data.db".to_string(),
@@ -1774,7 +1779,7 @@ async fn check_uncompressed_crc_db(
                         byte_offset: offset,
                         byte_len: filled as u64,
                         chunk_index: Some(chunk_index),
-                        damaged_logical: (offset, offset + filled as u64),
+                        damaged_logical: (offset, offset.saturating_add(filled as u64)),
                         logical_len: data_len,
                     });
                     // Report the first failing chunk and stop (matches the
