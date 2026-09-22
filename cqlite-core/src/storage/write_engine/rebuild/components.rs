@@ -380,10 +380,28 @@ pub async fn rebuild_components(
             // else: counting mode — nothing was persisted, nothing to finish.
         }
         if let Some(fw) = filter_writer {
+            // roborev finding (Medium): `fp_chance == 1.0` disables the
+            // bloom filter entirely (Cassandra's `AlwaysPresentFilter`) —
+            // `finish()` writes NO `Filter.db` and removes any stale one at
+            // that path. Reporting `filter` as `regenerated` regardless
+            // would claim a component that does not exist on disk, and
+            // `copy_untouched_components`'s `will_regenerate` closure would
+            // then also skip copying the ORIGINAL Filter.db (if any),
+            // leaving a `TOC.txt` naming a file `--out` never holds.
+            let disabled = fw.is_disabled();
             fw.finish().await?;
-            report
-                .regenerated
-                .push(Component::Filter.manifest_label().to_string());
+            if disabled {
+                report.skipped_not_applicable.push(SkippedComponent {
+                    component: Component::Filter.manifest_label().to_string(),
+                    reason: "bloom_filter_fp_chance == 1.0 disables the bloom filter \
+                             (Cassandra's AlwaysPresentFilter) — no Filter.db component exists"
+                        .to_string(),
+                });
+            } else {
+                report
+                    .regenerated
+                    .push(Component::Filter.manifest_label().to_string());
+            }
             let mut fields = BTreeMap::new();
             fields.insert(
                 "bloom_filter_fp_chance".to_string(),
@@ -437,20 +455,42 @@ pub async fn rebuild_components(
 
     let want_toc = want(Component::Toc);
     let regenerated: HashSet<String> = report.regenerated.iter().cloned().collect();
-    let present = simple::copy_untouched_components(dir, &options.out_dir, &base, |component| {
-        match component {
-            SSTableComponent::TOC => want_toc,
-            SSTableComponent::Index => regenerated.contains("index"),
-            SSTableComponent::Summary => regenerated.contains("summary"),
-            SSTableComponent::Filter => regenerated.contains("filter"),
-            SSTableComponent::Digest => regenerated.contains("digest"),
-            SSTableComponent::Crc => regenerated.contains("crc"),
-            SSTableComponent::Statistics => regenerated.contains("statistics"),
-            // Data, CompressionInfo, Partitions, Rows: this tool never
-            // regenerates any of these — always copy the original verbatim.
-            _ => false,
+    let mut present =
+        simple::copy_untouched_components(dir, &options.out_dir, &base, |component| {
+            match component {
+                SSTableComponent::TOC => want_toc,
+                SSTableComponent::Index => regenerated.contains("index"),
+                SSTableComponent::Summary => regenerated.contains("summary"),
+                SSTableComponent::Filter => regenerated.contains("filter"),
+                SSTableComponent::Digest => regenerated.contains("digest"),
+                SSTableComponent::Crc => regenerated.contains("crc"),
+                SSTableComponent::Statistics => regenerated.contains("statistics"),
+                // Data, CompressionInfo, Partitions, Rows: this tool never
+                // regenerates any of these — always copy the original verbatim.
+                _ => false,
+            }
+        })?;
+    // roborev finding (High): `copy_untouched_components` only walks the
+    // INPUT directory, so a component that was ABSENT from the input and
+    // rebuild just wrote fresh — the tool's headline use case, "a derived
+    // component went missing" — was never added to `present`, and the
+    // freshly-written TOC.txt silently omitted it (spec R1.3 violation).
+    // Union every genuinely-regenerated component in explicitly.
+    for component in [
+        ("index", SSTableComponent::Index),
+        ("summary", SSTableComponent::Summary),
+        ("filter", SSTableComponent::Filter),
+        ("digest", SSTableComponent::Digest),
+        ("crc", SSTableComponent::Crc),
+        ("statistics", SSTableComponent::Statistics),
+    ]
+    .into_iter()
+    .filter_map(|(label, component)| regenerated.contains(label).then_some(component))
+    {
+        if !present.contains(&component) {
+            present.push(component);
         }
-    })?;
+    }
     if want_toc {
         simple::write_toc(&options.out_dir, &base, &present)?;
         report
