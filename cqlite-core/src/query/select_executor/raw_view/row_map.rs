@@ -326,3 +326,222 @@ fn insert_complex_column(values: &mut HashMap<String, Value>, col: &ComplexColum
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn};
+
+    fn schema() -> TableSchema {
+        TableSchema {
+            keyspace: "ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![
+                ClusteringColumn {
+                    name: "ck1".to_string(),
+                    data_type: "int".to_string(),
+                    position: 0,
+                    order: ClusteringOrder::Asc,
+                },
+                ClusteringColumn {
+                    name: "ck2".to_string(),
+                    data_type: "text".to_string(),
+                    position: 1,
+                    order: ClusteringOrder::Asc,
+                },
+            ],
+            columns: vec![
+                Column {
+                    name: "pk".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck1".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck2".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "val".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: Default::default(),
+            dropped_columns: Default::default(),
+        }
+    }
+
+    fn pk_bytes(pk: i32) -> RowKey {
+        RowKey::new(pk.to_be_bytes().to_vec())
+    }
+
+    fn source() -> RawViewSource {
+        RawViewSource {
+            sstable: "nb-1-big-Data.db".to_string(),
+            generation: 1,
+            format: "big",
+            position: Some(42),
+        }
+    }
+
+    /// A prefix-bound range tombstone (design.md D7 / spec: "the unspecified
+    /// component is NULL, not fabricated") becomes exactly two rows, start +
+    /// end, each carrying ONLY the clustering components the bound specifies.
+    #[test]
+    fn range_marker_becomes_two_bound_rows_with_prefix_clustering() {
+        let row = CompactionRow {
+            key: pk_bytes(1),
+            row_timestamp: 0,
+            row_data: CompactionRowData::RangeMarker {
+                start: CompactionBound::Inclusive(vec![("ck1".to_string(), Value::Integer(2))]),
+                end: CompactionBound::Inclusive(vec![("ck1".to_string(), Value::Integer(2))]),
+                deletion_time: 1_700_000_000_000_000,
+                local_deletion_time: 1_700_000_000,
+            },
+        };
+        let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+        assert_eq!(rows.len(), 2, "a RangeMarker must become exactly 2 rows");
+
+        let start = &rows[0];
+        assert_eq!(
+            start.values.get("row_kind").and_then(|v| match v {
+                Value::Text(b) => Some(String::from_utf8_lossy(b).to_string()),
+                _ => None,
+            }),
+            Some("range_tombstone_start".to_string())
+        );
+        assert_eq!(start.values.get("bound_inclusive"), Some(&Value::Boolean(true)));
+        assert_eq!(start.values.get("ck1"), Some(&Value::Integer(2)));
+        assert!(
+            !start.values.contains_key("ck2"),
+            "an unspecified clustering component must be ABSENT, never fabricated as NULL-or-zero"
+        );
+        assert_eq!(
+            start.values.get("range_deletion_timestamp"),
+            Some(&Value::BigInt(1_700_000_000_000_000))
+        );
+        assert_eq!(start.values.get("pk"), Some(&Value::Integer(1)));
+
+        let end = &rows[1];
+        assert_eq!(
+            end.values.get("row_kind").and_then(|v| match v {
+                Value::Text(b) => Some(String::from_utf8_lossy(b).to_string()),
+                _ => None,
+            }),
+            Some("range_tombstone_end".to_string())
+        );
+    }
+
+    /// Mixed open/closed inclusivity on the same range tombstone (spec
+    /// scenario, `test_deltas.range_tombstones` pk=3) is preserved per bound.
+    #[test]
+    fn range_marker_preserves_mixed_inclusivity_per_bound() {
+        let row = CompactionRow {
+            key: pk_bytes(3),
+            row_timestamp: 0,
+            row_data: CompactionRowData::RangeMarker {
+                start: CompactionBound::Exclusive(vec![("ck1".to_string(), Value::Integer(1))]),
+                end: CompactionBound::Inclusive(vec![("ck1".to_string(), Value::Integer(3))]),
+                deletion_time: 1,
+                local_deletion_time: 1,
+            },
+        };
+        let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+        assert_eq!(rows[0].values.get("bound_inclusive"), Some(&Value::Boolean(false)));
+        assert_eq!(rows[1].values.get("bound_inclusive"), Some(&Value::Boolean(true)));
+    }
+
+    /// A partition tombstone becomes exactly one row with every cell/clustering
+    /// column absent and both partition-deletion columns populated.
+    #[test]
+    fn partition_delete_becomes_one_row_with_no_cell_columns() {
+        let row = CompactionRow {
+            key: pk_bytes(7),
+            row_timestamp: 0,
+            row_data: CompactionRowData::PartitionDelete {
+                deletion_time: 999,
+                local_deletion_time: 5,
+            },
+        };
+        let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.values.get("partition_deletion_timestamp"), Some(&Value::BigInt(999)));
+        assert_eq!(r.values.get("partition_deletion_time"), Some(&Value::BigInt(5)));
+        assert!(!r.values.contains_key("ck1"));
+        assert!(!r.values.contains_key("val"));
+    }
+
+    /// A live cell tombstone reports its kind and NULLs the value; a live cell
+    /// carries its value plus the full metadata quad.
+    #[test]
+    fn live_row_reports_cell_tombstone_and_live_metadata() {
+        let tombstoned = Value::Tombstone(Box::new(crate::types::TombstoneInfo {
+            deletion_time: 55,
+            tombstone_type: TombstoneType::CellTombstone,
+            local_deletion_time: 66,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        }));
+        let row = CompactionRow {
+            key: pk_bytes(1),
+            row_timestamp: 10,
+            row_data: CompactionRowData::Live {
+                simple: vec![
+                    SimpleCell {
+                        column: "ck1".to_string(),
+                        value: Value::Integer(1),
+                        timestamp: 10,
+                        ttl: None,
+                        local_deletion_time: None,
+                    },
+                    SimpleCell {
+                        column: "val".to_string(),
+                        value: tombstoned,
+                        timestamp: 10,
+                        ttl: None,
+                        local_deletion_time: None,
+                    },
+                ],
+                complex: vec![],
+                row_deletion: None,
+                row_liveness: Default::default(),
+            },
+        };
+        let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.values.get("val"), Some(&Value::Null));
+        assert_eq!(
+            r.values.get("val_tombstone").and_then(|v| match v {
+                Value::Text(b) => Some(String::from_utf8_lossy(b).to_string()),
+                _ => None,
+            }),
+            Some("cell".to_string())
+        );
+        assert_eq!(r.values.get("val_local_deletion_time"), Some(&Value::Integer(66)));
+        // Clustering columns are plain data columns, never a metadata quad.
+        assert_eq!(r.values.get("ck1"), Some(&Value::Integer(1)));
+        assert!(!r.values.contains_key("ck1_timestamp"));
+    }
+}
