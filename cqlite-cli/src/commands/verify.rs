@@ -122,7 +122,7 @@ fn location_to_json(loc: &Location) -> String {
         .map(|c| c.to_string())
         .unwrap_or_else(|| "null".to_string());
     let partitions = match &loc.partitions {
-        PartitionResolution::Resolved(keys) => {
+        PartitionResolution::Resolved { keys, truncated } => {
             let entries: Vec<String> = keys
                 .iter()
                 .map(|k| {
@@ -138,7 +138,14 @@ fn location_to_json(loc: &Location) -> String {
                     )
                 })
                 .collect();
-            format!("{{\"resolved\":[{}]}}", entries.join(","))
+            // `truncated` (issue #4194, roborev round-2 MEDIUM finding): how
+            // many more intersecting partitions exist beyond the resolver's
+            // MAX_RESOLVED_KEYS cap, `0` when nothing was omitted.
+            format!(
+                "{{\"resolved\":[{}],\"truncated\":{}}}",
+                entries.join(","),
+                truncated
+            )
         }
         PartitionResolution::Unresolved(cause) => {
             format!("{{\"unresolved\":{}}}", json_str(cause))

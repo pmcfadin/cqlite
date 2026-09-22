@@ -49,14 +49,28 @@ pub struct Location {
     pub partitions: PartitionResolution,
 }
 
+/// The largest number of partition keys [`resolve_partitions`] will
+/// materialize into `Resolved.keys` (roborev round-2 MEDIUM finding): a
+/// truncation's damaged range is `[first_bad_chunk_start, data_length)` —
+/// for a badly truncated file that can intersect essentially every partition
+/// in the SSTable, and this module's job is precisely to enumerate them by
+/// hex key, materializing one `String` (2x key length) per hit. A `Location`
+/// is a per-FINDING, not per-file, structure, so nothing else in this module
+/// bounds that count. `Resolved.truncated` names how many more intersected
+/// but were not materialized, so the report stays affirmative about what it
+/// omitted rather than either silently truncating or growing unbounded.
+pub const MAX_RESOLVED_KEYS: usize = 100;
+
 /// The outcome of resolving [`Location::partitions`] against a boundary source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartitionResolution {
     /// The boundary source was healthy and every intersecting partition's raw
-    /// key was recoverable. Empty when no boundary entry intersects the
-    /// damaged range (legitimate — e.g. the range falls entirely past the last
-    /// known partition).
-    Resolved(Vec<KeyRef>),
+    /// key was recoverable. `keys` is empty when no boundary entry intersects
+    /// the damaged range (legitimate — e.g. the range falls entirely past the
+    /// last known partition); it is capped at [`MAX_RESOLVED_KEYS`], with
+    /// `truncated` naming how many additional intersecting partitions exist
+    /// beyond the cap (`0` when nothing was omitted).
+    Resolved { keys: Vec<KeyRef>, truncated: usize },
     /// The boundary source could not be trusted (or a needed partition key was
     /// unavailable) — the cause is named, never a guess and never a silent
     /// empty list standing in for "unknown".
@@ -84,10 +98,15 @@ impl KeyRef {
     }
 }
 
+/// Lower-case hex encode, one `write!` per byte rather than one `String`
+/// allocation per byte (roborev round-2 LOW finding: `format!` inside the
+/// loop is on the path [`MAX_RESOLVED_KEYS`] makes hot — up to 100 calls per
+/// `Location`).
 fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        out.push_str(&format!("{:02x}", b));
+        let _ = write!(out, "{:02x}", b);
     }
     out
 }
@@ -175,8 +194,14 @@ pub fn resolve_partitions(
         "resolve_partitions requires its input sorted ascending by data_offset"
     );
 
+    // Issue #4194, roborev round-2 MEDIUM finding: bounded DURING accumulation
+    // (`hits.len() < MAX_RESOLVED_KEYS`), not just at the end — a truncation's
+    // damaged range `[first_bad_chunk_start, logical_len)` can intersect
+    // essentially every partition in the file, and `hits` materializing all of
+    // them before ever being capped would defeat the point.
     let mut hits: Vec<KeyRef> = Vec::new();
     let mut unknown = false;
+    let mut truncated = 0usize;
     for (i, (start, key)) in sorted_boundary_entries.iter().enumerate() {
         let end = sorted_boundary_entries
             .get(i + 1)
@@ -185,7 +210,13 @@ pub fn resolve_partitions(
         let extent = (*start, end.max(*start));
         if ranges_intersect(damaged, extent) {
             match key {
-                Some(k) => hits.push(KeyRef::from_raw(k)),
+                Some(k) => {
+                    if hits.len() < MAX_RESOLVED_KEYS {
+                        hits.push(KeyRef::from_raw(k));
+                    } else {
+                        truncated += 1;
+                    }
+                }
                 None => unknown = true,
             }
         }
@@ -196,7 +227,10 @@ pub fn resolve_partitions(
     }
     hits.sort_by(|a, b| a.key_hex.cmp(&b.key_hex));
     hits.dedup_by(|a, b| a.key_hex == b.key_hex);
-    PartitionResolution::Resolved(hits)
+    PartitionResolution::Resolved {
+        keys: hits,
+        truncated,
+    }
 }
 
 /// Build a [`Location`] for a chunk/offset-anchored finding, fail-closed on a
@@ -245,15 +279,18 @@ mod tests {
             .collect()
     }
 
+    /// `Resolved { keys, truncated: 0 }` — the shape every case in this file
+    /// expects except the dedicated cap test.
+    fn resolved(keys: Vec<KeyRef>) -> PartitionResolution {
+        PartitionResolution::Resolved { keys, truncated: 0 }
+    }
+
     #[test]
     fn intersects_a_single_partition() {
         let e = entries(&[(0, b"k0"), (100, b"k1"), (200, b"k2")]);
         // Damaged range [100, 150) falls entirely inside k1's extent [100,200).
         let res = resolve_partitions((100, 150), &e, 300);
-        assert_eq!(
-            res,
-            PartitionResolution::Resolved(vec![KeyRef::from_raw(b"k1")])
-        );
+        assert_eq!(res, resolved(vec![KeyRef::from_raw(b"k1")]));
     }
 
     #[test]
@@ -263,7 +300,7 @@ mod tests {
         let res = resolve_partitions((90, 110), &e, 300);
         assert_eq!(
             res,
-            PartitionResolution::Resolved(vec![KeyRef::from_raw(b"k0"), KeyRef::from_raw(b"k1"),])
+            resolved(vec![KeyRef::from_raw(b"k0"), KeyRef::from_raw(b"k1")])
         );
     }
 
@@ -272,29 +309,46 @@ mod tests {
         let e = entries(&[(0, b"k0"), (100, b"k1")]);
         // [100, 150) starts exactly where k0 ends — no overlap with k0.
         let res = resolve_partitions((100, 150), &e, 300);
-        assert_eq!(
-            res,
-            PartitionResolution::Resolved(vec![KeyRef::from_raw(b"k1")])
-        );
+        assert_eq!(res, resolved(vec![KeyRef::from_raw(b"k1")]));
     }
 
     #[test]
     fn last_partition_extent_is_bounded_by_logical_len() {
         let e = entries(&[(0, b"k0"), (100, b"k1")]);
         let res = resolve_partitions((250, 260), &e, 300);
-        assert_eq!(
-            res,
-            PartitionResolution::Resolved(vec![KeyRef::from_raw(b"k1")])
-        );
+        assert_eq!(res, resolved(vec![KeyRef::from_raw(b"k1")]));
         let res_past_end = resolve_partitions((300, 310), &e, 300);
-        assert_eq!(res_past_end, PartitionResolution::Resolved(vec![]));
+        assert_eq!(res_past_end, resolved(vec![]));
     }
 
     #[test]
     fn no_intersection_resolves_to_an_empty_resolved_set() {
         let e = entries(&[(1000, b"k0")]);
         let res = resolve_partitions((0, 10), &e, 2000);
-        assert_eq!(res, PartitionResolution::Resolved(vec![]));
+        assert_eq!(res, resolved(vec![]));
+    }
+
+    #[test]
+    fn resolved_set_is_capped_and_names_the_truncated_count() {
+        // MAX_RESOLVED_KEYS + 10 boundary entries, all intersecting one huge
+        // damaged range — the shape a badly truncated Data.db produces.
+        let mut pairs: Vec<(u64, Vec<u8>)> = Vec::new();
+        for i in 0..(MAX_RESOLVED_KEYS + 10) {
+            pairs.push((i as u64 * 10, format!("k{i:04}").into_bytes()));
+        }
+        let e: Vec<BoundaryEntry> = pairs
+            .iter()
+            .map(|(o, k)| (*o, Some(Arc::from(k.as_slice()))))
+            .collect();
+        let logical_len = (MAX_RESOLVED_KEYS as u64 + 11) * 10;
+        let res = resolve_partitions((0, logical_len), &e, logical_len);
+        match res {
+            PartitionResolution::Resolved { keys, truncated } => {
+                assert_eq!(keys.len(), MAX_RESOLVED_KEYS);
+                assert_eq!(truncated, 10);
+            }
+            other => panic!("expected a capped Resolved set, got {other:?}"),
+        }
     }
 
     #[test]
@@ -330,10 +384,7 @@ mod tests {
     fn resolve_location_resolves_when_the_boundary_source_is_healthy() {
         let e = entries(&[(0, b"k0")]);
         let loc = resolve_location("Data.db", 64, 16, Some(0), true, (0, 100), Some(&e), 16384);
-        assert_eq!(
-            loc.partitions,
-            PartitionResolution::Resolved(vec![KeyRef::from_raw(b"k0")])
-        );
+        assert_eq!(loc.partitions, resolved(vec![KeyRef::from_raw(b"k0")]));
         assert_eq!(loc.component, "Data.db");
         assert_eq!(loc.byte_offset, 64);
         assert_eq!(loc.byte_len, 16);

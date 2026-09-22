@@ -1,6 +1,6 @@
 # cli-sweep — new capability (corruption-locator, issue #4194)
 
-`cqlite sweep` SHALL verify every SSTable table directory under a data directory in one pass, name a
+`cqlite sweep` SHALL verify every SSTable GENERATION under a data directory in one pass, name a
 severity and cause for each, and exit non-zero when anything short of fully healthy is found. All
 requirements are ADDED.
 
@@ -9,17 +9,29 @@ requirements are ADDED.
 ### Requirement: S1 — The verb, its walk, and its severities
 
 The CLI SHALL provide `cqlite sweep <data-dir> [--mode quick|full] [--out text|json] [--jobs N]`,
-walking every `<keyspace>/<table>-<id>/` directory under `<data-dir>`, verifying each via the
-existing `verify_sstable`, and reporting exactly one row per directory with severity `ok | degraded |
-corrupt | unreadable`.
+walking every `<keyspace>/<table>-<id>/` directory under `<data-dir>`, enumerating every `*-Data.db`
+GENERATION found in each (a real table directory routinely holds several — `verify_sstable` alone
+resolves only the lexicographically-first, which would silently skip the rest), verifying each
+generation via `verify_sstable_generation`, and reporting exactly one row per GENERATION with
+severity `ok | degraded | corrupt | unreadable` (roborev round-2 HIGH finding — corrected from an
+earlier per-DIRECTORY design, whose S1.1 wording below is updated to match).
 
 #### Scenario: S1.1 sweep over the whole committed corpus is all-ok
 - **Given** the built binary and a `CQLITE_DATASETS_ROOT`-resolved corpus root holding every
   committed table
 - **When** `cqlite sweep <root> --mode quick --out json` runs
-- **Then** exit `0`, every row's severity is `ok`, and the row count equals the number of table
-  directories under the root (`cqlite-cli/tests/sweep_cli_tests.rs`, named in the gate's `cli-tests`
-  list per #3522).
+- **Then** exit `0`, every row's severity is `ok`, and the row count equals the number of SSTable
+  GENERATIONS (not table directories — a table directory with N generations contributes N rows)
+  under the root (`cqlite-cli/tests/sweep_cli_tests.rs`, named in the gate's `cli-tests` list per
+  #3522).
+
+#### Scenario: S1.5 a table directory with multiple generations reports one row PER generation (roborev round-2 HIGH finding)
+- **Given** a temp dir containing a table directory with TWO SSTable generations (distinct base
+  names, e.g. `nb-1-big-*` and `nb-2-big-*`), only the second corrupted
+- **When** `cqlite sweep <temp-dir> --mode full` runs
+- **Then** exit `2`, there are exactly two rows for that table directory (one per generation), the
+  first-generation row is `ok`, and the second-generation row is `corrupt` — never silently reporting
+  only the lexicographically-first generation's verdict for the whole directory.
 
 #### Scenario: S1.2 one corrupted copy makes exactly that row corrupt
 - **Given** a temp dir containing a copy of a healthy table plus
@@ -46,8 +58,8 @@ corrupt | unreadable`.
 ### Requirement: S2 — Exit code is a closed function of the row severities
 
 Sweep SHALL exit `0` when every row is `ok`, exit `2` when any row is `corrupt` or `unreadable`
-(regardless of how many rows are merely `degraded`), and exit `1` on a usage error (e.g. `<data-dir>`
-does not exist, or is not a directory).
+(regardless of how many rows are merely `degraded`) OR when zero rows were discovered at all, and
+exit `1` on a usage error (e.g. `<data-dir>` does not exist, or is not a directory).
 
 #### Scenario: S2.1 all-degraded-no-worse still exits non-zero-free of corrupt/unreadable
 - **Given** a temp dir whose only table directory is `test_comp_corrupt/filter_db_bit_flip`
@@ -58,6 +70,15 @@ does not exist, or is not a directory).
 #### Scenario: S2.2 usage error on a missing data dir
 - **When** `cqlite sweep /does/not/exist` runs
 - **Then** exit `1`, stderr names the missing path, and no verification is attempted.
+
+#### Scenario: S2.3 zero rows discovered is its own non-zero exit (roborev round-2 MEDIUM finding)
+- **Given** a temp dir that exists, is a directory, and holds zero `<keyspace>/<table>-<id>/`
+  subdirectories carrying at least one `*-Data.db` generation (either genuinely empty, or the caller
+  pointed `sweep` one level too high, e.g. directly at a table directory instead of its data root)
+- **When** `cqlite sweep <temp-dir>` runs
+- **Then** exit `2`, stderr names the "no table directories found" condition, and stdout carries no
+  report — a sweep that verified nothing must not print a report claiming a clean bill of health, and
+  must not be indistinguishable from an all-healthy corpus (affirmative-zero doctrine).
 
 ### Requirement: S3 — Sweep memory stays bounded
 

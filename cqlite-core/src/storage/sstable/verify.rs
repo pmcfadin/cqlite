@@ -257,11 +257,22 @@ pub fn format_location(loc: &Location) -> String {
         .map(|c| format!("chunk {c}, "))
         .unwrap_or_default();
     let partitions = match &loc.partitions {
-        PartitionResolution::Resolved(keys) if keys.is_empty() => "0 partitions".to_string(),
-        PartitionResolution::Resolved(keys) => {
+        PartitionResolution::Resolved { keys, .. } if keys.is_empty() => "0 partitions".to_string(),
+        PartitionResolution::Resolved { keys, truncated } => {
+            // Issue #4194, roborev round-2 MEDIUM finding: `truncated` names
+            // how many more intersecting partitions exist beyond the
+            // `MAX_RESOLVED_KEYS` cap, so a badly truncated Data.db's report
+            // stays affirmative about what it omitted rather than silently
+            // showing a partial list as if it were complete.
+            let more = if *truncated > 0 {
+                format!(" (+{truncated} more, capped)")
+            } else {
+                String::new()
+            };
             format!(
-                "{} partition(s): {}",
+                "{} partition(s){}: {}",
                 keys.len(),
+                more,
                 keys.iter()
                     .map(|k| k.key_hex.as_str())
                     .collect::<Vec<_>>()

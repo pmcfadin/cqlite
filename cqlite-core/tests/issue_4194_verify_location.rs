@@ -232,7 +232,12 @@ fn hex(b: &[u8]) -> String {
 
 fn resolved_keys(res: &PartitionResolution) -> Vec<String> {
     match res {
-        PartitionResolution::Resolved(keys) => {
+        PartitionResolution::Resolved { keys, truncated } => {
+            assert_eq!(
+                *truncated, 0,
+                "test fixtures never exceed MAX_RESOLVED_KEYS; a non-zero truncated count means \
+                 the oracle's expectation is incomplete, not that this is fine"
+            );
             let mut v: Vec<String> = keys.iter().map(|k| k.key_hex.clone()).collect();
             v.sort();
             v
