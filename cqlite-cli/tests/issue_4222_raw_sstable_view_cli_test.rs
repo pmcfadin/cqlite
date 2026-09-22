@@ -48,7 +48,11 @@ fn fixture_present() -> bool {
         .map(|mut entries| {
             entries.any(|e| {
                 e.ok()
-                    .map(|e| e.file_name().to_string_lossy().starts_with("resurrection_gc_positive-"))
+                    .map(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with("resurrection_gc_positive-")
+                    })
                     .unwrap_or(false)
             })
         })

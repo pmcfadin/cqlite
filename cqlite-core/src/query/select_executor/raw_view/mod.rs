@@ -67,7 +67,10 @@ impl super::SelectExecutor {
         // use this, never `table_id` (which still carries the suffix).
         let base_table_id = TableId::new(format!(
             "{}{}",
-            keyspace.as_deref().map(|k| format!("{k}.")).unwrap_or_default(),
+            keyspace
+                .as_deref()
+                .map(|k| format!("{k}."))
+                .unwrap_or_default(),
             base_name
         ));
 
@@ -79,14 +82,12 @@ impl super::SelectExecutor {
         // named) to decide whether this is a partition-targeted point read
         // or an unbounded full scan (spec: "pushed to the point-read path,
         // never a scan" for a full `WHERE pk = ?`).
-        let outcome =
-            classify_partition_lookup(&plan.sstable_predicates, Some(&base_schema));
+        let outcome = classify_partition_lookup(&plan.sstable_predicates, Some(&base_schema));
 
         let rows = match outcome {
             PartitionLookupOutcome::Targeted(pk_bytes) => {
                 let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;
-                raw_view_point_rows(&readers, &base_schema, std::slice::from_ref(&pk_bytes))
-                    .await?
+                raw_view_point_rows(&readers, &base_schema, std::slice::from_ref(&pk_bytes)).await?
             }
             PartitionLookupOutcome::MultiTargeted(pk_keys) => {
                 let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;

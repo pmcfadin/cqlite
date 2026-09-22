@@ -108,9 +108,7 @@ fn bigint_of(row: &QueryRow, col: &str) -> Option<i64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn point_key_yields_one_row_per_generation_no_reconciliation() {
     let db = open_fixture_db().await;
-    let query = format!(
-        "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1"
-    );
+    let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1");
     let result = db
         .execute(&query)
         .await
@@ -216,9 +214,7 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partition_tombstone_generation_still_yields_one_row() {
     let db = open_fixture_db().await;
-    let query = format!(
-        "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 2"
-    );
+    let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 2");
     let result = db
         .execute(&query)
         .await
@@ -259,7 +255,11 @@ async fn partition_tombstone_generation_still_yields_one_row() {
         .iter()
         .filter(|r| int_of(r, "generation") == Some(1))
         .collect();
-    assert_eq!(gen1_rows.len(), 3, "gen-1 must contribute exactly 3 live rows");
+    assert_eq!(
+        gen1_rows.len(),
+        3,
+        "gen-1 must contribute exactly 3 live rows"
+    );
 }
 
 /// Spec: "`SELECT DISTINCT sstable` answers 'which generations hold this
@@ -273,10 +273,12 @@ async fn partition_tombstone_generation_still_yields_one_row() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sstable_generation_projection_answers_which_generations_hold_the_key() {
     let db = open_fixture_db().await;
-    let query = format!(
-        "SELECT sstable, generation FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1"
-    );
-    let result = db.execute(&query).await.expect("projection query must succeed");
+    let query =
+        format!("SELECT sstable, generation FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1");
+    let result = db
+        .execute(&query)
+        .await
+        .expect("projection query must succeed");
 
     let mut generations: Vec<i32> = result
         .rows

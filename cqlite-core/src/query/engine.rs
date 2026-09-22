@@ -722,8 +722,8 @@ impl QueryEngine {
     /// not reject a raw-view query before `SelectExecutor` ever intercepts
     /// it (design.md D6).
     pub async fn has_schema_for_table(&self, table: &str) -> bool {
-        let resolve_table = crate::query::raw_view_naming::strip_raw_view_suffix(table)
-            .unwrap_or(table);
+        let resolve_table =
+            crate::query::raw_view_naming::strip_raw_view_suffix(table).unwrap_or(table);
         self.schema_manager
             .get_table_schema(resolve_table)
             .await

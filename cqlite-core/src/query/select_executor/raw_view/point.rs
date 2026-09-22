@@ -31,7 +31,10 @@ use std::sync::Arc;
 /// resolved independently).
 async fn resolve_position(reader: &SSTableReader, pk_bytes: &[u8]) -> Option<i64> {
     let offset = if reader.is_bti() {
-        reader.lookup_partition_via_bti_trie(pk_bytes).ok().flatten()
+        reader
+            .lookup_partition_via_bti_trie(pk_bytes)
+            .ok()
+            .flatten()
     } else {
         reader
             .lookup_partition_with_index(pk_bytes)

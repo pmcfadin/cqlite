@@ -302,7 +302,10 @@ fn insert_simple_cell(
         );
     }
     if let Some(ldt) = tombstone_ldt.or(cell.local_deletion_time) {
-        values.insert(format!("{}_local_deletion_time", cell.column), Value::Integer(ldt));
+        values.insert(
+            format!("{}_local_deletion_time", cell.column),
+            Value::Integer(ldt),
+        );
     }
     if let Some(kind) = tombstone_kind {
         values.insert(format!("{}_tombstone", cell.column), Value::text(kind));
@@ -429,7 +432,10 @@ mod tests {
             }),
             Some("range_tombstone_start".to_string())
         );
-        assert_eq!(start.values.get("bound_inclusive"), Some(&Value::Boolean(true)));
+        assert_eq!(
+            start.values.get("bound_inclusive"),
+            Some(&Value::Boolean(true))
+        );
         assert_eq!(start.values.get("ck1"), Some(&Value::Integer(2)));
         assert!(
             !start.values.contains_key("ck2"),
@@ -466,8 +472,14 @@ mod tests {
             },
         };
         let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
-        assert_eq!(rows[0].values.get("bound_inclusive"), Some(&Value::Boolean(false)));
-        assert_eq!(rows[1].values.get("bound_inclusive"), Some(&Value::Boolean(true)));
+        assert_eq!(
+            rows[0].values.get("bound_inclusive"),
+            Some(&Value::Boolean(false))
+        );
+        assert_eq!(
+            rows[1].values.get("bound_inclusive"),
+            Some(&Value::Boolean(true))
+        );
     }
 
     /// A partition tombstone becomes exactly one row with every cell/clustering
@@ -485,8 +497,14 @@ mod tests {
         let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
-        assert_eq!(r.values.get("partition_deletion_timestamp"), Some(&Value::BigInt(999)));
-        assert_eq!(r.values.get("partition_deletion_time"), Some(&Value::BigInt(5)));
+        assert_eq!(
+            r.values.get("partition_deletion_timestamp"),
+            Some(&Value::BigInt(999))
+        );
+        assert_eq!(
+            r.values.get("partition_deletion_time"),
+            Some(&Value::BigInt(5))
+        );
         assert!(!r.values.contains_key("ck1"));
         assert!(!r.values.contains_key("val"));
     }
@@ -539,7 +557,10 @@ mod tests {
             }),
             Some("cell".to_string())
         );
-        assert_eq!(r.values.get("val_local_deletion_time"), Some(&Value::Integer(66)));
+        assert_eq!(
+            r.values.get("val_local_deletion_time"),
+            Some(&Value::Integer(66))
+        );
         // Clustering columns are plain data columns, never a metadata quad.
         assert_eq!(r.values.get("ck1"), Some(&Value::Integer(1)));
         assert!(!r.values.contains_key("ck1_timestamp"));
