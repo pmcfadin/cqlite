@@ -175,9 +175,9 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
         "a row tombstone is recorded once at the row level, not duplicated per cell"
     );
 
-    // gen-2, ck=3: CELL tombstone on `val` only; `extra` is absent (never
-    // written for this row in either generation... actually only `val` cell
-    // is present in the golden for ck=3 in gen-2).
+    // gen-2, ck=3: CELL tombstone on `val` only — the golden's ck=3 row in
+    // gen-2 carries just the `val` cell (tombstoned); `extra` has no cell at
+    // all for this row in gen-2.
     let cell_tombstone = result
         .rows
         .iter()
@@ -452,5 +452,42 @@ async fn gen1_drop_col_visible_gen2_drop_col_absent() {
         text_of(gen2_ck4, "keep_col").as_deref(),
         Some("keep_b_4"),
         "keep_col (never dropped) must still decode normally in gen-2"
+    );
+}
+
+/// Roborev finding (issue #4222, High): `collect_sstable_predicates`
+/// deliberately skips OR/NOT branches when building `plan.sstable_predicates`;
+/// the base pipeline compensates with a residual `Filter` step this view's
+/// early return never reaches. A WHERE clause containing OR/NOT anywhere in
+/// its tree must fail closed rather than silently return every row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn where_clause_with_or_fails_closed() {
+    let db = open_fixture_db().await;
+    let outcome = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 OR pk = 2"
+        ))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "REGRESSION (issue #4222): a WHERE clause containing OR must fail closed, not \
+         silently return every row of every partition"
+    );
+}
+
+/// Roborev finding (issue #4222, Medium): `PER PARTITION LIMIT` must fail
+/// closed like ORDER BY/DISTINCT/aggregates, never silently ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_partition_limit_fails_closed() {
+    let db = open_fixture_db().await;
+    let outcome = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data PER PARTITION LIMIT 1"
+        ))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "REGRESSION (issue #4222): PER PARTITION LIMIT must fail closed, not be silently \
+         ignored"
     );
 }

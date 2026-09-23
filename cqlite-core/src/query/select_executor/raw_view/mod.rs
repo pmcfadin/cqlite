@@ -38,7 +38,7 @@ pub(super) use columns::{raw_view_columns, strip_raw_view_suffix};
 use super::{classify_partition_lookup, parse_table_id, PartitionLookupOutcome};
 use crate::query::result::{QueryMetadata, QueryResult, QueryRow};
 use crate::query::result_budget::enforce_materialized_rows;
-use crate::query::select_ast::{SelectClause, SelectExpression};
+use crate::query::select_ast::{SelectClause, SelectExpression, WhereExpression};
 use crate::query::select_optimizer::{OptimizedQueryPlan, SSTablePredicate};
 use crate::schema::TableSchema;
 use crate::types::Value;
@@ -55,6 +55,24 @@ use std::sync::Arc;
 /// all).
 pub(super) fn is_plain_data_row(row: &QueryRow) -> bool {
     row.values.get("row_kind") == Some(&Value::text("row"))
+}
+
+/// `true` when `expr` contains an `Or`/`Not` node ANYWHERE in its tree
+/// (through `And`/`Parentheses`) — mirroring exactly what
+/// `select_optimizer.rs::collect_sstable_predicates` walks, since a
+/// predicate under an `Or`/`Not` sibling contributes NOTHING to
+/// `plan.sstable_predicates` regardless of whether the top-level tree also
+/// contains a pushable `And` branch (roborev finding, issue #4222): `pk = 1
+/// AND (a = 2 OR b = 3)` still yields the non-empty predicate list `[pk =
+/// 1]`, so checking "predicates is empty" alone would miss the dropped `OR`
+/// clause.
+fn where_expression_has_or_or_not(expr: &WhereExpression) -> bool {
+    match expr {
+        WhereExpression::Comparison(_) => false,
+        WhereExpression::Or(_) | WhereExpression::Not(_) => true,
+        WhereExpression::And(exprs) => exprs.iter().any(where_expression_has_or_or_not),
+        WhereExpression::Parentheses(inner) => where_expression_has_or_or_not(inner),
+    }
 }
 
 /// Split `predicates` into the subset naming a PARTITION-KEY column (or a
@@ -165,6 +183,36 @@ impl super::SelectExecutor {
                 "ORDER BY is not supported over a _raw_sstable_data view",
             ));
         }
+        // PER PARTITION LIMIT (roborev finding, issue #4222): silently
+        // ignoring it (rather than failing closed, like the three guards
+        // above) would return every row of every partition instead of
+        // capping each one — the same silent-wrong-answer class.
+        if plan.statement.per_partition_limit.is_some() {
+            return Err(Error::unsupported_query(
+                "PER PARTITION LIMIT is not supported over a _raw_sstable_data view",
+            ));
+        }
+        // A WHERE clause containing OR/NOT anywhere in its tree (roborev
+        // finding, issue #4222 — High): `collect_sstable_predicates`
+        // (`select_optimizer.rs`) deliberately skips OR/NOT branches when
+        // building `plan.sstable_predicates`, and the base pipeline
+        // compensates with a residual `Filter` execution step over the
+        // ORIGINAL where-expression tree — a step this view's early return
+        // never reaches. Without this guard, `WHERE pk = 1 OR pk = 2` would
+        // silently return every physical row of every partition, unfiltered.
+        // Failing closed here (rather than re-implementing the general
+        // WHERE-expression evaluator with this view's row-kind exemption
+        // semantics) is the same documented scope boundary as ORDER BY/
+        // DISTINCT/aggregates above.
+        if let Some(where_clause) = &plan.statement.where_clause {
+            if where_expression_has_or_or_not(where_clause) {
+                return Err(Error::unsupported_query(
+                    "a WHERE clause containing OR/NOT is not supported over a \
+                     _raw_sstable_data view (every AND-only comparison is pushed down; \
+                     OR/NOT would otherwise be silently dropped)",
+                ));
+            }
+        }
 
         let (keyspace, _) = parse_table_id(table_id);
         let base_schema = self
@@ -241,6 +289,9 @@ impl super::SelectExecutor {
                     std::slice::from_ref(&pk_bytes),
                     &pk_predicates,
                     &other_predicates,
+                    self.max_result_bytes,
+                    self.max_result_rows,
+                    stop_after,
                 )
                 .await?
             }
@@ -251,6 +302,9 @@ impl super::SelectExecutor {
                     &pk_keys,
                     &pk_predicates,
                     &other_predicates,
+                    self.max_result_bytes,
+                    self.max_result_rows,
+                    stop_after,
                 )
                 .await?
             }
@@ -329,11 +383,13 @@ impl super::SelectExecutor {
         let rows: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
 
         // Same final budget check every other query path applies (issue
-        // #1582/D6) — belt-and-braces alongside the full-scan producer's own
-        // incremental check (which never materializes past the budget); the
-        // point-key path has no incremental check of its own, so this is its
-        // ONLY enforcement. Applied to the POST-limit rows, so a `LIMIT 10`
-        // raw-view query is never penalized for the corpus it did not keep.
+        // #1582/D6) — belt-and-braces alongside BOTH producers' own
+        // incremental checks (issue #4222 roborev finding: the point-key
+        // path now bounds accumulation the same way the full-scan path
+        // does, via `PointCollector` in `point.rs`), never materializing
+        // past the budget before this runs. Applied to the POST-limit rows,
+        // so a `LIMIT 10` raw-view query is never penalized for the corpus
+        // it did not keep.
         let effective_max_rows = if plan.statement.limit.is_some() {
             usize::MAX
         } else {
