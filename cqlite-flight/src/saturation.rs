@@ -558,12 +558,18 @@ mod tests {
         if std::env::var_os(CHILD_ENV).is_none() {
             let exe = std::env::current_exe().expect("current_exe");
             let sentinel = tempfile::NamedTempFile::new().expect("sentinel tempfile");
-            let filter = concat!(
-                module_path!(),
-                "::proc_thread_gauge_rises_with_load_and_settles"
-            );
+            // `module_path!()` includes the crate name (`cqlite_flight::...`),
+            // but a `--lib` binary's OWN test names are crate-relative (no
+            // crate-name segment) — strip it so a `saturation` module move
+            // still resolves; the leaf function name stays a literal, and a
+            // rename there is caught by the sentinel assertion below rather
+            // than silently matching zero tests.
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, m)| m);
+            let filter = format!("{module}::proc_thread_gauge_rises_with_load_and_settles");
             let status = std::process::Command::new(exe)
-                .args(["--exact", filter, "--test-threads=1"])
+                .args(["--exact", &filter, "--test-threads=1"])
                 .env(CHILD_ENV, "1")
                 .env(SENTINEL_ENV, sentinel.path())
                 .status()
