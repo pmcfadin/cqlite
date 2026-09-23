@@ -19,6 +19,7 @@
 use super::row_map::{map_compaction_row, RawViewSource};
 use super::row_passes_predicates;
 use crate::query::result::QueryRow;
+use crate::query::result_budget::{enforce_result_budget, estimate_query_row_bytes};
 use crate::query::select_optimizer::SSTablePredicate;
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
@@ -26,6 +27,69 @@ use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
 use std::ops::ControlFlow;
 use std::sync::Arc;
+
+/// Accumulates accepted rows for the point-key path under the SAME
+/// incremental byte/row-count bound the full-scan producer applies (roborev
+/// finding, issue #4222): a wide partition's rows are pushed here as they
+/// are decoded, never materialized in full before the budget is checked.
+struct PointCollector {
+    out: Vec<QueryRow>,
+    running_bytes: usize,
+    max_result_bytes: usize,
+    max_result_rows: usize,
+    /// `Some(offset + limit)` for an explicit `LIMIT` — stop once this many
+    /// ACCEPTED rows are collected (mirrors the full-scan producer's
+    /// `stop_after`).
+    stop_after: Option<usize>,
+}
+
+impl PointCollector {
+    fn new(max_result_bytes: usize, max_result_rows: usize, stop_after: Option<usize>) -> Self {
+        Self {
+            out: Vec::new(),
+            running_bytes: 0,
+            max_result_bytes,
+            max_result_rows,
+            stop_after,
+        }
+    }
+
+    /// Push one accepted row, returning `true` when the caller should STOP
+    /// (the `stop_after` cap was reached — not an error, just "enough").
+    /// Returns `Err(Error::ResultTooLarge)` when the byte/row budget is
+    /// exceeded WITHOUT an explicit `LIMIT` to exempt it (issue #1578).
+    fn push(&mut self, row: QueryRow) -> Result<bool> {
+        self.running_bytes = self
+            .running_bytes
+            .saturating_add(estimate_query_row_bytes(&row));
+        self.out.push(row);
+        if let Some(cap) = self.stop_after {
+            if self.out.len() >= cap {
+                return Ok(true);
+            }
+            // An explicit LIMIT exempts the row-count valve (issue #1578);
+            // the byte budget still guards memory even under a LIMIT.
+            if self.running_bytes > self.max_result_bytes {
+                enforce_result_budget(
+                    &self.out,
+                    self.running_bytes,
+                    self.max_result_bytes,
+                    usize::MAX,
+                )?;
+            }
+            return Ok(false);
+        }
+        if self.running_bytes > self.max_result_bytes || self.out.len() > self.max_result_rows {
+            enforce_result_budget(
+                &self.out,
+                self.running_bytes,
+                self.max_result_bytes,
+                self.max_result_rows,
+            )?;
+        }
+        Ok(false)
+    }
+}
 
 /// Resolve the partition's `Data.db` byte offset via the SAME index the reader
 /// already consults inside `read_single_partition_for_compaction` (issue
@@ -52,23 +116,25 @@ async fn resolve_position(reader: &SSTableReader, pk_bytes: &[u8]) -> Option<i64
     offset.and_then(|off| i64::try_from(off).ok())
 }
 
-/// Push every row `map_compaction_row(row, schema, source)` produces into
-/// `out`, keeping only those that pass the raw view's predicate backstop
-/// (roborev finding, issue #4222 — see `row_passes_predicates`'s doc).
+/// Map `row`, keep only the rows that pass the predicate backstop, and push
+/// each into `collector`. Returns `true` when the caller should stop (the
+/// `stop_after` cap was reached).
 fn push_mapped_rows(
     row: CompactionRow,
     schema: &TableSchema,
     source: &RawViewSource,
     pk_predicates: &[&SSTablePredicate],
     other_predicates: &[&SSTablePredicate],
-    out: &mut Vec<QueryRow>,
-) -> Result<()> {
+    collector: &mut PointCollector,
+) -> Result<bool> {
     for mapped in map_compaction_row(row, schema, source)? {
-        if row_passes_predicates(&mapped, pk_predicates, other_predicates)? {
-            out.push(mapped);
+        if row_passes_predicates(&mapped, pk_predicates, other_predicates)?
+            && collector.push(mapped)?
+        {
+            return Ok(true);
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Scan `reader`'s WHOLE compaction stream, forwarding only rows whose
@@ -79,6 +145,9 @@ fn push_mapped_rows(
 /// Fails closed (roborev finding, issue #4222) rather than fabricate
 /// metadata when `reader.compaction_stream_loses_cell_metadata()` — see
 /// `scan.rs`'s identical check for the full-scan producer's fuller doc.
+///
+/// Returns `true` when the caller should stop (the `stop_after` cap was
+/// reached mid-stream).
 async fn scan_and_filter_one_reader(
     reader: &SSTableReader,
     schema: &TableSchema,
@@ -86,8 +155,8 @@ async fn scan_and_filter_one_reader(
     pk_predicates: &[&SSTablePredicate],
     other_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
-    out: &mut Vec<QueryRow>,
-) -> Result<()> {
+    collector: &mut PointCollector,
+) -> Result<bool> {
     if reader.compaction_stream_loses_cell_metadata() {
         return Err(Error::unsupported_query(format!(
             "raw SSTable view: '{}' is a non-'nb'-format BIG SSTable whose compaction stream \
@@ -107,13 +176,23 @@ async fn scan_and_filter_one_reader(
         })
         .await?;
     for row in matched {
-        push_mapped_rows(row, schema, &source, pk_predicates, other_predicates, out)?;
+        if push_mapped_rows(
+            row,
+            schema,
+            &source,
+            pk_predicates,
+            other_predicates,
+            collector,
+        )? {
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
 }
 
-/// Probe every candidate generation for one partition key, returning every
-/// physical row found (unreconciled).
+/// Probe every candidate generation for one partition key, pushing every
+/// physical row found (unreconciled) into `collector`. Returns `true` when
+/// the caller should stop (the `stop_after` cap was reached).
 #[cfg(not(feature = "tombstones"))]
 async fn point_rows_for_key(
     readers: &[Arc<SSTableReader>],
@@ -122,10 +201,10 @@ async fn point_rows_for_key(
     pk_predicates: &[&SSTablePredicate],
     other_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
-) -> Result<Vec<QueryRow>> {
+    collector: &mut PointCollector,
+) -> Result<bool> {
     use crate::storage::sstable::reader::SinglePartitionCompaction;
 
-    let mut out = Vec::new();
     for reader in readers {
         scan_cancel.check()?;
         match reader
@@ -140,31 +219,36 @@ async fn point_rows_for_key(
                 let position = resolve_position(reader, pk_bytes).await;
                 let source = RawViewSource::from_reader(reader, position);
                 for row in rows {
-                    push_mapped_rows(
+                    if push_mapped_rows(
                         row,
                         schema,
                         &source,
                         pk_predicates,
                         other_predicates,
-                        &mut out,
-                    )?;
+                        collector,
+                    )? {
+                        return Ok(true);
+                    }
                 }
             }
             SinglePartitionCompaction::IndexUnavailable => {
-                scan_and_filter_one_reader(
+                if scan_and_filter_one_reader(
                     reader,
                     schema,
                     pk_bytes,
                     pk_predicates,
                     other_predicates,
                     scan_cancel,
-                    &mut out,
+                    collector,
                 )
-                .await?;
+                .await?
+                {
+                    return Ok(true);
+                }
             }
         }
     }
-    Ok(out)
+    Ok(false)
 }
 
 /// The `tombstones`-build counterpart (epic #951 "honest paths"): that build
@@ -180,22 +264,25 @@ async fn point_rows_for_key(
     pk_predicates: &[&SSTablePredicate],
     other_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
-) -> Result<Vec<QueryRow>> {
-    let mut out = Vec::new();
+    collector: &mut PointCollector,
+) -> Result<bool> {
     for reader in readers {
         scan_cancel.check()?;
-        scan_and_filter_one_reader(
+        if scan_and_filter_one_reader(
             reader,
             schema,
             pk_bytes,
             pk_predicates,
             other_predicates,
             scan_cancel,
-            &mut out,
+            collector,
         )
-        .await?;
+        .await?
+        {
+            return Ok(true);
+        }
     }
-    Ok(out)
+    Ok(false)
 }
 
 /// Row producer entry point: probe every requested partition key against
@@ -204,27 +291,37 @@ async fn point_rows_for_key(
 /// output is the deliberately UNRECONCILED per-generation contribution.
 /// `pk_predicates`/`other_predicates` (roborev finding, issue #4222) are the
 /// SAME split the full-scan producer applies — see `row_passes_predicates`.
+/// `max_result_bytes`/`max_result_rows`/`stop_after` bound accumulation
+/// INCREMENTALLY (a second roborev finding, issue #4222): a wide targeted
+/// partition across many generations is no longer fully materialized before
+/// the budget is checked.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::query::select_executor) async fn raw_view_point_rows(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     keys: &[Vec<u8>],
     pk_predicates: &[&SSTablePredicate],
     other_predicates: &[&SSTablePredicate],
+    max_result_bytes: usize,
+    max_result_rows: usize,
+    stop_after: Option<usize>,
 ) -> Result<Vec<QueryRow>> {
     let scan_cancel = ScanCancel::new();
-    let mut out = Vec::new();
+    let mut collector = PointCollector::new(max_result_bytes, max_result_rows, stop_after);
     for key in keys {
-        out.extend(
-            point_rows_for_key(
-                readers,
-                schema,
-                key,
-                pk_predicates,
-                other_predicates,
-                &scan_cancel,
-            )
-            .await?,
-        );
+        if point_rows_for_key(
+            readers,
+            schema,
+            key,
+            pk_predicates,
+            other_predicates,
+            &scan_cancel,
+            &mut collector,
+        )
+        .await?
+        {
+            break;
+        }
     }
-    Ok(out)
+    Ok(collector.out)
 }

@@ -28,10 +28,18 @@ pub(in crate::query::select_executor) use crate::query::raw_view_naming::RAW_SST
 /// gives them a per-column complex-deletion marker, so they keep the plain
 /// quad instead.
 fn is_complex_cql_type(t: &CqlType) -> bool {
-    matches!(
-        t,
-        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) | CqlType::Udt(_, _)
-    )
+    match t {
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) | CqlType::Udt(_, _) => true,
+        // A bare (non-frozen) UDT name parses to `Custom("udt:<name>")`, NEVER
+        // `CqlType::Udt(..)` (roborev finding, issue #4222):
+        // `ComplexTypeParser::parse_with_depth` only builds the structured
+        // `Udt` variant when it has the full field list to hand, which a bare
+        // schema type STRING never carries — `schema/cql_type_parser.rs:249`.
+        // Matching only `Udt(..)` therefore silently misclassified every
+        // real non-frozen UDT column as "simple".
+        CqlType::Custom(name) => name.starts_with("udt:"),
+        _ => false,
+    }
 }
 
 /// Build the raw view's full column contract (design.md D7) from the BASE
@@ -96,9 +104,20 @@ pub(in crate::query::select_executor) fn raw_view_columns(
     {
         push(&mut columns, col.name.clone(), &col.data_type)?;
 
-        let is_complex = parse_cql_type_str(&col.data_type)
-            .map(|t| is_complex_cql_type(&t))
-            .unwrap_or(false);
+        // Fail closed (design.md D8) on an unparseable declared type rather
+        // than defaulting to "simple" (roborev finding, issue #4222): a type
+        // this parser cannot classify might be complex, and silently
+        // declaring the wrong column shape is the same class of defect the
+        // collision check above exists to prevent.
+        let cql_type = parse_cql_type_str(&col.data_type).ok_or_else(|| {
+            Error::Schema(format!(
+                "raw SSTable view: base table '{}.{}' column '{}' has a declared type \
+                 ('{}') this parser cannot classify as simple or complex — refusing to guess \
+                 the column contract shape (issue #28 no-heuristics)",
+                base.keyspace, base.table, col.name, col.data_type
+            ))
+        })?;
+        let is_complex = is_complex_cql_type(&cql_type);
         if is_complex {
             push(
                 &mut columns,
