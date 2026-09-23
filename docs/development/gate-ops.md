@@ -551,6 +551,63 @@ tmutil listlocalsnapshots /                 # any snapshot pins freed blocks
 tmutil thinlocalsnapshots / 40000000000 4   # thin to reclaim (field: 9.1Gi -> 72Gi)
 ```
 
+## `tooling-tests` is diff-scoped in the full gate (issue #4266)
+
+`tooling-tests` — the ~80-nested-shell-self-test harness-regression component
+documented above — measured **5056s of ~11450s (44%) of a whole full-gate PASS**
+in `gate-4194f` on astro-processor. A product PR that touches no harness file
+(no `cqlite-core/src/**`-only, `cqlite-cli/**`-only, etc. diff) still paid all of
+it, and it is the component most often turned red by the HOST rather than the
+diff (IO starvation; #4252's r7, case 4b.126).
+
+**The decision lives in `scripts/lib/tooling-tests-scope.sh`**, sourced by
+`scripts/agent-gate.sh` at script scope (same pattern as `perf-capability.sh`).
+One array, `TOOLING_TESTS_SCOPE_PATTERNS`, is the ONE declared place the
+harness-path set lives — `scripts/**`, `.github/**`, `.claude/**`,
+`.roborev.toml`, `rust-toolchain.toml`, `Cargo.lock`, `Cargo.toml` — pinned
+literally by `scripts/tests/test_tooling_tests_scope.sh` so a change to the set
+is caught at the source rather than only inferred from behavior.
+
+**`run_tooling_tests()` (the full gate only — `tooling-tests` is not a `--lite`
+or `--delta` component) resolves the diff against the merge-base of the first
+of `origin/main` / `main` / `origin/master` / `master` that resolves** (the same
+fallback chain `run_file_size` uses), reads BOTH the committed diff against
+that base AND the uncommitted working-tree diff against `HEAD` (a dirty tree
+touching a harness path still forces a run), and decides:
+
+- **Zero declared-set paths in the diff → `SKIP`**, with the cause and the
+  declared set named via `_record_status_detail` (so it renders on the SUMMARY
+  row, per the `_status_detail` gate-authored-text contract — fixed wording plus
+  a COUNT, never a file name). Never a bare PASS; never a silent SKIP.
+- **At least one declared-set path in the diff → `RUN`** (the full ~80-suite
+  body executes exactly as before scoping existed).
+- **The base can't be resolved, or `git diff` itself fails → `RUN`, fail-closed
+  (#4266 AC3).** Scoping abstains rather than guesses; the SUMMARY names the
+  unmeasurable cause.
+- **`--only tooling-tests` always bypasses scoping** (`--only` is a diagnostic,
+  never scoped, matching every other component's `--only` leniency) — the
+  component runs in full whenever explicitly selected.
+
+**The nightly `gate.yml` deep-check job is the unconditional backstop scoping's
+false-negatives rely on**, and it needed its own escape hatch: that job runs the
+full gate on `main` itself, where `HEAD` **is** its own merge-base with
+`origin/main` — an empty diff by construction, which would otherwise SKIP the
+exact lane whose entire job is to catch harness drift within 24h. Its "Run full
+agent gate" step therefore sets `CQLITE_TOOLING_TESTS_ALWAYS_RUN=1`, which
+`_tooling_tests_scope_decide` checks first, before any git call, and forces
+`RUN` unconditionally.
+
+**Hidden CLI hooks** (mirroring the `--delta-classify` / `--component-set-line`
+pattern) expose both halves for self-tests without running the real component:
+`agent-gate.sh --tooling-tests-classify` (pure — reads changed paths on stdin,
+no git) and `agent-gate.sh --tooling-tests-scope-line [base]` (drives the real,
+git-backed decision — used against a scratch `git init` fixture, never this
+checkout, following the same `$wt`-copy pattern as
+`scripts/tests/test_dep_duplicates_ratchet.sh`).
+
+Self-test: `scripts/tests/test_tooling_tests_scope.sh`, wired into
+`tooling-tests` itself (hermetic — no cargo/python3/network/datasets).
+
 ## Gate Parallelism and nextest (issue #1737)
 
 The gate runs **~75% faster** than v0.12.0 on warm machines via two levers:
