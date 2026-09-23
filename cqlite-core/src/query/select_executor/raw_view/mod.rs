@@ -39,24 +39,75 @@ use super::{classify_partition_lookup, parse_table_id, PartitionLookupOutcome};
 use crate::query::result::{QueryMetadata, QueryResult, QueryRow};
 use crate::query::result_budget::enforce_materialized_rows;
 use crate::query::select_ast::{SelectClause, SelectExpression};
-use crate::query::select_optimizer::OptimizedQueryPlan;
+use crate::query::select_optimizer::{OptimizedQueryPlan, SSTablePredicate};
 use crate::schema::TableSchema;
 use crate::types::Value;
 use crate::{Error, Result, TableId};
 use point::raw_view_point_rows;
 use scan::raw_view_full_scan_rows;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// `true` when `row`'s `row_kind` column is the plain `'row'` case (a live
 /// or tombstoned DATA row) rather than a synthetic `partition_tombstone` /
 /// `range_tombstone_start` / `range_tombstone_end` row, which carries no
 /// clustering columns (or, for a partition-tombstone row, no data columns at
-/// all). Used to exempt those synthetic rows from the clustering/regular-
-/// column predicate backstop (roborev finding, issue #4222): the spec
-/// requires "a partition tombstone is visible even when the generation holds
-/// no live rows", which a clustering-key predicate must not silently defeat.
-fn is_plain_data_row(row: &QueryRow) -> bool {
+/// all).
+pub(super) fn is_plain_data_row(row: &QueryRow) -> bool {
     row.values.get("row_kind") == Some(&Value::text("row"))
+}
+
+/// Split `predicates` into the subset naming a PARTITION-KEY column (or a
+/// `token(...)` predicate, which constrains the partition key too) and
+/// everything else (clustering-key / regular-column predicates).
+///
+/// Used by both row producers to apply the CORRECT predicate backstop
+/// per row-kind (roborev finding, issue #4222): a synthetic
+/// `partition_tombstone`/`range_tombstone_*` row carries no clustering/
+/// regular columns to test a clustering/regular predicate against, and the
+/// spec requires it to stay visible "even when the generation holds no live
+/// rows" — but it DOES carry partition-key values (`insert_pk_values`), so a
+/// partition-key predicate (e.g. a composite key's `pk1 = 1` alone, which
+/// `classify_partition_lookup` cannot push down as a full targeted lookup)
+/// must still apply to it, or a full scan filtered to one partition would
+/// wrongly return every OTHER partition's tombstone rows too.
+pub(super) fn split_predicates_by_key_role<'a>(
+    predicates: &'a [SSTablePredicate],
+    base_schema: &TableSchema,
+) -> (Vec<&'a SSTablePredicate>, Vec<&'a SSTablePredicate>) {
+    let pk_names: HashSet<&str> = base_schema
+        .partition_keys
+        .iter()
+        .map(|k| k.name.as_str())
+        .collect();
+    predicates
+        .iter()
+        .partition(|p| p.is_token() || pk_names.contains(p.column.as_str()))
+}
+
+/// Apply the raw view's post-scan predicate backstop to one row: partition-
+/// key predicates apply UNCONDITIONALLY (every row carries the partition key,
+/// synthetic or not); clustering/regular-column predicates apply ONLY to a
+/// plain data row (`row_kind = 'row'`) — a synthetic row is exempt from
+/// those (roborev finding, issue #4222).
+pub(super) fn row_passes_predicates(
+    row: &QueryRow,
+    pk_predicates: &[&SSTablePredicate],
+    other_predicates: &[&SSTablePredicate],
+) -> Result<bool> {
+    for p in pk_predicates {
+        if super::evaluate_leaf(row, p) != super::LeafOutcome::True {
+            return Ok(false);
+        }
+    }
+    if is_plain_data_row(row) {
+        for p in other_predicates {
+            if super::evaluate_leaf(row, p) != super::LeafOutcome::True {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 impl super::SelectExecutor {
@@ -139,6 +190,41 @@ impl super::SelectExecutor {
             .resolve_raw_view_readers(&base_table_id, keyspace.is_some())
             .await?;
 
+        // Split the predicate set ONCE (roborev finding, issue #4222): a
+        // partition-key predicate (or `token(...)`) applies to EVERY row,
+        // synthetic or not (a synthetic row still carries the partition key);
+        // a clustering/regular-column predicate applies ONLY to a plain data
+        // row (`row_kind = 'row'`) — a synthetic `partition_tombstone`/
+        // `range_tombstone_*` row carries no such columns to test, and the
+        // spec requires it to stay visible "even when the generation holds
+        // no live rows". Threaded into BOTH producers so the filtering
+        // happens where LIMIT can stop the walk early, not after the whole
+        // corpus is already materialized.
+        let (pk_predicates, other_predicates) =
+            split_predicates_by_key_role(&plan.sstable_predicates, &base_schema);
+
+        // LIMIT/OFFSET (roborev finding, issue #4222): the raw view returns
+        // straight from `execute_raw_sstable_view`, never reaching the
+        // execution-step pipeline's `Limit` step. `stop_after` tells the
+        // FULL-SCAN producer to stop once this many ACCEPTED (post-predicate)
+        // rows are collected — mirroring issue #1577's LIMIT-pushdown intent —
+        // so `SELECT * FROM big_raw_sstable_data LIMIT 1` does not decode the
+        // whole corpus, and does not spuriously trip `max_result_rows` on a
+        // table that exceeds it (issue #1578's explicit-LIMIT exemption,
+        // applied at the SOURCE this time, not just the final check below).
+        let offset = plan.statement.offset.unwrap_or(0) as usize;
+        let limit = plan
+            .statement
+            .limit
+            .as_ref()
+            .map(|l| l.count as usize)
+            .unwrap_or(usize::MAX);
+        let stop_after = plan
+            .statement
+            .limit
+            .as_ref()
+            .map(|_| offset.saturating_add(limit));
+
         // Reuse the SAME sstable-predicate extraction the optimizer already
         // ran for this statement's WHERE clause (predicates are plain
         // column=value facts, independent of which table string the SELECT
@@ -149,47 +235,38 @@ impl super::SelectExecutor {
 
         let rows = match outcome {
             PartitionLookupOutcome::Targeted(pk_bytes) => {
-                raw_view_point_rows(&readers, &base_schema, std::slice::from_ref(&pk_bytes)).await?
+                raw_view_point_rows(
+                    &readers,
+                    &base_schema,
+                    std::slice::from_ref(&pk_bytes),
+                    &pk_predicates,
+                    &other_predicates,
+                )
+                .await?
             }
             PartitionLookupOutcome::MultiTargeted(pk_keys) => {
-                raw_view_point_rows(&readers, &base_schema, &pk_keys).await?
+                raw_view_point_rows(
+                    &readers,
+                    &base_schema,
+                    &pk_keys,
+                    &pk_predicates,
+                    &other_predicates,
+                )
+                .await?
             }
             PartitionLookupOutcome::Fallback(_) => {
                 raw_view_full_scan_rows(
                     &readers,
                     &base_schema,
+                    &pk_predicates,
+                    &other_predicates,
                     self.max_result_bytes,
                     self.max_result_rows,
+                    stop_after,
                 )
                 .await?
             }
         };
-
-        // Post-scan predicate backstop (mirrors the base pipeline's own
-        // partition-targeted paths): `classify_partition_lookup` only prunes
-        // by the PARTITION-key predicate(s), so any ADDITIONAL predicate in
-        // the WHERE clause (a clustering-key equality/range, or a predicate
-        // on a non-key column) is evaluated here against every produced
-        // PLAIN DATA row (`row_kind = 'row'`). A synthetic
-        // `partition_tombstone`/`range_tombstone_*` row is EXEMPT (roborev
-        // finding, issue #4222): it carries no clustering/regular columns to
-        // test a clustering/regular predicate against, and the spec
-        // explicitly requires a partition tombstone to stay visible "even
-        // when the generation holds no live rows" — a clustering predicate
-        // silently discarding it would violate that. The partition-key
-        // predicate(s) already selected the right partition upstream (or, on
-        // the unconstrained full-scan path, there is no partition predicate
-        // to apply at all), so keeping these rows unconditionally is correct
-        // on both paths.
-        let mut filtered = Vec::with_capacity(rows.len());
-        for row in rows {
-            if !is_plain_data_row(&row)
-                || super::evaluate_predicates(&row, &plan.sstable_predicates)?
-            {
-                filtered.push(row);
-            }
-        }
-        let rows = filtered;
 
         // Plain-column projection trimming (`SELECT a, b, ...`), reusing the
         // SAME `trim_projection` the base pipeline's `Project` step uses so
@@ -243,21 +320,12 @@ impl super::SelectExecutor {
             _ => (rows, columns),
         };
 
-        // LIMIT/OFFSET (roborev finding, issue #4222): the raw view returns
-        // straight from `execute_raw_sstable_view`, so it never reaches the
-        // execution-step pipeline's `Limit`/`PerPartitionLimit` steps —
-        // applied here instead, mirroring the constant-query branch
-        // (`execute.rs`'s `SELECT 1` handling) and issue #1578's exemption:
-        // an EXPLICIT `LIMIT` exempts the row-count safety valve (the byte
-        // budget still guards memory), since the user's own bound already
-        // caps the result.
-        let offset = plan.statement.offset.unwrap_or(0) as usize;
-        let limit = plan
-            .statement
-            .limit
-            .as_ref()
-            .map(|l| l.count as usize)
-            .unwrap_or(usize::MAX);
+        // Apply the SAME LIMIT/OFFSET the producer was told to `stop_after`
+        // (mirroring the constant-query branch, `execute.rs`'s `SELECT 1`
+        // handling): the producer stopped once `offset + limit` ACCEPTED
+        // rows were collected (or ran out of corpus first), so this trims
+        // exactly `offset` off the front and caps at `limit` — never fewer
+        // than available, never more than requested.
         let rows: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
 
         // Same final budget check every other query path applies (issue

@@ -17,11 +17,13 @@
 //!    "why not KWayMerger"), tagged with that generation's source identity.
 
 use super::row_map::{map_compaction_row, RawViewSource};
+use super::row_passes_predicates;
 use crate::query::result::QueryRow;
+use crate::query::select_optimizer::SSTablePredicate;
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
-use crate::Result;
+use crate::{Error, Result};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -50,17 +52,50 @@ async fn resolve_position(reader: &SSTableReader, pk_bytes: &[u8]) -> Option<i64
     offset.and_then(|off| i64::try_from(off).ok())
 }
 
+/// Push every row `map_compaction_row(row, schema, source)` produces into
+/// `out`, keeping only those that pass the raw view's predicate backstop
+/// (roborev finding, issue #4222 — see `row_passes_predicates`'s doc).
+fn push_mapped_rows(
+    row: CompactionRow,
+    schema: &TableSchema,
+    source: &RawViewSource,
+    pk_predicates: &[&SSTablePredicate],
+    other_predicates: &[&SSTablePredicate],
+    out: &mut Vec<QueryRow>,
+) -> Result<()> {
+    for mapped in map_compaction_row(row, schema, source)? {
+        if row_passes_predicates(&mapped, pk_predicates, other_predicates)? {
+            out.push(mapped);
+        }
+    }
+    Ok(())
+}
+
 /// Scan `reader`'s WHOLE compaction stream, forwarding only rows whose
 /// partition key equals `pk_bytes` — the fail-safe every point-key path
 /// (targeted or not) falls back to when no random-access index can be used.
 /// `position` is `None` (no index was consulted).
+///
+/// Fails closed (roborev finding, issue #4222) rather than fabricate
+/// metadata when `reader.compaction_stream_loses_cell_metadata()` — see
+/// `scan.rs`'s identical check for the full-scan producer's fuller doc.
 async fn scan_and_filter_one_reader(
     reader: &SSTableReader,
     schema: &TableSchema,
     pk_bytes: &[u8],
+    pk_predicates: &[&SSTablePredicate],
+    other_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
     out: &mut Vec<QueryRow>,
 ) -> Result<()> {
+    if reader.compaction_stream_loses_cell_metadata() {
+        return Err(Error::unsupported_query(format!(
+            "raw SSTable view: '{}' is a non-'nb'-format BIG SSTable whose compaction stream \
+             does not preserve per-cell write metadata — this view cannot surface fabricated \
+             timestamps/TTLs as authoritative facts (issue #4222)",
+            reader.file_path().display()
+        )));
+    }
     let source = RawViewSource::from_reader(reader, None);
     let mut matched: Vec<CompactionRow> = Vec::new();
     reader
@@ -72,7 +107,7 @@ async fn scan_and_filter_one_reader(
         })
         .await?;
     for row in matched {
-        out.extend(map_compaction_row(row, schema, &source)?);
+        push_mapped_rows(row, schema, &source, pk_predicates, other_predicates, out)?;
     }
     Ok(())
 }
@@ -84,6 +119,8 @@ async fn point_rows_for_key(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     pk_bytes: &[u8],
+    pk_predicates: &[&SSTablePredicate],
+    other_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
 ) -> Result<Vec<QueryRow>> {
     use crate::storage::sstable::reader::SinglePartitionCompaction;
@@ -103,11 +140,27 @@ async fn point_rows_for_key(
                 let position = resolve_position(reader, pk_bytes).await;
                 let source = RawViewSource::from_reader(reader, position);
                 for row in rows {
-                    out.extend(map_compaction_row(row, schema, &source)?);
+                    push_mapped_rows(
+                        row,
+                        schema,
+                        &source,
+                        pk_predicates,
+                        other_predicates,
+                        &mut out,
+                    )?;
                 }
             }
             SinglePartitionCompaction::IndexUnavailable => {
-                scan_and_filter_one_reader(reader, schema, pk_bytes, scan_cancel, &mut out).await?;
+                scan_and_filter_one_reader(
+                    reader,
+                    schema,
+                    pk_bytes,
+                    pk_predicates,
+                    other_predicates,
+                    scan_cancel,
+                    &mut out,
+                )
+                .await?;
             }
         }
     }
@@ -124,12 +177,23 @@ async fn point_rows_for_key(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     pk_bytes: &[u8],
+    pk_predicates: &[&SSTablePredicate],
+    other_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
 ) -> Result<Vec<QueryRow>> {
     let mut out = Vec::new();
     for reader in readers {
         scan_cancel.check()?;
-        scan_and_filter_one_reader(reader, schema, pk_bytes, scan_cancel, &mut out).await?;
+        scan_and_filter_one_reader(
+            reader,
+            schema,
+            pk_bytes,
+            pk_predicates,
+            other_predicates,
+            scan_cancel,
+            &mut out,
+        )
+        .await?;
     }
     Ok(out)
 }
@@ -138,15 +202,29 @@ async fn point_rows_for_key(
 /// every candidate generation, concatenating every physical row found. Never
 /// routes through `KWayMerger`/`StorageEngine::scan*` (design.md D5/D6) — the
 /// output is the deliberately UNRECONCILED per-generation contribution.
+/// `pk_predicates`/`other_predicates` (roborev finding, issue #4222) are the
+/// SAME split the full-scan producer applies — see `row_passes_predicates`.
 pub(in crate::query::select_executor) async fn raw_view_point_rows(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     keys: &[Vec<u8>],
+    pk_predicates: &[&SSTablePredicate],
+    other_predicates: &[&SSTablePredicate],
 ) -> Result<Vec<QueryRow>> {
     let scan_cancel = ScanCancel::new();
     let mut out = Vec::new();
     for key in keys {
-        out.extend(point_rows_for_key(readers, schema, key, &scan_cancel).await?);
+        out.extend(
+            point_rows_for_key(
+                readers,
+                schema,
+                key,
+                pk_predicates,
+                other_predicates,
+                &scan_cancel,
+            )
+            .await?,
+        );
     }
     Ok(out)
 }
