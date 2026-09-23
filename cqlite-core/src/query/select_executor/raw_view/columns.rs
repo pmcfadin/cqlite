@@ -142,10 +142,18 @@ pub(in crate::query::select_executor) fn raw_view_columns(
                 format!("{}_complex_deletion", col.name),
                 "boolean",
             )?;
+            // `bigint`, never `int` (roborev finding, issue #4222 — round
+            // 8, matching `partition_deletion_time`/`range_deletion_time`'s
+            // round-7 fix for the same defect class): a far-future LDT is
+            // carried as the wrapped `as u32 as i32` on-disk bit pattern
+            // (`compaction_row.rs`'s module-header invariant on
+            // `ComplexColumn::complex_deletion`'s `i32` element), and an
+            // `int` column can only render its SIGN-EXTENDED (fabricated
+            // negative) form.
             push(
                 &mut columns,
                 format!("{}_complex_deletion_time", col.name),
-                "int",
+                "bigint",
             )?;
             push(
                 &mut columns,
@@ -155,10 +163,15 @@ pub(in crate::query::select_executor) fn raw_view_columns(
         } else {
             push(&mut columns, format!("{}_timestamp", col.name), "bigint")?;
             push(&mut columns, format!("{}_ttl", col.name), "int")?;
+            // `bigint`, never `int` (roborev finding, issue #4222 — round
+            // 8): see the identical `_complex_deletion_time` note above —
+            // `SimpleCell::local_deletion_time`/`TombstoneInfo::local_deletion_time`
+            // both feed this column and either can carry a value an `int`
+            // cannot render honestly.
             push(
                 &mut columns,
                 format!("{}_local_deletion_time", col.name),
-                "int",
+                "bigint",
             )?;
             push(&mut columns, format!("{}_tombstone", col.name), "text")?;
         }
@@ -166,7 +179,13 @@ pub(in crate::query::select_executor) fn raw_view_columns(
 
     push(&mut columns, "row_timestamp".to_string(), "bigint")?;
     push(&mut columns, "row_ttl".to_string(), "int")?;
-    push(&mut columns, "row_local_deletion_time".to_string(), "int")?;
+    // `bigint`, never `int` (roborev finding, issue #4222 — round 8): see
+    // the identical `<col>_local_deletion_time` note above.
+    push(
+        &mut columns,
+        "row_local_deletion_time".to_string(),
+        "bigint",
+    )?;
     push(&mut columns, "row_tombstone".to_string(), "text")?;
     // The row tombstone's own `markedForDeleteAt` — distinct from
     // `row_local_deletion_time` (the GC-clock seconds), mirroring the
@@ -204,6 +223,26 @@ pub(in crate::query::select_executor) fn raw_view_columns(
     // per-generation source identity.
     push(&mut columns, "generation".to_string(), "bigint")?;
     push(&mut columns, "format".to_string(), "text")?;
+    // KNOWN, DELIBERATE scope limitation (roborev finding, issue #4222 —
+    // round 8): `position`'s PROJECTED value diverges by internal access
+    // path, and nothing distinguishes the two cases from the value alone.
+    // `point.rs::resolve_position` resolves a real byte offset via a
+    // second index lookup (best-effort — a lookup miss/error also yields
+    // `Null`, per that function's own doc); `scan.rs`'s full-scan producer
+    // NEVER consults an index per row and always reports `Value::Null`.
+    // So `SELECT pk, position FROM t_raw_sstable_data WHERE pk = 1` (point
+    // path) yields a real offset while the SAME projection with no WHERE
+    // (full-scan path) yields `NULL` for every row — a caller cannot tell
+    // "not measured on this access path" from "genuinely no offset" from
+    // the value alone. A `position` PREDICATE is rejected outright for
+    // exactly this reason (see the check in `execute_raw_sstable_view`);
+    // the PROJECTED value is NOT rejected, because a `SELECT *` (this
+    // view's primary, already-tested shape) must keep working over BOTH
+    // access paths, and a bare `NULL` is at least an honest "not measured"
+    // signal, never a fabricated one. Resolving `position` on the
+    // full-scan path too (a per-row index lookup) would undermine that
+    // producer's whole "bounded full scan" cost model; deferred rather
+    // than fixed here.
     push(&mut columns, "position".to_string(), "bigint")?;
 
     Ok(columns)

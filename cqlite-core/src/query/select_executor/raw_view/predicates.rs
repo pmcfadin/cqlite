@@ -168,6 +168,37 @@ pub(super) fn split_predicates_by_key_role<'a>(
     })
 }
 
+/// `true` for a metadata-DERIVATIVE column name — the row-level quintet
+/// (`row_timestamp`/`row_ttl`/`row_local_deletion_time`/`row_tombstone`/
+/// `row_deletion_timestamp`) or a per-cell suffix
+/// (`_timestamp`/`_ttl`/`_local_deletion_time`/`_tombstone`/
+/// `_complex_deletion`/`_complex_deletion_time`/`_complex_deletion_timestamp`)
+/// — as opposed to a STRUCTURAL data column (a clustering-key or
+/// regular-column VALUE itself).
+///
+/// Used by [`row_passes_predicates`] (roborev finding, issue #4222 — round
+/// 8, correcting round 6's own over-broad exemption) to decide which
+/// `data_predicates` a synthetic row's column-absence exemption may cover:
+/// NEVER one of these. No real base-table column can collide with one of
+/// these suffixes — `columns.rs::raw_view_columns`'s collision guard fails
+/// the WHOLE view closed at build time if it would — so a suffix match is
+/// unambiguous here.
+fn is_metadata_derivative_column(name: &str) -> bool {
+    matches!(
+        name,
+        "row_timestamp"
+            | "row_ttl"
+            | "row_local_deletion_time"
+            | "row_tombstone"
+            | "row_deletion_timestamp"
+    ) || name.ends_with("_timestamp")
+        || name.ends_with("_ttl")
+        || name.ends_with("_local_deletion_time")
+        || name.ends_with("_tombstone")
+        || name.ends_with("_complex_deletion")
+        || name.ends_with("_complex_deletion_time")
+}
+
 /// Apply the raw view's post-scan predicate backstop to one row:
 /// `always_predicates` (partition-key/token PLUS source-identity/
 /// `row_kind`/partition-and-range-deletion predicates —
@@ -176,23 +207,24 @@ pub(super) fn split_predicates_by_key_role<'a>(
 ///
 /// `data_predicates` (clustering-key/regular-column predicates, their
 /// metadata derivatives, and the row-level metadata quintet) exempt a
-/// SYNTHETIC row from a predicate ONLY WHEN the predicate's column is
-/// genuinely ABSENT from that row's values (roborev finding, issue #4222 —
-/// round 6, correcting round 5's own gap: exempting by ROW-KIND rather
-/// than by column presence). A `partition_tombstone` row carries no
-/// clustering/regular columns at all, so every `data_predicates` column is
-/// absent there and stays exempt — the spec's "even when the generation
-/// holds no live rows" case. But a `range_tombstone_start`/`_end` row
-/// (`row_map.rs::range_bound_row`) DOES carry real clustering-component
-/// values for an `Inclusive`/`Exclusive` bound (never for an open
-/// `Bottom`/`Top` bound) — `range_marker_becomes_two_bound_rows_with_prefix_clustering`'s
-/// own unit test asserts exactly this — so a blanket "exempt every
-/// non-plain row" previously let `WHERE ck1 = 99` wrongly include a bound
-/// row whose real `ck1` is `2`. A PLAIN row (`row_kind = 'row'`) is NEVER
-/// exempted this way, even when a nullable regular column happens to be
-/// absent — ordinary SQL semantics still apply there (`evaluate_leaf`'s own
-/// `Unknown`-rejects-like-`False` handling), so this exemption is
-/// deliberately scoped to non-plain rows only.
+/// SYNTHETIC row from a predicate ONLY WHEN BOTH the column is a
+/// STRUCTURAL data column (never one of [`is_metadata_derivative_column`]'s
+/// shapes) AND it is genuinely ABSENT from that row's values (roborev
+/// finding, issue #4222 — round 8, correcting round 6's own gap: the prior
+/// fix exempted EVERY absent `data_predicates` column, including
+/// `val_tombstone`/`row_tombstone`/etc — so `WHERE val_tombstone = 'cell'`
+/// wrongly included a `partition_tombstone` row that carries no
+/// `val_tombstone` fact AT ALL, an asymmetry with every PLAIN row lacking
+/// the column, which `evaluate_leaf`'s `Unknown` correctly rejects. A
+/// metadata predicate is now evaluated normally for a synthetic row too —
+/// absent ⇒ `Unknown` ⇒ reject, same as a plain row — while a STRUCTURAL
+/// data-column predicate (e.g. `ck1`) stays exempt when the row genuinely
+/// has no clustering at all (`partition_tombstone`) but is REJECTED when
+/// the row DOES carry a real value that mismatches (a
+/// `range_tombstone_start`/`_end` bound's clustering component — round 6's
+/// original fix, preserved here). A PLAIN row (`row_kind = 'row'`) is
+/// NEVER exempted by either rule — ordinary SQL semantics still apply
+/// there.
 pub(in crate::query::select_executor) fn row_passes_predicates(
     row: &QueryRow,
     always_predicates: &[&SSTablePredicate],
@@ -205,13 +237,17 @@ pub(in crate::query::select_executor) fn row_passes_predicates(
     }
     let plain = is_plain_data_row(row);
     for p in data_predicates {
-        if !plain && !row.values.contains_key(p.column.as_str()) {
-            // A synthetic row that genuinely has no value for this column
-            // (e.g. `partition_tombstone`'s clustering columns, or an open
-            // `Bottom`/`Top` range-tombstone bound's) is exempt from this
-            // ONE predicate — it stays visible on that column's account —
-            // but a DIFFERENT predicate this same row DOES carry a value
-            // for is still evaluated normally below.
+        if !plain
+            && !is_metadata_derivative_column(&p.column)
+            && !row.values.contains_key(p.column.as_str())
+        {
+            // A synthetic row that genuinely has no STRUCTURAL value for
+            // this column (e.g. `partition_tombstone`'s clustering
+            // columns, or an open `Bottom`/`Top` range-tombstone bound's)
+            // is exempt from this ONE predicate — it stays visible on that
+            // column's account — but a DIFFERENT predicate this same row
+            // DOES carry a value for, or a metadata-derivative predicate,
+            // is still evaluated normally below.
             continue;
         }
         if evaluate_leaf(row, p) != LeafOutcome::True {
@@ -420,6 +456,53 @@ mod tests {
             !row_passes_predicates(&row, &[], &[&val_predicate]).unwrap(),
             "a plain row missing 'val' must FAIL 'val = x' (SQL NULL semantics), never be \
              silently exempted the way a synthetic row is"
+        );
+    }
+
+    /// Roborev finding (issue #4222, round 8): a METADATA-DERIVATIVE
+    /// predicate (`val_tombstone` here) must NOT be exempted for a
+    /// synthetic row just because the row lacks the column — a
+    /// `partition_tombstone` row carries no `val_tombstone` fact AT ALL,
+    /// so `WHERE val_tombstone = 'cell'` must REJECT it (absent ⇒
+    /// `Unknown` ⇒ reject, the same rule a plain row already follows),
+    /// never silently include it the way a STRUCTURAL predicate is
+    /// exempted.
+    #[test]
+    fn partition_tombstone_row_is_rejected_by_a_metadata_derivative_predicate_it_lacks() {
+        let row = row_with("partition_tombstone", &[]);
+        let tombstone_predicate = eq_predicate("val_tombstone", Value::text("cell"));
+        assert!(
+            !row_passes_predicates(&row, &[], &[&tombstone_predicate]).unwrap(),
+            "a partition_tombstone row has no 'val_tombstone' fact at all — it must be \
+             REJECTED by 'val_tombstone = cell', never silently included as if it matched"
+        );
+    }
+
+    /// Same rejection rule applies to the ROW-level metadata quintet
+    /// (`row_tombstone` here), not just per-cell derivatives.
+    #[test]
+    fn partition_tombstone_row_is_rejected_by_a_row_level_metadata_predicate_it_lacks() {
+        let row = row_with("partition_tombstone", &[]);
+        let row_tombstone_predicate = eq_predicate("row_tombstone", Value::text("row"));
+        assert!(
+            !row_passes_predicates(&row, &[], &[&row_tombstone_predicate]).unwrap(),
+            "a partition_tombstone row has no 'row_tombstone' fact at all — it must be \
+             REJECTED by 'row_tombstone = row', never silently included"
+        );
+    }
+
+    /// Sanity: a STRUCTURAL data-column predicate (`ck`, not a metadata
+    /// derivative) is STILL exempted for a `partition_tombstone` row that
+    /// genuinely has no clustering at all — round 6's original fix must
+    /// stay intact for this class.
+    #[test]
+    fn partition_tombstone_row_is_still_exempt_from_a_structural_data_predicate() {
+        let row = row_with("partition_tombstone", &[]);
+        let ck_predicate = eq_predicate("ck", Value::Integer(99));
+        assert!(
+            row_passes_predicates(&row, &[], &[&ck_predicate]).unwrap(),
+            "a structural clustering predicate must STILL be exempt for a row with no \
+             clustering at all — this is not the class round 8 fixed"
         );
     }
 
