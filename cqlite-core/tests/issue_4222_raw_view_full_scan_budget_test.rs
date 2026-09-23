@@ -7,16 +7,18 @@
 //!
 //! Fixture discipline (#3220/#3121, roborev finding, issue #4222):
 //! `resurrection_gc_positive`'s `Data.db` is NOT git-committed — only its
-//! JSONL/`.txt`/`.crc32` sidecars are — so it is always absent from a bare
-//! checkout and depends on `fetch-datasets.sh` populating an out-of-tree
-//! `CQLITE_DATASETS_ROOT`. This lane SKIPs cleanly when no fetched root is
-//! configured (the checkout alone can never carry this fixture), and PANICs
-//! only when a fetched root IS configured but still lacks the table (a
-//! dropped/renamed fixture — a real regression, not a legitimate skip).
-//! `CQLITE_REQUIRE_FIXTURES=1` turns even the clean-skip case into a hard
-//! failure. See `issue_4222_raw_view_point_read_test.rs`'s identical helper
-//! for the reference implementation this duplicates (cross-file sharing
-//! isn't available to `#[path]`-included test support modules).
+//! JSONL/`.txt`/`.crc32` sidecars are — so it depends entirely on
+//! `fetch-datasets.sh` populating an out-of-tree `CQLITE_DATASETS_ROOT`.
+//! This lane SKIPs cleanly whenever no candidate root carries the table's
+//! real bytes; it does NOT replicate issue #3121's two-level SKIP/PANIC
+//! rule (see `issue_4222_raw_view_point_read_test.rs`'s module doc for why:
+//! `scripts/agent-gate.sh` UNCONDITIONALLY exports `CQLITE_DATASETS_ROOT`
+//! for every test run, so "is the env var set" can never signal "a real
+//! fetch happened" here). `CQLITE_REQUIRE_FIXTURES=1` turns even the
+//! clean-skip case into a hard failure. See
+//! `issue_4222_raw_view_point_read_test.rs`'s identical helper for the
+//! reference implementation this duplicates (cross-file sharing isn't
+//! available to `#[path]`-included test support modules).
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
@@ -24,9 +26,7 @@
 mod datasets_root;
 
 use cqlite_core::{ingestion::ingest, ingestion::IngestionConfig, Config, Database, Error};
-use datasets_root::{
-    describe_search, fetched_root_is_configured, schema_path, sstables_root_for_table,
-};
+use datasets_root::{describe_search, schema_path, sstables_root_for_table};
 
 const KEYSPACE: &str = "test_tomb";
 const TABLE: &str = "resurrection_gc_positive";
@@ -39,29 +39,22 @@ fn require_fixtures_strict() -> bool {
 }
 
 /// See `issue_4222_raw_view_point_read_test.rs::test_tomb_root_or_skip` —
-/// identical two-level SKIP/PANIC rule, duplicated here.
+/// identical plain-skip rule, duplicated here.
 fn test_tomb_root_or_skip(table: &str) -> Option<std::path::PathBuf> {
     if let Some(root) = sstables_root_for_table(KEYSPACE, table) {
         return Some(root);
     }
-    if fetched_root_is_configured() {
+    if require_fixtures_strict() {
         panic!(
-            "a fetched CQLITE_DATASETS_ROOT is configured but does not carry \
-             '{KEYSPACE}.{table}' — a renamed/regenerated/dropped fixture must FAIL here, \
-             not silently skip (issue #3121's rule, applied here): {}",
+            "CQLITE_REQUIRE_FIXTURES=1 but '{KEYSPACE}.{table}' was not found under any \
+             candidate root — fetch the corpus first \
+             (bash test-data/scripts/fetch-datasets.sh): {}",
             describe_search(KEYSPACE, table)
         );
     }
-    if require_fixtures_strict() {
-        panic!(
-            "CQLITE_REQUIRE_FIXTURES=1 but no fetched CQLITE_DATASETS_ROOT is configured and \
-             the checkout alone never carries '{KEYSPACE}.{table}' — fetch the corpus first \
-             (bash test-data/scripts/fetch-datasets.sh)"
-        );
-    }
     eprintln!(
-        "SKIP: no fetched CQLITE_DATASETS_ROOT configured, and the checkout's own committed \
-         corpus never carries '{KEYSPACE}.{table}' (fetch-only fixture) — {}",
+        "SKIP: '{KEYSPACE}.{table}' (fetch-only fixture) was not found under any candidate \
+         root — {}",
         describe_search(KEYSPACE, table)
     );
     None

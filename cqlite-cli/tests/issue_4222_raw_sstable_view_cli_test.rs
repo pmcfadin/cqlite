@@ -20,17 +20,17 @@
 //! `test-data/datasets` — and picking whichever ACTUALLY carries the table's
 //! `*-Data.db` bytes, never committing to a single env-first root.
 //! `resurrection_gc_positive`'s `Data.db` is NOT git-committed — only its
-//! JSONL/`.txt`/`.crc32` sidecars are (contrast `static_with_tombstones`,
-//! issue #3121's fixture, whose `Data.db` genuinely IS tracked — so
-//! keyspace-directory presence alone cannot signal "this table's corpus was
-//! fetched"). This lane keys the two-level rule on whether an out-of-tree,
-//! presumably-fetched `CQLITE_DATASETS_ROOT` is even CONFIGURED: none
-//! configured → the checkout alone can never carry this fixture → SKIP
-//! cleanly (never panic). A fetched root IS configured but still lacks the
-//! table → PANIC (`must_run`; a dropped/renamed fixture, a real
-//! regression). `CQLITE_REQUIRE_FIXTURES=1` turns even the clean-skip case
-//! into a hard failure. Mirrors `issue_4222_raw_view_point_read_test.rs`'s
-//! core-side helper (not directly shareable across crates).
+//! JSONL/`.txt`/`.crc32` sidecars are — so this lane SKIPs cleanly whenever
+//! no candidate root carries the table's real bytes. It does NOT replicate
+//! issue #3121's two-level SKIP/PANIC rule: `scripts/agent-gate.sh`
+//! UNCONDITIONALLY exports `CQLITE_DATASETS_ROOT` for every test run it
+//! drives, so "is the env var set" can never signal "a real fetch
+//! happened" here (unlike #3121's OWN fixture, `static_with_tombstones`,
+//! whose `Data.db` genuinely IS git-tracked, so its directory-presence
+//! check holds regardless of fetch state). `CQLITE_REQUIRE_FIXTURES=1`
+//! turns even the clean-skip case into a hard failure. Mirrors
+//! `issue_4222_raw_view_point_read_test.rs`'s core-side helper (not
+//! directly shareable across crates).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -96,21 +96,6 @@ fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
     })
 }
 
-/// True when an out-of-tree, presumably-FETCHED `CQLITE_DATASETS_ROOT` is
-/// configured at all — the signal that distinguishes "corpus never
-/// fetched" (SKIP) from "a fetched corpus is in play but this one table is
-/// missing from it" (PANIC). Mirrors
-/// `cqlite-core/tests/support/datasets_root.rs::fetched_root_is_configured`
-/// (not directly shareable across crates): `resurrection_gc_positive`'s
-/// `Data.db` is not git-committed, so `<keyspace>.is_dir()` alone cannot
-/// serve this purpose — the keyspace directory exists in every checkout
-/// (JSONL sidecars) regardless of whether a fetch ever ran.
-fn fetched_root_is_configured() -> bool {
-    std::env::var("CQLITE_DATASETS_ROOT")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-}
-
 /// The first candidate `sstables/` root that actually carries the table's
 /// bytes — table-granular by contract (#3220): a root holding the KEYSPACE
 /// but not this table must not be selected.
@@ -138,34 +123,23 @@ fn require_fixtures_strict() -> bool {
 }
 
 /// The resolved `sstables/` root for the fixture, or `None` — the ONLY
-/// sanctioned skip — when no fetched `CQLITE_DATASETS_ROOT` is configured
-/// (the checkout alone can never carry this fetch-only fixture). PANICs
-/// (`must_run`) if a fetched root IS configured but
-/// `resurrection_gc_positive` specifically is still not found: a
-/// dropped/renamed/regenerated fixture, a real regression, never a
-/// legitimately-unfetched one (issue #3121's two-level rule, applied here).
+/// sanctioned skip — whenever no candidate root carries the table's real
+/// bytes.
 fn committed_data_dir() -> Option<PathBuf> {
     if let Some(root) = sstables_root_for_table("test_tomb", "resurrection_gc_positive") {
         return Some(root);
     }
-    if fetched_root_is_configured() {
+    if require_fixtures_strict() {
         panic!(
-            "a fetched CQLITE_DATASETS_ROOT is configured but does not carry \
-             'test_tomb.resurrection_gc_positive' — a renamed/regenerated/dropped fixture \
-             must FAIL here, not silently skip: {}",
+            "CQLITE_REQUIRE_FIXTURES=1 but 'test_tomb.resurrection_gc_positive' was not found \
+             under any candidate root — fetch the corpus first \
+             (bash test-data/scripts/fetch-datasets.sh): {}",
             describe_search("test_tomb", "resurrection_gc_positive")
         );
     }
-    if require_fixtures_strict() {
-        panic!(
-            "CQLITE_REQUIRE_FIXTURES=1 but no fetched CQLITE_DATASETS_ROOT is configured and \
-             the checkout alone never carries 'test_tomb.resurrection_gc_positive' — fetch the \
-             corpus first (bash test-data/scripts/fetch-datasets.sh)"
-        );
-    }
     eprintln!(
-        "SKIP: no fetched CQLITE_DATASETS_ROOT configured, and the checkout's own committed \
-         corpus never carries 'test_tomb.resurrection_gc_positive' (fetch-only fixture) — {}",
+        "SKIP: 'test_tomb.resurrection_gc_positive' (fetch-only fixture) was not found under \
+         any candidate root — {}",
         describe_search("test_tomb", "resurrection_gc_positive")
     );
     None
