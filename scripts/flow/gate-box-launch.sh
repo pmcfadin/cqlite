@@ -170,18 +170,20 @@ fi
 . "$BOX_PROFILE"
 
 for _v in BOX_CANONICAL_CLONE BOX_LANES_DIR BOX_TMPDIR BOX_DATASETS_ROOT BOX_PATH \
-          BOX_JOBS BOX_RUST_TEST_THREADS BOX_MAX_CONCURRENCY BOX_MIN_FREE_GB BOX_LOG_DIR; do
+          BOX_JOBS BOX_RUST_TEST_THREADS BOX_MAX_CONCURRENCY BOX_MIN_FREE_GB \
+          BOX_TMP_MIN_FREE_GB BOX_LOG_DIR; do
   if [ -z "${!_v:-}" ]; then
     echo "gate-box-launch: profile '$BOX_PROFILE' does not set required variable $_v." >&2
     exit 1
   fi
 done
-# Four of those must be PLAIN NON-NEGATIVE INTEGERS — every one feeds a `-lt`/arithmetic
+# Five of those must be PLAIN NON-NEGATIVE INTEGERS — every one feeds a `-lt`/arithmetic
 # comparison below, and bash's `[ n -lt m ]` on a non-numeric operand errors to stderr and
-# evaluates FALSE, i.e. the PERMISSIVE branch. For BOX_MIN_FREE_GB specifically that means a
-# typo (`"150G"`) silently ADMITS every launch past the one check meant to prevent the vhdx
-# exhaustion incidents (roborev finding, #4267 round 2) — refuse by name instead.
-for _v in BOX_JOBS BOX_RUST_TEST_THREADS BOX_MAX_CONCURRENCY BOX_MIN_FREE_GB; do
+# evaluates FALSE, i.e. the PERMISSIVE branch. For the two admission bars specifically
+# that means a typo (`"150G"`) silently ADMITS every launch past the one check meant to
+# prevent the vhdx exhaustion incidents (roborev finding, #4267 round 2) — refuse by name
+# instead.
+for _v in BOX_JOBS BOX_RUST_TEST_THREADS BOX_MAX_CONCURRENCY BOX_MIN_FREE_GB BOX_TMP_MIN_FREE_GB; do
   case "${!_v}" in
     *[!0-9]*|'')
       echo "gate-box-launch: profile '$BOX_PROFILE' sets $_v='${!_v}', which is not a plain" >&2
@@ -298,8 +300,8 @@ _disk_free_gb() {  # <path> -> free GB, or empty if unmeasurable
   case "$kb" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$((kb / 1024 / 1024))"
 }
-_check_disk() {  # <path> <label>
-  local path="$1" label="$2" free measure_path="$1"
+_check_disk() {  # <path> <label> <min-free-gb>
+  local path="$1" label="$2" min="$3" free measure_path="$1"
   if [ ! -d "$path" ]; then
     # Walk up to the nearest EXISTING ancestor so a not-yet-created lanes/tmp directory
     # does not silently skip the admission check — it is the underlying filesystem's
@@ -315,18 +317,26 @@ _check_disk() {  # <path> <label>
     echo "gate-box-launch: REFUSING — could not measure free space for $label ('$path')." >&2
     return 1
   fi
-  echo "gate-box-launch: disk($label): ${free}G free at $path (admission bar ${BOX_MIN_FREE_GB}G)"
-  if [ "$free" -lt "$BOX_MIN_FREE_GB" ]; then
-    echo "gate-box-launch: REFUSING — $label has only ${free}G free, below the ${BOX_MIN_FREE_GB}G" >&2
+  echo "gate-box-launch: disk($label): ${free}G free at $path (admission bar ${min}G)"
+  if [ "$free" -lt "$min" ]; then
+    echo "gate-box-launch: REFUSING — $label has only ${free}G free, below the ${min}G" >&2
     echo "                 admission bar. See the astro-processor memory notes: the WSL vhdx has" >&2
     echo "                 been driven to emergency_ro by exactly this before." >&2
     return 1
   fi
   return 0
 }
+# TWO SEPARATE BARS, not one (found running --dry-run against the real astro-processor
+# box, #4267 endgame): BOX_LANES_DIR sits on the box's main disk (hundreds of GB, and the
+# vhdx-exhaustion axis this whole check exists for), while BOX_TMPDIR is a tmpfs whose
+# TOTAL size is a fixed, much smaller mount option (48G on astro-processor). A single
+# BOX_MIN_FREE_GB=150 bar applied to both means the tmpdir check REFUSES EVERY LAUNCH
+# UNCONDITIONALLY, because that tmpfs can never hold 150G free even completely empty —
+# not a disk problem, an admission-bar problem, and one a --dry-run against fixture
+# directories (which share one filesystem) could never surface.
 _DISK_OK=1
-_check_disk "$BOX_LANES_DIR" "lanes" || _DISK_OK=0
-_check_disk "$BOX_TMPDIR" "tmpdir" || _DISK_OK=0
+_check_disk "$BOX_LANES_DIR" "lanes" "$BOX_MIN_FREE_GB" || _DISK_OK=0
+_check_disk "$BOX_TMPDIR" "tmpdir" "$BOX_TMP_MIN_FREE_GB" || _DISK_OK=0
 if [ "$_DISK_OK" -ne 1 ]; then
   exit 1
 fi

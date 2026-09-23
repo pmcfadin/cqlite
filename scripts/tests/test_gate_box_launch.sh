@@ -74,8 +74,8 @@ gg clone -q "$ORIGIN" "$CLONE" 2>/dev/null
 mkdir -p "$LANES" "$TMPDIR_FIXTURE" "$DATASETS" "$LOGDIR" "$BOXES_DIR"
 
 # A profile that resolves and loads cleanly, used by every case that is not itself
-# testing profile loading. BOX_MIN_FREE_GB=0 so the (fixture) tmpfs's real free space
-# never fails an unrelated case.
+# testing profile loading. Both admission bars are 0 so the fixture tree's real free
+# space never fails an unrelated case.
 _write_good_profile() {  # <name>
   cat >"$BOXES_DIR/$1.env" <<EOF
 BOX_CANONICAL_CLONE="$CLONE"
@@ -87,6 +87,7 @@ BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
 BOX_MIN_FREE_GB=0
+BOX_TMP_MIN_FREE_GB=0
 BOX_LOG_DIR="$LOGDIR"
 EOF
 }
@@ -123,6 +124,7 @@ BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
 BOX_MIN_FREE_GB=150G
+BOX_TMP_MIN_FREE_GB=0
 BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run badnumber4267 main)
@@ -182,6 +184,7 @@ BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
 BOX_MIN_FREE_GB=0
+BOX_TMP_MIN_FREE_GB=0
 BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run npxbox4267 main)
@@ -258,9 +261,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------------
-# disk admission — a real REFUSAL (BOX_MIN_FREE_GB=0 everywhere else makes the check
-# vacuous), and the nearest-existing-ancestor walk for a not-yet-created lanes dir
-# (roborev Medium finding, #4267 round 2).
+# disk admission — a real REFUSAL (both bars are 0 everywhere else, making the check
+# vacuous), the nearest-existing-ancestor walk for a not-yet-created lanes dir (roborev
+# Medium finding, #4267 round 2), and that the lanes/tmpdir bars are INDEPENDENT (found
+# running --dry-run against the real astro-processor box: a single shared bar refused
+# every launch there, since /data/tmp's tmpfs total size is far below a sane lanes bar).
 # ---------------------------------------------------------------------------------
 cat >"$BOXES_DIR/hugebar4267.env" <<EOF
 BOX_CANONICAL_CLONE="$CLONE"
@@ -272,6 +277,7 @@ BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
 BOX_MIN_FREE_GB=999999999
+BOX_TMP_MIN_FREE_GB=0
 BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run hugebar4267 feat4267)
@@ -281,6 +287,33 @@ if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "below the" \
   ok "an absurdly high BOX_MIN_FREE_GB actually REFUSES the launch (disk check is not vacuous)"
 else
   bad "disk admission should refuse below its bar (rc=$_rc): $_out"
+fi
+
+# The two bars must be INDEPENDENT — an astro-processor production bug, found by running
+# --dry-run against the real box, where a single BOX_MIN_FREE_GB shared by BOX_LANES_DIR
+# (hundreds of GB) and BOX_TMPDIR (a 48G tmpfs, fixed total size) refused every launch
+# unconditionally at the tmpdir check. Here: a permissive lanes bar (0) alongside an
+# absurdly high tmp bar must refuse ON THE TMPDIR specifically.
+cat >"$BOXES_DIR/hugetmpbar4267.env" <<EOF
+BOX_CANONICAL_CLONE="$CLONE"
+BOX_LANES_DIR="$LANES"
+BOX_TMPDIR="$TMPDIR_FIXTURE"
+BOX_DATASETS_ROOT="$DATASETS"
+BOX_PATH="/usr/bin:/bin"
+BOX_JOBS=4
+BOX_RUST_TEST_THREADS=1
+BOX_MAX_CONCURRENCY=1
+BOX_MIN_FREE_GB=0
+BOX_TMP_MIN_FREE_GB=999999999
+BOX_LOG_DIR="$LOGDIR"
+EOF
+_out=$(run hugetmpbar4267 feat4267)
+_rc=$?
+if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "REFUSING — tmpdir has only" \
+  && ! printf '%s' "$_out" | grep -q "REFUSING — lanes has only"; then
+  ok "the tmpdir admission bar is independent of the lanes bar (astro-processor bug, fixed)"
+else
+  bad "a high BOX_TMP_MIN_FREE_GB alone should refuse only the tmpdir check (rc=$_rc): $_out"
 fi
 
 ANCESTOR_LANES="$LANES/notyet/deeper"
@@ -294,6 +327,7 @@ BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
 BOX_MIN_FREE_GB=0
+BOX_TMP_MIN_FREE_GB=0
 BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run ancestorwalk4267 feat4267)
