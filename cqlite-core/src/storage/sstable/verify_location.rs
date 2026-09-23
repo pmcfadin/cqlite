@@ -90,9 +90,12 @@ pub struct KeyRef {
     /// The raw partition key's bytes, lower-case hex. Always populated when
     /// the key is known.
     pub key_hex: String,
-    /// The key decoded through a schema, when one was available. `verify` and
-    /// `sweep` take no mandatory `--schema` today, so this is commonly `None`
-    /// (parity with `sstable-salvage`'s manifest `key`/`key_hex` split).
+    /// Reserved for a schema-decoded rendering of the raw key (parity with
+    /// `sstable-salvage`'s manifest `key`/`key_hex` split). **Never populated
+    /// today** — `KeyRef::from_raw` is the only constructor and always sets
+    /// this to `None`; wiring `--schema` support through to this field is a
+    /// follow-up, not something already partially implemented (roborev
+    /// finding, final round, #4194).
     pub rendered: Option<String>,
 }
 
