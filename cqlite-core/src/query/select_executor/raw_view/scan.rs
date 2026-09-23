@@ -25,6 +25,7 @@ use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::SSTableReader;
 use crate::{Error, Result};
+use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -47,6 +48,7 @@ pub(in crate::query::select_executor) async fn raw_view_full_scan_rows(
     schema: &TableSchema,
     always_predicates: &[&SSTablePredicate],
     data_predicates: &[&SSTablePredicate],
+    metadata_names: &HashSet<String>,
     max_result_bytes: usize,
     max_result_rows: usize,
     stop_after: Option<usize>,
@@ -94,7 +96,12 @@ pub(in crate::query::select_executor) async fn raw_view_full_scan_rows(
                     Err(e) => return Err(e),
                 };
                 for row in mapped {
-                    match row_passes_predicates(&row, always_predicates, data_predicates) {
+                    match row_passes_predicates(
+                        &row,
+                        always_predicates,
+                        data_predicates,
+                        metadata_names,
+                    ) {
                         Ok(true) => {}
                         Ok(false) => continue,
                         Err(e) => return Err(e),
