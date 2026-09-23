@@ -5,9 +5,18 @@
 //! a small configured `max_result_bytes` must return the existing
 //! budget-exceeded error rather than materializing the whole corpus.
 //!
-//! Fixture discipline (#3220): `test_tomb.resurrection_gc_positive`'s
-//! binaries are git-committed, so this lane is `must_run` — fail-closed, not
-//! a legitimate SKIP.
+//! Fixture discipline (#3220/#3121, roborev finding, issue #4222):
+//! `resurrection_gc_positive`'s `Data.db` is NOT git-committed — only its
+//! JSONL/`.txt`/`.crc32` sidecars are — so it is always absent from a bare
+//! checkout and depends on `fetch-datasets.sh` populating an out-of-tree
+//! `CQLITE_DATASETS_ROOT`. This lane SKIPs cleanly when no fetched root is
+//! configured (the checkout alone can never carry this fixture), and PANICs
+//! only when a fetched root IS configured but still lacks the table (a
+//! dropped/renamed fixture — a real regression, not a legitimate skip).
+//! `CQLITE_REQUIRE_FIXTURES=1` turns even the clean-skip case into a hard
+//! failure. See `issue_4222_raw_view_point_read_test.rs`'s identical helper
+//! for the reference implementation this duplicates (cross-file sharing
+//! isn't available to `#[path]`-included test support modules).
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
@@ -15,18 +24,51 @@
 mod datasets_root;
 
 use cqlite_core::{ingestion::ingest, ingestion::IngestionConfig, Config, Database, Error};
-use datasets_root::{describe_search, schema_path, sstables_root_for_table};
+use datasets_root::{
+    describe_search, fetched_root_is_configured, schema_path, sstables_root_for_table,
+};
 
 const KEYSPACE: &str = "test_tomb";
 const TABLE: &str = "resurrection_gc_positive";
 
-async fn open_db_with_byte_budget(max_result_bytes: u64) -> Database {
-    let root = sstables_root_for_table(KEYSPACE, TABLE).unwrap_or_else(|| {
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// See `issue_4222_raw_view_point_read_test.rs::test_tomb_root_or_skip` —
+/// identical two-level SKIP/PANIC rule, duplicated here.
+fn test_tomb_root_or_skip(table: &str) -> Option<std::path::PathBuf> {
+    if let Some(root) = sstables_root_for_table(KEYSPACE, table) {
+        return Some(root);
+    }
+    if fetched_root_is_configured() {
         panic!(
-            "committed fixture must resolve (issue #3220, fail-closed): {}",
-            describe_search(KEYSPACE, TABLE)
-        )
-    });
+            "a fetched CQLITE_DATASETS_ROOT is configured but does not carry \
+             '{KEYSPACE}.{table}' — a renamed/regenerated/dropped fixture must FAIL here, \
+             not silently skip (issue #3121's rule, applied here): {}",
+            describe_search(KEYSPACE, table)
+        );
+    }
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but no fetched CQLITE_DATASETS_ROOT is configured and \
+             the checkout alone never carries '{KEYSPACE}.{table}' — fetch the corpus first \
+             (bash test-data/scripts/fetch-datasets.sh)"
+        );
+    }
+    eprintln!(
+        "SKIP: no fetched CQLITE_DATASETS_ROOT configured, and the checkout's own committed \
+         corpus never carries '{KEYSPACE}.{table}' (fetch-only fixture) — {}",
+        describe_search(KEYSPACE, table)
+    );
+    None
+}
+
+async fn open_db_with_byte_budget(max_result_bytes: u64) -> Option<Database> {
+    let root = test_tomb_root_or_skip(TABLE)?;
     let schema = schema_path("tombstone-parity.cql")
         .expect("committed schema tombstone-parity.cql must be readable (#3148)");
     let mut core_config = Config::default();
@@ -41,10 +83,12 @@ async fn open_db_with_byte_budget(max_result_bytes: u64) -> Database {
         core_config,
         table_directory_filter: Some(format!("/{KEYSPACE}/")),
     };
-    ingest(cfg)
-        .await
-        .expect("ingestion of the fixture")
-        .database
+    Some(
+        ingest(cfg)
+            .await
+            .expect("ingestion of the fixture")
+            .database,
+    )
 }
 
 /// THE RED CASE: a no-predicate `_raw_sstable_data` query (the full-scan
@@ -53,7 +97,9 @@ async fn open_db_with_byte_budget(max_result_bytes: u64) -> Database {
 /// materialize the whole corpus first and fail after the fact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_scan_over_budget_returns_result_too_large() {
-    let db = open_db_with_byte_budget(1).await;
+    let Some(db) = open_db_with_byte_budget(1).await else {
+        return;
+    };
     let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data");
     let outcome = db.execute(&query).await;
     match outcome {
@@ -78,7 +124,9 @@ async fn full_scan_over_budget_returns_result_too_large() {
 /// non-empty rows spanning BOTH generations (never a vacuous empty pass).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_scan_under_budget_returns_every_physical_row() {
-    let db = open_db_with_byte_budget(64 * 1024 * 1024).await;
+    let Some(db) = open_db_with_byte_budget(64 * 1024 * 1024).await else {
+        return;
+    };
     let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data");
     let result = db
         .execute(&query)

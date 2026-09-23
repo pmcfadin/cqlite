@@ -200,6 +200,23 @@ pub fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
     !table_generation_dirs(root, keyspace, table).is_empty()
 }
 
+/// True when an out-of-tree, presumably-FETCHED `CQLITE_DATASETS_ROOT` is
+/// configured at all (distinct from the checkout's own committed corpus).
+///
+/// This is the signal a caller needs to distinguish "corpus never fetched"
+/// (SKIP) from "a fetched corpus is in play but this one table is missing
+/// from it" (PANIC — a fixture the fetch asset regenerated or dropped) —
+/// see [`sstables_root_candidates`]'s doc for why `<keyspace>.is_dir()`
+/// cannot serve this purpose: some `test_tomb` fixtures (e.g.
+/// `static_with_tombstones`) carry a REAL git-committed `Data.db` even with
+/// no fetch ever run, while most (e.g. `resurrection_gc_positive`) commit
+/// only JSONL/`.txt`/`.crc32` sidecars and depend entirely on a fetch — so
+/// "does this keyspace have data ANYWHERE" is true for reasons unrelated to
+/// whether THIS table's fetch-only fixture was ever populated.
+pub fn fetched_root_is_configured() -> bool {
+    fixture_roots::datasets_root_if_present().is_some()
+}
+
 /// The ONE usable generation directory of `<keyspace>.<table>`, resolved by
 /// EVIDENCE across every candidate root and selected DETERMINISTICALLY, or an
 /// `Err` naming what was searched.
