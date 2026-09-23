@@ -50,7 +50,12 @@ declared_want='scripts/*
 .roborev.toml
 rust-toolchain.toml
 Cargo.lock
-Cargo.toml'
+Cargo.toml
+test-data/scripts/*
+tools/*
+cqlite-flight/Dockerfile
+docs/reports/ws0-*-artifacts/*
+bindings/node/__test__/*'
 if [ "$declared_got" = "$declared_want" ]; then
   ok "declared harness-path set matches the #4266-issue-declared list exactly (order included)"
 else
@@ -85,6 +90,11 @@ classify '.roborev.toml'                         RUN ".roborev.toml -> RUN"
 classify 'rust-toolchain.toml'                   RUN "rust-toolchain.toml -> RUN"
 classify 'Cargo.lock'                            RUN "Cargo.lock -> RUN"
 classify 'Cargo.toml'                            RUN "Cargo.toml (root) -> RUN"
+classify 'test-data/scripts/check-dataset-manifest.sh' RUN "test-data/scripts/* (#3493 manifest guard) -> RUN"
+classify 'tools/ws0-corpus-gen/src/measurement_corpus.rs' RUN "tools/* (ws0-corpus-gen determinism oracle) -> RUN"
+classify 'cqlite-flight/Dockerfile'              RUN "cqlite-flight/Dockerfile (#2870 rust-pin lockstep) -> RUN"
+classify 'docs/reports/ws0-3096-artifacts/corpus-identity.json' RUN "nested docs/reports/ws0-*-artifacts/* -> RUN"
+classify 'bindings/node/__test__/parity-utils.js' RUN "bindings/node/__test__/* -> RUN"
 
 # Negative: production/doc/test-data paths outside the declared set, including
 # two near-miss traps — `.agents/` (NOT `.claude/`) and a nested `Cargo.toml`
@@ -129,7 +139,11 @@ if ! ( cd "$wt" \
   bad "could not build the layer-3 fixture repo — skipping all real-git cases"
 else
   # G1 / AC1: a diff that touches ONLY cqlite-core/src/** and cqlite-cli/** must
-  # SKIP, and the SUMMARY (the CAUSE line) must name the declared set.
+  # SKIP, and the SUMMARY (the CAUSE line) must name the declared set. This
+  # COMMITTED state (not-in-scope) is the baseline every following case builds
+  # on top of, in order, so each case's fixture state is legible from the case
+  # above it rather than requiring the whole file to be read to know what "HEAD"
+  # is at any given point.
   ( cd "$wt" && mkdir -p cqlite-cli/src && echo x >>cqlite-core/src/lib.rs && echo x >cqlite-cli/src/main.rs \
       && git add -A && git -c user.email=t@t -c user.name=t commit -q -m "AC1: src-only diff" )
   out=$(scope_line); dec=$(decision_of "$out"); cause=$(cause_of "$out")
@@ -143,7 +157,53 @@ else
     *) bad "AC1: SKIP cause does not name the declared set ($cause)" ;;
   esac
 
-  # G2 / AC2: touching scripts/agent-gate.sh must RUN.
+  # G3: an UNTRACKED, uncommitted harness-path file also RUNs — the case a
+  # roborev review on this issue found the first cut could not see at all (a
+  # brand-new self-test would never itself be recognised as in-scope). Run this
+  # from AC1's COMMITTED state (not-in-scope) so the working-tree leg is
+  # PROVABLY what flips the decision, not a residual committed change from a
+  # later case (the review's other finding on this case: the original ordering
+  # put it after AC2's own commit had already put scripts/agent-gate.sh into
+  # base..HEAD, so it passed for the wrong reason). Revert to the untouched
+  # state afterwards and re-assert SKIP, so the RUN above is shown to come from
+  # the file's presence and not from some other leftover.
+  mkdir -p "$wt/scripts/tests"
+  ( cd "$wt" && echo wt-only >scripts/tests/new_wt_only.sh )
+  out=$(scope_line); dec=$(decision_of "$out")
+  if [ "$dec" = RUN ]; then
+    ok "G3: untracked, uncommitted harness path -> RUN"
+  else
+    bad "G3: expected RUN for an untracked harness path, got '$dec' ($out)"
+  fi
+  ( cd "$wt" && rm -f scripts/tests/new_wt_only.sh )
+  out=$(scope_line); dec=$(decision_of "$out")
+  if [ "$dec" = SKIP ]; then
+    ok "G3: removing the untracked harness path reverts to SKIP (proves it was the cause)"
+  else
+    bad "G3: expected SKIP after removing the untracked path, got '$dec' ($out)"
+  fi
+
+  # G3b: an uncommitted change to a TRACKED harness-path file (not merely a new
+  # untracked one) also RUNs — mirrors run_file_size's committed+working-tree
+  # scope (a dirty tree must not be able to sneak a harness change past the
+  # gate). scripts/agent-gate.sh is already tracked in the fixture (copied in
+  # before the `git init`/first commit above).
+  ( cd "$wt" && echo wt-tracked-only >>scripts/agent-gate.sh )
+  out=$(scope_line); dec=$(decision_of "$out")
+  if [ "$dec" = RUN ]; then
+    ok "G3b: uncommitted change to a TRACKED harness path -> RUN"
+  else
+    bad "G3b: expected RUN for an uncommitted tracked harness-path change, got '$dec' ($out)"
+  fi
+  ( cd "$wt" && git checkout -q -- scripts/agent-gate.sh )
+  out=$(scope_line); dec=$(decision_of "$out")
+  if [ "$dec" = SKIP ]; then
+    ok "G3b: reverting the tracked working-tree change reverts to SKIP"
+  else
+    bad "G3b: expected SKIP after reverting, got '$dec' ($out)"
+  fi
+
+  # G2 / AC2: COMMITTING a change to scripts/agent-gate.sh must RUN.
   ( cd "$wt" && echo touched >>scripts/agent-gate.sh \
       && git add -A && git -c user.email=t@t -c user.name=t commit -q -m "AC2: touch agent-gate.sh" )
   out=$(scope_line); dec=$(decision_of "$out")
@@ -152,19 +212,6 @@ else
   else
     bad "AC2: expected RUN, got '$dec' ($out)"
   fi
-
-  # G3: an UNCOMMITTED (working-tree only) harness-path change also RUNs —
-  # mirrors run_file_size's committed+working-tree scope (a dirty tree must not
-  # be able to sneak a harness change past the gate).
-  mkdir -p "$wt/scripts/tests"
-  ( cd "$wt" && echo wt-only >scripts/tests/new_wt_only.sh )
-  out=$(scope_line); dec=$(decision_of "$out")
-  if [ "$dec" = RUN ]; then
-    ok "G3: uncommitted (working-tree-only) harness path -> RUN"
-  else
-    bad "G3: expected RUN for an uncommitted harness path, got '$dec' ($out)"
-  fi
-  ( cd "$wt" && rm -f scripts/tests/new_wt_only.sh )
 
   # G4 / AC3: no base resolves at all (origin/main, main, origin/master, master
   # all absent) -> fail-closed RUN, cause names the fail-closed reason.
@@ -180,15 +227,27 @@ else
     *) bad "AC3: RUN cause does not say fail-closed ($cause)" ;;
   esac
 
-  # G5: the nightly-unconditional escape hatch (#4266 AC4). Even with a clean
-  # (empty) diff against a resolvable base, CQLITE_TOOLING_TESTS_ALWAYS_RUN=1
-  # forces RUN — the branch the nightly gate.yml deep-check job depends on,
-  # since it runs on main itself (HEAD is its own merge-base -> empty diff).
+  # G5 / AC4: rebuild "main" pointing at HEAD itself (a clean, resolvable,
+  # EMPTY diff — the exact shape the nightly gate.yml deep-check job runs
+  # under, since it gates `main` against `origin/main`, which there is the same
+  # commit). NEGATIVE HALF FIRST (a roborev review on this issue found the
+  # positive-only case vacuous: CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 returns
+  # before any git call, so the fixture's git state is decorative unless the
+  # UNFORCED run is also asserted to SKIP right here) — without the env var, a
+  # clean/self diff must SKIP; only then does forcing it prove the override is
+  # load-bearing rather than redundant with what scoping would have decided
+  # anyway.
   ( cd "$wt" && git checkout -q -b main2 && git branch -m main2 main )
+  out=$(scope_line); dec=$(decision_of "$out")
+  if [ "$dec" = SKIP ]; then
+    ok "G5: a clean/self diff (HEAD is its own merge-base) -> SKIP without the override"
+  else
+    bad "G5: expected SKIP for a clean/self diff, got '$dec' ($out)"
+  fi
   out=$(cd "$wt" && CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 bash scripts/agent-gate.sh --tooling-tests-scope-line 2>/dev/null)
   dec=$(decision_of "$out")
   if [ "$dec" = RUN ]; then
-    ok "G5: CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 forces RUN even on a clean/self diff"
+    ok "G5: CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 forces RUN on that SAME clean/self diff"
   else
     bad "G5: expected RUN under CQLITE_TOOLING_TESTS_ALWAYS_RUN=1, got '$dec' ($out)"
   fi
@@ -210,10 +269,17 @@ fi
 # G7: `--only tooling-tests` bypasses scoping — the ONLY guard's early `return 0`
 # for a NOT-selected component sits above the scope block, and the scope block
 # itself is gated on `[ -z "$ONLY" ]`, so an explicit selection always runs.
-if grep -q 'if \[ -z "\$ONLY" \]; then' "$GATE"; then
-  ok "G7: the scope block is gated on ONLY being empty (an explicit --only selection bypasses it)"
+# Anchored to `$fn_body` (the extracted run_tooling_tests body, same extraction
+# G6 uses), NOT the whole 28k-line `$GATE` (a roborev review on this issue found
+# the unanchored form would stay green even if THIS function's own ONLY guard
+# were removed, as long as some unrelated guard elsewhere in the file happened
+# to match the same literal text) — and requires the guard to appear BEFORE the
+# scope-decision call within that body, not merely to exist somewhere in it.
+only_guard_ln=$(printf '%s\n' "$fn_body" | grep -n 'if \[ -z "\$ONLY" \]; then' | head -1 | cut -d: -f1)
+if [ -n "$only_guard_ln" ] && [ -n "$scope_ln" ] && [ "$only_guard_ln" -lt "$scope_ln" ]; then
+  ok "G7: run_tooling_tests's OWN scope block is gated on ONLY being empty, before the scope decision runs"
 else
-  bad "G7: could not find the ONLY-empty guard around the scope block"
+  bad "G7: could not confirm the ONLY-empty guard precedes the scope decision within run_tooling_tests (only_guard_ln=$only_guard_ln scope_ln=$scope_ln)"
 fi
 
 # ==== AC4: the nightly workflow forces the unconditional lane ================

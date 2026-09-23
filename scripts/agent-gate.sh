@@ -7038,8 +7038,26 @@ case "${1:-}" in
   #                                     resolution, fail-closed on no merge-base)
   #                                     against the shipped code, not a
   #                                     reimplementation of it.
-  --tooling-tests-classify) _tooling_tests_classify_stdin; exit 0 ;;
+  # Both hooks guard on _TOOLING_TESTS_SCOPE_LOADED (roborev finding on this
+  # issue): without it, a lib-source failure would hit an undefined function
+  # under `set -u` and die on an unbound TOOLING_SCOPE_* variable with no named
+  # cause. --tooling-tests-scope-line's guarded branch answers the SAME
+  # fail-closed RUN the real run_tooling_tests would (see its own
+  # _TOOLING_TESTS_SCOPE_LOADED branch), so the hook's decision never diverges
+  # from production even when the lib failed to source.
+  --tooling-tests-classify)
+    if [ "$_TOOLING_TESTS_SCOPE_LOADED" != 1 ]; then
+      echo "agent-gate: scripts/lib/tooling-tests-scope.sh did not source — cannot classify (#4266)" >&2
+      exit 2
+    fi
+    _tooling_tests_classify_stdin; exit 0 ;;
   --tooling-tests-scope-line)
+    if [ "$_TOOLING_TESTS_SCOPE_LOADED" != 1 ]; then
+      echo "DECISION: RUN"
+      echo "CAUSE: cause=scope-lib-unreadable — scripts/lib/tooling-tests-scope.sh did not source — running unconditionally (fail-closed)"
+      echo "DETAIL: scope lib unreadable — running unconditionally (fail-closed)"
+      exit 0
+    fi
     _tooling_tests_scope_decide "${2:-}"
     echo "DECISION: $TOOLING_SCOPE_DECISION"
     echo "CAUSE: $TOOLING_SCOPE_CAUSE"
@@ -10253,9 +10271,11 @@ _record_status_detail() {
 # at the LC_ALL=C pin below.
 #
 # DEFENCE IN DEPTH, stated as such rather than implied: every writer today (run_file_size,
-# and run_python_bindings's open-files detail added by #4221) emits fixed wording plus
-# GATE-COMPUTED values — a count and a bare filename for the former, an integer ulimit
-# reading for the latter — no repository PATH and no caller-controlled value in either, so
+# run_python_bindings's open-files detail added by #4221, and run_tooling_tests's scope
+# detail added by #4266 — three call sites, one per scope-decision branch) emits fixed
+# wording plus GATE-COMPUTED values — a count and a bare filename for the former, an
+# integer ulimit reading for the second, a harness-path count and the fixed declared-set
+# text for the third — no repository PATH and no caller-controlled value in any of them, so
 # no REACHABLE input carries a control character at all. This boundary exists so the NEXT
 # writer cannot reintroduce the row-injection route by not thinking about it.
 # NOT BEHAVIOURALLY TESTED ON THIS PLATFORM, and that is DECLARED rather than papered over
