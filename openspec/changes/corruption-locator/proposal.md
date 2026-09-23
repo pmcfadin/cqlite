@@ -26,7 +26,8 @@ CQLite already has every primitive needed: `IndexReader::get_partition_entries` 
 partition's key and `Data.db` offset (`index_reader/mod.rs:264`, `PartitionIndexEntry.data_offset:
 u64` at line 64); `CompressionInfo::chunk_for_offset` maps a `Data.db` byte offset to its compressed
 chunk index (`compression_info.rs:301`); the uncompressed `CRC.db` chunk grid is a fixed
-`CRC_CHUNK_SIZE = 64 * 1024` (`writer/crc_writer.rs:67`); and the BTI reader already performs a full
+`CRC_CHUNK_SIZE = 64 * 1024` (`writer/crc_writer.rs:67`) (writer default; read-side uses the
+per-file `CRC.db` header); and the BTI reader already performs a full
 `Partitions.db` trie walk — `iterate_partitions_in_bti_file` (`bti/parser/traversal.rs:384`) yields
 every partition's key and `BtiPartitionLocation` in byte-comparable order, and `verify.rs` itself
 already imports it (plus `iterate_rows_in_bti_trie` and the row-offset resolver `n`) for its
