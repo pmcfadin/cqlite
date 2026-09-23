@@ -26,6 +26,10 @@
 # Options:
 #   --box <name>          box profile to use (scripts/flow/boxes/<name>.env). Default:
 #                          `hostname -s` (or `hostname`).
+#   --box-dir <path>       directory holding box profiles. Default: scripts/flow/boxes/
+#                          (a committed, tracked directory). ONLY the self-test should
+#                          ever point this at a scratch directory — pointing a real launch
+#                          here would use an unreviewed profile.
 #   --allow-file-growth    sets CQLITE_ALLOW_FILE_GROWTH=1 for this launch. This is the
 #                          ONLY way that variable reaches the gate through this script.
 #   --summary <path>       forwarded to gate-detached.sh. Default: a fresh path under the
@@ -56,6 +60,7 @@ USAGE
 OPTIONS
   --box <name>           box profile (scripts/flow/boxes/<name>.env). Default: this
                          host's short hostname.
+  --box-dir <path>        profile directory (default: scripts/flow/boxes/; self-test only).
   --allow-file-growth     sets CQLITE_ALLOW_FILE_GROWTH=1 for this launch only.
   --summary <path>        forwarded to gate-detached.sh.
   --log <path>            forwarded to gate-detached.sh.
@@ -75,6 +80,7 @@ HELPTEXT
 
 PR_OR_BRANCH=""
 BOX_NAME=""
+BOX_DIR_OVERRIDE=""
 ALLOW_FILE_GROWTH=0
 DRY_RUN=0
 OUT_SUMMARY=""
@@ -82,12 +88,25 @@ OUT_LOG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --box) BOX_NAME="${2:?--box needs a name}"; shift 2 ;;
+    --box-dir) BOX_DIR_OVERRIDE="${2:?--box-dir needs a path}"; shift 2 ;;
     --allow-file-growth) ALLOW_FILE_GROWTH=1; shift ;;
     --summary) OUT_SUMMARY="${2:?--summary needs a path}"; shift 2 ;;
     --log) OUT_LOG="${2:?--log needs a path}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) _usage; exit 0 ;;
-    --) shift; break ;;
+    --)
+      # This launcher starts THE gate of record, always with no extra arguments — never a
+      # silent passthrough. `-- --only clippy` or `-- --lite` would otherwise run a full
+      # 30-50 minute gate while looking like it took the flag, which is worse than refusing
+      # (roborev finding, #4267 round 2).
+      if [ $# -gt 1 ]; then
+        echo "gate-box-launch: unexpected arguments after '--': $*" >&2
+        echo "                 This launcher always runs the full gate of record with no" >&2
+        echo "                 extra flags. Run scripts/flow/gate-detached.sh directly (see" >&2
+        echo "                 docs/development/fleet-runbook.md) if you need --lite/--only." >&2
+        exit 2
+      fi
+      shift ;;
     -*)
       echo "gate-box-launch: unknown option '$1'." >&2
       _usage >&2
@@ -125,11 +144,20 @@ if [ -z "$BOX_NAME" ]; then
   echo "                 and no --box was given. Pass --box <name> explicitly." >&2
   exit 2
 fi
-BOX_PROFILE="$REPO_ROOT/scripts/flow/boxes/$BOX_NAME.env"
+# BOX_NAME becomes part of a filesystem path below — reject anything that could walk out
+# of the box directory or be read as an option (roborev finding, #4267 round 2).
+case "$BOX_NAME" in
+  */*|*..*|-*)
+    echo "gate-box-launch: refusing box name '$BOX_NAME' — it must not contain '/', '..', or" >&2
+    echo "                 start with '-'. Pass an explicit --box <name>." >&2
+    exit 2 ;;
+esac
+BOXES_DIR="${BOX_DIR_OVERRIDE:-$REPO_ROOT/scripts/flow/boxes}"
+BOX_PROFILE="$BOXES_DIR/$BOX_NAME.env"
 if [ ! -f "$BOX_PROFILE" ]; then
   echo "gate-box-launch: no committed profile at '$BOX_PROFILE'." >&2
   echo "                 Known profiles:" >&2
-  for _p in "$REPO_ROOT"/scripts/flow/boxes/*.env; do
+  for _p in "$BOXES_DIR"/*.env; do
     [ -e "$_p" ] && echo "                   $(basename "$_p" .env)" >&2
   done
   echo "                 Add one (see scripts/flow/boxes/astro-processor.env for the shape)" >&2
@@ -147,6 +175,20 @@ for _v in BOX_CANONICAL_CLONE BOX_LANES_DIR BOX_TMPDIR BOX_DATASETS_ROOT BOX_PAT
     echo "gate-box-launch: profile '$BOX_PROFILE' does not set required variable $_v." >&2
     exit 1
   fi
+done
+# Four of those must be PLAIN NON-NEGATIVE INTEGERS — every one feeds a `-lt`/arithmetic
+# comparison below, and bash's `[ n -lt m ]` on a non-numeric operand errors to stderr and
+# evaluates FALSE, i.e. the PERMISSIVE branch. For BOX_MIN_FREE_GB specifically that means a
+# typo (`"150G"`) silently ADMITS every launch past the one check meant to prevent the vhdx
+# exhaustion incidents (roborev finding, #4267 round 2) — refuse by name instead.
+for _v in BOX_JOBS BOX_RUST_TEST_THREADS BOX_MAX_CONCURRENCY BOX_MIN_FREE_GB; do
+  case "${!_v}" in
+    *[!0-9]*|'')
+      echo "gate-box-launch: profile '$BOX_PROFILE' sets $_v='${!_v}', which is not a plain" >&2
+      echo "                 non-negative integer. Refusing rather than silently admitting" >&2
+      echo "                 past a numeric check that would otherwise error and pass." >&2
+      exit 1 ;;
+  esac
 done
 
 echo "gate-box-launch: box=$BOX_NAME profile=$BOX_PROFILE"
@@ -346,13 +388,33 @@ else
       echo "gate-box-launch: could not fetch in existing lane worktree '$LANE_DIR'." >&2
       exit 1
     fi
-    if ! git -C "$LANE_DIR" checkout --quiet --detach "$HEAD_SHA" 2>&1; then
+    # --force so a tracked-file modification left by an interrupted prior run (a stopped
+    # fix round, a generated file) is DISCARDED rather than either blocking the checkout
+    # or riding along into this run — a dirty lane stamps `dirty: yes` in the gate's own
+    # summary, which by CLAUDE.md means it cannot certify, and that costs the 30-50 minute
+    # run this launcher exists to protect (roborev finding, #4267 round 2). Untracked
+    # files (target/, the dataset root) are never touched by --force.
+    if ! git -C "$LANE_DIR" checkout --quiet --force --detach "$HEAD_SHA" 2>&1; then
       echo "gate-box-launch: could not check out $HEAD_SHA in lane worktree '$LANE_DIR'." >&2
       exit 1
     fi
+    _dirty=$(git -C "$LANE_DIR" status --porcelain --untracked-files=no 2>/dev/null)
+    if [ -n "$_dirty" ]; then
+      echo "gate-box-launch: REFUSING — lane worktree '$LANE_DIR' still has tracked-file" >&2
+      echo "                 changes after a forced checkout:" >&2
+      echo "$_dirty" | sed 's/^/                   /' >&2
+      exit 1
+    fi
   else
+    # Prune stale worktree registrations first: a lane directory left over from a removed
+    # `.git` file (a half-cleaned lane) makes `worktree add` fail with "already
+    # registered"/"already exists" and no remedy (roborev finding, #4267 round 2).
+    _git_clone worktree prune 2>&1 || true
     if ! _git_clone worktree add --quiet --detach "$LANE_DIR" "$HEAD_SHA" 2>&1; then
       echo "gate-box-launch: 'git worktree add' failed for '$LANE_DIR' @ $HEAD_SHA." >&2
+      echo "                 If '$LANE_DIR' exists but is not a usable worktree, remove it:" >&2
+      echo "                   git -C '$BOX_CANONICAL_CLONE' worktree remove --force '$LANE_DIR'" >&2
+      echo "                 or, if that fails too: rm -rf '$LANE_DIR'" >&2
       exit 1
     fi
   fi
@@ -376,6 +438,43 @@ GATE_ENV=(
 )
 if [ "$ALLOW_FILE_GROWTH" -eq 1 ]; then
   GATE_ENV+=("CQLITE_ALLOW_FILE_GROWTH=1")
+fi
+# gate-detached.sh REQUIRES a working `systemd-run --user` (its own precondition checks),
+# and sd-bus resolves the user bus from DBUS_SESSION_BUS_ADDRESS, else
+# $XDG_RUNTIME_DIR/bus — both stripped by `env -i` and neither was in the original
+# allowlist, so the first real launch would fail the systemd-run probe and exit 69 naming
+# the box rather than this gap (roborev finding, #4267 round 2).
+# gate-detached.sh:1087 already treats /run/user/<uid> as XDG_RUNTIME_DIR's canonical
+# value, so that is the default when the caller's environment does not set it.
+_uid=$(id -u 2>/dev/null || echo "")
+GATE_ENV+=("XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-${_uid:+/run/user/$_uid}}")
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+  GATE_ENV+=("DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS")
+fi
+# The canonical clone's `origin` may be an ssh remote, and this launcher does a network
+# `git fetch` against it — forward the caller's ssh-agent socket when present so that
+# fetch (and the gate's own fetches) can authenticate.
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+  GATE_ENV+=("SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+fi
+# gate-notify.sh's completion push (#2667/#3119) reads one of these webhook variables and
+# returns 1 with only a debug line when neither is set — so dropping them here would
+# SILENTLY disable notifications for every gate started through this launcher, with no
+# diagnostic pointing at the cause (roborev finding, #4267 round 2). Disclosed either way,
+# matching the sccache line below.
+_NOTIFY_WIRED=""
+if [ -n "${CQLITE_NOTIFY_WEBHOOK:-}" ]; then
+  GATE_ENV+=("CQLITE_NOTIFY_WEBHOOK=$CQLITE_NOTIFY_WEBHOOK")
+  _NOTIFY_WIRED="${_NOTIFY_WIRED:+$_NOTIFY_WIRED, }CQLITE_NOTIFY_WEBHOOK"
+fi
+if [ -n "${CODEX_NOTIFY_WEBHOOK:-}" ]; then
+  GATE_ENV+=("CODEX_NOTIFY_WEBHOOK=$CODEX_NOTIFY_WEBHOOK")
+  _NOTIFY_WIRED="${_NOTIFY_WIRED:+$_NOTIFY_WIRED, }CODEX_NOTIFY_WEBHOOK"
+fi
+if [ -n "$_NOTIFY_WIRED" ]; then
+  echo "gate-box-launch: notifications wired: $_NOTIFY_WIRED"
+else
+  echo "gate-box-launch: notifications not wired: neither CQLITE_NOTIFY_WEBHOOK nor CODEX_NOTIFY_WEBHOOK is set"
 fi
 _SCCACHE_NOTE="not wired: sccache not found on the profile PATH"
 if _sccache_bin=$(PATH="$GATE_PATH" command -v sccache 2>/dev/null) && [ -n "$_sccache_bin" ]; then
