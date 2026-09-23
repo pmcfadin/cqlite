@@ -294,3 +294,96 @@ async fn sstable_generation_projection_answers_which_generations_hold_the_key() 
          real source generation"
     );
 }
+
+/// Roborev finding (issue #4222, High): the raw-view interception bypassed
+/// the execution-step pipeline entirely, so `LIMIT`/`OFFSET` were silently
+/// ignored — `SELECT * FROM ..._raw_sstable_data LIMIT 1` returned every
+/// physical row instead of one. This is the spec's own first scenario's
+/// shape ("`SELECT * FROM ...LIMIT 1`... returning at least one row").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limit_and_offset_are_honored() {
+    let db = open_fixture_db().await;
+
+    let limited = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 LIMIT 1"
+        ))
+        .await
+        .expect("LIMIT 1 must succeed");
+    assert_eq!(
+        limited.rows.len(),
+        1,
+        "LIMIT 1 must return EXACTLY one row, not the whole 7-row corpus for pk=1"
+    );
+
+    let unlimited = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1"
+        ))
+        .await
+        .expect("unlimited query must succeed");
+    assert_eq!(unlimited.rows.len(), 7, "sanity: unlimited still returns all 7 rows");
+
+    let offset_query = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 LIMIT 3 OFFSET 2"
+        ))
+        .await
+        .expect("LIMIT+OFFSET must succeed");
+    assert_eq!(
+        offset_query.rows.len(),
+        3,
+        "LIMIT 3 OFFSET 2 must return exactly 3 rows"
+    );
+}
+
+/// Roborev finding (issue #4222): ORDER BY / DISTINCT / aggregates over the
+/// raw view are out of scope for this slice (design.md D4's JOIN-gap
+/// precedent) and must fail CLOSED with a typed error, never silently
+/// ignore the clause and return an unordered/unreduced result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn order_by_and_distinct_fail_closed_rather_than_silently_ignored() {
+    let db = open_fixture_db().await;
+
+    let order_by = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 ORDER BY ck DESC"
+        ))
+        .await;
+    assert!(
+        order_by.is_err(),
+        "ORDER BY over the raw view must fail closed, not silently return unordered rows"
+    );
+
+    let distinct = db
+        .execute(&format!(
+            "SELECT DISTINCT sstable FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1"
+        ))
+        .await;
+    assert!(
+        distinct.is_err(),
+        "SELECT DISTINCT over the raw view must fail closed, not silently return duplicates"
+    );
+}
+
+/// Roborev finding (issue #4222, Medium): a synthesized metadata-column name
+/// colliding with a real base-table column must fail closed (D8), never
+/// silently clobber one of the two. `resurrection_gc_positive` has no such
+/// collision, so this asserts the POSITIVE case works; the collision case
+/// itself is unit-tested directly against `raw_view_columns` in
+/// `cqlite-core/src/query/select_executor/raw_view/columns.rs`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selecting_an_unknown_column_fails_closed() {
+    let db = open_fixture_db().await;
+    let outcome = db
+        .execute(&format!(
+            "SELECT pk, this_column_does_not_exist FROM {KEYSPACE}.{TABLE}_raw_sstable_data \
+             WHERE pk = 1"
+        ))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "SELECTing a column absent from the raw view's contract must fail closed, not \
+         silently drop it from the result"
+    );
+}
