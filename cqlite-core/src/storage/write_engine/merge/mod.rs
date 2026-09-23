@@ -71,6 +71,8 @@
 //! Implementation for M5.2 (Issue #382)
 
 #[cfg(feature = "write-support")]
+use self::trace::{NoTrace, TombstoneKind, TombstoneRecord, TraceSink};
+#[cfg(feature = "write-support")]
 use crate::error::{Error, Result};
 #[cfg(feature = "write-support")]
 use crate::schema::TableSchema;
@@ -98,6 +100,9 @@ use std::time::{Duration, Instant};
 mod model;
 #[cfg(feature = "write-support")]
 pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, RowData};
+
+/// Public reconciliation decision-trail sink and event types (issue #4193).
+pub mod trace;
 
 /// Read-shape reassembly of a merged row's per-column cells (issue #2324):
 /// collapse per-element collection cells back into a single `Value::List` /
@@ -132,7 +137,8 @@ mod point_read;
 #[cfg(feature = "write-support")]
 pub use point_read::{
     build_single_partition_merger, build_single_partition_merger_from_readers,
-    build_single_partition_merger_with_registry, PointAccessRecording,
+    build_single_partition_merger_with_registry, build_single_partition_merger_with_trace,
+    PointAccessRecording,
 };
 
 /// Warm/shared-reader k-way merge construction (issue #2346): builds a merger
@@ -178,6 +184,8 @@ mod carriers;
 /// (issue #945). See [`reconcile::ReconcileState`].
 #[cfg(feature = "write-support")]
 mod reconcile;
+#[cfg(feature = "write-support")]
+mod reconcile_cluster;
 
 /// Streaming cluster-group step type (issue #1668; read-path wiring #2230). Wired
 /// into compaction AND (via the public re-export below) `cqlite-flight`'s read path.
@@ -200,7 +208,7 @@ mod schema_order;
 /// (issue #947) so per-cell winner resolution calls
 /// [`reconcile_rules::cell_wins`] — the one shared `Cells#reconcile` tie-break —
 /// instead of a hand-synced copy. How a tombstone is RECOGNIZED stays here
-/// (`Value::Tombstone` payload / IS_DELETED via [`KWayMerger::is_cell_tombstone`]),
+/// (`Value::Tombstone` payload / IS_DELETED via [`KWayMerger::<NoTrace>::is_cell_tombstone`]),
 /// since that is genuinely type-specific.
 #[cfg(feature = "write-support")]
 impl reconcile_rules::ReconcileCell for CellData {
@@ -208,45 +216,8 @@ impl reconcile_rules::ReconcileCell for CellData {
         self.timestamp
     }
     fn is_tombstone(&self) -> bool {
-        KWayMerger::is_cell_tombstone(self)
+        KWayMerger::<NoTrace>::is_cell_tombstone(self)
     }
-}
-
-/// A cut position on the clustering axis, used to coalesce range tombstones
-/// into a NON-OVERLAPPING canonical sequence (issue #933 / roborev #959 High
-/// #1).
-///
-/// The writer emits each [`RangeTombstone`] as an INDEPENDENT open/close marker
-/// pair, sorted by clustering position; the reader pairs markers using a single
-/// `pending_range_start`. Overlapping or nested ranges with different bounds
-/// would therefore mis-pair on read-back (e.g. `start[1,5] start[2,3] end[2,3]
-/// end[1,5]` resurfaces as `[2,3]` and `[Bottom,5]`), corrupting the persisted
-/// deletion ranges. Coalescing the cross-SSTable union into disjoint ranges
-/// before re-emission mirrors Cassandra's `RangeTombstoneList` invariant
-/// (on-disk range tombstones within a partition never overlap).
-///
-/// A range `[start, end]` is modelled as a closed interval over these cut
-/// positions. [`Self::At`] is the infinitesimal point just before (`after =
-/// false`) or just after (`after = true`) a clustering prefix; an open bound is
-/// [`Self::Bottom`] / [`Self::Top`]. The `after` flag at a SHORTER prefix sorts
-/// relative to all longer extensions (Cassandra's kind-weighted prefix
-/// ordering), so a prefix end bound `[ck1]` correctly covers every `[ck1, *]`.
-#[cfg(feature = "write-support")]
-#[derive(Clone)]
-enum RangeCut {
-    /// Before all clustering keys (start of partition).
-    Bottom,
-    /// Infinitesimally before (`after == false`) or after (`after == true`) the
-    /// clustering prefix.
-    At {
-        /// Clustering prefix (possibly shorter than the full arity).
-        key: ClusteringKey,
-        /// `false` = just before the prefix and all its extensions; `true` =
-        /// just after them.
-        after: bool,
-    },
-    /// After all clustering keys (end of partition).
-    Top,
 }
 
 /// Buffered reader for a single SSTable run
@@ -577,7 +548,7 @@ mod range_shadowing_binsearch_tests;
 /// ```
 #[cfg(feature = "write-support")]
 #[derive(Debug)]
-pub struct KWayMerger {
+pub struct KWayMerger<S: TraceSink = NoTrace> {
     /// Input runs (one per SSTable)
     runs: Vec<RunReader>,
     /// Min-heap for efficient merge (issue #1668, stage 5c-i): each element
@@ -655,6 +626,9 @@ pub struct KWayMerger {
     /// end — even on panic/early-return. `None` for test-only mergers built from
     /// pre-supplied runs that never registered a slot. See [`egress_budget`].
     _egress_slot: Option<egress_budget::ActiveMergeGuard>,
+    /// Static-dispatch decision-trail sink. `NoTrace` is zero-sized in every
+    /// existing constructor; traced callers replace it with a recording sink.
+    trace: S,
 }
 
 /// Report returned by [`compact_sstables`].
@@ -1588,7 +1562,7 @@ pub async fn compact_sstables_with_registry(
 /// Tally of tombstones GENUINELY PURGED during a partition merge (issue #1037).
 ///
 /// Accumulated only at the true gc_grace / overlap-safe purge decision points in
-/// [`KWayMerger::reconcile_cluster_with_overlap_counted`] and
+/// [`KWayMerger::<NoTrace>::reconcile_cluster_with_overlap_counted`] and
 /// [`KWayMerger::merge_partition_rows`] — never from a coarse input-vs-output
 /// entry-count diff. Last-write-wins reconciliation collapse (e.g. two duplicate
 /// row tombstones merging to one) is deliberately NOT counted, since that is
@@ -1771,6 +1745,42 @@ impl KWayMerger {
     pub fn with_max_purgeable_timestamp(mut self, max_purgeable_timestamp: Option<i64>) -> Self {
         self.max_purgeable_timestamp = max_purgeable_timestamp;
         self
+    }
+
+    /// Replace the zero-sized default sink with a caller-owned trace sink.
+    ///
+    /// All merge state is moved without retaining input paths or adding a
+    /// trace field to [`MergeEntry`]. Existing constructors therefore remain
+    /// `KWayMerger<NoTrace>`, while explain-style callers opt into a traced
+    /// merger explicitly.
+    #[must_use]
+    pub fn with_trace_sink<T: TraceSink>(self, sink: T) -> KWayMerger<T> {
+        let KWayMerger {
+            runs,
+            heap,
+            current_partition,
+            schema,
+            schema_arc,
+            gc_before_secs,
+            now_secs,
+            purge_safe,
+            max_purgeable_timestamp,
+            _egress_slot,
+            trace: _,
+        } = self;
+        KWayMerger {
+            runs,
+            heap,
+            current_partition,
+            schema,
+            schema_arc,
+            gc_before_secs,
+            now_secs,
+            purge_safe,
+            max_purgeable_timestamp,
+            _egress_slot,
+            trace: sink,
+        }
     }
 
     // `with_egress_slot` (issue #2765) lives in `egress_budget.rs` (its own
@@ -2031,6 +2041,32 @@ impl KWayMerger {
         stats.elapsed = start_time.elapsed();
         Ok(stats)
     }
+}
+
+#[cfg(feature = "write-support")]
+impl<S: TraceSink> KWayMerger<S> {
+    /// Borrow the decision-trail sink after driving the merger.
+    #[must_use]
+    pub fn trace_sink(&self) -> &S {
+        &self.trace
+    }
+
+    /// Mutably borrow the decision-trail sink while driving a merger.
+    #[must_use]
+    pub fn trace_sink_mut(&mut self) -> &mut S {
+        &mut self.trace
+    }
+
+    /// Extract the caller-owned decision-trail sink after the merge completes.
+    ///
+    /// The input runs and heap are dropped with the merger.  This is the
+    /// bounded hand-off used by explain callers: drive `step()` to
+    /// `MergeStep::Complete`, then take the collected records without a second
+    /// merge or a clone of the sink vectors.
+    #[must_use]
+    pub fn into_trace_sink(self) -> S {
+        self.trace
+    }
 
     /// Perform one merge step (one partition)
     ///
@@ -2196,7 +2232,7 @@ impl KWayMerger {
         }
     }
 
-    fn merge_partition_rows(&self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
+    fn merge_partition_rows(&mut self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
         use std::collections::BTreeMap;
 
         // Tombstone-purge accounting (issue #1037). Accumulated at the ACTUAL
@@ -2246,9 +2282,58 @@ impl KWayMerger {
         // skips them and keeps only the per-`(pk, ck)` rows, exactly as before.
         let carriers::PartitionCarriers {
             mut range_tombstones,
+            range_tombstone_run_indices,
             max_partition_deletion,
             partition_delete_key,
-        } = carriers::scan_partition_carriers(&rows);
+            partition_delete_run_index,
+        } = carriers::scan_partition_carriers_with_trace(&rows, S::ENABLED);
+
+        // Carrier rows are split out before cluster reconciliation, so emit
+        // their marker observations at the split boundary. Their source
+        // generation is otherwise lost when a retained marker is rebuilt
+        // with the synthetic output run index.
+        if S::ENABLED {
+            if let Some(run_indices) = range_tombstone_run_indices.as_ref() {
+                for ((_, range), run_index) in range_tombstones.iter().zip(run_indices.iter()) {
+                    self.trace.tombstone(TombstoneRecord {
+                        kind: TombstoneKind::Range,
+                        run_index: *run_index,
+                        clustering: None,
+                        column: None,
+                        deletion_time: range.deletion_time,
+                        local_deletion_time: range.local_deletion_time,
+                        range_start: Some(range.start.clone()),
+                        range_end: Some(range.end.clone()),
+                        droppable_at_now: effective_gc_before
+                            .is_some_and(|gc| i64::from(range.local_deletion_time as u32) < gc),
+                    });
+                }
+            }
+            if let (Some((deletion_time, local_deletion_time)), Some(run_index)) =
+                (max_partition_deletion, partition_delete_run_index)
+            {
+                self.trace.tombstone(TombstoneRecord {
+                    kind: TombstoneKind::Partition,
+                    run_index,
+                    clustering: None,
+                    column: None,
+                    deletion_time,
+                    local_deletion_time,
+                    range_start: None,
+                    range_end: None,
+                    droppable_at_now: effective_gc_before
+                        .is_some_and(|gc| i64::from(local_deletion_time as u32) < gc),
+                });
+            }
+        }
+
+        let original_range_tombstones = range_tombstone_run_indices.as_ref().map(|run_indices| {
+            range_tombstones
+                .iter()
+                .zip(run_indices.iter())
+                .map(|((key, range), run_index)| (key.clone(), range.clone(), *run_index))
+                .collect::<Vec<_>>()
+        });
 
         let mut clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>> = BTreeMap::new();
 
@@ -2283,37 +2368,83 @@ impl KWayMerger {
         // High #1). This also subsumes the old identical-bounds dedup.
         Self::coalesce_range_tombstones(&mut range_tombstones, &self.schema);
 
+        // Keep the source generation aligned with the canonical ranges. Exact
+        // matches cover the common case; the containment fallback preserves
+        // provenance when coalescing split an overlapping range into segments.
+        let range_source_runs = original_range_tombstones.as_ref().map(|original| {
+            range_tombstones
+                .iter()
+                .map(|(key, canonical)| {
+                    original
+                        .iter()
+                        .find(|(source_key, source, _)| {
+                            source_key.key == key.key && source == canonical
+                        })
+                        .or_else(|| {
+                            original.iter().find(|(source_key, source, _)| {
+                                source_key.key == key.key
+                                    && source.deletion_time == canonical.deletion_time
+                                    && source.local_deletion_time == canonical.local_deletion_time
+                                    && Self::range_tombstone_contains_range(
+                                        source,
+                                        canonical,
+                                        &self.schema,
+                                    )
+                            })
+                        })
+                        .map(|(_, _, run_index)| *run_index)
+                })
+                .collect::<Vec<_>>()
+        });
+
         let mut merged = Vec::new();
         for (ck, cluster_rows) in clustered_rows {
-            if let Some(entry) = Self::reconcile_cluster_with_overlap_counted(
-                ck,
-                cluster_rows,
-                &self.schema.dropped_columns,
-                effective_gc_before,
-                max_purgeable_timestamp,
-                // #1382: TTL expiry uses the merger's pinned evaluation instant,
-                // the SAME `now` that drove `compute_gc_before` so expiry and
-                // gc-grace purging agree deterministically.
-                self.now_secs,
-                &mut purges,
-            ) {
+            let (reconciled, trace_metadata) =
+                Self::reconcile_cluster_with_overlap_counted_traced_with_metadata(
+                    ck,
+                    cluster_rows,
+                    &self.schema.dropped_columns,
+                    effective_gc_before,
+                    max_purgeable_timestamp,
+                    // #1382: TTL expiry uses the merger's pinned evaluation instant,
+                    // the SAME `now` that drove `compute_gc_before` so expiry and
+                    // gc-grace purging agree deterministically.
+                    self.now_secs,
+                    &mut purges,
+                    &mut self.trace,
+                );
+            if let Some(entry) = reconciled {
                 // Issue #933: shadow cells covered by a range tombstone. The merge
                 // must do this per-cell (not just per-row at the writer) because a
                 // reconciled row's simple cells lose their individual writetimes
                 // when converted to a mutation — only the merge still sees each
                 // `CellData.timestamp`.
-                if let Some(shadowed) =
-                    Self::apply_range_shadowing(entry, &range_tombstones, &self.schema)
-                {
+                if let Some(shadowed) = Self::apply_range_shadowing_traced(
+                    entry,
+                    &range_tombstones,
+                    &self.schema,
+                    trace_metadata.winner_runs.as_ref(),
+                    range_source_runs.as_deref(),
+                    &mut self.trace,
+                ) {
                     // Issue #1072: apply the partition deletion as the OUTERMOST
                     // floor — after range shadowing — dropping every cell/row
                     // whose timestamp is `<= pmfda` (per-cell `<=`, so strictly-
                     // newer cells survive). A whole-row covered by the partition
                     // floor contributes nothing (the re-emitted partition
                     // tombstone covers it).
-                    if let Some(survivor) =
-                        Self::apply_partition_shadowing(shadowed, max_partition_deletion)
-                    {
+                    if let Some(survivor) = Self::apply_partition_shadowing_traced(
+                        shadowed,
+                        max_partition_deletion,
+                        trace_metadata.winner_runs.as_ref(),
+                        partition_delete_run_index,
+                        &mut self.trace,
+                    ) {
+                        reconcile_cluster::trace_entry_winners(
+                            &survivor,
+                            trace_metadata.winner_runs.as_ref(),
+                            &mut self.trace,
+                        );
                         merged.push(survivor);
                     }
                 }
@@ -2497,245 +2628,6 @@ impl KWayMerger {
         Ok(merged)
     }
 
-    /// Coalesce range tombstones into a NON-OVERLAPPING canonical sequence per
-    /// partition, the winning (newest) deletion time per covered segment (issue
-    /// #933 / roborev #959 High #1).
-    ///
-    /// Each input SSTable's range tombstones are individually non-overlapping
-    /// (Cassandra's `RangeTombstoneList` invariant), but the cross-SSTable union
-    /// gathered during compaction can overlap with different bounds. The writer
-    /// emits each retained range as an independent open/close marker pair and the
-    /// reader pairs them with a single `pending_range_start`, so OVERLAPPING
-    /// re-emitted ranges would mis-pair on read-back and corrupt the persisted
-    /// ranges. Splitting the union into disjoint segments (each carrying the max
-    /// `markedForDeleteAt` covering it) keeps the on-disk markers a clean
-    /// alternating open/close sequence. This also subsumes the prior
-    /// identical-bounds dedup.
-    fn coalesce_range_tombstones(
-        rts: &mut Vec<(DecoratedKey, RangeTombstone)>,
-        schema: &TableSchema,
-    ) {
-        // Group by partition-key bytes, preserving the first-seen DecoratedKey as
-        // the representative for each group (token + raw bytes are identical
-        // across the group).
-        let mut groups: Vec<(DecoratedKey, Vec<RangeTombstone>)> = Vec::new();
-        for (key, rt) in rts.drain(..) {
-            if let Some((_, ranges)) = groups.iter_mut().find(|(k, _)| k.key == key.key) {
-                ranges.push(rt);
-            } else {
-                groups.push((key, vec![rt]));
-            }
-        }
-
-        let mut out: Vec<(DecoratedKey, RangeTombstone)> = Vec::new();
-        for (key, ranges) in groups {
-            for rt in Self::coalesce_partition_range_tombstones(ranges, schema) {
-                out.push((key.clone(), rt));
-            }
-        }
-        *rts = out;
-    }
-
-    /// Coalesce the range tombstones of a SINGLE partition into a disjoint,
-    /// clustering-sorted sequence (helper for [`Self::coalesce_range_tombstones`]).
-    fn coalesce_partition_range_tombstones(
-        ranges: Vec<RangeTombstone>,
-        schema: &TableSchema,
-    ) -> Vec<RangeTombstone> {
-        if ranges.len() <= 1 {
-            return ranges;
-        }
-
-        // Model each range as a closed interval [start_cut, end_cut] with its
-        // (mfda, ldt).
-        let items: Vec<(RangeCut, RangeCut, i64, i32)> = ranges
-            .iter()
-            .map(|rt| {
-                (
-                    Self::range_start_cut(&rt.start),
-                    Self::range_end_cut(&rt.end),
-                    rt.deletion_time,
-                    rt.local_deletion_time,
-                )
-            })
-            .collect();
-
-        // Distinct, sorted cut positions (the candidate segment boundaries).
-        let mut cuts: Vec<RangeCut> = Vec::with_capacity(items.len() * 2);
-        for (s, e, _, _) in &items {
-            cuts.push(s.clone());
-            cuts.push(e.clone());
-        }
-        cuts.sort_by(|a, b| Self::cut_cmp(a, b, schema));
-        cuts.dedup_by(|a, b| Self::cut_cmp(a, b, schema) == Ordering::Equal);
-
-        // For each elementary gap (cuts[i], cuts[i+1]), the winning deletion is
-        // the max `markedForDeleteAt` among ranges whose closed interval fully
-        // contains the gap (start <= lo AND hi <= end).
-        let mut segs: Vec<(RangeCut, RangeCut, i64, i32)> = Vec::new();
-        for window in cuts.windows(2) {
-            let (lo, hi) = (&window[0], &window[1]);
-            let mut best: Option<(i64, i32)> = None;
-            for (s, e, mfda, ldt) in &items {
-                let covers = Self::cut_cmp(s, lo, schema) != Ordering::Greater
-                    && Self::cut_cmp(hi, e, schema) != Ordering::Greater;
-                if !covers {
-                    continue;
-                }
-                best = Some(match best {
-                    Some((bm, bl)) if bm > *mfda || (bm == *mfda && bl >= *ldt) => (bm, bl),
-                    _ => (*mfda, *ldt),
-                });
-            }
-            if let Some((mfda, ldt)) = best {
-                segs.push((lo.clone(), hi.clone(), mfda, ldt));
-            }
-        }
-
-        // Merge adjacent segments that share a boundary AND the same deletion
-        // (minimal fragmentation); a gap with no covering range breaks the run.
-        let mut merged: Vec<(RangeCut, RangeCut, i64, i32)> = Vec::new();
-        for seg in segs {
-            if let Some(last) = merged.last_mut() {
-                if last.2 == seg.2
-                    && last.3 == seg.3
-                    && Self::cut_cmp(&last.1, &seg.0, schema) == Ordering::Equal
-                {
-                    last.1 = seg.1;
-                    continue;
-                }
-            }
-            merged.push(seg);
-        }
-
-        merged
-            .into_iter()
-            .map(|(lo, hi, mfda, ldt)| RangeTombstone {
-                start: Self::cut_to_start_bound(lo),
-                end: Self::cut_to_end_bound(hi),
-                deletion_time: mfda,
-                local_deletion_time: ldt,
-            })
-            .collect()
-    }
-
-    /// Total order of two cut positions on the clustering axis (schema-aware,
-    /// honoring per-column ASC/DESC and Cassandra's kind-weighted prefix
-    /// ordering). See [`RangeCut`].
-    fn cut_cmp(a: &RangeCut, b: &RangeCut, schema: &TableSchema) -> Ordering {
-        match (a, b) {
-            (RangeCut::Bottom, RangeCut::Bottom) => Ordering::Equal,
-            (RangeCut::Bottom, _) => Ordering::Less,
-            (_, RangeCut::Bottom) => Ordering::Greater,
-            (RangeCut::Top, RangeCut::Top) => Ordering::Equal,
-            (RangeCut::Top, _) => Ordering::Greater,
-            (_, RangeCut::Top) => Ordering::Less,
-            (RangeCut::At { key: ka, after: aa }, RangeCut::At { key: kb, after: ab }) => {
-                // Compare the common prefix only; a shorter prefix's `after` flag
-                // decides its position relative to every longer extension.
-                let l = ka.columns.len().min(kb.columns.len());
-                let ta = ClusteringKey {
-                    columns: ka.columns[..l].to_vec(),
-                };
-                let tb = ClusteringKey {
-                    columns: kb.columns[..l].to_vec(),
-                };
-                let ord = ta.compare(&tb, schema).unwrap_or_else(|_| ta.cmp(&tb));
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-                match ka.columns.len().cmp(&kb.columns.len()) {
-                    Ordering::Equal => aa.cmp(ab),
-                    // `a` is the shorter prefix: just-after sorts past every
-                    // extension of it, just-before sorts ahead of all of them.
-                    Ordering::Less => {
-                        if *aa {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Less
-                        }
-                    }
-                    // `b` is the shorter prefix (mirror image).
-                    Ordering::Greater => {
-                        if *ab {
-                            Ordering::Less
-                        } else {
-                            Ordering::Greater
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Left edge (cut) of a range's start bound.
-    fn range_start_cut(
-        bound: &crate::storage::write_engine::mutation::ClusteringBound,
-    ) -> RangeCut {
-        use crate::storage::write_engine::mutation::ClusteringBound;
-        match bound {
-            ClusteringBound::Inclusive(ck) => RangeCut::At {
-                key: ck.clone(),
-                after: false,
-            },
-            ClusteringBound::Exclusive(ck) => RangeCut::At {
-                key: ck.clone(),
-                after: true,
-            },
-            ClusteringBound::Bottom => RangeCut::Bottom,
-            ClusteringBound::Top => RangeCut::Top,
-        }
-    }
-
-    /// Right edge (cut) of a range's end bound.
-    fn range_end_cut(bound: &crate::storage::write_engine::mutation::ClusteringBound) -> RangeCut {
-        use crate::storage::write_engine::mutation::ClusteringBound;
-        match bound {
-            ClusteringBound::Inclusive(ck) => RangeCut::At {
-                key: ck.clone(),
-                after: true,
-            },
-            ClusteringBound::Exclusive(ck) => RangeCut::At {
-                key: ck.clone(),
-                after: false,
-            },
-            ClusteringBound::Top => RangeCut::Top,
-            ClusteringBound::Bottom => RangeCut::Bottom,
-        }
-    }
-
-    /// Convert a left-edge cut back into a start [`ClusteringBound`].
-    fn cut_to_start_bound(
-        cut: RangeCut,
-    ) -> crate::storage::write_engine::mutation::ClusteringBound {
-        use crate::storage::write_engine::mutation::ClusteringBound;
-        match cut {
-            RangeCut::Bottom => ClusteringBound::Bottom,
-            RangeCut::At { key, after: false } => ClusteringBound::Inclusive(key),
-            RangeCut::At { key, after: true } => ClusteringBound::Exclusive(key),
-            RangeCut::Top => ClusteringBound::Top,
-        }
-    }
-
-    /// Convert a right-edge cut back into an end [`ClusteringBound`].
-    fn cut_to_end_bound(cut: RangeCut) -> crate::storage::write_engine::mutation::ClusteringBound {
-        use crate::storage::write_engine::mutation::ClusteringBound;
-        match cut {
-            RangeCut::Top => ClusteringBound::Top,
-            RangeCut::At { key, after: true } => ClusteringBound::Inclusive(key),
-            RangeCut::At { key, after: false } => ClusteringBound::Exclusive(key),
-            RangeCut::Bottom => ClusteringBound::Bottom,
-        }
-    }
-
-    /// Whether a range tombstone's clustering range covers `ck`, comparing bounds
-    /// SCHEMA-AWARE (honoring per-column ASC/DESC via [`ClusteringKey::compare`],
-    /// NOT the schema-agnostic `cmp`) — issue #933 / roborev #959 Medium #3.
-    ///
-    /// Bounds may be a PREFIX shorter than the full clustering arity; comparing
-    /// only the bound's components (via [`ClusteringKey::compare`], which treats an
-    /// absent trailing component as a first-sorting NULL) yields the correct
-    /// containment for the `DELETE WHERE pk=? AND ck1=?` prefix case.
     /// Shadow the cells / row / metadata of a reconciled cluster entry that are
     /// covered by the partition-level deletion (issue #1072 — the OUTERMOST floor).
     ///
@@ -2752,9 +2644,56 @@ impl KWayMerger {
         entry: MergeEntry,
         max_partition_deletion: Option<(i64, i32)>,
     ) -> Option<MergeEntry> {
-        let Some((pmfda, _)) = max_partition_deletion else {
+        let mut sink = NoTrace;
+        Self::apply_partition_shadowing_traced(entry, max_partition_deletion, None, None, &mut sink)
+    }
+
+    /// Trace-enabled partition-floor shadowing.  The no-trace wrapper above is
+    /// retained for the existing streaming and unit-test callers.
+    fn apply_partition_shadowing_traced<T: TraceSink>(
+        entry: MergeEntry,
+        max_partition_deletion: Option<(i64, i32)>,
+        winner_runs: Option<&std::collections::HashMap<reconcile::CellKey, usize>>,
+        partition_source_run: Option<usize>,
+        trace: &mut T,
+    ) -> Option<MergeEntry> {
+        let Some((pmfda, partition_ldt)) = max_partition_deletion else {
             return Some(entry);
         };
+
+        // Capture the cell versions that the partition floor removes before
+        // consuming `entry.row_data` below.  The carrier's source generation
+        // is not present in this reconciled entry, so the current entry's
+        // The reconciled row has no carrier field, so use the source generation
+        // captured by the partition pre-scan for the deciding marker.
+        if T::ENABLED {
+            if let RowData::Live { cells } = &entry.row_data {
+                let ck_names: std::collections::HashSet<&str> = entry
+                    .clustering_key
+                    .as_ref()
+                    .map(|ck| ck.columns.iter().map(|(name, _)| name.as_str()).collect())
+                    .unwrap_or_default();
+                let shadowed: Vec<CellData> = cells
+                    .iter()
+                    .filter(|cell| {
+                        !ck_names.contains(cell.column.as_str()) && cell.timestamp <= pmfda
+                    })
+                    .cloned()
+                    .collect();
+                if !shadowed.is_empty() {
+                    reconcile_cluster::trace_entry_shadowed(
+                        &entry,
+                        &shadowed,
+                        winner_runs,
+                        trace,
+                        TombstoneKind::Partition,
+                        partition_source_run.unwrap_or(entry.run_index),
+                        pmfda,
+                        partition_ldt,
+                    );
+                }
+            }
+        }
 
         // A complex (collection) deletion older-or-equal to the partition floor is
         // subsumed; one strictly newer must survive.
@@ -2890,306 +2829,10 @@ impl KWayMerger {
             }
         }
     }
+}
 
-    fn range_tombstone_covers_ck(
-        ck: &ClusteringKey,
-        rt: &RangeTombstone,
-        schema: &TableSchema,
-    ) -> bool {
-        // Issue #1669: count coverage comparisons so a bound test can prove the
-        // binary search stays O(rows) — one candidate per row — instead of the
-        // former O(rows × ranges) linear scan. Vanishes in production builds.
-        #[cfg(test)]
-        crate::storage::sstable::work_counters::range_coverage_scope::record();
-        use crate::storage::write_engine::mutation::ClusteringBound;
-
-        // Compare `ck` against a bound key over the bound's component count so a
-        // prefix bound only compares its present components.
-        let cmp = |bound: &ClusteringKey| -> Ordering {
-            let n = bound.columns.len();
-            let truncated = ClusteringKey {
-                columns: ck.columns.iter().take(n).cloned().collect(),
-            };
-            truncated
-                .compare(bound, schema)
-                .unwrap_or_else(|_| truncated.cmp(bound))
-        };
-
-        let after_start = match &rt.start {
-            ClusteringBound::Inclusive(b) => cmp(b) != Ordering::Less,
-            ClusteringBound::Exclusive(b) => cmp(b) == Ordering::Greater,
-            ClusteringBound::Bottom => true,
-            ClusteringBound::Top => false,
-        };
-        let before_end = match &rt.end {
-            ClusteringBound::Inclusive(b) => cmp(b) != Ordering::Greater,
-            ClusteringBound::Exclusive(b) => cmp(b) == Ordering::Less,
-            ClusteringBound::Top => true,
-            ClusteringBound::Bottom => false,
-        };
-        after_start && before_end
-    }
-
-    /// Whether a coalesced range tombstone's END bound lies strictly BEFORE `ck`
-    /// on the clustering axis — i.e. `ck` is beyond the range's end, so the range
-    /// cannot cover it. This is exactly the negation of the `before_end` test in
-    /// [`Self::range_tombstone_covers_ck`], kept in lock-step with it.
-    ///
-    /// It is the monotonic predicate the #1669 binary search feeds to
-    /// [`slice::partition_point`]: because `coalesce_range_tombstones` yields a
-    /// per-partition sequence sorted by start bound and DISJOINT, the ranges are
-    /// also sorted by end bound, so `range_end_before_ck` is `true` for every
-    /// range wholly before `ck` and `false` thereafter — a clean partition point.
-    /// The first `false` range is the ONLY candidate that can contain `ck`
-    /// (disjointness ⇒ at most one covers it).
-    ///
-    /// Deliberately does NOT bump the `range_coverage_scope` counter: it is the
-    /// cheap `O(log ranges)` search step, distinct from the single authoritative
-    /// `range_tombstone_covers_ck` containment check the counter measures.
-    fn range_end_before_ck(ck: &ClusteringKey, rt: &RangeTombstone, schema: &TableSchema) -> bool {
-        use crate::storage::write_engine::mutation::ClusteringBound;
-
-        // Same prefix-aware comparison as `range_tombstone_covers_ck` (compare
-        // `ck` against the bound over the bound's component count).
-        let cmp = |bound: &ClusteringKey| -> Ordering {
-            let n = bound.columns.len();
-            let truncated = ClusteringKey {
-                columns: ck.columns.iter().take(n).cloned().collect(),
-            };
-            truncated
-                .compare(bound, schema)
-                .unwrap_or_else(|_| truncated.cmp(bound))
-        };
-
-        match &rt.end {
-            // Negation of the `before_end` arms in `range_tombstone_covers_ck`.
-            ClusteringBound::Inclusive(b) => cmp(b) == Ordering::Greater,
-            ClusteringBound::Exclusive(b) => cmp(b) != Ordering::Less,
-            ClusteringBound::Top => false,
-            ClusteringBound::Bottom => true,
-        }
-    }
-
-    /// Shadow the cells of a reconciled cluster entry that are covered by a range
-    /// tombstone (issue #933, the re-applied #846 "Step 2c" made schema-aware).
-    ///
-    /// Computes the max `markedForDeleteAt` among range tombstones covering this
-    /// entry's clustering key, then drops every DATA cell whose own `timestamp` is
-    /// `<= floor` (the `<=` boundary lets a deletion win an equal-ts tie, #498).
-    /// Clustering-key pseudo-cells are retained whenever any data cell survives so
-    /// the row keeps its key columns for read-back. A row whose every data cell is
-    /// shadowed AND whose row-marker liveness is `<= floor` produces nothing (the
-    /// re-emitted range marker covers it); a coexisting row deletion newer than the
-    /// floor is preserved as a row tombstone. A row with no clustering key (static
-    /// / unclustered) is never covered by a range tombstone.
-    fn apply_range_shadowing(
-        entry: MergeEntry,
-        range_tombstones: &[(DecoratedKey, RangeTombstone)],
-        schema: &TableSchema,
-    ) -> Option<MergeEntry> {
-        // Fast path for the overwhelmingly common partition with no range
-        // tombstones: skip the clustering-key clone and coverage scan entirely.
-        if range_tombstones.is_empty() {
-            return Some(entry);
-        }
-        let Some(ck) = entry.clustering_key.clone() else {
-            return Some(entry);
-        };
-
-        // Issue #1669: binary search for the covering range instead of a linear
-        // `filter().max()` scan run per clustering key. `coalesce_range_tombstones`
-        // produces, per partition key, a sequence sorted by start bound and
-        // DISJOINT (verified: it partitions the clustering axis into segments
-        // between distinct sorted cut boundaries and only merges adjacent
-        // same-deletion segments — see `coalesce_partition_range_tombstones`). And
-        // `apply_range_shadowing` is called from `merge_partition_rows`, which is
-        // strictly per-partition, so this whole slice is ONE partition's
-        // sorted+disjoint ranges. Disjoint ⇒ at most ONE range covers a given `ck`,
-        // so the former max over the covering set is a max over ≤1 element: a
-        // binary search finds it. O(rows × ranges) → O(rows × log ranges + ranges).
-        //
-        // Defensive guard: only take the binary-search path when the slice is
-        // provably a single partition matching `entry`. `coalesce_range_tombstones`
-        // groups partitions into CONTIGUOUS blocks, so first.key == last.key ⇒ one
-        // group; == `entry.key` ⇒ it is `entry`'s partition. Any other shape (a
-        // future multi-partition caller) falls back to the original exact linear
-        // scan, so correctness never depends on the guarantee holding — only the
-        // speedup does.
-        let single_partition = match (range_tombstones.first(), range_tombstones.last()) {
-            (Some((first, _)), Some((last, _))) => {
-                first.key == entry.key.key && last.key == entry.key.key
-            }
-            _ => false,
-        };
-        let floor = if single_partition {
-            // First range whose end is NOT before `ck` — the unique candidate that
-            // can contain `ck` (disjoint + sorted). Verify full containment (both
-            // bounds) via the authoritative `range_tombstone_covers_ck`.
-            let idx = range_tombstones
-                .partition_point(|(_, rt)| Self::range_end_before_ck(&ck, rt, schema));
-            range_tombstones.get(idx).and_then(|(key, rt)| {
-                (key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema))
-                    .then_some(rt.deletion_time)
-            })
-        } else {
-            // Exact pre-#1669 behavior for any non-single-partition slice.
-            range_tombstones
-                .iter()
-                .filter(|(key, rt)| {
-                    key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema)
-                })
-                .map(|(_, rt)| rt.deletion_time)
-                .max()
-        };
-        let Some(floor) = floor else {
-            return Some(entry);
-        };
-
-        // A complex (collection) deletion OLDER than the covering range is
-        // subsumed by the range marker; one STRICTLY NEWER must survive, else
-        // older collection elements from a non-compacted SSTable could resurrect
-        // (roborev #959 High #2 — `apply_range_shadowing` previously dropped
-        // `entry.complex_deletions` on the whole-row-covered path). Filtered once
-        // here and reused by every arm below.
-        let surviving_complex: Vec<ComplexDeletion> = entry
-            .complex_deletions
-            .into_iter()
-            .filter(|cd| cd.marked_for_delete_at > floor)
-            .collect();
-
-        match entry.row_data {
-            RowData::Tombstone {
-                deletion_time,
-                local_deletion_time,
-            } => {
-                // A row tombstone fully covered by a newer/equal range deletion is
-                // redundant (the range marker shadows it); drop it. A strictly
-                // newer row tombstone survives.
-                if deletion_time > floor {
-                    let mut rebuilt = MergeEntry::new(
-                        entry.run_index,
-                        entry.key,
-                        Some(ck),
-                        deletion_time,
-                        RowData::Tombstone {
-                            deletion_time,
-                            local_deletion_time,
-                        },
-                    );
-                    if !surviving_complex.is_empty() {
-                        rebuilt = rebuilt.with_complex_deletions(surviving_complex);
-                    }
-                    Some(rebuilt)
-                } else if !surviving_complex.is_empty() {
-                    // The row tombstone is subsumed by the range, but a newer
-                    // complex deletion must persist as a metadata-only carrier.
-                    Some(
-                        MergeEntry::new(
-                            entry.run_index,
-                            entry.key,
-                            Some(ck),
-                            entry.timestamp,
-                            RowData::Live { cells: Vec::new() },
-                        )
-                        .with_complex_deletions(surviving_complex),
-                    )
-                } else {
-                    None
-                }
-            }
-            RowData::Live { cells } => {
-                let ck_names: std::collections::HashSet<&str> =
-                    ck.columns.iter().map(|(n, _)| n.as_str()).collect();
-                let is_data = |c: &CellData| !ck_names.contains(c.column.as_str());
-
-                // Keep clustering pseudo-cells; keep data cells strictly newer than
-                // the covering range deletion.
-                let kept: Vec<CellData> = cells
-                    .into_iter()
-                    .filter(|c| !is_data(c) || c.timestamp > floor)
-                    .collect();
-                let has_data = kept.iter().any(is_data);
-
-                // A coexisting row deletion (#932) older than the range floor is
-                // subsumed by the range marker; a newer one is preserved.
-                let surviving_row_del = entry.row_deletion.filter(|(dt, _)| *dt > floor);
-
-                // The row-marker liveness survives the range only if its own
-                // timestamp is strictly newer than the covering deletion.
-                let marker_live = entry.timestamp > floor;
-
-                if !has_data && !marker_live {
-                    // Whole row covered by the range. A coexisting row deletion
-                    // (#932) newer than the floor wins and subsumes any collection
-                    // deletion. Otherwise a complex deletion newer than the floor
-                    // must persist as a metadata-only carrier (roborev #959 High
-                    // #2); failing that, the re-emitted range marker is the sole
-                    // survivor and this entry contributes nothing.
-                    if let Some((dt, ldt)) = surviving_row_del {
-                        return Some(MergeEntry::new(
-                            entry.run_index,
-                            entry.key,
-                            Some(ck),
-                            dt,
-                            RowData::Tombstone {
-                                deletion_time: dt,
-                                local_deletion_time: ldt,
-                            },
-                        ));
-                    }
-                    if !surviving_complex.is_empty() {
-                        return Some(
-                            MergeEntry::new(
-                                entry.run_index,
-                                entry.key,
-                                Some(ck),
-                                entry.timestamp,
-                                RowData::Live { cells: Vec::new() },
-                            )
-                            .with_complex_deletions(surviving_complex),
-                        );
-                    }
-                    return None;
-                }
-
-                let row_ts = if has_data {
-                    kept.iter()
-                        .filter(|c| is_data(c))
-                        .map(|c| c.timestamp)
-                        .max()
-                        .unwrap_or(entry.timestamp)
-                } else {
-                    entry.timestamp
-                };
-
-                let mut rebuilt = MergeEntry::new(
-                    entry.run_index,
-                    entry.key,
-                    Some(ck),
-                    row_ts,
-                    RowData::Live { cells: kept },
-                );
-                // Issue #2374/#2789: carry the primary-key liveness marker forward
-                // when it survives the range floor, so a key-only live row (INSERT
-                // with no/all-null regular columns) that coexists with an older
-                // covering range tombstone stays VISIBLE through the read path.
-                // Dropped (default) when the marker did not survive the floor.
-                rebuilt = rebuilt.with_row_liveness(if marker_live {
-                    entry.row_liveness
-                } else {
-                    Default::default()
-                });
-                if !surviving_complex.is_empty() {
-                    rebuilt = rebuilt.with_complex_deletions(surviving_complex);
-                }
-                if let Some((dt, ldt)) = surviving_row_del {
-                    rebuilt = rebuilt.with_row_deletion(dt, ldt);
-                }
-                Some(rebuilt)
-            }
-        }
-    }
-
+#[cfg(feature = "write-support")]
+impl KWayMerger<NoTrace> {
     /// The cell's effective `localDeletionTime` (GC-clock seconds, on-disk
     /// width) for gc_grace purge decisions (#921 finding 1/2).
     ///
@@ -3237,144 +2880,6 @@ impl KWayMerger {
             // future element representation that sets the flag without the wrapped
             // value still counts as a deletion for the tie-break.
             || cell.is_deleted
-    }
-
-    /// Reconcile all entries for a single clustering-key group into at most one
-    /// merged `MergeEntry`, applying per-cell last-write-wins plus row-tombstone
-    /// shadowing (Issue #533). See [`Self::merge_partition_rows`] for the rules.
-    ///
-    /// `cluster_rows` is in heap-routing order (run_index ascending within equal
-    /// keys), so when two cells tie on both timestamp and liveness the first-seen
-    /// (newer file) is kept.
-    ///
-    /// Thin wrapper over [`Self::reconcile_cluster_with_overlap`] that defaults the
-    /// overlap-aware max-purgeable timestamp to `i64::MAX` (unrestricted — the
-    /// full-compaction semantics in effect before #935). The production merge path
-    /// (`merge_partition_rows`) calls the `_with_overlap` form directly to pass the
-    /// real bound for a partial compaction.
-    #[cfg(test)]
-    fn reconcile_cluster(
-        clustering_key: Option<ClusteringKey>,
-        cluster_rows: Vec<MergeEntry>,
-        dropped_columns: &std::collections::HashMap<String, i64>,
-        gc_before_secs: Option<i64>,
-    ) -> Option<MergeEntry> {
-        Self::reconcile_cluster_with_overlap(
-            clustering_key,
-            cluster_rows,
-            dropped_columns,
-            gc_before_secs,
-            i64::MAX,
-        )
-    }
-
-    /// Reconcile a clustering-key group with an explicit overlap-aware
-    /// max-purgeable timestamp (#935). See [`Self::reconcile_cluster`] for the base
-    /// reconciliation rules.
-    ///
-    /// Thin wrapper over [`Self::reconcile_cluster_with_overlap_counted`] that
-    /// discards the tombstone-purge tally. The production merge path
-    /// (`merge_partition_rows`) calls the `_counted` form directly to accumulate
-    /// genuine gc/overlap-safe purges for `COMPACTION_TOMBSTONES_PURGED` (#1037);
-    /// this wrapper keeps the simpler signature for tests and other callers.
-    #[cfg(test)]
-    fn reconcile_cluster_with_overlap(
-        clustering_key: Option<ClusteringKey>,
-        cluster_rows: Vec<MergeEntry>,
-        dropped_columns: &std::collections::HashMap<String, i64>,
-        gc_before_secs: Option<i64>,
-        max_purgeable_timestamp: i64,
-    ) -> Option<MergeEntry> {
-        let mut sink = PurgeCounts::default();
-        Self::reconcile_cluster_with_overlap_counted(
-            clustering_key,
-            cluster_rows,
-            dropped_columns,
-            gc_before_secs,
-            max_purgeable_timestamp,
-            // #1382: this test-only wrapper keeps the pre-#1382 default of NO
-            // TTL expiry (`now_secs = None` = strict no-op). Tests that exercise
-            // TTL expiry drive the real `compact_sstables` surface instead.
-            None,
-            &mut sink,
-        )
-    }
-
-    /// Reconcile a clustering-key group, accumulating genuine gc/overlap-safe
-    /// tombstone purges into `purges` (issue #1037).
-    ///
-    /// Identical merge OUTPUT to [`Self::reconcile_cluster_with_overlap`]; the
-    /// only addition is that each true purge decision (a cell tombstone, row
-    /// tombstone, or complex deletion dropped because it is gc/overlap-safe to
-    /// drop in Step 3c) increments the matching `purges` field. Last-write-wins
-    /// reconciliation collapse is NOT counted.
-    fn reconcile_cluster_with_overlap_counted(
-        clustering_key: Option<ClusteringKey>,
-        cluster_rows: Vec<MergeEntry>,
-        dropped_columns: &std::collections::HashMap<String, i64>,
-        // EFFECTIVE gc_grace cutoff (`gcBefore`, GC-clock seconds), threaded from
-        // the merger. A tombstone whose `localDeletionTime < gc_before_secs` is
-        // PURGEABLE; `None` disables purging (issue #845).
-        //
-        // OVERLAP SAFETY (#921 finding 1, #935): the caller
-        // (`merge_partition_rows`) collapses this to `None` only when the
-        // compaction is a PARTIAL one with NO overlap bound, so the purge stage is
-        // a strict no-op there. With a bound it runs and each tombstone is
-        // additionally gated on `max_purgeable_timestamp` below.
-        gc_before_secs: Option<i64>,
-        // EFFECTIVE overlap-aware max-purgeable timestamp (`markedForDeleteAt`,
-        // micros), threaded from the merger (#935). A tombstone is purgeable ONLY
-        // when its own deletion timestamp is STRICTLY LESS THAN this value, so it
-        // provably shadows no data living in a non-included overlapping SSTable.
-        // `i64::MAX` for a full compaction (no outside overlap — every gc-purgeable
-        // tombstone passes); the min outside timestamp for an overlap-aware partial
-        // compaction; `i64::MIN` when purging is disabled (`gc_before_secs` is then
-        // `None`, so this is unused).
-        max_purgeable_timestamp: i64,
-        // Pinned TTL-expiry evaluation instant (`now`, GC-clock seconds), threaded
-        // from the merger (#1382). A live expiring cell whose `localDeletionTime`
-        // is STRICTLY LESS THAN this is turned into a cell tombstone (Step 3b′)
-        // and then purged by the SAME gc/overlap gate as any other cell tombstone.
-        // `None` disables expiry (a strict no-op), preserving pre-#1382 behavior.
-        now_secs: Option<i64>,
-        // Tombstone-purge tally accumulated at the true purge decision points
-        // (issue #1037). Never read here; only incremented.
-        purges: &mut PurgeCounts,
-    ) -> Option<MergeEntry> {
-        // Issue #3058: explicit "the compaction reconciler ran" marker (see
-        // `storage::read_path_probe`) — a single relaxed add on the merge arm.
-        crate::storage::read_path_probe::record_reconcile_entry();
-        // Decomposed into named, parity-load-bearing steps in `reconcile.rs`
-        // (issue #945). The step ORDER is critical: Step 2b before Steps 3/3c so
-        // a surviving complex deletion cannot resurrect a covered element on a
-        // later purge (`f66fa14f`); `had_data_before` is captured pre-purge and
-        // consulted post-purge (#921 finding 3). Behavior and the #1037 purge
-        // tally are byte-identical.
-        let mut state = reconcile::ReconcileState::new(clustering_key);
-        // Step 1: fold per-entry row/complex/range deletion metadata.
-        state.fold_row_deletions(&cluster_rows);
-        // Step 2: per-(column, cell_path) last-write-wins winner resolution.
-        state.resolve_cell_winners(&cluster_rows);
-        // Empty group => nothing to emit (original `let key = key?`).
-        if !state.has_key() {
-            return None;
-        }
-        // Step 2b: complex-deletion strict-supersede + shadow-before-purge.
-        state.apply_complex_deletions();
-        // Step 3: row-tombstone shadowing (tallies #2163 suppression).
-        state.shadow_by_row_deletion(purges);
-        // Step 3b: dropped-column filtering (captures the phantom-row guard).
-        state.filter_dropped_columns(dropped_columns);
-        // Step 3b′ (#1382): TTL expiry — convert expired live cells to cell
-        // tombstones BEFORE the gc-grace purge so an expired-past-grace cell is
-        // dropped by Step 3c and an expired-within-grace cell is emitted as a
-        // tombstone (its live value never resurfaces).
-        state.expire_ttl_cells(now_secs);
-        // Step 3c: gc_grace / overlap-aware tombstone purging (tallies #1037).
-        state.purge_gc_grace(gc_before_secs, max_purgeable_timestamp, purges);
-        // Step 4: phantom-row guard + emit the merged entry (tallies #2163
-        // emitted row-tombstone markers).
-        state.build(purges)
     }
 
     /// Convert reconciled `CellData`s into writer `CellOperation`s (epic #899,
@@ -4079,7 +3584,7 @@ mod tests {
             },
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
@@ -4090,6 +3595,7 @@ mod tests {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         // Drive the real merger. Order the input so the live (newer-file) entry is
@@ -4203,7 +3709,7 @@ mod tests {
             },
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
@@ -4214,6 +3720,7 @@ mod tests {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         // Pass in heap-routing order (run_index ascending): B then A.
@@ -4352,7 +3859,7 @@ mod tests {
             },
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
@@ -4363,6 +3870,7 @@ mod tests {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         // Heap-routing order (run_index ascending): A then B.
@@ -4503,7 +4011,7 @@ mod tests {
             },
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
@@ -4514,6 +4022,7 @@ mod tests {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         // Heap-routing order (run_index ascending): newer file first — exactly what
@@ -4653,7 +4162,7 @@ mod tests {
             },
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
@@ -4664,6 +4173,7 @@ mod tests {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         let merged = merger
@@ -4788,7 +4298,7 @@ mod tests {
             },
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
@@ -4799,6 +4309,7 @@ mod tests {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         let merged = merger
@@ -4885,7 +4396,7 @@ mod tests {
             },
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
@@ -4896,6 +4407,7 @@ mod tests {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         let merged = merger
@@ -5031,8 +4543,8 @@ mod tests {
             },
         );
 
-        let mutation =
-            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(entry, &schema)
+            .expect("conversion should succeed");
 
         // Partition key should have one column named "id"
         assert_eq!(mutation.partition_key.columns.len(), 1);
@@ -5106,8 +4618,8 @@ mod tests {
             },
         );
 
-        let mutation =
-            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(entry, &schema)
+            .expect("conversion should succeed");
 
         assert_eq!(mutation.timestamp_micros, 300);
         let cwt = mutation
@@ -5166,8 +4678,8 @@ mod tests {
             },
         );
 
-        let mutation =
-            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(entry, &schema)
+            .expect("conversion should succeed");
         assert!(
             mutation.cell_write_timestamps.is_none(),
             "single-writetime row must not record any per-cell overrides"
@@ -5208,8 +4720,8 @@ mod tests {
             },
         );
 
-        let mutation =
-            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(entry, &schema)
+            .expect("conversion should succeed");
 
         assert_eq!(mutation.operations.len(), 1);
         assert!(
@@ -6287,7 +5799,7 @@ mod merge_property_tests {
                 }).collect();
 
                 // Drive the real merger.
-                let merger = KWayMerger {
+                let mut merger = KWayMerger {
                     runs: vec![],
                     heap: std::collections::BinaryHeap::new(),
                     current_partition: None,
@@ -6298,6 +5810,7 @@ mod merge_property_tests {
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
                     _egress_slot: None,
+    trace: NoTrace,
                 };
                 let real_merged = merger.merge_partition_rows(merge_entries.clone())
                     .expect("merge_partition_rows must not fail");
@@ -6415,7 +5928,7 @@ mod merge_property_tests {
                     },
                 );
 
-                let merger = KWayMerger {
+                let mut merger = KWayMerger {
                     runs: vec![],
                     heap: std::collections::BinaryHeap::new(),
                     current_partition: None,
@@ -6426,6 +5939,7 @@ mod merge_property_tests {
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
                     _egress_slot: None,
+    trace: NoTrace,
                 };
                 let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
                     .expect("merge_partition_rows must not fail");
@@ -6474,7 +5988,7 @@ mod streaming_channel_tests;
 //
 // ADDITIVE TEST MODULE — flagged per the issue brief. This module is `#[cfg(test)]`
 // only and adds NO production code. It exists because the authoritative reconcile
-// function `KWayMerger::reconcile_cluster` and the reader→merge adapter
+// function `KWayMerger::<NoTrace>::reconcile_cluster` and the reader→merge adapter
 // `SSTableRowIteratorAdapter::value_to_row_data` are private, so the gating
 // behaviour can only be value-asserted from inside the `merge` module.
 //
@@ -6521,7 +6035,7 @@ mod issue_823_complex_column_merge {
         let mut dropped = ::std::collections::HashMap::new();
         dropped.insert("legacy".to_string(), 150); // cell ts=100 <= 150
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped, None)
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(None, vec![row], &dropped, None)
             .expect("a live row must be emitted (name survives)");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
@@ -6538,7 +6052,7 @@ mod issue_823_complex_column_merge {
         let mut dropped = ::std::collections::HashMap::new();
         dropped.insert("legacy".to_string(), 150); // cell ts=200 > 150
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped, None)
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(None, vec![row], &dropped, None)
             .expect("a live row must be emitted (cell post-dates the drop)");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
@@ -6557,7 +6071,7 @@ mod issue_823_complex_column_merge {
         dropped.insert("legacy".to_string(), 150);
 
         assert!(
-            KWayMerger::reconcile_cluster(None, vec![row], &dropped, None).is_none(),
+            KWayMerger::<NoTrace>::reconcile_cluster(None, vec![row], &dropped, None).is_none(),
             "cell at exactly drop_time must be discarded, leaving no surviving cells"
         );
     }
@@ -6575,7 +6089,7 @@ mod issue_823_complex_column_merge {
         dropped.insert("b".to_string(), 200);
 
         assert!(
-            KWayMerger::reconcile_cluster(None, vec![row], &dropped, None).is_none(),
+            KWayMerger::<NoTrace>::reconcile_cluster(None, vec![row], &dropped, None).is_none(),
             "a row whose every cell is a dropped-column cell emits nothing"
         );
     }
@@ -6591,7 +6105,7 @@ mod issue_823_complex_column_merge {
                 scalar_cell("legacy", "stale", 100),
             ],
         );
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![row],
             &::std::collections::HashMap::new(),
@@ -6623,7 +6137,7 @@ mod issue_823_complex_column_merge {
         let mut dropped = ::std::collections::HashMap::new();
         dropped.insert("legacy".to_string(), 150);
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped, None)
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(None, vec![row], &dropped, None)
             .expect("name survives, so a live row must be emitted");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
@@ -6682,7 +6196,7 @@ mod issue_823_complex_column_merge {
             }],
         );
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![newer, older],
             &::std::collections::HashMap::new(),
@@ -6762,7 +6276,7 @@ mod issue_823_complex_column_merge {
             }],
         );
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![newer, older],
             &::std::collections::HashMap::new(),
@@ -6880,7 +6394,7 @@ mod issue_823_complex_column_merge {
             }],
         );
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![row_tomb, cell_tomb],
             &::std::collections::HashMap::new(),
@@ -6960,7 +6474,7 @@ mod issue_823_complex_column_merge {
         );
         let tombstone = live(1, TS, vec![cell_tombstone(TS, 1_000)]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![expiring, tombstone],
             &::std::collections::HashMap::new(),
@@ -6974,7 +6488,7 @@ mod issue_823_complex_column_merge {
         };
         assert_eq!(cells.len(), 1, "single column `v`");
         assert!(
-            KWayMerger::is_cell_tombstone(&cells[0]),
+            KWayMerger::<NoTrace>::is_cell_tombstone(&cells[0]),
             "at equal ts the cell TOMBSTONE must win over the expiring cell \
              (before any localDeletionTime compare); got {:?}",
             cells[0].value
@@ -6998,7 +6512,7 @@ mod issue_823_complex_column_merge {
             vec![expiring_cell("resurrected-if-buggy", TS, 3600, 9_999)],
         );
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone, expiring],
             &::std::collections::HashMap::new(),
@@ -7012,7 +6526,7 @@ mod issue_823_complex_column_merge {
         };
         assert_eq!(cells.len(), 1, "single column `v`");
         assert!(
-            KWayMerger::is_cell_tombstone(&cells[0]),
+            KWayMerger::<NoTrace>::is_cell_tombstone(&cells[0]),
             "at equal ts the cell TOMBSTONE must win regardless of source order; \
              got {:?}",
             cells[0].value
@@ -7027,7 +6541,7 @@ mod issue_823_complex_column_merge {
         let tombstone = live(0, 100, vec![cell_tombstone(100, 1_000)]);
         let expiring = live(1, 200, vec![expiring_cell("survives", 200, 3600, 9_999)]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone, expiring],
             &::std::collections::HashMap::new(),
@@ -7041,7 +6555,7 @@ mod issue_823_complex_column_merge {
         };
         assert_eq!(cells.len(), 1, "single column `v`");
         assert!(
-            !KWayMerger::is_cell_tombstone(&cells[0]),
+            !KWayMerger::<NoTrace>::is_cell_tombstone(&cells[0]),
             "a strictly NEWER expiring cell (ts=200) beats the older tombstone \
              (ts=100); the deletion tie-break only fires at equal ts"
         );
@@ -7176,7 +6690,7 @@ mod issue_886_merge_entry_enrichment {
                 marked_for_delete_at: 1234,
                 local_deletion_time: 1_700_000_000,
             }]);
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![live],
             &::std::collections::HashMap::new(),
@@ -7216,7 +6730,7 @@ mod issue_886_merge_entry_enrichment {
 
         // Plumbing-only: the covered cell (ts=1000 < range ts=5000) STILL
         // survives reconcile because range deletions are not yet applied.
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![entry],
             &::std::collections::HashMap::new(),
@@ -7290,7 +6804,7 @@ mod issue_886_merge_entry_enrichment {
         .with_complex_deletions(vec![complex_a.clone(), complex_b.clone()])
         .with_range_deletion(range_high.clone());
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![row0, row1],
             &::std::collections::HashMap::new(),
@@ -7334,7 +6848,7 @@ mod issue_886_merge_entry_enrichment {
                 cells: vec![CellData::new("w".to_string(), Value::Integer(1), 1000)],
             },
         );
-        let plain = KWayMerger::reconcile_cluster(
+        let plain = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![plain0, plain1],
             &::std::collections::HashMap::new(),
@@ -7371,7 +6885,7 @@ mod issue_886_merge_entry_enrichment {
         )
         .with_complex_deletions(vec![complex.clone()]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![row],
             &::std::collections::HashMap::new(),
@@ -7408,7 +6922,7 @@ mod issue_886_merge_entry_enrichment {
             .with_complex_deletions(vec![complex.clone()])
             .with_range_deletion(range.clone());
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![row],
             &::std::collections::HashMap::new(),
@@ -7438,7 +6952,7 @@ mod issue_886_merge_entry_enrichment {
     fn reconcile_cluster_empty_live_without_metadata_yields_none() {
         let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] });
         assert!(
-            KWayMerger::reconcile_cluster(
+            KWayMerger::<NoTrace>::reconcile_cluster(
                 None,
                 vec![row],
                 &::std::collections::HashMap::new(),
@@ -7502,7 +7016,7 @@ mod issue_886_merge_entry_enrichment {
 
         // The complex-deletion-only entry survives reconciliation AND stays
         // writer-visible end-to-end.
-        let reconciled = KWayMerger::reconcile_cluster(
+        let reconciled = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![complex_only],
             &::std::collections::HashMap::new(),
@@ -7741,7 +7255,7 @@ mod issue_899_per_element_merge {
             },
         );
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![newer, older],
             &::std::collections::HashMap::new(),
@@ -7814,7 +7328,7 @@ mod issue_899_per_element_merge {
             local_deletion_time: 1_700_000_000,
         }]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![new_el, old_el],
             &::std::collections::HashMap::new(),
@@ -7909,7 +7423,7 @@ mod issue_899_per_element_merge {
             local_deletion_time: 1_700_000_000,
         }]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![survivor, covered],
             &::std::collections::HashMap::new(),
@@ -8023,7 +7537,7 @@ mod issue_899_per_element_merge {
             local_deletion_time: 1_700_000_200,
         }]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![strong, weak],
             &::std::collections::HashMap::new(),
@@ -8148,7 +7662,7 @@ mod issue_899_per_element_merge {
             local_deletion_time: 1_700_000_000,
         }]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![row_tomb, carrier],
             &::std::collections::HashMap::new(),
@@ -8221,7 +7735,7 @@ mod issue_899_per_element_merge {
             local_deletion_time: 1_700_000_000,
         }]);
 
-        let mutation = KWayMerger::merge_entry_to_mutation(tomb_entry, &schema)
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(tomb_entry, &schema)
             .expect("conversion should succeed");
 
         let has_delete_row = mutation
@@ -8297,7 +7811,7 @@ mod issue_899_per_element_merge {
                 local_deletion_time: 1_700_000_000,
             }]);
 
-            let mutation = KWayMerger::merge_entry_to_mutation(entry, &schema)
+            let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(entry, &schema)
                 .expect("conversion should succeed");
 
             assert!(
@@ -8425,6 +7939,7 @@ mod issue_822_merge_ordering_semantics {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         }
     }
 
@@ -8485,7 +8000,7 @@ mod issue_822_merge_ordering_semantics {
     #[test]
     fn issue_10_desc_empty_vs_valued_in_merge_output_order() {
         let schema = schema_one_clustering("ck", "text", ClusteringOrder::Desc);
-        let merger = empty_merger(schema);
+        let mut merger = empty_merger(schema);
 
         let pk = DecoratedKey::new(7, vec![0, 0, 0, 7]);
         const TS: i64 = 1_700_000_000_000_000;
@@ -8547,7 +8062,7 @@ mod issue_822_merge_ordering_semantics {
     #[test]
     fn issue_13_tombstone_beats_expiring_at_equal_ts() {
         let schema = schema_one_clustering("ck", "text", ClusteringOrder::Asc);
-        let merger = empty_merger(schema);
+        let mut merger = empty_merger(schema);
 
         let pk = DecoratedKey::new(11, vec![0, 0, 0, 11]);
         const TS: i64 = 1_700_000_000_000_000;
@@ -8640,7 +8155,7 @@ mod issue_822_merge_ordering_semantics {
             .expect("column v must survive (as a tombstone)");
 
         assert!(
-            KWayMerger::is_cell_tombstone(v_cell),
+            KWayMerger::<NoTrace>::is_cell_tombstone(v_cell),
             "At equal ts the cell tombstone must beat the expiring (TTL) cell, even \
              though the expiring cell is in the newer file (run 0). Got a live value \
              => tombstone-vs-expiring tie reverted to recency (#13/#3 regression)."
@@ -8657,7 +8172,7 @@ mod issue_822_merge_ordering_semantics {
     #[test]
     fn issue_13_tombstone_beats_expiring_irrespective_of_run_index() {
         let schema = schema_one_clustering("ck", "text", ClusteringOrder::Asc);
-        let merger = empty_merger(schema);
+        let mut merger = empty_merger(schema);
 
         let pk = DecoratedKey::new(12, vec![0, 0, 0, 12]);
         const TS: i64 = 1_700_000_000_000_000;
@@ -8737,7 +8252,7 @@ mod issue_822_merge_ordering_semantics {
         };
         let v_cell = cells.iter().find(|c| c.column == "v").expect("v survives");
         assert!(
-            KWayMerger::is_cell_tombstone(v_cell),
+            KWayMerger::<NoTrace>::is_cell_tombstone(v_cell),
             "Tombstone must win the equal-ts tie over an expiring cell regardless of \
              run_index ordering."
         );
@@ -9029,7 +8544,7 @@ mod issue_822_merge_ordering_semantics {
             is_deleted: false,
             has_empty_value: false,
         };
-        assert!(KWayMerger::is_cell_tombstone(&tomb));
+        assert!(KWayMerger::<NoTrace>::is_cell_tombstone(&tomb));
         assert!(
             tomb.ttl.is_none(),
             "A cell tombstone must not carry a TTL (precondition for flag exclusivity)."
@@ -9047,7 +8562,7 @@ mod issue_822_merge_ordering_semantics {
             has_empty_value: false,
         };
         assert!(
-            !KWayMerger::is_cell_tombstone(&expiring),
+            !KWayMerger::<NoTrace>::is_cell_tombstone(&expiring),
             "An expiring (TTL) cell is LIVE, not a tombstone."
         );
         assert!(expiring.ttl.is_some(), "Expiring cell carries a TTL.");
@@ -9324,6 +8839,7 @@ mod issue_886_empty_partition_skip {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         }
     }
 
@@ -9613,7 +9129,7 @@ mod issue_912_row_tombstone_clustering_identity {
             "two distinct row tombstones must land in distinct buckets (#912)"
         );
 
-        let merger = KWayMerger {
+        let mut merger = KWayMerger {
             runs: vec![],
             heap: std::collections::BinaryHeap::new(),
             current_partition: None,
@@ -9624,6 +9140,7 @@ mod issue_912_row_tombstone_clustering_identity {
             schema: schema.clone(),
             schema_arc: std::sync::Arc::new(schema.clone()),
             _egress_slot: None,
+            trace: NoTrace,
         };
         let merged = merger
             .merge_partition_rows(vec![e5, e9])
@@ -9699,7 +9216,7 @@ mod issue_873_preserve_row_tombstone_ldt {
         let deletion_time = 1_000_000_000_000_000i64; // micros
         let source_ldt = 1_700_000_000i32; // seconds (wall clock)
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, deletion_time, source_ldt)],
             &HashMap::new(),
@@ -9732,8 +9249,13 @@ mod issue_873_preserve_row_tombstone_ldt {
         let older = tombstone_entry(0, 100_000_000, 1_900_000_000);
         let newer = tombstone_entry(1, 200_000_000, 1_500_000_000);
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![older, newer], &HashMap::new(), None)
-            .expect("a surviving row tombstone must be emitted");
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
+            None,
+            vec![older, newer],
+            &HashMap::new(),
+            None,
+        )
+        .expect("a surviving row tombstone must be emitted");
 
         match merged.row_data {
             RowData::Tombstone {
@@ -9759,7 +9281,7 @@ mod issue_873_preserve_row_tombstone_ldt {
         let deletion_time = 1_000_000_000_000_000i64;
         let source_ldt = 1_700_000_000i32;
 
-        let mutation = KWayMerger::merge_entry_to_mutation(
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(
             tombstone_entry(0, deletion_time, source_ldt),
             &schema,
         )
@@ -9794,7 +9316,7 @@ mod issue_873_preserve_row_tombstone_ldt {
         let schema = unclustered_schema();
         let deletion_time = 1_000_000_000_000_000i64;
 
-        let mutation = KWayMerger::merge_entry_to_mutation(
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(
             // ldt = 0 is the reader's "no LDT surfaced" sentinel, not a real delete.
             tombstone_entry(0, deletion_time, 0),
             &schema,
@@ -9827,8 +9349,8 @@ mod issue_873_preserve_row_tombstone_ldt {
             },
         );
 
-        let mutation =
-            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(entry, &schema)
+            .expect("conversion should succeed");
         assert_eq!(
             mutation.local_deletion_time, None,
             "a live row must not pin an explicit LDT"
@@ -9860,8 +9382,9 @@ mod issue_873_preserve_row_tombstone_ldt {
             },
         );
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![tomb, live], &HashMap::new(), None)
-            .expect("a live coexistence row must be emitted");
+        let merged =
+            KWayMerger::<NoTrace>::reconcile_cluster(None, vec![tomb, live], &HashMap::new(), None)
+                .expect("a live coexistence row must be emitted");
 
         match &merged.row_data {
             RowData::Live { cells } => {
@@ -9910,9 +9433,13 @@ mod issue_873_preserve_row_tombstone_ldt {
             },
         );
 
-        let merged =
-            KWayMerger::reconcile_cluster(None, vec![tomb, older, newer], &HashMap::new(), None)
-                .expect("a live coexistence row must be emitted");
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
+            None,
+            vec![tomb, older, newer],
+            &HashMap::new(),
+            None,
+        )
+        .expect("a live coexistence row must be emitted");
 
         match &merged.row_data {
             RowData::Live { cells } => {
@@ -9955,8 +9482,8 @@ mod issue_873_preserve_row_tombstone_ldt {
         )
         .with_row_deletion(deletion_time, source_ldt);
 
-        let mutation =
-            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        let mutation = KWayMerger::<NoTrace>::merge_entry_to_mutation(entry, &schema)
+            .expect("conversion should succeed");
 
         assert_eq!(
             mutation.row_tombstone,
@@ -10018,6 +9545,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             schema: schema.clone(),
             schema_arc: std::sync::Arc::new(schema.clone()),
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -10175,7 +9703,7 @@ mod issue_845_gc_grace_purge {
 
         // Older than gcBefore → purgeable → the marker is dropped, and with no
         // surviving data + no row tombstone the whole entry vanishes.
-        let purged = KWayMerger::reconcile_cluster(
+        let purged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![make((GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10188,7 +9716,7 @@ mod issue_845_gc_grace_purge {
         );
 
         // Within grace (strictly newer) → retained.
-        let retained = KWayMerger::reconcile_cluster(
+        let retained = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![make((GC_BEFORE + 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10202,7 +9730,7 @@ mod issue_845_gc_grace_purge {
         );
 
         // Boundary: LDT == gcBefore is RETAINED (only `< gcBefore` purges).
-        let boundary = KWayMerger::reconcile_cluster(
+        let boundary = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![make(GC_BEFORE as i32)],
             &::std::collections::HashMap::new(),
@@ -10224,7 +9752,7 @@ mod issue_845_gc_grace_purge {
         // deletion_time (micros) chosen so it does not equal LDT (seconds).
         let dt = 1_000_000_000_000_000i64;
 
-        let older = KWayMerger::reconcile_cluster(
+        let older = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, (GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10235,7 +9763,7 @@ mod issue_845_gc_grace_purge {
             "a row tombstone older than gcBefore must be purged (nothing emitted)"
         );
 
-        let within = KWayMerger::reconcile_cluster(
+        let within = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, (GC_BEFORE + 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10247,7 +9775,7 @@ mod issue_845_gc_grace_purge {
             "a within-grace row tombstone must survive"
         );
 
-        let boundary = KWayMerger::reconcile_cluster(
+        let boundary = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, GC_BEFORE as i32)],
             &::std::collections::HashMap::new(),
@@ -10271,7 +9799,7 @@ mod issue_845_gc_grace_purge {
         let keep = CellData::new("name".to_string(), Value::text("alive".to_string()), 500);
 
         let count_tombstone_cells = |ldt: i32| -> usize {
-            let merged = KWayMerger::reconcile_cluster(
+            let merged = KWayMerger::<NoTrace>::reconcile_cluster(
                 None,
                 vec![live(0, 500, vec![keep.clone(), cell_tombstone(100, ldt)])],
                 &::std::collections::HashMap::new(),
@@ -10281,7 +9809,7 @@ mod issue_845_gc_grace_purge {
             match merged.row_data {
                 RowData::Live { cells } => cells
                     .iter()
-                    .filter(|c| KWayMerger::is_cell_tombstone(c))
+                    .filter(|c| KWayMerger::<NoTrace>::is_cell_tombstone(c))
                     .count(),
                 other => panic!("expected Live, got {other:?}"),
             }
@@ -10310,7 +9838,7 @@ mod issue_845_gc_grace_purge {
     #[test]
     fn issue_845_no_gc_before_retains_everything() {
         let dt = 1_000_000_000_000_000i64;
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, 1)],
             &::std::collections::HashMap::new(),
@@ -10360,7 +9888,7 @@ mod issue_845_gc_grace_purge {
             local_deletion_time: (GC_BEFORE - 1) as i32,
         }]);
 
-        let merged = KWayMerger::reconcile_cluster(
+        let merged = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![entry],
             &::std::collections::HashMap::new(),
@@ -10470,7 +9998,7 @@ mod issue_845_gc_grace_purge {
 
         // (a) Row tombstone with the far-future LDT must be RETAINED.
         let dt = 1_000_000_000_000_000i64;
-        let row = KWayMerger::reconcile_cluster(
+        let row = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, future_ldt_bits)],
             &::std::collections::HashMap::new(),
@@ -10483,7 +10011,7 @@ mod issue_845_gc_grace_purge {
         );
 
         // (b) Complex-deletion marker with the far-future LDT must be RETAINED.
-        let complex = KWayMerger::reconcile_cluster(
+        let complex = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![
                 MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
@@ -10505,7 +10033,7 @@ mod issue_845_gc_grace_purge {
 
         // (c) Cell tombstone with the far-future LDT must be RETAINED.
         let keep = CellData::new("name".to_string(), Value::text("alive".to_string()), 500);
-        let cell = KWayMerger::reconcile_cluster(
+        let cell = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![live(
                 0,
@@ -10519,7 +10047,7 @@ mod issue_845_gc_grace_purge {
         let tombstone_cells = match cell.row_data {
             RowData::Live { cells } => cells
                 .iter()
-                .filter(|c| KWayMerger::is_cell_tombstone(c))
+                .filter(|c| KWayMerger::<NoTrace>::is_cell_tombstone(c))
                 .count(),
             other => panic!("expected Live, got {other:?}"),
         };
@@ -10530,7 +10058,7 @@ mod issue_845_gc_grace_purge {
 
         // Control: a genuinely ancient LDT (bit 31 clear, < gcBefore) IS purged,
         // proving the normalization did not disable purging wholesale.
-        let ancient = KWayMerger::reconcile_cluster(
+        let ancient = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, (GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10567,6 +10095,7 @@ mod issue_845_gc_grace_purge {
             purge_safe,
             max_purgeable_timestamp: None,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         // PARTIAL compaction (purge_safe = false): the purgeable row tombstone is
@@ -10623,6 +10152,7 @@ mod issue_845_gc_grace_purge {
             purge_safe,
             max_purgeable_timestamp: bound,
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         // A whole-partition range-tombstone CARRIER entry (issue #933): empty
@@ -10704,7 +10234,7 @@ mod issue_845_gc_grace_purge {
         let dt = 1_000_000_000_000_000i64;
 
         // LDT == 0 (unknown placeholder): RETAINED even though `0 < gcBefore`.
-        let unknown = KWayMerger::reconcile_cluster(
+        let unknown = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, 0)],
             &::std::collections::HashMap::new(),
@@ -10718,7 +10248,7 @@ mod issue_845_gc_grace_purge {
         );
 
         // A REAL, non-zero ancient LDT (< gcBefore) still purges.
-        let ancient = KWayMerger::reconcile_cluster(
+        let ancient = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, (GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10730,7 +10260,7 @@ mod issue_845_gc_grace_purge {
         );
 
         // Within-grace LDT (>= gcBefore) is retained.
-        let within = KWayMerger::reconcile_cluster(
+        let within = KWayMerger::<NoTrace>::reconcile_cluster(
             None,
             vec![tombstone_entry(0, dt, (GC_BEFORE + 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10769,7 +10299,7 @@ mod issue_845_gc_grace_purge {
         // Only non-key data is a purgeable (ancient LDT) cell tombstone on `v`.
         // After the gc purge the row has only the CK pseudo-cell left → it must
         // be recognized as purged-to-empty and emit NOTHING (no phantom live row).
-        let purged = KWayMerger::reconcile_cluster(
+        let purged = KWayMerger::<NoTrace>::reconcile_cluster(
             Some(ck.clone()),
             vec![make(vec![cell_tombstone(50, (GC_BEFORE - 1) as i32)])],
             &::std::collections::HashMap::new(),
@@ -10783,7 +10313,7 @@ mod issue_845_gc_grace_purge {
 
         // Control: a clustered row with REAL surviving non-key data still emits a
         // live row (the purge of the tombstone does not collapse a real row).
-        let kept = KWayMerger::reconcile_cluster(
+        let kept = KWayMerger::<NoTrace>::reconcile_cluster(
             Some(ck.clone()),
             vec![make(vec![
                 CellData::new("v".to_string(), Value::text("real".to_string()), 60),
@@ -10798,11 +10328,11 @@ mod issue_845_gc_grace_purge {
                 assert!(
                     cells
                         .iter()
-                        .any(|c| c.column == "v" && !KWayMerger::is_cell_tombstone(c)),
+                        .any(|c| c.column == "v" && !KWayMerger::<NoTrace>::is_cell_tombstone(c)),
                     "the real surviving `v` cell must remain in the emitted live row"
                 );
                 assert!(
-                    !cells.iter().any(KWayMerger::is_cell_tombstone),
+                    !cells.iter().any(KWayMerger::<NoTrace>::is_cell_tombstone),
                     "the purgeable cell tombstone must still be purged from the live row"
                 );
             }
@@ -10833,7 +10363,7 @@ mod issue_845_gc_grace_purge {
         const BOUND: i64 = 1_000_000_000_000_000;
         let mfda = BOUND - 1; // strictly older than every outside cell
 
-        let purged = KWayMerger::reconcile_cluster_with_overlap(
+        let purged = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![tombstone_entry(0, mfda, (GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10859,7 +10389,7 @@ mod issue_845_gc_grace_purge {
 
         // markedForDeleteAt strictly ABOVE the bound: outside data could be older
         // than the tombstone and thus shadowed → must retain.
-        let above = KWayMerger::reconcile_cluster_with_overlap(
+        let above = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![tombstone_entry(0, BOUND + 1, (GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10876,7 +10406,7 @@ mod issue_845_gc_grace_purge {
         // Boundary: markedForDeleteAt EXACTLY at the bound is retained — an outside
         // SSTable could hold a cell at exactly the bound that the tombstone would
         // shadow (`time < minTimestamp` is the purge predicate, so `==` retains).
-        let boundary = KWayMerger::reconcile_cluster_with_overlap(
+        let boundary = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![tombstone_entry(0, BOUND, (GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10898,7 +10428,7 @@ mod issue_845_gc_grace_purge {
         const GC_BEFORE: i64 = 1_700_000_000;
         const BOUND: i64 = 1_000_000_000_000_000;
 
-        let within = KWayMerger::reconcile_cluster_with_overlap(
+        let within = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![tombstone_entry(0, BOUND - 1, (GC_BEFORE + 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -10923,7 +10453,7 @@ mod issue_845_gc_grace_purge {
         const BOUND: i64 = 5_000;
 
         // Below the bound (and past grace) → purged from the surviving cells.
-        let purged = KWayMerger::reconcile_cluster_with_overlap(
+        let purged = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![live(
                 0,
@@ -10940,14 +10470,14 @@ mod issue_845_gc_grace_purge {
         .expect("the live `keep` cell keeps the row alive");
         match purged.row_data {
             RowData::Live { cells } => assert!(
-                !cells.iter().any(KWayMerger::is_cell_tombstone),
+                !cells.iter().any(KWayMerger::<NoTrace>::is_cell_tombstone),
                 "a cell tombstone below the overlap bound must be purged (#935)"
             ),
             other => panic!("expected Live row, got {other:?}"),
         }
 
         // At/above the bound → retained (could shadow an outside cell).
-        let retained = KWayMerger::reconcile_cluster_with_overlap(
+        let retained = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![live(
                 0,
@@ -10964,7 +10494,7 @@ mod issue_845_gc_grace_purge {
         .expect("the live `keep` cell keeps the row alive");
         match retained.row_data {
             RowData::Live { cells } => assert!(
-                cells.iter().any(KWayMerger::is_cell_tombstone),
+                cells.iter().any(KWayMerger::<NoTrace>::is_cell_tombstone),
                 "a cell tombstone at the overlap bound must be retained (#935)"
             ),
             other => panic!("expected Live row, got {other:?}"),
@@ -10987,7 +10517,7 @@ mod issue_845_gc_grace_purge {
         };
 
         // Below the bound and past grace → purged (nothing left to emit).
-        let purged = KWayMerger::reconcile_cluster_with_overlap(
+        let purged = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![make(BOUND - 1)],
             &::std::collections::HashMap::new(),
@@ -11000,7 +10530,7 @@ mod issue_845_gc_grace_purge {
         );
 
         // At the bound → retained as a metadata-only entry.
-        let retained = KWayMerger::reconcile_cluster_with_overlap(
+        let retained = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![make(BOUND)],
             &::std::collections::HashMap::new(),
@@ -11023,7 +10553,7 @@ mod issue_845_gc_grace_purge {
         const GC_BEFORE: i64 = 1_700_000_000;
         // A very large markedForDeleteAt that no realistic outside bound would
         // exceed still purges under the full-compaction +inf bound.
-        let purged = KWayMerger::reconcile_cluster_with_overlap(
+        let purged = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
             None,
             vec![tombstone_entry(0, i64::MAX - 1, (GC_BEFORE - 1) as i32)],
             &::std::collections::HashMap::new(),
@@ -11135,6 +10665,7 @@ mod issue_845_gc_grace_purge {
             schema: write_schema.clone(),
             schema_arc: std::sync::Arc::new(write_schema.clone()),
             _egress_slot: None,
+            trace: NoTrace,
         };
 
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -12055,7 +11586,7 @@ mod issue_959_range_tombstone_fixes {
                 ),
             ),
         ];
-        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+        KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut rts, &schema);
 
         assert_eq!(rts.len(), 3, "union splits into 3 disjoint segments");
         // [1, 2) @100
@@ -12074,10 +11605,10 @@ mod issue_959_range_tombstone_fixes {
         // Every emitted segment is a valid, well-ordered, non-overlapping range:
         // each end is >= its start and each start is > the previous end.
         for i in 0..rts.len() {
-            let s = KWayMerger::range_start_cut(&rts[i].1.start);
-            let e = KWayMerger::range_end_cut(&rts[i].1.end);
+            let s = KWayMerger::<NoTrace>::range_start_cut(&rts[i].1.start);
+            let e = KWayMerger::<NoTrace>::range_end_cut(&rts[i].1.end);
             assert_ne!(
-                KWayMerger::cut_cmp(&s, &e, &schema),
+                KWayMerger::<NoTrace>::cut_cmp(&s, &e, &schema),
                 Ordering::Greater,
                 "segment {i} start must not exceed its end"
             );
@@ -12086,9 +11617,9 @@ mod issue_959_range_tombstone_fixes {
                 // cut. Equality is fine and expected — an exclusive end and an
                 // inclusive start at the same value share one boundary cut while
                 // covering complementary value sets (e.g. `< 2` then `>= 2`).
-                let prev_e = KWayMerger::range_end_cut(&rts[i - 1].1.end);
+                let prev_e = KWayMerger::<NoTrace>::range_end_cut(&rts[i - 1].1.end);
                 assert_ne!(
-                    KWayMerger::cut_cmp(&prev_e, &s, &schema),
+                    KWayMerger::<NoTrace>::cut_cmp(&prev_e, &s, &schema),
                     Ordering::Greater,
                     "segment {i} must not overlap the previous segment"
                 );
@@ -12119,7 +11650,7 @@ mod issue_959_range_tombstone_fixes {
                 ),
             ),
         ];
-        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+        KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut rts, &schema);
         assert_eq!(rts.len(), 1);
         assert_eq!(rts[0].1.deletion_time, 200);
         assert_eq!(rts[0].1.start, ClusteringBound::Inclusive(ck(1)));
@@ -12148,7 +11679,7 @@ mod issue_959_range_tombstone_fixes {
                 ),
             ),
         ];
-        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+        KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut rts, &schema);
         assert_eq!(rts.len(), 1, "touching equal-deletion ranges coalesce");
         assert_eq!(rts[0].1.start, ClusteringBound::Inclusive(ck(1)));
         assert_eq!(rts[0].1.end, ClusteringBound::Inclusive(ck(5)));
@@ -12168,7 +11699,7 @@ mod issue_959_range_tombstone_fixes {
                 rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
             ),
         ];
-        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+        KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut rts, &schema);
         assert_eq!(rts.len(), 2);
         assert_ne!(rts[0].0.key, rts[1].0.key);
     }
@@ -12199,7 +11730,7 @@ mod issue_959_range_tombstone_fixes {
             rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
         )];
 
-        let out = KWayMerger::apply_range_shadowing(entry, &range, &schema)
+        let out = KWayMerger::<NoTrace>::apply_range_shadowing(entry, &range, &schema)
             .expect("a complex deletion newer than the range must survive");
         assert_eq!(
             out.complex_deletions.len(),
@@ -12238,7 +11769,7 @@ mod issue_959_range_tombstone_fixes {
         )];
 
         assert!(
-            KWayMerger::apply_range_shadowing(entry, &range, &schema).is_none(),
+            KWayMerger::<NoTrace>::apply_range_shadowing(entry, &range, &schema).is_none(),
             "an older complex deletion is subsumed; nothing survives"
         );
     }
@@ -12276,7 +11807,7 @@ mod issue_959_range_tombstone_fixes {
             rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
         )];
 
-        let out = KWayMerger::apply_range_shadowing(entry, &range, &schema)
+        let out = KWayMerger::<NoTrace>::apply_range_shadowing(entry, &range, &schema)
             .expect("a key-only live row newer than the range must survive");
         assert!(
             out.row_liveness.marker_live_at(1_000),
@@ -12306,7 +11837,7 @@ mod issue_959_range_tombstone_fixes {
             marker_timestamp: Some(200),
         });
 
-        let out = KWayMerger::apply_partition_shadowing(entry, Some((100, 0)))
+        let out = KWayMerger::<NoTrace>::apply_partition_shadowing(entry, Some((100, 0)))
             .expect("a key-only live row newer than the partition floor must survive");
         assert!(
             out.row_liveness.marker_live_at(1_000),
@@ -12342,7 +11873,7 @@ mod issue_959_range_tombstone_fixes {
             rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
         )];
         assert!(
-            KWayMerger::apply_range_shadowing(entry, &range, &schema).is_none(),
+            KWayMerger::<NoTrace>::apply_range_shadowing(entry, &range, &schema).is_none(),
             "a marker older than the covering range must not survive as a live row"
         );
     }

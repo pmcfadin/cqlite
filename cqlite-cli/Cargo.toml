@@ -232,6 +232,13 @@ name = "salvage_cli_tests"
 path = "tests/salvage_cli_tests.rs"
 required-features = ["write-support"]
 
+# Issue #4193: the explain command drives the traced write-engine point merge
+# and owns its process exit-code contract, so this target must use write support.
+[[test]]
+name = "explain_cli_tests"
+path = "tests/explain_cli_tests.rs"
+required-features = ["write-support"]
+
 # Issue #4196 (roborev L3): the publication-barrier cases drive the compiled
 # binary the same way salvage_cli_tests does, so they carry the same feature
 # requirement. Declared EXPLICITLY rather than left to cargo's auto-discovery:

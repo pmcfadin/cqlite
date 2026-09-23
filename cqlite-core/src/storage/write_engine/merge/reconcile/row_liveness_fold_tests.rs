@@ -12,7 +12,7 @@
 //! exercised end-to-end by the Flight parity lane, which SKIPs when fixtures are
 //! absent. A regression that dropped or mis-ordered the fold would then pass
 //! unnoticed in a clean checkout. These tests drive the production reconcile
-//! (`KWayMerger::reconcile_cluster_with_overlap`, the same kernel
+//! (`KWayMerger::<NoTrace>::reconcile_cluster_with_overlap`, the same kernel
 //! `merge_partition_rows` calls) so the fold is asserted directly.
 //!
 //! ## Oracle
@@ -26,6 +26,7 @@
 
 #![cfg(feature = "write-support")]
 
+use super::super::trace::NoTrace;
 use super::super::{CellData, KWayMerger, MergeEntry, RowData};
 use crate::storage::sstable::reader::compaction_row::RowLiveness;
 use crate::storage::write_engine::mutation::DecoratedKey;
@@ -78,7 +79,7 @@ fn ttl_marker(ts: i64, expiry: i64) -> RowLiveness {
 /// Reconcile the two entries through the production kernel and return the
 /// emitted entry's folded `row_liveness`.
 fn fold(entries: Vec<MergeEntry>) -> RowLiveness {
-    let out = KWayMerger::reconcile_cluster_with_overlap(
+    let out = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap(
         None,
         entries,
         &HashMap::new(),

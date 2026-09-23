@@ -18,6 +18,7 @@
 //! `paths` list, identical to the full-scan merger, so reconciliation ties break
 //! the same way.
 
+use super::trace::{NoTrace, ProbeOutcome as TraceProbeOutcome, TraceSink};
 use super::{
     egress_budget, KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter,
 };
@@ -92,6 +93,7 @@ impl KWayMerger {
             // attach the matching slot guard via `with_egress_slot`. A merger
             // built directly from pre-supplied runs registers no slot.
             _egress_slot: None,
+            trace: NoTrace,
         })
     }
 }
@@ -266,6 +268,50 @@ pub fn build_single_partition_merger_with_registry(
     udt_registry: Option<&UdtRegistry>,
     scan_cancel: ScanCancel,
 ) -> Result<Option<KWayMerger>> {
+    build_single_partition_merger_with_registry_and_sink(
+        paths,
+        keys,
+        schema,
+        udt_registry,
+        scan_cancel,
+        NoTrace,
+    )
+}
+
+/// Traced counterpart of [`build_single_partition_merger`].  Probe outcomes
+/// are recorded while the candidates are still in their authoritative path
+/// order, before absent candidates are pruned from the run list.  This keeps
+/// `run_index` equal to the caller's generation list even when a generation
+/// contributes no `SSTableRowIterator`.
+pub fn build_single_partition_merger_with_trace<S: TraceSink>(
+    paths: Vec<PathBuf>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    scan_cancel: ScanCancel,
+    sink: S,
+) -> Result<Option<KWayMerger<S>>> {
+    build_single_partition_merger_with_registry_and_sink(
+        paths,
+        keys,
+        schema,
+        None,
+        scan_cancel,
+        sink,
+    )
+}
+
+/// Shared path-builder implementation.  The public untraced wrapper passes a
+/// `NoTrace`; the explain path passes its caller-owned sink.  Probe failures
+/// return before the sink can escape, so a failed build cannot expose a
+/// partially populated trail.
+fn build_single_partition_merger_with_registry_and_sink<S: TraceSink>(
+    paths: Vec<PathBuf>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    udt_registry: Option<&UdtRegistry>,
+    scan_cancel: ScanCancel,
+    mut trace: S,
+) -> Result<Option<KWayMerger<S>>> {
     schema.validate_dropped_columns()?;
     if keys.is_empty() {
         return Ok(None);
@@ -322,6 +368,14 @@ pub fn build_single_partition_merger_with_registry(
             collect,
         )?;
         fold_size_notes(&mut weights, &notes);
+        trace.generation_probe(
+            run_index,
+            match &probe {
+                PathProbe::Empty => TraceProbeOutcome::Absent,
+                PathProbe::Seeked(_) => TraceProbeOutcome::Hit,
+                PathProbe::NeedsScan => TraceProbeOutcome::Scanned,
+            },
+        );
         match probe {
             PathProbe::Empty => {
                 // Pruned / absent for every key. No run.
@@ -398,10 +452,11 @@ pub fn build_single_partition_merger_with_registry(
     let merger = KWayMerger::from_row_iterators(runs, schema)?;
     // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened;
     // an all-`Seeked` (channel-less) point read registers no slot.
-    Ok(Some(match egress {
+    let merger = match egress {
         Some((_, guard)) => merger.with_egress_slot(guard),
         None => merger,
-    }))
+    };
+    Ok(Some(merger.with_trace_sink(trace)))
 }
 
 /// Reader-based analogue of [`build_single_partition_merger`] (issue #2346):

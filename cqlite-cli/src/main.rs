@@ -110,6 +110,40 @@ async fn run_main() -> Result<()> {
         return commands::dispatch_salvage(cli.schema.as_deref(), args).await;
     }
 
+    // `explain` is a read-only forensic surface over the traced point-read
+    // merger. Resolve and render it before Database/ingestion initialization so
+    // the command cannot accidentally mutate or depend on a local DB file.
+    if let Some(Commands::Explain {
+        table,
+        partition_key,
+        clustering,
+        now,
+        out,
+    }) = &cli.command
+    {
+        let effective_format = out.unwrap_or_else(|| match cli.out {
+            Some(OutputMode::Table) => cli::OutputFormat::Table,
+            Some(OutputMode::Json) => cli::OutputFormat::Json,
+            Some(OutputMode::Csv) => cli::OutputFormat::Csv,
+            Some(OutputMode::Parquet) => cli::OutputFormat::Parquet,
+            None => cli.format,
+        });
+        return commands::explain::execute_explain_command(
+            cli.schema.as_deref(),
+            cli.data_dir.as_deref(),
+            cli.dataset.as_deref(),
+            table,
+            partition_key,
+            clustering,
+            now.as_deref(),
+            effective_format,
+            cli.output.as_deref(),
+            cli.overwrite,
+            &config,
+        )
+        .await;
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
@@ -879,6 +913,10 @@ async fn run_main() -> Result<()> {
                 &output_config,
             )
             .await
+        }
+        Some(Commands::Explain { .. }) => {
+            // Handled by the short-circuit before database initialization.
+            unreachable!("Commands::Explain is dispatched before database initialization")
         }
         Some(Commands::Import {
             file,

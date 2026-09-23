@@ -1,6 +1,6 @@
 //! Clustering-group reconciliation kernel (issue #945 decomposition).
 //!
-//! `KWayMerger::reconcile_cluster_with_overlap_counted` used to be a single
+//! `KWayMerger::<NoTrace>::reconcile_cluster_with_overlap_counted` used to be a single
 //! ~470-line function. This module hosts the same logic decomposed into named,
 //! separately testable steps threaded through a [`ReconcileState`] accumulator.
 //! The orchestrator in `mod.rs` calls the steps **in a fixed, parity-load-bearing
@@ -32,12 +32,14 @@
 //! 7. [`build`](ReconcileState::build) — Step 4: phantom-row guard + emit the
 //!    merged `MergeEntry`.
 
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey, RangeTombstone};
 use crate::storage::write_engine::reconcile_rules;
 
+use super::trace::{
+    CellDecision, DecidedBy, NoTrace, TombstoneKind, TombstoneRecord, TraceSink, Verdict,
+};
 use super::{CellData, ComplexDeletion, KWayMerger, MergeEntry, PurgeCounts, RowData};
 
 // Issue #1537: parity coverage that TTL expiry applies to complex/collection/UDT
@@ -56,7 +58,15 @@ mod row_liveness_fold_tests;
 /// Per-cell reconcile key: `(column, cell_path)` so each element of a multi-cell
 /// column reconciles independently (epic #899). Simple cells have
 /// `cell_path == None`.
-type CellKey = (String, Option<Vec<u8>>);
+pub(super) type CellKey = (String, Option<Vec<u8>>);
+
+/// Trace-only source metadata that must survive the reconciled `MergeEntry`
+/// boundary. `MergeEntry` intentionally stays unchanged; the outer range and
+/// partition shadowing stages still need the original per-cell generation when
+/// they emit the final winner/loser records.
+pub(super) struct ReconcileTraceMetadata {
+    pub(super) winner_runs: Option<HashMap<CellKey, usize>>,
+}
 
 /// In-flight working set for reconciling one clustering-key group.
 ///
@@ -72,7 +82,7 @@ type CellKey = (String, Option<Vec<u8>>);
 ///   clustered row whose only non-key data is a purgeable cell tombstone is
 ///   recognized as data-less and emits nothing instead of a phantom key-only
 ///   live row (#921 finding 3).
-pub(super) struct ReconcileState {
+pub(super) struct ReconcileState<S: TraceSink = NoTrace> {
     /// Clustering key shared by every entry in the group (carry-through).
     clustering_key: Option<ClusteringKey>,
     /// Partition key, taken from the first entry seen.
@@ -103,11 +113,39 @@ pub(super) struct ReconcileState {
     /// (issue #2374/#2789), carry-only for the read path (Flight `do_get` / cross-
     /// gen read merge). Folded so the latest-expiry / live-forever marker wins.
     row_liveness: crate::storage::sstable::reader::compaction_row::RowLiveness,
+    /// Source generation for the effective row tombstone, when one exists.
+    row_del_run_index: Option<usize>,
+    /// Source generation for current cell winners. This map is allocated only
+    /// for an enabled sink; the default no-trace state retains the old shape's
+    /// hot-path allocations.
+    winner_runs: Option<HashMap<CellKey, usize>>,
+    /// Source generation and timestamp for each active complex deletion. This
+    /// is trace-only because the carried `ComplexDeletion` model predates the
+    /// explain surface and intentionally has no run identity field.
+    complex_deletion_sources: Option<HashMap<String, (i64, usize)>>,
+    /// Cells already assigned a terminal trace verdict.
+    emitted_cells: Option<HashSet<(CellKey, usize)>>,
+    trace: S,
+    trace_gc_before_secs: Option<i64>,
+    trace_now_secs: Option<i64>,
 }
 
-impl ReconcileState {
+impl ReconcileState<NoTrace> {
     /// Initialize an empty accumulator for the group sharing `clustering_key`.
+    #[allow(dead_code)]
     pub(super) fn new(clustering_key: Option<ClusteringKey>) -> Self {
+        Self::with_trace(clustering_key, NoTrace, None, None)
+    }
+}
+
+impl<S: TraceSink> ReconcileState<S> {
+    /// Initialize an accumulator with a statically-dispatched decision sink.
+    pub(super) fn with_trace(
+        clustering_key: Option<ClusteringKey>,
+        trace: S,
+        trace_gc_before_secs: Option<i64>,
+        trace_now_secs: Option<i64>,
+    ) -> Self {
         Self {
             clustering_key,
             key: None,
@@ -122,7 +160,58 @@ impl ReconcileState {
             surviving: Vec::new(),
             had_data_before: false,
             row_liveness: crate::storage::sstable::reader::compaction_row::RowLiveness::default(),
+            row_del_run_index: None,
+            winner_runs: S::ENABLED.then(HashMap::new),
+            complex_deletion_sources: S::ENABLED.then(HashMap::new),
+            emitted_cells: S::ENABLED.then(HashSet::new),
+            trace,
+            trace_gc_before_secs,
+            trace_now_secs,
         }
+    }
+
+    #[inline]
+    fn emit_cell(
+        &mut self,
+        cell: &CellData,
+        run_index: usize,
+        verdict: Verdict,
+        decided_by: DecidedBy,
+    ) {
+        if !S::ENABLED {
+            return;
+        }
+        let key = (cell.column.clone(), cell.cell_path.clone());
+        if let Some(emitted) = &mut self.emitted_cells {
+            if !emitted.insert((key, run_index)) {
+                return;
+            }
+        }
+        self.trace.cell(CellDecision {
+            run_index,
+            clustering: self.clustering_key.clone(),
+            column: cell.column.clone(),
+            value: (!KWayMerger::<NoTrace>::is_cell_tombstone(cell) && !cell.is_deleted)
+                .then(|| cell.value.clone()),
+            writetime: cell.timestamp,
+            ttl: cell.ttl.and_then(|ttl| i32::try_from(ttl).ok()),
+            expires_at: cell.local_deletion_time.map(|ldt| i64::from(ldt as u32)),
+            verdict,
+            decided_by,
+        });
+    }
+
+    #[inline]
+    fn emit_tombstone(&mut self, tombstone: TombstoneRecord) {
+        if S::ENABLED {
+            self.trace.tombstone(tombstone);
+        }
+    }
+
+    #[inline]
+    fn tombstone_droppable(&self, ldt: i32) -> bool {
+        self.trace_gc_before_secs
+            .is_some_and(|gc| i64::from(ldt as u32) < gc)
     }
 
     /// True once an input entry has been folded (i.e. the group is non-empty).
@@ -148,12 +237,63 @@ impl ReconcileState {
             }
             self.run_index = self.run_index.min(entry.run_index);
 
+            if let Some((deletion_time, local_deletion_time)) = entry.partition_deletion {
+                self.emit_tombstone(TombstoneRecord {
+                    kind: TombstoneKind::Partition,
+                    run_index: entry.run_index,
+                    clustering: None,
+                    column: None,
+                    deletion_time,
+                    local_deletion_time,
+                    range_start: None,
+                    range_end: None,
+                    droppable_at_now: self.tombstone_droppable(local_deletion_time),
+                });
+            }
+            if let Some(range) = &entry.range_deletion {
+                self.emit_tombstone(TombstoneRecord {
+                    kind: TombstoneKind::Range,
+                    run_index: entry.run_index,
+                    clustering: entry.clustering_key.clone(),
+                    column: None,
+                    deletion_time: range.deletion_time,
+                    local_deletion_time: range.local_deletion_time,
+                    range_start: Some(range.start.clone()),
+                    range_end: Some(range.end.clone()),
+                    droppable_at_now: self.tombstone_droppable(range.local_deletion_time),
+                });
+            }
+            for deletion in &entry.complex_deletions {
+                self.emit_tombstone(TombstoneRecord {
+                    kind: TombstoneKind::Collection,
+                    run_index: entry.run_index,
+                    clustering: entry.clustering_key.clone(),
+                    column: Some(deletion.column.clone()),
+                    deletion_time: deletion.marked_for_delete_at,
+                    local_deletion_time: deletion.local_deletion_time,
+                    range_start: None,
+                    range_end: None,
+                    droppable_at_now: self.tombstone_droppable(deletion.local_deletion_time),
+                });
+            }
+
             // Issue #2374/#2789: fold the row-marker liveness across generations
             // (latest-expiry / live-forever wins) so the read path can decide
             // row visibility. Carry-only — never a write-path decision.
             self.row_liveness = self.row_liveness.merge(entry.row_liveness);
 
             for cd in &entry.complex_deletions {
+                if let Some(sources) = &mut self.complex_deletion_sources {
+                    let replace = sources
+                        .get(&cd.column)
+                        .is_none_or(|(timestamp, _)| cd.marked_for_delete_at > *timestamp);
+                    if replace {
+                        sources.insert(
+                            cd.column.clone(),
+                            (cd.marked_for_delete_at, entry.run_index),
+                        );
+                    }
+                }
                 if !self.complex_deletions.contains(cd) {
                     self.complex_deletions.push(cd.clone());
                 }
@@ -175,9 +315,21 @@ impl ReconcileState {
             // it sets the new max so the rebuilt deletion preserves its
             // wall-clock `localDeletionTime` (#873).
             if let Some((del_ts, del_ldt)) = entry.row_deletion {
+                self.emit_tombstone(TombstoneRecord {
+                    kind: TombstoneKind::Row,
+                    run_index: entry.run_index,
+                    clustering: entry.clustering_key.clone(),
+                    column: None,
+                    deletion_time: del_ts,
+                    local_deletion_time: del_ldt,
+                    range_start: None,
+                    range_end: None,
+                    droppable_at_now: self.tombstone_droppable(del_ldt),
+                });
                 if self.row_del.is_none_or(|d| del_ts > d) {
                     self.row_del = Some(del_ts);
                     self.row_del_ldt = del_ldt;
+                    self.row_del_run_index = Some(entry.run_index);
                 }
             }
 
@@ -186,12 +338,24 @@ impl ReconcileState {
                 local_deletion_time,
             } = &entry.row_data
             {
+                self.emit_tombstone(TombstoneRecord {
+                    kind: TombstoneKind::Row,
+                    run_index: entry.run_index,
+                    clustering: entry.clustering_key.clone(),
+                    column: None,
+                    deletion_time: *deletion_time,
+                    local_deletion_time: *local_deletion_time,
+                    range_start: None,
+                    range_end: None,
+                    droppable_at_now: self.tombstone_droppable(*local_deletion_time),
+                });
                 // When this tombstone's deletion_time becomes (or sets) the new
                 // max, capture its paired LDT too so the winning tombstone's
                 // source `localDeletionTime` survives reconciliation (#873).
                 if self.row_del.is_none_or(|d| *deletion_time > d) {
                     self.row_del = Some(*deletion_time);
                     self.row_del_ldt = *local_deletion_time;
+                    self.row_del_run_index = Some(entry.run_index);
                 }
             }
         }
@@ -210,32 +374,123 @@ impl ReconcileState {
             if let RowData::Live { cells } = &entry.row_data {
                 for cell in cells {
                     let cell_key: CellKey = (cell.column.clone(), cell.cell_path.clone());
-                    // Issue #1665: the HashMap `entry()` API hashes ONCE on the
-                    // vacant path (the old `get()`+`insert()` hashed twice) and
-                    // lets `order` reuse the slot's owned key. Output is
-                    // byte-identical: the vacant/occupied arms below are the same
-                    // two branches as the former `None`/`Some` match, and the
-                    // `order.push` still precedes the `insert` so first-seen order
-                    // is preserved for the equal-timestamp tie-break.
-                    match self.winners.entry(cell_key) {
-                        Entry::Vacant(slot) => {
-                            self.order.push(slot.key().clone());
-                            slot.insert(cell.clone());
+                    if KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted {
+                        let local_deletion_time = cell
+                            .local_deletion_time
+                            .or_else(|| match &cell.value {
+                                crate::types::Value::Tombstone(info) => {
+                                    Some(info.local_deletion_time as i32)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+                        self.emit_tombstone(TombstoneRecord {
+                            kind: TombstoneKind::Cell,
+                            run_index: entry.run_index,
+                            clustering: entry.clustering_key.clone(),
+                            column: Some(cell.column.clone()),
+                            deletion_time: cell.timestamp,
+                            local_deletion_time,
+                            range_start: None,
+                            range_end: None,
+                            droppable_at_now: self.tombstone_droppable(local_deletion_time),
+                        });
+                    }
+
+                    let Some(existing) = self.winners.get(&cell_key) else {
+                        self.order.push(cell_key.clone());
+                        self.winners.insert(cell_key.clone(), cell.clone());
+                        if let Some(runs) = &mut self.winner_runs {
+                            runs.insert(cell_key, entry.run_index);
                         }
-                        Entry::Occupied(mut slot) => {
-                            // Higher timestamp wins. At EQUAL timestamp a cell
-                            // DELETION (tombstone) beats a LIVE or EXPIRING
-                            // (TTL) cell, decided BEFORE any localDeletionTime
-                            // compare (parity Cassandra `a62c749`,
-                            // `Cells#reconcile`; issue #848 / #498). At equal ts
-                            // + equal deletion-status, keep the first-seen
-                            // (newer file) winner. The tie-break is the SHARED
-                            // [`reconcile_rules::cell_wins`] rule (issue #947),
-                            // also used by the flush/write path.
-                            if reconcile_rules::cell_wins(cell, slot.get()) {
-                                slot.insert(cell.clone());
-                            }
+                        continue;
+                    };
+
+                    // Higher timestamp wins. At EQUAL timestamp a cell
+                    // DELETION (tombstone) beats a LIVE or EXPIRING (TTL) cell,
+                    // before any localDeletionTime comparison (Cassandra
+                    // `Cells#reconcile`; issue #848 / #498).
+                    let existing_run = self
+                        .winner_runs
+                        .as_ref()
+                        .and_then(|runs| runs.get(&cell_key).copied())
+                        .unwrap_or(entry.run_index);
+                    let cell_wins = reconcile_rules::cell_wins(cell, existing);
+                    if cell_wins {
+                        let old = if S::ENABLED {
+                            Some(existing.clone())
+                        } else {
+                            None
+                        };
+                        self.winners.insert(cell_key.clone(), cell.clone());
+                        if let Some(runs) = &mut self.winner_runs {
+                            runs.insert(cell_key.clone(), entry.run_index);
                         }
+                        if let Some(old) = old {
+                            let (verdict, decided_by) = if cell.timestamp == old.timestamp
+                                && (KWayMerger::<NoTrace>::is_cell_tombstone(cell)
+                                    || cell.is_deleted)
+                                && !(KWayMerger::<NoTrace>::is_cell_tombstone(&old)
+                                    || old.is_deleted)
+                            {
+                                (
+                                    Verdict::ShadowedByTombstone(TombstoneKind::Cell),
+                                    DecidedBy::Tombstone {
+                                        kind: TombstoneKind::Cell,
+                                        run_index: entry.run_index,
+                                        deletion_time: cell.timestamp,
+                                        local_deletion_time:
+                                            KWayMerger::<NoTrace>::cell_effective_ldt(cell)
+                                                .unwrap_or(0),
+                                        droppable_at_now: self.tombstone_droppable(
+                                            KWayMerger::<NoTrace>::cell_effective_ldt(cell)
+                                                .unwrap_or(0),
+                                        ),
+                                    },
+                                )
+                            } else {
+                                (
+                                    Verdict::ShadowedByTimestamp,
+                                    DecidedBy::Winner {
+                                        run_index: entry.run_index,
+                                        writetime: cell.timestamp,
+                                    },
+                                )
+                            };
+                            self.emit_cell(&old, existing_run, verdict, decided_by);
+                        }
+                    } else if S::ENABLED {
+                        let (verdict, decided_by) = if cell.timestamp == existing.timestamp
+                            && (KWayMerger::<NoTrace>::is_cell_tombstone(existing)
+                                || existing.is_deleted)
+                            && !(KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted)
+                        {
+                            (
+                                Verdict::ShadowedByTombstone(TombstoneKind::Cell),
+                                DecidedBy::Tombstone {
+                                    kind: TombstoneKind::Cell,
+                                    run_index: existing_run,
+                                    deletion_time: existing.timestamp,
+                                    local_deletion_time: KWayMerger::<NoTrace>::cell_effective_ldt(
+                                        existing,
+                                    )
+                                    .unwrap_or(0),
+                                    droppable_at_now: self.tombstone_droppable(
+                                        KWayMerger::<NoTrace>::cell_effective_ldt(existing)
+                                            .unwrap_or(0),
+                                    ),
+                                },
+                            )
+                        } else {
+                            (
+                                Verdict::ShadowedByTimestamp,
+                                DecidedBy::Winner {
+                                    run_index: existing_run,
+                                    writetime: existing.timestamp,
+                                },
+                            )
+                        };
+                        self.emit_cell(cell, entry.run_index, verdict, decided_by);
                     }
                 }
             }
@@ -296,6 +551,7 @@ impl ReconcileState {
                 if let Some(cd) = active.get(column) {
                     let mfda = cd.marked_for_delete_at;
                     let winners = &mut self.winners;
+                    let mut shadowed: Vec<(CellKey, CellData)> = Vec::new();
                     self.order.retain(|cell_key| {
                         let (cell_column, cell_path) = cell_key;
                         // Only complex elements (those with a cell_path) of THIS
@@ -315,12 +571,41 @@ impl ReconcileState {
                                 true
                             }
                             Some(_) => {
+                                if S::ENABLED {
+                                    if let Some(cell) = winners.get(cell_key) {
+                                        shadowed.push((cell_key.clone(), cell.clone()));
+                                    }
+                                }
                                 winners.remove(cell_key);
                                 false
                             }
                             None => false,
                         }
                     });
+                    for (cell_key, cell) in shadowed {
+                        let run_index = self
+                            .winner_runs
+                            .as_ref()
+                            .and_then(|runs| runs.get(&cell_key).copied())
+                            .unwrap_or(self.run_index);
+                        let deciding_run = self
+                            .complex_deletion_sources
+                            .as_ref()
+                            .and_then(|sources| sources.get(column).map(|(_, run)| *run))
+                            .unwrap_or(self.run_index);
+                        self.emit_cell(
+                            &cell,
+                            run_index,
+                            Verdict::ShadowedByTombstone(TombstoneKind::Collection),
+                            DecidedBy::Tombstone {
+                                kind: TombstoneKind::Collection,
+                                run_index: deciding_run,
+                                deletion_time: mfda,
+                                local_deletion_time: cd.local_deletion_time,
+                                droppable_at_now: self.tombstone_droppable(cd.local_deletion_time),
+                            },
+                        );
+                    }
                 }
             }
 
@@ -360,6 +645,23 @@ impl ReconcileState {
             .as_ref()
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
+        let mut shadowed: Vec<(CellKey, CellData, usize)> = Vec::new();
+        if S::ENABLED {
+            if let Some(deletion_time) = row_del {
+                for cell_key in &self.order {
+                    if let Some(cell) = self.winners.get(cell_key) {
+                        if cell.timestamp <= deletion_time {
+                            let run_index = self
+                                .winner_runs
+                                .as_ref()
+                                .and_then(|runs| runs.get(cell_key).copied())
+                                .unwrap_or(self.run_index);
+                            shadowed.push((cell_key.clone(), cell.clone(), run_index));
+                        }
+                    }
+                }
+            }
+        }
         let winners = &mut self.winners;
         self.after_row_del = std::mem::take(&mut self.order)
             .into_iter()
@@ -374,7 +676,7 @@ impl ReconcileState {
                     // never real data), is not "live data suppressed" and is not
                     // counted.
                     if !survives
-                        && !KWayMerger::is_cell_tombstone(cell)
+                        && !KWayMerger::<NoTrace>::is_cell_tombstone(cell)
                         && !ck_names.contains(cell.column.as_str())
                     {
                         purges.suppressed += 1;
@@ -384,6 +686,21 @@ impl ReconcileState {
                 None => true,
             })
             .collect();
+        for (_, cell, run_index) in shadowed {
+            let kind = TombstoneKind::Row;
+            self.emit_cell(
+                &cell,
+                run_index,
+                Verdict::ShadowedByTombstone(kind),
+                DecidedBy::Tombstone {
+                    kind,
+                    run_index: self.row_del_run_index.unwrap_or(self.run_index),
+                    deletion_time: row_del.unwrap_or(cell.timestamp),
+                    local_deletion_time: self.row_del_ldt,
+                    droppable_at_now: self.tombstone_droppable(self.row_del_ldt),
+                },
+            );
+        }
     }
 
     /// Step 3b — dropped-column filtering (Cassandra `cb34ad47`,
@@ -422,6 +739,26 @@ impl ReconcileState {
         self.had_data_before = self.after_row_del.iter().any(is_data_cell);
         drop(ck_names);
 
+        let mut dropped: Vec<(CellData, usize, i64)> = Vec::new();
+        if S::ENABLED {
+            for (cell_key, cell) in self
+                .order
+                .iter()
+                .filter_map(|key| self.winners.get_key_value(key))
+            {
+                if let Some(drop_time) = dropped_columns.get(&cell.column) {
+                    if cell.timestamp <= *drop_time {
+                        let run_index = self
+                            .winner_runs
+                            .as_ref()
+                            .and_then(|runs| runs.get(cell_key).copied())
+                            .unwrap_or(self.run_index);
+                        dropped.push((cell.clone(), run_index, *drop_time));
+                    }
+                }
+            }
+        }
+
         self.surviving = std::mem::take(&mut self.after_row_del)
             .into_iter()
             .filter(|cell| match dropped_columns.get(&cell.column) {
@@ -429,6 +766,14 @@ impl ReconcileState {
                 None => true,
             })
             .collect();
+        for (cell, run_index, drop_time) in dropped {
+            self.emit_cell(
+                &cell,
+                run_index,
+                Verdict::DroppedColumn,
+                DecidedBy::DropTime(drop_time),
+            );
+        }
     }
 
     /// Step 3b′ — TTL EXPIRY (issue #1382, parity Cassandra `ExpiringCell`
@@ -469,10 +814,11 @@ impl ReconcileState {
         let Some(now) = now_secs else {
             return; // Expiry disabled — strict no-op.
         };
+        let mut expired: Vec<(CellData, usize, i64)> = Vec::new();
         for cell in &mut self.surviving {
             // An existing tombstone (simple cell tombstone OR a complex-element
             // tombstone via `is_deleted`) has no live value to expire.
-            if KWayMerger::is_cell_tombstone(cell) {
+            if KWayMerger::<NoTrace>::is_cell_tombstone(cell) {
                 continue;
             }
             let (Some(ttl), Some(ldt)) = (cell.ttl, cell.local_deletion_time) else {
@@ -502,6 +848,15 @@ impl ReconcileState {
             // floors at 0, an ancient/purgeable tombstone) with no `unwrap`.
             let creation_secs: u32 = (ldt as u32).saturating_sub(ttl);
             let tombstone_ldt: i64 = i64::from(creation_secs);
+            let old_cell = if S::ENABLED { Some(cell.clone()) } else { None };
+            let run_index = self
+                .winner_runs
+                .as_ref()
+                .and_then(|runs| {
+                    runs.get(&(cell.column.clone(), cell.cell_path.clone()))
+                        .copied()
+                })
+                .unwrap_or(self.run_index);
             // Convert the expired live cell into a (cell / complex-element)
             // tombstone whose `localDeletionTime` is the creation-time instant
             // (`ldt - ttl`) and whose `markedForDeleteAt` is the cell's own write
@@ -535,6 +890,17 @@ impl ReconcileState {
             // `cell_effective_ldt`); `creation_secs` fits `i32` for any real
             // creation time.
             cell.local_deletion_time = Some(creation_secs as i32);
+            if let Some(old_cell) = old_cell {
+                expired.push((old_cell, run_index, i64::from(ldt as u32)));
+            }
+        }
+        for (cell, run_index, expires_at) in expired {
+            self.emit_cell(
+                &cell,
+                run_index,
+                Verdict::Expired,
+                DecidedBy::Expiry { expires_at, now },
+            );
         }
     }
 
@@ -581,18 +947,39 @@ impl ReconcileState {
         purges: &mut PurgeCounts,
     ) {
         if let Some(gc_before) = gc_before_secs {
+            let mut purged_cells: Vec<(CellData, usize, i32)> = Vec::new();
+            if S::ENABLED {
+                for cell in &self.surviving {
+                    if (KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted)
+                        && KWayMerger::<NoTrace>::cell_effective_ldt(cell)
+                            .is_some_and(|ldt| i64::from(ldt as u32) < gc_before)
+                        && cell.timestamp < max_purgeable_timestamp
+                    {
+                        let run_index = self
+                            .winner_runs
+                            .as_ref()
+                            .and_then(|runs| {
+                                runs.get(&(cell.column.clone(), cell.cell_path.clone()))
+                                    .copied()
+                            })
+                            .unwrap_or(self.run_index);
+                        let ldt = KWayMerger::<NoTrace>::cell_effective_ldt(cell).unwrap_or(0);
+                        purged_cells.push((cell.clone(), run_index, ldt));
+                    }
+                }
+            }
             // (a) Cell tombstones: drop any purgeable simple cell tombstone (and
             // purgeable complex-element tombstone) from the surviving set. A cell
             // whose `local_deletion_time` is not surfaced (`None`) is conservative-
             // ly RETAINED — we never purge on unknown LDT (no-heuristics mandate).
             self.surviving.retain(|cell| {
-                if KWayMerger::is_cell_tombstone(cell) || cell.is_deleted {
+                if KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted {
                     // #921 finding 1: a simple cell tombstone surfaces its LDT in
                     // its `Value::Tombstone` payload, not `CellData.local_deletion_time`
                     // (which the reader fills only for expiring cells). Consult both
                     // via `cell_effective_ldt` so a purgeable cell tombstone is
                     // actually purged here — matching the survivor pre-pass.
-                    let gc_purgeable = match KWayMerger::cell_effective_ldt(cell) {
+                    let gc_purgeable = match KWayMerger::<NoTrace>::cell_effective_ldt(cell) {
                         Some(ldt) => i64::from(ldt as u32) < gc_before,
                         // Unknown LDT: never purge (no-heuristics mandate).
                         None => false,
@@ -654,6 +1041,18 @@ impl ReconcileState {
                 }
                 keep
             });
+            for (cell, run_index, ldt) in purged_cells {
+                self.emit_cell(
+                    &cell,
+                    run_index,
+                    Verdict::Purgeable,
+                    DecidedBy::GcGrace {
+                        ldt,
+                        gc_before,
+                        now: self.trace_now_secs.unwrap_or(gc_before),
+                    },
+                );
+            }
         }
     }
 
@@ -666,7 +1065,25 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
+    #[allow(dead_code)]
     pub(super) fn build(self, purges: &mut PurgeCounts) -> Option<MergeEntry> {
+        self.build_with_trace_metadata(purges).0
+    }
+
+    /// Build the merged row and return the trace-only source map alongside it.
+    /// The map is moved out before the behavior-preserving build body consumes
+    /// the state, so untraced builds never clone cell keys or allocate a side
+    /// channel.
+    pub(super) fn build_with_trace_metadata(
+        mut self,
+        purges: &mut PurgeCounts,
+    ) -> (Option<MergeEntry>, ReconcileTraceMetadata) {
+        let winner_runs = self.winner_runs.take();
+        let built = self.build_inner(purges);
+        (built, ReconcileTraceMetadata { winner_runs })
+    }
+
+    fn build_inner(self, purges: &mut PurgeCounts) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
@@ -707,7 +1124,7 @@ impl ReconcileState {
         // emitted with it intact.
         let retained_cell_tombstones = surviving
             .iter()
-            .filter(|cell| KWayMerger::is_cell_tombstone(cell) || cell.is_deleted)
+            .filter(|cell| KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted)
             .count() as u64;
         purges.emitted += retained_cell_tombstones;
 

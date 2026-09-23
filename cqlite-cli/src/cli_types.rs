@@ -255,6 +255,25 @@ pub enum Commands {
         #[arg(long)]
         timing: bool,
     },
+    /// Explain reconciliation decisions for one partition across all generations.
+    #[command(
+        long_about = "Render the per-generation reconciliation trace for one partition without opening the database or mutating SSTables. Partition-key and clustering arguments use CQL literal syntax; comma-separated literals are accepted for composite keys."
+    )]
+    Explain {
+        /// Fully-qualified keyspace.table name.
+        table: String,
+        /// Partition-key literal(s), in schema order.
+        partition_key: String,
+        /// Render only cells for this clustering row. Repeat for composite keys.
+        #[arg(long)]
+        clustering: Vec<String>,
+        /// Reconciliation clock as epoch seconds or RFC3339. Defaults to wall clock.
+        #[arg(long)]
+        now: Option<String>,
+        /// Explain output format. Defaults to the global --out/--format setting.
+        #[arg(long, value_enum)]
+        out: Option<OutputFormat>,
+    },
     /// Import data from file
     Import {
         /// Input file path

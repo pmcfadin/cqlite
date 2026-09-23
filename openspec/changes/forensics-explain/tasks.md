@@ -5,12 +5,22 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 
 ## 0. Premises — re-confirm in the worktree, STOP if false
 
-- [ ] 0.1 `merge/reconcile.rs::ReconcileState` still exposes the eight step methods design.md §D1
+- [x] 0.1 `merge/reconcile.rs::ReconcileState` still exposes the eight step methods design.md §D1
       names, and `mod.rs::apply_range_shadowing` is the only range-shadow site.
-- [ ] 0.2 `build_single_partition_merger` returns a merger the caller drives with `step()` and its
+- [x] 0.2 `build_single_partition_merger` returns a merger the caller drives with `step()` and its
       `paths` order is the run-index order (point_read.rs doc).
-- [ ] 0.3 Every §D6 fixture dir exists under the root `fetch-datasets.sh --verify-only` names, with
+- [x] 0.3 Every §D6 fixture dir exists under the root `fetch-datasets.sh --verify-only` names, with
       the generation counts listed. Name the `collection` fixture or generate + commit its JSONL.
+
+  Evidence (2026-09-20, `origin/main=aab7cd357`): the verified exported root contains all named
+  D6 directories with the listed generation counts; the collection candidate is
+  `test_collections/collection_table` (`nb-1-big`, Cassandra JSONL plus raw components). The
+  post-compaction fixtures remain insufficient evidence for per-cell loser verdicts; that is
+  tracked as coverage work in task 2.4 and is not claimed by this premise check.
+
+  0.1/0.2 source evidence: `reconcile.rs` exposes the eight named methods; `mod.rs` contains the
+  range-shadow call/site; `point_read.rs` documents and implements `Result<Option<KWayMerger>>`,
+  caller-driven `step()`, and `paths.iter().enumerate()` run identity.
 
 ## 1. Campsite relocation (D5) — surface: byte-parity suites
 

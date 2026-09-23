@@ -1,6 +1,6 @@
 # The forensics surface — "sstabledump on steroids"
 
-Status: **idea document, 2026-09-09.** Not groomed, not scheduled, no issue yet. Origin: a
+Status: **F1 implemented in issue #4193 (2026-09-20); F2+ remain planned.** Origin: a
 Cassandra meetup comment (September 2026) — *"the ability to inspect data on a lower level,
 like tombstone visibility and different versions of data from different SSTables, would let
 CQLite be a troubleshooting tool as well — a kind of sstabledump on steroids."* This document

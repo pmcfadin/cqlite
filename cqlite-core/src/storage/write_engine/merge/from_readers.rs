@@ -99,6 +99,7 @@ use crate::storage::sstable::reader::SSTableReader;
 use super::egress_batch::EgressBatcher;
 use super::producer_iter::RunState;
 use super::producer_msg::{panicked_producer_error, MergeMsg, MergeProducerError};
+use super::trace::NoTrace;
 use super::{
     egress_batch, egress_budget, producer_gauge, KWayMerger, RunReader, SSTableRowIterator,
     SSTableRowIteratorAdapter,
@@ -492,6 +493,7 @@ impl KWayMerger {
             purge_safe: false,
             max_purgeable_timestamp: None,
             _egress_slot: Some(egress_slot),
+            trace: NoTrace,
         })
     }
 }
