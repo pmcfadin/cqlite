@@ -66,9 +66,16 @@ fn saturating_i32(v: i64) -> i32 {
 
 fn insert_source_values(values: &mut HashMap<String, Value>, source: &RawViewSource) {
     values.insert("sstable".to_string(), Value::text(source.sstable.clone()));
+    // `bigint`, never a saturating `i32` narrow (roborev finding, issue
+    // #4222): `SSTableReader::generation` is a `u64`, and this view's whole
+    // purpose is authoritative per-generation source identity — collapsing
+    // two distinct generations to the same saturated value would be exactly
+    // the fabricated-fact class the rest of this module fails closed on.
+    // `i64::MAX` remains a saturating fallback ONLY for a generation number
+    // past `i64::MAX`, a value no real corpus can produce.
     values.insert(
         "generation".to_string(),
-        Value::Integer(saturating_i32(source.generation as i64)),
+        Value::BigInt(i64::try_from(source.generation).unwrap_or(i64::MAX)),
     );
     values.insert("format".to_string(), Value::text(source.format));
     values.insert(

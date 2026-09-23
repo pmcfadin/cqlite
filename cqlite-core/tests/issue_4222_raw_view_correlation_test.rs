@@ -108,8 +108,8 @@ async fn logical_row_correlates_with_its_physical_rows_by_shared_keys() {
         .rows
         .iter()
         .max_by_key(|r| match get(r, "generation") {
-            Some(Value::Integer(g)) => *g,
-            _ => i32::MIN,
+            Some(Value::BigInt(g)) => *g,
+            _ => i64::MIN,
         })
         .expect("at least one physical row must be present");
     assert_eq!(
