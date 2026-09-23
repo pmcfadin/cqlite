@@ -531,6 +531,29 @@ async fn writetime_projection_fails_closed_rather_than_returning_every_column() 
     );
 }
 
+/// Roborev finding (issue #4222, round 6): a predicate on `position` must
+/// fail closed over the raw view — this column is populated for real ONLY
+/// on the point-key access path (a second index lookup) and is always
+/// `Null` on the full-scan path, so filtering on it would make the SAME
+/// query text silently return different rows depending on an internal
+/// access-path choice the query has no control over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn position_predicate_fails_closed_rather_than_diverging_by_access_path() {
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
+    let outcome = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 AND position = 0"
+        ))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "a 'position' predicate must fail closed over the raw view, never silently \
+         succeed with an access-path-dependent answer"
+    );
+}
+
 /// Spec: "A dropped-column generation shows the on-disk column the current
 /// schema no longer has" — the DELIVERED subset (see spec.md's DEFERRED
 /// note): `test_tomb.dropped_regular_col`'s CURRENT registered schema still
