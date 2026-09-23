@@ -1,7 +1,7 @@
 # forensics-explain — issue #4193 (epic #4192)
 
-**Milestone:** unmilestoned (owner convention: unmilestoned = unscheduled program; board `Ready` so a
-lane can take it without displacing the 0.18 headline). **Routing:** design-driven (OpenSpec + Seam 1)
+**Milestone:** 0.18 (the SSTable toolbox release, epic #4192). Seam 1 approved by the owner
+2026-09-23 with R2.1 removed. **Routing:** design-driven (OpenSpec + Seam 1)
 — a new CLI verb and a new library trait surface, no external oracle for their *shape*; the verdicts
 they emit ARE oracle-bound (Cassandra reconciliation source + Cassandra-written fixtures).
 

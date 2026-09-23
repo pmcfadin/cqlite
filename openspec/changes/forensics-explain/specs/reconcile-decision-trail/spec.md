@@ -36,15 +36,9 @@ whose methods have empty `#[inline]` bodies. Every production constructor
 
 The trail SHALL use exactly the verdicts `winner`, `shadowed-by-timestamp`,
 `shadowed-by-tombstone{partition|range|row|cell|collection}`, `expired`, `purgeable`,
-`dropped-column`. Each SHALL be emitted from the reconcile step design.md §D1 names and from no
-other site. There SHALL be no `unknown`/`other` verdict.
-
-#### Scenario: R2.1 one emit site per verdict
-- **Given** `scripts/tests/test_trace_verdict_sites.sh` (registered in `tooling-tests`)
-- **When** it greps `cqlite-core/src/storage/write_engine/merge/` for `Verdict::` constructor sites
-  outside `trace.rs` and tests
-- **Then** every variant appears in exactly the file(s) §D1 assigns it, and any variant appearing
-  elsewhere, or any `Verdict` variant not in the list above, FAILs naming the file.
+`dropped-column`. There SHALL be no `unknown`/`other` verdict. (Owner ruling 2026-09-23: the
+single-emit-site property is design intent (§D1), verified behaviourally by R2.2 and R3.1, not by a
+source-text scan: the R2.1 grep guard was dropped, #3725.)
 
 #### Scenario: R2.2 every verdict has a Cassandra-written fixture where it is the only correct answer
 - **Given** `cqlite-core/tests/issue_4193_verdict_fixtures.rs`, one `#[test]` per verdict, each

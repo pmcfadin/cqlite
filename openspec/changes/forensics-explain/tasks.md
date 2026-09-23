@@ -29,8 +29,6 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 - [ ] 2.4 `tests/issue_4193_verdict_fixtures.rs` (R2.2, R2.3) — one test per verdict, literals
       cite `cassandra-5.0.8` source, per-table root resolution, fail-closed on absent fixture.
 - [ ] 2.5 `tests/issue_4193_traced_equals_untraced.rs` (R3.1) + truncated-Statistics case (R4.1).
-- [ ] 2.6 `scripts/tests/test_trace_verdict_sites.sh` (R2.1), registered in `tooling-tests`; confirm
-      the census line shows it EXECUTED.
 - [ ] 2.7 `--lite` green; commit. Run `cargo bench -p cqlite-core --bench compaction` locally as an
       early read on R1.1 (advisory; the CI workflow is the assertion).
 
