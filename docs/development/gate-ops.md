@@ -1550,10 +1550,29 @@ same convention as `--delta`. `--recertify` is EXEMPT from the #1825 slot cap
 (it rides `--only`'s existing exemption) and from `apply_component_set_preflight`
 failing the run (advisory under `--only`, same as any other `--only` invocation).
 
-Self-test: `scripts/tests/test_recertify.sh` — a domain-table completeness
-census plus every acceptance branch above driven through REAL `--recertify`
-invocations against a scratch git fixture pinned to a local bare origin (never
-the network), wired into `tooling-tests`.
+**`premerge-assert.sh` accepts the pair as a third certifying shape, "Case C"**
+(alongside Case A/direct and Case B/anchored-delta): the optional 4th argument's
+KIND is detected by its OWN CONTENT (the literal `RECERT` vs `DELTA` header),
+never by position, so the existing 3-or-4-argument contract is unchanged and a
+LONE recert (a RECERT summary passed as the 3rd argument alone, or paired with
+itself) refuses via the same "zero full-gate blocks" path a lone delta already
+does. Case C's anchor does NOT require `RESULT: PASS` (a recert anchor
+legitimately has a failed component) but its `RESULT` must still be a real
+terminal verdict (`PASS` or `FAIL`, never `INCOMPLETE`); no `git merge-base
+--is-ancestor` walk is needed the way Case B's `#3653` binding requires, since a
+recert anchor's `commit:`/`tree-start:` must cover the certified sha EXACTLY (a
+plain string-prefix compare) rather than merely being an ancestor of a later
+one. The recert block itself must carry `MODE: recertify`, `RESULT: PASS`,
+`recert-verdict: CERTIFIED`, a `recert-anchor:` covering the certified sha, and
+its own `commit:`/`tree-start:` covering the certified sha too.
+
+Self-test: `scripts/tests/test_recertify.sh` (agent-gate.sh side) — a
+domain-table completeness census plus every acceptance branch above driven
+through REAL `--recertify` invocations against a scratch git fixture pinned to
+a local bare origin (never the network), wired into `tooling-tests`.
+`scripts/tests/test_premerge_assert.sh`'s Case C section (also wired into
+`tooling-tests`) covers the premerge-assert.sh side with the same fixture idiom
+Case A/B already use, needing no real-git ancestry fixture (unlike Case B).
 
 ---
 
