@@ -537,30 +537,42 @@ mod tests {
     /// Unlike [`BLOCKING_TASKS`] (a private atomic — see
     /// [`blocking_tasks_in_use_level`]'s NORMATIVE RULE), a real thread
     /// count has no self-attributable lower bound, so this test re-execs
-    /// itself with `--exact` naming only itself (guarded by [`CHILD_ENV`]):
-    /// the child runs no other test, so both reads are of a process this
-    /// test fully controls — impossible-by-construction under any runner.
+    /// itself with `--exact` naming only itself: the child runs no other
+    /// test, so both reads are of a process this test fully controls —
+    /// impossible-by-construction under any runner. A sentinel file (not
+    /// just the child's exit code) proves the filtered name actually
+    /// matched: libtest exits `0` on a zero-match filter too, so a bare
+    /// `status.success()` would pass vacuously if this test/module were
+    /// ever renamed or moved out from under the hardcoded filter string.
     #[test]
     fn proc_thread_gauge_rises_with_load_and_settles() {
         if read_proc_threads().is_none() {
             return; // Off-/proc platform: absence is covered elsewhere.
         }
 
-        // Set only in the re-exec'd child (see the doc comment above); its
-        // absence marks the original, driver invocation.
+        // Set only in the re-exec'd child; its absence marks the driver.
         const CHILD_ENV: &str = "CQLITE_SATURATION_PROC_THREAD_GAUGE_CHILD";
+        // Path of a file the child writes only after reaching the settle
+        // assertion below — the vacuous-pass guard described above.
+        const SENTINEL_ENV: &str = "CQLITE_SATURATION_PROC_THREAD_GAUGE_SENTINEL";
         if std::env::var_os(CHILD_ENV).is_none() {
             let exe = std::env::current_exe().expect("current_exe");
+            let sentinel = tempfile::NamedTempFile::new().expect("sentinel tempfile");
+            let filter = concat!(
+                module_path!(),
+                "::proc_thread_gauge_rises_with_load_and_settles"
+            );
             let status = std::process::Command::new(exe)
-                .args([
-                    "--exact",
-                    "saturation::tests::proc_thread_gauge_rises_with_load_and_settles",
-                    "--test-threads=1",
-                ])
+                .args(["--exact", filter, "--test-threads=1"])
                 .env(CHILD_ENV, "1")
+                .env(SENTINEL_ENV, sentinel.path())
                 .status()
                 .expect("spawn isolated child");
             assert!(status.success(), "isolated child failed: {status:?}");
+            assert!(
+                sentinel.path().metadata().is_ok_and(|m| m.len() > 0),
+                "child ran no test — filter '{filter}' matched nothing"
+            );
             return;
         }
 
@@ -612,6 +624,11 @@ mod tests {
             "the released threads must drop the count back below the loaded peak \
              (loaded={loaded}, settled={settled})"
         );
+
+        // Prove to the driver that this filtered run actually reached here.
+        if let Some(path) = std::env::var_os(SENTINEL_ENV) {
+            std::fs::write(path, b"ran").expect("write sentinel");
+        }
     }
 
     /// Stage 1.2 corollary: a `None` reader contributes NO sample to a tick, so
