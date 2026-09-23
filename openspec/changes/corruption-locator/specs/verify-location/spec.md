@@ -27,7 +27,9 @@ Deviation from this requirement's original draft (roborev round-3 MEDIUM finding
 #### Scenario: L1.2 uncompressed chunk CRC flip uses the CRC.db grid
 - **Given** `test_comp_corrupt/uncompressed_data_bit_flip` and its clean source `uncompressed_table`
 - **When** the test computes the intersecting partition(s) from the clean source's `Index.db`
-  positions and the fixed 64 KiB `CRC.db` chunk grid, and `verify_sstable` runs on the corrupt copy
+  positions and the chunk size recorded in the clean source's `CRC.db` header (64 KiB in this
+  fixture, the CQLite-writer default — not a universal on-disk constant), and `verify_sstable` runs
+  on the corrupt copy
 - **Then** the `UncompressedChunkCrcMismatch` finding's `location` matches, with `component ==
   "Data.db"` and the chunk index derived from the `CRC.db` grid (not `CompressionInfo.db`, which this
   fixture has none of).

@@ -7,20 +7,25 @@ every group (#3042). `--lite` after every fix round; ONE full gate in `flow-clos
 
 - [x] 0.1 `IndexReader::get_partition_entries` yields every BIG partition's key + `data_offset: u64`
       + a size/next-offset companion sufficient to build a closed `[start, end)` extent per
-      partition (`index_reader/mod.rs:264`, `PartitionIndexEntry` at line 49). Confirm the exact
-      field name used for the extent's upper bound (this activation found `data_size` referenced at
-      line 324; re-verify it is public and stable before depending on it).
+      partition (`index_reader/mod.rs:264`, `PartitionIndexEntry` at line 49). Confirmed the exact
+      field name used for the extent's upper bound: `data_size` is always 0 (a parser placeholder)
+      and is NOT used; extents are built from sorted successor `data_offset`s + the logical end.
 - [x] 0.2 `CompressionInfo::chunk_for_offset` (`compression_info.rs:301`) and `chunk_length: u32`
       (line 70) are sufficient to map a `Data.db` byte offset to its compressed chunk index and that
-      chunk's byte range. Confirm no rounding/edge case at the last (possibly short) chunk.
-- [x] 0.3 `CRC_CHUNK_SIZE = 64 * 1024` (`writer/crc_writer.rs:67`) is the correct, and only, chunk
-      grid for uncompressed BIG `CRC.db` location math (no per-file override).
+      chunk's byte range. Confirm no rounding/edge case at the last (possibly short) chunk. Confirmed
+      `chunk_for_offset`/`chunk_length` give the LOGICAL range only; the PHYSICAL range comes from
+      `compressed_chunk_offset`/`compressed_chunk_size`, used separately for `byte_offset`/`byte_len`.
+- [x] 0.3 `CRC_CHUNK_SIZE = 64 * 1024` (`writer/crc_writer.rs:67`) is the CQLite writer's DEFAULT
+      only; read-side location uses the per-file `CrcDb::chunk_size()` header (confirmed in
+      `check_uncompressed_crc_db`).
 - [x] 0.4 BTI: `iterate_partitions_in_bti_file` (`bti/parser/traversal.rs:384`) yields every
       partition's key + `BtiPartitionLocation` in byte-comparable/file order, and is ALREADY used by
       `verify.rs`'s own FULL-mode checks (confirmed present by this activation's read of both files
       — no new BTI primitive is needed, matching sibling change #4196's premise 0.3 finding).
       Re-confirm `BtiPartitionLocation`'s exact fields carry enough to build a `[offset, next_offset)`
-      extent (next entry's offset, or EOF for the last).
+      extent (next entry's offset, or EOF for the last). Confirmed `RowsOffset` leaves resolve their
+      raw key + `Data.db` position via `Rows.db` (`BtiResolvedLeaf::inline_raw_key`), never via the
+      raw trie offset directly.
 - [x] 0.5 Corruption corpus present under the fetched root (`test_comp_corrupt/*`, this activation
       verified 12 fixture entries in `corruption-manifest.yml` incl. `data_db_bit_flip`,
       `uncompressed_data_bit_flip`, `data_db_truncation`, `index_db_bit_flip_big`,
@@ -44,7 +49,7 @@ every group (#3042). `--lite` after every fix round; ONE full gate in `flow-clos
 - [x] 1.2/1.3 Implemented as ONE unified `resolve_partitions(damaged, sorted_boundary_entries,
       logical_len) -> PartitionResolution` over a generic `BoundaryEntry = (u64, Option<Arc<[u8]>>)`
       (a `(position, raw_key)` pair), rather than separate `resolve_big`/`resolve_bti` functions —
-      the closed-interval intersection logic is identical for both formats once each format's
+      the half-open-interval intersection logic is identical for both formats once each format's
       boundary source is mapped to that shape; `verify.rs`'s `finalize_locations` does the per-format
       mapping (BIG via `IndexReader`, BTI via the already-resolved `bti_leaves`). Boundary source
       unreadable (its OWN `IndexEntryCorrupt` / `BtiRootPointerCorrupt` / `BtiTrieCorrupt` finding

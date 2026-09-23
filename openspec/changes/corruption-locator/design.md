@@ -10,13 +10,13 @@ resolve_location(finding, boundary_source) :
    boundary source healthy? ──no──► Location { .., partitions: Unresolved("boundary-source-unreadable") }
       │ yes
       ▼
-   BIG:  IndexReader::get_partition_entries() -> [(key, data_offset, data_size)]
+   BIG:  IndexReader::get_partition_entries() -> decoded (raw_key, data_offset) pairs
          CompressionInfo::chunk_for_offset(offset) -> chunk index   (compressed)
-         CRC_CHUNK_SIZE grid: offset / 65536 -> chunk index          (uncompressed, CRC.db)
+         CrcDb::chunk_size() grid: offset / chunk_size -> chunk index (uncompressed, CRC.db, per-file)
    BTI:  iterate_partitions_in_bti_file() -> [(key, BtiPartitionLocation)] (already used by verify.rs)
       │
       ▼
-   partitions whose [data_offset, data_offset + data_size) intersects the finding's damaged
+   partitions whose half-open extent [data_offset, next_data_offset) intersects the finding's damaged
    [byte_offset, byte_offset + byte_len) range
       │
       ▼
@@ -24,8 +24,10 @@ resolve_location(finding, boundary_source) :
 ```
 
 - **No new boundary-source primitive.** BIG already exposes `IndexReader::get_partition_entries`
-  (`index_reader/mod.rs:264`) with `PartitionIndexEntry.data_offset: u64` (line 64) and a
-  `data_size` companion (used at line 324 to build `(data_offset, data_size)` pairs already).
+  (`index_reader/mod.rs:264`) with `PartitionIndexEntry.data_offset: u64` (line 64) — extents are
+  half-open `[data_offset, next_data_offset)`, the next entry's `data_offset` or the boundary
+  source's declared logical length for the last entry — `PartitionIndexEntry.data_size` is a
+  parser placeholder (always 0) and MUST NOT be read as a length.
   BTI's `iterate_partitions_in_bti_file` (`bti/parser/traversal.rs:384`) is already imported into
   `verify.rs` for the existing FULL-mode row-scan check, alongside `iterate_rows_in_bti_trie` and the
   row-offset resolver `n` (`bti/parser/rows.rs`) — confirmed present by direct read of both files, so
@@ -33,23 +35,31 @@ resolve_location(finding, boundary_source) :
   walk exists; this change reuses it exactly, no new primitive.**
 - **Chunk-to-byte-range translation** differs by input: compressed BIG uses
   `CompressionInfo::chunk_for_offset` (`compression_info.rs:301`, `offset / self.chunk_length`) with
-  `chunk_length: u32` (the per-chunk uncompressed size, field at line 70) giving the chunk's
-  `Data.db` byte range directly (`chunk_index * chunk_length .. (chunk_index+1) * chunk_length`,
-  clamped to the file's logical length); uncompressed BIG uses the fixed `CRC_CHUNK_SIZE = 64 * 1024`
-  grid (`writer/crc_writer.rs:67`) the same way. A truncation finding's damaged range is
+  `chunk_length: u32` (the per-chunk uncompressed size, field at line 70) to yield the LOGICAL chunk
+  index only — the logical range `[i * chunk_length, min((i+1) * chunk_length, data_length))` is used
+  for partition intersection, while the PHYSICAL `Data.db` range (`Location.byte_offset`/`byte_len`)
+  comes separately from `compressed_chunk_offset`/`compressed_chunk_size` — the two must never be
+  conflated. Uncompressed BIG uses the per-file grid from `CrcDb::chunk_size()` (the `CRC.db` header)
+  the same way; `CRC_CHUNK_SIZE = 64 * 1024` (`writer/crc_writer.rs:67`) is only the CQLite writer's
+  default and is never consulted for read-side location. A truncation finding's damaged range is
   `[new_eof, original_logical_length)` — recovered from the difference between the boundary source's
   last partition's expected extent and the truncated file's actual size, not from a second Cassandra
   fixture.
-- **Partition intersection is a closed interval test**, no scanning: for each boundary entry, its
-  extent is `[data_offset, data_offset + data_size)` (BIG) or `[BtiPartitionLocation.offset,
-  next_entry.offset)` (BTI, entries are in byte-comparable/file order so the next entry's offset — or
-  EOF for the last — bounds the extent); intersect against the finding's damaged range. This is the
-  same style of derivation `sstable-salvage`'s D6 oracle table uses for its own expected-loss-set
-  computation, applied here to a READ-ONLY report field instead of a recovery decision.
+- **Partition intersection is a half-open interval test** (`a_start < b_end && b_start < a_end`), no
+  scanning: for each boundary entry, its extent is `[data_offset, next_data_offset)` (BIG, the next
+  entry's `data_offset` or the boundary source's declared logical length for the last entry). For
+  BTI, a `RowsOffset` leaf's raw key and `Data.db` position are resolved through `Rows.db`, not read
+  as a raw trie offset; a `DataOffset` leaf's position is used directly — extents are built from
+  resolved, sorted `Data.db` positions, not from the next raw `BtiPartitionLocation`. Intersect
+  against the finding's damaged range. This is the same style of derivation `sstable-salvage`'s D6
+  oracle table uses for its own expected-loss-set computation, applied here to a READ-ONLY report
+  field instead of a recovery decision.
 - **`KeyRef.rendered`** is populated only when a schema is available to decode the raw key (parity
   with `sstable-salvage`'s manifest `key`/`key_hex` split, design.md §D5) — `verify`/`sweep` take no
   mandatory `--schema` today, so `rendered` is commonly `None`; `key_hex` is always populated from
   the boundary source's raw key bytes.
+- Reflects the corrected implementation per `cqlite-4194-spec-corrections.md`; code
+  (`verify_location.rs`, `verify.rs`) was already correct — this is a doc-only sync.
 
 ## D2. Fail-closed: a damaged boundary source poisons ALL locations, not just its own finding
 
@@ -125,7 +135,7 @@ pre-existing fields sees no behavior change. New surface:
 | Case | Fixture | Expected location derived by |
 |---|---|---|
 | compressed chunk CRC flip | `test_comp_corrupt/data_db_bit_flip` (captured Cassandra verdict `corrupt`) | test independently computes, from the CLEAN source's `Index.db` positions and `CompressionInfo.db` chunk table, the partitions whose byte range intersects the flipped chunk; asserted equal to `finding.location.partitions` |
-| uncompressed chunk CRC flip | `test_comp_corrupt/uncompressed_data_bit_flip` (`CRC.db`) | same, using `CRC.db`'s fixed 64 KiB chunk grid and the clean source's `Index.db` positions |
+| uncompressed chunk CRC flip | `test_comp_corrupt/uncompressed_data_bit_flip` (`CRC.db`) | same, using the per-file chunk grid from the clean source's `CRC.db` header (`CrcDb::chunk_size()`) and the clean source's `Index.db` positions |
 | Data.db truncation | `test_comp_corrupt/data_db_truncation` | partitions whose range extends past the corrupted file's actual size, computed from the CLEAN source's `Index.db` positions |
 | decodable-but-corrupt row (needle partition) | `corrupt_byte_fixture::stage_control_and_mutated(BIG_COMPOSITE)` / `BTI_MULTICLUSTERING` | the needle partition (the one holding the flipped clustering-key byte) is the sole resolved partition; verified via `index_partition_positions`/the BTI trie walk over `control` |
 | boundary source damaged (BIG) | `test_comp_corrupt/index_db_bit_flip_big` | every OTHER finding's location is `Unresolved("boundary-source-unreadable")` |
