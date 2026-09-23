@@ -226,9 +226,10 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
         "ck=2 in gen-2 is a whole-row delete"
     );
     assert_eq!(
-        int_of(row_tombstone, "row_local_deletion_time"),
-        Some(iso_to_secs("2026-06-24T22:59:14Z") as i32),
-        "row_local_deletion_time must match the golden's local_delete_time byte-exact"
+        bigint_of(row_tombstone, "row_local_deletion_time"),
+        Some(iso_to_secs("2026-06-24T22:59:14Z")),
+        "row_local_deletion_time must match the golden's local_delete_time byte-exact \
+         (bigint, roborev finding, issue #4222 — round 8)"
     );
     assert_eq!(
         text_of(row_tombstone, "val_tombstone"),
@@ -256,9 +257,10 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
         "val's cell tombstone kind must be reported"
     );
     assert_eq!(
-        int_of(cell_tombstone, "val_local_deletion_time"),
-        Some(iso_to_secs("2026-06-24T22:59:14Z") as i32),
-        "val_local_deletion_time must match the golden's local_delete_time byte-exact"
+        bigint_of(cell_tombstone, "val_local_deletion_time"),
+        Some(iso_to_secs("2026-06-24T22:59:14Z")),
+        "val_local_deletion_time must match the golden's local_delete_time byte-exact \
+         (bigint, roborev finding, issue #4222 — round 8)"
     );
     assert_eq!(
         bigint_of(cell_tombstone, "val_timestamp"),
@@ -703,5 +705,53 @@ async fn where_clause_naming_an_unknown_column_fails_closed() {
         "a WHERE predicate naming a column absent from the raw view's contract must fail \
          closed, never be silently misapplied (letting synthetic rows through while \
          rejecting plain ones)"
+    );
+}
+
+/// Roborev finding (issue #4222, round 8): a metadata-derivative predicate
+/// (`val_tombstone`) must NOT wrongly include a `partition_tombstone` row
+/// that carries no `val_tombstone` fact at all. pk=2's gen-2 row is a pure
+/// partition tombstone (no cells at all — see
+/// `partition_tombstone_generation_still_yields_one_row`); pk=1's gen-2
+/// ck=3 row IS the one real `val`-cell-tombstone in this fixture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_predicate_excludes_a_partition_tombstone_row_that_lacks_it() {
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
+    let query = format!(
+        "SELECT pk, ck, generation, row_kind FROM {KEYSPACE}.{TABLE}_raw_sstable_data \
+         WHERE val_tombstone = 'cell'"
+    );
+    let result = db
+        .execute(&query)
+        .await
+        .expect("a metadata-derivative predicate must still be answerable");
+
+    assert_eq!(
+        result.rows.len(),
+        1,
+        "'val_tombstone = cell' must match ONLY the one real cell-tombstone row (pk=1, \
+         gen-2, ck=3) — never a partition_tombstone row that carries no val_tombstone fact \
+         at all: {:?}",
+        result
+            .rows
+            .iter()
+            .map(|r| (
+                int_of(r, "pk"),
+                int_of(r, "ck"),
+                bigint_of(r, "generation"),
+                text_of(r, "row_kind")
+            ))
+            .collect::<Vec<_>>()
+    );
+    let row = &result.rows[0];
+    assert_eq!(int_of(row, "pk"), Some(1));
+    assert_eq!(int_of(row, "ck"), Some(3));
+    assert_eq!(bigint_of(row, "generation"), Some(2));
+    assert_eq!(
+        text_of(row, "row_kind").as_deref(),
+        Some("row"),
+        "the surviving row must be a PLAIN row, never a partition_tombstone"
     );
 }

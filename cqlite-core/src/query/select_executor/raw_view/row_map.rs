@@ -93,6 +93,17 @@ fn insert_pk_values(values: &mut HashMap<String, Value>, pk_values: &[(String, V
 /// Map one [`CompactionRow`] into its raw-view [`QueryRow`]s — one for
 /// `Live`/`Tombstone`/`PartitionDelete`, two (start + end bound) for
 /// `RangeMarker`.
+///
+/// KNOWN GAP, declared rather than left unexamined (roborev finding, issue
+/// #4222 — round 8; spec.md's "A static row is distinguishable from a
+/// clustering row" scenario, DEFERRED): `CompactionRow`/`CompactionRowData`
+/// do not carry whether the decoder classified this row as a Cassandra
+/// STATIC row (`compaction_row_build.rs`'s `is_static`, issue #3809), so a
+/// static row reaches here as an ordinary `Live`/`Tombstone` with EMPTY
+/// clustering and renders as the same `row_kind = 'row'` a genuine
+/// clustering row with missing clustering components would — a silent
+/// fidelity gap. Threading `is_static` onto `CompactionRow` (a shared
+/// compaction-read data model, not just this view's) is future work.
 pub(in crate::query::select_executor) fn map_compaction_row(
     row: CompactionRow,
     schema: &TableSchema,
@@ -134,9 +145,14 @@ pub(in crate::query::select_executor) fn map_compaction_row(
                     }
                 }
                 if let Some(expires_at) = row_liveness.expires_at_seconds {
+                    // `expires_at` is an HONEST `i64` (write-time + TTL
+                    // seconds), never a wrapped on-disk LDT bit pattern — no
+                    // cast needed now that the column is `bigint` (roborev
+                    // finding, issue #4222 — round 8: widened alongside the
+                    // two GENUINELY wrapped sites below).
                     values.insert(
                         "row_local_deletion_time".to_string(),
-                        Value::Integer(saturating_i32(expires_at)),
+                        Value::BigInt(expires_at),
                     );
                 }
             }
@@ -144,7 +160,13 @@ pub(in crate::query::select_executor) fn map_compaction_row(
                 values.insert("row_tombstone".to_string(), Value::text("row"));
                 values.insert(
                     "row_local_deletion_time".to_string(),
-                    Value::Integer(local_deletion_time),
+                    // `i64::from(x as u32)`, never a bare narrow-to-i32
+                    // (roborev finding, issue #4222 — round 8): this
+                    // `local_deletion_time` IS the wrapped on-disk bit
+                    // pattern (module doc, `compaction_row.rs`'s header),
+                    // matching `partition_deletion_time`/`range_deletion_time`'s
+                    // round-7 fix.
+                    Value::BigInt(i64::from(local_deletion_time as u32)),
                 );
                 values.insert(
                     "row_deletion_timestamp".to_string(),
@@ -173,7 +195,9 @@ pub(in crate::query::select_executor) fn map_compaction_row(
             );
             values.insert(
                 "row_local_deletion_time".to_string(),
-                Value::Integer(local_deletion_time),
+                // See the identical fix + rationale in the `Live` arm above
+                // (roborev finding, issue #4222 — round 8).
+                Value::BigInt(i64::from(local_deletion_time as u32)),
             );
             insert_source_values(&mut values, source);
             vec![QueryRow::with_values(row.key.clone(), values)]
@@ -309,13 +333,22 @@ fn insert_simple_cell(
     // a tombstone — that field is populated for a LIVE expiring cell). Prefer
     // the tombstone's own field when the cell is a tombstone; fall back to
     // the cell's own field otherwise (the live-TTL case).
-    let (tombstone_kind, tombstone_ldt) = match &cell.value {
+    //
+    // `TombstoneInfo::local_deletion_time` is an HONEST `i64` (never a
+    // wrapped bit pattern — `types.rs`'s own doc), so no cast is needed
+    // there. `SimpleCell::local_deletion_time: Option<i32>` DOES follow the
+    // wrapped `as u32 as i32` convention for a far-future LDT
+    // (`compaction_row.rs`'s module-header invariant) — widened via
+    // `i64::from(x as u32)`, never a bare narrow-to-i32 (roborev finding,
+    // issue #4222 — round 8, matching round 7's `partition_deletion_time`
+    // fix for the same defect class).
+    let (tombstone_kind, tombstone_ldt): (Option<&str>, Option<i64>) = match &cell.value {
         Value::Tombstone(info) => (
             Some(match info.tombstone_type {
                 TombstoneType::TtlExpiration => "expired",
                 _ => "cell",
             }),
-            Some(saturating_i32(info.local_deletion_time)),
+            Some(info.local_deletion_time),
         ),
         _ => (None, None),
     };
@@ -330,10 +363,11 @@ fn insert_simple_cell(
             Value::Integer(saturating_i32(ttl as i64)),
         );
     }
-    if let Some(ldt) = tombstone_ldt.or(cell.local_deletion_time) {
+    let ldt = tombstone_ldt.or_else(|| cell.local_deletion_time.map(|x| i64::from(x as u32)));
+    if let Some(ldt) = ldt {
         values.insert(
             format!("{}_local_deletion_time", cell.column),
-            Value::Integer(ldt),
+            Value::BigInt(ldt),
         );
     }
     if let Some(kind) = tombstone_kind {
@@ -354,7 +388,12 @@ fn insert_complex_column(values: &mut HashMap<String, Value>, col: &ComplexColum
         );
         values.insert(
             format!("{}_complex_deletion_time", col.column),
-            Value::Integer(local_deletion_time),
+            // `ComplexColumn::complex_deletion`'s `i32` element follows the
+            // SAME wrapped `as u32 as i32` convention as every other LDT
+            // field in this module (`compaction_row.rs`'s header) — widen
+            // via `i64::from(x as u32)`, never a bare narrow-to-i32
+            // (roborev finding, issue #4222 — round 8).
+            Value::BigInt(i64::from(local_deletion_time as u32)),
         );
     }
 }
@@ -616,10 +655,88 @@ mod tests {
         );
         assert_eq!(
             r.values.get("val_local_deletion_time"),
-            Some(&Value::Integer(66))
+            Some(&Value::BigInt(66)),
+            "val_local_deletion_time must be bigint (roborev finding, issue #4222 — round 8)"
         );
         // Clustering columns are plain data columns, never a metadata quad.
         assert_eq!(r.values.get("ck1"), Some(&Value::Integer(1)));
         assert!(!r.values.contains_key("ck1_timestamp"));
+    }
+
+    /// Roborev finding (issue #4222, round 8): `SimpleCell::local_deletion_time`
+    /// (a LIVE expiring cell, distinct from `TombstoneInfo`'s already-honest
+    /// `i64`) follows the SAME wrapped `as u32 as i32` convention as every
+    /// other LDT field in this module — `local_deletion_time: Some(-1)`
+    /// represents `u32::MAX` (4294967295, a genuinely far-future LDT).
+    #[test]
+    fn live_expiring_cell_far_future_ldt_widens_without_sign_extension() {
+        let row = CompactionRow {
+            key: pk_bytes(1),
+            row_timestamp: 10,
+            row_data: CompactionRowData::Live {
+                simple: vec![SimpleCell {
+                    column: "val".to_string(),
+                    value: Value::text("x"),
+                    timestamp: 10,
+                    ttl: Some(60),
+                    local_deletion_time: Some(-1),
+                }],
+                complex: vec![],
+                row_deletion: None,
+                row_liveness: Default::default(),
+            },
+        };
+        let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+        assert_eq!(
+            rows[0].values.get("val_local_deletion_time"),
+            Some(&Value::BigInt(4_294_967_295)),
+            "a live expiring cell's far-future LDT must widen to its TRUE u32 value, never \
+             sign-extend the wrapped i32 bit pattern"
+        );
+    }
+
+    /// Roborev finding (issue #4222, round 8): `row_deletion`'s wrapped
+    /// `i32` LDT (the row-tombstone's own local-deletion-time — distinct
+    /// from `CompactionRowData::Tombstone`'s, already covered) must ALSO
+    /// widen without sign-extension.
+    #[test]
+    fn row_deletion_far_future_ldt_widens_without_sign_extension() {
+        let row = CompactionRow {
+            key: pk_bytes(1),
+            row_timestamp: 10,
+            row_data: CompactionRowData::Live {
+                simple: vec![],
+                complex: vec![],
+                row_deletion: Some((99, -1)),
+                row_liveness: Default::default(),
+            },
+        };
+        let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+        assert_eq!(
+            rows[0].values.get("row_local_deletion_time"),
+            Some(&Value::BigInt(4_294_967_295)),
+            "a row tombstone's far-future LDT must widen to its TRUE u32 value, never \
+             sign-extend the wrapped i32 bit pattern"
+        );
+    }
+
+    /// Roborev finding (issue #4222, round 8): `ComplexColumn::complex_deletion`'s
+    /// wrapped `i32` LDT element must ALSO widen without sign-extension.
+    #[test]
+    fn complex_deletion_far_future_ldt_widens_without_sign_extension() {
+        let mut values: HashMap<String, Value> = HashMap::new();
+        let col = ComplexColumn {
+            column: "tags".to_string(),
+            elements: vec![],
+            collapsed_value: Value::Null,
+            complex_deletion: Some((99, -1)),
+        };
+        insert_complex_column(&mut values, &col);
+        assert_eq!(
+            values.get("tags_complex_deletion_time"),
+            Some(&Value::BigInt(4_294_967_295)),
+            "a complex column's far-future LDT must widen to its TRUE u32 value, never \
+             sign-extend the wrapped i32 bit pattern"
+        );
     }
 }

@@ -162,6 +162,20 @@ shape once that bookkeeping lands.
   gen-2). The `dropped = true` marker for a column TRULY absent from the current registry remains
   future work (see above).
 
+#### Scenario: A static row is distinguishable from a clustering row
+
+**DEFERRED — NOT satisfied by this change; tracked as a follow-up (roborev finding, issue #4222,
+round 8).** The decoder KNOWS whether a row is a Cassandra static row
+(`compaction_row_build.rs`'s `is_static` handling), but `CompactionRow`/`CompactionRowData` do not
+carry that fact onward — a static row reaches `row_map.rs::map_compaction_row` as an ordinary
+`Live`/`Tombstone` row with EMPTY clustering, and this view renders it as the same `row_kind = 'row'`
+with the clustering columns simply absent — indistinguishable from a genuine clustering row whose
+clustering components happen to be missing. For a view whose whole contract is "every physical row …
+the raw facts a reconciled `SELECT` discards", this is a silent fidelity gap, now declared rather than
+left unexamined. Threading `is_static` onto `CompactionRow` (and adding a `static_row` `row_kind`
+value) is future work — it touches the shared compaction-read data model
+(`compaction_row.rs`/`compaction_row_build.rs`), used by the write-path merge too, not just this view.
+
 ### Requirement: A partition-key predicate is pushed to the point-read path, never a scan
 
 The raw view SHALL resolve a `WHERE <partition key> = <literal>` predicate (and, for composite

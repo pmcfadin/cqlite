@@ -61,14 +61,28 @@ fn test_tomb_root_or_skip(table: &str) -> Option<std::path::PathBuf> {
 }
 
 async fn open_db_with_byte_budget(max_result_bytes: u64) -> Option<Database> {
+    open_db_with_budgets(max_result_bytes, None).await
+}
+
+/// `max_result_rows` is left at its default when `None` — used by the
+/// LIMIT-exemption test below, which needs a SMALL row-count valve to
+/// prove an explicit LIMIT waives it (roborev finding, issue #4222 —
+/// round 8).
+async fn open_db_with_budgets(
+    max_result_bytes: u64,
+    max_result_rows: Option<u64>,
+) -> Option<Database> {
     let root = test_tomb_root_or_skip(TABLE)?;
     let schema = schema_path("tombstone-parity.cql")
         .expect("committed schema tombstone-parity.cql must be readable (#3148)");
     let mut core_config = Config::default();
     core_config.query.max_result_bytes = max_result_bytes;
+    if let Some(rows) = max_result_rows {
+        core_config.query.max_result_rows = rows;
+    }
     core_config
         .validate()
-        .expect("a max_result_bytes budget must be a VALID configuration");
+        .expect("a max_result_bytes/max_result_rows budget must be a VALID configuration");
     let cfg = IngestionConfig {
         schema_paths: vec![schema],
         data_dir: root,
@@ -134,4 +148,50 @@ async fn full_scan_under_budget_returns_every_physical_row() {
         "the unbounded full scan must surface EVERY physical row across BOTH generations, \
          unreconciled"
     );
+}
+
+/// Roborev finding (issue #4222, round 8): every existing LIMIT/OFFSET
+/// assertion (`issue_4222_raw_view_point_read_test.rs::limit_and_offset_are_honored`)
+/// uses `WHERE pk = ?`, which always routes to the POINT producer — the
+/// full-scan producer's own `stop_after`/`ControlFlow::Break` early-stop
+/// path (`scan.rs`) was never exercised by any test. A no-predicate
+/// `LIMIT 2` against the known 11-row corpus is the direct regression test
+/// for that gap: it must return EXACTLY 2, never the whole corpus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_scan_limit_stops_early_without_a_predicate() {
+    let Some(db) = open_db_with_byte_budget(64 * 1024 * 1024).await else {
+        return;
+    };
+    let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data LIMIT 2");
+    let result = db
+        .execute(&query)
+        .await
+        .expect("a no-predicate LIMIT query must succeed");
+    assert_eq!(
+        result.rows.len(),
+        2,
+        "a no-predicate 'LIMIT 2' must return EXACTLY 2 rows via the full-scan producer's \
+         own stop_after/ControlFlow::Break path, never the whole 11-row corpus"
+    );
+}
+
+/// Roborev finding (issue #4222, round 8): an explicit LIMIT must exempt
+/// the ROW-COUNT valve (`max_result_rows`, issue #1578's convention) on the
+/// FULL-SCAN path too, not just the point-key path
+/// (`limit_and_offset_are_honored`'s existing coverage). `max_result_rows`
+/// is configured well below the known 11-row corpus, but an explicit
+/// `LIMIT 5` (< 11, > max_result_rows) must still succeed and return
+/// exactly 5 — never `Error::ResultTooLarge`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_scan_limit_exempts_the_row_count_valve() {
+    let Some(db) = open_db_with_budgets(64 * 1024 * 1024, Some(2)).await else {
+        return;
+    };
+    let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data LIMIT 5");
+    let result = db.execute(&query).await.expect(
+        "an explicit LIMIT must exempt the row-count valve on the full-scan path too — a \
+         REGRESSION here would wrongly trip Error::ResultTooLarge under a LIMIT smaller than \
+         the corpus but larger than max_result_rows",
+    );
+    assert_eq!(result.rows.len(), 5);
 }
