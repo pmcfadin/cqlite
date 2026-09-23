@@ -257,12 +257,19 @@ _disk_free_gb() {  # <path> -> free GB, or empty if unmeasurable
   printf '%s' "$((kb / 1024 / 1024))"
 }
 _check_disk() {  # <path> <label>
-  local path="$1" label="$2" free
+  local path="$1" label="$2" free measure_path="$1"
   if [ ! -d "$path" ]; then
-    echo "gate-box-launch: NOTE — $label path '$path' does not exist yet (will be created)." >&2
-    return 0
+    # Walk up to the nearest EXISTING ancestor so a not-yet-created lanes/tmp directory
+    # does not silently skip the admission check — it is the underlying filesystem's
+    # free space that matters, not whether this exact directory has been mkdir'd yet.
+    measure_path="$path"
+    while [ ! -d "$measure_path" ] && [ "$measure_path" != "/" ] && [ -n "$measure_path" ]; do
+      measure_path=$(dirname -- "$measure_path")
+    done
+    echo "gate-box-launch: NOTE — $label path '$path' does not exist yet (will be created);" >&2
+    echo "                 measuring free space on its nearest existing ancestor '$measure_path'." >&2
   fi
-  if ! free=$(_disk_free_gb "$path"); then
+  if ! free=$(_disk_free_gb "$measure_path"); then
     echo "gate-box-launch: REFUSING — could not measure free space for $label ('$path')." >&2
     return 1
   fi
