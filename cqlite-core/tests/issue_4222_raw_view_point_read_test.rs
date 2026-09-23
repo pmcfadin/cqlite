@@ -15,11 +15,23 @@
 //! from the committed `*-Data.db.jsonl` sstabledump goldens, not hardcoded
 //! from CQLite's own prior output (#3041/#3042).
 //!
-//! Fixture discipline (#3220): resolved per TABLE via the shared resolver;
-//! binaries are git-committed (see `test-data/datasets/sstables/test_tomb/`),
-//! so this lane is `must_run` — a SKIP is a harness defect, not a legitimate
-//! outcome. `CQLITE_DATASETS_ROOT` must point at a checkout carrying them
-//! (the worktree doctrine: point it at the MAIN checkout's `test-data/datasets`).
+//! Fixture discipline (#3220/#3121, roborev finding, issue #4222):
+//! `resurrection_gc_positive`'s `Data.db` is NOT git-committed — only its
+//! JSONL/`.txt`/`.crc32` sidecars are (`git ls-files
+//! test-data/datasets/sstables/test_tomb/resurrection_gc_positive-*/` carries
+//! no `Data.db`; contrast issue #3121's OWN fixture,
+//! `static_with_tombstones`, whose `Data.db` genuinely IS tracked — so a
+//! keyspace-directory-presence check cannot serve as the "was this table's
+//! corpus fetched" signal, it is always true regardless). So this lane keys
+//! the two-level rule on whether an out-of-tree, presumably-fetched
+//! `CQLITE_DATASETS_ROOT` is even CONFIGURED: none configured → the
+//! checkout alone can never carry this fixture → SKIP cleanly (never
+//! panic) — the ONLY sanctioned skip. A fetched root IS configured but
+//! still lacks the table → PANIC (a dropped/renamed fixture, a real
+//! regression, mirroring `issue_3121_static_row_tombstone_no_phantom.rs`'s
+//! two-level rule). `CQLITE_REQUIRE_FIXTURES=1` (issue #972 strict mode)
+//! turns even the clean-skip case into a hard failure, for a CI lane that
+//! must not silently pass having run nothing.
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
@@ -30,18 +42,66 @@ use chrono::DateTime;
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::types::Value;
 use cqlite_core::{ingestion::ingest, ingestion::IngestionConfig, Config, Database};
-use datasets_root::{describe_search, schema_path, sstables_root_for_table};
+use datasets_root::{
+    describe_search, fetched_root_is_configured, schema_path, sstables_root_for_table,
+};
 
 const KEYSPACE: &str = "test_tomb";
 const TABLE: &str = "resurrection_gc_positive";
 
-async fn open_fixture_db() -> Database {
-    let root = sstables_root_for_table(KEYSPACE, TABLE).unwrap_or_else(|| {
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is truthy (issue #972 strict mode):
+/// every would-be SKIP becomes a PANIC so a CI lane cannot false-pass on
+/// missing data.
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Resolve `table`'s fixture root under the `test_tomb` keyspace, or `None`
+/// — the ONLY sanctioned skip (roborev finding, issue #4222).
+///
+/// `resurrection_gc_positive`'s `Data.db` (unlike `static_with_tombstones`,
+/// issue #3121's fixture) is NOT git-committed — only its JSONL/`.txt`/
+/// `.crc32` sidecars are — so it is ALWAYS absent from a bare checkout and
+/// depends entirely on `fetch-datasets.sh` populating an out-of-tree
+/// `CQLITE_DATASETS_ROOT`. So the two-level rule keys on whether a fetched
+/// root is even CONFIGURED, never on keyspace-directory presence (which is
+/// always true here regardless of fetch — the sidecars alone satisfy it):
+/// no fetched root configured → this table can only ever be found via a
+/// checkout that never carries it → SKIP (corpus never fetched). A fetched
+/// root IS configured but still lacks the table → PANIC: the fetch asset
+/// dropped/renamed a fixture, a real regression, not a legitimate skip.
+fn test_tomb_root_or_skip(table: &str) -> Option<std::path::PathBuf> {
+    if let Some(root) = sstables_root_for_table(KEYSPACE, table) {
+        return Some(root);
+    }
+    if fetched_root_is_configured() {
         panic!(
-            "committed fixture must resolve (issue #3220, fail-closed): {}",
-            describe_search(KEYSPACE, TABLE)
-        )
-    });
+            "a fetched CQLITE_DATASETS_ROOT is configured but does not carry \
+             '{KEYSPACE}.{table}' — a renamed/regenerated/dropped fixture must FAIL here, \
+             not silently skip (issue #3121's rule, applied here): {}",
+            describe_search(KEYSPACE, table)
+        );
+    }
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but no fetched CQLITE_DATASETS_ROOT is configured and \
+             the checkout alone never carries '{KEYSPACE}.{table}' — fetch the corpus first \
+             (bash test-data/scripts/fetch-datasets.sh)"
+        );
+    }
+    eprintln!(
+        "SKIP: no fetched CQLITE_DATASETS_ROOT configured, and the checkout's own committed \
+         corpus never carries '{KEYSPACE}.{table}' (fetch-only fixture) — {}",
+        describe_search(KEYSPACE, table)
+    );
+    None
+}
+
+async fn open_fixture_db() -> Option<Database> {
+    let root = test_tomb_root_or_skip(TABLE)?;
     let schema = schema_path("tombstone-parity.cql")
         .expect("committed schema tombstone-parity.cql must be readable (#3148)");
     let cfg = IngestionConfig {
@@ -56,7 +116,7 @@ async fn open_fixture_db() -> Database {
         result.schema_load_result.schemas_loaded > 0,
         "the committed schema must load, else the raw view would refuse with Error::Schema"
     );
-    result.database
+    Some(result.database)
 }
 
 /// Parse an sstabledump JSONL RFC3339 timestamp into epoch MICROSECONDS —
@@ -107,7 +167,9 @@ fn bigint_of(row: &QueryRow, col: &str) -> Option<i64> {
 /// row-tombstone, one cell-tombstone), never reconciled into fewer rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn point_key_yields_one_row_per_generation_no_reconciliation() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
     let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1");
     let result = db
         .execute(&query)
@@ -213,7 +275,9 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
 /// rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partition_tombstone_generation_still_yields_one_row() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
     let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 2");
     let result = db
         .execute(&query)
@@ -272,7 +336,9 @@ async fn partition_tombstone_generation_still_yields_one_row() {
 /// the distinct generation set trivially — is what this case demonstrates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sstable_generation_projection_answers_which_generations_hold_the_key() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
     let query =
         format!("SELECT sstable, generation FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1");
     let result = db
@@ -302,7 +368,9 @@ async fn sstable_generation_projection_answers_which_generations_hold_the_key() 
 /// shape ("`SELECT * FROM ...LIMIT 1`... returning at least one row").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn limit_and_offset_are_honored() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
 
     let limited = db
         .execute(&format!(
@@ -347,7 +415,9 @@ async fn limit_and_offset_are_honored() {
 /// ignore the clause and return an unordered/unreduced result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn order_by_and_distinct_fail_closed_rather_than_silently_ignored() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
 
     let order_by = db
         .execute(&format!(
@@ -378,7 +448,9 @@ async fn order_by_and_distinct_fail_closed_rather_than_silently_ignored() {
 /// `cqlite-core/src/query/select_executor/raw_view/columns.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selecting_an_unknown_column_fails_closed() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
     let outcome = db
         .execute(&format!(
             "SELECT pk, this_column_does_not_exist FROM {KEYSPACE}.{TABLE}_raw_sstable_data \
@@ -401,12 +473,9 @@ async fn selecting_an_unknown_column_fails_closed() {
 /// bookkeeping — that marker itself is deferred (roborev finding, #4222).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gen1_drop_col_visible_gen2_drop_col_absent() {
-    let root = sstables_root_for_table("test_tomb", "dropped_regular_col").unwrap_or_else(|| {
-        panic!(
-            "committed fixture must resolve (issue #3220, fail-closed): {}",
-            describe_search("test_tomb", "dropped_regular_col")
-        )
-    });
+    let Some(root) = test_tomb_root_or_skip("dropped_regular_col") else {
+        return;
+    };
     let schema = schema_path("tombstone-parity.cql")
         .expect("committed schema tombstone-parity.cql must be readable (#3148)");
     let cfg = IngestionConfig {
@@ -462,7 +531,9 @@ async fn gen1_drop_col_visible_gen2_drop_col_absent() {
 /// its tree must fail closed rather than silently return every row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn where_clause_with_or_fails_closed() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
     let outcome = db
         .execute(&format!(
             "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 OR pk = 2"
@@ -479,7 +550,9 @@ async fn where_clause_with_or_fails_closed() {
 /// closed like ORDER BY/DISTINCT/aggregates, never silently ignored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn per_partition_limit_fails_closed() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
     let outcome = db
         .execute(&format!(
             "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data PER PARTITION LIMIT 1"
@@ -499,7 +572,9 @@ async fn per_partition_limit_fails_closed() {
 /// so a naive "contains OR/NOT" check would miss it entirely.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn where_clause_with_not_equal_fails_closed() {
-    let db = open_fixture_db().await;
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
     let outcome = db
         .execute(&format!(
             "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 AND val != 'x'"
