@@ -524,54 +524,33 @@ mod tests {
         }
     }
 
-    /// Spec Requirement 1 scenario ("Thread and fd gauges rise with concurrent
-    /// scans and settle after"): the process thread count read WHILE extra
-    /// threads are parked is strictly greater than the pre-load baseline, and
-    /// after they all exit it drops back below the loaded peak — asserted by
-    /// comparing captured LEVEL snapshots, never by asserting elapsed time. Not
-    /// `#[cfg]`-gated (so it compiles + clippy-checks on every platform); it
-    /// runs the real assertions only where `/proc` is present and early-returns
-    /// on an off-`/proc` platform, whose absence semantics `proc_readers_match_platform`
-    /// already covers.
+    /// Spec Requirement 1 ("thread/fd gauges rise with load and settle
+    /// after"): the count while `n` extra threads are parked is > baseline,
+    /// and drops back below the loaded peak once they exit — LEVEL
+    /// comparisons only, never elapsed time. Early-returns on a non-`/proc`
+    /// platform (covered by `proc_readers_match_platform`).
     ///
-    /// **Issue #4144 / #3956 — why this test re-execs itself.**
-    /// `read_proc_threads()` reads a **process-wide** `/proc/self/task` count,
-    /// and this `--lib` binary runs hundreds of OTHER tests concurrently
-    /// (`cargo test`'s default parallel runner). Comparing two snapshots of
-    /// that shared count taken at different instants is unsound: an unrelated
-    /// sibling test can spawn or retire threads between the `base` read and
-    /// the `loaded` read, moving the baseline out from under the comparison —
-    /// the observed flake read `loaded < base`, which adding 8 threads can
-    /// never cause on its own. Unlike [`BLOCKING_TASKS`] (a private atomic
-    /// this crate fully owns — see the NORMATIVE RULE on
-    /// [`blocking_tasks_in_use_level`]), there is no self-attributable lower
-    /// bound available for a REAL OS thread count: any other thread anywhere
-    /// in the process can move it in either direction, so no comparison this
-    /// test performs *in the shared process* can be made sound.
-    ///
-    /// The fix: make `base` and `loaded` both readings of a process this test
-    /// fully controls. The outer `#[test]` fn re-executes the SAME test
-    /// binary (`std::env::current_exe()`) with `--exact` naming only this
-    /// test, guarded by [`CHILD_ENV`] against infinite recursion; the CHILD
-    /// process runs no other test's code, so nothing else in it can touch the
-    /// thread count. That is impossible-by-construction, not merely
-    /// unlikely, and it holds under any runner: `cargo test`'s default
-    /// parallelism (the case that flaked) and `cargo nextest` (which already
-    /// isolates one test per process, so the grandchild is redundant but
-    /// harmless).
+    /// **Issue #4144 / #3956.** A process-wide count compared across two
+    /// instants in a `--lib` binary running hundreds of OTHER tests is
+    /// unsound: a sibling can retire threads between `base` and `loaded`
+    /// (observed: `loaded < base`, which +8 threads alone can't cause).
+    /// Unlike [`BLOCKING_TASKS`] (a private atomic — see
+    /// [`blocking_tasks_in_use_level`]'s NORMATIVE RULE), a real thread
+    /// count has no self-attributable lower bound, so this test re-execs
+    /// itself with `--exact` naming only itself (guarded by [`CHILD_ENV`]):
+    /// the child runs no other test, so both reads are of a process this
+    /// test fully controls — impossible-by-construction under any runner.
     #[test]
     fn proc_thread_gauge_rises_with_load_and_settles() {
         if read_proc_threads().is_none() {
-            // Off-/proc platform: readers report absence (covered elsewhere).
-            return;
+            return; // Off-/proc platform: absence is covered elsewhere.
         }
 
-        /// Set only in the re-exec'd child process (see the doc comment
-        /// above); its absence marks the original, driver invocation.
+        // Set only in the re-exec'd child (see the doc comment above); its
+        // absence marks the original, driver invocation.
         const CHILD_ENV: &str = "CQLITE_SATURATION_PROC_THREAD_GAUGE_CHILD";
         if std::env::var_os(CHILD_ENV).is_none() {
-            let exe = std::env::current_exe()
-                .expect("current_exe: needed to re-exec this test binary in isolation");
+            let exe = std::env::current_exe().expect("current_exe");
             let status = std::process::Command::new(exe)
                 .args([
                     "--exact",
@@ -580,17 +559,12 @@ mod tests {
                 ])
                 .env(CHILD_ENV, "1")
                 .status()
-                .expect("spawn isolated child process for the /proc thread-count assertion");
-            assert!(
-                status.success(),
-                "isolated child process failed (its captured output, if any, is above): {status:?}"
-            );
+                .expect("spawn isolated child");
+            assert!(status.success(), "isolated child failed: {status:?}");
             return;
         }
 
-        // Child mode: this process runs ONLY this one test, so `base` and
-        // `loaded` below are both readings of a process this test fully
-        // controls — no sibling test thread exists to move either of them.
+        // Child mode: sole test in this process, so both reads are ours alone.
         let base = read_proc_threads().expect("linux self-read");
         let n = 8usize;
         // A barrier so every spawned thread is simultaneously alive when we read
