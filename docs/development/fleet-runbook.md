@@ -160,9 +160,13 @@ how `astro-processor` resolves `scripts/flow/boxes/astro-processor.env` with no 
 **Box profiles are one committed file per host** (`scripts/flow/boxes/<name>.env`): canonical
 clone path, lanes directory, tmpfs `TMPDIR`, dataset root, an npx-free `PATH` allowlist,
 `AGENT_GATE_JOBS`, `RUST_TEST_THREADS` (kept at `1` for now — #4144's flake under parallel lanes;
-drop once #4144 merges), the single-gate concurrency pin, the disk admission bar, and the sccache
-cache dir/size when sccache is installed. `scripts/flow/boxes/astro-processor.env` is the
-reference profile; add a new box by copying its shape.
+drop once #4144 merges), the single-gate concurrency pin, and the sccache cache dir/size when
+sccache is installed. **Two SEPARATE disk admission bars**, not one — `BOX_MIN_FREE_GB` for the
+lanes directory (the box's main disk, hundreds of GB, and the vhdx-exhaustion axis) and
+`BOX_TMP_MIN_FREE_GB` for `TMPDIR` (typically a tmpfs whose *total* size is a much smaller, fixed
+mount option — a single shared bar sized for the main disk would refuse every launch
+unconditionally against a tmpfs that can never hold that much free). `scripts/flow/boxes/astro-processor.env`
+is the reference profile; add a new box by copying its shape.
 
 **`--dry-run` resolves everything — profile, head, staleness, disk, the built environment, and
 the exact `gate-detached.sh` command — and prints it without any git or process side effect**
