@@ -387,3 +387,63 @@ async fn selecting_an_unknown_column_fails_closed() {
          silently drop it from the result"
     );
 }
+
+/// Spec: "A dropped-column generation shows the on-disk column the current
+/// schema no longer has" — the DELIVERED subset (see spec.md's DEFERRED
+/// note): `test_tomb.dropped_regular_col`'s CURRENT registered schema still
+/// declares `drop_col`, so decoding with it already surfaces gen-1's
+/// `drop_col` cell correctly and correctly omits it from gen-2 (which
+/// genuinely has no such column on-disk), with no special `dropped` marker
+/// bookkeeping — that marker itself is deferred (roborev finding, #4222).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gen1_drop_col_visible_gen2_drop_col_absent() {
+    let root = sstables_root_for_table("test_tomb", "dropped_regular_col").unwrap_or_else(|| {
+        panic!(
+            "committed fixture must resolve (issue #3220, fail-closed): {}",
+            describe_search("test_tomb", "dropped_regular_col")
+        )
+    });
+    let schema = schema_path("tombstone-parity.cql")
+        .expect("committed schema tombstone-parity.cql must be readable (#3148)");
+    let cfg = IngestionConfig {
+        schema_paths: vec![schema],
+        data_dir: root,
+        version_hint: None,
+        core_config: Config::default(),
+        table_directory_filter: Some("/test_tomb/".to_string()),
+    };
+    let result = ingest(cfg).await.expect("ingestion of the fixture");
+    assert!(result.schema_load_result.schemas_loaded > 0);
+    let db = result.database;
+
+    let query = "SELECT generation, ck, drop_col, keep_col \
+                 FROM test_tomb.dropped_regular_col_raw_sstable_data WHERE pk = 1";
+    let result = db.execute(query).await.expect("raw view query must succeed");
+
+    let gen1_ck1 = result
+        .rows
+        .iter()
+        .find(|r| int_of(r, "generation") == Some(1) && int_of(r, "ck") == Some(1))
+        .expect("gen-1 ck=1 row must be present");
+    assert_eq!(
+        text_of(gen1_ck1, "drop_col").as_deref(),
+        Some("drop_a_1"),
+        "gen-1's drop_col cell must be visible under the CURRENT (undropped) schema"
+    );
+
+    let gen2_ck4 = result
+        .rows
+        .iter()
+        .find(|r| int_of(r, "generation") == Some(2) && int_of(r, "ck") == Some(4))
+        .expect("gen-2 ck=4 row must be present");
+    assert_eq!(
+        get(gen2_ck4, "drop_col"),
+        None,
+        "gen-2 genuinely has no drop_col cell on-disk — must be absent, not fabricated as NULL"
+    );
+    assert_eq!(
+        text_of(gen2_ck4, "keep_col").as_deref(),
+        Some("keep_b_4"),
+        "keep_col (never dropped) must still decode normally in gen-2"
+    );
+}
