@@ -21656,6 +21656,28 @@ run_tooling_tests() {
     return 0
   fi
 
+  # --recertify self-test (#4268): the non-vacuity proof for
+  # scripts/lib/recert-component-domains.sh (a completeness census over the
+  # LIVE COMPONENTS set + pure classify cases) and for run_recertify_preflight
+  # itself — every AC1 validation branch driven through REAL `--recertify`
+  # invocations against a scratch git fixture pinned to a local bare origin
+  # (never the network; mirrors test_agent_gate_delta.sh's own fixture pattern).
+  # The one component ever actually dispatched for real is file-size (cargo-free);
+  # a diff-eligibility case additionally dispatches dep-duplicates, which SKIPs
+  # fast in the fixture's minimal tree (no real Cargo.toml). A failure FAILs the
+  # component.
+  echo ">>> [$name] bash scripts/tests/test_recertify.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_recertify.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (--recertify self-test #4268); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   # #3689: the one-shot smoke harness must run its WHOLE suite through a failing
   # test. It used to abort on the first failure (a bare `set -e` inside run_test
   # clobbering main()'s `set +e`), so a stale CSV golden hid an identical
