@@ -36,7 +36,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
-    verify_sstable_generation, VerifyErrorClass, VerifyFinding, VerifyMode,
+    format_location, verify_sstable_generation, VerifyErrorClass, VerifyFinding, VerifyMode,
 };
 use cqlite_core::Config;
 use tokio::sync::Semaphore;
@@ -67,6 +67,20 @@ impl Severity {
             Severity::Degraded => "degraded",
             Severity::Corrupt => "corrupt",
             Severity::Unreadable => "unreadable",
+        }
+    }
+
+    /// Index into a 4-slot `[ok, degraded, corrupt, unreadable]` totals array.
+    /// Roborev finding (final round, #4194): this mapping used to be written
+    /// twice (once in `print_text`, once in `print_json`), each un-checked
+    /// against the other — a new variant added to one renderer's `match` and
+    /// missed in the other would silently disagree on totals.
+    fn index(self) -> usize {
+        match self {
+            Severity::Ok => 0,
+            Severity::Degraded => 1,
+            Severity::Corrupt => 2,
+            Severity::Unreadable => 3,
         }
     }
 }
@@ -317,7 +331,7 @@ async fn verify_one(
 /// data-dir-wide structure" claim this module's earlier doc draft made; that
 /// claim is true only of the PER-GENERATION verification work itself, not of
 /// this accumulation). Each `SweepRow.findings` is bounded per-finding by
-/// [`cqlite_core::storage::sstable::verify_location::MAX_RESOLVED_KEYS`]
+/// [`cqlite_core::storage::sstable::verify::MAX_RESOLVED_KEYS`]
 /// (round-2's companion fix for the dominant per-row cost — an unbounded
 /// resolved-partition list), so the resident total is `O(generations x
 /// bounded-per-row-size)`, not unbounded — but it is still `O(generations)`,
@@ -487,13 +501,7 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
 fn print_text(rows: &[SweepRow]) {
     let mut totals = [0usize; 4]; // ok, degraded, corrupt, unreadable
     for row in rows {
-        let idx = match row.severity {
-            Severity::Ok => 0,
-            Severity::Degraded => 1,
-            Severity::Corrupt => 2,
-            Severity::Unreadable => 3,
-        };
-        totals[idx] += 1;
+        totals[row.severity.index()] += 1;
         match row.severity {
             Severity::Ok => println!("ok         {}", row.path.display()),
             _ => {
@@ -511,6 +519,14 @@ fn print_text(rows: &[SweepRow]) {
                         f.component,
                         f.detail
                     );
+                    // Roborev finding (final round, #4194): mirror `verify`'s text
+                    // renderer — `--out text` is `sweep`'s default, so omitting the
+                    // location here silently dropped the very detail this verb
+                    // exists to surface, while `--out json` already carried it via
+                    // the shared `finding_to_json`.
+                    if let Some(loc) = &f.location {
+                        println!("               location: {}", format_location(loc));
+                    }
                 }
             }
         }
@@ -530,13 +546,7 @@ fn print_json(rows: &[SweepRow]) {
     let row_json: Vec<String> = rows
         .iter()
         .map(|row| {
-            let idx = match row.severity {
-                Severity::Ok => 0,
-                Severity::Degraded => 1,
-                Severity::Corrupt => 2,
-                Severity::Unreadable => 3,
-            };
-            totals[idx] += 1;
+            totals[row.severity.index()] += 1;
             let cause = row
                 .cause
                 .as_deref()

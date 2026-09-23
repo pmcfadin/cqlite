@@ -54,10 +54,11 @@ resolve_location(finding, boundary_source) :
   against the finding's damaged range. This is the same style of derivation `sstable-salvage`'s D6
   oracle table uses for its own expected-loss-set computation, applied here to a READ-ONLY report
   field instead of a recovery decision.
-- **`KeyRef.rendered`** is populated only when a schema is available to decode the raw key (parity
-  with `sstable-salvage`'s manifest `key`/`key_hex` split, design.md §D5) — `verify`/`sweep` take no
-  mandatory `--schema` today, so `rendered` is commonly `None`; `key_hex` is always populated from
-  the boundary source's raw key bytes.
+- **`KeyRef.rendered`** is reserved for a schema-decoded rendering of the raw key (parity with
+  `sstable-salvage`'s manifest `key`/`key_hex` split, design.md §D5) but is **never populated
+  today** — `KeyRef::from_raw` is the only constructor and always sets it `None`; wiring `--schema`
+  support through to this field is a follow-up. `key_hex` is always populated from the boundary
+  source's raw key bytes.
 - Reflects the corrected implementation per `cqlite-4194-spec-corrections.md`; code
   (`verify_location.rs`, `verify.rs`) was already correct — this is a doc-only sync.
 
