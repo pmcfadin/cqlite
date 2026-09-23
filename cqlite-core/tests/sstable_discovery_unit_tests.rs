@@ -516,30 +516,3 @@ fn create_minimal_sstable_data() -> Vec<u8> {
 
     data
 }
-
-#[tokio::test]
-async fn test_hooks_integration() {
-    // Test coordination hooks integration
-    let result = tokio::process::Command::new("npx")
-        .args([
-            "claude-flow@alpha",
-            "hooks",
-            "notify",
-            "--message",
-            "SSTable discovery unit tests completed",
-        ])
-        .output()
-        .await;
-
-    match result {
-        Ok(output) => {
-            println!(
-                "✓ Hooks integration test: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
-        Err(e) => {
-            eprintln!("Warning: Hooks integration test failed: {}", e);
-        }
-    }
-}
