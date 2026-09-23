@@ -146,6 +146,18 @@ fn push_mapped_rows(
 /// metadata when `reader.compaction_stream_loses_cell_metadata()` — see
 /// `scan.rs`'s identical check for the full-scan producer's fuller doc.
 ///
+/// Pushes each matching row into `collector` DIRECTLY FROM THE STREAMING
+/// CALLBACK (roborev finding, issue #4222 — round 6, correcting an earlier
+/// version of this function that buffered every match into an intermediate
+/// `Vec<CompactionRow>` and only pushed them into the budget-aware
+/// `PointCollector` once the ENTIRE stream had already been consumed —
+/// defeating both `PointCollector`'s and `raw_view_point_rows`'s own
+/// documented "never fully materialized before the budget is checked"
+/// contract, and meaning `stop_after` could never actually stop the walk
+/// early under `feature = "tombstones"`, where this is the ONLY point-key
+/// path). Returns `ControlFlow::Break` the moment the collector reports
+/// "stop", so the underlying reader genuinely stops streaming.
+///
 /// Returns `true` when the caller should stop (the `stop_after` cap was
 /// reached mid-stream).
 async fn scan_and_filter_one_reader(
@@ -166,28 +178,27 @@ async fn scan_and_filter_one_reader(
         )));
     }
     let source = RawViewSource::from_reader(reader, None);
-    let mut matched: Vec<CompactionRow> = Vec::new();
+    let mut stopped = false;
     reader
         .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |crow| {
-            if crow.key.as_bytes() == pk_bytes {
-                matched.push(crow);
+            if crow.key.as_bytes() != pk_bytes {
+                return Ok(ControlFlow::Continue(()));
+            }
+            if push_mapped_rows(
+                crow,
+                schema,
+                &source,
+                always_predicates,
+                data_predicates,
+                collector,
+            )? {
+                stopped = true;
+                return Ok(ControlFlow::Break(()));
             }
             Ok(ControlFlow::Continue(()))
         })
         .await?;
-    for row in matched {
-        if push_mapped_rows(
-            row,
-            schema,
-            &source,
-            always_predicates,
-            data_predicates,
-            collector,
-        )? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(stopped)
 }
 
 /// Probe every candidate generation for one partition key, pushing every
