@@ -1467,6 +1467,96 @@ Recovery default: `.agent-gate-delta-summary.txt`.
 
 ---
 
+## `--recertify` mechanics: host-fault re-certification (issue #4268)
+
+`--delta` re-certifies a NEW commit on top of a full PASS. `--recertify` is the
+other axis: the SAME commit, where 1-2 components of an otherwise-good full gate
+failed for a reason **proven to be the host's** (IO starvation, a disk-reclaim
+kill, a box reboot — #4252's r7/r8, a `tooling-tests` timing self-test that
+starved under co-scheduled load, not a code defect). Instead of a whole new ~3h
+full gate, it reruns ONLY the named components:
+
+```bash
+scripts/agent-gate.sh --recertify <anchor-summary-file> --components tooling-tests
+scripts/agent-gate.sh --recertify <anchor-summary-file> --components c1,c2   # at most 2
+```
+
+**Structural design point (why it rides `--only`'s machinery rather than
+reimplementing dispatch):** `dispatch_component` — the name→`run_*` case
+statement every component goes through — is defined very late in
+`agent-gate.sh` (~line 27000+), well after the early-exit mode dispatch where
+`--lite`/`--delta` are handled. `run_recertify_preflight` therefore does NOT
+early-exit the way `run_lite`/`run_delta` do: on success it sets
+`ONLY="$RECERT_COMPONENTS"` and **returns**, letting the run fall through into
+the SAME full-gate flow `--only` already uses — every `run_*` function already
+self-filters on `$ONLY`, and `acquire_gate_slot` already self-exempts a
+non-empty `$ONLY` from the #1825 slot cap. Zero changes to `dispatch_component`
+or the main component loop. The terminal emission still branches on
+`RECERTIFY` (beside the `mode: PARTIAL (--only ...)` block) to render the
+distinct `==== AGENT-GATE RECERT SUMMARY ====` header instead.
+
+**Acceptance (#4268 AC1), checked in `run_recertify_preflight`, before
+`acquire_gate_slot` (a bad anchor never queues for a slot or compiles
+anything):**
+
+1. **Component-list shape**: 1 or 2 names, no duplicates, every name a real
+   member of `COMPONENTS`.
+2. **Anchor is a genuine FULL-gate SUMMARY**: carries the literal `"==== AGENT-GATE
+   SUMMARY ===="` header — which, by construction, is never a substring of the
+   LITE/DELTA/RECERT headers (`"LITE "`/`"DELTA "`/`"RECERT "` always breaks the
+   contiguous `"GATE SUMMARY"` run) — and carries no `mode: PARTIAL` line (which
+   would mean it was an `--only` run sharing the same literal header). **This is
+   also the entire mechanism behind "a recert cannot follow a recert"** (#4268's
+   explicit limit): a real RECERT SUMMARY's own header never satisfies this
+   check, so it can never itself serve as a valid anchor — no separate
+   chain-tracking state is needed.
+3. **Every component NOT named** must read `PASS` or `OPT-OUT` in the anchor — a
+   STRICTER set than the generic `_status_is_nonfailing` (which also admits
+   `SKIP`): a `SKIP` means "not measured", not "reviewed and waived", so it
+   cannot stand in for either a passing OTHER component or (see point 6) the one
+   being recertified now.
+4. **Anchor tree identity**: its `tree-end:` line parses to a sha/dirty/digest,
+   `dirty: no`, and `tree-integrity: PASS` is present.
+5. **The CURRENT tree matches that identity exactly** — same sha, same digest,
+   not dirty — compared via `_tree_short` against `TREE_START_HEAD`/`DIGEST`/
+   `DIRTY`, which every gate mode captures unconditionally before mode dispatch
+   (so this reuses the anchor's own hashing rather than re-deriving it). This is
+   the "same tree digest" requirement: a recert re-runs against the EXACT tree
+   the anchor gated, never a later commit (that is `--delta`'s job).
+6. **Anchor age ≤24h**, via the portable `_tree_mtime` helper (already shipped
+   for the tree-integrity mechanism) against the anchor FILE's mtime.
+7. **No named component is diff-touched by the PR's own changes.** The base
+   resolves via #4266's `_tooling_tests_resolve_base`/`_tooling_tests_changed_paths`
+   (same fail-closed-to-unmeasurable behavior), then each requested component is
+   classified through `_recert_component_diff_touched`
+   (`scripts/lib/recert-component-domains.sh`) — a **best-effort, coarse,
+   path-prefix classifier**, declared as such: it answers "does this
+   component's domain overlap the changed-path set", never "did this change
+   actually affect it". An unmapped component fails closed to "always
+   diff-touched" (never silently eligible); the table is pinned by a
+   completeness census in `scripts/tests/test_recertify.sh` against the LIVE
+   `COMPONENTS` array. A component whose domain intersects the diff is treated
+   as a code-failure candidate, not a host-fault one, and needs a full gate.
+
+**Certification**: the terminal block requires every NAMED component to be
+**exactly `PASS`** — again stricter than the generic nonfailing set, since a
+`SKIP` on the very component being recertified would defeat the whole point.
+`recert-verdict: CERTIFIED (...)` or `NOT-CERTIFIED (...)` names which. Exit 0
+on PASS, exit 2 on any preflight refusal (with a named `error:` line), exit 1 on
+`NOT-CERTIFIED`.
+
+**Record BOTH the anchor's full SUMMARY and this RECERT block in the PR** —
+same convention as `--delta`. `--recertify` is EXEMPT from the #1825 slot cap
+(it rides `--only`'s existing exemption) and from `apply_component_set_preflight`
+failing the run (advisory under `--only`, same as any other `--only` invocation).
+
+Self-test: `scripts/tests/test_recertify.sh` — a domain-table completeness
+census plus every acceptance branch above driven through REAL `--recertify`
+invocations against a scratch git fixture pinned to a local bare origin (never
+the network), wired into `tooling-tests`.
+
+---
+
 ## The `oom-audit` component (issue #2012)
 
 `oom-audit` is a SKIP-aware full-gate component that structurally audits the
