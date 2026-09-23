@@ -326,6 +326,52 @@ async fn partition_tombstone_generation_still_yields_one_row() {
     );
 }
 
+/// Roborev finding (issue #4222, round 5): a predicate on a
+/// SOURCE/deletion column (`generation` here) must apply to a SYNTHETIC
+/// row too, not just a plain data row. The prior split exempted EVERY
+/// non-partition-key predicate from a `partition_tombstone`/
+/// `range_tombstone_*` row, so `WHERE pk = 2 AND generation = 1` wrongly
+/// INCLUDED gen-2's partition-tombstone row (it does carry a real
+/// `generation` value — it was just never checked). This is the direct
+/// regression test for that fix: gen-2's partition-tombstone row must be
+/// EXCLUDED once `generation = 1` is added to the WHERE clause that
+/// `partition_tombstone_generation_still_yields_one_row` (above) proved
+/// includes it with no such filter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_column_predicate_excludes_synthetic_row_from_other_generation() {
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
+    let query = format!(
+        "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 2 AND generation = 1"
+    );
+    let result = db
+        .execute(&query)
+        .await
+        .expect("raw view point-key query with a generation predicate must succeed");
+
+    assert_eq!(
+        result.rows.len(),
+        3,
+        "generation = 1 must yield ONLY pk=2's 3 gen-1 live rows — gen-2's \
+         partition-tombstone row must be EXCLUDED now that its own generation value fails \
+         the predicate, not wrongly exempted because it is a synthetic row: {:?}",
+        result
+            .rows
+            .iter()
+            .map(|r| (bigint_of(r, "generation"), text_of(r, "row_kind")))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .rows
+            .iter()
+            .all(|r| text_of(r, "row_kind").as_deref() == Some("row")),
+        "no partition_tombstone row must survive a 'generation = 1' filter when the \
+         tombstone itself lives in generation 2"
+    );
+}
+
 /// Spec: "`SELECT DISTINCT sstable` answers 'which generations hold this
 /// key'" (design.md D2, folding #4205's SSTable-generation enumeration into
 /// this view). Literal SQL `DISTINCT` is a general query-engine capability
@@ -461,6 +507,28 @@ async fn selecting_an_unknown_column_fails_closed() {
         outcome.is_err(),
         "SELECTing a column absent from the raw view's contract must fail closed, not \
          silently drop it from the result"
+    );
+}
+
+/// Roborev finding (issue #4222, round 5): a `SELECT` expression other than
+/// a plain column reference — `WRITETIME(...)` here — must fail closed
+/// over the raw view, never silently fall through to returning EVERY
+/// column unfiltered (indistinguishable from `SELECT *`, the exact defect
+/// the prior wildcard match arm produced).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writetime_projection_fails_closed_rather_than_returning_every_column() {
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
+    let outcome = db
+        .execute(&format!(
+            "SELECT WRITETIME(val) FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1"
+        ))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "a non-plain-column SELECT expression (WRITETIME) must fail closed over the raw \
+         view, not silently return every column as if 'SELECT *' had been written"
     );
 }
 

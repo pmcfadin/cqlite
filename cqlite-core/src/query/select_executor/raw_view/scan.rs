@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// routes through `KWayMerger`/`StorageEngine::scan` — this is the
 /// deliberately UNRECONCILED per-generation full corpus.
 ///
-/// `pk_predicates`/`other_predicates` (roborev finding, issue #4222) are
+/// `always_predicates`/`data_predicates` (roborev finding, issue #4222) are
 /// applied to every mapped row HERE, inside the streaming callback, rather
 /// than as a materialize-then-filter pass in the caller — which is what lets
 /// `stop_after` (`Some(offset + limit)` for an explicit `LIMIT`) stop the
@@ -45,8 +45,8 @@ use std::sync::Arc;
 pub(in crate::query::select_executor) async fn raw_view_full_scan_rows(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
-    pk_predicates: &[&SSTablePredicate],
-    other_predicates: &[&SSTablePredicate],
+    always_predicates: &[&SSTablePredicate],
+    data_predicates: &[&SSTablePredicate],
     max_result_bytes: usize,
     max_result_rows: usize,
     stop_after: Option<usize>,
@@ -94,7 +94,7 @@ pub(in crate::query::select_executor) async fn raw_view_full_scan_rows(
                     Err(e) => return Err(e),
                 };
                 for row in mapped {
-                    match row_passes_predicates(&row, pk_predicates, other_predicates) {
+                    match row_passes_predicates(&row, always_predicates, data_predicates) {
                         Ok(true) => {}
                         Ok(false) => continue,
                         Err(e) => return Err(e),

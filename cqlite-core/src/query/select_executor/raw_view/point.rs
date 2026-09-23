@@ -123,12 +123,12 @@ fn push_mapped_rows(
     row: CompactionRow,
     schema: &TableSchema,
     source: &RawViewSource,
-    pk_predicates: &[&SSTablePredicate],
-    other_predicates: &[&SSTablePredicate],
+    always_predicates: &[&SSTablePredicate],
+    data_predicates: &[&SSTablePredicate],
     collector: &mut PointCollector,
 ) -> Result<bool> {
     for mapped in map_compaction_row(row, schema, source)? {
-        if row_passes_predicates(&mapped, pk_predicates, other_predicates)?
+        if row_passes_predicates(&mapped, always_predicates, data_predicates)?
             && collector.push(mapped)?
         {
             return Ok(true);
@@ -152,8 +152,8 @@ async fn scan_and_filter_one_reader(
     reader: &SSTableReader,
     schema: &TableSchema,
     pk_bytes: &[u8],
-    pk_predicates: &[&SSTablePredicate],
-    other_predicates: &[&SSTablePredicate],
+    always_predicates: &[&SSTablePredicate],
+    data_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
     collector: &mut PointCollector,
 ) -> Result<bool> {
@@ -180,8 +180,8 @@ async fn scan_and_filter_one_reader(
             row,
             schema,
             &source,
-            pk_predicates,
-            other_predicates,
+            always_predicates,
+            data_predicates,
             collector,
         )? {
             return Ok(true);
@@ -198,8 +198,8 @@ async fn point_rows_for_key(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     pk_bytes: &[u8],
-    pk_predicates: &[&SSTablePredicate],
-    other_predicates: &[&SSTablePredicate],
+    always_predicates: &[&SSTablePredicate],
+    data_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
     collector: &mut PointCollector,
 ) -> Result<bool> {
@@ -223,8 +223,8 @@ async fn point_rows_for_key(
                         row,
                         schema,
                         &source,
-                        pk_predicates,
-                        other_predicates,
+                        always_predicates,
+                        data_predicates,
                         collector,
                     )? {
                         return Ok(true);
@@ -236,8 +236,8 @@ async fn point_rows_for_key(
                     reader,
                     schema,
                     pk_bytes,
-                    pk_predicates,
-                    other_predicates,
+                    always_predicates,
+                    data_predicates,
                     scan_cancel,
                     collector,
                 )
@@ -261,8 +261,8 @@ async fn point_rows_for_key(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     pk_bytes: &[u8],
-    pk_predicates: &[&SSTablePredicate],
-    other_predicates: &[&SSTablePredicate],
+    always_predicates: &[&SSTablePredicate],
+    data_predicates: &[&SSTablePredicate],
     scan_cancel: &ScanCancel,
     collector: &mut PointCollector,
 ) -> Result<bool> {
@@ -272,8 +272,8 @@ async fn point_rows_for_key(
             reader,
             schema,
             pk_bytes,
-            pk_predicates,
-            other_predicates,
+            always_predicates,
+            data_predicates,
             scan_cancel,
             collector,
         )
@@ -289,7 +289,7 @@ async fn point_rows_for_key(
 /// every candidate generation, concatenating every physical row found. Never
 /// routes through `KWayMerger`/`StorageEngine::scan*` (design.md D5/D6) — the
 /// output is the deliberately UNRECONCILED per-generation contribution.
-/// `pk_predicates`/`other_predicates` (roborev finding, issue #4222) are the
+/// `always_predicates`/`data_predicates` (roborev finding, issue #4222) are the
 /// SAME split the full-scan producer applies — see `row_passes_predicates`.
 /// `max_result_bytes`/`max_result_rows`/`stop_after` bound accumulation
 /// INCREMENTALLY (a second roborev finding, issue #4222): a wide targeted
@@ -300,8 +300,8 @@ pub(in crate::query::select_executor) async fn raw_view_point_rows(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     keys: &[Vec<u8>],
-    pk_predicates: &[&SSTablePredicate],
-    other_predicates: &[&SSTablePredicate],
+    always_predicates: &[&SSTablePredicate],
+    data_predicates: &[&SSTablePredicate],
     max_result_bytes: usize,
     max_result_rows: usize,
     stop_after: Option<usize>,
@@ -313,8 +313,8 @@ pub(in crate::query::select_executor) async fn raw_view_point_rows(
             readers,
             schema,
             key,
-            pk_predicates,
-            other_predicates,
+            always_predicates,
+            data_predicates,
             &scan_cancel,
             &mut collector,
         )

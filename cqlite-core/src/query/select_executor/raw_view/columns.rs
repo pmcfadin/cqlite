@@ -17,7 +17,7 @@ pub(in crate::query::select_executor) use crate::query::raw_view_naming::strip_r
 /// rejecting every raw-view query before `SelectExecutor` can intercept it.
 pub(in crate::query::select_executor) use crate::query::raw_view_naming::RAW_SSTABLE_VIEW_SUFFIX as RAW_VIEW_SUFFIX;
 
-/// `true` for a CQL type whose cells are individually addressable (a
+/// `Some(true)` for a CQL type whose cells are individually addressable (a
 /// non-frozen list/set/map/UDT) — the column gets ONLY the
 /// `_complex_deletion` trio (design.md D7), never the single-cell
 /// `_timestamp`/`_ttl`/`_local_deletion_time`/`_tombstone` quad: a collection
@@ -27,18 +27,27 @@ pub(in crate::query::select_executor) use crate::query::raw_view_naming::RAW_SST
 /// collections/UDTs are single-cell and excluded on purpose: Cassandra never
 /// gives them a per-column complex-deletion marker, so they keep the plain
 /// quad instead.
-fn is_complex_cql_type(t: &CqlType) -> bool {
+///
+/// `None` — the caller must FAIL CLOSED, never default to "simple" — for
+/// ANY `CqlType::Custom(_)`, not just a non-`udt:`-prefixed one (roborev
+/// finding, issue #4222 — round 5, correcting the FIRST fix's own gap): a
+/// bare (non-frozen) UDT name parses to `Custom("udt:<name>")` via
+/// `cql_type_parser.rs`'s explicit UDT-shaped branch — matched below — but
+/// an all-LOWERCASE, non-primitive type name ALSO reaches `Custom(_)`, via
+/// that same parser's final fallback arm (`cql_type_parser.rs:274`), with
+/// NO prefix at all. Cassandra identifiers default to lowercase unless
+/// quoted, so a real UDT named e.g. `address` or `person` parses to exactly
+/// `Custom("address")` — indistinguishable, at this call site with no UDT
+/// registry to consult, from a genuinely unrecognized custom type.
+/// Defaulting the non-`udt:`-prefixed case to "simple" (the FIRST fix's
+/// remaining gap) therefore silently misclassified every real
+/// lowercase-named UDT column as single-cell, assigning it the WRONG
+/// metadata shape rather than refusing to guess (issue #28 no-heuristics).
+fn try_is_complex_cql_type(t: &CqlType) -> Option<bool> {
     match t {
-        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) | CqlType::Udt(_, _) => true,
-        // A bare (non-frozen) UDT name parses to `Custom("udt:<name>")`, NEVER
-        // `CqlType::Udt(..)` (roborev finding, issue #4222):
-        // `ComplexTypeParser::parse_with_depth` only builds the structured
-        // `Udt` variant when it has the full field list to hand, which a bare
-        // schema type STRING never carries — `schema/cql_type_parser.rs:249`.
-        // Matching only `Udt(..)` therefore silently misclassified every
-        // real non-frozen UDT column as "simple".
-        CqlType::Custom(name) => name.starts_with("udt:"),
-        _ => false,
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) | CqlType::Udt(_, _) => Some(true),
+        CqlType::Custom(_) => None,
+        _ => Some(false),
     }
 }
 
@@ -117,7 +126,16 @@ pub(in crate::query::select_executor) fn raw_view_columns(
                 base.keyspace, base.table, col.name, col.data_type
             ))
         })?;
-        let is_complex = is_complex_cql_type(&cql_type);
+        let is_complex = try_is_complex_cql_type(&cql_type).ok_or_else(|| {
+            Error::Schema(format!(
+                "raw SSTable view: base table '{}.{}' column '{}' has declared type '{}', \
+                 which parses to an unclassifiable custom type — this parser cannot tell \
+                 whether it is a single-cell type or a multi-cell UDT/collection without a \
+                 UDT registry (a bare lowercase UDT name parses to this exact shape) — \
+                 refusing to guess the column contract shape (issue #28 no-heuristics)",
+                base.keyspace, base.table, col.name, col.data_type
+            ))
+        })?;
         if is_complex {
             push(
                 &mut columns,
@@ -354,5 +372,54 @@ mod tests {
         let err = raw_view_columns(&schema)
             .expect_err("a base column literally named 'keep_col_timestamp' must be refused");
         assert!(matches!(err, Error::Schema(_)));
+    }
+
+    /// Roborev finding (issue #4222, round 5, correcting round 4's own
+    /// gap): a BARE lowercase UDT name — e.g. `address` — parses to
+    /// `CqlType::Custom("address")` with NO `udt:` prefix
+    /// (`cql_type_parser.rs`'s all-lowercase fallback arm), indistinguishable
+    /// at this call site from a genuinely unrecognized custom type. This
+    /// must fail closed (never silently default to "simple"), or a real
+    /// UDT column gets the WRONG metadata shape (the single-cell quad
+    /// instead of the `_complex_deletion` trio).
+    #[test]
+    fn bare_lowercase_udt_type_name_fails_closed_rather_than_simple() {
+        let mut schema = dropped_regular_col_schema();
+        schema.columns.push(Column {
+            name: "addr".to_string(),
+            data_type: "address".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        let err = raw_view_columns(&schema).expect_err(
+            "a bare lowercase UDT-shaped type name must be refused, never silently \
+             classified as a simple type",
+        );
+        assert!(
+            matches!(err, Error::Schema(_)),
+            "must surface as Error::Schema, got: {err:?}"
+        );
+    }
+
+    /// Sanity: the explicitly `udt:`-prefixed shape (a MIXED-case or
+    /// dotted UDT name, `cql_type_parser.rs`'s earlier branch) also fails
+    /// closed here — this call site has no UDT registry to consult either
+    /// way, so both `Custom(_)` shapes are refused identically.
+    #[test]
+    fn udt_prefixed_custom_type_also_fails_closed() {
+        assert_eq!(
+            try_is_complex_cql_type(&CqlType::Custom("udt:Address".to_string())),
+            None
+        );
+        assert_eq!(
+            try_is_complex_cql_type(&CqlType::Custom("address".to_string())),
+            None
+        );
+        assert_eq!(try_is_complex_cql_type(&CqlType::Text), Some(false));
+        assert_eq!(
+            try_is_complex_cql_type(&CqlType::List(Box::new(CqlType::Int))),
+            Some(true)
+        );
     }
 }
