@@ -149,6 +149,23 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
 1. **Beat, then run THE full gate of record — background, summary-file, ONE run.** This is
    the only gate invocation that counts. The REQUIRED form (issue #2079) writes the block
    to a pre-chosen file so raw stdout never has to be read into context:
+
+   **On a shared fleet Linux box, `scripts/flow/gate-box-launch.sh` is the ONE sanctioned
+   entry point (#4267) — never hand-recite the box settings (lane worktree, npx-free `PATH`,
+   `env -u LANE_ID`, `TMPDIR` on the tmpfs, dataset root, file-growth disclosure).** It
+   resolves the PR/branch against the box's canonical clone, refuses a stale base and the
+   two recurring env hazards by name, cuts/refreshes the lane worktree, and calls
+   `gate-detached.sh` for you with an env built from an allowlist:
+   ```bash
+   bash scripts/flow/claim-heartbeat.sh beat <N>
+   bash scripts/flow/gate-box-launch.sh <N> --box <host-name>
+   # Prints one line on success: GATE-BOX-LAUNCH: box=… lane=… head=… unit=… run-id=… summary=… log=…
+   # Sanity-check first with --dry-run: it resolves everything and prints the env + command
+   # without any git/process side effect.
+   ```
+   See `docs/development/fleet-runbook.md` ("Starting a gate of record on a fleet Linux box")
+   for the box-profile mechanism. On a machine with **no committed box profile** (a laptop, or
+   a box `gate-box-launch.sh` does not yet know), fall back to the direct form it itself calls:
    ```bash
    bash scripts/flow/claim-heartbeat.sh beat <N>
    # Detached: its own cgroup, so it survives YOUR context ending (#3473). Returns
