@@ -546,16 +546,26 @@ mod tests {
     /// ever renamed or moved out from under the hardcoded filter string.
     #[test]
     fn proc_thread_gauge_rises_with_load_and_settles() {
-        if read_proc_threads().is_none() {
-            return; // Off-/proc platform: absence is covered elsewhere.
-        }
-
-        // Set only in the re-exec'd child; its absence marks the driver.
+        // Set only in the re-exec'd child; its absence marks the driver. Role
+        // detection needs BOTH markers: a stray `CHILD_ENV` in some ambient
+        // environment (a leaked debugging export, a wrapper script) with no
+        // `SENTINEL_ENV` must fail loudly via the `expect` below rather than
+        // silently degrade to the unsound single-process comparison #4144
+        // removes.
         const CHILD_ENV: &str = "CQLITE_SATURATION_PROC_THREAD_GAUGE_CHILD";
-        // Path of a file the child writes only after reaching the settle
-        // assertion below — the vacuous-pass guard described above.
+        // Path of a file the child writes, unconditionally, only after
+        // reaching the settle assertion below — the vacuous-pass guard
+        // described above.
         const SENTINEL_ENV: &str = "CQLITE_SATURATION_PROC_THREAD_GAUGE_SENTINEL";
         if std::env::var_os(CHILD_ENV).is_none() {
+            // Driver mode. The off-`/proc` check belongs here only: the
+            // child is the same binary, already proven `/proc`-capable, so a
+            // `None` there would be a real reader regression, not absence —
+            // it now surfaces via the child's own `expect("linux self-read")`
+            // instead of being misattributed to a stale filter string.
+            if read_proc_threads().is_none() {
+                return; // Off-/proc platform: absence is covered elsewhere.
+            }
             let exe = std::env::current_exe().expect("current_exe");
             let sentinel = tempfile::NamedTempFile::new().expect("sentinel tempfile");
             // `module_path!()` includes the crate name (`cqlite_flight::...`),
@@ -582,7 +592,12 @@ mod tests {
             return;
         }
 
-        // Child mode: sole test in this process, so both reads are ours alone.
+        // Child mode: sole test in this process, so both reads are ours
+        // alone. A missing sentinel path here means CHILD_ENV leaked in
+        // without going through the driver above — fail loudly rather than
+        // silently run the unsound comparison.
+        let sentinel_path =
+            std::env::var_os(SENTINEL_ENV).expect("SENTINEL_ENV must be set alongside CHILD_ENV");
         let base = read_proc_threads().expect("linux self-read");
         let n = 8usize;
         // A barrier so every spawned thread is simultaneously alive when we read
@@ -632,9 +647,7 @@ mod tests {
         );
 
         // Prove to the driver that this filtered run actually reached here.
-        if let Some(path) = std::env::var_os(SENTINEL_ENV) {
-            std::fs::write(path, b"ran").expect("write sentinel");
-        }
+        std::fs::write(sentinel_path, b"ran").expect("write sentinel");
     }
 
     /// Stage 1.2 corollary: a `None` reader contributes NO sample to a tick, so
