@@ -133,11 +133,15 @@ pub(in crate::query::select_executor) fn map_compaction_row(
                     );
                 }
             }
-            if let Some((_deletion_time, local_deletion_time)) = row_deletion {
+            if let Some((deletion_time, local_deletion_time)) = row_deletion {
                 values.insert("row_tombstone".to_string(), Value::text("row"));
                 values.insert(
                     "row_local_deletion_time".to_string(),
                     Value::Integer(local_deletion_time),
+                );
+                values.insert(
+                    "row_deletion_timestamp".to_string(),
+                    Value::BigInt(deletion_time),
                 );
             }
 
@@ -145,7 +149,7 @@ pub(in crate::query::select_executor) fn map_compaction_row(
             vec![QueryRow::with_values(row.key.clone(), values)]
         }
         CompactionRowData::Tombstone {
-            deletion_time: _,
+            deletion_time,
             local_deletion_time,
             clustering,
         } => {
@@ -156,6 +160,10 @@ pub(in crate::query::select_executor) fn map_compaction_row(
             }
             values.insert("row_kind".to_string(), Value::text("row"));
             values.insert("row_tombstone".to_string(), Value::text("row"));
+            values.insert(
+                "row_deletion_timestamp".to_string(),
+                Value::BigInt(deletion_time),
+            );
             values.insert(
                 "row_local_deletion_time".to_string(),
                 Value::Integer(local_deletion_time),

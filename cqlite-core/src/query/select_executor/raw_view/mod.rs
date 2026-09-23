@@ -11,10 +11,11 @@
 //! Since the query engine has no catalog/`TableProvider` registry at all
 //! (table resolution runs a `TableId` string straight to on-disk SSTables),
 //! recognizing this new virtual table means intercepting resolution BEFORE it
-//! reaches disk. [`SelectExecutor::execute`] (`execute.rs`) checks the FROM
-//! table name for [`strip_raw_view_suffix`]'s suffix immediately after
-//! extracting it, BEFORE the normal `resolve_table_schema` /
-//! execution-step pipeline runs, and routes entirely to
+//! reaches disk. [`SelectExecutor::execute`] (`execute.rs`) and
+//! [`SelectExecutor::execute_streaming`] (`mod.rs`) both call
+//! [`SelectExecutor::raw_view_base_name`] immediately after extracting the
+//! FROM-clause table id, BEFORE the normal `resolve_table_schema` /
+//! execution-step pipeline runs, and route a recognized suffix entirely to
 //! [`SelectExecutor::execute_raw_sstable_view`] — never through
 //! `StorageEngine::scan`/`scan_partition`/`SSTableManager::scan_with_meter`,
 //! which RECONCILE across generations (design.md D5's "why not `KWayMerger`").
@@ -35,16 +36,52 @@ mod scan;
 pub(super) use columns::{raw_view_columns, strip_raw_view_suffix};
 
 use super::{classify_partition_lookup, parse_table_id, PartitionLookupOutcome};
-use crate::query::result::{QueryMetadata, QueryResult};
+use crate::query::result::{QueryMetadata, QueryResult, QueryRow};
 use crate::query::result_budget::enforce_materialized_rows;
 use crate::query::select_ast::{SelectClause, SelectExpression};
 use crate::query::select_optimizer::OptimizedQueryPlan;
 use crate::schema::TableSchema;
+use crate::types::Value;
 use crate::{Error, Result, TableId};
 use point::raw_view_point_rows;
 use scan::raw_view_full_scan_rows;
+use std::sync::Arc;
+
+/// `true` when `row`'s `row_kind` column is the plain `'row'` case (a live
+/// or tombstoned DATA row) rather than a synthetic `partition_tombstone` /
+/// `range_tombstone_start` / `range_tombstone_end` row, which carries no
+/// clustering columns (or, for a partition-tombstone row, no data columns at
+/// all). Used to exempt those synthetic rows from the clustering/regular-
+/// column predicate backstop (roborev finding, issue #4222): the spec
+/// requires "a partition tombstone is visible even when the generation holds
+/// no live rows", which a clustering-key predicate must not silently defeat.
+fn is_plain_data_row(row: &QueryRow) -> bool {
+    row.values.get("row_kind") == Some(&Value::text("row"))
+}
 
 impl super::SelectExecutor {
+    /// Decide whether `table_id` should be intercepted as a raw-view
+    /// reference, returning the (owned) base table name when so.
+    ///
+    /// A LITERAL table actually named with the `_raw_sstable_data` suffix
+    /// takes precedence (roborev finding, issue #4222): unconditional
+    /// stripping made such a real table permanently unreachable through
+    /// this executor. Only when the FULL, unstripped name resolves to NO
+    /// registered schema does the suffix count as the D1 naming convention.
+    /// Checked on the bare table name only (no keyspace segment), matching
+    /// how the suffix is a convention over the flat `keyspace.table`
+    /// namespace.
+    pub(super) async fn raw_view_base_name(&self, table_id: &TableId) -> Option<String> {
+        let (_, bare_table_name) = parse_table_id(table_id);
+        let base = strip_raw_view_suffix(&bare_table_name)?;
+        if self.resolve_table_schema(table_id).await.is_some() {
+            // A real table is literally registered under the suffixed name —
+            // let it resolve normally, never shadow it.
+            return None;
+        }
+        Some(base.to_string())
+    }
+
     /// Entry point for a `_raw_sstable_data` table reference (design.md D6).
     /// `table_id` carries the RAW-VIEW name (suffix included, as the FROM
     /// clause named it — needed to resolve the reader snapshot and to keep
@@ -55,6 +92,29 @@ impl super::SelectExecutor {
         table_id: &TableId,
         base_name: &str,
     ) -> Result<QueryResult> {
+        // Fail closed on every reshaping clause this slice does not implement
+        // (roborev finding, issue #4222): ORDER BY needs a real sort over the
+        // producers' unordered output, DISTINCT/aggregates need dedup/fold
+        // machinery — none of which this view builds (design.md D4's
+        // JOIN-gap precedent: a general query-engine capability, not a
+        // raw-view concern). Checked BEFORE any producer work runs, so a
+        // rejected query never pays for a scan it will discard.
+        if plan.aggregation_plan.is_some() {
+            return Err(Error::unsupported_query(
+                "aggregate functions are not supported over a _raw_sstable_data view",
+            ));
+        }
+        if matches!(plan.statement.select_clause, SelectClause::Distinct(_)) {
+            return Err(Error::unsupported_query(
+                "SELECT DISTINCT is not supported over a _raw_sstable_data view",
+            ));
+        }
+        if plan.statement.order_by.is_some() {
+            return Err(Error::unsupported_query(
+                "ORDER BY is not supported over a _raw_sstable_data view",
+            ));
+        }
+
         let (keyspace, _) = parse_table_id(table_id);
         let base_schema = self
             .resolve_base_schema_for_raw_view(keyspace.as_deref(), base_name)
@@ -74,7 +134,10 @@ impl super::SelectExecutor {
             base_name
         ));
 
-        let columns = raw_view_columns(&base_schema);
+        let columns = raw_view_columns(&base_schema)?;
+        let readers = self
+            .resolve_raw_view_readers(&base_table_id, keyspace.is_some())
+            .await?;
 
         // Reuse the SAME sstable-predicate extraction the optimizer already
         // ran for this statement's WHERE clause (predicates are plain
@@ -86,15 +149,12 @@ impl super::SelectExecutor {
 
         let rows = match outcome {
             PartitionLookupOutcome::Targeted(pk_bytes) => {
-                let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;
                 raw_view_point_rows(&readers, &base_schema, std::slice::from_ref(&pk_bytes)).await?
             }
             PartitionLookupOutcome::MultiTargeted(pk_keys) => {
-                let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;
                 raw_view_point_rows(&readers, &base_schema, &pk_keys).await?
             }
             PartitionLookupOutcome::Fallback(_) => {
-                let readers = self.storage.raw_view_reader_snapshot(&base_table_id).await;
                 raw_view_full_scan_rows(
                     &readers,
                     &base_schema,
@@ -109,16 +169,21 @@ impl super::SelectExecutor {
         // partition-targeted paths): `classify_partition_lookup` only prunes
         // by the PARTITION-key predicate(s), so any ADDITIONAL predicate in
         // the WHERE clause (a clustering-key equality/range, or a predicate
-        // on a non-key column) is evaluated here against every produced row.
-        // Reuses the SAME `evaluate_predicates` the base scan applies, so the
-        // two never drift. A predicate over a column absent from a
-        // synthetic row (e.g. a clustering equality against a
-        // `partition_tombstone` row, which carries no clustering columns)
-        // correctly evaluates `Unknown`/false and drops that row — the same
-        // treatment an ordinary sparse row gets today.
+        // on a non-key column) is evaluated here against every produced
+        // PLAIN DATA row (`row_kind = 'row'`). A synthetic
+        // `partition_tombstone`/`range_tombstone_*` row is EXEMPT (roborev
+        // finding, issue #4222): it carries no clustering/regular columns to
+        // test a clustering/regular predicate against, and the spec
+        // explicitly requires a partition tombstone to stay visible "even
+        // when the generation holds no live rows" — a clustering predicate
+        // silently discarding it would violate that. The partition-key
+        // predicate(s) already selected the right partition upstream (or, on
+        // the unconstrained full-scan path, there is no partition predicate
+        // to apply at all), so keeping these rows unconditionally is correct
+        // on both paths.
         let mut filtered = Vec::with_capacity(rows.len());
         for row in rows {
-            if super::evaluate_predicates(&row, &plan.sstable_predicates)? {
+            if !is_plain_data_row(&row) || super::evaluate_predicates(&row, &plan.sstable_predicates)? {
                 filtered.push(row);
             }
         }
@@ -147,28 +212,64 @@ impl super::SelectExecutor {
                     })
                     .collect();
                 let trimmed_rows = self.trim_projection(rows, exprs);
-                let trimmed_columns: Vec<_> = selected
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, name)| {
-                        columns.iter().find(|c| c.name == *name).map(|c| {
-                            let mut c = c.clone();
-                            c.position = idx;
-                            c
-                        })
-                    })
-                    .collect();
+                // Look up every selected name BEFORE enumerating (roborev
+                // finding, issue #4222): assigning `position` from the
+                // pre-filter index left a `filter_map`'d-out unknown column
+                // a GAP in the surviving positions (`SELECT pk, bogus, ck`
+                // produced positions `0, 2`), violating the dense/ordered
+                // invariant `metadata.columns` must hold. An unknown column
+                // now fails closed (D8) instead of being silently dropped.
+                let mut trimmed_columns = Vec::with_capacity(selected.len());
+                for name in &selected {
+                    let col = columns
+                        .iter()
+                        .find(|c| c.name == *name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::Schema(format!(
+                                "raw SSTable view: SELECT names unknown column '{name}' — \
+                                 not part of the raw view's column contract"
+                            ))
+                        })?;
+                    trimmed_columns.push(col);
+                }
+                for (idx, c) in trimmed_columns.iter_mut().enumerate() {
+                    c.position = idx;
+                }
                 (trimmed_rows, trimmed_columns)
             }
             _ => (rows, columns),
         };
 
+        // LIMIT/OFFSET (roborev finding, issue #4222): the raw view returns
+        // straight from `execute_raw_sstable_view`, so it never reaches the
+        // execution-step pipeline's `Limit`/`PerPartitionLimit` steps —
+        // applied here instead, mirroring the constant-query branch
+        // (`execute.rs`'s `SELECT 1` handling) and issue #1578's exemption:
+        // an EXPLICIT `LIMIT` exempts the row-count safety valve (the byte
+        // budget still guards memory), since the user's own bound already
+        // caps the result.
+        let offset = plan.statement.offset.unwrap_or(0) as usize;
+        let limit = plan
+            .statement
+            .limit
+            .as_ref()
+            .map(|l| l.count as usize)
+            .unwrap_or(usize::MAX);
+        let rows: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
+
         // Same final budget check every other query path applies (issue
         // #1582/D6) — belt-and-braces alongside the full-scan producer's own
         // incremental check (which never materializes past the budget); the
         // point-key path has no incremental check of its own, so this is its
-        // ONLY enforcement.
-        enforce_materialized_rows(&rows, self.max_result_bytes, self.max_result_rows)?;
+        // ONLY enforcement. Applied to the POST-limit rows, so a `LIMIT 10`
+        // raw-view query is never penalized for the corpus it did not keep.
+        let effective_max_rows = if plan.statement.limit.is_some() {
+            usize::MAX
+        } else {
+            self.max_result_rows
+        };
+        enforce_materialized_rows(&rows, self.max_result_bytes, effective_max_rows)?;
 
         let total_rows = rows.len() as u64;
         Ok(QueryResult {
@@ -216,5 +317,37 @@ impl super::SelectExecutor {
                     columns::RAW_VIEW_SUFFIX,
                 ))
             })
+    }
+
+    /// Resolve the per-generation reader snapshot for `base_table_id`,
+    /// refusing a QUALIFIED (keyspace-carrying) raw-view request that only
+    /// resolved via the reader map's bare-table-name FALLBACK (roborev
+    /// finding, issue #4222).
+    ///
+    /// `resolve_reader_list` falls back to a bare-name match when no exact
+    /// `keyspace.table` key exists; `manager_point_read.rs` threads that same
+    /// `fully_qualified_match` signal into `get_with_resolution_unmetered`
+    /// specifically so a qualified query never silently reads a DIFFERENT
+    /// keyspace's same-named table (#1321) — this view had no equivalent
+    /// guard, so `ks_b.t_raw_sstable_data` could read `ks_a.t`'s rows tagged
+    /// as `ks_b.t`'s. `was_qualified` is `false` for an unqualified request
+    /// (no keyspace to mismatch, matching `fully_qualified_match`'s own
+    /// contract), so this never refuses a legitimately bare table name.
+    async fn resolve_raw_view_readers(
+        &self,
+        base_table_id: &TableId,
+        was_qualified: bool,
+    ) -> Result<Vec<Arc<crate::storage::sstable::reader::SSTableReader>>> {
+        let (readers, fully_qualified_match) =
+            self.storage.raw_view_reader_snapshot(base_table_id).await;
+        if was_qualified && !fully_qualified_match {
+            return Err(Error::Table(format!(
+                "raw SSTable view: '{base_table_id}' resolved only via a bare-table-name \
+                 fallback, not an exact keyspace match — refusing to read a possibly \
+                 DIFFERENT keyspace's same-named table (issue #1321's guard, applied here \
+                 for issue #4222)"
+            )));
+        }
+        Ok(readers)
     }
 }
