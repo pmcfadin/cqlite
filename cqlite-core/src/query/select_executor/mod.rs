@@ -90,7 +90,6 @@ use lookup::{
     classify_partition_lookup, honest_targeted_path, sort_metadata_rows_by_token,
     sort_rows_by_token, PartitionLookupOutcome,
 };
-use raw_view::strip_raw_view_suffix;
 use row_build::{column_info_from_type_str, parse_cql_type_str, parse_table_id};
 use value_ops::{compare_values_ordering, const_arithmetic, eval_arithmetic};
 use writetime_ttl::{
@@ -540,8 +539,7 @@ impl SelectExecutor {
         // state for the LITERAL suffixed name and silently scans nothing.
         if let Some(ref from_clause) = plan.statement.from_clause {
             let table_id = self.extract_table_id(from_clause)?;
-            let (_, bare_table_name) = parse_table_id(&table_id);
-            if strip_raw_view_suffix(&bare_table_name).is_some() {
+            if self.raw_view_base_name(&table_id).await.is_some() {
                 return self.execute_and_stream(plan, config).await;
             }
         }

@@ -66,13 +66,14 @@ impl SelectExecutor {
         // FROM-clause reference is intercepted HERE, before schema resolution
         // or any execution step runs, and routed entirely to the raw view's
         // own producer — never through `StorageEngine::scan`/`scan_partition`,
-        // which RECONCILE across generations. Checked on the BARE table name
-        // (no keyspace segment), matching how the suffix is a naming
-        // convention over the flat `keyspace.table` namespace (D1).
-        let (_, bare_table_name) = parse_table_id(&table_id);
-        if let Some(base_name) = super::strip_raw_view_suffix(&bare_table_name) {
+        // which RECONCILE across generations. `raw_view_base_name` prefers a
+        // REAL table literally named with the suffix, if one is registered
+        // (roborev finding: unconditional stripping made such a table
+        // unreachable) — only when no literal schema resolves does the
+        // suffix count as the naming convention (D1).
+        if let Some(base_name) = self.raw_view_base_name(&table_id).await {
             return self
-                .execute_raw_sstable_view(&plan, &table_id, base_name)
+                .execute_raw_sstable_view(&plan, &table_id, &base_name)
                 .await;
         }
 

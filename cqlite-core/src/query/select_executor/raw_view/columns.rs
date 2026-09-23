@@ -4,6 +4,7 @@
 use super::super::{column_info_from_type_str, parse_cql_type_str};
 use crate::query::result::ColumnInfo;
 use crate::schema::{CqlType, TableSchema};
+use crate::Error;
 use std::collections::HashSet;
 
 pub(in crate::query::select_executor) use crate::query::raw_view_naming::strip_raw_view_suffix;
@@ -17,10 +18,15 @@ pub(in crate::query::select_executor) use crate::query::raw_view_naming::strip_r
 pub(in crate::query::select_executor) use crate::query::raw_view_naming::RAW_SSTABLE_VIEW_SUFFIX as RAW_VIEW_SUFFIX;
 
 /// `true` for a CQL type whose cells are individually addressable (a
-/// non-frozen list/set/map/UDT) — the column gets the `_complex_deletion`
-/// trio (design.md D7) instead of relying on a single cell's own metadata.
-/// `Frozen(..)` collections/UDTs are single-cell and excluded on purpose:
-/// Cassandra never gives them a per-column complex-deletion marker.
+/// non-frozen list/set/map/UDT) — the column gets ONLY the
+/// `_complex_deletion` trio (design.md D7), never the single-cell
+/// `_timestamp`/`_ttl`/`_local_deletion_time`/`_tombstone` quad: a collection
+/// has no ONE cell timestamp to report, and declaring those four columns for
+/// a complex type would always render NULL — indistinguishable from "no
+/// timestamp exists" (roborev finding, issue #4222). `Frozen(..)`
+/// collections/UDTs are single-cell and excluded on purpose: Cassandra never
+/// gives them a per-column complex-deletion marker, so they keep the plain
+/// quad instead.
 fn is_complex_cql_type(t: &CqlType) -> bool {
     matches!(
         t,
@@ -34,11 +40,21 @@ fn is_complex_cql_type(t: &CqlType) -> bool {
 ///
 /// Order: partition-key columns, clustering-key columns (plain data columns:
 /// every physical row, including a range-tombstone bound row, carries them),
-/// then per-non-key-column metadata (the base value plus its
-/// `_timestamp`/`_ttl`/`_local_deletion_time`/`_tombstone` quad, plus a
-/// `_complex_deletion` trio for a collection/UDT column), then the
-/// row-level, partition-level, row-kind/range-tombstone, and source columns.
-pub(in crate::query::select_executor) fn raw_view_columns(base: &TableSchema) -> Vec<ColumnInfo> {
+/// then per-non-key-column metadata (the base value plus, for a simple
+/// column, its `_timestamp`/`_ttl`/`_local_deletion_time`/`_tombstone` quad,
+/// or for a collection/UDT column, its `_complex_deletion` trio only), then
+/// the row-level, partition-level, row-kind/range-tombstone, and source
+/// columns.
+///
+/// Fails closed (design.md D8) with `Error::Schema` when a synthesized
+/// metadata-column name COLLIDES with a real base-table column name (e.g. a
+/// base table with its own `generation`/`sstable`/`row_kind` column, or a
+/// `val` column alongside a `val_timestamp` column) — silently overwriting
+/// one of the two would be a no-heuristics-violating silent data loss
+/// (roborev finding, issue #4222), never something this view may do quietly.
+pub(in crate::query::select_executor) fn raw_view_columns(
+    base: &TableSchema,
+) -> crate::Result<Vec<ColumnInfo>> {
     let key_names: HashSet<&str> = base
         .partition_keys
         .iter()
@@ -47,16 +63,27 @@ pub(in crate::query::select_executor) fn raw_view_columns(base: &TableSchema) ->
         .collect();
 
     let mut columns: Vec<ColumnInfo> = Vec::new();
-    let push = |columns: &mut Vec<ColumnInfo>, name: String, type_str: &str| {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |columns: &mut Vec<ColumnInfo>, name: String, type_str: &str| {
+        if !seen.insert(name.clone()) {
+            return Err(Error::Schema(format!(
+                "raw SSTable view: base table '{}.{}' has a column named '{name}' that \
+                 collides with a synthesized metadata column name — the raw view's column \
+                 contract (design.md D7) cannot be built without silently shadowing one of \
+                 the two",
+                base.keyspace, base.table
+            )));
+        }
         let position = columns.len();
         columns.push(column_info_from_type_str(name, type_str, position, None));
+        Ok(())
     };
 
     for pk in &base.partition_keys {
-        push(&mut columns, pk.name.clone(), &pk.data_type);
+        push(&mut columns, pk.name.clone(), &pk.data_type)?;
     }
     for ck in &base.clustering_keys {
-        push(&mut columns, ck.name.clone(), &ck.data_type);
+        push(&mut columns, ck.name.clone(), &ck.data_type)?;
     }
 
     // `TableSchema::columns` carries EVERY declared column, key columns
@@ -67,15 +94,7 @@ pub(in crate::query::select_executor) fn raw_view_columns(base: &TableSchema) ->
         .iter()
         .filter(|c| !key_names.contains(c.name.as_str()))
     {
-        push(&mut columns, col.name.clone(), &col.data_type);
-        push(&mut columns, format!("{}_timestamp", col.name), "bigint");
-        push(&mut columns, format!("{}_ttl", col.name), "int");
-        push(
-            &mut columns,
-            format!("{}_local_deletion_time", col.name),
-            "int",
-        );
-        push(&mut columns, format!("{}_tombstone", col.name), "text");
+        push(&mut columns, col.name.clone(), &col.data_type)?;
 
         let is_complex = parse_cql_type_str(&col.data_type)
             .map(|t| is_complex_cql_type(&t))
@@ -85,51 +104,66 @@ pub(in crate::query::select_executor) fn raw_view_columns(base: &TableSchema) ->
                 &mut columns,
                 format!("{}_complex_deletion", col.name),
                 "boolean",
-            );
+            )?;
             push(
                 &mut columns,
                 format!("{}_complex_deletion_time", col.name),
                 "int",
-            );
+            )?;
             push(
                 &mut columns,
                 format!("{}_complex_deletion_timestamp", col.name),
                 "bigint",
-            );
+            )?;
+        } else {
+            push(&mut columns, format!("{}_timestamp", col.name), "bigint")?;
+            push(&mut columns, format!("{}_ttl", col.name), "int")?;
+            push(
+                &mut columns,
+                format!("{}_local_deletion_time", col.name),
+                "int",
+            )?;
+            push(&mut columns, format!("{}_tombstone", col.name), "text")?;
         }
     }
 
-    push(&mut columns, "row_timestamp".to_string(), "bigint");
-    push(&mut columns, "row_ttl".to_string(), "int");
-    push(&mut columns, "row_local_deletion_time".to_string(), "int");
-    push(&mut columns, "row_tombstone".to_string(), "text");
+    push(&mut columns, "row_timestamp".to_string(), "bigint")?;
+    push(&mut columns, "row_ttl".to_string(), "int")?;
+    push(&mut columns, "row_local_deletion_time".to_string(), "int")?;
+    push(&mut columns, "row_tombstone".to_string(), "text")?;
+    // The row tombstone's own `markedForDeleteAt` — distinct from
+    // `row_local_deletion_time` (the GC-clock seconds), mirroring the
+    // partition/range pairs below (roborev finding, issue #4222: this was
+    // previously discarded, making a row tombstone's writetime unrecoverable
+    // from this view).
+    push(&mut columns, "row_deletion_timestamp".to_string(), "bigint")?;
 
     push(
         &mut columns,
         "partition_deletion_time".to_string(),
         "bigint",
-    );
+    )?;
     push(
         &mut columns,
         "partition_deletion_timestamp".to_string(),
         "bigint",
-    );
+    )?;
 
-    push(&mut columns, "row_kind".to_string(), "text");
-    push(&mut columns, "bound_inclusive".to_string(), "boolean");
-    push(&mut columns, "range_deletion_time".to_string(), "bigint");
+    push(&mut columns, "row_kind".to_string(), "text")?;
+    push(&mut columns, "bound_inclusive".to_string(), "boolean")?;
+    push(&mut columns, "range_deletion_time".to_string(), "bigint")?;
     push(
         &mut columns,
         "range_deletion_timestamp".to_string(),
         "bigint",
-    );
+    )?;
 
-    push(&mut columns, "sstable".to_string(), "text");
-    push(&mut columns, "generation".to_string(), "int");
-    push(&mut columns, "format".to_string(), "text");
-    push(&mut columns, "position".to_string(), "bigint");
+    push(&mut columns, "sstable".to_string(), "text")?;
+    push(&mut columns, "generation".to_string(), "int")?;
+    push(&mut columns, "format".to_string(), "text")?;
+    push(&mut columns, "position".to_string(), "bigint")?;
 
-    columns
+    Ok(columns)
 }
 
 #[cfg(test)]
@@ -206,7 +240,7 @@ mod tests {
     #[test]
     fn dropped_regular_col_column_contract_snapshot() {
         let schema = dropped_regular_col_schema();
-        let columns = raw_view_columns(&schema);
+        let columns = raw_view_columns(&schema).expect("no collision in this fixture");
         let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -227,6 +261,7 @@ mod tests {
                 "row_ttl",
                 "row_local_deletion_time",
                 "row_tombstone",
+                "row_deletion_timestamp",
                 "partition_deletion_time",
                 "partition_deletion_timestamp",
                 "row_kind",
@@ -250,11 +285,49 @@ mod tests {
     #[test]
     fn key_columns_are_never_duplicated_as_metadata_quads() {
         let schema = dropped_regular_col_schema();
-        let columns = raw_view_columns(&schema);
+        let columns = raw_view_columns(&schema).expect("no collision in this fixture");
         let pk_timestamp_present = columns.iter().any(|c| c.name == "pk_timestamp");
         assert!(
             !pk_timestamp_present,
             "a partition-key column must not get a per-cell metadata quad"
         );
+    }
+
+    /// A base table whose real column name collides with a synthesized
+    /// metadata-column name must fail closed (design.md D8), never silently
+    /// clobber one of the two (roborev finding, issue #4222).
+    #[test]
+    fn colliding_base_column_name_fails_closed() {
+        let mut schema = dropped_regular_col_schema();
+        schema.columns.push(Column {
+            name: "generation".to_string(),
+            data_type: "int".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        let err = raw_view_columns(&schema)
+            .expect_err("a base column literally named 'generation' must be refused");
+        assert!(
+            matches!(err, Error::Schema(_)),
+            "collision must surface as Error::Schema, got: {err:?}"
+        );
+    }
+
+    /// A base column named `<other>_timestamp` alongside a plain `<other>`
+    /// column collides with that OTHER column's synthesized metadata quad.
+    #[test]
+    fn colliding_quad_suffix_fails_closed() {
+        let mut schema = dropped_regular_col_schema();
+        schema.columns.push(Column {
+            name: "keep_col_timestamp".to_string(),
+            data_type: "bigint".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        let err = raw_view_columns(&schema)
+            .expect_err("a base column literally named 'keep_col_timestamp' must be refused");
+        assert!(matches!(err, Error::Schema(_)));
     }
 }
