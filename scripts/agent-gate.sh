@@ -21562,6 +21562,27 @@ run_tooling_tests() {
     return 0
   fi
 
+  # tooling-tests diff-scoping self-test (#4266): the non-vacuity proof for
+  # scripts/lib/tooling-tests-scope.sh AND its wiring into this very function —
+  # pins the declared harness-path set literally, the pure classifier via the
+  # shipped --tooling-tests-classify hook, all three AC1/AC2/AC3 decision
+  # branches against a scratch git fixture via --tooling-tests-scope-line, the
+  # nightly CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 override, and (structurally) that
+  # the scope check runs before this function's first heavy self-test and that
+  # --only bypasses it. Hermetic: no cargo/python3/network/datasets, one local
+  # `git init` scratch repo. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_tooling_tests_scope.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_tooling_tests_scope.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (tooling-tests diff-scoping self-test #4266); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   # #3689: the one-shot smoke harness must run its WHOLE suite through a failing
   # test. It used to abort on the first failure (a bare `set -e` inside run_test
   # clobbering main()'s `set +e`), so a stale CSV golden hid an identical
