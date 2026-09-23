@@ -121,6 +121,62 @@ git ls-remote origin 'refs/claims/smoke-*'
 git push origin --delete refs/claims/smoke-<commit-sha>
 ```
 
+### Starting a gate of record on a fleet Linux box (#4267)
+
+**One command, and it is the only sanctioned way to start a gate of record on a shared Linux
+box:**
+
+```bash
+bash scripts/flow/gate-box-launch.sh <pr-number-or-branch> [--allow-file-growth] [--box <name>]
+```
+
+This replaces the hand-recited box-settings briefing (lane worktree, npx-free `PATH`,
+`env -u LANE_ID`, `TMPDIR` on the tmpfs, a fresh summary path, the dataset root, file-growth
+disclosure…) that cost five gates of record (~3h each, one box, one week) to getting a single
+one of those wrong. The launcher:
+
+- resolves `<pr-number-or-branch>` against the box's canonical clone (fetching
+  `refs/pull/<n>/head` for a PR number, or the branch directly) and **refuses a base behind
+  current `origin/main`** — the mechanized form of "a gate script behind `origin/main` cannot
+  certify; rebase before the gate of record";
+- **refuses an inherited `LANE_ID`** and **refuses a box profile whose `PATH` resolves `npx`**
+  (#4238 — with `npx` resolvable, two `cqlite-core` tests time out at 240s), both by name rather
+  than silently dropping either;
+- checks free disk against the box profile's admission bar before doing anything, and again
+  refuses (rather than launches into) a lane another `cqlite-gate-*` unit is already using;
+- cuts or refreshes the **lane worktree** (never a primary clone — #3393) from the box's
+  canonical clone at the resolved head, verifies the dataset root
+  (`fetch-datasets.sh --verify-only`, never mutating), and builds the gate's environment from an
+  **allowlist** — `env -i` plus exactly what the box profile and this launcher add, never the
+  caller's ambient environment — before handing off to `scripts/flow/gate-detached.sh`;
+- prints one machine-readable `GATE-BOX-LAUNCH: box=… lane=… head=… unit=… run-id=… summary=…
+  log=…` line on success.
+
+`--allow-file-growth` is the **only** way `CQLITE_ALLOW_FILE_GROWTH=1` reaches a gate launched
+this way — never set it in a box profile or an ambient export. `--box <name>` selects
+`scripts/flow/boxes/<name>.env` explicitly; it defaults to this host's short hostname, which is
+how `astro-processor` resolves `scripts/flow/boxes/astro-processor.env` with no flag.
+
+**Box profiles are one committed file per host** (`scripts/flow/boxes/<name>.env`): canonical
+clone path, lanes directory, tmpfs `TMPDIR`, dataset root, an npx-free `PATH` allowlist,
+`AGENT_GATE_JOBS`, `RUST_TEST_THREADS` (kept at `1` for now — #4144's flake under parallel lanes;
+drop once #4144 merges), the single-gate concurrency pin, the disk admission bar, and the sccache
+cache dir/size when sccache is installed. `scripts/flow/boxes/astro-processor.env` is the
+reference profile; add a new box by copying its shape.
+
+**`--dry-run` resolves everything — profile, head, staleness, disk, the built environment, and
+the exact `gate-detached.sh` command — and prints it without any git or process side effect**
+beyond the read-only fetches needed to resolve the head. Use it to sanity-check a box profile or
+a PR/branch before committing to a 30-50 minute run:
+
+```bash
+bash scripts/flow/gate-box-launch.sh 4213 --box astro-processor --dry-run
+```
+
+Self-test: `bash scripts/tests/test_gate_box_launch.sh` (hermetic — throwaway git fixtures it
+builds and destroys itself; no network, no real box). It is also wired into the full gate's
+`tooling-tests` component.
+
 ### Notification channel (ntfy) — one env var, no per-machine binary (#3119)
 
 Gate-completion pushes (#2667) and every supervisor page go over ntfy. **The payload contract lives in
