@@ -191,7 +191,17 @@ pub(in crate::query::select_executor) fn map_compaction_row(
             );
             values.insert(
                 "partition_deletion_time".to_string(),
-                Value::BigInt(local_deletion_time as i64),
+                // `i64::from(x as u32)`, NEVER a bare `as i64` (roborev
+                // finding, issue #4222 — round 7): `local_deletion_time` is
+                // an `i32` that deliberately carries a far-future LDT via
+                // wrapping `as u32 as i32` (`compaction_row.rs`), matching
+                // the SAME widening convention `write_engine/merge/{mod,
+                // reconcile,streaming}.rs` already use. A bare `as i64`
+                // SIGN-EXTENDS that wrapped bit pattern instead, rendering a
+                // real far-future LDT as a fabricated large-negative epoch
+                // second in this `bigint` column — precisely the
+                // authoritative-facts violation this view exists to avoid.
+                Value::BigInt(i64::from(local_deletion_time as u32)),
             );
             insert_source_values(&mut values, source);
             vec![QueryRow::with_values(row.key.clone(), values)]
@@ -266,7 +276,11 @@ fn range_bound_row(
     );
     values.insert(
         "range_deletion_time".to_string(),
-        Value::BigInt(local_deletion_time as i64),
+        // See the identical fix + rationale on `partition_deletion_time`
+        // above (roborev finding, issue #4222 — round 7): `i64::from(x as
+        // u32)`, never a bare `as i64` sign-extension of the wrapped bit
+        // pattern.
+        Value::BigInt(i64::from(local_deletion_time as u32)),
     );
     insert_source_values(&mut values, source);
     QueryRow::with_values(key.clone(), values)
@@ -522,6 +536,34 @@ mod tests {
         );
         assert!(!r.values.contains_key("ck1"));
         assert!(!r.values.contains_key("val"));
+    }
+
+    /// Roborev finding (issue #4222, round 7): a far-future
+    /// `local_deletion_time` — represented as a WRAPPED `i32` bit pattern of
+    /// a `u32` (`compaction_row.rs`'s convention, matching every other
+    /// widening site in the codebase) — must widen to `bigint` via
+    /// `i64::from(x as u32)`, never a bare `as i64`, which SIGN-EXTENDS the
+    /// wrapped bits into a fabricated large-negative epoch second.
+    /// `local_deletion_time: -1` represents `u32::MAX` (4294967295, a
+    /// genuinely far-future LDT); the buggy widening would render it as
+    /// `-1`.
+    #[test]
+    fn partition_delete_far_future_ldt_widens_without_sign_extension() {
+        let row = CompactionRow {
+            key: pk_bytes(7),
+            row_timestamp: 0,
+            row_data: CompactionRowData::PartitionDelete {
+                deletion_time: 999,
+                local_deletion_time: -1,
+            },
+        };
+        let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+        assert_eq!(
+            rows[0].values.get("partition_deletion_time"),
+            Some(&Value::BigInt(4_294_967_295)),
+            "a far-future LDT must widen to its TRUE u32 value, never sign-extend the \
+             wrapped i32 bit pattern into a fabricated negative epoch second"
+        );
     }
 
     /// A live cell tombstone reports its kind and NULLs the value; a live cell

@@ -30,216 +30,26 @@
 
 mod columns;
 mod point;
+mod predicates;
 mod row_map;
 mod scan;
 
 pub(super) use columns::{raw_view_columns, strip_raw_view_suffix};
+pub(super) use predicates::row_passes_predicates;
+use predicates::{
+    count_pushable_comparison_leaves, cross_keyspace_guard, split_predicates_by_key_role,
+};
 
 use super::{classify_partition_lookup, parse_table_id, PartitionLookupOutcome};
-use crate::query::result::{QueryMetadata, QueryResult, QueryRow};
+use crate::query::result::{QueryMetadata, QueryResult};
 use crate::query::result_budget::enforce_materialized_rows;
-use crate::query::select_ast::{SelectClause, SelectExpression, WhereExpression};
-use crate::query::select_optimizer::{OptimizedQueryPlan, SSTablePredicate};
+use crate::query::select_ast::{SelectClause, SelectExpression};
+use crate::query::select_optimizer::OptimizedQueryPlan;
 use crate::schema::TableSchema;
-use crate::types::Value;
 use crate::{Error, Result, TableId};
 use point::raw_view_point_rows;
 use scan::raw_view_full_scan_rows;
-use std::collections::HashSet;
 use std::sync::Arc;
-
-/// `true` when `row`'s `row_kind` column is the plain `'row'` case (a live
-/// or tombstoned DATA row) rather than a synthetic `partition_tombstone` /
-/// `range_tombstone_start` / `range_tombstone_end` row, which carries no
-/// clustering columns (or, for a partition-tombstone row, no data columns at
-/// all).
-pub(super) fn is_plain_data_row(row: &QueryRow) -> bool {
-    row.values.get("row_kind") == Some(&Value::text("row"))
-}
-
-/// Count every `Comparison` LEAF in a PUSHABLE position (through `And`/
-/// `Parentheses`), or `None` if the tree contains an `Or`/`Not` ANYWHERE —
-/// mirroring exactly what `select_optimizer.rs::collect_sstable_predicates`
-/// walks.
-///
-/// Used to detect when the WHERE clause was only PARTIALLY captured by
-/// `plan.sstable_predicates` (roborev finding, issue #4222 — round 2 of this
-/// same class): `Or`/`Not` are not the only way a comparison silently fails
-/// to lower. `select_optimizer.rs::column_comparison_to_predicate` returns
-/// `None` — a silent drop even in a perfectly pushable `And`/top-level
-/// position — for `!=`, `NotIn`, `Like`, `NotLike`, `NotBetween`, `IsNull`,
-/// `IsNotNull`, `Regex`, and any comparison whose right-hand side is not a
-/// literal (e.g. a column-to-column comparison). Each SUCCESSFULLY-lowered
-/// leaf contributes EXACTLY one `SSTablePredicate`
-/// (`column_comparison_to_predicate`'s every `Some` arm), so comparing this
-/// count against `plan.sstable_predicates.len()` (once `Or`/`Not` — which
-/// would make this `None` — is ruled out) detects ANY dropped leaf, not
-/// just the OR/NOT shape: `pk = 1 AND val != 'x'` yields the NON-empty
-/// predicate list `[pk = 1]` (1 predicate, 2 leaves) — checking
-/// "predicates is empty" alone would miss it.
-fn count_pushable_comparison_leaves(expr: &WhereExpression) -> Option<usize> {
-    match expr {
-        WhereExpression::Comparison(_) => Some(1),
-        WhereExpression::Or(_) | WhereExpression::Not(_) => None,
-        WhereExpression::And(exprs) => {
-            let mut total = 0usize;
-            for e in exprs {
-                total += count_pushable_comparison_leaves(e)?;
-            }
-            Some(total)
-        }
-        WhereExpression::Parentheses(inner) => count_pushable_comparison_leaves(inner),
-    }
-}
-
-/// Every column name that is present, with a REAL (non-synthesized) value,
-/// on EVERY physical row this view emits regardless of `row_kind` — the
-/// partition key (handled separately, see below), the source-identity quad,
-/// `row_kind` itself, and the partition-/range-deletion columns.
-///
-/// A predicate naming one of these must be applied to EVERY row, synthetic
-/// or not (roborev finding, issue #4222 — round 5 of this same class): the
-/// prior split exempted ALL non-partition-key predicates from a synthetic
-/// row, which wrongly ALSO exempted `generation`/`sstable`/`format`/
-/// `row_kind` and the partition-/range-deletion columns — so
-/// `WHERE pk = 2 AND generation = 1` incorrectly included a gen-2
-/// partition-tombstone row (`generation` IS present and real on that row;
-/// it was just never CHECKED). `partition_deletion_time`/
-/// `partition_deletion_timestamp`/`bound_inclusive`/`range_deletion_time`/
-/// `range_deletion_timestamp` are only ever POPULATED on their own specific
-/// synthetic row_kind (never on a plain `row`), but a predicate against them
-/// is still meaningful there and must not be silently skipped either — this
-/// set, not `is_plain_data_row`, is what decides "always apply".
-///
-/// `position` is DELIBERATELY EXCLUDED from this set (roborev finding,
-/// issue #4222 — round 6): unlike the other source-identity columns, it is
-/// NOT populated consistently across both row producers — `point.rs`
-/// resolves it for real via a second index lookup, while `scan.rs` always
-/// reports `Value::Null` (the full-scan producer never consults an index
-/// per row). A `position` predicate is instead REJECTED OUTRIGHT before
-/// either producer runs (see the check in `execute_raw_sstable_view`) —
-/// letting it reach this set would apply it "unconditionally" against a
-/// column whose very definition differs by internal access path, so the
-/// SAME query text (`WHERE pk = 1 AND position = N` vs a position-only
-/// predicate that forces a full scan) would silently return different
-/// rows depending on a choice (`classify_partition_lookup`) the caller
-/// does not control.
-///
-/// Deliberately NOT in this set (see [`row_passes_predicates`]): the
-/// clustering-key / regular-column values and their `_timestamp`/`_ttl`/
-/// `_local_deletion_time`/`_tombstone`/`_complex_deletion*` metadata
-/// derivatives, and the ROW-level `row_timestamp`/`row_ttl`/
-/// `row_local_deletion_time`/`row_tombstone`/`row_deletion_timestamp`
-/// quintet — every one of those is populated ONLY on a plain `row_kind =
-/// 'row'` row (`row_map.rs`'s `Live`/`Tombstone` arms), so they stay exempt
-/// for a synthetic row, matching the spec's "even when the generation holds
-/// no live rows" requirement for `partition_tombstone`/`range_tombstone_*`.
-fn always_applicable_column_names() -> &'static HashSet<&'static str> {
-    static NAMES: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
-    NAMES.get_or_init(|| {
-        [
-            "sstable",
-            "generation",
-            "format",
-            "row_kind",
-            "partition_deletion_time",
-            "partition_deletion_timestamp",
-            "bound_inclusive",
-            "range_deletion_time",
-            "range_deletion_timestamp",
-        ]
-        .into_iter()
-        .collect()
-    })
-}
-
-/// Split `predicates` into the subset that must apply to EVERY row
-/// (partition-key / `token(...)` predicates, plus source-identity/
-/// `row_kind`/partition-and-range-deletion predicates —
-/// [`always_applicable_column_names`]) and the subset that applies ONLY to
-/// a plain data row (`row_kind = 'row'`): clustering-key / regular-column
-/// predicates and their metadata derivatives, plus the row-level metadata
-/// quintet (roborev finding, issue #4222 — round 5, correcting round 2's
-/// over-broad exemption).
-///
-/// Used by both row producers to apply the CORRECT predicate backstop per
-/// row-kind: a synthetic `partition_tombstone`/`range_tombstone_*` row
-/// carries no clustering/regular columns to test a data-only predicate
-/// against, and the spec requires it to stay visible "even when the
-/// generation holds no live rows" — but it DOES carry partition-key values
-/// (`insert_pk_values`) and source/row_kind/deletion metadata, so those
-/// predicates must still apply to it, or a full scan filtered to one
-/// partition/generation would wrongly return every OTHER partition's or
-/// generation's tombstone rows too.
-pub(super) fn split_predicates_by_key_role<'a>(
-    predicates: &'a [SSTablePredicate],
-    base_schema: &TableSchema,
-) -> (Vec<&'a SSTablePredicate>, Vec<&'a SSTablePredicate>) {
-    let pk_names: HashSet<&str> = base_schema
-        .partition_keys
-        .iter()
-        .map(|k| k.name.as_str())
-        .collect();
-    let always_names = always_applicable_column_names();
-    predicates.iter().partition(|p| {
-        p.is_token()
-            || pk_names.contains(p.column.as_str())
-            || always_names.contains(p.column.as_str())
-    })
-}
-
-/// Apply the raw view's post-scan predicate backstop to one row:
-/// `always_predicates` (partition-key/token PLUS source-identity/
-/// `row_kind`/partition-and-range-deletion predicates —
-/// [`split_predicates_by_key_role`]) apply UNCONDITIONALLY, since every row
-/// carries real values for those columns, synthetic or not.
-///
-/// `data_predicates` (clustering-key/regular-column predicates, their
-/// metadata derivatives, and the row-level metadata quintet) exempt a
-/// SYNTHETIC row from a predicate ONLY WHEN the predicate's column is
-/// genuinely ABSENT from that row's values (roborev finding, issue #4222 —
-/// round 6, correcting round 5's own gap: exempting by ROW-KIND rather
-/// than by column presence). A `partition_tombstone` row carries no
-/// clustering/regular columns at all, so every `data_predicates` column is
-/// absent there and stays exempt — the spec's "even when the generation
-/// holds no live rows" case. But a `range_tombstone_start`/`_end` row
-/// (`row_map.rs::range_bound_row`) DOES carry real clustering-component
-/// values for an `Inclusive`/`Exclusive` bound (never for an open
-/// `Bottom`/`Top` bound) — `range_marker_becomes_two_bound_rows_with_prefix_clustering`'s
-/// own unit test asserts exactly this — so a blanket "exempt every
-/// non-plain row" previously let `WHERE ck1 = 99` wrongly include a bound
-/// row whose real `ck1` is `2`. A PLAIN row (`row_kind = 'row'`) is NEVER
-/// exempted this way, even when a nullable regular column happens to be
-/// absent — ordinary SQL semantics still apply there (`evaluate_leaf`'s own
-/// `Unknown`-rejects-like-`False` handling), so this exemption is
-/// deliberately scoped to non-plain rows only.
-pub(super) fn row_passes_predicates(
-    row: &QueryRow,
-    always_predicates: &[&SSTablePredicate],
-    data_predicates: &[&SSTablePredicate],
-) -> Result<bool> {
-    for p in always_predicates {
-        if super::evaluate_leaf(row, p) != super::LeafOutcome::True {
-            return Ok(false);
-        }
-    }
-    let plain = is_plain_data_row(row);
-    for p in data_predicates {
-        if !plain && !row.values.contains_key(p.column.as_str()) {
-            // A synthetic row that genuinely has no value for this column
-            // (e.g. `partition_tombstone`'s clustering columns, or an open
-            // `Bottom`/`Top` range-tombstone bound's) is exempt from this
-            // ONE predicate — it stays visible on that column's account —
-            // but a DIFFERENT predicate this same row DOES carry a value
-            // for is still evaluated normally below.
-            continue;
-        }
-        if super::evaluate_leaf(row, p) != super::LeafOutcome::True {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
 
 impl super::SelectExecutor {
     /// Decide whether `table_id` should be intercepted as a raw-view
@@ -384,17 +194,44 @@ impl super::SelectExecutor {
             .resolve_raw_view_readers(&base_table_id, keyspace.is_some())
             .await?;
 
+        // A predicate naming a column that is NOT part of the raw view's
+        // column contract at all must fail closed (roborev finding, issue
+        // #4222 — round 7), never be silently misapplied: it would land in
+        // `data_predicates` below, and the per-column-presence exemption
+        // that predicate group applies to a synthetic row (see
+        // `row_passes_predicates`) treats an unknown column exactly like a
+        // genuinely-absent one — exempting EVERY `partition_tombstone`/
+        // open-bound `range_tombstone_*` row from it while `evaluate_leaf`'s
+        // `Unknown` still rejects every plain `row_kind = 'row'` row. So
+        // `WHERE typo_col = 1` would silently return only the corpus's
+        // tombstone rows instead of erroring — asymmetric with the SELECT
+        // list, which already fails closed on an unknown column below, and
+        // with this view's whole D8 posture. Checked BEFORE the split, so
+        // neither producer runs on an unvalidated predicate set. Token
+        // predicates are exempt from this check (`p.column` is a
+        // human-readable `"token(...)"` label, never a real column name).
+        if let Some(bad) = plan
+            .sstable_predicates
+            .iter()
+            .find(|p| !p.is_token() && !columns.iter().any(|c| c.name == p.column))
+        {
+            return Err(Error::Schema(format!(
+                "raw SSTable view: WHERE names unknown column '{}' — not part of the raw \
+                 view's column contract",
+                bad.column
+            )));
+        }
+
         // Split the predicate set ONCE (roborev finding, issue #4222): a
-        // partition-key predicate (or `token(...)`) applies to EVERY row,
-        // synthetic or not (a synthetic row still carries the partition key);
-        // a clustering/regular-column predicate applies ONLY to a plain data
-        // row (`row_kind = 'row'`) — a synthetic `partition_tombstone`/
-        // `range_tombstone_*` row carries no such columns to test, and the
-        // spec requires it to stay visible "even when the generation holds
-        // no live rows". Threaded into BOTH producers so the filtering
-        // happens where LIMIT can stop the walk early, not after the whole
-        // corpus is already materialized.
-        let (pk_predicates, other_predicates) =
+        // partition-key predicate (or `token(...)`), source-identity/
+        // `row_kind`/partition-and-range-deletion predicate applies to
+        // EVERY row, synthetic or not; a clustering/regular-column
+        // predicate exempts a SYNTHETIC row ONLY WHEN that row genuinely
+        // lacks the column (round 6's fix — see `row_passes_predicates`),
+        // never by blanket row-kind. Threaded into BOTH producers so the
+        // filtering happens where LIMIT can stop the walk early, not after
+        // the whole corpus is already materialized.
+        let (always_predicates, data_predicates) =
             split_predicates_by_key_role(&plan.sstable_predicates, &base_schema);
 
         // LIMIT/OFFSET (roborev finding, issue #4222): the raw view returns
@@ -433,8 +270,8 @@ impl super::SelectExecutor {
                     &readers,
                     &base_schema,
                     std::slice::from_ref(&pk_bytes),
-                    &pk_predicates,
-                    &other_predicates,
+                    &always_predicates,
+                    &data_predicates,
                     self.max_result_bytes,
                     self.max_result_rows,
                     stop_after,
@@ -446,8 +283,8 @@ impl super::SelectExecutor {
                     &readers,
                     &base_schema,
                     &pk_keys,
-                    &pk_predicates,
-                    &other_predicates,
+                    &always_predicates,
+                    &data_predicates,
                     self.max_result_bytes,
                     self.max_result_rows,
                     stop_after,
@@ -458,8 +295,8 @@ impl super::SelectExecutor {
                 raw_view_full_scan_rows(
                     &readers,
                     &base_schema,
-                    &pk_predicates,
-                    &other_predicates,
+                    &always_predicates,
+                    &data_predicates,
                     self.max_result_bytes,
                     self.max_result_rows,
                     stop_after,
@@ -632,22 +469,16 @@ impl super::SelectExecutor {
     ) -> Result<Vec<Arc<crate::storage::sstable::reader::SSTableReader>>> {
         let (readers, fully_qualified_match) =
             self.storage.raw_view_reader_snapshot(base_table_id).await;
-        // `fully_qualified_match` is `false` for TWO distinct reasons
-        // (`SSTableManager::fully_qualified_match`'s contract): a qualified
-        // name that resolved via the bare-name fallback, OR nothing
-        // resolving at all (`readers.is_empty()`). Only the FIRST is the
-        // cross-keyspace safety violation this guard exists for (roborev
-        // finding, issue #4222 — round 2): a schema-loaded-but-no-SSTables
-        // table (a real, benign zero-row case) must fall through to an
-        // empty result, not be misreported as a keyspace-mismatch error.
-        if was_qualified && !fully_qualified_match && !readers.is_empty() {
-            return Err(Error::Table(format!(
-                "raw SSTable view: '{base_table_id}' resolved only via a bare-table-name \
-                 fallback, not an exact keyspace match — refusing to read a possibly \
-                 DIFFERENT keyspace's same-named table (issue #1321's guard, applied here \
-                 for issue #4222)"
-            )));
-        }
+        cross_keyspace_guard(was_qualified, fully_qualified_match, readers.is_empty()).map_err(
+            |_| {
+                Error::Table(format!(
+                    "raw SSTable view: '{base_table_id}' resolved only via a bare-table-name \
+                     fallback, not an exact keyspace match — refusing to read a possibly \
+                     DIFFERENT keyspace's same-named table (issue #1321's guard, applied here \
+                     for issue #4222)"
+                ))
+            },
+        )?;
         Ok(readers)
     }
 }
@@ -718,236 +549,5 @@ mod tests {
             "with no literal 'bar_raw_sstable_data' table registered, the suffix must be \
              recognized as the D1 naming convention over 'bar'"
         );
-    }
-
-    // =======================================================================
-    // Predicate-scoping unit tests — issue #4222 roborev finding (round 6):
-    // these drive `split_predicates_by_key_role`/`row_passes_predicates`/
-    // `count_pushable_comparison_leaves` directly over hand-built `QueryRow`s
-    // and `WhereExpression` trees, needing NO fetched corpus at all — the
-    // fail-closed/predicate-scoping contract must be verifiable on every
-    // checkout, fetched or not (unlike the round-5 regression tests, which
-    // all live in `issue_4222_raw_view_point_read_test.rs` and clean-SKIP
-    // whenever `resurrection_gc_positive`'s corpus is absent).
-    // =======================================================================
-
-    use crate::query::select_ast::{
-        ColumnRef, ComparisonExpression, ComparisonOperator, ComparisonRightSide,
-    };
-    use crate::query::select_optimizer::SSTableFilterOp;
-    use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn};
-    use crate::types::RowKey;
-    use std::collections::HashMap;
-
-    fn test_schema() -> TableSchema {
-        TableSchema {
-            keyspace: "ks".to_string(),
-            table: "t".to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "pk".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![ClusteringColumn {
-                name: "ck".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-                order: ClusteringOrder::Asc,
-            }],
-            columns: vec![
-                Column {
-                    name: "pk".to_string(),
-                    data_type: "int".to_string(),
-                    nullable: false,
-                    default: None,
-                    is_static: false,
-                },
-                Column {
-                    name: "ck".to_string(),
-                    data_type: "int".to_string(),
-                    nullable: false,
-                    default: None,
-                    is_static: false,
-                },
-                Column {
-                    name: "val".to_string(),
-                    data_type: "text".to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                },
-            ],
-            comments: Default::default(),
-            dropped_columns: Default::default(),
-        }
-    }
-
-    fn eq_predicate(column: &str, value: Value) -> SSTablePredicate {
-        SSTablePredicate::column(column, SSTableFilterOp::Equal, vec![value])
-    }
-
-    fn row_with(kind: &str, values: &[(&str, Value)]) -> QueryRow {
-        let mut map: HashMap<String, Value> = HashMap::new();
-        map.insert("row_kind".to_string(), Value::text(kind));
-        for (k, v) in values {
-            map.insert(k.to_string(), v.clone());
-        }
-        QueryRow::with_values(RowKey::new(vec![1, 2, 3]), map)
-    }
-
-    /// `split_predicates_by_key_role` puts pk/token/source-identity/
-    /// row_kind/deletion predicates in the FIRST (always-apply) group, and
-    /// clustering-key/regular-column predicates in the SECOND (data-only)
-    /// group.
-    #[test]
-    fn split_predicates_by_key_role_separates_always_from_data() {
-        let schema = test_schema();
-        let predicates = vec![
-            eq_predicate("pk", Value::Integer(1)),
-            eq_predicate("generation", Value::BigInt(1)),
-            eq_predicate("row_kind", Value::text("row")),
-            eq_predicate("partition_deletion_time", Value::BigInt(5)),
-            eq_predicate("ck", Value::Integer(2)),
-            eq_predicate("val", Value::text("x")),
-        ];
-        let (always, data) = split_predicates_by_key_role(&predicates, &schema);
-        let always_cols: Vec<&str> = always.iter().map(|p| p.column.as_str()).collect();
-        let data_cols: Vec<&str> = data.iter().map(|p| p.column.as_str()).collect();
-        assert_eq!(
-            always_cols,
-            vec!["pk", "generation", "row_kind", "partition_deletion_time"]
-        );
-        assert_eq!(data_cols, vec!["ck", "val"]);
-    }
-
-    /// A `partition_tombstone` row carries NO clustering/regular column at
-    /// all — a data predicate on `ck` must be EXEMPT (the row stays
-    /// visible), matching the spec's "even when the generation holds no
-    /// live rows" requirement.
-    #[test]
-    fn partition_tombstone_row_is_exempt_from_a_data_predicate_it_cannot_carry() {
-        let row = row_with("partition_tombstone", &[]);
-        let ck_predicate = eq_predicate("ck", Value::Integer(99));
-        assert!(
-            row_passes_predicates(&row, &[], &[&ck_predicate]).unwrap(),
-            "a partition_tombstone row has no 'ck' value at all — it must be EXEMPT from a \
-             'ck' predicate, not rejected as a mismatch"
-        );
-    }
-
-    /// Roborev finding (issue #4222, round 5): an ALWAYS predicate (here,
-    /// `generation`) is NEVER exempted for a synthetic row — a
-    /// partition_tombstone row from generation 2 must be REJECTED by
-    /// `generation = 1`, exactly the regression this fix corrects.
-    #[test]
-    fn partition_tombstone_row_is_still_checked_against_an_always_predicate() {
-        let row = row_with("partition_tombstone", &[("generation", Value::BigInt(2))]);
-        let gen_predicate = eq_predicate("generation", Value::BigInt(1));
-        assert!(
-            !row_passes_predicates(&row, &[&gen_predicate], &[]).unwrap(),
-            "a partition_tombstone row's REAL generation value (2) must be checked against \
-             an always-predicate (generation = 1) and REJECTED, never exempted"
-        );
-    }
-
-    /// Roborev finding (issue #4222, round 6): a `range_tombstone_start`/
-    /// `_end` row DOES carry a real clustering-component value for an
-    /// `Inclusive`/`Exclusive` bound — a data predicate against that column
-    /// must be evaluated normally (and can REJECT the row), never exempted
-    /// just because the row is non-plain. This is the direct regression
-    /// test for the fix that replaced the blanket `is_plain_data_row`
-    /// exemption with a per-column presence check.
-    #[test]
-    fn range_tombstone_row_with_a_real_clustering_value_is_checked_not_exempted() {
-        let row = row_with("range_tombstone_start", &[("ck", Value::Integer(2))]);
-        let ck_predicate = eq_predicate("ck", Value::Integer(99));
-        assert!(
-            !row_passes_predicates(&row, &[], &[&ck_predicate]).unwrap(),
-            "a range_tombstone_start row whose REAL ck value is 2 must be REJECTED by \
-             'ck = 99', never wrongly exempted as if it carried no ck value at all"
-        );
-
-        // Sanity: the SAME row DOES pass a predicate matching its real value.
-        let matching = eq_predicate("ck", Value::Integer(2));
-        assert!(
-            row_passes_predicates(&row, &[], &[&matching]).unwrap(),
-            "a range_tombstone_start row must PASS a data predicate its real clustering \
-             value genuinely satisfies"
-        );
-    }
-
-    /// An OPEN range-tombstone bound (`Bottom`/`Top`) carries no clustering
-    /// component at all — a data predicate on that column must stay exempt,
-    /// same as a partition_tombstone row.
-    #[test]
-    fn range_tombstone_row_with_an_open_bound_is_exempt_from_a_data_predicate() {
-        let row = row_with("range_tombstone_end", &[]);
-        let ck_predicate = eq_predicate("ck", Value::Integer(99));
-        assert!(
-            row_passes_predicates(&row, &[], &[&ck_predicate]).unwrap(),
-            "an open-bound range_tombstone_end row has no 'ck' value at all — exempt, not \
-             rejected"
-        );
-    }
-
-    /// A PLAIN data row is NEVER exempted from a data predicate by column
-    /// absence — ordinary SQL semantics apply: a missing/NULL column fails
-    /// an equality predicate, exactly like `evaluate_leaf`'s own
-    /// `Unknown`-rejects-like-`False` handling elsewhere.
-    #[test]
-    fn plain_row_is_never_exempted_even_when_a_data_column_is_absent() {
-        let row = row_with("row", &[]);
-        let val_predicate = eq_predicate("val", Value::text("x"));
-        assert!(
-            !row_passes_predicates(&row, &[], &[&val_predicate]).unwrap(),
-            "a plain row missing 'val' must FAIL 'val = x' (SQL NULL semantics), never be \
-             silently exempted the way a synthetic row is"
-        );
-    }
-
-    fn comparison(column: &str, value: Value) -> WhereExpression {
-        WhereExpression::Comparison(ComparisonExpression {
-            left: SelectExpression::Column(ColumnRef::new(column)),
-            operator: ComparisonOperator::Equal,
-            right: ComparisonRightSide::Value(SelectExpression::Literal(value)),
-        })
-    }
-
-    #[test]
-    fn count_pushable_comparison_leaves_sums_through_and_and_parentheses() {
-        let expr = WhereExpression::Parentheses(Box::new(WhereExpression::And(vec![
-            comparison("pk", Value::Integer(1)),
-            comparison("ck", Value::Integer(2)),
-        ])));
-        assert_eq!(count_pushable_comparison_leaves(&expr), Some(2));
-    }
-
-    #[test]
-    fn count_pushable_comparison_leaves_is_none_for_or() {
-        let expr = WhereExpression::Or(vec![
-            comparison("pk", Value::Integer(1)),
-            comparison("pk", Value::Integer(2)),
-        ]);
-        assert_eq!(count_pushable_comparison_leaves(&expr), None);
-    }
-
-    #[test]
-    fn count_pushable_comparison_leaves_is_none_for_not() {
-        let expr = WhereExpression::Not(Box::new(comparison("pk", Value::Integer(1))));
-        assert_eq!(count_pushable_comparison_leaves(&expr), None);
-    }
-
-    #[test]
-    fn count_pushable_comparison_leaves_is_none_when_or_is_nested_inside_and() {
-        // `pk = 1 AND (ck = 2 OR ck = 3)` — the OR is nested, not top-level,
-        // but must still propagate `None` through the enclosing `And`.
-        let expr = WhereExpression::And(vec![
-            comparison("pk", Value::Integer(1)),
-            WhereExpression::Or(vec![
-                comparison("ck", Value::Integer(2)),
-                comparison("ck", Value::Integer(3)),
-            ]),
-        ]);
-        assert_eq!(count_pushable_comparison_leaves(&expr), None);
     }
 }

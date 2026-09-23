@@ -678,3 +678,30 @@ async fn where_clause_with_not_equal_fails_closed() {
          unfiltered"
     );
 }
+
+/// Roborev finding (issue #4222, round 7): a WHERE predicate naming a
+/// column that is NOT part of the raw view's column contract at all must
+/// fail closed — the same fail-closed posture the SELECT list already has
+/// (`selecting_an_unknown_column_fails_closed`, above). Left unvalidated,
+/// an unknown column landed in `data_predicates` and its per-column-
+/// presence exemption then treated "unknown" identically to "absent",
+/// silently letting every `partition_tombstone` row through while
+/// rejecting every plain row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn where_clause_naming_an_unknown_column_fails_closed() {
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
+    let outcome = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 AND \
+             this_column_does_not_exist = 1"
+        ))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "a WHERE predicate naming a column absent from the raw view's contract must fail \
+         closed, never be silently misapplied (letting synthetic rows through while \
+         rejecting plain ones)"
+    );
+}
