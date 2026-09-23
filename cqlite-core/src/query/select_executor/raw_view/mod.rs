@@ -421,3 +421,72 @@ impl super::SelectExecutor {
         Ok(readers)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::SchemaManager;
+    use crate::storage::StorageEngine;
+    use crate::{platform::Platform, Config};
+    use tempfile::TempDir;
+
+    async fn test_executor() -> (super::super::SelectExecutor, Arc<SchemaManager>) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        (
+            super::super::SelectExecutor::new(schema.clone(), storage),
+            schema,
+        )
+    }
+
+    /// Roborev finding (issue #4222): a REAL table literally named with the
+    /// `_raw_sstable_data` suffix must resolve as an ordinary table, never be
+    /// shadowed by the naming convention. Registering a schema for the exact
+    /// literal name and asserting `raw_view_base_name` returns `None` for it
+    /// is the direct regression test for that precedence.
+    #[tokio::test]
+    async fn literal_raw_sstable_data_table_is_never_shadowed() {
+        let (executor, schema) = test_executor().await;
+        schema
+            .parse_and_register_cql_schema(
+                "CREATE TABLE ks.foo_raw_sstable_data (pk int PRIMARY KEY, v text);",
+            )
+            .await
+            .expect("registering the literal table's schema must succeed");
+
+        let literal_id = TableId::new("ks.foo_raw_sstable_data");
+        assert_eq!(
+            executor.raw_view_base_name(&literal_id).await,
+            None,
+            "a REAL table literally named '..._raw_sstable_data' must resolve normally, \
+             never be intercepted as the raw view's naming convention"
+        );
+
+        // Sanity: a table with NO literal registration under the suffixed
+        // name IS recognized as the raw-view convention.
+        schema
+            .parse_and_register_cql_schema("CREATE TABLE ks.bar (pk int PRIMARY KEY, v text);")
+            .await
+            .expect("registering bar's schema must succeed");
+        let convention_id = TableId::new("ks.bar_raw_sstable_data");
+        assert_eq!(
+            executor.raw_view_base_name(&convention_id).await,
+            Some("bar".to_string()),
+            "with no literal 'bar_raw_sstable_data' table registered, the suffix must be \
+             recognized as the D1 naming convention over 'bar'"
+        );
+    }
+}
