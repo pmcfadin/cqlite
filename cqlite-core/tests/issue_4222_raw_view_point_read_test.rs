@@ -322,7 +322,11 @@ async fn limit_and_offset_are_honored() {
         ))
         .await
         .expect("unlimited query must succeed");
-    assert_eq!(unlimited.rows.len(), 7, "sanity: unlimited still returns all 7 rows");
+    assert_eq!(
+        unlimited.rows.len(),
+        7,
+        "sanity: unlimited still returns all 7 rows"
+    );
 
     let offset_query = db
         .execute(&format!(
@@ -418,7 +422,10 @@ async fn gen1_drop_col_visible_gen2_drop_col_absent() {
 
     let query = "SELECT generation, ck, drop_col, keep_col \
                  FROM test_tomb.dropped_regular_col_raw_sstable_data WHERE pk = 1";
-    let result = db.execute(query).await.expect("raw view query must succeed");
+    let result = db
+        .execute(query)
+        .await
+        .expect("raw view query must succeed");
 
     let gen1_ck1 = result
         .rows

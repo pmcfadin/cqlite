@@ -183,7 +183,9 @@ impl super::SelectExecutor {
         // on both paths.
         let mut filtered = Vec::with_capacity(rows.len());
         for row in rows {
-            if !is_plain_data_row(&row) || super::evaluate_predicates(&row, &plan.sstable_predicates)? {
+            if !is_plain_data_row(&row)
+                || super::evaluate_predicates(&row, &plan.sstable_predicates)?
+            {
                 filtered.push(row);
             }
         }
