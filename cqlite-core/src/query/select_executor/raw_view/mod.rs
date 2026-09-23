@@ -57,21 +57,38 @@ pub(super) fn is_plain_data_row(row: &QueryRow) -> bool {
     row.values.get("row_kind") == Some(&Value::text("row"))
 }
 
-/// `true` when `expr` contains an `Or`/`Not` node ANYWHERE in its tree
-/// (through `And`/`Parentheses`) — mirroring exactly what
-/// `select_optimizer.rs::collect_sstable_predicates` walks, since a
-/// predicate under an `Or`/`Not` sibling contributes NOTHING to
-/// `plan.sstable_predicates` regardless of whether the top-level tree also
-/// contains a pushable `And` branch (roborev finding, issue #4222): `pk = 1
-/// AND (a = 2 OR b = 3)` still yields the non-empty predicate list `[pk =
-/// 1]`, so checking "predicates is empty" alone would miss the dropped `OR`
-/// clause.
-fn where_expression_has_or_or_not(expr: &WhereExpression) -> bool {
+/// Count every `Comparison` LEAF in a PUSHABLE position (through `And`/
+/// `Parentheses`), or `None` if the tree contains an `Or`/`Not` ANYWHERE —
+/// mirroring exactly what `select_optimizer.rs::collect_sstable_predicates`
+/// walks.
+///
+/// Used to detect when the WHERE clause was only PARTIALLY captured by
+/// `plan.sstable_predicates` (roborev finding, issue #4222 — round 2 of this
+/// same class): `Or`/`Not` are not the only way a comparison silently fails
+/// to lower. `select_optimizer.rs::column_comparison_to_predicate` returns
+/// `None` — a silent drop even in a perfectly pushable `And`/top-level
+/// position — for `!=`, `NotIn`, `Like`, `NotLike`, `NotBetween`, `IsNull`,
+/// `IsNotNull`, `Regex`, and any comparison whose right-hand side is not a
+/// literal (e.g. a column-to-column comparison). Each SUCCESSFULLY-lowered
+/// leaf contributes EXACTLY one `SSTablePredicate`
+/// (`column_comparison_to_predicate`'s every `Some` arm), so comparing this
+/// count against `plan.sstable_predicates.len()` (once `Or`/`Not` — which
+/// would make this `None` — is ruled out) detects ANY dropped leaf, not
+/// just the OR/NOT shape: `pk = 1 AND val != 'x'` yields the NON-empty
+/// predicate list `[pk = 1]` (1 predicate, 2 leaves) — checking
+/// "predicates is empty" alone would miss it.
+fn count_pushable_comparison_leaves(expr: &WhereExpression) -> Option<usize> {
     match expr {
-        WhereExpression::Comparison(_) => false,
-        WhereExpression::Or(_) | WhereExpression::Not(_) => true,
-        WhereExpression::And(exprs) => exprs.iter().any(where_expression_has_or_or_not),
-        WhereExpression::Parentheses(inner) => where_expression_has_or_or_not(inner),
+        WhereExpression::Comparison(_) => Some(1),
+        WhereExpression::Or(_) | WhereExpression::Not(_) => None,
+        WhereExpression::And(exprs) => {
+            let mut total = 0usize;
+            for e in exprs {
+                total += count_pushable_comparison_leaves(e)?;
+            }
+            Some(total)
+        }
+        WhereExpression::Parentheses(inner) => count_pushable_comparison_leaves(inner),
     }
 }
 
@@ -192,24 +209,35 @@ impl super::SelectExecutor {
                 "PER PARTITION LIMIT is not supported over a _raw_sstable_data view",
             ));
         }
-        // A WHERE clause containing OR/NOT anywhere in its tree (roborev
-        // finding, issue #4222 — High): `collect_sstable_predicates`
-        // (`select_optimizer.rs`) deliberately skips OR/NOT branches when
-        // building `plan.sstable_predicates`, and the base pipeline
-        // compensates with a residual `Filter` execution step over the
-        // ORIGINAL where-expression tree — a step this view's early return
-        // never reaches. Without this guard, `WHERE pk = 1 OR pk = 2` would
-        // silently return every physical row of every partition, unfiltered.
-        // Failing closed here (rather than re-implementing the general
-        // WHERE-expression evaluator with this view's row-kind exemption
-        // semantics) is the same documented scope boundary as ORDER BY/
-        // DISTINCT/aggregates above.
+        // A WHERE clause with ANY comparison that did not fully lower to a
+        // pushed-down predicate (roborev finding, issue #4222 — High,
+        // round 2 of this same class): OR/NOT are ONE way that happens
+        // (`collect_sstable_predicates` skips those branches entirely), but
+        // `!=`/`NotIn`/`LIKE`/`IS NULL`/`IS NOT NULL`/a non-literal RHS
+        // etc. ALSO silently drop even inside a perfectly pushable `AND`
+        // position — `column_comparison_to_predicate` returns `None` for
+        // every one of those shapes. The base pipeline compensates with a
+        // residual `Filter` execution step over the ORIGINAL where-
+        // expression tree — a step this view's early return never reaches.
+        // Comparing the PUSHABLE leaf count against the predicate count
+        // (rather than just checking for OR/NOT, or checking
+        // `sstable_predicates.is_empty()`) catches BOTH classes: `pk = 1 AND
+        // val != 'x'` still yields the non-empty list `[pk = 1]`, which an
+        // emptiness check would miss. Failing closed here (rather than
+        // re-implementing the general WHERE-expression evaluator with this
+        // view's row-kind exemption semantics) is the same documented scope
+        // boundary as ORDER BY/DISTINCT/aggregates above.
         if let Some(where_clause) = &plan.statement.where_clause {
-            if where_expression_has_or_or_not(where_clause) {
+            let fully_pushed = count_pushable_comparison_leaves(where_clause)
+                .map(|n| n == plan.sstable_predicates.len())
+                .unwrap_or(false);
+            if !fully_pushed {
                 return Err(Error::unsupported_query(
-                    "a WHERE clause containing OR/NOT is not supported over a \
-                     _raw_sstable_data view (every AND-only comparison is pushed down; \
-                     OR/NOT would otherwise be silently dropped)",
+                    "a WHERE clause containing OR/NOT, or a comparison shape (!=, LIKE, IS \
+                     [NOT] NULL, NOT IN, a non-literal comparison, etc.) that cannot be pushed \
+                     down to an SSTable-level predicate, is not supported over a \
+                     _raw_sstable_data view — every restriction must lower to a pushable \
+                     column/token comparison, or it would be silently dropped",
                 ));
             }
         }
@@ -466,7 +494,15 @@ impl super::SelectExecutor {
     ) -> Result<Vec<Arc<crate::storage::sstable::reader::SSTableReader>>> {
         let (readers, fully_qualified_match) =
             self.storage.raw_view_reader_snapshot(base_table_id).await;
-        if was_qualified && !fully_qualified_match {
+        // `fully_qualified_match` is `false` for TWO distinct reasons
+        // (`SSTableManager::fully_qualified_match`'s contract): a qualified
+        // name that resolved via the bare-name fallback, OR nothing
+        // resolving at all (`readers.is_empty()`). Only the FIRST is the
+        // cross-keyspace safety violation this guard exists for (roborev
+        // finding, issue #4222 — round 2): a schema-loaded-but-no-SSTables
+        // table (a real, benign zero-row case) must fall through to an
+        // empty result, not be misreported as a keyspace-mismatch error.
+        if was_qualified && !fully_qualified_match && !readers.is_empty() {
             return Err(Error::Table(format!(
                 "raw SSTable view: '{base_table_id}' resolved only via a bare-table-name \
                  fallback, not an exact keyspace match — refusing to read a possibly \

@@ -178,7 +178,13 @@ pub(in crate::query::select_executor) fn raw_view_columns(
     )?;
 
     push(&mut columns, "sstable".to_string(), "text")?;
-    push(&mut columns, "generation".to_string(), "int")?;
+    // `bigint`, not `int` (roborev finding, issue #4222): `SSTableReader::generation`
+    // is a `u64`; narrowing it to `i32` would SATURATE (and thus collapse
+    // two distinct generations to the same fabricated value) for any real
+    // corpus whose generation identifiers exceed `i32::MAX` — a
+    // no-heuristics violation in a view whose whole purpose is authoritative
+    // per-generation source identity.
+    push(&mut columns, "generation".to_string(), "bigint")?;
     push(&mut columns, "format".to_string(), "text")?;
     push(&mut columns, "position".to_string(), "bigint")?;
 

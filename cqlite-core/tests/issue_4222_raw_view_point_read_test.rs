@@ -123,7 +123,7 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
             .rows
             .iter()
             .map(|r| (
-                int_of(r, "generation"),
+                bigint_of(r, "generation"),
                 int_of(r, "ck"),
                 text_of(r, "row_tombstone")
             ))
@@ -133,7 +133,7 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
     let gen1_rows: Vec<&QueryRow> = result
         .rows
         .iter()
-        .filter(|r| int_of(r, "generation") == Some(1))
+        .filter(|r| bigint_of(r, "generation") == Some(1))
         .collect();
     assert_eq!(gen1_rows.len(), 5, "gen-1 must contribute exactly 5 rows");
     for row in &gen1_rows {
@@ -156,7 +156,7 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
     let row_tombstone = result
         .rows
         .iter()
-        .find(|r| int_of(r, "generation") == Some(2) && int_of(r, "ck") == Some(2))
+        .find(|r| bigint_of(r, "generation") == Some(2) && int_of(r, "ck") == Some(2))
         .expect("gen-2 ck=2 row-tombstone row must be present");
     assert_eq!(text_of(row_tombstone, "row_kind").as_deref(), Some("row"));
     assert_eq!(
@@ -181,7 +181,7 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
     let cell_tombstone = result
         .rows
         .iter()
-        .find(|r| int_of(r, "generation") == Some(2) && int_of(r, "ck") == Some(3))
+        .find(|r| bigint_of(r, "generation") == Some(2) && int_of(r, "ck") == Some(3))
         .expect("gen-2 ck=3 cell-tombstone row must be present");
     assert_eq!(text_of(cell_tombstone, "row_kind").as_deref(), Some("row"));
     assert_eq!(
@@ -229,7 +229,7 @@ async fn partition_tombstone_generation_still_yields_one_row() {
     let partition_tombstone = result
         .rows
         .iter()
-        .find(|r| int_of(r, "generation") == Some(2))
+        .find(|r| bigint_of(r, "generation") == Some(2))
         .expect("gen-2's partition-tombstone row must be present even with zero on-disk rows");
     assert_eq!(
         text_of(partition_tombstone, "row_kind").as_deref(),
@@ -253,7 +253,7 @@ async fn partition_tombstone_generation_still_yields_one_row() {
     let gen1_rows: Vec<&QueryRow> = result
         .rows
         .iter()
-        .filter(|r| int_of(r, "generation") == Some(1))
+        .filter(|r| bigint_of(r, "generation") == Some(1))
         .collect();
     assert_eq!(
         gen1_rows.len(),
@@ -280,10 +280,10 @@ async fn sstable_generation_projection_answers_which_generations_hold_the_key() 
         .await
         .expect("projection query must succeed");
 
-    let mut generations: Vec<i32> = result
+    let mut generations: Vec<i64> = result
         .rows
         .iter()
-        .filter_map(|r| int_of(r, "generation"))
+        .filter_map(|r| bigint_of(r, "generation"))
         .collect();
     generations.sort_unstable();
     generations.dedup();
@@ -430,7 +430,7 @@ async fn gen1_drop_col_visible_gen2_drop_col_absent() {
     let gen1_ck1 = result
         .rows
         .iter()
-        .find(|r| int_of(r, "generation") == Some(1) && int_of(r, "ck") == Some(1))
+        .find(|r| bigint_of(r, "generation") == Some(1) && int_of(r, "ck") == Some(1))
         .expect("gen-1 ck=1 row must be present");
     assert_eq!(
         text_of(gen1_ck1, "drop_col").as_deref(),
@@ -441,7 +441,7 @@ async fn gen1_drop_col_visible_gen2_drop_col_absent() {
     let gen2_ck4 = result
         .rows
         .iter()
-        .find(|r| int_of(r, "generation") == Some(2) && int_of(r, "ck") == Some(4))
+        .find(|r| bigint_of(r, "generation") == Some(2) && int_of(r, "ck") == Some(4))
         .expect("gen-2 ck=4 row must be present");
     assert_eq!(
         get(gen2_ck4, "drop_col"),
@@ -489,5 +489,27 @@ async fn per_partition_limit_fails_closed() {
         outcome.is_err(),
         "REGRESSION (issue #4222): PER PARTITION LIMIT must fail closed, not be silently \
          ignored"
+    );
+}
+
+/// Roborev finding (issue #4222, High, round 2 of this class): OR/NOT are
+/// NOT the only way a comparison silently fails to lower to a pushed-down
+/// predicate — `!=` never lowers at all (`column_comparison_to_predicate`
+/// has no `NotEqual` arm), even inside a perfectly pushable AND position,
+/// so a naive "contains OR/NOT" check would miss it entirely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn where_clause_with_not_equal_fails_closed() {
+    let db = open_fixture_db().await;
+    let outcome = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1 AND val != 'x'"
+        ))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "REGRESSION (issue #4222): a WHERE clause containing != must fail closed — it never \
+         lowers to a pushed-down predicate even inside an AND, so it would otherwise be \
+         silently dropped and every row of the matched partition-key predicate returned \
+         unfiltered"
     );
 }

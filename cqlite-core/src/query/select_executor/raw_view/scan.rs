@@ -101,13 +101,24 @@ pub(in crate::query::select_executor) async fn raw_view_full_scan_rows(
                     }
                     running_bytes = running_bytes.saturating_add(estimate_query_row_bytes(&row));
                     out.push(row);
+                    // An explicit LIMIT (`stop_after.is_some()`) exempts the
+                    // row-count safety valve (issue #1578) — mirroring
+                    // `PointCollector::push` in `point.rs` (roborev finding,
+                    // issue #4222: the two producers previously disagreed,
+                    // so a `LIMIT` on a full-scan query could spuriously
+                    // trip `max_result_rows` while the SAME `LIMIT` on a
+                    // partition-targeted query did not). The byte budget
+                    // still guards memory either way.
                     if let Some(cap) = stop_after {
                         if out.len() >= cap {
                             stop_reached = true;
                             return Ok(ControlFlow::Break(()));
                         }
-                    }
-                    if running_bytes > max_result_bytes || out.len() > max_result_rows {
+                        if running_bytes > max_result_bytes {
+                            budget_exceeded = true;
+                            return Ok(ControlFlow::Break(()));
+                        }
+                    } else if running_bytes > max_result_bytes || out.len() > max_result_rows {
                         budget_exceeded = true;
                         return Ok(ControlFlow::Break(()));
                     }
@@ -123,8 +134,14 @@ pub(in crate::query::select_executor) async fn raw_view_full_scan_rows(
             // Enforce via the shared budget check so the error carries the
             // SAME `Error::ResultTooLarge` shape (budget/estimate/rows) every
             // other query path reports (design.md D9 — reuse, no new
-            // mechanism).
-            enforce_result_budget(&out, running_bytes, max_result_bytes, max_result_rows)?;
+            // mechanism). `usize::MAX` for the row-count valve under an
+            // explicit LIMIT, matching the exemption applied above.
+            let effective_max_rows = if stop_after.is_some() {
+                usize::MAX
+            } else {
+                max_result_rows
+            };
+            enforce_result_budget(&out, running_bytes, max_result_bytes, effective_max_rows)?;
             break 'generations;
         }
     }
