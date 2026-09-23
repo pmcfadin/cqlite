@@ -1782,6 +1782,17 @@ if [ -r "$REPO_ROOT/scripts/perf-capability.sh" ]; then
   if . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then _PERF_CAP_LOADED=1; fi
 fi
 
+# #4266: the tooling-tests diff-scoping decision (declared path set + classifier +
+# base-resolution + top-level decision function). Sourced here, at script scope,
+# same pattern as perf-capability.sh above — pure function/array definitions, no
+# side effects, so sourcing it unconditionally cannot change any other component's
+# behavior. See scripts/lib/tooling-tests-scope.sh for the full contract.
+_TOOLING_TESTS_SCOPE_LOADED=0
+if [ -r "$REPO_ROOT/scripts/lib/tooling-tests-scope.sh" ]; then
+  # shellcheck source=scripts/lib/tooling-tests-scope.sh
+  if . "$REPO_ROOT/scripts/lib/tooling-tests-scope.sh" 2>/dev/null; then _TOOLING_TESTS_SCOPE_LOADED=1; fi
+fi
+
 # _AGENT_GATE_OS: the host OS, resolved ONCE per gate run. `uname` is an external
 # process, so the OS question cannot be asked inside the per-emit token path above;
 # asking it at script scope costs one fork per RUN instead of one per summary. The
@@ -7013,6 +7024,27 @@ case "${1:-}" in
   # slot count (full cores at N=1, fair share at N>1, caller override respected)
   # WITHOUT running any component. No side effects beyond reading env + ncpu.
   --cpu-budget) cpu_budget_line; echo; exit 0 ;;
+  # Hidden self-test hooks (issue #4266): expose the tooling-tests diff-scoping
+  # decision so scripts/tests/test_tooling_tests_scope.sh can assert it without
+  # running the real (multi-hour) component.
+  #   --tooling-tests-classify         pure classification of stdin paths against
+  #                                     the declared set — no git. Prints
+  #                                     "IN-SCOPE <path>" per match, "MATCHED: <N>",
+  #                                     "VERDICT: RUN|SKIP".
+  #   --tooling-tests-scope-line [ref] drives the REAL _tooling_tests_scope_decide
+  #                                     against actual git state (optional base
+  #                                     override as $2), so a fixture-repo case can
+  #                                     assert the git-dependent branches (base
+  #                                     resolution, fail-closed on no merge-base)
+  #                                     against the shipped code, not a
+  #                                     reimplementation of it.
+  --tooling-tests-classify) _tooling_tests_classify_stdin; exit 0 ;;
+  --tooling-tests-scope-line)
+    _tooling_tests_scope_decide "${2:-}"
+    echo "DECISION: $TOOLING_SCOPE_DECISION"
+    echo "CAUSE: $TOOLING_SCOPE_CAUSE"
+    echo "DETAIL: $TOOLING_SCOPE_DETAIL"
+    exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -21447,6 +21479,34 @@ run_tooling_tests() {
   local start end status
   start=$(date +%s)
   : >"$log"
+
+  # #4266: diff-scope this component in the full gate. `--only tooling-tests`
+  # already returned above before this point if NOT selected; when it IS
+  # explicitly selected (ONLY is non-empty and named it), scoping is bypassed —
+  # `--only` is a diagnostic and always runs what it names (never SKIP-scoped),
+  # matching every other component's `--only` leniency. A bare full-gate run
+  # (ONLY empty) is the only path scoped here.
+  if [ -z "$ONLY" ]; then
+    if [ "$_TOOLING_TESTS_SCOPE_LOADED" != 1 ]; then
+      # The lib failed to source — an unmeasurable state distinct from "diff
+      # computed, no harness path found". Fail closed to RUN, never to SKIP, and
+      # say why on the row.
+      echo ">>> [$name] scope: lib unreadable — scripts/lib/tooling-tests-scope.sh did not source; running unconditionally (fail-closed)" | tee -a "$log"
+      _record_status_detail "$name" "scope lib unreadable — running unconditionally (fail-closed)"
+    else
+      _tooling_tests_scope_decide
+      echo ">>> [$name] scope: $TOOLING_SCOPE_DECISION ($TOOLING_SCOPE_CAUSE)" | tee -a "$log"
+      if [ "$TOOLING_SCOPE_DECISION" = SKIP ]; then
+        status=SKIP
+        _record_status_detail "$name" "$TOOLING_SCOPE_DETAIL"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+        return 0
+      fi
+      _record_status_detail "$name" "$TOOLING_SCOPE_DETAIL"
+    fi
+  fi
 
   # NOTE (#2751): AGENT_GATE_SUMMARY_FILE is already de-exported once after summary
   # resolution (see the scrub near the SUMMARY_FILE `case` block), so none of the
