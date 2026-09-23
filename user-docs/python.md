@@ -24,7 +24,7 @@ macOS (Intel and Apple Silicon), and Windows (x64).
 ### From source (development)
 
 ```bash
-# Install Rust 1.85+ and maturin first
+# Install Rust 1.95+ and maturin first
 pip install maturin
 git clone https://github.com/pmcfadin/cqlite
 cd cqlite/bindings/python

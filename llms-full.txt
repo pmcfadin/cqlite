@@ -25,7 +25,7 @@ CQLite is a Rust library for reading Apache Cassandra 5.0 SSTable files directly
 
 * cargo install
 
-  Build from crates.io with a Rust 1.85+ toolchain:
+  Build from crates.io with a Rust 1.95+ toolchain:
 
   ```bash
   cargo install cqlite-cli      # installs the `cqlite` binary
@@ -17347,7 +17347,7 @@ cqlite --version
 
 [Section titled “Build from source (Rust)”](#build-from-source-rust)
 
-Requires Rust 1.85+. Install Rust via [rustup.rs](https://rustup.rs) if needed.
+Requires Rust 1.95+. Install Rust via [rustup.rs](https://rustup.rs) if needed.
 
 ```bash
 git clone https://github.com/pmcfadin/cqlite.git
@@ -17388,7 +17388,7 @@ If the import fails after install, see [Troubleshooting](/cqlite/user-docs/troub
 
 [Section titled “Build the Python package from source”](#build-the-python-package-from-source)
 
-Requires Rust 1.85+ and [maturin](https://www.maturin.rs/).
+Requires Rust 1.95+ and [maturin](https://www.maturin.rs/).
 
 ```bash
 pip install maturin
@@ -18582,7 +18582,7 @@ If you specify `--out parquet` without `--output`, CQLite exits with an error.
 | `time`                                    | `Time64(Nanosecond)`                                      | Nanoseconds since midnight                                                                                                                         |
 | `decimal`                                 | `Decimal128(38, 9)`                                       | Fixed column scale of 9; values are rescaled with checked arithmetic; overflow or precision > 38 is a deterministic error, never silent truncation |
 | `varint`                                  | `Decimal128(38, 0)`                                       | Values longer than 38 digits are a deterministic error                                                                                             |
-| `duration`                                | `Utf8` (CQL text form, e.g. `"1mo2d3ns"`)                 | The `parquet` crate (v53) cannot write Arrow `Interval(MonthDayNano)`; text fallback until upstream support lands                                  |
+| `duration`                                | `Utf8` (CQL text form, e.g. `"1mo2d3ns"`)                 | The `parquet` crate (v59) cannot write Arrow `Interval(MonthDayNano)`; text fallback until upstream support lands                                  |
 | `uuid` / `timeuuid`                       | `FixedSizeBinary(16)` + `ARROW:extension:name=arrow.uuid` | Carries the canonical Arrow UUID extension annotation                                                                                              |
 | `inet`                                    | `Utf8` (canonical text, e.g. `"192.168.1.1"`)             | Deliberate: no standard Arrow inet type; text is most portable                                                                                     |
 | `counter`                                 | `Int64`                                                   |                                                                                                                                                    |
@@ -18770,7 +18770,7 @@ Requires Python 3.9+. Pre-built wheels are available for Linux (x86\_64, ARM64),
 [Section titled “From source (development)”](#from-source-development)
 
 ```bash
-# Install Rust 1.85+ and maturin first
+# Install Rust 1.95+ and maturin first
 pip install maturin
 git clone https://github.com/pmcfadin/cqlite
 cd cqlite/bindings/python
@@ -19666,7 +19666,7 @@ If the binary wheel is missing for your platform, build from source:
 
 ```bash
 pip install maturin
-rustup update    # Requires Rust 1.85+
+rustup update    # Requires Rust 1.95+
 cd bindings/python && maturin develop
 ```
 
@@ -19814,7 +19814,7 @@ Or build from source:
 git clone https://github.com/pmcfadin/cqlite
 cd cqlite/bindings/node
 npm install
-npm run build      # requires Rust 1.85+
+npm run build      # requires Rust 1.95+
 ```
 
 ## The core pattern
@@ -20439,7 +20439,7 @@ pip install maturin
 maturin develop        # development build, editable install
 ```
 
-Requires Python 3.9+ and Rust 1.85+ (for source builds only).
+Requires Python 3.9+ and Rust 1.95+ (for source builds only).
 
 ## The core pattern
 
@@ -20822,7 +20822,7 @@ The type mapping is **analytics-grade for schema-aware queries**: query results 
 | tuple / UDT                              | `Struct`                                     | Positional `field_N` / schema field names                                |
 | frozen\<T>                               | Same as T                                    | Transparent at every nesting level                                       |
 | inet                                     | Utf8 (canonical text)                        | Deliberate: no standard Arrow inet type                                  |
-| duration                                 | Utf8 (CQL text form)                         | `parquet` crate v53 cannot write `Interval(MonthDayNano)`                |
+| duration                                 | Utf8 (CQL text form)                         | `parquet` crate v59 cannot write `Interval(MonthDayNano)`                |
 
 Collections, UDTs, and high-precision scalars all support columnar predicate pushdown in downstream consumers (Trino, Spark, DuckDB). The batch and streaming writers produce identical schemas and values. See [Output Formats](/cqlite/user-docs/output-formats/) for the full table and notes.
 

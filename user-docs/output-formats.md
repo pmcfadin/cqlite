@@ -204,7 +204,7 @@ If you specify `--out parquet` without `--output`, CQLite exits with an error.
 | `time` | `Time64(Nanosecond)` | Nanoseconds since midnight |
 | `decimal` | `Decimal128(38, 9)` | Fixed column scale of 9; values are rescaled with checked arithmetic; overflow or precision > 38 is a deterministic error, never silent truncation |
 | `varint` | `Decimal128(38, 0)` | Values longer than 38 digits are a deterministic error |
-| `duration` | `Utf8` (CQL text form, e.g. `"1mo2d3ns"`) | The `parquet` crate (v53) cannot write Arrow `Interval(MonthDayNano)`; text fallback until upstream support lands |
+| `duration` | `Utf8` (CQL text form, e.g. `"1mo2d3ns"`) | The `parquet` crate (v59) cannot write Arrow `Interval(MonthDayNano)`; text fallback until upstream support lands |
 | `uuid` / `timeuuid` | `FixedSizeBinary(16)` + `ARROW:extension:name=arrow.uuid` | Carries the canonical Arrow UUID extension annotation |
 | `inet` | `Utf8` (canonical text, e.g. `"192.168.1.1"`) | Deliberate: no standard Arrow inet type; text is most portable |
 | `counter` | `Int64` | |
