@@ -598,4 +598,49 @@ fn s4_2_text_rendering_matches_the_json_rows() {
             matching[0]
         );
     }
+
+    // Roborev finding (final round, #4194): this test previously checked only
+    // row-level (path, severity) pairing between `--out text` and `--out
+    // json` — it never asserted that a location-bearing finding's `location`
+    // is actually PRESENT in the text output, the exact gap the sweep
+    // text-renderer Medium fix closed (`--out text` is `sweep`'s DEFAULT
+    // mode, so this was a real gap in the verb the issue adds). Assert it
+    // directly: every JSON finding carrying a non-null `location` must have a
+    // matching `location: ...` line in the text output naming the same
+    // physical offset (and chunk index, when the finding has one).
+    let mut checked_a_location = false;
+    let location_lines: Vec<&str> = text_stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with("location:"))
+        .collect();
+    for row in value["rows"].as_array().unwrap() {
+        for finding in row["findings"].as_array().unwrap() {
+            let Some(loc) = finding["location"].as_object() else {
+                continue;
+            };
+            checked_a_location = true;
+            let byte_offset = loc["byte_offset"].as_u64().unwrap();
+            let expected_offset_hex = format!("offset 0x{byte_offset:x}");
+            let chunk_index = loc["chunk_index"].as_u64();
+            let expected_chunk = chunk_index.map(|c| format!("chunk {c}, "));
+            assert!(
+                location_lines.iter().any(|l| {
+                    l.contains(&expected_offset_hex)
+                        && match &expected_chunk {
+                            Some(c) => l.contains(c.as_str()),
+                            None => true,
+                        }
+                }),
+                "expected a text `location:` line containing {expected_offset_hex:?} \
+                 (chunk {chunk_index:?}) but found: {location_lines:?}\nfull text: {text_stdout}"
+            );
+        }
+    }
+    assert!(
+        checked_a_location,
+        "expected at least one location-bearing finding in this sweep run — \
+         corrupt_data_db (lz4-compressed fixture, --mode full) should produce \
+         a chunk-CRC finding with `location` set; if this fixture stopped \
+         producing one, the assertions above are vacuous"
+    );
 }
