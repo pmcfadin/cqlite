@@ -137,14 +137,30 @@ view's.
 
 #### Scenario: A dropped-column generation shows the on-disk column the current schema no longer has
 
+**DEFERRED — NOT satisfied by this change; tracked as a follow-up (roborev finding, issue #4222).**
+The committed `test_tomb.dropped_regular_col` fixture's schema (`test-data/schemas/tombstone-parity.cql`
+Table 6) still DECLARES `drop_col` in this repo's `.cql` (the file's own header comment: "declared here
+so the initial Phase-A writes type-check"), so the base table's REGISTERED schema never actually omits
+the column — decoding gen-1 and gen-2 with the CURRENT (undropped) schema already surfaces `drop_col`
+correctly for gen-1 and correctly omits it for gen-2, with no special bookkeeping, which is what this
+change delivers. Design.md D7 already flagged the remaining piece — a real `ALTER TABLE ... DROP`
+against the schema REGISTRY, requiring `TableSchema` to record a historically-dropped column's on-disk
+type — as unresolved research ("the two committed fixtures exist for exactly this case… that is
+implementation-phase work, not a design gap"). This change does not add that registry bookkeeping or a
+`dropped` marker column; `row_data.rs:404-428`'s detection exists but the `dropped = true` exposure and
+its own snapshot coverage remain future work. A synthetic-schema unit test (mirroring
+`cqlite-core/tests/issue_1015_dropped_static_parity.rs`'s hand-built post-drop schema) is the intended
+shape once that bookkeeping lands.
+
 - **GIVEN** `test_tomb.dropped_regular_col` (gen-1 written before `ALTER TABLE ... DROP drop_col`,
   gen-2 after — schema `test-data/schemas/tombstone-parity.cql` Table 6)
 - **WHEN** the raw view is queried for a gen-1 key
 - **THEN** the gen-1 row exposes `drop_col` (and `drop_col_timestamp`/`_ttl`/`_local_deletion_time`)
-  under its on-disk name with `dropped = true`, using the on-disk marshal type
-  (`row_data.rs:404-428`'s detection, no longer discarded for this view) rather than being hidden;
-  the gen-2 row has `dropped_col` entirely absent from the emitted column set for that row (the
-  column genuinely does not exist on-disk in gen-2).
+  under its on-disk name (present in the CURRENT registered schema for this fixture, so no special
+  `dropped` marker is required to surface it correctly here); the gen-2 row has `drop_col` entirely
+  absent from the emitted column set for that row (the column genuinely does not exist on-disk in
+  gen-2). The `dropped = true` marker for a column TRULY absent from the current registry remains
+  future work (see above).
 
 ### Requirement: A partition-key predicate is pushed to the point-read path, never a scan
 
