@@ -563,17 +563,28 @@ diff (IO starvation; #4252's r7, case 4b.126).
 **The decision lives in `scripts/lib/tooling-tests-scope.sh`**, sourced by
 `scripts/agent-gate.sh` at script scope (same pattern as `perf-capability.sh`).
 One array, `TOOLING_TESTS_SCOPE_PATTERNS`, is the ONE declared place the
-harness-path set lives — `scripts/**`, `.github/**`, `.claude/**`,
-`.roborev.toml`, `rust-toolchain.toml`, `Cargo.lock`, `Cargo.toml` — pinned
-literally by `scripts/tests/test_tooling_tests_scope.sh` so a change to the set
-is caught at the source rather than only inferred from behavior.
+harness-path set lives — read that file for the current set rather than a copy
+enumerated here, which a roborev review on this issue found ALREADY out of sync
+with the array on the round that added it (two places naming the same list is
+two places to keep in sync, and prose is not pinned by any test). It is pinned
+literally by `scripts/tests/test_tooling_tests_scope.sh` so a change to the
+array is caught at the source, but **the set is HAND-MAINTAINED, not derived
+structurally, and that is a DECLARED, UNMITIGATED residual** — there is no
+automated proof it is exhaustive; a second roborev round on this issue found the
+first cut still missing several read classes (`.gitignore`, `CLAUDE.md`,
+`docs/**`, several `test-data/*` manifests) after the first round had already
+expanded it once. Read the array's own header comment for the full rationale
+and the running list of what each class guards.
 
 **`run_tooling_tests()` (the full gate only — `tooling-tests` is not a `--lite`
 or `--delta` component) resolves the diff against the merge-base of the first
 of `origin/main` / `main` / `origin/master` / `master` that resolves** (the same
-fallback chain `run_file_size` uses), reads BOTH the committed diff against
-that base AND the uncommitted working-tree diff against `HEAD` (a dirty tree
-touching a harness path still forces a run), and decides:
+fallback chain `run_file_size` uses), reads the UNION of three legs — the
+committed+working-tree diff against that base, UNTRACKED files (`git ls-files
+--others --exclude-standard` — a brand-new, not-yet-`git add`ed self-test file
+is invisible to `git diff` and would otherwise never trigger its own
+introducing PR), and uncommitted TRACKED changes against `HEAD` (a dirty tree
+touching a harness path still forces a run) — and decides:
 
 - **Zero declared-set paths in the diff → `SKIP`**, with the cause and the
   declared set named via `_record_status_detail` (so it renders on the SUMMARY
@@ -604,6 +615,14 @@ no git) and `agent-gate.sh --tooling-tests-scope-line [base]` (drives the real,
 git-backed decision — used against a scratch `git init` fixture, never this
 checkout, following the same `$wt`-copy pattern as
 `scripts/tests/test_dep_duplicates_ratchet.sh`).
+
+**Declared residual (round-2 finding 5):** `run_tooling_tests` also runs `cargo
+test -p ws0-corpus-gen` — that crate's ONLY execution point anywhere in the gate
+of record — and it exercises the production `SSTableWriter` write path, yet
+`cqlite-core/**` is deliberately OUT of the declared set (a core-src-only diff
+must SKIP). A core write-path change that breaks the generator therefore has no
+gate-of-record signal until the nightly unconditional run. Tracked as a
+follow-up (move the block to an unscoped component, or accept the cadence).
 
 Self-test: `scripts/tests/test_tooling_tests_scope.sh`, wired into
 `tooling-tests` itself (hermetic — no cargo/python3/network/datasets).

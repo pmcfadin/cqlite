@@ -51,10 +51,17 @@ declared_want='scripts/*
 rust-toolchain.toml
 Cargo.lock
 Cargo.toml
+.gitignore
+CLAUDE.md
+process_improvements.md
+docs/*
+website/src/content/docs/*
 test-data/scripts/*
+test-data/*.yml
+test-data/*.env
+test-data/perf-corpus-*
 tools/*
 cqlite-flight/Dockerfile
-docs/reports/ws0-*-artifacts/*
 bindings/node/__test__/*'
 if [ "$declared_got" = "$declared_want" ]; then
   ok "declared harness-path set matches the #4266-issue-declared list exactly (order included)"
@@ -93,17 +100,27 @@ classify 'Cargo.toml'                            RUN "Cargo.toml (root) -> RUN"
 classify 'test-data/scripts/check-dataset-manifest.sh' RUN "test-data/scripts/* (#3493 manifest guard) -> RUN"
 classify 'tools/ws0-corpus-gen/src/measurement_corpus.rs' RUN "tools/* (ws0-corpus-gen determinism oracle) -> RUN"
 classify 'cqlite-flight/Dockerfile'              RUN "cqlite-flight/Dockerfile (#2870 rust-pin lockstep) -> RUN"
-classify 'docs/reports/ws0-3096-artifacts/corpus-identity.json' RUN "nested docs/reports/ws0-*-artifacts/* -> RUN"
 classify 'bindings/node/__test__/parity-utils.js' RUN "bindings/node/__test__/* -> RUN"
+classify '.gitignore'                            RUN ".gitignore (test_gate_detached.sh subject derivation) -> RUN"
+classify 'CLAUDE.md'                             RUN "CLAUDE.md (completion-grammar drift guard) -> RUN"
+classify 'process_improvements.md'               RUN "process_improvements.md -> RUN"
+classify 'docs/development/dev-cookbook.md'      RUN "nested docs/* (#4266 round-2: was wrongly SKIP) -> RUN"
+classify 'docs/development/fleet-runbook.md'     RUN "docs/* (test_worker_supervisor.sh subject) -> RUN"
+classify 'website/src/content/docs/index.mdx'    RUN "nested website/src/content/docs/* -> RUN"
+classify 'test-data/dataset-pin.env'             RUN "test-data/*.env (schemas-preflight fixture) -> RUN"
+classify 'test-data/cassandra-parity-manifest.yml' RUN "test-data/*.yml (parity-report manifest) -> RUN"
+classify 'test-data/perf-corpus-bti-sample.json' RUN "test-data/perf-corpus-* -> RUN"
 
 # Negative: production/doc/test-data paths outside the declared set, including
-# two near-miss traps — `.agents/` (NOT `.claude/`) and a nested `Cargo.toml`
+# three near-miss traps — `.agents/` (NOT `.claude/`), a nested `Cargo.toml`
 # under a workspace member (only the exact top-level name is declared; the
-# pattern is a literal, not `*/Cargo.toml`).
+# pattern is a literal, not `*/Cargo.toml`), and a repo-root doc that is
+# NEITHER `CLAUDE.md` NOR under `docs/`/`website/src/content/docs/` (proving
+# the new `docs/*` class did not silently swallow every markdown file).
 classify 'cqlite-core/src/lib.rs'                SKIP "cqlite-core/src/** -> SKIP (AC1 subject)"
 classify 'cqlite-cli/src/main.rs'                SKIP "cqlite-cli/** -> SKIP (AC1 subject)"
-classify 'docs/development/dev-cookbook.md'      SKIP "docs/**.md -> SKIP"
-classify 'test-data/schemas/basic.cql'           SKIP "test-data/** -> SKIP"
+classify 'README.md'                             SKIP "repo-root README.md (not CLAUDE.md, not under docs/) -> SKIP"
+classify 'test-data/schemas/basic.cql'           SKIP "test-data/** non-yml/env/perf-corpus -> SKIP"
 classify 'bindings/python/tests/test_x.py'       SKIP "bindings/python/tests/** -> SKIP"
 classify '.agents/skills/rust-patterns/SKILL.md' SKIP ".agents/** (not .claude/**) -> SKIP"
 classify 'cqlite-core/Cargo.toml'                SKIP "nested Cargo.toml (not root) -> SKIP"

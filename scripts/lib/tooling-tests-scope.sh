@@ -22,21 +22,50 @@
 # forward slashes) — `*` matches `/` in this context, so `scripts/*` already covers
 # `scripts/tests/foo.sh` and `scripts/lib/bar.sh`, not just top-level files.
 #
-# The set is hand-maintained against what run_tooling_tests ACTUALLY invokes, not
-# derived structurally (a roborev review on this issue asked for structural
-# derivation as the more principled fix; that is a larger refactor of
-# run_tooling_tests itself and is left as a DECLARED RESIDUAL — see the
-# completeness-net case in scripts/tests/test_tooling_tests_scope.sh, which scans
-# run_tooling_tests's own body for literal path references against a few known
-# prefixes and asserts each is covered here, as an early-warning net rather than a
-# proof). Classes beyond scripts/**/.github/**/.claude/**: the #2878
-# fetch-datasets.sh fixture guard and test_check_dataset_manifest.sh etc. read
-# `test-data/scripts/**`; `test_ws0_canonical_corpus.sh` plus the `cargo test -p
-# ws0-corpus-gen` block read `tools/**` and the committed corpus-identity pin
-# under `docs/reports/ws0-*-artifacts/**`; the #2870 Dockerfile-side half of the
-# Rust-pin lockstep guard reads `cqlite-flight/Dockerfile` (the other half,
+# The set is hand-maintained against what run_tooling_tests's ~80 self-tests
+# ACTUALLY read as live repository input, not derived structurally. A roborev
+# review on this issue asked for structural derivation (walk run_tooling_tests's
+# own body for path references and assert each is covered here) as the more
+# principled fix, and a SECOND review round caught the first cut both (a) still
+# missing several read classes and (b) claiming a "completeness-net self-test"
+# existed to catch exactly that, when none did — a declared residual naming a
+# non-existent mitigation is worse than an undeclared one, so that claim is
+# retracted here rather than repeated: THIS RESIDUAL IS UNMITIGATED. There is no
+# automated proof that the list below is exhaustive; it is reviewed by hand each
+# time a roborev pass (or any reader) finds a gap, and by construction the
+# direction any gap fails is SKIP-when-it-should-RUN (fail-open) — never the
+# reverse, since an unmapped path simply falls through the pattern list, not into
+# a special "definitely out of scope" branch. Structural derivation is tracked as
+# a follow-up (#4266 round-2 findings 1/2), not attempted here.
+#
+# Classes beyond scripts/**, .github/**, .claude/**, and the workspace/toolchain
+# pins: the #2878 fetch-datasets.sh fixture guard and test_check_dataset_manifest.sh
+# etc. read `test-data/scripts/**`; several `test-data/*.yml` and
+# `test-data/*.env`/`perf-corpus-*` fixtures are read directly by name
+# (test_agent_gate_parity_report.sh, test_agent_gate_schemas_preflight.sh,
+# test_bti_perf_scan.sh, test_gen_perf_corpus_bti.sh); `test_ws0_canonical_corpus.sh`
+# plus the `cargo test -p ws0-corpus-gen` block read `tools/**` and the committed
+# corpus-identity pin under `docs/reports/ws0-*-artifacts/**` (subsumed by the
+# broader `docs/*` entry below); the #2870 Dockerfile-side half of the Rust-pin
+# lockstep guard reads `cqlite-flight/Dockerfile` (the other half,
 # `rust-toolchain.toml`, was already declared); test_check_dataset_manifest.sh
-# also reads `bindings/node/__test__/**`.
+# also reads `bindings/node/__test__/**`; `test_gate_detached.sh` derives its
+# subjects from the committed `.gitignore`; test_gate_component_verdict.sh greps
+# `CLAUDE.md`, `process_improvements.md`, `docs/**` and
+# `website/src/content/docs/**` for completion-grammar drift; and
+# test_worker_supervisor.sh reads `docs/development/fleet-runbook.md` (also
+# subsumed by `docs/*`).
+#
+# DECLARED RESIDUAL (round-2 finding 5, left as-is rather than restructured under
+# the 2-roborev-round cap): the `cargo test -p ws0-corpus-gen` block inside
+# run_tooling_tests is that crate's ONLY execution point in the gate of record
+# (CLAUDE.md), and that crate exercises the production `SSTableWriter` /
+# `Database::execute_streaming` write path — yet `cqlite-core/**` is
+# DELIBERATELY OUT of this declared set (a core-only diff must SKIP per #4266
+# AC1). A `cqlite-core` write-path change that breaks ws0-corpus-gen's generator
+# therefore loses its only gate-of-record signal until the nightly unconditional
+# run. Follow-up: move that block to an unscoped component, or accept the
+# nightly-only cadence explicitly.
 TOOLING_TESTS_SCOPE_PATTERNS=(
   'scripts/*'
   '.github/*'
@@ -45,10 +74,17 @@ TOOLING_TESTS_SCOPE_PATTERNS=(
   'rust-toolchain.toml'
   'Cargo.lock'
   'Cargo.toml'
+  '.gitignore'
+  'CLAUDE.md'
+  'process_improvements.md'
+  'docs/*'
+  'website/src/content/docs/*'
   'test-data/scripts/*'
+  'test-data/*.yml'
+  'test-data/*.env'
+  'test-data/perf-corpus-*'
   'tools/*'
   'cqlite-flight/Dockerfile'
-  'docs/reports/ws0-*-artifacts/*'
   'bindings/node/__test__/*'
 )
 
@@ -122,13 +158,22 @@ _tooling_tests_resolve_base() {
   return 1
 }
 
-# _tooling_tests_changed_paths <base>: print repo-relative changed paths — the
-# committed diff (base..HEAD), UNTRACKED files, and uncommitted TRACKED
-# working-tree changes (vs HEAD), unioned and deduplicated. Mirrors
-# run_file_size's committed+working-tree scope, so a dirty tree touching a
-# harness path still forces RUN. Returns 1 (prints nothing usable) if ANY of the
-# three underlying git calls fails — the caller treats that as unmeasurable and
-# fails closed to RUN.
+# _tooling_tests_changed_paths <base>: print repo-relative changed paths, unioned
+# and deduplicated across THREE legs. Mirrors run_file_size's committed+working-tree
+# scope, so a dirty tree touching a harness path still forces RUN. Returns 1
+# (prints nothing usable) if ANY of the three underlying git calls fails — the
+# caller treats that as unmeasurable and fails closed to RUN.
+#
+#   1. `git diff <base>` — <base> vs the WORKING TREE (not `<base>..HEAD`: with no
+#      `--cached`/`HEAD` argument this already includes any uncommitted, TRACKED
+#      change on top of HEAD, so it is a superset of the committed range).
+#   2. `git ls-files --others --exclude-standard` — untracked files (leg 1 never
+#      reports these; see point 2 below).
+#   3. `git diff HEAD` — uncommitted TRACKED changes vs HEAD. Given leg 1 already
+#      covers <base>..working-tree, this leg's only ADDITIONAL job is a working-tree
+#      REVERT of a change that WAS committed between <base> and HEAD (leg 1 would
+#      then show no difference for that path, since base..working-tree nets to
+#      identical content) — a case leg 1 alone cannot see.
 #
 # THREE PROPERTIES A ROBOREV REVIEW ON THIS ISSUE FOUND MISSING FROM THE FIRST
 # CUT, each a fail-OPEN (the one direction this scoper must never take):
