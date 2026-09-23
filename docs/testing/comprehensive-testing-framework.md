@@ -162,7 +162,7 @@ The testing framework is fully integrated with GitHub Actions through the `compr
 ### Key Features
 
 - **Cross-platform testing**: Linux, macOS, Windows
-- **Multiple Rust versions**: Stable, beta, 1.85+
+- **Multiple Rust versions**: Stable, beta, 1.95+
 - **Parallel execution**: Optimized test runner with `nextest`
 - **Coverage reporting**: >90% threshold with Codecov integration
 - **Performance monitoring**: Regression detection with baseline comparison

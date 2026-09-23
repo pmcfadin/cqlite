@@ -393,7 +393,7 @@ fn recomputed_payload_matches_the_sum_of_the_row_widths() {
 /// what a future posture change would have to flip visibly. What it must NOT be
 /// read as any more is a live description of Flight behaviour.
 ///
-/// # MEASURED terminal behaviour (arrow-array 53.4.1)
+/// # MEASURED terminal behaviour (arrow-array 59.3.0)
 ///
 /// `RecordBatch::try_new(zero_field_schema, vec![])` returns
 /// `Err(ArrowError::InvalidArgumentError("must either specify a row count or at
@@ -426,7 +426,7 @@ fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
     // The accumulator DOES track the rows...
     assert_eq!(acc.len(), 3, "len() reports the committed rows");
 
-    // ...and NO batch exists to carry them: under arrow-array 53.4.1 both paths
+    // ...and NO batch exists to carry them: under arrow-array 59.3.0 both paths
     // REFUSE, with arrow's row-count message. This is the arm that executes.
     match (acc.to_record_batch(), rows_to_record_batch(&columns, &rows)) {
         (Err(fused), Err(reference)) => {
@@ -453,7 +453,7 @@ fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
                 "len() still reports the 3 staged rows after the batch was refused"
             );
         }
-        // TRIPWIRE, deliberately failing: arrow-array 53.4.1 — the version
+        // TRIPWIRE, deliberately failing: arrow-array 59.3.0 — the version
         // measured for issue #3742 — makes this arm unreachable. If an arrow
         // upgrade starts ACCEPTING a zero-field/zero-array batch, the equality
         // assert still enforces issue #3552's agreement property, and the panic

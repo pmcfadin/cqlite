@@ -88,7 +88,7 @@ cqlite --version
 
 ## Build from source (Rust)
 
-Requires Rust 1.85+. Install Rust via [rustup.rs](https://rustup.rs) if needed.
+Requires Rust 1.95+. Install Rust via [rustup.rs](https://rustup.rs) if needed.
 
 ```bash
 git clone https://github.com/pmcfadin/cqlite.git
@@ -125,7 +125,7 @@ If the import fails after install, see [Troubleshooting](/cqlite/user-docs/troub
 
 ### Build the Python package from source
 
-Requires Rust 1.85+ and [maturin](https://www.maturin.rs/).
+Requires Rust 1.95+ and [maturin](https://www.maturin.rs/).
 
 ```bash
 pip install maturin

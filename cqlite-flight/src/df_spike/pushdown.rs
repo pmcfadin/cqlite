@@ -244,7 +244,7 @@ fn column_name(expr: &Expr) -> Option<String> {
 /// an operand whose coercion is unproven is exactly the silent-wrong-rows hazard
 /// this module is built to avoid.
 fn literal_json(expr: &Expr) -> Option<serde_json::Value> {
-    let Expr::Literal(scalar) = expr else {
+    let Expr::Literal(scalar, _) = expr else {
         return None;
     };
     match scalar {

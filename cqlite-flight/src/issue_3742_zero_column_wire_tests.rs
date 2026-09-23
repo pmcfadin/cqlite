@@ -84,7 +84,7 @@ fn zero_column_batch_carries_its_row_count_before_any_transport() {
 
 /// THE MEASUREMENT: the real `do_get` encoder + a real arrow-flight client
 /// decode. Whatever this asserts is the observed transport behaviour of
-/// arrow/arrow-flight 53 — not a CQLite design choice.
+/// arrow/arrow-flight 59 — not a CQLite design choice.
 #[test]
 fn zero_column_row_count_through_the_real_do_get_encoder_and_flight_decode() {
     let (schema, batch) = zero_column_batch(ROWS);

@@ -3,6 +3,7 @@ name = "sstabledump-validator"
 publish = false
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Zero-tolerance cell-by-cell validation harness for sstabledump compatibility"
 
 [dependencies]

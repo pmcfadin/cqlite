@@ -101,7 +101,7 @@ pub fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, PathBuf)
 pub async fn start_server(svc: CqliteFlightService) -> RunningServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
     let server = tokio::spawn(async move {
         Server::builder()
             .add_service(FlightServiceServer::new(svc))
@@ -180,7 +180,9 @@ pub async fn do_get_batches(
         .do_get(Ticket::new(ticket))
         .await
         .expect("do_get rpc");
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    let stream = resp
+        .into_inner()
+        .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
     let mut batches = Vec::new();
     while let Some(batch) = rb.next().await {

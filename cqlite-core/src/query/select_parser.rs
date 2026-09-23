@@ -375,7 +375,7 @@ impl Tokenizer {
             }
         }
 
-        if digits.len() % 2 != 0 {
+        if !digits.len().is_multiple_of(2) {
             return Err(Error::cql_parse(format!(
                 "Blob literal must have an even number of hex digits, got {} in 0x{}",
                 digits.len(),

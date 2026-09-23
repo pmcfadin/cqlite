@@ -31,7 +31,7 @@ pip install maturin
 maturin develop        # development build, editable install
 ```
 
-Requires Python 3.9+ and Rust 1.85+ (for source builds only).
+Requires Python 3.9+ and Rust 1.95+ (for source builds only).
 
 ## The core pattern
 

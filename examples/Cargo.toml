@@ -3,6 +3,7 @@ name = "cqlite-examples"
 publish = false
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 cqlite-core = { path = "../cqlite-core" }

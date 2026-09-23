@@ -119,7 +119,7 @@ pub fn is_blob_hex(text: &str) -> bool {
     let Some(digits) = text.strip_prefix("0x") else {
         return false;
     };
-    digits.len() % 2 == 0 && digits.chars().all(|c| c.is_ascii_hexdigit())
+    digits.len().is_multiple_of(2) && digits.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Is `text` a spelling [`super::canon_timestamp`] RECOGNISED as a timestamp?

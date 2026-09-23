@@ -260,7 +260,7 @@ impl<W: Write + Send> DeltaParquetWriter<W> {
         // Build Parquet writer properties.
         let props = WriterProperties::builder()
             .set_compression(options.compression.to_parquet())
-            .set_max_row_group_size(options.row_group_size)
+            .set_max_row_group_row_count(Some(options.row_group_size))
             .build();
 
         let arrow_writer = ArrowWriter::try_new(output, Arc::clone(&schema), Some(props))?;

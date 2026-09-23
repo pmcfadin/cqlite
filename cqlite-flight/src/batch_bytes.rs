@@ -41,7 +41,7 @@
 //! denominated in `get_array_memory_size()`, which reports buffer **capacity**:
 //! the construction path (`StringArray::from` / `BinaryArray::from`) grows
 //! `MutableBuffer` by power-of-two doubling from zero, so reported memory runs
-//! up to ~2× payload (measured 1.72–1.80× on realistic shapes against arrow 53).
+//! up to ~2× payload (measured 1.72–1.80× on realistic shapes against arrow 59).
 //! Capacity is a property of an allocator's growth policy, not of the data: it
 //! is not computable before the batch exists and it is non-monotonic in row
 //! count, so it cannot be the trigger.
@@ -174,7 +174,7 @@ pub const ENV_MAX_BATCH_BYTES: &str = "CQLITE_MAX_BATCH_BYTES";
 /// `MutableBuffer::reserve` grows to `max(round_upto_multiple_of_64(required),
 /// capacity * 2)` — power-of-two doubling from zero — so a payload landing just
 /// past a power of two reports up to ~2× that payload. Measured against this
-/// tree's arrow 53: 1.001× (512 × 8 KiB binary), 1.280× (100 × 64 KiB binary),
+/// tree's arrow 59: 1.001× (512 × 8 KiB binary), 1.280× (100 × 64 KiB binary),
 /// 1.445× (8192 × 180 B binary), 1.720× (8192 × 300 B binary), 1.779× (8192 ×
 /// 290 B string), 1.801× (8192 × 20 B string). `2` is the bound, not the typical.
 ///
@@ -200,7 +200,7 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// 1024 this function was NOT an upper bound for text/blob schemas. 1024 was
 /// under the real
 /// fixed cost of the commonest node there is: a `Utf8`/`Binary` array built by
-/// `export::arrow_convert` reports **1208 B** at any length from 0 up (arrow 53 —
+/// `export::arrow_convert` reports **1208 B** at any length from 0 up (Arrow 59 —
 /// 1024 values buffer + 64 offsets + the struct overhead). A two-`text`-column
 /// batch of three short rows therefore reports 2416 B against a `2 × payload +
 /// 1024 × 2` = 2186 B bound — which #2821's fail-closed reservation turned from a

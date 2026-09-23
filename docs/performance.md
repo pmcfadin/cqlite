@@ -82,7 +82,7 @@ isolate CPU-bound behavior from storage.
 
 ### Prerequisites
 
-- Rust 1.85+, `cargo` in `~/.cargo/bin/`
+- Rust 1.95+, `cargo` in `~/.cargo/bin/`
 - Test data fetched: `bash test-data/scripts/fetch-datasets.sh`
 - `CQLITE_DATASETS_ROOT` set (or defaults to `test-data/datasets` from
   `CARGO_MANIFEST_DIR`)

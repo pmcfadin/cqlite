@@ -16,9 +16,9 @@ path = "src/main.rs"
 [dependencies]
 # Raw Flight client transport — pinned to the same major lines cqlite-flight
 # serves with so the tonic/arrow-flight wire types unify across the loopback
-# self-test (arrow-flight 53 → tonic 0.12).
-arrow-flight = "53"
-tonic = "0.12"
+# self-test (arrow-flight 59.3 → tonic 0.14.1).
+arrow-flight = "59.3"
+tonic = "0.14.1"
 arrow = { workspace = true, features = ["ipc"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 futures = { workspace = true }

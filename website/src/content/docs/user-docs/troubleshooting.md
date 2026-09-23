@@ -151,7 +151,7 @@ If the binary wheel is missing for your platform, build from source:
 
 ```bash
 pip install maturin
-rustup update    # Requires Rust 1.85+
+rustup update    # Requires Rust 1.95+
 cd bindings/python && maturin develop
 ```
 

@@ -40,6 +40,7 @@ resolver = "2"
 name = "cqlite"
 version = "0.17.0"
 edition = "2021"
+rust-version.workspace = true
 publish = false
 
 [dependencies]
@@ -71,7 +72,7 @@ license = "Apache-2.0"
 repository = "https://github.com/pmcfadin/cqlite"
 keywords = ["database", "embedded", "sstable", "wasm"]
 categories = ["database-implementations", "embedded", "wasm"]
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.lints.rust]
 unused_imports = "deny"
@@ -169,8 +170,8 @@ napi-derive = "2.16"
 napi-build = "2.1"
 
 # Arrow and Parquet support (M3 output writers)
-arrow = { version = "53", default-features = false }
-parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
+arrow = { version = "59", default-features = false }
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
 
 # WASM (M6 placeholders — no workspace member references these yet. The
 # wasm-bindgen/js-sys/web-sys pins were dropped in #1698 with cqlite-core's `wasm`

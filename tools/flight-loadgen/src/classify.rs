@@ -87,9 +87,9 @@ mod tests {
 
     #[test]
     fn flight_tonic_error_delegates_to_status_classification() {
-        let shed = FlightError::Tonic(Status::unavailable("shed"));
+        let shed = FlightError::Tonic(Box::new(Status::unavailable("shed")));
         assert_eq!(classify_flight_error(&shed), Outcome::Unavailable);
-        let other = FlightError::Tonic(Status::internal("mid-stream fault"));
+        let other = FlightError::Tonic(Box::new(Status::internal("mid-stream fault")));
         assert_eq!(
             classify_flight_error(&other),
             Outcome::Error("Internal".to_string())

@@ -85,7 +85,7 @@ impl ScanCancel {
     /// A loop that genuinely needs per-iteration cancellation uses
     /// [`Self::checkpoint_now`] instead.
     pub async fn checkpoint(&self, tick: usize) -> crate::Result<()> {
-        if tick % YIELD_STRIDE == 0 {
+        if tick.is_multiple_of(YIELD_STRIDE) {
             self.check()?;
             tokio::task::yield_now().await;
         }
@@ -113,7 +113,7 @@ impl ScanCancel {
     /// | [`Self::checkpoint_now`] | EVERY call | EVERY call |
     pub async fn checkpoint_polled(&self, tick: usize) -> crate::Result<()> {
         self.check()?;
-        if tick % YIELD_STRIDE == 0 {
+        if tick.is_multiple_of(YIELD_STRIDE) {
             tokio::task::yield_now().await;
         }
         Ok(())

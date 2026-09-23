@@ -87,7 +87,7 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<CorpusIdentity> {
                 .into(),
         );
     }
-    if spec.rows % spec.rows_per_partition != 0 {
+    if !spec.rows.is_multiple_of(spec.rows_per_partition) {
         return Err(format!(
             "rows ({}) must be an exact multiple of rows-per-partition ({})",
             spec.rows, spec.rows_per_partition
@@ -125,7 +125,7 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<CorpusIdentity> {
         }
         rows_written += mutations.len() as u64;
         writer.write_partition(key.clone(), mutations)?;
-        if spec.progress_every > 0 && (i as u64 + 1) % spec.progress_every == 0 {
+        if spec.progress_every > 0 && (i as u64 + 1).is_multiple_of(spec.progress_every) {
             eprintln!(
                 "  {} / {partitions} partitions ({rows_written} rows) in {:.1}s",
                 i + 1,

@@ -21,7 +21,6 @@
 //! pointer copy, not a decode change) — the plan's declared schema must match
 //! the batches it emits, and DataFusion is entitled to rely on that.
 
-use std::any::Any;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -266,10 +265,6 @@ impl CqliteTableProvider {
 
 #[async_trait]
 impl TableProvider for CqliteTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

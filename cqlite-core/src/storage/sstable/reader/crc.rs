@@ -139,7 +139,7 @@ impl CrcDb {
         let chunk_size = validate_chunk_size(chunk_size_raw)?;
 
         let body = &bytes[4..];
-        if body.len() % 4 != 0 {
+        if !body.len().is_multiple_of(4) {
             return Err(Error::corruption(format!(
                 "CRC.db body is {} bytes — not a whole number of 4-byte CRC32 entries (truncated)",
                 body.len()

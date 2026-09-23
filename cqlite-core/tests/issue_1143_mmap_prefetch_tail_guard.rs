@@ -194,7 +194,7 @@ async fn measure_tail(db: Arc<Database>, sql: Arc<String>) -> Option<(Duration, 
                     chunk[0] = chunk[0].wrapping_add(1);
                 }
                 i = i.wrapping_add(1);
-                if i % 64 == 0 {
+                if i.is_multiple_of(64) {
                     std::thread::yield_now();
                 }
             }

@@ -36,6 +36,9 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
+#[path = "support/parquet_decimal_scale_tests.rs"]
+mod parquet_decimal_scale_tests;
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -1250,34 +1253,6 @@ fn test_cql_decimal_roundtrip_scale_up() {
 }
 
 #[test]
-fn test_cql_decimal_roundtrip_scale_down() {
-    use arrow::array::Decimal128Array;
-
-    let col = col_with_cql_type("v", DataType::Text, cqlite_core::schema::CqlType::Decimal);
-    // Value: 1_000_000_000_000 with scale=12 (represents 1.000000000000)
-    // After rescaling to scale=9: divide by 10^3 = 1_000_000_000
-    let unscaled: i64 = 1_000_000_000_000;
-    let result = single_cql_typed_result(
-        col,
-        Value::Decimal {
-            scale: 12,
-            unscaled: unscaled.to_be_bytes().to_vec(),
-        },
-    );
-
-    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
-    let batch = read_parquet_back(&bytes).unwrap();
-
-    let arr = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<Decimal128Array>()
-        .unwrap();
-    assert!(arr.is_valid(0));
-    assert_eq!(arr.value(0), 1_000_000_000i128);
-}
-
-#[test]
 fn test_cql_decimal_null() {
     use arrow::array::Decimal128Array;
 
@@ -1408,10 +1383,10 @@ fn test_cql_varint_null() {
 }
 
 // ----------------------------------------
-// CQL duration → Arrow Utf8 (parquet crate v53 does not support Interval(MonthDayNano))
+// CQL duration → Arrow Utf8 (parquet crate v59 does not support Interval(MonthDayNano))
 //
 // The Parquet format's INTERVAL logical type only supports millisecond precision,
-// not nanoseconds. The `parquet` crate v53 explicitly rejects writing
+// not nanoseconds. The `parquet` crate v59 explicitly rejects writing
 // `Interval(MonthDayNano)` to Parquet files.  We therefore serialize CQL duration
 // values as their canonical CQL text form (e.g. "1mo2d3ns") stored as `Utf8`.
 // When the parquet crate gains MonthDayNano write support, these tests and the
@@ -4451,7 +4426,7 @@ fn make_parity_fixture() -> QueryResult {
             table_name: None,
             cql_type: Some(CqlType::Uuid),
         },
-        // duration → Utf8 (MonthDayNano parquet v53 NYI)
+        // duration → Utf8 (MonthDayNano parquet v59 NYI)
         ColumnInfo {
             name: "dur".to_string(),
             data_type: DataType::Text,
@@ -4750,7 +4725,7 @@ fn test_streaming_batch_parity_schema_identical() {
         Some("arrow.uuid"),
         "uuid field missing Arrow UUID extension metadata"
     );
-    // duration → Utf8 (parquet v53 MonthDayNano NYI)
+    // duration → Utf8 (parquet v59 MonthDayNano NYI)
     assert_eq!(
         batch_schema.field(4).data_type(),
         &AD::Utf8,

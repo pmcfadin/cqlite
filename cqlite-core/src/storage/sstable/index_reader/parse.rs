@@ -218,7 +218,7 @@ pub(super) fn parse_all_partition_keys_cancellable<'a>(
     let mut entry_index = 0usize;
     while !remaining.is_empty() {
         // #2383 fix C: bounded-interval cooperative cancel (not per entry).
-        if entry_index % CANCEL_POLL_INTERVAL == 0 {
+        if entry_index.is_multiple_of(CANCEL_POLL_INTERVAL) {
             cancel.check()?;
         }
         match parse_big_index_entry(remaining) {

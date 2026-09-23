@@ -312,7 +312,7 @@ pub fn column_is_absent(plan: NullPlan, column: &str, r: u64, rows_per_partition
     match plan {
         NullPlan::None => false,
         NullPlan::Pinned => match column {
-            "metric_a" => r % 8 == 0,
+            "metric_a" => r.is_multiple_of(8),
             "region" => r % 8 == 3,
             "payload" => r % 40 == 17,
             // The LAST row of each partition. Expressed against
@@ -516,7 +516,8 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<FixtureIdentity> {
                 .into(),
         );
     }
-    if spec.rows % spec.rows_per_partition != 0 {
+    // The guard above establishes a nonzero divisor before this check.
+    if !spec.rows.is_multiple_of(spec.rows_per_partition) {
         return Err(format!(
             "rows ({}) must be an exact multiple of rows-per-partition ({})",
             spec.rows, spec.rows_per_partition

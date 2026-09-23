@@ -29,7 +29,7 @@
 //!
 //! # The charging model, from first principles
 //!
-//! Arrow buffer **lengths are exact** — measured against this tree's arrow 53, a
+//! Arrow buffer **lengths are exact** — measured against this tree's arrow 59, a
 //! one-row `Int32` column is 4 bytes, a nine-row `Boolean` column is
 //! `ceil(9/8) = 2` bytes, and a null buffer is `ceil(n/8)` (absent entirely when
 //! a column has no nulls). Nothing is rounded up to an allocator quantum, so the

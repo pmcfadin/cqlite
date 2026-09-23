@@ -2,6 +2,7 @@
 name = "format-compatibility-tests"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Comprehensive format compatibility tests for Cassandra 5+"
 publish = false
 

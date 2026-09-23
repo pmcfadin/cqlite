@@ -15,7 +15,7 @@ Thank you for your interest in contributing to CQLite! This document provides gu
 ## Getting Started
 
 ### Prerequisites
-- Rust 1.70.0 or later
+- Rust 1.95.0 or later
 - Git
 - GitHub account
 - Optional: Docker for testing with real Cassandra data

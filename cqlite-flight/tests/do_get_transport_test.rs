@@ -13,7 +13,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use arrow::array::{Array, StringArray};
-use arrow::ipc::{root_as_message, MessageHeader};
+use arrow::ipc::{
+    root_as_message, BodyCompression, BodyCompressionArgs, BodyCompressionMethod, Buffer,
+    CompressionType, FieldNode, KeyValue, KeyValueArgs, MessageBuilder, MessageHeader,
+    MetadataVersion, RecordBatch as IpcRecordBatch, RecordBatchArgs,
+};
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
@@ -96,7 +100,7 @@ async fn do_get_stream_over_transport(
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -144,7 +148,7 @@ async fn do_get_batches_over_transport(
     ticket: Vec<u8>,
 ) -> Vec<RecordBatch> {
     let (server, inner) = do_get_stream_over_transport(svc, ticket).await;
-    let stream = inner.map(|r| r.map_err(FlightError::Tonic));
+    let stream = inner.map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
     let mut batches = Vec::new();
@@ -172,6 +176,181 @@ async fn do_get_raw_flight_data_over_transport(
     }
     server.abort();
     messages
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordBatchHeaderFields {
+    message_version: i16,
+    message_header_type: u8,
+    message_body_length: i64,
+    custom_metadata: Option<Vec<(Option<String>, Option<String>)>>,
+    length: i64,
+    nodes: Option<Vec<(i64, i64)>>,
+    buffers: Option<Vec<(i64, i64)>>,
+    compression: Option<(i8, i8)>,
+    variadic_buffer_counts: Option<Vec<i64>>,
+}
+
+/// Decode every field in an IPC RecordBatch header into owned values. The
+/// Arrow59 flatbuffer layout differs from the retained Arrow53 fixture, while
+/// these decoded fields remain the transport contract.
+fn record_batch_header_fields(data_header: &[u8]) -> Option<RecordBatchHeaderFields> {
+    let message = root_as_message(data_header).ok()?;
+    let record_batch = message.header_as_record_batch()?;
+    let custom_metadata = message.custom_metadata().map(|metadata| {
+        (0..metadata.len())
+            .map(|index| {
+                let entry = metadata.get(index);
+                (
+                    entry.key().map(str::to_owned),
+                    entry.value().map(str::to_owned),
+                )
+            })
+            .collect()
+    });
+    let nodes = record_batch.nodes().map(|nodes| {
+        (0..nodes.len())
+            .map(|index| {
+                let node = nodes.get(index);
+                (node.length(), node.null_count())
+            })
+            .collect()
+    });
+    let buffers = record_batch.buffers().map(|buffers| {
+        (0..buffers.len())
+            .map(|index| {
+                let buffer = buffers.get(index);
+                (buffer.offset(), buffer.length())
+            })
+            .collect()
+    });
+    let compression = record_batch
+        .compression()
+        .map(|compression| (compression.codec().0, compression.method().0));
+    let variadic_buffer_counts = record_batch
+        .variadicBufferCounts()
+        .map(|counts| (0..counts.len()).map(|index| counts.get(index)).collect());
+
+    Some(RecordBatchHeaderFields {
+        message_version: message.version().0,
+        message_header_type: message.header_type().0,
+        message_body_length: message.bodyLength(),
+        custom_metadata,
+        length: record_batch.length(),
+        nodes,
+        buffers,
+        compression,
+        variadic_buffer_counts,
+    })
+}
+
+fn record_batch_header_fields_match(
+    actual: &RecordBatchHeaderFields,
+    expected: &RecordBatchHeaderFields,
+) -> bool {
+    actual == expected
+}
+
+fn record_batch_headers_match(actual: &[u8], expected: &[u8]) -> bool {
+    match (
+        record_batch_header_fields(actual),
+        record_batch_header_fields(expected),
+    ) {
+        (Some(actual), Some(expected)) => record_batch_header_fields_match(&actual, &expected),
+        _ => false,
+    }
+}
+
+/// Serialize a RecordBatch IPC header from the semantic fields extracted by
+/// [`record_batch_header_fields`]. The negative controls use this builder so
+/// they exercise the same FlatBuffer parser and field extraction as the
+/// positive transport oracle, rather than only comparing Rust structs.
+#[allow(non_snake_case)]
+fn build_record_batch_header(fields: &RecordBatchHeaderFields) -> Vec<u8> {
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+
+    let nodes = fields.nodes.as_ref().map(|values| {
+        let values: Vec<_> = values
+            .iter()
+            .map(|&(length, null_count)| FieldNode::new(length, null_count))
+            .collect();
+        fbb.create_vector(&values)
+    });
+    let buffers = fields.buffers.as_ref().map(|values| {
+        let values: Vec<_> = values
+            .iter()
+            .map(|&(offset, length)| Buffer::new(offset, length))
+            .collect();
+        fbb.create_vector(&values)
+    });
+    let variadicBufferCounts = fields
+        .variadic_buffer_counts
+        .as_ref()
+        .map(|values| fbb.create_vector(values));
+    let compression = fields.compression.map(|(codec, method)| {
+        BodyCompression::create(
+            &mut fbb,
+            &BodyCompressionArgs {
+                codec: CompressionType(codec),
+                method: BodyCompressionMethod(method),
+            },
+        )
+    });
+    let custom_metadata = fields.custom_metadata.as_ref().map(|entries| {
+        let entries: Vec<_> = entries
+            .iter()
+            .map(|(key, value)| {
+                let key = key.as_deref().map(|key| fbb.create_string(key));
+                let value = value.as_deref().map(|value| fbb.create_string(value));
+                KeyValue::create(&mut fbb, &KeyValueArgs { key, value })
+            })
+            .collect();
+        fbb.create_vector(&entries)
+    });
+
+    let record_batch = IpcRecordBatch::create(
+        &mut fbb,
+        &RecordBatchArgs {
+            length: fields.length,
+            nodes,
+            buffers,
+            compression,
+            variadicBufferCounts,
+        },
+    )
+    .as_union_value();
+    let mut message = MessageBuilder::new(&mut fbb);
+    message.add_version(MetadataVersion(fields.message_version));
+    message.add_header_type(MessageHeader(fields.message_header_type));
+    message.add_bodyLength(fields.message_body_length);
+    message.add_header(record_batch);
+    if let Some(custom_metadata) = custom_metadata {
+        message.add_custom_metadata(custom_metadata);
+    }
+    let root = message.finish();
+    fbb.finish(root, None);
+    fbb.finished_data().to_vec()
+}
+
+fn read_committed_golden_messages() -> Vec<FlightData> {
+    // `cqlite-flight` and `trino-connector` are sibling crates/dirs at the
+    // root; the golden is committed there, not under `cqlite-flight`.
+    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../trino-connector/src/test/resources/golden/keyvalue.flightdata");
+    let golden_bytes = std::fs::read(&golden_path)
+        .unwrap_or_else(|e| panic!("read committed golden {}: {e}", golden_path.display()));
+
+    // Length-delimited protobuf: decode each `FlightData` message in turn,
+    // consuming the shared cursor (`&mut buf`) as prost advances it.
+    let mut buf: &[u8] = golden_bytes.as_slice();
+    let mut golden = Vec::new();
+    while !buf.is_empty() {
+        golden.push(
+            FlightData::decode_length_delimited(&mut buf)
+                .expect("decode a FlightData message from the committed golden"),
+        );
+    }
+    golden
 }
 
 /// Reproduces issue #2193: a 3-row nb-big table served over the real gRPC
@@ -231,12 +410,11 @@ fn do_get_over_transport_emits_schema_then_recordbatch() {
 }
 
 /// **Golden cross-check (issue #2193 review).** The transport-captured raw
-/// `FlightData` sequence for this SAME field-shape fixture must be
-/// byte-identical to the committed `keyvalue.flightdata` golden that
-/// `FlightDataGoldenDecodeTest` decodes on the Java side — closing the loop
-/// between "what the golden contains" and "what the wire actually carries" so
-/// a Java-side PASS against the golden is genuinely evidence about the real
-/// transport, not just about a possibly-stale fixture.
+/// `FlightData` sequence for this SAME field-shape fixture must retain the
+/// committed golden's message count, schema header, bodies, and application
+/// metadata. Arrow59 may encode an equivalent RecordBatch header with a
+/// different FlatBuffer layout, so that header is compared exhaustively by
+/// decoded fields instead of raw bytes.
 #[test]
 fn do_get_over_transport_matches_committed_golden() {
     let (_temp, data_dir) = build_fixture();
@@ -256,23 +434,7 @@ fn do_get_over_transport_matches_committed_golden() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let wire = rt.block_on(do_get_raw_flight_data_over_transport(svc, ticket_bytes()));
 
-    // `cqlite-flight` and `trino-connector` are sibling crates/dirs at the repo
-    // root; the golden is committed there, not under `cqlite-flight`.
-    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../trino-connector/src/test/resources/golden/keyvalue.flightdata");
-    let golden_bytes = std::fs::read(&golden_path)
-        .unwrap_or_else(|e| panic!("read committed golden {}: {e}", golden_path.display()));
-
-    // Length-delimited protobuf: decode each `FlightData` message in turn,
-    // consuming the shared cursor (`&mut buf`) as prost advances it.
-    let mut buf: &[u8] = golden_bytes.as_slice();
-    let mut golden = Vec::new();
-    while !buf.is_empty() {
-        golden.push(
-            FlightData::decode_length_delimited(&mut buf)
-                .expect("decode a FlightData message from the committed golden"),
-        );
-    }
+    let golden = read_committed_golden_messages();
 
     assert_eq!(
         wire.len(),
@@ -281,14 +443,142 @@ fn do_get_over_transport_matches_committed_golden() {
     );
     for (i, (w, g)) in wire.iter().zip(golden.iter()).enumerate() {
         assert_eq!(
-            w.data_header, g.data_header,
-            "message[{i}] data_header drifted from the committed golden"
+            w.flight_descriptor, g.flight_descriptor,
+            "message[{i}] flight_descriptor drifted from the committed golden"
         );
+        let actual_header_type = root_as_message(&w.data_header)
+            .expect("live data_header must be a valid IPC Message flatbuffer")
+            .header_type();
+        let expected_header_type = root_as_message(&g.data_header)
+            .expect("golden data_header must be a valid IPC Message flatbuffer")
+            .header_type();
+        assert_eq!(
+            actual_header_type, expected_header_type,
+            "message[{i}] data_header type drifted from the committed golden"
+        );
+        if actual_header_type == MessageHeader::RecordBatch {
+            assert!(
+                record_batch_headers_match(&w.data_header, &g.data_header),
+                "message[{i}] RecordBatch header fields drifted from the committed golden"
+            );
+        } else {
+            assert_eq!(
+                w.data_header, g.data_header,
+                "message[{i}] non-RecordBatch data_header drifted from the committed golden"
+            );
+        }
         assert_eq!(
             w.data_body, g.data_body,
             "message[{i}] data_body drifted from the committed golden"
         );
+        assert_eq!(
+            w.app_metadata, g.app_metadata,
+            "message[{i}] app_metadata drifted from the committed golden"
+        );
     }
+}
+
+#[test]
+fn record_batch_semantic_header_controls_reject_field_mutations() {
+    let golden = read_committed_golden_messages();
+    let expected = record_batch_header_fields(&golden[1].data_header)
+        .expect("committed second message must contain a RecordBatch header");
+
+    // The builder's layout need not match the committed Arrow53 bytes; the
+    // semantic parser must still extract the same fields from a valid Arrow59
+    // header before any mutation is tested.
+    let rebuilt = build_record_batch_header(&expected);
+    assert!(record_batch_headers_match(&rebuilt, &golden[1].data_header));
+
+    let assert_changed = |label: &str, mutate: &mut dyn FnMut(&mut RecordBatchHeaderFields)| {
+        let mut changed = expected.clone();
+        mutate(&mut changed);
+        let changed_header = build_record_batch_header(&changed);
+        assert!(
+            !record_batch_headers_match(&changed_header, &golden[1].data_header),
+            "serialized RecordBatch mutation {label} was not rejected"
+        );
+    };
+
+    assert_changed("message version", &mut |changed| {
+        changed.message_version += 1;
+    });
+    assert_changed("message header type", &mut |changed| {
+        changed.message_header_type = MessageHeader::Schema.0;
+    });
+    assert_changed("custom metadata", &mut |changed| {
+        changed.custom_metadata = Some(vec![(Some("changed".to_string()), None)]);
+    });
+    assert_changed("record batch length", &mut |changed| {
+        changed.length += 1;
+    });
+    assert_changed("field node", &mut |changed| {
+        changed
+            .nodes
+            .as_mut()
+            .expect("RecordBatch must contain field nodes")[0]
+            .0 += 1;
+    });
+    assert_changed("buffer", &mut |changed| {
+        changed
+            .buffers
+            .as_mut()
+            .expect("RecordBatch must contain buffers")[0]
+            .1 += 1;
+    });
+    assert_changed("body length", &mut |changed| {
+        changed.message_body_length += 1;
+    });
+    assert_changed("compression", &mut |changed| {
+        changed.compression = Some(match changed.compression {
+            Some((codec, method)) => (codec.wrapping_add(1), method),
+            None => (
+                CompressionType::LZ4_FRAME.0,
+                BodyCompressionMethod::BUFFER.0,
+            ),
+        });
+    });
+    assert_changed("variadic buffer counts", &mut |changed| {
+        changed.variadic_buffer_counts = Some(match changed.variadic_buffer_counts.take() {
+            Some(mut counts) => {
+                counts[0] += 1;
+                counts
+            }
+            None => vec![1],
+        });
+    });
+}
+
+#[test]
+fn record_batch_semantic_header_controls_fail_closed_on_malformed_or_wrong_type() {
+    let golden = read_committed_golden_messages();
+    let expected = &golden[1].data_header;
+
+    // FlatBuffer parsing must reject truncated and otherwise malformed bytes,
+    // rather than treating a partial header as an equivalent empty header.
+    assert!(!record_batch_headers_match(
+        &expected[..expected.len() / 2],
+        expected
+    ));
+    let mut malformed = expected.to_vec();
+    malformed[0] = malformed[0].wrapping_add(1);
+    assert!(!record_batch_headers_match(&malformed, expected));
+
+    let expected_fields = record_batch_header_fields(expected)
+        .expect("committed second message must contain a RecordBatch header");
+    let mut schema_typed = expected_fields.clone();
+    schema_typed.message_header_type = MessageHeader::Schema.0;
+    assert!(!record_batch_headers_match(
+        &build_record_batch_header(&schema_typed),
+        expected
+    ));
+
+    let mut unknown_typed = expected_fields;
+    unknown_typed.message_header_type = 255;
+    assert!(!record_batch_headers_match(
+        &build_record_batch_header(&unknown_typed),
+        expected
+    ));
 }
 
 /// The field failure was against a REAL Cassandra 5.0 `nb-big` + compressed
@@ -474,7 +764,7 @@ fn do_get_over_transport_enforces_limit() {
     // from flush 1 (even index) AND at least one from flush 2 (odd index).
     let keys = keys_of(&batches, "key");
     assert_eq!(keys.len(), limit as usize, "one key per returned row");
-    let from_flush1 = keys.iter().any(|k| key_index(k) % 2 == 0);
+    let from_flush1 = keys.iter().any(|k| key_index(k).is_multiple_of(2));
     let from_flush2 = keys.iter().any(|k| key_index(k) % 2 == 1);
     assert!(
         from_flush1 && from_flush2,
@@ -613,7 +903,7 @@ async fn do_get_drop_after(
 ) -> tokio::task::JoinHandle<Result<(), tonic::transport::Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -640,7 +930,9 @@ async fn do_get_drop_after(
         .do_get(Ticket::new(ticket))
         .await
         .expect("do_get rpc");
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    let stream = resp
+        .into_inner()
+        .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
     let mut read = 0usize;

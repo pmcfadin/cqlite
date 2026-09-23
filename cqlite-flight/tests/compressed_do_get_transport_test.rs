@@ -158,7 +158,7 @@ async fn do_get_batches_over_transport(
         .await
         .expect("bind loopback");
     let addr = listener.local_addr().expect("local addr");
-    let incoming = TcpIncoming::from_listener(listener, true, None).expect("incoming");
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -172,7 +172,9 @@ async fn do_get_batches_over_transport(
         .do_get(Ticket::new(ticket))
         .await
         .expect("do_get rpc");
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    let stream = resp
+        .into_inner()
+        .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
     let mut batches = Vec::new();
@@ -636,7 +638,7 @@ async fn do_get_drop_after(
         .await
         .expect("bind loopback");
     let addr = listener.local_addr().expect("local addr");
-    let incoming = TcpIncoming::from_listener(listener, true, None).expect("incoming");
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -650,7 +652,9 @@ async fn do_get_drop_after(
         .do_get(Ticket::new(ticket))
         .await
         .expect("do_get rpc");
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    let stream = resp
+        .into_inner()
+        .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
     let mut read = 0usize;

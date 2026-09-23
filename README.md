@@ -12,7 +12,7 @@
   <a href="https://www.npmjs.com/package/@cqlite/node"><img src="https://img.shields.io/npm/v/@cqlite/node.svg?label=npm%20%40cqlite%2Fnode" alt="npm"></a>
   <a href="https://pmcfadin.github.io/cqlite/"><img src="https://img.shields.io/badge/docs-pmcfadin.github.io%2Fcqlite-blue.svg" alt="Docs"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache License"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85+-red.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.95+-red.svg" alt="Rust"></a>
   <a href="https://cassandra.apache.org"><img src="https://img.shields.io/badge/cassandra-5.0+-green.svg" alt="Cassandra"></a>
 </p>
 
@@ -62,7 +62,7 @@ brew install pmcfadin/cqlite/cqlite
 cqlite --help
 ```
 
-### CLI (from crates.io — requires Rust 1.85+)
+### CLI (from crates.io — requires Rust 1.95+)
 
 ```bash
 cargo install cqlite-cli      # installs the `cqlite` binary
@@ -432,7 +432,7 @@ CQLite uses a **spec-driven, agent-orchestrated, gate-enforced** workflow built 
 
 ```bash
 # Prerequisites
-# - Rust 1.85+
+# - Rust 1.95+
 
 # Clone and build
 git clone https://github.com/pmcfadin/cqlite.git

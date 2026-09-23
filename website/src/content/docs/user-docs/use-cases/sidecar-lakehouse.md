@@ -151,7 +151,7 @@ faithful Arrow schema.
 | tuple / UDT | `Struct` | Positional `field_N` / schema field names |
 | frozen&lt;T&gt; | Same as T | Transparent at every nesting level |
 | inet | Utf8 (canonical text) | Deliberate: no standard Arrow inet type |
-| duration | Utf8 (CQL text form) | `parquet` crate v53 cannot write `Interval(MonthDayNano)` |
+| duration | Utf8 (CQL text form) | `parquet` crate v59 cannot write `Interval(MonthDayNano)` |
 
 Collections, UDTs, and high-precision scalars all support columnar predicate pushdown
 in downstream consumers (Trino, Spark, DuckDB). The batch and streaming writers produce

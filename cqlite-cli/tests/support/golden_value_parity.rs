@@ -650,7 +650,7 @@ pub fn stringified_blob_spelling(s: &str) -> Option<String> {
 /// prefix is not a spelling `BytesSerializer.toString` can produce, so it must not
 /// be normalized into one.
 fn is_bare_lowercase_hex(s: &str) -> bool {
-    s.len() % 2 == 0
+    s.len().is_multiple_of(2)
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }

@@ -74,7 +74,7 @@ async fn do_get_batches_over_transport(
 ) -> Vec<RecordBatch> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -107,7 +107,9 @@ async fn do_get_batches_over_transport(
         .do_get(Ticket::new(ticket))
         .await
         .expect("do_get rpc");
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    let stream = resp
+        .into_inner()
+        .map(|r| r.map_err(|status| FlightError::Tonic(Box::new(status))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
     let mut batches = Vec::new();

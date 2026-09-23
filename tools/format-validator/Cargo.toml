@@ -3,6 +3,7 @@ name = "format-validator"
 publish = false
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Cassandra 5+ SSTable format validation toolkit"
 
 [[bin]]
