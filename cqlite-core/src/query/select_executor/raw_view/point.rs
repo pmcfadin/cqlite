@@ -25,6 +25,7 @@ use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
+use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -125,10 +126,11 @@ fn push_mapped_rows(
     source: &RawViewSource,
     always_predicates: &[&SSTablePredicate],
     data_predicates: &[&SSTablePredicate],
+    metadata_names: &HashSet<String>,
     collector: &mut PointCollector,
 ) -> Result<bool> {
     for mapped in map_compaction_row(row, schema, source)? {
-        if row_passes_predicates(&mapped, always_predicates, data_predicates)?
+        if row_passes_predicates(&mapped, always_predicates, data_predicates, metadata_names)?
             && collector.push(mapped)?
         {
             return Ok(true);
@@ -166,6 +168,7 @@ async fn scan_and_filter_one_reader(
     pk_bytes: &[u8],
     always_predicates: &[&SSTablePredicate],
     data_predicates: &[&SSTablePredicate],
+    metadata_names: &HashSet<String>,
     scan_cancel: &ScanCancel,
     collector: &mut PointCollector,
 ) -> Result<bool> {
@@ -190,6 +193,7 @@ async fn scan_and_filter_one_reader(
                 &source,
                 always_predicates,
                 data_predicates,
+                metadata_names,
                 collector,
             )? {
                 stopped = true;
@@ -211,6 +215,7 @@ async fn point_rows_for_key(
     pk_bytes: &[u8],
     always_predicates: &[&SSTablePredicate],
     data_predicates: &[&SSTablePredicate],
+    metadata_names: &HashSet<String>,
     scan_cancel: &ScanCancel,
     collector: &mut PointCollector,
 ) -> Result<bool> {
@@ -236,6 +241,7 @@ async fn point_rows_for_key(
                         &source,
                         always_predicates,
                         data_predicates,
+                        metadata_names,
                         collector,
                     )? {
                         return Ok(true);
@@ -249,6 +255,7 @@ async fn point_rows_for_key(
                     pk_bytes,
                     always_predicates,
                     data_predicates,
+                    metadata_names,
                     scan_cancel,
                     collector,
                 )
@@ -274,6 +281,7 @@ async fn point_rows_for_key(
     pk_bytes: &[u8],
     always_predicates: &[&SSTablePredicate],
     data_predicates: &[&SSTablePredicate],
+    metadata_names: &HashSet<String>,
     scan_cancel: &ScanCancel,
     collector: &mut PointCollector,
 ) -> Result<bool> {
@@ -285,6 +293,7 @@ async fn point_rows_for_key(
             pk_bytes,
             always_predicates,
             data_predicates,
+            metadata_names,
             scan_cancel,
             collector,
         )
@@ -313,6 +322,7 @@ pub(in crate::query::select_executor) async fn raw_view_point_rows(
     keys: &[Vec<u8>],
     always_predicates: &[&SSTablePredicate],
     data_predicates: &[&SSTablePredicate],
+    metadata_names: &HashSet<String>,
     max_result_bytes: usize,
     max_result_rows: usize,
     stop_after: Option<usize>,
@@ -326,6 +336,7 @@ pub(in crate::query::select_executor) async fn raw_view_point_rows(
             key,
             always_predicates,
             data_predicates,
+            metadata_names,
             &scan_cancel,
             &mut collector,
         )

@@ -189,10 +189,52 @@ impl super::SelectExecutor {
             base_name
         ));
 
-        let columns = raw_view_columns(&base_schema)?;
+        let (columns, metadata_names) = raw_view_columns(&base_schema)?;
         let readers = self
             .resolve_raw_view_readers(&base_table_id, keyspace.is_some())
             .await?;
+
+        // Validate the SELECT-list shape/names BEFORE either producer runs
+        // (roborev finding, issue #4222 — round 9, correcting round 5's own
+        // gap): this check previously lived in the POST-producer
+        // projection-trimming match below, so a projection naming an
+        // unknown column paid a full corpus walk before erroring — and on
+        // a corpus exceeding `max_result_bytes`/`max_result_rows` the
+        // producer's OWN budget guard tripped first, masking the intended
+        // `Error::Schema` behind `Error::ResultTooLarge`. Mirrors the
+        // WHERE-predicate validation immediately below for the same
+        // reason. `SelectClause::All` needs no validation; a non-bare-
+        // column `Columns(exprs)` shape and `Distinct` are refused here,
+        // matching the (now trimming-only) match below.
+        match &plan.statement.select_clause {
+            SelectClause::All => {}
+            SelectClause::Columns(exprs)
+                if exprs
+                    .iter()
+                    .all(|e| matches!(e, SelectExpression::Column(_))) =>
+            {
+                for expr in exprs {
+                    let SelectExpression::Column(c) = expr else {
+                        unreachable!("filtered to bare Column above")
+                    };
+                    if !columns.iter().any(|col| col.name == c.column) {
+                        return Err(Error::Schema(format!(
+                            "raw SSTable view: SELECT names unknown column '{}' — not part \
+                             of the raw view's column contract",
+                            c.column
+                        )));
+                    }
+                }
+            }
+            SelectClause::Columns(_) | SelectClause::Distinct(_) => {
+                return Err(Error::unsupported_query(
+                    "a SELECT expression other than a plain column reference (WRITETIME/TTL, \
+                     an alias, an arithmetic expression, or a collection-element access) is \
+                     not supported over a _raw_sstable_data view — use 'SELECT *' or a plain \
+                     column list",
+                ));
+            }
+        }
 
         // A predicate naming a column that is NOT part of the raw view's
         // column contract at all must fail closed (roborev finding, issue
@@ -272,6 +314,7 @@ impl super::SelectExecutor {
                     std::slice::from_ref(&pk_bytes),
                     &always_predicates,
                     &data_predicates,
+                    &metadata_names,
                     self.max_result_bytes,
                     self.max_result_rows,
                     stop_after,
@@ -285,6 +328,7 @@ impl super::SelectExecutor {
                     &pk_keys,
                     &always_predicates,
                     &data_predicates,
+                    &metadata_names,
                     self.max_result_bytes,
                     self.max_result_rows,
                     stop_after,
@@ -297,6 +341,7 @@ impl super::SelectExecutor {
                     &base_schema,
                     &always_predicates,
                     &data_predicates,
+                    &metadata_names,
                     self.max_result_bytes,
                     self.max_result_rows,
                     stop_after,
@@ -305,27 +350,16 @@ impl super::SelectExecutor {
             }
         };
 
-        // Plain-column projection trimming (`SELECT a, b, ...`), reusing the
-        // SAME `trim_projection` the base pipeline's `Project` step uses so
-        // the two never drift. `SELECT *` is the only other shape handled
-        // here; DISTINCT/aggregates are already rejected above, before any
-        // producer work ran.
-        //
-        // Every OTHER `SelectExpression` shape (`WRITETIME`/`TTL`, an
-        // alias, an arithmetic expression, a collection-element access) now
-        // FAILS CLOSED (roborev finding, issue #4222 — round 5) rather than
-        // silently falling through to "return every column unfiltered": the
-        // prior wildcard `_ => (rows, columns)` arm matched BOTH
-        // `SelectClause::All` (the correct behavior) AND a `Columns(exprs)`
-        // whose list contained anything OTHER than a bare column reference
-        // — so `SELECT WRITETIME(val) FROM t_raw_sstable_data` silently
-        // returned every column instead of the WRITETIME projection (which
-        // this view does not build) or a typed refusal, the same
-        // silent-wrong-answer class ORDER BY/DISTINCT/aggregates are
-        // rejected for above. Reshaping expressions over the raw view remain
-        // OUT OF SCOPE for this slice (design.md D4's JOIN-gap precedent),
-        // but the refusal must be EXPLICIT, never indistinguishable from
-        // `SELECT *`.
+        // Plain-column projection TRIMMING ONLY (`SELECT a, b, ...`) —
+        // reusing the SAME `trim_projection` the base pipeline's `Project`
+        // step uses so the two never drift. The SHAPE/NAME validation for
+        // every branch here already ran ABOVE, before either producer, so
+        // the `ok_or_else` below is defense-in-depth (never actually
+        // reachable in practice — roborev finding, issue #4222 — round 9,
+        // moving that validation earlier so a bad projection cannot pay for
+        // a full corpus walk first). `SELECT *` is the only other shape
+        // handled here; DISTINCT/aggregates/a non-bare-column shape were
+        // already rejected above.
         let (rows, columns) = match &plan.statement.select_clause {
             SelectClause::All => (rows, columns),
             SelectClause::Columns(exprs)
@@ -347,7 +381,9 @@ impl super::SelectExecutor {
                 // a GAP in the surviving positions (`SELECT pk, bogus, ck`
                 // produced positions `0, 2`), violating the dense/ordered
                 // invariant `metadata.columns` must hold. An unknown column
-                // now fails closed (D8) instead of being silently dropped.
+                // now fails closed (D8) instead of being silently dropped
+                // (defense-in-depth only — the SAME check already ran
+                // above, before either producer).
                 let mut trimmed_columns = Vec::with_capacity(selected.len());
                 for name in &selected {
                     let col = columns

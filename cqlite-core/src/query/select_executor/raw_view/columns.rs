@@ -69,9 +69,26 @@ fn try_is_complex_cql_type(t: &CqlType) -> Option<bool> {
 /// `val` column alongside a `val_timestamp` column) — silently overwriting
 /// one of the two would be a no-heuristics-violating silent data loss
 /// (roborev finding, issue #4222), never something this view may do quietly.
+///
+/// Returns the synthesized column set ALONGSIDE the set of names that are
+/// METADATA DERIVATIVES (the per-cell `_timestamp`/`_ttl`/
+/// `_local_deletion_time`/`_tombstone`/`_complex_deletion*` names and the
+/// row-level `row_timestamp`/`row_ttl`/`row_local_deletion_time`/
+/// `row_tombstone`/`row_deletion_timestamp` quintet) — roborev finding,
+/// issue #4222 — round 9, correcting round 8's own gap: that fix classified
+/// a predicate's column by NAME SUFFIX (`predicates.rs`'s
+/// `is_metadata_derivative_column`), which misclassifies a REAL base-table
+/// column that happens to be named e.g. `event_timestamp` with no sibling
+/// `event` column to trip the collision guard (which only fires when a
+/// SIBLING column's synthesized name collides, not when an UNRELATED base
+/// column merely LOOKS like one). Returning the set THIS FUNCTION ACTUALLY
+/// SYNTHESIZED — never re-derived from a name pattern — makes that
+/// misclassification structurally impossible: a real base column can never
+/// end up in this set, because it is populated only at the exact call
+/// sites that push a synthesized quad/trio/quintet name.
 pub(in crate::query::select_executor) fn raw_view_columns(
     base: &TableSchema,
-) -> crate::Result<Vec<ColumnInfo>> {
+) -> crate::Result<(Vec<ColumnInfo>, HashSet<String>)> {
     let key_names: HashSet<&str> = base
         .partition_keys
         .iter()
@@ -80,8 +97,13 @@ pub(in crate::query::select_executor) fn raw_view_columns(
         .collect();
 
     let mut columns: Vec<ColumnInfo> = Vec::new();
+    let mut metadata_names: HashSet<String> = HashSet::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut push = |columns: &mut Vec<ColumnInfo>, name: String, type_str: &str| {
+    let mut push = |columns: &mut Vec<ColumnInfo>,
+                    metadata_names: &mut HashSet<String>,
+                    name: String,
+                    type_str: &str,
+                    is_metadata: bool| {
         if !seen.insert(name.clone()) {
             return Err(Error::Schema(format!(
                 "raw SSTable view: base table '{}.{}' has a column named '{name}' that \
@@ -91,16 +113,31 @@ pub(in crate::query::select_executor) fn raw_view_columns(
                 base.keyspace, base.table
             )));
         }
+        if is_metadata {
+            metadata_names.insert(name.clone());
+        }
         let position = columns.len();
         columns.push(column_info_from_type_str(name, type_str, position, None));
         Ok(())
     };
 
     for pk in &base.partition_keys {
-        push(&mut columns, pk.name.clone(), &pk.data_type)?;
+        push(
+            &mut columns,
+            &mut metadata_names,
+            pk.name.clone(),
+            &pk.data_type,
+            false,
+        )?;
     }
     for ck in &base.clustering_keys {
-        push(&mut columns, ck.name.clone(), &ck.data_type)?;
+        push(
+            &mut columns,
+            &mut metadata_names,
+            ck.name.clone(),
+            &ck.data_type,
+            false,
+        )?;
     }
 
     // `TableSchema::columns` carries EVERY declared column, key columns
@@ -111,7 +148,13 @@ pub(in crate::query::select_executor) fn raw_view_columns(
         .iter()
         .filter(|c| !key_names.contains(c.name.as_str()))
     {
-        push(&mut columns, col.name.clone(), &col.data_type)?;
+        push(
+            &mut columns,
+            &mut metadata_names,
+            col.name.clone(),
+            &col.data_type,
+            false,
+        )?;
 
         // Fail closed (design.md D8) on an unparseable declared type rather
         // than defaulting to "simple" (roborev finding, issue #4222): a type
@@ -139,8 +182,10 @@ pub(in crate::query::select_executor) fn raw_view_columns(
         if is_complex {
             push(
                 &mut columns,
+                &mut metadata_names,
                 format!("{}_complex_deletion", col.name),
                 "boolean",
+                true,
             )?;
             // `bigint`, never `int` (roborev finding, issue #4222 — round
             // 8, matching `partition_deletion_time`/`range_deletion_time`'s
@@ -152,17 +197,33 @@ pub(in crate::query::select_executor) fn raw_view_columns(
             // negative) form.
             push(
                 &mut columns,
+                &mut metadata_names,
                 format!("{}_complex_deletion_time", col.name),
                 "bigint",
+                true,
             )?;
             push(
                 &mut columns,
+                &mut metadata_names,
                 format!("{}_complex_deletion_timestamp", col.name),
                 "bigint",
+                true,
             )?;
         } else {
-            push(&mut columns, format!("{}_timestamp", col.name), "bigint")?;
-            push(&mut columns, format!("{}_ttl", col.name), "int")?;
+            push(
+                &mut columns,
+                &mut metadata_names,
+                format!("{}_timestamp", col.name),
+                "bigint",
+                true,
+            )?;
+            push(
+                &mut columns,
+                &mut metadata_names,
+                format!("{}_ttl", col.name),
+                "int",
+                true,
+            )?;
             // `bigint`, never `int` (roborev finding, issue #4222 — round
             // 8): see the identical `_complex_deletion_time` note above —
             // `SimpleCell::local_deletion_time`/`TombstoneInfo::local_deletion_time`
@@ -170,59 +231,143 @@ pub(in crate::query::select_executor) fn raw_view_columns(
             // cannot render honestly.
             push(
                 &mut columns,
+                &mut metadata_names,
                 format!("{}_local_deletion_time", col.name),
                 "bigint",
+                true,
             )?;
-            push(&mut columns, format!("{}_tombstone", col.name), "text")?;
+            push(
+                &mut columns,
+                &mut metadata_names,
+                format!("{}_tombstone", col.name),
+                "text",
+                true,
+            )?;
         }
     }
 
-    push(&mut columns, "row_timestamp".to_string(), "bigint")?;
-    push(&mut columns, "row_ttl".to_string(), "int")?;
+    // The row-level metadata QUINTET (roborev finding, issue #4222 — round
+    // 9): every one of these is a metadata derivative — populated ONLY on
+    // a plain `row_kind = 'row'` row (`row_map.rs`'s `Live`/`Tombstone`
+    // arms) — so `is_metadata = true` for each.
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "row_timestamp".to_string(),
+        "bigint",
+        true,
+    )?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "row_ttl".to_string(),
+        "int",
+        true,
+    )?;
     // `bigint`, never `int` (roborev finding, issue #4222 — round 8): see
     // the identical `<col>_local_deletion_time` note above.
     push(
         &mut columns,
+        &mut metadata_names,
         "row_local_deletion_time".to_string(),
         "bigint",
+        true,
     )?;
-    push(&mut columns, "row_tombstone".to_string(), "text")?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "row_tombstone".to_string(),
+        "text",
+        true,
+    )?;
     // The row tombstone's own `markedForDeleteAt` — distinct from
     // `row_local_deletion_time` (the GC-clock seconds), mirroring the
     // partition/range pairs below (roborev finding, issue #4222: this was
     // previously discarded, making a row tombstone's writetime unrecoverable
     // from this view).
-    push(&mut columns, "row_deletion_timestamp".to_string(), "bigint")?;
-
     push(
         &mut columns,
+        &mut metadata_names,
+        "row_deletion_timestamp".to_string(),
+        "bigint",
+        true,
+    )?;
+
+    // The remaining columns are all ALWAYS-APPLICABLE (source-identity/
+    // row_kind/partition-and-range-deletion — `predicates.rs`'s
+    // `always_applicable_column_names`), never a metadata DERIVATIVE of a
+    // base column — `is_metadata = false` for each.
+    push(
+        &mut columns,
+        &mut metadata_names,
         "partition_deletion_time".to_string(),
         "bigint",
+        false,
     )?;
     push(
         &mut columns,
+        &mut metadata_names,
         "partition_deletion_timestamp".to_string(),
         "bigint",
+        false,
     )?;
 
-    push(&mut columns, "row_kind".to_string(), "text")?;
-    push(&mut columns, "bound_inclusive".to_string(), "boolean")?;
-    push(&mut columns, "range_deletion_time".to_string(), "bigint")?;
     push(
         &mut columns,
+        &mut metadata_names,
+        "row_kind".to_string(),
+        "text",
+        false,
+    )?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "bound_inclusive".to_string(),
+        "boolean",
+        false,
+    )?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "range_deletion_time".to_string(),
+        "bigint",
+        false,
+    )?;
+    push(
+        &mut columns,
+        &mut metadata_names,
         "range_deletion_timestamp".to_string(),
         "bigint",
+        false,
     )?;
 
-    push(&mut columns, "sstable".to_string(), "text")?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "sstable".to_string(),
+        "text",
+        false,
+    )?;
     // `bigint`, not `int` (roborev finding, issue #4222): `SSTableReader::generation`
     // is a `u64`; narrowing it to `i32` would SATURATE (and thus collapse
     // two distinct generations to the same fabricated value) for any real
     // corpus whose generation identifiers exceed `i32::MAX` — a
     // no-heuristics violation in a view whose whole purpose is authoritative
     // per-generation source identity.
-    push(&mut columns, "generation".to_string(), "bigint")?;
-    push(&mut columns, "format".to_string(), "text")?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "generation".to_string(),
+        "bigint",
+        false,
+    )?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "format".to_string(),
+        "text",
+        false,
+    )?;
     // KNOWN, DELIBERATE scope limitation (roborev finding, issue #4222 —
     // round 8): `position`'s PROJECTED value diverges by internal access
     // path, and nothing distinguishes the two cases from the value alone.
@@ -243,9 +388,15 @@ pub(in crate::query::select_executor) fn raw_view_columns(
     // full-scan path too (a per-row index lookup) would undermine that
     // producer's whole "bounded full scan" cost model; deferred rather
     // than fixed here.
-    push(&mut columns, "position".to_string(), "bigint")?;
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "position".to_string(),
+        "bigint",
+        false,
+    )?;
 
-    Ok(columns)
+    Ok((columns, metadata_names))
 }
 
 #[cfg(test)]
@@ -322,7 +473,8 @@ mod tests {
     #[test]
     fn dropped_regular_col_column_contract_snapshot() {
         let schema = dropped_regular_col_schema();
-        let columns = raw_view_columns(&schema).expect("no collision in this fixture");
+        let (columns, _metadata_names) =
+            raw_view_columns(&schema).expect("no collision in this fixture");
         let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -367,11 +519,95 @@ mod tests {
     #[test]
     fn key_columns_are_never_duplicated_as_metadata_quads() {
         let schema = dropped_regular_col_schema();
-        let columns = raw_view_columns(&schema).expect("no collision in this fixture");
+        let (columns, _metadata_names) =
+            raw_view_columns(&schema).expect("no collision in this fixture");
         let pk_timestamp_present = columns.iter().any(|c| c.name == "pk_timestamp");
         assert!(
             !pk_timestamp_present,
             "a partition-key column must not get a per-cell metadata quad"
+        );
+    }
+
+    /// Roborev finding (issue #4222, round 9): the returned `metadata_names`
+    /// set must contain EXACTLY the synthesized per-cell quad + row-level
+    /// quintet names — never a structural column (`pk`/`ck`/`keep_col`/
+    /// `drop_col` themselves), and never an ALWAYS-applicable column
+    /// (`generation`/`sstable`/`row_kind`/`partition_deletion_time`/etc,
+    /// `predicates.rs`'s separate `always_applicable_column_names` set).
+    #[test]
+    fn metadata_names_contains_exactly_the_synthesized_derivatives() {
+        let schema = dropped_regular_col_schema();
+        let (_columns, metadata_names) =
+            raw_view_columns(&schema).expect("no collision in this fixture");
+        let expected: std::collections::HashSet<String> = [
+            "keep_col_timestamp",
+            "keep_col_ttl",
+            "keep_col_local_deletion_time",
+            "keep_col_tombstone",
+            "drop_col_timestamp",
+            "drop_col_ttl",
+            "drop_col_local_deletion_time",
+            "drop_col_tombstone",
+            "row_timestamp",
+            "row_ttl",
+            "row_local_deletion_time",
+            "row_tombstone",
+            "row_deletion_timestamp",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(metadata_names, expected);
+        // Structural + always-applicable columns must NEVER appear here.
+        for never in [
+            "pk",
+            "ck",
+            "keep_col",
+            "drop_col",
+            "generation",
+            "sstable",
+            "format",
+            "position",
+            "row_kind",
+            "partition_deletion_time",
+            "partition_deletion_timestamp",
+            "bound_inclusive",
+            "range_deletion_time",
+            "range_deletion_timestamp",
+        ] {
+            assert!(
+                !metadata_names.contains(never),
+                "'{never}' must never be classified as a metadata derivative"
+            );
+        }
+    }
+
+    /// Roborev finding (issue #4222, round 9) — the EXACT failure scenario
+    /// the finding cited: a REAL base column named `event_timestamp` with
+    /// NO sibling `event` column (so the collision guard never fires) must
+    /// NOT end up in `metadata_names` — it is a genuine structural data
+    /// column, never a synthesized derivative, no matter what its name
+    /// LOOKS like.
+    #[test]
+    fn a_real_column_that_merely_looks_like_a_metadata_derivative_is_never_classified_as_one() {
+        let mut schema = dropped_regular_col_schema();
+        schema.columns.push(Column {
+            name: "event_timestamp".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        let (columns, metadata_names) =
+            raw_view_columns(&schema).expect("no collision — 'event_timestamp' has no sibling");
+        assert!(
+            columns.iter().any(|c| c.name == "event_timestamp"),
+            "the real base column must still be present in the contract"
+        );
+        assert!(
+            !metadata_names.contains("event_timestamp"),
+            "REGRESSION: a real base column merely named like a metadata derivative must \
+             NEVER be classified as one — it is a genuine structural data column"
         );
     }
 
