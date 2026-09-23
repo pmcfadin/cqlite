@@ -258,6 +258,102 @@ else
 fi
 
 # ---------------------------------------------------------------------------------
+# disk admission — a real REFUSAL (BOX_MIN_FREE_GB=0 everywhere else makes the check
+# vacuous), and the nearest-existing-ancestor walk for a not-yet-created lanes dir
+# (roborev Medium finding, #4267 round 2).
+# ---------------------------------------------------------------------------------
+cat >"$BOXES_DIR/hugebar4267.env" <<EOF
+BOX_CANONICAL_CLONE="$CLONE"
+BOX_LANES_DIR="$LANES"
+BOX_TMPDIR="$TMPDIR_FIXTURE"
+BOX_DATASETS_ROOT="$DATASETS"
+BOX_PATH="/usr/bin:/bin"
+BOX_JOBS=4
+BOX_RUST_TEST_THREADS=1
+BOX_MAX_CONCURRENCY=1
+BOX_MIN_FREE_GB=999999999
+BOX_LOG_DIR="$LOGDIR"
+EOF
+_out=$(run hugebar4267 feat4267)
+_rc=$?
+if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "below the" \
+  && printf '%s' "$_out" | grep -q "admission bar"; then
+  ok "an absurdly high BOX_MIN_FREE_GB actually REFUSES the launch (disk check is not vacuous)"
+else
+  bad "disk admission should refuse below its bar (rc=$_rc): $_out"
+fi
+
+ANCESTOR_LANES="$LANES/notyet/deeper"
+cat >"$BOXES_DIR/ancestorwalk4267.env" <<EOF
+BOX_CANONICAL_CLONE="$CLONE"
+BOX_LANES_DIR="$ANCESTOR_LANES"
+BOX_TMPDIR="$TMPDIR_FIXTURE"
+BOX_DATASETS_ROOT="$DATASETS"
+BOX_PATH="/usr/bin:/bin"
+BOX_JOBS=4
+BOX_RUST_TEST_THREADS=1
+BOX_MAX_CONCURRENCY=1
+BOX_MIN_FREE_GB=0
+BOX_LOG_DIR="$LOGDIR"
+EOF
+_out=$(run ancestorwalk4267 feat4267)
+_rc=$?
+if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "nearest existing ancestor '$LANES'" \
+  && printf '%s' "$_out" | grep -q "disk(lanes):"; then
+  ok "a not-yet-created lanes dir still runs the disk check, against its nearest existing ancestor"
+else
+  bad "the ancestor walk should measure and name '$LANES' (rc=$_rc): $_out"
+fi
+
+# ---------------------------------------------------------------------------------
+# lane worktree create THEN refresh, non-dry-run — the direct pin for the roborev High
+# finding (`[ -d "$LANE_DIR/.git" ]` is always false for a real worktree, since
+# `git worktree add` writes `.git` as a regular file, so a refresh fell into the
+# create branch and failed against an already-registered worktree, round 2).
+#
+# The dataset-verify step (section 7) runs for real once DRY_RUN is off, against
+# BOX_CANONICAL_CLONE's OWN working tree (currently checked out on feat4267, from the
+# rebase above) — so feat4267 needs a stub test-data/scripts/fetch-datasets.sh that
+# --verify-only can call. It is committed ONTO feat4267 itself, so both the "create" and
+# the "refresh" head below carry it. Beyond that stub, the fixture canonical clone still
+# has no scripts/flow/gate-detached.sh, so the launch step fails after the worktree is
+# ready — exactly the point this test needs to observe, so a non-zero exit is EXPECTED.
+( cd "$CLONE" && gg checkout -q feat4267 \
+    && mkdir -p test-data/scripts \
+    && printf '#!/bin/sh\ncase "$1" in --verify-only) exit 0 ;; esac\nexit 0\n' >test-data/scripts/fetch-datasets.sh \
+    && chmod +x test-data/scripts/fetch-datasets.sh \
+    && gg add test-data/scripts/fetch-datasets.sh \
+    && gg commit -qm stub-fetch-datasets >/dev/null \
+    && gg push -q origin feat4267 )
+
+FEAT_LANE="$LANES/feat4267"
+_out=$(env -u LANE_ID bash "$LAUNCHER" feat4267 --box good4267 --box-dir "$BOXES_DIR" 2>&1)
+_created_head=$(git -C "$FEAT_LANE" rev-parse HEAD 2>/dev/null || echo "")
+_expected_head=$( (cd "$CLONE" && gg rev-parse origin/feat4267) )
+if printf '%s' "$_out" | grep -q "lane worktree ready:" && [ "$_created_head" = "$_expected_head" ]; then
+  ok "first launch for a lane CREATES the worktree at the resolved head"
+else
+  bad "lane worktree creation should succeed and land on $_expected_head (got '$_created_head'): $_out"
+fi
+
+# Advance feat4267 with a new commit (still a descendant of origin/main, still carrying
+# the stub) and relaunch for the SAME lane: this must take the REFRESH path, not fail
+# with "already exists".
+( cd "$CLONE" && gg checkout -q feat4267 && echo four >i.txt && gg add i.txt \
+    && gg commit -qm advance-feat >/dev/null && gg push -q origin feat4267 )
+_new_head=$( (cd "$CLONE" && gg rev-parse origin/feat4267) )
+_out=$(env -u LANE_ID bash "$LAUNCHER" feat4267 --box good4267 --box-dir "$BOXES_DIR" 2>&1)
+_refreshed_head=$(git -C "$FEAT_LANE" rev-parse HEAD 2>/dev/null || echo "")
+if printf '%s' "$_out" | grep -q "lane worktree ready:" \
+  && ! printf '%s' "$_out" | grep -qi "worktree add' failed" \
+  && ! printf '%s' "$_out" | grep -qi "already exists" \
+  && [ "$_refreshed_head" = "$_new_head" ]; then
+  ok "relaunching for the same lane REFRESHES it to the new head (pins the round-2 High finding)"
+else
+  bad "relaunch should refresh, not fail as 'already exists' (want $_new_head, got '$_refreshed_head'): $_out"
+fi
+
+# ---------------------------------------------------------------------------------
 # usage errors and other named refusals
 # ---------------------------------------------------------------------------------
 _out=$(env -u LANE_ID bash "$LAUNCHER" 2>&1); _rc=$?

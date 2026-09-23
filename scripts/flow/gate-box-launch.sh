@@ -375,15 +375,28 @@ fi
 # ---------------------------------------------------------------------------
 # 8. Cut or refresh the lane worktree.
 # ---------------------------------------------------------------------------
+# `git worktree add` writes `.git` as a REGULAR FILE (`gitdir: …`), never a directory —
+# verified against this repo's own git. `[ -d "$LANE_DIR/.git" ]` is therefore false for
+# EVERY lane this launcher itself created, so control fell into the `else` (create)
+# branch on every refresh, which failed against an already-registered worktree and told
+# the operator to `worktree remove --force`/`rm -rf` it — destroying the 120-190G in-tree
+# target/ this design exists to preserve (roborev High finding, #4267 round 2). Test
+# worktree MEMBERSHIP instead of a directory shape.
+_lane_is_worktree() {  # <dir> -> 0 if it is a git worktree (linked or otherwise)
+  [ -e "$1/.git" ] && git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
 if [ "$DRY_RUN" -eq 1 ]; then
-  if [ -d "$LANE_DIR/.git" ]; then
+  if _lane_is_worktree "$LANE_DIR"; then
     echo "gate-box-launch: [dry-run] would refresh existing lane worktree '$LANE_DIR' to $HEAD_SHA"
   else
     echo "gate-box-launch: [dry-run] would create lane worktree '$LANE_DIR' @ $HEAD_SHA"
   fi
 else
-  mkdir -p "$BOX_LANES_DIR"
-  if [ -d "$LANE_DIR/.git" ]; then
+  mkdir -p "$BOX_LANES_DIR" || {
+    echo "gate-box-launch: could not create BOX_LANES_DIR '$BOX_LANES_DIR'." >&2
+    exit 1
+  }
+  if _lane_is_worktree "$LANE_DIR"; then
     if ! git -C "$LANE_DIR" fetch origin --quiet 2>&1; then
       echo "gate-box-launch: could not fetch in existing lane worktree '$LANE_DIR'." >&2
       exit 1
