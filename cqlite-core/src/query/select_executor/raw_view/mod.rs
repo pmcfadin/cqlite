@@ -92,20 +92,72 @@ fn count_pushable_comparison_leaves(expr: &WhereExpression) -> Option<usize> {
     }
 }
 
-/// Split `predicates` into the subset naming a PARTITION-KEY column (or a
-/// `token(...)` predicate, which constrains the partition key too) and
-/// everything else (clustering-key / regular-column predicates).
+/// Every column name that is present, with a REAL (non-synthesized) value,
+/// on EVERY physical row this view emits regardless of `row_kind` — the
+/// partition key (handled separately, see below), the source-identity quad,
+/// `row_kind` itself, and the partition-/range-deletion columns.
 ///
-/// Used by both row producers to apply the CORRECT predicate backstop
-/// per row-kind (roborev finding, issue #4222): a synthetic
-/// `partition_tombstone`/`range_tombstone_*` row carries no clustering/
-/// regular columns to test a clustering/regular predicate against, and the
-/// spec requires it to stay visible "even when the generation holds no live
-/// rows" — but it DOES carry partition-key values (`insert_pk_values`), so a
-/// partition-key predicate (e.g. a composite key's `pk1 = 1` alone, which
-/// `classify_partition_lookup` cannot push down as a full targeted lookup)
-/// must still apply to it, or a full scan filtered to one partition would
-/// wrongly return every OTHER partition's tombstone rows too.
+/// A predicate naming one of these must be applied to EVERY row, synthetic
+/// or not (roborev finding, issue #4222 — round 5 of this same class): the
+/// prior split exempted ALL non-partition-key predicates from a synthetic
+/// row, which wrongly ALSO exempted `generation`/`sstable`/`format`/
+/// `position`/`row_kind` and the partition-/range-deletion columns — so
+/// `WHERE pk = 2 AND generation = 1` incorrectly included a gen-2
+/// partition-tombstone row (`generation` IS present and real on that row;
+/// it was just never CHECKED). `partition_deletion_time`/
+/// `partition_deletion_timestamp`/`bound_inclusive`/`range_deletion_time`/
+/// `range_deletion_timestamp` are only ever POPULATED on their own specific
+/// synthetic row_kind (never on a plain `row`), but a predicate against them
+/// is still meaningful there and must not be silently skipped either — this
+/// set, not `is_plain_data_row`, is what decides "always apply".
+///
+/// Deliberately NOT in this set (see [`row_passes_predicates`]): the
+/// clustering-key / regular-column values and their `_timestamp`/`_ttl`/
+/// `_local_deletion_time`/`_tombstone`/`_complex_deletion*` metadata
+/// derivatives, and the ROW-level `row_timestamp`/`row_ttl`/
+/// `row_local_deletion_time`/`row_tombstone`/`row_deletion_timestamp`
+/// quintet — every one of those is populated ONLY on a plain `row_kind =
+/// 'row'` row (`row_map.rs`'s `Live`/`Tombstone` arms), so they stay exempt
+/// for a synthetic row, matching the spec's "even when the generation holds
+/// no live rows" requirement for `partition_tombstone`/`range_tombstone_*`.
+fn always_applicable_column_names() -> &'static HashSet<&'static str> {
+    static NAMES: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        [
+            "sstable",
+            "generation",
+            "format",
+            "position",
+            "row_kind",
+            "partition_deletion_time",
+            "partition_deletion_timestamp",
+            "bound_inclusive",
+            "range_deletion_time",
+            "range_deletion_timestamp",
+        ]
+        .into_iter()
+        .collect()
+    })
+}
+
+/// Split `predicates` into the subset that must apply to EVERY row
+/// (partition-key / `token(...)` predicates, plus source-identity/
+/// `row_kind`/partition-and-range-deletion predicates —
+/// [`always_applicable_column_names`]) and the subset that applies ONLY to
+/// a plain data row (`row_kind = 'row'`): clustering-key / regular-column
+/// predicates and their metadata derivatives, plus the row-level metadata
+/// quintet (roborev finding, issue #4222 — round 5, correcting round 2's
+/// over-broad exemption).
+///
+/// Used by both row producers to apply the CORRECT predicate backstop per
+/// row-kind: a synthetic `partition_tombstone`/`range_tombstone_*` row
+/// carries no clustering/regular columns to test a data-only predicate
+/// against, and the spec requires it to stay visible "even when the
+/// generation holds no live rows" — but it DOES carry partition-key values
+/// (`insert_pk_values`) and source/row_kind/deletion metadata, so those
+/// predicates must still apply to it, or a full scan filtered to one
+/// partition/generation would wrongly return every OTHER partition's or
+/// generation's tombstone rows too.
 pub(super) fn split_predicates_by_key_role<'a>(
     predicates: &'a [SSTablePredicate],
     base_schema: &TableSchema,
@@ -115,28 +167,35 @@ pub(super) fn split_predicates_by_key_role<'a>(
         .iter()
         .map(|k| k.name.as_str())
         .collect();
-    predicates
-        .iter()
-        .partition(|p| p.is_token() || pk_names.contains(p.column.as_str()))
+    let always_names = always_applicable_column_names();
+    predicates.iter().partition(|p| {
+        p.is_token()
+            || pk_names.contains(p.column.as_str())
+            || always_names.contains(p.column.as_str())
+    })
 }
 
-/// Apply the raw view's post-scan predicate backstop to one row: partition-
-/// key predicates apply UNCONDITIONALLY (every row carries the partition key,
-/// synthetic or not); clustering/regular-column predicates apply ONLY to a
-/// plain data row (`row_kind = 'row'`) — a synthetic row is exempt from
-/// those (roborev finding, issue #4222).
+/// Apply the raw view's post-scan predicate backstop to one row:
+/// `always_predicates` (partition-key/token PLUS source-identity/
+/// `row_kind`/partition-and-range-deletion predicates —
+/// [`split_predicates_by_key_role`]) apply UNCONDITIONALLY, since every row
+/// carries real values for those columns, synthetic or not. `data_predicates`
+/// (clustering-key/regular-column predicates, their metadata derivatives,
+/// and the row-level metadata quintet) apply ONLY to a plain data row
+/// (`row_kind = 'row'`) — a synthetic row is exempt from those, since it
+/// never carries them at all (roborev finding, issue #4222).
 pub(super) fn row_passes_predicates(
     row: &QueryRow,
-    pk_predicates: &[&SSTablePredicate],
-    other_predicates: &[&SSTablePredicate],
+    always_predicates: &[&SSTablePredicate],
+    data_predicates: &[&SSTablePredicate],
 ) -> Result<bool> {
-    for p in pk_predicates {
+    for p in always_predicates {
         if super::evaluate_leaf(row, p) != super::LeafOutcome::True {
             return Ok(false);
         }
     }
     if is_plain_data_row(row) {
-        for p in other_predicates {
+        for p in data_predicates {
             if super::evaluate_leaf(row, p) != super::LeafOutcome::True {
                 return Ok(false);
             }
@@ -352,14 +411,27 @@ impl super::SelectExecutor {
 
         // Plain-column projection trimming (`SELECT a, b, ...`), reusing the
         // SAME `trim_projection` the base pipeline's `Project` step uses so
-        // the two never drift. `SELECT *` and anything reshaping (DISTINCT,
-        // aggregates, expressions, WRITETIME/TTL) are OUT OF SCOPE for this
-        // slice (design.md D4's JOIN-gap precedent: DISTINCT/aggregation over
-        // the raw view is a general query-engine capability, not a raw-view
-        // concern) and return every column unfiltered — a known, documented
-        // limitation rather than a silent wrong answer, since every column
-        // this contract defines is still present and correctly valued.
+        // the two never drift. `SELECT *` is the only other shape handled
+        // here; DISTINCT/aggregates are already rejected above, before any
+        // producer work ran.
+        //
+        // Every OTHER `SelectExpression` shape (`WRITETIME`/`TTL`, an
+        // alias, an arithmetic expression, a collection-element access) now
+        // FAILS CLOSED (roborev finding, issue #4222 — round 5) rather than
+        // silently falling through to "return every column unfiltered": the
+        // prior wildcard `_ => (rows, columns)` arm matched BOTH
+        // `SelectClause::All` (the correct behavior) AND a `Columns(exprs)`
+        // whose list contained anything OTHER than a bare column reference
+        // — so `SELECT WRITETIME(val) FROM t_raw_sstable_data` silently
+        // returned every column instead of the WRITETIME projection (which
+        // this view does not build) or a typed refusal, the same
+        // silent-wrong-answer class ORDER BY/DISTINCT/aggregates are
+        // rejected for above. Reshaping expressions over the raw view remain
+        // OUT OF SCOPE for this slice (design.md D4's JOIN-gap precedent),
+        // but the refusal must be EXPLICIT, never indistinguishable from
+        // `SELECT *`.
         let (rows, columns) = match &plan.statement.select_clause {
+            SelectClause::All => (rows, columns),
             SelectClause::Columns(exprs)
                 if exprs
                     .iter()
@@ -399,7 +471,14 @@ impl super::SelectExecutor {
                 }
                 (trimmed_rows, trimmed_columns)
             }
-            _ => (rows, columns),
+            SelectClause::Columns(_) | SelectClause::Distinct(_) => {
+                return Err(Error::unsupported_query(
+                    "a SELECT expression other than a plain column reference (WRITETIME/TTL, \
+                     an alias, an arithmetic expression, or a collection-element access) is \
+                     not supported over a _raw_sstable_data view — use 'SELECT *' or a plain \
+                     column list",
+                ));
+            }
         };
 
         // Apply the SAME LIMIT/OFFSET the producer was told to `stop_after`
