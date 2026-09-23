@@ -20,28 +20,45 @@
 # either way, but the census keeps the table honest).
 #
 # Domains reuse forward-slash `case` globs (`*` matches `/`, same as
-# scripts/lib/tooling-tests-scope.sh).
+# scripts/lib/tooling-tests-scope.sh). CASE PATTERNS ONLY, NEVER A BARE
+# EXPANSION: every domain group below is a bash ARRAY, and every use is a
+# QUOTED `"${arr[@]}"` expansion — an UNQUOTED `$var` holding a glob character
+# (e.g. `*.rs`) undergoes real pathname expansion against the CALLER's current
+# directory before `printf`/`case` ever sees it, silently replacing the pattern
+# with whatever files happen to match it on disk. A first cut of this file did
+# exactly that (`printf '%s\n' $_RECERT_DOM_RUST_ANY`), caught by
+# scripts/tests/test_recertify.sh's very first real classify case.
 
-# Shared domain groups, so a broad "this touches core" fact is spelled once.
-_RECERT_DOM_RUST_ANY='*.rs'
-_RECERT_DOM_CARGO_ANY='Cargo.toml Cargo.lock */Cargo.toml'
-_RECERT_DOM_CORE='cqlite-core/*'
-_RECERT_DOM_CLI='cqlite-cli/*'
-_RECERT_DOM_PY='bindings/python/*'
-_RECERT_DOM_NODE='bindings/node/*'
-_RECERT_DOM_BINDINGS_ANY='bindings/*'
-_RECERT_DOM_FLIGHT='cqlite-flight/*'
-_RECERT_DOM_TOOLS='tools/*'
-_RECERT_DOM_TESTDATA='test-data/*'
-_RECERT_DOM_DOCS_REPORTS='docs/reports/*'
-_RECERT_DOM_DOCS_ANY='docs/*'
-_RECERT_DOM_WEBSITE='website/*'
-# The #4266 declared harness set, reused verbatim rather than retyped (this file is
-# sourced alongside scripts/lib/tooling-tests-scope.sh by agent-gate.sh, so the
-# array is already in scope when both are loaded; fall back to a literal copy if
-# sourced standalone, e.g. by a test, without that file).
+# Shared domain groups. Each is an ARRAY, even a single-pattern one, so every
+# consumer can use the SAME `"${name[@]}"` expansion uniformly.
+_RECERT_DOM_RUST_ANY=('*.rs')
+_RECERT_DOM_CARGO_ANY=('Cargo.toml' 'Cargo.lock' '*/Cargo.toml')
+_RECERT_DOM_CORE=('cqlite-core/*')
+_RECERT_DOM_CLI=('cqlite-cli/*')
+_RECERT_DOM_PY=('bindings/python/*')
+_RECERT_DOM_NODE=('bindings/node/*')
+_RECERT_DOM_BINDINGS_ANY=('bindings/*')
+_RECERT_DOM_FLIGHT=('cqlite-flight/*')
+_RECERT_DOM_TOOLS=('tools/*')
+_RECERT_DOM_TESTDATA=('test-data/*')
+_RECERT_DOM_DOCS_REPORTS=('docs/reports/*')
+_RECERT_DOM_DOCS_ANY=('docs/*')
+_RECERT_DOM_WEBSITE=('website/*')
+
+# The #4266 declared harness set, reused verbatim rather than retyped (this file
+# is sourced alongside scripts/lib/tooling-tests-scope.sh by agent-gate.sh, so
+# the array is already in scope when both are loaded; fall back to a literal
+# copy if sourced standalone, e.g. by a test, without that file).
 _recert_harness_patterns() {
-  if [ "${#TOOLING_TESTS_SCOPE_PATTERNS[@]}" -gt 0 ]; then
+  # `declare -p` (rather than a direct `${#TOOLING_TESTS_SCOPE_PATTERNS[@]}`
+  # expansion) is the set -u-SAFE existence check: bash treats a length
+  # expansion on a name that was never declared at all — not even as an empty
+  # array — as an unset-parameter reference under `set -u`, so a caller that
+  # sources this file standalone (e.g. a self-test, or a future consumer that
+  # never loads scripts/lib/tooling-tests-scope.sh) would die here instead of
+  # falling through to the literal fallback below.
+  if declare -p TOOLING_TESTS_SCOPE_PATTERNS >/dev/null 2>&1 \
+     && [ "${#TOOLING_TESTS_SCOPE_PATTERNS[@]}" -gt 0 ]; then
     printf '%s\n' "${TOOLING_TESTS_SCOPE_PATTERNS[@]}"
   else
     printf '%s\n' 'scripts/*' '.github/*' '.claude/*' '.roborev.toml' \
@@ -52,31 +69,50 @@ _recert_harness_patterns() {
 # _recert_component_domain_patterns <component>: print the component's domain
 # patterns, one per line. Prints NOTHING for an unmapped component — the caller
 # (_recert_component_diff_touched) treats "no domain" as "match everything" (the
-# fail-closed default), never as "match nothing".
+# fail-closed default), never as "match nothing". Every arm expands its groups
+# with a QUOTED `"${name[@]}"` — see the file header for why that is load-bearing.
 _recert_component_domain_patterns() {
   case "$1" in
-    file-size|fmt)                       printf '%s\n' $_RECERT_DOM_RUST_ANY ;;
-    clippy)                               printf '%s\n' $_RECERT_DOM_RUST_ANY $_RECERT_DOM_CARGO_ANY ;;
-    roborev-lints)                        printf '%s\n' $_RECERT_DOM_RUST_ANY '.github/*' 'scripts/*' ;;
+    file-size|fmt)
+      printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" ;;
+    clippy)
+      printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    roborev-lints)
+      printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" '.github/*' 'scripts/*' ;;
     core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|memory-budget|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|oom-audit|all-features-check|pub-surface)
-                                           printf '%s\n' $_RECERT_DOM_CORE $_RECERT_DOM_CARGO_ANY ;;
-    integration-tests)                     printf '%s\n' $_RECERT_DOM_CORE 'cqlite-integration-tests/*' $_RECERT_DOM_CARGO_ANY ;;
-    format-compat)                         printf '%s\n' 'tools/format-validator/*' $_RECERT_DOM_CORE ;;
-    cli-tests|smoke)                       printf '%s\n' $_RECERT_DOM_CLI $_RECERT_DOM_CORE $_RECERT_DOM_TESTDATA ;;
-    query-semantics-oracle)                printf '%s\n' $_RECERT_DOM_CORE 'test-data/query-semantics-oracle.json' ;;
-    flight-query-semantics-oracle|flight-tests) printf '%s\n' $_RECERT_DOM_FLIGHT $_RECERT_DOM_CORE ;;
-    python-bindings)                       printf '%s\n' $_RECERT_DOM_PY $_RECERT_DOM_CORE ;;
-    node-bindings)                         printf '%s\n' $_RECERT_DOM_NODE $_RECERT_DOM_CORE ;;
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    integration-tests)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'cqlite-integration-tests/*' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    format-compat)
+      printf '%s\n' 'tools/format-validator/*' "${_RECERT_DOM_CORE[@]}" ;;
+    cli-tests|smoke)
+      printf '%s\n' "${_RECERT_DOM_CLI[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+    query-semantics-oracle)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'test-data/query-semantics-oracle.json' ;;
+    flight-query-semantics-oracle|flight-tests)
+      printf '%s\n' "${_RECERT_DOM_FLIGHT[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+    python-bindings)
+      printf '%s\n' "${_RECERT_DOM_PY[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+    node-bindings)
+      printf '%s\n' "${_RECERT_DOM_NODE[@]}" "${_RECERT_DOM_CORE[@]}" ;;
     binding-rust-tests|binding-unwind-profile)
-                                           printf '%s\n' $_RECERT_DOM_BINDINGS_ANY $_RECERT_DOM_CORE ;;
-    delivery-telemetry)                    printf '%s\n' 'scripts/delivery-telemetry.py' 'docs/reports/delivery-telemetry.jsonl' ;;
-    parity-report)                         printf '%s\n' $_RECERT_DOM_TOOLS $_RECERT_DOM_TESTDATA $_RECERT_DOM_DOCS_REPORTS ;;
-    operator-metrics-doc)                  printf '%s\n' $_RECERT_DOM_CORE $_RECERT_DOM_DOCS_ANY ;;
-    kit-dashboard-drift)                   printf '%s\n' $_RECERT_DOM_DOCS_ANY $_RECERT_DOM_WEBSITE ;;
-    dep-duplicates)                        printf '%s\n' $_RECERT_DOM_CARGO_ANY ;;
-    features-load-bearing)                 printf '%s\n' $_RECERT_DOM_CARGO_ANY $_RECERT_DOM_RUST_ANY ;;
-    tooling-tests)                         _recert_harness_patterns ;;
-    minimal-build)                         printf '%s\n' $_RECERT_DOM_CORE $_RECERT_DOM_CARGO_ANY ;;
+      printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+    delivery-telemetry)
+      printf '%s\n' 'scripts/delivery-telemetry.py' 'docs/reports/delivery-telemetry.jsonl' ;;
+    parity-report)
+      printf '%s\n' "${_RECERT_DOM_TOOLS[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_DOCS_REPORTS[@]}" ;;
+    operator-metrics-doc)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_DOCS_ANY[@]}" ;;
+    kit-dashboard-drift)
+      printf '%s\n' "${_RECERT_DOM_DOCS_ANY[@]}" "${_RECERT_DOM_WEBSITE[@]}" ;;
+    dep-duplicates)
+      printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    features-load-bearing)
+      printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_RUST_ANY[@]}" ;;
+    tooling-tests)
+      _recert_harness_patterns ;;
+    minimal-build)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     *) return 0 ;;   # unmapped: caller treats as "matches everything" (fail-closed)
   esac
 }
@@ -84,7 +120,10 @@ _recert_component_domain_patterns() {
 # _recert_component_diff_touched <component> <changed-paths-newline-list>: true
 # (0) iff <component>'s domain intersects the changed-path set, OR the component
 # has no domain entry (fail-closed default). False (1) only when the component
-# HAS a domain and NONE of the changed paths match it.
+# HAS a domain and NONE of the changed paths match it. The `case "$f" in $pat)`
+# below is SAFE unquoted — case patterns undergo parameter expansion but NEVER
+# pathname expansion against the filesystem, unlike a bare command-argument
+# expansion (see the file header).
 _recert_component_diff_touched() {
   local comp="$1" changed="$2" domain f pat
   domain=$(_recert_component_domain_patterns "$comp")
