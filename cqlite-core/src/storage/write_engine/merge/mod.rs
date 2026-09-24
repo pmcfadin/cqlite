@@ -1971,7 +1971,14 @@ impl KWayMerger {
                             // does not attempt (see `row_group_survives`'s doc
                             // comment) — folded unconditionally, matching the
                             // prior behavior for this classification exactly.
-                            crate::storage::sstable::writer::stats_fold::fold_mutation_stats(
+                            // `fold_row_content_stats` (not `fold_mutation_stats`,
+                            // issue #4246 roborev finding): this mutation's own
+                            // `partition_tombstone`/`range_tombstones` fields, if
+                            // any, are already folded unconditionally above at
+                            // their own classification sites — folding them
+                            // again here would double-count into the
+                            // tombstone-drop-time histogram.
+                            crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
                                 &mut partition_stats,
                                 &mutation,
                             );
@@ -2040,11 +2047,23 @@ impl KWayMerger {
                                         );
                                     }
                                 }
+                                // `skip_static_ops = false` — matching EXACTLY
+                                // what `feed_row` itself passes to
+                                // `merge_row_group` a few lines below
+                                // (`incremental_partition.rs`'s
+                                // `DataWriter::merge_row_group(&[mutation],
+                                // schema, false, shadow_floor)`), issue #4246
+                                // roborev finding: passing `schema_has_static`
+                                // here could diverge from the real emission
+                                // decision for a mutation whose sole surviving
+                                // content is a static op (masked today only by
+                                // the separate `carries_static` escape hatch
+                                // below).
                                 let survives =
                                     crate::storage::sstable::writer::stats_fold::row_group_survives(
                                         std::slice::from_ref(&mutation),
                                         &write_schema,
-                                        schema_has_static,
+                                        false,
                                         shadow_floor,
                                     );
                                 let carries_static = schema_has_static
@@ -2055,7 +2074,24 @@ impl KWayMerger {
                                         )
                                     });
                                 if survives || carries_static {
-                                    crate::storage::sstable::writer::stats_fold::fold_mutation_stats(
+                                    // `fold_row_content_stats`, not
+                                    // `fold_mutation_stats` (issue #4246
+                                    // roborev finding): this mutation's own
+                                    // `partition_tombstone`/`range_tombstones`
+                                    // fields, if any, are already folded
+                                    // unconditionally at their own
+                                    // classification sites above — folding
+                                    // them again here would double-count
+                                    // into the tombstone-drop-time
+                                    // histogram. A per-mutation self-shadow
+                                    // check (mirroring `write_partition`'s)
+                                    // is not needed here: a compaction
+                                    // "cluster group" is already a SINGLE,
+                                    // fully-reconciled `Mutation` per
+                                    // clustering key (see this fn's own doc
+                                    // comment), so there is no OLDER sibling
+                                    // mutation in the same group to exclude.
+                                    crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
                                         &mut partition_stats,
                                         mutation,
                                     );
