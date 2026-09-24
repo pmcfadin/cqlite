@@ -257,7 +257,7 @@ pub enum Commands {
     },
     /// Explain reconciliation decisions for one partition across all generations.
     #[command(
-        long_about = "Render the per-generation reconciliation trace for one partition without opening the database or mutating SSTables. Partition-key and clustering arguments use CQL literal syntax; comma-separated literals are accepted for composite keys."
+        long_about = "Render the per-generation reconciliation decisions (winner, shadowed-by-timestamp/tombstone, expired, purgeable, dropped-column) for one partition without opening the database or mutating SSTables. Partition-key and clustering arguments use CQL literal syntax; comma-separated literals are accepted for composite keys. Note: this is distinct from `query --explain`, which shows a query plan; for a query plan use `query --explain`."
     )]
     Explain {
         /// Fully-qualified keyspace.table name.

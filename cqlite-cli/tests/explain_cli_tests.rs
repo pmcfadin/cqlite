@@ -74,10 +74,33 @@ fn explain_json_reports_all_generations_and_stable_keys() {
     }));
 }
 
+/// Partition 3 (id=3) carries a range tombstone `[1,2]` shadowing `ck=1` AND a
+/// live winner at `ck=3` outside that range (test-data/datasets/sstables/
+/// test_explain/README.md). Filtering `--clustering 3` renders only the ck=3
+/// cell, so this is the only partition in the fixture that can prove a range
+/// tombstone stays visible in `tombstones` while the cell list is filtered
+/// (R7.3) — id=1 (used by `explain_command()` for the other cases) has no
+/// tombstone at all.
 #[test]
 fn explain_csv_keeps_tombstones_in_the_render_only_filter() {
-    let output = explain_command()
-        .args(["--clustering", "1", "--out", "csv"])
+    let mut command = Command::cargo_bin("cqlite").expect("cqlite binary is built");
+    let output = command
+        .env("CQLITE_DATASETS_ROOT", datasets_root())
+        .args([
+            "--schema",
+            schema_path().to_str().expect("schema path is UTF-8"),
+            "--dataset",
+            "test_explain",
+            "explain",
+            "test_explain.trace_decisions",
+            "3",
+            "--now",
+            "1789963136",
+            "--clustering",
+            "3",
+            "--out",
+            "csv",
+        ])
         .output()
         .expect("explain process starts");
     assert!(
@@ -89,8 +112,13 @@ fn explain_csv_keeps_tombstones_in_the_render_only_filter() {
     assert!(stdout.lines().next().unwrap().contains("generations=2"));
     assert!(stdout.contains("column,clustering,generation,writetime"));
     assert!(
-        stdout.contains("tombstone:"),
-        "tombstones must remain visible when clustering filters cells"
+        stdout.contains("tombstone:range"),
+        "the range tombstone covering ck=1 must remain visible when \
+         --clustering filters the cell list to ck=3 only; stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("range-shadowed"),
+        "the ck=1 cell must be filtered out of the cell list by --clustering 3"
     );
 }
 
