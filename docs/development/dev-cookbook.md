@@ -18,6 +18,26 @@ answers differently depending on cwd, so it can confirm the worktree's file whil
 another. Under 1:1:1:1 every issue lives in a worktree, so this is the default situation, not an edge
 case. Invocation itself stays `scripts/flow/roborev-review.sh` (see `CLAUDE.md`).
 
+## Dev/test build debug info (issue #4278)
+
+`[profile.dev]`/`[profile.test]` build with `debug = "line-tables-only"`, not full DWARF (`true`) —
+94% of a dev/test binary's bytes were debug sections, and one gate lane's `target/` reached
+63-190 GB across its feature-set builds, largely because every `cqlite-core/tests/*.rs` is its own
+binary statically linking all of `cqlite-core`. `line-tables-only` still keeps file:line in panic
+backtraces and dhat allocation backtraces (verified: `memory-budget`, `binding-unwind-profile`, and
+every test asserting on backtrace/panic-location text) — it drops the full variable/type debug info
+those don't need. `release`/`bench`/`perfsym`/`perfprof` are untouched.
+
+If you genuinely need full local debug info (e.g. stepping through dev/test binaries in `lldb`/`gdb`
+with variable inspection, not just a file:line backtrace), override per-build:
+
+```bash
+CARGO_PROFILE_DEV_DEBUG=true cargo build
+CARGO_PROFILE_TEST_DEBUG=true cargo test -p cqlite-core
+```
+
+Both env vars are cargo-native (no code change) and apply only to that invocation.
+
 ## Profiling loop
 
 See `docs/profiling.md`.
