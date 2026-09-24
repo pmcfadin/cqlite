@@ -1661,7 +1661,7 @@ _gate_awk() {
     else if (WANT == "recert") { S = RECERT_S; E = RECERT_E }
     else                        { S = FULL_S;   E = FULL_E }
     blocks = 0; full = 0; lite = 0; delta = 0; recert = 0; open = 0; unterminated = 0
-    n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0
+    n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0; n_partial = 0
     n_anchor = 0; n_nested = 0; anchor_unresolved = 0; n_dirty = 0; n_tsdirty = 0
     n_recert_anchor = 0; n_recert_verdict = 0; n_recert_components = 0
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
@@ -1678,6 +1678,20 @@ _gate_awk() {
   $0 == E       { if (open == 1) open = 0; next }
   open == 1 {
     if ($1 == "MODE:")                { n_mode++;   v_mode = $2 }
+    # lowercase mode: is a DIFFERENT key than MODE: (agent-gate.sh stamps it
+    # ONLY on a FAILING --only run terminal block: mode: PARTIAL (--only
+    # NAMES) - does NOT count as the gate) -- #4268 roborev finding, Medium:
+    # a --only run that FAILS never reaches RESULT: PASS, so the
+    # OLD-PASS-only mode: PARTIAL promotion (the gate own OVERALL=PARTIAL
+    # branch) never fires and this line is the ONLY surviving signal that the
+    # block came from a lenient --only dispatch rather than a genuine full
+    # run. Counted so Case C can refuse an anchor carrying it, closing the
+    # gap where such a block -- full header, no MODE: key, RESULT: FAIL,
+    # tree-integrity/dirty/commit/tree-start all otherwise legitimate --
+    # would otherwise pass every existing Case C check. NOTE: no apostrophes
+    # in this comment -- this text lives inside the single-quoted awk program
+    # literal a few lines up, and one would terminate it early.
+    else if ($1 == "mode:" && $2 == "PARTIAL") { n_partial++ }
     else if ($1 == "RESULT:")         { n_result++; v_result = $2 }
     else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2 }
     else if ($1 == "recert-anchor:")     { n_recert_anchor++;     v_recert_anchor = $2 }
@@ -1725,6 +1739,7 @@ _gate_awk() {
     print "recert=" recert
     print "unterminated=" unterminated
     print "n_mode=" n_mode
+    print "n_partial=" n_partial
     print "n_result=" n_result
     print "n_ti=" n_ti
     print "n_commit=" n_commit
@@ -1760,7 +1775,7 @@ gate_parse_file() {
   local gp_out gp_k gp_v
   gp_out=$(_gate_awk "$1" "$2") || refuse_tool_failure awk "$3"
   GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_recert=""; GP_unterminated=""
-  GP_n_mode=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
+  GP_n_mode=""; GP_n_partial=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
   GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""
   GP_n_recert_anchor=""; GP_n_recert_verdict=""; GP_n_recert_components=""
   GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
@@ -1774,6 +1789,7 @@ gate_parse_file() {
       recert)       GP_recert="$gp_v" ;;
       unterminated) GP_unterminated="$gp_v" ;;
       n_mode)       GP_n_mode="$gp_v" ;;
+      n_partial)    GP_n_partial="$gp_v" ;;
       n_result)     GP_n_result="$gp_v" ;;
       n_ti)         GP_n_ti="$gp_v" ;;
       n_commit)     GP_n_commit="$gp_v" ;;
@@ -1801,7 +1817,7 @@ gate_parse_file() {
   done <<GATE_PARSE
 $gp_out
 GATE_PARSE
-  for gp_k in blocks full lite delta recert unterminated n_mode n_result n_ti n_commit \
+  for gp_k in blocks full lite delta recert unterminated n_mode n_partial n_result n_ti n_commit \
               n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty \
               n_recert_anchor n_recert_verdict n_recert_components; do
     eval "gp_v=\${GP_$gp_k}"
@@ -2145,10 +2161,7 @@ fi
 if [ "$case_kind" = C ]; then
   assert_pass_block "full-gate block" 0
   # ...but it must still be a REAL terminal verdict — PASS or FAIL, never the
-  # INCOMPLETE liveness sentinel (#3041) or anything else. An --only PARTIAL
-  # run is already excluded by the MODE: belt above (a `mode: PARTIAL` line
-  # is lowercase and distinct from the `MODE:` key this belt checks, but a
-  # PARTIAL run's RESULT token is the literal string "PARTIAL", caught here).
+  # INCOMPLETE liveness sentinel (#3041) or anything else.
   case "$GP_v_result" in
     PASS|FAIL) ;;
     *)
@@ -2158,6 +2171,25 @@ if [ "$case_kind" = C ]; then
         "its RESULT must still be a REAL terminal verdict."
       ;;
   esac
+  # A FAILING `--only` run is NOT excluded by the MODE: belt above (roborev
+  # finding, Medium — an earlier comment here claimed it was, which was false
+  # for exactly this shape): agent-gate.sh only promotes `RESULT: PASS` to
+  # `PARTIAL` for a PASSing `--only` run (`[ "$OVERALL" = "PASS" ] &&
+  # OVERALL=PARTIAL`); a FAILING one stays `RESULT: FAIL` with its lowercase
+  # `mode: PARTIAL (--only <components>) - does NOT count as the gate` line
+  # UNCHANGED. Such a block has a genuine full header, carries no `MODE:` key
+  # (the belt above only ever sees the UPPERCASE key), `RESULT: FAIL` (which
+  # the case above just accepted), and can otherwise be entirely legitimate —
+  # so without this check an operator's own `agent-gate.sh --only
+  # tooling-tests` re-run at the certified sha (which failed again) could be
+  # passed as arg 3 alongside a genuine recert block and reach PREMERGE: OK
+  # for a merge with no real gate of record behind it at all.
+  if [ "${GP_n_partial:-0}" != 0 ]; then
+    refuse_no_gate \
+      "The recert anchor carries a 'mode: PARTIAL' line — it is an --only run, not a genuine full agent-gate.sh run." \
+      "A recert anchor must be the summary of a real full gate (whose named components may" \
+      "legitimately have failed), never a --only diagnostic invocation."
+  fi
 else
   assert_pass_block "full-gate block"
 fi

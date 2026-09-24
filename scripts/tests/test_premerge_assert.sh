@@ -4140,6 +4140,30 @@ grep -v -x -F "$RECERT_E" "$T/recert-unterminated.txt.full" >"$T/recert-untermin
 refused_recert "recert: UNTERMINATED recert block -> refuse" \
   "$ANCHOR_RECERT_FAIL" "$T/recert-unterminated.txt" "UNTERMINATED"
 
+# --- Case R9b: a FAILING --only run cannot serve as the recert anchor --------
+# (roborev finding, Medium: agent-gate.sh only promotes RESULT: PASS to
+# PARTIAL for a PASSING --only run — a FAILING one stays RESULT: FAIL with its
+# lowercase `mode: PARTIAL (--only …)` line UNCHANGED, so Case 37's existing
+# "--only -> refused by RESULT: PARTIAL" case does not cover this shape at
+# all. Full header, no UPPERCASE MODE: key (the belt above never sees it),
+# RESULT: FAIL (which Case C's PASS|FAIL relaxation just accepted), otherwise
+# legitimate — without the n_partial check this reaches recert-verdict:
+# CERTIFIED for a merge with no real gate of record behind it.
+{
+  printf '%s\n' "$FULL_S"
+  printf 'run-id: /tmp/agent-gate.only-fail\n'
+  printf 'commit: %s branch: issue-only-fail dirty: no\n' "$C7"
+  printf 'tree-start: %s dirty: no digest: %s\n' "$C7" "$C12"
+  printf 'tree-end: %s dirty: no digest: %s\n' "$C7" "$C12"
+  printf 'tree-integrity: PASS\n'
+  printf 'mode: PARTIAL (--only tooling-tests) - does NOT count as the gate\n'
+  printf 'tooling-tests:      FAIL (2s)\n'
+  printf 'RESULT: FAIL\n'
+  printf '%s\n' "$FULL_E"
+} >"$T/anchor-only-failed.txt"
+refused_recert "recert: a FAILING --only run (mode: PARTIAL + RESULT: FAIL) cannot anchor a recert, even paired with an otherwise-valid recert block" \
+  "$T/anchor-only-failed.txt" "$GOODRECERT" "carries a 'mode: PARTIAL' line"
+
 # --- Case R10: the fourth argument's KIND is detected by CONTENT, not position
 refused_recert "recert: a LITE summary passed as the fourth argument -> refuse (neither DELTA nor RECERT)" \
   "$ANCHOR_RECERT_FAIL" "$T/lite-only.txt" \
