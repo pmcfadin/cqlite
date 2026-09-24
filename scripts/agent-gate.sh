@@ -863,6 +863,23 @@
 #                      invisible to a bare `cargo check` — while pulling in none of the
 #                      ~100 integration test files, which assume default features and
 #                      fail here as noise, not leakage. No opt-out.
+#   feature-iso-vortex issue #4237 (owner Seam-1 ruling 2026-09-23: slim gate wiring).
+#                      Reuses run_feature_iso VERBATIM, parameterized `vortex` — the SAME
+#                      compile-only `--lib --no-run` shape feature-iso-parquet uses, in
+#                      MUTUAL isolation from `parquet` and `delta-scan`. No opt-out.
+#   vortex-parquet-differential
+#                      issue #4237. The ONLY component enabling `parquet` AND `vortex`
+#                      together (no other lane reaches that combination): `cargo test
+#                      -p cqlite-core --features parquet,vortex --lib` (the writer's own
+#                      unit-level coverage), then `cargo test -p cqlite-cli --features
+#                      vortex --test issue_4237_vortex_parquet_differential` — the
+#                      cross-format differential, the PRIMARY oracle for Vortex export:
+#                      the SAME `SELECT *` exported to Parquet and Vortex from the
+#                      compiled CLI for all 33 fixture tables (2 quarantined behind
+#                      issue #4279, a pre-existing row-decoder gap unrelated to Vortex),
+#                      both read back with their OWN readers, compared on full column
+#                      set (both directions) and every value. Fixture-required via the
+#                      FULL gate's global CQLITE_REQUIRE_FIXTURES=1 export.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
 #                      features-load-bearing component: 64 cases over throwaway
@@ -6707,7 +6724,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates features-load-bearing tooling-tests minimal-build all-features-check smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan feature-iso-vortex vortex-parquet-differential python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates features-load-bearing tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -6733,6 +6750,10 @@ _component_lane() {
     # no-default-features+one-of parquet/delta-scan), which is class (a) of the SIDE
     # rationale below: sharing MAIN's target dir would thrash it (#2657).
     flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf side ;;
+    # issue #4237: both build cqlite-core at a feature set (`vortex` alone;
+    # `parquet,vortex` together) that DIVERGES from MAIN's `cli-helpers` set — the
+    # identical class (a) rationale feature-iso-parquet/delta-scan document above.
+    feature-iso-vortex|vortex-parquet-differential) printf side ;;
     # all-features-check (#3453) is class (a): `--all-features` is the WIDEST feature set
     # any component builds cqlite-core at (42 features, including the OTLP stack MAIN never
     # enables), so it shares almost no unit with MAIN's `--features cli-helpers` build.
@@ -10050,6 +10071,7 @@ _fm_component_class() {
     format-compat|write-tests|cli-tests|compaction-byte-parity) printf 'cargo' ;;
     bti-multiclustering|query-semantics-oracle|flight-query-semantics-oracle) printf 'cargo' ;;
     flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf 'cargo' ;;
+    feature-iso-vortex|vortex-parquet-differential) printf 'cargo' ;;
     binding-rust-tests|oom-audit|parity-report|operator-metrics-doc) printf 'cargo' ;;
     kit-dashboard-drift|minimal-build|all-features-check|smoke) printf 'cargo' ;;
     # unobservable: tooling-tests shells out to ~60 nested test scripts. At least one
@@ -10658,6 +10680,13 @@ _census_kind() {
     # is still `--lib --no-run` and stays `compile`; the two are no longer symmetric.
     feature-iso-delta-scan)                                            printf 'libtest' ;;
     feature-iso-parquet|minimal-build)                                 printf 'compile' ;;
+    # issue #4237: feature-iso-vortex mirrors feature-iso-parquet's compile-only form
+    # exactly (owner Seam-1 ruling 2026-09-23: slim gate wiring) -- `--lib --no-run` via
+    # the SAME `run_feature_iso` function, so it carries the SAME `compile` kind.
+    # vortex-parquet-differential EXECUTES two `cargo test` passes (cqlite-core --lib,
+    # then cqlite-cli's named differential target) -- same `libtest` kind as write-tests.
+    feature-iso-vortex)                                                printf 'compile' ;;
+    vortex-parquet-differential)                                       printf 'libtest' ;;
     # integration-tests: `cargo test --package X --no-run` then a named-target run pass.
     integration-tests)                                                 printf 'both' ;;
     # scoped-tests has NO statically correct kind, and declaring one was a HIGH defect
@@ -19703,12 +19732,13 @@ EOF
 }
 
 # run_feature_iso <feature>: ONE isolation lane, parameterized by the feature under
-# test (issue #1699). ONE dispatch arm consumes it today — feature-iso-parquet (:20460).
+# test (issue #1699). TWO dispatch arms consume it today — feature-iso-parquet and,
+# since issue #4237, feature-iso-vortex (both compile-only, `cargo test --lib --no-run`).
 # Its former second consumer, feature-iso-delta-scan, has its OWN executing
-# implementation since #3725 (run_feature_iso_delta_scan), so THE TWO LANES ARE
-# DELIBERATELY ASYMMETRIC: this one is compile-only, that one EXECUTES. Do not
-# "restore" the symmetry by routing delta-scan back through here — the asymmetry IS
-# the #3725 fix, and this script's own header declares it.
+# implementation since #3725 (run_feature_iso_delta_scan), so THAT LANE IS
+# DELIBERATELY ASYMMETRIC WITH THE OTHERS: this function is compile-only, that one
+# EXECUTES. Do not "restore" the symmetry by routing delta-scan back through here —
+# the asymmetry IS the #3725 fix, and this script's own header declares it.
 #
 # WHY these lanes exist: run_clippy's cqlite-core arm enables legacy-heuristics,
 # parquet AND delta-scan together with ~30 more features. That combined shape is
@@ -26972,7 +27002,13 @@ run_file_size
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings node-bindings smoke flight-tests legacy-heuristics feature-iso-delta-scan"
+#   issue #4237 (Vortex export): feature-iso-vortex is compile-only (`run_feature_iso
+#     vortex` — the SAME `cargo test --lib --no-run` shape feature-iso-parquet uses, owner
+#     Seam-1 ruling 2026-09-23: slim gate wiring), so it stays OUT of this list for the
+#     identical reason feature-iso-parquet does. vortex-parquet-differential DOES execute —
+#     its second pass is the CLI-level cross-format differential over all 33 fixture tables
+#     (`issue_4237_vortex_parquet_differential.rs`) — so it IS in DATASET_COMPONENTS.
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings node-bindings smoke flight-tests legacy-heuristics feature-iso-delta-scan vortex-parquet-differential"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -27551,6 +27587,28 @@ dispatch_component() {
     # log alone. AGENT_GATE_FM_COMPONENT is already armed at the top of dispatch_component,
     # exactly as it is for run_legacy_heuristics / run_core_tests.
     feature-iso-delta-scan) run_feature_iso_delta_scan ;;
+    # issue #4237 (owner Seam-1 ruling 2026-09-23: slim gate wiring): feature-iso-vortex
+    # reuses run_feature_iso VERBATIM — the same compile-only `--lib --no-run` shape
+    # feature-iso-parquet uses, just parameterized on `vortex` instead of `parquet`, so
+    # `vortex` compiles cleanly with neither `parquet` nor `delta-scan` present.
+    feature-iso-vortex) run_component feature-iso-vortex run_feature_iso vortex ;;
+    # vortex-parquet-differential: the ONLY component that enables `parquet` AND `vortex`
+    # together (design.md D3) — no existing lane reaches that combination. Two
+    # `&&`-chained passes, hoisted (package, features) pairs per the #3453 pattern
+    # write-tests/cli-tests use above: cqlite-core's own unit-level coverage for the
+    # writer (R1/R5), then the CLI-level cross-format differential (R9, the PRIMARY
+    # oracle for Vortex export) over all 33 fixture tables,
+    # `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`, fixture-required via
+    # the FULL gate's global CQLITE_REQUIRE_FIXTURES=1 export (this component sets
+    # nothing itself — see the header note above run_feature_iso).
+    vortex-parquet-differential)
+      local vpd_core_pkg=cqlite-core vpd_core_feats=parquet,vortex
+      local vpd_cli_pkg=cqlite-cli vpd_cli_feats=vortex
+      run_component vortex-parquet-differential bash -c '
+  _fm_observe_child vortex-parquet-differential test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' &&
+  cargo test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' --lib &&
+  _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
+  cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test issue_4237_vortex_parquet_differential' ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     binding-rust-tests) run_binding_rust_tests ;;
