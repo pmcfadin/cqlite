@@ -101,9 +101,14 @@ pub enum ArrowConvertError {
     ///
     /// The two in-crate error-conversion boundaries (`ParquetExportError`,
     /// `DeltaParquetError`) carry it as their `InvalidValue` **through `Display`**,
-    /// so the prefix above survives the hop. Neither writer supplies its own
-    /// schema today, so neither can raise it; they map it rather than drop it so a
-    /// future caller that does gets the reason instead of a bare Arrow error.
+    /// so the prefix above survives the hop. (Stale as of issue #4237: both the
+    /// streaming Parquet writer and the Vortex writer now DO supply their own
+    /// pre-built schema via `rows_to_record_batch_with_schema` — design.md D1's
+    /// shared-producer requirement — so this variant CAN fire on the writer path
+    /// too, though never in practice, since each writer's schema is
+    /// `build_arrow_schema` of its own `columns` by construction; they map it
+    /// rather than drop it so any future caller whose precondition genuinely
+    /// breaks gets the reason instead of a bare Arrow error.)
     #[error("Arrow schema does not match the column set: {0}")]
     SchemaMismatch(String),
 }

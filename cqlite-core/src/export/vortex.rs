@@ -36,8 +36,12 @@
 //!
 //! The writer opens a `<path>.tmp` sibling of the destination and only `rename`s it to the real
 //! path on a fully successful `finalize()`. Any error during conversion, the push itself, or
-//! `finish()` removes the temp file (best-effort) before propagating — so the destination path
-//! never holds a partial file, even under a hard kill between chunks.
+//! `finish()` removes the temp file (best-effort) before propagating; a [`Drop`] impl covers the
+//! remaining case — an error from OUTSIDE this writer's own methods (e.g. the caller's chunk-pull
+//! deadline) that unwinds past it without ever calling `finalize`. So the destination path never
+//! holds a partial file, even if the writer is abandoned or the PROCESS is killed between chunks.
+//! (This is process-kill safety, not power-loss durability: there is no `fsync` before the
+//! rename, so an OS/power failure mid-write is a separate, unaddressed concern.)
 
 use crate::export::arrow_convert::{rows_to_record_batch_with_schema, ArrowConvertError};
 use crate::query::{ColumnInfo, QueryMetadata, QueryRow};
@@ -220,6 +224,18 @@ impl StreamingVortexWriter {
     /// Parquet writer uses. Opens a `<path>.tmp` sibling immediately; nothing is ever written to
     /// `path` itself until [`finalize`](Self::finalize) succeeds.
     ///
+    /// # Panics
+    ///
+    /// Must be called from inside a Tokio runtime — it uses `tokio::fs::File` and Vortex's own
+    /// writer looks up the ambient Tokio handle internally. Calling it outside one panics.
+    ///
+    /// # `!Send`
+    ///
+    /// The returned `StreamingVortexWriter` is `!Send` (it holds a `vortex::file::Writer`, whose
+    /// background layout task is driven inline rather than via `tokio::spawn`). It can be `await`ed
+    /// freely within a single task, but cannot be sent to another task or held across a `tokio::spawn`
+    /// boundary.
+    ///
     /// # Errors
     ///
     /// Returns [`VortexExportError::InvalidOptions`] if `options.row_group_size` is zero, or an
@@ -360,6 +376,28 @@ impl StreamingVortexWriter {
     }
 }
 
+/// Fail-closed cleanup for every path `write_chunk`/`finalize`'s own `cleanup_tmp` calls above
+/// do NOT cover (review finding, R4): an error from the CALLER's side of `write_chunk` — e.g.
+/// `collect_chunk_within`'s deadline/query-timeout path in `cqlite-cli/src/commands/export.rs`
+/// — propagates via `?` straight past this writer with no chance to run its own async cleanup.
+/// Without this, R4's "leaves no readable `.vortex` file at the destination path" claim held
+/// only for errors the writer's OWN methods observed, not for one that unwound through it.
+///
+/// Ensures the (possibly still-open) `vortex::file::Writer` is dropped BEFORE the temp file is
+/// unlinked — required on Windows (an open file cannot be deleted there), a no-op on POSIX.
+/// Dropping an in-progress `Writer` aborts its background layout task cleanly (it is a `Send`
+/// task spawned on the session's Tokio handle, not orphaned work) rather than deadlocking.
+///
+/// After a SUCCESSFUL `finalize()` the temp file no longer exists (renamed to `final_path`), so
+/// this `remove_file` call is a harmless not-found; it is the cleanup path ONLY when `finalize`
+/// never ran to completion.
+impl Drop for StreamingVortexWriter {
+    fn drop(&mut self) {
+        drop(self.writer.take());
+        let _ = std::fs::remove_file(&self.tmp_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +535,88 @@ mod tests {
             .await
             .expect_err("second finalize must be rejected");
         assert!(matches!(err, VortexExportError::InvalidOptions(_)));
+    }
+
+    /// R4.1: a conversion failure in a LATER batch (not the first) names its batch index,
+    /// leaves no readable file at the destination, and cleans up the `.tmp` sibling.
+    /// row_group_size=2 so the first `write_chunk` call flushes batch 0 (2 valid rows)
+    /// immediately, and the bad row sits buffered until `finalize`'s flush hits it as
+    /// batch 1 — proving the batch index tracks PUSHES, not `write_chunk` calls.
+    #[tokio::test]
+    async fn conversion_failure_in_a_later_batch_names_batch_index_and_cleans_up() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.vortex");
+        let metadata = metadata_two_cols();
+
+        let mut writer = StreamingVortexWriter::create(
+            &path,
+            &metadata,
+            &VortexExportOptions { row_group_size: 2 },
+        )
+        .await
+        .expect("create");
+
+        let mut row1: HashMap<Arc<str>, crate::types::Value> = HashMap::new();
+        row1.insert(Arc::<str>::from("id"), crate::types::Value::BigInt(1));
+        row1.insert(
+            Arc::<str>::from("name"),
+            crate::types::Value::Text("a".into()),
+        );
+        let mut row2 = row1.clone();
+        row2.insert(Arc::<str>::from("id"), crate::types::Value::BigInt(2));
+
+        let good_row = |values: HashMap<Arc<str>, crate::types::Value>| crate::query::QueryRow {
+            values,
+            key: crate::RowKey::new(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        };
+
+        let pushed = writer
+            .write_chunk(&[good_row(row1), good_row(row2)])
+            .await
+            .expect("2 valid rows at row_group_size=2 flush immediately as batch 0");
+        assert_eq!(pushed, 2, "batch 0 must have been pushed to the writer");
+
+        // A type-mismatched "id" (Text where the schema declares BigInt) — buffered, not
+        // yet flushed (1 row < row_group_size=2).
+        let mut bad_row_values: HashMap<Arc<str>, crate::types::Value> = HashMap::new();
+        bad_row_values.insert(
+            Arc::<str>::from("id"),
+            crate::types::Value::Text("not-a-bigint".into()),
+        );
+        bad_row_values.insert(
+            Arc::<str>::from("name"),
+            crate::types::Value::Text("c".into()),
+        );
+        let buffered = writer
+            .write_chunk(&[good_row(bad_row_values)])
+            .await
+            .expect("the bad row is only BUFFERED here, not yet converted");
+        assert_eq!(buffered, 0, "buffer has 1 row < row_group_size=2, nothing flushed yet");
+
+        let err = writer
+            .finalize()
+            .await
+            .expect_err("finalize's flush of the buffered bad row must fail");
+
+        match &err {
+            VortexExportError::BatchConversion { batch_index, .. } => {
+                assert_eq!(
+                    *batch_index, 1,
+                    "the failure is in the SECOND pushed batch (index 1), not the first"
+                );
+            }
+            other => panic!("expected VortexExportError::BatchConversion, got {other:?}"),
+        }
+
+        assert!(
+            !path.exists(),
+            "R4.1: a failed export must leave no readable file at the destination path"
+        );
+        assert!(
+            !tmp_sibling_path(&path).exists(),
+            "R4.1: the .tmp sibling must be cleaned up on a mid-stream failure"
+        );
     }
 }

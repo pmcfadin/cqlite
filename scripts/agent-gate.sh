@@ -863,23 +863,6 @@
 #                      invisible to a bare `cargo check` — while pulling in none of the
 #                      ~100 integration test files, which assume default features and
 #                      fail here as noise, not leakage. No opt-out.
-#   feature-iso-vortex issue #4237 (owner Seam-1 ruling 2026-09-23: slim gate wiring).
-#                      Reuses run_feature_iso VERBATIM, parameterized `vortex` — the SAME
-#                      compile-only `--lib --no-run` shape feature-iso-parquet uses, in
-#                      MUTUAL isolation from `parquet` and `delta-scan`. No opt-out.
-#   vortex-parquet-differential
-#                      issue #4237. The ONLY component enabling `parquet` AND `vortex`
-#                      together (no other lane reaches that combination): `cargo test
-#                      -p cqlite-core --features parquet,vortex --lib` (the writer's own
-#                      unit-level coverage), then `cargo test -p cqlite-cli --features
-#                      vortex --test issue_4237_vortex_parquet_differential` — the
-#                      cross-format differential, the PRIMARY oracle for Vortex export:
-#                      the SAME `SELECT *` exported to Parquet and Vortex from the
-#                      compiled CLI for all 33 fixture tables (2 quarantined behind
-#                      issue #4279, a pre-existing row-decoder gap unrelated to Vortex),
-#                      both read back with their OWN readers, compared on full column
-#                      set (both directions) and every value. Fixture-required via the
-#                      FULL gate's global CQLITE_REQUIRE_FIXTURES=1 export.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
 #                      features-load-bearing component: 64 cases over throwaway
@@ -911,6 +894,32 @@
 #                      controls, without which a guard hardwired to refuse everything
 #                      would satisfy them all. And case 26: THIS component must not
 #                      report PASS on a guard that exited 0 having measured nothing.
+#   feature-iso-vortex issue #4237 (owner Seam-1 ruling 2026-09-23: slim gate wiring).
+#                      Reuses run_feature_iso VERBATIM, parameterized `vortex` — the SAME
+#                      compile-only `--lib --no-run` shape feature-iso-parquet uses, in
+#                      MUTUAL isolation from `parquet` and `delta-scan`. No opt-out.
+#   vortex-parquet-differential
+#                      issue #4237. The ONLY component enabling `parquet` AND `vortex`
+#                      together (no other lane reaches that combination): name-filtered
+#                      `cargo test -p cqlite-core --features parquet,vortex --lib
+#                      export::vortex::` (the writer's own unit-level coverage, not a
+#                      bare `--lib` — the whole ~3.5k-test suite would be gate cost for
+#                      ~4 targeted tests), the `export_sstable` library function's
+#                      Vortex arm (`--test export_integration_tests
+#                      test_export_sstable_to_vortex` — its only caller anywhere), then
+#                      `cargo test -p cqlite-cli --features vortex --test
+#                      issue_4237_vortex_parquet_differential` — the cross-format
+#                      differential, the PRIMARY oracle for Vortex export: the SAME
+#                      `SELECT *` exported to Parquet and Vortex from the compiled CLI
+#                      for all 33 fixture tables (2 quarantined behind issue #4279, a
+#                      pre-existing row-decoder gap unrelated to Vortex), both read back
+#                      with their OWN readers, compared on full column set (both
+#                      directions) and every value. Fixture-required via the FULL gate's
+#                      global CQLITE_REQUIRE_FIXTURES=1 export. Ends with
+#                      check_no_unexpected_zero_tests (empty allowed-zero list) over the
+#                      combined log, the same zero-tests guard every sibling EXECUTING
+#                      lane (feature-iso-delta-scan, legacy-heuristics, flight-tests,
+#                      binding-rust-tests) has.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   all-features-check cargo check + cargo clippy (-D warnings), BOTH at
@@ -27593,22 +27602,49 @@ dispatch_component() {
     # `vortex` compiles cleanly with neither `parquet` nor `delta-scan` present.
     feature-iso-vortex) run_component feature-iso-vortex run_feature_iso vortex ;;
     # vortex-parquet-differential: the ONLY component that enables `parquet` AND `vortex`
-    # together (design.md D3) — no existing lane reaches that combination. Two
+    # together (design.md D3) — no existing lane reaches that combination. Three
     # `&&`-chained passes, hoisted (package, features) pairs per the #3453 pattern
-    # write-tests/cli-tests use above: cqlite-core's own unit-level coverage for the
-    # writer (R1/R5), then the CLI-level cross-format differential (R9, the PRIMARY
-    # oracle for Vortex export) over all 33 fixture tables,
-    # `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`, fixture-required via
-    # the FULL gate's global CQLITE_REQUIRE_FIXTURES=1 export (this component sets
-    # nothing itself — see the header note above run_feature_iso).
+    # write-tests/cli-tests use above:
+    #   1. cqlite-core's own unit-level coverage for the writer (R1/R5) — name-filtered to
+    #      `export::vortex::` (not a bare `--lib`) so this lane pays for ~4 targeted tests,
+    #      not a full ~3.5k-test cqlite-core suite run at a feature set no other component
+    #      builds (roborev job 4372 finding, Low: gate wall-clock is a first-order cost).
+    #   2. the `export_sstable` LIBRARY function's Vortex arm (R7) — name-filtered to
+    #      `test_export_sstable_to_vortex` — otherwise that ~75-line arm compiles
+    #      everywhere and executes in NO gate lane (roborev job 4372 finding, Medium:
+    #      wiring-evidence gap; `export_sstable` has no CLI-verb caller, only this test).
+    #   3. the CLI-level cross-format differential (R9, the PRIMARY oracle for Vortex
+    #      export) over all 33 fixture tables,
+    #      `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`, fixture-required
+    #      via the FULL gate's global CQLITE_REQUIRE_FIXTURES=1 export (this component
+    #      sets nothing itself — see the header note above run_feature_iso).
+    # `check_no_unexpected_zero_tests` at the end reads the ONE combined log
+    # `run_component` already writes this whole block's output to (issue #1978's guard,
+    # every SIBLING executing lane — feature-iso-delta-scan, legacy-heuristics,
+    # flight-tests, binding-rust-tests — calls it; this one previously did not, roborev
+    # job 4372 finding, Medium): an empty allowed-zero list, since neither `--test` pass
+    # (2 or 3) may legitimately produce zero tests here. SCOPE, stated so this is not
+    # over-trusted: that guard keys on `Running tests/<name>.rs` and explicitly
+    # disclaims unit runs (`Running unittests src/lib.rs`), so pass 1's name-filtered
+    # `--lib "export::vortex::"` run is NOT covered by it — a regression that silently
+    # dropped that filter to something matching zero tests would not be caught here.
+    # Closing that residual needs `check_unittest_targets_ran` with a cargo-metadata-
+    # derived unittest source path (the `--lib`/`--bins` analogue, #3384, e.g.
+    # feature-iso-delta-scan's `ds_unit_srcs`) — left as a follow-up rather than
+    # implemented here without the ability to verify it against a live gate run in
+    # this session (disk/build-slot contention on the Mac gate box).
     vortex-parquet-differential)
       local vpd_core_pkg=cqlite-core vpd_core_feats=parquet,vortex
       local vpd_cli_pkg=cqlite-cli vpd_cli_feats=vortex
+      local vpd_log="$LOG_DIR/vortex-parquet-differential.log"
       run_component vortex-parquet-differential bash -c '
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' &&
-  cargo test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' --lib &&
+  cargo test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' --lib "export::vortex::" &&
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
-  cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test issue_4237_vortex_parquet_differential' ;;
+  cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test export_integration_tests test_export_sstable_to_vortex &&
+  _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
+  cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test issue_4237_vortex_parquet_differential &&
+  check_no_unexpected_zero_tests vortex-parquet-differential '"$vpd_log"'' ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     binding-rust-tests) run_binding_rust_tests ;;

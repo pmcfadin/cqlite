@@ -50,9 +50,6 @@ pub async fn export_sstable(
         .await
         .with_context(|| format!("Failed to open SSTable: {}", sstable_path.display()))?;
 
-    let mut output_file = File::create(output_path)
-        .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
-
     if show_progress {
         println!("Exporting SSTable: {}", sstable_path.display());
         println!("Output: {} ({})", output_path.display(), format);
@@ -73,19 +70,33 @@ pub async fn export_sstable(
     };
 
     match format {
-        ExportFormat::Json => export_as_json(&reader, &schema, &mut output_file, &pb).await,
-        ExportFormat::Csv => export_as_csv(&reader, &schema, &mut output_file, &pb).await,
-        ExportFormat::Parquet => {
-            // Parquet writer manages its own file handle, so we drop the one we created
-            drop(output_file);
-            export_as_parquet(&reader, &schema, output_path, &pb).await
+        // Issue #4237 review finding (blocker 2): `File::create(output_path)` used to run
+        // UNCONDITIONALLY before this match, truncating the destination the instant this
+        // function was called regardless of format — so a Parquet/Vortex failure left a
+        // 0-byte file at the destination, and any PRE-EXISTING file there was wiped before
+        // either writer's own (Parquet: whole-file; Vortex: temp-then-rename) fail-closed
+        // behavior ever got a chance to run. Only Json/Csv/Cql actually write through this
+        // handle, so only they create it now, at the point they need it.
+        ExportFormat::Json => {
+            let mut output_file = File::create(output_path).with_context(|| {
+                format!("Failed to create output file: {}", output_path.display())
+            })?;
+            export_as_json(&reader, &schema, &mut output_file, &pb).await
         }
-        ExportFormat::Cql => export_as_cql(&reader, &schema, &mut output_file, &pb).await,
+        ExportFormat::Csv => {
+            let mut output_file = File::create(output_path).with_context(|| {
+                format!("Failed to create output file: {}", output_path.display())
+            })?;
+            export_as_csv(&reader, &schema, &mut output_file, &pb).await
+        }
+        ExportFormat::Parquet => export_as_parquet(&reader, &schema, output_path, &pb).await,
+        ExportFormat::Cql => {
+            let mut output_file = File::create(output_path).with_context(|| {
+                format!("Failed to create output file: {}", output_path.display())
+            })?;
+            export_as_cql(&reader, &schema, &mut output_file, &pb).await
+        }
         ExportFormat::Vortex => {
-            // Issue #4237. Like Parquet, the Vortex writer manages its own file handle
-            // (and writes through a `<path>.tmp` sibling — fail-closed, R4), so drop
-            // the one we created.
-            drop(output_file);
             #[cfg(feature = "vortex")]
             {
                 export_as_vortex(&reader, &schema, output_path, &pb).await

@@ -12,22 +12,26 @@ the compiled binary as a named, fixture-required gate target. All requirements a
 ### Requirement: R6 — `cqlite export --format vortex` writes a `.vortex` file from a query
 
 The CLI SHALL accept `--format vortex` (alias/spelling matching the existing `ExportFormat` value
-enum casing, i.e. `vortex`) on `cqlite export`, requiring an `--output`/`-o` file destination
-exactly as Parquet does (Vortex is a binary format; it cannot be written to stdout), and forwarding
+enum casing, i.e. `vortex`) on `cqlite export <FILE> --table <TABLE> --format vortex`, forwarding
 through the existing `--schema` resolution and streaming chunk/backpressure path unchanged.
+
+Corrected during implementation (the ORIGINAL R6.2 below described a non-existent code path):
+`export`'s destination is the MANDATORY positional `<FILE>` argument (`cli_types.rs`'s `Export`
+variant), not a separate `--out`/`--output` flag — that flag pattern belongs to the SEPARATE
+`query`/one-shot surface (`cqlite --query "..." --out <fmt> --output <file>`), which R6 does not
+touch (`query`'s own `OutputFormat::Vortex` arm always REJECTS, per the proposal's design choice —
+see `cqlite-cli/src/commands/query.rs`). Since `<FILE>` is mandatory for every `export` format
+alike, clap itself refuses `cqlite export --format vortex` with no `<FILE>` before any
+format-specific code runs — that is pre-existing, unconditional clap behavior, not something this
+change adds or could usefully re-test as Vortex-specific.
 
 #### Scenario: R6.1 query export produces a file Vortex's own reader opens
 - **Given** the built `cqlite` binary with the `vortex` feature enabled, a real fixture table, and
-  a `SELECT * FROM <table>` query
-- **When** `cqlite export --format vortex --out results.vortex 'SELECT * FROM <table>'` runs
+  its resolved schema
+- **When** `cqlite export results.vortex --format vortex --table <keyspace>.<table>` runs
 - **Then** exit `0`, `results.vortex` exists, and Vortex's own session reader opens it and reports
-  the expected row count.
-
-#### Scenario: R6.2 `--format vortex` without a file destination is a usage error
-- **Given** `cqlite export --format vortex 'SELECT ...'` with no `--out`/`--output`
-- **When** the command runs
-- **Then** it exits non-zero with an error naming that Vortex requires a file destination — the
-  same shape as today's Parquet-without-`--output` error.
+  the expected row count (verified for all 33 fixture tables by the R9 differential, which uses
+  exactly this invocation shape).
 
 ### Requirement: R7 — the `export_sstable` library function reads a table dir directly into Vortex
 
@@ -44,16 +48,21 @@ wording: `export_sstable` is NOT a CLI verb — the `export-sstable` subcommand 
 - **Given** a real fixture table directory (`test_basic.simple_table`) and its resolved schema
 - **When** `export_sstable(&sstable_file, &schema_file, &output_file, ExportFormat::Vortex, true)`
   is called directly (`test_export_sstable_to_vortex`, mirroring `test_export_sstable_to_parquet`)
-- **Then** it returns `Ok(())` and the output file exists with non-empty content.
+- **Then** it returns `Ok(())`, and reading the output back with Vortex's own reader
+  (`read_vortex_row_count`) reports a non-zero row count — not merely a non-empty file, which a
+  0-row Vortex export (magic bytes + footer) would also satisfy.
 
 ### Requirement: R8 — `read-sstable` rejects Vortex like it rejects Parquet
 
-`read-sstable`'s `--output`/format dispatch SHALL reject `vortex` with an error naming the
+`read-sstable`'s `--format`/`-f` dispatch SHALL reject `vortex` with an error naming the
 unsupported format and pointing at `--out json` or `--out csv`, using the same message shape as its
-existing Parquet rejection (`cqlite-cli/src/commands/read_sstable.rs`).
+existing Parquet rejection (`cqlite-cli/src/commands/read_sstable.rs`). Correction: `read-sstable`'s
+flag is `--format`/`-f` (`ReadSstable`'s `format: OutputFormat` field in `cli_types.rs`), not
+`--output` — the original wording below conflated it with `export`'s `--output`/`-o` destination
+flag.
 
-#### Scenario: R8.1 `read-sstable --output vortex` is rejected
-- **Given** `cqlite read-sstable <Data.db> --output vortex`
+#### Scenario: R8.1 `read-sstable --format vortex` is rejected
+- **Given** `cqlite read-sstable <Data.db> --format vortex`
 - **When** the command runs
 - **Then** it exits non-zero with the message `"Vortex format is not supported for this command.
   Use --out json or --out csv instead."` (or the exact string the implementation settles on,
@@ -79,9 +88,11 @@ runs in the mandatory full gate — not CI-only.
 #### Scenario: R9.2 the differential is a named, required-features `--test` target
 - **Given** `cqlite-cli/Cargo.toml`
 - **When** the new differential test target is declared
-- **Then** it carries `required-features = ["parquet", "vortex"]`, so a default-feature `cargo
-  test` neither compiles nor silently skips it — it is absent from that build entirely, and a gate
-  component that intends to run it must enable both features explicitly (see R11).
+- **Then** it carries `required-features = ["state_machine", "vortex"]` — `state_machine` already
+  forwards `cqlite-core/parquet` (see that feature's own comment in `cqlite-cli/Cargo.toml`), so
+  this pair gives both writers — so a default-feature `cargo test` neither compiles nor silently
+  skips it — it is absent from that build entirely, and a gate component that intends to run it
+  must enable both explicitly (see R11).
 
 ### Requirement: R10 — No byte-level `.vortex` golden is required or added
 
@@ -117,13 +128,18 @@ has real `cfg` reference sites — the writer module itself) and `dep-duplicates
   requires `arrow`, not `parquet`) — matching `feature-iso-parquet`'s own compile-only contract and
   its documented `PASS (0s)` legitimacy.
 
-#### Scenario: R11.2 `vortex-parquet-differential` is the sole executing lane, named and fixture-required
+#### Scenario: R11.2 `vortex-parquet-differential` is the sole executing lane, named, fixture-required, and zero-tests-guarded
 - **Given** the full gate's `AGENT-GATE SUMMARY`
 - **When** the `vortex-parquet-differential` component's line is read
-- **Then** it names both passes it ran — `cargo test -p cqlite-core --features parquet,vortex --lib`
-  and the CLI-level `--test` target(s) — states `CQLITE_REQUIRE_FIXTURES=1` for the fixture-backed
-  pass, and its pass/fail is not silently absorbed into an existing component's line (#3522's
-  per-component naming discipline); no other new component executes any `vortex`-gated test.
+- **Then** it names all three passes it ran — a name-filtered `cargo test -p cqlite-core --features
+  parquet,vortex --lib export::vortex::` (not a bare `--lib`, to bound gate cost to the writer's own
+  tests), `--test export_integration_tests test_export_sstable_to_vortex` (R7's library-level
+  coverage), and the CLI-level differential target — states `CQLITE_REQUIRE_FIXTURES=1` for the
+  fixture-backed pass, runs `check_no_unexpected_zero_tests` (empty allowed-zero list) over the
+  combined log so a target compiling out to 0 tests FAILs rather than PASSing having executed
+  nothing (review finding, Medium — every sibling executing lane already has this guard), and its
+  pass/fail is not silently absorbed into an existing component's line (#3522's per-component naming
+  discipline); no other new component executes any `vortex`-gated test.
 
 #### Scenario: R11.3 `features-load-bearing` and `dep-duplicates` stay green
 - **Given** the full gate
@@ -137,8 +153,18 @@ has real `cfg` reference sites — the writer module itself) and `dep-duplicates
 
 Documentation SHALL name Vortex as a new export target: `output-formats.md`, `cli-reference.md`,
 `docs/development/dev-cookbook.md` (a `--features vortex` build/test recipe mirroring the existing
-`--features parquet` one), and the README formats table each gain a Vortex entry; release notes for
-the shipping version name Vortex export, the arrow 59 rev, and the Rust 1.95 floor.
+`--features parquet` one), and `CHANGELOG.md`'s `[Unreleased]` section each gain a Vortex entry.
+`CHANGELOG.md`, not the README formats table, is this change's record of an UNSHIPPED feature —
+README's "Features" section is a per-shipped-milestone changelog (`### ✅ M3 Complete`, `### ✅
+v0.17.0`, …) and Vortex is not shipped as of this change; a README edit implying otherwise would be
+false. The eventual 0.18 release notes (owned by whichever issue assembles them, not this one) name
+Vortex export, the arrow 59 rev, and the Rust 1.95 floor.
+
+#### Scenario: R12.0 CHANGELOG.md names Vortex under Unreleased, not as a shipped release
+- **Given** `CHANGELOG.md`'s `## [Unreleased]` section (previously `_Nothing yet._`)
+- **When** this change lands
+- **Then** it gains an `### Added` entry naming Vortex export, the off-by-default `vortex` feature,
+  and the nested-UUID extension-metadata fix this change made along the way (issue #4237).
 
 #### Scenario: R12.1 output-formats.md documents Vortex like it documents Parquet
 - **Given** `website/src/content/docs/user-docs/output-formats.md`

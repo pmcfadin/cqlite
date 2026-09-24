@@ -359,3 +359,156 @@ pub(crate) fn data_type_to_arrow(data_type: &DataType) -> ArrowDataType {
         DataType::Tombstone => ArrowDataType::Utf8,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::CqlType;
+
+    fn has_uuid_extension(field: &Field) -> bool {
+        field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(String::as_str)
+            == Some(ARROW_UUID_EXTENSION_NAME)
+    }
+
+    /// Issue #4237 (roborev job 4372, Medium): the nested-UUID extension-metadata fix
+    /// (`cql_type_to_arrow_child_field`) is a behavior change to every collection/tuple/UDT
+    /// schema, previously pinned only by two Parquet golden-schema assertions in a
+    /// gate-quarantined test file. This is the gate-EXECUTED pin (runs in `core-tests` and
+    /// the new `vortex-parquet-differential` lane's `export::vortex::`-filtered pass, since
+    /// it lives in this module): a UUID nested at every position this module builds a child
+    /// Field for carries the `arrow.uuid` extension.
+    #[test]
+    fn nested_uuid_carries_extension_metadata_at_every_position() {
+        // list<uuid> -> List(item: FixedSizeBinary(16) + arrow.uuid)
+        let list_field =
+            cql_type_to_arrow_field("ids", &CqlType::List(Box::new(CqlType::Uuid)), true)
+                .expect("List maps to an explicit field");
+        let ArrowDataType::List(item_field) = list_field.data_type() else {
+            panic!("expected List, got {:?}", list_field.data_type());
+        };
+        assert!(
+            has_uuid_extension(item_field),
+            "list<uuid> element field must carry the arrow.uuid extension"
+        );
+
+        // map<text, uuid> -> Map(entries: Struct(key: Utf8, value: FixedSizeBinary(16) + arrow.uuid))
+        let map_field = cql_type_to_arrow_field(
+            "m",
+            &CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Uuid)),
+            true,
+        )
+        .expect("Map maps to an explicit field");
+        let ArrowDataType::Map(entries_field, _) = map_field.data_type() else {
+            panic!("expected Map, got {:?}", map_field.data_type());
+        };
+        let ArrowDataType::Struct(entry_fields) = entries_field.data_type() else {
+            panic!(
+                "expected Map entries Struct, got {:?}",
+                entries_field.data_type()
+            );
+        };
+        let value_field = entry_fields
+            .iter()
+            .find(|f| f.name() == "value")
+            .expect("entries struct has a value field");
+        assert!(
+            has_uuid_extension(value_field),
+            "map<text, uuid> value field must carry the arrow.uuid extension"
+        );
+
+        // map<uuid, text> -> the KEY field must also carry it.
+        let map_key_field = cql_type_to_arrow_field(
+            "m2",
+            &CqlType::Map(Box::new(CqlType::Uuid), Box::new(CqlType::Text)),
+            true,
+        )
+        .expect("Map maps to an explicit field");
+        let ArrowDataType::Map(entries_field2, _) = map_key_field.data_type() else {
+            panic!("expected Map, got {:?}", map_key_field.data_type());
+        };
+        let ArrowDataType::Struct(entry_fields2) = entries_field2.data_type() else {
+            panic!("expected Map entries Struct");
+        };
+        let key_field = entry_fields2
+            .iter()
+            .find(|f| f.name() == "key")
+            .expect("entries struct has a key field");
+        assert!(
+            has_uuid_extension(key_field),
+            "map<uuid, text> key field must carry the arrow.uuid extension"
+        );
+
+        // tuple<int, uuid> -> Struct(field_0: Int32, field_1: FixedSizeBinary(16) + arrow.uuid)
+        let tuple_field = cql_type_to_arrow_field(
+            "t",
+            &CqlType::Tuple(vec![CqlType::Int, CqlType::Uuid]),
+            true,
+        )
+        .expect("Tuple maps to an explicit field");
+        let ArrowDataType::Struct(tuple_fields) = tuple_field.data_type() else {
+            panic!("expected Struct, got {:?}", tuple_field.data_type());
+        };
+        assert!(
+            has_uuid_extension(&tuple_fields[1]),
+            "tuple position 1 (uuid) must carry the arrow.uuid extension"
+        );
+
+        // UDT { id: uuid, name: text } -> Struct(id: FixedSizeBinary(16) + arrow.uuid, name: Utf8)
+        let udt_field = cql_type_to_arrow_field(
+            "u",
+            &CqlType::Udt(
+                "my_udt".to_string(),
+                vec![
+                    ("id".to_string(), CqlType::Uuid),
+                    ("name".to_string(), CqlType::Text),
+                ],
+            ),
+            true,
+        )
+        .expect("Udt maps to an explicit field");
+        let ArrowDataType::Struct(udt_fields) = udt_field.data_type() else {
+            panic!("expected Struct, got {:?}", udt_field.data_type());
+        };
+        let udt_id_field = udt_fields
+            .iter()
+            .find(|f| f.name() == "id")
+            .expect("udt struct has an id field");
+        assert!(
+            has_uuid_extension(udt_id_field),
+            "UDT field 'id' (uuid) must carry the arrow.uuid extension"
+        );
+
+        // list<list<uuid>> -> nested List(List(item: FixedSizeBinary(16) + arrow.uuid))
+        let nested_list_field = cql_type_to_arrow_field(
+            "ll",
+            &CqlType::List(Box::new(CqlType::List(Box::new(CqlType::Uuid)))),
+            true,
+        )
+        .expect("nested List maps to an explicit field");
+        let ArrowDataType::List(outer_item) = nested_list_field.data_type() else {
+            panic!("expected List, got {:?}", nested_list_field.data_type());
+        };
+        let ArrowDataType::List(inner_item) = outer_item.data_type() else {
+            panic!("expected nested List, got {:?}", outer_item.data_type());
+        };
+        assert!(
+            has_uuid_extension(inner_item),
+            "list<list<uuid>> innermost element field must carry the arrow.uuid extension"
+        );
+    }
+
+    /// `cql_type_to_arrow_data_type` (the bare-`ArrowDataType` path used by the value-building
+    /// side) must resolve to the SAME `DataType` shape `cql_type_to_arrow_field` does for a
+    /// container type — this test pins that the two paths did not diverge when
+    /// `cql_type_to_arrow_child_field` was introduced as their shared recursion point.
+    #[test]
+    fn data_type_path_agrees_with_field_path_for_nested_uuid() {
+        let cql = CqlType::List(Box::new(CqlType::Uuid));
+        let via_field = cql_type_to_arrow_field("x", &cql, true)
+            .expect("List maps to an explicit field")
+            .data_type()
+            .clone();
+        let via_data_type = cql_type_to_arrow_data_type(&cql);
+        assert_eq!(via_field, via_data_type);
+    }
+}

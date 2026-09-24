@@ -115,6 +115,20 @@ fn is_quarantined(table: &FixtureTable) -> bool {
         .any(|(ks, t)| *ks == table.keyspace && *t == table.table)
 }
 
+/// Tables where `SELECT *` legitimately returns ZERO rows against the committed fixture —
+/// verified against a real run, not assumed. `test_basic.ttl_test_table` writes rows with a
+/// short TTL that has expired relative to the fixture's pinned `now` (issue #3220's oracle
+/// class), so an empty result here is the CORRECT reconciled view, not a decode failure.
+/// Anything NOT in this list that returns 0 rows is treated as a possible regression
+/// (`differential_all_fixture_tables_agree`'s per-table check).
+const ZERO_ROW_ALLOWED_TABLES: &[(&str, &str)] = &[("test_basic", "ttl_test_table")];
+
+fn is_zero_row_allowed(table: &FixtureTable) -> bool {
+    ZERO_ROW_ALLOWED_TABLES
+        .iter()
+        .any(|(ks, t)| *ks == table.keyspace && *t == table.table)
+}
+
 /// Discover every fixture table (issue #3220: resolve fixture roots per TABLE, assert per CASE —
 /// a keyspace-level "the root has SOME tables" check cannot see one table's Data.db missing
 /// behind its siblings).
@@ -416,6 +430,22 @@ fn differential_all_fixture_tables_agree() {
 
         match diff_one_table(&root, table) {
             Ok(rows) => {
+                // #4237 review finding (Medium, both rust-reviewer and roborev job 4372):
+                // `diff_one_table` returning `Ok(0)` on a genuinely 0-row table is
+                // indistinguishable, at this call site, from a shared row-decode
+                // regression that silently yields 0 rows everywhere — exactly the
+                // "0-rows-when-present = failure" rule in CLAUDE.md. `rows == 0` is only
+                // legitimate for the small, NAMED set in `ZERO_ROW_ALLOWED_TABLES`
+                // (verified against a real run: `test_basic.ttl_test_table` is TTL-expired
+                // under the fixture's pinned data); every other table must produce rows.
+                if rows == 0 && !is_zero_row_allowed(table) {
+                    failures.push(format!(
+                        "{qualified}: 0 rows compared — not in ZERO_ROW_ALLOWED_TABLES, so \
+                         this is treated as a possible silent row-decode regression, not a \
+                         legitimate empty table (CLAUDE.md: 0-rows-when-present = failure)"
+                    ));
+                    continue;
+                }
                 swept += 1;
                 total_rows_compared += rows;
                 eprintln!("{qualified}: OK ({rows} rows, both formats agree)");
@@ -438,12 +468,41 @@ fn differential_all_fixture_tables_agree() {
         "zero fixture tables were actually swept (all had missing Data.db) — \
          CQLITE_DATASETS_ROOT points at a corpus-less root"
     );
-    assert_eq!(
-        quarantined,
-        QUARANTINED_TABLES.len(),
-        "quarantined-table count drifted from QUARANTINED_TABLES — a table was added/removed \
-         from the corpus without updating this list"
-    );
+    // Corpus-wide floor (review finding): swept-table count and total rows compared must
+    // both clear a floor derived from a real run (31 tables, 6096 rows) so a regression
+    // that drops most tables to 0 rows (which the per-table check above already refuses)
+    // or silently skips most tables cannot pass by accumulating just enough from a few.
+    // Only enforced under CQLITE_REQUIRE_FIXTURES=1 — an intentionally partial local
+    // corpus (a subset of keyspaces fetched) is a legitimate non-strict state.
+    if strict {
+        assert!(
+            swept >= 31,
+            "strict mode: only {swept} tables swept (expected >= 31 of 33, 2 quarantined \
+             behind issue #4279) — a table silently dropped out of the sweep?"
+        );
+        assert!(
+            total_rows_compared >= 1000,
+            "strict mode: only {total_rows_compared} total rows compared across {swept} \
+             tables (expected >= 1000; a real run compares 6096) — a shared row-decode \
+             regression yielding near-empty results would still pass the per-table \
+             zero-row check if EVERY table returned exactly 1 row, so this floor is a \
+             second, independent net"
+        );
+    }
+    // Review finding: only enforced under `strict` — a partial local corpus (e.g. only
+    // `test_basic` fetched) legitimately discovers 0 of the 2 quarantined tables (their
+    // KEYSPACE directories are absent, so `discover_fixture_tables` never sees them at
+    // all), which is not "a table added/removed from the corpus", just an incomplete
+    // local root. Under CQLITE_REQUIRE_FIXTURES=1 the full corpus is expected, so the
+    // exact count is meaningful there.
+    if strict {
+        assert_eq!(
+            quarantined,
+            QUARANTINED_TABLES.len(),
+            "strict mode: quarantined-table count drifted from QUARANTINED_TABLES — a table \
+             was added/removed from the corpus without updating this list"
+        );
+    }
     eprintln!(
         "vortex-parquet differential: {swept}/{} tables swept ({quarantined} quarantined, issue #4279), \
          {total_rows_compared} total rows compared, all agree",
@@ -483,4 +542,45 @@ fn differential_uuid_column_matches() {
         Ok(rows) => assert!(rows > 0, "simple_table exported 0 rows"),
         Err(e) => panic!("{e}"),
     }
+}
+
+/// R8.1 — `read-sstable --format vortex` is rejected with the same message shape used for
+/// `--format parquet`, exercising the compiled binary (not just the match arm in isolation).
+#[test]
+fn differential_read_sstable_rejects_vortex() {
+    let strict = require_fixtures_strict();
+    let Some(root) = datasets_root() else {
+        assert!(!strict, "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT is unset");
+        eprintln!("CQLITE_DATASETS_ROOT not set, skipping");
+        return;
+    };
+
+    let table = FixtureTable {
+        keyspace: "test_basic",
+        table: "simple_table".to_string(),
+        schema: schemas_dir().join("basic-types.cql"),
+    };
+    let Some(sstable_dir) = table_dir_has_data_db(&root, &table) else {
+        assert!(!strict, "CQLITE_REQUIRE_FIXTURES=1 but test_basic.simple_table has no Data.db");
+        eprintln!("test_basic.simple_table: no Data.db present, skipping");
+        return;
+    };
+    let data_db = std::fs::read_dir(&sstable_dir)
+        .expect("read sstable dir")
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().ends_with("-Data.db"))
+        .expect("Data.db present")
+        .path();
+
+    let (_, stderr, ok) = run_cli(&[
+        "read-sstable",
+        data_db.to_str().unwrap(),
+        "--format",
+        "vortex",
+    ]);
+    assert!(!ok, "read-sstable --format vortex must exit non-zero");
+    assert!(
+        stderr.contains("Vortex format is not supported for this command"),
+        "expected the deliberate Vortex-rejection message, got stderr: {stderr}"
+    );
 }

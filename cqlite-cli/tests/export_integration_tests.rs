@@ -1207,8 +1207,33 @@ async fn test_export_sstable_to_vortex() {
         result.err()
     );
     assert!(output_file.exists(), "Output Vortex file should exist");
-    let vortex_bytes = fs::read(&output_file).expect("Failed to read Vortex file");
-    assert!(!vortex_bytes.is_empty(), "Vortex file should have content");
+
+    // Issue #4237 review finding: a bare non-empty-file check cannot distinguish a
+    // correctly-populated export from a 0-row one (Vortex's magic bytes + footer make
+    // even an empty file non-empty). Read it back with Vortex's own reader and assert a
+    // real row count, mirroring `test_export_sstable_to_parquet`'s row-count check above.
+    let row_count = read_vortex_row_count(&output_file)
+        .await
+        .expect("failed to read Vortex file back");
+    assert!(
+        row_count > 0,
+        "Vortex export of test_basic.simple_table produced 0 rows"
+    );
+    eprintln!("SSTable to Vortex export verified: {row_count} rows");
+}
+
+/// Read a `.vortex` file back and return its total row count, via Vortex's own reader.
+#[cfg(feature = "vortex")]
+async fn read_vortex_row_count(path: &std::path::Path) -> anyhow::Result<usize> {
+    use vortex::VortexSessionDefault;
+    use vortex::array::stream::ArrayStreamExt;
+    use vortex::file::OpenOptionsSessionExt;
+    use vortex::session::VortexSession;
+
+    let session = VortexSession::default();
+    let file = session.open_options().open_path(path.to_path_buf()).await?;
+    let array = file.scan()?.into_array_stream()?.read_all().await?;
+    Ok(array.len())
 }
 
 // ============================================================================

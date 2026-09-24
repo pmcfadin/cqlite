@@ -9,10 +9,15 @@ pub enum OutputFormat {
     Csv,
     /// Parquet binary format (requires --output flag for file destination)
     Parquet,
-    /// Vortex binary format — accepted here only so `read-sstable --output
-    /// vortex` gets the deliberate rejection message every other unsupported
-    /// format gets (issue #4237, R8), never a raw clap parse error. `export`
-    /// / `export-sstable` are the actual Vortex writers.
+    /// Vortex binary format — accepted here so `read-sstable --output vortex`
+    /// and `query --out vortex` get the deliberate rejection message those two
+    /// surfaces already use for unsupported formats (issue #4237, R8), rather
+    /// than a raw clap parse error. NOT every `OutputFormat`-matching surface
+    /// rejects this way — `read-commitlog`'s `match format { Json => …, _ =>
+    /// render_text(...) }` falls through to text for any other value,
+    /// `--output vortex` included, same as it already does for `Parquet`. The
+    /// actual Vortex writer is `cqlite export --format vortex` (`ExportFormat`,
+    /// not this enum) and the `export_sstable` library function.
     Vortex,
 }
 
