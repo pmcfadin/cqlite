@@ -35,9 +35,10 @@ metadata) then `session.write_options().write(...)` with the default sampling co
 crate features: `vortex-file` on, `vortex-cloud`/`vortex-tensor` off.
 
 **CLI (`cqlite-cli`).** `ExportFormat::Vortex` added to the existing exhaustive enum in `cli.rs`,
-forcing an explicit arm in every dispatcher that matches it today: `export.rs` (query export),
-`export_sstable.rs` (`export-sstable --format vortex`), and `read_sstable.rs` (rejects Vortex with
-the same message shape it already uses to reject Parquet). A `vortex` feature on `cqlite-cli`
+forcing an explicit arm in every dispatcher that matches it today: `export.rs` (the `cqlite export`
+CLI verb), `export_sstable.rs` (the `export_sstable` LIBRARY function — not a CLI verb; lead ruling
+2026-09-24, see R7 in `specs/cli-export-vortex/spec.md`), and `read_sstable.rs` (rejects Vortex
+with the same message shape it already uses to reject Parquet). A `vortex` feature on `cqlite-cli`
 forwards `cqlite-core/vortex`. `delta-export`'s `DeltaOutFormat` is untouched — Parquet-only,
 explicitly out of scope.
 
@@ -63,9 +64,10 @@ today, so this is new wiring, not a product decision).
    query schema's column order — never `HashMap` iteration order.
 4. **Fail closed, mid-stream**: a conversion or write error names the batch index and column,
    aborts, and leaves no `.vortex` file (or deletes an unreadable partial). No partial-file success.
-5. **Wiring evidence from the binary**: `cqlite export --format vortex`, `cqlite export-sstable
-   --format vortex`, and `read-sstable`'s rejection of Vortex all exercise the compiled CLI, not
-   just library unit tests.
+5. **Wiring evidence**: `cqlite export --format vortex` and `read-sstable`'s rejection of Vortex
+   exercise the compiled CLI; the `export_sstable` library function's Vortex arm is exercised at
+   the library level (`test_export_sstable_to_vortex`), exactly as its pre-existing Parquet arm
+   already is — not through a CLI subprocess (lead ruling 2026-09-24, R7).
 
 ## Non-goals
 

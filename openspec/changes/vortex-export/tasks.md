@@ -67,10 +67,13 @@ after every fix round; ONE full gate in `flow-closer`.
       matches) as the design's own check.
 - [ ] 3.3 `export.rs`: `ExportFormat::Vortex` arm — require `--out`/`--output` (R6.2), call the
       shared producer + `write_vortex`.
-- [ ] 3.4 `export_sstable.rs`: `ExportFormat::Vortex` arm mirroring the `Parquet` arm shape.
+- [ ] 3.4 `export_sstable.rs`: `ExportFormat::Vortex` arm on the `export_sstable` LIBRARY function
+      (not a CLI verb — lead ruling 2026-09-24, R7), mirroring the `Parquet` arm shape.
 - [ ] 3.5 `read_sstable.rs`: reject `vortex` with the R8.1 message shape.
-- [ ] 3.6 CLI-level tests: R6.1, R6.2, R7.1, R8.1 (`cqlite-cli/tests/`, named `--test` targets with
-      `required-features = ["vortex"]` or `["parquet", "vortex"]` as each needs).
+- [ ] 3.6 CLI-level tests: R6.1, R6.2, R8.1 (`cqlite-cli/tests/`, named `--test` targets with
+      `required-features = ["vortex"]` or `["parquet", "vortex"]` as each needs). R7.1 is a
+      LIBRARY-level test instead (`test_export_sstable_to_vortex` in
+      `export_integration_tests.rs`), mirroring `test_export_sstable_to_parquet` exactly.
 - [ ] 3.7 `--lite`; commit.
 
 ## 4. Cross-format differential + gate wiring (R9–R11, design.md D3)

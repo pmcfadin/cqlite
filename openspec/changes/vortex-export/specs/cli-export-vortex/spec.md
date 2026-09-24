@@ -1,9 +1,11 @@
 # cli-export-vortex — new capability (vortex-export, issue #4237)
 
-`cqlite export` and `cqlite export-sstable` SHALL accept `--format vortex` as a sibling of
-`--format parquet`, `read-sstable` SHALL reject it with the same message shape it already uses to
-reject Parquet, and the primary cross-format-differential oracle SHALL run against the compiled
-binary as a named, fixture-required gate target. All requirements are ADDED.
+`cqlite export` SHALL accept `--format vortex` as a sibling of `--format parquet`, the
+`export_sstable` LIBRARY function (`cqlite_cli::commands::export_sstable::export_sstable` — not a
+CLI verb; lead ruling 2026-09-24, R7) SHALL accept `ExportFormat::Vortex` the same way it already
+accepts `ExportFormat::Parquet`, `read-sstable` SHALL reject Vortex with the same message shape it
+already uses to reject Parquet, and the primary cross-format-differential oracle SHALL run against
+the compiled binary as a named, fixture-required gate target. All requirements are ADDED.
 
 ## ADDED Requirements
 
@@ -27,17 +29,22 @@ through the existing `--schema` resolution and streaming chunk/backpressure path
 - **Then** it exits non-zero with an error naming that Vortex requires a file destination — the
   same shape as today's Parquet-without-`--output` error.
 
-### Requirement: R7 — `cqlite export-sstable --format vortex` reads a table dir directly
+### Requirement: R7 — the `export_sstable` library function reads a table dir directly into Vortex
 
-The CLI SHALL accept `--format vortex` on `export-sstable`, following the same dispatch shape as
-`ExportFormat::Parquet` in `export_sstable.rs` (schema resolution, progress bar, single-generation
-export).
+The `export_sstable` LIBRARY function (`cqlite_cli::commands::export_sstable::export_sstable`) SHALL
+accept `ExportFormat::Vortex`, following the same dispatch shape as `ExportFormat::Parquet` in
+`export_sstable.rs` (schema resolution, progress bar, single-generation export), tested at the
+library level exactly as the pre-existing Parquet arm already is (`test_export_sstable_to_parquet`)
+— not through a CLI subprocess. Lead ruling 2026-09-24, correcting this requirement's original
+wording: `export_sstable` is NOT a CLI verb — the `export-sstable` subcommand documented in
+`cli-reference.md` is a DIFFERENT code path (the write engine's own SSTable-format exporter,
+`commands::write::handle_export`).
 
-#### Scenario: R7.1 direct SSTable export to Vortex
-- **Given** a real fixture table directory and its resolved schema
-- **When** `cqlite export-sstable <table-dir> --format vortex --out results.vortex` runs
-- **Then** exit `0` and Vortex's own reader opens `results.vortex` with the expected row count,
-  matching the same table's `--format parquet` row count exactly.
+#### Scenario: R7.1 direct SSTable export to Vortex via the library function
+- **Given** a real fixture table directory (`test_basic.simple_table`) and its resolved schema
+- **When** `export_sstable(&sstable_file, &schema_file, &output_file, ExportFormat::Vortex, true)`
+  is called directly (`test_export_sstable_to_vortex`, mirroring `test_export_sstable_to_parquet`)
+- **Then** it returns `Ok(())` and the output file exists with non-empty content.
 
 ### Requirement: R8 — `read-sstable` rejects Vortex like it rejects Parquet
 
