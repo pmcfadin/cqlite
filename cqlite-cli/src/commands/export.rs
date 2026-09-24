@@ -475,9 +475,11 @@ pub async fn export_data(
         ExportFormat::Vortex => {
             // Issue #4237: the streaming loop (chunk collection, limit truncation,
             // progress, deadline) lives in `export_vortex::run_vortex_export` so this
-            // 260-line per-format match gains ~10 lines instead of the ~65-line inline
-            // body the Parquet arm above has — the file-size ratchet (#1116) forced the
-            // extraction rather than growing an already-over-threshold file further.
+            // 260-line per-format match gains ~15 lines instead of the ~65-line inline
+            // body the Parquet arm above has. This file was already over the campsite
+            // (#1116) threshold before this change; the extraction minimizes but cannot
+            // eliminate the growth, so the full gate's file-size component needs
+            // `CQLITE_ALLOW_FILE_GROWTH=1` for this PR (noted in the PR description).
             #[cfg(feature = "vortex")]
             {
                 super::export_vortex::run_vortex_export(

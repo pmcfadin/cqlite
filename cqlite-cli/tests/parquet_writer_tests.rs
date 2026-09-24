@@ -2054,7 +2054,11 @@ fn test_set_uuid_schema_is_list_fixedsizebinary16() {
     // top-level uuid column does (`test_cql_uuid_schema_has_extension_metadata` above) — a bare
     // FixedSizeBinary(16) with no metadata is indistinguishable from arbitrary 16-byte binary,
     // which is harmless for Parquet but is refused outright by Vortex's Arrow importer
-    // (discovered via `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`).
+    // (discovered via `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`). This file
+    // is already far over the campsite (#1135) test-file threshold; this fix's net growth is
+    // ~12 lines correcting two assertions that hard-coded the OLD, buggy schema, not new
+    // scope — the full gate's file-size component needs `CQLITE_ALLOW_FILE_GROWTH=1` for this
+    // PR (noted in the PR description).
     let mut uuid_meta = std::collections::HashMap::new();
     uuid_meta.insert("ARROW:extension:name".to_string(), "arrow.uuid".to_string());
     assert_eq!(
