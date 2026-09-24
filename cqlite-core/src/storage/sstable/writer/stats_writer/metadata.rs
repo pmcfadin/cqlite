@@ -59,9 +59,31 @@ impl TombstoneHistogram {
         self.bins.is_empty()
     }
 
-    /// Return the number of populated bins.
+    /// Return the number of populated bins — NOT the number of observations
+    /// folded (issue #4246 roborev round-4 HIGH finding: a caller asserting
+    /// "folded exactly once/twice" must use [`Self::total_observations`]
+    /// instead — two `update()` calls for the SAME `local_deletion_time`
+    /// land in the SAME bin, so `size()` stays `1` either way).
     pub fn size(&self) -> i32 {
         self.bins.len() as i32
+    }
+
+    /// Total observation count across every bin (`Σ` of each bin's count) —
+    /// the exact quantity `update()` increments once per call, regardless of
+    /// how many DISTINCT `local_deletion_time` values have been observed.
+    /// `pub(crate)` and `#[cfg(test)]` (issue #4246 roborev round-4 finding)
+    /// so a stats-fold regression test in a DIFFERENT module (same crate,
+    /// `writer::stats_fold::tests`) can assert a marker was folded exactly
+    /// once, not merely that it landed in one bin — `size()` cannot
+    /// distinguish "folded once" from "folded twice at the identical LDT".
+    /// `#[cfg(test)]` because it has no production caller: gating it lets a
+    /// crate-wide `--cfg test` build (any `cargo test`) see it while the
+    /// normal (non-test) lib build — which `cargo clippy`'s dead-code pass
+    /// checks independently of any test target, even under `--all-targets`
+    /// — compiles it out entirely rather than flagging it dead.
+    #[cfg(test)]
+    pub(crate) fn total_observations(&self) -> i64 {
+        self.bins.values().sum()
     }
 
     /// Merge the two bins whose keys are closest together.

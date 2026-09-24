@@ -18,17 +18,33 @@
 //! This file is the PUBLIC, fixture-free writer regression the #4246
 //! acceptance criteria calls for — exercised without any external Cassandra
 //! fixture (unlike the oracle, this needs no `CQLITE_DATASETS_ROOT`), so it
-//! always runs. Two properties, each with its own test:
-//!   1. A row shadow-dropped by a covering tombstone must NOT lower
-//!      persisted `min_timestamp` (`shadowed_old_row_does_not_lower_header_encoding_baseline`).
+//! always runs. Updated (issue #4246 roborev round-4 finding — the file grew
+//! from three tests to seven as roborev rounds surfaced more shapes of the
+//! same defect class):
+//!   1. A row shadow-dropped by a covering tombstone must NOT lower the
+//!      HEADER encoding baseline
+//!      (`shadowed_old_row_does_not_lower_header_encoding_baseline`).
 //!   2. The **live-older-row control**: a genuinely LIVE row with an old
-//!      timestamp (never covered by any tombstone) MUST still lower
-//!      `min_timestamp` — proving the fix gates on actual shadow-drop, not on
-//!      "old timestamp" as a heuristic (`live_older_row_retains_header_encoding_baseline`).
-//!
-//! A third test combines both properties in one partition to prove
-//! selectivity: the persisted minimum reflects the live older row, never the
-//! (even lower) shadowed one.
+//!      timestamp (never covered by any tombstone) MUST still lower it —
+//!      proving the fix gates on actual shadow-drop, not on "old timestamp"
+//!      as a heuristic (`live_older_row_retains_header_encoding_baseline`).
+//!   3. Both properties combined in one partition, to prove selectivity per
+//!      row group, not an all-or-nothing partition-level switch
+//!      (`shadow_gate_is_selective_per_row_not_partition_wide_in_header_
+//!      encoding_baseline`).
+//!   4. DOCUMENTED RESIDUAL #1 (pins the CURRENT, architecturally-consistent
+//!      value rather than asserting an unverified "ideal" one — see the
+//!      test's own doc comment and issue #4286): a same-batch `INSERT` then
+//!      `DeleteRow` for ONE clustering key.
+//!   5. DOCUMENTED RESIDUAL #2 (same pattern as #4): two whole-partition
+//!      `DELETE`s in one flush batch.
+//!   6. The marker/row-content split (`mixed_row_and_partition_tombstone_
+//!      mutation_folds_tombstone_once`): a mutation carrying BOTH row
+//!      content and a partition tombstone must fold the tombstone exactly
+//!      once, not twice.
+//!   7. The COMPACTION-path analogue of properties 1-3
+//!      (`compaction_path_shadow_gate_matches_flush_path`): a same-generation
+//!      shadow survives `compact_sstables` unchanged.
 
 #![cfg(feature = "write-support")]
 
@@ -593,8 +609,9 @@ fn mixed_row_and_partition_tombstone_mutation_folds_tombstone_once() {
 /// construction), then compacted against an unrelated, independently live
 /// gen B (ck=10@30). This is deliberately NOT a cross-generation shadow
 /// (row in one flush, its covering tombstone in a separate, later flush) —
-/// see `compaction_cross_generation_stats_residual_is_documented` below for
-/// why that scenario is a known, documented gap rather than asserted here.
+/// see the plain (non-`#[test]`) comment block following this test's own
+/// body for why that scenario is a known, documented gap (issue #4286)
+/// rather than asserted here.
 ///
 /// After `compact_sstables`, the OUTPUT's persisted `min_timestamp` must
 /// still reflect the tombstone (10), not the shadow-dropped row (5) —
@@ -728,3 +745,71 @@ fn compaction_path_shadow_gate_matches_flush_path() {
 // there is nothing sound to assert that isn't either a duplicate of the
 // same-generation case above or an unverifiable number. The comment is the
 // artifact.
+
+/// Property 5 (roborev round-4 Medium finding, DOCUMENTED RESIDUAL —
+/// deliberately NOT "fixed" here, matching Property 4's pattern above): TWO
+/// `DELETE`s of the WHOLE PARTITION in one flush batch, PT@5 superseded by
+/// PT@10. Only the winning PT@10 is EMITTED into Data.db's partition header
+/// (`write_partition`'s own marker fold keeps
+/// `.max_by_key(|pt| pt.deletion_time)`), but `compute_mutations_baseline_
+/// stats` — the ENCODING baseline this issue's fix must preserve
+/// unconditional behavior for, per the SAME architectural argument #4286
+/// documents (two separate `DELETE` statements are two separate
+/// `PartitionUpdate`s, each contributing UNCONDITIONALLY to real Cassandra's
+/// `EncodingStats.Collector`) — folds EVERY partition tombstone, including
+/// the superseded PT@5. `pre_seed_encoding_baselines` locks the encoding
+/// baseline from this function's result BEFORE `write_partition` ever runs,
+/// so the persisted minimum inherits the lower (PT@5-inclusive) value.
+#[test]
+fn two_partition_tombstones_one_batch_baseline_residual_is_documented() {
+    let schema = schema();
+    let temp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let data_dir = temp.path().join("data");
+    let mut engine = WriteEngine::new(WriteEngineConfig::new(
+        data_dir.clone(),
+        temp.path().join("wal"),
+        schema.clone(),
+    ))
+    .unwrap();
+
+    // Two whole-partition DELETEs in one flush batch: PT@5 first, then the
+    // superseded/winning PT@10. Neither mutation carries any row content.
+    let mut superseded = Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("id", Value::Integer(1)),
+        None,
+        vec![],
+        5,
+        None,
+    );
+    superseded.partition_tombstone = Some(PartitionTombstone {
+        deletion_time: 5,
+        local_deletion_time: 1_000_000_000,
+    });
+    let mut winning = Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("id", Value::Integer(1)),
+        None,
+        vec![],
+        10,
+        None,
+    );
+    winning.partition_tombstone = Some(PartitionTombstone {
+        deletion_time: 10,
+        local_deletion_time: 2_000_000_000,
+    });
+    flush_batch(&mut engine, &rt, vec![superseded, winning]);
+    rt.block_on(engine.close()).unwrap();
+
+    assert_eq!(
+        header_encoding_baseline_min_timestamp(&data_dir),
+        5,
+        "DOCUMENTED RESIDUAL: the encoding baseline inherits the superseded \
+         partition tombstone's timestamp (5), not the winning, actually-\
+         emitted one (10) — see this test's own doc comment and #4286"
+    );
+}
