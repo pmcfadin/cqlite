@@ -2066,79 +2066,32 @@ impl KWayMerger {
                                         );
                                     }
                                 }
-                                // `skip_static_ops = false` — matching EXACTLY
-                                // what `feed_row` itself passes to
+                                // Issue #4246 roborev round-3 finding: the
+                                // four-step fold sequence (resolve survival,
+                                // fold the group's own row-deletion marker
+                                // once, then gate content on
+                                // `carries_static`/`survives`) is shared with
+                                // `WriteEngine::maintenance_step`'s
+                                // structurally-identical single-mutation
+                                // `PartitionEnd` drain via
+                                // `stats_fold::fold_single_mutation_row_group`
+                                // — extracted so the two paths can never
+                                // silently drift apart, and so this module's
+                                // own `#1668` equivalence test exercises the
+                                // SAME function both production paths call.
+                                // `skip_static_ops = false` inside it matches
+                                // EXACTLY what `feed_row` itself passes to
                                 // `merge_row_group` a few lines below
                                 // (`incremental_partition.rs`'s
                                 // `DataWriter::merge_row_group(&[mutation],
-                                // schema, false, shadow_floor)`), issue #4246
-                                // roborev finding: passing `schema_has_static`
-                                // here could diverge from the real emission
-                                // decision for a mutation whose sole surviving
-                                // content is a static op (masked today only by
-                                // the separate `carries_static` escape hatch
-                                // below).
-                                let (survives, deletion_ts, row_deletion) =
-                                    crate::storage::sstable::writer::stats_fold::row_group_survival(
-                                        std::slice::from_ref(&mutation),
-                                        &write_schema,
-                                        false,
-                                        shadow_floor,
-                                    );
-                                // This mutation's own row-deletion marker
-                                // (winning `DeleteRow` / #932 `row_tombstone`,
-                                // if any) is folded exactly ONCE here — issue
-                                // #4246 roborev round-2 finding:
-                                // `fold_row_content_stats` no longer folds it
-                                // per-mutation (see its own doc comment), so
-                                // this single-mutation "group"'s resolved
-                                // deletion must be folded explicitly or it is
-                                // lost entirely, not just double-counted.
-                                crate::storage::sstable::writer::stats_fold::fold_row_deletion_marker(
+                                // schema, false, shadow_floor)`).
+                                crate::storage::sstable::writer::stats_fold::fold_single_mutation_row_group(
                                     &mut partition_stats,
-                                    row_deletion,
+                                    mutation,
+                                    &write_schema,
+                                    schema_has_static,
+                                    shadow_floor,
                                 );
-                                let carries_static = schema_has_static
-                                    && mutation.operations.iter().any(|op| {
-                                        crate::storage::sstable::writer::data_writer::is_static_operation(
-                                            op,
-                                            &write_schema,
-                                        )
-                                    });
-                                // `fold_row_content_stats`, not
-                                // `fold_mutation_stats` (issue #4246 roborev
-                                // finding): this mutation's own
-                                // `partition_tombstone`/`range_tombstones`
-                                // fields, if any, are already folded
-                                // unconditionally at their own classification
-                                // sites above — folding them again here would
-                                // double-count into the tombstone-drop-time
-                                // histogram. Passing `deletion_ts` (not
-                                // `None`) lets it per-op gate any
-                                // `ComplexDeletion`/`WriteComplexElement` this
-                                // mutation carries against its OWN
-                                // independent timestamp, even though a
-                                // compaction "cluster group" is already a
-                                // SINGLE, fully-reconciled `Mutation` per
-                                // clustering key (see this fn's own doc
-                                // comment) — so there is no OLDER SIBLING
-                                // mutation in the group to self-shadow
-                                // against, but THIS mutation's own carried
-                                // `DeleteRow`/complex ops still need the same
-                                // per-op treatment `write_partition` uses.
-                                if carries_static {
-                                    crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
-                                        &mut partition_stats,
-                                        mutation,
-                                        None,
-                                    );
-                                } else if survives {
-                                    crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
-                                        &mut partition_stats,
-                                        mutation,
-                                        deletion_ts,
-                                    );
-                                }
                                 session.feed_row(mutation, &write_schema)?;
                             }
                             let (offset, blocks, emit) = session.finish(&write_schema)?;

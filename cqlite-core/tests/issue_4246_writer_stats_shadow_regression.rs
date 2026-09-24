@@ -20,11 +20,11 @@
 //! fixture (unlike the oracle, this needs no `CQLITE_DATASETS_ROOT`), so it
 //! always runs. Two properties, each with its own test:
 //!   1. A row shadow-dropped by a covering tombstone must NOT lower
-//!      persisted `min_timestamp` (`shadowed_old_row_does_not_lower_persisted_min_timestamp`).
+//!      persisted `min_timestamp` (`shadowed_old_row_does_not_lower_header_encoding_baseline`).
 //!   2. The **live-older-row control**: a genuinely LIVE row with an old
 //!      timestamp (never covered by any tombstone) MUST still lower
 //!      `min_timestamp` — proving the fix gates on actual shadow-drop, not on
-//!      "old timestamp" as a heuristic (`live_older_row_retains_persisted_min_timestamp`).
+//!      "old timestamp" as a heuristic (`live_older_row_retains_header_encoding_baseline`).
 //!
 //! A third test combines both properties in one partition to prove
 //! selectivity: the persisted minimum reflects the live older row, never the
@@ -186,7 +186,24 @@ fn parse_flushed_statistics(dir: &Path) -> cqlite_core::parser::statistics::SSTa
 
 /// Mirrors `issue_1385_gc_grace_boundary.rs`'s
 /// `statistics_min_local_deletion_time` helper, one field over.
-fn statistics_min_timestamp(dir: &Path) -> i64 {
+///
+/// Named for what this ACTUALLY reads (issue #4246 roborev round-3 finding),
+/// not "persisted `StatsMetadata`": `parse_statistics_with_fallback` decodes
+/// `timestamp_stats.min_timestamp` exclusively from the Statistics.db
+/// `HEADER`/`SerializationHeader` component
+/// (`enhanced_statistics_parser::parse_minimal_encoding_stats`) — the `STATS`
+/// component's OWN `minTimestamp` field is parsed past and discarded
+/// (`repair_metadata.rs`'s `c.skip(8)? // minTimestamp`), never independently
+/// exposed. CQLite's writer currently persists ONE value into BOTH physical
+/// components (see issue #4286), so this number IS what ends up on disk in
+/// both places TODAY — but it is the HEADER role's semantics this file's
+/// fix actually targets, and per real Cassandra the two roles are allowed to
+/// (and sometimes must) diverge. See #4286 for the full accounting,
+/// including the flush-level divergence this fix introduces for a
+/// same-batch range/partition-tombstone shadow (as opposed to the
+/// same-clustering-key `DeleteRow` case `issue_717_row_tombstone_columns_
+/// subset.rs` already pins byte-for-byte).
+fn header_encoding_baseline_min_timestamp(dir: &Path) -> i64 {
     parse_flushed_statistics(dir).timestamp_stats.min_timestamp
 }
 
@@ -263,10 +280,19 @@ fn live_cks(inputs: Vec<PathBuf>, schema: &TableSchema) -> Vec<i32> {
 }
 
 /// Property 1: a row fully shadow-dropped by a covering range tombstone must
-/// NOT lower the persisted `Statistics.db` `min_timestamp` — the exact #4246
-/// defect (mirrors the #4243 oracle's `ck1@5` shadowed by `[Bottom,5)@10`).
+/// NOT lower the `Statistics.db` HEADER encoding baseline — the exact #4246
+/// defect (mirrors the #4243 oracle's `ck1@5` shadowed by `[Bottom,5)@10`,
+/// which the oracle verifies byte-for-byte against real Cassandra for the
+/// COMPACTED output). Issue #4286 (roborev round-3 finding): CQLite persists
+/// this value into BOTH the HEADER and STATS on-disk components today, but
+/// this specific flush-level scenario (a row and its covering range
+/// tombstone in ONE flush batch) means CQLite's RAW, pre-compaction flush
+/// output now diverges from real Cassandra's own HEADER for that same
+/// scenario, whose `EncodingStats` accumulates unconditionally per applied
+/// `PartitionUpdate` (`SkipListMemtable.put`). No raw (non-compacted)
+/// byte-parity fixture exists to catch that divergence; #4286 tracks it.
 #[test]
-fn shadowed_old_row_does_not_lower_persisted_min_timestamp() {
+fn shadowed_old_row_does_not_lower_header_encoding_baseline() {
     let schema = schema();
     let temp = TempDir::new().unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -296,7 +322,7 @@ fn shadowed_old_row_does_not_lower_persisted_min_timestamp() {
     rt.block_on(engine.close()).unwrap();
 
     assert_eq!(
-        statistics_min_timestamp(&data_dir),
+        header_encoding_baseline_min_timestamp(&data_dir),
         10,
         "the shadow-dropped ck=1@5 row must not lower persisted min_timestamp \
          below the covering tombstone's own deletion time (10)"
@@ -318,7 +344,7 @@ fn shadowed_old_row_does_not_lower_persisted_min_timestamp() {
 /// decision (`DataWriter::merge_row_group`), not on "is this timestamp old"
 /// — a heuristic that would incorrectly exclude this row too.
 #[test]
-fn live_older_row_retains_persisted_min_timestamp() {
+fn live_older_row_retains_header_encoding_baseline() {
     let schema = schema();
     let temp = TempDir::new().unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -343,7 +369,7 @@ fn live_older_row_retains_persisted_min_timestamp() {
     rt.block_on(engine.close()).unwrap();
 
     assert_eq!(
-        statistics_min_timestamp(&data_dir),
+        header_encoding_baseline_min_timestamp(&data_dir),
         3,
         "a genuinely live old row must still set persisted min_timestamp — \
          the fix must not exclude it just for being old"
@@ -360,7 +386,7 @@ fn live_older_row_retains_persisted_min_timestamp() {
 /// older row (8), never the even-lower shadowed one (5) — proving the gate
 /// is selective per row-group, not an all-or-nothing partition-level switch.
 #[test]
-fn shadow_gate_is_selective_per_row_not_partition_wide() {
+fn shadow_gate_is_selective_per_row_not_partition_wide_in_header_encoding_baseline() {
     let schema = schema();
     let temp = TempDir::new().unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -391,7 +417,7 @@ fn shadow_gate_is_selective_per_row_not_partition_wide() {
     rt.block_on(engine.close()).unwrap();
 
     assert_eq!(
-        statistics_min_timestamp(&data_dir),
+        header_encoding_baseline_min_timestamp(&data_dir),
         8,
         "min_timestamp must reflect the live older row (8), excluding the \
          shadowed row's lower timestamp (5) but NOT the tombstone's own \
@@ -413,27 +439,45 @@ fn shadow_gate_is_selective_per_row_not_partition_wide() {
 /// involved at all.
 ///
 /// This LOOKS like the same defect class as the range-tombstone case above,
-/// but it is architecturally different and this fix does not close it:
-/// `compute_mutations_baseline_stats` computes the ENCODING baseline
-/// (`pre_seed_encoding_baselines`'s input), which Cassandra's own
-/// `EncodingStats` accumulates from EVERY memtable update APPLIED
-/// (`SkipListMemtable.put`'s `statsCollector.update(update.stats())`,
-/// cassandra-5.0.8) — UNCONDITIONALLY, never re-derived from the
-/// post-reconciliation row the way the PERSISTED STATS component
-/// (`MetadataCollector`) is. Verified directly against `issue_717_row_
-/// tombstone_columns_subset.rs::row_tombstone_emits_columns_subset`, a
-/// Cassandra-rejection-motivated byte-level test: excluding the shadowed
-/// INSERT from the encoding baseline broke it (the emitted `mfda_delta`
-/// must be relative to the INSERT's timestamp, not the DELETE's). Because
-/// `pre_seed_encoding_baselines` seeds `self.stats` — the same struct that
-/// becomes the PERSISTED Statistics.db STATS component — from THIS
-/// function's return value directly, the persisted minimum inherits the
-/// same (lower, INSERT-inclusive) value for this specific same-batch,
-/// same-key shape. A cross-generation shadow (a range/partition tombstone,
-/// or a shadowing DELETE in a LATER, separate flush/compaction — the shapes
-/// the other tests in this file and the #4243 oracle cover) is NOT affected:
-/// there, the shadowed clustering key's own GROUP returns `None` and is
-/// correctly excluded.
+/// but it is architecturally different: `compute_mutations_baseline_stats`
+/// computes the ENCODING baseline (`pre_seed_encoding_baselines`'s input),
+/// which Cassandra's own `EncodingStats` accumulates from EVERY memtable
+/// update APPLIED (`SkipListMemtable.put`'s
+/// `statsCollector.update(update.stats())`, cassandra-5.0.8) —
+/// UNCONDITIONALLY, never re-derived from the post-reconciliation row the
+/// way the PERSISTED STATS component (`MetadataCollector`) is. Verified
+/// directly against `issue_717_row_tombstone_columns_subset.rs::row_
+/// tombstone_emits_columns_subset`, a Cassandra-rejection-motivated
+/// byte-level test: excluding the shadowed INSERT from the encoding
+/// baseline broke it (the emitted `mfda_delta` must be relative to the
+/// INSERT's timestamp, not the DELETE's).
+///
+/// CORRECTION (issue #4286, roborev round-3 finding — an EARLIER version of
+/// this comment claimed the range-tombstone case above is "NOT affected"
+/// by this same architectural issue; that claim was WRONG and is retracted
+/// here): `compute_mutations_baseline_stats`'s group-level shadow exclusion
+/// (`row_group_survives`) is ALSO group-shadow-gated for a same-flush-batch
+/// range/partition-tombstone shadow — `shadowed_old_row_does_not_lower_
+/// header_encoding_baseline` above EXCLUDES the shadowed row from the
+/// encoding baseline too, exactly like this test's same-key case, and per
+/// the SAME unconditional-`EncodingStats` argument that should ALSO be
+/// wrong for real Cassandra's raw (pre-compaction) HEADER. This fix keeps
+/// that exclusion anyway — reverting it would re-break the #4243 oracle
+/// (see #4286's full accounting: CQLite conflates the HEADER and STATS
+/// on-disk components into one value, and `compute_baseline_min`'s
+/// compaction-time pre-seed depends on THIS SAME group-shadow-gated value
+/// being correct for the COMPACTED output, which the oracle verifies
+/// byte-for-byte). So BOTH same-batch shapes — same-key `DeleteRow` (this
+/// test) and cross-mutation range/partition-tombstone (the property-1 test
+/// above) — are, in fact, flush-level HEADER divergences from real
+/// Cassandra; only the former has byte-level fixture coverage (#717) to
+/// prove the DIRECTION of the correct fix (this test's `== 5`, not `== 10`).
+/// A cross-generation shadow (the shadowing DELETE/tombstone in a LATER,
+/// SEPARATE flush/compaction — the #4243 oracle's own two-generation shape)
+/// remains genuinely unaffected: there, the shadowed clustering key's own
+/// GROUP returns `None` within ITS OWN generation's flush and is correctly
+/// excluded, with no cross-`PartitionUpdate` unconditional-accumulation
+/// question in play.
 #[test]
 fn insert_then_delete_same_batch_baseline_residual_is_documented() {
     let schema = schema();
@@ -466,7 +510,7 @@ fn insert_then_delete_same_batch_baseline_residual_is_documented() {
     rt.block_on(engine.close()).unwrap();
 
     assert_eq!(
-        statistics_min_timestamp(&data_dir),
+        header_encoding_baseline_min_timestamp(&data_dir),
         5,
         "DOCUMENTED RESIDUAL: the encoding baseline (and, downstream, the \
          persisted min_timestamp) for a same-batch INSERT-then-DELETE still \
@@ -578,7 +622,7 @@ fn compaction_path_shadow_gate_matches_flush_path() {
     // Gen A: the covering range tombstone and the row it shadows, both in
     // the SAME flush batch, plus a live survivor. Gen A's own Statistics.db
     // min_timestamp is therefore already 10 (verified in isolation by
-    // `shadowed_old_row_does_not_lower_persisted_min_timestamp` above).
+    // `shadowed_old_row_does_not_lower_header_encoding_baseline` above).
     flush_batch(
         &mut engine,
         &rt,
@@ -605,7 +649,7 @@ fn compaction_path_shadow_gate_matches_flush_path() {
     .expect("compaction");
 
     assert_eq!(
-        statistics_min_timestamp(&out_dir),
+        header_encoding_baseline_min_timestamp(&out_dir),
         10,
         "the COMPACTED output's persisted min_timestamp must retain the \
          same-generation shadow exclusion (10) from its gen-A input, not \
