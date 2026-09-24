@@ -12,8 +12,42 @@
 //!
 //! [`SSTableWriter::write_partition`]: super::SSTableWriter::write_partition
 
+use crate::schema::TableSchema;
+use crate::storage::sstable::writer::data_writer::DataWriter;
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
 use crate::storage::write_engine::mutation::{CellOperation, Mutation};
+
+/// Whether `group` (one or more mutations sharing a clustering key) survives
+/// into a real emitted row under `shadow_floor` — the SAME decision
+/// [`DataWriter::merge_row_group`] (the sole authority for row shadow-drop,
+/// issue #1668) makes when actually writing Data.db.
+///
+/// Exposed as a thin, side-effect-free pre-check (rather than widening
+/// `merge_row_group`'s own `pub(super)` visibility out to
+/// `write_engine::merge`) so BOTH the buffered
+/// ([`super::SSTableWriter::write_partition`]) and incremental
+/// (`compact_sstables`'s streaming merge, `writer/incremental.rs`) paths can
+/// gate their STATISTICS fold on the SAME real emission decision (issue
+/// #4246): a row fully shadow-dropped from Data.db (e.g. a live write
+/// shadowed by a covering range/partition tombstone) must not lower
+/// persisted `StatisticsMetadata` minima — Cassandra's `MetadataCollector`
+/// only ever observes what `SortedTableWriter` actually emits
+/// (`SortedTableWriter.java`/`MetadataCollector.java`, cassandra-5.0.8).
+///
+/// Scope (issue #4246): this gates CLUSTERING-ROW mutations only. A mutation
+/// that also carries a static-column operation is deliberately EXCLUDED from
+/// this gate by callers (see their own doc comments) — static-cell shadowing
+/// by a partition tombstone is a separate, pre-existing question this fix
+/// does not attempt, and skipping such a mutation's fold here could
+/// under-count a surviving static write.
+pub(crate) fn row_group_survives(
+    group: &[&Mutation],
+    schema: &TableSchema,
+    skip_static_ops: bool,
+    shadow_floor: Option<i64>,
+) -> bool {
+    DataWriter::merge_row_group(group, schema, skip_static_ops, shadow_floor).is_some()
+}
 
 /// Fold one mutation's timestamp/TTL/local-deletion-time/tombstone information
 /// into `stats`. Mirrors the per-mutation loop body that used to live inline in
