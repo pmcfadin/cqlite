@@ -1550,6 +1550,19 @@ same convention as `--delta`. `--recertify` is EXEMPT from the #1825 slot cap
 (it rides `--only`'s existing exemption) and from `apply_component_set_preflight`
 failing the run (advisory under `--only`, same as any other `--only` invocation).
 
+**Disclosed cost of the slot-cap exemption (roborev finding, Low):** the #1825
+cap exists to bound how many full gates compete for a shared box's CPU/disk at
+once, and every `--recertify` invocation runs entirely OUTSIDE it — including a
+recert of `tooling-tests` itself, ~44% of a full gate's wall-clock by this
+PR's own measurement. A `--recertify --components tooling-tests` therefore
+competes with a peer's gate of record exactly as an uncapped `--lite` already
+does (a known, documented hazard — #3763). This is accepted rather than fixed
+here: bounding it would mean either queueing `--recertify` behind the cap
+(defeating its "faster than a full gate" purpose for exactly the case that
+motivates it) or a per-component cost class the cap does not have today.
+
+
+
 **`premerge-assert.sh` accepts the pair as a third certifying shape, "Case C"**
 (alongside Case A/direct and Case B/anchored-delta): the optional 4th argument's
 KIND is detected by its OWN CONTENT (the literal `RECERT` vs `DELTA` header),

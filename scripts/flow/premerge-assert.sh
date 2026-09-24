@@ -1803,7 +1803,7 @@ $gp_out
 GATE_PARSE
   for gp_k in blocks full lite delta recert unterminated n_mode n_result n_ti n_commit \
               n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty \
-              n_recert_anchor n_recert_verdict; do
+              n_recert_anchor n_recert_verdict n_recert_components; do
     eval "gp_v=\${GP_$gp_k}"
     case "$gp_v" in
       ''|*[!0-9]*)
@@ -2182,9 +2182,23 @@ C)
   # host-fault re-certification, so UNLIKE Case B its sha is not merely an
   # ANCESTOR of the certified sha: it must be the certified sha EXACTLY (a
   # recert never advances the tree; that is the whole point of "same digest").
-  # Already asserted above (the case_kind == C branch before this one), and
-  # readability was already asserted above too (before the content
-  # classification; $recert_file IS $delta_file in this branch).
+  #
+  # THIS BINDING IS LOAD-BEARING AND WAS MISSING FROM THE FIRST CUT (roborev
+  # finding, High): an earlier comment here claimed it was "already asserted
+  # above", which was false — the case_kind==C branch above only relaxes
+  # assert_pass_block and checks RESULT is PASS|FAIL; it never compares the
+  # anchor's own commit/tree-start to anything. Without this, a recert pair
+  # was accepted when the ANCHOR block came from a completely different
+  # commit (e.g. a stale green `main` gate), as long as the recert block
+  # alone named $certified — defeating "anchor + recert together certify the
+  # sha", this whole case's reason to exist. Matches Case A exactly (a recert
+  # never advances the tree, so the anchor's own binding is identical to the
+  # direct case's).
+  assert_covers commit "$full_commit" "$certified" "full-gate block" "certified sha"
+  assert_covers tree-start "$full_ts" "$certified" "full-gate block" "certified sha"
+
+  # Readability was already asserted above (before the content classification;
+  # $recert_file IS $delta_file in this branch).
   gate_parse_file "$recert_file" recert "recert summary"
 
   if [ "$GP_blocks" -eq 0 ]; then

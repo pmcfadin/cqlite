@@ -4057,6 +4057,20 @@ full_summary "$T/anchor-recert-dirty.txt" "$C7" "$C12" PASS FAIL yes
 refused_recert "recert: dirty anchor tree -> refuse" \
   "$T/anchor-recert-dirty.txt" "$GOODRECERT" "dirty"
 
+# --- Case R4b: the ANCHOR's own commit:/tree-start: must cover $CERTIFIED ----
+# (roborev finding, High: the first cut of Case C never asserted this at all —
+# a comment claimed it was "already asserted above" when it was not, so an
+# anchor from a COMPLETELY DIFFERENT commit — e.g. an old green `main` gate —
+# was accepted as long as the paired recert block alone named $CERTIFIED,
+# defeating "anchor + recert together certify the sha", the whole reason this
+# case exists). Same peer-lane shape #3616's Case A test uses (a well-formed
+# block whose provenance names a DIFFERENT sha throughout), paired with the
+# SAME $GOODRECERT that correctly names $CERTIFIED — proving the refusal is
+# about the ANCHOR's binding specifically, not the recert block's.
+full_summary "$T/anchor-recert-peer-lane.txt" "ca8eb01" "ca8eb016def1" PASS FAIL
+refused_recert "recert: an anchor naming a DIFFERENT sha than certified -> refuse (even with a valid recert block)" \
+  "$T/anchor-recert-peer-lane.txt" "$GOODRECERT" "does not match the certified sha"
+
 # --- Case R5: recert-verdict must be CERTIFIED --------------------------------
 recert_summary "$T/recert-notcertified.txt" "$C12" "$C7" "$C12" PASS FAIL "$RECERT_MODE" \
   "NOT-CERTIFIED (rerun component(s) not PASS: tooling-tests(FAIL))"
@@ -4170,10 +4184,26 @@ assert_src_absent_fixed \
 # --- CASE FLOOR (#3544) -------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite; the floor is what makes that a red. Committed at the count
-# this suite reached when the #3752 tri-state conversion landed (205), then
-# raised to the count after Case C (#4268, --recertify's pair-acceptance
-# support) landed.
-CASE_FLOOR=352
+# this suite reached when the #3752 tri-state conversion landed (205).
+#
+# NOT raised to "the count after Case C landed" (roborev finding, Medium: an
+# earlier cut set it to 352, the EXACT total observed on ONE host — but ~12
+# arms in THIS suite are host-conditional (no-git PATH, no bounded runner,
+# graft, GIT_DIR, commit-graph, shallow, a FIFO, running-as-root, …) and
+# several emit FEWER `ok`s when an arm is unbuildable than when it runs, so a
+# host missing e.g. `timeout`/a buildable graft fixture would land below 352
+# for a reason having nothing to do with a deleted case — false-failing a
+# merge-blocking check). Instead: 205 (the ALREADY-conservative floor,
+# presumably set below what even a constrained host reaches) PLUS 29 — the
+# EXACT assertion-count Case C's own tests add, measured by diffing this
+# suite's TOTAL with and without the Case C section (§ Case R1 onward) against
+# the SAME (current) premerge-assert.sh, on the SAME host. Case C's own tests
+# are host-INVARIANT (no real-git/timeout/systemd dependency — see the comment
+# above ANCHOR_RECERT_FAIL), so that 29 is safe to add unconditionally rather
+# than re-measured per host, and it preserves the ORIGINAL floor's conservatism
+# for every pre-existing conditional arm instead of replacing it with one
+# host's raw total.
+CASE_FLOOR=234
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

@@ -25440,7 +25440,12 @@ _recertify_refuse() {
 #      PASS or OPT-OUT in the anchor (a stricter set than
 #      `_status_is_nonfailing`, which also admits SKIP — deliberately: a SKIP
 #      dodges validation the same way it would for a component being
-#      recertified now, see point 6).
+#      recertified now, see point 6), WITH ONE DECLARED EXCEPTION:
+#      `tooling-tests: SKIP` is accepted, because #4266's own diff-scoping
+#      makes that a DECIDED, reviewed outcome on the common case (a diff
+#      touching no harness path) rather than an unmeasured gap — refusing it
+#      would make --recertify unconditionally unusable on exactly the PRs
+#      #4266 exists to speed up.
 #   5. anchor tree identity: `tree-end:` parses to a sha/dirty/digest, dirty is
 #      `no`, and `tree-integrity: PASS` is present.
 #   6. CURRENT tree matches that identity exactly (same sha, same digest, not
@@ -25502,6 +25507,7 @@ run_recertify_preflight() {
   fi
 
   # ---- 4: every OTHER component in the anchor is PASS/OPT-OUT ---------------
+  # (with ONE declared exception — see below)
   if [ -z "$reason" ]; then
     local _rc_comp _rc_line _rc_st
     for _rc_comp in "${COMPONENTS[@]}"; do
@@ -25510,6 +25516,23 @@ run_recertify_preflight() {
       _rc_st=$(printf '%s' "$_rc_line" | awk '{print $2}')
       case "$_rc_st" in
         PASS|OPT-OUT) ;;
+        # DECLARED EXCEPTION (roborev finding, High): tooling-tests's own #4266
+        # scoping records a decided, reviewed SKIP on the COMMON case (a diff
+        # touching no harness path) — it is not an unmeasured gap the way a
+        # missing python3/docker/systemd SKIP is for every other component.
+        # Refusing it here would make --recertify unconditionally unusable on
+        # exactly the product PRs #4266 exists to speed up: whatever OTHER
+        # component genuinely host-failed, the anchor's routine
+        # `tooling-tests: SKIP` would refuse the pair regardless. Scoped to
+        # this ONE component by name, not a general SKIP admission — every
+        # other component's SKIP still refuses, because for them SKIP really
+        # does mean "not measured", not "decided".
+        SKIP)
+          if [ "$_rc_comp" != tooling-tests ]; then
+            reason="anchor component '$_rc_comp' is not PASS/OPT-OUT (got 'SKIP') — every component NOT named in --components must already be PASS/OPT-OUT in the anchor (tooling-tests is the one declared exception, #4266/#4268)"
+            break
+          fi
+          ;;
         *)
           reason="anchor component '$_rc_comp' is not PASS/OPT-OUT (got '${_rc_st:-<absent>}') — every component NOT named in --components must already be PASS/OPT-OUT in the anchor"
           break
@@ -28384,13 +28407,41 @@ elif [ "$RECERTIFY" -eq 1 ]; then
   # SKIP/OPT-OUT. Those are legitimate outcomes for a component that is NOT
   # being recertified right now (the anchor already recorded them, reviewed),
   # but here they would mean the very re-run this whole mode exists to obtain
-  # never actually happened. `RECERT_COMPONENTS` (== `$ONLY` at this point) is a
-  # comma list; the `${ONLY//,/ }` membership idiom matches every other
-  # component's own ONLY-filter check.
-  _RC_I="" ; _RC_BAD=""
-  for _RC_I in "${!NAMES[@]}"; do
-    grep -qw "${NAMES[$_RC_I]}" <<<"${ONLY//,/ }" || continue
-    [ "${STATUSES[$_RC_I]}" = PASS ] || _RC_BAD="${_RC_BAD:+$_RC_BAD,}${NAMES[$_RC_I]}(${STATUSES[$_RC_I]})"
+  # never actually happened.
+  #
+  # EXACT MATCH, not the `${ONLY//,/ }` + `grep -qw` idiom every other
+  # component's own ONLY-filter uses (roborev finding, Medium): `grep -w`
+  # treats `-` as a word boundary, so e.g. `query-semantics-oracle` (a real,
+  # separate COMPONENTS entry) is a "whole word" match inside
+  # `flight-query-semantics-oracle` too. A verdict loop keyed on that idiom
+  # would silently CERTIFY a component that was never requested. Iterating the
+  # PARSED request list (comma-split, same as run_recertify_preflight's own
+  # rc_list) with an exact string compare has no such hazard. This does NOT
+  # fix the underlying dispatch-time exposure — dispatch_component's own
+  # per-component ONLY filter still uses the shared `grep -qw` idiom, so a
+  # colliding sibling component could still be DISPATCHED alongside the
+  # requested one; that is a pre-existing property of `--only` (unrelated to
+  # `--recertify`, which only reuses it) and out of scope here. What this loop
+  # closes is narrower and load-bearing for THIS mode specifically: the
+  # CERTIFICATION never credits a component that was not actually requested,
+  # and — the second half — never stamps CERTIFIED for a requested component
+  # that produced NO row at all (a component whose own preflight/dispatch
+  # never ran would otherwise pass this loop vacuously, since an EMPTY
+  # `_RC_BAD` was the only test for "any problems").
+  _RC_BAD=""
+  _RC_IFS_SAVE="$IFS"; IFS=,
+  read -r -a _RC_REQUESTED <<<"$RECERT_COMPONENTS"
+  IFS="$_RC_IFS_SAVE"
+  for _RC_C in "${_RC_REQUESTED[@]}"; do
+    _RC_FOUND=0
+    for _RC_I in "${!NAMES[@]}"; do
+      if [ "${NAMES[$_RC_I]}" = "$_RC_C" ]; then
+        _RC_FOUND=1
+        [ "${STATUSES[$_RC_I]}" = PASS ] || _RC_BAD="${_RC_BAD:+$_RC_BAD,}${NAMES[$_RC_I]}(${STATUSES[$_RC_I]})"
+        break
+      fi
+    done
+    [ "$_RC_FOUND" -eq 1 ] || _RC_BAD="${_RC_BAD:+$_RC_BAD,}${_RC_C}(NO-ROW)"
   done
   if [ -n "$_RC_BAD" ]; then
     OVERALL=FAIL
