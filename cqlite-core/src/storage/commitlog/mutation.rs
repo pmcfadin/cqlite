@@ -497,6 +497,10 @@ fn short() -> Error {
 }
 
 #[cfg(test)]
+#[path = "mutation_completeness_tests.rs"]
+mod completeness_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::commitlog::schema::{parse_table_id, ColumnSpec};
@@ -773,7 +777,3 @@ mod tests {
             .collect()
     }
 }
-
-#[cfg(test)]
-#[path = "mutation_completeness_tests.rs"]
-mod completeness_tests;
