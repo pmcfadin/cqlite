@@ -120,12 +120,21 @@ impl DataWriter {
     /// in `writer` (the grandparent of this module) so BOTH the buffered
     /// and incremental writer paths can gate their persisted
     /// `StatisticsMetadata` fold on this SAME shadow-drop decision.
-    pub(crate) fn merge_row_group<'a>(
-        group: &[&'a Mutation],
-        schema: &TableSchema,
-        skip_static_ops: bool,
+    /// Resolve the shadow boundary a group's row deletion (if any) combines
+    /// with `shadow_floor` into — the exact `deletion_ts` cells/liveness are
+    /// shadowed against inside [`Self::merge_row_group`]. Extracted
+    /// (`pub(crate)`, issue #4246 roborev finding) so a stats-fold caller can
+    /// gate an INDIVIDUAL mutation's own contribution against it: a row
+    /// group can return `Some` overall (it still produces a row — e.g. the
+    /// newer `DELETE`) while containing an OLDER mutation in the SAME group
+    /// (e.g. an earlier `INSERT` for the same clustering key in one flush
+    /// batch) that is itself fully shadowed and must not lower persisted
+    /// minima, mirroring `merge_row_group`'s own `mutation_shadowed` check
+    /// below.
+    pub(crate) fn resolve_row_deletion(
+        group: &[&Mutation],
         shadow_floor: Option<i64>,
-    ) -> Option<RowWrite<'a>> {
+    ) -> Option<(i64, i32)> {
         use crate::storage::write_engine::mutation::CellOperation;
 
         // Newest row deletion in the group (if any). A row deletion at or
@@ -159,12 +168,40 @@ impl DataWriter {
                 }
             }
         }
-        // Cells and liveness are shadowed by the strongest covering deletion:
-        // the row deletion or the partition/range tombstone floor.
-        let deletion_ts = match (row_deletion.map(|(ts, _)| ts), shadow_floor) {
+        row_deletion
+    }
+
+    /// Combine a group's resolved row deletion with `shadow_floor` into the
+    /// single `deletion_ts` boundary cells/liveness are shadowed against —
+    /// shared by [`Self::merge_row_group`] and a stats-fold caller
+    /// (`stats_fold::row_group_survival`, issue #4246 roborev finding) so
+    /// both agree on exactly what "shadowed" means.
+    pub(crate) fn combine_deletion_ts(
+        row_deletion: Option<(i64, i32)>,
+        shadow_floor: Option<i64>,
+    ) -> Option<i64> {
+        match (row_deletion.map(|(ts, _)| ts), shadow_floor) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
-        };
+        }
+    }
+
+    pub(crate) fn merge_row_group<'a>(
+        group: &[&'a Mutation],
+        schema: &TableSchema,
+        skip_static_ops: bool,
+        shadow_floor: Option<i64>,
+    ) -> Option<RowWrite<'a>> {
+        use crate::storage::write_engine::mutation::CellOperation;
+
+        // Cells and liveness are shadowed by the strongest covering deletion:
+        // the row deletion (issue #4246 roborev finding: also exposed via
+        // `resolve_row_deletion`/`combine_deletion_ts` so a stats-fold caller
+        // can gate an individual mutation's own contribution against it, not
+        // just the whole group's survival) or the partition/range tombstone
+        // floor.
+        let row_deletion = Self::resolve_row_deletion(group, shadow_floor);
+        let deletion_ts = Self::combine_deletion_ts(row_deletion, shadow_floor);
 
         // Per-column last-write-wins; tombstones win timestamp ties.
         let mut cells: std::collections::HashMap<&'a str, MergedOp<'a>> =

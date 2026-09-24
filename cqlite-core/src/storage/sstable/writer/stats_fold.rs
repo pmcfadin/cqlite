@@ -49,6 +49,58 @@ pub(crate) fn row_group_survives(
     DataWriter::merge_row_group(group, schema, skip_static_ops, shadow_floor).is_some()
 }
 
+/// Like [`row_group_survives`], but ALSO returns the group's resolved shadow
+/// boundary (`deletion_ts`, `None` when nothing shadows anything) — the SAME
+/// value [`DataWriter::merge_row_group`] shadows individual mutations
+/// against internally.
+///
+/// A row GROUP can survive overall (`Some` — e.g. a newer `DELETE` for the
+/// clustering key still produces a row) while containing an OLDER mutation
+/// in the SAME group (e.g. an earlier `INSERT` for the same clustering key
+/// in one flush batch) that is itself fully shadowed by that later
+/// deletion — roborev finding on issue #4246: gating only at the group level
+/// still folds that older, non-emitted mutation's timestamp. Callers must
+/// additionally check each mutation via
+/// `deletion_ts.is_none_or(|dts| mutation.timestamp_micros > dts)` (mirroring
+/// `merge_row_group`'s own `mutation_shadowed` test) before folding it.
+pub(crate) fn row_group_survival(
+    group: &[&Mutation],
+    schema: &TableSchema,
+    skip_static_ops: bool,
+    shadow_floor: Option<i64>,
+) -> (bool, Option<i64>) {
+    let row_deletion = DataWriter::resolve_row_deletion(group, shadow_floor);
+    let deletion_ts = DataWriter::combine_deletion_ts(row_deletion, shadow_floor);
+    let survives =
+        DataWriter::merge_row_group(group, schema, skip_static_ops, shadow_floor).is_some();
+    (survives, deletion_ts)
+}
+
+/// Fold ONLY the partition/range tombstone MARKER fields of `mutation` (issue
+/// #4246 roborev finding). A tombstone marker is never itself row-shadowed —
+/// it IS the deletion — so it always contributes, independent of whatever
+/// `fold_row_content_stats` decides about the row content sharing the same
+/// mutation object. Split out from [`fold_mutation_stats`] so a caller that
+/// folds markers unconditionally (once per mutation, regardless of
+/// [`row_group_survives`]/[`row_group_survival`]) and row content
+/// conditionally (only for surviving mutations) never double-folds a
+/// tombstone's local-deletion-time into the tombstone-drop-time histogram —
+/// `StatisticsMetadata::update_local_deletion_time` is NOT idempotent (it
+/// increments a histogram bucket), so folding the same marker twice inflates
+/// the persisted `estimatedTombstoneDropTime` Cassandra derives compaction
+/// scheduling from.
+pub(crate) fn fold_marker_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
+    if let Some(pt) = &mutation.partition_tombstone {
+        stats.update_timestamp(pt.deletion_time);
+        stats.update_local_deletion_time(pt.local_deletion_time);
+        stats.mark_partition_level_deletion();
+    }
+    for rt in &mutation.range_tombstones {
+        stats.update_timestamp(rt.deletion_time);
+        stats.update_local_deletion_time(rt.local_deletion_time);
+    }
+}
+
 /// Fold one mutation's timestamp/TTL/local-deletion-time/tombstone information
 /// into `stats`. Mirrors the per-mutation loop body that used to live inline in
 /// [`super::SSTableWriter::write_partition`] verbatim — same chokepoints
@@ -65,6 +117,16 @@ pub(crate) fn row_group_survives(
 /// partition-scoped fold is merged into the running `SSTableWriter`-wide
 /// `stats` at partition end).
 pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
+    fold_row_content_stats(stats, mutation);
+    fold_marker_stats(stats, mutation);
+}
+
+/// Everything [`fold_mutation_stats`] folds EXCEPT the partition/range
+/// tombstone marker fields (see [`fold_marker_stats`]'s doc for why the split
+/// exists, issue #4246 roborev finding). Used by a caller that folds markers
+/// separately/unconditionally so a mutation carrying both row content and a
+/// tombstone is never double-counted into the tombstone-drop-time histogram.
+pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
     stats.update_timestamp(mutation.timestamp_micros);
     // Issue #1018: simple `Write`/`WriteWithTtl`/`Delete` cells may carry their
     // OWN (lower) per-cell timestamps in `Mutation::cell_write_timestamps` (a
@@ -167,17 +229,6 @@ pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mut
                 }
             }
         }
-    }
-    // Track stats for partition tombstones.
-    if let Some(pt) = &mutation.partition_tombstone {
-        stats.update_timestamp(pt.deletion_time);
-        stats.update_local_deletion_time(pt.local_deletion_time);
-        stats.mark_partition_level_deletion();
-    }
-    // Track stats for range tombstones.
-    for rt in &mutation.range_tombstones {
-        stats.update_timestamp(rt.deletion_time);
-        stats.update_local_deletion_time(rt.local_deletion_time);
     }
     // Issue #1721: a decoupled row tombstone (#932
     // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted as a

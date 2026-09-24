@@ -38,7 +38,8 @@ use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallb
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
 use cqlite_core::storage::write_engine::mutation::{
-    CellOperation, ClusteringBound, ClusteringKey, Mutation, PartitionKey, RangeTombstone, TableId,
+    CellOperation, ClusteringBound, ClusteringKey, Mutation, PartitionKey, PartitionTombstone,
+    RangeTombstone, TableId,
 };
 use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use cqlite_core::types::Value;
@@ -163,6 +164,40 @@ fn statistics_min_timestamp(dir: &Path) -> i64 {
     let bytes = std::fs::read(&db).expect("read Statistics.db");
     let (_, stats) = parse_statistics_with_fallback(&bytes, None).expect("decode Statistics.db");
     stats.timestamp_stats.min_timestamp
+}
+
+/// Total observation count across the `Statistics.db` tombstone-drop-time
+/// histogram (Σ of every `(local_deletion_time, count)` bucket) — the exact
+/// counter `StatisticsMetadata::update_local_deletion_time` increments once
+/// per tombstone folded (issue #4246 roborev finding: NOT idempotent, so
+/// folding the same tombstone twice inflates this sum).
+fn statistics_tombstone_drop_count(dir: &Path) -> u64 {
+    fn find_stats(dir: &Path, depth: usize) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .map(|n| n.to_string_lossy().ends_with("-Statistics.db"))
+                .unwrap_or(false)
+            {
+                return Some(path);
+            }
+            if depth > 0 && path.is_dir() {
+                if let Some(p) = find_stats(&path, depth - 1) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+    let db = find_stats(dir, 8).expect("a *-Statistics.db under the flushed data dir");
+    let bytes = std::fs::read(&db).expect("read Statistics.db");
+    let (_, stats) = parse_statistics_with_fallback(&bytes, None).expect("decode Statistics.db");
+    stats
+        .tombstone_drop_times
+        .iter()
+        .map(|(_, count)| count)
+        .sum()
 }
 
 fn discover_inputs(dir: &Path) -> Vec<PathBuf> {
@@ -317,7 +352,7 @@ fn live_older_row_retains_persisted_min_timestamp() {
 
 /// Property 3 (combined, selectivity): one partition carrying BOTH a
 /// shadow-dropped OLDER row (ck=1@5, shadowed) and a genuinely live OLDER
-/// row (ck=2@8, not covered) alongside the covering tombstone (@10) and a
+/// row (ck=4@8, not covered) alongside the covering tombstone (@10) and a
 /// live survivor (ck=6@25). Persisted `min_timestamp` must reflect the live
 /// older row (8), never the even-lower shadowed one (5) — proving the gate
 /// is selective per row-group, not an all-or-nothing partition-level switch.
@@ -338,8 +373,8 @@ fn shadow_gate_is_selective_per_row_not_partition_wide() {
     .unwrap();
 
     // Range tombstone covers only ck < 3 (Bottom, Exclusive(3)) @ ts=10.
-    // ck=1@5 falls inside it (shadowed); ck=2@8 is OUTSIDE it (ck=2 < 3 is
-    // actually covered too — use ck=4 instead, outside [Bottom,3)).
+    // ck=1@5 falls inside it (shadowed); ck=4@8 is OUTSIDE it (chosen
+    // instead of ck=2, which [Bottom, 3) would ALSO cover).
     flush_batch(
         &mut engine,
         &rt,
@@ -365,5 +400,132 @@ fn shadow_gate_is_selective_per_row_not_partition_wide() {
         live,
         vec![4, 6],
         "ck=1 shadowed (absent), ck=4 and ck=6 live (present)"
+    );
+}
+
+/// Property 4 (roborev finding, DOCUMENTED RESIDUAL — not a regression this
+/// fix introduces, and deliberately NOT fixed here): a row deletion shadowing
+/// an OLDER mutation for the SAME clustering key WITHIN ONE FLUSH BATCH — an
+/// `INSERT` then a `DELETE` in a single flush, no range/partition tombstone
+/// involved at all.
+///
+/// This LOOKS like the same defect class as the range-tombstone case above,
+/// but it is architecturally different and this fix does not close it:
+/// `compute_mutations_baseline_stats` computes the ENCODING baseline
+/// (`pre_seed_encoding_baselines`'s input), which Cassandra's own
+/// `EncodingStats` accumulates from EVERY memtable update APPLIED
+/// (`SkipListMemtable.put`'s `statsCollector.update(update.stats())`,
+/// cassandra-5.0.8) — UNCONDITIONALLY, never re-derived from the
+/// post-reconciliation row the way the PERSISTED STATS component
+/// (`MetadataCollector`) is. Verified directly against `issue_717_row_
+/// tombstone_columns_subset.rs::row_tombstone_emits_columns_subset`, a
+/// Cassandra-rejection-motivated byte-level test: excluding the shadowed
+/// INSERT from the encoding baseline broke it (the emitted `mfda_delta`
+/// must be relative to the INSERT's timestamp, not the DELETE's). Because
+/// `pre_seed_encoding_baselines` seeds `self.stats` — the same struct that
+/// becomes the PERSISTED Statistics.db STATS component — from THIS
+/// function's return value directly, the persisted minimum inherits the
+/// same (lower, INSERT-inclusive) value for this specific same-batch,
+/// same-key shape. A cross-generation shadow (a range/partition tombstone,
+/// or a shadowing DELETE in a LATER, separate flush/compaction — the shapes
+/// the other tests in this file and the #4243 oracle cover) is NOT affected:
+/// there, the shadowed clustering key's own GROUP returns `None` and is
+/// correctly excluded.
+#[test]
+fn insert_then_delete_same_batch_baseline_residual_is_documented() {
+    let schema = schema();
+    let temp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let data_dir = temp.path().join("data");
+    let mut engine = WriteEngine::new(WriteEngineConfig::new(
+        data_dir.clone(),
+        temp.path().join("wal"),
+        schema.clone(),
+    ))
+    .unwrap();
+
+    // Both mutations target ck=1 in ONE flush batch: an INSERT at ts=5,
+    // then a row DELETE at ts=10. No range/partition tombstone at all.
+    let insert = write_row(1, "will-be-deleted", 5);
+    let mut delete = Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("id", Value::Integer(1)),
+        Some(ClusteringKey::single("ck", Value::Integer(1))),
+        vec![CellOperation::DeleteRow],
+        10,
+        None,
+    );
+    delete.local_deletion_time = Some(2_000_000_000);
+    flush_batch(&mut engine, &rt, vec![insert, delete]);
+    rt.block_on(engine.close()).unwrap();
+
+    assert_eq!(
+        statistics_min_timestamp(&data_dir),
+        5,
+        "DOCUMENTED RESIDUAL: the encoding baseline (and, downstream, the \
+         persisted min_timestamp) for a same-batch INSERT-then-DELETE still \
+         includes the shadowed INSERT's timestamp, matching Cassandra's own \
+         EncodingStats accumulation — this is intentional, not a bug this \
+         assertion should ever need to change to fix. If this starts \
+         failing, either a future fix has closed the residual (update this \
+         test to match, and remove the doc comment above) or a regression \
+         reintroduced the #717 columns-subset byte defect (do NOT change \
+         this expected value \
+         without also re-running \
+         issue_717_row_tombstone_columns_subset::row_tombstone_emits_columns_subset)."
+    );
+
+    let live = live_cks(discover_inputs(&data_dir), &schema);
+    assert!(
+        live.is_empty(),
+        "the row is deleted, not merely shadowed by a marker — no live row \
+         must remain: {live:?}"
+    );
+}
+
+/// Property 5 (roborev finding): a mutation carrying BOTH row content and a
+/// partition tombstone in the SAME `Mutation` object must fold that
+/// tombstone's local-deletion-time into the persisted tombstone-drop-time
+/// histogram EXACTLY ONCE — `StatisticsMetadata::update_local_deletion_time`
+/// is not idempotent (it increments a histogram bucket), so a caller that
+/// folds row content and markers through two separate, unguarded paths for
+/// the same mutation would double-count it, inflating the
+/// `estimatedTombstoneDropTime` distribution Cassandra derives compaction
+/// scheduling from.
+#[test]
+fn mixed_row_and_partition_tombstone_mutation_folds_tombstone_once() {
+    let schema = schema();
+    let temp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let data_dir = temp.path().join("data");
+    let mut engine = WriteEngine::new(WriteEngineConfig::new(
+        data_dir.clone(),
+        temp.path().join("wal"),
+        schema.clone(),
+    ))
+    .unwrap();
+
+    // A single Mutation carrying BOTH a surviving cell write (ts=25, well
+    // above the tombstone) AND a partition_tombstone field directly.
+    let mut mutation = write_row(1, "survivor", 25);
+    mutation.partition_tombstone = Some(PartitionTombstone {
+        deletion_time: 10,
+        local_deletion_time: 2_000_000_000,
+    });
+    flush_batch(&mut engine, &rt, vec![mutation]);
+    rt.block_on(engine.close()).unwrap();
+
+    assert_eq!(
+        statistics_tombstone_drop_count(&data_dir),
+        1,
+        "a mutation carrying both row content and a partition tombstone must \
+         fold that tombstone's LDT into the drop-time histogram exactly \
+         once, not twice"
     );
 }
