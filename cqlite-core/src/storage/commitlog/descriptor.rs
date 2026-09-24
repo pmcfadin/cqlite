@@ -89,8 +89,8 @@ impl CommitLogDescriptor {
     ///
     /// # Errors
     /// - [`Error::CorruptCommitLogFrame`] on a short/malformed header, invalid
-    ///   UTF-8 or malformed/non-object parameters JSON, an invalid known field
-    ///   type, or a CRC mismatch.
+    ///   UTF-8 or malformed/non-object parameters JSON, an invalid
+    ///   `compressionClass` type, or a CRC mismatch.
     /// - [`Error::UnsupportedCommitLogVersion`] for an out-of-range version.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         // version(4) + id(8) + paramsLen(2) + crc(4) = 18 byte minimum.
@@ -211,7 +211,9 @@ fn parse_params(json: &str) -> Result<(Option<String>, bool)> {
         }
     };
     // Encryption is declared by any of the real encryption-context keys being
-    // present with a non-null value. Same present-but-null hazard as
+    // present with a non-null value; unsupported values are conservatively
+    // refused as encrypted rather than interpreted as a plain payload.
+    // Same present-but-null hazard as
     // compression: `{"encCipher": null}` is NOT encrypted.
     let encrypted = ["encCipher", "encKeyAlias", "encIV"]
         .iter()

@@ -214,7 +214,12 @@ impl<'a> FrameWalker<'a> {
             self.open_torn_section(pos);
             return Ok(Some(()));
         }
-        // A marker must point strictly forward past its own 8 bytes.
+        // A marker must point forward past its own 8 bytes. The CRC covers
+        // id/position, not next_marker; it cannot establish how a bad offset
+        // arose. Cassandra 5.0.8 CommitLogSegmentReader.readSyncMarker still
+        // classifies a backward offset with a matching CRC as corruption,
+        // including zero at a real (positive) marker position. Preserve that
+        // policy instead of guessing that the offset resulted from a torn write.
         if next < pos + SYNC_MARKER_SIZE {
             return Err(Error::CorruptCommitLogFrame(format!(
                 "sync marker at offset {pos} points backward to {next}"
