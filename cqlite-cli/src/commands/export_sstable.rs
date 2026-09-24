@@ -340,9 +340,10 @@ async fn export_as_vortex(
     let entries = reader.get_all_entries().await?;
     let metadata = build_query_metadata_from_schema(schema);
 
-    let mut writer = StreamingVortexWriter::create(output_path, &metadata, &VortexExportOptions::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to initialize Vortex writer: {}", e))?;
+    let mut writer =
+        StreamingVortexWriter::create(output_path, &metadata, &VortexExportOptions::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize Vortex writer: {}", e))?;
 
     if entries.is_empty() {
         pb.finish_with_message("No data to export");

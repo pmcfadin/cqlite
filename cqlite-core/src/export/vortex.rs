@@ -47,11 +47,11 @@ use arrow::record_batch::RecordBatch;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use vortex::arrow::ArrowSessionExt;
 use vortex::array::arrays::StructArray;
 use vortex::array::dtype::{FieldName, FieldNames};
 use vortex::array::validity::Validity;
 use vortex::array::{ArrayRef as VortexArrayRef, IntoArray};
+use vortex::arrow::ArrowSessionExt;
 use vortex::file::WriteOptionsSessionExt;
 use vortex::session::VortexSession;
 use vortex::VortexSessionDefault;
@@ -236,9 +236,7 @@ impl StreamingVortexWriter {
             ));
         }
 
-        let schema = Arc::new(super::arrow_convert::build_arrow_schema(
-            &metadata.columns,
-        )?);
+        let schema = Arc::new(super::arrow_convert::build_arrow_schema(&metadata.columns)?);
         let session = VortexSession::default();
         let dtype = session
             .arrow()
@@ -327,13 +325,12 @@ impl StreamingVortexWriter {
     async fn push_batch(&mut self, rows: &[QueryRow]) -> Result<(), VortexExportError> {
         let batch_index = self.batches_pushed;
 
-        let batch =
-            rows_to_record_batch_with_schema(Arc::clone(&self.schema), &self.columns, rows)
-                .map_err(|e| VortexExportError::BatchConversion {
-                    batch_index,
-                    column: "<row-to-arrow-conversion>".to_string(),
-                    message: e.to_string(),
-                })?;
+        let batch = rows_to_record_batch_with_schema(Arc::clone(&self.schema), &self.columns, rows)
+            .map_err(|e| VortexExportError::BatchConversion {
+                batch_index,
+                column: "<row-to-arrow-conversion>".to_string(),
+                message: e.to_string(),
+            })?;
 
         let array = convert_batch_to_vortex(&self.session, &self.schema, &batch, batch_index)?;
 
@@ -422,9 +419,11 @@ mod tests {
         let path = dir.path().join("basic.vortex");
         let metadata = metadata_two_cols();
 
-        let mut writer = StreamingVortexWriter::create(&path, &metadata, &VortexExportOptions {
-            row_group_size: 2,
-        })
+        let mut writer = StreamingVortexWriter::create(
+            &path,
+            &metadata,
+            &VortexExportOptions { row_group_size: 2 },
+        )
         .await
         .expect("create");
 
@@ -436,7 +435,10 @@ mod tests {
 
         writer.finalize().await.expect("finalize");
 
-        assert!(path.exists(), "finalize must rename the temp file into place");
+        assert!(
+            path.exists(),
+            "finalize must rename the temp file into place"
+        );
         assert!(
             !tmp_sibling_path(&path).exists(),
             "no .tmp sibling should remain after a successful finalize"

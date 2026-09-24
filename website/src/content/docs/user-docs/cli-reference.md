@@ -242,7 +242,7 @@ Usage: cqlite export [OPTIONS] --table <TABLE> <FILE>
 |--------|-------|---------|-------------|
 | `<FILE>` | — | — | Output file path (positional) |
 | `--table <TABLE>` | `-t` | required | Source table name |
-| `--format <FORMAT>` | `-f` | `csv` | Export format: `csv`, `json`, `parquet`, `cql` |
+| `--format <FORMAT>` | `-f` | `csv` | Export format: `csv`, `json`, `parquet`, `cql`, `vortex` (requires `--features vortex`; see [Output Formats: vortex](/cqlite/user-docs/output-formats/#vortex--vortex-columnar-file-format-export-only)) |
 | `--query <QUERY>` | `-q` | — | Query filter (WHERE clause) |
 | `--limit <LIMIT>` | `-l` | — | Maximum rows to export |
 
@@ -304,7 +304,7 @@ Usage: cqlite read-sstable [OPTIONS] <FILE>
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
 | `<FILE>` | — | — | SSTable file or directory path (positional) |
-| `--format <FORMAT>` | `-f` | `table` | Output format: `table`, `json`, `csv`, `parquet` |
+| `--format <FORMAT>` | `-f` | `table` | Output format: `table`, `json`, `csv`, `parquet` (rejected — use `--out json`/`--out csv`), `vortex` (rejected — same reason) |
 | `--limit <LIMIT>` | `-l` | — | Limit number of rows |
 | `--skip <SKIP>` | — | `0` | Skip N rows |
 | `--keys-only` | — | — | Show only partition/clustering keys |

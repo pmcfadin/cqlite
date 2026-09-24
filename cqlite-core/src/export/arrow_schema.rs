@@ -108,12 +108,7 @@ pub(crate) fn cql_type_to_arrow_field(
         CqlType::Uuid | CqlType::TimeUuid => {
             // FixedSizeBinary(16) with the Arrow UUID extension metadata so that
             // Parquet readers interpret the column as UUID logical type.
-            let mut meta = HashMap::new();
-            meta.insert(
-                ARROW_EXTENSION_NAME_KEY.to_string(),
-                ARROW_UUID_EXTENSION_NAME.to_string(),
-            );
-            Some(Field::new(name, ArrowDataType::FixedSizeBinary(16), nullable).with_metadata(meta))
+            Some(uuid_field(name, nullable))
         }
         CqlType::Inet => Some(Field::new(name, ArrowDataType::Utf8, nullable)),
         CqlType::Counter => Some(Field::new(name, ArrowDataType::Int64, nullable)),
@@ -125,8 +120,7 @@ pub(crate) fn cql_type_to_arrow_field(
         // needs its own array builder and #4114's scope is the READ path; the value
         // shape here is correct either way.
         CqlType::List(inner) | CqlType::Set(inner) | CqlType::Vector(inner, _) => {
-            let item_type = cql_type_to_arrow_data_type(inner);
-            let item_field = Arc::new(Field::new("item", item_type, true));
+            let item_field = Arc::new(cql_type_to_arrow_child_field("item", inner, true));
             Some(Field::new(name, ArrowDataType::List(item_field), nullable))
         }
         // Frozen<T> is transparent: same Arrow type as T.
@@ -135,13 +129,11 @@ pub(crate) fn cql_type_to_arrow_field(
         // The entries struct is conventionally named "entries" with children
         // "key" (non-nullable) and "value" (nullable).
         CqlType::Map(key_type, val_type) => {
-            let key_arrow = cql_type_to_arrow_data_type(key_type);
-            let val_arrow = cql_type_to_arrow_data_type(val_type);
             let entries_field = Arc::new(Field::new(
                 "entries",
                 ArrowDataType::Struct(Fields::from(vec![
-                    Field::new("key", key_arrow, false),
-                    Field::new("value", val_arrow, true),
+                    cql_type_to_arrow_child_field("key", key_type, false),
+                    cql_type_to_arrow_child_field("value", val_type, true),
                 ])),
                 false,
             ));
@@ -172,6 +164,48 @@ pub(crate) fn cql_type_to_arrow_field(
         // Remaining scalar types are already handled correctly by the flat
         // DataType mapping; return None to allow that path to run.
         _ => None,
+    }
+}
+
+/// Build a `FixedSizeBinary(16)` Field carrying the Arrow UUID extension metadata
+/// (`ARROW:extension:name` = `arrow.uuid`).
+fn uuid_field(name: &str, nullable: bool) -> Field {
+    let mut meta = HashMap::new();
+    meta.insert(
+        ARROW_EXTENSION_NAME_KEY.to_string(),
+        ARROW_UUID_EXTENSION_NAME.to_string(),
+    );
+    Field::new(name, ArrowDataType::FixedSizeBinary(16), nullable).with_metadata(meta)
+}
+
+/// Build a CHILD `Field` for `cql_type` — the element of a `List`/`Set`/`Vector`, a `Map`
+/// key/value, or a `Tuple`/`Udt` position — carrying the Arrow UUID extension metadata when
+/// `cql_type` (after unwrapping `Frozen`) is `Uuid`/`TimeUuid`.
+///
+/// Issue #4237: [`cql_type_to_arrow_data_type`] returns a bare `ArrowDataType`, which cannot
+/// carry field-level metadata — so before this function existed, every nested UUID/TimeUUID
+/// (inside a collection, map, tuple, or UDT, at ANY depth) lost the `arrow.uuid` extension
+/// metadata that [`cql_type_to_arrow_field`] attaches at the TOP level. Parquet never
+/// noticed (a Parquet reader that wants the UUID logical type reads the metadata when
+/// present and falls back to raw `FixedSizeBinary(16)` otherwise), but Vortex's Arrow
+/// importer REFUSES a bare `FixedSizeBinary(16)` outright — discovered via the
+/// `test_collections`/`test_wide_rows` fixture tables that carry `list<uuid>` /
+/// `map<text, uuid>` / UDT-uuid fields (`cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`).
+///
+/// This is the single recursion point [`cql_type_to_arrow_data_type`]'s own List/Set/Vector/
+/// Map/Tuple/Udt branches (below) and the identically-shaped value-building constructors in
+/// `arrow_builders_nested.rs` both call, so the schema Field and the array's own embedded
+/// Field can never drift apart (`RecordBatch::try_new` requires them to match exactly,
+/// metadata included, for nested List/Struct/Map arrays).
+pub(crate) fn cql_type_to_arrow_child_field(
+    name: &str,
+    cql_type: &CqlType,
+    nullable: bool,
+) -> Field {
+    match cql_type {
+        CqlType::Uuid | CqlType::TimeUuid => uuid_field(name, nullable),
+        CqlType::Frozen(inner) => cql_type_to_arrow_child_field(name, inner, nullable),
+        _ => Field::new(name, cql_type_to_arrow_data_type(cql_type), nullable),
     }
 }
 
@@ -220,29 +254,24 @@ pub(crate) fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
         // Arrow has no dedicated Set type; both map to List.
         // Same rule as `cql_type_to_arrow_field` above (#4114).
         CqlType::List(inner) | CqlType::Set(inner) | CqlType::Vector(inner, _) => {
-            let item_type = cql_type_to_arrow_data_type(inner);
-            ArrowDataType::List(Arc::new(Field::new("item", item_type, true)))
+            ArrowDataType::List(Arc::new(cql_type_to_arrow_child_field("item", inner, true)))
         }
         // Frozen<T> is transparent in type mapping.
         CqlType::Frozen(inner) => cql_type_to_arrow_data_type(inner),
         // Map: Arrow Map type with typed key (non-nullable) and value (nullable).
         // The entries struct field is named "entries" with children "key" and
         // "value".
-        CqlType::Map(key_type, val_type) => {
-            let key_arrow = cql_type_to_arrow_data_type(key_type);
-            let val_arrow = cql_type_to_arrow_data_type(val_type);
-            ArrowDataType::Map(
-                Arc::new(Field::new(
-                    "entries",
-                    ArrowDataType::Struct(Fields::from(vec![
-                        Field::new("key", key_arrow, false),
-                        Field::new("value", val_arrow, true),
-                    ])),
-                    false,
-                )),
+        CqlType::Map(key_type, val_type) => ArrowDataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                ArrowDataType::Struct(Fields::from(vec![
+                    cql_type_to_arrow_child_field("key", key_type, false),
+                    cql_type_to_arrow_child_field("value", val_type, true),
+                ])),
                 false,
-            )
-        }
+            )),
+            false,
+        ),
         // Tuple<A, B, …> → Struct(field_0: A, field_1: B, …).
         // Zero-field tuples fall back to Utf8 (Arrow Struct requires ≥1 field).
         CqlType::Tuple(element_types) => {
@@ -253,9 +282,9 @@ pub(crate) fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
                 .iter()
                 .enumerate()
                 .map(|(i, t)| {
-                    Field::new(
-                        format!("field_{i}"),
-                        cql_type_to_arrow_data_type(t),
+                    cql_type_to_arrow_child_field(
+                        &format!("field_{i}"),
+                        t,
                         true, // tuple positions are always nullable
                     )
                 })
@@ -271,9 +300,9 @@ pub(crate) fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
             let struct_fields: Vec<Field> = udt_fields
                 .iter()
                 .map(|(field_name, field_type)| {
-                    Field::new(
+                    cql_type_to_arrow_child_field(
                         field_name.as_str(),
-                        cql_type_to_arrow_data_type(field_type),
+                        field_type,
                         true, // UDT fields are always nullable (can be unset)
                     )
                 })

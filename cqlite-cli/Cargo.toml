@@ -127,6 +127,12 @@ duckdb = { version = "1.1", features = ["bundled", "parquet"], optional = true }
 # lives in cqlite-core behind its `parquet` feature, Epic #682)
 arrow = { workspace = true }
 parquet = { workspace = true }
+# Vortex's own reader, for the cross-format differential test's Vortex-side
+# read-back (issue #4237) — mirrors `parquet` above exactly: the writer lives
+# in cqlite-core behind the `vortex` feature, this dev-dependency is the
+# READER half the differential test needs to verify what the CLI wrote,
+# exactly as the `parquet` dev-dependency above verifies the Parquet side.
+vortex = { workspace = true }
 # Issue #1490: the Parquet-vs-sstabledump-JSONL value-parity harness parses the
 # goldens' float literals with serde_json, and serde_json's DEFAULT float parser
 # is approximate — measured: `1014.5449131979983` (a real `test_timeseries.sensor_data`
@@ -277,6 +283,17 @@ required-features = ["write-support"]
 name = "issue_1581_query_stream_memory"
 path = "tests/issue_1581_query_stream_memory.rs"
 required-features = ["dhat-heap"]
+
+# Issue #4237: the cross-format differential — the PRIMARY oracle for Vortex export. `state_machine`
+# already enables cqlite-core/parquet (see that feature's own comment above), so
+# `state_machine` + `vortex` together give both writers; no other gate component enables that
+# combination simultaneously (design.md D3), so this target is declared with `required-features`
+# (#4196 job 3785's vacuous-pass lesson) rather than relying on the file's own `#![cfg(...)]`
+# alone, and the new `vortex-parquet-differential` gate component runs it explicitly.
+[[test]]
+name = "issue_4237_vortex_parquet_differential"
+path = "tests/issue_4237_vortex_parquet_differential.rs"
+required-features = ["state_machine", "vortex"]
 
 # Issue #1494 (AD5): CSV export-writer throughput bench. Hosted here (not in
 # cqlite-core) because the real public writer is cqlite_cli::output::CSVWriter;

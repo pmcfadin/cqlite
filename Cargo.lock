@@ -1554,6 +1554,7 @@ dependencies = [
  "tracing-subscriber",
  "trybuild",
  "trycmd",
+ "vortex",
  "wait-timeout",
 ]
 
