@@ -549,7 +549,8 @@ fn insert_then_delete_same_batch_baseline_residual_is_documented() {
     );
 }
 
-/// Property 5 (roborev finding): a mutation carrying BOTH row content and a
+/// Property 6 (roborev finding; renumbered round-5 to match the module
+/// header's list): a mutation carrying BOTH row content and a
 /// partition tombstone in the SAME `Mutation` object must fold that
 /// tombstone's local-deletion-time into the persisted tombstone-drop-time
 /// histogram EXACTLY ONCE — `StatisticsMetadata::update_local_deletion_time`
@@ -593,7 +594,8 @@ fn mixed_row_and_partition_tombstone_mutation_folds_tombstone_once() {
     );
 }
 
-/// Property 6 (roborev finding): the COMPACTION-path half of the fix
+/// Property 7 (roborev finding; renumbered round-5 to match the module
+/// header's list): the COMPACTION-path half of the fix
 /// (`KWayMerger::merge`'s deferred, `row_group_survival`-gated fold at
 /// `PartitionEnd`, plus its two unconditional marker folds) has its own,
 /// dedicated test — the properties above all drive `WriteEngine::flush` →

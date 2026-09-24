@@ -76,6 +76,18 @@ pub(crate) fn row_group_survives(
 /// (already `mutation_shadowed` under a uniform check, since `deletion_ts`
 /// is derived from its own timestamp) or wrongly folded a LOSING `DeleteRow`
 /// that `resolve_row_deletion` discarded and Data.db never emits).
+///
+/// PERFORMANCE (issue #4288, roborev round-5 finding): this calls
+/// `merge_row_group` as a pre-check, and every call site ALSO calls it again
+/// (directly or via `feed_row`/`merge_clustering_rows`) to actually emit the
+/// row — `merge_row_group`'s own full per-column LWW reconciliation
+/// (allocating `cells`/`whole_col_liveness`/`complex_element_ops`/`ops`) now
+/// runs 2-3x per row group on the write hot path instead of once.
+/// `merge_row_group` is a pure function of its arguments, so a future
+/// refactor computing the group's `RowWrite` once and deriving both the
+/// stats-fold decision and the emission from it would remove this
+/// duplication; deferred out of #4246's own scope (a correctness fix) to
+/// avoid a broader refactor under time pressure.
 pub(crate) fn row_group_survival(
     group: &[&Mutation],
     schema: &TableSchema,

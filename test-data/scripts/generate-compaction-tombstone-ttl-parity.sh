@@ -459,11 +459,22 @@ Major compaction did not collapse inputs into one output."
     # `sstablemetadata` failure for one table must not abort the whole
     # regeneration run (discarding every already-validated staged table via
     # the `cleanup` trap) for a failure in a non-essential diagnostic dump.
+    # Deliberately NO `sed` trailing-whitespace normalization here (roborev
+    # round-5 finding, PR carrying #4243/#4246): an earlier version added
+    # one, but the four pre-existing sidecars in this family
+    # (`rt_cross_gen`, `shadow_row_delete`, `ttl_expired_live`,
+    # `gc_purge_grace0`) were never regenerated through it and still carry
+    # `sstablemetadata`'s raw trailing blanks — normalizing only the new
+    # `rt_open_ended_boundary` sidecar would make the family internally
+    # inconsistent, and re-emitting the other four here is out of scope
+    # (would require verifying fresh Docker/Cassandra output this diff
+    # cannot produce). Keeping every sidecar byte-identical to
+    # `sstablemetadata`'s own output is the zero-risk choice.
     if ! $ENGINE run --rm \
       -v "$SSTABLES_DIR:/data" \
       "$CASSANDRA_IMAGE" \
       bash -lc "/opt/cassandra/tools/bin/sstablemetadata /data/${rel}" \
-      2>/dev/null | sed 's/[[:blank:]]*$//' > "$stats_base"; then
+      2>/dev/null > "$stats_base"; then
       log "  sstablemetadata failed for $rel (sidecar skipped, staged tables unaffected)"
     fi
   done < <(find "$SSTABLES_DIR/$KEYSPACE" -name "*-Data.db" -not -name "._*" -print0)

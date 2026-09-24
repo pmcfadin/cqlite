@@ -873,37 +873,49 @@ impl WriteEngine {
                             if let Some(session) = stream_state.direct_session.as_mut() {
                                 writer_ref.feed_streaming_row(session, &mutation)?;
                             }
-                            // Unconditional fold, correctly (issue #4246):
-                            // `stream_rows_directly` is gated on NO input to
-                            // this partition carrying any deletion (see this
-                            // branch's own doc comment above and
-                            // `stream_rows_directly`'s field doc), so no row
-                            // here can ever be shadow-dropped in the first
-                            // place — there is nothing to gate against. This
-                            // branch also deliberately never calls
-                            // `fold_row_deletion_marker`: pin the invariant
-                            // it relies on (issue #4246 roborev round-3
-                            // finding — nothing previously asserted this, so
-                            // a future relaxation of `stream_rows_directly`'s
-                            // gate could silently drop a row's own deletion
-                            // from persisted stats without any test noticing).
-                            debug_assert!(
-                                mutation.row_tombstone.is_none()
-                                    && !mutation
-                                        .operations
-                                        .iter()
-                                        .any(|op| matches!(op, crate::storage::write_engine::mutation::CellOperation::DeleteRow)),
-                                "issue #4246: stream_rows_directly fed a mutation carrying a \
-                                 row deletion (DeleteRow op or #932 row_tombstone) — this path \
-                                 never folds a row-deletion marker, relying on \
-                                 ActiveMerge::stream_rows_directly's own \"no input carries any \
-                                 deletion\" gate; that invariant just broke"
-                            );
                             stats_fold::fold_row_content_stats(
                                 stream_state.partition_stats_mut(),
                                 &mutation,
                                 None,
                             );
+                            // Correct-by-construction (issue #4246 roborev
+                            // round-5 finding): a `debug_assert!`-pinned
+                            // invariant compiles OUT of a release build, so a
+                            // future relaxation of `stream_rows_directly`'s
+                            // "no input carries any deletion" gate would
+                            // silently drop a row's own `DeleteRow`/
+                            // `row_tombstone` marker from persisted stats
+                            // with nothing to catch it in production.
+                            // Deliberately NOT `fold_single_mutation_row_group`
+                            // here (which would call `merge_row_group` — a
+                            // full per-column LWW reconciliation pass — on
+                            // EVERY row of this issue #2299 fast path, whose
+                            // entire purpose is avoiding exactly that cost):
+                            // fold the marker directly and cheaply, from
+                            // whichever of the two decoupled representations
+                            // this mutation ACTUALLY carries (never both,
+                            // #932), so correctness holds even if the
+                            // upstream gate is ever relaxed, without
+                            // reintroducing a reconciliation pass here.
+                            if let Some(row_deletion) = mutation.row_tombstone {
+                                stats_fold::fold_row_deletion_marker(
+                                    stream_state.partition_stats_mut(),
+                                    Some(row_deletion),
+                                );
+                            } else if mutation.operations.iter().any(|op| {
+                                matches!(
+                                    op,
+                                    crate::storage::write_engine::mutation::CellOperation::DeleteRow
+                                )
+                            }) {
+                                stats_fold::fold_row_deletion_marker(
+                                    stream_state.partition_stats_mut(),
+                                    Some((
+                                        mutation.timestamp_micros,
+                                        mutation.effective_local_deletion_time(),
+                                    )),
+                                );
+                            }
                             stream_state.row_count += 1;
                         } else {
                             // Buffered path: buffer for the single PartitionEnd
