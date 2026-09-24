@@ -31,6 +31,22 @@
 
 # Shared domain groups. Each is an ARRAY, even a single-pattern one, so every
 # consumer can use the SAME `"${name[@]}"` expansion uniformly.
+#
+# _RECERT_DOM_BASE (roborev finding, Medium): every MAPPED component's own
+# driver — `run_<component>` — lives in scripts/agent-gate.sh, and this
+# table mapped only the PRODUCT paths a component reads, never the HARNESS
+# path that IMPLEMENTS it. A PR editing `run_clippy` (or any other driver
+# function) changed nothing under `cqlite-core/**`/`Cargo.*`/etc., so it
+# classified as NOT diff-touched for every affected component — exactly the
+# "a failure there may be a code defect, not a host fault" case check 8
+# exists to refuse. Prepended to every MAPPED component's domain (never to
+# the unmapped default, which must stay EMPTY — see
+# _recert_component_domain_patterns below). This is still coarse (a
+# component-specific `scripts/ci/<guard>.sh` is added per-component below
+# where one exists; a bare change to a SIBLING component's driver inside the
+# same file still counts as touching THIS one, which is the safe direction to
+# be imprecise in).
+_RECERT_DOM_BASE=('scripts/agent-gate.sh')
 _RECERT_DOM_RUST_ANY=('*.rs')
 _RECERT_DOM_CARGO_ANY=('Cargo.toml' 'Cargo.lock' '*/Cargo.toml')
 _RECERT_DOM_CORE=('cqlite-core/*')
@@ -60,18 +76,51 @@ _recert_harness_patterns() {
   if declare -p TOOLING_TESTS_SCOPE_PATTERNS >/dev/null 2>&1 \
      && [ "${#TOOLING_TESTS_SCOPE_PATTERNS[@]}" -gt 0 ]; then
     printf '%s\n' "${TOOLING_TESTS_SCOPE_PATTERNS[@]}"
-  else
-    printf '%s\n' 'scripts/*' '.github/*' '.claude/*' '.roborev.toml' \
-      'rust-toolchain.toml' 'Cargo.lock' 'Cargo.toml'
+    return 0
   fi
+  # FAIL CLOSED (roborev finding, Medium) — NO second, hand-maintained copy of
+  # the #4266 declared set. An earlier cut carried a "literal copy" fallback
+  # here that silently drifted 7 patterns behind the real (19-entry) array —
+  # `.gitignore`, `CLAUDE.md`, `docs/*`, several `test-data/*` classes,
+  # `tools/*`, `cqlite-flight/Dockerfile` and `bindings/node/__test__/*` were
+  # all missing from it — so a diff touching only those paths classified
+  # `tooling-tests` as CLEAR: fail-OPEN, the one direction this file must
+  # never take. This should not happen in production (agent-gate.sh sources
+  # tooling-tests-scope.sh before this file — see both files' headers), but a
+  # standalone caller (a future consumer, a test) that skips it now gets an
+  # honest UNRECOGNIZED rather than a second source of truth to keep in sync.
+  # rc 1, no output: the caller (_recert_component_domain_patterns_raw's
+  # tooling-tests arm) propagates this exit status directly, so
+  # _recert_component_domain_patterns then treats tooling-tests as
+  # UNRECOGNIZED and its existing "no domain -> always diff-touched" default
+  # applies — never a partial, silently-permissive domain.
+  return 1
 }
 
 # _recert_component_domain_patterns <component>: print the component's domain
-# patterns, one per line. Prints NOTHING for an unmapped component — the caller
-# (_recert_component_diff_touched) treats "no domain" as "match everything" (the
-# fail-closed default), never as "match nothing". Every arm expands its groups
-# with a QUOTED `"${name[@]}"` — see the file header for why that is load-bearing.
+# patterns, one per line — ALWAYS including _RECERT_DOM_BASE (the component's
+# own driver file) for a RECOGNIZED component, plus that component's specific
+# product/guard paths. Prints NOTHING for an UNRECOGNIZED component — the
+# caller (_recert_component_diff_touched) treats "no domain" as "match
+# everything" (the fail-closed default), never as "match nothing". Delegates
+# the actual per-component list to _recert_component_domain_patterns_raw and
+# uses ITS EXIT STATUS (0 = recognized, 1 = not) to decide whether to prepend
+# the base — printing the base unconditionally would give an UNRECOGNIZED
+# component a non-empty (so "sometimes touched" instead of "ALWAYS touched")
+# domain, silently weakening the fail-closed default.
 _recert_component_domain_patterns() {
+  local _rdp_specific _rdp_rc
+  _rdp_specific=$(_recert_component_domain_patterns_raw "$1"); _rdp_rc=$?
+  [ "$_rdp_rc" -eq 0 ] || return 0
+  printf '%s\n' "${_RECERT_DOM_BASE[@]}"
+  [ -n "$_rdp_specific" ] && printf '%s\n' "$_rdp_specific"
+}
+
+# _recert_component_domain_patterns_raw <component>: the per-component product/
+# guard paths ALONE (no base) — rc 0 + the list for a recognized component, rc
+# 1 + nothing for an unrecognized one. Every arm expands its groups with a
+# QUOTED `"${name[@]}"` — see the file header for why that is load-bearing.
+_recert_component_domain_patterns_raw() {
   case "$1" in
     file-size|fmt)
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" ;;
@@ -79,8 +128,10 @@ _recert_component_domain_patterns() {
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     roborev-lints)
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" '.github/*' 'scripts/*' ;;
-    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|memory-budget|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|oom-audit|all-features-check|pub-surface)
+    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|memory-budget|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|oom-audit|all-features-check)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    pub-surface)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" 'scripts/ci/check-pub-surface.sh' ;;
     integration-tests)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'cqlite-integration-tests/*' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     format-compat)
@@ -106,15 +157,23 @@ _recert_component_domain_patterns() {
     kit-dashboard-drift)
       printf '%s\n' "${_RECERT_DOM_DOCS_ANY[@]}" "${_RECERT_DOM_WEBSITE[@]}" ;;
     dep-duplicates)
-      printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" 'scripts/ci/check-dep-duplicates.sh' 'scripts/ci/dep-duplicates-baseline.txt' ;;
     features-load-bearing)
-      printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_RUST_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_RUST_ANY[@]}" 'scripts/ci/check-features-load-bearing.sh' ;;
     tooling-tests)
-      _recert_harness_patterns ;;
+      # Propagate _recert_harness_patterns's OWN exit status directly (never
+      # fall through to this function's shared `return 0` below) — its
+      # fail-closed rc 1 must make THIS arm, and therefore the caller, see
+      # tooling-tests as unrecognized too (see that function's own comment).
+      _recert_harness_patterns
+      return $? ;;
     minimal-build)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
-    *) return 0 ;;   # unmapped: caller treats as "matches everything" (fail-closed)
+    *) return 1 ;;   # unrecognized: caller (_recert_component_domain_patterns)
+                      # prints nothing at all -> _recert_component_diff_touched's
+                      # fail-closed "matches everything" default applies.
   esac
+  return 0
 }
 
 # _recert_component_diff_touched <component> <changed-paths-newline-list>: true

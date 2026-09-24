@@ -69,10 +69,17 @@ if [ "$n_components" -lt 30 ]; then
 fi
 
 # Completeness census: every real component has a domain mapped (pure, no git).
+# Sources SCOPE_LIB (#4266) BEFORE DOMAINS_LIB (roborev finding, Medium: an
+# earlier cut sourced DOMAINS_LIB alone here, so this census — and the classify
+# cases below — exercised the tooling-tests FALLBACK, not the real array
+# production actually loads; the two have since diverged from each other on
+# purpose to make that drift impossible to miss again, see DOMAINS_LIB's own
+# _recert_harness_patterns comment).
 missing=""
 while IFS= read -r c; do
   [ -n "$c" ] || continue
   dom=$(
+    . "$SCOPE_LIB"
     . "$DOMAINS_LIB"
     _recert_component_domain_patterns "$c"
   )
@@ -88,11 +95,26 @@ fi
 classify_domain() {
   local comp="$1" path="$2" want="$3" desc="$4" got
   got=$(
+    . "$SCOPE_LIB"
     . "$DOMAINS_LIB"
     if _recert_component_diff_touched "$comp" "$path"; then echo TOUCHED; else echo CLEAR; fi
   )
   if [ "$got" = "$want" ]; then ok "$desc"; else bad "$desc (got $got, wanted $want)"; fi
 }
+# A dedicated case proving the fallback's fail-closed rc actually WORKS when
+# SCOPE_LIB genuinely is NOT loaded (the one scenario the census/classify
+# cases above no longer exercise now that they source it): tooling-tests must
+# be treated as unrecognized (any diff "touches" it) rather than falling back
+# to a hand-maintained second copy.
+fallback_got=$(
+  . "$DOMAINS_LIB"
+  if _recert_component_diff_touched tooling-tests 'docs/development/dev-cookbook.md'; then echo TOUCHED; else echo CLEAR; fi
+)
+if [ "$fallback_got" = TOUCHED ]; then
+  ok "tooling-tests without SCOPE_LIB loaded: fails closed to unrecognized (always diff-touched), never a stale second copy"
+else
+  bad "tooling-tests without SCOPE_LIB loaded: expected TOUCHED (fail-closed), got $fallback_got"
+fi
 classify_domain file-size 'cqlite-core/src/lib.rs' TOUCHED "file-size domain covers cqlite-core/src/**"
 classify_domain tooling-tests 'scripts/agent-gate.sh' TOUCHED "tooling-tests domain reuses #4266's harness set"
 classify_domain tooling-tests 'cqlite-core/src/lib.rs' CLEAR "tooling-tests domain does NOT cover cqlite-core/src/** (the #4268 round-2-style residual is real, not hidden)"
@@ -142,14 +164,33 @@ tree_identity() { # <fixture-dir> -> "sha dirty digest" on stdout, or empty on f
   printf '%s\n' "$te" | sed -n 's/^tree-end:[[:space:]]*\([^ ]*\) dirty: \([a-z]*\) digest: \([^ ]*\).*/\1 \2 \3/p'
 }
 
+# _override_status_for <component> <override1=status> ...: bash-3.2-safe
+# lookup (roborev finding, High — an earlier cut used `local -A overrides`, an
+# associative array, which is bash 4.0+; this repo's floor is stock macOS bash
+# 3.2, scripts/agent-gate.sh:15209/:15511 and
+# test_agent_gate_summary.sh:826-869 document a prior gate-of-record incident
+# from exactly this construct. On bash 3.2, `overrides["core-tests"]=…`
+# evaluates the subscript ARITHMETICALLY to 0, so every write landed in the
+# SAME slot and every component silently read the LAST override — not a
+# warning, a silently wrong fixture). Plain positional args + a linear scan;
+# the override list is at most 2 entries per test call, so this is not a
+# performance concern.
+_override_status_for() {
+  local comp="$1"; shift
+  local kv
+  for kv in "$@"; do
+    case "$kv" in
+      "$comp="*) printf '%s' "${kv#*=}"; return 0 ;;
+    esac
+  done
+  printf 'PASS'
+}
+
 # write_anchor <path> <sha> <digest> [override1=status ...]: a hand-built,
 # structurally-valid FULL-gate "==== AGENT-GATE SUMMARY ====" block. Every real
 # component defaults to PASS; pass e.g. "core-tests=FAIL" to override one.
 write_anchor() {
   local out="$1" sha="$2" digest="$3"; shift 3
-  local -A overrides=()
-  local kv
-  for kv in "$@"; do overrides["${kv%%=*}"]="${kv#*=}"; done
   {
     echo "==== AGENT-GATE SUMMARY ===="
     echo "run-id: synthetic-anchor-$$"
@@ -159,7 +200,7 @@ write_anchor() {
     echo "tree-integrity: PASS"
     while IFS= read -r c; do
       [ -n "$c" ] || continue
-      echo "${c}: ${overrides[$c]:-PASS} (1s)"
+      echo "${c}: $(_override_status_for "$c" "$@") (1s)"
     done <<<"$declared_components"
     echo "RESULT: PASS"
     echo "==== END AGENT-GATE SUMMARY ===="

@@ -2535,9 +2535,12 @@ _missing_fixtures_marker() {
 # so the hidden --preflight-fixtures hook asserts the SAME decision
 # apply_fixture_preflight consumes (single-source; no drift).
 _fixture_status() {
-  # Only the FULL gate is strict: --only stays lenient, --lite already returned.
-  [ -z "$ONLY" ] || { echo OK; return 0; }
-  [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  # Strict for the FULL gate AND --recertify (#4268: it reruns named
+  # components "in full-gate mode" by its own doctrine, so it must not
+  # silently inherit --only's general leniency just because it reuses
+  # --only's dispatch — roborev finding, High). A bare --only stays lenient;
+  # --lite already returned before this is ever reached.
+  _gate_is_strict || { echo OK; return 0; }
   local n
   n=$(find "$CQLITE_DATASETS_ROOT/sstables/$CANONICAL_FIXTURE_KEYSPACE" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
   [ "${n:-0}" -gt 0 ] && { echo OK; return 0; }
@@ -3163,9 +3166,10 @@ _missing_schema_files() {
 # side effects, so the hidden --preflight-schemas hook asserts the SAME decision
 # apply_schemas_preflight consumes (single-source; no drift).
 _schemas_status() {
-  # Only the FULL gate is strict: --only stays lenient, --lite already returned.
-  [ -z "$ONLY" ] || { echo OK; return 0; }
-  [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  # Strict for the FULL gate AND --recertify — same reasoning as
+  # _fixture_status just above (#4268 roborev finding, High): a bare --only
+  # stays lenient; --lite already returned before this is ever reached.
+  _gate_is_strict || { echo OK; return 0; }
   # A rejected override FAILs even if the checkout's fixtures happen to be complete: the
   # operator asked for a root the contract cannot honor, and quietly using a different
   # one is the mis-certification this guard exists to prevent.
@@ -6226,6 +6230,41 @@ _component_set_verdict() {
     no)  printf BEHIND ;;
     *)   printf INDETERMINATE ;;
   esac
+}
+
+# _gate_is_strict (#4268 roborev finding, High): rc 0 iff this run must enforce
+# the FULL gate's fixture/dataset strictness (a real corpus required,
+# CQLITE_REQUIRE_FIXTURES=1, etc.) — the full gate itself, OR a --recertify run.
+#
+# --recertify's OWN doctrine (its header comment, `docs/development/gate-ops.md`)
+# says it reruns the named components "in FULL-GATE mode" — but the
+# IMPLEMENTATION reuses `--only`'s dispatch (see the RECERTIFY design comment
+# below), and `--only` is the LENIENT posture throughout this script (a bare
+# diagnostic that cannot be a verdict — it exits 3 on success). Every strict/
+# lenient fork keyed on the bare `[ -z "$ONLY" ]` idiom therefore silently
+# degraded a recert too: `_fixture_status`/`_schemas_status` (the #2078/#3148
+# canonical-corpus guards) went lenient, `run_node_bindings` dropped
+# `CQLITE_REQUIRE_FIXTURES=1`, `cli-tests`'s sensor_data fixture preflight and
+# `feature-iso-delta-scan`'s fixture posture both degraded — so
+# `--recertify --components core-tests` on a worktree with an incomplete
+# corpus could run dataset-gated tests against data the full gate would have
+# refused to start on, then stamp `recert-verdict: CERTIFIED`. A re-run
+# strictly weaker than the run it claims to replace defeats the whole point.
+#
+# Every SUCH site now calls THIS predicate instead of `[ -z "$ONLY" ] && [
+# "$LITE" -eq 0 ]` directly. NOT every `-z "$ONLY"` site in this file needs
+# it, and two do NOT: `acquire_gate_slot`'s `[ -n "$ONLY" ] && return 0`
+# exemption from the #1825 slot cap is INTENTIONAL for --recertify (see its
+# own comment — recert is meant to be fast, not queued), and it already reads
+# `$ONLY` directly rather than through a leniency predicate, so it is
+# unaffected by this one either way.
+#
+# Distinct from `_component_set_strict()` just below, which governs a
+# DIFFERENT concern (component-set skew) with its own leniency boundary —
+# not merged with this one, so a future change to either cannot silently
+# perturb the other.
+_gate_is_strict() {
+  [ "$LITE" -eq 0 ] && { [ -z "$ONLY" ] || [ "$RECERTIFY" -eq 1 ]; }
 }
 
 # _component_set_strict: rc 0 iff this mode may FAIL on the verdict — the FULL gate and
@@ -16388,7 +16427,7 @@ run_node_bindings() {
   local -a leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)
   local require_fixtures=0 fixture_note
   local -a fixture_env=()
-  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+  if _gate_is_strict && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
     require_fixtures=1
     fixture_note="CQLITE_REQUIRE_FIXTURES=1 — an absent corpus fails ONCE, by name, in setup.js instead of as 14 separate beforeAll throws, and parity.test.js's test.skip placeholder (the one corpus-conditional path that would pass silently) cannot fire"
   elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ]; then
@@ -18030,18 +18069,20 @@ run_flight_tests() {
   # behaviour in cqlite-flight and is filed separately, on the #3420/#3380 precedent that a defect
   # this lane REVEALS is fixed in its own PR. What this lane owes is not to report a green over it.
   #
-  # FULL gate only. `--only` and `--lite` stay lenient by design (they are probes, and `--only`
-  # cannot be a verdict — it exits 3 on success), which is the same split the #2078 fixture contract
-  # uses; an opt-out is deliberately visible rather than silent.
-  # "full" spelled the way this script spells it (`-z "$ONLY"` and `LITE -eq 0`), matching the
-  # #2078 preflight's own test rather than inventing a MODE variable that does not exist here.
+  # FULL gate (and --recertify, #4268 roborev finding High — it reruns named
+  # components "in full-gate mode" by its own doctrine) only. A bare `--only`
+  # and `--lite` stay lenient by design (they are probes, and `--only` cannot
+  # be a verdict — it exits 3 on success), which is the same split the #2078
+  # fixture contract uses; an opt-out is deliberately visible rather than silent.
+  # Spelled via `_gate_is_strict` (matching #2078's own predicate) rather than
+  # inventing a MODE variable that does not exist here.
   # HONOURS THE DOCUMENTED OPT-OUT (roborev round-31, Medium). Without this the #2078 escape hatch
   # became INEFFECTIVE: `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` got past the generic preflight and then
   # this lane failed the run anyway, so an opt-out that the SUMMARY reports as taken did not, in
   # fact, let the gate finish. A per-lane check that ignores the global opt-out is a second,
   # undocumented policy — and the opt-out's whole value is that it is VISIBLE in the block
   # (`missing-fixtures: OPT-OUT`), which a silent per-lane veto destroys.
-  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
+  if _gate_is_strict && [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
      && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
     # EVERY prefix-matching entry must be usable, not just one (roborev round-32, Medium). The Rust
     # test picks the FIRST entry whose name starts with `sensor_data-` in UNSPECIFIED `read_dir`
@@ -18173,7 +18214,7 @@ run_flight_tests() {
       return 0
     fi
     echo ">>> [$name] fixture preflight: test_timeseries/sensor_data + Statistics.db present"
-  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]; then
+  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && _gate_is_strict; then
     echo ">>> [$name] fixture preflight: SKIPPED (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the real-fixture stats test may return early, so this lane does NOT validate the wide-table stats path in this run (#3425)"
   fi
 
@@ -20157,8 +20198,10 @@ run_feature_iso_delta_scan() {
   local iso_features="all-compression,write-support,$feat"
 
   # ---- fixture posture, decided from THIS script's own state -----------------------
+  # _gate_is_strict here too (#4268 roborev finding, High): a --recertify of
+  # this component must not silently degrade below the full-gate posture.
   local _full=0
-  [ -z "$ONLY" ] && [ "${LITE:-0}" -eq 0 ] && _full=1
+  _gate_is_strict && _full=1
   local _posture _fx_mode _fx_note
   _posture=$(_ds_fixture_posture "$_full" "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}")
   _fx_mode=${_posture%%$'\t'*}; _fx_note=${_posture#*$'\t'}
