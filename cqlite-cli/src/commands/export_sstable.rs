@@ -405,9 +405,22 @@ async fn export_as_vortex(
 #[cfg(feature = "state_machine")]
 fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query::QueryMetadata {
     use cqlite_core::query::{ColumnInfo, QueryMetadata};
+    use std::collections::HashSet;
 
     let mut columns = Vec::new();
     let mut position = 0;
+    // Issue #4237 (found by test_export_sstable_to_vortex, via the cql_type fix above):
+    // `TableSchema::columns` is documented as "ALL columns in the table" — partition and
+    // clustering keys included — so appending partition_keys/clustering_keys AND columns
+    // unconditionally, as this function used to, DUPLICATES every key column: once from
+    // its own loop below, once again from the `schema.columns` loop. Parquet silently
+    // tolerated the resulting duplicate-named Arrow fields; Vortex's StructLayout does
+    // not ("StructLayout must have unique field names") and this is the first Vortex path
+    // to build a struct from THIS function's output. Track added names and skip a
+    // `schema.columns` entry whose name a key loop already added, rather than changing
+    // what the key loops themselves do (their `nullable: true` override is deliberate,
+    // per the comments below, and unrelated to this bug).
+    let mut added_names: HashSet<&str> = HashSet::new();
 
     // Add partition keys
     // Mark as nullable because direct SSTable export may not extract all key values
@@ -419,8 +432,9 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
-            cql_type: None,
+            cql_type: cql_type_from_schema_string(&pk.data_type),
         });
+        added_names.insert(pk.name.as_str());
         position += 1;
     }
 
@@ -433,20 +447,24 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
-            cql_type: None,
+            cql_type: cql_type_from_schema_string(&ck.data_type),
         });
+        added_names.insert(ck.name.as_str());
         position += 1;
     }
 
-    // Add regular columns
+    // Add regular columns — skipping any name already added as a partition/clustering key.
     for col in &schema.columns {
+        if added_names.contains(col.name.as_str()) {
+            continue;
+        }
         columns.push(ColumnInfo {
             name: col.name.clone(),
             data_type: parse_cql_type_string(&col.data_type),
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
-            cql_type: None,
+            cql_type: cql_type_from_schema_string(&col.data_type),
         });
         position += 1;
     }
@@ -455,6 +473,30 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
         columns,
         ..Default::default()
     }
+}
+
+/// Parse a CQL type string (e.g. `"uuid"`, `"list<uuid>"`) into the authoritative
+/// `cqlite_core::schema::CqlType`, via the same `ComplexTypeParser` the query engine's own
+/// `SELECT` result columns use (`select_executor::row_build::parse_cql_type_str`, not
+/// reachable from this crate — `pub(super)` — so this calls the parser it wraps directly).
+///
+/// Issue #4237 (review finding): `build_query_metadata_from_schema` previously left
+/// `cql_type: None` unconditionally, so EVERY column here — top-level or nested — took the
+/// flat, extension-metadata-blind `DataType` mapping (`arrow_schema::data_type_to_arrow`),
+/// never the `CqlType`-aware one that attaches `arrow.uuid` (`cql_type_to_arrow_field`).
+/// Harmless for Parquet (which does not require the extension), fatal for Vortex: ANY uuid
+/// column exported via `export_sstable` (the library function both `export_as_parquet` and
+/// `export_as_vortex` share this schema builder with) failed with "Arrow data type not
+/// supported: FixedSizeBinary(16)" — caught by `test_export_sstable_to_vortex`, which a bare
+/// non-empty-file check would have missed, but the strengthened row-count read-back did not.
+/// `None` on a parse failure is a graceful degrade to the pre-existing flat-type behavior,
+/// not a new failure mode this change introduces.
+#[cfg(feature = "state_machine")]
+fn cql_type_from_schema_string(type_str: &str) -> Option<cqlite_core::schema::CqlType> {
+    cqlite_core::parser::complex_types::ComplexTypeParser::new()
+        .parse_type(type_str)
+        .ok()
+        .map(|parsed| parsed.cql_type)
 }
 
 /// Parse CQL type string to DataType
