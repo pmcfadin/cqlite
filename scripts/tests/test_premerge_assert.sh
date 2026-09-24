@@ -1281,16 +1281,21 @@ delta_summary "$T/delta-anchor-nonhex.txt" "unverified"
 refused_pair "delta-anchor: non-hex -> refuse" \
   "$ANCHORFULL" "$T/delta-anchor-nonhex.txt" "is not lowercase hex"
 
-# --- Case 30: the fourth argument must BE a delta block ----------------------
+# --- Case 30: the fourth argument must BE a delta OR a recert block (#4268) --
+# Classification is by CONTENT (a bash read/case loop, no external `grep` --
+# see the shipped script's own comment on why: two ancestry fixtures further
+# down deliberately omit grep from PATH), so a FULL/LITE fourth argument now
+# refuses with a message naming BOTH shapes it could have been, not "ZERO delta
+# blocks" (stale wording from before #4268 added the second shape).
 refused_pair "a FULL summary passed as the fourth argument -> refuse" \
-  "$ANCHORFULL" "$GOOD" "holds ZERO delta blocks"
+  "$ANCHORFULL" "$GOOD" "is neither a DELTA nor a RECERT summary block"
 if [ "${OUT#*"found 1 full"}" != "$OUT" ]; then
-  ok "fourth-arg: refusal NAMES the full block it found instead of a delta one"
+  ok "fourth-arg: refusal NAMES the full block it found instead of a delta/recert one"
 else
   bad "fourth-arg: refusal should name what it found (got: $OUT)"
 fi
 refused_pair "a LITE summary passed as the fourth argument -> refuse" \
-  "$ANCHORFULL" "$T/lite-only.txt" "holds ZERO delta blocks"
+  "$ANCHORFULL" "$T/lite-only.txt" "is neither a DELTA nor a RECERT summary block"
 { delta_block; delta_block; } >"$T/two-deltas.txt"
 assert_count \
   "two-deltas fixture: the file really does hold TWO delta start markers" \
