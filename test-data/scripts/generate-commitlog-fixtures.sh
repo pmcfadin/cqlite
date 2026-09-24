@@ -207,41 +207,7 @@ $ENGINE cp "$CONTAINER_NAME:/tmp/commitlog-ground-truth.json" "$CL_DIR/commitlog
 
 # ---- Derive small committed fixtures (trim trailing zero pre-allocation) ---
 log "Deriving trimmed / truncated / corrupt fixtures..."
-SEG_NAME="$SEG_NAME" RAW="$RAW" CL_DIR="$CL_DIR" python3 - <<'PYEOF'
-import os
-raw_path = os.environ["RAW"]; cl_dir = os.environ["CL_DIR"]; seg = os.environ["SEG_NAME"]
-with open(raw_path, 'rb') as f:
-    data = f.read()
-# Trim the 32MB zero pre-allocation. Keep a 64-byte zero tail so the reader
-# sees a clean end-of-segment (size==0) rather than a torn read.
-last_nz = len(data)
-while last_nz > 0 and data[last_nz - 1] == 0:
-    last_nz -= 1
-end = min(len(data), last_nz + 64)
-clean = data[:end]
-clean_path = os.path.join(cl_dir, f"clean-{seg}")
-with open(clean_path, 'wb') as f:
-    f.write(clean)
-print(f"[trim] raw={len(data)} clean={len(clean)} (last_nonzero={last_nz})")
-
-# Truncated fixture: tear the segment partway through the used region so the
-# final record decode hits EOF (torn tail). Cut ~40 bytes before the clean end
-# of the used data, landing mid-record after several clean records.
-tear_at = max(0, last_nz - 40)
-with open(os.path.join(cl_dir, f"truncated-{seg}"), 'wb') as f:
-    f.write(data[:tear_at])
-print(f"[trunc] tear_at={tear_at}")
-
-# Corrupt-CRC fixture: flip one byte in the used payload region (well past the
-# 4+8+2+len(params)+4 descriptor header + first sync marker), so a per-record
-# CRC check fails while the descriptor still parses.
-corrupt = bytearray(clean)
-flip = min(len(corrupt) - 1, 120)
-corrupt[flip] ^= 0xFF
-with open(os.path.join(cl_dir, f"corrupt-crc-{seg}"), 'wb') as f:
-    f.write(corrupt)
-print(f"[corrupt] flipped byte at {flip}")
-PYEOF
+python3 "$SCRIPT_DIR/commitlog_fixture_derivation.py" derive "$RAW" "$CL_DIR" "$SEG_NAME"
 
 log "=== CommitLog fixtures COMPLETE ==="
 log "  ground truth : $CL_DIR/commitlog-ground-truth.json"

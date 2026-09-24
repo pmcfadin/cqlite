@@ -82,6 +82,10 @@ pub struct PartitionUpdate {
     pub table_id: [u8; 16],
     /// Raw partition-key bytes (schema-typed decoding is the caller's choice).
     pub partition_key: Vec<u8>,
+    /// Whether the regular column-name block was successfully parsed.
+    /// `true` includes a parsed zero-name block; `false` means no such block
+    /// was read (including the empty-partition fast path and static-row bailout).
+    pub columns_read: bool,
     /// Regular column names from the messaging header, in wire order.
     pub column_names: Vec<String>,
     /// Whether the partition carries a partition-level deletion.
@@ -187,6 +191,7 @@ fn decode_partition_update(
         table_id,
         partition_key,
         column_names: Vec::new(),
+        columns_read: false,
         // Set from the authoritative iter_flags bit immediately, before any
         // early return — has_partition_deletion is a structural fact readable
         // right here, independent of rows_decoded, so it must not silently
@@ -231,6 +236,7 @@ fn decode_partition_update(
         return Ok((update, false));
     }
     update.column_names = read_column_names(c)?;
+    update.columns_read = true;
 
     // Constructs we do not fully model: bail structurally (honest, no guessing).
     // The cursor is left mid-body, so this update is NOT fully consumed.

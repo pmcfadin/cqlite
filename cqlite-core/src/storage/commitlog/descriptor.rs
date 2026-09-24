@@ -88,8 +88,9 @@ impl CommitLogDescriptor {
     /// touch the mutation stream.
     ///
     /// # Errors
-    /// - [`Error::CorruptCommitLogFrame`] on a short/malformed header or a CRC
-    ///   mismatch.
+    /// - [`Error::CorruptCommitLogFrame`] on a short/malformed header, invalid
+    ///   UTF-8 or malformed/non-object parameters JSON, an invalid known field
+    ///   type, or a CRC mismatch.
     /// - [`Error::UnsupportedCommitLogVersion`] for an out-of-range version.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         // version(4) + id(8) + paramsLen(2) + crc(4) = 18 byte minimum.
@@ -139,14 +140,18 @@ impl CommitLogDescriptor {
             )));
         }
 
-        let params_json = String::from_utf8_lossy(params_bytes).into_owned();
-        let (compression_class, encrypted) = parse_params(&params_json);
+        let params_json = std::str::from_utf8(params_bytes).map_err(|error| {
+            Error::CorruptCommitLogFrame(format!(
+                "descriptor parameters are not valid UTF-8: {error}"
+            ))
+        })?;
+        let (compression_class, encrypted) = parse_params(params_json)?;
 
         // Keep the gate's version (validated) as the authoritative value.
         Ok(Self {
             version: gates.version,
             id,
-            params_json,
+            params_json: params_json.to_owned(),
             compression_class,
             encrypted,
             header_len: crc_end,
@@ -164,8 +169,9 @@ impl CommitLogDescriptor {
 /// Extract the compressor class and encryption flag from the params JSON.
 ///
 /// The params object is Cassandra's own authoritative descriptor metadata; we
-/// parse it as JSON (never sniff the payload). An unparseable/empty params
-/// string is treated as uncompressed+unencrypted (the `{}` baseline).
+/// parse it as JSON (never sniff the payload). The JSON must be an object; an
+/// absent or explicit-null compression class means compression is unset, as in
+/// Cassandra's uncompressed descriptors.
 ///
 /// The key names are the ones Cassandra 5.0.2 actually writes in
 /// `CommitLogDescriptor.constructParametersString` /
@@ -176,15 +182,17 @@ impl CommitLogDescriptor {
 ///   for unsupported-payload detection.)
 /// - `encCipher` / `encKeyAlias` / `encIV` — the encryption-context keys; there
 ///   is no `encryptionContext`/`encryption` key on the wire.
-fn parse_params(json: &str) -> (Option<String>, bool) {
-    let value: serde_json::Value = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return (None, false),
-    };
-    let obj = match value.as_object() {
-        Some(o) => o,
-        None => return (None, false),
-    };
+fn parse_params(json: &str) -> Result<(Option<String>, bool)> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
+        Error::CorruptCommitLogFrame(format!(
+            "invalid CommitLog descriptor parameters JSON: {error}"
+        ))
+    })?;
+    let obj = value.as_object().ok_or_else(|| {
+        Error::CorruptCommitLogFrame(
+            "CommitLog descriptor parameters JSON must be an object".to_string(),
+        )
+    })?;
     // `compressionClass` is a plain string. Some configurations write it as an
     // explicit JSON `null` (key present, value null) when compression is unset,
     // rather than omitting the key; a present-but-null value must parse as "no
@@ -192,18 +200,23 @@ fn parse_params(json: &str) -> (Option<String>, bool) {
     // uncompressed segment. An empty string is likewise treated as no
     // compression. Only a present, non-null, non-empty string names a
     // compressor the reader must refuse.
-    let compression_class = obj
-        .get("compressionClass")
-        .and_then(|c| c.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+    let compression_class = match obj.get("compressionClass") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(class)) if !class.is_empty() => Some(class.clone()),
+        Some(serde_json::Value::String(_)) => None,
+        Some(_) => {
+            return Err(Error::CorruptCommitLogFrame(
+                "CommitLog descriptor compressionClass must be a string or null".to_string(),
+            ));
+        }
+    };
     // Encryption is declared by any of the real encryption-context keys being
     // present with a non-null value. Same present-but-null hazard as
     // compression: `{"encCipher": null}` is NOT encrypted.
     let encrypted = ["encCipher", "encKeyAlias", "encIV"]
         .iter()
         .any(|k| obj.get(*k).is_some_and(|v| !v.is_null()));
-    (compression_class, encrypted)
+    Ok((compression_class, encrypted))
 }
 
 #[inline]
@@ -237,18 +250,22 @@ pub(crate) mod tests {
     /// `pub(crate)` so the [`super::super::reader`] public-surface tests can
     /// build a Cassandra-shaped descriptor header without duplicating the CRC.
     pub(crate) fn build_header(version: i32, id: i64, params: &str) -> Vec<u8> {
-        let params_bytes = params.as_bytes();
+        build_header_raw(version, id, params.as_bytes())
+    }
+
+    fn build_header_raw(version: i32, id: i64, params_bytes: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&version.to_be_bytes());
         out.extend_from_slice(&id.to_be_bytes());
-        out.extend_from_slice(&(params_bytes.len() as u16).to_be_bytes());
+        let params_len = u16::try_from(params_bytes.len()).expect("test parameters fit header");
+        out.extend_from_slice(&params_len.to_be_bytes());
         out.extend_from_slice(params_bytes);
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&version.to_be_bytes());
         let id_u = id as u64;
         hasher.update(&((id_u & 0xFFFF_FFFF) as u32).to_be_bytes());
         hasher.update(&((id_u >> 32) as u32).to_be_bytes());
-        hasher.update(&(params_bytes.len() as u32).to_be_bytes());
+        hasher.update(&u32::from(params_len).to_be_bytes());
         hasher.update(params_bytes);
         out.extend_from_slice(&hasher.finalize().to_be_bytes());
         out
@@ -303,6 +320,47 @@ pub(crate) mod tests {
             CommitLogDescriptor::parse(&[0u8; 4]),
             Err(Error::CorruptCommitLogFrame(_))
         ));
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_in_descriptor_parameters() {
+        let bytes = build_header_raw(7, 42, &[0xff]);
+        assert!(matches!(
+            CommitLogDescriptor::parse(&bytes),
+            Err(Error::CorruptCommitLogFrame(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_non_object_and_wrongly_typed_parameters() {
+        for params in [
+            "not-json",
+            "[]",
+            "null",
+            r#"{"compressionClass":{}}"#,
+            r#"{"compressionClass":[]}"#,
+            r#"{"compressionClass":false}"#,
+            r#"{"compressionClass":7}"#,
+        ] {
+            let bytes = build_header(7, 42, params);
+            assert!(
+                matches!(
+                    CommitLogDescriptor::parse(&bytes),
+                    Err(Error::CorruptCommitLogFrame(_))
+                ),
+                "expected malformed descriptor params to fail: {params}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_and_null_compression_metadata_are_valid_uncompressed_controls() {
+        for params in ["{}", r#"{"compressionClass":null}"#] {
+            let bytes = build_header(7, 42, params);
+            let desc = CommitLogDescriptor::parse(&bytes).expect("valid unset metadata");
+            assert_eq!(desc.compression_class, None);
+            assert!(!desc.is_unsupported_payload());
+        }
     }
 
     #[test]

@@ -342,7 +342,8 @@ pub enum Commands {
         /// Output format
         #[arg(short, long, value_enum, default_value = "table")]
         format: OutputFormat,
-        /// Limit the mutations and emitted partition updates (whichever bound is reached first)
+        /// Stop after this many mutation records or emitted partition updates.
+        /// The update limit can clip the final mutation; check `last_mutation_partial`.
         #[arg(short, long)]
         limit: Option<usize>,
     },
