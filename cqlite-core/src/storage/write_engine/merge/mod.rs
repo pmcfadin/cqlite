@@ -1923,21 +1923,27 @@ impl KWayMerger {
                         if is_partition_only {
                             // The tombstone MARKER itself is never row-shadowed
                             // — it IS the deletion — so it always contributes
-                            // to persisted stats (issue #4246).
-                            if let Some(pt) = &mutation.partition_tombstone {
-                                partition_stats.update_timestamp(pt.deletion_time);
-                                partition_stats.update_local_deletion_time(pt.local_deletion_time);
-                                partition_stats.mark_partition_level_deletion();
-                            }
+                            // to persisted stats (issue #4246). `is_partition_only`
+                            // guarantees `range_tombstones` is empty, so
+                            // `fold_marker_stats` folding both fields is exactly
+                            // the partition-tombstone-only fold this needs.
+                            crate::storage::sstable::writer::stats_fold::fold_marker_stats(
+                                &mut partition_stats,
+                                &mutation,
+                            );
                             partition_tombstone = mutation.partition_tombstone;
                             saw_carrier_or_static = true;
                             continue;
                         }
                         if is_range_only {
-                            for rt in &mutation.range_tombstones {
-                                partition_stats.update_timestamp(rt.deletion_time);
-                                partition_stats.update_local_deletion_time(rt.local_deletion_time);
-                            }
+                            // `is_range_only` guarantees `partition_tombstone`
+                            // is `None`, so `fold_marker_stats` folding both
+                            // fields is exactly the range-tombstones-only fold
+                            // this needs.
+                            crate::storage::sstable::writer::stats_fold::fold_marker_stats(
+                                &mut partition_stats,
+                                &mutation,
+                            );
                             range_tombstones.extend(mutation.range_tombstones.iter().cloned());
                             saw_carrier_or_static = true;
                             continue;
@@ -1969,18 +1975,31 @@ impl KWayMerger {
                             // Static-cell shadowing by a partition tombstone is
                             // a separate, pre-existing question issue #4246
                             // does not attempt (see `row_group_survives`'s doc
-                            // comment) — folded unconditionally, matching the
-                            // prior behavior for this classification exactly.
+                            // comment) — folded unconditionally (`None`
+                            // shadow boundary), matching the prior behavior
+                            // for this classification exactly.
                             // `fold_row_content_stats` (not `fold_mutation_stats`,
-                            // issue #4246 roborev finding): this mutation's own
-                            // `partition_tombstone`/`range_tombstones` fields, if
-                            // any, are already folded unconditionally above at
-                            // their own classification sites — folding them
-                            // again here would double-count into the
-                            // tombstone-drop-time histogram.
+                            // issue #4246 roborev finding): the ONLY markers
+                            // this fold could otherwise double-count are a
+                            // `partition_tombstone`/`range_tombstones` field
+                            // on THIS SAME mutation object, which reaches
+                            // this branch only if it also has non-empty
+                            // `operations` — this mutation IS in this branch
+                            // because `mutation.clustering_key.is_none() &&
+                            // schema_has_static`, so any such marker field
+                            // would be REACHABLE-BUT-DEAD anyway: it is
+                            // never added to `partition_tombstone`/
+                            // `range_tombstones` above (those are set only
+                            // by the mutually-exclusive `is_partition_only`/
+                            // `is_range_only` branches, which require EMPTY
+                            // `operations`) and so never emitted as a marker
+                            // either — this call cannot double-count it, but
+                            // nothing folds it, matching the marker being
+                            // absent from Data.db.
                             crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
                                 &mut partition_stats,
                                 &mutation,
+                                None,
                             );
                             static_tracker.feed(&mutation, &write_schema, None);
                             saw_carrier_or_static = true;
@@ -2059,8 +2078,8 @@ impl KWayMerger {
                                 // content is a static op (masked today only by
                                 // the separate `carries_static` escape hatch
                                 // below).
-                                let survives =
-                                    crate::storage::sstable::writer::stats_fold::row_group_survives(
+                                let (survives, deletion_ts) =
+                                    crate::storage::sstable::writer::stats_fold::row_group_survival(
                                         std::slice::from_ref(&mutation),
                                         &write_schema,
                                         false,
@@ -2073,27 +2092,38 @@ impl KWayMerger {
                                             &write_schema,
                                         )
                                     });
-                                if survives || carries_static {
-                                    // `fold_row_content_stats`, not
-                                    // `fold_mutation_stats` (issue #4246
-                                    // roborev finding): this mutation's own
-                                    // `partition_tombstone`/`range_tombstones`
-                                    // fields, if any, are already folded
-                                    // unconditionally at their own
-                                    // classification sites above — folding
-                                    // them again here would double-count
-                                    // into the tombstone-drop-time
-                                    // histogram. A per-mutation self-shadow
-                                    // check (mirroring `write_partition`'s)
-                                    // is not needed here: a compaction
-                                    // "cluster group" is already a SINGLE,
-                                    // fully-reconciled `Mutation` per
-                                    // clustering key (see this fn's own doc
-                                    // comment), so there is no OLDER sibling
-                                    // mutation in the same group to exclude.
+                                // `fold_row_content_stats`, not
+                                // `fold_mutation_stats` (issue #4246 roborev
+                                // finding): this mutation's own
+                                // `partition_tombstone`/`range_tombstones`
+                                // fields, if any, are already folded
+                                // unconditionally at their own classification
+                                // sites above — folding them again here would
+                                // double-count into the tombstone-drop-time
+                                // histogram. Passing `deletion_ts` (not
+                                // `None`) lets it per-op gate any
+                                // `ComplexDeletion`/`WriteComplexElement` this
+                                // mutation carries against its OWN
+                                // independent timestamp, even though a
+                                // compaction "cluster group" is already a
+                                // SINGLE, fully-reconciled `Mutation` per
+                                // clustering key (see this fn's own doc
+                                // comment) — so there is no OLDER SIBLING
+                                // mutation in the group to self-shadow
+                                // against, but THIS mutation's own carried
+                                // `DeleteRow`/complex ops still need the same
+                                // per-op treatment `write_partition` uses.
+                                if carries_static {
                                     crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
                                         &mut partition_stats,
                                         mutation,
+                                        None,
+                                    );
+                                } else if survives {
+                                    crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
+                                        &mut partition_stats,
+                                        mutation,
+                                        deletion_ts,
                                     );
                                 }
                                 session.feed_row(mutation, &write_schema)?;
