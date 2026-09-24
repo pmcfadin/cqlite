@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
-use crate::parser::repair_metadata::{parse_repair_metadata, read_cell_per_partition_stats, RepairField};
+use crate::parser::repair_metadata::{
+    parse_repair_metadata, read_cell_per_partition_stats, read_compression_ratio, RepairField,
+};
 use crate::parser::statistics::SSTableStatistics;
 use crate::platform::Platform;
 use crate::schema::TableSchema;
@@ -289,6 +291,7 @@ async fn diagnose_generation(
 
     let repair = parse_repair_metadata(&stats_bytes, gates.as_ref())?;
     let cell_per_partition = read_cell_per_partition_stats(&stats_bytes)?;
+    let compression_ratio_raw = read_compression_ratio(&stats_bytes)?;
 
     let descriptor = SsTableDescriptor::parse(data_path).ok();
     let format = descriptor.map(|d| d.version).unwrap_or_default();
@@ -302,64 +305,18 @@ async fn diagnose_generation(
     let generation = reader.generation;
     let token_span = reader.endpoint_tokens();
 
-    let max_timestamp = match stats.timestamp_stats.max_timestamp {
-        Some(v) => SourcedField::measured(v, FieldSource::Statistics),
-        None => SourcedField::unmeasured(
-            "max_timestamp not authoritatively decoded from Statistics.db for this generation \
-             (issue #1653)",
-        ),
-    };
+    let max_timestamp = max_timestamp_field(&stats);
+    let estimated_partition_count = estimated_partition_count_field(&stats);
 
-    let estimated_partition_count =
-        SourcedField::measured(stats.row_stats.partition_count, FieldSource::Statistics);
-
-    let (estimated_droppable_tombstone_ratio, gc_before_for_ratio) = match (
-        gc_before,
+    let (estimated_droppable_tombstone_ratio, gc_before_for_ratio) = droppable_tombstone_ratio_field(
+        &stats,
         cell_per_partition.as_ref(),
-    ) {
-        (Some(gcb), Some(cpp)) => {
-            match compute_droppable_ratio(cpp, &stats.tombstone_drop_times, gcb) {
-                DroppableRatio::Value(v) => {
-                    (SourcedField::measured(v, FieldSource::Statistics), gcb)
-                }
-                DroppableRatio::Overflowed => (
-                    SourcedField::unmeasured(
-                        "estimatedCellPerPartitionCount histogram overflowed; Cassandra's own \
-                         mean() is undefined in this state",
-                    ),
-                    gcb,
-                ),
-            }
-        }
-        (None, _) => (
-            SourcedField::unmeasured("gc_grace_seconds is invalid (negative); purging disabled"),
-            options.now_secs,
-        ),
-        (Some(gcb), None) => (
-            SourcedField::unmeasured(
-                "Statistics.db carries no STATS component; estimatedCellPerPartitionCount \
-                 unavailable",
-            ),
-            gcb,
-        ),
-    };
+        gc_before,
+        options.now_secs,
+    );
 
-    let pending_repair = match &repair.pending_repair {
-        RepairField::Decoded(Some(uuid)) => {
-            SourcedField::measured(hex_uuid(uuid), FieldSource::Statistics)
-        }
-        RepairField::Decoded(None) => SourcedField::measured_absent(FieldSource::Statistics),
-        RepairField::Unparsed => SourcedField::unmeasured(
-            "pendingRepair not reachable by the version-gated STATS walk for this generation",
-        ),
-    };
-
-    let compression_ratio = match stats.compression_stats.as_ref() {
-        Some(c) => SourcedField::measured(c.ratio, FieldSource::Statistics),
-        None => SourcedField::unmeasured(
-            "compression statistics not authoritatively parsed from Statistics.db (issue #1653)",
-        ),
-    };
+    let pending_repair = pending_repair_field(&repair);
+    let compression_ratio = compression_ratio_field(compression_ratio_raw);
 
     let fully_expired_at_now = match gc_before {
         Some(gcb) => is_fully_expired(&stats.timestamp_stats, gcb),
@@ -404,6 +361,97 @@ async fn diagnose_generation(
         },
         token_span,
     ))
+}
+
+/// `max_timestamp`'s [`SourcedField`] mapping (spec R1.1), extracted as a public
+/// pure function so `issue_4204_diagnose_provenance.rs` can drive the EXACT
+/// mapping `diagnose_generation` uses against a synthetic `Option::None` case
+/// (issue #1653's honest-`Option` state) without needing a real on-disk fixture
+/// carrying that legacy layout.
+pub fn max_timestamp_field(stats: &SSTableStatistics) -> SourcedField<i64> {
+    match stats.timestamp_stats.max_timestamp {
+        Some(v) => SourcedField::measured(v, FieldSource::Statistics),
+        None => SourcedField::unmeasured(
+            "max_timestamp not authoritatively decoded from Statistics.db for this generation \
+             (issue #1653)",
+        ),
+    }
+}
+
+/// `estimated_partition_count`'s [`SourcedField`] mapping. Sourced from
+/// `Statistics.db`'s own `estimatedPartitionSize` histogram bucket SUM
+/// (`row_stats.partition_count`, already authoritatively decoded) rather than an
+/// independent walk of `Index.db`/`Partitions.db`: `diagnose` never
+/// cross-checks Statistics.db against a second source (spec R5 — that is
+/// `verify --mode audit`'s job), so this deliberately does not re-derive the
+/// count from the index just to relabel its source `"index"` (a documented,
+/// deliberate reading of `design.md` D5's suggested label).
+pub fn estimated_partition_count_field(stats: &SSTableStatistics) -> SourcedField<u64> {
+    SourcedField::measured(stats.row_stats.partition_count, FieldSource::Statistics)
+}
+
+/// `estimated_droppable_tombstone_ratio`'s [`SourcedField`] mapping (spec R2.1,
+/// `design.md` D3), plus the `gcBefore` it was computed against.
+pub fn droppable_tombstone_ratio_field(
+    stats: &SSTableStatistics,
+    cell_per_partition: Option<&crate::parser::repair_metadata::CellPerPartitionStats>,
+    gc_before: Option<i64>,
+    fallback_gc_before: i64,
+) -> (SourcedField<f64>, i64) {
+    match (gc_before, cell_per_partition) {
+        (Some(gcb), Some(cpp)) => match compute_droppable_ratio(cpp, &stats.tombstone_drop_times, gcb) {
+            DroppableRatio::Value(v) => (SourcedField::measured(v, FieldSource::Statistics), gcb),
+            DroppableRatio::Overflowed => (
+                SourcedField::unmeasured(
+                    "estimatedCellPerPartitionCount histogram overflowed; Cassandra's own \
+                     mean() is undefined in this state",
+                ),
+                gcb,
+            ),
+        },
+        (None, _) => (
+            SourcedField::unmeasured("gc_grace_seconds is invalid (negative); purging disabled"),
+            fallback_gc_before,
+        ),
+        (Some(gcb), None) => (
+            SourcedField::unmeasured(
+                "Statistics.db carries no STATS component; estimatedCellPerPartitionCount \
+                 unavailable",
+            ),
+            gcb,
+        ),
+    }
+}
+
+/// `pending_repair`'s [`SourcedField`] mapping (spec R1.1 shape, applied to
+/// `RepairMetadata::pending_repair`).
+pub fn pending_repair_field(
+    repair: &crate::parser::repair_metadata::RepairMetadata,
+) -> SourcedField<String> {
+    match &repair.pending_repair {
+        RepairField::Decoded(Some(uuid)) => {
+            SourcedField::measured(hex_uuid(uuid), FieldSource::Statistics)
+        }
+        RepairField::Decoded(None) => SourcedField::measured_absent(FieldSource::Statistics),
+        RepairField::Unparsed => SourcedField::unmeasured(
+            "pendingRepair not reachable by the version-gated STATS walk for this generation",
+        ),
+    }
+}
+
+/// `compression_ratio`'s [`SourcedField`] mapping (spec R1.1/R2.1 shape).
+///
+/// `ratio` is the STATS component's own `compressionRatio` `f64` field (decoded
+/// by [`crate::parser::repair_metadata::read_compression_ratio`]) — a DIFFERENT,
+/// unconditionally-written field from `SSTableStatistics::compression_stats`
+/// (the richer algorithm-name/speed structure the enhanced `nb` parser leaves
+/// `None`, issue #1653). `sstablemetadata`'s own "Compression ratio: …" line
+/// prints this same STATS field.
+pub fn compression_ratio_field(ratio: Option<f64>) -> SourcedField<f64> {
+    match ratio {
+        Some(r) => SourcedField::measured(r, FieldSource::Statistics),
+        None => SourcedField::unmeasured("Statistics.db carries no STATS component"),
+    }
 }
 
 /// Sibling `Statistics.db` path for a `Data.db` path.

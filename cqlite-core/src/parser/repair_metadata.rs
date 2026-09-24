@@ -1161,6 +1161,45 @@ pub(crate) fn read_cell_per_partition_stats(input: &[u8]) -> Result<Option<CellP
     }))
 }
 
+/// Decode the STATS component's `compressionRatio` (`f64`, field 7 of the
+/// self-describing forward walk — see [`parse_repair_metadata`]'s numbered
+/// steps) directly (issue #4204, `cqlite diagnose` R2.1).
+///
+/// `SSTableStatistics::compression_stats` (the richer algorithm-name/speed
+/// structure the enhanced `nb` parser leaves `None`, issue #1653) is a
+/// DIFFERENT field from this one: `compressionRatio` is a single `f64` written
+/// unconditionally by `StatsMetadata.StatsMetadataSerializer.serialize` (no
+/// version gate), reachable by the SAME fully self-describing walk
+/// [`read_table_counts`]/[`read_cell_per_partition_stats`] already use — no
+/// gates needed. This is what `sstablemetadata`'s own "Compression ratio: …"
+/// line prints, whether or not the SSTable is actually compressed (an
+/// uncompressed SSTable's ratio is `1.0` or the Cassandra-computed default; a
+/// negative sentinel means "not yet computed", see `CompressionMetadata` docs —
+/// this decoder returns whatever `f64` is on disk, not a heuristic).
+///
+/// Returns `Ok(None)` when `Statistics.db` carries no STATS component.
+pub(crate) fn read_compression_ratio(input: &[u8]) -> Result<Option<f64>> {
+    let Some(bounds) = stats_component_bounds(input)? else {
+        return Ok(None);
+    };
+    let mut c = Cursor::new(&input[bounds.start..bounds.end]);
+
+    // 1-2. estimatedPartitionSize + estimatedCellPerPartitionCount.
+    skip_estimated_histogram(&mut c)?;
+    skip_estimated_histogram(&mut c)?;
+    // 3. commitLogUpperBound: i64 segmentId + i32 position.
+    c.skip(8 + 4)?;
+    // 4. minTimestamp, maxTimestamp.
+    c.skip(8 + 8)?;
+    // 5. min/maxLocalDeletionTime.
+    c.skip(4 + 4)?;
+    // 6. minTTL, maxTTL.
+    c.skip(4 + 4)?;
+    // 7. compressionRatio (f64) — READ.
+    let ratio = c.read_f64()?;
+    Ok(Some(ratio))
+}
+
 /// Cassandra's canonical "no deletion" local-deletion-time sentinel,
 /// normalized to `i64` for both legacy (nb) and modern (oa/da) encodings.
 ///
