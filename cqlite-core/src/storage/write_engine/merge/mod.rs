@@ -5835,7 +5835,7 @@ mod merge_property_tests {
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
                     _egress_slot: None,
-    trace: NoTrace,
+                    trace: NoTrace,
                 };
                 let real_merged = merger.merge_partition_rows(merge_entries.clone())
                     .expect("merge_partition_rows must not fail");
@@ -5964,7 +5964,7 @@ mod merge_property_tests {
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
                     _egress_slot: None,
-    trace: NoTrace,
+                    trace: NoTrace,
                 };
                 let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
                     .expect("merge_partition_rows must not fail");

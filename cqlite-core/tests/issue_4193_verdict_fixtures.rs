@@ -303,7 +303,10 @@ fn verdict_shadowed_by_tombstone_range_and_winner_outside_range() {
 
     let outside = only_cell(&cells, "v", 3, 1);
     assert_eq!(outside.verdict, Verdict::Winner);
-    assert_eq!(outside.value, Some(Value::text("outside-range".to_string())));
+    assert_eq!(
+        outside.value,
+        Some(Value::text("outside-range".to_string()))
+    );
 }
 
 // ===========================================================================
@@ -636,7 +639,10 @@ fn verdict_dropped_column() {
     );
     for cell in dropped {
         assert_eq!(cell.decided_by, DecidedBy::DropTime(drop_time));
-        assert_eq!(cell.run_index, 1, "the dropped cells came from the older generation");
+        assert_eq!(
+            cell.run_index, 1,
+            "the dropped cells came from the older generation"
+        );
     }
 
     // `keep_col` must never be affected by the drop — a phantom-purge would

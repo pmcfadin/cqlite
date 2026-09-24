@@ -6,7 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-use cqlite_core::schema::cql_parser::{classify_statement, parse_create_table, split_cql_statements, StatementType};
+use cqlite_core::schema::cql_parser::{
+    classify_statement, parse_create_table, split_cql_statements, StatementType,
+};
 use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::write_engine::merge::trace::RecordingSink;
 use cqlite_core::storage::write_engine::merge::{KWayMerger, MergeEntry, MergeStep};
@@ -82,7 +84,10 @@ fn generation_dir(keyspace: &str, table: &str) -> PathBuf {
 /// path — R3.1 covers the compaction/full-scan reconciliation kernel every
 /// table below exercises) to completion, collecting `(key, rows)` per
 /// emitted partition in emission order.
-fn drive_full_scan(paths: Vec<PathBuf>, schema: &TableSchema) -> Vec<(DecoratedKey, Vec<MergeEntry>)> {
+fn drive_full_scan(
+    paths: Vec<PathBuf>,
+    schema: &TableSchema,
+) -> Vec<(DecoratedKey, Vec<MergeEntry>)> {
     let mut merger = KWayMerger::new_with_gc(
         paths,
         schema,
@@ -278,7 +283,10 @@ fn truncated_statistics_fails_closed_before_any_trace() {
     // even the fixed-size component-length header any parse path requires,
     // which no fallback can paper over.
     let truncated = staged.join("nb-1-big-Statistics.db");
-    assert!(truncated.exists(), "expected {truncated:?} to exist in the staged copy");
+    assert!(
+        truncated.exists(),
+        "expected {truncated:?} to exist in the staged copy"
+    );
     std::fs::write(&truncated, b"\x00").expect("truncate Statistics.db to 1 byte");
 
     let schema = load_table_schema(
@@ -288,7 +296,11 @@ fn truncated_statistics_fails_closed_before_any_trace() {
         "dropped_regular_col",
     );
     let paths = discover_generations_newest_first(&staged);
-    assert_eq!(paths.len(), 2, "expected both generations in the staged copy");
+    assert_eq!(
+        paths.len(),
+        2,
+        "expected both generations in the staged copy"
+    );
 
     // `SSTableRowIteratorAdapter::open` does not eagerly parse the FULL
     // Statistics.db at construction (encoding/deletion stats are consulted

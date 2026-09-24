@@ -221,7 +221,9 @@ async fn assert_explain_matches_select(id: i32, now: i64) {
     for (mode, mode_name) in [(ReadPathMode::Point, "point"), (ReadPathMode::Full, "full")] {
         let db = open_db(&root, &schema_path, mode).await;
         let result = db
-            .execute(&format!("SELECT * FROM test_explain.trace_decisions WHERE id = {id}"))
+            .execute(&format!(
+                "SELECT * FROM test_explain.trace_decisions WHERE id = {id}"
+            ))
             .await
             .unwrap_or_else(|error| panic!("SELECT ({mode_name}) failed: {error}"));
 
