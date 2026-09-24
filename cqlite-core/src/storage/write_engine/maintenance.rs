@@ -879,7 +879,26 @@ impl WriteEngine {
                             // branch's own doc comment above and
                             // `stream_rows_directly`'s field doc), so no row
                             // here can ever be shadow-dropped in the first
-                            // place — there is nothing to gate against.
+                            // place — there is nothing to gate against. This
+                            // branch also deliberately never calls
+                            // `fold_row_deletion_marker`: pin the invariant
+                            // it relies on (issue #4246 roborev round-3
+                            // finding — nothing previously asserted this, so
+                            // a future relaxation of `stream_rows_directly`'s
+                            // gate could silently drop a row's own deletion
+                            // from persisted stats without any test noticing).
+                            debug_assert!(
+                                mutation.row_tombstone.is_none()
+                                    && !mutation
+                                        .operations
+                                        .iter()
+                                        .any(|op| matches!(op, crate::storage::write_engine::mutation::CellOperation::DeleteRow)),
+                                "issue #4246: stream_rows_directly fed a mutation carrying a \
+                                 row deletion (DeleteRow op or #932 row_tombstone) — this path \
+                                 never folds a row-deletion marker, relying on \
+                                 ActiveMerge::stream_rows_directly's own \"no input carries any \
+                                 deletion\" gate; that invariant just broke"
+                            );
                             stats_fold::fold_row_content_stats(
                                 stream_state.partition_stats_mut(),
                                 &mutation,
@@ -997,47 +1016,24 @@ impl WriteEngine {
                                         );
                                     }
                                 }
-                                // `skip_static_ops = false`, matching what
-                                // `feed_streaming_row`/`feed_row` pass to
-                                // `merge_row_group` (issue #4246 roborev
-                                // finding, mirrored from `KWayMerger::merge`).
-                                let (survives, deletion_ts, row_deletion) =
-                                    stats_fold::row_group_survival(
-                                        std::slice::from_ref(&mutation),
-                                        &write_schema,
-                                        false,
-                                        shadow_floor,
-                                    );
-                                // This mutation's own row-deletion marker,
-                                // folded exactly once (issue #4246 roborev
-                                // round-2 finding, mirrored from
-                                // `KWayMerger::merge`'s identical fix):
-                                // `fold_row_content_stats` no longer folds a
-                                // row deletion per-mutation.
-                                stats_fold::fold_row_deletion_marker(
+                                // `skip_static_ops = false` inside it,
+                                // matching what `feed_streaming_row`/
+                                // `feed_row` pass to `merge_row_group` —
+                                // shared with `KWayMerger::merge`'s
+                                // structurally-identical single-mutation
+                                // `PartitionEnd` handling via
+                                // `stats_fold::fold_single_mutation_row_group`
+                                // (issue #4246 roborev round-3 finding: the
+                                // two paths used to hand-assemble this
+                                // sequence independently, risking silent
+                                // drift).
+                                stats_fold::fold_single_mutation_row_group(
                                     &mut state.partition_stats,
-                                    row_deletion,
+                                    mutation,
+                                    &write_schema,
+                                    schema_has_static,
+                                    shadow_floor,
                                 );
-                                let carries_static = schema_has_static
-                                    && mutation.operations.iter().any(|op| {
-                                        crate::storage::sstable::writer::data_writer::is_static_operation(
-                                            op,
-                                            &write_schema,
-                                        )
-                                    });
-                                if carries_static {
-                                    stats_fold::fold_row_content_stats(
-                                        &mut state.partition_stats,
-                                        mutation,
-                                        None,
-                                    );
-                                } else if survives {
-                                    stats_fold::fold_row_content_stats(
-                                        &mut state.partition_stats,
-                                        mutation,
-                                        deletion_ts,
-                                    );
-                                }
                                 merge.writer.feed_streaming_row(&mut session, mutation)?;
                             }
                             let (offset, blocks, emit) =

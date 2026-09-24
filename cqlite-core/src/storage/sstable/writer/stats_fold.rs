@@ -82,11 +82,29 @@ pub(crate) fn row_group_survival(
     skip_static_ops: bool,
     shadow_floor: Option<i64>,
 ) -> (bool, Option<i64>, Option<(i64, i32)>) {
-    let row_deletion = DataWriter::resolve_row_deletion(group, shadow_floor);
-    let deletion_ts = DataWriter::combine_deletion_ts(row_deletion, shadow_floor);
-    let survives =
-        DataWriter::merge_row_group(group, schema, skip_static_ops, shadow_floor).is_some();
-    (survives, deletion_ts, row_deletion)
+    // A SINGLE `merge_row_group` call (issue #4246 roborev round-3
+    // performance finding: this used to ALSO call `resolve_row_deletion`
+    // standalone before `merge_row_group`, which re-runs it internally as
+    // part of its own full reconciliation — a redundant group scan on the
+    // write hot path for every row group, on top of the emitter's own
+    // separate `merge_row_group` call to actually build the row). When the
+    // group survives, `row.row_deletion` IS the exact tuple
+    // `resolve_row_deletion` would have returned (see `merge_row_group`'s
+    // own doc comment) — no separate call needed. `combine_deletion_ts` is a
+    // cheap `Option` combine, not a group re-scan.
+    match DataWriter::merge_row_group(group, schema, skip_static_ops, shadow_floor) {
+        Some(row) => {
+            let deletion_ts = DataWriter::combine_deletion_ts(row.row_deletion, shadow_floor);
+            (true, deletion_ts, row.row_deletion)
+        }
+        // A group with ANY resolved row deletion always produces at least a
+        // tombstone row (`merge_row_group`'s own final "produces no row at
+        // all" check is `false` whenever `row_deletion.is_some()`), so
+        // `None` here implies `row_deletion` was ALSO `None` — every caller
+        // only consumes `deletion_ts`/`row_deletion` inside a `survives`
+        // branch, so this is behaviorally identical to the two-call form.
+        None => (false, None, None),
+    }
 }
 
 /// Fold the row GROUP's resolved row-deletion marker (the winning `DeleteRow`
@@ -105,6 +123,46 @@ pub(crate) fn fold_row_deletion_marker(
     if let Some((ts, ldt)) = row_deletion {
         stats.update_timestamp(ts);
         stats.update_local_deletion_time(ldt);
+    }
+}
+
+/// The exact fold sequence for a row GROUP consisting of a SINGLE mutation —
+/// the shape both incremental streaming paths use (`KWayMerger::merge`'s
+/// `PartitionEnd` handling and `WriteEngine::maintenance_step`'s buffered
+/// `PartitionEnd` drain): by the time either sees it, a compaction/merge
+/// "cluster group" is already one fully-reconciled `Mutation` per clustering
+/// key (unlike `write_partition`'s buffered multi-mutation-per-group case),
+/// so `row_group_survival`'s `group` argument is always a one-element slice.
+///
+/// Extracted (issue #4246 roborev round-3 finding): the two call sites used
+/// to hand-assemble this identical four-step sequence independently, so a
+/// future edit to one could silently drift from the other with nothing to
+/// catch it — this module's own `#1668` equivalence test
+/// (`single_mutation_row_group_fold_...`) now exercises THIS function
+/// directly, the same one both production paths call.
+pub(crate) fn fold_single_mutation_row_group(
+    stats: &mut StatisticsMetadata,
+    mutation: &Mutation,
+    schema: &TableSchema,
+    schema_has_static: bool,
+    shadow_floor: Option<i64>,
+) {
+    let (survives, deletion_ts, row_deletion) =
+        row_group_survival(std::slice::from_ref(&mutation), schema, false, shadow_floor);
+    fold_row_deletion_marker(stats, row_deletion);
+    let carries_static = schema_has_static
+        && mutation.operations.iter().any(|op| {
+            crate::storage::sstable::writer::data_writer::is_static_operation(op, schema)
+        });
+    if carries_static {
+        // Static-cell shadowing uses a SEPARATE, partition-floor-only
+        // mechanism unrelated to this row-level `deletion_ts` (out of this
+        // fix's verified scope, see `row_group_survives`'s doc comment) —
+        // pass `None` so per-op shadow gating never applies to it, exactly
+        // the prior unconditional-fold behavior.
+        fold_row_content_stats(stats, mutation, None);
+    } else if survives {
+        fold_row_content_stats(stats, mutation, deletion_ts);
     }
 }
 
@@ -270,7 +328,7 @@ pub(crate) fn fold_row_content_stats(
                 };
                 stats.update_local_deletion_time(local_deletion_time);
             }
-            op @ (CellOperation::Delete { .. } | CellOperation::DeleteRow) => {
+            op @ CellOperation::Delete { .. } => {
                 if mutation_shadowed {
                     continue;
                 }
@@ -283,6 +341,22 @@ pub(crate) fn fold_row_content_stats(
                     );
                 stats.update_local_deletion_time(local_deletion_time);
             }
+            // `DeleteRow` is NEVER folded here (issue #4246 roborev round-3
+            // finding): the row's own deletion — whether contributed by a
+            // `DeleteRow` op or a #932 decoupled `row_tombstone` — is folded
+            // EXACTLY ONCE at the GROUP level via `fold_row_deletion_marker`
+            // (see `row_group_survival`'s doc comment), regardless of
+            // `shadow_boundary`. This arm used to double-fold the LDT into
+            // the tombstone-drop-time histogram specifically for a
+            // `carries_static` mutation (whose caller always passes
+            // `shadow_boundary = None`, so `mutation_shadowed` was always
+            // `false` here and this body unconditionally re-ran after the
+            // group-level fold already counted it once) —
+            // `update_local_deletion_time` increments a histogram bucket and
+            // is NOT idempotent, exactly the defect class
+            // `mixed_row_and_partition_tombstone_mutation_folds_tombstone_once`
+            // guards markers against.
+            CellOperation::DeleteRow => {}
             // Issue #887: a `ComplexDeletion` marker is physically written with
             // its OWN `marked_for_delete_at` / `local_deletion_time`, which may
             // fall outside the row's own timestamp/LDT range. INDEPENDENT of
@@ -856,6 +930,89 @@ mod tests {
             fold_marker_stats(&mut stats, &mutation);
             assert_eq!(stats.min_timestamp, 42);
             assert!(stats.has_partition_level_deletions);
+        }
+
+        /// Roborev round-3 finding #3: the `carries_static` production
+        /// callers always pass `shadow_boundary = None` to
+        /// `fold_row_content_stats` (static-cell shadowing uses a separate
+        /// mechanism), which used to make `mutation_shadowed` unconditionally
+        /// `false` — so a `DeleteRow`-carrying mutation on that path
+        /// double-folded its LDT into the tombstone-drop-time histogram: once
+        /// via the group-level `fold_row_deletion_marker`, and again via
+        /// `fold_row_content_stats`'s own (now-removed) `DeleteRow` handling.
+        /// Reproduces the exact `carries_static` call shape
+        /// (`fold_row_deletion_marker` once, then
+        /// `fold_row_content_stats(mutation, None)`) and asserts the
+        /// histogram observes the tombstone exactly once.
+        #[test]
+        fn delete_row_on_carries_static_path_folds_ldt_exactly_once() {
+            let mutation = delete_row(1, 42);
+            let group: Vec<&Mutation> = vec![&mutation];
+            let (survives, _deletion_ts, row_deletion) =
+                row_group_survival(&group, &schema(), false, None);
+            assert!(
+                survives,
+                "a lone DeleteRow group still produces a tombstone row"
+            );
+
+            let mut stats = StatisticsMetadata::new();
+            // Exactly the `carries_static` branch's call shape: the group's
+            // marker folded once, then per-mutation content folded with
+            // `shadow_boundary = None` (static-cell shadowing is a separate,
+            // out-of-scope mechanism — see the `carries_static` call sites'
+            // own doc comments).
+            fold_row_deletion_marker(&mut stats, row_deletion);
+            fold_row_content_stats(&mut stats, &mutation, None);
+
+            assert_eq!(
+                stats.tombstone_histogram.size(),
+                1,
+                "a DeleteRow on the carries_static path must fold its LDT into \
+                 the tombstone-drop-time histogram exactly once, not twice"
+            );
+        }
+
+        /// The extracted single-mutation-group helper both `KWayMerger::merge`
+        /// and `WriteEngine::maintenance_step` call (issue #4246 roborev
+        /// round-3 finding #4) — exercised directly, the SAME function both
+        /// production paths use, rather than only reachable through whichever
+        /// integration test happens to exercise one of them.
+        #[test]
+        fn fold_single_mutation_row_group_folds_deletion_marker_exactly_once() {
+            let mutation = delete_row(1, 42);
+            let mut stats = StatisticsMetadata::new();
+            fold_single_mutation_row_group(&mut stats, &mutation, &schema(), false, None);
+            assert_eq!(stats.min_timestamp, 42);
+            assert_eq!(
+                stats.tombstone_histogram.size(),
+                1,
+                "the row's own deletion marker must be folded exactly once \
+                 through the shared single-mutation-group helper"
+            );
+        }
+
+        /// A live, surviving mutation folds its content normally.
+        #[test]
+        fn fold_single_mutation_row_group_folds_surviving_content() {
+            let mutation = insert(1, 99);
+            let mut stats = StatisticsMetadata::new();
+            fold_single_mutation_row_group(&mut stats, &mutation, &schema(), false, None);
+            assert_eq!(stats.min_timestamp, 99);
+        }
+
+        /// A live mutation fully covered by `shadow_floor` folds nothing —
+        /// proving the helper threads `shadow_floor` through to
+        /// `row_group_survival`, not just a hardcoded `None`.
+        #[test]
+        fn fold_single_mutation_row_group_gates_shadowed_content() {
+            let mutation = insert(1, 5);
+            let mut stats = StatisticsMetadata::new();
+            fold_single_mutation_row_group(&mut stats, &mutation, &schema(), false, Some(10));
+            assert_eq!(
+                stats.min_timestamp,
+                i64::MAX,
+                "a live mutation entirely covered by shadow_floor=10 must fold nothing"
+            );
         }
     }
 }
