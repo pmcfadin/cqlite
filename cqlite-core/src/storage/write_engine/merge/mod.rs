@@ -2040,12 +2040,13 @@ impl KWayMerger {
                                         );
                                     }
                                 }
-                                let survives = crate::storage::sstable::writer::stats_fold::row_group_survives(
-                                    std::slice::from_ref(&mutation),
-                                    &write_schema,
-                                    schema_has_static,
-                                    shadow_floor,
-                                );
+                                let survives =
+                                    crate::storage::sstable::writer::stats_fold::row_group_survives(
+                                        std::slice::from_ref(&mutation),
+                                        &write_schema,
+                                        schema_has_static,
+                                        shadow_floor,
+                                    );
                                 let carries_static = schema_has_static
                                     && mutation.operations.iter().any(|op| {
                                         crate::storage::sstable::writer::data_writer::is_static_operation(
