@@ -1904,16 +1904,6 @@ impl KWayMerger {
                             continue;
                         }
                         let mutation = Self::merge_entry_to_mutation(*row, &decode_schema)?;
-                        // Single fold point for EVERY mutation of this
-                        // partition (carrier, static, or clustered row) —
-                        // mirrors `write_partition`'s
-                        // `for mutation in &mutations { fold... }` loop,
-                        // which folds unconditionally regardless of
-                        // classification.
-                        crate::storage::sstable::writer::stats_fold::fold_mutation_stats(
-                            &mut partition_stats,
-                            &mutation,
-                        );
 
                         // Classify the (None-keyed) carriers and the static
                         // row; everything else is a real clustering row that
@@ -1931,11 +1921,23 @@ impl KWayMerger {
                             && !mutation.range_tombstones.is_empty();
 
                         if is_partition_only {
+                            // The tombstone MARKER itself is never row-shadowed
+                            // — it IS the deletion — so it always contributes
+                            // to persisted stats (issue #4246).
+                            if let Some(pt) = &mutation.partition_tombstone {
+                                partition_stats.update_timestamp(pt.deletion_time);
+                                partition_stats.update_local_deletion_time(pt.local_deletion_time);
+                                partition_stats.mark_partition_level_deletion();
+                            }
                             partition_tombstone = mutation.partition_tombstone;
                             saw_carrier_or_static = true;
                             continue;
                         }
                         if is_range_only {
+                            for rt in &mutation.range_tombstones {
+                                partition_stats.update_timestamp(rt.deletion_time);
+                                partition_stats.update_local_deletion_time(rt.local_deletion_time);
+                            }
                             range_tombstones.extend(mutation.range_tombstones.iter().cloned());
                             saw_carrier_or_static = true;
                             continue;
@@ -1964,6 +1966,15 @@ impl KWayMerger {
                             if !saw_carrier_or_static {
                                 static_first_ts = mutation.timestamp_micros;
                             }
+                            // Static-cell shadowing by a partition tombstone is
+                            // a separate, pre-existing question issue #4246
+                            // does not attempt (see `row_group_survives`'s doc
+                            // comment) — folded unconditionally, matching the
+                            // prior behavior for this classification exactly.
+                            crate::storage::sstable::writer::stats_fold::fold_mutation_stats(
+                                &mut partition_stats,
+                                &mutation,
+                            );
                             static_tracker.feed(&mutation, &write_schema, None);
                             saw_carrier_or_static = true;
                             row_count += 1;
@@ -1973,7 +1984,12 @@ impl KWayMerger {
                         // A real clustering row (or an unclustered table's
                         // sole `clustering_key: None` row): buffer it for the
                         // single PartitionEnd write once the full
-                        // range-tombstone set is known.
+                        // range-tombstone set is known. Its stats fold is
+                        // DEFERRED to PartitionEnd (issue #4246): the complete
+                        // range-tombstone set — needed to decide whether this
+                        // row survives shadowing — is not yet known here (a
+                        // range tombstone can arrive AFTER the rows it
+                        // covers, see the module doc above).
                         buffered_rows.push(mutation);
                         row_count += 1;
                     }
@@ -1997,7 +2013,52 @@ impl KWayMerger {
                                 let merged = std::mem::take(&mut static_tracker).finish();
                                 session.feed_static_row(&merged, static_first_ts, &write_schema)?;
                             }
+                            // Issue #4246: now that `partition_tombstone` and
+                            // `range_tombstones` are FINAL, gate each buffered
+                            // row's stats fold on the SAME shadow decision
+                            // `feed_row` makes when it calls
+                            // `DataWriter::merge_row_group` internally — a row
+                            // fully shadow-dropped from Data.db must not lower
+                            // persisted `StatisticsMetadata` minima. See
+                            // `stats_fold::row_group_survives`'s doc comment
+                            // for the scope note on mixed static+row
+                            // mutations.
+                            let partition_floor =
+                                partition_tombstone.as_ref().map(|pt| pt.deletion_time);
                             for mutation in &buffered_rows {
+                                let clustering_key = mutation.clustering_key.as_ref();
+                                let mut shadow_floor = partition_floor;
+                                for rt in &range_tombstones {
+                                    if crate::storage::sstable::writer::data_writer::range_tombstone_covers(
+                                        rt,
+                                        clustering_key,
+                                        &write_schema,
+                                    ) {
+                                        shadow_floor = Some(
+                                            shadow_floor
+                                                .map_or(rt.deletion_time, |f| f.max(rt.deletion_time)),
+                                        );
+                                    }
+                                }
+                                let survives = crate::storage::sstable::writer::stats_fold::row_group_survives(
+                                    std::slice::from_ref(&mutation),
+                                    &write_schema,
+                                    schema_has_static,
+                                    shadow_floor,
+                                );
+                                let carries_static = schema_has_static
+                                    && mutation.operations.iter().any(|op| {
+                                        crate::storage::sstable::writer::data_writer::is_static_operation(
+                                            op,
+                                            &write_schema,
+                                        )
+                                    });
+                                if survives || carries_static {
+                                    crate::storage::sstable::writer::stats_fold::fold_mutation_stats(
+                                        &mut partition_stats,
+                                        mutation,
+                                    );
+                                }
                                 session.feed_row(mutation, &write_schema)?;
                             }
                             let (offset, blocks, emit) = session.finish(&write_schema)?;

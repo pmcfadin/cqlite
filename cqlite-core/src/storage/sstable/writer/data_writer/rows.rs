@@ -114,7 +114,13 @@ impl DataWriter {
     /// Returns `None` when the group produces no row at all (e.g. a mutation
     /// that exists only to carry a partition or range tombstone, or a row
     /// fully shadowed by the partition/range tombstone `shadow_floor`).
-    pub(super) fn merge_row_group<'a>(
+    ///
+    /// `pub(crate)` (widened from `pub(super)`, issue #4246): also called as
+    /// a pure pre-check from `stats_fold::row_group_survives`, which lives
+    /// in `writer` (the grandparent of this module) so BOTH the buffered
+    /// and incremental writer paths can gate their persisted
+    /// `StatisticsMetadata` fold on this SAME shadow-drop decision.
+    pub(crate) fn merge_row_group<'a>(
         group: &[&'a Mutation],
         schema: &TableSchema,
         skip_static_ops: bool,
