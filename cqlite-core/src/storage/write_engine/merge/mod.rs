@@ -1705,47 +1705,13 @@ impl KWayMerger {
         )
     }
 
-    /// Mark this merge as overlap-safe for tombstone purging (#921 finding 1).
-    ///
-    /// Set `true` ONLY when the compaction inputs provably span EVERY SSTable
-    /// for the table (a major/full compaction), so no non-included overlapping
-    /// SSTable can hold data shadowed by a purged tombstone. When `false` (the
-    /// default) the gc_grace purge stage is a strict no-op — tombstones are
-    /// retained — which can never resurrect data in a partial compaction.
-    pub fn with_purge_safe(mut self, purge_safe: bool) -> Self {
-        self.purge_safe = purge_safe;
-        self
-    }
-
-    /// Set the read-time TTL evaluation instant (`now`, epoch seconds) for this
-    /// merge (issue #2374/#2789), enabling `expire_ttl_cells` on a READ merge
-    /// built through a `now`-less constructor (e.g. the warm
-    /// [`new_from_readers`](Self::new_from_readers) path). `gc_before_secs`
-    /// stays `None` so NO tombstone is gc-purged — a read reflects deletions, it
-    /// does not collect them. A compaction WRITE path threads `now` through its
-    /// constructor instead and never calls this.
-    #[must_use]
-    pub fn with_now_secs(mut self, now_secs: Option<i64>) -> Self {
-        self.now_secs = now_secs;
-        self
-    }
-
-    /// Supply the overlap-aware max-purgeable timestamp for a PARTIAL compaction
-    /// (#935, parity with Cassandra `CompactionController.maxPurgeableTimestamp`).
-    ///
-    /// `max_purgeable_timestamp` is the MINIMUM write timestamp (`markedForDeleteAt`,
-    /// micros) across every NON-INCLUDED overlapping SSTable for the table (their
-    /// `Statistics.db` min-timestamp bound). With it set, the gc_grace purge stage
-    /// additionally purges a tombstone in a partial compaction when the tombstone's
-    /// own deletion timestamp is STRICTLY LESS THAN this bound — proving it shadows
-    /// nothing outside the compaction set. `None` keeps the conservative #921
-    /// behavior (a partial compaction does not purge). Ignored when `purge_safe`
-    /// is `true` (a full compaction already has no non-included overlap, so the
-    /// effective bound is `+inf`).
-    pub fn with_max_purgeable_timestamp(mut self, max_purgeable_timestamp: Option<i64>) -> Self {
-        self.max_purgeable_timestamp = max_purgeable_timestamp;
-        self
-    }
+    // `with_purge_safe`, `with_now_secs`, `with_gc_before_secs` and
+    // `with_max_purgeable_timestamp` (issue #4193) live in the generic
+    // `impl<S: TraceSink> KWayMerger<S>` block below so they stay chainable
+    // AFTER `with_trace_sink`/`build_single_partition_merger_with_trace` has
+    // already produced a `KWayMerger<S>` for a non-`NoTrace` `S` — the explain
+    // surface configures a traced point-read merger as a full compaction
+    // exactly the way the untraced compaction path configures its own.
 
     /// Replace the zero-sized default sink with a caller-owned trace sink.
     ///
@@ -2045,6 +2011,65 @@ impl KWayMerger {
 
 #[cfg(feature = "write-support")]
 impl<S: TraceSink> KWayMerger<S> {
+    /// Mark this merge as overlap-safe for tombstone purging (#921 finding 1).
+    ///
+    /// Set `true` ONLY when the compaction inputs provably span EVERY SSTable
+    /// for the table (a major/full compaction), so no non-included overlapping
+    /// SSTable can hold data shadowed by a purged tombstone. When `false` (the
+    /// default) the gc_grace purge stage is a strict no-op — tombstones are
+    /// retained — which can never resurrect data in a partial compaction.
+    #[must_use]
+    pub fn with_purge_safe(mut self, purge_safe: bool) -> Self {
+        self.purge_safe = purge_safe;
+        self
+    }
+
+    /// Set the read-time TTL evaluation instant (`now`, epoch seconds) for this
+    /// merge (issue #2374/#2789), enabling `expire_ttl_cells` on a READ merge
+    /// built through a `now`-less constructor (e.g. the warm
+    /// [`new_from_readers`](KWayMerger::new_from_readers) path). `gc_before_secs`
+    /// stays `None` so NO tombstone is gc-purged — a read reflects deletions, it
+    /// does not collect them. A compaction WRITE path threads `now` through its
+    /// constructor instead and never calls this.
+    #[must_use]
+    pub fn with_now_secs(mut self, now_secs: Option<i64>) -> Self {
+        self.now_secs = now_secs;
+        self
+    }
+
+    /// Set the gc_grace cutoff (`gcBefore`, GC-clock seconds) for this merge
+    /// (issue #4193). Like [`Self::with_now_secs`], this lets a caller that
+    /// built a merger through a gc-less constructor (a point-read builder, or
+    /// [`KWayMerger::new_from_readers`]) configure it as a full compaction
+    /// after the fact — the `explain` surface's only production caller drives
+    /// a traced point-read merger with the SAME `now`/`gc_before`/`purge_safe`
+    /// posture the untraced compaction path uses (design.md §D3), so the
+    /// `winner` set the trail records is provably the read result. `None`
+    /// disables gc-grace purging (the default).
+    #[must_use]
+    pub fn with_gc_before_secs(mut self, gc_before_secs: Option<i64>) -> Self {
+        self.gc_before_secs = gc_before_secs;
+        self
+    }
+
+    /// Supply the overlap-aware max-purgeable timestamp for a PARTIAL compaction
+    /// (#935, parity with Cassandra `CompactionController.maxPurgeableTimestamp`).
+    ///
+    /// `max_purgeable_timestamp` is the MINIMUM write timestamp (`markedForDeleteAt`,
+    /// micros) across every NON-INCLUDED overlapping SSTable for the table (their
+    /// `Statistics.db` min-timestamp bound). With it set, the gc_grace purge stage
+    /// additionally purges a tombstone in a partial compaction when the tombstone's
+    /// own deletion timestamp is STRICTLY LESS THAN this bound — proving it shadows
+    /// nothing outside the compaction set. `None` keeps the conservative #921
+    /// behavior (a partial compaction does not purge). Ignored when `purge_safe`
+    /// is `true` (a full compaction already has no non-included overlap, so the
+    /// effective bound is `+inf`).
+    #[must_use]
+    pub fn with_max_purgeable_timestamp(mut self, max_purgeable_timestamp: Option<i64>) -> Self {
+        self.max_purgeable_timestamp = max_purgeable_timestamp;
+        self
+    }
+
     /// Borrow the decision-trail sink after driving the merger.
     #[must_use]
     pub fn trace_sink(&self) -> &S {

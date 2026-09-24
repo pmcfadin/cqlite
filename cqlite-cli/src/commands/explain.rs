@@ -499,8 +499,8 @@ fn parse_clustering_key(
 #[cfg(feature = "write-support")]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ExplainNow {
-    epoch_secs: i64,
-    wall_clock: bool,
+    pub(super) epoch_secs: i64,
+    pub(super) wall_clock: bool,
 }
 
 #[cfg(feature = "write-support")]
