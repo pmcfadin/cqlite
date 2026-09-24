@@ -294,16 +294,29 @@ async fn diagnose_generation(
     let compression_ratio_raw = read_compression_ratio(&stats_bytes)?;
 
     let descriptor = SsTableDescriptor::parse(data_path).ok();
-    let format = descriptor.map(|d| d.version).unwrap_or_default();
+    let format = descriptor
+        .as_ref()
+        .map(|d| d.version.clone())
+        .unwrap_or_default();
+    // The generation number comes from the FILENAME's own sstable-id segment
+    // (spec R5.1: `Data.db` is never opened in the cheap tier — not even for
+    // its header — so `generation` cannot come from `SSTableReader::generation`,
+    // which is decoded from the Data.db header). Every committed fixture this
+    // change targets uses Cassandra's sequential-integer id form (`nb-1-big-…`);
+    // a hex-UUID id (also legal) falls back to `0` here — a display label, not a
+    // measured value, so it does not need a `SourcedField`.
+    let generation = descriptor
+        .as_ref()
+        .and_then(|d| d.sstable_id.parse::<u64>().ok())
+        .unwrap_or(0);
 
-    // Open the reader for `generation`/`endpoint_tokens` metadata ONLY — this
-    // never reads Data.db content (spec R5.1: only opened for its
-    // Statistics/Index/Summary/CompressionInfo/TOC-derived metadata at
-    // `open()` time; `Data.db` bytes are read only by a later `scan_stream`
-    // call under `--deep`, never here).
-    let reader = SSTableReader::open(data_path, config, platform.clone()).await?;
-    let generation = reader.generation;
-    let token_span = reader.endpoint_tokens();
+    // First/last partition-key tokens for the table-wide token-overlap
+    // histogram (spec R4, D4) come from `Summary.db` ALONE (BIG only — BTI has
+    // no Summary.db) — never from opening `Data.db` (spec R5.1). A BTI
+    // generation (or a BIG one whose Summary.db is absent/unparseable)
+    // contributes `None` and is excluded from the histogram rather than guessed
+    // (see the module's implementer-report note on BTI token-overlap scope).
+    let token_span = summary_endpoint_tokens(data_path, platform.clone()).await;
 
     let max_timestamp = max_timestamp_field(&stats);
     let estimated_partition_count = estimated_partition_count_field(&stats);
@@ -324,6 +337,9 @@ async fn diagnose_generation(
     };
 
     let deep = if options.deep {
+        // `Data.db` is opened HERE, and only here — the one place in the whole
+        // cheap-vs-deep split where that is allowed (spec R3/R5.1).
+        let reader = SSTableReader::open(data_path, config, platform.clone()).await?;
         let scan = deep_scan::deep_scan_generation(
             Arc::new(reader),
             options.schema.clone(),
@@ -456,15 +472,49 @@ pub fn compression_ratio_field(ratio: Option<f64>) -> SourcedField<f64> {
 
 /// Sibling `Statistics.db` path for a `Data.db` path.
 fn stats_path_for(data_path: &Path) -> PathBuf {
+    sibling_component_path(data_path, "Statistics.db")
+}
+
+/// Sibling `Summary.db` path for a `Data.db` path (BIG format only).
+fn summary_path_for(data_path: &Path) -> PathBuf {
+    sibling_component_path(data_path, "Summary.db")
+}
+
+fn sibling_component_path(data_path: &Path, component: &str) -> PathBuf {
     let name = data_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
-    let stats_name = name.replace("-Data.db", "-Statistics.db");
+    let new_name = name.replace("-Data.db", &format!("-{component}"));
     data_path
         .parent()
-        .map(|p| p.join(&stats_name))
-        .unwrap_or_else(|| PathBuf::from(stats_name))
+        .map(|p| p.join(&new_name))
+        .unwrap_or_else(|| PathBuf::from(new_name))
+}
+
+/// `(first_token, last_token)` from `Summary.db` alone — spec R4/R5.1: never
+/// opens `Data.db`. `None` when `Summary.db` is absent/unparseable (a BTI
+/// generation, or a genuinely missing/corrupt Summary.db) — that generation is
+/// simply excluded from the table-wide token-overlap histogram rather than
+/// guessed (see the module's implementer-report note on BTI token-overlap
+/// scope: this is a deliberate scope decision, not an oversight).
+async fn summary_endpoint_tokens(data_path: &Path, platform: Arc<Platform>) -> Option<(i64, i64)> {
+    let summary_path = summary_path_for(data_path);
+    let reader = crate::storage::sstable::summary_reader::SummaryReader::open(
+        &summary_path,
+        platform,
+    )
+    .await
+    .ok()?;
+    let first = reader.get_first_key();
+    let last = reader.get_last_key();
+    if first.is_empty() || last.is_empty() {
+        return None;
+    }
+    Some((
+        crate::util::cassandra_murmur3::cassandra_murmur3_token(first),
+        crate::util::cassandra_murmur3::cassandra_murmur3_token(last),
+    ))
 }
 
 fn hex_uuid(bytes: &[u8; 16]) -> String {
