@@ -39,7 +39,10 @@ async fn extract_leaves_every_input_component_byte_identical() {
     let needle_key = source_rows[0].key.0.to_vec();
 
     let before = component_hashes(&table_dir);
-    assert!(!before.is_empty(), "the fixture dir must hold components to hash");
+    assert!(
+        !before.is_empty(),
+        "the fixture dir must hold components to hash"
+    );
 
     let temp = TempDir::new().expect("tempdir");
     let options = ExtractOptions {
@@ -77,9 +80,14 @@ async fn split_leaves_every_input_component_byte_identical() {
     assert!(!before.is_empty());
 
     let temp = TempDir::new().expect("tempdir");
-    let report = split_sstable(&data_db, SplitBoundary::Parts(2), &temp.path().join("out"), &schema)
-        .await
-        .expect("split must not error");
+    let report = split_sstable(
+        &data_db,
+        SplitBoundary::Parts(2),
+        &temp.path().join("out"),
+        &schema,
+    )
+    .await
+    .expect("split must not error");
     assert!(report.refused.is_none(), "got {:?}", report.refused);
 
     let after = component_hashes(&table_dir);

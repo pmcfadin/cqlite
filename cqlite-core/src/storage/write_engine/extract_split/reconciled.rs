@@ -75,9 +75,8 @@ pub(super) async fn extract_reconciled(
     // actually-smaller timestamp underflows the delta encoding, corrupting
     // (not merely losing) the stored value — caught by
     // `issue_4199_split_parts.rs`'s golden-vs-output row_timestamp mismatch.
-    let (min_ts, min_ldt, min_ttl) = crate::storage::write_engine::merge::compute_baseline_min(
-        &generation_paths.to_vec(),
-    );
+    let (min_ts, min_ldt, min_ttl) =
+        crate::storage::write_engine::merge::compute_baseline_min(generation_paths);
     writer.pre_seed_encoding_baselines(min_ts, min_ldt, min_ttl);
     let mut found: HashSet<Vec<u8>> = HashSet::new();
     let mut partitions = 0usize;

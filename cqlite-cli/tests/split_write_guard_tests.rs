@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
-const FIXTURE_RELATIVE: &str = "sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9";
+const FIXTURE_RELATIVE: &str =
+    "sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9";
 const FIXTURE_DIR_NAME: &str = "composite_key_table-6ab56990a25111f0a3fef1a551383fb9";
 const FIXTURE_COMPONENTS: &[&str] = &[
     "nb-1-big-Data.db",
@@ -68,7 +69,8 @@ fn schema_path() -> PathBuf {
 }
 
 fn as_arg(path: &Path) -> &str {
-    path.to_str().unwrap_or_else(|| panic!("{path:?} is not utf-8"))
+    path.to_str()
+        .unwrap_or_else(|| panic!("{path:?} is not utf-8"))
 }
 
 fn run_split(input: &Path, out: &Path) -> Output {

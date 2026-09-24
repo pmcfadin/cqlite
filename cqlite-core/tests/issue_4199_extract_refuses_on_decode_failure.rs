@@ -19,14 +19,16 @@ use cqlite_core::storage::write_engine::extract_split::{
 };
 use tempfile::TempDir;
 
-#[path = "support/datasets_root.rs"]
-mod datasets_root;
 #[path = "support/corrupt_byte_fixture.rs"]
 mod corrupt_fixture;
 #[path = "support/extract_split_fixture.rs"]
 mod fixture;
 
+// Reused from `fixture` (not re-declared at top level too — clippy's
+// `duplicate_mod` correctly flags loading the same `support/datasets_root.rs`
+// file as a module twice in one crate, even at different paths).
 use corrupt_fixture::{FIX_KS, FIX_TABLE};
+use fixture::datasets_root;
 use fixture::{require_fixtures_strict, table_schema};
 
 #[tokio::test]
@@ -41,7 +43,9 @@ async fn extract_refuses_on_a_decode_failure_in_the_requested_partition() {
                 datasets_root::describe_search(FIX_KS, FIX_TABLE)
             );
         }
-        eprintln!("[issue_4199] {FIX_KS}.{FIX_TABLE} fixture absent (dataset not fetched); skipping");
+        eprintln!(
+            "[issue_4199] {FIX_KS}.{FIX_TABLE} fixture absent (dataset not fetched); skipping"
+        );
         return;
     };
 

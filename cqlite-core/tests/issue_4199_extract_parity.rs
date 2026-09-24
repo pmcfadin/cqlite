@@ -22,7 +22,10 @@ use tempfile::TempDir;
 
 #[path = "support/extract_split_fixture.rs"]
 mod fixture;
-use fixture::{datasets_root, decode_all_rows, require_fixtures_strict, single_data_db, table_schema, KS, TABLE};
+use fixture::{
+    datasets_root, decode_all_rows, require_fixtures_strict, single_data_db, table_schema, KS,
+    TABLE,
+};
 
 #[tokio::test]
 async fn reconciled_extract_matches_a_direct_decode_of_the_source_for_the_key() {
@@ -55,8 +58,7 @@ async fn reconciled_extract_matches_a_direct_decode_of_the_source_for_the_key() 
 
     let temp = TempDir::new().expect("tempdir");
     let out_dir = temp.path().join("out");
-    let key_bytes =
-        parse_key_literal(&literal, &schema).expect("parse the needle's own literal");
+    let key_bytes = parse_key_literal(&literal, &schema).expect("parse the needle's own literal");
     assert_eq!(
         key_bytes, needle_key,
         "parse_key_literal must round-trip to the SAME raw key bytes Index.db carries"

@@ -209,7 +209,7 @@ pub(super) async fn extract_raw(
                         // corrupts, not merely loses, a later row's timestamp).
                         let (min_ts, min_ldt, min_ttl) =
                             crate::storage::write_engine::merge::compute_baseline_min(
-                                &[path.clone()],
+                                std::slice::from_ref(path),
                             );
                         w.pre_seed_encoding_baselines(min_ts, min_ldt, min_ttl);
                         writer = Some(w);

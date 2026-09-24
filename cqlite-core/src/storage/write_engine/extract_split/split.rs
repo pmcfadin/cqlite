@@ -167,7 +167,7 @@ pub async fn split_sstable(
     // timestamp whenever it is lower than whatever baseline the writer
     // would otherwise infer from the first row it happens to see).
     let (min_ts, min_ldt, min_ttl) =
-        crate::storage::write_engine::merge::compute_baseline_min(&[data_db.clone()]);
+        crate::storage::write_engine::merge::compute_baseline_min(std::slice::from_ref(&data_db));
 
     let mut current_part_index: Option<usize> = None;
     let mut writer: Option<SSTableWriter> = None;
@@ -318,7 +318,7 @@ fn parts_assignment(total: usize, n: usize) -> Result<Vec<usize>> {
     sizes[n - 1] += remainder;
     let mut assignment = Vec::with_capacity(total);
     for (part_index, size) in sizes.into_iter().enumerate() {
-        assignment.extend(std::iter::repeat(part_index).take(size));
+        assignment.extend(std::iter::repeat_n(part_index, size));
     }
     Ok(assignment)
 }

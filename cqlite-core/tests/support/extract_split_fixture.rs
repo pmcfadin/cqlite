@@ -81,7 +81,10 @@ pub fn component_hashes(dir: &Path) -> std::collections::BTreeMap<String, String
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let digest = hex::encode(hasher.finalize());
-        out.insert(path.file_name().unwrap().to_string_lossy().to_string(), digest);
+        out.insert(
+            path.file_name().unwrap().to_string_lossy().to_string(),
+            digest,
+        );
     }
     out
 }

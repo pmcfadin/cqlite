@@ -5,12 +5,17 @@
 
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
-use cqlite_core::storage::write_engine::extract_split::{extract_partitions, ExtractOptions, Selection};
+use cqlite_core::storage::write_engine::extract_split::{
+    extract_partitions, ExtractOptions, Selection,
+};
 use tempfile::TempDir;
 
 #[path = "support/extract_split_fixture.rs"]
 mod fixture;
-use fixture::{datasets_root, decode_all_rows, require_fixtures_strict, single_data_db, table_schema, KS, TABLE};
+use fixture::{
+    datasets_root, decode_all_rows, require_fixtures_strict, single_data_db, table_schema, KS,
+    TABLE,
+};
 
 #[tokio::test]
 async fn keys_file_with_some_keys_absent_from_every_generation() {
@@ -101,7 +106,8 @@ async fn keys_file_with_some_keys_absent_from_every_generation() {
             .cloned()
             .collect();
         assert_eq!(
-            actual, expected,
+            actual,
+            expected,
             "live key {} must be dump-equal to the source in the output",
             hex::encode(key)
         );

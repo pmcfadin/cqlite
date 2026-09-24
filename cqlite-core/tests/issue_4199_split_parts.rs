@@ -13,7 +13,10 @@ use tempfile::TempDir;
 
 #[path = "support/extract_split_fixture.rs"]
 mod fixture;
-use fixture::{datasets_root, decode_all_rows, require_fixtures_strict, single_data_db, table_schema, KS, TABLE};
+use fixture::{
+    datasets_root, decode_all_rows, require_fixtures_strict, single_data_db, table_schema, KS,
+    TABLE,
+};
 
 const N: u32 = 4;
 
@@ -45,9 +48,16 @@ async fn parts_n_partitions_the_source_exactly_once() {
         .expect("split_sstable must not error for a healthy input");
 
     assert!(report.refused.is_none(), "got {:?}", report.refused);
-    assert_eq!(report.parts.len(), N as usize, "exactly N parts must be produced");
+    assert_eq!(
+        report.parts.len(),
+        N as usize,
+        "exactly N parts must be produced"
+    );
     for p in &report.parts {
-        assert_eq!(p.verify, "pass", "every part must be verify --mode full clean");
+        assert_eq!(
+            p.verify, "pass",
+            "every part must be verify --mode full clean"
+        );
     }
 
     // Disjoint, strictly ascending token ranges (D3.2), asserted directly.

@@ -73,7 +73,8 @@ fn schema_path() -> PathBuf {
 }
 
 fn as_arg(path: &Path) -> &str {
-    path.to_str().unwrap_or_else(|| panic!("{path:?} is not utf-8"))
+    path.to_str()
+        .unwrap_or_else(|| panic!("{path:?} is not utf-8"))
 }
 
 fn run_extract(input: &Path, out: &Path, extra: &[&str]) -> Output {
