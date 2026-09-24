@@ -99,38 +99,23 @@ impl DataWriter {
         rows
     }
 
-    /// Merge a group of mutations sharing one clustering key into a single
-    /// row, applying Cassandra reconciliation semantics at write time:
-    ///
-    /// - Row deletion: the newest `DeleteRow` wins; mutations at or before
-    ///   the deletion timestamp are shadowed (`DeletionTime.deletes` uses
-    ///   `timestamp <= markedForDeleteAt`).
-    /// - Cells: last-write-wins per column by timestamp; a tombstone wins a
-    ///   timestamp tie (Cassandra cell reconciliation).
-    /// - Liveness: from the newest surviving mutation that writes cells, or
-    ///   a pure primary-key insert (no ops and no tombstone payload). Pure
-    ///   row tombstones carry NO liveness, matching Cassandra's serializer.
-    ///
-    /// Returns `None` when the group produces no row at all (e.g. a mutation
-    /// that exists only to carry a partition or range tombstone, or a row
-    /// fully shadowed by the partition/range tombstone `shadow_floor`).
+    /// Resolve a row group's WINNING row deletion (if any): the newest
+    /// `DeleteRow` op or #932 decoupled `row_tombstone` among `group`,
+    /// dropping any candidate at or before `shadow_floor` (already covered
+    /// by the partition/range tombstone, so redundant). This is the EXACT
+    /// tuple [`Self::merge_row_group`] emits unconditionally as
+    /// `RowWrite.row_deletion` whenever `Some`.
     ///
     /// `pub(crate)` (widened from `pub(super)`, issue #4246): also called as
-    /// a pure pre-check from `stats_fold::row_group_survives`, which lives
+    /// a pure pre-check from `stats_fold::row_group_survival`, which lives
     /// in `writer` (the grandparent of this module) so BOTH the buffered
     /// and incremental writer paths can gate their persisted
-    /// `StatisticsMetadata` fold on this SAME shadow-drop decision.
-    /// Resolve the shadow boundary a group's row deletion (if any) combines
-    /// with `shadow_floor` into — the exact `deletion_ts` cells/liveness are
-    /// shadowed against inside [`Self::merge_row_group`]. Extracted
-    /// (`pub(crate)`, issue #4246 roborev finding) so a stats-fold caller can
-    /// gate an INDIVIDUAL mutation's own contribution against it: a row
-    /// group can return `Some` overall (it still produces a row — e.g. the
-    /// newer `DELETE`) while containing an OLDER mutation in the SAME group
-    /// (e.g. an earlier `INSERT` for the same clustering key in one flush
-    /// batch) that is itself fully shadowed and must not lower persisted
-    /// minima, mirroring `merge_row_group`'s own `mutation_shadowed` check
-    /// below.
+    /// `StatisticsMetadata` fold on this SAME shadow-drop decision — folding
+    /// the winning `(timestamp, local_deletion_time)` exactly ONCE per
+    /// group via `stats_fold::fold_row_deletion_marker`, never per-mutation
+    /// (issue #4246 roborev round-2 finding: an earlier per-mutation
+    /// exemption let a LOSING `DeleteRow`/`row_tombstone` — one this
+    /// function does NOT pick as the winner — still lower persisted minima).
     pub(crate) fn resolve_row_deletion(
         group: &[&Mutation],
         shadow_floor: Option<i64>,
@@ -186,6 +171,29 @@ impl DataWriter {
         }
     }
 
+    /// Merge a group of mutations sharing one clustering key into a single
+    /// row, applying Cassandra reconciliation semantics at write time:
+    ///
+    /// - Row deletion: the newest `DeleteRow` wins; mutations at or before
+    ///   the deletion timestamp are shadowed (`DeletionTime.deletes` uses
+    ///   `timestamp <= markedForDeleteAt`).
+    /// - Cells: last-write-wins per column by timestamp; a tombstone wins a
+    ///   timestamp tie (Cassandra cell reconciliation).
+    /// - Liveness: from the newest surviving mutation that writes cells, or
+    ///   a pure primary-key insert (no ops and no tombstone payload). Pure
+    ///   row tombstones carry NO liveness, matching Cassandra's serializer.
+    ///
+    /// Returns `None` when the group produces no row at all (e.g. a mutation
+    /// that exists only to carry a partition or range tombstone, or a row
+    /// fully shadowed by the partition/range tombstone `shadow_floor`).
+    ///
+    /// `pub(crate)` (widened from `pub(super)`, issue #4246): also called as
+    /// a pure pre-check from `stats_fold::row_group_survives`/
+    /// `row_group_survival`, which live in `writer` (the grandparent of this
+    /// module) so BOTH the buffered and incremental writer paths can gate
+    /// their persisted `StatisticsMetadata` fold on this SAME shadow-drop
+    /// decision — see [`Self::resolve_row_deletion`]'s own doc comment for
+    /// how the group-level row-deletion marker specifically is shared.
     pub(crate) fn merge_row_group<'a>(
         group: &[&'a Mutation],
         schema: &TableSchema,

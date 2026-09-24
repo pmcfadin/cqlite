@@ -2078,13 +2078,26 @@ impl KWayMerger {
                                 // content is a static op (masked today only by
                                 // the separate `carries_static` escape hatch
                                 // below).
-                                let (survives, deletion_ts) =
+                                let (survives, deletion_ts, row_deletion) =
                                     crate::storage::sstable::writer::stats_fold::row_group_survival(
                                         std::slice::from_ref(&mutation),
                                         &write_schema,
                                         false,
                                         shadow_floor,
                                     );
+                                // This mutation's own row-deletion marker
+                                // (winning `DeleteRow` / #932 `row_tombstone`,
+                                // if any) is folded exactly ONCE here — issue
+                                // #4246 roborev round-2 finding:
+                                // `fold_row_content_stats` no longer folds it
+                                // per-mutation (see its own doc comment), so
+                                // this single-mutation "group"'s resolved
+                                // deletion must be folded explicitly or it is
+                                // lost entirely, not just double-counted.
+                                crate::storage::sstable::writer::stats_fold::fold_row_deletion_marker(
+                                    &mut partition_stats,
+                                    row_deletion,
+                                );
                                 let carries_static = schema_has_static
                                     && mutation.operations.iter().any(|op| {
                                         crate::storage::sstable::writer::data_writer::is_static_operation(

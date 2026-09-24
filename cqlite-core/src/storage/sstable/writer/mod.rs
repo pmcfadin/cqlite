@@ -708,10 +708,12 @@ impl SSTableWriter {
         // `stats_fold::row_group_survival` — the SAME `merge_row_group`
         // shadow decision `write_partition_with_index_blocks` makes for the
         // real emission below — while partition/range tombstone MARKERS
-        // (folded unconditionally above, via `fold_marker_stats`, never
-        // through `fold_mutation_stats` here — issue #4246 roborev finding:
-        // that would double-count into the tombstone-drop-time histogram for
-        // a mutation carrying both row content and a tombstone) and
+        // (folded unconditionally above, inline from the authoritative
+        // extracted `partition_tombstone`/`range_tombstones` values — issue
+        // #4246 roborev finding: NOT via `fold_marker_stats`/
+        // `fold_mutation_stats`, which would re-scan each carrier mutation
+        // and double-count into the tombstone-drop-time histogram for a
+        // mutation carrying both row content and a tombstone) and
         // wholly-static mutations (out of this fix's verified scope, see
         // `row_group_survives`'s doc comment) keep the prior unconditional
         // fold, minus markers.
@@ -748,12 +750,17 @@ impl SSTableWriter {
                         Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
                 }
             }
-            let (survives, deletion_ts) = stats_fold::row_group_survival(
+            let (survives, deletion_ts, row_deletion) = stats_fold::row_group_survival(
                 group,
                 &self.schema,
                 schema_has_static,
                 shadow_floor,
             );
+            // The group's own row-deletion marker (winning `DeleteRow` /
+            // #932 `row_tombstone`) is folded exactly ONCE here, at the
+            // group level — never per-mutation (issue #4246 roborev round-2
+            // finding: see `fold_row_deletion_marker`'s doc comment).
+            stats_fold::fold_row_deletion_marker(&mut self.stats, row_deletion);
             for mutation in group {
                 let carries_static = schema_has_static
                     && mutation
@@ -773,7 +780,8 @@ impl SSTableWriter {
                     // (simple content) and per-op (independent-timestamp
                     // `ComplexDeletion`/`WriteComplexElement`) against
                     // `deletion_ts` — see its doc comment (issue #4246
-                    // roborev finding).
+                    // roborev finding). It no longer folds a row's own
+                    // deletion marker (handled once above).
                     stats_fold::fold_row_content_stats(&mut self.stats, mutation, deletion_ts);
                 }
             }

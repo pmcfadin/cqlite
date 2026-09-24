@@ -453,11 +453,19 @@ Major compaction did not collapse inputs into one output."
     rel="${data_file#"$SSTABLES_DIR"/}"
     stats_base="${data_file%Data.db}Statistics.db.txt"
     log "  sstablemetadata: $rel"
-    $ENGINE run --rm \
+    # Tolerate a non-zero exit here (roborev finding, PR carrying #4243/#4246):
+    # this sidecar runs under `set -euo pipefail`, and the staged container
+    # export has already completed by this point in the script — an
+    # `sstablemetadata` failure for one table must not abort the whole
+    # regeneration run (discarding every already-validated staged table via
+    # the `cleanup` trap) for a failure in a non-essential diagnostic dump.
+    if ! $ENGINE run --rm \
       -v "$SSTABLES_DIR:/data" \
       "$CASSANDRA_IMAGE" \
       bash -lc "/opt/cassandra/tools/bin/sstablemetadata /data/${rel}" \
-      | sed 's/[[:blank:]]*$//' > "$stats_base"
+      2>/dev/null | sed 's/[[:blank:]]*$//' > "$stats_base"; then
+      log "  sstablemetadata failed for $rel (sidecar skipped, staged tables unaffected)"
+    fi
   done < <(find "$SSTABLES_DIR/$KEYSPACE" -name "*-Data.db" -not -name "._*" -print0)
 
   find "$SSTABLES_DIR/$KEYSPACE" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
