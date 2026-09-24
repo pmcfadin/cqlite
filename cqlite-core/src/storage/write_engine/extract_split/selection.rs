@@ -159,7 +159,11 @@ pub async fn parse_key_literal(literal: &str, schema: &TableSchema) -> Result<Ve
 /// applied here to every UNSELECTED one just to learn its key — tracked as
 /// follow-up rather than paid in this slice. BTI wide (`RowsOffset`) leaves
 /// carry `expected_key` and resolve correctly.
-fn resolve_token_range_to_keys(generation_paths: &[PathBuf], a: i64, b: i64) -> Result<Vec<Vec<u8>>> {
+fn resolve_token_range_to_keys(
+    generation_paths: &[PathBuf],
+    a: i64,
+    b: i64,
+) -> Result<Vec<Vec<u8>>> {
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut keys = Vec::new();
     for path in generation_paths {

@@ -71,9 +71,7 @@ pub(crate) fn table_name_from_dir(input: &std::path::Path) -> Option<String> {
         input.parent()?.file_name()?.to_str()?
     };
     match dir_name.rsplit_once('-') {
-        Some((table_name, id))
-            if id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit()) =>
-        {
+        Some((table_name, id)) if id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit()) => {
             Some(table_name.to_string())
         }
         _ => Some(dir_name.to_string()),

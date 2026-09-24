@@ -10,7 +10,9 @@
 
 use std::path::Path;
 
-use cqlite_core::storage::write_engine::extract_split::{split_sstable, SplitBoundary, SplitReport};
+use cqlite_core::storage::write_engine::extract_split::{
+    split_sstable, SplitBoundary, SplitReport,
+};
 
 use crate::cli_types::{SalvageOutFormatArg, SplitArgs};
 use crate::commands::write_guard::{WriteGuard, OUT_REMEDY};
@@ -106,8 +108,7 @@ pub async fn execute_split_command(schema_path: Option<&Path>, args: &SplitArgs)
         }
     };
     if let Some(manifest) = &args.manifest {
-        if let Err(collision) =
-            write_guard.assert_disjoint("--manifest", manifest, MANIFEST_REMEDY)
+        if let Err(collision) = write_guard.assert_disjoint("--manifest", manifest, MANIFEST_REMEDY)
         {
             eprintln!("cqlite split: {collision}");
             std::process::exit(1);

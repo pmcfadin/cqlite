@@ -115,8 +115,7 @@ pub async fn execute_extract_command(schema_path: Option<&Path>, args: &ExtractA
         }
     };
     if let Some(manifest) = &args.manifest {
-        if let Err(collision) =
-            write_guard.assert_disjoint("--manifest", manifest, MANIFEST_REMEDY)
+        if let Err(collision) = write_guard.assert_disjoint("--manifest", manifest, MANIFEST_REMEDY)
         {
             eprintln!("cqlite extract: {collision}");
             std::process::exit(1);
@@ -194,7 +193,10 @@ pub async fn execute_extract_command(schema_path: Option<&Path>, args: &ExtractA
     render(&report, args.out_format);
     if let Some(manifest_path) = &args.manifest {
         if let Err(e) = write_manifest(&report, manifest_path) {
-            eprintln!("cqlite extract: failed to write --manifest {}: {e}", manifest_path.display());
+            eprintln!(
+                "cqlite extract: failed to write --manifest {}: {e}",
+                manifest_path.display()
+            );
             std::process::exit(1);
         }
     }
@@ -228,14 +230,15 @@ fn parse_token_range(spec: &str) -> Result<(i64, i64), String> {
 
 fn render(report: &ExtractReport, format: SalvageOutFormatArg) {
     match format {
-        SalvageOutFormatArg::Json => {
-            match serde_json::to_string_pretty(report) {
-                Ok(s) => println!("{s}"),
-                Err(e) => eprintln!("cqlite extract: failed to render JSON manifest: {e}"),
-            }
-        }
+        SalvageOutFormatArg::Json => match serde_json::to_string_pretty(report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => eprintln!("cqlite extract: failed to render JSON manifest: {e}"),
+        },
         SalvageOutFormatArg::Text => {
-            eprintln!("extract: input={} output={} mode={}", report.input, report.output, report.mode);
+            eprintln!(
+                "extract: input={} output={} mode={}",
+                report.input, report.output, report.mode
+            );
             eprintln!(
                 "  selection: kind={} detail={}",
                 report.selection.kind, report.selection.detail
@@ -247,7 +250,11 @@ fn render(report: &ExtractReport, format: SalvageOutFormatArg) {
                 );
             }
             if !report.not_found.is_empty() {
-                eprintln!("  not_found ({}): {}", report.not_found.len(), report.not_found.join(", "));
+                eprintln!(
+                    "  not_found ({}): {}",
+                    report.not_found.len(),
+                    report.not_found.join(", ")
+                );
             }
             if let Some(refused) = &report.refused {
                 eprintln!(

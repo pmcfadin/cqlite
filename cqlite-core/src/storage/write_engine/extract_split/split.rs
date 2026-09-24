@@ -17,7 +17,10 @@ use crate::storage::sstable::writer::SSTableWriter;
 use crate::storage::write_engine::salvage::boundaries::enumerate_boundaries;
 
 use super::raw_copy::{decode_and_convert, open_reader};
-use super::{base_and_format, discover_generations, generation_of, partition_decode_failed, Refused, RefusalReason};
+use super::{
+    base_and_format, discover_generations, generation_of, partition_decode_failed, RefusalReason,
+    Refused,
+};
 
 /// Where a `split` run divides its ONE input generation (design D3).
 #[derive(Debug, Clone, Copy)]
@@ -172,7 +175,18 @@ pub async fn split_sstable(
         if current_part_index != Some(this_part) {
             if let Some(w) = writer.take() {
                 let bytes = entry.data_offset.saturating_sub(part_start_offset);
-                finalize_part(&mut report, w, current_part_index.unwrap(), generation, partitions, rows, min_token, max_token, bytes).await?;
+                finalize_part(
+                    &mut report,
+                    w,
+                    current_part_index.unwrap(),
+                    generation,
+                    partitions,
+                    rows,
+                    min_token,
+                    max_token,
+                    bytes,
+                )
+                .await?;
                 if report.refused.is_some() {
                     return Ok(report);
                 }
@@ -198,7 +212,8 @@ pub async fn split_sstable(
                 rows += mutations.len();
                 let w = writer.as_mut().expect("writer opened for this part");
                 if let Err(e) = w.write_partition(key, mutations) {
-                    report.refused = Some(partition_decode_failed(generation, entry.data_offset, e));
+                    report.refused =
+                        Some(partition_decode_failed(generation, entry.data_offset, e));
                     return Ok(report);
                 }
                 partitions += 1;
@@ -278,7 +293,9 @@ async fn finalize_part(
 /// parts.
 fn parts_assignment(total: usize, n: usize) -> Result<Vec<usize>> {
     if n == 0 {
-        return Err(Error::InvalidInput("--parts must be at least 1".to_string()));
+        return Err(Error::InvalidInput(
+            "--parts must be at least 1".to_string(),
+        ));
     }
     if n > total {
         return Err(Error::InvalidInput(format!(
@@ -308,7 +325,11 @@ fn max_bytes_assignment(
 ) -> Vec<usize> {
     let mut assignment = Vec::with_capacity(boundaries.entries.len());
     let mut part_index = 0usize;
-    let mut part_start = boundaries.entries.first().map(|e| e.data_offset).unwrap_or(0);
+    let mut part_start = boundaries
+        .entries
+        .first()
+        .map(|e| e.data_offset)
+        .unwrap_or(0);
     for idx in 0..boundaries.entries.len() {
         assignment.push(part_index);
         let next_offset = boundaries
@@ -316,7 +337,8 @@ fn max_bytes_assignment(
             .get(idx + 1)
             .map(|e| e.data_offset)
             .unwrap_or(total_data_length);
-        if next_offset.saturating_sub(part_start) >= max_bytes && idx + 1 < boundaries.entries.len() {
+        if next_offset.saturating_sub(part_start) >= max_bytes && idx + 1 < boundaries.entries.len()
+        {
             part_index += 1;
             part_start = next_offset;
         }

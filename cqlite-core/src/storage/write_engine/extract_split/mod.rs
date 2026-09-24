@@ -303,9 +303,13 @@ pub(crate) fn discover_generations(dir: &Path) -> Result<Vec<PathBuf>> {
 pub(crate) fn base_and_format(data_db: &Path) -> Result<(String, bool)> {
     let descriptor = SsTableDescriptor::parse(data_db)?;
     let is_bti = descriptor.format == SsTableFormat::Bti;
-    let base = crate::storage::sstable::reader::extract_sstable_base_name(data_db).ok_or_else(
-        || Error::InvalidInput(format!("cannot derive an SSTable base name from {}", data_db.display())),
-    )?;
+    let base =
+        crate::storage::sstable::reader::extract_sstable_base_name(data_db).ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "cannot derive an SSTable base name from {}",
+                data_db.display()
+            ))
+        })?;
     Ok((base, is_bti))
 }
 
@@ -327,7 +331,9 @@ pub(crate) fn generation_of(data_db: &Path) -> Result<u64> {
 /// `data_db_path` (design D1/D3's self-audit, mirroring the REPAIR-family
 /// convention). `Ok(true)` iff the report carries zero findings.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
-pub(crate) async fn verify_output_generation(data_db_path: &Path) -> Result<crate::storage::sstable::verify::VerifyReport> {
+pub(crate) async fn verify_output_generation(
+    data_db_path: &Path,
+) -> Result<crate::storage::sstable::verify::VerifyReport> {
     use crate::config::DiskAccessMode;
     use crate::platform::Platform;
     use crate::Config;

@@ -65,7 +65,10 @@ pub(super) async fn decode_and_convert(
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
 ) -> std::result::Result<
-    Option<(crate::storage::write_engine::mutation::DecoratedKey, Vec<crate::storage::write_engine::mutation::Mutation>)>,
+    Option<(
+        crate::storage::write_engine::mutation::DecoratedKey,
+        Vec<crate::storage::write_engine::mutation::Mutation>,
+    )>,
     String,
 > {
     let outcome = reader
@@ -105,8 +108,10 @@ pub(super) async fn decode_and_convert(
 
     let mut merge_entries = Vec::with_capacity(rows.len());
     for row in rows {
-        merge_entries
-            .push(SSTableRowIteratorAdapter::build_merge_entry(0, row, schema).map_err(|e| e.to_string())?);
+        merge_entries.push(
+            SSTableRowIteratorAdapter::build_merge_entry(0, row, schema)
+                .map_err(|e| e.to_string())?,
+        );
     }
     let run = SinglePartitionRun {
         entries: merge_entries.into(),
@@ -197,11 +202,20 @@ pub(super) async fn extract_raw(
                     }
                     found.insert(key.key.clone());
                     if writer.is_none() {
-                        writer = Some(SSTableWriter::new(out_dir.to_path_buf(), generation, schema)?);
+                        writer = Some(SSTableWriter::new(
+                            out_dir.to_path_buf(),
+                            generation,
+                            schema,
+                        )?);
                     }
                     rows += mutations.len();
-                    if let Err(e) = writer.as_mut().expect("just set").write_partition(key, mutations) {
-                        report.refused = Some(partition_decode_failed(generation, entry.data_offset, e));
+                    if let Err(e) = writer
+                        .as_mut()
+                        .expect("just set")
+                        .write_partition(key, mutations)
+                    {
+                        report.refused =
+                            Some(partition_decode_failed(generation, entry.data_offset, e));
                         return Ok(report);
                     }
                     partitions += 1;
@@ -211,7 +225,8 @@ pub(super) async fn extract_raw(
                     // failure, but also not a match worth counting.
                 }
                 Err(e) => {
-                    report.refused = Some(partition_decode_failed(generation, entry.data_offset, e));
+                    report.refused =
+                        Some(partition_decode_failed(generation, entry.data_offset, e));
                     return Ok(report);
                 }
             }
