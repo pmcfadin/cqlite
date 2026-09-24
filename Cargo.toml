@@ -258,13 +258,20 @@ opt-level = 0
 # (macOS defaults to `split-debuginfo=unpacked` — DWARF lives in
 # `target/debug/deps/*.o`, not the final binary, unlike Linux's embedded DWARF
 # — those `.o` files themselves are -49%, 492M -> 251M). line-tables-only
-# keeps file:line in panic backtraces (verified: `memory-budget` dhat
-# backtraces, `binding-unwind-profile`, and every backtrace/panic-location-
-# text assertion in the test suite still resolve correctly) while dropping the
-# full variable/type debug info a dev/test binary does not need.
-# `release`/`bench`/`perfsym`/`perfprof` are untouched (profiling needs full
-# symbols). Override locally with `CARGO_PROFILE_DEV_DEBUG=true` /
-# `CARGO_PROFILE_TEST_DEBUG=true` when full debug info is genuinely needed
+# keeps file:line in panic backtraces: verified directly with a standalone
+# `rustc -C debuginfo=line-tables-only` panic that still resolves both frames
+# to `file.rs:LINE` under `RUST_BACKTRACE=1` (binding-unwind-profile and
+# memory-budget are UNAFFECTED by this change — the former only checks
+# `[profile.release-unwind]`, the latter asserts dhat byte/allocation
+# budgets, neither exercises backtrace symbolication — re-verified PASS,
+# not evidence for the backtrace claim itself). Drops the full variable/type
+# debug info a dev/test binary does not need. `release`/`bench`/`perfsym`/
+# `perfprof` are untouched (profiling needs full symbols). Override locally
+# for a `cargo test` debugging session where you want full DWARF for BOTH
+# the test binary and the library it links (dependencies build under the
+# `dev` profile even under `cargo test`, so `CARGO_PROFILE_TEST_DEBUG=true`
+# alone restores it for the test file only):
+# `CARGO_PROFILE_DEV_DEBUG=true CARGO_PROFILE_TEST_DEBUG=true cargo test -p cqlite-core`
 # (documented in dev-cookbook.md).
 debug = "line-tables-only"
 rpath = false
