@@ -172,7 +172,7 @@ impl<S: TraceSink> ReconcileState<S> {
                     if KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted {
                         let local_deletion_time = cell
                             .local_deletion_time
-                            .or_else(|| match &cell.value {
+                            .or(match &cell.value {
                                 crate::types::Value::Tombstone(info) => {
                                     Some(info.local_deletion_time as i32)
                                 }
