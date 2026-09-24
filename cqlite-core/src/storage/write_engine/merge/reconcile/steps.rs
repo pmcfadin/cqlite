@@ -537,19 +537,23 @@ impl<S: TraceSink> ReconcileState<S> {
         self.had_data_before = self.after_row_del.iter().any(is_data_cell);
         drop(ck_names);
 
+        // Issue #4193 (found by `issue_4193_verdict_fixtures.rs::verdict_dropped_column`):
+        // Step 3 (`shadow_by_row_deletion`) already `mem::take`s `self.order` and
+        // drains `self.winners` into `self.after_row_del` BEFORE this step runs, so
+        // scanning `self.order`/`self.winners` here (as the untraced code shape
+        // did before the trace sink was added) always iterates an EMPTY pair —
+        // the dropped-column verdict could never be emitted. Scan the actual
+        // current survivor set, `self.after_row_del`, instead.
         let mut dropped: Vec<(CellData, usize, i64)> = Vec::new();
         if S::ENABLED {
-            for (cell_key, cell) in self
-                .order
-                .iter()
-                .filter_map(|key| self.winners.get_key_value(key))
-            {
+            for cell in &self.after_row_del {
                 if let Some(drop_time) = dropped_columns.get(&cell.column) {
                     if cell.timestamp <= *drop_time {
+                        let cell_key = (cell.column.clone(), cell.cell_path.clone());
                         let run_index = self
                             .winner_runs
                             .as_ref()
-                            .and_then(|runs| runs.get(cell_key).copied())
+                            .and_then(|runs| runs.get(&cell_key).copied())
                             .unwrap_or(self.run_index);
                         dropped.push((cell.clone(), run_index, *drop_time));
                     }
