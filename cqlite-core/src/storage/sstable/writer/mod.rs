@@ -104,7 +104,7 @@ use crate::error::{Error, Result};
 use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
 use crate::schema::UdtRegistry;
-use crate::storage::write_engine::mutation::{CellOperation, DecoratedKey, Mutation};
+use crate::storage::write_engine::mutation::{DecoratedKey, Mutation};
 use std::path::PathBuf;
 
 /// On-disk index format emitted by [`SSTableWriter`].
@@ -760,30 +760,28 @@ impl SSTableWriter {
                         .operations
                         .iter()
                         .any(|op| data_writer::is_static_operation(op, &self.schema));
-                // A mutation that itself CARRIES the group's row deletion
-                // (a `DeleteRow` op, or the #932 decoupled `row_tombstone`)
-                // must never exclude itself: `deletion_ts` is derived FROM
-                // such a mutation's own timestamp when it is the winning
-                // deletion, so a naive `timestamp <= deletion_ts` check
-                // would treat it as "shadowed by itself" and drop its own
-                // (always-emitted, marker-like) timestamp/LDT — exactly the
-                // false exclusion this bypass guards against.
-                let carries_row_deletion = mutation
-                    .operations
-                    .iter()
-                    .any(|op| matches!(op, CellOperation::DeleteRow))
-                    || mutation.row_tombstone.is_some();
-                let mutation_shadowed = !carries_row_deletion
-                    && deletion_ts.is_some_and(|dts| mutation.timestamp_micros <= dts);
-                if (survives && !mutation_shadowed) || carries_static {
-                    stats_fold::fold_row_content_stats(&mut self.stats, mutation);
+                if carries_static {
+                    // Static-cell shadowing uses a SEPARATE, partition-floor
+                    // -only mechanism unrelated to this row-level
+                    // `deletion_ts` (out of this fix's verified scope, see
+                    // `row_group_survives`'s doc comment) — pass `None` so
+                    // per-op shadow gating never applies to it, exactly the
+                    // prior unconditional-fold behavior.
+                    stats_fold::fold_row_content_stats(&mut self.stats, mutation, None);
+                } else if survives {
+                    // `fold_row_content_stats` itself gates per-mutation
+                    // (simple content) and per-op (independent-timestamp
+                    // `ComplexDeletion`/`WriteComplexElement`) against
+                    // `deletion_ts` — see its doc comment (issue #4246
+                    // roborev finding).
+                    stats_fold::fold_row_content_stats(&mut self.stats, mutation, deletion_ts);
                 }
             }
             group_start = group_end;
         }
         for mutation in &mutations {
             if data_writer::is_static_row_mutation(mutation, &self.schema) {
-                stats_fold::fold_row_content_stats(&mut self.stats, mutation);
+                stats_fold::fold_row_content_stats(&mut self.stats, mutation, None);
             }
         }
 

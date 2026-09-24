@@ -111,13 +111,19 @@ pub(crate) fn fold_marker_stats(stats: &mut StatisticsMetadata, mutation: &Mutat
 /// min/max folds, issue #1668 stage 5a) reproduces `write_partition`'s final
 /// `StatisticsMetadata` byte-for-byte.
 ///
-/// Callers: `write_partition` (once per mutation, whole-partition buffered)
-/// and the incremental streaming path (once per mutation, as it streams
-/// through — see `writer/incremental.rs` doc comments for how the streamed
-/// partition-scoped fold is merged into the running `SSTableWriter`-wide
-/// `stats` at partition end).
+/// `#[cfg(test)]` (issue #4246 roborev round 2): every production caller now
+/// needs either shadow-aware row content
+/// (`fold_row_content_stats(stats, mutation, shadow_boundary)`) or markers
+/// folded separately from row content (`fold_marker_stats`, so a mutation
+/// carrying both never double-counts a tombstone into the drop-time
+/// histogram) — this convenience "fold everything, unconditionally" wrapper
+/// has no remaining non-test caller. Kept as the REGRESSION PROOF this
+/// module's own tests use: `fold_row_content_stats(_, _, None) +
+/// fold_marker_stats` must still reproduce exactly what folding a mutation
+/// unconditionally always did, byte-for-byte, for every mutation kind.
+#[cfg(test)]
 pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
-    fold_row_content_stats(stats, mutation);
+    fold_row_content_stats(stats, mutation, None);
     fold_marker_stats(stats, mutation);
 }
 
@@ -126,29 +132,68 @@ pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mut
 /// exists, issue #4246 roborev finding). Used by a caller that folds markers
 /// separately/unconditionally so a mutation carrying both row content and a
 /// tombstone is never double-counted into the tombstone-drop-time histogram.
-pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
-    stats.update_timestamp(mutation.timestamp_micros);
-    // Issue #1018: simple `Write`/`WriteWithTtl`/`Delete` cells may carry their
-    // OWN (lower) per-cell timestamps in `Mutation::cell_write_timestamps` (a
-    // live cell's writetime OR a cell tombstone's markedForDeleteAt) and are
-    // emitted with an explicit `min_timestamp` delta. Fold every per-cell
-    // timestamp into the stats BEFORE emitting cells so `min_timestamp` can
-    // never exceed an emitted cell's actual timestamp (which would underflow
-    // the unsigned-VInt delta). Mirrors the pre-pass fold in
-    // `compute_mutations_baseline_stats`.
-    if let Some(cell_ts) = &mutation.cell_write_timestamps {
-        for ts in cell_ts.values() {
-            stats.update_timestamp(*ts);
+///
+/// `shadow_boundary` is the row GROUP's resolved `deletion_ts` (see
+/// [`row_group_survival`]), or `None` when the caller does not need
+/// per-mutation shadow awareness (every existing caller before issue #4246,
+/// and the wholly-static/carries-static callers today, which pass `None` to
+/// preserve their prior unconditional-fold behavior exactly).
+///
+/// When `Some(dts)` and `mutation` does NOT itself carry the group's row
+/// deletion (no `DeleteRow`, no `#932` `row_tombstone` — a mutation that
+/// DOES must never exclude itself, since `dts` is derived FROM its own
+/// timestamp when it is the winning deletion), the mutation's SIMPLE
+/// content (its own leading timestamp, per-cell `cell_write_timestamps`,
+/// row-level TTL, and `WriteWithTtl`/`Delete`/`DeleteRow`/`Write`
+/// contributions) is shadow-gated on `mutation.timestamp_micros > dts` —
+/// matching `merge_row_group`'s own `mutation_shadowed` test exactly. Its
+/// `ComplexDeletion`/`WriteComplexElement` ops are gated PER-OP instead,
+/// each against its OWN independent timestamp (`marked_for_delete_at` /
+/// `timestamp_micros`) rather than the mutation's row timestamp — mirroring
+/// `merge_row_group`'s rescue branch (`data_writer/rows.rs`'s
+/// `mutation_shadowed` handling), because such an op can independently
+/// survive and be EMITTED even when the rest of a shadowed mutation is dead
+/// (issue #887/#921's whole point, and issue #4246 roborev finding: a
+/// per-mutation gate that skips these too under-counts an actually-emitted
+/// value).
+pub(crate) fn fold_row_content_stats(
+    stats: &mut StatisticsMetadata,
+    mutation: &Mutation,
+    shadow_boundary: Option<i64>,
+) {
+    let carries_row_deletion = mutation
+        .operations
+        .iter()
+        .any(|op| matches!(op, CellOperation::DeleteRow))
+        || mutation.row_tombstone.is_some();
+    let mutation_shadowed = !carries_row_deletion
+        && shadow_boundary.is_some_and(|dts| mutation.timestamp_micros <= dts);
+
+    if !mutation_shadowed {
+        stats.update_timestamp(mutation.timestamp_micros);
+        // Issue #1018: simple `Write`/`WriteWithTtl`/`Delete` cells may carry
+        // their OWN (lower) per-cell timestamps in
+        // `Mutation::cell_write_timestamps` (a live cell's writetime OR a
+        // cell tombstone's markedForDeleteAt) and are emitted with an
+        // explicit `min_timestamp` delta. Fold every per-cell timestamp into
+        // the stats BEFORE emitting cells so `min_timestamp` can never
+        // exceed an emitted cell's actual timestamp (which would underflow
+        // the unsigned-VInt delta). Mirrors the pre-pass fold in
+        // `compute_mutations_baseline_stats`.
+        if let Some(cell_ts) = &mutation.cell_write_timestamps {
+            for ts in cell_ts.values() {
+                stats.update_timestamp(*ts);
+            }
         }
-    }
-    if let Some(ttl) = mutation.ttl_seconds {
-        stats.update_ttl(ttl as i32);
-        let now_seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i32)
-            .unwrap_or(0);
-        let local_deletion_time = now_seconds.saturating_add(ttl as i32);
-        stats.update_local_deletion_time(local_deletion_time);
+        if let Some(ttl) = mutation.ttl_seconds {
+            stats.update_ttl(ttl as i32);
+            let now_seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i32)
+                .unwrap_or(0);
+            let local_deletion_time = now_seconds.saturating_add(ttl as i32);
+            stats.update_local_deletion_time(local_deletion_time);
+        }
     }
     // Track local deletion times for tombstones and TTL cells. Issue #764:
     // row/cell tombstones use the caller-supplied `local_deletion_time` when
@@ -160,6 +205,9 @@ pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &
                 local_deletion_time,
                 ..
             } => {
+                if mutation_shadowed {
+                    continue;
+                }
                 stats.update_ttl(*ttl_seconds as i32);
                 // Issue #1538: honor the authoritative per-cell LDT VERBATIM
                 // when present (a surviving expiring cell preserved through
@@ -178,6 +226,9 @@ pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &
                 stats.update_local_deletion_time(local_deletion_time);
             }
             op @ (CellOperation::Delete { .. } | CellOperation::DeleteRow) => {
+                if mutation_shadowed {
+                    continue;
+                }
                 // Issue #764 / #921 finding 2: record the EXACT LDT the
                 // tombstone is emitted with, via the same helper the emit path
                 // uses, so stats and Data.db bytes agree exactly.
@@ -189,17 +240,26 @@ pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &
             }
             // Issue #887: a `ComplexDeletion` marker is physically written with
             // its OWN `marked_for_delete_at` / `local_deletion_time`, which may
-            // fall outside the row's own timestamp/LDT range.
+            // fall outside the row's own timestamp/LDT range. INDEPENDENT of
+            // `mutation_shadowed` (issue #4246 roborev finding): gated on its
+            // OWN mfda against `shadow_boundary`, mirroring
+            // `merge_row_group`'s rescue branch — this marker can survive and
+            // be emitted even when the rest of a shadowed mutation is dead.
             CellOperation::ComplexDeletion {
                 marked_for_delete_at,
                 local_deletion_time,
                 ..
             } => {
+                if shadow_boundary.is_some_and(|dts| *marked_for_delete_at <= dts) {
+                    continue;
+                }
                 stats.update_timestamp(*marked_for_delete_at);
                 stats.update_local_deletion_time(*local_deletion_time);
             }
             // Issue #887: a per-element complex cell carries its OWN explicit
-            // timestamp/ttl/local_deletion_time.
+            // timestamp/ttl/local_deletion_time — INDEPENDENT of
+            // `mutation_shadowed` for the same reason as `ComplexDeletion`
+            // above (issue #4246 roborev finding).
             CellOperation::WriteComplexElement {
                 timestamp_micros,
                 ttl_seconds,
@@ -207,6 +267,9 @@ pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &
                 is_deleted,
                 ..
             } => {
+                if shadow_boundary.is_some_and(|dts| *timestamp_micros <= dts) {
+                    continue;
+                }
                 stats.update_timestamp(*timestamp_micros);
                 if let Some(ttl) = ttl_seconds {
                     stats.update_ttl(*ttl as i32);
@@ -224,6 +287,9 @@ pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &
             // Issue #1728: a live, non-TTL `Write` cell carries Cassandra's
             // `Cell.NO_DELETION_TIME` sentinel as its localDeletionTime.
             CellOperation::Write { value, .. } => {
+                if mutation_shadowed {
+                    continue;
+                }
                 if mutation.ttl_seconds.is_none() && !matches!(value, crate::types::Value::Null) {
                     stats.note_live_local_deletion_time();
                 }
@@ -234,7 +300,10 @@ pub(crate) fn fold_row_content_stats(stats: &mut StatisticsMetadata, mutation: &
     // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted as a
     // `HAS_DELETION` row stamped with its OWN `(deletion_time, ldt)` —
     // DECOUPLED from `timestamp_micros`, so the per-cell/mutation folds above
-    // never see it.
+    // never see it. Always folded (never gated by `mutation_shadowed`): a
+    // mutation carrying `row_tombstone` is, by definition, one that carries
+    // the group's row deletion (`carries_row_deletion` above), so it is
+    // never itself excluded.
     if let Some((deletion_time, ldt)) = mutation.row_tombstone {
         stats.update_timestamp(deletion_time);
         stats.update_local_deletion_time(ldt);

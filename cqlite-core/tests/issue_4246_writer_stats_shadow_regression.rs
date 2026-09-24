@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
-use cqlite_core::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
+use cqlite_core::storage::write_engine::merge::{compact_sstables, KWayMerger, MergeStep, RowData};
 use cqlite_core::storage::write_engine::mutation::{
     CellOperation, ClusteringBound, ClusteringKey, Mutation, PartitionKey, PartitionTombstone,
     RangeTombstone, TableId,
@@ -138,40 +138,11 @@ fn flush_batch(engine: &mut WriteEngine, rt: &tokio::runtime::Runtime, muts: Vec
         .expect("sstable info");
 }
 
-/// Find the single `*-Statistics.db` under `dir` (recursively) and decode its
-/// `min_timestamp`. Mirrors `issue_1385_gc_grace_boundary.rs`'s
-/// `statistics_min_local_deletion_time` helper, one field over.
-fn statistics_min_timestamp(dir: &Path) -> i64 {
-    fn find_stats(dir: &Path, depth: usize) -> Option<PathBuf> {
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
-            let path = entry.path();
-            if path
-                .file_name()
-                .map(|n| n.to_string_lossy().ends_with("-Statistics.db"))
-                .unwrap_or(false)
-            {
-                return Some(path);
-            }
-            if depth > 0 && path.is_dir() {
-                if let Some(p) = find_stats(&path, depth - 1) {
-                    return Some(p);
-                }
-            }
-        }
-        None
-    }
-    let db = find_stats(dir, 8).expect("a *-Statistics.db under the flushed data dir");
-    let bytes = std::fs::read(&db).expect("read Statistics.db");
-    let (_, stats) = parse_statistics_with_fallback(&bytes, None).expect("decode Statistics.db");
-    stats.timestamp_stats.min_timestamp
-}
-
-/// Total observation count across the `Statistics.db` tombstone-drop-time
-/// histogram (Σ of every `(local_deletion_time, count)` bucket) — the exact
-/// counter `StatisticsMetadata::update_local_deletion_time` increments once
-/// per tombstone folded (issue #4246 roborev finding: NOT idempotent, so
-/// folding the same tombstone twice inflates this sum).
-fn statistics_tombstone_drop_count(dir: &Path) -> u64 {
+/// Find the single `*-Statistics.db` under `dir` (recursively), read it, and
+/// decode it. Shared by both accessors below (issue #4246 roborev finding:
+/// they used to each carry a byte-identical nested `find_stats` + read/parse
+/// preamble).
+fn parse_flushed_statistics(dir: &Path) -> cqlite_core::parser::statistics::SSTableStatistics {
     fn find_stats(dir: &Path, depth: usize) -> Option<PathBuf> {
         for entry in std::fs::read_dir(dir).ok()?.flatten() {
             let path = entry.path();
@@ -194,6 +165,21 @@ fn statistics_tombstone_drop_count(dir: &Path) -> u64 {
     let bytes = std::fs::read(&db).expect("read Statistics.db");
     let (_, stats) = parse_statistics_with_fallback(&bytes, None).expect("decode Statistics.db");
     stats
+}
+
+/// Mirrors `issue_1385_gc_grace_boundary.rs`'s
+/// `statistics_min_local_deletion_time` helper, one field over.
+fn statistics_min_timestamp(dir: &Path) -> i64 {
+    parse_flushed_statistics(dir).timestamp_stats.min_timestamp
+}
+
+/// Total observation count across the `Statistics.db` tombstone-drop-time
+/// histogram (Σ of every `(local_deletion_time, count)` bucket) — the exact
+/// counter `StatisticsMetadata::update_local_deletion_time` increments once
+/// per tombstone folded (issue #4246 roborev finding: NOT idempotent, so
+/// folding the same tombstone twice inflates this sum).
+fn statistics_tombstone_drop_count(dir: &Path) -> u64 {
+    parse_flushed_statistics(dir)
         .tombstone_drop_times
         .iter()
         .map(|(_, count)| count)
@@ -529,3 +515,155 @@ fn mixed_row_and_partition_tombstone_mutation_folds_tombstone_once() {
          once, not twice"
     );
 }
+
+/// Property 6 (roborev finding): the COMPACTION-path half of the fix
+/// (`KWayMerger::merge`'s deferred, `row_group_survival`-gated fold at
+/// `PartitionEnd`, plus its two unconditional marker folds) has its own,
+/// dedicated test — the properties above all drive `WriteEngine::flush` →
+/// `write_partition` only, and the #4243 oracle explicitly excludes
+/// `Statistics.db` from its byte comparison
+/// (`rt_boundary_oracle.rs::PRESENT_NOT_DIFFED`), so nothing else asserts
+/// that a shadow-dropped row stops lowering a COMPACTED SSTable's persisted
+/// `min_timestamp`, nor that its markers are folded exactly once there.
+///
+/// The shadow is created WITHIN a single flush batch (gen A: the covering
+/// range tombstone `[Bottom, 5)@10` plus the row it shadows, ck=1@5, plus a
+/// live survivor ck=6@25 — mirroring the #4243 oracle's own gen-1
+/// construction), then compacted against an unrelated, independently live
+/// gen B (ck=10@30). This is deliberately NOT a cross-generation shadow
+/// (row in one flush, its covering tombstone in a separate, later flush) —
+/// see `compaction_cross_generation_stats_residual_is_documented` below for
+/// why that scenario is a known, documented gap rather than asserted here.
+///
+/// After `compact_sstables`, the OUTPUT's persisted `min_timestamp` must
+/// still reflect the tombstone (10), not the shadow-dropped row (5) —
+/// proving `compute_baseline_min` correctly reads gen A's ALREADY-correct
+/// (shadow-aware) per-input minimum through to the compacted output, and
+/// that `KWayMerger::merge`'s own fold does not regress it — and the
+/// tombstone-drop count must be exactly 1 (not duplicated by re-folding
+/// gen A's own marker during compaction).
+#[test]
+fn compaction_path_shadow_gate_matches_flush_path() {
+    let schema = schema();
+    let temp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let data_dir = temp.path().join("data");
+    let mut engine = WriteEngine::new(WriteEngineConfig::new(
+        data_dir.clone(),
+        temp.path().join("wal"),
+        schema.clone(),
+    ))
+    .unwrap();
+
+    // Gen A: the covering range tombstone and the row it shadows, both in
+    // the SAME flush batch, plus a live survivor. Gen A's own Statistics.db
+    // min_timestamp is therefore already 10 (verified in isolation by
+    // `shadowed_old_row_does_not_lower_persisted_min_timestamp` above).
+    flush_batch(
+        &mut engine,
+        &rt,
+        vec![
+            range_delete(ClusteringBound::Bottom, excl(5), 10),
+            write_row(1, "shadowed-same-gen", 5),
+            write_row(6, "survivor", 25),
+        ],
+    );
+    // Gen B: an unrelated, independently live row with a HIGHER timestamp
+    // than gen A's post-shadow minimum, so the compacted output's minimum
+    // can only be correct if it comes from gen A's shadow-aware 10 — a
+    // vacuous pass (gen B supplying the min) is not possible here.
+    flush_batch(&mut engine, &rt, vec![write_row(10, "other-gen", 30)]);
+    rt.block_on(engine.close()).unwrap();
+
+    let inputs = discover_inputs(&data_dir);
+    assert_eq!(inputs.len(), 2, "expected exactly two flushed generations");
+
+    let out_dir = temp.path().join("compacted");
+    rt.block_on(compact_sstables(
+        inputs, &out_dir, &schema, 1, None, None, /* purge_safe */ true,
+    ))
+    .expect("compaction");
+
+    assert_eq!(
+        statistics_min_timestamp(&out_dir),
+        10,
+        "the COMPACTED output's persisted min_timestamp must retain the \
+         same-generation shadow exclusion (10) from its gen-A input, not \
+         regress to the shadow-dropped row's timestamp (5)"
+    );
+    assert_eq!(
+        statistics_tombstone_drop_count(&out_dir),
+        1,
+        "the compacted output's tombstone-drop-time histogram must record \
+         the range tombstone exactly once, not duplicated across the \
+         compaction merge"
+    );
+
+    let mut live = live_cks(discover_inputs(&out_dir), &schema);
+    live.sort_unstable();
+    assert_eq!(
+        live,
+        vec![6, 10],
+        "ck=1 must be physically absent from the compacted Data.db \
+         (shadowed); ck=6 and ck=10 present"
+    );
+}
+
+// Documents a known, out-of-scope residual (issue #4246 leaves it for a
+// follow-up): CQLite currently persists ONE conflated `min_timestamp` value
+// that serves BOTH roles Cassandra keeps distinct on disk —
+// `SerializationHeader`'s `EncodingStats` (the Data.db delta-encoding
+// baseline, `HEADER` component) and `StatsMetadata.minTimestamp` (the
+// `STATS` component; verified present as its own field via the pinned
+// `cassandra-5.0.8` `StatsMetadata.java`, NOT merely an alias of
+// `EncodingStats`).
+//
+// Per the pinned `cassandra-5.0.8` `SerializationHeader.java`
+// (`SerializationHeader.make`), a COMPACTED output's HEADER baseline is
+// deliberately derived from each input's `StatsMetadata` (the fully
+// accurate, already-shadow-resolved persisted minimum) rather than from
+// each input's own header — the source comment states this explicitly:
+// "we don't base our stats merging on the compacted files headers, which
+// ... can be somewhat inaccurate, but rather on their stats stored in
+// StatsMetadata that are fully accurate". CQLite's `compute_baseline_min`
+// (`write_engine/merge/mod.rs`) instead reads `timestamp_stats.min_timestamp`
+// from `parse_statistics_with_fallback`, which decodes ONLY the HEADER
+// component (`enhanced_statistics_parser::parse_minimal_encoding_stats`) —
+// the STATS component's own `minTimestamp` is parsed past and discarded
+// (`repair_metadata.rs`'s `c.skip(8)? // minTimestamp`), never exposed.
+//
+// Consequence: when a row and its covering range tombstone live in
+// DIFFERENT generations (gen A: row only, genuinely live from gen A's own
+// perspective at flush time; gen B: the covering tombstone, flushed
+// later), gen A's own STATS.minTimestamp is genuinely 5 — nothing within
+// gen A alone shadows it. Cassandra's compacted-output STATS.minTimestamp
+// (via `MetadataCollector`, built from what compaction ACTUALLY emits,
+// cross-generation) would correctly be 10; its compacted-output HEADER
+// baseline would be 5 (derived from inputs' STATS minima, min(5, 10) = 5).
+// CQLite's SINGLE conflated value cannot represent this split at all: it
+// reflects whichever role happened to lock it first (the HEADER pre-seed
+// from `compute_baseline_min`, itself never lower than 5 here).
+//
+// This is a genuinely separate defect from the same-generation case fixed
+// by this issue (which the #4243 oracle's byte-for-byte Data.db comparison
+// — governed entirely by the HEADER baseline — already exercises and
+// passes). Splitting the persisted STATS component from the HEADER
+// encoding baseline (introducing a distinct emitted-data-only accumulator
+// on the write side, and decoding STATS.minTimestamp as its own field on
+// the read side) is out of scope here: the #4243 oracle explicitly
+// excludes `Statistics.db` from its byte comparison
+// (`rt_boundary_oracle.rs::PRESENT_NOT_DIFFED`), so nothing about #4246's
+// acceptance criteria requires it to land in this PR. Tracked as a
+// follow-up: issue #4286. Do not "fix" this by changing an expected value
+// in the test
+// above without first adding a STATS-component reader and re-deriving the
+// value from primary Cassandra source, per the no-heuristics mandate (#28).
+//
+// No regression test accompanies this residual: CQLite exposes no way to
+// independently observe the STATS component's own `minTimestamp` today, so
+// there is nothing sound to assert that isn't either a duplicate of the
+// same-generation case above or an unverifiable number. The comment is the
+// artifact.
