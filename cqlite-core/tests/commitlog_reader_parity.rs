@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use cqlite_core::storage::commitlog::{
     parse_table_id, ColumnSpec, CommitLogReader, CommitLogSchema, SchemaSet,
@@ -70,15 +71,45 @@ fn users_schema() -> CommitLogSchema {
 fn find_fixture(dir: &Path, prefix: &str) -> PathBuf {
     let entries = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read commitlog dir {}: {e}", dir.display()));
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with(prefix) && name.ends_with(".log") {
-            return e.path();
-        }
-    }
-    panic!(
-        "no fixture starting with {prefix:?} under {}",
+    let matches = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name.starts_with(prefix) && name.ends_with(".log")).then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one fixture starting with {prefix:?} under {}; found {matches:?}",
         dir.display()
+    );
+    matches
+        .into_iter()
+        .next()
+        .expect("one matching fixture was asserted above")
+}
+
+/// Keep the Python fixture generator's structural checks in routine Cargo validation.
+#[test]
+fn fixture_derivation_helper_self_tests_pass() {
+    let helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-data/scripts/commitlog_fixture_derivation.py");
+    let output = Command::new("python3")
+        .arg(&helper)
+        .arg("--self-test")
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "run Python 3 to validate CommitLog fixture derivation at {}: {error}",
+                helper.display()
+            )
+        });
+    assert!(
+        output.status.success(),
+        "CommitLog fixture derivation self-tests failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

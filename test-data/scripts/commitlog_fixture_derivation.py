@@ -2,9 +2,12 @@
 """Derive small CommitLog fixtures and test the structural CRC locator."""
 
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
+import tempfile
 import unittest
 import uuid
 import zlib
@@ -200,9 +203,24 @@ def select_truncated_tail(data, ground_truth):
     return cut_at, target_id, complete_prefix
 
 
+def _ensure_fresh_fixture_output(output_dir):
+    existing = sorted(
+        path
+        for pattern in ("clean-*.log", "truncated-*.log", "corrupt-crc-*.log")
+        for path in output_dir.glob(pattern)
+    )
+    if existing:
+        names = ", ".join(path.name for path in existing)
+        raise FixtureFormatError(
+            f"fixture outputs already exist under {output_dir} ({names}); "
+            "refusing to create an ambiguous fixture set"
+        )
+
+
 def derive_fixtures(raw_path, output_dir, segment_name):
-    raw = Path(raw_path).read_bytes()
     output_dir = Path(output_dir)
+    _ensure_fresh_fixture_output(output_dir)
+    raw = Path(raw_path).read_bytes()
     last_nonzero = len(raw)
     while last_nonzero > 0 and raw[last_nonzero - 1] == 0:
         last_nonzero -= 1
@@ -336,6 +354,95 @@ class CommitLogFixtureDerivationTests(unittest.TestCase):
 
         with self.assertRaises(FixtureFormatError):
             list(iter_valid_frames(bytes(malformed)))
+
+    def test_stale_fixture_triplet_is_refused_without_rewriting_ground_truth(self):
+        with tempfile.TemporaryDirectory(prefix="cqlite-commitlog-stale-") as name:
+            output_dir = Path(name)
+            raw_path = output_dir / "raw-input.log"
+            raw_path.write_bytes(self.clean)
+            ground_truth_path = output_dir / "commitlog-ground-truth.json"
+            ground_truth_path.write_bytes(b"ground-truth sentinel")
+            stale_paths = [
+                output_dir / "clean-old.log",
+                output_dir / "truncated-old.log",
+                output_dir / "corrupt-crc-old.log",
+            ]
+            for path in stale_paths:
+                path.write_bytes(b"old fixture")
+
+            with self.assertRaisesRegex(FixtureFormatError, "ambiguous fixture set"):
+                derive_fixtures(raw_path, output_dir, "new.log")
+
+            self.assertEqual(ground_truth_path.read_bytes(), b"ground-truth sentinel")
+            self.assertTrue(all(path.read_bytes() == b"old fixture" for path in stale_paths))
+            self.assertFalse((output_dir / "clean-new.log").exists())
+
+    def test_fresh_output_derivation_writes_a_coherent_triplet(self):
+        with tempfile.TemporaryDirectory(prefix="cqlite-commitlog-fresh-") as name:
+            output_dir = Path(name)
+            raw_path = output_dir / "raw-input.log"
+            raw_path.write_bytes(self.clean)
+            ground_truth_path = output_dir / "commitlog-ground-truth.json"
+            ground_truth_bytes = json.dumps(self.ground_truth).encode("utf-8")
+            ground_truth_path.write_bytes(ground_truth_bytes)
+
+            derive_fixtures(raw_path, output_dir, "fresh.log")
+
+            cut_at, target_id, prefix_ids = select_truncated_tail(
+                self.clean, self.ground_truth
+            )
+            self.assertEqual(target_id, EXPECTED_INSERT_IDS[-1])
+            self.assertEqual(prefix_ids, EXPECTED_INSERT_IDS[:-1])
+            self.assertEqual((output_dir / "clean-fresh.log").read_bytes(), self.clean)
+            self.assertEqual(
+                (output_dir / "truncated-fresh.log").read_bytes(), self.clean[:cut_at]
+            )
+            self.assertEqual(
+                (output_dir / "corrupt-crc-fresh.log").read_bytes(),
+                corrupt_record_body(self.clean)[0],
+            )
+            self.assertEqual(ground_truth_path.read_bytes(), ground_truth_bytes)
+
+    @unittest.skipUnless(os.name == "posix", "fixture generator requires Bash")
+    def test_generator_rejects_existing_outputs_and_accepts_fresh_dry_run(self):
+        generator = Path(__file__).with_name("generate-commitlog-fixtures.sh")
+        with tempfile.TemporaryDirectory(
+            prefix="cqlite-commitlog-generator-test-", dir="/tmp"
+        ) as name:
+            output_dir = Path(name)
+            commitlog_dir = output_dir / "commitlog"
+            commitlog_dir.mkdir()
+            ground_truth_path = commitlog_dir / "commitlog-ground-truth.json"
+            ground_truth_path.write_bytes(b"ground-truth sentinel")
+            (commitlog_dir / "clean-old.log").write_bytes(b"old clean fixture")
+
+            stale_run = subprocess.run(
+                ["bash", str(generator), "--out", str(output_dir), "--dry-run"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(stale_run.returncode, 0)
+            self.assertIn("CommitLog output already exists:", stale_run.stderr)
+            self.assertNotIn("Starting cassandra:5.0.2", stale_run.stdout)
+            self.assertEqual(ground_truth_path.read_bytes(), b"ground-truth sentinel")
+
+        with tempfile.TemporaryDirectory(
+            prefix="cqlite-commitlog-generator-fresh-", dir="/tmp"
+        ) as name:
+            output_dir = Path(name)
+            fresh_run = subprocess.run(
+                ["bash", str(generator), "--out", str(output_dir), "--dry-run"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                fresh_run.returncode,
+                0,
+                f"fresh generator dry-run failed\nstdout:\n{fresh_run.stdout}\nstderr:\n{fresh_run.stderr}",
+            )
+            self.assertFalse((output_dir / "commitlog").exists())
 
 
 def main(argv):
