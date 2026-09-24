@@ -52,25 +52,36 @@ construction (#1699); `all-features-check` runs `cargo check`/`clippy` (never `c
 `vortex` enabled together.** The primary cross-format-differential test (proposal item 1) needs
 exactly that, so it cannot land in any existing lane unchanged.
 
+**Owner Seam-1 ruling 2026-09-23 (slim gate wiring):** at spec approval the owner narrowed this
+from my original two-executing-lane proposal to ONE executing new component. `feature-iso-vortex`
+is **compile-only**, mirroring `feature-iso-parquet` exactly rather than `feature-iso-delta-scan`'s
+executing form; `vortex-parquet-differential` is the ONLY new component that runs tests, and it
+absorbs the unit-level coverage the original design would have run inside `feature-iso-vortex`.
+Decision below reflects that ruling — not re-litigated.
+
 **Decision:** two new, narrowly-scoped components, keeping the existing isolation lanes'
 contracts untouched:
 
-1. `feature-iso-vortex` — mirrors `feature-iso-delta-scan`'s *executing* form (not
-   `feature-iso-parquet`'s compile-only form): `cargo test -p cqlite-core --no-default-features
-   --features <defaults-minus-parquet-minus-delta-scan>,vortex --lib`, proving the `vortex` feature
-   compiles and its own unit tests (type-mapping helpers, the UUID-extension pin at the unit level)
-   pass with neither `parquet` nor `delta-scan` present. Compile-only would not be enough here
-   because the UUID-extension-pin unit test (proposal item 2) needs to actually run somewhere
-   `parquet` is absent, to prove Vortex's own importer path — not a shared helper only exercised
-   under `parquet` — carries the extension.
-2. `vortex-parquet-differential` — a new component, same `run_component` shape as `write-tests`:
-   `cargo test -p cqlite-cli --features parquet,vortex --test issue_4237_vortex_parquet_differential`
-   (plus any split files the campsite file-size rule forces), `CQLITE_REQUIRE_FIXTURES=1`, added to
-   `DATASET_COMPONENTS` (it reads the 33 fixture tables) and to the `COMPONENTS=(...)` array in the
-   same edit as the new test target, per the pattern every prior feature addition (#3453, #1699)
-   used. It is CLI-level (not `cqlite-core`-level) because proposal item 5 (wiring evidence) requires
-   the compiled binary, and the differential is most naturally driven at the `cqlite export`
-   surface where both format flags already exist.
+1. `feature-iso-vortex` — **compile-only**, mirroring `feature-iso-parquet`'s existing form
+   exactly: `cargo test -p cqlite-core --no-default-features --features
+   <defaults-minus-parquet-minus-delta-scan>,vortex --lib --no-run`, proving the `vortex` feature
+   compiles cleanly with neither `parquet` nor `delta-scan` present (no accidental compile-time
+   coupling to the Parquet crate). It does not execute anything, matching the owner's ruling and
+   `feature-iso-parquet`'s own documented `PASS (0s)` legitimacy (gate-ops.md:10569).
+2. `vortex-parquet-differential` — a new component, same `run_component` shape as `write-tests`,
+   and now the SOLE place `vortex`'s tests actually run. Two passes, both with `parquet` AND
+   `vortex` enabled together (the pairing no other component reaches):
+   - `cargo test -p cqlite-core --features parquet,vortex --lib` — the writer's own unit-level
+     coverage (R1.2's no-second-mapping check, R5's feature-gating assertions, and the
+     UUID-extension-pin unit test if written at the writer level per tasks.md 2.5). Since
+     `feature-iso-vortex` no longer executes anything, this pass is what proves these unit tests
+     pass at all — folding it into this component rather than dropping the coverage.
+   - `cargo test -p cqlite-cli --features parquet,vortex --test
+     issue_4237_vortex_parquet_differential` (plus any split files the campsite file-size rule
+     forces) — the CLI-level, fixture-required cross-format oracle (R9), `CQLITE_REQUIRE_FIXTURES=1`.
+   Added to `DATASET_COMPONENTS` (it reads the 33 fixture tables) and to the `COMPONENTS=(...)`
+   array in the same edit as the new test targets, per the pattern every prior feature addition
+   (#3453, #1699) used.
 
 This is an implementation/gate-wiring decision, not a product one — no requirement's meaning
 changes based on which component name runs it, and the choice follows the file's own established

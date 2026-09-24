@@ -82,11 +82,14 @@ after every fix round; ONE full gate in `flow-closer`.
       both directions, not its subject matter). Split into a sibling
       `issue_4237_vortex_type_coverage.rs` for the per-CQL-type-family cases (R2.2/R2.3) if the
       first file approaches the ~1500-line campsite threshold.
-- [ ] 4.2 `scripts/agent-gate.sh`: add `feature-iso-vortex` (R11.1, mirrors
-      `feature-iso-delta-scan`'s executing form per design.md D3) and the new two-feature
-      differential component (R11.2) to `COMPONENTS=(...)`, `DATASET_COMPONENTS`, and the dispatch
-      `case` — following the exact pattern of the #1699 / #3453 prior additions (grep those issues'
-      landed diffs for the touch-point list: `COMPONENTS`, dispatch `case`, cost-model `case`
+- [ ] 4.2 `scripts/agent-gate.sh` (owner Seam-1 ruling 2026-09-23: slim gate wiring — see design.md
+      D3): add `feature-iso-vortex` (R11.1) as **compile-only**, mirroring `feature-iso-parquet`'s
+      existing form exactly (`--no-run`, no execution), and `vortex-parquet-differential` (R11.2) —
+      the SOLE new executing component, running both `cargo test -p cqlite-core --features
+      parquet,vortex --lib` (writer unit tests) and the CLI-level fixture-required differential
+      target — to `COMPONENTS=(...)`, `DATASET_COMPONENTS`, and the dispatch `case` — following the
+      exact pattern of the #1699 / #3453 prior additions (grep those issues' landed diffs for the
+      touch-point list: `COMPONENTS`, dispatch `case`, cost-model `case`
       (`printf 'cargo'`/`'libtest'`), and the summary-line emission).
 - [ ] 4.3 Verify `features-load-bearing` recognizes `vortex` as load-bearing (R11.3) — it has real
       `cfg` sites once 2.3/3.2 land; no special-casing needed if the guard's derivation is followed

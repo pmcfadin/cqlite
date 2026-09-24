@@ -89,30 +89,34 @@ solely by the cross-format differential (R9) and the value/type-level requiremen
 - **Then** they are permitted to differ (compressor sampling), and no test in this change asserts
   byte equality between them or against a committed golden — only decoded-value equality (R9).
 
-### Requirement: R11 — Gate wiring: mutual-isolation lane plus a two-feature differential lane
+### Requirement: R11 — Gate wiring: a compile-only isolation lane plus one executing differential lane
 
-The full gate SHALL gain `feature-iso-vortex` (vortex enabled, parquet and delta-scan disabled,
-executing the vortex module's own unit tests — see design.md D3) and a second component that
-enables `parquet` AND `vortex` together to execute R9's differential target
-(`CQLITE_REQUIRE_FIXTURES=1`, added to `DATASET_COMPONENTS`). `features-load-bearing` SHALL pass
-(the `vortex` feature has real `cfg` reference sites — the writer module itself) and
-`dep-duplicates` SHALL show no `ADVISORY-INCREASE` (Vortex's `parquet ^59.2`/`tokio` dependencies
-are already in the tree after #4236's arrow-59 rev).
+The full gate SHALL gain `feature-iso-vortex` as a **compile-only** lane (vortex enabled, parquet
+and delta-scan disabled, `--no-run`, mirroring `feature-iso-parquet` exactly — owner Seam-1 ruling
+2026-09-23: slim gate wiring) and `vortex-parquet-differential` as the sole new EXECUTING
+component, enabling `parquet` AND `vortex` together to run both the writer's own unit-level
+coverage and R9's CLI-level differential target (`CQLITE_REQUIRE_FIXTURES=1`, added to
+`DATASET_COMPONENTS`; see design.md D3). `features-load-bearing` SHALL pass (the `vortex` feature
+has real `cfg` reference sites — the writer module itself) and `dep-duplicates` SHALL show no
+`ADVISORY-INCREASE` (Vortex's `parquet ^59.2`/`tokio` dependencies are already in the tree after
+#4236's arrow-59 rev).
 
-#### Scenario: R11.1 `feature-iso-vortex` compiles and runs without `parquet` or `delta-scan`
+#### Scenario: R11.1 `feature-iso-vortex` compiles, without `parquet` or `delta-scan`, and runs nothing
 - **Given** the full gate
 - **When** `feature-iso-vortex` runs
-- **Then** `cqlite-core` builds and its `--lib` tests pass with `vortex` enabled and both `parquet`
-  and `delta-scan` disabled — proving the Vortex writer has no accidental compile-time dependency on
-  the Parquet crate itself (only on the shared `arrow_convert` producer, which requires `arrow`, not
-  `parquet`).
+- **Then** `cqlite-core` builds with `vortex` enabled and both `parquet` and `delta-scan` disabled
+  (`--no-run`, no test execution) — proving the Vortex writer has no accidental compile-time
+  dependency on the Parquet crate itself (only on the shared `arrow_convert` producer, which
+  requires `arrow`, not `parquet`) — matching `feature-iso-parquet`'s own compile-only contract and
+  its documented `PASS (0s)` legitimacy.
 
-#### Scenario: R11.2 the two-feature differential lane is named and fixture-required
+#### Scenario: R11.2 `vortex-parquet-differential` is the sole executing lane, named and fixture-required
 - **Given** the full gate's `AGENT-GATE SUMMARY`
-- **When** the new component's line is read
-- **Then** it names the exact `--test` target(s) it ran, states `CQLITE_REQUIRE_FIXTURES=1`, and
-  its pass/fail is not silently absorbed into an existing component's line (#3522's per-component
-  naming discipline).
+- **When** the `vortex-parquet-differential` component's line is read
+- **Then** it names both passes it ran — `cargo test -p cqlite-core --features parquet,vortex --lib`
+  and the CLI-level `--test` target(s) — states `CQLITE_REQUIRE_FIXTURES=1` for the fixture-backed
+  pass, and its pass/fail is not silently absorbed into an existing component's line (#3522's
+  per-component naming discipline); no other new component executes any `vortex`-gated test.
 
 #### Scenario: R11.3 `features-load-bearing` and `dep-duplicates` stay green
 - **Given** the full gate
