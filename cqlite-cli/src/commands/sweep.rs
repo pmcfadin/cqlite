@@ -177,28 +177,15 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
                     }
                     match std::fs::read_dir(&table_path) {
                         Ok(files) => {
-                            let mut data_dbs: Vec<PathBuf> = Vec::new();
-                            let mut unreadable_file_entries = 0usize;
-                            let mut last_file_entry_error: Option<String> = None;
-                            for file_entry in files {
-                                match file_entry {
-                                    Ok(e) => {
-                                        let p = e.path();
-                                        if p.is_file()
-                                            && p.file_name()
-                                                .and_then(|n| n.to_str())
-                                                .map(|n| n.ends_with("-Data.db"))
-                                                .unwrap_or(false)
-                                        {
-                                            data_dbs.push(p);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        unreadable_file_entries += 1;
-                                        last_file_entry_error = Some(e.to_string());
-                                    }
-                                }
-                            }
+                            let (mut data_dbs, unreadable_file_entries, last_file_entry_error) =
+                                classify_table_dir_entries(files.map(|e| e.map(|e| e.path())));
+                            // Captured BEFORE the branch below: the `data_dbs.is_empty()`
+                            // arm consumes `last_file_entry_error` by value in its own
+                            // `match`, and `found_count` needs `data_dbs.len()` before
+                            // the non-empty arm moves it into `generations`.
+                            let found_count = data_dbs.len();
+                            let file_entry_error_for_unreadable_note =
+                                last_file_entry_error.clone();
                             if data_dbs.is_empty() {
                                 let cause = match last_file_entry_error {
                                     // At least one *-Data.db might have been
@@ -221,6 +208,29 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
                             } else {
                                 data_dbs.sort();
                                 generations.extend(data_dbs);
+                            }
+                            // roborev job 4376: the branch above only ever names
+                            // `unreadable_file_entries` when `data_dbs` is ALSO empty
+                            // (folded into the "no *-Data.db" cause) — a table dir that
+                            // has BOTH readable generations AND unreadable directory
+                            // entries lost that count entirely, with `generations.extend`
+                            // being the only trace. Report it as its OWN unreadable row,
+                            // mirroring the aggregated `unreadable_table_entries` pattern
+                            // below: this affects the exit code exactly like any other
+                            // unreadable row, and the readable generations found
+                            // alongside it are still verified (not skipped).
+                            if found_count > 0 && unreadable_file_entries > 0 {
+                                unreadable_table_dirs.push((
+                                    table_path.clone(),
+                                    format!(
+                                        "{unreadable_file_entries} unreadable directory \
+                                         entry(ies) under {} (last error: {}) alongside \
+                                         {found_count} readable *-Data.db generation(s), \
+                                         which are still verified below",
+                                        table_path.display(),
+                                        file_entry_error_for_unreadable_note.unwrap_or_default(),
+                                    ),
+                                ));
                             }
                         }
                         Err(e) => unreadable_table_dirs.push((table_path, e.to_string())),
@@ -261,6 +271,40 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
     })
 }
 
+/// Classify one table directory's `read_dir` entries into the `*-Data.db`
+/// paths found and the unreadable-entry count/last error (roborev job 4376's
+/// injectable seam). Takes `io::Result<PathBuf>` rather than
+/// `io::Result<DirEntry>` — a `DirEntry` has no public constructor, so a test
+/// cannot synthesize one to inject a failing entry; the caller maps its
+/// `ReadDir` iterator down to this same shape (`e.map(|e| e.path())`), so
+/// production behavior is unchanged.
+fn classify_table_dir_entries(
+    entries: impl Iterator<Item = std::io::Result<PathBuf>>,
+) -> (Vec<PathBuf>, usize, Option<String>) {
+    let mut data_dbs: Vec<PathBuf> = Vec::new();
+    let mut unreadable_file_entries = 0usize;
+    let mut last_file_entry_error: Option<String> = None;
+    for entry in entries {
+        match entry {
+            Ok(p) => {
+                if p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                {
+                    data_dbs.push(p);
+                }
+            }
+            Err(e) => {
+                unreadable_file_entries += 1;
+                last_file_entry_error = Some(e.to_string());
+            }
+        }
+    }
+    (data_dbs, unreadable_file_entries, last_file_entry_error)
+}
+
 /// Map a completed [`VerifyReport`] to its severity + cause (design.md §D3):
 /// `FilterFalseNegative`-only is `Degraded`; any other non-empty finding set
 /// is `Corrupt`. A closed function of `VerifyErrorClass`, stated once.
@@ -277,8 +321,18 @@ fn classify_report(findings: &[VerifyFinding]) -> (Severity, Option<String>) {
             Some(VerifyErrorClass::FilterFalseNegative.code().to_string()),
         )
     } else {
+        // roborev job 4376: `findings.first()` could name a
+        // `FilterFalseNegative` sitting ahead of a REAL corruption finding in
+        // the same report (this arm is reached whenever the set is not
+        // FilterFalseNegative-only, so a mix is possible) — the row's cause
+        // is meant to name the reason it is `Corrupt`, not merely the first
+        // finding recorded. Prefer the first finding that is NOT
+        // FilterFalseNegative; fall back to `findings.first()` only when
+        // every finding (impossible here, but kept fail-safe) is one.
         let cause = findings
-            .first()
+            .iter()
+            .find(|f| f.class != VerifyErrorClass::FilterFalseNegative)
+            .or_else(|| findings.first())
             .map(|f| f.class.code().to_string())
             .unwrap_or_default();
         (Severity::Corrupt, Some(cause))
@@ -572,4 +626,128 @@ fn print_json(rows: &[SweepRow]) {
         totals[2],
         totals[3],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finding(class: VerifyErrorClass) -> VerifyFinding {
+        VerifyFinding {
+            class,
+            component: "Data.db".to_string(),
+            detail: "synthetic".to_string(),
+            location: None,
+        }
+    }
+
+    // roborev job 4376: `classify_report`'s Corrupt arm must name a REAL
+    // corruption cause, not merely the first finding recorded — a
+    // `FilterFalseNegative` ahead of a genuine corruption finding in the
+    // same (non-FilterFalseNegative-only) report must not become the row's
+    // cause.
+    #[test]
+    fn classify_report_corrupt_cause_skips_a_leading_filter_false_negative() {
+        let findings = vec![
+            finding(VerifyErrorClass::FilterFalseNegative),
+            finding(VerifyErrorClass::RowScanFailed),
+        ];
+        let (severity, cause) = classify_report(&findings);
+        assert_eq!(severity, Severity::Corrupt);
+        assert_eq!(
+            cause.as_deref(),
+            Some(VerifyErrorClass::RowScanFailed.code())
+        );
+    }
+
+    // Unchanged behavior: FilterFalseNegative-only stays Degraded, its cause
+    // still names FilterFalseNegative (the ONLY finding present).
+    #[test]
+    fn classify_report_filter_false_negative_only_is_degraded() {
+        let findings = vec![finding(VerifyErrorClass::FilterFalseNegative)];
+        let (severity, cause) = classify_report(&findings);
+        assert_eq!(severity, Severity::Degraded);
+        assert_eq!(
+            cause.as_deref(),
+            Some(VerifyErrorClass::FilterFalseNegative.code())
+        );
+    }
+
+    // Unchanged behavior: a Corrupt report with no FilterFalseNegative at all
+    // still names its first finding.
+    #[test]
+    fn classify_report_corrupt_cause_is_first_finding_when_no_filter_false_negative() {
+        let findings = vec![
+            finding(VerifyErrorClass::RowScanFailed),
+            finding(VerifyErrorClass::DigestMismatch),
+        ];
+        let (severity, cause) = classify_report(&findings);
+        assert_eq!(severity, Severity::Corrupt);
+        assert_eq!(
+            cause.as_deref(),
+            Some(VerifyErrorClass::RowScanFailed.code())
+        );
+    }
+
+    // roborev job 4376: a table directory can hold BOTH readable
+    // `*-Data.db` generations AND an unreadable directory entry in the SAME
+    // `read_dir` pass — the count must not be silently dropped just because
+    // `data_dbs` ended up non-empty. Injects a failing entry directly (a
+    // `DirEntry` has no public constructor to synthesize one for real).
+    #[test]
+    fn table_dir_entries_unreadable_alongside_readable_generations_is_counted() {
+        let dir = std::env::temp_dir().join(format!(
+            "cqlite-sweep-unittest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let data_db = dir.join("nb-1-big-Data.db");
+        std::fs::write(&data_db, b"").expect("create Data.db stand-in");
+
+        let entries = vec![
+            Ok(data_db.clone()),
+            Err(std::io::Error::other("injected failure")),
+        ];
+        let (data_dbs, unreadable_file_entries, last_file_entry_error) =
+            classify_table_dir_entries(entries.into_iter());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(data_dbs, vec![data_db]);
+        assert_eq!(unreadable_file_entries, 1);
+        assert_eq!(last_file_entry_error.as_deref(), Some("injected failure"));
+        // The call site's own guard (`found_count > 0 && unreadable_file_entries > 0`)
+        // is what turns this into a pushed `unreadable_table_dirs` row — asserted
+        // structurally here since both counts driving it are confirmed non-zero.
+        assert!(!data_dbs.is_empty() && unreadable_file_entries > 0);
+    }
+
+    // Clean case: no unreadable entries at all yields an empty last-error and
+    // a zero count, so the call site's guard never fires.
+    #[test]
+    fn table_dir_entries_all_readable_reports_zero_unreadable() {
+        let dir = std::env::temp_dir().join(format!(
+            "cqlite-sweep-unittest-clean-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let data_db = dir.join("nb-1-big-Data.db");
+        std::fs::write(&data_db, b"").expect("create Data.db stand-in");
+
+        let entries = vec![Ok(data_db.clone())];
+        let (data_dbs, unreadable_file_entries, last_file_entry_error) =
+            classify_table_dir_entries(entries.into_iter());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(data_dbs, vec![data_db]);
+        assert_eq!(unreadable_file_entries, 0);
+        assert_eq!(last_file_entry_error, None);
+    }
 }
