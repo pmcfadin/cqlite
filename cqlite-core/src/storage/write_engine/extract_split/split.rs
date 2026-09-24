@@ -161,6 +161,13 @@ pub async fn split_sstable(
 
     let reader = open_reader(&data_db).await?;
     let scan_cancel = ScanCancel::default();
+    // Seed every part's writer from the ONE source generation's own
+    // Statistics.db (issue #729 convention; see `reconciled.rs`'s identical
+    // fix for why omitting this corrupts, not merely loses, a row's
+    // timestamp whenever it is lower than whatever baseline the writer
+    // would otherwise infer from the first row it happens to see).
+    let (min_ts, min_ldt, min_ttl) =
+        crate::storage::write_engine::merge::compute_baseline_min(&[data_db.clone()]);
 
     let mut current_part_index: Option<usize> = None;
     let mut writer: Option<SSTableWriter> = None;
@@ -192,11 +199,13 @@ pub async fn split_sstable(
                 }
             }
             current_part_index = Some(this_part);
-            writer = Some(SSTableWriter::new(
+            let mut w = SSTableWriter::new(
                 out_dir.join(format!("part-{this_part:04}")),
                 generation,
                 schema,
-            )?);
+            )?;
+            w.pre_seed_encoding_baselines(min_ts, min_ldt, min_ttl);
+            writer = Some(w);
             partitions = 0;
             rows = 0;
             min_token = i64::MAX;

@@ -123,7 +123,7 @@ pub async fn execute_extract_command(schema_path: Option<&Path>, args: &ExtractA
     }
 
     let selection = if let Some(literal) = &args.partition {
-        match parse_key_literal(literal, &schema).await {
+        match parse_key_literal(literal, &schema) {
             Ok(k) => Selection::Key(k),
             Err(e) => {
                 eprintln!("cqlite extract: --partition '{literal}': {e}");
@@ -156,7 +156,7 @@ pub async fn execute_extract_command(schema_path: Option<&Path>, args: &ExtractA
             if line.is_empty() {
                 continue;
             }
-            match parse_key_literal(line, &schema).await {
+            match parse_key_literal(line, &schema) {
                 Ok(k) => keys.push(k),
                 Err(e) => {
                     eprintln!(

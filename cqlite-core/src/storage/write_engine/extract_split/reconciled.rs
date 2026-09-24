@@ -67,6 +67,18 @@ pub(super) async fn extract_reconciled(
     };
 
     let mut writer = SSTableWriter::new(out_dir.to_path_buf(), OUTPUT_GENERATION, schema)?;
+    // Two-pass compaction convention (issue #729, mirrored from `compact_sstables`/
+    // `salvage_sstable`): seed the output's timestamp/LDT/TTL delta-encoding
+    // baselines from the INPUT generations' own Statistics.db before writing
+    // any partition. Without this the writer's baseline defaults to
+    // whatever it first observes, and any LATER-written row with an
+    // actually-smaller timestamp underflows the delta encoding, corrupting
+    // (not merely losing) the stored value — caught by
+    // `issue_4199_split_parts.rs`'s golden-vs-output row_timestamp mismatch.
+    let (min_ts, min_ldt, min_ttl) = crate::storage::write_engine::merge::compute_baseline_min(
+        &generation_paths.to_vec(),
+    );
+    writer.pre_seed_encoding_baselines(min_ts, min_ldt, min_ttl);
     let mut found: HashSet<Vec<u8>> = HashSet::new();
     let mut partitions = 0usize;
     let mut rows = 0usize;

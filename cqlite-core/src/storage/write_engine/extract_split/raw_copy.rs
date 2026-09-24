@@ -202,11 +202,17 @@ pub(super) async fn extract_raw(
                     }
                     found.insert(key.key.clone());
                     if writer.is_none() {
-                        writer = Some(SSTableWriter::new(
-                            out_dir.to_path_buf(),
-                            generation,
-                            schema,
-                        )?);
+                        let mut w = SSTableWriter::new(out_dir.to_path_buf(), generation, schema)?;
+                        // Seed the delta-encoding baselines from THIS generation's
+                        // own Statistics.db (issue #729 convention; see
+                        // `reconciled.rs`'s identical fix for why omitting this
+                        // corrupts, not merely loses, a later row's timestamp).
+                        let (min_ts, min_ldt, min_ttl) =
+                            crate::storage::write_engine::merge::compute_baseline_min(
+                                &[path.clone()],
+                            );
+                        w.pre_seed_encoding_baselines(min_ts, min_ldt, min_ttl);
+                        writer = Some(w);
                     }
                     rows += mutations.len();
                     if let Err(e) = writer

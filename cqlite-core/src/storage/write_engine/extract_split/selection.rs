@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::cql::ast::CqlLiteral;
 use crate::error::{Error, Result};
 use crate::schema::{CqlType, TableSchema};
 use crate::storage::partition_key_codec::encode_partition_key_columns;
@@ -69,6 +70,43 @@ impl Selection {
     }
 }
 
+/// Lex ONE CQL scalar literal's TEXT SHAPE into a [`CqlLiteral`] — grammar
+/// dispatch only (a quoted string is always a string, a UUID's 8-4-4-4-12
+/// hex-dash shape is always a UUID, per the CQL grammar itself), never a
+/// guess about what the SCHEMA says the column should hold: [`literal_to_value`]
+/// still does that schema-driven coercion from the returned [`CqlLiteral`].
+///
+/// `cql::factory::ParserFactory`'s generic `parse_literal` does not
+/// recognise a UUID literal at all (its own doc calls it a "placeholder"),
+/// so `--partition`/`--keys-file` need this narrower, purpose-built lexer
+/// covering exactly the literal shapes a partition-key column can hold:
+/// null, boolean, single-quoted string, UUID, integer, float.
+fn lex_cql_literal(s: &str) -> Result<CqlLiteral> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("null") {
+        return Ok(CqlLiteral::Null);
+    }
+    if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
+        return Ok(CqlLiteral::Boolean(s.eq_ignore_ascii_case("true")));
+    }
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        return Ok(CqlLiteral::String(s[1..s.len() - 1].to_string()));
+    }
+    if uuid::Uuid::parse_str(s).is_ok() {
+        return Ok(CqlLiteral::Uuid(s.to_string()));
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        return Ok(CqlLiteral::Integer(i));
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Ok(CqlLiteral::Float(f));
+    }
+    Err(Error::InvalidInput(format!(
+        "could not parse '{s}' as a CQL literal (expected null, true/false, 'quoted text', a \
+         UUID, or a number)"
+    )))
+}
+
 /// Parse ONE key literal (`--partition`'s argument, or one `--keys-file`
 /// line) into raw partition-key bytes (design D1.1).
 ///
@@ -78,7 +116,7 @@ impl Selection {
 /// pairs, one per partition-key column) so a schema column reorder, or a
 /// typo, names the offending column rather than silently binding to the
 /// wrong position.
-pub async fn parse_key_literal(literal: &str, schema: &TableSchema) -> Result<Vec<u8>> {
+pub fn parse_key_literal(literal: &str, schema: &TableSchema) -> Result<Vec<u8>> {
     let literal = literal.trim();
     if schema.partition_keys.is_empty() {
         return Err(Error::InvalidInput(format!(
@@ -86,14 +124,12 @@ pub async fn parse_key_literal(literal: &str, schema: &TableSchema) -> Result<Ve
             schema.keyspace, schema.table
         )));
     }
-    let parser = crate::cql::factory::ParserFactory::create_default()?;
     let mut values: Vec<Option<Value>> = vec![None; schema.partition_keys.len()];
 
     if schema.partition_keys.len() == 1 && !literal.contains('=') {
         let column = &schema.partition_keys[0];
-        let cql_literal = parser.parse_literal(literal).await.map_err(|e| {
-            Error::InvalidInput(format!("could not parse key literal '{literal}': {e}"))
-        })?;
+        let cql_literal = lex_cql_literal(literal)
+            .map_err(|e| Error::InvalidInput(format!("key literal '{literal}': {e}")))?;
         let cql_type = CqlType::parse(&column.data_type)?;
         values[0] = Some(literal_to_value(&cql_literal, &cql_type)?);
     } else {
@@ -118,9 +154,9 @@ pub async fn parse_key_literal(literal: &str, schema: &TableSchema) -> Result<Ve
                         schema.keyspace, schema.table
                     ))
                 })?;
-            let cql_literal = parser.parse_literal(value_literal).await.map_err(|e| {
+            let cql_literal = lex_cql_literal(value_literal).map_err(|e| {
                 Error::InvalidInput(format!(
-                    "could not parse key literal '{value_literal}' for column '{name}': {e}"
+                    "key literal '{value_literal}' for column '{name}': {e}"
                 ))
             })?;
             let cql_type = CqlType::parse(&column.data_type)?;
