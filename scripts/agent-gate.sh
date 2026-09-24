@@ -23703,7 +23703,11 @@ run_tooling_tests() {
     return 0
   fi
   echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
-  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
+  # CommitLog fixture derivation (#2798): committed fixtures, no Docker/network.
+  # Keep its Python dependency in tooling validation, outside core Cargo tests.
+  echo ">>> [$name] python3 test-data/scripts/commitlog_fixture_derivation.py --self-test"
+  if python3 "$REPO_ROOT/test-data/scripts/commitlog_fixture_derivation.py" --self-test >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&

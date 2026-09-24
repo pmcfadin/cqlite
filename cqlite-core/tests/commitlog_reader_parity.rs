@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use cqlite_core::storage::commitlog::{
     parse_table_id, ColumnSpec, CommitLogReader, CommitLogSchema, SchemaSet,
@@ -88,29 +87,6 @@ fn find_fixture(dir: &Path, prefix: &str) -> PathBuf {
         .into_iter()
         .next()
         .expect("one matching fixture was asserted above")
-}
-
-/// Keep the Python fixture generator's structural checks in routine Cargo validation.
-#[test]
-fn fixture_derivation_helper_self_tests_pass() {
-    let helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../test-data/scripts/commitlog_fixture_derivation.py");
-    let output = Command::new("python3")
-        .arg(&helper)
-        .arg("--self-test")
-        .output()
-        .unwrap_or_else(|error| {
-            panic!(
-                "run Python 3 to validate CommitLog fixture derivation at {}: {error}",
-                helper.display()
-            )
-        });
-    assert!(
-        output.status.success(),
-        "CommitLog fixture derivation self-tests failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 /// Requirement: mutation stream decoding matches ground truth.
