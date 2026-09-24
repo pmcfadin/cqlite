@@ -22,6 +22,8 @@ pub mod write;
 
 pub mod delta_export;
 pub mod docker;
+pub mod explain;
+pub(crate) mod explain_render;
 pub mod info;
 pub mod read_commitlog;
 pub mod read_sstable;

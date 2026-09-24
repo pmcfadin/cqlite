@@ -36,6 +36,7 @@
 //!      independently, across all four end-bound variants and a ck sweep. Pins the
 //!      hand-mirrored negation against future divergence.
 
+use super::NoTrace;
 use super::*;
 use crate::schema::{ClusteringOrder, Column, KeyColumn};
 use crate::storage::sstable::work_counters::range_coverage_scope::RangeCoverageScope;
@@ -151,7 +152,7 @@ fn range_shadowing_is_binary_search_not_linear_scan() {
             )
         })
         .collect();
-    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+    KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut range_tombstones, &schema);
     assert_eq!(
         range_tombstones.len(),
         T,
@@ -166,7 +167,7 @@ fn range_shadowing_is_binary_search_not_linear_scan() {
 
     let scope = RangeCoverageScope::new();
     for row in rows {
-        let _ = KWayMerger::apply_range_shadowing(row, &range_tombstones, &schema);
+        let _ = KWayMerger::<NoTrace>::apply_range_shadowing(row, &range_tombstones, &schema);
     }
     let comparisons = scope.count();
     drop(scope);
@@ -213,7 +214,7 @@ fn binary_search_shadows_exactly_the_covered_rows() {
             )
         })
         .collect();
-    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+    KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut range_tombstones, &schema);
 
     // Sweep past every edge (-1 .. last_end + 2), across both a tombstone row and
     // a live row so both `apply_range_shadowing` arms are exercised.
@@ -222,7 +223,8 @@ fn binary_search_shadows_exactly_the_covered_rows() {
         let expected_covered = oracle_covered(n, &blocks);
         for row in [shadowable_row(dk(1), n), shadowable_live_row(dk(1), n)] {
             let survived =
-                KWayMerger::apply_range_shadowing(row, &range_tombstones, &schema).is_some();
+                KWayMerger::<NoTrace>::apply_range_shadowing(row, &range_tombstones, &schema)
+                    .is_some();
             assert_eq!(
                 !survived, expected_covered,
                 "ck={n}: covered={expected_covered} but survived={survived} \
@@ -261,7 +263,7 @@ fn multi_partition_slice_uses_exact_fallback_scan() {
             ),
         ),
     ];
-    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+    KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut range_tombstones, &schema);
     assert_ne!(
         range_tombstones.first().expect("non-empty").0.key,
         range_tombstones.last().expect("non-empty").0.key,
@@ -270,21 +272,33 @@ fn multi_partition_slice_uses_exact_fallback_scan() {
 
     // p1 row at ck=1 is covered by p1's range; ck=11 (p2's range) does NOT leak
     // into p1. Symmetrically for p2.
-    let p1_hit =
-        KWayMerger::apply_range_shadowing(shadowable_row(dk(1), 1), &range_tombstones, &schema);
+    let p1_hit = KWayMerger::<NoTrace>::apply_range_shadowing(
+        shadowable_row(dk(1), 1),
+        &range_tombstones,
+        &schema,
+    );
     assert!(p1_hit.is_none(), "p1 ck=1 covered by p1 range");
-    let p1_miss =
-        KWayMerger::apply_range_shadowing(shadowable_row(dk(1), 11), &range_tombstones, &schema);
+    let p1_miss = KWayMerger::<NoTrace>::apply_range_shadowing(
+        shadowable_row(dk(1), 11),
+        &range_tombstones,
+        &schema,
+    );
     assert!(
         p1_miss.is_some(),
         "p1 ck=11 must NOT be shadowed by p2's range (no cross-partition leak)"
     );
 
-    let p2_hit =
-        KWayMerger::apply_range_shadowing(shadowable_row(dk(2), 11), &range_tombstones, &schema);
+    let p2_hit = KWayMerger::<NoTrace>::apply_range_shadowing(
+        shadowable_row(dk(2), 11),
+        &range_tombstones,
+        &schema,
+    );
     assert!(p2_hit.is_none(), "p2 ck=11 covered by p2 range");
-    let p2_miss =
-        KWayMerger::apply_range_shadowing(shadowable_row(dk(2), 1), &range_tombstones, &schema);
+    let p2_miss = KWayMerger::<NoTrace>::apply_range_shadowing(
+        shadowable_row(dk(2), 1),
+        &range_tombstones,
+        &schema,
+    );
     assert!(
         p2_miss.is_some(),
         "p2 ck=1 must NOT be shadowed by p1's range (no cross-partition leak)"
@@ -408,7 +422,7 @@ fn assert_binsearch_matches_oracle<F>(
         // (1) monotone partition predicate.
         let flags: Vec<bool> = range_tombstones
             .iter()
-            .map(|(_, rt)| KWayMerger::range_end_before_ck(ck, rt, schema))
+            .map(|(_, rt)| KWayMerger::<NoTrace>::range_end_before_ck(ck, rt, schema))
             .collect();
         let first_false = flags.iter().position(|&b| !b).unwrap_or(flags.len());
         assert!(
@@ -424,7 +438,8 @@ fn assert_binsearch_matches_oracle<F>(
             entry_live(key.clone(), ck.clone()),
         ] {
             let survived =
-                KWayMerger::apply_range_shadowing(row, range_tombstones, schema).is_some();
+                KWayMerger::<NoTrace>::apply_range_shadowing(row, range_tombstones, schema)
+                    .is_some();
             assert_eq!(
                 !survived, expected,
                 "ck={ck:?}: oracle covered={expected} but survived={survived} \
@@ -469,7 +484,7 @@ fn binary_search_exact_over_exclusive_bounds() {
             ),
         ),
     ];
-    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+    KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut range_tombstones, &schema);
 
     let keys: Vec<ClusteringKey> = (5..=65).map(ck).collect();
     assert_binsearch_matches_oracle(&schema, &range_tombstones, &keys, |k| {
@@ -513,7 +528,7 @@ fn binary_search_exact_over_prefix_bounds() {
             ),
         ),
     ];
-    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+    KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut range_tombstones, &schema);
 
     let mut keys: Vec<ClusteringKey> = Vec::new();
     for c1 in 0..=6 {
@@ -564,7 +579,7 @@ fn binary_search_exact_over_desc_order() {
             ),
         ),
     ];
-    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+    KWayMerger::<NoTrace>::coalesce_range_tombstones(&mut range_tombstones, &schema);
 
     let keys: Vec<ClusteringKey> = (5..=65).map(ck).collect();
     assert_binsearch_matches_oracle(&schema, &range_tombstones, &keys, |k| {
@@ -629,7 +644,7 @@ fn range_end_before_ck_mirrors_before_end() {
             for n in 25..=35 {
                 let k = ck(n);
                 assert_eq!(
-                    KWayMerger::range_end_before_ck(&k, &rt, &schema),
+                    KWayMerger::<NoTrace>::range_end_before_ck(&k, &rt, &schema),
                     !ref_before_end(&k, &rt, &schema),
                     "range_end_before_ck must be the exact negation of before_end \
                      (ck={n}, end={end:?}, desc={})",

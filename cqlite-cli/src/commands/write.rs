@@ -664,7 +664,7 @@ pub(crate) fn udt_registry_from_schema_file(
 /// Recursively discover published input SSTables under `dir`, ordered
 /// newest-to-oldest by generation (the order `compact_sstables` expects).
 #[cfg(feature = "write-support")]
-fn discover_input_sstables(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+pub(crate) fn discover_input_sstables(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut found: Vec<(u64, std::path::PathBuf)> = Vec::new();
     collect_data_files(dir, &mut found, 8)?;
     // Highest generation first: run_index 0 must be the newest run.

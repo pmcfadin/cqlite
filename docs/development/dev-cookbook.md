@@ -450,7 +450,23 @@ cargo run --package cqlite-cli -- \
   --data-dir test-data/datasets/sstables \
   --query "SELECT * FROM test_basic.simple_table LIMIT 5" \
   --out json
+
+# Explain one partition across every published generation (issue #4193).
+# The command is read-only and uses the same CQL literal grammar as SELECT.
+cargo run --package cqlite-cli --features write-support -- \
+  --schema test-data/schemas/explain-trace.cql \
+  --dataset test_explain \
+  explain test_explain.trace_decisions 1 \
+  --clustering 1 --now 1789963136 --out json
 ```
+
+`explain` resolves all generations for the requested `keyspace.table` and
+prints the reconciliation clock, generation probes, cell versions, and
+tombstones. `--now` accepts epoch seconds or RFC3339; without it the first
+line marks the wall-clock value. `table`, `json`, and `csv` are supported, and
+the command fails closed with exit 1 for usage/schema/table errors or exit 2
+for generation read/render errors. The configured `max_result_bytes` budget
+applies to the rendered report just as it does to a materialized query.
 
 ### Output format precedence
 
