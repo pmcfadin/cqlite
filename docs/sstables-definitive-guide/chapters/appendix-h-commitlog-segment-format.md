@@ -153,6 +153,9 @@ The public API exposes three completeness signals:
 | `PartitionUpdate::rows_decoded` | rows/cells were not decoded for this update; `rows` is empty (never partially filled) |
 | `Mutation::updates_complete` | a batch declared more partition updates than `updates` holds — the walk stopped at the first update whose body could not be fully consumed, because the next update's offset is unknowable without finishing this one |
 
+A partially decoded final update can leave `updates_complete` true: every
+declared update is represented, while its `rows_decoded` remains false.
+
 What still *is* authoritative when `rows_decoded == false`: `table_id`, `partition_key`,
 `has_partition_deletion` (read straight from the `iterFlags` bit before any early return), and
 `column_names` when `columns_read` is true. A true flag with an empty list means
@@ -168,6 +171,8 @@ Reaching the limit exactly after the last update in a mutation does not set
 `last_mutation_partial`; `limited` still reports that the segment tail was not
 inspected. Decoder incompleteness is reported independently by
 `all_updates_complete`, even without a display limit.
+These are output limits: the reader still loads the segment and decodes each
+encountered mutation before the CLI applies the emitted-update bound.
 
 Bail sites, each with its reason (all in
 `cqlite-core/src/storage/commitlog/mutation.rs`):

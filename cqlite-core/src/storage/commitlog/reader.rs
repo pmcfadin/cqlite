@@ -12,10 +12,10 @@
 //! this doc previously oversold it as "streaming"):** the decode side is
 //! genuinely lazy, but opening a reader reads the entire segment FILE into
 //! one `Vec<u8>` up front (bounded by [`MAX_SEGMENT_BYTES`]) — it does not
-//! mmap or chunk the file itself. For a Cassandra-default 32 MB segment this
-//! is well inside CQLite's <128MB target; a caller inspecting many segments
-//! should still bound how many `CommitLogReader`s it keeps open
-//! simultaneously, since each one holds its full segment in memory.
+//! mmap or chunk the file itself. Decoding also materializes a whole mutation,
+//! so this input-size cap is not a bound on decoded allocations or total process
+//! memory. A caller inspecting many segments should bound how many readers and
+//! decoded mutations it keeps alive simultaneously.
 
 use std::fs;
 use std::path::Path;
@@ -28,9 +28,8 @@ use crate::{Error, Result};
 
 /// Upper bound on a segment file we will read into memory (128 MiB).
 ///
-/// Cassandra caps a segment at 32 MB by default; even a doubled configuration
-/// fits comfortably. Rejecting anything larger keeps the reader within CQLite's
-/// <128MB memory target and guards against a pathological/hostile file.
+/// Cassandra uses 32 MB segments by default. This limit bounds the retained
+/// input buffer, not the additional allocations needed to decode mutations.
 pub const MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
 
 /// A reader over a single Cassandra CommitLog segment.

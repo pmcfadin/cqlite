@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import sys
 import unittest
+import uuid
 import zlib
 
 
@@ -58,22 +59,22 @@ def _marker_crc(segment_id, marker_pos):
     return zlib.crc32(checksum_input)
 
 
-def locate_record_body(data):
-    """Return the first fully bounded, CRC-valid record body's offset and size."""
+def iter_valid_frames(data):
+    """Yield bounded record offsets after validating each section and record CRC."""
     _, segment_id, _, marker_pos = _descriptor(data)
 
     while True:
         _require_range(data, marker_pos, 8, "sync marker")
         next_marker = struct.unpack_from(">i", data, marker_pos)[0]
         stored_marker_crc = struct.unpack_from(">I", data, marker_pos + 4)[0]
-        if next_marker == 0:
-            raise FixtureFormatError("no record body before the clean end marker")
+        if next_marker == 0 and stored_marker_crc == 0:
+            return
+        if stored_marker_crc != _marker_crc(segment_id, marker_pos):
+            raise FixtureFormatError(f"sync marker CRC mismatch at offset {marker_pos}")
         if next_marker < marker_pos + 8:
             raise FixtureFormatError(
                 f"sync marker at {marker_pos} does not point past its marker bytes"
             )
-        if stored_marker_crc != _marker_crc(segment_id, marker_pos):
-            raise FixtureFormatError(f"sync marker CRC mismatch at offset {marker_pos}")
         if next_marker > len(data):
             raise FixtureFormatError(
                 f"sync marker at {marker_pos} points past file end to {next_marker}"
@@ -105,9 +106,19 @@ def locate_record_body(data):
             stored_body_crc = struct.unpack_from(">I", data, body_end)[0]
             if zlib.crc32(size_bytes + body) != stored_body_crc:
                 raise FixtureFormatError(f"record body CRC mismatch at offset {cursor}")
-            return body_start, size
+            yield cursor, body_start, body_end, frame_end, body
+            cursor = frame_end
 
         marker_pos = next_marker
+
+
+def locate_record_body(data):
+    """Return the first fully bounded, CRC-valid record body's offset and size."""
+    try:
+        _, body_start, body_end, _, _ = next(iter_valid_frames(data))
+    except StopIteration as error:
+        raise FixtureFormatError("no record body before the clean end marker") from error
+    return body_start, body_end - body_start
 
 
 def corrupt_record_body(data):
@@ -126,6 +137,69 @@ def corrupt_record_body(data):
     return bytes(corrupted), flip_offset
 
 
+EXPECTED_INSERT_IDS = (1, 2, 3, 4, 5)
+
+
+def select_truncated_tail(data, ground_truth):
+    """Cut within the final known users INSERT after validating its record frame."""
+    if ground_truth.get("keyspace") != "commitlog_test" or ground_truth.get("table") != "users":
+        raise FixtureFormatError("ground truth is not for commitlog_test.users")
+    if ground_truth.get("primary_key") != {
+        "partition": [["id", "int"]],
+        "clustering": [],
+    }:
+        raise FixtureFormatError("ground truth must describe the single int id partition key")
+
+    inserts = ground_truth.get("inserts")
+    if not isinstance(inserts, list) or tuple(row.get("id") for row in inserts) != EXPECTED_INSERT_IDS:
+        raise FixtureFormatError(
+            f"expected generated INSERT ids {EXPECTED_INSERT_IDS}, got {inserts!r}"
+        )
+    try:
+        table_id = uuid.UUID(ground_truth["table_id"]).bytes
+    except (KeyError, ValueError, AttributeError) as error:
+        raise FixtureFormatError("ground truth table_id is not a UUID") from error
+
+    # The fixture generator emits one mutation update per INSERT. In that
+    # Cassandra layout, the body begins with update-count 1, then table UUID,
+    # the one-byte unsigned-VInt PK length (4), and the big-endian int key.
+    target_frames = []
+    for frame_start, body_start, body_end, frame_end, body in iter_valid_frames(data):
+        if len(body) < 18 or body[0] != 1 or body[1:17] != table_id:
+            continue
+        if body[17] != 4 or len(body) < 22:
+            raise FixtureFormatError(
+                f"target INSERT at record offset {frame_start} does not use the expected int PK layout"
+            )
+        partition_key = struct.unpack_from(">i", body, 18)[0]
+        target_frames.append(
+            (partition_key, frame_start, body_start, body_end, frame_end)
+        )
+
+    found_ids = tuple(frame[0] for frame in target_frames)
+    if found_ids != EXPECTED_INSERT_IDS:
+        raise FixtureFormatError(
+            f"expected one CRC-valid target record for INSERT ids {EXPECTED_INSERT_IDS} "
+            f"in order, found {found_ids}"
+        )
+
+    target_id, _, body_start, body_end, _ = target_frames[-1]
+    cut_at = body_start + (body_end - body_start) // 2
+    if not body_start < cut_at < body_end:
+        raise FixtureFormatError(f"cannot cut inside target INSERT id={target_id} body")
+
+    complete_prefix = tuple(
+        frame[0] for frame in target_frames if frame[4] <= cut_at
+    )
+    expected_prefix = EXPECTED_INSERT_IDS[:-1]
+    if complete_prefix != expected_prefix:
+        raise FixtureFormatError(
+            f"cut inside INSERT id={target_id} would preserve {complete_prefix}, "
+            f"expected {expected_prefix}"
+        )
+    return cut_at, target_id, complete_prefix
+
+
 def derive_fixtures(raw_path, output_dir, segment_name):
     raw = Path(raw_path).read_bytes()
     output_dir = Path(output_dir)
@@ -137,15 +211,21 @@ def derive_fixtures(raw_path, output_dir, segment_name):
 
     clean_end = min(len(raw), last_nonzero + 64)
     clean = raw[:clean_end]
-    (output_dir / f"clean-{segment_name}").write_bytes(clean)
-    print(f"[trim] raw={len(raw)} clean={len(clean)} (last_nonzero={last_nonzero})")
-
-    tear_at = max(0, last_nonzero - 40)
-    (output_dir / f"truncated-{segment_name}").write_bytes(raw[:tear_at])
-    print(f"[trunc] tear_at={tear_at}")
-
+    ground_truth_path = output_dir / "commitlog-ground-truth.json"
+    try:
+        ground_truth = json.loads(ground_truth_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise FixtureFormatError(
+            f"cannot read fixture ground truth {ground_truth_path}: {error}"
+        ) from error
+    tear_at, target_id, prefix_ids = select_truncated_tail(clean, ground_truth)
     corrupt, flip = corrupt_record_body(clean)
+
+    (output_dir / f"clean-{segment_name}").write_bytes(clean)
+    (output_dir / f"truncated-{segment_name}").write_bytes(clean[:tear_at])
     (output_dir / f"corrupt-crc-{segment_name}").write_bytes(corrupt)
+    print(f"[trim] raw={len(raw)} clean={len(clean)} (last_nonzero={last_nonzero})")
+    print(f"[trunc] target_id={target_id} cut_at={tear_at} preserved_ids={prefix_ids}")
     print(f"[corrupt] flipped record-body byte at {flip}")
 
 
@@ -196,6 +276,9 @@ class CommitLogFixtureDerivationTests(unittest.TestCase):
         if len(clean_paths) != 1:
             raise AssertionError(f"expected one committed clean fixture, found {clean_paths}")
         cls.clean = clean_paths[0].read_bytes()
+        cls.ground_truth = json.loads(
+            (fixture_dir / "commitlog-ground-truth.json").read_text()
+        )
 
     def assert_corruption_hits_checked_body(self, data):
         body_start, body_size = locate_record_body(data)
@@ -219,15 +302,40 @@ class CommitLogFixtureDerivationTests(unittest.TestCase):
 
     def test_committed_fixture_selects_and_corrupts_a_valid_record_body(self):
         self.assert_corruption_hits_checked_body(self.clean)
+        cut_at, selected_id, prefix_ids = select_truncated_tail(
+            self.clean, self.ground_truth
+        )
+        self.assertEqual(selected_id, EXPECTED_INSERT_IDS[-1])
+        self.assertEqual(prefix_ids, EXPECTED_INSERT_IDS[:-1])
+        self.assertLess(cut_at, len(self.clean))
 
-    def test_valid_shifted_descriptor_moves_the_selected_body_offset(self):
+    def test_valid_shifted_descriptor_moves_corruption_and_torn_cut_offsets(self):
         original_offset = self.assert_corruption_hits_checked_body(self.clean)
+        original_cut, original_target, original_prefix = select_truncated_tail(
+            self.clean, self.ground_truth
+        )
         shifted, delta = _shift_descriptor(self.clean)
         self.assertGreater(delta, 0)
         self.assertEqual(_descriptor(shifted)[3], _descriptor(self.clean)[3] + delta)
 
         shifted_offset = self.assert_corruption_hits_checked_body(shifted)
         self.assertEqual(shifted_offset, original_offset + delta)
+        shifted_cut, shifted_target, shifted_prefix = select_truncated_tail(
+            shifted, self.ground_truth
+        )
+        self.assertEqual(shifted_cut, original_cut + delta)
+        self.assertEqual(shifted_target, original_target)
+        self.assertEqual(shifted_prefix, original_prefix)
+
+    def test_zero_offset_marker_requires_zero_crc(self):
+        _, _, _, marker_pos = _descriptor(self.clean)
+        while struct.unpack_from(">i", self.clean, marker_pos)[0] != 0:
+            marker_pos = struct.unpack_from(">i", self.clean, marker_pos)[0]
+        malformed = bytearray(self.clean)
+        struct.pack_into(">I", malformed, marker_pos + 4, 1)
+
+        with self.assertRaises(FixtureFormatError):
+            list(iter_valid_frames(bytes(malformed)))
 
 
 def main(argv):

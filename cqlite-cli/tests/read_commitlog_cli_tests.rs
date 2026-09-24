@@ -412,3 +412,29 @@ fn read_commitlog_cli_distinguishes_parsed_empty_columns_from_static_bailout() {
         "static-row bailout must label the column names unknown"
     );
 }
+
+/// A full first update followed by a structurally represented final update.
+fn mutation_with_partial_final_update() -> Vec<u8> {
+    let mut body = vec![2];
+    let empty_prefix = mutation_with_empty_updates(1);
+    body.extend_from_slice(&empty_prefix[1..]);
+    body.extend_from_slice(&[0x6B; 16]);
+    body.push(0); // empty partition key
+    body.push(0); // no iterator flags
+    body.extend_from_slice(&[0, 0, 0]); // EncodingStats
+    body.push(0); // parsed empty regular column-name block, then no schema
+    body
+}
+
+#[test]
+fn read_commitlog_all_updates_complete_accepts_a_final_partial_update() {
+    let segment = synthetic_segment(&[mutation_with_partial_final_update()]);
+    let json = run_json(&segment, None);
+    let updates = json["updates"].as_array().expect("updates array");
+
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0]["rows_decoded"], true);
+    assert_eq!(updates[1]["rows_decoded"], false);
+    assert_eq!(json["all_updates_complete"], true);
+    assert_eq!(json["last_mutation_partial"], false);
+}

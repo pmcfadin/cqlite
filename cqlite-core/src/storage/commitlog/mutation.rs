@@ -64,14 +64,10 @@ pub struct Mutation {
     /// May be a PREFIX of the mutation's true update count — see
     /// [`Mutation::updates_complete`].
     pub updates: Vec<PartitionUpdate>,
-    /// `false` when a batch mutation declared more partition updates than
-    /// `updates` contains — the loop stops at the first update whose body
-    /// isn't fully consumed (no schema, or an unmodeled construct), since a
-    /// partial decode can't locate the next update's offset without the
-    /// schema. This is the common case for `open()` with no schemas: a
-    /// multi-table batch silently reported only its first update with no
-    /// signal that more existed, until this field was added (roborev
-    /// finding, review-first pass).
+    /// `false` when fewer updates were represented than the mutation declared.
+    /// A final update whose body is only partially decoded still counts as
+    /// represented; an unmodeled partial update makes this false only when
+    /// additional declared updates remain hidden after it.
     pub updates_complete: bool,
 }
 
@@ -156,19 +152,16 @@ pub fn decode_mutation(body: &[u8], schemas: &SchemaSet) -> Result<Mutation> {
     }
     let mut updates = Vec::with_capacity(num_updates.min(1024) as usize);
     let mut updates_complete = true;
-    for _ in 0..num_updates {
+    for update_index in 0..num_updates {
         // Each update is decoded either fully (cursor left at the next update) or
         // partially (structural fields only — no schema, or an unmodeled
-        // construct). A partial decode cannot locate the following update's
-        // offset without the schema, so we stop the update loop and return what
-        // we have. The record's frame CRC already proved the bytes are intact;
-        // an under-reported batch is honest, not corruption — updates_complete
-        // makes that honesty visible to the caller instead of a silent
-        // truncation (roborev finding, review-first pass).
+        // construct). A partial decode cannot locate a following update's
+        // offset, so stop. The current update is still represented in `updates`;
+        // completeness is false only if declared updates remain hidden after it.
         let (update, consumed_fully) = decode_partition_update(&mut c, schemas)?;
         updates.push(update);
         if !consumed_fully {
-            updates_complete = false;
+            updates_complete = update_index + 1 == num_updates;
             break;
         }
     }
@@ -780,3 +773,7 @@ mod tests {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "mutation_completeness_tests.rs"]
+mod completeness_tests;

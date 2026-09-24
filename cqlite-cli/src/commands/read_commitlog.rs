@@ -130,12 +130,9 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
                         row_count: upd.rows.len(),
                         has_partition_deletion: upd.has_partition_deletion,
                     });
-                    // Also bound emitted view rows by `limit`, not just the
-                    // mutation count: a single mutation can carry many
-                    // updates, and this CLI is the memory-bounded surface the
-                    // streaming design is meant to protect — `--limit 1`
-                    // must not still materialize thousands of rows from one
-                    // mutation (roborev finding, review-first pass).
+                    // Cap retained output views when one decoded mutation has
+                    // many updates. The reader has already materialized this
+                    // record's updates, so this is not a parser-memory bound.
                     if let Some(n) = limit {
                         if views.len() >= n {
                             limited = true;
@@ -159,11 +156,9 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
             break;
         }
         if let Some(n) = limit {
-            // Stop on whichever bound is hit first: mutation_count (the
-            // documented meaning of --limit) or views.len() (the actual
-            // memory/display bound the inner break above enforces per
-            // mutation — without this, a later mutation could still push
-            // views past n even after an earlier one was capped).
+            // Stop after the record-count bound too. The reader decodes a
+            // requested record before returning it, so this limits later
+            // records and retained views, not allocations inside this record.
             if mutation_count >= n || views.len() >= n {
                 limited = true;
                 break;
