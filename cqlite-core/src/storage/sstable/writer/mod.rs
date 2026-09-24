@@ -670,12 +670,14 @@ impl SSTableWriter {
         // `row_group_survives`) loses nothing.
         if let Some(pt) = partition_tombstone {
             self.stats.update_timestamp(pt.deletion_time);
-            self.stats.update_local_deletion_time(pt.local_deletion_time);
+            self.stats
+                .update_local_deletion_time(pt.local_deletion_time);
             self.stats.mark_partition_level_deletion();
         }
         for rt in &range_tombstones {
             self.stats.update_timestamp(rt.deletion_time);
-            self.stats.update_local_deletion_time(rt.local_deletion_time);
+            self.stats
+                .update_local_deletion_time(rt.local_deletion_time);
         }
 
         // Update statistics from mutations. Issue #1668 stage 5c-iv part 2:
@@ -719,7 +721,8 @@ impl SSTableWriter {
         while group_start < row_mutations.len() {
             let mut group_end = group_start + 1;
             while group_end < row_mutations.len()
-                && row_mutations[group_end].clustering_key == row_mutations[group_start].clustering_key
+                && row_mutations[group_end].clustering_key
+                    == row_mutations[group_start].clustering_key
             {
                 group_end += 1;
             }
@@ -981,7 +984,8 @@ impl SSTableWriter {
         while group_start < row_mutations.len() {
             let mut group_end = group_start + 1;
             while group_end < row_mutations.len()
-                && row_mutations[group_end].clustering_key == row_mutations[group_start].clustering_key
+                && row_mutations[group_end].clustering_key
+                    == row_mutations[group_start].clustering_key
             {
                 group_end += 1;
             }
@@ -2146,8 +2150,10 @@ mod tests {
         )
         .with_local_deletion_time(1_700);
 
-        let (min_ts, min_ldt, min_ttl) =
-            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+        let (min_ts, min_ldt, min_ttl) = SSTableWriter::compute_mutations_baseline_stats(
+            std::slice::from_ref(&mutation),
+            &create_test_schema(),
+        );
 
         assert_eq!(
             min_ts, 2_000_000,
@@ -2193,8 +2199,10 @@ mod tests {
         cell_ts.insert("name".to_string(), CELL_TS);
         mutation.cell_write_timestamps = Some(cell_ts);
 
-        let (min_ts, _min_ldt, _min_ttl) =
-            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+        let (min_ts, _min_ldt, _min_ttl) = SSTableWriter::compute_mutations_baseline_stats(
+            std::slice::from_ref(&mutation),
+            &create_test_schema(),
+        );
 
         assert_eq!(
             min_ts, CELL_TS,
@@ -2447,8 +2455,10 @@ mod tests {
             None,
         );
 
-        let (_min_ts, min_ldt, _min_ttl) =
-            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+        let (_min_ts, min_ldt, _min_ttl) = SSTableWriter::compute_mutations_baseline_stats(
+            std::slice::from_ref(&mutation),
+            &create_test_schema(),
+        );
 
         assert_eq!(
             min_ldt, 2,
