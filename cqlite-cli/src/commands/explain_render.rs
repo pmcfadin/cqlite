@@ -254,12 +254,11 @@ fn render_table(report: &ExplainReport, metadata: &str) -> String {
     let mut rendered = String::with_capacity(metadata.len() + 256);
     rendered.push_str(metadata);
     rendered.push('\n');
-    if report
-        .generations
-        .iter()
-        .all(|generation| generation.probe == "absent")
+    if report.generations.iter().all(|generation| {
+        generation.probe == "absent" || generation.probe == "scanned"
+    }) && report.cells.is_empty()
     {
-        rendered.push_str("0 generations hold this partition\n");
+        rendered.push_str("0 generations hold this key\n");
     }
     for cell in &report.cells {
         let sstable = report
