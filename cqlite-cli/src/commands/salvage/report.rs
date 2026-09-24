@@ -9,7 +9,7 @@
 //! did not name for overwriting?) lives in the sibling [`super::manifest_path`],
 //! split out the same way in round 22 when the guard added there took THIS file
 //! past the same threshold, over the containment mechanism shared with `--out` in
-//! [`super::write_guard`] (round 23). This file's only stake in it is the
+//! [`crate::commands::write_guard`] (round 23). This file's only stake in it is the
 //! RE-CHECK immediately before the truncating `File::create` — see
 //! [`write_manifest_file`].
 
@@ -20,7 +20,7 @@ use cqlite_core::storage::write_engine::salvage::{ComponentFinding, SalvageRepor
 use crate::cli_types::{SalvageArgs, SalvageOutFormatArg};
 
 use super::discovery::SkippedInput;
-use super::write_guard::{WriteGuard, MANIFEST_REMEDY};
+use crate::commands::write_guard::{WriteGuard, MANIFEST_REMEDY};
 
 /// Does this ONE generation's report make the overall run imperfect (exit 3
 /// rather than 0)? Factored out of `execute_salvage_command` (roborev, issue

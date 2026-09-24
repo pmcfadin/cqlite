@@ -12,11 +12,12 @@
 //! changed by the split: [`discovery`] resolves `args.input` into the
 //! generations to salvage and derives a target table name; [`report`]
 //! decides the exit code, attaches table-dir-level findings, and renders
-//! the JSON/text manifest; [`write_guard`] owns the ONE decision "will this
-//! write land on a byte the operator did not name for overwriting?" for
-//! EVERY destructive path the command takes (`--out` and `--manifest`
-//! alike — round 23), and [`manifest_path`] the one extra rule specific to
-//! the manifest.
+//! the JSON/text manifest; [`crate::commands::write_guard`] owns the ONE
+//! decision "will this write land on a byte the operator did not name for
+//! overwriting?" for EVERY destructive path the command takes (`--out` and
+//! `--manifest` alike — round 23; promoted crate-wide in issue #4199 design
+//! D7 task 0.4/1 so `extract`/`split` reuse the same hardened guard), and
+//! [`manifest_path`] the one extra rule specific to the manifest.
 
 use std::path::{Path, PathBuf};
 
@@ -27,7 +28,6 @@ use crate::cli_types::SalvageArgs;
 mod discovery;
 mod manifest_path;
 mod report;
-mod write_guard;
 
 use discovery::{discover_salvage_inputs, table_name_from_input};
 use manifest_path::validate_manifest_path;
@@ -35,7 +35,9 @@ use report::{
     exit_after_partial_failure, record_table_dir_level_findings, record_unpublished_input_findings,
     render_console, report_is_imperfect, write_manifest_file,
 };
-use write_guard::{WriteGuard, OUT_REMEDY};
+// Promoted crate-wide (issue #4199 design D7 task 0.4/1) — see
+// `crate::commands::write_guard`'s module doc.
+use crate::commands::write_guard::{WriteGuard, OUT_REMEDY};
 
 /// Execute the `salvage` command.
 ///

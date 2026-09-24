@@ -1,7 +1,14 @@
-//! DESTRUCTIVE-WRITE CONTAINMENT for `cqlite salvage` (issue #4196, round-23
-//! findings F1/F4/F5 — an independent Cassandra-format expert review REPRODUCED
-//! F1 and F4 against the compiled binary and real Cassandra-written SSTable
-//! bytes, so none of this is theoretical).
+//! DESTRUCTIVE-WRITE CONTAINMENT, shared across every REPAIR-family verb
+//! (`cqlite salvage`, `extract`, `split`). Originated in `cqlite salvage`
+//! (issue #4196, round-23 findings F1/F4/F5 — an independent Cassandra-format
+//! expert review REPRODUCED F1 and F4 against the compiled binary and real
+//! Cassandra-written SSTable bytes, so none of this is theoretical) and
+//! promoted out of `commands/salvage/` into this crate-visible sibling
+//! (issue #4199, design D7 task 0.4/1) so `extract`/`split` build their own
+//! [`WriteGuard`] instances from the SAME hardened resolve-then-check helper
+//! instead of writing a fourth independent copy of F1/F4/F5 — a pure
+//! relocation, no logic change; salvage's own 600+ lines of tests below keep
+//! proving the same guard unchanged.
 //!
 //! # The one invariant, in one place
 //!
@@ -52,25 +59,25 @@ use std::path::{Component, Path, PathBuf};
 /// `manifest_path::tests::a_plain_json_path_inside_the_input_dir_is_refused` (the
 /// round-22 case) — the operator has to be told WHICH boundary was crossed, and
 /// "the input" and "your own output" are very different mistakes.
-pub(super) const INPUT_LABEL: &str = "the INPUT directory";
+pub(crate) const INPUT_LABEL: &str = "the INPUT directory";
 
 /// Label for the run's own planned output generation directory (F1).
-pub(super) const OUTPUT_LABEL: &str = "the run's OWN planned OUTPUT directory";
+pub(crate) const OUTPUT_LABEL: &str = "the run's OWN planned OUTPUT directory";
 
 /// The remedy clause for a refused `--manifest`, kept identical to the pattern
 /// `--help` and `dev-cookbook.md` document.
-pub(super) const MANIFEST_REMEDY: &str =
+pub(crate) const MANIFEST_REMEDY: &str =
     "point --manifest at a path of its own, outside both the input and the recovered generation, \
      e.g. <--out>/salvage.json";
 
 /// The remedy clause for a refused `--out` (F5).
-pub(super) const OUT_REMEDY: &str =
+pub(crate) const OUT_REMEDY: &str =
     "point --out at a directory OUTSIDE the input tree (a sibling of the table directory, or \
      anywhere on another volume) — salvage must be re-runnable on an input it has not altered";
 
 /// The set of paths a salvage run must not write into, each LABELED for the
 /// refusal message.
-pub(super) struct WriteGuard {
+pub(crate) struct WriteGuard {
     protected: Vec<(&'static str, PathBuf)>,
 }
 
@@ -112,7 +119,7 @@ impl WriteGuard {
     /// the enclosing directory, which then contains the manifest: a spurious
     /// refusal, pinned by
     /// `manifest_path::tests::a_nonexistent_input_does_not_break_the_guard`.
-    pub(super) fn new(input: &Path, output_dir: Option<&Path>) -> Result<Self, String> {
+    pub(crate) fn new(input: &Path, output_dir: Option<&Path>) -> Result<Self, String> {
         let mut protected = Vec::with_capacity(2);
 
         // The input DIRECTORY, when there is one to protect at all. Resolve the
@@ -167,7 +174,7 @@ impl WriteGuard {
     /// # Errors
     ///
     /// As [`Self::resolve_disjoint`].
-    pub(super) fn assert_disjoint(
+    pub(crate) fn assert_disjoint(
         &self,
         subject: &str,
         candidate: &Path,
@@ -194,7 +201,7 @@ impl WriteGuard {
     /// The collision, NAMED, for the caller to print before exiting 1 — or the
     /// RESOLUTION FAILURE, also named (F4b): an unresolvable candidate is a
     /// refusal, never an allow.
-    pub(super) fn resolve_disjoint(
+    pub(crate) fn resolve_disjoint(
         &self,
         subject: &str,
         candidate: &Path,
@@ -250,7 +257,7 @@ impl WriteGuard {
 /// for one, yet `File::create` follows it and creates its target — so the
 /// not-yet-exists branch must never absorb this case); no existing ancestor at
 /// all; and a `..` chain that walks off the filesystem root.
-pub(super) fn resolve_write_target(candidate: &Path) -> Result<PathBuf, String> {
+pub(crate) fn resolve_write_target(candidate: &Path) -> Result<PathBuf, String> {
     let absolute = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {

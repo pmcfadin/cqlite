@@ -40,6 +40,11 @@ pub mod read_sstable;
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod salvage;
 pub mod verify;
+// Shared destructive-path write guard (issue #4196 round-23 F1/F4/F5;
+// promoted crate-wide by issue #4199 design D7 task 0.4/1) — `salvage`,
+// `extract`, and `split` all build their own `WriteGuard` from this one
+// resolve-then-check helper rather than each re-deriving it.
+pub(crate) mod write_guard;
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).
 pub mod benchmark_sstable;

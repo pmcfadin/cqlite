@@ -9,7 +9,7 @@
 //! be written where the operator asked at all.
 //!
 //! The CONTAINMENT decision itself moved out again in round 23, into the shared
-//! [`super::write_guard`]: `--manifest` and `--out` were two independently
+//! [`crate::commands::write_guard`]: `--manifest` and `--out` were two independently
 //! maintained guards, which is exactly how the round-23 F1/F5 findings happened
 //! (a manifest aimed at the run's own recovered `Data.db` truncated it after a
 //! clean-looking salvage, and `--out` was never checked for WHERE it pointed at
@@ -20,7 +20,7 @@ use std::path::Path;
 
 use crate::cli_types::SalvageArgs;
 
-use super::write_guard::{WriteGuard, MANIFEST_REMEDY};
+use crate::commands::write_guard::{WriteGuard, MANIFEST_REMEDY};
 
 /// Refuse a `--manifest` path that would DESTROY bytes the operator did not
 /// name for overwriting, BEFORE any work is done (roborev, issue #4196,
@@ -108,7 +108,7 @@ fn looks_like_sstable_component(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::manifest_path_collision;
-    use crate::commands::salvage::write_guard::{WriteGuard, OUTPUT_LABEL};
+    use crate::commands::write_guard::{WriteGuard, OUTPUT_LABEL};
     use std::path::Path;
     use tempfile::TempDir;
 
