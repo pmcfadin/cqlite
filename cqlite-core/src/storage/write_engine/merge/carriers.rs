@@ -292,7 +292,10 @@ mod tests {
         assert_eq!(untraced.partition_delete_run_index, None);
         // The carrier set itself is identical either way.
         assert_eq!(untraced.range_tombstones, traced.range_tombstones);
-        assert_eq!(untraced.max_partition_deletion, traced.max_partition_deletion);
+        assert_eq!(
+            untraced.max_partition_deletion,
+            traced.max_partition_deletion
+        );
     }
 
     #[test]
