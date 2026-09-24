@@ -9,6 +9,11 @@ pub enum OutputFormat {
     Csv,
     /// Parquet binary format (requires --output flag for file destination)
     Parquet,
+    /// Vortex binary format — accepted here only so `read-sstable --output
+    /// vortex` gets the deliberate rejection message every other unsupported
+    /// format gets (issue #4237, R8), never a raw clap parse error. `export`
+    /// / `export-sstable` are the actual Vortex writers.
+    Vortex,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -24,6 +29,9 @@ pub enum ExportFormat {
     Json,
     Parquet,
     Cql,
+    /// Vortex columnar format (issue #4237) — export only, off by default
+    /// (`--features vortex`).
+    Vortex,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -40,6 +48,7 @@ impl std::fmt::Display for OutputFormat {
             OutputFormat::Json => write!(f, "json"),
             OutputFormat::Csv => write!(f, "csv"),
             OutputFormat::Parquet => write!(f, "parquet"),
+            OutputFormat::Vortex => write!(f, "vortex"),
         }
     }
 }
@@ -61,6 +70,7 @@ impl std::fmt::Display for ExportFormat {
             ExportFormat::Json => write!(f, "json"),
             ExportFormat::Parquet => write!(f, "parquet"),
             ExportFormat::Cql => write!(f, "cql"),
+            ExportFormat::Vortex => write!(f, "vortex"),
         }
     }
 }

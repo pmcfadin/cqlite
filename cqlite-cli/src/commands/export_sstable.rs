@@ -81,6 +81,22 @@ pub async fn export_sstable(
             export_as_parquet(&reader, &schema, output_path, &pb).await
         }
         ExportFormat::Cql => export_as_cql(&reader, &schema, &mut output_file, &pb).await,
+        ExportFormat::Vortex => {
+            // Issue #4237. Like Parquet, the Vortex writer manages its own file handle
+            // (and writes through a `<path>.tmp` sibling — fail-closed, R4), so drop
+            // the one we created.
+            drop(output_file);
+            #[cfg(feature = "vortex")]
+            {
+                export_as_vortex(&reader, &schema, output_path, &pb).await
+            }
+            #[cfg(not(feature = "vortex"))]
+            {
+                Err(anyhow::anyhow!(
+                    "Vortex export requires the 'vortex' feature. Rebuild with --features vortex."
+                ))
+            }
+        }
     }
 }
 
@@ -301,6 +317,75 @@ async fn export_as_parquet(
         .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet: {}", e))?;
 
     pb.finish_with_message(format!("Exported {} rows to Parquet", exported_count));
+    Ok(())
+}
+
+/// Export SSTable data as Vortex (issue #4237).
+///
+/// Mirrors [`export_as_parquet`] above (same batch-then-chunk shape over
+/// `reader.get_all_entries()`), calling `cqlite_core::export::vortex::StreamingVortexWriter`
+/// directly rather than through a `crate::output` adapter: `StreamingWriter` (the trait
+/// `crate::output::parquet` implements for the CLI) is synchronous, and Vortex's writer is
+/// natively async (its file writer is push-based over tokio) — see `export_vortex.rs`'s module
+/// doc for the same reasoning on the `cqlite export` side.
+#[cfg(all(feature = "state_machine", feature = "vortex"))]
+async fn export_as_vortex(
+    reader: &SSTableReader,
+    schema: &TableSchema,
+    output_path: &Path,
+    pb: &ProgressBar,
+) -> Result<()> {
+    use cqlite_core::export::vortex::{StreamingVortexWriter, VortexExportOptions};
+
+    let entries = reader.get_all_entries().await?;
+    let metadata = build_query_metadata_from_schema(schema);
+
+    let mut writer = StreamingVortexWriter::create(output_path, &metadata, &VortexExportOptions::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize Vortex writer: {}", e))?;
+
+    if entries.is_empty() {
+        pb.finish_with_message("No data to export");
+        writer
+            .finalize()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to finalize Vortex: {}", e))?;
+        return Ok(());
+    }
+
+    let mut chunk = Vec::with_capacity(1000);
+    let mut exported_count = 0;
+
+    for (index, (_table_id, row_key, value)) in entries.iter().enumerate() {
+        pb.set_position(index as u64);
+
+        let query_row = convert_entry_to_query_row(row_key, value, schema);
+        chunk.push(query_row);
+
+        if chunk.len() >= 1000 {
+            writer
+                .write_chunk(&chunk)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to write Vortex chunk: {}", e))?;
+            exported_count += chunk.len();
+            chunk.clear();
+        }
+    }
+
+    if !chunk.is_empty() {
+        writer
+            .write_chunk(&chunk)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to write Vortex chunk: {}", e))?;
+        exported_count += chunk.len();
+    }
+
+    writer
+        .finalize()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to finalize Vortex: {}", e))?;
+
+    pb.finish_with_message(format!("Exported {} rows to Vortex", exported_count));
     Ok(())
 }
 

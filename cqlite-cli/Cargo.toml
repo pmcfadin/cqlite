@@ -341,6 +341,11 @@ tombstones = ["cqlite-core/tombstones"]
 # Enables cqlite-core/delta-scan (DeltaRecord types, scan_delta API) and
 # cqlite-core/parquet (DeltaParquetWriter, arrow/parquet crates).
 delta-export = ["state_machine", "cqlite-core/delta-scan", "cqlite-core/parquet"]
+# Issue #4237: Vortex export (`cqlite export --format vortex` /
+# `export-sstable --format vortex`). Forwarding-only, like `parquet` above but
+# deliberately NOT bundled into `state_machine` — Vortex stays strictly
+# opt-in (owner ruling; design.md), unlike Parquet's historical bundling.
+vortex = ["state_machine", "cqlite-core/vortex"]
 # Expensive, source-built DuckDB validation tests. Keep this out of default
 # and main PR unit-test CI; focused E2E/parity workflows opt in explicitly.
 duckdb-tests = ["dep:duckdb"]
