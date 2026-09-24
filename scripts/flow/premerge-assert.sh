@@ -2093,17 +2093,51 @@ fi
 case_kind=A
 recert_file=""
 if [ -n "$delta_file" ]; then
-  if grep -qF "==== AGENT-GATE RECERT SUMMARY ====" "$delta_file" 2>/dev/null; then
-    case_kind=C
-    recert_file="$delta_file"
-  elif grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$delta_file" 2>/dev/null; then
-    case_kind=B
-  else
-    refuse_no_gate \
-      "The fourth argument ($delta_file) is neither a DELTA nor a RECERT summary block." \
-      "Checked by CONTENT, not position: expected '==== AGENT-GATE DELTA SUMMARY ===='" \
-      "(#1892) or '==== AGENT-GATE RECERT SUMMARY ====' (#4268)."
-  fi
+  # File-level preconditions (exists/readable/non-empty) are checked BEFORE any
+  # content classification — same "delta summary" <what> label the pre-#4268
+  # code always used here, so an absent/empty fourth argument refuses with the
+  # SAME wording regardless of which of the two shapes it was meant to be (a
+  # roborev-style regression check on this diff caught an earlier cut that
+  # classified by content FIRST, which meant a missing/empty file skipped this
+  # check entirely and fell through to the "neither DELTA nor RECERT" message
+  # instead of naming the real, cheaper-to-diagnose cause).
+  assert_readable_summary "$delta_file" "delta summary"
+  # PURE BASH, no `grep` (roborev-style regression check on this diff caught an
+  # earlier cut that shelled out to `grep -qF`): two of this suite's own hardened
+  # fixtures — the no-git and no-bounded-runner ancestry arms — deliberately
+  # build a PATH with awk/tr/git/etc. but WITHOUT grep, to prove the ancestry
+  # check degrades to a NAMED refusal rather than a silent tool-failure. A `grep`
+  # call here would 127 on exactly those fixtures, before the classification
+  # ever reaches the real question, misreporting a "neither DELTA nor RECERT"
+  # refusal instead of exercising (or correctly bypassing) the ancestry check.
+  # A `case`/`read` loop needs nothing beyond the shell itself. While scanning,
+  # also tally every marker family (whole-line-exact, same anchoring _gate_awk
+  # uses) so a refusal can NAME what it found instead of only what it wanted —
+  # matching the existing "(found N full, M lite)" style below.
+  # Block counting for a full/recert AMBIGUOUS verdict (>1 of the SAME family)
+  # is the existing gate_parse_file/GP_blocks check inside the Case B/C bodies
+  # below — not duplicated here. This loop only decides WHICH family to hand
+  # off to, plus the full/lite counts a "neither" refusal names.
+  _delta_kind="" _delta_nfull=0 _delta_nlite=0
+  while IFS= read -r _delta_line || [ -n "$_delta_line" ]; do
+    case "$_delta_line" in
+      "==== AGENT-GATE RECERT SUMMARY ====") [ -z "$_delta_kind" ] && _delta_kind=recert ;;
+      "==== AGENT-GATE DELTA SUMMARY ====")  [ -z "$_delta_kind" ] && _delta_kind=delta ;;
+      "==== AGENT-GATE SUMMARY ====")      _delta_nfull=$((_delta_nfull + 1)) ;;
+      "==== AGENT-GATE LITE SUMMARY ====") _delta_nlite=$((_delta_nlite + 1)) ;;
+    esac
+  done <"$delta_file"
+  case "$_delta_kind" in
+    recert) case_kind=C; recert_file="$delta_file" ;;
+    delta)  case_kind=B ;;
+    *)
+      refuse_no_gate \
+        "The fourth argument ($delta_file) is neither a DELTA nor a RECERT summary block" \
+        "(found $_delta_nfull full, $_delta_nlite lite)." \
+        "Checked by CONTENT, not position: expected '==== AGENT-GATE DELTA SUMMARY ===='" \
+        "(#1892) or '==== AGENT-GATE RECERT SUMMARY ====' (#4268)."
+      ;;
+  esac
 fi
 
 # Case C's anchor legitimately does NOT require RESULT: PASS (see
@@ -2148,9 +2182,9 @@ C)
   # host-fault re-certification, so UNLIKE Case B its sha is not merely an
   # ANCESTOR of the certified sha: it must be the certified sha EXACTLY (a
   # recert never advances the tree; that is the whole point of "same digest").
-  # Already asserted above (the case_kind == C branch before this one).
-
-  assert_readable_summary "$recert_file" "recert summary"
+  # Already asserted above (the case_kind == C branch before this one), and
+  # readability was already asserted above too (before the content
+  # classification; $recert_file IS $delta_file in this branch).
   gate_parse_file "$recert_file" recert "recert summary"
 
   if [ "$GP_blocks" -eq 0 ]; then
@@ -2232,7 +2266,7 @@ C)
   assert_hex_abbrev commit "$full_commit" "full-gate block"
   assert_hex_abbrev tree-start "$full_ts" "full-gate block"
 
-  assert_readable_summary "$delta_file" "delta summary"
+  # (readability already asserted above, before the content classification)
   gate_parse_file "$delta_file" delta "delta summary"
 
   if [ "$GP_blocks" -eq 0 ]; then
