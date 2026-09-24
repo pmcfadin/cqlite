@@ -1054,6 +1054,113 @@ fn sum_estimated_histogram_counts(c: &mut Cursor) -> Result<u64> {
     Ok(sum)
 }
 
+/// `estimatedCellPerPartitionCount.mean()`/`.count()` inputs, decoded straight
+/// from the STATS component (issue #4204, `cqlite diagnose`'s
+/// `getEstimatedDroppableTombstoneRatio` port — `design.md` D3).
+///
+/// Mirrors cassandra-5.0.8 `EstimatedHistogram.rawMean()`/`.count()`
+/// (`src/java/org/apache/cassandra/utils/EstimatedHistogram.java`) exactly:
+/// `mean = ceil(Σ bucket[i]*offset[i] / Σ bucket[i])` for `i` in
+/// `[0, lastBucket)` (the LAST bucket is the overflow bucket and is excluded
+/// from the mean sum, though its count is still added by `count()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CellPerPartitionStats {
+    /// `estimatedCellPerPartitionCount.mean()` — `0` when there were no
+    /// observations outside the overflow bucket (Cassandra's `0/0` -> `NaN` ->
+    /// `(long) NaN == 0` edge case, reproduced exactly rather than divide-by-zero).
+    pub mean: i64,
+    /// `estimatedCellPerPartitionCount.count()` — Σ of EVERY bucket, including
+    /// the overflow bucket.
+    pub count: u64,
+    /// `true` when the overflow (last) bucket holds any observations. Real
+    /// Cassandra's `mean()` throws `IllegalStateException` in this state; this
+    /// decoder instead reports it so the caller can render the ratio as
+    /// `unmeasured` rather than panic (issue #4204, #4159 class: never guess past
+    /// a state Cassandra itself refuses to compute a mean for).
+    pub overflowed: bool,
+}
+
+/// Decode [`CellPerPartitionStats`] from a raw `Statistics.db` buffer (issue
+/// #4204). `estimatedCellPerPartitionCount` is the SECOND `EstimatedHistogram` in
+/// the STATS body (right after `estimatedPartitionSize`) and is reachable by the
+/// same fully self-describing forward walk [`read_table_counts`] uses to reach
+/// the first — no version gates needed.
+///
+/// Returns `Ok(None)` when the `Statistics.db` carries no STATS component
+/// (nothing to decode). Returns `Err(Corruption)` for a truncated/malformed STATS
+/// body, matching every other decoder in this module (fail closed).
+pub(crate) fn read_cell_per_partition_stats(input: &[u8]) -> Result<Option<CellPerPartitionStats>> {
+    let Some(bounds) = stats_component_bounds(input)? else {
+        return Ok(None);
+    };
+    let mut c = Cursor::new(&input[bounds.start..bounds.end]);
+
+    // 1. estimatedPartitionSize histogram — skip (not needed here).
+    skip_estimated_histogram(&mut c)?;
+
+    // 2. estimatedCellPerPartitionCount histogram — READ every (offset, count)
+    //    pair. Cassandra's on-disk `(offset, count)` pair for bucket `i` IS
+    //    `bucketOffsets[i]`/`buckets[i]` as `EstimatedHistogram.mean()`/`.count()`
+    //    consume them directly (see `estimated_histogram.rs`'s serializer doc:
+    //    the writer emits exactly `offsets[i == 0 ? 0 : i - 1]` per bucket).
+    let bucket_count = c.read_i32()?;
+    if bucket_count < 0 {
+        return Err(Error::Corruption(format!(
+            "negative estimatedCellPerPartitionCount bucket count {bucket_count}"
+        )));
+    }
+    let bucket_count = bucket_count as usize;
+    let mut offsets: Vec<i64> = Vec::with_capacity(bucket_count.min(256));
+    let mut counts: Vec<u64> = Vec::with_capacity(bucket_count.min(256));
+    for _ in 0..bucket_count {
+        let offset = c.read_i64()?;
+        let bucket = c.read_i64()?;
+        if bucket < 0 {
+            return Err(Error::Corruption(format!(
+                "negative estimatedCellPerPartitionCount bucket value {bucket}"
+            )));
+        }
+        offsets.push(offset);
+        counts.push(bucket as u64);
+    }
+
+    if bucket_count == 0 {
+        return Ok(Some(CellPerPartitionStats {
+            mean: 0,
+            count: 0,
+            overflowed: false,
+        }));
+    }
+
+    let last_bucket = bucket_count - 1;
+    let overflowed = counts[last_bucket] > 0;
+
+    // count() sums EVERY bucket including the overflow one.
+    let total_count: u64 = counts.iter().fold(0u64, |acc, &v| acc.saturating_add(v));
+
+    // rawMean()/mean() exclude the overflow bucket. `elements == 0` reproduces
+    // Cassandra's `0.0/0.0 == NaN -> (long) NaN == 0` edge case rather than a
+    // divide-by-zero.
+    let mut elements: u64 = 0;
+    let mut sum: i128 = 0;
+    for i in 0..last_bucket {
+        elements = elements.saturating_add(counts[i]);
+        sum += counts[i] as i128 * offsets[i] as i128;
+    }
+    let mean: i64 = if elements == 0 {
+        0
+    } else {
+        let raw_mean = sum as f64 / elements as f64;
+        raw_mean.ceil() as i64
+    };
+
+    Ok(Some(CellPerPartitionStats {
+        mean,
+        count: total_count,
+        overflowed,
+    }))
+}
+
 /// Cassandra's canonical "no deletion" local-deletion-time sentinel,
 /// normalized to `i64` for both legacy (nb) and modern (oa/da) encodings.
 ///

@@ -10,6 +10,10 @@ pub mod chunk_decompressor;
 pub mod chunk_reader;
 pub mod compression;
 pub mod compression_info;
+/// `cqlite diagnose` (issue #4204): read-only, files-only performance-report
+/// library — cheap tier (Statistics.db/Index.db/Summary.db/CompressionInfo.db)
+/// plus an opt-in `--deep` bounded streaming scan. See `diagnose::diagnose_table`.
+pub mod diagnose;
 pub mod directory;
 pub mod directory_integration_tests;
 pub mod format_detector;

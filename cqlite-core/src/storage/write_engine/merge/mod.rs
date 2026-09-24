@@ -158,6 +158,13 @@ mod fully_expired;
 pub use fully_expired::fully_expired_sstables;
 #[cfg(feature = "write-support")]
 pub(crate) use fully_expired::{reclaim_dropped_whole, split_merge_and_dropped};
+// Issue #4204 task 0.2: `cqlite diagnose`'s cheap tier reuses this predicate
+// READ-ONLY (it never compacts) for its `fully_expired_at_now` field. The
+// function itself was widened `pub(super)` -> `pub(crate)`; this re-export is
+// the minimal additional step needed to reach it from
+// `storage::sstable::diagnose`, since `mod fully_expired` is private to `merge`.
+#[cfg(feature = "write-support")]
+pub(crate) use fully_expired::is_fully_expired;
 
 /// Repair-state classification + mixed-state rejection for compaction
 /// (issue #1021). Reads each input's persisted repair state from `Statistics.db`
