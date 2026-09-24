@@ -278,9 +278,10 @@ overflow-checks = true
 [profile.test]
 # Optimized test builds
 opt-level = 1
-# line-tables-only, NOT inherited from [profile.dev] automatically — this
-# block sets `debug` explicitly itself, so it must be changed here too
-# (issue #4278; see [profile.dev]'s comment for the full rationale).
+# [profile.test] inherits [profile.dev], but this block overrides `debug`
+# explicitly itself, so the value does NOT come along automatically — it must
+# be changed here too (issue #4278; see [profile.dev]'s comment for the full
+# rationale).
 debug = "line-tables-only"
 rpath = false
 lto = false
