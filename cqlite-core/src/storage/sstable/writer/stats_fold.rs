@@ -63,17 +63,49 @@ pub(crate) fn row_group_survives(
 /// additionally check each mutation via
 /// `deletion_ts.is_none_or(|dts| mutation.timestamp_micros > dts)` (mirroring
 /// `merge_row_group`'s own `mutation_shadowed` test) before folding it.
+///
+/// Also returns the group's RAW resolved row deletion (`row_deletion`,
+/// before combining with `shadow_floor`) — the exact tuple
+/// `merge_row_group` emits UNCONDITIONALLY as `RowWrite.row_deletion`
+/// whenever `Some` (`data_writer/rows.rs`: `row.row_deletion` is set from
+/// `resolve_row_deletion`'s result directly, never re-gated against
+/// `deletion_ts`). Callers fold this ONCE per group via
+/// [`fold_row_deletion_marker`] — never per-mutation (issue #4246 roborev
+/// round-2 finding: a per-mutation `carries_row_deletion` exemption in
+/// `fold_row_content_stats` either double-folded the winning deletion
+/// (already `mutation_shadowed` under a uniform check, since `deletion_ts`
+/// is derived from its own timestamp) or wrongly folded a LOSING `DeleteRow`
+/// that `resolve_row_deletion` discarded and Data.db never emits).
 pub(crate) fn row_group_survival(
     group: &[&Mutation],
     schema: &TableSchema,
     skip_static_ops: bool,
     shadow_floor: Option<i64>,
-) -> (bool, Option<i64>) {
+) -> (bool, Option<i64>, Option<(i64, i32)>) {
     let row_deletion = DataWriter::resolve_row_deletion(group, shadow_floor);
     let deletion_ts = DataWriter::combine_deletion_ts(row_deletion, shadow_floor);
     let survives =
         DataWriter::merge_row_group(group, schema, skip_static_ops, shadow_floor).is_some();
-    (survives, deletion_ts)
+    (survives, deletion_ts, row_deletion)
+}
+
+/// Fold the row GROUP's resolved row-deletion marker (the winning `DeleteRow`
+/// / issue #932 decoupled `row_tombstone`) exactly ONCE — the third element
+/// of [`row_group_survival`]'s return tuple. This is the ONLY place a row's
+/// own deletion marker reaches persisted stats: `fold_row_content_stats` no
+/// longer special-cases a deletion-carrying mutation (issue #4246 roborev
+/// round-2 finding — see its doc comment), so a group with N mutations
+/// contending for the row deletion (losing `DeleteRow`s included) folds the
+/// winner's `(timestamp, local_deletion_time)` exactly once, matching what
+/// `merge_row_group` actually emits.
+pub(crate) fn fold_row_deletion_marker(
+    stats: &mut StatisticsMetadata,
+    row_deletion: Option<(i64, i32)>,
+) {
+    if let Some((ts, ldt)) = row_deletion {
+        stats.update_timestamp(ts);
+        stats.update_local_deletion_time(ldt);
+    }
 }
 
 /// Fold ONLY the partition/range tombstone MARKER fields of `mutation` (issue
@@ -112,19 +144,27 @@ pub(crate) fn fold_marker_stats(stats: &mut StatisticsMetadata, mutation: &Mutat
 /// `StatisticsMetadata` byte-for-byte.
 ///
 /// `#[cfg(test)]` (issue #4246 roborev round 2): every production caller now
-/// needs either shadow-aware row content
-/// (`fold_row_content_stats(stats, mutation, shadow_boundary)`) or markers
+/// needs shadow-aware row content
+/// (`fold_row_content_stats(stats, mutation, shadow_boundary)`), markers
 /// folded separately from row content (`fold_marker_stats`, so a mutation
 /// carrying both never double-counts a tombstone into the drop-time
-/// histogram) — this convenience "fold everything, unconditionally" wrapper
-/// has no remaining non-test caller. Kept as the REGRESSION PROOF this
-/// module's own tests use: `fold_row_content_stats(_, _, None) +
-/// fold_marker_stats` must still reproduce exactly what folding a mutation
-/// unconditionally always did, byte-for-byte, for every mutation kind.
+/// histogram), and a row's own deletion folded once at the GROUP level
+/// (`fold_row_deletion_marker`, never per-mutation) — this convenience
+/// "fold everything for one mutation treated as its own trivial group"
+/// wrapper has no remaining non-test caller. A TEST-ONLY CONVENIENCE
+/// WRAPPER, not a regression proof (roborev round-2 finding: the earlier
+/// wording claimed it reproduces "exactly what folding a mutation
+/// unconditionally always did", which is circular once its own definition
+/// IS that composition — treats `mutation` as a one-element group via the
+/// real `DataWriter::resolve_row_deletion`/`fold_row_deletion_marker` path
+/// rather than duplicating that logic, so a future drift between the two
+/// would still surface here).
 #[cfg(test)]
 pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
     fold_row_content_stats(stats, mutation, None);
     fold_marker_stats(stats, mutation);
+    let row_deletion = DataWriter::resolve_row_deletion(&[mutation], None);
+    fold_row_deletion_marker(stats, row_deletion);
 }
 
 /// Everything [`fold_mutation_stats`] folds EXCEPT the partition/range
@@ -139,14 +179,25 @@ pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mut
 /// and the wholly-static/carries-static callers today, which pass `None` to
 /// preserve their prior unconditional-fold behavior exactly).
 ///
-/// When `Some(dts)` and `mutation` does NOT itself carry the group's row
-/// deletion (no `DeleteRow`, no `#932` `row_tombstone` — a mutation that
-/// DOES must never exclude itself, since `dts` is derived FROM its own
-/// timestamp when it is the winning deletion), the mutation's SIMPLE
-/// content (its own leading timestamp, per-cell `cell_write_timestamps`,
-/// row-level TTL, and `WriteWithTtl`/`Delete`/`DeleteRow`/`Write`
-/// contributions) is shadow-gated on `mutation.timestamp_micros > dts` —
-/// matching `merge_row_group`'s own `mutation_shadowed` test exactly. Its
+/// When `Some(dts)`, the mutation's SIMPLE content (its own leading
+/// timestamp, per-cell `cell_write_timestamps`, row-level TTL, and
+/// `WriteWithTtl`/`Delete`/`DeleteRow`/`Write` contributions) is
+/// shadow-gated on `mutation.timestamp_micros <= dts` — matching
+/// `merge_row_group`'s own `mutation_shadowed` test EXACTLY, with NO
+/// exemption for a mutation that itself carries a `DeleteRow` op or a
+/// `#932` `row_tombstone` (issue #4246 roborev round-2 finding: an earlier
+/// version exempted such a mutation, reasoning that "`dts` is derived from
+/// its own timestamp when it is the winning deletion" — but `dts` is
+/// ALWAYS `>=` any row-deletion-carrying mutation's own timestamp in the
+/// group by construction, whether it WON or LOST that contention, so the
+/// exemption let a LOSING `DeleteRow`'s never-emitted timestamp/LDT lower
+/// persisted minima — precisely the #4246 defect this fix exists to close).
+/// This makes the `Delete { .. } | DeleteRow` match arm below structurally
+/// unreachable for the `DeleteRow` case specifically (it is always
+/// `mutation_shadowed`) — correct, since the group's row deletion is now
+/// folded exactly once at the GROUP level via
+/// [`fold_row_deletion_marker`]/[`row_group_survival`], never here.
+///
 /// `ComplexDeletion`/`WriteComplexElement` ops are gated PER-OP instead,
 /// each against its OWN independent timestamp (`marked_for_delete_at` /
 /// `timestamp_micros`) rather than the mutation's row timestamp — mirroring
@@ -161,13 +212,7 @@ pub(crate) fn fold_row_content_stats(
     mutation: &Mutation,
     shadow_boundary: Option<i64>,
 ) {
-    let carries_row_deletion = mutation
-        .operations
-        .iter()
-        .any(|op| matches!(op, CellOperation::DeleteRow))
-        || mutation.row_tombstone.is_some();
-    let mutation_shadowed = !carries_row_deletion
-        && shadow_boundary.is_some_and(|dts| mutation.timestamp_micros <= dts);
+    let mutation_shadowed = shadow_boundary.is_some_and(|dts| mutation.timestamp_micros <= dts);
 
     if !mutation_shadowed {
         stats.update_timestamp(mutation.timestamp_micros);
@@ -296,18 +341,17 @@ pub(crate) fn fold_row_content_stats(
             }
         }
     }
-    // Issue #1721: a decoupled row tombstone (#932
-    // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted as a
-    // `HAS_DELETION` row stamped with its OWN `(deletion_time, ldt)` —
-    // DECOUPLED from `timestamp_micros`, so the per-cell/mutation folds above
-    // never see it. Always folded (never gated by `mutation_shadowed`): a
-    // mutation carrying `row_tombstone` is, by definition, one that carries
-    // the group's row deletion (`carries_row_deletion` above), so it is
-    // never itself excluded.
-    if let Some((deletion_time, ldt)) = mutation.row_tombstone {
-        stats.update_timestamp(deletion_time);
-        stats.update_local_deletion_time(ldt);
-    }
+    // Issue #1721 / #932: a decoupled row tombstone
+    // (`Mutation::row_tombstone = Some((deletion_time, ldt))`) is NOT folded
+    // here (issue #4246 roborev round-2 finding — removed the earlier
+    // unconditional fold). `resolve_row_deletion` already considers
+    // `mutation.row_tombstone` as a candidate for the group's winning row
+    // deletion, on equal footing with a `DeleteRow` op, so folding it again
+    // here would either double-count the winner or wrongly count a losing
+    // `row_tombstone` Data.db never emits. The group's actual winning
+    // `(deletion_time, ldt)` — from a `DeleteRow` op OR a `row_tombstone`,
+    // whichever `resolve_row_deletion` picked — is folded exactly once at
+    // the GROUP level via [`fold_row_deletion_marker`].
 }
 
 /// Fold `from`'s accumulated range/flags into `into` (issue #1668 stage
@@ -621,5 +665,197 @@ mod tests {
             "merging a never-folded (default) StatisticsMetadata must not \
              change min_local_deletion_time to i32::MIN or max_ttl to i32::MAX"
         );
+    }
+
+    /// Direct unit coverage of `fold_row_content_stats(Some(dts))`,
+    /// `row_group_survival`, and `fold_row_deletion_marker` in isolation
+    /// (issue #4246 roborev round-2 finding: the tests above only exercise
+    /// `shadow_boundary = None` via `fold_mutation_stats`, so drift in the
+    /// `Some(dts)` gating logic was invisible to this module's own suite).
+    mod shadow_gating {
+        use super::*;
+        use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+
+        fn schema() -> TableSchema {
+            TableSchema {
+                keyspace: "ks".to_string(),
+                table: "t".to_string(),
+                partition_keys: vec![KeyColumn {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    position: 0,
+                }],
+                clustering_keys: vec![ClusteringColumn {
+                    name: "ck".to_string(),
+                    data_type: "int".to_string(),
+                    position: 0,
+                    order: ClusteringOrder::Asc,
+                }],
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "int".to_string(),
+                        nullable: false,
+                        default: None,
+                        is_static: false,
+                    },
+                    Column {
+                        name: "ck".to_string(),
+                        data_type: "int".to_string(),
+                        nullable: false,
+                        default: None,
+                        is_static: false,
+                    },
+                    Column {
+                        name: "v".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        default: None,
+                        is_static: false,
+                    },
+                ],
+                comments: Default::default(),
+                dropped_columns: Default::default(),
+            }
+        }
+
+        fn insert(ck_val: i32, ts: i64) -> Mutation {
+            Mutation::new(
+                table(),
+                pk(),
+                Some(ck(ck_val)),
+                vec![CellOperation::Write {
+                    column: "v".to_string(),
+                    value: Value::text("x".to_string()),
+                }],
+                ts,
+                None,
+            )
+        }
+
+        fn delete_row(ck_val: i32, ts: i64) -> Mutation {
+            Mutation::new(
+                table(),
+                pk(),
+                Some(ck(ck_val)),
+                vec![CellOperation::DeleteRow],
+                ts,
+                None,
+            )
+        }
+
+        /// A mutation fully below `shadow_boundary` folds nothing.
+        #[test]
+        fn fold_row_content_stats_below_boundary_folds_nothing() {
+            let mut stats = StatisticsMetadata::new();
+            fold_row_content_stats(&mut stats, &insert(1, 5), Some(10));
+            assert_eq!(
+                stats.min_timestamp,
+                i64::MAX,
+                "a mutation at ts=5 shadowed by dts=10 must fold nothing"
+            );
+        }
+
+        /// A mutation strictly above `shadow_boundary` folds normally.
+        #[test]
+        fn fold_row_content_stats_above_boundary_folds_everything() {
+            let mut stats = StatisticsMetadata::new();
+            fold_row_content_stats(&mut stats, &insert(1, 15), Some(10));
+            assert_eq!(stats.min_timestamp, 15);
+        }
+
+        /// A shadowed mutation's `ComplexDeletion` still folds when its OWN
+        /// `marked_for_delete_at` strictly exceeds `dts` (issue #887/#921's
+        /// per-op independence).
+        #[test]
+        fn fold_row_content_stats_shadowed_mutation_complex_deletion_survives_own_timestamp() {
+            let mutation = Mutation::new(
+                table(),
+                pk(),
+                Some(ck(1)),
+                vec![CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: 20,
+                    local_deletion_time: 2_000,
+                }],
+                5, // row timestamp is itself shadowed
+                None,
+            );
+            let mut stats = StatisticsMetadata::new();
+            fold_row_content_stats(&mut stats, &mutation, Some(10));
+            assert_eq!(
+                stats.min_timestamp, 20,
+                "the marker's own mfda=20 exceeds dts=10, so it must survive \
+                 even though the carrying mutation's row ts=5 is shadowed"
+            );
+        }
+
+        /// The exact roborev round-2 finding #1 scenario: two `DeleteRow`s
+        /// for the same clustering key in one group, `DeleteRow@5` and
+        /// `DeleteRow@20`. `resolve_row_deletion` picks 20 (the winner);
+        /// only it may ever reach persisted stats. The losing `DeleteRow@5`
+        /// must fold NOTHING via `fold_row_content_stats` (no
+        /// `carries_row_deletion` self-exemption), and the winning marker is
+        /// folded exactly once via `fold_row_deletion_marker`, not per-mutation.
+        #[test]
+        fn losing_delete_row_in_same_group_does_not_lower_persisted_minimum() {
+            let losing = delete_row(1, 5);
+            let winning = delete_row(1, 20);
+            let group: Vec<&Mutation> = vec![&losing, &winning];
+
+            let (survives, deletion_ts, row_deletion) =
+                row_group_survival(&group, &schema(), false, None);
+            assert!(
+                survives,
+                "a DeleteRow group still produces a row (the tombstone)"
+            );
+            assert_eq!(
+                deletion_ts,
+                Some(20),
+                "the winning DeleteRow's ts resolves the boundary"
+            );
+            assert_eq!(
+                row_deletion.map(|(ts, _)| ts),
+                Some(20),
+                "resolve_row_deletion must pick the NEWER DeleteRow, not the older one"
+            );
+
+            let mut stats = StatisticsMetadata::new();
+            for m in &group {
+                fold_row_content_stats(&mut stats, m, deletion_ts);
+            }
+            assert_eq!(
+                stats.min_timestamp,
+                i64::MAX,
+                "fold_row_content_stats must fold NOTHING for either DeleteRow \
+                 mutation — both are `mutation_shadowed` (ts <= dts=20) under the \
+                 uniform check, with no self-exemption for the winner"
+            );
+
+            fold_row_deletion_marker(&mut stats, row_deletion);
+            assert_eq!(
+                stats.min_timestamp, 20,
+                "the group's winning row-deletion marker (ts=20), folded exactly \
+                 once, is the ONLY way this group's timestamp reaches stats — the \
+                 losing DeleteRow@5 must never lower the persisted minimum"
+            );
+        }
+
+        /// `fold_marker_stats` folds a partition/range tombstone
+        /// unconditionally, independent of any `shadow_boundary` concept (it
+        /// takes no such parameter) — a tombstone marker is never itself
+        /// row-shadowed.
+        #[test]
+        fn fold_marker_stats_folds_partition_tombstone_unconditionally() {
+            let mut mutation = Mutation::new(table(), pk(), None, vec![], 999, None);
+            mutation.partition_tombstone = Some(PartitionTombstone {
+                deletion_time: 42,
+                local_deletion_time: 4_242,
+            });
+            let mut stats = StatisticsMetadata::new();
+            fold_marker_stats(&mut stats, &mutation);
+            assert_eq!(stats.min_timestamp, 42);
+            assert!(stats.has_partition_level_deletions);
+        }
     }
 }

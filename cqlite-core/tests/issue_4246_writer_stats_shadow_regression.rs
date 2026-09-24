@@ -142,27 +142,44 @@ fn flush_batch(engine: &mut WriteEngine, rt: &tokio::runtime::Runtime, muts: Vec
 /// decode it. Shared by both accessors below (issue #4246 roborev finding:
 /// they used to each carry a byte-identical nested `find_stats` + read/parse
 /// preamble).
+///
+/// Asserts EXACTLY ONE match (issue #4246 roborev round-2 finding): this
+/// file's own `compaction_path_shadow_gate_matches_flush_path` creates a
+/// two-generation data dir, so a caller passing that dir directly (rather
+/// than a single-generation output) would otherwise silently read whichever
+/// generation's `Statistics.db` `read_dir` happens to enumerate first —
+/// order-dependent and flaky, not a real assertion — instead of failing
+/// loudly. Mirrors the oracle helper's own `single_data_db` uniqueness check
+/// (`support/rt_boundary_oracle.rs`).
 fn parse_flushed_statistics(dir: &Path) -> cqlite_core::parser::statistics::SSTableStatistics {
-    fn find_stats(dir: &Path, depth: usize) -> Option<PathBuf> {
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    fn find_all_stats(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
             let path = entry.path();
             if path
                 .file_name()
                 .map(|n| n.to_string_lossy().ends_with("-Statistics.db"))
                 .unwrap_or(false)
             {
-                return Some(path);
-            }
-            if depth > 0 && path.is_dir() {
-                if let Some(p) = find_stats(&path, depth - 1) {
-                    return Some(p);
-                }
+                out.push(path);
+            } else if depth > 0 && path.is_dir() {
+                find_all_stats(&path, depth - 1, out);
             }
         }
-        None
     }
-    let db = find_stats(dir, 8).expect("a *-Statistics.db under the flushed data dir");
-    let bytes = std::fs::read(&db).expect("read Statistics.db");
+    let mut found = Vec::new();
+    find_all_stats(dir, 8, &mut found);
+    assert_eq!(
+        found.len(),
+        1,
+        "expected exactly one *-Statistics.db under {dir:?}, found {found:?} — \
+         a caller reading a multi-generation dir must resolve to a single \
+         generation's output first (e.g. `out_dir`, not a raw `data_dir` with \
+         multiple flushed generations)"
+    );
+    let bytes = std::fs::read(&found[0]).expect("read Statistics.db");
     let (_, stats) = parse_statistics_with_fallback(&bytes, None).expect("decode Statistics.db");
     stats
 }

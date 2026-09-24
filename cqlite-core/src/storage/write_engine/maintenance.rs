@@ -1001,11 +1001,22 @@ impl WriteEngine {
                                 // `feed_streaming_row`/`feed_row` pass to
                                 // `merge_row_group` (issue #4246 roborev
                                 // finding, mirrored from `KWayMerger::merge`).
-                                let (survives, deletion_ts) = stats_fold::row_group_survival(
-                                    std::slice::from_ref(&mutation),
-                                    &write_schema,
-                                    false,
-                                    shadow_floor,
+                                let (survives, deletion_ts, row_deletion) =
+                                    stats_fold::row_group_survival(
+                                        std::slice::from_ref(&mutation),
+                                        &write_schema,
+                                        false,
+                                        shadow_floor,
+                                    );
+                                // This mutation's own row-deletion marker,
+                                // folded exactly once (issue #4246 roborev
+                                // round-2 finding, mirrored from
+                                // `KWayMerger::merge`'s identical fix):
+                                // `fold_row_content_stats` no longer folds a
+                                // row deletion per-mutation.
+                                stats_fold::fold_row_deletion_marker(
+                                    &mut state.partition_stats,
+                                    row_deletion,
                                 );
                                 let carries_static = schema_has_static
                                     && mutation.operations.iter().any(|op| {
