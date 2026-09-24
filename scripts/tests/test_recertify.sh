@@ -277,6 +277,22 @@ else
       bad "R6c: expected exit 2 naming 'clippy' SKIP, got rc=$RC"
     fi
 
+    # R6d: tooling-tests: SKIP is the ONE declared exception (roborev finding,
+    # High: #4266's own diff-scoping makes tooling-tests SKIP a DECIDED,
+    # reviewed outcome on the common case — a full gate whose diff touches no
+    # harness path — not an unmeasured gap; refusing it here would make
+    # --recertify unconditionally unusable on exactly the PRs #4266 speeds
+    # up). Every OTHER component's SKIP still refuses (R6c, just above).
+    tt_skip_anchor="$TMPROOT/anchor-tt-skip.txt"
+    write_anchor "$tt_skip_anchor" "$f_sha" "$f_digest" "tooling-tests=SKIP"
+    run_recert "$fixture" "$tt_skip_anchor" file-size
+    if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qE '^recert-verdict: CERTIFIED'; then
+      ok "R6d: an anchor whose tooling-tests is SKIP (the one declared exception) is still ACCEPTED"
+    else
+      bad "R6d: expected acceptance with a tooling-tests:SKIP anchor, got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+
     # R7: a dirty anchor tree (dirty: yes) -> REFUSED.
     dirty_anchor="$TMPROOT/anchor-dirty.txt"
     write_anchor "$dirty_anchor" "$f_sha" "$f_digest"
