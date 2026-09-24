@@ -192,100 +192,128 @@ impl<S: TraceSink> ReconcileState<S> {
                         });
                     }
 
-                    let Some(existing) = self.winners.get(&cell_key) else {
-                        self.order.push(cell_key.clone());
-                        self.winners.insert(cell_key.clone(), cell.clone());
-                        if let Some(runs) = &mut self.winner_runs {
-                            runs.insert(cell_key, entry.run_index);
+                    // Issue #4193 review finding: use the `Entry` API (single
+                    // hash of `self.winners`, `order`/`winner_runs` reuse the
+                    // slot's owned key on the vacant path) rather than a
+                    // preliminary `get()` + a separate `insert()` — that
+                    // double-hashes `self.winners` and clones `cell_key`/
+                    // `cell` an extra time on every cell of every merge
+                    // (read AND compaction), whether or not tracing is
+                    // enabled. All trace-only bookkeeping (whether the key
+                    // was already occupied, the previous winner's
+                    // `run_index`) is derived from the `Entry` match arms
+                    // themselves.
+                    match self.winners.entry(cell_key) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            self.order.push(slot.key().clone());
+                            if let Some(runs) = &mut self.winner_runs {
+                                runs.insert(slot.key().clone(), entry.run_index);
+                            }
+                            slot.insert(cell.clone());
                         }
-                        continue;
-                    };
-
-                    // Higher timestamp wins. At EQUAL timestamp a cell
-                    // DELETION (tombstone) beats a LIVE or EXPIRING (TTL) cell,
-                    // before any localDeletionTime comparison (Cassandra
-                    // `Cells#reconcile`; issue #848 / #498).
-                    let existing_run = self
-                        .winner_runs
-                        .as_ref()
-                        .and_then(|runs| runs.get(&cell_key).copied())
-                        .unwrap_or(entry.run_index);
-                    let cell_wins = reconcile_rules::cell_wins(cell, existing);
-                    if cell_wins {
-                        let old = if S::ENABLED {
-                            Some(existing.clone())
-                        } else {
-                            None
-                        };
-                        self.winners.insert(cell_key.clone(), cell.clone());
-                        if let Some(runs) = &mut self.winner_runs {
-                            runs.insert(cell_key.clone(), entry.run_index);
-                        }
-                        if let Some(old) = old {
-                            let (verdict, decided_by) = if cell.timestamp == old.timestamp
-                                && (KWayMerger::<NoTrace>::is_cell_tombstone(cell)
-                                    || cell.is_deleted)
-                                && !(KWayMerger::<NoTrace>::is_cell_tombstone(&old)
-                                    || old.is_deleted)
-                            {
-                                (
-                                    Verdict::ShadowedByTombstone(TombstoneKind::Cell),
-                                    DecidedBy::Tombstone {
-                                        kind: TombstoneKind::Cell,
-                                        run_index: entry.run_index,
-                                        deletion_time: cell.timestamp,
-                                        local_deletion_time:
-                                            KWayMerger::<NoTrace>::cell_effective_ldt(cell)
-                                                .unwrap_or(0),
-                                        droppable_at_now: self.tombstone_droppable(
-                                            KWayMerger::<NoTrace>::cell_effective_ldt(cell)
-                                                .unwrap_or(0),
-                                        ),
-                                    },
-                                )
-                            } else {
-                                (
-                                    Verdict::ShadowedByTimestamp,
-                                    DecidedBy::Winner {
-                                        run_index: entry.run_index,
-                                        writetime: cell.timestamp,
-                                    },
-                                )
-                            };
-                            self.emit_cell(&old, existing_run, verdict, decided_by);
-                        }
-                    } else if S::ENABLED {
-                        let (verdict, decided_by) = if cell.timestamp == existing.timestamp
-                            && (KWayMerger::<NoTrace>::is_cell_tombstone(existing)
-                                || existing.is_deleted)
-                            && !(KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted)
-                        {
-                            (
-                                Verdict::ShadowedByTombstone(TombstoneKind::Cell),
-                                DecidedBy::Tombstone {
-                                    kind: TombstoneKind::Cell,
-                                    run_index: existing_run,
-                                    deletion_time: existing.timestamp,
-                                    local_deletion_time: KWayMerger::<NoTrace>::cell_effective_ldt(
-                                        existing,
+                        std::collections::hash_map::Entry::Occupied(mut slot) => {
+                            // Higher timestamp wins. At EQUAL timestamp a cell
+                            // DELETION (tombstone) beats a LIVE or EXPIRING (TTL) cell,
+                            // before any localDeletionTime comparison (Cassandra
+                            // `Cells#reconcile`; issue #848 / #498).
+                            let existing_run = self
+                                .winner_runs
+                                .as_ref()
+                                .and_then(|runs| runs.get(slot.key()).copied())
+                                .unwrap_or(entry.run_index);
+                            let cell_wins = reconcile_rules::cell_wins(cell, slot.get());
+                            if cell_wins {
+                                let old = if S::ENABLED {
+                                    Some(slot.get().clone())
+                                } else {
+                                    None
+                                };
+                                if let Some(runs) = &mut self.winner_runs {
+                                    runs.insert(slot.key().clone(), entry.run_index);
+                                }
+                                slot.insert(cell.clone());
+                                if let Some(old) = old {
+                                    let (verdict, decided_by) = if cell.timestamp == old.timestamp
+                                        && (KWayMerger::<NoTrace>::is_cell_tombstone(cell)
+                                            || cell.is_deleted)
+                                        && !(KWayMerger::<NoTrace>::is_cell_tombstone(&old)
+                                            || old.is_deleted)
+                                    {
+                                        (
+                                            Verdict::ShadowedByTombstone(TombstoneKind::Cell),
+                                            DecidedBy::Tombstone {
+                                                kind: TombstoneKind::Cell,
+                                                run_index: entry.run_index,
+                                                deletion_time: cell.timestamp,
+                                                local_deletion_time:
+                                                    KWayMerger::<NoTrace>::cell_effective_ldt(cell)
+                                                        .unwrap_or(0),
+                                                droppable_at_now: self.tombstone_droppable(
+                                                    KWayMerger::<NoTrace>::cell_effective_ldt(
+                                                        cell,
+                                                    )
+                                                    .unwrap_or(0),
+                                                ),
+                                            },
+                                        )
+                                    } else {
+                                        (
+                                            Verdict::ShadowedByTimestamp,
+                                            DecidedBy::Winner {
+                                                run_index: entry.run_index,
+                                                writetime: cell.timestamp,
+                                            },
+                                        )
+                                    };
+                                    self.emit_cell(&old, existing_run, verdict, decided_by);
+                                }
+                            } else if S::ENABLED {
+                                // Copy the fields we need out of `slot.get()`
+                                // into owned locals FIRST — a single `existing:
+                                // &CellData` reused across this whole
+                                // if/else would keep `slot`'s borrow of
+                                // `self.winners` alive through the
+                                // `self.tombstone_droppable(&self, ..)` call
+                                // below, which needs an unaliased `&self`.
+                                let existing_timestamp = slot.get().timestamp;
+                                let existing_is_tombstone = {
+                                    let existing = slot.get();
+                                    KWayMerger::<NoTrace>::is_cell_tombstone(existing)
+                                        || existing.is_deleted
+                                };
+                                let existing_effective_ldt =
+                                    KWayMerger::<NoTrace>::cell_effective_ldt(slot.get())
+                                        .unwrap_or(0);
+                                let cell_is_tombstone =
+                                    KWayMerger::<NoTrace>::is_cell_tombstone(cell)
+                                        || cell.is_deleted;
+                                let (verdict, decided_by) = if cell.timestamp == existing_timestamp
+                                    && existing_is_tombstone
+                                    && !cell_is_tombstone
+                                {
+                                    (
+                                        Verdict::ShadowedByTombstone(TombstoneKind::Cell),
+                                        DecidedBy::Tombstone {
+                                            kind: TombstoneKind::Cell,
+                                            run_index: existing_run,
+                                            deletion_time: existing_timestamp,
+                                            local_deletion_time: existing_effective_ldt,
+                                            droppable_at_now: self
+                                                .tombstone_droppable(existing_effective_ldt),
+                                        },
                                     )
-                                    .unwrap_or(0),
-                                    droppable_at_now: self.tombstone_droppable(
-                                        KWayMerger::<NoTrace>::cell_effective_ldt(existing)
-                                            .unwrap_or(0),
-                                    ),
-                                },
-                            )
-                        } else {
-                            (
-                                Verdict::ShadowedByTimestamp,
-                                DecidedBy::Winner {
-                                    run_index: existing_run,
-                                    writetime: existing.timestamp,
-                                },
-                            )
-                        };
-                        self.emit_cell(cell, entry.run_index, verdict, decided_by);
+                                } else {
+                                    (
+                                        Verdict::ShadowedByTimestamp,
+                                        DecidedBy::Winner {
+                                            run_index: existing_run,
+                                            writetime: existing_timestamp,
+                                        },
+                                    )
+                                };
+                                self.emit_cell(cell, entry.run_index, verdict, decided_by);
+                            }
+                        }
                     }
                 }
             }
