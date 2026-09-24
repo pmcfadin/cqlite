@@ -1,6 +1,6 @@
 # The forensics surface — "sstabledump on steroids"
 
-Status: **F1 implemented in issue #4193 (2026-09-20); F2+ remain planned.** Origin: a
+Status: **F0+F1 shipped in issue #4193 (2026-09-23); F2+ remain planned.** Origin: a
 Cassandra meetup comment (September 2026) — *"the ability to inspect data on a lower level,
 like tombstone visibility and different versions of data from different SSTables, would let
 CQLite be a troubleshooting tool as well — a kind of sstabledump on steroids."* This document
@@ -177,16 +177,22 @@ problem, next to the `sstabledump` output an operator would otherwise be reading
 
 ## 7. Open questions (for the grooming thread)
 
-- Does the decision trail live in the merge output type (a side channel per cell) or as a
-  separate pass that re-runs the merge in "explain mode"? The first is one mechanism and zero
-  drift; the second keeps the hot path untouched. Measure the cost of the first before choosing.
+- ~~Does the decision trail live in the merge output type (a side channel per cell) or as a
+  separate pass that re-runs the merge in "explain mode"?~~ DECIDED (#4193, design.md §D2): a
+  static-dispatch `TraceSink` type parameter on `KWayMerger<S>`, defaulting to a zero-sized
+  `NoTrace` — one mechanism, zero drift, and `size_of::<NoTrace>() == 0` is asserted by
+  `cqlite-core/tests/issue_4193_trace_sink_zero_cost.rs`.
 - `raw.*` as virtual tables in the CLI query engine vs a dedicated `cqlite raw` verb with a
-  restricted filter grammar. The former is the better product; the latter ships sooner.
-- Naming: `explain` collides with SQL `EXPLAIN` (a plan). `why` is shorter and unambiguous;
-  `trace` is neutral. Decide before F1.
+  restricted filter grammar. The former is the better product; the latter ships sooner. Still
+  open — out of #4193's F0+F1 scope.
+- ~~Naming: `explain` collides with SQL `EXPLAIN` (a plan).~~ DECIDED (owner ruling
+  2026-09-09, design.md §D7): the verb is `explain`; `query --explain` keeps its existing
+  meaning, and `cqlite explain --help` documents the collision.
 - Whether the verdict vocabulary should also cover the *read-time* reconciliation that differs
-  from compaction (e.g. a cell shadowed only at read time by a not-yet-purged tombstone). It
-  should; check that `reconcile_rules.rs` exposes the distinction.
+  from compaction (e.g. a cell shadowed only at read time by a not-yet-purged tombstone).
+  ANSWERED for F0: `explain` always runs the FULL-COMPACTION posture (design.md §D3), so the
+  trail already reflects gc_grace purgeability; a genuinely read-time-only divergence (e.g. an
+  overlap-aware partial-compaction bound) is out of scope until a use case names it.
 
 ## 8. Relationship to the PRD
 

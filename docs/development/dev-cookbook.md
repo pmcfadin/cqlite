@@ -467,6 +467,9 @@ line marks the wall-clock value. `table`, `json`, and `csv` are supported, and
 the command fails closed with exit 1 for usage/schema/table errors or exit 2
 for generation read/render errors. The configured `max_result_bytes` budget
 applies to the rendered report just as it does to a materialized query.
+`explain` is a distinct verb from the pre-existing `query --explain` flag (a
+query-PLAN display, unrelated to reconciliation) — the naming collision is
+intentional (owner ruling, design.md §D7) and `cqlite explain --help` says so.
 
 ### Output format precedence
 

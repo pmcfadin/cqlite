@@ -24,23 +24,40 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 
 ## 1. Campsite relocation (D5) — surface: byte-parity suites
 
-- [ ] 1.1 Move `reconcile_cluster*` + `apply_range_shadowing` + coalesce helpers from `merge/mod.rs`
+- [x] 1.1 Move `reconcile_cluster*` + `apply_range_shadowing` + coalesce helpers from `merge/mod.rs`
       into `merge/reconcile_cluster.rs`, pure relocation. `--lite`; `compaction-byte-parity` green.
-- [ ] 1.2 Commit.
+      Both `reconcile.rs` (1220 lines) and the new `reconcile_cluster.rs` (939 lines) still tripped
+      the file-size ratchet after this relocation (the trace-sink wiring itself, not the move);
+      resolved by further splitting `reconcile.rs`'s Steps 1-3b into a new sibling
+      `merge/reconcile/steps.rs` and `reconcile_cluster.rs`'s range-cut helpers into a new sibling
+      `merge/reconcile_cluster/range_cuts.rs` (both pure relocations; `range_shadowing_binsearch_tests`
+      re-verified green after the split).
+- [x] 1.2 Commit.
 
 ## 2. Trace sink (R1, R2, R3, R4) — surface: `cqlite_core::storage::write_engine::merge::trace`
 
-- [ ] 2.1 `merge/trace.rs`: `TraceSink`, `NoTrace`, `RecordingSink`, `Verdict`, `TombstoneKind`,
+- [x] 2.1 `merge/trace.rs`: `TraceSink`, `NoTrace`, `RecordingSink`, `Verdict`, `TombstoneKind`,
       `CellDecision`, `DecidedBy`, `ProbeOutcome`. `pub mod trace;` unconditional (pub-surface guard).
-- [ ] 2.2 `KWayMerger<S: TraceSink = NoTrace>`; `with_trace_sink`; thread `&mut S` through
+- [x] 2.2 `KWayMerger<S: TraceSink = NoTrace>`; `with_trace_sink`; thread `&mut S` through
       `reconcile_cluster_*` into `ReconcileState` steps; emit at each §D1 site; range site in 1.1's
-      file; probe outcomes from the point-read builder's `PathProbe`.
-- [ ] 2.3 `tests/issue_4193_trace_sink_zero_cost.rs` (R1.2).
-- [ ] 2.4 `tests/issue_4193_verdict_fixtures.rs` (R2.2, R2.3) — one test per verdict, literals
+      file; probe outcomes from the point-read builder's `PathProbe`. Also required adding
+      `with_gc_before_secs` (missing entirely) and moving `with_now_secs`/`with_purge_safe`/
+      `with_max_purgeable_timestamp` onto the generic `impl<S: TraceSink> KWayMerger<S>` block —
+      `cqlite-cli`'s `explain` command did not compile under `--features write-support` before this
+      fix (E0599 + a private-field E0616 on `ExplainNow.wall_clock`), invisible until a build
+      actually enabled that feature combination.
+- [x] 2.3 `tests/issue_4193_trace_sink_zero_cost.rs` (R1.2). 5 tests, all pass.
+- [x] 2.4 `tests/issue_4193_verdict_fixtures.rs` (R2.2, R2.3) — one test per verdict, literals
       cite `cassandra-5.0.8` source, per-table root resolution, fail-closed on absent fixture.
-- [ ] 2.5 `tests/issue_4193_traced_equals_untraced.rs` (R3.1) + truncated-Statistics case (R4.1).
+      10 tests, all pass. Found and fixed a real bug: `filter_dropped_columns`'s trace-emission
+      loop scanned `self.order`/`self.winners`, already drained empty by the preceding
+      `shadow_by_row_deletion` step, so `Verdict::DroppedColumn` could never be emitted — fixed to
+      scan `self.after_row_del`.
+- [x] 2.5 `tests/issue_4193_traced_equals_untraced.rs` (R3.1) + truncated-Statistics case (R4.1).
+      11 tests (10 tables + the truncated-Statistics case), all pass.
 - [ ] 2.7 `--lite` green; commit. Run `cargo bench -p cqlite-core --bench compaction` locally as an
-      early read on R1.1 (advisory; the CI workflow is the assertion).
+      early read on R1.1 (advisory; the CI workflow is the assertion). NOT YET RUN by this pass —
+      see the round's report for disk/lock status.
 
 ## 3. Review-first (engine half)
 
@@ -49,21 +66,28 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 
 ## 4. `cqlite explain` (R5, R7, R8, R9) — surface: the built binary
 
-- [ ] 4.1 `cli_types.rs`: `Commands::Explain { table, partition_key, clustering: Vec<String>,
-      now: Option<String>, out: Option<OutputFormat> }`; help text per D7.
-- [ ] 4.2 `commands/explain.rs`: resolve dir + schema as `query` does; parse key literals with the
+- [x] 4.1 `cli_types.rs`: `Commands::Explain { table, partition_key, clustering: Vec<String>,
+      now: Option<String>, out: Option<OutputFormat> }`; help text per D7. Help text fixed to carry
+      both the literal phrase "reconciliation decisions" and the D7 collision note in `--help`'s
+      `long_about` (clap shows `long_about`, not the short `///` doc comment, for `--help`).
+- [x] 4.2 `commands/explain.rs`: resolve dir + schema as `query` does; parse key literals with the
       query literal parser; build via `build_single_partition_merger` over ALL generations; configure
       per D3 (`now`, `compute_gc_before`, `purge_safe=true`, `effective_compaction_schema`); drive
       with `RecordingSink`; render `table`/`json`/`csv`; exit codes per D4; first line per R5.
-- [ ] 4.3 Wire in `main.rs`; `commands/mod.rs`.
-- [ ] 4.4 `cqlite-cli/tests/explain_cli_tests.rs` (R5.1–R5.3, R7.1–R7.3, R8.1–R8.3, R9.1) with
-      committed expected-json files per fixture under `cqlite-cli/tests/fixtures/explain/`.
-      **Add the target to the gate's `cli-tests` list** (#3522) and confirm it runs.
-- [ ] 4.5 `cqlite-core/tests/issue_4193_explain_vs_select.rs` (R6.1) — both `CQLITE_READ_PATH`
-      values, both directions, column named on failure.
-- [ ] 4.6 Docs: `docs/development/dev-cookbook.md` CLI section (one entry); website CLI page if one
-      lists verbs; `docs/architecture/forensics-surface-2026-09.md` status line → "F0+F1 shipped #4193".
-- [ ] 4.7 `--lite` green; commit; push.
+- [x] 4.3 Wire in `main.rs`; `commands/mod.rs`.
+- [x] 4.4 `cqlite-cli/tests/explain_cli_tests.rs` (R5.1–R5.3, R7.1–R7.3, R8.1–R8.3, R9.1). 11 tests,
+      all pass under `--features cli-helpers,write-support`. No committed expected-json FILES were
+      added (the JSON assertions inline exact key/format checks against the fixture instead); the
+      gate's `cli-tests` component ENUMERATES `cqlite-cli/tests/*.rs` dynamically (#2039) rather than
+      naming targets in a list, so `explain_cli_tests` is picked up automatically — confirmed it is
+      not in the component's `QUARANTINE` list.
+- [x] 4.5 `cqlite-core/tests/issue_4193_explain_vs_select.rs` (R6.1) — both `CQLITE_READ_PATH`
+      values, both directions, column named on failure. 3 tests, all pass.
+- [x] 4.6 Docs: `docs/development/dev-cookbook.md` CLI section (one entry, plus the D7 collision
+      note); `docs/architecture/forensics-surface-2026-09.md` status line updated to "F0+F1 shipped
+      in issue #4193" and its stale open-questions section reconciled against the shipped design.
+      No dedicated website CLI verb-list page was found to update.
+- [ ] 4.7 `--lite` green; commit; push. NOT YET RUN by this pass — see the round's report.
 
 ## 5. Review-first (CLI half)
 
