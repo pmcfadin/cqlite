@@ -24,16 +24,23 @@ case. Invocation itself stays `scripts/flow/roborev-review.sh` (see `CLAUDE.md`)
 94% of a dev/test binary's bytes were debug sections, and one gate lane's `target/` reached
 63-190 GB across its feature-set builds, largely because every `cqlite-core/tests/*.rs` is its own
 binary statically linking all of `cqlite-core`. `line-tables-only` still keeps file:line in panic
-backtraces and dhat allocation backtraces (verified: `memory-budget`, `binding-unwind-profile`, and
-every test asserting on backtrace/panic-location text) — it drops the full variable/type debug info
-those don't need. `release`/`bench`/`perfsym`/`perfprof` are untouched.
+backtraces — verified directly with a standalone `rustc -C debuginfo=line-tables-only` panic that
+still resolves every frame to `file.rs:LINE` under `RUST_BACKTRACE=1` (`binding-unwind-profile` and
+`memory-budget` are UNAFFECTED by this change and re-verify PASS, but neither exercises backtrace
+symbolication, so they are not evidence for this claim — see the `[profile.dev]` comment in
+`Cargo.toml`). Drops the full variable/type debug info a dev/test binary does not need.
+`release`/`bench`/`perfsym`/`perfprof` are untouched.
 
 If you genuinely need full local debug info (e.g. stepping through dev/test binaries in `lldb`/`gdb`
-with variable inspection, not just a file:line backtrace), override per-build:
+with variable inspection, not just a file:line backtrace), override per-build. For `cargo build` one
+var suffices; for a `cargo test` debugging session set **both** — dependencies (including
+`cqlite-core`'s own lib, linked into every `cqlite-core/tests/*.rs` integration test) build under the
+`dev` profile even when the target itself is a test, so `CARGO_PROFILE_TEST_DEBUG=true` alone
+restores full DWARF for the test file only, not the library code you actually want to step through:
 
 ```bash
 CARGO_PROFILE_DEV_DEBUG=true cargo build
-CARGO_PROFILE_TEST_DEBUG=true cargo test -p cqlite-core
+CARGO_PROFILE_DEV_DEBUG=true CARGO_PROFILE_TEST_DEBUG=true cargo test -p cqlite-core
 ```
 
 Both env vars are cargo-native (no code change) and apply only to that invocation.
