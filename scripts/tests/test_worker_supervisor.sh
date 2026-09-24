@@ -10631,6 +10631,7 @@ t test_object_store_sweep_claim_wait_completed_stops_contending
 # is asserted below, from the shipped files, so this case does not re-type it either.
 test_object_store_sweep_claim_recovers_when_stale() {
   local d root calls counter rc claim bound fns walks per_walk want got
+  local refresh_pid
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10691,6 +10692,28 @@ test_object_store_sweep_claim_recovers_when_stale() {
   #     OBJ_SWEEP_TIMEOUT_SECS and the (now env-overridable) slack term to make the SAME
   #     derived relation come out at a few seconds. The property under test is unchanged;
   #     only its price is.
+  #
+  #     ISSUE #4282: A ONE-SHOT `started` PLANT RACES THE SUPERVISOR'S OWN LAUNCH. With the
+  #     budget compressed to ~3s (MAX_SWEEP_WALKS x 1 + 2), the gap between this line writing
+  #     `started` and the supervisor's FIRST read of it — process fork/exec, sourcing, the
+  #     preflight/latch/stamp checks ahead of it in `obj_sweep_claim_wait` — can exceed 3s on
+  #     a box under full-gate load (load avg 30-75 on 20 cores, #4250's r-run), ageing the
+  #     "fresh" claim past the bound before anyone reads it and sweeping it instead. Widening
+  #     the bound only makes this less likely, not impossible (the same class as 4b.126,
+  #     #4252 r7/r8, fixed differently in PR #4272) — and it is NOT the property under test
+  #     here (that's read-vs-plant scheduling latency, not the derivation in (a)).
+  #
+  #     THE FIX KEEPS `started` CONTINUOUSLY FRESH instead of trying to guess a plant time
+  #     that survives an unknown delay. A background loop rewrites `$claim/started` to
+  #     `date +%s` every 0.2s (atomically: a `mv` into place, never a partial read) for as
+  #     long as the supervisor runs, so WHENEVER it takes its first (or any) reading, the
+  #     claim's age is at most ~0.2s — the plant/read race is gone regardless of how late the
+  #     read happens. This does not weaken the property or the timing: the wait's OUTER
+  #     `wait_until` budget (computed by the supervisor itself, from ITS OWN process-start
+  #     clock, not from this file) still bounds and terminates the wait — a continuously-aged
+  #     `started+stale` deadline never fires first (it always trails `now` by ~`stale`), so
+  #     the case still ends via the SAME `exhausted` -> "NOT SWEPT AND NOT MEASURED" path,
+  #     asserted below exactly as before, in about the same ~3s wall-clock.
   d="$(new_case_dir)"; calls="$d/calls-fresh"; counter="$d/counter"
   common_env "$d"
   write_finalize_stub "$d/bin/worker.sh" "$counter"
@@ -10704,9 +10727,22 @@ test_object_store_sweep_claim_recovers_when_stale() {
   claim="$OBJ_SWEEP_STAMP.sweeping"
   mkdir -p "$claim"
   printf '%s\n' "$(date +%s)" >"$claim/started"
+  # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
+  # a concurrent read never observes a torn value. `fixture_bg`/`fixture_kill` own the group
+  # so a case failure or interrupt cannot leak this loop.
+  fixture_bg bash -c '
+    claim="$1"
+    while true; do
+      printf "%s\n" "$(date +%s)" >"$claim/started.tmp.$$" 2>/dev/null &&
+        mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null
+      sleep 0.2
+    done
+  ' _ "$claim" >/dev/null 2>&1
+  refresh_pid=$FIXTURE_LAST_PID
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
   rc=$?
+  fixture_kill "$refresh_pid"
   if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
     grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/fresh.log" &&
     grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
