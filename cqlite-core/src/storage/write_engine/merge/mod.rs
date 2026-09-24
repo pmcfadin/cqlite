@@ -2286,7 +2286,7 @@ impl<S: TraceSink> KWayMerger<S> {
             max_partition_deletion,
             partition_delete_key,
             partition_delete_run_index,
-        } = carriers::scan_partition_carriers_with_trace(&rows, S::ENABLED);
+        } = carriers::scan_partition_carriers(&rows, S::ENABLED);
 
         // Carrier rows are split out before cluster reconciliation, so emit
         // their marker observations at the split boundary. Their source
