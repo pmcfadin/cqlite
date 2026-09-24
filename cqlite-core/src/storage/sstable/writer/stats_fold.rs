@@ -238,11 +238,10 @@ pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mut
 /// preserve their prior unconditional-fold behavior exactly).
 ///
 /// When `Some(dts)`, the mutation's SIMPLE content (its own leading
-/// timestamp, per-cell `cell_write_timestamps`, row-level TTL, and
-/// `WriteWithTtl`/`Delete`/`DeleteRow`/`Write` contributions) is
-/// shadow-gated on `mutation.timestamp_micros <= dts` — matching
-/// `merge_row_group`'s own `mutation_shadowed` test EXACTLY, with NO
-/// exemption for a mutation that itself carries a `DeleteRow` op or a
+/// timestamp, row-level TTL, and `WriteWithTtl`/`Delete`/`DeleteRow`/`Write`
+/// contributions) is shadow-gated on `mutation.timestamp_micros <= dts` —
+/// matching `merge_row_group`'s own `mutation_shadowed` test EXACTLY, with
+/// NO exemption for a mutation that itself carries a `DeleteRow` op or a
 /// `#932` `row_tombstone` (issue #4246 roborev round-2 finding: an earlier
 /// version exempted such a mutation, reasoning that "`dts` is derived from
 /// its own timestamp when it is the winning deletion" — but `dts` is
@@ -255,6 +254,20 @@ pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mut
 /// `mutation_shadowed`) — correct, since the group's row deletion is now
 /// folded exactly once at the GROUP level via
 /// [`fold_row_deletion_marker`]/[`row_group_survival`], never here.
+///
+/// A SECOND, per-cell filter mirrors `merge_row_group`'s own
+/// (`data_writer/rows.rs`, issue #1018 roborev HIGH / issue #4246 roborev
+/// round-4 Medium finding): even when the mutation's ROW timestamp survives
+/// (`!mutation_shadowed`), an individual `Write`/`WriteWithTtl`/`Delete` cell
+/// may carry its OWN (lower) per-cell timestamp in
+/// `Mutation::cell_write_timestamps` (populated by the compaction
+/// merge→mutation path) that is itself `<= dts` — covered by the
+/// partition/range/row tombstone and never emitted, even though the row
+/// survives via other content. Each of those three arms resolves its own
+/// `cell_ts` via `Mutation::cell_write_timestamp` (falling back to
+/// `mutation.timestamp_micros` when no per-cell override exists, a no-op
+/// for the common single-writetime row) and gates on it independently of
+/// `mutation_shadowed`.
 ///
 /// `ComplexDeletion`/`WriteComplexElement` ops are gated PER-OP instead,
 /// each against its OWN independent timestamp (`marked_for_delete_at` /
@@ -274,20 +287,6 @@ pub(crate) fn fold_row_content_stats(
 
     if !mutation_shadowed {
         stats.update_timestamp(mutation.timestamp_micros);
-        // Issue #1018: simple `Write`/`WriteWithTtl`/`Delete` cells may carry
-        // their OWN (lower) per-cell timestamps in
-        // `Mutation::cell_write_timestamps` (a live cell's writetime OR a
-        // cell tombstone's markedForDeleteAt) and are emitted with an
-        // explicit `min_timestamp` delta. Fold every per-cell timestamp into
-        // the stats BEFORE emitting cells so `min_timestamp` can never
-        // exceed an emitted cell's actual timestamp (which would underflow
-        // the unsigned-VInt delta). Mirrors the pre-pass fold in
-        // `compute_mutations_baseline_stats`.
-        if let Some(cell_ts) = &mutation.cell_write_timestamps {
-            for ts in cell_ts.values() {
-                stats.update_timestamp(*ts);
-            }
-        }
         if let Some(ttl) = mutation.ttl_seconds {
             stats.update_ttl(ttl as i32);
             let now_seconds = std::time::SystemTime::now()
@@ -304,6 +303,7 @@ pub(crate) fn fold_row_content_stats(
     for op in &mutation.operations {
         match op {
             CellOperation::WriteWithTtl {
+                column,
                 ttl_seconds,
                 local_deletion_time,
                 ..
@@ -311,6 +311,23 @@ pub(crate) fn fold_row_content_stats(
                 if mutation_shadowed {
                     continue;
                 }
+                // Issue #1018 (roborev round-4 Medium finding, mirroring
+                // `merge_row_group`'s identical per-cell filter,
+                // `data_writer/rows.rs`): a mutation whose ROW timestamp
+                // survives can still carry an individual cell whose OWN
+                // resolved timestamp (`Mutation::cell_write_timestamps`,
+                // populated by the compaction merge→mutation path) is
+                // `<= shadow_boundary` — covered by the partition/range/row
+                // tombstone and never emitted, even though the row itself
+                // survives via other content. `cell_write_timestamp` falls
+                // back to `mutation.timestamp_micros` when no per-cell
+                // override exists, so this is a no-op for the common
+                // single-writetime row.
+                let cell_ts = mutation.cell_write_timestamp(column);
+                if shadow_boundary.is_some_and(|dts| cell_ts <= dts) {
+                    continue;
+                }
+                stats.update_timestamp(cell_ts);
                 stats.update_ttl(*ttl_seconds as i32);
                 // Issue #1538: honor the authoritative per-cell LDT VERBATIM
                 // when present (a surviving expiring cell preserved through
@@ -328,10 +345,17 @@ pub(crate) fn fold_row_content_stats(
                 };
                 stats.update_local_deletion_time(local_deletion_time);
             }
-            op @ CellOperation::Delete { .. } => {
+            op @ CellOperation::Delete { column, .. } => {
                 if mutation_shadowed {
                     continue;
                 }
+                // Per-cell shadow filter (roborev round-4 Medium finding) —
+                // see the identical comment on `WriteWithTtl` above.
+                let cell_ts = mutation.cell_write_timestamp(column);
+                if shadow_boundary.is_some_and(|dts| cell_ts <= dts) {
+                    continue;
+                }
+                stats.update_timestamp(cell_ts);
                 // Issue #764 / #921 finding 2: record the EXACT LDT the
                 // tombstone is emitted with, via the same helper the emit path
                 // uses, so stats and Data.db bytes agree exactly.
@@ -405,10 +429,17 @@ pub(crate) fn fold_row_content_stats(
             }
             // Issue #1728: a live, non-TTL `Write` cell carries Cassandra's
             // `Cell.NO_DELETION_TIME` sentinel as its localDeletionTime.
-            CellOperation::Write { value, .. } => {
+            CellOperation::Write { column, value, .. } => {
                 if mutation_shadowed {
                     continue;
                 }
+                // Per-cell shadow filter (roborev round-4 Medium finding) —
+                // see the identical comment on `WriteWithTtl` above.
+                let cell_ts = mutation.cell_write_timestamp(column);
+                if shadow_boundary.is_some_and(|dts| cell_ts <= dts) {
+                    continue;
+                }
+                stats.update_timestamp(cell_ts);
                 if mutation.ttl_seconds.is_none() && !matches!(value, crate::types::Value::Null) {
                     stats.note_live_local_deletion_time();
                 }
@@ -965,10 +996,13 @@ mod tests {
             fold_row_content_stats(&mut stats, &mutation, None);
 
             assert_eq!(
-                stats.tombstone_histogram.size(),
+                stats.tombstone_histogram.total_observations(),
                 1,
                 "a DeleteRow on the carries_static path must fold its LDT into \
-                 the tombstone-drop-time histogram exactly once, not twice"
+                 the tombstone-drop-time histogram exactly once, not twice \
+                 (total_observations, NOT size() — size() counts distinct \
+                 bins, and a double-fold of the SAME LDT lands in one bin \
+                 either way, roborev round-4 HIGH finding)"
             );
         }
 
@@ -984,10 +1018,11 @@ mod tests {
             fold_single_mutation_row_group(&mut stats, &mutation, &schema(), false, None);
             assert_eq!(stats.min_timestamp, 42);
             assert_eq!(
-                stats.tombstone_histogram.size(),
+                stats.tombstone_histogram.total_observations(),
                 1,
                 "the row's own deletion marker must be folded exactly once \
-                 through the shared single-mutation-group helper"
+                 through the shared single-mutation-group helper \
+                 (total_observations, NOT size() — roborev round-4 HIGH finding)"
             );
         }
 
@@ -1012,6 +1047,50 @@ mod tests {
                 stats.min_timestamp,
                 i64::MAX,
                 "a live mutation entirely covered by shadow_floor=10 must fold nothing"
+            );
+        }
+
+        /// Roborev round-4 Medium finding: `merge_row_group` applies a SECOND,
+        /// per-cell shadow filter (`data_writer/rows.rs`, issue #1018) on top
+        /// of the row-level `mutation_shadowed` check — a mutation whose ROW
+        /// timestamp survives can still carry an individual cell whose OWN
+        /// per-cell override timestamp (`Mutation::cell_write_timestamps`) is
+        /// itself covered by `shadow_boundary`. Construct exactly that shape:
+        /// row ts=100 (survives dts=50), but the `v` column's own per-cell
+        /// override is ts=5 (covered by dts=50) — Data.db never emits this
+        /// cell, so it must not fold either.
+        #[test]
+        fn fold_row_content_stats_gates_per_cell_override_independent_of_row_timestamp() {
+            let mut mutation = insert(1, 100);
+            mutation.cell_write_timestamps =
+                Some(std::collections::HashMap::from([("v".to_string(), 5)]));
+
+            let mut stats = StatisticsMetadata::new();
+            fold_row_content_stats(&mut stats, &mutation, Some(50));
+            assert_eq!(
+                stats.min_timestamp, 100,
+                "the row's own base timestamp (100, which survives dts=50) is \
+                 still folded; the shadowed per-cell override (5) must NOT be — \
+                 if it were, min_timestamp would incorrectly read 5"
+            );
+        }
+
+        /// The companion control: when the per-cell override timestamp is
+        /// ABOVE `shadow_boundary`, it folds normally (proving the gate is on
+        /// the override value, not a blanket exclusion once any override is
+        /// present).
+        #[test]
+        fn fold_row_content_stats_folds_surviving_per_cell_override() {
+            let mut mutation = insert(1, 100);
+            mutation.cell_write_timestamps =
+                Some(std::collections::HashMap::from([("v".to_string(), 60)]));
+
+            let mut stats = StatisticsMetadata::new();
+            fold_row_content_stats(&mut stats, &mutation, Some(50));
+            assert_eq!(
+                stats.min_timestamp, 60,
+                "a per-cell override (60) that survives shadow_boundary=50 must \
+                 lower min_timestamp below the row's own base timestamp (100)"
             );
         }
     }

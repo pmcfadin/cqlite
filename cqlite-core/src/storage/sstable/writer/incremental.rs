@@ -137,8 +137,12 @@ impl SSTableWriter {
     /// step).
     ///
     /// `partition_stats` is the caller's per-partition fold (every mutation
-    /// of this partition folded through `stats_fold::fold_mutation_stats` as
-    /// it streamed by — the caller cannot fold directly into
+    /// of this partition folded through `stats_fold`'s shadow-aware
+    /// functions — `fold_row_content_stats`/`fold_marker_stats`/
+    /// `fold_row_deletion_marker`, or the `fold_single_mutation_row_group`
+    /// composition of them, issue #4246 roborev round-4 finding: NOT the
+    /// test-only `fold_mutation_stats` — as it streamed by; the caller cannot
+    /// fold directly into
     /// `self.stats` while the `IncrementalPartitionWriter` session holds an
     /// exclusive borrow of `self`). Merged in here, once the session's borrow
     /// has ended, via `stats_fold::merge_stats_fold` so the FINAL

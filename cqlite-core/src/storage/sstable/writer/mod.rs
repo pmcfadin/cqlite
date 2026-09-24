@@ -34,8 +34,15 @@ mod finish;
 #[cfg(feature = "write-support")]
 mod incremental;
 /// Shared per-mutation statistics fold (issue #1668, stage 5c-iv part 2),
-/// called by both `write_partition` and the incremental streaming path so
-/// they can never drift. See [`stats_fold::fold_mutation_stats`].
+/// called by `write_partition`, `KWayMerger::merge`'s streaming compaction
+/// path, and `WriteEngine::maintenance_step`'s budgeted drain, so they can
+/// never drift (issue #4246 roborev round-4 finding: updated — the fold is
+/// now the composition of [`stats_fold::fold_row_content_stats`],
+/// [`stats_fold::fold_marker_stats`], and
+/// [`stats_fold::fold_row_deletion_marker`]/
+/// [`stats_fold::fold_single_mutation_row_group`], not a single
+/// `fold_mutation_stats` call — that function is `#[cfg(test)]`-only now,
+/// kept as a test-only convenience wrapper with no production caller).
 #[cfg(feature = "write-support")]
 pub(crate) mod stats_fold;
 
@@ -681,9 +688,10 @@ impl SSTableWriter {
         }
 
         // Update statistics from mutations. Issue #1668 stage 5c-iv part 2:
-        // extracted into `stats_fold::fold_mutation_stats` so the incremental
-        // streaming path folds the exact same logic per mutation and the two
-        // paths can never drift.
+        // extracted into `stats_fold` (see that module's own doc comment for
+        // which functions compose the fold today, issue #4246 roborev
+        // round-4 finding) so the incremental streaming path folds the exact
+        // same logic per mutation and the paths can never drift.
         //
         // Issue #851: row_count (totalRows) and column_count
         // (totalColumnsSet) are NOT re-derived per-mutation here. The two
@@ -971,6 +979,25 @@ impl SSTableWriter {
         // Tombstone MARKERS are never themselves row-shadowed — they ARE the
         // deletion — so they always contribute, folded unconditionally here
         // exactly as before this fix.
+        //
+        // DELIBERATELY folds EVERY mutation's OWN `partition_tombstone`, not
+        // just the WINNING one `write_partition`'s marker fold keeps
+        // (`.max_by_key(|pt| pt.deletion_time)`, the only one actually
+        // EMITTED into Data.db's partition header — issue #4246 roborev
+        // round-4 Medium finding, verified empirically: two `DELETE`s for
+        // one partition in a single flush batch, PT@5 superseded by PT@10,
+        // persists `min_timestamp = 5`, even though only the `@10` marker is
+        // written). This is the SAME architectural pattern #4286 already
+        // documents for row content (two separate `DELETE` CQL statements
+        // are two separate `PartitionUpdate`s, each contributing
+        // UNCONDITIONALLY to real Cassandra's `EncodingStats.Collector`,
+        // `SkipListMemtable.put`) — not a defect this function should close:
+        // `write_partition`'s OWN winning-only marker fold can only ever
+        // LOWER this pre-seeded value further, never raise it, so folding
+        // EVERY partition tombstone here (the group-wide MINIMUM across all
+        // candidates) is the ENCODING-baseline-correct behavior, and
+        // `write_partition`'s own fold is consequently a no-op whenever this
+        // pre-seed already dominates. See #4286 for the full accounting.
         for mutation in mutations_slice {
             if let Some(pt) = &mutation.partition_tombstone {
                 min_timestamp = min_timestamp.min(pt.deletion_time);
@@ -1060,8 +1087,8 @@ impl SSTableWriter {
             // since `pre_seed_encoding_baselines` seeds `self.stats` from
             // this function's return value directly — see
             // `issue_4246_writer_stats_shadow_regression.rs`'s
-            // `insert_then_delete_baseline_residual_is_documented` for the
-            // exact boundary this leaves.
+            // `insert_then_delete_same_batch_baseline_residual_is_documented`
+            // for the exact boundary this leaves.
             for mutation in group {
                 let carries_static = schema_has_static
                     && mutation
