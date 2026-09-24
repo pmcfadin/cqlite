@@ -55,7 +55,7 @@ impl BoundarySourceKind {
 /// offset and, when the source carries one independently of `Data.db`, the
 /// partition's raw key bytes (design D1's key cross-check, spec R4.2).
 #[derive(Debug, Clone)]
-pub(super) struct BoundaryEntry {
+pub(crate) struct BoundaryEntry {
     /// The boundary source's own key for this slot, when it carries one
     /// independently: always `Some` for BIG (`Index.db` entries carry the
     /// raw key directly); for BTI only a `RowsOffset` (wide-partition) leaf
@@ -65,8 +65,8 @@ pub(super) struct BoundaryEntry {
     /// this is `None`. This is a fact about what the BTI format's
     /// `Partitions.db` trie carries, not a heuristic: the format simply does
     /// not store a narrow partition's raw key anywhere but `Data.db` itself.
-    pub(super) expected_key: Option<Vec<u8>>,
-    pub(super) data_offset: u64,
+    pub(crate) expected_key: Option<Vec<u8>>,
+    pub(crate) data_offset: u64,
     /// The BTI trie's byte-comparable PREFIX for this slot — present ONLY
     /// when `expected_key` is `None` (a `DataOffset`/narrow BTI leaf). NOT a
     /// raw key (it is a truncated, byte-comparable-order artifact of the
@@ -75,13 +75,13 @@ pub(super) struct BoundaryEntry {
     /// every narrow-BTI loss carried an EMPTY `key_hex`, giving an operator
     /// nothing to locate the slot by. `None` for BIG and for BTI `RowsOffset`
     /// leaves, where `expected_key` already carries the real key.
-    pub(super) diagnostic_prefix: Option<Vec<u8>>,
+    pub(crate) diagnostic_prefix: Option<Vec<u8>>,
 }
 
 /// The enumerated boundary source for one input SSTable.
-pub(super) struct Boundaries {
-    pub(super) kind: BoundarySourceKind,
-    pub(super) entries: Vec<BoundaryEntry>,
+pub(crate) struct Boundaries {
+    pub(crate) kind: BoundarySourceKind,
+    pub(crate) entries: Vec<BoundaryEntry>,
 }
 
 const REBUILD_REMEDY: &str = "cqlite rebuild --components index (issue #4197)";
@@ -96,7 +96,7 @@ fn refusal(detail: impl std::fmt::Display) -> Refusal {
 /// Enumerate the authoritative partition boundaries for `dir` (the SSTable's
 /// component directory), given `base` (the shared component-name prefix,
 /// e.g. `nb-1-big`) and whether the on-disk format is BTI.
-pub(super) fn enumerate_boundaries(
+pub(crate) fn enumerate_boundaries(
     dir: &Path,
     base: &str,
     is_bti: bool,

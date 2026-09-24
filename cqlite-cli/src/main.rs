@@ -110,6 +110,16 @@ async fn run_main() -> Result<()> {
         return commands::dispatch_salvage(cli.schema.as_deref(), args).await;
     }
 
+    // `extract`/`split` (issue #4199) likewise operate directly on files and
+    // need no Database/ingestion; short-circuit before database init like
+    // `salvage`.
+    if let Some(Commands::Extract(args)) = &cli.command {
+        return commands::dispatch_extract(cli.schema.as_deref(), args).await;
+    }
+    if let Some(Commands::Split(args)) = &cli.command {
+        return commands::dispatch_split(cli.schema.as_deref(), args).await;
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
@@ -1069,6 +1079,14 @@ async fn run_main() -> Result<()> {
         Some(Commands::Salvage(_)) => {
             // Handled by the short-circuit before database init; see above.
             unreachable!("Commands::Salvage is dispatched before database initialization")
+        }
+        Some(Commands::Extract(_)) => {
+            // Handled by the short-circuit before database init; see above.
+            unreachable!("Commands::Extract is dispatched before database initialization")
+        }
+        Some(Commands::Split(_)) => {
+            // Handled by the short-circuit before database init; see above.
+            unreachable!("Commands::Split is dispatched before database initialization")
         }
         None => {
             // Issue #1693 (AG4): with `--writable` and no one-shot operation

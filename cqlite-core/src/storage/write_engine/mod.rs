@@ -36,6 +36,14 @@ pub mod merge;
 pub mod merge_policy;
 #[cfg(feature = "write-support")]
 pub mod mutation;
+// `cqlite extract` / `cqlite split` (issue #4199, epic #4192): pull one
+// partition/token-range/key-set out of a table, or divide one SSTable
+// generation into N (or byte-bounded) parts. Built on the SAME
+// decode-at-offset / boundary-walk primitives `salvage` uses, so it carries
+// the identical `not(tombstones)` dependency — see `salvage`'s own gate
+// comment below for the rationale.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod extract_split;
 #[cfg(feature = "write-support")]
 pub(crate) mod reconcile_rules;
 // `cqlite salvage` (issue #4196, epic #4192): recovers every completely-

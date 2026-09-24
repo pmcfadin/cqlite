@@ -387,6 +387,46 @@ pub enum Commands {
         long_about = "Recover every completely-decodable partition of a damaged Data.db | table-dir into a fresh generation, from the authoritative boundary source (Index.db / the Partitions.db trie) -- never by scanning Data.db bytes for a plausible header. A partition is recovered WHOLE OR NOT AT ALL: a partition whose decode fails at any row is skipped entirely (a later row can carry a tombstone that shadows earlier ones already decoded, so writing a prefix would resurrect deleted data). Output is UNCOMPRESSED (issue #1406) -- CQLite's production write surface never emits a CompressionInfo.db. A damaged Index.db/Partitions.db means boundaries are unknown and salvage REFUSES, writing no Data.db; the remedy is `cqlite rebuild --components index` (issue #4197) first. --schema resolves through the global --schema flag, which may declare MULTIPLE tables; the target table is DERIVED from the input directory's own name (Cassandra's <table>-<id> convention) unless --table names it explicitly -- salvage FAILS CLOSED (never a silent guess) when neither resolves to exactly one matching CREATE TABLE. Exit 0 = every partition recovered AND every verification the run depends on actually RAN; 3 = output written with losses, OR with a verification GAP -- an uncompressed input with no CRC.db (or a CRC.db shorter than Data.db needs) disables chunk-CRC loss detection entirely, so its `losses: 0` means UNMEASURED, not clean; the manifest names the gap as a ChunkCrcUnavailable component finding (see --manifest); 2 = refused, no Data.db written; 1 = usage error. Example: cqlite --schema ks.tbl.cql salvage ./damaged-table-dir --out ./recovered --manifest ./recovered/salvage.json"
     )]
     Salvage(SalvageArgs),
+    /// Extract one partition / token-range / key-set out of a table (issue #4199)
+    #[command(
+        long_about = "Pull one partition, a token range, or a named key list out of a table into \
+                       a fresh output directory. Default (reconciled) mode reconciles the \
+                       selected key(s) across EVERY input generation (no purge — the same \
+                       point-read semantics `query` uses) and writes ONE output generation. \
+                       --raw instead walks each input generation's OWN boundary source \
+                       independently and writes one output generation per input generation that \
+                       held a match, that generation's own bytes verbatim (tombstones included), \
+                       never reconciled. Output is UNCOMPRESSED (issue #1406). Unlike `cqlite \
+                       salvage`, a partition that cannot be read cleanly REFUSES the whole run \
+                       (nothing written under --out) rather than being skipped and reported — \
+                       extract is not a corruption-recovery tool; use `cqlite salvage` (#4196) or \
+                       `cqlite rebuild` (#4197) first. Exit 0 = every requested key found and \
+                       written; 3 = --out holds every key that WAS found, but --keys-file named \
+                       at least one key absent from every generation (named in --manifest); 2 = \
+                       refused, nothing written; 1 = usage error. Example: cqlite --schema \
+                       ks.tbl.cql extract ./table-dir --partition 42 --out ./out --manifest \
+                       ./out/extract.json"
+    )]
+    Extract(ExtractArgs),
+    /// Divide one SSTable generation into N (or byte-bounded) parts (issue #4199)
+    #[command(
+        long_about = "Divide exactly ONE SSTable generation into N (--parts) or byte-bounded \
+                       (--max-bytes) output parts, walking the input's authoritative boundary \
+                       source sequentially (partitions arrive in ascending Murmur3-token order by \
+                       construction) so every part's token range is disjoint and strictly \
+                       ascending. No reconciliation, no merge, no purge — split divides one \
+                       generation, it does not compact it. Output is UNCOMPRESSED (issue #1406). \
+                       A table directory holding more than one generation is a usage error (exit \
+                       1) naming every generation found — pass the explicit *-Data.db path of the \
+                       one to split. Unlike `cqlite salvage`, a partition that cannot be read \
+                       cleanly REFUSES the whole run (no part published, not even ones that would \
+                       have decoded cleanly). Exit 0 = every part written and independently \
+                       verify --mode full clean; 2 = a partition could not be read cleanly, or a \
+                       produced part failed its own verify self-audit (nothing published); 1 = \
+                       usage error. Example: cqlite --schema ks.tbl.cql split ./table-dir/nb-1-big-Data.db \
+                       --parts 4 --out ./parts --manifest ./parts/split.json"
+    )]
+    Split(SplitArgs),
     /// Verify SSTable integrity (compressed + corrupted) — epic #970, issue #1000
     #[command(
         long_about = "Enforce the CQLite verifier contract on one SSTable generation directory. QUICK mode checks component presence, TOC.txt completeness, Digest.crc32, CompressionInfo.db (+ chunk-offset bounds) and BTI trie structure. FULL mode adds inline Data.db chunk-CRC validation, Statistics.db/Summary.db parse, and a complete row scan that fails loudly on corrupt index/BTI components (no silent empty results). Exit code is non-zero when verification fails. Example: cqlite verify ./test-data/datasets/sstables/test_comp/lz4_table-xxx --mode full --out json"
@@ -611,6 +651,73 @@ pub struct SalvageArgs {
     pub manifest: Option<PathBuf>,
     /// Console rendering of the same manifest (text to stderr, or JSON to
     /// stdout) — independent of `--manifest`.
+    #[arg(long, value_enum, default_value = "text")]
+    pub out_format: SalvageOutFormatArg,
+}
+
+// Arguments for the extract subcommand (issue #4199)
+#[derive(Args, Debug, Clone)]
+pub struct ExtractArgs {
+    /// Table directory (every generation under it is a candidate).
+    pub table_dir: PathBuf,
+    /// Select exactly one partition by its CQL key literal (bare literal for
+    /// a single-column key, `col=literal,...` for a composite key).
+    #[arg(long)]
+    pub partition: Option<String>,
+    /// Select every partition whose Murmur3 token falls in `(a, b]` —
+    /// left-exclusive, right-inclusive, matching Cassandra's own
+    /// ring-boundary convention.
+    #[arg(long, value_name = "A,B")]
+    pub token_range: Option<String>,
+    /// A file naming one key literal per non-blank line (same literal syntax
+    /// as --partition). Any key absent from every input generation is named
+    /// in --manifest and the run exits 3.
+    #[arg(long)]
+    pub keys_file: Option<PathBuf>,
+    /// Walk each input generation's OWN boundary source independently and
+    /// write one output generation per input generation that held a match —
+    /// that generation's own bytes verbatim (tombstones included), never
+    /// reconciled across generations.
+    #[arg(long)]
+    pub raw: bool,
+    /// The table to extract from, when --schema declares more than one.
+    #[arg(long)]
+    pub table: Option<String>,
+    /// Output directory (must not resolve inside the input tree).
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Write the JSON manifest (design D4 shape) to this path.
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    /// Console rendering of the same manifest.
+    #[arg(long, value_enum, default_value = "text")]
+    pub out_format: SalvageOutFormatArg,
+}
+
+// Arguments for the split subcommand (issue #4199)
+#[derive(Args, Debug, Clone)]
+pub struct SplitArgs {
+    /// A `Data.db` file, or a table directory resolving to exactly one
+    /// generation.
+    pub input: PathBuf,
+    /// Divide into exactly N partition-count-balanced parts.
+    #[arg(long)]
+    pub parts: Option<u32>,
+    /// Roll to the next part once its accumulated Data.db byte span reaches
+    /// or exceeds this many bytes.
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+    /// The table being split, when --schema declares more than one.
+    #[arg(long)]
+    pub table: Option<String>,
+    /// Output directory (must not resolve inside the input tree); one
+    /// `part-NNNN/` subdirectory per output part.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Write the JSON manifest (design D4 shape) to this path.
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    /// Console rendering of the same manifest.
     #[arg(long, value_enum, default_value = "text")]
     pub out_format: SalvageOutFormatArg,
 }

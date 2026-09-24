@@ -39,12 +39,46 @@ pub mod read_sstable;
 // item that no longer exists.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod salvage;
+// `cqlite extract` / `cqlite split` (issue #4199, epic #4192) — same
+// write-support/tombstones dependency as `salvage` above (both are built on
+// `cqlite_core::storage::write_engine::extract_split`, which carries the
+// identical `not(tombstones)` gate `salvage` does — see that module's own
+// gate comment for the rationale).
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod extract;
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod split;
 pub mod verify;
 // Shared destructive-path write guard (issue #4196 round-23 F1/F4/F5;
 // promoted crate-wide by issue #4199 design D7 task 0.4/1) — `salvage`,
 // `extract`, and `split` all build their own `WriteGuard` from this one
 // resolve-then-check helper rather than each re-deriving it.
 pub(crate) mod write_guard;
+
+/// Derive a target table name from a table directory's own name (Cassandra's
+/// `<table>-<hex-id>` convention), for `extract`/`split` when `--table` is
+/// not given (issue #4199).
+///
+/// A deliberately SIMPLER subset of `salvage::discovery::table_name_from_input`
+/// (no `snapshots/<tag>` walk-up) — `extract`/`split` operate on an already-
+/// identified table directory, not salvage's broader input-discovery surface,
+/// so the snapshot layer is out of scope here; an operator whose layout needs
+/// it can always name `--table` explicitly.
+pub(crate) fn table_name_from_dir(input: &std::path::Path) -> Option<String> {
+    let dir_name = if input.is_dir() {
+        input.file_name()?.to_str()?
+    } else {
+        input.parent()?.file_name()?.to_str()?
+    };
+    match dir_name.rsplit_once('-') {
+        Some((table_name, id))
+            if id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            Some(table_name.to_string())
+        }
+        _ => Some(dir_name.to_string()),
+    }
+}
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).
 pub mod benchmark_sstable;
@@ -113,6 +147,52 @@ pub async fn dispatch_salvage(
             "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
              the salvage module cannot be built against, roborev issue #4196 round-7). Build \
              with --features write-support (and without --features tombstones) to enable salvage."
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Dispatch `cqlite extract` (issue #4199), or the informative "not built"
+/// error, mirroring [`dispatch_salvage`]'s established pattern.
+pub async fn dispatch_extract(
+    schema: Option<&std::path::Path>,
+    args: &crate::cli_types::ExtractArgs,
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    {
+        extract::execute_extract_command(schema, args).await;
+        Ok(())
+    }
+    #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
+    {
+        let _ = (schema, args);
+        eprintln!(
+            "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
+             the extract module cannot be built against). Build with --features write-support \
+             (and without --features tombstones) to enable extract."
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Dispatch `cqlite split` (issue #4199), or the informative "not built"
+/// error, mirroring [`dispatch_salvage`]'s established pattern.
+pub async fn dispatch_split(
+    schema: Option<&std::path::Path>,
+    args: &crate::cli_types::SplitArgs,
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    {
+        split::execute_split_command(schema, args).await;
+        Ok(())
+    }
+    #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
+    {
+        let _ = (schema, args);
+        eprintln!(
+            "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
+             the split module cannot be built against). Build with --features write-support \
+             (and without --features tombstones) to enable split."
         );
         std::process::exit(1);
     }

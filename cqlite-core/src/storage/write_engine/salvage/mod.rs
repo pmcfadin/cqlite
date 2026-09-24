@@ -11,7 +11,7 @@
 //! never a prefix, because a later row in that partition can carry a
 //! tombstone that shadows the earlier ones salvage already decoded.
 
-mod boundaries;
+pub(crate) mod boundaries;
 mod chunks;
 mod effective_schema;
 mod recover;
