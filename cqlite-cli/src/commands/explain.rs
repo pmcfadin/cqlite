@@ -5,6 +5,11 @@
 //! SSTable. That keeps forensic output tied to the same schema-aware merge
 //! rules as a read while making the command useful against a directory that is
 //! otherwise not a configured CQLite database.
+//!
+//! `explain` NEVER writes a file (`openspec/changes/forensics-explain/proposal.md`
+//! Non-goals: "Any write. `explain` never creates, modifies or compacts a
+//! file") — it always renders to stdout and, like `verify`, does not accept
+//! the global `--output`/`--overwrite` file-write flags at all.
 
 use crate::cli::OutputFormat;
 #[cfg(feature = "write-support")]
@@ -25,8 +30,6 @@ pub async fn execute_explain_command(
     clustering: &[String],
     now: Option<&str>,
     out: OutputFormat,
-    output_path: Option<&Path>,
-    overwrite: bool,
     config: &Config,
 ) -> Result<()> {
     #[cfg(feature = "write-support")]
@@ -43,28 +46,11 @@ pub async fn execute_explain_command(
             config,
         ) {
             Ok(rendered) => {
-                if let Some(path) = output_path {
-                    if path.exists() && !overwrite {
-                        print_failure(
-                            ExplainFailure::Usage(format!(
-                                "output file {} already exists; pass --overwrite to replace it",
-                                path.display()
-                            )),
-                            1,
-                        );
-                    }
-                    if let Err(error) = std::fs::write(path, rendered.as_bytes()) {
-                        print_failure(
-                            ExplainFailure::Read(format!(
-                                "could not write explain output {}: {error}",
-                                path.display()
-                            )),
-                            2,
-                        );
-                    }
-                } else {
-                    print!("{rendered}");
-                }
+                // Always stdout — explain never writes a file (Non-goals:
+                // "Any write. `explain` never creates, modifies or compacts
+                // a file"). Unlike `query`, it does not accept the global
+                // --output/--overwrite flags at all.
+                print!("{rendered}");
                 Ok(())
             }
             Err(error) => {
@@ -85,8 +71,6 @@ pub async fn execute_explain_command(
             clustering,
             now,
             out,
-            output_path,
-            overwrite,
             config,
         );
         eprintln!(
@@ -183,7 +167,10 @@ fn run_explain(
         &schema,
         &input_paths,
     );
-    let gc_before = compute_gc_before(&effective_schema, now_value.epoch_secs);
+    let gc_before = cqlite_core::storage::write_engine::merge::compute_gc_before(
+        &effective_schema,
+        now_value.epoch_secs,
+    );
     let sink = BudgetedTraceSink::new(config.performance.max_result_bytes);
     let merger =
         cqlite_core::storage::write_engine::merge::build_single_partition_merger_with_trace(
@@ -540,19 +527,6 @@ fn gc_grace_seconds(schema: &cqlite_core::schema::TableSchema) -> i64 {
         .and_then(|value| value.trim().parse::<i64>().ok())
         .filter(|value| *value >= 0)
         .unwrap_or(864_000)
-}
-
-#[cfg(feature = "write-support")]
-fn compute_gc_before(schema: &cqlite_core::schema::TableSchema, now: i64) -> Option<i64> {
-    match schema.comments.get("gc_grace_seconds") {
-        None => Some(now - 864_000),
-        Some(grace) => grace
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .filter(|grace| *grace >= 0)
-            .map(|grace| now - grace),
-    }
 }
 
 #[cfg(feature = "write-support")]

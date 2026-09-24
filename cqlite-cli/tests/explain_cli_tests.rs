@@ -445,3 +445,36 @@ fn explain_never_mutates_the_input_directory() {
         "explain must not modify the SSTable directory it reads, in any output format"
     );
 }
+
+/// R8 / Non-goals ("Any write. `explain` never creates, modifies or compacts
+/// a file"): the global `--output <path>` flag (used by `query` to write
+/// results to a file) is silently ignored by `explain` — the named path is
+/// never created, and the rendered report still goes to stdout. This is the
+/// same convention `verify` follows: a read-only verb does not accept the
+/// global write-target flags at all.
+#[test]
+fn explain_ignores_the_global_output_flag_and_never_creates_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let would_be_output = temp.path().join("should-never-exist.txt");
+
+    let mut command = explain_command();
+    let output = command
+        .args(["--output", would_be_output.to_str().expect("utf-8 path")])
+        .output()
+        .expect("explain process starts");
+
+    assert!(
+        output.status.success(),
+        "explain must still succeed with a global --output flag present: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !would_be_output.exists(),
+        "explain must never create the file named by the global --output flag"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert!(
+        stdout.starts_with("now="),
+        "the rendered report must still go to stdout, got: {stdout}"
+    );
+}

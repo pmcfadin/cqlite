@@ -71,6 +71,10 @@ fn discover_generations_newest_first(dir: &Path) -> Vec<PathBuf> {
     found.into_iter().map(|(_, path)| path).collect()
 }
 
+/// Unconditionally fail-closed generation-dir resolution (#3220) — for
+/// `test_explain`, whose fixtures (including the `*-Data.db` binaries) are
+/// FULLY git-committed, so absence is always a test-data defect, never a
+/// legitimate "dataset not fetched" state.
 fn generation_dir(keyspace: &str, table: &str) -> PathBuf {
     let root = datasets_root::sstables_root_for_table(keyspace, table)
         .unwrap_or_else(|| panic!("{}", datasets_root::describe_search(keyspace, table)));
@@ -78,6 +82,45 @@ fn generation_dir(keyspace: &str, table: &str) -> PathBuf {
         .into_iter()
         .next()
         .unwrap_or_else(|| panic!("no usable {keyspace}.{table} generation dir"))
+}
+
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value. In strict
+/// mode (the full gate's default), a `test_tomb` fixture that would otherwise
+/// SKIP because its binaries are unfetched must PANIC instead, so a CI gate
+/// cannot false-pass on missing data (issue #972).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// SKIP-clean (or, under `CQLITE_REQUIRE_FIXTURES=1`, PANIC-naming-the-table)
+/// generation-dir resolution for the `test_tomb` fixtures this file uses.
+/// Unlike `generation_dir` above (`test_explain`, fully committed), `test_tomb`'s
+/// `*-Data.db` binaries are NOT git-committed — `test-data/datasets/sstables/test_tomb`
+/// ships only `.jsonl`/`.txt` sidecars — so an unfetched dataset root on a fresh
+/// checkout or CI run without `fetch-datasets.sh` is a legitimate absence, not
+/// a defect (issue #4193 review finding; precedent:
+/// `issue_1014_resurrection_safety_parity.rs::require_fixture`). Every caller
+/// asserts PER CASE (#3220) — never behind a suite-wide `assert!(ran > 0)`.
+fn skip_clean_generation_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
+    let dir = datasets_root::sstables_root_for_table(keyspace, table).and_then(|root| {
+        datasets_root::table_generation_dirs(&root, keyspace, table)
+            .into_iter()
+            .next()
+    });
+    if dir.is_none() {
+        let reason = datasets_root::describe_search(keyspace, table);
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but {keyspace}.{table} fixture is absent — {reason}; \
+                 fetch it (bash test-data/scripts/fetch-datasets.sh)"
+            );
+        }
+        eprintln!("[skip] {keyspace}.{table}: {reason}");
+    }
+    dir
 }
 
 /// Drive a full-scan merger (`KWayMerger::new_with_gc`, never the point-read
@@ -131,8 +174,12 @@ fn drive_full_scan_traced(
 
 /// Assert traced == untraced for one table, and that the trail is non-empty
 /// (R3.1: "an empty trail on a table with rows FAILs — no vacuous pass").
+/// SKIPs cleanly (see `skip_clean_generation_dir`) when the `test_tomb`
+/// fixture's binaries are not fetched, unless `CQLITE_REQUIRE_FIXTURES=1`.
 fn assert_traced_equals_untraced(keyspace: &str, table: &str) {
-    let dir = generation_dir(keyspace, table);
+    let Some(dir) = skip_clean_generation_dir(keyspace, table) else {
+        return;
+    };
     let schema = load_table_schema(
         &datasets_root::schema_path("tombstone-parity.cql")
             .expect("committed test-data/schemas/tombstone-parity.cql fixture"),
@@ -267,7 +314,9 @@ fn traced_equals_untraced_trace_decisions() {
 /// committed fixture is never mutated.
 #[test]
 fn truncated_statistics_fails_closed_before_any_trace() {
-    let dir = generation_dir("test_tomb", "dropped_regular_col");
+    let Some(dir) = skip_clean_generation_dir("test_tomb", "dropped_regular_col") else {
+        return;
+    };
     let temp = tempfile::tempdir().expect("tempdir");
     let staged = temp.path().join("staged");
     std::fs::create_dir_all(&staged).expect("create staged dir");

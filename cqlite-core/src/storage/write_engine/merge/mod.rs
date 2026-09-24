@@ -1266,7 +1266,7 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
 /// NEGATIVE — which DISABLES purging (a strict no-op): garbage metadata must
 /// never cause data to be dropped.
 #[cfg(feature = "write-support")]
-pub(crate) fn compute_gc_before(schema: &TableSchema, now_secs: i64) -> Option<i64> {
+pub fn compute_gc_before(schema: &TableSchema, now_secs: i64) -> Option<i64> {
     /// Cassandra's `TableParams.DEFAULT_GC_GRACE_SECONDS` (10 days).
     const DEFAULT_GC_GRACE_SECONDS: i64 = 864_000;
 
@@ -2450,6 +2450,7 @@ impl<S: TraceSink> KWayMerger<S> {
                     &self.schema,
                     trace_metadata.winner_runs.as_ref(),
                     range_source_runs.as_deref(),
+                    effective_gc_before,
                     &mut self.trace,
                 ) {
                     // Issue #1072: apply the partition deletion as the OUTERMOST
@@ -2463,6 +2464,7 @@ impl<S: TraceSink> KWayMerger<S> {
                         max_partition_deletion,
                         trace_metadata.winner_runs.as_ref(),
                         partition_delete_run_index,
+                        effective_gc_before,
                         &mut self.trace,
                     ) {
                         reconcile_cluster::trace_entry_winners(
@@ -2670,16 +2672,28 @@ impl<S: TraceSink> KWayMerger<S> {
         max_partition_deletion: Option<(i64, i32)>,
     ) -> Option<MergeEntry> {
         let mut sink = NoTrace;
-        Self::apply_partition_shadowing_traced(entry, max_partition_deletion, None, None, &mut sink)
+        // `gc_before_secs: None` is inert here — `NoTrace::ENABLED` is
+        // `false`, so the `T::ENABLED` guard below skips the trace call
+        // (and hence the `droppable_at_now` computation) entirely.
+        Self::apply_partition_shadowing_traced(
+            entry,
+            max_partition_deletion,
+            None,
+            None,
+            None,
+            &mut sink,
+        )
     }
 
     /// Trace-enabled partition-floor shadowing.  The no-trace wrapper above is
     /// retained for the existing streaming and unit-test callers.
+    #[allow(clippy::too_many_arguments)]
     fn apply_partition_shadowing_traced<T: TraceSink>(
         entry: MergeEntry,
         max_partition_deletion: Option<(i64, i32)>,
         winner_runs: Option<&std::collections::HashMap<reconcile::CellKey, usize>>,
         partition_source_run: Option<usize>,
+        gc_before_secs: Option<i64>,
         trace: &mut T,
     ) -> Option<MergeEntry> {
         let Some((pmfda, partition_ldt)) = max_partition_deletion else {
@@ -2715,6 +2729,7 @@ impl<S: TraceSink> KWayMerger<S> {
                         partition_source_run.unwrap_or(entry.run_index),
                         pmfda,
                         partition_ldt,
+                        reconcile_cluster::droppable_at_now(gc_before_secs, partition_ldt),
                     );
                 }
             }

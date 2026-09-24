@@ -130,6 +130,44 @@ fn trace_decisions_schema() -> TableSchema {
     load_table_schema(&schema_path, "test_explain", "trace_decisions")
 }
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value. In strict
+/// mode (the full gate's default), a `test_tomb` fixture that would otherwise
+/// SKIP because its binaries are unfetched must PANIC instead, so a CI gate
+/// cannot false-pass on missing data (issue #972).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// SKIP-clean (or, under `CQLITE_REQUIRE_FIXTURES=1`, PANIC-naming-the-table)
+/// generation-dir resolution for the `test_tomb` fixture this file's
+/// `dropped-column` case uses. Unlike `trace_decisions_generation_dir` above
+/// (`test_explain`, fully git-committed including `*-Data.db`), `test_tomb`'s
+/// binaries are NOT committed — `test-data/datasets/sstables/test_tomb` ships
+/// only `.jsonl`/`.txt` sidecars — so an unfetched dataset root is a
+/// legitimate absence, not a test-data defect (issue #4193 review finding;
+/// precedent: `issue_1014_resurrection_safety_parity.rs::require_fixture`).
+fn skip_clean_generation_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
+    let dir = datasets_root::sstables_root_for_table(keyspace, table).and_then(|root| {
+        datasets_root::table_generation_dirs(&root, keyspace, table)
+            .into_iter()
+            .next()
+    });
+    if dir.is_none() {
+        let reason = datasets_root::describe_search(keyspace, table);
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but {keyspace}.{table} fixture is absent — {reason}; \
+                 fetch it (bash test-data/scripts/fetch-datasets.sh)"
+            );
+        }
+        eprintln!("[skip] {keyspace}.{table}: {reason}");
+    }
+    dir
+}
+
 /// Drive a traced FULL-COMPACTION merge (design.md §D3: every generation,
 /// `with_now_secs`/`with_gc_before_secs`/`with_purge_safe(true)`) over
 /// `test_explain.trace_decisions` for partition key `id` at `now`, and return
@@ -402,6 +440,76 @@ fn verdict_shadowed_by_tombstone_partition() {
     assert!(!partition_tombstone.droppable_at_now);
 }
 
+/// `now` far enough past `GEN_B_LDT + GC_GRACE_SECONDS` that a tombstone with
+/// local_deletion_time == GEN_B_LDT is genuinely droppable. Every
+/// `assert!(!droppable_at_now)` above is pinned at `NOW_ORDINARY` (inside
+/// gc_grace, per design.md §D6), where `droppable_at_now == false` regardless
+/// of whether the code even LOOKS at `now` — so this constant exists to make
+/// those assertions load-bearing: it is used below to prove `droppable_at_now`
+/// genuinely flips to `true` once gc_grace has elapsed (issue #4193 review
+/// finding — `trace_entry_shadowed` previously hardcoded `false`
+/// unconditionally, which every `NOW_ORDINARY` case above could not catch).
+const NOW_PAST_GC_GRACE: i64 = GEN_B_LDT as i64 + GC_GRACE_SECONDS + 1;
+
+// ===========================================================================
+// Row / range / partition tombstones ARE droppable once gc_grace has elapsed.
+// Reuses partitions 2 (row), 3 (range) and 5 (partition) at `NOW_PAST_GC_GRACE`
+// instead of `NOW_ORDINARY` — same fixtures, same tombstones, only `now`
+// differs — so a regression that hardcodes `droppable_at_now: false` (or
+// otherwise stops consulting `gc_before`) fails this test even though every
+// `NOW_ORDINARY` assertion above stays green.
+// ===========================================================================
+
+#[test]
+fn verdict_row_tombstone_is_droppable_once_gc_grace_has_elapsed() {
+    let (cells, tombstones) = explain_partition(2, NOW_PAST_GC_GRACE);
+    let loser = only_cell(&cells, "v", 1, 1);
+    match &loser.decided_by {
+        DecidedBy::Tombstone {
+            droppable_at_now, ..
+        } => assert!(
+            *droppable_at_now,
+            "past gc_grace at now={NOW_PAST_GC_GRACE}, must be droppable"
+        ),
+        other => panic!("expected DecidedBy::Tombstone, got {other:?}"),
+    }
+    let row_tombstone = tombstones
+        .iter()
+        .find(|t| t.kind == TombstoneKind::Row && t.run_index == 0)
+        .unwrap_or_else(|| panic!("expected a row tombstone record, got {tombstones:?}"));
+    assert!(row_tombstone.droppable_at_now);
+}
+
+#[test]
+fn verdict_range_tombstone_is_droppable_once_gc_grace_has_elapsed() {
+    let (_cells, tombstones) = explain_partition(3, NOW_PAST_GC_GRACE);
+    let range_tombstone = tombstones
+        .iter()
+        .find(|t| t.kind == TombstoneKind::Range)
+        .unwrap_or_else(|| panic!("expected a range tombstone record, got {tombstones:?}"));
+    assert!(range_tombstone.droppable_at_now);
+}
+
+#[test]
+fn verdict_partition_tombstone_is_droppable_once_gc_grace_has_elapsed() {
+    let (cells, tombstones) = explain_partition(5, NOW_PAST_GC_GRACE);
+    let loser = only_cell(&cells, "v", 1, 1);
+    match &loser.decided_by {
+        DecidedBy::Tombstone {
+            droppable_at_now, ..
+        } => assert!(
+            *droppable_at_now,
+            "past gc_grace at now={NOW_PAST_GC_GRACE}, must be droppable"
+        ),
+        other => panic!("expected DecidedBy::Tombstone, got {other:?}"),
+    }
+    let partition_tombstone = tombstones
+        .iter()
+        .find(|t| t.kind == TombstoneKind::Partition)
+        .unwrap_or_else(|| panic!("expected a partition tombstone record, got {tombstones:?}"));
+    assert!(partition_tombstone.droppable_at_now);
+}
+
 // ===========================================================================
 // Partition 6 (id=6): shadowed-by-tombstone{collection}.
 // A full-map overwrite (`UPDATE ... SET m={'new':2}`) writes a COMPLEX
@@ -586,17 +694,9 @@ fn verdict_dropped_column() {
         .dropped_columns
         .insert("drop_col".to_string(), T_GEN2_MICROS);
 
-    let root = datasets_root::sstables_root_for_table("test_tomb", "dropped_regular_col")
-        .unwrap_or_else(|| {
-            panic!(
-                "{}",
-                datasets_root::describe_search("test_tomb", "dropped_regular_col")
-            )
-        });
-    let dir = datasets_root::table_generation_dirs(&root, "test_tomb", "dropped_regular_col")
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("no usable test_tomb.dropped_regular_col generation dir"));
+    let Some(dir) = skip_clean_generation_dir("test_tomb", "dropped_regular_col") else {
+        return;
+    };
     let paths = discover_generations_newest_first(&dir);
     assert_eq!(paths.len(), 2, "expected two generations under {dir:?}");
 

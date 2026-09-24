@@ -61,6 +61,7 @@ pub(super) fn trace_entry_winners<T: TraceSink>(
 }
 
 /// Emit cells removed by a range or partition floor.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn trace_entry_shadowed<T: TraceSink>(
     entry: &MergeEntry,
     cells: &[CellData],
@@ -70,6 +71,7 @@ pub(super) fn trace_entry_shadowed<T: TraceSink>(
     run_index: usize,
     deletion_time: i64,
     local_deletion_time: i32,
+    droppable_at_now: bool,
 ) {
     if !T::ENABLED {
         return;
@@ -93,10 +95,20 @@ pub(super) fn trace_entry_shadowed<T: TraceSink>(
                 run_index,
                 deletion_time,
                 local_deletion_time,
-                droppable_at_now: false,
+                droppable_at_now,
             },
         });
     }
+}
+
+/// Issue #4193 review finding: `droppable_at_now` must be derived from the
+/// SAME `gc_before` comparison every other tombstone record in this module
+/// uses (`ReconcileState::tombstone_droppable`, and the partition/range
+/// TombstoneRecord emission in `merge/mod.rs::merge_partition_rows`) — never
+/// hardcoded, or the CellDecision half of a shadowed-cell report would
+/// contradict the TombstoneRecord half emitted for the SAME marker.
+pub(super) fn droppable_at_now(gc_before_secs: Option<i64>, local_deletion_time: i32) -> bool {
+    gc_before_secs.is_some_and(|gc| i64::from(local_deletion_time as u32) < gc)
 }
 
 impl<S: TraceSink> KWayMerger<S> {
@@ -118,17 +130,30 @@ impl<S: TraceSink> KWayMerger<S> {
         schema: &TableSchema,
     ) -> Option<MergeEntry> {
         let mut sink = NoTrace;
-        Self::apply_range_shadowing_traced(entry, range_tombstones, schema, None, None, &mut sink)
+        // `gc_before_secs: None` is inert here — `NoTrace::ENABLED` is
+        // `false`, so `trace_entry_shadowed` returns before ever consulting
+        // it (see the `!T::ENABLED` guard).
+        Self::apply_range_shadowing_traced(
+            entry,
+            range_tombstones,
+            schema,
+            None,
+            None,
+            None,
+            &mut sink,
+        )
     }
 
     /// Trace-enabled range shadowing entry point. The no-trace wrapper above is
     /// retained for the existing streaming and unit-test callers.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_range_shadowing_traced<T: TraceSink>(
         entry: MergeEntry,
         range_tombstones: &[(DecoratedKey, RangeTombstone)],
         schema: &TableSchema,
         winner_runs: Option<&HashMap<reconcile::CellKey, usize>>,
         range_source_runs: Option<&[Option<usize>]>,
+        gc_before_secs: Option<i64>,
         trace: &mut T,
     ) -> Option<MergeEntry> {
         // Fast path for the overwhelmingly common partition with no range
@@ -165,7 +190,15 @@ impl<S: TraceSink> KWayMerger<S> {
             }
             _ => false,
         };
-        let floor = if single_partition {
+        // Carry the MATCHED range's own index alongside `floor`, rather than
+        // re-finding a covering range afterwards by `deletion_time == floor`
+        // (issue #4193 review finding): `coalesce_partition_range_tombstones`
+        // only merges ADJACENT same-deletion segments, so two non-adjacent
+        // segments in this partition can legitimately share a
+        // `deletion_time` — re-finding by timestamp alone could then name
+        // the WRONG segment's `local_deletion_time` and, via
+        // `range_source_runs.get(range_index)`, the wrong source generation.
+        let floor_with_index: Option<(usize, i64)> = if single_partition {
             // First range whose end is NOT before `ck` — the unique candidate that
             // can contain `ck` (disjoint + sorted). Verify full containment (both
             // bounds) via the authoritative `range_tombstone_covers_ck`.
@@ -173,30 +206,25 @@ impl<S: TraceSink> KWayMerger<S> {
                 .partition_point(|(_, rt)| Self::range_end_before_ck(&ck, rt, schema));
             range_tombstones.get(idx).and_then(|(key, rt)| {
                 (key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema))
-                    .then_some(rt.deletion_time)
+                    .then_some((idx, rt.deletion_time))
             })
         } else {
             // Exact pre-#1669 behavior for any non-single-partition slice.
             range_tombstones
                 .iter()
-                .filter(|(key, rt)| {
+                .enumerate()
+                .filter(|(_, (key, rt))| {
                     key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema)
                 })
-                .map(|(_, rt)| rt.deletion_time)
-                .max()
+                .max_by_key(|(_, (_, rt))| rt.deletion_time)
+                .map(|(idx, (_, rt))| (idx, rt.deletion_time))
         };
-        let Some(floor) = floor else {
+        let Some((range_index, floor)) = floor_with_index else {
             return Some(entry);
         };
 
-        // `floor` was computed by the authoritative containment check above;
-        // recover its marker without a second coverage comparison (the latter
-        // is counted by the range-search work-counter tests).
-        let covering_range = range_tombstones
-            .iter()
-            .enumerate()
-            .find(|(_, (key, rt))| key.key == entry.key.key && rt.deletion_time == floor);
-        if let Some((range_index, (_, range))) = covering_range {
+        {
+            let range = &range_tombstones[range_index].1;
             if T::ENABLED {
                 let ck_names: std::collections::HashSet<&str> =
                     ck.columns.iter().map(|(name, _)| name.as_str()).collect();
@@ -221,6 +249,7 @@ impl<S: TraceSink> KWayMerger<S> {
                         .unwrap_or(entry.run_index),
                     range.deletion_time,
                     range.local_deletion_time,
+                    droppable_at_now(gc_before_secs, range.local_deletion_time),
                 );
             }
         }

@@ -128,6 +128,11 @@ async fn run_main() -> Result<()> {
             Some(OutputMode::Parquet) => cli::OutputFormat::Parquet,
             None => cli.format,
         });
+        // explain is read-only (openspec/changes/forensics-explain/proposal.md
+        // Non-goals: "Any write. `explain` never creates, modifies or
+        // compacts a file") and, like `verify` above, never wires the
+        // global --output/--overwrite file-write flags through — it always
+        // renders to stdout regardless of whether either global is set.
         return commands::explain::execute_explain_command(
             cli.schema.as_deref(),
             cli.data_dir.as_deref(),
@@ -137,8 +142,6 @@ async fn run_main() -> Result<()> {
             clustering,
             now.as_deref(),
             effective_format,
-            cli.output.as_deref(),
-            cli.overwrite,
             &config,
         )
         .await;
