@@ -30,6 +30,8 @@ pub async fn execute_read_commitlog_command(
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
+    // Keep async for uniform CLI dispatch. This handler uses the synchronous
+    // CommitLog reader and performs synchronous file I/O and rendering.
     // Decorative status to stderr so a redirected stdout stays machine-readable
     // (matches the read-sstable stdout/stderr contract).
     let show_status = !quiet && std::io::stderr().is_terminal();
@@ -58,6 +60,7 @@ struct UpdateView {
     table_id: String,
     partition_key_hex: String,
     columns: Vec<String>,
+    columns_read: bool,
     rows_decoded: bool,
     row_count: usize,
     has_partition_deletion: bool,
@@ -72,16 +75,19 @@ struct UpdateView {
 /// roborev rounds of new fields — switched to a named struct.
 struct Collected {
     views: Vec<UpdateView>,
+    /// Mutation records yielded by the reader, including a final record whose
+    /// updates were clipped by the CLI view limit.
     mutation_count: usize,
     truncated: bool,
     errored: bool,
     limited: bool,
-    /// `false` if ANY mutation in the stream had `updates_complete == false`
-    /// — i.e. a batch mutation whose partition updates were only partially
-    /// reported (the common case for the no-schema CLI path: a multi-table
-    /// batch previously reported only its first update with no signal that
-    /// more existed) (roborev finding, review-first pass).
+    /// Whether every update in each visited mutation is represented in `views`.
+    /// False if decoding omitted updates or the CLI limit clipped the final
+    /// mutation. When `limited` is true, this says nothing about unread records.
     all_updates_complete: bool,
+    /// True when the CLI limit stopped after only some decoded updates from the
+    /// final counted mutation. `mutation_count` still includes that record.
+    last_mutation_partial: bool,
 }
 
 fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
@@ -97,6 +103,7 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
             errored: false,
             limited: true,
             all_updates_complete: true,
+            last_mutation_partial: false,
         };
     }
     let mut views = Vec::new();
@@ -104,6 +111,7 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
     let mut errored = false;
     let mut limited = false;
     let mut all_updates_complete = true;
+    let mut last_mutation_partial = false;
     let mut it = reader.mutations();
     for res in it.by_ref() {
         match res {
@@ -112,24 +120,26 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
                 if !mutation.updates_complete {
                     all_updates_complete = false;
                 }
-                for upd in &mutation.updates {
+                for (update_index, upd) in mutation.updates.iter().enumerate() {
                     views.push(UpdateView {
                         table_id: upd.table_id_uuid(),
                         partition_key_hex: hex(&upd.partition_key),
                         columns: upd.column_names.clone(),
+                        columns_read: upd.columns_read,
                         rows_decoded: upd.rows_decoded,
                         row_count: upd.rows.len(),
                         has_partition_deletion: upd.has_partition_deletion,
                     });
-                    // Also bound emitted view rows by `limit`, not just the
-                    // mutation count: a single mutation can carry many
-                    // updates, and this CLI is the memory-bounded surface the
-                    // streaming design is meant to protect — `--limit 1`
-                    // must not still materialize thousands of rows from one
-                    // mutation (roborev finding, review-first pass).
+                    // Cap retained output views when one decoded mutation has
+                    // many updates. The reader has already materialized this
+                    // record's updates, so this is not a parser-memory bound.
                     if let Some(n) = limit {
                         if views.len() >= n {
                             limited = true;
+                            if update_index + 1 < mutation.updates.len() {
+                                last_mutation_partial = true;
+                                all_updates_complete = false;
+                            }
                             break;
                         }
                     }
@@ -146,11 +156,9 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
             break;
         }
         if let Some(n) = limit {
-            // Stop on whichever bound is hit first: mutation_count (the
-            // documented meaning of --limit) or views.len() (the actual
-            // memory/display bound the inner break above enforces per
-            // mutation — without this, a later mutation could still push
-            // views past n even after an earlier one was capped).
+            // Stop after the record-count bound too. The reader decodes a
+            // requested record before returning it, so this limits later
+            // records and retained views, not allocations inside this record.
             if mutation_count >= n || views.len() >= n {
                 limited = true;
                 break;
@@ -164,6 +172,7 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
         errored,
         limited,
         all_updates_complete,
+        last_mutation_partial,
     }
 }
 
@@ -188,11 +197,10 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
         println!("  note:        stream ended on a corrupt record (typed decode error)");
     }
     if !c.all_updates_complete {
-        println!(
-            "  note:        at least one mutation's partition updates were only \
-             partially reported (no schema, or an unmodeled construct — see \
-             --format json for per-update rows_decoded)"
-        );
+        println!("  note:        not all partition updates are present in the output");
+    }
+    if c.last_mutation_partial {
+        println!("  note:        --limit stopped partway through the final mutation");
     }
     println!();
 
@@ -201,7 +209,11 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
         if v.has_partition_deletion {
             println!("    partition-deletion");
         }
-        if !v.columns.is_empty() {
+        if !v.columns_read {
+            println!("    columns: unknown (not read)");
+        } else if v.columns.is_empty() {
+            println!("    columns: (empty)");
+        } else {
             println!("    columns: {}", v.columns.join(", "));
         }
         println!(
@@ -236,6 +248,7 @@ fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
                 "table_id": v.table_id,
                 "partition_key_hex": v.partition_key_hex,
                 "columns": v.columns,
+                "columns_read": v.columns_read,
                 "rows_decoded": v.rows_decoded,
                 "row_count": v.row_count,
                 "has_partition_deletion": v.has_partition_deletion,
@@ -265,11 +278,11 @@ fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
         "truncated": truncated_json,
         "decode_error": decode_error_json,
         "limited": c.limited,
-        // false when at least one mutation's partition updates were only
-        // partially reported (no schema, or an unmodeled construct) — the
-        // common no-schema CLI path with a multi-table batch mutation
-        // (roborev finding, review-first pass).
+        // False when decoding omitted updates or the CLI limit clipped the
+        // final visited mutation. A limited walk says nothing about unread
+        // records in the segment.
         "all_updates_complete": c.all_updates_complete,
+        "last_mutation_partial": c.last_mutation_partial,
         "updates": updates,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);

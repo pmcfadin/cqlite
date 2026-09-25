@@ -20,12 +20,15 @@
 //!   int32 bodyCrc      CRC32 continuing over size bytes ++ body bytes
 //! ```
 //!
-//! **Truncation vs corruption.** A record or marker whose bytes are *missing*
-//! (extend past end-of-file) is a torn tail — tolerated: prior records are kept
-//! and the walk stops with [`FrameStep::Truncated`]. A record that is *fully
-//! present* but whose CRC does not match is genuine corruption — surfaced as
-//! [`Error::CorruptCommitLogFrame`]. This mirrors Cassandra's
-//! `CommitLogReader` `tolerateTruncation` behavior.
+//! **Truncation vs corruption.** Missing record or marker bytes, a nonzero
+//! marker with a bad CRC, and a valid forward marker beyond end-of-file are
+//! treated as a torn tail: prior records are kept and the walk stops with
+//! [`FrameStep::Truncated`]. A fully present record with a bad CRC, or a
+//! valid-CRC marker with a negative or backward next-marker offset, is
+//! corruption and returns [`Error::CorruptCommitLogFrame`]. Zeroed preallocated
+//! space is a clean end. This mirrors Cassandra's `CommitLogReader`
+//! `tolerateTruncation` behavior without accepting structurally invalid
+//! backward pointers.
 
 use crate::{Error, Result};
 
@@ -92,7 +95,9 @@ impl<'a> FrameWalker<'a> {
     ///
     /// # Errors
     /// [`Error::CorruptCommitLogFrame`] when a fully-present record fails its
-    /// size/body CRC, or a marker is internally inconsistent.
+    /// size/body CRC, its framing overruns a section, or a valid-CRC sync marker
+    /// has a negative or backward next-marker offset. Invalid marker CRCs and
+    /// forward markers past EOF are reported as [`FrameStep::Truncated`].
     pub fn next_frame(&mut self) -> Result<FrameStep<'a>> {
         if self.done {
             return Ok(FrameStep::End);
@@ -160,26 +165,44 @@ impl<'a> FrameWalker<'a> {
             self.truncated_end |= pos < self.bytes.len();
             return Ok(None);
         }
-        let next_marker = read_i32_be(self.bytes, pos);
-        // Zeroed pre-allocation → clean end of the written region.
-        if next_marker == 0 {
-            self.truncated_end = false;
+        let marker = &self.bytes[pos..pos + SYNC_MARKER_SIZE];
+        // Only a fully zeroed marker is clean preallocated space. Do not clear
+        // truncated_end: once the walk has observed a torn tail, later padding
+        // cannot turn it back into a clean segment.
+        if marker.iter().all(|&byte| byte == 0) {
             return Ok(None);
         }
-        // Validate the marker CRC (id-low, id-high, markerPos).
+        let next_marker = read_i32_be(self.bytes, pos);
+        // A zero next-marker value with nonzero CRC bytes is not the zeroed
+        // preallocation sentinel; it must still pass CRC and pointer checks.
+        // This preserves the distinction between a torn marker and a valid-CRC
+        // backward pointer.
         let stored_crc = read_u32_be(self.bytes, pos + 4);
         let computed = marker_crc(self.segment_id, pos);
         if computed != stored_crc {
-            // An invalid marker over an all-zero region is the normal clean end;
-            // otherwise it is a torn/garbage marker (tolerate as truncation).
-            let all_zero = self.bytes[pos..pos + SYNC_MARKER_SIZE]
-                .iter()
-                .all(|&b| b == 0);
-            // `|=` for the same monotonicity reason as above.
-            self.truncated_end |= !all_zero;
+            // A complete, nonzero marker with a bad CRC is tolerated as a torn
+            // tail. It cannot make a previously observed truncation disappear.
+            self.truncated_end = true;
             return Ok(None);
         }
-        let next = next_marker as usize;
+        // The marker offset is signed on disk. Reject negative values before
+        // any conversion so they cannot wrap into a huge positive `usize` and
+        // masquerade as a torn forward section.
+        if next_marker < 0 {
+            return Err(Error::CorruptCommitLogFrame(format!(
+                "sync marker at offset {pos} has negative next-marker offset {next_marker}"
+            )));
+        }
+        // On targets where usize is narrower than i32, an unrepresentable
+        // positive offset is necessarily beyond this in-memory file and has
+        // the same torn-tail meaning as any other forward offset past EOF.
+        let next = match usize::try_from(next_marker) {
+            Ok(next) => next,
+            Err(_) => {
+                self.open_torn_section(pos);
+                return Ok(Some(()));
+            }
+        };
         // Marker is valid but points past EOF → the section body is torn. This
         // section necessarily runs to true end-of-file (nothing can follow a
         // marker that already overruns the buffer), so the walk is guaranteed
@@ -188,13 +211,15 @@ impl<'a> FrameWalker<'a> {
         // still inside this torn section doesn't get reported as a clean end
         // (roborev finding, review-first pass).
         if next > self.bytes.len() {
-            self.section_end = self.bytes.len();
-            self.cursor = pos + SYNC_MARKER_SIZE;
-            self.in_section = true;
-            self.truncated_end = true;
+            self.open_torn_section(pos);
             return Ok(Some(()));
         }
-        // A marker must point strictly forward past its own 8 bytes.
+        // A marker must point forward past its own 8 bytes. The CRC covers
+        // id/position, not next_marker; it cannot establish how a bad offset
+        // arose. Cassandra 5.0.8 CommitLogSegmentReader.readSyncMarker still
+        // classifies a backward offset with a matching CRC as corruption,
+        // including zero at a real (positive) marker position. Preserve that
+        // policy instead of guessing that the offset resulted from a torn write.
         if next < pos + SYNC_MARKER_SIZE {
             return Err(Error::CorruptCommitLogFrame(format!(
                 "sync marker at offset {pos} points backward to {next}"
@@ -204,6 +229,15 @@ impl<'a> FrameWalker<'a> {
         self.cursor = pos + SYNC_MARKER_SIZE;
         self.in_section = true;
         Ok(Some(()))
+    }
+
+    /// Continue reading the final section to EOF after a valid forward marker
+    /// points beyond the available bytes.
+    fn open_torn_section(&mut self, marker_pos: usize) {
+        self.section_end = self.bytes.len();
+        self.cursor = marker_pos + SYNC_MARKER_SIZE;
+        self.in_section = true;
+        self.truncated_end = true;
     }
 
     /// Read one record from within the open section.
@@ -426,5 +460,90 @@ mod tests {
                 "expected Truncated (torn section, record ends exactly at EOF), got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn negative_sync_offset_is_corruption() {
+        let mut buf = Vec::new();
+        push_marker(&mut buf, 0, -1);
+
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        assert!(matches!(
+            walker.next_frame(),
+            Err(Error::CorruptCommitLogFrame(_))
+        ));
+    }
+
+    #[test]
+    fn valid_backward_sync_offset_remains_corruption() {
+        let mut buf = Vec::new();
+        // This is nonnegative but still points inside its own marker.
+        push_marker(&mut buf, 0, 4);
+
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        assert!(matches!(
+            walker.next_frame(),
+            Err(Error::CorruptCommitLogFrame(_))
+        ));
+    }
+
+    #[test]
+    fn forward_sync_offset_past_eof_is_a_torn_tail() {
+        let mut buf = Vec::new();
+        push_marker(&mut buf, 0, 999_999);
+
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        assert!(matches!(walker.next_frame(), Ok(FrameStep::Truncated)));
+    }
+
+    #[test]
+    fn invalid_nonzero_sync_marker_crc_is_a_torn_tail() {
+        let mut buf = Vec::new();
+        push_marker(&mut buf, 0, 16);
+        buf[4] ^= 0x01;
+
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        assert!(matches!(walker.next_frame(), Ok(FrameStep::Truncated)));
+    }
+
+    #[test]
+    fn fully_zeroed_sync_marker_is_clean_end() {
+        let buf = [0u8; SYNC_MARKER_SIZE];
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        assert!(matches!(walker.next_frame(), Ok(FrameStep::End)));
+    }
+
+    #[test]
+    fn zero_next_marker_with_bad_crc_is_a_torn_tail() {
+        let mut buf = [0u8; SYNC_MARKER_SIZE];
+        buf[4..].copy_from_slice(&1u32.to_be_bytes());
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        assert!(matches!(walker.next_frame(), Ok(FrameStep::Truncated)));
+    }
+
+    #[test]
+    fn zero_next_marker_with_valid_crc_is_backward_corruption() {
+        let marker_pos = SYNC_MARKER_SIZE;
+        let mut buf = vec![0u8; marker_pos + SYNC_MARKER_SIZE];
+        let crc = marker_crc(SEGMENT_ID, marker_pos);
+        assert_ne!(
+            crc, 0,
+            "fixture CRC must distinguish the marker from zeroed space"
+        );
+        buf[marker_pos + 4..].copy_from_slice(&crc.to_be_bytes());
+
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, marker_pos);
+        assert!(matches!(
+            walker.next_frame(),
+            Err(Error::CorruptCommitLogFrame(_))
+        ));
+    }
+
+    #[test]
+    fn zeroed_sync_marker_does_not_clear_prior_truncation() {
+        let buf = [0u8; SYNC_MARKER_SIZE];
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        walker.truncated_end = true;
+        assert!(matches!(walker.next_frame(), Ok(FrameStep::Truncated)));
     }
 }
