@@ -39,6 +39,12 @@ pub mod read_sstable;
 // item that no longer exists.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod salvage;
+// `cqlite rebuild` (issue #4197): mirrors `salvage`'s own module-gating
+// rationale above — its core counterpart,
+// `cqlite_core::storage::write_engine::rebuild`, carries the identical
+// `all(write-support, not(tombstones))` gate.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod rebuild;
 pub mod verify;
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).
@@ -108,6 +114,31 @@ pub async fn dispatch_salvage(
             "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
              the salvage module cannot be built against, roborev issue #4196 round-7). Build \
              with --features write-support (and without --features tombstones) to enable salvage."
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Dispatch the `cqlite rebuild` verb (issue #4197), or the informative
+/// "not built" error when this binary was built without it. Mirrors
+/// [`dispatch_salvage`]'s pattern exactly (same underlying gate, same
+/// rationale).
+pub async fn dispatch_rebuild(
+    schema: Option<&std::path::Path>,
+    args: &crate::cli_types::RebuildArgs,
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    {
+        rebuild::execute_rebuild_command(schema, args).await;
+        Ok(())
+    }
+    #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
+    {
+        let _ = (schema, args);
+        eprintln!(
+            "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
+             the rebuild module cannot be built against, mirroring issue #4196 round-7). Build \
+             with --features write-support (and without --features tombstones) to enable rebuild."
         );
         std::process::exit(1);
     }

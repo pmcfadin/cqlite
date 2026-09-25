@@ -23797,6 +23797,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # `cqlite rebuild` no-resync-scan guard (issue #4197, spec R2.3): mirrors
+  # the salvage guard immediately above, scoped to
+  # `storage/write_engine/rebuild/`. Pure grep, no cargo/python3/network
+  # needed.
+  echo ">>> [$name] bash scripts/tests/test_rebuild_no_resync_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_rebuild_no_resync_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (rebuild no-resync-scan guard #4197); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -27451,7 +27467,17 @@ dispatch_component() {
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_effective_schema &&
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
-  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_output_input_contracts' ;;
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_output_input_contracts &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_byte_parity &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_index_parity &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_summary_classification &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_statistics_recompute &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_refusal' ;;
     cli-tests)
       # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
       # write-support) and a single-value annotation would be false for it — each pass

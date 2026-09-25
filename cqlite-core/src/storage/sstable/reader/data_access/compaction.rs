@@ -301,7 +301,20 @@ impl SSTableReader {
     ///
     /// The stitch/parse strategy mirrors [`Self::distinct_partition_keys`]; only
     /// the parser entry point differs (it threads the partition-start offset).
-    pub async fn distinct_partition_keys_with_positions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+    ///
+    /// `schema`, when supplied, takes priority over the reader's own
+    /// header-derived resolution (`get_table_schema`'s "Strategy 0"; issue
+    /// #4197). This matters whenever the reader's usual fallbacks cannot
+    /// resolve one on their own — e.g. `cqlite rebuild` walking boundaries
+    /// while the sibling `Statistics.db` (the source `get_table_schema`'s
+    /// header-derived Strategy 1 reads from at OPEN time) is itself the
+    /// component being regenerated, or is temporarily relocated for repair-
+    /// field recovery (spec R4.2). Every pre-existing caller passes `None`
+    /// and is unaffected.
+    pub async fn distinct_partition_keys_with_positions(
+        &self,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(u64, Vec<u8>)>> {
         let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use std::collections::HashSet;
 
@@ -313,7 +326,7 @@ impl SSTableReader {
         }
         let whole = self.stitch_all_chunks(&cursor).await?;
 
-        let effective_schema = self.get_table_schema(None);
+        let effective_schema = schema.cloned().or_else(|| self.get_table_schema(None));
         let parser = self.build_v5_parser(false);
 
         // `seen` dedups partition keys; the recorded position is the FIRST row's

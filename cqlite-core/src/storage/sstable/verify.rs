@@ -1630,7 +1630,7 @@ async fn full_row_scan_partitions(
     // BTI Partitions.db cross-check on healthy SSTables (issue #970). The reader
     // dedups at the partition boundary for both BIG (`nb`) and BTI (`da`); the
     // position lets the verifier resolve a BTI leaf's payload back to its raw key.
-    let partitions = reader.distinct_partition_keys_with_positions().await?;
+    let partitions = reader.distinct_partition_keys_with_positions(None).await?;
 
     Ok((rows, partitions))
 }
