@@ -16,6 +16,7 @@ import datetime as dt
 RES = Path(__file__).resolve().parents[2] / "docs/2024-09-meetup/results"
 MET = RES / "metrics"
 OUT = Path(__file__).resolve().parents[2] / "docs/2024-09-meetup/charts"
+OUT.mkdir(parents=True, exist_ok=True)
 
 C_CQL = "#3D6FB4"
 C_SHADE = "#3D6FB4"
@@ -76,7 +77,11 @@ fig.savefig(OUT / "rows-per-sec-sustained.png", dpi=170)
 plt.close(fig)
 print(f"wrote rows-per-sec-sustained.png  (median {med:,.0f}, peak in window {max(v for _,v in win):,.0f})")
 
-# ------------------------------------------------------- chart 2: per-pod, shows the fan-out gap
+# ------------------------------------------------------- chart 2: the one recorded series
+# rows_served_per_pod.csv's `series` column has exactly one distinct value in this export
+# ("cqlite-flight") -- the PromQL had no `by(pod)` grouping, so there is no db0/db1/db2
+# breakout to plot here, whatever the file name suggests. Do not title this as a measured
+# per-pod comparison.
 fig, ax = plt.subplots(figsize=(13.5, 5.2))
 pods = sorted({l.split(",")[1] for l in open(MET / "rows_served_per_pod.csv")
                if not l.startswith("unix_ts") and len(l.split(",")) >= 3})
@@ -90,7 +95,7 @@ for i, p in enumerate(pods):
 ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=dt.UTC))
 ax.set_ylabel("rows/sec served (millions)", fontsize=11)
 ax.set_xlabel("time (UTC)", fontsize=10)
-ax.set_title("Same window, per Flight pod: one pod carries it, two idle (issue #4175)",
+ax.set_title("Same window: the one recorded Flight series (no per-pod breakout in this export, issue #4175)",
              fontsize=14, fontweight="bold", pad=12)
 ax.legend(frameon=False, fontsize=10)
 ax.grid(axis="y", alpha=0.25, lw=0.6)
