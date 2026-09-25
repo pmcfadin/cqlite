@@ -247,7 +247,33 @@ strip = "none"
 [profile.dev]
 # Faster builds for development
 opt-level = 0
-debug = true
+# line-tables-only (not `true`/full DWARF): issue #4278 — measured on
+# astro-processor (Linux gate box), 94% of a dev/test binary's bytes are debug
+# sections (196 MB of 209 MB in one sampled `cqlite-core` test binary), and one
+# gate lane's `target/` reached 63-190 GB across its several feature-set
+# builds. Re-measured on macOS (this repo's dev laptop, cold `target/`, same
+# sha, `cargo test -p cqlite-core --features cli-helpers --test
+# issue_3928_corrupt_header_refusal --no-run`): wall-clock -30% (168s -> 118s),
+# `target/` -25% (2.0G -> 1.5G), the linked test binary itself near-unchanged
+# (macOS defaults to `split-debuginfo=unpacked` — DWARF lives in
+# `target/debug/deps/*.o`, not the final binary, unlike Linux's embedded DWARF
+# — those `.o` files themselves are -49%, 492M -> 251M). line-tables-only
+# keeps file:line in panic backtraces: verified directly with a standalone
+# `rustc -C debuginfo=line-tables-only` panic that still resolves both frames
+# to `file.rs:LINE` under `RUST_BACKTRACE=1` (binding-unwind-profile and
+# memory-budget are UNAFFECTED by this change — the former only checks
+# `[profile.release-unwind]`, the latter asserts dhat byte/allocation
+# budgets, neither exercises backtrace symbolication — re-verified PASS,
+# not evidence for the backtrace claim itself). Drops the full variable/type
+# debug info a dev/test binary does not need. `release`/`bench`/`perfsym`/
+# `perfprof` are untouched (profiling needs full symbols). Override locally
+# for a `cargo test` debugging session where you want full DWARF for BOTH
+# the test binary and the library it links (dependencies build under the
+# `dev` profile even under `cargo test`, so `CARGO_PROFILE_TEST_DEBUG=true`
+# alone restores it for the test file only):
+# `CARGO_PROFILE_DEV_DEBUG=true CARGO_PROFILE_TEST_DEBUG=true cargo test -p cqlite-core`
+# (documented in dev-cookbook.md).
+debug = "line-tables-only"
 rpath = false
 lto = false
 debug-assertions = true
@@ -259,7 +285,11 @@ overflow-checks = true
 [profile.test]
 # Optimized test builds
 opt-level = 1
-debug = true
+# [profile.test] inherits [profile.dev], but this block overrides `debug`
+# explicitly itself, so the value does NOT come along automatically — it must
+# be changed here too (issue #4278; see [profile.dev]'s comment for the full
+# rationale).
+debug = "line-tables-only"
 rpath = false
 lto = false
 debug-assertions = true

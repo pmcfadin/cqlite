@@ -297,8 +297,11 @@ markers and the WARN).
 ## mold linker accelerator — Linux only (issue #2859)
 
 Linking is the **one build cost sccache cannot cache**: every `--lite` round and
-full gate re-links every test binary from scratch (`debug = true`), so on a warm
-worker link time is a large slice of the remaining wall-clock. On Linux agent
+full gate re-links every test binary from scratch (`debug = "line-tables-only"`
+since issue #4278 — dev/test binaries carry far less debug info than the full
+DWARF this section originally measured against, so link time is smaller than it
+was, but still uncached), so on a warm worker link time is a large slice of the
+remaining wall-clock. On Linux agent
 workers `scripts/bootstrap-agent-machine.sh` provisions the **mold** linker and
 wires it through a delimited managed block in the **per-machine** `~/.cargo/config.toml`
 (honoring `$CARGO_HOME`) — it never touches the repo-committed `.cargo/config.toml`,
