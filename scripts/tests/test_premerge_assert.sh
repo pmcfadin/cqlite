@@ -1281,16 +1281,21 @@ delta_summary "$T/delta-anchor-nonhex.txt" "unverified"
 refused_pair "delta-anchor: non-hex -> refuse" \
   "$ANCHORFULL" "$T/delta-anchor-nonhex.txt" "is not lowercase hex"
 
-# --- Case 30: the fourth argument must BE a delta block ----------------------
+# --- Case 30: the fourth argument must BE a delta OR a recert block (#4268) --
+# Classification is by CONTENT (a bash read/case loop, no external `grep` --
+# see the shipped script's own comment on why: two ancestry fixtures further
+# down deliberately omit grep from PATH), so a FULL/LITE fourth argument now
+# refuses with a message naming BOTH shapes it could have been, not "ZERO delta
+# blocks" (stale wording from before #4268 added the second shape).
 refused_pair "a FULL summary passed as the fourth argument -> refuse" \
-  "$ANCHORFULL" "$GOOD" "holds ZERO delta blocks"
+  "$ANCHORFULL" "$GOOD" "is neither a DELTA nor a RECERT summary block"
 if [ "${OUT#*"found 1 full"}" != "$OUT" ]; then
-  ok "fourth-arg: refusal NAMES the full block it found instead of a delta one"
+  ok "fourth-arg: refusal NAMES the full block it found instead of a delta/recert one"
 else
   bad "fourth-arg: refusal should name what it found (got: $OUT)"
 fi
 refused_pair "a LITE summary passed as the fourth argument -> refuse" \
-  "$ANCHORFULL" "$T/lite-only.txt" "holds ZERO delta blocks"
+  "$ANCHORFULL" "$T/lite-only.txt" "is neither a DELTA nor a RECERT summary block"
 { delta_block; delta_block; } >"$T/two-deltas.txt"
 assert_count \
   "two-deltas fixture: the file really does hold TWO delta start markers" \
@@ -3939,6 +3944,253 @@ ORDADV
   fi
 fi
 
+# =============================================================================
+# CASE C — RECERTIFY (#4268): the optional 4th argument is a RECERT block
+# =============================================================================
+# NO ANCESTRY FIXTURE IS NEEDED HERE, unlike Case B: a recert anchor's
+# commit/tree-start must cover $CERTIFIED EXACTLY (same tree digest — a recert
+# never advances the commit, that's --delta's job), which is a plain
+# string-prefix compare (assert_covers), never a `git merge-base --is-ancestor`
+# walk. So the fabricated $CERTIFIED/$C7/$C12 constants already used for every
+# Case A case are sufficient for Case C's success path too — no repository
+# needed, and `run` (not `run_anc`) is the right helper throughout.
+RECERT_MODE="MODE: recertify (HOST-FAULT RE-CERTIFICATION of tooling-tests — NOT the gate of record; gate of record = the full agent-gate.sh run recorded at the anchor, combined with this block)"
+RECERT_S="==== AGENT-GATE RECERT SUMMARY ===="
+RECERT_E="==== END AGENT-GATE RECERT SUMMARY ===="
+
+# recert_block [anchor] [commit] [tree-start] [tree-integrity] [result] [mode] \
+#              [verdict] [components] [dirty] -> STDOUT. "-" omits that line.
+# Line SHAPES are copied from scripts/agent-gate.sh's RECERTIFY terminal-emission
+# branch (recert-anchor:/recert-verdict:/recert-components:, MODE, tree lines).
+recert_block() {
+  local anchor="${1:-$C12}" commit="${2:-$C7}" tstart="${3:-$C12}" \
+        ti="${4:-PASS}" result="${5:-PASS}" mode="${6:-$RECERT_MODE}" \
+        verdict="${7:-CERTIFIED (all rerun component(s) PASS: tooling-tests)}" \
+        components="${8:-tooling-tests}" dirty="${9-no}"
+  printf '%s\n' "$RECERT_S"
+  printf 'run-id: /tmp/agent-gate.rCt9Qx\n'
+  [ "$mode" = "-" ] || printf '%s\n' "$mode"
+  [ "$commit" = "-" ] || printf 'commit: %s branch: issue-3465-require-gate-of-record%s\n' \
+    "$commit" "$(dirty_field "$dirty")"
+  [ "$anchor" = "-" ] || printf 'recert-anchor: %s\n' "$anchor"
+  printf 'recert-anchor-run-id: /tmp/agent-gate.9cIQgX\n'
+  printf 'recert-anchor-summary-file: /tmp/anchor-summary.txt\n'
+  printf 'recert-components: %s\n' "$components"
+  [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: %s digest: 671a6275687c\n' \
+    "$tstart" "$(dirty_tree_start "$dirty")"
+  printf 'tree-end: %s dirty: %s digest: 671a6275687c\n' "$tstart" "$(dirty_tree_start "$dirty")"
+  [ "$ti" = "-" ] || printf 'tree-integrity: %s\n' "$ti"
+  [ "$verdict" = "-" ] || printf 'recert-verdict: %s\n' "$verdict"
+  printf 'logs: /tmp/agent-gate.rCt9Qx\n'
+  [ "$result" = "-" ] || printf 'RESULT: %s\n' "$result"
+  printf '%s\n' "$RECERT_E"
+}
+recert_summary() { local f="$1"; shift; recert_block "$@" >"$f"; }
+
+# refused_recert <desc> <full-file> <recert-file> [needle] — a 4-arg refusal.
+# Reuses refused_pair verbatim: its ONLY delta-specific text is the description
+# string a caller supplies, and $needle already lets each case name its own
+# cause, so nothing about it is actually delta-shaped.
+refused_recert() { refused_pair "$@"; }
+
+# The ANCHOR for every case below: a FULL block whose RESULT is FAIL (one
+# component failed — that is the whole reason a recert exists) but whose
+# tree-integrity/commit/tree-start all cover $CERTIFIED exactly.
+ANCHOR_RECERT_FAIL="$T/anchor-recert-fail.txt"
+full_summary "$ANCHOR_RECERT_FAIL" "$C7" "$C12" PASS FAIL
+GOODRECERT="$T/good-recert.txt"
+recert_summary "$GOODRECERT"
+
+# --- Case R1: the happy path — anchor RESULT: FAIL + CERTIFIED recert -> 0 ---
+if run 0 "recert: FAILed anchor + CERTIFIED recert block -> exit 0" \
+  2421 "$CERTIFIED" "$ANCHOR_RECERT_FAIL" "$GOODRECERT"; then
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "recert: PREMERGE: OK printed" ;;
+    *) bad "recert: missing PREMERGE: OK (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: GATE-OF-RECORD commit: $C7 tree-start: $C12"*)
+      ok "recert: the GATE-OF-RECORD line names the ANCHOR's provenance" ;;
+    *) bad "recert: GATE-OF-RECORD line must name the anchor (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: RECERTIFY anchor: $C12 components: tooling-tests recert-verdict: CERTIFIED"*"commit: $C7 tree-start: $C12"*"summary: $GOODRECERT"*)
+      ok "recert: a DISTINCT RECERTIFY line names the anchor, components, verdict, and the merged tree" ;;
+    *) bad "recert: missing/incorrect PREMERGE: RECERTIFY line (got: $OUT)" ;;
+  esac
+  # #3465's Case B ancestry evidence must NOT appear for Case C — there is no
+  # ancestry walk here at all (a regression that started running it would be a
+  # silent behavior change, not a visible refusal, so it needs its own case).
+  case "$OUT" in
+    *"PREMERGE: DELTA-RECERT"*) bad "recert: a Case B DELTA-RECERT line leaked into a Case C run (got: $OUT)" ;;
+    *) ok "recert: no Case B DELTA-RECERT evidence line leaks into a Case C run" ;;
+  esac
+fi
+
+# --- Case R2: the anchor is NOT required to be RESULT: PASS ------------------
+# The defining relaxation vs Case A/B — already exercised by R1's own fixture
+# (ANCHOR_RECERT_FAIL is RESULT: FAIL), asserted explicitly here so a
+# regression that reinstated the PASS requirement fails on ITS OWN case
+# rather than only incidentally alongside R1.
+full_summary "$T/anchor-recert-pass.txt" "$C7" "$C12" PASS PASS
+recert_summary "$T/recert-anchor-was-pass.txt"
+if run 0 "recert: an anchor that happens to be RESULT: PASS is ALSO accepted" \
+  2421 "$CERTIFIED" "$T/anchor-recert-pass.txt" "$T/recert-anchor-was-pass.txt"; then
+  ok "recert: RESULT: PASS anchor accepted (the relaxation is permissive, not exclusive)"
+fi
+
+# --- Case R3: the anchor's RESULT must still be a REAL terminal verdict ------
+full_summary "$T/anchor-incomplete.txt" "$C7" "$C12" PASS INCOMPLETE
+refused_recert "recert: anchor RESULT: INCOMPLETE -> refuse (liveness sentinel, not a verdict)" \
+  "$T/anchor-incomplete.txt" "$GOODRECERT" "neither PASS nor FAIL"
+full_summary "$T/anchor-partial.txt" "$C7" "$C12" PASS PARTIAL
+refused_recert "recert: anchor RESULT: PARTIAL -> refuse" \
+  "$T/anchor-partial.txt" "$GOODRECERT" "neither PASS nor FAIL"
+
+# --- Case R4: the anchor's tree-integrity/dirty contract is UNRELAXED --------
+full_summary "$T/anchor-recert-ti-fail.txt" "$C7" "$C12" \
+  "FAIL (tree-mutated-midrun; head da9a7cb->ca8eb01; changed: docs/x.md)" FAIL
+refused_recert "recert: anchor tree-integrity: FAIL -> refuse" \
+  "$T/anchor-recert-ti-fail.txt" "$GOODRECERT" \
+  "tree-integrity verdict token in the full-gate block is"
+full_summary "$T/anchor-recert-dirty.txt" "$C7" "$C12" PASS FAIL yes
+refused_recert "recert: dirty anchor tree -> refuse" \
+  "$T/anchor-recert-dirty.txt" "$GOODRECERT" "dirty"
+
+# --- Case R4b: the ANCHOR's own commit:/tree-start: must cover $CERTIFIED ----
+# (roborev finding, High: the first cut of Case C never asserted this at all —
+# a comment claimed it was "already asserted above" when it was not, so an
+# anchor from a COMPLETELY DIFFERENT commit — e.g. an old green `main` gate —
+# was accepted as long as the paired recert block alone named $CERTIFIED,
+# defeating "anchor + recert together certify the sha", the whole reason this
+# case exists). Same peer-lane shape #3616's Case A test uses (a well-formed
+# block whose provenance names a DIFFERENT sha throughout), paired with the
+# SAME $GOODRECERT that correctly names $CERTIFIED — proving the refusal is
+# about the ANCHOR's binding specifically, not the recert block's.
+full_summary "$T/anchor-recert-peer-lane.txt" "ca8eb01" "ca8eb016def1" PASS FAIL
+refused_recert "recert: an anchor naming a DIFFERENT sha than certified -> refuse (even with a valid recert block)" \
+  "$T/anchor-recert-peer-lane.txt" "$GOODRECERT" "does not match the certified sha"
+
+# --- Case R5: recert-verdict must be CERTIFIED --------------------------------
+recert_summary "$T/recert-notcertified.txt" "$C12" "$C7" "$C12" PASS FAIL "$RECERT_MODE" \
+  "NOT-CERTIFIED (rerun component(s) not PASS: tooling-tests(FAIL))"
+refused_recert "recert: recert-verdict: NOT-CERTIFIED -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-notcertified.txt" \
+  "RESULT verdict token in the recert block is 'FAIL'"
+# ...and even if a doctored block claimed CERTIFIED while its OWN RESULT reads
+# FAIL, the RESULT check (asserted first) already catches it above; this arm
+# additionally pins the value comparison in isolation, RESULT: PASS held fixed.
+recert_summary "$T/recert-verdict-bad-token.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "MAYBE (unrecognised token)"
+refused_recert "recert: an unrecognised recert-verdict token -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-verdict-bad-token.txt" \
+  "not CERTIFIED"
+recert_summary "$T/recert-no-verdict.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" "-"
+refused_recert "recert: NO recert-verdict: line -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-no-verdict.txt" \
+  "has no 'recert-verdict:' line"
+
+# --- Case R6: recert-anchor: must cover the CERTIFIED sha ---------------------
+recert_summary "$T/recert-wrong-anchor.txt" "deadbeefcafe"
+refused_recert "recert: recert-anchor: names a DIFFERENT tree than the certified sha -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-wrong-anchor.txt" \
+  "'recert-anchor:' value 'deadbeefcafe' in the recert block does not match the certified sha"
+recert_summary "$T/recert-no-anchor.txt" "-"
+refused_recert "recert: recert block with NO recert-anchor: line -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-no-anchor.txt" "has no 'recert-anchor:' line"
+recert_summary "$T/recert-anchor-nonhex.txt" "unverified"
+refused_recert "recert: recert-anchor: non-hex -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-anchor-nonhex.txt" "is not lowercase hex"
+
+# --- Case R7: the recert run's OWN provenance must cover the certified sha --
+recert_summary "$T/recert-wrong-commit.txt" "$C12" "deadbeef"
+refused_recert "recert: recert block commit: does not match the certified sha -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-wrong-commit.txt" \
+  "'commit:' value 'deadbeef' in the recert block does not match the certified sha"
+recert_summary "$T/recert-wrong-tstart.txt" "$C12" "$C7" "deadbeefcafe"
+refused_recert "recert: recert block tree-start: does not match the certified sha -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-wrong-tstart.txt" \
+  "'tree-start:' value 'deadbeefcafe' in the recert block does not match the certified sha"
+
+# --- Case R8: MODE: recertify is REQUIRED in the recert block ----------------
+recert_summary "$T/recert-no-mode.txt" "$C12" "$C7" "$C12" PASS PASS "-"
+refused_recert "recert: recert block with NO MODE: line -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-no-mode.txt" "has no 'MODE:' line"
+recert_summary "$T/recert-mode-delta.txt" "$C12" "$C7" "$C12" PASS PASS \
+  "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record)"
+refused_recert "recert: recert header + MODE: delta -> refuse (token asserted, not presence)" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-mode-delta.txt" "MODE token is 'delta', not 'recertify'"
+
+# --- Case R9: the recert block's own RESULT/tree-integrity/dirty -------------
+recert_summary "$T/recert-result-fail.txt" "$C12" "$C7" "$C12" PASS FAIL
+refused_recert "recert: recert RESULT: FAIL -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-result-fail.txt" \
+  "RESULT verdict token in the recert block is 'FAIL'"
+recert_summary "$T/recert-ti-fail.txt" "$C12" "$C7" "$C12" \
+  "FAIL (tree-mutated-midrun; head da9a7cb->ca8eb01; changed: docs/x.md)" PASS
+refused_recert "recert: recert tree-integrity: FAIL -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-ti-fail.txt" \
+  "tree-integrity verdict token in the recert block is 'FAIL'"
+recert_summary "$T/recert-dirty.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: tooling-tests)" tooling-tests yes
+refused_recert "recert: a dirty recert run's own tree -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-dirty.txt" "dirty"
+recert_block >"$T/recert-unterminated.txt.full"
+grep -v -x -F "$RECERT_E" "$T/recert-unterminated.txt.full" >"$T/recert-unterminated.txt"
+refused_recert "recert: UNTERMINATED recert block -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-unterminated.txt" "UNTERMINATED"
+
+# --- Case R9b: a FAILING --only run cannot serve as the recert anchor --------
+# (roborev finding, Medium: agent-gate.sh only promotes RESULT: PASS to
+# PARTIAL for a PASSING --only run — a FAILING one stays RESULT: FAIL with its
+# lowercase `mode: PARTIAL (--only …)` line UNCHANGED, so Case 37's existing
+# "--only -> refused by RESULT: PARTIAL" case does not cover this shape at
+# all. Full header, no UPPERCASE MODE: key (the belt above never sees it),
+# RESULT: FAIL (which Case C's PASS|FAIL relaxation just accepted), otherwise
+# legitimate — without the n_partial check this reaches recert-verdict:
+# CERTIFIED for a merge with no real gate of record behind it.
+{
+  printf '%s\n' "$FULL_S"
+  printf 'run-id: /tmp/agent-gate.only-fail\n'
+  printf 'commit: %s branch: issue-only-fail dirty: no\n' "$C7"
+  printf 'tree-start: %s dirty: no digest: %s\n' "$C7" "$C12"
+  printf 'tree-end: %s dirty: no digest: %s\n' "$C7" "$C12"
+  printf 'tree-integrity: PASS\n'
+  printf 'mode: PARTIAL (--only tooling-tests) - does NOT count as the gate\n'
+  printf 'tooling-tests:      FAIL (2s)\n'
+  printf 'RESULT: FAIL\n'
+  printf '%s\n' "$FULL_E"
+} >"$T/anchor-only-failed.txt"
+refused_recert "recert: a FAILING --only run (mode: PARTIAL + RESULT: FAIL) cannot anchor a recert, even paired with an otherwise-valid recert block" \
+  "$T/anchor-only-failed.txt" "$GOODRECERT" "carries a 'mode: PARTIAL' line"
+
+# --- Case R10: the fourth argument's KIND is detected by CONTENT, not position
+refused_recert "recert: a LITE summary passed as the fourth argument -> refuse (neither DELTA nor RECERT)" \
+  "$ANCHOR_RECERT_FAIL" "$T/lite-only.txt" \
+  "is neither a DELTA nor a RECERT summary block"
+{ recert_block; recert_block; } >"$T/two-recerts.txt"
+assert_count \
+  "two-recerts fixture: the file really does hold TWO recert start markers" \
+  "two-recerts fixture: expected 2 recert start markers, saw %s" \
+  "$T/two-recerts.txt" line-exact "$RECERT_S" 2
+refused_recert "recert: TWO recert blocks in the fourth argument -> refuse as AMBIGUOUS" \
+  "$ANCHOR_RECERT_FAIL" "$T/two-recerts.txt" "holds 2 recert blocks"
+
+# --- Case R11: "a recert cannot follow a recert" holds STRUCTURALLY ----------
+# A RECERT SUMMARY passed as the THIRD argument (the "anchor" slot) can never
+# satisfy the FULL-header check — proving the chain-prevention property without
+# any separate state-tracking mechanism (#4268's explicit limit).
+refused "a lone RECERT summary passed as the THIRD argument (no fourth at all) -> refuse" \
+  "$GOODRECERT" "ZERO full-gate blocks"
+refused_recert "a RECERT summary passed as the THIRD argument, WITH a fourth -> refuse (still no full-gate block)" \
+  "$GOODRECERT" "$GOODRECERT" "ZERO full-gate blocks"
+
+# --- Case R12: usage is unchanged (still 3 or 4 args; recert never adds a 5th)
+if run 3 "usage: five arguments -> exit 3 (a recert pair is still exactly 4 args)" \
+  2421 "$CERTIFIED" "$ANCHOR_RECERT_FAIL" "$GOODRECERT" extra; then
+  ok "usage: a fifth argument fails closed rather than being ignored (recert pair)"
+fi
+
 # --- NO VERDICT MAY RIDE ON A PIPE INTO AN EARLY-EXITING GREP (#3752) --------
 # The structural half of a MEASURED false FAIL in the sibling suite: under
 # `set -o pipefail` a `producer | grep -q` reports the PRODUCER's SIGPIPE when
@@ -3956,8 +4208,26 @@ assert_src_absent_fixed \
 # --- CASE FLOOR (#3544) -------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite; the floor is what makes that a red. Committed at the count
-# this suite reached when the #3752 tri-state conversion landed.
-CASE_FLOOR=205
+# this suite reached when the #3752 tri-state conversion landed (205).
+#
+# NOT raised to "the count after Case C landed" (roborev finding, Medium: an
+# earlier cut set it to 352, the EXACT total observed on ONE host — but ~12
+# arms in THIS suite are host-conditional (no-git PATH, no bounded runner,
+# graft, GIT_DIR, commit-graph, shallow, a FIFO, running-as-root, …) and
+# several emit FEWER `ok`s when an arm is unbuildable than when it runs, so a
+# host missing e.g. `timeout`/a buildable graft fixture would land below 352
+# for a reason having nothing to do with a deleted case — false-failing a
+# merge-blocking check). Instead: 205 (the ALREADY-conservative floor,
+# presumably set below what even a constrained host reaches) PLUS 29 — the
+# EXACT assertion-count Case C's own tests add, measured by diffing this
+# suite's TOTAL with and without the Case C section (§ Case R1 onward) against
+# the SAME (current) premerge-assert.sh, on the SAME host. Case C's own tests
+# are host-INVARIANT (no real-git/timeout/systemd dependency — see the comment
+# above ANCHOR_RECERT_FAIL), so that 29 is safe to add unconditionally rather
+# than re-measured per host, and it preserves the ORIGINAL floor's conservatism
+# for every pre-existing conditional arm instead of replacing it with one
+# host's raw total.
+CASE_FLOOR=234
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
