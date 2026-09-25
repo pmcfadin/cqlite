@@ -19,6 +19,25 @@ impl FileSystem {
         Ok(fs::metadata(path).await.is_ok())
     }
 
+    /// Like [`exists`](Self::exists), but only for a DEFINITE answer: a stat
+    /// FAILURE is returned as an error instead of collapsing into `false`
+    /// (issue #4159).
+    ///
+    /// `exists` is `metadata(path).is_ok()`, so `PermissionDenied` on a parent
+    /// component, EIO, or ELOOP all read as "this does not exist". A caller that
+    /// then skips the path has silently omitted whatever was there — the swallow
+    /// class this issue exists to remove. Only `NotFound` is genuine absence.
+    ///
+    /// Kept as a separate method rather than a change to `exists`: the other
+    /// callers of `exists` want a plain boolean and are out of this issue's scope.
+    pub async fn try_exists(&self, path: &Path) -> Result<bool> {
+        match fs::metadata(path).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(Error::from(e)),
+        }
+    }
+
     /// Create directory (single level)
     pub async fn create_dir(&self, path: &Path) -> Result<()> {
         fs::create_dir(path).await.map_err(Error::from)

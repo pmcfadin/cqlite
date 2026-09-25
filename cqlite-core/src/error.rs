@@ -73,6 +73,87 @@ pub enum Error {
         source: Box<Error>,
     },
 
+    /// One or more of a table's SSTables could not be READ, so a scan of that table
+    /// cannot return a complete answer (issue #4159).
+    ///
+    /// Raised by every row-returning [`SSTableManager`] read surface when the table
+    /// has at least one generation whose **open REFUSED** (a corrupt `Statistics.db`,
+    /// an undecodable SerializationHeader type, an unsupported version, an unreadable
+    /// component). The constructors load best-effort, so the refusal is RECORDED
+    /// per table and consulted per read; the full rationale — including why a PARTIAL
+    /// answer is still a refusal — is in [`storage::sstable`]'s `refusal` module.
+    ///
+    /// It is its OWN variant, not a `Corruption` message, because a caller must be
+    /// able to tell "empty table" from "unreadable table" by MATCHING on the
+    /// discriminant, never on message text (#28). Before #4159 the constructors
+    /// answered a per-file open failure with a `tracing::warn!` and nothing else, so
+    /// the scan's `reader_list.is_empty()` guard returned `Ok(Vec::new())` — the
+    /// #3721 swallow class at SSTable granularity.
+    ///
+    /// `source` is an [`Arc`](std::sync::Arc) over the ORIGINAL refusal, never a
+    /// re-rendered message: [`Error`] is deliberately not [`Clone`], and a ledger
+    /// that had to hand out owned errors would re-wrap the text and discard the
+    /// cause, which is the mistake this variant exists to stop.
+    ///
+    /// [`SSTableManager`]: crate::storage::sstable::SSTableManager
+    /// [`storage::sstable`]: crate::storage::sstable
+    // The cause is NOT interpolated into this message: it is already the
+    // `#[source]`, so anything that renders the chain (`{:#}`, `anyhow`, the FFI
+    // error walkers) would print it twice.
+    #[error(
+        "table '{table}': {refused} of its SSTable(s) could not be read, so this read \
+         would silently omit their rows; first refusal at {}",
+        path.display()
+    )]
+    UnreadableSSTable {
+        /// The `table_readers` key of the table being read.
+        table: String,
+        /// Path of the FIRST refused `Data.db` generation reported here.
+        path: std::path::PathBuf,
+        /// How many of the table's generations were refused (>= 1).
+        refused: usize,
+        /// The original reader-open failure for `path`.
+        #[source]
+        source: std::sync::Arc<Error>,
+    },
+
+    /// A table was not DISCOVERED, and the discovery walk could not see the whole
+    /// tree — so its absence is not a fact we know (issue #4159).
+    ///
+    /// Distinct from [`Error::UnreadableSSTable`] on purpose. That one says "this
+    /// table's generations exist and one of them refused"; this one says "we found
+    /// nothing for this table, but part of the directory tree was unreadable, so we
+    /// cannot honestly claim it has no data".
+    ///
+    /// It is also distinct from a per-table refusal in the LEDGER. Recording an
+    /// unreadable directory as an unattributed refusal would make it bear on every
+    /// table (see `refusal`'s module doc), and since essentially every ext4 data
+    /// volume carries a root-owned `lost+found` at mode 0700, that would refuse all
+    /// reads on the most common real deployment layout. A table that IS discovered
+    /// and opens fine still reads normally while this condition holds; only a query
+    /// whose answer the gap could change fails closed.
+    ///
+    /// `source` keeps the original [`std::io::Error`]'s kind and message, so
+    /// `PermissionDenied` (a `lost+found`, an operator permissions mistake) stays
+    /// distinguishable from `NotFound` (a directory removed mid-walk).
+    #[error(
+        "table '{table}' was not found, but SSTable discovery could NOT read \
+         {unreadable} director(y/ies), so its absence cannot be confirmed; first \
+         unreadable directory: {}",
+        directory.display()
+    )]
+    IncompleteDiscovery {
+        /// The `table_readers` key of the table being read.
+        table: String,
+        /// The FIRST directory the walk could not read.
+        directory: std::path::PathBuf,
+        /// How many directories the walk could not read (>= 1).
+        unreadable: usize,
+        /// The original filesystem failure for `directory`.
+        #[source]
+        source: std::sync::Arc<Error>,
+    },
+
     /// Schema validation errors
     #[error("Schema error: {0}")]
     Schema(String),
@@ -349,6 +430,40 @@ impl Error {
         }
     }
 
+    /// A table cannot be read completely: at least one of its SSTables was refused
+    /// at open (issue #4159). `source` is the ORIGINAL refusal, shared by reference
+    /// count — never rendered to a string.
+    pub fn unreadable_sstable(
+        table: impl Into<String>,
+        path: impl Into<std::path::PathBuf>,
+        refused: usize,
+        source: std::sync::Arc<Error>,
+    ) -> Self {
+        Self::UnreadableSSTable {
+            table: table.into(),
+            path: path.into(),
+            refused,
+            source,
+        }
+    }
+
+    /// A table was not discovered while part of the tree was unreadable, so its
+    /// absence cannot be confirmed (issue #4159). `source` is the ORIGINAL
+    /// filesystem failure, shared by reference count.
+    pub fn incomplete_discovery(
+        table: impl Into<String>,
+        directory: impl Into<std::path::PathBuf>,
+        unreadable: usize,
+        source: std::sync::Arc<Error>,
+    ) -> Self {
+        Self::IncompleteDiscovery {
+            table: table.into(),
+            directory: directory.into(),
+            unreadable,
+            source,
+        }
+    }
+
     /// Create a schema error
     pub fn schema(msg: impl Into<String>) -> Self {
         Self::Schema(msg.into())
@@ -514,6 +629,15 @@ impl Error {
             // A column that cannot be decoded will not decode on a retry: the
             // bytes and the declared type are both unchanged (issue #3721).
             Error::ColumnDecode { .. } => false,
+            // The refused SSTable's bytes do not change on a retry, and the
+            // manager's refusal ledger only changes at `refresh_tables`.
+            Error::UnreadableSSTable { .. } => false,
+            // An unreadable DIRECTORY is an environmental condition, not a
+            // property of the bytes: a remount, a `chmod`, or an operator fixing
+            // permissions makes the next discovery complete. Classified with
+            // `Io`, which it wraps — unlike `UnreadableSSTable`, whose refused
+            // file decodes identically on every retry.
+            Error::IncompleteDiscovery { .. } => true,
             Error::Schema(_) => false,
             Error::CqlParse(_) => false,
             Error::Configuration(_) => false,
@@ -575,6 +699,8 @@ impl Error {
             Error::Serialization { .. } => ErrorCategory::Data,
             Error::Corruption(_) => ErrorCategory::Data,
             Error::ColumnDecode { .. } => ErrorCategory::Data,
+            Error::UnreadableSSTable { .. } => ErrorCategory::Data,
+            Error::IncompleteDiscovery { .. } => ErrorCategory::System,
             Error::Schema(_) => ErrorCategory::Schema,
             Error::CqlParse(_) => ErrorCategory::Query,
             Error::QueryExecution(_) => ErrorCategory::Query,

@@ -5,12 +5,26 @@
 //! and [`SSTableManager::new_from_discovered_paths`] (pre-discovered table dirs) —
 //! together with the best-effort load routines they drive. Grouping them here puts
 //! the boundary checks and the load behaviour those checks exist to protect against
-//! (a per-file reader error is LOGGED AND SKIPPED, so nothing else would report a
-//! systematically failing open) in one readable place.
+//! in one readable place.
+//!
+//! # A per-file open error is SKIPPED but no longer SILENT (issue #4159)
+//!
+//! Both routines below still load best-effort: a generation whose
+//! `SSTableReader::open` fails is skipped so ONE corrupt file cannot render an
+//! unrelated table unreadable. What changed is that the refusal is now RECORDED on
+//! the manager's [`refusal`] ledger, keyed by the table the generation belongs to
+//! and carrying the original [`Error`](crate::Error). Every read surface of that
+//! table then fails closed with `Error::UnreadableSSTable`.
+//!
+//! Before #4159 the `Err` arm was a `tracing::warn!` and nothing else, so the
+//! generation was merely absent from the reader map and the read surfaces'
+//! `reader_list.is_empty()` guard turned that absence into `Ok(Vec::new())` — a
+//! scan over an unreadable SSTable reported SUCCESS with zero rows, which no
+//! caller, test or supervisor can detect.
 
 use super::{
-    build_chunk_cache, is_apple_double_sidecar, refresh, SSTableId, SSTableManager,
-    MAX_SSTABLE_SCAN_DEPTH,
+    build_chunk_cache, discovery_walk, is_apple_double_sidecar, refresh, refusal, SSTableId,
+    SSTableManager, MAX_SSTABLE_SCAN_DEPTH,
 };
 use crate::platform::Platform;
 use crate::{Config, Result};
@@ -32,20 +46,24 @@ impl SSTableManager {
         // Reject an out-of-range `direct_io_memory_fraction` before any
         // filesystem work (#1696 roborev r3 F2). This constructor is public, so
         // it is a boundary in its own right — and `load_existing_sstables`
-        // treats a per-file reader-open error as best-effort (log and skip), so
-        // without this an invalid fraction would build a manager holding ZERO
-        // readers and report success. One rule, one definition:
-        // `validated_direct_io_memory_fraction`.
+        // treats a per-file reader-open error as best-effort (skip, and since
+        // #4159 record), so without this an invalid fraction would build a
+        // manager holding ZERO readers and report success. One rule, one
+        // definition: `validated_direct_io_memory_fraction`.
         config.storage.validated_direct_io_memory_fraction()?;
 
         let base_path = path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
+        let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
+        let incomplete_walk = Arc::new(RwLock::new(discovery_walk::IncompleteDiscovery::default()));
 
         let manager = Self {
             base_path,
             readers,
             table_readers,
+            refused,
+            incomplete_walk,
             platform,
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::BasePath,
@@ -91,9 +109,13 @@ impl SSTableManager {
     /// Returns an error if the configuration is invalid (an out-of-range
     /// `storage.direct_io_memory_fraction`, checked before any filesystem work),
     /// or if any of the specified directories cannot be read.
-    /// Individual SSTable loading errors are logged but do not fail the entire operation —
-    /// which is exactly why a config defect must be rejected here rather than left
-    /// to the reader opens it would silently swallow (#1696).
+    ///
+    /// An individual SSTable's open error does NOT fail this constructor — which is
+    /// exactly why a config defect must be rejected here rather than left to the
+    /// reader opens it would swallow (#1696) — but it is no longer discarded: it is
+    /// recorded on the refusal ledger, and every subsequent read of THAT table
+    /// returns `Error::UnreadableSSTable` naming the cause (#4159). Reads of other
+    /// tables are unaffected.
     ///
     /// # Example
     ///
@@ -139,11 +161,15 @@ impl SSTableManager {
         let base_path = storage_path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
+        let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
+        let incomplete_walk = Arc::new(RwLock::new(discovery_walk::IncompleteDiscovery::default()));
 
         let manager = Self {
             base_path,
             readers,
             table_readers,
+            refused,
+            incomplete_walk,
             platform: platform.clone(),
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::TableDirs(table_dirs.clone()),
@@ -168,6 +194,8 @@ impl SSTableManager {
     async fn load_from_table_directories(&self, table_dirs: Vec<PathBuf>) -> Result<()> {
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
+        let mut refused = self.refused.write().await;
+        let mut incomplete = self.incomplete_walk.write().await;
 
         tracing::debug!(
             "SSTableManager::load_from_table_directories: processing {} directories",
@@ -175,32 +203,99 @@ impl SSTableManager {
         );
 
         for table_dir in table_dirs {
-            // Check if directory exists
-            if !self.platform.fs().exists(&table_dir).await? {
-                tracing::warn!("Table directory does not exist: {:?}", table_dir);
-                continue;
+            // Check if directory exists. `try_exists`, not `exists`: the latter is
+            // `metadata().is_ok()`, so an UNSTATTABLE table directory would read as
+            // absent and be skipped with only a warn! — every SSTable under it
+            // silently missing from the reader map, which the scan surfaces then
+            // report as an empty SUCCESS. Only `NotFound` is genuine absence.
+            match self.platform.fs().try_exists(&table_dir).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("Table directory does not exist: {:?}", table_dir);
+                    continue;
+                }
+                Err(e) => {
+                    let cause =
+                        discovery_walk::unreadable_dir_error(&table_dir, "stat table directory", e);
+                    tracing::warn!(
+                        "SSTableManager: {cause}. Discovery is INCOMPLETE; queries for \
+                         tables not otherwise discovered will fail closed."
+                    );
+                    incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
+                        table_dir.clone(),
+                        cause,
+                    )]);
+                    continue;
+                }
             }
 
             tracing::debug!("SSTableManager scanning directory: {:?}", table_dir);
 
-            // Read directory contents
+            // Read directory contents. Issue #4159: a `warn!` + `continue` here
+            // made every SSTable under an unreadable table directory silently
+            // absent, and the scan surfaces then reported that absence as an EMPTY
+            // SUCCESS. The gap is RECORDED (not swallowed, and not escalated into
+            // an abort that would take every OTHER table down with it) so a query
+            // for an undiscovered table fails closed.
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    tracing::warn!("Cannot read table directory {:?}: {}", table_dir, e);
+                    let cause =
+                        discovery_walk::unreadable_dir_error(&table_dir, "read table directory", e);
+                    tracing::warn!(
+                        "SSTableManager: {cause}. Discovery is INCOMPLETE; queries for \
+                         tables not otherwise discovered will fail closed."
+                    );
+                    incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
+                        table_dir.clone(),
+                        cause,
+                    )]);
                     continue;
                 }
             };
 
             // Scan for Data.db files
             let mut files_found = 0;
-            while let Some(entry) = dir_entries.next_entry().await? {
+            loop {
+                // An entry can fail MID-ITERATION. Propagating with `?` here would
+                // abort the whole constructor over one directory (the same
+                // over-correction the `read_dir` arm above avoids), so the
+                // remainder of THIS directory is recorded as unseen and the walk
+                // moves on. Entries already collected are real and are kept.
+                let entry = match dir_entries.next_entry().await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(e) => {
+                        let cause = discovery_walk::unreadable_dir_error(
+                            &table_dir,
+                            "read an entry of",
+                            crate::Error::Io(e),
+                        );
+                        tracing::warn!("SSTableManager: {cause}");
+                        incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
+                            table_dir.clone(),
+                            cause,
+                        )]);
+                        break;
+                    }
+                };
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                     // Check for Cassandra SSTable data files using the *-Data.db pattern.
                     // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
                     // See Issue #481.
-                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
+                    // The NAME is not the type. An entry matching `*-Data.db`
+                    // that is not a regular file is not an SSTable, so it is
+                    // rejected as a CANDIDATE here rather than opened and then
+                    // recorded as a refusal — which made one stray directory or
+                    // symlink render this whole HEALTHY table unreadable. Shared
+                    // with both walk sites; the reasoning, including why symlinks
+                    // are followed for DIRECTORIES but not for `Data.db` entries,
+                    // is on `discovery_walk::is_data_db_candidate`.
+                    if filename.ends_with("-Data.db")
+                        && !is_apple_double_sidecar(filename)
+                        && discovery_walk::is_data_db_candidate(&path).await
+                    {
                         files_found += 1;
                         tracing::debug!("SSTableManager found SSTable file: {:?}", path);
 
@@ -238,8 +333,31 @@ impl SSTableManager {
                                 }
                             }
                             Err(e) => {
-                                // Log warning but continue loading other SSTables
+                                // Issue #4159: the load stays best-effort — one
+                                // unreadable generation must not render an
+                                // UNRELATED table unreadable — but the refusal is
+                                // RECORDED against this table so every read of it
+                                // fails closed instead of reporting an empty
+                                // success. The `Error` itself is kept, never
+                                // stringified: `Error::UnreadableSSTable` carries
+                                // it as its `#[source]`.
+                                //
+                                // BLAST RADIUS of the fallback key: an
+                                // UNATTRIBUTED refusal bears on EVERY table's read,
+                                // not just this one (see `refusal`'s module doc) —
+                                // "we cannot say which table this file belonged to"
+                                // means no table's answer is knowably complete. It
+                                // is the right answer for a refused SSTable, whose
+                                // rows must belong to SOME table, but it is a heavy
+                                // hammer: if you add a recording site here, make
+                                // sure its subject really is a table's data before
+                                // reaching for this key. An unreadable DIRECTORY,
+                                // for instance, deliberately does NOT use it — see
+                                // `incomplete_walk`.
                                 tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
+                                let key = refresh::table_dir_table_key(&path)
+                                    .unwrap_or_else(|| refusal::UNATTRIBUTED_TABLE_KEY.to_string());
+                                refusal::record(&mut refused, key, path.clone(), e);
                             }
                         }
                     }
@@ -268,14 +386,43 @@ impl SSTableManager {
     /// This supports both flat layouts (Data.db directly in base_path) and Cassandra-style
     /// directory structures (keyspace/table_name/Data.db).
     async fn load_existing_sstables(&self) -> Result<()> {
-        // Check if directory exists first
-        if !self.platform.fs().exists(&self.base_path).await? {
-            return Ok(()); // No directory, no SSTables to load
+        // Check if directory exists first. `try_exists` for the same reason as the
+        // sibling loader: an unstattable base path must not be reported as an empty
+        // one. A stat failure is recorded so an absent-table query fails closed.
+        match self.platform.fs().try_exists(&self.base_path).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(()), // No directory, no SSTables to load
+            Err(e) => {
+                let cause = discovery_walk::unreadable_dir_error(
+                    &self.base_path,
+                    "stat SSTable base path",
+                    e,
+                );
+                tracing::warn!("SSTableManager: {cause}. Discovery is INCOMPLETE.");
+                let mut incomplete = self.incomplete_walk.write().await;
+                incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
+                    self.base_path.clone(),
+                    cause,
+                )]);
+                return Ok(());
+            }
         }
 
-        // Collect all Data.db paths by walking up to 3 levels deep
-        let data_files: Vec<PathBuf> =
+        // Collect all Data.db paths by walking up to 3 levels deep. The walk
+        // RECORDS every directory it could not read rather than aborting (issue
+        // #4159): one inaccessible directory — a root-owned `lost+found` at mode
+        // 0700 is on essentially every ext4 data volume — must not make the whole
+        // constructor fail and leave NO table readable. What it must not do either
+        // is vanish: an incomplete walk is remembered so a query for a table it
+        // did not discover fails closed instead of reporting "empty".
+        let walk =
             Self::find_data_files(&self.platform, &self.base_path, MAX_SSTABLE_SCAN_DEPTH).await?;
+        let data_files = walk.data_files;
+
+        {
+            let mut incomplete = self.incomplete_walk.write().await;
+            incomplete.extend_from_walk(walk.unreadable);
+        }
 
         if data_files.is_empty() {
             return Ok(());
@@ -283,6 +430,7 @@ impl SSTableManager {
 
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
+        let mut refused = self.refused.write().await;
 
         // Pre-compute for the table name fallback heuristic
         let base_dir_name = self
@@ -331,9 +479,32 @@ impl SSTableManager {
                         );
                     }
                 }
-                Err(_) => {
-                    // Skip problematic SSTable files during initialization
-                    tracing::warn!("Could not load SSTable file: {:?}", path);
+                Err(e) => {
+                    // Issue #4159: the load stays best-effort, but the refusal is
+                    // RECORDED (with its `Error`, not a message) against this
+                    // table's key so every subsequent read of it fails closed —
+                    // the reader is absent from the map, and the scan surfaces'
+                    // `reader_list.is_empty()` guard would otherwise report that
+                    // absence as an empty SUCCESS.
+                    //
+                    // The key is derived from the PATH alone: a refused open
+                    // produced no header, so the `header_table_name` last-resort
+                    // branch of `base_path_table_key` is deliberately given the
+                    // empty string (which that helper skips).
+                    //
+                    // BLAST RADIUS of the fallback: when no key can be derived at
+                    // all the refusal is UNATTRIBUTED and every table's read then
+                    // fails closed on it, not just this one — see `refusal`'s module
+                    // doc. That is correct for a refused SSTable (its rows belong to
+                    // SOME table, and we cannot say which), but it is the widest
+                    // possible effect, so a NEW recording site must justify reaching
+                    // for this key. An unreadable DIRECTORY is deliberately recorded
+                    // elsewhere (`incomplete_walk`) precisely to avoid it: a stock
+                    // root-owned `lost+found` would otherwise refuse every read.
+                    tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
+                    let key = refresh::base_path_table_key(&path, &base_dir_name, "")
+                        .unwrap_or_else(|| refusal::UNATTRIBUTED_TABLE_KEY.to_string());
+                    refusal::record(&mut refused, key, path.clone(), e);
                 }
             }
         }

@@ -122,9 +122,13 @@ pub(super) fn convert_marshal_type_to_cql_checked(
 // answered `None` for a refusal so the marker-search parsers could fold it into
 // their "this offset holds no readable header" outcome. That fold WAS the fail-open
 // — a refusal became an ordinary failed candidate and the search carried on to the
-// empty-schema success. Those parsers now carry `HeaderSchemaError`, so they call
-// `convert_marshal_type_to_cql_checked` directly and a refusal keeps both its
-// meaning and its message.
+// empty-schema success.
+//
+// #4159 then deleted the marker-search parsers themselves, and with them the
+// `HeaderSchemaError` channel that had carried the distinction: with ONE decoder
+// there is no second offset to retry, so "structural" and "semantic" no longer need
+// telling apart at the call site. What survives is the KIND — a refusal here is
+// `Error::Schema` and stays `Error::Schema` all the way to `StatisticsReader::open`.
 
 /// Convert Cassandra internal marshal type to CQL type name.
 ///

@@ -16,6 +16,18 @@ use crate::{
 
 use super::super::header_spec::{get_global_registry, ParsedHeader};
 
+// Headerless nb/oa/da minimal-header builders + the `CompressionInfo.db` probe they
+// share, split out of THIS file per the campsite rule (#1116) and declared HERE
+// rather than in `reader/mod.rs` because that file is itself over the threshold —
+// adding a declaration there would GROW an over-threshold file, while this one is
+// shrinking. `#[path]` resolves relative to `reader/`.
+#[path = "header_minimal.rs"]
+mod header_minimal;
+// The absent-vs-unreadable split of `header_minimal`'s probe (#4159).
+#[cfg(test)]
+#[path = "header_compression_info_tests.rs"]
+mod header_compression_info_tests;
+
 // Re-export helper functions from header_helpers module
 pub(crate) use super::header_helpers::{
     calculate_actual_header_size, extract_generation_from_path,
@@ -28,7 +40,7 @@ pub(crate) use super::header_helpers::{
 /// resolution matches schema-registry resolution and `SSTableManager` keying
 /// exactly (issue #2384). Falls back to the `"unknown"` sentinel when the path is
 /// too shallow to contain a keyspace directory.
-fn extract_keyspace_from_path(path: &Path) -> String {
+pub(super) fn extract_keyspace_from_path(path: &Path) -> String {
     crate::storage::sstable::snapshot_path::extract_keyspace(path)
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -38,7 +50,7 @@ fn extract_keyspace_from_path(path: &Path) -> String {
 /// Delegates to the authoritative snapshot-aware parser
 /// [`crate::storage::sstable::snapshot_path::extract_table_name`] (issue #2384).
 /// Falls back to the `"unknown"` sentinel when the path has no directory component.
-fn extract_table_name_from_path(path: &Path) -> String {
+pub(super) fn extract_table_name_from_path(path: &Path) -> String {
     crate::storage::sstable::snapshot_path::extract_table_name(path)
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -228,7 +240,7 @@ pub(crate) async fn parse_header_with_version_detection(
                     path.display(),
                     first_4_bytes
                 );
-                return create_minimal_nb_header(path).await;
+                return header_minimal::create_minimal_nb_header(path).await;
             } else {
                 // True headerless NB format - first 4 bytes are compressed data
                 tracing::debug!(
@@ -236,7 +248,7 @@ pub(crate) async fn parse_header_with_version_detection(
                     path.display(),
                     first_4_bytes
                 );
-                return create_minimal_nb_header(path).await;
+                return header_minimal::create_minimal_nb_header(path).await;
             }
         } else {
             // Buffer too small for magic number check, assume headerless
@@ -245,7 +257,7 @@ pub(crate) async fn parse_header_with_version_detection(
                 path.display(),
                 header_buffer.len()
             );
-            return create_minimal_nb_header(path).await;
+            return header_minimal::create_minimal_nb_header(path).await;
         }
     }
 
@@ -260,7 +272,7 @@ pub(crate) async fn parse_header_with_version_detection(
              building minimal header from CompressionInfo.db",
             path.display()
         );
-        return create_minimal_bti_header(path).await;
+        return header_minimal::create_minimal_bti_header(path).await;
     }
 
     // Read first 4 bytes as potential magic number or CRC32 checksum
@@ -604,145 +616,6 @@ async fn create_minimal_uncompressed_header(path: &Path) -> Result<SSTableHeader
         columns: vec![],
         properties: std::collections::HashMap::new(),
     })
-}
-
-/// Create minimal header for headerless NB format files
-async fn create_minimal_nb_header(path: &Path) -> Result<SSTableHeader> {
-    // Try to load CompressionInfo.db to determine compression algorithm
-    let compression_algorithm = match load_nb_compression_info(path).await {
-        Ok(info) => {
-            tracing::info!(
-                "Loaded CompressionInfo.db for NB format: algorithm={}, chunk_length={}, chunks={}",
-                info.algorithm,
-                info.chunk_length,
-                info.chunk_offsets.len()
-            );
-            info.algorithm
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Could not load CompressionInfo.db for NB format file '{}': {}. Assuming no compression.",
-                path.display(),
-                e
-            );
-            "NONE".to_string()
-        }
-    };
-
-    // Create a minimal header for NB format with compression info
-    Ok(SSTableHeader {
-        cassandra_version: CassandraVersion::V5_0NewBig, // NB format maps to NewBig
-        version: 0,        // NB format doesn't have version in Data.db
-        table_id: [0; 16], // Table ID is in other components
-        keyspace: extract_keyspace_from_path(path),
-        table_name: extract_table_name_from_path(path),
-        generation: extract_generation_from_path(path),
-        compression: CompressionInfo {
-            algorithm: compression_algorithm,
-            chunk_size: 16384, // Default chunk size
-            parameters: std::collections::HashMap::new(),
-        },
-        stats: SSTableStats {
-            row_count: 0,
-            min_timestamp: 0,
-            max_timestamp: 0,
-            max_deletion_time: 0,
-            compression_ratio: 1.0,
-            row_size_histogram: vec![],
-        },
-        columns: vec![],
-        properties: std::collections::HashMap::new(),
-    })
-}
-
-/// Build a minimal headerless header for BTI ("da") format Data.db (issue #831).
-///
-/// BTI Data.db is headerless and chunk-compressed, just like nb/oa BIG format,
-/// so this mirrors [`create_minimal_nb_header`] but sets `cassandra_version` to
-/// [`CassandraVersion::V5_0Bti`] — which is what makes the reader engage schema
-/// extraction (mod.rs schema-eligible match) and schema-aware V5 row parsing for
-/// the BTI partition decode path. Compression metadata is loaded from the sibling
-/// CompressionInfo.db (BTI Data.db is LZ4-chunk-compressed).
-async fn create_minimal_bti_header(path: &Path) -> Result<SSTableHeader> {
-    let compression_algorithm = match load_nb_compression_info(path).await {
-        Ok(info) => {
-            tracing::info!(
-                "Loaded CompressionInfo.db for BTI format: algorithm={}, chunk_length={}, chunks={}",
-                info.algorithm,
-                info.chunk_length,
-                info.chunk_offsets.len()
-            );
-            info.algorithm
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Could not load CompressionInfo.db for BTI format file '{}': {}. Assuming no compression.",
-                path.display(),
-                e
-            );
-            "NONE".to_string()
-        }
-    };
-
-    Ok(SSTableHeader {
-        cassandra_version: CassandraVersion::V5_0Bti, // da format maps to BTI
-        version: 0,                                   // headerless: no version in Data.db
-        table_id: [0; 16],                            // Table ID is in other components
-        keyspace: extract_keyspace_from_path(path),
-        table_name: extract_table_name_from_path(path),
-        generation: extract_generation_from_path(path),
-        compression: CompressionInfo {
-            algorithm: compression_algorithm,
-            chunk_size: 16384, // Default chunk size
-            parameters: std::collections::HashMap::new(),
-        },
-        stats: SSTableStats {
-            row_count: 0,
-            min_timestamp: 0,
-            max_timestamp: 0,
-            max_deletion_time: 0,
-            compression_ratio: 1.0,
-            row_size_histogram: vec![],
-        },
-        columns: vec![],
-        properties: std::collections::HashMap::new(),
-    })
-}
-
-/// Load CompressionInfo.db for NB format files
-async fn load_nb_compression_info(
-    data_db_path: &Path,
-) -> Result<crate::storage::sstable::compression_info::CompressionInfo> {
-    use super::compression::extract_sstable_base_name;
-    use tokio::fs::File;
-    use tokio::io::AsyncReadExt;
-
-    // Extract base name (e.g., "nb-1-big-Data.db" -> "nb-1-big")
-    let base_name = extract_sstable_base_name(data_db_path).ok_or_else(|| {
-        Error::InvalidFormat(format!("Cannot extract base name from {:?}", data_db_path))
-    })?;
-
-    // Build CompressionInfo.db path
-    let parent_dir = data_db_path.parent().unwrap_or(Path::new("."));
-    let compression_info_path = parent_dir.join(format!("{}-CompressionInfo.db", base_name));
-
-    // Read and parse CompressionInfo.db
-    let mut file = File::open(&compression_info_path).await.map_err(|e| {
-        Error::InvalidFormat(format!(
-            "Failed to open CompressionInfo.db at {:?}: {}. NB format requires CompressionInfo.db",
-            compression_info_path, e
-        ))
-    })?;
-
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).await.map_err(|e| {
-        Error::InvalidFormat(format!(
-            "Failed to read CompressionInfo.db at {:?}: {}",
-            compression_info_path, e
-        ))
-    })?;
-
-    crate::storage::sstable::compression_info::CompressionInfo::parse(&data)
 }
 
 /// Parse minimal legacy header with strict validation (feature-gated)

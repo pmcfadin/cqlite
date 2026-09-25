@@ -56,6 +56,10 @@ pub use reader::SSTableReader;
 /// the held reader set. Not `state_machine`-gated — meaningful for minimal builds.
 pub mod refresh;
 pub use refresh::RefreshReport;
+/// The on-disk `*-Data.db` walk shared by the constructors and `refresh_tables`.
+mod discovery_walk;
+/// Per-table SSTable REFUSAL ledger + the fail-closed read guard (issue #4159).
+mod refusal;
 mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod row_cell_state_machine;
 /// Cross-SSTable scan ordering: k-way merge in Cassandra token order (issue #1580).
@@ -457,6 +461,39 @@ pub struct SSTableManager {
     /// Maps table names (e.g., "simple_table") to their corresponding SSTable readers
     pub(crate) table_readers: Arc<RwLock<HashMap<String, Vec<Arc<reader::SSTableReader>>>>>,
 
+    /// SSTable generations whose OPEN REFUSED, keyed by the same table key a
+    /// successful open would have used (issue #4159).
+    ///
+    /// Both constructors load discovered generations best-effort — one corrupt file
+    /// must not render an unrelated table unreadable — so a refusal cannot simply
+    /// propagate out of `new`. It is recorded HERE instead, and every read surface
+    /// of the affected table then FAILS CLOSED with [`Error::UnreadableSSTable`]
+    /// (see [`refusal`] for the full rationale, including why a PARTIAL answer is
+    /// still a refusal). Empty in the overwhelmingly common case, and
+    /// [`refusal::check`] short-circuits on empty, so a healthy manager pays one
+    /// uncontended read-lock acquisition per read.
+    ///
+    /// [`Error::UnreadableSSTable`]: crate::Error::UnreadableSSTable
+    pub(crate) refused: Arc<RwLock<refusal::RefusalLedger>>,
+
+    /// Directories the last discovery walk could NOT read (issue #4159).
+    ///
+    /// Kept SEPARATE from [`refused`](Self::refused) on purpose. A refusal is
+    /// attributed to a table; an unreadable directory is attributed to nothing —
+    /// recording it as an unattributed refusal would make it bear on EVERY table,
+    /// and since essentially every ext4 data volume carries a root-owned
+    /// `lost+found` at mode 0700, that would refuse all reads on the most common
+    /// real deployment layout.
+    ///
+    /// It bears on exactly one question: whether "this table was not discovered"
+    /// may be reported as "this table is empty". While this list is non-empty a
+    /// discovered table reads normally, and a query for an UNdiscovered one fails
+    /// closed with [`Error::IncompleteDiscovery`]. See [`discovery_walk`] for the
+    /// four-outcome table.
+    ///
+    /// [`Error::IncompleteDiscovery`]: crate::Error::IncompleteDiscovery
+    pub(crate) incomplete_walk: Arc<RwLock<discovery_walk::IncompleteDiscovery>>,
+
     /// Platform abstraction
     platform: Arc<Platform>,
 
@@ -591,49 +628,6 @@ impl SSTableManager {
         }
     }
 
-    /// Recursively find all *-Data.db files up to `max_depth` levels deep
-    fn find_data_files<'a>(
-        platform: &'a Platform,
-        dir: &'a Path,
-        max_depth: usize,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
-    {
-        let dir = dir.to_path_buf();
-        Box::pin(async move {
-            let mut results = Vec::new();
-
-            let mut dir_entries = match platform.fs().read_dir(&dir).await {
-                Ok(entries) => entries,
-                Err(_) => return Ok(results),
-            };
-
-            while let Some(entry) = dir_entries.next_entry().await? {
-                let path = entry.path();
-                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
-                    // See Issue #481.
-                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
-                        results.push(path);
-                    } else if max_depth > 0 {
-                        // Check if it's a directory and recurse
-                        if entry
-                            .file_type()
-                            .await
-                            .map(|ft| ft.is_dir())
-                            .unwrap_or(false)
-                        {
-                            let sub_results =
-                                Self::find_data_files(platform, &path, max_depth - 1).await?;
-                            results.extend(sub_results);
-                        }
-                    }
-                }
-            }
-
-            Ok(results)
-        })
-    }
-
     /// Create a new SSTable from MemTable data
     ///
     /// NOTE: SSTable writing removed in Issue #176 (writer.rs deleted).
@@ -745,7 +739,9 @@ impl SSTableManager {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O. Holding it across the whole scan let one queued writer FIFO-park
         // every later point read behind the slowest in-flight scan.
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        // #4159: FAIL CLOSED before the emptiness test — a table with a REFUSED
+        // SSTable must never be reported as an empty one.
+        let (reader_list, _fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
 
         if reader_list.is_empty() {
             tracing::debug!(
@@ -1081,7 +1077,7 @@ impl SSTableManager {
 
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (bloom/BTI prune, per-candidate decode, cross-generation merge).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), true));
         }
@@ -1226,7 +1222,7 @@ impl SSTableManager {
         // Format-agnostic: the operation spans a table's generations.
         let mut meter = ReadOpMeter::start(None);
 
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), false));
         }
@@ -1464,7 +1460,7 @@ impl SSTableManager {
     ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (per-reader metadata decode and cross-generation merge).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
         if reader_list.is_empty() {
             return Ok(Vec::new());
         }
@@ -1609,6 +1605,11 @@ impl SSTableManager {
     /// caller then keeps the honest full-scan path (all from SerializationHeaders,
     /// no heuristics — #28).
     pub async fn partition_key_shape(&self, table_id: &TableId) -> Option<PartitionKeyShape> {
+        // Deliberately the UNCHECKED resolver (#4159): this returns no rows, only the
+        // authoritative key SHAPE used to CLASSIFY a query. The read the
+        // classification then selects — `scan`, `scan_partition`, `get` — resolves
+        // through `resolve_readers_checked` and fails closed there, so refusing here
+        // would only replace one fail-closed report with a less specific one.
         let (readers, _) = self.resolve_reader_snapshot(table_id).await;
         partition_key_shape_from_headers(readers.iter().map(|r| r.header().columns.as_slice()))
     }
@@ -1633,7 +1634,10 @@ impl SSTableManager {
     /// `table_readers` read lock — needed by the streaming scan, which spawns a
     /// background merge task.
     #[cfg(not(feature = "tombstones"))]
-    async fn resolve_table_readers(&self, table_id: &TableId) -> Vec<Arc<reader::SSTableReader>> {
+    pub(super) async fn resolve_table_readers(
+        &self,
+        table_id: &TableId,
+    ) -> Vec<Arc<reader::SSTableReader>> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
         let list = if table_readers.contains_key(table_name) {
@@ -1774,7 +1778,9 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::RowScanStream> {
-        let readers = self.resolve_table_readers(table_id).await;
+        // #4159: a streaming scan over a table with a REFUSED SSTable must fail,
+        // not end cleanly having yielded nothing.
+        let readers = self.resolve_table_readers_checked(table_id).await?;
 
         // Issue #957: keep the materializing `scan` and this streaming path in lockstep
         // ON THE SUCCESS PATH. Reuse the EXACT guard `scan` uses for cross-generation
@@ -1875,7 +1881,8 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::BatchedScanStream> {
-        let readers = self.resolve_table_readers(table_id).await;
+        // #4159: same contract as `scan_stream` — see there.
+        let readers = self.resolve_table_readers_checked(table_id).await?;
 
         if readers.len() == 1 {
             if let Some(reader) = readers.into_iter().next() {
@@ -2228,9 +2235,15 @@ mod tests {
         fs::write(&sidecar, b"\x00\x00").unwrap();
 
         // find_data_files scans `temp_dir` with max_depth=0 (single level).
-        let results = SSTableManager::find_data_files(&platform, temp_dir.path(), 0)
+        let walk = SSTableManager::find_data_files(&platform, temp_dir.path(), 0)
             .await
             .unwrap();
+        assert!(
+            walk.unreadable.is_empty(),
+            "a healthy temp directory must produce a COMPLETE walk, or the \
+             expectations below are about the wrong thing"
+        );
+        let results = walk.data_files;
 
         // Only the real Data.db file should be returned; the ._ sidecar must be excluded.
         assert_eq!(

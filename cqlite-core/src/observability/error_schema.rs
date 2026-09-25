@@ -11,9 +11,10 @@
 //!
 //! | Variant        | `as_str()`       | Maps from `cqlite_core::Error` …                                  |
 //! |----------------|------------------|-------------------------------------------------------------------|
-//! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`                                     |
+//! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`, `IncompleteDiscovery`              |
 //! | `Serialization`| `serialization`  | `Serialization`, `TypeConversion`                                 |
-//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`, `ColumnDecode`             |
+//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`, `ColumnDecode`,            |
+//! |                |                  | `UnreadableSSTable`                                               |
 //! | `Schema`       | `schema`         | `Schema`, `Table`                                                  |
 //! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`,        |
 //! |                |                  | `UnsupportedVersion`, `UnsupportedCommitLogVersion`               |
@@ -155,16 +156,29 @@ impl std::fmt::Display for ObsErrorCategory {
 /// `Error::obs_category` and `record_error` route through it.
 pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
     match err {
-        Error::Io(_) | Error::InvalidPath(_) | Error::Timeout(_) => ObsErrorCategory::Io,
+        // `IncompleteDiscovery` is an I/O condition (an unreadable directory), not
+        // corruption: the bytes of every file are fine, the walk simply could not
+        // see part of the tree. It belongs with the `io::Error` it carries, so a
+        // dashboard shows a permissions/mount problem as one.
+        Error::Io(_)
+        | Error::InvalidPath(_)
+        | Error::Timeout(_)
+        | Error::IncompleteDiscovery { .. } => ObsErrorCategory::Io,
 
         Error::Serialization { .. } | Error::TypeConversion(_) => ObsErrorCategory::Serialization,
 
         // Issue #3721: a per-column decode failure IS damaged/undecodable data at
         // the cell level — the same operator signal as `Corruption`, and never the
         // `Other` bucket, so a dashboard shows a read that failed on bad bytes.
+        // Issue #4159: an SSTable that could not be OPENED is damaged/undecodable
+        // data at file granularity — the same operator signal, one level up from
+        // `ColumnDecode`. Never `Other`: a dashboard must show a read that failed
+        // because a file was unreadable, which is precisely the event the silent
+        // `Ok(vec![])` used to hide.
         Error::Corruption(_)
         | Error::CorruptCommitLogFrame(_)
-        | Error::ColumnDecode { .. } => ObsErrorCategory::Corruption,
+        | Error::ColumnDecode { .. }
+        | Error::UnreadableSSTable { .. } => ObsErrorCategory::Corruption,
 
         Error::Schema(_) | Error::Table(_) => ObsErrorCategory::Schema,
 

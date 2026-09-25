@@ -41,8 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    extract_keyspace_and_table_name, extract_table_name, is_apple_double_sidecar, reader,
-    SSTableId, SSTableManager, MAX_SSTABLE_SCAN_DEPTH,
+    extract_keyspace_and_table_name, extract_table_name, reader, refusal, SSTableId, SSTableManager,
 };
 use crate::Result;
 
@@ -168,45 +167,6 @@ impl SSTableManager {
         Ok(Arc::new(reader))
     }
 
-    /// List the current on-disk `Data.db` paths using the manager's recorded
-    /// [`DiscoverySource`] — the same discovery the manager was built with.
-    async fn discover_data_file_paths(&self) -> Result<Vec<PathBuf>> {
-        match &self.discovery_source {
-            DiscoverySource::BasePath => {
-                if !self.platform.fs().exists(&self.base_path).await? {
-                    return Ok(Vec::new());
-                }
-                SSTableManager::find_data_files(
-                    &self.platform,
-                    &self.base_path,
-                    MAX_SSTABLE_SCAN_DEPTH,
-                )
-                .await
-            }
-            DiscoverySource::TableDirs(dirs) => {
-                let mut out = Vec::new();
-                for dir in dirs {
-                    if !self.platform.fs().exists(dir).await? {
-                        continue;
-                    }
-                    let mut entries = match self.platform.fs().read_dir(dir).await {
-                        Ok(entries) => entries,
-                        Err(_) => continue,
-                    };
-                    while let Some(entry) = entries.next_entry().await? {
-                        let path = entry.path();
-                        if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                            if fname.ends_with("-Data.db") && !is_apple_double_sidecar(fname) {
-                                out.push(path);
-                            }
-                        }
-                    }
-                }
-                Ok(out)
-            }
-        }
-    }
-
     /// Compute the `table_readers` key for a discovered `path`/`reader` under the
     /// manager's discovery keying.
     fn table_key_for(&self, path: &Path, reader: &reader::SSTableReader) -> Option<String> {
@@ -236,7 +196,15 @@ impl SSTableManager {
         let _refresh_guard = self.refresh_lock.lock().await;
 
         // 1. Rediscover the current on-disk Data.db set (no readers opened yet).
-        let discovered_paths = self.discover_data_file_paths().await?;
+        //
+        //    The walk records rather than aborts on an unreadable directory (issue
+        //    #4159), which matters MORE here than at construction: `refresh_tables`
+        //    reads "not discovered" as "removed from disk", so a directory it could
+        //    not read would otherwise look like a mass deletion and DROP live
+        //    readers. Every diff step below is therefore gated on the walk having
+        //    had a complete view of the path in question.
+        let walk = self.discover_data_file_paths().await?;
+        let discovered_paths = walk.data_files.clone();
 
         // Precompute a raw-path -> canonical-path cache for EVERY path this
         // refresh will diff. Filesystem canonicalization happens ONLY here (and
@@ -249,6 +217,21 @@ impl SSTableManager {
             HashMap::with_capacity(discovered_paths.len());
         for p in &discovered_paths {
             canon_cache.entry(p.clone()).or_insert_with(|| canon(p));
+        }
+
+        // The UNREADABLE paths must be in the cache too, and BEFORE the cache-only
+        // `canon_of` closure below exists — otherwise `canonicalized_unreadable`
+        // resolves them through that closure, misses, and keeps them RAW. With a
+        // symlinked base path the held readers' paths are canonical while the
+        // unreadable prefix is not, so `view_was_complete_for` answers "complete"
+        // for a path it cannot see and step 5a REMOVES live readers under it. That
+        // is worse than the gap this whole mechanism exists to close: it does not
+        // merely fail to report an unreadable directory, it destroys working
+        // readers because of one.
+        for d in &walk.unreadable {
+            canon_cache
+                .entry(d.path().to_path_buf())
+                .or_insert_with(|| canon(d.path()));
         }
 
         // 2. Snapshot the canonical paths currently held (short read guards),
@@ -308,9 +291,54 @@ impl SSTableManager {
             opened.push((canon_of(path), sstable_id, key, reader_arc));
         }
 
+        // The unreadable regions, in the SAME canonical form as every path below,
+        // so "was this path inside a part of the tree the walk could not see?" is
+        // answered without a syscall under the write guard.
+        let walk = walk.with_canonical_unreadable(|p| canon_of(p));
+
+        // Canonical paths this refresh RE-OPENED successfully. A refusal recorded
+        // for one of these has been REPAIRED IN PLACE (the classic case: the
+        // manager opened mid-`rsync` over a half-written `Statistics.db`, and the
+        // copy has since completed), so it must stop refusing even though the path
+        // is still very much on disk.
+        let reopened_canon: HashSet<PathBuf> = opened.iter().map(|(c, ..)| c.clone()).collect();
+
         // 5. Apply the diff under the write guards (short critical section).
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
+        let mut refused = self.refused.write().await;
+
+        // 5.0 Issue #4159: a refusal recorded at construction must stop poisoning
+        //     its table once the generation stops being bad, or the table is
+        //     unreadable for the life of the process. There are TWO such ways and a
+        //     refusal survives only when NEITHER happened:
+        //
+        //       * GONE from disk — the operator deleted the bad generation;
+        //       * RE-OPENED by this refresh — repaired in place, so the very path
+        //         that refused now opens. Testing presence alone kept the refusal
+        //         forever in exactly this case, which is the common one.
+        //
+        //     Every path is compared in the SAME canonical form the reader diff
+        //     below uses, from the precomputed cache — zero syscalls under the
+        //     guard. Note the ledger has no other exit: a generation that is still
+        //     unreadable aborts step 4 with `?`, so this line is not even reached.
+        //
+        //     A path the walk could not SEE is not a path that disappeared: while
+        //     its directory is unreadable nothing has been learned about it, so the
+        //     refusal stands.
+        refusal::retain_still_refusing(&mut refused, |p| {
+            let c = canon_of(p);
+            let vanished = !discovered_canon.contains(&c) && walk.view_was_complete_for(&c);
+            !vanished && !reopened_canon.contains(&c)
+        });
+
+        // 5.0b Replace the incomplete-walk record with THIS walk's. A directory
+        //      that became readable again must stop making absence unknowable, and
+        //      one that just became unreadable must start.
+        {
+            let mut incomplete = self.incomplete_walk.write().await;
+            incomplete.replace_from_walk(walk.unreadable.clone());
+        }
 
         // 5a. Removal: retain only readers still present on disk. Every
         //     canonical path below comes from the precomputed cache — the
@@ -336,8 +364,11 @@ impl SSTableManager {
         {
             let mut seen: HashSet<*const reader::SSTableReader> = HashSet::new();
             for r in readers.values().chain(table_readers.values().flatten()) {
-                if discovered_canon.contains(&canon_of(&r.file_path())) {
-                    continue; // still present on disk — not removed
+                let c = canon_of(&r.file_path());
+                if discovered_canon.contains(&c) || !walk.view_was_complete_for(&c) {
+                    // Still present on disk, or under a directory the walk could
+                    // not read (so not knowably removed) — either way, not removed.
+                    continue;
                 }
                 if seen.insert(Arc::as_ptr(r)) {
                     r.invalidate_key_cache_entries();
@@ -345,9 +376,17 @@ impl SSTableManager {
             }
         }
 
-        readers.retain(|_id, r| discovered_canon.contains(&canon_of(&r.file_path())));
+        // A reader is removed only when the walk SAW that its path is gone. Under an
+        // unreadable directory the walk's silence is not evidence of deletion, and
+        // dropping a live reader on it would turn a permissions problem into
+        // silently short scan results — the very failure mode this issue is about.
+        let still_on_disk = |r: &Arc<reader::SSTableReader>| {
+            let c = canon_of(&r.file_path());
+            discovered_canon.contains(&c) || !walk.view_was_complete_for(&c)
+        };
+        readers.retain(|_id, r| still_on_disk(r));
         for list in table_readers.values_mut() {
-            list.retain(|r| discovered_canon.contains(&canon_of(&r.file_path())));
+            list.retain(&still_on_disk);
         }
         table_readers.retain(|_key, list| !list.is_empty());
 

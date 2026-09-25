@@ -197,6 +197,7 @@ empty_root="$tmp/empty/sstables/test_da"
 mkdir -p "$empty_root"
 cp -r "$REPO/$FIXTURE_REL" "$empty_root/"
 : > "$empty_root/$(basename "$FIXTURE_REL")/$DATA_DB"
+empty_data_db="$empty_root/$(basename "$FIXTURE_REL")/$DATA_DB"
 empty_out="$tmp/empty.log"
 run_lane "$empty_out" CQLITE_DATASETS_ROOT="$tmp/empty"
 empty_rc=$?
@@ -226,17 +227,32 @@ never rejected; see $empty_out"
 else
   ok "empty: the multiclustering case did not report PASS"
 fi
-# The two anchors are the only ways this case can legitimately reject an empty
-# fixture: the clustering-slice row-count anchor (`must yield exactly N`, the one that
-# fires while `probe_keys` are declared) or the partition-key discovery guard. Both are
-# required to name the case on the SAME line, so a sibling's failure cannot satisfy it.
-if grep -qE "case test_da\.multiclustering_table: .*(must yield exactly [0-9]+|no partition keys to probe)" "$empty_out"; then
+# THREE anchors are the ways this case can legitimately reject an empty fixture, and
+# each names the case (or the staged file) on the SAME line, so a sibling's failure
+# cannot satisfy it:
+#   (a) the clustering-slice row-count anchor (`must yield exactly N`, the one that
+#       fires while `probe_keys` are declared);
+#   (b) the partition-key discovery guard (`no partition keys to probe`);
+#   (c) #4159's READ REFUSAL. Since #4159 an SSTable whose metadata cannot be parsed
+#       makes the scan return Err instead of Ok(empty), so a 0-byte `-Data.db` is now
+#       refused at DISCOVERY and the read never reaches (a) or (b) at all. This anchor
+#       is STRICTLY STRONGER than either: it must name the STAGED file by its full
+#       path, which (a)/(b) never did — so a run that fell back to the healthy
+#       checkout fixture cannot satisfy it even by accident.
+# RESIDUAL (#4168): with (c) firing first, this staging no longer EXERCISES (a)/(b).
+# They stay accepted because they remain reachable for a fixture that is READABLE and
+# legitimately rowless; exercising them needs a different staging than a 0-byte file.
+if grep -qE "case test_da\.multiclustering_table: .*(must yield exactly [0-9]+|no partition keys to probe)" "$empty_out" \
+   || grep -E "^test_da\.multiclustering_table: discovery SELECT failed: .*could not be read" "$empty_out" \
+        | grep -qF "$empty_data_db"; then
   ok "empty: the rejection is THIS case's anti-vacuous anchor (slice row count or \
-partition-key discovery), not merely a nonzero exit"
+partition-key discovery) or #4159's read refusal naming the staged 0-byte file, not \
+merely a nonzero exit"
 else
   bad "empty: no 'case test_da.multiclustering_table: … must yield exactly N' (or \
-'… no partition keys to probe') line — the run failed for some OTHER reason, which \
-does not prove the empty fixture was rejected; see $empty_out"
+'… no partition keys to probe', or a #4159 refusal naming $empty_data_db) line — the \
+run failed for some OTHER reason, which does not prove the empty fixture was rejected; \
+see $empty_out"
 fi
 
 # ---------------------------------------------------------------------------

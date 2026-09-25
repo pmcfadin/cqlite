@@ -193,6 +193,34 @@ ffi_error_contract_table! {
     // `Corruption` on every axis — it IS undecodable data reaching a caller — so a
     // binding consumer that already handles a parse failure needs no new branch.
     ColumnDecode => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    // Issue #4159: an SSTable whose OPEN refused, so a scan of its table cannot
+    // return a complete answer. Same row as `Corruption`/`ColumnDecode` on every
+    // axis — it IS undecodable data reaching a caller, one granularity up (the whole
+    // file rather than one cell) — so a binding consumer that already handles a
+    // parse failure needs no new branch, and both bindings agree on the identity.
+    // `category: Data` MATCHES `Error::classify()` (Corruption) and
+    // `recoverable: false` matches `Error::is_recoverable()` for the variant.
+    UnreadableSSTable => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    // Issue #4159: discovery could not read part of the directory tree, so a table
+    // it did not find cannot be reported as absent. Deliberately NOT the
+    // `UnreadableSSTable` row: nothing here is undecodable data — every file is
+    // fine, the walk simply could not see a directory. It is an I/O condition, and
+    // an ENVIRONMENTAL one, so `py: Io`, `code: "IO"`, `category: System` and
+    // `recoverable: true` all MATCH `Error::category()`/`Error::is_recoverable()`
+    // for the variant, and a binding consumer handling an I/O failure (fix the
+    // mount, fix the permissions, retry) already has the right branch.
+    //
+    // `py` was `Cqlite` when this row was first written — contradicting this row's
+    // OWN `code: "IO"`, and contradicting the Python binding's documented table AND
+    // its `expected_py_class` restatement, so `to_py_err` raised `CqliteError`
+    // where all three said `IOError`. It survived review because the test that
+    // reconciles the restatement against this table,
+    // `test_error_mapping_completeness` in `bindings/python/src/error.rs`, cannot
+    // LINK in the gate: a pyo3 extension-module build has no libpython, so
+    // `cargo test -p cqlite-py --lib` dies with `undefined symbol: PyExc_*` before
+    // any test runs. Both #4159 rows are therefore now pinned in
+    // `cqlite-ffi-common/tests/error_contract_table.rs`, which does run.
+    IncompleteDiscovery => { py: Io, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
     Schema => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
     // (#1451) real PARSE: a CQL syntax failure, not the generic QUERY bucket.
     CqlParse => { py: Parse, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
@@ -259,6 +287,8 @@ pub fn variant_of(err: &Error) -> FfiErrorVariant {
         Error::Serialization { .. } => FfiErrorVariant::Serialization,
         Error::Corruption(_) => FfiErrorVariant::Corruption,
         Error::ColumnDecode { .. } => FfiErrorVariant::ColumnDecode,
+        Error::UnreadableSSTable { .. } => FfiErrorVariant::UnreadableSSTable,
+        Error::IncompleteDiscovery { .. } => FfiErrorVariant::IncompleteDiscovery,
         Error::Schema(_) => FfiErrorVariant::Schema,
         Error::CqlParse(_) => FfiErrorVariant::CqlParse,
         Error::InvalidFormat(_) => FfiErrorVariant::InvalidFormat,
@@ -324,6 +354,21 @@ impl FfiErrorVariant {
                 "org.apache.cassandra.db.marshal.Int32Type",
                 0,
                 Error::corruption("sample cell decode failure"),
+            ),
+            FfiErrorVariant::UnreadableSSTable => Error::unreadable_sstable(
+                "sample_keyspace.sample_table",
+                "/sample/sample_keyspace/sample_table-1/nb-1-big-Data.db",
+                1,
+                std::sync::Arc::new(Error::corruption("sample SSTable open refusal")),
+            ),
+            FfiErrorVariant::IncompleteDiscovery => Error::incomplete_discovery(
+                "sample_keyspace.sample_table",
+                "/sample/lost+found",
+                1,
+                std::sync::Arc::new(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "sample unreadable directory",
+                ))),
             ),
             FfiErrorVariant::Schema => Error::schema("sample schema failure"),
             FfiErrorVariant::CqlParse => Error::cql_parse("sample CQL syntax failure"),

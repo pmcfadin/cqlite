@@ -47,7 +47,11 @@ impl SSTableManager {
 
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (candidate prune + the block-walk delegated to the reader).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        // #4159: FAIL CLOSED on a REFUSED SSTable. `Ok(None)` on this surface means
+        // "reverse iteration did not apply, fall back to the in-memory sort", and
+        // that fallback would then read the same unreadable table — so a refusal
+        // must be an `Err` here, not a fallback signal.
+        let (reader_list, _fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
 
         // Prune to the candidate generations that admit the key. Reverse iteration
         // covers ONLY the single-generation case: with several generations the same

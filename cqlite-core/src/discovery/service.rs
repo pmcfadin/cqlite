@@ -118,6 +118,7 @@ impl DiscoveryService {
             coverage,
             badge,
             warnings: scan_result.warnings,
+            unreadable_dirs: scan_result.unreadable_dirs,
         })
     }
 }
@@ -149,6 +150,14 @@ pub struct DiscoverySummary {
     pub badge: CoverageBadge,
     /// Warnings about potential issues with the directory structure
     pub warnings: Vec<String>,
+    /// Directories the scan could NOT read (issue #4159).
+    ///
+    /// Non-empty means this summary is INCOMPLETE — `keyspaces`/`tables` list what
+    /// was reachable, not what exists. Seed these into the database built from
+    /// `table_directories` (see `Database::note_incomplete_discovery`) so a query
+    /// for a table this scan could not enumerate fails closed rather than answering
+    /// an empty success.
+    pub unreadable_dirs: Vec<crate::discovery::UnreadableDirectory>,
 }
 
 impl DiscoverySummary {
@@ -162,6 +171,24 @@ impl DiscoverySummary {
             self.tables.len(),
             self.sstables_found
         ));
+
+        // Issue #4159: the counts above are what was REACHABLE. Saying so is not
+        // optional — a short list presented as complete is the whole defect.
+        if !self.unreadable_dirs.is_empty() {
+            text.push_str(&format!(
+                "INCOMPLETE: {} director(y/ies) could not be read, so the counts \
+                 above are a LOWER BOUND\n",
+                self.unreadable_dirs.len()
+            ));
+            for d in &self.unreadable_dirs {
+                text.push_str(&format!(
+                    "  unreadable {} directory {}: {}\n",
+                    d.role,
+                    d.path.display(),
+                    d.message
+                ));
+            }
+        }
 
         if let Some(version) = &self.resolved_version {
             text.push_str(&format!("Cassandra version: {}\n", version));

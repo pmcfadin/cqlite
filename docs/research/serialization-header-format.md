@@ -1,9 +1,22 @@
 # SerializationHeader Format Analysis - Collection Type Parsing Issue
 
+> **HISTORICAL SNAPSHOT — the code references below are STALE (noted #4159).**
+> This is a dated research note, kept for the format analysis in it, not as a
+> description of the current parser. Everything in the "Current Parser Limitation"
+> and "Recommended Fix Locations" sections describes a source layout that no longer
+> exists: `enhanced_statistics_parser.rs` is now a directory of modules, and
+> `parse_serialization_header_at_offset()` and `parse_regular_columns()` — with the
+> SerializationHeader MARKER SEARCH they belonged to — were **deleted** by issue
+> #4159. Their replacement is
+> `parser/enhanced_statistics_parser/serialization_header/schema.rs`
+> (`parse_serialization_header_schema`), which is TOC-positioned and refuses rather
+> than searching. Every line number below is meaningless; treat the FORMAT sections
+> as the durable content and the code sections as archaeology.
+
 **Date**: 2025-12-17
 **Issue**: #215 - Collection type parsing failures
 **Research Goal**: Identify byte patterns that differ in collection type descriptors
-**Status**: Partially resolved - VInt fix applied
+**Status**: Partially resolved - VInt fix applied (code references since deleted, #4159)
 
 ## Executive Summary
 
@@ -164,11 +177,14 @@ Example: 0x80 0xa6  →  (0x00 << 8) | 0xa6 = 166
 
 ---
 
-## Current Parser Limitation
+## Current Parser Limitation (AS OF 2025-12-17 — no longer current)
 
-**File**: `/Users/patrick/local_projects/cqlite/cqlite-core/src/parser/enhanced_statistics_parser.rs`
+**File**: `cqlite-core/src/parser/enhanced_statistics_parser.rs` — since split into a
+module directory.
 
-**Function**: `parse_serialization_header_at_offset()` (line 378)
+**Function**: `parse_serialization_header_at_offset()` — **DELETED by #4159** along
+with the marker search. The VInt length handling described here was fixed long ago
+and lives in `serialization_header/schema.rs`.
 
 ```rust
 // Step 7: Parse each regular column
@@ -248,7 +264,11 @@ Parser: ❌ parse_u8() reads 0x80 = 128, parsing fails
 
 ---
 
-## Recommended Fix Locations
+## Recommended Fix Locations (2025-12-17 — ALL APPLIED, and the symbols are gone)
+
+None of the symbols or line numbers below exist any more; they are retained only to
+show what the VInt fix touched. Current code:
+`parser/enhanced_statistics_parser/serialization_header/schema.rs`.
 
 1. **`parse_serialization_header_at_offset()`** (line 378-579)
    - Line 542: Change column type length from `parse_u8()` to `parse_vuint()`
