@@ -12,7 +12,7 @@
 //! Fixtures are small, committed reference binaries (`git add -f`), so this test
 //! never silently passes on missing data.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use cqlite_core::storage::commitlog::{
@@ -70,16 +70,23 @@ fn users_schema() -> CommitLogSchema {
 fn find_fixture(dir: &Path, prefix: &str) -> PathBuf {
     let entries = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read commitlog dir {}: {e}", dir.display()));
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with(prefix) && name.ends_with(".log") {
-            return e.path();
-        }
-    }
-    panic!(
-        "no fixture starting with {prefix:?} under {}",
+    let matches = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name.starts_with(prefix) && name.ends_with(".log")).then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one fixture starting with {prefix:?} under {}; found {matches:?}",
         dir.display()
     );
+    matches
+        .into_iter()
+        .next()
+        .expect("one matching fixture was asserted above")
 }
 
 /// Requirement: mutation stream decoding matches ground truth.
@@ -102,9 +109,15 @@ fn decoded_mutations_match_inserted_set() {
         "clean fixture must be uncompressed"
     );
 
+    assert_eq!(gt.inserts.len(), 5, "fixture ground truth insert count");
+    let ground_truth_ids = gt.inserts.iter().map(|row| row.id).collect::<BTreeSet<_>>();
+    assert_eq!(ground_truth_ids, BTreeSet::from([1, 2, 3, 4, 5]));
+
     // Collect only OUR table's partition updates from the full mutation stream
     // (the segment also contains system-keyspace mutations — filter by table id).
     let mut decoded: HashMap<i32, (String, i32)> = HashMap::new();
+    let mut decoded_ids = BTreeSet::new();
+    let mut decoded_count = 0usize;
     let mut it = reader.mutations();
     for res in it.by_ref() {
         let mutation = res.expect("mutation decode must not error on the clean segment");
@@ -120,6 +133,11 @@ fn decoded_mutations_match_inserted_set() {
                 upd.partition_key[2],
                 upd.partition_key[3],
             ]);
+            assert!(
+                decoded_ids.insert(id),
+                "duplicate target-table update for id={id}"
+            );
+            decoded_count += 1;
             assert_eq!(upd.rows.len(), 1, "one row per insert");
             let row = &upd.rows[0];
             let mut name = None;
@@ -144,12 +162,23 @@ fn decoded_mutations_match_inserted_set() {
                     other => panic!("unexpected column {other}"),
                 }
             }
-            decoded.insert(id, (name.expect("name"), age.expect("age")));
+            assert!(
+                decoded
+                    .insert(id, (name.expect("name"), age.expect("age")))
+                    .is_none(),
+                "duplicate decoded row for id={id}"
+            );
         }
     }
     assert!(!it.truncated(), "clean fixture must not be truncated");
 
-    // The insert-set-vs-decoded-set oracle.
+    // Pin both the target-table count and identity set. The segment also has
+    // Cassandra system-table traffic, whose total is intentionally not part of
+    // this oracle.
+    assert_eq!(decoded_count, 5, "decoded target-table update count");
+    assert_eq!(decoded_ids, ground_truth_ids, "decoded target-table ids");
+
+    // The insert-set-vs-decoded-set value oracle.
     assert_eq!(
         decoded.len(),
         gt.inserts.len(),
@@ -170,60 +199,51 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
     let dir = commitlog_dir();
     let gt = load_ground_truth(&dir);
     let table_id = parse_table_id(&gt.table_id).expect("table id");
-    // Named `torn`, not `clean` — this is the deliberately-truncated fixture;
-    // the previous name was a copy-paste leftover from the clean-fixture test
-    // (roborev finding, review-first pass: test-quality nit, fixed alongside
-    // the count-bound fix below since both touch this test).
+    assert_eq!(gt.inserts.len(), 5, "fixture ground truth insert count");
+    let ground_truth_ids = gt.inserts.iter().map(|row| row.id).collect::<BTreeSet<_>>();
+    assert_eq!(ground_truth_ids, BTreeSet::from([1, 2, 3, 4, 5]));
+
     let torn = find_fixture(&dir, "truncated-");
     let reader = CommitLogReader::open(&torn).expect("open truncated segment");
 
-    // Count only OUR table's decoded updates, not every mutation in the
-    // segment — it also carries system-keyspace traffic, so counting all
-    // successfully-decoded mutations made the lower-bound assertion below
-    // weaker than it looked: the reader could drop every one of our inserts
-    // and still pass on system mutations alone (roborev finding, review-first
-    // pass).
-    let mut count = 0usize;
-    let mut saw_err = false;
+    // The real truncated fixture ends after exactly the first four target-table
+    // writes. Track identities and reject duplicates so system-table traffic or
+    // repeated updates cannot satisfy the oracle accidentally.
+    let mut decoded_ids = BTreeSet::new();
+    let mut decoded_count = 0usize;
     let mut it = reader.mutations();
     for res in it.by_ref() {
-        // Cleanly-decoded records before the tear are returned; a torn body is
-        // reported as end-of-stream (truncation), never a panic. A structural
-        // decode may still hit corruption if the tear lands mid-record — that is
-        // surfaced as a typed Err, which is acceptable (no panic).
-        match res {
-            Ok(mutation) => {
-                count += mutation
-                    .updates
-                    .iter()
-                    .filter(|u| u.table_id == table_id)
-                    .count();
+        let mutation = res.expect("truncated fixture must not yield typed errors");
+        for update in &mutation.updates {
+            if update.table_id != table_id {
+                continue;
             }
-            Err(_) => saw_err = true,
+            assert_eq!(
+                update.partition_key.len(),
+                4,
+                "int partition key is 4 bytes"
+            );
+            let id = i32::from_be_bytes([
+                update.partition_key[0],
+                update.partition_key[1],
+                update.partition_key[2],
+                update.partition_key[3],
+            ]);
+            assert!(
+                decoded_ids.insert(id),
+                "duplicate target-table update for id={id}"
+            );
+            decoded_count += 1;
         }
     }
-    // The fixture generator tears ~40 bytes before the clean end, which its
-    // own comment documents as landing "after several clean records" — i.e.
-    // only the last record is torn. Asserting a real lower bound (derived
-    // from the ground truth, not a guess) catches a regression that decodes
-    // far fewer records than it should; `count > 0` alone would pass even if
-    // the reader dropped 90% of the pre-tear records (roborev finding,
-    // review-first pass).
     assert!(
-        count >= gt.inserts.len() - 1,
-        "expected at least {} of {} of OUR table's inserts to decode before the tear, got {count}",
-        gt.inserts.len() - 1,
-        gt.inserts.len()
+        decoded_count == 4,
+        "expected exactly four target-table updates before the tear, got {decoded_count}"
     );
-    // Exactly one of these outcomes must hold, matching the comment above: the
-    // walker either reaches a torn tail cleanly (truncated()) or the fixture's
-    // cut point lands mid-record and surfaces as a typed Err first. Asserting
-    // only truncated() made this test fixture-offset-fragile — regenerating
-    // with a different insert set could shift the tear into the Err case and
-    // fail confusingly (roborev finding, review-first pass).
+    assert_eq!(decoded_ids, BTreeSet::from([1, 2, 3, 4]));
     assert!(
-        it.truncated() || saw_err,
-        "torn tail must surface as either Iterator::truncated() or a typed Err, not silently"
+        it.truncated(),
+        "truncated fixture must terminate with Iterator::truncated()"
     );
 }
 

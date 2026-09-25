@@ -12,10 +12,10 @@
 //! this doc previously oversold it as "streaming"):** the decode side is
 //! genuinely lazy, but opening a reader reads the entire segment FILE into
 //! one `Vec<u8>` up front (bounded by [`MAX_SEGMENT_BYTES`]) — it does not
-//! mmap or chunk the file itself. For a Cassandra-default 32 MB segment this
-//! is well inside CQLite's <128MB target; a caller inspecting many segments
-//! should still bound how many `CommitLogReader`s it keeps open
-//! simultaneously, since each one holds its full segment in memory.
+//! mmap or chunk the file itself. Decoding also materializes a whole mutation,
+//! so this input-size cap is not a bound on decoded allocations or total process
+//! memory. A caller inspecting many segments should bound how many readers and
+//! decoded mutations it keeps alive simultaneously.
 
 use std::fs;
 use std::path::Path;
@@ -28,9 +28,8 @@ use crate::{Error, Result};
 
 /// Upper bound on a segment file we will read into memory (128 MiB).
 ///
-/// Cassandra caps a segment at 32 MB by default; even a doubled configuration
-/// fits comfortably. Rejecting anything larger keeps the reader within CQLite's
-/// <128MB memory target and guards against a pathological/hostile file.
+/// Cassandra uses 32 MB segments by default. This limit bounds the retained
+/// input buffer, not the additional allocations needed to decode mutations.
 pub const MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
 
 /// A reader over a single Cassandra CommitLog segment.
@@ -55,7 +54,8 @@ impl CommitLogReader {
     ///
     /// # Errors
     /// - [`Error::CorruptCommitLogFrame`] / [`Error::UnsupportedCommitLogVersion`]
-    ///   from descriptor parsing.
+    ///   from descriptor parsing, including malformed parameters JSON or
+    ///   invalid UTF-8.
     /// - [`Error::UnsupportedFormat`] if the segment exceeds
     ///   [`MAX_SEGMENT_BYTES`], or declares a compressed/encrypted payload
     ///   (fail-closed: never decoded as if plain).
@@ -161,6 +161,7 @@ impl Iterator for MutationIter<'_> {
 mod tests {
     use super::*;
     use crate::storage::commitlog::descriptor::tests::build_header;
+    use crate::storage::commitlog::frame::{marker_crc, RECORD_OVERHEAD, SYNC_MARKER_SIZE};
 
     fn write_segment(params: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         // A valid descriptor header alone is enough: open_with_schemas checks
@@ -169,6 +170,46 @@ mod tests {
         let bytes = build_header(7, 1_689_012_345_678_i64, params);
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("CommitLog-7-1.log");
+        fs::write(&path, &bytes).expect("write segment");
+        (dir, path)
+    }
+
+    fn write_segment_with_one_empty_partition(
+        params: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        const SEGMENT_ID: i64 = 77;
+
+        let mut bytes = build_header(7, SEGMENT_ID, params);
+        let marker_pos = bytes.len();
+
+        // One mutation containing one empty partition update: update count,
+        // 16-byte table id, empty partition key, and ITER_IS_EMPTY.
+        let mut body = Vec::with_capacity(19);
+        body.push(1);
+        body.extend_from_slice(&[0u8; 16]);
+        body.extend_from_slice(&[0, 1]);
+
+        let segment_len = marker_pos + SYNC_MARKER_SIZE + RECORD_OVERHEAD + body.len();
+        let next_marker = i32::try_from(segment_len).expect("test segment offset fits marker");
+        bytes.extend_from_slice(&next_marker.to_be_bytes());
+        bytes.extend_from_slice(&marker_crc(SEGMENT_ID, marker_pos).to_be_bytes());
+
+        let size = i32::try_from(body.len()).expect("test mutation size fits record");
+        let size_bytes = size.to_be_bytes();
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&size_bytes);
+        bytes.extend_from_slice(&size_bytes);
+        bytes.extend_from_slice(&hasher.finalize().to_be_bytes());
+        bytes.extend_from_slice(&body);
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&size_bytes);
+        hasher.update(&body);
+        bytes.extend_from_slice(&hasher.finalize().to_be_bytes());
+        assert_eq!(bytes.len(), segment_len, "test segment construction");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("CommitLog-77-1.log");
         fs::write(&path, &bytes).expect("write segment");
         (dir, path)
     }
@@ -200,11 +241,59 @@ mod tests {
     }
 
     #[test]
+    fn open_rejects_malformed_or_non_object_descriptor_params() {
+        for params in ["not-json", "[]", "null", r#"{"compressionClass":{}}"#] {
+            let (_dir, path) = write_segment(params);
+            assert!(
+                matches!(
+                    CommitLogReader::open(&path),
+                    Err(Error::CorruptCommitLogFrame(_))
+                ),
+                "expected descriptor parameters to fail: {params}"
+            );
+        }
+    }
+
+    #[test]
     fn open_succeeds_on_uncompressed_unencrypted_header() {
-        // Baseline: a plain `{}` descriptor is neither compressed nor encrypted,
-        // so the fail-closed guard must NOT fire on it.
-        let (_dir, path) = write_segment("{}");
-        let reader = CommitLogReader::open(&path).expect("plain segment opens");
-        assert!(!reader.descriptor().is_unsupported_payload());
+        // Missing or explicitly null compression metadata means uncompressed;
+        // valid unset forms must not be confused with malformed params.
+        for params in ["{}", r#"{"compressionClass":null}"#] {
+            let (_dir, path) = write_segment(params);
+            let reader = CommitLogReader::open(&path).expect("plain segment opens");
+            assert!(!reader.descriptor().is_unsupported_payload());
+        }
+    }
+
+    #[test]
+    fn variable_descriptor_length_keeps_reader_aligned_to_sync_frames() {
+        let params = [
+            "{}",
+            r#"{"extra":"descriptor metadata that shifts the sync marker and framed record offsets"}"#,
+        ];
+        let mut header_lengths = Vec::new();
+
+        for params_json in params {
+            let (_dir, path) = write_segment_with_one_empty_partition(params_json);
+            let reader = CommitLogReader::open(&path).expect("valid segment opens");
+            header_lengths.push(reader.descriptor().header_len);
+
+            let mut mutations = reader.mutations();
+            let mutation = mutations
+                .next()
+                .expect("one framed mutation")
+                .expect("valid mutation body");
+            assert_eq!(mutation.updates.len(), 1);
+            assert!(mutation.updates_complete);
+            assert_eq!(mutation.updates[0].table_id, [0; 16]);
+            assert!(mutation.updates[0].partition_key.is_empty());
+            assert!(mutations.next().is_none(), "section ends cleanly");
+            assert!(!mutations.truncated(), "valid segment is not truncated");
+        }
+
+        assert_ne!(
+            header_lengths[0], header_lengths[1],
+            "the longer JSON metadata must move the first sync marker"
+        );
     }
 }

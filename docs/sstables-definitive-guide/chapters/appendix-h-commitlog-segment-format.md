@@ -47,7 +47,9 @@ Cassandra keys — a non-null `compressionClass` (a plain STRING, e.g.
 `encCipher` / `encKeyAlias` / `encIV` ⇒ encrypted (Cassandra never writes an
 `"encryption"`/`"encryptionContext"` key). A present-but-`null` value (e.g.
 `{"compressionClass":null}`) is neither. Never sniffed from payload bytes
-(no-heuristics, issue #28).
+(no-heuristics, issue #28). CQLite rejects invalid UTF-8, malformed JSON,
+non-object parameters, and a non-string/non-null `compressionClass` as corrupt
+metadata; a valid header checksum does not make those shapes interpretable.
 
 ## 3. Sync marker (8 bytes, `CommitLogSegment.writeSyncMarker`)
 
@@ -143,17 +145,34 @@ rather than guessing at bytes it cannot align. Guessing here would be a no-heuri
 violation (issue #28) *and* a silent-corruption source, since misreading one field's width
 misaligns every field after it.
 
-The two honesty signals, both on the public API
-(`cqlite-core/src/storage/commitlog/mutation.rs:60-95`):
+The public API exposes three completeness signals:
 
 | Signal | Meaning when `false` |
 |---|---|
+| `PartitionUpdate::columns_read` | the regular column-name block was not read; `column_names` is empty but does not assert a parsed empty list |
 | `PartitionUpdate::rows_decoded` | rows/cells were not decoded for this update; `rows` is empty (never partially filled) |
 | `Mutation::updates_complete` | a batch declared more partition updates than `updates` holds — the walk stopped at the first update whose body could not be fully consumed, because the next update's offset is unknowable without finishing this one |
 
+A partially decoded final update can leave `updates_complete` true: every
+declared update is represented, while its `rows_decoded` remains false.
+
 What still *is* authoritative when `rows_decoded == false`: `table_id`, `partition_key`,
 `has_partition_deletion` (read straight from the `iterFlags` bit before any early return), and
-`column_names` when the reader got far enough to read the columns block.
+`column_names` when `columns_read` is true. A true flag with an empty list means
+the reader parsed a zero-column block. Static-row bailouts and the empty-partition
+fast path do not read that block and leave `columns_read` false.
+
+The `read-commitlog` JSON output carries `columns_read` on each update. Its
+`mutation_count` counts decoded mutation records encountered, including a record
+whose display was cut short. `--limit` bounds both that count and emitted updates,
+whichever is reached first. When it omits an already-decoded update from the last
+mutation, `last_mutation_partial` is true and `all_updates_complete` is false.
+Reaching the limit exactly after the last update in a mutation does not set
+`last_mutation_partial`; `limited` still reports that the segment tail was not
+inspected. Decoder incompleteness is reported independently by
+`all_updates_complete`, even without a display limit.
+These are output limits: the reader still loads the segment and decodes each
+encountered mutation before the CLI applies the emitted-update bound.
 
 Bail sites, each with its reason (all in
 `cqlite-core/src/storage/commitlog/mutation.rs`):
