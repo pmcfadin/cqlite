@@ -15854,9 +15854,31 @@ run_component() { # run_component <name> <cmd...>
   AGENT_GATE_FM_COMPONENT="$name"
   local log="$LOG_DIR/$name.log"
   local start end status
+  # #4230: these three dataset-backed components must pass the strict fixture contract on
+  # the FULL gate. Keep the export scoped to the child command so it cannot leak into a
+  # later dataset-free component. --only/--lite probes and the documented opt-out retain
+  # explicitly inherited caller flags; this wrapper only adds the gate-owned requirement on
+  # a certifying full run, including every child nested under bash -c.
+  local -a fixture_env=()
+  case "$name" in
+    core-tests|write-tests|cli-tests)
+      if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+        fixture_env=(CQLITE_REQUIRE_FIXTURES=1)
+      fi
+      ;;
+  esac
   echo ">>> [$name] $*"
   start=$(date +%s)
-  if "$@" >"$log" 2>&1; then
+  if [ "${#fixture_env[@]}" -gt 0 ]; then
+    if env "${fixture_env[@]}" "$@" >"$log" 2>&1; then
+      status=PASS
+    else
+      status=FAIL
+      echo "--- [$name] FAILED; last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+    fi
+  elif "$@" >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -22842,6 +22864,23 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_cli_tests_enum.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (cli-tests enumeration self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # strict-fixture export self-test (#4230): hermetic, no Cargo. Extracts the shipped
+  # core/write/CLI command bodies and drives them through a cargo stub, proving every
+  # nextest/doc/write/CLI child receives CQLITE_REQUIRE_FIXTURES=1 on the full gate,
+  # missing fixtures fail hard, the documented opt-out/probe modes retain caller policy,
+  # and the scoped value cannot leak into a dataset-free component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_strict_fixtures.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_strict_fixtures.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (strict-fixture export self-test #4230); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
