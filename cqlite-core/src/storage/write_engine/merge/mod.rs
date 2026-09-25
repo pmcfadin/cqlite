@@ -1904,16 +1904,6 @@ impl KWayMerger {
                             continue;
                         }
                         let mutation = Self::merge_entry_to_mutation(*row, &decode_schema)?;
-                        // Single fold point for EVERY mutation of this
-                        // partition (carrier, static, or clustered row) —
-                        // mirrors `write_partition`'s
-                        // `for mutation in &mutations { fold... }` loop,
-                        // which folds unconditionally regardless of
-                        // classification.
-                        crate::storage::sstable::writer::stats_fold::fold_mutation_stats(
-                            &mut partition_stats,
-                            &mutation,
-                        );
 
                         // Classify the (None-keyed) carriers and the static
                         // row; everything else is a real clustering row that
@@ -1931,11 +1921,29 @@ impl KWayMerger {
                             && !mutation.range_tombstones.is_empty();
 
                         if is_partition_only {
+                            // The tombstone MARKER itself is never row-shadowed
+                            // — it IS the deletion — so it always contributes
+                            // to persisted stats (issue #4246). `is_partition_only`
+                            // guarantees `range_tombstones` is empty, so
+                            // `fold_marker_stats` folding both fields is exactly
+                            // the partition-tombstone-only fold this needs.
+                            crate::storage::sstable::writer::stats_fold::fold_marker_stats(
+                                &mut partition_stats,
+                                &mutation,
+                            );
                             partition_tombstone = mutation.partition_tombstone;
                             saw_carrier_or_static = true;
                             continue;
                         }
                         if is_range_only {
+                            // `is_range_only` guarantees `partition_tombstone`
+                            // is `None`, so `fold_marker_stats` folding both
+                            // fields is exactly the range-tombstones-only fold
+                            // this needs.
+                            crate::storage::sstable::writer::stats_fold::fold_marker_stats(
+                                &mut partition_stats,
+                                &mutation,
+                            );
                             range_tombstones.extend(mutation.range_tombstones.iter().cloned());
                             saw_carrier_or_static = true;
                             continue;
@@ -1964,6 +1972,35 @@ impl KWayMerger {
                             if !saw_carrier_or_static {
                                 static_first_ts = mutation.timestamp_micros;
                             }
+                            // Static-cell shadowing by a partition tombstone is
+                            // a separate, pre-existing question issue #4246
+                            // does not attempt (see `row_group_survives`'s doc
+                            // comment) — folded unconditionally (`None`
+                            // shadow boundary), matching the prior behavior
+                            // for this classification exactly.
+                            // `fold_row_content_stats` (not `fold_mutation_stats`,
+                            // issue #4246 roborev finding): the ONLY markers
+                            // this fold could otherwise double-count are a
+                            // `partition_tombstone`/`range_tombstones` field
+                            // on THIS SAME mutation object, which reaches
+                            // this branch only if it also has non-empty
+                            // `operations` — this mutation IS in this branch
+                            // because `mutation.clustering_key.is_none() &&
+                            // schema_has_static`, so any such marker field
+                            // would be REACHABLE-BUT-DEAD anyway: it is
+                            // never added to `partition_tombstone`/
+                            // `range_tombstones` above (those are set only
+                            // by the mutually-exclusive `is_partition_only`/
+                            // `is_range_only` branches, which require EMPTY
+                            // `operations`) and so never emitted as a marker
+                            // either — this call cannot double-count it, but
+                            // nothing folds it, matching the marker being
+                            // absent from Data.db.
+                            crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
+                                &mut partition_stats,
+                                &mutation,
+                                None,
+                            );
                             static_tracker.feed(&mutation, &write_schema, None);
                             saw_carrier_or_static = true;
                             row_count += 1;
@@ -1973,7 +2010,12 @@ impl KWayMerger {
                         // A real clustering row (or an unclustered table's
                         // sole `clustering_key: None` row): buffer it for the
                         // single PartitionEnd write once the full
-                        // range-tombstone set is known.
+                        // range-tombstone set is known. Its stats fold is
+                        // DEFERRED to PartitionEnd (issue #4246): the complete
+                        // range-tombstone set — needed to decide whether this
+                        // row survives shadowing — is not yet known here (a
+                        // range tombstone can arrive AFTER the rows it
+                        // covers, see the module doc above).
                         buffered_rows.push(mutation);
                         row_count += 1;
                     }
@@ -1997,7 +2039,59 @@ impl KWayMerger {
                                 let merged = std::mem::take(&mut static_tracker).finish();
                                 session.feed_static_row(&merged, static_first_ts, &write_schema)?;
                             }
+                            // Issue #4246: now that `partition_tombstone` and
+                            // `range_tombstones` are FINAL, gate each buffered
+                            // row's stats fold on the SAME shadow decision
+                            // `feed_row` makes when it calls
+                            // `DataWriter::merge_row_group` internally — a row
+                            // fully shadow-dropped from Data.db must not lower
+                            // persisted `StatisticsMetadata` minima. See
+                            // `stats_fold::row_group_survives`'s doc comment
+                            // for the scope note on mixed static+row
+                            // mutations.
+                            let partition_floor =
+                                partition_tombstone.as_ref().map(|pt| pt.deletion_time);
                             for mutation in &buffered_rows {
+                                let clustering_key = mutation.clustering_key.as_ref();
+                                let mut shadow_floor = partition_floor;
+                                for rt in &range_tombstones {
+                                    if crate::storage::sstable::writer::data_writer::range_tombstone_covers(
+                                        rt,
+                                        clustering_key,
+                                        &write_schema,
+                                    ) {
+                                        shadow_floor = Some(
+                                            shadow_floor
+                                                .map_or(rt.deletion_time, |f| f.max(rt.deletion_time)),
+                                        );
+                                    }
+                                }
+                                // Issue #4246 roborev round-3 finding: the
+                                // four-step fold sequence (resolve survival,
+                                // fold the group's own row-deletion marker
+                                // once, then gate content on
+                                // `carries_static`/`survives`) is shared with
+                                // `WriteEngine::maintenance_step`'s
+                                // structurally-identical single-mutation
+                                // `PartitionEnd` drain via
+                                // `stats_fold::fold_single_mutation_row_group`
+                                // — extracted so the two paths can never
+                                // silently drift apart, and so this module's
+                                // own `#1668` equivalence test exercises the
+                                // SAME function both production paths call.
+                                // `skip_static_ops = false` inside it matches
+                                // EXACTLY what `feed_row` itself passes to
+                                // `merge_row_group` a few lines below
+                                // (`incremental_partition.rs`'s
+                                // `DataWriter::merge_row_group(&[mutation],
+                                // schema, false, shadow_floor)`).
+                                crate::storage::sstable::writer::stats_fold::fold_single_mutation_row_group(
+                                    &mut partition_stats,
+                                    mutation,
+                                    &write_schema,
+                                    schema_has_static,
+                                    shadow_floor,
+                                );
                                 session.feed_row(mutation, &write_schema)?;
                             }
                             let (offset, blocks, emit) = session.finish(&write_schema)?;

@@ -34,8 +34,15 @@ mod finish;
 #[cfg(feature = "write-support")]
 mod incremental;
 /// Shared per-mutation statistics fold (issue #1668, stage 5c-iv part 2),
-/// called by both `write_partition` and the incremental streaming path so
-/// they can never drift. See [`stats_fold::fold_mutation_stats`].
+/// called by `write_partition`, `KWayMerger::merge`'s streaming compaction
+/// path, and `WriteEngine::maintenance_step`'s budgeted drain, so they can
+/// never drift (issue #4246 roborev round-4 finding: updated — the fold is
+/// now the composition of [`stats_fold::fold_row_content_stats`],
+/// [`stats_fold::fold_marker_stats`], and
+/// [`stats_fold::fold_row_deletion_marker`]/
+/// [`stats_fold::fold_single_mutation_row_group`], not a single
+/// `fold_mutation_stats` call — that function is `#[cfg(test)]`-only now,
+/// kept as a test-only convenience wrapper with no production caller).
 #[cfg(feature = "write-support")]
 pub(crate) mod stats_fold;
 
@@ -638,40 +645,14 @@ impl SSTableWriter {
                 .unwrap_or_else(|_| ck_a.cmp(ck_b)),
         });
 
-        // Update statistics from mutations. Issue #1668 stage 5c-iv part 2:
-        // extracted into `stats_fold::fold_mutation_stats` so the incremental
-        // streaming path folds the exact same logic per mutation and the two
-        // paths can never drift.
-        //
-        // Issue #851: row_count (totalRows) and column_count
-        // (totalColumnsSet) are NOT re-derived per-mutation here. The two
-        // previous attempts re-grouped rows in this loop and kept diverging
-        // from `DataWriter::merge_row_group`, which is what actually emits
-        // rows/cells to Data.db (e.g. it drops partition/clustering-key
-        // columns from cells, and merges static ops from ALL mutations into
-        // a single static prelude that is a SEPARATE row from the clustering
-        // row). Instead, the emitter returns `PartitionEmitCounts` and we add
-        // them below (see the `write_partition_with_index_blocks` call) so
-        // the stats can never drift from what was physically written.
-        for mutation in &mutations {
-            stats_fold::fold_mutation_stats(&mut self.stats, mutation);
-        }
-
-        // Update DataWriter's stats before writing, unless baselines were
-        // pre-seeded for the whole SSTable (issue #729 two-pass flush).
-        // When baselines are locked, the DataWriter already holds the final
-        // minimum values computed over ALL partitions; overwriting them with
-        // the incrementally-growing stats of this partition would raise the
-        // baseline and corrupt delta encoding for earlier partitions.
-        if !self.baselines_locked {
-            self.data_writer.update_stats_from_metadata(&self.stats);
-        }
-
-        // Extract partition tombstone and range tombstones from mutations.
-        // The tombstone can arrive on ANY mutation of the partition (a DELETE
-        // typically follows earlier INSERTs), so scan all of them and keep the
-        // newest deletion (Issue #716: taking only the first mutation dropped
-        // the tombstone and left the partition header LIVE).
+        // Extract partition tombstone and range tombstones from mutations
+        // FIRST (moved ahead of the statistics fold below — issue #4246):
+        // the fold needs the complete shadow-floor inputs to decide whether a
+        // row survives before folding its contribution. The tombstone can
+        // arrive on ANY mutation of the partition (a DELETE typically follows
+        // earlier INSERTs), so scan all of them and keep the newest deletion
+        // (Issue #716: taking only the first mutation dropped the tombstone
+        // and left the partition header LIVE).
         let partition_tombstone = mutations
             .iter()
             .filter_map(|m| m.partition_tombstone.as_ref())
@@ -683,6 +664,152 @@ impl SSTableWriter {
             .flat_map(|m| m.range_tombstones.iter())
             .cloned()
             .collect();
+
+        // Fold the tombstone MARKERS themselves unconditionally (issue
+        // #4246): a partition/range tombstone is never itself row-shadowed —
+        // it IS the deletion — so its timestamp/local-deletion-time always
+        // contribute to persisted stats regardless of what it shadows.
+        // Folded directly from the authoritative extracted values above
+        // rather than re-scanning each carrier mutation (whose own
+        // `partition_tombstone`/`range_tombstones` fields duplicate these),
+        // so a carrier mutation being excluded from the row-shadow gate
+        // below (its `operations` are always empty, so it never survives
+        // `row_group_survives`) loses nothing.
+        if let Some(pt) = partition_tombstone {
+            self.stats.update_timestamp(pt.deletion_time);
+            self.stats
+                .update_local_deletion_time(pt.local_deletion_time);
+            self.stats.mark_partition_level_deletion();
+        }
+        for rt in &range_tombstones {
+            self.stats.update_timestamp(rt.deletion_time);
+            self.stats
+                .update_local_deletion_time(rt.local_deletion_time);
+        }
+
+        // Update statistics from mutations. Issue #1668 stage 5c-iv part 2:
+        // extracted into `stats_fold` (see that module's own doc comment for
+        // which functions compose the fold today, issue #4246 roborev
+        // round-4 finding) so the incremental streaming path folds the exact
+        // same logic per mutation and the paths can never drift.
+        //
+        // Issue #851: row_count (totalRows) and column_count
+        // (totalColumnsSet) are NOT re-derived per-mutation here. The two
+        // previous attempts re-grouped rows in this loop and kept diverging
+        // from `DataWriter::merge_row_group`, which is what actually emits
+        // rows/cells to Data.db (e.g. it drops partition/clustering-key
+        // columns from cells, and merges static ops from ALL mutations into
+        // a single static prelude that is a SEPARATE row from the clustering
+        // row). Instead, the emitter returns `PartitionEmitCounts` and we add
+        // them below (see the `write_partition_with_index_blocks` call) so
+        // the stats can never drift from what was physically written.
+        //
+        // Issue #4246: the OLD blind loop folded EVERY mutation's
+        // timestamp/TTL/LDT unconditionally, including a row's whose whole
+        // clustering-key group is later shadow-dropped by a covering
+        // partition/range tombstone and never reaches Data.db — so a
+        // physically-dropped row (e.g. an old write shadowed by a newer
+        // range deletion) still lowered `min_timestamp`, diverging from
+        // Cassandra's `MetadataCollector` (which only observes emitted
+        // rows/markers, `SortedTableWriter.java`/`MetadataCollector.java`).
+        // Fixed by gating each clustering-row GROUP's fold on
+        // `stats_fold::row_group_survival` — the SAME `merge_row_group`
+        // shadow decision `write_partition_with_index_blocks` makes for the
+        // real emission below — while partition/range tombstone MARKERS
+        // (folded unconditionally above, inline from the authoritative
+        // extracted `partition_tombstone`/`range_tombstones` values — issue
+        // #4246 roborev finding: NOT via `fold_marker_stats`/
+        // `fold_mutation_stats`, which would re-scan each carrier mutation
+        // and double-count into the tombstone-drop-time histogram for a
+        // mutation carrying both row content and a tombstone) and
+        // wholly-static mutations (out of this fix's verified scope, see
+        // `row_group_survives`'s doc comment) keep the prior unconditional
+        // fold, minus markers.
+        //
+        // A GROUP surviving is not sufficient (issue #4246 roborev finding):
+        // a newer row deletion INSIDE the same group can still shadow an
+        // OLDER mutation in it (e.g. an INSERT then a DELETE for the same
+        // clustering key in one flush batch) even though the group as a
+        // whole still produces a row. `row_group_survival` additionally
+        // returns the group's resolved `deletion_ts` so each mutation is
+        // checked individually against it, mirroring `merge_row_group`'s own
+        // `mutation_shadowed` test.
+        let partition_floor = partition_tombstone.map(|pt| pt.deletion_time);
+        let schema_has_static = self.schema.columns.iter().any(|c| c.is_static);
+        let row_mutations: Vec<&Mutation> = mutations
+            .iter()
+            .filter(|m| !data_writer::is_static_row_mutation(m, &self.schema))
+            .collect();
+        let mut group_start = 0;
+        while group_start < row_mutations.len() {
+            let mut group_end = group_start + 1;
+            while group_end < row_mutations.len()
+                && row_mutations[group_end].clustering_key
+                    == row_mutations[group_start].clustering_key
+            {
+                group_end += 1;
+            }
+            let group = &row_mutations[group_start..group_end];
+            let clustering_key = group[0].clustering_key.as_ref();
+            let mut shadow_floor = partition_floor;
+            for rt in &range_tombstones {
+                if data_writer::range_tombstone_covers(rt, clustering_key, &self.schema) {
+                    shadow_floor =
+                        Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
+                }
+            }
+            let (survives, deletion_ts, row_deletion) = stats_fold::row_group_survival(
+                group,
+                &self.schema,
+                schema_has_static,
+                shadow_floor,
+            );
+            // The group's own row-deletion marker (winning `DeleteRow` /
+            // #932 `row_tombstone`) is folded exactly ONCE here, at the
+            // group level — never per-mutation (issue #4246 roborev round-2
+            // finding: see `fold_row_deletion_marker`'s doc comment).
+            stats_fold::fold_row_deletion_marker(&mut self.stats, row_deletion);
+            for mutation in group {
+                let carries_static = schema_has_static
+                    && mutation
+                        .operations
+                        .iter()
+                        .any(|op| data_writer::is_static_operation(op, &self.schema));
+                if carries_static {
+                    // Static-cell shadowing uses a SEPARATE, partition-floor
+                    // -only mechanism unrelated to this row-level
+                    // `deletion_ts` (out of this fix's verified scope, see
+                    // `row_group_survives`'s doc comment) — pass `None` so
+                    // per-op shadow gating never applies to it, exactly the
+                    // prior unconditional-fold behavior.
+                    stats_fold::fold_row_content_stats(&mut self.stats, mutation, None);
+                } else if survives {
+                    // `fold_row_content_stats` itself gates per-mutation
+                    // (simple content) and per-op (independent-timestamp
+                    // `ComplexDeletion`/`WriteComplexElement`) against
+                    // `deletion_ts` — see its doc comment (issue #4246
+                    // roborev finding). It no longer folds a row's own
+                    // deletion marker (handled once above).
+                    stats_fold::fold_row_content_stats(&mut self.stats, mutation, deletion_ts);
+                }
+            }
+            group_start = group_end;
+        }
+        for mutation in &mutations {
+            if data_writer::is_static_row_mutation(mutation, &self.schema) {
+                stats_fold::fold_row_content_stats(&mut self.stats, mutation, None);
+            }
+        }
+
+        // Update DataWriter's stats before writing, unless baselines were
+        // pre-seeded for the whole SSTable (issue #729 two-pass flush).
+        // When baselines are locked, the DataWriter already holds the final
+        // minimum values computed over ALL partitions; overwriting them with
+        // the incrementally-growing stats of this partition would raise the
+        // baseline and corrupt delta encoding for earlier partitions.
+        if !self.baselines_locked {
+            self.data_writer.update_stats_from_metadata(&self.stats);
+        }
 
         // Write partition to Data.db, collecting promoted index blocks for wide partitions.
         // Wide partitions (≥ 64 KiB of row data) get a non-zero promoted index so Cassandra
@@ -822,166 +949,335 @@ impl SSTableWriter {
     /// Sentinel value `i64::MAX` / `i32::MAX` is returned for each field when no
     /// relevant data is found in the slice (caller should handle via `.min()`
     /// accumulation and then pass the final result to `pre_seed_encoding_baselines`).
-    pub fn compute_mutations_baseline_stats(mutations_slice: &[Mutation]) -> (i64, i32, i32) {
+    ///
+    /// `mutations_slice` is one memtable PARTITION's mutations (the caller,
+    /// `WriteEngine::flush_internal_async`, calls this once per partition and
+    /// `.min()`s the results across all partitions before locking the
+    /// baseline). `schema` decides clustering-row grouping and static-column
+    /// classification for the issue #4246 shadow gate below.
+    ///
+    /// Issue #4246: this is the baseline `WriteEngine::flush_internal_async`
+    /// LOCKS via `pre_seed_encoding_baselines` BEFORE any partition is
+    /// written — `write_partition`'s own per-mutation fold runs strictly
+    /// AFTER that lock and can only ever LOWER `min_timestamp` further
+    /// (`update_timestamp`'s fold is a plain `.min()`), never raise a
+    /// too-low pre-seeded value back up. So gating `write_partition`'s own
+    /// fold (done separately, see its call site) is necessary but NOT
+    /// sufficient in any production flush — THIS function is where the fix
+    /// must actually take effect: a mutation whose clustering-row group is
+    /// fully shadow-dropped by a covering partition/range tombstone (and so
+    /// never reaches Data.db) must not lower the baseline Cassandra's own
+    /// `MetadataCollector` would compute from the SAME emitted rows.
+    pub fn compute_mutations_baseline_stats(
+        mutations_slice: &[Mutation],
+        schema: &TableSchema,
+    ) -> (i64, i32, i32) {
         let mut min_timestamp = i64::MAX;
         let mut min_ldt = i32::MAX;
         let mut min_ttl = i32::MAX;
 
+        // Tombstone MARKERS are never themselves row-shadowed — they ARE the
+        // deletion — so they always contribute, folded unconditionally here
+        // exactly as before this fix.
+        //
+        // DELIBERATELY folds EVERY mutation's OWN `partition_tombstone`, not
+        // just the WINNING one `write_partition`'s marker fold keeps
+        // (`.max_by_key(|pt| pt.deletion_time)`, the only one actually
+        // EMITTED into Data.db's partition header — issue #4246 roborev
+        // round-4 Medium finding, verified empirically: two `DELETE`s for
+        // one partition in a single flush batch, PT@5 superseded by PT@10,
+        // persists `min_timestamp = 5`, even though only the `@10` marker is
+        // written). This is the SAME architectural pattern #4286 already
+        // documents for row content (two separate `DELETE` CQL statements
+        // are two separate `PartitionUpdate`s, each contributing
+        // UNCONDITIONALLY to real Cassandra's `EncodingStats.Collector`,
+        // `SkipListMemtable.put`) — not a defect this function should close:
+        // `write_partition`'s OWN winning-only marker fold can only ever
+        // LOWER this pre-seeded value further, never raise it, so folding
+        // EVERY partition tombstone here (the group-wide MINIMUM across all
+        // candidates) is the ENCODING-baseline-correct behavior, and
+        // `write_partition`'s own fold is consequently a no-op whenever this
+        // pre-seed already dominates. See #4286 for the full accounting.
         for mutation in mutations_slice {
-            min_timestamp = min_timestamp.min(mutation.timestamp_micros);
-
-            // Issue #1018: a simple `Write`/`WriteWithTtl`/`Delete` cell may carry
-            // its OWN (lower) per-cell timestamp in
-            // `Mutation::cell_write_timestamps` — a live cell's writetime OR a cell
-            // tombstone's markedForDeleteAt (the compaction merge→mutation path
-            // records it when it differs from the row's `timestamp_micros`). The
-            // DataWriter emits that cell's explicit timestamp as a `min_timestamp`
-            // delta, so the pre-seeded baseline must cover EVERY per-cell timestamp
-            // — otherwise `min_timestamp` could be pre-seeded ABOVE an emitted
-            // cell's actual (lower) timestamp and the unsigned-VInt delta
-            // underflows/wraps. Fold them all in here, mirroring the per-cell
-            // timestamp threading in `rows.rs` / `encoding.rs`.
-            if let Some(cell_ts) = &mutation.cell_write_timestamps {
-                for ts in cell_ts.values() {
-                    min_timestamp = min_timestamp.min(*ts);
-                }
-            }
-
-            for op in &mutation.operations {
-                match op {
-                    crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                        ttl_seconds,
-                        local_deletion_time,
-                        ..
-                    } => {
-                        let ttl = *ttl_seconds as i32;
-                        if ttl > 0 {
-                            min_ttl = min_ttl.min(ttl);
-                            // Issue #1538: the encoding baseline must match the LDT
-                            // the expiring cell will ACTUALLY be written with, else
-                            // the unsigned delta underflows. An authoritative
-                            // per-cell `local_deletion_time: Some(L)` is emitted with
-                            // `L` verbatim (a surviving expiring cell preserved
-                            // through compaction); `None` derives `now + ttl`.
-                            let ldt = match local_deletion_time {
-                                Some(l) => *l,
-                                None => {
-                                    let now_seconds = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs() as i32)
-                                        .unwrap_or(0);
-                                    now_seconds.saturating_add(ttl)
-                                }
-                            };
-                            min_ldt = min_ldt.min(ldt);
-                        }
-                    }
-                    op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
-                        // Issue #764 / #921 finding 2: the encoding baseline must
-                        // match the LDT the row/cell tombstone will ACTUALLY be
-                        // written with, else the delta underflows. A `Delete` with
-                        // a per-cell `local_deletion_time: Some(L)` is emitted with
-                        // `L` verbatim; reuse the emit path's
-                        // `op_cell_local_deletion_time` helper so the pre-seeded
-                        // baseline always covers the smallest LDT actually written.
-                        let ldt =
-                            crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
-                                op, mutation,
-                            );
-                        min_ldt = min_ldt.min(ldt);
-                    }
-                    // Issue #887: the pre-seeded baseline path must fold the SAME
-                    // marker timestamps/LDTs the DataWriter delta-encodes (it
-                    // subtracts `min_timestamp` / `min_local_deletion_time` from
-                    // `marked_for_delete_at` and the element LDT). A
-                    // `ComplexDeletion`/`WriteComplexElement` carrying a timestamp or
-                    // LDT BELOW the mutation's own values would make the delta
-                    // underflow when baselines are locked — exactly what #729's
-                    // two-pass flush is meant to prevent. Mirror the non-pre-seeded
-                    // accumulation in `write_partition`.
-                    crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
-                        marked_for_delete_at,
-                        local_deletion_time,
-                        ..
-                    } => {
-                        // Exclude LIVE / NO_DELETION sentinels exactly as the
-                        // `update_*` chokepoints do (issue #851), so a sentinel
-                        // marker cannot drag the min baselines to `i64::MIN` /
-                        // `i32::MAX`.
-                        if *marked_for_delete_at != i64::MIN && *marked_for_delete_at != i64::MAX {
-                            min_timestamp = min_timestamp.min(*marked_for_delete_at);
-                        }
-                        if *local_deletion_time != i32::MAX {
-                            min_ldt = min_ldt.min(*local_deletion_time);
-                        }
-                    }
-                    crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
-                        timestamp_micros,
-                        ttl_seconds,
-                        local_deletion_time,
-                        ..
-                    } => {
-                        if *timestamp_micros != i64::MIN && *timestamp_micros != i64::MAX {
-                            min_timestamp = min_timestamp.min(*timestamp_micros);
-                        }
-                        if let Some(ttl) = ttl_seconds {
-                            let ttl = *ttl as i32;
-                            if ttl > 0 {
-                                min_ttl = min_ttl.min(ttl);
-                            }
-                        }
-                        if let Some(ldt) = local_deletion_time {
-                            if *ldt != i32::MAX {
-                                min_ldt = min_ldt.min(*ldt);
-                            }
-                        }
-                    }
-                    crate::storage::write_engine::mutation::CellOperation::Write { .. } => {}
-                }
-            }
-
-            // Partition-level TTL (top-level ttl_seconds on the Mutation)
-            if let Some(ttl) = mutation.ttl_seconds {
-                let ttl = ttl as i32;
-                if ttl > 0 {
-                    min_ttl = min_ttl.min(ttl);
-                    let now_seconds = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i32)
-                        .unwrap_or(0);
-                    let ldt = now_seconds.saturating_add(ttl);
-                    min_ldt = min_ldt.min(ldt);
-                }
-            }
-
             if let Some(pt) = &mutation.partition_tombstone {
                 min_timestamp = min_timestamp.min(pt.deletion_time);
                 min_ldt = min_ldt.min(pt.local_deletion_time);
             }
-
             for rt in &mutation.range_tombstones {
                 min_timestamp = min_timestamp.min(rt.deletion_time);
                 min_ldt = min_ldt.min(rt.local_deletion_time);
             }
+        }
 
-            // Issue #1721: a decoupled row tombstone (#932
-            // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted by
-            // DataWriter as a `HAS_DELETION` row stamped with its OWN
-            // `(deletion_time, ldt)` — DECOUPLED from `timestamp_micros`, so the
-            // folds above never see it. The pre-seeded flush path locks THIS
-            // baseline; without folding the row tombstone, `min_ldt` stays
-            // `i32::MAX` and the below-baseline guard in data_writer/rows.rs rejects
-            // the row (and the `deletion_time` delta underflows against
-            // `min_timestamp`). Mirror the `partition_tombstone` fold; LIVE
-            // sentinels never reach this field.
-            if let Some((deletion_time, ldt)) = mutation.row_tombstone {
-                min_timestamp = min_timestamp.min(deletion_time);
-                min_ldt = min_ldt.min(ldt);
+        let partition_floor = mutations_slice
+            .iter()
+            .filter_map(|m| m.partition_tombstone.as_ref())
+            .map(|pt| pt.deletion_time)
+            .max();
+        let range_tombstones: Vec<_> = mutations_slice
+            .iter()
+            .flat_map(|m| m.range_tombstones.iter())
+            .cloned()
+            .collect();
+        let schema_has_static = schema.columns.iter().any(|c| c.is_static);
+
+        // Group the row-bearing mutations by clustering key (mirrors
+        // `merge_clustering_rows`'s own adjacency grouping) and fold ONLY the
+        // groups that actually survive shadow filtering — the same
+        // `DataWriter::merge_row_group` decision `write_partition`'s emitter
+        // makes. Sorted locally (this slice is memtable-internal storage,
+        // not guaranteed pre-sorted, unlike `write_partition`'s own
+        // caller-sorted `mutations`).
+        let mut row_mutations: Vec<&Mutation> = mutations_slice
+            .iter()
+            .filter(|m| !data_writer::is_static_row_mutation(m, schema))
+            .collect();
+        row_mutations.sort_by(|a, b| match (&a.clustering_key, &b.clustering_key) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(ck_a), Some(ck_b)) => ck_a
+                .compare(ck_b, schema)
+                .unwrap_or_else(|_| ck_a.cmp(ck_b)),
+        });
+
+        let mut group_start = 0;
+        while group_start < row_mutations.len() {
+            let mut group_end = group_start + 1;
+            while group_end < row_mutations.len()
+                && row_mutations[group_end].clustering_key
+                    == row_mutations[group_start].clustering_key
+            {
+                group_end += 1;
+            }
+            let group = &row_mutations[group_start..group_end];
+            let clustering_key = group[0].clustering_key.as_ref();
+            let mut shadow_floor = partition_floor;
+            for rt in &range_tombstones {
+                if data_writer::range_tombstone_covers(rt, clustering_key, schema) {
+                    shadow_floor =
+                        Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
+                }
+            }
+            let survives =
+                stats_fold::row_group_survives(group, schema, schema_has_static, shadow_floor);
+            // GROUP-level gating only (issue #4246): deliberately NOT the
+            // per-mutation `deletion_ts` refinement `write_partition` (the
+            // PERSISTED-stats fold, below) uses. This function computes the
+            // ENCODING baseline (`pre_seed_encoding_baselines`'s input),
+            // which is a SEPARATE Cassandra concept from the persisted STATS
+            // component `write_partition`'s fold feeds: Cassandra's own
+            // `EncodingStats` accumulates from EVERY memtable update applied
+            // (`SkipListMemtable.put`'s `statsCollector.update(update.stats())`,
+            // cassandra-5.0.8), UNCONDITIONALLY — it does not re-derive from
+            // the post-reconciliation row the way `MetadataCollector`
+            // (persisted STATS) does. Verified against `issue_717_row_
+            // tombstone_columns_subset.rs::row_tombstone_emits_columns_subset`,
+            // a Cassandra-rejection-motivated byte-level test asserting an
+            // INSERT-then-DELETE for the SAME clustering key in ONE flush
+            // batch encodes its tombstone delta against the INSERT's
+            // timestamp, not the DELETE's — the per-mutation refinement
+            // broke it. So an INSERT shadowed by a same-batch, same-key
+            // DELETE (unlike a range/partition-tombstone shadow, which this
+            // group-level gate already excludes correctly since the
+            // SHADOWED clustering key's own group returns `None`) is a
+            // KNOWN, DOCUMENTED residual of this fix: the ENCODING baseline
+            // still includes it, matching Cassandra, but the PERSISTED STATS
+            // component inherits that same (possibly lower) value here too,
+            // since `pre_seed_encoding_baselines` seeds `self.stats` from
+            // this function's return value directly — see
+            // `issue_4246_writer_stats_shadow_regression.rs`'s
+            // `insert_then_delete_same_batch_baseline_residual_is_documented`
+            // for the exact boundary this leaves.
+            for mutation in group {
+                let carries_static = schema_has_static
+                    && mutation
+                        .operations
+                        .iter()
+                        .any(|op| data_writer::is_static_operation(op, schema));
+                if survives || carries_static {
+                    Self::fold_one_mutation_baseline(
+                        mutation,
+                        &mut min_timestamp,
+                        &mut min_ldt,
+                        &mut min_ttl,
+                    );
+                }
+            }
+            group_start = group_end;
+        }
+
+        // Wholly-static mutations (excluded from `row_mutations` above) are
+        // out of this fix's verified scope (see `stats_fold::row_group_survives`'s
+        // doc comment) — folded unconditionally, matching prior behavior.
+        for mutation in mutations_slice {
+            if data_writer::is_static_row_mutation(mutation, schema) {
+                Self::fold_one_mutation_baseline(
+                    mutation,
+                    &mut min_timestamp,
+                    &mut min_ldt,
+                    &mut min_ttl,
+                );
             }
         }
 
         (min_timestamp, min_ldt, min_ttl)
+    }
+
+    /// One mutation's row-content contribution to the encoding baseline
+    /// (issue #4246): everything `compute_mutations_baseline_stats` used to
+    /// fold unconditionally EXCEPT the partition/range tombstone MARKER
+    /// fields, which that function folds separately and unconditionally
+    /// (they are never row-shadowed). Extracted so the caller can gate
+    /// exactly this row-content fold on `stats_fold::row_group_survives`
+    /// without duplicating the per-`CellOperation` classification logic.
+    fn fold_one_mutation_baseline(
+        mutation: &Mutation,
+        min_timestamp: &mut i64,
+        min_ldt: &mut i32,
+        min_ttl: &mut i32,
+    ) {
+        *min_timestamp = (*min_timestamp).min(mutation.timestamp_micros);
+
+        // Issue #1018: a simple `Write`/`WriteWithTtl`/`Delete` cell may carry
+        // its OWN (lower) per-cell timestamp in
+        // `Mutation::cell_write_timestamps` — a live cell's writetime OR a cell
+        // tombstone's markedForDeleteAt (the compaction merge→mutation path
+        // records it when it differs from the row's `timestamp_micros`). The
+        // DataWriter emits that cell's explicit timestamp as a `min_timestamp`
+        // delta, so the pre-seeded baseline must cover EVERY per-cell timestamp
+        // — otherwise `min_timestamp` could be pre-seeded ABOVE an emitted
+        // cell's actual (lower) timestamp and the unsigned-VInt delta
+        // underflows/wraps. Fold them all in here, mirroring the per-cell
+        // timestamp threading in `rows.rs` / `encoding.rs`.
+        if let Some(cell_ts) = &mutation.cell_write_timestamps {
+            for ts in cell_ts.values() {
+                *min_timestamp = (*min_timestamp).min(*ts);
+            }
+        }
+
+        for op in &mutation.operations {
+            match op {
+                crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    ttl_seconds,
+                    local_deletion_time,
+                    ..
+                } => {
+                    let ttl = *ttl_seconds as i32;
+                    if ttl > 0 {
+                        *min_ttl = (*min_ttl).min(ttl);
+                        // Issue #1538: the encoding baseline must match the LDT
+                        // the expiring cell will ACTUALLY be written with, else
+                        // the unsigned delta underflows. An authoritative
+                        // per-cell `local_deletion_time: Some(L)` is emitted with
+                        // `L` verbatim (a surviving expiring cell preserved
+                        // through compaction); `None` derives `now + ttl`.
+                        let ldt = match local_deletion_time {
+                            Some(l) => *l,
+                            None => {
+                                let now_seconds = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i32)
+                                    .unwrap_or(0);
+                                now_seconds.saturating_add(ttl)
+                            }
+                        };
+                        *min_ldt = (*min_ldt).min(ldt);
+                    }
+                }
+                op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
+                    // Issue #764 / #921 finding 2: the encoding baseline must
+                    // match the LDT the row/cell tombstone will ACTUALLY be
+                    // written with, else the delta underflows. A `Delete` with
+                    // a per-cell `local_deletion_time: Some(L)` is emitted with
+                    // `L` verbatim; reuse the emit path's
+                    // `op_cell_local_deletion_time` helper so the pre-seeded
+                    // baseline always covers the smallest LDT actually written.
+                    let ldt =
+                        crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
+                            op, mutation,
+                        );
+                    *min_ldt = (*min_ldt).min(ldt);
+                }
+                // Issue #887: the pre-seeded baseline path must fold the SAME
+                // marker timestamps/LDTs the DataWriter delta-encodes (it
+                // subtracts `min_timestamp` / `min_local_deletion_time` from
+                // `marked_for_delete_at` and the element LDT). A
+                // `ComplexDeletion`/`WriteComplexElement` carrying a timestamp or
+                // LDT BELOW the mutation's own values would make the delta
+                // underflow when baselines are locked — exactly what #729's
+                // two-pass flush is meant to prevent. Mirror the non-pre-seeded
+                // accumulation in `write_partition`.
+                crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+                    marked_for_delete_at,
+                    local_deletion_time,
+                    ..
+                } => {
+                    // Exclude LIVE / NO_DELETION sentinels exactly as the
+                    // `update_*` chokepoints do (issue #851), so a sentinel
+                    // marker cannot drag the min baselines to `i64::MIN` /
+                    // `i32::MAX`.
+                    if *marked_for_delete_at != i64::MIN && *marked_for_delete_at != i64::MAX {
+                        *min_timestamp = (*min_timestamp).min(*marked_for_delete_at);
+                    }
+                    if *local_deletion_time != i32::MAX {
+                        *min_ldt = (*min_ldt).min(*local_deletion_time);
+                    }
+                }
+                crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+                    timestamp_micros,
+                    ttl_seconds,
+                    local_deletion_time,
+                    ..
+                } => {
+                    if *timestamp_micros != i64::MIN && *timestamp_micros != i64::MAX {
+                        *min_timestamp = (*min_timestamp).min(*timestamp_micros);
+                    }
+                    if let Some(ttl) = ttl_seconds {
+                        let ttl = *ttl as i32;
+                        if ttl > 0 {
+                            *min_ttl = (*min_ttl).min(ttl);
+                        }
+                    }
+                    if let Some(ldt) = local_deletion_time {
+                        if *ldt != i32::MAX {
+                            *min_ldt = (*min_ldt).min(*ldt);
+                        }
+                    }
+                }
+                crate::storage::write_engine::mutation::CellOperation::Write { .. } => {}
+            }
+        }
+
+        // Partition-level TTL (top-level ttl_seconds on the Mutation)
+        if let Some(ttl) = mutation.ttl_seconds {
+            let ttl = ttl as i32;
+            if ttl > 0 {
+                *min_ttl = (*min_ttl).min(ttl);
+                let now_seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i32)
+                    .unwrap_or(0);
+                let ldt = now_seconds.saturating_add(ttl);
+                *min_ldt = (*min_ldt).min(ldt);
+            }
+        }
+
+        // Issue #1721: a decoupled row tombstone (#932
+        // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted by
+        // DataWriter as a `HAS_DELETION` row stamped with its OWN
+        // `(deletion_time, ldt)` — DECOUPLED from `timestamp_micros`, so the
+        // folds above never see it. The pre-seeded flush path locks THIS
+        // baseline; without folding the row tombstone, `min_ldt` stays
+        // `i32::MAX` and the below-baseline guard in data_writer/rows.rs rejects
+        // the row (and the `deletion_time` delta underflows against
+        // `min_timestamp`). Mirror the `partition_tombstone` fold; LIVE
+        // sentinels never reach this field.
+        if let Some((deletion_time, ldt)) = mutation.row_tombstone {
+            *min_timestamp = (*min_timestamp).min(deletion_time);
+            *min_ldt = (*min_ldt).min(ldt);
+        }
     }
 }
 
@@ -1943,8 +2239,10 @@ mod tests {
         )
         .with_local_deletion_time(1_700);
 
-        let (min_ts, min_ldt, min_ttl) =
-            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+        let (min_ts, min_ldt, min_ttl) = SSTableWriter::compute_mutations_baseline_stats(
+            std::slice::from_ref(&mutation),
+            &create_test_schema(),
+        );
 
         assert_eq!(
             min_ts, 2_000_000,
@@ -1990,8 +2288,10 @@ mod tests {
         cell_ts.insert("name".to_string(), CELL_TS);
         mutation.cell_write_timestamps = Some(cell_ts);
 
-        let (min_ts, _min_ldt, _min_ttl) =
-            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+        let (min_ts, _min_ldt, _min_ttl) = SSTableWriter::compute_mutations_baseline_stats(
+            std::slice::from_ref(&mutation),
+            &create_test_schema(),
+        );
 
         assert_eq!(
             min_ts, CELL_TS,
@@ -2244,8 +2544,10 @@ mod tests {
             None,
         );
 
-        let (_min_ts, min_ldt, _min_ttl) =
-            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+        let (_min_ts, min_ldt, _min_ttl) = SSTableWriter::compute_mutations_baseline_stats(
+            std::slice::from_ref(&mutation),
+            &create_test_schema(),
+        );
 
         assert_eq!(
             min_ldt, 2,

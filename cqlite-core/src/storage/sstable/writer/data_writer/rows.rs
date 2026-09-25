@@ -99,27 +99,27 @@ impl DataWriter {
         rows
     }
 
-    /// Merge a group of mutations sharing one clustering key into a single
-    /// row, applying Cassandra reconciliation semantics at write time:
+    /// Resolve a row group's WINNING row deletion (if any): the newest
+    /// `DeleteRow` op or #932 decoupled `row_tombstone` among `group`,
+    /// dropping any candidate at or before `shadow_floor` (already covered
+    /// by the partition/range tombstone, so redundant). This is the EXACT
+    /// tuple [`Self::merge_row_group`] emits unconditionally as
+    /// `RowWrite.row_deletion` whenever `Some`.
     ///
-    /// - Row deletion: the newest `DeleteRow` wins; mutations at or before
-    ///   the deletion timestamp are shadowed (`DeletionTime.deletes` uses
-    ///   `timestamp <= markedForDeleteAt`).
-    /// - Cells: last-write-wins per column by timestamp; a tombstone wins a
-    ///   timestamp tie (Cassandra cell reconciliation).
-    /// - Liveness: from the newest surviving mutation that writes cells, or
-    ///   a pure primary-key insert (no ops and no tombstone payload). Pure
-    ///   row tombstones carry NO liveness, matching Cassandra's serializer.
-    ///
-    /// Returns `None` when the group produces no row at all (e.g. a mutation
-    /// that exists only to carry a partition or range tombstone, or a row
-    /// fully shadowed by the partition/range tombstone `shadow_floor`).
-    pub(super) fn merge_row_group<'a>(
-        group: &[&'a Mutation],
-        schema: &TableSchema,
-        skip_static_ops: bool,
+    /// `pub(crate)` (widened from `pub(super)`, issue #4246): also called as
+    /// a pure pre-check from `stats_fold::row_group_survival`, which lives
+    /// in `writer` (the grandparent of this module) so BOTH the buffered
+    /// and incremental writer paths can gate their persisted
+    /// `StatisticsMetadata` fold on this SAME shadow-drop decision — folding
+    /// the winning `(timestamp, local_deletion_time)` exactly ONCE per
+    /// group via `stats_fold::fold_row_deletion_marker`, never per-mutation
+    /// (issue #4246 roborev round-2 finding: an earlier per-mutation
+    /// exemption let a LOSING `DeleteRow`/`row_tombstone` — one this
+    /// function does NOT pick as the winner — still lower persisted minima).
+    pub(crate) fn resolve_row_deletion(
+        group: &[&Mutation],
         shadow_floor: Option<i64>,
-    ) -> Option<RowWrite<'a>> {
+    ) -> Option<(i64, i32)> {
         use crate::storage::write_engine::mutation::CellOperation;
 
         // Newest row deletion in the group (if any). A row deletion at or
@@ -153,12 +153,63 @@ impl DataWriter {
                 }
             }
         }
-        // Cells and liveness are shadowed by the strongest covering deletion:
-        // the row deletion or the partition/range tombstone floor.
-        let deletion_ts = match (row_deletion.map(|(ts, _)| ts), shadow_floor) {
+        row_deletion
+    }
+
+    /// Combine a group's resolved row deletion with `shadow_floor` into the
+    /// single `deletion_ts` boundary cells/liveness are shadowed against —
+    /// shared by [`Self::merge_row_group`] and a stats-fold caller
+    /// (`stats_fold::row_group_survival`, issue #4246 roborev finding) so
+    /// both agree on exactly what "shadowed" means.
+    pub(crate) fn combine_deletion_ts(
+        row_deletion: Option<(i64, i32)>,
+        shadow_floor: Option<i64>,
+    ) -> Option<i64> {
+        match (row_deletion.map(|(ts, _)| ts), shadow_floor) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
-        };
+        }
+    }
+
+    /// Merge a group of mutations sharing one clustering key into a single
+    /// row, applying Cassandra reconciliation semantics at write time:
+    ///
+    /// - Row deletion: the newest `DeleteRow` wins; mutations at or before
+    ///   the deletion timestamp are shadowed (`DeletionTime.deletes` uses
+    ///   `timestamp <= markedForDeleteAt`).
+    /// - Cells: last-write-wins per column by timestamp; a tombstone wins a
+    ///   timestamp tie (Cassandra cell reconciliation).
+    /// - Liveness: from the newest surviving mutation that writes cells, or
+    ///   a pure primary-key insert (no ops and no tombstone payload). Pure
+    ///   row tombstones carry NO liveness, matching Cassandra's serializer.
+    ///
+    /// Returns `None` when the group produces no row at all (e.g. a mutation
+    /// that exists only to carry a partition or range tombstone, or a row
+    /// fully shadowed by the partition/range tombstone `shadow_floor`).
+    ///
+    /// `pub(crate)` (widened from `pub(super)`, issue #4246): also called as
+    /// a pure pre-check from `stats_fold::row_group_survives`/
+    /// `row_group_survival`, which live in `writer` (the grandparent of this
+    /// module) so BOTH the buffered and incremental writer paths can gate
+    /// their persisted `StatisticsMetadata` fold on this SAME shadow-drop
+    /// decision — see [`Self::resolve_row_deletion`]'s own doc comment for
+    /// how the group-level row-deletion marker specifically is shared.
+    pub(crate) fn merge_row_group<'a>(
+        group: &[&'a Mutation],
+        schema: &TableSchema,
+        skip_static_ops: bool,
+        shadow_floor: Option<i64>,
+    ) -> Option<RowWrite<'a>> {
+        use crate::storage::write_engine::mutation::CellOperation;
+
+        // Cells and liveness are shadowed by the strongest covering deletion:
+        // the row deletion (issue #4246 roborev finding: also exposed via
+        // `resolve_row_deletion`/`combine_deletion_ts` so a stats-fold caller
+        // can gate an individual mutation's own contribution against it, not
+        // just the whole group's survival) or the partition/range tombstone
+        // floor.
+        let row_deletion = Self::resolve_row_deletion(group, shadow_floor);
+        let deletion_ts = Self::combine_deletion_ts(row_deletion, shadow_floor);
 
         // Per-column last-write-wins; tombstones win timestamp ties.
         let mut cells: std::collections::HashMap<&'a str, MergedOp<'a>> =

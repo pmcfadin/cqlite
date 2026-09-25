@@ -1329,6 +1329,7 @@ impl WriteEngine {
             let (ts, ldt, ttl) =
                 crate::storage::sstable::writer::SSTableWriter::compute_mutations_baseline_stats(
                     mutations,
+                    &self.config.schema,
                 );
             baseline_min_ts = baseline_min_ts.min(ts);
             baseline_min_ldt = baseline_min_ldt.min(ldt);
