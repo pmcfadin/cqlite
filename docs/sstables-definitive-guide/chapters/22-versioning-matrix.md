@@ -26,5 +26,5 @@ References (pinned to cassandra-5.0.8):
 - `Descriptor`: https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Descriptor.java
 - `BigFormat` (versions & gates): https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java
 - `BtiFormat` (version & gates): https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java
-- `SSTableReader`: https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/SSTableReader.java
+- `SSTableReader`: https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableReader.java
 - `CompressionMetadata`: https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java
