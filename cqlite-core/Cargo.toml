@@ -70,7 +70,7 @@ exclude = [
 
 # docs.rs build: document the commonly used features.
 [package.metadata.docs.rs]
-features = ["all-compression", "state_machine", "write-support", "arrow", "parquet", "cli-helpers", "delta-scan"]
+features = ["all-compression", "state_machine", "write-support", "arrow", "parquet", "vortex", "cli-helpers", "delta-scan"]
 
 [dependencies]
 # Async runtime
@@ -139,6 +139,10 @@ num-bigint = "0.4"
 # default build's dependency surface is unchanged (Epic #682)
 arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
+
+# Vortex columnar export (feature = "vortex", issue #4237) - optional, NOT in
+# defaults, mirroring `parquet` above.
+vortex = { workspace = true, optional = true }
 
 # Features defined at end of file to avoid duplicates
 
@@ -576,6 +580,11 @@ arrow = ["state_machine", "dep:arrow"]
 # `cargo build --package cqlite-core` does not compile arrow/parquet.
 # Depends on `arrow` for the CQL→RecordBatch conversion layer.
 parquet = ["arrow", "dep:parquet"]
+
+# Embeddable Vortex export (issue #4237) - NOT in defaults, mirroring
+# `parquet` exactly. Depends on `arrow` for the SAME CQL→RecordBatch producer
+# `parquet` uses (design.md D1) — no second CQL→Arrow mapping.
+vortex = ["arrow", "dep:vortex"]
 
 # Observability (epic #1031, issues #1032 + #1038) — opt-in OpenTelemetry
 # tracing + metrics export. NOT in defaults: the helpers in

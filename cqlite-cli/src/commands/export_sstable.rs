@@ -50,9 +50,6 @@ pub async fn export_sstable(
         .await
         .with_context(|| format!("Failed to open SSTable: {}", sstable_path.display()))?;
 
-    let mut output_file = File::create(output_path)
-        .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
-
     if show_progress {
         println!("Exporting SSTable: {}", sstable_path.display());
         println!("Output: {} ({})", output_path.display(), format);
@@ -73,14 +70,44 @@ pub async fn export_sstable(
     };
 
     match format {
-        ExportFormat::Json => export_as_json(&reader, &schema, &mut output_file, &pb).await,
-        ExportFormat::Csv => export_as_csv(&reader, &schema, &mut output_file, &pb).await,
-        ExportFormat::Parquet => {
-            // Parquet writer manages its own file handle, so we drop the one we created
-            drop(output_file);
-            export_as_parquet(&reader, &schema, output_path, &pb).await
+        // Issue #4237 review finding (blocker 2): `File::create(output_path)` used to run
+        // UNCONDITIONALLY before this match, truncating the destination the instant this
+        // function was called regardless of format — so a Parquet/Vortex failure left a
+        // 0-byte file at the destination, and any PRE-EXISTING file there was wiped before
+        // either writer's own (Parquet: whole-file; Vortex: temp-then-rename) fail-closed
+        // behavior ever got a chance to run. Only Json/Csv/Cql actually write through this
+        // handle, so only they create it now, at the point they need it.
+        ExportFormat::Json => {
+            let mut output_file = File::create(output_path).with_context(|| {
+                format!("Failed to create output file: {}", output_path.display())
+            })?;
+            export_as_json(&reader, &schema, &mut output_file, &pb).await
         }
-        ExportFormat::Cql => export_as_cql(&reader, &schema, &mut output_file, &pb).await,
+        ExportFormat::Csv => {
+            let mut output_file = File::create(output_path).with_context(|| {
+                format!("Failed to create output file: {}", output_path.display())
+            })?;
+            export_as_csv(&reader, &schema, &mut output_file, &pb).await
+        }
+        ExportFormat::Parquet => export_as_parquet(&reader, &schema, output_path, &pb).await,
+        ExportFormat::Cql => {
+            let mut output_file = File::create(output_path).with_context(|| {
+                format!("Failed to create output file: {}", output_path.display())
+            })?;
+            export_as_cql(&reader, &schema, &mut output_file, &pb).await
+        }
+        ExportFormat::Vortex => {
+            #[cfg(feature = "vortex")]
+            {
+                export_as_vortex(&reader, &schema, output_path, &pb).await
+            }
+            #[cfg(not(feature = "vortex"))]
+            {
+                Err(anyhow::anyhow!(
+                    "Vortex export requires the 'vortex' feature. Rebuild with --features vortex."
+                ))
+            }
+        }
     }
 }
 
@@ -304,13 +331,96 @@ async fn export_as_parquet(
     Ok(())
 }
 
+/// Export SSTable data as Vortex (issue #4237).
+///
+/// Mirrors [`export_as_parquet`] above (same batch-then-chunk shape over
+/// `reader.get_all_entries()`), calling `cqlite_core::export::vortex::StreamingVortexWriter`
+/// directly rather than through a `crate::output` adapter: `StreamingWriter` (the trait
+/// `crate::output::parquet` implements for the CLI) is synchronous, and Vortex's writer is
+/// natively async (its file writer is push-based over tokio) — see `export_vortex.rs`'s module
+/// doc for the same reasoning on the `cqlite export` side.
+#[cfg(all(feature = "state_machine", feature = "vortex"))]
+async fn export_as_vortex(
+    reader: &SSTableReader,
+    schema: &TableSchema,
+    output_path: &Path,
+    pb: &ProgressBar,
+) -> Result<()> {
+    use cqlite_core::export::vortex::{StreamingVortexWriter, VortexExportOptions};
+
+    let entries = reader.get_all_entries().await?;
+    let metadata = build_query_metadata_from_schema(schema);
+
+    let mut writer =
+        StreamingVortexWriter::create(output_path, &metadata, &VortexExportOptions::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize Vortex writer: {}", e))?;
+
+    if entries.is_empty() {
+        pb.finish_with_message("No data to export");
+        writer
+            .finalize()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to finalize Vortex: {}", e))?;
+        return Ok(());
+    }
+
+    let mut chunk = Vec::with_capacity(1000);
+    let mut exported_count = 0;
+
+    for (index, (_table_id, row_key, value)) in entries.iter().enumerate() {
+        pb.set_position(index as u64);
+
+        let query_row = convert_entry_to_query_row(row_key, value, schema);
+        chunk.push(query_row);
+
+        if chunk.len() >= 1000 {
+            writer
+                .write_chunk(&chunk)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to write Vortex chunk: {}", e))?;
+            exported_count += chunk.len();
+            chunk.clear();
+        }
+    }
+
+    if !chunk.is_empty() {
+        writer
+            .write_chunk(&chunk)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to write Vortex chunk: {}", e))?;
+        exported_count += chunk.len();
+    }
+
+    writer
+        .finalize()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to finalize Vortex: {}", e))?;
+
+    pb.finish_with_message(format!("Exported {} rows to Vortex", exported_count));
+    Ok(())
+}
+
 /// Build QueryMetadata from TableSchema for Parquet export
 #[cfg(feature = "state_machine")]
 fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query::QueryMetadata {
     use cqlite_core::query::{ColumnInfo, QueryMetadata};
+    use std::collections::HashSet;
 
     let mut columns = Vec::new();
     let mut position = 0;
+    // Issue #4237 (found by test_export_sstable_to_vortex, via the cql_type fix above):
+    // `TableSchema::columns` is documented as "ALL columns in the table" — partition and
+    // clustering keys included — so appending partition_keys/clustering_keys AND columns
+    // unconditionally, as this function used to, DUPLICATES every key column: once from
+    // its own loop below, once again from the `schema.columns` loop. Parquet silently
+    // tolerated the resulting duplicate-named Arrow fields; Vortex's StructLayout does
+    // not ("StructLayout must have unique field names") and this is the first Vortex path
+    // to build a struct from THIS function's output. Track added names and skip a
+    // `schema.columns` entry whose name a key loop already added, rather than changing
+    // what the key loops themselves do (their `nullable: true` override is deliberate,
+    // per the comments below, and unrelated to this bug).
+    let mut added_names: HashSet<&str> = HashSet::new();
 
     // Add partition keys
     // Mark as nullable because direct SSTable export may not extract all key values
@@ -322,8 +432,9 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
-            cql_type: None,
+            cql_type: cql_type_from_schema_string(&pk.data_type),
         });
+        added_names.insert(pk.name.as_str());
         position += 1;
     }
 
@@ -336,20 +447,24 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
-            cql_type: None,
+            cql_type: cql_type_from_schema_string(&ck.data_type),
         });
+        added_names.insert(ck.name.as_str());
         position += 1;
     }
 
-    // Add regular columns
+    // Add regular columns — skipping any name already added as a partition/clustering key.
     for col in &schema.columns {
+        if added_names.contains(col.name.as_str()) {
+            continue;
+        }
         columns.push(ColumnInfo {
             name: col.name.clone(),
             data_type: parse_cql_type_string(&col.data_type),
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
-            cql_type: None,
+            cql_type: cql_type_from_schema_string(&col.data_type),
         });
         position += 1;
     }
@@ -358,6 +473,30 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
         columns,
         ..Default::default()
     }
+}
+
+/// Parse a CQL type string (e.g. `"uuid"`, `"list<uuid>"`) into the authoritative
+/// `cqlite_core::schema::CqlType`, via the same `ComplexTypeParser` the query engine's own
+/// `SELECT` result columns use (`select_executor::row_build::parse_cql_type_str`, not
+/// reachable from this crate — `pub(super)` — so this calls the parser it wraps directly).
+///
+/// Issue #4237 (review finding): `build_query_metadata_from_schema` previously left
+/// `cql_type: None` unconditionally, so EVERY column here — top-level or nested — took the
+/// flat, extension-metadata-blind `DataType` mapping (`arrow_schema::data_type_to_arrow`),
+/// never the `CqlType`-aware one that attaches `arrow.uuid` (`cql_type_to_arrow_field`).
+/// Harmless for Parquet (which does not require the extension), fatal for Vortex: ANY uuid
+/// column exported via `export_sstable` (the library function both `export_as_parquet` and
+/// `export_as_vortex` share this schema builder with) failed with "Arrow data type not
+/// supported: FixedSizeBinary(16)" — caught by `test_export_sstable_to_vortex`, which a bare
+/// non-empty-file check would have missed, but the strengthened row-count read-back did not.
+/// `None` on a parse failure is a graceful degrade to the pre-existing flat-type behavior,
+/// not a new failure mode this change introduces.
+#[cfg(feature = "state_machine")]
+fn cql_type_from_schema_string(type_str: &str) -> Option<cqlite_core::schema::CqlType> {
+    cqlite_core::parser::complex_types::ComplexTypeParser::new()
+        .parse_type(type_str)
+        .ok()
+        .map(|parsed| parsed.cql_type)
 }
 
 /// Parse CQL type string to DataType

@@ -80,6 +80,8 @@ flight-tests
 legacy-heuristics
 feature-iso-parquet
 feature-iso-delta-scan
+feature-iso-vortex
+vortex-parquet-differential
 python-bindings
 node-bindings
 binding-rust-tests

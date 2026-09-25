@@ -1139,6 +1139,103 @@ async fn test_export_sstable_to_parquet() {
     );
 }
 
+/// Test that the `export_sstable` library function supports Vortex export (issue #4237),
+/// mirroring [`test_export_sstable_to_parquet`] exactly — same internal-API call shape, same
+/// fixture. `export_sstable` is a `cqlite-cli` library function, not a wired CLI subcommand (the
+/// `export-sstable` CLI verb documented in `cli-reference.md` is a DIFFERENT code path — the
+/// write engine's own SSTable-format exporter, `commands::write::handle_export`); this test
+/// exercises the same internal API surface `test_export_sstable_to_parquet` does.
+#[cfg(feature = "vortex")]
+#[tokio::test]
+async fn test_export_sstable_to_vortex() {
+    use cqlite_cli::cli::ExportFormat;
+    use cqlite_cli::commands::export_sstable;
+    use std::io::Write;
+
+    let (data_dir, _cql_schema_file) = assert_test_data_available();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let output_file = temp_dir.path().join("sstable_export.vortex");
+
+    let schema_content = r#"{
+        "keyspace": "test_basic",
+        "table": "simple_table",
+        "columns": {
+            "id": { "type": "uuid", "kind": "PartitionKey" },
+            "name": { "type": "text", "kind": "Regular" },
+            "age": { "type": "int", "kind": "Regular" },
+            "active": { "type": "boolean", "kind": "Regular" }
+        }
+    }"#;
+
+    let schema_file = temp_dir.path().join("test_schema.json");
+    {
+        let mut f = fs::File::create(&schema_file).expect("Failed to create schema file");
+        f.write_all(schema_content.as_bytes())
+            .expect("Failed to write schema");
+    }
+
+    let test_basic_dir = data_dir.join("test_basic");
+    let simple_table_dir = fs::read_dir(&test_basic_dir)
+        .expect("Failed to read test_basic directory")
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("simple_table-")
+        })
+        .expect("No simple_table directory found");
+
+    let sstable_file = simple_table_dir.path().join("nb-1-big-Data.db");
+    assert!(
+        sstable_file.exists(),
+        "Test requires SSTable file: {sstable_file:?}"
+    );
+
+    let result = export_sstable(
+        &sstable_file,
+        &schema_file,
+        &output_file,
+        ExportFormat::Vortex,
+        true, // quiet: suppress progress in tests
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "export_sstable to Vortex should succeed: {:?}",
+        result.err()
+    );
+    assert!(output_file.exists(), "Output Vortex file should exist");
+
+    // Issue #4237 review finding: a bare non-empty-file check cannot distinguish a
+    // correctly-populated export from a 0-row one (Vortex's magic bytes + footer make
+    // even an empty file non-empty). Read it back with Vortex's own reader and assert a
+    // real row count, mirroring `test_export_sstable_to_parquet`'s row-count check above.
+    let row_count = read_vortex_row_count(&output_file)
+        .await
+        .expect("failed to read Vortex file back");
+    assert!(
+        row_count > 0,
+        "Vortex export of test_basic.simple_table produced 0 rows"
+    );
+    eprintln!("SSTable to Vortex export verified: {row_count} rows");
+}
+
+/// Read a `.vortex` file back and return its total row count, via Vortex's own reader.
+#[cfg(feature = "vortex")]
+async fn read_vortex_row_count(path: &std::path::Path) -> anyhow::Result<usize> {
+    use vortex::VortexSessionDefault;
+    use vortex::array::stream::ArrayStreamExt;
+    use vortex::file::OpenOptionsSessionExt;
+    use vortex::session::VortexSession;
+
+    let session = VortexSession::default();
+    let file = session.open_options().open_path(path.to_path_buf()).await?;
+    let array = file.scan()?.into_array_stream()?.read_all().await?;
+    Ok(array.len())
+}
+
 // ============================================================================
 // Memory Efficiency Tests
 // ============================================================================

@@ -749,6 +749,17 @@ cargo build --package cqlite-core --features cli-helpers
 cargo build --package cqlite-core --features parquet
 cargo test --package cqlite-core --features parquet
 
+# Build/test core with the embeddable Vortex writer (issue #4237) — export
+# only in this slice, mirrors parquet exactly
+cargo build --package cqlite-core --features vortex
+cargo test --package cqlite-core --features vortex
+
+# CLI: `cqlite export --format vortex` / `export-sstable --format vortex`
+cargo build --package cqlite-cli --features vortex
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test --package cqlite-cli --features vortex \
+  --test issue_4237_vortex_parquet_differential
+
 # Flight server with the LINKED non-glibc allocator (issue #3997) — Linux only,
 # NON-DEFAULT. `default = []`, so every ordinary build (and the GHCR image) links
 # glibc malloc; this feature is the only way to get jemalloc, and it applies to

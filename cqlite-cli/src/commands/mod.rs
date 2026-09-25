@@ -45,6 +45,11 @@ pub mod verify;
 pub mod benchmark_sstable;
 pub mod export;
 pub mod export_sstable;
+// Issue #4237: the `cqlite export --format vortex` streaming loop, split out of
+// `export.rs` (#1116 campsite rule). Needs BOTH `state_machine` (the streaming
+// query machinery `export.rs` itself requires) and `vortex` (the writer).
+#[cfg(all(feature = "state_machine", feature = "vortex"))]
+pub mod export_vortex;
 pub mod import;
 pub mod inspect;
 pub mod query;
