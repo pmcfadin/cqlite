@@ -415,6 +415,33 @@ impl StorageEngine {
         self.sstables.partition_key_shape(table_id).await
     }
 
+    /// Snapshot the resolved [`SSTableReader`](sstable::reader::SSTableReader) set
+    /// for `table_id`, plus the authoritative `fully_qualified_match` signal
+    /// (issue #4222, raw SSTable view).
+    ///
+    /// A thin passthrough to [`SSTableManager::resolve_reader_snapshot`] — the
+    /// raw view's point-key and full-scan row producers need the per-generation
+    /// readers DIRECTLY (never through [`scan`](Self::scan)/[`scan_partition`]
+    /// (Self::scan_partition), which RECONCILE across generations) so they can
+    /// emit one row per physical row per generation. `pub(crate)`: this bypasses
+    /// every reconciliation guarantee `StorageEngine`'s other methods provide, so
+    /// it is deliberately not part of the public API — only the query engine's
+    /// raw-view producer (`query::select_executor::raw_view`) calls it.
+    ///
+    /// The bool mirrors [`SSTableManager::resolve_reader_snapshot`]'s own
+    /// `fully_qualified_match`: `false` means a fully-qualified `table_id` (one
+    /// carrying a keyspace) resolved ONLY via the bare-table-name fallback —
+    /// the same signal the point-read path (`manager_point_read.rs`) threads
+    /// into `get_with_resolution_unmetered` to keep strict keyspace matching
+    /// on a fallback resolution (#1321), so a qualified raw-view name never
+    /// silently reads another keyspace's same-named table's rows.
+    pub(crate) async fn raw_view_reader_snapshot(
+        &self,
+        table_id: &TableId,
+    ) -> (Vec<Arc<sstable::reader::SSTableReader>>, bool) {
+        self.sstables.resolve_reader_snapshot(table_id).await
+    }
+
     /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
     ///
     /// Like [`scan_partition`](Self::scan_partition) but pushes a single-column

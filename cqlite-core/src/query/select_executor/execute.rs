@@ -62,6 +62,21 @@ impl SelectExecutor {
             TableId::new("_dummy_")
         };
 
+        // Issue #4222 (design.md D6): a `<keyspace>.<table>_raw_sstable_data`
+        // FROM-clause reference is intercepted HERE, before schema resolution
+        // or any execution step runs, and routed entirely to the raw view's
+        // own producer — never through `StorageEngine::scan`/`scan_partition`,
+        // which RECONCILE across generations. `raw_view_base_name` prefers a
+        // REAL table literally named with the suffix, if one is registered
+        // (roborev finding: unconditional stripping made such a table
+        // unreachable) — only when no literal schema resolves does the
+        // suffix count as the naming convention (D1).
+        if let Some(base_name) = self.raw_view_base_name(&table_id).await {
+            return self
+                .execute_raw_sstable_view(&plan, &table_id, &base_name)
+                .await;
+        }
+
         // Issue #1587 (E5): resolve the table's schema ONCE per query into a shared
         // `Arc<TableSchema>`. Column-metadata building, the SSTable scan, and the
         // SELECT-* metadata fallback all borrow this same schema (ref-count bump),
