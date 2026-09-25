@@ -243,9 +243,13 @@ ax.legend(h1 + h2, l1 + l2, frameon=False, fontsize=9, loc="upper left")
 ax.set_xticks(th)
 finish(fig, ax,
        "Dashboards at scale: 0 errors and 0 restarts through 80 clients\n"
-       "degrades in LATENCY, never by failing; Flight memory flat idle->80 clients",
+       "degrades in LATENCY, never by failing",
        "queries/sec", "d4-ladder.png",
        rows="mixed bounded queries over keyvalue + sensor_data")
+# NOTE: no memory claim here -- REPORT.md's committed correction shows real RSS peaking at
+# 3.5-5.9 GiB (higher than the kubectl-top-derived "flat" figure this chart used to caption) and
+# says "no memory claim from this run should be presented as settled." Only the measured
+# qps/latency/error/restart facts above are captioned; memory stays an open question.
 
 # ---------------------------------------------------------------- D5 freshness
 d5 = {}
