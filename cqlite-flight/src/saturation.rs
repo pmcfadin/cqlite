@@ -524,21 +524,81 @@ mod tests {
         }
     }
 
-    /// Spec Requirement 1 scenario ("Thread and fd gauges rise with concurrent
-    /// scans and settle after"): the process thread count read WHILE extra
-    /// threads are parked is strictly greater than the pre-load baseline, and
-    /// after they all exit it drops back below the loaded peak — asserted by
-    /// comparing captured LEVEL snapshots, never by asserting elapsed time. Not
-    /// `#[cfg]`-gated (so it compiles + clippy-checks on every platform); it
-    /// runs the real assertions only where `/proc` is present and early-returns
-    /// on an off-`/proc` platform, whose absence semantics `proc_readers_match_platform`
-    /// already covers.
+    /// Spec Requirement 1 ("thread/fd gauges rise with load and settle
+    /// after"): the count while `n` extra threads are parked is > baseline,
+    /// and drops back below the loaded peak once they exit — LEVEL
+    /// comparisons only, never elapsed time. Early-returns on a non-`/proc`
+    /// platform (covered by `proc_readers_match_platform`).
+    ///
+    /// **Issue #4144 / #3956.** A process-wide count compared across two
+    /// instants in a `--lib` binary running hundreds of OTHER tests is
+    /// unsound: a sibling can retire threads between `base` and `loaded`
+    /// (observed: `loaded < base`, which +8 threads alone can't cause).
+    /// Unlike [`BLOCKING_TASKS`] (a private atomic — see
+    /// [`blocking_tasks_in_use_level`]'s NORMATIVE RULE), a real thread
+    /// count has no self-attributable lower bound, so this test re-execs
+    /// itself with `--exact` naming only itself: the child runs no other
+    /// test, so both reads are of a process this test fully controls —
+    /// impossible-by-construction under any runner. A sentinel file (not
+    /// just the child's exit code) proves the filtered name actually
+    /// matched: libtest exits `0` on a zero-match filter too, so a bare
+    /// `status.success()` would pass vacuously if this test/module were
+    /// ever renamed or moved out from under the hardcoded filter string.
     #[test]
     fn proc_thread_gauge_rises_with_load_and_settles() {
-        let Some(base) = read_proc_threads() else {
-            // Off-/proc platform: readers report absence (covered elsewhere).
+        // Set only in the re-exec'd child; its absence marks the driver. Role
+        // detection needs BOTH markers: a stray `CHILD_ENV` in some ambient
+        // environment (a leaked debugging export, a wrapper script) with no
+        // `SENTINEL_ENV` must fail loudly via the `expect` below rather than
+        // silently degrade to the unsound single-process comparison #4144
+        // removes.
+        const CHILD_ENV: &str = "CQLITE_SATURATION_PROC_THREAD_GAUGE_CHILD";
+        // Path of a file the child writes, unconditionally, only after
+        // reaching the settle assertion below — the vacuous-pass guard
+        // described above.
+        const SENTINEL_ENV: &str = "CQLITE_SATURATION_PROC_THREAD_GAUGE_SENTINEL";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Driver mode. The off-`/proc` check belongs here only: the
+            // child is the same binary, already proven `/proc`-capable, so a
+            // `None` there would be a real reader regression, not absence —
+            // it now surfaces via the child's own `expect("linux self-read")`
+            // instead of being misattributed to a stale filter string.
+            if read_proc_threads().is_none() {
+                return; // Off-/proc platform: absence is covered elsewhere.
+            }
+            let exe = std::env::current_exe().expect("current_exe");
+            let sentinel = tempfile::NamedTempFile::new().expect("sentinel tempfile");
+            // `module_path!()` includes the crate name (`cqlite_flight::...`),
+            // but a `--lib` binary's OWN test names are crate-relative (no
+            // crate-name segment) — strip it so a `saturation` module move
+            // still resolves; the leaf function name stays a literal, and a
+            // rename there is caught by the sentinel assertion below rather
+            // than silently matching zero tests.
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, m)| m);
+            let filter = format!("{module}::proc_thread_gauge_rises_with_load_and_settles");
+            let status = std::process::Command::new(exe)
+                .args(["--exact", &filter, "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .env(SENTINEL_ENV, sentinel.path())
+                .status()
+                .expect("spawn isolated child");
+            assert!(status.success(), "isolated child failed: {status:?}");
+            assert!(
+                sentinel.path().metadata().is_ok_and(|m| m.len() > 0),
+                "child ran no test — filter '{filter}' matched nothing"
+            );
             return;
-        };
+        }
+
+        // Child mode: sole test in this process, so both reads are ours
+        // alone. A missing sentinel path here means CHILD_ENV leaked in
+        // without going through the driver above — fail loudly rather than
+        // silently run the unsound comparison.
+        let sentinel_path =
+            std::env::var_os(SENTINEL_ENV).expect("SENTINEL_ENV must be set alongside CHILD_ENV");
+        let base = read_proc_threads().expect("linux self-read");
         let n = 8usize;
         // A barrier so every spawned thread is simultaneously alive when we read
         // the loaded snapshot, and a second so they exit only after we have.
@@ -585,6 +645,9 @@ mod tests {
             "the released threads must drop the count back below the loaded peak \
              (loaded={loaded}, settled={settled})"
         );
+
+        // Prove to the driver that this filtered run actually reached here.
+        std::fs::write(sentinel_path, b"ran").expect("write sentinel");
     }
 
     /// Stage 1.2 corollary: a `None` reader contributes NO sample to a tick, so
