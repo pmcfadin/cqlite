@@ -18,6 +18,13 @@ name: Nightly agent-gate (deep check)
 # The lane always runs the FULL gate (`bash scripts/agent-gate.sh`, never
 # `--only`) so the run "counts" — a `--only` run is stamped PARTIAL and
 # explicitly does not count as the gate.
+#
+# #4266: `tooling-tests` (the ~80-nested-self-test harness-regression component,
+# ~44% of a full gate's wall-clock) is diff-scoped in the full gate — SKIP when the
+# diff touches no harness path. This job's "diff" is HEAD against its own
+# merge-base (it runs on `main` itself), which is always empty, so the "Run full
+# agent gate" step below sets CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 to force it — this
+# lane IS the nightly unconditional backstop AC4 requires.
 
 on:
   schedule:
@@ -238,6 +245,12 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           CQLITE_REQUIRE_FIXTURES: '1'
           AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/agent-gate-summary.txt
+          # #4266: tooling-tests is diff-scoped in the full gate (SKIPs when the diff
+          # touches no harness path — scripts/lib/tooling-tests-scope.sh). This job runs
+          # on `main` itself, where HEAD IS its own merge-base with origin/main, so a
+          # diff-based decision would see an empty diff and SKIP every night — exactly
+          # the drift-catching run this lane exists to be. Force it unconditionally.
+          CQLITE_TOOLING_TESTS_ALWAYS_RUN: '1'
           # NOTE (issue #2662): CQLITE_CLIPPY_FULL is deliberately NOT set here.
           # The full-matrix clippy backstop (issue #1844) — which compiles the
           # source-built DuckDB C++ amalgamation (cqlite-cli `duckdb-tests`) + the

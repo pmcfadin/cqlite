@@ -551,6 +551,82 @@ tmutil listlocalsnapshots /                 # any snapshot pins freed blocks
 tmutil thinlocalsnapshots / 40000000000 4   # thin to reclaim (field: 9.1Gi -> 72Gi)
 ```
 
+## `tooling-tests` is diff-scoped in the full gate (issue #4266)
+
+`tooling-tests` — the ~80-nested-shell-self-test harness-regression component
+documented above — measured **5056s of ~11450s (44%) of a whole full-gate PASS**
+in `gate-4194f` on astro-processor. A product PR that touches no harness file
+(no `cqlite-core/src/**`-only, `cqlite-cli/**`-only, etc. diff) still paid all of
+it, and it is the component most often turned red by the HOST rather than the
+diff (IO starvation; #4252's r7, case 4b.126).
+
+**The decision lives in `scripts/lib/tooling-tests-scope.sh`**, sourced by
+`scripts/agent-gate.sh` at script scope (same pattern as `perf-capability.sh`).
+One array, `TOOLING_TESTS_SCOPE_PATTERNS`, is the ONE declared place the
+harness-path set lives — read that file for the current set rather than a copy
+enumerated here, which a roborev review on this issue found ALREADY out of sync
+with the array on the round that added it (two places naming the same list is
+two places to keep in sync, and prose is not pinned by any test). It is pinned
+literally by `scripts/tests/test_tooling_tests_scope.sh` so a change to the
+array is caught at the source, but **the set is HAND-MAINTAINED, not derived
+structurally, and that is a DECLARED, UNMITIGATED residual** — there is no
+automated proof it is exhaustive; a second roborev round on this issue found the
+first cut still missing several read classes (`.gitignore`, `CLAUDE.md`,
+`docs/**`, several `test-data/*` manifests) after the first round had already
+expanded it once. Read the array's own header comment for the full rationale
+and the running list of what each class guards.
+
+**`run_tooling_tests()` (the full gate only — `tooling-tests` is not a `--lite`
+or `--delta` component) resolves the diff against the merge-base of the first
+of `origin/main` / `main` / `origin/master` / `master` that resolves** (the same
+fallback chain `run_file_size` uses), reads the UNION of three legs — the
+committed+working-tree diff against that base, UNTRACKED files (`git ls-files
+--others --exclude-standard` — a brand-new, not-yet-`git add`ed self-test file
+is invisible to `git diff` and would otherwise never trigger its own
+introducing PR), and uncommitted TRACKED changes against `HEAD` (a dirty tree
+touching a harness path still forces a run) — and decides:
+
+- **Zero declared-set paths in the diff → `SKIP`**, with the cause and the
+  declared set named via `_record_status_detail` (so it renders on the SUMMARY
+  row, per the `_status_detail` gate-authored-text contract — fixed wording plus
+  a COUNT, never a file name). Never a bare PASS; never a silent SKIP.
+- **At least one declared-set path in the diff → `RUN`** (the full ~80-suite
+  body executes exactly as before scoping existed).
+- **The base can't be resolved, or `git diff` itself fails → `RUN`, fail-closed
+  (#4266 AC3).** Scoping abstains rather than guesses; the SUMMARY names the
+  unmeasurable cause.
+- **`--only tooling-tests` always bypasses scoping** (`--only` is a diagnostic,
+  never scoped, matching every other component's `--only` leniency) — the
+  component runs in full whenever explicitly selected.
+
+**The nightly `gate.yml` deep-check job is the unconditional backstop scoping's
+false-negatives rely on**, and it needed its own escape hatch: that job runs the
+full gate on `main` itself, where `HEAD` **is** its own merge-base with
+`origin/main` — an empty diff by construction, which would otherwise SKIP the
+exact lane whose entire job is to catch harness drift within 24h. Its "Run full
+agent gate" step therefore sets `CQLITE_TOOLING_TESTS_ALWAYS_RUN=1`, which
+`_tooling_tests_scope_decide` checks first, before any git call, and forces
+`RUN` unconditionally.
+
+**Hidden CLI hooks** (mirroring the `--delta-classify` / `--component-set-line`
+pattern) expose both halves for self-tests without running the real component:
+`agent-gate.sh --tooling-tests-classify` (pure — reads changed paths on stdin,
+no git) and `agent-gate.sh --tooling-tests-scope-line [base]` (drives the real,
+git-backed decision — used against a scratch `git init` fixture, never this
+checkout, following the same `$wt`-copy pattern as
+`scripts/tests/test_dep_duplicates_ratchet.sh`).
+
+**Declared residual (round-2 finding 5):** `run_tooling_tests` also runs `cargo
+test -p ws0-corpus-gen` — that crate's ONLY execution point anywhere in the gate
+of record — and it exercises the production `SSTableWriter` write path, yet
+`cqlite-core/**` is deliberately OUT of the declared set (a core-src-only diff
+must SKIP). A core write-path change that breaks the generator therefore has no
+gate-of-record signal until the nightly unconditional run. Tracked as a
+follow-up (move the block to an unscoped component, or accept the cadence).
+
+Self-test: `scripts/tests/test_tooling_tests_scope.sh`, wired into
+`tooling-tests` itself (hermetic — no cargo/python3/network/datasets).
+
 ## Gate Parallelism and nextest (issue #1737)
 
 The gate runs **~75% faster** than v0.12.0 on warm machines via two levers:
@@ -3112,7 +3188,7 @@ rules, so they moved here unchanged when `CLAUDE.md` was trimmed back to rules a
 
 ### Full gate — what the component set runs
 
-ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), **`dep-duplicates`** (the ADVISORY duplicate-dependency ratchet, #1700: measures `cargo tree -d --workspace --target all` — never the bare form, which reads the ROOT PACKAGE only, and never without `--target all`, since `cargo tree` otherwise measures the HOST target and a COMMITTED baseline would then mean different things on a Linux lane and a macOS one — against the committed baseline `scripts/ci/dep-duplicates-baseline.txt`, regenerated by the one documented `bash scripts/ci/check-dep-duplicates.sh --regenerate`. The probe is run READ-ONLY, `--locked --offline`: without `--locked` cargo UPDATES the TRACKED `Cargo.lock` whenever it decides the manifests need it, and a component that rewrites a tracked file mid-run trips #2926's mid-run tree-mutation check — an ADVISORY component that may never FAIL reddening the gate of record from a mutation it caused itself; a failure under either flag is UNMEASURABLE ⇒ SKIP, never an unlocked/online retry, which would restore that mutability silently. It emits **no FAIL at all, by mandate**: an increase is PASS plus a loud, textually distinct `ADVISORY-INCREASE` block naming the delta AND the crates responsible, because a legitimate new dependency can add a duplicate no local decision can collapse and `[patch]`/upstream-fighting pins are out of scope. It also cannot pass VACUOUSLY: PASS is keyed on THREE affirmative signals together — the guard's own `verdict` line PLUS its `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line (a census was really published), because a verdict alone is reachable from a stale, replayed or hard-coded log and once permitted the self-contradictory `PASS [never reached …]` — a clean run reads `0 INCREASE RECOGNISED` rather than a bare `0`, the measurement parser is a CLOSED grammar in which every line must match a recognised shape (record / indented-or-tree-branch continuation in EITHER cargo charset / the exact `[dev-dependencies]`|`[build-dependencies]` pair) and anything else at column zero — punctuation included — is refused rather than skipped, and every unmeasured state — no cargo, **no `timeout(1)` accepting `-k` with which to BOUND the probe** (the probe is then not run at all: an unbounded `cargo tree` could hang the gate, and a missing capability must not inherit the permissive branch), `cargo tree` non-zero or timed out, output the parser does not recognise, a missing or ungrammatical baseline, an unexpected exit status, a zero exit with NO verdict line, or a verdict unaccompanied by the probe/MEASURED lines — is a **SKIP NAMING THE CAUSE**. `cargo tree` is a metadata probe, so the component reads no corpus and is not in `DATASET_COMPONENTS`; its class is `indirect:` with the driver's reach recorded from the guard's own `probe … INVOKED (rc N)` line, never from the terminal status), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` hold `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features` — `feature-iso-parquet` still COMPILE-ONLY (`--lib --no-run`), while `feature-iso-delta-scan` **EXECUTES** its `--lib` suite plus a run-time-DERIVED set of crate-level `delta-scan`-gated `--test` targets under the zero-tests guards and, on the full gate, `CQLITE_REQUIRE_FIXTURES=1`. Its per-target fixture-AWARENESS scan was DESCOPED by lead ruling on #3725 after seven rounds found seven holes in it — source-text matching cannot decide whether a lookup is executable; #3789 owns declared per-target posture, #3725), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), `all-features-check` (#3453: `cargo check` + `cargo clippy -D warnings`, both at `-p cqlite-core --all-features --all-targets` — the ONLY component that enables the OTLP stack; never SKIPs), smoke. Emits `AGENT-GATE SUMMARY`.
+ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), **`dep-duplicates`** (the ADVISORY duplicate-dependency ratchet, #1700: measures `cargo tree -d --workspace --target all` — never the bare form, which reads the ROOT PACKAGE only, and never without `--target all`, since `cargo tree` otherwise measures the HOST target and a COMMITTED baseline would then mean different things on a Linux lane and a macOS one — against the committed baseline `scripts/ci/dep-duplicates-baseline.txt`, regenerated by the one documented `bash scripts/ci/check-dep-duplicates.sh --regenerate`. The probe is run READ-ONLY, `--locked --offline`: without `--locked` cargo UPDATES the TRACKED `Cargo.lock` whenever it decides the manifests need it, and a component that rewrites a tracked file mid-run trips #2926's mid-run tree-mutation check — an ADVISORY component that may never FAIL reddening the gate of record from a mutation it caused itself; a failure under either flag is UNMEASURABLE ⇒ SKIP, never an unlocked/online retry, which would restore that mutability silently. It emits **no FAIL at all, by mandate**: an increase is PASS plus a loud, textually distinct `ADVISORY-INCREASE` block naming the delta AND the crates responsible, because a legitimate new dependency can add a duplicate no local decision can collapse and `[patch]`/upstream-fighting pins are out of scope. It also cannot pass VACUOUSLY: PASS is keyed on THREE affirmative signals together — the guard's own `verdict` line PLUS its `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line (a census was really published), because a verdict alone is reachable from a stale, replayed or hard-coded log and once permitted the self-contradictory `PASS [never reached …]` — a clean run reads `0 INCREASE RECOGNISED` rather than a bare `0`, the measurement parser is a CLOSED grammar in which every line must match a recognised shape (record / indented-or-tree-branch continuation in EITHER cargo charset / the exact `[dev-dependencies]`|`[build-dependencies]` pair) and anything else at column zero — punctuation included — is refused rather than skipped, and every unmeasured state — no cargo, **no `timeout(1)` accepting `-k` with which to BOUND the probe** (the probe is then not run at all: an unbounded `cargo tree` could hang the gate, and a missing capability must not inherit the permissive branch), `cargo tree` non-zero or timed out, output the parser does not recognise, a missing or ungrammatical baseline, an unexpected exit status, a zero exit with NO verdict line, or a verdict unaccompanied by the probe/MEASURED lines — is a **SKIP NAMING THE CAUSE**. `cargo tree` is a metadata probe, so the component reads no corpus and is not in `DATASET_COMPONENTS`; its class is `indirect:` with the driver's reach recorded from the guard's own `probe … INVOKED (rc N)` line, never from the terminal status), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` hold `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features` — `feature-iso-parquet` still COMPILE-ONLY (`--lib --no-run`), while `feature-iso-delta-scan` **EXECUTES** its `--lib` suite plus a run-time-DERIVED set of crate-level `delta-scan`-gated `--test` targets under the zero-tests guards and, on the full gate, `CQLITE_REQUIRE_FIXTURES=1`. Its per-target fixture-AWARENESS scan was DESCOPED by lead ruling on #3725 after seven rounds found seven holes in it — source-text matching cannot decide whether a lookup is executable; #3789 owns declared per-target posture, #3725), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), **`tooling-tests`** (#4266: diff-scoped — SKIPs, naming the cause, when the diff touches no declared harness path — the set lives in ONE place, `TOOLING_TESTS_SCOPE_PATTERNS` in `scripts/lib/tooling-tests-scope.sh` (never enumerated here, to avoid a second copy drifting from it — a roborev round on this issue caught exactly that); fails closed to RUN when the diff can't be measured; `--only tooling-tests` always bypasses scoping; the nightly `gate.yml` deep-check job forces it unconditionally via `CQLITE_TOOLING_TESTS_ALWAYS_RUN=1`, since it runs on `main` itself where the diff is empty by construction — see `## \`tooling-tests\` is diff-scoped in the full gate` above), `all-features-check` (#3453: `cargo check` + `cargo clippy -D warnings`, both at `-p cqlite-core --all-features --all-targets` — the ONLY component that enables the OTLP stack; never SKIPs), smoke. Emits `AGENT-GATE SUMMARY`.
 
 ### `--lite` — what it costs, and why
 

@@ -1818,7 +1818,18 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   else
     bad "4b.125 a very fast gate is accepted" "exit $_fr: $_fo"
   fi
-  for _i in {1..40}; do grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null && break; sleep 1; done
+  # The bound is NOT the property under test (that's "a fast gate is accepted and
+  # REACHES a terminal verdict", asserted below) — it exists only so a genuinely
+  # hung launch fails this case instead of hanging the suite forever. #4252's
+  # full-gate runs r7 and r8 on astro-processor FAILed this case: the SAME nested
+  # `--only fmt` launch alone measured ~18s, but under THIS suite's own co-scheduled
+  # load (load avg reaching ~75 on 20 cores — tooling-tests itself is a mandatory
+  # gate component, so this case always runs under SOME sibling load) it exceeded
+  # the previous 40s bound without ever failing to complete. 300s is comfortably
+  # past the load-inflated case while still bounded; the loop's early `break` keeps
+  # the common (unloaded) pass fast.
+  _4B126_BOUND_S=300
+  for _i in $(seq 1 "$_4B126_BOUND_S"); do grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null && break; sleep 1; done
   if grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null; then
     ok "4b.126 ...and it reached a terminal verdict ($(sed -n 's/^RESULT: //p' "$_ft" | head -1))"
   else

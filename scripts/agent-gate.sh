@@ -1782,6 +1782,17 @@ if [ -r "$REPO_ROOT/scripts/perf-capability.sh" ]; then
   if . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then _PERF_CAP_LOADED=1; fi
 fi
 
+# #4266: the tooling-tests diff-scoping decision (declared path set + classifier +
+# base-resolution + top-level decision function). Sourced here, at script scope,
+# same pattern as perf-capability.sh above — pure function/array definitions, no
+# side effects, so sourcing it unconditionally cannot change any other component's
+# behavior. See scripts/lib/tooling-tests-scope.sh for the full contract.
+_TOOLING_TESTS_SCOPE_LOADED=0
+if [ -r "$REPO_ROOT/scripts/lib/tooling-tests-scope.sh" ]; then
+  # shellcheck source=scripts/lib/tooling-tests-scope.sh
+  if . "$REPO_ROOT/scripts/lib/tooling-tests-scope.sh" 2>/dev/null; then _TOOLING_TESTS_SCOPE_LOADED=1; fi
+fi
+
 # _AGENT_GATE_OS: the host OS, resolved ONCE per gate run. `uname` is an external
 # process, so the OS question cannot be asked inside the per-emit token path above;
 # asking it at script scope costs one fork per RUN instead of one per summary. The
@@ -7013,6 +7024,45 @@ case "${1:-}" in
   # slot count (full cores at N=1, fair share at N>1, caller override respected)
   # WITHOUT running any component. No side effects beyond reading env + ncpu.
   --cpu-budget) cpu_budget_line; echo; exit 0 ;;
+  # Hidden self-test hooks (issue #4266): expose the tooling-tests diff-scoping
+  # decision so scripts/tests/test_tooling_tests_scope.sh can assert it without
+  # running the real (multi-hour) component.
+  #   --tooling-tests-classify         pure classification of stdin paths against
+  #                                     the declared set — no git. Prints
+  #                                     "IN-SCOPE <path>" per match, "MATCHED: <N>",
+  #                                     "VERDICT: RUN|SKIP".
+  #   --tooling-tests-scope-line [ref] drives the REAL _tooling_tests_scope_decide
+  #                                     against actual git state (optional base
+  #                                     override as $2), so a fixture-repo case can
+  #                                     assert the git-dependent branches (base
+  #                                     resolution, fail-closed on no merge-base)
+  #                                     against the shipped code, not a
+  #                                     reimplementation of it.
+  # Both hooks guard on _TOOLING_TESTS_SCOPE_LOADED (roborev finding on this
+  # issue): without it, a lib-source failure would hit an undefined function
+  # under `set -u` and die on an unbound TOOLING_SCOPE_* variable with no named
+  # cause. --tooling-tests-scope-line's guarded branch answers the SAME
+  # fail-closed RUN the real run_tooling_tests would (see its own
+  # _TOOLING_TESTS_SCOPE_LOADED branch), so the hook's decision never diverges
+  # from production even when the lib failed to source.
+  --tooling-tests-classify)
+    if [ "$_TOOLING_TESTS_SCOPE_LOADED" != 1 ]; then
+      echo "agent-gate: scripts/lib/tooling-tests-scope.sh did not source — cannot classify (#4266)" >&2
+      exit 2
+    fi
+    _tooling_tests_classify_stdin; exit 0 ;;
+  --tooling-tests-scope-line)
+    if [ "$_TOOLING_TESTS_SCOPE_LOADED" != 1 ]; then
+      echo "DECISION: RUN"
+      echo "CAUSE: cause=scope-lib-unreadable — scripts/lib/tooling-tests-scope.sh did not source — running unconditionally (fail-closed)"
+      echo "DETAIL: scope lib unreadable — running unconditionally (fail-closed)"
+      exit 0
+    fi
+    _tooling_tests_scope_decide "${2:-}"
+    echo "DECISION: $TOOLING_SCOPE_DECISION"
+    echo "CAUSE: $TOOLING_SCOPE_CAUSE"
+    echo "DETAIL: $TOOLING_SCOPE_DETAIL"
+    exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -10221,9 +10271,11 @@ _record_status_detail() {
 # at the LC_ALL=C pin below.
 #
 # DEFENCE IN DEPTH, stated as such rather than implied: every writer today (run_file_size,
-# and run_python_bindings's open-files detail added by #4221) emits fixed wording plus
-# GATE-COMPUTED values — a count and a bare filename for the former, an integer ulimit
-# reading for the latter — no repository PATH and no caller-controlled value in either, so
+# run_python_bindings's open-files detail added by #4221, and run_tooling_tests's scope
+# detail added by #4266 — three call sites, one per scope-decision branch) emits fixed
+# wording plus GATE-COMPUTED values — a count and a bare filename for the former, an
+# integer ulimit reading for the second, a harness-path count and the fixed declared-set
+# text for the third — no repository PATH and no caller-controlled value in any of them, so
 # no REACHABLE input carries a control character at all. This boundary exists so the NEXT
 # writer cannot reintroduce the row-injection route by not thinking about it.
 # NOT BEHAVIOURALLY TESTED ON THIS PLATFORM, and that is DECLARED rather than papered over
@@ -21448,6 +21500,34 @@ run_tooling_tests() {
   start=$(date +%s)
   : >"$log"
 
+  # #4266: diff-scope this component in the full gate. `--only tooling-tests`
+  # already returned above before this point if NOT selected; when it IS
+  # explicitly selected (ONLY is non-empty and named it), scoping is bypassed —
+  # `--only` is a diagnostic and always runs what it names (never SKIP-scoped),
+  # matching every other component's `--only` leniency. A bare full-gate run
+  # (ONLY empty) is the only path scoped here.
+  if [ -z "$ONLY" ]; then
+    if [ "$_TOOLING_TESTS_SCOPE_LOADED" != 1 ]; then
+      # The lib failed to source — an unmeasurable state distinct from "diff
+      # computed, no harness path found". Fail closed to RUN, never to SKIP, and
+      # say why on the row.
+      echo ">>> [$name] scope: lib unreadable — scripts/lib/tooling-tests-scope.sh did not source; running unconditionally (fail-closed)" | tee -a "$log"
+      _record_status_detail "$name" "scope lib unreadable — running unconditionally (fail-closed)"
+    else
+      _tooling_tests_scope_decide
+      echo ">>> [$name] scope: $TOOLING_SCOPE_DECISION ($TOOLING_SCOPE_CAUSE)" | tee -a "$log"
+      if [ "$TOOLING_SCOPE_DECISION" = SKIP ]; then
+        status=SKIP
+        _record_status_detail "$name" "$TOOLING_SCOPE_DETAIL"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+        return 0
+      fi
+      _record_status_detail "$name" "$TOOLING_SCOPE_DETAIL"
+    fi
+  fi
+
   # NOTE (#2751): AGENT_GATE_SUMMARY_FILE is already de-exported once after summary
   # resolution (see the scrub near the SUMMARY_FILE `case` block), so none of the
   # self-tests below — several of which recursively invoke agent-gate.sh — can
@@ -21494,6 +21574,27 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_check_dataset_manifest.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (test_check_dataset_manifest.sh); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # tooling-tests diff-scoping self-test (#4266): the non-vacuity proof for
+  # scripts/lib/tooling-tests-scope.sh AND its wiring into this very function —
+  # pins the declared harness-path set literally, the pure classifier via the
+  # shipped --tooling-tests-classify hook, all three AC1/AC2/AC3 decision
+  # branches against a scratch git fixture via --tooling-tests-scope-line, the
+  # nightly CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 override, and (structurally) that
+  # the scope check runs before this function's first heavy self-test and that
+  # --only bypasses it. Hermetic: no cargo/python3/network/datasets, one local
+  # `git init` scratch repo. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_tooling_tests_scope.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_tooling_tests_scope.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (tooling-tests diff-scoping self-test #4266); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
