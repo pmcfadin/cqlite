@@ -4807,6 +4807,26 @@ FAKEGATE
   #
   #      Driven as a REAL root invocation with a lying `id` first on PATH, because that is
   #      the only way to distinguish "we read $EUID" from "we read a binary that agreed".
+  #
+  #      THE BOUND IS A RUNAWAY GUARD, NOT THE PROPERTY, AND 120s WAS AN OUTLIER (#4287).
+  #      `runpin` — the driver every other case in this block goes through, same shape,
+  #      same staged tree — allows 300s, and THIS case is the heaviest of the family: it
+  #      is the only one passing `--yes`, and sudoers' env_reset drops the suite-wide
+  #      opt-outs exported at the top of this file, so it executes MORE of the script than
+  #      its siblings did under a TIGHTER deadline. It was SIGKILLed mid-run during a full
+  #      gate on astro-processor (run-id /data/tmp/agent-gate.fZDLHj, sha d220a0bc5) and
+  #      the case then announced a security-guard DEFEAT it had never observed.
+  #
+  #      Widening is the proportionate fix here because there is nothing cheaper left to
+  #      bound, and that was checked rather than assumed: against this block's staged tree
+  #      the `--yes` dataset fetch, the claude-auth section and the object-store sweep are
+  #      each an immediate no-op (their scripts are absent from the staged tree), and both
+  #      env-seam sections refuse outright under root before opening their bounded session
+  #      probes. What remains is probe latency, which is exactly what co-scheduled gate
+  #      load inflates. 300s matches this file's own convention and #4266's sibling raise
+  #      of test_gate_detached.sh 4b.126, whose early-exit keeps the unloaded pass fast —
+  #      here the bound is never waited on at all when the run completes.
+  PIN_11AT_BOUND_S=300
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     pin_liar="$tmp/pin-liar-bin"; mkdir -p "$pin_liar"
     printf '#!/usr/bin/env bash\necho 1000\n' >"$pin_liar/id"; chmod +x "$pin_liar/id"
@@ -4814,14 +4834,58 @@ FAKEGATE
     out_at=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" PATH="$pin_liar:$PATH" \
       CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_liar_target" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL "$PIN_11AT_BOUND_S" "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
-    if out_has "$out_at" 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
-      ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
-    else
+    rc_at=$?
+    # A KILLED RUN IS NOT A DEFEATED GUARD (#4287). The old form was a two-way `if`, so
+    # EVERY non-green reason — including "the deadline fired before the run printed a
+    # single line" — came out as the one sentence "the seam steered a privileged write":
+    # an accusation of a security failure, made from an empty observation. The evidence
+    # printed alongside it was empty too, in both channels, which is what identified the
+    # real cause. So the outcomes are separated, and the ORDER is the classification:
+    #
+    #   1. the target EXISTS            -> the guard was genuinely defeated. A write
+    #                                      landed at an env-chosen path under root; that
+    #                                      is the true positive and stays a `bad`,
+    #                                      whatever the exit status says.
+    #   2. the refusal line is present  -> the decision path was taken and nothing was
+    #                                      written: the pass. Asserted even if the run was
+    #                                      later killed, because the property was already
+    #                                      OBSERVED by then — a deadline that fires after
+    #                                      the verdict changes nothing about the verdict.
+    #   3. killed at the bound          -> UNMEASURED. `timeout -s KILL` exits 137
+    #                                      (128+SIGKILL); 124 is accepted too, since that
+    #                                      is what the GNU tool reports when the child is
+    #                                      reaped through the softer path. Announced as a
+    #                                      counted `skip`, this file's category for "the
+    #                                      subject could not be observed" — never an `ok`
+    #                                      (that would be a vacuous green) and never a
+    #                                      `bad` (that would be the false accusation again).
+    #   4. no output at all             -> UNMEASURED for a cause the status did not name.
+    #                                      Kept distinct from 3 rather than folded into it:
+    #                                      empty output with a NON-timeout status is a
+    #                                      different failure (a sudo refusal, a missing
+    #                                      bounded runner) and must not be reported as a
+    #                                      deadline we never hit.
+    #   5. otherwise                    -> the run COMPLETED, wrote nothing, and never
+    #                                      printed the refusal. No write was observed, so
+    #                                      it is not the defeat message; it is still a
+    #                                      `bad`, because the guard's decision path went
+    #                                      unexercised and the case would otherwise pass
+    #                                      vacuously the day the section stops running.
+    if [ -e "$pin_liar_target" ]; then
       bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
       printf '%s\n' "$out_at" | grep -i 'gate-pin' | head -2
       ls -l "$pin_liar_target" 2>/dev/null
+    elif out_has "$out_at" 'gate-pin: SKIPPED'; then
+      ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
+    elif [ "$rc_at" -eq 137 ] || [ "$rc_at" -eq 124 ]; then
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation was KILLED at its ${PIN_11AT_BOUND_S}s wall-clock bound (rc=$rc_at) before it reached a verdict, so the guard was neither confirmed nor defeated (nothing was written)"
+    elif [ -z "$out_at" ]; then
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at, not the ${PIN_11AT_BOUND_S}s deadline), so the guard was neither confirmed nor defeated (nothing was written)"
+    else
+      bad "gate-pin: the root-seam refusal never appeared in a run that COMPLETED (rc=$rc_at) — nothing was written, so this is not an observed privileged write, but the guard's decision path went unexercised"
+      printf '%s\n' "$out_at" | grep -i 'gate-pin' | head -2
     fi
     sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
 
