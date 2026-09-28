@@ -10631,7 +10631,7 @@ t test_object_store_sweep_claim_wait_completed_stops_contending
 # is asserted below, from the shipped files, so this case does not re-type it either.
 test_object_store_sweep_claim_recovers_when_stale() {
   local d root calls counter rc claim bound fns walks per_walk want got
-  local refresh_pid
+  local refresh_pid planted_started
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10707,13 +10707,17 @@ test_object_store_sweep_claim_recovers_when_stale() {
   #     that survives an unknown delay. A background loop rewrites `$claim/started` to
   #     `date +%s` every 0.2s (atomically: a `mv` into place, never a partial read) for as
   #     long as the supervisor runs, so WHENEVER it takes its first (or any) reading, the
-  #     claim's age is at most ~0.2s — the plant/read race is gone regardless of how late the
-  #     read happens. This does not weaken the property or the timing: the wait's OUTER
-  #     `wait_until` budget (computed by the supervisor itself, from ITS OWN process-start
-  #     clock, not from this file) still bounds and terminates the wait — a continuously-aged
-  #     `started+stale` deadline never fires first (it always trails `now` by ~`stale`), so
-  #     the case still ends via the SAME `exhausted` -> "NOT SWEPT AND NOT MEASURED" path,
-  #     asserted below exactly as before, in about the same ~3s wall-clock.
+  #     claim's age is at most ~0.2s. This narrows the race to the refresher itself being
+  #     scheduled within the ~3s bound under the same load that caused #4282 — far less likely
+  #     than the ORIGINAL one-shot plant racing the supervisor's launch, but not a zero-latency
+  #     guarantee, which is why the liveness check below (did `started` actually advance?)
+  #     matters: without it, a dead or starved refresher silently degrades this case back to
+  #     the one-shot plant it replaces. This does not weaken the property or the timing: the
+  #     wait's OUTER `wait_until` budget (computed by the supervisor itself, from ITS OWN
+  #     process-start clock, not from this file) still bounds and terminates the wait — a
+  #     continuously-aged `started+stale` deadline never fires first (it always trails `now`
+  #     by ~`stale`), so the case still ends via the SAME `exhausted` -> "NOT SWEPT AND NOT
+  #     MEASURED" path, asserted below exactly as before, in about the same ~3s wall-clock.
   d="$(new_case_dir)"; calls="$d/calls-fresh"; counter="$d/counter"
   common_env "$d"
   write_finalize_stub "$d/bin/worker.sh" "$counter"
@@ -10726,7 +10730,8 @@ test_object_store_sweep_claim_recovers_when_stale() {
   export OBJ_SWEEP_CLAIM_POLL_SECS=1
   claim="$OBJ_SWEEP_STAMP.sweeping"
   mkdir -p "$claim"
-  printf '%s\n' "$(date +%s)" >"$claim/started"
+  planted_started="$(date +%s)"
+  printf '%s\n' "$planted_started" >"$claim/started"
   # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
   # a concurrent read never observes a torn value. `fixture_bg`/`fixture_kill` own the group
   # so a case failure or interrupt cannot leak this loop.
@@ -10743,7 +10748,14 @@ test_object_store_sweep_claim_recovers_when_stale() {
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
   rc=$?
   fixture_kill "$refresh_pid"
-  if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
+  # NON-VACUITY: a dead/starved refresher would silently degrade this case back to the
+  # one-shot plant it replaces (this passes on most runs anyway; the bug's own trigger --
+  # a loaded box -- is exactly what widens the plant/read gap). Assert the loop actually
+  # ran and advanced `started` past the initial plant, so a broken fixture fails as
+  # "refresher never ran" rather than reappearing as an unattributed flake.
+  if [[ "$(cat "$claim/started" 2>/dev/null || echo 0)" -le "$planted_started" ]]; then
+    fail "obj-sweep(claim-fresh-control): the refresh fixture never advanced \$claim/started past its initial plant ($planted_started) -- the case ran on a one-shot plant, not the fix under test"
+  elif [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
     grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/fresh.log" &&
     grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
     pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip"
