@@ -27,7 +27,7 @@
 # A DECREASE never fails — re-run the command above and commit a tighter baseline. That
 # is also the ONE declared residual: the digest changes on any removal, so a net decrease
 # that also ADDS a line is tolerated.
-scripts/agent-gate.sh 106 101ddaac01fffd9401f45c5e7d0300fde207f608f7037a9fd7a196238d602525
+scripts/agent-gate.sh 108 e5a0a1c8ad429be21c5b8d9c05fbded8ed25db8ef30f7a16ef310a703c98e9fa
 scripts/audit-inert-surfaces.sh 1 bb72bed6f53cbe17f37446cb6ca69b342de3f6d12568cb2f783e53e266330ac4
 scripts/bootstrap-agent-machine.sh 44 2c9067d9ad2e0947309819e81b2580d456412994e8f3bbbcbd7383cd223e3ed2
 scripts/bump-version.sh 2 b8b4c6e32848ce57f6420923360038c3469adcc5ea2ba0b00999a3e2fb7e3a2c
@@ -64,6 +64,7 @@ scripts/flow/tests/claim-resume.test.sh 128 d5405d189133a4ec24a22410857d223ba594
 scripts/flow/tests/finalize-cleanup.test.sh 5 1425ebeb86776577985280998a4fc614258cc3713be0d28b36c818cd952343cf
 scripts/gate-component-verdict.sh 2 7dd234b10e78bbeaa90f2c57a16ad73c7055ee675967757415a1e8704bc140fa
 scripts/lib/gate-notify.sh 1 defae3c729e4a264f18e28d0e5ca3fa1f1711f7d1e87c7a242d365fcffe7858c
+scripts/lib/tooling-tests-scope.sh 4 d9331d699972c16907b9ae058e6734e08fccc8e8f4a49daa0da8d433f1476092
 scripts/local/audit-ci-commands.sh 1 03b2626dd12f2bf7b31e8d5f10863875e765a231406a9499aea713d963d5347e
 scripts/local/pre-merge.sh 1 ceb8863c04edde78ddd8327323ed6758cbc56e7061857ad3e0b568aa78bfaa3d
 scripts/local/test-all-ci-locally.sh 1 acee272f300976f39b15da8d48d6af5a3ce95b6fab0aad4e94696789ab3e59c5
@@ -138,6 +139,7 @@ scripts/tests/test_premerge_review_binding.sh 2 1c289034dc6b210386155b99b6beedb6
 scripts/tests/test_pub_surface_guard.sh 1 68e897407dbb3033b4711bdfd2f2ad86b4adbb924e1ec117cd51fe158eb2ad86
 scripts/tests/test_roborev_guard_portability.sh 38 29bf34563897e39c7c0e85fde5498bfc9854afc763ba638e583cebc1149b102e
 scripts/tests/test_roborev_review_guard.sh 15 8e3f036bace31b3f90d59bb2b58c8b61da654a1a63c624325c21ce74c0f5614b
+scripts/tests/test_tooling_tests_scope.sh 7 b734d9f2000919153f05ae9faf38ded82eda3e4252a98a5d2508b7196618cf3c
 scripts/tests/test_tools_crate_disposition.sh 8 754df1e26c18d316080e2fefde96a07e02a6cfbf67a13c6bd8c11e65c3ca7fef
 scripts/tests/test_tools_crate_disposition_selftest.sh 6 9dc7d6251e18ceae04e0b82efc41c1d0bf20f45dc32eb3f9d9e65bc4cadd6888
 scripts/tests/test_worker_supervisor.sh 134 f07556196de9631990721cce0eed72a805056501ad8c9495965dcf5034e6be20
