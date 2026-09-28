@@ -187,8 +187,8 @@
 //! something this sweep introduced, and not something it can fix from inside
 //! a test file. Wiring a `CQLITE_REQUIRE_FIXTURES=1` gate component for these
 //! targets (precedent: the #3032 component, which does exactly that for its
-//! two committed-fixture targets) is tracked as separate follow-up work. It
-//! is stated here rather than left implied because a doc that reads as though
+//! two committed-fixture targets) is tracked as **issue #4311**. It is stated
+//! here rather than left implied because a doc that reads as though
 //! full-corpus certification happens automatically is the false assurance
 //! this repo exists to avoid.
 //!

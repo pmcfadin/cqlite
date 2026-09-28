@@ -30,7 +30,7 @@
 //! `CQLITE_REQUIRE_FIXTURES=1`, so on a box without the fetched corpus every
 //! fetch-only case here SKIPs and certifies nothing. Cite a strict-mode run
 //! against a fetched corpus, not a gate PASS, when claiming this family was
-//! swept.
+//! swept. The gate-wiring remedy is issue #4311.
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
