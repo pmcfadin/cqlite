@@ -9,9 +9,11 @@
 //! keeps working unchanged.
 
 use crate::query::result::QueryRow;
-use crate::query::select_ast::WhereExpression;
+use crate::query::select_ast::{
+    ComparisonExpression, ComparisonOperator, ComparisonRightSide, WhereExpression,
+};
 use crate::query::select_executor::{evaluate_leaf, LeafOutcome};
-use crate::query::select_optimizer::{in_list_lowers_completely, SSTablePredicate};
+use crate::query::select_optimizer::{literal_value, SSTablePredicate};
 use crate::schema::TableSchema;
 use crate::types::Value;
 use crate::Result;
@@ -59,6 +61,30 @@ fn is_plain_data_row(row: &QueryRow) -> bool {
 /// Such a leaf yields `None` here instead, via the optimizer's own
 /// `in_list_lowers_completely` (never a re-derived copy of its literal
 /// rule).
+/// `true` when EVERY element of an `IN (...)` value list lowers to a literal
+/// — i.e. `select_optimizer::column_comparison_to_predicate` captures the
+/// WHOLE restriction rather than a narrowed subset. Non-`In` comparisons are
+/// `true`: they lower all-or-nothing, which the leaf/predicate COUNT check
+/// already detects.
+///
+/// Roborev finding (issue #4222 — round 11): that `In` arm `filter_map`s the
+/// value list through [`literal_value`] — the optimizer's OWN rule, called
+/// here rather than re-derived, so the two cannot diverge — and emits a
+/// predicate as long as AT LEAST ONE element is a literal. `WHERE pk IN
+/// (1, ck)` therefore yields one leaf and one predicate, indistinguishable by
+/// count alone from a fully lowered restriction, while the restriction has
+/// silently become `pk IN (1)`. (A bare column reference, not the finding's
+/// illustrative `2 + 3`: arithmetic inside an `IN` list does not parse at
+/// all, so that shape is a parse error rather than this defect.)
+fn in_list_lowers_completely(comp: &ComparisonExpression) -> bool {
+    match (&comp.operator, &comp.right) {
+        (ComparisonOperator::In, ComparisonRightSide::ValueList(value_exprs)) => {
+            value_exprs.iter().all(|e| literal_value(e).is_some())
+        }
+        _ => true,
+    }
+}
+
 pub(super) fn count_pushable_comparison_leaves(expr: &WhereExpression) -> Option<usize> {
     match expr {
         // An `In` leaf whose value list is only PARTIALLY literal lowers

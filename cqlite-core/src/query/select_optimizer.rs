@@ -606,32 +606,7 @@ fn token_comparison_to_predicate(
     Ok(SSTablePredicate::token(token_columns, op, vec![bound]))
 }
 
-/// `true` when EVERY element of an `IN (...)` value list lowers to a literal
-/// — i.e. [`column_comparison_to_predicate`] captures the WHOLE restriction
-/// rather than a narrowed subset of it. Non-`In` comparisons are `true`
-/// (they lower all-or-nothing, so the caller's leaf/predicate count check
-/// already covers them).
-///
-/// Roborev finding (issue #4222 — round 11): the `In` arm above `filter_map`s
-/// the value list through [`literal_value`] and emits a predicate as long as
-/// AT LEAST ONE element is a literal. So `WHERE pk IN (1, ck)` yields one
-/// leaf and one predicate — indistinguishable, by count alone, from a fully
-/// lowered restriction — while the restriction has silently become
-/// `pk IN (1)`. (A bare column reference, not the finding's illustrative
-/// `2 + 3`: arithmetic inside an `IN` list does not parse at all, so it is a
-/// parse error rather than this defect.) Callers that must FAIL CLOSED on an incompletely-lowered
-/// WHERE clause (the raw SSTable view) ask this instead of re-deriving the
-/// optimizer's literal rule, so the two can never diverge.
-pub(crate) fn in_list_lowers_completely(comp: &ComparisonExpression) -> bool {
-    match (&comp.operator, &comp.right) {
-        (ComparisonOperator::In, ComparisonRightSide::ValueList(value_exprs)) => {
-            value_exprs.iter().all(|e| literal_value(e).is_some())
-        }
-        _ => true,
-    }
-}
-
-fn literal_value(expr: &SelectExpression) -> Option<Value> {
+pub(crate) fn literal_value(expr: &SelectExpression) -> Option<Value> {
     match expr {
         SelectExpression::Literal(value) => Some(value.clone()),
         _ => None,
