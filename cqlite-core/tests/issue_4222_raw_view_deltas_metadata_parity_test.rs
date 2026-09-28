@@ -364,11 +364,22 @@ async fn ttl_cells_report_the_declared_ttl_and_computed_expiry_from_the_golden()
             );
         }
 
-        // The row-level liveness quintet reports the same three facts
+        // The row-level liveness columns report the same three facts
         // (R3's `row_timestamp`/`row_ttl`, also previously unasserted).
         assert_eq!(int_of(row, "row_ttl"), Some(golden_i32(ttl, "ttl")));
         assert_eq!(bigint_of(row, "row_timestamp"), Some(tstamp));
-        assert_eq!(bigint_of(row, "row_local_deletion_time"), Some(expires_at));
+        // The liveness marker's expiry has its OWN column (roborev finding,
+        // issue #4222 — round 11, F3): `row_local_deletion_time` is the row
+        // TOMBSTONE's GC clock and nothing else, so a live TTL'd row with no
+        // row deletion reports NO `row_local_deletion_time` at all. Folding
+        // both facts into one column is what let a coexisting row tombstone
+        // silently overwrite (and discard) this expiry.
+        assert_eq!(bigint_of(row, "row_liveness_expires_at"), Some(expires_at));
+        assert_eq!(
+            get(row, "row_local_deletion_time"),
+            None,
+            "this row carries no row tombstone, so it has no row-level GC clock"
+        );
         assert_eq!(
             text_of(row, "row_kind").as_deref(),
             Some("row"),
@@ -416,6 +427,7 @@ async fn a_partition_written_without_a_ttl_reports_no_ttl_at_all() {
             "val_local_deletion_time",
             "extra_local_deletion_time",
             "row_local_deletion_time",
+            "row_liveness_expires_at",
         ] {
             assert_eq!(
                 get(row, col),
@@ -556,6 +568,7 @@ async fn collection_table_column_contract_is_pinned_from_the_public_surface() {
             "props_complex_deletion_timestamp",
             "row_timestamp",
             "row_ttl",
+            "row_liveness_expires_at",
             "row_local_deletion_time",
             "row_tombstone",
             "row_deletion_timestamp",

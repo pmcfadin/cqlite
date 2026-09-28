@@ -175,9 +175,12 @@ plus, per non-key column `<col>`:
 | `<col>_complex_deletion_time` / `_timestamp` | `int`/`bigint`, NULL unless the above is true | the complex deletion's LDT and writetime | same field, tuple halves |
 
 Row level: `row_timestamp` (`bigint`, NULL if no explicit liveness marker —
-`RowLiveness::marker_timestamp`, `compaction_row.rs:194-211`), `row_ttl` (`int`), `row_local_deletion_time`
-(`int`), `row_tombstone` (`text`, NULL \| `row` \| `expired`, from `RowHeader::row_tombstone()`,
-`row_decoder/mod.rs:437-484`).
+`RowLiveness::marker_timestamp`), `row_ttl` (`int`, the on-disk `RowHeader::ttl` carried verbatim via
+`RowLiveness::ttl_seconds` — NEVER derived from expiry minus write timestamp, which diverges under an
+explicit `USING TIMESTAMP`; roborev round 11 F2), `row_liveness_expires_at` (`bigint`, the liveness
+marker's own expiry — its OWN column so a coexisting row deletion cannot overwrite and discard it;
+roborev round 11 F3), `row_local_deletion_time` (`bigint`, the row TOMBSTONE's GC clock and nothing
+else), `row_tombstone` (`text`, NULL \| `row` \| `expired`, from `RowHeader::row_tombstone()`).
 
 Partition level: `partition_deletion_time` (`bigint`), `partition_deletion_timestamp` (`bigint`), both
 NULL unless this generation carries a partition tombstone for this key —

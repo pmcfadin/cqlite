@@ -302,6 +302,7 @@ async fn bti_row_and_cell_write_times_match_the_golden() {
             "payload_local_deletion_time",
             "payload_tombstone",
             "row_ttl",
+            "row_liveness_expires_at",
             "row_local_deletion_time",
             "row_tombstone",
         ] {

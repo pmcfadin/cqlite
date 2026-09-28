@@ -73,8 +73,8 @@ fn try_is_complex_cql_type(t: &CqlType) -> Option<bool> {
 /// Returns the synthesized column set ALONGSIDE the set of names that are
 /// METADATA DERIVATIVES (the per-cell `_timestamp`/`_ttl`/
 /// `_local_deletion_time`/`_tombstone`/`_complex_deletion*` names and the
-/// row-level `row_timestamp`/`row_ttl`/`row_local_deletion_time`/
-/// `row_tombstone`/`row_deletion_timestamp` quintet) — roborev finding,
+/// row-level `row_timestamp`/`row_ttl`/`row_liveness_expires_at`/
+/// `row_local_deletion_time`/`row_tombstone`/`row_deletion_timestamp` set) — roborev finding,
 /// issue #4222 — round 9, correcting round 8's own gap: that fix classified
 /// a predicate's column by NAME SUFFIX (`predicates.rs`'s
 /// `is_metadata_derivative_column`), which misclassifies a REAL base-table
@@ -85,7 +85,7 @@ fn try_is_complex_cql_type(t: &CqlType) -> Option<bool> {
 /// SYNTHESIZED — never re-derived from a name pattern — makes that
 /// misclassification structurally impossible: a real base column can never
 /// end up in this set, because it is populated only at the exact call
-/// sites that push a synthesized quad/trio/quintet name.
+/// sites that push a synthesized quad/trio/row-level metadata name.
 pub(in crate::query::select_executor) fn raw_view_columns(
     base: &TableSchema,
 ) -> crate::Result<(Vec<ColumnInfo>, HashSet<String>)> {
@@ -281,6 +281,21 @@ pub(in crate::query::select_executor) fn raw_view_columns(
         "int",
         true,
     )?;
+    // The liveness marker's OWN expiry (epoch seconds), distinct from the row
+    // TOMBSTONE's GC clock below (roborev finding, issue #4222 — round 11).
+    // The two COEXIST on a single physical row (`row_deletion` alongside a
+    // TTL'd `row_liveness`, issue #932), and folding both into
+    // `row_local_deletion_time` meant the tombstone's LDT silently
+    // OVERWROTE — and discarded — the marker's expiry. Separate facts,
+    // separate columns.
+    push(
+        &mut columns,
+        &mut metadata_names,
+        "row_liveness_expires_at".to_string(),
+        "bigint",
+        true,
+    )?;
+    // The row TOMBSTONE's GC clock, and ONLY that (round 11, above).
     // `bigint`, never `int` (roborev finding, issue #4222 — round 8): see
     // the identical `<col>_local_deletion_time` note above.
     push(

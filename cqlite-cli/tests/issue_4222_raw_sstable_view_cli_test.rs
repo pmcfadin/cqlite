@@ -229,6 +229,7 @@ const FULL_COLUMN_CONTRACT: &[&str] = &[
     "extra_tombstone",
     "row_timestamp",
     "row_ttl",
+    "row_liveness_expires_at",
     "row_local_deletion_time",
     "row_tombstone",
     "row_deletion_timestamp",

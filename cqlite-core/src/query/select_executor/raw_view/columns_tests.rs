@@ -97,6 +97,7 @@ fn dropped_regular_col_column_contract_snapshot() {
             "drop_col_tombstone",
             "row_timestamp",
             "row_ttl",
+            "row_liveness_expires_at",
             "row_local_deletion_time",
             "row_tombstone",
             "row_deletion_timestamp",
@@ -134,7 +135,8 @@ fn key_columns_are_never_duplicated_as_metadata_quads() {
 
 /// Roborev finding (issue #4222, round 9): the returned `metadata_names`
 /// set must contain EXACTLY the synthesized per-cell quad + row-level
-/// quintet names — never a structural column (`pk`/`ck`/`keep_col`/
+/// metadata names (the `row_liveness_expires_at` member was added in round
+/// 11, F3) — never a structural column (`pk`/`ck`/`keep_col`/
 /// `drop_col` themselves), and never an ALWAYS-applicable column
 /// (`generation`/`sstable`/`row_kind`/`partition_deletion_time`/etc,
 /// `predicates.rs`'s separate `always_applicable_column_names` set).
@@ -154,6 +156,7 @@ fn metadata_names_contains_exactly_the_synthesized_derivatives() {
         "drop_col_tombstone",
         "row_timestamp",
         "row_ttl",
+        "row_liveness_expires_at",
         "row_local_deletion_time",
         "row_tombstone",
         "row_deletion_timestamp",

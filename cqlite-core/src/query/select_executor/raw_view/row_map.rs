@@ -158,13 +158,27 @@ pub(in crate::query::select_executor) fn map_compaction_row(
                     values.insert("row_ttl".to_string(), Value::Integer(ttl));
                 }
                 if let Some(expires_at) = row_liveness.expires_at_seconds {
+                    // ITS OWN COLUMN, never `row_local_deletion_time`
+                    // (roborev finding, issue #4222 — round 11). A row
+                    // deletion and a TTL'd liveness marker COEXIST on one
+                    // physical row (`CompactionRowData::Live::row_deletion`,
+                    // issue #932 — e.g. a `DELETE … USING TIMESTAMP 100`
+                    // flushed together with a later
+                    // `INSERT … USING TIMESTAMP 200 AND TTL 60`), and this
+                    // value used to be written into `row_local_deletion_time`
+                    // only to be UNCONDITIONALLY OVERWRITTEN by the
+                    // tombstone's LDT below — silently discarding a physical
+                    // fact in a view whose contract is to lose none. The two
+                    // clocks are different facts and now have different
+                    // columns: `row_local_deletion_time` is the row
+                    // TOMBSTONE's GC clock and nothing else.
+                    //
                     // `expires_at` is an HONEST `i64` (write-time + TTL
                     // seconds), never a wrapped on-disk LDT bit pattern — no
-                    // cast needed now that the column is `bigint` (roborev
-                    // finding, issue #4222 — round 8: widened alongside the
-                    // two GENUINELY wrapped sites below).
+                    // cast needed for this `bigint` column (roborev finding,
+                    // issue #4222 — round 8).
                     values.insert(
-                        "row_local_deletion_time".to_string(),
+                        "row_liveness_expires_at".to_string(),
                         Value::BigInt(expires_at),
                     );
                 }

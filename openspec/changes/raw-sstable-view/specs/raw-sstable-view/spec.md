@@ -61,7 +61,11 @@ For every non-key column `<col>` of the base table, the raw view SHALL carry `<c
 ### Requirement: The physical column contract — row, partition, and source columns
 
 Every physical row SHALL carry `row_timestamp` (bigint, NULL absent an explicit liveness marker),
-`row_ttl` (int), `row_local_deletion_time` (int), `row_tombstone` (text, NULL \| `row` \| `expired`),
+`row_ttl` (int, the AUTHORITATIVE on-disk row TTL read verbatim from the row header — never derived
+from the expiry and the write timestamp, which diverge whenever the write used an explicit
+`USING TIMESTAMP`), `row_liveness_expires_at` (bigint, the liveness marker's own expiry in epoch
+seconds), `row_local_deletion_time` (bigint, the row TOMBSTONE's GC clock and nothing else),
+`row_tombstone` (text, NULL \| `row` \| `expired`),
 `partition_deletion_time` / `partition_deletion_timestamp` (bigint, both NULL unless this generation
 carries a partition tombstone for the key), and the source columns `sstable` (text, the Data.db file
 name), `generation` (int), `format` (text, `big` \| `bti`), and `position` (bigint, the partition's
@@ -74,6 +78,22 @@ byte offset in Data.db).
 - **THEN** `row_tombstone = 'row'` with `row_local_deletion_time` matching `sstabledump`'s row-level
   deletion info, and every `<col>_tombstone` on that physical row is NULL (the tombstone is recorded
   once, at the row level, not duplicated per cell).
+
+#### Scenario: A row deletion and a TTL'd liveness marker coexist without either being discarded
+
+A single physical row can carry BOTH a row deletion and a primary-key liveness marker — e.g.
+`DELETE FROM t WHERE pk=1 AND ck=1 USING TIMESTAMP 100;` followed by
+`INSERT INTO t(pk,ck,val) VALUES(1,1,'x') USING TIMESTAMP 200 AND TTL 60;` flushed together into one
+SSTable. They are two independent physical facts with two independent clocks, so they SHALL occupy
+two distinct columns; neither may overwrite the other.
+
+- **GIVEN** a physical row carrying a row deletion AND a TTL'd liveness marker
+- **WHEN** the raw view is queried for it
+- **THEN** `row_local_deletion_time` / `row_deletion_timestamp` report the ROW TOMBSTONE's GC clock
+  and `markedForDeleteAt`, AND `row_liveness_expires_at` / `row_ttl` / `row_timestamp` report the
+  LIVENESS MARKER's expiry, on-disk TTL and write timestamp — all of them present simultaneously.
+- **AND** a row with a liveness marker but NO row deletion reports `row_liveness_expires_at` with
+  `row_local_deletion_time` NULL (there is no row-level GC clock to report).
 
 #### Scenario: A partition tombstone is visible even when the generation holds no live rows
 

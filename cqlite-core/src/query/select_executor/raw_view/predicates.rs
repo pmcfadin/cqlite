@@ -109,8 +109,8 @@ pub(super) fn count_pushable_comparison_leaves(expr: &WhereExpression) -> Option
 /// clustering-key / regular-column values and their `_timestamp`/`_ttl`/
 /// `_local_deletion_time`/`_tombstone`/`_complex_deletion*` metadata
 /// derivatives, and the ROW-level `row_timestamp`/`row_ttl`/
-/// `row_local_deletion_time`/`row_tombstone`/`row_deletion_timestamp`
-/// quintet — every one of those is populated ONLY on a plain `row_kind =
+/// `row_liveness_expires_at`/`row_local_deletion_time`/`row_tombstone`/
+/// `row_deletion_timestamp` set — every one of those is populated ONLY on a plain `row_kind =
 /// 'row'` row (`row_map.rs`'s `Live`/`Tombstone` arms), so they stay exempt
 /// for a synthetic row, matching the spec's "even when the generation holds
 /// no live rows" requirement for `partition_tombstone`/`range_tombstone_*`.
@@ -139,7 +139,7 @@ fn always_applicable_column_names() -> &'static HashSet<&'static str> {
 /// [`always_applicable_column_names`]) and the subset that applies ONLY to
 /// a plain data row (`row_kind = 'row'`): clustering-key / regular-column
 /// predicates and their metadata derivatives, plus the row-level metadata
-/// quintet (roborev finding, issue #4222 — round 5, correcting round 2's
+/// set (roborev finding, issue #4222 — round 5, correcting round 2's
 /// over-broad exemption).
 ///
 /// Used by both row producers to apply the CORRECT predicate backstop per
@@ -175,7 +175,7 @@ pub(super) fn split_predicates_by_key_role<'a>(
 /// carries real values for those columns, synthetic or not.
 ///
 /// `data_predicates` (clustering-key/regular-column predicates, their
-/// metadata derivatives, and the row-level metadata quintet) exempt a
+/// metadata derivatives, and the row-level metadata set) exempt a
 /// SYNTHETIC row from a predicate ONLY WHEN BOTH the column is a
 /// STRUCTURAL data column (its name is NOT a member of `metadata_names` —
 /// the set `columns.rs::raw_view_columns` ACTUALLY SYNTHESIZED, never
@@ -316,7 +316,7 @@ mod tests {
 
     /// The exact metadata-derivative name set `raw_view_columns` would
     /// synthesize for [`test_schema`]'s `val` column plus the row-level
-    /// quintet — the SAME construction-derived shape `row_passes_predicates`
+    /// set — the SAME construction-derived shape `row_passes_predicates`
     /// now takes as an explicit parameter (roborev finding, issue #4222 —
     /// round 9), never a name-suffix guess.
     fn metadata_names_fixture() -> HashSet<String> {
@@ -327,6 +327,7 @@ mod tests {
             "val_tombstone",
             "row_timestamp",
             "row_ttl",
+            "row_liveness_expires_at",
             "row_local_deletion_time",
             "row_tombstone",
             "row_deletion_timestamp",
@@ -482,7 +483,7 @@ mod tests {
         );
     }
 
-    /// Same rejection rule applies to the ROW-level metadata quintet
+    /// Same rejection rule applies to the ROW-level metadata set
     /// (`row_tombstone` here), not just per-cell derivatives.
     #[test]
     fn partition_tombstone_row_is_rejected_by_a_row_level_metadata_predicate_it_lacks() {

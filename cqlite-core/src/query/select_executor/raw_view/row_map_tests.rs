@@ -416,3 +416,93 @@ fn a_marker_without_an_on_disk_ttl_reports_no_row_ttl() {
     let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
     assert_eq!(rows[0].values.get("row_ttl"), None);
 }
+
+/// Roborev finding (issue #4222, round 11 — F3): a row deletion and a TTL'd
+/// liveness marker COEXIST on the same physical row
+/// (`CompactionRowData::Live::row_deletion` is a documented real state,
+/// issue #932) — e.g.
+/// `DELETE FROM t WHERE pk=1 AND ck=1 USING TIMESTAMP 100;` followed by
+/// `INSERT INTO t(pk,ck,val) VALUES(1,1,'x') USING TIMESTAMP 200 AND TTL 60;`
+/// flushed together into one SSTable.
+///
+/// `row_local_deletion_time` used to be set from the liveness expiry and then
+/// UNCONDITIONALLY OVERWRITTEN by the tombstone's LDT, silently discarding the
+/// marker's expiry — a lost physical fact in a view whose whole contract is to
+/// lose none. The two facts now have their OWN columns and BOTH must be
+/// present and correct.
+#[test]
+fn a_row_deletion_and_a_ttld_liveness_marker_both_survive_without_overwriting() {
+    let row = CompactionRow {
+        key: pk_bytes(1),
+        row_timestamp: 200,
+        row_data: CompactionRowData::Live {
+            simple: vec![],
+            complex: vec![],
+            // The row tombstone: markedForDeleteAt = 100µs, GC clock = 1_000s.
+            row_deletion: Some((100, 1_000)),
+            // The coexisting TTL'd liveness marker from the later INSERT.
+            row_liveness: RowLiveness {
+                has_marker: true,
+                expires_at_seconds: Some(2_060),
+                marker_timestamp: Some(200),
+                ttl_seconds: Some(60),
+            },
+        },
+    };
+    let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+    let r = &rows[0];
+    assert_eq!(
+        r.values.get("row_local_deletion_time"),
+        Some(&Value::BigInt(1_000)),
+        "row_local_deletion_time is the ROW TOMBSTONE's GC clock"
+    );
+    assert_eq!(
+        r.values.get("row_deletion_timestamp"),
+        Some(&Value::BigInt(100)),
+        "the tombstone's own markedForDeleteAt"
+    );
+    assert_eq!(
+        r.values.get("row_liveness_expires_at"),
+        Some(&Value::BigInt(2_060)),
+        "REGRESSION: the coexisting liveness marker's expiry must NOT be discarded \
+         by the row tombstone's LDT"
+    );
+    assert_eq!(r.values.get("row_timestamp"), Some(&Value::BigInt(200)));
+    assert_eq!(r.values.get("row_ttl"), Some(&Value::Integer(60)));
+}
+
+/// The other half of F3's column split: with NO row deletion, the liveness
+/// expiry is reported by `row_liveness_expires_at` and
+/// `row_local_deletion_time` is ABSENT — it is the row TOMBSTONE's GC clock
+/// and nothing else, so it must never stand in for a liveness expiry (which
+/// is what made the collision above silent in the first place).
+#[test]
+fn a_ttld_marker_with_no_row_deletion_reports_only_the_liveness_expiry_column() {
+    let row = CompactionRow {
+        key: pk_bytes(1),
+        row_timestamp: 200,
+        row_data: CompactionRowData::Live {
+            simple: vec![],
+            complex: vec![],
+            row_deletion: None,
+            row_liveness: RowLiveness {
+                has_marker: true,
+                expires_at_seconds: Some(2_060),
+                marker_timestamp: Some(200),
+                ttl_seconds: Some(60),
+            },
+        },
+    };
+    let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+    let r = &rows[0];
+    assert_eq!(
+        r.values.get("row_liveness_expires_at"),
+        Some(&Value::BigInt(2_060))
+    );
+    assert_eq!(
+        r.values.get("row_local_deletion_time"),
+        None,
+        "no row tombstone exists, so there is no row-level GC clock to report"
+    );
+    assert_eq!(r.values.get("row_tombstone"), None);
+}
