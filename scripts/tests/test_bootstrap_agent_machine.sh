@@ -4856,6 +4856,9 @@ FAKEGATE
   # independent substring searches cannot narrow the pass, and the live predicate matches the
   # refusal LINE verbatim instead (round 27).
   PIN_11AT_COEMIT_SAMPLE='sccache-cap: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)'
+  # A NON-root-identity refusal, verbatim from bootstrap :2586. Used wherever a fixture
+  # needs a real `gate-pin:` line that is NOT this case's pass (round 32).
+  PIN_11AT_OTHER_REFUSAL_SAMPLE='gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE must be an ABSOLUTE path)'
   PIN_11AT_PASS_SAMPLE='gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)'
   # The signal-death/deadline predicate, hoisted for the SAME anti-drift reason — round
   # 15's F1 was precisely this test being too narrow (137-only), and a prose-only claim
@@ -4883,6 +4886,28 @@ FAKEGATE
     [ "$1" -ne 0 ] && out_has "$2" -E "$PIN_11AT_SUDO_RE" \
       && ! out_has "$2" -vE "$PIN_11AT_SUDO_RE"'|^[[:space:]]*$'
   }
+
+  # FIXTURE DRIFT IS ITS OWN FAILURE, NAMED AS ITSELF (round 32). The three samples above
+  # are transcribed from bootstrap's own `warn` calls, and the live pass predicate is an
+  # exact `grep -F` on one of them. If bootstrap rewords :2551, the predicate stops
+  # matching and 11at falls to branch 7 — which announces "the guard's decision path went
+  # unexercised", an accusation about the GUARD inferred from a stale fixture. That is
+  # #4287's own defect one level out, and the 29-case harness cannot see it because it
+  # drives the classifier against the same stale literal. So assert the wording still
+  # exists in the subject and report THAT as the cause. Precedent: :7091 pins a function
+  # body out of "$BOOTSTRAP" the same way.
+  pin_11at_bootstrap_src=$(cat "$BOOTSTRAP" 2>/dev/null || true)
+  if [ -z "$pin_11at_bootstrap_src" ]; then
+    bad "gate-pin 11at fixture drift: could not read \$BOOTSTRAP ($BOOTSTRAP) — the fixtures below could not be checked against their subject"
+  else
+    for _pf in PIN_11AT_PASS_SAMPLE PIN_11AT_COEMIT_SAMPLE PIN_11AT_OTHER_REFUSAL_SAMPLE; do
+      if ! out_has "$pin_11at_bootstrap_src" -F -- "${!_pf}"; then
+        bad "gate-pin 11at fixture drift: \$$_pf no longer appears verbatim in $BOOTSTRAP — bootstrap reworded the line this fixture transcribes. THIS IS FIXTURE DRIFT, not a defeated guard and not an unexercised decision path: update the sample to bootstrap's new wording."
+      fi
+    done
+    unset _pf
+  fi
+  unset pin_11at_bootstrap_src
 
   # THE CLASSIFIER, AS A PURE FUNCTION (rounds 15/17/19 + owner ruling). It takes
   # (target-exists, rc, captured-output), prints exactly ONE token, asserts nothing and
@@ -4933,7 +4958,7 @@ FAKEGATE
   for _pc in "bash: /nonexistent/staged.sh: No such file or directory" \
              "bash: line 1: /usr/bin/env: bad interpreter: No such file or directory" \
              "sudo: a password is required" \
-             "gate-pin: SKIPPED PRIVILEGED write"; do
+             "$PIN_11AT_PASS_SAMPLE"; do
     if out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
       pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; FALSE-MATCHED non-runner output: $_pc"
     fi
@@ -4957,13 +4982,13 @@ FAKEGATE
   if ! pin_11at_sudo_failed 1 "sudo: a password is required"; then
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a genuine sudo wrapper failure (rc!=0, sudo diagnostic, no bootstrap output)"
   fi
-  if pin_11at_sudo_failed 0 $'sudo: unable to resolve host h\ngate-pin: SKIPPED PRIVILEGED write'; then
+  if pin_11at_sudo_failed 0 $'sudo: unable to resolve host h\n'"$PIN_11AT_PASS_SAMPLE"; then
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED an rc=0 run as a wrapper failure (this pair pins the rc CONJUNCT's short-circuit; the non-sudo-line conjunct is pinned by the rc=1 rows below)"
   fi
   if pin_11at_sudo_failed 0 'sudo: unable to resolve host h'; then
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED an rc=0 run as a wrapper failure"
   fi
-  if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\ngate-pin: some bootstrap output'; then
+  if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\n'"$PIN_11AT_OTHER_REFUSAL_SAMPLE"; then
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a run that DID produce bootstrap output as a wrapper failure"
   fi
   if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\nsome early bootstrap output'; then
@@ -5012,6 +5037,7 @@ FAKEGATE
   # --- ORDERING: the two that must WIN over any UNMEASURED reason ----------------------
   pin_case defeat      yes 137 "$PIN_11AT_PASS_SAMPLE"                         "ORDER: a write outranks both pass and kill"
   pin_case ok          no  137 "$PIN_11AT_PASS_SAMPLE"                         "ORDER: a verdict OBSERVED before a later kill is still the pass"
+  pin_case ok          no  127 $'/usr/bin/timeout: failed to run command\n'"$PIN_11AT_PASS_SAMPLE" "ORDER: an OBSERVED verdict outranks a runner diagnostic [round 32]"
   # --- killed / deadline: the whole 128+signum range, not a 137/124 pair ---------------
   pin_case killed      no  137 ""                                              "137 SIGKILL"
   pin_case killed      no  124 ""                                              "124 is timeout(1) own deadline status"
@@ -5025,6 +5051,7 @@ FAKEGATE
   pin_case runner      no  127 "/opt/homebrew/bin/gtimeout: failed to run command" "absolute gtimeout on macos [round 14]"
   pin_case runner      no  127 "env: 'timeout': No such file or directory"     "env: when NO runner resolves - the REAL env(1) shape, matching 11at-ctl [round 14/23]"
   pin_case runner      no  127 "timeout: failed to run command"                "bare timeout on PATH"
+  pin_case runner      no  125 "timeout: unrecognized option '--badopt'"        "rc=125, the one status exclusively timeout(1)'s own [round 32]"
   pin_case unexercised no  1   "/usr/bin/timeout: failed to run command"       "ORDER: the runner diagnostic alone is NOT enough - rc must be 125/126/127"
   # --- sudo wrapper failure: rc!=0, its own diagnostic, and NO other line -------------
   pin_case sudo        no  1   "sudo: a password is required"                  "a true wrapper failure [round 17]"
@@ -5032,7 +5059,7 @@ FAKEGATE
   pin_case sudo        no  1   $'sudo: unable to resolve host h\n\nsudo: a password is required' "an ALL-sudo capture with an interior BLANK line is still a wrapper failure [round 23]"
   pin_case unexercised no  1   $'sudo: unable to resolve host h\nsome early bootstrap output' "rc!=0 + sudo WARNING + early output must RED, not skip [round 19]"
   pin_case unexercised no  0   "sudo: unable to resolve host h"                "rc=0 + sudo WARNING must RED, not skip [round 17]"
-  pin_case unexercised no  0   $'sudo: unable to resolve host h\ngate-pin: noise' "a COMPLETED run carrying the sudo warning must RED [round 17]"
+  pin_case unexercised no  0   $'sudo: unable to resolve host h\n'"$PIN_11AT_OTHER_REFUSAL_SAMPLE" "a COMPLETED run carrying the sudo warning must RED [round 17]"
   # --- the residual reds: real regressions that must NOT become skips -----------------
   pin_case unexercised no  127 "bash: /nonexistent/staged.sh: No such file or directory" "a STAGING REGRESSION must RED [round 13]"
   pin_case unexercised no  127 "bash: line 1: /usr/bin/env: bad interpreter: No such file" "a child shebang naming /usr/bin/env must RED [round 14]"
