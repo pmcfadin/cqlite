@@ -27,6 +27,15 @@
 //! and PANICS when absent. The other eight are fetch-only, so each SKIPs
 //! cleanly on its own; `CQLITE_REQUIRE_FIXTURES=1` (#972) turns that SKIP into
 //! a panic. Roots are resolved PER TABLE and every case asserts on its own.
+//!
+//! # What a green gate does and does not certify
+//!
+//! `raw_view_parity.rs`'s module doc has the full statement (roborev finding
+//! R1, issue #4309): the full gate's `core-tests` component runs WITHOUT
+//! `CQLITE_REQUIRE_FIXTURES=1`, so on a box without the fetched corpus every
+//! fetch-only case here SKIPs and certifies nothing. Cite a strict-mode run
+//! against a fetched corpus, not a gate PASS, when claiming this family was
+//! swept.
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
