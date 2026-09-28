@@ -613,33 +613,3 @@ fn get_memory_usage() -> usize {
     // Fallback: return 0 if we can't measure
     0
 }
-
-/// Test coordination hook integration for negative test results
-#[tokio::test]
-async fn test_negative_tests_coordination() {
-    // Store negative test results in memory for coordination
-    let result = tokio::process::Command::new("npx")
-        .args([
-            "claude-flow@alpha",
-            "hooks",
-            "post-edit",
-            "--file",
-            "sstable_discovery_negative_tests",
-            "--memory-key",
-            "swarm/tester/negative_tests",
-        ])
-        .output()
-        .await;
-
-    match result {
-        Ok(output) => {
-            println!(
-                "✓ Negative test results stored in memory: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
-        Err(e) => {
-            eprintln!("Warning: Could not store negative test results: {}", e);
-        }
-    }
-}
