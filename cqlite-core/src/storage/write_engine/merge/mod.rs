@@ -12269,6 +12269,7 @@ mod issue_959_range_tombstone_fixes {
         .with_row_liveness(RowLiveness {
             has_marker: true,
             expires_at_seconds: None,
+            ttl_seconds: None,
             marker_timestamp: Some(200),
         });
         let range = vec![(
@@ -12303,6 +12304,7 @@ mod issue_959_range_tombstone_fixes {
         .with_row_liveness(RowLiveness {
             has_marker: true,
             expires_at_seconds: None,
+            ttl_seconds: None,
             marker_timestamp: Some(200),
         });
 
@@ -12335,6 +12337,7 @@ mod issue_959_range_tombstone_fixes {
         .with_row_liveness(RowLiveness {
             has_marker: true,
             expires_at_seconds: None,
+            ttl_seconds: None,
             marker_timestamp: Some(200),
         });
         let range = vec![(

@@ -136,13 +136,26 @@ pub(in crate::query::select_executor) fn map_compaction_row(
             if row_liveness.has_marker {
                 if let Some(ts) = row_liveness.marker_timestamp {
                     values.insert("row_timestamp".to_string(), Value::BigInt(ts));
-                    // TTL seconds = expiry (epoch s) - write time (epoch s),
-                    // derived from two authoritative on-disk fields — never a
-                    // guess (issue #28).
-                    if let Some(expires_at) = row_liveness.expires_at_seconds {
-                        let ttl = expires_at.saturating_sub(ts / 1_000_000);
-                        values.insert("row_ttl".to_string(), Value::Integer(saturating_i32(ttl)));
-                    }
+                }
+                // The AUTHORITATIVE on-disk row TTL, reported VERBATIM
+                // (roborev finding, issue #4222 — round 11). This used to be
+                // DERIVED as `expires_at_seconds - marker_timestamp/1_000_000`,
+                // which is not a fact: Cassandra computes `localExpirationTime`
+                // from the COORDINATOR's `nowInSec` at write time, never from
+                // the mutation's write timestamp, so the subtraction diverges
+                // by exactly the gap between "now" and an explicit
+                // `USING TIMESTAMP`. `INSERT ... USING TIMESTAMP
+                // 4102444800000000 AND TTL 60` (year 2100) left the expiry at
+                // `now + 60`, so the subtraction underflowed to ≈ `-2.4e9` and
+                // `saturating_i32` published `row_ttl = i32::MIN` — a
+                // fabricated fact in the very branch whose comment claimed
+                // "never a guess (issue #28)". `RowHeader::ttl` was decoded all
+                // along and merely dropped when `RowLiveness` was built; it is
+                // now threaded through as `ttl_seconds`, matching how the
+                // per-cell `<col>_ttl` path has always read `cell.ttl`. A
+                // marker with no on-disk TTL reports NO `row_ttl` at all.
+                if let Some(ttl) = row_liveness.ttl_seconds {
+                    values.insert("row_ttl".to_string(), Value::Integer(ttl));
                 }
                 if let Some(expires_at) = row_liveness.expires_at_seconds {
                     // `expires_at` is an HONEST `i64` (write-time + TTL

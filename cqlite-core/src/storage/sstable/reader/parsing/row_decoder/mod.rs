@@ -498,6 +498,12 @@ impl RowHeader {
             // from the row header — the last-write-wins key the cross-generation
             // fold uses. Never inferred (no-heuristics, #28).
             marker_timestamp: self.timestamp,
+            // Roborev finding (issue #4222 — round 11): the row header's OWN
+            // decoded `ttl`, carried verbatim rather than dropped. It is the
+            // only authoritative statement of the row TTL; deriving it from
+            // `expires_at_seconds - timestamp` is wrong whenever the write used
+            // an explicit `USING TIMESTAMP` (see `RowLiveness::ttl_seconds`).
+            ttl_seconds: self.ttl,
         }
     }
 

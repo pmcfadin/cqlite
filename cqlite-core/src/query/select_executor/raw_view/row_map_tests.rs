@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn};
+use crate::storage::sstable::reader::compaction_row::RowLiveness;
 
 fn schema() -> TableSchema {
     TableSchema {
@@ -343,4 +344,75 @@ fn complex_deletion_far_future_ldt_widens_without_sign_extension() {
         "a complex column's far-future LDT must widen to its TRUE u32 value, never \
          sign-extend the wrapped i32 bit pattern"
     );
+}
+
+/// Roborev finding (issue #4222, round 11 — F2): `row_ttl` must be the
+/// AUTHORITATIVE on-disk row TTL (`RowHeader::ttl`, threaded onto
+/// `RowLiveness::ttl_seconds`), NEVER the derived
+/// `expires_at_seconds - marker_timestamp / 1_000_000`.
+///
+/// Cassandra computes `localExpirationTime` from the COORDINATOR's `nowInSec`
+/// at write time, not from the mutation's write timestamp, so the subtraction
+/// diverges from the real TTL by exactly the gap between "now" and an explicit
+/// `USING TIMESTAMP`. The scenario below is
+/// `INSERT ... USING TIMESTAMP 4102444800000000 AND TTL 60` (a year-2100
+/// write timestamp): the expiry is still `now + 60`, so the subtraction is
+/// ≈ `-2.4e9` and `saturating_i32` clamped it to `row_ttl = i32::MIN` — a
+/// fabricated, wildly negative TTL presented as an authoritative fact, in the
+/// very function whose comment claimed it was "never a guess (issue #28)".
+#[test]
+fn row_ttl_is_the_on_disk_ttl_never_derived_from_a_far_future_write_timestamp() {
+    let far_future_micros = 4_102_444_800_000_000i64; // 2100-01-01T00:00:00Z
+    let expires_at = 1_800_000_060i64; // the coordinator's now + 60s
+    let row = CompactionRow {
+        key: pk_bytes(1),
+        row_timestamp: far_future_micros,
+        row_data: CompactionRowData::Live {
+            simple: vec![],
+            complex: vec![],
+            row_deletion: None,
+            row_liveness: RowLiveness {
+                has_marker: true,
+                expires_at_seconds: Some(expires_at),
+                marker_timestamp: Some(far_future_micros),
+                ttl_seconds: Some(60),
+            },
+        },
+    };
+    let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+    assert_eq!(
+        rows[0].values.get("row_ttl"),
+        Some(&Value::Integer(60)),
+        "row_ttl must be the on-disk TTL VERBATIM — the old derivation reported \
+         i32::MIN here"
+    );
+    assert_eq!(
+        rows[0].values.get("row_timestamp"),
+        Some(&Value::BigInt(far_future_micros)),
+        "the marker's own write timestamp is unaffected"
+    );
+}
+
+/// The no-fabrication half of the same contract: a marker with NO on-disk
+/// TTL reports NO `row_ttl` at all, rather than deriving one from whatever
+/// other fields happen to be available (issue #28).
+#[test]
+fn a_marker_without_an_on_disk_ttl_reports_no_row_ttl() {
+    let row = CompactionRow {
+        key: pk_bytes(1),
+        row_timestamp: 10,
+        row_data: CompactionRowData::Live {
+            simple: vec![],
+            complex: vec![],
+            row_deletion: None,
+            row_liveness: RowLiveness {
+                has_marker: true,
+                expires_at_seconds: None,
+                marker_timestamp: Some(10),
+                ttl_seconds: None,
+            },
+        },
+    };
+    let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
+    assert_eq!(rows[0].values.get("row_ttl"), None);
 }
