@@ -548,6 +548,43 @@ impl SSTableReader {
         }
     }
 
+    /// `true` when [`stream_all_partitions_for_compaction`](Self::stream_all_partitions_for_compaction)
+    /// would take its NON-stitching fallback branch (`!requires_chunk_stitching()
+    /// && bti_partitions_db.is_none()`) — a non-`nb`-format BIG reader (never a
+    /// real Cassandra 5.0 `nb` SSTable, compressed or not: `data_format()`
+    /// classifies every `nb`-magic variant, `V5_0Uncompressed` included, as
+    /// `DataFormat::V5CompressedLegacy`, and `is_nb_format()` is true for the
+    /// SAME set — verified empirically against a real `compression = {'enabled':
+    /// false}` Cassandra 5.0 fixture, issue #4222). That fallback branch
+    /// collapses every row through
+    /// [`CompactionRow::from_legacy_value`](super::super::compaction_row::CompactionRow::from_legacy_value),
+    /// which sets EVERY live cell's `timestamp` to `0`, `ttl`/`local_deletion_time`
+    /// to `None`, `complex` to empty, and a row tombstone's `clustering` to empty —
+    /// correct for compaction's own reconciliation (which never reads those
+    /// zeroed fields back out), but each is a FABRICATED value if surfaced as an
+    /// authoritative on-disk fact (no-heuristics, issue #28).
+    ///
+    /// `pub(crate)`: the one caller outside this module that needs to know
+    /// BEFORE decoding whether it would receive fabricated per-cell metadata is
+    /// the raw SSTable view (`query::select_executor::raw_view`, issue #4222),
+    /// which fails closed rather than render a fabricated `0` as a real write
+    /// timestamp — a defensive guard for whatever non-`nb` BIG shape this
+    /// crate's supported version floor (`na`+) admits, since no committed
+    /// fixture currently exercises it.
+    ///
+    /// `#[cfg(feature = "state_machine")]` for the same reason as
+    /// [`StorageEngine::raw_view_reader_snapshot`](crate::storage::StorageEngine):
+    /// that sole caller lives under `query::select_executor`, which is itself
+    /// `#[cfg(feature = "state_machine")]` (`query/mod.rs:39`), so without the
+    /// gate this is genuinely dead code in any feature set omitting
+    /// `state_machine` — the gate's `feature-iso-delta-scan` component builds
+    /// exactly such a set with `-D warnings` and FAILed on it. Gated to match
+    /// the consumer rather than silenced with `allow(dead_code)`.
+    #[cfg(feature = "state_machine")]
+    pub(crate) fn compaction_stream_loses_cell_metadata(&self) -> bool {
+        !self.requires_chunk_stitching() && self.bti_partitions_db.is_none()
+    }
+
     /// Streaming compaction read (issue #827): yield `(RowKey, ScanRow, ts)`
     /// entries via `emit` one partition at a time, so peak memory is bounded by
     /// `max_partition_size + one_chunk` rather than by the total input size.

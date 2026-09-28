@@ -46,6 +46,10 @@ mod limit_pushdown;
 mod lookup;
 mod numeric_acc;
 mod predicate;
+/// The raw SSTable view (`<keyspace>.<table>_raw_sstable_data`, issue #4222) —
+/// see the module's own doc for the interception point and fail-closed
+/// contract.
+mod raw_view;
 mod row_build;
 mod schemaless_point;
 mod stream_agg;
@@ -523,6 +527,22 @@ impl SelectExecutor {
         // Issue #960: clear the global access-path probe so a stale value from a
         // previous query cannot satisfy a test assertion against this one.
         crate::query::access_path::reset();
+
+        // Issue #4222 (design.md D6): a `_raw_sstable_data` FROM-clause
+        // reference has no dedicated streaming producer of its own (its
+        // producers are internally bounded/streaming — D9 — but only the
+        // materializing `execute()` entry point intercepts the suffix
+        // today). Route through the SAME `execute_and_stream` fallback this
+        // function already uses for ORDER BY/GROUP BY ("falls back to full
+        // execution then streams results") rather than falling through to
+        // the generic `SSTableScan` step below, which resolves schema/reader
+        // state for the LITERAL suffixed name and silently scans nothing.
+        if let Some(ref from_clause) = plan.statement.from_clause {
+            let table_id = self.extract_table_id(from_clause)?;
+            if self.raw_view_base_name(&table_id).await.is_some() {
+                return self.execute_and_stream(plan, config).await;
+            }
+        }
 
         // Issue #1578 (D2): route ANY aggregate through `execute_and_stream`, which
         // delegates to `execute`. For a GROUP-BY-free aggregate `execute` runs the

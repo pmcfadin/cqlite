@@ -714,14 +714,43 @@ impl QueryEngine {
         );
     }
 
-    /// Check if schema is available for a table
+    /// Check if schema is available for a table.
+    ///
+    /// Issue #4222: a `_raw_sstable_data` name is never itself a registered
+    /// schema (only its BASE table is) — strip the suffix first, so the
+    /// CLI's issue #199 pre-flight check (the caller of this method) does
+    /// not reject a raw-view query before `SelectExecutor` ever intercepts
+    /// it (design.md D6).
+    ///
+    /// A LITERAL table actually named with the `_raw_sstable_data` suffix
+    /// takes precedence over the naming convention (roborev finding, issue
+    /// #4222): tried FIRST, falling back to the stripped base name only when
+    /// the literal name resolves to no schema — mirroring
+    /// `SelectExecutor::raw_view_base_name`'s exact precedence, so this
+    /// pre-flight check and the executor that actually serves the query
+    /// never disagree about which table a raw-view-suffixed name means.
     pub async fn has_schema_for_table(&self, table: &str) -> bool {
-        self.schema_manager.get_table_schema(table).await.is_ok()
+        if self.schema_manager.get_table_schema(table).await.is_ok() {
+            return true;
+        }
+        match crate::query::raw_view_naming::strip_raw_view_suffix(table) {
+            Some(base) => self.schema_manager.get_table_schema(base).await.is_ok(),
+            None => false,
+        }
     }
 
-    /// Get detailed schema status for debugging
+    /// Get detailed schema status for debugging (issue #4222: same
+    /// literal-name-first precedence as [`Self::has_schema_for_table`]).
     pub async fn schema_status(&self, table: &str) -> SchemaStatus {
-        match self.schema_manager.get_table_schema(table).await {
+        let literal = self.schema_manager.get_table_schema(table).await;
+        let resolved = if literal.is_ok() {
+            literal
+        } else if let Some(base) = crate::query::raw_view_naming::strip_raw_view_suffix(table) {
+            self.schema_manager.get_table_schema(base).await
+        } else {
+            literal
+        };
+        match resolved {
             Ok(schema) => SchemaStatus::Available {
                 keyspace: schema.keyspace.clone(),
                 table: schema.table.clone(),

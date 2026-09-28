@@ -35,6 +35,7 @@ pub mod partition_key_codec;
 // Byte weighting for the #2827 partition access-distribution probe: recovers the
 // sizes a targeted read already resolved, without re-driving any lookup.
 mod partition_access_weight;
+mod raw_view_access; // raw SSTable view's storage seam (#4222) — see its module doc
 
 // M5: Write engine and serialization (Issue #359)
 #[cfg(feature = "write-support")]

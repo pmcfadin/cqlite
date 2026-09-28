@@ -208,6 +208,22 @@ pub struct RowLiveness {
     /// older live-forever one, and vice-versa) instead of a most-permissive
     /// union. `None` when `has_marker` is `false`.
     pub marker_timestamp: Option<i64>,
+    /// The marker's AUTHORITATIVE on-disk TTL in seconds — the row header's
+    /// `ttl` field (`HAS_TTL`, delta-decoded from `min_ttl`), carried
+    /// VERBATIM. `None` when the marker is live-forever (no `HAS_TTL`) or
+    /// `has_marker` is `false`.
+    ///
+    /// Distinct from [`expires_at_seconds`](Self::expires_at_seconds), and
+    /// NOT derivable from it (roborev finding, issue #4222 — round 11):
+    /// Cassandra computes `localExpirationTime` from the COORDINATOR's
+    /// `nowInSec` at write time, not from the mutation's write timestamp
+    /// (`LivenessInfo.expiring(...)`, `cassandra-5.0.8`), so
+    /// `expires_at_seconds - marker_timestamp / 1_000_000` diverges from the
+    /// real TTL by exactly the gap between "now" and an explicit
+    /// `USING TIMESTAMP`. A year-2100 `USING TIMESTAMP` with `TTL 60` makes
+    /// that subtraction ~-2.4e9 — a fabricated, wildly negative "TTL". Only
+    /// the on-disk field is a fact (no-heuristics, #28).
+    pub ttl_seconds: Option<i32>,
 }
 
 impl RowLiveness {
@@ -272,7 +288,9 @@ impl RowLiveness {
     /// TTL'd marker supersedes an older live-forever one (and vice-versa). Later
     /// expiry is only a TIE-BREAK when the timestamps compare equal (or both are
     /// absent). A generation with no marker contributes nothing, so the surviving
-    /// marker (if any) is carried through unchanged.
+    /// marker (if any) is carried through unchanged — including its
+    /// [`ttl_seconds`](Self::ttl_seconds), which rides along with whichever
+    /// marker wins rather than being folded independently.
     ///
     /// This replaces the former most-permissive union, which unconditionally let
     /// a live-forever marker win regardless of write order and diverged from
@@ -646,6 +664,9 @@ mod row_liveness_tests {
             has_marker: true,
             expires_at_seconds,
             marker_timestamp: Some(ts),
+            // Not under test here (the fold is keyed on timestamp/expiry);
+            // `ttl_seconds` rides along with whichever marker wins.
+            ttl_seconds: None,
         }
     }
 

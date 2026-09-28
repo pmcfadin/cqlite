@@ -63,6 +63,7 @@ fn live_forever(ts: i64) -> RowLiveness {
         has_marker: true,
         expires_at_seconds: None,
         marker_timestamp: Some(ts),
+        ttl_seconds: None,
     }
 }
 
@@ -72,6 +73,7 @@ fn ttl_marker(ts: i64, expiry: i64) -> RowLiveness {
         has_marker: true,
         expires_at_seconds: Some(expiry),
         marker_timestamp: Some(ts),
+        ttl_seconds: None,
     }
 }
 

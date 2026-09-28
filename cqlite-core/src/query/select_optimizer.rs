@@ -606,7 +606,7 @@ fn token_comparison_to_predicate(
     Ok(SSTablePredicate::token(token_columns, op, vec![bound]))
 }
 
-fn literal_value(expr: &SelectExpression) -> Option<Value> {
+pub(crate) fn literal_value(expr: &SelectExpression) -> Option<Value> {
     match expr {
         SelectExpression::Literal(value) => Some(value.clone()),
         _ => None,
