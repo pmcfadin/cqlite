@@ -139,11 +139,13 @@ impl super::SelectExecutor {
                 .unwrap_or(false);
             if !fully_pushed {
                 return Err(Error::unsupported_query(
-                    "a WHERE clause containing OR/NOT, or a comparison shape (!=, LIKE, IS \
+                    "a WHERE clause containing OR/NOT, a comparison shape (!=, LIKE, IS \
                      [NOT] NULL, NOT IN, a non-literal comparison, etc.) that cannot be pushed \
-                     down to an SSTable-level predicate, is not supported over a \
+                     down to an SSTable-level predicate, or an IN (...) list with a \
+                     non-literal element (which would lower to a SILENTLY NARROWED subset of \
+                     the list — roborev finding, issue #4222), is not supported over a \
                      _raw_sstable_data view — every restriction must lower to a pushable \
-                     column/token comparison, or it would be silently dropped",
+                     column/token comparison IN FULL, or it would be silently dropped",
                 ));
             }
         }

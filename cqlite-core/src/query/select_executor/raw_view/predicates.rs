@@ -11,7 +11,7 @@
 use crate::query::result::QueryRow;
 use crate::query::select_ast::WhereExpression;
 use crate::query::select_executor::{evaluate_leaf, LeafOutcome};
-use crate::query::select_optimizer::SSTablePredicate;
+use crate::query::select_optimizer::{in_list_lowers_completely, SSTablePredicate};
 use crate::schema::TableSchema;
 use crate::types::Value;
 use crate::Result;
@@ -27,9 +27,9 @@ fn is_plain_data_row(row: &QueryRow) -> bool {
 }
 
 /// Count every `Comparison` LEAF in a PUSHABLE position (through `And`/
-/// `Parentheses`), or `None` if the tree contains an `Or`/`Not` ANYWHERE —
-/// mirroring exactly what `select_optimizer.rs::collect_sstable_predicates`
-/// walks.
+/// `Parentheses`), or `None` if the tree contains an `Or`/`Not` ANYWHERE, or
+/// an `IN (...)` list that lowers only PARTIALLY — mirroring exactly what
+/// `select_optimizer.rs::collect_sstable_predicates` walks.
 ///
 /// Used to detect when the WHERE clause was only PARTIALLY captured by
 /// `plan.sstable_predicates` (roborev finding, issue #4222 — round 2 of this
@@ -46,8 +46,28 @@ fn is_plain_data_row(row: &QueryRow) -> bool {
 /// just the OR/NOT shape: `pk = 1 AND val != 'x'` yields the NON-empty
 /// predicate list `[pk = 1]` (1 predicate, 2 leaves) — checking
 /// "predicates is empty" alone would miss it.
+///
+/// COUNTING ALONE IS NOT ENOUGH, though (roborev finding, issue #4222 —
+/// round 11, correcting this function's own remaining gap): "each
+/// successfully-lowered leaf contributes exactly one predicate" holds, but
+/// an `In` leaf can lower PARTIALLY — `column_comparison_to_predicate`
+/// `filter_map`s the value list through `literal_value` and emits a
+/// predicate as long as AT LEAST ONE element is a literal. `WHERE pk IN
+/// (1, 2 + 3)` is therefore 1 leaf and 1 predicate — the count check
+/// PASSES — while the restriction has silently narrowed to `pk IN (1)` and
+/// the view returns a SUBSET of the correct rows with no error at all.
+/// Such a leaf yields `None` here instead, via the optimizer's own
+/// `in_list_lowers_completely` (never a re-derived copy of its literal
+/// rule).
 pub(super) fn count_pushable_comparison_leaves(expr: &WhereExpression) -> Option<usize> {
     match expr {
+        // An `In` leaf whose value list is only PARTIALLY literal lowers
+        // PARTIALLY (roborev finding, issue #4222 — round 11), so it must
+        // make the whole clause "not fully lowered" rather than contribute a
+        // leaf the count check then happily matches — see
+        // `in_list_lowers_completely`'s doc for why counting alone cannot
+        // see it.
+        WhereExpression::Comparison(comp) if !in_list_lowers_completely(comp) => None,
         WhereExpression::Comparison(_) => Some(1),
         WhereExpression::Or(_) | WhereExpression::Not(_) => None,
         WhereExpression::And(exprs) => {
@@ -532,6 +552,49 @@ mod tests {
             comparison("ck", Value::Integer(2)),
         ])));
         assert_eq!(count_pushable_comparison_leaves(&expr), Some(2));
+    }
+
+    /// Roborev finding (issue #4222, round 11 — F4): an `IN` list lowers
+    /// PARTIALLY. `select_optimizer::column_comparison_to_predicate`
+    /// `filter_map`s the value list through `literal_value` and emits a
+    /// predicate as long as AT LEAST ONE element is a literal, so
+    /// `WHERE pk IN (1, 2 + 3)` produced exactly 1 leaf and 1 predicate —
+    /// the count check PASSED — while the restriction had silently been
+    /// narrowed to `pk IN (1)` and the view returned a SUBSET of the
+    /// correct rows with no error at all. Exactly the class the fail-closed
+    /// guard exists to prevent.
+    #[test]
+    fn count_pushable_comparison_leaves_is_none_for_a_partially_literal_in_list() {
+        let expr = WhereExpression::Comparison(ComparisonExpression {
+            left: SelectExpression::Column(ColumnRef::new("pk")),
+            operator: ComparisonOperator::In,
+            right: ComparisonRightSide::ValueList(vec![
+                SelectExpression::Literal(Value::Integer(1)),
+                // Not a literal: this element is silently DROPPED by the
+                // optimizer's `filter_map`.
+                SelectExpression::Column(ColumnRef::new("ck")),
+            ]),
+        });
+        assert_eq!(
+            count_pushable_comparison_leaves(&expr),
+            None,
+            "a partially-lowering IN list must REFUSE the query, never narrow it silently"
+        );
+    }
+
+    /// The positive control for the case above: an ALL-literal `IN` list
+    /// lowers completely and must still be accepted.
+    #[test]
+    fn count_pushable_comparison_leaves_accepts_an_all_literal_in_list() {
+        let expr = WhereExpression::Comparison(ComparisonExpression {
+            left: SelectExpression::Column(ColumnRef::new("pk")),
+            operator: ComparisonOperator::In,
+            right: ComparisonRightSide::ValueList(vec![
+                SelectExpression::Literal(Value::Integer(1)),
+                SelectExpression::Literal(Value::Integer(2)),
+            ]),
+        });
+        assert_eq!(count_pushable_comparison_leaves(&expr), Some(1));
     }
 
     #[test]
