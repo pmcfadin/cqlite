@@ -35,6 +35,7 @@ pub mod partition_key_codec;
 // Byte weighting for the #2827 partition access-distribution probe: recovers the
 // sizes a targeted read already resolved, without re-driving any lookup.
 mod partition_access_weight;
+mod raw_view_access; // raw SSTable view's storage seam (#4222) — see its module doc
 
 // M5: Write engine and serialization (Issue #359)
 #[cfg(feature = "write-support")]
@@ -413,44 +414,6 @@ impl StorageEngine {
         table_id: &TableId,
     ) -> Option<sstable::PartitionKeyShape> {
         self.sstables.partition_key_shape(table_id).await
-    }
-
-    /// Snapshot the resolved [`SSTableReader`](sstable::reader::SSTableReader) set
-    /// for `table_id`, plus the authoritative `fully_qualified_match` signal
-    /// (issue #4222, raw SSTable view).
-    ///
-    /// A thin passthrough to [`SSTableManager::resolve_reader_snapshot`] — the
-    /// raw view's point-key and full-scan row producers need the per-generation
-    /// readers DIRECTLY (never through [`scan`](Self::scan)/[`scan_partition`]
-    /// (Self::scan_partition), which RECONCILE across generations) so they can
-    /// emit one row per physical row per generation. `pub(crate)`: this bypasses
-    /// every reconciliation guarantee `StorageEngine`'s other methods provide, so
-    /// it is deliberately not part of the public API — only the query engine's
-    /// raw-view producer (`query::select_executor::raw_view`) calls it.
-    ///
-    /// The bool mirrors [`SSTableManager::resolve_reader_snapshot`]'s own
-    /// `fully_qualified_match`: `false` means a fully-qualified `table_id` (one
-    /// carrying a keyspace) resolved ONLY via the bare-table-name fallback —
-    /// the same signal the point-read path (`manager_point_read.rs`) threads
-    /// into `get_with_resolution_unmetered` to keep strict keyspace matching
-    /// on a fallback resolution (#1321), so a qualified raw-view name never
-    /// silently reads another keyspace's same-named table's rows.
-    ///
-    /// `#[cfg(feature = "state_machine")]` because its ONLY consumer is
-    /// `query::select_executor::raw_view`, and `query::select_executor` is
-    /// itself `#[cfg(feature = "state_machine")]` (`query/mod.rs:39`). Without
-    /// this the method is genuinely dead under any feature set that omits
-    /// `state_machine` — which the gate's `feature-iso-delta-scan` component
-    /// (`--no-default-features --features all-compression,write-support,delta-scan`,
-    /// `-D warnings`) builds, and FAILed on. The gate matches the consumer
-    /// rather than silencing the warning with `allow(dead_code)`: this is a
-    /// real "not reachable in this configuration", not a false positive.
-    #[cfg(feature = "state_machine")]
-    pub(crate) async fn raw_view_reader_snapshot(
-        &self,
-        table_id: &TableId,
-    ) -> (Vec<Arc<sstable::reader::SSTableReader>>, bool) {
-        self.sstables.resolve_reader_snapshot(table_id).await
     }
 
     /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
