@@ -614,10 +614,12 @@ fn token_comparison_to_predicate(
 ///
 /// Roborev finding (issue #4222 — round 11): the `In` arm above `filter_map`s
 /// the value list through [`literal_value`] and emits a predicate as long as
-/// AT LEAST ONE element is a literal. So `WHERE pk IN (1, 2 + 3)` yields one
+/// AT LEAST ONE element is a literal. So `WHERE pk IN (1, ck)` yields one
 /// leaf and one predicate — indistinguishable, by count alone, from a fully
 /// lowered restriction — while the restriction has silently become
-/// `pk IN (1)`. Callers that must FAIL CLOSED on an incompletely-lowered
+/// `pk IN (1)`. (A bare column reference, not the finding's illustrative
+/// `2 + 3`: arithmetic inside an `IN` list does not parse at all, so it is a
+/// parse error rather than this defect.) Callers that must FAIL CLOSED on an incompletely-lowered
 /// WHERE clause (the raw SSTable view) ask this instead of re-deriving the
 /// optimizer's literal rule, so the two can never diverge.
 pub(crate) fn in_list_lowers_completely(comp: &ComparisonExpression) -> bool {

@@ -288,7 +288,9 @@ impl RowLiveness {
     /// TTL'd marker supersedes an older live-forever one (and vice-versa). Later
     /// expiry is only a TIE-BREAK when the timestamps compare equal (or both are
     /// absent). A generation with no marker contributes nothing, so the surviving
-    /// marker (if any) is carried through unchanged.
+    /// marker (if any) is carried through unchanged — including its
+    /// [`ttl_seconds`](Self::ttl_seconds), which rides along with whichever
+    /// marker wins rather than being folded independently.
     ///
     /// This replaces the former most-permissive union, which unconditionally let
     /// a live-forever marker win regardless of write order and diverged from

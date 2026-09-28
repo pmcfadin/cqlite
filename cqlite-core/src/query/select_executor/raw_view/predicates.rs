@@ -53,7 +53,7 @@ fn is_plain_data_row(row: &QueryRow) -> bool {
 /// an `In` leaf can lower PARTIALLY — `column_comparison_to_predicate`
 /// `filter_map`s the value list through `literal_value` and emits a
 /// predicate as long as AT LEAST ONE element is a literal. `WHERE pk IN
-/// (1, 2 + 3)` is therefore 1 leaf and 1 predicate — the count check
+/// (1, ck)` is therefore 1 leaf and 1 predicate — the count check
 /// PASSES — while the restriction has silently narrowed to `pk IN (1)` and
 /// the view returns a SUBSET of the correct rows with no error at all.
 /// Such a leaf yields `None` here instead, via the optimizer's own
@@ -558,7 +558,7 @@ mod tests {
     /// PARTIALLY. `select_optimizer::column_comparison_to_predicate`
     /// `filter_map`s the value list through `literal_value` and emits a
     /// predicate as long as AT LEAST ONE element is a literal, so
-    /// `WHERE pk IN (1, 2 + 3)` produced exactly 1 leaf and 1 predicate —
+    /// `WHERE pk IN (1, ck)` produced exactly 1 leaf and 1 predicate —
     /// the count check PASSED — while the restriction had silently been
     /// narrowed to `pk IN (1)` and the view returned a SUBSET of the
     /// correct rows with no error at all. Exactly the class the fail-closed
