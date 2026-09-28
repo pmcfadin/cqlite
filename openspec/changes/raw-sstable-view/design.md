@@ -25,9 +25,15 @@ and its raw view are two strings resolved by two different code paths sharing on
 
 ## D2 — Fold #4205's SSTable-generation enumeration into this view
 
-**Decision: yes, exactly as scoped — `SELECT DISTINCT sstable, generation FROM ks.t_raw_sstable_data
-WHERE <pk> = ?` answers "which generations hold this key," and #4205 (`find`) keeps the CommitLog half
-*and* keeps its own finer probe-classification vocabulary for misses.**
+**Decision: yes, but not via literal `SELECT DISTINCT` — amended by owner ruling, 2026-09-28,
+issue #4222.** The original decision below named `SELECT DISTINCT sstable, generation FROM
+ks.t_raw_sstable_data WHERE <pk> = ?` as the answer to "which generations hold this key." That
+literal spelling conflicts with this change's fail-closed refusal of `DISTINCT` over the raw view
+(a general query-engine capability out of scope for this slice, same reasoning as the `JOIN`
+deferral to #4249/epic #941). The fold still holds: a plain `SELECT sstable, generation FROM
+ks.t_raw_sstable_data WHERE <pk> = ?` plus client-side dedup answers the same question, and #4205
+(`find`) keeps the CommitLog half *and* keeps its own finer probe-classification vocabulary for
+misses.
 
 This view is a **positive-hits-only** projection by construction: a generation contributes rows only
 when the point-read path actually resolved the key inside it (D5). #4205's acceptance criteria ask for

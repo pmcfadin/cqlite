@@ -137,7 +137,8 @@ view's.
 
 #### Scenario: A dropped-column generation shows the on-disk column the current schema no longer has
 
-**DEFERRED — NOT satisfied by this change; tracked as a follow-up (roborev finding, issue #4222).**
+**DEFERRED — NOT satisfied by this change; tracked as a follow-up, issue #4295 (owner ruling,
+2026-09-28: AC6 ships partially — this delivered subset only).**
 The committed `test_tomb.dropped_regular_col` fixture's schema (`test-data/schemas/tombstone-parity.cql`
 Table 6) still DECLARES `drop_col` in this repo's `.cql` (the file's own header comment: "declared here
 so the initial Phase-A writes type-check"), so the base table's REGISTERED schema never actually omits
@@ -164,8 +165,8 @@ shape once that bookkeeping lands.
 
 #### Scenario: A static row is distinguishable from a clustering row
 
-**DEFERRED — NOT satisfied by this change; tracked as a follow-up (roborev finding, issue #4222,
-round 8).** The decoder KNOWS whether a row is a Cassandra static row
+**DEFERRED — NOT satisfied by this change; tracked as a follow-up, issue #4296 (owner ruling,
+2026-09-28).** The decoder KNOWS whether a row is a Cassandra static row
 (`compaction_row_build.rs`'s `is_static` handling), but `CompactionRow`/`CompactionRowData` do not
 carry that fact onward — a static row reaches `row_map.rs::map_compaction_row` as an ordinary
 `Live`/`Tombstone` row with EMPTY clustering, and this view renders it as the same `row_kind = 'row'`
@@ -243,15 +244,18 @@ required by this change (design.md D4): CQLite's query engine has no `JOIN` exec
   names, same types, same encoding) — the correlation an external `JOIN ... USING (<pk>, <ck>)` would
   perform if the engine supported it.
 
-#### Scenario: `SELECT DISTINCT sstable` answers "which generations hold this key" (folds #4205's SSTable half)
+#### Scenario: A plain `sstable`/`generation` projection answers "which generations hold this key" (folds #4205's SSTable half)
 
 - **GIVEN** `test_tomb.resurrection_gc_positive` (2 generations)
-- **WHEN** `SELECT DISTINCT sstable, generation FROM
+- **WHEN** `SELECT sstable, generation FROM
   test_tomb.resurrection_gc_positive_raw_sstable_data WHERE <pk> = <a key present in both
-  generations>` is executed
-- **THEN** it returns exactly the 2 generations' `sstable`/`generation` values, matching the set
-  `test_tomb.resurrection_gc_positive`'s directory listing shows for that key — the query design.md
-  D2 designates as the folded-in half of #4205's scope.
+  generations>` is executed and the client dedups the returned rows
+- **THEN** the deduped result is exactly the 2 generations' `sstable`/`generation` values, matching
+  the set `test_tomb.resurrection_gc_positive`'s directory listing shows for that key — the query
+  design.md D2 designates as the folded-in half of #4205's scope. `SELECT DISTINCT` over this
+  surface is refused (see "Unsupported query shapes over the raw view fail closed with a typed
+  error" below); `DISTINCT` is a general query-engine capability out of scope for this change
+  (owner ruling, 2026-09-28, issue #4222), and this plain-projection form delivers the same answer.
 
 ### Requirement: Unknown table or missing schema is a typed error, never silent inference
 
@@ -342,15 +346,17 @@ accepted and answered as if the clause had not been written. The refused set is:
 This requirement documents behavior already implemented and tested; it exists so the archived spec
 describes what shipped rather than leaving a substantial public-surface contract undocumented.
 
-> **Open — owner decision pending.** `SELECT DISTINCT` appears here AND in this spec's
-> "joinable via shared key columns" requirement, whose second scenario asks
-> `SELECT DISTINCT sstable, generation … WHERE <pk> = <key>` to RETURN the generation set. Those
-> two statements contradict each other. The delivered behavior is the refusal above, and the
-> underlying capability is delivered by a plain `sstable, generation` projection
-> (`sstable_generation_projection_answers_which_generations_hold_the_key`). Resolving the
-> contradiction — implement per-surface dedup, or amend that scenario and design.md D2 — is an
-> owner call tracked on issue #4222; this note records the contradiction rather than silently
-> picking a side.
+> **Resolved (owner ruling, 2026-09-28, issue #4222).** This requirement's refusal of
+> `SELECT DISTINCT` previously contradicted this spec's "joinable via shared key columns"
+> requirement, whose second scenario asked literal `SELECT DISTINCT sstable, generation …` to
+> return the generation set. Ruling: `DISTINCT` stays refused — it is a general query-engine
+> capability (`m2_select_validator.rs`, `unsupported_query_tests.rs:11-23` already document it as
+> broadly unsupported), and special-casing it for exactly this one view would be a narrow carve-out
+> for one keyword rather than a coherent feature. The "which generations hold this key" answer
+> AC5 actually asks for is delivered by a plain `sstable, generation` projection plus client-side
+> dedup (`sstable_generation_projection_answers_which_generations_hold_the_key`), amended into the
+> scenario above; `design.md` D2 amended to match. Full `DISTINCT` support, if ever wanted, belongs
+> with the general query engine (epic #941), same as literal `JOIN` (#4249).
 
 #### Scenario: Each unsupported shape is refused rather than silently ignored
 
