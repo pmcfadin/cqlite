@@ -11,9 +11,16 @@
 //! "one row per physical row per generation, no reconciliation" contract
 //! (spec's `resurrection_gc_positive` scenario).
 //!
-//! Oracle: physical-dump parity (#1742) — expected values are read directly
-//! from the committed `*-Data.db.jsonl` sstabledump goldens, not hardcoded
-//! from CQLite's own prior output (#3041/#3042).
+//! Oracle: physical-dump parity (#1742) — every expected timestamp,
+//! local-deletion-time and byte offset below is **parsed at runtime** from
+//! the committed `nb-{1,2}-big-Data.db.jsonl` sstabledump goldens beside the
+//! very `Data.db` the query reads (see the "sstabledump golden" section),
+//! never from CQLite's own prior output (#3041/#3042) and never transcribed
+//! into a Rust literal. Transcription was the C intent-audit's R12 finding:
+//! the values were golden-DERIVED and correct, but a fixture regeneration
+//! would have drifted away from them silently. Each accessor panics rather
+//! than defaulting when the golden lacks the fact a case is about, so a
+//! regenerated fixture FAILs instead of passing vacuously.
 //!
 //! Fixture discipline (#3220/#3121, roborev finding, issue #4222):
 //! `resurrection_gc_positive`'s `Data.db` is NOT git-committed — only its
@@ -53,6 +60,8 @@ use cqlite_core::query::result::QueryRow;
 use cqlite_core::types::Value;
 use cqlite_core::{ingestion::ingest, ingestion::IngestionConfig, Config, Database};
 use datasets_root::{describe_search, schema_path, sstables_root_for_table};
+use serde_json::Value as Json;
+use std::path::Path;
 
 const KEYSPACE: &str = "test_tomb";
 const TABLE: &str = "resurrection_gc_positive";
@@ -118,6 +127,107 @@ async fn open_fixture_db() -> Option<Database> {
     Some(result.database)
 }
 
+// ---------------------------------------------------------------------------
+// sstabledump golden (the oracle) — parsed at runtime, never transcribed
+//
+// C intent-audit R12: this lane's expectations used to be RFC3339 literals
+// copied out of the goldens by hand, under a module doc claiming they were
+// read from the goldens. They are now genuinely read from them, per
+// GENERATION, from the same directory whose `Data.db` the query reads.
+// ---------------------------------------------------------------------------
+
+/// Every partition object of this fixture's `nb-<generation>-big` golden.
+///
+/// `resurrection_gc_positive` keeps BOTH generations in ONE directory, so the
+/// generation is part of the file name, not of the directory — a golden must
+/// never be read from the "first" generation when the assertion is about the
+/// second.
+fn golden_partitions(root: &Path, table: &str, generation: u32) -> Vec<Json> {
+    let dirs = datasets_root::table_generation_dirs(root, KEYSPACE, table);
+    let dir = dirs.first().unwrap_or_else(|| {
+        panic!(
+            "no *-Data.db-bearing {table}-* directory under {}/{KEYSPACE} even though that \
+             root was selected as carrying the table",
+            root.display()
+        )
+    });
+    let path = dir.join(format!("nb-{generation}-big-Data.db.jsonl"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "the sstabledump golden {} must be readable — it is THE oracle for this lane, \
+             so its absence is a failure, never a skip: {e}",
+            path.display()
+        )
+    });
+    let parts: Vec<Json> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("each golden line must be a JSON object"))
+        .collect();
+    assert!(
+        !parts.is_empty(),
+        "golden {} carried no partitions — a fixture that stopped exercising this lane must \
+         FAIL, not pass vacuously",
+        path.display()
+    );
+    parts
+}
+
+/// Both generations' goldens for the main fixture, resolved through the SAME
+/// table-granular root search the database open used.
+fn fixture_goldens(table: &str) -> Option<(Vec<Json>, Vec<Json>)> {
+    let root = sstables_root_for_table(KEYSPACE, table)?;
+    Some((
+        golden_partitions(&root, table, 1),
+        golden_partitions(&root, table, 2),
+    ))
+}
+
+/// The golden partition whose key is `pk` (sstabledump renders keys as strings).
+fn golden_partition<'a>(parts: &'a [Json], pk: i32) -> &'a Json {
+    let wanted = pk.to_string();
+    parts
+        .iter()
+        .find(|p| p["partition"]["key"][0].as_str() == Some(wanted.as_str()))
+        .unwrap_or_else(|| panic!("golden must carry partition pk={pk}"))
+}
+
+/// The golden `"type": "row"` entry whose first clustering component is `ck`.
+fn golden_row<'a>(partition: &'a Json, ck: i64) -> &'a Json {
+    partition["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("golden partition must carry a 'rows' array"))
+        .iter()
+        .find(|r| r["type"] == "row" && r["clustering"][0].as_i64() == Some(ck))
+        .unwrap_or_else(|| panic!("golden must carry a row with clustering[0] = {ck}"))
+}
+
+/// The golden cell named `name` under `row`.
+fn golden_cell<'a>(row: &'a Json, name: &str) -> &'a Json {
+    row["cells"]
+        .as_array()
+        .unwrap_or_else(|| panic!("golden row must carry a 'cells' array"))
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("golden row must carry a cell named '{name}'"))
+}
+
+/// A required golden STRING field, or a panic naming what was missing — never
+/// a silent default that would turn a drifted fixture into a pass.
+fn golden_str<'a>(node: &'a Json, field: &str) -> &'a str {
+    node[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("golden node must carry a string '{field}': {node}"))
+}
+
+/// The byte offset sstabledump reports for this partition — the oracle for
+/// the raw view's `position` column.
+fn golden_position(partition: &Json) -> i64 {
+    partition["partition"]["position"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("golden partition must carry a byte position: {partition}"))
+}
+
 /// Parse an sstabledump JSONL RFC3339 timestamp into epoch MICROSECONDS —
 /// the same unit `<col>_timestamp`/`row_timestamp` etc. report.
 fn iso_to_micros(iso: &str) -> i64 {
@@ -169,6 +279,9 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
     let Some(db) = open_fixture_db().await else {
         return;
     };
+    let (gen1_golden, gen2_golden) = fixture_goldens(TABLE).expect("the fixture just opened");
+    let g_gen1 = golden_partition(&gen1_golden, 1);
+    let g_gen2 = golden_partition(&gen2_golden, 1);
     let query = format!("SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1");
     let result = db
         .execute(&query)
@@ -211,6 +324,25 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
             "gen-1 rows must be sourced from the nb-1 SSTable"
         );
         assert_eq!(text_of(row, "format").as_deref(), Some("big"));
+
+        // C intent-audit R3: `row_timestamp` was pinned by NAME in the R11
+        // column snapshot but never value-asserted anywhere. Each gen-1 row
+        // carries its own golden liveness write time.
+        let ck = int_of(row, "ck").expect("every gen-1 row has a clustering key");
+        let g_row = golden_row(g_gen1, i64::from(ck));
+        assert_eq!(
+            bigint_of(row, "row_timestamp"),
+            Some(iso_to_micros(golden_str(&g_row["liveness_info"], "tstamp"))),
+            "row_timestamp must match the golden's liveness tstamp byte-exact for ck={ck}"
+        );
+        // This fixture is written without a TTL, so `row_ttl` must be ABSENT
+        // rather than a fabricated zero (the TTL-present half of R3 is
+        // covered on `test_deltas.ttl_cells`, which really has one).
+        assert_eq!(
+            get(row, "row_ttl"),
+            None,
+            "row_ttl must be ABSENT for a row written with no TTL, never fabricated"
+        );
     }
 
     // gen-2, ck=2: ROW tombstone (deletion_info at the row level, no cells).
@@ -225,11 +357,21 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
         Some("row"),
         "ck=2 in gen-2 is a whole-row delete"
     );
+    let g_row_tombstone = &golden_row(g_gen2, 2)["deletion_info"];
     assert_eq!(
         bigint_of(row_tombstone, "row_local_deletion_time"),
-        Some(iso_to_secs("2026-06-24T22:59:14Z")),
+        Some(iso_to_secs(golden_str(
+            g_row_tombstone,
+            "local_delete_time"
+        ))),
         "row_local_deletion_time must match the golden's local_delete_time byte-exact \
          (bigint, roborev finding, issue #4222 — round 8)"
+    );
+    assert_eq!(
+        bigint_of(row_tombstone, "row_deletion_timestamp"),
+        Some(iso_to_micros(golden_str(g_row_tombstone, "marked_deleted"))),
+        "row_deletion_timestamp must match the golden's marked_deleted byte-exact \
+         (C intent-audit R3: pinned by name, never value-asserted before)"
     );
     assert_eq!(
         text_of(row_tombstone, "val_tombstone"),
@@ -256,15 +398,19 @@ async fn point_key_yields_one_row_per_generation_no_reconciliation() {
         Some("cell"),
         "val's cell tombstone kind must be reported"
     );
+    let g_val_cell = golden_cell(golden_row(g_gen2, 3), "val");
     assert_eq!(
         bigint_of(cell_tombstone, "val_local_deletion_time"),
-        Some(iso_to_secs("2026-06-24T22:59:14Z")),
+        Some(iso_to_secs(golden_str(
+            &g_val_cell["deletion_info"],
+            "local_delete_time"
+        ))),
         "val_local_deletion_time must match the golden's local_delete_time byte-exact \
          (bigint, roborev finding, issue #4222 — round 8)"
     );
     assert_eq!(
         bigint_of(cell_tombstone, "val_timestamp"),
-        Some(iso_to_micros("2021-01-02T00:00:00Z")),
+        Some(iso_to_micros(golden_str(g_val_cell, "tstamp"))),
         "val_timestamp must match the golden's tstamp byte-exact (microseconds)"
     );
 }
@@ -300,14 +446,22 @@ async fn partition_tombstone_generation_still_yields_one_row() {
         text_of(partition_tombstone, "row_kind").as_deref(),
         Some("partition_tombstone")
     );
+    let (_gen1_golden, gen2_golden) = fixture_goldens(TABLE).expect("the fixture just opened");
+    let g_partition_deletion = &golden_partition(&gen2_golden, 2)["partition"]["deletion_info"];
     assert_eq!(
         bigint_of(partition_tombstone, "partition_deletion_timestamp"),
-        Some(iso_to_micros("2021-01-02T00:00:00Z")),
+        Some(iso_to_micros(golden_str(
+            g_partition_deletion,
+            "marked_deleted"
+        ))),
         "partition_deletion_timestamp must match the golden's marked_deleted byte-exact"
     );
     assert_eq!(
         bigint_of(partition_tombstone, "partition_deletion_time"),
-        Some(iso_to_secs("2026-06-24T22:59:14Z")),
+        Some(iso_to_secs(golden_str(
+            g_partition_deletion,
+            "local_delete_time"
+        ))),
         "partition_deletion_time must match the golden's local_delete_time byte-exact"
     );
     // Every cell/clustering column is NULL on a partition-tombstone row
@@ -753,5 +907,83 @@ async fn metadata_predicate_excludes_a_partition_tombstone_row_that_lacks_it() {
         text_of(row, "row_kind").as_deref(),
         Some("row"),
         "the surviving row must be a PLAIN row, never a partition_tombstone"
+    );
+}
+
+/// C intent-audit R3, scenario C: the source columns must name "the specific
+/// `Data.db` file and byte offset that physical row came from, matching the
+/// partition offset for that generation". `sstable`, `generation` and
+/// `format` were already asserted; **`position` was asserted nowhere in the
+/// change**, and it is the one column where that matters most — a `position`
+/// PREDICATE is rejected outright (it is real on the point path and always
+/// `Null` on the scan path, so filtering on it would make the same query text
+/// return different rows by access path; see
+/// `position_predicate_fails_closed_rather_than_diverging_by_access_path`).
+/// A direct value assertion is therefore the ONLY possible check on it.
+///
+/// `pk = 2` is used rather than `pk = 1` deliberately: pk=1 sits at offset 0
+/// in BOTH generations, so it cannot distinguish a real offset from a
+/// zero-initialised field or from the two generations sharing one value.
+/// pk=2 sits at two DIFFERENT non-zero offsets, one per generation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn point_read_reports_each_generations_own_partition_byte_offset() {
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
+    let (gen1_golden, gen2_golden) = fixture_goldens(TABLE).expect("the fixture just opened");
+    let gen1_position = golden_position(golden_partition(&gen1_golden, 2));
+    let gen2_position = golden_position(golden_partition(&gen2_golden, 2));
+    // Without this the two per-generation assertions below could both be
+    // satisfied by one shared value.
+    assert_ne!(
+        gen1_position, gen2_position,
+        "golden precondition: pk=2 must sit at a DIFFERENT offset in each generation, else \
+         this case cannot show `position` is per-generation"
+    );
+    assert_ne!(
+        gen1_position, 0,
+        "golden precondition: pk=2's gen-1 offset must be non-zero, else a zero-initialised \
+         field would pass"
+    );
+
+    let result = db
+        .execute(&format!(
+            "SELECT * FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 2"
+        ))
+        .await
+        .expect("raw view point-key query must succeed");
+    assert_eq!(
+        result.rows.len(),
+        4,
+        "pk=2 yields 3 gen-1 rows + 1 gen-2 row"
+    );
+
+    for row in &result.rows {
+        let generation = bigint_of(row, "generation").expect("every row carries its generation");
+        let expected = match generation {
+            1 => gen1_position,
+            2 => gen2_position,
+            other => panic!("unexpected generation {other}"),
+        };
+        assert_eq!(
+            bigint_of(row, "position"),
+            Some(expected),
+            "gen-{generation}'s rows must report THAT generation's own partition byte \
+             offset, matching sstabledump's reported offset byte-exact"
+        );
+    }
+
+    // The synthetic partition-tombstone row carries a real offset too — it
+    // is sourced from a real partition, just one holding no rows.
+    let partition_tombstone = result
+        .rows
+        .iter()
+        .find(|r| text_of(r, "row_kind").as_deref() == Some("partition_tombstone"))
+        .expect("gen-2's partition-tombstone row must be present");
+    assert_eq!(
+        bigint_of(partition_tombstone, "position"),
+        Some(gen2_position),
+        "a synthetic partition-tombstone row must still name the byte offset it was \
+         sourced from, never a fabricated NULL"
     );
 }
