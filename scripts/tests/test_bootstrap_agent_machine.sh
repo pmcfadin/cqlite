@@ -4849,11 +4849,18 @@ FAKEGATE
   # prints before running the command TO COMPLETION, so matching `^sudo: ` by itself
   # converts a genuine branch-7 red into a never-red skip (roborev round 17). The property
   # is "the wrapper failed AND the child never ran": a non-zero status, sudo's own
-  # diagnostic, and NO bootstrap output at all — the absence of any `gate-pin` line is the
-  # distinguisher, since a run that got far enough to print one plainly executed.
+  # diagnostic, and NO NON-SUDO LINE ANYWHERE in the capture (`grep -v`, inverted).
+  # KEYING THIS ON `gate-pin` WAS THE ROUND-17 FIX'S OWN BUG (round 19): bootstrap prints
+  # its first `gate-pin:` line only in section 5b, thousands of lines in, so on a host that
+  # emits `sudo: unable to resolve host` EVERY run carries a `sudo: ` line, and any non-zero
+  # exit BEFORE 5b — a staged-tree syntax error, a usage-error exit, an early abort —
+  # satisfied all three conjuncts and was downgraded to an environmental `skip`. That made
+  # branch 7 UNREACHABLE for non-zero exits on such a host. The inverted test has no such
+  # blind spot: one line of real bootstrap output, however early, defeats it.
   PIN_11AT_SUDO_RE='^sudo: '
   pin_11at_sudo_failed() {
-    [ "$1" -ne 0 ] && out_has "$2" -E "$PIN_11AT_SUDO_RE" && ! out_has "$2" -F 'gate-pin'
+    [ "$1" -ne 0 ] && out_has "$2" -E "$PIN_11AT_SUDO_RE" \
+      && ! out_has "$2" -vE "$PIN_11AT_SUDO_RE"
   }
 
   # 11at-ctl. A CONTROL FOR 11at's OWN CORROBORATION PATTERN (roborev round 15). Branches
@@ -4915,6 +4922,12 @@ FAKEGATE
   fi
   if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\ngate-pin: some bootstrap output'; then
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a run that DID produce bootstrap output as a wrapper failure"
+  fi
+  if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\nsome early bootstrap output'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a non-zero run that DID produce early (pre-5b) bootstrap output as a wrapper failure — the round-19 blind spot"
+  fi
+  if ! pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\nsudo: a password is required'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a wrapper failure whose capture is ALL sudo diagnostics"
   fi
   if pin_11at_sudo_failed 1 'bash: /nonexistent/staged.sh: No such file or directory'; then
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a non-sudo child failure as a wrapper failure"
@@ -5055,12 +5068,23 @@ FAKEGATE
          && out_has "$out_at" -E "$PIN_11AT_RUNNER_RE"; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found) CORROBORATED by the RUNNER's own diagnostic in the captured output, so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
     elif pin_11at_sudo_failed "$rc_at" "$out_at"; then
-      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the SUDO WRAPPER itself failed (rc=$rc_at), CORROBORATED by its own '^sudo: ' diagnostic AND by the absence of ANY bootstrap output (a mid-suite credential expiry is the common cause; the case entry probe passed, so this is environmental), so the root invocation never ran and the guard was neither confirmed nor defeated (nothing was written)"
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the SUDO WRAPPER itself failed (rc=$rc_at), CORROBORATED by its own '^sudo: ' diagnostic AND by the capture holding NO line that is not a sudo diagnostic (a mid-suite credential expiry is the common cause; the case entry probe passed, so this is environmental), so the root invocation never ran and the guard was neither confirmed nor defeated (nothing was written)"
     elif [ -z "$out_at" ]; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
     else
       bad "gate-pin: the root-seam refusal never appeared in a run that ENDED (rc=$rc_at) — nothing was written, so this is not an observed privileged write, but the guard's decision path went unexercised"
-      grep -i 'gate-pin' <<<"$out_at" | head -2
+      # EVIDENCE MUST NOT BE EMPTY (round 19). This branch's own defining shape is a run
+      # that never reached section 5b, which has NO `gate-pin` line — so the grep that
+      # serves every other branch prints nothing here, leaving an accusation with no
+      # observation attached: #4287's defect one branch over. Branch 6 guarantees
+      # `$out_at` is non-empty, so a raw tail always has something to show.
+      pin_11at_ev=$(grep -i 'gate-pin' <<<"$out_at" | head -2)
+      if [ -n "$pin_11at_ev" ]; then
+        printf '%s\n' "$pin_11at_ev"
+      else
+        tail -5 <<<"$out_at"
+      fi
+      unset pin_11at_ev
     fi
     sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
 
