@@ -61,6 +61,16 @@
 //! inheritance shows up as a FAILING assertion, not as a quiet pass. It
 //! passes on every fixture in the sweep.
 //!
+//! ATTRIBUTION, so the next reader does not debug the wrong side: if that
+//! assertion ever DOES fail on an inherited `<col>_ttl` /
+//! `<col>_local_deletion_time`, it is a HARNESS-ASSUMPTION failure FIRST and a
+//! view failure only second. CQLite inherits a row TTL only when the cell's
+//! on-disk `USE_ROW_TTL` (0x10) flag is set (`row_data.rs`, #1743), whereas
+//! this harness inherits whenever the golden omits the field — so a TTL'd
+//! INSERT later partially overwritten by a plain `UPDATE` would make the
+//! harness demand a fact the view correctly reports absent. Fix the rule in
+//! [`golden::fold_simple_cell`] before touching the view (roborev, #4309).
+//!
 //! # Column-contract coverage (issue #4309 AC5)
 //!
 //! Source of truth for the contract:

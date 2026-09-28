@@ -23,14 +23,22 @@
 //! the harness PANICS rather than skipping. Roots are still resolved PER TABLE
 //! (`sstables_root_for_table`), never by keyspace.
 //!
-//! # What a green gate does and does not certify
+//! # What a green gate certifies HERE — this lane is the exception
 //!
-//! `raw_view_parity.rs`'s module doc has the full statement (roborev finding
-//! R1, issue #4309): the full gate's `core-tests` component runs WITHOUT
-//! `CQLITE_REQUIRE_FIXTURES=1`, so on a box without the fetched corpus every
-//! fetch-only case here SKIPs and certifies nothing. Cite a strict-mode run
-//! against a fetched corpus, not a gate PASS, when claiming this family was
-//! swept. The gate-wiring remedy is issue #4311.
+//! Unlike the `tomb` and `deltas` lanes, **every case in this file is
+//! `Discipline::GitCommitted`**, so the full gate's `core-tests` component
+//! certifies all four WITHOUT a fetched corpus, and
+//! `CQLITE_REQUIRE_FIXTURES=1` changes nothing here — there is no fetch-only
+//! case for it to promote. A green gate IS sufficient evidence that this
+//! family was swept.
+//!
+//! The strict-mode caveat (roborev finding R1, issue #4309; full statement in
+//! `raw_view_parity.rs`'s module doc) is scoped to the two lanes that DO have
+//! fetch-only cases — 16 of the 22 cases across `tomb` and `deltas`. Do not
+//! restate it here: applied to this lane it is not merely redundant but
+//! FALSE, and it would tell a reader to discount a gate PASS for the one
+//! family the gate fully covers. The gate-wiring remedy for the other two
+//! lanes is issue #4311.
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 

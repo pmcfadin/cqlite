@@ -425,11 +425,16 @@ impl ExpectedRow {
 pub fn render_golden_clustering(node: &Json, width: usize, ctx: &str) -> Vec<Option<String>> {
     let arr = node.as_array().unwrap_or_else(|| {
         panic!(
-            "{ctx}: golden entry carries no 'clustering' array. sstabledump omits it only \
-             for a SIZE-0 clustering prefix (an open BOTTOM/TOP range bound — \
-             `JsonTransformer.serializeClustering`), a shape no fixture in this sweep has \
-             and this harness does not model; extend it rather than letting the entry pass \
-             unchecked"
+            "{ctx}: golden entry carries no 'clustering' array. \
+             `JsonTransformer.serializeClustering` guards on `clustering.size() > 0`, so \
+             the field is absent in TWO distinct cases, and this harness models NEITHER: \
+             (1) a SIZE-0 clustering PREFIX — an open BOTTOM/TOP range bound; and (2) EVERY \
+             `row` entry of a table declaring NO clustering columns at all (width == {width}; \
+             e.g. `test_compactionparity.live_no_clustering`, which lives in the same \
+             `compaction-parity.cql` this sweep already loads for `live_clustering`). If you \
+             are extending the sweep to a clustering-free table, this panic is case (2) and \
+             NOT a range-bound modelling problem — treat a missing `clustering` as an empty \
+             prefix there. Extend the harness rather than letting the entry pass unchecked"
         )
     });
     assert_eq!(
@@ -512,6 +517,21 @@ pub fn fold_simple_cell(
         return;
     }
 
+    // INHERITED TTL — read the attribution note before debugging the view.
+    //
+    // `serializeCell` omits `ttl` in two cases we cannot distinguish from the
+    // JSONL: the cell expires with the SAME ttl as the row marker (inherited
+    // here), or the cell is NOT EXPIRING AT ALL. CQLite inherits only when the
+    // cell's on-disk USE_ROW_TTL (0x10) flag is set (`row_data.rs`, #1743), so
+    // for a row whose TTL'd liveness marker is later partially overwritten by
+    // a plain UPDATE, this harness would demand a `<col>_ttl` /
+    // `<col>_local_deletion_time` the view CORRECTLY reports as absent.
+    //
+    // So: a mismatch on an INHERITED ttl/expires_at is a HARNESS-ASSUMPTION
+    // failure FIRST and a view failure only second. No fixture in the sweep
+    // has that shape today (all 22 pass); if you add one, fix the inheritance
+    // rule here before you touch the view. Scoping inheritance to cells the
+    // golden shows as expiring is the candidate fix (roborev, issue #4309).
     let ttl = cell
         .get("ttl")
         .and_then(Json::as_i64)
