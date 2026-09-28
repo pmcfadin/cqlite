@@ -4862,7 +4862,7 @@ FAKEGATE
     #                                      later killed, because the property was already
     #                                      OBSERVED by then — a deadline that fires after
     #                                      the verdict changes nothing about the verdict.
-    #   3. killed at the bound          -> UNMEASURED. `timeout -s KILL` exits 137
+    #   3. killed (bound or otherwise)  -> UNMEASURED. `timeout -s KILL` exits 137
     #                                      (128+SIGKILL); 124 is accepted too, since that
     #                                      is what the GNU tool reports when the child is
     #                                      reaped through the softer path. MEASURED on
@@ -4870,6 +4870,11 @@ FAKEGATE
     #                                      124-always (a review round asserted exactly that
     #                                      and it is FALSE for `-s KILL`): `timeout -s KILL
     #                                      1 sleep 5` -> 137, `timeout 1 sleep 5` -> 124.
+    #                                      137 is NOT self-attributing, though, so the
+    #                                      message does not claim the bound fired: an
+    #                                      external SIGKILL lands here identically, and this
+    #                                      case must not name a cause it did not observe —
+    #                                      the very defect #4287 exists to remove.
     #                                      Announced as a
     #                                      counted `skip`, this file's category for "the
     #                                      subject could not be observed" — never an `ok`
@@ -4891,15 +4896,28 @@ FAKEGATE
     #                                      regression downgraded to a never-red `skip`
     #                                      instead of a real success upgraded to a false
     #                                      accusation. So the branch REQUIRES CORROBORATION
-    #                                      from timeout's own stderr, which `2>&1` captures
-    #                                      and which it prefixes `timeout: ` on all three
-    #                                      codes; an UNCORROBORATED 125/126/127 falls
-    #                                      through to 6 and REDS. MEASURED on coreutils 9.4:
-    #                                      `timeout 5 /etc/hostname` -> 126 + "timeout:
-    #                                      failed to run command"; `timeout 5 bash -c 'bash
-    #                                      /nonexistent'` -> 127 + "bash: ... No such file
-    #                                      or directory" (no `timeout: ` prefix). The rc is
-    #                                      reported verbatim.
+    #                                      from the RUNNER's own stderr, which `2>&1`
+    #                                      captures. THE PREFIX IS NOT THE LITERAL
+    #                                      `timeout: `: coreutils names itself by argv[0] AS
+    #                                      INVOKED, and TIMEOUT_BIN_TEST holds a `command
+    #                                      -v` ABSOLUTE PATH (:1639), so the real line is
+    #                                      `/usr/bin/timeout: ...` — and `gtimeout` on
+    #                                      macOS, and `env: 'timeout': ...` when NO runner
+    #                                      resolves at all and `env` execs the literal
+    #                                      fallback. Hence
+    #                                      `^(/[^[:space:]:]*/)?(g?timeout|env): `: an
+    #                                      optional absolute path, then the runner's own
+    #                                      name. Anchored at LINE START on purpose — a bare
+    #                                      `(^|/)` would also match a CHILD's `bash: line 1:
+    #                                      /usr/bin/env: bad interpreter`, reclassifying a
+    #                                      real failure as UNMEASURED. An UNCORROBORATED
+    #                                      125/126/127 falls through to 6 and REDS. MEASURED
+    #                                      on coreutils 9.4: `/usr/bin/timeout 5 missing` ->
+    #                                      127 + "/usr/bin/timeout: failed to run command";
+    #                                      `env missing` -> 127 + "env: 'missing': No such
+    #                                      file"; `timeout 5 bash -c 'bash /nonexistent'` ->
+    #                                      127 + "bash: ... No such file" (NO runner
+    #                                      prefix). The rc is reported verbatim.
     #   5. no output at all             -> UNMEASURED for a cause no status above named.
     #                                      Kept distinct rather than folded in: empty
     #                                      output at an ordinary status (a sudo refusal) is
@@ -4918,10 +4936,10 @@ FAKEGATE
     elif out_has "$out_at" 'gate-pin: SKIPPED'; then
       ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
     elif [ "$rc_at" -eq 137 ] || [ "$rc_at" -eq 124 ]; then
-      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation was KILLED at its ${PIN_11AT_BOUND_S}s wall-clock bound (rc=$rc_at) before it reached a verdict, so the guard was neither confirmed nor defeated (nothing was written)"
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation was KILLED before it reached a verdict (rc=$rc_at; 124 IS timeout(1)'s own deadline status, but 137 is only a SIGKILL: its ${PIN_11AT_BOUND_S}s bound via -s KILL is the likely cause and is NOT confirmed here, an external SIGKILL — OOM killer, a peer's cgroup reap — being indistinguishable by status alone), so the guard was neither confirmed nor defeated (nothing was written)"
     elif { [ "$rc_at" -eq 125 ] || [ "$rc_at" -eq 126 ] || [ "$rc_at" -eq 127 ]; } \
-         && out_has "$out_at" -E '^timeout: '; then
-      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found) CORROBORATED by timeout(1)'s own '^timeout: ' diagnostic in the captured output, so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
+         && out_has "$out_at" -E '^(/[^[:space:]:]*/)?(g?timeout|env): '; then
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found) CORROBORATED by the RUNNER's own diagnostic in the captured output, so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
     elif [ -z "$out_at" ]; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
     else
