@@ -10631,7 +10631,7 @@ t test_object_store_sweep_claim_wait_completed_stops_contending
 # is asserted below, from the shipped files, so this case does not re-type it either.
 test_object_store_sweep_claim_recovers_when_stale() {
   local d root calls counter rc claim bound fns walks per_walk want got
-  local refresh_pid planted_started ended last_started live live_waited slack
+  local refresh_pid planted_started ended last_started live live_waited slack ticks tick_count max_gap
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10732,6 +10732,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
   claim="$OBJ_SWEEP_STAMP.sweeping"
   mkdir -p "$claim"
   live="$d/refresher.live"
+  ticks="$d/refresher.ticks"
   planted_started="$(date +%s)"
   printf '%s\n' "$planted_started" >"$claim/started"
   # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
@@ -10743,15 +10744,24 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # box produces — would not tick even once before the supervisor's first read, and the
   # fix would degrade to the one-shot plant it replaces for exactly the window that matters
   # most. Waiting for the marker makes that deterministic instead of merely probable.
+  # BOUNDED at 300 ticks (~60s at the 0.2s period below, an order of magnitude over this
+  # case's ~5s run): unlike every OTHER background fixture in this file, this loop has no
+  # natural exit, so a lost `fixture_kill` (this suite's own SIGKILL, an OOM kill) would
+  # otherwise leave it spinning forever on a shared fleet box. Every tick also appends
+  # `$claim/started`'s new value to `$ticks`, so a stall can be attributed by NAME rather
+  # than left to degrade into the generic outcome failure below.
   fixture_bg bash -c '
-    claim="$1" live="$2"
-    while true; do
-      printf "%s\n" "$(date +%s)" >"$claim/started.tmp.$$" 2>/dev/null &&
+    claim="$1" live="$2" ticks="$3"
+    i=0
+    while [[ "$i" -lt 300 ]]; do
+      now="$(date +%s)"
+      printf "%s\n" "$now" >"$claim/started.tmp.$$" 2>/dev/null &&
         mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null &&
-        : >"$live"
+        { printf "%s\n" "$now" >>"$ticks" 2>/dev/null; : >"$live"; }
       sleep 0.2
+      i=$((i + 1))
     done
-  ' _ "$claim" "$live" >/dev/null 2>&1
+  ' _ "$claim" "$live" "$ticks" >/dev/null 2>&1
   refresh_pid=$FIXTURE_LAST_PID
   live_waited=0
   while [[ ! -e "$live" && "$live_waited" -lt 30 ]]; do
@@ -10774,13 +10784,16 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # the rest of the run -- the exact failure mode this guards against -- so anchor to the
     # END of the run instead: the last write must be within a small slack of when the
     # supervisor actually exited, proving the loop was still ticking right up to
-    # `fixture_kill`, not just that it fired once at some point. The slack is DERIVED from
-    # the same pinned knobs (a) reads rather than a re-typed literal — one poll interval's
-    # worth of read staleness plus the claim's own slack term, which also comfortably covers
-    # the (short, stubbed) worker-spawn/finalize work the supervisor does after the wait
-    # itself ends and before this process exits.
-    slack=$((OBJ_SWEEP_CLAIM_POLL_SECS + OBJ_SWEEP_CLAIM_SLACK_SECS))
+    # `fixture_kill`, not just that it fired once at some point. The slack tolerates ONLY
+    # refresher scheduling latency at the end of the run (post-wait supervisor work is
+    # already inside `ended`, sampled above BEFORE `fixture_kill`, so it needs none) and is
+    # DERIVED from the same relation the wait itself uses (`walks * OBJ_SWEEP_TIMEOUT_SECS +
+    # OBJ_SWEEP_CLAIM_SLACK_SECS`, `obj_sweep_claim_stale_secs`) rather than a re-typed
+    # literal narrower than that bound -- a re-typed, tighter slack would fail a refresher
+    # stall the wait itself tolerates, which is the same class of flake #4282 was about.
+    slack=$((walks * OBJ_SWEEP_TIMEOUT_SECS + OBJ_SWEEP_CLAIM_SLACK_SECS))
     last_started="$(cat "$claim/started" 2>/dev/null || echo 0)"
+    [[ "$last_started" =~ ^[0-9]+$ ]] || last_started=0
     if [[ "$last_started" -lt $((ended - slack)) ]]; then
       fail "obj-sweep(claim-fresh-control): the refresh fixture went stale before the run ended -- last \$claim/started=$last_started, run ended=$ended, slack=${slack}s, planted=$planted_started, rc=$rc (see $d/fresh.log) -- the case did not exercise the fix under test"
     elif [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
@@ -10788,7 +10801,13 @@ test_object_store_sweep_claim_recovers_when_stale() {
       grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
       pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip"
     else
-      fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) (see $d/fresh.log)"
+      # A mid-run refresher stall (started ages past the bound, the supervisor sweeps, then
+      # the refresher resumes and ticks through to `fixture_kill`) passes the end-anchored
+      # check above yet is exactly #4282's symptom -- so name the refresher's own tick
+      # record here, distinguishing "fixture starved" from a genuine behavioural regression.
+      tick_count="$(wc -l <"$ticks" 2>/dev/null || echo 0)"
+      max_gap="$(awk 'NR>1{d=$1-p; if(d>m)m=d} {p=$1} END{print m+0}' "$ticks" 2>/dev/null || echo 0)"
+      fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) refresher_ticks=$tick_count refresher_max_gap=${max_gap}s (see $d/fresh.log)"
     fi
   fi
   unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
