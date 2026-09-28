@@ -4810,12 +4810,21 @@ FAKEGATE
   #
   #      THE BOUND IS A RUNAWAY GUARD, NOT THE PROPERTY, AND 120s WAS AN OUTLIER (#4287).
   #      `runpin` — the driver every other case in this block goes through, same shape,
-  #      same staged tree — allows 300s, and THIS case is the heaviest of the family: it
-  #      is the only one passing `--yes`, and sudoers' env_reset drops the suite-wide
-  #      opt-outs exported at the top of this file, so it executes MORE of the script than
-  #      its siblings did under a TIGHTER deadline. It was SIGKILLed mid-run during a full
-  #      gate on astro-processor (run-id /data/tmp/agent-gate.fZDLHj, sha d220a0bc5) and
-  #      the case then announced a security-guard DEFEAT it had never observed.
+  #      same staged tree — allows 300s, and THIS case is the heaviest of the family.
+  #      THE DISTINGUISHER IS NOT `--yes`: 11ak passes it too, under real root, at the
+  #      same 120s. It is that 11at ALONE sets PATH="$pin_liar:$PATH" on the invocation
+  #      below, so it is the one root run that inherits the suite's FULL PATH — cargo,
+  #      sccache and gh all reachable — instead of sudo's `secure_path`, WHILE its lying
+  #      `id` claims uid 1000. Bootstrap therefore walks the LONGER "unprivileged" code
+  #      paths against REAL tools, where its siblings short-circuit on the tools
+  #      secure_path hides from them. It was SIGKILLed mid-run during a full gate on
+  #      astro-processor (run-id /data/tmp/agent-gate.fZDLHj, sha d220a0bc5) and the case
+  #      then announced a security-guard DEFEAT it had never observed.
+  #
+  #      11ak CARRIES THE SAME 120s EXPOSURE AND IS DELIBERATELY LEFT ALONE, as do the
+  #      other block-11 sudo cases. #4287 is scoped to the case that actually misreported;
+  #      the issue body already names a sweep of this file's fixed-timeout self-tests as
+  #      separate future work, and widening here would be that sweep done quietly.
   #
   #      Widening is the proportionate fix here because there is nothing cheaper left to
   #      bound, and that was checked rather than assumed: against this block's staged tree
@@ -4861,13 +4870,25 @@ FAKEGATE
     #                                      subject could not be observed" — never an `ok`
     #                                      (that would be a vacuous green) and never a
     #                                      `bad` (that would be the false accusation again).
-    #   4. no output at all             -> UNMEASURED for a cause the status did not name.
-    #                                      Kept distinct from 3 rather than folded into it:
-    #                                      empty output with a NON-timeout status is a
-    #                                      different failure (a sudo refusal, a missing
-    #                                      bounded runner) and must not be reported as a
-    #                                      deadline we never hit.
-    #   5. otherwise                    -> the run COMPLETED, wrote nothing, and never
+    #   4. the RUNNER itself failed     -> UNMEASURED, and a SEPARATE branch because it is
+    #      (125 / 126 / 127)               a separate fact. These are timeout(1)'s OWN
+    #                                      documented failure codes — 125 the runner
+    #                                      failed, 126 the command could not be invoked,
+    #                                      127 it was not found — so an unresolvable
+    #                                      `${TIMEOUT_BIN_TEST:-timeout}` lands here. Each
+    #                                      writes to stderr, which `2>&1` captures, so the
+    #                                      output is NON-empty and these used to fall
+    #                                      through to 6 and be described as a run that
+    #                                      "COMPLETED". That is this issue's own defect one
+    #                                      exit-code cluster over: the deadline was never
+    #                                      even reached, so neither the bound nor the guard
+    #                                      may be named. The rc is reported verbatim.
+    #   5. no output at all             -> UNMEASURED for a cause no status above named.
+    #                                      Kept distinct rather than folded in: empty
+    #                                      output at an ordinary status (a sudo refusal) is
+    #                                      a different failure and must not be reported as
+    #                                      a deadline we never hit, nor as a broken runner.
+    #   6. otherwise                    -> the run COMPLETED, wrote nothing, and never
     #                                      printed the refusal. No write was observed, so
     #                                      it is not the defeat message; it is still a
     #                                      `bad`, because the guard's decision path went
@@ -4881,8 +4902,10 @@ FAKEGATE
       ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
     elif [ "$rc_at" -eq 137 ] || [ "$rc_at" -eq 124 ]; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation was KILLED at its ${PIN_11AT_BOUND_S}s wall-clock bound (rc=$rc_at) before it reached a verdict, so the guard was neither confirmed nor defeated (nothing was written)"
+    elif [ "$rc_at" -eq 125 ] || [ "$rc_at" -eq 126 ] || [ "$rc_at" -eq 127 ]; then
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found), so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
     elif [ -z "$out_at" ]; then
-      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at, not the ${PIN_11AT_BOUND_S}s deadline), so the guard was neither confirmed nor defeated (nothing was written)"
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
     else
       bad "gate-pin: the root-seam refusal never appeared in a run that COMPLETED (rc=$rc_at) — nothing was written, so this is not an observed privileged write, but the guard's decision path went unexercised"
       printf '%s\n' "$out_at" | grep -i 'gate-pin' | head -2
