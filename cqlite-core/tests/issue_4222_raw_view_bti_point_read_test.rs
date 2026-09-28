@@ -115,12 +115,21 @@ fn golden_partitions() -> Vec<Json> {
     parts
 }
 
-fn golden_partition<'a>(parts: &'a [Json], pk: i32) -> &'a Json {
+fn golden_partition(parts: &[Json], pk: i32) -> &Json {
     let wanted = pk.to_string();
     parts
         .iter()
         .find(|p| p["partition"]["key"][0].as_str() == Some(wanted.as_str()))
         .unwrap_or_else(|| panic!("golden must carry partition pk={pk}"))
+}
+
+/// Narrow a golden `i64` to the `i32` an `int` column reports, PANICKING on
+/// a value that would not fit rather than silently wrapping — `as i32` would
+/// make an equality assertion compare a WRAPPED number, i.e. an oracle blind
+/// to the defect it exists to catch. A tripwire, not a code path.
+fn golden_i32(value: i64, what: &str) -> i32 {
+    i32::try_from(value)
+        .unwrap_or_else(|_| panic!("golden {what} {value} must fit the i32 an int column reports"))
 }
 
 fn iso_to_micros(iso: &str) -> i64 {
@@ -193,9 +202,12 @@ async fn bti_point_read_returns_every_clustering_row_with_the_trie_resolved_offs
         let mut expected_cks: Vec<i32> = g_rows
             .iter()
             .map(|r| {
-                r["clustering"][0]
-                    .as_i64()
-                    .expect("golden clustering component") as i32
+                golden_i32(
+                    r["clustering"][0]
+                        .as_i64()
+                        .expect("golden clustering component"),
+                    "clustering component",
+                )
             })
             .collect();
         expected_cks.sort_unstable();
@@ -258,7 +270,10 @@ async fn bti_row_and_cell_write_times_match_the_golden() {
         g_rows.first().expect("golden first row"),
         g_rows.last().expect("golden last row"),
     ] {
-        let ck = g_row["clustering"][0].as_i64().expect("golden clustering") as i32;
+        let ck = golden_i32(
+            g_row["clustering"][0].as_i64().expect("golden clustering"),
+            "clustering component",
+        );
         let tstamp = iso_to_micros(
             g_row["liveness_info"]["tstamp"]
                 .as_str()

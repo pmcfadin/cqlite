@@ -169,7 +169,7 @@ fn golden_partitions(root: &Path, table: &str) -> Vec<Json> {
 }
 
 /// The golden partition whose key is `pk` (sstabledump renders keys as strings).
-fn golden_partition<'a>(parts: &'a [Json], pk: i32) -> &'a Json {
+fn golden_partition(parts: &[Json], pk: i32) -> &Json {
     let wanted = pk.to_string();
     parts
         .iter()
@@ -178,7 +178,7 @@ fn golden_partition<'a>(parts: &'a [Json], pk: i32) -> &'a Json {
 }
 
 /// The golden `"type": "row"` entry whose first clustering component is `ck`.
-fn golden_row<'a>(partition: &'a Json, ck: i64) -> &'a Json {
+fn golden_row(partition: &Json, ck: i64) -> &Json {
     partition["rows"]
         .as_array()
         .unwrap_or_else(|| panic!("golden partition must carry a 'rows' array"))
@@ -234,6 +234,17 @@ fn golden_str<'a>(node: &'a Json, field: &str) -> &'a str {
     node[field]
         .as_str()
         .unwrap_or_else(|| panic!("golden node must carry a string '{field}': {node}"))
+}
+
+/// Narrow a golden `i64` to the `i32` an `int` column reports, PANICKING on
+/// a value that would not fit rather than silently wrapping.
+///
+/// `as i32` would make an equality assertion compare a WRAPPED number, i.e.
+/// an oracle that cannot see the very defect it exists to catch. No real
+/// fixture can produce such a value, so this is a tripwire, not a code path.
+fn golden_i32(value: i64, what: &str) -> i32 {
+    i32::try_from(value)
+        .unwrap_or_else(|_| panic!("golden {what} {value} must fit the i32 an int column reports"))
 }
 
 // ---------------------------------------------------------------------------
@@ -326,13 +337,13 @@ async fn ttl_cells_report_the_declared_ttl_and_computed_expiry_from_the_golden()
         let row = result
             .rows
             .iter()
-            .find(|r| int_of(r, "ck") == Some(ck as i32))
+            .find(|r| int_of(r, "ck") == Some(golden_i32(ck, "ck")))
             .unwrap_or_else(|| panic!("the raw view must return ck={ck}"));
 
         for col in ["val", "extra"] {
             assert_eq!(
                 int_of(row, &format!("{col}_ttl")),
-                Some(ttl as i32),
+                Some(golden_i32(ttl, "ttl")),
                 "{col}_ttl must equal the golden's declared TTL for ck={ck}"
             );
             assert_eq!(
@@ -355,7 +366,7 @@ async fn ttl_cells_report_the_declared_ttl_and_computed_expiry_from_the_golden()
 
         // The row-level liveness quintet reports the same three facts
         // (R3's `row_timestamp`/`row_ttl`, also previously unasserted).
-        assert_eq!(int_of(row, "row_ttl"), Some(ttl as i32));
+        assert_eq!(int_of(row, "row_ttl"), Some(golden_i32(ttl, "ttl")));
         assert_eq!(bigint_of(row, "row_timestamp"), Some(tstamp));
         assert_eq!(bigint_of(row, "row_local_deletion_time"), Some(expires_at));
         assert_eq!(
@@ -620,7 +631,9 @@ fn assert_bound_matches_golden(row: &QueryRow, golden_bound: &Json, row_kind: &s
         .expect("a golden bound must carry a clustering array");
     assert_eq!(
         int_of(row, "ck1"),
-        clustering[0].as_i64().map(|v| v as i32),
+        clustering[0]
+            .as_i64()
+            .map(|v| golden_i32(v, "bound clustering component")),
         "the bound's first clustering component must be reported"
     );
     // sstabledump renders an UNSPECIFIED trailing component as "*". CQLite

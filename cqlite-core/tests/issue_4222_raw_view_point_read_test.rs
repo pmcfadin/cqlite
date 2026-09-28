@@ -184,7 +184,7 @@ fn fixture_goldens(table: &str) -> Option<(Vec<Json>, Vec<Json>)> {
 }
 
 /// The golden partition whose key is `pk` (sstabledump renders keys as strings).
-fn golden_partition<'a>(parts: &'a [Json], pk: i32) -> &'a Json {
+fn golden_partition(parts: &[Json], pk: i32) -> &Json {
     let wanted = pk.to_string();
     parts
         .iter()
@@ -193,7 +193,7 @@ fn golden_partition<'a>(parts: &'a [Json], pk: i32) -> &'a Json {
 }
 
 /// The golden `"type": "row"` entry whose first clustering component is `ck`.
-fn golden_row<'a>(partition: &'a Json, ck: i64) -> &'a Json {
+fn golden_row(partition: &Json, ck: i64) -> &Json {
     partition["rows"]
         .as_array()
         .unwrap_or_else(|| panic!("golden partition must carry a 'rows' array"))
