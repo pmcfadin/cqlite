@@ -4836,6 +4836,65 @@ FAKEGATE
   #      of test_gate_detached.sh 4b.126, whose early-exit keeps the unloaded pass fast —
   #      here the bound is never waited on at all when the run completes.
   PIN_11AT_BOUND_S=300
+  # The RUNNER's own diagnostic prefix, in ONE place: branch 4 below and the 11at-ctl
+  # control after it both read this variable, so a future edit cannot change one without
+  # changing the other (roborev round 15).
+  PIN_11AT_RUNNER_RE='^(/[^[:space:]:]*/)?(g?timeout|env): '
+  # The signal-death/deadline predicate, hoisted for the SAME anti-drift reason — round
+  # 15's F1 was precisely this test being too narrow (137-only), and a prose-only claim
+  # about it is what let that ship. Branch 3 and the control below both call it.
+  pin_11at_killed() { [ "$1" -ge 128 ] || [ "$1" -eq 124 ]; }
+
+  # 11at-ctl. A CONTROL FOR 11at's OWN CORROBORATION PATTERN (roborev round 15). Branches
+  #      3-7 above are unreachable on a healthy host, so without this the ERE is asserted
+  #      only in PROSE — the same shape test_roborev_guard_portability.sh refuses ("the
+  #      new branches would be dead code asserted only in prose, which is the same shape
+  #      as the defect they close") and case 13b plants its own probe for. HOST-
+  #      INDEPENDENT, AND DELIBERATELY ABOVE THE `sudo -n true` GATE BELOW: it classifies
+  #      fixed sample lines, spawns nothing and needs no root, so it must not inherit the
+  #      sudo precondition. It was first written INSIDE that gate, which silently made the
+  #      control itself conditional — the same prose-vs-code gap it exists to close, one
+  #      level up: a host without passwordless sudo would have checked nothing while this
+  #      comment claimed host independence. Keep it above the gate.
+  #      It reads the SAME $PIN_11AT_RUNNER_RE branch 4 reads, so the two cannot drift —
+  #      the `(^|/)` "simplification" the block warns against REDS here instead of
+  #      silently reclassifying a real failure as a never-red skip.
+  pin_ctl_bad=0
+  pin_ctl_why=""
+  for _pc in "/usr/bin/timeout: failed to run command 'x': No such file or directory" \
+             "/opt/homebrew/bin/gtimeout: failed to run command 'x'" \
+             "timeout: failed to run command 'x'" \
+             "env: 'timeout': No such file or directory"; do
+    if ! out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a runner diagnostic: $_pc"
+    fi
+  done
+  for _pc in "bash: /nonexistent/staged.sh: No such file or directory" \
+             "bash: line 1: /usr/bin/env: bad interpreter: No such file or directory" \
+             "sudo: a password is required" \
+             "gate-pin: SKIPPED PRIVILEGED write"; do
+    if out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; FALSE-MATCHED non-runner output: $_pc"
+    fi
+  done
+  unset _pc
+  for _pk in 137 143 130 139 124; do
+    if ! pin_11at_killed "$_pk"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk is a signal death/deadline but was NOT classified killed"
+    fi
+  done
+  for _pk in 0 1 125 126 127; do
+    if pin_11at_killed "$_pk"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk was WRONGLY classified killed (it must reach the runner/sudo/residual branches)"
+    fi
+  done
+  unset _pk
+  if [ "$pin_ctl_bad" -eq 0 ]; then
+    ok "gate-pin 11at control: the runner-corroboration ERE matches every runner-diagnostic shape (absolute timeout, absolute gtimeout, bare, env) and NONE of the child/sudo/bootstrap shapes that must stay reportable; and the kill predicate accepts 137/143/130/139/124 while rejecting 0/1/125/126/127"
+  else
+    bad "gate-pin 11at control: the runner-corroboration ERE misclassifies${pin_ctl_why}"
+  fi
+
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     pin_liar="$tmp/pin-liar-bin"; mkdir -p "$pin_liar"
     printf '#!/usr/bin/env bash\necho 1000\n' >"$pin_liar/id"; chmod +x "$pin_liar/id"
@@ -4953,14 +5012,6 @@ FAKEGATE
     #                                      `bad`, because the guard's decision path went
     #                                      unexercised and the case would otherwise pass
     #                                      vacuously the day the section stops running.
-    # The RUNNER's own diagnostic prefix, in ONE place: branch 4 below and the 11at-ctl
-    # control after it both read this variable, so a future edit cannot change one without
-    # changing the other (roborev round 15).
-    PIN_11AT_RUNNER_RE='^(/[^[:space:]:]*/)?(g?timeout|env): '
-    # The signal-death/deadline predicate, hoisted for the SAME anti-drift reason — round
-    # 15's F1 was precisely this test being too narrow (137-only), and a prose-only claim
-    # about it is what let that ship. Branch 3 and the control below both call it.
-    pin_11at_killed() { [ "$1" -ge 128 ] || [ "$1" -eq 124 ]; }
     if [ -e "$pin_liar_target" ]; then
       bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
       grep -i 'gate-pin' <<<"$out_at" | head -2
@@ -4981,51 +5032,6 @@ FAKEGATE
       grep -i 'gate-pin' <<<"$out_at" | head -2
     fi
     sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
-
-    # 11at-ctl. A CONTROL FOR 11at's OWN CORROBORATION PATTERN (roborev round 15). Branches
-    #      3-7 above are unreachable on a healthy host, so without this the ERE is asserted
-    #      only in PROSE — the same shape test_roborev_guard_portability.sh refuses ("the
-    #      new branches would be dead code asserted only in prose, which is the same shape
-    #      as the defect they close") and case 13b plants its own probe for. HOST-
-    #      INDEPENDENT: it classifies fixed sample lines, spawns nothing and needs no root.
-    #      It reads the SAME $PIN_11AT_RUNNER_RE branch 4 reads, so the two cannot drift —
-    #      the `(^|/)` "simplification" the block warns against REDS here instead of
-    #      silently reclassifying a real failure as a never-red skip.
-    pin_ctl_bad=0
-    pin_ctl_why=""
-    for _pc in "/usr/bin/timeout: failed to run command 'x': No such file or directory" \
-               "/opt/homebrew/bin/gtimeout: failed to run command 'x'" \
-               "timeout: failed to run command 'x'" \
-               "env: 'timeout': No such file or directory"; do
-      if ! out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
-        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a runner diagnostic: $_pc"
-      fi
-    done
-    for _pc in "bash: /nonexistent/staged.sh: No such file or directory" \
-               "bash: line 1: /usr/bin/env: bad interpreter: No such file or directory" \
-               "sudo: a password is required" \
-               "gate-pin: SKIPPED PRIVILEGED write"; do
-      if out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
-        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; FALSE-MATCHED non-runner output: $_pc"
-      fi
-    done
-    unset _pc
-    for _pk in 137 143 130 139 124; do
-      if ! pin_11at_killed "$_pk"; then
-        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk is a signal death/deadline but was NOT classified killed"
-      fi
-    done
-    for _pk in 0 1 125 126 127; do
-      if pin_11at_killed "$_pk"; then
-        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk was WRONGLY classified killed (it must reach the runner/sudo/residual branches)"
-      fi
-    done
-    unset _pk
-    if [ "$pin_ctl_bad" -eq 0 ]; then
-      ok "gate-pin 11at control: the runner-corroboration ERE matches every runner-diagnostic shape (absolute timeout, absolute gtimeout, bare, env) and NONE of the child/sudo/bootstrap shapes that must stay reportable; and the kill predicate accepts 137/143/130/139/124 while rejecting 0/1/125/126/127"
-    else
-      bad "gate-pin 11at control: the runner-corroboration ERE misclassifies${pin_ctl_why}"
-    fi
 
     # 11au. SUDO_USER MUST AGREE WITH SUDO_UID (roborev round 8). Trusting the NAME alone
     #      accepts stale metadata — `SUDO_UID=1000 SUDO_USER=root` would probe root and
