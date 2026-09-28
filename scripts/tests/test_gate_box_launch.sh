@@ -73,6 +73,23 @@ gg clone -q "$ORIGIN" "$CLONE" 2>/dev/null
 
 mkdir -p "$LANES" "$TMPDIR_FIXTURE" "$DATASETS" "$LOGDIR" "$BOXES_DIR"
 
+# A curated, npx-free bin directory built from THIS host's real tool locations — never the
+# literal "/usr/bin:/bin" this fixture used to hardcode, which is npx-free only by accident
+# and breaks on any host where node/npm's npx lands there (found the hard way: this box's
+# own /usr/bin/npx -> ../lib/node_modules/npm/bin/npx-cli.js, #4267 endgame review). Every
+# "good"/non-npx fixture below points BOX_PATH at this directory instead.
+CLEANBIN="$T/cleanbin"
+mkdir -p "$CLEANBIN"
+for _tool in git hostname df date awk dirname basename sed tr mkdir readlink id cat env bash; do
+  _tool_path=$(command -v "$_tool" 2>/dev/null) || continue
+  ln -sf "$_tool_path" "$CLEANBIN/$_tool"
+done
+# systemctl is optional (the busy-lane check degrades to a NOTE without it) — link it only
+# when this host actually has one, so the fixture also matches a real no-systemctl host.
+if _systemctl_path=$(command -v systemctl 2>/dev/null); then
+  ln -sf "$_systemctl_path" "$CLEANBIN/systemctl"
+fi
+
 # A profile that resolves and loads cleanly, used by every case that is not itself
 # testing profile loading. Both admission bars are 0 so the fixture tree's real free
 # space never fails an unrelated case.
@@ -82,7 +99,7 @@ BOX_CANONICAL_CLONE="$CLONE"
 BOX_LANES_DIR="$LANES"
 BOX_TMPDIR="$TMPDIR_FIXTURE"
 BOX_DATASETS_ROOT="$DATASETS"
-BOX_PATH="/usr/bin:/bin"
+BOX_PATH="$CLEANBIN"
 BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
@@ -119,7 +136,7 @@ BOX_CANONICAL_CLONE="$CLONE"
 BOX_LANES_DIR="$LANES"
 BOX_TMPDIR="$TMPDIR_FIXTURE"
 BOX_DATASETS_ROOT="$DATASETS"
-BOX_PATH="/usr/bin:/bin"
+BOX_PATH="$CLEANBIN"
 BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
@@ -143,6 +160,39 @@ if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "^GATE-BOX-LAUNCH: dry-run 
 else
   bad "a complete, correct profile should dry-run clean (rc=$_rc): $_out"
 fi
+
+# ---------------------------------------------------------------------------------
+# (c) profile loading — BOX_CANONICAL_CLONE pointed at a WORKTREE, not a primary clone.
+# `git worktree add` writes `.git` as a regular file, so `[ -d "$CLONE/.git" ]` alone
+# is false for a worktree too — the same shape as a missing checkout — and used to
+# misreport this as "not a git checkout" instead of naming the actual problem (roborev
+# finding, #4267 endgame review).
+# ---------------------------------------------------------------------------------
+WORKTREE_CLONE="$T/canonical-worktree"
+gg -C "$CLONE" worktree add -q --detach "$WORKTREE_CLONE" main >/dev/null 2>&1
+cat >"$BOXES_DIR/worktreebox4267.env" <<EOF
+BOX_CANONICAL_CLONE="$WORKTREE_CLONE"
+BOX_LANES_DIR="$LANES"
+BOX_TMPDIR="$TMPDIR_FIXTURE"
+BOX_DATASETS_ROOT="$DATASETS"
+BOX_PATH="$CLEANBIN"
+BOX_JOBS=4
+BOX_RUST_TEST_THREADS=1
+BOX_MAX_CONCURRENCY=1
+BOX_MIN_FREE_GB=0
+BOX_TMP_MIN_FREE_GB=0
+BOX_LOG_DIR="$LOGDIR"
+EOF
+_out=$(run worktreebox4267 main)
+_rc=$?
+if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -qi "is a linked git" \
+  && printf '%s' "$_out" | grep -qi "WORKTREE" \
+  && ! printf '%s' "$_out" | grep -q "not a git.*checkout"; then
+  ok "BOX_CANONICAL_CLONE pointed at a worktree is refused as a worktree, not misreported as 'not a git checkout'"
+else
+  bad "a worktree BOX_CANONICAL_CLONE should be refused by its real cause (rc=$_rc): $_out"
+fi
+gg -C "$CLONE" worktree remove --force "$WORKTREE_CLONE" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------------
 # (a) env scrubbing — LANE_ID
@@ -179,7 +229,7 @@ BOX_CANONICAL_CLONE="$CLONE"
 BOX_LANES_DIR="$LANES"
 BOX_TMPDIR="$TMPDIR_FIXTURE"
 BOX_DATASETS_ROOT="$DATASETS"
-BOX_PATH="$NPXBIN:/usr/bin:/bin"
+BOX_PATH="$NPXBIN:$CLEANBIN"
 BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
@@ -218,6 +268,28 @@ if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "CQLITE_ALLOW_FILE_GROWTH=1
   ok "--allow-file-growth does add CQLITE_ALLOW_FILE_GROWTH=1 to the built env"
 else
   bad "--allow-file-growth should add CQLITE_ALLOW_FILE_GROWTH=1 (rc=$_rc): $_out"
+fi
+
+# ---------------------------------------------------------------------------------
+# (a) env scrubbing — webhook/token values must never appear IN THE CLEAR in --dry-run's
+# printed env. This output is routinely pasted into PR/issue comments by closers
+# (flow-closer.md), so a webhook URL leaking through the very check meant to prove
+# things "resolve cleanly" hands a credential to a public log (roborev finding, #4267
+# endgame review, CRITICAL). The name must still be disclosed as wired — dropping it
+# silently would be the #4267-round-2 notify-disclosure regression all over again.
+# ---------------------------------------------------------------------------------
+_secret='https://hooks.example.test/T00/deadbeefSECRET1234'
+_out=$(env -u LANE_ID CQLITE_NOTIFY_WEBHOOK="$_secret" CODEX_NOTIFY_WEBHOOK="$_secret" \
+  bash "$LAUNCHER" main --box good4267 --box-dir "$BOXES_DIR" --dry-run 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ] \
+  && ! printf '%s' "$_out" | grep -qF "$_secret" \
+  && printf '%s' "$_out" | grep -q "CQLITE_NOTIFY_WEBHOOK=<redacted>" \
+  && printf '%s' "$_out" | grep -q "CODEX_NOTIFY_WEBHOOK=<redacted>" \
+  && printf '%s' "$_out" | grep -q "notifications wired: CQLITE_NOTIFY_WEBHOOK, CODEX_NOTIFY_WEBHOOK"; then
+  ok "webhook secret values are redacted in --dry-run output, but their names are still disclosed as wired"
+else
+  bad "webhook secrets must never appear verbatim in --dry-run output (rc=$_rc): $_out"
 fi
 
 # ---------------------------------------------------------------------------------
@@ -272,7 +344,7 @@ BOX_CANONICAL_CLONE="$CLONE"
 BOX_LANES_DIR="$LANES"
 BOX_TMPDIR="$TMPDIR_FIXTURE"
 BOX_DATASETS_ROOT="$DATASETS"
-BOX_PATH="/usr/bin:/bin"
+BOX_PATH="$CLEANBIN"
 BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
@@ -299,7 +371,7 @@ BOX_CANONICAL_CLONE="$CLONE"
 BOX_LANES_DIR="$LANES"
 BOX_TMPDIR="$TMPDIR_FIXTURE"
 BOX_DATASETS_ROOT="$DATASETS"
-BOX_PATH="/usr/bin:/bin"
+BOX_PATH="$CLEANBIN"
 BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1
@@ -322,7 +394,7 @@ BOX_CANONICAL_CLONE="$CLONE"
 BOX_LANES_DIR="$ANCESTOR_LANES"
 BOX_TMPDIR="$TMPDIR_FIXTURE"
 BOX_DATASETS_ROOT="$DATASETS"
-BOX_PATH="/usr/bin:/bin"
+BOX_PATH="$CLEANBIN"
 BOX_JOBS=4
 BOX_RUST_TEST_THREADS=1
 BOX_MAX_CONCURRENCY=1

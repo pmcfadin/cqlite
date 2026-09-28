@@ -233,11 +233,36 @@ echo "gate-box-launch: PATH is npx-free (asserted)."
 #    base (CLAUDE.md: "A gate script behind origin/main cannot certify. Rebase before
 #    the gate of record.") — the mechanized form of that rule.
 # ---------------------------------------------------------------------------
-if [ ! -d "$BOX_CANONICAL_CLONE/.git" ]; then
+# `[ -d "$BOX_CANONICAL_CLONE/.git" ]` used to be the whole check, but a `git worktree add`
+# writes `.git` as a REGULAR FILE, not a directory (same fact section 8 below documents for
+# lane worktrees) — so pointing BOX_CANONICAL_CLONE at a worktree by mistake failed THIS
+# check and was misreported as "not a git checkout" instead of the real problem: a worktree,
+# not the box's primary clone (roborev finding, #4267 endgame review). Distinguish them with
+# git itself: a primary clone's --git-dir and --git-common-dir resolve to the SAME directory;
+# a linked worktree's --git-dir is a private per-worktree dir under
+# <common>/worktrees/<name>, distinct from --git-common-dir.
+_raw_gd=$(git -C "$BOX_CANONICAL_CLONE" rev-parse --git-dir 2>/dev/null) || _raw_gd=""
+if [ -z "$_raw_gd" ]; then
   echo "gate-box-launch: profile's BOX_CANONICAL_CLONE '$BOX_CANONICAL_CLONE' is not a git" >&2
-  echo "                 checkout (no .git). A PRIMARY clone under a scratch dir fails 68" >&2
+  echo "                 checkout. A PRIMARY clone under a scratch dir fails 68" >&2
   echo "                 worker-supervisor cases (#3393) — this must be the box's own" >&2
   echo "                 long-lived clone that lane worktrees are cut FROM." >&2
+  exit 1
+fi
+_raw_gcd=$(git -C "$BOX_CANONICAL_CLONE" rev-parse --git-common-dir 2>/dev/null) || _raw_gcd=""
+_abs_gd=$(cd "$BOX_CANONICAL_CLONE" 2>/dev/null && cd "$_raw_gd" 2>/dev/null && pwd -P) || _abs_gd=""
+_abs_gcd=$(cd "$BOX_CANONICAL_CLONE" 2>/dev/null && cd "$_raw_gcd" 2>/dev/null && pwd -P) || _abs_gcd=""
+if [ -z "$_abs_gd" ] || [ -z "$_abs_gcd" ]; then
+  echo "gate-box-launch: could not resolve git-dir/git-common-dir for BOX_CANONICAL_CLONE" >&2
+  echo "                 '$BOX_CANONICAL_CLONE'." >&2
+  exit 1
+fi
+if [ "$_abs_gd" != "$_abs_gcd" ]; then
+  echo "gate-box-launch: profile's BOX_CANONICAL_CLONE '$BOX_CANONICAL_CLONE' is a linked git" >&2
+  echo "                 WORKTREE (git-dir '$_abs_gd' != git-common-dir '$_abs_gcd'), not the" >&2
+  echo "                 box's primary clone. A worktree here fails 68 worker-supervisor cases" >&2
+  echo "                 (#3393) — point BOX_CANONICAL_CLONE at the box's own long-lived clone" >&2
+  echo "                 that lane worktrees are cut FROM." >&2
   exit 1
 fi
 
@@ -348,19 +373,37 @@ fi
 # ---------------------------------------------------------------------------
 LANE_DIR="$BOX_LANES_DIR/$LANE_NAME"
 if command -v systemctl >/dev/null 2>&1; then
-  while IFS= read -r _unit; do
-    [ -n "$_unit" ] || continue
-    _pid=$(systemctl --user show -p ExecMainPID --value "$_unit" 2>/dev/null || echo 0)
-    case "$_pid" in ''|*[!0-9]*|0) continue ;; esac
-    [ -e "/proc/$_pid/cwd" ] || continue
-    _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true)
-    case "$_cwd" in
-      "$LANE_DIR"|"$LANE_DIR"/*)
-        echo "gate-box-launch: REFUSING — unit '$_unit' (pid $_pid) is already running in" >&2
-        echo "                 lane '$LANE_DIR'. Only one gate may occupy a lane at a time." >&2
-        exit 1 ;;
-    esac
-  done < <(systemctl --user list-units 'cqlite-gate-*' --no-legend --plain 2>/dev/null | awk '{print $1}')
+  # Capture list-units' own exit status: a PRESENT systemctl that FAILS (no user bus, no
+  # login session) previously fell through to an empty read loop — a silent, undiagnosed
+  # pass indistinguishable from "checked, nothing found" (roborev finding, #4267 endgame
+  # review). Only a confirmed EMPTY-BUT-SUCCESSFUL listing is a clean pass.
+  if ! _units_out=$(systemctl --user list-units 'cqlite-gate-*' --no-legend --plain 2>&1); then
+    echo "gate-box-launch: NOTE — 'systemctl --user list-units' failed; skipped the busy-lane" >&2
+    echo "                 check (best-effort):" >&2
+    printf '%s\n' "$_units_out" | sed 's/^/                   /' >&2
+  else
+    while IFS= read -r _unit; do
+      [ -n "$_unit" ] || continue
+      _pid=$(systemctl --user show -p ExecMainPID --value "$_unit" 2>/dev/null || echo 0)
+      case "$_pid" in ''|*[!0-9]*|0) continue ;; esac
+      if [ ! -e "/proc/$_pid/cwd" ]; then
+        # The unit reports a pid but its /proc entry is gone (exited between the two reads)
+        # or unreadable (permissions) — this ONE unit's occupancy is INCONCLUSIVE, not clear;
+        # say so rather than silently treating it as "not in this lane" (same class as above).
+        echo "gate-box-launch: NOTE — unit '$_unit' (pid $_pid) has no readable" >&2
+        echo "                 /proc/$_pid/cwd; could not check whether it occupies lane" >&2
+        echo "                 '$LANE_DIR' (best-effort)." >&2
+        continue
+      fi
+      _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true)
+      case "$_cwd" in
+        "$LANE_DIR"|"$LANE_DIR"/*)
+          echo "gate-box-launch: REFUSING — unit '$_unit' (pid $_pid) is already running in" >&2
+          echo "                 lane '$LANE_DIR'. Only one gate may occupy a lane at a time." >&2
+          exit 1 ;;
+      esac
+    done < <(printf '%s\n' "$_units_out" | awk '{print $1}')
+  fi
 else
   echo "gate-box-launch: NOTE — no systemctl on PATH; skipped the busy-lane check (best-effort)." >&2
 fi
@@ -524,7 +567,19 @@ GATE_CMD=(bash "$LANE_DIR/scripts/flow/gate-detached.sh" --summary "$SUMMARY_PAT
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "gate-box-launch: [dry-run] resolved environment:"
   for _e in "${GATE_ENV[@]}"; do
-    printf '  %s\n' "$_e"
+    _ekey="${_e%%=*}"
+    case "$_ekey" in
+      *WEBHOOK*|*TOKEN*|*SECRET*|*PASSWORD*)
+        # These are credentials, not diagnostics — bootstrap-agent-machine.sh strips exactly
+        # these same webhook vars for the same reason ("report the HOST only"). --dry-run
+        # output is routinely pasted into PR/issue comments by closers (flow-closer.md), which
+        # would otherwise leak the webhook URL/token verbatim to a public log (roborev
+        # finding, #4267 endgame review, CRITICAL). The `_NOTIFY_WIRED` line above already
+        # discloses which names are wired without their values — this mirrors that.
+        printf '  %s=<redacted>\n' "$_ekey" ;;
+      *)
+        printf '  %s\n' "$_e" ;;
+    esac
   done
   echo "gate-box-launch: [dry-run] resolved command:"
   printf '  '
@@ -554,6 +609,19 @@ if [ "$_LAUNCH_RC" -ne 0 ]; then
 fi
 
 _UNIT=$(printf '%s\n' "$_LAUNCH_OUT" | awk -F': *' '/^unit:/ {print $2; exit}')
-_RUN_ID=$(grep -m1 '^run-id: ' "$SUMMARY_PATH" 2>/dev/null | sed 's/^run-id: //')
+# Parse the run-id from gate-detached's OWN "poll it with: ... --run-id <id>" line, never
+# from the summary file: a --summary path is only unique to THIS launch when the caller lets
+# this script pick the default. Once a caller pins --summary (e.g. flow-closer.md's
+# /tmp/gate-<N>.txt convention), a concurrent or later gate on that same path can rewrite it
+# between our launch and this read, pairing our launch with a PEER's run-id — exactly the
+# hazard gate-detached.sh:323-326,1583 documents for its own summary reads (roborev finding,
+# #4267 endgame review). gate-detached.sh's launch stdout is ours alone; read the run-id there.
+_RUN_ID=$(printf '%s\n' "$_LAUNCH_OUT" | awk '
+  /gate-liveness\.sh/ && /--run-id/ {
+    for (i = 1; i <= NF; i++) {
+      if ($i == "--run-id" && (i + 1) <= NF) { print $(i + 1); exit }
+    }
+  }
+')
 echo "GATE-BOX-LAUNCH: box=$BOX_NAME lane=$LANE_NAME head=$HEAD_SHA unit=${_UNIT:-unknown} run-id=${_RUN_ID:-unknown} summary=$SUMMARY_PATH log=$LOG_PATH"
 exit 0
