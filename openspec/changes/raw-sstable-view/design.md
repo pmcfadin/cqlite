@@ -43,7 +43,8 @@ positive) comes from `SSTableReader::might_contain_partition` (`storage/sstable/
 and `has_partition_index` (`partition_lookup.rs:766`), consulted *before* any row is ever produced, and
 a query engine result set has no natural way to emit "this generation was consulted and said no." So
 the fold is real but partial: this view gives #4205 the "which generations hold it" **enumeration**
-for free (no #4205 code needed to reimplement `DISTINCT sstable`), while #4205 keeps building and
+for free (no #4205 code needed to reimplement per-generation `sstable` enumeration — a plain
+projection plus client-side dedup, per the amended D2 above), while #4205 keeps building and
 owning the negative-probe classification and the CommitLog segment scan, unchanged from its own
 grooming. Recorded in #4205's own tracking, not touched by this change.
 
@@ -81,8 +82,9 @@ execution path in `query/executor.rs` or `planner.rs` — the one `PlanType::Joi
 display-label match arm, not an executor.
 
 **Decision: "joinable" (AC5) is satisfied by correlated queries over the shared key columns, not by
-literal `JOIN` syntax executing.** `SELECT DISTINCT sstable ... WHERE <pk> = ?` (the #4205-folding
-half of AC5) needs no JOIN and works today. The other half — "returns the logical row beside each
+literal `JOIN` syntax executing.** A plain `SELECT sstable, generation ... WHERE <pk> = ?` plus
+client-side dedup (the #4205-folding half of AC5, D2) needs no JOIN and works today — not literal
+`SELECT DISTINCT`, which this change refuses (D2, amended 2026-09-28). The other half — "returns the logical row beside each
 physical row" — is satisfied by running the same `WHERE <pk> = ?` predicate against `ks.t` and
 `ks.t_raw_sstable_data` as two separate `SELECT`s sharing the identical key columns and asserting the
 logical row's values match the reconciled subset of the physical rows' `<col>` values (never the
