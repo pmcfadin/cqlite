@@ -571,6 +571,16 @@ impl SSTableReader {
     /// timestamp — a defensive guard for whatever non-`nb` BIG shape this
     /// crate's supported version floor (`na`+) admits, since no committed
     /// fixture currently exercises it.
+    ///
+    /// `#[cfg(feature = "state_machine")]` for the same reason as
+    /// [`StorageEngine::raw_view_reader_snapshot`](crate::storage::StorageEngine):
+    /// that sole caller lives under `query::select_executor`, which is itself
+    /// `#[cfg(feature = "state_machine")]` (`query/mod.rs:39`), so without the
+    /// gate this is genuinely dead code in any feature set omitting
+    /// `state_machine` — the gate's `feature-iso-delta-scan` component builds
+    /// exactly such a set with `-D warnings` and FAILed on it. Gated to match
+    /// the consumer rather than silenced with `allow(dead_code)`.
+    #[cfg(feature = "state_machine")]
     pub(crate) fn compaction_stream_loses_cell_metadata(&self) -> bool {
         !self.requires_chunk_stitching() && self.bti_partitions_db.is_none()
     }

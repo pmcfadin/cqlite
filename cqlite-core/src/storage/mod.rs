@@ -435,6 +435,17 @@ impl StorageEngine {
     /// into `get_with_resolution_unmetered` to keep strict keyspace matching
     /// on a fallback resolution (#1321), so a qualified raw-view name never
     /// silently reads another keyspace's same-named table's rows.
+    ///
+    /// `#[cfg(feature = "state_machine")]` because its ONLY consumer is
+    /// `query::select_executor::raw_view`, and `query::select_executor` is
+    /// itself `#[cfg(feature = "state_machine")]` (`query/mod.rs:39`). Without
+    /// this the method is genuinely dead under any feature set that omits
+    /// `state_machine` — which the gate's `feature-iso-delta-scan` component
+    /// (`--no-default-features --features all-compression,write-support,delta-scan`,
+    /// `-D warnings`) builds, and FAILed on. The gate matches the consumer
+    /// rather than silencing the warning with `allow(dead_code)`: this is a
+    /// real "not reachable in this configuration", not a false positive.
+    #[cfg(feature = "state_machine")]
     pub(crate) async fn raw_view_reader_snapshot(
         &self,
         table_id: &TableId,
