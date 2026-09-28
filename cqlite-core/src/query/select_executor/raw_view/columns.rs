@@ -1,7 +1,7 @@
 //! Table-name suffix detection + the raw view's column contract (issue #4222,
 //! design.md D1/D6/D7).
 
-use super::super::{column_info_from_type_str, parse_cql_type_str};
+use super::super::column_info_from_type_str;
 use crate::query::result::ColumnInfo;
 use crate::schema::{CqlType, TableSchema};
 use crate::Error;
@@ -161,11 +161,28 @@ pub(in crate::query::select_executor) fn raw_view_columns(
         // this parser cannot classify might be complex, and silently
         // declaring the wrong column shape is the same class of defect the
         // collision check above exists to prevent.
-        let cql_type = parse_cql_type_str(&col.data_type).ok_or_else(|| {
+        // [`CqlType::parse`] — the parser the doc comments above cite
+        // (`cql_type_parser.rs`) — and NEVER `row_build.rs`'s
+        // `parse_cql_type_str` (roborev finding, issue #4222 — round 11):
+        // the latter is `parser::complex_types::ComplexTypeParser`, which
+        // is materially weaker. It has NO `varint` arm at all (so `varint`
+        // fell through to `Custom("varint")` and was refused as an
+        // "ambiguous UDT"), and its primitive alternation lists `time`
+        // BEFORE `timeuuid`, so `"timeuuid"` matched `Time` with a
+        // trailing `"uuid"` and was rejected outright as malformed. Both
+        // outcomes are hard errors here, so the raw view was UNUSABLE for
+        // any table declaring a `timeuuid`/`varint`/`vector<..>`/UDT
+        // column — real committed fixtures do (`basic-types.cql`'s
+        // `session_id TIMEUUID`, `issue-4114-vector-float.cql`'s
+        // `vector<float, n>`) — and the message misdiagnosed a primitive
+        // parser gap as UDT ambiguity. `CqlType::parse` resolves all of
+        // those and reserves `Custom(_)` for the genuinely-ambiguous UDT
+        // shape the fail-closed arm below is actually about.
+        let cql_type = CqlType::parse(&col.data_type).map_err(|e| {
             Error::Schema(format!(
                 "raw SSTable view: base table '{}.{}' column '{}' has a declared type \
-                 ('{}') this parser cannot classify as simple or complex — refusing to guess \
-                 the column contract shape (issue #28 no-heuristics)",
+                 ('{}') this parser cannot classify as simple or complex ({e}) — refusing \
+                 to guess the column contract shape (issue #28 no-heuristics)",
                 base.keyspace, base.table, col.name, col.data_type
             ))
         })?;
@@ -695,6 +712,78 @@ mod tests {
         assert_eq!(
             try_is_complex_cql_type(&CqlType::List(Box::new(CqlType::Int))),
             Some(true)
+        );
+    }
+
+    /// Roborev finding (issue #4222, round 11 — F1): the declared-type
+    /// classifier must be [`CqlType::parse`] (the parser the doc comments
+    /// above actually cite), NOT `row_build.rs`'s `parse_cql_type_str`
+    /// (`parser::complex_types::ComplexTypeParser`). That parser has NO
+    /// `varint` arm at all and orders its `time` alternative BEFORE
+    /// `timeuuid`, so `"timeuuid"` parsed as `Time` with a trailing
+    /// `"uuid"` and was REJECTED, and `"varint"` fell through to
+    /// `Custom("varint")` — both of which this function turns into a hard
+    /// `Error::Schema`. The raw view was therefore entirely unusable for
+    /// any table carrying a `timeuuid`, `varint`, `vector<..>` or UDT
+    /// column (real committed fixtures do: `basic-types.cql` declares
+    /// `session_id TIMEUUID`; `issue-4114-vector-float.cql` declares
+    /// `vector<float, n>`), and the emitted message blamed UDT ambiguity
+    /// for what was really a primitive-parser gap.
+    #[test]
+    fn primitive_and_vector_types_classify_as_simple_never_fail_closed() {
+        let mut schema = dropped_regular_col_schema();
+        for (name, data_type) in [
+            ("session_id", "timeuuid"),
+            ("big_number", "varint"),
+            ("embedding", "vector<float, 3>"),
+            ("money", "decimal"),
+            ("when", "time"),
+        ] {
+            schema.columns.push(Column {
+                name: name.to_string(),
+                data_type: data_type.to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            });
+        }
+        let (columns, metadata_names) = raw_view_columns(&schema).expect(
+            "REGRESSION (F1): every one of these is an unambiguous SINGLE-CELL type — \
+             the raw view must not refuse a table that declares one",
+        );
+        for name in ["session_id", "big_number", "embedding", "money", "when"] {
+            // Each gets the single-cell QUAD, never the complex trio.
+            for suffix in ["timestamp", "ttl", "local_deletion_time", "tombstone"] {
+                let synthesized = format!("{name}_{suffix}");
+                assert!(
+                    columns.iter().any(|c| c.name == synthesized),
+                    "'{name}' must be classified SIMPLE and get '{synthesized}'"
+                );
+                assert!(metadata_names.contains(&synthesized));
+            }
+            assert!(
+                !columns
+                    .iter()
+                    .any(|c| c.name == format!("{name}_complex_deletion")),
+                "'{name}' is single-cell — it must NOT get the complex-deletion trio"
+            );
+        }
+    }
+
+    /// The classifier's own unit-level contract, pinned directly on
+    /// [`CqlType::parse`] output (issue #4222, round 11 — F1): `timeuuid`
+    /// and `varint` are real primitives, not `Custom(_)`.
+    #[test]
+    fn cql_type_parse_resolves_the_types_the_weaker_parser_missed() {
+        assert_eq!(CqlType::parse("timeuuid").ok(), Some(CqlType::TimeUuid));
+        assert_eq!(CqlType::parse("varint").ok(), Some(CqlType::Varint));
+        assert_eq!(
+            try_is_complex_cql_type(&CqlType::parse("timeuuid").expect("primitive")),
+            Some(false)
+        );
+        assert_eq!(
+            try_is_complex_cql_type(&CqlType::parse("varint").expect("primitive")),
+            Some(false)
         );
     }
 }
