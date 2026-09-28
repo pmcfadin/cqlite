@@ -460,6 +460,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------------
+# A non-ignored UNTRACKED leftover in the lane (a stopped fix round's scratch file) must
+# not survive a refresh: `checkout --force` discards only TRACKED changes, and the
+# gate's own dirty check counts untracked files too, so a survivor would stamp
+# `dirty: yes` and refuse to certify — the exact loss this launcher exists to prevent
+# (roborev finding, #4267 endgame review, Medium).
+# ---------------------------------------------------------------------------------
+echo leftover >"$FEAT_LANE/stray-scratch-file.txt"
+_out=$(env -u LANE_ID bash "$LAUNCHER" feat4267 --box good4267 --box-dir "$BOXES_DIR" 2>&1)
+if grep -q "lane worktree ready:" <<<"$_out" && [ ! -e "$FEAT_LANE/stray-scratch-file.txt" ]; then
+  ok "a non-ignored untracked leftover in the lane is cleaned by a refresh, not left to stamp the gate dirty"
+else
+  bad "a stray untracked file should be cleaned by a refresh: $_out"
+fi
+
+# ---------------------------------------------------------------------------------
+# BOX_LANES_DIR/<lane> pointed at a PRIMARY clone (not a linked worktree at all) of the
+# SAME origin must not be silently refreshed and certified from. This is the case that
+# actually differs pre/post-fix: a primary clone's fetch+checkout SUCCEED (shared
+# history, so $HEAD_SHA resolves fine) and its `.git` is a real directory, so the old
+# `[ -e "$1/.git" ] && rev-parse --is-inside-work-tree` check could not tell it apart
+# from a genuine linked worktree — the inverse of the BOX_CANONICAL_CLONE-is-a-worktree
+# check earlier in this file, now also enforced on the lane side (roborev finding, #4267
+# endgame review, Medium).
+# ---------------------------------------------------------------------------------
+FOREIGN_LANE="$LANES/main"
+gg clone -q "$ORIGIN" "$FOREIGN_LANE" 2>/dev/null
+_out=$(env -u LANE_ID bash "$LAUNCHER" main --box good4267 --box-dir "$BOXES_DIR" 2>&1)
+_rc=$?
+if [ "$_rc" -ne 0 ] && ! grep -q "lane worktree ready:" <<<"$_out"; then
+  ok "a lane dir that is a PRIMARY clone (not a linked worktree) is refused, not silently refreshed"
+else
+  bad "a primary-clone lane dir should be refused, not treated as our worktree (rc=$_rc): $_out"
+fi
+rm -rf "$FOREIGN_LANE"
+
+# ---------------------------------------------------------------------------------
 # usage errors and other named refusals
 # ---------------------------------------------------------------------------------
 _out=$(env -u LANE_ID bash "$LAUNCHER" 2>&1); _rc=$?

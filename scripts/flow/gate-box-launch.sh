@@ -375,6 +375,11 @@ fi
 #    absence of systemctl or /proc degrades to a printed NOTE, never a silent pass.
 # ---------------------------------------------------------------------------
 LANE_DIR="$BOX_LANES_DIR/$LANE_NAME"
+# Canonicalize ONCE, outside the loop: comparing a symlink-resolved /proc/<pid>/cwd
+# against the raw (possibly symlinked) $LANE_DIR string never matches, so a symlink
+# component in BOX_LANES_DIR made an occupied lane pass silently — the one outcome this
+# section's own rule forbids (roborev finding, #4267 endgame review).
+_LANE_DIR_REAL=$(readlink -f "$LANE_DIR" 2>/dev/null || printf '%s' "$LANE_DIR")
 if command -v systemctl >/dev/null 2>&1; then
   # Capture list-units' own exit status: a PRESENT systemctl that FAILS (no user bus, no
   # login session) previously fell through to an empty read loop — a silent, undiagnosed
@@ -399,8 +404,17 @@ if command -v systemctl >/dev/null 2>&1; then
         continue
       fi
       _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true)
+      if [ -z "$_cwd" ]; then
+        # readlink failed after the -e check above (the process exited in the gap) — this
+        # ONE unit's occupancy is INCONCLUSIVE, not clear; say so rather than falling
+        # through the case below with no match (same silent-pass class as above).
+        echo "gate-box-launch: NOTE — unit '$_unit' (pid $_pid) exited before its cwd could" >&2
+        echo "                 be resolved; could not check whether it occupies lane" >&2
+        echo "                 '$LANE_DIR' (best-effort)." >&2
+        continue
+      fi
       case "$_cwd" in
-        "$LANE_DIR"|"$LANE_DIR"/*)
+        "$_LANE_DIR_REAL"|"$_LANE_DIR_REAL"/*)
           echo "gate-box-launch: REFUSING — unit '$_unit' (pid $_pid) is already running in" >&2
           echo "                 lane '$LANE_DIR'. Only one gate may occupy a lane at a time." >&2
           exit 1 ;;
@@ -438,8 +452,23 @@ fi
 # the operator to `worktree remove --force`/`rm -rf` it — destroying the 120-190G in-tree
 # target/ this design exists to preserve (roborev High finding, #4267 round 2). Test
 # worktree MEMBERSHIP instead of a directory shape.
-_lane_is_worktree() {  # <dir> -> 0 if it is a git worktree (linked or otherwise)
-  [ -e "$1/.git" ] && git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+_lane_is_worktree() {  # <dir> -> 0 iff it is a LINKED worktree of BOX_CANONICAL_CLONE
+  # `[ -e "$1/.git" ] && rev-parse --is-inside-work-tree` accepts ANY git work tree,
+  # including a primary clone placed at $LANE_DIR, or a worktree of an UNRELATED repo
+  # that merely shares this lane's directory name. Section 4 refuses exactly that shape
+  # for BOX_CANONICAL_CLONE ("a PRIMARY clone fails 68 worker-supervisor cases, #3393");
+  # the same check is needed here so a refresh never fetches/checks-out into — and later
+  # certifies from — a lane that violates that same invariant (roborev finding, #4267
+  # endgame review, Medium). A LINKED worktree of the canonical clone has its
+  # --git-common-dir equal to the clone's, and its own --git-dir DISTINCT from it; a
+  # primary clone (this one's own, or an unrelated repo's) fails one half of that.
+  [ -e "$1/.git" ] || return 1
+  local _lgd _lgcd _abs_lgd _abs_lgcd
+  _lgd=$(git -C "$1" rev-parse --git-dir 2>/dev/null) || return 1
+  _lgcd=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
+  _abs_lgd=$(cd "$1" 2>/dev/null && cd "$_lgd" 2>/dev/null && pwd -P) || return 1
+  _abs_lgcd=$(cd "$1" 2>/dev/null && cd "$_lgcd" 2>/dev/null && pwd -P) || return 1
+  [ "$_abs_lgcd" = "$_abs_gcd" ] && [ "$_abs_lgd" != "$_abs_lgcd" ]
 }
 if [ "$DRY_RUN" -eq 1 ]; then
   if _lane_is_worktree "$LANE_DIR"; then
@@ -467,10 +496,18 @@ else
       echo "gate-box-launch: could not check out $HEAD_SHA in lane worktree '$LANE_DIR'." >&2
       exit 1
     fi
-    _dirty=$(git -C "$LANE_DIR" status --porcelain --untracked-files=no 2>/dev/null)
+    # `checkout --force` only discards TRACKED-file changes — a non-ignored UNTRACKED
+    # leftover (a scratch file, a stray generated fixture) from an interrupted prior round
+    # survives it, and the check below used to look ONLY at tracked files
+    # (--untracked-files=no), so that leftover reached the gate's own tree-identity check
+    # and stamped `dirty: yes` there instead — the exact 30-50 minute loss this launcher
+    # exists to prevent (roborev finding, #4267 endgame review, Medium). `clean -fdq`
+    # (no `-x`) removes it without touching gitignored paths (target/, the dataset root).
+    git -C "$LANE_DIR" clean -fdq 2>&1 || true
+    _dirty=$(git -C "$LANE_DIR" status --porcelain --untracked-files=normal 2>/dev/null)
     if [ -n "$_dirty" ]; then
       echo "gate-box-launch: REFUSING — lane worktree '$LANE_DIR' still has tracked-file" >&2
-      echo "                 changes after a forced checkout:" >&2
+      echo "                 or non-ignored untracked changes after a forced checkout and clean:" >&2
       sed 's/^/                   /' <<<"$_dirty" >&2
       exit 1
     fi
