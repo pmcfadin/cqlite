@@ -54,6 +54,7 @@ async fn cell_tombstones_matches_the_sstabledump_golden() {
             "cell_tombstone",
             "cell_local_deletion_time",
             "row_timestamp",
+            "entry:row",
         ]);
 }
 
@@ -67,6 +68,7 @@ async fn row_tombstones_matches_the_sstabledump_golden() {
             "row_tombstone",
             "row_local_deletion_time",
             "row_deletion_timestamp",
+            "entry:row",
         ]);
 }
 
@@ -80,6 +82,8 @@ async fn range_tombstones_matches_the_sstabledump_golden() {
             "bound_inclusive",
             "range_deletion_time",
             "range_deletion_timestamp",
+            "entry:range_tombstone_bound",
+            "shape:prefix_bound",
         ]);
 }
 
@@ -92,6 +96,7 @@ async fn partition_tombstones_matches_the_sstabledump_golden() {
             "row_timestamp",
             "partition_deletion_time",
             "partition_deletion_timestamp",
+            "entry:partition_deletion",
         ]);
 }
 
@@ -106,6 +111,7 @@ async fn ttl_cells_matches_the_sstabledump_golden() {
             "row_timestamp",
             "row_ttl",
             "row_liveness_expires_at",
+            "entry:row",
         ]);
 }
 
@@ -114,7 +120,7 @@ async fn ttl_cells_matches_the_sstabledump_golden() {
 async fn static_with_rows_matches_the_sstabledump_golden() {
     assert_raw_view_matches_golden(&deltas("static_with_rows", Discipline::GitCommitted))
         .await
-        .require_observed(&["cell_timestamp", "row_timestamp"]);
+        .require_observed(&["cell_timestamp", "row_timestamp", "entry:static_block"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -126,6 +132,7 @@ async fn collection_ops_matches_the_sstabledump_golden() {
             "complex_deletion_time",
             "complex_deletion_timestamp",
             "row_timestamp",
+            "entry:row",
         ]);
 }
 
@@ -133,7 +140,11 @@ async fn collection_ops_matches_the_sstabledump_golden() {
 async fn partial_updates_matches_the_sstabledump_golden() {
     assert_raw_view_matches_golden(&deltas("partial_updates", Discipline::FetchOnly))
         .await
-        .require_observed(&["cell_timestamp", "row_timestamp"]);
+        .require_observed(&[
+            "cell_timestamp",
+            "row_timestamp",
+            "shape:row_update_without_liveness",
+        ]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -146,5 +157,7 @@ async fn adjacent_ranges_matches_the_sstabledump_golden() {
             "bound_inclusive",
             "range_deletion_time",
             "range_deletion_timestamp",
+            "entry:range_tombstone_bound",
+            "entry:range_tombstone_boundary",
         ]);
 }

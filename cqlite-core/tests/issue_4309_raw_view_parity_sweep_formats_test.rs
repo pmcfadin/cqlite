@@ -43,7 +43,7 @@ async fn bti_wide_table_matches_the_sstabledump_golden() {
         discipline: Discipline::GitCommitted,
     })
     .await
-    .require_observed(&["cell_timestamp", "row_timestamp"]);
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
 }
 
 /// The COMPRESSED-BIG axis: a chunk-stitched read must surface the same
@@ -58,7 +58,7 @@ async fn lz4_table_matches_the_sstabledump_golden() {
         discipline: Discipline::GitCommitted,
     })
     .await
-    .require_observed(&["cell_timestamp", "row_timestamp"]);
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
 }
 
 /// The UNCOMPRESSED-BIG axis: the compaction stream has a non-stitching
@@ -75,7 +75,7 @@ async fn uncompressed_table_matches_the_sstabledump_golden() {
         discipline: Discipline::GitCommitted,
     })
     .await
-    .require_observed(&["cell_timestamp", "row_timestamp"]);
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
 }
 
 /// The compaction-parity corpus, and the sweep's only non-`pk` partition-key
@@ -91,5 +91,5 @@ async fn live_clustering_matches_the_sstabledump_golden() {
         discipline: Discipline::GitCommitted,
     })
     .await
-    .require_observed(&["cell_timestamp", "row_timestamp"]);
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
 }

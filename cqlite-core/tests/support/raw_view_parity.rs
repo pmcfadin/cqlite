@@ -129,6 +129,21 @@
 //!   view does not yet expose. Fixtures: `test_tomb.static_with_tombstones`,
 //!   `test_tomb.dropped_static_col`, `test_deltas.static_with_rows`.
 //!
+//! # Coverage census — families AND shapes (issue #4309 AC5)
+//!
+//! A sweep whose golden lost the very shape its lane exists for would compare
+//! cleanly and report green, because the golden and the expectation model
+//! lose it together. So [`SweepOutcome::require_observed`] enforces TWO kinds
+//! of token per case, each an affirmative zero: metadata FAMILIES
+//! (`cell_ttl`, `row_tombstone`, `complex_deletion_time`, …) observed with a
+//! non-`Absent` golden value, and golden ENTRY SHAPES — `entry:row`,
+//! `entry:static_block`, `entry:partition_deletion`,
+//! `entry:range_tombstone_bound`, `entry:range_tombstone_boundary`,
+//! `shape:prefix_bound`, `shape:row_update_without_liveness`,
+//! `shape:multi_generation`. [`SweepOutcome`] is `#[must_use]`, so a case
+//! that makes no coverage claim at all is a compile error under the gate's
+//! `-D warnings`.
+//!
 //! # Fixture discipline (#3220/#3121)
 //!
 //! Roots are resolved PER TABLE via
@@ -236,10 +251,12 @@ fn fact_of(value: Option<&Value>) -> Fact {
 // sstabledump golden loading
 // ---------------------------------------------------------------------------
 
-/// One generation's golden: the `Data.db` file name it describes plus every
-/// partition object of the sidecar JSONL.
+/// One generation's golden: the `Data.db` file name it describes, the
+/// generation directory it came from, and every partition object of the
+/// sidecar JSONL.
 struct GoldenSstable {
     data_db: String,
+    source_dir: PathBuf,
     partitions: Vec<Json>,
 }
 
@@ -304,16 +321,51 @@ fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
                     .and_then(|n| n.to_str())
                     .unwrap_or_default()
                     .to_string(),
+                source_dir: dir.clone(),
                 partitions,
             });
         }
     }
-    goldens.sort_by(|a, b| a.data_db.cmp(&b.data_db));
+    goldens.sort_by(|a, b| (&a.data_db, &a.source_dir).cmp(&(&b.data_db, &b.source_dir)));
     assert!(
         !goldens.is_empty(),
         "issue #4309: {} resolved to a root with no readable golden at all",
         spec.id()
     );
+
+    // FAIL LOUDLY on two generation directories contributing the SAME
+    // `Data.db` file name (roborev finding I3, issue #4309). This is latent,
+    // not hypothetical: the corpus already ships THREE `<table>-<uuid>`
+    // directories for several `test_deltas`/`test_tomb` tables, and today
+    // only one of each carries real binaries — the moment a second does, two
+    // goldens both called e.g. `nb-1-big-Data.db` appear.
+    //
+    // It cannot be fixed by qualifying the group key, because the fact the
+    // grouping is matched against is the raw view's OWN `sstable` column,
+    // which carries the bare FILE NAME (`RawViewSource::from_reader` takes
+    // `file_path().file_name()`). There is therefore NO information in the
+    // query result that could tell the two apart, so the honest outcome is a
+    // refusal that names the cause, never a silent collapse of both
+    // generations onto one group (which would surface as a torrent of
+    // "missing"/"unexplained" rows blaming the view for a harness limit).
+    for (i, a) in goldens.iter().enumerate() {
+        for b in &goldens[i + 1..] {
+            assert_ne!(
+                a.data_db,
+                b.data_db,
+                "issue #4309: {} has two generation directories contributing a golden \
+                 named '{}' ({} and {}). The raw view's `sstable` column reports only the \
+                 bare file name, so the sweep cannot attribute a returned row to one of \
+                 them — scope the fixture to a single generation directory, or extend the \
+                 harness with a directory-aware source identity, before relying on this \
+                 lane for that table",
+                spec.id(),
+                a.data_db,
+                a.source_dir.display(),
+                b.source_dir.display()
+            );
+        }
+    }
     goldens
 }
 
@@ -724,14 +776,33 @@ fn bound_facts(bound: &Json, ctx: &str) -> BTreeMap<String, Fact> {
 }
 
 /// Turn every golden partition of every generation into the physical rows the
-/// raw view must produce.
+/// raw view must produce, alongside a census of the golden ENTRY SHAPES seen.
+///
+/// The shape census is the other half of the affirmative zero (roborev
+/// finding I2, issue #4309). Counting metadata FAMILIES alone cannot catch a
+/// fixture that silently stopped exercising the shape its lane exists for,
+/// because the golden and the expectation model lose that shape TOGETHER: a
+/// regenerated `static_with_rows` with zero `static_block` entries, or an
+/// `adjacent_ranges` with zero `range_tombstone_boundary` entries (plain
+/// bounds emit the identical families), would compare cleanly and report
+/// green. Each case therefore names the SHAPES it is there to exercise, not
+/// only the families.
 fn build_expectations(
     goldens: &[GoldenSstable],
     roles: &ColumnRoles,
     spec: &FixtureSpec,
-) -> Vec<ExpectedRow> {
+) -> (Vec<ExpectedRow>, BTreeMap<&'static str, usize>) {
     let width = roles.clustering_columns.len();
     let mut expected: Vec<ExpectedRow> = Vec::new();
+    let mut shapes: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut bump = |shape: &'static str| *shapes.entry(shape).or_insert(0) += 1;
+    if goldens.len() > 1 {
+        // A cross-generation fixture: several lanes exist ONLY to show one key
+        // yielding one row per generation with no reconciliation, and a
+        // regeneration that collapsed to a single SSTable would silently
+        // retire that property.
+        bump("shape:multi_generation");
+    }
     for golden in goldens {
         for partition in &golden.partitions {
             let key_components = partition["partition"]["key"]
@@ -758,6 +829,7 @@ fn build_expectations(
             let ctx = format!("{} {} pk={key}", spec.id(), golden.data_db);
 
             if let Some(deletion) = partition["partition"].get("deletion_info") {
+                bump("entry:partition_deletion");
                 let mut facts: BTreeMap<String, Fact> = BTreeMap::new();
                 facts.insert(
                     "partition_deletion_timestamp".to_string(),
@@ -784,6 +856,18 @@ fn build_expectations(
                     .unwrap_or_else(|| panic!("{ctx}: golden entry must carry a 'type'"));
                 match kind {
                     "row" => {
+                        bump("entry:row");
+                        // An UPDATE-only row: no primary-key liveness marker,
+                        // yet real cells — `row_timestamp` must be ABSENT
+                        // while every cell still carries its own write time.
+                        // A row TOMBSTONE also lacks liveness, so the
+                        // non-empty cell set is what makes this the partial-
+                        // UPDATE shape specifically.
+                        if entry.get("liveness_info").is_none()
+                            && entry["cells"].as_array().is_some_and(|c| !c.is_empty())
+                        {
+                            bump("shape:row_update_without_liveness");
+                        }
                         let clustering =
                             render_golden_clustering(&entry["clustering"], width, &ctx);
                         assert!(
@@ -803,6 +887,7 @@ fn build_expectations(
                         });
                     }
                     "static_block" => {
+                        bump("entry:static_block");
                         // Declared gap (module doc): the view cannot yet mark
                         // a static row, so it renders as `row_kind = 'row'`
                         // with no clustering. Its CELL metadata is still
@@ -818,6 +903,10 @@ fn build_expectations(
                         });
                     }
                     "range_tombstone_bound" | "range_tombstone_boundary" => {
+                        bump(match kind {
+                            "range_tombstone_boundary" => "entry:range_tombstone_boundary",
+                            _ => "entry:range_tombstone_bound",
+                        });
                         // A BOUNDARY closes one range and opens the next at
                         // the same clustering position, and sstabledump
                         // renders both sides in ONE entry with their OWN
@@ -832,6 +921,12 @@ fn build_expectations(
                             };
                             let clustering =
                                 render_golden_clustering(&bound["clustering"], width, &ctx);
+                            // A PREFIX bound: sstabledump rendered a trailing
+                            // clustering component as `"*"`, and the view must
+                            // report it ABSENT rather than fabricate a value.
+                            if clustering.iter().any(Option::is_none) {
+                                bump("shape:prefix_bound");
+                            }
                             let origin = format!("{ctx} {kind}.{side} clustering={clustering:?}");
                             expected.push(ExpectedRow {
                                 sstable: golden.data_db.clone(),
@@ -856,7 +951,7 @@ fn build_expectations(
         "issue #4309: {}'s goldens describe no physical rows at all",
         spec.id()
     );
-    expected
+    (expected, shapes)
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +981,11 @@ fn actual_identity(row: &QueryRow, roles: &ColumnRoles, ctx: &str) -> RowIdentit
     (kind, clustering)
 }
 
-/// Compare ONE `(sstable, partition key)` group in BOTH directions.
+/// Compare ONE `(sstable, partition key)` group in BOTH directions, returning
+/// the number of column comparisons it actually performed (roborev finding
+/// S3, issue #4309: the reported total is MEASURED here, never re-derived
+/// from `rows x columns` — a count nothing counted is the kind of figure this
+/// repo's affirmative-zero rule exists to forbid).
 fn assert_group(
     fixture: &str,
     source: &str,
@@ -895,7 +994,7 @@ fn assert_group(
     expected: &[&ExpectedRow],
     actual: &[&QueryRow],
     roles: &ColumnRoles,
-) {
+) -> usize {
     let ctx = format!("{fixture} [{source}] {sstable} pk={key}");
 
     let mut expected_by_id: BTreeMap<RowIdentity, &ExpectedRow> = BTreeMap::new();
@@ -936,6 +1035,7 @@ fn assert_group(
         actual.len()
     );
 
+    let mut comparisons = 0usize;
     for (id, expected_row) in &expected_by_id {
         let actual_row = actual_by_id[id];
         for column in &roles.compared_columns {
@@ -951,8 +1051,10 @@ fn assert_group(
                  byte-exact (golden entry: {})",
                 expected_row.origin
             );
+            comparisons += 1;
         }
     }
+    comparisons
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,14 +1203,26 @@ fn fact_kind(column: &str) -> &'static str {
 ///
 /// Row counts alone cannot show a sweep is meaningful: a corpus where every
 /// metadata column happens to be ABSENT would compare thousands of absences
-/// and report green. So each case states the metadata families its fixture is
-/// there to exercise, and [`SweepOutcome::require_observed`] FAILs when a
-/// named family was never observed with a real (non-`Absent`) golden value —
-/// an affirmative zero, never a bare one.
+/// and report green. So each case states the metadata FAMILIES and golden
+/// ENTRY SHAPES its fixture is there to exercise, and
+/// [`SweepOutcome::require_observed`] FAILs when a named one was never
+/// observed — an affirmative zero, never a bare one.
+///
+/// `#[must_use]` is load-bearing, not decoration (roborev finding I1, issue
+/// #4309): the census is the ONLY thing standing between this sweep and a
+/// "compared thousands of absences, reported green" pass, and nothing else
+/// obliges a caller to consult it. Dropping this value as a statement is
+/// therefore a hard error under the gate's `-D warnings`, so a future lane
+/// cannot quietly add a fixture case with no coverage claim at all.
+#[must_use = "issue #4309: call `.require_observed(&[..])` on this outcome, naming the \
+metadata families and golden entry shapes the fixture exists to exercise — the census is \
+the only thing stopping a case from passing having compared nothing but absences"]
 pub struct SweepOutcome {
     fixture: String,
     /// `false` ONLY when a fetch-only fixture was legitimately absent.
     pub ran: bool,
+    /// MEASURED (roborev finding S3): incremented once per column actually
+    /// compared, never re-derived as `rows x columns`.
     pub compared_facts: usize,
     observed: BTreeMap<&'static str, usize>,
 }
@@ -1123,9 +1237,13 @@ impl SweepOutcome {
         }
     }
 
-    /// Assert this fixture really contributed a non-`Absent` golden value for
-    /// every named metadata family. A no-op for a legitimately skipped
-    /// fetch-only fixture (there is nothing to have observed).
+    /// Assert this fixture really contributed every named coverage token:
+    /// a metadata FAMILY (`cell_ttl`, `row_tombstone`, …) observed with a
+    /// non-`Absent` golden value, or a golden ENTRY SHAPE (`entry:static_block`,
+    /// `entry:range_tombstone_boundary`, `shape:prefix_bound`,
+    /// `shape:row_update_without_liveness`, `shape:multi_generation`, …) the
+    /// lane exists to exercise. A no-op for a legitimately skipped fetch-only
+    /// fixture (there is nothing to have observed).
     pub fn require_observed(&self, kinds: &[&str]) {
         if !self.ran {
             return;
@@ -1134,9 +1252,10 @@ impl SweepOutcome {
             let count = self.observed.get(kind).copied().unwrap_or(0);
             assert!(
                 count > 0,
-                "issue #4309: {} was swept for '{kind}' but the golden stated ZERO such \
-                 facts — the case compared only absences for it, so it proves nothing. \
-                 {} column-comparisons ran; observed families: {:?}",
+                "issue #4309: {} was swept for '{kind}' but its golden states ZERO of \
+                 them — the fixture no longer exercises the shape/family this case exists \
+                 for, so the case proves nothing even though every comparison matched. \
+                 {} column-comparisons ran; observed: {:?}",
                 self.fixture,
                 self.compared_facts,
                 self.observed
@@ -1165,8 +1284,13 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     let Some(root) = resolve_root(spec) else {
         return SweepOutcome::skipped(spec);
     };
-    let db = open_database(spec, &root).await;
+    // Load the goldens BEFORE opening the database: `load_goldens` is where
+    // the harness states its own limits (a missing sidecar, a golden with no
+    // partitions, two generation directories sharing a `Data.db` name), and
+    // those diagnostics are far more useful than whatever an ingestion of the
+    // same corpus would say first.
     let goldens = load_goldens(&root, spec);
+    let db = open_database(spec, &root).await;
     let view = format!("{}.{}_raw_sstable_data", spec.keyspace, spec.table);
 
     let scan = db
@@ -1181,15 +1305,22 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     );
 
     let roles = classify_columns(&scan.metadata.columns, spec);
-    let expected = build_expectations(&goldens, &roles, spec);
+    let (expected, mut observed) = build_expectations(&goldens, &roles, spec);
 
-    // The census is taken from the EXPECTATION model, and the comparison below
-    // then proves every one of those facts was matched byte-exact — so a
-    // family counted here is a family really compared.
-    let mut observed: BTreeMap<&'static str, usize> = BTreeMap::new();
+    // The FAMILY half of the census is taken from the EXPECTATION model, and
+    // the comparison below then proves every one of those facts was matched
+    // byte-exact — so a family counted here is a family really compared. The
+    // SHAPE half arrives from `build_expectations` in the same map.
     for row in &expected {
         for (column, fact) in &row.facts {
-            if *fact != Fact::Absent {
+            // `Fact::Bool(false)` on `<col>_complex_deletion` is the ABSENCE
+            // of a complex-deletion marker (roborev finding S1, issue #4309):
+            // counting it would let a fixture with no marker at all "observe"
+            // the family. Every other boolean — `bound_inclusive = false`, an
+            // EXCLUSIVE bound — is a genuine positive observation.
+            let is_negative_marker =
+                *fact == Fact::Bool(false) && fact_kind(column) == "complex_deletion";
+            if *fact != Fact::Absent && !is_negative_marker {
                 *observed.entry(fact_kind(column)).or_insert(0) += 1;
             }
         }
@@ -1207,7 +1338,7 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     let golden_sstables: BTreeSet<String> = goldens.iter().map(|g| g.data_db.clone()).collect();
 
     // --- Producer 1: the full scan -----------------------------------------
-    assert_rows_match(
+    let mut compared_facts = assert_rows_match(
         spec,
         "full scan",
         &scan.rows.iter().collect::<Vec<_>>(),
@@ -1253,7 +1384,7 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
                 scoped.insert((sstable.clone(), k.clone()), v.clone());
             }
         }
-        assert_rows_match(
+        compared_facts += assert_rows_match(
             spec,
             "point-key query",
             &rows,
@@ -1263,9 +1394,6 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
         );
     }
 
-    // Each expected row is compared once per producer (full scan + point
-    // query), so the fact total counts both passes.
-    let compared_facts = expected.len() * roles.compared_columns.len() * 2;
     SweepOutcome {
         fixture: spec.id(),
         ran: true,
@@ -1292,7 +1420,8 @@ fn actual_partition_key(row: &QueryRow, spec: &FixtureSpec) -> String {
 }
 
 /// Split an actual row set into `(sstable, key)` groups and compare each
-/// against its expectation group, in both directions.
+/// against its expectation group, in both directions. Returns the number of
+/// column comparisons actually performed.
 fn assert_rows_match(
     spec: &FixtureSpec,
     source: &str,
@@ -1300,7 +1429,7 @@ fn assert_rows_match(
     expected_groups: &BTreeMap<(String, String), Vec<&ExpectedRow>>,
     golden_sstables: &BTreeSet<String>,
     roles: &ColumnRoles,
-) {
+) -> usize {
     let fixture = spec.id();
     let mut actual_groups: BTreeMap<(String, String), Vec<&QueryRow>> = BTreeMap::new();
     for row in rows {
@@ -1319,11 +1448,13 @@ fn assert_rows_match(
 
     let expected_ids: BTreeSet<&(String, String)> = expected_groups.keys().collect();
     let actual_ids: BTreeSet<&(String, String)> = actual_groups.keys().collect();
+    let mut comparisons = 0usize;
     for id in expected_ids.union(&actual_ids) {
         let empty_expected: Vec<&ExpectedRow> = Vec::new();
         let empty_actual: Vec<&QueryRow> = Vec::new();
         let expected = expected_groups.get(*id).unwrap_or(&empty_expected);
         let actual = actual_groups.get(*id).unwrap_or(&empty_actual);
-        assert_group(&fixture, source, &id.0, &id.1, expected, actual, roles);
+        comparisons += assert_group(&fixture, source, &id.0, &id.1, expected, actual, roles);
     }
+    comparisons
 }

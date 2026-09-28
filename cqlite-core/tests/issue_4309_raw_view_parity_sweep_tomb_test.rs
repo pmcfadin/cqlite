@@ -64,6 +64,7 @@ async fn gc_before_boundary_matches_the_sstabledump_golden() {
             "row_timestamp",
             "row_ttl",
             "row_liveness_expires_at",
+            "entry:row",
         ]);
 }
 
@@ -79,6 +80,7 @@ async fn tombstone_histogram_matches_the_sstabledump_golden() {
             "row_tombstone",
             "row_local_deletion_time",
             "row_deletion_timestamp",
+            "entry:row",
         ]);
 }
 
@@ -91,6 +93,8 @@ async fn skipped_partition_delete_matches_the_sstabledump_golden() {
             "row_timestamp",
             "partition_deletion_time",
             "partition_deletion_timestamp",
+            "entry:partition_deletion",
+            "shape:multi_generation",
         ]);
 }
 
@@ -108,6 +112,8 @@ async fn resurrection_gc0_matches_the_sstabledump_golden() {
             "row_deletion_timestamp",
             "partition_deletion_time",
             "partition_deletion_timestamp",
+            "entry:partition_deletion",
+            "shape:multi_generation",
         ]);
 }
 
@@ -125,6 +131,8 @@ async fn resurrection_gc_positive_matches_the_sstabledump_golden() {
             "row_deletion_timestamp",
             "partition_deletion_time",
             "partition_deletion_timestamp",
+            "entry:partition_deletion",
+            "shape:multi_generation",
         ]);
 }
 
@@ -132,14 +140,24 @@ async fn resurrection_gc_positive_matches_the_sstabledump_golden() {
 async fn dropped_regular_col_matches_the_sstabledump_golden() {
     assert_raw_view_matches_golden(&tomb("dropped_regular_col", Discipline::FetchOnly))
         .await
-        .require_observed(&["cell_timestamp", "row_timestamp"]);
+        .require_observed(&[
+            "cell_timestamp",
+            "row_timestamp",
+            "entry:row",
+            "shape:multi_generation",
+        ]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_static_col_matches_the_sstabledump_golden() {
     assert_raw_view_matches_golden(&tomb("dropped_static_col", Discipline::FetchOnly))
         .await
-        .require_observed(&["cell_timestamp", "row_timestamp"]);
+        .require_observed(&[
+            "cell_timestamp",
+            "row_timestamp",
+            "entry:static_block",
+            "shape:multi_generation",
+        ]);
 }
 
 /// `must_run`: this fixture's `Data.db` is git-committed (issue #3121), so
@@ -159,6 +177,8 @@ async fn static_with_tombstones_matches_the_sstabledump_golden() {
             "bound_inclusive",
             "range_deletion_time",
             "range_deletion_timestamp",
+            "entry:static_block",
+            "entry:range_tombstone_bound",
         ]);
 }
 
@@ -172,5 +192,6 @@ async fn wide_range_tombstone_matches_the_sstabledump_golden() {
             "bound_inclusive",
             "range_deletion_time",
             "range_deletion_timestamp",
+            "entry:range_tombstone_bound",
         ]);
 }
