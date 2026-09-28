@@ -4862,10 +4862,22 @@ FAKEGATE
     #                                      later killed, because the property was already
     #                                      OBSERVED by then — a deadline that fires after
     #                                      the verdict changes nothing about the verdict.
-    #   3. killed (bound or otherwise)  -> UNMEASURED. `timeout -s KILL` exits 137
-    #                                      (128+SIGKILL); 124 is accepted too, since that
-    #                                      is what the GNU tool reports when the child is
-    #                                      reaped through the softer path. MEASURED on
+    #   3. killed, or the deadline hit -> UNMEASURED. The test is `rc >= 128 || rc == 124`,
+    #      (rc >= 128, or 124)             NOT a 137/124 pair: 128+signum covers EVERY
+    #                                      signal death, and 137 (SIGKILL) is only one of
+    #                                      them. A peer's cgroup reap or the suite's own
+    #                                      watchdog sends SIGTERM first, and timeout(1)
+    #                                      FORWARDS a signal it receives and exits
+    #                                      128+signum, so an externally reaped run arrives
+    #                                      as 143 — which a 137-only test dropped into 6 and
+    #                                      RED, the same false accusation one signal over
+    #                                      (roborev round 15). MEASURED on coreutils 9.4:
+    #                                      SIGTERM to timeout -> 143, SIGINT -> 130. The
+    #                                      ranges do not overlap: 124/125/126/127 are all
+    #                                      below 128, so branch 4 is unaffected. 124 is
+    #                                      accepted too, since that is what the GNU tool
+    #                                      reports when the child is reaped through the
+    #                                      softer path. MEASURED on
     #                                      coreutils 9.4 — do NOT "correct" this to
     #                                      124-always (a review round asserted exactly that
     #                                      and it is FALSE for `-s KILL`): `timeout -s KILL
@@ -4918,28 +4930,50 @@ FAKEGATE
     #                                      file"; `timeout 5 bash -c 'bash /nonexistent'` ->
     #                                      127 + "bash: ... No such file" (NO runner
     #                                      prefix). The rc is reported verbatim.
-    #   5. no output at all             -> UNMEASURED for a cause no status above named.
-    #                                      Kept distinct rather than folded in: empty
-    #                                      output at an ordinary status (a sudo refusal) is
-    #                                      a different failure and must not be reported as
-    #                                      a deadline we never hit, nor as a broken runner.
-    #   6. otherwise                    -> the run COMPLETED, wrote nothing, and never
+    #   5. the SUDO WRAPPER failed      -> UNMEASURED, corroborated by `^sudo: `. The
+    #      (corroborated)                  capture is `$(sudo -n env ... 2>&1)`, so sudo's
+    #                                      own "a password is required" IS captured and the
+    #                                      output is NOT empty — which is why the old
+    #                                      rationale for branch 6 naming this the
+    #                                      "sudo refusal" case was describing behaviour the
+    #                                      code did not have: it landed in 6 and RED an
+    #                                      environmental failure as an unexercised guard
+    #                                      (roborev round 15). The entry probe passed, so
+    #                                      reaching here means a MID-SUITE credential
+    #                                      expiry.
+    #   6. no output at all             -> UNMEASURED for a cause no status above named. A
+    #                                      RESIDUAL catch-all, not the sudo case: at an
+    #                                      ordinary status with genuinely empty output
+    #                                      there is nothing to attribute, and it must not be
+    #                                      reported as a deadline we never hit nor as a
+    #                                      broken runner.
+    #   7. otherwise                    -> the run COMPLETED, wrote nothing, and never
     #                                      printed the refusal. No write was observed, so
     #                                      it is not the defeat message; it is still a
     #                                      `bad`, because the guard's decision path went
     #                                      unexercised and the case would otherwise pass
     #                                      vacuously the day the section stops running.
+    # The RUNNER's own diagnostic prefix, in ONE place: branch 4 below and the 11at-ctl
+    # control after it both read this variable, so a future edit cannot change one without
+    # changing the other (roborev round 15).
+    PIN_11AT_RUNNER_RE='^(/[^[:space:]:]*/)?(g?timeout|env): '
+    # The signal-death/deadline predicate, hoisted for the SAME anti-drift reason — round
+    # 15's F1 was precisely this test being too narrow (137-only), and a prose-only claim
+    # about it is what let that ship. Branch 3 and the control below both call it.
+    pin_11at_killed() { [ "$1" -ge 128 ] || [ "$1" -eq 124 ]; }
     if [ -e "$pin_liar_target" ]; then
       bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
       grep -i 'gate-pin' <<<"$out_at" | head -2
       ls -l "$pin_liar_target" 2>/dev/null
     elif out_has "$out_at" 'gate-pin: SKIPPED'; then
       ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
-    elif [ "$rc_at" -eq 137 ] || [ "$rc_at" -eq 124 ]; then
-      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation was KILLED before it reached a verdict (rc=$rc_at; 124 IS timeout(1)'s own deadline status, but 137 is only a SIGKILL: its ${PIN_11AT_BOUND_S}s bound via -s KILL is the likely cause and is NOT confirmed here, an external SIGKILL — OOM killer, a peer's cgroup reap — being indistinguishable by status alone), so the guard was neither confirmed nor defeated (nothing was written)"
+    elif pin_11at_killed "$rc_at"; then
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation DIED ON A SIGNAL or hit the deadline before it reached a verdict (rc=$rc_at; 124 IS timeout(1)'s own deadline status, while any rc>=128 is 128+signum — 137 SIGKILL, 143 SIGTERM, 130 SIGINT — and names NO cause: the ${PIN_11AT_BOUND_S}s bound via -s KILL, an OOM kill, a peer's cgroup reap and timeout(1) forwarding a signal it received are indistinguishable by status alone), so the guard was neither confirmed nor defeated (nothing was written)"
     elif { [ "$rc_at" -eq 125 ] || [ "$rc_at" -eq 126 ] || [ "$rc_at" -eq 127 ]; } \
-         && out_has "$out_at" -E '^(/[^[:space:]:]*/)?(g?timeout|env): '; then
+         && out_has "$out_at" -E "$PIN_11AT_RUNNER_RE"; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found) CORROBORATED by the RUNNER's own diagnostic in the captured output, so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
+    elif out_has "$out_at" -E '^sudo: '; then
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the SUDO WRAPPER itself failed (rc=$rc_at), CORROBORATED by its own '^sudo: ' diagnostic (a mid-suite credential expiry is the common cause; the case entry probe passed, so this is environmental), and the root invocation therefore never ran: the guard was neither confirmed nor defeated (nothing was written)"
     elif [ -z "$out_at" ]; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
     else
@@ -4947,6 +4981,51 @@ FAKEGATE
       grep -i 'gate-pin' <<<"$out_at" | head -2
     fi
     sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
+
+    # 11at-ctl. A CONTROL FOR 11at's OWN CORROBORATION PATTERN (roborev round 15). Branches
+    #      3-7 above are unreachable on a healthy host, so without this the ERE is asserted
+    #      only in PROSE — the same shape test_roborev_guard_portability.sh refuses ("the
+    #      new branches would be dead code asserted only in prose, which is the same shape
+    #      as the defect they close") and case 13b plants its own probe for. HOST-
+    #      INDEPENDENT: it classifies fixed sample lines, spawns nothing and needs no root.
+    #      It reads the SAME $PIN_11AT_RUNNER_RE branch 4 reads, so the two cannot drift —
+    #      the `(^|/)` "simplification" the block warns against REDS here instead of
+    #      silently reclassifying a real failure as a never-red skip.
+    pin_ctl_bad=0
+    pin_ctl_why=""
+    for _pc in "/usr/bin/timeout: failed to run command 'x': No such file or directory" \
+               "/opt/homebrew/bin/gtimeout: failed to run command 'x'" \
+               "timeout: failed to run command 'x'" \
+               "env: 'timeout': No such file or directory"; do
+      if ! out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
+        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a runner diagnostic: $_pc"
+      fi
+    done
+    for _pc in "bash: /nonexistent/staged.sh: No such file or directory" \
+               "bash: line 1: /usr/bin/env: bad interpreter: No such file or directory" \
+               "sudo: a password is required" \
+               "gate-pin: SKIPPED PRIVILEGED write"; do
+      if out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
+        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; FALSE-MATCHED non-runner output: $_pc"
+      fi
+    done
+    unset _pc
+    for _pk in 137 143 130 139 124; do
+      if ! pin_11at_killed "$_pk"; then
+        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk is a signal death/deadline but was NOT classified killed"
+      fi
+    done
+    for _pk in 0 1 125 126 127; do
+      if pin_11at_killed "$_pk"; then
+        pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk was WRONGLY classified killed (it must reach the runner/sudo/residual branches)"
+      fi
+    done
+    unset _pk
+    if [ "$pin_ctl_bad" -eq 0 ]; then
+      ok "gate-pin 11at control: the runner-corroboration ERE matches every runner-diagnostic shape (absolute timeout, absolute gtimeout, bare, env) and NONE of the child/sudo/bootstrap shapes that must stay reportable; and the kill predicate accepts 137/143/130/139/124 while rejecting 0/1/125/126/127"
+    else
+      bad "gate-pin 11at control: the runner-corroboration ERE misclassifies${pin_ctl_why}"
+    fi
 
     # 11au. SUDO_USER MUST AGREE WITH SUDO_UID (roborev round 8). Trusting the NAME alone
     #      accepts stale metadata — `SUDO_UID=1000 SUDO_USER=root` would probe root and
