@@ -25,8 +25,10 @@ and its raw view are two strings resolved by two different code paths sharing on
 
 ## D2 — Fold #4205's SSTable-generation enumeration into this view
 
-**Decision: yes, but not via literal `SELECT DISTINCT` — amended by owner ruling, 2026-09-28,
-issue #4222.** The original decision below named `SELECT DISTINCT sstable, generation FROM
+**Decision: yes, but not via literal `SELECT DISTINCT` — amended by lead ruling on a stated
+default, 2026-09-28, issue #4222 comment 5862037458 (owner sign-off not received within the coord
+window; revert this and re-open the request if the owner disagrees).** The original decision below
+named `SELECT DISTINCT sstable, generation FROM
 ks.t_raw_sstable_data WHERE <pk> = ?` as the answer to "which generations hold this key." That
 literal spelling conflicts with this change's fail-closed refusal of `DISTINCT` over the raw view
 (a general query-engine capability out of scope for this slice, same reasoning as the `JOIN`

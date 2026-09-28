@@ -137,8 +137,9 @@ view's.
 
 #### Scenario: A dropped-column generation shows the on-disk column the current schema no longer has
 
-**DEFERRED — NOT satisfied by this change; tracked as a follow-up, issue #4295 (owner ruling,
-2026-09-28: AC6 ships partially — this delivered subset only).**
+**DEFERRED — NOT satisfied by this change; tracked as a follow-up, issue #4295 (lead ruling on a
+stated default, 2026-09-28 — owner sign-off not received within the coord window, see issue #4222
+comment 5862037458: AC6 ships partially — this delivered subset only).**
 The committed `test_tomb.dropped_regular_col` fixture's schema (`test-data/schemas/tombstone-parity.cql`
 Table 6) still DECLARES `drop_col` in this repo's `.cql` (the file's own header comment: "declared here
 so the initial Phase-A writes type-check"), so the base table's REGISTERED schema never actually omits
@@ -165,8 +166,9 @@ shape once that bookkeeping lands.
 
 #### Scenario: A static row is distinguishable from a clustering row
 
-**DEFERRED — NOT satisfied by this change; tracked as a follow-up, issue #4296 (owner ruling,
-2026-09-28).** The decoder KNOWS whether a row is a Cassandra static row
+**DEFERRED — NOT satisfied by this change; tracked as a follow-up, issue #4296 (lead ruling on a
+stated default, 2026-09-28 — owner sign-off not received within the coord window, see issue #4222
+comment 5862037458).** The decoder KNOWS whether a row is a Cassandra static row
 (`compaction_row_build.rs`'s `is_static` handling), but `CompactionRow`/`CompactionRowData` do not
 carry that fact onward — a static row reaches `row_map.rs::map_compaction_row` as an ordinary
 `Live`/`Tombstone` row with EMPTY clustering, and this view renders it as the same `row_kind = 'row'`
@@ -255,7 +257,8 @@ required by this change (design.md D4): CQLite's query engine has no `JOIN` exec
   design.md D2 designates as the folded-in half of #4205's scope. `SELECT DISTINCT` over this
   surface is refused (see "Unsupported query shapes over the raw view fail closed with a typed
   error" below); `DISTINCT` is a general query-engine capability out of scope for this change
-  (owner ruling, 2026-09-28, issue #4222), and this plain-projection form delivers the same answer.
+  (lead ruling on a stated default, 2026-09-28, issue #4222 comment 5862037458 — owner sign-off
+  not received within the coord window), and this plain-projection form delivers the same answer.
 
 ### Requirement: Unknown table or missing schema is a typed error, never silent inference
 
@@ -346,7 +349,9 @@ accepted and answered as if the clause had not been written. The refused set is:
 This requirement documents behavior already implemented and tested; it exists so the archived spec
 describes what shipped rather than leaving a substantial public-surface contract undocumented.
 
-> **Resolved (owner ruling, 2026-09-28, issue #4222).** This requirement's refusal of
+> **Resolved (lead ruling on a stated default, 2026-09-28, issue #4222 comment 5862037458 — owner
+> sign-off not received within the coord window; revert this and re-open the request if the owner
+> disagrees).** This requirement's refusal of
 > `SELECT DISTINCT` previously contradicted this spec's "joinable via shared key columns"
 > requirement, whose second scenario asked literal `SELECT DISTINCT sstable, generation …` to
 > return the generation set. Ruling: `DISTINCT` stays refused — it is a general query-engine
