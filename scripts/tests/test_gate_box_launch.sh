@@ -114,7 +114,7 @@ EOF
 # ---------------------------------------------------------------------------------
 _out=$(run nosuchtestbox4267 main)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "no committed profile at"; then
+if [ "$_rc" -eq 1 ] && grep -q "no committed profile at" <<<"$_out"; then
   ok "missing profile is refused by name"
 else
   bad "missing profile should be refused (rc=$_rc): $_out"
@@ -125,7 +125,7 @@ BOX_CANONICAL_CLONE="$CLONE"
 EOF
 _out=$(run incomplete4267 main)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "does not set required variable"; then
+if [ "$_rc" -eq 1 ] && grep -q "does not set required variable" <<<"$_out"; then
   ok "profile missing a required variable is refused by name"
 else
   bad "incomplete profile should be refused (rc=$_rc): $_out"
@@ -146,7 +146,7 @@ BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run badnumber4267 main)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "is not a plain"; then
+if [ "$_rc" -eq 1 ] && grep -q "is not a plain" <<<"$_out"; then
   ok "a non-numeric BOX_MIN_FREE_GB is refused rather than silently admitted"
 else
   bad "non-numeric BOX_MIN_FREE_GB should be refused (rc=$_rc): $_out"
@@ -155,7 +155,7 @@ fi
 _write_good_profile good4267
 _out=$(run good4267 main)
 _rc=$?
-if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "^GATE-BOX-LAUNCH: dry-run "; then
+if [ "$_rc" -eq 0 ] && grep -q "^GATE-BOX-LAUNCH: dry-run " <<<"$_out"; then
   ok "a complete profile loads and resolves cleanly (positive control)"
 else
   bad "a complete, correct profile should dry-run clean (rc=$_rc): $_out"
@@ -185,9 +185,9 @@ BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run worktreebox4267 main)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -qi "is a linked git" \
-  && printf '%s' "$_out" | grep -qi "WORKTREE" \
-  && ! printf '%s' "$_out" | grep -q "not a git.*checkout"; then
+if [ "$_rc" -eq 1 ] && grep -qi "is a linked git" <<<"$_out" \
+  && grep -qi "WORKTREE" <<<"$_out" \
+  && ! grep -q "not a git.*checkout" <<<"$_out"; then
   ok "BOX_CANONICAL_CLONE pointed at a worktree is refused as a worktree, not misreported as 'not a git checkout'"
 else
   bad "a worktree BOX_CANONICAL_CLONE should be refused by its real cause (rc=$_rc): $_out"
@@ -199,7 +199,7 @@ gg -C "$CLONE" worktree remove --force "$WORKTREE_CLONE" >/dev/null 2>&1 || true
 # ---------------------------------------------------------------------------------
 _out=$(LANE_ID=peer-lane bash "$LAUNCHER" main --box good4267 --box-dir "$BOXES_DIR" --dry-run 2>&1)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "LANE_ID='peer-lane' is set"; then
+if [ "$_rc" -eq 1 ] && grep -q "LANE_ID='peer-lane' is set" <<<"$_out"; then
   ok "an inherited LANE_ID is refused, naming the value"
 else
   bad "LANE_ID in the calling environment should be refused (rc=$_rc): $_out"
@@ -208,7 +208,7 @@ fi
 # it) — the check must not treat empty-string as absent.
 _out=$(LANE_ID= bash "$LAUNCHER" main --box good4267 --box-dir "$BOXES_DIR" --dry-run 2>&1)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "LANE_ID="; then
+if [ "$_rc" -eq 1 ] && grep -q "LANE_ID=" <<<"$_out"; then
   ok "an inherited empty-but-set LANE_ID is still refused"
 else
   bad "empty LANE_ID should still be refused (rc=$_rc): $_out"
@@ -239,7 +239,7 @@ BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run npxbox4267 main)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "'npx' resolves on the profile's PATH"; then
+if [ "$_rc" -eq 1 ] && grep -q "'npx' resolves on the profile's PATH" <<<"$_out"; then
   ok "an npx-bearing PATH is refused, naming the resolved path"
 else
   bad "npx on PATH should be refused (rc=$_rc): $_out"
@@ -253,9 +253,9 @@ _out=$(env -u LANE_ID RUSTFLAGS='-D warnings' CQLITE_ALLOW_FILE_GROWTH=1 GATE_BO
   bash "$LAUNCHER" main --box good4267 --box-dir "$BOXES_DIR" --dry-run 2>&1)
 _rc=$?
 if [ "$_rc" -eq 0 ] \
-  && ! printf '%s' "$_out" | grep -q "RUSTFLAGS" \
-  && ! printf '%s' "$_out" | grep -q "CQLITE_ALLOW_FILE_GROWTH" \
-  && ! printf '%s' "$_out" | grep -q "GATE_BOX_LAUNCH_TEST_FOO"; then
+  && ! grep -q "RUSTFLAGS" <<<"$_out" \
+  && ! grep -q "CQLITE_ALLOW_FILE_GROWTH" <<<"$_out" \
+  && ! grep -q "GATE_BOX_LAUNCH_TEST_FOO" <<<"$_out"; then
   ok "ambient RUSTFLAGS/CQLITE_ALLOW_FILE_GROWTH/an arbitrary variable do not reach the built env"
 else
   bad "ambient hazard variables must not leak into the built env (rc=$_rc): $_out"
@@ -264,7 +264,7 @@ fi
 # the built env — assert it actually does when the flag is passed.
 _out=$(run good4267 main --allow-file-growth)
 _rc=$?
-if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "CQLITE_ALLOW_FILE_GROWTH=1"; then
+if [ "$_rc" -eq 0 ] && grep -q "CQLITE_ALLOW_FILE_GROWTH=1" <<<"$_out"; then
   ok "--allow-file-growth does add CQLITE_ALLOW_FILE_GROWTH=1 to the built env"
 else
   bad "--allow-file-growth should add CQLITE_ALLOW_FILE_GROWTH=1 (rc=$_rc): $_out"
@@ -283,10 +283,10 @@ _out=$(env -u LANE_ID CQLITE_NOTIFY_WEBHOOK="$_secret" CODEX_NOTIFY_WEBHOOK="$_s
   bash "$LAUNCHER" main --box good4267 --box-dir "$BOXES_DIR" --dry-run 2>&1)
 _rc=$?
 if [ "$_rc" -eq 0 ] \
-  && ! printf '%s' "$_out" | grep -qF "$_secret" \
-  && printf '%s' "$_out" | grep -q "CQLITE_NOTIFY_WEBHOOK=<redacted>" \
-  && printf '%s' "$_out" | grep -q "CODEX_NOTIFY_WEBHOOK=<redacted>" \
-  && printf '%s' "$_out" | grep -q "notifications wired: CQLITE_NOTIFY_WEBHOOK, CODEX_NOTIFY_WEBHOOK"; then
+  && ! grep -qF "$_secret" <<<"$_out" \
+  && grep -q "CQLITE_NOTIFY_WEBHOOK=<redacted>" <<<"$_out" \
+  && grep -q "CODEX_NOTIFY_WEBHOOK=<redacted>" <<<"$_out" \
+  && grep -q "notifications wired: CQLITE_NOTIFY_WEBHOOK, CODEX_NOTIFY_WEBHOOK" <<<"$_out"; then
   ok "webhook secret values are redacted in --dry-run output, but their names are still disclosed as wired"
 else
   bad "webhook secrets must never appear verbatim in --dry-run output (rc=$_rc): $_out"
@@ -302,8 +302,8 @@ fi
 
 _out=$(run good4267 feat4267)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "does not have current" \
-   && printf '%s' "$_out" | grep -qi "rebase before the gate of record"; then
+if [ "$_rc" -eq 1 ] && grep -q "does not have current" <<<"$_out" \
+   && grep -qi "rebase before the gate of record" <<<"$_out"; then
   ok "a branch behind origin/main is refused (stale base), naming the CLAUDE.md rule"
 else
   bad "a stale-based branch should be refused (rc=$_rc): $_out"
@@ -314,7 +314,7 @@ fi
     && gg push -q -f origin feat4267 )
 _out=$(run good4267 feat4267)
 _rc=$?
-if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "a descendant of origin/main"; then
+if [ "$_rc" -eq 0 ] && grep -q "a descendant of origin/main" <<<"$_out"; then
   ok "a branch rebased onto current origin/main is accepted (positive control)"
 else
   bad "a freshly rebased branch should dry-run clean (rc=$_rc): $_out"
@@ -326,7 +326,7 @@ FEAT_SHA=$( (cd "$CLONE" && gg rev-parse origin/feat4267) )
 ( cd "$ORIGIN" && gg update-ref refs/pull/99/head "$FEAT_SHA" )
 _out=$(run good4267 99)
 _rc=$?
-if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "^GATE-BOX-LAUNCH: dry-run "; then
+if [ "$_rc" -eq 0 ] && grep -q "^GATE-BOX-LAUNCH: dry-run " <<<"$_out"; then
   ok "a PR-number argument resolves refs/pull/<n>/head through the same ancestry check"
 else
   bad "PR-number resolution should dry-run clean (rc=$_rc): $_out"
@@ -354,8 +354,8 @@ BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run hugebar4267 feat4267)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "below the" \
-  && printf '%s' "$_out" | grep -q "admission bar"; then
+if [ "$_rc" -eq 1 ] && grep -q "below the" <<<"$_out" \
+  && grep -q "admission bar" <<<"$_out"; then
   ok "an absurdly high BOX_MIN_FREE_GB actually REFUSES the launch (disk check is not vacuous)"
 else
   bad "disk admission should refuse below its bar (rc=$_rc): $_out"
@@ -381,8 +381,8 @@ BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run hugetmpbar4267 feat4267)
 _rc=$?
-if [ "$_rc" -eq 1 ] && printf '%s' "$_out" | grep -q "REFUSING — tmpdir has only" \
-  && ! printf '%s' "$_out" | grep -q "REFUSING — lanes has only"; then
+if [ "$_rc" -eq 1 ] && grep -q "REFUSING — tmpdir has only" <<<"$_out" \
+  && ! grep -q "REFUSING — lanes has only" <<<"$_out"; then
   ok "the tmpdir admission bar is independent of the lanes bar (astro-processor bug, fixed)"
 else
   bad "a high BOX_TMP_MIN_FREE_GB alone should refuse only the tmpdir check (rc=$_rc): $_out"
@@ -404,8 +404,8 @@ BOX_LOG_DIR="$LOGDIR"
 EOF
 _out=$(run ancestorwalk4267 feat4267)
 _rc=$?
-if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q "nearest existing ancestor '$LANES'" \
-  && printf '%s' "$_out" | grep -q "disk(lanes):"; then
+if [ "$_rc" -eq 0 ] && grep -q "nearest existing ancestor '$LANES'" <<<"$_out" \
+  && grep -q "disk(lanes):" <<<"$_out"; then
   ok "a not-yet-created lanes dir still runs the disk check, against its nearest existing ancestor"
 else
   bad "the ancestor walk should measure and name '$LANES' (rc=$_rc): $_out"
@@ -436,7 +436,7 @@ FEAT_LANE="$LANES/feat4267"
 _out=$(env -u LANE_ID bash "$LAUNCHER" feat4267 --box good4267 --box-dir "$BOXES_DIR" 2>&1)
 _created_head=$(git -C "$FEAT_LANE" rev-parse HEAD 2>/dev/null || echo "")
 _expected_head=$( (cd "$CLONE" && gg rev-parse origin/feat4267) )
-if printf '%s' "$_out" | grep -q "lane worktree ready:" && [ "$_created_head" = "$_expected_head" ]; then
+if grep -q "lane worktree ready:" <<<"$_out" && [ "$_created_head" = "$_expected_head" ]; then
   ok "first launch for a lane CREATES the worktree at the resolved head"
 else
   bad "lane worktree creation should succeed and land on $_expected_head (got '$_created_head'): $_out"
@@ -450,9 +450,9 @@ fi
 _new_head=$( (cd "$CLONE" && gg rev-parse origin/feat4267) )
 _out=$(env -u LANE_ID bash "$LAUNCHER" feat4267 --box good4267 --box-dir "$BOXES_DIR" 2>&1)
 _refreshed_head=$(git -C "$FEAT_LANE" rev-parse HEAD 2>/dev/null || echo "")
-if printf '%s' "$_out" | grep -q "lane worktree ready:" \
-  && ! printf '%s' "$_out" | grep -qi "worktree add' failed" \
-  && ! printf '%s' "$_out" | grep -qi "already exists" \
+if grep -q "lane worktree ready:" <<<"$_out" \
+  && ! grep -qi "worktree add' failed" <<<"$_out" \
+  && ! grep -qi "already exists" <<<"$_out" \
   && [ "$_refreshed_head" = "$_new_head" ]; then
   ok "relaunching for the same lane REFRESHES it to the new head (pins the round-2 High finding)"
 else
@@ -471,7 +471,7 @@ fi
 
 _out=$(run good4267 main -- --lite)
 _rc=$?
-if [ "$_rc" -eq 2 ] && printf '%s' "$_out" | grep -q "unexpected arguments after"; then
+if [ "$_rc" -eq 2 ] && grep -q "unexpected arguments after" <<<"$_out"; then
   ok "extra arguments after '--' are refused rather than silently passed through"
 else
   bad "'-- --lite' should be refused (rc=$_rc): $_out"
@@ -479,7 +479,7 @@ fi
 
 _out=$(run "../../../etc/passwd" main)
 _rc=$?
-if [ "$_rc" -eq 2 ] && printf '%s' "$_out" | grep -q "refusing box name"; then
+if [ "$_rc" -eq 2 ] && grep -q "refusing box name" <<<"$_out"; then
   ok "a box name containing '..' is refused before it is used as a path"
 else
   bad "a path-traversal box name should be refused (rc=$_rc): $_out"

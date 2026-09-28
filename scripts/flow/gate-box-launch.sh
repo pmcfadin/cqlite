@@ -297,7 +297,10 @@ else
   fi
   # Lane directory names must never smuggle a path separator or leading dash from a
   # branch name into BOX_LANES_DIR.
-  LANE_NAME=$(printf '%s' "$PR_OR_BRANCH" | tr -c 'A-Za-z0-9_.-' '-')
+  # Process substitution, not a pipe: a herestring here would add a trailing newline that
+  # `tr -c` then translates into a spurious trailing '-' (the exact hazard
+  # check-sigpipe-sites.sh's own remedy text warns about for this substitution).
+  LANE_NAME=$(tr -c 'A-Za-z0-9_.-' '-' < <(printf '%s' "$PR_OR_BRANCH"))
   case "$LANE_NAME" in -*) LANE_NAME="branch-$LANE_NAME" ;; esac
 fi
 HEAD_SHA=$(_git_clone rev-parse FETCH_HEAD 2>/dev/null) || {
@@ -380,7 +383,7 @@ if command -v systemctl >/dev/null 2>&1; then
   if ! _units_out=$(systemctl --user list-units 'cqlite-gate-*' --no-legend --plain 2>&1); then
     echo "gate-box-launch: NOTE — 'systemctl --user list-units' failed; skipped the busy-lane" >&2
     echo "                 check (best-effort):" >&2
-    printf '%s\n' "$_units_out" | sed 's/^/                   /' >&2
+    sed 's/^/                   /' <<<"$_units_out" >&2
   else
     while IFS= read -r _unit; do
       [ -n "$_unit" ] || continue
@@ -402,7 +405,7 @@ if command -v systemctl >/dev/null 2>&1; then
           echo "                 lane '$LANE_DIR'. Only one gate may occupy a lane at a time." >&2
           exit 1 ;;
       esac
-    done < <(printf '%s\n' "$_units_out" | awk '{print $1}')
+    done < <(awk '{print $1}' <<<"$_units_out")
   fi
 else
   echo "gate-box-launch: NOTE — no systemctl on PATH; skipped the busy-lane check (best-effort)." >&2
@@ -468,7 +471,7 @@ else
     if [ -n "$_dirty" ]; then
       echo "gate-box-launch: REFUSING — lane worktree '$LANE_DIR' still has tracked-file" >&2
       echo "                 changes after a forced checkout:" >&2
-      echo "$_dirty" | sed 's/^/                   /' >&2
+      sed 's/^/                   /' <<<"$_dirty" >&2
       exit 1
     fi
   else
@@ -608,7 +611,7 @@ if [ "$_LAUNCH_RC" -ne 0 ]; then
   exit "$_LAUNCH_RC"
 fi
 
-_UNIT=$(printf '%s\n' "$_LAUNCH_OUT" | awk -F': *' '/^unit:/ {print $2; exit}')
+_UNIT=$(awk -F': *' '/^unit:/ {print $2; exit}' <<<"$_LAUNCH_OUT")
 # Parse the run-id from gate-detached's OWN "poll it with: ... --run-id <id>" line, never
 # from the summary file: a --summary path is only unique to THIS launch when the caller lets
 # this script pick the default. Once a caller pins --summary (e.g. flow-closer.md's
@@ -616,12 +619,12 @@ _UNIT=$(printf '%s\n' "$_LAUNCH_OUT" | awk -F': *' '/^unit:/ {print $2; exit}')
 # between our launch and this read, pairing our launch with a PEER's run-id — exactly the
 # hazard gate-detached.sh:323-326,1583 documents for its own summary reads (roborev finding,
 # #4267 endgame review). gate-detached.sh's launch stdout is ours alone; read the run-id there.
-_RUN_ID=$(printf '%s\n' "$_LAUNCH_OUT" | awk '
+_RUN_ID=$(awk '
   /gate-liveness\.sh/ && /--run-id/ {
     for (i = 1; i <= NF; i++) {
       if ($i == "--run-id" && (i + 1) <= NF) { print $(i + 1); exit }
     }
   }
-')
+' <<<"$_LAUNCH_OUT")
 echo "GATE-BOX-LAUNCH: box=$BOX_NAME lane=$LANE_NAME head=$HEAD_SHA unit=${_UNIT:-unknown} run-id=${_RUN_ID:-unknown} summary=$SUMMARY_PATH log=$LOG_PATH"
 exit 0
