@@ -314,3 +314,58 @@ parity oracle (#1742) used elsewhere in this codebase, never CQLite's own prior 
 - **WHEN** the raw view is queried for every key in each fixture's JSONL golden
 - **THEN** every timestamp, TTL, local-deletion-time, and tombstone-kind value in the result matches
   the golden exactly, and no key present in the golden is missing from the raw view's output.
+
+### Requirement: Unsupported query shapes over the raw view fail closed with a typed error
+
+The raw view's interception in `SelectExecutor::execute` returns rows directly, bypassing the
+execution-step pipeline that would otherwise apply ordering, deduplication, aggregation, residual
+filtering and per-partition limits. Any query shape that DEPENDS on one of those steps SHALL
+therefore be refused with a typed `Error::unsupported_query` / `Error::Schema`, never silently
+accepted and answered as if the clause had not been written. The refused set is:
+
+- aggregate functions (e.g. `COUNT(*)`);
+- `SELECT DISTINCT`;
+- `ORDER BY`;
+- `PER PARTITION LIMIT`;
+- any `WHERE` leaf that does not lower to a pushable predicate — `OR`/`NOT` anywhere in the tree,
+  `!=`, `NotIn`, `LIKE`, `IS [NOT] NULL`, and a non-literal RHS — detected by comparing the
+  pushable-leaf count against `plan.sstable_predicates.len()`, so a mixed clause such as
+  `pk = 1 AND val != 'x'` is caught where an emptiness check would not be;
+- a predicate on `position` (real on the point path, always `Null` on the scan path, so filtering
+  on it would make the same query text return different rows by internal access-path choice);
+- a `SELECT` expression that is not a bare column reference (e.g. `WRITETIME(...)`);
+- a column name — in either the `SELECT` list or the `WHERE` clause — that is absent from the
+  view's column contract.
+
+`LIMIT` and `OFFSET` are NOT in this set: they are applied, and are asserted separately.
+
+This requirement documents behavior already implemented and tested; it exists so the archived spec
+describes what shipped rather than leaving a substantial public-surface contract undocumented.
+
+> **Open — owner decision pending.** `SELECT DISTINCT` appears here AND in this spec's
+> "joinable via shared key columns" requirement, whose second scenario asks
+> `SELECT DISTINCT sstable, generation … WHERE <pk> = <key>` to RETURN the generation set. Those
+> two statements contradict each other. The delivered behavior is the refusal above, and the
+> underlying capability is delivered by a plain `sstable, generation` projection
+> (`sstable_generation_projection_answers_which_generations_hold_the_key`). Resolving the
+> contradiction — implement per-surface dedup, or amend that scenario and design.md D2 — is an
+> owner call tracked on issue #4222; this note records the contradiction rather than silently
+> picking a side.
+
+#### Scenario: Each unsupported shape is refused rather than silently ignored
+
+- **GIVEN** `test_tomb.resurrection_gc_positive_raw_sstable_data`
+- **WHEN** each refused shape above is executed through `Database::execute`
+- **THEN** each returns `Err`, never an `Ok` result computed as though the clause were absent —
+  pinned by `cqlite-core/tests/issue_4222_raw_view_point_read_test.rs`:
+  `aggregate_over_the_raw_view_fails_closed_though_the_base_table_answers_it` (which also asserts
+  the BASE table still answers `COUNT(*)`, so the refusal is specific to this surface),
+  `order_by_and_distinct_fail_closed_rather_than_silently_ignored`,
+  `per_partition_limit_fails_closed`, `where_clause_with_or_fails_closed`,
+  `where_clause_with_not_equal_fails_closed`, `where_clause_naming_an_unknown_column_fails_closed`,
+  `position_predicate_fails_closed_rather_than_diverging_by_access_path`,
+  `writetime_projection_fails_closed_rather_than_returning_every_column`, and
+  `selecting_an_unknown_column_fails_closed`
+- **AND** `limit_and_offset_are_honored` asserts the contrasting case: `LIMIT`/`OFFSET` ARE applied
+  (they were silently ignored in an earlier revision, which is the defect class this whole
+  requirement exists to prevent).

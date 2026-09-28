@@ -987,3 +987,44 @@ async fn point_read_reports_each_generations_own_partition_byte_offset() {
          sourced from, never a fabricated NULL"
     );
 }
+
+/// The fail-closed envelope's one previously-untested guard: an AGGREGATE
+/// over the raw view must be refused with a typed error.
+///
+/// The contrast is what makes this meaningful — `COUNT(*)` is a general
+/// query-engine capability that WORKS on the base table, so the refusal is
+/// specific to this surface (the interception in `execute()` bypasses the
+/// aggregate execution step entirely, so silently accepting it would return
+/// an unreduced row set, not a count). ORDER BY, DISTINCT, PER PARTITION
+/// LIMIT, non-pushable WHERE leaves, a `position` predicate and a
+/// non-bare-column SELECT each already have their own case above; this
+/// completes the set the spec's fail-closed-envelope requirement names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_over_the_raw_view_fails_closed_though_the_base_table_answers_it() {
+    let Some(db) = open_fixture_db().await else {
+        return;
+    };
+
+    let base = db
+        .execute(&format!(
+            "SELECT COUNT(*) FROM {KEYSPACE}.{TABLE} WHERE pk = 1"
+        ))
+        .await;
+    assert!(
+        base.is_ok(),
+        "precondition: COUNT(*) is a general engine capability the BASE table answers — if \
+         it stopped working, this case would prove nothing about the raw view: {base:?}"
+    );
+
+    let raw = db
+        .execute(&format!(
+            "SELECT COUNT(*) FROM {KEYSPACE}.{TABLE}_raw_sstable_data WHERE pk = 1"
+        ))
+        .await;
+    assert!(
+        raw.is_err(),
+        "an aggregate over the raw view must fail closed — the interception bypasses the \
+         aggregate execution step, so accepting it would silently return an UNREDUCED row \
+         set instead of a count"
+    );
+}
