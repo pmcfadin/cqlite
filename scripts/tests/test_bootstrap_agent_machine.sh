@@ -4844,6 +4844,17 @@ FAKEGATE
   # 15's F1 was precisely this test being too narrow (137-only), and a prose-only claim
   # about it is what let that ship. Branch 3 and the control below both call it.
   pin_11at_killed() { [ "$1" -ge 128 ] || [ "$1" -eq 124 ]; }
+  # The SUDO-WRAPPER-FAILED predicate. Hoisted as a FUNCTION, not a bare regex, because the
+  # regex alone is not the property: `sudo: unable to resolve host h` is a WARNING that sudo
+  # prints before running the command TO COMPLETION, so matching `^sudo: ` by itself
+  # converts a genuine branch-7 red into a never-red skip (roborev round 17). The property
+  # is "the wrapper failed AND the child never ran": a non-zero status, sudo's own
+  # diagnostic, and NO bootstrap output at all — the absence of any `gate-pin` line is the
+  # distinguisher, since a run that got far enough to print one plainly executed.
+  PIN_11AT_SUDO_RE='^sudo: '
+  pin_11at_sudo_failed() {
+    [ "$1" -ne 0 ] && out_has "$2" -E "$PIN_11AT_SUDO_RE" && ! out_has "$2" -F 'gate-pin'
+  }
 
   # 11at-ctl. A CONTROL FOR 11at's OWN CORROBORATION PATTERN (roborev round 15). Branches
   #      3-7 above are unreachable on a healthy host, so without this the ERE is asserted
@@ -4889,8 +4900,27 @@ FAKEGATE
     fi
   done
   unset _pk
+  # The SUDO predicate, in BOTH directions. The negatives are the point: sudo's
+  # resolve-host WARNING precedes a run that COMPLETES, so a regex-only test converts a
+  # real branch-7 red into a never-red skip (round 17's F1 — this control is what would
+  # have caught it).
+  if ! pin_11at_sudo_failed 1 "sudo: a password is required"; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a genuine sudo wrapper failure (rc!=0, sudo diagnostic, no bootstrap output)"
+  fi
+  if pin_11at_sudo_failed 0 $'sudo: unable to resolve host h\ngate-pin: SKIPPED PRIVILEGED write'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a COMPLETED run carrying sudo's resolve-host WARNING as a wrapper failure"
+  fi
+  if pin_11at_sudo_failed 0 'sudo: unable to resolve host h'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED an rc=0 run as a wrapper failure"
+  fi
+  if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\ngate-pin: some bootstrap output'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a run that DID produce bootstrap output as a wrapper failure"
+  fi
+  if pin_11at_sudo_failed 1 'bash: /nonexistent/staged.sh: No such file or directory'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a non-sudo child failure as a wrapper failure"
+  fi
   if [ "$pin_ctl_bad" -eq 0 ]; then
-    ok "gate-pin 11at control: the runner-corroboration ERE matches every runner-diagnostic shape (absolute timeout, absolute gtimeout, bare, env) and NONE of the child/sudo/bootstrap shapes that must stay reportable; and the kill predicate accepts 137/143/130/139/124 while rejecting 0/1/125/126/127"
+    ok "gate-pin 11at control: the runner-corroboration ERE matches every runner-diagnostic shape (absolute timeout, absolute gtimeout, bare, env) and NONE of the child/sudo/bootstrap shapes that must stay reportable; and the kill predicate accepts 137/143/130/139/124 while rejecting 0/1/125/126/127; and the sudo predicate fires on a true wrapper failure but NOT on an rc=0 run, a resolve-host WARNING before a completed run, a run that produced bootstrap output, or a non-sudo child failure"
   else
     bad "gate-pin 11at control: the runner-corroboration ERE misclassifies${pin_ctl_why}"
   fi
@@ -4928,7 +4958,7 @@ FAKEGATE
     #                                      watchdog sends SIGTERM first, and timeout(1)
     #                                      FORWARDS a signal it receives and exits
     #                                      128+signum, so an externally reaped run arrives
-    #                                      as 143 — which a 137-only test dropped into 6 and
+    #                                      as 143 — which a 137-only test dropped into 7 and
     #                                      RED, the same false accusation one signal over
     #                                      (roborev round 15). MEASURED on coreutils 9.4:
     #                                      SIGTERM to timeout -> 143, SIGINT -> 130. The
@@ -4982,7 +5012,8 @@ FAKEGATE
     #                                      `(^|/)` would also match a CHILD's `bash: line 1:
     #                                      /usr/bin/env: bad interpreter`, reclassifying a
     #                                      real failure as UNMEASURED. An UNCORROBORATED
-    #                                      125/126/127 falls through to 6 and REDS. MEASURED
+    #                                      125/126/127 falls through to 7 and REDS (or to 6
+    #                                      and skips, when the output is empty). MEASURED
     #                                      on coreutils 9.4: `/usr/bin/timeout 5 missing` ->
     #                                      127 + "/usr/bin/timeout: failed to run command";
     #                                      `env missing` -> 127 + "env: 'missing': No such
@@ -5023,8 +5054,8 @@ FAKEGATE
     elif { [ "$rc_at" -eq 125 ] || [ "$rc_at" -eq 126 ] || [ "$rc_at" -eq 127 ]; } \
          && out_has "$out_at" -E "$PIN_11AT_RUNNER_RE"; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found) CORROBORATED by the RUNNER's own diagnostic in the captured output, so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
-    elif out_has "$out_at" -E '^sudo: '; then
-      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the SUDO WRAPPER itself failed (rc=$rc_at), CORROBORATED by its own '^sudo: ' diagnostic (a mid-suite credential expiry is the common cause; the case entry probe passed, so this is environmental), and the root invocation therefore never ran: the guard was neither confirmed nor defeated (nothing was written)"
+    elif pin_11at_sudo_failed "$rc_at" "$out_at"; then
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the SUDO WRAPPER itself failed (rc=$rc_at), CORROBORATED by its own '^sudo: ' diagnostic AND by the absence of ANY bootstrap output (a mid-suite credential expiry is the common cause; the case entry probe passed, so this is environmental), so the root invocation never ran and the guard was neither confirmed nor defeated (nothing was written)"
     elif [ -z "$out_at" ]; then
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
     else
