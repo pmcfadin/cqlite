@@ -4863,6 +4863,24 @@ FAKEGATE
       && ! out_has "$2" -vE "$PIN_11AT_SUDO_RE"
   }
 
+  # THE CLASSIFIER, AS A PURE FUNCTION (rounds 15/17/19 + owner ruling). It takes
+  # (target-exists, rc, captured-output), prints exactly ONE token, asserts nothing and
+  # mutates nothing — so the 11at-cases harness below can drive it with synthetic triples
+  # and pin the BRANCH ORDERING itself. Ordering is where three of this issue's defects
+  # lived and is the one thing no predicate-level control could reach: a control over
+  # `PIN_11AT_RUNNER_RE` cannot notice that the rc test above it changed. The LIVE case
+  # calls this SAME function, so the harness and the behaviour cannot drift.
+  pin_11at_verdict() {
+    if [ "$1" = yes ]; then printf 'defeat\n'; return 0; fi
+    if out_has "$3" 'gate-pin: SKIPPED'; then printf 'ok\n'; return 0; fi
+    if pin_11at_killed "$2"; then printf 'killed\n'; return 0; fi
+    if { [ "$2" -eq 125 ] || [ "$2" -eq 126 ] || [ "$2" -eq 127 ]; } \
+       && out_has "$3" -E "$PIN_11AT_RUNNER_RE"; then printf 'runner\n'; return 0; fi
+    if pin_11at_sudo_failed "$2" "$3"; then printf 'sudo\n'; return 0; fi
+    if [ -z "$3" ]; then printf 'nooutput\n'; return 0; fi
+    printf 'unexercised\n'
+  }
+
   # 11at-ctl. A CONTROL FOR 11at's OWN CORROBORATION PATTERN (roborev round 15). Branches
   #      3-7 above are unreachable on a healthy host, so without this the ERE is asserted
   #      only in PROSE — the same shape test_roborev_guard_portability.sh refuses ("the
@@ -4937,6 +4955,66 @@ FAKEGATE
   else
     bad "gate-pin 11at control: the runner-corroboration ERE misclassifies${pin_ctl_why}"
   fi
+
+  # 11at-cases. THE BRANCH-ORDERING HARNESS (owner ruling, after rounds 13-19). The
+  #      11at-ctl control above pins the two corroboration PREDICATES; this pins the
+  #      CLASSIFIER'S ORDER, which is a different property and the one that kept breaking:
+  #      rounds 15, 17 and 19 each shipped a predicate whose own control was green while
+  #      the classification it fed was wrong. HOST-INDEPENDENT and ABOVE the sudo gate for
+  #      the same reason as the control: it drives pin_11at_verdict with synthetic
+  #      (target, rc, output) triples, spawns nothing, needs no root, and touches no file.
+  #      Each case NAMES the round whose real defect it would have caught, so a future
+  #      "simplification" of the elif order reds here with a pointer to the history.
+  pin_cases_bad=0
+  pin_cases_n=0
+  pin_cases_why=""
+  pin_case() {   # <want> <target-exists> <rc> <out> <label>
+    local want="$1" tgt="$2" rc="$3" out="$4" label="$5" got
+    pin_cases_n=$((pin_cases_n + 1))
+    got=$(pin_11at_verdict "$tgt" "$rc" "$out")
+    if [ "$got" != "$want" ]; then
+      pin_cases_bad=$((pin_cases_bad + 1))
+      pin_cases_why="$pin_cases_why; [$label] want=$want got=$got"
+    fi
+  }
+  # --- the two terminal verdicts -------------------------------------------------------
+  pin_case defeat      yes 0   ""                                              "a written target IS the defeat"
+  pin_case ok          no  0   "gate-pin: SKIPPED PRIVILEGED write"            "the refusal IS the pass"
+  # --- ORDERING: the two that must WIN over any UNMEASURED reason ----------------------
+  pin_case defeat      yes 137 "gate-pin: SKIPPED PRIVILEGED write"            "ORDER: a write outranks both pass and kill"
+  pin_case ok          no  137 "gate-pin: SKIPPED PRIVILEGED write"            "ORDER: a verdict OBSERVED before a later kill is still the pass"
+  # --- killed / deadline: the whole 128+signum range, not a 137/124 pair ---------------
+  pin_case killed      no  137 ""                                              "137 SIGKILL"
+  pin_case killed      no  124 ""                                              "124 is timeout(1) own deadline status"
+  pin_case killed      no  143 ""                                              "143 SIGTERM - a peer cgroup reap [round 15]"
+  pin_case killed      no  130 ""                                              "130 SIGINT [round 15]"
+  pin_case killed      no  139 ""                                              "139 SIGSEGV in the child"
+  pin_case killed      no  137 "/usr/bin/timeout: failed to run command"       "ORDER: kill outranks a runner diagnostic"
+  # --- runner failure: corroborated, and ONLY at 125/126/127 --------------------------
+  pin_case runner      no  127 "/usr/bin/timeout: failed to run command: No such file" "absolute timeout - the PRIMARY linux shape [round 14]"
+  pin_case runner      no  126 "/usr/bin/timeout: failed to run command: Permission denied" "absolute timeout at rc126"
+  pin_case runner      no  127 "/opt/homebrew/bin/gtimeout: failed to run command" "absolute gtimeout on macos [round 14]"
+  pin_case runner      no  127 "env: unable to find timeout"                   "env: when NO runner resolves [round 14]"
+  pin_case runner      no  127 "timeout: failed to run command"                "bare timeout on PATH"
+  pin_case unexercised no  1   "/usr/bin/timeout: failed to run command"       "ORDER: the runner diagnostic alone is NOT enough - rc must be 125/126/127"
+  # --- sudo wrapper failure: rc!=0, its own diagnostic, and NO other line -------------
+  pin_case sudo        no  1   "sudo: a password is required"                  "a true wrapper failure [round 17]"
+  pin_case sudo        no  1   $'sudo: unable to resolve host h\nsudo: a password is required' "an ALL-sudo capture is still a wrapper failure [round 19]"
+  pin_case unexercised no  1   $'sudo: unable to resolve host h\nsome early bootstrap output' "rc!=0 + sudo WARNING + early output must RED, not skip [round 19]"
+  pin_case unexercised no  0   "sudo: unable to resolve host h"                "rc=0 + sudo WARNING must RED, not skip [round 17]"
+  pin_case unexercised no  0   $'sudo: unable to resolve host h\ngate-pin: noise' "a COMPLETED run carrying the sudo warning must RED [round 17]"
+  # --- the residual reds: real regressions that must NOT become skips -----------------
+  pin_case unexercised no  127 "bash: /nonexistent/staged.sh: No such file or directory" "a STAGING REGRESSION must RED [round 13]"
+  pin_case unexercised no  127 "bash: line 1: /usr/bin/env: bad interpreter: No such file" "a child shebang naming /usr/bin/env must RED [round 14]"
+  pin_case unexercised no  1   "bash: /x: No such file or directory"           "a non-sudo child failure at rc=1 must RED"
+  pin_case unexercised no  0   "noise"                                         "completed, output, no refusal -> unexercised"
+  pin_case nooutput    no  0   ""                                              "completed with genuinely EMPTY output"
+  if [ "$pin_cases_bad" -eq 0 ]; then
+    ok "gate-pin 11at classifier: all $pin_cases_n branch-ordering case(s) classify as specified (defeat/ok/killed/runner/sudo/nooutput/unexercised)"
+  else
+    bad "gate-pin 11at classifier: $pin_cases_bad of $pin_cases_n branch-ordering case(s) MISCLASSIFIED$pin_cases_why"
+  fi
+  unset -f pin_case
 
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     pin_liar="$tmp/pin-liar-bin"; mkdir -p "$pin_liar"
@@ -5056,22 +5134,29 @@ FAKEGATE
     #                                      `bad`, because the guard's decision path went
     #                                      unexercised and the case would otherwise pass
     #                                      vacuously the day the section stops running.
-    if [ -e "$pin_liar_target" ]; then
+    if [ -e "$pin_liar_target" ]; then pin_11at_tgt=yes; else pin_11at_tgt=no; fi
+    case "$(pin_11at_verdict "$pin_11at_tgt" "$rc_at" "$out_at")" in
+      defeat)
       bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
       grep -i 'gate-pin' <<<"$out_at" | head -2
       ls -l "$pin_liar_target" 2>/dev/null
-    elif out_has "$out_at" 'gate-pin: SKIPPED'; then
+      ;;
+      ok)
       ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
-    elif pin_11at_killed "$rc_at"; then
+      ;;
+      killed)
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation DIED ON A SIGNAL or hit the deadline before it reached a verdict (rc=$rc_at; 124 IS timeout(1)'s own deadline status, while any rc>=128 is 128+signum — 137 SIGKILL, 143 SIGTERM, 130 SIGINT — and names NO cause: the ${PIN_11AT_BOUND_S}s bound via -s KILL, an OOM kill, a peer's cgroup reap and timeout(1) forwarding a signal it received are indistinguishable by status alone), so the guard was neither confirmed nor defeated (nothing was written)"
-    elif { [ "$rc_at" -eq 125 ] || [ "$rc_at" -eq 126 ] || [ "$rc_at" -eq 127 ]; } \
-         && out_has "$out_at" -E "$PIN_11AT_RUNNER_RE"; then
+      ;;
+      runner)
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found) CORROBORATED by the RUNNER's own diagnostic in the captured output, so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
-    elif pin_11at_sudo_failed "$rc_at" "$out_at"; then
+      ;;
+      sudo)
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the SUDO WRAPPER itself failed (rc=$rc_at), CORROBORATED by its own '^sudo: ' diagnostic AND by the capture holding NO line that is not a sudo diagnostic (a mid-suite credential expiry is the common cause; the case entry probe passed, so this is environmental), so the root invocation never ran and the guard was neither confirmed nor defeated (nothing was written)"
-    elif [ -z "$out_at" ]; then
+      ;;
+      nooutput)
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
-    else
+      ;;
+      unexercised)
       bad "gate-pin: the root-seam refusal never appeared in a run that ENDED (rc=$rc_at) — nothing was written, so this is not an observed privileged write, but the guard's decision path went unexercised"
       # EVIDENCE MUST NOT BE EMPTY (round 19). This branch's own defining shape is a run
       # that never reached section 5b, which has NO `gate-pin` line — so the grep that
@@ -5085,7 +5170,14 @@ FAKEGATE
         tail -5 <<<"$out_at"
       fi
       unset pin_11at_ev
-    fi
+      ;;
+      *)
+      # FAIL CLOSED on a token this dispatch does not know: a classifier that grows an
+      # eighth outcome must not be silently ignored here.
+      bad "gate-pin 11at: pin_11at_verdict returned an UNRECOGNISED verdict token — refusing to classify (rc=$rc_at)"
+      ;;
+    esac
+    unset pin_11at_tgt
     sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
 
     # 11au. SUDO_USER MUST AGREE WITH SUDO_UID (roborev round 8). Trusting the NAME alone
