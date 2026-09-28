@@ -4908,7 +4908,7 @@ FAKEGATE
       skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
     else
       bad "gate-pin: the root-seam refusal never appeared in a run that COMPLETED (rc=$rc_at) — nothing was written, so this is not an observed privileged write, but the guard's decision path went unexercised"
-      printf '%s\n' "$out_at" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_at" | head -2
     fi
     sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
 
