@@ -4856,11 +4856,15 @@ FAKEGATE
   # exit BEFORE 5b — a staged-tree syntax error, a usage-error exit, an early abort —
   # satisfied all three conjuncts and was downgraded to an environmental `skip`. That made
   # branch 7 UNREACHABLE for non-zero exits on such a host. The inverted test has no such
-  # blind spot: one line of real bootstrap output, however early, defeats it.
+  # blind spot: one line of real bootstrap output, however early, defeats it. BLANK AND
+  # WHITESPACE-ONLY lines are exempted from "non-sudo line" (round 23): they are not
+  # evidence the child ran, and counting them as such RED a genuine credential expiry whose
+  # capture happened to contain one — the false accusation again, one blank line over. The
+  # exemption is COMPOSED from the hoisted prefix, never a second spelling of it.
   PIN_11AT_SUDO_RE='^sudo: '
   pin_11at_sudo_failed() {
     [ "$1" -ne 0 ] && out_has "$2" -E "$PIN_11AT_SUDO_RE" \
-      && ! out_has "$2" -vE "$PIN_11AT_SUDO_RE"
+      && ! out_has "$2" -vE "$PIN_11AT_SUDO_RE"'|^[[:space:]]*$'
   }
 
   # THE CLASSIFIER, AS A PURE FUNCTION (rounds 15/17/19 + owner ruling). It takes
@@ -4994,12 +4998,13 @@ FAKEGATE
   pin_case runner      no  127 "/usr/bin/timeout: failed to run command: No such file" "absolute timeout - the PRIMARY linux shape [round 14]"
   pin_case runner      no  126 "/usr/bin/timeout: failed to run command: Permission denied" "absolute timeout at rc126"
   pin_case runner      no  127 "/opt/homebrew/bin/gtimeout: failed to run command" "absolute gtimeout on macos [round 14]"
-  pin_case runner      no  127 "env: unable to find timeout"                   "env: when NO runner resolves [round 14]"
+  pin_case runner      no  127 "env: 'timeout': No such file or directory"     "env: when NO runner resolves - the REAL env(1) shape, matching 11at-ctl [round 14/23]"
   pin_case runner      no  127 "timeout: failed to run command"                "bare timeout on PATH"
   pin_case unexercised no  1   "/usr/bin/timeout: failed to run command"       "ORDER: the runner diagnostic alone is NOT enough - rc must be 125/126/127"
   # --- sudo wrapper failure: rc!=0, its own diagnostic, and NO other line -------------
   pin_case sudo        no  1   "sudo: a password is required"                  "a true wrapper failure [round 17]"
   pin_case sudo        no  1   $'sudo: unable to resolve host h\nsudo: a password is required' "an ALL-sudo capture is still a wrapper failure [round 19]"
+  pin_case sudo        no  1   $'sudo: unable to resolve host h\n\nsudo: a password is required' "an ALL-sudo capture with an interior BLANK line is still a wrapper failure [round 23]"
   pin_case unexercised no  1   $'sudo: unable to resolve host h\nsome early bootstrap output' "rc!=0 + sudo WARNING + early output must RED, not skip [round 19]"
   pin_case unexercised no  0   "sudo: unable to resolve host h"                "rc=0 + sudo WARNING must RED, not skip [round 17]"
   pin_case unexercised no  0   $'sudo: unable to resolve host h\ngate-pin: noise' "a COMPLETED run carrying the sudo warning must RED [round 17]"
