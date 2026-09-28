@@ -4840,6 +4840,12 @@ FAKEGATE
   # control after it both read this variable, so a future edit cannot change one without
   # changing the other (roborev round 15).
   PIN_11AT_RUNNER_RE='^(/[^[:space:]:]*/)?(g?timeout|env): '
+  # bootstrap emits SIX distinct `gate-pin: SKIPPED` refusals (:2551, :2568, :2573, :2577,
+  # :2580, :2586) and only :2551 — the root-identity one — is the property 11at proves. The
+  # pass therefore requires BOTH substrings, exactly as sibling 11ak does (round 25); the
+  # other five carry no `PRIVILEGED write`. This is that line VERBATIM, so no fixture here
+  # pins a wording bootstrap does not actually emit (round 23's fabricated-sample lesson).
+  PIN_11AT_PASS_SAMPLE='gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)'
   # The signal-death/deadline predicate, hoisted for the SAME anti-drift reason — round
   # 15's F1 was precisely this test being too narrow (137-only), and a prose-only claim
   # about it is what let that ship. Branch 3 and the control below both call it.
@@ -4876,7 +4882,7 @@ FAKEGATE
   # calls this SAME function, so the harness and the behaviour cannot drift.
   pin_11at_verdict() {
     if [ "$1" = yes ]; then printf 'defeat\n'; return 0; fi
-    if out_has "$3" 'gate-pin: SKIPPED'; then printf 'ok\n'; return 0; fi
+    if out_has "$3" 'gate-pin: SKIPPED' && out_has "$3" 'PRIVILEGED write'; then printf 'ok\n'; return 0; fi
     if pin_11at_killed "$2"; then printf 'killed\n'; return 0; fi
     if { [ "$2" -eq 125 ] || [ "$2" -eq 126 ] || [ "$2" -eq 127 ]; } \
        && out_has "$3" -E "$PIN_11AT_RUNNER_RE"; then printf 'runner\n'; return 0; fi
@@ -4890,9 +4896,12 @@ FAKEGATE
   #      only in PROSE — the same shape test_roborev_guard_portability.sh refuses ("the
   #      new branches would be dead code asserted only in prose, which is the same shape
   #      as the defect they close") and case 13b plants its own probe for. HOST-
-  #      INDEPENDENT, AND DELIBERATELY ABOVE THE `sudo -n true` GATE BELOW: it classifies
-  #      fixed sample lines, spawns nothing and needs no root, so it must not inherit the
-  #      sudo precondition. It was first written INSIDE that gate, which silently made the
+  #      INDEPENDENT OF THE `sudo -n true` GATE BELOW, and deliberately placed above it: it
+  #      classifies fixed sample lines, spawns nothing and needs no sudo, so it must not
+  #      inherit that precondition. STATED RESIDUAL (round 25): this is NOT "runs on every
+  #      host" — both pure blocks still sit inside block 11's `else`, so a suite run AS ROOT
+  #      (:3847) or one whose tree staging fails skips them wholesale. Hoisting them to file
+  #      scope would close that; it is deliberately not done here. It was first written INSIDE that gate, which silently made the
   #      control itself conditional — the same prose-vs-code gap it exists to close, one
   #      level up: a host without passwordless sudo would have checked nothing while this
   #      comment claimed host independence. Keep it above the gate.
@@ -4937,7 +4946,7 @@ FAKEGATE
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a genuine sudo wrapper failure (rc!=0, sudo diagnostic, no bootstrap output)"
   fi
   if pin_11at_sudo_failed 0 $'sudo: unable to resolve host h\ngate-pin: SKIPPED PRIVILEGED write'; then
-    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a COMPLETED run carrying sudo's resolve-host WARNING as a wrapper failure"
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED an rc=0 run as a wrapper failure (this pair pins the rc CONJUNCT's short-circuit; the non-sudo-line conjunct is pinned by the rc=1 rows below)"
   fi
   if pin_11at_sudo_failed 0 'sudo: unable to resolve host h'; then
     pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED an rc=0 run as a wrapper failure"
@@ -4966,7 +4975,9 @@ FAKEGATE
   #      rounds 15, 17 and 19 each shipped a predicate whose own control was green while
   #      the classification it fed was wrong. HOST-INDEPENDENT and ABOVE the sudo gate for
   #      the same reason as the control: it drives pin_11at_verdict with synthetic
-  #      (target, rc, output) triples, spawns nothing, needs no root, and touches no file.
+  #      (target, rc, output) triples, spawns nothing, needs no sudo, and touches no file.
+  #      It carries the SAME stated residual as the control: inside block 11's `else`, so a
+  #      root-run or staging-failed suite skips it (round 25).
   #      Each case NAMES the round whose real defect it would have caught, so a future
   #      "simplification" of the elif order reds here with a pointer to the history.
   pin_cases_bad=0
@@ -4982,11 +4993,12 @@ FAKEGATE
     fi
   }
   # --- the two terminal verdicts -------------------------------------------------------
+  pin_case unexercised no  0   "gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE must be an ABSOLUTE path)" "a NON-privileged-write SKIPPED is NOT this case's pass [round 25]"
   pin_case defeat      yes 0   ""                                              "a written target IS the defeat"
-  pin_case ok          no  0   "gate-pin: SKIPPED PRIVILEGED write"            "the refusal IS the pass"
+  pin_case ok          no  0   "$PIN_11AT_PASS_SAMPLE"                         "the REAL root-identity refusal IS the pass"
   # --- ORDERING: the two that must WIN over any UNMEASURED reason ----------------------
-  pin_case defeat      yes 137 "gate-pin: SKIPPED PRIVILEGED write"            "ORDER: a write outranks both pass and kill"
-  pin_case ok          no  137 "gate-pin: SKIPPED PRIVILEGED write"            "ORDER: a verdict OBSERVED before a later kill is still the pass"
+  pin_case defeat      yes 137 "$PIN_11AT_PASS_SAMPLE"                         "ORDER: a write outranks both pass and kill"
+  pin_case ok          no  137 "$PIN_11AT_PASS_SAMPLE"                         "ORDER: a verdict OBSERVED before a later kill is still the pass"
   # --- killed / deadline: the whole 128+signum range, not a 137/124 pair ---------------
   pin_case killed      no  137 ""                                              "137 SIGKILL"
   pin_case killed      no  124 ""                                              "124 is timeout(1) own deadline status"
