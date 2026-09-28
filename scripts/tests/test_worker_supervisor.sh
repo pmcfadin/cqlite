@@ -10711,9 +10711,11 @@ test_object_store_sweep_claim_recovers_when_stale() {
   #     claim's age is at most ~0.2s. This narrows the race to the refresher itself being
   #     scheduled within the ~5s bound under the same load that caused #4282 — far less likely
   #     than the ORIGINAL one-shot plant racing the supervisor's launch, but not a zero-latency
-  #     guarantee, which is why the liveness check below (did `started` stay fresh for the
-  #     WHOLE run, not just tick once?) matters: without it, a dead or starved refresher
-  #     silently degrades this case back to the one-shot plant it replaces. This does not
+  #     guarantee, which is why the liveness check below (was the refresher STILL ALIVE at
+  #     the END of the run, not just at some point during it? -- it is end-anchored, so a
+  #     mid-run stall that resumes before `fixture_kill` is not what it detects) matters:
+  #     without it, a dead or starved refresher silently degrades this case back to the
+  #     one-shot plant it replaces. This does not
   #     weaken the property or the timing: the wait's OUTER `wait_until` budget (computed by
   #     the supervisor itself, from ITS OWN process-start clock, not from this file) still
   #     bounds and terminates the wait — a continuously-aged `started+stale` deadline never
@@ -10743,6 +10745,19 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # hand-typing the relation a fourth time in this function — (a)'s own `got` assert already
   # fails loudly if the shipped relation moves; a hand-typed copy here would not.
   stale_secs="$(bash -c 'set -uo pipefail; OBJ_SWEEP_TIMEOUT_SECS="'"$OBJ_SWEEP_TIMEOUT_SECS"'"; OBJ_SWEEP_CLAIM_SLACK_SECS="'"$OBJ_SWEEP_CLAIM_SLACK_SECS"'"; . "$1"; obj_sweep_claim_stale_secs "$2"' _ "$fns" "$REPO_ROOT/scripts/check-object-store-integrity.sh" 2>&1)"
+  # GUARDED THE SAME WAY (a) GUARDS walks/per_walk/bound: an undecided derivation (the
+  # function returns 1 with no output when it cannot read MAX_SWEEP_WALKS) must not reach
+  # the arithmetic below as an empty string -- `barrier_secs=$((10 * stale_secs))` on an
+  # empty value fails BEFORE this case even attempts to schedule the refresher, misreporting
+  # a derivation failure as "never ticked once in 0s", the same misattribution class the
+  # liveness rework was about. It must also never reach arithmetic UNVALIDATED: the `2>&1`
+  # above means any stderr text would be read as the value, and `$((10 * <text>))` under
+  # this file's `set -u` is a FATAL shell error that would silently kill the whole suite
+  # mid-run, not just this case.
+  if [[ ! "$stale_secs" =~ ^[0-9]+$ ]]; then
+    fail "obj-sweep(claim-fresh-control): the derived stale bound came back '$stale_secs' -- every timing bound below would be vacuous"
+    return
+  fi
   planted_started="$(date +%s)"
   printf '%s\n' "$planted_started" >"$claim/started"
   # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
@@ -10782,7 +10797,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
       case "$tick" in *N) tick="$now" ;; esac
       printf "%s\n" "$now" >"$claim/started.tmp.$$" 2>/dev/null &&
         mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null &&
-        { printf "%s\n" "$tick" >>"$ticks" 2>/dev/null; : >"$live"; }
+        { printf "%s\n" "$tick" >>"$ticks" 2>/dev/null && : >"$live"; }
       sleep 0.2
       i=$((i + 1))
     done
@@ -10800,7 +10815,12 @@ test_object_store_sweep_claim_recovers_when_stale() {
     live_waited=$((live_waited + 1))
   done
   if [[ ! -e "$live" ]]; then
-    fail "obj-sweep(claim-fresh-control): the refresh fixture never ticked once in ${barrier_secs}s -- it could not be scheduled at all, so the supervisor was never launched (a stale plant would test nothing)"
+    # ENVIRONMENTAL NON-RESULT, not a failure: the supervisor is never launched on this
+    # path, so there is no vacuity risk in skipping (this file's own convention for "a live
+    # control process never scheduled within the wait cap" — see the proc-probe cases).
+    # Reporting it as `fail` would convert a load-induced scheduling miss into a
+    # differently-shaped load-induced red, after burning up to `barrier_secs` of wall clock.
+    skip "obj-sweep(claim-fresh-control): the refresh fixture never ticked once in ${barrier_secs}s -- it could not be scheduled at all, so the supervisor was never launched (a stale plant would test nothing)"
     fixture_kill "$refresh_pid"
   else
     root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
