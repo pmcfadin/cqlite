@@ -1309,11 +1309,20 @@ pub fn is_negative_complex_marker(column: &str, fact: &Fact) -> bool {
 /// map, which is the thing a producer can truncate — unlike
 /// `result.metadata.columns`, which both producers share by construction.
 ///
-/// `position` is excluded because it is the ONE legitimately path-divergent
-/// column: the full-scan producer reports it `Null` (or omits it) while the
-/// point-read producer resolves a real byte offset, so its presence differs
-/// by access path BY DESIGN. It is the sweep's path witness, asserted
-/// separately, and a declared gap in the column contract.
+/// `position` is excluded DEFENSIVELY, not because it would otherwise
+/// diverge — an earlier version of this comment claimed the latter and the
+/// production source says otherwise (roborev job 75).
+/// `row_map.rs::insert_source_values` inserts `"position"`
+/// UNCONDITIONALLY, as `source.position.map(Value::BigInt)
+/// .unwrap_or(Value::Null)`, and is called from every arm (`Live`,
+/// `Tombstone`, `PartitionDelete`, the range-bound path). So the KEY is
+/// always present on both producers and the key sets are equal either way;
+/// only its VALUE is path-divergent — NULL on the full scan, a real byte
+/// offset on the point read — which is why it is the sweep's path witness
+/// and a declared gap in the column contract rather than a compared column.
+/// The filter is kept as forward compatibility for a producer that ever
+/// stops inserting it, and is stated as defensive so nobody reads it as
+/// load-bearing.
 pub fn value_key_set(row: &QueryRow) -> BTreeSet<String> {
     row.values
         .keys()

@@ -39,10 +39,7 @@ mod synthetic;
 
 use cqlite_core::query::result::ColumnInfo;
 use cqlite_core::types::Value;
-use raw_view_parity::golden::{
-    build_expectations, classify_columns, load_goldens, Fact, DECLARED_GAP_COLUMNS,
-    PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA,
-};
+use raw_view_parity::golden::{build_expectations, classify_columns, load_goldens, Fact};
 use raw_view_parity::golden::{fact_of, render_actual_clustering};
 use raw_view_parity::{
     is_negative_complex_marker, partition_key_predicate, resolve_root, Discipline, FixtureSpec,
@@ -50,7 +47,7 @@ use raw_view_parity::{
 use serde_json::json;
 use std::collections::BTreeMap;
 use synthetic::raw_view_parity;
-use synthetic::{census, generation_of, roles, roles_full, roles_with, SPEC};
+use synthetic::{census, contract_columns, generation_of, roles, roles_full, roles_with, SPEC};
 
 // ---------------------------------------------------------------------------
 // The COMPLEX-COLUMN oracle, which no gate-executed fixture reaches (job 50)
@@ -200,61 +197,6 @@ fn only_a_false_complex_deletion_is_excluded_from_the_census() {
 // ---------------------------------------------------------------------------
 // `classify_columns`' COMPLEX branch, also gate-unreachable (roborev job 56)
 // ---------------------------------------------------------------------------
-
-/// Build the raw view's full contract column set for a table with the given
-/// keys, simple base columns and collection columns.
-///
-/// MODELS ONE ORDERING PROPERTY, not the whole contract order (roborev job
-/// 64). What `classify_columns` depends on is reproduced exactly: KEYS
-/// FIRST, then each base column immediately followed by its synthesized
-/// metadata siblings — that is what its `take_while` key-boundary scan
-/// reads. The trailing always-applicable block's INTERNAL order is NOT
-/// modelled: production emits `row_kind` BETWEEN the partition-deletion
-/// pair and `bound_inclusive` (`raw_view/columns.rs:347`), whereas this
-/// helper appends it with the other `DECLARED_GAP_COLUMNS`. Nothing in
-/// `classify_columns` reads that order today, so the difference is inert —
-/// but an order-sensitive check added there later would be validated
-/// against a shape production never emits, so fix this helper before
-/// adding one.
-fn contract_columns(keys: &[&str], simple: &[&str], complex: &[&str]) -> Vec<ColumnInfo> {
-    let mut names: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-    for c in simple {
-        names.push((*c).to_string());
-        for suffix in ["_timestamp", "_ttl", "_local_deletion_time", "_tombstone"] {
-            names.push(format!("{c}{suffix}"));
-        }
-    }
-    for c in complex {
-        names.push((*c).to_string());
-        for suffix in [
-            "_complex_deletion",
-            "_complex_deletion_time",
-            "_complex_deletion_timestamp",
-        ] {
-            names.push(format!("{c}{suffix}"));
-        }
-    }
-    for n in ROW_LEVEL_METADATA
-        .iter()
-        .chain(PARTITION_METADATA)
-        .chain(RANGE_METADATA)
-        .chain(DECLARED_GAP_COLUMNS)
-    {
-        names.push((*n).to_string());
-    }
-    names
-        .into_iter()
-        .enumerate()
-        .map(|(position, name)| ColumnInfo {
-            name,
-            data_type: cqlite_core::types::DataType::Text,
-            nullable: true,
-            position,
-            table_name: None,
-            cql_type: None,
-        })
-        .collect()
-}
 
 /// The `_complex_deletion` EXCLUSION, which `classify_columns`' own comment
 /// calls load-bearing. `tags_complex_deletion` itself has a

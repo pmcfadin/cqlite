@@ -27,9 +27,10 @@
 #[path = "raw_view_parity.rs"]
 pub mod raw_view_parity;
 
+use cqlite_core::query::result::ColumnInfo;
 use raw_view_parity::golden::{
-    build_expectations, ColumnRoles, GoldenSstable, PARTITION_METADATA, RANGE_METADATA,
-    ROW_LEVEL_METADATA,
+    build_expectations, classify_columns, ColumnRoles, GoldenSstable, DECLARED_GAP_COLUMNS,
+    PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA,
 };
 use raw_view_parity::{Discipline, FixtureSpec};
 use serde_json::json;
@@ -80,46 +81,76 @@ pub fn roles_with(clustering: &[&str], simple: &[&str]) -> ColumnRoles {
     roles_full(clustering, simple, &[])
 }
 
-pub fn roles_full(clustering: &[&str], simple: &[&str], complex: &[&str]) -> ColumnRoles {
-    // `compared_columns` is DERIVED here, exactly as `classify_columns`
-    // derives it, rather than left empty (roborev job 72). It is the field
-    // `assert_group` iterates to decide which columns get compared AT ALL,
-    // so an empty value makes `assert_group` perform zero comparisons and
-    // return 0 — passing having compared nothing. Neither self-test lane
-    // reaches `assert_group` today, but these three helpers are the obvious
-    // ones to reuse if a lane ever adds a control for it, and a
-    // vacuous-pass trap waiting in a shared helper is precisely what these
-    // lanes exist to prevent.
-    let mut compared_columns: Vec<String> = Vec::new();
+/// Build the raw view's contract column set for a table with the given
+/// keys, simple base columns and collection columns.
+///
+/// MODELS ONE ORDERING PROPERTY, not the whole contract order (roborev job
+/// 64). What `classify_columns` depends on is reproduced exactly: KEYS
+/// FIRST, then each base column immediately followed by its synthesized
+/// metadata siblings — that is what its `take_while` key-boundary scan
+/// reads. The trailing always-applicable block's INTERNAL order is NOT
+/// modelled: production emits `row_kind` BETWEEN the partition-deletion
+/// pair and `bound_inclusive` (`raw_view/columns.rs:347`), whereas this
+/// helper appends it with the other `DECLARED_GAP_COLUMNS`. Nothing in
+/// `classify_columns` reads that order today, so the difference is inert —
+/// but an order-sensitive check added there later would be validated
+/// against a shape production never emits, so fix this helper before
+/// adding one.
+pub fn contract_columns(keys: &[&str], simple: &[&str], complex: &[&str]) -> Vec<ColumnInfo> {
+    let mut names: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
     for c in simple {
+        names.push((*c).to_string());
         for suffix in ["_timestamp", "_ttl", "_local_deletion_time", "_tombstone"] {
-            compared_columns.push(format!("{c}{suffix}"));
+            names.push(format!("{c}{suffix}"));
         }
     }
     for c in complex {
+        names.push((*c).to_string());
         for suffix in [
             "_complex_deletion",
             "_complex_deletion_time",
             "_complex_deletion_timestamp",
         ] {
-            compared_columns.push(format!("{c}{suffix}"));
+            names.push(format!("{c}{suffix}"));
         }
     }
-    for name in ROW_LEVEL_METADATA
+    for n in ROW_LEVEL_METADATA
         .iter()
         .chain(PARTITION_METADATA)
         .chain(RANGE_METADATA)
+        .chain(DECLARED_GAP_COLUMNS)
     {
-        compared_columns.push((*name).to_string());
+        names.push((*n).to_string());
     }
-    compared_columns.sort();
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(position, name)| ColumnInfo {
+            name,
+            data_type: cqlite_core::types::DataType::Text,
+            nullable: true,
+            position,
+            table_name: None,
+            cql_type: None,
+        })
+        .collect()
+}
 
-    ColumnRoles {
-        clustering_columns: clustering.iter().map(|c| c.to_string()).collect(),
-        simple_columns: simple.iter().map(|c| c.to_string()).collect(),
-        complex_columns: complex.iter().map(|c| c.to_string()).collect(),
-        compared_columns,
-    }
+/// ONE derivation of the roles, not two (roborev job 75).
+///
+/// This used to re-implement `classify_columns`' `compared_columns`
+/// assembly — the four simple suffixes, the three complex suffixes, then
+/// the row/partition/range metadata — and claimed to do it "exactly as
+/// `classify_columns` derives it". That was a claim about the code with
+/// nothing pinning it, and `raw_view_parity.rs`'s module doc names a new
+/// metadata column in `raw_view_columns` as the expected future change. So
+/// the synthetic roles are now produced BY `classify_columns` itself, over
+/// the synthetic contract above: there is one derivation, and it cannot
+/// drift from the one the sweep uses.
+pub fn roles_full(clustering: &[&str], simple: &[&str], complex: &[&str]) -> ColumnRoles {
+    let mut keys: Vec<&str> = vec!["pk"];
+    keys.extend_from_slice(clustering);
+    classify_columns(&contract_columns(&keys, simple, complex), &SPEC)
 }
 
 pub fn census(goldens: &[GoldenSstable]) -> BTreeMap<&'static str, usize> {
