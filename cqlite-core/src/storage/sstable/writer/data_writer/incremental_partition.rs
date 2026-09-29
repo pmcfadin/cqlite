@@ -221,13 +221,12 @@ impl<'w, 'r> IncrementalPartitionWriter<'w, 'r> {
     /// `merge_clustering_rows`'s `if let Some(row) = ...` skip).
     pub(crate) fn feed_row(&mut self, mutation: &Mutation, schema: &TableSchema) -> Result<()> {
         let clustering_key = mutation.clustering_key.as_ref();
-        let mut shadow_floor = self.partition_floor;
-        for rt in self.range_tombstones {
-            if range_tombstone_covers(rt, clustering_key, schema) {
-                shadow_floor =
-                    Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
-            }
-        }
+        let shadow_floor = resolve_shadow_floor(
+            self.partition_floor,
+            self.range_tombstones,
+            clustering_key,
+            schema,
+        );
 
         // Emit every pending marker that sorts strictly before this row
         // (issue #1220 tie-break: a Row and a Marker never compare Equal at

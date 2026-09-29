@@ -60,42 +60,26 @@ impl DataWriter {
         partition_floor: Option<i64>,
         range_tombstones: &[RangeTombstone],
     ) -> Vec<RowWrite<'a>> {
-        let row_mutations: Vec<&'a Mutation> = mutations
-            .iter()
-            .filter(|m| !is_static_row_mutation(m, schema))
-            .collect();
+        // Filtering, adjacency-grouping and shadow-floor resolution are all
+        // shared with the two STATISTICS folds that must reproduce this
+        // emitter's decisions (issue #4246 roborev round-8 finding 2) — see
+        // `data_writer/row_groups.rs`.
+        let row_mutations = clustering_row_mutations(mutations, schema);
 
         let mut rows = Vec::new();
-        let mut start = 0;
-        while start < row_mutations.len() {
-            let mut end = start + 1;
-            while end < row_mutations.len()
-                && row_mutations[end].clustering_key == row_mutations[start].clustering_key
-            {
-                end += 1;
-            }
-
-            // Shadow floor for this row: partition tombstone plus any range
-            // tombstone covering the group's clustering key.
-            let clustering_key = row_mutations[start].clustering_key.as_ref();
-            let mut shadow_floor = partition_floor;
-            for rt in range_tombstones {
-                if range_tombstone_covers(rt, clustering_key, schema) {
-                    shadow_floor =
-                        Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
+        for_each_clustering_row_group(
+            &row_mutations,
+            schema,
+            partition_floor,
+            range_tombstones,
+            |group, shadow_floor| {
+                if let Some(row) =
+                    Self::merge_row_group(group, schema, skip_static_ops, shadow_floor)
+                {
+                    rows.push(row);
                 }
-            }
-
-            if let Some(row) = Self::merge_row_group(
-                &row_mutations[start..end],
-                schema,
-                skip_static_ops,
-                shadow_floor,
-            ) {
-                rows.push(row);
-            }
-            start = end;
-        }
+            },
+        );
         rows
     }
 

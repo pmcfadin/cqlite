@@ -273,6 +273,7 @@ mod marker_merge;
 /// [`marshal_comparator::compare_for_marshal`].
 mod marshal_comparator;
 mod partition;
+mod row_groups;
 mod rows;
 mod schema_helpers;
 /// Incremental static-column last-write-wins tracker (issue #1668, stage
@@ -308,6 +309,9 @@ pub(crate) use encoding::*;
 pub(crate) use incremental_partition::IncrementalPartitionWriter;
 pub(crate) use index_prefix::*;
 pub(crate) use partition::PartitionItem;
+pub(crate) use row_groups::{
+    clustering_row_mutations, for_each_clustering_row_group, resolve_shadow_floor,
+};
 pub(crate) use schema_helpers::*;
 pub(crate) use static_ops::StaticOpsTracker;
 pub(crate) use streaming_partition::StreamingPartitionSession;

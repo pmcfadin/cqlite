@@ -179,47 +179,104 @@ pub(crate) fn fold_single_mutation_row_group(
 }
 
 /// The fold sequence for a STATIC-ROW CARRIER mutation — the
-/// `clustering_key: None` shape both incremental compaction paths classify
-/// out of `row_mutations` and handle on their own branch
-/// (`KWayMerger::merge` and `WriteEngine::maintenance_step`).
+/// `clustering_key: None` shape all three writer paths classify out of
+/// their clustering-row grouping and handle on their own branch
+/// (`SSTableWriter::write_partition`'s wholly-static loop,
+/// `KWayMerger::merge`, and `WriteEngine::maintenance_step`).
 ///
-/// Extracted (issue #4246 roborev round-6 finding): those two branches used
-/// to call [`fold_row_content_stats`] ALONE, which meant a static carrier's
-/// own row deletion was folded NOWHERE on either compaction path.
-/// [`fold_row_content_stats`] deliberately does not fold a row's deletion —
-/// neither the `DeleteRow` op (its match arm is an explicit no-op) nor the
-/// #932 decoupled `row_tombstone` field — because a row's deletion is folded
-/// exactly once at the GROUP level via [`fold_row_deletion_marker`]. The
-/// static-carrier branches never performed that group-level fold, so both
-/// representations were silently dropped from persisted stats. Before the
-/// #4246 refactor `fold_mutation_stats` folded them for these mutations
-/// (issue #1721's explicit purpose: without the LDT contribution
-/// `min_local_deletion_time` stays `i32::MAX` and `data_writer/rows.rs`'s
-/// below-baseline guard then REJECTS the row).
+/// # A static carrier's own row deletion is folded NOWHERE — deliberately
 ///
-/// SCOPE OF THE FLUSH-PATH PRE-SEED, STATED PRECISELY (issue #4246 roborev
-/// round-7 finding -- an earlier version of this comment OVERSTATED it):
-/// `compute_mutations_baseline_stats`/`pre_seed_encoding_baselines` seed
-/// ONLY the MIN fields (`min_timestamp`, `min_local_deletion_time`,
-/// `min_ttl`). They do NOT protect `max_timestamp`,
-/// `max_local_deletion_time` or the `estimatedTombstoneDropTime` histogram,
-/// so the flush path is NOT broadly "shielded" -- which is why
-/// `write_partition`'s own wholly-static loop calls this helper too, rather
-/// than relying on the pre-seed. No compaction path has any pre-seed at
-/// all.
+/// Issue #4246 roborev rounds 6/7 added a `fold_row_deletion_marker(stats,
+/// DataWriter::resolve_row_deletion(&[mutation], None))` call here, on the
+/// theory that a static carrier's `CellOperation::DeleteRow` / #932
+/// `row_tombstone` was otherwise "folded nowhere". Round 8 overturned it and
+/// the fold was REMOVED: it was a PHANTOM marker — a `Statistics.db` entry
+/// (persisted minima plus an `estimatedTombstoneDropTime` histogram
+/// increment) for a deletion that has no corresponding bytes in `Data.db`.
+/// That is precisely the "persisted stats do not match emitted data" defect
+/// class issue #4246 exists to eliminate, so the fold was an instance of the
+/// bug, not a fix for one.
 ///
-/// Resolution goes through `DataWriter::resolve_row_deletion` — the single
-/// authority, which picks whichever of the two representations carries the
-/// GREATER timestamp — rather than a local hand-rolled preference, so this
-/// can never drift from what `merge_row_group` actually emits.
+/// FORMAT AUTHORITY (pinned `cassandra-5.0.8`, never CQLite's own code).
+/// Cassandra derives a static row's stats from THE SAME `Row` object it just
+/// serialized, in adjacent statements —
+/// `io/sstable/format/SortedTableWriter.java::addStaticRow`:
+/// ```java
+/// partitionWriter.addStaticRow(row);
+/// if (!row.isEmpty())
+///     Rows.collectStats(row, metadataCollector);
+/// ```
+/// and `db/rows/Rows.java::collectStats` reads `row.deletion()` — the very
+/// field `db/rows/UnfilteredSerializer.java::serialize` turns into the
+/// `HAS_DELETION` (`0x10`) flag. Emission and collection therefore cannot
+/// diverge by construction: Cassandra counts a static-row deletion IF AND
+/// ONLY IF it wrote one. Any CQLite fold that counts a deletion the emitter
+/// will not write violates that invariant.
 ///
-/// `shadow_floor` is `None`: static-cell shadowing uses a separate,
+/// WHAT CQLITE'S EMITTER ACTUALLY DOES. No production path can emit a
+/// static-row deletion at all:
+///   * `data_writer/encoding.rs::is_static_operation` returns `false` for
+///     `CellOperation::DeleteRow`, and `data_writer/static_ops.rs`'s
+///     `StaticOpsTracker::feed` additionally `continue`s on that variant —
+///     so `collect_static_operations`/`StaticOpsTracker::finish` can never
+///     place a `DeleteRow` into the merged static-op set.
+///   * `data_writer/static_rows.rs::write_static_row_with_prev_size` sets
+///     `ROW_HAS_DELETION` only when its `static_ops` slice contains a
+///     `DeleteRow`, and never consults `Mutation::row_tombstone` at all.
+///   * Every production static-row emission passes a merged set into that
+///     function (`partition.rs`, `streaming_partition.rs`,
+///     `incremental_partition.rs`, `incremental.rs::feed_streaming_static_row`).
+///     The one entry point that maps `mutation.operations` UNFILTERED —
+///     `DataWriter::write_static_row` — has NO production caller; it is
+///     reached only from tests.
+///
+/// Verified empirically on the flush path: a static carrier whose only
+/// operation is `DeleteRow` (and, separately, one carrying a #932
+/// `row_tombstone`) emits a static row whose flags byte is `0x80`/`0xa0` —
+/// `ROW_HAS_DELETION` clear — while the pre-removal fold still persisted a
+/// `tombstone_drop_times` bucket for it. Both halves are pinned by
+/// `cqlite-core/tests/issue_4246_static_carrier_deletion_phantom.rs`, which
+/// is also the tripwire: if the emitter is ever taught to write a static-row
+/// deletion, its byte assertion FAILS and this fold must be revisited.
+///
+/// WHY ISSUE #1721 DOES NOT APPLY. Rounds 6/7 justified the fold by citing
+/// #1721 ("without the LDT contribution `min_local_deletion_time` stays
+/// `i32::MAX` and `data_writer/rows.rs`'s below-baseline guard REJECTS the
+/// row"). That is a MISCITATION. Commit `e638bf369`'s regression
+/// (`tests/issue_1385_gc_grace_boundary.rs::
+/// write_decoupled_row_tombstone_with_survivor`) builds a mutation with
+/// `clustering_key: Some(ck)` against a schema whose columns are ALL
+/// `is_static: false` — a CLUSTERING row in a table with no static columns,
+/// which `is_static_row_mutation` rejects twice over. #1721's deletion IS
+/// emitted (by `merge_row_group`, as a `ROW_HAS_DELETION` row), and today it
+/// is folded at the GROUP level by [`fold_row_deletion_marker`] on the
+/// clustering-row path. Nothing in #1721 concerns a static carrier, and the
+/// below-baseline guard cannot fire for a deletion that is never written.
+///
+/// # What this helper does fold
+///
+/// The carrier's row CONTENT only, via [`fold_row_content_stats`] with a
+/// `None` shadow boundary: static-cell shadowing uses a separate,
 /// partition-floor-only mechanism outside this fix's verified scope (see
-/// [`row_group_survives`]'s doc comment), so the carrier's content keeps its
-/// prior unconditional-fold behavior exactly.
+/// [`row_group_survives`]'s doc comment), so the carrier keeps its prior
+/// unconditional-fold behavior exactly.
+///
+/// Kept as a NAMED helper rather than inlined at the three call sites even
+/// though its body is now a single delegation: it is the one place this
+/// invariant is stated, and the production composition
+/// `fold_marker_stats` + `fold_single_mutation_row_group` +
+/// `fold_static_carrier_stats` is what the fold-equivalence tests assert
+/// against.
+///
+/// KNOWN RESIDUAL, out of scope here (pre-existing, predates #4246): the
+/// delegation below still folds `mutation.timestamp_micros` for a carrier
+/// that contributes NO static cell — where Cassandra's `addStaticRow` skips
+/// collection entirely for an empty row (`if (!row.isEmpty())`). Closing
+/// that requires folding from the merged static-op set the emitter actually
+/// writes, which is the broader "derive stats from the emitted artifact"
+/// refactor `row_group_survival`'s doc comment already defers.
 pub(crate) fn fold_static_carrier_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
     fold_row_content_stats(stats, mutation, None);
-    fold_row_deletion_marker(stats, DataWriter::resolve_row_deletion(&[mutation], None));
 }
 
 /// Fold ONLY the partition/range tombstone MARKER fields of `mutation` (issue

@@ -1996,17 +1996,16 @@ impl KWayMerger {
                             // either — this call cannot double-count it, but
                             // nothing folds it, matching the marker being
                             // absent from Data.db.
-                            // Issue #4246 roborev round-6 finding: this must
-                            // be the STATIC-CARRIER fold, not
-                            // `fold_row_content_stats` alone — the latter
-                            // never folds the row's own deletion (`DeleteRow`
-                            // is an explicit no-op arm; the #932
-                            // `row_tombstone` field is not read at all),
-                            // deferring it to a GROUP-level
-                            // `fold_row_deletion_marker` that this branch
-                            // does not perform. A static carrier's
-                            // `DeleteRow`/`row_tombstone` was therefore
-                            // folded NOWHERE on this path.
+                            // The STATIC-CARRIER fold folds row CONTENT
+                            // only. A static carrier's own row deletion
+                            // (`DeleteRow` op or the #932 `row_tombstone`
+                            // field) is folded NOWHERE, deliberately: no
+                            // production path emits a static-row deletion to
+                            // Data.db, so counting one would be a PHANTOM
+                            // marker of exactly the class issue #4246 exists
+                            // to eliminate. Adjudication + Cassandra
+                            // authority: `fold_static_carrier_stats`'s doc
+                            // comment (roborev round 8, overturning 6/7).
                             crate::storage::sstable::writer::stats_fold::fold_static_carrier_stats(
                                 &mut partition_stats,
                                 &mutation,
@@ -2062,20 +2061,18 @@ impl KWayMerger {
                             let partition_floor =
                                 partition_tombstone.as_ref().map(|pt| pt.deletion_time);
                             for mutation in &buffered_rows {
-                                let clustering_key = mutation.clustering_key.as_ref();
-                                let mut shadow_floor = partition_floor;
-                                for rt in &range_tombstones {
-                                    if crate::storage::sstable::writer::data_writer::range_tombstone_covers(
-                                        rt,
-                                        clustering_key,
+                                // Shared with the emitter's own derivation
+                                // (issue #4246 roborev round-8 finding 2,
+                                // `data_writer/row_groups.rs`) so the fold
+                                // can never shadow-gate differently than
+                                // `feed_row` does.
+                                let shadow_floor =
+                                    crate::storage::sstable::writer::data_writer::resolve_shadow_floor(
+                                        partition_floor,
+                                        &range_tombstones,
+                                        mutation.clustering_key.as_ref(),
                                         &write_schema,
-                                    ) {
-                                        shadow_floor = Some(
-                                            shadow_floor
-                                                .map_or(rt.deletion_time, |f| f.max(rt.deletion_time)),
-                                        );
-                                    }
-                                }
+                                    );
                                 // Issue #4246 roborev round-3 finding: the
                                 // four-step fold sequence (resolve survival,
                                 // fold the group's own row-deletion marker

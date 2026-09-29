@@ -736,79 +736,72 @@ impl SSTableWriter {
         // `mutation_shadowed` test.
         let partition_floor = partition_tombstone.map(|pt| pt.deletion_time);
         let schema_has_static = self.schema.columns.iter().any(|c| c.is_static);
-        let row_mutations: Vec<&Mutation> = mutations
-            .iter()
-            .filter(|m| !data_writer::is_static_row_mutation(m, &self.schema))
-            .collect();
-        let mut group_start = 0;
-        while group_start < row_mutations.len() {
-            let mut group_end = group_start + 1;
-            while group_end < row_mutations.len()
-                && row_mutations[group_end].clustering_key
-                    == row_mutations[group_start].clustering_key
-            {
-                group_end += 1;
-            }
-            let group = &row_mutations[group_start..group_end];
-            let clustering_key = group[0].clustering_key.as_ref();
-            let mut shadow_floor = partition_floor;
-            for rt in &range_tombstones {
-                if data_writer::range_tombstone_covers(rt, clustering_key, &self.schema) {
-                    shadow_floor =
-                        Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
+        //
+        // THE SHARED GROUPING (issue #4246 roborev round-8 finding 2).
+        // The clustering-row selection, adjacency grouping and shadow-floor
+        // resolution below are the SHARED ones the EMITTER
+        // (`DataWriter::merge_clustering_rows`) uses — issue #4246 roborev
+        // round-8 finding 2, `data_writer/row_groups.rs`. That sharing is
+        // the structural form of this fix's property: the fold cannot make
+        // a different grouping/shadow decision than the emitter, because it
+        // is not a copy of that decision.
+        let row_mutations = data_writer::clustering_row_mutations(&mutations, &self.schema);
+        let schema = &self.schema;
+        let stats = &mut self.stats;
+        data_writer::for_each_clustering_row_group(
+            &row_mutations,
+            schema,
+            partition_floor,
+            &range_tombstones,
+            |group, shadow_floor| {
+                let (survives, deletion_ts, row_deletion) =
+                    stats_fold::row_group_survival(group, schema, schema_has_static, shadow_floor);
+                // The group's own row-deletion marker (winning `DeleteRow` /
+                // #932 `row_tombstone`) is folded exactly ONCE here, at the
+                // group level — never per-mutation (issue #4246 roborev
+                // round-2 finding: see `fold_row_deletion_marker`'s doc).
+                stats_fold::fold_row_deletion_marker(stats, row_deletion);
+                for mutation in group {
+                    let carries_static = schema_has_static
+                        && mutation
+                            .operations
+                            .iter()
+                            .any(|op| data_writer::is_static_operation(op, schema));
+                    if carries_static {
+                        // Static-cell shadowing uses a SEPARATE,
+                        // partition-floor-only mechanism unrelated to this
+                        // row-level `deletion_ts` (out of this fix's
+                        // verified scope, see `row_group_survives`'s doc
+                        // comment) — pass `None` so per-op shadow gating
+                        // never applies to it, exactly the prior
+                        // unconditional-fold behavior.
+                        stats_fold::fold_row_content_stats(stats, mutation, None);
+                    } else if survives {
+                        // `fold_row_content_stats` itself gates per-mutation
+                        // (simple content) and per-op
+                        // (independent-timestamp `ComplexDeletion`/
+                        // `WriteComplexElement`) against `deletion_ts` — see
+                        // its doc comment (issue #4246 roborev finding). It
+                        // no longer folds a row's own deletion marker
+                        // (handled once above).
+                        stats_fold::fold_row_content_stats(stats, mutation, deletion_ts);
+                    }
                 }
-            }
-            let (survives, deletion_ts, row_deletion) = stats_fold::row_group_survival(
-                group,
-                &self.schema,
-                schema_has_static,
-                shadow_floor,
-            );
-            // The group's own row-deletion marker (winning `DeleteRow` /
-            // #932 `row_tombstone`) is folded exactly ONCE here, at the
-            // group level — never per-mutation (issue #4246 roborev round-2
-            // finding: see `fold_row_deletion_marker`'s doc comment).
-            stats_fold::fold_row_deletion_marker(&mut self.stats, row_deletion);
-            for mutation in group {
-                let carries_static = schema_has_static
-                    && mutation
-                        .operations
-                        .iter()
-                        .any(|op| data_writer::is_static_operation(op, &self.schema));
-                if carries_static {
-                    // Static-cell shadowing uses a SEPARATE, partition-floor
-                    // -only mechanism unrelated to this row-level
-                    // `deletion_ts` (out of this fix's verified scope, see
-                    // `row_group_survives`'s doc comment) — pass `None` so
-                    // per-op shadow gating never applies to it, exactly the
-                    // prior unconditional-fold behavior.
-                    stats_fold::fold_row_content_stats(&mut self.stats, mutation, None);
-                } else if survives {
-                    // `fold_row_content_stats` itself gates per-mutation
-                    // (simple content) and per-op (independent-timestamp
-                    // `ComplexDeletion`/`WriteComplexElement`) against
-                    // `deletion_ts` — see its doc comment (issue #4246
-                    // roborev finding). It no longer folds a row's own
-                    // deletion marker (handled once above).
-                    stats_fold::fold_row_content_stats(&mut self.stats, mutation, deletion_ts);
-                }
-            }
-            group_start = group_end;
-        }
+            },
+        );
         for mutation in &mutations {
             if data_writer::is_static_row_mutation(mutation, &self.schema) {
-                // Issue #4246 roborev round-7 finding: the STATIC-CARRIER
-                // fold, matching both compaction paths. `fold_row_content_
-                // stats` alone never folds a row's own deletion
-                // (`CellOperation::DeleteRow` is an explicit no-op arm and
-                // the #932 `row_tombstone` field is not read), deferring it
-                // to a group-level `fold_row_deletion_marker` this loop
-                // does not perform -- so a static carrier's deletion marker
-                // reached persisted stats NOWHERE on this path either.
-                // `pre_seed_encoding_baselines` does NOT cover this: it
-                // seeds only the MIN fields, leaving `max_timestamp`,
-                // `max_local_deletion_time` and the
-                // `estimatedTombstoneDropTime` histogram unprotected.
+                // The STATIC-CARRIER fold, matching both compaction paths.
+                // It folds the carrier's row CONTENT only: a static
+                // carrier's own row deletion (`CellOperation::DeleteRow` or
+                // the #932 `row_tombstone` field) is folded NOWHERE, and
+                // deliberately so — no production path emits a static-row
+                // deletion to Data.db, so counting one here would be a
+                // PHANTOM marker of exactly the class issue #4246 exists to
+                // eliminate. Full adjudication, Cassandra authority and
+                // emitter trace: `stats_fold::fold_static_carrier_stats`'s
+                // doc comment (issue #4246 roborev round 8, overturning
+                // rounds 6/7).
                 stats_fold::fold_static_carrier_stats(&mut self.stats, mutation);
             }
         }
@@ -1040,10 +1033,7 @@ impl SSTableWriter {
         // makes. Sorted locally (this slice is memtable-internal storage,
         // not guaranteed pre-sorted, unlike `write_partition`'s own
         // caller-sorted `mutations`).
-        let mut row_mutations: Vec<&Mutation> = mutations_slice
-            .iter()
-            .filter(|m| !data_writer::is_static_row_mutation(m, schema))
-            .collect();
+        let mut row_mutations = data_writer::clustering_row_mutations(mutations_slice, schema);
         row_mutations.sort_by(|a, b| match (&a.clustering_key, &b.clustering_key) {
             (None, None) => std::cmp::Ordering::Equal,
             (None, Some(_)) => std::cmp::Ordering::Less,
@@ -1053,71 +1043,59 @@ impl SSTableWriter {
                 .unwrap_or_else(|_| ck_a.cmp(ck_b)),
         });
 
-        let mut group_start = 0;
-        while group_start < row_mutations.len() {
-            let mut group_end = group_start + 1;
-            while group_end < row_mutations.len()
-                && row_mutations[group_end].clustering_key
-                    == row_mutations[group_start].clustering_key
-            {
-                group_end += 1;
-            }
-            let group = &row_mutations[group_start..group_end];
-            let clustering_key = group[0].clustering_key.as_ref();
-            let mut shadow_floor = partition_floor;
-            for rt in &range_tombstones {
-                if data_writer::range_tombstone_covers(rt, clustering_key, schema) {
-                    shadow_floor =
-                        Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
+        data_writer::for_each_clustering_row_group(
+            &row_mutations,
+            schema,
+            partition_floor,
+            &range_tombstones,
+            |group, shadow_floor| {
+                let survives =
+                    stats_fold::row_group_survives(group, schema, schema_has_static, shadow_floor);
+                // GROUP-level gating only (issue #4246): deliberately NOT the
+                // per-mutation `deletion_ts` refinement `write_partition` (the
+                // PERSISTED-stats fold, below) uses. This function computes the
+                // ENCODING baseline (`pre_seed_encoding_baselines`'s input),
+                // which is a SEPARATE Cassandra concept from the persisted STATS
+                // component `write_partition`'s fold feeds: Cassandra's own
+                // `EncodingStats` accumulates from EVERY memtable update applied
+                // (`SkipListMemtable.put`'s `statsCollector.update(update.stats())`,
+                // cassandra-5.0.8), UNCONDITIONALLY — it does not re-derive from
+                // the post-reconciliation row the way `MetadataCollector`
+                // (persisted STATS) does. Verified against `issue_717_row_
+                // tombstone_columns_subset.rs::row_tombstone_emits_columns_subset`,
+                // a Cassandra-rejection-motivated byte-level test asserting an
+                // INSERT-then-DELETE for the SAME clustering key in ONE flush
+                // batch encodes its tombstone delta against the INSERT's
+                // timestamp, not the DELETE's — the per-mutation refinement
+                // broke it. So an INSERT shadowed by a same-batch, same-key
+                // DELETE (unlike a range/partition-tombstone shadow, which this
+                // group-level gate already excludes correctly since the
+                // SHADOWED clustering key's own group returns `None`) is a
+                // KNOWN, DOCUMENTED residual of this fix: the ENCODING baseline
+                // still includes it, matching Cassandra, but the PERSISTED STATS
+                // component inherits that same (possibly lower) value here too,
+                // since `pre_seed_encoding_baselines` seeds `self.stats` from
+                // this function's return value directly — see
+                // `issue_4246_writer_stats_shadow_regression.rs`'s
+                // `insert_then_delete_same_batch_baseline_residual_is_documented`
+                // for the exact boundary this leaves.
+                for mutation in group {
+                    let carries_static = schema_has_static
+                        && mutation
+                            .operations
+                            .iter()
+                            .any(|op| data_writer::is_static_operation(op, schema));
+                    if survives || carries_static {
+                        Self::fold_one_mutation_baseline(
+                            mutation,
+                            &mut min_timestamp,
+                            &mut min_ldt,
+                            &mut min_ttl,
+                        );
+                    }
                 }
-            }
-            let survives =
-                stats_fold::row_group_survives(group, schema, schema_has_static, shadow_floor);
-            // GROUP-level gating only (issue #4246): deliberately NOT the
-            // per-mutation `deletion_ts` refinement `write_partition` (the
-            // PERSISTED-stats fold, below) uses. This function computes the
-            // ENCODING baseline (`pre_seed_encoding_baselines`'s input),
-            // which is a SEPARATE Cassandra concept from the persisted STATS
-            // component `write_partition`'s fold feeds: Cassandra's own
-            // `EncodingStats` accumulates from EVERY memtable update applied
-            // (`SkipListMemtable.put`'s `statsCollector.update(update.stats())`,
-            // cassandra-5.0.8), UNCONDITIONALLY — it does not re-derive from
-            // the post-reconciliation row the way `MetadataCollector`
-            // (persisted STATS) does. Verified against `issue_717_row_
-            // tombstone_columns_subset.rs::row_tombstone_emits_columns_subset`,
-            // a Cassandra-rejection-motivated byte-level test asserting an
-            // INSERT-then-DELETE for the SAME clustering key in ONE flush
-            // batch encodes its tombstone delta against the INSERT's
-            // timestamp, not the DELETE's — the per-mutation refinement
-            // broke it. So an INSERT shadowed by a same-batch, same-key
-            // DELETE (unlike a range/partition-tombstone shadow, which this
-            // group-level gate already excludes correctly since the
-            // SHADOWED clustering key's own group returns `None`) is a
-            // KNOWN, DOCUMENTED residual of this fix: the ENCODING baseline
-            // still includes it, matching Cassandra, but the PERSISTED STATS
-            // component inherits that same (possibly lower) value here too,
-            // since `pre_seed_encoding_baselines` seeds `self.stats` from
-            // this function's return value directly — see
-            // `issue_4246_writer_stats_shadow_regression.rs`'s
-            // `insert_then_delete_same_batch_baseline_residual_is_documented`
-            // for the exact boundary this leaves.
-            for mutation in group {
-                let carries_static = schema_has_static
-                    && mutation
-                        .operations
-                        .iter()
-                        .any(|op| data_writer::is_static_operation(op, schema));
-                if survives || carries_static {
-                    Self::fold_one_mutation_baseline(
-                        mutation,
-                        &mut min_timestamp,
-                        &mut min_ldt,
-                        &mut min_ttl,
-                    );
-                }
-            }
-            group_start = group_end;
-        }
+            },
+        );
 
         // Wholly-static mutations (excluded from `row_mutations` above) are
         // out of this fix's verified scope (see `stats_fold::row_group_survives`'s

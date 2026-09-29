@@ -821,12 +821,14 @@ impl WriteEngine {
                             if !stream_state.saw_carrier_or_static {
                                 stream_state.static_first_ts = mutation.timestamp_micros;
                             }
-                            // Issue #4246 roborev round-6 finding: the
-                            // STATIC-CARRIER fold, not
-                            // `fold_row_content_stats` alone — see that
-                            // helper's doc comment for why the latter leaves
-                            // a static carrier's own `DeleteRow`/#932
-                            // `row_tombstone` folded NOWHERE on this path.
+                            // The STATIC-CARRIER fold: row CONTENT only.
+                            // A static carrier's own `DeleteRow`/#932
+                            // `row_tombstone` is folded NOWHERE, and
+                            // deliberately so — the emitter never writes a
+                            // static-row deletion, so folding one would be a
+                            // PHANTOM marker (issue #4246 roborev round 8,
+                            // overturning 6/7). See
+                            // `fold_static_carrier_stats`'s doc comment.
                             stats_fold::fold_static_carrier_stats(
                                 stream_state.partition_stats_mut(),
                                 &mutation,
@@ -1024,20 +1026,18 @@ impl WriteEngine {
                                 .as_ref()
                                 .map(|pt| pt.deletion_time);
                             for mutation in &state.buffered_rows {
-                                let clustering_key = mutation.clustering_key.as_ref();
-                                let mut shadow_floor = partition_floor;
-                                for rt in &state.range_tombstones {
-                                    if crate::storage::sstable::writer::data_writer::range_tombstone_covers(
-                                        rt,
-                                        clustering_key,
+                                // Shared with the emitter's own derivation
+                                // (issue #4246 roborev round-8 finding 2,
+                                // `data_writer/row_groups.rs`) so the fold
+                                // can never shadow-gate differently than
+                                // `feed_streaming_row` does.
+                                let shadow_floor =
+                                    crate::storage::sstable::writer::data_writer::resolve_shadow_floor(
+                                        partition_floor,
+                                        &state.range_tombstones,
+                                        mutation.clustering_key.as_ref(),
                                         &write_schema,
-                                    ) {
-                                        shadow_floor = Some(
-                                            shadow_floor
-                                                .map_or(rt.deletion_time, |f| f.max(rt.deletion_time)),
-                                        );
-                                    }
-                                }
+                                    );
                                 // `skip_static_ops = false` inside it,
                                 // matching what `feed_streaming_row`/
                                 // `feed_row` pass to `merge_row_group` —
