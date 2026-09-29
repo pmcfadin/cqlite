@@ -13,12 +13,15 @@
 //! |---|---|
 //! | `test_da.wide_table` (`wide-table-bti.cql`) | the **BTI (`da`)** format — `raw_view/point.rs` resolves a partition by TRIE DESCENT here, not by the BIG index; 3 partitions × 300 clustering rows |
 //! | `test_comp.lz4_table` (`compression-parity.cql`) | a **COMPRESSED** (`LZ4Compressor`, 16 KiB chunks) BIG table read through chunk stitching — 600 rows in one partition |
+//! | `test_comp.snappy_table` / `deflate_table` / `zstd_table` (same schema) | the other three **COMPRESSOR CLASSES** Cassandra ships, each at 16 KiB chunks — the axis heading says "compression axes" plural, and one compressor could not honour it |
+//! | `test_comp.short_final_chunk` (same schema) | `LZ4Compressor` at **4 KiB** chunks with a total payload that is NOT a multiple of 4096, so the LAST chunk covers fewer than `chunk_length_in_kb` uncompressed bytes — a chunk-stitching edge case that perturbs the offset mapping this sweep compares |
+//! | `test_comp.incompressible_uncompressed_chunk` (same schema, `payload BLOB`) | `LZ4Compressor` at 4 KiB with `min_compress_ratio = 1.0`, so `CompressedSequentialWriter` stores high-entropy chunks **RAW** at exactly the uncompressed length — the uncompressed-chunk fallback INSIDE a compressed file, and the sweep's only `BLOB` payload column |
 //! | `test_comp.uncompressed_table` (same schema) | the **UNCOMPRESSED** BIG table (`compression = {'enabled': false}`, so NO `CompressionInfo.db`; its only checksum sidecar is `Digest.crc32` — this fixture ships no `CRC.db`) whose compaction-stream path `issue_4222_raw_view_uncompressed_failclosed_test.rs` investigated — every write time must be the real on-disk one, never `from_legacy_value`'s fabricated zero |
 //! | `test_compactionparity.live_clustering` (`compaction-parity.cql`) | the compaction-parity corpus the raw view's JOIN-substitute correlation lane uses, swept end-to-end; also the only fixture whose partition-key column is not named `pk` |
 //!
 //! # Fixture discipline (#3220/#3121)
 //!
-//! All four `Data.db` binaries are **git-committed**, so every case here is
+//! All nine `Data.db` binaries are **git-committed**, so every case here is
 //! `must_run`: absence means a broken checkout, never an unfetched corpus, and
 //! the harness PANICS rather than skipping. Roots are still resolved PER TABLE
 //! (`sstables_root_for_table`), never by keyspace.
@@ -27,7 +30,7 @@
 //!
 //! Unlike the `tomb` and `deltas` lanes, **every case in this file is
 //! `Discipline::GitCommitted`**, so the full gate's `core-tests` component
-//! certifies all four WITHOUT a fetched corpus, and
+//! certifies all nine WITHOUT a fetched corpus, and
 //! `CQLITE_REQUIRE_FIXTURES=1` changes nothing here — there is no fetch-only
 //! case for it to promote. A green gate IS sufficient evidence that this
 //! family was swept.
@@ -70,6 +73,91 @@ async fn lz4_table_matches_the_sstabledump_golden() {
     assert_raw_view_matches_golden(&FixtureSpec {
         keyspace: "test_comp",
         table: "lz4_table",
+        schema_file: "compression-parity.cql",
+        partition_key_columns: &["pk"],
+        discipline: Discipline::GitCommitted,
+    })
+    .await
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
+}
+
+/// The REMAINING COMPRESSOR CLASSES. `lz4_table` alone left this lane's own
+/// "compression **axes**" heading overstated: a defect in the Snappy,
+/// Deflate or Zstd chunk path — a wrong compressed-length field, a
+/// decompressor handed the wrong bound — is invisible to an LZ4-only sweep,
+/// and each of these fixtures ships a committed `Data.db` AND golden, so
+/// covering them costs no fixture and no dependence on #4311 (roborev job
+/// 42).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snappy_table_matches_the_sstabledump_golden() {
+    assert_raw_view_matches_golden(&FixtureSpec {
+        keyspace: "test_comp",
+        table: "snappy_table",
+        schema_file: "compression-parity.cql",
+        partition_key_columns: &["pk"],
+        discipline: Discipline::GitCommitted,
+    })
+    .await
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deflate_table_matches_the_sstabledump_golden() {
+    assert_raw_view_matches_golden(&FixtureSpec {
+        keyspace: "test_comp",
+        table: "deflate_table",
+        schema_file: "compression-parity.cql",
+        partition_key_columns: &["pk"],
+        discipline: Discipline::GitCommitted,
+    })
+    .await
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zstd_table_matches_the_sstabledump_golden() {
+    assert_raw_view_matches_golden(&FixtureSpec {
+        keyspace: "test_comp",
+        table: "zstd_table",
+        schema_file: "compression-parity.cql",
+        partition_key_columns: &["pk"],
+        discipline: Discipline::GitCommitted,
+    })
+    .await
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
+}
+
+/// SHORT FINAL CHUNK: `chunk_length_in_kb = 4` with a payload that is not a
+/// multiple of 4096, so the last chunk covers fewer uncompressed bytes than
+/// every other one. Every row's `position` is a DATA-FILE offset the reader
+/// must map back through the chunk table, so an off-by-one in the final
+/// chunk's uncompressed length is exactly the class of defect a
+/// byte-exact position comparison against the golden can see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn short_final_chunk_matches_the_sstabledump_golden() {
+    assert_raw_view_matches_golden(&FixtureSpec {
+        keyspace: "test_comp",
+        table: "short_final_chunk",
+        schema_file: "compression-parity.cql",
+        partition_key_columns: &["pk"],
+        discipline: Discipline::GitCommitted,
+    })
+    .await
+    .require_observed(&["cell_timestamp", "row_timestamp", "entry:row"]);
+}
+
+/// UNCOMPRESSED CHUNK INSIDE A COMPRESSED FILE: `min_compress_ratio = 1.0`
+/// sets `maxCompressedLength` to the 4096-byte chunk length, so
+/// `CompressedSequentialWriter` stores each high-entropy chunk RAW at
+/// exactly its uncompressed length rather than keeping the larger
+/// compressed form. A reader that decides "compressed file ⇒ every chunk is
+/// compressed" reads garbage here while every other fixture in this lane
+/// passes. Also the sweep's only `BLOB` payload column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incompressible_uncompressed_chunk_matches_the_sstabledump_golden() {
+    assert_raw_view_matches_golden(&FixtureSpec {
+        keyspace: "test_comp",
+        table: "incompressible_uncompressed_chunk",
         schema_file: "compression-parity.cql",
         partition_key_columns: &["pk"],
         discipline: Discipline::GitCommitted,
