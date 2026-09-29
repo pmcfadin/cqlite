@@ -995,21 +995,30 @@ pub fn build_expectations(
         .values()
         .filter(|sstables| sstables.len() > 1)
         .count();
+    // The two write paths must not overlap, checked UNCONDITIONALLY
+    // (roborev jobs 70/71). `SHAPE_MULTI_GENERATION` is a member of
+    // `SHAPE_TOKENS`, which is exactly the set `bump` accepts — so a future
+    // `bump(...)` for it inside the entry loop would be permitted, and the
+    // census would then be wrong in one of TWO directions:
+    //
+    //   * derived count > 0 — the trailing `insert` silently DISCARDS the
+    //     loop's count, so the census under-reports;
+    //   * derived count == 0 — no insert happens, so the loop-written count
+    //     SURVIVES and the census reports the shape as observed for a
+    //     fixture whose expectation model says it has none. Five lanes
+    //     claim this token, so that false positive would let a regenerated
+    //     fixture satisfy a claim it no longer meets.
+    //
+    // Nesting the guard inside the `> 0` branch caught only the first, which
+    // is why it runs before it.
+    assert!(
+        !shapes.contains_key(SHAPE_MULTI_GENERATION),
+        "issue #4309: {} already counted {SHAPE_MULTI_GENERATION} inside the entry loop. \
+         It is DERIVED from the finished expectation model, so it must have exactly one \
+         writer — the insert below",
+        spec.id()
+    );
     if cross_generation_keys > 0 {
-        // The two write paths must not overlap (roborev job 70).
-        // `SHAPE_MULTI_GENERATION` is a member of `SHAPE_TOKENS`, which is
-        // exactly the set `bump` accepts — so a future `bump(...)` for it
-        // inside the entry loop would be permitted, and its count then
-        // SILENTLY DISCARDED by this trailing `insert`. The census would
-        // under-report instead of failing. The comment on the const says
-        // this token does not go through `bump`; this is what enforces it.
-        assert!(
-            !shapes.contains_key(SHAPE_MULTI_GENERATION),
-            "issue #4309: {} already counted {SHAPE_MULTI_GENERATION} inside the entry \
-             loop. It is DERIVED from the finished expectation model, so it must have \
-             exactly one writer — this insert — or one of the two counts is lost",
-            spec.id()
-        );
         shapes.insert(SHAPE_MULTI_GENERATION, cross_generation_keys);
     }
 
