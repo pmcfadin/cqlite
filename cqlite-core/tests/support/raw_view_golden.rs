@@ -509,6 +509,17 @@ pub fn fold_simple_cell(
     if let Some(deletion) = cell.get("deletion_info") {
         // A tombstoned cell: its local-deletion-time is the tombstone's GC
         // clock and it has no TTL of its own.
+        //
+        // ATTRIBUTION, same trap as the inherited-TTL note below (roborev,
+        // issue #4309): the view has TWO cell-tombstone kinds — `row_map.rs`
+        // renders "expired" for `TombstoneType::TtlExpiration` and "cell"
+        // otherwise — but the golden's `deletion_info` does not distinguish
+        // them, so this model hard-codes "cell". No fixture in the sweep
+        // surfaces the expiration variant today; if one ever does (the
+        // `gc_before_boundary` / `ttl_cells` families are the plausible
+        // source) the resulting `<col>_tombstone` mismatch is a
+        // HARNESS-MODELLING gap FIRST and a view failure only second. Accept
+        // both kinds here before concluding the view is wrong.
         facts.insert(format!("{name}_tombstone"), Fact::Text("cell".to_string()));
         facts.insert(
             format!("{name}_local_deletion_time"),

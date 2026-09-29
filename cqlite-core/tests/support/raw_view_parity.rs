@@ -567,6 +567,20 @@ impl SweepOutcome {
     /// lane exists to exercise. A no-op for a legitimately skipped fetch-only
     /// fixture (there is nothing to have observed).
     pub fn require_observed(&self, kinds: &[&str]) {
+        // An EMPTY claim is not a claim (roborev, issue #4309). `#[must_use]`
+        // forces a caller to CALL this, but nothing forced the claim to say
+        // anything: `require_observed(&[])` satisfied the lint, ran the loop
+        // below zero times, and let a case compare thousands of absences and
+        // report green — the exact hole the census exists to close. Asserted
+        // BEFORE the `ran` early return, so an empty claim fails even on a
+        // fixture that skipped.
+        assert!(
+            !kinds.is_empty(),
+            "issue #4309: {} called require_observed(&[]) — an empty coverage claim. \
+             Name the metadata families and golden entry shapes this case exists to \
+             exercise; a case that claims nothing certifies nothing.",
+            self.fixture
+        );
         if !self.ran {
             return;
         }
@@ -627,6 +641,22 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     );
 
     let roles = classify_columns(&scan.metadata.columns, spec);
+    // The SCAN's column set, kept so the point-read producer can be held to the
+    // SAME contract (roborev, issue #4309; the #3890 class CLAUDE.md pins:
+    // "Point/seek-vs-scan tests use `SELECT *` and assert the column set in
+    // BOTH directions"). Deriving `roles` from the scan alone left the point
+    // path's own `metadata.columns` unread, so a contract column missing from —
+    // or extra in — the point projection was only caught where some golden
+    // stated a non-`Absent` fact for it: for a column whose golden value is
+    // `Absent` across the whole fixture, `fact_of(None)` and
+    // `fact_of(Some(Null))` are both `Fact::Absent` and a DROPPED column
+    // compares clean.
+    let scan_columns: BTreeSet<String> = scan
+        .metadata
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
     let (expected, mut observed) = build_expectations(&goldens, &roles, spec);
 
     // The FAMILY half of the census is taken from the EXPECTATION model, and
@@ -693,6 +723,24 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
                     spec.id()
                 )
             });
+        // BOTH DIRECTIONS (#3890): set equality, so a column dropped from the
+        // point projection AND one that appears only there both fail by name.
+        let point_columns: BTreeSet<String> = result
+            .metadata
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        assert_eq!(
+            point_columns,
+            scan_columns,
+            "issue #4309: {} pk={key} — the point-read producer must expose the SAME \
+             column contract as the full scan. Missing from the point read: {:?}; \
+             present ONLY in the point read: {:?}",
+            spec.id(),
+            scan_columns.difference(&point_columns).collect::<Vec<_>>(),
+            point_columns.difference(&scan_columns).collect::<Vec<_>>(),
+        );
         let rows: Vec<&QueryRow> = result.rows.iter().collect();
         assert!(
             !rows.is_empty(),
