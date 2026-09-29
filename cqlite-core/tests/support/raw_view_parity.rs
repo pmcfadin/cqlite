@@ -1072,9 +1072,6 @@ fn actual_partition_key(row: &QueryRow, spec: &FixtureSpec) -> String {
         .join("|")
 }
 
-/// Split an actual row set into `(sstable, key)` groups and compare each
-/// against its expectation group, in both directions. Returns the number of
-/// column comparisons actually performed.
 /// Is this fact the ABSENCE of a complex-deletion marker rather than an
 /// observation of one? (roborev finding S1, issue #4309.)
 ///
@@ -1140,6 +1137,9 @@ pub fn assert_value_key_sets_match(
     );
 }
 
+/// Split an actual row set into `(sstable, key)` groups and compare each
+/// against its expectation group, in both directions. Returns the number of
+/// column comparisons actually performed.
 fn assert_rows_match(
     spec: &FixtureSpec,
     source: &str,

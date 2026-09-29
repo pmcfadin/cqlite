@@ -574,7 +574,14 @@ fn identical_value_key_sets_pass() {
 /// `fact_of(Some(Null))` are both `Fact::Absent`. Against the key sets it
 /// must fail by name.
 #[test]
-#[should_panic(expected = "MISSING from the point row")]
+// ANCHORED ON THE RENDERED DIFFERENCE LIST, not the static prose (roborev
+// job 51). `assert_value_key_sets_match`'s message ALWAYS contains both
+// literal phrases, so matching on "MISSING from the point row" alone passes
+// whichever direction actually diverged — swapping the two `expected`
+// strings between these tests would leave both green, and neither control
+// would establish the direction it names. The column name only appears in
+// the list for the direction under test.
+#[should_panic(expected = r#"MISSING from the point row: ["body_timestamp"]"#)]
 fn a_point_row_missing_a_column_fails() {
     let scan = keys(&["pk", "ck", "sstable", "row_kind", "body_timestamp"]);
     let point = keys(&["pk", "ck", "sstable", "row_kind"]);
@@ -584,7 +591,7 @@ fn a_point_row_missing_a_column_fails() {
 /// NEGATIVE CONTROL, direction 2 (#3890 pins BOTH directions): a column
 /// present ONLY on the point row is equally a contract divergence.
 #[test]
-#[should_panic(expected = "present ONLY on the point row")]
+#[should_panic(expected = r#"present ONLY on the point row: ["body_ttl"]"#)]
 fn a_point_row_with_an_extra_column_fails() {
     let scan = keys(&["pk", "ck", "sstable", "row_kind"]);
     let point = keys(&["pk", "ck", "sstable", "row_kind", "body_ttl"]);
