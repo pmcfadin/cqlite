@@ -1972,44 +1972,25 @@ impl KWayMerger {
                             if !saw_carrier_or_static {
                                 static_first_ts = mutation.timestamp_micros;
                             }
-                            // Static-cell shadowing by a partition tombstone is
-                            // a separate, pre-existing question issue #4246
-                            // does not attempt (see `row_group_survives`'s doc
-                            // comment) — folded unconditionally (`None`
-                            // shadow boundary), matching the prior behavior
-                            // for this classification exactly.
-                            // `fold_row_content_stats` (not `fold_mutation_stats`,
-                            // issue #4246 roborev finding): the ONLY markers
-                            // this fold could otherwise double-count are a
-                            // `partition_tombstone`/`range_tombstones` field
-                            // on THIS SAME mutation object, which reaches
-                            // this branch only if it also has non-empty
-                            // `operations` — this mutation IS in this branch
-                            // because `mutation.clustering_key.is_none() &&
-                            // schema_has_static`, so any such marker field
-                            // would be REACHABLE-BUT-DEAD anyway: it is
-                            // never added to `partition_tombstone`/
-                            // `range_tombstones` above (those are set only
-                            // by the mutually-exclusive `is_partition_only`/
-                            // `is_range_only` branches, which require EMPTY
-                            // `operations`) and so never emitted as a marker
-                            // either — this call cannot double-count it, but
-                            // nothing folds it, matching the marker being
-                            // absent from Data.db.
-                            // The STATIC-CARRIER fold folds row CONTENT
-                            // only. A static carrier's own row deletion
-                            // (`DeleteRow` op or the #932 `row_tombstone`
-                            // field) is excluded here, deliberately: no
-                            // production path emits a static-row deletion to
-                            // Data.db, so counting one would be a PHANTOM
-                            // marker of exactly the class issue #4246 exists
-                            // to eliminate. The flush path's #729 pre-seed
-                            // baseline re-derives the SAME exclusion
-                            // independently (`fold_one_mutation_baseline`,
-                            // round 10; #4320 tracks unifying them).
-                            // Adjudication + Cassandra authority:
-                            // `fold_static_carrier_stats`'s doc comment
-                            // (roborev rounds 8 and 10).
+                            // The STATIC-CARRIER fold (issue #4246): row
+                            // CONTENT only, with a `None` shadow boundary.
+                            // INVARIANT it protects — a static carrier's own
+                            // row deletion (`DeleteRow` op or the #932
+                            // `row_tombstone` field) must NOT be folded,
+                            // because no production path emits a static-row
+                            // deletion to Data.db. The #729 flush pre-seed
+                            // baseline re-derives the same exclusion
+                            // independently in `fold_one_mutation_baseline`
+                            // (#4320 tracks unifying the two).
+                            // Canonical explanation — the two fold paths, the
+                            // pinned `cassandra-5.0.8` authority, why static-
+                            // cell shadowing is a separate out-of-scope
+                            // question, and why this is `fold_row_content_stats`
+                            // with no `fold_marker_stats` (a marker field on
+                            // this mutation would be reachable-but-dead, so
+                            // there is nothing here to double-count):
+                            // `stats_fold::fold_static_carrier_stats`'s doc
+                            // comment.
                             crate::storage::sstable::writer::stats_fold::fold_static_carrier_stats(
                                 &mut partition_stats,
                                 &mutation,

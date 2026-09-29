@@ -294,6 +294,17 @@ pub(crate) fn fold_single_mutation_row_group(
 /// [`row_group_survives`]'s doc comment), so the carrier keeps its prior
 /// unconditional-fold behavior exactly.
 ///
+/// [`fold_row_content_stats`] ALONE, with no accompanying
+/// [`fold_marker_stats`] call (issue #4246 roborev finding; the test-only
+/// `fold_mutation_stats` composes both). The only markers that second fold
+/// could add are a `partition_tombstone`/`range_tombstones` field on this
+/// SAME mutation object — and on a static carrier such a field is
+/// REACHABLE-BUT-DEAD: a carrier reaches this helper only with non-empty
+/// `operations`, whereas those fields are populated exclusively by the
+/// mutually-exclusive partition-only/range-only branches, which require
+/// EMPTY `operations`. So nothing here is double-counted, and nothing that
+/// Data.db actually carries is left unfolded.
+///
 /// Kept as a NAMED helper rather than inlined at the three call sites even
 /// though its body is now a single delegation: it is the one place this
 /// invariant is stated, and the production composition

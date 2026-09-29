@@ -888,42 +888,26 @@ impl WriteEngine {
                                 &mutation,
                                 None,
                             );
-                            // Correct-by-construction (issue #4246 roborev
-                            // round-5 finding): a `debug_assert!`-pinned
-                            // invariant compiles OUT of a release build, so a
-                            // future relaxation of `stream_rows_directly`'s
-                            // "no input carries any deletion" gate would
-                            // silently drop a row's own `DeleteRow`/
-                            // `row_tombstone` marker from persisted stats
-                            // with nothing to catch it in production.
-                            // Deliberately NOT `fold_single_mutation_row_group`
-                            // here (which would call `merge_row_group` — a
-                            // full per-column LWW reconciliation pass — on
-                            // EVERY row of this issue #2299 fast path, whose
-                            // entire purpose is avoiding exactly that cost):
-                            // fold the marker directly and cheaply, from
-                            // whichever of the two decoupled representations
-                            // this mutation ACTUALLY carries (never both,
-                            // #932), so correctness holds even if the
-                            // upstream gate is ever relaxed, without
-                            // reintroducing a reconciliation pass here.
-                            // Issue #4246 roborev round-6 finding: resolve
-                            // through `DataWriter::resolve_row_deletion` --
-                            // the single authority this diff extracted --
-                            // rather than hand-rolling the winner here. The
-                            // hand-rolled form preferred `row_tombstone`
-                            // UNCONDITIONALLY, whereas the shared helper
-                            // picks whichever representation carries the
-                            // GREATER timestamp; the two agree only while
-                            // the "never both (#932)" invariant holds, and
-                            // that invariant is not enforced at this point.
-                            // The cost objection that justified avoiding
-                            // `fold_single_mutation_row_group` here does NOT
-                            // apply to `resolve_row_deletion`: it is a cheap
-                            // group scan that performs no per-column LWW
-                            // reconciliation, so this fast path keeps its
-                            // #2299 property while gaining a single source
-                            // of truth.
+                            // INVARIANT: a row's own deletion marker reaches
+                            // persisted stats even on this fast path (issue
+                            // #4246 roborev rounds 5/6). Two site-specific
+                            // reasons for this exact shape:
+                            //   * NOT a `debug_assert!` on
+                            //     `stream_rows_directly`'s "no input carries
+                            //     any deletion" gate — that compiles OUT of a
+                            //     release build, so relaxing the gate would
+                            //     silently drop markers in production.
+                            //   * NOT `fold_single_mutation_row_group` — it
+                            //     runs `merge_row_group`'s full per-column LWW
+                            //     pass on EVERY row, the exact cost this issue
+                            //     #2299 path exists to avoid.
+                            // `resolve_row_deletion` is a cheap group scan with
+                            // no reconciliation, so it keeps the #2299 property
+                            // while remaining the single authority for WHICH
+                            // representation wins (the NEWEST, not an
+                            // unconditional `row_tombstone` preference — see
+                            // its doc comment, and `fold_row_deletion_marker`'s
+                            // for the fold-exactly-once rule).
                             stats_fold::fold_row_deletion_marker(
                                 stream_state.partition_stats_mut(),
                                 crate::storage::sstable::writer::data_writer::DataWriter::resolve_row_deletion(
