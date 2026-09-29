@@ -363,12 +363,61 @@ fn split_and_merge_matches_direct_fold_for_every_mutation_kind() {
         direct.has_partition_level_deletions,
         "partition_only must have set the partition-level-deletion flag"
     );
-    // ...and that the STATIC branch of `production_fold` was reached at all
-    // (issue #4246 roborev round-8): `static_carrier`'s writetime is the
-    // fixture's maximum, so it can only be the max if that branch ran.
+    // ...and a FIXTURE-MAXIMUM pin, stated as what it actually is (issue
+    // #4246 roborev round-9 finding). An earlier version of this block
+    // carried this same assertion under the claim that it proved
+    // `production_fold`'s STATIC branch was reached, reasoning that
+    // "`static_carrier`'s writetime is the fixture's maximum". Both halves
+    // were wrong: 9_000_000 is `complex_deletion_row`'s
+    // `marked_for_delete_at`, not `static_carrier`'s writetime (850), and
+    // the value is INSENSITIVE to the static branch anyway — deleting that
+    // arm routes the carrier to `fold_single_mutation_row_group`, whose
+    // `carries_static` path resolves to the identical
+    // `fold_row_content_stats(stats, mutation, None)` call, leaving
+    // `max_timestamp` unchanged. That was the same false-coverage-claim
+    // class round 6 corrected on Property 7, so it is split here into one
+    // honest pin plus one real control.
     assert_eq!(
         direct.max_timestamp, 9_000_000,
-        "the complex-deletion marker must remain the fixture maximum"
+        "complex_deletion_row's marked_for_delete_at must remain the \
+         fixture maximum"
+    );
+    // BRANCH-SENSITIVITY CONTROL for `production_fold`'s static arm, stated
+    // RELATIVELY so it needs no magic number and cannot drift with the
+    // fixture: for a static carrier that owns a row deletion the two
+    // dispatch arms MUST disagree, because `fold_single_mutation_row_group`
+    // folds the group's deletion marker while `fold_static_carrier_stats`
+    // deliberately does not (the round-8 phantom-marker adjudication). If
+    // these ever agree, the static arm is not load-bearing and the
+    // equivalence asserted above covers less than it claims. The absolute
+    // behaviour — zero observations, in BOTH representations, with a live
+    // clustering-row control — is pinned by
+    // `static_carrier_row_deletion_is_never_folded` below.
+    let static_carrier_with_deletion = mutations
+        .iter()
+        .find(|m| {
+            m.clustering_key.is_none()
+                && m.operations
+                    .iter()
+                    .any(|op| matches!(op, CellOperation::DeleteRow))
+        })
+        .expect("fixture must contain a static carrier owning a DeleteRow");
+    let mut via_static_arm = StatisticsMetadata::new();
+    fold_static_carrier_stats(&mut via_static_arm, static_carrier_with_deletion);
+    let mut via_clustering_arm = StatisticsMetadata::new();
+    fold_single_mutation_row_group(
+        &mut via_clustering_arm,
+        static_carrier_with_deletion,
+        &schema,
+        true,
+        None,
+    );
+    assert_ne!(
+        via_static_arm.tombstone_histogram.total_observations(),
+        via_clustering_arm.tombstone_histogram.total_observations(),
+        "production_fold's static arm must be LOAD-BEARING: routing a \
+         static carrier's row deletion through the clustering-row arm folds \
+         a phantom marker, so the two arms cannot agree"
     );
 }
 
