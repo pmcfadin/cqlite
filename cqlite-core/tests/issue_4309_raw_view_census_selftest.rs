@@ -52,7 +52,9 @@
 //! sweep schemas have zero), and it is `FetchOnly`. So `fold_complex_column`,
 //! the `_complex_deletion` exclusion in `classify_columns` that its own
 //! comment calls "load-bearing", and the `Fact::Bool(false)` census
-//! exclusion never execute under `core-tests`. They are controlled here.
+//! exclusion never execute under `core-tests`. All three are controlled
+//! here — `classify_columns` against a synthetic contract column set, the
+//! other two against synthetic goldens.
 //!
 //! This lane opens no database and reads no corpus, so every case here is
 //! `must_run` on EVERY gate. Each of those tokens now has a positive control
@@ -65,9 +67,13 @@
 #[path = "support/raw_view_parity.rs"]
 mod raw_view_parity;
 
+use cqlite_core::query::result::ColumnInfo;
 use raw_view_parity::golden::Fact;
 use raw_view_parity::golden::RowIdentity;
-use raw_view_parity::golden::{build_expectations, ColumnRoles, GoldenSstable};
+use raw_view_parity::golden::{
+    build_expectations, classify_columns, ColumnRoles, GoldenSstable, DECLARED_GAP_COLUMNS,
+    PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA,
+};
 use raw_view_parity::{
     assert_value_key_sets_match, fact_kind, is_negative_complex_marker, SweepOutcome,
     KNOWN_COVERAGE_TOKENS, UNCLAIMABLE_TOKENS,
@@ -141,6 +147,30 @@ fn census(goldens: &[GoldenSstable]) -> BTreeMap<&'static str, usize> {
 fn census_with(goldens: &[GoldenSstable], roles: &ColumnRoles) -> BTreeMap<&'static str, usize> {
     build_expectations(goldens, roles, &SPEC).1
 }
+
+/// One representative column per `fact_kind` arm. Kept as a const because
+/// BOTH halves of `every_produced_token_is_in_the_known_vocabulary` read it
+/// — the membership half and the set-equality half.
+const FACT_KIND_REPRESENTATIVES: &[&str] = &[
+    "row_timestamp",
+    "row_ttl",
+    "row_liveness_expires_at",
+    "row_local_deletion_time",
+    "row_tombstone",
+    "row_deletion_timestamp",
+    "partition_deletion_time",
+    "partition_deletion_timestamp",
+    "bound_inclusive",
+    "range_deletion_time",
+    "range_deletion_timestamp",
+    "tags_complex_deletion_timestamp",
+    "tags_complex_deletion_time",
+    "tags_complex_deletion",
+    "body_local_deletion_time",
+    "body_timestamp",
+    "body_ttl",
+    "body_tombstone",
+];
 
 /// A generation built from explicit partition objects, for the shapes
 /// `generation()`'s one-live-row-per-key form cannot express.
@@ -851,27 +881,7 @@ fn complex_deletion_arms_win_over_the_generic_timestamp_arms() {
 /// hand; this asserts it instead.
 #[test]
 fn every_produced_token_is_in_the_known_vocabulary() {
-    // One representative column per `fact_kind` arm.
-    for column in [
-        "row_timestamp",
-        "row_ttl",
-        "row_liveness_expires_at",
-        "row_local_deletion_time",
-        "row_tombstone",
-        "row_deletion_timestamp",
-        "partition_deletion_time",
-        "partition_deletion_timestamp",
-        "bound_inclusive",
-        "range_deletion_time",
-        "range_deletion_timestamp",
-        "tags_complex_deletion_timestamp",
-        "tags_complex_deletion_time",
-        "tags_complex_deletion",
-        "body_local_deletion_time",
-        "body_timestamp",
-        "body_ttl",
-        "body_tombstone",
-    ] {
+    for column in FACT_KIND_REPRESENTATIVES {
         let kind = fact_kind(column);
         assert!(
             KNOWN_COVERAGE_TOKENS.contains(&kind),
@@ -913,6 +923,45 @@ fn every_produced_token_is_in_the_known_vocabulary() {
     ] {
         produced.extend(observed.keys().copied());
     }
+    // `shape:prefix_bound` needs a second clustering column to have a
+    // trailing `"*"`, and `shape:row_update_without_liveness` needs a real
+    // base column — so both come from their own roles.
+    produced.extend(
+        census_with(
+            &[generation_of(
+                "nb-1-big-Data.db",
+                vec![json!({
+                    "partition": { "key": ["1"] },
+                    "rows": [
+                        { "type": "range_tombstone_bound", "start": bound("inclusive", json!(["10", "*"])) }
+                    ]
+                })],
+            )],
+            &roles_with(&["ck1", "ck2"], &[]),
+        )
+        .keys()
+        .copied(),
+    );
+    produced.extend(
+        census_with(
+            &[generation_of(
+                "nb-1-big-Data.db",
+                vec![json!({
+                    "partition": { "key": ["1"] },
+                    "rows": [{
+                        "type": "row",
+                        "clustering": ["10"],
+                        "cells": [
+                            { "name": "body", "value": "x", "tstamp": "2021-01-01T00:00:00Z" }
+                        ]
+                    }]
+                })],
+            )],
+            &roles_with(&["ck"], &["body"]),
+        )
+        .keys()
+        .copied(),
+    );
     assert!(
         produced.len() >= 5,
         "the synthetic goldens must actually produce shape tokens: {produced:?}"
@@ -925,4 +974,152 @@ fn every_produced_token_is_in_the_known_vocabulary() {
              no lane can ever claim. Produced: {produced:?}"
         );
     }
+
+    // SET EQUALITY, not membership (roborev job 56). Membership alone leaves
+    // this lane GREEN when a 19th `fact_kind` arm is added without a matching
+    // vocabulary entry: the census would still bump the new family via
+    // `observed.entry(fact_kind(column))`, but `require_observed` would reject
+    // any claim for it as "not a known metadata family", so the family becomes
+    // silently UNCLAIMABLE — the under-coverage this census exists to forbid.
+    // Equality makes a new arm fail here until the representative list above
+    // and the vocabulary are updated TOGETHER.
+    let mut reachable: std::collections::BTreeSet<&str> = produced.clone();
+    reachable.extend(FACT_KIND_REPRESENTATIVES.iter().map(|c| fact_kind(c)));
+    let vocabulary: std::collections::BTreeSet<&str> =
+        KNOWN_COVERAGE_TOKENS.iter().copied().collect();
+    assert_eq!(
+        reachable,
+        vocabulary,
+        "issue #4309: the tokens this lane can actually REACH must be exactly \
+         KNOWN_COVERAGE_TOKENS. In the vocabulary but unreachable here: {:?} (add a \
+         representative column or a synthetic golden that produces it). Reachable but \
+         NOT in the vocabulary: {:?} (a family or shape the census counts that no lane \
+         could ever claim).",
+        vocabulary.difference(&reachable).collect::<Vec<_>>(),
+        reachable.difference(&vocabulary).collect::<Vec<_>>(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `classify_columns`' COMPLEX branch, also gate-unreachable (roborev job 56)
+// ---------------------------------------------------------------------------
+
+/// Build the raw view's full contract column set for a table with the given
+/// keys, simple base columns and collection columns, in CONTRACT ORDER —
+/// keys, then each base column followed by its synthesized metadata
+/// siblings, then the row/partition/range metadata and the declared gaps.
+/// Order matters: `classify_columns` finds the key boundary with a
+/// `take_while` over this sequence.
+fn contract_columns(keys: &[&str], simple: &[&str], complex: &[&str]) -> Vec<ColumnInfo> {
+    let mut names: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+    for c in simple {
+        names.push((*c).to_string());
+        for suffix in ["_timestamp", "_ttl", "_local_deletion_time", "_tombstone"] {
+            names.push(format!("{c}{suffix}"));
+        }
+    }
+    for c in complex {
+        names.push((*c).to_string());
+        for suffix in [
+            "_complex_deletion",
+            "_complex_deletion_time",
+            "_complex_deletion_timestamp",
+        ] {
+            names.push(format!("{c}{suffix}"));
+        }
+    }
+    for n in ROW_LEVEL_METADATA
+        .iter()
+        .chain(PARTITION_METADATA)
+        .chain(RANGE_METADATA)
+        .chain(DECLARED_GAP_COLUMNS)
+    {
+        names.push((*n).to_string());
+    }
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(position, name)| ColumnInfo {
+            name,
+            data_type: cqlite_core::types::DataType::Text,
+            nullable: true,
+            position,
+            table_name: None,
+            cql_type: None,
+        })
+        .collect()
+}
+
+/// The `_complex_deletion` EXCLUSION, which `classify_columns`' own comment
+/// calls load-bearing. `tags_complex_deletion` itself has a
+/// `tags_complex_deletion_timestamp` sibling, so without the
+/// `!name.ends_with("_complex_deletion")` guard it would be misread as a
+/// SIMPLE base column — and the sweep would then demand `<col>_ttl` /
+/// `<col>_tombstone` siblings the contract never declares.
+///
+/// Only `test_deltas.collection_ops` has a collection column and it is
+/// `FetchOnly`, so this branch is otherwise unexercised on the gate of
+/// record.
+#[test]
+fn classify_columns_separates_a_collection_from_its_own_metadata() {
+    let columns = contract_columns(&["pk", "ck"], &["body"], &["tags"]);
+    let roles = classify_columns(&columns, &SPEC);
+
+    assert_eq!(
+        roles.complex_columns,
+        vec!["tags".to_string()],
+        "the collection column is the one with a `_complex_deletion` sibling"
+    );
+    assert_eq!(
+        roles.simple_columns,
+        vec!["body".to_string()],
+        "issue #4309: `tags_complex_deletion` must NOT be classified as a simple base \
+         column. It has a `tags_complex_deletion_timestamp` sibling, so dropping the \
+         `!name.ends_with(\"_complex_deletion\")` guard admits it here — and the sweep \
+         would then demand `tags_complex_deletion_ttl` / `_tombstone` columns the \
+         contract never declares. Got: {:?}",
+        roles.simple_columns
+    );
+    assert_eq!(roles.clustering_columns, vec!["ck".to_string()]);
+
+    // The metadata sibling is in NEITHER base-column role.
+    for role in [&roles.simple_columns, &roles.complex_columns] {
+        assert!(
+            !role.iter().any(|c| c == "tags_complex_deletion"),
+            "`tags_complex_deletion` is a METADATA column, not a base column: {role:?}"
+        );
+    }
+
+    // All three of the collection's metadata columns are compared.
+    for expected in [
+        "tags_complex_deletion",
+        "tags_complex_deletion_time",
+        "tags_complex_deletion_timestamp",
+    ] {
+        assert!(
+            roles.compared_columns.iter().any(|c| c == expected),
+            "issue #4309: '{expected}' must be compared against the golden. Compared: {:?}",
+            roles.compared_columns
+        );
+    }
+}
+
+/// The CONVERSE accounting check (roborev finding R2): a contract column
+/// that is neither compared nor a declared gap must FAIL, because a column
+/// nobody accounts for is compared by nothing and noticed by nobody. Also
+/// gate-unreachable today — every fixture's contract is exactly accounted.
+#[test]
+#[should_panic(expected = "neither compares against the golden nor declares as a gap")]
+fn an_unaccounted_contract_column_is_refused() {
+    let mut columns = contract_columns(&["pk", "ck"], &["body"], &["tags"]);
+    let position = columns.len();
+    columns.push(ColumnInfo {
+        name: "a_column_the_sweep_never_heard_of".to_string(),
+        data_type: cqlite_core::types::DataType::Text,
+        nullable: true,
+        position,
+        table_name: None,
+        cql_type: None,
+    });
+    let _ = classify_columns(&columns, &SPEC);
 }
