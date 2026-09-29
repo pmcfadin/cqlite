@@ -588,31 +588,107 @@ fn partition_key_predicate(spec: &FixtureSpec, key: &str) -> String {
 /// real base column that merely LOOKS like one can never reach this function
 /// — the misclassification #4222 round 9 fixed. The `_complex_deletion*` arms
 /// must precede the generic `_timestamp`/`_time` arms.
+/// How a [`FACT_KIND_RULES`] entry matches a column name.
+#[derive(Clone, Copy)]
+pub enum FactKindMatch {
+    /// The whole column name, for the row/partition/range metadata columns
+    /// that are not per-base-column.
+    Exact(&'static str),
+    /// A synthesized suffix on a base column name.
+    Suffix(&'static str),
+}
+
+/// The metadata-family rules, IN PRIORITY ORDER — this table IS
+/// [`fact_kind`]'s arm order, not a copy of it.
+///
+/// ORDER IS LOAD-BEARING. The `_complex_deletion*` rules MUST precede the
+/// generic `_timestamp` / `_local_deletion_time` rules: a column named
+/// `tags_complex_deletion_timestamp` ends with `_timestamp` too, and a
+/// reorder would classify it as `cell_timestamp`, silently retiring the
+/// complex family. `complex_deletion_timestamp` must likewise precede
+/// `complex_deletion_time`, which must precede `complex_deletion`, since
+/// each is a suffix of the previous one's column names. Pinned by
+/// `issue_4309_raw_view_census_selftest.rs`.
+///
+/// DRIVEN FROM A TABLE RATHER THAN A `match` so the rule set is
+/// ENUMERABLE (roborev job 59). The self-test asserts that the families
+/// this table can produce, together with the shapes `build_expectations`
+/// bumps, are EXACTLY [`KNOWN_COVERAGE_TOKENS`]. With a `match` that claim
+/// was unenforceable: a new arm changed neither side of the comparison, so
+/// a new family could become silently unclaimable — `require_observed`
+/// would reject every lane's claim for it as an unknown name while the
+/// census happily counted it. Adding a rule here now FAILs the self-test
+/// until the vocabulary is updated with it.
+pub const FACT_KIND_RULES: &[(FactKindMatch, &str)] = &[
+    (FactKindMatch::Exact("row_timestamp"), "row_timestamp"),
+    (FactKindMatch::Exact("row_ttl"), "row_ttl"),
+    (
+        FactKindMatch::Exact("row_liveness_expires_at"),
+        "row_liveness_expires_at",
+    ),
+    (
+        FactKindMatch::Exact("row_local_deletion_time"),
+        "row_local_deletion_time",
+    ),
+    (FactKindMatch::Exact("row_tombstone"), "row_tombstone"),
+    (
+        FactKindMatch::Exact("row_deletion_timestamp"),
+        "row_deletion_timestamp",
+    ),
+    (
+        FactKindMatch::Exact("partition_deletion_time"),
+        "partition_deletion_time",
+    ),
+    (
+        FactKindMatch::Exact("partition_deletion_timestamp"),
+        "partition_deletion_timestamp",
+    ),
+    (FactKindMatch::Exact("bound_inclusive"), "bound_inclusive"),
+    (
+        FactKindMatch::Exact("range_deletion_time"),
+        "range_deletion_time",
+    ),
+    (
+        FactKindMatch::Exact("range_deletion_timestamp"),
+        "range_deletion_timestamp",
+    ),
+    // --- the complex arms, which MUST stay above the generic ones ---
+    (
+        FactKindMatch::Suffix("_complex_deletion_timestamp"),
+        "complex_deletion_timestamp",
+    ),
+    (
+        FactKindMatch::Suffix("_complex_deletion_time"),
+        "complex_deletion_time",
+    ),
+    (
+        FactKindMatch::Suffix("_complex_deletion"),
+        "complex_deletion",
+    ),
+    // --- the generic per-cell arms ---
+    (
+        FactKindMatch::Suffix("_local_deletion_time"),
+        "cell_local_deletion_time",
+    ),
+    (FactKindMatch::Suffix("_timestamp"), "cell_timestamp"),
+    (FactKindMatch::Suffix("_ttl"), "cell_ttl"),
+    (FactKindMatch::Suffix("_tombstone"), "cell_tombstone"),
+];
+
 pub fn fact_kind(column: &str) -> &'static str {
-    match column {
-        "row_timestamp" => "row_timestamp",
-        "row_ttl" => "row_ttl",
-        "row_liveness_expires_at" => "row_liveness_expires_at",
-        "row_local_deletion_time" => "row_local_deletion_time",
-        "row_tombstone" => "row_tombstone",
-        "row_deletion_timestamp" => "row_deletion_timestamp",
-        "partition_deletion_time" => "partition_deletion_time",
-        "partition_deletion_timestamp" => "partition_deletion_timestamp",
-        "bound_inclusive" => "bound_inclusive",
-        "range_deletion_time" => "range_deletion_time",
-        "range_deletion_timestamp" => "range_deletion_timestamp",
-        c if c.ends_with("_complex_deletion_timestamp") => "complex_deletion_timestamp",
-        c if c.ends_with("_complex_deletion_time") => "complex_deletion_time",
-        c if c.ends_with("_complex_deletion") => "complex_deletion",
-        c if c.ends_with("_local_deletion_time") => "cell_local_deletion_time",
-        c if c.ends_with("_timestamp") => "cell_timestamp",
-        c if c.ends_with("_ttl") => "cell_ttl",
-        c if c.ends_with("_tombstone") => "cell_tombstone",
-        other => panic!(
-            "issue #4309: compared column '{other}' belongs to no known metadata family — \
-             the coverage census must never silently drop a column it cannot classify"
-        ),
+    for (rule, kind) in FACT_KIND_RULES {
+        let hit = match rule {
+            FactKindMatch::Exact(name) => column == *name,
+            FactKindMatch::Suffix(suffix) => column.ends_with(suffix),
+        };
+        if hit {
+            return kind;
+        }
     }
+    panic!(
+        "issue #4309: compared column '{column}' belongs to no known metadata family — \
+         the coverage census must never silently drop a column it cannot classify"
+    )
 }
 
 /// Every coverage token a case may legitimately claim.

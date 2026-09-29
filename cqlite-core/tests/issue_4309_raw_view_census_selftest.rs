@@ -76,7 +76,7 @@ use raw_view_parity::golden::{
 };
 use raw_view_parity::{
     assert_value_key_sets_match, fact_kind, is_negative_complex_marker, SweepOutcome,
-    KNOWN_COVERAGE_TOKENS, UNCLAIMABLE_TOKENS,
+    FACT_KIND_RULES, KNOWN_COVERAGE_TOKENS, UNCLAIMABLE_TOKENS,
 };
 use raw_view_parity::{Discipline, FixtureSpec};
 use serde_json::json;
@@ -975,26 +975,35 @@ fn every_produced_token_is_in_the_known_vocabulary() {
         );
     }
 
-    // SET EQUALITY, not membership (roborev job 56). Membership alone leaves
-    // this lane GREEN when a 19th `fact_kind` arm is added without a matching
-    // vocabulary entry: the census would still bump the new family via
-    // `observed.entry(fact_kind(column))`, but `require_observed` would reject
-    // any claim for it as "not a known metadata family", so the family becomes
-    // silently UNCLAIMABLE — the under-coverage this census exists to forbid.
-    // Equality makes a new arm fail here until the representative list above
-    // and the vocabulary are updated TOGETHER.
+    // SET EQUALITY against the RULE TABLE, not against the hand-maintained
+    // representative list (roborev jobs 56 and 59).
+    //
+    // Job 56 replaced membership with equality; job 59 then showed the
+    // equality did not catch the case its comment named. `FACT_KIND_RULES`
+    // is now read directly, which is what makes the claim TRUE: a new rule
+    // adds a family token to `reachable`, so the assertion FAILs until
+    // `KNOWN_COVERAGE_TOKENS` gains it too. Against a `match`, a new arm
+    // changed NEITHER side — `produced` carries only shape tokens (the
+    // family half is folded in later, in `assert_raw_view_matches_golden`)
+    // and the representative list is a literal a new arm does not touch —
+    // so a new family could become silently unclaimable: the census would
+    // bump it while `require_observed` rejected every claim for it as an
+    // unknown name. That is exactly the under-coverage this assertion is
+    // supposed to forbid.
     let mut reachable: std::collections::BTreeSet<&str> = produced.clone();
-    reachable.extend(FACT_KIND_REPRESENTATIVES.iter().map(|c| fact_kind(c)));
+    reachable.extend(FACT_KIND_RULES.iter().map(|(_, kind)| *kind));
     let vocabulary: std::collections::BTreeSet<&str> =
         KNOWN_COVERAGE_TOKENS.iter().copied().collect();
     assert_eq!(
         reachable,
         vocabulary,
-        "issue #4309: the tokens this lane can actually REACH must be exactly \
-         KNOWN_COVERAGE_TOKENS. In the vocabulary but unreachable here: {:?} (add a \
-         representative column or a synthetic golden that produces it). Reachable but \
-         NOT in the vocabulary: {:?} (a family or shape the census counts that no lane \
-         could ever claim).",
+        "issue #4309: the tokens the census can PRODUCE — every FACT_KIND_RULES family \
+         plus every shape the synthetic goldens bump — must be exactly \
+         KNOWN_COVERAGE_TOKENS. In the vocabulary but unproducible: {:?} (a token no lane \
+         could ever observe, so any claim for it is unsatisfiable). Producible but NOT in \
+         the vocabulary: {:?} (the census counts it while require_observed rejects every \
+         claim for it as an unknown name — a silently unclaimable family, which is the \
+         under-coverage this census exists to forbid).",
         vocabulary.difference(&reachable).collect::<Vec<_>>(),
         reachable.difference(&vocabulary).collect::<Vec<_>>(),
     );
