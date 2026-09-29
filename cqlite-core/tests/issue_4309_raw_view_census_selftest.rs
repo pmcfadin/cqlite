@@ -461,13 +461,17 @@ fn a_boundary_expands_to_two_rows_each_carrying_its_own_sides_facts() {
     assert_eq!(
         end.facts.get("bound_inclusive"),
         Some(&Fact::Bool(false)),
-        "issue #4309: the END side is EXCLUSIVE here, so `bound_inclusive` must be          false — the only assertion of `bound_facts`' exclusive arm anywhere, since the          one gate-executed bound fixture has inclusive-only bounds. {:?}",
+        "issue #4309: the END side is EXCLUSIVE here, so `bound_inclusive` must be \
+         false — the only assertion of `bound_facts`' exclusive arm anywhere, since \
+         the one gate-executed bound fixture has inclusive-only bounds. {:?}",
         end.facts
     );
     assert_eq!(
         end.facts.get("range_deletion_timestamp"),
         Some(&Fact::BigInt(1609459201000000)),
-        "issue #4309: the END row must carry the END side's deletion time, not the          START side's (…202000000). A swapped pairing in build_expectations lands here.          {:?}",
+        "issue #4309: the END row must carry the END side's deletion time, not the \
+         START side's (…202000000). A swapped pairing in build_expectations lands \
+         here. {:?}",
         end.facts
     );
     assert_eq!(
@@ -1098,11 +1102,20 @@ fn every_produced_token_is_in_the_known_vocabulary() {
 // ---------------------------------------------------------------------------
 
 /// Build the raw view's full contract column set for a table with the given
-/// keys, simple base columns and collection columns, in CONTRACT ORDER —
-/// keys, then each base column followed by its synthesized metadata
-/// siblings, then the row/partition/range metadata and the declared gaps.
-/// Order matters: `classify_columns` finds the key boundary with a
-/// `take_while` over this sequence.
+/// keys, simple base columns and collection columns.
+///
+/// MODELS ONE ORDERING PROPERTY, not the whole contract order (roborev job
+/// 64). What `classify_columns` depends on is reproduced exactly: KEYS
+/// FIRST, then each base column immediately followed by its synthesized
+/// metadata siblings — that is what its `take_while` key-boundary scan
+/// reads. The trailing always-applicable block's INTERNAL order is NOT
+/// modelled: production emits `row_kind` BETWEEN the partition-deletion
+/// pair and `bound_inclusive` (`raw_view/columns.rs:347`), whereas this
+/// helper appends it with the other `DECLARED_GAP_COLUMNS`. Nothing in
+/// `classify_columns` reads that order today, so the difference is inert —
+/// but an order-sensitive check added there later would be validated
+/// against a shape production never emits, so fix this helper before
+/// adding one.
 fn contract_columns(keys: &[&str], simple: &[&str], complex: &[&str]) -> Vec<ColumnInfo> {
     let mut names: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
     for c in simple {
@@ -1482,4 +1495,117 @@ fn load_goldens_refuses_an_empty_golden() {
     std::fs::write(dir.join("nb-1-big-Data.db"), b"not read").expect("write binary");
     std::fs::write(dir.join("nb-1-big-Data.db.jsonl"), b"\n").expect("write sidecar");
     let _ = load_goldens(tmp.path(), &SELECT_SPEC);
+}
+
+// ---------------------------------------------------------------------------
+// The oracle's FAIL-CLOSED panics (roborev job 64)
+// ---------------------------------------------------------------------------
+//
+// Five refusals in the golden model exist so a fixture the harness cannot
+// model FAILS instead of being silently skipped. Each is reachable only
+// from a corpus fixture that does not exist today — i.e. exactly the
+// "derivation nobody executes" class this lane's charter names. A refusal
+// that has never fired is a refusal nobody has checked still fires.
+
+/// `bound_facts` refuses a bound `type` that is neither `inclusive` nor
+/// `exclusive`, rather than defaulting `bound_inclusive` to a guess.
+#[test]
+#[should_panic(expected = "unexpected sstabledump bound type")]
+fn an_unknown_bound_type_is_refused() {
+    let _ = census(&[generation_of(
+        "nb-1-big-Data.db",
+        vec![json!({
+            "partition": { "key": ["1"] },
+            "rows": [{
+                "type": "range_tombstone_bound",
+                "start": {
+                    "type": "sort_of_inclusive",
+                    "clustering": ["10"],
+                    "deletion_info": {
+                        "marked_deleted": "2021-01-01T00:00:00Z",
+                        "local_delete_time": "2021-01-01T00:00:00Z"
+                    }
+                }
+            }]
+        })],
+    )]);
+}
+
+/// `fold_simple_cell` refuses a cell carrying neither its own `tstamp` nor
+/// an enclosing `liveness_info.tstamp` — the sweep will not invent a write
+/// time. Without the refusal the cell would silently compare as an absence.
+#[test]
+#[should_panic(expected = "refuses to invent a write time")]
+fn a_cell_with_no_write_time_anywhere_is_refused() {
+    let (_, _) = build_expectations(
+        &[generation_of(
+            "nb-1-big-Data.db",
+            vec![json!({
+                "partition": { "key": ["1"] },
+                "rows": [{
+                    "type": "row",
+                    "clustering": ["10"],
+                    "cells": [{ "name": "body", "value": "x" }]
+                }]
+            })],
+        )],
+        &roles_with(&["ck"], &["body"]),
+        &SPEC,
+    );
+}
+
+/// `render_golden_clustering` refuses an entry with no `clustering` array.
+/// `serializeClustering` omits it for a size-0 prefix (an open range bound)
+/// AND for every row of a clustering-free table, and the harness models
+/// NEITHER — so it must say so rather than compare a fabricated shape.
+#[test]
+#[should_panic(expected = "carries no 'clustering' array")]
+fn an_entry_with_no_clustering_array_is_refused() {
+    let (_, _) = build_expectations(
+        &[generation_of(
+            "nb-1-big-Data.db",
+            vec![json!({
+                "partition": { "key": ["1"] },
+                "rows": [{
+                    "type": "row",
+                    "liveness_info": { "tstamp": "2021-01-01T00:00:00Z" },
+                    "cells": []
+                }]
+            })],
+        )],
+        &roles(),
+        &SPEC,
+    );
+}
+
+/// `golden_i32` refuses a TTL that does not fit an `int` rather than
+/// wrapping with `as i32` — a wrapped value would make the equality
+/// assertion compare the WRONG number and pass, which is an oracle blind
+/// spot rather than a failure.
+#[test]
+#[should_panic(expected = "must fit the i32 an int column reports")]
+fn a_ttl_too_large_for_an_int_is_refused() {
+    let _ = ttl_facts(
+        json!({
+            "tstamp": "2021-01-01T00:00:00Z",
+            "ttl": 4_294_967_296i64,
+            "expires_at": "2021-01-01T01:00:00Z"
+        }),
+        json!({ "name": "body", "value": "x", "tstamp": "2021-01-01T00:00:00Z" }),
+    );
+}
+
+/// The sweep refuses a golden entry `type` it cannot model, rather than
+/// ignoring a physical entry — an ignored entry is a row the view could
+/// omit with nothing noticing.
+#[test]
+#[should_panic(expected = "unrecognized sstabledump entry type")]
+fn an_unmodelled_entry_type_is_refused() {
+    let _ = census(&[generation_of(
+        "nb-1-big-Data.db",
+        vec![json!({
+            "partition": { "key": ["1"] },
+            "rows": [{ "type": "some_future_entry_kind" }]
+        })],
+    )]);
 }

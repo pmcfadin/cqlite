@@ -137,7 +137,8 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
     }
 
     let mut goldens: Vec<GoldenSstable> = Vec::new();
-    for dir in std::slice::from_ref(chosen) {
+    {
+        let dir = chosen;
         let entries = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("reading {} must succeed: {e}", dir.display()));
         let mut data_dbs: Vec<PathBuf> = entries
