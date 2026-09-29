@@ -13,7 +13,7 @@
 //! |---|---|
 //! | `test_da.wide_table` (`wide-table-bti.cql`) | the **BTI (`da`)** format — `raw_view/point.rs` resolves a partition by TRIE DESCENT here, not by the BIG index; 3 partitions × 300 clustering rows |
 //! | `test_comp.lz4_table` (`compression-parity.cql`) | a **COMPRESSED** (`LZ4Compressor`, 16 KiB chunks) BIG table read through chunk stitching — 600 rows in one partition |
-//! | `test_comp.uncompressed_table` (same schema) | the **UNCOMPRESSED** BIG table (`compression = {'enabled': false}`, CRC.db instead of CompressionInfo.db) whose compaction-stream path `issue_4222_raw_view_uncompressed_failclosed_test.rs` investigated — every write time must be the real on-disk one, never `from_legacy_value`'s fabricated zero |
+//! | `test_comp.uncompressed_table` (same schema) | the **UNCOMPRESSED** BIG table (`compression = {'enabled': false}`, so NO `CompressionInfo.db`; its only checksum sidecar is `Digest.crc32` — this fixture ships no `CRC.db`) whose compaction-stream path `issue_4222_raw_view_uncompressed_failclosed_test.rs` investigated — every write time must be the real on-disk one, never `from_legacy_value`'s fabricated zero |
 //! | `test_compactionparity.live_clustering` (`compaction-parity.cql`) | the compaction-parity corpus the raw view's JOIN-substitute correlation lane uses, swept end-to-end; also the only fixture whose partition-key column is not named `pk` |
 //!
 //! # Fixture discipline (#3220/#3121)

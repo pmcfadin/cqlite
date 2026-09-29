@@ -154,6 +154,14 @@
 //! that makes no coverage claim at all is a compile error under the gate's
 //! `-D warnings`.
 //!
+//! One further token, `shape:point_path_resolved`, records how many
+//! point-read rows resolved a non-NULL `position` — the PATH WITNESS that
+//! proves the point-read producer ran rather than being served from the
+//! full-scan path. It is recorded for visibility and IS claimable by a lane,
+//! but unlike the tokens above it does not depend on a lane claiming it: the
+//! witness is asserted directly in `assert_raw_view_matches_golden`, per
+//! build, so it cannot be left unenforced by omission (roborev, #4309).
+//!
 //! # Fixture discipline (#3220/#3121)
 //!
 //! Roots are resolved PER TABLE via
@@ -806,18 +814,47 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
         );
     }
 
-    // A fixture where NOTHING resolved is indistinguishable from one whose
-    // point queries all served from the scan path — the hole this witness
-    // exists to close.
-    assert!(
-        point_positions_resolved > 0,
-        "issue #4309: {} — not one point-read row across the whole fixture resolved a \
-         non-NULL `position`, so nothing here proves the point-read producer was \
-         exercised at all rather than served from the full-scan path. \
-         {} point key(s) queried",
-        spec.id(),
-        golden_keys.len()
-    );
+    // The witness is FEATURE-DEPENDENT, and both builds assert something
+    // (roborev, issue #4309). `point.rs` compiles TWO `point_rows_for_key`
+    // implementations: the default one resolves a real offset, but the
+    // `#[cfg(feature = "tombstones")]` one routes every reader through
+    // `scan_and_filter_one_reader`, which builds
+    // `RawViewSource::from_reader(reader, None)` — so `position` is NULL on
+    // every point row in that build and "at least one resolved" is
+    // UNSATISFIABLE there.
+    //
+    // Deliberately NOT `#[cfg(not(feature = "tombstones"))]` on the whole
+    // witness: skipping it under `tombstones` would make an unmeasured build
+    // read exactly like a measured one, which is the failure mode this sweep
+    // exists to prevent. Instead each build asserts the behaviour ITS
+    // producer actually has, so a change to either one fails here by name.
+    if cfg!(feature = "tombstones") {
+        assert_eq!(
+            point_positions_resolved,
+            0,
+            "issue #4309: {} — under `feature = \"tombstones\"`, `point.rs`'s cfg'd \
+             `point_rows_for_key` routes every reader through \
+             `scan_and_filter_one_reader` (`from_reader(reader, None)`), so EVERY \
+             point-read `position` must be NULL. {} resolved — that producer now \
+             resolves offsets, so this witness (and the default-build branch below) \
+             needs revisiting",
+            spec.id(),
+            point_positions_resolved
+        );
+    } else {
+        // A fixture where NOTHING resolved is indistinguishable from one whose
+        // point queries all served from the scan path — the hole this witness
+        // exists to close.
+        assert!(
+            point_positions_resolved > 0,
+            "issue #4309: {} — not one point-read row across the whole fixture resolved \
+             a non-NULL `position`, so nothing here proves the point-read producer was \
+             exercised at all rather than served from the full-scan path. \
+             {} point key(s) queried",
+            spec.id(),
+            golden_keys.len()
+        );
+    }
     *observed.entry("shape:point_path_resolved").or_insert(0) += point_positions_resolved;
 
     SweepOutcome {
