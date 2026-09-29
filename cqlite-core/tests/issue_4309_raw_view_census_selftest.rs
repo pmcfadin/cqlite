@@ -75,8 +75,8 @@ use raw_view_parity::golden::{
     PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA,
 };
 use raw_view_parity::{
-    assert_value_key_sets_match, fact_kind, is_negative_complex_marker, SweepOutcome,
-    FACT_KIND_RULES, KNOWN_COVERAGE_TOKENS, UNCLAIMABLE_TOKENS,
+    assert_value_key_sets_match, fact_kind, is_negative_complex_marker, FactKindMatch,
+    SweepOutcome, FACT_KIND_RULES, KNOWN_COVERAGE_TOKENS, UNCLAIMABLE_TOKENS,
 };
 use raw_view_parity::{Discipline, FixtureSpec};
 use serde_json::json;
@@ -147,30 +147,6 @@ fn census(goldens: &[GoldenSstable]) -> BTreeMap<&'static str, usize> {
 fn census_with(goldens: &[GoldenSstable], roles: &ColumnRoles) -> BTreeMap<&'static str, usize> {
     build_expectations(goldens, roles, &SPEC).1
 }
-
-/// One representative column per `fact_kind` arm. Kept as a const because
-/// BOTH halves of `every_produced_token_is_in_the_known_vocabulary` read it
-/// — the membership half and the set-equality half.
-const FACT_KIND_REPRESENTATIVES: &[&str] = &[
-    "row_timestamp",
-    "row_ttl",
-    "row_liveness_expires_at",
-    "row_local_deletion_time",
-    "row_tombstone",
-    "row_deletion_timestamp",
-    "partition_deletion_time",
-    "partition_deletion_timestamp",
-    "bound_inclusive",
-    "range_deletion_time",
-    "range_deletion_timestamp",
-    "tags_complex_deletion_timestamp",
-    "tags_complex_deletion_time",
-    "tags_complex_deletion",
-    "body_local_deletion_time",
-    "body_timestamp",
-    "body_ttl",
-    "body_tombstone",
-];
 
 /// A generation built from explicit partition objects, for the shapes
 /// `generation()`'s one-live-row-per-key form cannot express.
@@ -881,10 +857,26 @@ fn complex_deletion_arms_win_over_the_generic_timestamp_arms() {
 /// hand; this asserts it instead.
 #[test]
 fn every_produced_token_is_in_the_known_vocabulary() {
-    for column in FACT_KIND_REPRESENTATIVES {
-        let kind = fact_kind(column);
+    // A representative column PER RULE, synthesized FROM the rule table, so
+    // the list cannot drift out of step with the arms it claims to cover
+    // (roborev job 60). Asserting the synthesized column maps back to its
+    // OWN rule also proves no rule is SHADOWED by an earlier one — an
+    // unreachable rule is a family nothing can ever observe.
+    for (rule, kind) in FACT_KIND_RULES {
+        let column = match rule {
+            FactKindMatch::Exact(name) => (*name).to_string(),
+            FactKindMatch::Suffix(suffix) => format!("body{suffix}"),
+        };
+        assert_eq!(
+            fact_kind(&column),
+            *kind,
+            "issue #4309: the representative column '{column}' for rule '{kind}' is \
+             classified as '{}' instead — that rule is SHADOWED by an earlier one, so the \
+             family it names can never be observed",
+            fact_kind(&column)
+        );
         assert!(
-            KNOWN_COVERAGE_TOKENS.contains(&kind),
+            KNOWN_COVERAGE_TOKENS.contains(kind),
             "issue #4309: fact_kind({column:?}) returns '{kind}', which is not in \
              KNOWN_COVERAGE_TOKENS — a family a lane can never claim, so its coverage \
              can never be asserted"
@@ -1131,4 +1123,149 @@ fn an_unaccounted_contract_column_is_refused() {
         cql_type: None,
     });
     let _ = classify_columns(&columns, &SPEC);
+}
+
+// ---------------------------------------------------------------------------
+// The TTL half of the oracle, also gate-unreachable (roborev job 60)
+// ---------------------------------------------------------------------------
+//
+// `cell_ttl`, `row_ttl` and `row_liveness_expires_at` are claimed only by
+// `ttl_cells` and `gc_before_boundary`, both `Discipline::FetchOnly` — and
+// the only committed JSONL goldens carrying a `"ttl"` field belong to those
+// two fixtures, neither of which ships a `Data.db`. So `fold_simple_cell`'s
+// TTL inheritance, its `expires_at` fallback chain, and `row_entry_facts`'
+// `row_ttl` / `row_liveness_expires_at` inserts run on NO gate build.
+//
+// The module doc already flags inheritance as the harness's riskiest
+// assumption; leaving it uncontrolled as well is the gap this lane exists
+// to close. These three cases also pin the UNIT SPLIT that makes the facts
+// comparable at all: timestamps are epoch MICROseconds, `expires_at` and
+// every `*_local_deletion_time` are epoch SECONDS.
+
+/// One row with a liveness marker, plus one cell, both under the
+/// `body`-as-simple-column roles the TTL derivations need.
+fn ttl_facts(
+    liveness: serde_json::Value,
+    cell: serde_json::Value,
+) -> BTreeMap<String, raw_view_parity::golden::Fact> {
+    let mut row = json!({
+        "type": "row",
+        "clustering": ["10"],
+        "cells": [cell]
+    });
+    if !liveness.is_null() {
+        row["liveness_info"] = liveness;
+    }
+    let (expected, _) = build_expectations(
+        &[generation_of(
+            "nb-1-big-Data.db",
+            vec![json!({ "partition": { "key": ["1"] }, "rows": [row] })],
+        )],
+        &roles_with(&["ck"], &["body"]),
+        &SPEC,
+    );
+    assert_eq!(expected.len(), 1, "one synthetic row");
+    expected.into_iter().next().unwrap().facts
+}
+
+/// (a) INHERITANCE. `serializeCell` omits `ttl` when the cell expires with
+/// the SAME ttl as the row marker, so a cell with neither `ttl` nor
+/// `expires_at` inherits both from the row's `liveness_info`. Also pins the
+/// unit split: `row_timestamp` in MICROseconds, `row_liveness_expires_at`
+/// and `body_local_deletion_time` in SECONDS.
+#[test]
+fn a_cell_inherits_the_rows_ttl_and_expiry() {
+    let facts = ttl_facts(
+        json!({
+            "tstamp": "2021-01-01T00:00:00Z",
+            "ttl": 3600,
+            "expires_at": "2021-01-01T01:00:00Z"
+        }),
+        json!({ "name": "body", "value": "x", "tstamp": "2021-01-01T00:00:00Z" }),
+    );
+    assert_eq!(facts.get("row_ttl"), Some(&Fact::Int(3600)), "{facts:?}");
+    assert_eq!(
+        facts.get("row_liveness_expires_at"),
+        Some(&Fact::BigInt(1609462800)),
+        "issue #4309: `expires_at` is epoch SECONDS (iso_to_secs). A micros value here \
+         would be 1609462800000000. {facts:?}"
+    );
+    assert_eq!(
+        facts.get("row_timestamp"),
+        Some(&Fact::BigInt(1609459200000000)),
+        "issue #4309: a write timestamp is epoch MICROseconds (iso_to_micros). {facts:?}"
+    );
+    assert_eq!(
+        facts.get("body_ttl"),
+        Some(&Fact::Int(3600)),
+        "issue #4309: the cell states no ttl of its own, so it INHERITS the row marker's \
+         — dropping that inheritance is invisible on the gate of record. {facts:?}"
+    );
+    assert_eq!(
+        facts.get("body_local_deletion_time"),
+        Some(&Fact::BigInt(1609462800)),
+        "the inherited expiry, also in SECONDS: {facts:?}"
+    );
+}
+
+/// (b) The CELL'S OWN values win over the row's. If inheritance were
+/// applied unconditionally the cell would report the row's 3600/01:00:00Z
+/// rather than its own 60/00:01:00Z.
+#[test]
+fn a_cells_own_ttl_wins_over_the_rows() {
+    let facts = ttl_facts(
+        json!({
+            "tstamp": "2021-01-01T00:00:00Z",
+            "ttl": 3600,
+            "expires_at": "2021-01-01T01:00:00Z"
+        }),
+        json!({
+            "name": "body",
+            "value": "x",
+            "tstamp": "2021-01-01T00:00:00Z",
+            "ttl": 60,
+            "expires_at": "2021-01-01T00:01:00Z"
+        }),
+    );
+    assert_eq!(facts.get("body_ttl"), Some(&Fact::Int(60)), "{facts:?}");
+    assert_eq!(
+        facts.get("body_local_deletion_time"),
+        Some(&Fact::BigInt(1609459260)),
+        "the CELL's own expiry, not the row's 1609462800: {facts:?}"
+    );
+    // The row still reports its own.
+    assert_eq!(facts.get("row_ttl"), Some(&Fact::Int(3600)), "{facts:?}");
+}
+
+/// (c) NEGATIVE CONTROL. A row whose liveness marker carries NO ttl is not
+/// expiring, so every TTL fact must be ABSENT — never a fabricated zero
+/// (#28). `Fact::Absent` and `Fact::Int(0)` are different statements, and
+/// telling them apart is the entire point of this sweep's fact model.
+#[test]
+fn a_row_without_a_ttl_states_no_ttl_facts_at_all() {
+    let facts = ttl_facts(
+        json!({ "tstamp": "2021-01-01T00:00:00Z" }),
+        json!({ "name": "body", "value": "x", "tstamp": "2021-01-01T00:00:00Z" }),
+    );
+    for column in [
+        "row_ttl",
+        "row_liveness_expires_at",
+        "body_ttl",
+        "body_local_deletion_time",
+    ] {
+        assert_eq!(
+            facts.get(column),
+            None,
+            "issue #4309: nothing here is expiring, so '{column}' must be ABSENT. A \
+             fabricated zero would be an invented fact (#28), and the view correctly \
+             reports nothing — the harness must too. {facts:?}"
+        );
+    }
+    // The write timestamp is still stated: absence of a TTL is not absence
+    // of the row.
+    assert_eq!(
+        facts.get("row_timestamp"),
+        Some(&Fact::BigInt(1609459200000000)),
+        "{facts:?}"
+    );
 }
