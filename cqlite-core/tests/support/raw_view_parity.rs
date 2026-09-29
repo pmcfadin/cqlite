@@ -139,6 +139,28 @@
 //!   view does not yet expose. Fixtures: `test_tomb.static_with_tombstones`,
 //!   `test_tomb.dropped_static_col`, `test_deltas.static_with_rows`.
 //!
+//! * Physical row ORDER (roborev, issue #4309). [`assert_group`] reduces both
+//!   sides to a `BTreeMap` keyed by `(row_kind, clustering)`, so the golden's
+//!   on-disk entry SEQUENCE is discarded before any comparison: this sweep
+//!   compares the row SET and every row's metadata, never the order they
+//!   appear in. sstabledump's JSONL *is* an ordered physical dump, so this is
+//!   a real limit and it is stated here rather than left implied — a
+//!   clustering-order regression that returns the right rows in the wrong
+//!   order passes this sweep green.
+//!
+//!   A BLANKET order assertion is NOT achievable, which is why the gap is
+//!   declared rather than closed: for range markers CQLite and sstabledump
+//!   order differently BY CONSTRUCTION.
+//!   `row_decoder/compaction.rs::on_range_marker` buffers an open bound in
+//!   `pending_range_start` and emits the paired `RangeMarker` only when the
+//!   matching END bound closes it, so CQLite emits the start row AFTER the
+//!   intervening `row` entries, whereas sstabledump emits the open bound in
+//!   its own physical position. Asserting order for the `row` /
+//!   `static_block` / `partition_deletion` kinds within each
+//!   `(sstable, key)` group IS achievable and is the stronger follow-up
+//!   (#4314); it is not done here because it is a behaviour change to the
+//!   comparison, not a confirmation-round fix.
+//!
 //! # Coverage census — families AND shapes (issue #4309 AC5)
 //!
 //! A sweep whose golden lost the very shape its lane exists for would compare
