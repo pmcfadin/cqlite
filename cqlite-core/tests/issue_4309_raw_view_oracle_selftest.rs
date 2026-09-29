@@ -756,10 +756,17 @@ fn an_absent_git_committed_fixture_is_refused_not_skipped() {
 /// everything.
 #[test]
 fn an_absent_fetch_only_fixture_skips_cleanly() {
-    // Guard the environment rather than assume it: under
-    // CQLITE_REQUIRE_FIXTURES=1 this same call is REQUIRED to panic, so the
-    // assertion below would be wrong. The sweep is run both ways.
-    if std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+    // Guard the environment rather than assume it: under strict mode this
+    // same call is REQUIRED to panic, so the assertion below would be
+    // wrong, and the sweep is run both ways.
+    //
+    // Asks the CODE UNDER TEST what "strict" means (roborev job 77).
+    // Spelling the check `== Ok("1")` here left it out of step with
+    // `require_fixtures_strict`, which accepts `Ok("1") | Ok("true")` — so
+    // `CQLITE_REQUIRE_FIXTURES=true` would make this case assert the
+    // opposite of what the function does. A guard that mirrors a predicate
+    // must BE that predicate.
+    if raw_view_parity::require_fixtures_strict() {
         return;
     }
     assert!(

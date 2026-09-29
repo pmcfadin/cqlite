@@ -140,8 +140,15 @@ async fn zstd_table_matches_the_sstabledump_golden() {
 /// see an offset error. What DOES catch a mis-stitched final chunk is that
 /// the rows in it decode to garbage: the per-cell and per-row metadata stop
 /// matching the golden byte-exact, and the row set itself stops matching.
-/// The offset value proper is value-asserted by
-/// `issue_4222_raw_view_point_read_test.rs`.
+///
+/// DECLARED GAP, stated rather than implied (roborev job 77): NO lane
+/// value-asserts a `position` resolved through a 4 KiB SHORT FINAL CHUNK.
+/// `issue_4222_raw_view_point_read_test.rs` does value-assert the
+/// `position` column, but for OTHER fixtures — it pins
+/// `test_tomb.resurrection_gc_positive` (LZ4 at the default 16 KiB chunks),
+/// which never exercises a short final chunk. So an offset error confined
+/// to that geometry is caught here only through the decoded metadata, not
+/// through the offset itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn short_final_chunk_matches_the_sstabledump_golden() {
     assert_raw_view_matches_golden(&FixtureSpec {

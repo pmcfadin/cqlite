@@ -487,7 +487,7 @@ fn assert_group(
 // Fixture resolution + database open
 // ---------------------------------------------------------------------------
 
-fn require_fixtures_strict() -> bool {
+pub fn require_fixtures_strict() -> bool {
     matches!(
         std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
         Ok("1") | Ok("true")
@@ -1309,26 +1309,27 @@ pub fn is_negative_complex_marker(column: &str, fact: &Fact) -> bool {
 /// map, which is the thing a producer can truncate — unlike
 /// `result.metadata.columns`, which both producers share by construction.
 ///
-/// `position` is excluded DEFENSIVELY, not because it would otherwise
-/// diverge — an earlier version of this comment claimed the latter and the
-/// production source says otherwise (roborev job 75).
+/// NOTHING IS FILTERED OUT — in particular not `position` (roborev jobs
+/// 75/77).
+///
+/// `position` was excluded here on the stated grounds that its presence
+/// differs by access path. It does not:
 /// `row_map.rs::insert_source_values` inserts `"position"`
-/// UNCONDITIONALLY, as `source.position.map(Value::BigInt)
-/// .unwrap_or(Value::Null)`, and is called from every arm (`Live`,
-/// `Tombstone`, `PartitionDelete`, the range-bound path). So the KEY is
-/// always present on both producers and the key sets are equal either way;
-/// only its VALUE is path-divergent — NULL on the full scan, a real byte
-/// offset on the point read — which is why it is the sweep's path witness
-/// and a declared gap in the column contract rather than a compared column.
-/// The filter is kept as forward compatibility for a producer that ever
-/// stops inserting it, and is stated as defensive so nobody reads it as
-/// load-bearing.
+/// UNCONDITIONALLY, as
+/// `source.position.map(Value::BigInt).unwrap_or(Value::Null)`, and is
+/// called from every arm (`Live`, `Tombstone`, `PartitionDelete`, the
+/// range-bound path). Only its VALUE is path-divergent — NULL on the full
+/// scan, a real byte offset on the point read — which is why it is the
+/// sweep's path witness and a declared gap rather than a compared column.
+///
+/// Keeping the filter "defensively" was worse than pointless: it removed
+/// `position` from BOTH sides before the comparison, so the #3890
+/// both-directions assertion was structurally blind to a producer that
+/// stopped inserting the key — which is exactly the divergence it exists to
+/// catch. The sets are equal today, so dropping the filter costs nothing
+/// and closes that hole.
 pub fn value_key_set(row: &QueryRow) -> BTreeSet<String> {
-    row.values
-        .keys()
-        .map(|k| k.to_string())
-        .filter(|k| k != "position")
-        .collect()
+    row.values.keys().map(|k| k.to_string()).collect()
 }
 
 /// The REAL #3890 assertion CLAUDE.md pins — "point/seek-vs-scan tests use
