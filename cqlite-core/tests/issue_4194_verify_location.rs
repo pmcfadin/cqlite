@@ -38,9 +38,36 @@ use cqlite_core::storage::sstable::verify::{
 use cqlite_core::Config;
 
 // ---------------------------------------------------------------------------
-// Fixture-gating (issue #1094 doctrine, mirrors sstable_parity_corruption_verify.rs
-// and issue_1396_uncompressed_crc_verify.rs)
+// Fixture resolution + gating
+//
+// TABLE-granular BY CONTRACT (issue #3220, CLAUDE.md "Resolve fixture roots per
+// TABLE, and assert per CASE"): the clean sources come from the sanctioned
+// `support/datasets_root.rs` resolver, which walks EVERY candidate `sstables/`
+// root and picks the one that actually carries `<keyspace>/<table>-*/…-Data.db`.
+// This file previously hand-rolled the env-first, keyspace-directory form
+// (`CQLITE_DATASETS_ROOT` if it is a directory, else the checkout, then
+// `join("sstables").join(keyspace)`) — the exact selection #3220 removed: it
+// COMMITS to a root chosen on the keyspace and then reports a table that a
+// DIFFERENT candidate root holds as absent. Neither root is a superset of the
+// other (#3104), so no fixed preference is right for every table.
+//
+// The corruption fixtures (`corruption/<keyspace>_corrupt/<case>/`) are not
+// `<keyspace>/<table>-*` shaped, so they cannot go through
+// `resolve_table_generation_dir`; they are resolved over the SAME candidate
+// base-root list instead (mirroring `support/salvage_corpus.rs`'s
+// `candidate_base_roots`/`resolve_root_with_corpus_fixture`, issue #4196 — the
+// sibling lane on this same corpus), and a case needing BOTH halves binds them
+// from ONE root so the oracle can never read a clean `Index.db` from one
+// generation of the corpus against a corrupt copy derived from another.
+//
+// Gating follows #1094 doctrine: a missing fixture SKIPs loudly and
+// `CQLITE_REQUIRE_FIXTURES=1` turns every such skip into a hard failure.
 // ---------------------------------------------------------------------------
+
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
+use datasets_root::{resolve_table_generation_dir, table_generation_dirs};
 
 fn require_fixtures() -> bool {
     matches!(
@@ -49,33 +76,104 @@ fn require_fixtures() -> bool {
     )
 }
 
-fn datasets_root() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
-        let p = PathBuf::from(root);
-        if p.is_dir() {
-            return Some(p);
-        }
+/// Every candidate BASE root — the PARENT of what
+/// `datasets_root::sstables_root_candidates()` returns, since the corruption
+/// corpus is a `corruption/` SIBLING of `sstables/`. Same env-var + checkout
+/// resolution `sstables_root_for_table` uses, never `CQLITE_DATASETS_ROOT`
+/// alone.
+fn candidate_base_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(r) = datasets_root::fixture_roots::datasets_root_if_present() {
+        roots.push(r);
     }
-    let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("test-data/datasets"))?;
-    fallback.is_dir().then_some(fallback)
+    let checkout = datasets_root::fixture_roots::checkout_test_data_dir().join("datasets");
+    if !roots.contains(&checkout) {
+        roots.push(checkout);
+    }
+    roots
 }
 
-/// Resolve a directory under the datasets root, applying the fail-closed gate.
-/// Returns `None` (after emitting a SKIP or panicking under
-/// `CQLITE_REQUIRE_FIXTURES=1`) when the corpus is not usable.
+fn describe_base_roots() -> String {
+    candidate_base_roots()
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Resolve one corruption-corpus fixture directory by EVIDENCE across every
+/// candidate base root, applying the fail-closed gate.
 fn dataset_dir_or_gate(rel: &str, what: &str) -> Option<PathBuf> {
-    let path = datasets_root().map(|r| r.join(rel));
-    match path {
-        Some(p) if p.is_dir() && has_data_db(&p) => Some(p),
-        _ => {
+    dataset_dirs_or_gate(&[rel], what).map(|mut dirs| dirs.remove(0))
+}
+
+/// Resolve SEVERAL corruption-corpus fixture directories that a single case
+/// combines, all from ONE candidate base root — a case that overlays one
+/// fixture's component onto another's generation must not mix two different
+/// corpus generations. Returns `None` (after emitting a SKIP, or panicking
+/// under `CQLITE_REQUIRE_FIXTURES=1`) when no single candidate root carries
+/// every named fixture.
+fn dataset_dirs_or_gate(rels: &[&str], what: &str) -> Option<Vec<PathBuf>> {
+    let found = candidate_base_roots().into_iter().find_map(|root| {
+        let dirs: Vec<PathBuf> = rels.iter().map(|rel| root.join(rel)).collect();
+        dirs.iter().all(|p| has_data_db(p)).then_some(dirs)
+    });
+    let rel_list = rels.join(", ");
+    match found {
+        Some(dirs) => Some(dirs),
+        None => {
             assert!(
                 !require_fixtures(),
-                "CQLITE_REQUIRE_FIXTURES=1 but {what} is unusable: {rel}. Regenerate the \
-                 corpus (test-data/scripts/generate-corruption-corpus.sh)."
+                "CQLITE_REQUIRE_FIXTURES=1 but {what} is unusable: no single candidate datasets \
+                 root [{}] carries every one of [{rel_list}] with a *-Data.db. Regenerate the \
+                 corpus (test-data/scripts/generate-corruption-corpus.sh).",
+                describe_base_roots()
             );
-            eprintln!("SKIP: {what} unusable ({rel}); set CQLITE_REQUIRE_FIXTURES=1 to enforce.");
+            eprintln!(
+                "SKIP: {what} unusable (no single candidate datasets root [{}] carries every one \
+                 of [{rel_list}] with a *-Data.db); set CQLITE_REQUIRE_FIXTURES=1 to enforce.",
+                describe_base_roots()
+            );
+            None
+        }
+    }
+}
+
+/// A corruption fixture and its CLEAN source table, bound from ONE candidate
+/// base root: the oracle reads the clean generation's `Index.db` /
+/// `CompressionInfo.db` and compares against findings on the corrupt COPY of
+/// that same generation, so the two halves must come from the same corpus.
+fn corrupt_and_clean_or_gate(
+    rel: &str,
+    what: &str,
+    keyspace: &str,
+    table: &str,
+) -> Option<(PathBuf, PathBuf)> {
+    let found = candidate_base_roots().into_iter().find_map(|root| {
+        let corrupt = root.join(rel);
+        if !has_data_db(&corrupt) {
+            return None;
+        }
+        let clean = table_generation_dirs(&root.join("sstables"), keyspace, table)
+            .into_iter()
+            .next()?;
+        Some((corrupt, clean))
+    });
+    match found {
+        Some(pair) => Some(pair),
+        None => {
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but no candidate datasets root [{}] carries BOTH \
+                 {rel} ({what}) and the clean {keyspace}.{table} source. Regenerate the corpus \
+                 (test-data/scripts/generate-corruption-corpus.sh).",
+                describe_base_roots()
+            );
+            eprintln!(
+                "SKIP: no candidate datasets root [{}] carries BOTH {rel} ({what}) and the clean \
+                 {keyspace}.{table} source; set CQLITE_REQUIRE_FIXTURES=1 to enforce.",
+                describe_base_roots()
+            );
             None
         }
     }
@@ -94,22 +192,25 @@ fn has_data_db(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The clean-source generation directory `<base>/<table>-*`, chosen
-/// deterministically (lexicographically first matching entry).
-fn clean_source_dir(base_keyspace: &str, table_prefix: &str) -> Option<PathBuf> {
-    let base = datasets_root()?.join("sstables").join(base_keyspace);
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&base)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name();
-            let name = name.to_str()?.to_string();
-            (name.starts_with(table_prefix) && e.path().is_dir() && has_data_db(&e.path()))
-                .then(|| e.path())
-        })
-        .collect();
-    candidates.sort();
-    candidates.into_iter().next()
+/// The clean-source generation directory of `<keyspace>.<table>`, resolved
+/// TABLE-granularly across every candidate root and selected
+/// deterministically, with the same #1094 gate.
+fn clean_source_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
+    match resolve_table_generation_dir(keyspace, table) {
+        Ok(dir) => Some(dir),
+        Err(why) => {
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but the clean {keyspace}.{table} source is absent: \
+                 {why}"
+            );
+            eprintln!(
+                "SKIP: clean {keyspace}.{table} source absent ({why}); set \
+                 CQLITE_REQUIRE_FIXTURES=1 to enforce."
+            );
+            None
+        }
+    }
 }
 
 async fn run_verify(dir: &Path) -> cqlite_core::storage::sstable::verify::VerifyReport {
@@ -254,18 +355,12 @@ fn resolved_keys(res: &PartitionResolution) -> Vec<String> {
 
 #[tokio::test]
 async fn l1_1_compressed_chunk_crc_flip_names_intersecting_partitions() {
-    let Some(corrupt_dir) = dataset_dir_or_gate(
+    let Some((corrupt_dir, clean_dir)) = corrupt_and_clean_or_gate(
         "corruption/test_comp_corrupt/data_db_bit_flip",
         "data_db_bit_flip",
+        "test_comp",
+        "lz4_table",
     ) else {
-        return;
-    };
-    let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table-") else {
-        assert!(
-            !require_fixtures(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent"
-        );
-        eprintln!("SKIP: clean lz4_table source absent");
         return;
     };
 
@@ -306,18 +401,12 @@ async fn l1_1_compressed_chunk_crc_flip_names_intersecting_partitions() {
 
 #[tokio::test]
 async fn l1_2_uncompressed_chunk_crc_flip_uses_crc_db_grid() {
-    let Some(corrupt_dir) = dataset_dir_or_gate(
+    let Some((corrupt_dir, clean_dir)) = corrupt_and_clean_or_gate(
         "corruption/test_comp_corrupt/uncompressed_data_bit_flip",
         "uncompressed_data_bit_flip",
+        "test_comp",
+        "uncompressed_table",
     ) else {
-        return;
-    };
-    let Some(clean_dir) = clean_source_dir("test_comp", "uncompressed_table-") else {
-        assert!(
-            !require_fixtures(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the clean uncompressed_table source is absent"
-        );
-        eprintln!("SKIP: clean uncompressed_table source absent");
         return;
     };
 
@@ -374,18 +463,12 @@ async fn l1_2_uncompressed_chunk_crc_flip_uses_crc_db_grid() {
 /// production-code note.
 #[tokio::test]
 async fn l1_3_truncated_data_db_names_every_partition_past_new_eof() {
-    let Some(corrupt_dir) = dataset_dir_or_gate(
+    let Some((corrupt_dir, clean_dir)) = corrupt_and_clean_or_gate(
         "corruption/test_comp_corrupt/data_db_truncation",
         "data_db_truncation",
+        "test_comp",
+        "lz4_table",
     ) else {
-        return;
-    };
-    let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table-") else {
-        assert!(
-            !require_fixtures(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent"
-        );
-        eprintln!("SKIP: clean lz4_table source absent");
         return;
     };
 
@@ -465,17 +548,23 @@ fn bit_flip_first_byte(path: &Path) {
 
 #[tokio::test]
 async fn l2_1_corrupt_big_index_db_unresolves_every_location() {
-    let Some(data_corrupt) = dataset_dir_or_gate(
-        "corruption/test_comp_corrupt/data_db_bit_flip",
-        "data_db_bit_flip",
+    // BOTH fixtures from ONE candidate root: this case overlays one's Index.db
+    // onto the other's generation, so they must be copies of the same clean
+    // `lz4_table` source, never two roots' independent corpus generations.
+    let Some(dirs) = dataset_dirs_or_gate(
+        &[
+            "corruption/test_comp_corrupt/data_db_bit_flip",
+            "corruption/test_comp_corrupt/index_db_bit_flip_big",
+        ],
+        "data_db_bit_flip + index_db_bit_flip_big",
     ) else {
         return;
     };
-    let Some(index_corrupt) = dataset_dir_or_gate(
-        "corruption/test_comp_corrupt/index_db_bit_flip_big",
-        "index_db_bit_flip_big",
-    ) else {
-        return;
+    let [data_corrupt, index_corrupt] = dirs.as_slice() else {
+        panic!(
+            "dataset_dirs_or_gate returned {} dirs for 2 rels",
+            dirs.len()
+        );
     };
 
     let staging = tempfile::Builder::new()
@@ -483,7 +572,7 @@ async fn l2_1_corrupt_big_index_db_unresolves_every_location() {
         .tempdir()
         .expect("create staging temp dir");
     let combined = staging.path().join("nb-1-big");
-    copy_generation(&data_corrupt, &combined);
+    copy_generation(data_corrupt, &combined);
     // Overwrite Index.db with the OTHER corpus fixture's corrupted copy — both
     // shared the same `lz4_table` clean source, so every sibling component
     // (base name, format) is compatible.
@@ -635,12 +724,7 @@ fn oracle_bti_rows_offset_positions(
 
 #[tokio::test]
 async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
-    let Some(clean) = clean_source_dir("test_da", "wide_table-") else {
-        assert!(
-            !require_fixtures(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the clean wide_table source is absent"
-        );
-        eprintln!("SKIP: clean wide_table source absent");
+    let Some(clean) = clean_source_dir("test_da", "wide_table") else {
         return;
     };
     if !clean.join("da-2-bti-CompressionInfo.db").is_file() {
@@ -711,12 +795,7 @@ async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
 
 #[tokio::test]
 async fn l2_3_clean_fixture_has_no_findings_and_no_fabricated_location() {
-    let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table-") else {
-        assert!(
-            !require_fixtures(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table source is absent"
-        );
-        eprintln!("SKIP: clean lz4_table source absent");
+    let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table") else {
         return;
     };
     let report = run_verify(&clean_dir).await;
