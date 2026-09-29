@@ -10633,7 +10633,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
   local d root calls counter rc claim bound fns walks per_walk want got
   local refresh_pid planted_started ended live live_waited stale_secs ticks tick_count max_gap
   local barrier_secs barrier_ticks max_refresher_ticks outcome_ok barrier_started barrier_elapsed
-  local gap_exceeds
+  local gap_exceeds stub_walks real_walks launched
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10746,6 +10746,18 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # hand-typing the relation a fourth time in this function — (a)'s own `got` assert already
   # fails loudly if the shipped relation moves; a hand-typed copy here would not.
   stale_secs="$(bash -c 'set -uo pipefail; OBJ_SWEEP_TIMEOUT_SECS="'"$OBJ_SWEEP_TIMEOUT_SECS"'"; OBJ_SWEEP_CLAIM_SLACK_SECS="'"$OBJ_SWEEP_CLAIM_SLACK_SECS"'"; . "$1"; obj_sweep_claim_stale_secs "$2"' _ "$fns" "$REPO_ROOT/scripts/check-object-store-integrity.sh" 2>&1)"
+  # `stale_secs` ABOVE IS DERIVED FROM THE REAL SHIPPED SCRIPT, BUT THE SUPERVISOR UNDER TEST
+  # BELOW READS THE STUB `obj_sweep_tree` WRITES, which hardcodes `MAX_SWEEP_WALKS=3` rather
+  # than reading it from the real script (roborev job 45). The two agree only by coincidence
+  # today -- if the shipped script's own MAX_SWEEP_WALKS ever moves, `stale_secs` silently
+  # stops matching the bound the supervisor actually enforces, reintroducing the exact
+  # misattribution (a healthy run reads as a regression, or a real regression reads as
+  # healthy) this whole case exists to remove. Assert them equal before trusting `stale_secs`
+  # for anything below; a mismatch is an environmental drift in this fixture, not a supervisor
+  # regression, so it reports `skip`, not `fail` (same convention as the barrier-miss path).
+  stub_walks=3
+  real_walks="$({ grep -m1 '^MAX_SWEEP_WALKS=' "$REPO_ROOT/scripts/check-object-store-integrity.sh" || true; } 2>/dev/null)"
+  real_walks="${real_walks#MAX_SWEEP_WALKS=}"
   # GUARDED THE SAME WAY (a) GUARDS walks/per_walk/bound: an undecided derivation (the
   # function returns 1 with no output when it cannot read MAX_SWEEP_WALKS) must not reach
   # the arithmetic below as an empty string -- `barrier_secs=$((10 * stale_secs))` on an
@@ -10760,7 +10772,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # depend on `stale_secs` -- and reporting one red with no indication three untested
   # properties never ran. Wrapping in `if` instead lets them proceed either way; the shared
   # `unset` below already runs unconditionally after this block closes.
-  if [[ "$stale_secs" =~ ^[0-9]+$ ]]; then
+  if [[ "$stale_secs" =~ ^[0-9]+$ && "$real_walks" == "$stub_walks" ]]; then
     planted_started="$(date +%s)"
     printf '%s\n' "$planted_started" >"$claim/started"
     # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
@@ -10846,6 +10858,15 @@ test_object_store_sweep_claim_recovers_when_stale() {
       fixture_kill "$refresh_pid"
     else
       root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+      # CAPTURED IMMEDIATELY BEFORE LAUNCH, same sub-second-with-fallback shape as `ended`
+      # below: `obj_sweep_tree` above runs `git init` + `git commit` + two `cp`s, and the
+      # refresher's tick record starts at the barrier, BEFORE any of that -- a stall in that
+      # setup window is irrelevant to the property under test (the supervisor has not read
+      # `started` yet) but was previously charged against `stale_secs` anyway, downgrading an
+      # otherwise-valid run to a spurious `skip` on exactly the loaded box this case targets
+      # (roborev job 45). `max_gap` below uses this to ignore the pre-launch window.
+      launched="$(date +%s.%N)"
+      case "$launched" in *N) launched="$(date +%s)" ;; esac
       env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
       rc=$?
       # SAME sub-second capture (+ GNU/BSD fallback) as the refresher's own ticks: mixing a
@@ -10881,7 +10902,13 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # LC_ALL=C: gawk honours LC_NUMERIC for `printf %f`, so under a locale with a comma
       # decimal separator this would emit e.g. "0,20" -- FAILS CLOSED below regardless
       # (the `=~` validation rejects a comma), rather than silently misparsing it.
-      max_gap="$(LC_ALL=C awk -v e="$ended" 'NR>1{d=$1-p; if(d>m)m=d} {p=$1} END{d=e-p; if(d>m)m=d; printf "%.2f", m+0}' "$ticks" 2>/dev/null)"
+      # WINDOWED AT `launched`, NOT AT THE BARRIER (roborev job 45): a tick before `launched`
+      # only seeds `p` (the "last pre-launch tick" the fix suggests) and is otherwise
+      # skipped -- the pre-launch setup window (git init/commit/cp inside `obj_sweep_tree`)
+      # is real elapsed time but not time the property under test cares about, so a stall
+      # there must not count as a gap. The first POST-launch tick's gap is still measured
+      # against that seeded `p`, so a stall spanning the launch instant itself is still caught.
+      max_gap="$(LC_ALL=C awk -v e="$ended" -v l="$launched" '$1<l{p=$1;next} {if(p!=""){d=$1-p; if(d>m)m=d} p=$1} END{if(p!=""){d=e-p; if(d>m)m=d} printf "%.2f", m+0}' "$ticks" 2>/dev/null)"
       # FAIL CLOSED, not open: an awk error (missing binary, unreadable `$ticks`, ENOSPC) or
       # any output that is not a plain `N.NN` number forces the SENTINEL, which the scaled
       # comparison below treats as "gap exceeds every plausible bound" -- i.e. routes to the
@@ -10921,6 +10948,8 @@ test_object_store_sweep_claim_recovers_when_stale() {
         fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) refresher_ticks=$tick_count refresher_max_gap=${max_gap}s (see $d/fresh.log)"
       fi
     fi
+  elif [[ "$stale_secs" =~ ^[0-9]+$ ]]; then
+    skip "obj-sweep(claim-fresh-control): the shipped script's MAX_SWEEP_WALKS ('$real_walks') no longer matches this fixture's stub ('$stub_walks') -- stale_secs would be derived from a bound the supervisor under test does not actually read, so this run cannot be credited either way (update the stub in obj_sweep_tree to match)"
   else
     fail "obj-sweep(claim-fresh-control): the derived stale bound came back '$stale_secs' -- every timing bound in this sub-case would be vacuous"
   fi
