@@ -201,32 +201,17 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
     // message naming the file. The live guard for "nothing here" is the
     // `dirs.is_empty()` refusal at the top of this function.
 
-    // ASSERT THE PROPERTY THAT CAN CHANGE, not one that cannot (roborev job
-    // 65). The previous cross-directory duplicate check could no longer fire
-    // at all once the selection was pinned: all goldens come from ONE
-    // filesystem directory, where two files cannot share a name — its own
-    // message said "impossible on a normal filesystem", which is the
-    // signature of an inert guard.
+    // NO in-line "every golden came from `chosen`" assertion here. One was
+    // added and then removed (roborev jobs 65/67/69): every `GoldenSstable`
+    // above is constructed with `source_dir: dir.clone()` where `dir` IS
+    // `chosen`, in this same block, so such a check cannot fire for any
+    // input — replacing one inert guard with another.
     //
-    // What a future edit CAN break is the pin itself, by letting a golden in
-    // from a directory other than the chosen one. That is checked here, and
-    // it is the property `assert_raw_view_matches_golden` relies on when it
-    // takes `goldens[0].source_dir` as the ingest selection: if the goldens
-    // spanned directories, oracle and query would read different bytes.
-    for g in &goldens {
-        assert_eq!(
-            &g.source_dir,
-            chosen,
-            "issue #4309: {} produced a golden ('{}') from {} rather than the chosen \
-             generation directory {}. The sweep pins ONE directory so the oracle and \
-             the ingest selection read the same bytes; a golden from elsewhere breaks \
-             that binding",
-            spec.id(),
-            g.data_db,
-            g.source_dir.display(),
-            chosen.display()
-        );
-    }
+    // The pin IS checked, from outside, where it can actually fail:
+    // `issue_4309_raw_view_oracle_selftest.rs`'s
+    // `load_goldens_binds_to_the_lexically_first_generation_directory`
+    // builds TWO Data.db-bearing directories on disk and asserts this
+    // function returns only the lexically-first one's goldens.
     goldens
 }
 

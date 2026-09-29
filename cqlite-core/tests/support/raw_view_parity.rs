@@ -419,8 +419,14 @@ fn assert_group(
     let mut expected_by_id: BTreeMap<RowIdentity, &ExpectedRow> = BTreeMap::new();
     for row in expected {
         let id = row.identity();
+        // INSERT FIRST, THEN ASSERT (roborev job 69). The map population is
+        // what the whole comparison below reads; hiding it inside an
+        // `assert!` condition means a future `debug_assert!`, or a refactor
+        // that puts the check behind a flag, would silently leave both maps
+        // EMPTY and turn `assert_group` into a no-op that compares nothing.
+        let prior = expected_by_id.insert(id.clone(), row);
         assert!(
-            expected_by_id.insert(id.clone(), row).is_none(),
+            prior.is_none(),
             "{ctx}: the golden describes two physical rows with the SAME identity {id:?} — \
              the sweep's row model cannot distinguish them, so it must not silently compare \
              one twice"
@@ -429,8 +435,9 @@ fn assert_group(
     let mut actual_by_id: BTreeMap<RowIdentity, &QueryRow> = BTreeMap::new();
     for row in actual {
         let id = actual_identity(row, roles, &ctx);
+        let prior = actual_by_id.insert(id.clone(), row);
         assert!(
-            actual_by_id.insert(id.clone(), row).is_none(),
+            prior.is_none(),
             "{ctx}: the raw view returned two rows with the SAME identity {id:?}"
         );
     }

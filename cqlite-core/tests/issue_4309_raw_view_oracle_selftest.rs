@@ -712,3 +712,64 @@ fn an_unmodelled_entry_type_is_refused() {
         })],
     )]);
 }
+
+/// The PARTITION-TOMBSTONE fact derivation, which no gate-executed fixture
+/// reaches (roborev job 69).
+///
+/// All four claimants of `entry:partition_deletion` are
+/// `Discipline::FetchOnly`, and no `GitCommitted` sweep fixture carries a
+/// partition-level `deletion_info` — verified across the committed goldens.
+/// The census control asserts only that the token is COUNTED; the values
+/// and the row shape were never asserted by anything the gate runs.
+///
+/// The two instants are DISTINCT on purpose: with equal values the
+/// seconds-vs-micros unit split is unobservable, and swapping
+/// `marked_deleted` for `local_delete_time` would pass.
+#[test]
+fn a_partition_deletion_yields_a_partition_tombstone_row_with_both_times() {
+    let (expected, _) = build_expectations(
+        &[generation_of(
+            "nb-1-big-Data.db",
+            vec![json!({
+                "partition": {
+                    "key": ["1"],
+                    "deletion_info": {
+                        "marked_deleted": "2021-01-01T00:00:01Z",
+                        "local_delete_time": "2021-01-01T00:00:02Z"
+                    }
+                },
+                "rows": []
+            })],
+        )],
+        &roles(),
+        &SPEC,
+    );
+
+    assert_eq!(expected.len(), 1, "one partition tombstone row");
+    let row = &expected[0];
+    assert_eq!(
+        row.row_kind, "partition_tombstone",
+        "a partition-level deletion_info is a PARTITION tombstone, not a row"
+    );
+    assert_eq!(
+        row.clustering,
+        vec![None],
+        "issue #4309: a partition tombstone has no clustering position — every component \
+         must be ABSENT, never a fabricated value"
+    );
+    assert_eq!(
+        row.facts.get("partition_deletion_timestamp"),
+        Some(&Fact::BigInt(1609459201000000)),
+        "issue #4309: `marked_deleted` is the write timestamp, in epoch MICROseconds. \
+         Reading `local_delete_time` here instead would give 1609459202000000. {:?}",
+        row.facts
+    );
+    assert_eq!(
+        row.facts.get("partition_deletion_time"),
+        Some(&Fact::BigInt(1609459202)),
+        "issue #4309: `local_delete_time` is the GC clock, in epoch SECONDS. A micros \
+         value would be 1609459202000000; the `marked_deleted` instant would be \
+         1609459201. {:?}",
+        row.facts
+    );
+}
