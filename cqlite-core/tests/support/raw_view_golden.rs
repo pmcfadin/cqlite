@@ -199,30 +199,31 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
         spec.id()
     );
 
-    // The `Data.db` names within the chosen directory are unique by
-    // construction (one filesystem directory cannot hold two files of the
-    // same name), so the group key `(sstable, partition key)` attributes
-    // every returned row unambiguously. Asserted anyway, because that is the
-    // property the whole comparison rests on and it costs one pass: the raw
-    // view's `sstable` column reports only the bare FILE NAME, so a
-    // duplicate would silently collapse two generations onto one group and
-    // surface as a torrent of "missing"/"unexplained" rows blaming the view
-    // for a harness limit.
-    for (i, a) in goldens.iter().enumerate() {
-        for b in &goldens[i + 1..] {
-            assert_ne!(
-                a.data_db,
-                b.data_db,
-                "issue #4309: {} produced two goldens named '{}' from one directory \
-                 ({} and {}) — impossible on a normal filesystem, so the generation \
-                 selection above has been changed in a way that reintroduces the \
-                 cross-directory ambiguity it removed",
-                spec.id(),
-                a.data_db,
-                a.source_dir.display(),
-                b.source_dir.display()
-            );
-        }
+    // ASSERT THE PROPERTY THAT CAN CHANGE, not one that cannot (roborev job
+    // 65). The previous cross-directory duplicate check could no longer fire
+    // at all once the selection was pinned: all goldens come from ONE
+    // filesystem directory, where two files cannot share a name — its own
+    // message said "impossible on a normal filesystem", which is the
+    // signature of an inert guard.
+    //
+    // What a future edit CAN break is the pin itself, by letting a golden in
+    // from a directory other than the chosen one. That is checked here, and
+    // it is the property `assert_raw_view_matches_golden` relies on when it
+    // takes `goldens[0].source_dir` as the ingest selection: if the goldens
+    // spanned directories, oracle and query would read different bytes.
+    for g in &goldens {
+        assert_eq!(
+            &g.source_dir,
+            chosen,
+            "issue #4309: {} produced a golden ('{}') from {} rather than the chosen \
+             generation directory {}. The sweep pins ONE directory so the oracle and \
+             the ingest selection read the same bytes; a golden from elsewhere breaks \
+             that binding",
+            spec.id(),
+            g.data_db,
+            g.source_dir.display(),
+            chosen.display()
+        );
     }
     goldens
 }
@@ -729,6 +730,11 @@ pub fn bound_facts(bound: &Json, ctx: &str) -> BTreeMap<String, Fact> {
 /// the coverage vocabulary (roborev job 61). `bump` asserts membership, and
 /// `issue_4309_raw_view_census_selftest.rs` asserts this list plus every
 /// `FACT_KIND_RULES` family is EXACTLY `KNOWN_COVERAGE_TOKENS`.
+/// Named once so the vocabulary entry and the insert site cannot drift
+/// apart — `shape:multi_generation` is DERIVED after the entry loop, so it
+/// is the one shape that does not go through `bump`'s membership check.
+pub const SHAPE_MULTI_GENERATION: &str = "shape:multi_generation";
+
 pub const SHAPE_TOKENS: &[&str] = &[
     "entry:row",
     "entry:static_block",
@@ -737,7 +743,7 @@ pub const SHAPE_TOKENS: &[&str] = &[
     "entry:range_tombstone_boundary",
     "shape:prefix_bound",
     "shape:row_update_without_liveness",
-    "shape:multi_generation",
+    SHAPE_MULTI_GENERATION,
 ];
 
 /// Turn every golden partition of every generation into the physical rows the
@@ -962,11 +968,7 @@ pub fn build_expectations(
         .filter(|sstables| sstables.len() > 1)
         .count();
     if cross_generation_keys > 0 {
-        assert!(
-            SHAPE_TOKENS.contains(&"shape:multi_generation"),
-            "issue #4309: shape:multi_generation must be declared in SHAPE_TOKENS"
-        );
-        shapes.insert("shape:multi_generation", cross_generation_keys);
+        shapes.insert(SHAPE_MULTI_GENERATION, cross_generation_keys);
     }
 
     (expected, shapes)

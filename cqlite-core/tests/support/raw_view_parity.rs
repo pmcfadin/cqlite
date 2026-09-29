@@ -990,8 +990,26 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
             // counting it would let a fixture with no marker at all "observe"
             // the family. Every other boolean — `bound_inclusive = false`, an
             // EXCLUSIVE bound — is a genuine positive observation.
-            let is_negative_marker = is_negative_complex_marker(column, fact);
-            if *fact != Fact::Absent && !is_negative_marker {
+            // The oracle NEVER stores an explicit absence: `row_entry_facts`,
+            // `bound_facts`, `fold_simple_cell` and `fold_complex_column`
+            // only ever insert a fact that has a value, and a missing fact is
+            // simply not in the map — `Fact::Absent` is synthesized later, by
+            // `assert_group`'s `unwrap_or`. A `*fact != Fact::Absent` filter
+            // here could therefore never be false (roborev job 65), so the
+            // invariant is ASSERTED once instead of being filtered on
+            // forever: a future `insert(.., Fact::Absent)` would make the
+            // census count an absence as an observation, which is the
+            // vacuous-coverage failure this census exists to forbid.
+            assert_ne!(
+                *fact,
+                Fact::Absent,
+                "issue #4309: {} stored an explicit Fact::Absent for '{column}'. The \
+                 expectation model states only facts it HAS; absence is represented by \
+                 the column being missing. Counting an explicit absence would let a \
+                 fixture observe a family it never exercised",
+                spec.id()
+            );
+            if !is_negative_complex_marker(column, fact) {
                 *observed.entry(fact_kind(column)).or_insert(0) += 1;
             }
         }
