@@ -149,6 +149,30 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
 1. **Beat, then run THE full gate of record — background, summary-file, ONE run.** This is
    the only gate invocation that counts. The REQUIRED form (issue #2079) writes the block
    to a pre-chosen file so raw stdout never has to be read into context:
+
+   **On a shared fleet Linux box, `scripts/flow/gate-box-launch.sh` is the ONE sanctioned
+   entry point (#4267) — never hand-recite the box settings (lane worktree, npx-free `PATH`,
+   `env -u LANE_ID`, `TMPDIR` on the tmpfs, dataset root, file-growth disclosure).** It
+   resolves the PR/branch against the box's canonical clone, refuses a stale base and the
+   two recurring env hazards by name, cuts/refreshes the lane worktree, and calls
+   `gate-detached.sh` for you with an env built from an allowlist:
+   ```bash
+   bash scripts/flow/claim-heartbeat.sh beat <N>
+   bash scripts/flow/gate-box-launch.sh <pr> --box <host-name> \
+     --summary /tmp/gate-<N>.txt --log /tmp/gate-<N>.log
+   # Prints one line on success: GATE-BOX-LAUNCH: box=… lane=… head=… unit=… run-id=… summary=… log=…
+   # <pr> is the PR NUMBER (or a branch name) — NOT the issue number; they differ whenever an
+   # issue's PR isn't filed under the same number (this issue's own case: #4267 vs PR #4270).
+   # --summary/--log MUST be pinned to this SAME /tmp/gate-<N>.txt path: step 5(a) and the
+   # terminal packet below both hard-require it, and gate-box-launch.sh's own default (a
+   # fresh path under the box profile's BOX_LOG_DIR) would leave those steps reading a file
+   # that was never written.
+   # Sanity-check first with --dry-run: it resolves everything and prints the env + command
+   # without any git/process side effect beyond the `git fetch`es used to resolve the head.
+   ```
+   See `docs/development/fleet-runbook.md` ("Starting a gate of record on a fleet Linux box")
+   for the box-profile mechanism. On a machine with **no committed box profile** (a laptop, or
+   a box `gate-box-launch.sh` does not yet know), fall back to the direct form it itself calls:
    ```bash
    bash scripts/flow/claim-heartbeat.sh beat <N>
    # Detached: its own cgroup, so it survives YOUR context ending (#3473). Returns

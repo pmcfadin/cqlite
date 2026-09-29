@@ -23147,6 +23147,21 @@ run_tooling_tests() {
     return 0
   fi
 
+  # the fleet box launcher (#4267): env scrubbing (LANE_ID, npx-bearing PATH),
+  # stale-base refusal, and profile loading, all against throwaway git fixtures this
+  # script builds and destroys itself — no network, no real box, no systemd, no cargo.
+  echo ">>> [$name] bash scripts/tests/test_gate_box_launch.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_box_launch.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (fleet box launcher #4267); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   # BANNER IMMEDIATELY BEFORE ITS OWN INVOCATION (roborev job 238). It used to sit ~30 lines earlier,
   # and the #3473 liveness and detached suites were inserted between — so the log announced pub-surface,
