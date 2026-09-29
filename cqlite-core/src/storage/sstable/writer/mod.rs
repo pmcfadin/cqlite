@@ -797,7 +797,19 @@ impl SSTableWriter {
         }
         for mutation in &mutations {
             if data_writer::is_static_row_mutation(mutation, &self.schema) {
-                stats_fold::fold_row_content_stats(&mut self.stats, mutation, None);
+                // Issue #4246 roborev round-7 finding: the STATIC-CARRIER
+                // fold, matching both compaction paths. `fold_row_content_
+                // stats` alone never folds a row's own deletion
+                // (`CellOperation::DeleteRow` is an explicit no-op arm and
+                // the #932 `row_tombstone` field is not read), deferring it
+                // to a group-level `fold_row_deletion_marker` this loop
+                // does not perform -- so a static carrier's deletion marker
+                // reached persisted stats NOWHERE on this path either.
+                // `pre_seed_encoding_baselines` does NOT cover this: it
+                // seeds only the MIN fields, leaving `max_timestamp`,
+                // `max_local_deletion_time` and the
+                // `estimatedTombstoneDropTime` histogram unprotected.
+                stats_fold::fold_static_carrier_stats(&mut self.stats, mutation);
             }
         }
 

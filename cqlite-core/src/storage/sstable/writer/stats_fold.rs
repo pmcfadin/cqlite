@@ -195,9 +195,18 @@ pub(crate) fn fold_single_mutation_row_group(
 /// #4246 refactor `fold_mutation_stats` folded them for these mutations
 /// (issue #1721's explicit purpose: without the LDT contribution
 /// `min_local_deletion_time` stays `i32::MAX` and `data_writer/rows.rs`'s
-/// below-baseline guard then REJECTS the row). The flush path is shielded by
-/// `compute_mutations_baseline_stats`/`pre_seed_encoding_baselines`; neither
-/// compaction path has such a pre-seed.
+/// below-baseline guard then REJECTS the row).
+///
+/// SCOPE OF THE FLUSH-PATH PRE-SEED, STATED PRECISELY (issue #4246 roborev
+/// round-7 finding -- an earlier version of this comment OVERSTATED it):
+/// `compute_mutations_baseline_stats`/`pre_seed_encoding_baselines` seed
+/// ONLY the MIN fields (`min_timestamp`, `min_local_deletion_time`,
+/// `min_ttl`). They do NOT protect `max_timestamp`,
+/// `max_local_deletion_time` or the `estimatedTombstoneDropTime` histogram,
+/// so the flush path is NOT broadly "shielded" -- which is why
+/// `write_partition`'s own wholly-static loop calls this helper too, rather
+/// than relying on the pre-seed. No compaction path has any pre-seed at
+/// all.
 ///
 /// Resolution goes through `DataWriter::resolve_row_deletion` — the single
 /// authority, which picks whichever of the two representations carries the
@@ -217,7 +226,7 @@ pub(crate) fn fold_static_carrier_stats(stats: &mut StatisticsMetadata, mutation
 /// #4246 roborev finding). A tombstone marker is never itself row-shadowed —
 /// it IS the deletion — so it always contributes, independent of whatever
 /// `fold_row_content_stats` decides about the row content sharing the same
-/// mutation object. Split out from [`fold_mutation_stats`] so a caller that
+/// mutation object. Split out from `fold_mutation_stats` so a caller that
 /// folds markers unconditionally (once per mutation, regardless of
 /// [`row_group_survives`]/[`row_group_survival`]) and row content
 /// conditionally (only for surviving mutations) never double-folds a
@@ -272,7 +281,7 @@ pub(crate) fn fold_mutation_stats(stats: &mut StatisticsMetadata, mutation: &Mut
     fold_row_deletion_marker(stats, row_deletion);
 }
 
-/// Everything [`fold_mutation_stats`] folds EXCEPT the partition/range
+/// Everything `fold_mutation_stats` folds EXCEPT the partition/range
 /// tombstone marker fields (see [`fold_marker_stats`]'s doc for why the split
 /// exists, issue #4246 roborev finding). Used by a caller that folds markers
 /// separately/unconditionally so a mutation carrying both row content and a

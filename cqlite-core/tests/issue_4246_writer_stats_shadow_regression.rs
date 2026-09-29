@@ -869,4 +869,31 @@ fn two_partition_tombstones_one_batch_baseline_residual_is_documented() {
          partition tombstone's timestamp (5), not the winning, actually-\
          emitted one (10) — see this test's own doc comment and #4286"
     );
+
+    // Issue #4246 roborev round-7 finding: moving the marker fold OUT of the
+    // per-mutation loop and folding only the WINNING `partition_tombstone`
+    // (`max_by_key(|pt| pt.deletion_time)`) is a change to PERSISTED BYTES —
+    // previously each carrier mutation's partition tombstone produced its own
+    // `update_local_deletion_time` observation, so this batch would have
+    // recorded TWO. That behavior was previously unpinned: this is the only
+    // two-partition-tombstone case in the suite, and it asserted
+    // `min_timestamp` alone.
+    //
+    // The expected value is derived from what is EMITTED, not read off the
+    // output: `write_partition` emits exactly ONE partition tombstone into the
+    // partition header (the winning PT@10), and the whole point of issue #4246
+    // is that persisted statistics describe emitted data — so one emitted
+    // marker must yield exactly one drop-time observation.
+    // `update_local_deletion_time` increments a histogram bucket and is NOT
+    // idempotent, so a regression here inflates the persisted
+    // `estimatedTombstoneDropTime` Cassandra derives compaction scheduling
+    // from.
+    assert_eq!(
+        statistics_tombstone_drop_count(&data_dir),
+        1,
+        "exactly ONE partition tombstone is emitted (the winning PT@10), so \
+         the tombstone-drop-time histogram must carry exactly ONE \
+         observation — 2 would mean the superseded, never-emitted PT@5 was \
+         folded as well"
+    );
 }
