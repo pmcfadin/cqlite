@@ -496,7 +496,7 @@ fn require_fixtures_strict() -> bool {
 
 /// Resolve the fixture's root PER TABLE, or decide the case's fate per its
 /// declared discipline. `None` is the ONE sanctioned skip.
-fn resolve_root(spec: &FixtureSpec) -> Option<PathBuf> {
+pub fn resolve_root(spec: &FixtureSpec) -> Option<PathBuf> {
     if let Some(root) = sstables_root_for_table(spec.keyspace, spec.table) {
         return Some(root);
     }
@@ -584,7 +584,7 @@ async fn open_database(spec: &FixtureSpec, root: &Path, generation_dir: &Path) -
 /// Fail-closed on anything but an integer single-column key: every fixture in
 /// the sweep has one, and silently quoting or interpolating an unvalidated
 /// string would build a query this harness cannot reason about.
-fn partition_key_predicate(spec: &FixtureSpec, key: &str) -> String {
+pub fn partition_key_predicate(spec: &FixtureSpec, key: &str) -> String {
     let components: Vec<&str> = key.split('|').collect();
     assert_eq!(
         components.len(),
@@ -1021,6 +1021,27 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
                  expectation model states only facts it HAS; absence is represented by \
                  the column being missing. Counting an explicit absence would let a \
                  fixture observe a family it never exercised",
+                spec.id()
+            );
+            // A FACT MAY ONLY COUNT AS OBSERVED IF THE SWEEP ACTUALLY
+            // COMPARES IT (roborev job 73). The family half of the census is
+            // counted from the expectation model, but the byte-exact
+            // comparison iterates `roles.compared_columns` — and the two are
+            // built independently: the fact producers hardcode their column
+            // names, while `compared_columns` comes from the
+            // ROW_LEVEL/PARTITION/RANGE lists plus per-column suffixes. So a
+            // fact could be STORED and COUNTED without ever being COMPARED,
+            // which would make the census overstate what a green run
+            // certifies — the exact thing it exists to prevent. Tying them
+            // together here means a producer that invents a column the
+            // contract does not carry fails by name instead of inflating a
+            // coverage claim.
+            assert!(
+                roles.compared_columns.iter().any(|c| c == column),
+                "issue #4309: {} states a fact for '{column}', which is not in the \
+                 sweep's compared-column set — so it would be COUNTED as coverage while \
+                 never being COMPARED against the golden. Either compare it or stop \
+                 producing it; a counted-but-uncompared fact is a false coverage claim",
                 spec.id()
             );
             if !is_negative_complex_marker(column, fact) {

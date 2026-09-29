@@ -38,11 +38,15 @@
 mod synthetic;
 
 use cqlite_core::query::result::ColumnInfo;
+use cqlite_core::types::Value;
 use raw_view_parity::golden::{
     build_expectations, classify_columns, load_goldens, Fact, DECLARED_GAP_COLUMNS,
     PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA,
 };
-use raw_view_parity::{is_negative_complex_marker, Discipline, FixtureSpec};
+use raw_view_parity::golden::{fact_of, render_actual_clustering};
+use raw_view_parity::{
+    is_negative_complex_marker, partition_key_predicate, resolve_root, Discipline, FixtureSpec,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use synthetic::raw_view_parity;
@@ -772,4 +776,81 @@ fn a_partition_deletion_yields_a_partition_tombstone_row_with_both_times() {
          1609459201. {:?}",
         row.facts
     );
+}
+
+// ---------------------------------------------------------------------------
+// The SWEEP side's fail-closed refusals (roborev job 73)
+// ---------------------------------------------------------------------------
+//
+// The five refusals controlled above are all in the GOLDEN model. The sweep
+// has four of its own, and none of their panicking arms is reachable from
+// any fixture in the corpus — so none had ever executed either. Same
+// standard: a refusal that has never fired is a refusal nobody has checked
+// still fires.
+
+/// A spec naming a table no root carries, used to drive `resolve_root`'s
+/// two disciplines.
+const fn absent_spec(discipline: Discipline) -> FixtureSpec {
+    FixtureSpec {
+        keyspace: "selftest_absent_ks",
+        table: "no_such_table",
+        schema_file: "unused-no-database-is-opened.cql",
+        partition_key_columns: &["pk"],
+        discipline,
+    }
+}
+
+/// `resolve_root` on a `GitCommitted` fixture that is absent: a broken
+/// checkout, never an unfetched corpus, so it must PANIC rather than skip.
+#[test]
+#[should_panic(expected = "so its absence is a broken checkout")]
+fn an_absent_git_committed_fixture_is_refused_not_skipped() {
+    let _ = resolve_root(&absent_spec(Discipline::GitCommitted));
+}
+
+/// The other half of the same split: an absent `FetchOnly` fixture SKIPs
+/// cleanly (returns `None`) when strict mode is off. Without this the
+/// refusal above could be satisfied by a `resolve_root` that panics on
+/// everything.
+#[test]
+fn an_absent_fetch_only_fixture_skips_cleanly() {
+    // Guard the environment rather than assume it: under
+    // CQLITE_REQUIRE_FIXTURES=1 this same call is REQUIRED to panic, so the
+    // assertion below would be wrong. The sweep is run both ways.
+    if std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+        return;
+    }
+    assert!(
+        resolve_root(&absent_spec(Discipline::FetchOnly)).is_none(),
+        "issue #4309: an absent FETCH-ONLY fixture is a missing corpus, not a broken \
+         checkout — it must skip cleanly, or the discipline split means nothing"
+    );
+}
+
+/// `partition_key_predicate` builds point predicates for INTEGER partition
+/// keys only, and refuses anything else rather than emitting a predicate
+/// that would silently match nothing (a point query returning no rows would
+/// then read as a view defect).
+#[test]
+#[should_panic(expected = "only builds point predicates for INTEGER")]
+fn a_non_integer_partition_key_predicate_is_refused() {
+    let _ = partition_key_predicate(&SPEC, "not_an_integer");
+}
+
+/// `fact_of` refuses a metadata value shape the sweep does not compare,
+/// rather than silently dropping it — an unrecognized shape is a contract
+/// change that must be reviewed.
+#[test]
+#[should_panic(expected = "rendered an unexpected value shape")]
+fn an_unexpected_metadata_value_shape_is_refused() {
+    let _ = fact_of(Some(&Value::Float(1.0)));
+}
+
+/// `render_actual_clustering` renders int/text/bool components only, and
+/// refuses the rest rather than formatting something the golden comparison
+/// could never match.
+#[test]
+#[should_panic(expected = "renders only int/text/bool clustering components")]
+fn an_unsupported_clustering_component_type_is_refused() {
+    let _ = render_actual_clustering(&Value::Float(1.0), "selftest");
 }
