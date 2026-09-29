@@ -740,7 +740,22 @@ pub fn bound_facts(bound: &Json, ctx: &str) -> BTreeMap<String, Fact> {
         other => panic!("{ctx}: unexpected sstabledump bound type '{other}'"),
     };
     facts.insert("bound_inclusive".to_string(), Fact::Bool(inclusive));
-    let deletion = &bound["deletion_info"];
+    // ESTABLISH THE PARENT BEFORE READING ITS LEAVES, as every other
+    // accessor in this module does (roborev job 72): `row_entry_facts` and
+    // `fold_complex_column` guard on `get("deletion_info")`, and
+    // `render_golden_clustering` panics naming the missing array. Indexing
+    // `bound["deletion_info"]` unguarded yields `Json::Null` for a bound
+    // side that carries none, and the failure then surfaces from
+    // `golden_str` as a confusing "node must carry a string
+    // 'marked_deleted' — got null" rather than naming what is actually
+    // absent.
+    let deletion = bound.get("deletion_info").unwrap_or_else(|| {
+        panic!(
+            "{ctx}: golden bound side carries no 'deletion_info' object. A range-tombstone \
+             bound IS a deletion — `serializeTombstone` always writes one — so its absence \
+             is a malformed or unmodelled golden, never a bound without a deletion time"
+        )
+    });
     facts.insert(
         "range_deletion_timestamp".to_string(),
         Fact::BigInt(iso_to_micros(golden_str(deletion, "marked_deleted", ctx))),

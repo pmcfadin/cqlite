@@ -27,7 +27,10 @@
 #[path = "raw_view_parity.rs"]
 pub mod raw_view_parity;
 
-use raw_view_parity::golden::{build_expectations, ColumnRoles, GoldenSstable};
+use raw_view_parity::golden::{
+    build_expectations, ColumnRoles, GoldenSstable, PARTITION_METADATA, RANGE_METADATA,
+    ROW_LEVEL_METADATA,
+};
 use raw_view_parity::{Discipline, FixtureSpec};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -78,11 +81,44 @@ pub fn roles_with(clustering: &[&str], simple: &[&str]) -> ColumnRoles {
 }
 
 pub fn roles_full(clustering: &[&str], simple: &[&str], complex: &[&str]) -> ColumnRoles {
+    // `compared_columns` is DERIVED here, exactly as `classify_columns`
+    // derives it, rather than left empty (roborev job 72). It is the field
+    // `assert_group` iterates to decide which columns get compared AT ALL,
+    // so an empty value makes `assert_group` perform zero comparisons and
+    // return 0 — passing having compared nothing. Neither self-test lane
+    // reaches `assert_group` today, but these three helpers are the obvious
+    // ones to reuse if a lane ever adds a control for it, and a
+    // vacuous-pass trap waiting in a shared helper is precisely what these
+    // lanes exist to prevent.
+    let mut compared_columns: Vec<String> = Vec::new();
+    for c in simple {
+        for suffix in ["_timestamp", "_ttl", "_local_deletion_time", "_tombstone"] {
+            compared_columns.push(format!("{c}{suffix}"));
+        }
+    }
+    for c in complex {
+        for suffix in [
+            "_complex_deletion",
+            "_complex_deletion_time",
+            "_complex_deletion_timestamp",
+        ] {
+            compared_columns.push(format!("{c}{suffix}"));
+        }
+    }
+    for name in ROW_LEVEL_METADATA
+        .iter()
+        .chain(PARTITION_METADATA)
+        .chain(RANGE_METADATA)
+    {
+        compared_columns.push((*name).to_string());
+    }
+    compared_columns.sort();
+
     ColumnRoles {
         clustering_columns: clustering.iter().map(|c| c.to_string()).collect(),
         simple_columns: simple.iter().map(|c| c.to_string()).collect(),
         complex_columns: complex.iter().map(|c| c.to_string()).collect(),
-        compared_columns: Vec::new(),
+        compared_columns,
     }
 }
 
