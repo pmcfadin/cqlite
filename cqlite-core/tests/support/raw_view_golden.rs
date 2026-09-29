@@ -144,60 +144,57 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
     }
 
     let mut goldens: Vec<GoldenSstable> = Vec::new();
-    {
-        let dir = chosen;
-        let entries = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("reading {} must succeed: {e}", dir.display()));
-        let mut data_dbs: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with("-Data.db"))
+    let entries = std::fs::read_dir(chosen)
+        .unwrap_or_else(|e| panic!("reading {} must succeed: {e}", chosen.display()));
+    let mut data_dbs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+        })
+        .collect();
+    data_dbs.sort();
+    for data_db in data_dbs {
+        let jsonl = data_db.with_file_name(format!(
+            "{}.jsonl",
+            data_db
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+        ));
+        let text = std::fs::read_to_string(&jsonl).unwrap_or_else(|e| {
+            panic!(
+                "issue #4309: the sstabledump golden {} must be readable — it is THE \
+                 oracle for this sweep, so its absence is a FAILURE, never a skip: {e}",
+                jsonl.display()
+            )
+        });
+        let partitions: Vec<Json> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                serde_json::from_str(l).unwrap_or_else(|e| {
+                    panic!("golden {} line must be a JSON object: {e}", jsonl.display())
+                })
             })
             .collect();
-        data_dbs.sort();
-        for data_db in data_dbs {
-            let jsonl = data_db.with_file_name(format!(
-                "{}.jsonl",
-                data_db
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-            ));
-            let text = std::fs::read_to_string(&jsonl).unwrap_or_else(|e| {
-                panic!(
-                    "issue #4309: the sstabledump golden {} must be readable — it is THE \
-                     oracle for this sweep, so its absence is a FAILURE, never a skip: {e}",
-                    jsonl.display()
-                )
-            });
-            let partitions: Vec<Json> = text
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| {
-                    serde_json::from_str(l).unwrap_or_else(|e| {
-                        panic!("golden {} line must be a JSON object: {e}", jsonl.display())
-                    })
-                })
-                .collect();
-            assert!(
-                !partitions.is_empty(),
-                "golden {} carried no partitions — a fixture that stopped exercising this \
-                 sweep must FAIL, not pass vacuously",
-                jsonl.display()
-            );
-            goldens.push(GoldenSstable {
-                data_db: data_db
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                source_dir: dir.clone(),
-                partitions,
-            });
-        }
+        assert!(
+            !partitions.is_empty(),
+            "golden {} carried no partitions — a fixture that stopped exercising this \
+             sweep must FAIL, not pass vacuously",
+            jsonl.display()
+        );
+        goldens.push(GoldenSstable {
+            data_db: data_db
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            source_dir: chosen.clone(),
+            partitions,
+        });
     }
     goldens.sort_by(|a, b| (&a.data_db, &a.source_dir).cmp(&(&b.data_db, &b.source_dir)));
     // NOTE: there is deliberately no `!goldens.is_empty()` check here. It
@@ -767,17 +764,17 @@ pub fn bound_facts(bound: &Json, ctx: &str) -> BTreeMap<String, Fact> {
     facts
 }
 
+/// Named once so the vocabulary entry and the insert site cannot drift
+/// apart — `shape:multi_generation` is DERIVED after the entry loop, so it
+/// is the one shape that does not go through `bump`'s membership check.
+pub const SHAPE_MULTI_GENERATION: &str = "shape:multi_generation";
+
 /// Every golden ENTRY SHAPE `build_expectations` can count.
 ///
 /// The enumerable counterpart of `FACT_KIND_RULES` for the shape half of
 /// the coverage vocabulary (roborev job 61). `bump` asserts membership, and
 /// `issue_4309_raw_view_census_selftest.rs` asserts this list plus every
 /// `FACT_KIND_RULES` family is EXACTLY `KNOWN_COVERAGE_TOKENS`.
-/// Named once so the vocabulary entry and the insert site cannot drift
-/// apart — `shape:multi_generation` is DERIVED after the entry loop, so it
-/// is the one shape that does not go through `bump`'s membership check.
-pub const SHAPE_MULTI_GENERATION: &str = "shape:multi_generation";
-
 pub const SHAPE_TOKENS: &[&str] = &[
     "entry:row",
     "entry:static_block",

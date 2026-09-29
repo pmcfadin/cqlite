@@ -614,14 +614,6 @@ pub fn partition_key_predicate(spec: &FixtureSpec, key: &str) -> String {
 // Affirmative-zero coverage census (issue #4309 AC5)
 // ---------------------------------------------------------------------------
 
-/// The metadata FAMILY a compared column belongs to.
-///
-/// Suffix matching is safe here and only here: the input is already known to
-/// be a SYNTHESIZED contract column (`ColumnRoles::compared_columns` is built
-/// from `simple_columns`/`complex_columns`, never from a name pattern), so a
-/// real base column that merely LOOKS like one can never reach this function
-/// — the misclassification #4222 round 9 fixed. The `_complex_deletion*` arms
-/// must precede the generic `_timestamp`/`_time` arms.
 /// How a [`FACT_KIND_RULES`] entry matches a column name.
 #[derive(Clone, Copy)]
 pub enum FactKindMatch {
@@ -709,6 +701,15 @@ pub const FACT_KIND_RULES: &[(FactKindMatch, &str)] = &[
     (FactKindMatch::Suffix("_tombstone"), "cell_tombstone"),
 ];
 
+/// The metadata FAMILY a compared column belongs to.
+///
+/// Suffix matching is safe here and only here: the input is already known to
+/// be a SYNTHESIZED contract column (`ColumnRoles::compared_columns` is built
+/// from `simple_columns`/`complex_columns`, never from a name pattern), so a
+/// real base column that merely LOOKS like one can never reach this function
+/// — the misclassification #4222 round 9 fixed. The priority order that
+/// makes the suffix arms safe against each other lives on
+/// [`FACT_KIND_RULES`], which is the table this reads.
 pub fn fact_kind(column: &str) -> &'static str {
     for (rule, kind) in FACT_KIND_RULES {
         let hit = match rule {
@@ -948,6 +949,21 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     let goldens = load_goldens(&root, spec);
     // The oracle picked the generation directory; the query must read that
     // same one (roborev job 61).
+    // GUARD THE INDEX (roborev job 78). `load_goldens` deliberately has no
+    // `!goldens.is_empty()` check of its own — its invariant is sound (it
+    // reads a directory `table_generation_dirs` already proved
+    // `Data.db`-bearing, under the same filename predicate) — but that
+    // invariant lives as a comment in another file, and every other
+    // accessor in this harness panics with a message naming what is absent
+    // rather than indexing and hoping.
+    assert!(
+        !goldens.is_empty(),
+        "issue #4309: {} loaded no goldens, so there is no generation directory to bind \
+         the ingest to. load_goldens' invariant (one golden per *-Data.db in the chosen \
+         Data.db-bearing directory) has been broken — see its comment in \
+         raw_view_golden.rs",
+        spec.id()
+    );
     let generation_dir = goldens[0].source_dir.clone();
     let db = open_database(spec, &root, &generation_dir).await;
     let view = format!("{}.{}_raw_sstable_data", spec.keyspace, spec.table);
