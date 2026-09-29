@@ -176,6 +176,19 @@
 //! that makes no coverage claim at all is a compile error under the gate's
 //! `-D warnings`.
 //!
+//! **Every token must witness the property it NAMES, not a proxy for it**
+//! (roborev job 42, issue #4309). A token derived from something weaker than
+//! its own name reintroduces the census's own blind spot inside the census:
+//! `shape:multi_generation` once counted `goldens.len() > 1` — "this fixture
+//! has more than one SSTable" — while the five lanes claiming it exist to
+//! show ONE PARTITION KEY yielding one unreconciled row per generation, so a
+//! regeneration with DISJOINT keys per generation kept the token positive
+//! with the shape gone. It is now derived from the expectation model (count
+//! of keys appearing under two or more distinct `sstable` values), and
+//! `issue_4309_raw_view_census_selftest.rs` is the census's own oracle:
+//! synthetic goldens of known shape, with a negative control per token
+//! claim. Extend that lane when you add a token.
+//!
 //! One further token, `shape:point_path_resolved`, records how many
 //! point-read rows resolved a non-NULL `position` — the PATH WITNESS that
 //! proves the point-read producer ran rather than being served from the

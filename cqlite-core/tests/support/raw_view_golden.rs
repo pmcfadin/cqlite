@@ -701,13 +701,6 @@ pub fn build_expectations(
     let mut expected: Vec<ExpectedRow> = Vec::new();
     let mut shapes: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut bump = |shape: &'static str| *shapes.entry(shape).or_insert(0) += 1;
-    if goldens.len() > 1 {
-        // A cross-generation fixture: several lanes exist ONLY to show one key
-        // yielding one row per generation with no reconciliation, and a
-        // regeneration that collapsed to a single SSTable would silently
-        // retire that property.
-        bump("shape:multi_generation");
-    }
     for golden in goldens {
         for partition in &golden.partitions {
             let key_components = partition["partition"]["key"]
@@ -856,5 +849,44 @@ pub fn build_expectations(
         "issue #4309: {}'s goldens describe no physical rows at all",
         spec.id()
     );
+
+    // `shape:multi_generation` is derived from the EXPECTATION MODEL, never
+    // from `goldens.len()` (roborev job 42, issue #4309).
+    //
+    // Five lanes claim this token — `skipped_partition_delete`,
+    // `resurrection_gc0`, `resurrection_gc_positive`, `dropped_regular_col`,
+    // `dropped_static_col` — and every one of them exists to show ONE
+    // PARTITION KEY yielding one UNRECONCILED row per generation: the raw
+    // view is physical, so a key written in gen-1 and shadowed/resurrected in
+    // gen-2 must surface TWICE, once per `Data.db`, rather than being
+    // reconciled into one logical row. Bumping the token from "this fixture
+    // has more than one SSTable" witnesses a far weaker property: a
+    // regeneration whose generations hold DISJOINT keys (or whose gen-2
+    // deletes land on different `pk`s than gen-1's inserts) would keep the
+    // token positive with the cross-generation shape gone — reproducing,
+    // inside the census, exactly the "golden and expectation model lose the
+    // shape together and compare cleanly" failure the census exists to close.
+    //
+    // So count the keys that genuinely span generations. `expected` is the
+    // post-modelling row set, so this counts what the sweep will actually
+    // COMPARE, not what the fixture directory happens to contain. The
+    // negative control is
+    // `issue_4309_raw_view_census_selftest.rs::disjoint_keys_across_generations_do_not_claim_multi_generation`,
+    // which fails against the old derivation.
+    let mut generations_per_key: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for row in &expected {
+        generations_per_key
+            .entry(row.key.as_str())
+            .or_default()
+            .insert(row.sstable.as_str());
+    }
+    let cross_generation_keys = generations_per_key
+        .values()
+        .filter(|sstables| sstables.len() > 1)
+        .count();
+    if cross_generation_keys > 0 {
+        shapes.insert("shape:multi_generation", cross_generation_keys);
+    }
+
     (expected, shapes)
 }
