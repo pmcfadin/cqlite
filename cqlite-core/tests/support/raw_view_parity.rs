@@ -711,7 +711,39 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
         spec.id()
     );
 
+    // --- PATH WITNESS, scan side (roborev, issue #4309) ---------------------
+    //
+    // The sweep's headline claim is that it compares BOTH producers, and the
+    // formats lane's whole BTI rationale rests on `test_da.wide_table`
+    // exercising trie descent through `point.rs`. Nothing in the fact model
+    // could back that: `position` is the ONLY contract column whose value
+    // differs by access path, and it is a DECLARED GAP, so a point query that
+    // silently routed to the full-scan producer — or a BTI point resolution
+    // that fell back — would leave all 22 cases passing byte-exact while the
+    // second producer certified NOTHING.
+    //
+    // Authority for the asymmetry is the production source, not this harness:
+    // `raw_view/columns.rs` records that `scan.rs`'s full-scan producer NEVER
+    // consults an index per row and always reports `Value::Null`, while
+    // `point.rs::resolve_position` resolves a real byte offset via a second
+    // index lookup. So `position` is the only available discriminator, and it
+    // is used here as a PATH WITNESS only — never as a golden comparison,
+    // which is why it stays a declared gap in the column contract.
+    for row in &scan.rows {
+        let position = row.values.get("position");
+        assert!(
+            matches!(position, None | Some(Value::Null)),
+            "issue #4309: {} — the full-scan producer must report `position` as NULL for \
+             every row (`scan.rs` consults no per-row index; `columns.rs` documents that \
+             NULL as an honest 'not measured on this access path'). Got {position:?}, so \
+             this row did NOT come from the scan path and the two producers are no longer \
+             distinguishable",
+            spec.id()
+        );
+    }
+
     // --- Producer 2: one point query per golden key ------------------------
+    let mut point_positions_resolved = 0usize;
     for key in &golden_keys {
         let predicate = partition_key_predicate(spec, key);
         let result = db
@@ -754,6 +786,16 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
                 scoped.insert((sstable.clone(), k.clone()), v.clone());
             }
         }
+        // PATH WITNESS, point side. Counted across the WHOLE fixture, never
+        // asserted per row: `resolve_position` is documented best-effort — a
+        // lookup miss or error also yields `Null` — so "every row resolves" is
+        // not a property the view promises. "At least one resolved somewhere in
+        // this fixture" is, and it is enough to prove the point path ran.
+        for row in &rows {
+            if !matches!(row.values.get("position"), None | Some(Value::Null)) {
+                point_positions_resolved += 1;
+            }
+        }
         compared_facts += assert_rows_match(
             spec,
             "point-key query",
@@ -763,6 +805,20 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
             &roles,
         );
     }
+
+    // A fixture where NOTHING resolved is indistinguishable from one whose
+    // point queries all served from the scan path — the hole this witness
+    // exists to close.
+    assert!(
+        point_positions_resolved > 0,
+        "issue #4309: {} — not one point-read row across the whole fixture resolved a \
+         non-NULL `position`, so nothing here proves the point-read producer was \
+         exercised at all rather than served from the full-scan path. \
+         {} point key(s) queried",
+        spec.id(),
+        golden_keys.len()
+    );
+    *observed.entry("shape:point_path_resolved").or_insert(0) += point_positions_resolved;
 
     SweepOutcome {
         fixture: spec.id(),
