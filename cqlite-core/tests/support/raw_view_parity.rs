@@ -190,21 +190,32 @@
 //! corpus, so every case in it is `must_run` on EVERY gate.
 //!
 //! WHICH TOKENS THAT LANE ACTUALLY CONTROLS, stated exactly rather than
-//! blanket (roborev job 46, issue #4309 — the earlier "a negative control
-//! per token claim" here was an overclaim). SIX of the eight shape tokens
-//! have a positive control AND a near-miss negative control there:
-//! `shape:multi_generation`, `entry:partition_deletion`,
-//! `entry:range_tombstone_bound`, `entry:range_tombstone_boundary`,
-//! `shape:prefix_bound`, `shape:row_update_without_liveness`. Those five
-//! after the first are covered there precisely BECAUSE every lane claiming
-//! them is `FetchOnly` and SKIPs under the gate's corpus-less `core-tests`,
-//! so their derivations would otherwise be unexercised on the gate of
-//! record — "a token derived from something nobody checks", this same
-//! blindness one level down. The remaining two, `entry:row` and
-//! `entry:static_block`, need no synthetic control: both are claimed by
-//! `GitCommitted` lanes that DO run on every gate (`entry:row` additionally
-//! has a vacuity guard in the self-test). Extend that lane when you add a
-//! token, and say here which case controls it.
+//! blanket (roborev jobs 46 and 50, issue #4309 — first an overclaim that
+//! every token had a control, then a wrong claim about which ones the gate
+//! reaches). SIX of the eight shape tokens have a positive control AND a
+//! near-miss negative control there: `shape:multi_generation`,
+//! `entry:partition_deletion`, `entry:range_tombstone_bound`,
+//! `entry:range_tombstone_boundary`, `shape:prefix_bound`,
+//! `shape:row_update_without_liveness`.
+//!
+//! FOUR of those six are covered there because they have NO gate-executed
+//! claimant at all — `entry:partition_deletion`,
+//! `entry:range_tombstone_boundary`, `shape:prefix_bound` and
+//! `shape:row_update_without_liveness` are claimed only by `FetchOnly`
+//! lanes, which SKIP under the corpus-less `core-tests`, so their
+//! derivations would otherwise be unexercised on the gate of record. The
+//! other two are DEFENCE IN DEPTH, not the only executor:
+//! `shape:multi_generation` is the job-42 regression, and
+//! `entry:range_tombstone_bound` IS gate-executed — `static_with_tombstones`
+//! is `GitCommitted` and claims it, and its committed golden really carries
+//! two `range_tombstone_bound` entries (one `start`-only, one `end`-only).
+//!
+//! The remaining two, `entry:row` and `entry:static_block`, need no
+//! synthetic control: both are claimed by `GitCommitted` lanes that run on
+//! every gate (`entry:row` additionally has a vacuity guard in the
+//! self-test). Extend that lane when you add a token, and say here which
+//! case controls it — and check the claimant's DISCIPLINE before writing
+//! "no gate-executed fixture reaches this".
 //!
 //! One further token, `shape:point_path_resolved`, records how many
 //! point-read rows resolved a non-NULL `position` — the PATH WITNESS that
@@ -230,10 +241,13 @@
 //!
 //! The sweep is **27 fixture cases** — 9 `tomb` + 9 `deltas` + 9 `formats`.
 //! **Sixteen of them are `FetchOnly`, and the full gate's `core-tests`
-//! component runs WITHOUT `CQLITE_REQUIRE_FIXTURES=1`** (the gate exports
-//! that variable for `node-bindings` only; `core-tests` deliberately does
-//! not, because most of `test_tomb/**` is fetched and gitignored, so pinning
-//! it there would make the component depend on a fetched corpus). On any box
+//! component runs WITHOUT `CQLITE_REQUIRE_FIXTURES=1`** (SEVERAL targeted
+//! components DO export it — `node-bindings`, the #3032 committed-reference
+//! lane, `compaction-byte-parity`, the compaction-tombstone-TTL lane, and
+//! the strict branch — but `core-tests`, which is what runs these lanes,
+//! deliberately does not, because most of `test_tomb/**` is fetched and
+//! gitignored, so pinning it there would make the component depend on a
+//! fetched corpus). On any box
 //! or CI lane lacking the fetched corpus those sixteen therefore SKIP,
 //! `require_observed` no-ops (`ran == false`), and the gate certifies the
 //! **ELEVEN** whose `Data.db` is git-committed:
@@ -814,8 +828,7 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
             // counting it would let a fixture with no marker at all "observe"
             // the family. Every other boolean — `bound_inclusive = false`, an
             // EXCLUSIVE bound — is a genuine positive observation.
-            let is_negative_marker =
-                *fact == Fact::Bool(false) && fact_kind(column) == "complex_deletion";
+            let is_negative_marker = is_negative_complex_marker(column, fact);
             if *fact != Fact::Absent && !is_negative_marker {
                 *observed.entry(fact_kind(column)).or_insert(0) += 1;
             }
@@ -1062,6 +1075,24 @@ fn actual_partition_key(row: &QueryRow, spec: &FixtureSpec) -> String {
 /// Split an actual row set into `(sstable, key)` groups and compare each
 /// against its expectation group, in both directions. Returns the number of
 /// column comparisons actually performed.
+/// Is this fact the ABSENCE of a complex-deletion marker rather than an
+/// observation of one? (roborev finding S1, issue #4309.)
+///
+/// `<col>_complex_deletion` is a BOOLEAN: `false` states "this collection
+/// column has no complex-deletion marker in this row". Counting that as an
+/// observation would let a fixture with no marker anywhere "observe" the
+/// `complex_deletion` family and satisfy a coverage claim it does not meet.
+/// Every OTHER boolean is a genuine positive — `bound_inclusive = false` is
+/// an EXCLUSIVE bound, which is a real measurement.
+///
+/// Split out and `pub` so it has a control in the census self-test: the
+/// only fixture in the sweep with a collection column is
+/// `test_deltas.collection_ops`, which is `FetchOnly`, so this rule would
+/// otherwise never execute on the gate of record (roborev job 50).
+pub fn is_negative_complex_marker(column: &str, fact: &Fact) -> bool {
+    *fact == Fact::Bool(false) && fact_kind(column) == "complex_deletion"
+}
+
 /// The set of column names a raw-view row ACTUALLY carries in its values
 /// map, which is the thing a producer can truncate — unlike
 /// `result.metadata.columns`, which both producers share by construction.

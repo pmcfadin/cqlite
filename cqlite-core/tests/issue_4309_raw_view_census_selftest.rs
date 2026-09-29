@@ -25,16 +25,33 @@
 //!
 //! # Why this lane covers the shape tokens the GATE cannot reach (job 46)
 //!
-//! Five shape tokens — `entry:partition_deletion`,
-//! `entry:range_tombstone_bound`, `entry:range_tombstone_boundary`,
-//! `shape:prefix_bound`, `shape:row_update_without_liveness` — are claimed
-//! ONLY by `Discipline::FetchOnly` lanes (`partition_tombstones`,
-//! `adjacent_ranges`, `range_tombstones`, `wide_range_tombstone`,
-//! `partial_updates`, `resurrection_*`, `skipped_partition_delete`), all of
-//! which SKIP under the gate's corpus-less `core-tests`. Their derivations
-//! in `build_expectations` were therefore unexercised on the gate of record
-//! — "a token derived from something nobody checks", the same blindness the
-//! census section argues against, one level down.
+//! FOUR shape tokens — `entry:partition_deletion`,
+//! `entry:range_tombstone_boundary`, `shape:prefix_bound`,
+//! `shape:row_update_without_liveness` — are claimed ONLY by
+//! `Discipline::FetchOnly` lanes (`partition_tombstones`, `adjacent_ranges`,
+//! `range_tombstones`, `partial_updates`, `resurrection_*`,
+//! `skipped_partition_delete`), all of which SKIP under the gate's
+//! corpus-less `core-tests`. Their derivations in `build_expectations` were
+//! therefore unexercised on the gate of record — "a token derived from
+//! something nobody checks", the same blindness the census section argues
+//! against, one level down.
+//!
+//! `entry:range_tombstone_bound` is NOT one of them, and saying so was a doc
+//! defect of exactly the class this file exists to prevent (roborev job 50):
+//! `static_with_tombstones` is `Discipline::GitCommitted` and claims it, and
+//! its committed golden carries two `range_tombstone_bound` entries — so
+//! that derivation IS exercised on every gate. Its control here is DEFENCE
+//! IN DEPTH, not the only executor. Check a claimant's DISCIPLINE before
+//! writing "no gate-executed fixture reaches this".
+//!
+//! The COMPLEX-COLUMN half of the oracle has the same gap and no
+//! gate-reachable control at all: `test_deltas.collection_ops` is the only
+//! table in the whole sweep with a collection column
+//! (`test-data/schemas/deltas.cql:119` — `SET`/`LIST`/`MAP`; the other four
+//! sweep schemas have zero), and it is `FetchOnly`. So `fold_complex_column`,
+//! the `_complex_deletion` exclusion in `classify_columns` that its own
+//! comment calls "load-bearing", and the `Fact::Bool(false)` census
+//! exclusion never execute under `core-tests`. They are controlled here.
 //!
 //! This lane opens no database and reads no corpus, so every case here is
 //! `must_run` on EVERY gate. Each of those tokens now has a positive control
@@ -47,9 +64,10 @@
 #[path = "support/raw_view_parity.rs"]
 mod raw_view_parity;
 
-use raw_view_parity::assert_value_key_sets_match;
+use raw_view_parity::golden::Fact;
 use raw_view_parity::golden::RowIdentity;
 use raw_view_parity::golden::{build_expectations, ColumnRoles, GoldenSstable};
+use raw_view_parity::{assert_value_key_sets_match, is_negative_complex_marker};
 use raw_view_parity::{Discipline, FixtureSpec};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -100,10 +118,14 @@ fn generation(data_db: &str, keys: &[&str]) -> GoldenSstable {
 /// one golden component per clustering column, and `row_entry_facts`
 /// refuses a cell naming a column outside the contract.
 fn roles_with(clustering: &[&str], simple: &[&str]) -> ColumnRoles {
+    roles_full(clustering, simple, &[])
+}
+
+fn roles_full(clustering: &[&str], simple: &[&str], complex: &[&str]) -> ColumnRoles {
     ColumnRoles {
         clustering_columns: clustering.iter().map(|c| c.to_string()).collect(),
         simple_columns: simple.iter().map(|c| c.to_string()).collect(),
-        complex_columns: Vec::new(),
+        complex_columns: complex.iter().map(|c| c.to_string()).collect(),
         compared_columns: Vec::new(),
     }
 }
@@ -305,11 +327,18 @@ fn range_tombstone_bound_and_boundary_are_counted_separately() {
         "nb-1-big-Data.db",
         vec![json!({
             "partition": { "key": ["1"] },
-            "rows": [{
-                "type": "range_tombstone_bound",
-                "start": bound("inclusive", json!(["10"])),
-                "end": bound("inclusive", json!(["20"]))
-            }]
+            // ONE SIDE PER ENTRY. `serializeTombstone` never writes both
+            // sides of a NON-boundary marker in one entry: a
+            // `RangeTombstoneBoundMarker` holds the single side it opens or
+            // closes. Confirmed against the committed `static_with_tombstones`
+            // golden, which carries two separate `range_tombstone_bound`
+            // entries — one `start`-only, one `end`-only. A control built on
+            // a shape the oracle cannot produce is weaker than it reads
+            // (roborev job 50).
+            "rows": [
+                { "type": "range_tombstone_bound", "start": bound("inclusive", json!(["10"])) },
+                { "type": "range_tombstone_bound", "end": bound("inclusive", json!(["20"])) }
+            ]
         })],
     )]);
     assert_eq!(
@@ -317,7 +346,7 @@ fn range_tombstone_bound_and_boundary_are_counted_separately() {
             .get("entry:range_tombstone_bound")
             .copied()
             .unwrap_or(0),
-        1,
+        2,
         "{plain:?}"
     );
     assert_eq!(
@@ -400,11 +429,10 @@ fn prefix_bound_is_counted_only_for_a_star_component() {
             "nb-1-big-Data.db",
             vec![json!({
                 "partition": { "key": ["1"] },
-                "rows": [{
-                    "type": "range_tombstone_bound",
-                    "start": bound("inclusive", json!(["10", "*"])),
-                    "end": bound("inclusive", json!(["20", "*"]))
-                }]
+                "rows": [
+                    { "type": "range_tombstone_bound", "start": bound("inclusive", json!(["10", "*"])) },
+                    { "type": "range_tombstone_bound", "end": bound("inclusive", json!(["20", "*"])) }
+                ]
             })],
         )],
         &two_ck,
@@ -420,11 +448,10 @@ fn prefix_bound_is_counted_only_for_a_star_component() {
             "nb-1-big-Data.db",
             vec![json!({
                 "partition": { "key": ["1"] },
-                "rows": [{
-                    "type": "range_tombstone_bound",
-                    "start": bound("inclusive", json!(["10", "1"])),
-                    "end": bound("inclusive", json!(["20", "2"]))
-                }]
+                "rows": [
+                    { "type": "range_tombstone_bound", "start": bound("inclusive", json!(["10", "1"])) },
+                    { "type": "range_tombstone_bound", "end": bound("inclusive", json!(["20", "2"])) }
+                ]
             })],
         )],
         &two_ck,
@@ -562,4 +589,149 @@ fn a_point_row_with_an_extra_column_fails() {
     let scan = keys(&["pk", "ck", "sstable", "row_kind"]);
     let point = keys(&["pk", "ck", "sstable", "row_kind", "body_ttl"]);
     assert_value_key_sets_match("selftest", "1", &ident(), &point, &scan);
+}
+
+// ---------------------------------------------------------------------------
+// The COMPLEX-COLUMN oracle, which no gate-executed fixture reaches (job 50)
+// ---------------------------------------------------------------------------
+//
+// `test_deltas.collection_ops` is the only table in the sweep with a
+// collection column, and it is `FetchOnly` — so `fold_complex_column` and
+// the `Fact::Bool(false)` census exclusion never run under the gate's
+// corpus-less `core-tests`. These controls need no corpus, so they do.
+
+/// One collection element cell, as `JsonTransformer` renders it: a cell
+/// carrying a `path` into the collection.
+fn element_cell(name: &str, path: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "path": [path],
+        "value": "v",
+        "tstamp": "2021-01-01T00:00:00Z"
+    })
+}
+
+/// The COMPLEX-DELETION MARKER: a cell for the collection column carrying
+/// NO `path` and a `deletion_info` — what Cassandra writes for the
+/// shadowing marker a full collection overwrite emits.
+fn complex_marker(name: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "deletion_info": {
+            "marked_deleted": "2021-01-01T00:00:00Z",
+            "local_delete_time": "2021-01-01T00:00:00Z"
+        }
+    })
+}
+
+fn facts_for(cells: Vec<serde_json::Value>) -> BTreeMap<String, raw_view_parity::golden::Fact> {
+    let (expected, _) = build_expectations(
+        &[generation_of(
+            "nb-1-big-Data.db",
+            vec![json!({
+                "partition": { "key": ["1"] },
+                "rows": [{
+                    "type": "row",
+                    "clustering": ["10"],
+                    "liveness_info": { "tstamp": "2021-01-01T00:00:00Z" },
+                    "cells": cells
+                }]
+            })],
+        )],
+        &roles_full(&["ck"], &[], &["tags"]),
+        &SPEC,
+    );
+    assert_eq!(expected.len(), 1, "one synthetic row");
+    expected.into_iter().next().unwrap().facts
+}
+
+/// (a) A pathless marker present: the column reports the marker AND both of
+/// its deletion times.
+#[test]
+fn a_complex_deletion_marker_yields_all_three_facts() {
+    let facts = facts_for(vec![complex_marker("tags"), element_cell("tags", "red")]);
+    assert_eq!(
+        facts.get("tags_complex_deletion"),
+        Some(&Fact::Bool(true)),
+        "{facts:?}"
+    );
+    assert_eq!(
+        facts.get("tags_complex_deletion_timestamp"),
+        Some(&Fact::BigInt(1609459200000000)),
+        "{facts:?}"
+    );
+    assert_eq!(
+        facts.get("tags_complex_deletion_time"),
+        Some(&Fact::BigInt(1609459200)),
+        "{facts:?}"
+    );
+}
+
+/// (b) Per-element cells ONLY, no marker: the column reports
+/// `Fact::Bool(false)` — the ABSENCE of a marker — and states no deletion
+/// times at all. A fabricated time here would be an invented fact (#28).
+#[test]
+fn elements_without_a_marker_report_a_negative_and_no_times() {
+    let facts = facts_for(vec![
+        element_cell("tags", "red"),
+        element_cell("tags", "blue"),
+    ]);
+    assert_eq!(
+        facts.get("tags_complex_deletion"),
+        Some(&Fact::Bool(false)),
+        "elements present but no pathless marker: {facts:?}"
+    );
+    assert_eq!(
+        facts.get("tags_complex_deletion_timestamp"),
+        None,
+        "issue #4309: no marker means no deletion time to report — the sweep must never \
+         invent one. {facts:?}"
+    );
+    assert_eq!(facts.get("tags_complex_deletion_time"), None, "{facts:?}");
+}
+
+/// (c) The column contributed NO cell at all: every one of its three
+/// columns must be absent, not `Bool(false)`. "The collection was not
+/// touched in this row" and "the collection was touched with no marker" are
+/// different facts.
+#[test]
+fn a_complex_column_absent_from_the_row_states_nothing() {
+    let facts = facts_for(vec![]);
+    for column in [
+        "tags_complex_deletion",
+        "tags_complex_deletion_timestamp",
+        "tags_complex_deletion_time",
+    ] {
+        assert_eq!(
+            facts.get(column),
+            None,
+            "issue #4309: a collection column with no cell in this row must state NOTHING \
+             — reporting Bool(false) would conflate 'untouched' with 'touched, no marker'. \
+             {facts:?}"
+        );
+    }
+}
+
+/// The CENSUS exclusion (roborev finding S1): `Bool(false)` on a
+/// `_complex_deletion` column is the absence of a marker and must NOT count
+/// as observing the `complex_deletion` family — otherwise a fixture with no
+/// marker anywhere would satisfy a coverage claim for it. Every OTHER
+/// boolean is a genuine positive: `bound_inclusive = false` is an EXCLUSIVE
+/// bound, a real measurement.
+#[test]
+fn only_a_false_complex_deletion_is_excluded_from_the_census() {
+    assert!(
+        is_negative_complex_marker("tags_complex_deletion", &Fact::Bool(false)),
+        "a false complex-deletion marker is an ABSENCE, not an observation"
+    );
+    assert!(
+        !is_negative_complex_marker("tags_complex_deletion", &Fact::Bool(true)),
+        "a TRUE marker is a genuine observation"
+    );
+    assert!(
+        !is_negative_complex_marker("bound_inclusive", &Fact::Bool(false)),
+        "issue #4309: `bound_inclusive = false` is an EXCLUSIVE bound — a real measurement, \
+         not an absence. Excluding it would under-count a family the range-tombstone lanes \
+         legitimately claim"
+    );
 }
