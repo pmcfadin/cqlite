@@ -198,17 +198,22 @@
 //! `entry:range_tombstone_boundary`, `shape:prefix_bound`,
 //! `shape:row_update_without_liveness`.
 //!
-//! FOUR of those six are covered there because they have NO gate-executed
+//! FIVE of those six are covered there because they have NO gate-executed
 //! claimant at all — `entry:partition_deletion`,
-//! `entry:range_tombstone_boundary`, `shape:prefix_bound` and
-//! `shape:row_update_without_liveness` are claimed only by `FetchOnly`
-//! lanes, which SKIP under the corpus-less `core-tests`, so their
-//! derivations would otherwise be unexercised on the gate of record. The
-//! other two are DEFENCE IN DEPTH, not the only executor:
-//! `shape:multi_generation` is the job-42 regression, and
-//! `entry:range_tombstone_bound` IS gate-executed — `static_with_tombstones`
-//! is `GitCommitted` and claims it, and its committed golden really carries
-//! two `range_tombstone_bound` entries (one `start`-only, one `end`-only).
+//! `entry:range_tombstone_boundary`, `shape:prefix_bound`,
+//! `shape:row_update_without_liveness` and `shape:multi_generation` are
+//! claimed only by `FetchOnly` lanes, which SKIP under the corpus-less
+//! `core-tests`, so their derivations would otherwise be unexercised on the
+//! gate of record. (`shape:multi_generation`'s five claimants —
+//! `skipped_partition_delete`, `resurrection_gc0`,
+//! `resurrection_gc_positive`, `dropped_regular_col`, `dropped_static_col`
+//! — are every one of them `FetchOnly`; calling it defence-in-depth was the
+//! job-50 error inverted, and roborev job 52 caught it.)
+//!
+//! The SIXTH, `entry:range_tombstone_bound`, is the only DEFENCE-IN-DEPTH
+//! control: it IS gate-executed, because `static_with_tombstones` is
+//! `GitCommitted` and claims it, and its committed golden really carries two
+//! `range_tombstone_bound` entries (one `start`-only, one `end`-only).
 //!
 //! The remaining two, `entry:row` and `entry:static_block`, need no
 //! synthetic control: both are claimed by `GitCommitted` lanes that run on
@@ -220,8 +225,12 @@
 //! One further token, `shape:point_path_resolved`, records how many
 //! point-read rows resolved a non-NULL `position` — the PATH WITNESS that
 //! proves the point-read producer ran rather than being served from the
-//! full-scan path. It is recorded for visibility and IS claimable by a lane,
-//! but unlike the tokens above it does not depend on a lane claiming it: the
+//! full-scan path. It is recorded for visibility but is NOT claimable by a
+//! lane — `require_observed` rejects it by name (`UNCLAIMABLE_TOKENS`),
+//! because under `feature = "tombstones"` the witness is necessarily ZERO
+//! and a claim would be unsatisfiable in that build while passing the
+//! default one. Unlike the tokens above it does not depend on a lane
+//! claiming it: the
 //! witness is asserted directly in `assert_raw_view_matches_golden`, per
 //! build, so it cannot be left unenforced by omission (roborev, #4309).
 //!
@@ -610,7 +619,8 @@ fn fact_kind(column: &str) -> &'static str {
 ///
 /// The METADATA-FAMILY half is exactly [`fact_kind`]'s return set; the SHAPE
 /// half is exactly what `build_expectations` can `bump`, plus the
-/// `shape:point_path_resolved` path witness. Keep all three in step — a
+/// `shape:point_path_resolved` path witness, which lives in
+/// [`UNCLAIMABLE_TOKENS`] instead. Keep all of them in step — a
 /// token added to one and not here is refused by name, which is the
 /// intended failure.
 const KNOWN_COVERAGE_TOKENS: &[&str] = &[
@@ -642,8 +652,23 @@ const KNOWN_COVERAGE_TOKENS: &[&str] = &[
     "shape:prefix_bound",
     "shape:row_update_without_liveness",
     "shape:multi_generation",
-    "shape:point_path_resolved",
+    // `shape:point_path_resolved` is DELIBERATELY ABSENT — see
+    // `UNCLAIMABLE_TOKENS`.
 ];
+
+/// Tokens the census RECORDS but which a lane must never CLAIM.
+///
+/// `shape:point_path_resolved` counts point-read rows that resolved a
+/// non-NULL `position`. It is asserted directly in
+/// `assert_raw_view_matches_golden`, per build, so it needs no claim path —
+/// and claiming it would be actively WRONG (roborev job 52): under
+/// `feature = "tombstones"`, `point.rs`'s cfg'd `point_rows_for_key` routes
+/// every reader through `scan_and_filter_one_reader`, so the witness is
+/// necessarily ZERO and `require_observed`'s `count > 0` is UNSATISFIABLE.
+/// A lane claiming it would pass the default build and fail an
+/// all-features one. Rejected by name so that contradiction cannot be
+/// written rather than merely discouraged in prose.
+const UNCLAIMABLE_TOKENS: &[&str] = &["shape:point_path_resolved"];
 
 /// What ONE fixture's sweep actually measured.
 ///
@@ -719,6 +744,15 @@ impl SweepOutcome {
         // this census's own failure mode. Checked here, a typo fails on
         // EVERY gate whether or not the fixture ran.
         for kind in kinds {
+            assert!(
+                !UNCLAIMABLE_TOKENS.contains(kind),
+                "issue #4309: {} claims coverage token '{kind}', which the census RECORDS \
+                 but no lane may CLAIM. It is asserted directly in \
+                 assert_raw_view_matches_golden, per build, so it needs no claim — and \
+                 under `feature = \"tombstones\"` it is necessarily ZERO, so the claim \
+                 would be unsatisfiable in that build while passing the default one.",
+                self.fixture
+            );
             assert!(
                 KNOWN_COVERAGE_TOKENS.contains(kind),
                 "issue #4309: {} claims coverage token '{kind}', which is not a known \
