@@ -1,6 +1,30 @@
 //! Issue #4246 — a STATIC-ROW CARRIER's own row deletion must not reach
 //! `Statistics.db`, because no production path ever writes it to `Data.db`.
 //!
+//! ## TWO independent paths had to exclude it (rounds 8 and 10)
+//!
+//! A mutation reaches the persisted `Statistics.db` minima by two separate
+//! routes, each of which re-derives "was this actually emitted?" by hand:
+//!
+//! 1. the DIRECT fold — `stats_fold::fold_static_carrier_stats`, called by
+//!    `SSTableWriter::write_partition`, `KWayMerger::merge` and
+//!    `WriteEngine::maintenance_step` (the phantom was removed here in
+//!    ROUND 8; pinned by the first four tests below); and
+//! 2. the TWO-PASS PRE-SEED ENCODING BASELINE —
+//!    `SSTableWriter::compute_mutations_baseline_stats` ->
+//!    `fold_one_mutation_baseline` -> `pre_seed_encoding_baselines` (issue
+//!    #729), removed in ROUND 10 and pinned by the last two tests.
+//!
+//! Round 8's fix was correct but NOT sufficient, and its comments overstated
+//! it as an absolute ("folded nowhere"): the pre-seed path assigns its
+//! `min_local_deletion_time` into the persisted field VERBATIM, and
+//! `write_partition`'s later fold is a `.min()` that can only lower it
+//! further — so the phantom survived rounds 8 and 9 untouched. It was
+//! invisible to the histogram assertions here because pre-seeding is a field
+//! assignment, not an `update_local_deletion_time` call. Issue **#4320**
+//! tracks collapsing the two re-derivations into one; until then a change to
+//! either path must be mirrored in the other.
+//!
 //! ## The adjudication this file pins
 //!
 //! Roborev rounds 6/7 on PR #4289 added a group-level row-deletion fold to
@@ -55,12 +79,14 @@
 //!
 //! ## What each test asserts
 //!
-//! The two halves are pinned in BOTH directions so neither can drift alone:
-//! the emitted flags byte (no `ROW_HAS_DELETION`) AND the persisted histogram
-//! (no bucket). The byte assertions are the tripwire: if the emitter is ever
-//! taught to write a static-row deletion, they FAIL, and whoever does that
-//! must revisit `fold_static_carrier_stats`. The final test is the
-//! live-control proving the histogram assertion is not vacuously green.
+//! The halves are pinned in BOTH directions so none can drift alone: the
+//! emitted flags byte (no `ROW_HAS_DELETION`), the persisted histogram (no
+//! bucket, path 1), and the persisted `minLocalDeletionTime` read back off
+//! disk (path 2). The byte assertions are the tripwire: if the emitter is
+//! ever taught to write a static-row deletion, they FAIL, and whoever does
+//! that must revisit BOTH `fold_static_carrier_stats` and
+//! `fold_one_mutation_baseline`. Each persisted-value assertion is paired
+//! with a live control proving it is not vacuously green.
 
 #![cfg(feature = "write-support")]
 
@@ -391,5 +417,172 @@ fn clustering_row_deletion_still_adds_a_tombstone_drop_time_bucket() {
          pinned LDT — proving the empty-histogram assertion in \
          `static_carrier_deletion_adds_no_tombstone_drop_time_bucket` is a live \
          signal, not a vacuous one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The SECOND mechanism: the two-pass pre-seed ENCODING BASELINE (issue #4246
+// roborev round 10).
+//
+// Round 8 (above) closed the DIRECT fold path — `fold_static_carrier_stats`,
+// which `write_partition`/`KWayMerger::merge`/`maintenance_step` call to fold a
+// carrier into `self.stats`. It did NOT close the SECOND, independent path by
+// which the same phantom deletion reaches the same persisted `Statistics.db`:
+//
+//   `WriteEngine::flush_internal_async`
+//     -> `SSTableWriter::compute_mutations_baseline_stats`   (#729 pre-scan)
+//          -> `fold_one_mutation_baseline`  <-- folded `DeleteRow`'s LDT here
+//     -> `SSTableWriter::pre_seed_encoding_baselines`
+//          -> `self.stats.min_local_deletion_time = <that value>`  (VERBATIM)
+//     -> `write_partition` ... -> `Statistics.db`
+//
+// `pre_seed_encoding_baselines` ASSIGNS the pre-scan's `min_ldt` into the very
+// field that is persisted, and `write_partition`'s own fold runs strictly after
+// and can only LOWER it further (`update_local_deletion_time` is a `.min()`),
+// never raise it back. So a phantom contribution made in the pre-scan survives
+// into the persisted minimum no matter what the direct fold path does.
+//
+// Crucially this is INVISIBLE to the histogram assertions above:
+// `pre_seed_encoding_baselines` is a plain field assignment, NOT a call to
+// `StatisticsMetadata::update_local_deletion_time`, so it never increments an
+// `estimatedTombstoneDropTime` bucket. That is exactly how the round-8 fix
+// escaped detection for two more rounds — the tests asserted the histogram and
+// the in-memory struct, never the persisted MINIMUM parsed back off disk.
+//
+// The tests below therefore assert the value CQLite actually wrote into
+// `Statistics.db`, read back with the same parser the reader uses.
+// ---------------------------------------------------------------------------
+
+/// The LDT of a deletion that IS genuinely emitted to `Data.db` in the fixtures
+/// below. Chosen strictly ABOVE [`PINNED_LDT`] so the persisted minimum
+/// discriminates: `PINNED_LDT` persisted == the phantom won, `EMITTED_LDT`
+/// persisted == only emitted deletions were folded. Using two distinct values
+/// (rather than a lone carrier and a sentinel) keeps the assertion a positive
+/// one, immune to any future change in how the writer normalises "no deletions".
+const EMITTED_LDT: i32 = 2_100_000_000;
+
+/// A CLUSTERING row carrying a single cell tombstone with an explicit, higher
+/// LDT. The writer really does emit this (a `Delete` cell inside a normal row),
+/// so its LDT legitimately belongs in the persisted minimum.
+fn clustering_cell_delete(ck: i32, ts: i64) -> Mutation {
+    Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("id", Value::Integer(1)),
+        Some(ClusteringKey::single("ck", Value::Integer(ck))),
+        vec![CellOperation::Delete {
+            column: "name".to_string(),
+            local_deletion_time: Some(EMITTED_LDT),
+        }],
+        ts,
+        None,
+    )
+}
+
+/// A STATIC carrier whose only operation deletes a STATIC COLUMN. Unlike
+/// `DeleteRow`, `is_static_operation` returns TRUE for this, so
+/// `collect_static_operations` keeps it and the emitter really does write a
+/// static cell tombstone — its LDT MUST still reach the persisted minimum.
+/// This is the asymmetry the fix has to preserve.
+fn static_carrier_static_cell_delete(ts: i64) -> Mutation {
+    Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("id", Value::Integer(1)),
+        None,
+        vec![CellOperation::Delete {
+            column: "stat_col".to_string(),
+            local_deletion_time: Some(PINNED_LDT),
+        }],
+        ts,
+        None,
+    )
+}
+
+/// The persisted `minLocalDeletionTime` CQLite wrote, read back off disk with
+/// the reader's own parser.
+///
+/// SCOPE, stated exactly. `timestamp_stats.min_deletion_time` is decoded from
+/// the `Statistics.db` SERIALIZATION_HEADER `EncodingStats` VInt triple
+/// (`enhanced_statistics_parser::encoding_stats`), which is one of the TWO
+/// on-disk fields `StatisticsMetadata::min_local_deletion_time` feeds —
+/// `stats_writer/serialization_header.rs` writes this one and
+/// `stats_writer/components.rs` writes the STATS component's own
+/// `minLocalDeletionTime` from the SAME struct field, so a phantom in that
+/// field lands in both. The parser exposes only the header value (the STATS
+/// post-pass deliberately leaves `min_deletion_time` alone and recovers only
+/// `max_deletion_time`), so that is the one asserted here; it is the value
+/// `pre_seed_encoding_baselines` assigns into, which is what round 10 found
+/// contaminated.
+fn persisted_min_local_deletion_time(data_dir: &Path) -> i64 {
+    let path = find_exactly_one(data_dir, "-Statistics.db");
+    let bytes = std::fs::read(&path).expect("read Statistics.db");
+    let (_, stats) = parse_statistics_with_fallback(&bytes, None).expect("decode Statistics.db");
+    stats.timestamp_stats.min_deletion_time
+}
+
+#[test]
+fn static_carrier_delete_row_op_does_not_lower_persisted_min_local_deletion_time() {
+    for (name, carrier) in [
+        (
+            "preseed-delete-row-op",
+            static_carrier_delete_row_op(900_000),
+        ),
+        (
+            "preseed-row-tombstone-field",
+            static_carrier_row_tombstone_field(1_000_000, 900_000),
+        ),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let dir = flush_batch(
+            &temp,
+            name,
+            vec![
+                live_row(1, 1_000_000),
+                clustering_cell_delete(2, 950_000),
+                carrier,
+            ],
+        );
+        assert_eq!(
+            persisted_min_local_deletion_time(&dir),
+            EMITTED_LDT as i64,
+            "{name}: the ONLY deletion this batch emits to Data.db is the \
+             clustering-row cell tombstone at {EMITTED_LDT}; the static \
+             carrier's own row deletion at {PINNED_LDT} is dropped by \
+             `collect_static_operations` and never written. Persisting \
+             {PINNED_LDT} means the #729 two-pass pre-scan \
+             (`compute_mutations_baseline_stats` -> \
+             `fold_one_mutation_baseline`) folded a PHANTOM LDT into \
+             `pre_seed_encoding_baselines`, which assigns it VERBATIM into the \
+             persisted `min_local_deletion_time` (issue #4246 roborev round 10)."
+        );
+    }
+}
+
+#[test]
+fn static_carrier_static_cell_delete_does_lower_persisted_min_local_deletion_time() {
+    // LIVE CONTROL for the two assertions above, pinning the ASYMMETRY: a
+    // `Delete` targeting a STATIC COLUMN on the very same carrier shape IS
+    // emitted, so its (lower) LDT MUST still win the persisted minimum. Without
+    // this, the fix could "pass" by gating the whole static-carrier branch out
+    // of the baseline, silently under-seeding a real emitted tombstone and
+    // re-opening the below-baseline delta underflow the pre-scan exists to
+    // prevent.
+    let temp = TempDir::new().unwrap();
+    let dir = flush_batch(
+        &temp,
+        "preseed-static-cell-delete",
+        vec![
+            live_row(1, 1_000_000),
+            clustering_cell_delete(2, 950_000),
+            static_carrier_static_cell_delete(900_000),
+        ],
+    );
+    assert_eq!(
+        persisted_min_local_deletion_time(&dir),
+        PINNED_LDT as i64,
+        "a static carrier's `Delete {{ column: \"stat_col\" }}` IS emitted \
+         (`is_static_operation` returns true for it, so \
+         `collect_static_operations` keeps it), so its LDT at {PINNED_LDT} must \
+         still win the persisted minimum over the clustering deletion at \
+         {EMITTED_LDT} — only `DeleteRow` is the phantom"
     );
 }

@@ -794,14 +794,18 @@ impl SSTableWriter {
                 // The STATIC-CARRIER fold, matching both compaction paths.
                 // It folds the carrier's row CONTENT only: a static
                 // carrier's own row deletion (`CellOperation::DeleteRow` or
-                // the #932 `row_tombstone` field) is folded NOWHERE, and
+                // the #932 `row_tombstone` field) is excluded HERE, and
                 // deliberately so — no production path emits a static-row
                 // deletion to Data.db, so counting one here would be a
                 // PHANTOM marker of exactly the class issue #4246 exists to
-                // eliminate. Full adjudication, Cassandra authority and
-                // emitter trace: `stats_fold::fold_static_carrier_stats`'s
-                // doc comment (issue #4246 roborev round 8, overturning
-                // rounds 6/7).
+                // eliminate. The SECOND path to the same persisted fields —
+                // the #729 two-pass pre-seed baseline — excludes it
+                // separately, in `fold_one_mutation_baseline` below; both
+                // exclusions are required, and #4320 tracks collapsing the
+                // two re-derivations into one. Full adjudication, Cassandra
+                // authority and emitter trace:
+                // `stats_fold::fold_static_carrier_stats`'s doc comment
+                // (issue #4246 roborev rounds 8 and 10).
                 stats_fold::fold_static_carrier_stats(&mut self.stats, mutation);
             }
         }
@@ -1088,6 +1092,7 @@ impl SSTableWriter {
                     if survives || carries_static {
                         Self::fold_one_mutation_baseline(
                             mutation,
+                            schema,
                             &mut min_timestamp,
                             &mut min_ldt,
                             &mut min_ttl,
@@ -1098,12 +1103,18 @@ impl SSTableWriter {
         );
 
         // Wholly-static mutations (excluded from `row_mutations` above) are
-        // out of this fix's verified scope (see `stats_fold::row_group_survives`'s
-        // doc comment) — folded unconditionally, matching prior behavior.
+        // out of the SHADOW-GATING part of this fix's verified scope (see
+        // `stats_fold::row_group_survives`'s doc comment) — their row CONTENT
+        // is folded unconditionally, matching prior behavior. Their own ROW
+        // DELETION is not: `fold_one_mutation_baseline` re-derives that from
+        // `is_static_row_mutation` internally (issue #4246 roborev round 10),
+        // so this call site stays a plain per-mutation fold and the two
+        // call sites cannot answer that question differently.
         for mutation in mutations_slice {
             if data_writer::is_static_row_mutation(mutation, schema) {
                 Self::fold_one_mutation_baseline(
                     mutation,
+                    schema,
                     &mut min_timestamp,
                     &mut min_ldt,
                     &mut min_ttl,
@@ -1121,12 +1132,72 @@ impl SSTableWriter {
     /// (they are never row-shadowed). Extracted so the caller can gate
     /// exactly this row-content fold on `stats_fold::row_group_survives`
     /// without duplicating the per-`CellOperation` classification logic.
+    ///
+    /// `schema` is used for ONE decision: whether `mutation` is a STATIC-ROW
+    /// CARRIER, whose own row deletion this function must not fold — see the
+    /// two `row_deletion_is_emitted` sites below and
+    /// [`stats_fold::fold_static_carrier_stats`]'s doc comment for the
+    /// adjudication and its Cassandra authority.
     fn fold_one_mutation_baseline(
         mutation: &Mutation,
+        schema: &TableSchema,
         min_timestamp: &mut i64,
         min_ldt: &mut i32,
         min_ttl: &mut i32,
     ) {
+        // Issue #4246 roborev round 10. A STATIC-ROW CARRIER's own row
+        // deletion — in EITHER representation, `CellOperation::DeleteRow` or
+        // the #932 decoupled `Mutation::row_tombstone` field — is never
+        // written to Data.db: `is_static_operation` returns `false` for
+        // `DeleteRow` (so `collect_static_operations`/`StaticOpsTracker::feed`
+        // drop it before the merged set the emitter writes from), and
+        // `write_static_row_with_prev_size` never consults `row_tombstone` at
+        // all. Full adjudication + the pinned `cassandra-5.0.8`
+        // `SortedTableWriter::addStaticRow`/`Rows.collectStats` authority:
+        // `stats_fold::fold_static_carrier_stats`'s doc comment.
+        //
+        // Round 8 removed the equivalent phantom from the DIRECT fold path
+        // (`fold_static_carrier_stats`, which feeds `self.stats` from
+        // `write_partition`/`KWayMerger::merge`/`maintenance_step`). THIS is
+        // the SECOND, independent path to the SAME persisted field:
+        // `compute_mutations_baseline_stats` -> here ->
+        // `pre_seed_encoding_baselines`, which assigns the returned `min_ldt`
+        // VERBATIM into `self.stats.min_local_deletion_time`. Because
+        // `write_partition`'s own fold runs strictly AFTER that assignment and
+        // is a `.min()`, it can only LOWER the value further, never raise a
+        // phantom-contaminated one back — so gating the direct path alone left
+        // the phantom fully intact in the persisted `Statistics.db`. (It is
+        // invisible to the tombstone-drop-time histogram, because pre-seeding
+        // is a field assignment rather than an `update_local_deletion_time`
+        // call — which is precisely how it survived rounds 8 and 9.)
+        //
+        // Both re-derivations of "was this actually emitted?" have to answer
+        // identically, and nothing structurally forces them to; that coupling
+        // is what issue #4320 proposes to remove by deriving stats from the
+        // emitted artifact instead.
+        //
+        // WHY THE #4286 "ENCODING STATS ACCUMULATE UNCONDITIONALLY" DOCTRINE
+        // (quoted at length in `compute_mutations_baseline_stats` above) DOES
+        // NOT COVER THIS. That doctrine is about updates Cassandra's
+        // `SkipListMemtable.put` folds into `EncodingStats` even though
+        // RECONCILIATION later supersedes them — e.g. a partition tombstone
+        // that loses to a newer one. Those markers ARE emitted, by some
+        // writer, in some generation; the fold merely predates the winner
+        // being chosen. A static carrier's row deletion is categorically
+        // different: it is emitted by NOTHING, in EITHER representation, so
+        // there is no `Row` object for Cassandra's `addStaticRow` to hand to
+        // `Rows.collectStats` in the first place (pinned `cassandra-5.0.8`:
+        // `partitionWriter.addStaticRow(row); if (!row.isEmpty())
+        // Rows.collectStats(row, metadataCollector);` — same object, adjacent
+        // statements). Excluding it can also never underflow an encoding
+        // delta, because a delta is only computed for bytes that ARE written.
+        //
+        // NOTE the asymmetry this deliberately preserves: a `Delete { column }`
+        // targeting a STATIC column IS emitted (`is_static_operation` returns
+        // `true` for it), so its LDT stays an unconditional contribution below.
+        // Only the ROW deletion is phantom, and only on a static carrier.
+        let row_deletion_is_emitted = !data_writer::is_static_row_mutation(mutation, schema);
+
         *min_timestamp = (*min_timestamp).min(mutation.timestamp_micros);
 
         // Issue #1018: a simple `Write`/`WriteWithTtl`/`Delete` cell may carry
@@ -1175,8 +1246,7 @@ impl SSTableWriter {
                         *min_ldt = (*min_ldt).min(ldt);
                     }
                 }
-                op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
+                op @ crate::storage::write_engine::mutation::CellOperation::Delete { .. } => {
                     // Issue #764 / #921 finding 2: the encoding baseline must
                     // match the LDT the row/cell tombstone will ACTUALLY be
                     // written with, else the delta underflows. A `Delete` with
@@ -1184,11 +1254,30 @@ impl SSTableWriter {
                     // `L` verbatim; reuse the emit path's
                     // `op_cell_local_deletion_time` helper so the pre-seeded
                     // baseline always covers the smallest LDT actually written.
+                    //
+                    // UNCONDITIONAL, including on a static carrier: a cell
+                    // tombstone on a static column IS emitted (see the
+                    // asymmetry note on `row_deletion_is_emitted` above).
                     let ldt =
                         crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
                             op, mutation,
                         );
                     *min_ldt = (*min_ldt).min(ldt);
+                }
+                op @ crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
+                    // Same #764 / #921 rule as `Delete` above — but only when
+                    // the row deletion is actually emitted. On a STATIC CARRIER
+                    // it never is (issue #4246 roborev round 10; see
+                    // `row_deletion_is_emitted` above), so folding its LDT
+                    // would seed the persisted `min_local_deletion_time` from
+                    // bytes that were never written — and the below-baseline
+                    // guard it exists to satisfy cannot fire for a deletion the
+                    // emitter will not write.
+                    if row_deletion_is_emitted {
+                        let ldt = crate::storage::sstable::writer::data_writer::
+                            op_cell_local_deletion_time(op, mutation);
+                        *min_ldt = (*min_ldt).min(ldt);
+                    }
                 }
                 // Issue #887: the pre-seeded baseline path must fold the SAME
                 // marker timestamps/LDTs the DataWriter delta-encodes (it
@@ -1264,9 +1353,19 @@ impl SSTableWriter {
         // the row (and the `deletion_time` delta underflows against
         // `min_timestamp`). Mirror the `partition_tombstone` fold; LIVE
         // sentinels never reach this field.
-        if let Some((deletion_time, ldt)) = mutation.row_tombstone {
-            *min_timestamp = (*min_timestamp).min(deletion_time);
-            *min_ldt = (*min_ldt).min(ldt);
+        //
+        // Issue #4246 roborev round 10: gated on `row_deletion_is_emitted` for
+        // the SAME reason as the `DeleteRow` arm above. This is the SECOND
+        // representation of a static carrier's phantom row deletion —
+        // `write_static_row_with_prev_size` never reads `row_tombstone`, so
+        // neither its `deletion_time` nor its `ldt` reaches Data.db, and
+        // #1721's below-baseline argument (quoted above) is about a CLUSTERING
+        // row, whose deletion `merge_row_group` really does emit.
+        if row_deletion_is_emitted {
+            if let Some((deletion_time, ldt)) = mutation.row_tombstone {
+                *min_timestamp = (*min_timestamp).min(deletion_time);
+                *min_ldt = (*min_ldt).min(ldt);
+            }
         }
     }
 }

@@ -184,7 +184,40 @@ pub(crate) fn fold_single_mutation_row_group(
 /// (`SSTableWriter::write_partition`'s wholly-static loop,
 /// `KWayMerger::merge`, and `WriteEngine::maintenance_step`).
 ///
-/// # A static carrier's own row deletion is folded NOWHERE — deliberately
+/// # A static carrier's own row deletion is excluded from BOTH fold paths
+///
+/// The exclusion is deliberate, and it has to be re-derived in TWO
+/// independent places, because there are two separate paths by which a
+/// mutation reaches the SAME persisted `Statistics.db` fields:
+///
+/// 1. the DIRECT fold — THIS function, called by
+///    `SSTableWriter::write_partition`'s wholly-static loop,
+///    `KWayMerger::merge` and `WriteEngine::maintenance_step`, which folds
+///    into `self.stats` (fixed in issue #4246 roborev round 8, below); and
+/// 2. the TWO-PASS PRE-SEED ENCODING BASELINE —
+///    `SSTableWriter::compute_mutations_baseline_stats` ->
+///    `fold_one_mutation_baseline` -> `pre_seed_encoding_baselines`, the
+///    issue #729 flush pre-scan, whose result is assigned VERBATIM into
+///    `self.stats.min_timestamp` / `.min_local_deletion_time` BEFORE any
+///    partition is written (fixed in roborev round 10).
+///
+/// Path 2 is not a refinement of path 1: `write_partition`'s own fold runs
+/// strictly AFTER the pre-seed assignment and is a `.min()`, so it can only
+/// LOWER the pre-seeded value further, never raise a phantom-contaminated
+/// one back. Gating path 1 alone therefore left the phantom fully intact in
+/// the persisted file — invisible to the `estimatedTombstoneDropTime`
+/// histogram, since pre-seeding is a field assignment rather than an
+/// `update_local_deletion_time` call. That is how round 8's fix read as
+/// complete for two further rounds.
+///
+/// Having to answer "was this actually emitted?" twice, in two hand-written
+/// re-derivations that nothing forces to agree, is the structural problem
+/// issue **#4320** proposes to remove (derive stats from the emitted
+/// artifact). Until then, a change to either path must be mirrored in the
+/// other; `cqlite-core/tests/issue_4246_static_carrier_deletion_phantom.rs`
+/// pins both.
+///
+/// ## The adjudication (round 8)
 ///
 /// Issue #4246 roborev rounds 6/7 added a `fold_row_deletion_marker(stats,
 /// DataWriter::resolve_row_deletion(&[mutation], None))` call here, on the

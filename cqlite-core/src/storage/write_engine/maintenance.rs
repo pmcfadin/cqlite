@@ -823,11 +823,14 @@ impl WriteEngine {
                             }
                             // The STATIC-CARRIER fold: row CONTENT only.
                             // A static carrier's own `DeleteRow`/#932
-                            // `row_tombstone` is folded NOWHERE, and
+                            // `row_tombstone` is excluded here, and
                             // deliberately so — the emitter never writes a
                             // static-row deletion, so folding one would be a
                             // PHANTOM marker (issue #4246 roborev round 8,
-                            // overturning 6/7). See
+                            // overturning 6/7). The flush path's #729
+                            // pre-seed baseline re-derives the SAME exclusion
+                            // independently (`fold_one_mutation_baseline`,
+                            // round 10; #4320 tracks unifying them). See
                             // `fold_static_carrier_stats`'s doc comment.
                             stats_fold::fold_static_carrier_stats(
                                 stream_state.partition_stats_mut(),

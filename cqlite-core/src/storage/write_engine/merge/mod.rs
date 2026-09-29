@@ -1999,13 +1999,17 @@ impl KWayMerger {
                             // The STATIC-CARRIER fold folds row CONTENT
                             // only. A static carrier's own row deletion
                             // (`DeleteRow` op or the #932 `row_tombstone`
-                            // field) is folded NOWHERE, deliberately: no
+                            // field) is excluded here, deliberately: no
                             // production path emits a static-row deletion to
                             // Data.db, so counting one would be a PHANTOM
                             // marker of exactly the class issue #4246 exists
-                            // to eliminate. Adjudication + Cassandra
-                            // authority: `fold_static_carrier_stats`'s doc
-                            // comment (roborev round 8, overturning 6/7).
+                            // to eliminate. The flush path's #729 pre-seed
+                            // baseline re-derives the SAME exclusion
+                            // independently (`fold_one_mutation_baseline`,
+                            // round 10; #4320 tracks unifying them).
+                            // Adjudication + Cassandra authority:
+                            // `fold_static_carrier_stats`'s doc comment
+                            // (roborev rounds 8 and 10).
                             crate::storage::sstable::writer::stats_fold::fold_static_carrier_stats(
                                 &mut partition_stats,
                                 &mutation,
