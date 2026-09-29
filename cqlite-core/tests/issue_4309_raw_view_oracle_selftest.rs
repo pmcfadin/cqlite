@@ -515,8 +515,15 @@ fn generation_dir_on_disk(root: &std::path::Path, dir_name: &str, gens: &[(&str,
 #[test]
 fn load_goldens_binds_to_the_lexically_first_generation_directory() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    generation_dir_on_disk(tmp.path(), "sel-00000000", &[("nb-1-big-Data.db", "1")]);
+    // CREATED IN DESCENDING ORDER ON PURPOSE (roborev job 67). Creating
+    // them ascending would let this pass on any filesystem whose `read_dir`
+    // returns entries in creation order, whether or not
+    // `table_generation_dirs` sorts — so the control would not actually
+    // establish the determinism its message claims. Created later-first, a
+    // `dirs[0]` that reflected readdir order would pick `sel-ffffffff` and
+    // fail.
     generation_dir_on_disk(tmp.path(), "sel-ffffffff", &[("nb-1-big-Data.db", "2")]);
+    generation_dir_on_disk(tmp.path(), "sel-00000000", &[("nb-1-big-Data.db", "1")]);
 
     let goldens = load_goldens(tmp.path(), &SELECT_SPEC);
     assert_eq!(

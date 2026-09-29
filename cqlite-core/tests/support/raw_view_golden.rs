@@ -193,11 +193,13 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
         }
     }
     goldens.sort_by(|a, b| (&a.data_db, &a.source_dir).cmp(&(&b.data_db, &b.source_dir)));
-    assert!(
-        !goldens.is_empty(),
-        "issue #4309: {} resolved to a root with no readable golden at all",
-        spec.id()
-    );
+    // NOTE: there is deliberately no `!goldens.is_empty()` check here. It
+    // could not fire (roborev job 67): `table_generation_dirs` returns only
+    // directories that already contain a `*-Data.db`, `chosen` is one of
+    // them, and the loop pushes one golden per `*-Data.db` under the same
+    // filename predicate — while every per-file problem panics above with a
+    // message naming the file. The live guard for "nothing here" is the
+    // `dirs.is_empty()` refusal at the top of this function.
 
     // ASSERT THE PROPERTY THAT CAN CHANGE, not one that cannot (roborev job
     // 65). The previous cross-directory duplicate check could no longer fire
@@ -362,6 +364,40 @@ pub fn classify_columns(columns: &[ColumnInfo], spec: &FixtureSpec) -> ColumnRol
         spec.id()
     );
     let clustering_columns = key_columns[pk.len()..].to_vec();
+
+    // THE KEY-BOUNDARY SCAN MUST HAVE STOPPED AT A REAL BASE COLUMN
+    // (roborev job 67). `boundary` is true only for `row_timestamp` or a
+    // name already classified simple/complex, so a base column that ever
+    // reached the contract WITHOUT a `_timestamp` or `_complex_deletion`
+    // sibling would not stop the `take_while` — it, and every metadata
+    // column after it up to `row_timestamp`, would be absorbed into
+    // `clustering_columns`. The sweep would then compare golden clustering
+    // components against metadata columns and report a torrent of
+    // mismatches blaming the view for a classification bug. Nothing in the
+    // current contract has that shape, which is exactly why it needs
+    // asserting rather than assuming.
+    for name in &clustering_columns {
+        let synthesized = name.ends_with("_timestamp")
+            || name.ends_with("_ttl")
+            || name.ends_with("_local_deletion_time")
+            || name.ends_with("_tombstone")
+            || name.contains("_complex_deletion");
+        let always_applicable = ROW_LEVEL_METADATA
+            .iter()
+            .chain(PARTITION_METADATA)
+            .chain(RANGE_METADATA)
+            .chain(DECLARED_GAP_COLUMNS)
+            .any(|n| n == name);
+        assert!(
+            !synthesized && !always_applicable,
+            "issue #4309: {}'s key-boundary scan absorbed '{name}' into the clustering \
+             columns {clustering_columns:?}. That is a synthesized or always-applicable \
+             contract column, not a clustering key — the scan stops at the first base \
+             column, so a base column reaching the contract with no `_timestamp` or \
+             `_complex_deletion` sibling would let the scan run past it",
+            spec.id()
+        );
+    }
 
     let mut compared_columns: Vec<String> = Vec::new();
     for c in &simple_columns {

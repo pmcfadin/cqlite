@@ -771,7 +771,14 @@ pub const KNOWN_COVERAGE_TOKENS: &[&str] = &[
 /// A lane claiming it would pass the default build and fail an
 /// all-features one. Rejected by name so that contradiction cannot be
 /// written rather than merely discouraged in prose.
-pub const UNCLAIMABLE_TOKENS: &[&str] = &["shape:point_path_resolved"];
+pub const UNCLAIMABLE_TOKENS: &[&str] = &[SHAPE_POINT_PATH_RESOLVED];
+
+/// Named once so the vocabulary entry and the census insert site cannot
+/// drift apart (roborev job 67) — the same reason
+/// `golden::SHAPE_MULTI_GENERATION` exists. This is the one shape token
+/// `bump` does not mechanize, because it is recorded by the sweep itself
+/// rather than derived from a golden entry.
+pub const SHAPE_POINT_PATH_RESOLVED: &str = "shape:point_path_resolved";
 
 /// What ONE fixture's sweep actually measured.
 ///
@@ -1225,7 +1232,7 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
             golden_keys.len()
         );
     }
-    *observed.entry("shape:point_path_resolved").or_insert(0) += point_positions_resolved;
+    *observed.entry(SHAPE_POINT_PATH_RESOLVED).or_insert(0) += point_positions_resolved;
 
     SweepOutcome {
         fixture: spec.id(),
