@@ -178,6 +178,41 @@ pub(crate) fn fold_single_mutation_row_group(
     }
 }
 
+/// The fold sequence for a STATIC-ROW CARRIER mutation — the
+/// `clustering_key: None` shape both incremental compaction paths classify
+/// out of `row_mutations` and handle on their own branch
+/// (`KWayMerger::merge` and `WriteEngine::maintenance_step`).
+///
+/// Extracted (issue #4246 roborev round-6 finding): those two branches used
+/// to call [`fold_row_content_stats`] ALONE, which meant a static carrier's
+/// own row deletion was folded NOWHERE on either compaction path.
+/// [`fold_row_content_stats`] deliberately does not fold a row's deletion —
+/// neither the `DeleteRow` op (its match arm is an explicit no-op) nor the
+/// #932 decoupled `row_tombstone` field — because a row's deletion is folded
+/// exactly once at the GROUP level via [`fold_row_deletion_marker`]. The
+/// static-carrier branches never performed that group-level fold, so both
+/// representations were silently dropped from persisted stats. Before the
+/// #4246 refactor `fold_mutation_stats` folded them for these mutations
+/// (issue #1721's explicit purpose: without the LDT contribution
+/// `min_local_deletion_time` stays `i32::MAX` and `data_writer/rows.rs`'s
+/// below-baseline guard then REJECTS the row). The flush path is shielded by
+/// `compute_mutations_baseline_stats`/`pre_seed_encoding_baselines`; neither
+/// compaction path has such a pre-seed.
+///
+/// Resolution goes through `DataWriter::resolve_row_deletion` — the single
+/// authority, which picks whichever of the two representations carries the
+/// GREATER timestamp — rather than a local hand-rolled preference, so this
+/// can never drift from what `merge_row_group` actually emits.
+///
+/// `shadow_floor` is `None`: static-cell shadowing uses a separate,
+/// partition-floor-only mechanism outside this fix's verified scope (see
+/// [`row_group_survives`]'s doc comment), so the carrier's content keeps its
+/// prior unconditional-fold behavior exactly.
+pub(crate) fn fold_static_carrier_stats(stats: &mut StatisticsMetadata, mutation: &Mutation) {
+    fold_row_content_stats(stats, mutation, None);
+    fold_row_deletion_marker(stats, DataWriter::resolve_row_deletion(&[mutation], None));
+}
+
 /// Fold ONLY the partition/range tombstone MARKER fields of `mutation` (issue
 /// #4246 roborev finding). A tombstone marker is never itself row-shadowed —
 /// it IS the deletion — so it always contributes, independent of whatever

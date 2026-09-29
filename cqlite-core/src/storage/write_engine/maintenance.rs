@@ -821,10 +821,15 @@ impl WriteEngine {
                             if !stream_state.saw_carrier_or_static {
                                 stream_state.static_first_ts = mutation.timestamp_micros;
                             }
-                            stats_fold::fold_row_content_stats(
+                            // Issue #4246 roborev round-6 finding: the
+                            // STATIC-CARRIER fold, not
+                            // `fold_row_content_stats` alone — see that
+                            // helper's doc comment for why the latter leaves
+                            // a static carrier's own `DeleteRow`/#932
+                            // `row_tombstone` folded NOWHERE on this path.
+                            stats_fold::fold_static_carrier_stats(
                                 stream_state.partition_stats_mut(),
                                 &mutation,
-                                None,
                             );
                             stream_state
                                 .static_tracker
@@ -897,25 +902,30 @@ impl WriteEngine {
                             // #932), so correctness holds even if the
                             // upstream gate is ever relaxed, without
                             // reintroducing a reconciliation pass here.
-                            if let Some(row_deletion) = mutation.row_tombstone {
-                                stats_fold::fold_row_deletion_marker(
-                                    stream_state.partition_stats_mut(),
-                                    Some(row_deletion),
-                                );
-                            } else if mutation.operations.iter().any(|op| {
-                                matches!(
-                                    op,
-                                    crate::storage::write_engine::mutation::CellOperation::DeleteRow
-                                )
-                            }) {
-                                stats_fold::fold_row_deletion_marker(
-                                    stream_state.partition_stats_mut(),
-                                    Some((
-                                        mutation.timestamp_micros,
-                                        mutation.effective_local_deletion_time(),
-                                    )),
-                                );
-                            }
+                            // Issue #4246 roborev round-6 finding: resolve
+                            // through `DataWriter::resolve_row_deletion` --
+                            // the single authority this diff extracted --
+                            // rather than hand-rolling the winner here. The
+                            // hand-rolled form preferred `row_tombstone`
+                            // UNCONDITIONALLY, whereas the shared helper
+                            // picks whichever representation carries the
+                            // GREATER timestamp; the two agree only while
+                            // the "never both (#932)" invariant holds, and
+                            // that invariant is not enforced at this point.
+                            // The cost objection that justified avoiding
+                            // `fold_single_mutation_row_group` here does NOT
+                            // apply to `resolve_row_deletion`: it is a cheap
+                            // group scan that performs no per-column LWW
+                            // reconciliation, so this fast path keeps its
+                            // #2299 property while gaining a single source
+                            // of truth.
+                            stats_fold::fold_row_deletion_marker(
+                                stream_state.partition_stats_mut(),
+                                crate::storage::sstable::writer::data_writer::DataWriter::resolve_row_deletion(
+                                    &[&mutation],
+                                    None,
+                                ),
+                            );
                             stream_state.row_count += 1;
                         } else {
                             // Buffered path: buffer for the single PartitionEnd

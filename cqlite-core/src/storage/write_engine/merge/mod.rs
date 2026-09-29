@@ -1996,10 +1996,20 @@ impl KWayMerger {
                             // either — this call cannot double-count it, but
                             // nothing folds it, matching the marker being
                             // absent from Data.db.
-                            crate::storage::sstable::writer::stats_fold::fold_row_content_stats(
+                            // Issue #4246 roborev round-6 finding: this must
+                            // be the STATIC-CARRIER fold, not
+                            // `fold_row_content_stats` alone — the latter
+                            // never folds the row's own deletion (`DeleteRow`
+                            // is an explicit no-op arm; the #932
+                            // `row_tombstone` field is not read at all),
+                            // deferring it to a GROUP-level
+                            // `fold_row_deletion_marker` that this branch
+                            // does not perform. A static carrier's
+                            // `DeleteRow`/`row_tombstone` was therefore
+                            // folded NOWHERE on this path.
+                            crate::storage::sstable::writer::stats_fold::fold_static_carrier_stats(
                                 &mut partition_stats,
                                 &mutation,
-                                None,
                             );
                             static_tracker.feed(&mutation, &write_schema, None);
                             saw_carrier_or_static = true;
