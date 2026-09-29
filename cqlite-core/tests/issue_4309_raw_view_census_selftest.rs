@@ -47,6 +47,8 @@
 #[path = "support/raw_view_parity.rs"]
 mod raw_view_parity;
 
+use raw_view_parity::assert_value_key_sets_match;
+use raw_view_parity::golden::RowIdentity;
 use raw_view_parity::golden::{build_expectations, ColumnRoles, GoldenSstable};
 use raw_view_parity::{Discipline, FixtureSpec};
 use serde_json::json;
@@ -58,12 +60,7 @@ use std::path::PathBuf;
 /// the regular-column set, so the narrowest roles that still model a real
 /// table keep the fixture honest.
 fn roles() -> ColumnRoles {
-    ColumnRoles {
-        clustering_columns: vec!["ck".to_string()],
-        simple_columns: Vec::new(),
-        complex_columns: Vec::new(),
-        compared_columns: Vec::new(),
-    }
+    roles_with(&["ck"], &[])
 }
 
 const SPEC: FixtureSpec = FixtureSpec {
@@ -514,4 +511,55 @@ fn row_update_without_liveness_needs_both_no_liveness_and_real_cells() {
          makes a row the partial-UPDATE shape, and conflating the two is the edit this \
          control exists to catch. observed: {row_tombstone:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The point-vs-scan value-column comparison (roborev job 47)
+// ---------------------------------------------------------------------------
+//
+// The assertion this replaces compared `result.metadata.columns` across the
+// two producers. That CANNOT FAIL for `SELECT *`: `raw_view/mod.rs:194`
+// computes the column list ONCE, before the point/scan branch, and the
+// `SelectClause::All` arm returns it unchanged — so it was byte-identical by
+// construction and never derived from what a producer put in a row. These
+// controls exist because "a comparison that cannot fail" is precisely the
+// defect being fixed, and the only way to know the replacement is different
+// is to watch it fail.
+
+fn ident() -> RowIdentity {
+    ("row".to_string(), vec![Some("10".to_string())])
+}
+
+fn keys(names: &[&str]) -> std::collections::BTreeSet<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+/// POSITIVE CONTROL: identical value-column sets compare clean.
+#[test]
+fn identical_value_key_sets_pass() {
+    let both = keys(&["pk", "ck", "sstable", "row_kind", "body_timestamp"]);
+    assert_value_key_sets_match("selftest", "1", &ident(), &both, &both);
+}
+
+/// NEGATIVE CONTROL, direction 1 — the one the finding is about: a point row
+/// that DROPPED a metadata column. Against the fact model this compares
+/// clean whenever the golden value is `Absent`, because `fact_of(None)` and
+/// `fact_of(Some(Null))` are both `Fact::Absent`. Against the key sets it
+/// must fail by name.
+#[test]
+#[should_panic(expected = "MISSING from the point row")]
+fn a_point_row_missing_a_column_fails() {
+    let scan = keys(&["pk", "ck", "sstable", "row_kind", "body_timestamp"]);
+    let point = keys(&["pk", "ck", "sstable", "row_kind"]);
+    assert_value_key_sets_match("selftest", "1", &ident(), &point, &scan);
+}
+
+/// NEGATIVE CONTROL, direction 2 (#3890 pins BOTH directions): a column
+/// present ONLY on the point row is equally a contract divergence.
+#[test]
+#[should_panic(expected = "present ONLY on the point row")]
+fn a_point_row_with_an_extra_column_fails() {
+    let scan = keys(&["pk", "ck", "sstable", "row_kind"]);
+    let point = keys(&["pk", "ck", "sstable", "row_kind", "body_ttl"]);
+    assert_value_key_sets_match("selftest", "1", &ident(), &point, &scan);
 }

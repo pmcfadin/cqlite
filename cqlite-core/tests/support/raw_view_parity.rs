@@ -592,6 +592,45 @@ fn fact_kind(column: &str) -> &'static str {
     }
 }
 
+/// Every coverage token a case may legitimately claim.
+///
+/// The METADATA-FAMILY half is exactly [`fact_kind`]'s return set; the SHAPE
+/// half is exactly what `build_expectations` can `bump`, plus the
+/// `shape:point_path_resolved` path witness. Keep all three in step — a
+/// token added to one and not here is refused by name, which is the
+/// intended failure.
+const KNOWN_COVERAGE_TOKENS: &[&str] = &[
+    // metadata families (fact_kind)
+    "row_timestamp",
+    "row_ttl",
+    "row_liveness_expires_at",
+    "row_local_deletion_time",
+    "row_tombstone",
+    "row_deletion_timestamp",
+    "partition_deletion_time",
+    "partition_deletion_timestamp",
+    "bound_inclusive",
+    "range_deletion_time",
+    "range_deletion_timestamp",
+    "complex_deletion_timestamp",
+    "complex_deletion_time",
+    "complex_deletion",
+    "cell_local_deletion_time",
+    "cell_timestamp",
+    "cell_ttl",
+    "cell_tombstone",
+    // golden entry shapes
+    "entry:row",
+    "entry:static_block",
+    "entry:partition_deletion",
+    "entry:range_tombstone_bound",
+    "entry:range_tombstone_boundary",
+    "shape:prefix_bound",
+    "shape:row_update_without_liveness",
+    "shape:multi_generation",
+    "shape:point_path_resolved",
+];
+
 /// What ONE fixture's sweep actually measured.
 ///
 /// Row counts alone cannot show a sweep is meaningful: a corpus where every
@@ -652,6 +691,29 @@ impl SweepOutcome {
              exercise; a case that claims nothing certifies nothing.",
             self.fixture
         );
+        // TOKEN NAMES ARE VALIDATED BEFORE THE `ran` EARLY RETURN, for the
+        // same reason the emptiness check above is (roborev job 47, issue
+        // #4309). `require_observed` otherwise validates a name only
+        // IMPLICITLY, by looking it up in `observed` — so on a fixture that
+        // skipped, a MISTYPED token (`"cell_tombstonee"`,
+        // `"entry:static_blocks"`, `"shape:prefix_bounds"`) is silently
+        // accepted. Sixteen of the sweep's 27 cases are `FetchOnly` and skip
+        // under the gate's corpus-less `core-tests`, so a typo in the
+        // `tomb`/`deltas` lanes would be accepted FOREVER on the gate of
+        // record and surface only on a strict-mode run against a fetched
+        // corpus — a coverage claim that silently claims nothing, which is
+        // this census's own failure mode. Checked here, a typo fails on
+        // EVERY gate whether or not the fixture ran.
+        for kind in kinds {
+            assert!(
+                KNOWN_COVERAGE_TOKENS.contains(kind),
+                "issue #4309: {} claims coverage token '{kind}', which is not a known \
+                 metadata family or golden entry shape. A mistyped token can never be \
+                 observed, so it would make the claim vacuous rather than failing. Known \
+                 tokens: {KNOWN_COVERAGE_TOKENS:?}",
+                self.fixture
+            );
+        }
         if !self.ran {
             return;
         }
@@ -712,16 +774,27 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     );
 
     let roles = classify_columns(&scan.metadata.columns, spec);
-    // The SCAN's column set, kept so the point-read producer can be held to the
-    // SAME contract (roborev, issue #4309; the #3890 class CLAUDE.md pins:
-    // "Point/seek-vs-scan tests use `SELECT *` and assert the column set in
-    // BOTH directions"). Deriving `roles` from the scan alone left the point
-    // path's own `metadata.columns` unread, so a contract column missing from —
-    // or extra in — the point projection was only caught where some golden
-    // stated a non-`Absent` fact for it: for a column whose golden value is
-    // `Absent` across the whole fixture, `fact_of(None)` and
-    // `fact_of(Some(Null))` are both `Fact::Absent` and a DROPPED column
-    // compares clean.
+    // The SCAN's RESULT-METADATA column set. Retained as a cheap structural
+    // check, but read the next paragraph before citing it as the #3890
+    // assertion — IT IS NOT, AND CANNOT FAIL FOR `SELECT *` (roborev job 47,
+    // issue #4309).
+    //
+    // Authority is the production source, not this harness:
+    // `raw_view/mod.rs:194` computes `let (columns, metadata_names) =
+    // raw_view_columns(&base_schema)?` ONCE, BEFORE the
+    // `PartitionLookupOutcome` branch that chooses the point vs full-scan
+    // producer, and the `SelectClause::All` arm returns it UNCHANGED
+    // (`mod.rs:366`). Both queries here are `SELECT *`, so
+    // `result.metadata.columns` is byte-identical on the two paths BY
+    // CONSTRUCTION — it is never derived from what the producer actually put
+    // in a row. Comparing it therefore asserts a tautology.
+    //
+    // The hole it was supposed to close lives in `QueryRow::values`: for a
+    // column whose golden value is `Absent` across the whole fixture,
+    // `fact_of(None)` and `fact_of(Some(Null))` are both `Fact::Absent`, so
+    // a column DROPPED from the point row's values compares clean. That is
+    // asserted below, per row, against the matching scan row — see
+    // `assert_value_key_sets_match`.
     let scan_columns: BTreeSet<String> = scan
         .metadata
         .columns
@@ -813,6 +886,22 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
         );
     }
 
+    // --- The scan's PER-ROW value-column sets, for the #3890 comparison ----
+    //
+    // Keyed by the full physical identity `(sstable, partition key, row_kind,
+    // clustering)`, so each point row is held against the SAME physical row
+    // the scan produced rather than against an aggregate.
+    let mut scan_value_keys: BTreeMap<(String, String, RowIdentity), BTreeSet<String>> =
+        BTreeMap::new();
+    for row in &scan.rows {
+        let ctx = format!("{} [full scan]", spec.id());
+        let sstable = actual_text(row, "sstable")
+            .unwrap_or_else(|| panic!("{ctx}: every raw-view row must carry a text 'sstable'"));
+        let pk = actual_partition_key(row, spec);
+        let identity = actual_identity(row, &roles, &ctx);
+        scan_value_keys.insert((sstable, pk, identity), value_key_set(row));
+    }
+
     // --- Producer 2: one point query per golden key ------------------------
     let mut point_positions_resolved = 0usize;
     for key in &golden_keys {
@@ -851,6 +940,31 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
              returned nothing",
             spec.id()
         );
+        // THE #3890 COMPARISON, per row and in BOTH directions. Held against
+        // the matching SCAN row by full physical identity, so a point row
+        // that silently dropped a metadata column fails by NAME even where
+        // the fact model would compare it clean as an absence.
+        for row in &rows {
+            let ctx = format!("{} [point read] pk={key}", spec.id());
+            let sstable = actual_text(row, "sstable")
+                .unwrap_or_else(|| panic!("{ctx}: every raw-view row must carry a text 'sstable'"));
+            let pk = actual_partition_key(row, spec);
+            let identity = actual_identity(row, &roles, &ctx);
+            let scan_keys = scan_value_keys
+                .get(&(sstable.clone(), pk.clone(), identity.clone()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "issue #4309: {} — the point read produced a physical row \
+                         (sstable={sstable}, pk={pk}, {identity:?}) that the FULL SCAN \
+                         never produced. The two producers must expose the same physical \
+                         rows; a point-only row means one of them is fabricating or \
+                         dropping data",
+                        spec.id()
+                    )
+                });
+            assert_value_key_sets_match(&spec.id(), key, &identity, &value_key_set(row), scan_keys);
+        }
+
         let mut scoped: BTreeMap<(String, String), Vec<&ExpectedRow>> = BTreeMap::new();
         for ((sstable, k), v) in &expected_groups {
             if k == key {
@@ -948,6 +1062,53 @@ fn actual_partition_key(row: &QueryRow, spec: &FixtureSpec) -> String {
 /// Split an actual row set into `(sstable, key)` groups and compare each
 /// against its expectation group, in both directions. Returns the number of
 /// column comparisons actually performed.
+/// The set of column names a raw-view row ACTUALLY carries in its values
+/// map, which is the thing a producer can truncate — unlike
+/// `result.metadata.columns`, which both producers share by construction.
+///
+/// `position` is excluded because it is the ONE legitimately path-divergent
+/// column: the full-scan producer reports it `Null` (or omits it) while the
+/// point-read producer resolves a real byte offset, so its presence differs
+/// by access path BY DESIGN. It is the sweep's path witness, asserted
+/// separately, and a declared gap in the column contract.
+pub fn value_key_set(row: &QueryRow) -> BTreeSet<String> {
+    row.values
+        .keys()
+        .map(|k| k.to_string())
+        .filter(|k| k != "position")
+        .collect()
+}
+
+/// The REAL #3890 assertion CLAUDE.md pins — "point/seek-vs-scan tests use
+/// `SELECT *` and assert the column set in BOTH directions" — applied to the
+/// column set that can actually diverge (roborev job 47, issue #4309).
+///
+/// Split out and `pub` so it has its own negative control: a comparison that
+/// cannot fail is exactly the defect this replaced, so
+/// `issue_4309_raw_view_census_selftest.rs` proves this one CAN, in both
+/// directions, without needing a corpus.
+pub fn assert_value_key_sets_match(
+    fixture: &str,
+    key: &str,
+    identity: &RowIdentity,
+    point: &BTreeSet<String>,
+    scan: &BTreeSet<String>,
+) {
+    assert_eq!(
+        point,
+        scan,
+        "issue #4309: {fixture} pk={key} row {identity:?} — the point-read producer must \
+         populate the SAME value columns as the full scan. Present on the SCAN row but \
+         MISSING from the point row: {:?}; present ONLY on the point row: {:?}. (A column \
+         missing from the point row's values compares CLEAN against the fact model \
+         whenever its golden value is Absent, because fact_of(None) and \
+         fact_of(Some(Null)) are both Fact::Absent — which is why this is asserted on the \
+         key sets rather than the values.)",
+        scan.difference(point).collect::<Vec<_>>(),
+        point.difference(scan).collect::<Vec<_>>(),
+    );
+}
+
 fn assert_rows_match(
     spec: &FixtureSpec,
     source: &str,
