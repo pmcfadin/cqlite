@@ -44,7 +44,10 @@
 //!      once, not twice.
 //!   7. The COMPACTION-path analogue of properties 1-3
 //!      (`compaction_path_shadow_gate_matches_flush_path`): a same-generation
-//!      shadow survives `compact_sstables` unchanged.
+//!      shadow survives `compact_sstables` unchanged. NOT a regression
+//!      detector for the compaction shadow GATE — see that test's own doc
+//!      comment for what it cannot see, and why (issue #4246 roborev
+//!      round-6).
 
 #![cfg(feature = "write-support")]
 
@@ -595,15 +598,67 @@ fn mixed_row_and_partition_tombstone_mutation_folds_tombstone_once() {
 }
 
 /// Property 7 (roborev finding; renumbered round-5 to match the module
-/// header's list): the COMPACTION-path half of the fix
-/// (`KWayMerger::merge`'s deferred, `row_group_survival`-gated fold at
-/// `PartitionEnd`, plus its two unconditional marker folds) has its own,
-/// dedicated test — the properties above all drive `WriteEngine::flush` →
-/// `write_partition` only, and the #4243 oracle explicitly excludes
-/// `Statistics.db` from its byte comparison
-/// (`rt_boundary_oracle.rs::PRESENT_NOT_DIFFED`), so nothing else asserts
-/// that a shadow-dropped row stops lowering a COMPACTED SSTable's persisted
-/// `min_timestamp`, nor that its markers are folded exactly once there.
+/// header's list): the COMPACTION path's analogue of properties 1-3 — the
+/// properties above all drive `WriteEngine::flush` → `write_partition`
+/// only, and the #4243 oracle explicitly excludes `Statistics.db` from its
+/// byte comparison (`rt_boundary_oracle.rs::PRESENT_NOT_DIFFED`), so
+/// nothing else asserts that a COMPACTED SSTable's persisted
+/// `min_timestamp` reflects the shadow, nor that its markers are folded
+/// exactly once there.
+///
+/// WHAT THIS TEST DOES **NOT** DO, STATED PLAINLY (issue #4246 roborev
+/// round-6 Medium finding). An earlier version of this comment claimed the
+/// compaction half of the fix "has its own, dedicated test". **That claim
+/// was false in the direction that misleads**, and it is corrected here
+/// rather than propped up with a test that cannot fail.
+///
+/// This test **cannot detect a regression of the compaction-path shadow
+/// gate**. Two independent reasons, both MEASURED rather than argued:
+///
+///   1. Its shadow is created WITHIN gen A's flush batch, so the shadowed
+///      row is already absent from gen A's Data.db and `KWayMerger::merge`
+///      never sees a shadowed row group. Every value asserted below is
+///      additionally floored by `compute_baseline_min`'s pre-seed from gen
+///      A's header (10), which the merge fold can only LOWER — so
+///      `min_timestamp == 10` holds whether `fold_single_mutation_row_group`
+///      applies its `row_group_survival` gate or folds unconditionally.
+///   2. More fundamentally, the gate's NON-SURVIVING branch is not reached
+///      here at all. Instrumenting it shows `fold_single_mutation_row_group`
+///      firing only for SURVIVING rows (ck=6, ck=10, `deletion_ts = None`)
+///      in this test and in every cross-generation variant tried (a
+///      later-generation covering range tombstone, and a later-generation
+///      whole-partition tombstone): `KWayMerger` drops shadow-covered rows
+///      UPSTREAM, before they are ever buffered for the `PartitionEnd`
+///      fold.
+///
+/// So the compaction-path gate is DEFENCE IN DEPTH on the evidence
+/// available today, not a behaviour these tests pin. Deleting the gate was
+/// verified not to change this test's outcome. NOTE THE LIMIT OF THAT
+/// CLAIM: unreachability is an EMPIRICAL result over the three scenarios
+/// named above, **not a proof** — establishing it in general requires
+/// reading `KWayMerger`'s row-production logic and is deliberately out of
+/// this issue's scope. If that branch turns out to be reachable, the
+/// compaction half of this fix is genuinely untested and owes a real test;
+/// this comment is an honest disclosure of a gap, NOT evidence of
+/// correctness.
+///
+/// A candidate regression test WAS attempted and DISCARDED rather than
+/// shipped: a cross-generation whole-partition tombstone makes the
+/// compacted output's tombstone-drop histogram read `[(2_000_000_000, 2)]`
+/// — the partition tombstone's own LDT counted TWICE for a single emitted
+/// marker — but it reads identically with the survival gate present and
+/// removed, so it pins a DIFFERENT (suspected, unconfirmed) double-fold
+/// rather than this gate. Adjudicating it needs the pinned
+/// `cassandra-5.0.8` `MetadataCollector`/`StatsMetadata` semantics for
+/// `estimatedTombstoneDropTime`, not a number read off CQLite's own output
+/// (the no-heuristics mandate, #28). Tracked as issue #4318; explicitly NOT
+/// blocking this issue, since it reproduces with the gate in either state.
+///
+/// WHAT THIS TEST *DOES* PIN, and why it is still worth keeping: that
+/// `compute_baseline_min` carries gen A's already-shadow-aware per-input
+/// minimum through to the compacted output, and that gen A's own marker is
+/// not re-folded (double-counted) during compaction. Both are real
+/// properties of the compaction path; neither is sensitive to the gate.
 ///
 /// The shadow is created WITHIN a single flush batch (gen A: the covering
 /// range tombstone `[Bottom, 5)@10` plus the row it shadows, ck=1@5, plus a
