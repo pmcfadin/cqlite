@@ -10838,8 +10838,18 @@ test_object_store_sweep_claim_recovers_when_stale() {
         tick="$(date +%s.%N)"
         case "$tick" in *N) tick="$now" ;; esac
         # decoupled from the claim write on purpose -- see the outer comment above this loop.
+        # BACKDATED BY 1s (roborev job 68 F1): the shipped `obj_sweep_claim_acquire`
+        # captures ITS OWN `now` before reading `started`, and treats `started > now` as
+        # STALE (a value "in the future" is untrustworthy, not fresh) -- takeover, not a
+        # wait. Planting the CURRENT second means any epoch-second rollover landing between
+        # the supervisor own `now` capture and this write next tick produces exactly
+        # `started == now + 1`, which the supervisor reads as future-dated and sweeps: the
+        # #4282 symptom, reintroduced by the fix meant to remove it, and invisible to every
+        # guard below (ticks stay healthy, claim writes still succeed). A 1s backdate keeps
+        # the observed age at ~1s -- far under the 5s bound -- while making `started <= now`
+        # true for every possible relative ordering of the two clock reads.
         wrote=0
-        printf "%s\n" "$now" >"$claim/started.tmp.$$" 2>/dev/null &&
+        printf "%s\n" "$((now - 1))" >"$claim/started.tmp.$$" 2>/dev/null &&
           mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null && wrote=1
         # SECOND FIELD (roborev job 58 F2): whether THIS tick also managed to write
         # `$claim/started`, distinct from the tick itself (liveness). `$OBJ_SWEEP_MAX_GAP_AWK`
@@ -10850,22 +10860,17 @@ test_object_store_sweep_claim_recovers_when_stale() {
       done
     ' _ "$claim" "$live" "$ticks" "$max_refresher_ticks" >/dev/null 2>&1
     refresh_pid=$FIXTURE_LAST_PID
-    # BARRIER BUDGET is 4x `stale_secs`, in 0.2s polls (matching the refresher's own tick
-    # period, an interval this file already uses elsewhere, rather than a finer one that
-    # only adds forks without shortening the wait) — a re-typed literal here (the ORIGINAL
-    # finding: a bare "3s") can itself go red on the same loaded box #4282 is about, since the
-    # refresher is spawned through the identical fork/exec path the comment above says can be
-    # slow to schedule under load. 4x (not the original 10x) keeps a genuine barrier MISS from
-    # ballooning this file's own <30s total-runtime target while still comfortably outlasting
-    # the fork/exec scheduling delays #4250/#4252 measured -- the barrier only needs to
-    # outlast that scheduling latency once, not cover ten full wait budgets.
-    barrier_secs=$((4 * stale_secs))
-    # ABSOLUTE CEILING (roborev job 53 F4): at this case's `stale_secs` that is already 20s,
-    # burned on exactly the loaded-box path #4282 is about, in a file whose own header
-    # targets <30s total -- and it is burned on a path that then reports `skip` (no verdict
-    # at all). The barrier only needs to outlast ONE fork/exec scheduling delay (see the
-    # comment above), not scale with `stale_secs` without limit.
-    [[ "$barrier_secs" -le 8 ]] || barrier_secs=8
+    # BARRIER BUDGET is a FLAT 8s (roborev job 68 F3, superseding the `4 * stale_secs`
+    # derivation): under this sub-case's pinned knobs `stale_secs` is always 5, so that
+    # derivation always produced 20 and job 53's absolute ceiling always clamped it back
+    # down to 8 -- the multiplier was dead code, misleadingly documented as live. A flat
+    # literal states what actually governs. The barrier only needs to outlast ONE fork/exec
+    # scheduling delay under load (the refresher is spawned through the same fork/exec path
+    # #4250/#4252 measured going slow) -- not scale with `stale_secs` at all -- and 8s
+    # comfortably covers that while keeping a genuine barrier MISS from ballooning this
+    # file's own <30s total-runtime target, in 0.2s polls (matching the refresher's own tick
+    # period, an interval this file already uses elsewhere).
+    barrier_secs=8
     barrier_ticks=$((barrier_secs * 5))
     live_waited=0
     barrier_started="$(date +%s)"
@@ -10992,6 +10997,14 @@ test_object_store_sweep_claim_recovers_when_stale() {
         # environmental non-result the barrier-miss branch above already treats as `skip`, not
         # a behavioural claim in either direction.
         skip "obj-sweep(claim-fresh-control): outcome matched but the refresher's own tick record shows a ${max_gap}s gap >= the ${stale_secs}s stale bound -- this run cannot be credited as having exercised the fix (refresher_ticks=$tick_count, last_tick=$last_tick, rc=$rc, see $d/fresh.log)"
+      elif [[ "$outcome_ok" -eq 1 && "$claim_write_ok" -eq 0 ]]; then
+        # THE SYMMETRIC VACUITY CASE (roborev job 68 F2): a healthy tick record proves the
+        # refresher was ALIVE, but if it never once wrote `$claim/started` successfully, the
+        # supervisor only ever saw the ONE-SHOT plant from before the loop started -- the
+        # same "degrade to the one-shot plant it replaces" vacuity the barrier exists to
+        # prevent, just surfacing as a `pass` instead of a barrier miss. A run that never
+        # exercised the continuous-refresh fix at all must not be credited as though it did.
+        skip "obj-sweep(claim-fresh-control): outcome matched but the refresher never wrote \$claim/started successfully even once (refresher_ticks=$tick_count) -- this run only ever saw the one-shot plant, so it cannot be credited as having exercised the continuous-refresh fix (rc=$rc, see $d/fresh.log)"
       elif [[ "$outcome_ok" -eq 1 ]]; then
         pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip"
       elif [[ "$max_gap_valid" -eq 0 ]]; then
@@ -11131,9 +11144,15 @@ test_object_store_sweep_max_gap_awk_property() {
   d="$(new_case_dir)"
   ticks="$d/ticks"
 
+  # ALL FIXTURES BELOW ARE TWO-FIELD (`<tick> <wrote>`), roborev job 68 F4: the real record
+  # written at the refresher loop above is two fields, and this test exists specifically to
+  # stop the awk program and what it is tested against from drifting apart -- a one-field
+  # fixture would not have pinned the "reads only $1" compatibility claim at all. `$2`'s
+  # value is otherwise irrelevant to every case here; `1` is used throughout for realism.
+
   # (1) HEALTHY: evenly spaced ticks entirely after `launched`, `ended` shortly past the
   # last one -- every gap is a normal ~0.2s tick period, nowhere near a 5s bound.
-  printf '10.0\n10.2\n10.4\n10.6\n' >"$ticks"
+  printf '10.0 1\n10.2 1\n10.4 1\n10.6 1\n' >"$ticks"
   got="$(LC_ALL=C awk -v e="10.8" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
   if [[ "$got" == "0.20" ]]; then
     pass "obj-sweep(max-gap-awk-healthy): an evenly-ticked record reports the true per-tick gap (${got}s), not a sentinel"
@@ -11144,7 +11163,7 @@ test_object_store_sweep_max_gap_awk_property() {
   # (2) STARVED: the refresher ticks twice near the start, then never again -- the guard
   # must REDDEN (report the large gap to `ended`), proving it can fire and is not
   # permanently satisfied by one early tick (the exact defect round 10 fixed).
-  printf '10.0\n10.2\n' >"$ticks"
+  printf '10.0 1\n10.2 1\n' >"$ticks"
   got="$(LC_ALL=C awk -v e="16.0" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
   if [[ "$got" == "5.80" ]]; then
     pass "obj-sweep(max-gap-awk-starved): a refresher that stops ticking mid-run is caught as a large gap to \`ended\` (${got}s), not masked by an earlier healthy tick"
@@ -11155,7 +11174,7 @@ test_object_store_sweep_max_gap_awk_property() {
   # (3) PRE-LAUNCH WINDOW EXCLUDED (job 45): a large gap entirely BEFORE `launched` (the
   # `obj_sweep_tree` setup cost) must not count, but the largest REMAINING gap must still be
   # reported -- proving the windowing narrows what counts without silently zeroing it out.
-  printf '10.0\n14.9\n15.1\n15.3\n' >"$ticks"
+  printf '10.0 1\n14.9 1\n15.1 1\n15.3 1\n' >"$ticks"
   got="$(LC_ALL=C awk -v e="16.0" -v l="15.0" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
   if [[ "$got" == "0.70" ]]; then
     pass "obj-sweep(max-gap-awk-prelaunch): a 4.9s gap entirely before \`launched\` is excluded, and the largest remaining gap (${got}s, ended-to-last-tick) is still reported"
@@ -11193,7 +11212,7 @@ test_object_store_sweep_max_gap_awk_property() {
   # dies exactly at the launch instant. The main block never executes (every line takes the
   # `next` branch), so only `END`'s `e-p` fires; this pins that path explicitly rather than
   # relying on case (3)'s partial overlap to exercise it incidentally.
-  printf '10.0\n10.2\n' >"$ticks"
+  printf '10.0 1\n10.2 1\n' >"$ticks"
   got="$(LC_ALL=C awk -v e="16.0" -v l="15.0" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
   if [[ "$got" == "5.80" ]]; then
     pass "obj-sweep(max-gap-awk-all-prelaunch): a refresher that ticks only before \`launched\` still reports the true gap to \`ended\` (${got}s) via the seeded \`p\`, not a value from inside the (unreached) main block"
