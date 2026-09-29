@@ -440,6 +440,38 @@ else
 fi
 
 # ---------------------------------------------------------------------------------
+# FETCH_HEAD is per-worktree shared state in the canonical clone: every launcher
+# invocation fetches in the SAME worktree, so a concurrent fetch for a DIFFERENT
+# branch/PR (simulated here as a peer launch racing this one) must not leak into this
+# launch's resolved head (roborev finding, #4267 endgame review, job 55).
+# ---------------------------------------------------------------------------------
+( cd "$CLONE" && gg fetch -q origin \
+    && gg checkout -q -b raceA origin/main && echo racea >ra.txt && gg add ra.txt \
+    && gg commit -qm raceA >/dev/null && gg push -q -u origin raceA \
+    && gg checkout -q -b raceB origin/main && echo raceb >rb.txt && gg add rb.txt \
+    && gg commit -qm raceB >/dev/null && gg push -q -u origin raceB )
+_raceB_expected=$( (cd "$CLONE" && gg rev-parse origin/raceB) )
+# Simulate a concurrent peer fetching a DIFFERENT ref in the SAME shared canonical clone
+# immediately before this launch resolves its own head — this used to overwrite
+# FETCH_HEAD out from under it.
+( cd "$CLONE" && gg fetch -q origin raceA )
+_out=$(run good4267 raceB)
+_rc=$?
+# The direct, deterministic proof of the fix: the launcher must fetch into a PRIVATE
+# per-lane ref (never bare FETCH_HEAD, which a sequential prior fetch alone cannot
+# reproduce racing against — a true FETCH_HEAD clobber needs a peer fetch interleaved
+# between the launcher's own fetch and its read, which a hermetic single-process test
+# cannot force deterministically). Pre-fix, no such ref is ever created, so this
+# resolves to nothing.
+_private_ref_sha=$( (cd "$CLONE" && gg rev-parse --verify -q "refs/gate-box-launch/raceB" 2>/dev/null) || echo "")
+if [ "$_rc" -eq 0 ] && grep -q "head=$_raceB_expected" <<<"$_out" \
+  && [ "$_private_ref_sha" = "$_raceB_expected" ]; then
+  ok "the launcher fetches into a private per-lane ref, not shared FETCH_HEAD, so a concurrent fetch of a different ref cannot leak into its resolved head"
+else
+  bad "expected head=$_raceB_expected AND refs/gate-box-launch/raceB==$_raceB_expected (got ref '$_private_ref_sha'), rc=$_rc: $_out"
+fi
+
+# ---------------------------------------------------------------------------------
 # lane worktree create THEN refresh, non-dry-run — the direct pin for the roborev High
 # finding (`[ -d "$LANE_DIR/.git" ]` is always false for a real worktree, since
 # `git worktree add` writes `.git` as a regular file, so a refresh fell into the
@@ -500,6 +532,30 @@ if grep -q "lane worktree ready:" <<<"$_out" && [ ! -e "$FEAT_LANE/stray-scratch
   ok "a non-ignored untracked leftover in the lane is cleaned by a refresh, not left to stamp the gate dirty"
 else
   bad "a stray untracked file should be cleaned by a refresh: $_out"
+fi
+
+# ---------------------------------------------------------------------------------
+# The dataset verifier must run test-data/scripts/fetch-datasets.sh PINNED to the
+# resolved head (via `git show`), never the canonical clone's checked-out WORKING TREE
+# copy: that clone is fetched but never checked out, so its working tree can sit on any
+# other commit (roborev finding, #4267 endgame review, job 55). $CLONE's working tree is
+# still checked out on feat4267 here, whose committed stub always exits 0 — the OPPOSITE
+# of pin4267's committed stub below, so a working-tree read would wrongly PASS.
+# ---------------------------------------------------------------------------------
+( cd "$CLONE" && gg checkout -q -b pin4267 origin/main \
+    && mkdir -p test-data/scripts \
+    && printf '#!/bin/sh\ncase "$1" in --verify-only) exit 1 ;; esac\nexit 1\n' >test-data/scripts/fetch-datasets.sh \
+    && chmod +x test-data/scripts/fetch-datasets.sh \
+    && gg add test-data/scripts/fetch-datasets.sh \
+    && gg commit -qm bad-fetch-datasets >/dev/null \
+    && gg push -q -u origin pin4267 \
+    && gg checkout -q feat4267 )
+_out=$(env -u LANE_ID bash "$LAUNCHER" pin4267 --box good4267 --box-dir "$BOXES_DIR" 2>&1)
+_rc=$?
+if [ "$_rc" -ne 0 ] && grep -q "REFUSING.*dataset root" <<<"$_out"; then
+  ok "dataset verify runs fetch-datasets.sh pinned to the resolved head, not the canonical clone's checked-out working tree"
+else
+  bad "dataset verify should run pin4267's failing pinned fetch-datasets.sh, not feat4267's passing working-tree copy (rc=$_rc): $_out"
 fi
 
 # ---------------------------------------------------------------------------------

@@ -288,19 +288,11 @@ case "$PR_OR_BRANCH" in
   *)           IS_PR=1 ;;
 esac
 
+# LANE_NAME depends only on $PR_OR_BRANCH, never on anything fetched, so it is resolved
+# BEFORE the head fetch below and used to name a private ref for it.
 if [ "$IS_PR" -eq 1 ]; then
-  if ! _git_clone fetch origin --quiet "refs/pull/${PR_OR_BRANCH}/head" 2>&1; then
-    echo "gate-box-launch: could not fetch refs/pull/${PR_OR_BRANCH}/head from origin." >&2
-    echo "                 Check the PR number, and that this clone's 'origin' remote is" >&2
-    echo "                 the GitHub repo (PR refs are a GitHub-side mechanism)." >&2
-    exit 1
-  fi
   LANE_NAME="pr-${PR_OR_BRANCH}"
 else
-  if ! _git_clone fetch origin --quiet "$PR_OR_BRANCH" 2>&1; then
-    echo "gate-box-launch: could not fetch branch '$PR_OR_BRANCH' from origin." >&2
-    exit 1
-  fi
   # Lane directory names must never smuggle a path separator or leading dash from a
   # branch name into BOX_LANES_DIR.
   # Process substitution, not a pipe: a herestring here would add a trailing newline that
@@ -309,8 +301,29 @@ else
   LANE_NAME=$(tr -c 'A-Za-z0-9_.-' '-' < <(printf '%s' "$PR_OR_BRANCH"))
   case "$LANE_NAME" in -*) LANE_NAME="branch-$LANE_NAME" ;; esac
 fi
-HEAD_SHA=$(_git_clone rev-parse FETCH_HEAD 2>/dev/null) || {
-  echo "gate-box-launch: could not resolve FETCH_HEAD after fetching '$PR_OR_BRANCH'." >&2
+
+# Fetch into a PRIVATE per-lane ref, never bare FETCH_HEAD: FETCH_HEAD is per-*worktree*,
+# and every launcher invocation fetches in the SAME worktree (the shared canonical clone),
+# so it is shared mutable state — two closers launching concurrently for different
+# PRs/branches (the #1825 slot cap serializes gate *execution*, not this resolve phase)
+# can cross each other's FETCH_HEAD, and the loser cuts a lane at the WRONG head under its
+# own lane name (roborev finding, #4267 endgame review, job 55).
+_HEAD_REF="refs/gate-box-launch/$LANE_NAME"
+if [ "$IS_PR" -eq 1 ]; then
+  if ! _git_clone fetch origin --quiet "+refs/pull/${PR_OR_BRANCH}/head:$_HEAD_REF" 2>&1; then
+    echo "gate-box-launch: could not fetch refs/pull/${PR_OR_BRANCH}/head from origin." >&2
+    echo "                 Check the PR number, and that this clone's 'origin' remote is" >&2
+    echo "                 the GitHub repo (PR refs are a GitHub-side mechanism)." >&2
+    exit 1
+  fi
+else
+  if ! _git_clone fetch origin --quiet "+refs/heads/${PR_OR_BRANCH}:$_HEAD_REF" 2>&1; then
+    echo "gate-box-launch: could not fetch branch '$PR_OR_BRANCH' from origin." >&2
+    exit 1
+  fi
+fi
+HEAD_SHA=$(_git_clone rev-parse "$_HEAD_REF" 2>/dev/null) || {
+  echo "gate-box-launch: could not resolve '$_HEAD_REF' after fetching '$PR_OR_BRANCH'." >&2
   exit 1
 }
 
@@ -448,16 +461,38 @@ fi
 #    under --dry-run — it is safe, but a --dry-run promises to touch nothing beyond git
 #    reads and df, so a caller resolving a box profile from a machine without that
 #    dataset root (e.g. this repo's own worktree, off-box) still gets a clean resolve.
+#
+#    Run the verifier PINNED to $HEAD_SHA via `git show`, never the canonical clone's
+#    working-tree copy: that clone is fetched but never checked out (section 4), so its
+#    working tree sits at whatever commit someone last left it on. fetch-datasets.sh's own
+#    docs say its default path is `rm -rf "${DATASET_ROOT}"` and that fail-closed argument
+#    rejection was added (#3131) precisely because an old version "SILENTLY selects the
+#    destructive path and rm -rf's the operator's corpus" on unrecognized args — so a
+#    stale-enough working tree turns this "never mutates" call into a wipe of the box's
+#    shared dataset root (roborev finding, #4267 endgame review, job 55).
 # ---------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 0 ]; then
-  if ! CQLITE_DATASETS_ROOT="$BOX_DATASETS_ROOT" bash "$BOX_CANONICAL_CLONE/test-data/scripts/fetch-datasets.sh" --verify-only; then
+  _FETCH_DATASETS_TMP=$(mktemp "${BOX_TMPDIR}/gate-box-launch-fetch-datasets.XXXXXX") || {
+    echo "gate-box-launch: REFUSING — could not create a temp file under '$BOX_TMPDIR' to" >&2
+    echo "                 pin fetch-datasets.sh to $HEAD_SHA." >&2
+    exit 1
+  }
+  trap 'rm -f "$_FETCH_DATASETS_TMP"' EXIT
+  if ! _git_clone show "$HEAD_SHA:test-data/scripts/fetch-datasets.sh" >"$_FETCH_DATASETS_TMP" 2>/dev/null; then
+    echo "gate-box-launch: REFUSING — could not read test-data/scripts/fetch-datasets.sh at" >&2
+    echo "                 $HEAD_SHA from '$BOX_CANONICAL_CLONE'." >&2
+    exit 1
+  fi
+  if ! CQLITE_DATASETS_ROOT="$BOX_DATASETS_ROOT" bash "$_FETCH_DATASETS_TMP" --verify-only; then
     echo "gate-box-launch: REFUSING — dataset root '$BOX_DATASETS_ROOT' is not usable" >&2
     echo "                 (fetch-datasets.sh --verify-only failed). See its output above." >&2
     exit 1
   fi
+  rm -f "$_FETCH_DATASETS_TMP"
+  trap - EXIT
 else
   echo "gate-box-launch: [dry-run] would verify dataset root '$BOX_DATASETS_ROOT' via" \
-       "fetch-datasets.sh --verify-only"
+       "fetch-datasets.sh --verify-only, pinned to \$HEAD_SHA"
 fi
 
 # ---------------------------------------------------------------------------
