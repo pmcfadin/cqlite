@@ -37,7 +37,8 @@
 //!
 //! The strict-mode caveat (roborev finding R1, issue #4309; full statement in
 //! `raw_view_parity.rs`'s module doc) is scoped to the two lanes that DO have
-//! fetch-only cases — 16 of the 22 cases across `tomb` and `deltas`. Do not
+//! fetch-only cases — 16 of the sweep's 27 cases, all of them across
+//! `tomb` and `deltas`. Do not
 //! restate it here: applied to this lane it is not merely redundant but
 //! FALSE, and it would tell a reader to discount a gate PASS for the one
 //! family the gate fully covers. The gate-wiring remedy for the other two

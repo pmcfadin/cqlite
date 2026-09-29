@@ -540,7 +540,7 @@ pub fn fold_simple_cell(
     //
     // So: a mismatch on an INHERITED ttl/expires_at is a HARNESS-ASSUMPTION
     // failure FIRST and a view failure only second. No fixture in the sweep
-    // has that shape today (all 22 pass); if you add one, fix the inheritance
+    // has that shape today (all 27 pass); if you add one, fix the inheritance
     // rule here before you touch the view. Scoping inheritance to cells the
     // golden shows as expiring is the candidate fix (roborev, issue #4309).
     let ttl = cell

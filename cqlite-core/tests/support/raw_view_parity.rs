@@ -186,8 +186,25 @@
 //! with the shape gone. It is now derived from the expectation model (count
 //! of keys appearing under two or more distinct `sstable` values), and
 //! `issue_4309_raw_view_census_selftest.rs` is the census's own oracle:
-//! synthetic goldens of known shape, with a negative control per token
-//! claim. Extend that lane when you add a token.
+//! synthetic goldens of known shape, opening no database and reading no
+//! corpus, so every case in it is `must_run` on EVERY gate.
+//!
+//! WHICH TOKENS THAT LANE ACTUALLY CONTROLS, stated exactly rather than
+//! blanket (roborev job 46, issue #4309 — the earlier "a negative control
+//! per token claim" here was an overclaim). SIX of the eight shape tokens
+//! have a positive control AND a near-miss negative control there:
+//! `shape:multi_generation`, `entry:partition_deletion`,
+//! `entry:range_tombstone_bound`, `entry:range_tombstone_boundary`,
+//! `shape:prefix_bound`, `shape:row_update_without_liveness`. Those five
+//! after the first are covered there precisely BECAUSE every lane claiming
+//! them is `FetchOnly` and SKIPs under the gate's corpus-less `core-tests`,
+//! so their derivations would otherwise be unexercised on the gate of
+//! record — "a token derived from something nobody checks", this same
+//! blindness one level down. The remaining two, `entry:row` and
+//! `entry:static_block`, need no synthetic control: both are claimed by
+//! `GitCommitted` lanes that DO run on every gate (`entry:row` additionally
+//! has a vacuity guard in the self-test). Extend that lane when you add a
+//! token, and say here which case controls it.
 //!
 //! One further token, `shape:point_path_resolved`, records how many
 //! point-read rows resolved a non-NULL `position` — the PATH WITNESS that
@@ -209,21 +226,32 @@
 //! panic. No lane ends in a suite-wide `assert!(ran > 0)`.
 //!
 //! ## WHAT THE GATE OF RECORD ACTUALLY CERTIFIES — read this before citing
-//! ## "22/22 byte-exact" (roborev finding R1, issue #4309)
+//! ## "27/27 byte-exact" (roborev finding R1, issue #4309)
 //!
-//! **Sixteen of the 22 cases are `FetchOnly`, and the full gate's
-//! `core-tests` component runs WITHOUT `CQLITE_REQUIRE_FIXTURES=1`** (the
-//! gate exports that variable for `node-bindings` only; `core-tests`
-//! deliberately does not, because most of `test_tomb/**` is fetched and
-//! gitignored, so pinning it there would make the component depend on a
-//! fetched corpus). On any box or CI lane lacking the fetched corpus those
-//! sixteen therefore SKIP, `require_observed` no-ops (`ran == false`), and
-//! the gate certifies only the SIX whose `Data.db` is git-committed:
+//! The sweep is **27 fixture cases** — 9 `tomb` + 9 `deltas` + 9 `formats`.
+//! **Sixteen of them are `FetchOnly`, and the full gate's `core-tests`
+//! component runs WITHOUT `CQLITE_REQUIRE_FIXTURES=1`** (the gate exports
+//! that variable for `node-bindings` only; `core-tests` deliberately does
+//! not, because most of `test_tomb/**` is fetched and gitignored, so pinning
+//! it there would make the component depend on a fetched corpus). On any box
+//! or CI lane lacking the fetched corpus those sixteen therefore SKIP,
+//! `require_observed` no-ops (`ran == false`), and the gate certifies the
+//! **ELEVEN** whose `Data.db` is git-committed:
 //! `test_tomb.static_with_tombstones`, `test_deltas.static_with_rows`,
-//! `test_da.wide_table`, `test_comp.lz4_table`,
-//! `test_comp.uncompressed_table`, `test_compactionparity.live_clustering`.
+//! `test_da.wide_table`, `test_compactionparity.live_clustering`, and the
+//! seven `test_comp` tables — `lz4_table`, `snappy_table`, `deflate_table`,
+//! `zstd_table`, `short_final_chunk`,
+//! `incompressible_uncompressed_chunk`, `uncompressed_table`.
 //!
-//! So a green gate is NOT by itself evidence that all 22 fixtures were
+//! KEEP THESE THREE NUMBERS IN STEP (roborev job 46, issue #4309): the
+//! counts went stale the moment the formats lane grew 4 -> 9 cases, and an
+//! UNDERCOUNT of gate-covered cases is false assurance in reverse — this is
+//! the one section whose entire purpose is stating precisely what a green
+//! gate certifies. Total = 27, `FetchOnly` = 16, `GitCommitted` = 11, and
+//! the enumerated list above must name all eleven. The formats lane's own
+//! doc repeats the denominator and must be updated with it.
+//!
+//! So a green gate is NOT by itself evidence that all 27 fixtures were
 //! compared. To certify the whole sweep, run it against a fetched corpus
 //! with strict mode on, and cite THAT:
 //!
@@ -762,7 +790,7 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     // could back that: `position` is the ONLY contract column whose value
     // differs by access path, and it is a DECLARED GAP, so a point query that
     // silently routed to the full-scan producer — or a BTI point resolution
-    // that fell back — would leave all 22 cases passing byte-exact while the
+    // that fell back — would leave all 27 cases passing byte-exact while the
     // second producer certified NOTHING.
     //
     // Authority for the asymmetry is the production source, not this harness:
