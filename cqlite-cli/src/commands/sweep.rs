@@ -5,8 +5,9 @@
 //! [`cqlite_core::storage::sstable::verify::verify_sstable_generation`] a
 //! single-directory `cqlite verify` call effectively targets — one call per
 //! discovered `*-Data.db` generation, bounded to at most `--jobs`
-//! concurrently (`--jobs` is clamped to `MAX_JOBS`, see
-//! `execute_sweep_command` — NOT "identical to `verify --mode full`"'s
+//! concurrently (omitting `--jobs` is SEQUENTIAL — one generation open at a
+//! time; an explicit `--jobs N` opts in and is clamped to [`MAX_JOBS`], see
+//! [`resolve_jobs`] — NOT "identical to `verify --mode full`"'s
 //! memory profile multiplied by an unbounded `--jobs`, an earlier draft of
 //! this doc's claim; roborev round-4 MEDIUM finding: `check_digest` reads
 //! the WHOLE `Data.db` into memory even in QUICK mode, so peak RSS is
@@ -44,6 +45,36 @@ use tokio::task::JoinSet;
 
 use crate::cli_types::{SweepArgs, VerifyModeArg, VerifyOutputArg};
 use crate::commands::verify::{finding_to_json, json_str};
+
+/// Hard upper bound on `--jobs`, applied regardless of source (issue #4194,
+/// roborev round-4 MEDIUM findings — see [`resolve_jobs`]).
+pub const MAX_JOBS: usize = 8;
+
+/// Resolve the effective concurrency from `--jobs`.
+///
+/// **Omitting `--jobs` means `1` — sequential, one generation open at a time**
+/// (issue #4194, roborev M3, owner ruling: AC5's literal wording is
+/// "one table open at a time", and this verb runs against damaged, possibly
+/// stressed production hosts, so the default must be the safest one). Passing
+/// `--jobs N` OPTS IN to parallelism and is clamped to `[1, MAX_JOBS]`:
+///
+/// * `check_digest` (Check 2, runs in QUICK mode too) reads the WHOLE
+///   `Data.db` into a `Vec<u8>`, so peak RSS is `jobs x largest Data.db` —
+///   against real GB-sized production SSTables an unbounded value is an OOM
+///   risk `verify` alone never had (it only ever processes one generation).
+/// * Each generation runs on `spawn_blocking` + `Handle::block_on`, and
+///   `verify_one`'s own async awaits (`tokio::fs::metadata`/`File::open`,
+///   `IndexReader::open`) are themselves `spawn_blocking` — an unbounded
+///   value past tokio's `max_blocking_threads` (default 512) can occupy every
+///   blocking-pool thread with OUTER tasks parked in `block_on`, each waiting
+///   on an INNER blocking task that can never be scheduled: a permanent hang
+///   with no output. `MAX_JOBS` sits far below that default.
+///
+/// `0` is not a usable permit count, so it clamps up to `1` rather than
+/// deadlocking the sweep.
+pub fn resolve_jobs(requested: Option<usize>) -> usize {
+    requested.unwrap_or(1).clamp(1, MAX_JOBS)
+}
 
 /// Per-table severity (design.md §D3/§S1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,31 +458,10 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
         VerifyModeArg::Quick => VerifyMode::Quick,
         VerifyModeArg::Full => VerifyMode::Full,
     };
-    // Issue #4194, roborev round-4 MEDIUM findings (two, one fix): clamped to
-    // MAX_JOBS regardless of source (default OR user-supplied `--jobs`).
-    // (1) `check_digest` (Check 2, runs in QUICK mode too) reads the WHOLE
-    // `Data.db` into a `Vec<u8>` — peak RSS is `jobs x largest Data.db`, not
-    // "identical to `verify --mode full`" as this module's own doc claimed;
-    // an unclamped default (`available_parallelism()`) against real,
-    // GB-sized production SSTables on a many-core box is an OOM risk `verify`
-    // alone never had (it only ever processes one generation). (2) each
-    // generation runs on `spawn_blocking` + `Handle::block_on`, and
-    // `verify_one`'s OWN async awaits (`tokio::fs::metadata`/`File::open`,
-    // `IndexReader::open`) are themselves implemented via `spawn_blocking` —
-    // an UNBOUNDED `--jobs` past tokio's `max_blocking_threads` (default
-    // 512) can occupy every blocking-pool thread with OUTER tasks parked in
-    // `block_on`, each waiting on an INNER blocking task that can never be
-    // scheduled: a permanent hang with no output. `MAX_JOBS` sits far below
-    // that default, so this clamp closes both.
-    const MAX_JOBS: usize = 8;
-    let jobs = args
-        .jobs
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        })
-        .clamp(1, MAX_JOBS);
+    // Omitted `--jobs` = 1 (sequential); an explicit `--jobs N` opts in and is
+    // clamped to `MAX_JOBS`. Rationale (memory + blocking-pool exhaustion) and
+    // the owner ruling behind the sequential default live on [`resolve_jobs`].
+    let jobs = resolve_jobs(args.jobs);
 
     // Bounded concurrency (design.md §S3): at most `jobs`
     // `verify_sstable_generation` calls in flight, each with the SAME
@@ -461,9 +471,10 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
     // round-2 LOW + round-3 LOW findings — round-2's fix was a doc-only
     // caveat, judged insufficient): `verify_sstable_generation`'s hot checks
     // use blocking `std::fs` I/O, so running them as ordinary async tasks
-    // would park every worker thread inside blocking I/O simultaneously at
-    // the default `--jobs` (`available_parallelism()`, which also sizes the
-    // runtime), starving every OTHER task on the runtime for the duration —
+    // would park up to `jobs` worker threads inside blocking I/O
+    // simultaneously (the runtime is sized by `available_parallelism()`, which
+    // on a small box can be at or below `MAX_JOBS`), starving every OTHER task
+    // on the runtime for the duration —
     // not a deadlock (permits still release on completion), but a real cost
     // this verb introduces beyond a single `cqlite verify` call. Each
     // blocking-pool task drives the SAME async fn to completion via

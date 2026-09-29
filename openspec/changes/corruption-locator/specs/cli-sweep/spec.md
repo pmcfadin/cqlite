@@ -101,7 +101,11 @@ exit `1` on a usage error (e.g. `<data-dir>` does not exist, or is not a directo
 
 Sweep SHALL hold at most one table's `VerifyReport` (and the FULL-mode scan behind it) fully
 resident per concurrent worker, and `--jobs` SHALL bound the number of tables verified concurrently,
-CLAMPED to a fixed maximum (`MAX_JOBS = 8`) regardless of source — a single `verify` check
+CLAMPED to a fixed maximum (`MAX_JOBS = 8`) regardless of source. **Omitting `--jobs` SHALL mean `1`
+— sequential, one table open at a time** (issue #4194 AC5's literal wording; sweep runs
+against damaged, possibly stressed production hosts, so the default is the safest one — roborev M3,
+owner ruling); an explicit `--jobs N` OPTS IN to parallelism and is clamped to `[1, MAX_JOBS]`. A
+single `verify` check
 (`check_digest`, Check 2, runs in QUICK mode too) reads the WHOLE `Data.db` into memory, so peak
 resident memory scales with `jobs x largest Data.db`, not `O(1)` in `jobs` (roborev round-4 MEDIUM
 finding — an earlier draft of this requirement asserted the per-worker bound alone, without stating
@@ -123,6 +127,12 @@ states this bound precisely).
   already-bounded behavior — this change does not introduce new per-worker resident structure, only
   the cross-row accumulation named above, which S3.1 as originally scoped would not have measured
   either.
+
+#### Scenario: S3.3 omitting --jobs is sequential
+- **Given** `cqlite sweep` invoked WITHOUT `--jobs`
+- **Then** the effective concurrency is exactly `1` — one table open at a time, never derived from
+  the host's core count — and `cqlite sweep --help` states that default; an explicit `--jobs N`
+  still opts in to parallelism, clamped to `MAX_JOBS = 8`.
 
 #### Scenario: S3.2 --jobs bounds concurrency, not correctness
 - **Given** a temp dir with N ≥ 4 table directories (a mix of healthy and the S1.2 corrupted pair)

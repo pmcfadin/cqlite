@@ -549,6 +549,91 @@ fn s3_2_jobs_bounds_concurrency_not_which_rows_appear() {
 }
 
 // ---------------------------------------------------------------------------
+// S3.3 — omitting --jobs is SEQUENTIAL (1), not derived from the core count
+// ---------------------------------------------------------------------------
+
+/// Pins the DEFAULT, which no other case here can observe: S3.2 asserts only
+/// that `--jobs 1` and `--jobs 4` agree on the ROWS, which is equally true of
+/// the old `min(available_parallelism(), MAX_JOBS)` default — a run's row set
+/// is invariant to concurrency by design, so row equality can never detect a
+/// change of default. The effective permit count is only observable through
+/// the resolver itself (`Semaphore::new(resolve_jobs(args.jobs))` is the sole
+/// call site), so assert it there, plus the `--help` text an operator reads.
+///
+/// Issue #4194 roborev M3, owner ruling: omitting `--jobs` means 1 (one table
+/// open at a time, issue AC5) because sweep runs against damaged, possibly
+/// stressed production hosts; `--jobs N` opts in, still clamped to `MAX_JOBS`.
+#[test]
+fn s3_3_omitted_jobs_defaults_to_one_sequential() {
+    use cqlite_cli::commands::sweep::{resolve_jobs, MAX_JOBS};
+
+    assert_eq!(MAX_JOBS, 8, "the ratified explicit-opt-in clamp");
+    assert_eq!(
+        resolve_jobs(None),
+        1,
+        "omitting --jobs must be sequential (1), never derived from the host core count"
+    );
+    // The default is host-INDEPENDENT: on a many-core box the old default
+    // would have resolved above 1, so state what it must NOT equal rather
+    // than only what it equals. (On a single-core host the two defaults
+    // coincide and this assertion is trivially satisfied — the `--help`
+    // assertion below is what stays meaningful there.)
+    let old_default = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_JOBS);
+    if old_default > 1 {
+        assert_ne!(
+            resolve_jobs(None),
+            old_default,
+            "the default must not track available_parallelism()"
+        );
+    }
+
+    // An explicit `--jobs N` is unchanged: opt-in, clamped to [1, MAX_JOBS].
+    assert_eq!(
+        resolve_jobs(Some(0)),
+        1,
+        "0 permits would deadlock the sweep"
+    );
+    assert_eq!(resolve_jobs(Some(1)), 1);
+    assert_eq!(resolve_jobs(Some(4)), 4);
+    assert_eq!(resolve_jobs(Some(MAX_JOBS)), MAX_JOBS);
+    assert_eq!(resolve_jobs(Some(MAX_JOBS + 1)), MAX_JOBS);
+    assert_eq!(resolve_jobs(Some(usize::MAX)), MAX_JOBS);
+
+    // `--help` must state that default — an operator deciding whether to opt
+    // in reads the help, not this test.
+    let help = Command::new(env!("CARGO_BIN_EXE_cqlite"))
+        .args(["sweep", "--help"])
+        .output()
+        .expect("spawn cqlite sweep --help");
+    assert!(
+        help.status.success(),
+        "cqlite sweep --help failed: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    // Whitespace-normalized: clap hard-wraps to the terminal width, so a
+    // phrase assertion against the raw text would break on line breaks.
+    let help_text: String = String::from_utf8_lossy(&help.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        help_text.contains("--jobs"),
+        "cqlite sweep --help does not document --jobs at all: {help_text}"
+    );
+    for needle in ["SEQUENTIAL, one table open at a time", "maximum of 8"] {
+        assert!(
+            help_text.contains(needle),
+            "cqlite sweep --help does not state {needle:?} — the sequential \
+             default of 1 and the opt-in maximum of 8 must both be visible \
+             to an operator: {help_text}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // S4.2 — text rendering matches the JSON rows
 // ---------------------------------------------------------------------------
 

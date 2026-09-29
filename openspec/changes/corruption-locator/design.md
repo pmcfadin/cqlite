@@ -79,7 +79,8 @@ deliberately — an operator who has read one SSTable-tool report already knows 
 sweep(data_dir, mode, jobs) :
    for each <ks>/<table>-<id>/ under data_dir (existence check only; no Data.db content touched
    until that table's own verify_sstable call):
-       bounded by a semaphore of size `jobs` (default: available_parallelism)
+       bounded by a semaphore of size `jobs` (default when `--jobs` is omitted: 1, i.e. sequential —
+       one table open at a time; an explicit `--jobs N` opts in, clamped to MAX_JOBS = 8)
        ── Data.db unreadable / dir unopenable ──► SweepRow { severity: unreadable, cause }
        ── verify_sstable(dir, mode) fails to even resolve components ──► unreadable
        ── verify_sstable returns Ok(report) ──►

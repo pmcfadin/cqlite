@@ -830,7 +830,9 @@ cargo run --package cqlite-cli --features cli-helpers -- \
   verify ./corrupted-table-dir --mode full --out json
 
 # Sweep every SSTable generation under every <keyspace>/<table>-<id>/
-# directory under a data dir.
+# directory under a data dir. Omitting --jobs is SEQUENTIAL (one table open at
+# a time, the safe default for a damaged/stressed host); --jobs N opts in to
+# parallelism, clamped to 8 (peak RSS scales with jobs).
 cargo run --package cqlite-cli --features cli-helpers -- \
   sweep ./test-data/datasets/sstables --mode quick --out json --jobs 4
 
