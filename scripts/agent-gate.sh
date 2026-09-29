@@ -15040,6 +15040,17 @@ run_clippy() {
 # dataset corpus. Both scripts are SKIP-aware (no python3 -> loud SKIP, exit 0),
 # so this component is safe on a stripped runner; any real violation exits non-zero
 # and FAILs the component.
+#   * test_verify_location_no_resync_scan.sh — the #28 NO-HEURISTICS class for `cqlite
+#     verify`/`sweep`'s corruption locator (issue #4194, spec verify-location L3): partition
+#     location resolution must read ONLY the boundary source's own decoded entries
+#     (`Index.db` entries, BTI trie leaves) and the chunk tables, never scan `Data.db` for a
+#     plausible partition header. It lives HERE, not in `tooling-tests`, DELIBERATELY: #4266
+#     made `tooling-tests` diff-scoped and `cqlite-core/**` is not in its declared harness
+#     path set, so a core-only diff — exactly the diff shape that can reintroduce a byte
+#     scan into `cqlite-core/src/storage/sstable/verify_location.rs` — would SKIP the very
+#     guard that exists to catch it. `roborev-lints` is UNSCOPED (it runs on every --lite
+#     round and in the full gate whatever the diff touches), which is the property this
+#     guard needs. Pure grep over one committed file: no cargo/python3/network, ~0s.
 #   * test_roborev_guard_portability.sh — the #3296 PLATFORM class: the guard test above
 #     is a shell script that runs on macOS worker boxes and Linux CI, and three GNU-only
 #     constructs in its own scaffolding (`sed -i EXPR FILE`, an operand-less `paste -s`,
@@ -15054,7 +15065,8 @@ run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" &&
-    bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh"
+    bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh" &&
+    bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh"
 }
 
 # check_no_unexpected_zero_tests <label> <logfile> [allowed-zero-target...]
@@ -24086,24 +24098,6 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_rebuild_no_resync_scan.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (rebuild no-resync-scan guard #4197); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
-
-  # `cqlite verify`/`sweep` corruption-location no-resync-scan guard (issue
-  # #4194, spec verify-location L3): partition location resolution reads ONLY
-  # the boundary source's own decoded entries, never by scanning `Data.db`
-  # for a plausible header — same mechanism as the salvage guard above,
-  # scoped to the single `verify_location.rs` file. Pure grep, no
-  # cargo/python3/network needed.
-  echo ">>> [$name] bash scripts/tests/test_verify_location_no_resync_scan.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (verify-location no-resync-scan guard #4194); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

@@ -68,9 +68,11 @@ every group (#3042). `--lite` after every fix round; ONE full gate in `flow-clos
       partition sets computed independently in the test from the CLEAN source's `Index.db`
       positions / BTI trie + chunk table — never from `verify_sstable`'s own output on the corrupt
       copy. Corpus gating per #1094 (`CQLITE_REQUIRE_FIXTURES=1` hard-requires).
-- [x] 2.2 `scripts/tests/test_verify_location_no_resync_scan.sh` (L3.1), registered in
-      `tooling-tests`, modeled directly on `sstable-salvage`'s
-      `test_salvage_no_resync_scan.sh`.
+- [x] 2.2 `scripts/tests/test_verify_location_no_resync_scan.sh` (L3.1), registered in the gate's
+      UNSCOPED `roborev-lints` component, modeled on `sstable-salvage`'s
+      `test_salvage_no_resync_scan.sh` — but NOT in `tooling-tests`, which #4266 made diff-scoped
+      over a path set that excludes `cqlite-core/**`: a core-only diff (the shape that can
+      reintroduce a byte scan) would SKIP the guard there.
 - [x] 2.3 Confirm `sstable_parity_corruption_verify.rs` (unmodified) still passes unchanged (L4.1) —
       this is a regression check, not new test code.
 - [x] 2.4 `cqlite-cli/src/commands/verify.rs`: extend `print_text`/`print_json` to render `location`

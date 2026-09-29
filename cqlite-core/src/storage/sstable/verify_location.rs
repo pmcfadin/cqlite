@@ -5,7 +5,10 @@
 //! partition extents to name which partitions the damage touches. It is a pure,
 //! closed-interval computation — **no byte-pattern scanning of `Data.db` is ever
 //! performed here** (no-heuristics mandate, issue #28; mechanically enforced by
-//! `scripts/tests/test_verify_location_no_resync_scan.sh`).
+//! `scripts/tests/test_verify_location_no_resync_scan.sh`, which runs in the
+//! gate's UNSCOPED `roborev-lints` component — `tooling-tests` is diff-scoped
+//! and does not declare `cqlite-core/**` (#4266), so a core-only diff would
+//! skip it there).
 //!
 //! # Coordinate spaces (read this before touching call sites)
 //!

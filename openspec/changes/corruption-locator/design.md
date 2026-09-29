@@ -151,7 +151,9 @@ pre-existing fields sees no behavior change. New surface:
 Partition resolution reads ONLY the boundary source's own structured entries (`Index.db`'s decoded
 `PartitionIndexEntry`s, the BTI trie's decoded leaves) and the `CompressionInfo.db`/`CRC.db` chunk
 tables — never a byte-pattern search over `Data.db` looking for a plausible partition header. A
-`scripts/tests/test_verify_location_no_resync_scan.sh` (registered in `tooling-tests`, same pattern
-as `sstable-salvage`'s `test_salvage_no_resync_scan.sh`) greps
+`scripts/tests/test_verify_location_no_resync_scan.sh` (registered in the gate's UNSCOPED
+`roborev-lints` component, modeled on `sstable-salvage`'s `test_salvage_no_resync_scan.sh` — but
+NOT in `tooling-tests`, which #4266 made diff-scoped over a path set that excludes
+`cqlite-core/**`, so a core-only diff would SKIP the guard there) greps
 `cqlite-core/src/storage/sstable/verify_location.rs` for `memchr`, `windows(`, `find(|b|`,
 `position(|b|` outside `#[cfg(test)]` and FAILs naming the line if any is found.

@@ -85,7 +85,8 @@ Partition resolution SHALL read only the boundary source's own decoded entries a
 bytes for a plausible header.
 
 #### Scenario: L3.1 static no-resync-scan guard
-- **Given** `scripts/tests/test_verify_location_no_resync_scan.sh` (`tooling-tests`)
+- **Given** `scripts/tests/test_verify_location_no_resync_scan.sh` (the gate's UNSCOPED
+  `roborev-lints` component, so a `cqlite-core`-only diff cannot skip it — #4266)
 - **When** it greps `cqlite-core/src/storage/sstable/verify_location.rs` for `memchr`, `windows(`,
   `find(|b|`, `position(|b|` outside `#[cfg(test)]`
 - **Then** none is present; any hit FAILs naming the line.

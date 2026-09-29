@@ -31,8 +31,16 @@
 #   FIRST such marker onward as test code — re-adopt the brace-counting form
 #   (or split the file) if that ever happens.
 #
-# Registered in the gate's `tooling-tests` component (no cargo/network needed
-# — a pure grep, so it always runs).
+# WIRING, and why it is not where the salvage guard is: registered in the
+# gate's UNSCOPED `roborev-lints` component (`run_roborev_lints_cmd` in
+# `scripts/agent-gate.sh`), which runs on every `--lite` round and in the full
+# gate regardless of what the diff touches. It is deliberately NOT in
+# `tooling-tests`: #4266 made that component diff-scoped
+# (`scripts/lib/tooling-tests-scope.sh`) and `cqlite-core/**` is not in its
+# declared harness-path set, so a core-only diff — precisely the diff that can
+# reintroduce a byte scan into `verify_location.rs` — would SKIP this guard.
+# No cargo/python3/network needed (a pure grep over one committed file), which
+# is what makes it safe for the fast loop.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
