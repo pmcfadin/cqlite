@@ -168,7 +168,7 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    # fresh path under the box profile's BOX_LOG_DIR) would leave those steps reading a file
    # that was never written.
    # Sanity-check first with --dry-run: it resolves everything and prints the env + command
-   # without any git/process side effect.
+   # without any git/process side effect beyond the `git fetch`es used to resolve the head.
    ```
    See `docs/development/fleet-runbook.md` ("Starting a gate of record on a fleet Linux box")
    for the box-profile mechanism. On a machine with **no committed box profile** (a laptop, or

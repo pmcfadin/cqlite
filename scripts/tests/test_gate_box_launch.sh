@@ -411,6 +411,34 @@ else
   bad "the ancestor walk should measure and name '$LANES' (rc=$_rc): $_out"
 fi
 
+# A missing BOX_TMPDIR must REFUSE, not print "(will be created)": unlike BOX_LANES_DIR
+# (mkdir'd later, :486) and BOX_LOG_DIR (mkdir'd later, :640), nothing in this script ever
+# creates the tmpdir — it is expected to be a pre-mounted tmpfs, so mkdir'ing it would
+# silently produce a plain directory over a missing mount instead of surfacing the problem
+# (roborev finding, #4267 endgame review).
+MISSING_TMPDIR="$T/tmp-not-mounted"
+cat >"$BOXES_DIR/missingtmp4267.env" <<EOF
+BOX_CANONICAL_CLONE="$CLONE"
+BOX_LANES_DIR="$LANES"
+BOX_TMPDIR="$MISSING_TMPDIR"
+BOX_DATASETS_ROOT="$DATASETS"
+BOX_PATH="$CLEANBIN"
+BOX_JOBS=4
+BOX_RUST_TEST_THREADS=1
+BOX_MAX_CONCURRENCY=1
+BOX_MIN_FREE_GB=0
+BOX_TMP_MIN_FREE_GB=0
+BOX_LOG_DIR="$LOGDIR"
+EOF
+_out=$(run missingtmp4267 feat4267)
+_rc=$?
+if [ "$_rc" -ne 0 ] && grep -q "REFUSING.*tmpdir path" <<<"$_out" \
+  && ! grep -q "will be created" <<<"$_out"; then
+  ok "a missing BOX_TMPDIR is REFUSED, never claimed as '(will be created)'"
+else
+  bad "a missing tmpdir should refuse, not claim it will be created (rc=$_rc): $_out"
+fi
+
 # ---------------------------------------------------------------------------------
 # lane worktree create THEN refresh, non-dry-run — the direct pin for the roborev High
 # finding (`[ -d "$LANE_DIR/.git" ]` is always false for a real worktree, since
@@ -511,6 +539,18 @@ if [ "$_rc" -eq 2 ] && grep -q "unexpected arguments after" <<<"$_out"; then
   ok "extra arguments after '--' are refused rather than silently passed through"
 else
   bad "'-- --lite' should be refused (rc=$_rc): $_out"
+fi
+
+# `--` as ordinary end-of-options, with the PR/branch positional STILL to come, must reach
+# the same positional handling as omitting it — not be swallowed as "unexpected arguments"
+# (roborev finding, #4267 endgame review: $# used to still count '--' itself, rejecting
+# this case unconditionally and leaving '--' with no reachable use at all).
+_out=$(env -u LANE_ID bash "$LAUNCHER" --box good4267 --box-dir "$BOXES_DIR" --dry-run -- main 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ] && ! grep -q "unexpected arguments after" <<<"$_out"; then
+  ok "'-- <pr-or-branch>' as ordinary end-of-options is accepted, not refused"
+else
+  bad "'-- main' should resolve 'main' as the positional (rc=$_rc): $_out"
 fi
 
 _out=$(run "../../../etc/passwd" main)

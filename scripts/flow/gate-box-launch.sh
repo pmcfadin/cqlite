@@ -18,7 +18,8 @@
 # It does not replace scripts/flow/gate-detached.sh's own cgroup/heartbeat machinery
 # (#3473) — it calls that script for the actual detached launch. It does not skip the
 # #1825 single-gate-slot cap. It does not run the gate itself; --dry-run stops before any
-# git or process side effect.
+# git or process side effect beyond the `git fetch`es it runs against the canonical clone
+# to resolve the PR/branch head (roborev finding, #4267 endgame review).
 #
 # Usage:
 #   bash scripts/flow/gate-box-launch.sh <pr-number-or-branch> [options]
@@ -36,7 +37,8 @@
 #                          box profile's BOX_LOG_DIR, one per launch.
 #   --log <path>           forwarded to gate-detached.sh. Default: alongside --summary.
 #   --dry-run              resolve everything (box profile, PR/branch head, staleness,
-#                          disk, env, command) and PRINT it; make no git/process changes.
+#                          disk, env, command) and PRINT it; make no git/process changes
+#                          beyond the `git fetch`es needed to resolve the head.
 #   -h, --help              this text.
 #
 # Exit codes:
@@ -98,15 +100,19 @@ while [ $# -gt 0 ]; do
       # This launcher starts THE gate of record, always with no extra arguments — never a
       # silent passthrough. `-- --only clippy` or `-- --lite` would otherwise run a full
       # 30-50 minute gate while looking like it took the flag, which is worse than refusing
-      # (roborev finding, #4267 round 2).
-      if [ $# -gt 1 ]; then
+      # (roborev finding, #4267 round 2). Shift off '--' FIRST: $# still counts '--' itself,
+      # so checking it against a flat >1 (as this used to) rejected the ordinary
+      # end-of-options positional too (`-- 4213`), leaving '--' with no reachable use at
+      # all (roborev finding, #4267 endgame review) — the allowance has to depend on
+      # whether the PR/branch positional was already given.
+      shift
+      if { [ -n "$PR_OR_BRANCH" ] && [ $# -gt 0 ]; } || { [ -z "$PR_OR_BRANCH" ] && [ $# -gt 1 ]; }; then
         echo "gate-box-launch: unexpected arguments after '--': $*" >&2
         echo "                 This launcher always runs the full gate of record with no" >&2
         echo "                 extra flags. Run scripts/flow/gate-detached.sh directly (see" >&2
         echo "                 docs/development/fleet-runbook.md) if you need --lite/--only." >&2
         exit 2
-      fi
-      shift ;;
+      fi ;;
     -*)
       echo "gate-box-launch: unknown option '$1'." >&2
       _usage >&2
@@ -328,8 +334,8 @@ _disk_free_gb() {  # <path> -> free GB, or empty if unmeasurable
   case "$kb" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$((kb / 1024 / 1024))"
 }
-_check_disk() {  # <path> <label> <min-free-gb>
-  local path="$1" label="$2" min="$3" free measure_path="$1"
+_check_disk() {  # <path> <label> <min-free-gb> <will-create: yes|no>
+  local path="$1" label="$2" min="$3" will_create="${4:?_check_disk needs will-create yes|no}" free measure_path="$1"
   if [ ! -d "$path" ]; then
     # Walk up to the nearest EXISTING ancestor so a not-yet-created lanes/tmp directory
     # does not silently skip the admission check — it is the underlying filesystem's
@@ -338,8 +344,20 @@ _check_disk() {  # <path> <label> <min-free-gb>
     while [ ! -d "$measure_path" ] && [ "$measure_path" != "/" ] && [ -n "$measure_path" ]; do
       measure_path=$(dirname -- "$measure_path")
     done
-    echo "gate-box-launch: NOTE — $label path '$path' does not exist yet (will be created);" >&2
-    echo "                 measuring free space on its nearest existing ancestor '$measure_path'." >&2
+    if [ "$will_create" = yes ]; then
+      echo "gate-box-launch: NOTE — $label path '$path' does not exist yet (will be created);" >&2
+      echo "                 measuring free space on its nearest existing ancestor '$measure_path'." >&2
+    else
+      # Unlike lanes/log, this path is expected to be a pre-mounted tmpfs (see the box
+      # profile), never something this script creates: mkdir'ing it would silently produce
+      # a plain directory in place of a missing mount rather than surfacing the problem, so
+      # a missing path here is a REFUSING, not a "will be created" NOTE (roborev finding,
+      # #4267 endgame review — the wording used to claim creation that never happens).
+      echo "gate-box-launch: REFUSING — $label path '$path' does not exist and is never" >&2
+      echo "                 created by this script (it must be a pre-mounted tmpfs);" >&2
+      echo "                 measuring free space on its nearest existing ancestor '$measure_path'." >&2
+      return 1
+    fi
   fi
   if ! free=$(_disk_free_gb "$measure_path"); then
     echo "gate-box-launch: REFUSING — could not measure free space for $label ('$path')." >&2
@@ -363,8 +381,8 @@ _check_disk() {  # <path> <label> <min-free-gb>
 # not a disk problem, an admission-bar problem, and one a --dry-run against fixture
 # directories (which share one filesystem) could never surface.
 _DISK_OK=1
-_check_disk "$BOX_LANES_DIR" "lanes" "$BOX_MIN_FREE_GB" || _DISK_OK=0
-_check_disk "$BOX_TMPDIR" "tmpdir" "$BOX_TMP_MIN_FREE_GB" || _DISK_OK=0
+_check_disk "$BOX_LANES_DIR" "lanes" "$BOX_MIN_FREE_GB" yes || _DISK_OK=0
+_check_disk "$BOX_TMPDIR" "tmpdir" "$BOX_TMP_MIN_FREE_GB" no || _DISK_OK=0
 if [ "$_DISK_OK" -ne 1 ]; then
   exit 1
 fi
