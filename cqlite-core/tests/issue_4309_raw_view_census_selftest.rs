@@ -25,12 +25,13 @@
 //!
 //! # Why this lane covers the shape tokens the GATE cannot reach (job 46)
 //!
-//! FOUR shape tokens — `entry:partition_deletion`,
+//! FIVE shape tokens — `entry:partition_deletion`,
 //! `entry:range_tombstone_boundary`, `shape:prefix_bound`,
-//! `shape:row_update_without_liveness` — are claimed ONLY by
-//! `Discipline::FetchOnly` lanes (`partition_tombstones`, `adjacent_ranges`,
-//! `range_tombstones`, `partial_updates`, `resurrection_*`,
-//! `skipped_partition_delete`), all of which SKIP under the gate's
+//! `shape:row_update_without_liveness` and `shape:multi_generation` — are
+//! claimed ONLY by `Discipline::FetchOnly` lanes (`partition_tombstones`,
+//! `adjacent_ranges`, `range_tombstones`, `partial_updates`,
+//! `resurrection_*`, `skipped_partition_delete`, `dropped_regular_col`,
+//! `dropped_static_col`), all of which SKIP under the gate's
 //! corpus-less `core-tests`. Their derivations in `build_expectations` were
 //! therefore unexercised on the gate of record — "a token derived from
 //! something nobody checks", the same blindness the census section argues
@@ -67,7 +68,10 @@ mod raw_view_parity;
 use raw_view_parity::golden::Fact;
 use raw_view_parity::golden::RowIdentity;
 use raw_view_parity::golden::{build_expectations, ColumnRoles, GoldenSstable};
-use raw_view_parity::{assert_value_key_sets_match, is_negative_complex_marker};
+use raw_view_parity::{
+    assert_value_key_sets_match, fact_kind, is_negative_complex_marker, SweepOutcome,
+    KNOWN_COVERAGE_TOKENS, UNCLAIMABLE_TOKENS,
+};
 use raw_view_parity::{Discipline, FixtureSpec};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -741,4 +745,184 @@ fn only_a_false_complex_deletion_is_excluded_from_the_census() {
          not an absence. Excluding it would under-count a family the range-tombstone lanes \
          legitimately claim"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The census's OWN GUARDS, which never fire on a real run (roborev job 54)
+// ---------------------------------------------------------------------------
+//
+// `require_observed`'s three guards — non-empty claim, known token name, not
+// an unclaimable token — exist because a coverage claim that claims nothing
+// certifies nothing. But no lane claims a bad token, so on every real run
+// all three are silently satisfied. Inverting `!UNCLAIMABLE_TOKENS.contains`,
+// dropping the `!kinds.is_empty()` assert, or moving either back BELOW the
+// `if !self.ran { return; }` would leave every gate green while re-opening
+// the exact hole each was added (jobs 47/52) to close.
+//
+// Every case below therefore drives the guard on a SKIPPED outcome
+// (`ran == false`), which pins the pre-`ran` PLACEMENT as well as the check:
+// 16 of the sweep's 27 cases skip under the gate's corpus-less `core-tests`,
+// so a guard that runs only on the `ran` path is a guard the gate never runs.
+
+/// POSITIVE CONTROL: a well-formed claim on a fixture that ran and observed
+/// the token passes. Without this the `should_panic` cases below could all
+/// be satisfied by a `require_observed` that rejects everything.
+#[test]
+fn a_well_formed_claim_on_an_observed_token_passes() {
+    SweepOutcome::for_control("selftest", true, &[("entry:row", 3)])
+        .require_observed(&["entry:row"]);
+}
+
+/// A claim for a token the fixture did NOT observe must fail — the
+/// affirmative zero the whole census exists for.
+#[test]
+#[should_panic(expected = "states ZERO of them")]
+fn a_claim_for_an_unobserved_token_fails() {
+    SweepOutcome::for_control("selftest", true, &[("entry:row", 3)])
+        .require_observed(&["entry:static_block"]);
+}
+
+/// GUARD 1, on a SKIPPED outcome: an EMPTY claim is not a claim.
+#[test]
+#[should_panic(expected = "an empty coverage claim")]
+fn an_empty_claim_fails_even_when_the_fixture_skipped() {
+    SweepOutcome::for_control("selftest", false, &[]).require_observed(&[]);
+}
+
+/// GUARD 2, on a SKIPPED outcome: a MISTYPED token can never be observed,
+/// so it would make the claim vacuous rather than failing.
+#[test]
+#[should_panic(expected = "is not a known metadata family")]
+fn a_mistyped_token_fails_even_when_the_fixture_skipped() {
+    SweepOutcome::for_control("selftest", false, &[])
+        .require_observed(&["shape:multi_generationn"]);
+}
+
+/// GUARD 3, on a SKIPPED outcome: the path witness is recorded but must
+/// never be CLAIMED — under `feature = "tombstones"` it is necessarily zero.
+#[test]
+#[should_panic(expected = "no lane may CLAIM")]
+fn claiming_the_path_witness_fails_even_when_the_fixture_skipped() {
+    SweepOutcome::for_control("selftest", false, &[])
+        .require_observed(&["shape:point_path_resolved"]);
+}
+
+/// `fact_kind`'s ARM ORDER is self-documented as load-bearing, and only
+/// `test_deltas.collection_ops` (`FetchOnly`) has a complex column — so a
+/// reorder mapping `tags_complex_deletion_timestamp` to `cell_timestamp` is
+/// invisible on the gate of record. The generic `_timestamp` / `_time` arms
+/// would both swallow these names if they came first.
+#[test]
+fn complex_deletion_arms_win_over_the_generic_timestamp_arms() {
+    assert_eq!(
+        fact_kind("tags_complex_deletion_timestamp"),
+        "complex_deletion_timestamp",
+        "issue #4309: the `_complex_deletion*` arms MUST precede the generic `_timestamp` \
+         arm — otherwise this column is misclassified as `cell_timestamp` and the complex \
+         family silently stops being observable"
+    );
+    assert_eq!(
+        fact_kind("tags_complex_deletion_time"),
+        "complex_deletion_time",
+        "must not fall through to `cell_local_deletion_time`"
+    );
+    assert_eq!(fact_kind("tags_complex_deletion"), "complex_deletion");
+    // The generic arms still work for ordinary columns.
+    assert_eq!(fact_kind("body_timestamp"), "cell_timestamp");
+    assert_eq!(
+        fact_kind("body_local_deletion_time"),
+        "cell_local_deletion_time"
+    );
+    assert_eq!(fact_kind("body_ttl"), "cell_ttl");
+    assert_eq!(fact_kind("body_tombstone"), "cell_tombstone");
+    // ...and the exact-match arms are not shadowed by the suffix arms.
+    assert_eq!(fact_kind("row_timestamp"), "row_timestamp");
+    assert_eq!(
+        fact_kind("row_local_deletion_time"),
+        "row_local_deletion_time"
+    );
+    assert_eq!(fact_kind("row_ttl"), "row_ttl");
+    assert_eq!(fact_kind("row_tombstone"), "row_tombstone");
+}
+
+/// The vocabulary must stay in step with the two things that PRODUCE tokens
+/// — `fact_kind`'s return set and `build_expectations`' `bump` calls. The
+/// comment on `KNOWN_COVERAGE_TOKENS` asks a reader to keep them aligned by
+/// hand; this asserts it instead.
+#[test]
+fn every_produced_token_is_in_the_known_vocabulary() {
+    // One representative column per `fact_kind` arm.
+    for column in [
+        "row_timestamp",
+        "row_ttl",
+        "row_liveness_expires_at",
+        "row_local_deletion_time",
+        "row_tombstone",
+        "row_deletion_timestamp",
+        "partition_deletion_time",
+        "partition_deletion_timestamp",
+        "bound_inclusive",
+        "range_deletion_time",
+        "range_deletion_timestamp",
+        "tags_complex_deletion_timestamp",
+        "tags_complex_deletion_time",
+        "tags_complex_deletion",
+        "body_local_deletion_time",
+        "body_timestamp",
+        "body_ttl",
+        "body_tombstone",
+    ] {
+        let kind = fact_kind(column);
+        assert!(
+            KNOWN_COVERAGE_TOKENS.contains(&kind),
+            "issue #4309: fact_kind({column:?}) returns '{kind}', which is not in \
+             KNOWN_COVERAGE_TOKENS — a family a lane can never claim, so its coverage \
+             can never be asserted"
+        );
+    }
+
+    // Every SHAPE token the synthetic goldens in this file can produce.
+    // These censuses exercise each `bump` call in `build_expectations`.
+    let mut produced: std::collections::BTreeSet<&str> = Default::default();
+    for observed in [
+        census(&[
+            generation("nb-1-big-Data.db", &["1", "2"]),
+            generation("nb-2-big-Data.db", &["2", "3"]),
+        ]),
+        census(&[generation_of(
+            "nb-1-big-Data.db",
+            vec![json!({
+                "partition": {
+                    "key": ["1"],
+                    "deletion_info": {
+                        "marked_deleted": "2021-01-01T00:00:00Z",
+                        "local_delete_time": "2021-01-01T00:00:00Z"
+                    }
+                },
+                "rows": [
+                    { "type": "static_block", "cells": [] },
+                    { "type": "range_tombstone_bound", "start": bound("inclusive", json!(["10"])) },
+                    {
+                        "type": "range_tombstone_boundary",
+                        "end": bound("exclusive", json!(["10"])),
+                        "start": bound("inclusive", json!(["10"]))
+                    }
+                ]
+            })],
+        )]),
+    ] {
+        produced.extend(observed.keys().copied());
+    }
+    assert!(
+        produced.len() >= 5,
+        "the synthetic goldens must actually produce shape tokens: {produced:?}"
+    );
+    for token in &produced {
+        assert!(
+            KNOWN_COVERAGE_TOKENS.contains(token) || UNCLAIMABLE_TOKENS.contains(token),
+            "issue #4309: build_expectations bumps '{token}', which is in neither \
+             KNOWN_COVERAGE_TOKENS nor UNCLAIMABLE_TOKENS — a shape the census counts but \
+             no lane can ever claim. Produced: {produced:?}"
+        );
+    }
 }

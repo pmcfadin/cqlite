@@ -588,7 +588,7 @@ fn partition_key_predicate(spec: &FixtureSpec, key: &str) -> String {
 /// real base column that merely LOOKS like one can never reach this function
 /// — the misclassification #4222 round 9 fixed. The `_complex_deletion*` arms
 /// must precede the generic `_timestamp`/`_time` arms.
-fn fact_kind(column: &str) -> &'static str {
+pub fn fact_kind(column: &str) -> &'static str {
     match column {
         "row_timestamp" => "row_timestamp",
         "row_ttl" => "row_ttl",
@@ -623,7 +623,7 @@ fn fact_kind(column: &str) -> &'static str {
 /// [`UNCLAIMABLE_TOKENS`] instead. Keep all of them in step — a
 /// token added to one and not here is refused by name, which is the
 /// intended failure.
-const KNOWN_COVERAGE_TOKENS: &[&str] = &[
+pub const KNOWN_COVERAGE_TOKENS: &[&str] = &[
     // metadata families (fact_kind)
     "row_timestamp",
     "row_ttl",
@@ -668,7 +668,7 @@ const KNOWN_COVERAGE_TOKENS: &[&str] = &[
 /// A lane claiming it would pass the default build and fail an
 /// all-features one. Rejected by name so that contradiction cannot be
 /// written rather than merely discouraged in prose.
-const UNCLAIMABLE_TOKENS: &[&str] = &["shape:point_path_resolved"];
+pub const UNCLAIMABLE_TOKENS: &[&str] = &["shape:point_path_resolved"];
 
 /// What ONE fixture's sweep actually measured.
 ///
@@ -699,6 +699,21 @@ pub struct SweepOutcome {
 }
 
 impl SweepOutcome {
+    /// Build an outcome directly, so the census self-test can drive
+    /// [`Self::require_observed`]'s guards (roborev job 54). Those guards
+    /// never fire on any real run — no lane claims a bad token — so
+    /// inverting one, or moving it back below the `ran` early return, would
+    /// leave every gate green while re-opening the vacuous-claim hole it was
+    /// added to close. Controls need a way to construct the input.
+    pub fn for_control(fixture: &str, ran: bool, observed: &[(&'static str, usize)]) -> Self {
+        Self {
+            fixture: fixture.to_string(),
+            ran,
+            compared_facts: 0,
+            observed: observed.iter().copied().collect(),
+        }
+    }
+
     fn skipped(spec: &FixtureSpec) -> Self {
         Self {
             fixture: spec.id(),
@@ -713,8 +728,15 @@ impl SweepOutcome {
     /// non-`Absent` golden value, or a golden ENTRY SHAPE (`entry:static_block`,
     /// `entry:range_tombstone_boundary`, `shape:prefix_bound`,
     /// `shape:row_update_without_liveness`, `shape:multi_generation`, …) the
-    /// lane exists to exercise. A no-op for a legitimately skipped fetch-only
-    /// fixture (there is nothing to have observed).
+    /// lane exists to exercise.
+    ///
+    /// The CLAIM ITSELF is always validated — non-empty, every token a known
+    /// name, none of them [`UNCLAIMABLE_TOKENS`] — whether or not the
+    /// fixture ran. Only the per-token OBSERVATION COUNTS are skipped for a
+    /// legitimately skipped fetch-only fixture, which genuinely has nothing
+    /// to have observed. That split is the job-47/52 fix: 16 of the 27 cases
+    /// skip under the gate's corpus-less `core-tests`, so a claim validated
+    /// only on the `ran` path is a claim never validated on the gate.
     pub fn require_observed(&self, kinds: &[&str]) {
         // An EMPTY claim is not a claim (roborev, issue #4309). `#[must_use]`
         // forces a caller to CALL this, but nothing forced the claim to say
