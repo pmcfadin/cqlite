@@ -108,11 +108,19 @@ pub fn generation_of(data_db: &str, partitions: Vec<serde_json::Value>) -> Golde
 }
 
 /// One range-tombstone bound side, as `JsonTransformer` renders it.
-/// `clustering` is passed through verbatim so a caller can write the literal
-/// `"*"` sstabledump emits for an unspecified trailing component.
-pub fn bound(kind: &str, clustering: serde_json::Value) -> serde_json::Value {
+///
+/// `inclusivity` is the BOUND's own `"type"` field — `"inclusive"` or
+/// `"exclusive"` — which is NOT the same `"type"` as the enclosing ENTRY's
+/// (`"range_tombstone_bound"` / `"range_tombstone_boundary"`). The two are
+/// nested and both spelled `"type"` in sstabledump's JSON, so the parameter
+/// is named for the one it sets (roborev job 70): passing an entry kind
+/// here yields the unrelated "unexpected sstabledump bound type" panic.
+///
+/// `clustering` is passed through verbatim so a caller can write the
+/// literal `"*"` sstabledump emits for an unspecified trailing component.
+pub fn bound(inclusivity: &str, clustering: serde_json::Value) -> serde_json::Value {
     json!({
-        "type": kind,
+        "type": inclusivity,
         "clustering": clustering,
         "deletion_info": {
             "marked_deleted": "2021-01-01T00:00:00Z",

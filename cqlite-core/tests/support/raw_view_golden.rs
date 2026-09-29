@@ -112,9 +112,16 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
     // prescribes as the way to certify the sweep. Selecting one directory
     // removes the ambiguity at its source instead of refusing on it.
     //
-    // The choice is ANNOUNCED, never silent: a skipped sibling is named
-    // below, because a harness that quietly ignores half a corpus is the
-    // failure mode this sweep exists to catch.
+    // The choice is announced below — but READ THE LIMIT (roborev job 70).
+    // The notice is an `eprintln!` from a test binary, and `cargo test`
+    // captures stderr and replays it only for FAILING tests. So on exactly
+    // the green, fetched-corpus run this branch exists for, the operator
+    // does NOT see it without `--nocapture`. It is a breadcrumb for
+    // someone already debugging, not a guarantee that a skipped sibling is
+    // noticed. Folding the skipped-sibling count into `SweepOutcome`, so it
+    // rides the census diagnostics that DO print on failure, is the real
+    // fix and is deferred with the rest of the generation-pinning work to
+    // #4314.
     let chosen = &dirs[0];
     if dirs.len() > 1 {
         let skipped: Vec<String> = dirs[1..].iter().map(|d| d.display().to_string()).collect();
@@ -989,6 +996,20 @@ pub fn build_expectations(
         .filter(|sstables| sstables.len() > 1)
         .count();
     if cross_generation_keys > 0 {
+        // The two write paths must not overlap (roborev job 70).
+        // `SHAPE_MULTI_GENERATION` is a member of `SHAPE_TOKENS`, which is
+        // exactly the set `bump` accepts — so a future `bump(...)` for it
+        // inside the entry loop would be permitted, and its count then
+        // SILENTLY DISCARDED by this trailing `insert`. The census would
+        // under-report instead of failing. The comment on the const says
+        // this token does not go through `bump`; this is what enforces it.
+        assert!(
+            !shapes.contains_key(SHAPE_MULTI_GENERATION),
+            "issue #4309: {} already counted {SHAPE_MULTI_GENERATION} inside the entry \
+             loop. It is DERIVED from the finished expectation model, so it must have \
+             exactly one writer — this insert — or one of the two counts is lost",
+            spec.id()
+        );
         shapes.insert(SHAPE_MULTI_GENERATION, cross_generation_keys);
     }
 
