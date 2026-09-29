@@ -517,7 +517,7 @@ fn resolve_root(spec: &FixtureSpec) -> Option<PathBuf> {
     }
 }
 
-async fn open_database(spec: &FixtureSpec, root: &Path) -> Database {
+async fn open_database(spec: &FixtureSpec, root: &Path, generation_dir: &Path) -> Database {
     let schema = schema_path(spec.schema_file).unwrap_or_else(|| {
         panic!(
             "committed schema {} must be readable (#3148)",
@@ -529,9 +529,35 @@ async fn open_database(spec: &FixtureSpec, root: &Path) -> Database {
         data_dir: root.to_path_buf(),
         version_hint: None,
         core_config: Config::default(),
-        // TABLE-granular, never keyspace-granular: several of these keyspaces
-        // hold nine tables and each case needs exactly one of them.
-        table_directory_filter: Some(format!("/{}/{}-", spec.keyspace, spec.table)),
+        // GENERATION-DIRECTORY-granular, not merely table-granular (roborev
+        // job 61). `table_directory_filter` is a SUBSTRING match, so the old
+        // `/<ks>/<table>-` form loaded EVERY `<table>-<uuid>/` directory —
+        // three of them for several `test_deltas` tables — while
+        // `load_goldens` now binds to one. Oracle and query must read the
+        // SAME generation directory or the sweep compares a view built from
+        // data it has no golden for. Interpolating the chosen directory's
+        // own name makes the substring unique to it, so the two agree BY
+        // CONSTRUCTION rather than by the accident that the extra
+        // directories happen to ship sidecars only.
+        //
+        // NO TRAILING SLASH: the filter is matched against the table
+        // DIRECTORY paths themselves (`select_table_dirs` over
+        // `service_summary.table_directories`), which carry none — appending
+        // one matches nothing and yields a silent 0-row database. The
+        // `<table>-<uuid>` name is fixed-length-unique anyway, so no other
+        // generation directory can contain it as a substring.
+        table_directory_filter: Some(format!(
+            "/{}/{}",
+            spec.keyspace,
+            generation_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_else(|| panic!(
+                    "issue #4309: {}'s generation directory {} must have a readable name",
+                    spec.id(),
+                    generation_dir.display()
+                ))
+        )),
     };
     let result = ingest(cfg)
         .await
@@ -905,7 +931,10 @@ pub async fn assert_raw_view_matches_golden(spec: &FixtureSpec) -> SweepOutcome 
     // those diagnostics are far more useful than whatever an ingestion of the
     // same corpus would say first.
     let goldens = load_goldens(&root, spec);
-    let db = open_database(spec, &root).await;
+    // The oracle picked the generation directory; the query must read that
+    // same one (roborev job 61).
+    let generation_dir = goldens[0].source_dir.clone();
+    let db = open_database(spec, &root, &generation_dir).await;
     let view = format!("{}.{}_raw_sstable_data", spec.keyspace, spec.table);
 
     let scan = db

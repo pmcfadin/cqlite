@@ -130,10 +130,18 @@ async fn zstd_table_matches_the_sstabledump_golden() {
 
 /// SHORT FINAL CHUNK: `chunk_length_in_kb = 4` with a payload that is not a
 /// multiple of 4096, so the last chunk covers fewer uncompressed bytes than
-/// every other one. Every row's `position` is a DATA-FILE offset the reader
-/// must map back through the chunk table, so an off-by-one in the final
-/// chunk's uncompressed length is exactly the class of defect a
-/// byte-exact position comparison against the golden can see.
+/// every other one.
+///
+/// WHAT CATCHES A DEFECT HERE — not `position` (roborev job 61). This sweep
+/// does NOT compare `position` against the golden: it is in
+/// `DECLARED_GAP_COLUMNS` and the `raw_view_parity` module doc declares it a
+/// gap, because it has no single golden-comparable value across the two
+/// producers. Its only use here is the boolean path witness, which cannot
+/// see an offset error. What DOES catch a mis-stitched final chunk is that
+/// the rows in it decode to garbage: the per-cell and per-row metadata stop
+/// matching the golden byte-exact, and the row set itself stops matching.
+/// The offset value proper is value-asserted by
+/// `issue_4222_raw_view_point_read_test.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn short_final_chunk_matches_the_sstabledump_golden() {
     assert_raw_view_matches_golden(&FixtureSpec {

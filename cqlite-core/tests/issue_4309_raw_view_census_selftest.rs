@@ -72,7 +72,7 @@ use raw_view_parity::golden::Fact;
 use raw_view_parity::golden::RowIdentity;
 use raw_view_parity::golden::{
     build_expectations, classify_columns, ColumnRoles, GoldenSstable, DECLARED_GAP_COLUMNS,
-    PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA,
+    PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA, SHAPE_TOKENS,
 };
 use raw_view_parity::{
     assert_value_key_sets_match, fact_kind, is_negative_complex_marker, FactKindMatch,
@@ -982,8 +982,26 @@ fn every_produced_token_is_in_the_known_vocabulary() {
     // bump it while `require_observed` rejected every claim for it as an
     // unknown name. That is exactly the under-coverage this assertion is
     // supposed to forbid.
+    // BOTH halves are now derived from declarations the producing code
+    // itself reads (roborev job 61): families from `FACT_KIND_RULES`, shapes
+    // from `SHAPE_TOKENS`, which `bump` asserts membership against. Relying
+    // on the synthetic goldens to enumerate the shapes left a new
+    // `bump("shape:…")` invisible here — it landed in neither set, so the
+    // equality stayed green while the shape became unclaimable.
     let mut reachable: std::collections::BTreeSet<&str> = produced.clone();
     reachable.extend(FACT_KIND_RULES.iter().map(|(_, kind)| *kind));
+    reachable.extend(SHAPE_TOKENS.iter().copied());
+
+    // The synthetic goldens must still actually produce the shapes they
+    // declare, so `SHAPE_TOKENS` cannot become a list of aspirations.
+    for shape in SHAPE_TOKENS {
+        assert!(
+            produced.contains(shape),
+            "issue #4309: SHAPE_TOKENS declares '{shape}' but no synthetic golden in this \
+             lane produces it, so its derivation is unexercised on the gate. Produced: \
+             {produced:?}"
+        );
+    }
     let vocabulary: std::collections::BTreeSet<&str> =
         KNOWN_COVERAGE_TOKENS.iter().copied().collect();
     assert_eq!(

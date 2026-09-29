@@ -86,8 +86,58 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
         spec.keyspace
     );
 
+    // ONE GENERATION DIRECTORY, chosen deterministically (roborev job 61,
+    // issue #4309). `table_generation_dirs` returns only `Data.db`-BEARING
+    // directories, sorted, so `dirs[0]` is stable across runs and machines.
+    //
+    // WHY, and why this does not lose a generation. The corpus ships THREE
+    // `<table>-<uuid>/` directories for several `test_deltas` tables — they
+    // are separate REGENERATIONS of the same table, with DIFFERENT golden
+    // content (verified: the three `static_with_rows` sidecars have three
+    // distinct md5s), and only one carries binaries. Every genuinely
+    // multi-generation fixture instead keeps `nb-1` AND `nb-2` inside a
+    // SINGLE directory — verified for all five: `skipped_partition_delete`,
+    // `resurrection_gc0`, `resurrection_gc_positive`, `dropped_regular_col`,
+    // `dropped_static_col`. So binding to one directory preserves every
+    // declared shape, `shape:multi_generation` included.
+    //
+    // Enumerating ALL of them was a latent hard failure on a `must_run`
+    // case: two directories would then contribute goldens both named
+    // `nb-1-big-Data.db`, and the raw view's `sstable` column reports only
+    // the bare FILE NAME (`RawViewSource::from_reader` takes
+    // `file_path().file_name()`), so nothing in the query result can
+    // attribute a row to one of them. `test_deltas.static_with_rows` is
+    // `Discipline::GitCommitted`, so it cannot skip — it would hard-FAIL on
+    // exactly the fetched-corpus, strict-mode run this module's doc
+    // prescribes as the way to certify the sweep. Selecting one directory
+    // removes the ambiguity at its source instead of refusing on it.
+    //
+    // The choice is ANNOUNCED, never silent: a skipped sibling is named
+    // below, because a harness that quietly ignores half a corpus is the
+    // failure mode this sweep exists to catch.
+    let chosen = &dirs[0];
+    if dirs.len() > 1 {
+        let skipped: Vec<String> = dirs[1..].iter().map(|d| d.display().to_string()).collect();
+        eprintln!(
+            "NOTE: {} binds to ONE generation directory, {} — {} OTHER \
+             Data.db-bearing {}-* {} RECOGNISED and deliberately NOT read: {}. Each is a \
+             separate regeneration with its own golden content; the sweep compares one. \
+             Pinning a specific directory is issue #4314.",
+            spec.id(),
+            chosen.display(),
+            skipped.len(),
+            spec.table,
+            if skipped.len() == 1 {
+                "directory was"
+            } else {
+                "directories were"
+            },
+            skipped.join(", ")
+        );
+    }
+
     let mut goldens: Vec<GoldenSstable> = Vec::new();
-    for dir in &dirs {
+    for dir in std::slice::from_ref(chosen) {
         let entries = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("reading {} must succeed: {e}", dir.display()));
         let mut data_dbs: Vec<PathBuf> = entries
@@ -148,32 +198,24 @@ pub fn load_goldens(root: &Path, spec: &FixtureSpec) -> Vec<GoldenSstable> {
         spec.id()
     );
 
-    // FAIL LOUDLY on two generation directories contributing the SAME
-    // `Data.db` file name (roborev finding I3, issue #4309). This is latent,
-    // not hypothetical: the corpus already ships THREE `<table>-<uuid>`
-    // directories for several `test_deltas`/`test_tomb` tables, and today
-    // only one of each carries real binaries — the moment a second does, two
-    // goldens both called e.g. `nb-1-big-Data.db` appear.
-    //
-    // It cannot be fixed by qualifying the group key, because the fact the
-    // grouping is matched against is the raw view's OWN `sstable` column,
-    // which carries the bare FILE NAME (`RawViewSource::from_reader` takes
-    // `file_path().file_name()`). There is therefore NO information in the
-    // query result that could tell the two apart, so the honest outcome is a
-    // refusal that names the cause, never a silent collapse of both
-    // generations onto one group (which would surface as a torrent of
-    // "missing"/"unexplained" rows blaming the view for a harness limit).
+    // The `Data.db` names within the chosen directory are unique by
+    // construction (one filesystem directory cannot hold two files of the
+    // same name), so the group key `(sstable, partition key)` attributes
+    // every returned row unambiguously. Asserted anyway, because that is the
+    // property the whole comparison rests on and it costs one pass: the raw
+    // view's `sstable` column reports only the bare FILE NAME, so a
+    // duplicate would silently collapse two generations onto one group and
+    // surface as a torrent of "missing"/"unexplained" rows blaming the view
+    // for a harness limit.
     for (i, a) in goldens.iter().enumerate() {
         for b in &goldens[i + 1..] {
             assert_ne!(
                 a.data_db,
                 b.data_db,
-                "issue #4309: {} has two generation directories contributing a golden \
-                 named '{}' ({} and {}). The raw view's `sstable` column reports only the \
-                 bare file name, so the sweep cannot attribute a returned row to one of \
-                 them — scope the fixture to a single generation directory, or extend the \
-                 harness with a directory-aware source identity, before relying on this \
-                 lane for that table",
+                "issue #4309: {} produced two goldens named '{}' from one directory \
+                 ({} and {}) — impossible on a normal filesystem, so the generation \
+                 selection above has been changed in a way that reintroduces the \
+                 cross-directory ambiguity it removed",
                 spec.id(),
                 a.data_db,
                 a.source_dir.display(),
@@ -680,6 +722,23 @@ pub fn bound_facts(bound: &Json, ctx: &str) -> BTreeMap<String, Fact> {
     facts
 }
 
+/// Every golden ENTRY SHAPE `build_expectations` can count.
+///
+/// The enumerable counterpart of `FACT_KIND_RULES` for the shape half of
+/// the coverage vocabulary (roborev job 61). `bump` asserts membership, and
+/// `issue_4309_raw_view_census_selftest.rs` asserts this list plus every
+/// `FACT_KIND_RULES` family is EXACTLY `KNOWN_COVERAGE_TOKENS`.
+pub const SHAPE_TOKENS: &[&str] = &[
+    "entry:row",
+    "entry:static_block",
+    "entry:partition_deletion",
+    "entry:range_tombstone_bound",
+    "entry:range_tombstone_boundary",
+    "shape:prefix_bound",
+    "shape:row_update_without_liveness",
+    "shape:multi_generation",
+];
+
 /// Turn every golden partition of every generation into the physical rows the
 /// raw view must produce, alongside a census of the golden ENTRY SHAPES seen.
 ///
@@ -700,7 +759,24 @@ pub fn build_expectations(
     let width = roles.clustering_columns.len();
     let mut expected: Vec<ExpectedRow> = Vec::new();
     let mut shapes: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut bump = |shape: &'static str| *shapes.entry(shape).or_insert(0) += 1;
+    // Every shape token this function can emit is validated against
+    // `SHAPE_TOKENS` as it is bumped (roborev job 61). The FAMILY half of
+    // the census vocabulary was mechanized from `FACT_KIND_RULES` (jobs
+    // 56/59); the shape half was still enumerated by hand in the self-test,
+    // so a new `bump("shape:…")` without a matching `KNOWN_COVERAGE_TOKENS`
+    // entry landed in neither set and left the equality assertion green —
+    // while the census counted the shape and `require_observed` rejected
+    // every lane's claim for it as an unknown name. Now a new shape must be
+    // declared here, and the self-test folds this list into the equality.
+    let mut bump = |shape: &'static str| {
+        assert!(
+            SHAPE_TOKENS.contains(&shape),
+            "issue #4309: build_expectations bumped '{shape}', which is not in \
+             SHAPE_TOKENS. Add it there AND to KNOWN_COVERAGE_TOKENS, or no lane will \
+             ever be able to claim the shape this counts"
+        );
+        *shapes.entry(shape).or_insert(0) += 1
+    };
     for golden in goldens {
         for partition in &golden.partitions {
             let key_components = partition["partition"]["key"]
@@ -885,6 +961,10 @@ pub fn build_expectations(
         .filter(|sstables| sstables.len() > 1)
         .count();
     if cross_generation_keys > 0 {
+        assert!(
+            SHAPE_TOKENS.contains(&"shape:multi_generation"),
+            "issue #4309: shape:multi_generation must be declared in SHAPE_TOKENS"
+        );
         shapes.insert("shape:multi_generation", cross_generation_keys);
     }
 
