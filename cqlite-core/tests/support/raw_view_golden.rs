@@ -869,12 +869,28 @@ pub fn build_expectations(
                 match kind {
                     "row" => {
                         bump("entry:row");
-                        // An UPDATE-only row: no primary-key liveness marker,
-                        // yet real cells — `row_timestamp` must be ABSENT
-                        // while every cell still carries its own write time.
-                        // A row TOMBSTONE also lacks liveness, so the
-                        // non-empty cell set is what makes this the partial-
-                        // UPDATE shape specifically.
+                        // An UPDATE-only row: no primary-key liveness
+                        // marker, yet CELLS — so `row_timestamp` is ABSENT
+                        // while the cells carry their own metadata. A row
+                        // TOMBSTONE also lacks liveness, so the NON-EMPTY
+                        // CELL SET is what makes this the partial-UPDATE
+                        // shape specifically.
+                        //
+                        // A CELL-TOMBSTONE-ONLY ROW IS DELIBERATELY IN
+                        // SCOPE (roborev job 81). The predicate counts any
+                        // non-empty cell array, including a row whose only
+                        // cell carries just `deletion_info` — and that
+                        // shape is real: `resurrection_gc0`'s gen-2
+                        // partition `1`, clustering `[3]`, is exactly it.
+                        // That is CORRECT rather than incidental: a
+                        // `DELETE <col> WHERE pk=… AND ck=…` writes no row
+                        // liveness marker and one tombstone cell, which IS
+                        // an update without a row marker — the physical
+                        // shape this token names. The earlier wording "yet
+                        // real cells" read as "live cells" and understated
+                        // it. Pinned by
+                        // `row_update_without_liveness_counts_a_cell_tombstone_only_row`
+                        // so the meaning is asserted, not inferred.
                         if entry.get("liveness_info").is_none()
                             && entry["cells"].as_array().is_some_and(|c| !c.is_empty())
                         {

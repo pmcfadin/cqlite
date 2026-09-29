@@ -830,3 +830,46 @@ fn every_produced_token_is_in_the_known_vocabulary() {
         reachable.difference(&vocabulary).collect::<Vec<_>>(),
     );
 }
+
+/// PINS THE SHAPE'S MEANING at its edge (roborev job 81): a row with no
+/// liveness whose ONLY cell is a tombstone still counts as the
+/// partial-UPDATE shape.
+///
+/// This is not a corner case — `resurrection_gc0`'s gen-2 partition `1`,
+/// clustering `[3]`, is exactly it — and it is correct: a
+/// `DELETE <col> WHERE pk=… AND ck=…` writes no row liveness marker and one
+/// tombstone cell, which IS an update without a row marker. Asserted so the
+/// inclusion is a decision rather than a side effect of "any non-empty cell
+/// array", which is what the predicate literally tests.
+#[test]
+fn row_update_without_liveness_counts_a_cell_tombstone_only_row() {
+    let observed = census_with(
+        &[generation_of(
+            "nb-1-big-Data.db",
+            vec![json!({
+                "partition": { "key": ["1"] },
+                "rows": [{
+                    "type": "row",
+                    "clustering": ["10"],
+                    "cells": [{
+                        "name": "body",
+                        "tstamp": "2021-01-01T00:00:00Z",
+                        "deletion_info": { "local_delete_time": "2021-01-01T00:00:00Z" }
+                    }]
+                }]
+            })],
+        )],
+        &roles_with(&["ck"], &["body"]),
+    );
+    assert_eq!(
+        observed
+            .get("shape:row_update_without_liveness")
+            .copied()
+            .unwrap_or(0),
+        1,
+        "issue #4309: a row with no liveness marker whose only cell is a TOMBSTONE is \
+         still the partial-UPDATE shape — `DELETE <col>` writes exactly that. If this \
+         is ever narrowed to live cells only, `resurrection_gc0` gen-2 clustering [3] \
+         stops being counted and the change must be deliberate. observed: {observed:?}"
+    );
+}
