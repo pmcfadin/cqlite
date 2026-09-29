@@ -10633,6 +10633,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
   local d root calls counter rc claim bound fns walks per_walk want got
   local refresh_pid planted_started ended live live_waited stale_secs ticks tick_count max_gap
   local barrier_secs barrier_ticks max_refresher_ticks outcome_ok barrier_started barrier_elapsed
+  local gap_exceeds
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10760,151 +10761,166 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # properties never ran. Wrapping in `if` instead lets them proceed either way; the shared
   # `unset` below already runs unconditionally after this block closes.
   if [[ "$stale_secs" =~ ^[0-9]+$ ]]; then
-  planted_started="$(date +%s)"
-  printf '%s\n' "$planted_started" >"$claim/started"
-  # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
-  # a concurrent read never observes a torn value. `fixture_bg`/`fixture_kill` own the group
-  # so a case failure or interrupt cannot leak this loop. The loop also touches `$live` after
-  # its first successful write, which the spin-wait below uses as a BARRIER: `fixture_bg`
-  # itself gives no guarantee the loop's first tick has happened before it returns, so
-  # without this a refresher starved at its own startup — the very condition #4282's loaded
-  # box produces — would not tick even once before the supervisor's first read, and the
-  # fix would degrade to the one-shot plant it replaces for exactly the window that matters
-  # most. Waiting for the marker makes that deterministic instead of merely probable.
-  # LIFETIME BOUNDED at a flat, generous literal (6000 ticks x 0.2s = 1200s/20min): unlike
-  # every OTHER background fixture in this file, this loop has no natural exit, so a lost
-  # `fixture_kill` (this suite's own SIGKILL, an OOM kill) would otherwise leave it spinning
-  # forever on a shared fleet box. This is PURELY a leak backstop, not a correctness bound —
-  # deriving it from `stale_secs` (the wait budget) was tried and reverted: a supervisor run
-  # that legitimately stretches past that budget under load would then outlive the refresher,
-  # ageing `started` and causing exactly the takeover this case exists to rule out, reported
-  # as a fixture problem. 20 minutes safely exceeds this suite's own 600s stall watchdog, so
-  # in practice the watchdog kills the whole run before this cap could ever fire — it is
-  # bounded, not tight. Every tick also appends a sub-second timestamp (GNU `date +%s.%N`,
-  # with a fallback to whole seconds on a BSD/macOS `date` where `%N` is emitted literally)
-  # to `$ticks` (separate from the integer-second `$claim/started`, which the shipped
-  # production code requires and which a real takeover DELETES via
-  # `obj_sweep_claim_release`'s `rm -rf`), so a stall can be attributed by NAME, from a
-  # record that survives claim removal, rather than left to
-  # degrade into the generic outcome failure below or misattributed as a fixture fault when
-  # the regression is real. THE TWO WRITES (claim, ticks) ARE DELIBERATELY NOT CHAINED
-  # TOGETHER in the loop below: an earlier version appended the tick only after the claim
-  # write succeeded, so on a GENUINE regression -- the supervisor takes the claim over and
-  # its EXIT trap removes it -- every subsequent claim write failed and the tick record
-  # froze right along with it, contradicting the "survives claim removal" claim above and
-  # putting the same attribution inversion round 6 fixed back into the diagnostic instead
-  # of the verdict. The tick append is gated ONLY on `$ticks` itself (under `$d`, never
-  # removed), independent of whether the claim write succeeds.
-  max_refresher_ticks=6000
-  fixture_bg bash -c '
-    claim="$1" live="$2" ticks="$3" max_ticks="$4"
-    i=0
-    while [[ "$i" -lt "$max_ticks" ]]; do
-      now="$(date +%s)"
-      # %N is GNU-only; a BSD/macOS date emits it literally -- probe and fall back.
-      tick="$(date +%s.%N)"
-      case "$tick" in *N) tick="$now" ;; esac
-      # decoupled from the claim write on purpose -- see the outer comment above this loop.
-      printf "%s\n" "$now" >"$claim/started.tmp.$$" 2>/dev/null &&
-        mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null
-      printf "%s\n" "$tick" >>"$ticks" 2>/dev/null && : >"$live"
+    planted_started="$(date +%s)"
+    printf '%s\n' "$planted_started" >"$claim/started"
+    # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
+    # a concurrent read never observes a torn value. `fixture_bg`/`fixture_kill` own the group
+    # so a case failure or interrupt cannot leak this loop. The loop also touches `$live` after
+    # its first successful write, which the spin-wait below uses as a BARRIER: `fixture_bg`
+    # itself gives no guarantee the loop's first tick has happened before it returns, so
+    # without this a refresher starved at its own startup — the very condition #4282's loaded
+    # box produces — would not tick even once before the supervisor's first read, and the
+    # fix would degrade to the one-shot plant it replaces for exactly the window that matters
+    # most. Waiting for the marker makes that deterministic instead of merely probable.
+    # LIFETIME BOUNDED at a flat, generous literal (6000 ticks x 0.2s = 1200s/20min): unlike
+    # every OTHER background fixture in this file, this loop has no natural exit, so a lost
+    # `fixture_kill` (this suite's own SIGKILL, an OOM kill) would otherwise leave it spinning
+    # forever on a shared fleet box. This is PURELY a leak backstop, not a correctness bound —
+    # deriving it from `stale_secs` (the wait budget) was tried and reverted: a supervisor run
+    # that legitimately stretches past that budget under load would then outlive the refresher,
+    # ageing `started` and causing exactly the takeover this case exists to rule out, reported
+    # as a fixture problem. 20 minutes safely exceeds this suite's own 600s stall watchdog, so
+    # in practice the watchdog kills the whole run before this cap could ever fire — it is
+    # bounded, not tight. Every tick also appends a sub-second timestamp (GNU `date +%s.%N`,
+    # with a fallback to whole seconds on a BSD/macOS `date` where `%N` is emitted literally)
+    # to `$ticks` (separate from the integer-second `$claim/started`, which the shipped
+    # production code requires and which a real takeover DELETES via
+    # `obj_sweep_claim_release`'s `rm -rf`), so a stall can be attributed by NAME, from a
+    # record that survives claim removal, rather than left to
+    # degrade into the generic outcome failure below or misattributed as a fixture fault when
+    # the regression is real. THE TWO WRITES (claim, ticks) ARE DELIBERATELY NOT CHAINED
+    # TOGETHER in the loop below: an earlier version appended the tick only after the claim
+    # write succeeded, so on a GENUINE regression -- the supervisor takes the claim over and
+    # its EXIT trap removes it -- every subsequent claim write failed and the tick record
+    # froze right along with it, contradicting the "survives claim removal" claim above and
+    # putting the same attribution inversion round 6 fixed back into the diagnostic instead
+    # of the verdict. The tick append is gated ONLY on `$ticks` itself (under `$d`, never
+    # removed), independent of whether the claim write succeeds.
+    max_refresher_ticks=6000
+    fixture_bg bash -c '
+      claim="$1" live="$2" ticks="$3" max_ticks="$4"
+      i=0
+      while [[ "$i" -lt "$max_ticks" ]]; do
+        now="$(date +%s)"
+        # %N is GNU-only; a BSD/macOS date emits it literally -- probe and fall back.
+        tick="$(date +%s.%N)"
+        case "$tick" in *N) tick="$now" ;; esac
+        # decoupled from the claim write on purpose -- see the outer comment above this loop.
+        printf "%s\n" "$now" >"$claim/started.tmp.$$" 2>/dev/null &&
+          mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null
+        printf "%s\n" "$tick" >>"$ticks" 2>/dev/null && : >"$live"
+        sleep 0.2
+        i=$((i + 1))
+      done
+    ' _ "$claim" "$live" "$ticks" "$max_refresher_ticks" >/dev/null 2>&1
+    refresh_pid=$FIXTURE_LAST_PID
+    # BARRIER BUDGET is 4x `stale_secs`, in 0.2s polls (matching the refresher's own tick
+    # period, an interval this file already uses elsewhere, rather than a finer one that
+    # only adds forks without shortening the wait) — a re-typed literal here (the ORIGINAL
+    # finding: a bare "3s") can itself go red on the same loaded box #4282 is about, since the
+    # refresher is spawned through the identical fork/exec path the comment above says can be
+    # slow to schedule under load. 4x (not the original 10x) keeps a genuine barrier MISS from
+    # ballooning this file's own <30s total-runtime target while still comfortably outlasting
+    # the fork/exec scheduling delays #4250/#4252 measured -- the barrier only needs to
+    # outlast that scheduling latency once, not cover ten full wait budgets.
+    barrier_secs=$((4 * stale_secs))
+    barrier_ticks=$((barrier_secs * 5))
+    live_waited=0
+    barrier_started="$(date +%s)"
+    while [[ ! -e "$live" && "$live_waited" -lt "$barrier_ticks" ]]; do
       sleep 0.2
-      i=$((i + 1))
+      live_waited=$((live_waited + 1))
     done
-  ' _ "$claim" "$live" "$ticks" "$max_refresher_ticks" >/dev/null 2>&1
-  refresh_pid=$FIXTURE_LAST_PID
-  # BARRIER BUDGET is 4x `stale_secs`, in 0.2s polls (matching the refresher's own tick
-  # period, an interval this file already uses elsewhere, rather than a finer one that
-  # only adds forks without shortening the wait) — a re-typed literal here (the ORIGINAL
-  # finding: a bare "3s") can itself go red on the same loaded box #4282 is about, since the
-  # refresher is spawned through the identical fork/exec path the comment above says can be
-  # slow to schedule under load. 4x (not the original 10x) keeps a genuine barrier MISS from
-  # ballooning this file's own <30s total-runtime target while still comfortably outlasting
-  # the fork/exec scheduling delays #4250/#4252 measured -- the barrier only needs to
-  # outlast that scheduling latency once, not cover ten full wait budgets.
-  barrier_secs=$((4 * stale_secs))
-  barrier_ticks=$((barrier_secs * 5))
-  live_waited=0
-  barrier_started="$(date +%s)"
-  while [[ ! -e "$live" && "$live_waited" -lt "$barrier_ticks" ]]; do
-    sleep 0.2
-    live_waited=$((live_waited + 1))
-  done
-  if [[ ! -e "$live" ]]; then
-    # ENVIRONMENTAL NON-RESULT, not a failure: the supervisor is never launched on this
-    # path, so there is no vacuity risk in skipping (this file's own convention for "a live
-    # control process never scheduled within the wait cap" — see the proc-probe cases).
-    # Reporting it as `fail` would convert a load-induced scheduling miss into a
-    # differently-shaped load-induced red, after burning up to `barrier_secs` of wall clock.
-    # MEASURE the actual elapsed wall clock rather than assert the BUDGET (`barrier_secs`):
-    # 100 external `sleep 0.2` invocations do not take 20s under load, only AT LEAST 20s, so
-    # reporting the budget as if it were a measurement is the same misattribution class this
-    # whole change is about.
-    barrier_elapsed=$(( $(date +%s) - barrier_started ))
-    skip "obj-sweep(claim-fresh-control): the refresh fixture never ticked once in ${barrier_elapsed}s (budget ${barrier_secs}s) -- it could not be scheduled at all, so the supervisor was never launched (a stale plant would test nothing)"
-    fixture_kill "$refresh_pid"
-  else
-    root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
-    env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
-    rc=$?
-    # SAME sub-second capture (+ GNU/BSD fallback) as the refresher's own ticks: mixing a
-    # whole-second `ended` with sub-second tick values understated the virtual final gap by
-    # up to ~1s -- against a `stale_secs` of 5 that is a 20% leniency in exactly the
-    # direction that admits a vacuous pass.
-    ended="$(date +%s.%N)"
-    case "$ended" in *N) ended="$(date +%s)" ;; esac
-    fixture_kill "$refresh_pid"
-    # OUTCOME FIRST, DELIBERATELY: a real regression (the supervisor ages the claim, takes
-    # it over, sweeps, and its EXIT trap removes `$claim` entirely) must never be masked
-    # behind the liveness check below — evaluating that check first, against a claim
-    # directory a real takeover just deleted, previously reported "the refresh fixture went
-    # stale" for a run where the fixture was healthy and the behaviour genuinely regressed
-    # (roborev round 6). Liveness is now consulted ONLY to avert a VACUOUS pass: read from
-    # `$ticks` (the refresher's own record, which survives claim removal), not from
-    # `$claim/started` (which does not).
-    outcome_ok=0
-    if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
-      grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/fresh.log" &&
-      grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
-      outcome_ok=1
-    fi
-    # COMPUTED UNCONDITIONALLY, not just as a diagnostic in the failure branch: an
-    # end-anchored "is the LAST tick recent enough" check (what this used to assert) is
-    # satisfied by a SINGLE early tick followed by starvation for the entire rest of the
-    # run, whenever that run's own duration is close to `stale_secs` -- which it always is
-    # here, since the supervisor's wait budget IS `stale_secs`. `max_gap` folds `ended` in
-    # as a virtual final tick, so it also catches that exact case: a barrier-satisfying tick
-    # immediately followed by nothing until `fixture_kill` shows up as a gap of ~`stale_secs`
-    # to `ended`, not as "the last tick was recent" (it never advances past that one tick).
-    tick_count="$(wc -l <"$ticks" 2>/dev/null || echo 0)"
-    # LC_ALL=C on BOTH awk calls below (this one and the comparison further down): gawk
-    # honours LC_NUMERIC for `printf %f`, so under a locale with a comma decimal separator
-    # this would emit e.g. "0,20", which the SECOND awk (below) parses numerically as the
-    # integer 0 -- silently disabling the non-vacuity check below for every run on such a
-    # locale, which is the exact vacuous pass this check exists to prevent. Pinning C here
-    # avoids a value ever round-tripping through a locale-formatted string.
-    max_gap="$(LC_ALL=C awk -v e="$ended" 'NR>1{d=$1-p; if(d>m)m=d} {p=$1} END{d=e-p; if(d>m)m=d; printf "%.2f", m+0}' "$ticks" 2>/dev/null || echo 0)"
-    # Float compare (max_gap carries sub-second precision; bash arithmetic is integer-only).
-    # `>=`, not `>`: the ORIGINAL end-anchored check used strict `<` against `stale_secs`,
-    # which let a gap of EXACTLY `stale_secs` (the single-early-tick case above, precisely)
-    # through as a false PASS at the boundary.
-    if [[ "$outcome_ok" -eq 1 ]] && LC_ALL=C awk -v g="$max_gap" -v s="$stale_secs" 'BEGIN{exit !(g>=s)}'; then
-      # NON-VACUITY, reported as `skip` rather than `fail`: the OUTCOME matched (the
-      # supervisor behaved correctly), but this run's OWN fixture cannot certify that it
-      # exercised the fix under test rather than getting lucky on timing -- the identical
-      # environmental non-result the barrier-miss branch above already treats as `skip`, not
-      # a behavioural claim in either direction.
-      skip "obj-sweep(claim-fresh-control): outcome matched but the refresher's own tick record shows a ${max_gap}s gap >= the ${stale_secs}s stale bound -- this run cannot be credited as having exercised the fix (refresher_ticks=$tick_count, planted=$planted_started, rc=$rc, see $d/fresh.log)"
-    elif [[ "$outcome_ok" -eq 1 ]]; then
-      pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip"
+    if [[ ! -e "$live" ]]; then
+      # ENVIRONMENTAL NON-RESULT, not a failure: the supervisor is never launched on this
+      # path, so there is no vacuity risk in skipping (this file's own convention for "a live
+      # control process never scheduled within the wait cap" — see the proc-probe cases).
+      # Reporting it as `fail` would convert a load-induced scheduling miss into a
+      # differently-shaped load-induced red, after burning up to `barrier_secs` of wall clock.
+      # MEASURE the actual elapsed wall clock rather than assert the BUDGET (`barrier_secs`):
+      # 100 external `sleep 0.2` invocations do not take 20s under load, only AT LEAST 20s, so
+      # reporting the budget as if it were a measurement is the same misattribution class this
+      # whole change is about.
+      barrier_elapsed=$(( $(date +%s) - barrier_started ))
+      skip "obj-sweep(claim-fresh-control): the refresh fixture never ticked once in ${barrier_elapsed}s (budget ${barrier_secs}s) -- it could not be scheduled at all, so the supervisor was never launched (a stale plant would test nothing)"
+      fixture_kill "$refresh_pid"
     else
-      # A mid-run refresher stall (started ages past the bound, the supervisor sweeps, then
-      # the refresher resumes and ticks through to `fixture_kill`) is exactly #4282's
-      # symptom -- so name the refresher's own tick record here, distinguishing "fixture
-      # starved" from a genuine behavioural regression.
-      fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) refresher_ticks=$tick_count refresher_max_gap=${max_gap}s (see $d/fresh.log)"
+      root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+      env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
+      rc=$?
+      # SAME sub-second capture (+ GNU/BSD fallback) as the refresher's own ticks: mixing a
+      # whole-second `ended` with sub-second tick values understated the virtual final gap by
+      # up to ~1s -- against a `stale_secs` of 5 that is a 20% leniency in exactly the
+      # direction that admits a vacuous pass.
+      ended="$(date +%s.%N)"
+      case "$ended" in *N) ended="$(date +%s)" ;; esac
+      fixture_kill "$refresh_pid"
+      # OUTCOME FIRST, DELIBERATELY: a real regression (the supervisor ages the claim, takes
+      # it over, sweeps, and its EXIT trap removes `$claim` entirely) must never be masked
+      # behind the liveness check below — evaluating that check first, against a claim
+      # directory a real takeover just deleted, previously reported "the refresh fixture went
+      # stale" for a run where the fixture was healthy and the behaviour genuinely regressed
+      # (roborev round 6). Liveness is now consulted ONLY to avert a VACUOUS pass: read from
+      # `$ticks` (the refresher's own record, which survives claim removal), not from
+      # `$claim/started` (which does not).
+      outcome_ok=0
+      if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
+        grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/fresh.log" &&
+        grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
+        outcome_ok=1
+      fi
+      # COMPUTED UNCONDITIONALLY, not just as a diagnostic in the failure branch: an
+      # end-anchored "is the LAST tick recent enough" check (what this used to assert) is
+      # satisfied by a SINGLE early tick followed by starvation for the entire rest of the
+      # run, whenever that run's own duration is close to `stale_secs` -- which it always is
+      # here, since the supervisor's wait budget IS `stale_secs`. `max_gap` folds `ended` in
+      # as a virtual final tick, so it also catches that exact case: a barrier-satisfying tick
+      # immediately followed by nothing until `fixture_kill` shows up as a gap of ~`stale_secs`
+      # to `ended`, not as "the last tick was recent" (it never advances past that one tick).
+      tick_count="$(wc -l <"$ticks" 2>/dev/null || echo 0)"
+      # LC_ALL=C: gawk honours LC_NUMERIC for `printf %f`, so under a locale with a comma
+      # decimal separator this would emit e.g. "0,20" -- FAILS CLOSED below regardless
+      # (the `=~` validation rejects a comma), rather than silently misparsing it.
+      max_gap="$(LC_ALL=C awk -v e="$ended" 'NR>1{d=$1-p; if(d>m)m=d} {p=$1} END{d=e-p; if(d>m)m=d; printf "%.2f", m+0}' "$ticks" 2>/dev/null)"
+      # FAIL CLOSED, not open: an awk error (missing binary, unreadable `$ticks`, ENOSPC) or
+      # any output that is not a plain `N.NN` number forces the SENTINEL, which the scaled
+      # comparison below treats as "gap exceeds every plausible bound" -- i.e. routes to the
+      # non-credit paths, never to a silent `pass`. `|| echo 0` (the previous form) did the
+      # opposite: it defaulted to "no gap detected", which is the exact vacuous-pass class
+      # this whole check exists to prevent, now relocated into the guard's OWN error path.
+      [[ "$max_gap" =~ ^[0-9]+\.[0-9][0-9]$ ]] || max_gap="999999.00"
+      # PURE BASH integer comparison (both sides scaled x100, since `max_gap` is always
+      # exactly two decimal digits at this point), not a second awk call: a comparison
+      # expressed as `awk '...'`'s OWN exit code cannot distinguish "the gap does not
+      # exceed the bound" from "awk itself failed for an unrelated reason" -- both read as
+      # exit 1 -- and the second awk failing was ITSELF the fail-open hole in the guard this
+      # closes. `${max_gap/./}` deletes the one decimal point (e.g. "5.23" -> "523").
+      gap_exceeds=0
+      [[ "$((10#${max_gap/./}))" -ge "$((stale_secs * 100))" ]] && gap_exceeds=1
+      if [[ "$outcome_ok" -eq 1 && "$gap_exceeds" -eq 1 ]]; then
+        # NON-VACUITY, reported as `skip` rather than `fail`: the OUTCOME matched (the
+        # supervisor behaved correctly), but this run's OWN fixture cannot certify that it
+        # exercised the fix under test rather than getting lucky on timing -- the identical
+        # environmental non-result the barrier-miss branch above already treats as `skip`, not
+        # a behavioural claim in either direction.
+        skip "obj-sweep(claim-fresh-control): outcome matched but the refresher's own tick record shows a ${max_gap}s gap >= the ${stale_secs}s stale bound -- this run cannot be credited as having exercised the fix (refresher_ticks=$tick_count, planted=$planted_started, rc=$rc, see $d/fresh.log)"
+      elif [[ "$outcome_ok" -eq 1 ]]; then
+        pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip"
+      elif [[ "$gap_exceeds" -eq 1 ]]; then
+        # THE OTHER HALF OF THE NON-VACUITY GUARD (roborev round 10 -- the ORIGINAL version
+        # only checked this in the outcome_ok=1 direction, leaving THIS branch a bare `fail`
+        # for every takeover regardless of cause). A refresher that let the claim age past
+        # `stale_secs` makes the supervisor's takeover CORRECT, SPECIFIED behaviour, not a
+        # regression -- reporting it as `fail` is exactly #4282's own symptom (load starves
+        # the fixture, the case goes red) with better diagnostics bolted on, not fixed.
+        skip "obj-sweep(claim-fresh-control): the refresher let the claim age past the ${stale_secs}s stale bound (gap=${max_gap}s) -- the takeover cannot be attributed to the supervisor (rc=$rc calls=$(obj_sweep_calls "$calls") refresher_ticks=$tick_count, see $d/fresh.log)"
+      else
+        # A HEALTHY tick record (gap under the bound) alongside a mismatched outcome is the
+        # one combination this guard cannot explain away as fixture starvation -- a genuine
+        # behavioural regression.
+        fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) refresher_ticks=$tick_count refresher_max_gap=${max_gap}s (see $d/fresh.log)"
+      fi
     fi
-  fi
   else
     fail "obj-sweep(claim-fresh-control): the derived stale bound came back '$stale_secs' -- every timing bound in this sub-case would be vacuous"
   fi
@@ -10939,7 +10955,8 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # finishes; this case needs the age to advance PAST the threshold, which a value pinned
   # to a fixed relative offset cannot do). Closing this race for real needs the plant timed
   # relative to the supervisor's OWN observed launch, which this file has no hook for
-  # without instrumenting production code -- tracked as a follow-up rather than rushed here.
+  # without instrumenting production code -- tracked as a follow-up rather than rushed here:
+  # issue #4315.
   printf '%s\n' "$(( $(date +%s) - 4 ))" >"$claim/started"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/expired.log" 2>&1
