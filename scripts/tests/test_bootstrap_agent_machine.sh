@@ -4807,6 +4807,272 @@ FAKEGATE
   #
   #      Driven as a REAL root invocation with a lying `id` first on PATH, because that is
   #      the only way to distinguish "we read $EUID" from "we read a binary that agreed".
+  #
+  #      THE BOUND IS A RUNAWAY GUARD, NOT THE PROPERTY, AND 120s WAS AN OUTLIER (#4287).
+  #      `runpin` — the driver every other case in this block goes through, same shape,
+  #      same staged tree — allows 300s, and THIS case is the heaviest of the family.
+  #      THE DISTINGUISHER IS NOT `--yes`: 11ak passes it too, under real root, at the
+  #      same 120s. It is that 11at ALONE sets PATH="$pin_liar:$PATH" on the invocation
+  #      below, so it is the one root run that inherits the suite's FULL PATH — cargo,
+  #      sccache and gh all reachable — instead of sudo's `secure_path`, WHILE its lying
+  #      `id` claims uid 1000. Bootstrap therefore walks the LONGER "unprivileged" code
+  #      paths against REAL tools, where its siblings short-circuit on the tools
+  #      secure_path hides from them. It was SIGKILLed mid-run during a full gate on
+  #      astro-processor (run-id /data/tmp/agent-gate.fZDLHj, sha d220a0bc5) and the case
+  #      then announced a security-guard DEFEAT it had never observed.
+  #
+  #      11ak CARRIES THE SAME 120s EXPOSURE AND IS DELIBERATELY LEFT ALONE, as do the
+  #      other block-11 sudo cases. #4287 is scoped to the case that actually misreported;
+  #      the issue body already names a sweep of this file's fixed-timeout self-tests as
+  #      separate future work, and widening here would be that sweep done quietly.
+  #
+  #      Widening is the proportionate fix here because there is nothing cheaper left to
+  #      bound, and that was checked rather than assumed: against this block's staged tree
+  #      the `--yes` dataset fetch, the claude-auth section and the object-store sweep are
+  #      each an immediate no-op (their scripts are absent from the staged tree), and both
+  #      env-seam sections refuse outright under root before opening their bounded session
+  #      probes. What remains is probe latency, which is exactly what co-scheduled gate
+  #      load inflates. 300s matches this file's own convention and #4266's sibling raise
+  #      of test_gate_detached.sh 4b.126, whose early-exit keeps the unloaded pass fast —
+  #      here the bound is never waited on at all when the run completes.
+  PIN_11AT_BOUND_S=300
+  # The RUNNER's own diagnostic prefix, in ONE place: branch 4 below and the 11at-ctl
+  # control after it both read this variable, so a future edit cannot change one without
+  # changing the other (roborev round 15).
+  PIN_11AT_RUNNER_RE='^(/[^[:space:]:]*/)?(g?timeout|env): '
+  # bootstrap emits SIX distinct `gate-pin: SKIPPED` refusals (:2551, :2568, :2573, :2577,
+  # :2580, :2586) and only :2551 — the root-identity one — is the property 11at proves. The
+  # live predicate matches THIS LINE VERBATIM (`grep -F`), the only form that actually
+  # narrows it. TWO INDEPENDENT SUBSTRING SEARCHES DO NOT, and that was round 25's defect:
+  # they scan the WHOLE capture, and 5b2 independently emits its own `PRIVILEGED write`
+  # refusal (PIN_11AT_COEMIT_SAMPLE above), so the second substring is satisfied by a
+  # DIFFERENT line and any of the other five refusals still read as the pass (round 27).
+  # Matching the line also keeps every fixture on wording bootstrap really emits (round
+  # 23's lesson). If bootstrap rewords :2551 this REDs — intended: the two must move
+  # together, and there is ONE spelling of it here.
+  # 5b2 emits THIS under the SAME root+seam condition (bootstrap :3718), and 11at's flags do
+  # not skip it (`--skip-sccache-cap` is the only switch). So every real 11at capture already
+  # carries a `PRIVILEGED write` line that is NOT the property under test — which is why two
+  # independent substring searches cannot narrow the pass, and the live predicate matches the
+  # refusal LINE verbatim instead (round 27).
+  PIN_11AT_COEMIT_SAMPLE='sccache-cap: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)'
+  # A NON-root-identity refusal, verbatim from bootstrap :2586. Used wherever a fixture
+  # needs a real `gate-pin:` line that is NOT this case's pass (round 32).
+  PIN_11AT_OTHER_REFUSAL_SAMPLE='gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE must be an ABSOLUTE path)'
+  PIN_11AT_PASS_SAMPLE='gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)'
+  # The signal-death/deadline predicate, hoisted for the SAME anti-drift reason — round
+  # 15's F1 was precisely this test being too narrow (137-only), and a prose-only claim
+  # about it is what let that ship. Branch 3 and the control below both call it.
+  pin_11at_killed() { [ "$1" -ge 128 ] || [ "$1" -eq 124 ]; }
+  # The SUDO-WRAPPER-FAILED predicate. Hoisted as a FUNCTION, not a bare regex, because the
+  # regex alone is not the property: `sudo: unable to resolve host h` is a WARNING that sudo
+  # prints before running the command TO COMPLETION, so matching `^sudo: ` by itself
+  # converts a genuine branch-7 red into a never-red skip (roborev round 17). The property
+  # is "the wrapper failed AND the child never ran": a non-zero status, sudo's own
+  # diagnostic, and NO NON-SUDO LINE ANYWHERE in the capture (`grep -v`, inverted).
+  # KEYING THIS ON `gate-pin` WAS THE ROUND-17 FIX'S OWN BUG (round 19): bootstrap prints
+  # its first `gate-pin:` line only in section 5b, thousands of lines in, so on a host that
+  # emits `sudo: unable to resolve host` EVERY run carries a `sudo: ` line, and any non-zero
+  # exit BEFORE 5b — a staged-tree syntax error, a usage-error exit, an early abort —
+  # satisfied all three conjuncts and was downgraded to an environmental `skip`. That made
+  # branch 7 UNREACHABLE for non-zero exits on such a host. The inverted test has no such
+  # blind spot: one line of real bootstrap output, however early, defeats it. BLANK AND
+  # WHITESPACE-ONLY lines are exempted from "non-sudo line" (round 23): they are not
+  # evidence the child ran, and counting them as such RED a genuine credential expiry whose
+  # capture happened to contain one — the false accusation again, one blank line over. The
+  # exemption is COMPOSED from the hoisted prefix, never a second spelling of it.
+  PIN_11AT_SUDO_RE='^sudo: '
+  pin_11at_sudo_failed() {
+    [ "$1" -ne 0 ] && out_has "$2" -E "$PIN_11AT_SUDO_RE" \
+      && ! out_has "$2" -vE "$PIN_11AT_SUDO_RE"'|^[[:space:]]*$'
+  }
+
+  # FIXTURE DRIFT IS ITS OWN FAILURE, NAMED AS ITSELF (round 32). The three samples above
+  # are transcribed from bootstrap's own `warn` calls, and the live pass predicate is an
+  # exact `grep -F` on one of them. If bootstrap rewords :2551, the predicate stops
+  # matching and 11at falls to branch 7 — which announces "the guard's decision path went
+  # unexercised", an accusation about the GUARD inferred from a stale fixture. That is
+  # #4287's own defect one level out, and the 29-case harness cannot see it because it
+  # drives the classifier against the same stale literal. So assert the wording still
+  # exists in the subject and report THAT as the cause. Precedent: :7091 pins a function
+  # body out of "$BOOTSTRAP" the same way.
+  pin_11at_bootstrap_src=$(cat "$BOOTSTRAP" 2>/dev/null || true)
+  if [ -z "$pin_11at_bootstrap_src" ]; then
+    bad "gate-pin 11at fixture drift: could not read \$BOOTSTRAP ($BOOTSTRAP) — the fixtures below could not be checked against their subject"
+  else
+    for _pf in PIN_11AT_PASS_SAMPLE PIN_11AT_COEMIT_SAMPLE PIN_11AT_OTHER_REFUSAL_SAMPLE; do
+      if ! out_has "$pin_11at_bootstrap_src" -F -- "${!_pf}"; then
+        bad "gate-pin 11at fixture drift: \$$_pf no longer appears verbatim in $BOOTSTRAP — bootstrap reworded the line this fixture transcribes. THIS IS FIXTURE DRIFT, not a defeated guard and not an unexercised decision path: update the sample to bootstrap's new wording."
+      fi
+    done
+    unset _pf
+  fi
+  unset pin_11at_bootstrap_src
+
+  # THE CLASSIFIER, AS A PURE FUNCTION (rounds 15/17/19 + owner ruling). It takes
+  # (target-exists, rc, captured-output), prints exactly ONE token, asserts nothing and
+  # mutates nothing — so the 11at-cases harness below can drive it with synthetic triples
+  # and pin the BRANCH ORDERING itself. Ordering is where three of this issue's defects
+  # lived and is the one thing no predicate-level control could reach: a control over
+  # `PIN_11AT_RUNNER_RE` cannot notice that the rc test above it changed. The LIVE case
+  # calls this SAME function, so the harness and the behaviour cannot drift.
+  pin_11at_verdict() {
+    if [ "$1" = yes ]; then printf 'defeat\n'; return 0; fi
+    if out_has "$3" -F -- "$PIN_11AT_PASS_SAMPLE"; then printf 'ok\n'; return 0; fi
+    if pin_11at_killed "$2"; then printf 'killed\n'; return 0; fi
+    if { [ "$2" -eq 125 ] || [ "$2" -eq 126 ] || [ "$2" -eq 127 ]; } \
+       && out_has "$3" -E "$PIN_11AT_RUNNER_RE"; then printf 'runner\n'; return 0; fi
+    if pin_11at_sudo_failed "$2" "$3"; then printf 'sudo\n'; return 0; fi
+    if [ -z "$3" ]; then printf 'nooutput\n'; return 0; fi
+    printf 'unexercised\n'
+  }
+
+  # 11at-ctl. A CONTROL FOR 11at's OWN CORROBORATION PATTERN (roborev round 15). Branches
+  #      3-7 above are unreachable on a healthy host, so without this the ERE is asserted
+  #      only in PROSE — the same shape test_roborev_guard_portability.sh refuses ("the
+  #      new branches would be dead code asserted only in prose, which is the same shape
+  #      as the defect they close") and case 13b plants its own probe for. HOST-
+  #      INDEPENDENT OF THE `sudo -n true` GATE BELOW, and deliberately placed above it: it
+  #      classifies fixed sample lines, spawns nothing and needs no sudo, so it must not
+  #      inherit that precondition. It was first written INSIDE that gate, which silently
+  #      made the control itself conditional — the same prose-vs-code gap it exists to
+  #      close, one level up: a host without passwordless sudo would have checked nothing
+  #      while this comment claimed host independence. Keep it above the gate.
+  #      STATED RESIDUAL (round 25): this is still NOT "runs on every host" — both pure
+  #      blocks sit inside block 11's `else`, so a suite run AS ROOT (:3847), or one whose
+  #      tree staging fails, skips them wholesale. Hoisting them to file scope would close
+  #      that; it is deliberately not done here.
+  #      It reads the SAME $PIN_11AT_RUNNER_RE branch 4 reads, so the two cannot drift —
+  #      the `(^|/)` "simplification" the block warns against REDS here instead of
+  #      silently reclassifying a real failure as a never-red skip.
+  pin_ctl_bad=0
+  pin_ctl_why=""
+  for _pc in "/usr/bin/timeout: failed to run command 'x': No such file or directory" \
+             "/opt/homebrew/bin/gtimeout: failed to run command 'x'" \
+             "timeout: failed to run command 'x'" \
+             "env: 'timeout': No such file or directory"; do
+    if ! out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a runner diagnostic: $_pc"
+    fi
+  done
+  for _pc in "bash: /nonexistent/staged.sh: No such file or directory" \
+             "bash: line 1: /usr/bin/env: bad interpreter: No such file or directory" \
+             "sudo: a password is required" \
+             "$PIN_11AT_PASS_SAMPLE"; do
+    if out_has "$_pc" -E "$PIN_11AT_RUNNER_RE"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; FALSE-MATCHED non-runner output: $_pc"
+    fi
+  done
+  unset _pc
+  for _pk in 137 143 130 139 124; do
+    if ! pin_11at_killed "$_pk"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk is a signal death/deadline but was NOT classified killed"
+    fi
+  done
+  for _pk in 0 1 125 126 127; do
+    if pin_11at_killed "$_pk"; then
+      pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; rc=$_pk was WRONGLY classified killed (it must reach the runner/sudo/residual branches)"
+    fi
+  done
+  unset _pk
+  # The SUDO predicate, in BOTH directions. The negatives are the point: sudo's
+  # resolve-host WARNING precedes a run that COMPLETES, so a regex-only test converts a
+  # real branch-7 red into a never-red skip (round 17's F1 — this control is what would
+  # have caught it).
+  if ! pin_11at_sudo_failed 1 "sudo: a password is required"; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a genuine sudo wrapper failure (rc!=0, sudo diagnostic, no bootstrap output)"
+  fi
+  if pin_11at_sudo_failed 0 $'sudo: unable to resolve host h\n'"$PIN_11AT_PASS_SAMPLE"; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED an rc=0 run as a wrapper failure (this pair pins the rc CONJUNCT's short-circuit; the non-sudo-line conjunct is pinned by the rc=1 rows below)"
+  fi
+  if pin_11at_sudo_failed 0 'sudo: unable to resolve host h'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED an rc=0 run as a wrapper failure"
+  fi
+  if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\n'"$PIN_11AT_OTHER_REFUSAL_SAMPLE"; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a run that DID produce bootstrap output as a wrapper failure"
+  fi
+  if pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\nsome early bootstrap output'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a non-zero run that DID produce early (pre-5b) bootstrap output as a wrapper failure — the round-19 blind spot"
+  fi
+  if ! pin_11at_sudo_failed 1 $'sudo: unable to resolve host h\nsudo: a password is required'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; MISSED a wrapper failure whose capture is ALL sudo diagnostics"
+  fi
+  if pin_11at_sudo_failed 1 'bash: /nonexistent/staged.sh: No such file or directory'; then
+    pin_ctl_bad=1; pin_ctl_why="$pin_ctl_why; TREATED a non-sudo child failure as a wrapper failure"
+  fi
+  if [ "$pin_ctl_bad" -eq 0 ]; then
+    ok "gate-pin 11at control: the runner-corroboration ERE matches every runner-diagnostic shape (absolute timeout, absolute gtimeout, bare, env) and NONE of the child/sudo/bootstrap shapes that must stay reportable; and the kill predicate accepts 137/143/130/139/124 while rejecting 0/1/125/126/127; and the sudo predicate fires on a true wrapper failure but NOT on an rc=0 run, a resolve-host WARNING before a completed run, a run that produced bootstrap output, or a non-sudo child failure"
+  else
+    bad "gate-pin 11at control: the runner-corroboration ERE misclassifies${pin_ctl_why}"
+  fi
+
+  # 11at-cases. THE BRANCH-ORDERING HARNESS (owner ruling, after rounds 13-19). The
+  #      11at-ctl control above pins the two corroboration PREDICATES; this pins the
+  #      CLASSIFIER'S ORDER, which is a different property and the one that kept breaking:
+  #      rounds 15, 17 and 19 each shipped a predicate whose own control was green while
+  #      the classification it fed was wrong. HOST-INDEPENDENT and ABOVE the sudo gate for
+  #      the same reason as the control: it drives pin_11at_verdict with synthetic
+  #      (target, rc, output) triples, spawns nothing, needs no sudo, and touches no file.
+  #      It carries the SAME stated residual as the control: inside block 11's `else`, so a
+  #      root-run or staging-failed suite skips it (round 25).
+  #      Each case NAMES the round whose real defect it would have caught, so a future
+  #      "simplification" of the elif order reds here with a pointer to the history.
+  pin_cases_bad=0
+  pin_cases_n=0
+  pin_cases_why=""
+  pin_case() {   # <want> <target-exists> <rc> <out> <label>
+    local want="$1" tgt="$2" rc="$3" out="$4" label="$5" got
+    pin_cases_n=$((pin_cases_n + 1))
+    got=$(pin_11at_verdict "$tgt" "$rc" "$out")
+    if [ "$got" != "$want" ]; then
+      pin_cases_bad=$((pin_cases_bad + 1))
+      pin_cases_why="$pin_cases_why; [$label] want=$want got=$got"
+    fi
+  }
+  # --- the two terminal verdicts -------------------------------------------------------
+  pin_case unexercised no  0   $'gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE must be an ABSOLUTE path)\n'"$PIN_11AT_COEMIT_SAMPLE" "a NON-root-identity SKIPPED beside 5b2's co-emitted PRIVILEGED-write line is NOT the pass [round 27]"
+  pin_case unexercised no  0   "$PIN_11AT_COEMIT_SAMPLE"                       "5b2's sccache-cap refusal ALONE never reads as this case's pass [round 27]"
+  pin_case defeat      yes 0   ""                                              "a written target IS the defeat"
+  pin_case ok          no  0   "$PIN_11AT_PASS_SAMPLE"                         "the REAL root-identity refusal IS the pass"
+  # --- ORDERING: the two that must WIN over any UNMEASURED reason ----------------------
+  pin_case defeat      yes 137 "$PIN_11AT_PASS_SAMPLE"                         "ORDER: a write outranks both pass and kill"
+  pin_case ok          no  137 "$PIN_11AT_PASS_SAMPLE"                         "ORDER: a verdict OBSERVED before a later kill is still the pass"
+  pin_case ok          no  127 $'/usr/bin/timeout: failed to run command\n'"$PIN_11AT_PASS_SAMPLE" "ORDER: an OBSERVED verdict outranks a runner diagnostic [round 32]"
+  # --- killed / deadline: the whole 128+signum range, not a 137/124 pair ---------------
+  pin_case killed      no  137 ""                                              "137 SIGKILL"
+  pin_case killed      no  124 ""                                              "124 is timeout(1) own deadline status"
+  pin_case killed      no  143 ""                                              "143 SIGTERM - a peer cgroup reap [round 15]"
+  pin_case killed      no  130 ""                                              "130 SIGINT [round 15]"
+  pin_case killed      no  139 ""                                              "139 SIGSEGV in the child"
+  pin_case killed      no  137 "/usr/bin/timeout: failed to run command"       "ORDER: kill outranks a runner diagnostic"
+  # --- runner failure: corroborated, and ONLY at 125/126/127 --------------------------
+  pin_case runner      no  127 "/usr/bin/timeout: failed to run command: No such file" "absolute timeout - the PRIMARY linux shape [round 14]"
+  pin_case runner      no  126 "/usr/bin/timeout: failed to run command: Permission denied" "absolute timeout at rc126"
+  pin_case runner      no  127 "/opt/homebrew/bin/gtimeout: failed to run command" "absolute gtimeout on macos [round 14]"
+  pin_case runner      no  127 "env: 'timeout': No such file or directory"     "env: when NO runner resolves - the REAL env(1) shape, matching 11at-ctl [round 14/23]"
+  pin_case runner      no  127 "timeout: failed to run command"                "bare timeout on PATH"
+  pin_case runner      no  125 "timeout: unrecognized option '--badopt'"        "rc=125, the one status exclusively timeout(1)'s own [round 32]"
+  pin_case unexercised no  1   "/usr/bin/timeout: failed to run command"       "ORDER: the runner diagnostic alone is NOT enough - rc must be 125/126/127"
+  # --- sudo wrapper failure: rc!=0, its own diagnostic, and NO other line -------------
+  pin_case sudo        no  1   "sudo: a password is required"                  "a true wrapper failure [round 17]"
+  pin_case sudo        no  1   $'sudo: unable to resolve host h\nsudo: a password is required' "an ALL-sudo capture is still a wrapper failure [round 19]"
+  pin_case sudo        no  1   $'sudo: unable to resolve host h\n\nsudo: a password is required' "an ALL-sudo capture with an interior BLANK line is still a wrapper failure [round 23]"
+  pin_case unexercised no  1   $'sudo: unable to resolve host h\nsome early bootstrap output' "rc!=0 + sudo WARNING + early output must RED, not skip [round 19]"
+  pin_case unexercised no  0   "sudo: unable to resolve host h"                "rc=0 + sudo WARNING must RED, not skip [round 17]"
+  pin_case unexercised no  0   $'sudo: unable to resolve host h\n'"$PIN_11AT_OTHER_REFUSAL_SAMPLE" "a COMPLETED run carrying the sudo warning must RED [round 17]"
+  # --- the residual reds: real regressions that must NOT become skips -----------------
+  pin_case unexercised no  127 "bash: /nonexistent/staged.sh: No such file or directory" "a STAGING REGRESSION must RED [round 13]"
+  pin_case unexercised no  127 "bash: line 1: /usr/bin/env: bad interpreter: No such file" "a child shebang naming /usr/bin/env must RED [round 14]"
+  pin_case unexercised no  1   "bash: /x: No such file or directory"           "a non-sudo child failure at rc=1 must RED"
+  pin_case unexercised no  0   "noise"                                         "completed, output, no refusal -> unexercised"
+  pin_case nooutput    no  0   ""                                              "completed with genuinely EMPTY output"
+  if [ "$pin_cases_bad" -eq 0 ]; then
+    ok "gate-pin 11at classifier: all $pin_cases_n branch-ordering case(s) classify as specified (defeat/ok/killed/runner/sudo/nooutput/unexercised)"
+  else
+    bad "gate-pin 11at classifier: $pin_cases_bad of $pin_cases_n branch-ordering case(s) MISCLASSIFIED$pin_cases_why"
+  fi
+  unset -f pin_case
+
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     pin_liar="$tmp/pin-liar-bin"; mkdir -p "$pin_liar"
     printf '#!/usr/bin/env bash\necho 1000\n' >"$pin_liar/id"; chmod +x "$pin_liar/id"
@@ -4814,15 +5080,161 @@ FAKEGATE
     out_at=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" PATH="$pin_liar:$PATH" \
       CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_liar_target" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL "$PIN_11AT_BOUND_S" "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
-    if out_has "$out_at" 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
-      ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
-    else
+    rc_at=$?
+    # A KILLED RUN IS NOT A DEFEATED GUARD (#4287). The old form was a two-way `if`, so
+    # EVERY non-green reason — including "the deadline fired before the run printed a
+    # single line" — came out as the one sentence "the seam steered a privileged write":
+    # an accusation of a security failure, made from an empty observation. The evidence
+    # printed alongside it was empty too, in both channels, which is what identified the
+    # real cause. So the outcomes are separated, and the ORDER is the classification:
+    #
+    #   1. the target EXISTS            -> the guard was genuinely defeated. A write
+    #                                      landed at an env-chosen path under root; that
+    #                                      is the true positive and stays a `bad`,
+    #                                      whatever the exit status says.
+    #   2. the refusal line is present  -> the decision path was taken and nothing was
+    #                                      written: the pass. Asserted even if the run was
+    #                                      later killed, because the property was already
+    #                                      OBSERVED by then — a deadline that fires after
+    #                                      the verdict changes nothing about the verdict.
+    #   3. killed, or the deadline hit -> UNMEASURED. The test is `rc >= 128 || rc == 124`,
+    #      (rc >= 128, or 124)             NOT a 137/124 pair: 128+signum covers EVERY
+    #                                      signal death, and 137 (SIGKILL) is only one of
+    #                                      them. A peer's cgroup reap or the suite's own
+    #                                      watchdog sends SIGTERM first, and timeout(1)
+    #                                      FORWARDS a signal it receives and exits
+    #                                      128+signum, so an externally reaped run arrives
+    #                                      as 143 — which a 137-only test dropped into 7 and
+    #                                      RED, the same false accusation one signal over
+    #                                      (roborev round 15). MEASURED on coreutils 9.4:
+    #                                      SIGTERM to timeout -> 143, SIGINT -> 130. The
+    #                                      ranges do not overlap: 124/125/126/127 are all
+    #                                      below 128, so branch 4 is unaffected. 124 is
+    #                                      accepted too, since that is what the GNU tool
+    #                                      reports when the child is reaped through the
+    #                                      softer path. MEASURED on
+    #                                      coreutils 9.4 — do NOT "correct" this to
+    #                                      124-always (a review round asserted exactly that
+    #                                      and it is FALSE for `-s KILL`): `timeout -s KILL
+    #                                      1 sleep 5` -> 137, `timeout 1 sleep 5` -> 124.
+    #                                      137 is NOT self-attributing, though, so the
+    #                                      message does not claim the bound fired: an
+    #                                      external SIGKILL lands here identically, and this
+    #                                      case must not name a cause it did not observe —
+    #                                      the very defect #4287 exists to remove.
+    #                                      Announced as a
+    #                                      counted `skip`, this file's category for "the
+    #                                      subject could not be observed" — never an `ok`
+    #                                      (that would be a vacuous green) and never a
+    #                                      `bad` (that would be the false accusation again).
+    #   4. the RUNNER itself failed     -> UNMEASURED, and a SEPARATE branch because it is
+    #      (125 / 126 / 127)               a separate fact. These are timeout(1)'s OWN
+    #                                      documented failure codes — 125 the runner
+    #                                      failed, 126 the command could not be invoked,
+    #                                      127 it was not found — so an unresolvable
+    #                                      `${TIMEOUT_BIN_TEST:-timeout}` lands here.
+    #                                      BUT THEY ARE NOT EXCLUSIVELY timeout(1)'s:
+    #                                      timeout passes the CHILD's status through
+    #                                      verbatim, and the child is `bash "$@"` (PIN_BS),
+    #                                      so a missing staged script or a bootstrap ending
+    #                                      on a command-not-found ALSO yields 127. Reporting
+    #                                      that as UNMEASURED would be this issue's own
+    #                                      defect with the sign flipped — a real staging
+    #                                      regression downgraded to a never-red `skip`
+    #                                      instead of a real success upgraded to a false
+    #                                      accusation. So the branch REQUIRES CORROBORATION
+    #                                      from the RUNNER's own stderr, which `2>&1`
+    #                                      captures. THE PREFIX IS NOT THE LITERAL
+    #                                      `timeout: `: coreutils names itself by argv[0] AS
+    #                                      INVOKED, and TIMEOUT_BIN_TEST holds a `command
+    #                                      -v` ABSOLUTE PATH (:1639), so the real line is
+    #                                      `/usr/bin/timeout: ...` — and `gtimeout` on
+    #                                      macOS, and `env: 'timeout': ...` when NO runner
+    #                                      resolves at all and `env` execs the literal
+    #                                      fallback. Hence
+    #                                      `^(/[^[:space:]:]*/)?(g?timeout|env): `: an
+    #                                      optional absolute path, then the runner's own
+    #                                      name. Anchored at LINE START on purpose — a bare
+    #                                      `(^|/)` would also match a CHILD's `bash: line 1:
+    #                                      /usr/bin/env: bad interpreter`, reclassifying a
+    #                                      real failure as UNMEASURED. An UNCORROBORATED
+    #                                      125/126/127 falls through to 7 and REDS (or to 6
+    #                                      and skips, when the output is empty). MEASURED
+    #                                      on coreutils 9.4: `/usr/bin/timeout 5 missing` ->
+    #                                      127 + "/usr/bin/timeout: failed to run command";
+    #                                      `env missing` -> 127 + "env: 'missing': No such
+    #                                      file"; `timeout 5 bash -c 'bash /nonexistent'` ->
+    #                                      127 + "bash: ... No such file" (NO runner
+    #                                      prefix). The rc is reported verbatim.
+    #   5. the SUDO WRAPPER failed      -> UNMEASURED, corroborated by `^sudo: `. The
+    #      (corroborated)                  capture is `$(sudo -n env ... 2>&1)`, so sudo's
+    #                                      own "a password is required" IS captured and the
+    #                                      output is NOT empty — which is why the old
+    #                                      rationale for branch 6 naming this the
+    #                                      "sudo refusal" case was describing behaviour the
+    #                                      code did not have: it landed in 6 and RED an
+    #                                      environmental failure as an unexercised guard
+    #                                      (roborev round 15). The entry probe passed, so
+    #                                      reaching here means a MID-SUITE credential
+    #                                      expiry.
+    #   6. no output at all             -> UNMEASURED for a cause no status above named. A
+    #                                      RESIDUAL catch-all, not the sudo case: at an
+    #                                      ordinary status with genuinely empty output
+    #                                      there is nothing to attribute, and it must not be
+    #                                      reported as a deadline we never hit nor as a
+    #                                      broken runner.
+    #   7. otherwise                    -> the run COMPLETED, wrote nothing, and never
+    #                                      printed the refusal. No write was observed, so
+    #                                      it is not the defeat message; it is still a
+    #                                      `bad`, because the guard's decision path went
+    #                                      unexercised and the case would otherwise pass
+    #                                      vacuously the day the section stops running.
+    if [ -e "$pin_liar_target" ]; then pin_11at_tgt=yes; else pin_11at_tgt=no; fi
+    case "$(pin_11at_verdict "$pin_11at_tgt" "$rc_at" "$out_at")" in
+      defeat)
       bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
-      printf '%s\n' "$out_at" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_at" | head -2
       ls -l "$pin_liar_target" 2>/dev/null
-    fi
+      ;;
+      ok)
+      ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
+      ;;
+      killed)
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation DIED ON A SIGNAL or hit the deadline before it reached a verdict (rc=$rc_at; 124 IS timeout(1)'s own deadline status, while any rc>=128 is 128+signum — 137 SIGKILL, 143 SIGTERM, 130 SIGINT — and names NO cause: the ${PIN_11AT_BOUND_S}s bound via -s KILL, an OOM kill, a peer's cgroup reap and timeout(1) forwarding a signal it received are indistinguishable by status alone), so the guard was neither confirmed nor defeated (nothing was written)"
+      ;;
+      runner)
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the BOUNDED RUNNER itself could not run the root invocation (rc=$rc_at; 125=the runner failed, 126=the command could not be invoked, 127=not found) CORROBORATED by the RUNNER's own diagnostic in the captured output, so the ${PIN_11AT_BOUND_S}s deadline was never even reached and the guard was neither confirmed nor defeated (nothing was written)"
+      ;;
+      sudo)
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the SUDO WRAPPER itself failed (rc=$rc_at), CORROBORATED by its own '^sudo: ' diagnostic AND by the capture holding NO line that is not a sudo diagnostic (a mid-suite credential expiry is the common cause; the case entry probe passed, so this is environmental), so the root invocation never ran and the guard was neither confirmed nor defeated (nothing was written)"
+      ;;
+      nooutput)
+      skip "gate-pin root-seam lying-'id' case: UNMEASURED — the root invocation produced NO output (rc=$rc_at: neither the ${PIN_11AT_BOUND_S}s deadline nor a runner failure), so the guard was neither confirmed nor defeated (nothing was written)"
+      ;;
+      unexercised)
+      bad "gate-pin: the root-seam refusal never appeared in a run that ENDED (rc=$rc_at) — nothing was written, so this is not an observed privileged write, but the guard's decision path went unexercised"
+      # EVIDENCE MUST NOT BE EMPTY (round 19). This branch's own defining shape is a run
+      # that never reached section 5b, which has NO `gate-pin` line — so the grep that
+      # serves every other branch prints nothing here, leaving an accusation with no
+      # observation attached: #4287's defect one branch over. Branch 6 guarantees
+      # `$out_at` is non-empty, so a raw tail always has something to show.
+      pin_11at_ev=$(grep -i 'gate-pin' <<<"$out_at" | head -2)
+      if [ -n "$pin_11at_ev" ]; then
+        printf '%s\n' "$pin_11at_ev"
+      else
+        tail -5 <<<"$out_at"
+      fi
+      unset pin_11at_ev
+      ;;
+      *)
+      # FAIL CLOSED on a token this dispatch does not know: a classifier that grows an
+      # eighth outcome must not be silently ignored here.
+      bad "gate-pin 11at: pin_11at_verdict returned an UNRECOGNISED verdict token — refusing to classify (rc=$rc_at)"
+      ;;
+    esac
+    unset pin_11at_tgt
     sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
 
     # 11au. SUDO_USER MUST AGREE WITH SUDO_UID (roborev round 8). Trusting the NAME alone
