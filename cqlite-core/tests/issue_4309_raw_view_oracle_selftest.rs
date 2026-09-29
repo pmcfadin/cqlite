@@ -755,25 +755,34 @@ fn an_absent_git_committed_fixture_is_refused_not_skipped() {
 /// refusal above could be satisfied by a `resolve_root` that panics on
 /// everything.
 #[test]
-fn an_absent_fetch_only_fixture_skips_cleanly() {
-    // Guard the environment rather than assume it: under strict mode this
-    // same call is REQUIRED to panic, so the assertion below would be
-    // wrong, and the sweep is run both ways.
+fn an_absent_fetch_only_fixture_skips_or_is_refused_per_strict_mode() {
+    // BOTH CONFIGURATIONS ASSERT SOMETHING (roborev job 80). This case is
+    // the POSITIVE half of the discipline split — the half that stops the
+    // `GitCommitted` refusal above from being satisfied by a `resolve_root`
+    // that panics on everything. Returning early under strict mode made it
+    // assert NOTHING on exactly the strict-mode fetched-corpus run this
+    // module's doc prescribes as the only run that certifies the whole
+    // sweep, while its `should_panic` sibling still passed.
     //
-    // Asks the CODE UNDER TEST what "strict" means (roborev job 77).
-    // Spelling the check `== Ok("1")` here left it out of step with
-    // `require_fixtures_strict`, which accepts `Ok("1") | Ok("true")` — so
-    // `CQLITE_REQUIRE_FIXTURES=true` would make this case assert the
-    // opposite of what the function does. A guard that mirrors a predicate
-    // must BE that predicate.
+    // It asks the CODE UNDER TEST what "strict" means (roborev job 77):
+    // spelling it `== Ok("1")` left it out of step with
+    // `require_fixtures_strict`, which also accepts `Ok("true")`.
+    let spec = absent_spec(Discipline::FetchOnly);
     if raw_view_parity::require_fixtures_strict() {
-        return;
+        let refused = std::panic::catch_unwind(|| resolve_root(&spec));
+        assert!(
+            refused.is_err(),
+            "issue #4309: under CQLITE_REQUIRE_FIXTURES an absent FETCH-ONLY fixture must \
+             PANIC rather than skip — strict mode exists precisely to turn that clean SKIP \
+             into a failure (#972)"
+        );
+    } else {
+        assert!(
+            resolve_root(&spec).is_none(),
+            "issue #4309: an absent FETCH-ONLY fixture is a missing corpus, not a broken \
+             checkout — it must skip cleanly, or the discipline split means nothing"
+        );
     }
-    assert!(
-        resolve_root(&absent_spec(Discipline::FetchOnly)).is_none(),
-        "issue #4309: an absent FETCH-ONLY fixture is a missing corpus, not a broken \
-         checkout — it must skip cleanly, or the discipline split means nothing"
-    );
 }
 
 /// `partition_key_predicate` builds point predicates for INTEGER partition

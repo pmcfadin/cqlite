@@ -309,6 +309,21 @@
 //! drift apart. Flagged as a consolidation candidate so the duplication is a
 //! recorded decision rather than an accident — the #4222 lanes are the ones
 //! to migrate, and this module is the destination.
+//!
+//! FIFTH INSTANCE, recorded for the same reason (roborev job 80):
+//! `load_goldens`' generation-directory pick — root via
+//! `sstables_root_for_table`, then the lexicographically first
+//! `Data.db`-bearing entry of `table_generation_dirs` — is the same rule
+//! `datasets_root::resolve_table_generation_dir` composes. It is not called
+//! because this harness needs the FULL directory list as well, for the
+//! skipped-sibling notice, and `resolve_table_generation_dir` returns only
+//! the pick (so using it would mean resolving the root twice and reading
+//! the directory twice). Both copies are built on the SAME shared primitive,
+//! `table_generation_dirs`, which is where the sort and the
+//! `Data.db`-bearing filter actually live — so what is duplicated is the
+//! two-line composition, not the selection rule itself. #3220 is the
+//! standing warning about copies of one selection rule drifting; this is
+//! logged so it is a decision.
 
 #![allow(dead_code)]
 

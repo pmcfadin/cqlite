@@ -354,39 +354,30 @@ pub fn classify_columns(columns: &[ColumnInfo], spec: &FixtureSpec) -> ColumnRol
     );
     let clustering_columns = key_columns[pk.len()..].to_vec();
 
-    // THE KEY-BOUNDARY SCAN MUST HAVE STOPPED AT A REAL BASE COLUMN
-    // (roborev job 67). `boundary` is true only for `row_timestamp` or a
-    // name already classified simple/complex, so a base column that ever
-    // reached the contract WITHOUT a `_timestamp` or `_complex_deletion`
-    // sibling would not stop the `take_while` — it, and every metadata
-    // column after it up to `row_timestamp`, would be absorbed into
-    // `clustering_columns`. The sweep would then compare golden clustering
-    // components against metadata columns and report a torrent of
-    // mismatches blaming the view for a classification bug. Nothing in the
-    // current contract has that shape, which is exactly why it needs
-    // asserting rather than assuming.
-    for name in &clustering_columns {
-        let synthesized = name.ends_with("_timestamp")
-            || name.ends_with("_ttl")
-            || name.ends_with("_local_deletion_time")
-            || name.ends_with("_tombstone")
-            || name.contains("_complex_deletion");
-        let always_applicable = ROW_LEVEL_METADATA
-            .iter()
-            .chain(PARTITION_METADATA)
-            .chain(RANGE_METADATA)
-            .chain(DECLARED_GAP_COLUMNS)
-            .any(|n| n == name);
-        assert!(
-            !synthesized && !always_applicable,
-            "issue #4309: {}'s key-boundary scan absorbed '{name}' into the clustering \
-             columns {clustering_columns:?}. That is a synthesized or always-applicable \
-             contract column, not a clustering key — the scan stops at the first base \
-             column, so a base column reaching the contract with no `_timestamp` or \
-             `_complex_deletion` sibling would let the scan run past it",
-            spec.id()
-        );
-    }
+    // DECLARED GAP: the key-boundary scan is NOT verified (roborev job 80).
+    //
+    // `boundary` is true only for `row_timestamp` or a name already
+    // classified simple/complex, so a base column reaching the contract
+    // WITHOUT a `_timestamp` or `_complex_deletion` sibling would not stop
+    // the `take_while` and would be absorbed into `clustering_columns`.
+    //
+    // A name-shaped guard was added here for that and then REMOVED, because
+    // it was wrong in both directions. It could not catch the scenario its
+    // own comment named — such a column has an ordinary name (`payload`),
+    // so it matches neither the synthesized-suffix test nor the
+    // always-applicable list — and it could FALSE-FAIL on a legitimate
+    // schema whose clustering column is named `event_timestamp` or
+    // `created_ttl`. A guard that reds on correct input is the guard agents
+    // learn to waive (CLAUDE.md), which is worse than the hole.
+    //
+    // The real fix is DECLARATIVE, not a name heuristic: add
+    // `clustering_key_columns: &'static [&'static str]` to `FixtureSpec`,
+    // mirroring `partition_key_columns`, and assert `clustering_columns`
+    // equals it. That detects both scenarios with no heuristic, and it is
+    // deferred to #4314 because it touches every case declaration in all
+    // three lanes. Every fixture in the sweep today has an explicit
+    // `_timestamp` sibling for each base column, so the hole is unreachable
+    // by the current corpus.
 
     let mut compared_columns: Vec<String> = Vec::new();
     for c in &simple_columns {
