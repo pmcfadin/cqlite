@@ -10754,14 +10754,12 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # above means any stderr text would be read as the value, and `$((10 * <text>))` under
   # this file's `set -u` is a FATAL shell error that would silently kill the whole suite
   # mid-run, not just this case.
-  if [[ ! "$stale_secs" =~ ^[0-9]+$ ]]; then
-    fail "obj-sweep(claim-fresh-control): the derived stale bound came back '$stale_secs' -- every timing bound below would be vacuous"
-    # MATCH THE unset BELOW: this return skips it otherwise, leaking
-    # OBJ_SWEEP_CLAIM_SLACK_SECS/OBJ_SWEEP_CLAIM_POLL_SECS (common_env only unsets
-    # OBJ_SWEEP_STAMP/OBJ_SWEEP_TIMEOUT_SECS) into every later case in this shared shell.
-    unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
-    return
-  fi
+  # GUARDS ONLY THIS SUB-CASE, DELIBERATELY: an earlier version `return`ed the whole
+  # function on an invalid derivation, silently dropping (c2)/(d)/(e) too -- none of which
+  # depend on `stale_secs` -- and reporting one red with no indication three untested
+  # properties never ran. Wrapping in `if` instead lets them proceed either way; the shared
+  # `unset` below already runs unconditionally after this block closes.
+  if [[ "$stale_secs" =~ ^[0-9]+$ ]]; then
   planted_started="$(date +%s)"
   printf '%s\n' "$planted_started" >"$claim/started"
   # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
@@ -10789,7 +10787,14 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # `obj_sweep_claim_release`'s `rm -rf`), so a stall can be attributed by NAME, from a
   # record that survives claim removal, rather than left to
   # degrade into the generic outcome failure below or misattributed as a fixture fault when
-  # the regression is real.
+  # the regression is real. THE TWO WRITES (claim, ticks) ARE DELIBERATELY NOT CHAINED
+  # TOGETHER in the loop below: an earlier version appended the tick only after the claim
+  # write succeeded, so on a GENUINE regression -- the supervisor takes the claim over and
+  # its EXIT trap removes it -- every subsequent claim write failed and the tick record
+  # froze right along with it, contradicting the "survives claim removal" claim above and
+  # putting the same attribution inversion round 6 fixed back into the diagnostic instead
+  # of the verdict. The tick append is gated ONLY on `$ticks` itself (under `$d`, never
+  # removed), independent of whether the claim write succeeds.
   max_refresher_ticks=6000
   fixture_bg bash -c '
     claim="$1" live="$2" ticks="$3" max_ticks="$4"
@@ -10799,24 +10804,30 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # %N is GNU-only; a BSD/macOS date emits it literally -- probe and fall back.
       tick="$(date +%s.%N)"
       case "$tick" in *N) tick="$now" ;; esac
+      # decoupled from the claim write on purpose -- see the outer comment above this loop.
       printf "%s\n" "$now" >"$claim/started.tmp.$$" 2>/dev/null &&
-        mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null &&
-        { printf "%s\n" "$tick" >>"$ticks" 2>/dev/null && : >"$live"; }
+        mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null
+      printf "%s\n" "$tick" >>"$ticks" 2>/dev/null && : >"$live"
       sleep 0.2
       i=$((i + 1))
     done
   ' _ "$claim" "$live" "$ticks" "$max_refresher_ticks" >/dev/null 2>&1
   refresh_pid=$FIXTURE_LAST_PID
-  # BARRIER BUDGET is 10x `stale_secs`, in 0.1s polls — a re-typed literal here (the ORIGINAL
+  # BARRIER BUDGET is 4x `stale_secs`, in 0.2s polls (matching the refresher's own tick
+  # period, an interval this file already uses elsewhere, rather than a finer one that
+  # only adds forks without shortening the wait) — a re-typed literal here (the ORIGINAL
   # finding: a bare "3s") can itself go red on the same loaded box #4282 is about, since the
   # refresher is spawned through the identical fork/exec path the comment above says can be
-  # slow to schedule under load.
-  barrier_secs=$((10 * stale_secs))
-  barrier_ticks=$((barrier_secs * 10))
+  # slow to schedule under load. 4x (not the original 10x) keeps a genuine barrier MISS from
+  # ballooning this file's own <30s total-runtime target while still comfortably outlasting
+  # the fork/exec scheduling delays #4250/#4252 measured -- the barrier only needs to
+  # outlast that scheduling latency once, not cover ten full wait budgets.
+  barrier_secs=$((4 * stale_secs))
+  barrier_ticks=$((barrier_secs * 5))
   live_waited=0
   barrier_started="$(date +%s)"
   while [[ ! -e "$live" && "$live_waited" -lt "$barrier_ticks" ]]; do
-    sleep 0.1
+    sleep 0.2
     live_waited=$((live_waited + 1))
   done
   if [[ ! -e "$live" ]]; then
@@ -10826,7 +10837,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # Reporting it as `fail` would convert a load-induced scheduling miss into a
     # differently-shaped load-induced red, after burning up to `barrier_secs` of wall clock.
     # MEASURE the actual elapsed wall clock rather than assert the BUDGET (`barrier_secs`):
-    # 500 external `sleep 0.1` invocations do not take 50s under load, only AT LEAST 50s, so
+    # 100 external `sleep 0.2` invocations do not take 20s under load, only AT LEAST 20s, so
     # reporting the budget as if it were a measurement is the same misattribution class this
     # whole change is about.
     barrier_elapsed=$(( $(date +%s) - barrier_started ))
@@ -10836,7 +10847,12 @@ test_object_store_sweep_claim_recovers_when_stale() {
     root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
     env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
     rc=$?
-    ended="$(date +%s)"
+    # SAME sub-second capture (+ GNU/BSD fallback) as the refresher's own ticks: mixing a
+    # whole-second `ended` with sub-second tick values understated the virtual final gap by
+    # up to ~1s -- against a `stale_secs` of 5 that is a 20% leniency in exactly the
+    # direction that admits a vacuous pass.
+    ended="$(date +%s.%N)"
+    case "$ended" in *N) ended="$(date +%s)" ;; esac
     fixture_kill "$refresh_pid"
     # OUTCOME FIRST, DELIBERATELY: a real regression (the supervisor ages the claim, takes
     # it over, sweeps, and its EXIT trap removes `$claim` entirely) must never be masked
@@ -10861,12 +10877,18 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # immediately followed by nothing until `fixture_kill` shows up as a gap of ~`stale_secs`
     # to `ended`, not as "the last tick was recent" (it never advances past that one tick).
     tick_count="$(wc -l <"$ticks" 2>/dev/null || echo 0)"
-    max_gap="$(awk -v e="$ended" 'NR>1{d=$1-p; if(d>m)m=d} {p=$1} END{d=e-p; if(d>m)m=d; printf "%.2f", m+0}' "$ticks" 2>/dev/null || echo 0)"
+    # LC_ALL=C on BOTH awk calls below (this one and the comparison further down): gawk
+    # honours LC_NUMERIC for `printf %f`, so under a locale with a comma decimal separator
+    # this would emit e.g. "0,20", which the SECOND awk (below) parses numerically as the
+    # integer 0 -- silently disabling the non-vacuity check below for every run on such a
+    # locale, which is the exact vacuous pass this check exists to prevent. Pinning C here
+    # avoids a value ever round-tripping through a locale-formatted string.
+    max_gap="$(LC_ALL=C awk -v e="$ended" 'NR>1{d=$1-p; if(d>m)m=d} {p=$1} END{d=e-p; if(d>m)m=d; printf "%.2f", m+0}' "$ticks" 2>/dev/null || echo 0)"
     # Float compare (max_gap carries sub-second precision; bash arithmetic is integer-only).
     # `>=`, not `>`: the ORIGINAL end-anchored check used strict `<` against `stale_secs`,
     # which let a gap of EXACTLY `stale_secs` (the single-early-tick case above, precisely)
     # through as a false PASS at the boundary.
-    if [[ "$outcome_ok" -eq 1 ]] && awk -v g="$max_gap" -v s="$stale_secs" 'BEGIN{exit !(g>=s)}'; then
+    if [[ "$outcome_ok" -eq 1 ]] && LC_ALL=C awk -v g="$max_gap" -v s="$stale_secs" 'BEGIN{exit !(g>=s)}'; then
       # NON-VACUITY, reported as `skip` rather than `fail`: the OUTCOME matched (the
       # supervisor behaved correctly), but this run's OWN fixture cannot certify that it
       # exercised the fix under test rather than getting lucky on timing -- the identical
@@ -10882,6 +10904,9 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # starved" from a genuine behavioural regression.
       fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) refresher_ticks=$tick_count refresher_max_gap=${max_gap}s (see $d/fresh.log)"
     fi
+  fi
+  else
+    fail "obj-sweep(claim-fresh-control): the derived stale bound came back '$stale_secs' -- every timing bound in this sub-case would be vacuous"
   fi
   unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
   # (c2) THE `expired` PATH, WHICH IS ROUND 12'S NON-PERMISSIVE OUTCOME AND ONE PROPERTY
@@ -10904,6 +10929,17 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # Derived from the pinned knobs, never re-typed: MAX_SWEEP_WALKS(3) x 1 + 4 = 7s, planted
   # 4s old, so the claim's own deadline is ~3s out while the outer budget is ~7s — the one
   # arrangement in which `expired` and not `exhausted` is the outcome.
+  #
+  # ROBOREV ROUND 9 FLAGGED this one-shot plant as exposed to the SAME launch-latency race
+  # #4282 fixed in (c), with a TIGHTER margin (~3s here vs (c)'s ~5s). A continuous-refresh
+  # port of (c)'s fix was ATTEMPTED and REVERTED: rewriting `started` to `now - 4` on every
+  # tick keeps the observed age PERMANENTLY at 4s, so the claim can never age far enough to
+  # cross its own 7s deadline at all -- the sub-case failed 100% of the time under that
+  # "fix" (case (c) wants the age to stay near ZERO forever, simulating a peer that never
+  # finishes; this case needs the age to advance PAST the threshold, which a value pinned
+  # to a fixed relative offset cannot do). Closing this race for real needs the plant timed
+  # relative to the supervisor's OWN observed launch, which this file has no hook for
+  # without instrumenting production code -- tracked as a follow-up rather than rushed here.
   printf '%s\n' "$(( $(date +%s) - 4 ))" >"$claim/started"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/expired.log" 2>&1
