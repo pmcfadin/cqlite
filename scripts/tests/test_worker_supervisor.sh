@@ -10629,11 +10629,19 @@ t test_object_store_sweep_claim_wait_completed_stops_contending
 #
 # The recovery bound is DERIVED (see obj_sweep_claim_stale_secs) and the derivation itself
 # is asserted below, from the shipped files, so this case does not re-type it either.
+#
+# SHARED with test_object_store_sweep_max_gap_awk_property below (roborev job 53 F2): ONE
+# definition of the (c) sub-case's tick-gap liveness program, used by both the case itself
+# and the mutant test that pins it, so a change to the logic and a change to what is tested
+# cannot drift apart -- the same "re-typed relation" lesson MAX_SWEEP_WALKS taught this file,
+# one level up. `l`=launched (job 45: ticks before it only seed `p`, never count as a gap),
+# `e`=ended (folded in as a virtual final tick, per the comment at its use site).
+OBJ_SWEEP_MAX_GAP_AWK='$1<l{p=$1;next} {if(p!=""){d=$1-p; if(d>m)m=d} p=$1} END{if(p!=""){d=e-p; if(d>m)m=d} printf "%.2f", m+0}'
 test_object_store_sweep_claim_recovers_when_stale() {
   local d root calls counter rc claim bound fns walks per_walk want got
   local refresh_pid planted_started ended live live_waited stale_secs ticks tick_count max_gap
   local barrier_secs barrier_ticks max_refresher_ticks outcome_ok barrier_started barrier_elapsed
-  local gap_exceeds stub_walks launched max_gap_valid
+  local gap_exceeds launched max_gap_valid
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10747,45 +10755,36 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # fixed cost of `git init`/`commit`/the two `cp`s is paid before the tick record
   # begins at all, rather than between the barrier and the launch.
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
-  # `stale_secs` is the case's own derived stale/takeover threshold, computed ONCE here so
-  # every timing bound below (the refresher's start barrier and the end-anchored liveness
-  # check) derives from the SAME number rather than a re-typed literal narrower than it — a
-  # re-typed, tighter bound would fail a stall the wait itself tolerates, which is the same
-  # class of flake #4282 was about. Re-invokes the SAME extracted `obj_sweep_claim_stale_secs`
-  # (a) already sourced into `$fns`, with THIS case's compressed overrides, rather than
-  # hand-typing the relation a fourth time in this function — (a)'s own `got` assert already
-  # fails loudly if the shipped relation moves; a hand-typed copy here would not.
-  stale_secs="$(bash -c 'set -uo pipefail; OBJ_SWEEP_TIMEOUT_SECS="'"$OBJ_SWEEP_TIMEOUT_SECS"'"; OBJ_SWEEP_CLAIM_SLACK_SECS="'"$OBJ_SWEEP_CLAIM_SLACK_SECS"'"; . "$1"; obj_sweep_claim_stale_secs "$2"' _ "$fns" "$REPO_ROOT/scripts/check-object-store-integrity.sh" 2>&1)"
-  # `stale_secs` ABOVE IS DERIVED FROM THE REAL SHIPPED SCRIPT, BUT THE SUPERVISOR UNDER TEST
-  # BELOW READS THE STUB `obj_sweep_tree` WRITES ABOVE (roborev job 45). The two agree only
-  # by coincidence unless asserted -- if the shipped script's own MAX_SWEEP_WALKS ever moves,
-  # `stale_secs` silently stops matching the bound the supervisor actually enforces,
-  # reintroducing the exact misattribution (a healthy run reads as a regression, or a real
-  # regression reads as healthy) this whole case exists to remove. Compares the STUB'S OWN
-  # declaration (read out of `$root`, the tree the supervisor actually runs against), not a
-  # hand-typed literal (roborev job 49 F2: a hand-typed `stub_walks=3` cannot detect the stub
-  # itself drifting) -- against `$walks`, (a)'s own already-parsed-and-validated read of the
-  # real script (roborev job 49 F3: re-deriving it here risked disagreeing with (a) on a line
-  # `(a)`'s stricter normalization would accept differently). A mismatch is environmental
-  # drift in this fixture, not a supervisor regression, so it reports `skip`, not `fail` (same
-  # convention as the barrier-miss path).
-  stub_walks="$({ grep -m1 '^MAX_SWEEP_WALKS=' "$root/scripts/check-object-store-integrity.sh" || true; } 2>/dev/null)"
-  stub_walks="${stub_walks#MAX_SWEEP_WALKS=}"
+  # `stale_secs` is derived from the STUB (`$root`), NOT the real shipped script (roborev
+  # job 53, superseding jobs 45/49's equality-guard approach): the supervisor under test
+  # below reads the stub `obj_sweep_tree` wrote above, so deriving this case's own threshold
+  # from anything else risks the two disagreeing -- and unlike an assert, a `skip`-on-
+  # mismatch GUARD cannot stop that from silently and PERMANENTLY retiring this property the
+  # moment the shipped script's MAX_SWEEP_WALKS moves (`skip` never fails the suite -- only
+  # `FAIL_COUNT` gates the exit, so a guard that routes drift to `skip` is the exact
+  # "vacuous green" class the rest of this file is written against). Deriving directly from
+  # the stub makes the two agree BY CONSTRUCTION, with no guard needed. (a)'s own `got`/`want`
+  # assert already independently pins the SHIPPED script's own relation -- a different
+  # property (the derivation FUNCTION is correct) from this case's (the THRESHOLD matches
+  # what THIS fixture's supervisor will read). Re-invokes the SAME extracted
+  # `obj_sweep_claim_stale_secs` (a) already sourced into `$fns`, with THIS case's compressed
+  # overrides, rather than hand-typing the relation a fourth time in this function.
+  stale_secs="$(bash -c 'set -uo pipefail; OBJ_SWEEP_TIMEOUT_SECS="'"$OBJ_SWEEP_TIMEOUT_SECS"'"; OBJ_SWEEP_CLAIM_SLACK_SECS="'"$OBJ_SWEEP_CLAIM_SLACK_SECS"'"; . "$1"; obj_sweep_claim_stale_secs "$2"' _ "$fns" "$root/scripts/check-object-store-integrity.sh" 2>&1)"
   # GUARDED THE SAME WAY (a) GUARDS walks/per_walk/bound: an undecided derivation (the
   # function returns 1 with no output when it cannot read MAX_SWEEP_WALKS) must not reach
-  # the arithmetic below as an empty string -- `barrier_secs=$((10 * stale_secs))` on an
-  # empty value fails BEFORE this case even attempts to schedule the refresher, misreporting
-  # a derivation failure as "never ticked once in 0s", the same misattribution class the
-  # liveness rework was about. It must also never reach arithmetic UNVALIDATED: the `2>&1`
-  # above means any stderr text would be read as the value, and `$((10 * <text>))` under
-  # this file's `set -u` is a FATAL shell error that would silently kill the whole suite
-  # mid-run, not just this case.
+  # the arithmetic below as an empty string -- `barrier_secs` (below) on an empty value fails
+  # BEFORE this case even attempts to schedule the refresher, misreporting a derivation
+  # failure as "never ticked once in 0s", the same misattribution class the liveness rework
+  # was about. It must also never reach arithmetic UNVALIDATED: the `2>&1` above means any
+  # stderr text would be read as the value, and `$((... <text>))` under this file's `set -u`
+  # is a FATAL shell error that would silently kill the whole suite mid-run, not just this
+  # case.
   # GUARDS ONLY THIS SUB-CASE, DELIBERATELY: an earlier version `return`ed the whole
   # function on an invalid derivation, silently dropping (c2)/(d)/(e) too -- none of which
   # depend on `stale_secs` -- and reporting one red with no indication three untested
   # properties never ran. Wrapping in `if` instead lets them proceed either way; the shared
   # `unset` below already runs unconditionally after this block closes.
-  if [[ "$stale_secs" =~ ^[0-9]+$ && "$walks" == "$stub_walks" ]]; then
+  if [[ "$stale_secs" =~ ^[0-9]+$ ]]; then
     planted_started="$(date +%s)"
     printf '%s\n' "$planted_started" >"$claim/started"
     # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
@@ -10849,6 +10848,12 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # the fork/exec scheduling delays #4250/#4252 measured -- the barrier only needs to
     # outlast that scheduling latency once, not cover ten full wait budgets.
     barrier_secs=$((4 * stale_secs))
+    # ABSOLUTE CEILING (roborev job 53 F4): at this case's `stale_secs` that is already 20s,
+    # burned on exactly the loaded-box path #4282 is about, in a file whose own header
+    # targets <30s total -- and it is burned on a path that then reports `skip` (no verdict
+    # at all). The barrier only needs to outlast ONE fork/exec scheduling delay (see the
+    # comment above), not scale with `stale_secs` without limit.
+    [[ "$barrier_secs" -le 8 ]] || barrier_secs=8
     barrier_ticks=$((barrier_secs * 5))
     live_waited=0
     barrier_started="$(date +%s)"
@@ -10921,7 +10926,10 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # is real elapsed time but not time the property under test cares about, so a stall
       # there must not count as a gap. The first POST-launch tick's gap is still measured
       # against that seeded `p`, so a stall spanning the launch instant itself is still caught.
-      max_gap="$(LC_ALL=C awk -v e="$ended" -v l="$launched" '$1<l{p=$1;next} {if(p!=""){d=$1-p; if(d>m)m=d} p=$1} END{if(p!=""){d=e-p; if(d>m)m=d} printf "%.2f", m+0}' "$ticks" 2>/dev/null)"
+      # `$OBJ_SWEEP_MAX_GAP_AWK` (defined once, above this function -- see the comment there)
+      # is the SAME program `test_object_store_sweep_max_gap_awk_property` pins with a
+      # mutant demonstration (roborev job 53 F2), never a re-typed copy.
+      max_gap="$(LC_ALL=C awk -v e="$ended" -v l="$launched" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks" 2>/dev/null)"
       # FAIL CLOSED, not open: an awk error (missing binary, unreadable `$ticks`, ENOSPC) or
       # any output that is not a plain `N.NN` number is tracked SEPARATELY as `max_gap_valid=0`
       # (roborev job 49 F1 -- the prior version folded this into `gap_exceeds` alone, which
@@ -10975,8 +10983,6 @@ test_object_store_sweep_claim_recovers_when_stale() {
         fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) refresher_ticks=$tick_count refresher_max_gap=${max_gap}s (see $d/fresh.log)"
       fi
     fi
-  elif [[ "$stale_secs" =~ ^[0-9]+$ ]]; then
-    skip "obj-sweep(claim-fresh-control): the shipped script's MAX_SWEEP_WALKS ('$walks') no longer matches this fixture's stub ('$stub_walks') -- stale_secs would be derived from a bound the supervisor under test does not actually read, so this run cannot be credited either way (update the stub in obj_sweep_tree to match)"
   else
     fail "obj-sweep(claim-fresh-control): the derived stale bound came back '$stale_secs' -- every timing bound in this sub-case would be vacuous"
   fi
@@ -11072,6 +11078,69 @@ test_object_store_sweep_claim_recovers_when_stale() {
 }
 
 t test_object_store_sweep_claim_recovers_when_stale
+
+# Test (#4282, roborev job 53 F2): PINS THE `max_gap` AWK PROGRAM ITSELF (shared as
+# `$OBJ_SWEEP_MAX_GAP_AWK`, defined above `test_object_store_sweep_claim_recovers_when_stale`),
+# not just the case that uses it. That case's own `claim-fresh-control` sub-case only
+# exercises the "everything healthy" path in a green run -- nothing previously demonstrated
+# the program actually REDDENING (reporting a large gap) under a starved refresher, nor
+# that it correctly EXCLUDES the pre-launch setup window (job 45), nor that a measurement
+# outage fails closed through the case's own sentinel path -- the "a property stopped being
+# tested and nobody noticed" class this file elsewhere guards against with a recorded
+# mutant demonstration (cf. test_no_fixture_processes_leak). Feeds synthetic ticks +
+# launched/ended pairs through the SAME shared program the case uses.
+test_object_store_sweep_max_gap_awk_property() {
+  local d ticks got
+  d="$(new_case_dir)"
+  ticks="$d/ticks"
+
+  # (1) HEALTHY: evenly spaced ticks entirely after `launched`, `ended` shortly past the
+  # last one -- every gap is a normal ~0.2s tick period, nowhere near a 5s bound.
+  printf '10.0\n10.2\n10.4\n10.6\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="10.8" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "0.20" ]]; then
+    pass "obj-sweep(max-gap-awk-healthy): an evenly-ticked record reports the true per-tick gap (${got}s), not a sentinel"
+  else
+    fail "obj-sweep(max-gap-awk-healthy): got '$got', wanted '0.20'"
+  fi
+
+  # (2) STARVED: the refresher ticks twice near the start, then never again -- the guard
+  # must REDDEN (report the large gap to `ended`), proving it can fire and is not
+  # permanently satisfied by one early tick (the exact defect round 10 fixed).
+  printf '10.0\n10.2\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="16.0" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "5.80" ]]; then
+    pass "obj-sweep(max-gap-awk-starved): a refresher that stops ticking mid-run is caught as a large gap to \`ended\` (${got}s), not masked by an earlier healthy tick"
+  else
+    fail "obj-sweep(max-gap-awk-starved): got '$got', wanted '5.80'"
+  fi
+
+  # (3) PRE-LAUNCH WINDOW EXCLUDED (job 45): a large gap entirely BEFORE `launched` (the
+  # `obj_sweep_tree` setup cost) must not count, but the largest REMAINING gap must still be
+  # reported -- proving the windowing narrows what counts without silently zeroing it out.
+  printf '10.0\n14.9\n15.1\n15.3\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="16.0" -v l="15.0" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "0.70" ]]; then
+    pass "obj-sweep(max-gap-awk-prelaunch): a 4.9s gap entirely before \`launched\` is excluded, and the largest remaining gap (${got}s, ended-to-last-tick) is still reported"
+  else
+    fail "obj-sweep(max-gap-awk-prelaunch): got '$got', wanted '0.70'"
+  fi
+
+  # (4) UNMEASURABLE, FAILS CLOSED (roborev job 49 F1's sentinel path): an unreadable tick
+  # file makes awk itself produce no output (redirected away by the case's own `2>/dev/null`
+  # convention, reproduced verbatim here) -- the case's separate validation regex, re-invoked
+  # exactly as it appears at the call site, must reject the empty result and force the
+  # sentinel rather than accepting it as "no gap detected".
+  got="$(LC_ALL=C awk -v e="16.0" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$d/does-not-exist" 2>/dev/null)"
+  [[ "$got" =~ ^[0-9]+\.[0-9][0-9]$ ]] || got="999999.00"
+  if [[ "$got" == "999999.00" ]]; then
+    pass "obj-sweep(max-gap-awk-unmeasurable): an unreadable tick record fails closed to the sentinel via the case's own validation regex, never a silent 'no gap detected'"
+  else
+    fail "obj-sweep(max-gap-awk-unmeasurable): got '$got' -- the sentinel guard did not fire"
+  fi
+}
+
+t test_object_store_sweep_max_gap_awk_property
 
 # THE CLAIM IS A REGISTERED RESOURCE, NOT ONE WHOSE LIFETIME NOBODY OWNS (#3749 review
 # round 5, item 2; CLAUDE.md's roborev-job-282 ruling that a fix which ADDS a resource
