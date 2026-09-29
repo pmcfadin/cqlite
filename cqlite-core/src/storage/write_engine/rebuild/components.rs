@@ -351,7 +351,7 @@ pub async fn rebuild_components(
                     iw.add_partition_with_promoted(&decorated_key, *offset, &blocks)?;
                 if let Some(sw) = summary_writer.as_mut() {
                     sw.note_partition(&decorated_key);
-                    if summary_sample_counter % sample_interval == 0 {
+                    if summary_sample_counter.is_multiple_of(sample_interval) {
                         sw.add_entry(&decorated_key, entry_info.index_offset)?;
                     }
                     summary_sample_counter += 1;
