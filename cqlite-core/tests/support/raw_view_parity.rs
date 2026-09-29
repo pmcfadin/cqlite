@@ -322,7 +322,10 @@ pub mod golden;
 
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::types::Value;
-use cqlite_core::{ingestion::ingest, ingestion::IngestionConfig, Config, Database};
+use cqlite_core::{
+    ingestion::ingest_with_selection, ingestion::IngestionConfig, ingestion::TableDirSelection,
+    Config, Database,
+};
 use datasets_root::{describe_search, schema_path, sstables_root_for_table};
 use golden::{
     build_expectations, classify_columns, fact_of, load_goldens, render_actual_clustering,
@@ -529,39 +532,37 @@ async fn open_database(spec: &FixtureSpec, root: &Path, generation_dir: &Path) -
         data_dir: root.to_path_buf(),
         version_hint: None,
         core_config: Config::default(),
-        // GENERATION-DIRECTORY-granular, not merely table-granular (roborev
-        // job 61). `table_directory_filter` is a SUBSTRING match, so the old
-        // `/<ks>/<table>-` form loaded EVERY `<table>-<uuid>/` directory —
-        // three of them for several `test_deltas` tables — while
-        // `load_goldens` now binds to one. Oracle and query must read the
-        // SAME generation directory or the sweep compares a view built from
-        // data it has no golden for. Interpolating the chosen directory's
-        // own name makes the substring unique to it, so the two agree BY
-        // CONSTRUCTION rather than by the accident that the extra
-        // directories happen to ship sidecars only.
-        //
-        // NO TRAILING SLASH: the filter is matched against the table
-        // DIRECTORY paths themselves (`select_table_dirs` over
-        // `service_summary.table_directories`), which carry none — appending
-        // one matches nothing and yields a silent 0-row database. The
-        // `<table>-<uuid>` name is fixed-length-unique anyway, so no other
-        // generation directory can contain it as a substring.
-        table_directory_filter: Some(format!(
-            "/{}/{}",
-            spec.keyspace,
-            generation_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_else(|| panic!(
-                    "issue #4309: {}'s generation directory {} must have a readable name",
-                    spec.id(),
-                    generation_dir.display()
-                ))
-        )),
+        // NOT USED. Exactly one directory is required here, and a
+        // SUBSTRING FILTER CANNOT EXPRESS THAT (roborev job 62).
+        // `IngestionConfig::table_directory_filter`'s own doc says so for
+        // exactly this shape: a filter of `/<ks>/<table>-<uuid>` also
+        // matches a SIBLING whose name EXTENDS it
+        // (`<table>-<uuid>-backup`), which silently adds generations to the
+        // ingest. An earlier attempt here argued the `<uuid>` made the
+        // substring safe; that addresses uuid-vs-uuid collision, not name
+        // EXTENSION, which is the documented counterexample (#3234). The
+        // selection is made with `TableDirSelection::Exact` below, which
+        // compares canonicalized complete path components.
+        table_directory_filter: None,
     };
-    let result = ingest(cfg)
+    let only = [generation_dir.to_path_buf()];
+    let result = ingest_with_selection(cfg, TableDirSelection::Exact(&only))
         .await
         .unwrap_or_else(|e| panic!("ingestion of {} must succeed: {e}", spec.id()));
+    // FAIL CLOSED on the selection not being exactly the oracle's directory.
+    // The whole point of the pin is that oracle and query read the SAME
+    // bytes; asserting it costs nothing and turns a silent extra generation
+    // into a named failure instead of a misleading "the raw view attributed
+    // a row to '<sstable>', which has no sstabledump golden".
+    assert_eq!(
+        result.discovery_summary.table_directories.len(),
+        1,
+        "issue #4309: {} must ingest EXACTLY the generation directory its oracle read \
+         ({}), got {:?}",
+        spec.id(),
+        generation_dir.display(),
+        result.discovery_summary.table_directories
+    );
     assert!(
         result.schema_load_result.schemas_loaded > 0,
         "the committed schema must load for {}, else the raw view would refuse with \

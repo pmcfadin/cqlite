@@ -71,8 +71,8 @@ use cqlite_core::query::result::ColumnInfo;
 use raw_view_parity::golden::Fact;
 use raw_view_parity::golden::RowIdentity;
 use raw_view_parity::golden::{
-    build_expectations, classify_columns, ColumnRoles, GoldenSstable, DECLARED_GAP_COLUMNS,
-    PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA, SHAPE_TOKENS,
+    build_expectations, classify_columns, load_goldens, ColumnRoles, GoldenSstable,
+    DECLARED_GAP_COLUMNS, PARTITION_METADATA, RANGE_METADATA, ROW_LEVEL_METADATA, SHAPE_TOKENS,
 };
 use raw_view_parity::{
     assert_value_key_sets_match, fact_kind, is_negative_complex_marker, FactKindMatch,
@@ -400,10 +400,41 @@ fn range_tombstone_bound_and_boundary_are_counted_separately() {
 
 /// A BOUNDARY closes one range and opens the next at the same clustering
 /// position, and sstabledump renders both sides in ONE entry — so it must
-/// expand to TWO physical raw-view rows, exactly as a bound pair does. The
-/// census cannot see that; only the row set can.
+/// expand to TWO physical raw-view rows, exactly as a bound pair does.
+///
+/// THE TWO SIDES MUST BE DISTINGUISHABLE, or this control cannot see the
+/// defect it exists for (roborev job 62). With identical `deletion_info` on
+/// both sides, swapping the `[("end", …), ("start", …)]` pairing in
+/// `build_expectations` — or reading `entry["start"]` for both rows —
+/// changes nothing observable. So each side here carries its OWN
+/// `type`/`marked_deleted`/`local_delete_time`, matching the real
+/// `adjacent_ranges` golden, whose sides genuinely differ (start inclusive
+/// at `…000002Z`, end exclusive at `…000001Z`). That fixture is `FetchOnly`,
+/// so without this the mis-pairing would surface only on a strict-mode
+/// fetched-corpus run — and there it would read as a VIEW failure rather
+/// than a harness bug.
+///
+/// This is also the only place `bound_facts`' `"exclusive" => false` arm has
+/// its RESULT asserted: the one gate-executed bound fixture,
+/// `static_with_tombstones`, carries inclusive-only bounds.
 #[test]
-fn a_boundary_expands_to_both_an_end_and_a_start_row() {
+fn a_boundary_expands_to_two_rows_each_carrying_its_own_sides_facts() {
+    let end_side = json!({
+        "type": "exclusive",
+        "clustering": ["10"],
+        "deletion_info": {
+            "marked_deleted": "2021-01-01T00:00:01Z",
+            "local_delete_time": "2021-01-01T00:00:01Z"
+        }
+    });
+    let start_side = json!({
+        "type": "inclusive",
+        "clustering": ["10"],
+        "deletion_info": {
+            "marked_deleted": "2021-01-01T00:00:02Z",
+            "local_delete_time": "2021-01-01T00:00:02Z"
+        }
+    });
     let (expected, _) = build_expectations(
         &[generation_of(
             "nb-1-big-Data.db",
@@ -411,8 +442,8 @@ fn a_boundary_expands_to_both_an_end_and_a_start_row() {
                 "partition": { "key": ["1"] },
                 "rows": [{
                     "type": "range_tombstone_boundary",
-                    "end": bound("exclusive", json!(["10"])),
-                    "start": bound("inclusive", json!(["10"]))
+                    "end": end_side,
+                    "start": start_side
                 }]
             })],
         )],
@@ -424,6 +455,46 @@ fn a_boundary_expands_to_both_an_end_and_a_start_row() {
         kinds,
         vec!["range_tombstone_end", "range_tombstone_start"],
         "one boundary entry must expand to an END row and a START row"
+    );
+
+    let end = &expected[0];
+    assert_eq!(
+        end.facts.get("bound_inclusive"),
+        Some(&Fact::Bool(false)),
+        "issue #4309: the END side is EXCLUSIVE here, so `bound_inclusive` must be          false — the only assertion of `bound_facts`' exclusive arm anywhere, since the          one gate-executed bound fixture has inclusive-only bounds. {:?}",
+        end.facts
+    );
+    assert_eq!(
+        end.facts.get("range_deletion_timestamp"),
+        Some(&Fact::BigInt(1609459201000000)),
+        "issue #4309: the END row must carry the END side's deletion time, not the          START side's (…202000000). A swapped pairing in build_expectations lands here.          {:?}",
+        end.facts
+    );
+    assert_eq!(
+        end.facts.get("range_deletion_time"),
+        Some(&Fact::BigInt(1609459201)),
+        "{:?}",
+        end.facts
+    );
+
+    let start = &expected[1];
+    assert_eq!(
+        start.facts.get("bound_inclusive"),
+        Some(&Fact::Bool(true)),
+        "the START side is INCLUSIVE here: {:?}",
+        start.facts
+    );
+    assert_eq!(
+        start.facts.get("range_deletion_timestamp"),
+        Some(&Fact::BigInt(1609459202000000)),
+        "issue #4309: the START row must carry the START side's deletion time: {:?}",
+        start.facts
+    );
+    assert_eq!(
+        start.facts.get("range_deletion_time"),
+        Some(&Fact::BigInt(1609459202)),
+        "{:?}",
+        start.facts
     );
 }
 
@@ -982,14 +1053,17 @@ fn every_produced_token_is_in_the_known_vocabulary() {
     // bump it while `require_observed` rejected every claim for it as an
     // unknown name. That is exactly the under-coverage this assertion is
     // supposed to forbid.
-    // BOTH halves are now derived from declarations the producing code
-    // itself reads (roborev job 61): families from `FACT_KIND_RULES`, shapes
-    // from `SHAPE_TOKENS`, which `bump` asserts membership against. Relying
-    // on the synthetic goldens to enumerate the shapes left a new
-    // `bump("shape:…")` invisible here — it landed in neither set, so the
-    // equality stayed green while the shape became unclaimable.
-    let mut reachable: std::collections::BTreeSet<&str> = produced.clone();
-    reachable.extend(FACT_KIND_RULES.iter().map(|(_, kind)| *kind));
+    // BOTH halves are derived from declarations the producing code itself
+    // reads (roborev job 61): families from `FACT_KIND_RULES`, shapes from
+    // `SHAPE_TOKENS`, which `bump` asserts membership against as it counts.
+    //
+    // `produced` is deliberately NOT seeded into `reachable` (roborev job
+    // 62): `bump` now guarantees `produced ⊆ SHAPE_TOKENS`, so seeding it
+    // would contribute nothing while reading as though the synthetic
+    // goldens still gate the shape side. Their job is the SEPARATE liveness
+    // loop below — no token may be declared that nothing produces.
+    let mut reachable: std::collections::BTreeSet<&str> =
+        FACT_KIND_RULES.iter().map(|(_, kind)| *kind).collect();
     reachable.extend(SHAPE_TOKENS.iter().copied());
 
     // The synthetic goldens must still actually produce the shapes they
@@ -1286,4 +1360,126 @@ fn a_row_without_a_ttl_states_no_ttl_facts_at_all() {
         Some(&Fact::BigInt(1609459200000000)),
         "{facts:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `load_goldens`' GENERATION SELECTION (roborev job 62)
+// ---------------------------------------------------------------------------
+//
+// The `dirs[0]` pin is the linchpin keeping oracle and query on the same
+// bytes, and it had no test: every case above constructs `GoldenSstable`
+// values directly, and the `dirs.len() > 1` branch executes on NO corpus,
+// because every committed table has exactly one `Data.db`-bearing
+// directory. These build the two-directory layout on disk instead.
+
+const SELECT_SPEC: FixtureSpec = FixtureSpec {
+    keyspace: "selftest_ks",
+    table: "sel",
+    schema_file: "unused-no-database-is-opened.cql",
+    partition_key_columns: &["pk"],
+    discipline: Discipline::GitCommitted,
+};
+
+/// One `<table>-<uuid>/` directory carrying `<gen>-Data.db` binaries and
+/// their sidecars. The binary content is irrelevant — `load_goldens` only
+/// needs the NAME to exist so `table_generation_dirs` counts the directory
+/// as `Data.db`-bearing; the oracle it reads is the `.jsonl`.
+fn generation_dir_on_disk(root: &std::path::Path, dir_name: &str, gens: &[(&str, &str)]) {
+    let dir = root.join(SELECT_SPEC.keyspace).join(dir_name);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for (data_db, key) in gens {
+        std::fs::write(dir.join(data_db), b"not read").expect("write binary");
+        std::fs::write(
+            dir.join(format!("{data_db}.jsonl")),
+            format!(
+                r#"{{"partition":{{"key":["{key}"]}},"rows":[{{"type":"row","clustering":["10"],"liveness_info":{{"tstamp":"2021-01-01T00:00:00Z"}},"cells":[]}}]}}"#
+            ),
+        )
+        .expect("write sidecar");
+    }
+}
+
+/// Two `Data.db`-bearing generation directories: the oracle must bind to
+/// the lexically FIRST and read ONLY its goldens. Before the `dirs[0]` pin
+/// this returned both, and the two same-named goldens tripped a hard
+/// refusal on a `must_run` case.
+#[test]
+fn load_goldens_binds_to_the_lexically_first_generation_directory() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    generation_dir_on_disk(tmp.path(), "sel-00000000", &[("nb-1-big-Data.db", "1")]);
+    generation_dir_on_disk(tmp.path(), "sel-ffffffff", &[("nb-1-big-Data.db", "2")]);
+
+    let goldens = load_goldens(tmp.path(), &SELECT_SPEC);
+    assert_eq!(
+        goldens.len(),
+        1,
+        "issue #4309: exactly ONE generation directory is read; enumerating both is what \
+         produced two goldens named 'nb-1-big-Data.db' and hard-failed a must_run case"
+    );
+    assert!(
+        goldens[0].source_dir.ends_with("sel-00000000"),
+        "the LEXICALLY FIRST directory — the selection must be deterministic across runs \
+         and machines, not filesystem-order dependent. Got {}",
+        goldens[0].source_dir.display()
+    );
+    assert_eq!(goldens[0].data_db, "nb-1-big-Data.db");
+}
+
+/// Binding to one directory must NOT collapse a genuinely multi-generation
+/// fixture: every real one keeps `nb-1` and `nb-2` inside a SINGLE
+/// directory, so both are still read. This is what makes
+/// `shape:multi_generation` survive the pin.
+#[test]
+fn load_goldens_keeps_every_generation_inside_the_chosen_directory() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    generation_dir_on_disk(
+        tmp.path(),
+        "sel-00000000",
+        &[("nb-1-big-Data.db", "1"), ("nb-2-big-Data.db", "1")],
+    );
+
+    let goldens = load_goldens(tmp.path(), &SELECT_SPEC);
+    let names: Vec<&str> = goldens.iter().map(|g| g.data_db.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["nb-1-big-Data.db", "nb-2-big-Data.db"],
+        "issue #4309: both generations of a multi-generation fixture live in ONE \
+         directory and must both be read — otherwise the directory pin silently retires \
+         shape:multi_generation"
+    );
+}
+
+/// A root with no `Data.db`-bearing directory is a broken checkout, not an
+/// empty result.
+#[test]
+#[should_panic(expected = "no *-Data.db-bearing")]
+fn load_goldens_refuses_a_root_with_no_generation_directory() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join(SELECT_SPEC.keyspace)).expect("ks dir");
+    let _ = load_goldens(tmp.path(), &SELECT_SPEC);
+}
+
+/// A `Data.db` with no `.jsonl` sidecar is a FAILURE, never a skip — the
+/// sidecar IS the oracle.
+#[test]
+#[should_panic(expected = "must be readable")]
+fn load_goldens_refuses_a_generation_with_no_sidecar() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path().join(SELECT_SPEC.keyspace).join("sel-00000000");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("nb-1-big-Data.db"), b"not read").expect("write binary");
+    let _ = load_goldens(tmp.path(), &SELECT_SPEC);
+}
+
+/// An empty sidecar is a fixture that stopped exercising the sweep, and
+/// must FAIL rather than pass vacuously.
+#[test]
+#[should_panic(expected = "carried no partitions")]
+fn load_goldens_refuses_an_empty_golden() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path().join(SELECT_SPEC.keyspace).join("sel-00000000");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("nb-1-big-Data.db"), b"not read").expect("write binary");
+    std::fs::write(dir.join("nb-1-big-Data.db.jsonl"), b"\n").expect("write sidecar");
+    let _ = load_goldens(tmp.path(), &SELECT_SPEC);
 }
