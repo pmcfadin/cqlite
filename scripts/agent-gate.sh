@@ -15018,7 +15018,8 @@ run_clippy() {
 
 # run_roborev_lints (issue #2656, epic #2636): mechanize the recurring roborev
 # BLOCKER classes that have credible low-false-positive mechanical detection, so
-# they FAIL in the fast --lite loop instead of costing a review round. Two checks:
+# they FAIL in the fast --lite loop instead of costing a review round. Five checks, in the
+# order run_roborev_lints_cmd runs them:
 #   * check-workflow-injection.sh — the GitHub Actions command-injection class
 #     (top-severity, previously UNMECHANIZED anywhere in the gate).
 #   * check-no-wallclock-asserts.sh — the #2642 wall-clock-race class. It already
@@ -15040,17 +15041,6 @@ run_clippy() {
 # dataset corpus. Both scripts are SKIP-aware (no python3 -> loud SKIP, exit 0),
 # so this component is safe on a stripped runner; any real violation exits non-zero
 # and FAILs the component.
-#   * test_verify_location_no_resync_scan.sh — the #28 NO-HEURISTICS class for `cqlite
-#     verify`/`sweep`'s corruption locator (issue #4194, spec verify-location L3): partition
-#     location resolution must read ONLY the boundary source's own decoded entries
-#     (`Index.db` entries, BTI trie leaves) and the chunk tables, never scan `Data.db` for a
-#     plausible partition header. It lives HERE, not in `tooling-tests`, DELIBERATELY: #4266
-#     made `tooling-tests` diff-scoped and `cqlite-core/**` is not in its declared harness
-#     path set, so a core-only diff — exactly the diff shape that can reintroduce a byte
-#     scan into `cqlite-core/src/storage/sstable/verify_location.rs` — would SKIP the very
-#     guard that exists to catch it. `roborev-lints` is UNSCOPED (it runs on every --lite
-#     round and in the full gate whatever the diff touches), which is the property this
-#     guard needs. Pure grep over one committed file: no cargo/python3/network, ~0s.
 #   * test_roborev_guard_portability.sh — the #3296 PLATFORM class: the guard test above
 #     is a shell script that runs on macOS worker boxes and Linux CI, and three GNU-only
 #     constructs in its own scaffolding (`sed -i EXPR FILE`, an operand-less `paste -s`,
@@ -15061,6 +15051,17 @@ run_clippy() {
 #     every pattern carries a positive control) and behaviourally (the guard test's own
 #     helpers, extracted verbatim, exercised under BSD `sed`/`paste` shims), so the
 #     platform difference is caught on ANY platform. Hermetic, ~1s.
+#   * test_verify_location_no_resync_scan.sh — the #28 NO-HEURISTICS class for `cqlite
+#     verify`/`sweep`'s corruption locator (issue #4194, spec verify-location L3): partition
+#     location resolution must read ONLY the boundary source's own decoded entries
+#     (`Index.db` entries, BTI trie leaves) and the chunk tables, never scan `Data.db` for a
+#     plausible partition header. It lives HERE, not in `tooling-tests`, DELIBERATELY: #4266
+#     made `tooling-tests` diff-scoped and `cqlite-core/**` is not in its declared harness
+#     path set, so a core-only diff — exactly the diff shape that can reintroduce a byte scan
+#     into `cqlite-core/src/storage/sstable/verify_location.rs` — would SKIP the very guard
+#     that exists to catch it. `roborev-lints` is UNSCOPED (it runs on every --lite round and
+#     in the full gate whatever the diff touches), which is the property this guard needs.
+#     Pure grep over one committed file: no cargo/python3/network, ~0s.
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
