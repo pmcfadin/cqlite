@@ -4185,6 +4185,97 @@ refused "a lone RECERT summary passed as the THIRD argument (no fourth at all) -
 refused_recert "a RECERT summary passed as the THIRD argument, WITH a fourth -> refuse (still no full-gate block)" \
   "$GOODRECERT" "$GOODRECERT" "ZERO full-gate blocks"
 
+# --- Case R13: EVERY component the recert does NOT name must already be
+# --- PASS/OPT-OUT in the ANCHOR (#4268 AC; roborev finding, Medium) ----------
+# The anchor is legitimately RESULT: FAIL (Case R1/R2), but WHICH components
+# failed was never checked — so a TWO-failure anchor paired with a ONE-component
+# recert reached PREMERGE: OK with the second failure never re-run, never
+# certified and never mentioned. These cases pin the accounting in BOTH
+# directions: unaccounted failures refuse, and fully-accounted ones still pass.
+
+# anchor_rows <out> <extra-row>...: the standard Case C anchor (RESULT: FAIL,
+# commit/tree-start covering $CERTIFIED) with extra COMPONENT rows spliced in
+# INSIDE the block — immediately before `RESULT:`, because appending would land
+# them AFTER the end marker where no parser inside a block would ever see them
+# (a first cut did exactly that and every case passed vacuously).
+anchor_rows() {
+  local out="$1"; shift
+  full_summary "$out" "$C7" "$C12" PASS FAIL
+  local tmp="$out.rows" line
+  while IFS= read -r line; do
+    case "$line" in
+      "RESULT: "*) [ "$#" -gt 0 ] && printf '%s\n' "$@" ;;
+    esac
+    printf '%s\n' "$line"
+  done <"$out" >"$tmp"
+  mv "$tmp" "$out"
+}
+
+# R13a: TWO failures in the anchor, ONE named in the recert -> refuse, naming the
+# unaccounted one.
+anchor_rows "$T/anchor-two-fail.txt" 'clippy:            FAIL (61s)' 'tooling-tests:     FAIL (88s)'
+refused_recert "recert: a 2-failure anchor with a 1-component recert -> refuse (the other failure is certified by nothing)" \
+  "$T/anchor-two-fail.txt" "$GOODRECERT" \
+  "non-PASS component(s) this recert does NOT re-run: clippy=FAIL"
+
+# R13b: the SAME anchor, with BOTH failures named -> accepted. Without this the
+# case above would be satisfied by refusing every anchor that has any FAIL row
+# at all, which would make --recertify unusable for its actual purpose.
+recert_summary "$T/recert-both.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: clippy,tooling-tests)" "clippy,tooling-tests"
+if run 0 "recert: the SAME 2-failure anchor with BOTH components named -> exit 0" \
+  2421 "$CERTIFIED" "$T/anchor-two-fail.txt" "$T/recert-both.txt"; then
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "recert: a fully-accounted 2-failure anchor still certifies" ;;
+    *) bad "recert: expected PREMERGE: OK for a fully-accounted pair (got: $OUT)" ;;
+  esac
+fi
+
+# R13c: a non-named OTHER component at SKIP refuses — SKIP means "not measured",
+# not "reviewed and waived". This mirrors scripts/agent-gate.sh's own
+# run_recertify_preflight check 4 exactly; a divergence would let one side
+# certify what the other refuses.
+anchor_rows "$T/anchor-other-skip.txt" 'core-tests:        SKIP (0s)'
+refused_recert "recert: an anchor whose non-named OTHER component is SKIP -> refuse (SKIP is unmeasured, not waived)" \
+  "$T/anchor-other-skip.txt" "$GOODRECERT" \
+  "non-PASS component(s) this recert does NOT re-run: core-tests=SKIP"
+
+# R13d: `tooling-tests: SKIP` is the ONE declared exception (#4266's diff-scoping
+# makes it a DECIDED outcome on the common case, not an unmeasured gap) — so an
+# anchor carrying it is still accepted when tooling-tests is NOT the component
+# being recertified.
+anchor_rows "$T/anchor-tt-skip.txt" 'tooling-tests:     SKIP (0s)' 'clippy:            FAIL (61s)'
+recert_summary "$T/recert-clippy.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: clippy)" "clippy"
+if run 0 "recert: 'tooling-tests: SKIP' in the anchor is the one declared exception -> exit 0" \
+  2421 "$CERTIFIED" "$T/anchor-tt-skip.txt" "$T/recert-clippy.txt"; then
+  ok "recert: a routine tooling-tests SKIP does not block an unrelated component's recert (#4266)"
+fi
+
+# R13e: OPT-OUT is accepted alongside PASS — the check is SET membership, not a
+# literal-PASS compare (file-size under CQLITE_ALLOW_FILE_GROWTH=1 is the live
+# instance of a non-PASS-but-legal token).
+anchor_rows "$T/anchor-other-optout.txt" 'file-size:         OPT-OUT (0s)'
+if run 0 "recert: an anchor whose non-named OTHER component is OPT-OUT -> exit 0" \
+  2421 "$CERTIFIED" "$T/anchor-other-optout.txt" "$GOODRECERT"; then
+  ok "recert: OPT-OUT is accepted for a non-named component (set membership, not a literal PASS)"
+fi
+
+# R13f: AFFIRMATIVE ZERO. An anchor with NO component rows at all cannot support
+# "every component this recert does not name already PASSed", so it refuses
+# rather than passing over an unmeasured census.
+{
+  while IFS= read -r _r13_line; do
+    case "$_r13_line" in
+      "file-size:"*|"smoke:"*) continue ;;
+    esac
+    printf '%s\n' "$_r13_line"
+  done <"$ANCHOR_RECERT_FAIL"
+} >"$T/anchor-no-rows.txt"
+refused_recert "recert: an anchor carrying ZERO component status rows -> refuse (unmeasured, not clean)" \
+  "$T/anchor-no-rows.txt" "$GOODRECERT" \
+  "ZERO component status rows"
+
 # --- Case R12: usage is unchanged (still 3 or 4 args; recert never adds a 5th)
 if run 3 "usage: five arguments -> exit 3 (a recert pair is still exactly 4 args)" \
   2421 "$CERTIFIED" "$ANCHOR_RECERT_FAIL" "$GOODRECERT" extra; then
@@ -4227,7 +4318,11 @@ assert_src_absent_fixed \
 # than re-measured per host, and it preserves the ORIGINAL floor's conservatism
 # for every pre-existing conditional arm instead of replacing it with one
 # host's raw total.
-CASE_FLOOR=234
+#
+# +6 for Case R13 (#4268 roborev round: the anchor's per-component accounting),
+# measured the same way — the exact assertion count that section adds — and
+# host-invariant for the same reason.
+CASE_FLOOR=240
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

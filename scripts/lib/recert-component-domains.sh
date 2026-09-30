@@ -47,6 +47,29 @@
 # same file still counts as touching THIS one, which is the safe direction to
 # be imprecise in).
 _RECERT_DOM_BASE=('scripts/agent-gate.sh')
+# _RECERT_DOM_TOOLCHAIN (#4268 roborev finding, Medium): the repo-root build
+# CONFIGURATION every Rust-executing component's behavior is parameterised by.
+# The table mapped PRODUCT paths (and, since _RECERT_DOM_BASE, the driver), but
+# none of these — so a PR whose whole diff was `.clippy.toml` (or a Rust-version
+# bump in `rust-toolchain.toml`, or a nextest profile change) classified as NOT
+# diff-touched for clippy, fmt, core-tests and every other MAPPED component, and
+# `--recertify` would have accepted a host-fault recert of exactly the component
+# whose behavior that diff changes. That is the fail-OPEN direction.
+#
+# The file header's "a component with no entry is fail-closed to 'always
+# diff-touched'" default does NOT cover this: it applies only to components that
+# are wholly UNMAPPED. A MAPPED component gets precisely the patterns listed for
+# it, so an unlisted path is CLEAR for it — fail-open, not fail-closed.
+#
+# PREPENDED TO EVERY MAPPED COMPONENT'S DOMAIN, exactly as _RECERT_DOM_BASE is
+# (same site, same reason): enumerating it per-arm would leave the next arm to
+# the next person. Coarse in the safe direction — a nextest profile change
+# counts as touching `kit-dashboard-drift` too, which only ever REFUSES a recert
+# that might have been eligible.
+#
+# `.config/nextest.toml`, not `.config/*`: the whole point is a DECLARED list,
+# and a glob over an unrelated future `.config` entry would be a different claim.
+_RECERT_DOM_TOOLCHAIN=('rust-toolchain.toml' '.clippy.toml' '.rustfmt.toml' '.config/nextest.toml')
 _RECERT_DOM_RUST_ANY=('*.rs')
 _RECERT_DOM_CARGO_ANY=('Cargo.toml' 'Cargo.lock' '*/Cargo.toml')
 _RECERT_DOM_CORE=('cqlite-core/*')
@@ -98,21 +121,23 @@ _recert_harness_patterns() {
 }
 
 # _recert_component_domain_patterns <component>: print the component's domain
-# patterns, one per line — ALWAYS including _RECERT_DOM_BASE (the component's
-# own driver file) for a RECOGNIZED component, plus that component's specific
-# product/guard paths. Prints NOTHING for an UNRECOGNIZED component — the
-# caller (_recert_component_diff_touched) treats "no domain" as "match
-# everything" (the fail-closed default), never as "match nothing". Delegates
-# the actual per-component list to _recert_component_domain_patterns_raw and
-# uses ITS EXIT STATUS (0 = recognized, 1 = not) to decide whether to prepend
-# the base — printing the base unconditionally would give an UNRECOGNIZED
-# component a non-empty (so "sometimes touched" instead of "ALWAYS touched")
-# domain, silently weakening the fail-closed default.
+# patterns, one per line — ALWAYS including the two SHARED groups
+# (_RECERT_DOM_BASE, the component's own driver file, and _RECERT_DOM_TOOLCHAIN,
+# the repo-root build configuration) for a RECOGNIZED component, plus that
+# component's specific product/guard paths. Prints NOTHING for an UNRECOGNIZED
+# component — the caller (_recert_component_diff_touched) treats "no domain" as
+# "match everything" (the fail-closed default), never as "match nothing".
+# Delegates the actual per-component list to
+# _recert_component_domain_patterns_raw and uses ITS EXIT STATUS (0 =
+# recognized, 1 = not) to decide whether to prepend the shared groups — printing
+# them unconditionally would give an UNRECOGNIZED component a non-empty (so
+# "sometimes touched" instead of "ALWAYS touched") domain, silently weakening
+# the fail-closed default.
 _recert_component_domain_patterns() {
   local _rdp_specific _rdp_rc
   _rdp_specific=$(_recert_component_domain_patterns_raw "$1"); _rdp_rc=$?
   [ "$_rdp_rc" -eq 0 ] || return 0
-  printf '%s\n' "${_RECERT_DOM_BASE[@]}"
+  printf '%s\n' "${_RECERT_DOM_BASE[@]}" "${_RECERT_DOM_TOOLCHAIN[@]}"
   [ -n "$_rdp_specific" ] && printf '%s\n' "$_rdp_specific"
 }
 

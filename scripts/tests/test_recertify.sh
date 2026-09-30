@@ -57,6 +57,13 @@ FAIL=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
+# Sourced AFTER ok/bad (it refuses to load without them). Provides the
+# THREE-VALUED file probes W3 uses: an ABSENCE assert spelled `if grep -q
+# <forbidden>; then bad; else ok; fi` folds "could not read the subject" onto
+# `ok`, i.e. an unreadable file CERTIFIES the property (#3752).
+# shellcheck source=scripts/tests/lib/tristate-file-probe.bash
+. "$SCRIPT_DIR/lib/tristate-file-probe.bash"
+
 [ -f "$GATE" ] || { echo "FATAL: $GATE not found"; exit 1; }
 [ -f "$DOMAINS_LIB" ] || { echo "FATAL: $DOMAINS_LIB not found"; exit 1; }
 
@@ -123,6 +130,69 @@ classify_domain python-bindings 'bindings/node/src/row.rs' CLEAR "python-binding
 classify_domain dep-duplicates 'Cargo.lock' TOUCHED "dep-duplicates domain covers Cargo.lock"
 classify_domain dep-duplicates 'docs/development/dev-cookbook.md' CLEAR "dep-duplicates domain does NOT cover docs/**"
 
+# TOOLCHAIN-CONFIG CENSUS (#4268 roborev finding, Medium): every repo-root build
+# CONFIGURATION file must be diff-touched for EVERY component the table MAPS.
+#
+# This is a census, not spot cases, because the defect it pins is per-arm
+# omission: `.clippy.toml` was in no arm's domain at all, so a PR whose whole
+# diff was `.clippy.toml` classified clippy — the one component that file
+# parameterises — as CLEAR, and `--recertify` would have accepted a host-fault
+# recert of it. The file header's "no entry -> always diff-touched" default does
+# NOT save this: it applies only to WHOLLY UNMAPPED components, while a MAPPED
+# component gets exactly its listed patterns, so an unlisted path is CLEAR for
+# it (fail-OPEN).
+#
+# A census reports an AFFIRMATIVE count and names its subject set, never a bare
+# 0 (an unmeasured census and a clean one must not read alike). The paths are
+# read from the library's OWN _RECERT_DOM_TOOLCHAIN array rather than retyped,
+# so adding a fifth config file extends the census automatically instead of
+# leaving it one behind.
+tc_report=$(
+  . "$SCOPE_LIB"
+  . "$DOMAINS_LIB"
+  pairs=0
+  miss=0
+  offenders=""
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    # Skip components the table does NOT map: they are fail-closed to "always
+    # diff-touched" via an EMPTY domain, so asserting TOUCHED for them would
+    # pass for a reason having nothing to do with this group.
+    [ -n "$(_recert_component_domain_patterns "$c")" ] || continue
+    for f in "${_RECERT_DOM_TOOLCHAIN[@]}"; do
+      pairs=$((pairs + 1))
+      _recert_component_diff_touched "$c" "$f" && continue
+      miss=$((miss + 1))
+      # The offender list is CAPPED at 6: the fail-open shape is per-CONFIG-FILE,
+      # so the first few pairs already name the cause, while an uncapped list is
+      # ~156 entries of noise in a gate log (measured while writing this case).
+      [ "$miss" -le 6 ] && offenders="${offenders:+$offenders }$c($f)"
+    done
+  done <<<"$declared_components"
+  # ONE machine-readable line, so a partially-written report cannot be misread as
+  # a clean one: every field is present or the whole line is absent.
+  printf 'CENSUS pairs=%d miss=%d offenders=%s\n' "$pairs" "$miss" "${offenders:-none}"
+)
+tc_pairs=$(awk -F'pairs=' '/^CENSUS /{ split($2, a, " "); print a[1]; exit }' <<<"$tc_report")
+tc_miss=$(awk -F'miss=' '/^CENSUS /{ split($2, a, " "); print a[1]; exit }' <<<"$tc_report")
+tc_offenders=$(awk -F'offenders=' '/^CENSUS /{ print $2; exit }' <<<"$tc_report")
+case "${tc_pairs:-x}${tc_miss:-x}" in
+  *[!0-9]*)
+    bad "toolchain-census: UNMEASURED — the census produced no usable pairs/miss counts (pairs='${tc_pairs:-}' miss='${tc_miss:-}'), so it asserts NOTHING about the domain table" ;;
+  *)
+    if [ "$tc_pairs" -lt 30 ]; then
+      bad "toolchain-census: only $tc_pairs (component, config-path) pairs were measured — expected ~4x the mapped component count, so the census did not run over the real table"
+    elif [ "$tc_miss" -eq 0 ]; then
+      ok "toolchain-census: all $tc_pairs (MAPPED component, repo-root build-config path) pairs classify as diff-touched — 0 fail-open gaps"
+    else
+      bad "toolchain-census: $tc_miss of $tc_pairs pairs classify as CLEAR — a diff touching only that config file would wrongly make the component recert-ELIGIBLE; first offenders: $tc_offenders"
+    fi ;;
+esac
+# Two named spot cases as well, so a reader sees the concrete claim and a future
+# census refactor cannot quietly stop asserting it.
+classify_domain clippy '.clippy.toml' TOUCHED "clippy domain covers .clippy.toml (the file that parameterises it)"
+classify_domain core-tests 'rust-toolchain.toml' TOUCHED "core-tests domain covers rust-toolchain.toml (the pinned compiler)"
+
 # ==== Layer 2: real --recertify invocations against a scratch fixture ========
 TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/recertify_test.XXXXXX") || { echo "FATAL: mktemp failed"; exit 1; }
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -143,6 +213,22 @@ build_fixture() {
   agent_gate_install_components_manifest "$repo/scripts/agent-gate.sh" || return 1
   mkdir -p "$repo/cqlite-core/src" "$repo/scripts/tests"
   echo base >"$repo/cqlite-core/src/lib.rs"
+  # The COMMITTED canonical CQL schema fixtures (#3148). --recertify reruns its
+  # components in FULL-GATE mode, so apply_schemas_preflight is STRICT for it
+  # (#4268 roborev finding, High -- see R13 below) and resolves this root
+  # CHECKOUT-RELATIVE from the fixture's own REPO_ROOT (the fixture carries no
+  # workspace Cargo.toml, so _gate_checkout_test_data_dir falls back to
+  # $REPO_ROOT/test-data). Names are read from the gate's OWN
+  # CANONICAL_SCHEMA_FILES rather than retyped, so a change to that list cannot
+  # leave this fixture silently one file short. Content is irrelevant: the guard
+  # asks only for a READABLE REGULAR FILE (_missing_schema_files).
+  mkdir -p "$repo/test-data/schemas" || return 1
+  local _bf_canon _bf_f
+  _bf_canon=$(awk -F'"' '/^CANONICAL_SCHEMA_FILES=/ { print $2; exit }' "$GATE")
+  [ -n "$_bf_canon" ] || { echo "FATAL: could not read CANONICAL_SCHEMA_FILES from $GATE" >&2; return 1; }
+  for _bf_f in $_bf_canon; do
+    printf '%s\n' "-- fixture stub for $_bf_f" >"$repo/test-data/schemas/$_bf_f" || return 1
+  done
   ( cd "$repo" \
       && git init -q -b main . \
       && git config user.email t@cqlite.test && git config user.name cqlite-test \
@@ -160,8 +246,10 @@ build_fixture() {
 tree_identity() { # <fixture-dir> -> "sha dirty digest" on stdout, or empty on failure
   local repo="$1" out te
   out=$(cd "$repo" && bash scripts/agent-gate.sh --only file-size 2>&1)
-  te=$(grep -E '^tree-end:' <<<"$out" | head -1)
-  printf '%s\n' "$te" | sed -n 's/^tree-end:[[:space:]]*\([^ ]*\) dirty: \([a-z]*\) digest: \([^ ]*\).*/\1 \2 \3/p'
+  # No pipe into an early-exiting reader (W3): awk takes the FIRST tree-end:
+  # line itself, and sed reads the captured value from a herestring.
+  te=$(awk '/^tree-end:/ { print; exit }' <<<"$out")
+  sed -n 's/^tree-end:[[:space:]]*\([^ ]*\) dirty: \([a-z]*\) digest: \([^ ]*\).*/\1 \2 \3/p' <<<"$te"
 }
 
 # _override_status_for <component> <override1=status> ...: bash-3.2-safe
@@ -209,6 +297,16 @@ write_anchor() {
 
 run_recert() { # <fixture-dir> <anchor-file> <components> -> sets RC, OUT
   OUT=$( (cd "$1" && bash scripts/agent-gate.sh --recertify "$2" --components "$3") 2>&1 )
+  RC=$?
+}
+
+# run_recert_env <fixture-dir> <anchor-file> <components> <VAR=VALUE>...: the
+# same invocation with environment variables seeded, for the #3148 schemas cases
+# (R13). `env` rather than exported assignments so nothing can leak into a later
+# case in this file.
+run_recert_env() {
+  local repo="$1" anchor_f="$2" comps="$3"; shift 3
+  OUT=$( (cd "$repo" && env "$@" bash scripts/agent-gate.sh --recertify "$anchor_f" --components "$comps") 2>&1 )
   RC=$?
 }
 
@@ -402,6 +500,80 @@ else
       bad "R11: expected exit 2 + '--only PARTIAL run', got rc=$RC"
     fi
 
+    # R13: --recertify runs its named components in FULL-GATE MODE, so the #3148
+    # COMMITTED-SCHEMAS guard must be STRICT for it — there is deliberately no
+    # opt-out (roborev finding, High). `--recertify` implements "full-gate mode"
+    # by setting ONLY="$RECERT_COMPONENTS" and falling through into the shared
+    # flow, so `apply_schemas_preflight`'s leniency test must read the
+    # `_gate_is_strict` PREDICATE (which excepts RECERTIFY) and not the bare
+    # `[ -n "$ONLY" ] || [ "$LITE" -ne 0 ]` idiom. With the bare idiom every
+    # recert took the LENIENT branch: it stamped `schemas: not checked` and
+    # never consulted `_gate_schemas_override_reject` at all — while
+    # `_schemas_status`, the PURE decision that function's own header says it
+    # consumes, was already `_gate_is_strict`-gated. The effectful guard and the
+    # pure decision had drifted apart, which is the exact pairing #3148 built
+    # them as one to prevent.
+    #
+    # PLACED BEFORE R12 DELIBERATELY: R12 adds a commit touching
+    # cqlite-core/src/**, which both invalidates $anchor and makes every
+    # CORE-domain component (core-tests included) diff-touched, so these cases
+    # would refuse at check 8 before ever reaching a schemas verdict.
+    #
+    # `core-tests` rather than `file-size`, because the schemas pre-flight runs
+    # ONLY when the selection needs datasets (`selected_needs_datasets`) —
+    # file-size does not, so a file-size recert never reaches the guard and
+    # could not distinguish the fix from the bug. The fake corpus below is what
+    # keeps that cheap: the #2078 corpus guard (already `_gate_is_strict`-gated)
+    # runs FIRST and would otherwise FAIL the run before the schemas guard is
+    # reached. core-tests itself then FAILs in ~1s (no real Cargo.toml in the
+    # fixture), which is irrelevant here — these cases assert the PRE-FLIGHT's
+    # schemas verdict, not the component's.
+    rc_ds="$TMPROOT/ds"
+    rc_keyspace=$(awk -F'"' '/^CANONICAL_FIXTURE_KEYSPACE=/ { print $2; exit }' "$GATE")
+    if [ -z "$rc_keyspace" ]; then
+      bad "R13: could not read CANONICAL_FIXTURE_KEYSPACE from $GATE — the schemas cases would run against an unrecognized corpus root"
+    else
+      mkdir -p "$rc_ds/sstables/$rc_keyspace"
+      : >"$rc_ds/sstables/$rc_keyspace/na-1-big-Data.db"
+
+      # (a) the AFFIRMATIVE half: the strict guard RAN and says so. A positive
+      # line must never be stamped for a check that did not run (#3148), so its
+      # presence is the evidence the guard engaged.
+      run_recert_env "$fixture" "$anchor" core-tests "CQLITE_DATASETS_ROOT=$rc_ds"
+      if grep -qE '^schemas: [0-9]+/[0-9]+ canonical \.cql readable' <<<"$OUT"; then
+        ok "R13a: a recert whose selection needs datasets STAMPS the affirmative 'N/N canonical .cql readable' line (the strict #3148 guard ran)"
+      else
+        bad "R13a: expected an affirmative 'N/N canonical .cql readable' schemas line on a core-tests recert"
+        grep -E '^schemas:|^missing-schemas:' <<<"$OUT" || echo '(no schemas line at all)'
+      fi
+      if ! grep -qE '^schemas: not checked' <<<"$OUT"; then
+        ok "R13b: a recert NEVER stamps the lenient 'schemas: not checked' line (--recertify is not a bare --only)"
+      else
+        bad "R13b: the recert stamped 'schemas: not checked' — apply_schemas_preflight read the bare ONLY idiom instead of _gate_is_strict, so the guard was SKIPPED"
+      fi
+
+      # (b) the REFUSAL half: a RELATIVE CQLITE_SCHEMAS_ROOT is the no-opt-out
+      # rejection class (the gate resolves it against REPO_ROOT, cargo against
+      # each PACKAGE dir, so the two sides would read DIFFERENT roots). Keyed on
+      # the CAUSE text, not merely on a non-zero rc: under the bug this run also
+      # ends non-zero, but for the unrelated "no Data.db files" reason.
+      run_recert_env "$fixture" "$anchor" core-tests \
+        "CQLITE_DATASETS_ROOT=$rc_ds" 'CQLITE_SCHEMAS_ROOT=packaged/schemas'
+      if [ "$RC" -ne 0 ] \
+         && grep -qE '^missing-schemas: FAIL-CLOSED \(#3148\) — relative CQLITE_SCHEMAS_ROOT rejected' <<<"$OUT" \
+         && grep -qE '^RESULT: FAIL' <<<"$OUT"; then
+        ok "R13c: a recert with a RELATIVE CQLITE_SCHEMAS_ROOT FAILS CLOSED, naming the rejection (#3148 has no --recertify bypass)"
+      else
+        bad "R13c: expected a FAIL-CLOSED refusal naming the relative-override rejection, got rc=$RC"
+        grep -E '^schemas:|^missing-schemas:|^RESULT:' <<<"$OUT" || echo '(no schemas/RESULT line at all)'
+      fi
+      if ! grep -qE '^recert-verdict: CERTIFIED' <<<"$OUT"; then
+        ok "R13d: the rejected-override recert is NOT certified"
+      else
+        bad "R13d: a recert whose schemas override was REJECTED still stamped recert-verdict: CERTIFIED"
+      fi
+    fi
+
     # R12: a component whose domain intersects the PR's own diff REFUSES, while a
     # component OUTSIDE that domain (dep-duplicates — a CARGO_ANY-only domain,
     # excludes cqlite-core/src/**, and SKIPs fast in this minimal fixture with no
@@ -441,6 +613,7 @@ else
       bad "R12b: expected dep-duplicates to be preflight-ELIGIBLE (no diff-domain refusal) against the core-src diff, got rc=$RC"
       echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
     fi
+
   fi
 fi
 
@@ -449,9 +622,15 @@ fi
 # covers RECERTIFY once run_recertify_preflight sets ONLY — assert the function
 # body still contains that line (a regression here would silently start queueing
 # every recert behind the full-gate slot cap, defeating the whole point).
+# The awk output is CAPTURED FIRST and matched from a herestring, never piped
+# into `grep -q` (#4268 roborev finding, Medium; W3 below is the ratchet). Under
+# `set -o pipefail` a pipe into an early-exiting reader reports the PRODUCER's
+# SIGPIPE, so a CORRECT gate file would red intermittently. The repo's
+# scripts/ci/check-sigpipe-sites.sh cannot see this shape: it pattern-matches
+# `printf`/`echo` writers only, and the writer here is `awk`.
+_w1_body=$(awk '/^acquire_gate_slot\(\) \{/{f=1} f{print; if (/^\}/ && NR>1) exit}' "$GATE")
 if grep -qE '^acquire_gate_slot\(\) \{' "$GATE" \
-   && awk '/^acquire_gate_slot\(\) \{/{f=1} f{print; if (/^\}/ && NR>1) exit}' "$GATE" \
-        | grep -qE '\[ -n "\$ONLY" \] && return 0'; then
+   && grep -qE '\[ -n "\$ONLY" \] && return 0' <<<"$_w1_body"; then
   ok "W1: acquire_gate_slot's ONLY-exemption still covers RECERTIFY (it sets ONLY before falling through)"
 else
   bad "W1: could not confirm acquire_gate_slot exempts a non-empty \$ONLY"
@@ -460,12 +639,43 @@ fi
 # W2: run_recertify_preflight is dispatched BEFORE acquire_gate_slot (fail fast,
 # never queues for a slot on a bad anchor).
 preflight_ln=$(grep -n 'run_recertify_preflight$' "$GATE" | grep -v '^\s*#' | tail -1 | cut -d: -f1)
-slot_ln=$(grep -n '^acquire_gate_slot$' "$GATE" | head -1 | cut -d: -f1)
+# Single awk, not `grep -n … | head -1 | cut` — `head -1` is an early-exiting
+# reader, the same SIGPIPE-under-pipefail shape W3 forbids.
+slot_ln=$(awk '/^acquire_gate_slot$/ { print NR; exit }' "$GATE")
 if [ -n "$preflight_ln" ] && [ -n "$slot_ln" ] && [ "$preflight_ln" -lt "$slot_ln" ]; then
   ok "W2: run_recertify_preflight is dispatched before acquire_gate_slot"
 else
   bad "W2: could not confirm run_recertify_preflight runs before acquire_gate_slot (preflight_ln=$preflight_ln slot_ln=$slot_ln)"
 fi
+
+# W3: NO VERDICT IN THIS SUITE MAY RIDE ON A PIPE INTO AN EARLY-EXITING READER
+# (#4268 roborev finding, Medium). Under `set -o pipefail` a `producer | grep -q`
+# (or `| head -1`) reports the PRODUCER's SIGPIPE once the consumer matches and
+# exits before the producer has finished writing, so a CORRECT subject reds
+# intermittently. The construct itself is the defect and its ABSENCE is the
+# property, so this is a structural ratchet over this file, not a behavioural
+# case.
+#
+# IT IS NEEDED IN ADDITION TO scripts/ci/check-sigpipe-sites.sh, not instead of
+# it: that ratchet pattern-matches `printf`/`echo` WRITERS only, so it was blind
+# to W1's `awk … | grep -qE` (the instance this case was written for) and to the
+# three `… | head -1` sites elsewhere in this file. Widening that guard's writer
+# set is a separate concern and deliberately NOT attempted here.
+#
+# The needles are ASSEMBLED FROM PARTS so this guard cannot match its own lines,
+# and `code` mode drops whole-line comments so the prose above is not a subject.
+# assert_src_absent_fixed is THREE-VALUED: an unreadable subject reports
+# UNMEASURED rather than certifying the property (#3752).
+_w3_grep='| grep -'
+_w3_head='| head -'
+assert_src_absent_fixed \
+  "W3: no verdict in this suite is derived from a pipe into an early-exiting grep" \
+  "W3: a pipe into an early-exiting grep is back — under pipefail such a pipeline reports the PRODUCER's SIGPIPE, so a CORRECT subject reds intermittently (capture into a variable and match with a herestring instead)" \
+  "${BASH_SOURCE[0]}" "${_w3_grep}q" code
+assert_src_absent_fixed \
+  "W3: no verdict in this suite is derived from a pipe into an early-exiting head" \
+  "W3: a pipe into 'head -1' is back — same SIGPIPE-under-pipefail hazard as the grep form (use a single awk with 'exit', or capture and match from a herestring)" \
+  "${BASH_SOURCE[0]}" "${_w3_head}1" code
 
 printf '\n%s\n' "recertify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

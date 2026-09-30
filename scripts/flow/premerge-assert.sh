@@ -1767,6 +1767,66 @@ _gate_awk() {
 ' <"$1"
 }
 
+# _gate_component_rows <file> <want> — print `<name> <STATUS>`, one per line, for
+# every COMPONENT STATUS ROW inside the selected block. Case C's only consumer
+# (#4268 roborev finding, Medium).
+#
+# WHY A SECOND PASS RATHER THAN MORE _gate_awk KEYS. _gate_awk publishes a FIXED
+# set of key=value pairs with occurrence counts; component rows are a VARIABLE
+# -length list, so threading them through that contract would mean either a
+# delimiter-joined mega-value or per-key accumulation in gate_parse_file's
+# last-wins `case`. Both are worse than one small, single-purpose reader.
+#
+# SUBJECT SELECTION, and why it is deliberately GENEROUS. A row qualifies when
+# its key is lowercase-and-dashes (so `RESULT:`/`MODE:` — uppercase — are out)
+# AND its first value token is one of the CLOSED status set agent-gate.sh's
+# `record_result` can write: PASS|FAIL|SKIP|OPT-OUT|VACUOUS (scripts/agent-gate.sh
+# validates exactly that set). Everything else in a block — `run-id:`, `commit:`,
+# `schemas: 8/8 …`, `heartbeat: on …`, `component-set: ADVISORY-PASS …` — cannot
+# collide, because its value token is not in that set.
+#
+# _GATE_NONCOMPONENT_KEYS then removes the few METADATA keys that genuinely DO
+# carry a status-shaped token, and ONLY those. `preflight:` is deliberately NOT
+# in it: a block carrying `preflight: FAIL` is a gate that died before its
+# components ran, which is not a legitimate recert anchor, so leaving it in the
+# subject set makes Case C refuse it — the fail-CLOSED direction. Any future
+# metadata key is likewise treated as a component and refuses on a non-PASS
+# value, which is the direction a merge gate must be wrong in.
+_GATE_NONCOMPONENT_KEYS="tree-integrity component-set missing-fixtures disk-admission schemas summary-integrity"
+
+_gate_component_rows() {
+  awk -v WANT="$2" -v SKIPKEYS="$_GATE_NONCOMPONENT_KEYS" '
+  BEGIN {
+    FULL_S  = "==== AGENT-GATE SUMMARY ===="
+    FULL_E  = "==== END AGENT-GATE SUMMARY ===="
+    DELTA_S = "==== AGENT-GATE DELTA SUMMARY ===="
+    DELTA_E = "==== END AGENT-GATE DELTA SUMMARY ===="
+    RECERT_S = "==== AGENT-GATE RECERT SUMMARY ===="
+    RECERT_E = "==== END AGENT-GATE RECERT SUMMARY ===="
+    if (WANT == "delta")       { S = DELTA_S;  E = DELTA_E }
+    else if (WANT == "recert") { S = RECERT_S; E = RECERT_E }
+    else                        { S = FULL_S;   E = FULL_E }
+    n = split(SKIPKEYS, sk, " ")
+    for (i = 1; i <= n; i++) skip[sk[i]] = 1
+    ok["PASS"] = 1; ok["FAIL"] = 1; ok["SKIP"] = 1; ok["OPT-OUT"] = 1; ok["VACUOUS"] = 1
+    open = 0
+  }
+  {
+    gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
+    sub(/\r$/, "")
+  }
+  $0 == S { open = 1; next }
+  $0 == E { open = 0; next }
+  open == 1 {
+    if ($1 !~ /^[a-z0-9][a-z0-9-]*:$/) next
+    name = substr($1, 1, length($1) - 1)
+    if (name in skip) next
+    if (!($2 in ok)) next
+    print name " " $2
+  }
+' <"$1"
+}
+
 # gate_parse_file <file> <want> <what> — run the parse and publish its fields as
 # GP_* globals (bash 3.2: no namerefs, no associative arrays). Every COUNT is
 # validated as a non-negative integer here, keyed on its AFFIRMATIVE value: an
@@ -2286,6 +2346,79 @@ C)
   # value would make the printed evidence line lie about what was certified.
   assert_single_key "$GP_n_recert_components" recert-components "recert block"
   recert_components="$GP_v_recert_components"
+
+  # EVERY COMPONENT IN THE ANCHOR THAT THIS RECERT DOES *NOT* NAME MUST ALREADY
+  # BE PASS OR OPT-OUT (#4268 AC; roborev finding, Medium).
+  #
+  # WHAT WAS MISSING. The checks above accept an anchor whose overall RESULT is
+  # FAIL — legitimately, since a recert exists precisely because a component
+  # failed — but nothing looked at WHICH components failed. So an anchor with
+  # TWO failures paired with a ONE-component recert naming only one of them
+  # reached `PREMERGE: OK`: the second failure was never re-run, never
+  # certified, and never mentioned. "Anchor + recert together certify the sha"
+  # then covered strictly less than the whole component set, which is this
+  # case's entire reason to exist.
+  #
+  # THE SAME RULE THE GATE ITSELF ENFORCES, READ FROM THE OPPOSITE SIDE.
+  # scripts/agent-gate.sh's run_recertify_preflight (check 4) walks its OWN
+  # COMPONENTS array and refuses to START a recert unless every non-named
+  # component is PASS/OPT-OUT in the anchor, with ONE declared exception:
+  # `tooling-tests: SKIP`, which #4266's diff-scoping makes a DECIDED, reviewed
+  # outcome on the common case rather than an unmeasured gap. Every other
+  # component's SKIP still refuses, because for them SKIP really does mean "not
+  # measured". This check mirrors that set exactly — a divergence would let one
+  # side certify what the other refuses.
+  #
+  # WHY IT IS NOT REDUNDANT WITH THE GATE'S OWN CHECK: the gate validated the
+  # anchor it was HANDED, while this assert validates the anchor PASTED IN THE
+  # PR. Nothing binds those to be the same file, which is exactly why every
+  # other Case C check re-reads the blocks here too.
+  #
+  # AFFIRMATIVE ZERO: zero component rows is an UNMEASURED census, not a clean
+  # one, so it refuses. No HIGHER floor is asserted: only the gate knows the
+  # live COMPONENTS array, and this side can measure only the rows the block
+  # actually carries — claiming a count here would be inventing a baseline.
+  _rc_rows=$(_gate_component_rows "$summary_file" full) \
+    || refuse_tool_failure awk "full-gate block's component rows"
+  _rc_nrows=0
+  _rc_offenders=""
+  while read -r _rc_name _rc_status; do
+    [ -n "$_rc_name" ] || continue
+    _rc_nrows=$((_rc_nrows + 1))
+    # NAMED components are exempt: their status in the ANCHOR is the failure
+    # being re-certified. The recert block's own `recert-verdict: CERTIFIED`
+    # (asserted above) is what vouches for their RE-RUN.
+    case ",$recert_components," in *",$_rc_name,"*) continue ;; esac
+    case "$_rc_status" in
+      PASS|OPT-OUT) ;;
+      SKIP)
+        [ "$_rc_name" = tooling-tests ] \
+          || _rc_offenders="${_rc_offenders:+$_rc_offenders }$_rc_name=$_rc_status"
+        ;;
+      *) _rc_offenders="${_rc_offenders:+$_rc_offenders }$_rc_name=$_rc_status" ;;
+    esac
+  done <<GATE_RECERT_ROWS
+$_rc_rows
+GATE_RECERT_ROWS
+  if [ "$_rc_nrows" -eq 0 ]; then
+    refuse_no_gate \
+      "The recert ANCHOR carries ZERO component status rows — nothing was measured." \
+      "A full-gate SUMMARY lists every component it ran (e.g. 'core-tests: PASS (412s)')." \
+      "With none present, 'every component this recert does not name already PASSed' is" \
+      "UNVERIFIABLE, and an unmeasured check is not a clean one. Paste the anchor run's" \
+      "real AGENT_GATE_SUMMARY_FILE, not an excerpt."
+  fi
+  if [ -n "$_rc_offenders" ]; then
+    refuse_no_gate \
+      "The recert ANCHOR has non-PASS component(s) this recert does NOT re-run: $_rc_offenders." \
+      "A recert re-certifies ONLY the components named in 'recert-components:'" \
+      "(here: $recert_components). Every OTHER component must already be PASS or OPT-OUT" \
+      "in the anchor — the same rule scripts/agent-gate.sh's own --recertify pre-flight" \
+      "enforces before it will start (tooling-tests: SKIP is the one declared exception," \
+      "#4266). Those component(s) were never re-run and are not certified by anything," \
+      "so this pair covers less than the full component set. REMEDY: name them in" \
+      "--components too (max 2), or re-run the FULL gate."
+  fi
 
   # ...and the recert run's OWN provenance must cover the tree being merged —
   # which, for a recert, IS the same tree the anchor covers: both are compared

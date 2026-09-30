@@ -3221,7 +3221,19 @@ apply_schemas_preflight() {
   # Leniency (AC (g), unchanged from #2078's contract): only the FULL gate is strict.
   # --lite never reaches here (run_lite always exits first), but it is checked anyway so
   # the invariant holds by construction rather than by call-site archaeology.
-  if [ -n "$ONLY" ] || [ "$LITE" -ne 0 ]; then
+  #
+  # SPELLED VIA `_gate_is_strict`, NEVER THE BARE `[ -n "$ONLY" ]` IDIOM (#4268 roborev
+  # finding, High). `--recertify` reruns its named components in FULL-GATE mode, and it
+  # implements that by setting `ONLY="$RECERT_COMPONENTS"` before falling through into the
+  # shared flow — so the bare idiom classified every recert run as LENIENT and returned
+  # HERE, skipping the guard entirely and stamping `schemas: not checked`. That defeated
+  # #4268's "reruns in full-gate mode" requirement AND broke the single-source property
+  # this function's own header comment claims: `_schemas_status` (the PURE decision this
+  # function is documented to consume) already reads `_gate_is_strict`, so the effectful
+  # guard was branching on one mode test while the decision it renders branched on
+  # another — and the decision was never reached at all. There is deliberately no
+  # environment opt-out on either side.
+  if ! _gate_is_strict; then
     local _mode
     if [ -n "$ONLY" ]; then _mode="--only $ONLY"; else _mode="--lite"; fi
     SCHEMAS_LINE="schemas: not checked ($_mode is lenient, #3148 AC (g)) — this block asserts NOTHING about the schemas root"

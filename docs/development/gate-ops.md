@@ -1517,7 +1517,11 @@ anything):**
    STRICTER set than the generic `_status_is_nonfailing` (which also admits
    `SKIP`): a `SKIP` means "not measured", not "reviewed and waived", so it
    cannot stand in for either a passing OTHER component or (see point 6) the one
-   being recertified now.
+   being recertified now. **ONE declared exception, by name:** `tooling-tests:
+   SKIP`, because #4266's diff-scoping makes that a DECIDED, reviewed outcome on
+   the common case (a full gate whose diff touches no harness path), not an
+   unmeasured gap — refusing it would make `--recertify` unusable on exactly the
+   product PRs #4266 speeds up. Every other component's `SKIP` still refuses.
 4. **Anchor tree identity**: its `tree-end:` line parses to a sha/dirty/digest,
    `dirty: no`, and `tree-integrity: PASS` is present.
 5. **The CURRENT tree matches that identity exactly** — same sha, same digest,
@@ -1540,6 +1544,17 @@ anything):**
    completeness census in `scripts/tests/test_recertify.sh` against the LIVE
    `COMPONENTS` array. A component whose domain intersects the diff is treated
    as a code-failure candidate, not a host-fault one, and needs a full gate.
+   Every MAPPED component's domain is its own product/guard paths PLUS two
+   SHARED groups prepended in one place (`_recert_component_domain_patterns`):
+   `_RECERT_DOM_BASE` (`scripts/agent-gate.sh` — the file its `run_<component>`
+   driver lives in) and `_RECERT_DOM_TOOLCHAIN` (`rust-toolchain.toml`,
+   `.clippy.toml`, `.rustfmt.toml`, `.config/nextest.toml` — the repo-root build
+   configuration its behavior is parameterised by). Both were added because the
+   "unmapped ⇒ always diff-touched" default does NOT cover them: it applies only
+   to WHOLLY unmapped components, while a MAPPED component gets exactly its
+   listed patterns, so an unlisted path is CLEAR for it — fail-OPEN. The
+   toolchain group is pinned by a census in `scripts/tests/test_recertify.sh`
+   asserting every (MAPPED component × config path) pair classifies as touched.
 
 **Certification**: the terminal block requires every NAMED component to be
 **exactly `PASS`** — again stricter than the generic nonfailing set, since a
@@ -1552,6 +1567,19 @@ on PASS, exit 2 on any preflight refusal (with a named `error:` line), exit 1 on
 same convention as `--delta`. `--recertify` is EXEMPT from the #1825 slot cap
 (it rides `--only`'s existing exemption) and from `apply_component_set_preflight`
 failing the run (advisory under `--only`, same as any other `--only` invocation).
+
+**It is NOT exempt from the FAIL-CLOSED pre-flights, because it reruns in
+FULL-GATE mode.** Riding `--only`'s dispatch means `ONLY` is non-empty during a
+recert, so any guard spelled as the bare `[ -n "$ONLY" ]` leniency idiom would
+silently treat a recert as a lenient probe. The predicate `_gate_is_strict`
+(`[ "$LITE" -eq 0 ] && { [ -z "$ONLY" ] || [ "$RECERTIFY" -eq 1 ]; }`) is
+therefore the ONE spelling for that decision, and both fail-closed fixture
+guards read it: the #2078 canonical-corpus guard (`_fixture_status` /
+`apply_fixture_preflight`) and the #3148 committed-schemas guard
+(`_schemas_status` / `apply_schemas_preflight`). A recert consequently stamps
+the AFFIRMATIVE `schemas: N/N canonical .cql readable …` line rather than
+`schemas: not checked`, and a rejected `CQLITE_SCHEMAS_ROOT` FAILs it closed
+with no opt-out. `--lite` and a bare `--only` stay lenient, unchanged.
 
 **Disclosed cost of the slot-cap exemption (roborev finding, Low):** the #1825
 cap exists to bound how many full gates compete for a shared box's CPU/disk at
@@ -1581,6 +1609,19 @@ plain string-prefix compare) rather than merely being an ancestor of a later
 one. The recert block itself must carry `MODE: recertify`, `RESULT: PASS`,
 `recert-verdict: CERTIFIED`, a `recert-anchor:` covering the certified sha, and
 its own `commit:`/`tree-start:` covering the certified sha too.
+
+Case C additionally **enumerates the anchor's own per-component status rows**
+(`_gate_component_rows`) and applies point 3's rule from the opposite side:
+every component present in the ANCHOR that `recert-components:` does NOT name
+must read `PASS`/`OPT-OUT` (or be the declared `tooling-tests: SKIP`). Without
+it, a TWO-failure anchor paired with a ONE-component recert reached
+`PREMERGE: OK` with the second failure never rerun, never certified and never
+mentioned. ZERO component rows in the anchor refuses as UNMEASURED rather than
+passing (affirmative zero); no HIGHER floor is asserted, because only the gate
+knows the live `COMPONENTS` array while this side can measure only the rows the
+pasted block carries. It is not redundant with point 3: the gate validated the
+anchor it was HANDED, this assert validates the anchor PASTED IN THE PR, and
+nothing binds those to be the same file.
 
 Self-test: `scripts/tests/test_recertify.sh` (agent-gate.sh side) — a
 domain-table completeness census plus every acceptance branch above driven
