@@ -10644,7 +10644,19 @@ t test_object_store_sweep_claim_wait_completed_stops_contending
 # class every OTHER unmeasurable path in this file routes to the `999999.00` sentinel
 # instead. Exiting nonzero with no output makes an empty tick record indistinguishable
 # from any other measurement failure at the call site.
-OBJ_SWEEP_MAX_GAP_AWK='$1<l{p=$1;next} {if(p!=""){d=$1-p; if(d>m)m=d} p=$1} END{if(p==""){exit 1} d=e-p; if(d>m)m=d; printf "%.2f", m+0}'
+# `if(m==""){exit 1}` IS THE SECOND FAIL-CLOSED GATE, AND IT IS NOT REDUNDANT (roborev job 93
+# M1). `END{if(p=="")}` only catches a record with NO in-window line at all. `m` itself stayed
+# UNINITIALISED whenever no inter-tick sample ever fired (a single in-window line, so the
+# `if(p!="")` guard never sees a second sample) AND the virtual final gap `e-p` was not
+# positive -- and `printf "%.2f", m+0` then printed exactly the plausible `0.00` that reads as
+# "healthy for the whole run". `e-p <= 0` is reachable in the real case, not hypothetical: the
+# refresher keeps appending ticks until `fixture_kill`, while `ended` is captured BEFORE it, so
+# any tick landing in that tail is later than `e`. For the `$2==1` projection that is a
+# credited `pass` on a fixture that refreshed `started` exactly once -- the one-shot plant this
+# whole change exists to replace. So "no positive sample was measured" is now UNMEASURABLE
+# (exit 1 -> the call site's sentinel), never zero, and `m+0` is dropped because the `m==""`
+# case it used to coerce is precisely the case that must not be coerced.
+OBJ_SWEEP_MAX_GAP_AWK='$1<l{p=$1;next} {if(p!=""){d=$1-p; if(d>m)m=d} p=$1} END{if(p==""){exit 1} d=e-p; if(d>m)m=d; if(m==""){exit 1} printf "%.2f", m}'
 # THE VALIDATION THAT MAKES THE GAP FAIL CLOSED, shared rather than re-typed (roborev job 90
 # F6): the call site and `test_object_store_sweep_max_gap_awk_property` both used to spell this
 # regex out independently, while the pin test's own comment claimed it was "re-invoked exactly
@@ -11022,7 +11034,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # very vacuity job 58 F2 / job 68 F2 closed, one window off. Two things are required
       # now, both restricted to the post-`launched` window the property actually depends on:
       #   1. at least one SUCCESSFUL write strictly after `launched` (never a pre-launch one);
-      #   2. no gap between successful writes >= `stale_secs` -- which also closes the
+      #   2. no gap between successful writes >= `age_bound_secs` -- which also closes the
       #      adjacent hole where writes succeed once just after launch and then stop, letting
       #      `started` freeze and age past the bound while ticks stay perfectly healthy.
       # Requirement 2 reuses `$OBJ_SWEEP_MAX_GAP_AWK` VERBATIM on the successful-write-only
@@ -11085,9 +11097,12 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # (the `=~` validation rejects a comma), rather than silently misparsing it.
       # WINDOWED AT `launched`, NOT AT THE BARRIER (roborev job 45): a tick before `launched`
       # only seeds `p` (the "last pre-launch tick" the fix suggests) and is otherwise
-      # skipped -- the pre-launch setup window (git init/commit/cp inside `obj_sweep_tree`)
-      # is real elapsed time but not time the property under test cares about, so a stall
-      # there must not count as a gap. The first POST-launch tick's gap is still measured
+      # skipped. WHAT THAT ACTUALLY EXCLUDES is the barrier wait plus the barrier->launch gap
+      # (roborev job 93 L6): `root="$(obj_sweep_tree ...)"` is built BEFORE the refresher is
+      # even spawned, so no git init/commit/cp time has ever been inside the tick record --
+      # the older wording naming it was describing a superseded ordering. Those excluded
+      # windows are real elapsed time but not time the property under test cares about, so a
+      # stall there must not count as a gap. The first POST-launch tick's gap is still measured
       # against that seeded `p`, so a stall spanning the launch instant itself is still caught.
       # `$OBJ_SWEEP_MAX_GAP_AWK` (defined once, above this function -- see the comment there)
       # is the SAME program `test_object_store_sweep_max_gap_awk_property` pins with a
@@ -11109,7 +11124,17 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # for why `stale_secs` alone was the wrong threshold and for the `>=` direction.
       gap_exceeds=0
       obj_sweep_gap_reaches_bound "$max_gap" "$age_bound_secs" && gap_exceeds=1
-      if [[ "$outcome_ok" -eq 1 && "$max_gap_valid" -eq 0 ]]; then
+      if [[ ! "$age_bound_secs" =~ ^[1-9][0-9]*$ ]]; then
+        # A NON-POSITIVE AGE BOUND IS A BROKEN CASE, NOT A SKIPPABLE ONE (roborev job 93 L2).
+        # `obj_sweep_gap_reaches_bound` compares `>=`, so a bound of 0 or less makes EVERY gap
+        # reach it: `gap_exceeds` and `write_gap_exceeds` latch to 1, both outcome sides route
+        # to `skip`, and the sub-case degrades to a permanent green that touches no counter --
+        # the vacuous-skip class the guards around it are written against, and invisible
+        # precisely because `skip` never reddens the suite. Reachable by compressing this
+        # sub-case's own knobs (a `stale_secs` of 1 against a 1s backdate yields 0), so it is
+        # asserted rather than assumed. The single regex covers non-numeric, zero and negative.
+        fail "obj-sweep(claim-fresh-control): the derived age bound came back '$age_bound_secs' (${stale_secs}s stale - ${refresh_backdate_secs}s backdate) -- every gap would reach it and this sub-case would degrade to a permanent skip"
+      elif [[ "$outcome_ok" -eq 1 && "$max_gap_valid" -eq 0 ]]; then
         # Same non-credit rationale as the `gap_exceeds` skip below, one step earlier: the
         # tick record itself could not be measured, so this run cannot certify it exercised
         # the fix either way.
@@ -11125,7 +11150,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
         # THE SYMMETRIC VACUITY CASE (roborev job 68 F2, re-windowed per job 89 F1): a healthy
         # tick record proves the refresher was ALIVE, but if it never landed a write to
         # `$claim/started` AFTER `launched` -- or landed one and then stopped for longer than
-        # the stale bound -- the supervisor's view degenerates to the ONE-SHOT plant from
+        # `age_bound_secs` -- the supervisor's view degenerates to the ONE-SHOT plant from
         # before the loop started: the same "degrade to the one-shot plant it replaces"
         # vacuity the barrier exists to prevent, just surfacing as a `pass` instead of a
         # barrier miss. A run that never exercised the continuous-refresh fix must not be
@@ -11387,6 +11412,21 @@ test_object_store_sweep_max_gap_awk_property() {
   else
     fail "obj-sweep(max-gap-awk-ignores-second-field): got '$got', wanted '0.20' -- the awk program is no longer reading only \$1"
   fi
+
+  # (8) NO SAMPLE MEASURED, SO UNMEASURABLE RATHER THAN `0.00` (roborev job 93 M1): a single
+  # in-window tick means the `if(p!="")` sample guard never fires, and an `ended` EARLIER than
+  # that tick makes the virtual final gap negative -- which is reachable for real, because the
+  # refresher keeps ticking until `fixture_kill` while `ended` is captured before it. With `m`
+  # left uninitialised the program printed `0.00` and the call site read a one-write fixture as
+  # healthy for the whole run. This is the mutant demonstration that it now fails closed.
+  printf '15.50 1\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="15.20" -v l="15.00" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks" 2>/dev/null)"
+  [[ "$got" =~ $OBJ_SWEEP_GAP_RE ]] || got="999999.00"
+  if [[ "$got" == "999999.00" ]]; then
+    pass "obj-sweep(max-gap-awk-no-sample): a lone in-window tick later than \`ended\` measures no gap at all and fails closed to the sentinel, never the plausible-looking '0.00' of 'perfectly healthy'"
+  else
+    fail "obj-sweep(max-gap-awk-no-sample): got '$got' -- an unmeasured gap must never read as 0.00"
+  fi
 }
 
 t test_object_store_sweep_max_gap_awk_property
@@ -11402,19 +11442,38 @@ t test_object_store_sweep_max_gap_awk_property
 # `>= stale_secs` comparison waved through as healthy while the supervisor had already,
 # correctly, swept.
 test_object_store_sweep_gap_threshold_property() {
-  local stale backdate bound self sites_right sites_wrong derive_shared
-  self="${BASH_SOURCE[0]}"
+  local stale backdate bound sites_right sites_wrong derive_shared
+  local gap_re_uses inline_gap_re bound_guard under at band over
   # DERIVED THROUGH THE SHARED HELPER THE CASE ITSELF CALLS, never re-typed here (roborev job
   # 91 F3). The previous version rebuilt `$((stale - backdate))` locally, so it asserted a
   # relation it had computed itself and would have stayed green with the call site reverted.
-  stale=5; backdate=1
-  bound="$(obj_sweep_claim_age_bound_secs "$stale" "$backdate")"
-  if [[ "$bound" -eq 4 ]]; then
-    pass "obj-sweep(gap-threshold-derivation): the shared \`obj_sweep_claim_age_bound_secs\` returns \`stale - backdate\` (${stale}s - ${backdate}s = ${bound}s), not \`stale_secs\` -- the quantity the supervisor actually compares"
-  else
-    fail "obj-sweep(gap-threshold-derivation): bound='$bound', wanted 4 -- every threshold case below would be vacuous"
+  # THE BACKDATE IS READ OUT OF THE SHIPPED DECLARATION (roborev job 93 L4), the same way part
+  # (a) of the claim case reads `MAX_SWEEP_WALKS`: re-typing `backdate=1` meant changing
+  # `refresh_backdate_secs` to 2 left every assert here green while the 3.99/4.00/4.50 gaps no
+  # longer described the case's real threshold. `stale` stays a local 5 BECAUSE THAT IS WHAT
+  # THIS SUB-CASE'S OWN PINNED KNOBS PRODUCE (MAX_SWEEP_WALKS x 1 + 2) and re-deriving it here
+  # would mean duplicating the case's shipped-file derivation; what this test pins is the
+  # RELATION and the call sites, and every gap below is now derived FROM `bound` so the cases
+  # stay meaningful if either operand moves.
+  backdate="$({ grep -m1 -E '^ *refresh_backdate_secs=[0-9]+$' "$SELF_FILE" || true; })"
+  backdate="${backdate##*=}"
+  stale=5
+  if [[ ! "$backdate" =~ ^[0-9]+$ ]]; then
+    fail "obj-sweep(gap-threshold-backdate): could not read \`refresh_backdate_secs\` out of $SELF_FILE (got '$backdate') -- every threshold case below would be vacuous"
     return
   fi
+  bound="$(obj_sweep_claim_age_bound_secs "$stale" "$backdate")"
+  if [[ "$bound" -eq $((stale - backdate)) && "$bound" -gt 0 ]]; then
+    pass "obj-sweep(gap-threshold-derivation): the shared \`obj_sweep_claim_age_bound_secs\` returns \`stale - backdate\` (${stale}s - ${backdate}s read from the shipped declaration = ${bound}s), not \`stale_secs\` -- the quantity the supervisor actually compares"
+  else
+    fail "obj-sweep(gap-threshold-derivation): bound='$bound' from stale=$stale backdate=$backdate -- every threshold case below would be vacuous"
+    return
+  fi
+  # DERIVED FROM `bound`, so these stay the right side of the threshold if the operands move.
+  under="$(LC_ALL=C awk -v b="$bound" 'BEGIN{printf "%.2f", b-0.01}')"
+  at="$(LC_ALL=C awk -v b="$bound" 'BEGIN{printf "%.2f", b}')"
+  band="$(LC_ALL=C awk -v b="$bound" 'BEGIN{printf "%.2f", b+0.5}')"
+  over="$(LC_ALL=C awk -v s="$stale" 'BEGIN{printf "%.2f", s+1}')"
 
   # STRUCTURAL PIN OF THE CALL SITES (roborev job 91 F3), because sharing the derivation is
   # necessary but NOT sufficient: the helper cannot see WHICH variable the case hands to
@@ -11424,13 +11483,34 @@ test_object_store_sweep_gap_threshold_property() {
   # bound must be derived through the shared helper. (The patterns cannot match the grep lines
   # themselves -- the `$` is backslash-escaped in this source, so the literal text here differs
   # from what the regex requires.)
-  sites_right="$(grep -cE 'obj_sweep_gap_reaches_bound "\$(max_gap|write_gap)" "\$age_bound_secs"' "$self" || true)"
-  sites_wrong="$(grep -cE 'obj_sweep_gap_reaches_bound "\$(max_gap|write_gap)" "\$stale_secs"' "$self" || true)"
-  derive_shared="$(grep -cE 'obj_sweep_claim_age_bound_secs "\$stale_secs" "\$refresh_backdate_secs"' "$self" || true)"
+  sites_right="$(grep -cE 'obj_sweep_gap_reaches_bound "\$(max_gap|write_gap)" "\$age_bound_secs"' "$SELF_FILE" || true)"
+  sites_wrong="$(grep -cE 'obj_sweep_gap_reaches_bound "\$(max_gap|write_gap)" "\$stale_secs"' "$SELF_FILE" || true)"
+  derive_shared="$(grep -cE 'obj_sweep_claim_age_bound_secs "\$stale_secs" "\$refresh_backdate_secs"' "$SELF_FILE" || true)"
   if [[ "$sites_right" -eq 2 && "$sites_wrong" -eq 0 && "$derive_shared" -eq 1 ]]; then
     pass "obj-sweep(gap-threshold-callsites): both gap comparisons pass \`\$age_bound_secs\` (none pass \`\$stale_secs\`) and the bound comes from the shared helper -- the mutation that reopens the band is pinned structurally, not by this test's own arithmetic"
   else
     fail "obj-sweep(gap-threshold-callsites): age_bound call sites=$sites_right (want 2), stale_secs call sites=$sites_wrong (want 0), shared derivation=$derive_shared (want 1) -- the threshold relation is no longer pinned"
+  fi
+
+  # THE SHARED VALIDATION REGEX GETS THE SAME STRUCTURAL TREATMENT (roborev job 93 L3): job 90
+  # F6 hoisted `$OBJ_SWEEP_GAP_RE` so the call site and the pin test could not drift, but
+  # nothing asserted the call sites still USE it -- reverting one to an inline
+  # `^[0-9]+\.[0-9][0-9]$` (or loosening it) left every case in both pin tests green. `-ge` on
+  # the use count rather than `-eq` so adding a legitimate new validation site is not a false
+  # red, while a revert still trips both halves at once. And the non-positive-bound guard is
+  # pinned too, since it is the one branch that keeps a compressed bound from degrading this
+  # sub-case to a permanent skip (job 93 L2).
+  gap_re_uses="$(grep -cE '=~ \$OBJ_SWEEP_GAP_RE' "$SELF_FILE" || true)"
+  # PATTERN IS THE GAP SHAPE, NOT "any `^[0-9]` validation": this file has ~29 integer
+  # validations of the `^[0-9]+$` kind, so the looser pattern counted all of them and would
+  # have reddened permanently. Verified BOTH ways -- 0 on this file, 1 once a call site is
+  # reverted to an inline copy. The `$OBJ_SWEEP_GAP_RE` DEFINITION is not matched (no `=~`).
+  inline_gap_re="$(grep -cE '=~ *\^\[0-9\]\+\\\.\[0-9\]\[0-9\]\$' "$SELF_FILE" || true)"
+  bound_guard="$(grep -cE 'age_bound_secs" =~ \^\[1-9\]' "$SELF_FILE" || true)"
+  if [[ "$gap_re_uses" -ge 4 && "$inline_gap_re" -eq 0 && "$bound_guard" -eq 1 ]]; then
+    pass "obj-sweep(gap-threshold-shared-regex): all ${gap_re_uses} gap validations go through \`\$OBJ_SWEEP_GAP_RE\` with no inline copy, and the non-positive-bound guard is present -- neither the validation nor the bound can drift back without reddening"
+  else
+    fail "obj-sweep(gap-threshold-shared-regex): shared-regex uses=$gap_re_uses (want >=4), inline copies=$inline_gap_re (want 0), non-positive-bound guard=$bound_guard (want 1)"
   fi
 
   if ! obj_sweep_gap_reaches_bound "0.20" "$bound"; then
@@ -11439,34 +11519,34 @@ test_object_store_sweep_gap_threshold_property() {
     fail "obj-sweep(gap-threshold-healthy): a 0.20s gap was flagged against a ${bound}s bound"
   fi
 
-  if ! obj_sweep_gap_reaches_bound "3.99" "$bound"; then
-    pass "obj-sweep(gap-threshold-under): a 3.99s gap does not reach the ${bound}s age bound -- \`gap + backdate\` is still inside \`stale_secs\`"
+  if ! obj_sweep_gap_reaches_bound "$under" "$bound"; then
+    pass "obj-sweep(gap-threshold-under): a ${under}s gap does not reach the ${bound}s age bound -- \`gap + backdate\` is still inside \`stale_secs\`"
   else
-    fail "obj-sweep(gap-threshold-under): a 3.99s gap was flagged against a ${bound}s bound"
+    fail "obj-sweep(gap-threshold-under): a ${under}s gap was flagged against a ${bound}s bound"
   fi
 
   # THE BOUNDARY, and the direction is deliberate: `>=` flags it. The supervisor compares whole
   # seconds while the tick record is sub-second, so the boundary is not attributable either way;
   # erring toward `skip` is the only direction that cannot produce this issue's own false red.
-  if obj_sweep_gap_reaches_bound "4.00" "$bound"; then
-    pass "obj-sweep(gap-threshold-boundary): a ${bound}.00s gap REACHES the bound and is flagged -- the unattributable boundary errs toward \`skip\`, never toward a false \`fail\`"
+  if obj_sweep_gap_reaches_bound "$at" "$bound"; then
+    pass "obj-sweep(gap-threshold-boundary): a ${at}s gap REACHES the bound and is flagged -- the unattributable boundary errs toward \`skip\`, never toward a false \`fail\`"
   else
-    fail "obj-sweep(gap-threshold-boundary): a ${bound}.00s gap was not flagged -- the boundary must fail closed"
+    fail "obj-sweep(gap-threshold-boundary): a ${at}s gap was not flagged -- the boundary must fail closed"
   fi
 
   # THE REGRESSION CASE, and the whole reason this test exists: a gap inside
   # (bound, stale_secs). With the backdate added the claim HAS aged past `stale_secs`, so the
   # supervisor's takeover is correct -- but `>= stale_secs` read this as a healthy refresher.
-  if obj_sweep_gap_reaches_bound "4.50" "$bound"; then
-    pass "obj-sweep(gap-threshold-band): a 4.50s gap is flagged -- with the ${backdate}s backdate the claim aged past the ${stale}s stale bound, so the takeover was CORRECT; comparing against \`stale_secs\` alone waved this whole 1s band through as a false \`fail\`"
+  if obj_sweep_gap_reaches_bound "$band" "$bound"; then
+    pass "obj-sweep(gap-threshold-band): a ${band}s gap is flagged -- with the ${backdate}s backdate the claim aged past the ${stale}s stale bound, so the takeover was CORRECT; comparing against \`stale_secs\` alone waved this whole ${backdate}s band through as a false \`fail\`"
   else
-    fail "obj-sweep(gap-threshold-band): a 4.50s gap was not flagged against a ${bound}s bound -- the job-90 F1 false-\`fail\` band is open again"
+    fail "obj-sweep(gap-threshold-band): a ${band}s gap was not flagged against a ${bound}s bound -- the job-90 F1 false-\`fail\` band is open again"
   fi
 
-  if obj_sweep_gap_reaches_bound "6.00" "$bound"; then
-    pass "obj-sweep(gap-threshold-over): a 6.00s gap is flagged against the ${bound}s age bound"
+  if obj_sweep_gap_reaches_bound "$over" "$bound"; then
+    pass "obj-sweep(gap-threshold-over): a ${over}s gap is flagged against the ${bound}s age bound"
   else
-    fail "obj-sweep(gap-threshold-over): a 6.00s gap was not flagged against a ${bound}s bound"
+    fail "obj-sweep(gap-threshold-over): a ${over}s gap was not flagged against a ${bound}s bound"
   fi
 
   # The sentinel the call site substitutes for an unmeasurable gap must also be flagged --
