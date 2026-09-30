@@ -764,8 +764,24 @@ cargo run --package cqlite-cli --features write-support -- \
   rebuild ./table-dir --components statistics --out /tmp/rebuilt
 
 # Exit codes: 0 = every requested component regenerated (or correctly
-# skipped_not_applicable); 2 = refused (a damaged Data.db — nothing
-# written; remedy is `cqlite salvage`, issue #4196); 1 = usage error.
+# skipped_not_applicable); 2 = refused; 1 = usage error.
+#   refused, reason `data-corrupt`      — Data.db itself cannot be trusted;
+#                                         remedy `cqlite salvage` (#4196).
+#   refused, reason `reencode-mismatch` — Data.db decodes fine but rebuild
+#                                         cannot reproduce a partition's byte
+#                                         extent, so promoted-index offsets
+#                                         would be wrong. Almost always a
+#                                         MISSING original Statistics.db,
+#                                         whose SerializationHeader carries
+#                                         the authoritative delta-encoding
+#                                         baseline: restore it and re-run.
+# A table-dir run is ALL-OR-NOTHING: one generation refusing removes every
+# earlier generation's output again, and those manifest entries are marked
+# `rolled_back: true` with an empty `regenerated` — so
+# `jq '.[] | select(.refused == null and .rolled_back == false) | .output'`
+# names exactly the surviving output directories.
+# The human text rendering always goes to stderr; --out-format selects only
+# what (if anything) is printed to stdout.
 # --in-place refuses today (exit 1), naming the #4195 dependency
 # (verify --mode audit does not exist yet) — use --out.
 ```
@@ -783,6 +799,14 @@ cargo run --package cqlite-cli --features write-support -- \
   compaction-produced uncompressed `Data.db`'s rebuilt `CRC.db` will differ
   by exactly one trailing `00000000` group until a detection mechanism
   exists.
+- `Statistics.db`'s `EncodingStats` baseline (min timestamp / TTL /
+  local-deletion-time) is `recovered` verbatim from the ORIGINAL
+  `Statistics.db` when it is readable, because Data.db's own content cannot
+  bound it (Cassandra inherits the minima from compaction inputs). With no
+  original to read, all six timestamp/TTL/LDT aggregates are classified
+  `lost` — the decode that would recompute them needs the very baseline that
+  is missing — and an `index`/`summary` request in that state REFUSES rather
+  than writing offsets it cannot reproduce.
 - `Filter.db` byte-identity additionally depends on Cassandra's original
   `estimatedKeys`, which for a compaction-produced SSTable is an ESTIMATE
   that can exceed the true final distinct partition count — rebuild uses
