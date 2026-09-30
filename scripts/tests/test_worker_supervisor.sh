@@ -10629,8 +10629,135 @@ t test_object_store_sweep_claim_wait_completed_stops_contending
 #
 # The recovery bound is DERIVED (see obj_sweep_claim_stale_secs) and the derivation itself
 # is asserted below, from the shipped files, so this case does not re-type it either.
+#
+# SHARED with test_object_store_sweep_max_gap_awk_property below (roborev job 53 F2): ONE
+# definition of the (c) sub-case's tick-gap liveness program, used by both the case itself
+# and the mutant test that pins it, so a change to the logic and a change to what is tested
+# cannot drift apart -- the same "re-typed relation" lesson MAX_SWEEP_WALKS taught this file,
+# one level up. `l`=launched (job 45: ticks before it only seed `p`, never count as a gap),
+# `e`=ended (folded in as a virtual final tick, per the comment at its use site).
+# `END{if(p==""){exit 1} ...}` (roborev job 58 F1): a ZERO-LINE `$ticks` never enters the
+# main block, so `p` stays unset -- the ORIGINAL `if(p!=""){...}` guard around the printf
+# let this fall through to `printf "%.2f", m+0` with `m` also unset, emitting "0.00" for a
+# tick record that was never measured at all. "0.00" passes the call site's `N.NN` validation
+# and reads as "perfectly healthy for the whole run" -- the exact fail-OPEN, vacuous-pass
+# class every OTHER unmeasurable path in this file routes to the `999999.00` sentinel
+# instead. Exiting nonzero with no output makes an empty tick record indistinguishable
+# from any other measurement failure at the call site.
+# `if(m==""){exit 1}` IS THE SECOND FAIL-CLOSED GATE, AND IT IS NOT REDUNDANT (roborev job 93
+# M1). `END{if(p=="")}` only catches a record with NO in-window line at all. `m` itself stayed
+# UNINITIALISED whenever no inter-tick sample ever fired (a single in-window line, so the
+# `if(p!="")` guard never sees a second sample) AND the virtual final gap `e-p` was not
+# positive -- and `printf "%.2f", m+0` then printed exactly the plausible `0.00` that reads as
+# "healthy for the whole run". `e-p <= 0` is reachable in the real case, not hypothetical: the
+# refresher keeps appending ticks until `fixture_kill`, while `ended` is captured BEFORE it, so
+# any tick landing in that tail is later than `e`. For the `$2==1` projection that is a
+# credited `pass` on a fixture that refreshed `started` exactly once -- the one-shot plant this
+# whole change exists to replace. So "no positive sample was measured" is now UNMEASURABLE
+# (exit 1 -> the call site's sentinel), never zero, and `m+0` is dropped because the `m==""`
+# case it used to coerce is precisely the case that must not be coerced.
+OBJ_SWEEP_MAX_GAP_AWK='$1<l{p=$1;next} {if(p!=""){d=$1-p; if(d>m)m=d} p=$1} END{if(p==""){exit 1} d=e-p; if(d>m)m=d; if(m==""){exit 1} printf "%.2f", m}'
+# THE VALIDATION THAT MAKES THE GAP FAIL CLOSED, shared rather than re-typed (roborev job 90
+# F6): the call site and `test_object_store_sweep_max_gap_awk_property` both used to spell this
+# regex out independently, while the pin test's own comment claimed it was "re-invoked exactly
+# as it appears at the call site" -- so the call site could tighten or loosen it and both pin
+# cases would keep passing against the old shape. Same re-typed-relation drift the
+# `$OBJ_SWEEP_MAX_GAP_AWK` extraction removed one level up.
+OBJ_SWEEP_GAP_RE='^[0-9]+\.[0-9][0-9]$'
+
+# "COULD THIS GAP HAVE LET THE CLAIM AGE PAST THE BOUND?" -- ONE DEFINITION, used by both gap
+# comparisons in the claim-fresh-control case and pinned by
+# `test_object_store_sweep_gap_threshold_property` (roborev job 90 F1). Takes an ALREADY-VALIDATED
+# `N.NN` gap (validity is tracked separately, so this never has to encode a second failure mode)
+# and the age bound in whole seconds; exit 0 means the gap reaches or exceeds it.
+# SCALED INTEGER COMPARISON, not awk: a comparison expressed as awk's own exit code cannot
+# distinguish "does not exceed" from "awk failed", which was itself the fail-open hole job 49 F1
+# closed. `${1/./}` deletes the single decimal point ("5.23" -> "523"), and `10#` forces base 10
+# so a leading zero ("0.20" -> "020") is never read as octal.
+obj_sweep_gap_reaches_bound() {
+  [[ "$((10#${1/./}))" -ge "$(($2 * 100))" ]]
+}
+
+# THE AGE BOUND'S DERIVATION, at file scope so the case and its pin test share the one
+# definition (roborev job 91 F3): the pin test previously re-typed `stale=5; backdate=1;
+# bound=$((stale - backdate))` as local literals, so it asserted a relation it had rebuilt
+# itself and would have stayed green with the call site reverted to `$stale_secs`. A test that
+# re-derives what it is pinning is not a pin. (Sharing this is necessary but NOT sufficient --
+# it still cannot see WHICH variable the call site passes, which is why the pin test also
+# asserts the call sites structurally.)
+obj_sweep_claim_age_bound_secs() {
+  printf '%s\n' "$(($1 - $2))"
+}
+
+# THE VERDICT ROUTER FOR (c) claim-fresh-control -- PURE, so it can be table-tested (roborev
+# job 95 M2). Takes the eleven measured signals and prints ONE verdict key; no messages, no I/O,
+# no globals, so `test_object_store_sweep_verdict_routing_property` can drive every branch
+# combination directly instead of hoping a live run happens to reach it. ORDER IS THE
+# CONTRACT, and each rule earns its position:
+#   * a non-positive age bound is a broken case, checked FIRST, because every gap reaches it
+#     and everything below would read as starvation (job 93 L2);
+#   * on the OUTCOME-MATCHED side, an unmeasurable or starved record cannot CREDIT the run, so
+#     it downgrades pass -> skip, never up;
+#   * on the MISMATCHED side, an unmeasurable record must never EXCUSE the takeover -- it
+#     fails (job 49 F1, job 90 F5) -- while a measurable record showing genuine starvation
+#     does excuse it (skip);
+#   * tick liveness is consulted before claim writes because `$ticks` survives claim removal
+#     and claim writes do not (job 90 F3) -- AND THE ORDER NOW MATCHES THAT CLAIM on the
+#     mismatched side too (roborev job 98 L2): `mg_exceeds` used to be tested AFTER write
+#     validity, so a measurable tick record showing genuine starvation plus an unmeasurable
+#     WRITE record reported `fail:write-unmeasurable` -- a false red decided by the weaker
+#     signal, contradicting this very paragraph. Reachable: ENOSPC on `$d` stops tick appends
+#     (leaving a large, measurable `max_gap` over the written prefix) while also failing the
+#     `>"$wticks"` projection redirect. Two table rows now cover that combination;
+#   * `post_launch_ticks=0` fails rather than excuses: with no tick inside the window there was
+#     no OPPORTUNITY to write, so absence of writes says nothing about the fixture (job 91 F2).
+# No signal defaults: the arity check below requires all eleven (job 100 L4 / 101 L2).
+obj_sweep_claim_fresh_verdict() {
+  # ARITY FIRST, BEFORE ANY POSITIONAL READ (roborev job 101 L2). No signal defaults to a
+  # permissive value (job 100 L4), and this check has to precede the `local` assignments: under
+  # this file's `set -u`, reading `$9` in a call with eight arguments aborts the subshell on
+  # `unbound variable`, so `$#` was never reached and a short call surfaced as the case's
+  # `unrecognised verdict ''` arm instead of `fail:bad-arity` -- fail-closed, but a
+  # misattribution, which is the thing this router exists to eliminate.
+  if [[ "$#" -ne 11 ]]; then
+    printf 'fail:bad-arity\n'
+    return
+  fi
+  local ok="$1" bound="$2" mg_valid="$3" mg_exceeds="$4" wg_valid="$5" wg_exceeds="$6"
+  local writes="$7" ticks_in="$8" claim_present="$9" writes_valid="${10}"
+  local ticks_valid="${11}"
+  if [[ ! "$bound" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'fail:bad-bound\n'
+  elif [[ "$ok" -eq 1 && ( "$mg_valid" -eq 0 || "$ticks_valid" -eq 0 ) ]]; then
+    printf 'skip:tick-unmeasurable\n'
+  elif [[ "$ok" -eq 1 && "$mg_exceeds" -eq 1 ]]; then
+    printf 'skip:tick-starved\n'
+  elif [[ "$ok" -eq 1 && ( "$wg_valid" -eq 0 || "$writes_valid" -eq 0 || "$writes" -eq 0 || "$wg_exceeds" -eq 1 ) ]]; then
+    printf 'skip:write-uncertified\n'
+  elif [[ "$ok" -eq 1 ]]; then
+    printf 'pass\n'
+  elif [[ "$mg_valid" -eq 0 || "$ticks_valid" -eq 0 ]]; then
+    printf 'fail:tick-unmeasurable\n'
+  elif [[ "$mg_exceeds" -eq 1 ]]; then
+    printf 'skip:tick-starved-takeover\n'
+  elif [[ "$wg_valid" -eq 0 || "$writes_valid" -eq 0 ]]; then
+    printf 'fail:write-unmeasurable\n'
+  elif [[ "$ticks_in" -eq 0 ]]; then
+    printf 'fail:window-too-short\n'
+  elif [[ "$claim_present" -eq 1 && ( "$wg_exceeds" -eq 1 || "$writes" -eq 0 ) ]]; then
+    printf 'skip:write-starved-takeover\n'
+  else
+    printf 'fail:regression\n'
+  fi
+}
 test_object_store_sweep_claim_recovers_when_stale() {
   local d root calls counter rc claim bound fns walks per_walk want got
+  local refresh_pid planted_started ended live live_waited stale_secs ticks tick_count max_gap
+  local barrier_secs barrier_ticks max_refresher_ticks outcome_ok barrier_started barrier_elapsed
+  local gap_exceeds launched max_gap_valid last_tick
+  local wticks post_launch_writes post_launch_ticks write_gap write_gap_valid write_gap_exceeds
+  local refresh_backdate_secs age_bound_secs claim_present_at_end proj_rc verdict bound_expl
+  local writes_valid ticks_valid first_write pre_launch_writes
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10691,6 +10818,42 @@ test_object_store_sweep_claim_recovers_when_stale() {
   #     OBJ_SWEEP_TIMEOUT_SECS and the (now env-overridable) slack term to make the SAME
   #     derived relation come out at a few seconds. The property under test is unchanged;
   #     only its price is.
+  #
+  #     ISSUE #4282: A ONE-SHOT `started` PLANT RACES THE SUPERVISOR'S OWN LAUNCH. With the
+  #     budget compressed to ~5s (MAX_SWEEP_WALKS x 1 + 2), the gap between this line writing
+  #     `started` and the supervisor's FIRST read of it — process fork/exec, sourcing, the
+  #     preflight/latch/stamp checks ahead of it in `obj_sweep_claim_wait` — can exceed that on
+  #     a box under full-gate load (load avg 30-75 on 20 cores, #4250's r-run), ageing the
+  #     "fresh" claim past the bound before anyone reads it and sweeping it instead. Widening
+  #     the bound only makes this less likely, not impossible (the same class as 4b.126,
+  #     #4252 r7/r8, fixed differently in PR #4272) — and it is NOT the property under test
+  #     here (that's read-vs-plant scheduling latency, not the derivation in (a)).
+  #
+  #     THE FIX KEEPS `started` CONTINUOUSLY FRESH instead of trying to guess a plant time
+  #     that survives an unknown delay. A background loop rewrites `$claim/started` to
+  #     `date +%s` MINUS `refresh_backdate_secs` every 0.2s (atomically: a `mv` into place,
+  #     never a partial read) for as long as the supervisor runs, so WHENEVER it takes its
+  #     first (or any) reading, the claim's age is at most ~0.2s PLUS that backdate -- ~2.2s
+  #     at the shipped `refresh_backdate_secs=2`, not ~0.2s (roborev job 90 F4; the backdate
+  #     itself is job 68 F1's epoch-rollover fix, and its rationale is at the declaration).
+  #     That unstated second is not cosmetic: it is exactly what the guard threshold below
+  #     must subtract from `stale_secs`, and failing to subtract it left a 1s-wide
+  #     false-`fail` band (job 90 F1). This narrows the race to the refresher itself being
+  #     scheduled within the ~5s bound under the same load that caused #4282 — far less likely
+  #     than the ORIGINAL one-shot plant racing the supervisor's launch, but not a zero-latency
+  #     guarantee, which is why the liveness check below (the MAX GAP between consecutive
+  #     ticks over the whole launch->exit window, with `ended` folded in as a virtual final
+  #     tick -- an end-anchored "was it still alive at the END" check was tried and rejected:
+  #     a single early tick followed by starvation for the rest of the run satisfies THAT
+  #     check while missing exactly the stall this guard exists to catch) matters: without
+  #     it, a dead or starved refresher silently degrades this case back to the one-shot plant
+  #     it replaces. This does not
+  #     weaken the property or the timing: the wait's OUTER `wait_until` budget (computed by
+  #     the supervisor itself, from ITS OWN process-start clock, not from this file) still
+  #     bounds and terminates the wait — a continuously-aged `started+stale` deadline never
+  #     fires first (it always trails `now` by ~`stale`), so the case still ends via the SAME
+  #     `exhausted` -> "NOT SWEPT AND NOT MEASURED" path, asserted below exactly as before, in
+  #     about the same ~5s wall-clock.
   d="$(new_case_dir)"; calls="$d/calls-fresh"; counter="$d/counter"
   common_env "$d"
   write_finalize_stub "$d/bin/worker.sh" "$counter"
@@ -10703,16 +10866,504 @@ test_object_store_sweep_claim_recovers_when_stale() {
   export OBJ_SWEEP_CLAIM_POLL_SECS=1
   claim="$OBJ_SWEEP_STAMP.sweeping"
   mkdir -p "$claim"
-  printf '%s\n' "$(date +%s)" >"$claim/started"
+  live="$d/refresher.live"
+  ticks="$d/refresher.ticks"
+  # BUILT HERE, BEFORE THE GUARD BELOW (roborev job 49): the guard needs to compare
+  # against what the supervisor under test will ACTUALLY read, which is this stub --
+  # not a hand-typed literal and not the real script's own declaration (job 45's
+  # first attempt compared against the latter, which cannot detect the stub itself
+  # drifting). Building it here, before the refresher starts ticking, also means the
+  # fixed cost of `git init`/`commit`/the two `cp`s is paid before the tick record
+  # begins at all, rather than between the barrier and the launch.
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
-  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
-  rc=$?
-  if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
-    grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/fresh.log" &&
-    grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
-    pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip"
+  # `stale_secs` is derived from the STUB (`$root`), NOT the real shipped script (roborev
+  # job 53, superseding jobs 45/49's equality-guard approach): the supervisor under test
+  # below reads the stub `obj_sweep_tree` wrote above, so deriving this case's own threshold
+  # from anything else risks the two disagreeing -- and unlike an assert, a `skip`-on-
+  # mismatch GUARD cannot stop that from silently and PERMANENTLY retiring this property the
+  # moment the shipped script's MAX_SWEEP_WALKS moves (`skip` never fails the suite -- only
+  # `FAIL_COUNT` gates the exit, so a guard that routes drift to `skip` is the exact
+  # "vacuous green" class the rest of this file is written against). Deriving directly from
+  # the stub makes the two agree BY CONSTRUCTION, with no guard needed. (a)'s own `got`/`want`
+  # assert already independently pins the SHIPPED script's own relation -- a different
+  # property (the derivation FUNCTION is correct) from this case's (the THRESHOLD matches
+  # what THIS fixture's supervisor will read). Re-invokes the SAME extracted
+  # `obj_sweep_claim_stale_secs` (a) already sourced into `$fns`, with THIS case's compressed
+  # overrides, rather than hand-typing the relation a fourth time in this function.
+  stale_secs="$(bash -c 'set -uo pipefail; OBJ_SWEEP_TIMEOUT_SECS="'"$OBJ_SWEEP_TIMEOUT_SECS"'"; OBJ_SWEEP_CLAIM_SLACK_SECS="'"$OBJ_SWEEP_CLAIM_SLACK_SECS"'"; . "$1"; obj_sweep_claim_stale_secs "$2"' _ "$fns" "$root/scripts/check-object-store-integrity.sh" 2>&1)"
+  # GUARDED THE SAME WAY (a) GUARDS walks/per_walk/bound: an undecided derivation (the
+  # function returns 1 with no output when it cannot read MAX_SWEEP_WALKS) must not reach
+  # the arithmetic below as an empty string -- `barrier_secs` (below) on an empty value fails
+  # BEFORE this case even attempts to schedule the refresher, misreporting a derivation
+  # failure as "never ticked once in 0s", the same misattribution class the liveness rework
+  # was about. It must also never reach arithmetic UNVALIDATED: the `2>&1` above means any
+  # stderr text would be read as the value, and `$((... <text>))` under this file's `set -u`
+  # is a FATAL shell error that would silently kill the whole suite mid-run, not just this
+  # case.
+  # GUARDS ONLY THIS SUB-CASE, DELIBERATELY: an earlier version `return`ed the whole
+  # function on an invalid derivation, silently dropping (c2)/(d)/(e) too -- none of which
+  # depend on `stale_secs` -- and reporting one red with no indication three untested
+  # properties never ran. Wrapping in `if` instead lets them proceed either way; the shared
+  # `unset` below already runs unconditionally after this block closes.
+  if [[ "$stale_secs" =~ ^[0-9]+$ ]]; then
+    planted_started="$(date +%s)"
+    printf '%s\n' "$planted_started" >"$claim/started"
+    # Keep `started` at ~now for the whole run (see the comment above) — atomic mv per write so
+    # a concurrent read never observes a torn value. `fixture_bg`/`fixture_kill` own the group
+    # so a case failure or interrupt cannot leak this loop. The loop also touches `$live` after
+    # its first successful write, which the spin-wait below uses as a BARRIER: `fixture_bg`
+    # itself gives no guarantee the loop's first tick has happened before it returns, so
+    # without this a refresher starved at its own startup — the very condition #4282's loaded
+    # box produces — would not tick even once before the supervisor's first read, and the
+    # fix would degrade to the one-shot plant it replaces for exactly the window that matters
+    # most. Waiting for the marker makes that deterministic instead of merely probable.
+    # LIFETIME BOUNDED at a flat, generous literal (6000 ticks x 0.2s = 1200s/20min): unlike
+    # every OTHER background fixture in this file, this loop has no natural exit, so a lost
+    # `fixture_kill` (this suite's own SIGKILL, an OOM kill) would otherwise leave it spinning
+    # forever on a shared fleet box. This is PURELY a leak backstop, not a correctness bound —
+    # deriving it from `stale_secs` (the wait budget) was tried and reverted: a supervisor run
+    # that legitimately stretches past that budget under load would then outlive the refresher,
+    # ageing `started` and causing exactly the takeover this case exists to rule out, reported
+    # as a fixture problem. 20 minutes safely exceeds this suite's own 600s stall watchdog, so
+    # in practice the watchdog kills the whole run before this cap could ever fire — it is
+    # bounded, not tight. Every tick also appends a sub-second timestamp (GNU `date +%s.%N`,
+    # with a fallback to whole seconds on a BSD/macOS `date` where `%N` is emitted literally)
+    # to `$ticks` (separate from the integer-second `$claim/started`, which the shipped
+    # production code requires and which a real takeover DELETES via
+    # `obj_sweep_claim_release`'s `rm -rf`), so a stall can be attributed by NAME, from a
+    # record that survives claim removal, rather than left to
+    # degrade into the generic outcome failure below or misattributed as a fixture fault when
+    # the regression is real. THE TWO WRITES (claim, ticks) ARE DELIBERATELY NOT CHAINED
+    # TOGETHER in the loop below: an earlier version appended the tick only after the claim
+    # write succeeded, so on a GENUINE regression -- the supervisor takes the claim over and
+    # its EXIT trap removes it -- every subsequent claim write failed and the tick record
+    # froze right along with it, contradicting the "survives claim removal" claim above and
+    # putting the same attribution inversion round 6 fixed back into the diagnostic instead
+    # of the verdict. The tick append is gated ONLY on `$ticks` itself (under `$d`, never
+    # removed), independent of whether the claim write succeeds.
+    max_refresher_ticks=6000
+    # THE BACKDATE, AND THE BOUND IT MOVES (roborev job 90 F1). The refresher plants
+    # `started = now - refresh_backdate_secs`, so the age the supervisor observes is the write
+    # gap PLUS this offset. Both shipped predicates are STRICT -- `obj_sweep_claim_wait` expires
+    # at `now > started + stale` and `obj_sweep_claim_acquire` is fresh while `age <= stale` --
+    # so a takeover happens once `gap + backdate > stale`, i.e. once the gap passes
+    # `stale_secs - refresh_backdate_secs`, NOT `stale_secs`. Comparing the gap against
+    # `stale_secs` alone left a band one whole backdate wide (2s of a 5s budget, 40%) in which a
+    # starved fixture aged the claim out, the supervisor CORRECTLY took it over, and this case
+    # reported a "genuine behavioural regression": #4282's own symptom, moved one second inward.
+    # DIRECTION IS DELIBERATE: `obj_sweep_gap_reaches_bound` uses `>=`, so the boundary gap
+    # itself counts as "could have aged the claim". The supervisor compares WHOLE seconds
+    # (`date +%s`) while the tick record is sub-second, so exact attribution at the boundary is
+    # not available to this case at all; erring toward `skip` costs a run's credit, erring the
+    # other way is the false red this issue exists to remove. It does not raise the skip rate in
+    # practice: a healthy refresher ticks every 0.2s, two orders of magnitude inside the bound.
+    # VALUE IS 2 (roborev job 98 M1 raised it off 1; job 99 M1 settled it at 2 -- see the
+    # tradeoff paragraph below), and the arithmetic is the reason. The residual this
+    # spends headroom on: `obj_sweep_claim_acquire` captures `now`, THEN forks/execs `mkdir`,
+    # and only then reads `started`. If >= `backdate` seconds of real time elapse across that
+    # fork/exec, the refresher's next write lands far enough ahead that `started > now_sup`,
+    # which the shipped code treats as future-dated => STALE => takeover -- surfacing here as
+    # `fail:regression` with ticks and writes both healthy, i.e. precisely the false red this
+    # issue exists to remove. Fork/exec latency on the load-30-75 box #4282 cites is NOT
+    # comfortably below 1s, so a 1s threshold was too thin; 2 moves it to ">= 2s stall".
+    # WHY 2 AND NOT 3 (roborev job 98 M1 asked for ~3, job 99 M1 then objected that 3 halves the
+    # starvation tolerance -- the review argued BOTH directions, so the value is settled on the
+    # arithmetic rather than on the latest opinion). The knob trades two failure modes that are
+    # NOT equally bad:
+    #   * future-dating (a stall > backdate between the supervisor's `now` capture and its
+    #     `started` read) produces `fail:regression` -- a FALSE RED, the defect this issue
+    #     exists to remove;
+    #   * starvation beyond `age_bound_secs` produces `skip` -- invisible lost coverage, bad,
+    #     but not a false red, and already tracked as the skip ceiling in #4315.
+    # At `stale_secs=5`: b=1 leaves a >1s future-dating window (too thin -- ~3 forks per 0.2s
+    # tick on a load-30-75 box); b=3 leaves only a 2s starvation tolerance. b=2 is the single
+    # value where BOTH clear their thresholds: a >2s stall needed to future-date, and a 3s
+    # tolerance at 15x the 0.2s tick period.
+    # SAFETY, CHECKED AGAINST THE SHIPPED SOURCE RATHER THAN ASSUMED: `obj_sweep_claim_wait`
+    # sets `deadline = started + stale` and expires on `now > deadline`; with
+    # `started = now - backdate` that is `now > now - backdate + stale`, i.e. it expires early
+    # ONLY when `backdate > stale_secs`. So the whole constraint is `backdate < stale_secs`, and
+    # it is already MECHANICALLY ENFORCED rather than left to a comment: `age_bound_secs =
+    # stale_secs - refresh_backdate_secs` and the router's first branch fails the case on a
+    # non-positive bound (`fail:bad-bound`, job 93 L2). COST, STATED: the age bound tightens
+    # from 4s to 3s, so a starved fixture is classified `skip` sooner. That is the intended
+    # direction (skip over false red) and still 15x the refresher's 0.2s tick period, so a
+    # healthy run is nowhere near it -- but it does raise the skip ceiling #4315 tracks.
+    refresh_backdate_secs=2
+    fixture_bg bash -c '
+      claim="$1" live="$2" ticks="$3" max_ticks="$4" backdate="$5"
+      i=0
+      while [[ "$i" -lt "$max_ticks" ]]; do
+        now="$(date +%s)"
+        # %N is GNU-only; a BSD/macOS date emits it literally -- probe and fall back.
+        tick="$(date +%s.%N)"
+        case "$tick" in *N) tick="$now" ;; esac
+        # decoupled from the claim write on purpose -- see the outer comment above this loop.
+        # BACKDATED BY `$backdate` SECONDS (roborev job 68 F1), passed in from the single
+        # `refresh_backdate_secs` declaration above rather than written as a literal here
+        # (roborev job 90 F1): the guard threshold below has to subtract exactly this quantity,
+        # and a re-typed literal in either place would silently reopen the false-`fail` band.
+        # The shipped `obj_sweep_claim_acquire`
+        # captures ITS OWN `now` before reading `started`, and treats `started > now` as
+        # STALE (a value "in the future" is untrustworthy, not fresh) -- takeover, not a
+        # wait. Planting the CURRENT second means any epoch-second rollover landing between
+        # the supervisor own `now` capture and this write next tick produces exactly
+        # `started == now + 1`, which the supervisor reads as future-dated and sweeps: the
+        # #4282 symptom, reintroduced by the fix meant to remove it, and invisible to every
+        # guard below (ticks stay healthy, claim writes still succeed). The backdate keeps the
+        # observed age at ~`backdate`s -- far under the 5s bound -- while making `started <= now`
+        # true for every ordering of the two clock reads THAT IS SEPARATED BY LESS THAN
+        # `backdate` SECONDS. STATED PRECISELY BECAUSE AN EARLIER WORDING OVERCLAIMED IT AS
+        # "every possible ordering" (roborev job 96 L3): `obj_sweep_claim_acquire` captures its
+        # `now` at entry and only then reads `started`, so a stall LONGER than `backdate`
+        # between those two points still lets `now - backdate` exceed the captured `now`, and
+        # the resulting takeover surfaces here as `fail:regression` (ticks healthy, claim gone)
+        # -- a false red. The backdate shrinks that window from "any epoch rollover" to "a stall
+        # longer than `backdate`", which is a real improvement and not a guarantee. Whether to
+        # spend more of the 4s of headroom (`stale_secs - backdate`) on a larger backdate is a
+        # timing tradeoff left to the follow-up rather than guessed at here.
+        wrote=0
+        printf "%s\n" "$((now - backdate))" >"$claim/started.tmp.$$" 2>/dev/null &&
+          mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null && wrote=1
+        # SECOND FIELD (roborev job 58 F2): whether THIS tick also managed to write
+        # `$claim/started`, distinct from the tick itself (liveness). `$OBJ_SWEEP_MAX_GAP_AWK`
+        # reads only `$1`, so this is compatible with the existing gap computation.
+        printf "%s %s\n" "$tick" "$wrote" >>"$ticks" 2>/dev/null && : >"$live"
+        sleep 0.2
+        i=$((i + 1))
+      done
+    ' _ "$claim" "$live" "$ticks" "$max_refresher_ticks" "$refresh_backdate_secs" >/dev/null 2>&1
+    refresh_pid=$FIXTURE_LAST_PID
+    # BARRIER BUDGET is a FLAT 8s (roborev job 68 F3, superseding the `4 * stale_secs`
+    # derivation): under this sub-case's pinned knobs `stale_secs` is always 5, so that
+    # derivation always produced 20 and job 53's absolute ceiling always clamped it back
+    # down to 8 -- the multiplier was dead code, misleadingly documented as live. A flat
+    # literal states what actually governs. The barrier only needs to outlast ONE fork/exec
+    # scheduling delay under load (the refresher is spawned through the same fork/exec path
+    # #4250/#4252 measured going slow) -- not scale with `stale_secs` at all -- and 8s
+    # comfortably covers that while keeping a genuine barrier MISS from ballooning this
+    # file's own <30s total-runtime target, in 0.2s polls (matching the refresher's own tick
+    # period, an interval this file already uses elsewhere).
+    barrier_secs=8
+    barrier_ticks=$((barrier_secs * 5))
+    live_waited=0
+    barrier_started="$(date +%s)"
+    while [[ ! -e "$live" && "$live_waited" -lt "$barrier_ticks" ]]; do
+      sleep 0.2
+      live_waited=$((live_waited + 1))
+    done
+    if [[ ! -e "$live" ]]; then
+      # ENVIRONMENTAL NON-RESULT, not a failure: the supervisor is never launched on this
+      # path, so there is no vacuity risk in skipping (this file's own convention for "a live
+      # control process never scheduled within the wait cap" — see the proc-probe cases).
+      # Reporting it as `fail` would convert a load-induced scheduling miss into a
+      # differently-shaped load-induced red, after burning up to `barrier_secs` of wall clock.
+      # MEASURE the actual elapsed wall clock rather than assert the BUDGET (`barrier_secs`):
+      # the barrier's external `sleep 0.2` invocations do not take exactly the budget under
+      # load, only AT LEAST that long, so reporting the budget as if it were a measurement is
+      # the same misattribution class this whole change is about. Phrased WITHOUT re-typing
+      # either derived number (roborev job 89 F2), since an earlier wording quoted a tick count
+      # and a budget that a later round had already superseded. The constant's own history
+      # lives at the `barrier_secs` declaration and is deliberately NOT repeated here (roborev
+      # job 91 F5: the two copies had drifted into contradicting each other about which round
+      # flattened the multiplier and which added the ceiling).
+      barrier_elapsed=$(( $(date +%s) - barrier_started ))
+      skip "obj-sweep(claim-fresh-control): the refresh fixture never ticked once in ${barrier_elapsed}s (budget ${barrier_secs}s) -- it could not be scheduled at all, so the supervisor was never launched (a stale plant would test nothing)"
+      fixture_kill "$refresh_pid"
+    else
+      # `root` was already built above, before the walks guard -- reused here rather than
+      # rebuilt, so the fixed git-init/commit/cp cost is paid once, before the tick record
+      # even starts (see the comment at its construction).
+      # CAPTURED IMMEDIATELY BEFORE LAUNCH, same sub-second-with-fallback shape as `ended`
+      # below (roborev job 45): a stall between the barrier and this instant is real elapsed
+      # time but not time the property under test cares about (the supervisor has not read
+      # `started` yet), so it must not be charged against `stale_secs` -- `max_gap` below uses
+      # this to ignore everything before it.
+      launched="$(date +%s.%N)"
+      case "$launched" in *N) launched="$(date +%s)" ;; esac
+      env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
+      rc=$?
+      # SAME sub-second capture (+ GNU/BSD fallback) as the refresher's own ticks: mixing a
+      # whole-second `ended` with sub-second tick values understated the virtual final gap by
+      # up to ~1s -- against a `stale_secs` of 5 that is a 20% leniency in exactly the
+      # direction that admits a vacuous pass.
+      ended="$(date +%s.%N)"
+      case "$ended" in *N) ended="$(date +%s)" ;; esac
+      # CAPTURED BEFORE ANYTHING ELSE CAN REMOVE IT (roborev job 90 F3): a WRONG takeover
+      # deletes `$claim` via the supervisor's own EXIT trap, which makes every subsequent
+      # claim write fail -- so on the mismatched-outcome side, a claim-write signal would let
+      # the regression's own side effect excuse the regression. That is the attribution
+      # inversion round 6 fixed for `$claim/started`, and it applies equally to "the refresher
+      # could not write". This flag is what lets the verdict below tell "the fixture could not
+      # write to a claim that was still there" (fixture fault, skip) from "the fixture could
+      # not write because the claim had already been taken away" (the takeover, fail).
+      claim_present_at_end=0
+      [[ -d "$claim" ]] && claim_present_at_end=1
+      fixture_kill "$refresh_pid"
+      # OUTCOME FIRST, DELIBERATELY: a real regression (the supervisor ages the claim, takes
+      # it over, sweeps, and its EXIT trap removes `$claim` entirely) must never be masked
+      # behind the liveness check below — evaluating that check first, against a claim
+      # directory a real takeover just deleted, previously reported "the refresh fixture went
+      # stale" for a run where the fixture was healthy and the behaviour genuinely regressed
+      # (roborev round 6). Liveness is now consulted ONLY to avert a VACUOUS pass: read from
+      # `$ticks` (the refresher's own record, which survives claim removal), not from
+      # `$claim/started` (which does not).
+      outcome_ok=0
+      if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
+        grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/fresh.log" &&
+        grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
+        outcome_ok=1
+      fi
+      # COMPUTED UNCONDITIONALLY, not just as a diagnostic in the failure branch: an
+      # end-anchored "is the LAST tick recent enough" check (what this used to assert) is
+      # satisfied by a SINGLE early tick followed by starvation for the entire rest of the
+      # run, whenever that run's own duration is close to `stale_secs` -- which it always is
+      # here, since the supervisor's wait budget IS `stale_secs`. `max_gap` folds `ended` in
+      # as a virtual final tick, so it also catches that exact case: a barrier-satisfying tick
+      # immediately followed by nothing until `fixture_kill` shows up as a gap of ~`stale_secs`
+      # to `ended`, not as "the last tick was recent" (it never advances past that one tick).
+      tick_count="$(wc -l <"$ticks" 2>/dev/null || echo 0)"
+      # CLAIM-WRITE OUTCOME, SEPARATE FROM TICK LIVENESS (roborev job 58 F2): the tick record
+      # attests the refresher was ALIVE, not that it ever managed to write `$claim/started`
+      # -- a refresher whose claim writes fail for a non-takeover reason (permissions, a
+      # transient disk issue scoped to `$claim`) still ticks healthily, so `gap_exceeds`
+      # alone would land this on the bare `fail` branch below, blaming the supervisor for a
+      # fixture write failure.
+      # WINDOWED AT `launched` AND GAP-MEASURED, NOT "a `1` anywhere in the record" (roborev
+      # job 89 F1): the refresher touches `$live` only AFTER appending its first tick, so the
+      # barrier GUARANTEES a pre-launch tick exists, and in the ordinary case that tick
+      # carries `wrote=1`. A bare `grep -q ' 1$'` was therefore satisfied by the pre-launch
+      # tick alone and STAYED satisfied even if every post-launch write failed -- leaving the
+      # supervisor reading nothing but the one-shot plant while this credited a `pass`: the
+      # very vacuity job 58 F2 / job 68 F2 closed, one window off. Two things are required
+      # now, both restricted to the post-`launched` window the property actually depends on:
+      #   1. at least one SUCCESSFUL write strictly after `launched` (never a pre-launch one);
+      #   2. no gap between successful writes >= `age_bound_secs` -- which also closes the
+      #      adjacent hole where writes succeed once just after launch and then stop, letting
+      #      `started` freeze and age past the bound while ticks stay perfectly healthy.
+      # Requirement 2 reuses `$OBJ_SWEEP_MAX_GAP_AWK` VERBATIM on the successful-write-only
+      # projection of the record rather than introducing a second gap program to keep in sync:
+      # same windowing, same `ended` fold, same fail-closed sentinel, already pinned by
+      # `test_object_store_sweep_max_gap_awk_property`. Tick liveness (`max_gap`) deliberately
+      # keeps measuring ALL ticks -- folding the two together would destroy exactly the
+      # "alive but cannot write" distinction job 58 F2 introduced this signal to draw.
+      # DERIVED ONCE, ABOVE BOTH CONSUMERS: `write_gap_exceeds` just below and `gap_exceeds`
+      # further down compare against this same bound, so it cannot be computed next to either
+      # one of them without the other reading it unset.
+      age_bound_secs="$(obj_sweep_claim_age_bound_secs "$stale_secs" "$refresh_backdate_secs")"
+      # THREE SEPARATE SIGNALS, NEVER ONE BOOLEAN (roborev job 90 F2): `claim_write_ok`
+      # collapsed "never wrote in the window", "the write record is unmeasurable" and "wrote,
+      # then stopped long enough for the claim to age" into a single flag, so one skip message
+      # had to describe three different runs and the failure-side branch reported all three as
+      # the first. They also need DIFFERENT verdicts -- an unmeasurable record must never
+      # excuse a mismatched outcome (job 49 F1's rule, which folding it into a skip-routed
+      # boolean reintroduced, job 90 F5) -- so each is kept and routed on its own below.
+      wticks="$d/wticks"
+      # THE PROJECTION'S OWN EXIT STATUS IS EVIDENCE, NOT NOISE (roborev job 95 M1). This used
+      # to end `|| : >"$wticks"`, which threw the status away and truncated the file -- so a
+      # projection that FAILED (ENOSPC on `$d`, an unwritable `$wticks`, an awk error that
+      # still leaves `$ticks` readable so `max_gap` succeeds) became indistinguishable from an
+      # honestly empty result, which the job-91-F4 logic below deliberately reads as a MEASURED
+      # zero. On the mismatched-outcome side that excused a genuine regression with an
+      # unmeasurable record: the exact fail-open closed for every other measurement path here
+      # (job 49 F1, job 90 F5). `max_gap_valid` cannot cover it -- different awk invocation,
+      # different input file.
+      proj_rc=0
+      LC_ALL=C awk '$2==1{print $1, $2}' "$ticks" >"$wticks" 2>/dev/null || proj_rc=$?
+      # STRICTLY AFTER `launched` (`>`, not `>=`) -- the contract this comment block states,
+      # now matched by the code (roborev job 95 L3). With `>=` a pre-launch tick sharing the
+      # same value as `launched` satisfied the window, which is unreachable at GNU nanosecond
+      # resolution but NOT when `date +%s.%N` is unavailable and both this case and the
+      # refresher fall back to whole seconds -- and that reopens precisely the job-89-F1
+      # vacuity (the supervisor sees only the one-shot plant while the window reports
+      # satisfied). RESIDUAL, STATED: under that fallback the gap arithmetic is also near
+      # meaningless at 1s granularity against the 3s age bound. It does not fire on the gate host
+      # (Linux `date` has `%N`); tightening the whole sub-case to `skip` when the probe falls
+      # back is tracked in the follow-up rather than guessed at here.
+      # VALIDITY TRACKED SEPARATELY, BECAUSE A COUNT THAT FAILED IS NOT A COUNT OF ZERO
+      # (roborev job 96 M1). This is a DIFFERENT awk invocation from the projection above, so
+      # `proj_rc` does not cover it and neither does `max_gap_valid`. Coercing its failure to
+      # `0` fails OPEN: on the mismatched-outcome side `writes=0` with the claim still present
+      # routes to `skip:write-starved-takeover`, i.e. an unmeasurable record excusing a genuine
+      # regression -- the precise rule job 49 F1 / job 90 F5 established, and the third place it
+      # had to be closed. `post_launch_ticks` below has its own `ticks_valid` for the same
+      # reason (job 99 L2).
+      writes_valid=1
+      post_launch_writes="$(LC_ALL=C awk -v l="$launched" '$1>l{n++} END{print n+0}' "$wticks" 2>/dev/null)" || writes_valid=0
+      [[ "$post_launch_writes" =~ ^[0-9]+$ ]] || { writes_valid=0; post_launch_writes=0; }
+      # DID THE WINDOW EVEN CONTAIN A TICK? (roborev job 91 F2) `post_launch_writes=0` is only
+      # evidence of fixture starvation if the `launched`->`ended` window was long enough to
+      # hold a tick at all. A regression that abandons the wait and returns straight toward the
+      # spawn path can exit inside one 0.2s tick period, so the refresher never had the
+      # OPPORTUNITY to write, `post_launch_writes` is legitimately 0, and crediting that as
+      # "the fixture failed, not the supervisor" would excuse the regression on the strength of
+      # its own speed. Counted over ALL ticks (`$ticks`, not the `$2==1` projection) because
+      # the question is opportunity, not write success -- and `$ticks` is claim-independent.
+      # STRICTLY AFTER `launched` TOO, matching the writes filter (roborev job 96 L2). The two
+      # were asymmetric (`>` for writes, `>=` here), and under the whole-second `date` fallback
+      # that is not cosmetic: a pre-launch tick EQUAL to `launched` made `post_launch_ticks>=1`
+      # while `post_launch_writes` stayed 0, which suppresses `fail:window-too-short` and routes
+      # a genuine mismatch to `skip:write-starved-takeover` -- the job-89-F1 vacuity again, one
+      # signal over. A tick exactly AT the launch instant is arguably opportunity, but it is not
+      # worth a vacuity path to claim it, and at nanosecond resolution the case never arises.
+      # VALIDITY TRACKED, NOT LEFT "SAFE BY ACCIDENT" (roborev job 99 L2). This was the last
+      # measurement without a validity signal: a failure coerced to `0`, which on the
+      # mismatched side routes to `fail:window-too-short` -- a red blaming the supervisor for a
+      # MEASUREMENT failure. The previous comment conceded it was safe only by accident; an
+      # accident is not a property, and the direction is a false red, which is the whole point
+      # of this issue. Routed with `mg_valid` (same `$ticks` file, same authority) so an
+      # unmeasurable tick count is `fail:tick-unmeasurable`, never `fail:window-too-short`.
+      ticks_valid=1
+      post_launch_ticks="$(LC_ALL=C awk -v l="$launched" '$1>l{n++} END{print n+0}' "$ticks" 2>/dev/null)" || ticks_valid=0
+      [[ "$post_launch_ticks" =~ ^[0-9]+$ ]] || { ticks_valid=0; post_launch_ticks=0; }
+      # AN EMPTY PROJECTION IS A MEASURED ZERO, NOT A MEASUREMENT FAILURE (roborev job 91 F4).
+      # When no tick ever wrote, `$wticks` is empty and the shared gap program correctly takes
+      # its `END{if(p==""){exit 1}}` path and prints nothing -- indistinguishable, at the regex,
+      # from awk having failed. Treating that as `write_gap_valid=0` inverted two fixture
+      # failures by severity: "never landed a single write" hit the fail-closed branch while the
+      # strictly milder "wrote once, then stopped" was excused as a fixture fault. The
+      # emptiness is directly observable, so it is observed rather than inferred, and routed
+      # through `post_launch_writes=0` with the other measured signals.
+      write_gap_valid=1
+      if [[ "$proj_rc" -ne 0 ]]; then
+        # UNMEASURABLE, distinct from the measured zero below (roborev job 95 M1).
+        write_gap_valid=0
+        write_gap="999999.00"
+      elif [[ -s "$wticks" ]]; then
+        write_gap="$(LC_ALL=C awk -v e="$ended" -v l="$launched" "$OBJ_SWEEP_MAX_GAP_AWK" "$wticks" 2>/dev/null)"
+        [[ "$write_gap" =~ $OBJ_SWEEP_GAP_RE ]] || { write_gap_valid=0; write_gap="999999.00"; }
+        # LAUNCH -> FIRST SUCCESSFUL WRITE, FOLDED IN (roborev job 103 M1). The shared gap
+        # program measures the launch-to-first-in-window interval only via the `p` that its
+        # `$1<l{p=$1;next}` branch seeds. For `$ticks` that seed is guaranteed (the barrier
+        # touches `$live` only after a tick append, and `launched` is captured after that), but
+        # `$wticks` is the `$2==1` PROJECTION and the tick append is deliberately decoupled from
+        # the claim write -- so a pre-launch tick carrying `wrote=0` leaves the projection with
+        # no line below `l`, `p` is unset when the first in-window line arrives, no sample
+        # fires, and the interval during which `started` was FROZEN is never measured. That
+        # readmits the job-89-F1 vacuity the write-gap signal exists to close: writes failing
+        # for the first seconds of the window and succeeding only at the tail scored
+        # `write_gap ~ 0.2s` while the supervisor had seen nothing but the one-shot plant.
+        # Measured separately and folded in rather than by changing `$OBJ_SWEEP_MAX_GAP_AWK`,
+        # whose behaviour is pinned by eight cases; `$1>l` matches the strict window used for
+        # `post_launch_writes`.
+        # Census captured and validated, like the four sibling measurements (roborev job 104
+        # M1): inline, its failure read as "pre-launch writes existed, no fold needed".
+        pre_launch_writes="$(LC_ALL=C awk -v l="$launched" '$1<l{n++} END{print n+0}' "$wticks" 2>/dev/null)" ||
+          pre_launch_writes=""
+        if [[ ! "$pre_launch_writes" =~ ^[0-9]+$ ]]; then
+          write_gap_valid=0
+          write_gap="999999.00"
+        elif [[ "$write_gap_valid" -eq 1 && "$pre_launch_writes" -eq 0 ]]; then
+          first_write="$(LC_ALL=C awk -v l="$launched" '$1>l{print $1; exit}' "$wticks" 2>/dev/null)" ||
+            { write_gap_valid=0; write_gap="999999.00"; first_write=""; }
+          if [[ "$write_gap_valid" -eq 1 && -n "$first_write" ]]; then
+            write_gap="$(LC_ALL=C awk -v a="$write_gap" -v f="$first_write" -v l="$launched" \
+              'BEGIN{d=f-l; printf "%.2f", (d>a?d:a)}' 2>/dev/null)"
+            [[ "$write_gap" =~ $OBJ_SWEEP_GAP_RE ]] || { write_gap_valid=0; write_gap="999999.00"; }
+          fi
+        fi
+      else
+        write_gap="999999.00"
+      fi
+      write_gap_exceeds=0
+      obj_sweep_gap_reaches_bound "$write_gap" "$age_bound_secs" && write_gap_exceeds=1
+      # DIAGNOSTIC VALUE FOR THE SKIP MESSAGES BELOW (roborev job 58 F5): `planted_started`
+      # is the ONE-SHOT value written before the refresher loop started -- the refresher
+      # overwrites it ~5x/second for the whole run, so by the time any of this runs it has
+      # no bearing on what the supervisor actually observed. The last recorded tick is at
+      # least a value with some connection to the run's own timeline.
+      last_tick="$(tail -n1 "$ticks" 2>/dev/null | cut -d' ' -f1)"
+      [[ -n "$last_tick" ]] || last_tick="(none)"
+      # LC_ALL=C: gawk honours LC_NUMERIC for `printf %f`, so under a locale with a comma
+      # decimal separator this would emit e.g. "0,20" -- FAILS CLOSED below regardless
+      # (the `=~` validation rejects a comma), rather than silently misparsing it.
+      # WINDOWED AT `launched`, NOT AT THE BARRIER (roborev job 45): a tick before `launched`
+      # only seeds `p` (the "last pre-launch tick" the fix suggests) and is otherwise
+      # skipped. WHAT THAT ACTUALLY EXCLUDES is the barrier wait plus the barrier->launch gap
+      # (roborev job 93 L6): `root="$(obj_sweep_tree ...)"` is built BEFORE the refresher is
+      # even spawned, so no git init/commit/cp time has ever been inside the tick record --
+      # the older wording naming it was describing a superseded ordering. Those excluded
+      # windows are real elapsed time but not time the property under test cares about, so a
+      # stall there must not count as a gap. The first POST-launch tick's gap is still measured
+      # against that seeded `p`, so a stall spanning the launch instant itself is still caught.
+      # `$OBJ_SWEEP_MAX_GAP_AWK` (defined once, above this function -- see the comment there)
+      # is the SAME program `test_object_store_sweep_max_gap_awk_property` pins with a
+      # mutant demonstration (roborev job 53 F2), never a re-typed copy.
+      max_gap="$(LC_ALL=C awk -v e="$ended" -v l="$launched" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks" 2>/dev/null)"
+      # FAIL CLOSED, not open: an awk error (missing binary, unreadable `$ticks`, ENOSPC) or
+      # any output that is not a plain `N.NN` number is tracked SEPARATELY as `max_gap_valid=0`
+      # (roborev job 49 F1 -- the prior version folded this into `gap_exceeds` alone, which
+      # routes `outcome_ok=0` here into the "refresher let the claim age past the bound" `skip`
+      # below, EXCUSING a genuine regression behind an unmeasurable diagnostic and printing a
+      # self-evidently-nonsense `gap=999999.00s` for what may have been a normal-length run --
+      # exactly the attribution inversion round 6 fixed, one level up). `max_gap` itself still
+      # gets the sentinel, so it stays safe to print and to feed the scaled comparison below
+      # (which is then moot: `max_gap_valid` is checked first on both outcome sides).
+      max_gap_valid=1
+      [[ "$max_gap" =~ $OBJ_SWEEP_GAP_RE ]] || { max_gap_valid=0; max_gap="999999.00"; }
+      # COMPARED AGAINST THE BACKDATE-ADJUSTED BOUND via the single shared
+      # `obj_sweep_gap_reaches_bound` (roborev job 90 F1) -- see `refresh_backdate_secs` above
+      # for why `stale_secs` alone was the wrong threshold and for the `>=` direction.
+      gap_exceeds=0
+      obj_sweep_gap_reaches_bound "$max_gap" "$age_bound_secs" && gap_exceeds=1
+      # VERDICT ROUTED BY A PURE FUNCTION, TABLE-TESTED (roborev job 95 M2). This chain is the
+      # densest and most-revised logic in the change -- nearly every round edited it -- and
+      # NOTHING asserted it: the awk pin covers what the gap program computes and the threshold
+      # pin covers the bound, but the mapping from the eleven signals to pass/skip/fail was only
+      # ever exercised along the single all-healthy path a green run takes. Both inversions this
+      # change fixed by hand (job 90 F3's claim-gone gate, job 91 F2's opportunity check) were
+      # invisible to every assert, so re-introducing either stayed green -- the "a property
+      # stopped being tested and nobody noticed" class the file's other pin tests exist against,
+      # sitting on the deliverable itself. `obj_sweep_claim_fresh_verdict` now holds the routing
+      # and nothing else (no messages, no I/O, no globals), so
+      # `test_object_store_sweep_verdict_routing_property` can table-test the combinations
+      # directly. The message text stays here, where the diagnostics live.
+      verdict="$(obj_sweep_claim_fresh_verdict "$outcome_ok" "$age_bound_secs" "$max_gap_valid" \
+        "$gap_exceeds" "$write_gap_valid" "$write_gap_exceeds" "$post_launch_writes" \
+        "$post_launch_ticks" "$claim_present_at_end" "$writes_valid" "$ticks_valid")"
+      # BUILT ONCE, NOT HAND-SPELLED IN FIVE STRINGS (roborev job 95 L6): the bound's
+      # derivation appeared verbatim in five separate messages and had to be kept in sync by
+      # hand, which is how two of them came to name `stale_secs` (job 93 L5).
+      bound_expl="${age_bound_secs}s age bound (= ${stale_secs}s stale - ${refresh_backdate_secs}s backdate)"
+      case "$verdict" in
+        fail:bad-arity)
+          # Rendered because the wiring pin requires every key the router can return to have an
+          # arm -- and because a routing call that lost an argument must be loud, not permissive.
+          fail "obj-sweep(claim-fresh-control): the verdict router was called with the wrong number of signals -- the case and the router have drifted apart, so no verdict can be trusted" ;;
+        fail:bad-bound)
+          fail "obj-sweep(claim-fresh-control): the derived age bound came back '$age_bound_secs' (${stale_secs}s stale - ${refresh_backdate_secs}s backdate) -- every gap would reach it and this sub-case would degrade to a permanent skip" ;;
+        skip:tick-unmeasurable)
+          skip "obj-sweep(claim-fresh-control): outcome matched but the refresher's own tick record could not be measured -- this run cannot be credited as having exercised the fix (refresher_ticks=$tick_count, last_tick=$last_tick, rc=$rc, see $d/fresh.log)" ;;
+        skip:tick-starved)
+          skip "obj-sweep(claim-fresh-control): outcome matched but the refresher's own tick record shows a ${max_gap}s gap >= the ${bound_expl} -- this run cannot be credited as having exercised the fix (refresher_ticks=$tick_count, last_tick=$last_tick, rc=$rc, see $d/fresh.log)" ;;
+        skip:write-uncertified)
+          skip "obj-sweep(claim-fresh-control): outcome matched but the refresher's claim writes cannot certify continuous refresh across the post-launch window (post_launch_writes=$post_launch_writes, write_gap=${write_gap}s, write_gap_valid=$write_gap_valid, vs the ${bound_expl}, refresher_ticks=$tick_count) -- the supervisor may only ever have seen the one-shot plant, so this run cannot be credited as having exercised the continuous-refresh fix (rc=$rc, see $d/fresh.log)" ;;
+        pass)
+          pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip" ;;
+        fail:tick-unmeasurable)
+          fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) -- the refresher's own tick record could not be measured, so the takeover cannot be excused as fixture starvation (see $d/fresh.log)" ;;
+        fail:write-unmeasurable)
+          fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) -- the refresher's claim-write record could not be measured, so the takeover cannot be excused as fixture starvation (refresher_ticks=$tick_count, see $d/fresh.log)" ;;
+        skip:tick-starved-takeover)
+          skip "obj-sweep(claim-fresh-control): the refresher let the claim age past the ${bound_expl} (gap=${max_gap}s) -- the takeover cannot be attributed to the supervisor (rc=$rc calls=$(obj_sweep_calls "$calls") refresher_ticks=$tick_count, see $d/fresh.log)" ;;
+        fail:window-too-short)
+          fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) -- not one refresher tick landed between launch and exit (post_launch_ticks=0, refresher_ticks=$tick_count, max_gap=${max_gap}s), so the window was too short to contain a write and the outcome cannot be excused as fixture starvation (see $d/fresh.log)" ;;
+        skip:write-starved-takeover)
+          skip "obj-sweep(claim-fresh-control): the refresher's claim writes cannot attribute this outcome to the supervisor (post_launch_writes=$post_launch_writes, write_gap=${write_gap}s vs the ${bound_expl}, refresher_ticks=$tick_count, claim survived the run) -- this run's fixture, not the supervisor, is what failed (see $d/fresh.log)" ;;
+        fail:regression)
+          # The one combination the guards cannot explain away as fixture starvation. Reached
+          # also when the claim did NOT survive the run, which is the takeover itself and never
+          # a fixture excuse (job 90 F3) -- `claim_present_at_end` is printed so a reader can
+          # tell the two apart from the message alone.
+          fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) refresher_ticks=$tick_count refresher_max_gap=${max_gap}s write_gap=${write_gap}s post_launch_writes=$post_launch_writes claim_present_at_end=$claim_present_at_end age_bound=${age_bound_secs}s (see $d/fresh.log)" ;;
+        *)
+          # FAIL CLOSED ON AN UNRECOGNISED KEY: a verdict this case cannot render is a defect in
+          # the routing function, never a reason to report nothing.
+          fail "obj-sweep(claim-fresh-control): the verdict router returned an unrecognised verdict '$verdict' -- the routing function and this case have drifted apart" ;;
+      esac
+    fi
   else
-    fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) (see $d/fresh.log)"
+    fail "obj-sweep(claim-fresh-control): the derived stale bound came back '$stale_secs' -- every timing bound in this sub-case would be vacuous"
   fi
   unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
   # (c2) THE `expired` PATH, WHICH IS ROUND 12'S NON-PERMISSIVE OUTCOME AND ONE PROPERTY
@@ -10735,6 +11386,18 @@ test_object_store_sweep_claim_recovers_when_stale() {
   # Derived from the pinned knobs, never re-typed: MAX_SWEEP_WALKS(3) x 1 + 4 = 7s, planted
   # 4s old, so the claim's own deadline is ~3s out while the outer budget is ~7s — the one
   # arrangement in which `expired` and not `exhausted` is the outcome.
+  #
+  # ROBOREV ROUND 9 FLAGGED this one-shot plant as exposed to the SAME launch-latency race
+  # #4282 fixed in (c), with a TIGHTER margin (~3s here vs (c)'s ~5s). A continuous-refresh
+  # port of (c)'s fix was ATTEMPTED and REVERTED: rewriting `started` to `now - 4` on every
+  # tick keeps the observed age PERMANENTLY at 4s, so the claim can never age far enough to
+  # cross its own 7s deadline at all -- the sub-case failed 100% of the time under that
+  # "fix" (case (c) wants the age to stay near ZERO forever, simulating a peer that never
+  # finishes; this case needs the age to advance PAST the threshold, which a value pinned
+  # to a fixed relative offset cannot do). Closing this race for real needs the plant timed
+  # relative to the supervisor's OWN observed launch, which this file has no hook for
+  # without instrumenting production code -- tracked as a follow-up rather than rushed here:
+  # issue #4315.
   printf '%s\n' "$(( $(date +%s) - 4 ))" >"$claim/started"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/expired.log" 2>&1
@@ -10794,6 +11457,445 @@ test_object_store_sweep_claim_recovers_when_stale() {
 }
 
 t test_object_store_sweep_claim_recovers_when_stale
+
+# Test (#4282, roborev job 53 F2): PINS THE `max_gap` AWK PROGRAM ITSELF (shared as
+# `$OBJ_SWEEP_MAX_GAP_AWK`, defined above `test_object_store_sweep_claim_recovers_when_stale`),
+# not just the case that uses it. That case's own `claim-fresh-control` sub-case only
+# exercises the "everything healthy" path in a green run -- nothing previously demonstrated
+# the program actually REDDENING (reporting a large gap) under a starved refresher, nor
+# that it correctly EXCLUDES the pre-launch setup window (job 45), nor that a measurement
+# outage fails closed through the case's own sentinel path -- the "a property stopped being
+# tested and nobody noticed" class this file elsewhere guards against with a recorded
+# mutant demonstration (cf. test_no_fixture_processes_leak). Feeds synthetic ticks +
+# launched/ended pairs through the SAME shared program the case uses.
+test_object_store_sweep_max_gap_awk_property() {
+  local d ticks got
+  d="$(new_case_dir)"
+  ticks="$d/ticks"
+
+  # ALL FIXTURES BELOW ARE TWO-FIELD (`<tick> <wrote>`), roborev job 68 F4: the real record
+  # written at the refresher loop above is two fields, and this test exists specifically to
+  # stop the awk program and what it is tested against from drifting apart -- a one-field
+  # fixture would not have pinned the "reads only $1" compatibility claim at all. Cases
+  # (1)-(6) use `1` throughout for realism, which on its own does NOT pin that claim: a
+  # program mutated to filter on `$2==1` passes every one of them unchanged (roborev job 89
+  # F3). Case (7) is the mutant demonstration that does pin it.
+
+  # (1) HEALTHY: evenly spaced ticks entirely after `launched`, `ended` shortly past the
+  # last one -- every gap is a normal ~0.2s tick period, nowhere near a 5s bound.
+  printf '10.0 1\n10.2 1\n10.4 1\n10.6 1\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="10.8" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "0.20" ]]; then
+    pass "obj-sweep(max-gap-awk-healthy): an evenly-ticked record reports the true per-tick gap (${got}s), not a sentinel"
+  else
+    fail "obj-sweep(max-gap-awk-healthy): got '$got', wanted '0.20'"
+  fi
+
+  # (2) STARVED: the refresher ticks twice near the start, then never again -- the guard
+  # must REDDEN (report the large gap to `ended`), proving it can fire and is not
+  # permanently satisfied by one early tick (the exact defect round 10 fixed).
+  printf '10.0 1\n10.2 1\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="16.0" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "5.80" ]]; then
+    pass "obj-sweep(max-gap-awk-starved): a refresher that stops ticking mid-run is caught as a large gap to \`ended\` (${got}s), not masked by an earlier healthy tick"
+  else
+    fail "obj-sweep(max-gap-awk-starved): got '$got', wanted '5.80'"
+  fi
+
+  # (3) PRE-LAUNCH WINDOW EXCLUDED (job 45): a large gap entirely BEFORE `launched` (the
+  # `obj_sweep_tree` setup cost) must not count, but the largest REMAINING gap must still be
+  # reported -- proving the windowing narrows what counts without silently zeroing it out.
+  printf '10.0 1\n14.9 1\n15.1 1\n15.3 1\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="16.0" -v l="15.0" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "0.70" ]]; then
+    pass "obj-sweep(max-gap-awk-prelaunch): a 4.9s gap entirely before \`launched\` is excluded, and the largest remaining gap (${got}s, ended-to-last-tick) is still reported"
+  else
+    fail "obj-sweep(max-gap-awk-prelaunch): got '$got', wanted '0.70'"
+  fi
+
+  # (4) UNMEASURABLE, FAILS CLOSED (roborev job 49 F1's sentinel path): an unreadable tick
+  # file makes awk itself produce no output (redirected away by the case's own `2>/dev/null`
+  # convention, reproduced verbatim here) -- the case's separate validation regex, which is the
+  # SHARED `$OBJ_SWEEP_GAP_RE`, the same object the call site uses rather than a re-typed copy
+  # of it (roborev job 90 F6), must reject the empty result and force the sentinel rather than
+  # accepting it as "no gap detected".
+  got="$(LC_ALL=C awk -v e="16.0" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$d/does-not-exist" 2>/dev/null)"
+  [[ "$got" =~ $OBJ_SWEEP_GAP_RE ]] || got="999999.00"
+  if [[ "$got" == "999999.00" ]]; then
+    pass "obj-sweep(max-gap-awk-unmeasurable): an unreadable tick record fails closed to the sentinel via the case's own validation regex, never a silent 'no gap detected'"
+  else
+    fail "obj-sweep(max-gap-awk-unmeasurable): got '$got' -- the sentinel guard did not fire"
+  fi
+
+  # (5) EMPTY (roborev job 58 F1): a ZERO-LINE tick record -- distinct from case (4)'s
+  # unreadable file -- must also fail closed, via the program's OWN `END{if(p==""){exit 1}}`
+  # rather than relying on the call site's regex to catch a plausible-looking "0.00". This is
+  # the one shape the program itself used to fail OPEN on.
+  : >"$ticks"
+  got="$(LC_ALL=C awk -v e="16.0" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks" 2>/dev/null)"
+  [[ "$got" =~ $OBJ_SWEEP_GAP_RE ]] || got="999999.00"
+  if [[ "$got" == "999999.00" ]]; then
+    pass "obj-sweep(max-gap-awk-empty): a zero-line tick record fails closed to the sentinel from inside the awk program itself, never the plausible-looking '0.00' of 'perfectly healthy'"
+  else
+    fail "obj-sweep(max-gap-awk-empty): got '$got' -- an empty tick record must never read as a healthy gap"
+  fi
+
+  # (6) ALL-PRE-LAUNCH (roborev job 58 F3): every tick precedes `launched` -- the refresher
+  # dies exactly at the launch instant. The main block never executes (every line takes the
+  # `next` branch), so only `END`'s `e-p` fires; this pins that path explicitly rather than
+  # relying on case (3)'s partial overlap to exercise it incidentally.
+  printf '10.0 1\n10.2 1\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="16.0" -v l="15.0" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "5.80" ]]; then
+    pass "obj-sweep(max-gap-awk-all-prelaunch): a refresher that ticks only before \`launched\` still reports the true gap to \`ended\` (${got}s) via the seeded \`p\`, not a value from inside the (unreached) main block"
+  else
+    fail "obj-sweep(max-gap-awk-all-prelaunch): got '$got', wanted '5.80'"
+  fi
+
+  # (7) `$2` IS IGNORED, NOT MERELY TOLERATED (roborev job 89 F3): case (1)'s fixture with
+  # every second field flipped to `0` must report the IDENTICAL gap. This is the mutant
+  # demonstration for the "reads only $1" claim above -- a program that started filtering on
+  # `$2==1` (the plausible drift, now that the case computes a separate successful-write gap
+  # from the same program over a `$2==1` projection) would see zero lines here, take `END`'s
+  # `p==""` exit, and produce no output at all instead of `0.20`.
+  printf '10.0 0\n10.2 0\n10.4 0\n10.6 0\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="10.8" -v l="9.5" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks")"
+  if [[ "$got" == "0.20" ]]; then
+    pass "obj-sweep(max-gap-awk-ignores-second-field): a record whose every \`wrote\` field is \`0\` reports the same ${got}s gap as the all-\`1\` fixture -- the program reads only \$1, and a \`\$2==1\` filter would have produced no output here"
+  else
+    fail "obj-sweep(max-gap-awk-ignores-second-field): got '$got', wanted '0.20' -- the awk program is no longer reading only \$1"
+  fi
+
+  # (8) NO SAMPLE MEASURED, SO UNMEASURABLE RATHER THAN `0.00` (roborev job 93 M1): a single
+  # in-window tick means the `if(p!="")` sample guard never fires, and an `ended` EARLIER than
+  # that tick makes the virtual final gap negative -- which is reachable for real, because the
+  # refresher keeps ticking until `fixture_kill` while `ended` is captured before it. With `m`
+  # left uninitialised the program printed `0.00` and the call site read a one-write fixture as
+  # healthy for the whole run. This is the mutant demonstration that it now fails closed.
+  printf '15.50 1\n' >"$ticks"
+  got="$(LC_ALL=C awk -v e="15.20" -v l="15.00" "$OBJ_SWEEP_MAX_GAP_AWK" "$ticks" 2>/dev/null)"
+  [[ "$got" =~ $OBJ_SWEEP_GAP_RE ]] || got="999999.00"
+  if [[ "$got" == "999999.00" ]]; then
+    pass "obj-sweep(max-gap-awk-no-sample): a lone in-window tick later than \`ended\` measures no gap at all and fails closed to the sentinel, never the plausible-looking '0.00' of 'perfectly healthy'"
+  else
+    fail "obj-sweep(max-gap-awk-no-sample): got '$got' -- an unmeasured gap must never read as 0.00"
+  fi
+}
+
+t test_object_store_sweep_max_gap_awk_property
+
+# THE THRESHOLD THE GAP IS COMPARED AGAINST, PINNED SEPARATELY FROM THE GAP PROGRAM (roborev
+# job 90 F1). `test_object_store_sweep_max_gap_awk_property` pins what `$OBJ_SWEEP_MAX_GAP_AWK`
+# COMPUTES; this pins what the case DOES with the number, which is where the false-`fail` band
+# actually lived -- the gap was correct and the bound it was compared against was not. The
+# relation under test: a takeover happens once `gap + refresh_backdate_secs > stale_secs` (both
+# shipped predicates are strict -- `obj_sweep_claim_wait` expires at `now > started + stale`,
+# `obj_sweep_claim_acquire` is fresh while `age <= stale`), so the case must flag at
+# `stale_secs - refresh_backdate_secs`. Case (d) is the 4.50s gap the superseded
+# `>= stale_secs` comparison waved through as healthy while the supervisor had already,
+# correctly, swept.
+test_object_store_sweep_gap_threshold_property() {
+  local stale backdate bound sites_right sites_wrong derive_shared
+  local gap_re_uses inline_gap_re bound_guard under at band over
+  # DERIVED THROUGH THE SHARED HELPER THE CASE ITSELF CALLS (roborev job 91 F3). WHAT THIS
+  # ASSERT ACTUALLY PINS, stated precisely because the previous wording overclaimed (roborev
+  # job 95 L5): it pins the HELPER'S BODY against being mutated, by comparing its output to the
+  # relation rebuilt locally -- so yes, the relation IS re-typed on the right-hand side, and
+  # that is the only way this assert can detect a wrong helper. What it does NOT pin is the
+  # call site's choice of argument; that is pinned separately, and structurally, by the grep
+  # block below.
+  # THE BACKDATE IS READ OUT OF THE SHIPPED DECLARATION (roborev job 93 L4), the same way part
+  # (a) of the claim case reads `MAX_SWEEP_WALKS`: re-typing `backdate=1` meant changing
+  # `refresh_backdate_secs` to 2 left every assert here green while the 3.99/4.00/4.50 gaps no
+  # longer described the case's real threshold. `stale` stays a local 5 BECAUSE THAT IS WHAT
+  # THIS SUB-CASE'S OWN PINNED KNOBS PRODUCE (MAX_SWEEP_WALKS x 1 + 2) and re-deriving it here
+  # would mean duplicating the case's shipped-file derivation; what this test pins is the
+  # RELATION and the call sites, and every gap below is now derived FROM `bound` so the cases
+  # stay meaningful if either operand moves.
+  backdate="$({ grep -m1 -E '^ *refresh_backdate_secs=[0-9]+$' "$SELF_FILE" || true; })"
+  backdate="${backdate##*=}"
+  stale=5
+  if [[ ! "$backdate" =~ ^[0-9]+$ ]]; then
+    fail "obj-sweep(gap-threshold-backdate): could not read \`refresh_backdate_secs\` out of $SELF_FILE (got '$backdate') -- every threshold case below would be vacuous"
+    return
+  fi
+  bound="$(obj_sweep_claim_age_bound_secs "$stale" "$backdate")"
+  if [[ "$bound" -eq $((stale - backdate)) && "$bound" -gt 0 ]]; then
+    pass "obj-sweep(gap-threshold-derivation): the shared \`obj_sweep_claim_age_bound_secs\` returns \`stale - backdate\` (${stale}s - ${backdate}s read from the shipped declaration = ${bound}s), not \`stale_secs\` -- the quantity the supervisor actually compares"
+  else
+    fail "obj-sweep(gap-threshold-derivation): bound='$bound' from stale=$stale backdate=$backdate -- every threshold case below would be vacuous"
+    return
+  fi
+  # DERIVED FROM `bound`, so these stay the right side of the threshold if the operands move.
+  under="$(LC_ALL=C awk -v b="$bound" 'BEGIN{printf "%.2f", b-0.01}')"
+  at="$(LC_ALL=C awk -v b="$bound" 'BEGIN{printf "%.2f", b}')"
+  band="$(LC_ALL=C awk -v b="$bound" 'BEGIN{printf "%.2f", b+0.5}')"
+  over="$(LC_ALL=C awk -v s="$stale" 'BEGIN{printf "%.2f", s+1}')"
+
+  # STRUCTURAL PIN OF THE CALL SITES (roborev job 91 F3), because sharing the derivation is
+  # necessary but NOT sufficient: the helper cannot see WHICH variable the case hands to
+  # `obj_sweep_gap_reaches_bound`, and passing `$stale_secs` there is precisely the mutation
+  # that reopens the job-90 F1 false-`fail` band. So the relation is read back out of this
+  # file: both comparisons must pass `$age_bound_secs`, none may pass `$stale_secs`, and the
+  # bound must be derived through the shared helper. (The patterns cannot match the grep lines
+  # themselves -- the `$` is backslash-escaped in this source, so the literal text here differs
+  # from what the regex requires.)
+  sites_right="$(grep -cE 'obj_sweep_gap_reaches_bound "\$(max_gap|write_gap)" "\$age_bound_secs"' "$SELF_FILE" || true)"
+  sites_wrong="$(grep -cE 'obj_sweep_gap_reaches_bound "\$(max_gap|write_gap)" "\$stale_secs"' "$SELF_FILE" || true)"
+  derive_shared="$(grep -cE 'obj_sweep_claim_age_bound_secs "\$stale_secs" "\$refresh_backdate_secs"' "$SELF_FILE" || true)"
+  if [[ "$sites_right" -eq 2 && "$sites_wrong" -eq 0 && "$derive_shared" -eq 1 ]]; then
+    pass "obj-sweep(gap-threshold-callsites): both gap comparisons pass \`\$age_bound_secs\` (none pass \`\$stale_secs\`) and the bound comes from the shared helper -- the mutation that reopens the band is pinned structurally, not by this test's own arithmetic"
+  else
+    fail "obj-sweep(gap-threshold-callsites): age_bound call sites=$sites_right (want 2), stale_secs call sites=$sites_wrong (want 0), shared derivation=$derive_shared (want 1) -- the threshold relation is no longer pinned"
+  fi
+
+  # THE SHARED VALIDATION REGEX GETS THE SAME STRUCTURAL TREATMENT (roborev job 93 L3): job 90
+  # F6 hoisted `$OBJ_SWEEP_GAP_RE` so the call site and the pin test could not drift, but
+  # nothing asserted the call sites still USE it -- reverting one to an inline
+  # `^[0-9]+\.[0-9][0-9]$` (or loosening it) left every case in both pin tests green. `-ge` on
+  # the use count rather than `-eq` so adding a legitimate new validation site is not a false
+  # red, while a revert still trips both halves at once. And the non-positive-bound guard is
+  # pinned too, since it is the one branch that keeps a compressed bound from degrading this
+  # sub-case to a permanent skip (job 93 L2).
+  gap_re_uses="$(grep -cE '=~ \$OBJ_SWEEP_GAP_RE' "$SELF_FILE" || true)"
+  # PATTERN IS THE GAP SHAPE, NOT "any `^[0-9]` validation": this file has ~29 integer
+  # validations of the `^[0-9]+$` kind, so the looser pattern counted all of them and would
+  # have reddened permanently. Verified BOTH ways -- 0 on this file, 1 once a call site is
+  # reverted to an inline copy. The `$OBJ_SWEEP_GAP_RE` DEFINITION is not matched (no `=~`).
+  inline_gap_re="$(grep -cE '=~ *\^\[0-9\]\+\\\.\[0-9\]\[0-9\]\$' "$SELF_FILE" || true)"
+  # PINNED AT THE GUARD'S REAL HOME: it lives inside `obj_sweep_claim_fresh_verdict` (where the
+  # parameter is `$bound`), not at the old call site. This pin CAUGHT that move when the router
+  # was extracted -- it read 0 and reddened the suite -- which is the behaviour wanted from it.
+  bound_guard="$(grep -cE '\$bound" =~ \^\[1-9\]' "$SELF_FILE" || true)"
+  if [[ "$gap_re_uses" -ge 4 && "$inline_gap_re" -eq 0 && "$bound_guard" -eq 1 ]]; then
+    pass "obj-sweep(gap-threshold-shared-regex): all ${gap_re_uses} gap validations go through \`\$OBJ_SWEEP_GAP_RE\` with no inline copy, and the non-positive-bound guard is present -- neither the validation nor the bound can drift back without reddening"
+  else
+    fail "obj-sweep(gap-threshold-shared-regex): shared-regex uses=$gap_re_uses (want >=4), inline copies=$inline_gap_re (want 0), non-positive-bound guard=$bound_guard (want 1)"
+  fi
+
+  if ! obj_sweep_gap_reaches_bound "0.20" "$bound"; then
+    pass "obj-sweep(gap-threshold-healthy): a 0.20s gap does not reach the ${bound}s age bound"
+  else
+    fail "obj-sweep(gap-threshold-healthy): a 0.20s gap was flagged against a ${bound}s bound"
+  fi
+
+  if ! obj_sweep_gap_reaches_bound "$under" "$bound"; then
+    pass "obj-sweep(gap-threshold-under): a ${under}s gap does not reach the ${bound}s age bound -- \`gap + backdate\` is still inside \`stale_secs\`"
+  else
+    fail "obj-sweep(gap-threshold-under): a ${under}s gap was flagged against a ${bound}s bound"
+  fi
+
+  # THE BOUNDARY, and the direction is deliberate: `>=` flags it. The supervisor compares whole
+  # seconds while the tick record is sub-second, so the boundary is not attributable either way;
+  # erring toward `skip` is the only direction that cannot produce this issue's own false red.
+  if obj_sweep_gap_reaches_bound "$at" "$bound"; then
+    pass "obj-sweep(gap-threshold-boundary): a ${at}s gap REACHES the bound and is flagged -- the unattributable boundary errs toward \`skip\`, never toward a false \`fail\`"
+  else
+    fail "obj-sweep(gap-threshold-boundary): a ${at}s gap was not flagged -- the boundary must fail closed"
+  fi
+
+  # THE REGRESSION CASE, and the whole reason this test exists: a gap inside
+  # (bound, stale_secs). With the backdate added the claim HAS aged past `stale_secs`, so the
+  # supervisor's takeover is correct -- but `>= stale_secs` read this as a healthy refresher.
+  if obj_sweep_gap_reaches_bound "$band" "$bound"; then
+    pass "obj-sweep(gap-threshold-band): a ${band}s gap is flagged -- with the ${backdate}s backdate the claim aged past the ${stale}s stale bound, so the takeover was CORRECT; comparing against \`stale_secs\` alone waved this whole ${backdate}s band through as a false \`fail\`"
+  else
+    fail "obj-sweep(gap-threshold-band): a ${band}s gap was not flagged against a ${bound}s bound -- the job-90 F1 false-\`fail\` band is open again"
+  fi
+
+  if obj_sweep_gap_reaches_bound "$over" "$bound"; then
+    pass "obj-sweep(gap-threshold-over): a ${over}s gap is flagged against the ${bound}s age bound"
+  else
+    fail "obj-sweep(gap-threshold-over): a ${over}s gap was not flagged against a ${bound}s bound"
+  fi
+
+  # The sentinel the call site substitutes for an unmeasurable gap must also be flagged --
+  # belt-and-braces, since validity is tracked separately and routed to `fail` on the
+  # mismatched-outcome side (job 90 F5).
+  if obj_sweep_gap_reaches_bound "999999.00" "$bound"; then
+    pass "obj-sweep(gap-threshold-sentinel): the 999999.00s unmeasurable-gap sentinel is flagged, never read as a healthy gap"
+  else
+    fail "obj-sweep(gap-threshold-sentinel): the unmeasurable-gap sentinel was not flagged"
+  fi
+}
+
+t test_object_store_sweep_gap_threshold_property
+
+# THE VERDICT ROUTING, TABLE-TESTED (roborev job 95 M2). Until this existed, the nine-signal ->
+# pass/skip/fail mapping was exercised only along the all-healthy path a green run takes, so
+# both inversions this change fixed by hand were invisible to every assert and re-introducing
+# either stayed green. Rows (15) and (16) are the ones that matter most: they are job 90 F3,
+# where the claim did NOT survive, and a claim-write excuse there would let a takeover excuse
+# itself. Row (12) is job 91 F2. Rows (9) and (10) are job 49 F1 / job 90 F5 -- an unmeasurable
+# record must never excuse a mismatched outcome.
+# Columns: ok bound mg_valid mg_exceeds wg_valid wg_exceeds writes ticks_in claim_present
+#          writes_valid ticks_valid   <- 10th and 11th, APPENDED (jobs 96 M1 / 99 L2) rather than
+#                            inserted mid-row, so pre-existing rows could not be silently
+#                            mis-shifted by the edit. The last three rows are job 99 L2: an
+#                            unmeasurable TICK COUNT is `*:tick-unmeasurable` on both sides --
+#                            never `fail:window-too-short`, which blamed the supervisor for a
+#                            measurement failure (the third row pins that precedence with
+#                            ticks_in=0 as well).
+# Healthy baseline (all eleven): 1 4 1 0 1 0 3 5 1 1 1
+# The last TWO rows are job 98 L2: a measurable tick record showing starvation outranks an
+# unmeasurable WRITE record, so both route to `skip:tick-starved-takeover` rather than to
+# `fail:write-unmeasurable` -- the ordering the router's header claims and did not have.
+# The three rows before those are job 96 M1: an unmeasurable WRITE COUNT (a different awk invocation
+# from the projection, so `proj_rc` does not cover it) must downgrade the matched side to
+# `skip` and must FAIL the mismatched side -- never excuse it as `skip:write-starved-takeover`,
+# which is what coercing the failed count to `0` used to do. The last row is that exact path:
+# writes=0 AND claim present, which without validity tracking was a skip.
+test_object_store_sweep_verdict_routing_property() {
+  local want args got rows_checked bad
+  rows_checked=0; bad=0
+  while IFS='|' read -r want args; do
+    [[ -n "${want// /}" ]] || continue
+    case "$want" in \#*) continue ;; esac
+    # DELIBERATELY UNQUOTED: `$args` is a column row that must word-split into the nine
+    # positional signals.
+    # shellcheck disable=SC2086
+    got="$(obj_sweep_claim_fresh_verdict $args)"
+    rows_checked=$((rows_checked + 1))
+    if [[ "$got" != "$want" ]]; then
+      bad=$((bad + 1))
+      fail "obj-sweep(verdict-routing): [$args] -> '$got', wanted '$want'"
+    fi
+  done <<'ROWS'
+fail:bad-bound|1 0 1 0 1 0 3 5 1 1 1
+fail:bad-bound|0 0 1 0 1 0 3 5 1 1 1
+fail:bad-bound|1 -1 1 0 1 0 3 5 1 1 1
+fail:bad-bound|1 x 1 0 1 0 3 5 1 1 1
+skip:tick-unmeasurable|1 4 0 0 1 0 3 5 1 1 1
+skip:tick-starved|1 4 1 1 1 0 3 5 1 1 1
+skip:write-uncertified|1 4 1 0 0 0 3 5 1 1 1
+skip:write-uncertified|1 4 1 0 1 0 0 5 1 1 1
+skip:write-uncertified|1 4 1 0 1 1 3 5 1 1 1
+pass|1 4 1 0 1 0 3 5 1 1 1
+fail:tick-unmeasurable|0 4 0 0 1 0 3 5 1 1 1
+fail:write-unmeasurable|0 4 1 0 0 0 3 5 1 1 1
+skip:tick-starved-takeover|0 4 1 1 1 0 3 5 1 1 1
+fail:window-too-short|0 4 1 0 1 0 3 0 1 1 1
+skip:write-starved-takeover|0 4 1 0 1 1 3 5 1 1 1
+skip:write-starved-takeover|0 4 1 0 1 0 0 5 1 1 1
+fail:regression|0 4 1 0 1 1 3 5 0 1 1
+fail:regression|0 4 1 0 1 0 0 5 0 1 1
+fail:regression|0 4 1 0 1 0 3 5 1 1 1
+fail:regression|0 4 1 0 1 0 3 5 0 1 1
+skip:write-uncertified|1 4 1 0 1 0 3 5 1 0 1
+fail:write-unmeasurable|0 4 1 0 1 0 3 5 1 0 1
+fail:write-unmeasurable|0 4 1 0 1 0 0 5 1 0 1
+skip:tick-starved-takeover|0 4 1 1 0 0 3 5 1 1 1
+skip:tick-starved-takeover|0 4 1 1 1 0 3 5 1 0 1
+skip:tick-unmeasurable|1 4 1 0 1 0 3 5 1 1 0
+fail:tick-unmeasurable|0 4 1 0 1 0 3 5 1 1 0
+fail:tick-unmeasurable|0 4 1 0 1 0 3 0 1 1 0
+ROWS
+  if [[ "$bad" -eq 0 && "$rows_checked" -eq 28 ]]; then
+    pass "obj-sweep(verdict-routing): all ${rows_checked} signal combinations route as specified -- including a claim that did NOT survive the run falling through to \`fail\` rather than being excused by its own takeover (job 90 F3), a too-short window failing rather than excusing (job 91 F2), and an unmeasurable record never excusing a mismatched outcome (job 49 F1 / job 90 F5)"
+  elif [[ "$bad" -eq 0 ]]; then
+    fail "obj-sweep(verdict-routing): only ${rows_checked} of the expected 28 rows were read -- the table was truncated, so the routing is not fully pinned"
+  fi
+
+  # THE CASE MUST ACTUALLY ROUTE THROUGH THE FUNCTION, not keep a parallel inline chain
+  # (structural, same reasoning as the threshold call-site pin: a pure function nothing calls
+  # pins nothing). One call site, and every key the function can print must be rendered by the
+  # case's `case` arms -- otherwise a verdict would fall to its unrecognised-key `fail`.
+  local callers keys arms missing k
+  # ANCHORED AT LINE START AND AT THE EXACT VARIABLE NAME. The unanchored form counted 2,
+  # because this test's own arity probe assigns to `short_verdict` -- which ENDS with
+  # `verdict`, so the substring `verdict="$(obj_sweep_claim_fresh_verdict ` occurred inside it.
+  # The pin caught its own false positive on the first run; the lesson is that a structural
+  # grep must be anchored, or it counts its own scaffolding.
+  callers="$(grep -cE '^ +verdict="\$\(obj_sweep_claim_fresh_verdict ' "$SELF_FILE" || true)"
+  # THE FULL ARGUMENT LIST, NOT JUST THE TAIL (roborev job 99 L3). The earlier version matched
+  # only the last two arguments, leaving the first nine unpinned -- and an argument-ORDER
+  # mistake is both silent and severe: swapping `$max_gap_valid` with `$gap_exceeds` inverts
+  # `fail:tick-unmeasurable` with `skip:tick-starved-takeover` on the mismatched side, turning a
+  # genuine regression into a skip, while the table test (which calls the router directly) and
+  # every other assert in the file stay green. The trailing validity signals are also the ones
+  # a call site is most likely to drop, which the router now answers with `fail:bad-arity`.
+  # THE EXPECTED LIST IS ASSEMBLED FROM THE NAMES, never written out as a literal: a literal
+  # would appear in this file and therefore match ITSELF, making the pin trivially true.
+  local -a verdict_arg_names=(outcome_ok age_bound_secs max_gap_valid gap_exceeds
+    write_gap_valid write_gap_exceeds post_launch_writes post_launch_ticks
+    claim_present_at_end writes_valid ticks_valid)
+  local expect joined a full_args
+  expect="obj_sweep_claim_fresh_verdict"
+  for a in "${verdict_arg_names[@]}"; do expect="$expect \"\$$a\""; done
+  expect="$expect)"
+  # Joined, because the invocation is wrapped over three lines with backslash continuations.
+  joined="$(tr '\n' ' ' < "$SELF_FILE" | tr -d '\\' | tr -s ' ')"
+  full_args=0
+  case "$joined" in *"$expect"*) full_args=1 ;; esac
+  keys="$(grep -oE "printf '(pass|fail:[a-z-]+|skip:[a-z-]+)" "$SELF_FILE" | sed "s/printf '//" | sort -u)"
+  # AFFIRMATIVE COUNT FIRST, so an EMPTY subject set cannot pass as "nothing missing" (roborev
+  # job 100 L2). `keys` is scraped from the router's `printf` lines; if those change shape the
+  # scrape yields nothing, the loop below never executes, `missing` stays empty and this pin
+  # reported success having checked NOTHING -- a bare zero read as clean, which is the vacuity
+  # CLAUDE.md's affirmative-zero rule exists to forbid. The count is asserted against the arms
+  # actually rendered, so the two can only drift together.
+  local key_count
+  key_count="$(printf '%s\n' $keys | grep -c . || true)"
+  missing=""
+  for k in $keys; do
+    arms="$(grep -cE "^ +${k}\)" "$SELF_FILE" || true)"
+    [[ "$arms" -ge 1 ]] || missing="$missing $k"
+  done
+  if [[ "$callers" -eq 1 && "$full_args" -eq 1 && "$key_count" -ge 12 && -z "$missing" ]]; then
+    pass "obj-sweep(verdict-routing-wired): the case routes through \`obj_sweep_claim_fresh_verdict\` (1 call site, passing all ${#verdict_arg_names[@]} signals in the specified ORDER) and renders all ${key_count} verdict keys the function can return -- the router is wired, an argument-order swap would redden here, and the key census is affirmative so an empty scrape cannot pass as clean"
+  else
+    fail "obj-sweep(verdict-routing-wired): call sites=$callers (want 1), full-ordered-argument-list match=$full_args (want 1), verdict keys scraped=$key_count (want >=12), unrendered keys:${missing:- none}"
+  fi
+
+  # AND THE TABLE MUST COVER EVERY KEY, not just the case's `case` arms (roborev job 101 L3):
+  # a newly added router branch needs only a rendered arm to satisfy the check above, and would
+  # sit entirely untested while both pins stayed green. Compared against the table's own `want`
+  # column, so the two can only drift together.
+  local wanted_keys uncovered
+  # RANGE ANCHORED SO IT CANNOT MATCH ITS OWN SOURCE LINE (roborev job 103 L3): spelled with a
+  # character class, the start pattern no longer matches the literal text of this very line, so
+  # sed opens exactly one range instead of a second unterminated one running to EOF.
+  wanted_keys="$(sed -n "/done <<.ROWS.\$/,/^ROWS\$/p" "$SELF_FILE" | grep -oE '^[a-z:-]+\|' | tr -d '|' | sort -u)"
+  uncovered=""
+  for k in $keys; do
+    case " $(printf '%s ' $wanted_keys) " in
+      *" $k "*) ;;
+      *) [[ "$k" == "fail:bad-arity" ]] || uncovered="$uncovered $k" ;;
+    esac
+  done
+  if [[ -z "$uncovered" && "$key_count" -ge 12 ]]; then
+    pass "obj-sweep(verdict-routing-table-covers): every verdict key the router can return appears in the routing table's expectations (\`fail:bad-arity\` excepted -- it is pinned by the arity assert below, which the table cannot express)"
+  else
+    fail "obj-sweep(verdict-routing-table-covers): keys scraped=$key_count (want >=12), verdict keys with no table row:${uncovered:- none} -- a router branch was added without a case pinning it, or the key scrape came back empty and this check would have passed having verified nothing"
+  fi
+
+  # ARITY IS FAIL-CLOSED, DEMONSTRATED (roborev job 100 L4): a short call must not inherit a
+  # permissive default. Ten arguments is the near miss that the old `${11:-1}` accepted.
+  local short_verdict
+  short_verdict="$(obj_sweep_claim_fresh_verdict 1 4 1 0 1 0 3 5 1 1)"
+  if [[ "$short_verdict" == "fail:bad-arity" ]]; then
+    pass "obj-sweep(verdict-routing-arity): a ten-argument call returns \`fail:bad-arity\` instead of inheriting \`valid\` for the missing signal -- a dropped argument is loud, not permissive"
+  else
+    fail "obj-sweep(verdict-routing-arity): a ten-argument call returned '$short_verdict', wanted 'fail:bad-arity' -- a dropped validity signal is failing open again"
+  fi
+
+  # THE REFRESHER'S OWN WRITE IS PINNED TOO (roborev job 99 L4). The pinning was asymmetric: the
+  # threshold test asserts the BOUND subtracts `refresh_backdate_secs`, but nothing asserted the
+  # WRITE applies it. An edit that wrote bare `$now` would leave the case over-strict by the
+  # backdate -- the observed age becomes the raw gap while the bound stays `stale - backdate` --
+  # silently losing pass credit with no assert reddening, which is the same re-typed-relation
+  # class the rest of this change is written against.
+  local write_backdated write_bare_now
+  write_backdated="$(grep -cE 'now - backdate\)\)" >"\$claim/started' "$SELF_FILE" || true)"
+  write_bare_now="$(grep -cE '"\$now" >"\$claim/started' "$SELF_FILE" || true)"
+  if [[ "$write_backdated" -eq 1 && "$write_bare_now" -eq 0 ]]; then
+    pass "obj-sweep(verdict-routing-wired-backdate): the refresher writes \`now - backdate\` to \$claim/started (1 site, none writing a bare \`\$now\`) -- the write and the bound subtract the same quantity"
+  else
+    fail "obj-sweep(verdict-routing-wired-backdate): backdated write sites=$write_backdated (want 1), bare-\$now write sites=$write_bare_now (want 0) -- the refresher's write and the age bound have drifted apart"
+  fi
+}
+
+t test_object_store_sweep_verdict_routing_property
 
 # THE CLAIM IS A REGISTERED RESOURCE, NOT ONE WHOSE LIFETIME NOBODY OWNS (#3749 review
 # round 5, item 2; CLAUDE.md's roborev-job-282 ruling that a fix which ADDS a resource
