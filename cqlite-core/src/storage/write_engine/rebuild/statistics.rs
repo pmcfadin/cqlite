@@ -111,9 +111,11 @@ pub(super) struct RecoveredBaseline {
 ///
 /// Returns `None` (never a fabricated default) when the file is absent or
 /// its `SerializationHeader` does not parse; the caller then falls back to
-/// the decode-derivation and classifies the affected fields `recomputed`
-/// (rebuild exists partly to regenerate a MISSING `Statistics.db`, so the
-/// fallback must stay).
+/// the decode-derivation and classifies the affected fields `lost` — NEVER
+/// `recomputed`, since that derivation is circular (rebuild exists partly to
+/// regenerate a MISSING `Statistics.db`, so the fallback must stay; see
+/// `components`'s module doc for why circularity, not mere imprecision, is
+/// the reason).
 pub(super) fn recover_encoding_stats_baseline(stats_path: &Path) -> Option<RecoveredBaseline> {
     let bytes = std::fs::read(stats_path).ok()?;
     let (min_timestamp, min_local_deletion_time, min_ttl) =
@@ -235,12 +237,15 @@ pub(super) fn write_statistics_component(
     //     bytes, carried through verbatim (`recovered`); the three MAXIMA are
     //     a genuine fold over correctly-decoded content (`recomputed`).
     //   * baseline LOST — Data.db stores these fields as UNSIGNED DELTAS
-    //     against the very value that is missing, so the decode that would
-    //     feed a recomputation is circular and its absolute values are not
-    //     the file's. All six are then `lost`: default-valued and NAMED so,
-    //     never dressed up as `recomputed` (which this crate's own
-    //     `FieldProvenance` defines as "derived from Data.db alone … never a
-    //     guess").
+    //     against the very value that is missing, so decoding them requires
+    //     GUESSING the baseline first — the fold below still runs and
+    //     produces real, non-sentinel numbers (PASS 1's decode-derived
+    //     minima, PASS 2's genuine per-partition maxima), but they are
+    //     absolute values reconstructed from a circular guess, not the
+    //     file's true ones. All six are `lost` and NAMED so — plausible
+    //     numbers, not sentinels, is exactly why they cannot be dressed up
+    //     as `recomputed` (which this crate's own `FieldProvenance` defines
+    //     as "derived from Data.db alone … never a guess").
     let minima_provenance = baseline_provenance;
     let maxima_provenance = match baseline_provenance {
         FieldProvenance::Recovered => FieldProvenance::Recomputed,

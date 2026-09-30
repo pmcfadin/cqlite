@@ -343,8 +343,24 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
                 reports.push(report);
                 if refused {
                     any_refused = true;
+                    // roborev finding N7 (review round 2): a swallowed
+                    // `remove_dir_all` error used to leave `mark_rolled_back`
+                    // asserting the directory WAS removed regardless — the
+                    // inverse of the bug this rollback exists to fix. Warn
+                    // rather than silently continue; the manifest entry is
+                    // still marked `rolled_back` below either way (a
+                    // rollback was ATTEMPTED, so the manifest must never
+                    // claim `regenerated` under a path we just tried to
+                    // delete, whether or not the deletion fully succeeded).
                     for written in &written_out_dirs {
-                        let _ = std::fs::remove_dir_all(written);
+                        if let Err(e) = std::fs::remove_dir_all(written) {
+                            eprintln!(
+                                "cqlite rebuild: failed to roll back {} after a later \
+                                 generation's refusal: {e} — remove it manually before \
+                                 re-running",
+                                written.display()
+                            );
+                        }
                     }
                     // roborev finding (Medium, issue #4197 F2): the manifest
                     // is rendered from `reports` REGARDLESS of the rollback
