@@ -52,6 +52,14 @@ mod marshal_type;
 mod schema_refusal;
 mod serialization_header;
 
+// See the function's own `cfg_attr`: its only production caller
+// (`write_engine::rebuild`) is compiled out under `tombstones` /
+// without `write-support`.
+#[cfg_attr(
+    any(feature = "tombstones", not(feature = "write-support")),
+    allow(unused_imports)
+)]
+pub(crate) use encoding_stats::read_encoding_stats_baseline;
 pub use header::parse_nb_format_header;
 
 use super::statistics::*;

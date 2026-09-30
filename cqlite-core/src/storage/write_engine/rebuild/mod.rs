@@ -30,6 +30,7 @@
 mod boundaries;
 mod components;
 mod decode;
+mod partition_stats;
 mod simple;
 mod statistics;
 
@@ -172,6 +173,15 @@ pub enum RefusalReason {
     /// chunk-CRC failure, or a partition failed to decode structurally while
     /// walking it) — the remedy always names `salvage` (#4196).
     DataCorrupt,
+    /// `Data.db` decoded cleanly but rebuild could not REPRODUCE a
+    /// partition's on-disk byte extent by re-encoding it, so every
+    /// promoted-index offset derived from that re-encode would be wrong
+    /// (issue #4197, spec R2). Distinct from [`Self::DataCorrupt`] on
+    /// purpose: the input may be perfectly healthy — the usual cause is an
+    /// unrecoverable `SerializationHeader.EncodingStats` baseline (the
+    /// original `Statistics.db` is gone), and the remedy names restoring it
+    /// FIRST, with `salvage` (#4196) as the fallback.
+    ReencodeMismatch,
 }
 
 /// A refusal: nothing was written (design D3). Distinct from a usage error
@@ -265,6 +275,7 @@ impl RefusalReason {
     pub fn manifest_label(self) -> &'static str {
         match self {
             RefusalReason::DataCorrupt => "data-corrupt",
+            RefusalReason::ReencodeMismatch => "reencode-mismatch",
         }
     }
 }

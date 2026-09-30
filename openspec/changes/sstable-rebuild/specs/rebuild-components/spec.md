@@ -33,12 +33,27 @@ original, because each is a pure function of Data.db's existing, unchanged bytes
 - **Then** the rebuilt TOC.txt names exactly the components present on disk afterward (including
   itself), and `cqlite verify --mode full` reports no missing-component finding for the directory.
 
-### Requirement: R2 — Index.db and BTI Partitions.db/Rows.db are byte-identical from Data.db structure alone
+### Requirement: R2 — Index.db and BTI Partitions.db/Rows.db are byte-identical from Data.db structure alone, measured against the file's own authoritative encoding baseline
 
 `rebuild_components` SHALL derive every Index.db entry (or BTI trie leaf) — key, data offset,
 promoted-index/row-index blocks — from a byte-extent-aware structural walk of the existing Data.db,
 without decoding any Data.db bytes not required to establish those extents, and SHALL produce
 output byte-identical to the Cassandra-written original for every table in the committed corpus.
+
+Because every promoted-index block offset/width is measured in bytes whose VInt widths are
+delta-encoded against the whole-SSTable `SerializationHeader.EncodingStats` baseline,
+`rebuild_components` SHALL take that baseline from the ORIGINAL `Statistics.db`'s own
+SerializationHeader whenever it is readable, and SHALL NOT prefer a value re-derived from the
+decoded content. The baseline is not bounded above by this file's own content — Cassandra carries
+EncodingStats minima forward from compaction inputs (`SerializationHeader.make(metadata,
+sstables)` → `EncodingStats.merge`), and a minimum-carrying row can be shadow-dropped by
+reconciliation before rebuild decodes it — so a re-derivation can only come out too HIGH, silently
+narrowing every delta. A re-derivation from the decoded content is the DOCUMENTED FALLBACK, used
+only when the original `Statistics.db`/header is genuinely unreadable (rebuild's own headline case
+is a MISSING `Statistics.db`), and it never certifies byte parity: when it is in force,
+`rebuild_components` SHALL refuse any `index`/`summary` request whose re-encoded partition span
+does not equal that partition's actual on-disk span, rather than writing offsets it cannot
+reproduce.
 
 #### Scenario: R2.1 BIG uncompressed and compressed Index.db byte parity
 - **Given** every committed `test_basic`/`test_collections`/`test_wide_rows` table (uncompressed
@@ -53,6 +68,27 @@ output byte-identical to the Cassandra-written original for every table in the c
 - **When** rebuild regenerates `index` (BTI's equivalent request)
 - **Then** both files are byte-identical to the originals, including `RowsOffset` payloads for wide
   partitions (`cqlite-core/tests/issue_4197_rebuild_bti_index_parity.rs`).
+
+#### Scenario: R2.4 the original header's baseline wins over any re-derivation
+- **Given** a generation written with a whole-SSTable EncodingStats baseline deliberately BELOW
+  every timestamp present in its own content (the state Cassandra reaches by inheriting minima at
+  compaction; reproduced through `SSTableWriter::pre_seed_encoding_baselines`), wide enough to
+  carry real promoted-index payloads, with `Index.db` deleted from a working copy
+- **When** rebuild regenerates `index`
+- **Then** the output is byte-identical to that generation's own original `Index.db`, and
+  `classification.index.encoding_stats_baseline == "recovered"` — whereas a baseline re-derived
+  from the decoded content differs from the real one and produces different promoted-index bytes
+  (`cqlite-core/tests/issue_4197_rebuild_baseline_provenance.rs`; the committed-corpus fixtures
+  cannot observe this, their derived and true baselines coincide).
+
+#### Scenario: R2.5 an unrecoverable baseline refuses, never ships desynced offsets
+- **Given** the same generation with BOTH `Index.db` and `Statistics.db` deleted (the baseline is
+  then genuinely unrecoverable: Data.db stores timestamps as unsigned deltas FROM it)
+- **When** rebuild regenerates `index`
+- **Then** `report.refused.reason == "reencode-mismatch"` (NOT `data-corrupt` — the input is
+  healthy, rebuild just cannot reproduce its encoding), the remedy names restoring the original
+  `Statistics.db` first and `salvage` (#4196) as the fallback, `index` never appears in
+  `regenerated`, and no `Index.db` is left under `--out`.
 
 #### Scenario: R2.3 No header hunting
 - **Given** `scripts/tests/test_rebuild_no_resync_scan.sh` (`tooling-tests`, mirrors salvage's
@@ -98,6 +134,17 @@ requested SHALL recompute every aggregate field from a full Data.db decode while
 `repaired_at`/`pending_repair`/`is_transient` as `recovered` (original Statistics.db readable) or
 `lost` (unreadable), and origin-host/compaction-ancestry as unconditionally `lost`.
 
+The six timestamp/TTL/local-deletion-time aggregates are a THIRD case, because Data.db stores each
+of them as an unsigned delta from the very `EncodingStats` baseline being regenerated (R2):
+
+- original SerializationHeader readable — the three MINIMA are that header's own values, carried
+  through verbatim (they are also what the rebuilt header must WRITE, or the unchanged Data.db
+  would delta-decode against a baseline it was never encoded with), classified `recovered`; the
+  three MAXIMA are a genuine fold over correctly-decoded content, classified `recomputed`.
+- original unreadable — the decode that would feed a recomputation is circular, so all six SHALL be
+  classified `lost`: default-valued and named so, never advertised as `recomputed`. Counts and
+  key bounds do not depend on the baseline and stay `recomputed`.
+
 #### Scenario: R4.1 aggregates recomputed correctly
 - **Given** any committed table, Statistics.db deleted
 - **When** rebuild regenerates `statistics`
@@ -105,7 +152,11 @@ requested SHALL recompute every aggregate field from a full Data.db decode while
   partition/row/column counts, both estimated histograms, first/last key,
   has-partition-level-deletions) equals the value an independent re-derivation from the fixture's
   `*-Data.db.jsonl` golden computes — never compared against CQLite's own prior Statistics.db
-  output (`cqlite-core/tests/issue_4197_rebuild_statistics_recompute.rs`).
+  output (`cqlite-core/tests/issue_4197_rebuild_statistics_recompute.rs`), the three baseline
+  minima are classified `recovered` when the original header supplied them, and — with the
+  original `Statistics.db` deleted outright — all six timestamp/TTL/LDT aggregates are classified
+  `lost` while the counts stay `recomputed`, with the written baseline demonstrably differing from
+  the original's (so the `lost` label is load-bearing, not decorative).
 
 #### Scenario: R4.2 repair fields recovered when the original is readable
 - **Given** a temp copy where Statistics.db is renamed aside (readable, but not at its expected

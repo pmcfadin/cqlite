@@ -251,3 +251,45 @@ fn parse_encoding_stats_fallback<'a>(
         ),
     ))
 }
+
+/// The authoritative `SerializationHeader.EncodingStats` baseline triple
+/// `(minTimestamp, minLocalDeletionTime, minTTL)` of a COMPLETE
+/// `Statistics.db` buffer — the three whole-SSTable values Cassandra
+/// delta-encoded every row's timestamp/TTL/LDT against when it wrote the
+/// sibling `Data.db` (`EncodingStats.Serializer`, `EncodingStats.java:274-276`
+/// at `cassandra-5.0.8`).
+///
+/// `None` — never a fabricated default — when the buffer's own TOC does not
+/// name a `SERIALIZATION_HEADER` (type 3) component offset, or the three
+/// leading VInts at that offset do not parse. Deliberately does NOT fall
+/// back to [`parse_encoding_stats_fallback`]'s ad-hoc "skip ~2 VInts after
+/// the partitioner string" walk: this function exists for callers that must
+/// be able to distinguish "the on-disk baseline says X" from "no
+/// authoritative baseline is available" (no-heuristics mandate, issue #28),
+/// and a positionally-guessed triple would be indistinguishable from the
+/// real thing once returned as `Some`.
+///
+/// Issue #4197: `rebuild` needs this to seed its scratch `DataWriter` with
+/// the baseline the file was ACTUALLY encoded against, which can legitimately
+/// be LOWER than any value still present in the decoded content — Cassandra
+/// carries EncodingStats minima forward from compaction inputs
+/// (`SerializationHeader.make(metadata, sstables)` → `EncodingStats.merge`),
+/// so re-deriving the baseline from this file's own rows can only ever
+/// produce a too-HIGH minimum, which silently narrows every VInt delta.
+// The only production caller is `write_engine::rebuild` (pass 0), which is
+// itself gated `all(feature = "write-support", not(feature = "tombstones"))`
+// — so in exactly those configurations this function has no caller. Named
+// rather than blanket-allowed, mirroring `merge::point_read`'s own
+// `cfg_attr(feature = "tombstones", allow(dead_code))` pattern.
+#[cfg_attr(
+    any(feature = "tombstones", not(feature = "write-support")),
+    allow(dead_code)
+)]
+pub(crate) fn read_encoding_stats_baseline(full_input: &[u8]) -> Option<(i64, i64, i64)> {
+    let toc = crate::parser::repair_metadata::parse_statistics_toc(full_input);
+    let offset = toc.header_offset()?;
+    let header_data = full_input.get(offset..)?;
+    let (_, (min_timestamp, min_local_deletion_time, min_ttl)) =
+        parse_encoding_stats_vuints(header_data, None).ok()?;
+    Some((min_timestamp, min_local_deletion_time, min_ttl?))
+}

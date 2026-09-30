@@ -64,6 +64,7 @@ component except Statistics.
 |---|---|---|
 | every requested component regenerated | requested components written (or `--in-place` renamed once #4195 lands); manifest `refused: null` | 0 |
 | Data.db chunk-CRC failure or mid-partition decode error while walking | REFUSE: nothing written; manifest `refused: {reason: "data-corrupt", remedy: "cqlite salvage (#4196)", offset: <n>}` | 2 |
+| Data.db decodes cleanly but a partition's re-encoded span ≠ its on-disk span, while an `index`/`summary` request is deriving byte offsets from that re-encode (in practice: the `SerializationHeader.EncodingStats` baseline was unrecoverable because the original Statistics.db is gone) | REFUSE: nothing written; manifest `refused: {reason: "reencode-mismatch", remedy: restore the original Statistics.db, else salvage (#4196), offset: <n>}`. Deliberately NOT `data-corrupt` — the input may be perfectly healthy, and sending the operator to `salvage` for a healthy file would be a false alarm | 2 |
 | schema unresolvable, or a requested component that needs schema (Filter, Statistics-if-recovering-schema-derived-fields) has none | usage error | 1 |
 | `--in-place` requested before #4195 ships `verify --mode audit` | usage error naming the dependency; nothing written | 1 |
 | `--in-place`, `verify --mode audit` on the freshly-rebuilt output set FAILS | REFUSE: originals untouched, no rename performed | 2 |
@@ -102,6 +103,7 @@ recovered/recomputed/lost), not the process exit code.
   "regenerated": ["index","summary","filter","digest","toc","statistics"],
   "skipped_not_applicable": [{"component": "crc", "reason": "compressed input uses inline chunk CRC, no CRC.db"}],
   "classification": {
+    "index": {"encoding_stats_baseline": "recovered"},
     "summary": {"min_index_interval": "recomputed", "sampling_level": "recovered"},
     "filter": {"bloom_filter_fp_chance": "recovered"},
     "statistics": {
@@ -110,7 +112,7 @@ recovered/recomputed/lost), not the process exit code.
       "origin_host": "lost", "compaction_ancestry": "lost"
     }
   },
-  "refused": null | {"reason": "data-corrupt|schema-unresolvable|in-place-unsupported|audit-failed",
+  "refused": null | {"reason": "data-corrupt|reencode-mismatch|schema-unresolvable|in-place-unsupported|audit-failed",
                        "remedy": "…", "offset": 88192 },
   "now": "<RFC3339 of the run>", "cqlite_version": "…" }
 ```

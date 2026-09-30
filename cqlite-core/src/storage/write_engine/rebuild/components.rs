@@ -6,12 +6,43 @@
 //! `min_ttl`/`min_local_deletion_time`) is ONE value per whole SSTable,
 //! known upfront from the memtable at flush time, and used to delta-encode
 //! EVERY row's timestamp/TTL/LDT VInts. Rebuild is reading an ALREADY-
-//! written file, so it must first WALK every partition once to reconstruct
-//! that same whole-table baseline (pass 1) before it can re-measure any
-//! single row's promoted-index byte width against a scratch `DataWriter`
-//! seeded with that baseline (pass 2) — seeding with the wrong baseline
-//! would silently change VInt widths and desync every computed byte offset.
+//! written file, so before it can re-measure any single row's
+//! promoted-index byte width against a scratch `DataWriter` (pass 2) it
+//! must establish that same whole-table baseline — seeding with the wrong
+//! baseline silently changes VInt widths and desyncs every computed byte
+//! offset.
+//!
+//! # Where the baseline comes from (issue #4197, spec R2/R4.2)
+//!
+//! In PROVENANCE ORDER, never a guess:
+//!
+//!   1. The ORIGINAL `Statistics.db`'s own `SerializationHeader.EncodingStats`
+//!      (`statistics::recover_encoding_stats_baseline`) — the authoritative
+//!      record of the value this `Data.db` was ACTUALLY encoded against. It
+//!      wins whenever readable, and it is not merely "better": the baseline
+//!      is NOT bounded above by this file's own decodable content, so no
+//!      derivation can recover it in general. Cassandra carries EncodingStats
+//!      minima FORWARD from compaction inputs
+//!      (`SerializationHeader.make(metadata, sstables)` → `EncodingStats.merge`,
+//!      `cassandra-5.0.8`), and a minimum-carrying row can be shadow-dropped
+//!      by reconciliation before pass 1 ever sees it. Both make a derived
+//!      baseline come out too HIGH — narrower deltas, desynced offsets, no
+//!      error (no-heuristics mandate, issue #28).
+//!   2. Failing that (rebuild's own headline case: a `Statistics.db` that is
+//!      GONE), a pass-1 walk that reconciles every partition and folds the
+//!      minima out of the decoded mutations. This fallback is CIRCULAR by
+//!      construction — the decoder needs the baseline to turn on-disk deltas
+//!      into absolute timestamps — so the six timestamp/TTL/LDT aggregates
+//!      are classified [`FieldProvenance::Lost`], never `recomputed`, and an
+//!      Index.db/Summary.db request additionally fails closed through the
+//!      per-partition re-encoded-span cross-check in pass 2 rather than
+//!      shipping desynced byte offsets.
+//!
+//! Pass 1 runs either way: independently of the baseline it is also the
+//! "prove every partition decodes BEFORE writing a byte" pass design D3/R5.2
+//! rests on.
 
+use super::partition_stats::fold_partition_statistics;
 use super::{
     boundaries, decode, simple, statistics, Component, FieldProvenance, RebuildOptions,
     RebuildReport, Refusal, RefusalReason, SkippedComponent,
@@ -22,19 +53,12 @@ use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::directory::types::SSTableComponent;
 use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
-use crate::storage::sstable::writer::data_writer::{
-    is_static_row_mutation, resolve_shadow_floor, PartitionEmitCounts,
-};
-use crate::storage::sstable::writer::stats_fold::{
-    fold_single_mutation_row_group, fold_static_carrier_stats,
-};
+use crate::storage::sstable::writer::data_writer::PartitionEmitCounts;
 use crate::storage::sstable::writer::{
-    DataWriter, FilterWriter, IndexWriter, SSTableWriter, StatisticsMetadata, StatisticsWriter,
-    SummaryWriter,
+    DataWriter, FilterWriter, IndexWriter, SSTableWriter, StatisticsMetadata, SummaryWriter,
 };
-use crate::storage::write_engine::mutation::{Mutation, PartitionTombstone, RangeTombstone};
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 async fn open_reader(input: &Path) -> Result<SSTableReader> {
     use crate::config::DiskAccessMode;
@@ -82,109 +106,47 @@ fn data_corrupt_refusal(detail: impl std::fmt::Display, offset: Option<u64>) -> 
     }
 }
 
-/// Fold one decoded partition's mutations into the running whole-SSTable
-/// `stats` accumulator (issue #4197 PASS 2; issue #4246 doctrine).
+/// Refuse because re-encoding a partition did not reproduce its ACTUAL
+/// on-disk byte span (issue #4197 spec R2), so every promoted-index offset
+/// derived from that re-encode is untrustworthy.
 ///
-/// Partition/range tombstone MARKERS are folded unconditionally from the
-/// caller's own authoritative extraction (`partition_tombstone`/
-/// `range_tombstones`, already reduced to "one winning PT, every surviving
-/// RT") — they are never row-shadowed, they ARE the deletion, exactly
-/// mirroring `SSTableWriter::write_partition`'s own marker fold
-/// (`writer/mod.rs`, issue #4246).
-///
-/// Everything else is folded per-mutation via `fold_single_mutation_row_group`
-/// (the SAME per-mutation fold `KWayMerger::merge`'s `PartitionEnd` handling
-/// and `WriteEngine::maintenance_step`'s buffered `PartitionEnd` drain use),
-/// rather than the group-oriented `for_each_clustering_row_group` /
-/// `clustering_row_mutations` machinery `write_partition` needs for RAW,
-/// pre-reconciliation buffered input. `mutations` here is NOT raw input: it
-/// is `decode_one_partition`'s output, itself `merge_partition_rows`'s
-/// (`write_engine/merge/mod.rs`) reconciled result, which has ALREADY
-/// applied `apply_range_shadowing`/`apply_partition_shadowing` to every
-/// clustering-keyed cluster before this function ever sees it — so the
-/// per-mutation `resolve_shadow_floor` gate below is PROVABLY INERT for this
-/// input (it can exclude nothing `merge_partition_rows` has not already
-/// excluded). It stays, not because it does live work here, but because it
-/// makes this fold provably agree with the scratch `DataWriter`'s own
-/// emission decision BY CONSTRUCTION, rather than depending on an upstream
-/// invariant inside `decode`/`merge` that a future change there could break
-/// silently. In that sense this function is a compile-time fix (routing
-/// through the shared, already-#4246-hardened primitives instead of the
-/// now-test-only `fold_mutation_stats`), not a bug fix: the OLD blind fold
-/// was never actually wrong for rebuild's input, because nothing shadow-able
-/// survives into `mutations` in the first place.
-///
-/// One subtlety `fold_single_mutation_row_group`'s own docs do not spell out
-/// for THIS caller: NOT every `clustering_key: None` mutation here belongs
-/// to a single reconciled clustering group. `merge_partition_rows` emits up
-/// to three DISTINCT `None`-keyed shapes per partition — the one reconciled
-/// `None`-clustered cluster (an unclustered table's sole row, or a
-/// static-row carrier, if the schema has static columns), PLUS one carrier
-/// entry per surviving coalesced range tombstone, PLUS one carrier for the
-/// partition tombstone (`merge/mod.rs`'s range-tombstone and
-/// partition-tombstone re-emit loops) — so splitting them into singleton
-/// per-mutation folds (instead of one grouped fold, as
-/// `SSTableWriter::write_partition` would for raw buffered input) is safe
-/// for two INDEPENDENT reasons, not because "every clustering key is already
-/// one mutation":
-///
-///   1. A marker-only carrier mutation folds to nothing under
-///      `fold_single_mutation_row_group`: `merge_entry_to_mutation`
-///      (`merge/mod.rs`) gives the partition-tombstone carrier empty
-///      `operations` and no row deletion (it returns early, before the
-///      operation builder ever runs), and the range-tombstone carrier empty
-///      `operations` with `row_deletion` unset too — so `merge_row_group`
-///      produces no row for either, matching its own doc comment ("a
-///      mutation that exists only to carry a partition or range tombstone").
-///   2. Splitting the group cannot double-fold a row's OWN deletion marker
-///      (`fold_row_deletion_marker`, whose `update_local_deletion_time` call
-///      is NOT idempotent — it increments a histogram bucket) because AT
-///      MOST ONE `None`-keyed mutation per partition can carry one: only the
-///      single reconciled `None`-clustered entry can; the two marker
-///      carriers structurally cannot, per point 1.
-///
-/// `is_static_row_mutation` (`data_writer::encoding`) also classifies a
-/// marker-only carrier as a "static carrier" whenever the schema has any
-/// static column — not because it IS one, but because `Iterator::all` over
-/// its EMPTY `operations` is vacuously `true`. This is harmless: the static
-/// branch (`fold_static_carrier_stats`) only folds `update_timestamp`
-/// (idempotent) from a mutation with no ops to iterate, so a carrier
-/// misclassified this way contributes nothing beyond what the unconditional
-/// marker fold above already folded. It IS, however, load-bearing for this
-/// function's branch disjointness, and worth re-deriving by hand — not
-/// assumed — before ever "simplifying" this predicate away.
-fn fold_partition_statistics(
-    stats: &mut StatisticsMetadata,
-    mutations: &[Mutation],
-    partition_tombstone: Option<&PartitionTombstone>,
-    range_tombstones: &[RangeTombstone],
-    schema: &TableSchema,
-    schema_has_static: bool,
-) {
-    if let Some(pt) = partition_tombstone {
-        stats.update_timestamp(pt.deletion_time);
-        stats.update_local_deletion_time(pt.local_deletion_time);
-        stats.mark_partition_level_deletion();
+/// This is deliberately NOT [`RefusalReason::DataCorrupt`]: `Data.db` decoded
+/// cleanly and may well be perfectly healthy — what failed is rebuild's
+/// ability to REPRODUCE its encoding, overwhelmingly because the
+/// whole-SSTable `EncodingStats` baseline could not be recovered from the
+/// original `Statistics.db` (see the module doc). Reporting corruption for a
+/// healthy file would send the operator to `salvage` for nothing.
+fn reencode_mismatch_refusal(
+    offset: u64,
+    on_disk_span: u64,
+    reencoded_span: u64,
+    baseline_provenance: FieldProvenance,
+) -> Refusal {
+    Refusal {
+        reason: RefusalReason::ReencodeMismatch,
+        remedy: format!(
+            "the partition at Data.db offset {offset} occupies {on_disk_span} bytes on disk but \
+             re-encodes to {reencoded_span} bytes, so every promoted-index offset derived from \
+             it would be wrong (EncodingStats baseline provenance: {}) — remedy: restore this \
+             generation's original Statistics.db (its SerializationHeader carries the \
+             authoritative delta-encoding baseline) and re-run; if it is gone for good, cqlite \
+             salvage (issue #4196) can write a fresh, self-consistent generation instead",
+            baseline_provenance.manifest_label()
+        ),
+        offset: Some(offset),
     }
-    for rt in range_tombstones {
-        stats.update_timestamp(rt.deletion_time);
-        stats.update_local_deletion_time(rt.local_deletion_time);
-    }
+}
 
-    let partition_floor = partition_tombstone.map(|pt| pt.deletion_time);
-    for mutation in mutations {
-        if is_static_row_mutation(mutation, schema) {
-            fold_static_carrier_stats(stats, mutation);
-            continue;
-        }
-        let shadow_floor = resolve_shadow_floor(
-            partition_floor,
-            range_tombstones,
-            mutation.clustering_key.as_ref(),
-            schema,
-        );
-        fold_single_mutation_row_group(stats, mutation, schema, schema_has_static, shadow_floor);
-    }
+/// The `Statistics.db` this run reads recovered metadata FROM (spec R4.2):
+/// the caller's explicit "renamed aside" override when given, else the
+/// input's own expected sibling path. Resolved ONCE so the `EncodingStats`
+/// baseline (pass 0) and the repair fields (`write_statistics_component`)
+/// can never read two different files.
+fn statistics_source_path(dir: &Path, base: &str, options: &RebuildOptions) -> PathBuf {
+    options
+        .statistics_recovery_source
+        .clone()
+        .unwrap_or_else(|| dir.join(format!("{base}-Statistics.db")))
 }
 
 /// Regenerate `requested` derived components of `data_db_path` (design D1;
@@ -303,28 +265,46 @@ pub async fn rebuild_components(
     let needs_partition_pass = want_index || want_summary || want_filter || want_statistics;
 
     let mut stats_acc = StatisticsMetadata::default();
+    let stats_source = statistics_source_path(dir, &base, options);
+    // Provenance of the three `EncodingStats` baseline minima actually used
+    // below (module doc, provenance order). `Recovered` = read from the
+    // original `Statistics.db`'s SerializationHeader; `Lost` = that file was
+    // unreadable and the circular pass-1 derivation stood in for it. Stays
+    // `Recovered` for a run that needs no baseline at all (`filter` alone),
+    // where nothing is derived and nothing is seeded.
+    let mut baseline_provenance = FieldProvenance::Recovered;
 
     if needs_partition_pass {
         let scan_cancel = ScanCancel::new();
+        let needs_baseline = want_index || want_summary || want_statistics;
 
-        // PASS 1 (only when the scratch-DataWriter pass below needs a
-        // baseline): reconstruct the whole-table `EncodingStats` MINIMA
-        // (min_timestamp/min_ttl/min_local_deletion_time) via the same
-        // fixed #729 two-pass baseline primitive `WriteEngine::
-        // flush_internal_async` uses (`SSTableWriter::
-        // compute_mutations_baseline_stats`), routed through this shared
-        // primitive rather than the old `fold_mutation_stats` call this
-        // replaced — issue #4246 made that function `#[cfg(test)]`-only in
-        // production. This is a COMPILE fix, not a bug fix: `mutations` here
-        // is decode-reconciled output (see `fold_partition_statistics`'s doc
-        // comment below), which was never phantom-fold-able in the first
-        // place, so the old blind fold was not actually wrong for rebuild —
-        // it just no longer compiles against the shared, #4246-hardened
-        // primitives everything else in this module now uses.  The full
-        // per-mutation content fold (maxima, tombstone histogram, flags)
-        // happens below in PASS 2. Refuse the WHOLE run — before writing a
-        // single byte — on any decode failure.
-        if want_index || want_summary || want_statistics {
+        // PASS 0: the AUTHORITATIVE baseline, from the original
+        // `Statistics.db`'s own `SerializationHeader` — see the module doc
+        // for why this beats (and is not merely nicer than) any derivation
+        // from `Data.db`'s content.
+        let recovered_baseline = if needs_baseline {
+            statistics::recover_encoding_stats_baseline(&stats_source)
+        } else {
+            None
+        };
+
+        // PASS 1: walk + reconcile EVERY partition. Two jobs, both needed
+        // regardless of PASS 0's outcome:
+        //   * it is the "prove Data.db decodes BEFORE writing a byte" pass
+        //     design D3/R5.2 rests on (a decode failure here refuses the
+        //     whole run having written nothing at all), and
+        //   * it derives the FALLBACK baseline minima for the
+        //     `Statistics.db`-is-gone case, via the same fixed #729
+        //     two-pass primitive `WriteEngine::flush_internal_async` uses
+        //     (`SSTableWriter::compute_mutations_baseline_stats`) rather
+        //     than the old `fold_mutation_stats` call this replaced — issue
+        //     #4246 made that function `#[cfg(test)]`-only in production.
+        //     `mutations` here is decode-reconciled output (see
+        //     `partition_stats::fold_partition_statistics`'s doc comment),
+        //     which was never phantom-fold-able in the first place.
+        // The full per-mutation content fold (maxima, tombstone histogram,
+        // flags) happens below in PASS 2.
+        if needs_baseline {
             let mut baseline_min_ts = i64::MAX;
             let mut baseline_min_ldt = i32::MAX;
             let mut baseline_min_ttl = i32::MAX;
@@ -353,14 +333,38 @@ pub async fn rebuild_components(
                     }
                 }
             }
-            stats_acc.min_timestamp = baseline_min_ts;
-            stats_acc.min_local_deletion_time = baseline_min_ldt;
-            stats_acc.min_ttl = baseline_min_ttl;
+            match recovered_baseline {
+                // The file's own header wins — and note this value is ALSO
+                // what a `statistics` rebuild must WRITE back out
+                // (`build_serialization_header_component` serializes these
+                // three fields AS the new EncodingStats), so a derived
+                // baseline would not merely misplace promoted-index offsets:
+                // it would leave the UNCHANGED Data.db delta-decoding against
+                // a baseline it was never encoded with.
+                Some(b) => {
+                    stats_acc.min_timestamp = b.min_timestamp;
+                    stats_acc.min_local_deletion_time = b.min_local_deletion_time;
+                    stats_acc.min_ttl = b.min_ttl;
+                    baseline_provenance = FieldProvenance::Recovered;
+                }
+                None => {
+                    stats_acc.min_timestamp = baseline_min_ts;
+                    stats_acc.min_local_deletion_time = baseline_min_ldt;
+                    stats_acc.min_ttl = baseline_min_ttl;
+                    baseline_provenance = FieldProvenance::Lost;
+                }
+            }
         }
-        if let (Some((_, first_key)), Some((_, last_key))) = (entries.first(), entries.last()) {
-            stats_acc.first_key = Some(first_key.clone());
-            stats_acc.last_key = Some(last_key.clone());
-        }
+        // NO `first_key`/`last_key` pre-seed from `entries` here (issue
+        // #4197 F6): `entries` is the RAW boundary walk, which includes
+        // partitions PASS 2 below reconciles to nothing and skips, while
+        // `StatisticsMetadata::update_key_range` — called ONLY for the
+        // partitions that survive — documents (and depends on) being fed an
+        // in-order population from a clean slate: it assigns `first_key`
+        // only while still `None` and always overwrites `last_key`.
+        // Pre-seeding BOTH from the raw walk broke that precondition and
+        // drew the two ends from two different populations whenever the
+        // FIRST enumerated partition reconciled away.
 
         // PASS 2: Data.db is now proven fully decodable and the baseline is
         // known — drive the real component writers.
@@ -478,7 +482,15 @@ pub async fn rebuild_components(
 
             let need_scratch = index_writer.is_some() || want_statistics;
             let (blocks, emit) = if need_scratch {
-                let mut scratch = DataWriter::new(baseline_seed.clone());
+                // `with_oa_partition_deletion` mirrors
+                // `SSTableWriter::with_format_and_registry`'s own
+                // `matches!(format, Bti)` gate: `da` writes the oa
+                // `DeletionTime.Serializer` partition header (1 byte LIVE /
+                // 12 bytes deleted), the legacy `nb` form is always 12. The
+                // scratch writer must re-encode in the input's OWN format or
+                // its byte extents are not this file's byte extents.
+                let mut scratch =
+                    DataWriter::new(baseline_seed.clone()).with_oa_partition_deletion(is_bti);
                 let (_, blocks, emit) = scratch.write_partition_with_index_blocks(
                     &decorated_key,
                     &mutations,
@@ -486,6 +498,36 @@ pub async fn rebuild_components(
                     partition_tombstone.as_ref(),
                     &range_tombstones,
                 )?;
+                // Fail-closed cross-check (issue #4197 spec R2): the scratch
+                // re-encode is only a valid source of BYTE OFFSETS if it
+                // reproduces this partition's ACTUAL on-disk extent. Any
+                // divergence — a baseline that could not be recovered, a
+                // Data.db feature this writer does not re-encode identically
+                // — shifts every promoted-index block offset/width derived
+                // from it, and the result would otherwise ship silently with
+                // exit 0 and `regenerated: ["index"]`.
+                //
+                // Scoped to the runs that actually DERIVE offsets from the
+                // re-encode (`index`, and `summary`, whose entry offsets come
+                // from the same Index.db entry sizes — both BIG-only). A
+                // `statistics`-only run reads no byte offset off the scratch
+                // (only the emitted row/cell COUNTS), so a span difference
+                // corrupts nothing there; that run's own exposure is the
+                // timestamp aggregates, and it is reported through
+                // `baseline_provenance` instead (spec R4.1).
+                if index_writer.is_some() {
+                    let on_disk_span = this_end.saturating_sub(*offset);
+                    let reencoded_span = scratch.position();
+                    if reencoded_span != on_disk_span {
+                        cleanup_partial_output(&options.out_dir, &base);
+                        return Ok(make_report(Some(reencode_mismatch_refusal(
+                            *offset,
+                            on_disk_span,
+                            reencoded_span,
+                            baseline_provenance,
+                        ))));
+                    }
+                }
                 (blocks, emit)
             } else {
                 (Vec::new(), PartitionEmitCounts::default())
@@ -521,6 +563,20 @@ pub async fn rebuild_components(
                 report
                     .regenerated
                     .push(Component::Index.manifest_label().to_string());
+                // Every promoted-index offset in this file was measured
+                // against the delta-encoding baseline, so the manifest says
+                // where that baseline came from (design D5; the same
+                // "the manifest always says which" discipline spec R3
+                // imposes on Summary/Filter's governing parameters). Only
+                // ever `recovered` here in practice: a `Lost` baseline
+                // cannot reach this point, because the per-partition
+                // re-encoded-span cross-check above refuses the run first.
+                let mut fields = BTreeMap::new();
+                fields.insert(
+                    "encoding_stats_baseline".to_string(),
+                    baseline_provenance.manifest_label().to_string(),
+                );
+                report.classification.insert("index".to_string(), fields);
             }
             // else: counting mode — nothing was persisted, nothing to finish.
         }
@@ -574,12 +630,13 @@ pub async fn rebuild_components(
     }
 
     if want_statistics {
-        write_statistics_component(
-            dir,
+        statistics::write_statistics_component(
+            &stats_source,
             &base,
             options,
             schema,
             is_bti,
+            baseline_provenance,
             &mut stats_acc,
             &mut report,
         )?;
@@ -645,76 +702,3 @@ pub async fn rebuild_components(
 
     Ok(report)
 }
-
-fn write_statistics_component(
-    dir: &Path,
-    base: &str,
-    options: &RebuildOptions,
-    schema: &TableSchema,
-    is_bti: bool,
-    stats_acc: &mut StatisticsMetadata,
-    report: &mut RebuildReport,
-) -> Result<()> {
-    let stats_path = options
-        .statistics_recovery_source
-        .clone()
-        .unwrap_or_else(|| dir.join(format!("{base}-Statistics.db")));
-    let repair = statistics::recover_repair_state(&stats_path);
-    stats_acc.set_repair_state(
-        repair.repaired_at,
-        repair.pending_repair,
-        repair.is_transient,
-    );
-
-    let out_path = options.out_dir.join(format!("{base}-Statistics.db"));
-    let writer = if is_bti {
-        StatisticsWriter::new_bti(out_path)
-    } else {
-        StatisticsWriter::new(out_path)
-    };
-    writer.write(stats_acc, Some(schema))?;
-    report
-        .regenerated
-        .push(Component::Statistics.manifest_label().to_string());
-
-    let mut fields = BTreeMap::new();
-    for field in [
-        "min_timestamp",
-        "max_timestamp",
-        "min_local_deletion_time",
-        "max_local_deletion_time",
-        "min_ttl",
-        "max_ttl",
-        "partition_count",
-        "row_count",
-        "column_count",
-        "first_key",
-        "last_key",
-        "has_partition_level_deletions",
-    ] {
-        fields.insert(
-            field.to_string(),
-            FieldProvenance::Recomputed.manifest_label().to_string(),
-        );
-    }
-    for field in ["repaired_at", "pending_repair", "is_transient"] {
-        fields.insert(
-            field.to_string(),
-            repair.provenance.manifest_label().to_string(),
-        );
-    }
-    for field in ["origin_host", "compaction_ancestry"] {
-        fields.insert(
-            field.to_string(),
-            FieldProvenance::Lost.manifest_label().to_string(),
-        );
-    }
-    report
-        .classification
-        .insert("statistics".to_string(), fields);
-    Ok(())
-}
-
-#[cfg(test)]
-#[path = "components_tests.rs"]
-mod tests;

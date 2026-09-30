@@ -1,12 +1,16 @@
-//! Statistics.db rebuild helpers (design D2/§2; spec R4): repair-field
-//! recovery from the original `Statistics.db` (when readable), and the
-//! `bloom_filter_fp_chance` / `min_index_interval` schema-provenance helpers
-//! shared with the Filter.db / Summary.db regenerators.
+//! Statistics.db rebuild helpers (design D2/§2; spec R4): repair-field and
+//! `EncodingStats`-baseline recovery from the original `Statistics.db` (when
+//! readable), and the `bloom_filter_fp_chance` / `min_index_interval`
+//! schema-provenance helpers shared with the Filter.db / Summary.db
+//! regenerators.
 
-use super::FieldProvenance;
+use super::{Component, FieldProvenance, RebuildOptions, RebuildReport};
+use crate::error::Result;
 use crate::parser::repair_metadata::{parse_repair_metadata, RepairField};
 use crate::schema::TableSchema;
 use crate::storage::sstable::version_gate::VersionGates;
+use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// One partition's recovered repair-coordination fields (spec R4.2/R4.3),
@@ -78,6 +82,56 @@ pub(super) fn recover_repair_state(stats_path: &Path) -> RecoveredRepairState {
     }
 }
 
+/// The whole-SSTable delta-encoding baseline
+/// (`SerializationHeader.EncodingStats`) recovered from the ORIGINAL
+/// `Statistics.db`, with its provenance (issue #4197, spec R2/R4.2).
+pub(super) struct RecoveredBaseline {
+    pub(super) min_timestamp: i64,
+    pub(super) min_local_deletion_time: i32,
+    pub(super) min_ttl: i32,
+}
+
+/// Read the authoritative `EncodingStats` baseline triple out of
+/// `stats_path`'s `SerializationHeader` — the three whole-SSTable minima
+/// Cassandra delta-encoded EVERY row's timestamp/TTL/local-deletion-time
+/// against when it wrote the sibling (and, for rebuild, UNCHANGED) `Data.db`.
+///
+/// # Why the file's own header beats re-deriving it from Data.db (spec R2)
+///
+/// The baseline is NOT recoverable from the decoded content in general, only
+/// bounded by it: it is whatever value the writer happened to hold, and
+/// Cassandra carries EncodingStats minima FORWARD from compaction inputs
+/// (`SerializationHeader.make(metadata, sstables)` → `EncodingStats.merge`,
+/// `cassandra-5.0.8`), so a compaction-produced SSTable's true baseline can
+/// be lower than anything present in its own rows. A row that carried the
+/// minimum can also be shadow-dropped by read-time reconciliation before
+/// rebuild's own decode ever sees it. Either way a re-derivation can only
+/// come out too HIGH, which silently NARROWS every VInt delta and desyncs
+/// every promoted-index byte offset rebuild computes — with no error.
+///
+/// Returns `None` (never a fabricated default) when the file is absent or
+/// its `SerializationHeader` does not parse; the caller then falls back to
+/// the decode-derivation and classifies the affected fields `recomputed`
+/// (rebuild exists partly to regenerate a MISSING `Statistics.db`, so the
+/// fallback must stay).
+pub(super) fn recover_encoding_stats_baseline(stats_path: &Path) -> Option<RecoveredBaseline> {
+    let bytes = std::fs::read(stats_path).ok()?;
+    let (min_timestamp, min_local_deletion_time, min_ttl) =
+        crate::parser::enhanced_statistics_parser::read_encoding_stats_baseline(&bytes)?;
+    // A value outside `i32` cannot be the baseline Cassandra wrote:
+    // `EncodingStats.Serializer` round-trips both of these through
+    // `writeUnsignedVInt32`/`readUnsignedVInt32`, whose `checkedCast`
+    // REJECTS anything that does not fit a signed 32-bit int. Refuse the
+    // recovery rather than truncate into a plausible-looking baseline.
+    let min_local_deletion_time = i32::try_from(min_local_deletion_time).ok()?;
+    let min_ttl = i32::try_from(min_ttl).ok()?;
+    Some(RecoveredBaseline {
+        min_timestamp,
+        min_local_deletion_time,
+        min_ttl,
+    })
+}
+
 /// Resolve `bloom_filter_fp_chance` from the schema's `WITH` clause,
 /// mirroring `writer::finish::bloom_filter_fp_chance` (`pub(super)` there,
 /// so not directly callable — this is a deliberate, small duplicate rather
@@ -111,6 +165,108 @@ pub(super) fn bloom_filter_fp_chance(schema: &TableSchema) -> (f64, FieldProvena
 /// byte parity it cannot back up.
 pub(super) fn min_index_interval() -> (u32, FieldProvenance) {
     (128, FieldProvenance::Recomputed)
+}
+
+/// Write the regenerated `Statistics.db` and record its per-field
+/// provenance (design D2/D5; spec R4).
+///
+/// `stats_path` is the ALREADY-RESOLVED recovery source
+/// (`components::statistics_source_path`) — the same file pass 0 read the
+/// `EncodingStats` baseline from, so the repair fields and the baseline can
+/// never come from two different `Statistics.db`s.
+///
+/// `baseline_provenance` is that pass-0 outcome: `Recovered` when the
+/// original header supplied the delta-encoding baseline, `Lost` when it was
+/// unreadable and the circular decode-derivation stood in (see
+/// `components`'s module doc).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn write_statistics_component(
+    stats_path: &Path,
+    base: &str,
+    options: &RebuildOptions,
+    schema: &TableSchema,
+    is_bti: bool,
+    baseline_provenance: FieldProvenance,
+    stats_acc: &mut StatisticsMetadata,
+    report: &mut RebuildReport,
+) -> Result<()> {
+    let repair = recover_repair_state(stats_path);
+    stats_acc.set_repair_state(
+        repair.repaired_at,
+        repair.pending_repair,
+        repair.is_transient,
+    );
+
+    let out_path = options.out_dir.join(format!("{base}-Statistics.db"));
+    let writer = if is_bti {
+        StatisticsWriter::new_bti(out_path)
+    } else {
+        StatisticsWriter::new(out_path)
+    };
+    writer.write(stats_acc, Some(schema))?;
+    report
+        .regenerated
+        .push(Component::Statistics.manifest_label().to_string());
+
+    let mut fields = BTreeMap::new();
+    for field in [
+        "partition_count",
+        "row_count",
+        "column_count",
+        "first_key",
+        "last_key",
+        "has_partition_level_deletions",
+    ] {
+        fields.insert(
+            field.to_string(),
+            FieldProvenance::Recomputed.manifest_label().to_string(),
+        );
+    }
+    // The six timestamp/TTL/local-deletion-time aggregates are exactly as
+    // trustworthy as the delta-encoding baseline they are measured against
+    // (issue #4197, spec R4.1):
+    //
+    //   * baseline RECOVERED — the three MINIMA are the original header's own
+    //     bytes, carried through verbatim (`recovered`); the three MAXIMA are
+    //     a genuine fold over correctly-decoded content (`recomputed`).
+    //   * baseline LOST — Data.db stores these fields as UNSIGNED DELTAS
+    //     against the very value that is missing, so the decode that would
+    //     feed a recomputation is circular and its absolute values are not
+    //     the file's. All six are then `lost`: default-valued and NAMED so,
+    //     never dressed up as `recomputed` (which this crate's own
+    //     `FieldProvenance` defines as "derived from Data.db alone … never a
+    //     guess").
+    let minima_provenance = baseline_provenance;
+    let maxima_provenance = match baseline_provenance {
+        FieldProvenance::Recovered => FieldProvenance::Recomputed,
+        other => other,
+    };
+    for (field, provenance) in [
+        ("min_timestamp", minima_provenance),
+        ("min_local_deletion_time", minima_provenance),
+        ("min_ttl", minima_provenance),
+        ("max_timestamp", maxima_provenance),
+        ("max_local_deletion_time", maxima_provenance),
+        ("max_ttl", maxima_provenance),
+    ] {
+        fields.insert(field.to_string(), provenance.manifest_label().to_string());
+    }
+    for field in ["repaired_at", "pending_repair", "is_transient"] {
+        fields.insert(
+            field.to_string(),
+            repair.provenance.manifest_label().to_string(),
+        );
+    }
+    for field in ["origin_host", "compaction_ancestry"] {
+        fields.insert(
+            field.to_string(),
+            FieldProvenance::Lost.manifest_label().to_string(),
+        );
+    }
+    report
+        .classification
+        .insert("statistics".to_string(), fields);
+    Ok(())
 }
 
 #[cfg(test)]

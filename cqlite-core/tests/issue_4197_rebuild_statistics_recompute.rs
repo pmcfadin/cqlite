@@ -231,15 +231,24 @@ async fn statistics_recompute_partition_count_matches_golden() {
         .classification
         .get("statistics")
         .unwrap_or_else(|| panic!("no `statistics` classification in report={report:?}"));
-    for field in [
-        "min_timestamp",
-        "max_timestamp",
-        "partition_count",
-        "row_count",
-    ] {
+    for field in ["max_timestamp", "partition_count", "row_count"] {
         assert_eq!(
             classification.get(field).map(String::as_str),
             Some("recomputed"),
+            "field {field}, report={report:?}"
+        );
+    }
+    // The three MINIMA are the `SerializationHeader.EncodingStats` baseline
+    // itself, taken verbatim from this generation's own (still readable)
+    // `Statistics.db` rather than re-derived from the decoded content —
+    // issue #4197's F1 fix, spec R2/R4.1. `recovered`, not `recomputed`:
+    // the baseline is NOT bounded above by the file's own content (Cassandra
+    // carries it forward from compaction inputs), so a derivation could only
+    // ever come out too high and silently narrow every VInt delta.
+    for field in ["min_timestamp", "min_local_deletion_time", "min_ttl"] {
+        assert_eq!(
+            classification.get(field).map(String::as_str),
+            Some("recovered"),
             "field {field}, report={report:?}"
         );
     }
@@ -254,6 +263,123 @@ async fn statistics_recompute_partition_count_matches_golden() {
     eprintln!(
         "[issue_4197] {KEYSPACE}.{TABLE}: recomputed partition_count={partition_count} matches \
          the independent sstabledump-golden oracle ({expected_partitions})."
+    );
+}
+
+/// R4.1 (issue #4197 F1) — when the original `Statistics.db` is GONE the
+/// delta-encoding baseline is not recoverable AT ALL, and every aggregate
+/// measured against it is reported `lost`, never `recomputed`.
+///
+/// `Data.db` stores timestamps/TTLs/local-deletion-times as UNSIGNED VInt
+/// DELTAS from the whole-SSTable `EncodingStats` baseline, so "re-derive the
+/// baseline by decoding the content" is circular: the decoder needs the
+/// baseline to produce the absolute values the derivation would fold. This
+/// test pins BOTH halves of the honesty claim — the label AND the fact that
+/// the label is load-bearing (the written value really is not the original's).
+#[tokio::test]
+async fn statistics_timestamp_aggregates_are_lost_without_the_original_header() {
+    let Some(fixture_dir) = fixture_dir_or_skip() else {
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but {KEYSPACE}.{TABLE} is absent; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE)
+            );
+        }
+        eprintln!("[issue_4197] {KEYSPACE}.{TABLE} fixture absent; skipping");
+        return;
+    };
+    let schema = table_schema(SCHEMA_FILE, TABLE, KEYSPACE);
+    let temp = TempDir::new().expect("tempdir");
+    let working = copy_fixture_dir(&fixture_dir, temp.path());
+    let data_db = single_data_db(&working);
+    let prefix = data_db
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .trim_end_matches("Data.db")
+        .to_string();
+    std::fs::remove_file(working.join(format!("{prefix}Statistics.db")))
+        .expect("delete Statistics.db");
+
+    let out = temp.path().join("out");
+    let options = RebuildOptions {
+        out_dir: out.clone(),
+        statistics_recovery_source: None,
+    };
+    let report = rebuild_components(&data_db, &schema, &[Component::Statistics], &options)
+        .await
+        .expect("rebuild must succeed (R4.3: a missing Statistics.db is the headline case)");
+    assert!(report.refused.is_none(), "refused: {:?}", report.refused);
+    let classification = report
+        .classification
+        .get("statistics")
+        .unwrap_or_else(|| panic!("no `statistics` classification in report={report:?}"));
+    for field in [
+        "min_timestamp",
+        "max_timestamp",
+        "min_local_deletion_time",
+        "max_local_deletion_time",
+        "min_ttl",
+        "max_ttl",
+    ] {
+        assert_eq!(
+            classification.get(field).map(String::as_str),
+            Some("lost"),
+            "field {field} must be `lost` with no original header to recover the baseline \
+             from; report={report:?}"
+        );
+    }
+    // Counts and key bounds do NOT depend on the baseline — they stay
+    // `recomputed`, so the assertion above is not a blanket "everything is
+    // lost" that would pass however the code behaved.
+    for field in ["partition_count", "row_count", "column_count"] {
+        assert_eq!(
+            classification.get(field).map(String::as_str),
+            Some("recomputed"),
+            "field {field}, report={report:?}"
+        );
+    }
+
+    // The `lost` label is load-bearing, not decorative: the value actually
+    // written differs from the original Cassandra-written baseline, which is
+    // exactly why it must not be advertised as `recomputed`.
+    use cqlite_core::platform::Platform;
+    use cqlite_core::storage::sstable::statistics_reader::StatisticsReader;
+    use std::sync::Arc;
+    let config = cqlite_core::Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let rebuilt = StatisticsReader::open(
+        &out.join(format!("{prefix}Statistics.db")),
+        platform.clone(),
+    )
+    .await
+    .expect("open rebuilt Statistics.db");
+    let original_stats_path = fixture_dir.join(format!(
+        "{}Statistics.db",
+        single_data_db(&fixture_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .trim_end_matches("Data.db")
+    ));
+    let original = StatisticsReader::open(&original_stats_path, platform)
+        .await
+        .expect("open the fixture's original Statistics.db");
+    assert_ne!(
+        original.statistics().timestamp_stats.min_timestamp,
+        0,
+        "the original must carry a real baseline or the comparison below is vacuous"
+    );
+    assert_ne!(
+        rebuilt.statistics().timestamp_stats.min_timestamp,
+        original.statistics().timestamp_stats.min_timestamp,
+        "if the baseline HAD been recoverable without the original header, this field would \
+         not need a `lost` classification — re-examine the classification, not this assertion"
+    );
+
+    eprintln!(
+        "[issue_4197] {KEYSPACE}.{TABLE}: timestamp aggregates classified `lost` with no \
+         original SerializationHeader to recover the encoding baseline from."
     );
 }
 
