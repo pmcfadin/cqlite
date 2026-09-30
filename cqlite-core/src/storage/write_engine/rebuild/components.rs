@@ -163,6 +163,29 @@ pub async fn rebuild_components(
     requested: &[Component],
     options: &RebuildOptions,
 ) -> Result<RebuildReport> {
+    let mut discarded = StatisticsMetadata::default();
+    rebuild_components_capturing_stats(data_db_path, schema, requested, options, &mut discarded)
+        .await
+}
+
+/// [`rebuild_components`], additionally handing back the `StatisticsMetadata`
+/// the `Statistics.db` write was driven from.
+///
+/// Exists because two of those fields are otherwise UNOBSERVABLE from a
+/// rebuilt `nb` generation: `build_stats_component` (the `nb` STATS body)
+/// does not serialize `firstKey`/`lastKey` at all — only
+/// `build_stats_component_da` does — so the key-range invariant (both ends
+/// drawn from the SAME counted population as `partition_count`; issue #4197
+/// F6) cannot be asserted from the output bytes of the format the whole
+/// committed corpus uses. Crate-internal on purpose: it is a test seam for
+/// an in-crate assertion, not a second public entry point.
+pub(crate) async fn rebuild_components_capturing_stats(
+    data_db_path: &Path,
+    schema: &TableSchema,
+    requested: &[Component],
+    options: &RebuildOptions,
+    stats_acc: &mut StatisticsMetadata,
+) -> Result<RebuildReport> {
     if requested.is_empty() {
         return Err(Error::InvalidInput(
             "rebuild_components: `requested` must name at least one component".to_string(),
@@ -264,7 +287,6 @@ pub async fn rebuild_components(
     let want_statistics = want(Component::Statistics);
     let needs_partition_pass = want_index || want_summary || want_filter || want_statistics;
 
-    let mut stats_acc = StatisticsMetadata::default();
     let stats_source = statistics_source_path(dir, &base, options);
     // Provenance of the three `EncodingStats` baseline minima actually used
     // below (module doc, provenance order). `Recovered` = read from the
@@ -364,7 +386,20 @@ pub async fn rebuild_components(
         // only while still `None` and always overwrites `last_key`.
         // Pre-seeding BOTH from the raw walk broke that precondition and
         // drew the two ends from two different populations whenever the
-        // FIRST enumerated partition reconciled away.
+        // FIRST enumerated partition reconciled away. Both ends now come
+        // from the single PASS-2 call site that also counts the partition,
+        // so the populations agree by construction.
+        //
+        // How reachable was the divergence? MEASURED (see
+        // `components_keyrange_tests.rs`'s own reachability note): none of
+        // the four writable shapes tried — rowless, partition-tombstone-only,
+        // PT-shadowed row, TTL-expired row — makes an ENUMERATED partition
+        // reconcile to nothing, because the decode primitive runs with read
+        // shadowing OFF and `merge` re-emits every marker as a carrier, while
+        // a rowless partition is not enumerated in the first place. So this
+        // is a latent-correctness fix restoring a documented precondition,
+        // not a live wrong-output bug — stated rather than implied, so a
+        // later reader does not mistake the test for a regression pin.
 
         // PASS 2: Data.db is now proven fully decodable and the baseline is
         // known — drive the real component writers.
@@ -471,7 +506,7 @@ pub async fn rebuild_components(
 
             if want_statistics {
                 fold_partition_statistics(
-                    &mut stats_acc,
+                    stats_acc,
                     &mutations,
                     partition_tombstone.as_ref(),
                     &range_tombstones,
@@ -637,7 +672,7 @@ pub async fn rebuild_components(
             schema,
             is_bti,
             baseline_provenance,
-            &mut stats_acc,
+            stats_acc,
             &mut report,
         )?;
     }
@@ -702,3 +737,7 @@ pub async fn rebuild_components(
 
     Ok(report)
 }
+
+#[cfg(test)]
+#[path = "components_keyrange_tests.rs"]
+mod keyrange_tests;
