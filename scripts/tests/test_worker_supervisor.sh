@@ -10705,22 +10705,24 @@ obj_sweep_claim_age_bound_secs() {
 #     and claim writes do not (job 90 F3);
 #   * `post_launch_ticks=0` fails rather than excuses: with no tick inside the window there was
 #     no OPPORTUNITY to write, so absence of writes says nothing about the fixture (job 91 F2).
+# `writes_valid` defaults to 1 ONLY so the nine-argument form stays callable; every live call
+# site passes it explicitly, and the wiring pin asserts the case passes all ten (job 96 M1).
 obj_sweep_claim_fresh_verdict() {
   local ok="$1" bound="$2" mg_valid="$3" mg_exceeds="$4" wg_valid="$5" wg_exceeds="$6"
-  local writes="$7" ticks_in="$8" claim_present="$9"
+  local writes="$7" ticks_in="$8" claim_present="$9" writes_valid="${10:-1}"
   if [[ ! "$bound" =~ ^[1-9][0-9]*$ ]]; then
     printf 'fail:bad-bound\n'
   elif [[ "$ok" -eq 1 && "$mg_valid" -eq 0 ]]; then
     printf 'skip:tick-unmeasurable\n'
   elif [[ "$ok" -eq 1 && "$mg_exceeds" -eq 1 ]]; then
     printf 'skip:tick-starved\n'
-  elif [[ "$ok" -eq 1 && ( "$wg_valid" -eq 0 || "$writes" -eq 0 || "$wg_exceeds" -eq 1 ) ]]; then
+  elif [[ "$ok" -eq 1 && ( "$wg_valid" -eq 0 || "$writes_valid" -eq 0 || "$writes" -eq 0 || "$wg_exceeds" -eq 1 ) ]]; then
     printf 'skip:write-uncertified\n'
   elif [[ "$ok" -eq 1 ]]; then
     printf 'pass\n'
   elif [[ "$mg_valid" -eq 0 ]]; then
     printf 'fail:tick-unmeasurable\n'
-  elif [[ "$wg_valid" -eq 0 ]]; then
+  elif [[ "$wg_valid" -eq 0 || "$writes_valid" -eq 0 ]]; then
     printf 'fail:write-unmeasurable\n'
   elif [[ "$mg_exceeds" -eq 1 ]]; then
     printf 'skip:tick-starved-takeover\n'
@@ -10739,6 +10741,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
   local gap_exceeds launched max_gap_valid last_tick
   local wticks post_launch_writes post_launch_ticks write_gap write_gap_valid write_gap_exceeds
   local refresh_backdate_secs age_bound_secs claim_present_at_end proj_rc verdict bound_expl
+  local writes_valid
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -10959,9 +10962,18 @@ test_object_store_sweep_claim_recovers_when_stale() {
         # the supervisor own `now` capture and this write next tick produces exactly
         # `started == now + 1`, which the supervisor reads as future-dated and sweeps: the
         # #4282 symptom, reintroduced by the fix meant to remove it, and invisible to every
-        # guard below (ticks stay healthy, claim writes still succeed). A 1s backdate keeps
-        # the observed age at ~1s -- far under the 5s bound -- while making `started <= now`
-        # true for every possible relative ordering of the two clock reads.
+        # guard below (ticks stay healthy, claim writes still succeed). The backdate keeps the
+        # observed age at ~`backdate`s -- far under the 5s bound -- while making `started <= now`
+        # true for every ordering of the two clock reads THAT IS SEPARATED BY LESS THAN
+        # `backdate` SECONDS. STATED PRECISELY BECAUSE AN EARLIER WORDING OVERCLAIMED IT AS
+        # "every possible ordering" (roborev job 96 L3): `obj_sweep_claim_acquire` captures its
+        # `now` at entry and only then reads `started`, so a stall LONGER than `backdate`
+        # between those two points still lets `now - backdate` exceed the captured `now`, and
+        # the resulting takeover surfaces here as `fail:regression` (ticks healthy, claim gone)
+        # -- a false red. The backdate shrinks that window from "any epoch rollover" to "a stall
+        # longer than `backdate`", which is a real improvement and not a guarantee. Whether to
+        # spend more of the 4s of headroom (`stale_secs - backdate`) on a larger backdate is a
+        # timing tradeoff left to the follow-up rather than guessed at here.
         wrote=0
         printf "%s\n" "$((now - backdate))" >"$claim/started.tmp.$$" 2>/dev/null &&
           mv -f "$claim/started.tmp.$$" "$claim/started" 2>/dev/null && wrote=1
@@ -11120,8 +11132,17 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # meaningless at 1s granularity against a 4s bound. It does not fire on the gate host
       # (Linux `date` has `%N`); tightening the whole sub-case to `skip` when the probe falls
       # back is tracked in the follow-up rather than guessed at here.
-      post_launch_writes="$(LC_ALL=C awk -v l="$launched" '$1>l{n++} END{print n+0}' "$wticks" 2>/dev/null)"
-      [[ "$post_launch_writes" =~ ^[0-9]+$ ]] || post_launch_writes=0
+      # VALIDITY TRACKED SEPARATELY, BECAUSE A COUNT THAT FAILED IS NOT A COUNT OF ZERO
+      # (roborev job 96 M1). This is a DIFFERENT awk invocation from the projection above, so
+      # `proj_rc` does not cover it and neither does `max_gap_valid`. Coercing its failure to
+      # `0` fails OPEN: on the mismatched-outcome side `writes=0` with the claim still present
+      # routes to `skip:write-starved-takeover`, i.e. an unmeasurable record excusing a genuine
+      # regression -- the precise rule job 49 F1 / job 90 F5 established, and the third place it
+      # had to be closed. The sibling `post_launch_ticks` fallback below is safe only by
+      # accident (its `0` routes to `fail:window-too-short`), which is not a property to rely on.
+      writes_valid=1
+      post_launch_writes="$(LC_ALL=C awk -v l="$launched" '$1>l{n++} END{print n+0}' "$wticks" 2>/dev/null)" || writes_valid=0
+      [[ "$post_launch_writes" =~ ^[0-9]+$ ]] || { writes_valid=0; post_launch_writes=0; }
       # DID THE WINDOW EVEN CONTAIN A TICK? (roborev job 91 F2) `post_launch_writes=0` is only
       # evidence of fixture starvation if the `launched`->`ended` window was long enough to
       # hold a tick at all. A regression that abandons the wait and returns straight toward the
@@ -11130,7 +11151,14 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # "the fixture failed, not the supervisor" would excuse the regression on the strength of
       # its own speed. Counted over ALL ticks (`$ticks`, not the `$2==1` projection) because
       # the question is opportunity, not write success -- and `$ticks` is claim-independent.
-      post_launch_ticks="$(LC_ALL=C awk -v l="$launched" '$1>=l{n++} END{print n+0}' "$ticks" 2>/dev/null)"
+      # STRICTLY AFTER `launched` TOO, matching the writes filter (roborev job 96 L2). The two
+      # were asymmetric (`>` for writes, `>=` here), and under the whole-second `date` fallback
+      # that is not cosmetic: a pre-launch tick EQUAL to `launched` made `post_launch_ticks>=1`
+      # while `post_launch_writes` stayed 0, which suppresses `fail:window-too-short` and routes
+      # a genuine mismatch to `skip:write-starved-takeover` -- the job-89-F1 vacuity again, one
+      # signal over. A tick exactly AT the launch instant is arguably opportunity, but it is not
+      # worth a vacuity path to claim it, and at nanosecond resolution the case never arises.
+      post_launch_ticks="$(LC_ALL=C awk -v l="$launched" '$1>l{n++} END{print n+0}' "$ticks" 2>/dev/null)"
       [[ "$post_launch_ticks" =~ ^[0-9]+$ ]] || post_launch_ticks=0
       # AN EMPTY PROJECTION IS A MEASURED ZERO, NOT A MEASUREMENT FAILURE (roborev job 91 F4).
       # When no tick ever wrote, `$wticks` is empty and the shared gap program correctly takes
@@ -11206,7 +11234,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # directly. The message text stays here, where the diagnostics live.
       verdict="$(obj_sweep_claim_fresh_verdict "$outcome_ok" "$age_bound_secs" "$max_gap_valid" \
         "$gap_exceeds" "$write_gap_valid" "$write_gap_exceeds" "$post_launch_writes" \
-        "$post_launch_ticks" "$claim_present_at_end")"
+        "$post_launch_ticks" "$claim_present_at_end" "$writes_valid")"
       # BUILT ONCE, NOT HAND-SPELLED IN FIVE STRINGS (roborev job 95 L6): the bound's
       # derivation appeared verbatim in five separate messages and had to be kept in sync by
       # hand, which is how two of them came to name `stale_secs` (job 93 L5).
@@ -11611,7 +11639,14 @@ t test_object_store_sweep_gap_threshold_property
 # itself. Row (12) is job 91 F2. Rows (9) and (10) are job 49 F1 / job 90 F5 -- an unmeasurable
 # record must never excuse a mismatched outcome.
 # Columns: ok bound mg_valid mg_exceeds wg_valid wg_exceeds writes ticks_in claim_present
-# Healthy baseline: 1 4 1 0 1 0 3 5 1
+#          writes_valid   <- 10th, appended (job 96 M1) rather than inserted mid-row, so the
+#                            pre-existing rows could not be silently mis-shifted by the edit.
+# Healthy baseline: 1 4 1 0 1 0 3 5 1 1
+# The last three rows are job 96 M1: an unmeasurable WRITE COUNT (a different awk invocation
+# from the projection, so `proj_rc` does not cover it) must downgrade the matched side to
+# `skip` and must FAIL the mismatched side -- never excuse it as `skip:write-starved-takeover`,
+# which is what coercing the failed count to `0` used to do. The last row is that exact path:
+# writes=0 AND claim present, which without validity tracking was a skip.
 test_object_store_sweep_verdict_routing_property() {
   local want args got rows_checked bad
   rows_checked=0; bad=0
@@ -11628,31 +11663,34 @@ test_object_store_sweep_verdict_routing_property() {
       fail "obj-sweep(verdict-routing): [$args] -> '$got', wanted '$want'"
     fi
   done <<'ROWS'
-fail:bad-bound|1 0 1 0 1 0 3 5 1
-fail:bad-bound|0 0 1 0 1 0 3 5 1
-fail:bad-bound|1 -1 1 0 1 0 3 5 1
-fail:bad-bound|1 x 1 0 1 0 3 5 1
-skip:tick-unmeasurable|1 4 0 0 1 0 3 5 1
-skip:tick-starved|1 4 1 1 1 0 3 5 1
-skip:write-uncertified|1 4 1 0 0 0 3 5 1
-skip:write-uncertified|1 4 1 0 1 0 0 5 1
-skip:write-uncertified|1 4 1 0 1 1 3 5 1
-pass|1 4 1 0 1 0 3 5 1
-fail:tick-unmeasurable|0 4 0 0 1 0 3 5 1
-fail:write-unmeasurable|0 4 1 0 0 0 3 5 1
-skip:tick-starved-takeover|0 4 1 1 1 0 3 5 1
-fail:window-too-short|0 4 1 0 1 0 3 0 1
-skip:write-starved-takeover|0 4 1 0 1 1 3 5 1
-skip:write-starved-takeover|0 4 1 0 1 0 0 5 1
-fail:regression|0 4 1 0 1 1 3 5 0
-fail:regression|0 4 1 0 1 0 0 5 0
-fail:regression|0 4 1 0 1 0 3 5 1
-fail:regression|0 4 1 0 1 0 3 5 0
+fail:bad-bound|1 0 1 0 1 0 3 5 1 1
+fail:bad-bound|0 0 1 0 1 0 3 5 1 1
+fail:bad-bound|1 -1 1 0 1 0 3 5 1 1
+fail:bad-bound|1 x 1 0 1 0 3 5 1 1
+skip:tick-unmeasurable|1 4 0 0 1 0 3 5 1 1
+skip:tick-starved|1 4 1 1 1 0 3 5 1 1
+skip:write-uncertified|1 4 1 0 0 0 3 5 1 1
+skip:write-uncertified|1 4 1 0 1 0 0 5 1 1
+skip:write-uncertified|1 4 1 0 1 1 3 5 1 1
+pass|1 4 1 0 1 0 3 5 1 1
+fail:tick-unmeasurable|0 4 0 0 1 0 3 5 1 1
+fail:write-unmeasurable|0 4 1 0 0 0 3 5 1 1
+skip:tick-starved-takeover|0 4 1 1 1 0 3 5 1 1
+fail:window-too-short|0 4 1 0 1 0 3 0 1 1
+skip:write-starved-takeover|0 4 1 0 1 1 3 5 1 1
+skip:write-starved-takeover|0 4 1 0 1 0 0 5 1 1
+fail:regression|0 4 1 0 1 1 3 5 0 1
+fail:regression|0 4 1 0 1 0 0 5 0 1
+fail:regression|0 4 1 0 1 0 3 5 1 1
+fail:regression|0 4 1 0 1 0 3 5 0 1
+skip:write-uncertified|1 4 1 0 1 0 3 5 1 0
+fail:write-unmeasurable|0 4 1 0 1 0 3 5 1 0
+fail:write-unmeasurable|0 4 1 0 1 0 0 5 1 0
 ROWS
-  if [[ "$bad" -eq 0 && "$rows_checked" -eq 20 ]]; then
+  if [[ "$bad" -eq 0 && "$rows_checked" -eq 23 ]]; then
     pass "obj-sweep(verdict-routing): all ${rows_checked} signal combinations route as specified -- including a claim that did NOT survive the run falling through to \`fail\` rather than being excused by its own takeover (job 90 F3), a too-short window failing rather than excusing (job 91 F2), and an unmeasurable record never excusing a mismatched outcome (job 49 F1 / job 90 F5)"
   elif [[ "$bad" -eq 0 ]]; then
-    fail "obj-sweep(verdict-routing): only ${rows_checked} of the expected 20 rows were read -- the table was truncated, so the routing is not fully pinned"
+    fail "obj-sweep(verdict-routing): only ${rows_checked} of the expected 23 rows were read -- the table was truncated, so the routing is not fully pinned"
   fi
 
   # THE CASE MUST ACTUALLY ROUTE THROUGH THE FUNCTION, not keep a parallel inline chain
@@ -11661,16 +11699,21 @@ ROWS
   # case's `case` arms -- otherwise a verdict would fall to its unrecognised-key `fail`.
   local callers keys arms missing k
   callers="$(grep -cE 'verdict="\$\(obj_sweep_claim_fresh_verdict ' "$SELF_FILE" || true)"
+  # AND IT MUST PASS THE TENTH ARGUMENT (roborev job 96 M1): `writes_valid` defaults to 1 in the
+  # router so the old nine-arg form stays callable, which means a call site that forgot it would
+  # silently fail OPEN again rather than erroring. Pinned explicitly for that reason.
+  local tenth
+  tenth="$(grep -cE '"\$claim_present_at_end" "\$writes_valid"\)' "$SELF_FILE" || true)"
   keys="$(grep -oE "printf '(pass|fail:[a-z-]+|skip:[a-z-]+)" "$SELF_FILE" | sed "s/printf '//" | sort -u)"
   missing=""
   for k in $keys; do
     arms="$(grep -cE "^ +${k}\)" "$SELF_FILE" || true)"
     [[ "$arms" -ge 1 ]] || missing="$missing $k"
   done
-  if [[ "$callers" -eq 1 && -z "$missing" ]]; then
-    pass "obj-sweep(verdict-routing-wired): the case routes through \`obj_sweep_claim_fresh_verdict\` (1 call site) and renders every verdict key the function can return -- the router is wired, not decorative"
+  if [[ "$callers" -eq 1 && "$tenth" -eq 1 && -z "$missing" ]]; then
+    pass "obj-sweep(verdict-routing-wired): the case routes through \`obj_sweep_claim_fresh_verdict\` (1 call site, passing all ten signals including \`writes_valid\`) and renders every verdict key the function can return -- the router is wired, not decorative"
   else
-    fail "obj-sweep(verdict-routing-wired): call sites=$callers (want 1), unrendered verdict keys:${missing:- none}"
+    fail "obj-sweep(verdict-routing-wired): call sites=$callers (want 1), tenth-arg call sites=$tenth (want 1), unrendered verdict keys:${missing:- none}"
   fi
 }
 
