@@ -10757,7 +10757,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
   local gap_exceeds launched max_gap_valid last_tick
   local wticks post_launch_writes post_launch_ticks write_gap write_gap_valid write_gap_exceeds
   local refresh_backdate_secs age_bound_secs claim_present_at_end proj_rc verdict bound_expl
-  local writes_valid ticks_valid first_write
+  local writes_valid ticks_valid first_write pre_launch_writes
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -11246,8 +11246,14 @@ test_object_store_sweep_claim_recovers_when_stale() {
         # Measured separately and folded in rather than by changing `$OBJ_SWEEP_MAX_GAP_AWK`,
         # whose behaviour is pinned by eight cases; `$1>l` matches the strict window used for
         # `post_launch_writes`.
-        if [[ "$write_gap_valid" -eq 1 ]] &&
-          [[ "$(LC_ALL=C awk -v l="$launched" '$1<l{n++} END{print n+0}' "$wticks" 2>/dev/null)" == "0" ]]; then
+        # Census captured and validated, like the four sibling measurements (roborev job 104
+        # M1): inline, its failure read as "pre-launch writes existed, no fold needed".
+        pre_launch_writes="$(LC_ALL=C awk -v l="$launched" '$1<l{n++} END{print n+0}' "$wticks" 2>/dev/null)" ||
+          pre_launch_writes=""
+        if [[ ! "$pre_launch_writes" =~ ^[0-9]+$ ]]; then
+          write_gap_valid=0
+          write_gap="999999.00"
+        elif [[ "$write_gap_valid" -eq 1 && "$pre_launch_writes" -eq 0 ]]; then
           first_write="$(LC_ALL=C awk -v l="$launched" '$1>l{print $1; exit}' "$wticks" 2>/dev/null)"
           if [[ -n "$first_write" ]]; then
             write_gap="$(LC_ALL=C awk -v a="$write_gap" -v f="$first_write" -v l="$launched" \
