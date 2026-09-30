@@ -221,12 +221,40 @@ pub struct RebuildReport {
     /// has nothing to classify (proposal.md).
     pub classification: BTreeMap<String, BTreeMap<String, String>>,
     pub refused: Option<Refusal>,
+    /// `true` iff this generation's own output directory was REMOVED after
+    /// the fact, because a LATER generation of the same table-directory run
+    /// refused and the CLI rolled the whole run back (issue #4197 F2; design
+    /// D3's "nothing written" contract for an exit-2 run).
+    ///
+    /// Without this, a manifest entry could describe `regenerated: [...]`
+    /// under an `output` path `remove_dir_all` had already deleted, and spec
+    /// R9's consumer contract ("every non-refused entry names a real,
+    /// surviving path") would be false. [`Self::mark_rolled_back`] is the
+    /// only writer; `serde(default)` so a manifest written before this field
+    /// existed still deserializes.
+    #[serde(default)]
+    pub rolled_back: bool,
     /// RFC3339 timestamp of the run.
     pub now: String,
     pub cqlite_version: String,
 }
 
 impl RebuildReport {
+    /// Record that this generation's output was rolled back — its own
+    /// `--out` subdirectory no longer exists (issue #4197 F2).
+    ///
+    /// Clears `regenerated` and `classification`, because both describe
+    /// components that are no longer on disk: a consumer reading either
+    /// after a rollback would be told a file exists that does not.
+    /// `requested`/`skipped_not_applicable` are KEPT — they describe what was
+    /// ASKED FOR and what the input's format made inapplicable, and both are
+    /// still true.
+    pub fn mark_rolled_back(&mut self) {
+        self.rolled_back = true;
+        self.regenerated.clear();
+        self.classification.clear();
+    }
+
     /// Text rendering of the manifest (design D5: "the CLI text form is a
     /// rendering of it"). Mirrors salvage's affirmative-zero convention: an
     /// empty `classification`/`skipped_not_applicable` is stated, never
@@ -245,6 +273,13 @@ impl RebuildReport {
             if let Some(offset) = refusal.offset {
                 out.push_str(&format!("offset: {offset}\n"));
             }
+            return out;
+        }
+        if self.rolled_back {
+            out.push_str(
+                "ROLLED BACK: a later generation of this run refused, so this generation's \
+                 output was removed (nothing regenerated)\n",
+            );
             return out;
         }
         out.push_str(&format!("regenerated: {}\n", self.regenerated.join(", ")));
@@ -329,6 +364,7 @@ mod tests {
             skipped_not_applicable: Vec::new(),
             classification: BTreeMap::new(),
             refused: None,
+            rolled_back: false,
             now: "2026-01-01T00:00:00Z".to_string(),
             cqlite_version: "0.0.0".to_string(),
         };
@@ -353,6 +389,7 @@ mod tests {
                 remedy: "cqlite salvage (issue #4196)".to_string(),
                 offset: Some(88192),
             }),
+            rolled_back: false,
             now: "2026-01-01T00:00:00Z".to_string(),
             cqlite_version: "0.0.0".to_string(),
         };

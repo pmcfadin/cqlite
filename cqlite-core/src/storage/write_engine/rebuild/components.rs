@@ -233,6 +233,7 @@ pub(crate) async fn rebuild_components_capturing_stats(
         skipped_not_applicable: Vec::new(),
         classification: BTreeMap::new(),
         refused,
+        rolled_back: false,
         now: now.clone(),
         cqlite_version: cqlite_version.clone(),
     };

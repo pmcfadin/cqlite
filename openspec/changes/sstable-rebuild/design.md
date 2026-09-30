@@ -114,6 +114,7 @@ recovered/recomputed/lost), not the process exit code.
   },
   "refused": null | {"reason": "data-corrupt|reencode-mismatch|schema-unresolvable|in-place-unsupported|audit-failed",
                        "remedy": "…", "offset": 88192 },
+  "rolled_back": false,
   "now": "<RFC3339 of the run>", "cqlite_version": "…" }
 ```
 

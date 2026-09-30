@@ -621,13 +621,21 @@ pub struct SalvageArgs {
     pub out_format: SalvageOutFormatArg,
 }
 
-/// Output format for the `rebuild` subcommand's console rendering (design
-/// D5: the manifest is the JSON contract; text is a rendering of it).
+/// Output format for the `rebuild` subcommand's MACHINE-READABLE console
+/// rendering (design D5: the manifest is the JSON contract; text is a
+/// rendering of it).
+///
+/// These two are NOT alternatives (issue #4197 F5): the human-readable text
+/// rendering is ALWAYS written to stderr as the run's trace — including for
+/// `--out-format json`, so a refusal is never invisible on the console — and
+/// this flag selects only what goes to STDOUT. `json` therefore means "also
+/// print the manifest JSON to stdout", which keeps `--out-format json | jq .`
+/// clean because the text never shares that stream.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum RebuildOutFormatArg {
-    /// Human-readable text (the default), to stderr.
+    /// Nothing on stdout (the default); the stderr text trace only.
     Text,
-    /// The JSON manifest, to stdout.
+    /// The JSON manifest, to stdout (in ADDITION to the stderr text trace).
     Json,
 }
 

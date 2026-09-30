@@ -15,13 +15,13 @@ through the `--schema` global, rebuilding each generation of a table dir separat
 `2` when refused, `1` on usage errors. There is no partial-success exit code (design.md §D3).
 
 #### Scenario: R7.1 healthy table dir, per-generation outputs
-- **Given** the built binary, `--dataset test_basic`, a table with 2 generations, all 7
-  components deleted from each generation in a temp copy
-- **When** `cqlite rebuild <table-dir> --components
-  index,summary,filter,digest,toc,crc,statistics --out <tmp> --out-format json` runs
-- **Then** exit `0`, `<tmp>` holds two complete generation component sets (Data.db itself untouched
-  — same file, verified by sha256), and the manifest has two entries each with `refused: null`
-  (`cqlite-cli/tests/rebuild_cli_tests.rs`, named in the gate's `cli-tests` list).
+- **Given** the built binary and a TABLE DIRECTORY holding 2 generations
+- **When** `cqlite rebuild <table-dir> --components … --out <tmp>` runs
+- **Then** exit `0`, `<tmp>` holds one output subdirectory PER GENERATION (named from each
+  generation's `Data.db` base), the input Data.db files are untouched, and the manifest is
+  ARRAY-shaped with one `refused: null` entry per generation whose `output` path really exists
+  (`cqlite-cli/tests/rebuild_cli_tests.rs::table_directory_rebuilds_every_generation`, named in
+  the gate's `cli-tests` list).
 
 #### Scenario: R7.2 damaged Data.db exits 2 with the manifest naming salvage
 - **Given** `test_comp_corrupt/data_db_bit_flip` (skip-clean if absent; required under
@@ -34,6 +34,22 @@ through the `--schema` global, rebuilding each generation of a table dir separat
 - **When** `--out` is a non-empty dir, no `--schema` resolves the table, the input dir has no
   `Data.db`, an unknown component name is passed, or `--in-place` is passed
 - **Then** exit `1` with the specific cause on stderr and nothing written.
+
+#### Scenario: R7.4 a refused generation rolls the WHOLE run back
+- **Given** a table directory with 2 generations where the LATER one's `Data.db` is corrupted
+- **When** the same command runs
+- **Then** exit `2`, the earlier generation's output subdirectory — written before the refusal —
+  is REMOVED again (design D3's "nothing written" for an exit-2 run), and its manifest entry is
+  marked `rolled_back: true` with an empty `regenerated`
+  (`…::table_directory_refusal_rolls_back_earlier_generations`).
+
+#### Scenario: R7.5 an underivable table name is an actionable usage error, never an invented one
+- **Given** an input directory whose name does NOT follow Cassandra's `<table>-<32-hex-id>`
+  convention, and no `--table`
+- **When** rebuild runs
+- **Then** exit `1` naming `--table` and stating that no table name could be derived — never a
+  table name fabricated from the bare directory name, which would fail later as an unrelated
+  schema-resolution error (`…::underivable_table_name_without_table_flag_is_usage_error`).
 
 ### Requirement: R8 — `--in-place` refuses until #4195 ships `verify --mode audit`
 
@@ -58,6 +74,12 @@ lands `VerifyMode::Audit` — SHALL follow the temp-file/atomic-rename/audit pro
 The JSON manifest SHALL follow design.md §D5 exactly and the text output MUST be derived from it,
 including the per-field `classification` map whenever `statistics`, `summary`, or `filter` was
 requested.
+
+Every entry whose `refused` is null SHALL name, in `output`, a path that EXISTS when the run ends:
+a generation whose output was rolled back (R7.4) SHALL carry `rolled_back: true` with an empty
+`regenerated`/`classification`, so no consumer is told a component exists at a deleted path. The
+human text rendering is ALWAYS written to stderr regardless of `--out-format`, which selects only
+the stdout (machine-readable) rendering.
 
 #### Scenario: R9.1 committed expected manifests
 - **Given** committed expected manifest files under `cqlite-cli/tests/fixtures/rebuild/` for

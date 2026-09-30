@@ -42,7 +42,14 @@ fn table_name_from_input(input: &Path) -> Option<String> {
         Some((table_name, id)) if !table_name.is_empty() && is_table_id_suffix(id) => {
             Some(table_name.to_string())
         }
-        _ => Some(dir_name.to_string()),
+        // `None`, NOT the bare directory name (issue #4197 F4). A directory
+        // that does not follow Cassandra's `<table>-<32-hex-id>` convention
+        // carries no table name to derive — returning its name anyway
+        // produced a BOGUS target (`data_db_bit_flip`) that then failed
+        // schema resolution with a confusing message, and made the caller's
+        // dedicated "name it explicitly with --table" diagnostic
+        // unreachable dead code.
+        _ => None,
     }
 }
 
@@ -137,6 +144,13 @@ fn render_and_write_reports(
     is_table_dir: bool,
     args: &RebuildArgs,
 ) -> anyhow::Result<()> {
+    // The text rendering is ALWAYS written, to stderr, as the human trace of
+    // the run; `--out-format` selects only the machine-readable (stdout)
+    // rendering. Deliberately not gated on the format (issue #4197 F5): a
+    // `--out-format json | jq .` pipe is unaffected either way, and
+    // suppressing the human trace would remove the only console record of a
+    // refusal for a caller that asked for JSON. `RebuildOutFormatArg`'s own
+    // doc comments state this contract.
     for report in reports {
         eprintln!("{}", report.render_text());
     }
@@ -331,6 +345,22 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
                     any_refused = true;
                     for written in &written_out_dirs {
                         let _ = std::fs::remove_dir_all(written);
+                    }
+                    // roborev finding (Medium, issue #4197 F2): the manifest
+                    // is rendered from `reports` REGARDLESS of the rollback
+                    // above, so every entry whose output directory was just
+                    // removed must say so — otherwise it advertises
+                    // `regenerated: [...]` under an `output` path that no
+                    // longer exists, and spec R9's consumer contract (a
+                    // non-refused entry names a real, surviving path) is
+                    // false. The removed generations are exactly the reports
+                    // pushed BEFORE this refusing one: each successful
+                    // iteration pushes its report and then records its
+                    // out_dir, so `written_out_dirs.len()` is the count of
+                    // leading successful reports.
+                    let rolled_back = written_out_dirs.len();
+                    for report in reports.iter_mut().take(rolled_back) {
+                        report.mark_rolled_back();
                     }
                     break;
                 }

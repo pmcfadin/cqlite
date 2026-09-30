@@ -254,9 +254,14 @@ fn damaged_data_db_exits_2_naming_salvage() {
         "rebuild",
         data_db.to_str().unwrap(),
         // The corruption corpus's directory naming (`data_db_bit_flip`) does
-        // NOT follow Cassandra's `<table>-<32-hex-id>` convention
-        // `table_name_from_input` derives from, so the target table must be
-        // named explicitly.
+        // NOT follow Cassandra's `<table>-<32-hex-id>` convention, so
+        // `table_name_from_input` returns `None` (issue #4197 F4 — it used
+        // to fall back to the bare directory name and invent the table
+        // `data_db_bit_flip`) and omitting `--table` here would be a USAGE
+        // error, exit 1, never the exit 2 this test is about. Naming the
+        // table explicitly is therefore required, not merely tidier; the
+        // `None` path itself is covered by
+        // `underivable_table_name_without_table_flag_is_usage_error`.
         "--table",
         "lz4_table",
         "--components",
@@ -368,4 +373,234 @@ fn unknown_component_is_usage_error() {
         stderr.contains("bogus"),
         "stderr must name the bad token: {stderr}"
     );
+}
+
+/// The real component set of a generation (excludes the corpus's `.jsonl` /
+/// `.txt` sidecars, which are documentation, not SSTable components).
+fn is_component_file(name: &str) -> bool {
+    name.ends_with(".db")
+        || name.ends_with("-TOC.txt")
+        || name.ends_with("-Digest.crc32")
+        || name.ends_with("-CRC.db")
+}
+
+/// Build a TABLE DIRECTORY holding `generations` copies of the committed lz4
+/// fixture's component set, one per generation number, named exactly like a
+/// real Cassandra table directory (`<table>-<32-hex-id>`) so the `--table`
+/// derivation applies.
+///
+/// A generation is a pure FILENAME property (`<version>-<generation>-<format>-`)
+/// — nothing inside any component encodes the generation number — so renaming
+/// a verbatim copy produces a genuinely valid second generation. That matters
+/// for what follows: `discover_generations` orders by that parsed number, so
+/// generation 1 is always rebuilt before generation 2.
+fn multi_generation_table_dir(root: &Path, generations: u32) -> PathBuf {
+    let src = resolve_committed_fixture(LZ4_TABLE_FIXTURE);
+    let dir = root.join("lz4_table-25801a0071a911f19b3225f9984c6a77");
+    std::fs::create_dir_all(&dir).expect("create table dir");
+    for generation in 1..=generations {
+        for entry in std::fs::read_dir(&src).expect("read fixture dir").flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !is_component_file(&name) {
+                continue;
+            }
+            let renamed = name.replacen("nb-1-", &format!("nb-{generation}-"), 1);
+            std::fs::copy(entry.path(), dir.join(renamed)).expect("copy component");
+        }
+    }
+    dir
+}
+
+/// Corrupt `Data.db` for one generation so the compressed-chunk pre-flight
+/// refuses it (spec R5.1): flip every bit of one byte in the middle of the
+/// compressed stream.
+fn corrupt_generation_data_db(table_dir: &Path, generation: u32) {
+    let path = table_dir.join(format!("nb-{generation}-big-Data.db"));
+    let mut bytes = std::fs::read(&path).expect("read Data.db");
+    assert!(bytes.len() > 64, "fixture Data.db is implausibly small");
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0xFF;
+    std::fs::write(&path, bytes).expect("write corrupted Data.db");
+}
+
+/// R7.1 — a TABLE DIRECTORY input rebuilds EVERY generation separately: one
+/// output subdirectory per generation, and an ARRAY-shaped manifest with one
+/// entry per generation.
+///
+/// This is the CLI's headline capability and no other test in this file
+/// passes a DIRECTORY as the input at all (every other one resolves down to a
+/// single `*-Data.db` first), so `discover_generations`, the per-generation
+/// `<out>/<base>` naming and the array-vs-object manifest shape were
+/// completely dark (issue #4197 F3).
+#[test]
+fn table_directory_rebuilds_every_generation() {
+    let temp = TempDir::new().expect("tempdir");
+    let table_dir = multi_generation_table_dir(temp.path(), 2);
+    let schema = schemas_dir().join("compression-parity.cql");
+    let out = temp.path().join("out");
+    let manifest_path = temp.path().join("m.json");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        table_dir.to_str().unwrap(),
+        "--components",
+        "digest,toc",
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        manifest_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "expected exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // (a) one output subdirectory per generation, named from the Data.db
+    // base (`trim_end_matches("-Data.db")`).
+    for generation in [1, 2] {
+        let gen_out = out.join(format!("nb-{generation}-big"));
+        assert!(
+            gen_out.is_dir(),
+            "generation {generation} must get its own output subdirectory; --out holds {:?}",
+            std::fs::read_dir(&out)
+                .map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+        assert!(
+            gen_out
+                .join(format!("nb-{generation}-big-Digest.crc32"))
+                .exists(),
+            "generation {generation}'s regenerated Digest.crc32 must be in its own subdirectory"
+        );
+    }
+
+    // (b) ARRAY-shaped manifest, one entry per generation.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest is JSON");
+    let entries = manifest
+        .as_array()
+        .unwrap_or_else(|| panic!("a table-dir manifest must be an ARRAY; got {manifest}"));
+    assert_eq!(entries.len(), 2, "one entry per generation; got {manifest}");
+    for entry in entries {
+        assert!(entry["refused"].is_null(), "{entry}");
+        assert_eq!(entry["rolled_back"], serde_json::json!(false), "{entry}");
+        // (c) spec R9's consumer contract: every non-refused entry's
+        // `output` names a path that really exists.
+        let output_path = entry["output"].as_str().expect("output string");
+        assert!(
+            Path::new(output_path).is_dir(),
+            "manifest names a non-existent output path {output_path}"
+        );
+    }
+}
+
+/// R7.1 + F2 — when a LATER generation refuses, the whole run exits 2, the
+/// EARLIER generation's output is rolled back, and the manifest never names a
+/// surviving path for it.
+#[test]
+fn table_directory_refusal_rolls_back_earlier_generations() {
+    let temp = TempDir::new().expect("tempdir");
+    let table_dir = multi_generation_table_dir(temp.path(), 2);
+    corrupt_generation_data_db(&table_dir, 2);
+    let schema = schemas_dir().join("compression-parity.cql");
+    let out = temp.path().join("out");
+    let manifest_path = temp.path().join("m.json");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        table_dir.to_str().unwrap(),
+        "--components",
+        "digest,toc",
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        manifest_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a refused generation must exit 2; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Generation 1 completed BEFORE generation 2 refused, so its output must
+    // have been removed again — design D3's "nothing written" for exit 2.
+    assert!(
+        !out.join("nb-1-big").exists(),
+        "generation 1's output must be rolled back when a later generation refuses"
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest is JSON");
+    let entries = manifest
+        .as_array()
+        .unwrap_or_else(|| panic!("a table-dir manifest must be an ARRAY; got {manifest}"));
+    // Non-vacuity: both generations must appear (the successful-then-rolled-
+    // back one AND the refusing one), otherwise the assertion below passes
+    // because there is nothing to check.
+    assert_eq!(entries.len(), 2, "{manifest}");
+    let refused: Vec<_> = entries.iter().filter(|e| !e["refused"].is_null()).collect();
+    assert_eq!(refused.len(), 1, "exactly one entry refused; {manifest}");
+
+    for entry in entries.iter().filter(|e| e["refused"].is_null()) {
+        assert_eq!(
+            entry["rolled_back"],
+            serde_json::json!(true),
+            "a non-refused entry whose output was removed MUST be marked rolled_back, or spec \
+             R9's `select(.refused==null) | .output` names a deleted directory; {entry}"
+        );
+        assert_eq!(
+            entry["regenerated"],
+            serde_json::json!([]),
+            "a rolled-back entry must claim no regenerated components; {entry}"
+        );
+        assert!(
+            !Path::new(entry["output"].as_str().expect("output string")).exists(),
+            "sanity: the rolled-back entry's output really is gone; {entry}"
+        );
+    }
+}
+
+/// R7.3 + F4 — a directory whose name does NOT follow Cassandra's
+/// `<table>-<32-hex-id>` convention carries no derivable table name, so
+/// omitting `--table` is a usage error that SAYS SO, rather than silently
+/// deriving the bare directory name and failing later on an invented table.
+#[test]
+fn underivable_table_name_without_table_flag_is_usage_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let table_dir = multi_generation_table_dir(temp.path(), 1);
+    // Rename the directory to something that does not carry a table id.
+    let odd = temp.path().join("not_a_table_dir");
+    std::fs::rename(&table_dir, &odd).expect("rename table dir");
+    let schema = schemas_dir().join("compression-parity.cql");
+    let out = temp.path().join("out");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        odd.to_str().unwrap(),
+        "--components",
+        "digest",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1), "must exit 1 (usage error)");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--table") && stderr.contains("could not derive a table name"),
+        "stderr must name the actionable flag rather than an invented table: {stderr}"
+    );
+    assert!(!out.exists(), "a usage error must not create --out");
 }
