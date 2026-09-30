@@ -93,6 +93,8 @@ on:
       - 'cqlite-core/tests/issue_101*_*.rs'
       - 'cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs'
       - 'cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs'
+      - 'cqlite-core/tests/issue_1383_rt_boundary_synthesis.rs'
+      - 'cqlite-core/tests/support/rt_boundary_oracle.rs'
       - 'test-data/scripts/generate-tombstone-parity.sh'
       - 'test-data/scripts/generate-deltas.sh'
       - 'test-data/scripts/generate-compaction-tombstone-ttl-parity.sh'
@@ -274,6 +276,7 @@ jobs:
                 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
                 cargo test -p cqlite-core --features write-support \
                   --test issue_1387_tombstone_ttl_compaction_byte_parity \
+                  --test issue_1383_rt_boundary_synthesis \
                   -- --nocapture
             scenario_id: cass.tombstone_ttl.nightly_docker_lane
             failure_class: RowScanFailed

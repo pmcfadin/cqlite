@@ -92,6 +92,17 @@ const NOT_COMPARABLE: &[Excluded] = &[
     },
     Excluded {
         keyspace: "test_compaction_tombstone_ttl",
+        table: "rt_open_ended_boundary",
+        shapes: &[Unsupported::RangeTombstone],
+        // Issue #4246 committed this #1383/#4243 oracle fixture. Its golden
+        // carries two range-tombstone BOUNDS and one BOUNDARY (the synthesized
+        // [Bottom,5)/[3,Top] open-ended pair) which the dump keeps and a SELECT
+        // projection drops, so this lane cannot compare it -- same reason as
+        // its `rt_cross_gen` sibling above.
+        note: "open-ended range tombstone bounds and a synthesized boundary",
+    },
+    Excluded {
+        keyspace: "test_compaction_tombstone_ttl",
         table: "shadow_row_delete",
         shapes: &[Unsupported::RowDeletion],
         note: "a row deletion marker the dump keeps and a SELECT drops",

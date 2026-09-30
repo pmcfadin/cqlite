@@ -747,14 +747,6 @@ impl WriteEngine {
                         }
                         let mutation =
                             merge::KWayMerger::merge_entry_to_mutation(*row, &decode_schema)?;
-                        // Single fold point for EVERY mutation of this
-                        // partition, mirroring `KWayMerger::merge`'s stage
-                        // 5c-iv part 2 design — folds unconditionally,
-                        // regardless of classification, before it happens.
-                        stats_fold::fold_mutation_stats(
-                            stream_state.partition_stats_mut(),
-                            &mutation,
-                        );
 
                         // Classify the (None-keyed) carriers and the static
                         // row; everything else is a real clustering row that
@@ -785,11 +777,31 @@ impl WriteEngine {
                             // input carried a deletion, so `stream_rows_directly`
                             // was never set (the direct path is gated on NO
                             // deletion in any input). Buffered path only.
+                            // The tombstone MARKER itself is never row-shadowed
+                            // — it IS the deletion — so it always contributes
+                            // to persisted stats (issue #4246, mirroring
+                            // `KWayMerger::merge`'s identical fix).
+                            // `is_partition_only` guarantees `range_tombstones`
+                            // is empty, so `fold_marker_stats` folding both
+                            // fields is exactly the partition-tombstone-only
+                            // fold this needs.
+                            stats_fold::fold_marker_stats(
+                                stream_state.partition_stats_mut(),
+                                &mutation,
+                            );
                             stream_state.partition_tombstone = mutation.partition_tombstone;
                             stream_state.saw_carrier_or_static = true;
                             continue;
                         }
                         if is_range_only {
+                            // `is_range_only` guarantees `partition_tombstone`
+                            // is `None`, so `fold_marker_stats` folding both
+                            // fields is exactly the range-tombstones-only fold
+                            // this needs.
+                            stats_fold::fold_marker_stats(
+                                stream_state.partition_stats_mut(),
+                                &mutation,
+                            );
                             stream_state
                                 .range_tombstones
                                 .extend(mutation.range_tombstones.iter().cloned());
@@ -801,10 +813,29 @@ impl WriteEngine {
                             // resolved static-row carrier increments
                             // `row_count` — a pure partition/range-tombstone
                             // carrier emits a marker/header deletion, not a
-                            // row.
+                            // row. Static-cell shadowing is a separate,
+                            // out-of-scope question (issue #4246, see
+                            // `stats_fold::row_group_survives`'s doc comment)
+                            // — folded unconditionally (`None` shadow
+                            // boundary).
                             if !stream_state.saw_carrier_or_static {
                                 stream_state.static_first_ts = mutation.timestamp_micros;
                             }
+                            // The STATIC-CARRIER fold: row CONTENT only.
+                            // A static carrier's own `DeleteRow`/#932
+                            // `row_tombstone` is excluded here, and
+                            // deliberately so — the emitter never writes a
+                            // static-row deletion, so folding one would be a
+                            // PHANTOM marker (issue #4246 roborev round 8,
+                            // overturning 6/7). The flush path's #729
+                            // pre-seed baseline re-derives the SAME exclusion
+                            // independently (`fold_one_mutation_baseline`,
+                            // round 10; #4320 tracks unifying them). See
+                            // `fold_static_carrier_stats`'s doc comment.
+                            stats_fold::fold_static_carrier_stats(
+                                stream_state.partition_stats_mut(),
+                                &mutation,
+                            );
                             stream_state
                                 .static_tracker
                                 .feed(&mutation, &write_schema, None);
@@ -852,6 +883,38 @@ impl WriteEngine {
                             if let Some(session) = stream_state.direct_session.as_mut() {
                                 writer_ref.feed_streaming_row(session, &mutation)?;
                             }
+                            stats_fold::fold_row_content_stats(
+                                stream_state.partition_stats_mut(),
+                                &mutation,
+                                None,
+                            );
+                            // INVARIANT: a row's own deletion marker reaches
+                            // persisted stats even on this fast path (issue
+                            // #4246 roborev rounds 5/6). Two site-specific
+                            // reasons for this exact shape:
+                            //   * NOT a `debug_assert!` on
+                            //     `stream_rows_directly`'s "no input carries
+                            //     any deletion" gate — that compiles OUT of a
+                            //     release build, so relaxing the gate would
+                            //     silently drop markers in production.
+                            //   * NOT `fold_single_mutation_row_group` — it
+                            //     runs `merge_row_group`'s full per-column LWW
+                            //     pass on EVERY row, the exact cost this issue
+                            //     #2299 path exists to avoid.
+                            // `resolve_row_deletion` is a cheap group scan with
+                            // no reconciliation, so it keeps the #2299 property
+                            // while remaining the single authority for WHICH
+                            // representation wins (the NEWEST, not an
+                            // unconditional `row_tombstone` preference — see
+                            // its doc comment, and `fold_row_deletion_marker`'s
+                            // for the fold-exactly-once rule).
+                            stats_fold::fold_row_deletion_marker(
+                                stream_state.partition_stats_mut(),
+                                crate::storage::sstable::writer::data_writer::DataWriter::resolve_row_deletion(
+                                    &[&mutation],
+                                    None,
+                                ),
+                            );
                             stream_state.row_count += 1;
                         } else {
                             // Buffered path: buffer for the single PartitionEnd
@@ -936,7 +999,50 @@ impl WriteEngine {
                                     state.static_first_ts,
                                 )?;
                             }
+                            // Issue #4246 (mirroring `KWayMerger::merge`'s
+                            // identical PartitionEnd fix): now that
+                            // `partition_tombstone`/`range_tombstones` are
+                            // FINAL, gate each buffered row's stats fold on
+                            // the SAME shadow decision `feed_streaming_row`
+                            // makes via `DataWriter::merge_row_group`
+                            // internally — a row fully shadow-dropped from
+                            // Data.db must not lower persisted
+                            // `StatisticsMetadata` minima.
+                            let partition_floor = state
+                                .partition_tombstone
+                                .as_ref()
+                                .map(|pt| pt.deletion_time);
                             for mutation in &state.buffered_rows {
+                                // Shared with the emitter's own derivation
+                                // (issue #4246 roborev round-8 finding 2,
+                                // `data_writer/row_groups.rs`) so the fold
+                                // can never shadow-gate differently than
+                                // `feed_streaming_row` does.
+                                let shadow_floor =
+                                    crate::storage::sstable::writer::data_writer::resolve_shadow_floor(
+                                        partition_floor,
+                                        &state.range_tombstones,
+                                        mutation.clustering_key.as_ref(),
+                                        &write_schema,
+                                    );
+                                // `skip_static_ops = false` inside it,
+                                // matching what `feed_streaming_row`/
+                                // `feed_row` pass to `merge_row_group` —
+                                // shared with `KWayMerger::merge`'s
+                                // structurally-identical single-mutation
+                                // `PartitionEnd` handling via
+                                // `stats_fold::fold_single_mutation_row_group`
+                                // (issue #4246 roborev round-3 finding: the
+                                // two paths used to hand-assemble this
+                                // sequence independently, risking silent
+                                // drift).
+                                stats_fold::fold_single_mutation_row_group(
+                                    &mut state.partition_stats,
+                                    mutation,
+                                    &write_schema,
+                                    schema_has_static,
+                                    shadow_floor,
+                                );
                                 merge.writer.feed_streaming_row(&mut session, mutation)?;
                             }
                             let (offset, blocks, emit) =

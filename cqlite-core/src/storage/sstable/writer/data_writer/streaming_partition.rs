@@ -180,13 +180,12 @@ impl StreamingPartitionSession {
         schema: &TableSchema,
     ) -> Result<()> {
         let clustering_key = mutation.clustering_key.as_ref();
-        let mut shadow_floor = self.partition_floor;
-        for rt in &self.range_tombstones {
-            if range_tombstone_covers(rt, clustering_key, schema) {
-                shadow_floor =
-                    Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
-            }
-        }
+        let shadow_floor = resolve_shadow_floor(
+            self.partition_floor,
+            &self.range_tombstones,
+            clustering_key,
+            schema,
+        );
 
         let row_item = PartitionItem::Row(RowWrite {
             clustering_key,

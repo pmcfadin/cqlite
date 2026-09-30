@@ -10,11 +10,11 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 236 |
+| `mirrored` | 237 |
 | `partial` | 11 |
 | `planned` | 45 |
 | `out_of_scope` | 41 |
-| **total** | **333** |
+| **total** | **334** |
 
 ## Evidence counts
 
@@ -22,7 +22,7 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 128 |
+| `byte_for_byte` | 129 |
 | `canonical_semantic` | 100 |
 | `smoke` | 12 |
 | `partial` | 52 |
@@ -245,6 +245,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 - `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` — Row delete + gc purge during compaction
 - `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` — Overlapping range-tombstone merge during compaction
+- `cass.compaction.CompactionIteratorTest.open_ended_range_boundary_synthesis` — Open-ended range-tombstone boundary synthesis across generations
 - `cass.compaction.SSTableRewriterTest.output_component_integrity` — Compaction output components byte-identical to Cassandra SSTableRewriter (the parity claim) _(planned — no evidence yet)_
 - `cass.compaction.harness_byte_tier_artifacts` — Differential harness byte-tier MECHANISM — per-component cmp engine + failure artifacts _(planned — no evidence yet)_
 - `cass.compaction.live_cells_clustering_lww` — Live-cell compaction byte parity — clustering table, LWW overlap (the claim)
@@ -639,7 +640,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **70** across **261** scenarios that name a test.
+- Distinct backing tests: **71** across **262** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -908,6 +909,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.CompactionDiskSpaceTest.disk_space_constrained_merge` | manual_debug | — |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction.CompactionIteratorTest.live_partition_merge` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.CompactionIteratorTest.open_ended_range_boundary_synthesis` | nightly_docker | .github/workflows/parity-regen-matrix.yml |
 | `cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge` | manual_debug | — |
 | `cass.compaction.CompactionSimpleValueMergeTest.static_row_merge` | required_parity | .github/workflows/parity-regen-matrix.yml |
 | `cass.compaction.CompactionTaskTest.reject_mixed_repair_state` | required_parity | .github/workflows/parity-regen-matrix.yml |
@@ -1246,6 +1248,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.CompactionDiskSpaceTest.disk_space_constrained_merge` | nb | — |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction.CompactionIteratorTest.live_partition_merge` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
+| `cass.compaction.CompactionIteratorTest.open_ended_range_boundary_synthesis` | nb, oa | test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_open_ended_boundary-b2d77220b54911f1b553796aae82c67f/nb-3-big-Data.db.jsonl<br>_fail:_ artifact.nightly_docker.byte_diff |
 | `cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge` | nb, oa, big | — |
 | `cass.compaction.CompactionSimpleValueMergeTest.static_row_merge` | nb | — |
 | `cass.compaction.CompactionTaskTest.reject_mixed_repair_state` | nb | cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs |

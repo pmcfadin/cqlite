@@ -1,5 +1,6 @@
 -- compaction-tombstone-ttl-parity.cql — Cassandra 5.0.2 reference schema for the
--- TOMBSTONE / TTL COMPACTION byte-parity slice (issue #1387, epic #973).
+-- TOMBSTONE / TTL COMPACTION byte-parity slice (issue #1387, epic #973;
+-- issue #1383/#4243).
 --
 -- This is the tombstone/TTL analogue of compaction-parity.cql (issue #1017, live
 -- cells only). Each table below is written BY CASSANDRA as TWO (or more)
@@ -48,6 +49,9 @@
 --   4. rt_cross_gen        — (d) a range tombstone in gen A + an overlapping range
 --                            tombstone / rows in gen B: cross-generation RT open/close
 --                            boundary synthesis in the merged output.
+--   5. rt_open_ended_boundary — (e) the #1383 open-ended ranges [Bottom,5) and
+--                            [3,Top] across two generations, with live rows that
+--                            exercise both sides of the synthesized boundary.
 
 CREATE KEYSPACE IF NOT EXISTS test_compaction_tombstone_ttl WITH replication = {
   'class': 'SimpleStrategy',
@@ -91,6 +95,17 @@ CREATE TABLE IF NOT EXISTS gc_purge_grace0 (
 -- (d) cross-generation range-tombstone open/close boundary synthesis. Default
 --     gc_grace so the range markers SURVIVE compaction.
 CREATE TABLE IF NOT EXISTS rt_cross_gen (
+    id INT,
+    ck INT,
+    v  TEXT,
+    PRIMARY KEY (id, ck)
+) WITH compression = {'enabled': 'false'}
+  AND gc_grace_seconds = 864000
+  AND compaction = {'class': 'SizeTieredCompactionStrategy'};
+
+-- (e) issue #1383/#4243: open-ended range-boundary synthesis. Default gc_grace
+-- keeps both Cassandra range markers in the major-compacted oracle.
+CREATE TABLE IF NOT EXISTS rt_open_ended_boundary (
     id INT,
     ck INT,
     v  TEXT,
