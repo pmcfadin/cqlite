@@ -160,7 +160,7 @@ build_fixture() {
 tree_identity() { # <fixture-dir> -> "sha dirty digest" on stdout, or empty on failure
   local repo="$1" out te
   out=$(cd "$repo" && bash scripts/agent-gate.sh --only file-size 2>&1)
-  te=$(printf '%s\n' "$out" | grep -E '^tree-end:' | head -1)
+  te=$(grep -E '^tree-end:' <<<"$out" | head -1)
   printf '%s\n' "$te" | sed -n 's/^tree-end:[[:space:]]*\([^ ]*\) dirty: \([a-z]*\) digest: \([^ ]*\).*/\1 \2 \3/p'
 }
 
@@ -231,23 +231,23 @@ else
     # changed) -> ACCEPTED, falls through, actually runs file-size for real, and
     # the terminal block certifies.
     run_recert "$fixture" "$anchor" file-size
-    if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qF "==== AGENT-GATE RECERT SUMMARY ===="; then
+    if [ "$RC" -eq 0 ] && grep -qF "==== AGENT-GATE RECERT SUMMARY ====" <<<"$OUT"; then
       ok "R1: a valid anchor + eligible component is ACCEPTED (distinct RECERT SUMMARY header present)"
     else
       bad "R1: expected acceptance (rc 0, RECERT SUMMARY header), got rc=$RC"
       echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
     fi
-    if printf '%s\n' "$OUT" | grep -qE '^recert-verdict: CERTIFIED'; then
+    if grep -qE '^recert-verdict: CERTIFIED' <<<"$OUT"; then
       ok "R1: recert-verdict is CERTIFIED"
     else
       bad "R1: expected recert-verdict: CERTIFIED"
     fi
-    if printf '%s\n' "$OUT" | grep -qE '^file-size: +PASS'; then
+    if grep -qE '^file-size: +PASS' <<<"$OUT"; then
       ok "R1: file-size actually ran for real and reported PASS (not merely validated)"
     else
       bad "R1: file-size's own component row is not PASS — the fall-through into the real gate flow did not execute it"
     fi
-    if printf '%s\n' "$OUT" | grep -qE '^RESULT: PASS'; then
+    if grep -qE '^RESULT: PASS' <<<"$OUT"; then
       ok "R1: RESULT: PASS"
     else
       bad "R1: expected RESULT: PASS"
@@ -255,7 +255,7 @@ else
 
     # R2: missing anchor file -> REFUSED, exit 2, distinct header still present.
     run_recert "$fixture" "$TMPROOT/does-not-exist.txt" file-size
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: .*not found or unreadable'; then
+    if [ "$RC" -eq 2 ] && grep -qE '^error: .*not found or unreadable' <<<"$OUT"; then
       ok "R2: a missing anchor file REFUSES (exit 2, named cause)"
     else
       bad "R2: expected exit 2 + a named 'not found' cause, got rc=$RC"
@@ -263,7 +263,7 @@ else
 
     # R3: >2 components -> REFUSED.
     run_recert "$fixture" "$anchor" "file-size,fmt,clippy"
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: .*must name 1 or 2'; then
+    if [ "$RC" -eq 2 ] && grep -qE '^error: .*must name 1 or 2' <<<"$OUT"; then
       ok "R3: >2 requested components REFUSES"
     else
       bad "R3: expected exit 2 + a named '1 or 2' cause, got rc=$RC"
@@ -271,7 +271,7 @@ else
 
     # R4: an unknown component name -> REFUSED.
     run_recert "$fixture" "$anchor" "not-a-real-component"
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: unknown component'; then
+    if [ "$RC" -eq 2 ] && grep -qE '^error: unknown component' <<<"$OUT"; then
       ok "R4: an unknown component name REFUSES"
     else
       bad "R4: expected exit 2 + 'unknown component', got rc=$RC"
@@ -279,7 +279,7 @@ else
 
     # R5: a duplicate component named twice -> REFUSED.
     run_recert "$fixture" "$anchor" "file-size,file-size"
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: duplicate component'; then
+    if [ "$RC" -eq 2 ] && grep -qE '^error: duplicate component' <<<"$OUT"; then
       ok "R5: a duplicate component name REFUSES"
     else
       bad "R5: expected exit 2 + 'duplicate component', got rc=$RC"
@@ -289,7 +289,7 @@ else
     bad_anchor="$TMPROOT/anchor-bad-other.txt"
     write_anchor "$bad_anchor" "$f_sha" "$f_digest" "clippy=FAIL"
     run_recert "$fixture" "$bad_anchor" file-size
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE "^error: anchor component 'clippy' is not PASS/OPT-OUT"; then
+    if [ "$RC" -eq 2 ] && grep -qE "^error: anchor component 'clippy' is not PASS/OPT-OUT" <<<"$OUT"; then
       ok "R6: an anchor whose OTHER component is FAIL (not PASS/OPT-OUT) REFUSES"
     else
       bad "R6: expected exit 2 naming 'clippy' not PASS/OPT-OUT, got rc=$RC"
@@ -300,7 +300,7 @@ else
     optout_anchor="$TMPROOT/anchor-optout.txt"
     write_anchor "$optout_anchor" "$f_sha" "$f_digest" "clippy=OPT-OUT"
     run_recert "$fixture" "$optout_anchor" file-size
-    if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qE '^recert-verdict: CERTIFIED'; then
+    if [ "$RC" -eq 0 ] && grep -qE '^recert-verdict: CERTIFIED' <<<"$OUT"; then
       ok "R6b: an anchor whose OTHER component is OPT-OUT (not PASS) is still ACCEPTED"
     else
       bad "R6b: expected acceptance with an OPT-OUT other-component anchor, got rc=$RC"
@@ -312,7 +312,7 @@ else
     skip_anchor="$TMPROOT/anchor-skip.txt"
     write_anchor "$skip_anchor" "$f_sha" "$f_digest" "clippy=SKIP"
     run_recert "$fixture" "$skip_anchor" file-size
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE "^error: anchor component 'clippy' is not PASS/OPT-OUT \\(got 'SKIP'\\)"; then
+    if [ "$RC" -eq 2 ] && grep -qE "^error: anchor component 'clippy' is not PASS/OPT-OUT \\(got 'SKIP'\\)" <<<"$OUT"; then
       ok "R6c: an anchor whose OTHER component is SKIP (not PASS/OPT-OUT) REFUSES"
     else
       bad "R6c: expected exit 2 naming 'clippy' SKIP, got rc=$RC"
@@ -327,7 +327,7 @@ else
     tt_skip_anchor="$TMPROOT/anchor-tt-skip.txt"
     write_anchor "$tt_skip_anchor" "$f_sha" "$f_digest" "tooling-tests=SKIP"
     run_recert "$fixture" "$tt_skip_anchor" file-size
-    if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qE '^recert-verdict: CERTIFIED'; then
+    if [ "$RC" -eq 0 ] && grep -qE '^recert-verdict: CERTIFIED' <<<"$OUT"; then
       ok "R6d: an anchor whose tooling-tests is SKIP (the one declared exception) is still ACCEPTED"
     else
       bad "R6d: expected acceptance with a tooling-tests:SKIP anchor, got rc=$RC"
@@ -340,7 +340,7 @@ else
     sed -i.bak 's/^tree-end:.*/tree-end: '"$f_sha"' dirty: yes digest: '"$f_digest"'/' "$dirty_anchor" 2>/dev/null \
       || sed -i '' 's/^tree-end:.*/tree-end: '"$f_sha"' dirty: yes digest: '"$f_digest"'/' "$dirty_anchor"
     run_recert "$fixture" "$dirty_anchor" file-size
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: anchor tree was dirty'; then
+    if [ "$RC" -eq 2 ] && grep -qE '^error: anchor tree was dirty' <<<"$OUT"; then
       ok "R7: an anchor with dirty:yes REFUSES"
     else
       bad "R7: expected exit 2 + 'anchor tree was dirty', got rc=$RC"
@@ -350,7 +350,7 @@ else
     mismatch_anchor="$TMPROOT/anchor-mismatch.txt"
     write_anchor "$mismatch_anchor" "deadbeef0000" "cafef00dcafe"
     run_recert "$fixture" "$mismatch_anchor" file-size
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: current tree does not match'; then
+    if [ "$RC" -eq 2 ] && grep -qE '^error: current tree does not match' <<<"$OUT"; then
       ok "R8: a mismatched anchor tree digest REFUSES"
     else
       bad "R8: expected exit 2 + 'current tree does not match', got rc=$RC"
@@ -361,7 +361,7 @@ else
     write_anchor "$stale_anchor" "$f_sha" "$f_digest"
     if touch -t "$(date -v-2d +%Y%m%d%H%M.%S 2>/dev/null || date -d '2 days ago' +%Y%m%d%H%M.%S 2>/dev/null)" "$stale_anchor" 2>/dev/null; then
       run_recert "$fixture" "$stale_anchor" file-size
-      if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: anchor summary is stale'; then
+      if [ "$RC" -eq 2 ] && grep -qE '^error: anchor summary is stale' <<<"$OUT"; then
         ok "R9: an anchor >24h old REFUSES"
       else
         bad "R9: expected exit 2 + 'anchor summary is stale', got rc=$RC"
@@ -382,7 +382,7 @@ else
       sed -i.bak "s/^==== END AGENT-GATE SUMMARY ====\$/==== END AGENT-GATE ${hdr_kind} SUMMARY ====/" "$chained_anchor" 2>/dev/null \
         || sed -i '' "s/^==== END AGENT-GATE SUMMARY ====\$/==== END AGENT-GATE ${hdr_kind} SUMMARY ====/" "$chained_anchor"
       run_recert "$fixture" "$chained_anchor" file-size
-      if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: anchor is not a full-gate SUMMARY block'; then
+      if [ "$RC" -eq 2 ] && grep -qE '^error: anchor is not a full-gate SUMMARY block' <<<"$OUT"; then
         ok "R10: a $hdr_kind-shaped anchor header REFUSES (a recert can never chain off another recert)"
       else
         bad "R10 ($hdr_kind): expected exit 2 + 'not a full-gate SUMMARY block', got rc=$RC"
@@ -396,7 +396,7 @@ else
     write_anchor "$partial_anchor" "$f_sha" "$f_digest"
     printf 'mode: PARTIAL (--only clippy) - does NOT count as the gate\n' >>"$partial_anchor"
     run_recert "$fixture" "$partial_anchor" file-size
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE '^error: anchor is an --only PARTIAL run'; then
+    if [ "$RC" -eq 2 ] && grep -qE '^error: anchor is an --only PARTIAL run' <<<"$OUT"; then
       ok "R11: an --only-shaped (mode: PARTIAL) anchor REFUSES"
     else
       bad "R11: expected exit 2 + '--only PARTIAL run', got rc=$RC"
@@ -421,7 +421,7 @@ else
     diff_anchor="$TMPROOT/anchor-diff.txt"
     write_anchor "$diff_anchor" "$f2_sha" "$f2_digest"
     run_recert "$fixture" "$diff_anchor" file-size
-    if [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qE "^error: 'file-size' is in the PR's own diff domain"; then
+    if [ "$RC" -eq 2 ] && grep -qE "^error: 'file-size' is in the PR's own diff domain" <<<"$OUT"; then
       ok "R12a: a component (file-size) whose domain intersects a real cqlite-core/src/** diff REFUSES"
     else
       bad "R12a: expected exit 2 + 'file-size' diff-domain refusal, got rc=$RC"
@@ -434,8 +434,8 @@ else
     # correctly SKIPs once dispatched — a SEPARATE, already-covered property is
     # R1/R6c's "recert-verdict requires exactly PASS", not re-asserted here).
     run_recert "$fixture" "$diff_anchor" dep-duplicates
-    if ! printf '%s\n' "$OUT" | grep -qE "^error: 'dep-duplicates' is in the PR's own diff domain" \
-       && printf '%s\n' "$OUT" | grep -qE '^dep-duplicates: '; then
+    if ! grep -qE "^error: 'dep-duplicates' is in the PR's own diff domain" <<<"$OUT" \
+       && grep -qE '^dep-duplicates: ' <<<"$OUT"; then
       ok "R12b: dep-duplicates (CARGO_ANY-only domain, excludes cqlite-core/src) is ELIGIBLE against the SAME diff (preflight accepted, dispatched for real)"
     else
       bad "R12b: expected dep-duplicates to be preflight-ELIGIBLE (no diff-domain refusal) against the core-src diff, got rc=$RC"
