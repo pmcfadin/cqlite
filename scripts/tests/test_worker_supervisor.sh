@@ -11254,8 +11254,9 @@ test_object_store_sweep_claim_recovers_when_stale() {
           write_gap_valid=0
           write_gap="999999.00"
         elif [[ "$write_gap_valid" -eq 1 && "$pre_launch_writes" -eq 0 ]]; then
-          first_write="$(LC_ALL=C awk -v l="$launched" '$1>l{print $1; exit}' "$wticks" 2>/dev/null)"
-          if [[ -n "$first_write" ]]; then
+          first_write="$(LC_ALL=C awk -v l="$launched" '$1>l{print $1; exit}' "$wticks" 2>/dev/null)" ||
+            { write_gap_valid=0; write_gap="999999.00"; first_write=""; }
+          if [[ "$write_gap_valid" -eq 1 && -n "$first_write" ]]; then
             write_gap="$(LC_ALL=C awk -v a="$write_gap" -v f="$first_write" -v l="$launched" \
               'BEGIN{d=f-l; printf "%.2f", (d>a?d:a)}' 2>/dev/null)"
             [[ "$write_gap" =~ $OBJ_SWEEP_GAP_RE ]] || { write_gap_valid=0; write_gap="999999.00"; }
