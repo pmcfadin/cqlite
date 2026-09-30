@@ -172,16 +172,54 @@ async fn statistics_recompute_partition_count_matches_golden() {
     // Cassandra — not a second CQLite computation that could share a bug
     // with the one under test (`docs/development/test-oracles.md` §2: "the
     // oracle is Cassandra-written bytes").
-    let original_stats_path = fixture_dir.join(format!("{prefix}Statistics.db"));
+    //
+    // This equality holds for THIS fixture specifically because
+    // `test_basic.composite_key_table` carries no shadowed/reconciled
+    // content (no tombstones, no overwrites) — rebuild recomputes
+    // `min_timestamp`/`max_timestamp` from a shadow-gated fold of DECODED
+    // mutations, while Cassandra computed the original from the memtable's
+    // `EncodingStats` at flush time; those two agree only when nothing was
+    // shadowed away. `design.md` classifies these fields `recomputed`
+    // (lossy) precisely because that agreement is NOT guaranteed in
+    // general — a future fixture with tombstones could legitimately
+    // diverge from its own original Statistics.db, and that would be a
+    // fixture/design property, not a rebuild regression to "fix" here.
+    let original_stats_path = fixture_dir.join(format!(
+        "{}Statistics.db",
+        single_data_db(&fixture_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .trim_end_matches("Data.db")
+    ));
     let original_reader = StatisticsReader::open(&original_stats_path, platform.clone())
         .await
         .expect("open the fixture's original Statistics.db");
+    // Affirmative-zero guard: an untouched sentinel on BOTH sides would pass
+    // the comparison below vacuously (a census reports `0 RECOGNISED`, never
+    // a bare `0` — an unmeasured check and a clean one must not read alike).
+    assert_ne!(
+        original_reader.statistics().timestamp_stats.min_timestamp,
+        i64::MAX,
+        "{KEYSPACE}.{TABLE}: original Statistics.db carries no min_timestamp \
+         — the comparison below would be vacuous"
+    );
+    assert_ne!(
+        original_reader.max_timestamp(),
+        None,
+        "{KEYSPACE}.{TABLE}: original Statistics.db carries no max_timestamp \
+         — the comparison below would be vacuous"
+    );
     assert_eq!(
         reader.statistics().timestamp_stats.min_timestamp,
         original_reader.statistics().timestamp_stats.min_timestamp,
         "{KEYSPACE}.{TABLE}: recomputed min_timestamp differs from the original, \
          Cassandra-written Statistics.db"
     );
+    // `max_timestamp()` (not a bare field read, matching `min_timestamp`'s
+    // access above) accounts for issue #1653's `None` = "not authoritatively
+    // available" sentinel on the legacy (`nb`) STATS body; `min_timestamp`
+    // has no such `Option` wrapper to account for.
     assert_eq!(
         reader.max_timestamp(),
         original_reader.max_timestamp(),

@@ -92,8 +92,16 @@ const PT_LDT: i32 = 1_000;
 const RT_LDT: i32 = 2_000;
 const STATIC_DELETE_LDT: i32 = 7_000;
 
+/// `timestamp_micros` matches `deletion_time` — the shape `decode` actually
+/// produces (`merge_entry_to_mutation`, `merge/mod.rs:3594`: `Mutation::new(..,
+/// deletion_time, None)`), NOT an arbitrary value. This matters:
+/// `fold_static_carrier_stats` unconditionally folds `timestamp_micros` (its
+/// own doc's KNOWN RESIDUAL), so a carrier whose `timestamp_micros` diverged
+/// from `deletion_time` would leak a synthetic value into `max_timestamp` —
+/// invisible with a mismatched fixture, since nothing here would assert on
+/// it (roborev N1).
 fn pt_carrier() -> Mutation {
-    let mut m = Mutation::new(table(), pk(), None, vec![], 500, None);
+    let mut m = Mutation::new(table(), pk(), None, vec![], 100, None);
     m.partition_tombstone = Some(PartitionTombstone {
         deletion_time: 100,
         local_deletion_time: PT_LDT,
@@ -101,8 +109,12 @@ fn pt_carrier() -> Mutation {
     m
 }
 
+/// See [`pt_carrier`]'s doc comment: `timestamp_micros` matches
+/// `deletion_time`, matching `merge_entry_to_mutation`'s actual
+/// `MergeEntry::new(.., rt.deletion_time, ..)` → `Mutation::new(..,
+/// entry.timestamp, None)` construction (`merge/mod.rs:2456`/`3743`).
 fn rt_carrier() -> Mutation {
-    let mut m = Mutation::new(table(), pk(), None, vec![], 500, None);
+    let mut m = Mutation::new(table(), pk(), None, vec![], 200, None);
     m.range_tombstones.push(RangeTombstone {
         start: ClusteringBound::Inclusive(ck(1)),
         end: ClusteringBound::Inclusive(ck(3)),
@@ -174,6 +186,14 @@ fn marker_only_carriers_do_not_double_count_the_marker_fold() {
         stats.has_partition_level_deletions,
         "a folded partition tombstone must set the flag"
     );
+    assert_eq!(
+        stats.max_timestamp, 200,
+        "positive control (roborev N1): with timestamp_micros == deletion_time \
+         (the shape decode actually produces), the vacuously-misclassified \
+         static branch's unconditional timestamp fold is a true no-op — it \
+         lands on the SAME value the marker fold already folded, never a \
+         higher synthetic one"
+    );
 }
 
 /// The same two carriers, against a schema with NO static columns: now
@@ -201,6 +221,12 @@ fn marker_only_carriers_are_also_inert_via_the_non_static_branch() {
         2,
         "the non-static (fold_single_mutation_row_group) branch must also \
          contribute zero additional observations for a marker-only carrier"
+    );
+    assert_eq!(
+        stats.max_timestamp, 200,
+        "same positive control as the static-branch test (roborev N1), \
+         proving the two classification branches are provably identical for \
+         a marker-only carrier"
     );
 }
 
@@ -233,6 +259,15 @@ fn static_carrier_row_deletion_is_excluded_from_rebuilds_dispatch() {
         "min_local_deletion_time must stay at its untouched default — \
          folding the static carrier's DeleteRow LDT here is exactly the \
          #4246 round-6/7 phantom, now checked through rebuild's own dispatch"
+    );
+    assert_eq!(
+        stats.min_timestamp, 250,
+        "positive control (roborev N2): without this, deleting the entire \
+         per-mutation dispatch loop would still pass the two assertions \
+         above. This proves the mutation actually reached \
+         fold_static_carrier_stats (which folds timestamp_micros, 250 — not \
+         a live sentinel) rather than the function returning early / \
+         skipping it entirely"
     );
 }
 
