@@ -10702,7 +10702,13 @@ obj_sweep_claim_age_bound_secs() {
 #     fails (job 49 F1, job 90 F5) -- while a measurable record showing genuine starvation
 #     does excuse it (skip);
 #   * tick liveness is consulted before claim writes because `$ticks` survives claim removal
-#     and claim writes do not (job 90 F3);
+#     and claim writes do not (job 90 F3) -- AND THE ORDER NOW MATCHES THAT CLAIM on the
+#     mismatched side too (roborev job 98 L2): `mg_exceeds` used to be tested AFTER write
+#     validity, so a measurable tick record showing genuine starvation plus an unmeasurable
+#     WRITE record reported `fail:write-unmeasurable` -- a false red decided by the weaker
+#     signal, contradicting this very paragraph. Reachable: ENOSPC on `$d` stops tick appends
+#     (leaving a large, measurable `max_gap` over the written prefix) while also failing the
+#     `>"$wticks"` projection redirect. Two table rows now cover that combination;
 #   * `post_launch_ticks=0` fails rather than excuses: with no tick inside the window there was
 #     no OPPORTUNITY to write, so absence of writes says nothing about the fixture (job 91 F2).
 # `writes_valid` defaults to 1 ONLY so the nine-argument form stays callable; every live call
@@ -10722,10 +10728,10 @@ obj_sweep_claim_fresh_verdict() {
     printf 'pass\n'
   elif [[ "$mg_valid" -eq 0 ]]; then
     printf 'fail:tick-unmeasurable\n'
-  elif [[ "$wg_valid" -eq 0 || "$writes_valid" -eq 0 ]]; then
-    printf 'fail:write-unmeasurable\n'
   elif [[ "$mg_exceeds" -eq 1 ]]; then
     printf 'skip:tick-starved-takeover\n'
+  elif [[ "$wg_valid" -eq 0 || "$writes_valid" -eq 0 ]]; then
+    printf 'fail:write-unmeasurable\n'
   elif [[ "$ticks_in" -eq 0 ]]; then
     printf 'fail:window-too-short\n'
   elif [[ "$claim_present" -eq 1 && ( "$wg_exceeds" -eq 1 || "$writes" -eq 0 ) ]]; then
@@ -10941,7 +10947,25 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # not available to this case at all; erring toward `skip` costs a run's credit, erring the
     # other way is the false red this issue exists to remove. It does not raise the skip rate in
     # practice: a healthy refresher ticks every 0.2s, two orders of magnitude inside the bound.
-    refresh_backdate_secs=1
+    # VALUE IS 3, NOT 1 (roborev job 98 M1), and the arithmetic is the reason. The residual this
+    # spends headroom on: `obj_sweep_claim_acquire` captures `now`, THEN forks/execs `mkdir`,
+    # and only then reads `started`. If >= `backdate` seconds of real time elapse across that
+    # fork/exec, the refresher's next write lands far enough ahead that `started > now_sup`,
+    # which the shipped code treats as future-dated => STALE => takeover -- surfacing here as
+    # `fail:regression` with ticks and writes both healthy, i.e. precisely the false red this
+    # issue exists to remove. Fork/exec latency on the load-30-75 box #4282 cites is NOT
+    # comfortably below 1s, so a 1s threshold was too thin; 3 moves it to ">= 3s stall".
+    # SAFETY, CHECKED AGAINST THE SHIPPED SOURCE RATHER THAN ASSUMED: `obj_sweep_claim_wait`
+    # sets `deadline = started + stale` and expires on `now > deadline`; with
+    # `started = now - backdate` that is `now > now - backdate + stale`, i.e. it expires early
+    # ONLY when `backdate > stale_secs`. So the whole constraint is `backdate < stale_secs`, and
+    # it is already MECHANICALLY ENFORCED rather than left to a comment: `age_bound_secs =
+    # stale_secs - refresh_backdate_secs` and the router's first branch fails the case on a
+    # non-positive bound (`fail:bad-bound`, job 93 L2). COST, STATED: the age bound tightens
+    # from 4s to 2s, so a starved fixture is classified `skip` sooner. That is the intended
+    # direction (skip over false red) and still 10x the refresher's 0.2s tick period, so a
+    # healthy run is nowhere near it -- but it does raise the skip ceiling #4315 tracks.
+    refresh_backdate_secs=3
     fixture_bg bash -c '
       claim="$1" live="$2" ticks="$3" max_ticks="$4" backdate="$5"
       i=0
@@ -11642,7 +11666,10 @@ t test_object_store_sweep_gap_threshold_property
 #          writes_valid   <- 10th, appended (job 96 M1) rather than inserted mid-row, so the
 #                            pre-existing rows could not be silently mis-shifted by the edit.
 # Healthy baseline: 1 4 1 0 1 0 3 5 1 1
-# The last three rows are job 96 M1: an unmeasurable WRITE COUNT (a different awk invocation
+# The last TWO rows are job 98 L2: a measurable tick record showing starvation outranks an
+# unmeasurable WRITE record, so both route to `skip:tick-starved-takeover` rather than to
+# `fail:write-unmeasurable` -- the ordering the router's header claims and did not have.
+# The three rows before those are job 96 M1: an unmeasurable WRITE COUNT (a different awk invocation
 # from the projection, so `proj_rc` does not cover it) must downgrade the matched side to
 # `skip` and must FAIL the mismatched side -- never excuse it as `skip:write-starved-takeover`,
 # which is what coercing the failed count to `0` used to do. The last row is that exact path:
@@ -11686,11 +11713,13 @@ fail:regression|0 4 1 0 1 0 3 5 0 1
 skip:write-uncertified|1 4 1 0 1 0 3 5 1 0
 fail:write-unmeasurable|0 4 1 0 1 0 3 5 1 0
 fail:write-unmeasurable|0 4 1 0 1 0 0 5 1 0
+skip:tick-starved-takeover|0 4 1 1 0 0 3 5 1 1
+skip:tick-starved-takeover|0 4 1 1 1 0 3 5 1 0
 ROWS
-  if [[ "$bad" -eq 0 && "$rows_checked" -eq 23 ]]; then
+  if [[ "$bad" -eq 0 && "$rows_checked" -eq 25 ]]; then
     pass "obj-sweep(verdict-routing): all ${rows_checked} signal combinations route as specified -- including a claim that did NOT survive the run falling through to \`fail\` rather than being excused by its own takeover (job 90 F3), a too-short window failing rather than excusing (job 91 F2), and an unmeasurable record never excusing a mismatched outcome (job 49 F1 / job 90 F5)"
   elif [[ "$bad" -eq 0 ]]; then
-    fail "obj-sweep(verdict-routing): only ${rows_checked} of the expected 23 rows were read -- the table was truncated, so the routing is not fully pinned"
+    fail "obj-sweep(verdict-routing): only ${rows_checked} of the expected 25 rows were read -- the table was truncated, so the routing is not fully pinned"
   fi
 
   # THE CASE MUST ACTUALLY ROUTE THROUGH THE FUNCTION, not keep a parallel inline chain
