@@ -32,6 +32,7 @@ use crate::storage::sstable::writer::{
     DataWriter, FilterWriter, IndexWriter, SSTableWriter, StatisticsMetadata, StatisticsWriter,
     SummaryWriter,
 };
+use crate::storage::write_engine::mutation::{Mutation, PartitionTombstone, RangeTombstone};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -78,6 +79,111 @@ fn data_corrupt_refusal(detail: impl std::fmt::Display, offset: Option<u64>) -> 
              salvage (issue #4196) to recover a fresh generation from what is still decodable"
         ),
         offset,
+    }
+}
+
+/// Fold one decoded partition's mutations into the running whole-SSTable
+/// `stats` accumulator (issue #4197 PASS 2; issue #4246 doctrine).
+///
+/// Partition/range tombstone MARKERS are folded unconditionally from the
+/// caller's own authoritative extraction (`partition_tombstone`/
+/// `range_tombstones`, already reduced to "one winning PT, every surviving
+/// RT") — they are never row-shadowed, they ARE the deletion, exactly
+/// mirroring `SSTableWriter::write_partition`'s own marker fold
+/// (`writer/mod.rs`, issue #4246).
+///
+/// Everything else is folded per-mutation via `fold_single_mutation_row_group`
+/// (the SAME per-mutation fold `KWayMerger::merge`'s `PartitionEnd` handling
+/// and `WriteEngine::maintenance_step`'s buffered `PartitionEnd` drain use),
+/// rather than the group-oriented `for_each_clustering_row_group` /
+/// `clustering_row_mutations` machinery `write_partition` needs for RAW,
+/// pre-reconciliation buffered input. `mutations` here is NOT raw input: it
+/// is `decode_one_partition`'s output, itself `merge_partition_rows`'s
+/// (`write_engine/merge/mod.rs`) reconciled result, which has ALREADY
+/// applied `apply_range_shadowing`/`apply_partition_shadowing` to every
+/// clustering-keyed cluster before this function ever sees it — so the
+/// per-mutation `resolve_shadow_floor` gate below is PROVABLY INERT for this
+/// input (it can exclude nothing `merge_partition_rows` has not already
+/// excluded). It stays, not because it does live work here, but because it
+/// makes this fold provably agree with the scratch `DataWriter`'s own
+/// emission decision BY CONSTRUCTION, rather than depending on an upstream
+/// invariant inside `decode`/`merge` that a future change there could break
+/// silently. In that sense this function is a compile-time fix (routing
+/// through the shared, already-#4246-hardened primitives instead of the
+/// now-test-only `fold_mutation_stats`), not a bug fix: the OLD blind fold
+/// was never actually wrong for rebuild's input, because nothing shadow-able
+/// survives into `mutations` in the first place.
+///
+/// One subtlety `fold_single_mutation_row_group`'s own docs do not spell out
+/// for THIS caller: NOT every `clustering_key: None` mutation here belongs
+/// to a single reconciled clustering group. `merge_partition_rows` emits up
+/// to three DISTINCT `None`-keyed shapes per partition — the one reconciled
+/// `None`-clustered cluster (an unclustered table's sole row, or a
+/// static-row carrier, if the schema has static columns), PLUS one carrier
+/// entry per surviving coalesced range tombstone, PLUS one carrier for the
+/// partition tombstone (`merge/mod.rs`'s range-tombstone and
+/// partition-tombstone re-emit loops) — so splitting them into singleton
+/// per-mutation folds (instead of one grouped fold, as
+/// `SSTableWriter::write_partition` would for raw buffered input) is safe
+/// for two INDEPENDENT reasons, not because "every clustering key is already
+/// one mutation":
+///
+///   1. A marker-only carrier mutation folds to nothing under
+///      `fold_single_mutation_row_group`: `merge_entry_to_mutation`
+///      (`merge/mod.rs`) gives the partition-tombstone carrier empty
+///      `operations` and no row deletion (it returns early, before the
+///      operation builder ever runs), and the range-tombstone carrier empty
+///      `operations` with `row_deletion` unset too — so `merge_row_group`
+///      produces no row for either, matching its own doc comment ("a
+///      mutation that exists only to carry a partition or range tombstone").
+///   2. Splitting the group cannot double-fold a row's OWN deletion marker
+///      (`fold_row_deletion_marker`, whose `update_local_deletion_time` call
+///      is NOT idempotent — it increments a histogram bucket) because AT
+///      MOST ONE `None`-keyed mutation per partition can carry one: only the
+///      single reconciled `None`-clustered entry can; the two marker
+///      carriers structurally cannot, per point 1.
+///
+/// `is_static_row_mutation` (`data_writer::encoding`) also classifies a
+/// marker-only carrier as a "static carrier" whenever the schema has any
+/// static column — not because it IS one, but because `Iterator::all` over
+/// its EMPTY `operations` is vacuously `true`. This is harmless: the static
+/// branch (`fold_static_carrier_stats`) only folds `update_timestamp`
+/// (idempotent) from a mutation with no ops to iterate, so a carrier
+/// misclassified this way contributes nothing beyond what the unconditional
+/// marker fold above already folded. It IS, however, load-bearing for this
+/// function's branch disjointness, and worth re-deriving by hand — not
+/// assumed — before ever "simplifying" this predicate away.
+fn fold_partition_statistics(
+    stats: &mut StatisticsMetadata,
+    mutations: &[Mutation],
+    partition_tombstone: Option<&PartitionTombstone>,
+    range_tombstones: &[RangeTombstone],
+    schema: &TableSchema,
+    schema_has_static: bool,
+) {
+    if let Some(pt) = partition_tombstone {
+        stats.update_timestamp(pt.deletion_time);
+        stats.update_local_deletion_time(pt.local_deletion_time);
+        stats.mark_partition_level_deletion();
+    }
+    for rt in range_tombstones {
+        stats.update_timestamp(rt.deletion_time);
+        stats.update_local_deletion_time(rt.local_deletion_time);
+    }
+
+    let partition_floor = partition_tombstone.map(|pt| pt.deletion_time);
+    for mutation in mutations {
+        if is_static_row_mutation(mutation, schema) {
+            fold_static_carrier_stats(stats, mutation);
+            continue;
+        }
+        let shadow_floor = resolve_shadow_floor(
+            partition_floor,
+            range_tombstones,
+            mutation.clustering_key.as_ref(),
+            schema,
+        );
+        fold_single_mutation_row_group(stats, mutation, schema, schema_has_static, shadow_floor);
     }
 }
 
@@ -206,15 +312,18 @@ pub async fn rebuild_components(
         // (min_timestamp/min_ttl/min_local_deletion_time) via the same
         // fixed #729 two-pass baseline primitive `WriteEngine::
         // flush_internal_async` uses (`SSTableWriter::
-        // compute_mutations_baseline_stats`) — NOT the old blind
-        // `fold_mutation_stats` (issue #4246: that function is
-        // `#[cfg(test)]`-only now precisely because folding every raw
-        // mutation unconditionally reintroduces the phantom-fold bug).
-        // The full per-mutation content fold (maxima, tombstone histogram,
-        // flags) happens below in PASS 2, gated on the SAME shadow decision
-        // the scratch `DataWriter` emission makes for each partition.
-        // Refuse the WHOLE run — before writing a single byte — on any
-        // decode failure.
+        // compute_mutations_baseline_stats`), routed through this shared
+        // primitive rather than the old `fold_mutation_stats` call this
+        // replaced — issue #4246 made that function `#[cfg(test)]`-only in
+        // production. This is a COMPILE fix, not a bug fix: `mutations` here
+        // is decode-reconciled output (see `fold_partition_statistics`'s doc
+        // comment below), which was never phantom-fold-able in the first
+        // place, so the old blind fold was not actually wrong for rebuild —
+        // it just no longer compiles against the shared, #4246-hardened
+        // primitives everything else in this module now uses.  The full
+        // per-mutation content fold (maxima, tombstone histogram, flags)
+        // happens below in PASS 2. Refuse the WHOLE run — before writing a
+        // single byte — on any decode failure.
         if want_index || want_summary || want_statistics {
             let mut baseline_min_ts = i64::MAX;
             let mut baseline_min_ldt = i32::MAX;
@@ -311,6 +420,7 @@ pub async fn rebuild_components(
             min_local_deletion_time: stats_acc.min_local_deletion_time,
             ..StatisticsMetadata::default()
         };
+        let schema_has_static = schema.columns.iter().any(|c| c.is_static);
 
         for (i, (offset, key)) in entries.iter().enumerate() {
             let end_bound = entries.get(i + 1).map(|(o, _)| *o);
@@ -356,56 +466,14 @@ pub async fn rebuild_components(
                 .collect();
 
             if want_statistics {
-                // The full per-mutation content fold (issue #4246): marker
-                // fields (partition/range tombstone) are never row-shadowed
-                // — they ARE the deletion — so fold them unconditionally
-                // from the authoritative extracted values above, exactly
-                // mirroring `SSTableWriter::write_partition`'s own fold.
-                if let Some(pt) = partition_tombstone.as_ref() {
-                    stats_acc.update_timestamp(pt.deletion_time);
-                    stats_acc.update_local_deletion_time(pt.local_deletion_time);
-                    stats_acc.mark_partition_level_deletion();
-                }
-                for rt in &range_tombstones {
-                    stats_acc.update_timestamp(rt.deletion_time);
-                    stats_acc.update_local_deletion_time(rt.local_deletion_time);
-                }
-
-                // Row content: `mutations` is decoded from an ALREADY-WRITTEN
-                // Data.db via the same `KWayMerger` reconciliation
-                // `compact_sstables`/`salvage_sstable` use (see `decode.rs`
-                // doc comment), so each clustering key is already a single
-                // fully-reconciled `Mutation` — the exact precondition
-                // `fold_single_mutation_row_group` documents for
-                // `KWayMerger::merge`'s own `PartitionEnd` handling and
-                // `WriteEngine::maintenance_step`'s buffered `PartitionEnd`
-                // drain (both post-merge streaming contexts, structurally
-                // identical to rebuild's decode-from-disk context). A
-                // marker-only mutation (no operations, no row deletion)
-                // folds to nothing here — `merge_row_group` produces no row
-                // for it — so this is safe to call unconditionally without
-                // double-counting the marker fold above.
-                let partition_floor = partition_tombstone.as_ref().map(|pt| pt.deletion_time);
-                let schema_has_static = schema.columns.iter().any(|c| c.is_static);
-                for mutation in &mutations {
-                    if is_static_row_mutation(mutation, schema) {
-                        fold_static_carrier_stats(&mut stats_acc, mutation);
-                        continue;
-                    }
-                    let shadow_floor = resolve_shadow_floor(
-                        partition_floor,
-                        &range_tombstones,
-                        mutation.clustering_key.as_ref(),
-                        schema,
-                    );
-                    fold_single_mutation_row_group(
-                        &mut stats_acc,
-                        mutation,
-                        schema,
-                        schema_has_static,
-                        shadow_floor,
-                    );
-                }
+                fold_partition_statistics(
+                    &mut stats_acc,
+                    &mutations,
+                    partition_tombstone.as_ref(),
+                    &range_tombstones,
+                    schema,
+                    schema_has_static,
+                );
             }
 
             let need_scratch = index_writer.is_some() || want_statistics;
@@ -646,3 +714,7 @@ fn write_statistics_component(
         .insert("statistics".to_string(), fields);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "components_tests.rs"]
+mod tests;

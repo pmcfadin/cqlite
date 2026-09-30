@@ -154,7 +154,7 @@ async fn statistics_recompute_partition_count_matches_golden() {
         .trim_end_matches("Data.db")
         .to_string();
     let stats_path = out.join(format!("{prefix}Statistics.db"));
-    let reader = StatisticsReader::open(&stats_path, platform)
+    let reader = StatisticsReader::open(&stats_path, platform.clone())
         .await
         .expect("open rebuilt Statistics.db");
     let partition_count = reader.statistics().row_stats.partition_count;
@@ -162,6 +162,31 @@ async fn statistics_recompute_partition_count_matches_golden() {
         partition_count as usize, expected_partitions,
         "{KEYSPACE}.{TABLE}: recomputed partition_count differs from the independent \
          sstabledump-golden partition count"
+    );
+
+    // R4.1, extended (roborev finding on PR #4250): `partition_count` alone
+    // does not observe the fold this issue's PASS 2 actually rewired
+    // (min/max timestamp, min/max local-deletion-time, the tombstone-drop
+    // histogram, `has_partition_level_deletions`). The independent oracle
+    // here is the fixture's OWN original `Statistics.db`, written by real
+    // Cassandra — not a second CQLite computation that could share a bug
+    // with the one under test (`docs/development/test-oracles.md` §2: "the
+    // oracle is Cassandra-written bytes").
+    let original_stats_path = fixture_dir.join(format!("{prefix}Statistics.db"));
+    let original_reader = StatisticsReader::open(&original_stats_path, platform.clone())
+        .await
+        .expect("open the fixture's original Statistics.db");
+    assert_eq!(
+        reader.statistics().timestamp_stats.min_timestamp,
+        original_reader.statistics().timestamp_stats.min_timestamp,
+        "{KEYSPACE}.{TABLE}: recomputed min_timestamp differs from the original, \
+         Cassandra-written Statistics.db"
+    );
+    assert_eq!(
+        reader.max_timestamp(),
+        original_reader.max_timestamp(),
+        "{KEYSPACE}.{TABLE}: recomputed max_timestamp differs from the original, \
+         Cassandra-written Statistics.db"
     );
 
     let classification = report
