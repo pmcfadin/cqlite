@@ -360,6 +360,14 @@ bindings/parity/out/
 # role: `.impl-*-report.md` alone let a read-only auditor's `.census-audit-report.md`
 # into a working tree, which is one edit away from a scratch report entering a PR diff.
 .*-report.md
+# Same class, sixth instance (roborev job 77, issue #4309): the per-lane `/drive-issue`
+# scratch pad. Its content is session narration ("Adopted stale marker...", "Spawned
+# flow-closer-4309...", "Awaiting its first report") — an input to the work, never an
+# artifact of it. It reached a PR diff on #4309 via a `git add -A`, which is exactly the
+# laundering the lane lock (#3436) exists to stop, so the remedy is the same one the five
+# entries above use: ignore it, because untracked-but-not-ignored ALSO stamps `dirty: yes`
+# on the next certification block.
+.driveissue-scratch/
 # Sidecar files of the per-lane drive-issue state marker (#3822): the flock lockfile and
 # the atomic-replace temporaries. The marker itself is ignored above.
 .drive-issue-state.md.*

@@ -312,6 +312,39 @@ required-features = ["write-support", "lz4"]
 name = "issue_1695_query_timeout"
 required-features = ["state_machine", "cli-helpers"]
 
+# Issue #4309 raw-SSTable-view physical-dump-parity sweep: three fixture lanes plus
+# two corpus-free self-test lanes for the harness's own oracle and coverage census.
+# All five are `#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]` —
+# the fixtures are opened through `cqlite_core::ingestion` (cli-helpers) so the sweep
+# drives the same `Database` surface the CLI does.
+#
+# DECLARED FOR THE SAME REASON AS THE BLOCK ABOVE, and it was MEASURED (roborev job
+# 81): without these entries `cargo test -p cqlite-core` compiles all five to EMPTY
+# binaries and reports `running 0 tests ... ok`, which is the vacuous pass this whole
+# sweep exists to make impossible. The full gate's core-tests happens to pass
+# `--features cli-helpers` so it does run them, but that is the component's choice,
+# not a property of these targets. The `#![cfg]` and these required-features must
+# always agree.
+[[test]]
+name = "issue_4309_raw_view_parity_sweep_tomb_test"
+required-features = ["state_machine", "cli-helpers"]
+
+[[test]]
+name = "issue_4309_raw_view_parity_sweep_deltas_test"
+required-features = ["state_machine", "cli-helpers"]
+
+[[test]]
+name = "issue_4309_raw_view_parity_sweep_formats_test"
+required-features = ["state_machine", "cli-helpers"]
+
+[[test]]
+name = "issue_4309_raw_view_census_selftest"
+required-features = ["state_machine", "cli-helpers"]
+
+[[test]]
+name = "issue_4309_raw_view_oracle_selftest"
+required-features = ["state_machine", "cli-helpers"]
+
 # Statistics.db single-TOC-walk oracle (issue #2148). `#![cfg(feature =
 # "cli-helpers")]` — the `toc_walk_metrics` counter getters/`reset` +
 # `record_toc_walk` live behind `cli-helpers` — so it only compiles+runs with that
