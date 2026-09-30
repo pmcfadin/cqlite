@@ -143,55 +143,87 @@ classify_domain dep-duplicates 'docs/development/dev-cookbook.md' CLEAR "dep-dup
 # it (fail-OPEN).
 #
 # A census reports an AFFIRMATIVE count and names its subject set, never a bare
-# 0 (an unmeasured census and a clean one must not read alike). The paths are
-# read from the library's OWN _RECERT_DOM_TOOLCHAIN array rather than retyped,
-# so adding a fifth config file extends the census automatically instead of
-# leaving it one behind.
+# 0 (an unmeasured census and a clean one must not read alike).
+#
+# THE PROBES ARE CONCRETE REPO PATHS, NOT THE LIBRARY'S OWN PATTERNS. Two of the
+# five entries are directory globs (`.cargo/*`, `.config/*`), and feeding a glob
+# back in as the changed PATH would only prove that bash `case` is reflexive —
+# it would pass even if the domain had been narrowed to that literal string.
+# Drift is caught instead by the count assert below: one probe per pattern,
+# pinned to the array's own length, so adding a sixth pattern to the library
+# without adding a sixth probe here FAILS rather than silently under-measuring.
+TC_PROBE_PATHS='rust-toolchain.toml
+.clippy.toml
+.rustfmt.toml
+.cargo/config.toml
+.config/nextest.toml'
+
 tc_report=$(
   . "$SCOPE_LIB"
   . "$DOMAINS_LIB"
   pairs=0
   miss=0
+  nprobe=0
   offenders=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    nprobe=$((nprobe + 1))
+  done <<<"$TC_PROBE_PATHS"
   while IFS= read -r c; do
     [ -n "$c" ] || continue
     # Skip components the table does NOT map: they are fail-closed to "always
     # diff-touched" via an EMPTY domain, so asserting TOUCHED for them would
     # pass for a reason having nothing to do with this group.
     [ -n "$(_recert_component_domain_patterns "$c")" ] || continue
-    for f in "${_RECERT_DOM_TOOLCHAIN[@]}"; do
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
       pairs=$((pairs + 1))
       _recert_component_diff_touched "$c" "$f" && continue
       miss=$((miss + 1))
       # The offender list is CAPPED at 6: the fail-open shape is per-CONFIG-FILE,
       # so the first few pairs already name the cause, while an uncapped list is
-      # ~156 entries of noise in a gate log (measured while writing this case).
+      # ~200 entries of noise in a gate log (measured while writing this case).
       [ "$miss" -le 6 ] && offenders="${offenders:+$offenders }$c($f)"
-    done
+    done <<<"$TC_PROBE_PATHS"
   done <<<"$declared_components"
   # ONE machine-readable line, so a partially-written report cannot be misread as
   # a clean one: every field is present or the whole line is absent.
-  printf 'CENSUS pairs=%d miss=%d offenders=%s\n' "$pairs" "$miss" "${offenders:-none}"
+  printf 'CENSUS pairs=%d miss=%d nprobe=%d npattern=%d offenders=%s\n' \
+    "$pairs" "$miss" "$nprobe" "${#_RECERT_DOM_TOOLCHAIN[@]}" "${offenders:-none}"
 )
-tc_pairs=$(awk -F'pairs=' '/^CENSUS /{ split($2, a, " "); print a[1]; exit }' <<<"$tc_report")
-tc_miss=$(awk -F'miss=' '/^CENSUS /{ split($2, a, " "); print a[1]; exit }' <<<"$tc_report")
+_tc_field() { awk -v k="$1=" '/^CENSUS /{ i = index($0, k); if (i == 0) exit; s = substr($0, i + length(k)); split(s, a, " "); print a[1]; exit }' <<<"$tc_report"; }
+tc_pairs=$(_tc_field pairs)
+tc_miss=$(_tc_field miss)
+tc_nprobe=$(_tc_field nprobe)
+tc_npattern=$(_tc_field npattern)
 tc_offenders=$(awk -F'offenders=' '/^CENSUS /{ print $2; exit }' <<<"$tc_report")
-case "${tc_pairs:-x}${tc_miss:-x}" in
+case "${tc_pairs:-x}${tc_miss:-x}${tc_nprobe:-x}${tc_npattern:-x}" in
   *[!0-9]*)
-    bad "toolchain-census: UNMEASURED — the census produced no usable pairs/miss counts (pairs='${tc_pairs:-}' miss='${tc_miss:-}'), so it asserts NOTHING about the domain table" ;;
+    bad "toolchain-census: UNMEASURED — the census produced no usable counts (pairs='${tc_pairs:-}' miss='${tc_miss:-}' nprobe='${tc_nprobe:-}' npattern='${tc_npattern:-}'), so it asserts NOTHING about the domain table" ;;
   *)
+    if [ "$tc_nprobe" -eq "$tc_npattern" ]; then
+      ok "toolchain-census: $tc_nprobe concrete probe path(s) cover all $tc_npattern _RECERT_DOM_TOOLCHAIN pattern(s) — the census measures the whole group"
+    else
+      bad "toolchain-census: $tc_nprobe probe path(s) for $tc_npattern _RECERT_DOM_TOOLCHAIN pattern(s) — the library grew (or shrank) and TC_PROBE_PATHS did not, so the census below under-measures the group"
+    fi
     if [ "$tc_pairs" -lt 30 ]; then
-      bad "toolchain-census: only $tc_pairs (component, config-path) pairs were measured — expected ~4x the mapped component count, so the census did not run over the real table"
+      bad "toolchain-census: only $tc_pairs (component, config-path) pairs were measured — expected ~5x the mapped component count, so the census did not run over the real table"
     elif [ "$tc_miss" -eq 0 ]; then
       ok "toolchain-census: all $tc_pairs (MAPPED component, repo-root build-config path) pairs classify as diff-touched — 0 fail-open gaps"
     else
       bad "toolchain-census: $tc_miss of $tc_pairs pairs classify as CLEAR — a diff touching only that config file would wrongly make the component recert-ELIGIBLE; first offenders: $tc_offenders"
     fi ;;
 esac
-# Two named spot cases as well, so a reader sees the concrete claim and a future
-# census refactor cannot quietly stop asserting it.
-classify_domain clippy '.clippy.toml' TOUCHED "clippy domain covers .clippy.toml (the file that parameterises it)"
+# Named spot cases as well, so a reader sees the concrete claim and a future
+# census refactor cannot quietly stop asserting it. rust-toolchain.toml is
+# pinned for all three components a compiler-version bump most obviously
+# invalidates; .clippy.toml and the two directory globs get one each.
+classify_domain clippy 'rust-toolchain.toml' TOUCHED "clippy domain covers rust-toolchain.toml (the pinned compiler)"
+classify_domain fmt 'rust-toolchain.toml' TOUCHED "fmt domain covers rust-toolchain.toml (the pinned compiler)"
 classify_domain core-tests 'rust-toolchain.toml' TOUCHED "core-tests domain covers rust-toolchain.toml (the pinned compiler)"
+classify_domain clippy '.clippy.toml' TOUCHED "clippy domain covers .clippy.toml (the file that parameterises it)"
+classify_domain core-tests '.config/nextest.toml' TOUCHED "core-tests domain covers .config/* (the nextest profiles it runs under)"
+classify_domain clippy '.cargo/config.toml' TOUCHED "clippy domain covers .cargo/* (rustflags/target settings cargo reads implicitly)"
 
 # ==== Layer 2: real --recertify invocations against a scratch fixture ========
 TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/recertify_test.XXXXXX") || { echo "FATAL: mktemp failed"; exit 1; }

@@ -3234,8 +3234,24 @@ apply_schemas_preflight() {
   # another — and the decision was never reached at all. There is deliberately no
   # environment opt-out on either side.
   if ! _gate_is_strict; then
+    # $_mode is derived from ALL THREE mode variables, not just `$ONLY`. A recert
+    # sets `ONLY`, so the old two-way spelling would have labelled any lenient
+    # state it reached `--only <components>` — naming a mode the run is not in,
+    # in the one line whose entire job is to say WHICH mode declined to check.
+    # The `--recertify` arms are unreachable while `_gate_is_strict` excepts
+    # RECERTIFY (that is the fix above); they exist so this text cannot LIE if
+    # that predicate is ever widened, the same reason the `$LITE` arm is kept
+    # for a path `run_lite` already exits before.
     local _mode
-    if [ -n "$ONLY" ]; then _mode="--only $ONLY"; else _mode="--lite"; fi
+    if [ "$LITE" -ne 0 ] && [ "$RECERTIFY" -eq 1 ]; then
+      _mode="--lite --recertify $ONLY"
+    elif [ "$LITE" -ne 0 ]; then
+      _mode="--lite"
+    elif [ "$RECERTIFY" -eq 1 ]; then
+      _mode="--recertify $ONLY"
+    else
+      _mode="--only $ONLY"
+    fi
     SCHEMAS_LINE="schemas: not checked ($_mode is lenient, #3148 AC (g)) — this block asserts NOTHING about the schemas root"
     return 0
   fi

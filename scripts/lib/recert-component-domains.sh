@@ -67,9 +67,16 @@ _RECERT_DOM_BASE=('scripts/agent-gate.sh')
 # counts as touching `kit-dashboard-drift` too, which only ever REFUSES a recert
 # that might have been eligible.
 #
-# `.config/nextest.toml`, not `.config/*`: the whole point is a DECLARED list,
-# and a glob over an unrelated future `.config` entry would be a different claim.
-_RECERT_DOM_TOOLCHAIN=('rust-toolchain.toml' '.clippy.toml' '.rustfmt.toml' '.config/nextest.toml')
+# `.cargo/*` and `.config/*` are DIRECTORY GLOBS, not single named files, and
+# deliberately so. Both directories exist only to hold build/test configuration
+# that is read implicitly by cargo and its subcommands (`.cargo/config.toml`'s
+# rustflags/target/registry settings; `.config/nextest.toml`'s profiles), so a
+# change to ANY entry under them is a plausible cause of a component's failure.
+# Naming today's files instead would silently fail OPEN the moment a second one
+# is added — the exact per-arm-omission shape this group exists to close — and
+# the cost of the glob is only ever an extra REFUSED recert, never an accepted
+# one. (Forward-slash `case` globs: `*` matches `/` here, see the file header.)
+_RECERT_DOM_TOOLCHAIN=('rust-toolchain.toml' '.clippy.toml' '.rustfmt.toml' '.cargo/*' '.config/*')
 _RECERT_DOM_RUST_ANY=('*.rs')
 _RECERT_DOM_CARGO_ANY=('Cargo.toml' 'Cargo.lock' '*/Cargo.toml')
 _RECERT_DOM_CORE=('cqlite-core/*')

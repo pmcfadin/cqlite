@@ -1548,13 +1548,17 @@ anything):**
    SHARED groups prepended in one place (`_recert_component_domain_patterns`):
    `_RECERT_DOM_BASE` (`scripts/agent-gate.sh` — the file its `run_<component>`
    driver lives in) and `_RECERT_DOM_TOOLCHAIN` (`rust-toolchain.toml`,
-   `.clippy.toml`, `.rustfmt.toml`, `.config/nextest.toml` — the repo-root build
-   configuration its behavior is parameterised by). Both were added because the
-   "unmapped ⇒ always diff-touched" default does NOT cover them: it applies only
-   to WHOLLY unmapped components, while a MAPPED component gets exactly its
-   listed patterns, so an unlisted path is CLEAR for it — fail-OPEN. The
-   toolchain group is pinned by a census in `scripts/tests/test_recertify.sh`
-   asserting every (MAPPED component × config path) pair classifies as touched.
+   `.clippy.toml`, `.rustfmt.toml`, `.cargo/*`, `.config/*` — the repo-root build
+   configuration its behavior is parameterised by; the last two are DIRECTORY
+   globs because those directories hold nothing but implicitly-read cargo/nextest
+   config, so naming today's files would fail OPEN on the next one added). Both
+   were added because the "unmapped ⇒ always diff-touched" default does NOT cover
+   them: it applies only to WHOLLY unmapped components, while a MAPPED component
+   gets exactly its listed patterns, so an unlisted path is CLEAR for it —
+   fail-OPEN. The toolchain group is pinned by a census in
+   `scripts/tests/test_recertify.sh` asserting every (MAPPED component × config
+   path) pair classifies as touched, over CONCRETE probe paths whose count is
+   itself pinned to the array's length (so a new pattern cannot go unmeasured).
 
 **Certification**: the terminal block requires every NAMED component to be
 **exactly `PASS`** — again stricter than the generic nonfailing set, since a
