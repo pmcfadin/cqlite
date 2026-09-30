@@ -132,6 +132,15 @@ fn cli_json_output_carries_a_location_object_with_chunk_index_and_partitions() {
     );
     assert_eq!(location["chunk_index"], 0);
     assert_eq!(location["component"], "Data.db");
+    // spec L6.3 (roborev job 92 MEDIUM): the machine channel must disclose
+    // WHICH reading the physical fields carry. A chunk decompression failure
+    // damages bytes that are present, so this one is a damaged extent — a
+    // JSON consumer reading byte_offset/byte_len needs that stated, not
+    // inferred from the finding class.
+    assert_eq!(
+        location["anchor"], "damaged_extent",
+        "location must disclose its physical-anchor reading: {location}"
+    );
     let resolved = location["partitions"]["resolved"]
         .as_array()
         .unwrap_or_else(|| {

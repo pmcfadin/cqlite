@@ -54,7 +54,7 @@ use std::sync::Arc;
 // module path. Resolution LOGIC lives in `verify_location.rs` (file-size
 // relocation); only check-site plumbing stays here.
 pub use crate::storage::sstable::verify_location::{
-    format_location, KeyRef, Location, PartitionResolution,
+    format_location, KeyRef, Location, PartitionResolution, PhysicalAnchor,
     BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE, MAX_RESOLVED_KEYS,
     PARTITION_KEY_UNAVAILABLE,
 };
@@ -988,6 +988,11 @@ fn check_compression_info(
                     component: "Data.db".to_string(),
                     byte_offset: offset,
                     byte_len: 4,
+                    // The declared offset outruns the file, so these 4 bytes
+                    // (the chunk-length prefix) are NOT present on disk: the
+                    // damage is the logical tail `partitions` enumerates
+                    // (roborev job 92 MEDIUM).
+                    anchor: PhysicalAnchor::DeclaredRecord,
                     chunk_index: Some(i),
                     damaged_logical: (logical_start, info.data_length.max(logical_start)),
                     logical_len: info.data_length,
@@ -1558,6 +1563,7 @@ fn check_inline_chunk_crc(
                     component: "Data.db".to_string(),
                     byte_offset: phys_offset,
                     byte_len: phys_len,
+                    anchor: PhysicalAnchor::DamagedExtent,
                     chunk_index: Some(i),
                     damaged_logical: (logical_start, logical_end),
                     logical_len: info.data_length,
@@ -1679,6 +1685,7 @@ async fn check_uncompressed_crc_db(
                         component: "Data.db".to_string(),
                         byte_offset: offset,
                         byte_len: filled as u64,
+                        anchor: PhysicalAnchor::DamagedExtent,
                         chunk_index: Some(chunk_index),
                         damaged_logical: (offset, offset.saturating_add(filled as u64)),
                         logical_len: data_len,

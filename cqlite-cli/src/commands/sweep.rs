@@ -250,18 +250,13 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
                             // below: this affects the exit code exactly like any other
                             // unreadable row, and the readable generations found
                             // alongside it are still verified (not skipped).
-                            if found_count > 0 && unreadable_file_entries > 0 {
-                                unreadable_table_dirs.push((
-                                    table_path.clone(),
-                                    format!(
-                                        "{unreadable_file_entries} unreadable directory \
-                                         entry(ies) under {} (last error: {}) alongside \
-                                         {found_count} readable *-Data.db generation(s), \
-                                         which are still verified below",
-                                        table_path.display(),
-                                        file_entry_error_for_unreadable_note.unwrap_or_default(),
-                                    ),
-                                ));
+                            if let Some(row) = mixed_readability_row(
+                                &table_path,
+                                found_count,
+                                unreadable_file_entries,
+                                file_entry_error_for_unreadable_note.as_deref(),
+                            ) {
+                                unreadable_table_dirs.push(row);
                             }
                         }
                         Err(e) => unreadable_table_dirs.push((table_path, e.to_string())),
@@ -318,13 +313,47 @@ fn classify_table_dir_entries(
     for entry in entries {
         match entry {
             Ok(p) => {
-                if p.is_file()
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.ends_with("-Data.db"))
-                        .unwrap_or(false)
-                {
-                    data_dbs.push(p);
+                // NAME FIRST, THEN STAT (roborev job 92 MEDIUM). `is_file()`
+                // collapses every stat failure into `false`, so an entry whose
+                // metadata cannot be read — a dangling symlink after a partial
+                // restore, an EACCES component — was neither counted as a
+                // generation NOR as an unreadable entry: it vanished with no
+                // row and no cause, the exact silent omission this module's own
+                // comments above claim to have closed. Testing the NAME first
+                // is what makes the drop attributable at all: `is_file()` &&
+                // name meant the code could not even tell that what it dropped
+                // was a `*-Data.db`.
+                let is_data_db = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with("-Data.db"))
+                    .unwrap_or(false);
+                if !is_data_db {
+                    continue;
+                }
+                match std::fs::metadata(&p) {
+                    Ok(md) if md.is_file() => data_dbs.push(p),
+                    // A `*-Data.db` NAME that is not a regular file (a
+                    // directory, a fifo) is not a generation, and saying
+                    // nothing about it would be the same silent drop.
+                    Ok(_) => {
+                        unreadable_file_entries += 1;
+                        last_file_entry_error = Some(format!(
+                            "{} is not a regular file",
+                            p.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("<non-utf8 name>")
+                        ));
+                    }
+                    Err(e) => {
+                        unreadable_file_entries += 1;
+                        last_file_entry_error = Some(format!(
+                            "cannot stat {}: {e}",
+                            p.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("<non-utf8 name>")
+                        ));
+                    }
                 }
             }
             Err(e) => {
@@ -334,6 +363,36 @@ fn classify_table_dir_entries(
         }
     }
     (data_dbs, unreadable_file_entries, last_file_entry_error)
+}
+
+/// The extra `unreadable` row a table directory earns when it holds BOTH
+/// readable `*-Data.db` generations AND unreadable directory entries, or
+/// `None` when it does not (roborev job 92 MEDIUM: the decision used to be an
+/// inline `if` at the single call site, so the only test for it exercised the
+/// CLASSIFIER in isolation and never this branch — a refactor inverting the
+/// guard to `found_count == 0` would have left every assertion green).
+///
+/// Returning `Option<(PathBuf, String)>` makes both the guard AND the cause
+/// string observable from a unit test, which is the property that was missing.
+fn mixed_readability_row(
+    table_path: &Path,
+    found_count: usize,
+    unreadable_file_entries: usize,
+    last_file_entry_error: Option<&str>,
+) -> Option<(PathBuf, String)> {
+    if found_count == 0 || unreadable_file_entries == 0 {
+        return None;
+    }
+    Some((
+        table_path.to_path_buf(),
+        format!(
+            "{unreadable_file_entries} unreadable directory entry(ies) under {} (last \
+             error: {}) alongside {found_count} readable *-Data.db generation(s), which \
+             are still verified below",
+            table_path.display(),
+            last_file_entry_error.unwrap_or_default(),
+        ),
+    ))
 }
 
 /// Map a completed [`VerifyReport`] to its severity + cause (design.md §D3):
@@ -730,10 +789,105 @@ mod tests {
         assert_eq!(data_dbs, vec![data_db]);
         assert_eq!(unreadable_file_entries, 1);
         assert_eq!(last_file_entry_error.as_deref(), Some("injected failure"));
-        // The call site's own guard (`found_count > 0 && unreadable_file_entries > 0`)
-        // is what turns this into a pushed `unreadable_table_dirs` row — asserted
-        // structurally here since both counts driving it are confirmed non-zero.
-        assert!(!data_dbs.is_empty() && unreadable_file_entries > 0);
+        // NO tautological restatement here (roborev job 92 MEDIUM): asserting
+        // `!data_dbs.is_empty() && unreadable_file_entries > 0` is implied by
+        // the two assert_eq!s above and observes nothing. The branch those
+        // counts drive is exercised directly in
+        // `mixed_readability_row_*` below.
+    }
+
+    // The branch the classifier feeds (roborev job 92 MEDIUM). These four
+    // cases pin the GUARD and the CAUSE STRING, so the reviewer's named
+    // regression -- inverting the guard to `found_count == 0` -- FAILs here
+    // instead of passing silently.
+    #[test]
+    fn mixed_readability_row_fires_when_readable_and_unreadable_coexist() {
+        let row = mixed_readability_row(Path::new("/ks/tbl-abc"), 3, 2, Some("injected failure"));
+        let (path, cause) = row.expect("readable generations + unreadable entries must push a row");
+        assert_eq!(path, PathBuf::from("/ks/tbl-abc"));
+        // Both counts and the underlying error are NAMED, so the row explains
+        // itself rather than just flipping the exit code.
+        assert!(
+            cause.contains('2'),
+            "cause must name the unreadable count: {cause}"
+        );
+        assert!(
+            cause.contains('3'),
+            "cause must name the readable count: {cause}"
+        );
+        assert!(
+            cause.contains("injected failure"),
+            "cause must carry the last error: {cause}"
+        );
+        assert!(
+            cause.contains("still verified"),
+            "cause must say the readable generations are not skipped: {cause}"
+        );
+    }
+
+    #[test]
+    fn mixed_readability_row_is_none_when_nothing_is_unreadable() {
+        assert!(mixed_readability_row(Path::new("/ks/tbl-abc"), 3, 0, None).is_none());
+    }
+
+    #[test]
+    fn mixed_readability_row_is_none_when_no_generation_was_found() {
+        // found_count == 0 is the OTHER arm's job (the "no *-Data.db" cause),
+        // so this must not double-report.
+        assert!(
+            mixed_readability_row(Path::new("/ks/tbl-abc"), 0, 2, Some("boom")).is_none(),
+            "an empty generation set is reported by the is_empty arm, not here"
+        );
+    }
+
+    #[test]
+    fn mixed_readability_row_tolerates_a_missing_last_error() {
+        let (_, cause) = mixed_readability_row(Path::new("/ks/tbl-abc"), 1, 1, None)
+            .expect("guard depends on the counts, not on an error being present");
+        assert!(
+            cause.contains('1'),
+            "cause must still name the counts: {cause}"
+        );
+    }
+
+    // A `*-Data.db` NAME whose metadata cannot be read is an UNREADABLE entry,
+    // never a silent drop (roborev job 92 MEDIUM). A path under a directory
+    // that does not exist cannot be stat'ed, which is the portable way to
+    // provoke the Err arm without planting a symlink.
+    #[test]
+    fn classify_counts_an_unstattable_data_db_as_unreadable() {
+        let missing = PathBuf::from("/nonexistent-cqlite-4194/ks/tbl/nb-1-big-Data.db");
+        let (data_dbs, unreadable, last_err) =
+            classify_table_dir_entries(vec![Ok(missing)].into_iter());
+        assert!(
+            data_dbs.is_empty(),
+            "an unstattable entry is not a usable generation"
+        );
+        assert_eq!(
+            unreadable, 1,
+            "it must be COUNTED, not dropped: that silent drop is the finding"
+        );
+        let cause = last_err.expect("the stat failure must be recorded with a cause");
+        assert!(
+            cause.contains("cannot stat") && cause.contains("nb-1-big-Data.db"),
+            "cause must name the stat failure and the file: {cause}"
+        );
+    }
+
+    // A non-Data.db entry that cannot be stat'ed is NOT our business: the
+    // sweep only claims completeness over `*-Data.db` names, so counting
+    // unrelated entries would inflate the unreadable count.
+    #[test]
+    fn classify_ignores_a_non_data_db_entry_entirely() {
+        let other = PathBuf::from("/nonexistent-cqlite-4194/ks/tbl/nb-1-big-Index.db");
+        let (data_dbs, unreadable, last_err) =
+            classify_table_dir_entries(vec![Ok(other)].into_iter());
+        assert!(data_dbs.is_empty());
+        assert_eq!(
+            unreadable, 0,
+            "a non-Data.db name is out of scope, not unreadable"
+        );
+        assert!(last_err.is_none());
     }
 
     // Clean case: no unreadable entries at all yields an empty last-error and

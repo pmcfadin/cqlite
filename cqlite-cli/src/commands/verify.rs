@@ -10,8 +10,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
-    format_location, verify_sstable, Location, PartitionResolution, VerifyFinding, VerifyMode,
-    VerifyReport,
+    format_location, verify_sstable, Location, PartitionResolution, PhysicalAnchor, VerifyFinding,
+    VerifyMode, VerifyReport,
 };
 use cqlite_core::Config;
 
@@ -151,11 +151,20 @@ fn location_to_json(loc: &Location) -> String {
             format!("{{\"unresolved\":{}}}", json_str(cause))
         }
     };
+    // `anchor` (roborev job 92 MEDIUM): a JSON consumer sees the same two
+    // physical fields the text renderer does, so it needs the same disclosure —
+    // fixing only the human channel would leave the machine channel asserting
+    // "these bytes are damaged" about an offset past EOF.
+    let anchor = match loc.anchor {
+        PhysicalAnchor::DamagedExtent => "damaged_extent",
+        PhysicalAnchor::DeclaredRecord => "declared_record",
+    };
     format!(
-        "{{\"component\":{},\"byte_offset\":{},\"byte_len\":{},\"chunk_index\":{},\"partitions\":{}}}",
+        "{{\"component\":{},\"byte_offset\":{},\"byte_len\":{},\"anchor\":{},\"chunk_index\":{},\"partitions\":{}}}",
         json_str(&loc.component),
         loc.byte_offset,
         loc.byte_len,
+        json_str(anchor),
         chunk_index,
         partitions,
     )

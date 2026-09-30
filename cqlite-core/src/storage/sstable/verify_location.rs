@@ -38,6 +38,28 @@ use crate::storage::sstable::verify::{
 };
 use crate::storage::sstable::version_gate::SsTableFormat;
 
+/// What a [`Location`]'s physical `byte_offset`/`byte_len` actually describe
+/// (issue #4194, roborev job 92 MEDIUM finding).
+///
+/// The two readings are not interchangeable, and conflating them produced
+/// output that pointed an operator at bytes which do not exist: a corruption
+/// LOCATOR whose physical range is a declared-but-absent offset must say so,
+/// because `dd`/`xxd` at that offset returns nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalAnchor {
+    /// `byte_offset`/`byte_len` cover bytes that are PRESENT in the file and
+    /// damaged — a failed chunk CRC, a decompression error. Reading that range
+    /// off disk yields the damaged bytes themselves.
+    DamagedExtent,
+    /// `byte_offset`/`byte_len` are a location the SSTable's OWN metadata
+    /// declares and the file does not satisfy: for `ChunkOffsetOutOfBounds` the
+    /// declared chunk offset (and the 4-byte length prefix it points at) lies
+    /// beyond the end of `Data.db`, so those bytes cannot be read at all. The
+    /// damaged extent in that case is the LOGICAL range, which is what
+    /// `partitions` enumerates.
+    DeclaredRecord,
+}
+
 /// Where a [`VerifyFinding`] anchored to a `Data.db` byte range is located, and
 /// which partitions that range intersects.
 ///
@@ -47,10 +69,20 @@ pub struct Location {
     /// The component the byte range belongs to — always `"Data.db"` today (the
     /// only component with a chunk/offset grid a finding can anchor to).
     pub component: String,
-    /// Physical (on-disk) start of the damaged range in `component`.
+    /// Physical (on-disk) start of the range this finding is ANCHORED to in
+    /// `component`. Whether those bytes are damaged, or merely DECLARED by the
+    /// SSTable's own metadata and absent from the file, is stated by
+    /// [`Location::anchor`] — read it before describing this range to a human
+    /// (roborev job 92 MEDIUM: these two fields previously claimed to be "the
+    /// damaged range" unconditionally, which for `ChunkOffsetOutOfBounds` named
+    /// 4 bytes at an offset PAST EOF beside a 900-partition damage list).
     pub byte_offset: u64,
-    /// Physical (on-disk) length of the damaged range in `component`.
+    /// Physical (on-disk) length of the anchored range in `component`. See
+    /// [`Location::byte_offset`] and [`Location::anchor`].
     pub byte_len: u64,
+    /// Whether `byte_offset`/`byte_len` describe damaged bytes or a declared
+    /// record location that the file does not satisfy.
+    pub anchor: PhysicalAnchor,
     /// The chunk index the damage falls in, when `component` has a chunk grid
     /// (compressed `CompressionInfo.db` chunks, or the fixed-size `CRC.db`
     /// grid). `None` for a finding with no chunk grid.
@@ -142,6 +174,10 @@ pub(crate) struct PendingLocation {
     /// The boundary source's declared total LOGICAL length, bounding the last
     /// boundary entry's extent.
     pub(crate) logical_len: u64,
+    /// Whether the physical range above is a damaged extent or a declared
+    /// record location — carried per-finding because it is a property of the
+    /// CHECK that produced it, not of the component.
+    pub(crate) anchor: PhysicalAnchor,
 }
 
 /// Human-readable one-line rendering of a [`Location`] for text output
@@ -176,10 +212,22 @@ pub fn format_location(loc: &Location) -> String {
         }
         PartitionResolution::Unresolved(cause) => format!("partitions unresolved ({cause})"),
     };
-    format!(
-        "{}: {}offset 0x{:x} len {} — {}",
-        loc.component, chunk, loc.byte_offset, loc.byte_len, partitions
-    )
+    // The physical range is rendered according to what it IS (roborev job 92
+    // MEDIUM). A `DeclaredRecord` anchor names an offset the file does not
+    // reach, so it is labelled `declared` and explicitly disclosed as absent —
+    // rendering it identically to a damaged extent told the operator that 4
+    // bytes were damaged when the real damage was the whole logical tail the
+    // partition list enumerates.
+    let physical = match loc.anchor {
+        PhysicalAnchor::DamagedExtent => {
+            format!("offset 0x{:x} len {}", loc.byte_offset, loc.byte_len)
+        }
+        PhysicalAnchor::DeclaredRecord => format!(
+            "declared offset 0x{:x} len {} (declared by metadata; not present in the file)",
+            loc.byte_offset, loc.byte_len
+        ),
+    };
+    format!("{}: {}{} — {}", loc.component, chunk, physical, partitions)
 }
 
 /// Lower-case hex encode, one `write!` per byte rather than one `String`
@@ -354,6 +402,7 @@ pub fn resolve_location(
     component: &str,
     byte_offset: u64,
     byte_len: u64,
+    anchor: PhysicalAnchor,
     chunk_index: Option<usize>,
     boundary_source_healthy: bool,
     damaged_logical: (u64, u64),
@@ -374,6 +423,7 @@ pub fn resolve_location(
         component: component.to_string(),
         byte_offset,
         byte_len,
+        anchor,
         chunk_index,
         partitions,
     }
@@ -492,6 +542,7 @@ pub(crate) async fn finalize_locations(
             &p.component,
             p.byte_offset,
             p.byte_len,
+            p.anchor,
             p.chunk_index,
             boundary_healthy,
             p.damaged_logical,
@@ -631,6 +682,7 @@ mod tests {
             "Data.db",
             64,
             16,
+            PhysicalAnchor::DamagedExtent,
             Some(0),
             false, // boundary source damaged
             (0, 16384),
@@ -646,7 +698,17 @@ mod tests {
     #[test]
     fn resolve_location_resolves_when_the_boundary_source_is_healthy() {
         let e = entries(&[(0, b"k0")]);
-        let loc = resolve_location("Data.db", 64, 16, Some(0), true, (0, 100), Some(&e), 16384);
+        let loc = resolve_location(
+            "Data.db",
+            64,
+            16,
+            PhysicalAnchor::DamagedExtent,
+            Some(0),
+            true,
+            (0, 100),
+            Some(&e),
+            16384,
+        );
         assert_eq!(loc.partitions, resolved(vec![KeyRef::from_raw(b"k0")]));
         assert_eq!(loc.component, "Data.db");
         assert_eq!(loc.byte_offset, 64);

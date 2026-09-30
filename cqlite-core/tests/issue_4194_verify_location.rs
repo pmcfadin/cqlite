@@ -33,7 +33,8 @@ use std::sync::Arc;
 
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
-    verify_sstable, PartitionResolution, VerifyErrorClass, VerifyMode, MAX_RESOLVED_KEYS,
+    format_location, verify_sstable, PartitionResolution, PhysicalAnchor, VerifyErrorClass,
+    VerifyMode, MAX_RESOLVED_KEYS,
 };
 use cqlite_core::Config;
 
@@ -393,6 +394,20 @@ async fn l1_1_compressed_chunk_crc_flip_names_intersecting_partitions() {
     assert_eq!(loc.component, "Data.db");
     assert_eq!(loc.chunk_index, Some(0));
     assert_eq!(resolved_keys(&loc.partitions), expected);
+    // POSITIVE CONTROL for roborev job 92 MEDIUM: a chunk CRC flip damages
+    // bytes that ARE present, so this class keeps the damaged-extent reading.
+    // Without this arm the DeclaredRecord assertions elsewhere would be
+    // satisfied by classifying everything as declared.
+    assert_eq!(
+        loc.anchor,
+        PhysicalAnchor::DamagedExtent,
+        "a CRC flip's bytes are present on disk and genuinely damaged"
+    );
+    let rendered = format_location(loc);
+    assert!(
+        !rendered.contains("declared offset"),
+        "a real damaged extent must NOT be rendered as a declared record: {rendered}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +529,20 @@ async fn l1_3_truncated_data_db_names_every_partition_past_new_eof() {
     assert_eq!(loc.component, "Data.db");
     assert_eq!(loc.chunk_index, Some(first_oob_chunk));
     assert_eq!(resolved_keys(&loc.partitions), expected);
+    // roborev job 92 MEDIUM: a truncation's physical range is the DECLARED
+    // chunk offset, which lies past EOF — so it must be classified and
+    // rendered as a declared record, never as a damaged byte extent. An
+    // operator who reads "len 4 damaged" here goes to `dd` and gets nothing.
+    assert_eq!(
+        loc.anchor,
+        PhysicalAnchor::DeclaredRecord,
+        "a past-EOF declared offset is not a damaged extent"
+    );
+    let rendered = format_location(loc);
+    assert!(
+        rendered.contains("declared offset") && rendered.contains("not present in the file"),
+        "the rendered location must disclose that these bytes are absent: {rendered}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -907,6 +936,11 @@ async fn l5_1_resolved_set_is_capped_and_names_the_omitted_count_end_to_end() {
         .location
         .as_ref()
         .expect("ChunkOffsetOutOfBounds finding must carry a location");
+    assert_eq!(
+        loc.anchor,
+        PhysicalAnchor::DeclaredRecord,
+        "a truncation's physical anchor is a declared record, not a damaged extent"
+    );
     let (keys, truncated) = capped_resolution(&loc.partitions);
     // AFFIRMATIVE evidence, not a bare pass: this case is only meaningful if it
     // really drove >100 intersecting partitions through the public surface, so

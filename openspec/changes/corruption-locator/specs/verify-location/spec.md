@@ -112,6 +112,39 @@ bytes for a plausible header.
   `cli-tests` list per #3522 — no manual edit needed since `cli-tests` enumerates the
   `cqlite-cli/tests/*.rs` glob).
 
+### Requirement: L6 — A physical range is never presented as damage it is not (roborev job 92 MEDIUM)
+
+`Location.byte_offset`/`byte_len` SHALL NOT be presented as a damaged byte extent when the range is
+merely one the SSTable's own metadata DECLARES and the file does not satisfy. Every `Location` SHALL
+carry a `PhysicalAnchor` stating which of the two it is, and BOTH the text renderer and the JSON
+output SHALL disclose it. For `ChunkOffsetOutOfBounds` the declared chunk offset lies past EOF, so
+its anchor is `DeclaredRecord` and the damaged extent is the LOGICAL range `partitions` enumerates;
+for a chunk CRC/decompression failure the bytes are present and damaged, so its anchor is
+`DamagedExtent`.
+
+#### Scenario: L6.1 a truncation's location is labelled declared, not damaged
+- **Given** `test_comp_corrupt/data_db_truncation`
+- **When** `verify_sstable(dir, VerifyMode::Full, ..)` runs
+- **Then** the `ChunkOffsetOutOfBounds` finding's `location.anchor` is `DeclaredRecord`, and
+  `format_location` renders `declared offset 0x…` together with an explicit statement that the range
+  is `not present in the file` — so an operator is never told that 4 bytes are damaged at an offset
+  where `dd`/`xxd` returns nothing
+  (`cqlite-core/tests/issue_4194_verify_location.rs`'s `l1_3_…`, and `l5_1_…` for the capped case).
+
+#### Scenario: L6.2 a real damaged extent keeps the damaged reading (positive control)
+- **Given** `test_comp_corrupt/data_db_bit_flip` (a compressed chunk CRC flip)
+- **When** the same verify runs
+- **Then** that finding's `location.anchor` is `DamagedExtent` and the rendered line does NOT read
+  `declared offset` — without this control, classifying EVERY location as declared would satisfy
+  L6.1 (`cqlite-core/tests/issue_4194_verify_location.rs`'s `l1_1_…`).
+
+#### Scenario: L6.3 the JSON channel discloses the anchor too
+- **Given** the built binary on a truncated fixture
+- **When** `cqlite verify <dir> --mode full --out json` runs
+- **Then** each `location` object carries `"anchor": "damaged_extent" | "declared_record"` —
+  disclosing in the machine channel exactly what the text channel discloses, since a JSON consumer
+  reads the same two physical fields (`cqlite-cli/src/commands/verify.rs`'s location writer).
+
 ### Requirement: L5 — Resolved partition sets are bounded (roborev round-2 MEDIUM finding)
 
 `location.partitions`'s `Resolved` set SHALL NOT grow unbounded: a truncation's damaged range can
