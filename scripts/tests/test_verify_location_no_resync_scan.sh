@@ -56,16 +56,27 @@ fi
 # code — the exact "resync by scanning for a plausible header" shape
 # `sstable-salvage`'s R4.3 guard exists to catch, reused here verbatim.
 PATTERNS=("memchr" ".windows(" "find(|" "position(|")
+
 # The waiver KEY for each pattern, so a marker can waive one primitive without
 # blanket-exempting the line (roborev job 108). Keys are stable names, not the
 # raw pattern text, so a marker never has to embed punctuation the guard
 # itself greps for.
-declare -A PATTERN_KEYS=(
-  ["memchr"]="memchr"
-  [".windows("]="windows"
-  ["find(|"]="find"
-  ["position(|"]="position"
-)
+#
+# A `case` FUNCTION, not a `declare -A` associative array: associative arrays
+# are bash 4+, macOS ships bash 3.2, and macOS is a first-class development
+# host for --lite/--only. The gate's own portability guard (portability-8c)
+# catches this, and caught exactly this regression here.
+pattern_key() {
+  case "$1" in
+    "memchr") printf 'memchr' ;;
+    ".windows(") printf 'windows' ;;
+    "find(|") printf 'find' ;;
+    "position(|") printf 'position' ;;
+    # An unmapped pattern must NOT become waivable-by-empty-marker: emit a
+    # sentinel no marker can match rather than an empty string.
+    *) printf 'UNMAPPED-PATTERN' ;;
+  esac
+}
 
 hits=0
 allowed=0
@@ -109,7 +120,7 @@ while IFS= read -r line; do
   # affirmative count a lie).
   for pat in "${PATTERNS[@]}"; do
     if [[ "$line" == *"$pat"* ]]; then
-      key="${PATTERN_KEYS[$pat]}"
+      key="$(pattern_key "$pat")"
       if [[ "$line" == *"no-resync-scan-allow:$key"* ]]; then
         allowed=$((allowed + 1))
         continue
