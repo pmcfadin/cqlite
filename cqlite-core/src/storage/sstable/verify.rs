@@ -988,10 +988,22 @@ fn check_compression_info(
                     component: "Data.db".to_string(),
                     byte_offset: offset,
                     byte_len: 4,
-                    // The declared offset outruns the file, so these 4 bytes
-                    // (the chunk-length prefix) are NOT present on disk: the
-                    // damage is the logical tail `partitions` enumerates
-                    // (roborev job 92 MEDIUM).
+                    // The declared record does not FIT in the file, so this
+                    // physical range is a declared location rather than a
+                    // damaged extent; the damage is the logical tail
+                    // `partitions` enumerates (roborev job 92 MEDIUM).
+                    //
+                    // The 4 bytes are the chunk record's TRAILING inline
+                    // CRC32 -- its minimum size -- not a length prefix at the
+                    // offset (roborev job 108: the comment here said "prefix",
+                    // contradicting both the bounds check three lines above
+                    // and `compression_info.rs`'s documented record layout
+                    // `[compressed_bytes][4-byte CRC32]`, which cites
+                    // CompressedSequentialWriter.java:203's
+                    // `chunkOffset += compressedLength + 4`). Cassandra source
+                    // was NOT re-read here (no pinned clone on this host), so
+                    // this states the two in-repo records rather than claiming
+                    // fresh primary-source verification.
                     anchor: PhysicalAnchor::DeclaredRecord,
                     chunk_index: Some(i),
                     damaged_logical: (logical_start, info.data_length.max(logical_start)),

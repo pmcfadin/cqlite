@@ -56,6 +56,16 @@ fi
 # code — the exact "resync by scanning for a plausible header" shape
 # `sstable-salvage`'s R4.3 guard exists to catch, reused here verbatim.
 PATTERNS=("memchr" ".windows(" "find(|" "position(|")
+# The waiver KEY for each pattern, so a marker can waive one primitive without
+# blanket-exempting the line (roborev job 108). Keys are stable names, not the
+# raw pattern text, so a marker never has to embed punctuation the guard
+# itself greps for.
+declare -A PATTERN_KEYS=(
+  ["memchr"]="memchr"
+  [".windows("]="windows"
+  ["find(|"]="find"
+  ["position(|"]="position"
+)
 
 hits=0
 allowed=0
@@ -86,12 +96,24 @@ while IFS= read -r line; do
   # The marker is deliberately narrow: same line, named, and it does not
   # suppress the census -- an allowed line is still COUNTED and reported, so
   # the opt-out is visible rather than silent.
-  if [[ "$line" == *"no-resync-scan-allow"* ]]; then
-    allowed=$((allowed + 1))
-    continue
-  fi
+  # PER-PATTERN, NOT PER-LINE (roborev job 108). The first cut of this marker
+  # `continue`d before the loop, which exempted the WHOLE line from EVERY
+  # pattern -- a line carrying a legitimate slice-pairs call AND an
+  # illegitimate `memchr` would have passed silently. That is a fail-OPEN in
+  # the guard, i.e. the opposite of what a guard is for. The marker now names
+  # the single pattern it waives: `no-resync-scan-allow:<key>`.
+  #
+  # And `allowed` counts ACTUAL exemptions only -- incremented inside the match
+  # arm, never merely because a line mentions the marker text (a comment
+  # discussing it used to inflate the census, which would make the
+  # affirmative count a lie).
   for pat in "${PATTERNS[@]}"; do
     if [[ "$line" == *"$pat"* ]]; then
+      key="${PATTERN_KEYS[$pat]}"
+      if [[ "$line" == *"no-resync-scan-allow:$key"* ]]; then
+        allowed=$((allowed + 1))
+        continue
+      fi
       echo "FAIL - byte-pattern search primitive '$pat' outside tests: $TARGET:$line_no: $line"
       hits=$((hits + 1))
     fi

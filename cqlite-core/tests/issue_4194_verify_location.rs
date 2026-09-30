@@ -540,7 +540,7 @@ async fn l1_3_truncated_data_db_names_every_partition_past_new_eof() {
     );
     let rendered = format_location(loc);
     assert!(
-        rendered.contains("declared offset") && rendered.contains("not present in the file"),
+        rendered.contains("declared offset") && rendered.contains("does not fit"),
         "the rendered location must disclose that these bytes are absent: {rendered}"
     );
 }

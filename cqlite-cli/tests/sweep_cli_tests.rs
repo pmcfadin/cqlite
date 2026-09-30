@@ -670,7 +670,21 @@ fn s4_2_text_rendering_matches_the_json_rows() {
     for row in value["rows"].as_array().unwrap() {
         let path = row["path"].as_str().unwrap();
         let severity = row["severity"].as_str().unwrap();
-        let matching: Vec<&&str> = row_lines.iter().filter(|l| l.contains(path)).collect();
+        // EXACT FIELD, not a substring (roborev job 108). `path` is a
+        // `*-Data.db` file path for generation rows but a DIRECTORY path for
+        // the `unreadable` rows, and those are not disjoint: a table dir
+        // holding both readable generations and unreadable entries yields a
+        // row whose path (`…/tbl-abc`) is a strict PREFIX of its siblings'
+        // (`…/tbl-abc/nb-1-big-Data.db`). A `contains` filter then matched 3
+        // lines for the directory row and failed this test for a reason
+        // unrelated to any defect. Matching the path as a whole
+        // whitespace-delimited field makes prefixes non-matching, and stays
+        // independent of `severity` so the severity assert below remains a
+        // real assertion rather than a restatement of the filter.
+        let matching: Vec<&&str> = row_lines
+            .iter()
+            .filter(|l| l.split_whitespace().any(|f| f == path))
+            .collect();
         assert_eq!(
             matching.len(),
             1,

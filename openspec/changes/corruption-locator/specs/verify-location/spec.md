@@ -127,7 +127,7 @@ for a chunk CRC/decompression failure the bytes are present and damaged, so its 
 - **When** `verify_sstable(dir, VerifyMode::Full, ..)` runs
 - **Then** the `ChunkOffsetOutOfBounds` finding's `location.anchor` is `DeclaredRecord`, and
   `format_location` renders `declared offset 0x…` together with an explicit statement that the range
-  is `not present in the file` — so an operator is never told that 4 bytes are damaged at an offset
+  is `the record does not fit within the file` — so an operator is never told that 4 bytes are damaged at an offset
   where `dd`/`xxd` returns nothing
   (`cqlite-core/tests/issue_4194_verify_location.rs`'s `l1_3_…`, and `l5_1_…` for the capped case).
 

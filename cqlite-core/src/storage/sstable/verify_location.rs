@@ -222,8 +222,15 @@ pub fn format_location(loc: &Location) -> String {
         PhysicalAnchor::DamagedExtent => {
             format!("offset 0x{:x} len {}", loc.byte_offset, loc.byte_len)
         }
+        // "does not fit within the file", NOT "not present" (roborev job
+        // 108). The out-of-bounds test is `offset + 4 > data_len`, which also
+        // fires when the offset itself is INSIDE the file and only the record's
+        // tail runs past the end (data_len 1000, offset 998: two of those bytes
+        // are readable). Claiming the range is absent would over-state the
+        // evidence in exactly the way this anchor exists to prevent.
         PhysicalAnchor::DeclaredRecord => format!(
-            "declared offset 0x{:x} len {} (declared by metadata; not present in the file)",
+            "declared offset 0x{:x} len {} (declared by metadata; the record does not fit \
+             within the file)",
             loc.byte_offset, loc.byte_len
         ),
     };
@@ -325,7 +332,7 @@ pub fn resolve_partitions(
     // the code says what it means and the marker records WHY it is allowed.
     debug_assert!(
         sorted_boundary_entries
-            .windows(2) // no-resync-scan-allow: sortedness over boundary tuples, not a byte scan
+            .windows(2) // no-resync-scan-allow:windows — sortedness over boundary tuples, not a byte scan
             .all(|w| w[0].0 <= w[1].0),
         "resolve_partitions requires its input sorted ascending by data_offset"
     );
@@ -700,7 +707,7 @@ mod tests {
         );
         // …and the declared-record disclosure rides along on the same line.
         assert!(
-            out.contains("declared offset 0x28000") && out.contains("not present in the file"),
+            out.contains("declared offset 0x28000") && out.contains("does not fit"),
             "capped rendering must not lose the anchor disclosure: {out}"
         );
     }
