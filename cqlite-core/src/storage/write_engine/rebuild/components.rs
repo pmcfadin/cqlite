@@ -22,10 +22,15 @@ use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::directory::types::SSTableComponent;
 use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
-use crate::storage::sstable::writer::data_writer::PartitionEmitCounts;
-use crate::storage::sstable::writer::stats_fold::fold_mutation_stats;
+use crate::storage::sstable::writer::data_writer::{
+    is_static_row_mutation, resolve_shadow_floor, PartitionEmitCounts,
+};
+use crate::storage::sstable::writer::stats_fold::{
+    fold_single_mutation_row_group, fold_static_carrier_stats,
+};
 use crate::storage::sstable::writer::{
-    DataWriter, FilterWriter, IndexWriter, StatisticsMetadata, StatisticsWriter, SummaryWriter,
+    DataWriter, FilterWriter, IndexWriter, SSTableWriter, StatisticsMetadata, StatisticsWriter,
+    SummaryWriter,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -197,9 +202,23 @@ pub async fn rebuild_components(
         let scan_cancel = ScanCancel::new();
 
         // PASS 1 (only when the scratch-DataWriter pass below needs a
-        // baseline): fold every mutation into `stats_acc` and refuse the
-        // WHOLE run — before writing a single byte — on any decode failure.
+        // baseline): reconstruct the whole-table `EncodingStats` MINIMA
+        // (min_timestamp/min_ttl/min_local_deletion_time) via the same
+        // fixed #729 two-pass baseline primitive `WriteEngine::
+        // flush_internal_async` uses (`SSTableWriter::
+        // compute_mutations_baseline_stats`) — NOT the old blind
+        // `fold_mutation_stats` (issue #4246: that function is
+        // `#[cfg(test)]`-only now precisely because folding every raw
+        // mutation unconditionally reintroduces the phantom-fold bug).
+        // The full per-mutation content fold (maxima, tombstone histogram,
+        // flags) happens below in PASS 2, gated on the SAME shadow decision
+        // the scratch `DataWriter` emission makes for each partition.
+        // Refuse the WHOLE run — before writing a single byte — on any
+        // decode failure.
         if want_index || want_summary || want_statistics {
+            let mut baseline_min_ts = i64::MAX;
+            let mut baseline_min_ldt = i32::MAX;
+            let mut baseline_min_ttl = i32::MAX;
             for (i, (offset, key)) in entries.iter().enumerate() {
                 let end_bound = entries.get(i + 1).map(|(o, _)| *o);
                 match decode::decode_one_partition(
@@ -213,9 +232,11 @@ pub async fn rebuild_components(
                 .await
                 {
                     Ok(Some((_, mutations))) => {
-                        for m in &mutations {
-                            fold_mutation_stats(&mut stats_acc, m);
-                        }
+                        let (min_ts, min_ldt, min_ttl) =
+                            SSTableWriter::compute_mutations_baseline_stats(&mutations, schema);
+                        baseline_min_ts = baseline_min_ts.min(min_ts);
+                        baseline_min_ldt = baseline_min_ldt.min(min_ldt);
+                        baseline_min_ttl = baseline_min_ttl.min(min_ttl);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -223,6 +244,9 @@ pub async fn rebuild_components(
                     }
                 }
             }
+            stats_acc.min_timestamp = baseline_min_ts;
+            stats_acc.min_local_deletion_time = baseline_min_ldt;
+            stats_acc.min_ttl = baseline_min_ttl;
         }
         if let (Some((_, first_key)), Some((_, last_key))) = (entries.first(), entries.last()) {
             stats_acc.first_key = Some(first_key.clone());
@@ -330,6 +354,59 @@ pub async fn rebuild_components(
                 .flat_map(|m| m.range_tombstones.iter())
                 .cloned()
                 .collect();
+
+            if want_statistics {
+                // The full per-mutation content fold (issue #4246): marker
+                // fields (partition/range tombstone) are never row-shadowed
+                // — they ARE the deletion — so fold them unconditionally
+                // from the authoritative extracted values above, exactly
+                // mirroring `SSTableWriter::write_partition`'s own fold.
+                if let Some(pt) = partition_tombstone.as_ref() {
+                    stats_acc.update_timestamp(pt.deletion_time);
+                    stats_acc.update_local_deletion_time(pt.local_deletion_time);
+                    stats_acc.mark_partition_level_deletion();
+                }
+                for rt in &range_tombstones {
+                    stats_acc.update_timestamp(rt.deletion_time);
+                    stats_acc.update_local_deletion_time(rt.local_deletion_time);
+                }
+
+                // Row content: `mutations` is decoded from an ALREADY-WRITTEN
+                // Data.db via the same `KWayMerger` reconciliation
+                // `compact_sstables`/`salvage_sstable` use (see `decode.rs`
+                // doc comment), so each clustering key is already a single
+                // fully-reconciled `Mutation` — the exact precondition
+                // `fold_single_mutation_row_group` documents for
+                // `KWayMerger::merge`'s own `PartitionEnd` handling and
+                // `WriteEngine::maintenance_step`'s buffered `PartitionEnd`
+                // drain (both post-merge streaming contexts, structurally
+                // identical to rebuild's decode-from-disk context). A
+                // marker-only mutation (no operations, no row deletion)
+                // folds to nothing here — `merge_row_group` produces no row
+                // for it — so this is safe to call unconditionally without
+                // double-counting the marker fold above.
+                let partition_floor = partition_tombstone.as_ref().map(|pt| pt.deletion_time);
+                let schema_has_static = schema.columns.iter().any(|c| c.is_static);
+                for mutation in &mutations {
+                    if is_static_row_mutation(mutation, schema) {
+                        fold_static_carrier_stats(&mut stats_acc, mutation);
+                        continue;
+                    }
+                    let shadow_floor = resolve_shadow_floor(
+                        partition_floor,
+                        &range_tombstones,
+                        mutation.clustering_key.as_ref(),
+                        schema,
+                    );
+                    fold_single_mutation_row_group(
+                        &mut stats_acc,
+                        mutation,
+                        schema,
+                        schema_has_static,
+                        shadow_floor,
+                    );
+                }
+            }
 
             let need_scratch = index_writer.is_some() || want_statistics;
             let (blocks, emit) = if need_scratch {
