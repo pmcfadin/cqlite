@@ -10690,7 +10690,7 @@ obj_sweep_claim_age_bound_secs() {
 }
 
 # THE VERDICT ROUTER FOR (c) claim-fresh-control -- PURE, so it can be table-tested (roborev
-# job 95 M2). Takes the nine measured signals and prints ONE verdict key; no messages, no I/O,
+# job 95 M2). Takes the eleven measured signals and prints ONE verdict key; no messages, no I/O,
 # no globals, so `test_object_store_sweep_verdict_routing_property` can drive every branch
 # combination directly instead of hoping a live run happens to reach it. ORDER IS THE
 # CONTRACT, and each rule earns its position:
@@ -10711,24 +10711,21 @@ obj_sweep_claim_age_bound_secs() {
 #     `>"$wticks"` projection redirect. Two table rows now cover that combination;
 #   * `post_launch_ticks=0` fails rather than excuses: with no tick inside the window there was
 #     no OPPORTUNITY to write, so absence of writes says nothing about the fixture (job 91 F2).
-# `writes_valid` defaults to 1 ONLY so the nine-argument form stays callable; every live call
-# site passes it explicitly, and the wiring pin asserts the case passes all ten (job 96 M1).
+# No signal defaults: the arity check below requires all eleven (job 100 L4 / 101 L2).
 obj_sweep_claim_fresh_verdict() {
-  local ok="$1" bound="$2" mg_valid="$3" mg_exceeds="$4" wg_valid="$5" wg_exceeds="$6"
-  local writes="$7" ticks_in="$8" claim_present="$9" writes_valid="${10-}"
-  local ticks_valid="${11-}"
-  # ARITY IS CHECKED, NOT DEFAULTED (roborev job 100 L4). These two were `${10:-1}` /
-  # `${11:-1}`, i.e. VALIDITY flags defaulting to "valid" -- fail-OPEN in precisely the
-  # direction jobs 49 F1 / 90 F5 / 96 M1 / 99 L2 each had to close, and the one place this
-  # change still had it. A defaulted-to-valid signal means a call site that drops an argument
-  # silently gets the permissive answer. There is no nine- or ten-argument caller to keep
-  # working (the case and the table test both pass all eleven, and the wiring pin asserts the
-  # case does), so the compatibility the defaults bought was worth nothing and cost the
-  # fail-closed direction.
+  # ARITY FIRST, BEFORE ANY POSITIONAL READ (roborev job 101 L2). No signal defaults to a
+  # permissive value (job 100 L4), and this check has to precede the `local` assignments: under
+  # this file's `set -u`, reading `$9` in a call with eight arguments aborts the subshell on
+  # `unbound variable`, so `$#` was never reached and a short call surfaced as the case's
+  # `unrecognised verdict ''` arm instead of `fail:bad-arity` -- fail-closed, but a
+  # misattribution, which is the thing this router exists to eliminate.
   if [[ "$#" -ne 11 ]]; then
     printf 'fail:bad-arity\n'
     return
   fi
+  local ok="$1" bound="$2" mg_valid="$3" mg_exceeds="$4" wg_valid="$5" wg_exceeds="$6"
+  local writes="$7" ticks_in="$8" claim_present="$9" writes_valid="${10}"
+  local ticks_valid="${11}"
   if [[ ! "$bound" =~ ^[1-9][0-9]*$ ]]; then
     printf 'fail:bad-bound\n'
   elif [[ "$ok" -eq 1 && ( "$mg_valid" -eq 0 || "$ticks_valid" -eq 0 ) ]]; then
@@ -11189,8 +11186,8 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # `0` fails OPEN: on the mismatched-outcome side `writes=0` with the claim still present
       # routes to `skip:write-starved-takeover`, i.e. an unmeasurable record excusing a genuine
       # regression -- the precise rule job 49 F1 / job 90 F5 established, and the third place it
-      # had to be closed. The sibling `post_launch_ticks` fallback below is safe only by
-      # accident (its `0` routes to `fail:window-too-short`), which is not a property to rely on.
+      # had to be closed. `post_launch_ticks` below has its own `ticks_valid` for the same
+      # reason (job 99 L2).
       writes_valid=1
       post_launch_writes="$(LC_ALL=C awk -v l="$launched" '$1>l{n++} END{print n+0}' "$wticks" 2>/dev/null)" || writes_valid=0
       [[ "$post_launch_writes" =~ ^[0-9]+$ ]] || { writes_valid=0; post_launch_writes=0; }
@@ -11282,7 +11279,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # VERDICT ROUTED BY A PURE FUNCTION, TABLE-TESTED (roborev job 95 M2). This chain is the
       # densest and most-revised logic in the change -- nearly every round edited it -- and
       # NOTHING asserted it: the awk pin covers what the gap program computes and the threshold
-      # pin covers the bound, but the mapping from the nine signals to pass/skip/fail was only
+      # pin covers the bound, but the mapping from the eleven signals to pass/skip/fail was only
       # ever exercised along the single all-healthy path a green run takes. Both inversions this
       # change fixed by hand (job 90 F3's claim-gone gate, job 91 F2's opportunity check) were
       # invisible to every assert, so re-introducing either stayed green -- the "a property
@@ -11709,7 +11706,7 @@ t test_object_store_sweep_gap_threshold_property
 #                            never `fail:window-too-short`, which blamed the supervisor for a
 #                            measurement failure (the third row pins that precedence with
 #                            ticks_in=0 as well).
-# Healthy baseline: 1 4 1 0 1 0 3 5 1 1
+# Healthy baseline (all eleven): 1 4 1 0 1 0 3 5 1 1 1
 # The last TWO rows are job 98 L2: a measurable tick record showing starvation outranks an
 # unmeasurable WRITE record, so both route to `skip:tick-starved-takeover` rather than to
 # `fail:write-unmeasurable` -- the ordering the router's header claims and did not have.
@@ -11785,9 +11782,8 @@ ROWS
   # mistake is both silent and severe: swapping `$max_gap_valid` with `$gap_exceeds` inverts
   # `fail:tick-unmeasurable` with `skip:tick-starved-takeover` on the mismatched side, turning a
   # genuine regression into a skip, while the table test (which calls the router directly) and
-  # every other assert in the file stay green. It also still covers the job-96-M1 reason for
-  # pinning the tail: the trailing validity signals DEFAULT to 1 in the router so the shorter
-  # forms stay callable, so a call site that dropped one would fail OPEN rather than error.
+  # every other assert in the file stay green. The trailing validity signals are also the ones
+  # a call site is most likely to drop, which the router now answers with `fail:bad-arity`.
   # THE EXPECTED LIST IS ASSEMBLED FROM THE NAMES, never written out as a literal: a literal
   # would appear in this file and therefore match ITSELF, making the pin trivially true.
   local -a verdict_arg_names=(outcome_ok age_bound_secs max_gap_valid gap_exceeds
@@ -11819,6 +11815,25 @@ ROWS
     pass "obj-sweep(verdict-routing-wired): the case routes through \`obj_sweep_claim_fresh_verdict\` (1 call site, passing all ${#verdict_arg_names[@]} signals in the specified ORDER) and renders all ${key_count} verdict keys the function can return -- the router is wired, an argument-order swap would redden here, and the key census is affirmative so an empty scrape cannot pass as clean"
   else
     fail "obj-sweep(verdict-routing-wired): call sites=$callers (want 1), full-ordered-argument-list match=$full_args (want 1), verdict keys scraped=$key_count (want >=12), unrendered keys:${missing:- none}"
+  fi
+
+  # AND THE TABLE MUST COVER EVERY KEY, not just the case's `case` arms (roborev job 101 L3):
+  # a newly added router branch needs only a rendered arm to satisfy the check above, and would
+  # sit entirely untested while both pins stayed green. Compared against the table's own `want`
+  # column, so the two can only drift together.
+  local wanted_keys uncovered
+  wanted_keys="$(sed -n "/done <<'ROWS'/,/^ROWS$/p" "$SELF_FILE" | grep -oE '^[a-z:-]+\|' | tr -d '|' | sort -u)"
+  uncovered=""
+  for k in $keys; do
+    case " $(printf '%s ' $wanted_keys) " in
+      *" $k "*) ;;
+      *) [[ "$k" == "fail:bad-arity" ]] || uncovered="$uncovered $k" ;;
+    esac
+  done
+  if [[ -z "$uncovered" ]]; then
+    pass "obj-sweep(verdict-routing-table-covers): every verdict key the router can return appears in the routing table's expectations (\`fail:bad-arity\` excepted -- it is pinned by the arity assert below, which the table cannot express)"
+  else
+    fail "obj-sweep(verdict-routing-table-covers): verdict keys with no table row:${uncovered} -- a router branch was added without a case pinning it"
   fi
 
   # ARITY IS FAIL-CLOSED, DEMONSTRATED (roborev job 100 L4): a short call must not inherit a
