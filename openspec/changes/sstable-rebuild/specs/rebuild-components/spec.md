@@ -50,10 +50,17 @@ sstables)` → `EncodingStats.merge`), and a minimum-carrying row can be shadow-
 reconciliation before rebuild decodes it — so a re-derivation can only come out too HIGH, silently
 narrowing every delta. A re-derivation from the decoded content is the DOCUMENTED FALLBACK, used
 only when the original `Statistics.db`/header is genuinely unreadable (rebuild's own headline case
-is a MISSING `Statistics.db`), and it never certifies byte parity: when it is in force,
-`rebuild_components` SHALL refuse any `index`/`summary` request whose re-encoded partition span
-does not equal that partition's actual on-disk span, rather than writing offsets it cannot
-reproduce.
+is a MISSING `Statistics.db`), and it never certifies byte parity.
+
+Independently of which baseline is in force, `rebuild_components` SHALL refuse an `index`/`summary`
+request whenever a partition that CARRIES a promoted-index payload (≥ 2 blocks, the gate
+Cassandra's `RowIndexEntry.create()` applies as `columnIndexCount > 1`) does not re-encode to its
+ACTUAL on-disk byte span, rather than writing block offsets it cannot reproduce. The check is
+scoped to payload-bearing partitions BY MEASUREMENT, not by preference: every other value in an
+Index.db/Summary.db entry (key, data offset, the zero promoted-size VInt, and hence the entry size
+a Summary sample records) comes from the authoritative boundary walk rather than the re-encode, and
+an unconditional span comparison was measured to refuse 58 of 114 committed BIG generations whose
+rebuilt Index.db is byte-identical to Cassandra's own.
 
 #### Scenario: R2.1 BIG uncompressed and compressed Index.db byte parity
 - **Given** every committed `test_basic`/`test_collections`/`test_wide_rows` table (uncompressed
@@ -82,13 +89,17 @@ reproduce.
   cannot observe this, their derived and true baselines coincide).
 
 #### Scenario: R2.5 an unrecoverable baseline refuses, never ships desynced offsets
-- **Given** the same generation with BOTH `Index.db` and `Statistics.db` deleted (the baseline is
-  then genuinely unrecoverable: Data.db stores timestamps as unsigned deltas FROM it)
+- **Given** the same generation (its partitions carry promoted-index payloads) with BOTH
+  `Index.db` and `Statistics.db` deleted — the baseline is then genuinely unrecoverable, since
+  Data.db stores timestamps as unsigned deltas FROM it
 - **When** rebuild regenerates `index`
 - **Then** `report.refused.reason == "reencode-mismatch"` (NOT `data-corrupt` — the input is
   healthy, rebuild just cannot reproduce its encoding), the remedy names restoring the original
   `Statistics.db` first and `salvage` (#4196) as the fallback, `index` never appears in
   `regenerated`, and no `Index.db` is left under `--out`.
+- **And** the check costs no working capability: an `index` rebuild sweep over all 114 committed
+  BIG generations produces the SAME 109 byte-identical Index.db files / 0 mismatches with the
+  check armed as with it disabled.
 
 #### Scenario: R2.3 No header hunting
 - **Given** `scripts/tests/test_rebuild_no_resync_scan.sh` (`tooling-tests`, mirrors salvage's

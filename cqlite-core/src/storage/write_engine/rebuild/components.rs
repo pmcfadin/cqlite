@@ -537,24 +537,45 @@ pub(crate) async fn rebuild_components_capturing_stats(
                     partition_tombstone.as_ref(),
                     &range_tombstones,
                 )?;
-                // Fail-closed cross-check (issue #4197 spec R2): the scratch
-                // re-encode is only a valid source of BYTE OFFSETS if it
-                // reproduces this partition's ACTUAL on-disk extent. Any
+                // Fail-closed cross-check (issue #4197 spec R2): the
+                // promoted-index payload's block offsets and widths are
+                // PARTITION-RELATIVE BYTE POSITIONS taken from this scratch
+                // re-encode, so they are only valid if the re-encode
+                // reproduces the partition's ACTUAL on-disk extent. Any
                 // divergence — a baseline that could not be recovered, a
                 // Data.db feature this writer does not re-encode identically
-                // — shifts every promoted-index block offset/width derived
-                // from it, and the result would otherwise ship silently with
-                // exit 0 and `regenerated: ["index"]`.
+                // — shifts them, and the result would otherwise ship silently
+                // with exit 0 and `regenerated: ["index"]`.
                 //
-                // Scoped to the runs that actually DERIVE offsets from the
-                // re-encode (`index`, and `summary`, whose entry offsets come
-                // from the same Index.db entry sizes — both BIG-only). A
-                // `statistics`-only run reads no byte offset off the scratch
-                // (only the emitted row/cell COUNTS), so a span difference
-                // corrupts nothing there; that run's own exposure is the
-                // timestamp aggregates, and it is reported through
-                // `baseline_provenance` instead (spec R4.1).
-                if index_writer.is_some() {
+                // SCOPED, deliberately and narrowly, to the partitions whose
+                // Index.db entry actually CARRIES that payload:
+                // `blocks.len() >= 2`, the same gate
+                // `IndexWriter::add_partition_with_promoted` applies (itself
+                // mirroring Cassandra `RowIndexEntry.create()`'s
+                // `columnIndexCount > 1`). Everything else in an Index.db /
+                // Summary.db entry — the key, the data offset, the zero
+                // promoted-size VInt, and hence the entry size a Summary
+                // sample records — is baseline-INDEPENDENT, sourced from the
+                // authoritative boundary walk rather than from this
+                // re-encode, so a span difference cannot make any of it
+                // wrong.
+                //
+                // MEASURED, because the wider check was tried first and was
+                // WRONG: an unconditional span comparison refused 58 of 114
+                // committed BIG generations whose rebuilt Index.db is
+                // BYTE-IDENTICAL to Cassandra's own (verified by re-running
+                // the same sweep with the check off: 109 parity, 0
+                // mismatch). CQLite's re-encode is simply not
+                // byte-length-exact for every shape in the corpus, and for a
+                // narrow partition that costs Index.db nothing. Refusing
+                // those runs would have been a large capability regression
+                // dressed up as rigour.
+                //
+                // A `statistics`-only run derives no byte offset from the
+                // scratch at all (only the emitted row/cell COUNTS), so it is
+                // not checked here either; its exposure is the timestamp
+                // aggregates, reported through `baseline_provenance` (R4.1).
+                if index_writer.is_some() && blocks.len() >= 2 {
                     let on_disk_span = this_end.saturating_sub(*offset);
                     let reencoded_span = scratch.position();
                     if reencoded_span != on_disk_span {
