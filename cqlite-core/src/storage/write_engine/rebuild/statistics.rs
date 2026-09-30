@@ -179,6 +179,11 @@ pub(super) fn min_index_interval() -> (u32, FieldProvenance) {
 /// original header supplied the delta-encoding baseline, `Lost` when it was
 /// unreadable and the circular decode-derivation stood in (see
 /// `components`'s module doc).
+// Eight parameters, each an independent fact about ONE run (paths, schema,
+// format, provenance, the accumulator, the report). Bundling them into a
+// context struct would add a type whose only purpose is to be destructured
+// immediately at the single call site, so the lint is silenced rather than
+// satisfied.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_statistics_component(
     stats_path: &Path,

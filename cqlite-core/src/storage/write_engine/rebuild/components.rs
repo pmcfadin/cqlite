@@ -292,10 +292,13 @@ pub(crate) async fn rebuild_components_capturing_stats(
     // Provenance of the three `EncodingStats` baseline minima actually used
     // below (module doc, provenance order). `Recovered` = read from the
     // original `Statistics.db`'s SerializationHeader; `Lost` = that file was
-    // unreadable and the circular pass-1 derivation stood in for it. Stays
-    // `Recovered` for a run that needs no baseline at all (`filter` alone),
-    // where nothing is derived and nothing is seeded.
-    let mut baseline_provenance = FieldProvenance::Recovered;
+    // unreadable and the circular pass-1 derivation stood in for it.
+    // Initialised to `Lost` because at this point nothing HAS been
+    // recovered: a run that needs no baseline at all (`filter` alone) never
+    // reaches the assignment below, and for it this value is never reported
+    // either — but "not recovered" is the truthful state to sit in, not
+    // "recovered".
+    let mut baseline_provenance = FieldProvenance::Lost;
 
     if needs_partition_pass {
         let scan_cancel = ScanCancel::new();
