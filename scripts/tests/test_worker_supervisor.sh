@@ -10715,8 +10715,20 @@ obj_sweep_claim_age_bound_secs() {
 # site passes it explicitly, and the wiring pin asserts the case passes all ten (job 96 M1).
 obj_sweep_claim_fresh_verdict() {
   local ok="$1" bound="$2" mg_valid="$3" mg_exceeds="$4" wg_valid="$5" wg_exceeds="$6"
-  local writes="$7" ticks_in="$8" claim_present="$9" writes_valid="${10:-1}"
-  local ticks_valid="${11:-1}"
+  local writes="$7" ticks_in="$8" claim_present="$9" writes_valid="${10-}"
+  local ticks_valid="${11-}"
+  # ARITY IS CHECKED, NOT DEFAULTED (roborev job 100 L4). These two were `${10:-1}` /
+  # `${11:-1}`, i.e. VALIDITY flags defaulting to "valid" -- fail-OPEN in precisely the
+  # direction jobs 49 F1 / 90 F5 / 96 M1 / 99 L2 each had to close, and the one place this
+  # change still had it. A defaulted-to-valid signal means a call site that drops an argument
+  # silently gets the permissive answer. There is no nine- or ten-argument caller to keep
+  # working (the case and the table test both pass all eleven, and the wiring pin asserts the
+  # case does), so the compatibility the defaults bought was worth nothing and cost the
+  # fail-closed direction.
+  if [[ "$#" -ne 11 ]]; then
+    printf 'fail:bad-arity\n'
+    return
+  fi
   if [[ ! "$bound" =~ ^[1-9][0-9]*$ ]]; then
     printf 'fail:bad-bound\n'
   elif [[ "$ok" -eq 1 && ( "$mg_valid" -eq 0 || "$ticks_valid" -eq 0 ) ]]; then
@@ -10824,8 +10836,8 @@ test_object_store_sweep_claim_recovers_when_stale() {
   #     that survives an unknown delay. A background loop rewrites `$claim/started` to
   #     `date +%s` MINUS `refresh_backdate_secs` every 0.2s (atomically: a `mv` into place,
   #     never a partial read) for as long as the supervisor runs, so WHENEVER it takes its
-  #     first (or any) reading, the claim's age is at most ~0.2s PLUS that backdate -- ~1.2s
-  #     at the shipped `refresh_backdate_secs=1`, not ~0.2s (roborev job 90 F4; the backdate
+  #     first (or any) reading, the claim's age is at most ~0.2s PLUS that backdate -- ~2.2s
+  #     at the shipped `refresh_backdate_secs=2`, not ~0.2s (roborev job 90 F4; the backdate
   #     itself is job 68 F1's epoch-rollover fix, and its rationale is at the declaration).
   #     That unstated second is not cosmetic: it is exactly what the guard threshold below
   #     must subtract from `stale_secs`, and failing to subtract it left a 1s-wide
@@ -10939,7 +10951,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # at `now > started + stale` and `obj_sweep_claim_acquire` is fresh while `age <= stale` --
     # so a takeover happens once `gap + backdate > stale`, i.e. once the gap passes
     # `stale_secs - refresh_backdate_secs`, NOT `stale_secs`. Comparing the gap against
-    # `stale_secs` alone left a band one whole backdate wide (1s of a 5s budget, 20%) in which a
+    # `stale_secs` alone left a band one whole backdate wide (2s of a 5s budget, 40%) in which a
     # starved fixture aged the claim out, the supervisor CORRECTLY took it over, and this case
     # reported a "genuine behavioural regression": #4282's own symptom, moved one second inward.
     # DIRECTION IS DELIBERATE: `obj_sweep_gap_reaches_bound` uses `>=`, so the boundary gap
@@ -10948,7 +10960,8 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # not available to this case at all; erring toward `skip` costs a run's credit, erring the
     # other way is the false red this issue exists to remove. It does not raise the skip rate in
     # practice: a healthy refresher ticks every 0.2s, two orders of magnitude inside the bound.
-    # VALUE IS 3, NOT 1 (roborev job 98 M1), and the arithmetic is the reason. The residual this
+    # VALUE IS 2 (roborev job 98 M1 raised it off 1; job 99 M1 settled it at 2 -- see the
+    # tradeoff paragraph below), and the arithmetic is the reason. The residual this
     # spends headroom on: `obj_sweep_claim_acquire` captures `now`, THEN forks/execs `mkdir`,
     # and only then reads `started`. If >= `backdate` seconds of real time elapse across that
     # fork/exec, the refresher's next write lands far enough ahead that `started > now_sup`,
@@ -10976,8 +10989,8 @@ test_object_store_sweep_claim_recovers_when_stale() {
     # it is already MECHANICALLY ENFORCED rather than left to a comment: `age_bound_secs =
     # stale_secs - refresh_backdate_secs` and the router's first branch fails the case on a
     # non-positive bound (`fail:bad-bound`, job 93 L2). COST, STATED: the age bound tightens
-    # from 4s to 2s, so a starved fixture is classified `skip` sooner. That is the intended
-    # direction (skip over false red) and still 10x the refresher's 0.2s tick period, so a
+    # from 4s to 3s, so a starved fixture is classified `skip` sooner. That is the intended
+    # direction (skip over false red) and still 15x the refresher's 0.2s tick period, so a
     # healthy run is nowhere near it -- but it does raise the skip ceiling #4315 tracks.
     refresh_backdate_secs=2
     fixture_bg bash -c '
@@ -10992,7 +11005,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
         # BACKDATED BY `$backdate` SECONDS (roborev job 68 F1), passed in from the single
         # `refresh_backdate_secs` declaration above rather than written as a literal here
         # (roborev job 90 F1): the guard threshold below has to subtract exactly this quantity,
-        # and a re-typed `1` in either place would silently reopen the false-`fail` band.
+        # and a re-typed literal in either place would silently reopen the false-`fail` band.
         # The shipped `obj_sweep_claim_acquire`
         # captures ITS OWN `now` before reading `started`, and treats `started > now` as
         # STALE (a value "in the future" is untrustworthy, not fresh) -- takeover, not a
@@ -11167,7 +11180,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # refresher fall back to whole seconds -- and that reopens precisely the job-89-F1
       # vacuity (the supervisor sees only the one-shot plant while the window reports
       # satisfied). RESIDUAL, STATED: under that fallback the gap arithmetic is also near
-      # meaningless at 1s granularity against a 4s bound. It does not fire on the gate host
+      # meaningless at 1s granularity against the 3s age bound. It does not fire on the gate host
       # (Linux `date` has `%N`); tightening the whole sub-case to `skip` when the probe falls
       # back is tracked in the follow-up rather than guessed at here.
       # VALIDITY TRACKED SEPARATELY, BECAUSE A COUNT THAT FAILED IS NOT A COUNT OF ZERO
@@ -11286,6 +11299,10 @@ test_object_store_sweep_claim_recovers_when_stale() {
       # hand, which is how two of them came to name `stale_secs` (job 93 L5).
       bound_expl="${age_bound_secs}s age bound (= ${stale_secs}s stale - ${refresh_backdate_secs}s backdate)"
       case "$verdict" in
+        fail:bad-arity)
+          # Rendered because the wiring pin requires every key the router can return to have an
+          # arm -- and because a routing call that lost an argument must be loud, not permissive.
+          fail "obj-sweep(claim-fresh-control): the verdict router was called with the wrong number of signals -- the case and the router have drifted apart, so no verdict can be trusted" ;;
         fail:bad-bound)
           fail "obj-sweep(claim-fresh-control): the derived age bound came back '$age_bound_secs' (${stale_secs}s stale - ${refresh_backdate_secs}s backdate) -- every gap would reach it and this sub-case would degrade to a permanent skip" ;;
         skip:tick-unmeasurable)
@@ -11757,7 +11774,12 @@ ROWS
   # pins nothing). One call site, and every key the function can print must be rendered by the
   # case's `case` arms -- otherwise a verdict would fall to its unrecognised-key `fail`.
   local callers keys arms missing k
-  callers="$(grep -cE 'verdict="\$\(obj_sweep_claim_fresh_verdict ' "$SELF_FILE" || true)"
+  # ANCHORED AT LINE START AND AT THE EXACT VARIABLE NAME. The unanchored form counted 2,
+  # because this test's own arity probe assigns to `short_verdict` -- which ENDS with
+  # `verdict`, so the substring `verdict="$(obj_sweep_claim_fresh_verdict ` occurred inside it.
+  # The pin caught its own false positive on the first run; the lesson is that a structural
+  # grep must be anchored, or it counts its own scaffolding.
+  callers="$(grep -cE '^ +verdict="\$\(obj_sweep_claim_fresh_verdict ' "$SELF_FILE" || true)"
   # THE FULL ARGUMENT LIST, NOT JUST THE TAIL (roborev job 99 L3). The earlier version matched
   # only the last two arguments, leaving the first nine unpinned -- and an argument-ORDER
   # mistake is both silent and severe: swapping `$max_gap_valid` with `$gap_exceeds` inverts
@@ -11780,15 +11802,33 @@ ROWS
   full_args=0
   case "$joined" in *"$expect"*) full_args=1 ;; esac
   keys="$(grep -oE "printf '(pass|fail:[a-z-]+|skip:[a-z-]+)" "$SELF_FILE" | sed "s/printf '//" | sort -u)"
+  # AFFIRMATIVE COUNT FIRST, so an EMPTY subject set cannot pass as "nothing missing" (roborev
+  # job 100 L2). `keys` is scraped from the router's `printf` lines; if those change shape the
+  # scrape yields nothing, the loop below never executes, `missing` stays empty and this pin
+  # reported success having checked NOTHING -- a bare zero read as clean, which is the vacuity
+  # CLAUDE.md's affirmative-zero rule exists to forbid. The count is asserted against the arms
+  # actually rendered, so the two can only drift together.
+  local key_count
+  key_count="$(printf '%s\n' $keys | grep -c . || true)"
   missing=""
   for k in $keys; do
     arms="$(grep -cE "^ +${k}\)" "$SELF_FILE" || true)"
     [[ "$arms" -ge 1 ]] || missing="$missing $k"
   done
-  if [[ "$callers" -eq 1 && "$full_args" -eq 1 && -z "$missing" ]]; then
-    pass "obj-sweep(verdict-routing-wired): the case routes through \`obj_sweep_claim_fresh_verdict\` (1 call site, passing all ${#verdict_arg_names[@]} signals in the specified ORDER) and renders every verdict key the function can return -- the router is wired, and an argument-order swap would redden here"
+  if [[ "$callers" -eq 1 && "$full_args" -eq 1 && "$key_count" -ge 12 && -z "$missing" ]]; then
+    pass "obj-sweep(verdict-routing-wired): the case routes through \`obj_sweep_claim_fresh_verdict\` (1 call site, passing all ${#verdict_arg_names[@]} signals in the specified ORDER) and renders all ${key_count} verdict keys the function can return -- the router is wired, an argument-order swap would redden here, and the key census is affirmative so an empty scrape cannot pass as clean"
   else
-    fail "obj-sweep(verdict-routing-wired): call sites=$callers (want 1), full-ordered-argument-list match=$full_args (want 1), unrendered verdict keys:${missing:- none}"
+    fail "obj-sweep(verdict-routing-wired): call sites=$callers (want 1), full-ordered-argument-list match=$full_args (want 1), verdict keys scraped=$key_count (want >=12), unrendered keys:${missing:- none}"
+  fi
+
+  # ARITY IS FAIL-CLOSED, DEMONSTRATED (roborev job 100 L4): a short call must not inherit a
+  # permissive default. Ten arguments is the near miss that the old `${11:-1}` accepted.
+  local short_verdict
+  short_verdict="$(obj_sweep_claim_fresh_verdict 1 4 1 0 1 0 3 5 1 1)"
+  if [[ "$short_verdict" == "fail:bad-arity" ]]; then
+    pass "obj-sweep(verdict-routing-arity): a ten-argument call returns \`fail:bad-arity\` instead of inheriting \`valid\` for the missing signal -- a dropped argument is loud, not permissive"
+  else
+    fail "obj-sweep(verdict-routing-arity): a ten-argument call returned '$short_verdict', wanted 'fail:bad-arity' -- a dropped validity signal is failing open again"
   fi
 
   # THE REFRESHER'S OWN WRITE IS PINNED TOO (roborev job 99 L4). The pinning was asymmetric: the
