@@ -72,6 +72,42 @@ earlier per-DIRECTORY design, whose S1.1 wording below is updated to match).
 - **Then** exit `2`, and the row for that directory has severity `unreadable` and names the cause —
   the row count still includes it (no silent skip).
 
+### Requirement: S5 — A discovery entry is never silently dropped (roborev jobs 92/102 MEDIUM)
+
+The walk SHALL NOT drop a discovery entry it cannot stat. `is_file()`/`is_dir()` collapse EVERY
+stat failure into `false`, so a dangling symlink, an `EACCES`, or a race with a concurrent `mv`
+previously vanished with no row, no cause and — for the directory levels — no effect on the exit
+code, which is the dangerous direction because the sweep could still report success. Every level of
+the walk (keyspace dir, table dir, `*-Data.db` entry) SHALL therefore probe metadata EXPLICITLY and
+record an unstattable entry as an `unreadable` subject naming the path and the OS error.
+`DirEntry::file_type()` SHALL NOT be used as the probe: it does not follow symlinks, so it reports a
+dangling link as a symlink instead of surfacing the broken target.
+
+#### Scenario: S5.1 an unstattable keyspace or table directory is counted, not skipped
+- **Given** a path under the data dir whose metadata cannot be read
+- **When** the walk reaches it
+- **Then** `descendable_dir` returns `Err(cause)` naming the stat failure and the path, the caller
+  increments the aggregated `unreadable_*_entries` count, and a genuine non-directory (a stray file)
+  is still skipped silently — `Ok(false)`, distinct from the error case
+  (`cqlite-cli/src/commands/sweep_tests.rs`'s `descendable_dir_*`).
+
+#### Scenario: S5.2 a `*-Data.db` whose metadata cannot be read is an unreadable entry
+- **Given** a table directory holding a `*-Data.db` NAME that cannot be stat'ed
+- **When** `classify_table_dir_entries` classifies it
+- **Then** it is NOT counted as a generation, `unreadable_file_entries` increments, and the recorded
+  cause names the stat failure and the file — while a non-`*-Data.db` name is out of scope entirely
+  and does NOT inflate the count. The NAME is tested BEFORE metadata, which is what makes the entry
+  attributable at all (`classify_counts_an_unstattable_data_db_as_unreadable`,
+  `classify_ignores_a_non_data_db_entry_entirely`).
+
+#### Scenario: S5.3 readable generations alongside unreadable entries earn their own row
+- **Given** a table directory with both readable generations and unreadable entries
+- **When** the walk classifies it
+- **Then** `mixed_readability_row` returns a row naming BOTH counts and the last error, and the
+  readable generations are still verified — and it returns `None` when either count is zero, so the
+  zero-generation case is reported by its own arm and never double-reported. PINNED BY MUTATION:
+  inverting the guard FAILs these cases (`mixed_readability_row_*`).
+
 ### Requirement: S2 — Exit code is a closed function of the row severities
 
 Sweep SHALL exit `0` when every row is `ok`, exit `2` when any row is `corrupt` or `unreadable`

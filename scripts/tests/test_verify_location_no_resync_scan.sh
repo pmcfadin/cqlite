@@ -58,6 +58,7 @@ fi
 PATTERNS=("memchr" ".windows(" "find(|" "position(|")
 
 hits=0
+allowed=0
 line_no=0
 in_test_tail=0
 while IFS= read -r line; do
@@ -69,6 +70,24 @@ while IFS= read -r line; do
   stripped="${stripped//$'\t'/}"
   if [ "$stripped" = '#[cfg(test)]' ]; then
     in_test_tail=1
+    continue
+  fi
+  # LINE-LEVEL OPT-OUT (roborev job 102 LOW). Without one this guard was
+  # purely lexical with no sanctioned override, unlike its siblings
+  # (`injection-lint-allow`, `perf-gate-allow`) -- and it had already DISTORTED
+  # production code: `resolve_partitions`'s sortedness debug_assert! was
+  # written as `zip(iter().skip(1))`, with a comment apologising for avoiding
+  # the clearer `windows(2)`, over a slice of boundary-entry tuples that has
+  # nothing to do with `Data.db` bytes. A guard that constrains SYNTAX rather
+  # than behaviour needs an escape hatch, or the next legitimate
+  # `.position(|e| ..)` over that same slice FAILs --lite with no way out
+  # (this guard is wired into the UNSCOPED roborev-lints component).
+  #
+  # The marker is deliberately narrow: same line, named, and it does not
+  # suppress the census -- an allowed line is still COUNTED and reported, so
+  # the opt-out is visible rather than silent.
+  if [[ "$line" == *"no-resync-scan-allow"* ]]; then
+    allowed=$((allowed + 1))
     continue
   fi
   for pat in "${PATTERNS[@]}"; do
@@ -91,5 +110,5 @@ if [ "$hits" -gt 0 ]; then
   exit 1
 fi
 
-echo "ok   - $TARGET scanned, 0 byte-pattern-search hit(s) RECOGNISED outside tests (spec L3)"
+echo "ok   - $TARGET scanned, 0 byte-pattern-search hit(s) RECOGNISED outside tests, $allowed line(s) RECOGNISED as no-resync-scan-allow (spec L3)"
 exit 0

@@ -186,8 +186,16 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
             }
         };
         let ks_path = ks_entry.path();
-        if !ks_path.is_dir() {
-            continue;
+        match descendable_dir(&ks_path) {
+            Ok(true) => {}
+            // A stray file next to the keyspace dirs is not a defect.
+            Ok(false) => continue,
+            // Unstattable: COUNT it, never drop it (roborev job 102 MEDIUM).
+            Err(cause) => {
+                unreadable_ks_entries += 1;
+                last_ks_entry_error = Some(cause);
+                continue;
+            }
         }
         match std::fs::read_dir(&ks_path) {
             Ok(tables) => {
@@ -203,8 +211,14 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
                         }
                     };
                     let table_path = table_entry.path();
-                    if !table_path.is_dir() {
-                        continue;
+                    match descendable_dir(&table_path) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(cause) => {
+                            unreadable_table_entries += 1;
+                            last_table_entry_error = Some(cause);
+                            continue;
+                        }
                     }
                     match std::fs::read_dir(&table_path) {
                         Ok(files) => {
@@ -363,6 +377,30 @@ fn classify_table_dir_entries(
         }
     }
     (data_dbs, unreadable_file_entries, last_file_entry_error)
+}
+
+/// Is this path a directory we should descend into? Fail-closed (roborev job
+/// 102 MEDIUM).
+///
+/// `Path::is_dir()` collapses EVERY stat failure into `false`, so a keyspace or
+/// table directory that cannot be stat'ed — a dangling symlink from a partial
+/// restore, an `EACCES` after a parent lost its execute bit, a race with a
+/// concurrent `mv` — was silently `continue`d with no row, no cause, and NO
+/// EFFECT ON THE EXIT CODE. That is the same silent-drop class
+/// `classify_table_dir_entries` is hardened against, in the more dangerous
+/// direction: it can leave a sweep reporting success.
+///
+/// `DirEntry::file_type()` is deliberately NOT used — it does not follow
+/// symlinks, so it would report a dangling link as a symlink rather than
+/// surfacing the broken target.
+///
+/// `Ok(true)` descend · `Ok(false)` a genuine non-directory (a stray file,
+/// skip silently) · `Err(cause)` unstattable, which the caller MUST record.
+fn descendable_dir(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(md) => Ok(md.is_dir()),
+        Err(e) => Err(format!("cannot stat {}: {e}", path.display())),
+    }
 }
 
 /// The extra `unreadable` row a table directory earns when it holds BOTH
@@ -699,220 +737,5 @@ fn print_json(rows: &[SweepRow]) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn finding(class: VerifyErrorClass) -> VerifyFinding {
-        VerifyFinding {
-            class,
-            component: "Data.db".to_string(),
-            detail: "synthetic".to_string(),
-            location: None,
-        }
-    }
-
-    // roborev job 4376: `classify_report`'s Corrupt arm must name a REAL
-    // corruption cause, not merely the first finding recorded — a
-    // `FilterFalseNegative` ahead of a genuine corruption finding in the
-    // same (non-FilterFalseNegative-only) report must not become the row's
-    // cause.
-    #[test]
-    fn classify_report_corrupt_cause_skips_a_leading_filter_false_negative() {
-        let findings = vec![
-            finding(VerifyErrorClass::FilterFalseNegative),
-            finding(VerifyErrorClass::RowScanFailed),
-        ];
-        let (severity, cause) = classify_report(&findings);
-        assert_eq!(severity, Severity::Corrupt);
-        assert_eq!(
-            cause.as_deref(),
-            Some(VerifyErrorClass::RowScanFailed.code())
-        );
-    }
-
-    // Unchanged behavior: FilterFalseNegative-only stays Degraded, its cause
-    // still names FilterFalseNegative (the ONLY finding present).
-    #[test]
-    fn classify_report_filter_false_negative_only_is_degraded() {
-        let findings = vec![finding(VerifyErrorClass::FilterFalseNegative)];
-        let (severity, cause) = classify_report(&findings);
-        assert_eq!(severity, Severity::Degraded);
-        assert_eq!(
-            cause.as_deref(),
-            Some(VerifyErrorClass::FilterFalseNegative.code())
-        );
-    }
-
-    // Unchanged behavior: a Corrupt report with no FilterFalseNegative at all
-    // still names its first finding.
-    #[test]
-    fn classify_report_corrupt_cause_is_first_finding_when_no_filter_false_negative() {
-        let findings = vec![
-            finding(VerifyErrorClass::RowScanFailed),
-            finding(VerifyErrorClass::DigestMismatch),
-        ];
-        let (severity, cause) = classify_report(&findings);
-        assert_eq!(severity, Severity::Corrupt);
-        assert_eq!(
-            cause.as_deref(),
-            Some(VerifyErrorClass::RowScanFailed.code())
-        );
-    }
-
-    // roborev job 4376: a table directory can hold BOTH readable
-    // `*-Data.db` generations AND an unreadable directory entry in the SAME
-    // `read_dir` pass — the count must not be silently dropped just because
-    // `data_dbs` ended up non-empty. Injects a failing entry directly (a
-    // `DirEntry` has no public constructor to synthesize one for real).
-    #[test]
-    fn table_dir_entries_unreadable_alongside_readable_generations_is_counted() {
-        let dir = std::env::temp_dir().join(format!(
-            "cqlite-sweep-unittest-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let data_db = dir.join("nb-1-big-Data.db");
-        std::fs::write(&data_db, b"").expect("create Data.db stand-in");
-
-        let entries = vec![
-            Ok(data_db.clone()),
-            Err(std::io::Error::other("injected failure")),
-        ];
-        let (data_dbs, unreadable_file_entries, last_file_entry_error) =
-            classify_table_dir_entries(entries.into_iter());
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_eq!(data_dbs, vec![data_db]);
-        assert_eq!(unreadable_file_entries, 1);
-        assert_eq!(last_file_entry_error.as_deref(), Some("injected failure"));
-        // NO tautological restatement here (roborev job 92 MEDIUM): asserting
-        // `!data_dbs.is_empty() && unreadable_file_entries > 0` is implied by
-        // the two assert_eq!s above and observes nothing. The branch those
-        // counts drive is exercised directly in
-        // `mixed_readability_row_*` below.
-    }
-
-    // The branch the classifier feeds (roborev job 92 MEDIUM). These four
-    // cases pin the GUARD and the CAUSE STRING, so the reviewer's named
-    // regression -- inverting the guard to `found_count == 0` -- FAILs here
-    // instead of passing silently.
-    #[test]
-    fn mixed_readability_row_fires_when_readable_and_unreadable_coexist() {
-        let row = mixed_readability_row(Path::new("/ks/tbl-abc"), 3, 2, Some("injected failure"));
-        let (path, cause) = row.expect("readable generations + unreadable entries must push a row");
-        assert_eq!(path, PathBuf::from("/ks/tbl-abc"));
-        // Both counts and the underlying error are NAMED, so the row explains
-        // itself rather than just flipping the exit code.
-        assert!(
-            cause.contains('2'),
-            "cause must name the unreadable count: {cause}"
-        );
-        assert!(
-            cause.contains('3'),
-            "cause must name the readable count: {cause}"
-        );
-        assert!(
-            cause.contains("injected failure"),
-            "cause must carry the last error: {cause}"
-        );
-        assert!(
-            cause.contains("still verified"),
-            "cause must say the readable generations are not skipped: {cause}"
-        );
-    }
-
-    #[test]
-    fn mixed_readability_row_is_none_when_nothing_is_unreadable() {
-        assert!(mixed_readability_row(Path::new("/ks/tbl-abc"), 3, 0, None).is_none());
-    }
-
-    #[test]
-    fn mixed_readability_row_is_none_when_no_generation_was_found() {
-        // found_count == 0 is the OTHER arm's job (the "no *-Data.db" cause),
-        // so this must not double-report.
-        assert!(
-            mixed_readability_row(Path::new("/ks/tbl-abc"), 0, 2, Some("boom")).is_none(),
-            "an empty generation set is reported by the is_empty arm, not here"
-        );
-    }
-
-    #[test]
-    fn mixed_readability_row_tolerates_a_missing_last_error() {
-        let (_, cause) = mixed_readability_row(Path::new("/ks/tbl-abc"), 1, 1, None)
-            .expect("guard depends on the counts, not on an error being present");
-        assert!(
-            cause.contains('1'),
-            "cause must still name the counts: {cause}"
-        );
-    }
-
-    // A `*-Data.db` NAME whose metadata cannot be read is an UNREADABLE entry,
-    // never a silent drop (roborev job 92 MEDIUM). A path under a directory
-    // that does not exist cannot be stat'ed, which is the portable way to
-    // provoke the Err arm without planting a symlink.
-    #[test]
-    fn classify_counts_an_unstattable_data_db_as_unreadable() {
-        let missing = PathBuf::from("/nonexistent-cqlite-4194/ks/tbl/nb-1-big-Data.db");
-        let (data_dbs, unreadable, last_err) =
-            classify_table_dir_entries(vec![Ok(missing)].into_iter());
-        assert!(
-            data_dbs.is_empty(),
-            "an unstattable entry is not a usable generation"
-        );
-        assert_eq!(
-            unreadable, 1,
-            "it must be COUNTED, not dropped: that silent drop is the finding"
-        );
-        let cause = last_err.expect("the stat failure must be recorded with a cause");
-        assert!(
-            cause.contains("cannot stat") && cause.contains("nb-1-big-Data.db"),
-            "cause must name the stat failure and the file: {cause}"
-        );
-    }
-
-    // A non-Data.db entry that cannot be stat'ed is NOT our business: the
-    // sweep only claims completeness over `*-Data.db` names, so counting
-    // unrelated entries would inflate the unreadable count.
-    #[test]
-    fn classify_ignores_a_non_data_db_entry_entirely() {
-        let other = PathBuf::from("/nonexistent-cqlite-4194/ks/tbl/nb-1-big-Index.db");
-        let (data_dbs, unreadable, last_err) =
-            classify_table_dir_entries(vec![Ok(other)].into_iter());
-        assert!(data_dbs.is_empty());
-        assert_eq!(
-            unreadable, 0,
-            "a non-Data.db name is out of scope, not unreadable"
-        );
-        assert!(last_err.is_none());
-    }
-
-    // Clean case: no unreadable entries at all yields an empty last-error and
-    // a zero count, so the call site's guard never fires.
-    #[test]
-    fn table_dir_entries_all_readable_reports_zero_unreadable() {
-        let dir = std::env::temp_dir().join(format!(
-            "cqlite-sweep-unittest-clean-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let data_db = dir.join("nb-1-big-Data.db");
-        std::fs::write(&data_db, b"").expect("create Data.db stand-in");
-
-        let entries = vec![Ok(data_db.clone())];
-        let (data_dbs, unreadable_file_entries, last_file_entry_error) =
-            classify_table_dir_entries(entries.into_iter());
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_eq!(data_dbs, vec![data_db]);
-        assert_eq!(unreadable_file_entries, 0);
-        assert_eq!(last_file_entry_error, None);
-    }
-}
+#[path = "sweep_tests.rs"]
+mod tests;

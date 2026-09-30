@@ -316,17 +316,17 @@ pub fn resolve_partitions(
     sorted_boundary_entries: &[BoundaryEntry],
     logical_len: u64,
 ) -> PartitionResolution {
-    // A manual pairwise zip/skip scan, not the slice-pairs adaptor whose name
-    // the no-resync-scan guard (spec L3, `test_verify_location_no_resync_scan.sh`)
-    // greps this file for as a byte-pattern-search primitive — it cannot
-    // distinguish "scanning `Data.db` bytes for a header" from "checking a
-    // tuple slice is sorted", so this form sidesteps the false positive
-    // entirely rather than needing a carve-out the guard has no mechanism for.
+    // The clear form, restored (roborev job 102 LOW). This was written as a
+    // manual `zip(iter().skip(1))` purely to dodge the no-resync-scan guard's
+    // lexical slice-pairs pattern — contorting production code to satisfy a
+    // grep, over a slice of `(u64, Option<Arc<[u8]>>)` tuples that has nothing
+    // to do with scanning `Data.db` bytes for a header. The guard now has a
+    // named line-level opt-out, which is the right place for the exception, so
+    // the code says what it means and the marker records WHY it is allowed.
     debug_assert!(
         sorted_boundary_entries
-            .iter()
-            .zip(sorted_boundary_entries.iter().skip(1))
-            .all(|(a, b)| a.0 <= b.0),
+            .windows(2) // no-resync-scan-allow: sortedness over boundary tuples, not a byte scan
+            .all(|w| w[0].0 <= w[1].0),
         "resolve_partitions requires its input sorted ascending by data_offset"
     );
 
@@ -672,6 +672,77 @@ mod tests {
         assert_eq!(
             res,
             PartitionResolution::Unresolved(PARTITION_KEY_UNAVAILABLE.to_string())
+        );
+    }
+
+    // format_location's PARTITION branches (roborev job 102 LOW, upgraded:
+    // `--out text` is the DEFAULT for both `verify` and `sweep`, so these two
+    // strings ARE the disclosures this change exists to make, and neither had
+    // any coverage. A regression dropping the `+N more, capped` suffix would
+    // have let a partial list read as complete with a green suite.
+    #[test]
+    fn format_location_discloses_a_capped_partition_list() {
+        let loc = Location {
+            component: "Data.db".to_string(),
+            byte_offset: 0x28000,
+            byte_len: 4,
+            anchor: PhysicalAnchor::DeclaredRecord,
+            chunk_index: Some(1),
+            partitions: PartitionResolution::Resolved {
+                keys: vec![KeyRef::from_raw(b"k0")],
+                truncated: 842,
+            },
+        };
+        let out = format_location(&loc);
+        assert!(
+            out.contains("(+842 more, capped)"),
+            "a capped list MUST say it is incomplete: {out}"
+        );
+        // …and the declared-record disclosure rides along on the same line.
+        assert!(
+            out.contains("declared offset 0x28000") && out.contains("not present in the file"),
+            "capped rendering must not lose the anchor disclosure: {out}"
+        );
+    }
+
+    #[test]
+    fn format_location_discloses_an_unresolved_cause() {
+        let loc = Location {
+            component: "Data.db".to_string(),
+            byte_offset: 64,
+            byte_len: 16,
+            anchor: PhysicalAnchor::DamagedExtent,
+            chunk_index: Some(0),
+            partitions: PartitionResolution::Unresolved(BOUNDARY_SOURCE_UNREADABLE.to_string()),
+        };
+        let out = format_location(&loc);
+        assert!(
+            out.contains("partitions unresolved") && out.contains(BOUNDARY_SOURCE_UNREADABLE),
+            "an unresolved location MUST name its cause rather than render an empty list: {out}"
+        );
+        assert!(
+            !out.contains("declared offset"),
+            "a damaged extent must not be labelled declared: {out}"
+        );
+    }
+
+    #[test]
+    fn format_location_names_an_empty_resolved_set_without_claiming_partitions() {
+        let loc = Location {
+            component: "Data.db".to_string(),
+            byte_offset: 64,
+            byte_len: 16,
+            anchor: PhysicalAnchor::DamagedExtent,
+            chunk_index: None,
+            partitions: PartitionResolution::Resolved {
+                keys: vec![],
+                truncated: 0,
+            },
+        };
+        let out = format_location(&loc);
+        assert!(
+            out.contains("0 partitions"),
+            "an empty resolved set reads as an affirmative zero, never a blank: {out}"
         );
     }
 
