@@ -10757,7 +10757,7 @@ test_object_store_sweep_claim_recovers_when_stale() {
   local gap_exceeds launched max_gap_valid last_tick
   local wticks post_launch_writes post_launch_ticks write_gap write_gap_valid write_gap_exceeds
   local refresh_backdate_secs age_bound_secs claim_present_at_end proj_rc verdict bound_expl
-  local writes_valid ticks_valid
+  local writes_valid ticks_valid first_write
   # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
   #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
   #     MAX_SWEEP_WALKS lesson, one function over.
@@ -11232,6 +11232,29 @@ test_object_store_sweep_claim_recovers_when_stale() {
       elif [[ -s "$wticks" ]]; then
         write_gap="$(LC_ALL=C awk -v e="$ended" -v l="$launched" "$OBJ_SWEEP_MAX_GAP_AWK" "$wticks" 2>/dev/null)"
         [[ "$write_gap" =~ $OBJ_SWEEP_GAP_RE ]] || { write_gap_valid=0; write_gap="999999.00"; }
+        # LAUNCH -> FIRST SUCCESSFUL WRITE, FOLDED IN (roborev job 103 M1). The shared gap
+        # program measures the launch-to-first-in-window interval only via the `p` that its
+        # `$1<l{p=$1;next}` branch seeds. For `$ticks` that seed is guaranteed (the barrier
+        # touches `$live` only after a tick append, and `launched` is captured after that), but
+        # `$wticks` is the `$2==1` PROJECTION and the tick append is deliberately decoupled from
+        # the claim write -- so a pre-launch tick carrying `wrote=0` leaves the projection with
+        # no line below `l`, `p` is unset when the first in-window line arrives, no sample
+        # fires, and the interval during which `started` was FROZEN is never measured. That
+        # readmits the job-89-F1 vacuity the write-gap signal exists to close: writes failing
+        # for the first seconds of the window and succeeding only at the tail scored
+        # `write_gap ~ 0.2s` while the supervisor had seen nothing but the one-shot plant.
+        # Measured separately and folded in rather than by changing `$OBJ_SWEEP_MAX_GAP_AWK`,
+        # whose behaviour is pinned by eight cases; `$1>l` matches the strict window used for
+        # `post_launch_writes`.
+        if [[ "$write_gap_valid" -eq 1 ]] &&
+          [[ "$(LC_ALL=C awk -v l="$launched" '$1<l{n++} END{print n+0}' "$wticks" 2>/dev/null)" == "0" ]]; then
+          first_write="$(LC_ALL=C awk -v l="$launched" '$1>l{print $1; exit}' "$wticks" 2>/dev/null)"
+          if [[ -n "$first_write" ]]; then
+            write_gap="$(LC_ALL=C awk -v a="$write_gap" -v f="$first_write" -v l="$launched" \
+              'BEGIN{d=f-l; printf "%.2f", (d>a?d:a)}' 2>/dev/null)"
+            [[ "$write_gap" =~ $OBJ_SWEEP_GAP_RE ]] || { write_gap_valid=0; write_gap="999999.00"; }
+          fi
+        fi
       else
         write_gap="999999.00"
       fi
@@ -11822,7 +11845,10 @@ ROWS
   # sit entirely untested while both pins stayed green. Compared against the table's own `want`
   # column, so the two can only drift together.
   local wanted_keys uncovered
-  wanted_keys="$(sed -n "/done <<'ROWS'/,/^ROWS$/p" "$SELF_FILE" | grep -oE '^[a-z:-]+\|' | tr -d '|' | sort -u)"
+  # RANGE ANCHORED SO IT CANNOT MATCH ITS OWN SOURCE LINE (roborev job 103 L3): spelled with a
+  # character class, the start pattern no longer matches the literal text of this very line, so
+  # sed opens exactly one range instead of a second unterminated one running to EOF.
+  wanted_keys="$(sed -n "/done <<.ROWS.\$/,/^ROWS\$/p" "$SELF_FILE" | grep -oE '^[a-z:-]+\|' | tr -d '|' | sort -u)"
   uncovered=""
   for k in $keys; do
     case " $(printf '%s ' $wanted_keys) " in
@@ -11830,10 +11856,10 @@ ROWS
       *) [[ "$k" == "fail:bad-arity" ]] || uncovered="$uncovered $k" ;;
     esac
   done
-  if [[ -z "$uncovered" ]]; then
+  if [[ -z "$uncovered" && "$key_count" -ge 12 ]]; then
     pass "obj-sweep(verdict-routing-table-covers): every verdict key the router can return appears in the routing table's expectations (\`fail:bad-arity\` excepted -- it is pinned by the arity assert below, which the table cannot express)"
   else
-    fail "obj-sweep(verdict-routing-table-covers): verdict keys with no table row:${uncovered} -- a router branch was added without a case pinning it"
+    fail "obj-sweep(verdict-routing-table-covers): keys scraped=$key_count (want >=12), verdict keys with no table row:${uncovered:- none} -- a router branch was added without a case pinning it, or the key scrape came back empty and this check would have passed having verified nothing"
   fi
 
   # ARITY IS FAIL-CLOSED, DEMONSTRATED (roborev job 100 L4): a short call must not inherit a
