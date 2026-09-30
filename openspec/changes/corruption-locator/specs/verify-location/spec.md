@@ -128,3 +128,13 @@ omitted), bounded DURING accumulation, not only in the final output.
   count naming how many more intersected
   (`cqlite-core/src/storage/sstable/verify_location.rs`'s
   `resolved_set_is_capped_and_names_the_truncated_count`).
+- **And** the same cap is observed END TO END through the PUBLIC `verify_sstable` surface, not only
+  through the crate-internal resolver: `cqlite-core/tests/issue_4194_verify_location.rs`'s
+  `l5_1_resolved_set_is_capped_and_names_the_omitted_count_end_to_end` copies the real
+  Cassandra-written `test_basic.simple_table` generation (**1000 partitions** — 10x the cap) to a
+  tempdir, truncates the COPY's `Data.db` to its first compressed chunk, and asserts the resulting
+  `ChunkOffsetOutOfBounds` finding's location against this test file's own independent
+  `Index.db`/`CompressionInfo.db` oracle. MEASURED: **977** intersecting partitions, **100**
+  materialized, **truncated = 877** — the two halves sum to the oracle's total, so a silently
+  dropped entry would fail the case rather than pass it. No synthetic fixture and no mutation of
+  the shared corpus is involved (the clean generation is copied first, as L2.1/L2.2 do).

@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
-    verify_sstable, PartitionResolution, VerifyErrorClass, VerifyMode,
+    verify_sstable, PartitionResolution, VerifyErrorClass, VerifyMode, MAX_RESOLVED_KEYS,
 };
 use cqlite_core::Config;
 
@@ -803,5 +803,141 @@ async fn l2_3_clean_fixture_has_no_findings_and_no_fabricated_location() {
         report.findings.is_empty(),
         "expected a clean baseline: {:#?}",
         report.findings
+    );
+}
+
+// ---------------------------------------------------------------------------
+// L5.1 — the Resolved set is CAPPED at MAX_RESOLVED_KEYS, end to end
+//
+// WHY A REAL 1000-PARTITION TABLE AND NOT A SYNTHETIC ONE. The cap only
+// engages above 100 intersecting partitions, and every `test_comp_corrupt`
+// fixture is far too small to reach it (hence `resolved_keys`'s
+// `truncated == 0` assertion above). `test_basic.simple_table` is a real
+// Cassandra-written generation carrying 1000 partitions — 10x the cap — so
+// truncating a COPY of its Data.db drives the cap through the public
+// `verify_sstable` surface with no synthetic fixture at all.
+//
+// The corruption corpus README's "CI consumes the DESCRIBED corruptions and
+// never mutates bytes at test time" is respected: nothing here touches the
+// shared corpus. The clean generation is copied into a tempdir first and the
+// COPY is truncated, exactly as L2.1/L2.2 above copy-then-bit-flip.
+// ---------------------------------------------------------------------------
+
+/// Truncate `path` in place to `len` bytes. No CRC recomputation: a truncation
+/// is precisely the case where the declared chunk offsets outrun the file.
+fn truncate_to(path: &Path, len: u64) {
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} for truncation: {e}", path.display()));
+    f.set_len(len)
+        .unwrap_or_else(|e| panic!("truncate {} to {len}: {e}", path.display()));
+}
+
+/// The materialized key list and the `truncated` count of a CAPPED resolution.
+/// Deliberately separate from `resolved_keys`, which asserts `truncated == 0`
+/// for the small fixtures: this case exists to observe a NON-zero count.
+fn capped_resolution(res: &PartitionResolution) -> (Vec<String>, usize) {
+    match res {
+        PartitionResolution::Resolved { keys, truncated } => {
+            let mut v: Vec<String> = keys.iter().map(|k| k.key_hex.clone()).collect();
+            v.sort();
+            (v, *truncated)
+        }
+        PartitionResolution::Unresolved(cause) => {
+            panic!("expected a capped Resolved set, got Unresolved({cause})")
+        }
+    }
+}
+
+#[tokio::test]
+async fn l5_1_resolved_set_is_capped_and_names_the_omitted_count_end_to_end() {
+    let Some(clean_dir) = clean_source_dir("test_basic", "simple_table") else {
+        return;
+    };
+
+    let (chunk_length, data_length, chunk_offsets) =
+        oracle_compression_info(&clean_dir.join("nb-1-big-CompressionInfo.db"));
+    let positions = oracle_index_positions(&clean_dir.join("nb-1-big-Index.db"));
+    assert!(
+        chunk_offsets.len() >= 2,
+        "simple_table must span >=2 compressed chunks to be truncatable mid-table; got {}",
+        chunk_offsets.len()
+    );
+
+    let staging = tempfile::Builder::new()
+        .prefix("cqlite-4194-l5-1-")
+        .tempdir()
+        .expect("create staging temp dir");
+    let staged = staging.path().join("nb-1-big");
+    copy_generation(&clean_dir, &staged);
+
+    // Keep EXACTLY the first compressed chunk, so every later chunk's declared
+    // offset is past the new EOF and the damaged logical range starts at
+    // chunk 1 — spanning essentially the whole 1000-partition table.
+    let keep = chunk_offsets[1];
+    truncate_to(&staged.join("nb-1-big-Data.db"), keep);
+
+    let first_oob_chunk = chunk_offsets
+        .iter()
+        .position(|&off| off.saturating_add(4) > keep)
+        .expect("oracle expected at least one out-of-bounds chunk offset");
+    let new_eof_logical = (first_oob_chunk as u64) * chunk_length;
+    let expected =
+        expected_intersecting_keys((new_eof_logical, data_length), &positions, data_length);
+    assert!(
+        expected.len() > MAX_RESOLVED_KEYS,
+        "this case is only meaningful above the cap: oracle computed {} intersecting \
+         partitions, need > {MAX_RESOLVED_KEYS}",
+        expected.len()
+    );
+
+    let report = run_verify(&staged).await;
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.class == VerifyErrorClass::ChunkOffsetOutOfBounds)
+        .unwrap_or_else(|| {
+            panic!(
+                "no ChunkOffsetOutOfBounds finding in {:#?}",
+                report.findings
+            )
+        });
+    let loc = finding
+        .location
+        .as_ref()
+        .expect("ChunkOffsetOutOfBounds finding must carry a location");
+    let (keys, truncated) = capped_resolution(&loc.partitions);
+    // AFFIRMATIVE evidence, not a bare pass: this case is only meaningful if it
+    // really drove >100 intersecting partitions through the public surface, so
+    // the measured counts are DISCLOSED rather than left to be inferred from a
+    // green tick (the 0-rows-when-present trap, CLAUDE.md test doctrine).
+    eprintln!(
+        "L5.1 MEASURED: oracle intersecting={} materialized={} truncated={} (cap={})",
+        expected.len(),
+        keys.len(),
+        truncated,
+        MAX_RESOLVED_KEYS
+    );
+
+    // The cap holds AT the limit, the omitted count names the remainder
+    // exactly, and the two together account for every intersecting partition
+    // the independent oracle found — so a silently-dropped entry is caught.
+    assert_eq!(
+        keys.len(),
+        MAX_RESOLVED_KEYS,
+        "resolved set must materialize exactly MAX_RESOLVED_KEYS keys"
+    );
+    assert_eq!(
+        truncated,
+        expected.len() - MAX_RESOLVED_KEYS,
+        "truncated count must name every intersecting partition not materialized"
+    );
+    // Every materialized key is one the oracle independently expects.
+    let unexpected: Vec<&String> = keys.iter().filter(|k| !expected.contains(k)).collect();
+    assert!(
+        unexpected.is_empty(),
+        "resolved set contains {} key(s) the independent oracle did not expect: {unexpected:?}",
+        unexpected.len()
     );
 }
