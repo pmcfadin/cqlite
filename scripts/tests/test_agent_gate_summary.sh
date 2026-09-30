@@ -4445,7 +4445,25 @@ else
     bad "1699-r30-preflight-halves: the fixture preflight no longer checks both halves — the real-fixture test returns early on a missing Statistics.db too, so the lane would report a green over skipped coverage (#3220)"
   fi
   # FULL gate only, spelled the way this script spells it: --only and --lite are probes.
+  # Since #4268 the gating idiom is the `_gate_is_strict` PREDICATE, not the bare
+  # `[ -z "$ONLY" ] && [ "$LITE" -eq 0 ]` (--recertify reuses --only's dispatch, so the
+  # bare idiom would read a recert as LENIENT and skip this preflight). Accept EITHER
+  # form -- but when it is the predicate, ALSO pin that the predicate itself still keys
+  # on LITE and ONLY. Without that second half this assert would pass on a predicate
+  # that gates NOTHING, which is the false-clean direction this case exists to prevent.
+  _pf_strict_ok_=0
   if grep -qE '\[ -z "\$ONLY" \] && \[ "\$LITE" -eq 0 \]' "$fl_pf_"; then
+    _pf_strict_ok_=1
+  elif grep -q '_gate_is_strict' "$fl_pf_"; then
+    _pf_pred_="$(awk '/^_gate_is_strict\(\)/,/^}/' "$GATE")"
+    # herestrings, NOT `printf | grep -q`: grep -q is an EARLY-EXIT reader, so the pipe
+    # form is the SIGPIPE shape the ratchet reds on (and it would re-trip it here).
+    if grep -qE '"\$LITE" -eq 0' <<<"$_pf_pred_" \
+       && grep -qE '\-z "\$ONLY"' <<<"$_pf_pred_"; then
+      _pf_strict_ok_=1
+    fi
+  fi
+  if [ "$_pf_strict_ok_" -eq 1 ]; then
     ok "1699-r30-preflight-fullonly: the fixture preflight is gated on FULL-gate mode, leaving --only/--lite lenient"
   else
     bad "1699-r30-preflight-fullonly: the fixture preflight is no longer full-gate-only — either it has become unconditional (redding every --only probe) or it has lost its mode test entirely"
@@ -4489,11 +4507,20 @@ i = src.index("  # LANE-SPECIFIC FIXTURE PREFLIGHT")
 j = src.index("  # The enabled set.")
 block = src[i:j]
 
+# The preflight is gated on `_gate_is_strict`, not on the bare
+# `[ -z "$ONLY" ] && [ "$LITE" -eq 0 ]` idiom it used before #4268 (--recertify
+# reuses --only's dispatch, so the bare idiom would read a recert as LENIENT).
+# EXTRACT the real definition rather than restating it here: a second copy of the
+# rule would drift, and the whole point of this probe is to run the SHIPPED block.
+k = src.index("_gate_is_strict() {")
+strict_fn = src[k:src.index("\n}\n", k) + 3]
+
 def run(root, prelude=""):
     harness = (
-        '%s\nONLY=""\nLITE=0\nname=flight-tests\nlog=/dev/null\nstatus=PASS\nstart=0\n'
+        '%s\nONLY=""\nLITE=0\nRECERTIFY=0\nname=flight-tests\nlog=/dev/null\nstatus=PASS\nstart=0\n'
+        '%s\n'
         'record_result(){ :; }\nCQLITE_DATASETS_ROOT="%s"\n'
-        'f(){\n%s\n echo PREFLIGHT-PASSED\n}\nf\n' % (prelude, root, block)
+        'f(){\n%s\n echo PREFLIGHT-PASSED\n}\nf\n' % (prelude, strict_fn, root, block)
     )
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
     return (r.stdout + r.stderr)
