@@ -229,7 +229,12 @@ fn s1_1_and_s4_1_all_healthy_sweep_is_all_ok_with_affirmative_zero_totals() {
     );
     let value = parse_json(&output);
     let rows = value["rows"].as_array().expect("rows array");
-    assert_eq!(rows.len(), 2, "expected one row per table dir: {value}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected one row per GENERATION — two table dirs x one generation each \
+         (see s1_5_* for the multi-generation case): {value}"
+    );
     for row in rows {
         assert_eq!(row["severity"], "ok", "expected every row ok: {row}");
         assert!(

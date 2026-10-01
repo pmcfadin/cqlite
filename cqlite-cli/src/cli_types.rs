@@ -688,8 +688,10 @@ pub struct RebuildArgs {
 // Arguments for the sweep subcommand (issue #4194)
 #[derive(Args, Debug, Clone)]
 pub struct SweepArgs {
-    /// Data directory to walk — every `<keyspace>/<table>-<id>/` directory
-    /// under it is verified, one row per directory.
+    /// Data directory to walk — every SSTable generation in every
+    /// `<keyspace>/<table>-<id>/` directory under it is verified, one row per
+    /// GENERATION (a table directory holding N generations contributes N
+    /// rows, never just the lexicographically-first).
     pub data_dir: PathBuf,
     /// Verification mode applied to every table (same semantics as `verify
     /// --mode`).

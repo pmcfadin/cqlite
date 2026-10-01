@@ -33,14 +33,20 @@ generation via `verify_sstable_generation`, and reporting exactly one row per GE
 severity `ok | degraded | corrupt | unreadable` (roborev round-2 HIGH finding — corrected from an
 earlier per-DIRECTORY design, whose S1.1 wording below is updated to match).
 
-#### Scenario: S1.1 sweep over the whole committed corpus is all-ok
-- **Given** the built binary and a `CQLITE_DATASETS_ROOT`-resolved corpus root holding every
-  committed table
-- **When** `cqlite sweep <root> --mode quick --out json` runs
-- **Then** exit `0`, every row's severity is `ok`, and the row count equals the number of SSTable
-  GENERATIONS (not table directories — a table directory with N generations contributes N rows)
-  under the root (`cqlite-cli/tests/sweep_cli_tests.rs`, named in the gate's `cli-tests` list per
-  #3522).
+#### Scenario: S1.1 an all-healthy sweep is all-ok
+- **Given** the built binary and a temp data directory holding two `<keyspace>/<table>/`
+  directories, each a staged copy of the clean `test_comp.lz4_table` generation
+- **When** `cqlite sweep <temp-dir> --mode full --out json` runs
+- **Then** exit `0`, every row's severity is `ok`, no `ok` row carries a `cause`, and the row count
+  equals the number of SSTable GENERATIONS (not table directories — a table directory with N
+  generations contributes N rows; here two dirs x one generation each = 2 rows)
+  (`cqlite-cli/tests/sweep_cli_tests.rs`, named in the gate's `cli-tests` list per #3522).
+- **Note** this case stages its OWN fixture rather than sweeping a `CQLITE_DATASETS_ROOT` corpus
+  root, as an earlier draft of this scenario specified: a fetched root is not a stable "the WHOLE
+  corpus is clean" oracle — measured on at least one fleet box, several `sstables/system/*` and
+  `sstables/test_deltas/*` directories are git-tracked while their `*-Data.db` binaries were never
+  materialized, which is itself a CORRECT `unreadable` row and would fail an all-ok assertion for a
+  reason unrelated to this verb.
 
 #### Scenario: S1.5 a table directory with multiple generations reports one row PER generation (roborev round-2 HIGH finding)
 - **Given** a temp dir containing a table directory with TWO SSTable generations (distinct base
@@ -58,19 +64,31 @@ earlier per-DIRECTORY design, whose S1.1 wording below is updated to match).
   `ChunkDecompressionError` finding, and the healthy table's row is `ok`.
 
 #### Scenario: S1.3 a Filter.db-only finding is degraded, not corrupt
-- **Given** a temp dir holding `test_comp_corrupt/filter_db_bit_flip` (the one fixture whose only
-  finding is `FilterFalseNegative`, a CQLite-only detection with Cassandra verdict `clean`)
+- **Given** a temp dir holding one staged copy of the clean `test_comp.lz4_table` generation whose
+  `Filter.db` is then mutated to produce a `FilterFalseNegative` — a CQLite-only detection whose
+  Cassandra verdict is `clean` — by clearing the manifest-pinned bit `0x10` at byte 8 (asserted SET
+  before the flip, so the mutation can never silently become a no-op)
 - **When** `cqlite sweep <temp-dir> --mode full` runs
-- **Then** that row's severity is `degraded`, not `corrupt`, and the row still contributes to a
-  non-zero data-dir exit code only via the `corrupt`/`unreadable` classes — `degraded` alone does not
-  flip the sweep's own exit code (§S1.4 states the exact exit contract).
+- **Then** that row's severity is `degraded`, not `corrupt`, `totals.degraded` is 1 with
+  `totals.corrupt` and `totals.unreadable` both 0, and `degraded` alone does not flip the sweep's own
+  exit code (§S2.1 asserts the exit `0`; §S2 states the exact exit contract).
+- **Note** the mutation is applied to a CLEAN copy rather than reading a
+  `test_comp_corrupt/filter_db_bit_flip` fixture, as an earlier draft specified: deriving the one
+  byte in-test keeps the case independent of which corruption fixtures a given box has fetched,
+  and the pre-flip assertion is what makes it an oracle rather than a guess.
 
 #### Scenario: S1.4 a directory with no readable Data.db is a row, never an omission
-- **Given** a temp dir with a `Data.db` file present but no `TOC.txt` and no readable
-  `Statistics.db`
+- **Given** a temp dir holding a `<keyspace>/<table>/` directory with NO `*-Data.db` at all (only a
+  stray non-component file)
 - **When** `cqlite sweep <temp-dir>` runs
-- **Then** exit `2`, and the row for that directory has severity `unreadable` and names the cause —
-  the row count still includes it (no silent skip).
+- **Then** exit `2`, and that directory still produces exactly one row, severity `unreadable`, with a
+  non-empty `cause` — the row count includes it (no silent skip).
+- **Note** this replaces an earlier draft's Given ("a `Data.db` present but no `TOC.txt` and no
+  readable `Statistics.db`"), which does NOT reach the branch it meant to exercise: a present
+  `Data.db` alone is sufficient for `resolve_components` to succeed, so that shape returns
+  `Ok(report)` with `MissingComponent` findings and is correctly classified `corrupt`, not
+  `unreadable` (verified directly before the test was written). A directory with no `*-Data.db` is
+  the shape design.md §D3's own pseudocode names for `unreadable`.
 
 ### Requirement: S5 — A discovery entry is never silently dropped (roborev jobs 92/102 MEDIUM)
 
@@ -185,7 +203,8 @@ the text rendering MUST be derived from the same rows.
 #### Scenario: S4.1 JSON report shape
 - **Given** any sweep run
 - **When** `--out json` is used
-- **Then** the JSON document has a `rows` array, one entry per swept directory, each with `path`,
+- **Then** the JSON document has a `rows` array, one entry per swept GENERATION (not per
+  directory — see §S1/§S1.5), each with `path` (that generation's exact `Data.db` file),
   `severity`, `cause` (`null` when `ok`), and `findings` (the `VerifyReport.findings` shape,
   `location` included when present), plus a `totals` object counting each severity —
   `totals.<severity>` is always present even at `0`, never omitted for an unreached severity
@@ -193,6 +212,7 @@ the text rendering MUST be derived from the same rows.
 
 #### Scenario: S4.2 text rendering matches the JSON rows
 - **Given** the same sweep run rendered as `--out text`
-- **Then** every row appears with its directory and severity, and every `corrupt`/`unreadable`/
+- **Then** every row appears with its generation `path` and severity, and every
+  `corrupt`/`unreadable`/
   `degraded` row's cause/finding summary is present in the text output — text and JSON never
   disagree on which rows exist or their severities.

@@ -58,7 +58,14 @@ Deviation from this requirement's original draft (roborev round-3 MEDIUM finding
 
 ### Requirement: L2 — A damaged boundary source poisons every location, never a guess
 
-Every OTHER finding's `location.partitions` SHALL be `Unresolved("boundary-source-unreadable")` — never omitted, left empty, or populated from a plausible-looking scan — whenever `Index.db` (BIG) or `Partitions.db` (BTI) is itself the corrupt component named by a finding in that report.
+Every OTHER finding's `location.partitions` SHALL be `Unresolved("boundary-source-unreadable")` — never omitted, left empty, or populated from a plausible-looking scan — whenever the report casts doubt on the format's boundary source. Trust is withdrawn on a UNION of two signals, never either alone:
+
+1. **The finding's COMPONENT** is a boundary component — `Index.db` for BIG, `Partitions.db` or `Rows.db` for BTI — for ANY finding class. This covers the boundary component being ABSENT (`MissingComponent`, incl. the TOC critical-component check) or TRUNCATED (`UnexpectedEof` on a `Partitions.db` shorter than the mandatory 8-byte trie root footer), not merely structurally corrupt. It also covers the one genuine wrong-ANSWER case: with `Rows.db` absent, the BTI structural check still returns the `DataOffset` leaves it could read — a PARTIAL boundary list — which a class-only predicate would hand on and present as `Resolved`.
+2. **The finding's CLASS** says the index structure is corrupt — `IndexEntryCorrupt` (BIG), `BtiRootPointerCorrupt`/`BtiTrieCorrupt` (BTI). This signal cannot be dropped in favour of (1): `BtiTrieCorrupt` is raised on component `Rows.db`, which this requirement did not originally name a boundary source at all.
+
+Additionally, BIG withdraws trust when `IndexReader::is_fully_parsed()` reports a partial parse, since that reader silently truncates its partition list on the first malformed entry (#2302) and a partial prefix presented as `Resolved` is a confident wrong answer.
+
+The predicate is deliberately OVER-conservative where (1) and (2) overlap: a boundary component present on disk but unlisted in `TOC.txt` withdraws trust even though the component itself reads fine. §D2 prefers a refused answer to a confident wrong one.
 
 #### Scenario: L2.1 corrupt BIG Index.db unresolves every location
 - **Given** `test_comp_corrupt/index_db_bit_flip_big`
@@ -68,9 +75,20 @@ Every OTHER finding's `location.partitions` SHALL be `Unresolved("boundary-sourc
   (`cqlite-core/tests/issue_4194_verify_location.rs`).
 
 #### Scenario: L2.2 corrupt BTI boundary source unresolves every location
-- **Given** `test_comp_corrupt/bti_partitions_footer_flip` and `bti_rows_truncation`
-- **When** `verify_sstable` runs on each
-- **Then** as L2.1, for the BTI `BtiRootPointerCorrupt`/`BtiTrieCorrupt` findings.
+- **Given** `test_comp_corrupt/bti_rows_truncation`, staged as a copy whose own `Data.db` is then
+  bit-flipped so a second, `Data.db`-anchored finding exists to assert `Unresolved` on
+- **When** `verify_sstable` runs
+- **Then** as L2.1, for the BTI `BtiTrieCorrupt` findings.
+- **Note** `bti_partitions_footer_flip` is NOT usable here, as an earlier draft's Given assumed:
+  that fixture is only DETECTED via the FULL-mode `Data.db`-scan identity cross-check
+  (`bti_partition_identity_mismatch`), which never runs once `Data.db` is ALSO corrupted (the scan
+  itself errors first) — measured directly, staging that combination yields no BTI boundary-source
+  finding at all. `bti_rows_truncation`'s findings are raised structurally in
+  `check_bti_structure` BEFORE the chunk-CRC check and the scan, so they survive pairing with an
+  independent `Data.db` corruption.
+- **Note** boundary-source distrust is a UNION of the finding CLASS and the finding COMPONENT, so
+  a boundary component that is ABSENT (`MissingComponent`) or truncated (`UnexpectedEof`) — not
+  merely structurally corrupt — also unresolves every location; see §L2's own requirement text.
 
 #### Scenario: L2.3 a healthy boundary source with no other finding never fabricates an unresolved marker
 - **Given** any committed clean `test_basic`/`test_comp` fixture
