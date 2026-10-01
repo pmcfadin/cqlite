@@ -27,20 +27,35 @@ fn datasets_root() -> Option<PathBuf> {
         .filter(|p| p.is_dir())
 }
 
-/// The `data_db_bit_flip` corruption fixture directory, gated per #1094
-/// doctrine: `None` (after an eprintln SKIP, or a panic under
-/// `CQLITE_REQUIRE_FIXTURES=1`) when unusable.
-fn data_db_bit_flip_dir() -> Option<PathBuf> {
-    let Some(root) = datasets_root() else {
-        assert!(
-            !require_fixtures_strict(),
-            "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT is unset/not a directory"
-        );
-        eprintln!("SKIP: CQLITE_DATASETS_ROOT unset/not a directory");
-        return None;
-    };
-    let dir = root.join("corruption/test_comp_corrupt/data_db_bit_flip");
-    let has_data_db = std::fs::read_dir(&dir)
+/// Every candidate BASE root — the `CQLITE_DATASETS_ROOT` corpus, then the
+/// checkout's own committed corpus.
+///
+/// Issue #3220 doctrine, mirrored from `cqlite-core/tests/
+/// issue_4194_verify_location.rs`'s `candidate_base_roots()` and the sibling
+/// `salvage_cli_tests.rs`: resolution here was env-ONLY, so every case in this
+/// file skipped silently whenever `CQLITE_DATASETS_ROOT` was unset — and would
+/// skip even with it set if the fixture lived under the OTHER root, since
+/// neither root is a superset of the other (#3104).
+fn candidate_base_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(r) = datasets_root() {
+        roots.push(r);
+    }
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join("test-data/datasets");
+    if !roots.contains(&checkout) {
+        roots.push(checkout);
+    }
+    roots
+}
+
+/// Does `dir` carry at least one `*-Data.db`? "The directory resolved" is not
+/// "the fixture is usable": a candidate root can hold a same-named directory
+/// carrying only the JSONL sidecar.
+fn usable(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten().any(|e| {
                 e.file_name()
@@ -49,16 +64,31 @@ fn data_db_bit_flip_dir() -> Option<PathBuf> {
                     .unwrap_or(false)
             })
         })
-        .unwrap_or(false);
-    if !has_data_db {
+        .unwrap_or(false)
+}
+
+/// The `data_db_bit_flip` corruption fixture directory, resolved by EVIDENCE
+/// across every candidate base root and gated per #1094 doctrine: `None`
+/// (after an eprintln SKIP, or a panic under `CQLITE_REQUIRE_FIXTURES=1`) when
+/// no candidate root carries a usable copy.
+fn data_db_bit_flip_dir() -> Option<PathBuf> {
+    let found = candidate_base_roots()
+        .into_iter()
+        .map(|root| root.join("corruption/test_comp_corrupt/data_db_bit_flip"))
+        .find(|dir| usable(dir));
+    let Some(dir) = found else {
         assert!(
             !require_fixtures_strict(),
-            "CQLITE_REQUIRE_FIXTURES=1 but data_db_bit_flip is unusable at {}",
-            dir.display()
+            "CQLITE_REQUIRE_FIXTURES=1 but data_db_bit_flip is unusable under every candidate \
+             base root: {:?}",
+            candidate_base_roots()
         );
-        eprintln!("SKIP: data_db_bit_flip unusable at {}", dir.display());
+        eprintln!(
+            "SKIP: data_db_bit_flip unusable under every candidate base root ({:?})",
+            candidate_base_roots()
+        );
         return None;
-    }
+    };
     Some(dir)
 }
 
