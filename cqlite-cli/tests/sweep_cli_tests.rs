@@ -51,23 +51,51 @@ fn datasets_root() -> Option<PathBuf> {
         .filter(|p| p.is_dir())
 }
 
-/// The clean `test_comp.lz4_table` generation directory, gated per #1094
-/// doctrine.
+/// Every candidate BASE root — the `CQLITE_DATASETS_ROOT` corpus, then the
+/// checkout's own committed corpus.
+///
+/// Issue #3220 doctrine, mirrored from the sibling `salvage_cli_tests.rs`'s
+/// `candidate_base_roots()`/`resolve_root_with_corpus_fixture` and from
+/// `cqlite-core/tests/issue_4194_verify_location.rs`: `datasets_root()` alone
+/// reads `CQLITE_DATASETS_ROOT` ONLY, with no checkout fallback, so every case
+/// needing a fixture skipped silently whenever that env var was unset — and
+/// would skip even with it set if the fixture lived under the OTHER root, since
+/// neither root is a superset of the other (#3104). Resolution is therefore by
+/// EVIDENCE across both roots, never a commitment to one root chosen up front.
+fn candidate_base_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(r) = datasets_root() {
+        roots.push(r);
+    }
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join("test-data/datasets");
+    if !roots.contains(&checkout) {
+        roots.push(checkout);
+    }
+    roots
+}
+
+/// The clean `test_comp.lz4_table` generation directory, resolved by EVIDENCE
+/// (a generation that actually carries `nb-1-big-Data.db`) across every
+/// candidate base root and gated per #1094 doctrine.
 fn lz4_table_dir() -> Option<PathBuf> {
-    let root = datasets_root()?;
-    let base = root.join("sstables/test_comp");
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&base)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name();
-            let name = name.to_str()?.to_string();
-            (name.starts_with("lz4_table-") && e.path().join("nb-1-big-Data.db").is_file())
-                .then(|| e.path())
-        })
-        .collect();
-    candidates.sort();
-    candidates.into_iter().next()
+    candidate_base_roots().into_iter().find_map(|root| {
+        let base = root.join("sstables/test_comp");
+        let mut candidates: Vec<PathBuf> = std::fs::read_dir(&base)
+            .ok()?
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name();
+                let name = name.to_str()?.to_string();
+                (name.starts_with("lz4_table-") && e.path().join("nb-1-big-Data.db").is_file())
+                    .then(|| e.path())
+            })
+            .collect();
+        candidates.sort();
+        candidates.into_iter().next()
+    })
 }
 
 fn require_lz4_table() -> Option<PathBuf> {
@@ -75,9 +103,15 @@ fn require_lz4_table() -> Option<PathBuf> {
     if dir.is_none() {
         assert!(
             !require_fixtures_strict(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table fixture is unavailable"
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table fixture is unavailable under any \
+             candidate base root: {:?}",
+            candidate_base_roots()
         );
-        eprintln!("SKIP: clean lz4_table fixture unavailable (set CQLITE_DATASETS_ROOT)");
+        eprintln!(
+            "SKIP: clean lz4_table fixture unavailable under any candidate base root ({:?}); \
+             fetch the corpus and export the CQLITE_DATASETS_ROOT line the script prints.",
+            candidate_base_roots()
+        );
     }
     dir
 }
