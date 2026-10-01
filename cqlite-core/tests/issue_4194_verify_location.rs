@@ -818,6 +818,96 @@ async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
 }
 
 // ---------------------------------------------------------------------------
+// Boundary-component ABSENCE, not boundary-component CORRUPTION.
+//
+// `l2_1`/`l2_2` cover a boundary source that is PRESENT but structurally
+// corrupt, which `check_big_index`/`check_bti_structure` report via a
+// dedicated class (`IndexEntryCorrupt`, `BtiTrieCorrupt`). The two cases
+// below cover the other reachable shape: the boundary component is GONE, so
+// the finding class is the generic `MissingComponent` and only the finding's
+// COMPONENT names the boundary source. `finalize_locations` must distrust the
+// boundary source on either signal (the union predicate) — in particular the
+// BTI case is a wrong-ANSWER regression guard, not merely a cause-string one:
+// with `Rows.db` absent, `check_bti_structure` still returns the `DataOffset`
+// leaves it could read, i.e. a PARTIAL boundary list that a class-only
+// predicate would hand to `resolve_partitions` and present as `Resolved`.
+// ---------------------------------------------------------------------------
+
+/// Stage `clean` under `gen_name`, bit-flip its `Data.db` (so a chunk-CRC
+/// finding exists to carry a location) and delete `drop_component`.
+fn stage_without_component(
+    clean: &Path,
+    gen_name: &str,
+    drop_component: &str,
+) -> tempfile::TempDir {
+    let staging = tempfile::Builder::new()
+        .prefix("cqlite-4194-absent-")
+        .tempdir()
+        .expect("create staging temp dir");
+    let staged = staging.path().join(gen_name);
+    copy_generation(clean, &staged);
+    bit_flip_first_byte(&staged.join(format!("{gen_name}-Data.db")));
+    let dropped = staged.join(format!("{gen_name}-{drop_component}"));
+    std::fs::remove_file(&dropped).unwrap_or_else(|e| panic!("remove {}: {e}", dropped.display()));
+    staging
+}
+
+/// Assert that EVERY located finding in `dir`'s report refuses to name
+/// partitions, with the boundary-source cause — and that at least one located
+/// finding exists, so the assertion cannot pass vacuously.
+async fn assert_every_location_unresolved_on_boundary(dir: &Path, expect_missing: &str) {
+    let report = run_verify(dir).await;
+    assert!(
+        report.findings.iter().any(|f| {
+            f.class == VerifyErrorClass::MissingComponent && f.component == expect_missing
+        }),
+        "expected a MissingComponent finding on {expect_missing}: {:#?}",
+        report.findings
+    );
+    let located: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.location.is_some())
+        .collect();
+    assert!(
+        !located.is_empty(),
+        "no finding carried a location, so this case asserts nothing: {:#?}",
+        report.findings
+    );
+    for f in located {
+        let loc = f.location.as_ref().expect("filtered on is_some");
+        assert_eq!(
+            loc.partitions,
+            PartitionResolution::Unresolved(
+                cqlite_core::storage::sstable::verify::BOUNDARY_SOURCE_UNREADABLE_CAUSE.to_string()
+            ),
+            "finding {:?} on {} must refuse to name partitions when {expect_missing} is absent",
+            f.class,
+            f.component
+        );
+    }
+}
+
+#[tokio::test]
+async fn absent_big_index_db_unresolves_every_location() {
+    let Some(clean) = clean_source_dir("test_comp", "lz4_table") else {
+        return;
+    };
+    let staging = stage_without_component(&clean, "nb-1-big", "Index.db");
+    assert_every_location_unresolved_on_boundary(&staging.path().join("nb-1-big"), "Index.db")
+        .await;
+}
+
+#[tokio::test]
+async fn absent_bti_rows_db_unresolves_every_location() {
+    let Some(clean) = clean_source_dir("test_da", "wide_table") else {
+        return;
+    };
+    let staging = stage_without_component(&clean, "da-2-bti", "Rows.db");
+    assert_every_location_unresolved_on_boundary(&staging.path().join("da-2-bti"), "Rows.db").await;
+}
+
+// ---------------------------------------------------------------------------
 // L2.3 — a healthy boundary source with no finding never fabricates an
 // Unresolved marker
 // ---------------------------------------------------------------------------

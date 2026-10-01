@@ -441,8 +441,9 @@ pub fn resolve_location(
 ///
 /// The boundary source is either fully trusted for this whole report or not
 /// trusted at all — never partially: `boundary_healthy` is a single decision
-/// (no `Index.db`/BTI-trie-corrupt finding present) applied uniformly to every
-/// pending location, so a damaged boundary source poisons ALL of them with
+/// (no finding against the boundary component, and no index-structure-corrupt
+/// finding class) applied uniformly to every pending location, so a damaged
+/// boundary source poisons ALL of them with
 /// [`BOUNDARY_SOURCE_UNREADABLE`], never just the finding that happens to be
 /// nearest the damage.
 ///
@@ -457,20 +458,36 @@ pub(crate) async fn finalize_locations(
     scan_position_map: Option<&std::collections::HashMap<u64, Vec<u8>>>,
     platform: Arc<Platform>,
 ) {
+    // Distrust on EITHER signal (a union, never component-only): a finding
+    // whose CLASS says the index structure is corrupt, OR any finding at all
+    // against the boundary component itself. The class test alone missed
+    // `MissingComponent`/`UnexpectedEof` against `Index.db`/`Partitions.db`,
+    // and — the genuine wrong-answer case — a missing `Rows.db`, where
+    // `check_bti_structure` still returns the `DataOffset` leaves it could
+    // read: a PARTIAL boundary list that would then be presented as
+    // `Resolved`. The component test cannot replace the class test either,
+    // since `BtiTrieCorrupt` is raised on `Rows.db`, which spec L2 does not
+    // name as a boundary source. Deliberately over-conservative where the two
+    // overlap (a boundary component present on disk but unlisted in TOC.txt
+    // poisons every location): §D2 prefers a refused answer to a confident
+    // wrong one.
+    //
     // `mut`: the BIG arm below can additionally downgrade this to `false`
-    // after consulting `IndexReader::is_fully_parsed()` (roborev round-1
-    // MEDIUM finding — see the comment at that check).
-    let mut boundary_healthy = match components.format {
-        SsTableFormat::Big => !findings
-            .iter()
-            .any(|f| f.class == VerifyErrorClass::IndexEntryCorrupt),
-        SsTableFormat::Bti => !findings.iter().any(|f| {
-            matches!(
-                f.class,
-                VerifyErrorClass::BtiRootPointerCorrupt | VerifyErrorClass::BtiTrieCorrupt
-            )
-        }),
+    // after consulting `IndexReader::is_fully_parsed()`.
+    let boundary_components: &[&str] = match components.format {
+        SsTableFormat::Big => &["Index.db"],
+        SsTableFormat::Bti => &["Partitions.db", "Rows.db"],
     };
+    let mut boundary_healthy = !findings.iter().any(|f| {
+        boundary_components.contains(&f.component.as_str())
+            || match components.format {
+                SsTableFormat::Big => f.class == VerifyErrorClass::IndexEntryCorrupt,
+                SsTableFormat::Bti => matches!(
+                    f.class,
+                    VerifyErrorClass::BtiRootPointerCorrupt | VerifyErrorClass::BtiTrieCorrupt
+                ),
+            }
+    });
 
     // Boundary entries: `(logical Data.db position, raw key when known)`, one
     // per partition the boundary source names — built only when the boundary
