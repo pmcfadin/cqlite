@@ -148,11 +148,21 @@ struct Discovered {
 }
 
 fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
-    if !data_dir.is_dir() {
-        anyhow::bail!(
-            "sweep target does not exist or is not a directory: {}",
+    // Probe metadata EXPLICITLY, exactly as `descendable_dir` does one level
+    // down (spec S5: "every level SHALL probe metadata explicitly"). `is_dir()`
+    // collapses EVERY stat failure into `false`, so an EACCES, an ELOOP symlink
+    // loop or an EIO would all have been reported as "does not exist or is not
+    // a directory" — a confidently wrong diagnosis that sends the operator
+    // looking for a typo instead of at a permission or hardware fault. Both
+    // arms still fail closed (exit 1, usage error) and still name the path;
+    // only the stated CAUSE changes.
+    match std::fs::metadata(data_dir) {
+        Ok(md) if md.is_dir() => {}
+        Ok(_) => anyhow::bail!(
+            "sweep target exists but is not a directory: {}",
             data_dir.display()
-        );
+        ),
+        Err(e) => anyhow::bail!("cannot stat sweep target {}: {e}", data_dir.display()),
     }
     let mut generations = Vec::new();
     let mut unreadable_keyspaces = Vec::new();

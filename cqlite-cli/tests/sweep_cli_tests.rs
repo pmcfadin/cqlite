@@ -519,8 +519,9 @@ fn zero_table_directories_found_is_not_a_clean_sweep() {
 
 #[test]
 fn s2_2_usage_error_on_a_missing_data_dir() {
+    const MISSING: &str = "/does/not/exist/cqlite-4194-sweep-test";
     let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
-        .args(["sweep", "/does/not/exist/cqlite-4194-sweep-test"])
+        .args(["sweep", MISSING])
         .output()
         .expect("spawn cqlite sweep");
     assert_eq!(
@@ -529,9 +530,19 @@ fn s2_2_usage_error_on_a_missing_data_dir() {
         "expected exit 1 on a missing data dir"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The path itself, asserted literally — the previous form checked only for
+    // the phrases "does not exist"/"not a directory" while its own failure
+    // message claimed to check that the path was named, so a message naming no
+    // path at all would have passed.
     assert!(
-        stderr.contains("does not exist") || stderr.contains("not a directory"),
-        "stderr did not name the missing path: {stderr}"
+        stderr.contains(MISSING),
+        "stderr did not name the missing path {MISSING}: {stderr}"
+    );
+    // And the REAL OS cause, not `is_dir()`'s collapsed guess (spec S5): an
+    // absent path must be distinguishable from an unstattable one.
+    assert!(
+        stderr.contains("No such file or directory") || stderr.contains("os error 2"),
+        "stderr did not name the underlying OS cause: {stderr}"
     );
 }
 
