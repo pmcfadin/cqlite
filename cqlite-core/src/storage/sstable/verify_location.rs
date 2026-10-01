@@ -152,10 +152,8 @@ impl KeyRef {
 /// is only knowable once every check has run (design.md §D2). Resolved in one
 /// pass at the end of `verify_components` by [`finalize_locations`].
 ///
-/// `pub(crate)` with `pub(crate)` fields (issue #4194 file-size relocation,
-/// #1116/#1135): constructed at each check site in `verify.rs`, resolved
-/// here — the type and its fields must be visible across that module
-/// boundary for straight struct-literal construction.
+/// `pub(crate)` fields (#1116/#1135 file-size relocation): constructed at each
+/// check site in `verify.rs`, resolved here, so both must cross that boundary.
 pub(crate) struct PendingLocation {
     /// Index into `findings` of the finding this location belongs to.
     pub(crate) finding_index: usize,
@@ -261,24 +259,18 @@ pub const BOUNDARY_SOURCE_UNREADABLE: &str = "boundary-source-unreadable";
 /// QUICK mode never scans). Named rather than silently dropping the leaf from
 /// the resolved set, which would under-report the intersecting partitions.
 ///
-/// **This is the COMMON case for a `DataOffset` leaf whose finding is
-/// Data.db-anchored** (roborev round-1 MEDIUM finding), not an edge case —
-/// though NOT for the reason an earlier draft of this doc claimed (roborev
-/// round-3 LOW finding: location resolution happens in `finalize_locations`,
-/// which runs AFTER the FULL-mode row scan, so `scan_position_map` is
-/// already populated by the time any location resolves, whenever the scan
-/// succeeds). The actual cause: a `Data.db` corrupt enough to fail the
-/// chunk-CRC check is, in practice, ALSO corrupt enough to fail the full row
-/// scan on the SAME bytes — so the scan errors, `scan_position_map` stays
-/// `None`, and a `DataOffset` leaf's raw key (recoverable ONLY through that
-/// map) is unavailable. A BTI table whose intersecting leaves are
-/// `DataOffset` (narrow partitions) therefore commonly reports
-/// `Unresolved(PARTITION_KEY_UNAVAILABLE)` for its chunk-CRC findings even
-/// with a perfectly healthy boundary source; a `RowsOffset` leaf (wide
-/// partitions) resolves its key INLINE from `Rows.db` and is unaffected by
-/// whether the scan succeeds. See `issue_4194_verify_location.rs`'s
-/// `bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves` for the
-/// positive (`RowsOffset`) case this module's tests cover.
+/// **The COMMON case for a `DataOffset` leaf whose finding is
+/// Data.db-anchored**, not an edge case. Not because the scan runs too late
+/// (it does not: `finalize_locations` runs AFTER it), but because a `Data.db`
+/// corrupt enough to fail the chunk-CRC check is in practice ALSO corrupt
+/// enough to fail the full row scan on the SAME bytes — the scan errors,
+/// `scan_position_map` stays `None`, and a `DataOffset` leaf's raw key is
+/// recoverable ONLY through that map. So a BTI table whose intersecting
+/// leaves are `DataOffset` (narrow partitions) commonly reports this even
+/// with a healthy boundary source, while a `RowsOffset` leaf (wide
+/// partitions) resolves its key INLINE from `Rows.db` and is unaffected. See
+/// `issue_4194_verify_location.rs`'s
+/// `bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves`.
 pub const PARTITION_KEY_UNAVAILABLE: &str =
     "partition key unavailable for an intersecting boundary entry (requires a full-mode scan)";
 
@@ -337,31 +329,22 @@ pub fn resolve_partitions(
         "resolve_partitions requires its input sorted ascending by data_offset"
     );
 
-    // Issue #4194, roborev round-2 MEDIUM finding: bounded DURING accumulation
-    // (`hits.len() < MAX_RESOLVED_KEYS`), not just at the end — a truncation's
-    // damaged range `[first_bad_chunk_start, logical_len)` can intersect
-    // essentially every partition in the file, and `hits` materializing all of
-    // them before ever being capped would defeat the point.
+    // Bounded DURING accumulation (`hits.len() < MAX_RESOLVED_KEYS`), not just
+    // at the end: a truncation's damaged range `[first_bad_chunk_start,
+    // logical_len)` can intersect essentially every partition in the file, so
+    // materializing them all before capping would defeat the cap.
     //
-    // `seen` dedups by raw key DURING accumulation (roborev round-3 LOW
-    // finding): a POST-hoc `dedup_by` after the cap made `truncated` count
-    // pre-dedup entries — a boundary source naming the same raw key twice
-    // (defensive-only in practice; not an expected shape) would consume TWO
-    // cap slots and could render e.g. "40 partition(s) (+60 more, capped)"
-    // when only 100 DISTINCT partitions actually intersect. Deduping here
-    // means a duplicate is recognized before it can occupy a slot OR inflate
-    // `truncated`, and the final list needs no further dedup pass.
+    // `seen` dedups by raw key DURING accumulation too. A post-hoc dedup after
+    // the cap would let a boundary source naming one raw key twice
+    // (defensive-only; not an expected shape) consume TWO cap slots and inflate
+    // `truncated` with pre-dedup entries — rendering e.g. "40 partition(s)
+    // (+60 more, capped)" when only 100 DISTINCT partitions intersect.
     //
-    // `seen` is itself BOUNDED to MAX_RESOLVED_KEYS entries (roborev round-4
-    // LOW finding): round-3's fix grew it unboundedly — O(distinct
-    // intersecting partitions) — which is exactly the O(partitions) growth
-    // the MAX_RESOLVED_KEYS cap (round 2) exists to eliminate for the
-    // truncation case this module's own doc describes (a damaged range
-    // spanning essentially the whole file). Once `hits` reaches the cap,
-    // dedup stops (a duplicate found past the cap is defensive-only and
-    // simply counts as one more `truncated` entry, a minor over-count
-    // accepted in exchange for a hard memory bound) rather than growing
-    // `seen` to match the file's full partition count.
+    // `seen` is itself bounded to MAX_RESOLVED_KEYS: growing it to O(distinct
+    // intersecting partitions) would reintroduce exactly the O(partitions)
+    // growth the cap exists to eliminate. Once `hits` is full, dedup stops — a
+    // duplicate past the cap just counts as one more `truncated` entry, a minor
+    // over-count traded for a hard memory bound.
     let mut hits: Vec<KeyRef> = Vec::new();
     let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
     let mut unknown = false;
@@ -447,8 +430,8 @@ pub fn resolve_location(
 /// [`BOUNDARY_SOURCE_UNREADABLE`], never just the finding that happens to be
 /// nearest the damage.
 ///
-/// `pub(crate)` (issue #4194 file-size relocation): called from
-/// `verify.rs`'s `verify_components` once every check has run.
+/// `pub(crate)` (#1116 relocation): called from `verify.rs`'s
+/// `verify_components` once every check has run.
 pub(crate) async fn finalize_locations(
     dir: &Path,
     components: &ComponentSet,
@@ -505,16 +488,15 @@ pub(crate) async fn finalize_locations(
                 use crate::storage::sstable::index_reader::IndexReader;
                 let index_path = components.path(dir, "Index.db");
                 match IndexReader::open(&index_path, platform).await {
-                    // Issue #4194, roborev round-1 MEDIUM finding: `IndexReader`
-                    // uses a DIFFERENT parser from `check_big_index`'s structural
-                    // walk above, and per Check 4's own doc it "silently
-                    // TRUNCATES the partition list on the first malformed
-                    // Index.db entry" (issue #2302) — exposed via
-                    // `is_fully_parsed()`. `check_big_index` seeing no
-                    // `IndexEntryCorrupt` does NOT mean `IndexReader` parsed the
-                    // whole file; if the two parsers disagree, presenting a
-                    // partial prefix as `Resolved` is a confident WRONG answer,
-                    // exactly what the fail-closed contract (§D2) exists to
+                    // `IndexReader` uses a DIFFERENT parser from
+                    // `check_big_index`'s structural walk above, and per Check
+                    // 4's own doc it "silently TRUNCATES the partition list on
+                    // the first malformed Index.db entry" (#2302) — exposed via
+                    // `is_fully_parsed()`. So no `IndexEntryCorrupt` does NOT
+                    // mean `IndexReader` parsed the whole file; if the two
+                    // parsers disagree, presenting a partial prefix as
+                    // `Resolved` is a confident WRONG answer, exactly what the
+                    // fail-closed contract (§D2) exists to
                     // prevent. Downgrade `boundary_healthy` itself (not just
                     // this arm's `None`) so every OTHER pending location in
                     // this report is poisoned too, matching "fully trusted or
