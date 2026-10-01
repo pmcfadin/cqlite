@@ -130,6 +130,19 @@ classify_domain python-bindings 'bindings/node/src/row.rs' CLEAR "python-binding
 classify_domain dep-duplicates 'Cargo.lock' TOUCHED "dep-duplicates domain covers Cargo.lock"
 classify_domain dep-duplicates 'docs/development/dev-cookbook.md' CLEAR "dep-duplicates domain does NOT cover docs/**"
 
+# job 106 roborev finding (Medium): four arms named paths that are not the
+# component's real subject, leaving them fail-open on exactly the diffs that
+# could have caused their own failure. Each pair below proves the REAL subject
+# now classifies TOUCHED and the OLD (wrong) mapped path classifies CLEAR.
+classify_domain integration-tests 'tests/golden_path_get_operations_tests.rs' TOUCHED "integration-tests domain covers tests/** (the real cqlite-integration-tests crate dir)"
+classify_domain integration-tests 'cqlite-integration-tests/src/lib.rs' CLEAR "integration-tests domain does NOT cover cqlite-integration-tests/** (that path has never existed; it was the cargo PACKAGE name, not a repo path)"
+classify_domain format-compat 'tests/format-compatibility/src/lib.rs' TOUCHED "format-compat domain covers tests/format-compatibility/** (the real format-compatibility-tests crate)"
+classify_domain format-compat 'tools/format-validator/src/main.rs' CLEAR "format-compat domain does NOT cover tools/format-validator/** (an unrelated crate)"
+classify_domain kit-dashboard-drift 'easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json' TOUCHED "kit-dashboard-drift domain covers easy-db-lab-kits/** (the dashboard it reads)"
+classify_domain kit-dashboard-drift 'cqlite-core/src/observability/catalog.rs' TOUCHED "kit-dashboard-drift domain covers cqlite-core/** (the metric catalog + the kit_dashboard_metric_drift test)"
+classify_domain kit-dashboard-drift 'website/content/index.md' CLEAR "kit-dashboard-drift domain does NOT cover website/** (never a real subject)"
+classify_domain oom-audit 'xtask/src/main.rs' TOUCHED "oom-audit domain covers xtask/** (cargo run -p xtask -- oom-audit --enforce)"
+
 # TOOLCHAIN-CONFIG CENSUS (#4268 roborev finding, Medium): every repo-root build
 # CONFIGURATION file must be diff-touched for EVERY component the table MAPS.
 #

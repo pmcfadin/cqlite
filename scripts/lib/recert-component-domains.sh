@@ -90,6 +90,8 @@ _RECERT_DOM_TESTDATA=('test-data/*')
 _RECERT_DOM_DOCS_REPORTS=('docs/reports/*')
 _RECERT_DOM_DOCS_ANY=('docs/*')
 _RECERT_DOM_WEBSITE=('website/*')
+_RECERT_DOM_XTASK=('xtask/*')
+_RECERT_DOM_LABKITS=('easy-db-lab-kits/*')
 
 # The #4266 declared harness set, reused verbatim rather than retyped (this file
 # is sourced alongside scripts/lib/tooling-tests-scope.sh by agent-gate.sh, so
@@ -160,14 +162,28 @@ _recert_component_domain_patterns_raw() {
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     roborev-lints)
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" '.github/*' 'scripts/*' ;;
-    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|memory-budget|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|oom-audit|all-features-check)
+    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|memory-budget|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|all-features-check)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    # oom-audit (job 106 roborev finding, Medium): split out of the shared
+    # core/cargo arm above — it runs `cargo run -p xtask -- oom-audit
+    # --enforce` (scripts/agent-gate.sh), so xtask/* is a real subject the
+    # shared arm never named.
+    oom-audit)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_XTASK[@]}" ;;
     pub-surface)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" 'scripts/ci/check-pub-surface.sh' ;;
+    # integration-tests (job 106 roborev finding, Medium): 'cqlite-integration-tests/*'
+    # is the cargo PACKAGE name, not a repo path — that crate lives at tests/
+    # (tests/Cargo.toml declares `name = "cqlite-integration-tests"`), so the old
+    # pattern matched nothing in the tree and left this component fail-open.
     integration-tests)
-      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'cqlite-integration-tests/*' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'tests/*' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    # format-compat (job 106 roborev finding, Medium): the component runs
+    # `cargo test --package format-compatibility-tests`, whose sources are
+    # tests/format-compatibility/** — 'tools/format-validator/*' is an
+    # unrelated crate and was never a real subject of this component.
     format-compat)
-      printf '%s\n' 'tools/format-validator/*' "${_RECERT_DOM_CORE[@]}" ;;
+      printf '%s\n' 'tests/format-compatibility/*' "${_RECERT_DOM_CORE[@]}" ;;
     cli-tests|smoke)
       printf '%s\n' "${_RECERT_DOM_CLI[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
     query-semantics-oracle)
@@ -186,8 +202,13 @@ _recert_component_domain_patterns_raw() {
       printf '%s\n' "${_RECERT_DOM_TOOLS[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_DOCS_REPORTS[@]}" ;;
     operator-metrics-doc)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_DOCS_ANY[@]}" ;;
+    # kit-dashboard-drift (job 106 roborev finding, Medium): it reads
+    # easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json and runs
+    # `cargo test -p cqlite-core --test kit_dashboard_metric_drift`
+    # (scripts/agent-gate.sh) — docs/* and website/* are not subjects at all;
+    # the real ones are the kit subtree and cqlite-core.
     kit-dashboard-drift)
-      printf '%s\n' "${_RECERT_DOM_DOCS_ANY[@]}" "${_RECERT_DOM_WEBSITE[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_LABKITS[@]}" "${_RECERT_DOM_CORE[@]}" ;;
     dep-duplicates)
       printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" 'scripts/ci/check-dep-duplicates.sh' 'scripts/ci/dep-duplicates-baseline.txt' ;;
     features-load-bearing)
