@@ -38,13 +38,11 @@ use crate::storage::sstable::verify::{
 };
 use crate::storage::sstable::version_gate::SsTableFormat;
 
-/// What a [`Location`]'s physical `byte_offset`/`byte_len` actually describe
-/// (issue #4194, roborev job 92 MEDIUM finding).
+/// What a [`Location`]'s physical `byte_offset`/`byte_len` actually describe.
 ///
-/// The two readings are not interchangeable, and conflating them produced
-/// output that pointed an operator at bytes which do not exist: a corruption
-/// LOCATOR whose physical range is a declared-but-absent offset must say so,
-/// because `dd`/`xxd` at that offset returns nothing.
+/// The two readings are not interchangeable: rendering a declared range
+/// identically to a damaged one told the operator that 4 bytes were damaged
+/// when the real damage is the whole logical tail `partitions` enumerates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalAnchor {
     /// `byte_offset`/`byte_len` cover bytes that are PRESENT in the file and
@@ -52,11 +50,13 @@ pub enum PhysicalAnchor {
     /// off disk yields the damaged bytes themselves.
     DamagedExtent,
     /// `byte_offset`/`byte_len` are a location the SSTable's OWN metadata
-    /// declares and the file does not satisfy: for `ChunkOffsetOutOfBounds` the
-    /// declared chunk offset (and the 4-byte length prefix it points at) lies
-    /// beyond the end of `Data.db`, so those bytes cannot be read at all. The
-    /// damaged extent in that case is the LOGICAL range, which is what
-    /// `partitions` enumerates.
+    /// declares that the file does not satisfy: for `ChunkOffsetOutOfBounds`
+    /// the declared chunk offset, plus the 4-byte TRAILING inline CRC32 that is
+    /// a chunk record's minimum size, does not FIT inside `Data.db`. The test
+    /// is `offset + 4 > data_len` (verify.rs), so it ALSO fires when the offset
+    /// is itself readable and only the record's tail runs past EOF — hence "does
+    /// not fit", never "absent"/"cannot be read", matching `format_location`.
+    /// The damaged extent here is the LOGICAL range, which `partitions` names.
     DeclaredRecord,
 }
 
