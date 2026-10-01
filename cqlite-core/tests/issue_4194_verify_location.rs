@@ -193,20 +193,51 @@ fn has_data_db(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The clean-source generation directory of `<keyspace>.<table>`, resolved
-/// TABLE-granularly across every candidate root and selected
-/// deterministically, with the same #1094 gate.
-fn clean_source_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
+/// The clean-source generation directory of a **git-COMMITTED**
+/// `<keyspace>.<table>`, resolved TABLE-granularly across every candidate root.
+///
+/// FAILS CLOSED UNCONDITIONALLY — never gated on `CQLITE_REQUIRE_FIXTURES`,
+/// never a SKIP (issue #3220; roborev job 111 MEDIUM). These tables' `*.db`
+/// binaries are force-added to git, so their absence is a BROKEN CHECKOUT, not
+/// an unfetched dataset, and the only correct response is to fail. A
+/// `CQLITE_REQUIRE_FIXTURES`-gated skip here would let a case that can ALWAYS
+/// run vanish silently from a green suite. Same doctrine as
+/// `cqlite-cli/tests/salvage_cli_tests.rs::resolve_committed_fixture`.
+///
+/// Verified committed via `git ls-files`: `test_comp/lz4_table-*` (6 `*.db`)
+/// and `test_da/wide_table-*` (full BIG/BTI component set). Use
+/// [`fetched_clean_source_dir`] instead for a table whose binaries are
+/// fetch-only.
+fn committed_clean_source_dir(keyspace: &str, table: &str) -> PathBuf {
+    resolve_table_generation_dir(keyspace, table).unwrap_or_else(|why| {
+        panic!(
+            "COMMITTED clean source {keyspace}.{table} is absent: {why}. Its *.db binaries are \
+             git-tracked, so this is a BROKEN CHECKOUT, not an unfetched dataset, and must never \
+             skip (issue #3220, fail-closed UNCONDITIONALLY, not gated on \
+             CQLITE_REQUIRE_FIXTURES). Searched base roots: {}",
+            describe_base_roots()
+        )
+    })
+}
+
+/// The clean-source generation directory of a **fetch-only**
+/// `<keyspace>.<table>`, with the #1094 gate: a loud SKIP when absent, a hard
+/// failure under `CQLITE_REQUIRE_FIXTURES=1`.
+///
+/// Correct ONLY for a table whose binaries are NOT force-added to git —
+/// verified via `git ls-files`: `test_basic/simple_table` tracks 0 `*.db`. A
+/// committed table must use [`committed_clean_source_dir`] instead.
+fn fetched_clean_source_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
     match resolve_table_generation_dir(keyspace, table) {
         Ok(dir) => Some(dir),
         Err(why) => {
             assert!(
                 !require_fixtures(),
-                "CQLITE_REQUIRE_FIXTURES=1 but the clean {keyspace}.{table} source is absent: \
-                 {why}"
+                "CQLITE_REQUIRE_FIXTURES=1 but the fetch-only clean {keyspace}.{table} source is \
+                 absent: {why}"
             );
             eprintln!(
-                "SKIP: clean {keyspace}.{table} source absent ({why}); set \
+                "SKIP: fetch-only clean {keyspace}.{table} source absent ({why}); set \
                  CQLITE_REQUIRE_FIXTURES=1 to enforce."
             );
             None
@@ -753,9 +784,7 @@ fn oracle_bti_rows_offset_positions(
 
 #[tokio::test]
 async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
-    let Some(clean) = clean_source_dir("test_da", "wide_table") else {
-        return;
-    };
+    let clean = committed_clean_source_dir("test_da", "wide_table");
     if !clean.join("da-2-bti-CompressionInfo.db").is_file() {
         // roborev round-4 MEDIUM finding: this is the ONLY case covering a
         // BTI `Resolved` location (L2.2 covers only `Unresolved`; L1.4 is a
@@ -890,9 +919,7 @@ async fn assert_every_location_unresolved_on_boundary(dir: &Path, expect_missing
 
 #[tokio::test]
 async fn absent_big_index_db_unresolves_every_location() {
-    let Some(clean) = clean_source_dir("test_comp", "lz4_table") else {
-        return;
-    };
+    let clean = committed_clean_source_dir("test_comp", "lz4_table");
     let staging = stage_without_component(&clean, "nb-1-big", "Index.db");
     assert_every_location_unresolved_on_boundary(&staging.path().join("nb-1-big"), "Index.db")
         .await;
@@ -900,9 +927,7 @@ async fn absent_big_index_db_unresolves_every_location() {
 
 #[tokio::test]
 async fn absent_bti_rows_db_unresolves_every_location() {
-    let Some(clean) = clean_source_dir("test_da", "wide_table") else {
-        return;
-    };
+    let clean = committed_clean_source_dir("test_da", "wide_table");
     let staging = stage_without_component(&clean, "da-2-bti", "Rows.db");
     assert_every_location_unresolved_on_boundary(&staging.path().join("da-2-bti"), "Rows.db").await;
 }
@@ -914,9 +939,7 @@ async fn absent_bti_rows_db_unresolves_every_location() {
 
 #[tokio::test]
 async fn l2_3_clean_fixture_has_no_findings_and_no_fabricated_location() {
-    let Some(clean_dir) = clean_source_dir("test_comp", "lz4_table") else {
-        return;
-    };
+    let clean_dir = committed_clean_source_dir("test_comp", "lz4_table");
     let report = run_verify(&clean_dir).await;
     assert!(
         report.findings.is_empty(),
@@ -971,7 +994,7 @@ fn capped_resolution(res: &PartitionResolution) -> (Vec<String>, usize) {
 
 #[tokio::test]
 async fn l5_1_resolved_set_is_capped_and_names_the_omitted_count_end_to_end() {
-    let Some(clean_dir) = clean_source_dir("test_basic", "simple_table") else {
+    let Some(clean_dir) = fetched_clean_source_dir("test_basic", "simple_table") else {
         return;
     };
 

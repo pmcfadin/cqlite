@@ -37,12 +37,11 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
-fn require_fixtures_strict() -> bool {
-    matches!(
-        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
-        Ok("1") | Ok("true")
-    )
-}
+// No `CQLITE_REQUIRE_FIXTURES` gate in this file (roborev job 111 MEDIUM):
+// every case here stages from the git-COMMITTED `test_comp.lz4_table`
+// generation or synthesizes its own fixture, so there is nothing whose absence
+// could legitimately SKIP — `require_lz4_table()` fails closed unconditionally
+// and the env var would have no case to gate.
 
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
@@ -98,22 +97,27 @@ fn lz4_table_dir() -> Option<PathBuf> {
     })
 }
 
-fn require_lz4_table() -> Option<PathBuf> {
-    let dir = lz4_table_dir();
-    if dir.is_none() {
-        assert!(
-            !require_fixtures_strict(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table fixture is unavailable under any \
-             candidate base root: {:?}",
+/// The clean `test_comp.lz4_table` generation directory.
+///
+/// FAILS CLOSED UNCONDITIONALLY — never gated on `CQLITE_REQUIRE_FIXTURES`,
+/// never a SKIP (issue #3220; roborev job 111 MEDIUM). `lz4_table`'s `*.db`
+/// binaries are force-added to git (verified via `git ls-files`: 6 tracked
+/// `*.db` under `test-data/datasets/sstables/test_comp/lz4_table-*`), so their
+/// absence is a BROKEN CHECKOUT, not an unfetched dataset. The previous
+/// `Option` form let all 7 cases that need this fixture vanish from a green
+/// suite whenever `CQLITE_DATASETS_ROOT` was unset — and they could ALWAYS
+/// have run from the checkout. Same doctrine as
+/// `salvage_cli_tests.rs::resolve_committed_fixture`.
+fn require_lz4_table() -> PathBuf {
+    lz4_table_dir().unwrap_or_else(|| {
+        panic!(
+            "COMMITTED fixture test_comp.lz4_table is absent under every candidate base root \
+             ({:?}). Its *.db binaries are git-tracked, so this is a BROKEN CHECKOUT, not an \
+             unfetched dataset, and must never skip (issue #3220, fail-closed UNCONDITIONALLY, \
+             not gated on CQLITE_REQUIRE_FIXTURES).",
             candidate_base_roots()
-        );
-        eprintln!(
-            "SKIP: clean lz4_table fixture unavailable under any candidate base root ({:?}); \
-             fetch the corpus and export the CQLITE_DATASETS_ROOT line the script prints.",
-            candidate_base_roots()
-        );
-    }
-    dir
+        )
+    })
 }
 
 fn copy_generation(src: &Path, dst: &Path) {
@@ -214,9 +218,7 @@ fn parse_json(output: &Output) -> Value {
 
 #[test]
 fn s1_1_and_s4_1_all_healthy_sweep_is_all_ok_with_affirmative_zero_totals() {
-    let Some(clean) = require_lz4_table() else {
-        return;
-    };
+    let clean = require_lz4_table();
     let staging = TempDir::new().expect("create staging dir");
     copy_generation(&clean, &staging.path().join("ks1").join("table-a"));
     copy_generation(&clean, &staging.path().join("ks1").join("table-b"));
@@ -256,9 +258,7 @@ fn s1_1_and_s4_1_all_healthy_sweep_is_all_ok_with_affirmative_zero_totals() {
 
 #[test]
 fn s1_2_one_corrupted_copy_makes_exactly_that_row_corrupt() {
-    let Some(clean) = require_lz4_table() else {
-        return;
-    };
+    let clean = require_lz4_table();
     let staging = TempDir::new().expect("create staging dir");
     let healthy_dir = staging.path().join("ks1").join("healthy-table");
     let corrupt_dir = staging.path().join("ks1").join("corrupt-table");
@@ -305,9 +305,7 @@ fn s1_2_one_corrupted_copy_makes_exactly_that_row_corrupt() {
 
 #[test]
 fn s1_5_a_table_directory_with_two_generations_reports_two_rows() {
-    let Some(clean) = require_lz4_table() else {
-        return;
-    };
+    let clean = require_lz4_table();
     let staging = TempDir::new().expect("create staging dir");
     let table_dir = staging.path().join("ks1").join("multi-gen-table");
     // Two generations in the SAME directory: nb-1-big-* (healthy) and
@@ -351,9 +349,7 @@ fn s1_5_a_table_directory_with_two_generations_reports_two_rows() {
 
 #[test]
 fn s1_3_and_s2_1_filter_only_finding_is_degraded_and_does_not_fail_the_sweep() {
-    let Some(clean) = require_lz4_table() else {
-        return;
-    };
+    let clean = require_lz4_table();
     let staging = TempDir::new().expect("create staging dir");
     let dir = staging.path().join("ks1").join("filter-table");
     copy_generation(&clean, &dir);
@@ -423,9 +419,7 @@ fn s1_4_a_directory_with_no_data_db_is_an_unreadable_row_never_an_omission() {
 fn an_unreadable_keyspace_directory_is_its_own_unreadable_row() {
     use std::os::unix::fs::PermissionsExt;
 
-    let Some(clean) = require_lz4_table() else {
-        return;
-    };
+    let clean = require_lz4_table();
     let staging = TempDir::new().expect("create staging dir");
     // One healthy table under a READABLE keyspace, so the sweep also proves
     // it did not stop at the first unreadable keyspace.
@@ -552,9 +546,7 @@ fn s2_2_usage_error_on_a_missing_data_dir() {
 
 #[test]
 fn s3_2_jobs_bounds_concurrency_not_which_rows_appear() {
-    let Some(clean) = require_lz4_table() else {
-        return;
-    };
+    let clean = require_lz4_table();
     let staging = TempDir::new().expect("create staging dir");
     for i in 0..4 {
         let dir = staging.path().join("ks1").join(format!("table-{i}"));
@@ -689,9 +681,7 @@ fn s3_3_omitted_jobs_defaults_to_one_sequential() {
 
 #[test]
 fn s4_2_text_rendering_matches_the_json_rows() {
-    let Some(clean) = require_lz4_table() else {
-        return;
-    };
+    let clean = require_lz4_table();
     let staging = TempDir::new().expect("create staging dir");
     let healthy_dir = staging.path().join("ks1").join("healthy-table");
     let corrupt_dir = staging.path().join("ks1").join("corrupt-table");
