@@ -1663,9 +1663,9 @@ _gate_awk() {
     blocks = 0; full = 0; lite = 0; delta = 0; recert = 0; open = 0; unterminated = 0
     n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0; n_partial = 0
     n_anchor = 0; n_nested = 0; anchor_unresolved = 0; n_dirty = 0; n_tsdirty = 0
-    n_recert_anchor = 0; n_recert_verdict = 0; n_recert_components = 0
+    n_recert_anchor = 0; n_recert_verdict = 0; n_recert_components = 0; n_si = 0
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
-    v_mode = ""; v_anchor = ""; v_recert_anchor = ""; v_recert_verdict = ""; v_recert_components = ""
+    v_mode = ""; v_anchor = ""; v_recert_anchor = ""; v_recert_verdict = ""; v_recert_components = ""; v_si = ""
   }
   {
     gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
@@ -1694,6 +1694,12 @@ _gate_awk() {
     else if ($1 == "mode:" && $2 == "PARTIAL") { n_partial++ }
     else if ($1 == "RESULT:")         { n_result++; v_result = $2 }
     else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2 }
+    # summary-integrity: (#2874) is ONLY ever emitted with a FAIL value — a
+    # SIDE-lane component that detects a mid-run clobber of the pinned summary
+    # path; a healthy run omits the key entirely, it never carries PASS
+    # (#4268 roborev finding, High). Presence alone is therefore the refusal
+    # signal — see assert_pass_block.
+    else if ($1 == "summary-integrity:") { n_si++;  v_si = $2 }
     else if ($1 == "recert-anchor:")     { n_recert_anchor++;     v_recert_anchor = $2 }
     else if ($1 == "recert-verdict:")    { n_recert_verdict++;    v_recert_verdict = $2 }
     else if ($1 == "recert-components:") { n_recert_components++; v_recert_components = $2 }
@@ -1751,6 +1757,7 @@ _gate_awk() {
     print "n_recert_anchor=" n_recert_anchor
     print "n_recert_verdict=" n_recert_verdict
     print "n_recert_components=" n_recert_components
+    print "n_si=" n_si
     print "anchor_unresolved=" anchor_unresolved
     print "v_result=" v_result
     print "v_ti=" v_ti
@@ -1763,6 +1770,7 @@ _gate_awk() {
     print "v_recert_anchor=" v_recert_anchor
     print "v_recert_verdict=" v_recert_verdict
     print "v_recert_components=" v_recert_components
+    print "v_si=" v_si
   }
 ' <"$1"
 }
@@ -1837,9 +1845,9 @@ gate_parse_file() {
   GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_recert=""; GP_unterminated=""
   GP_n_mode=""; GP_n_partial=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
   GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""
-  GP_n_recert_anchor=""; GP_n_recert_verdict=""; GP_n_recert_components=""
+  GP_n_recert_anchor=""; GP_n_recert_verdict=""; GP_n_recert_components=""; GP_n_si=""
   GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
-  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""; GP_v_recert_anchor=""; GP_v_recert_verdict=""; GP_v_recert_components=""
+  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""; GP_v_recert_anchor=""; GP_v_recert_verdict=""; GP_v_recert_components=""; GP_v_si=""
   while IFS='=' read -r gp_k gp_v; do
     case "$gp_k" in
       blocks)       GP_blocks="$gp_v" ;;
@@ -1861,6 +1869,7 @@ gate_parse_file() {
       n_recert_anchor)     GP_n_recert_anchor="$gp_v" ;;
       n_recert_components) GP_n_recert_components="$gp_v" ;;
       n_recert_verdict) GP_n_recert_verdict="$gp_v" ;;
+      n_si)             GP_n_si="$gp_v" ;;
       anchor_unresolved) GP_anchor_unresolved="$gp_v" ;;
       v_result)     GP_v_result="$gp_v" ;;
       v_ti)         GP_v_ti="$gp_v" ;;
@@ -1873,13 +1882,14 @@ gate_parse_file() {
       v_recert_anchor)     GP_v_recert_anchor="$gp_v" ;;
       v_recert_components) GP_v_recert_components="$gp_v" ;;
       v_recert_verdict) GP_v_recert_verdict="$gp_v" ;;
+      v_si)             GP_v_si="$gp_v" ;;
     esac
   done <<GATE_PARSE
 $gp_out
 GATE_PARSE
   for gp_k in blocks full lite delta recert unterminated n_mode n_partial n_result n_ti n_commit \
               n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty \
-              n_recert_anchor n_recert_verdict n_recert_components; do
+              n_recert_anchor n_recert_verdict n_recert_components n_si; do
     eval "gp_v=\${GP_$gp_k}"
     case "$gp_v" in
       ''|*[!0-9]*)
@@ -2124,6 +2134,25 @@ assert_pass_block() {
       "A sub-gate spawned by an enclosing gate runs at the SAME tree, so the sha" \
       "binding cannot tell it apart; it certifies the gate's machinery, not this PR."
   fi
+
+  # summary-integrity: FAIL (#2874, roborev finding, High) is the one way a
+  # block's component rows can all read PASS/OPT-OUT while the run is NOT
+  # certifiable: a SIDE-lane writer detected a mid-run clobber of the pinned
+  # summary path, so the rows this block carries may not describe the tree
+  # that actually ran. It is in _GATE_NONCOMPONENT_KEYS precisely so
+  # _gate_component_rows never mistakes it for a component — which means
+  # nothing else ever looks at its value, so it must be checked here,
+  # unconditionally (require_pass=0's Case C anchor is exactly the case that
+  # would otherwise launder this: every row PASS, RESULT: FAIL, no row names
+  # the real cause). The key is NEVER emitted with a PASS value (only
+  # emitted at all when a clobber fired), so presence alone refuses.
+  if [ "$GP_n_si" != 0 ]; then
+    refuse_no_gate \
+      "The $what carries a 'summary-integrity:' line (value '$GP_v_si')." \
+      "A SIDE-lane component detected a mid-run clobber of the pinned summary path" \
+      "(#2874) — this block's component rows may not describe the tree that actually" \
+      "ran, so it cannot certify anything, even when every row it carries reads PASS."
+  fi
 }
 
 # --- the FULL gate of record (arg 3) -----------------------------------------
@@ -2258,6 +2287,12 @@ assert_single_key "$GP_n_commit" commit "full-gate block"
 assert_single_key "$GP_n_ts" tree-start "full-gate block"
 full_commit="$GP_v_commit"
 full_ts="$GP_v_ts"
+# Captured NOW, not read as $GP_v_result later: Case C's gate_parse_file call
+# on the recert block (below) OVERWRITES every GP_* global, including
+# GP_v_result, with the RECERT block's own RESULT — so the FAIL-attributability
+# check further down must compare against THIS anchor snapshot, never the
+# live global (#4268 roborev finding, High; caught by this diff's own tests).
+full_result="$GP_v_result"
 full_dirty="$GP_v_dirty"
 full_ndirty="$GP_n_dirty"
 full_tsdirty="$GP_v_tsdirty"
@@ -2339,13 +2374,39 @@ C)
   recert_anchor="$GP_v_recert_anchor"
   assert_covers recert-anchor "$recert_anchor" "$certified" "recert block" "certified sha"
 
-  # recert-components: is REPORTING evidence only (which <=2 components this
-  # pair certifies) — not itself a security boundary, since `recert-verdict:
-  # CERTIFIED` already means every component agent-gate.sh actually dispatched
-  # was PASS. Still validated as a single, present key: an absent/ambiguous
-  # value would make the printed evidence line lie about what was certified.
+  # recert-components: IS a security boundary (#4268 roborev finding, Medium —
+  # an earlier comment here claimed it was reporting evidence only, which was
+  # false): it is used VERBATIM below as the exemption set for the anchor's
+  # component accounting (a component named here is treated as "the failure
+  # being re-certified" rather than checked for PASS/OPT-OUT). agent-gate.sh
+  # enforces <=2 names and validates each against its live COMPONENTS array
+  # before it will even START a recert, but nothing here mirrors either bound
+  # — a pasted block whose `recert-components:` lists every component name
+  # would exempt every anchor failure from the check below and still reach
+  # `recert-verdict: CERTIFIED`/`PREMERGE: OK`. Bounded the same way the gate
+  # bounds it: 1 or 2 comma-separated names, each `[a-z0-9-]+`.
   assert_single_key "$GP_n_recert_components" recert-components "recert block"
   recert_components="$GP_v_recert_components"
+  _rc_comp_ifs_save="$IFS"; IFS=,
+  read -r -a _rc_comp_list <<<"$recert_components"
+  IFS="$_rc_comp_ifs_save"
+  if [ "${#_rc_comp_list[@]}" -eq 0 ] || [ "${#_rc_comp_list[@]}" -gt 2 ]; then
+    refuse_no_gate \
+      "The recert block's 'recert-components:' names ${#_rc_comp_list[@]} component(s) ('$recert_components')." \
+      "agent-gate.sh's own --recertify refuses to start on anything but 1 or 2 names;" \
+      "this assert must bound the same way, or a pasted block naming every component" \
+      "would exempt every anchor failure from the check below."
+  fi
+  for _rc_comp_check in "${_rc_comp_list[@]}"; do
+    case "$_rc_comp_check" in
+      ''|*[!a-z0-9-]*)
+        refuse_no_gate \
+          "The recert block's 'recert-components:' contains an invalid name" \
+          "('$_rc_comp_check' in '$recert_components') — component names are" \
+          "[a-z0-9-]+ only (agent-gate.sh's COMPONENTS array)."
+        ;;
+    esac
+  done
 
   # EVERY COMPONENT IN THE ANCHOR THAT THIS RECERT DOES *NOT* NAME MUST ALREADY
   # BE PASS OR OPT-OUT (#4268 AC; roborev finding, Medium).
@@ -2382,13 +2443,25 @@ C)
     || refuse_tool_failure awk "full-gate block's component rows"
   _rc_nrows=0
   _rc_offenders=""
+  _rc_named_nonpass=0
   while read -r _rc_name _rc_status; do
     [ -n "$_rc_name" ] || continue
     _rc_nrows=$((_rc_nrows + 1))
     # NAMED components are exempt: their status in the ANCHOR is the failure
     # being re-certified. The recert block's own `recert-verdict: CERTIFIED`
     # (asserted above) is what vouches for their RE-RUN.
-    case ",$recert_components," in *",$_rc_name,"*) continue ;; esac
+    case ",$recert_components," in
+      *",$_rc_name,"*)
+        # Tracked so the FAIL-attributability check below can tell a real
+        # anchor failure (named component genuinely non-PASS) apart from a
+        # cause with NO component-row representation at all — a SIDE-lane
+        # subshell failure (SIDE_LANE_EXIT != 0) forces OVERALL=FAIL with no
+        # row naming it, so every row, including the named ones, would
+        # otherwise read PASS (#4268 roborev finding, High).
+        [ "$_rc_status" = PASS ] || _rc_named_nonpass=1
+        continue
+        ;;
+    esac
     case "$_rc_status" in
       PASS|OPT-OUT) ;;
       SKIP)
@@ -2418,6 +2491,27 @@ GATE_RECERT_ROWS
       "#4266). Those component(s) were never re-run and are not certified by anything," \
       "so this pair covers less than the full component set. REMEDY: name them in" \
       "--components too (max 2), or re-run the FULL gate."
+  fi
+  # FAIL-ATTRIBUTABILITY (#4268 roborev finding, High): the checks above confirm
+  # every OTHER component is PASS/OPT-OUT, but say nothing about WHY the anchor's
+  # overall RESULT is FAIL in the first place. A SIDE-lane subshell failure
+  # (SIDE_LANE_EXIT != 0, scripts/agent-gate.sh) forces OVERALL=FAIL with no
+  # component row naming it at all — so an anchor can have RESULT: FAIL while
+  # EVERY row, including the named ones, reads PASS, and the checks above would
+  # accept it anyway (nothing to flag as an offender). A recert then "re-runs"
+  # components that were never the real cause and certifies a failure that was
+  # never attributed to anything. Require the FAIL to land on a NAMED component.
+  if [ "$full_result" = FAIL ] && [ "$_rc_named_nonpass" != 1 ]; then
+    refuse_no_gate \
+      "The recert ANCHOR's RESULT is FAIL, but every component named in" \
+      "'recert-components:' (here: $recert_components) already reads PASS in the" \
+      "anchor's own rows." \
+      "A recert exists to re-run the component(s) that actually failed. If none of the" \
+      "named components shows a non-PASS row, the anchor's FAIL has no component-row" \
+      "cause — e.g. a SIDE-lane subshell failure or a summary-integrity clobber — and" \
+      "re-running already-PASSing components certifies nothing about the real failure." \
+      "REMEDY: name the component(s) whose row is actually non-PASS, or re-run the" \
+      "FULL gate."
   fi
 
   # ...and the recert run's OWN provenance must cover the tree being merged —

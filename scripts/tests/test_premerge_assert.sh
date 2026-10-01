@@ -3993,11 +3993,33 @@ recert_summary() { local f="$1"; shift; recert_block "$@" >"$f"; }
 # cause, so nothing about it is actually delta-shaped.
 refused_recert() { refused_pair "$@"; }
 
+# anchor_rows <out> <extra-row>...: the standard Case C anchor (RESULT: FAIL,
+# commit/tree-start covering $CERTIFIED) with extra COMPONENT rows spliced in
+# INSIDE the block — immediately before `RESULT:`, because appending would land
+# them AFTER the end marker where no parser inside a block would ever see them
+# (a first cut did exactly that and every case passed vacuously).
+anchor_rows() {
+  local out="$1"; shift
+  full_summary "$out" "$C7" "$C12" PASS FAIL
+  local tmp="$out.rows" line
+  while IFS= read -r line; do
+    case "$line" in
+      "RESULT: "*) [ "$#" -gt 0 ] && printf '%s\n' "$@" ;;
+    esac
+    printf '%s\n' "$line"
+  done <"$out" >"$tmp"
+  mv "$tmp" "$out"
+}
+
 # The ANCHOR for every case below: a FULL block whose RESULT is FAIL (one
 # component failed — that is the whole reason a recert exists) but whose
-# tree-integrity/commit/tree-start all cover $CERTIFIED exactly.
+# tree-integrity/commit/tree-start all cover $CERTIFIED exactly. Carries a REAL
+# 'tooling-tests: FAIL' row (the component GOODRECERT below actually names) —
+# a bare RESULT: FAIL with no row attributing it would itself be the
+# unattributable-FAIL shape the High-severity attributability check (job 110
+# roborev finding) exists to refuse, which this fixture must NOT be.
 ANCHOR_RECERT_FAIL="$T/anchor-recert-fail.txt"
-full_summary "$ANCHOR_RECERT_FAIL" "$C7" "$C12" PASS FAIL
+anchor_rows "$ANCHOR_RECERT_FAIL" 'tooling-tests:     FAIL (88s)'
 GOODRECERT="$T/good-recert.txt"
 recert_summary "$GOODRECERT"
 
@@ -4193,24 +4215,6 @@ refused_recert "a RECERT summary passed as the THIRD argument, WITH a fourth -> 
 # certified and never mentioned. These cases pin the accounting in BOTH
 # directions: unaccounted failures refuse, and fully-accounted ones still pass.
 
-# anchor_rows <out> <extra-row>...: the standard Case C anchor (RESULT: FAIL,
-# commit/tree-start covering $CERTIFIED) with extra COMPONENT rows spliced in
-# INSIDE the block — immediately before `RESULT:`, because appending would land
-# them AFTER the end marker where no parser inside a block would ever see them
-# (a first cut did exactly that and every case passed vacuously).
-anchor_rows() {
-  local out="$1"; shift
-  full_summary "$out" "$C7" "$C12" PASS FAIL
-  local tmp="$out.rows" line
-  while IFS= read -r line; do
-    case "$line" in
-      "RESULT: "*) [ "$#" -gt 0 ] && printf '%s\n' "$@" ;;
-    esac
-    printf '%s\n' "$line"
-  done <"$out" >"$tmp"
-  mv "$tmp" "$out"
-}
-
 # R13a: TWO failures in the anchor, ONE named in the recert -> refuse, naming the
 # unaccounted one.
 anchor_rows "$T/anchor-two-fail.txt" 'clippy:            FAIL (61s)' 'tooling-tests:     FAIL (88s)'
@@ -4255,7 +4259,7 @@ fi
 # R13e: OPT-OUT is accepted alongside PASS — the check is SET membership, not a
 # literal-PASS compare (file-size under CQLITE_ALLOW_FILE_GROWTH=1 is the live
 # instance of a non-PASS-but-legal token).
-anchor_rows "$T/anchor-other-optout.txt" 'file-size:         OPT-OUT (0s)'
+anchor_rows "$T/anchor-other-optout.txt" 'file-size:         OPT-OUT (0s)' 'tooling-tests:     FAIL (88s)'
 if run 0 "recert: an anchor whose non-named OTHER component is OPT-OUT -> exit 0" \
   2421 "$CERTIFIED" "$T/anchor-other-optout.txt" "$GOODRECERT"; then
   ok "recert: OPT-OUT is accepted for a non-named component (set membership, not a literal PASS)"
@@ -4267,7 +4271,7 @@ fi
 {
   while IFS= read -r _r13_line; do
     case "$_r13_line" in
-      "file-size:"*|"smoke:"*) continue ;;
+      "file-size:"*|"smoke:"*|"tooling-tests:"*) continue ;;
     esac
     printf '%s\n' "$_r13_line"
   done <"$ANCHOR_RECERT_FAIL"
@@ -4275,6 +4279,40 @@ fi
 refused_recert "recert: an anchor carrying ZERO component status rows -> refuse (unmeasured, not clean)" \
   "$T/anchor-no-rows.txt" "$GOODRECERT" \
   "ZERO component status rows"
+
+# --- Case R14: summary-integrity: (job 110 roborev finding, High) -----------
+# A SIDE-lane mid-run clobber of the pinned summary path (#2874) is ONLY ever
+# emitted as 'summary-integrity: FAIL (...)' — never PASS — so presence alone
+# must refuse, even though every component row the block carries looks clean.
+anchor_rows "$T/anchor-summary-integrity.txt" 'tooling-tests:     FAIL (88s)' \
+  'summary-integrity: FAIL (clobber-detected; detected-after-component: fmt)'
+refused_recert "recert: anchor carries a 'summary-integrity:' line -> refuse (mid-run clobber, #2874) even with a clean-looking row set" \
+  "$T/anchor-summary-integrity.txt" "$GOODRECERT" \
+  "carries a 'summary-integrity:' line"
+
+# --- Case R15: recert-components is bounded like the gate bounds it (job 110
+# roborev finding, Medium) — used VERBATIM as the row-accounting exemption
+# set, so an unbounded value could exempt every anchor failure from R13's
+# checks and still reach recert-verdict: CERTIFIED.
+recert_summary "$T/recert-3comp.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: clippy,core-tests,fmt)" "clippy,core-tests,fmt"
+refused_recert "recert: recert-components naming 3 components -> refuse (the bound is 1 or 2, same as agent-gate.sh's own --recertify)" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-3comp.txt" "names 3 component(s)"
+recert_summary "$T/recert-badchar.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: bad!name)" "bad!name"
+refused_recert "recert: recert-components containing an invalid character -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-badchar.txt" "invalid name"
+
+# --- Case R16: FAIL-attributability (job 110 roborev finding, High) ---------
+# A SIDE-lane subshell failure (SIDE_LANE_EXIT != 0) forces OVERALL=FAIL with
+# NO component row naming it — so an anchor can carry RESULT: FAIL while the
+# NAMED component's own row reads PASS. R13's offender checks have nothing to
+# flag (every OTHER component is PASS too), so without this check the pair
+# would reach PREMERGE: OK despite the FAIL having no attributable cause.
+anchor_rows "$T/anchor-unattributable.txt" 'tooling-tests:     PASS (12s)'
+refused_recert "recert: anchor RESULT: FAIL but the NAMED component already reads PASS -> refuse (unattributable FAIL)" \
+  "$T/anchor-unattributable.txt" "$GOODRECERT" \
+  "already reads PASS in the"
 
 # --- Case R12: usage is unchanged (still 3 or 4 args; recert never adds a 5th)
 if run 3 "usage: five arguments -> exit 3 (a recert pair is still exactly 4 args)" \
@@ -4322,7 +4360,12 @@ assert_src_absent_fixed \
 # +6 for Case R13 (#4268 roborev round: the anchor's per-component accounting),
 # measured the same way — the exact assertion count that section adds — and
 # host-invariant for the same reason.
-CASE_FLOOR=240
+#
+# +4 for Cases R14-R16 (#4268 job-110 roborev round: summary-integrity
+# presence, recert-components bounding, FAIL-attributability), same
+# measurement method, same host-invariance (no real-git/timeout/systemd
+# dependency — pure fixture text).
+CASE_FLOOR=244
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

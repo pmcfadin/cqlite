@@ -89,7 +89,6 @@ _RECERT_DOM_TOOLS=('tools/*')
 _RECERT_DOM_TESTDATA=('test-data/*')
 _RECERT_DOM_DOCS_REPORTS=('docs/reports/*')
 _RECERT_DOM_DOCS_ANY=('docs/*')
-_RECERT_DOM_WEBSITE=('website/*')
 _RECERT_DOM_XTASK=('xtask/*')
 _RECERT_DOM_LABKITS=('easy-db-lab-kits/*')
 
@@ -162,8 +161,17 @@ _recert_component_domain_patterns_raw() {
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     roborev-lints)
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" '.github/*' 'scripts/*' ;;
+    # test-data/* (job 110 roborev finding, Medium): added for every member of
+    # this arm that DATASET_COMPONENTS (scripts/agent-gate.sh) lists as a real
+    # corpus reader — core-tests, tombstones-scan, scan-offload-guard,
+    # work-counters-guard, memory-budget, legacy-heuristics,
+    # feature-iso-delta-scan, write-tests. byte-budget-guard, arrow-parity-guard,
+    # feature-iso-parquet, compaction-byte-parity, bti-multiclustering and
+    # all-features-check are NOT in DATASET_COMPONENTS, so this over-includes
+    # for them — the safe direction this file already takes elsewhere (only
+    # ever REFUSES an eligible recert, never admits an ineligible one).
     core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|memory-budget|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|all-features-check)
-      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
     # oom-audit (job 106 roborev finding, Medium): split out of the shared
     # core/cargo arm above — it runs `cargo run -p xtask -- oom-audit
     # --enforce` (scripts/agent-gate.sh), so xtask/* is a real subject the
@@ -176,39 +184,59 @@ _recert_component_domain_patterns_raw() {
     # is the cargo PACKAGE name, not a repo path — that crate lives at tests/
     # (tests/Cargo.toml declares `name = "cqlite-integration-tests"`), so the old
     # pattern matched nothing in the tree and left this component fail-open.
+    # integration-tests also DATASET_COMPONENTS-mapped (job 110 Medium) — see
+    # the test-data/* comment on the shared core arm above.
     integration-tests)
-      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'tests/*' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'tests/*' "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
     # format-compat (job 106 roborev finding, Medium): the component runs
     # `cargo test --package format-compatibility-tests`, whose sources are
     # tests/format-compatibility/** — 'tools/format-validator/*' is an
     # unrelated crate and was never a real subject of this component.
+    # CARGO_ANY added (job 110 Medium): this arm ran cargo but never carried it.
     format-compat)
-      printf '%s\n' 'tests/format-compatibility/*' "${_RECERT_DOM_CORE[@]}" ;;
+      printf '%s\n' 'tests/format-compatibility/*' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     cli-tests|smoke)
-      printf '%s\n' "${_RECERT_DOM_CLI[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_CLI[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     query-semantics-oracle)
-      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'test-data/query-semantics-oracle.json' ;;
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'test-data/query-semantics-oracle.json' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    # flight-tests is DATASET_COMPONENTS-mapped; flight-query-semantics-oracle
+    # is not, but shares this arm — over-including TESTDATA for it is the safe
+    # direction (job 110 Medium, both findings: CARGO_ANY + test-data/* gaps).
     flight-query-semantics-oracle|flight-tests)
-      printf '%s\n' "${_RECERT_DOM_FLIGHT[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_FLIGHT[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+    # python-bindings (job 110 Medium): maturin builds the extension via an
+    # INDIRECT cargo invocation (scripts/agent-gate.sh's _fm_component_class:
+    # 'indirect:maturin') and is DATASET_COMPONENTS-mapped (pytest reads the
+    # corpus) — both CARGO_ANY and test-data/* were missing.
     python-bindings)
-      printf '%s\n' "${_RECERT_DOM_PY[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_PY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+    # node-bindings (job 110 Medium): napi's `npm run build` invokes cargo
+    # build INDIRECTLY ('indirect:npm run build (napi)') and is
+    # DATASET_COMPONENTS-mapped — same two gaps as python-bindings.
     node-bindings)
-      printf '%s\n' "${_RECERT_DOM_NODE[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_NODE[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+    # binding-rust-tests runs cargo directly; binding-unwind-profile does not
+    # (_fm_component_class: no-cargo) but shares this arm — over-including is
+    # the safe direction (job 110 Medium).
     binding-rust-tests|binding-unwind-profile)
-      printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     delivery-telemetry)
       printf '%s\n' 'scripts/delivery-telemetry.py' 'docs/reports/delivery-telemetry.jsonl' ;;
     parity-report)
       printf '%s\n' "${_RECERT_DOM_TOOLS[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_DOCS_REPORTS[@]}" ;;
+    # operator-metrics-doc (job 110 Medium): runs `cargo run -q -p cqlite-core
+    # --example gen_operator_metrics_doc` — CARGO_ANY was missing.
     operator-metrics-doc)
-      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_DOCS_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_DOCS_ANY[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     # kit-dashboard-drift (job 106 roborev finding, Medium): it reads
     # easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json and runs
     # `cargo test -p cqlite-core --test kit_dashboard_metric_drift`
     # (scripts/agent-gate.sh) — docs/* and website/* are not subjects at all;
     # the real ones are the kit subtree and cqlite-core.
+    # CARGO_ANY added (job 110 Medium): runs `cargo test -p cqlite-core --test
+    # kit_dashboard_metric_drift`, same gap as the job-106 path fix above.
     kit-dashboard-drift)
-      printf '%s\n' "${_RECERT_DOM_LABKITS[@]}" "${_RECERT_DOM_CORE[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_LABKITS[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     dep-duplicates)
       printf '%s\n' "${_RECERT_DOM_CARGO_ANY[@]}" 'scripts/ci/check-dep-duplicates.sh' 'scripts/ci/dep-duplicates-baseline.txt' ;;
     features-load-bearing)

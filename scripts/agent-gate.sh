@@ -25535,7 +25535,12 @@ _recertify_refuse() {
 #      makes that a DECIDED, reviewed outcome on the common case (a diff
 #      touching no harness path) rather than an unmeasured gap — refusing it
 #      would make --recertify unconditionally unusable on exactly the PRs
-#      #4266 exists to speed up.
+#      #4266 exists to speed up. ALSO (#4268 roborev finding, High,
+#      attributability): if the anchor's overall RESULT is FAIL, at least one
+#      NAMED component must itself be non-PASS in the anchor — otherwise the
+#      FAIL has no component-row cause (a SIDE-lane subshell failure, e.g.)
+#      and starting a recert would "re-certify" components that were never
+#      the real cause.
 #   5. anchor tree identity: `tree-end:` parses to a sha/dirty/digest, dirty is
 #      `no`, and `tree-integrity: PASS` is present.
 #   6. CURRENT tree matches that identity exactly (same sha, same digest, not
@@ -25631,6 +25636,31 @@ run_recertify_preflight() {
     done
   fi
 
+  # ---- 4b: FAIL-attributability (#4268 roborev finding, High) ---------------
+  # A SIDE-lane subshell failure (SIDE_LANE_EXIT != 0) forces OVERALL=FAIL with
+  # NO component row naming it — so an anchor can carry RESULT: FAIL while
+  # EVERY row, including the named ones, reads PASS, and check 4 above would
+  # accept it (nothing to flag as an offender). Require the FAIL to land on a
+  # named component — mirrors scripts/flow/premerge-assert.sh's identical
+  # check on the pasted-PR side.
+  if [ -z "$reason" ]; then
+    local _rc_overall _rc_named_nonpass=0 _rc_nc _rc_nline _rc_nst _rc_nignored _rc_nrest
+    _rc_overall=$(grep -E '^RESULT: ' "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1 | awk '{print $2}')
+    if [ "$_rc_overall" = FAIL ]; then
+      for _rc_nc in "${rc_list[@]}"; do
+        _rc_nline=$(grep -E "^${_rc_nc}: " "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1)
+        # Herestring, not `printf | awk` (#4061 sigpipe ratchet: a bash builtin
+        # writer followed by a pipe is the flagged shape) — read splits the
+        # same whitespace-delimited fields with no pipe at all.
+        read -r _rc_nignored _rc_nst _rc_nrest <<<"$_rc_nline"
+        [ "$_rc_nst" = PASS ] || _rc_named_nonpass=1
+      done
+      if [ "$_rc_named_nonpass" != 1 ]; then
+        reason="anchor RESULT is FAIL, but every named component (${rc_list[*]}) already reads PASS in the anchor — the FAIL has no component-row cause, so this recert would certify nothing about the real failure"
+      fi
+    fi
+  fi
+
   # ---- 5: anchor tree identity (dirty:no, tree-integrity: PASS) -------------
   local _rc_a_sha="" _rc_a_dirty="" _rc_a_digest=""
   if [ -z "$reason" ]; then
@@ -25645,6 +25675,15 @@ run_recertify_preflight() {
       reason="anchor tree was dirty (dirty: $_rc_a_dirty) — a recert anchor must be a clean, committed tree"
     elif ! grep -qE '^tree-integrity: PASS' "$RECERT_ANCHOR_FILE" 2>/dev/null; then
       reason="anchor tree-integrity is not PASS — cannot trust the anchor's identity"
+    # summary-integrity: (#2874) is ONLY ever emitted with a FAIL value — a
+    # SIDE-lane component detected a mid-run clobber of the pinned summary
+    # path, so the anchor's component rows may not describe the tree that
+    # actually ran (#4268 roborev finding, High; mirrors
+    # scripts/flow/premerge-assert.sh's assert_pass_block check on the
+    # pasted-PR side — a divergence here would let the gate START a recert
+    # that side would then refuse anyway).
+    elif grep -qE '^summary-integrity:' "$RECERT_ANCHOR_FILE" 2>/dev/null; then
+      reason="anchor carries a 'summary-integrity:' line — a mid-run clobber of the pinned summary path was detected (#2874); this anchor's rows cannot be trusted"
     fi
   fi
 
