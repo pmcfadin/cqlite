@@ -321,6 +321,20 @@ fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
     })
 }
 
+/// A path's final component, rendered lossily for an operator-facing cause.
+///
+/// `to_string_lossy`, never `to_str().unwrap_or("<non-utf8 name>")` (roborev
+/// I2, #4194): the placeholder named NO file, so a cause carrying it could
+/// not be acted on — and a non-UTF-8 generation is exactly the case most in
+/// need of being named. Lossy rendering keeps every ASCII byte of the name
+/// (so the `-Data.db` suffix and the generation number survive) and
+/// substitutes U+FFFD only for the invalid bytes.
+fn file_name_lossy(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
 /// Classify one table directory's `read_dir` entries into the `*-Data.db`
 /// paths found and the unreadable-entry count/last error (roborev job 4376's
 /// injectable seam). Takes `io::Result<PathBuf>` rather than
@@ -347,10 +361,23 @@ fn classify_table_dir_entries(
                 // is what makes the drop attributable at all: `is_file()` &&
                 // name meant the code could not even tell that what it dropped
                 // was a `*-Data.db`.
+                // RAW BYTES, NOT `&str` (roborev important finding I2,
+                // #4194). `and_then(|n| n.to_str())` returned `None` for a
+                // filename that is not valid UTF-8, `unwrap_or(false)` made
+                // the name test false, and the entry was `continue`d below
+                // with NO row, NO unreadable count and NO effect on the exit
+                // code: `sweep` reported success over a directory it had not
+                // fully swept. A filename is an `OsStr`, and nothing about a
+                // Cassandra generation requires it to be UTF-8 — a restore
+                // from a foreign filesystem, or a locale-mangled copy, is
+                // enough. `as_encoded_bytes` is the portable byte view (it
+                // is NOT OS-specific like `OsStrExt`), and comparing a
+                // suffix of bytes is exact: `-Data.db` is pure ASCII, and
+                // UTF-8 is self-synchronising, so a byte-suffix match can
+                // never split a multi-byte character.
                 let is_data_db = p
                     .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.ends_with("-Data.db"))
+                    .map(|n| n.as_encoded_bytes().ends_with(b"-Data.db"))
                     .unwrap_or(false);
                 if !is_data_db {
                     continue;
@@ -362,21 +389,13 @@ fn classify_table_dir_entries(
                     // nothing about it would be the same silent drop.
                     Ok(_) => {
                         unreadable_file_entries += 1;
-                        last_file_entry_error = Some(format!(
-                            "{} is not a regular file",
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("<non-utf8 name>")
-                        ));
+                        last_file_entry_error =
+                            Some(format!("{} is not a regular file", file_name_lossy(&p)));
                     }
                     Err(e) => {
                         unreadable_file_entries += 1;
-                        last_file_entry_error = Some(format!(
-                            "cannot stat {}: {e}",
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("<non-utf8 name>")
-                        ));
+                        last_file_entry_error =
+                            Some(format!("cannot stat {}: {e}", file_name_lossy(&p)));
                     }
                 }
             }

@@ -254,3 +254,99 @@ fn table_dir_entries_all_readable_reports_zero_unreadable() {
     assert_eq!(unreadable_file_entries, 0);
     assert_eq!(last_file_entry_error, None);
 }
+
+// A `*-Data.db` whose FILENAME is not valid UTF-8 is a real generation and
+// must be swept, not silently skipped (roborev important finding I2, #4194).
+//
+// The pre-fix name test was `file_name().and_then(|n| n.to_str())`, so a
+// non-UTF-8 name made `to_str()` return `None`, `unwrap_or(false)` made the
+// filter false, and the entry was `continue`d with NO row, NO unreadable
+// count and NO effect on the exit code — `sweep` reported success over a
+// directory it had not fully swept. That is the same silent-drop class the
+// NAME-FIRST-THEN-STAT ordering above exists to close, reached through the
+// name test itself.
+//
+// Unix-only: the invalid byte sequence is constructed through
+// `OsStrExt::from_bytes`, and a Windows filename is UTF-16, so the defect
+// does not exist there in this form.
+#[cfg(unix)]
+#[test]
+fn classify_recognises_a_data_db_with_a_non_utf8_filename() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = std::env::temp_dir().join(format!(
+        "cqlite-sweep-unittest-nonutf8-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    // 0xFF is not a valid UTF-8 byte in any position, so this name has no
+    // `&str` view at all.
+    let name = std::ffi::OsStr::from_bytes(b"nb-1-\xffbig-Data.db");
+    let data_db = dir.join(name);
+    std::fs::write(&data_db, b"").expect("create non-UTF-8 Data.db stand-in");
+    assert!(
+        data_db.file_name().and_then(|n| n.to_str()).is_none(),
+        "the premise of this case is a filename with NO UTF-8 view"
+    );
+
+    let (data_dbs, unreadable, last_err) =
+        classify_table_dir_entries(vec![Ok(data_db.clone())].into_iter());
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        data_dbs,
+        vec![data_db],
+        "a `*-Data.db` with a non-UTF-8 name is a generation and must be swept"
+    );
+    assert_eq!(
+        unreadable, 0,
+        "it is readable, so it is not an error either"
+    );
+    assert_eq!(last_err, None);
+}
+
+// The companion: a NON-Data.db entry with a non-UTF-8 name stays out of
+// scope. Matching on raw bytes must not widen what the sweep claims.
+#[cfg(unix)]
+#[test]
+fn classify_still_ignores_a_non_data_db_with_a_non_utf8_filename() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let other = PathBuf::from("/nonexistent-cqlite-4194/ks/tbl")
+        .join(std::ffi::OsStr::from_bytes(b"nb-1-\xffbig-Index.db"));
+    let (data_dbs, unreadable, last_err) = classify_table_dir_entries(vec![Ok(other)].into_iter());
+    assert!(data_dbs.is_empty());
+    assert_eq!(unreadable, 0, "a non-Data.db name is out of scope");
+    assert!(last_err.is_none());
+}
+
+// An UNSTATTABLE `*-Data.db` with a non-UTF-8 name must still be COUNTED
+// and its cause recorded — and the cause must not render as the
+// placeholder `<non-utf8 name>`, which named no file at all and so could
+// not be acted on.
+#[cfg(unix)]
+#[test]
+fn classify_names_an_unstattable_non_utf8_data_db_in_its_cause() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let missing = PathBuf::from("/nonexistent-cqlite-4194/ks/tbl")
+        .join(std::ffi::OsStr::from_bytes(b"nb-1-\xffbig-Data.db"));
+    let (data_dbs, unreadable, last_err) =
+        classify_table_dir_entries(vec![Ok(missing)].into_iter());
+    assert!(data_dbs.is_empty());
+    assert_eq!(unreadable, 1, "it must be COUNTED, not dropped");
+    let cause = last_err.expect("the stat failure must be recorded with a cause");
+    assert!(
+        cause.contains("cannot stat") && cause.contains("big-Data.db"),
+        "the cause must name the file lossily rather than as an anonymous \
+         placeholder: {cause}"
+    );
+    assert!(
+        !cause.contains("<non-utf8 name>"),
+        "a placeholder naming no file cannot be acted on: {cause}"
+    );
+}

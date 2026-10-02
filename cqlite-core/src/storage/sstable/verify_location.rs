@@ -366,13 +366,21 @@ pub enum BoundarySource<'a> {
 /// only enforces ascending order; a single corrupted offset (e.g. an MSB set)
 /// is ascending yet points past EOF") transfers here verbatim.
 pub fn first_order_violation(entries: &[BoundaryEntry]) -> Option<usize> {
-    // An explicit index loop, not `windows(2).position(..)`: both of those are
-    // primitives `test_verify_location_no_resync_scan.sh` refuses in this
-    // file, and the clearer form here needs no waiver at all.
-    for i in 1..entries.len() {
-        if entries[i].0 <= entries[i - 1].0 {
-            return Some(i);
+    // A running `prev`, deliberately: the slice-pairs and closure-predicate
+    // search primitives `test_verify_location_no_resync_scan.sh` refuses in
+    // this file are the idiomatic alternatives, and this form needs no waiver
+    // for any of them — while the obvious bare indexed `for` loop tripped
+    // clippy's `manual_find`, which is what pushed the first two attempts
+    // toward a waiver. (Naming those primitives literally here would itself
+    // trip the guard, which is purely lexical.)
+    let mut prev: Option<u64> = None;
+    for (i, (offset, _)) in entries.iter().enumerate() {
+        if let Some(previous) = prev {
+            if *offset <= previous {
+                return Some(i);
+            }
         }
+        prev = Some(*offset);
     }
     None
 }
