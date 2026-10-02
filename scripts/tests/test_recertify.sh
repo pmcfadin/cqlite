@@ -411,6 +411,61 @@ else
       bad "R2: expected exit 2 + a named 'not found' cause, got rc=$RC"
     fi
 
+    # R2b/R2c (#4268 roborev finding, High): SUMMARY_FILE must never resolve to
+    # the SAME file as RECERT_ANCHOR_FILE — the startup INCOMPLETE sentinel
+    # truncates whatever SUMMARY_FILE names before run_recertify_preflight ever
+    # reads the anchor, so a collision silently destroys the anchor's PASS
+    # content even though the run then fails closed on check 3's full-SUMMARY
+    # test. R2b proves the EXPLICIT-collision guard (an AGENT_GATE_SUMMARY_FILE
+    # pinned to the same path as --recertify's own argument); R2c proves the
+    # single most natural footgun: RECERTIFY has no distinct default path of its
+    # own (by design — it shares the full gate's default exactly the way a bare
+    # `--only` run does, so unspecified-summary invocations exclude each other's
+    # leftover artifacts from tree-integrity's dirty scan), so anchoring at the
+    # checkout's OWN default full-gate recovery path with NO
+    # AGENT_GATE_SUMMARY_FILE override collides BY DEFAULT and must refuse too.
+    collide_anchor="$fixture/collide-anchor.txt"
+    cp "$anchor" "$collide_anchor"
+    run_recert_env "$fixture" "$collide_anchor" file-size "AGENT_GATE_SUMMARY_FILE=$collide_anchor"
+    if [ "$RC" -eq 2 ] && grep -qF 'resolves to the SAME file' <<<"$OUT"; then
+      ok "R2b: an explicit SUMMARY_FILE==anchor collision REFUSES (exit 2, named cause)"
+    else
+      bad "R2b: expected exit 2 + 'resolves to the SAME file', got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+    if grep -qE '^RESULT: PASS' "$collide_anchor" 2>/dev/null; then
+      ok "R2b: the anchor file's original PASS content survives the refused run untouched"
+    else
+      bad "R2b: the anchor file was mutated/truncated by the refused run — data-loss footgun reproduced"
+      echo "------- anchor after run -------"; cat "$collide_anchor" 2>/dev/null; echo "---------------------------------"
+    fi
+    # Not an --only/--recertify-recognized artifact name (unlike the
+    # default-path case below), so it is never self-excluded from
+    # tree-integrity's dirty scan — leaving it behind would dirty the SHARED
+    # fixture for every later case that reuses it.
+    rm -f "$collide_anchor"
+
+    default_path_anchor="$fixture/.agent-gate-summary.txt"
+    cp "$anchor" "$default_path_anchor"
+    run_recert "$fixture" "$default_path_anchor" file-size
+    if [ "$RC" -eq 2 ] && grep -qF 'resolves to the SAME file' <<<"$OUT"; then
+      ok "R2c: anchoring at the checkout's own default full-gate summary path, with NO override, REFUSES by default (the collision the finding describes, unpinned)"
+    else
+      bad "R2c: expected exit 2 + 'resolves to the SAME file' anchoring at the default full-gate summary path, got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+    if grep -qE '^RESULT: PASS' "$default_path_anchor" 2>/dev/null; then
+      ok "R2c: the default-path anchor's original PASS content survives the refused run untouched"
+    else
+      bad "R2c: the default-path anchor was mutated/truncated by the refused run — data-loss footgun reproduced"
+      echo "------- anchor after run -------"; cat "$default_path_anchor" 2>/dev/null; echo "---------------------------------"
+    fi
+    # Self-excluded by name from tree-integrity's dirty scan (it IS the
+    # checkout-default summary path), but removed anyway so this synthetic
+    # PASS content can never be misread as a REAL prior gate's recovery
+    # artifact by a later case in this same shared fixture.
+    rm -f "$default_path_anchor"
+
     # R3: >2 components -> REFUSED.
     run_recert "$fixture" "$anchor" "file-size,fmt,clippy"
     if [ "$RC" -eq 2 ] && grep -qE '^error: .*must name 1 or 2' <<<"$OUT"; then
