@@ -34,11 +34,36 @@ fn fixture_dir_or_skip() -> Option<std::path::PathBuf> {
 ///
 /// `hash_count` (the header field that is a PURE function of `fp_chance`
 /// alone, `bloom.rs`'s `BloomFilter::new`) matches the fixture's ORIGINAL
-/// `Filter.db` exactly once the injected schema value matches this fixture's
-/// real write-time `fp_chance` (`0.05`, empirically determined — reverse
-/// engineering the exact hash-count formula against the real byte, since no
-/// committed schema states the option explicitly). That confirms the
-/// `fp_chance` recovery half of R3.1.
+/// `Filter.db` exactly when `0.05` is injected. No committed schema states the
+/// option, so the value was found by reverse-engineering CQLite's hash-count
+/// selection against the real Cassandra-written byte.
+///
+/// ## Declared, unresolved discrepancy — `0.05` is NOT claimed to be the
+/// write-time value
+///
+/// The generation's own Cassandra-written `sstablemetadata` sidecar
+/// (`<gen>-Statistics.db.txt`) records `Bloom Filter FP chance: 0.01`, and
+/// every other corpus table agrees with its own sidecar the same way
+/// (`test_comp.lz4_table`: sidecar 0.01, `hash_count` 5;
+/// `test_basic.composite_key_table`: sidecar 0.1, `hash_count` 3). CQLite's
+/// `FilterWriter`, given those same values, selects 7 and 4 respectively — so
+/// CQLite's `fp_chance` → `hash_count` step selection does NOT agree with the
+/// `BloomCalculations` table Cassandra used to write these files, by one step
+/// in both directions tested.
+///
+/// Resolving that needs the pinned `cassandra-5.0.8`
+/// `utils/BloomCalculations.java` (CLAUDE.md #3041: a CQLite `file:line` is
+/// never format authority here), which is out of scope for #4197 — rebuild
+/// drives the EXISTING `FilterWriter`, it does not define the bloom spec. So
+/// this test deliberately asserts only what it can stand behind:
+///   * the `recovered` CLASSIFICATION (the value came from the schema, not
+///     from a hardcoded default) — spec R3.1's actual requirement, and
+///   * MEMBERSHIP parity with the original (no false negatives) — the
+///     correctness property a bloom filter owes its reader,
+/// plus the `hash_count` equality as a today's-behaviour regression net at the
+/// injected value. It does NOT claim `0.05` is this fixture's write-time
+/// `fp_chance`; the sidecar says otherwise and the sidecar is the Cassandra
+/// oracle.
 ///
 /// Full byte-identity does NOT hold here, and this is a genuine finding
 /// beyond design.md §D2's own table (discovered empirically while validating
@@ -99,8 +124,11 @@ async fn filter_fp_chance_recovered_and_matches_original_membership() {
     assert_eq!(
         hash_count(&original),
         hash_count(&rebuilt),
-        "{KEYSPACE}.{TABLE}: hash_count (a pure function of fp_chance alone) must match once \
-         the recovered fp_chance equals the fixture's real write-time value"
+        "{KEYSPACE}.{TABLE}: hash_count (a pure function of fp_chance alone) must still match \
+         the Cassandra-written original at the injected fp_chance. See this test's doc comment: \
+         0.05 is the value at which CQLITE's FilterWriter reproduces Cassandra's byte, NOT the \
+         0.01 the generation's own sstablemetadata sidecar records — a change to CQLite's \
+         fp_chance -> hash_count selection will red this assertion, and that is the point"
     );
 
     // Content parity: every partition key actually in this SSTable must
