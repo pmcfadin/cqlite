@@ -503,6 +503,16 @@ mk_block "$S9D" " DELTA" run-1 PASS "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATIO
 expect "9.2 a DELTA block under --mode only is REFUSED by name" \
   COULD-NOT-MEASURE 4 "delta" -- "$S9D" --mode only --component fmt --run-id run-1
 
+# #4268 roborev finding, Medium: a RECERT block must be refused by name too,
+# the same way LITE/DELTA already are — _OPEN_RE/_CLOSE_RE used to accept
+# only full/LITE/DELTA, so a RECERT block fell through to "not a recognised
+# summary marker" instead of naming the real cause.
+S9R="$TMP/recert.txt"
+mk_block "$S9R" " RECERT" run-1 PASS "MODE: recertify (HOST-FAULT RE-CERTIFICATION of clippy)" \
+  "$(comp_line clippy PASS 2s)"
+expect "9.3 a RECERT block under --mode only is REFUSED by name" \
+  COULD-NOT-MEASURE 4 "recert" -- "$S9R" --mode only --component clippy --run-id run-1
+
 # TRAP 1: `--only` takes a COMMA-SEPARATED LIST (agent-gate.sh's `--only` arg), so a
 # membership test written as equality REDS a correct `--only fmt,clippy` run.
 S9C="$TMP/only-list.txt"

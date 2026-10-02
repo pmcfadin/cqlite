@@ -830,8 +830,9 @@ trunc_inc="$TMP/trunc-inc2.txt"
   echo "RESULT: INCOMPLETE (gate did not finish)"; } > "$trunc_inc"
 mk_beat "$trunc_inc.heartbeat" r1 5
 expect_reader "11c.2d control: truncated INCOMPLETE still consults the beat" RUNNING 2 "" -- "$trunc_inc"
-# Controls: all three real marker dialects must still be accepted.
-for m in "AGENT-GATE SUMMARY" "AGENT-GATE LITE SUMMARY" "AGENT-GATE DELTA SUMMARY"; do
+# Controls: all four real marker dialects must still be accepted (#4268
+# roborev finding, Medium: RECERT added alongside full/LITE/DELTA).
+for m in "AGENT-GATE SUMMARY" "AGENT-GATE LITE SUMMARY" "AGENT-GATE DELTA SUMMARY" "AGENT-GATE RECERT SUMMARY"; do
   f="$TMP/mk-$(echo "$m" | tr ' ' '_').txt"
   { echo "==== $m ===="; echo "run-id: run-x"; echo "RESULT: PASS"; echo "==== END $m ===="; } > "$f"
   expect_reader "11c.3 control: '$m' framing is accepted" COMPLETE 0 "" -- "$f"

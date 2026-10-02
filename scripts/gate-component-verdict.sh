@@ -472,8 +472,8 @@ fi
 # it needs line numbers to slice with. A non-unique or inverted extent is a REFUSAL, never
 # a guess at which block was meant.
 # ---------------------------------------------------------------------------
-_OPEN_RE='^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
-_CLOSE_RE='^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
+_OPEN_RE='^==== AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$'
+_CLOSE_RE='^==== END AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$'
 _n_open=$(_count_re "$_OPEN_RE" "$SNAP")  || cnm "block-extent-unmeasurable; the opener scan failed"
 _n_close=$(_count_re "$_CLOSE_RE" "$SNAP") || cnm "block-extent-unmeasurable; the closer scan failed"
 if [ "$_n_open" != 1 ] || [ "$_n_close" != 1 ]; then
@@ -533,6 +533,8 @@ case "$_opener" in
     cnm "wrong-block-for-mode; this is a LITE block, and --mode only answers about a full-marker run. A lite PASS is silent about 32 of the full gate's components and its clippy is per-package scoped, so a lite component line is a DIFFERENT claim — read the LITE block directly" ;;
   *' DELTA '*)
     cnm "wrong-block-for-mode; this is a DELTA block, and --mode only answers about a full-marker run. A delta re-certification is bound to its anchor's full PASS — scripts/flow/premerge-assert.sh (Case B) is the authority" ;;
+  *' RECERT '*)
+    cnm "wrong-block-for-mode; this is a RECERT block, and --mode only answers about a full-marker run. A recert is bound to its anchor's full PASS — scripts/flow/premerge-assert.sh (Case C) is the authority (#4268)" ;;
   *)
     cnm "wrong-block-for-mode; the opener at line $_o is not a recognised summary marker" ;;
 esac

@@ -524,12 +524,12 @@ SUM_TEXT=$(_slurp "$_SUM_SNAP")
 # Settle-retry: incomplete framing may mean we caught a write in progress. Re-SNAPSHOT once and
 # prefer the completed copy — re-snapshotting rather than re-reading is what keeps the NUL check
 # and the parse on the same bytes.
-if ! grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT"; then
+if ! grep -qE '^==== END AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$' <<<"$SUM_TEXT"; then
   sleep 0.2
   _SUM_SNAP2=$(_snap_of "$SUMMARY" summary2) || _SUM_SNAP2=""
   if [ -n "$_SUM_SNAP2" ] && ! _has_nul "$_SUM_SNAP2"; then
     _t2=$(_slurp "$_SUM_SNAP2")
-    if grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$_t2"; then
+    if grep -qE '^==== END AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$' <<<"$_t2"; then
       SUM_TEXT="$_t2"
     fi
   fi
@@ -540,8 +540,8 @@ fi
 # had no right to trust. More than one of any element means the file holds fragments of more
 # than one write, and then NOTHING in it can be attributed to a single run — including the
 # run-id used moments later to decide whether this artifact is even ours.
-_n_start=$(grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT")
-_n_end=$(grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT")
+_n_start=$(grep -cE '^==== AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$' <<<"$SUM_TEXT")
+_n_end=$(grep -cE '^==== END AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$' <<<"$SUM_TEXT")
 _n_res=$(grep -c '^RESULT: ' <<<"$SUM_TEXT")
 _n_rid=$(grep -c '^run-id: ' <<<"$SUM_TEXT")
 if [ "$_n_start" -gt 1 ] || [ "$_n_end" -gt 1 ] || [ "$_n_res" -gt 1 ] || [ "$_n_rid" -gt 1 ]; then
@@ -562,10 +562,11 @@ fi
 # opener also passed. Both were verified reporting COMPLETE before this check existed, and both
 # are exactly what an interleaved write produces, which is the case these checks are for.
 #
-# The three dialects are the gate's own (full / --lite / --delta) and CLAUDE.md keeps them
-# DISTINCT so no block can ever be pasted as another; a reader that accepts a mismatched pair
-# throws that distinction away.
-_open_line=$(grep -nE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT" | head -1)
+# The four dialects are the gate's own (full / --lite / --delta / --recertify, #4268
+# roborev finding, Medium) and CLAUDE.md keeps them DISTINCT so no block can ever be
+# pasted as another; a reader that accepts a mismatched pair throws that distinction
+# away.
+_open_line=$(grep -nE '^==== AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$' <<<"$SUM_TEXT" | head -1)
 _open_ln="${_open_line%%:*}"
 _open_txt="${_open_line#*:}"
 _dialect="${_open_txt#'==== AGENT-GATE'}"
@@ -686,7 +687,7 @@ RESULT_TOKEN="${RESULT_VALUE%% *}"
 # summary already falls through to the heartbeat, which is the conservative direction, and
 # a block truncated before its `RESULT:` line has no result to misread — it lands on
 # `no-result-line` above.
-_END_RE='^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
+_END_RE='^==== END AGENT-GATE( LITE| DELTA| RECERT)? SUMMARY ====$'
 case "$RESULT_TOKEN" in
   PASS|FAIL|PARTIAL|ERROR|REFUSED)
     # RECONCILE WITH THE HEARTBEAT before believing this verdict (roborev job 192, Medium). During

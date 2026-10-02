@@ -127,6 +127,13 @@ classify_domain tooling-tests 'scripts/agent-gate.sh' TOUCHED "tooling-tests dom
 classify_domain tooling-tests 'cqlite-core/src/lib.rs' CLEAR "tooling-tests domain does NOT cover cqlite-core/src/** (the #4268 round-2-style residual is real, not hidden)"
 classify_domain python-bindings 'bindings/python/src/result.rs' TOUCHED "python-bindings domain covers bindings/python/**"
 classify_domain python-bindings 'bindings/node/src/row.rs' CLEAR "python-bindings domain does NOT cover bindings/node/**"
+# job 117 roborev finding (Medium): cqlite-ffi-common is a workspace member
+# BOTH bindings/python/Cargo.toml and bindings/node/Cargo.toml depend on by
+# path, but appeared in NO domain — a diff touching only it was fail-open
+# (CLEAR) for all three binding-lane arms.
+classify_domain python-bindings 'cqlite-ffi-common/src/lib.rs' TOUCHED "python-bindings domain covers cqlite-ffi-common/** (job 117)"
+classify_domain node-bindings 'cqlite-ffi-common/src/lib.rs' TOUCHED "node-bindings domain covers cqlite-ffi-common/** (job 117)"
+classify_domain binding-rust-tests 'cqlite-ffi-common/src/lib.rs' TOUCHED "binding-rust-tests domain covers cqlite-ffi-common/** (job 117)"
 classify_domain dep-duplicates 'Cargo.lock' TOUCHED "dep-duplicates domain covers Cargo.lock"
 classify_domain dep-duplicates 'docs/development/dev-cookbook.md' CLEAR "dep-duplicates domain does NOT cover docs/**"
 
@@ -815,6 +822,35 @@ else
       bad "R12b: expected dep-duplicates to be preflight-ELIGIBLE (no diff-domain refusal) against the core-src diff, got rc=$RC"
       echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
     fi
+    # #4268 roborev finding (Medium, job 117): the GATE-SIDE recert-verdict
+    # PRODUCER (scripts/agent-gate.sh:28663's NOT-CERTIFIED branch, including
+    # its (NO-ROW) sub-case) had no test — every other verdict assertion in
+    # this suite checks CERTIFIED (R1, R2d, R6b, R6d), and R13d fails at the
+    # schemas preflight before ever reaching the terminal branch, so it was
+    # vacuous as a test of the producer. This fixture's dep-duplicates
+    # genuinely SKIPs (no real scripts/ci/check-dep-duplicates.sh), so R12b's
+    # own real dispatch above is positioned to prove the producer for free.
+    if [ "$RC" -ne 0 ] && grep -qE '^recert-verdict: NOT-CERTIFIED' <<<"$OUT" \
+       && grep -qF 'dep-duplicates(SKIP)' <<<"$OUT"; then
+      ok "R12c: a SKIPped named component stamps recert-verdict: NOT-CERTIFIED naming it, and exits non-zero"
+    else
+      bad "R12c: expected a non-zero exit + 'recert-verdict: NOT-CERTIFIED' naming 'dep-duplicates(SKIP)'"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+    if grep -qE '^RESULT: FAIL' <<<"$OUT"; then
+      ok "R12c: NOT-CERTIFIED also forces RESULT: FAIL (recert-verdict is not independent of OVERALL)"
+    else
+      bad "R12c: expected RESULT: FAIL alongside recert-verdict: NOT-CERTIFIED"
+    fi
+
+    # The '(NO-ROW)' sub-case (a named component that produces NO row at
+    # all) is NOT independently pinned here: every run_* function in this
+    # gate record_result's SOMETHING for itself once dispatched — including
+    # a guard-absent SKIP, as dep-duplicates just demonstrated above — by
+    # design (the whole point being no component is ever left ambiguously
+    # unmeasured), so reaching NO-ROW via a REAL dispatch would need a
+    # component whose own run_* function is itself defective, which is out
+    # of scope for a fixture test of the VERDICT PRODUCER.
 
   fi
 fi

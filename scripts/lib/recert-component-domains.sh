@@ -91,6 +91,13 @@ _RECERT_DOM_DOCS_REPORTS=('docs/reports/*')
 _RECERT_DOM_DOCS_ANY=('docs/*')
 _RECERT_DOM_XTASK=('xtask/*')
 _RECERT_DOM_LABKITS=('easy-db-lab-kits/*')
+# #4268 roborev finding, Medium (job 117): cqlite-ffi-common is a workspace
+# member both bindings/python/Cargo.toml and bindings/node/Cargo.toml depend
+# on by path, but appeared in NO domain — a diff touching only it classified
+# CLEAR for python-bindings/node-bindings/binding-rust-tests|binding-unwind-
+# profile, the same fail-open class as the already-fixed oom-audit->xtask/*,
+# memory-budget->cqlite-flight/* and integration-tests->tests/* arms.
+_RECERT_DOM_FFI_COMMON=('cqlite-ffi-common/*')
 
 # The #4266 declared harness set, reused verbatim rather than retyped (this file
 # is sourced alongside scripts/lib/tooling-tests-scope.sh by agent-gate.sh, so
@@ -225,19 +232,24 @@ _recert_component_domain_patterns_raw() {
     # python-bindings (job 110 Medium): maturin builds the extension via an
     # INDIRECT cargo invocation (scripts/agent-gate.sh's _fm_component_class:
     # 'indirect:maturin') and is DATASET_COMPONENTS-mapped (pytest reads the
-    # corpus) — both CARGO_ANY and test-data/* were missing.
+    # corpus) — both CARGO_ANY and test-data/* were missing. cqlite-ffi-common
+    # added (job 117 Medium): bindings/python/Cargo.toml depends on it by path.
     python-bindings)
-      printf '%s\n' "${_RECERT_DOM_PY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_PY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_FFI_COMMON[@]}" ;;
     # node-bindings (job 110 Medium): napi's `npm run build` invokes cargo
     # build INDIRECTLY ('indirect:npm run build (napi)') and is
     # DATASET_COMPONENTS-mapped — same two gaps as python-bindings.
+    # cqlite-ffi-common added (job 117 Medium): bindings/node/Cargo.toml
+    # depends on it by path too.
     node-bindings)
-      printf '%s\n' "${_RECERT_DOM_NODE[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_NODE[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_FFI_COMMON[@]}" ;;
     # binding-rust-tests runs cargo directly; binding-unwind-profile does not
     # (_fm_component_class: no-cargo) but shares this arm — over-including is
-    # the safe direction (job 110 Medium).
+    # the safe direction (job 110 Medium). cqlite-ffi-common added (job 117
+    # Medium): binding-rust-tests runs `test cqlite-ffi-common default-features`
+    # directly — the clearest case of all three arms.
     binding-rust-tests|binding-unwind-profile)
-      printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_FFI_COMMON[@]}" ;;
     # test_delivery_telemetry*.py added (job 112 roborev finding, Medium): the
     # component runs EVERY scripts/tests/test_delivery_telemetry*.py module
     # (test_delivery_telemetry.py AND test_delivery_telemetry_timeline.py) —
