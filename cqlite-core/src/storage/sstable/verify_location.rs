@@ -51,11 +51,21 @@ pub enum PhysicalAnchor {
     DamagedExtent,
     /// `byte_offset`/`byte_len` are a location the SSTable's OWN metadata
     /// declares that the file does not satisfy: for `ChunkOffsetOutOfBounds`
-    /// the declared chunk offset, plus the 4-byte TRAILING inline CRC32 that is
-    /// a chunk record's minimum size, does not FIT inside `Data.db`. The test
-    /// is `offset + 4 > data_len` (verify.rs), so it ALSO fires when the offset
-    /// is itself readable and only the record's tail runs past EOF — hence "does
-    /// not fit", never "absent"/"cannot be read", matching `format_location`.
+    /// the declared chunk offset plus a chunk record's MINIMUM SIZE of 4 bytes
+    /// does not FIT inside `Data.db`. The 4 is the minimum because a record is
+    /// `[compressed_bytes][4-byte trailing CRC32]`
+    /// (`compression_info.rs`), so even a zero-length payload occupies 4
+    /// bytes. The reported range `[byte_offset, byte_offset + 4)` is therefore
+    /// the record's HEAD at the declared offset — NOT the trailing CRC32,
+    /// which lies at the record's far end and whose position is unknown here
+    /// (the payload length is not known for an out-of-bounds chunk). Roborev
+    /// nit N1 (#4194): this doc called the reported range "the 4-byte TRAILING
+    /// inline CRC32", which names the wrong end of the record.
+    ///
+    /// The test is `offset + 4 > data_len` (verify.rs), so it ALSO fires when
+    /// the offset is itself readable and only the record's minimum extent runs
+    /// past EOF — hence "does not fit", never "absent"/"cannot be read",
+    /// matching `format_location`.
     /// The damaged extent here is the LOGICAL range, which `partitions` names.
     DeclaredRecord,
 }

@@ -1390,3 +1390,81 @@ async fn blocker2_non_ascending_index_positions_are_refused_by_name() {
     );
     drop(staging);
 }
+
+// ---------------------------------------------------------------------------
+// Roborev I3 — "uncompressed" and "compressed but unreadable" were ONE state.
+//
+// `check_compression_info` returned `Option<CompressionInfo>`, so a
+// `CompressionInfo.db` that is PRESENT but corrupt looked exactly like a table
+// that has none, and the caller's `else` branch dispatched it into the
+// UNCOMPRESSED `CRC.db` check. That check then validates the compressed
+// `Data.db` against a chunk grid that is not its grid, and attaches a
+// `PendingLocation` whose `damaged_logical` is a PHYSICAL range being read as
+// a logical one — a wrong answer presented with a confidently-resolved
+// partition list beside it.
+//
+// The staged generation mixes components deliberately: a real
+// `compression_info_bad_offset` fixture (compressed, with a corrupt
+// `CompressionInfo.db`) plus a `CRC.db`. Cassandra writes `CRC.db` only for
+// UNCOMPRESSED SSTables, so the combination is not something Cassandra emits
+// — which is precisely why it belongs in a damaged-SSTable toolbox's tests: a
+// partial restore, a mixed-up directory, or an operator's own `cp` produces
+// it, and the verifier must not answer confidently from it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn i3_corrupt_compression_info_is_never_checked_as_an_uncompressed_table() {
+    let Some(corrupt_ci_dir) = dataset_dir_or_gate(
+        "corruption/test_comp_corrupt/compression_info_bad_offset",
+        "compression_info_bad_offset",
+    ) else {
+        return;
+    };
+    let Some(uncompressed_dir) = fetched_clean_source_dir("test_basic", "uncompressed_table")
+    else {
+        return;
+    };
+
+    let staging = tempfile::Builder::new()
+        .prefix("cqlite-4194-i3-")
+        .tempdir()
+        .expect("create staging temp dir");
+    let staged = staging.path().join("nb-1-big");
+    copy_generation(&corrupt_ci_dir, &staged);
+    // A CRC.db from an UNCOMPRESSED generation. Its base name matches, so the
+    // component resolver accepts it as this generation's sidecar.
+    std::fs::copy(
+        uncompressed_dir.join("nb-1-big-CRC.db"),
+        staged.join("nb-1-big-CRC.db"),
+    )
+    .expect("overlay a CRC.db onto the compressed generation");
+
+    let report = run_verify(&staged).await;
+
+    // The real cause IS reported — this fix removes a wrong finding, it does
+    // not silence the right one.
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.class == VerifyErrorClass::CompressionInfoCorrupt),
+        "the corrupt CompressionInfo.db must still be reported: {:#?}",
+        report.findings
+    );
+
+    // ...and the table is NEVER validated against the uncompressed grid.
+    let misdispatched: Vec<&cqlite_core::storage::sstable::verify::VerifyFinding> = report
+        .findings
+        .iter()
+        .filter(|f| f.class == VerifyErrorClass::UncompressedChunkCrcMismatch)
+        .collect();
+    assert!(
+        misdispatched.is_empty(),
+        "a COMPRESSED table whose CompressionInfo.db is corrupt must not be dispatched into \
+         the uncompressed CRC.db check. Pre-fix this produced \
+         `UncompressedChunkCrcMismatch` with `location: Data.db: chunk 0, offset 0x0 len 6979 \
+         — 1 partition(s)`: a physical range reported as a logical damaged extent, measured \
+         against a grid that is not this table's. Got: {misdispatched:#?}"
+    );
+    drop(staging);
+}
