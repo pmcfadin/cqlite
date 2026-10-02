@@ -456,6 +456,17 @@ async fn verify_components(
     // `RowsOffset` leaf's key is already inline on `bti_leaves`).
     let mut scan_position_map: Option<std::collections::HashMap<u64, Vec<u8>>> = None;
 
+    // Issue #4194 (owner ruling 2026-10-02: option (a), fail closed): whether
+    // the BTI identity cross-check below RAN TO COMPLETION and AGREED. Starts
+    // `false` and is only ever set by the affirmative outcome — never derived
+    // from the ABSENCE of a mismatch finding, which is the whole defect
+    // (CLAUDE.md: key the permissive branch on the affirmative value). QUICK
+    // mode, a `compression_metadata_corrupt` skip, a failed scan and an absent
+    // `bti_leaves` all leave it `false`, and each of those is a state in which
+    // "no mismatch was reported" means "nothing looked". See
+    // `verify_location::BTI_IDENTITY_UNCORROBORATED`.
+    let mut bti_identity_corroborated = false;
+
     if mode == VerifyMode::Full {
         // ---- Check 5: inline Data.db chunk CRC validation (#998) -----------
         // THREE-WAY (roborev I3, #4194): an unreadable `CompressionInfo.db`
@@ -547,14 +558,22 @@ async fn verify_components(
                     // Issue #4194: borrowed (not moved) — `bti_leaves` is needed
                     // again by `finalize_locations` below.
                     if let Some(leaves) = bti_leaves.as_ref() {
-                        if let Some(detail) =
-                            bti_partition_identity_mismatch(leaves, &scan_partitions)
-                        {
-                            findings.push(VerifyFinding::new(
+                        match bti_partition_identity_mismatch(leaves, &scan_partitions) {
+                            Some(detail) => findings.push(VerifyFinding::new(
                                 VerifyErrorClass::BtiRootPointerCorrupt,
                                 "Partitions.db",
                                 detail,
-                            ));
+                            )),
+                            // THE one affirmative corroboration point (#4194
+                            // option (a)): every leaf's payload, resolved back
+                            // to a raw key by authoritative data, was compared
+                            // against the keys decoded from Data.db and they
+                            // agreed. Only this outcome licenses a BTI
+                            // `Resolved` location. A mismatch is left `false`
+                            // too — it also pushes `BtiRootPointerCorrupt`,
+                            // which distrusts the source by class anyway, so
+                            // the two signals agree rather than race.
+                            None => bti_identity_corroborated = true,
                         }
                     }
                     // Issue #4194, roborev round-4 MEDIUM finding: only built
@@ -607,6 +626,7 @@ async fn verify_components(
             pending_locations,
             bti_leaves.as_deref(),
             scan_position_map.as_ref(),
+            bti_identity_corroborated,
             platform_for_location,
         )
         .await;

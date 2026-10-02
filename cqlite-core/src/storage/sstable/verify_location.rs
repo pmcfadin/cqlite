@@ -316,6 +316,49 @@ pub const BOUNDARY_SOURCE_OPEN_FAILED: &str = "boundary source could not be open
 /// all, with no error to attribute it to (the BTI arm's `bti_leaves == None`).
 pub const BOUNDARY_SOURCE_UNAVAILABLE: &str = "boundary source unavailable for location resolution";
 
+/// The cause named when a BTI boundary source's leaves were never
+/// CORROBORATED against `Data.db` (issue #4194; owner ruling 2026-10-02:
+/// option (a), fail closed).
+///
+/// # Why a BTI `Resolved` needs corroboration and a BIG one does not
+///
+/// A BIG `Index.db` entry is `(raw key, data position)` — one declaration,
+/// parsed together, whose position is now checked against the file's own
+/// declared logical length ([`BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS`],
+/// [`first_order_violation`]). A BTI leaf's identity is NOT one declaration:
+/// the trie emits a byte-comparable PREFIX, and the raw key is recovered
+/// separately through the leaf's PAYLOAD (`Rows.db` for a `RowsOffset` leaf, a
+/// `Data.db` scan for a `DataOffset` leaf). A corruption that keeps a leaf's
+/// prefix while rewriting its payload to point at a DIFFERENT partition thus
+/// yields a trie that parses cleanly and resolves confidently to the WRONG
+/// key — and the only thing that can see it is the FULL-mode identity
+/// cross-check (`bti_partition_identity_mismatch`), which compares every
+/// leaf's resolved payload against the keys decoded from `Data.db`.
+///
+/// # Why "no mismatch reported" is not evidence the leaves agree
+///
+/// The cross-check sits two levels deep inside conditions a corrupt file
+/// routinely trips, so its silence usually means nothing looked:
+///
+///   1. QUICK mode never scans at all.
+///   2. It is nested in `if !compression_metadata_corrupt`, which ANY
+///      `CompressionInfoCorrupt` or `ChunkOffsetOutOfBounds` finding sets — so
+///      a footer-flip plus a corrupt `CompressionInfo.db` evades it with no
+///      `Data.db` damage at all.
+///   3. Most sharply, `ChunkOffsetOutOfBounds` is pushed in
+///      `check_compression_info` ALONGSIDE the very `PendingLocation` that
+///      needs resolving: ONE corruption event both creates the location and
+///      disables the only guard on it.
+///   4. A `Data.db` corrupt enough to produce a location at all commonly
+///      fails the scan outright, which skips the cross-check too.
+///
+/// Resolving against an uncorroborated trie in any of those states is the
+/// confident wrong answer §D2 exists to refuse. A CORROBORATED `Resolved` is
+/// unaffected; restoring an UNCORROBORATED one as a distinct state is option
+/// (b) (milestone 0.19).
+pub const BTI_IDENTITY_UNCORROBORATED: &str =
+    "BTI partition-index leaves were not corroborated against Data.db (the FULL-mode identity      cross-check did not run to completion)";
+
 /// The cause named when the boundary source's own declared `Data.db`
 /// positions are not STRICTLY ascending in ON-DISK PARSE ORDER — see
 /// [`first_order_violation`] for why that is a corruption signal and not a
@@ -435,35 +478,25 @@ pub fn resolve_partitions(
 
     // BOUNDS CHECK AGAINST THE DECLARED LOGICAL LENGTH — roborev blocker #2
     // (#4194). Both halves of the extent derivation below come from
-    // AUTHORITATIVE metadata, but nothing had ever checked that the two agree,
-    // and `Index.db`'s own parse cannot catch the disagreement: flip one bit of
-    // a NON-LEADING byte of a multi-byte `position` vint and the length prefix
-    // is unchanged, so every entry still parses, `is_fully_parsed()` is still
-    // true, and no `IndexEntryCorrupt` finding fires. The bogus position (say
-    // `+2^24`) then sorts to the END of the list, where `end` is
-    // `logical_len` — BELOW its own `start` — and the `end.max(*start)` clamp
-    // below turned it into the empty extent `[huge, huge)`. Consequences, both
-    // silent:
-    //   1. That partition intersects NOTHING, so it is never reported, never
-    //      counted in `truncated`, and never surfaced as `Unresolved` — a
-    //      damaged partition dropped from the report entirely.
-    //   2. Removing it from the ordering WIDENS its former left neighbour's
-    //      extent to the next real partition's start, so bytes belonging to
-    //      partition B are attributed to partition A and A's clean key is
-    //      printed as damaged with full confidence.
-    // Refusing with a named cause is §D2's "a refused answer over a confident
-    // wrong one". This is a consistency check over metadata the file declares
-    // about itself — NOT a byte-pattern guess (issue #28); it is the same
-    // check `verify.rs`'s `check_compression_info` already applies to
-    // `CompressionInfo.db`'s chunk offsets, for the same stated reason.
+    // AUTHORITATIVE metadata, but nothing checked that the two AGREE, and
+    // `Index.db`'s own parse cannot: flip one bit of a NON-LEADING byte of a
+    // multi-byte `position` vint and the length prefix is unchanged, so every
+    // entry still parses, `is_fully_parsed()` is true, and no
+    // `IndexEntryCorrupt` fires. The bogus position then sorts LAST, where
+    // `end` is `logical_len` — below its own `start` — and the `end.max(*start)`
+    // clamp below made it the empty extent `[huge, huge)`. That dropped the
+    // partition from the report silently (it intersects nothing, so it is
+    // never reported, never counted in `truncated`, never `Unresolved`) AND
+    // widened its former left neighbour's extent over its real bytes, so a
+    // clean key was printed as damaged with full confidence.
     //
-    // `>= logical_len`, not `> logical_len`: an entry starting exactly AT the
-    // declared logical end has the empty extent `[len, len)`, i.e. precisely
-    // the degenerate case above. Testing only `>` would leave that one value
-    // silently dropped.
-    //
-    // O(1), not O(n): the input is sorted ascending (asserted above), so the
-    // LAST entry is the maximum and the only one that can be out of bounds.
+    // A consistency check over metadata the file declares about itself, NOT a
+    // byte-pattern guess (issue #28) — the same check `check_compression_info`
+    // already applies to `CompressionInfo.db`'s chunk offsets, for the reason
+    // stated there. `>= logical_len`, not `>`: an entry starting exactly AT
+    // the declared end has the same degenerate `[len, len)` extent, so `>`
+    // would leave that one value silently dropped. O(1), not O(n): the input
+    // is sorted (asserted above), so the last entry is the only candidate.
     if let Some((last_start, _)) = sorted_boundary_entries.last() {
         if *last_start >= logical_len {
             return PartitionResolution::Unresolved(format!(
@@ -593,6 +626,9 @@ pub(crate) async fn finalize_locations(
     pending: Vec<PendingLocation>,
     bti_leaves: Option<&[BtiResolvedLeaf]>,
     scan_position_map: Option<&std::collections::HashMap<u64, Vec<u8>>>,
+    // Whether the FULL-mode BTI identity cross-check ran to completion AND
+    // agreed — see `BTI_IDENTITY_UNCORROBORATED`. Never consulted for BIG.
+    bti_identity_corroborated: bool,
     platform: Arc<Platform>,
 ) {
     // Distrust on EITHER signal (a union, never component-only): a finding
@@ -636,8 +672,14 @@ pub(crate) async fn finalize_locations(
     // reuses `PartitionIndexEntry::raw_key`/`key_digest`'s ALREADY-`Arc`
     // storage via a refcount bump, never an `O(key_len)` byte copy that would
     // double the resident partition-index memory for a large table.
+    // BTI CORROBORATION GATE (issue #4194, owner ruling: option (a), fail
+    // closed). Checked AFTER `component_or_class_distrust` so a direct finding
+    // against the boundary source still reports its own, more specific cause.
+    let bti_uncorroborated = components.format == SsTableFormat::Bti && !bti_identity_corroborated;
     let mut built: Result<Vec<BoundaryEntry>, String> = if component_or_class_distrust {
         Err(BOUNDARY_SOURCE_UNREADABLE.to_string())
+    } else if bti_uncorroborated {
+        Err(BTI_IDENTITY_UNCORROBORATED.to_string())
     } else {
         match components.format {
             SsTableFormat::Big => {
@@ -721,15 +763,13 @@ pub(crate) async fn finalize_locations(
         }
     };
     // `resolve_partitions` requires its input pre-sorted ascending by
-    // `data_offset` (roborev round-1 MEDIUM finding — sort ONCE here rather
-    // than on every pending-location call). For BIG this sort is a NO-OP by
-    // the time it runs: the format guarantees strict ascent in parse order
-    // (definitive guide Ch.6) and `first_order_violation` above has just
-    // refused the source if it did not hold. It is retained because BTI
-    // leaves come from a byte-comparable-KEY-order DFS trie walk, which is
-    // NOT Data.db offset order at all, and because `resolve_partitions`'s
-    // sortedness precondition must be established for BOTH arms by the same
-    // statement rather than by one arm's format guarantee.
+    // `data_offset` (roborev round-1 MEDIUM — sort ONCE here, not per pending
+    // location). For BIG it is a NO-OP by the time it runs: the format
+    // guarantees strict ascent in parse order (guide Ch.6) and
+    // `first_order_violation` has just refused the source if it did not hold.
+    // Retained because BTI leaves come from a byte-comparable-KEY-order DFS
+    // trie walk, which is NOT Data.db offset order, and so the precondition is
+    // established for BOTH arms by one statement.
     if let Ok(entries) = built.as_mut() {
         entries.sort_by_key(|(offset, _)| *offset);
     }
