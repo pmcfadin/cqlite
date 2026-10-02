@@ -177,10 +177,18 @@ requested SHALL recompute every aggregate field from a full Data.db decode while
 The six timestamp/TTL/local-deletion-time aggregates are a THIRD case, because Data.db stores each
 of them as an unsigned delta from the very `EncodingStats` baseline being regenerated (R2):
 
-- original SerializationHeader readable — the three MINIMA are that header's own values, carried
-  through verbatim (they are also what the rebuilt header must WRITE, or the unchanged Data.db
-  would delta-decode against a baseline it was never encoded with), classified `recovered`; the
-  three MAXIMA are a genuine fold over correctly-decoded content, classified `recomputed`.
+- original SerializationHeader readable — all six are a genuine fold over correctly-decoded
+  content, classified `recomputed`. The recovered baseline is NOT one of them: `EncodingStats`
+  (the SERIALIZATION_HEADER triple every row's VInt was delta-encoded against, which Cassandra
+  merges forward from compaction INPUTS and which can therefore sit strictly BELOW anything in
+  this file's own rows) and `StatsMetadata.minTimestamp`/`minLocalDeletionTime`/`minTTL`
+  (Cassandra's `MetadataCollector` fold over the cells and tombstones actually WRITTEN) are TWO
+  DIFFERENT VALUES. The rebuilt header SHALL carry the recovered baseline verbatim — or the
+  unchanged Data.db would delta-decode against a baseline it was never encoded with — while the
+  STATS minima SHALL be established independently by the pass-2 content fold, and SHALL NOT be
+  pre-seeded from the baseline (which, being a minimum, silently pins them). The baseline's own
+  provenance is reported under `classification.statistics.encoding_stats_baseline`, the same key
+  the `index` component uses for it.
 - original unreadable — the decode that would feed a recomputation is circular, so all six SHALL be
   classified `lost`: default-valued and named so, never advertised as `recomputed`. Counts and
   key bounds do not depend on the baseline and stay `recomputed`.
@@ -192,11 +200,22 @@ of them as an unsigned delta from the very `EncodingStats` baseline being regene
   partition/row/column counts, both estimated histograms, first/last key,
   has-partition-level-deletions) equals the value an independent re-derivation from the fixture's
   `*-Data.db.jsonl` golden computes — never compared against CQLite's own prior Statistics.db
-  output (`cqlite-core/tests/issue_4197_rebuild_statistics_recompute.rs`), the three baseline
-  minima are classified `recovered` when the original header supplied them, and — with the
-  original `Statistics.db` deleted outright — all six timestamp/TTL/LDT aggregates are classified
-  `lost` while the counts stay `recomputed`, with the written baseline demonstrably differing from
-  the original's (so the `lost` label is load-bearing, not decorative).
+  output (`cqlite-core/tests/issue_4197_rebuild_statistics_recompute.rs`), the six timestamp/TTL/LDT
+  aggregates are classified `recomputed` while `encoding_stats_baseline` is classified `recovered`
+  when the original header supplied it, and — with the original `Statistics.db` deleted outright —
+  all six are classified `lost` while the counts stay `recomputed`, with the written baseline
+  demonstrably differing from the original's (so the `lost` label is load-bearing, not decorative).
+
+#### Scenario: R4.1a the STATS minima and the EncodingStats baseline can legitimately differ
+- **Given** a generation whose `EncodingStats` baseline sits strictly BELOW every timestamp present
+  in its own content (the compaction-inherited state, reached here via
+  `SSTableWriter::pre_seed_encoding_baselines`), its original `Statistics.db` still readable
+- **When** rebuild regenerates `statistics`
+- **Then** the regenerated `StatsMetadata` minimum equals the minimum a full decode actually finds
+  in the rows (NOT the lower baseline), the regenerated SERIALIZATION_HEADER's `EncodingStats`
+  minimum equals the original header's value verbatim, the two demonstrably differ, and the
+  manifest classifies the fold `recomputed` and the baseline `recovered`
+  (`cqlite-core/src/storage/write_engine/rebuild/stats_baseline_tests.rs`)
 
 #### Scenario: R4.2 repair fields recovered when the original is readable
 - **Given** a temp copy where Statistics.db is renamed aside (readable, but not at its expected
@@ -220,9 +239,14 @@ of them as an unsigned delta from the very `EncodingStats` baseline being regene
 
 ### Requirement: R5 — Refuses when Data.db itself cannot be trusted
 
-`rebuild_components` SHALL refuse, writing nothing, when a chunk-CRC check over Data.db fails or a
-partition fails to decode structurally while walking it, and SHALL name `salvage` (#4196) as the
-remedy.
+`rebuild_components` SHALL refuse, writing nothing, when a chunk-CRC check over Data.db fails, a
+partition fails to decode structurally while walking it, or the boundary walk finds the same
+partition key at two different on-disk offsets, and SHALL name `salvage` (#4196) as the remedy.
+
+The boundary walk SHALL enumerate one entry per on-disk partition BOUNDARY and SHALL NOT
+deduplicate by partition key: a repeated key is Cassandra's `Verifier` "Key out of order"
+condition (a non-increasing `(token, key)` step), so deduplicating it under-enumerates the file and
+computes every derived component over a partition set that does not match it.
 
 #### Scenario: R5.1 damaged Data.db refuses and names salvage
 - **Given** `test_comp_corrupt/data_db_bit_flip` (skip-clean if absent; required under
@@ -230,6 +254,15 @@ remedy.
 - **When** rebuild runs requesting any component
 - **Then** `report.refused.reason == "data-corrupt"`, `remedy` names `salvage` (#4196), the exact
   chunk offset is reported, and NOTHING is written to `--out`
+  (`cqlite-core/tests/issue_4197_rebuild_refusal.rs`).
+
+#### Scenario: R5.1a one partition key at two offsets refuses
+- **Given** a Data.db synthesized by doubling a healthy single-partition extent, so the same key
+  appears at two ascending offsets, with NARROW partitions (no promoted-index payload, so R2's
+  re-encoded-span cross-check cannot be what catches it)
+- **When** rebuild runs requesting `index`
+- **Then** `report.refused.reason == "data-corrupt"`, the offset of the REPEAT is reported,
+  `remedy` names `salvage`, and nothing is regenerated
   (`cqlite-core/tests/issue_4197_rebuild_refusal.rs`).
 
 #### Scenario: R5.2 input never modified
@@ -240,10 +273,18 @@ remedy.
 ### Requirement: R6 — Bounded memory
 
 `rebuild_components` SHALL hold at most one partition's structural state resident on the read side
-for Index/Summary/Filter/CRC, and one partition's decoded mutations for a Statistics rebuild.
+for Index/Summary/Filter/CRC, and one partition's decoded mutations for a Statistics rebuild. In
+particular the partition-boundary walk SHALL stream the data section (one chunk plus one in-flight
+structure resident) and SHALL NOT materialise the whole decompressed section first.
+
+What legitimately remains proportional to the input is the enumerated boundary LIST itself — one
+`(data_offset, raw_key)` per partition — which both passes index into for the next partition's end
+bound.
 
 #### Scenario: R6.1 wide partitions under the budget lane
 - **Given** `test_wide_rows` (every table) under the gate's `memory-budget` component (dhat)
 - **When** rebuild runs requesting every component including `statistics`
 - **Then** peak heap stays within the existing lane threshold for a single-input compaction of the
-  same table.
+  same table, AND within the tighter pinned ceiling the lane records alongside it — which is set
+  close enough to the measured figure that a return to whole-section materialisation reddens it
+  (`cqlite-core/tests/issue_4197_rebuild_memory_budget.rs`).
