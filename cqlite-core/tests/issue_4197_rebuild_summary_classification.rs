@@ -54,8 +54,10 @@ fn fixture_dir_or_skip() -> Option<std::path::PathBuf> {
 /// Resolving that needs the pinned `cassandra-5.0.8`
 /// `utils/BloomCalculations.java` (CLAUDE.md #3041: a CQLite `file:line` is
 /// never format authority here), which is out of scope for #4197 — rebuild
-/// drives the EXISTING `FilterWriter`, it does not define the bloom spec. So
-/// this test deliberately asserts only what it can stand behind:
+/// drives the EXISTING `FilterWriter`, it does not define the bloom spec.
+/// Tracked as issue #4335; CQLite's current `hash_count` selection is NOT
+/// claimed correct, only reproduced. So this test deliberately asserts only
+/// what it can stand behind:
 ///   * the `recovered` CLASSIFICATION (the value came from the schema, not
 ///     from a hardcoded default) — spec R3.1's actual requirement, and
 ///   * MEMBERSHIP parity with the original (no false negatives) — the
@@ -128,7 +130,9 @@ async fn filter_fp_chance_recovered_and_matches_original_membership() {
          the Cassandra-written original at the injected fp_chance. See this test's doc comment: \
          0.05 is the value at which CQLITE's FilterWriter reproduces Cassandra's byte, NOT the \
          0.01 the generation's own sstablemetadata sidecar records — a change to CQLite's \
-         fp_chance -> hash_count selection will red this assertion, and that is the point"
+         fp_chance -> hash_count selection will red this assertion, and that is the point. \
+         The selection's disagreement with Cassandra's own BloomCalculations is tracked as \
+         issue #4335, not fixed here."
     );
 
     // Content parity: every partition key actually in this SSTable must
