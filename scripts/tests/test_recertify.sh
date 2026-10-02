@@ -143,6 +143,13 @@ classify_domain kit-dashboard-drift 'cqlite-core/src/observability/catalog.rs' T
 classify_domain kit-dashboard-drift 'website/content/index.md' CLEAR "kit-dashboard-drift domain does NOT cover website/** (never a real subject)"
 classify_domain oom-audit 'xtask/src/main.rs' TOUCHED "oom-audit domain covers xtask/** (cargo run -p xtask -- oom-audit --enforce)"
 
+# job 112 roborev finding (Medium): four more fail-open arms, same class.
+classify_domain fmt 'Cargo.toml' TOUCHED "fmt domain covers Cargo.toml (cargo fmt --all --check's workspace-member subject set)"
+classify_domain parity-report 'Cargo.lock' TOUCHED "parity-report domain covers Cargo.lock (cargo run -q -p cassandra-parity)"
+classify_domain memory-budget 'cqlite-flight/src/lib.rs' TOUCHED "memory-budget domain covers cqlite-flight/** (its Flight dhat lane)"
+classify_domain delivery-telemetry 'scripts/tests/test_delivery_telemetry_timeline.py' TOUCHED "delivery-telemetry domain covers its OWN test modules"
+classify_domain delivery-telemetry 'scripts/tests/test_delivery_telemetry.py' TOUCHED "delivery-telemetry domain covers its OWN test modules (non-timeline)"
+
 # TOOLCHAIN-CONFIG CENSUS (#4268 roborev finding, Medium): every repo-root build
 # CONFIGURATION file must be diff-touched for EVERY component the table MAPS.
 #

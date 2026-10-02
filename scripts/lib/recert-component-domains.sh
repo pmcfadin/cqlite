@@ -155,8 +155,12 @@ _recert_component_domain_patterns() {
 # QUOTED `"${name[@]}"` — see the file header for why that is load-bearing.
 _recert_component_domain_patterns_raw() {
   case "$1" in
+    # CARGO_ANY added (job 112 roborev finding, Medium): fmt is class `cargo`
+    # and `cargo fmt --all --check`'s subject set is the workspace member
+    # list in Cargo.toml — a PR adding a member was CLEAR for it. Over-includes
+    # for file-size (no-cargo), the safe direction.
     file-size|fmt)
-      printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     clippy)
       printf '%s\n' "${_RECERT_DOM_RUST_ANY[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     roborev-lints)
@@ -164,14 +168,20 @@ _recert_component_domain_patterns_raw() {
     # test-data/* (job 110 roborev finding, Medium): added for every member of
     # this arm that DATASET_COMPONENTS (scripts/agent-gate.sh) lists as a real
     # corpus reader — core-tests, tombstones-scan, scan-offload-guard,
-    # work-counters-guard, memory-budget, legacy-heuristics,
-    # feature-iso-delta-scan, write-tests. byte-budget-guard, arrow-parity-guard,
+    # work-counters-guard, legacy-heuristics, feature-iso-delta-scan,
+    # write-tests (memory-budget is also a member, but split into its own arm
+    # below, job 112). byte-budget-guard, arrow-parity-guard,
     # feature-iso-parquet, compaction-byte-parity, bti-multiclustering and
     # all-features-check are NOT in DATASET_COMPONENTS, so this over-includes
     # for them — the safe direction this file already takes elsewhere (only
     # ever REFUSES an eligible recert, never admits an ineligible one).
-    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|memory-budget|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|all-features-check)
+    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|all-features-check)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
+    # memory-budget (job 112 roborev finding, Medium): split out of the shared
+    # arm above — its Flight lane runs `cargo test --package cqlite-flight
+    # --features dhat-heap`, so a cqlite-flight/src/**-only diff was CLEAR.
+    memory-budget)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_FLIGHT[@]}" ;;
     # oom-audit (job 106 roborev finding, Medium): split out of the shared
     # core/cargo arm above — it runs `cargo run -p xtask -- oom-audit
     # --enforce` (scripts/agent-gate.sh), so xtask/* is a real subject the
@@ -220,10 +230,18 @@ _recert_component_domain_patterns_raw() {
     # the safe direction (job 110 Medium).
     binding-rust-tests|binding-unwind-profile)
       printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
+    # test_delivery_telemetry*.py added (job 112 roborev finding, Medium): the
+    # component runs EVERY scripts/tests/test_delivery_telemetry*.py module
+    # (test_delivery_telemetry.py AND test_delivery_telemetry_timeline.py) —
+    # a PR editing its own test modules was CLEAR for it.
     delivery-telemetry)
-      printf '%s\n' 'scripts/delivery-telemetry.py' 'docs/reports/delivery-telemetry.jsonl' ;;
+      printf '%s\n' 'scripts/delivery-telemetry.py' 'docs/reports/delivery-telemetry.jsonl' \
+        'scripts/tests/test_delivery_telemetry*' ;;
+    # CARGO_ANY added (job 112 Medium): runs `cargo run -q -p cassandra-parity`
+    # — a root Cargo.lock/Cargo.toml dependency change was CLEAR for it
+    # (tools/* only covers tools/cassandra-parity/Cargo.toml).
     parity-report)
-      printf '%s\n' "${_RECERT_DOM_TOOLS[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_DOCS_REPORTS[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_TOOLS[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_DOCS_REPORTS[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     # operator-metrics-doc (job 110 Medium): runs `cargo run -q -p cqlite-core
     # --example gen_operator_metrics_doc` — CARGO_ANY was missing.
     operator-metrics-doc)
