@@ -90,7 +90,7 @@
 #                      target can't read as PASS.
 #   memory-budget      dhat allocation/peak-heap regression nets (dhat-heap;
 #                      --test-threads=1 since dhat::Profiler is a process-global
-#                      singleton). Three lanes: (a) read path — memory_budget.rs
+#                      singleton). FIVE lanes: (a) read path — memory_budget.rs
 #                      (issue #1565, Epic A/A4), pinning full-scan total-bytes
 #                      (~209 MB, ceiling 252 MB) + materializing peak (~4.9 MB,
 #                      ceiling 6 MB, also < 128 MiB); (b) export converter —
@@ -101,11 +101,17 @@
 #                      issue_2075_row_assembly_alloc_budget.rs (issue #2075),
 #                      absolute allocs/row + allocs/cell for the decode->RowCells->
 #                      QueryRow scan path across a wide-row + text-heavy shape
-#                      (measures/gates the #1645 item 2 smallvec-RowCells win).
+#                      (measures/gates the #1645 item 2 smallvec-RowCells win);
+#                      (e) SSTable component rebuild — issue_4197_rebuild_memory_
+#                      budget.rs (issue #4197, spec R6.1), an all-components
+#                      (incl. statistics) rebuild_components run over EVERY
+#                      test_wide_rows table, peak live heap <= the 128 MiB budget
+#                      a single-input compaction is held to, plus a pinned
+#                      ~2.6 MB measured ceiling.
 #                      dhat counts are machine-independent, so this is the hard,
 #                      load-deterministic export/Flight/read signal. Dataset-
 #                      dependent lanes fail closed on empty (assert >=1 row/cell/
-#                      alloc before reading dhat stats).
+#                      alloc/table before reading dhat stats).
 #   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
 #                      (--no-run, whole package) then run the seven CI-enforced ones
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
@@ -28080,6 +28086,16 @@ dispatch_component() {
   _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
   cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_2075_row_assembly_alloc_budget -- --test-threads=1 || rc=1
+  # (e) SSTable component REBUILD path -- issue #4197 spec R6.1: an
+  # all-components (incl. `statistics`, the full-decode one) rebuild_components
+  # run over EVERY committed test_wide_rows table, asserting peak live heap
+  # stays inside the same 128 MiB budget a single-input compaction of the same
+  # table is held to, plus a tighter pinned measured ceiling. Same feature set
+  # as the sibling cqlite-core lanes to reuse build artifacts (`write-support`
+  # is a DEFAULT cqlite-core feature, so the target compiles here).
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
+  cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
+    --test issue_4197_rebuild_memory_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
     integration-tests)
       # #3453: see the memory-budget branch — package hoisted so the recorded scope and
