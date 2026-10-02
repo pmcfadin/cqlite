@@ -1088,3 +1088,305 @@ async fn l5_1_resolved_set_is_capped_and_names_the_omitted_count_end_to_end() {
         unexpected.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Roborev blocker #2 — an UNVALIDATED BIG `Index.db` `data_offset` silently
+// dropped a partition AND mis-attributed its bytes to a neighbour.
+//
+// The corruption modelled here is the one Check 4 structurally CANNOT see:
+// flip one bit of a NON-LEADING byte of a multi-byte `position` vint. The
+// vint's length prefix lives in the FIRST byte, so the parse stays
+// byte-aligned — every entry parses, `IndexReader::is_fully_parsed()` is
+// true, no `IndexEntryCorrupt` finding fires, and the boundary source was
+// therefore trusted in full.
+//
+// Both halves of the damage are asserted, because the first alone would pass
+// against an implementation that merely clamped:
+//   * the corrupt entry's own partition is NOT silently dropped, and
+//   * the neighbour's extent is NOT widened over the corrupt entry's real
+//     bytes, so a clean key is never printed as damaged.
+//
+// `test_basic/uncompressed_table` is the vehicle, not `test_comp/lz4_table`:
+// it is the smallest real BIG generation with ENOUGH partitions (100, of
+// which 99 carry a multi-byte position vint) for an offset corruption to have
+// a neighbour to mis-attribute to at all. `lz4_table` has exactly ONE
+// partition at position 0 — a single-byte vint, with nothing to reorder and
+// no neighbour. Being uncompressed also makes logical == physical offsets, so
+// the oracle needs no `CompressionInfo.db` indirection, and its `CRC.db`
+// supplies the chunk grid the Data.db bit flip is reported against.
+//
+// Nothing in the shared corpus is mutated: the clean generation is COPIED
+// into a tempdir and the COPY is corrupted, as L2.1/L2.2/L5.1 above do.
+// ---------------------------------------------------------------------------
+
+/// `(byte offset of the entry's `position` vint, its length)` for every BIG
+/// `Index.db` entry, in on-disk order — the physical companion to
+/// [`oracle_index_positions`], which yields the decoded values. Separate
+/// because a corruption has to be applied to BYTES, at an offset.
+fn oracle_index_position_vint_spans(path: &Path) -> Vec<(usize, usize)> {
+    let b = std::fs::read(path).expect("read Index.db");
+    let mut out = Vec::new();
+    let mut o = 0usize;
+    while o + 2 <= b.len() {
+        let key_len = u16::from_be_bytes([b[o], b[o + 1]]) as usize;
+        o += 2 + key_len;
+        let (_position, n) = read_unsigned_vint(&b, o);
+        out.push((o, n));
+        o += n;
+        let (promoted_size, n) = read_unsigned_vint(&b, o);
+        o += n + promoted_size as usize;
+    }
+    out
+}
+
+/// Flip exactly ONE bit — in EITHER direction — in a NON-LEADING byte of the
+/// `entry`-th `position` vint, choosing the first flip whose resulting
+/// declared position satisfies `accept`.
+///
+/// The first byte is never touched: it carries the vint's length prefix, so
+/// altering it would change the entry's width and desynchronise the parse —
+/// which `check_big_index` ALREADY catches. The corruption that matters is
+/// precisely the one that leaves the parse intact, which is why the width is
+/// re-asserted after every candidate flip.
+///
+/// XOR, not OR: a real bit flip goes both ways, and a DOWNWARD flip is how a
+/// non-leading entry's position can fall below its predecessor's while staying
+/// comfortably inside the file — an ordering violation with no bounds
+/// violation, which is the only way to exercise the two refusals separately
+/// on a fixture this compact.
+///
+/// Returns the new declared position, or `None` when no single-bit flip of
+/// this entry satisfies `accept` — the file is left UNTOUCHED in that case, so
+/// a caller may probe several candidate entries in turn. A fixture's vint
+/// widths bound how far one bit can move a position (a 2-byte vint moves it by
+/// at most 128, which is less than this corpus's typical partition stride), so
+/// which entries are corruptible at all is a property of the fixture and must
+/// be discovered, not assumed.
+fn try_corrupt_index_position_bit(
+    path: &Path,
+    entry: usize,
+    accept: impl Fn(u64) -> bool,
+) -> Option<u64> {
+    let spans = oracle_index_position_vint_spans(path);
+    let (off, len) = spans
+        .get(entry)
+        .copied()
+        .unwrap_or_else(|| panic!("Index.db has no entry {entry} (only {})", spans.len()));
+    if len < 2 {
+        // A single-byte vint has no non-leading byte to flip: byte 0 carries
+        // the width prefix, and changing it desynchronises the parse — the
+        // corruption Check 4 already catches, not the one under test.
+        return None;
+    }
+    let original = std::fs::read(path).expect("read Index.db");
+    for byte in 1..len {
+        for bit in [0x80u8, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01] {
+            let mut candidate = original.clone();
+            candidate[off + byte] ^= bit;
+            let (position, n) = read_unsigned_vint(&candidate, off);
+            assert_eq!(
+                n, len,
+                "flipping a non-leading byte must not change the vint's width"
+            );
+            if accept(position) {
+                std::fs::write(path, &candidate).expect("write corrupted Index.db");
+                return Some(position);
+            }
+        }
+    }
+    None
+}
+
+/// [`try_corrupt_index_position_bit`], but required to succeed.
+fn corrupt_index_position_bit(path: &Path, entry: usize, accept: impl Fn(u64) -> bool) -> u64 {
+    try_corrupt_index_position_bit(path, entry, accept).unwrap_or_else(|| {
+        panic!(
+            "no single-bit flip of entry {entry}'s position vint satisfies this case's \
+             constraint; pick a fixture whose positions have more headroom"
+        )
+    })
+}
+
+/// Stage a copy of `test_basic/uncompressed_table` whose `Data.db` chunk 0
+/// fails its `CRC.db` checksum — the finding a location is attached to — and
+/// return `(staging guard, generation dir, Data.db length)`.
+fn stage_uncompressed_table_with_a_bad_chunk(
+    prefix: &str,
+    clean_dir: &Path,
+) -> (tempfile::TempDir, PathBuf, u64) {
+    let staging = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("create staging temp dir");
+    let staged = staging.path().join("nb-1-big");
+    copy_generation(clean_dir, &staged);
+    let data_path = staged.join("nb-1-big-Data.db");
+    let data_len = std::fs::metadata(&data_path)
+        .expect("stat staged Data.db")
+        .len();
+    bit_flip_first_byte(&data_path);
+    (staging, staged, data_len)
+}
+
+/// The `Unresolved` cause of a location, or a panic naming what it resolved
+/// to instead — the inverse of [`resolved_keys`].
+fn unresolved_cause(res: &PartitionResolution) -> String {
+    match res {
+        PartitionResolution::Unresolved(cause) => cause.clone(),
+        PartitionResolution::Resolved { keys, truncated } => panic!(
+            "expected the boundary source to be REFUSED, but it resolved {} key(s) \
+             (truncated={truncated}): {keys:?}",
+            keys.len()
+        ),
+    }
+}
+
+/// The `UncompressedChunkCrcMismatch` location of a staged generation, with
+/// the boundary-source health assertions every case here shares.
+async fn crc_mismatch_location(staged: &Path) -> cqlite_core::storage::sstable::verify::Location {
+    let report = run_verify(staged).await;
+    // The corruption must be INVISIBLE to Check 4 — that is the premise of
+    // blocker #2. If an `IndexEntryCorrupt` finding fires, the boundary source
+    // is distrusted for an unrelated reason and the case proves nothing.
+    let index_findings: Vec<&cqlite_core::storage::sstable::verify::VerifyFinding> = report
+        .findings
+        .iter()
+        .filter(|f| f.class == VerifyErrorClass::IndexEntryCorrupt)
+        .collect();
+    assert!(
+        index_findings.is_empty(),
+        "this case requires a corruption Check 4 CANNOT see (the vint stays byte-aligned), \
+         but IndexEntryCorrupt fired: {index_findings:#?}"
+    );
+    report
+        .findings
+        .iter()
+        .find(|f| f.class == VerifyErrorClass::UncompressedChunkCrcMismatch)
+        .unwrap_or_else(|| {
+            panic!(
+                "no UncompressedChunkCrcMismatch finding in {:#?}",
+                report.findings
+            )
+        })
+        .location
+        .as_ref()
+        .expect("an UncompressedChunkCrcMismatch finding must carry a location")
+        .clone()
+}
+
+#[tokio::test]
+async fn blocker2_index_position_past_the_logical_length_is_refused_by_name() {
+    let Some(clean_dir) = fetched_clean_source_dir("test_basic", "uncompressed_table") else {
+        return;
+    };
+    let index_name = "nb-1-big-Index.db";
+    let positions = oracle_index_positions(&clean_dir.join(index_name));
+    let (staging, staged, data_len) =
+        stage_uncompressed_table_with_a_bad_chunk("cqlite-4194-b2-oob-", &clean_dir);
+
+    // Corrupt the LAST entry, so the declared positions stay ASCENDING (only
+    // the bounds check can catch it, never the order check) — the exact shape
+    // that used to sort to the end of the list, collapse to `[huge, huge)` and
+    // vanish.
+    let last = positions.len() - 1;
+    let bogus = corrupt_index_position_bit(&staged.join(index_name), last, |p| p > data_len);
+    eprintln!(
+        "BLOCKER-2 MEASURED: entry {last} position {} -> {bogus}, Data.db logical length \
+         {data_len} ({} partitions declared)",
+        positions[last].1,
+        positions.len()
+    );
+
+    let loc = crc_mismatch_location(&staged).await;
+    let cause = unresolved_cause(&loc.partitions);
+    assert!(
+        cause.contains("at or past the declared logical length"),
+        "the refusal must NAME the out-of-bounds offset as its cause, not fall back to a \
+         generic one: {cause}"
+    );
+    assert!(
+        cause.contains(&bogus.to_string()) && cause.contains(&data_len.to_string()),
+        "the cause must carry BOTH the offending position ({bogus}) and the logical length \
+         ({data_len}) so the inconsistency is visible to an operator: {cause}"
+    );
+    // Pre-fix this returned `Resolved` with MAX_RESOLVED_KEYS keys — the
+    // corrupt entry's partition silently absent from them, and its real bytes
+    // folded into its left neighbour's extent. Assert the rendered line too:
+    // `--out text` is the default, so this string IS the disclosure.
+    let rendered = format_location(&loc);
+    assert!(
+        rendered.contains("partitions unresolved"),
+        "the text rendering must disclose the refusal: {rendered}"
+    );
+    let dropped = hex(&positions[last].0);
+    assert!(
+        !rendered.contains(&dropped),
+        "the corrupt entry's key must not be presented as a confidently-located \
+         partition: {rendered}"
+    );
+    drop(staging);
+}
+
+#[tokio::test]
+async fn blocker2_non_ascending_index_positions_are_refused_by_name() {
+    let Some(clean_dir) = fetched_clean_source_dir("test_basic", "uncompressed_table") else {
+        return;
+    };
+    let index_name = "nb-1-big-Index.db";
+    let positions = oracle_index_positions(&clean_dir.join(index_name));
+    assert!(
+        positions.len() >= 3,
+        "this case needs an interior entry to corrupt; got {} partition(s)",
+        positions.len()
+    );
+    let (staging, staged, data_len) =
+        stage_uncompressed_table_with_a_bad_chunk("cqlite-4194-b2-order-", &clean_dir);
+
+    // Corrupt a MIDDLE entry DOWNWARD, so its declared position falls below
+    // its PREDECESSOR's while staying comfortably inside the file. That is an
+    // ordering violation with NO bounds violation, which is what makes this
+    // case a test of `first_order_violation` specifically rather than of
+    // whichever refusal happens to fire first. It is caught BEFORE the sort —
+    // the sort is exactly what would otherwise hide it, by quietly moving the
+    // entry to where its extent collapses and its neighbour's widens.
+    // Probe from the END backwards for an entry a single bit CAN move below
+    // its predecessor: positions below 16384 use a 2-byte vint, whose one bit
+    // moves the value by at most 128 — less than this fixture's ~195-byte
+    // partition stride. The corruptible entries are therefore the later,
+    // 3-byte-vint ones, and which they are is a property of the fixture.
+    let index_path = staged.join(index_name);
+    let mut corrupted: Option<(usize, u64, u64)> = None;
+    for entry in (1..positions.len()).rev() {
+        let predecessor = positions[entry - 1].1;
+        if let Some(bogus) =
+            try_corrupt_index_position_bit(&index_path, entry, |p| p < predecessor && p < data_len)
+        {
+            corrupted = Some((entry, predecessor, bogus));
+            break;
+        }
+    }
+    let (entry, predecessor, bogus) = corrupted.expect(
+        "no entry in this fixture can be moved below its predecessor by a single-bit flip \
+         while staying inside the file; the ordering refusal needs such an entry to be \
+         tested in ISOLATION from the bounds refusal",
+    );
+    eprintln!(
+        "BLOCKER-2 MEASURED: entry {entry} position {} -> {bogus}, below its predecessor's \
+         {predecessor}; Data.db logical length {data_len} (so NO bounds violation — only the \
+         ordering is broken)",
+        positions[entry].1
+    );
+
+    let loc = crc_mismatch_location(&staged).await;
+    let cause = unresolved_cause(&loc.partitions);
+    assert!(
+        cause.contains("non-ascending Data.db positions"),
+        "a parse-order violation must be named as such, distinctly from the bounds \
+         violation: {cause}"
+    );
+    assert!(
+        cause.contains(&format!("entry {entry}")),
+        "the cause must name WHICH entry broke the ordering: {cause}"
+    );
+    drop(staging);
+}
