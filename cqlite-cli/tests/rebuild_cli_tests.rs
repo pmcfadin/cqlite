@@ -395,20 +395,28 @@ fn is_component_file(name: &str) -> bool {
 /// for what follows: `discover_generations` orders by that parsed number, so
 /// generation 1 is always rebuilt before generation 2.
 fn multi_generation_table_dir(root: &Path, generations: u32) -> PathBuf {
-    let src = resolve_committed_fixture(LZ4_TABLE_FIXTURE);
     let dir = root.join("lz4_table-25801a0071a911f19b3225f9984c6a77");
     std::fs::create_dir_all(&dir).expect("create table dir");
     for generation in 1..=generations {
-        for entry in std::fs::read_dir(&src).expect("read fixture dir").flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !is_component_file(&name) {
-                continue;
-            }
-            let renamed = name.replacen("nb-1-", &format!("nb-{generation}-"), 1);
-            std::fs::copy(entry.path(), dir.join(renamed)).expect("copy component");
-        }
+        copy_generation_into(&dir, generation);
     }
     dir
+}
+
+/// Copy the committed lz4 fixture's whole component set into `dir`, renamed to
+/// generation `generation`. Shared by [`multi_generation_table_dir`] and the
+/// per-generation REFERENCE directories R10.1 reads back against.
+fn copy_generation_into(dir: &Path, generation: u32) {
+    let src = resolve_committed_fixture(LZ4_TABLE_FIXTURE);
+    std::fs::create_dir_all(dir).expect("create generation dir");
+    for entry in std::fs::read_dir(&src).expect("read fixture dir").flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_component_file(&name) {
+            continue;
+        }
+        let renamed = name.replacen("nb-1-", &format!("nb-{generation}-"), 1);
+        std::fs::copy(entry.path(), dir.join(renamed)).expect("copy component");
+    }
 }
 
 /// Corrupt `Data.db` for one generation so the compressed-chunk pre-flight
@@ -603,4 +611,330 @@ fn underivable_table_name_without_table_flag_is_usage_error() {
         "stderr must name the actionable flag rather than an invented table: {stderr}"
     );
     assert!(!out.exists(), "a usage error must not create --out");
+}
+
+// ---------------------------------------------------------------------------
+// R10.1 — verify + read-back parity (tasks.md 4.5)
+// ---------------------------------------------------------------------------
+
+/// The DERIVED components R10.1 deletes before rebuilding. `Statistics.db` and
+/// `CompressionInfo.db` are deliberately LEFT in place: `statistics` is opt-in
+/// (spec R4.4) and the original `Statistics.db`'s `SerializationHeader` is the
+/// authoritative `EncodingStats` baseline an `index` rebuild must take (spec
+/// R2) — deleting it would move this test onto R2.5's refusal path instead of
+/// R10.1's success path.
+const DERIVED_SUFFIXES: [&str; 5] = [
+    "Index.db",
+    "Summary.db",
+    "Filter.db",
+    "Digest.crc32",
+    "TOC.txt",
+];
+
+/// Delete every [`DERIVED_SUFFIXES`] component of generation `generation` from
+/// `table_dir`, asserting each one really existed first (a delete that removed
+/// nothing would make the whole rebuild vacuous).
+fn delete_derived_components(table_dir: &Path, generation: u32) {
+    for suffix in DERIVED_SUFFIXES {
+        let path = table_dir.join(format!("nb-{generation}-big-{suffix}"));
+        assert!(
+            path.is_file(),
+            "fixture must carry {suffix} for generation {generation} before deletion: {}",
+            path.display()
+        );
+        std::fs::remove_file(&path).unwrap_or_else(|e| panic!("delete {}: {e}", path.display()));
+    }
+}
+
+/// Run `cqlite verify --mode full --out json` over `dir`, returning its exit
+/// code and parsed report.
+fn verify_full(dir: &Path, schema: &Path) -> (Option<i32>, serde_json::Value) {
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "verify",
+        dir.to_str().unwrap(),
+        "--mode",
+        "full",
+        "--out",
+        "json",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "verify --out json must emit JSON on stdout: {e}\nstdout={stdout}\nstderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code(), report)
+}
+
+/// Read every row of `data_db` back through `cqlite read-sstable --format
+/// json`, with the PATH-DERIVED `table_id` field removed.
+///
+/// `table_id` is not SSTable content: `read-sstable` synthesises it from the
+/// input file's own filesystem path (empirically `<grandparent>.<parent>` —
+/// `.../r10/orig/nb-1-big-Data.db` renders `r10.orig`). A rebuilt generation
+/// necessarily lives at a DIFFERENT path from the original it is compared
+/// against, so leaving it in would compare this test's own directory layout
+/// rather than the data. Every content-bearing field (`key`, `value`) is
+/// compared verbatim, and the stripping is asserted non-vacuous: `table_id`
+/// must have been PRESENT in each row object.
+fn read_sstable_rows(data_db: &Path, schema: &Path) -> Vec<serde_json::Value> {
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "read-sstable",
+        data_db.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "read-sstable must exit 0 for {}; stderr={}",
+        data_db.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("read-sstable --format json must emit a JSON array: {e}"));
+    rows.into_iter()
+        .map(|row| {
+            let rendered = row.to_string();
+            let serde_json::Value::Object(mut obj) = row else {
+                panic!("read-sstable row must be an object; got {rendered}")
+            };
+            assert!(
+                obj.remove("table_id").is_some(),
+                "a read-sstable row must carry the path-derived table_id this helper strips \
+                 (its absence would make the normalisation silently vacuous); row={rendered}"
+            );
+            serde_json::Value::Object(obj)
+        })
+        .collect()
+}
+
+/// R10.1 — every generation the R7.1 table-directory run writes passes
+/// `verify --mode full` with ZERO findings, and reads back row-for-row
+/// identical to the ORIGINAL (pre-deletion) component set.
+///
+/// ## Why BOTH oracles, and which one carries which half
+///
+/// `read-sstable` performs a full `Data.db` scan and is MEASURABLY BLIND to
+/// `Index.db` (verified while writing this test: a rebuilt output whose
+/// `Index.db` had its first 40 bytes bit-flipped still produced byte-identical
+/// `read-sstable --format json` output). On its own it would therefore prove
+/// only that `Data.db` was copied intact — not that the rebuilt index serves
+/// reads. `verify --mode full` is the oracle that CAN see an index defect: it
+/// parses every `Index.db` entry and reports `IndexEntryCorrupt`. The negative
+/// control below pins exactly that asymmetry, so neither half can quietly
+/// become decorative (CLAUDE.md: "pick the oracle that can see your defect").
+#[test]
+fn rebuilt_generations_verify_full_and_read_back_identically() {
+    let temp = TempDir::new().expect("tempdir");
+    let schema = schemas_dir().join("compression-parity.cql");
+
+    // (1) The INPUT: a 2-generation table dir (R7.1's shape) with every
+    // derived component deleted.
+    let input_dir = multi_generation_table_dir(&temp.path().join("input"), 2);
+    for generation in [1, 2] {
+        delete_derived_components(&input_dir, generation);
+    }
+
+    // (2) The REFERENCE: one untouched single-generation directory per
+    // generation, holding the full Cassandra-written component set. This is
+    // the pre-deletion read-back oracle; it is never passed to `rebuild`.
+    let reference: Vec<PathBuf> = [1u32, 2u32]
+        .iter()
+        .map(|generation| {
+            let dir = temp.path().join(format!("reference/gen{generation}"));
+            copy_generation_into(&dir, *generation);
+            dir
+        })
+        .collect();
+
+    // (3) Rebuild every generation into --out.
+    let out = temp.path().join("out");
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        input_dir.to_str().unwrap(),
+        "--components",
+        "index,summary,filter,digest,toc",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "rebuild of a healthy 2-generation table dir must exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for (idx, generation) in [1u32, 2u32].iter().enumerate() {
+        let gen_out = out.join(format!("nb-{generation}-big"));
+        assert!(
+            gen_out.is_dir(),
+            "generation {generation} must have its own output dir"
+        );
+
+        // (4a) `verify --mode full` on the REBUILT generation: clean.
+        let (code, report) = verify_full(&gen_out, &schema);
+        let findings = report["findings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("verify report must carry a findings array: {report}"));
+        assert_eq!(
+            code,
+            Some(0),
+            "verify --mode full must exit 0 on a rebuilt generation; report={report}"
+        );
+        assert_eq!(report["ok"], serde_json::json!(true), "report={report}");
+        assert!(
+            findings.is_empty(),
+            "verify --mode full must report ZERO findings on a rebuilt generation; report={report}"
+        );
+        // Non-vacuity: a verify that scanned nothing proves nothing.
+        let (ref_code, ref_report) = verify_full(&reference[idx], &schema);
+        assert_eq!(ref_code, Some(0), "reference verify: {ref_report}");
+        let rows_scanned = report["rows_scanned"].as_u64().unwrap_or_default();
+        assert!(
+            rows_scanned > 0,
+            "verify --mode full scanned 0 rows — a vacuous clean report; report={report}"
+        );
+        assert_eq!(
+            rows_scanned,
+            ref_report["rows_scanned"].as_u64().unwrap_or_default(),
+            "the rebuilt generation must scan the SAME row count as the original component set; \
+             rebuilt={report} original={ref_report}"
+        );
+        // Every requested component must be back in the rebuilt TOC.txt.
+        let toc: Vec<String> = report["toc_components"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for suffix in DERIVED_SUFFIXES {
+            assert!(
+                toc.iter().any(|c| c == suffix),
+                "the rebuilt TOC.txt must name {suffix}; toc={toc:?}"
+            );
+        }
+
+        // (4b) Read-back parity against the ORIGINAL component set.
+        let rebuilt_rows = read_sstable_rows(
+            &gen_out.join(format!("nb-{generation}-big-Data.db")),
+            &schema,
+        );
+        let original_rows = read_sstable_rows(
+            &reference[idx].join(format!("nb-{generation}-big-Data.db")),
+            &schema,
+        );
+        assert!(
+            !original_rows.is_empty(),
+            "the ORIGINAL component set read back 0 rows — a vacuous parity pass"
+        );
+        assert_eq!(
+            rebuilt_rows.len(),
+            original_rows.len(),
+            "row count differs between the rebuilt and the original component set"
+        );
+        assert_eq!(
+            rebuilt_rows, original_rows,
+            "generation {generation}: the rebuilt component set must read back row-for-row \
+             identical to the original Cassandra-written one"
+        );
+    }
+}
+
+/// R10.1 negative control — the `verify --mode full` half of the test above is
+/// the ONLY half that can see an `Index.db` defect, and it really does.
+///
+/// Flipping the first 40 bytes of a rebuilt `Index.db`:
+///   - `verify --mode full` exits non-zero with an `Index.db` finding, and
+///   - `read-sstable` output is UNCHANGED (full `Data.db` scan, index-blind).
+///
+/// Without this control, a future change that stopped parsing `Index.db` in
+/// FULL mode would leave `rebuilt_generations_verify_full_and_read_back_identically`
+/// green while proving nothing about the rebuilt index.
+#[test]
+fn verify_full_is_the_oracle_that_sees_a_broken_rebuilt_index() {
+    let temp = TempDir::new().expect("tempdir");
+    let schema = schemas_dir().join("compression-parity.cql");
+
+    let input_dir = multi_generation_table_dir(&temp.path().join("input"), 1);
+    delete_derived_components(&input_dir, 1);
+    let out = temp.path().join("out");
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        input_dir.to_str().unwrap(),
+        "--components",
+        "index,summary,filter,digest,toc",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "rebuild must exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A single-generation input writes a FLAT --out (no per-generation
+    // subdirectory) — `discover_generations` found exactly one Data.db.
+    let data_db = out.join("nb-1-big-Data.db");
+    assert!(data_db.is_file(), "single-generation --out must be flat");
+
+    let clean_rows = read_sstable_rows(&data_db, &schema);
+    let (clean_code, clean_report) = verify_full(&out, &schema);
+    assert_eq!(
+        clean_code,
+        Some(0),
+        "baseline must be clean: {clean_report}"
+    );
+
+    // Break the REBUILT Index.db.
+    let index_path = out.join("nb-1-big-Index.db");
+    let mut index_bytes = std::fs::read(&index_path).expect("read rebuilt Index.db");
+    assert!(
+        index_bytes.len() >= 40,
+        "rebuilt Index.db is implausibly small: {} bytes",
+        index_bytes.len()
+    );
+    for byte in index_bytes.iter_mut().take(40) {
+        *byte ^= 0xFF;
+    }
+    std::fs::write(&index_path, &index_bytes).expect("write corrupted Index.db");
+
+    let (broken_code, broken_report) = verify_full(&out, &schema);
+    assert_ne!(
+        broken_code,
+        Some(0),
+        "verify --mode full must FAIL on a broken Index.db — otherwise the read-back parity test \
+         above proves nothing about the rebuilt index; report={broken_report}"
+    );
+    assert_eq!(broken_report["ok"], serde_json::json!(false));
+    let findings = broken_report["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings array: {broken_report}"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["component"].as_str() == Some("Index.db")),
+        "verify must attribute the finding to Index.db; report={broken_report}"
+    );
+
+    // And the documented blindness: `read-sstable` cannot see it.
+    assert_eq!(
+        read_sstable_rows(&data_db, &schema),
+        clean_rows,
+        "read-sstable is expected to be INDEX-BLIND (full Data.db scan). If this assertion ever \
+         fails, read-sstable has gained index sensitivity and the parity test above can be \
+         strengthened to rely on it directly — update both together."
+    );
 }
