@@ -291,6 +291,92 @@ fn ranges_intersect(a: (u64, u64), b: (u64, u64)) -> bool {
 /// exact cost this type existed to avoid.
 pub type BoundaryEntry = (u64, Option<Arc<[u8]>>);
 
+/// The cause named when the boundary source could not be OPENED at all — a
+/// permission error, an I/O failure, a path that went away mid-report.
+///
+/// Roborev "important" finding I1 (#4194): the `Err(_) => None` arm of
+/// [`finalize_locations`]'s `IndexReader::open` DISCARDED the real
+/// `io::Error` and fell through to the generic [`BOUNDARY_SOURCE_UNAVAILABLE`],
+/// so an operator hitting `Permission denied` on `Index.db` was told only that
+/// a boundary source was "unavailable" — violating this module's own contract
+/// ([`PartitionResolution::Unresolved`]) that "the cause is named".
+pub const BOUNDARY_SOURCE_OPEN_FAILED: &str = "boundary source could not be opened";
+
+/// The cause named when no boundary source was produced for this report at
+/// all, with no error to attribute it to (the BTI arm's `bti_leaves == None`).
+pub const BOUNDARY_SOURCE_UNAVAILABLE: &str = "boundary source unavailable for location resolution";
+
+/// The cause named when the boundary source's own declared `Data.db`
+/// positions are not STRICTLY ascending in ON-DISK PARSE ORDER — see
+/// [`first_order_violation`] for why that is a corruption signal and not a
+/// tolerable quirk.
+pub const BOUNDARY_ENTRY_ORDER_VIOLATION: &str =
+    "boundary source declares non-ascending Data.db positions";
+
+/// The cause named when a boundary entry declares a `Data.db` position at or
+/// past the declared logical length — see [`resolve_partitions`]'s bounds
+/// check for the silent-drop/mis-attribution failure this refuses.
+pub const BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS: &str =
+    "boundary source declares a Data.db position at or past the declared logical length";
+
+/// The boundary source's trust decision for a WHOLE report (design.md §D2:
+/// fully trusted or not trusted at all, never partially).
+///
+/// Replaces the former `boundary_source_healthy: bool` + `Option<&[_]>` pair
+/// (roborev #4194): two parameters could express four states, two of which
+/// ("healthy but absent", "unhealthy but present") had to be reconciled by
+/// convention at every call site, and the `None` arm could only ever render
+/// ONE generic cause. A rejection now CARRIES its cause, which is what lets
+/// `Index.db`'s open error, its order violation and its out-of-bounds offset
+/// each reach the operator under their own name.
+pub enum BoundarySource<'a> {
+    /// Trusted, pre-sorted ascending by logical `data_offset`.
+    Trusted(&'a [BoundaryEntry]),
+    /// Not trusted — the named cause, never a silent empty list.
+    Rejected(String),
+}
+
+/// The index of the first boundary entry whose declared `Data.db` position
+/// does not STRICTLY exceed its predecessor's, in ON-DISK PARSE ORDER, or
+/// `None` when the sequence ascends strictly.
+///
+/// # Why non-ascending parse order is corruption, not a quirk
+///
+/// `Index.db` entries are written in decorated-key order, which the format
+/// guarantees is also ascending `Data.db` offset order — the definitive
+/// guide states it outright: "the ordering guarantee that `Index.db` entries
+/// ascend in token order and therefore in `Data.db` offset order"
+/// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`,
+/// §"Token Ordering Requirement" and the sequential-windowing note). So a
+/// descent in parse order is a declaration this format cannot produce.
+///
+/// # Why STRICT, not merely non-decreasing
+///
+/// Two partitions cannot share a start offset — every partition occupies at
+/// least a header's worth of bytes. Two EQUAL positions give the earlier
+/// entry the extent `[s, s)`, which intersects nothing, so that partition
+/// would be silently dropped from every location in the report: the same
+/// silent-drop shape as the out-of-bounds offset below, reached by a
+/// different corruption.
+///
+/// This is a consistency check over AUTHORITATIVE metadata the file declares
+/// about itself, not a byte-pattern guess (issue #28) — the same pattern
+/// `verify.rs`'s `check_compression_info` already applies to
+/// `CompressionInfo.db`'s chunk offsets, whose own rationale ("`validate()`
+/// only enforces ascending order; a single corrupted offset (e.g. an MSB set)
+/// is ascending yet points past EOF") transfers here verbatim.
+pub fn first_order_violation(entries: &[BoundaryEntry]) -> Option<usize> {
+    // An explicit index loop, not `windows(2).position(..)`: both of those are
+    // primitives `test_verify_location_no_resync_scan.sh` refuses in this
+    // file, and the clearer form here needs no waiver at all.
+    for i in 1..entries.len() {
+        if entries[i].0 <= entries[i - 1].0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Intersect `damaged` (a closed-open `[start, end)` range in `Data.db`
 /// LOGICAL/decompressed offset space) against `sorted_boundary_entries` — one
 /// `(data_offset, raw_key)` pair per partition the boundary source (`Index.db`
@@ -329,6 +415,46 @@ pub fn resolve_partitions(
         "resolve_partitions requires its input sorted ascending by data_offset"
     );
 
+    // BOUNDS CHECK AGAINST THE DECLARED LOGICAL LENGTH — roborev blocker #2
+    // (#4194). Both halves of the extent derivation below come from
+    // AUTHORITATIVE metadata, but nothing had ever checked that the two agree,
+    // and `Index.db`'s own parse cannot catch the disagreement: flip one bit of
+    // a NON-LEADING byte of a multi-byte `position` vint and the length prefix
+    // is unchanged, so every entry still parses, `is_fully_parsed()` is still
+    // true, and no `IndexEntryCorrupt` finding fires. The bogus position (say
+    // `+2^24`) then sorts to the END of the list, where `end` is
+    // `logical_len` — BELOW its own `start` — and the `end.max(*start)` clamp
+    // below turned it into the empty extent `[huge, huge)`. Consequences, both
+    // silent:
+    //   1. That partition intersects NOTHING, so it is never reported, never
+    //      counted in `truncated`, and never surfaced as `Unresolved` — a
+    //      damaged partition dropped from the report entirely.
+    //   2. Removing it from the ordering WIDENS its former left neighbour's
+    //      extent to the next real partition's start, so bytes belonging to
+    //      partition B are attributed to partition A and A's clean key is
+    //      printed as damaged with full confidence.
+    // Refusing with a named cause is §D2's "a refused answer over a confident
+    // wrong one". This is a consistency check over metadata the file declares
+    // about itself — NOT a byte-pattern guess (issue #28); it is the same
+    // check `verify.rs`'s `check_compression_info` already applies to
+    // `CompressionInfo.db`'s chunk offsets, for the same stated reason.
+    //
+    // `>= logical_len`, not `> logical_len`: an entry starting exactly AT the
+    // declared logical end has the empty extent `[len, len)`, i.e. precisely
+    // the degenerate case above. Testing only `>` would leave that one value
+    // silently dropped.
+    //
+    // O(1), not O(n): the input is sorted ascending (asserted above), so the
+    // LAST entry is the maximum and the only one that can be out of bounds.
+    if let Some((last_start, _)) = sorted_boundary_entries.last() {
+        if *last_start >= logical_len {
+            return PartitionResolution::Unresolved(format!(
+                "{BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS}: declared position {last_start} \
+                 (0x{last_start:x}) is not below the declared logical length {logical_len}"
+            ));
+        }
+    }
+
     // Bounded DURING accumulation (`hits.len() < MAX_RESOLVED_KEYS`), not just
     // at the end: a truncation's damaged range `[first_bad_chunk_start,
     // logical_len)` can intersect essentially every partition in the file, so
@@ -354,6 +480,21 @@ pub fn resolve_partitions(
             .get(i + 1)
             .map(|(next_start, _)| *next_start)
             .unwrap_or(logical_len);
+        // `end >= *start` for EVERY entry now that the bounds check above has
+        // run: non-last entries take `end` from their successor, and the
+        // input is sorted ascending; the last takes `logical_len`, which the
+        // check proved is strictly greater. So the `.max(*start)` clamp is no
+        // longer load-bearing — it was what silently converted a corrupt BIG
+        // entry into an empty extent (roborev blocker #2). It is kept only as
+        // a non-panicking release fallback for the BTI arm, whose leaves are
+        // not yet validated this way (that is blocked on an owner decision on
+        // the BTI resolution-state machinery); the assertion states the
+        // invariant the BIG path now guarantees.
+        debug_assert!(
+            end >= *start,
+            "boundary entry {i} has extent end {end} below its start {start}; the bounds \
+             check in resolve_partitions should have refused this source"
+        );
         let extent = (*start, end.max(*start));
         if ranges_intersect(damaged, extent) {
             match key {
@@ -383,10 +524,10 @@ pub fn resolve_partitions(
 }
 
 /// Build a [`Location`] for a chunk/offset-anchored finding, fail-closed on a
-/// damaged boundary source (design.md §D2): when `boundary_source_healthy` is
-/// `false`, `partitions` is always `Unresolved(BOUNDARY_SOURCE_UNREADABLE)` —
-/// the boundary source is either fully trusted or not trusted at all, never
-/// partially.
+/// damaged boundary source (design.md §D2): a
+/// [`BoundarySource::Rejected`] always yields `Unresolved` carrying that
+/// rejection's OWN cause — the boundary source is either fully trusted or not
+/// trusted at all, never partially, and a refusal always names why.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_location(
     component: &str,
@@ -394,20 +535,15 @@ pub fn resolve_location(
     byte_len: u64,
     anchor: PhysicalAnchor,
     chunk_index: Option<usize>,
-    boundary_source_healthy: bool,
+    boundary: &BoundarySource<'_>,
     damaged_logical: (u64, u64),
-    boundary_entries: Option<&[BoundaryEntry]>,
     logical_len: u64,
 ) -> Location {
-    let partitions = if !boundary_source_healthy {
-        PartitionResolution::Unresolved(BOUNDARY_SOURCE_UNREADABLE.to_string())
-    } else {
-        match boundary_entries {
-            Some(entries) => resolve_partitions(damaged_logical, entries, logical_len),
-            None => PartitionResolution::Unresolved(
-                "boundary source unavailable for location resolution".to_string(),
-            ),
+    let partitions = match boundary {
+        BoundarySource::Trusted(entries) => {
+            resolve_partitions(damaged_logical, entries, logical_len)
         }
+        BoundarySource::Rejected(cause) => PartitionResolution::Unresolved(cause.clone()),
     };
     Location {
         component: component.to_string(),
@@ -455,13 +591,15 @@ pub(crate) async fn finalize_locations(
     // poisons every location): §D2 prefers a refused answer to a confident
     // wrong one.
     //
-    // `mut`: the BIG arm below can additionally downgrade this to `false`
-    // after consulting `IndexReader::is_fully_parsed()`.
+    // Expressed as an `Option<String>` CAUSE rather than a bool: every
+    // rejection path below (this one, a partial `IndexReader` parse, an open
+    // error, an order violation) carries its own cause through to the
+    // operator (roborev I1/#blocker 2, #4194).
     let boundary_components: &[&str] = match components.format {
         SsTableFormat::Big => &["Index.db"],
         SsTableFormat::Bti => &["Partitions.db", "Rows.db"],
     };
-    let mut boundary_healthy = !findings.iter().any(|f| {
+    let component_or_class_distrust = findings.iter().any(|f| {
         boundary_components.contains(&f.component.as_str())
             || match components.format {
                 SsTableFormat::Big => f.class == VerifyErrorClass::IndexEntryCorrupt,
@@ -480,8 +618,8 @@ pub(crate) async fn finalize_locations(
     // reuses `PartitionIndexEntry::raw_key`/`key_digest`'s ALREADY-`Arc`
     // storage via a refcount bump, never an `O(key_len)` byte copy that would
     // double the resident partition-index memory for a large table.
-    let mut boundary_entries: Option<Vec<BoundaryEntry>> = if !boundary_healthy {
-        None
+    let mut built: Result<Vec<BoundaryEntry>, String> = if component_or_class_distrust {
+        Err(BOUNDARY_SOURCE_UNREADABLE.to_string())
     } else {
         match components.format {
             SsTableFormat::Big => {
@@ -502,24 +640,54 @@ pub(crate) async fn finalize_locations(
                     // this report is poisoned too, matching "fully trusted or
                     // not at all".
                     Ok(reader) if !reader.is_fully_parsed() => {
-                        boundary_healthy = false;
-                        None
+                        Err(BOUNDARY_SOURCE_UNREADABLE.to_string())
                     }
-                    Ok(reader) => Some(
-                        reader
+                    Ok(reader) => {
+                        let entries: Vec<BoundaryEntry> = reader
                             .get_partition_entries()
                             .iter()
                             .map(|e| {
                                 let raw = e.raw_key.clone().unwrap_or_else(|| e.key_digest.clone());
                                 (e.data_offset, Some(raw))
                             })
-                            .collect(),
-                    ),
-                    Err(_) => None,
+                            .collect();
+                        // PARSE-ORDER VALIDATION (roborev blocker #2, #4194).
+                        // Checked BEFORE the sort below, because the sort is
+                        // exactly what HIDES this corruption: a bit flip in a
+                        // non-leading byte of a `position` vint leaves every
+                        // entry parsing cleanly, and sorting then quietly
+                        // moves the bogus entry into a position where its
+                        // extent collapses and its neighbour's widens. The
+                        // format guarantees strict ascent in parse order
+                        // (definitive guide Ch.6, cited on
+                        // `first_order_violation`), so a violation is
+                        // corruption and the source is refused by name.
+                        match first_order_violation(&entries) {
+                            Some(i) => Err(format!(
+                                "{BOUNDARY_ENTRY_ORDER_VIOLATION}: Index.db entry {i} declares \
+                                 Data.db position {} (0x{:x}) after entry {} declared {} \
+                                 (0x{:x})",
+                                entries[i].0,
+                                entries[i].0,
+                                i - 1,
+                                entries[i - 1].0,
+                                entries[i - 1].0
+                            )),
+                            None => Ok(entries),
+                        }
+                    }
+                    // The REAL error, named (roborev I1, #4194): this arm used
+                    // to discard it and fall through to the generic
+                    // "unavailable", so `Permission denied` on `Index.db`
+                    // reached the operator as no cause at all.
+                    Err(e) => Err(format!(
+                        "{BOUNDARY_SOURCE_OPEN_FAILED}: {}: {e}",
+                        index_path.display()
+                    )),
                 }
             }
-            SsTableFormat::Bti => bti_leaves.map(|leaves| {
-                leaves
+            SsTableFormat::Bti => match bti_leaves {
+                Some(leaves) => Ok(leaves
                     .iter()
                     .map(|leaf| {
                         let key = leaf.inline_raw_key.as_deref().map(Arc::from).or_else(|| {
@@ -529,19 +697,28 @@ pub(crate) async fn finalize_locations(
                         });
                         (leaf.data_position, key)
                     })
-                    .collect()
-            }),
+                    .collect()),
+                None => Err(BOUNDARY_SOURCE_UNAVAILABLE.to_string()),
+            },
         }
     };
     // `resolve_partitions` requires its input pre-sorted ascending by
     // `data_offset` (roborev round-1 MEDIUM finding — sort ONCE here rather
-    // than on every pending-location call): BIG's on-disk parse order is
-    // ascending by convention but not a documented guarantee, and BTI leaves
-    // come from a byte-comparable-KEY-order DFS trie walk, which is NOT
-    // Data.db offset order at all.
-    if let Some(entries) = boundary_entries.as_mut() {
+    // than on every pending-location call). For BIG this sort is a NO-OP by
+    // the time it runs: the format guarantees strict ascent in parse order
+    // (definitive guide Ch.6) and `first_order_violation` above has just
+    // refused the source if it did not hold. It is retained because BTI
+    // leaves come from a byte-comparable-KEY-order DFS trie walk, which is
+    // NOT Data.db offset order at all, and because `resolve_partitions`'s
+    // sortedness precondition must be established for BOTH arms by the same
+    // statement rather than by one arm's format guarantee.
+    if let Ok(entries) = built.as_mut() {
         entries.sort_by_key(|(offset, _)| *offset);
     }
+    let boundary = match &built {
+        Ok(entries) => BoundarySource::Trusted(entries),
+        Err(cause) => BoundarySource::Rejected(cause.clone()),
+    };
 
     for p in pending {
         let location = resolve_location(
@@ -550,9 +727,8 @@ pub(crate) async fn finalize_locations(
             p.byte_len,
             p.anchor,
             p.chunk_index,
-            boundary_healthy,
+            &boundary,
             p.damaged_logical,
-            boundary_entries.as_deref(),
             p.logical_len,
         );
         if let Some(f) = findings.get_mut(p.finding_index) {

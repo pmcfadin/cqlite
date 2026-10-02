@@ -199,16 +199,18 @@ fn format_location_names_an_empty_resolved_set_without_claiming_partitions() {
 
 #[test]
 fn resolve_location_fails_closed_on_a_damaged_boundary_source() {
-    let e = entries(&[(0, b"k0")]);
+    // A `Rejected` source carries NO entries at all now: the former
+    // `(healthy: false, entries: Some(..))` pair could express "distrusted yet
+    // still handed its entries", a state nothing was stopping a future caller
+    // from resolving against.
     let loc = resolve_location(
         "Data.db",
         64,
         16,
         PhysicalAnchor::DamagedExtent,
         Some(0),
-        false, // boundary source damaged
+        &BoundarySource::Rejected(BOUNDARY_SOURCE_UNREADABLE.to_string()),
         (0, 16384),
-        Some(&e),
         16384,
     );
     assert_eq!(
@@ -226,9 +228,8 @@ fn resolve_location_resolves_when_the_boundary_source_is_healthy() {
         16,
         PhysicalAnchor::DamagedExtent,
         Some(0),
-        true,
+        &BoundarySource::Trusted(&e),
         (0, 100),
-        Some(&e),
         16384,
     );
     assert_eq!(loc.partitions, resolved(vec![KeyRef::from_raw(b"k0")]));
@@ -241,4 +242,126 @@ fn resolve_location_resolves_when_the_boundary_source_is_healthy() {
 #[test]
 fn hex_encode_matches_lower_case_pairs() {
     assert_eq!(hex_encode(&[0x00, 0xab, 0xff]), "00abff");
+}
+
+// ---------------------------------------------------------------------------
+// Boundary-source validation (roborev blocker #2 + I1, issue #4194)
+//
+// Each of these fails WITHOUT the validation in `resolve_partitions` /
+// `first_order_violation`: the pre-fix code let a corrupt `data_offset`
+// collapse its own extent to `[huge, huge)` (never reported, never counted
+// in `truncated`, never `Unresolved` — a silent drop) AND widen its former
+// left neighbour's extent to the next real partition's start (clean bytes
+// attributed to the wrong key, with full confidence).
+// ---------------------------------------------------------------------------
+
+/// The exact post-sort shape a bit flip in a non-leading byte of a BIG
+/// `Index.db` `position` vint produces: every entry still parses, so the
+/// bogus `+2^24` position simply sorts to the END of the list.
+#[test]
+fn an_out_of_bounds_boundary_offset_is_refused_rather_than_silently_dropped() {
+    let logical_len = 300u64;
+    let e = entries(&[(0, b"k0"), (100, b"k1"), (100 + (1 << 24), b"k2")]);
+    let res = resolve_partitions((100, 150), &e, logical_len);
+    match res {
+        PartitionResolution::Unresolved(cause) => {
+            assert!(
+                cause.contains(BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS),
+                "the refusal must NAME the out-of-bounds offset as its cause: {cause}"
+            );
+            assert!(
+                cause.contains("16777316") && cause.contains("300"),
+                "the cause must carry BOTH the offending position and the logical length so \
+                 the operator can see the inconsistency: {cause}"
+            );
+        }
+        PartitionResolution::Resolved { keys, truncated } => panic!(
+            "a boundary source declaring a position past the logical length must be REFUSED, \
+             not resolved against: got keys={keys:?} truncated={truncated}. Pre-fix this \
+             returned Resolved([k1]) — k2 silently dropped and k1's extent widened over k2's \
+             real bytes."
+        ),
+    }
+}
+
+/// A position EXACTLY at the declared logical length is the same degenerate
+/// `[len, len)` extent, so `>` would have left this one value silently
+/// dropped — the bounds check is `>=`.
+#[test]
+fn a_boundary_offset_exactly_at_the_logical_length_is_also_refused() {
+    let e = entries(&[(0, b"k0"), (300, b"k1")]);
+    match resolve_partitions((0, 300), &e, 300) {
+        PartitionResolution::Unresolved(cause) => assert!(
+            cause.contains(BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS),
+            "cause: {cause}"
+        ),
+        other => panic!("expected a refusal for a position at the logical end, got {other:?}"),
+    }
+}
+
+/// The in-bounds case must be entirely unaffected — the validation refuses a
+/// corrupt source, it does not make a healthy one unresolvable.
+#[test]
+fn a_boundary_offset_just_below_the_logical_length_still_resolves() {
+    let e = entries(&[(0, b"k0"), (299, b"k1")]);
+    assert_eq!(
+        resolve_partitions((299, 300), &e, 300),
+        resolved(vec![KeyRef::from_raw(b"k1")])
+    );
+}
+
+#[test]
+fn first_order_violation_accepts_a_strictly_ascending_sequence() {
+    assert_eq!(
+        first_order_violation(&entries(&[(0, b"k0"), (1, b"k1"), (2, b"k2")])),
+        None
+    );
+    assert_eq!(first_order_violation(&entries(&[(7, b"only")])), None);
+    assert_eq!(first_order_violation(&[]), None);
+}
+
+#[test]
+fn first_order_violation_names_a_descending_entry() {
+    // Entry 2 declares a position BELOW entry 1's — the on-disk parse order
+    // the format guarantees is strictly ascending (guide Ch.6).
+    assert_eq!(
+        first_order_violation(&entries(&[(0, b"k0"), (200, b"k1"), (100, b"k2")])),
+        Some(2)
+    );
+}
+
+#[test]
+fn first_order_violation_treats_two_equal_positions_as_a_violation() {
+    // STRICT ascent: two partitions sharing a start offset give the earlier
+    // one the extent `[s, s)`, which intersects nothing — the same silent
+    // drop the out-of-bounds check above refuses, reached by a different
+    // corruption. A non-strict `<` test would wave this through.
+    assert_eq!(
+        first_order_violation(&entries(&[(0, b"k0"), (100, b"k1"), (100, b"k2")])),
+        Some(2)
+    );
+}
+
+#[test]
+fn a_rejected_boundary_source_propagates_its_own_cause_verbatim() {
+    // I1: a rejection's cause must reach the operator intact, not be
+    // flattened into one generic "unavailable" string.
+    let cause = format!("{BOUNDARY_SOURCE_OPEN_FAILED}: /x/nb-1-big-Index.db: Permission denied");
+    let loc = resolve_location(
+        "Data.db",
+        64,
+        16,
+        PhysicalAnchor::DamagedExtent,
+        Some(0),
+        &BoundarySource::Rejected(cause.clone()),
+        (0, 16384),
+        16384,
+    );
+    assert_eq!(loc.partitions, PartitionResolution::Unresolved(cause));
+    let rendered = format_location(&loc);
+    assert!(
+        rendered.contains("Permission denied"),
+        "the operator-visible text MUST name the real I/O cause, not just \
+         'boundary source unavailable': {rendered}"
+    );
 }
