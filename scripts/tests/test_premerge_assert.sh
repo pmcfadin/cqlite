@@ -1282,10 +1282,12 @@ refused_pair "delta-anchor: non-hex -> refuse" \
   "$ANCHORFULL" "$T/delta-anchor-nonhex.txt" "is not lowercase hex"
 
 # --- Case 30: the fourth argument must BE a delta OR a recert block (#4268) --
-# Classification is by CONTENT (a bash read/case loop, no external `grep` --
-# see the shipped script's own comment on why: two ancestry fixtures further
-# down deliberately omit grep from PATH), so a FULL/LITE fourth argument now
-# refuses with a message naming BOTH shapes it could have been, not "ZERO delta
+# Classification is by CONTENT, via awk (no external `grep` -- see the shipped
+# script's own comment on why: two ancestry fixtures further down deliberately
+# omit grep from PATH; comment corrected #4268 job 122 -- it used to say "a
+# bash read/case loop", stale since the classifier moved to awk for the
+# ANSI/CR normalization R18 pins), so a FULL/LITE fourth argument now refuses
+# with a message naming BOTH shapes it could have been, not "ZERO delta
 # blocks" (stale wording from before #4268 added the second shape).
 refused_pair "a FULL summary passed as the fourth argument -> refuse" \
   "$ANCHORFULL" "$GOOD" "is neither a DELTA nor a RECERT summary block"
@@ -4365,7 +4367,20 @@ refused_recert "recert: recert-components containing an invalid character -> ref
 anchor_rows "$T/anchor-unattributable.txt" 'tooling-tests:     PASS (12s)'
 refused_recert "recert: anchor RESULT: FAIL but the NAMED component already reads PASS -> refuse (unattributable FAIL)" \
   "$T/anchor-unattributable.txt" "$GOODRECERT" \
-  "already reads PASS in the"
+  "no component named in"
+
+# #4268 roborev finding (Medium, job 122): a named component reading SKIP
+# (or OPT-OUT) ALSO cannot have caused RESULT: FAIL
+# (scripts/agent-gate.sh's _status_is_nonfailing defines PASS|SKIP|OPT-OUT
+# as non-failing) — the OLD `!= PASS` test wrongly admitted it, laundering
+# an unattributable FAIL exactly like the PASS case above. Reproduces the
+# finding's own failure scenario: a cqlite-core-only PR where tooling-tests
+# routinely SKIPped (the #4266 scoping skip) alongside an unrelated
+# SIDE-lane failure that forced RESULT: FAIL with no row of its own.
+anchor_rows "$T/anchor-unattributable-skip.txt" 'tooling-tests:     SKIP (0s)'
+refused_recert "recert: anchor RESULT: FAIL but the NAMED component reads SKIP, not FAIL/VACUOUS -> refuse (unattributable FAIL)" \
+  "$T/anchor-unattributable-skip.txt" "$GOODRECERT" \
+  "no component named in"
 
 # --- Case R17: the RECERT BLOCK's OWN rows must be measured and PASS (#4268
 # --- roborev finding, Medium — _gate_component_rows's "recert" selector was
@@ -4533,7 +4548,11 @@ assert_src_absent_fixed \
 #
 # +1 for Case R6b (#4268 job-121 roborev round: the recert-anchor-run-id:
 # binding check), 1 `refused_recert` arm.
-CASE_FLOOR=254
+#
+# +1 for the SKIP-attributability case (#4268 job-122 roborev round: a named
+# component reading SKIP cannot have caused RESULT: FAIL either), 1
+# `refused_recert` arm.
+CASE_FLOOR=255
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

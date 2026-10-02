@@ -4454,11 +4454,26 @@ else
   _pf_strict_ok_=0
   if grep -qE '\[ -z "\$ONLY" \] && \[ "\$LITE" -eq 0 \]' "$fl_pf_"; then
     _pf_strict_ok_=1
-  elif grep -q '_gate_is_strict' "$fl_pf_"; then
-    _pf_pred_="$(awk '/^_gate_is_strict\(\)/,/^}/' "$GATE")"
+  # EVERY ASSERT BELOW MATCHES A CODE STATEMENT, NEVER A MENTION (#4268 roborev
+  # finding, Medium — job 122, same class the "4268-recert-schemas-reached"
+  # section ~1700 lines below already learned): a bare `grep -q '_gate_is_strict'`
+  # is satisfiable by this very function's own explanatory comment ("Spelled via
+  # `_gate_is_strict` ..."), which would stay present even if someone deleted the
+  # actual call and made the preflight unconditional. The STATEMENT shape
+  # (`if _gate_is_strict` followed by `&&`/`;`/end-of-line) a comment cannot supply.
+  elif grep -qE '^[[:space:]]*if _gate_is_strict( &&|;|$)' "$fl_pf_"; then
+    # `/^\}/`, not `/^}/` (job 122 Low, BSD-awk consistency — matches the
+    # sibling extraction a few thousand lines below). Bound-checked (job 122
+    # Medium, companion half of the statement-shape fix above): an EMPTY
+    # extraction must not reach the two greps below, where an empty haystack
+    # would simply report no-match and leave `_pf_strict_ok_` at its default
+    # 0 — the RIGHT verdict here, but for the WRONG reason (an unmeasured
+    # predicate, not a genuinely non-strict one); the final if/else below
+    # still reports the single `bad` for this subject either way.
+    _pf_pred_="$(awk '/^_gate_is_strict\(\) \{/,/^\}/' "$GATE")"
     # herestrings, NOT `printf | grep -q`: grep -q is an EARLY-EXIT reader, so the pipe
     # form is the SIGPIPE shape the ratchet reds on (and it would re-trip it here).
-    if grep -qE '"\$LITE" -eq 0' <<<"$_pf_pred_" \
+    if [ -n "$_pf_pred_" ] && grep -qE '"\$LITE" -eq 0' <<<"$_pf_pred_" \
        && grep -qE '\-z "\$ONLY"' <<<"$_pf_pred_"; then
       _pf_strict_ok_=1
     fi

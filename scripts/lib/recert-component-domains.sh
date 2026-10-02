@@ -151,15 +151,22 @@ _recert_harness_patterns() {
 _recert_component_domain_patterns() {
   local _rdp_specific _rdp_rc
   _rdp_specific=$(_recert_component_domain_patterns_raw "$1"); _rdp_rc=$?
-  [ "$_rdp_rc" -eq 0 ] || return 0
+  # Propagated, not discarded (#4268 roborev finding, Low — job 122, a direct
+  # regression from the job-114 fix below): an earlier cut returned 0 HERE
+  # unconditionally for the unrecognized case too, which combined with the
+  # explicit `return 0` at the bottom made BOTH exit paths return 0 — the
+  # function's rc carried NO information at all, the fail-OPEN direction a
+  # future `if _recert_component_domain_patterns "$c" >/dev/null; then` (or
+  # any `set -e` caller) would read as "every component, including a
+  # brand-new one with no arm below, is recognized". `return "$_rdp_rc"`
+  # restores the documented contract (0 = recognized, 1 = not) without
+  # reintroducing the job-114 bug this fix sits next to.
+  [ "$_rdp_rc" -eq 0 ] || return "$_rdp_rc"
   printf '%s\n' "${_RECERT_DOM_BASE[@]}" "${_RECERT_DOM_TOOLCHAIN[@]}"
-  # Explicit (roborev finding, Low): without this, the function's own exit
-  # status is the `[ -n ... ]` test above, which is FALSE whenever a
+  # Explicit (roborev finding, Low — job 114): without this, the function's
+  # own exit status is the `[ -n ... ]` test above, which is FALSE whenever a
   # recognized component's specific list happens to be empty — even though
-  # the shared groups were just printed. No current caller reads the rc, but
-  # a future `if _recert_component_domain_patterns "$c" >/dev/null; then`
-  # (or any `set -e` caller) would silently misread a recognized component
-  # as unrecognized.
+  # the shared groups were just printed.
   [ -n "$_rdp_specific" ] && printf '%s\n' "$_rdp_specific"
   return 0
 }

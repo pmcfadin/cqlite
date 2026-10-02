@@ -25752,13 +25752,25 @@ run_recertify_preflight() {
     done
   fi
 
-  # ---- 4b: FAIL-attributability (#4268 roborev finding, High) ---------------
+  # ---- 4b: FAIL-attributability (#4268 roborev finding, High; narrowed job
+  # ---- 122, Medium) ----------------------------------------------------------
   # A SIDE-lane subshell failure (SIDE_LANE_EXIT != 0) forces OVERALL=FAIL with
   # NO component row naming it — so an anchor can carry RESULT: FAIL while
   # EVERY row, including the named ones, reads PASS, and check 4 above would
   # accept it (nothing to flag as an offender). Require the FAIL to land on a
   # named component — mirrors scripts/flow/premerge-assert.sh's identical
   # check on the pasted-PR side.
+  #
+  # ONLY FAIL/VACUOUS CAN HAVE CAUSED IT (job 122): `_status_is_nonfailing`
+  # (this file) defines PASS|SKIP|OPT-OUT as the NON-failing set, so a named
+  # component whose anchor row is SKIP or OPT-OUT cannot be the reason
+  # OVERALL=FAIL — naming one used to satisfy this check anyway (`!= PASS`
+  # admitted SKIP/OPT-OUT alongside the real culprits), laundering exactly
+  # the unattributable-FAIL shape this guard exists to refuse. Concretely: a
+  # cqlite-core-only PR with `tooling-tests: SKIP` (the routine #4266
+  # scoping skip) alongside a SIDE-lane failure that forces RESULT: FAIL
+  # with no row of its own — naming `tooling-tests` passed every check
+  # including this one, though nothing about its SKIP explains the FAIL.
   if [ -z "$reason" ]; then
     local _rc_overall _rc_named_nonpass=0 _rc_nc _rc_nline _rc_nst _rc_nignored _rc_nrest
     _rc_overall=$(grep -E '^RESULT: ' "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1 | awk '{print $2}')
@@ -25769,10 +25781,10 @@ run_recertify_preflight() {
         # writer followed by a pipe is the flagged shape) — read splits the
         # same whitespace-delimited fields with no pipe at all.
         read -r _rc_nignored _rc_nst _rc_nrest <<<"$_rc_nline"
-        [ "$_rc_nst" = PASS ] || _rc_named_nonpass=1
+        case "$_rc_nst" in FAIL|VACUOUS) _rc_named_nonpass=1 ;; esac
       done
       if [ "$_rc_named_nonpass" != 1 ]; then
-        reason="anchor RESULT is FAIL, but every named component (${rc_list[*]}) already reads PASS in the anchor — the FAIL has no component-row cause, so this recert would certify nothing about the real failure"
+        reason="anchor RESULT is FAIL, but no named component (${rc_list[*]}) reads FAIL or VACUOUS in the anchor — the FAIL has no component-row cause (PASS/SKIP/OPT-OUT cannot have produced it — see _status_is_nonfailing), so this recert would certify nothing about the real failure"
       fi
     fi
   fi

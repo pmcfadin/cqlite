@@ -2243,18 +2243,22 @@ if [ -n "$delta_file" ]; then
   # check entirely and fell through to the "neither DELTA nor RECERT" message
   # instead of naming the real, cheaper-to-diagnose cause).
   assert_readable_summary "$delta_file" "delta summary"
-  # PURE BASH, no `grep` (roborev-style regression check on this diff caught an
-  # earlier cut that shelled out to `grep -qF`): two of this suite's own hardened
-  # fixtures — the no-git and no-bounded-runner ancestry arms — deliberately
-  # build a PATH with awk/tr/git/etc. but WITHOUT grep, to prove the ancestry
-  # check degrades to a NAMED refusal rather than a silent tool-failure. A `grep`
-  # call here would 127 on exactly those fixtures, before the classification
-  # ever reaches the real question, misreporting a "neither DELTA nor RECERT"
-  # refusal instead of exercising (or correctly bypassing) the ancestry check.
-  # A `case`/`read` loop needs nothing beyond the shell itself. While scanning,
-  # also tally every marker family (whole-line-exact, same anchoring _gate_awk
-  # uses) so a refusal can NAME what it found instead of only what it wanted —
-  # matching the existing "(found N full, M lite)" style below.
+  # NO `grep` (roborev-style regression check on this diff caught an earlier cut
+  # that shelled out to `grep -qF`; comment corrected #4268 job 122 — a stale
+  # "PURE BASH, no grep" / "a case/read loop needs nothing beyond the shell
+  # itself" pair here used to contradict the awk-based reality a few lines
+  # down, which is exactly the regression the stale text invited): two of this
+  # suite's own hardened fixtures — the no-git and no-bounded-runner ancestry
+  # arms — deliberately build a PATH with awk/tr/git/etc. but WITHOUT grep, to
+  # prove the ancestry check degrades to a NAMED refusal rather than a silent
+  # tool-failure. A `grep` call here would 127 on exactly those fixtures,
+  # before the classification ever reaches the real question, misreporting a
+  # "neither DELTA nor RECERT" refusal instead of exercising (or correctly
+  # bypassing) the ancestry check. `awk` is NOT excluded by this constraint —
+  # see its own comment below for why it is the right tool anyway. While
+  # scanning, also tally every marker family (whole-line-exact, same anchoring
+  # _gate_awk uses) so a refusal can NAME what it found instead of only what it
+  # wanted — matching the existing "(found N full, M lite)" style below.
   # Block counting for a full/recert AMBIGUOUS verdict (>1 of the SAME family)
   # is the existing gate_parse_file/GP_blocks check inside the Case B/C bodies
   # below — not duplicated here. This loop only decides WHICH family to hand
@@ -2561,7 +2565,14 @@ C)
         # subshell failure (SIDE_LANE_EXIT != 0) forces OVERALL=FAIL with no
         # row naming it, so every row, including the named ones, would
         # otherwise read PASS (#4268 roborev finding, High).
-        [ "$_rc_status" = PASS ] || _rc_named_nonpass=1
+        #
+        # ONLY FAIL/VACUOUS CAN HAVE CAUSED RESULT: FAIL (job 122, Medium):
+        # agent-gate.sh's _status_is_nonfailing defines PASS|SKIP|OPT-OUT as
+        # non-failing, so a named component reading SKIP or OPT-OUT cannot be
+        # the anchor's real failure — `!= PASS` used to admit it anyway,
+        # laundering an unattributable FAIL exactly like an unnamed one
+        # would. mirrors agent-gate.sh's own check 4b fix.
+        case "$_rc_status" in FAIL|VACUOUS) _rc_named_nonpass=1 ;; esac
         continue
         ;;
     esac
@@ -2606,15 +2617,17 @@ GATE_RECERT_ROWS
   # never attributed to anything. Require the FAIL to land on a NAMED component.
   if [ "$full_result" = FAIL ] && [ "$_rc_named_nonpass" != 1 ]; then
     refuse_no_gate \
-      "The recert ANCHOR's RESULT is FAIL, but every component named in" \
-      "'recert-components:' (here: $recert_components) already reads PASS in the" \
-      "anchor's own rows." \
+      "The recert ANCHOR's RESULT is FAIL, but no component named in" \
+      "'recert-components:' (here: $recert_components) reads FAIL or VACUOUS in the" \
+      "anchor's own rows — PASS, SKIP and OPT-OUT cannot have produced RESULT: FAIL" \
+      "(scripts/agent-gate.sh's _status_is_nonfailing)." \
       "A recert exists to re-run the component(s) that actually failed. If none of the" \
-      "named components shows a non-PASS row, the anchor's FAIL has no component-row" \
+      "named components shows a FAIL/VACUOUS row, the anchor's FAIL has no component-row" \
       "cause — e.g. a SIDE-lane subshell failure or a summary-integrity clobber — and" \
-      "re-running already-PASSing components certifies nothing about the real failure." \
-      "REMEDY: name the component(s) whose row is actually non-PASS, or re-run the" \
-      "FULL gate."
+      "re-running a PASSing/SKIPped/OPT-OUT component certifies nothing about the real" \
+      "failure." \
+      "REMEDY: name the component(s) whose row actually reads FAIL or VACUOUS, or re-run" \
+      "the FULL gate."
   fi
 
   # THE RECERT BLOCK'S OWN ROWS MUST BE MEASURED AND EXACTLY PASS (#4268 roborev
@@ -2690,7 +2703,7 @@ GATE_RECERT_SELF_ROWS
   assert_clean_tree "recert block" "$recert_dirty" recert "$recert_ndirty" commit:
   assert_clean_tree "recert block" "$recert_tsdirty" recert "$recert_ntsdirty" tree-start:
   ;;
-*)
+B)
   # CASE B — ANCHORED DELTA (#1892). The full block is the ANCHOR: its sha need
   # not be the certified sha, but it must still be a real, verifiable sha, and
   # the delta block must name exactly it.
@@ -2768,6 +2781,17 @@ GATE_RECERT_SELF_ROWS
   # the PR exactly as a dirty full gate does.
   assert_clean_tree "delta block" "$delta_dirty" delta "$delta_ndirty" commit:
   assert_clean_tree "delta block" "$delta_tsdirty" delta "$delta_ntsdirty" tree-start:
+  ;;
+# REFUSE, don't guess (#4268 roborev finding, Low — job 122): every other
+# kind-dispatch in this file refuses on an unrecognized shape rather than
+# falling through to a specific arm's own logic (assert_clean_tree's own
+# comment: "Refusing rather than guessing a remedy"). B was previously the
+# bare `*)` catch-all — a future fourth classification, or a typo'd
+# case_kind assignment, would silently run the delta path and read
+# $delta_anchor, which no other arm ever sets (an unset-variable abort under
+# `set -u`, or worse, an unbound read if `set -u` is ever relaxed here).
+*)
+  refuse_no_gate "INTERNAL: unknown case_kind '$case_kind' — this is a defect in premerge-assert.sh itself, not a property of the pasted pair."
   ;;
 esac
 
