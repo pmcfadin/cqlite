@@ -86,11 +86,8 @@ mod summary_scan;
 #[cfg(all(test, feature = "write-support"))]
 mod full_index_stream_tests;
 mod model;
-// Streaming partition-BOUNDARY enumeration (issue #1103; rewritten streaming +
-// boundary-keyed for #4197): `distinct_partition_keys_with_positions` plus the
-// `PartitionBoundaryObserver` the `compaction` streaming driver threads through
-// its drain loop. Split out of `compaction.rs` under the campsite rule (epic
-// #1116) — that file is over the target already.
+// Streaming partition-BOUNDARY enumeration (#1103, rewritten for #4197); split
+// out of the over-target `compaction.rs` per the campsite rule (epic #1116).
 mod partition_boundaries;
 // Single-partition compaction seek (issue #2207): the public point-read primitive
 // composing the presence oracle + BTI/BIG offset resolution into a byte-identical
