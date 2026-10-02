@@ -245,6 +245,15 @@ docs/sstable-guide-audit/
 /.agent-gate-lite-summary.txt
 # agent-gate --delta caller-known summary (distinct recovery path, issue #1892)
 /.agent-gate-delta-summary.txt
+# agent-gate --recertify caller-known summary (distinct recovery path, #4268
+# roborev finding, Medium — job 115): without this, a --recertify run's own
+# leftover artifact reads as an untracked, non-ignored "dirty" file to an
+# UNRELATED bare `--only`/full gate run sharing the checkout, perturbing that
+# OTHER run's tree digest. TREE_EXCLUDE_REL/_tree_excluded only ever
+# self-excludes the CURRENT run's own artifact, never another mode's — this
+# .gitignore entry is the mechanism that protects cross-mode runs from each
+# other, the same way the lite/delta entries above already do.
+/.agent-gate-recert-summary.txt
 # agent-gate summary-integrity FAIL siblings for the checkout-default paths (#2874): the
 # no-clobber live-peer publish drops "<default-summary>.integrity-fail.<run-id>" next to the
 # pinned path; ignore them so an incident never dirties the tree (job-2107 LOW#1).
@@ -254,6 +263,8 @@ docs/sstable-guide-audit/
 !/.agent-gate-lite-summary.txt.integrity-fail.*/
 /.agent-gate-delta-summary.txt.integrity-fail.*
 !/.agent-gate-delta-summary.txt.integrity-fail.*/
+/.agent-gate-recert-summary.txt.integrity-fail.*
+!/.agent-gate-recert-summary.txt.integrity-fail.*/
 # agent-gate liveness heartbeat for the checkout-default summary paths (#3473). The gate
 # rewrites these every 20s for the whole run; they are runtime artifacts, never source.
 # The tree-integrity guard carves them out explicitly too (_tree_excluded) — that is what
@@ -284,6 +295,10 @@ docs/sstable-guide-audit/
 /.agent-gate-delta-summary.txt.heartbeat.launch-lock
 !/.agent-gate-delta-summary.txt.heartbeat.launch-lock/
 !/.agent-gate-delta-summary.txt.heartbeat/
+/.agent-gate-recert-summary.txt.heartbeat
+/.agent-gate-recert-summary.txt.heartbeat.launch-lock
+!/.agent-gate-recert-summary.txt.heartbeat.launch-lock/
+!/.agent-gate-recert-summary.txt.heartbeat/
 /.agent-gate-summary.txt.launch-lock
 !/.agent-gate-summary.txt.launch-lock/
 /.agent-gate-summary.txt.launch-lock.mutex
@@ -296,12 +311,18 @@ docs/sstable-guide-audit/
 !/.agent-gate-delta-summary.txt.launch-lock/
 /.agent-gate-delta-summary.txt.launch-lock.mutex
 !/.agent-gate-delta-summary.txt.launch-lock.mutex/
+/.agent-gate-recert-summary.txt.launch-lock
+!/.agent-gate-recert-summary.txt.launch-lock/
+/.agent-gate-recert-summary.txt.launch-lock.mutex
+!/.agent-gate-recert-summary.txt.launch-lock.mutex/
 /.agent-gate-summary.txt.heartbeat.tmp.*
 !/.agent-gate-summary.txt.heartbeat.tmp.*/
 /.agent-gate-lite-summary.txt.heartbeat.tmp.*
 !/.agent-gate-lite-summary.txt.heartbeat.tmp.*/
 /.agent-gate-delta-summary.txt.heartbeat.tmp.*
 !/.agent-gate-delta-summary.txt.heartbeat.tmp.*/
+/.agent-gate-recert-summary.txt.heartbeat.tmp.*
+!/.agent-gate-recert-summary.txt.heartbeat.tmp.*/
 
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
 test-data/.tmp-parity-manifest-mutated*

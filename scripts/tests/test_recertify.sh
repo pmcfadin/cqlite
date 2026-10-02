@@ -281,6 +281,33 @@ build_fixture() {
   for _bf_f in $_bf_canon; do
     printf '%s\n' "-- fixture stub for $_bf_f" >"$repo/test-data/schemas/$_bf_f" || return 1
   done
+  # A .gitignore for the four default-summary families (#4268 roborev finding,
+  # Medium — job 115: once RECERTIFY got its OWN distinct default path, an
+  # unrelated bare `--only`/full run in this SAME fixture directory would see
+  # a --recertify run's leftover artifact as untracked and report dirty: yes,
+  # the exact cross-mode contamination the REAL checkout's own .gitignore
+  # prevents. Mirrors that .gitignore's agent-gate block exactly (minus the
+  # self-test-only heartbeat.tmp.* glob, not exercised here) so this fixture's
+  # git-based untracked-file scan matches real-world behavior rather than
+  # relying on accidental default-path sharing between modes.
+  {
+    printf '/.agent-gate-summary.txt\n'
+    printf '/.agent-gate-lite-summary.txt\n'
+    printf '/.agent-gate-delta-summary.txt\n'
+    printf '/.agent-gate-recert-summary.txt\n'
+    for _bf_fam in summary lite-summary delta-summary recert-summary; do
+      printf '/.agent-gate-%s.txt.integrity-fail.*\n' "$_bf_fam"
+      printf '!/.agent-gate-%s.txt.integrity-fail.*/\n' "$_bf_fam"
+      printf '/.agent-gate-%s.txt.heartbeat\n' "$_bf_fam"
+      printf '/.agent-gate-%s.txt.heartbeat.launch-lock\n' "$_bf_fam"
+      printf '!/.agent-gate-%s.txt.heartbeat.launch-lock/\n' "$_bf_fam"
+      printf '!/.agent-gate-%s.txt.heartbeat/\n' "$_bf_fam"
+      printf '/.agent-gate-%s.txt.launch-lock\n' "$_bf_fam"
+      printf '!/.agent-gate-%s.txt.launch-lock/\n' "$_bf_fam"
+      printf '/.agent-gate-%s.txt.launch-lock.mutex\n' "$_bf_fam"
+      printf '!/.agent-gate-%s.txt.launch-lock.mutex/\n' "$_bf_fam"
+    done
+  } >"$repo/.gitignore" || return 1
   ( cd "$repo" \
       && git init -q -b main . \
       && git config user.email t@cqlite.test && git config user.name cqlite-test \
@@ -428,19 +455,18 @@ else
       bad "R2: expected exit 2 + a named 'not found' cause, got rc=$RC"
     fi
 
-    # R2b/R2c (#4268 roborev finding, High): SUMMARY_FILE must never resolve to
-    # the SAME file as RECERT_ANCHOR_FILE — the startup INCOMPLETE sentinel
-    # truncates whatever SUMMARY_FILE names before run_recertify_preflight ever
-    # reads the anchor, so a collision silently destroys the anchor's PASS
-    # content even though the run then fails closed on check 3's full-SUMMARY
-    # test. R2b proves the EXPLICIT-collision guard (an AGENT_GATE_SUMMARY_FILE
-    # pinned to the same path as --recertify's own argument); R2c proves the
-    # single most natural footgun: RECERTIFY has no distinct default path of its
-    # own (by design — it shares the full gate's default exactly the way a bare
-    # `--only` run does, so unspecified-summary invocations exclude each other's
-    # leftover artifacts from tree-integrity's dirty scan), so anchoring at the
-    # checkout's OWN default full-gate recovery path with NO
-    # AGENT_GATE_SUMMARY_FILE override collides BY DEFAULT and must refuse too.
+    # R2b/R2c/R2e (#4268 roborev finding, High (job 112) + Medium/Low (job
+    # 115)): SUMMARY_FILE must never resolve to the SAME file as
+    # RECERT_ANCHOR_FILE — the startup INCOMPLETE sentinel truncates whatever
+    # SUMMARY_FILE names before run_recertify_preflight ever reads the
+    # anchor, so a collision silently destroys the anchor's PASS content even
+    # though the run then fails closed on check 3's full-SUMMARY test.
+    # RECERTIFY now has its OWN distinct default path (job 115 — mirroring
+    # LITE/DELTA), so the common UNPINNED footgun is now structurally
+    # impossible (R2d proves that positively); what remains reachable is an
+    # EXPLICIT AGENT_GATE_SUMMARY_FILE pin, by a literal path match (R2b) or
+    # by a symlink/hardlink to the same inode under a DIFFERENT basename,
+    # which the path-compare half alone cannot see (R2e, the `-ef` guard).
     collide_anchor="$fixture/collide-anchor.txt"
     cp "$anchor" "$collide_anchor"
     run_recert_env "$fixture" "$collide_anchor" file-size "AGENT_GATE_SUMMARY_FILE=$collide_anchor"
@@ -456,32 +482,55 @@ else
       bad "R2b: the anchor file was mutated/truncated by the refused run — data-loss footgun reproduced"
       echo "------- anchor after run -------"; cat "$collide_anchor" 2>/dev/null; echo "---------------------------------"
     fi
-    # Not an --only/--recertify-recognized artifact name (unlike the
-    # default-path case below), so it is never self-excluded from
-    # tree-integrity's dirty scan — leaving it behind would dirty the SHARED
-    # fixture for every later case that reuses it.
+    # Not an --only/--recertify-recognized artifact name, so it is never
+    # self-excluded from tree-integrity's dirty scan (neither by
+    # TREE_EXCLUDE_REL nor by the fixture's new .gitignore) — leaving it
+    # behind would dirty the SHARED fixture for every later case that reuses
+    # it.
     rm -f "$collide_anchor"
 
+    # R2d: the POSITIVE half — RECERTIFY's own distinct default path (job
+    # 115) means anchoring at the checkout's default FULL-gate recovery path
+    # with NO AGENT_GATE_SUMMARY_FILE override no longer collides at all.
     default_path_anchor="$fixture/.agent-gate-summary.txt"
     cp "$anchor" "$default_path_anchor"
     run_recert "$fixture" "$default_path_anchor" file-size
-    if [ "$RC" -eq 2 ] && grep -qF 'resolves to the SAME file' <<<"$OUT"; then
-      ok "R2c: anchoring at the checkout's own default full-gate summary path, with NO override, REFUSES by default (the collision the finding describes, unpinned)"
+    if [ "$RC" -eq 0 ] && grep -qF "==== AGENT-GATE RECERT SUMMARY ====" <<<"$OUT"; then
+      ok "R2d: anchoring at the default FULL-gate summary path, with no override, no longer collides (RECERTIFY has its own distinct default, job 115)"
     else
-      bad "R2c: expected exit 2 + 'resolves to the SAME file' anchoring at the default full-gate summary path, got rc=$RC"
+      bad "R2d: expected acceptance anchoring at the default full-gate summary path, got rc=$RC"
       echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
     fi
     if grep -qE '^RESULT: PASS' "$default_path_anchor" 2>/dev/null; then
-      ok "R2c: the default-path anchor's original PASS content survives the refused run untouched"
+      ok "R2d: the default-path anchor's original PASS content survives the accepted run untouched"
     else
-      bad "R2c: the default-path anchor was mutated/truncated by the refused run — data-loss footgun reproduced"
+      bad "R2d: the default-path anchor was mutated by the accepted run — RECERTIFY still shares the full gate's default path"
       echo "------- anchor after run -------"; cat "$default_path_anchor" 2>/dev/null; echo "---------------------------------"
     fi
-    # Self-excluded by name from tree-integrity's dirty scan (it IS the
-    # checkout-default summary path), but removed anyway so this synthetic
-    # PASS content can never be misread as a REAL prior gate's recovery
-    # artifact by a later case in this same shared fixture.
     rm -f "$default_path_anchor"
+
+    # R2e: the `-ef` (device+inode) half of the collision guard — a SYMLINK
+    # whose basename differs from its target's still names the SAME file,
+    # which the path-compare half alone cannot see (#4268 roborev finding,
+    # Low — job 115).
+    symlink_anchor="$fixture/anchor-via-symlink.txt"
+    link_target="$fixture/.agent-gate-recert-summary.txt"
+    cp "$anchor" "$link_target"
+    ln -sf "$(basename -- "$link_target")" "$symlink_anchor"
+    run_recert_env "$fixture" "$symlink_anchor" file-size "AGENT_GATE_SUMMARY_FILE=$link_target"
+    if [ "$RC" -eq 2 ] && grep -qF 'resolves to the SAME file' <<<"$OUT"; then
+      ok "R2e: a symlink to the SAME file (different basename) still REFUSES via the -ef inode compare"
+    else
+      bad "R2e: expected exit 2 + 'resolves to the SAME file' for a same-inode symlink, got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+    if grep -qE '^RESULT: PASS' "$link_target" 2>/dev/null; then
+      ok "R2e: the symlinked anchor's original PASS content survives the refused run untouched"
+    else
+      bad "R2e: the symlinked anchor was mutated/truncated by the refused run — data-loss footgun reproduced"
+      echo "------- anchor after run -------"; cat "$link_target" 2>/dev/null; echo "---------------------------------"
+    fi
+    rm -f "$symlink_anchor" "$link_target"
 
     # R3: >2 components -> REFUSED.
     run_recert "$fixture" "$anchor" "file-size,fmt,clippy"
@@ -762,7 +811,13 @@ fi
 
 # W2: run_recertify_preflight is dispatched BEFORE acquire_gate_slot (fail fast,
 # never queues for a slot on a bad anchor).
-preflight_ln=$(grep -n 'run_recertify_preflight$' "$GATE" | grep -v '^\s*#' | tail -1 | cut -d: -f1)
+#
+# Single awk, not `grep -n … | grep -v '^\s*#' | tail -1 | cut` (#4268 roborev
+# finding, Low — job 115): `\s` is a GNU grep extension — BSD/macOS grep's BRE
+# treats it as a literal `s`, so the comment filter was a silent no-op there.
+# A POSIX bracket class in one awk program closes both the portability gap
+# and the multi-stage pipe this file's own W3 ratchet disfavors.
+preflight_ln=$(awk '/^[[:space:]]*run_recertify_preflight$/ { n = NR } END { print n }' "$GATE")
 # Single awk, not `grep -n … | head -1 | cut` — `head -1` is an early-exiting
 # reader, the same SIGPIPE-under-pipefail shape W3 forbids.
 slot_ln=$(awk '/^acquire_gate_slot$/ { print NR; exit }' "$GATE")

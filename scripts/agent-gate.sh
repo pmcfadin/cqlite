@@ -11636,6 +11636,22 @@ elif [ "$DELTA" -eq 1 ]; then
   # the full or lite recovery artifact, and `cat`-ing it can never be misread as
   # the full gate's result.
   SUMMARY_FILE="$REPO_ROOT/.agent-gate-delta-summary.txt"
+elif [ "$RECERTIFY" -eq 1 ]; then
+  # DISTINCT recert recovery filename (#4268 roborev finding, Medium — job 115):
+  # without this, an UNPINNED --recertify shares the FULL gate's own default
+  # path, so the startup sentinel below truncates the gate-of-record's own
+  # recovery artifact the instant an operator anchors a recert there with no
+  # AGENT_GATE_SUMMARY_FILE override — the single most natural thing to do,
+  # and exactly the shape the pre-sentinel collision guard a few lines down
+  # exists to catch rather than prevent structurally. Mirrors LITE/DELTA's
+  # existing rationale exactly. The matching .gitignore entries (mirroring
+  # the lite/delta block) are what stop THIS path's own leftover artifacts
+  # from reading as "dirty" to an unrelated bare `--only`/full run sharing the
+  # checkout — tree-integrity's untracked-file scan honors .gitignore
+  # (`git ls-files --others --exclude-standard`), which is a SEPARATE
+  # mechanism from TREE_EXCLUDE_REL (which only ever self-excludes the
+  # CURRENT run's own artifact, never another mode's).
+  SUMMARY_FILE="$REPO_ROOT/.agent-gate-recert-summary.txt"
 else
   SUMMARY_FILE="$REPO_ROOT/.agent-gate-summary.txt"
 fi
@@ -11653,31 +11669,45 @@ case "$SUMMARY_FILE" in
   /*) ;; # absolute (incl. the repo-root default) -> use verbatim
   *)  SUMMARY_FILE="$INVOCATION_CWD/$SUMMARY_FILE" ;;
 esac
-# #4268 roborev finding (High): a --recertify run whose SUMMARY_FILE resolves to
-# the SAME file as its own RECERT_ANCHOR_FILE — most naturally, anchoring at the
-# checkout's own default full-gate recovery path (RECERTIFY has no distinct
-# default of its own, by design: it shares the full gate's default path exactly
-# the way a bare `--only` run does, so the two can exclude each other's leftover
-# artifacts from tree-integrity's dirty-tree scan; see TREE_EXCLUDE_REL/
-# _tree_excluded below) with no AGENT_GATE_SUMMARY_FILE override — would have the
-# startup INCOMPLETE sentinel below truncate the anchor out from under
-# run_recertify_preflight before check 2 ever reads it. The run then fails closed
-# (a truncated sentinel can't pass check 3's full-SUMMARY test), but the anchor's
-# PASS content is already destroyed on disk — a data-loss footgun regardless of
-# the safe FAIL. Refuse BEFORE any write, comparing PHYSICAL identity (`cd … &&
-# pwd -P`, this file's existing canonicalization idiom — see _tree_canon_rel
-# below) so a relative vs absolute spelling of the same path still collides; a
-# nonexistent anchor directory just means "can't collide", leaving its existence
-# check to run_recertify_preflight's own check 2.
+# #4268 roborev finding (High, job 112; narrowed job 115 — RECERTIFY now has
+# ITS OWN distinct default, so the common unpinned case this guard originally
+# caught structurally cannot collide anymore): a --recertify run whose
+# SUMMARY_FILE resolves to the SAME file as its own RECERT_ANCHOR_FILE —
+# still reachable via an EXPLICIT AGENT_GATE_SUMMARY_FILE override pinned to
+# the anchor (or to anything else RECERT_ANCHOR_FILE also names) — would have
+# the startup INCOMPLETE sentinel below truncate the anchor out from under
+# run_recertify_preflight before check 2 ever reads it. The run then fails
+# closed (a truncated sentinel can't pass check 3's full-SUMMARY test), but
+# the anchor's PASS content is already destroyed on disk — a data-loss
+# footgun regardless of the safe FAIL. Refuse BEFORE any write.
+#
+# TWO independent same-file tests, not one (#4268 roborev finding, Low — job
+# 115): the PATH compare (`cd … && pwd -P`, this file's existing
+# canonicalization idiom — see _tree_canon_rel below) catches a
+# relative-vs-absolute spelling of the SAME path even when neither file
+# exists yet; `-ef` (device+inode) catches a SYMLINK or HARD LINK whose
+# basename differs from its target's, which the path compare alone cannot
+# see — e.g. `--recertify /tmp/anchor.txt` where `/tmp/anchor.txt` is a
+# symlink to this run's own SUMMARY_FILE: the composed paths differ, but
+# `>"$SUMMARY_FILE"` still truncates the symlink's target, i.e. the anchor's
+# own bytes. `-ef` needs both sides to EXIST, so it is skipped (not refused)
+# when either does not — a nonexistent anchor just means "can't collide via
+# a link", leaving existence itself to run_recertify_preflight's own check 2.
 if [ "$RECERTIFY" -eq 1 ]; then
   _recert_anchor_phys_d=$(cd "$(dirname -- "$RECERT_ANCHOR_FILE")" 2>/dev/null && pwd -P) || _recert_anchor_phys_d=""
   _summary_phys_d=$(cd "$(dirname -- "$SUMMARY_FILE")" 2>/dev/null && pwd -P) || _summary_phys_d=""
+  _recert_collides=0
   if [ -n "$_recert_anchor_phys_d" ] && [ -n "$_summary_phys_d" ] \
      && [ "$_recert_anchor_phys_d/$(basename -- "$RECERT_ANCHOR_FILE")" = "$_summary_phys_d/$(basename -- "$SUMMARY_FILE")" ]; then
-    echo "agent-gate: --recertify anchor-summary-file ($RECERT_ANCHOR_FILE) resolves to the SAME file as this run's own SUMMARY_FILE ($SUMMARY_FILE) — refusing before the startup sentinel would truncate it. Pin a distinct AGENT_GATE_SUMMARY_FILE, or point --recertify at a COPY of the anchor (#4268)." >&2
+    _recert_collides=1
+  elif [ -e "$RECERT_ANCHOR_FILE" ] && [ -e "$SUMMARY_FILE" ] && [ "$RECERT_ANCHOR_FILE" -ef "$SUMMARY_FILE" ]; then
+    _recert_collides=1
+  fi
+  if [ "$_recert_collides" -eq 1 ]; then
+    echo "agent-gate: --recertify anchor-summary-file ($RECERT_ANCHOR_FILE) resolves to the SAME file as this run's own SUMMARY_FILE ($SUMMARY_FILE) — refusing before the startup sentinel would truncate it. Pin a distinct AGENT_GATE_SUMMARY_FILE, or point --recertify at a 'cp -p' COPY of the anchor (plain 'cp' resets the copy's mtime, which silently defeats check 7's 24h anchor-staleness bound) (#4268)." >&2
     exit 2
   fi
-  unset _recert_anchor_phys_d _summary_phys_d
+  unset _recert_anchor_phys_d _summary_phys_d _recert_collides
 fi
 # #2751: the summary path is now fully resolved into SUMMARY_FILE (the parent's own
 # var). Both the startup INCOMPLETE sentinel below and emit_summary write
