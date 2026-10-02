@@ -3973,14 +3973,20 @@ recert_block() {
   local anchor="${1:-$C12}" commit="${2:-$C7}" tstart="${3:-$C12}" \
         ti="${4:-PASS}" result="${5:-PASS}" mode="${6:-$RECERT_MODE}" \
         verdict="${7:-CERTIFIED (all rerun component(s) PASS: tooling-tests)}" \
-        components="${8:-tooling-tests}" dirty="${9-no}" rows="${10-}"
+        components="${8:-tooling-tests}" dirty="${9-no}" rows="${10-}" \
+        anchor_run_id="${11:-/tmp/agent-gate.9cIQgX}"
   printf '%s\n' "$RECERT_S"
   printf 'run-id: /tmp/agent-gate.rCt9Qx\n'
   [ "$mode" = "-" ] || printf '%s\n' "$mode"
   [ "$commit" = "-" ] || printf 'commit: %s branch: issue-3465-require-gate-of-record%s\n' \
     "$commit" "$(dirty_field "$dirty")"
   [ "$anchor" = "-" ] || printf 'recert-anchor: %s\n' "$anchor"
-  printf 'recert-anchor-run-id: /tmp/agent-gate.9cIQgX\n'
+  # Defaults to the SAME placeholder emit_summary_block hardcodes for every
+  # full-gate fixture's own run-id: (/tmp/agent-gate.9cIQgX), so the #4268
+  # job-121 run-id binding check (premerge-assert.sh) passes by default for
+  # every EXISTING case here — a case overrides the 11th positional ONLY to
+  # test a deliberate mismatch.
+  printf 'recert-anchor-run-id: %s\n' "$anchor_run_id"
   printf 'recert-anchor-summary-file: /tmp/anchor-summary.txt\n'
   printf 'recert-components: %s\n' "$components"
   [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: %s digest: 671a6275687c\n' \
@@ -4144,6 +4150,20 @@ refused_recert "recert: recert block with NO recert-anchor: line -> refuse" \
 recert_summary "$T/recert-anchor-nonhex.txt" "unverified"
 refused_recert "recert: recert-anchor: non-hex -> refuse" \
   "$ANCHOR_RECERT_FAIL" "$T/recert-anchor-nonhex.txt" "is not lowercase hex"
+
+# --- Case R6b: the PASTED anchor must be the SAME FILE the gate actually
+# --- validated, not merely the same tree sha (#4268 roborev finding, Medium
+# --- — job 121). A hand-trimmed two-row anchor at the correct sha (one FAIL
+# --- row for attributability, one PASS row to dodge the zero-row refusal)
+# --- would otherwise pass every sha/digest/row check above while 37 of 39
+# --- real components go unmeasured — recert-anchor-run-id: is the gate own
+# --- binding evidence that closes this.
+recert_summary "$T/recert-wrong-run-id.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: tooling-tests)" tooling-tests no "" \
+  "/tmp/agent-gate.DIFFERENT-RUN"
+refused_recert "recert: recert-anchor-run-id: does not match the pasted anchor's own run-id: -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-wrong-run-id.txt" \
+  "does not match the pasted anchor block's own 'run-id:'"
 
 # --- Case R7: the recert run's OWN provenance must cover the certified sha --
 recert_summary "$T/recert-wrong-commit.txt" "$C12" "deadbeef"
@@ -4426,8 +4446,24 @@ fi
 # learned costs two false reds in one merge, just pointed the other way.
 GATE="$SCRIPT_DIR/../agent-gate.sh"
 if [ -r "$GATE" ]; then
-  _gcv_want=$(grep -oE 'PASS\|FAIL\|SKIP\|OPT-OUT\|VACUOUS\) ;;' "$GATE" | head -1 \
-    | sed -e 's/) ;;$//' | tr '|' '\n' | sort)
+  # Single awk, exiting on the FIRST match, not `grep -oE ... | head -1`
+  # (#4268 roborev finding, Low — job 121): a producer piped into an
+  # early-exiting reader under `set -o pipefail` is exactly the shape this
+  # suite's own #3752 ratchet forbids a few hundred lines below, and
+  # test_recertify.sh's W1/W2 already use this single-awk idiom for the
+  # identical reason. Extraction and splitting both happen inside the one
+  # awk program: it finds the FIRST matching case arm, strips the `) ;;`
+  # tail, and prints one token per line.
+  _gcv_want=$(awk '
+    /PASS\|FAIL\|SKIP\|OPT-OUT\|VACUOUS\) ;;/ {
+      match($0, /PASS\|FAIL\|SKIP\|OPT-OUT\|VACUOUS\) ;;/)
+      tok = substr($0, RSTART, RLENGTH)
+      sub(/\) ;;$/, "", tok)
+      n = split(tok, parts, "|")
+      for (i = 1; i <= n; i++) print parts[i]
+      exit
+    }
+  ' "$GATE" | sort)
   _gcv_got=$(grep -oE 'ok\["[A-Z-]+"\] = 1' "$ASSERT" | sed -e 's/^ok\["//' -e 's/"\] = 1$//' | sort)
   if [ -n "$_gcv_want" ] && [ "$_gcv_want" = "$_gcv_got" ]; then
     ok "ok-vocabulary derived: _gate_component_rows's ok[] set equals agent-gate.sh's own closed status vocabulary"
@@ -4494,7 +4530,10 @@ assert_src_absent_fixed \
 #
 # +2 for the mixed-family (DELTA+RECERT) ambiguity cases (#4268 job-120
 # roborev round), both `refused_recert` arms.
-CASE_FLOOR=253
+#
+# +1 for Case R6b (#4268 job-121 roborev round: the recert-anchor-run-id:
+# binding check), 1 `refused_recert` arm.
+CASE_FLOOR=254
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

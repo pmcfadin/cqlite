@@ -1489,9 +1489,26 @@ starved under co-scheduled load, not a code defect). Instead of a whole new ~3h
 full gate, it reruns ONLY the named components:
 
 ```bash
-scripts/agent-gate.sh --recertify <anchor-summary-file> --components tooling-tests
+scripts/agent-gate.sh --recertify <anchor-summary-file> --components core-tests
 scripts/agent-gate.sh --recertify <anchor-summary-file> --components c1,c2   # at most 2
 ```
+
+**`--components tooling-tests` is structurally UNREACHABLE on a PR diff (roborev
+finding, Medium — job 121), despite being the motivating example above.**
+`run_tooling_tests` only executes (rather than recording `SKIP`) when the diff
+touches a `TOOLING_TESTS_SCOPE_PATTERNS` path (#4266); its recert eligibility
+domain (`scripts/lib/recert-component-domains.sh`'s `tooling-tests` arm) is
+*that same set*, reused verbatim via `_recert_harness_patterns`. So check 8
+refuses "in the PR's own diff domain" on exactly the diffs tooling-tests would
+have RUN on, and on every other diff tooling-tests SKIPped — there is no
+failure to recertify. The only way to reach it is a non-PR run with
+`CQLITE_TOOLING_TESTS_ALWAYS_RUN=1` (the nightly lane). Narrowing the recert
+domain to a VERDICT-relevant subset (vs. the broader #4266 TRIGGER set) was
+considered and deliberately NOT done here: `tooling-tests` runs ~80 nested
+self-test scripts covering most of `scripts/*`, so a correct narrower domain
+needs its own careful analysis to avoid reopening a fail-open gap — tracked as
+a follow-up rather than rushed. Use a component with a reachable recert domain
+(like `core-tests` above) until that follow-up lands.
 
 **Structural design point (why it rides `--only`'s machinery rather than
 reimplementing dispatch):** `dispatch_component` — the name→`run_*` case

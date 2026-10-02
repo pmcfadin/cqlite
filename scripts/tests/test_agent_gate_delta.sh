@@ -503,6 +503,41 @@ else
   bad "anchor-full-fail-rejected: a full FAIL anchor summary was not rejected"
   echo "------- captured -------"; cat "$o8c" 2>/dev/null; echo "------------------------"
 fi
+# 8d. RECERT block anchor -> ERROR (#4268 roborev finding, Low -- job 121: the
+#     exclusion chain was exhaustive over lite/delta only, so a fourth dialect
+#     added by #4268 was not excluded).
+RECERT_START="==== AGENT-GATE RECERT SUMMARY ===="
+RECERT_END="==== END AGENT-GATE RECERT SUMMARY ===="
+recert_anchor="$tmp/anchor-recert.txt"
+mk_block "$RECERT_START" "RESULT: PASS" "$RECERT_END" "$recert_anchor"
+o8d="$tmp/o8d.txt"
+AGENT_GATE_SUMMARY_FILE="$o8d" \
+  bash "$GATE" --delta HEAD --anchor-summary-file "$recert_anchor" >/dev/null 2>&1
+if [ "$?" -ne 0 ] && grep -q "^RESULT: ERROR" "$o8d"; then
+  ok "anchor-recert-rejected: a RECERT summary cannot anchor a delta (RESULT: ERROR)"
+else
+  bad "anchor-recert-rejected: a RECERT anchor summary was not rejected"
+  echo "------- captured -------"; cat "$o8d" 2>/dev/null; echo "------------------------"
+fi
+# 8e. MIXED full+RECERT anchor -> ERROR. The exact shape --recertify's own
+#     doctrine tells operators to record TOGETHER (both blocks in one file):
+#     before this fix, this passed the full-header test unexcluded, and
+#     anchor_run_id was read from whichever block's run-id: a `grep | head -1`
+#     happened to see first.
+mixed_anchor="$tmp/anchor-full-plus-recert.txt"
+{
+  printf '%s\nrun-id: /tmp/agent-gate.FULLRUN\nRESULT: PASS\n%s\n' "$FULL_START" "==== END AGENT-GATE SUMMARY ===="
+  printf '%s\nrun-id: /tmp/agent-gate.RECERTRUN\nRESULT: PASS\n%s\n' "$RECERT_START" "$RECERT_END"
+} >"$mixed_anchor"
+o8e="$tmp/o8e.txt"
+AGENT_GATE_SUMMARY_FILE="$o8e" \
+  bash "$GATE" --delta HEAD --anchor-summary-file "$mixed_anchor" >/dev/null 2>&1
+if [ "$?" -ne 0 ] && grep -q "^RESULT: ERROR" "$o8e"; then
+  ok "anchor-mixed-full-recert-rejected: a full+RECERT mixed-family anchor cannot anchor a delta (RESULT: ERROR)"
+else
+  bad "anchor-mixed-full-recert-rejected: a mixed full+RECERT anchor was not rejected"
+  echo "------- captured -------"; cat "$o8e" 2>/dev/null; echo "------------------------"
+fi
 
 # 9. Bash 3.2 compatibility: macOS ships /bin/bash 3.2 and the gate is invoked as
 #    plain `bash scripts/agent-gate.sh`. The --delta classification + list paths

@@ -25212,9 +25212,19 @@ run_delta() {
     fi
     if ! grep -qF "==== AGENT-GATE SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
        || grep -qF "==== AGENT-GATE LITE SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
-       || grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
+       || grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
+       || grep -qF "==== AGENT-GATE RECERT SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
+      # RECERT exclusion added (#4268 roborev finding, Low — job 121): this
+      # exclusion chain was exhaustive over the three PRE-#4268 dialects; a
+      # file carrying a full SUMMARY block PLUS a RECERT block (the exact
+      # pair --recertify's own doctrine tells operators to record together)
+      # used to pass this full-header test unexcluded, and `anchor_run_id`
+      # below would then read whichever block's `run-id:` `grep | head -1`
+      # happened to see first — possibly the RECERT run's, not the full
+      # gate's. Mirrors premerge-assert.sh's own mixed-family refusal
+      # (`_delta_ndelta`/`_delta_nrecert`) on the pasted-PR side.
       echo "--- [delta] ERROR: --anchor-summary-file is not a FULL-gate SUMMARY block." >&2
-      echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta run." >&2
+      echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta/recert run." >&2
       _tree_meta_array   # #2926
       # disk-exhaustion-exempt: --delta usage ERROR: the anchor summary is not a FULL-gate SUMMARY block. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
@@ -25222,7 +25232,7 @@ run_delta() {
         "$(accelerators_line)" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
-        "error: anchor summary is not a full-gate SUMMARY block (lite/delta cannot anchor a delta)"
+        "error: anchor summary is not a full-gate SUMMARY block (lite/delta/recert cannot anchor a delta)"
       exit 2
     fi
     if ! grep -qE '^RESULT: PASS' "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
@@ -25560,8 +25570,15 @@ run_delta() {
 # ~3h full gate. It certifies the sha only in COMBINATION with the anchor's own
 # full SUMMARY — record BOTH in the PR, exactly like --delta.
 #
-#   scripts/agent-gate.sh --recertify <anchor-summary-file> --components tooling-tests
+#   scripts/agent-gate.sh --recertify <anchor-summary-file> --components core-tests
 #   scripts/agent-gate.sh --recertify <anchor-summary-file> --components c1,c2
+#
+# `--components tooling-tests` is structurally UNREACHABLE on a PR diff
+# (roborev finding, Medium — job 121): its recert domain IS the #4266 trigger
+# set that decides whether tooling-tests runs at all, so check 8 refuses
+# exactly when tooling-tests would have run, and every other diff SKIPped it
+# (nothing to recertify). See docs/development/gate-ops.md's `--recertify`
+# section for the full reasoning and why a narrower domain was not rushed.
 #
 # _recertify_refuse <reason>: the ONE emit-and-exit path for every validation
 # failure below — mirrors run_delta's usage-error pattern (_tree_meta_array +

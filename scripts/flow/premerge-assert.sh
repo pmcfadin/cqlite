@@ -1664,8 +1664,10 @@ _gate_awk() {
     n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0; n_partial = 0
     n_anchor = 0; n_nested = 0; anchor_unresolved = 0; n_dirty = 0; n_tsdirty = 0
     n_recert_anchor = 0; n_recert_verdict = 0; n_recert_components = 0; n_si = 0
+    n_run_id = 0; n_recert_anchor_run_id = 0
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
     v_mode = ""; v_anchor = ""; v_recert_anchor = ""; v_recert_verdict = ""; v_recert_components = ""; v_si = ""
+    v_run_id = ""; v_recert_anchor_run_id = ""
   }
   {
     gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
@@ -1703,6 +1705,14 @@ _gate_awk() {
     else if ($1 == "recert-anchor:")     { n_recert_anchor++;     v_recert_anchor = $2 }
     else if ($1 == "recert-verdict:")    { n_recert_verdict++;    v_recert_verdict = $2 }
     else if ($1 == "recert-components:") { n_recert_components++; v_recert_components = $2 }
+    # run-id: (#4268 roborev finding, Medium -- job 121) and its recert-side
+    # echo recert-anchor-run-id: are what binds the PASTED anchor block to the
+    # SAME anchor run_recertify_preflight actually validated -- see the Case C
+    # cross-check below. Every block (full/delta/recert alike) carries its OWN
+    # run-id:, so this key is read regardless of WANT; recert-anchor-run-id:
+    # only ever appears inside a recert block.
+    else if ($1 == "run-id:")                 { n_run_id++;               v_run_id = $2 }
+    else if ($1 == "recert-anchor-run-id:")    { n_recert_anchor_run_id++; v_recert_anchor_run_id = $2 }
     else if ($1 == "tree-start:") {
       n_ts++; v_ts = $2
       # tree-start: carries its OWN `dirty:`, and it is NOT redundant with the
@@ -1758,6 +1768,8 @@ _gate_awk() {
     print "n_recert_verdict=" n_recert_verdict
     print "n_recert_components=" n_recert_components
     print "n_si=" n_si
+    print "n_run_id=" n_run_id
+    print "n_recert_anchor_run_id=" n_recert_anchor_run_id
     print "anchor_unresolved=" anchor_unresolved
     print "v_result=" v_result
     print "v_ti=" v_ti
@@ -1771,6 +1783,8 @@ _gate_awk() {
     print "v_recert_verdict=" v_recert_verdict
     print "v_recert_components=" v_recert_components
     print "v_si=" v_si
+    print "v_run_id=" v_run_id
+    print "v_recert_anchor_run_id=" v_recert_anchor_run_id
   }
 ' <"$1"
 }
@@ -1857,8 +1871,10 @@ gate_parse_file() {
   GP_n_mode=""; GP_n_partial=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
   GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""
   GP_n_recert_anchor=""; GP_n_recert_verdict=""; GP_n_recert_components=""; GP_n_si=""
+  GP_n_run_id=""; GP_n_recert_anchor_run_id=""
   GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
   GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""; GP_v_recert_anchor=""; GP_v_recert_verdict=""; GP_v_recert_components=""; GP_v_si=""
+  GP_v_run_id=""; GP_v_recert_anchor_run_id=""
   while IFS='=' read -r gp_k gp_v; do
     case "$gp_k" in
       blocks)       GP_blocks="$gp_v" ;;
@@ -1881,6 +1897,8 @@ gate_parse_file() {
       n_recert_components) GP_n_recert_components="$gp_v" ;;
       n_recert_verdict) GP_n_recert_verdict="$gp_v" ;;
       n_si)             GP_n_si="$gp_v" ;;
+      n_run_id)                GP_n_run_id="$gp_v" ;;
+      n_recert_anchor_run_id)  GP_n_recert_anchor_run_id="$gp_v" ;;
       anchor_unresolved) GP_anchor_unresolved="$gp_v" ;;
       v_result)     GP_v_result="$gp_v" ;;
       v_ti)         GP_v_ti="$gp_v" ;;
@@ -1894,13 +1912,16 @@ gate_parse_file() {
       v_recert_components) GP_v_recert_components="$gp_v" ;;
       v_recert_verdict) GP_v_recert_verdict="$gp_v" ;;
       v_si)             GP_v_si="$gp_v" ;;
+      v_run_id)                GP_v_run_id="$gp_v" ;;
+      v_recert_anchor_run_id)  GP_v_recert_anchor_run_id="$gp_v" ;;
     esac
   done <<GATE_PARSE
 $gp_out
 GATE_PARSE
   for gp_k in blocks full lite delta recert unterminated n_mode n_partial n_result n_ti n_commit \
               n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty \
-              n_recert_anchor n_recert_verdict n_recert_components n_si; do
+              n_recert_anchor n_recert_verdict n_recert_components n_si \
+              n_run_id n_recert_anchor_run_id; do
     eval "gp_v=\${GP_$gp_k}"
     case "$gp_v" in
       ''|*[!0-9]*)
@@ -2342,6 +2363,16 @@ full_result="$GP_v_result"
 full_dirty="$GP_v_dirty"
 full_ndirty="$GP_n_dirty"
 full_tsdirty="$GP_v_tsdirty"
+# Captured for the SAME reason (#4268 roborev finding, Medium — job 121):
+# this anchor blocks own run-id:, snapshotted before the recert block's
+# gate_parse_file call below overwrites GP_v_run_id with the RECERT run's
+# OWN id. Case C's cross-check (inside the C) case body below, the only
+# place run-id: is actually REQUIRED — plenty of pre-existing fixtures here
+# test unrelated shapes without one) compares THIS against the recert
+# block's recert-anchor-run-id: — the gate's own record of which anchor it
+# validated — never the live global.
+full_run_id="$GP_v_run_id"
+full_n_run_id="$GP_n_run_id"
 full_ntsdirty="$GP_n_tsdirty"
 
 case "$case_kind" in
@@ -2419,6 +2450,32 @@ C)
   assert_single_key "$GP_n_recert_anchor" recert-anchor "recert block"
   recert_anchor="$GP_v_recert_anchor"
   assert_covers recert-anchor "$recert_anchor" "$certified" "recert block" "certified sha"
+
+  # THE PASTED ANCHOR MUST BE THE SAME FILE run_recertify_preflight ACTUALLY
+  # VALIDATED (#4268 roborev finding, Medium — job 121). Every check above
+  # this point reasons about the anchor's CONTENT (sha, tree digest, rows,
+  # dirty) — none of them bind that content to a SPECIFIC gate run, because
+  # `commit:`/`tree-start:` only prove "some run at this tree", and a
+  # hand-trimmed two-row anchor at the SAME sha (one FAIL row for
+  # attributability, one PASS row to avoid a zero-row refusal) passes every
+  # one of them while 37 of 39 real components go unmeasured. agent-gate.sh
+  # already records exactly the binding needed: `recert-anchor-run-id:` in
+  # the recert block is the gate own read of the ANCHOR's `run-id:` at
+  # preflight time (scripts/agent-gate.sh:25851, RECERT_ANCHOR_RUN_ID).
+  # Requiring them equal makes the gate own 39-component check-4 census —
+  # already performed against the REAL anchor file at recert time —
+  # transitively binding on the PASTED pair, with no new component-count
+  # baseline invented here.
+  assert_single_key "$full_n_run_id" run-id "full-gate block"
+  assert_single_key "$GP_n_recert_anchor_run_id" recert-anchor-run-id "recert block"
+  if [ "$GP_v_recert_anchor_run_id" != "$full_run_id" ]; then
+    refuse_no_gate \
+      "The recert block's 'recert-anchor-run-id:' ($GP_v_recert_anchor_run_id) does not match the pasted anchor block's own 'run-id:' ($full_run_id)." \
+      "The anchor PASTED in this PR is not the file run_recertify_preflight actually" \
+      "validated — its full 39-component accounting does not transfer to a different file" \
+      "that merely shares the same tree sha. Paste the EXACT anchor file the recert run" \
+      "named in 'recert-anchor-summary-file:'."
+  fi
 
   # recert-components: IS a security boundary (#4268 roborev finding, Medium —
   # an earlier comment here claimed it was reporting evidence only, which was
