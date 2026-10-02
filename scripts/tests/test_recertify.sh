@@ -376,8 +376,27 @@ _override_status_for() {
 # write_anchor <path> <sha> <digest> [override1=status ...]: a hand-built,
 # structurally-valid FULL-gate "==== AGENT-GATE SUMMARY ====" block. Every real
 # component defaults to PASS; pass e.g. "core-tests=FAIL" to override one.
+#
+# TWO RESERVED OVERRIDE TOKENS (#4268 roborev finding, Medium — job 125):
+# `__RESULT__=<value>` sets the anchor's own RESULT: (default PASS), and
+# `__SI__=<value>` injects a `summary-integrity: <value>` line (default
+# absent). Neither collides with a real component name, so they are plain
+# members of the same override list rather than a separate parameter — every
+# EXISTING call site (none of which uses these tokens) is unaffected. Added
+# because no anchor fixture in this suite ever set RESULT: FAIL before now,
+# so run_recertify_preflight's check 4b (the FAIL|VACUOUS narrowing, job 122)
+# and check 5's summary-integrity clobber refusal were UNEXERCISED here —
+# both fail OPEN if broken, and the mirrored premerge-assert.sh checks (R14,
+# R16) were covered while these were not.
 write_anchor() {
   local out="$1" sha="$2" digest="$3"; shift 3
+  local _wa_result=PASS _wa_si="" _wa_kv
+  for _wa_kv in "$@"; do
+    case "$_wa_kv" in
+      __RESULT__=*) _wa_result="${_wa_kv#*=}" ;;
+      __SI__=*)     _wa_si="${_wa_kv#*=}" ;;
+    esac
+  done
   {
     echo "==== AGENT-GATE SUMMARY ===="
     echo "run-id: synthetic-anchor-$$"
@@ -389,7 +408,8 @@ write_anchor() {
       [ -n "$c" ] || continue
       echo "${c}: $(_override_status_for "$c" "$@") (1s)"
     done <<<"$declared_components"
-    echo "RESULT: PASS"
+    [ -n "$_wa_si" ] && echo "summary-integrity: $_wa_si"
+    echo "RESULT: $_wa_result"
     echo "==== END AGENT-GATE SUMMARY ===="
   } >"$out"
 }
@@ -868,6 +888,68 @@ else
     # unmeasured), so reaching NO-ROW via a REAL dispatch would need a
     # component whose own run_* function is itself defective, which is out
     # of scope for a fixture test of the VERDICT PRODUCER.
+
+    # R14: check 4b's FAIL-attributability AND check 5's summary-integrity
+    # clobber refusal, exercised via a REAL --recertify dispatch for the
+    # first time (#4268 roborev finding, Medium — job 125): no anchor
+    # fixture in this suite ever set RESULT: FAIL before now, so both
+    # checks were UNEXERCISED here — only the mirrored premerge-assert.sh
+    # checks (R14, R16 in that suite) were covered. Both fail OPEN if
+    # broken. dep-duplicates is reused as the named component: confirmed
+    # domain-eligible against this fixture's cqlite-core/src diff by R12b
+    # above, so these cases reach check 4b/5 rather than refusing earlier
+    # at check 8.
+    fail_anchor_pass="$TMPROOT/anchor-fail-named-pass.txt"
+    write_anchor "$fail_anchor_pass" "$f2_sha" "$f2_digest" "dep-duplicates=PASS" "__RESULT__=FAIL"
+    run_recert "$fixture" "$fail_anchor_pass" dep-duplicates
+    if [ "$RC" -eq 2 ] && grep -qF "anchor RESULT is FAIL, but no named component" <<<"$OUT"; then
+      ok "R14a: anchor RESULT: FAIL + named component PASS -> refuse (unattributable FAIL)"
+    else
+      bad "R14a: expected exit 2 + FAIL-attributability refusal, got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+
+    fail_anchor_skip="$TMPROOT/anchor-fail-named-skip.txt"
+    write_anchor "$fail_anchor_skip" "$f2_sha" "$f2_digest" "dep-duplicates=SKIP" "__RESULT__=FAIL"
+    run_recert "$fixture" "$fail_anchor_skip" dep-duplicates
+    if [ "$RC" -eq 2 ] && grep -qF "anchor RESULT is FAIL, but no named component" <<<"$OUT"; then
+      ok "R14b: anchor RESULT: FAIL + named component SKIP -> refuse (job-122 shape: SKIP cannot have caused a FAIL)"
+    else
+      bad "R14b: expected exit 2 + FAIL-attributability refusal (SKIP case), got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+
+    # R14c proves PREFLIGHT acceptance (falls through to real dispatch),
+    # never the OVERALL verdict: dep-duplicates always SKIPs in this
+    # fixture (no real scripts/ci/check-dep-duplicates.sh, load-bearing for
+    # R12b/R12c and R14a/b above), so it can never reach recert-verdict:
+    # CERTIFIED regardless of whether check 4b accepted the anchor — that
+    # would conflate "preflight didn't refuse" with "the rerun happened to
+    # pass", a different, already-covered property (R1/R6c). The ABSENCE of
+    # the FAIL-attributability refusal, plus the PRESENCE of a real
+    # dep-duplicates row, is what proves check 4b let a genuinely-attributed
+    # FAIL through — mirroring R12b's own pattern exactly.
+    fail_anchor_fail="$TMPROOT/anchor-fail-named-fail.txt"
+    write_anchor "$fail_anchor_fail" "$f2_sha" "$f2_digest" "dep-duplicates=FAIL" "__RESULT__=FAIL"
+    run_recert "$fixture" "$fail_anchor_fail" dep-duplicates
+    if ! grep -qF "anchor RESULT is FAIL, but no named component" <<<"$OUT" \
+       && grep -qE '^dep-duplicates: ' <<<"$OUT"; then
+      ok "R14c: anchor RESULT: FAIL + named component genuinely FAIL -> preflight ACCEPTS (real attribution, dispatched for real)"
+    else
+      bad "R14c: expected preflight acceptance (no FAIL-attributability refusal) + a real dep-duplicates row, got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+
+    si_anchor="$TMPROOT/anchor-summary-integrity.txt"
+    write_anchor "$si_anchor" "$f2_sha" "$f2_digest" "dep-duplicates=PASS" \
+      "__SI__=FAIL (clobber-detected; detected-after-component: fmt)"
+    run_recert "$fixture" "$si_anchor" dep-duplicates
+    if [ "$RC" -eq 2 ] && grep -qF "carries a 'summary-integrity:' line" <<<"$OUT"; then
+      ok "R14d: an anchor carrying summary-integrity: (#2874 clobber) -> refuse, even with clean-looking rows"
+    else
+      bad "R14d: expected exit 2 + summary-integrity refusal, got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
 
   fi
 fi

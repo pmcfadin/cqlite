@@ -2191,11 +2191,13 @@ gate_parse_file "$summary_file" full "gate summary"
 
 if [ "$GP_blocks" -eq 0 ]; then
   refuse_no_gate \
-    "The file contains ZERO full-gate blocks (found $GP_lite lite, $GP_delta delta)." \
-    "--lite and --delta emit DISTINCT headers; NEITHER is the gate of record:" \
+    "The file contains ZERO full-gate blocks (found $GP_lite lite, $GP_delta delta, $GP_recert recert)." \
+    "--lite, --delta and --recertify each emit a DISTINCT header; NONE is the gate of record:" \
     "  --lite  is fast iteration and is never acceptable here." \
     "  --delta re-certifies a post-full-PASS test/docs-only round — pass the ANCHOR's" \
     "          FULL summary as argument 3 and the delta summary as argument 4." \
+    "  --recertify re-certifies <=2 host-failed components — pass the ANCHOR's FULL" \
+    "          summary as argument 3 and the recert summary as argument 4 (#4268)." \
     "This is the #3408 failure exactly: many lite PASSes, no full gate."
 fi
 

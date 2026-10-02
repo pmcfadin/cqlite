@@ -25592,7 +25592,7 @@ _recertify_refuse() {
   # any recert component runs, so there is no component log to scan; the
   # error: line already names the cause.
   emit_summary ERROR \
-    "recert-anchor: ${RECERT_ANCHOR_FILE:-<unset>}" \
+    "recert-anchor-summary-file: ${RECERT_ANCHOR_FILE:-<unset>}" \
     "recert-components: ${RECERT_COMPONENTS:-<unset>}" \
     "$(accelerators_line)" \
     "$(_component_set_meta)" \
