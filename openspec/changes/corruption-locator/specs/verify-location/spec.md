@@ -70,20 +70,33 @@ Deviation from this requirement's original draft (roborev round-3 MEDIUM finding
   outcome is satisfied on BIG only — scenarios L1.1–L1.3 are BIG fixtures throughout (`lz4_table`,
   `uncompressed_table`, `data_db_truncation`, all via `Index.db`). No scenario asserts a
   BTI-`Resolved` outcome, so the requirement's acceptance criteria remain satisfiable as written;
-  what is NOT reachable is the BTI half of its prose promise. §L2's `Unresolved`
-  ("boundary-source-unreadable") path carries BTI instead, consistent with §D2's preference for a
-  refused answer over a confident wrong one.
-- Restoring a corroborated BTI-`Resolved` path is tracked as follow-up **#4337** (milestone 0.19),
-  rather than implemented in this change.
+  what is NOT reachable is the BTI half of its prose promise. §L2's `Unresolved` path carries BTI
+  instead, consistent with §D2's preference for a refused answer over a confident wrong one — but
+  under its OWN cause, `BTI_IDENTITY_UNCORROBORATED` ("BTI partition-index leaves were not
+  corroborated against Data.db..."), NOT the generic `boundary-source-unreadable`. The distinction
+  is deliberate and test-pinned, because the two name different operator actions ("repair this
+  component" vs "the trie was never cross-checked"): see
+  `bti_compressed_chunk_crc_flip_refuses_uncorroborated_rows_offset_leaves`,
+  `path3_chunk_offset_out_of_bounds_disables_its_own_guard_and_refuses`, and
+  `path1_direct_boundary_finding_keeps_its_own_more_specific_cause`, which asserts that a DIRECT
+  boundary finding keeps `boundary-source-unreadable` rather than being flattened into the
+  corroboration cause.
+- Surfacing an UNCORROBORATED BTI leaf set as a distinct, clearly-labelled outcome (a
+  `ResolvedUncorroborated` corroboration state — option (b)) instead of refusing it is tracked as
+  follow-up **#4337** (milestone 0.19), rather than implemented in this change.
 
 ### Requirement: L2 — A damaged boundary source poisons every location, never a guess
 
-Every OTHER finding's `location.partitions` SHALL be `Unresolved("boundary-source-unreadable")` — never omitted, left empty, or populated from a plausible-looking scan — whenever the report casts doubt on the format's boundary source. Trust is withdrawn on a UNION of two signals, never either alone:
+Every OTHER finding's `location.partitions` SHALL be `Unresolved` **under a NAMED cause** — never omitted, left empty, populated from a plausible-looking scan, or refused anonymously — whenever the report casts doubt on the format's boundary source. Trust is withdrawn on the UNION of the signals below: each is SUFFICIENT on its own, and none may be dropped in favour of another. Signals (1) and (2) are format-agnostic and both report `boundary-source-unreadable`:
 
 1. **The finding's COMPONENT** is a boundary component — `Index.db` for BIG, `Partitions.db` or `Rows.db` for BTI — for ANY finding class. This covers the boundary component being ABSENT (`MissingComponent`, incl. the TOC critical-component check) or TRUNCATED (`UnexpectedEof` on a `Partitions.db` shorter than the mandatory 8-byte trie root footer), not merely structurally corrupt. It also covers the one genuine wrong-ANSWER case: with `Rows.db` absent, the BTI structural check still returns the `DataOffset` leaves it could read — a PARTIAL boundary list — which a class-only predicate would hand on and present as `Resolved`.
 2. **The finding's CLASS** says the index structure is corrupt — `IndexEntryCorrupt` (BIG), `BtiRootPointerCorrupt`/`BtiTrieCorrupt` (BTI). This signal cannot be dropped in favour of (1): `BtiTrieCorrupt` is raised on component `Rows.db`, which this requirement did not originally name a boundary source at all.
 
-Additionally, BIG withdraws trust when `IndexReader::is_fully_parsed()` reports a partial parse, since that reader silently truncates its partition list on the first malformed entry (#2302) and a partial prefix presented as `Resolved` is a confident wrong answer.
+3. **BTI only — the leaves were never CORROBORATED** against `Data.db`. A BTI leaf's identity is not one declaration (the trie emits a byte-comparable prefix; the raw key comes from the leaf's PAYLOAD), so a corruption that keeps a leaf's prefix while rewriting its payload resolves confidently to the WRONG key, and the FULL-mode identity cross-check is the only thing that can see it. That cross-check does not run in QUICK mode, when `compression_metadata_corrupt` is set, or when the scan fails — and `ChunkOffsetOutOfBounds` is pushed ALONGSIDE the very `PendingLocation` that needs resolving, so one corruption event both creates the location and disables its only guard. Cause: `BTI_IDENTITY_UNCORROBORATED`, deliberately DISTINCT from (1)/(2) because the operator action differs. Signal (1) is checked FIRST, so a direct boundary finding keeps its more specific cause.
+
+Additionally, BIG withdraws trust when `IndexReader::is_fully_parsed()` reports a partial parse, since that reader silently truncates its partition list on the first malformed entry (#2302) and a partial prefix presented as `Resolved` is a confident wrong answer (cause: `boundary-source-unreadable`). Three further BIG refusals each carry their own cause rather than a generic one, so the operator learns WHAT disagreed: `BOUNDARY_SOURCE_OPEN_FAILED` (the real `io::Error` from opening `Index.db`, e.g. `Permission denied` — previously discarded), `BOUNDARY_ENTRY_ORDER_VIOLATION` (declared positions not strictly ascending in on-disk parse order), and `BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS` (a declared position at or past the declared logical length). The last two exist because a bit flip in a non-leading byte of a `position` vint leaves every entry PARSING cleanly — so no signal above fires — while silently dropping one partition and mis-attributing its bytes to a neighbour.
+
+This requirement is satisfied by refusing in MORE cases than (1) and (2) alone, never fewer: every signal above withdraws trust, and none of them grants it.
 
 The predicate is deliberately OVER-conservative where (1) and (2) overlap: a boundary component present on disk but unlisted in `TOC.txt` withdraws trust even though the component itself reads fine. §D2 prefers a refused answer to a confident wrong one.
 
