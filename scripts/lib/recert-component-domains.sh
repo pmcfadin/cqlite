@@ -186,17 +186,25 @@ _recert_component_domain_patterns_raw() {
     # work-counters-guard, legacy-heuristics, feature-iso-delta-scan,
     # write-tests (memory-budget is also a member, but split into its own arm
     # below, job 112). byte-budget-guard, arrow-parity-guard,
-    # feature-iso-parquet, compaction-byte-parity, bti-multiclustering and
-    # all-features-check are NOT in DATASET_COMPONENTS, so this over-includes
-    # for them — the safe direction this file already takes elsewhere (only
-    # ever REFUSES an eligible recert, never admits an ineligible one).
-    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|bti-multiclustering|write-tests|all-features-check)
+    # feature-iso-parquet, compaction-byte-parity and all-features-check are
+    # NOT in DATASET_COMPONENTS, so this over-includes for them — the safe
+    # direction this file already takes elsewhere (only ever REFUSES an
+    # eligible recert, never admits an ineligible one). bti-multiclustering
+    # is split into its own arm below (job 119).
+    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|write-tests|all-features-check)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
     # memory-budget (job 112 roborev finding, Medium): split out of the shared
     # arm above — its Flight lane runs `cargo test --package cqlite-flight
     # --features dhat-heap`, so a cqlite-flight/src/**-only diff was CLEAR.
     memory-budget)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_FLIGHT[@]}" ;;
+    # bti-multiclustering (job 119 roborev finding, Medium): split out of the
+    # shared arm above — it runs two dedicated fail-closed control harnesses
+    # (scripts/agent-gate.sh:17830-17831), so a diff touching only those two
+    # scripts was CLEAR for it.
+    bti-multiclustering)
+      printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" \
+        'scripts/tests/test_point_vs_full_failclosed.sh' 'scripts/tests/test_issue_3358_failclosed.sh' ;;
     # oom-audit (job 106 roborev finding, Medium): split out of the shared
     # core/cargo arm above — it runs `cargo run -p xtask -- oom-audit
     # --enforce` (scripts/agent-gate.sh), so xtask/* is a real subject the
@@ -247,9 +255,13 @@ _recert_component_domain_patterns_raw() {
     # (_fm_component_class: no-cargo) but shares this arm — over-including is
     # the safe direction (job 110 Medium). cqlite-ffi-common added (job 117
     # Medium): binding-rust-tests runs `test cqlite-ffi-common default-features`
-    # directly — the clearest case of all three arms.
+    # directly — the clearest case of all three arms. binding-unwind-profile
+    # IS scripts/tests/test_binding_unwind_profile.sh (scripts/agent-gate.sh
+    # dispatch), added job 119 Medium — a diff touching only that script was
+    # CLEAR for it.
     binding-rust-tests|binding-unwind-profile)
-      printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_FFI_COMMON[@]}" ;;
+      printf '%s\n' "${_RECERT_DOM_BINDINGS_ANY[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_FFI_COMMON[@]}" \
+        'scripts/tests/test_binding_unwind_profile.sh' ;;
     # test_delivery_telemetry*.py added (job 112 roborev finding, Medium): the
     # component runs EVERY scripts/tests/test_delivery_telemetry*.py module
     # (test_delivery_telemetry.py AND test_delivery_telemetry_timeline.py) —

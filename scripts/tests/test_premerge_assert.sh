@@ -4401,6 +4401,31 @@ if run 3 "usage: five arguments -> exit 3 (a recert pair is still exactly 4 args
   ok "usage: a fifth argument fails closed rather than being ignored (recert pair)"
 fi
 
+# --- _gate_component_rows's status vocabulary is DERIVED, not retyped (#4268
+# --- roborev finding, Medium — job 119) ---------------------------------------
+# _gate_component_rows's `ok[]` array is a second, UNPINNED copy of
+# scripts/agent-gate.sh's own closed status vocabulary (that script's own
+# `PASS|FAIL|SKIP|OPT-OUT|VACUOUS) ;;` case, DERIVED-pinned there by
+# test_agent_gate_disk_exhaustion.sh per the "do not add a token here without
+# that assert seeing it" rule). Without THIS case, a 6th token added to the
+# gate's vocabulary would silently fall open here (a row this suite's own
+# premerge-assert.sh reader cannot distinguish from a metadata line) instead
+# of reding anywhere — the exact silent-divergence class #3625/#3402 already
+# learned costs two false reds in one merge, just pointed the other way.
+GATE="$SCRIPT_DIR/../agent-gate.sh"
+if [ -r "$GATE" ]; then
+  _gcv_want=$(grep -oE 'PASS\|FAIL\|SKIP\|OPT-OUT\|VACUOUS\) ;;' "$GATE" | head -1 \
+    | sed -e 's/) ;;$//' -e 's/|/\n/g' | sort)
+  _gcv_got=$(grep -oE 'ok\["[A-Z-]+"\] = 1' "$ASSERT" | sed -e 's/^ok\["//' -e 's/"\] = 1$//' | sort)
+  if [ -n "$_gcv_want" ] && [ "$_gcv_want" = "$_gcv_got" ]; then
+    ok "ok-vocabulary derived: _gate_component_rows's ok[] set equals agent-gate.sh's own closed status vocabulary"
+  else
+    bad "ok-vocabulary derived: _gate_component_rows's ok[] set diverges from agent-gate.sh's own (gate: $(tr '\n' ',' <<<"$_gcv_want"); premerge-assert: $(tr '\n' ',' <<<"$_gcv_got"))"
+  fi
+else
+  bad "ok-vocabulary derived: could not read $GATE to derive the authoritative status vocabulary"
+fi
+
 # --- NO VERDICT MAY RIDE ON A PIPE INTO AN EARLY-EXITING GREP (#3752) --------
 # The structural half of a MEASURED false FAIL in the sibling suite: under
 # `set -o pipefail` a `producer | grep -q` reports the PRODUCER's SIGPIPE when
@@ -4452,7 +4477,9 @@ assert_src_absent_fixed \
 # arms — plus the fourth-argument kind classification's ANSI/CR tolerance —
 # R18, 2 `run`-wrapped cases + 1 `assert_src_present_fixed`), same
 # measurement method, same host-invariance.
-CASE_FLOOR=250
+#
+# +1 for the ok-vocabulary derived case (#4268 job-119 roborev round).
+CASE_FLOOR=251
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

@@ -1816,6 +1816,17 @@ _gate_component_rows() {
     else                        { S = FULL_S;   E = FULL_E }
     n = split(SKIPKEYS, sk, " ")
     for (i = 1; i <= n; i++) skip[sk[i]] = 1
+    # THIS FIVE-TOKEN SET IS A SECOND, UNPINNED COPY of agent-gate.sh own
+    # closed status vocabulary (scripts/agent-gate.sh ~line 7522,
+    # PASS FAIL SKIP OPT-OUT VACUOUS case arm) -- DERIVED-pinned there by
+    # test_agent_gate_disk_exhaustion.sh per the do-not-add-a-token-here-
+    # without-that-assert-seeing-it rule (#4268 roborev finding, Medium --
+    # job 119: a 6th token would otherwise silently fall open here,
+    # degrading SILENTLY rather than reding). test_premerge_assert.sh own
+    # ok-vocabulary-derived case greps BOTH sides and asserts the sets are
+    # equal, so a future gate token added without updating this line reds
+    # there instead of degrading here. Do not add a token here without that
+    # case seeing it too.
     ok["PASS"] = 1; ok["FAIL"] = 1; ok["SKIP"] = 1; ok["OPT-OUT"] = 1; ok["VACUOUS"] = 1
     open = 0
   }

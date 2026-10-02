@@ -134,6 +134,13 @@ classify_domain python-bindings 'bindings/node/src/row.rs' CLEAR "python-binding
 classify_domain python-bindings 'cqlite-ffi-common/src/lib.rs' TOUCHED "python-bindings domain covers cqlite-ffi-common/** (job 117)"
 classify_domain node-bindings 'cqlite-ffi-common/src/lib.rs' TOUCHED "node-bindings domain covers cqlite-ffi-common/** (job 117)"
 classify_domain binding-rust-tests 'cqlite-ffi-common/src/lib.rs' TOUCHED "binding-rust-tests domain covers cqlite-ffi-common/** (job 117)"
+# job 119 roborev finding (Medium): bti-multiclustering and
+# binding-unwind-profile each ran a dedicated harness script with no
+# scripts/tests/* coverage in their domain, leaving them fail-open for a
+# diff touching only that script.
+classify_domain bti-multiclustering 'scripts/tests/test_point_vs_full_failclosed.sh' TOUCHED "bti-multiclustering domain covers its own failclosed control harness (job 119)"
+classify_domain bti-multiclustering 'scripts/tests/test_issue_3358_failclosed.sh' TOUCHED "bti-multiclustering domain covers its other failclosed control harness (job 119)"
+classify_domain binding-unwind-profile 'scripts/tests/test_binding_unwind_profile.sh' TOUCHED "binding-unwind-profile domain covers its OWN test script (job 119)"
 classify_domain dep-duplicates 'Cargo.lock' TOUCHED "dep-duplicates domain covers Cargo.lock"
 classify_domain dep-duplicates 'docs/development/dev-cookbook.md' CLEAR "dep-duplicates domain does NOT cover docs/**"
 

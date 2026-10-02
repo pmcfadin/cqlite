@@ -1011,6 +1011,30 @@
 #                                     # Record BOTH the anchor's full SUMMARY and this
 #                                     # DELTA block in the PR. Recovery default:
 #                                     # .agent-gate-delta-summary.txt.
+#   scripts/agent-gate.sh --recertify <anchor-summary-file> --components <c1[,c2]>
+#                                     # HOST-FAULT RE-CERTIFICATION (issue #4268): rerun
+#                                     # <=2 host-failed components against a SAME-TREE-
+#                                     # DIGEST full-gate anchor, instead of a full re-gate.
+#                                     # Preconditions (run_recertify_preflight), all
+#                                     # FAIL-CLOSED: the anchor is a genuine full-gate
+#                                     # SUMMARY (never lite/delta/recert — a recert can
+#                                     # never chain off another), <=24h old, every OTHER
+#                                     # anchor component already PASS/OPT-OUT (tooling-
+#                                     # tests: SKIP is the one declared #4266 exception),
+#                                     # the anchor's own RESULT:FAIL (if any) attributable
+#                                     # to a NAMED component, and the current tree's sha +
+#                                     # digest matching the anchor's exactly. It reruns in
+#                                     # FULL-GATE mode (NOT --only's lenient posture,
+#                                     # despite riding its dispatch — see `_gate_is_strict`)
+#                                     # and is EXEMPT from the #1825 slot cap only, never
+#                                     # from #3544's component-set strictness or any other
+#                                     # fail-closed preflight. Emits a DISTINCT
+#                                     # "==== AGENT-GATE RECERT SUMMARY ====" block (MODE:
+#                                     # recertify) that names the anchor + its run-id, so it
+#                                     # can NEVER be pasted as a full SUMMARY. It is NOT the
+#                                     # gate of record. Record BOTH the anchor's full
+#                                     # SUMMARY and this RECERT block in the PR. Recovery
+#                                     # default: .agent-gate-recert-summary.txt.
 #   scripts/agent-gate.sh --list      # list full-gate components without running
 #   scripts/agent-gate.sh --lite-list # list the --lite components without running
 #   scripts/agent-gate.sh --delta-list # list the --delta components without running
