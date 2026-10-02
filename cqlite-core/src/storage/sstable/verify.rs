@@ -55,8 +55,9 @@ use std::sync::Arc;
 // relocation); only check-site plumbing stays here.
 pub use crate::storage::sstable::verify_location::{
     format_location, KeyRef, Location, PartitionResolution, PhysicalAnchor,
-    BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE, MAX_RESOLVED_KEYS,
-    PARTITION_KEY_UNAVAILABLE,
+    BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS, BOUNDARY_ENTRY_ORDER_VIOLATION,
+    BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE, BTI_IDENTITY_UNCORROBORATED,
+    MAX_RESOLVED_KEYS, PARTITION_KEY_UNAVAILABLE,
 };
 
 /// Verification depth. QUICK and FULL are intentionally distinct — see the

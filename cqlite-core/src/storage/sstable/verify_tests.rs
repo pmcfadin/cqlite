@@ -752,3 +752,146 @@ async fn i4_unstattable_data_db_is_a_typed_finding_not_a_zero_logical_length() {
         pending.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// #4194 blocker #1, option (a): the BTI corroboration gate, BOTH directions.
+//
+// These two cases are the ONLY place the CORROBORATED branch is reachable, and
+// that is a measured fact about the current check set, not a convenience:
+//
+//   * A BTI `PendingLocation` can only come from `check_inline_chunk_crc` (a
+//     chunk CRC/decompression failure) or from `ChunkOffsetOutOfBounds`.
+//   * The read path validates the SAME chunk CRC during decompression, so any
+//     corruption that produces the first ALSO fails `full_row_scan_partitions`
+//     — measured directly: flipping a bit in chunk 0's stored TRAILING CRC32
+//     (leaving the payload intact, to try to keep the scan healthy) still
+//     fails the scan, because the reader checks that CRC too.
+//   * `ChunkOffsetOutOfBounds` sets `compression_metadata_corrupt`, which
+//     skips the scan outright.
+//
+// So end-to-end, a BTI location is now ALWAYS `Unresolved` — the accepted cost
+// of option (a), and precisely what the 0.19 corroboration-state follow-up
+// exists to recover. Pinning the positive branch here is therefore not
+// optional: without it the gate could be stuck-false and no test in the
+// repository would notice.
+//
+// `finalize_locations`'s BTI arm reads its leaves from the `bti_leaves`
+// ARGUMENT and performs no file I/O at all (only the BIG arm opens
+// `Index.db`), so the directory below never needs real components.
+// ---------------------------------------------------------------------------
+
+fn bti_component_set(dir: &Path) -> ComponentSet {
+    ComponentSet {
+        base_name: "da-2-bti".to_string(),
+        format: SsTableFormat::Bti,
+        present: BTreeMap::new(),
+        data_path: dir.join("da-2-bti-Data.db"),
+    }
+}
+
+fn pending_at(finding_index: usize, logical_len: u64) -> PendingLocation {
+    PendingLocation {
+        finding_index,
+        component: "Data.db".to_string(),
+        byte_offset: 0,
+        byte_len: 16,
+        chunk_index: Some(0),
+        damaged_logical: (0, 16),
+        logical_len,
+        anchor: crate::storage::sstable::verify_location::PhysicalAnchor::DamagedExtent,
+    }
+}
+
+/// `findings[0]` must be a class/component that does NOT itself distrust the
+/// boundary source, so the corroboration gate is the only thing being
+/// measured (`ChunkDecompressionError` on `Data.db` is exactly the real shape).
+fn chunk_finding() -> VerifyFinding {
+    VerifyFinding::new(
+        VerifyErrorClass::ChunkDecompressionError,
+        "Data.db",
+        "staged chunk failure".to_string(),
+    )
+}
+
+async fn resolve_one_bti_location(
+    leaves: &[BtiResolvedLeaf],
+    corroborated: bool,
+) -> PartitionResolution {
+    let dir = std::env::temp_dir().join(format!(
+        "cqlite-4194-bti-gate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let components = bti_component_set(&dir);
+    let mut findings = vec![chunk_finding()];
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
+
+    verify_location::finalize_locations(
+        &dir,
+        &components,
+        &mut findings,
+        vec![pending_at(0, 4096)],
+        Some(leaves),
+        None,
+        corroborated,
+        platform,
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    findings[0]
+        .location
+        .as_ref()
+        .expect("the pending location must have been written back")
+        .partitions
+        .clone()
+}
+
+#[tokio::test]
+async fn bti_gate_uncorroborated_refuses_by_name() {
+    // `inline_leaf` is this suite's existing `RowsOffset`-shaped helper: an
+    // authoritative inline raw key, so resolution needs no scan position map
+    // and the corroboration gate is the ONLY thing under measurement.
+    let leaves = vec![inline_leaf(b"k0", 0)];
+    let res = resolve_one_bti_location(&leaves, false).await;
+    match res {
+        PartitionResolution::Unresolved(cause) => assert_eq!(
+            cause, BTI_IDENTITY_UNCORROBORATED,
+            "an uncorroborated BTI source must refuse under its OWN cause, not a generic one"
+        ),
+        PartitionResolution::Resolved { keys, .. } => panic!(
+            "an uncorroborated BTI trie must never resolve: a corruption that keeps a leaf's \
+             prefix while rewriting its payload resolves confidently to the WRONG key, and the \
+             identity cross-check is the only thing that can see it. Got {keys:?}"
+        ),
+    }
+}
+
+#[tokio::test]
+async fn bti_gate_corroborated_still_resolves() {
+    // The gate is a GATE, not an unconditional refusal: when the cross-check
+    // did run and agreed, the leaves are trusted exactly as before. If this
+    // ever starts failing, option (a) has become a blanket BTI refusal and the
+    // `corroborated` flag is dead.
+    let leaves = vec![inline_leaf(b"k0", 0)];
+    let res = resolve_one_bti_location(&leaves, true).await;
+    match res {
+        PartitionResolution::Resolved { keys, truncated } => {
+            assert_eq!(truncated, 0);
+            assert_eq!(
+                keys.iter().map(|k| k.key_hex.as_str()).collect::<Vec<_>>(),
+                vec!["6b30"],
+                "the corroborated path must still name the intersecting partition"
+            );
+        }
+        PartitionResolution::Unresolved(cause) => panic!(
+            "corroborated BTI leaves must still resolve; refusing here would make the \
+             corroboration flag dead and option (a) a blanket refusal: {cause}"
+        ),
+    }
+}
