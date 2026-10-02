@@ -27285,6 +27285,25 @@ _gate_release_slot() {
 acquire_gate_slot() {
   [ "$LITE" -eq 1 ] && return 0
   [ "$DELTA" -eq 1 ] && return 0
+  if [ "$RECERTIFY" -eq 1 ]; then
+    # #4268 roborev finding (Medium, job 116): RECERTIFY inherits the SAME
+    # `[ -n "$ONLY" ] && return 0` slot-cap exemption a bare `--only`
+    # diagnostic gets (recert is meant to be fast, never queued — see the
+    # RECERTIFY design comment above the arg-parse case) — but unlike a bare
+    # `--only`, a recert IS a certifying mode (premerge-assert.sh Case C), so
+    # returning before ANY disk-admission evaluation meant the one
+    # certifying mode this diff adds never free-space-admits, and
+    # `_disk_admission_meta` rendered the MISLEADING "--only self-exempts…"
+    # line for a mode the run is not in. Evaluate the probe here, exactly
+    # the way the "cap off" branch below binds it for the full gate, WITHOUT
+    # joining the actual queue/build machinery — a recert still never
+    # queues.
+    _DA_PROBE_REACHED=1
+    _gate_disk_admission_bar
+    _gate_disk_admission_launch
+    _gate_disk_admission_bind_launch "recertify self-exempts from the #1825 slot cap (#4268)"
+    return 0
+  fi
   [ -n "$ONLY" ] && return 0
   # #3755: reached by exactly the run class that queues and then builds — the full gate —
   # and by nothing else, because the exemptions above have already returned.

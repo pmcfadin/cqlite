@@ -446,6 +446,35 @@ else
     else
       ok "R1: no ADVISORY component-set wording leaks into a recert's SUMMARY"
     fi
+    # #4268 roborev finding (Medium, job 116): RECERTIFY used to inherit a
+    # bare --only's #1825 slot-cap exemption wholesale, so acquire_gate_slot
+    # returned before the #3755 disk-admission probe ever ran — a recert is
+    # a CERTIFYING mode (unlike a bare --only), so it must still be admitted
+    # on free space, and the emitted line must say so rather than naming a
+    # mode ("--only self-exempts…") the run is not in.
+    # The fixture carries no real cargo workspace, so the probe's OWN verdict
+    # here is legitimately UNMEASURED (target-dir resolution needs `cargo
+    # metadata`) rather than PASS — what this proves is that the probe
+    # ACTUALLY RAN for real (evaluated 1x, a real bar/mount/target-dir
+    # rendering), not which verdict a real cargo workspace would get.
+    if grep -qE '^disk-admission: (PASS|UNMEASURED|FAIL-CLOSED|UNWRITABLE-FAIL-CLOSED)' <<<"$OUT" \
+       && grep -qF 'evaluated 1x' <<<"$OUT"; then
+      ok "R1: disk-admission: carries a REAL evaluated verdict on a recert run (the #3755 probe actually ran)"
+    else
+      bad "R1: expected a real, evaluated disk-admission verdict on a recert run"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+    if grep -qF 'self-exempts from the #1825 slot cap' <<<"$OUT"; then
+      ok "R1: the disk-admission line correctly names --recertify's OWN cap exemption, not a bare --only's"
+    else
+      bad "R1: expected the disk-admission line to name recertify's own slot-cap exemption"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+    if grep -qF 'NOT EVALUATED (--only self-exempts' <<<"$OUT"; then
+      bad "R1: disk-admission: still renders the misleading bare-'--only' wording on a recert run"
+    else
+      ok "R1: the misleading bare-'--only' disk-admission wording is gone from a recert's SUMMARY"
+    fi
 
     # R2: missing anchor file -> REFUSED, exit 2, distinct header still present.
     run_recert "$fixture" "$TMPROOT/does-not-exist.txt" file-size
