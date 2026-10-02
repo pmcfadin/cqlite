@@ -44,7 +44,7 @@ the Cassandra-written original for every BIG table in the committed corpus.
 index — `Partitions.db`/`Rows.db`, which is what [`Component::Index`] names for a `da` input — is
 deferred to follow-up **issue #4336** ("rebuild: BTI (`da`) Partitions.db/Rows.db index rebuild byte
 parity", epic #4192). Reason: the byte-extent walk plus `PartitionsTrieWriter`/`RowsTrieWriter`
-wiring (design.md §D4's BTI row, kept as forward-looking reference for #4336) is substantial enough
+wiring (design.md §D2's BTI row, kept as forward-looking reference for #4336) is substantial enough
 to warrant its own review pass rather than landing unreviewed inside an already-large change. This
 requirement therefore makes NO byte-parity claim for `Partitions.db`/`Rows.db`; what it requires
 instead is that the gap be FAIL-CLOSED, per R2.6 below. The original "R2.2 BTI Partitions.db/Rows.db
