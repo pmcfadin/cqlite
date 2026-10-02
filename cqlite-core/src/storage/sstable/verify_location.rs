@@ -264,10 +264,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 pub const BOUNDARY_SOURCE_UNREADABLE: &str = "boundary-source-unreadable";
 
 /// A partition key was needed to resolve a location but was not recoverable
-/// from the data available at resolution time (e.g. a BTI `DataOffset` leaf
-/// whose raw key is only recoverable through a FULL-mode `Data.db` scan, and
-/// QUICK mode never scans). Named rather than silently dropping the leaf from
-/// the resolved set, which would under-report the intersecting partitions.
+/// at resolution time (e.g. a BTI `DataOffset` leaf whose raw key needs a
+/// FULL-mode `Data.db` scan, and QUICK mode never scans). Named rather than
+/// silently dropped from the resolved set, which would under-report.
 ///
 /// **The COMMON case for a `DataOffset` leaf whose finding is
 /// Data.db-anchored**, not an edge case. Not because the scan runs too late
@@ -356,8 +355,10 @@ pub const BOUNDARY_SOURCE_UNAVAILABLE: &str = "boundary source unavailable for l
 /// confident wrong answer §D2 exists to refuse. A CORROBORATED `Resolved` is
 /// unaffected; restoring an UNCORROBORATED one as a distinct state is option
 /// (b) (milestone 0.19).
-pub const BTI_IDENTITY_UNCORROBORATED: &str =
-    "BTI partition-index leaves were not corroborated against Data.db (the FULL-mode identity      cross-check did not run to completion)";
+pub const BTI_IDENTITY_UNCORROBORATED: &str = concat!(
+    "BTI partition-index leaves were not corroborated against Data.db ",
+    "(the FULL-mode identity cross-check did not run to completion)"
+);
 
 /// The cause named when the boundary source's own declared `Data.db`
 /// positions are not STRICTLY ascending in ON-DISK PARSE ORDER — see
