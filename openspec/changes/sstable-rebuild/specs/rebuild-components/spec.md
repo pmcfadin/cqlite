@@ -33,12 +33,28 @@ original, because each is a pure function of Data.db's existing, unchanged bytes
 - **Then** the rebuilt TOC.txt names exactly the components present on disk afterward (including
   itself), and `cqlite verify --mode full` reports no missing-component finding for the directory.
 
-### Requirement: R2 — Index.db and BTI Partitions.db/Rows.db are byte-identical from Data.db structure alone, measured against the file's own authoritative encoding baseline
+### Requirement: R2 — BIG Index.db is byte-identical from Data.db structure alone, measured against the file's own authoritative encoding baseline (BTI index deferred to #4336)
 
-`rebuild_components` SHALL derive every Index.db entry (or BTI trie leaf) — key, data offset,
-promoted-index/row-index blocks — from a byte-extent-aware structural walk of the existing Data.db,
-without decoding any Data.db bytes not required to establish those extents, and SHALL produce
-output byte-identical to the Cassandra-written original for every table in the committed corpus.
+`rebuild_components` SHALL derive every BIG Index.db entry — key, data offset, promoted-index
+blocks — from a byte-extent-aware structural walk of the existing Data.db, without decoding any
+Data.db bytes not required to establish those extents, and SHALL produce output byte-identical to
+the Cassandra-written original for every BIG table in the committed corpus.
+
+**Scope amendment (owner ruling): the BTI (`da`) index is NOT in this change.** Rebuilding BTI's own
+index — `Partitions.db`/`Rows.db`, which is what [`Component::Index`] names for a `da` input — is
+deferred to follow-up **issue #4336** ("rebuild: BTI (`da`) Partitions.db/Rows.db index rebuild byte
+parity", epic #4192). Reason: the byte-extent walk plus `PartitionsTrieWriter`/`RowsTrieWriter`
+wiring (design.md §D4's BTI row, kept as forward-looking reference for #4336) is substantial enough
+to warrant its own review pass rather than landing unreviewed inside an already-large change. This
+requirement therefore makes NO byte-parity claim for `Partitions.db`/`Rows.db`; what it requires
+instead is that the gap be FAIL-CLOSED, per R2.6 below. The original "R2.2 BTI Partitions.db/Rows.db
+byte parity" scenario is dropped here and belongs to #4336, which is also where
+`cqlite-core/tests/issue_4197_rebuild_bti_scope.rs` must be replaced by the byte-parity assertions
+R2.2 described.
+
+Every other component stays format-agnostic exactly as R1/R3/R4 state: a `da` input still rebuilds
+`Filter.db`/`Digest.crc32`/`TOC.txt`/`Statistics.db`, and still reports `summary`/`crc` as
+`skipped_not_applicable` (R1.2) — the deferral is confined to the index itself.
 
 Because every promoted-index block offset/width is measured in bytes whose VInt widths are
 delta-encoded against the whole-SSTable `SerializationHeader.EncodingStats` baseline,
@@ -70,11 +86,18 @@ rebuilt Index.db is byte-identical to Cassandra's own.
   every wide partition present in the corpus
   (`cqlite-core/tests/issue_4197_rebuild_index_parity.rs`).
 
-#### Scenario: R2.2 BTI Partitions.db/Rows.db byte parity
-- **Given** every committed `test_da` table, Partitions.db and Rows.db deleted from a temp copy
-- **When** rebuild regenerates `index` (BTI's equivalent request)
-- **Then** both files are byte-identical to the originals, including `RowsOffset` payloads for wide
-  partitions (`cqlite-core/tests/issue_4197_rebuild_bti_index_parity.rs`).
+#### Scenario: R2.6 BTI index rebuild is refused fail-closed, not silently attempted (replaces the dropped R2.2; owned by #4336)
+- **Given** every committed `test_da` (BTI) table, requesting `index` alone and mixed with
+  components that ARE supported for `da`
+- **When** rebuild runs
+- **Then** it returns `Error::UnsupportedFormat` — a USAGE error, never a panic, never a silent
+  success, and never a different variant that would read as data corruption — whose message names
+  the deferral's tracking issue #4336; NOTHING is written under `--out`; no BIG-shaped `Index.db`
+  ever appears beside a BTI generation; and the same fixture WITHOUT `index` still succeeds, with
+  `Partitions.db`/`Rows.db` under `--out` byte-identical to the Cassandra-written originals because
+  they were COPIED verbatim, never rebuilt
+  (`cqlite-core/tests/issue_4197_rebuild_bti_scope.rs`; mutation-verified against removing the
+  guard, changing its variant, and dropping the issue reference).
 
 #### Scenario: R2.4 the original header's baseline wins over any re-derivation
 - **Given** a generation written with a whole-SSTable EncodingStats baseline deliberately BELOW

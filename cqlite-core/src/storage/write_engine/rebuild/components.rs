@@ -196,8 +196,8 @@ pub(crate) async fn rebuild_components_capturing_stats(
     if is_bti && requested.contains(&Component::Index) {
         return Err(Error::UnsupportedFormat(
             "BTI (`da`) Partitions.db/Rows.db rebuild is not implemented in this change (issue \
-             #4197 scope note, follow-up under epic #4192); request summary/filter/digest/toc/\
-             crc/statistics instead"
+             #4197 scope note; deferred to follow-up issue #4336 under epic #4192); request \
+             summary/filter/digest/toc/crc/statistics instead"
                 .to_string(),
         ));
     }

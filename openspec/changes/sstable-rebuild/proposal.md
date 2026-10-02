@@ -93,6 +93,11 @@ just a derived component, is what is actually damaged.
   CompressionInfo.db is read, never rewritten.
 - Recovering `repaired_at` / `pending_repair` / origin-host / compaction-ancestry when the original
   Statistics.db is unreadable — declared lossy, not a defect to fix later.
+- **BTI (`da`) index rebuild — `Partitions.db`/`Rows.db` — deferred to issue #4336** (epic #4192) by
+  owner ruling, formalized as a spec amendment (R2's scope note; the original R2.2 byte-parity
+  scenario is dropped and replaced by the fail-closed R2.6). The `PartitionsTrieWriter`/
+  `RowsTrieWriter` wiring warrants its own review pass. Every other component still rebuilds for a
+  `da` input; only `index` refuses, with `Error::UnsupportedFormat`.
 - A data-dir-wide sweep (#4194) or format conversion (#4202).
 - Anything beyond `--out` until #4195 lands `verify --mode audit`; `--in-place` ships as a
   documented refusal in this change, wired for real once the dependency lands.

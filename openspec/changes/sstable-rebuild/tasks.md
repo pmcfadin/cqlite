@@ -62,7 +62,9 @@ Ordered. Group 0 is premises, 1–3 the library, 4 the CLI, 5 the endgame. Commi
 - [ ] 2.3 Opt-in gate: `statistics` never implied by a bare `--components` omission; must be named
       explicitly (R4.4).
 - [ ] 2.4 Tests: `issue_4197_rebuild_byte_parity.rs` (R1), `issue_4197_rebuild_index_parity.rs` and
-      `issue_4197_rebuild_bti_index_parity.rs` (R2), `issue_4197_rebuild_summary_classification.rs`
+      `issue_4197_rebuild_bti_scope.rs` (R2.6 — the BTI index-rebuild deferral boundary; the
+      byte-parity `issue_4197_rebuild_bti_index_parity.rs` the dropped R2.2 named belongs to the
+      follow-up issue #4336), `issue_4197_rebuild_summary_classification.rs`
       (R3), `issue_4197_rebuild_statistics_recompute.rs` (R4), `issue_4197_rebuild_refusal.rs` (R5).
       Expected values computed independently from the fixture's `*-Data.db.jsonl` golden or the
       clean source's own components — never from `rebuild_components`'s own output.

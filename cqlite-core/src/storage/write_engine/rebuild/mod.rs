@@ -21,11 +21,16 @@
 //! index (`Partitions.db`/`Rows.db`, [`Component::Index`]'s BTI form) is
 //! **NOT implemented in this change** — requesting `index` against a `da`
 //! input is a usage error (`Error::UnsupportedFormat`), never a silent
-//! wrong-format guess. Tracked as explicit follow-up work under epic #4192
-//! (design.md's own per-component table describes the BTI shape; the byte-
-//! extent walk + `PartitionsTrieWriter`/`RowsTrieWriter` wiring is
-//! substantial enough to warrant its own review pass rather than landing
-//! unreviewed inside an already-large change).
+//! wrong-format guess. Deferred by owner ruling to follow-up **issue
+//! #4336** (epic #4192), formalized as a spec amendment that dropped the
+//! original R2.2 BTI byte-parity scenario in favour of the fail-closed R2.6
+//! (design.md's per-component table still describes the BTI shape, kept as
+//! forward-looking reference for #4336; the byte-extent walk +
+//! `PartitionsTrieWriter`/`RowsTrieWriter` wiring is substantial enough to
+//! warrant its own review pass rather than landing unreviewed inside an
+//! already-large change). The boundary is pinned by
+//! `cqlite-core/tests/issue_4197_rebuild_bti_scope.rs`, which is the test to
+//! replace when #4336 lands.
 
 mod boundaries;
 mod components;
@@ -45,7 +50,8 @@ use std::path::PathBuf;
 #[serde(rename_all = "lowercase")]
 pub enum Component {
     /// BIG `Index.db`. Against a BTI (`da`) input this names `Partitions.db`
-    /// / `Rows.db` — NOT implemented in this change; see the module doc.
+    /// / `Rows.db` — NOT implemented in this change, deferred to issue
+    /// #4336; see the module doc.
     Index,
     /// BIG `Summary.db`. Not applicable to BTI (`skipped_not_applicable`).
     Summary,
