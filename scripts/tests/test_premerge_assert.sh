@@ -3959,14 +3959,21 @@ RECERT_S="==== AGENT-GATE RECERT SUMMARY ===="
 RECERT_E="==== END AGENT-GATE RECERT SUMMARY ===="
 
 # recert_block [anchor] [commit] [tree-start] [tree-integrity] [result] [mode] \
-#              [verdict] [components] [dirty] -> STDOUT. "-" omits that line.
+#              [verdict] [components] [dirty] [rows] -> STDOUT. "-" omits that line.
 # Line SHAPES are copied from scripts/agent-gate.sh's RECERTIFY terminal-emission
 # branch (recert-anchor:/recert-verdict:/recert-components:, MODE, tree lines).
+#
+# [rows] (#4268 roborev finding, Medium — Case C's OWN-rows check): omitted ->
+# ONE "<name>: PASS (1s)" row per name in [components], matching what a REAL
+# --recertify run actually dispatches and records; "-" -> NO rows at all (the
+# unmeasured-census shape the finding's attack used); any other value is
+# printed VERBATIM, one row per line, letting a case plant a non-PASS or
+# missing-name row deliberately.
 recert_block() {
   local anchor="${1:-$C12}" commit="${2:-$C7}" tstart="${3:-$C12}" \
         ti="${4:-PASS}" result="${5:-PASS}" mode="${6:-$RECERT_MODE}" \
         verdict="${7:-CERTIFIED (all rerun component(s) PASS: tooling-tests)}" \
-        components="${8:-tooling-tests}" dirty="${9-no}"
+        components="${8:-tooling-tests}" dirty="${9-no}" rows="${10-}"
   printf '%s\n' "$RECERT_S"
   printf 'run-id: /tmp/agent-gate.rCt9Qx\n'
   [ "$mode" = "-" ] || printf '%s\n' "$mode"
@@ -3981,6 +3988,20 @@ recert_block() {
   printf 'tree-end: %s dirty: %s digest: 671a6275687c\n' "$tstart" "$(dirty_tree_start "$dirty")"
   [ "$ti" = "-" ] || printf 'tree-integrity: %s\n' "$ti"
   [ "$verdict" = "-" ] || printf 'recert-verdict: %s\n' "$verdict"
+  if [ "$rows" = "-" ]; then
+    :
+  elif [ -n "$rows" ]; then
+    printf '%s\n' "$rows"
+  else
+    local _rb_ifs_save="$IFS" _rb_c
+    IFS=,
+    for _rb_c in $components; do
+      IFS="$_rb_ifs_save"
+      printf '%s: PASS (1s)\n' "$_rb_c"
+      IFS=,
+    done
+    IFS="$_rb_ifs_save"
+  fi
   printf 'logs: /tmp/agent-gate.rCt9Qx\n'
   [ "$result" = "-" ] || printf 'RESULT: %s\n' "$result"
   printf '%s\n' "$RECERT_E"
@@ -4313,6 +4334,42 @@ anchor_rows "$T/anchor-unattributable.txt" 'tooling-tests:     PASS (12s)'
 refused_recert "recert: anchor RESULT: FAIL but the NAMED component already reads PASS -> refuse (unattributable FAIL)" \
   "$T/anchor-unattributable.txt" "$GOODRECERT" \
   "already reads PASS in the"
+
+# --- Case R17: the RECERT BLOCK's OWN rows must be measured and PASS (#4268
+# --- roborev finding, Medium — _gate_component_rows's "recert" selector was
+# --- dead code, wired for exactly this purpose but never called). Every R13-
+# --- R16 check above reads the ANCHOR's rows; nothing checked the recert
+# --- block's OWN until now, so 'recert-verdict: CERTIFIED' + 'RESULT: PASS'
+# --- (scalar tokens) alone used to certify a rerun that never happened.
+
+# R17a: AFFIRMATIVE ZERO on the recert block itself — no rows at all. Paired
+# with the SAME real anchor every other case here uses ($ANCHOR_RECERT_FAIL),
+# so this isolates the recert block's OWN-rows gap from everything R13-R16
+# already cover on the anchor side.
+recert_summary "$T/recert-zero-rows.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: tooling-tests)" "tooling-tests" no -
+refused_recert "recert: a recert block carrying ZERO component status rows -> refuse (unmeasured, not clean)" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-zero-rows.txt" \
+  "ZERO component status rows"
+
+# R17b: a named component with NO row at all in the recert block (distinct
+# from R17a — OTHER metadata-shaped lines are present, just not this name's).
+recert_summary "$T/recert-missing-row.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: tooling-tests)" "tooling-tests" no \
+  "clippy: PASS (1s)"
+refused_recert "recert: the recert block has NO row at all for its own named component -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-missing-row.txt" \
+  "has NO component row for it"
+
+# R17c: a named component's row is present but NOT PASS — the rerun itself
+# failed, so 'recert-verdict: CERTIFIED' names a rerun that did not actually
+# clear the host fault.
+recert_summary "$T/recert-row-not-pass.txt" "$C12" "$C7" "$C12" PASS PASS "$RECERT_MODE" \
+  "CERTIFIED (all rerun component(s) PASS: tooling-tests)" "tooling-tests" no \
+  "tooling-tests: FAIL (3s)"
+refused_recert "recert: the recert block's own named-component row is FAIL, not PASS -> refuse" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-row-not-pass.txt" \
+  "reads 'FAIL', not PASS"
 
 # --- Case R12: usage is unchanged (still 3 or 4 args; recert never adds a 5th)
 if run 3 "usage: five arguments -> exit 3 (a recert pair is still exactly 4 args)" \

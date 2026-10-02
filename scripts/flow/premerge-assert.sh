@@ -2514,6 +2514,61 @@ GATE_RECERT_ROWS
       "FULL gate."
   fi
 
+  # THE RECERT BLOCK'S OWN ROWS MUST BE MEASURED AND EXACTLY PASS (#4268 roborev
+  # finding, Medium — `_gate_component_rows`'s "recert" selector was DEAD CODE:
+  # wired for exactly this purpose but never called anywhere in Case C). Every
+  # check above reads the ANCHOR's rows; nothing yet reads the recert block's
+  # OWN. `recert-verdict: CERTIFIED` and `RESULT: PASS` (asserted earlier) are
+  # SCALAR tokens a hand-assembled block can stamp with zero components ever
+  # having run — this is what closes that gap. Mirrors the anchor's own
+  # affirmative-zero rule (a block with no rows is UNMEASURED, not clean), and
+  # requires each NAMED component's row to be EXACTLY PASS — not merely
+  # PASS/OPT-OUT the way an unnamed anchor component may be, because a recert
+  # exists specifically to RE-RUN the named component(s) for real.
+  _rcb_rows=$(_gate_component_rows "$recert_file" recert) \
+    || refuse_tool_failure awk "recert block's component rows"
+  _rcb_nrows=0
+  _rcb_seen=""
+  while read -r _rcb_name _rcb_status; do
+    [ -n "$_rcb_name" ] || continue
+    _rcb_nrows=$((_rcb_nrows + 1))
+    case ",$recert_components," in
+      *",$_rcb_name,"*)
+        _rcb_seen="${_rcb_seen:+$_rcb_seen,}$_rcb_name"
+        if [ "$_rcb_status" != PASS ]; then
+          refuse_no_gate \
+            "The recert block's own component row for '$_rcb_name' reads '$_rcb_status', not PASS." \
+            "A recert exists to RE-RUN its named component(s) for real; a non-PASS row on the" \
+            "rerun itself means the host fault was never actually cleared."
+        fi
+        ;;
+    esac
+  done <<GATE_RECERT_SELF_ROWS
+$_rcb_rows
+GATE_RECERT_SELF_ROWS
+  if [ "$_rcb_nrows" -eq 0 ]; then
+    refuse_no_gate \
+      "The recert block carries ZERO component status rows — nothing was measured." \
+      "A real 'scripts/agent-gate.sh --recertify' run dispatches each named" \
+      "component through the SAME full-gate flow and records its own row (e.g." \
+      "'file-size: PASS (1s)'). With none present, 'recert-verdict: CERTIFIED'" \
+      "names a rerun that never happened. Paste the recert run's real" \
+      "AGENT_GATE_SUMMARY_FILE, not a hand-assembled excerpt."
+  fi
+  for _rc_comp_check in "${_rc_comp_list[@]}"; do
+    case ",$_rcb_seen," in
+      *",$_rc_comp_check,"*) ;;
+      *)
+        refuse_no_gate \
+          "recert-components: names '$_rc_comp_check', but the recert block has NO component row for it." \
+          "Every named component must show its OWN row in the recert block, not merely be" \
+          "listed in 'recert-components:' — a listed-but-unrepresented name certifies a" \
+          "component that was never actually rerun."
+        ;;
+    esac
+  done
+  unset _rcb_rows _rcb_nrows _rcb_seen _rcb_name _rcb_status
+
   # ...and the recert run's OWN provenance must cover the tree being merged —
   # which, for a recert, IS the same tree the anchor covers: both are compared
   # directly against $certified, never against each other, so there is no THIRD
