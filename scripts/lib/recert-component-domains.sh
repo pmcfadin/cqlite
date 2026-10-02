@@ -146,7 +146,15 @@ _recert_component_domain_patterns() {
   _rdp_specific=$(_recert_component_domain_patterns_raw "$1"); _rdp_rc=$?
   [ "$_rdp_rc" -eq 0 ] || return 0
   printf '%s\n' "${_RECERT_DOM_BASE[@]}" "${_RECERT_DOM_TOOLCHAIN[@]}"
+  # Explicit (roborev finding, Low): without this, the function's own exit
+  # status is the `[ -n ... ]` test above, which is FALSE whenever a
+  # recognized component's specific list happens to be empty — even though
+  # the shared groups were just printed. No current caller reads the rc, but
+  # a future `if _recert_component_domain_patterns "$c" >/dev/null; then`
+  # (or any `set -e` caller) would silently misread a recognized component
+  # as unrecognized.
   [ -n "$_rdp_specific" ] && printf '%s\n' "$_rdp_specific"
+  return 0
 }
 
 # _recert_component_domain_patterns_raw <component>: the per-component product/
