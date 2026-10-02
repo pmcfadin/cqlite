@@ -586,22 +586,10 @@ impl SSTableReader {
     }
 
     /// [`Self::stream_all_partitions_for_compaction`] with a partition-BOUNDARY
-    /// observer threaded through the drain loop (issue #4197).
-    ///
-    /// The `observer` carries the driver's running LOGICAL offset (the absolute
-    /// position, in the decompressed data section, of the window front) and —
-    /// when a caller installs a sink — receives one
-    /// `(data_position, raw_partition_key)` callback per on-disk partition
-    /// header. `distinct_partition_keys_with_positions` is that caller; every
-    /// other consumer passes
-    /// [`PartitionBoundaryObserver::inactive`](super::partition_boundaries::PartitionBoundaryObserver::inactive)
-    /// and pays one integer add per confirmed structure.
-    ///
-    /// Row semantics, cancellation and the sliding-window mechanics are
-    /// `stream_all_partitions_for_compaction`'s — see its doc comment; the ONE
-    /// behavioural difference is the non-stitching fallback branch, which
-    /// cannot report offsets at all and therefore FAILS CLOSED for a reporting
-    /// observer instead of inventing them.
+    /// observer threaded through the drain loop (issue #4197). Row semantics,
+    /// cancellation and window mechanics are that method's; the observer and
+    /// the one branch that treats a boundary walk differently are documented on
+    /// [`PartitionBoundaryObserver`](super::partition_boundaries::PartitionBoundaryObserver).
     pub(crate) async fn stream_all_partitions_for_compaction_observed<F>(
         &self,
         schema: Option<&crate::schema::TableSchema>,
@@ -639,21 +627,12 @@ impl SSTableReader {
         // and would hit the no-schema `parse_block_entries` error; the stitch+parse
         // drain below decodes BTI correctly (as `bti_scan_with_metadata` does).
         // Issue #4197: a BOUNDARY walk is EXCLUDED from this fallback for the
-        // same shape of reason #2372 excludes BTI. The index walk resolves rows
-        // through `Index.db`/the Summary and never reports where a partition
-        // STARTS in the decompressed data section, so it has no authoritative
-        // `data_position` to hand back — and this is the one caller that is
-        // regenerating `Index.db` itself, so inventing one is not an option
-        // (no-heuristics, issue #28). The window-drain loop below reads the
-        // SAME chunk sequence `stitch_all_chunks` does (for an uncompressed
-        // reader `read_next_block` yields raw blocks and `compression_reader`
-        // is `None`, so the bytes pass straight through), which is exactly how
-        // `distinct_partition_keys_with_positions` decoded this format before
-        // it was made streaming — only now the section is never fully resident.
-        // Empirically load-bearing, not defensive: the committed real
-        // Cassandra 5.0 `test_basic.uncompressed_table` fixture reaches HERE
-        // (`requires_chunk_stitching()` is false for it), so a boundary walk
-        // that took the fallback would refuse a healthy file.
+        // same shape of reason #2372 excludes BTI — the index walk reports no
+        // decompressed-section partition offset, and inventing one is not an
+        // option (issue #28). It is routed to the drain loop below instead,
+        // which reads the same chunk sequence `stitch_all_chunks` does. See
+        // `partition_boundaries.rs` for why this is load-bearing rather than
+        // defensive (a real committed fixture reaches here).
         if !self.requires_chunk_stitching()
             && self.bti_partitions_db.is_none()
             && !observer.is_reporting()
@@ -871,17 +850,13 @@ impl SSTableReader {
                 scan_cancel.check()?;
             }
             drained += 1;
-            // Partition-boundary bookkeeping (issue #4197). The window front's
-            // LOGICAL offset, captured BEFORE the call, is the start offset of
-            // whatever structure the parser is about to confirm; when that
-            // structure turns out to be a partition HEADER (the state's
-            // `header_parsed` flag flips `false -> true`), this is the
-            // partition's `data_position` — the same offset the buffered
-            // `parse_block_for_compaction_emit_with_offset` reports, taken from
-            // the driver's own confirmed consumption rather than from a byte
-            // search (issue #28). Captured unconditionally (two integer reads)
-            // so the boundary walk and the ordinary compaction stream run the
-            // SAME driver code.
+            // Partition-boundary bookkeeping (issue #4197): the window front's
+            // LOGICAL offset BEFORE the call is the start offset of the
+            // structure about to be confirmed, so if that structure turns out
+            // to be a partition HEADER it is the partition's `data_position`.
+            // Captured unconditionally (two integer reads) so a boundary walk
+            // and an ordinary compaction stream run the SAME driver code; the
+            // derivation is documented on `PartitionBoundaryObserver`.
             let structure_start = observer.front();
             let was_header_parsed = partition_state.header_parsed();
             let step = parser.stream_partition_body_incremental(

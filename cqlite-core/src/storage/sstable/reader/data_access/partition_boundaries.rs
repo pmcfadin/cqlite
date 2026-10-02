@@ -100,11 +100,27 @@ impl<'a> PartitionBoundaryObserver<'a> {
         }
     }
 
-    /// Whether a caller is actually collecting boundaries. The driver consults
-    /// this to route a boundary walk AWAY from the index-walk fallback, which
-    /// reports no decompressed-data-section offsets at all (see
-    /// [`SSTableReader::stream_all_partitions_for_compaction_observed`]'s
-    /// non-stitching branch) rather than report fabricated ones (issue #28).
+    /// Whether a caller is actually collecting boundaries.
+    ///
+    /// The driver consults this to route a boundary walk AWAY from its
+    /// non-stitching (index-walk) fallback branch, which resolves rows through
+    /// `Index.db`/the Summary and so reports no decompressed-data-section
+    /// partition offset at all — and this is the one caller that is
+    /// REGENERATING `Index.db`, so inventing one is not an option (issue #28).
+    /// A reporting observer therefore always takes the window-drain path, which
+    /// reads the SAME chunk sequence `stitch_all_chunks` does (for an
+    /// uncompressed reader `read_next_block` yields raw blocks and
+    /// `compression_reader` is `None`, so the bytes pass straight through) —
+    /// exactly how this walk decoded that format before it was made streaming,
+    /// only without the whole section resident.
+    ///
+    /// Empirically load-bearing, not defensive: the committed real Cassandra
+    /// 5.0 `test_basic.uncompressed_table` fixture reaches that fallback
+    /// (`requires_chunk_stitching()` is false for it — measured, against
+    /// `compaction_stream_loses_cell_metadata`'s doc comment, which reads as
+    /// though no real `nb` SSTable can), so a boundary walk that followed it
+    /// REFUSED a healthy file with `UnsupportedFormat` until this routing was
+    /// added.
     pub(crate) fn is_reporting(&self) -> bool {
         self.sink.is_some()
     }
