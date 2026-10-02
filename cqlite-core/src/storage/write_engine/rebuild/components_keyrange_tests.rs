@@ -24,8 +24,18 @@
 //! reaches that state on a CQLite-written generation:
 //!
 //!   * a rowless partition (header + end-of-partition marker only) — written
-//!     to `Data.db`, but `distinct_partition_keys_with_positions` does not
-//!     ENUMERATE it, so the raw walk never sees it either;
+//!     to `Data.db`, and NOT enumerated at the time this was measured, because
+//!     the boundary walk then recorded a partition only once one of its ROWS
+//!     was emitted. That second clause no longer holds: issue #4197's roborev
+//!     round made `distinct_partition_keys_with_positions` enumerate by
+//!     partition BOUNDARY (a header on disk IS a partition — see
+//!     `data_access/partition_boundaries.rs`), and a probe over a
+//!     CQLite-written generation whose lowest-token partition was built from a
+//!     mutation with no cell operations enumerated all three of its
+//!     partitions. So this shape may well reach `Ok(None)` now; what was NOT
+//!     re-measured in that round is whether such a partition's on-disk body is
+//!     genuinely empty or carries an empty row marker, so it is reported here
+//!     as "no longer excluded by the walk", not as a confirmed `Ok(None)`;
 //!   * a partition-tombstone-ONLY partition (the ordinary
 //!     `DELETE FROM t WHERE pk=?` shape, which this test uses) — enumerated
 //!     AND counted: the decode preserves the marker and `merge` re-emits it
@@ -36,12 +46,15 @@
 //!     file rather than SELECT semantics);
 //!   * a TTL-expired row — likewise counted, for the same reason.
 //!
-//! So `Ok(None)` is a defensively-handled outcome, and F6 is a
-//! latent-correctness fix — it deletes the second source of truth and
-//! restores `update_key_range`'s documented precondition — rather than a live
-//! wrong-output bug with a constructible fixture. This test therefore guards
-//! the invariant going FORWARD; it is NOT red-without-the-fix, and saying so
-//! explicitly is part of the point.
+//! So at the time of measurement `Ok(None)` was a defensively-handled
+//! outcome, and F6 was a latent-correctness fix — it deletes the second
+//! source of truth and restores `update_key_range`'s documented precondition
+//! — rather than a live wrong-output bug with a constructible fixture. This
+//! test therefore guards the invariant going FORWARD; it is NOT
+//! red-without-the-fix, and saying so explicitly is part of the point. (The
+//! boundary-walk change noted in the first bullet makes that "defensively
+//! handled" claim weaker, not stronger: the fix matters MORE now, never
+//! less.)
 
 use super::{rebuild_components_capturing_stats, Component, RebuildOptions};
 use crate::schema::{Column, KeyColumn, TableSchema};

@@ -1,21 +1,39 @@
 //! Issue #4197 (spec R5) — rebuild REFUSES, writing nothing, when a
-//! chunk-CRC check over `Data.db` fails or a partition fails to decode
-//! structurally while walking it, and names `salvage` (#4196) as the
-//! remedy.
+//! chunk-CRC check over `Data.db` fails, a partition fails to decode
+//! structurally while walking it, or the boundary walk finds the SAME
+//! partition key at two different on-disk offsets; and names `salvage`
+//! (#4196) as the remedy.
 //!
 //! Oracle: `test_comp_corrupt/data_db_bit_flip` — a Cassandra-verified
 //! corrupt fixture (`cassandra_verdict: corrupt`,
 //! `corruption-manifest.yml`), captured against the REAL Apache Cassandra
 //! 5.0.2 `sstableverify --extended --force` outcome. Not a synthetic
 //! CQLite-fabricated corruption.
+//!
+//! The duplicate-partition-key case (roborev job 124) has no committed
+//! fixture — no writer, Cassandra's or CQLite's, will produce one: both
+//! reject a non-increasing `(token, key)` step at write time
+//! (`SSTableWriter::write_partition` returns `InvalidInput`). It is
+//! synthesized here by DOUBLING a healthy single-partition `Data.db`, which
+//! yields exactly the on-disk shape Cassandra's own `Verifier` reports as
+//! "Key out of order": the same key, twice, at two ascending offsets. The
+//! authority for the shape is Cassandra's verifier contract, not CQLite's
+//! own code; the fixture is merely the cheapest way to reach it.
 
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use cqlite_core::schema::{Column, KeyColumn, TableSchema};
+use cqlite_core::storage::sstable::writer::SSTableWriter;
+use cqlite_core::storage::write_engine::mutation::{
+    CellOperation, Mutation, PartitionKey, TableId,
+};
 use cqlite_core::storage::write_engine::rebuild::{
     rebuild_components, Component, RebuildOptions, RefusalReason,
 };
+use cqlite_core::types::Value;
 use tempfile::TempDir;
 
 #[path = "support/datasets_root.rs"]
@@ -224,6 +242,167 @@ async fn rebuild_refuses_on_a_cassandra_verified_corrupt_data_db() {
         "[issue_4197] {FIXTURE}: rebuild correctly refused a Cassandra-verified corrupt \
          Data.db, naming salvage as the remedy: {}",
         refusal.remedy
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate partition key at two offsets (roborev job 124)
+// ---------------------------------------------------------------------------
+
+const DUP_KEYSPACE: &str = "test_ks";
+const DUP_TABLE: &str = "dup_key_table";
+const DUP_TIMESTAMP: i64 = 1_759_713_125_977_357;
+
+fn dup_schema() -> TableSchema {
+    TableSchema {
+        keyspace: DUP_KEYSPACE.to_string(),
+        table: DUP_TABLE.to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![
+            Column {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "v".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Write a healthy generation holding exactly ONE partition, and return its
+/// `Data.db` path (under `SSTableWriter`'s own `<keyspace>/<table>/` nesting).
+fn write_single_partition_generation(dir: &Path) -> PathBuf {
+    let schema = dup_schema();
+    let mut writer = SSTableWriter::new(dir.to_path_buf(), 1, &schema).expect("writer");
+    let mutation = Mutation::new(
+        TableId::new(DUP_KEYSPACE, DUP_TABLE),
+        PartitionKey::single("pk", Value::Integer(7)),
+        None,
+        vec![CellOperation::Write {
+            column: "v".to_string(),
+            value: Value::text("only"),
+        }],
+        DUP_TIMESTAMP,
+        None,
+    );
+    let key = mutation.decorated_key(&schema).expect("decorated key");
+    writer
+        .write_partition(key, vec![mutation])
+        .expect("write_partition");
+    let info = tokio::runtime::Handle::current()
+        .block_on(async { writer.finish().await })
+        .expect("finish");
+    info.data_path
+}
+
+/// R5 / roborev job 124 — a `Data.db` in which one partition key appears at
+/// TWO different on-disk offsets must be REFUSED as corrupt, never silently
+/// under-enumerated (the pre-fix boundary walk deduped by raw key, so the
+/// second occurrence vanished and every derived component was computed over a
+/// partition set that does not match the file).
+///
+/// Narrow partitions on purpose: a single-row partition carries NO
+/// promoted-index payload, so the `blocks.len() >= 2` re-encoded-span
+/// cross-check never runs and cannot be what catches this. The refusal has to
+/// come from the boundary walk itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_refuses_a_data_db_with_one_partition_key_at_two_offsets() {
+    let temp = TempDir::new().expect("tempdir");
+    let reference = temp.path().join("reference");
+    std::fs::create_dir_all(&reference).expect("create reference dir");
+    let data_db = tokio::task::spawn_blocking({
+        let reference = reference.clone();
+        move || write_single_partition_generation(&reference)
+    })
+    .await
+    .expect("join");
+    let generation = data_db.parent().expect("generation dir").to_path_buf();
+
+    // Double the data section: the SAME partition, byte for byte, at offset 0
+    // and again at `len`. An `nb` Data.db is headerless (the serialization
+    // header lives in Statistics.db), so a concatenation of two partition
+    // extents is a well-formed two-partition data section.
+    let one = std::fs::read(&data_db).expect("read Data.db");
+    assert!(
+        !one.is_empty(),
+        "the writer must have produced a non-empty Data.db"
+    );
+    let mut doubled = one.clone();
+    doubled.extend_from_slice(&one);
+    std::fs::write(&data_db, &doubled).expect("write doubled Data.db");
+
+    // Delete the Index.db so the request is the tool's headline use case, and
+    // the CRC.db/Digest.crc32 the ORIGINAL (undoubled) Data.db was checksummed
+    // against — otherwise the uncompressed read path's own CRC.db check refuses
+    // first, on a stale checksum, and this test would never reach the boundary
+    // walk it exists to exercise (verified: it refused with "uncompressed CRC32
+    // mismatch for chunk 0" before these two lines were added).
+    let prefix = data_db
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("Data.db name")
+        .trim_end_matches("Data.db")
+        .to_string();
+    for stale in ["Index.db", "CRC.db", "Digest.crc32"] {
+        let _ = std::fs::remove_file(generation.join(format!("{prefix}{stale}")));
+    }
+
+    let out = temp.path().join("out");
+    let options = RebuildOptions {
+        out_dir: out.clone(),
+        statistics_recovery_source: None,
+    };
+    let report = rebuild_components(&data_db, &dup_schema(), &[Component::Index], &options)
+        .await
+        .expect("a corrupt Data.db is a REFUSAL (report.refused), never an Err");
+
+    let refusal = report.refused.as_ref().unwrap_or_else(|| {
+        panic!(
+            "a Data.db carrying one partition key at two offsets must be refused, not \
+             silently under-enumerated; report={report:?}"
+        )
+    });
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::DataCorrupt,
+        "a repeated partition key is Data.db corruption (Cassandra's Verifier: \"Key out of \
+         order\"), not an unreproducible encoding; {refusal:?}"
+    );
+    assert_eq!(
+        refusal.offset,
+        Some(one.len() as u64),
+        "the refusal must name the offset of the REPEAT (the second occurrence), which is \
+         where the original single-partition extent ended; remedy={}",
+        refusal.remedy
+    );
+    assert!(
+        refusal.remedy.to_lowercase().contains("salvage"),
+        "remedy must name salvage (#4196); got: {}",
+        refusal.remedy
+    );
+    assert!(
+        report.regenerated.is_empty(),
+        "a refused run must regenerate nothing; got {:?}",
+        report.regenerated
+    );
+    assert!(
+        !out.join(format!("{prefix}Index.db")).exists(),
+        "a refused run must leave no partially-streamed Index.db behind"
     );
 }
 

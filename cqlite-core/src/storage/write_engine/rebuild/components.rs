@@ -246,9 +246,12 @@ pub(crate) async fn rebuild_components_capturing_stats(
         }
     }
 
+    // `enumerate_partitions` classifies its own failures (it is the only place
+    // that knows the offset a structural problem was detected at), so its Err
+    // IS the refusal.
     let entries = match boundaries::enumerate_partitions(&reader, schema).await {
         Ok(e) => e,
-        Err(err) => return Ok(make_report(Some(data_corrupt_refusal(err, None)))),
+        Err(refusal) => return Ok(make_report(Some(refusal))),
     };
 
     std::fs::create_dir_all(&options.out_dir)?;

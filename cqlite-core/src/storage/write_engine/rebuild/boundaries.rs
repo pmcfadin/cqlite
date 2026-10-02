@@ -13,11 +13,11 @@
 //! tests).
 
 use super::{Refusal, RefusalReason};
-use crate::error::{Error, Result};
 use crate::schema::TableSchema;
 use crate::storage::sstable::chunk_reader::ChunkReader;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::SSTableReader;
+use std::collections::HashMap;
 use std::path::Path;
 
 fn data_corrupt(detail: impl std::fmt::Display, offset: Option<u64>) -> Refusal {
@@ -74,8 +74,26 @@ pub(super) fn compressed_chunk_preflight(
 ///
 /// Any error escaping the underlying structural parse (a malformed
 /// partition header, an out-of-range length field, ...) IS the R5 "cannot be
-/// trusted" signal for an uncompressed input — the caller classifies it as
-/// [`RefusalReason::DataCorrupt`].
+/// trusted" signal for an uncompressed input, and is returned here as a
+/// [`RefusalReason::DataCorrupt`] [`Refusal`] — this function owns that
+/// classification so the offset it detected the problem at is never lost on
+/// the way out.
+///
+/// Two structural invariants are asserted over the walk's own output, both
+/// fail-closed:
+///
+/// 1. **Strictly ascending `data_offset`.** Partitions occupy disjoint,
+///    ascending extents; a non-advancing boundary means the walk desynced.
+/// 2. **No partition key at two different offsets.** This is Cassandra's
+///    `Verifier` "Key out of order" condition (a non-increasing
+///    `(token, key)` step — a repeated key has an EQUAL token): no writer
+///    produces it, so seeing it means `Data.db` cannot be trusted as the
+///    source of truth for a partition set. Refusing is the only safe
+///    outcome, because every derived component would otherwise be computed
+///    over a partition set that does not match the file — and silently
+///    deduping the repeat, which the boundary walk itself did before issue
+///    #4197's roborev round, is the version of this bug that ships an
+///    `Index.db` missing an entry with exit 0.
 ///
 /// `schema` is passed through explicitly (issue #4197) rather than relying
 /// on the reader's own header-derived resolution, which depends on
@@ -85,24 +103,43 @@ pub(super) fn compressed_chunk_preflight(
 pub(super) async fn enumerate_partitions(
     reader: &SSTableReader,
     schema: &TableSchema,
-) -> Result<Vec<(u64, Vec<u8>)>> {
+) -> std::result::Result<Vec<(u64, Vec<u8>)>, Refusal> {
     let entries = reader
         .distinct_partition_keys_with_positions(Some(schema))
-        .await?;
+        .await
+        .map_err(|e| data_corrupt(e, None))?;
     if entries.len() < 2 {
         return Ok(entries);
     }
     for i in 1..entries.len() {
         if entries[i].0 <= entries[i - 1].0 {
-            return Err(Error::corruption(format!(
-                "partition boundaries are not strictly ascending in data_offset: entry {} at \
-                 offset {} is followed by entry {} at offset {} — Data.db itself is corrupt \
-                 (non-monotonic partition order)",
-                i - 1,
-                entries[i - 1].0,
-                i,
-                entries[i].0
-            )));
+            return Err(data_corrupt(
+                format!(
+                    "partition boundaries are not strictly ascending in data_offset: entry {} \
+                     at offset {} is followed by entry {} at offset {} (non-monotonic partition \
+                     order)",
+                    i - 1,
+                    entries[i - 1].0,
+                    i,
+                    entries[i].0
+                ),
+                Some(entries[i].0),
+            ));
+        }
+    }
+    let mut first_offset_of: HashMap<&[u8], u64> = HashMap::with_capacity(entries.len());
+    for (offset, key) in &entries {
+        if let Some(previous) = first_offset_of.insert(key.as_slice(), *offset) {
+            return Err(data_corrupt(
+                format!(
+                    "partition key 0x{} appears at TWO different data offsets, {previous} and \
+                     {offset} — Cassandra's own Verifier reports this as \"Key out of order\" \
+                     (a repeated key is a non-increasing (token, key) step), and no writer \
+                     produces it",
+                    key.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                ),
+                Some(*offset),
+            ));
         }
     }
     Ok(entries)
