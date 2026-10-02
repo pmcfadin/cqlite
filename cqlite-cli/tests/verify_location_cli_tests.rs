@@ -71,25 +71,29 @@ fn usable(dir: &std::path::Path) -> bool {
 /// across every candidate base root and gated per #1094 doctrine: `None`
 /// (after an eprintln SKIP, or a panic under `CQLITE_REQUIRE_FIXTURES=1`) when
 /// no candidate root carries a usable copy.
-fn data_db_bit_flip_dir() -> Option<PathBuf> {
+fn corruption_fixture_dir(case: &str) -> Option<PathBuf> {
     let found = candidate_base_roots()
         .into_iter()
-        .map(|root| root.join("corruption/test_comp_corrupt/data_db_bit_flip"))
+        .map(|root| root.join("corruption/test_comp_corrupt").join(case))
         .find(|dir| usable(dir));
     let Some(dir) = found else {
         assert!(
             !require_fixtures_strict(),
-            "CQLITE_REQUIRE_FIXTURES=1 but data_db_bit_flip is unusable under every candidate \
-             base root: {:?}",
+            "CQLITE_REQUIRE_FIXTURES=1 but {case} is unusable under every candidate base \
+             root: {:?}",
             candidate_base_roots()
         );
         eprintln!(
-            "SKIP: data_db_bit_flip unusable under every candidate base root ({:?})",
+            "SKIP: {case} unusable under every candidate base root ({:?})",
             candidate_base_roots()
         );
         return None;
     };
     Some(dir)
+}
+
+fn data_db_bit_flip_dir() -> Option<PathBuf> {
+    corruption_fixture_dir("data_db_bit_flip")
 }
 
 fn run_verify(dir: &std::path::Path, out: &str) -> String {
@@ -195,5 +199,67 @@ fn cli_json_output_carries_a_location_object_with_chunk_index_and_partitions() {
     assert!(
         digest_finding["location"].is_null(),
         "DigestMismatch (no natural byte range) unexpectedly carried a location: {digest_finding}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Spec L6.3, the OTHER anchor value — `"declared_record"`.
+//
+// Found by the spec-auditor at 135eda0d6: `grep -rn "declared_record"
+// --include=*.rs` matched exactly ONE line, the match arm that PRODUCES it
+// (`cqlite-cli/src/commands/verify.rs:160`). Nothing asserted it. So a typo
+// in that string literal — `"declared_recrod"`, or silently swapping the two
+// arms — would have shipped green, in precisely the machine-readable channel
+// L6 exists to protect, and the `damaged_extent` case above would not have
+// noticed because it exercises the other arm.
+//
+// `data_db_truncation` is the fixture shape that produces it: a truncation
+// makes declared chunk offsets outrun the file, which is the ONLY corruption
+// class whose physical range is a location the metadata DECLARES rather than
+// damaged bytes that are present. Measured on the real fixture:
+//   {"byte_offset": 4102, "byte_len": 4, "anchor": "declared_record",
+//    "chunk_index": 7, ...}
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_json_discloses_a_declared_record_anchor_for_a_truncated_fixture() {
+    let Some(dir) = corruption_fixture_dir("data_db_truncation") else {
+        return;
+    };
+    let stdout = run_verify(&dir, "json");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("cqlite verify --out json did not emit valid JSON: {e}\n{stdout}")
+    });
+    let findings = value["findings"].as_array().expect("findings array");
+
+    let oob = findings
+        .iter()
+        .find(|f| f["class"] == "ChunkOffsetOutOfBounds")
+        .unwrap_or_else(|| panic!("no ChunkOffsetOutOfBounds finding in {value}"));
+    let location = &oob["location"];
+    assert!(
+        !location.is_null(),
+        "ChunkOffsetOutOfBounds finding's location was null: {value}"
+    );
+    // THE assertion this case exists for: the string literal itself.
+    assert_eq!(
+        location["anchor"], "declared_record",
+        "a truncation's physical range is DECLARED by metadata, not damaged bytes that are \
+         present; the JSON channel must say which reading it carries: {location}"
+    );
+    // ...and it must be the OTHER value, not both arms collapsed into one.
+    assert_ne!(
+        location["anchor"], "damaged_extent",
+        "the two anchor readings must be distinguishable in JSON: {location}"
+    );
+    // The fields the anchor qualifies are still present and typed, so a
+    // consumer that branches on `anchor` has something to branch over.
+    assert!(
+        location["byte_offset"].is_u64() && location["byte_len"].is_u64(),
+        "declared-record locations must still carry typed byte fields: {location}"
+    );
+    assert!(
+        location["chunk_index"].is_u64(),
+        "a chunk-anchored finding must name its chunk index: {location}"
     );
 }
