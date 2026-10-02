@@ -314,10 +314,23 @@ fi
 # ---------------------------------------------------------------------------
 
 refuse_no_gate() {
+  # Labeled from case_kind, not hard-coded "delta" (#4268 roborev finding,
+  # Low — job 127): this script goes to some length elsewhere never to name
+  # a mode the run is not in (e.g. apply_schemas_preflight's `_mode`
+  # derivation), so a Case C (recert) refusal calling the fourth argument a
+  # "delta summary file" was the one diagnostic that still did. case_kind is
+  # "A" (the default, set before fourth-argument classification runs) for
+  # every refusal reached BEFORE that classification succeeds — the neutral
+  # label covers those honestly rather than guessing a family.
+  local _rng_fourth_label="fourth-argument summary file"
+  case "${case_kind:-}" in
+    B) _rng_fourth_label="delta summary file" ;;
+    C) _rng_fourth_label="recert summary file" ;;
+  esac
   printf '========================================================\n' >&2
   printf 'PREMERGE: NO-GATE-OF-RECORD — REFUSING TO MERGE\n' >&2
   printf '  summary file: %s\n' "$summary_file" >&2
-  [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$delta_file" >&2
+  [ -n "$delta_file" ] && printf '  %s: %s\n' "$_rng_fourth_label" "$delta_file" >&2
   printf '  certified sha: %s\n' "$certified" >&2
   while [ "$#" -gt 0 ]; do
     printf '  %s\n' "$1" >&2

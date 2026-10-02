@@ -11693,6 +11693,24 @@ case "$SUMMARY_FILE" in
   /*) ;; # absolute (incl. the repo-root default) -> use verbatim
   *)  SUMMARY_FILE="$INVOCATION_CWD/$SUMMARY_FILE" ;;
 esac
+# Same normalization for --recertify's own anchor argument (#4268 roborev
+# finding, Medium — job 127, escalated from a Low flagged twice before and
+# deferred to #4334: this round showed it ALSO defeats the collision guard
+# just below, not merely a usability gap). The gate cd's to the repo root
+# BEFORE arg parsing, so a relative `--recertify <path>` was resolved
+# against the repo root while a relative AGENT_GATE_SUMMARY_FILE is resolved
+# against the caller's CWD — two paths composed from DIFFERENT bases, so the
+# guard's own same-file tests (both the path compare and the `-e`-gated
+# `-ef` compare) silently missed a real collision, and `--recertify
+# ./anchor.txt` run from any subdirectory refused "not found" for a file
+# that plainly exists next to the caller. MUST run before the guard and
+# before check 2's existence test, both of which read RECERT_ANCHOR_FILE.
+if [ "$RECERTIFY" -eq 1 ]; then
+  case "$RECERT_ANCHOR_FILE" in
+    /*) ;; # absolute -> use verbatim
+    *)  RECERT_ANCHOR_FILE="$INVOCATION_CWD/$RECERT_ANCHOR_FILE" ;;
+  esac
+fi
 # #4268 roborev finding (High, job 112; narrowed job 115 — RECERTIFY now has
 # ITS OWN distinct default, so the common unpinned case this guard originally
 # caught structurally cannot collide anymore): a --recertify run whose
@@ -25711,6 +25729,28 @@ run_recertify_preflight() {
       reason="anchor is not a full-gate SUMMARY block (a lite/delta/recert block, or a foreign file, cannot anchor a recert — this is also why a recert can never chain off another recert)"
     elif grep -qE '^mode: PARTIAL' "$RECERT_ANCHOR_FILE" 2>/dev/null; then
       reason="anchor is an --only PARTIAL run, not the gate of record — a recert must anchor to a genuine full agent-gate.sh run"
+    fi
+  fi
+
+  # ---- 3b: EXACTLY ONE full-gate block (#4268 roborev finding, Medium — job
+  # ---- 127) -------------------------------------------------------------
+  # Checks 3-5 read a MIX of block-scoped (grep ... | head -1, taking the
+  # FIRST occurrence: tree-end:, RESULT:, a named component's own row) and
+  # file-scoped (tree-integrity: PASS, summary-integrity: — grepped over the
+  # WHOLE file) fields. Without this count, a file concatenating TWO full
+  # blocks is validated by COMBINING them: a mutated-tree block 1 (whose own
+  # tree-integrity: FAIL) paired with a clean block 2 would have its
+  # scalar reads taken from block 1 while the tree-integrity: PASS grep is
+  # satisfied by block 2 alone. premerge-assert.sh:GP_blocks already refuses
+  # this on the pasted-PR side, so it is not independently mergeable — but
+  # this preflight's own documented fail-closed contract ("never admit an
+  # anchor it should have refused") was broken regardless of that backstop.
+  # Mirrors premerge-assert.sh's "holds N full-gate blocks — AMBIGUOUS" shape.
+  if [ -z "$reason" ]; then
+    local _rc_nfull
+    _rc_nfull=$(grep -cF "==== AGENT-GATE SUMMARY ====" "$RECERT_ANCHOR_FILE" 2>/dev/null)
+    if [ "${_rc_nfull:-0}" -gt 1 ]; then
+      reason="anchor holds $_rc_nfull full-gate blocks — AMBIGUOUS; a recert must anchor to exactly ONE run's summary, never a concatenation of several"
     fi
   fi
 

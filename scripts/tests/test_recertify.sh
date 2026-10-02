@@ -951,6 +951,42 @@ else
       echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
     fi
 
+    # R14e: EXACTLY ONE full-gate block is required (#4268 roborev finding,
+    # Medium — job 127): checks 3-5 mix block-scoped (first-occurrence) and
+    # file-scoped (whole-file) reads, so a concatenation of two blocks used
+    # to be validated by COMBINING them — a mutated-tree block 1 paired with
+    # a clean block 2 would read block 1's scalars but satisfy the
+    # whole-file tree-integrity: PASS grep from block 2 alone.
+    two_block_anchor="$TMPROOT/anchor-two-blocks.txt"
+    write_anchor "$TMPROOT/anchor-two-blocks-part1.txt" "$f2_sha" "$f2_digest" "dep-duplicates=PASS"
+    write_anchor "$TMPROOT/anchor-two-blocks-part2.txt" "$f2_sha" "$f2_digest" "dep-duplicates=PASS"
+    cat "$TMPROOT/anchor-two-blocks-part1.txt" "$TMPROOT/anchor-two-blocks-part2.txt" >"$two_block_anchor"
+    run_recert "$fixture" "$two_block_anchor" dep-duplicates
+    if [ "$RC" -eq 2 ] && grep -qF "anchor holds 2 full-gate blocks — AMBIGUOUS" <<<"$OUT"; then
+      ok "R14e: an anchor holding TWO full-gate blocks -> refuse as AMBIGUOUS, never combined"
+    else
+      bad "R14e: expected exit 2 + 'anchor holds 2 full-gate blocks — AMBIGUOUS', got rc=$RC"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+
+    # R15: a RELATIVE --recertify anchor path resolves against the CALLER's
+    # cwd, not the repo root the gate cd's into (#4268 roborev finding,
+    # Medium — job 127, escalated from a Low flagged twice before and
+    # deferred to #4334). Invoked directly (not via run_recert, which always
+    # cd's into the fixture ROOT first) from $TMPROOT — OUTSIDE the fixture
+    # entirely — referencing the script by its full path and the anchor by a
+    # BARE relative filename that only resolves correctly against $TMPROOT.
+    relpath_anchor="relpath-anchor.txt"
+    write_anchor "$TMPROOT/$relpath_anchor" "$f2_sha" "$f2_digest" "dep-duplicates=PASS"
+    relpath_out=$( (cd "$TMPROOT" && bash "$fixture/scripts/agent-gate.sh" --recertify "$relpath_anchor" --components dep-duplicates) 2>&1 )
+    relpath_rc=$?
+    if ! grep -qF "not found or unreadable" <<<"$relpath_out" && grep -qE '^dep-duplicates: ' <<<"$relpath_out" && grep -qF "==== AGENT-GATE RECERT SUMMARY ====" <<<"$relpath_out"; then
+      ok "R15: a RELATIVE --recertify anchor path resolves against the caller's cwd, not the repo root the gate cd's into"
+    else
+      bad "R15: expected a relative anchor path (invoked from outside the repo root) to resolve and dispatch (not refuse as not-found), got rc=$relpath_rc"
+      echo "------- captured -------"; printf '%s\n' "$relpath_out"; echo "------------------------"
+    fi
+
   fi
 fi
 
