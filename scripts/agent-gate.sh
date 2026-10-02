@@ -28098,8 +28098,8 @@ dispatch_component() {
   # target discovers its corpus from disk, and with NO test_wide_rows table
   # present `discover_tables()` returns empty and the test prints a notice and
   # RETURNS -- a green PASS that measured no memory at all. The flag turns that
-  # absence into one named setup failure, which is what makes this lane's
-  # "fails closed on empty" claim in the component header above true.
+  # absence into one named setup failure, which is what makes the "fails closed
+  # on empty" claim in the component header above true for this lane too.
   _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
   env CQLITE_REQUIRE_FIXTURES=1 cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_4197_rebuild_memory_budget -- --test-threads=1 || rc=1
