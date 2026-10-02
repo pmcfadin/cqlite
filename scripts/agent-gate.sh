@@ -6295,13 +6295,24 @@ _gate_is_strict() {
   [ "$LITE" -eq 0 ] && { [ -z "$ONLY" ] || [ "$RECERTIFY" -eq 1 ]; }
 }
 
-# _component_set_strict: rc 0 iff this mode may FAIL on the verdict — the FULL gate and
-# --delta, the two modes whose blocks are recorded in a PR as certification. `--lite`
-# and `--only` emit the SAME line ADVISORY, matching how the #2078 fixture and #3148
-# schemas pre-flights already split leniency: --lite runs every fix round and must not
-# require the network to function.
+# _component_set_strict: rc 0 iff this mode may FAIL on the verdict — the FULL gate,
+# --delta, and --recertify (#4268 roborev finding, Medium — see below), the modes whose
+# blocks are recorded in a PR as certification. `--lite` and a bare `--only` emit the
+# SAME line ADVISORY, matching how the #2078 fixture and #3148 schemas pre-flights
+# already split leniency: --lite runs every fix round and must not require the network
+# to function.
+#
+# RECERTIFY must be named explicitly, exactly like `_gate_is_strict` just above (NOT
+# merged with it — see that function's own comment on why they stay two predicates):
+# run_recertify_preflight sets `ONLY="$RECERT_COMPONENTS"` on success, so the bare
+# `[ -z "$ONLY" ]` test alone reads a --recertify run as lenient at
+# apply_component_set_preflight's SECOND call site (after `_tree_recapture_after_slot`,
+# guarding against a mid-queue mutation per roborev job 290) — exactly the call whose
+# verdict a Case C recert block now certifies in premerge-assert.sh. A skew introduced
+# during the slot queue would downgrade to an ADVISORY line instead of failing the run
+# that is about to certify a merge.
 _component_set_strict() {
-  [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]
+  [ "$LITE" -eq 0 ] && { [ -z "$ONLY" ] || [ "$RECERTIFY" -eq 1 ]; }
 }
 
 # _component_set_line: PURE text for the current probe state + mode. The strict wording

@@ -402,6 +402,23 @@ else
     else
       bad "R1: expected RESULT: PASS"
     fi
+    # #4268 roborev finding (Medium): _component_set_strict used to read ONLY as the
+    # bare `[ -z "$ONLY" ]` idiom, so apply_component_set_preflight's SECOND call site
+    # (after run_recertify_preflight sets ONLY="$RECERT_COMPONENTS") degraded a recert's
+    # #3544 skew check to the SAME ADVISORY wording --only gets — silently lenient on a
+    # mode that now certifies merges via premerge-assert.sh's Case C. A clean recert run
+    # must stamp the STRICT (PASS, never ADVISORY-PASS) wording.
+    if grep -qE '^component-set: PASS ' <<<"$OUT"; then
+      ok "R1: component-set: is STRICT (bare PASS, never ADVISORY-PASS) on a recert run"
+    else
+      bad "R1: expected a strict 'component-set: PASS' line on a recert run"
+      echo "------- captured -------"; printf '%s\n' "$OUT"; echo "------------------------"
+    fi
+    if grep -qF 'ADVISORY' <<<"$OUT"; then
+      bad "R1: component-set: line carries ADVISORY wording on a recert run (#3544 degraded to non-fatal)"
+    else
+      ok "R1: no ADVISORY component-set wording leaks into a recert's SUMMARY"
+    fi
 
     # R2: missing anchor file -> REFUSED, exit 2, distinct header still present.
     run_recert "$fixture" "$TMPROOT/does-not-exist.txt" file-size
