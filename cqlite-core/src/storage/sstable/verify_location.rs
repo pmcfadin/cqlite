@@ -246,9 +246,8 @@ pub fn format_location(loc: &Location) -> String {
 }
 
 /// Lower-case hex encode, one `write!` per byte rather than one `String`
-/// allocation per byte (roborev round-2 LOW finding: `format!` inside the
-/// loop is on the path [`MAX_RESOLVED_KEYS`] makes hot — up to 100 calls per
-/// `Location`).
+/// allocation per byte (roborev round-2 LOW: `format!` in the loop is on the
+/// path [`MAX_RESOLVED_KEYS`] makes hot — up to 100 calls per `Location`).
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
