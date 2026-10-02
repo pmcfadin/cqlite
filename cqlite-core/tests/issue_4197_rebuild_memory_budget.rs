@@ -84,9 +84,30 @@ const HEAP_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 ///
 /// Measured 2026-10-02 on this branch, all 7 measurable `test_wide_rows`
 /// tables, all components including `statistics`: CORPUS-WIDE peak live heap
-/// 2,601,427–2,602,003 B across repeated runs. Ceiling 4 MiB ≈ 1.6x headroom
-/// over the high reading; peak varies more than allocation totals do, so the
-/// slack is deliberately wider than a counts-based net would need.
+/// **676,698–676,782 B** across three repeated runs. Ceiling 1 MiB ≈ 1.55x
+/// headroom over the high reading.
+///
+/// **Why this constant DROPPED from 4 MiB / ~2.60 MB.** The earlier reading
+/// (2,601,427–2,602,003 B, same corpus, same components) was taken while the
+/// partition-boundary walk still materialised the WHOLE decompressed data
+/// section into one `Vec<u8>` before parsing it
+/// (`stitch_all_chunks`). Issue #4197's roborev round replaced that with the
+/// streaming driver (`data_access/partition_boundaries.rs`), and the peak fell
+/// by ~3.8x. Re-pinned tight on purpose: at 4 MiB a regression back to
+/// whole-section materialisation would not have reddened anything, which is
+/// precisely how the old implementation sat under a budget that claimed
+/// one-partition residency.
+///
+/// **What still scales with the input, stated rather than implied.** Peak is
+/// no longer O(data-section size), but it is not O(1) either: the walk returns
+/// one `(u64, Vec<u8>)` per partition, so the BOUNDARY VECTOR is
+/// O(partition count) — inherent to a `Vec`-returning contract rebuild
+/// iterates twice (pass 1 and pass 2, each needing the NEXT partition's offset
+/// as an end bound). The corpus-wide series above shows the shape: the peak
+/// rises over the first three tables (622,074 → 637,595 → 676,782 B) and is
+/// then FLAT across four more tables of differing sizes, including the largest
+/// allocator (`multi_metric_timeseries`, 13.9 MB allocated). A
+/// whole-section-resident implementation instead tracks the largest section.
 ///
 /// **What this is and is not.** `dhat::HeapStats::max_bytes` is the peak over
 /// the PROFILER's whole lifetime, so sampling it inside the per-table loop
@@ -97,7 +118,7 @@ const HEAP_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 /// `total_bytes` (allocation volume) and `curr_bytes` (live-heap retention,
 /// see [`CEILING_RETAINED_BYTES`]) — and `max_bytes` is asserted only as the
 /// corpus-wide ceiling it actually measures.
-const CEILING_PEAK_BYTES: u64 = 4 * 1024 * 1024;
+const CEILING_PEAK_BYTES: u64 = 1024 * 1024;
 
 /// Retention net: live heap STILL RESIDENT at the end of each table's
 /// rebuild. Unlike `max_bytes` this is a genuinely PER-TABLE read, and it is
@@ -106,9 +127,10 @@ const CEILING_PEAK_BYTES: u64 = 4 * 1024 * 1024;
 /// the iteration count and cross the ceiling.
 ///
 /// Measured 2026-10-02, across several runs of all 7 measurable tables:
-/// 14,859–17,163 B after each table. Ceiling 64 KiB ≈ 3.7x headroom over the
-/// high reading, which still reddens on retention as small as ~7 KB per table
-/// across this corpus.
+/// 14,859–17,163 B after each table (the three runs taken after the streaming
+/// boundary-walk rewrite read a bit-identical 14,859 B after EVERY table).
+/// Ceiling 64 KiB ≈ 3.7x headroom over the high reading, which still reddens
+/// on retention as small as ~7 KB per table across this corpus.
 ///
 /// **What is NOT claimed.** The series is *approximately* flat but not
 /// run-to-run stable: observed runs vary between bit-identical (14,859 B after
@@ -373,7 +395,7 @@ fn rebuild_every_wide_rows_table_within_the_compaction_heap_budget() {
         assert!(
             (after.max_bytes as u64) <= CEILING_PEAK_BYTES,
             "corpus-wide peak live heap reached {} B through {KEYSPACE}.{} — over the PINNED \
-             ceiling {} B (measured ~2.60 MB corpus-wide). Still within the 128 MiB contract \
+             ceiling {} B (measured ~677 KB corpus-wide). Still within the 128 MiB contract \
              budget, but a jump this size means rebuild stopped holding one partition at a time \
              — investigate before re-pinning this constant.",
             after.max_bytes,
