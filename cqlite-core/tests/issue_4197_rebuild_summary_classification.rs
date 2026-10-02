@@ -207,11 +207,12 @@ async fn min_index_interval_is_recomputed_and_differs_from_a_non_default_origina
     // `min_index_interval` (256, vs Cassandra's default 128) would look
     // like, using the SAME low-level `SummaryWriter` rebuild itself drives —
     // this is the "Summary.db written at that value" design.md §D6 says is
-    // necessarily synthetic. Uses one arbitrary key/offset pair; the exact
-    // content does not matter, only that it differs from what a
-    // 128-interval writer with the SAME single entry would produce whenever
-    // the entry count crosses a sampling boundary — here we assert on the
-    // HEADER field difference instead, which is unconditional.
+    // necessarily synthetic. Uses one arbitrary key/offset pair; the entry
+    // payload is irrelevant, because the assertion below reads the ONE field
+    // R3.2 is about — the `min_index_interval` header word — out of each
+    // buffer, rather than comparing whole buffers (which would differ on
+    // entry count/offsets/keys no matter what the interval was, and so would
+    // prove nothing).
     let mut synth = SummaryWriter::new(256);
     let key = DecoratedKey::new(42, vec![0x00, 0x00, 0x00, 0x01]);
     synth.note_partition(&key);
@@ -248,15 +249,52 @@ async fn min_index_interval_is_recomputed_and_differs_from_a_non_default_origina
     );
 
     let rebuilt = read_component(&out, "Summary.db");
+
+    // The Summary.db header is 24 bytes, big-endian, and `min_index_interval`
+    // is its FIRST word: `SummaryWriter::write_header` (summary_writer.rs)
+    // emits `min_index_interval` (u32 BE), then `entries_count` (u32 BE),
+    // `summary_entries_size` (u64 BE) and `sampling_level` (u32 BE).
+    let header_interval = |label: &str, bytes: &[u8]| -> u32 {
+        assert!(
+            bytes.len() >= 24,
+            "{label}: {} bytes is shorter than the 24-byte Summary.db header, so the \
+             min_index_interval word cannot be read — the comparison below would be vacuous",
+            bytes.len()
+        );
+        u32::from_be_bytes(bytes[0..4].try_into().expect("4-byte slice"))
+    };
+
+    // Control: the synthetic buffer really does carry 256, so the inequality
+    // below is a difference in THIS field and not an artifact of the control
+    // being built wrong.
+    assert_eq!(
+        header_interval("synthetic control", &synthetic_256_bytes),
+        256,
+        "the synthetic control must genuinely be a 256-interval Summary.db"
+    );
+    // R3.2 — rebuild recomputes the field to Cassandra's hardcoded default.
+    assert_eq!(
+        header_interval("rebuilt", &rebuilt),
+        128,
+        "the rebuilt Summary.db's min_index_interval header word must be the hardcoded default \
+         128 that `statistics::min_index_interval()` returns — the value the `recomputed` \
+         classification promises"
+    );
+    // And therefore it is NOT the original's value whenever that was
+    // non-default: the gap is disclosed, never masked.
     assert_ne!(
-        rebuilt, synthetic_256_bytes,
-        "a Summary.db rebuilt at the hardcoded default (128) must differ from one genuinely \
-         written at a non-default interval (256) — otherwise the `recomputed` classification \
-         would be silently claiming a byte parity it cannot back up"
+        header_interval("rebuilt", &rebuilt),
+        header_interval("synthetic control", &synthetic_256_bytes),
+        "a Summary.db rebuilt at the hardcoded default (128) must carry a DIFFERENT \
+         min_index_interval than one genuinely written at a non-default interval (256) — \
+         otherwise the `recomputed` classification would be silently claiming a byte parity it \
+         cannot back up"
     );
 
     eprintln!(
-        "[issue_4197] {KEYSPACE}.{TABLE}: min_index_interval gap correctly disclosed \
-         (recomputed=128, differs from a genuinely non-default 256-interval Summary.db)."
+        "[issue_4197] {KEYSPACE}.{TABLE}: min_index_interval gap correctly disclosed (rebuilt \
+         header word = {}, vs {} for a genuinely non-default Summary.db).",
+        header_interval("rebuilt", &rebuilt),
+        header_interval("synthetic control", &synthetic_256_bytes),
     );
 }
