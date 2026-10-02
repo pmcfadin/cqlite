@@ -806,10 +806,19 @@ grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE
 # list — hence PARTIAL (unemittable by --delta; that is the --only demotion) and the defensive REFUSED.
 grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
 
+# RECERTIFY grammar — `--recertify <anchor> --components <c1[,c2]>` ONLY (issue #4268;
+# #4268 roborev finding, Medium — job 120: this grammar shipped with the mode's code but
+# was never published here). `_recertify_refuse` emits `emit_summary ERROR` (and exits 2)
+# for every one of run_recertify_preflight's eight fail-closed checks — a bad anchor, an
+# ineligible component, a stale/dirty/mismatched tree, an unattributable FAIL, and so on
+# — so ERROR is a ROUTINE recert outcome, not an edge case. The RECORD grammar above never
+# matches it and would spin forever on a refused recert.
+grep -qE '^RESULT: (PASS|FAIL|ERROR)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+
 # Widening a COMPLETION grammar is safe here and would NOT have been before #3750 split completion from
 # verdict: matching ERROR/REFUSED cannot create a false pass, because the verdict is now a separate
-# affirmative read (the PASS token exactly, or the component's own line). Three grammars are therefore
-# not three chances to be wrong. Better than any of them: ask gate-liveness.sh, the single source of
+# affirmative read (the PASS token exactly, or the component's own line). Four grammars are therefore
+# not four chances to be wrong. Better than any of them: ask gate-liveness.sh, the single source of
 # truth executable rather than transcribed.
 
 # And COMPLETION IS NOT A VERDICT: `PARTIAL` says the run ENDED, not that your component passed. Read the
@@ -1935,9 +1944,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'                    "$AGENT_GATE_SUMMARY_FILE"
   # DELTA grammar — `--delta <anchor>` ONLY. It alone can terminate ERROR or REFUSED.
   grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'      "$AGENT_GATE_SUMMARY_FILE"
+  # RECERTIFY grammar — `--recertify <anchor> --components <c1[,c2]>` ONLY (#4268 roborev
+  # finding, Medium — job 120). Every one of run_recertify_preflight's eight fail-closed
+  # checks terminates via `_recertify_refuse`'s `emit_summary ERROR`, so ERROR is routine
+  # here, not an edge case; the RECORD grammar never matches it.
+  grep -qE '^RESULT: (PASS|FAIL|ERROR)([[:space:]]|$)'                     "$AGENT_GATE_SUMMARY_FILE"
   ```
 
-  **THREE MODES, THREE SETS — and `--delta` is the one that bites.** `run_delta` can terminate with
+  **FOUR MODES, FOUR SETS — and `--delta` is the one that bites.** `run_delta` can terminate with
   `ERROR` (4 emit sites) or `REFUSED` (3 more, reached via `emit_summary "$(_tree_result REFUSED)"`,
   which is why grepping for `emit_summary REFUSED` finds nothing and the token *looks* unemitted — it
   **is** emitted, and `gate-liveness.sh`'s comment enumerating it is accurate, not stale). All seven
@@ -1948,7 +1962,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   already-enumerated terminal set, token for token** — ONE source of truth for "what is terminal", not
   a second list — so it carries `PARTIAL` (which `--delta` cannot emit; that is the `--only` demotion)
   and the reader's defensive `REFUSED`, with `ERROR` the emit you will actually meet. Better than any
-  of the three: **ask the reader**, which is that one source of truth executable rather than
+  of the four: **ask the reader**, which is that one source of truth executable rather than
   transcribed.
 
   **Widening a COMPLETION grammar is safe here and would not have been before**: matching

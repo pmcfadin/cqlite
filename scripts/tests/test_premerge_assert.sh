@@ -4219,6 +4219,18 @@ assert_count \
 refused_recert "recert: TWO recert blocks in the fourth argument -> refuse as AMBIGUOUS" \
   "$ANCHOR_RECERT_FAIL" "$T/two-recerts.txt" "holds 2 recert blocks"
 
+# #4268 roborev finding (Low, job 120): the classifier picks kind from the
+# FIRST marker it sees, so a file carrying BOTH a DELTA and a RECERT block
+# was silently accepted as whichever family came first, leaving the OTHER
+# certification claim unvalidated — the per-family GP_blocks>1 checks only
+# ever count ONE family, so they could not see a MIXED-family file.
+{ delta_block; recert_block; } >"$T/delta-then-recert.txt"
+refused_recert "recert: a file carrying BOTH a DELTA and a RECERT block -> refuse as AMBIGUOUS (mixed family)" \
+  "$ANCHOR_RECERT_FAIL" "$T/delta-then-recert.txt" "carries BOTH a DELTA and a RECERT"
+{ recert_block; delta_block; } >"$T/recert-then-delta.txt"
+refused_recert "recert: the SAME mixed-family file, RECERT marker first -> still refuses as AMBIGUOUS" \
+  "$ANCHOR_RECERT_FAIL" "$T/recert-then-delta.txt" "carries BOTH a DELTA and a RECERT"
+
 # --- Case R11: "a recert cannot follow a recert" holds STRUCTURALLY ----------
 # A RECERT SUMMARY passed as the THIRD argument (the "anchor" slot) can never
 # satisfy the FULL-header check — proving the chain-prevention property without
@@ -4415,7 +4427,7 @@ fi
 GATE="$SCRIPT_DIR/../agent-gate.sh"
 if [ -r "$GATE" ]; then
   _gcv_want=$(grep -oE 'PASS\|FAIL\|SKIP\|OPT-OUT\|VACUOUS\) ;;' "$GATE" | head -1 \
-    | sed -e 's/) ;;$//' -e 's/|/\n/g' | sort)
+    | sed -e 's/) ;;$//' | tr '|' '\n' | sort)
   _gcv_got=$(grep -oE 'ok\["[A-Z-]+"\] = 1' "$ASSERT" | sed -e 's/^ok\["//' -e 's/"\] = 1$//' | sort)
   if [ -n "$_gcv_want" ] && [ "$_gcv_want" = "$_gcv_got" ]; then
     ok "ok-vocabulary derived: _gate_component_rows's ok[] set equals agent-gate.sh's own closed status vocabulary"
@@ -4479,7 +4491,10 @@ assert_src_absent_fixed \
 # measurement method, same host-invariance.
 #
 # +1 for the ok-vocabulary derived case (#4268 job-119 roborev round).
-CASE_FLOOR=251
+#
+# +2 for the mixed-family (DELTA+RECERT) ambiguity cases (#4268 job-120
+# roborev round), both `refused_recert` arms.
+CASE_FLOOR=253
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

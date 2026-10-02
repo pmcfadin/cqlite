@@ -109,9 +109,10 @@ The merge-blocking rules — each one FAILs closed, and the full mechanism for e
 `docs/development/gate-ops.md`:
 
 - **Completion and verdict are two assertions.** Probe completion with the terminal-token grammar
-  for the mode you ran — full, `--lite`/`--only`, and `--delta` each have their own, published ONLY
-  in `docs/development/gate-ops.md` (this file deliberately quotes none of them, so it cannot teach
-  a partial set). `INCOMPLETE` is a liveness placeholder written at launch, not a verdict. And read
+  for the mode you ran — full, `--lite`/`--only`, `--delta`, and `--recertify` each have their own,
+  published ONLY in `docs/development/gate-ops.md` (this file deliberately quotes none of them, so
+  it cannot teach a partial set). `INCOMPLETE` is a liveness placeholder written at launch, not a
+  verdict. And read
   a **component's OWN line**, never the terminal token — `PARTIAL` says the *run* was partial, not
   that your component failed.
 - **A gate script behind `origin/main` cannot certify.** Rebase before the gate of record.

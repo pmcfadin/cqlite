@@ -2256,13 +2256,28 @@ if [ -n "$delta_file" ]; then
       gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
       sub(/\r$/, "")
     }
-    $0 == "==== AGENT-GATE RECERT SUMMARY ====" { if (kind == "") kind = "recert" }
-    $0 == "==== AGENT-GATE DELTA SUMMARY ===="  { if (kind == "") kind = "delta" }
+    $0 == "==== AGENT-GATE RECERT SUMMARY ====" { if (kind == "") kind = "recert"; nrecert++ }
+    $0 == "==== AGENT-GATE DELTA SUMMARY ===="  { if (kind == "") kind = "delta"; ndelta++ }
     $0 == "==== AGENT-GATE SUMMARY ===="        { nfull++ }
     $0 == "==== AGENT-GATE LITE SUMMARY ===="   { nlite++ }
-    END { printf "%s %d %d\n", (kind == "" ? "none" : kind), nfull, nlite }
+    END { printf "%s %d %d %d %d\n", (kind == "" ? "none" : kind), nfull, nlite, ndelta, nrecert }
   ' "$delta_file") || refuse_tool_failure awk "fourth-argument kind classification"
-  read -r _delta_kind _delta_nfull _delta_nlite <<<"$_delta_class"
+  read -r _delta_kind _delta_nfull _delta_nlite _delta_ndelta _delta_nrecert <<<"$_delta_class"
+  # #4268 roborev finding (Low, job 120): the classifier above picks kind
+  # from the FIRST marker it sees, so a file carrying BOTH a DELTA and a
+  # RECERT block was silently accepted as whichever family came first,
+  # leaving the OTHER certification claim unvalidated — the per-family
+  # GP_blocks>1 checks inside the Case B/C bodies below only ever count ONE
+  # family, so they cannot see this. Refuse the MIXED-FAMILY case here,
+  # before either body runs, mirroring the same-family "holds N blocks —
+  # AMBIGUOUS" refusal already used for a repeated opener of ONE family.
+  if [ "$_delta_ndelta" -gt 0 ] && [ "$_delta_nrecert" -gt 0 ]; then
+    refuse_no_gate \
+      "The fourth argument ($delta_file) carries BOTH a DELTA and a RECERT summary block" \
+      "($_delta_ndelta delta, $_delta_nrecert recert) — AMBIGUOUS." \
+      "A delta re-certification and a host-fault recert are different claims; only ONE" \
+      "family may be validated. Point at a file carrying exactly one."
+  fi
   case "$_delta_kind" in
     recert) case_kind=C; recert_file="$delta_file" ;;
     delta)  case_kind=B ;;

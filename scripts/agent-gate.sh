@@ -25700,11 +25700,14 @@ run_recertify_preflight() {
   # ---- 4: every OTHER component in the anchor is PASS/OPT-OUT ---------------
   # (with ONE declared exception — see below)
   if [ -z "$reason" ]; then
-    local _rc_comp _rc_line _rc_st
+    local _rc_comp _rc_line _rc_st _rc_ignored_name _rc_ignored_rest
     for _rc_comp in "${COMPONENTS[@]}"; do
       case " ${rc_list[*]} " in *" $_rc_comp "*) continue ;; esac
       _rc_line=$(grep -E "^${_rc_comp}: " "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1)
-      _rc_st=$(printf '%s' "$_rc_line" | awk '{print $2}')
+      # Herestring, not `printf | awk` (#4061 sigpipe ratchet; #4268 roborev
+      # finding, Low — job 120: check 4b two blocks down already avoids this
+      # exact shape with a herestring `read`, so this arm now matches it).
+      read -r _rc_ignored_name _rc_st _rc_ignored_rest <<<"$_rc_line"
       case "$_rc_st" in
         PASS|OPT-OUT) ;;
         # DECLARED EXCEPTION (roborev finding, High): tooling-tests's own #4266
@@ -25762,9 +25765,11 @@ run_recertify_preflight() {
   if [ -z "$reason" ]; then
     local _rc_te
     _rc_te=$(grep -E '^tree-end:' "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1)
-    _rc_a_sha=$(printf '%s' "$_rc_te" | sed -n 's/^tree-end:[[:space:]]*\([^ ]*\).*/\1/p')
-    _rc_a_dirty=$(printf '%s' "$_rc_te" | sed -n 's/.* dirty: \([a-z]*\).*/\1/p')
-    _rc_a_digest=$(printf '%s' "$_rc_te" | sed -n 's/.* digest: \([^ ]*\).*/\1/p')
+    # Herestrings, not `printf | sed` (#4061 sigpipe ratchet; #4268 roborev
+    # finding, Low — job 120: matches check 4b's own herestring idiom).
+    _rc_a_sha=$(sed -n 's/^tree-end:[[:space:]]*\([^ ]*\).*/\1/p' <<<"$_rc_te")
+    _rc_a_dirty=$(sed -n 's/.* dirty: \([a-z]*\).*/\1/p' <<<"$_rc_te")
+    _rc_a_digest=$(sed -n 's/.* digest: \([^ ]*\).*/\1/p' <<<"$_rc_te")
     if [ -z "$_rc_a_sha" ] || [ -z "$_rc_a_digest" ]; then
       reason="anchor's tree-end: line could not be parsed — cannot verify the same-digest requirement"
     elif [ "$_rc_a_dirty" != no ]; then
