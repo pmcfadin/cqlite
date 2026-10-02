@@ -138,9 +138,16 @@ bytes for a plausible header.
 #### Scenario: L3.1 static no-resync-scan guard
 - **Given** `scripts/tests/test_verify_location_no_resync_scan.sh` (the gate's UNSCOPED
   `roborev-lints` component, so a `cqlite-core`-only diff cannot skip it — #4266)
-- **When** it greps `cqlite-core/src/storage/sstable/verify_location.rs` for `memchr`, `windows(`,
-  `find(|b|`, `position(|b|` outside `#[cfg(test)]`
-- **Then** none is present; any hit FAILs naming the line.
+- **When** it greps every PRODUCTION file of the `verify_location` module for `memchr`,
+  `windows(`, `find(|b|`, `position(|b|` outside `#[cfg(test)]`. The file set is DISCOVERED, not
+  hard-pinned to one name (roborev Medium #2): flat `verify_location*.rs` siblings AND, if it
+  exists, every `*.rs` under a `verify_location/` module directory — so a future campsite-rule
+  split cannot move code out from under the guard while it still reports "0 hits RECOGNISED".
+  `*_tests.rs` siblings and `*/tests/*` paths are excluded as test code.
+- **Then** none is present; any hit FAILs naming the line. A file set that resolves EMPTY (the
+  module renamed or moved away) is a REFUSAL, not a pass, and the `ok` line states how many
+  production files were scanned and names them — an affirmative count, so a guard that swept
+  nothing cannot read identically to one that swept everything and found nothing.
 
 ### Requirement: L4 — Additive report shape; the existing parity guard is unaffected
 

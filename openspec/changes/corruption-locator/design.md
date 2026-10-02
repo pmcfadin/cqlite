@@ -155,6 +155,11 @@ tables — never a byte-pattern search over `Data.db` looking for a plausible pa
 `scripts/tests/test_verify_location_no_resync_scan.sh` (registered in the gate's UNSCOPED
 `roborev-lints` component, modeled on `sstable-salvage`'s `test_salvage_no_resync_scan.sh` — but
 NOT in `tooling-tests`, which #4266 made diff-scoped over a path set that excludes
-`cqlite-core/**`, so a core-only diff would SKIP the guard there) greps
-`cqlite-core/src/storage/sstable/verify_location.rs` for `memchr`, `windows(`, `find(|b|`,
-`position(|b|` outside `#[cfg(test)]` and FAILs naming the line if any is found.
+`cqlite-core/**`, so a core-only diff would SKIP the guard there) greps every PRODUCTION file of
+the `verify_location` module for `memchr`, `windows(`, `find(|b|`, `position(|b|` outside
+`#[cfg(test)]` and FAILs naming the line if any is found. Its scope is DISCOVERED rather than
+pinned to one filename (roborev Medium #2) — flat `verify_location*.rs` siblings plus any
+`verify_location/` module directory — because `verify_location.rs` sits at exactly the 800-line
+threshold and was already split once during this change; a filename-pinned guard would have kept
+passing after the next split while covering none of the code that moved. An empty file set is a
+REFUSAL, and the pass line names the files scanned.
