@@ -1,0 +1,32 @@
+{
+  "input": "<input>/nb-1-big-Data.db",
+  "output": "<out>",
+  "format": "nb",
+  "compressed_input": true,
+  "requested": [
+    "filter",
+    "summary",
+    "crc"
+  ],
+  "regenerated": [
+    "filter",
+    "summary"
+  ],
+  "skipped_not_applicable": [
+    {
+      "component": "crc",
+      "reason": "compressed input uses inline chunk CRC, no CRC.db"
+    }
+  ],
+  "classification": {
+    "filter": {
+      "bloom_filter_fp_chance": "recovered"
+    },
+    "summary": {
+      "min_index_interval": "recomputed",
+      "sampling_level": "recovered"
+    }
+  },
+  "refused": null,
+  "rolled_back": false
+}

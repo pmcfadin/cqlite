@@ -938,3 +938,344 @@ fn verify_full_is_the_oracle_that_sees_a_broken_rebuilt_index() {
          strengthened to rely on it directly — update both together."
     );
 }
+
+// ---------------------------------------------------------------------------
+// R9.1 — committed expected manifests (tasks.md 4.4)
+// ---------------------------------------------------------------------------
+
+/// `cqlite-cli/tests/fixtures/rebuild/` — committed expected manifests + the
+/// one `--schema` input they need. See that directory's `README.md` for the
+/// normalisation contract.
+fn rebuild_fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rebuild")
+}
+
+fn expected_manifest(name: &str) -> serde_json::Value {
+    let path = rebuild_fixtures_dir().join(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "committed expected manifest {} is unreadable: {e} — this is a broken checkout, not \
+             an unfetched dataset",
+            path.display()
+        )
+    });
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()))
+}
+
+/// Normalise ONE manifest entry per the fixtures `README.md`: rewrite the two
+/// run-specific absolute paths to `<input>`/`<out>` placeholders (keeping the
+/// RELATIVE part, which is what R7.1's per-generation subdirectory contract is
+/// about) and remove `now`/`cqlite_version` after asserting each is present
+/// and well-formed. Every other field is compared verbatim.
+fn normalise_manifest_entry(
+    entry: &serde_json::Value,
+    input_root: &Path,
+    out_root: &Path,
+) -> serde_json::Value {
+    let serde_json::Value::Object(mut obj) = entry.clone() else {
+        panic!("a manifest entry must be a JSON object; got {entry}")
+    };
+
+    let placeholder = |field: &str, root: &Path, token: &str| -> serde_json::Value {
+        let raw = obj
+            .get(field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("manifest entry has no string `{field}`: {entry}"));
+        let path = Path::new(raw);
+        match path.strip_prefix(root) {
+            Ok(rest) if rest.as_os_str().is_empty() => serde_json::json!(token),
+            Ok(rest) => serde_json::json!(format!("{token}/{}", rest.display())),
+            Err(_) => panic!(
+                "manifest `{field}` ({raw}) is not under the expected root {} — the \
+                 normalisation would silently leave an absolute path in the comparison",
+                root.display()
+            ),
+        }
+    };
+    let input = placeholder("input", input_root, "<input>");
+    let output = placeholder("output", out_root, "<out>");
+    obj.insert("input".to_string(), input);
+    obj.insert("output".to_string(), output);
+
+    let now = obj
+        .remove("now")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("manifest entry has no string `now`: {entry}"));
+    assert!(
+        now.len() >= 20 && now.starts_with("20") && now.contains('T'),
+        "`now` must be an RFC3339 timestamp; got {now:?}"
+    );
+    let version = obj
+        .remove("cqlite_version")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("manifest entry has no string `cqlite_version`: {entry}"));
+    assert_eq!(
+        version.split('.').count(),
+        3,
+        "`cqlite_version` must be a <major>.<minor>.<patch> string; got {version:?}"
+    );
+
+    serde_json::Value::Object(obj)
+}
+
+/// Normalise a whole manifest — an ARRAY (table-dir input) or a single object
+/// (single-`Data.db` input), preserving the shape, which is itself part of the
+/// R7.1 contract.
+fn normalise_manifest(
+    manifest: &serde_json::Value,
+    input_root: &Path,
+    out_root: &Path,
+) -> serde_json::Value {
+    match manifest {
+        serde_json::Value::Array(entries) => serde_json::Value::Array(
+            entries
+                .iter()
+                .map(|e| normalise_manifest_entry(e, input_root, out_root))
+                .collect(),
+        ),
+        other => normalise_manifest_entry(other, input_root, out_root),
+    }
+}
+
+/// Assert the human TEXT rendering (always stderr, spec R9) really carries
+/// every list and `classification` entry the manifest declares — derived FROM
+/// the expected fixture, so the two can never drift apart.
+fn assert_text_renders_manifest(text: &str, expected: &serde_json::Value) {
+    let entries: Vec<&serde_json::Value> = match expected {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        other => vec![other],
+    };
+    for entry in entries {
+        if let Some(refusal) = entry["refused"].as_object() {
+            let reason = refusal["reason"].as_str().expect("refusal reason");
+            assert!(
+                text.contains(&format!("REFUSED: {reason}")),
+                "text must render the refusal reason {reason:?}; got:\n{text}"
+            );
+            assert!(
+                text.contains(refusal["remedy"].as_str().expect("remedy")),
+                "text must render the remedy verbatim; got:\n{text}"
+            );
+            if let Some(offset) = refusal["offset"].as_u64() {
+                assert!(
+                    text.contains(&format!("offset: {offset}")),
+                    "text must render the refusal offset {offset}; got:\n{text}"
+                );
+            }
+            continue;
+        }
+
+        // `regenerated` / `skipped_not_applicable` lists.
+        let regenerated: Vec<&str> = entry["regenerated"]
+            .as_array()
+            .expect("regenerated array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            text.contains(&format!("regenerated: {}", regenerated.join(", "))),
+            "text must render the regenerated list {regenerated:?}; got:\n{text}"
+        );
+        let skipped = entry["skipped_not_applicable"]
+            .as_array()
+            .expect("skipped array");
+        if skipped.is_empty() {
+            assert!(
+                text.contains("skipped_not_applicable: 0 RECOGNISED"),
+                "an empty skip list must be STATED (affirmative zero), not omitted; got:\n{text}"
+            );
+        } else {
+            for skip in skipped {
+                let line = format!(
+                    "  - {}: {}",
+                    skip["component"].as_str().expect("component"),
+                    skip["reason"].as_str().expect("reason")
+                );
+                assert!(
+                    text.contains(&line),
+                    "text must render the skipped entry {line:?}; got:\n{text}"
+                );
+            }
+        }
+
+        // Every per-field `classification` entry.
+        let classification = entry["classification"]
+            .as_object()
+            .expect("classification object");
+        if classification.is_empty() {
+            assert!(
+                text.contains("classification: 0 RECOGNISED"),
+                "an empty classification map must be STATED, not omitted; got:\n{text}"
+            );
+        } else {
+            for (component, fields) in classification {
+                assert!(
+                    text.contains(&format!("  {component}:")),
+                    "text must name the classified component {component:?}; got:\n{text}"
+                );
+                for (field, provenance) in fields.as_object().expect("field map") {
+                    let line = format!(
+                        "    {field}: {}",
+                        provenance.as_str().expect("provenance label")
+                    );
+                    assert!(
+                        text.contains(&line),
+                        "text must render the classification entry {line:?}; got:\n{text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// R9.1 — the R7.1 table-directory run's manifest deep-equals its committed
+/// expectation, and the stderr text rendering carries the same lists.
+#[test]
+fn table_dir_manifest_matches_committed_fixture() {
+    let temp = TempDir::new().expect("tempdir");
+    let input_root = multi_generation_table_dir(temp.path(), 2);
+    let schema = schemas_dir().join("compression-parity.cql");
+    let out = temp.path().join("out");
+    let manifest_path = temp.path().join("m.json");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        input_root.to_str().unwrap(),
+        "--components",
+        "digest,toc",
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        manifest_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let produced: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest is JSON");
+    let expected = expected_manifest("r7_1_table_dir_two_generations.json");
+    assert_eq!(
+        normalise_manifest(&produced, &input_root, &out),
+        expected,
+        "the produced manifest must deep-equal the committed expectation \
+         (cqlite-cli/tests/fixtures/rebuild/r7_1_table_dir_two_generations.json)"
+    );
+    assert_text_renders_manifest(&String::from_utf8_lossy(&output.stderr), &expected);
+}
+
+/// R9.1 — the R3.1/R3.2 classification case: the full per-field
+/// `classification` map AND a real `skipped_not_applicable` entry (`crc`
+/// against a compressed input), deep-equal to its committed expectation.
+#[test]
+fn classification_manifest_matches_committed_fixture() {
+    let temp = TempDir::new().expect("tempdir");
+    // Only the three components rebuild READS: Data.db, its CompressionInfo.db
+    // and the original Statistics.db (the authoritative EncodingStats
+    // baseline). Filter.db/Summary.db are deliberately absent — they are what
+    // this run regenerates.
+    let input_root = temp.path().join("input");
+    std::fs::create_dir_all(&input_root).expect("create input dir");
+    let src = resolve_committed_fixture(LZ4_TABLE_FIXTURE);
+    for name in [
+        "nb-1-big-Data.db",
+        "nb-1-big-CompressionInfo.db",
+        "nb-1-big-Statistics.db",
+    ] {
+        std::fs::copy(src.join(name), input_root.join(name))
+            .unwrap_or_else(|e| panic!("copy {name}: {e}"));
+    }
+    let schema = rebuild_fixtures_dir().join("lz4_table_with_fp_chance.cql");
+    let out = temp.path().join("out");
+    let manifest_path = temp.path().join("m.json");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        input_root.join("nb-1-big-Data.db").to_str().unwrap(),
+        "--table",
+        "lz4_table",
+        "--components",
+        "filter,summary,crc",
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        manifest_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a correctly skipped_not_applicable component must still exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let produced: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest is JSON");
+    let expected = expected_manifest("r3_classification_filter_summary_crc.json");
+    assert_eq!(
+        normalise_manifest(&produced, &input_root, &out),
+        expected,
+        "the produced manifest must deep-equal the committed expectation \
+         (cqlite-cli/tests/fixtures/rebuild/r3_classification_filter_summary_crc.json)"
+    );
+    assert_text_renders_manifest(&String::from_utf8_lossy(&output.stderr), &expected);
+    // R1.2: no CRC.db for a compressed input, ever.
+    assert!(
+        !out.join("nb-1-big-CRC.db").exists(),
+        "a skipped_not_applicable crc must leave no CRC.db behind"
+    );
+}
+
+/// R9.1 — the R7.2 refusal manifest deep-equals its committed expectation,
+/// remedy string and chunk offset included.
+#[test]
+fn refusal_manifest_matches_committed_fixture() {
+    let Some(input_root) = resolve_fixture_or_skip(CORRUPT_DATA_DB_FIXTURE) else {
+        eprintln!(
+            "[SKIP] corruption fixture {CORRUPT_DATA_DB_FIXTURE} unavailable (dataset not \
+             fetched)"
+        );
+        return;
+    };
+    let temp = TempDir::new().expect("tempdir");
+    let schema = schemas_dir().join("compression-parity.cql");
+    let out = temp.path().join("out");
+    let manifest_path = temp.path().join("m.json");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "rebuild",
+        input_root.join("nb-1-big-Data.db").to_str().unwrap(),
+        "--table",
+        "lz4_table",
+        "--components",
+        "index",
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        manifest_path.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "must exit 2 (refused)");
+
+    let produced: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest is JSON");
+    let expected = expected_manifest("r7_2_refused_data_corrupt.json");
+    assert_eq!(
+        normalise_manifest(&produced, &input_root, &out),
+        expected,
+        "the produced refusal manifest must deep-equal the committed expectation \
+         (cqlite-cli/tests/fixtures/rebuild/r7_2_refused_data_corrupt.json)"
+    );
+    assert_text_renders_manifest(&String::from_utf8_lossy(&output.stderr), &expected);
+}
