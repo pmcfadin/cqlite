@@ -21802,7 +21802,12 @@ run_tooling_tests() {
   # (never the network; mirrors test_agent_gate_delta.sh's own fixture pattern).
   # The one component ever actually dispatched for real is file-size (cargo-free);
   # a diff-eligibility case additionally dispatches dep-duplicates, which SKIPs
-  # fast in the fixture's minimal tree (no real Cargo.toml). A failure FAILs the
+  # (cause=guard-absent): run_dep_duplicates checks for
+  # scripts/ci/check-dep-duplicates.sh BEFORE ever invoking cargo, and
+  # build_fixture deliberately does not copy that guard into the fixture
+  # (job 118 roborev finding, Low — load-bearing for test_recertify.sh's R12c,
+  # which asserts the exact SKIP this produces; copying the guard in would
+  # change dep-duplicates' verdict and break that case). A failure FAILs the
   # component.
   echo ">>> [$name] bash scripts/tests/test_recertify.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_recertify.sh" >>"$log" 2>&1; then

@@ -268,6 +268,12 @@ build_fixture() {
   if [ -f "$REPO_ROOT/scripts/perf-capability.sh" ]; then
     cp "$REPO_ROOT/scripts/perf-capability.sh" "$repo/scripts/perf-capability.sh"
   fi
+  # scripts/ci/check-dep-duplicates.sh is DELIBERATELY NOT copied here (#4268
+  # job 118 roborev finding, Low): run_dep_duplicates checks for that guard's
+  # presence before ever invoking cargo and records SKIP (cause=guard-absent)
+  # when it's missing — R12c below asserts exactly that SKIP. Copying the
+  # guard in would let dep-duplicates actually run `cargo tree`, changing its
+  # verdict and breaking R12c.
   agent_gate_pin_canonical_remote "$repo/scripts/agent-gate.sh" "$repo.origin.git" || return 1
   agent_gate_install_components_manifest "$repo/scripts/agent-gate.sh" || return 1
   mkdir -p "$repo/cqlite-core/src" "$repo/scripts/tests"
@@ -785,9 +791,13 @@ else
 
     # R12: a component whose domain intersects the PR's own diff REFUSES, while a
     # component OUTSIDE that domain (dep-duplicates — a CARGO_ANY-only domain,
-    # excludes cqlite-core/src/**, and SKIPs fast in this minimal fixture with no
-    # real Cargo.toml: an "unmeasurable — cargo tree non-zero" state its OWN
-    # design treats as SKIP naming the cause, never a hang or a FAIL) is still
+    # excludes cqlite-core/src/**, and SKIPs in this fixture because
+    # build_fixture deliberately never copies scripts/ci/check-dep-duplicates.sh
+    # into it — run_dep_duplicates checks for that guard BEFORE ever invoking
+    # cargo and records SKIP (cause=guard-absent) when it's missing, never a
+    # hang or a FAIL; #4268 job 118 roborev finding, Low — R12c below depends
+    # on this exact cause, so copying the guard into the fixture would change
+    # dep-duplicates' verdict and break it) is still
     # ACCEPTED against the SAME diff. NOTE: tooling-tests is deliberately NOT
     # used for the "excluded" half here — --recertify reuses --only's dispatch,
     # and --only ALWAYS bypasses #4266's own tooling-tests scoping by design (a

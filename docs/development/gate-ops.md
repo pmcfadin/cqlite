@@ -1569,8 +1569,16 @@ on PASS, exit 2 on any preflight refusal (with a named `error:` line), exit 1 on
 
 **Record BOTH the anchor's full SUMMARY and this RECERT block in the PR** —
 same convention as `--delta`. `--recertify` is EXEMPT from the #1825 slot cap
-(it rides `--only`'s existing exemption) and from `apply_component_set_preflight`
-failing the run (advisory under `--only`, same as any other `--only` invocation).
+ONLY (it rides `--only`'s existing exemption there). `apply_component_set_preflight`
+is **STRICT** for it, not advisory: `_component_set_strict` (job 115 roborev
+finding, Medium) ORs in `[ "$RECERTIFY" -eq 1 ]` alongside the bare
+`[ -z "$ONLY" ]` test, at BOTH call sites — the mode-dispatch call (where
+`ONLY` is still empty, so it was already strict there by accident of
+ordering) and the post-`_tree_recapture_after_slot` call (where `ONLY` is
+now `$RECERT_COMPONENTS`, and `RECERTIFY` is the disjunct that keeps it
+strict rather than falling to the same ADVISORY wording a bare `--only` gets).
+A #3544 component-set skew therefore DOES fail a recert, same as the full
+gate and `--delta`.
 
 **It is NOT exempt from the FAIL-CLOSED pre-flights, because it reruns in
 FULL-GATE mode.** Riding `--only`'s dispatch means `ONLY` is non-empty during a
