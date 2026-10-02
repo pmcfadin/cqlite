@@ -2080,8 +2080,6 @@ assert_clean_tree() {
     "re-gateable, so an override could only buy a vacuous green."
 }
 
-# assert_pass_block <what>: the verdict half every accepted block must satisfy —
-# terminated, RESULT: PASS, tree-integrity: PASS, and not a nested sub-gate.
 # assert_pass_block <what> [require-result-pass=1]: the shared structural
 # checks every certifying block needs — unterminated, tree-integrity: PASS, no
 # nested-under: — PLUS, unless the caller passes 0 as the second argument, a
@@ -2179,8 +2177,14 @@ fi
 # Belt for the header separation above: the FULL gate emits NO `MODE:` line;
 # --lite and --delta each emit one naming themselves. (An `--only` run emits the
 # FULL markers with a LOWERCASE `mode: PARTIAL (--only …)` line, which this
-# case-sensitive check deliberately does NOT catch — that run is refused by the
-# `RESULT: PARTIAL` compare above, which is the property that matters.)
+# case-sensitive check deliberately does NOT catch. For every case BUT C that
+# is fine: a PASSing --only run's RESULT is promoted to PARTIAL, so the
+# `RESULT: PARTIAL` compare in assert_pass_block's default require_pass=1 path
+# refuses it. Case C's anchor is the ONE exception — its require_pass=0 accepts
+# a non-PASS RESULT by design (a recert anchor legitimately has RESULT: FAIL),
+# so a FAILING --only run's un-promoted `RESULT: FAIL` is NOT caught here or
+# there; the dedicated `GP_n_partial` check below, just inside the Case C body,
+# is what closes that gap — see its own comment for why.)
 if [ "$GP_n_mode" -ne 0 ]; then
   refuse_no_gate \
     "The full-gate block carries a MODE: line — the FULL gate emits none." \
@@ -2223,15 +2227,31 @@ if [ -n "$delta_file" ]; then
   # is the existing gate_parse_file/GP_blocks check inside the Case B/C bodies
   # below — not duplicated here. This loop only decides WHICH family to hand
   # off to, plus the full/lite counts a "neither" refusal names.
-  _delta_kind="" _delta_nfull=0 _delta_nlite=0
-  while IFS= read -r _delta_line || [ -n "$_delta_line" ]; do
-    case "$_delta_line" in
-      "==== AGENT-GATE RECERT SUMMARY ====") [ -z "$_delta_kind" ] && _delta_kind=recert ;;
-      "==== AGENT-GATE DELTA SUMMARY ====")  [ -z "$_delta_kind" ] && _delta_kind=delta ;;
-      "==== AGENT-GATE SUMMARY ====")      _delta_nfull=$((_delta_nfull + 1)) ;;
-      "==== AGENT-GATE LITE SUMMARY ====") _delta_nlite=$((_delta_nlite + 1)) ;;
-    esac
-  done <"$delta_file"
+  # awk, not a bare `case`/`read` loop (roborev finding, Medium): every OTHER
+  # reader of a summary block (`_gate_awk`, `_gate_component_rows`) normalizes
+  # ANSI escapes and a trailing CR before matching a marker line — a summary
+  # "RECOVERED FROM A COLOURED CAPTURE" or CRLF-terminated is a real, tested
+  # scenario (test_premerge_assert.sh Case 24). An exact whole-line `case`
+  # against the RAW bytes skips that normalization, so an ANSI-decorated or
+  # CRLF delta/recert summary would refuse here as "neither" before any
+  # tolerant reader got a chance. awk is NOT the tool this block avoids —
+  # only `grep` is (see the comment above, and the hardened no-grep fixtures
+  # at test_premerge_assert.sh:1672/3422); awk is already a hard dependency
+  # via `_gate_awk`/`_gate_component_rows`. `kind` prints as the literal
+  # `none` rather than empty so the bash `read` below cannot lose an empty
+  # first field to IFS whitespace-collapsing.
+  _delta_class=$(awk '
+    {
+      gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
+      sub(/\r$/, "")
+    }
+    $0 == "==== AGENT-GATE RECERT SUMMARY ====" { if (kind == "") kind = "recert" }
+    $0 == "==== AGENT-GATE DELTA SUMMARY ===="  { if (kind == "") kind = "delta" }
+    $0 == "==== AGENT-GATE SUMMARY ===="        { nfull++ }
+    $0 == "==== AGENT-GATE LITE SUMMARY ===="   { nlite++ }
+    END { printf "%s %d %d\n", (kind == "" ? "none" : kind), nfull, nlite }
+  ' "$delta_file") || refuse_tool_failure awk "fourth-argument kind classification"
+  read -r _delta_kind _delta_nfull _delta_nlite <<<"$_delta_class"
   case "$_delta_kind" in
     recert) case_kind=C; recert_file="$delta_file" ;;
     delta)  case_kind=B ;;

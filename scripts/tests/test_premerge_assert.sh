@@ -4371,6 +4371,30 @@ refused_recert "recert: the recert block's own named-component row is FAIL, not 
   "$ANCHOR_RECERT_FAIL" "$T/recert-row-not-pass.txt" \
   "reads 'FAIL', not PASS"
 
+# --- Case R18: the fourth-argument KIND classification tolerates the SAME
+# --- ANSI/CR decoration every other summary reader does (#4268 roborev
+# --- finding, Medium). It used to be a bare case/read loop against the raw
+# --- bytes, with none of _gate_awk/_gate_component_rows's gsub/sub
+# --- normalization — exactly the "RECOVERED FROM A COLOURED CAPTURE" shape
+# --- Case 24 (above) already proves the THIRD-argument path tolerates.
+ESC=$(printf '\033')
+sed -e "s/^${RECERT_S}\$/${ESC}[1m${RECERT_S}${ESC}[0m/" "$GOODRECERT" >"$T/recert-coloured.txt"
+assert_src_present_fixed \
+  "recert colour fixture: the fixture really does contain ANSI escapes" \
+  "recert colour fixture: expected ANSI escapes in the fixture" \
+  "$T/recert-coloured.txt" "$ESC"
+if run 0 "ANSI-coloured RECERT marker line -> still classified as recert -> exit 0" \
+  2421 "$CERTIFIED" "$ANCHOR_RECERT_FAIL" "$T/recert-coloured.txt"; then
+  ok "recert: the fourth-argument kind classification strips ANSI before matching (#4268 roborev finding, Medium)"
+fi
+
+CR=$(printf '\r')
+sed -e "s/^${RECERT_S}\$/${RECERT_S}${CR}/" "$GOODRECERT" >"$T/recert-crlf.txt"
+if run 0 "CRLF-terminated RECERT marker line -> still classified as recert -> exit 0" \
+  2421 "$CERTIFIED" "$ANCHOR_RECERT_FAIL" "$T/recert-crlf.txt"; then
+  ok "recert: the fourth-argument kind classification strips a trailing CR before matching (#4268 roborev finding, Medium)"
+fi
+
 # --- Case R12: usage is unchanged (still 3 or 4 args; recert never adds a 5th)
 if run 3 "usage: five arguments -> exit 3 (a recert pair is still exactly 4 args)" \
   2421 "$CERTIFIED" "$ANCHOR_RECERT_FAIL" "$GOODRECERT" extra; then
@@ -4422,7 +4446,13 @@ assert_src_absent_fixed \
 # presence, recert-components bounding, FAIL-attributability), same
 # measurement method, same host-invariance (no real-git/timeout/systemd
 # dependency — pure fixture text).
-CASE_FLOOR=244
+#
+# +6 for Cases R17-R18 (#4268 job-113/114 roborev round: the recert block's
+# OWN component rows must be measured and PASS — R17a-c, 3 `refused_recert`
+# arms — plus the fourth-argument kind classification's ANSI/CR tolerance —
+# R18, 2 `run`-wrapped cases + 1 `assert_src_present_fixed`), same
+# measurement method, same host-invariance.
+CASE_FLOOR=250
 TOTAL=$((PASS + FAIL))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
