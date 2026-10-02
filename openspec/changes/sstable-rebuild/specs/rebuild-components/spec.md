@@ -138,11 +138,17 @@ rebuilt Index.db is byte-identical to Cassandra's own.
 `recomputed`-valued component as byte-equal to an original that used a different value.
 
 #### Scenario: R3.1 bloom_filter_fp_chance recovered from schema
-- **Given** a committed table's schema `.cql` stating `WITH bloom_filter_fp_chance = 0.01` (matches
-  the fixture's actual write-time value), Filter.db deleted
+- **Given** a committed table's schema `.cql` stating a `bloom_filter_fp_chance` value, Filter.db
+  deleted
 - **When** rebuild regenerates `filter` with `--schema` pointing at that file
-- **Then** the rebuilt Filter.db is byte-identical to the original and
-  `classification.filter.bloom_filter_fp_chance == "recovered"`.
+- **Then** `classification.filter.bloom_filter_fp_chance == "recovered"`, and the rebuilt Filter.db
+  matches the original's membership (no false negatives for any key present) and `hash_count`.
+  **Full byte-identity is NOT claimed**: CQLite's `fp_chance -> hash_count` step selection disagrees
+  with Cassandra's own `BloomCalculations` table by one step (tracked separately as issue #4335,
+  out of scope for this change — rebuild drives the existing `FilterWriter`, it does not define the
+  bloom spec), and the filter's bit-array size additionally depends on
+  compaction-inherited `estimatedKeys`, not a recount of Data.db's final partition set
+  (`cqlite-core/tests/issue_4197_rebuild_summary_classification.rs`).
 
 #### Scenario: R3.2 min_index_interval cannot be recovered today — documented, not silently wrong
 - **Given** a schema constructed in-test with a non-default `min_index_interval` WITH-clause value
