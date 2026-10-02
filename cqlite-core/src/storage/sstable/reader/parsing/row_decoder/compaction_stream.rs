@@ -378,6 +378,30 @@ impl CompactionPartitionState {
         }
     }
 
+    /// Whether the CURRENT partition's header has already been parsed — i.e.
+    /// whether the driver's window front points at a partition HEADER (`false`)
+    /// or into a partition BODY (`true`).
+    ///
+    /// Read by the partition-BOUNDARY enumeration walk (issue #4197,
+    /// `SSTableReader::distinct_partition_keys_with_positions`): the `false ->
+    /// true` transition across ONE
+    /// [`V5CompressedLegacyParser::stream_partition_body_incremental`] call is
+    /// the authoritative signal that a new partition started at exactly the
+    /// window-front offset the caller recorded BEFORE that call — the streaming
+    /// equivalent of the buffered
+    /// `parse_block_for_compaction_emit_with_offset`'s `partition_start`, with
+    /// no byte pattern inspected to find it (issue #28).
+    pub(crate) fn header_parsed(&self) -> bool {
+        self.header_parsed
+    }
+
+    /// The CURRENT partition's key, as decoded from its header. Meaningful only
+    /// while [`Self::header_parsed`] is `true`; a fresh/reset state carries an
+    /// empty placeholder key, never a stale one.
+    pub(crate) fn partition_key(&self) -> &RowKey {
+        &self.partition_key
+    }
+
     /// Reset to await the next partition header (after an END_OF_PARTITION or a
     /// terminal trailing partition).
     fn reset(&mut self) {
