@@ -531,16 +531,16 @@ pub fn resolve_partitions(
             .get(i + 1)
             .map(|(next_start, _)| *next_start)
             .unwrap_or(logical_len);
-        // `end >= *start` for EVERY entry now that the bounds check above has
-        // run: non-last entries take `end` from their successor, and the
-        // input is sorted ascending; the last takes `logical_len`, which the
-        // check proved is strictly greater. So the `.max(*start)` clamp is no
-        // longer load-bearing — it was what silently converted a corrupt BIG
-        // entry into an empty extent (roborev blocker #2). It is kept only as
-        // a non-panicking release fallback for the BTI arm, whose leaves are
-        // not yet validated this way (that is blocked on an owner decision on
-        // the BTI resolution-state machinery); the assertion states the
-        // invariant the BIG path now guarantees.
+        // `end >= *start` for EVERY entry, on BOTH arms — so `.max(*start)` is
+        // UNREACHABLE and no longer load-bearing (it was what silently turned a
+        // corrupt BIG entry into an empty extent, blocker #2). BIG: strict
+        // ascent is enforced by `first_order_violation` and the last entry by
+        // the bounds check above. BTI: a `Trusted` source is now CORROBORATED
+        // (#4194 option (a)), and corroboration requires every leaf's
+        // `data_position` to be a DECODED PARTITION START carrying the matching
+        // key, so positions are real and distinct. Kept purely as a
+        // non-panicking release fallback — dropping it would let a future
+        // invariant break compute a reversed range silently instead.
         debug_assert!(
             end >= *start,
             "boundary entry {i} has extent end {end} below its start {start}; the bounds \
