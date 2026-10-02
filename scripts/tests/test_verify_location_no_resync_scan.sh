@@ -193,7 +193,7 @@ if [ "$hits" -gt 0 ]; then
   exit 1
 fi
 
-echo "ok   - $scanned production file(s) scanned ($(echo "$scanned_names" | sed 's/^ //')), \
+echo "ok   - $scanned production file(s) scanned (${scanned_names# }), \
 0 byte-pattern-search hit(s) RECOGNISED outside tests, $allowed line(s) RECOGNISED as \
 no-resync-scan-allow (spec L3)"
 exit 0
