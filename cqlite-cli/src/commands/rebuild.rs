@@ -383,6 +383,45 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
                 written_out_dirs.push(out_dir);
             }
             Err(e) => {
+                // roborev job 130 (Medium): this arm used to just print and exit,
+                // leaving every EARLIER generation's fully-written output under
+                // `--out` and writing no manifest at all. That breaks the same
+                // "a refused run leaves --out empty" contract the `refused` branch
+                // above honors, and spec R7.3's non-empty-`--out` refusal then
+                // blocks a re-run with no hint about the orphan. Roll back exactly
+                // like a refusal: remove every prior generation's out_dir, mark
+                // those reports `rolled_back`, and remove this generation's own
+                // out_dir too (rebuild_components may have `create_dir_all`'d it
+                // before hitting this error).
+                for written in &written_out_dirs {
+                    if let Err(rm_err) = std::fs::remove_dir_all(written) {
+                        eprintln!(
+                            "cqlite rebuild: failed to roll back {} after a later \
+                             generation's error: {rm_err} — remove it manually before \
+                             re-running",
+                            written.display()
+                        );
+                    }
+                }
+                if let Err(rm_err) = std::fs::remove_dir_all(&out_dir) {
+                    // ENOENT is expected whenever rebuild_components failed before
+                    // ever creating out_dir; anything else is worth naming.
+                    if rm_err.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!(
+                            "cqlite rebuild: failed to remove {} after this generation's \
+                             error: {rm_err} — remove it manually before re-running",
+                            out_dir.display()
+                        );
+                    }
+                }
+                let rolled_back = written_out_dirs.len();
+                for report in reports.iter_mut().take(rolled_back) {
+                    report.mark_rolled_back();
+                }
+                let is_table_dir = args.input.is_dir();
+                if let Err(write_err) = render_and_write_reports(&reports, is_table_dir, args) {
+                    eprintln!("cqlite rebuild: failed to write report: {write_err:#}");
+                }
                 eprintln!("cqlite rebuild: {e}");
                 std::process::exit(1);
             }
