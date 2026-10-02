@@ -56,6 +56,26 @@ Deviation from this requirement's original draft (roborev round-3 MEDIUM finding
   ("no new boundary-source primitive for BTI … the existing full trie walk is reused as-is").
   Tracked as a follow-up rather than implemented in this change.
 
+#### DECLARED GAP — L1's `Resolved` outcome is NOT reachable for BTI (owner ruling, option (a))
+- **Ruling** (issue #4194, 2026-10-02): where a BTI boundary source cannot be corroborated, the tool
+  fails closed rather than presenting an uncorroborated set as `Resolved` — option (a) of three,
+  chosen over narrowing this requirement's wording (option (c)). The cost was explicit and disclosed
+  when the option was chosen: it removes the only BTI-`Resolved` case entirely.
+- **Measured directly** — the loss is UNIVERSAL, not an occasional corner case. Every real BTI
+  `PendingLocation`-producing corruption also fails the read path's own CRC check, so
+  `bti_partition_identity_mismatch` (the sole corroborating cross-check) can never succeed for a
+  genuinely corrupted BTI location; an attempt to construct a counterexample produced none.
+  `location.partitions` is therefore always `Unresolved` for BTI.
+- **Consequence for this requirement**: L1's SHALL is worded format-agnostically, but its `Resolved`
+  outcome is satisfied on BIG only — scenarios L1.1–L1.3 are BIG fixtures throughout (`lz4_table`,
+  `uncompressed_table`, `data_db_truncation`, all via `Index.db`). No scenario asserts a
+  BTI-`Resolved` outcome, so the requirement's acceptance criteria remain satisfiable as written;
+  what is NOT reachable is the BTI half of its prose promise. §L2's `Unresolved`
+  ("boundary-source-unreadable") path carries BTI instead, consistent with §D2's preference for a
+  refused answer over a confident wrong one.
+- Restoring a corroborated BTI-`Resolved` path is tracked as follow-up **#4337** (milestone 0.19),
+  rather than implemented in this change.
+
 ### Requirement: L2 — A damaged boundary source poisons every location, never a guess
 
 Every OTHER finding's `location.partitions` SHALL be `Unresolved("boundary-source-unreadable")` — never omitted, left empty, or populated from a plausible-looking scan — whenever the report casts doubt on the format's boundary source. Trust is withdrawn on a UNION of two signals, never either alone:
