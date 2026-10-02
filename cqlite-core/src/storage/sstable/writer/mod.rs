@@ -101,7 +101,7 @@ pub use index_writer::{
 #[cfg(all(test, feature = "write-support"))]
 pub(crate) use index_writer::serialize_promoted_index_for_test;
 #[cfg(feature = "write-support")]
-pub use stats_writer::{StatisticsMetadata, StatisticsWriter};
+pub use stats_writer::{EncodingStatsBaseline, StatisticsMetadata, StatisticsWriter};
 #[cfg(feature = "write-support")]
 pub use summary_writer::SummaryWriter;
 #[cfg(feature = "write-support")]

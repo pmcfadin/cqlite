@@ -238,20 +238,29 @@ async fn statistics_recompute_partition_count_matches_golden() {
             "field {field}, report={report:?}"
         );
     }
-    // The three MINIMA are the `SerializationHeader.EncodingStats` baseline
-    // itself, taken verbatim from this generation's own (still readable)
-    // `Statistics.db` rather than re-derived from the decoded content —
-    // issue #4197's F1 fix, spec R2/R4.1. `recovered`, not `recomputed`:
-    // the baseline is NOT bounded above by the file's own content (Cassandra
-    // carries it forward from compaction inputs), so a derivation could only
-    // ever come out too high and silently narrow every VInt delta.
+    // The three STATS MINIMA are a fold over the decoded content, exactly
+    // like the maxima — `recomputed` (issue #4197 roborev job 124). They are
+    // NOT the `SerializationHeader.EncodingStats` baseline: that is a
+    // different Cassandra value, merged forward from compaction INPUTS
+    // (`EncodingStats.merge`, `cassandra-5.0.8`) and therefore not bounded
+    // above by this file's own content, which is why it must be RECOVERED
+    // rather than derived (spec R2/R4.1). Its provenance is reported under
+    // its own key, asserted next.
     for field in ["min_timestamp", "min_local_deletion_time", "min_ttl"] {
         assert_eq!(
             classification.get(field).map(String::as_str),
-            Some("recovered"),
+            Some("recomputed"),
             "field {field}, report={report:?}"
         );
     }
+    assert_eq!(
+        classification
+            .get("encoding_stats_baseline")
+            .map(String::as_str),
+        Some("recovered"),
+        "the regenerated SerializationHeader's EncodingStats baseline came verbatim from this \
+         generation's own still-readable Statistics.db; report={report:?}"
+    );
     for field in ["origin_host", "compaction_ancestry"] {
         assert_eq!(
             classification.get(field).map(String::as_str),

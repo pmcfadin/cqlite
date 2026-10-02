@@ -231,36 +231,58 @@ pub(super) fn write_statistics_component(
     }
     // The six timestamp/TTL/local-deletion-time aggregates are exactly as
     // trustworthy as the delta-encoding baseline they are measured against
-    // (issue #4197, spec R4.1):
+    // (issue #4197, spec R4.1) — but they are NOT that baseline:
     //
-    //   * baseline RECOVERED — the three MINIMA are the original header's own
-    //     bytes, carried through verbatim (`recovered`); the three MAXIMA are
-    //     a genuine fold over correctly-decoded content (`recomputed`).
+    //   * baseline RECOVERED — all six are a genuine fold over
+    //     correctly-decoded content (`recomputed`). The three MINIMA were
+    //     labelled `recovered` here until issue #4197's roborev job 124,
+    //     which was wrong in BOTH directions: `StatsMetadata`'s minima are
+    //     Cassandra's `MetadataCollector` fold over the cells and tombstones
+    //     actually WRITTEN, while the recovered value is
+    //     `SerializationHeader.EncodingStats` — merged forward from
+    //     compaction INPUTS (`EncodingStats.merge`, `cassandra-5.0.8`) and so
+    //     legitimately LOWER than any row in the file. Labelling the fold
+    //     `recovered` claimed a verbatim copy that is true of the header and
+    //     false of STATS; the code behind it also wrote the baseline INTO the
+    //     STATS minima. `encoding_stats_baseline` below is where the recovered
+    //     provenance is now reported, because the header is what actually
+    //     carries that value.
     //   * baseline LOST — Data.db stores these fields as UNSIGNED DELTAS
     //     against the very value that is missing, so decoding them requires
-    //     GUESSING the baseline first — the fold below still runs and
-    //     produces real, non-sentinel numbers (PASS 1's decode-derived
-    //     minima, PASS 2's genuine per-partition maxima), but they are
-    //     absolute values reconstructed from a circular guess, not the
-    //     file's true ones. All six are `lost` and NAMED so — plausible
-    //     numbers, not sentinels, is exactly why they cannot be dressed up
-    //     as `recomputed` (which this crate's own `FieldProvenance` defines
-    //     as "derived from Data.db alone … never a guess").
-    let minima_provenance = baseline_provenance;
-    let maxima_provenance = match baseline_provenance {
+    //     GUESSING the baseline first — the fold still runs and produces
+    //     real, non-sentinel numbers, but they are absolute values
+    //     reconstructed from a circular guess, not the file's true ones. All
+    //     six are `lost` and NAMED so — plausible numbers, not sentinels, is
+    //     exactly why they cannot be dressed up as `recomputed` (which this
+    //     crate's own `FieldProvenance` defines as "derived from Data.db alone
+    //     … never a guess").
+    let aggregate_provenance = match baseline_provenance {
         FieldProvenance::Recovered => FieldProvenance::Recomputed,
         other => other,
     };
-    for (field, provenance) in [
-        ("min_timestamp", minima_provenance),
-        ("min_local_deletion_time", minima_provenance),
-        ("min_ttl", minima_provenance),
-        ("max_timestamp", maxima_provenance),
-        ("max_local_deletion_time", maxima_provenance),
-        ("max_ttl", maxima_provenance),
+    for field in [
+        "min_timestamp",
+        "min_local_deletion_time",
+        "min_ttl",
+        "max_timestamp",
+        "max_local_deletion_time",
+        "max_ttl",
     ] {
-        fields.insert(field.to_string(), provenance.manifest_label().to_string());
+        fields.insert(
+            field.to_string(),
+            aggregate_provenance.manifest_label().to_string(),
+        );
     }
+    // The regenerated SERIALIZATION_HEADER's own `EncodingStats` triple —
+    // `recovered` when it came verbatim from the original header (the only
+    // authoritative record of what the UNCHANGED Data.db was delta-encoded
+    // against), `lost` when that file was unreadable and the circular
+    // decode-derivation stood in. Reported under the same name the `index`
+    // component uses for the same value.
+    fields.insert(
+        "encoding_stats_baseline".to_string(),
+        baseline_provenance.manifest_label().to_string(),
+    );
     for field in ["repaired_at", "pending_repair", "is_transient"] {
         fields.insert(
             field.to_string(),

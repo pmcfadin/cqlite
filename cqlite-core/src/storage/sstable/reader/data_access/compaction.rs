@@ -897,7 +897,11 @@ impl SSTableReader {
             // parsed and then had its tombstone carrier BREAK the scan
             // (`PartitionStreamStep::Break`) is still a real on-disk partition
             // the walk must not lose.
-            observer.note_if_partition_started(was_header_parsed, structure_start, partition_state)?;
+            observer.note_if_partition_started(
+                was_header_parsed,
+                structure_start,
+                partition_state,
+            )?;
             match step {
                 // A confirmed mid-partition structure: advance the cursor over
                 // exactly the bytes it consumed (issue #1589: NO memmove here —

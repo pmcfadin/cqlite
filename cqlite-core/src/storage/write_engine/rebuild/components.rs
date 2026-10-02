@@ -302,6 +302,31 @@ pub(crate) async fn rebuild_components_capturing_stats(
     // either — but "not recovered" is the truthful state to sit in, not
     // "recovered".
     let mut baseline_provenance = FieldProvenance::Lost;
+    // The `SerializationHeader.EncodingStats` baseline, kept STRICTLY SEPARATE
+    // from `stats_acc`'s `min_timestamp`/`min_local_deletion_time`/`min_ttl`
+    // (issue #4197 roborev job 124). In Cassandra these are two different
+    // values — the baseline is merged forward from compaction INPUTS
+    // (`EncodingStats.merge`, `cassandra-5.0.8`) and can sit strictly below
+    // anything in this file's own rows, while `StatsMetadata`'s minima are
+    // folded from the cells and tombstones actually WRITTEN
+    // (`MetadataCollector`). Writing the recovered baseline into `stats_acc`
+    // also pre-seeded the STATS minima, so `update_timestamp`'s `min()` could
+    // never raise them back to what PASS 2 actually decodes: a
+    // compaction-produced input's regenerated `Statistics.db` then claimed, as
+    // its own minimum, a timestamp no row in it carries — labelled `recovered`,
+    // which is true of the header and false of STATS.
+    //
+    // This value feeds exactly two things: the scratch `DataWriter`'s
+    // delta-encoding seed (`baseline_seed` below) and, through
+    // `StatisticsMetadata::encoding_stats_baseline`, the regenerated
+    // SERIALIZATION_HEADER. The sentinel triple is the "nothing recovered"
+    // state the header serializer already normalises to Cassandra's
+    // epoch/`LIVE` baselines.
+    let mut encoding_baseline = crate::storage::sstable::writer::EncodingStatsBaseline {
+        min_timestamp: i64::MAX,
+        min_local_deletion_time: i32::MAX,
+        min_ttl: i32::MAX,
+    };
 
     if needs_partition_pass {
         let scan_cancel = ScanCancel::new();
@@ -371,18 +396,25 @@ pub(crate) async fn rebuild_components_capturing_stats(
                 // it would leave the UNCHANGED Data.db delta-decoding against
                 // a baseline it was never encoded with.
                 Some(b) => {
-                    stats_acc.min_timestamp = b.min_timestamp;
-                    stats_acc.min_local_deletion_time = b.min_local_deletion_time;
-                    stats_acc.min_ttl = b.min_ttl;
+                    encoding_baseline.min_timestamp = b.min_timestamp;
+                    encoding_baseline.min_local_deletion_time = b.min_local_deletion_time;
+                    encoding_baseline.min_ttl = b.min_ttl;
                     baseline_provenance = FieldProvenance::Recovered;
                 }
                 None => {
-                    stats_acc.min_timestamp = baseline_min_ts;
-                    stats_acc.min_local_deletion_time = baseline_min_ldt;
-                    stats_acc.min_ttl = baseline_min_ttl;
+                    encoding_baseline.min_timestamp = baseline_min_ts;
+                    encoding_baseline.min_local_deletion_time = baseline_min_ldt;
+                    encoding_baseline.min_ttl = baseline_min_ttl;
                     baseline_provenance = FieldProvenance::Lost;
                 }
             }
+            // The regenerated SERIALIZATION_HEADER must carry THIS baseline
+            // verbatim — the UNCHANGED `Data.db` delta-decodes against it —
+            // while `stats_acc`'s own minima stay untouched (still the
+            // `i64::MAX`/`i32::MAX` "nothing folded yet" sentinels) so PASS 2's
+            // per-partition fold below establishes them from the rows it
+            // actually decodes.
+            stats_acc.encoding_stats_baseline = Some(encoding_baseline);
         }
         // NO `first_key`/`last_key` pre-seed from `entries` here (issue
         // #4197 F6): `entries` is the RAW boundary walk, which includes
@@ -460,10 +492,15 @@ pub(crate) async fn rebuild_components_capturing_stats(
         let sample_interval = (min_interval as usize).max(1);
 
         let section_len = partition_section_len(&reader, data_db_path)?;
+        // The scratch re-encode's delta-encoding seed is the ENCODING baseline
+        // (PASS 0's recovered header value, or the derived fallback), NEVER
+        // `stats_acc`'s content minima — which at this point are still
+        // unfolded sentinels, and after PASS 2 are a different quantity
+        // entirely (see `encoding_baseline`'s declaration).
         let baseline_seed = StatisticsMetadata {
-            min_timestamp: stats_acc.min_timestamp,
-            min_ttl: stats_acc.min_ttl,
-            min_local_deletion_time: stats_acc.min_local_deletion_time,
+            min_timestamp: encoding_baseline.min_timestamp,
+            min_ttl: encoding_baseline.min_ttl,
+            min_local_deletion_time: encoding_baseline.min_local_deletion_time,
             ..StatisticsMetadata::default()
         };
         let schema_has_static = schema.columns.iter().any(|c| c.is_static);
@@ -769,3 +806,11 @@ pub(crate) async fn rebuild_components_capturing_stats(
 #[cfg(test)]
 #[path = "components_keyrange_tests.rs"]
 mod keyrange_tests;
+
+// `StatsMetadata` minima vs `SerializationHeader.EncodingStats` — two
+// Cassandra values rebuild must keep apart (roborev job 124). In-crate because
+// the `nb` STATS minima are not readable back through any public API; see the
+// module doc.
+#[cfg(test)]
+#[path = "stats_baseline_tests.rs"]
+mod stats_baseline_tests;
