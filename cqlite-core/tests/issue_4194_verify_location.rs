@@ -34,7 +34,7 @@ use std::sync::Arc;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
     format_location, verify_sstable, PartitionResolution, PhysicalAnchor, VerifyErrorClass,
-    VerifyMode, MAX_RESOLVED_KEYS,
+    VerifyMode, BTI_IDENTITY_UNCORROBORATED, MAX_RESOLVED_KEYS,
 };
 use cqlite_core::Config;
 
@@ -783,14 +783,13 @@ fn oracle_bti_rows_offset_positions(
 }
 
 #[tokio::test]
-async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
+async fn bti_compressed_chunk_crc_flip_refuses_uncorroborated_rows_offset_leaves() {
     let clean = committed_clean_source_dir("test_da", "wide_table");
     if !clean.join("da-2-bti-CompressionInfo.db").is_file() {
-        // roborev round-4 MEDIUM finding: this is the ONLY case covering a
-        // BTI `Resolved` location (L2.2 covers only `Unresolved`; L1.4 is a
-        // declared gap) — under CQLITE_REQUIRE_FIXTURES=1 this whole branch
-        // must hard-fail, not silently vanish behind a green suite, matching
-        // every other gate in this file (#1094 doctrine).
+        // Under CQLITE_REQUIRE_FIXTURES=1 this branch must hard-fail rather
+        // than silently vanish behind a green suite (#1094 doctrine). It no
+        // longer covers a BTI `Resolved` (see the assertion below); the
+        // corroborated path is pinned at the seam in `verify_tests.rs`.
         assert!(
             !require_fixtures(),
             "CQLITE_REQUIRE_FIXTURES=1 but wide_table is not compressed (no CompressionInfo.db)"
@@ -843,7 +842,32 @@ async fn bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves() {
         .expect("ChunkDecompressionError finding must carry a location");
     assert_eq!(loc.component, "Data.db");
     assert_eq!(loc.chunk_index, Some(0));
-    assert_eq!(resolved_keys(&loc.partitions), expected);
+    // OUTCOME FLIPPED BY THE OWNER'S RULING on blocker #1 (option (a), fail
+    // closed, 2026-10-02). This test previously asserted `Resolved(expected)`
+    // and the flip is the POINT, not a regression: the Data.db bit flip makes
+    // `full_row_scan_partitions` fail, so the FULL-mode identity cross-check
+    // never runs, so nothing ever confirmed that these leaves' payloads name
+    // the partitions Data.db actually holds. A corruption that keeps a leaf's
+    // prefix while rewriting its payload would have resolved to the WRONG key
+    // here with full confidence.
+    //
+    // Kept (renamed) rather than deleted because it documents the exact
+    // mechanism: `RowsOffset` leaves carry their raw key INLINE, so the old
+    // `Resolved` did not even need the scan's position map — which is
+    // precisely why the absence of corroboration was invisible.
+    //
+    // `expected` is still computed from the clean fixture's own
+    // `Partitions.db`/`Rows.db` and asserted non-empty above, so this is an
+    // affirmative refusal of a REAL intersecting leaf set, never a vacuous
+    // refusal of nothing.
+    assert_eq!(
+        loc.partitions,
+        PartitionResolution::Unresolved(BTI_IDENTITY_UNCORROBORATED.to_string()),
+        "an uncorroborated BTI trie must refuse by name; the {} partition(s) the oracle \
+         independently found intersecting chunk 0 are exactly what a confident wrong answer \
+         would have reported",
+        expected.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
