@@ -707,9 +707,14 @@ pub(crate) async fn rebuild_components_capturing_stats(
                 "min_index_interval".to_string(),
                 min_interval_provenance.manifest_label().to_string(),
             );
+            // roborev finding (Medium): `write_header` unconditionally emits the
+            // hardcoded `BASE_SAMPLING_LEVEL` constant (summary_writer.rs) — nothing
+            // reads the original Summary.db's actual value, so this is wrong for any
+            // generation Cassandra downsampled (`IndexSummaryManager`, level < 128).
+            // `Recomputed` is the honest label, same as `min_index_interval` above.
             fields.insert(
                 "sampling_level".to_string(),
-                FieldProvenance::Recovered.manifest_label().to_string(),
+                FieldProvenance::Recomputed.manifest_label().to_string(),
             );
             report.classification.insert("summary".to_string(), fields);
         }

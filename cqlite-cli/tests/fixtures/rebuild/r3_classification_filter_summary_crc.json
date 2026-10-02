@@ -24,7 +24,7 @@
     },
     "summary": {
       "min_index_interval": "recomputed",
-      "sampling_level": "recovered"
+      "sampling_level": "recomputed"
     }
   },
   "refused": null,

@@ -244,11 +244,13 @@ async fn min_index_interval_is_recomputed_and_differs_from_a_non_default_origina
         Some("recomputed"),
         "report={report:?}"
     );
-    // R3.3 — sampling_level is always `recovered` (the freshly-rebuilt
-    // Summary.db is never a downsampled one).
+    // R3.3 — sampling_level is `recomputed`: `SummaryWriter::write_header`
+    // unconditionally emits the hardcoded `BASE_SAMPLING_LEVEL` constant, never
+    // the original Summary.db's actual (possibly downsampled) value (roborev
+    // job 130 Medium finding).
     assert_eq!(
         summary_fields.get("sampling_level").map(String::as_str),
-        Some("recovered"),
+        Some("recomputed"),
         "report={report:?}"
     );
 

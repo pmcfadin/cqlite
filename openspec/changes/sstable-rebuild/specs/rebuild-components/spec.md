@@ -160,12 +160,14 @@ rebuilt Index.db is byte-identical to Cassandra's own.
   bytes DIFFER from the original at that value — proving the gap is disclosed, never masked
   (`cqlite-core/tests/issue_4197_rebuild_summary_classification.rs`).
 
-#### Scenario: R3.3 sampling_level always recovered
+#### Scenario: R3.3 sampling_level is always recomputed at the hardcoded default
 - **Given** any Summary.db rebuild (R3.1 or R3.2's fixtures)
 - **When** it runs
-- **Then** `sampling_level` in the output is `BASE_SAMPLING_LEVEL` (128), matching every
-  freshly-written (never-downsampled) Cassandra Summary.db, and
-  `classification.summary.sampling_level == "recovered"`.
+- **Then** `sampling_level` in the output is `BASE_SAMPLING_LEVEL` (128) — correct for a
+  never-downsampled Cassandra Summary.db but WRONG for one Cassandra's `IndexSummaryManager`
+  downsampled (level < 128), since nothing reads the original's actual value — and
+  `classification.summary.sampling_level == "recomputed"` (roborev job 130 Medium finding:
+  this was mislabelled `recovered`, same class of bug as `min_index_interval` already avoids).
 
 ### Requirement: R4 — Statistics.db rebuild is opt-in, and every field is classified recovered/recomputed/lost
 
