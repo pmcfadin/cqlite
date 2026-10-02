@@ -195,3 +195,112 @@ async fn rebuild_digest_and_crc_byte_parity_uncompressed() {
     )
     .await;
 }
+
+/// R1.2's BTI half — `crc` AND `summary` against a `da` input must land in
+/// `skipped_not_applicable` with the BTI-specific reason, never in
+/// `regenerated`, and no file may be written for either; the
+/// format-agnostic `digest`/`toc` must still regenerate normally.
+///
+/// The BTI branch of that skip decision (`components.rs`'s
+/// `Component::Crc if is_bti`) is distinct from the compressed-input branch
+/// immediately below it, and this fixture is ALSO compressed — so asserting
+/// the REASON text (not merely that a skip happened) is what proves the BTI
+/// arm fired rather than the compressed one.
+#[tokio::test]
+async fn rebuild_crc_and_summary_not_applicable_to_bti_input() {
+    const KEYSPACE: &str = "test_da";
+    const TABLE: &str = "simple_table";
+
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE) else {
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but {KEYSPACE}.{TABLE} is absent; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE)
+            );
+        }
+        eprintln!("[issue_4197] {KEYSPACE}.{TABLE} fixture absent; skipping");
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE}: no usable generation directory"));
+
+    let schema = table_schema("da-test.cql", TABLE, KEYSPACE);
+    let temp = TempDir::new().expect("tempdir");
+    let working = copy_fixture_dir(&fixture_dir, temp.path());
+    let data_db = single_data_db(&working);
+    let out = temp.path().join("out");
+    let options = RebuildOptions {
+        out_dir: out.clone(),
+        statistics_recovery_source: None,
+    };
+    let report = rebuild_components(
+        &data_db,
+        &schema,
+        &[
+            Component::Crc,
+            Component::Summary,
+            Component::Digest,
+            Component::Toc,
+        ],
+        &options,
+    )
+    .await
+    .expect("rebuild_components must succeed on a healthy BTI fixture");
+    assert!(
+        report.refused.is_none(),
+        "{KEYSPACE}.{TABLE}: healthy BTI fixture rebuild refused: {:?}",
+        report.refused
+    );
+    assert_eq!(
+        report.format, "da",
+        "the manifest must report the BTI format for a `da` input; report={report:?}"
+    );
+
+    for (component, file, expected_reason) in [
+        ("crc", "CRC.db", "BTI (`da`) has no CRC.db"),
+        ("summary", "Summary.db", "BTI (`da`) has no Summary.db"),
+    ] {
+        let skip = report
+            .skipped_not_applicable
+            .iter()
+            .find(|s| s.component == component)
+            .unwrap_or_else(|| {
+                panic!("{component} must be skipped_not_applicable for a BTI input; {report:?}")
+            });
+        assert!(
+            skip.reason.contains(expected_reason),
+            "{component}'s skip reason must name the BTI format (not the compressed-input \
+             branch, which this fixture would ALSO match): got {:?}",
+            skip.reason
+        );
+        assert!(
+            !report.regenerated.iter().any(|c| c == component),
+            "{component} must never appear in `regenerated` for a BTI input; {report:?}"
+        );
+        assert!(
+            !component_exists(&out, file),
+            "no {file} may be written for a BTI input"
+        );
+    }
+
+    for component in ["digest", "toc"] {
+        assert!(
+            report.regenerated.iter().any(|c| c == component),
+            "the format-agnostic {component} must still regenerate for a BTI input; {report:?}"
+        );
+    }
+    let original_digest = read_component(&fixture_dir, "Digest.crc32");
+    let rebuilt_digest = read_component(&out, "Digest.crc32");
+    assert_eq!(
+        original_digest, rebuilt_digest,
+        "{KEYSPACE}.{TABLE}: a BTI input's Digest.crc32 is still a pure function of Data.db's \
+         bytes and must rebuild byte-identical"
+    );
+
+    eprintln!(
+        "[issue_4197] {KEYSPACE}.{TABLE} (BTI `da`): crc/summary correctly \
+         skipped_not_applicable, digest byte-identical."
+    );
+}
