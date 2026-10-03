@@ -4445,7 +4445,40 @@ else
     bad "1699-r30-preflight-halves: the fixture preflight no longer checks both halves — the real-fixture test returns early on a missing Statistics.db too, so the lane would report a green over skipped coverage (#3220)"
   fi
   # FULL gate only, spelled the way this script spells it: --only and --lite are probes.
+  # Since #4268 the gating idiom is the `_gate_is_strict` PREDICATE, not the bare
+  # `[ -z "$ONLY" ] && [ "$LITE" -eq 0 ]` (--recertify reuses --only's dispatch, so the
+  # bare idiom would read a recert as LENIENT and skip this preflight). Accept EITHER
+  # form -- but when it is the predicate, ALSO pin that the predicate itself still keys
+  # on LITE and ONLY. Without that second half this assert would pass on a predicate
+  # that gates NOTHING, which is the false-clean direction this case exists to prevent.
+  _pf_strict_ok_=0
   if grep -qE '\[ -z "\$ONLY" \] && \[ "\$LITE" -eq 0 \]' "$fl_pf_"; then
+    _pf_strict_ok_=1
+  # EVERY ASSERT BELOW MATCHES A CODE STATEMENT, NEVER A MENTION (#4268 roborev
+  # finding, Medium — job 122, same class the "4268-recert-schemas-reached"
+  # section ~1700 lines below already learned): a bare `grep -q '_gate_is_strict'`
+  # is satisfiable by this very function's own explanatory comment ("Spelled via
+  # `_gate_is_strict` ..."), which would stay present even if someone deleted the
+  # actual call and made the preflight unconditional. The STATEMENT shape
+  # (`if _gate_is_strict` followed by `&&`/`;`/end-of-line) a comment cannot supply.
+  elif grep -qE '^[[:space:]]*if _gate_is_strict( &&|;|$)' "$fl_pf_"; then
+    # `/^\}/`, not `/^}/` (job 122 Low, BSD-awk consistency — matches the
+    # sibling extraction a few thousand lines below). Bound-checked (job 122
+    # Medium, companion half of the statement-shape fix above): an EMPTY
+    # extraction must not reach the two greps below, where an empty haystack
+    # would simply report no-match and leave `_pf_strict_ok_` at its default
+    # 0 — the RIGHT verdict here, but for the WRONG reason (an unmeasured
+    # predicate, not a genuinely non-strict one); the final if/else below
+    # still reports the single `bad` for this subject either way.
+    _pf_pred_="$(awk '/^_gate_is_strict\(\) \{/,/^\}/' "$GATE")"
+    # herestrings, NOT `printf | grep -q`: grep -q is an EARLY-EXIT reader, so the pipe
+    # form is the SIGPIPE shape the ratchet reds on (and it would re-trip it here).
+    if [ -n "$_pf_pred_" ] && grep -qE '"\$LITE" -eq 0' <<<"$_pf_pred_" \
+       && grep -qE '\-z "\$ONLY"' <<<"$_pf_pred_"; then
+      _pf_strict_ok_=1
+    fi
+  fi
+  if [ "$_pf_strict_ok_" -eq 1 ]; then
     ok "1699-r30-preflight-fullonly: the fixture preflight is gated on FULL-gate mode, leaving --only/--lite lenient"
   else
     bad "1699-r30-preflight-fullonly: the fixture preflight is no longer full-gate-only — either it has become unconditional (redding every --only probe) or it has lost its mode test entirely"
@@ -4489,11 +4522,20 @@ i = src.index("  # LANE-SPECIFIC FIXTURE PREFLIGHT")
 j = src.index("  # The enabled set.")
 block = src[i:j]
 
+# The preflight is gated on `_gate_is_strict`, not on the bare
+# `[ -z "$ONLY" ] && [ "$LITE" -eq 0 ]` idiom it used before #4268 (--recertify
+# reuses --only's dispatch, so the bare idiom would read a recert as LENIENT).
+# EXTRACT the real definition rather than restating it here: a second copy of the
+# rule would drift, and the whole point of this probe is to run the SHIPPED block.
+k = src.index("_gate_is_strict() {")
+strict_fn = src[k:src.index("\n}\n", k) + 3]
+
 def run(root, prelude=""):
     harness = (
-        '%s\nONLY=""\nLITE=0\nname=flight-tests\nlog=/dev/null\nstatus=PASS\nstart=0\n'
+        '%s\nONLY=""\nLITE=0\nRECERTIFY=0\nname=flight-tests\nlog=/dev/null\nstatus=PASS\nstart=0\n'
+        '%s\n'
         'record_result(){ :; }\nCQLITE_DATASETS_ROOT="%s"\n'
-        'f(){\n%s\n echo PREFLIGHT-PASSED\n}\nf\n' % (prelude, root, block)
+        'f(){\n%s\n echo PREFLIGHT-PASSED\n}\nf\n' % (prelude, strict_fn, root, block)
     )
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
     return (r.stdout + r.stderr)
@@ -6025,6 +6067,92 @@ else
   bad "3402-grammar-c: $fs_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the grammar above would have no behavioural counterpart"
 fi
 
+# --- 55. #4268: --recertify REACHES the fail-closed pre-flights (full-gate mode) --------
+#
+# `--recertify` reruns its named components in FULL-GATE mode, but it implements that by
+# setting `ONLY="$RECERT_COMPONENTS"` (scripts/agent-gate.sh, run_recertify_preflight) and
+# FALLING THROUGH into the shared flow — the call site is hundreds of lines further down.
+# So any guard spelled as the bare `[ -n "$ONLY" ] || [ "$LITE" -ne 0 ]` leniency idiom
+# reads a recert as a lenient probe and returns BEFORE doing its work. That is exactly what
+# `apply_schemas_preflight` did: it short-circuited on the bare idiom and never reached the
+# `_schemas_status` decision it is documented to consume — which was ALREADY
+# `_gate_is_strict`-gated, so the effectful guard and the pure decision had silently
+# diverged, and every recert stamped `schemas: not checked`.
+#
+# TWO HALVES, because either alone is satisfiable by the bug:
+#   (a) BEHAVIOURAL — the real `_gate_is_strict` is EXTRACTED from the shipped gate and
+#       evaluated over the four mode combinations. Extracted, never restated: a second copy
+#       of the rule here would drift, and this section's whole point is the shipped rule.
+#   (b) STRUCTURAL — `apply_schemas_preflight` must CONSUME that predicate and must no
+#       longer carry the bare idiom. (a) alone would still pass if the preflight ignored the
+#       predicate entirely; (b) alone would pass on a predicate that gates nothing.
+# The full behavioural form (a real recert run reaching a FAIL-CLOSED schemas verdict) needs
+# a scratch git fixture plus a fake corpus and lives in scripts/tests/test_recertify.sh
+# (cases R13a-R13d); it does not belong in a sub-second self-test.
+_r4268_pred=$(awk '/^_gate_is_strict\(\) \{/, /^\}/' "$GATE")
+if [ -z "$_r4268_pred" ]; then
+  bad "4268-recert-strict: could not extract _gate_is_strict from $GATE — these asserts would pass vacuously"
+else
+  # <label> <LITE> <ONLY> <RECERTIFY> <want strict|lenient>
+  while IFS=' ' read -r _r4268_lbl _r4268_lite _r4268_only _r4268_rc _r4268_want; do
+    [ -n "$_r4268_lbl" ] || continue
+    [ "$_r4268_only" = '-' ] && _r4268_only=""
+    _r4268_got=$(
+      LITE="$_r4268_lite" ONLY="$_r4268_only" RECERTIFY="$_r4268_rc" \
+      bash -c '
+        set -uo pipefail
+        '"$_r4268_pred"'
+        if _gate_is_strict; then echo strict; else echo lenient; fi
+      ' 2>/dev/null
+    )
+    if [ "$_r4268_got" = "$_r4268_want" ]; then
+      ok "4268-recert-strict[$_r4268_lbl]: _gate_is_strict is $_r4268_want (LITE=$_r4268_lite ONLY='${_r4268_only}' RECERTIFY=$_r4268_rc)"
+    else
+      bad "4268-recert-strict[$_r4268_lbl]: expected $_r4268_want, got '${_r4268_got:-<unmeasured>}' (LITE=$_r4268_lite ONLY='${_r4268_only}' RECERTIFY=$_r4268_rc)"
+    fi
+  done <<'EOF_R4268_MODES'
+full 0 - 0 strict
+only 0 core-tests 0 lenient
+lite 1 - 0 lenient
+recertify 0 core-tests 1 strict
+EOF_R4268_MODES
+fi
+
+# (b) the STRUCTURAL half: the schemas pre-flight must be REACHED under a recert, i.e. it
+# must consume the predicate above rather than the bare idiom that reads a recert as --only.
+#
+# EVERY ASSERT BELOW MATCHES A CODE STATEMENT, NEVER A MENTION. The first cut of this
+# section grepped the body for the bare NAME `_gate_is_strict` — and it PASSED against the
+# deliberately-reverted (buggy) gate, because the function's own explanatory comment
+# contains that name. An assert satisfiable by prose measures the prose. So each needle
+# below is the shipped STATEMENT form, which a comment cannot supply.
+_r4268_sp=$(awk '/^apply_schemas_preflight\(\) \{/, /^\}/' "$GATE")
+if [ -z "$_r4268_sp" ] || ! grep -qF 'schemas: not checked' <<<"$_r4268_sp"; then
+  # The extraction is VERIFIED to have reached the leniency branch before anything is
+  # asserted about it: a truncated body would otherwise satisfy the two ABSENCE-shaped
+  # asserts below for free.
+  bad "4268-recert-schemas-reached: could not extract apply_schemas_preflight (with its leniency branch) from $GATE — these asserts would pass vacuously"
+else
+  if grep -qE '^[[:space:]]*if ! _gate_is_strict; then' <<<"$_r4268_sp"; then
+    ok "4268-recert-schemas-reached: apply_schemas_preflight's leniency test IS the _gate_is_strict predicate (so --recertify reaches the #3148 guard)"
+  else
+    bad "4268-recert-schemas-reached: apply_schemas_preflight's leniency branch no longer tests _gate_is_strict — a recert would take the lenient branch and SKIP the committed-schemas guard entirely (#4268)"
+  fi
+  # The bare idiom is the specific regression: it is TRUE for a recert (which sets ONLY),
+  # so its presence as the leniency test is the defect, not merely a style choice.
+  if grep -qE '^[[:space:]]*if \[ -n "\$ONLY" \] \|\| \[ "\$LITE" -ne 0 \]; then' <<<"$_r4268_sp"; then
+    bad "4268-recert-schemas-reached-b: the bare 'if [ -n \$ONLY ] || [ \$LITE -ne 0 ]' leniency idiom is back in apply_schemas_preflight — it classifies every --recertify run as lenient"
+  else
+    ok "4268-recert-schemas-reached-b: the bare ONLY/LITE leniency idiom is absent from apply_schemas_preflight's leniency test"
+  fi
+  # ...and the lenient line must name the ACTUAL mode, which requires reading RECERTIFY.
+  if grep -qE '\[ "\$RECERTIFY" -eq 1 \]' <<<"$_r4268_sp"; then
+    ok "4268-recert-schemas-mode-text: the 'not checked' line derives its mode from a real \$RECERTIFY test, so it cannot label a recert '--only'"
+  else
+    bad "4268-recert-schemas-mode-text: apply_schemas_preflight never TESTS \$RECERTIFY — its lenient line can only say '--only'/'--lite', naming a mode the run may not be in"
+  fi
+fi
+
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
 #
@@ -6122,7 +6250,14 @@ fi
 # BRANCH decision with its own risk (a floor nearer the count reds on the host-conditional verdicts
 # enumerated above, on a host that is not this one), so it is stated here rather than done inside a
 # merge resolution.
-ASSERT_FLOOR=432
+# 432 -> 439: section 55 (#4268) adds exactly 7 host-INDEPENDENT verdicts — 4 mode
+# combinations of the extracted `_gate_is_strict` plus 3 structural asserts over
+# `apply_schemas_preflight` — all of them plain bash over the gate SOURCE (no cargo,
+# python3, jq, node, network or datasets), so none can become a declared skip on any of
+# the eight host shapes enumerated above. Raised by exactly the number added, the same
+# rule the #3453 entries below follow, so the existing margin is preserved rather than
+# widened.
+ASSERT_FLOOR=439
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

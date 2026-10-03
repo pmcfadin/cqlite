@@ -249,15 +249,24 @@ usage() {
   # a TOOL failure and a GH failure, and a caller must be able to tell them apart
   # — "you called me wrong" is not "GitHub is down". The exit CODES are unchanged.
   printf 'PREMERGE: USAGE — the call is wrong (this is NOT a gh/network failure)\n' >&2
-  printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-summary>]\n' \
+  printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-or-recert-summary>]\n' \
     "$(basename "$0")" >&2
   printf '       <gate-of-record-summary> is REQUIRED: the AGENT_GATE_SUMMARY_FILE of the\n' >&2
-  printf '       FULL gate (a "==== AGENT-GATE SUMMARY ====" block with RESULT: PASS and\n' >&2
-  printf '       tree-integrity: PASS). With 3 args it must be AT the certified sha.\n' >&2
-  printf '       <delta-summary> is OPTIONAL: an "==== AGENT-GATE DELTA SUMMARY ====" block\n' >&2
-  printf '       whose delta-anchor: is the full block above and whose own commit:/\n' >&2
-  printf '       tree-start: are AT the certified sha (the #1892 post-gate-polish route).\n' >&2
-  printf '       See #3465.\n' >&2
+  printf '       FULL gate (a "==== AGENT-GATE SUMMARY ====" block, tree-integrity: PASS;\n' >&2
+  printf '       RESULT: PASS is required UNLESS the 4th argument is a RECERT block, see\n' >&2
+  printf '       below). With 3 args it must be AT the certified sha.\n' >&2
+  printf '       The 4th argument is OPTIONAL, and its KIND is detected by its own content,\n' >&2
+  printf '       never by position:\n' >&2
+  printf '         * an "==== AGENT-GATE DELTA SUMMARY ====" block whose delta-anchor: is the\n' >&2
+  printf '           full block above and whose own commit:/tree-start: are AT the certified\n' >&2
+  printf '           sha (the #1892 post-gate-polish route).\n' >&2
+  printf '         * an "==== AGENT-GATE RECERT SUMMARY ====" block (#4268) whose\n' >&2
+  printf '           recert-verdict: is CERTIFIED, whose recert-anchor: AND whose own\n' >&2
+  printf '           commit:/tree-start: are all AT the certified sha (--recertify never\n' >&2
+  printf '           advances the tree — the 3rd-argument anchor need not itself be\n' >&2
+  printf '           RESULT: PASS, since a recert exists precisely because one of its\n' >&2
+  printf '           components was not).\n' >&2
+  printf '       See #3465 and #4268.\n' >&2
 }
 
 if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
@@ -305,10 +314,23 @@ fi
 # ---------------------------------------------------------------------------
 
 refuse_no_gate() {
+  # Labeled from case_kind, not hard-coded "delta" (#4268 roborev finding,
+  # Low — job 127): this script goes to some length elsewhere never to name
+  # a mode the run is not in (e.g. apply_schemas_preflight's `_mode`
+  # derivation), so a Case C (recert) refusal calling the fourth argument a
+  # "delta summary file" was the one diagnostic that still did. case_kind is
+  # "A" (the default, set before fourth-argument classification runs) for
+  # every refusal reached BEFORE that classification succeeds — the neutral
+  # label covers those honestly rather than guessing a family.
+  local _rng_fourth_label="fourth-argument summary file"
+  case "${case_kind:-}" in
+    B) _rng_fourth_label="delta summary file" ;;
+    C) _rng_fourth_label="recert summary file" ;;
+  esac
   printf '========================================================\n' >&2
   printf 'PREMERGE: NO-GATE-OF-RECORD — REFUSING TO MERGE\n' >&2
   printf '  summary file: %s\n' "$summary_file" >&2
-  [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$delta_file" >&2
+  [ -n "$delta_file" ] && printf '  %s: %s\n' "$_rng_fourth_label" "$delta_file" >&2
   printf '  certified sha: %s\n' "$certified" >&2
   while [ "$#" -gt 0 ]; do
     printf '  %s\n' "$1" >&2
@@ -1646,25 +1668,64 @@ _gate_awk() {
     LITE_S  = "==== AGENT-GATE LITE SUMMARY ===="
     DELTA_S = "==== AGENT-GATE DELTA SUMMARY ===="
     DELTA_E = "==== END AGENT-GATE DELTA SUMMARY ===="
-    if (WANT == "delta") { S = DELTA_S; E = DELTA_E } else { S = FULL_S; E = FULL_E }
-    blocks = 0; full = 0; lite = 0; delta = 0; open = 0; unterminated = 0
-    n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0
+    RECERT_S = "==== AGENT-GATE RECERT SUMMARY ===="
+    RECERT_E = "==== END AGENT-GATE RECERT SUMMARY ===="
+    if (WANT == "delta")       { S = DELTA_S;  E = DELTA_E }
+    else if (WANT == "recert") { S = RECERT_S; E = RECERT_E }
+    else                        { S = FULL_S;   E = FULL_E }
+    blocks = 0; full = 0; lite = 0; delta = 0; recert = 0; open = 0; unterminated = 0
+    n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0; n_partial = 0
     n_anchor = 0; n_nested = 0; anchor_unresolved = 0; n_dirty = 0; n_tsdirty = 0
+    n_recert_anchor = 0; n_recert_verdict = 0; n_recert_components = 0; n_si = 0
+    n_run_id = 0; n_recert_anchor_run_id = 0
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
-    v_mode = ""; v_anchor = ""
+    v_mode = ""; v_anchor = ""; v_recert_anchor = ""; v_recert_verdict = ""; v_recert_components = ""; v_si = ""
+    v_run_id = ""; v_recert_anchor_run_id = ""
   }
   {
     gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
     sub(/\r$/, "")
   }
-  $0 == FULL_S  { full++;  if (S == FULL_S)  { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
-  $0 == DELTA_S { delta++; if (S == DELTA_S) { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
+  $0 == FULL_S   { full++;   if (S == FULL_S)   { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
+  $0 == DELTA_S  { delta++;  if (S == DELTA_S)  { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
+  $0 == RECERT_S { recert++; if (S == RECERT_S) { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
   $0 == LITE_S  { lite++;  next }
   $0 == E       { if (open == 1) open = 0; next }
   open == 1 {
     if ($1 == "MODE:")                { n_mode++;   v_mode = $2 }
+    # lowercase mode: is a DIFFERENT key than MODE: (agent-gate.sh stamps it
+    # ONLY on a FAILING --only run terminal block: mode: PARTIAL (--only
+    # NAMES) - does NOT count as the gate) -- #4268 roborev finding, Medium:
+    # a --only run that FAILS never reaches RESULT: PASS, so the
+    # OLD-PASS-only mode: PARTIAL promotion (the gate own OVERALL=PARTIAL
+    # branch) never fires and this line is the ONLY surviving signal that the
+    # block came from a lenient --only dispatch rather than a genuine full
+    # run. Counted so Case C can refuse an anchor carrying it, closing the
+    # gap where such a block -- full header, no MODE: key, RESULT: FAIL,
+    # tree-integrity/dirty/commit/tree-start all otherwise legitimate --
+    # would otherwise pass every existing Case C check. NOTE: no apostrophes
+    # in this comment -- this text lives inside the single-quoted awk program
+    # literal a few lines up, and one would terminate it early.
+    else if ($1 == "mode:" && $2 == "PARTIAL") { n_partial++ }
     else if ($1 == "RESULT:")         { n_result++; v_result = $2 }
     else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2 }
+    # summary-integrity: (#2874) is ONLY ever emitted with a FAIL value — a
+    # SIDE-lane component that detects a mid-run clobber of the pinned summary
+    # path; a healthy run omits the key entirely, it never carries PASS
+    # (#4268 roborev finding, High). Presence alone is therefore the refusal
+    # signal — see assert_pass_block.
+    else if ($1 == "summary-integrity:") { n_si++;  v_si = $2 }
+    else if ($1 == "recert-anchor:")     { n_recert_anchor++;     v_recert_anchor = $2 }
+    else if ($1 == "recert-verdict:")    { n_recert_verdict++;    v_recert_verdict = $2 }
+    else if ($1 == "recert-components:") { n_recert_components++; v_recert_components = $2 }
+    # run-id: (#4268 roborev finding, Medium -- job 121) and its recert-side
+    # echo recert-anchor-run-id: are what binds the PASTED anchor block to the
+    # SAME anchor run_recertify_preflight actually validated -- see the Case C
+    # cross-check below. Every block (full/delta/recert alike) carries its OWN
+    # run-id:, so this key is read regardless of WANT; recert-anchor-run-id:
+    # only ever appears inside a recert block.
+    else if ($1 == "run-id:")                 { n_run_id++;               v_run_id = $2 }
+    else if ($1 == "recert-anchor-run-id:")    { n_recert_anchor_run_id++; v_recert_anchor_run_id = $2 }
     else if ($1 == "tree-start:") {
       n_ts++; v_ts = $2
       # tree-start: carries its OWN `dirty:`, and it is NOT redundant with the
@@ -1704,8 +1765,10 @@ _gate_awk() {
     print "full=" full
     print "lite=" lite
     print "delta=" delta
+    print "recert=" recert
     print "unterminated=" unterminated
     print "n_mode=" n_mode
+    print "n_partial=" n_partial
     print "n_result=" n_result
     print "n_ti=" n_ti
     print "n_commit=" n_commit
@@ -1714,6 +1777,12 @@ _gate_awk() {
     print "n_nested=" n_nested
     print "n_dirty=" n_dirty
     print "n_tsdirty=" n_tsdirty
+    print "n_recert_anchor=" n_recert_anchor
+    print "n_recert_verdict=" n_recert_verdict
+    print "n_recert_components=" n_recert_components
+    print "n_si=" n_si
+    print "n_run_id=" n_run_id
+    print "n_recert_anchor_run_id=" n_recert_anchor_run_id
     print "anchor_unresolved=" anchor_unresolved
     print "v_result=" v_result
     print "v_ti=" v_ti
@@ -1723,6 +1792,83 @@ _gate_awk() {
     print "v_tsdirty=" v_tsdirty
     print "v_mode=" v_mode
     print "v_anchor=" v_anchor
+    print "v_recert_anchor=" v_recert_anchor
+    print "v_recert_verdict=" v_recert_verdict
+    print "v_recert_components=" v_recert_components
+    print "v_si=" v_si
+    print "v_run_id=" v_run_id
+    print "v_recert_anchor_run_id=" v_recert_anchor_run_id
+  }
+' <"$1"
+}
+
+# _gate_component_rows <file> <want> — print `<name> <STATUS>`, one per line, for
+# every COMPONENT STATUS ROW inside the selected block. Case C's only consumer
+# (#4268 roborev finding, Medium).
+#
+# WHY A SECOND PASS RATHER THAN MORE _gate_awk KEYS. _gate_awk publishes a FIXED
+# set of key=value pairs with occurrence counts; component rows are a VARIABLE
+# -length list, so threading them through that contract would mean either a
+# delimiter-joined mega-value or per-key accumulation in gate_parse_file's
+# last-wins `case`. Both are worse than one small, single-purpose reader.
+#
+# SUBJECT SELECTION, and why it is deliberately GENEROUS. A row qualifies when
+# its key is lowercase-and-dashes (so `RESULT:`/`MODE:` — uppercase — are out)
+# AND its first value token is one of the CLOSED status set agent-gate.sh's
+# `record_result` can write: PASS|FAIL|SKIP|OPT-OUT|VACUOUS (scripts/agent-gate.sh
+# validates exactly that set). Everything else in a block — `run-id:`, `commit:`,
+# `schemas: 8/8 …`, `heartbeat: on …`, `component-set: ADVISORY-PASS …` — cannot
+# collide, because its value token is not in that set.
+#
+# _GATE_NONCOMPONENT_KEYS then removes the few METADATA keys that genuinely DO
+# carry a status-shaped token, and ONLY those. `preflight:` is deliberately NOT
+# in it: a block carrying `preflight: FAIL` is a gate that died before its
+# components ran, which is not a legitimate recert anchor, so leaving it in the
+# subject set makes Case C refuse it — the fail-CLOSED direction. Any future
+# metadata key is likewise treated as a component and refuses on a non-PASS
+# value, which is the direction a merge gate must be wrong in.
+_GATE_NONCOMPONENT_KEYS="tree-integrity component-set missing-fixtures disk-admission schemas summary-integrity"
+
+_gate_component_rows() {
+  awk -v WANT="$2" -v SKIPKEYS="$_GATE_NONCOMPONENT_KEYS" '
+  BEGIN {
+    FULL_S  = "==== AGENT-GATE SUMMARY ===="
+    FULL_E  = "==== END AGENT-GATE SUMMARY ===="
+    DELTA_S = "==== AGENT-GATE DELTA SUMMARY ===="
+    DELTA_E = "==== END AGENT-GATE DELTA SUMMARY ===="
+    RECERT_S = "==== AGENT-GATE RECERT SUMMARY ===="
+    RECERT_E = "==== END AGENT-GATE RECERT SUMMARY ===="
+    if (WANT == "delta")       { S = DELTA_S;  E = DELTA_E }
+    else if (WANT == "recert") { S = RECERT_S; E = RECERT_E }
+    else                        { S = FULL_S;   E = FULL_E }
+    n = split(SKIPKEYS, sk, " ")
+    for (i = 1; i <= n; i++) skip[sk[i]] = 1
+    # THIS FIVE-TOKEN SET IS A SECOND, UNPINNED COPY of agent-gate.sh own
+    # closed status vocabulary (scripts/agent-gate.sh ~line 7522,
+    # PASS FAIL SKIP OPT-OUT VACUOUS case arm) -- DERIVED-pinned there by
+    # test_agent_gate_disk_exhaustion.sh per the do-not-add-a-token-here-
+    # without-that-assert-seeing-it rule (#4268 roborev finding, Medium --
+    # job 119: a 6th token would otherwise silently fall open here,
+    # degrading SILENTLY rather than reding). test_premerge_assert.sh own
+    # ok-vocabulary-derived case greps BOTH sides and asserts the sets are
+    # equal, so a future gate token added without updating this line reds
+    # there instead of degrading here. Do not add a token here without that
+    # case seeing it too.
+    ok["PASS"] = 1; ok["FAIL"] = 1; ok["SKIP"] = 1; ok["OPT-OUT"] = 1; ok["VACUOUS"] = 1
+    open = 0
+  }
+  {
+    gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
+    sub(/\r$/, "")
+  }
+  $0 == S { open = 1; next }
+  $0 == E { open = 0; next }
+  open == 1 {
+    if ($1 !~ /^[a-z0-9][a-z0-9-]*:$/) next
+    name = substr($1, 1, length($1) - 1)
+    if (name in skip) next
+    if (!($2 in ok)) next
+    print name " " $2
   }
 ' <"$1"
 }
@@ -1734,19 +1880,24 @@ _gate_awk() {
 gate_parse_file() {
   local gp_out gp_k gp_v
   gp_out=$(_gate_awk "$1" "$2") || refuse_tool_failure awk "$3"
-  GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_unterminated=""
-  GP_n_mode=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
+  GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_recert=""; GP_unterminated=""
+  GP_n_mode=""; GP_n_partial=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
   GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""
+  GP_n_recert_anchor=""; GP_n_recert_verdict=""; GP_n_recert_components=""; GP_n_si=""
+  GP_n_run_id=""; GP_n_recert_anchor_run_id=""
   GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
-  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""
+  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""; GP_v_recert_anchor=""; GP_v_recert_verdict=""; GP_v_recert_components=""; GP_v_si=""
+  GP_v_run_id=""; GP_v_recert_anchor_run_id=""
   while IFS='=' read -r gp_k gp_v; do
     case "$gp_k" in
       blocks)       GP_blocks="$gp_v" ;;
       full)         GP_full="$gp_v" ;;
       lite)         GP_lite="$gp_v" ;;
       delta)        GP_delta="$gp_v" ;;
+      recert)       GP_recert="$gp_v" ;;
       unterminated) GP_unterminated="$gp_v" ;;
       n_mode)       GP_n_mode="$gp_v" ;;
+      n_partial)    GP_n_partial="$gp_v" ;;
       n_result)     GP_n_result="$gp_v" ;;
       n_ti)         GP_n_ti="$gp_v" ;;
       n_commit)     GP_n_commit="$gp_v" ;;
@@ -1755,6 +1906,12 @@ gate_parse_file() {
       n_nested)     GP_n_nested="$gp_v" ;;
       n_dirty)      GP_n_dirty="$gp_v" ;;
       n_tsdirty)    GP_n_tsdirty="$gp_v" ;;
+      n_recert_anchor)     GP_n_recert_anchor="$gp_v" ;;
+      n_recert_components) GP_n_recert_components="$gp_v" ;;
+      n_recert_verdict) GP_n_recert_verdict="$gp_v" ;;
+      n_si)             GP_n_si="$gp_v" ;;
+      n_run_id)                GP_n_run_id="$gp_v" ;;
+      n_recert_anchor_run_id)  GP_n_recert_anchor_run_id="$gp_v" ;;
       anchor_unresolved) GP_anchor_unresolved="$gp_v" ;;
       v_result)     GP_v_result="$gp_v" ;;
       v_ti)         GP_v_ti="$gp_v" ;;
@@ -1764,12 +1921,20 @@ gate_parse_file() {
       v_tsdirty)    GP_v_tsdirty="$gp_v" ;;
       v_mode)       GP_v_mode="$gp_v" ;;
       v_anchor)     GP_v_anchor="$gp_v" ;;
+      v_recert_anchor)     GP_v_recert_anchor="$gp_v" ;;
+      v_recert_components) GP_v_recert_components="$gp_v" ;;
+      v_recert_verdict) GP_v_recert_verdict="$gp_v" ;;
+      v_si)             GP_v_si="$gp_v" ;;
+      v_run_id)                GP_v_run_id="$gp_v" ;;
+      v_recert_anchor_run_id)  GP_v_recert_anchor_run_id="$gp_v" ;;
     esac
   done <<GATE_PARSE
 $gp_out
 GATE_PARSE
-  for gp_k in blocks full lite delta unterminated n_mode n_result n_ti n_commit \
-              n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty; do
+  for gp_k in blocks full lite delta recert unterminated n_mode n_partial n_result n_ti n_commit \
+              n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty \
+              n_recert_anchor n_recert_verdict n_recert_components n_si \
+              n_run_id n_recert_anchor_run_id; do
     eval "gp_v=\${GP_$gp_k}"
     case "$gp_v" in
       ''|*[!0-9]*)
@@ -1917,12 +2082,13 @@ assert_clean_tree() {
   # unestablished value is never given the benign branch.
   local rerun
   case "$kind" in
-    full)  rerun="re-run the FULL gate on the clean tree and pass that summary" ;;
-    delta) rerun="re-run the --delta re-certification on the clean tree and pass that summary (the anchor's own full-gate PASS is unaffected)" ;;
+    full)   rerun="re-run the FULL gate on the clean tree and pass that summary" ;;
+    delta)  rerun="re-run the --delta re-certification on the clean tree and pass that summary (the anchor's own full-gate PASS is unaffected)" ;;
+    recert) rerun="re-run the --recertify re-certification on the clean tree and pass that summary (#4268; the anchor's own full-gate block is unaffected)" ;;
     *)
       refuse_no_gate \
         "INTERNAL: assert_clean_tree was called with remedy kind '$kind', which is not" \
-        "'full' or 'delta'. Refusing rather than guessing a remedy (#3648)."
+        "'full', 'delta' or 'recert'. Refusing rather than guessing a remedy (#3648)."
       ;;
   esac
   # AMBIGUITY BEFORE VALUE: more than one `dirty:` on the commit: line means the
@@ -1959,10 +2125,18 @@ assert_clean_tree() {
     "re-gateable, so an override could only buy a vacuous green."
 }
 
-# assert_pass_block <what>: the verdict half every accepted block must satisfy —
-# terminated, RESULT: PASS, tree-integrity: PASS, and not a nested sub-gate.
+# assert_pass_block <what> [require-result-pass=1]: the shared structural
+# checks every certifying block needs — unterminated, tree-integrity: PASS, no
+# nested-under: — PLUS, unless the caller passes 0 as the second argument, a
+# RESULT: PASS requirement. The 0 form exists for #4268 Case C's ANCHOR block
+# alone: a recert anchor's RESULT is legitimately NOT PASS (that is the whole
+# reason a recert exists — one of its components failed), so requiring PASS
+# there would refuse every genuine recert anchor. Nothing else may pass 0; the
+# recert block itself (the fourth-argument summary) still requires PASS via the
+# default, because `recert-verdict: CERTIFIED` is defined as "every rerun
+# component was PASS", which sets the block's own RESULT to PASS too.
 assert_pass_block() {
-  local what="$1"
+  local what="$1" require_pass="${2:-1}"
   if [ "$GP_unterminated" != 0 ]; then
     refuse_no_gate \
       "A block in the $what is UNTERMINATED (no exact end marker)." \
@@ -1974,7 +2148,7 @@ assert_pass_block() {
   # accepts `PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`, i.e. it would
   # check a SPELLING rather than a STATE. awk already gave us the first
   # whitespace-delimited token after the key, so this is a token-exact compare.
-  if [ "$GP_v_result" != PASS ]; then
+  if [ "$require_pass" = 1 ] && [ "$GP_v_result" != PASS ]; then
     refuse_no_gate \
       "RESULT verdict token in the $what is '$GP_v_result', not PASS." \
       "INCOMPLETE is the launch-time liveness SENTINEL, not a verdict (#3041): it is" \
@@ -2003,6 +2177,25 @@ assert_pass_block() {
       "A sub-gate spawned by an enclosing gate runs at the SAME tree, so the sha" \
       "binding cannot tell it apart; it certifies the gate's machinery, not this PR."
   fi
+
+  # summary-integrity: FAIL (#2874, roborev finding, High) is the one way a
+  # block's component rows can all read PASS/OPT-OUT while the run is NOT
+  # certifiable: a SIDE-lane writer detected a mid-run clobber of the pinned
+  # summary path, so the rows this block carries may not describe the tree
+  # that actually ran. It is in _GATE_NONCOMPONENT_KEYS precisely so
+  # _gate_component_rows never mistakes it for a component — which means
+  # nothing else ever looks at its value, so it must be checked here,
+  # unconditionally (require_pass=0's Case C anchor is exactly the case that
+  # would otherwise launder this: every row PASS, RESULT: FAIL, no row names
+  # the real cause). The key is NEVER emitted with a PASS value (only
+  # emitted at all when a clobber fired), so presence alone refuses.
+  if [ "$GP_n_si" != 0 ]; then
+    refuse_no_gate \
+      "The $what carries a 'summary-integrity:' line (value '$GP_v_si')." \
+      "A SIDE-lane component detected a mid-run clobber of the pinned summary path" \
+      "(#2874) — this block's component rows may not describe the tree that actually" \
+      "ran, so it cannot certify anything, even when every row it carries reads PASS."
+  fi
 }
 
 # --- the FULL gate of record (arg 3) -----------------------------------------
@@ -2011,11 +2204,13 @@ gate_parse_file "$summary_file" full "gate summary"
 
 if [ "$GP_blocks" -eq 0 ]; then
   refuse_no_gate \
-    "The file contains ZERO full-gate blocks (found $GP_lite lite, $GP_delta delta)." \
-    "--lite and --delta emit DISTINCT headers; NEITHER is the gate of record:" \
+    "The file contains ZERO full-gate blocks (found $GP_lite lite, $GP_delta delta, $GP_recert recert)." \
+    "--lite, --delta and --recertify each emit a DISTINCT header; NONE is the gate of record:" \
     "  --lite  is fast iteration and is never acceptable here." \
     "  --delta re-certifies a post-full-PASS test/docs-only round — pass the ANCHOR's" \
     "          FULL summary as argument 3 and the delta summary as argument 4." \
+    "  --recertify re-certifies <=2 host-failed components — pass the ANCHOR's FULL" \
+    "          summary as argument 3 and the recert summary as argument 4 (#4268)." \
     "This is the #3408 failure exactly: many lite PASSes, no full gate."
 fi
 
@@ -2029,37 +2224,508 @@ fi
 # Belt for the header separation above: the FULL gate emits NO `MODE:` line;
 # --lite and --delta each emit one naming themselves. (An `--only` run emits the
 # FULL markers with a LOWERCASE `mode: PARTIAL (--only …)` line, which this
-# case-sensitive check deliberately does NOT catch — that run is refused by the
-# `RESULT: PARTIAL` compare above, which is the property that matters.)
+# case-sensitive check deliberately does NOT catch. For every case BUT C that
+# is fine: a PASSing --only run's RESULT is promoted to PARTIAL, so the
+# `RESULT: PARTIAL` compare in assert_pass_block's default require_pass=1 path
+# refuses it. Case C's anchor is the ONE exception — its require_pass=0 accepts
+# a non-PASS RESULT by design (a recert anchor legitimately has RESULT: FAIL),
+# so a FAILING --only run's un-promoted `RESULT: FAIL` is NOT caught here or
+# there; the dedicated `GP_n_partial` check below, just inside the Case C body,
+# is what closes that gap — see its own comment for why.)
 if [ "$GP_n_mode" -ne 0 ]; then
   refuse_no_gate \
     "The full-gate block carries a MODE: line — the FULL gate emits none." \
     "This block was produced by (or doctored from) a lite/delta run."
 fi
 
-assert_pass_block "full-gate block"
+# Which of the two OPTIONAL-fourth-argument shapes (if any) is in play — decided
+# by the FOURTH FILE'S OWN CONTENT, never by argument position (#4268): a delta
+# block and a recert block share nothing but the 4-argument SLOT, and a caller
+# that swapped them would otherwise be silently misclassified. This is also
+# what refuses "a lone recert" (#4268 AC2): passing a RECERT summary as the
+# THIRD argument (no fourth at all) never reaches this block — `gate_parse_file
+# "$summary_file" full ...` already found zero FULL markers in it and refused
+# above, exactly as a lone delta/lite summary already does.
+case_kind=A
+recert_file=""
+if [ -n "$delta_file" ]; then
+  # File-level preconditions (exists/readable/non-empty) are checked BEFORE any
+  # content classification — same "delta summary" <what> label the pre-#4268
+  # code always used here, so an absent/empty fourth argument refuses with the
+  # SAME wording regardless of which of the two shapes it was meant to be (a
+  # roborev-style regression check on this diff caught an earlier cut that
+  # classified by content FIRST, which meant a missing/empty file skipped this
+  # check entirely and fell through to the "neither DELTA nor RECERT" message
+  # instead of naming the real, cheaper-to-diagnose cause).
+  assert_readable_summary "$delta_file" "delta summary"
+  # NO `grep` (roborev-style regression check on this diff caught an earlier cut
+  # that shelled out to `grep -qF`; comment corrected #4268 job 122 — a stale
+  # "PURE BASH, no grep" / "a case/read loop needs nothing beyond the shell
+  # itself" pair here used to contradict the awk-based reality a few lines
+  # down, which is exactly the regression the stale text invited): two of this
+  # suite's own hardened fixtures — the no-git and no-bounded-runner ancestry
+  # arms — deliberately build a PATH with awk/tr/git/etc. but WITHOUT grep, to
+  # prove the ancestry check degrades to a NAMED refusal rather than a silent
+  # tool-failure. A `grep` call here would 127 on exactly those fixtures,
+  # before the classification ever reaches the real question, misreporting a
+  # "neither DELTA nor RECERT" refusal instead of exercising (or correctly
+  # bypassing) the ancestry check. `awk` is NOT excluded by this constraint —
+  # see its own comment below for why it is the right tool anyway. While
+  # scanning, also tally every marker family (whole-line-exact, same anchoring
+  # _gate_awk uses) so a refusal can NAME what it found instead of only what it
+  # wanted — matching the existing "(found N full, M lite)" style below.
+  # Block counting for a full/recert AMBIGUOUS verdict (>1 of the SAME family)
+  # is the existing gate_parse_file/GP_blocks check inside the Case B/C bodies
+  # below — not duplicated here. This loop only decides WHICH family to hand
+  # off to, plus the full/lite counts a "neither" refusal names.
+  # awk, not a bare `case`/`read` loop (roborev finding, Medium): every OTHER
+  # reader of a summary block (`_gate_awk`, `_gate_component_rows`) normalizes
+  # ANSI escapes and a trailing CR before matching a marker line — a summary
+  # "RECOVERED FROM A COLOURED CAPTURE" or CRLF-terminated is a real, tested
+  # scenario (test_premerge_assert.sh Case 24). An exact whole-line `case`
+  # against the RAW bytes skips that normalization, so an ANSI-decorated or
+  # CRLF delta/recert summary would refuse here as "neither" before any
+  # tolerant reader got a chance. awk is NOT the tool this block avoids —
+  # only `grep` is (see the comment above, and the hardened no-grep fixtures
+  # at test_premerge_assert.sh:1672/3422); awk is already a hard dependency
+  # via `_gate_awk`/`_gate_component_rows`. `kind` prints as the literal
+  # `none` rather than empty so the bash `read` below cannot lose an empty
+  # first field to IFS whitespace-collapsing.
+  _delta_class=$(awk '
+    {
+      gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
+      sub(/\r$/, "")
+    }
+    $0 == "==== AGENT-GATE RECERT SUMMARY ====" { if (kind == "") kind = "recert"; nrecert++ }
+    $0 == "==== AGENT-GATE DELTA SUMMARY ===="  { if (kind == "") kind = "delta"; ndelta++ }
+    $0 == "==== AGENT-GATE SUMMARY ===="        { nfull++ }
+    $0 == "==== AGENT-GATE LITE SUMMARY ===="   { nlite++ }
+    END { printf "%s %d %d %d %d\n", (kind == "" ? "none" : kind), nfull, nlite, ndelta, nrecert }
+  ' "$delta_file") || refuse_tool_failure awk "fourth-argument kind classification"
+  read -r _delta_kind _delta_nfull _delta_nlite _delta_ndelta _delta_nrecert <<<"$_delta_class"
+  # #4268 roborev finding (Low, job 120): the classifier above picks kind
+  # from the FIRST marker it sees, so a file carrying BOTH a DELTA and a
+  # RECERT block was silently accepted as whichever family came first,
+  # leaving the OTHER certification claim unvalidated — the per-family
+  # GP_blocks>1 checks inside the Case B/C bodies below only ever count ONE
+  # family, so they cannot see this. Refuse the MIXED-FAMILY case here,
+  # before either body runs, mirroring the same-family "holds N blocks —
+  # AMBIGUOUS" refusal already used for a repeated opener of ONE family.
+  if [ "$_delta_ndelta" -gt 0 ] && [ "$_delta_nrecert" -gt 0 ]; then
+    refuse_no_gate \
+      "The fourth argument ($delta_file) carries BOTH a DELTA and a RECERT summary block" \
+      "($_delta_ndelta delta, $_delta_nrecert recert) — AMBIGUOUS." \
+      "A delta re-certification and a host-fault recert are different claims; only ONE" \
+      "family may be validated. Point at a file carrying exactly one."
+  fi
+  case "$_delta_kind" in
+    recert) case_kind=C; recert_file="$delta_file" ;;
+    delta)  case_kind=B ;;
+    *)
+      refuse_no_gate \
+        "The fourth argument ($delta_file) is neither a DELTA nor a RECERT summary block" \
+        "(found $_delta_nfull full, $_delta_nlite lite)." \
+        "Checked by CONTENT, not position: expected '==== AGENT-GATE DELTA SUMMARY ===='" \
+        "(#1892) or '==== AGENT-GATE RECERT SUMMARY ====' (#4268)."
+      ;;
+  esac
+fi
+
+# Case C's anchor legitimately does NOT require RESULT: PASS (see
+# assert_pass_block's header comment) — every OTHER case still does.
+if [ "$case_kind" = C ]; then
+  assert_pass_block "full-gate block" 0
+  # ...but it must still be a REAL terminal verdict — PASS or FAIL, never the
+  # INCOMPLETE liveness sentinel (#3041) or anything else.
+  case "$GP_v_result" in
+    PASS|FAIL) ;;
+    *)
+      refuse_no_gate \
+        "The recert anchor's RESULT token is '$GP_v_result', neither PASS nor FAIL." \
+        "A recert anchor may have a FAILED component (that is why a recert exists), but" \
+        "its RESULT must still be a REAL terminal verdict."
+      ;;
+  esac
+  # A FAILING `--only` run is NOT excluded by the MODE: belt above (roborev
+  # finding, Medium — an earlier comment here claimed it was, which was false
+  # for exactly this shape): agent-gate.sh only promotes `RESULT: PASS` to
+  # `PARTIAL` for a PASSing `--only` run (`[ "$OVERALL" = "PASS" ] &&
+  # OVERALL=PARTIAL`); a FAILING one stays `RESULT: FAIL` with its lowercase
+  # `mode: PARTIAL (--only <components>) - does NOT count as the gate` line
+  # UNCHANGED. Such a block has a genuine full header, carries no `MODE:` key
+  # (the belt above only ever sees the UPPERCASE key), `RESULT: FAIL` (which
+  # the case above just accepted), and can otherwise be entirely legitimate —
+  # so without this check an operator's own `agent-gate.sh --only
+  # tooling-tests` re-run at the certified sha (which failed again) could be
+  # passed as arg 3 alongside a genuine recert block and reach PREMERGE: OK
+  # for a merge with no real gate of record behind it at all.
+  if [ "${GP_n_partial:-0}" != 0 ]; then
+    refuse_no_gate \
+      "The recert anchor carries a 'mode: PARTIAL' line — it is an --only run, not a genuine full agent-gate.sh run." \
+      "A recert anchor must be the summary of a real full gate (whose named components may" \
+      "legitimately have failed), never a --only diagnostic invocation."
+  fi
+else
+  assert_pass_block "full-gate block"
+fi
 
 assert_single_key "$GP_n_commit" commit "full-gate block"
 assert_single_key "$GP_n_ts" tree-start "full-gate block"
 full_commit="$GP_v_commit"
 full_ts="$GP_v_ts"
+# Captured NOW, not read as $GP_v_result later: Case C's gate_parse_file call
+# on the recert block (below) OVERWRITES every GP_* global, including
+# GP_v_result, with the RECERT block's own RESULT — so the FAIL-attributability
+# check further down must compare against THIS anchor snapshot, never the
+# live global (#4268 roborev finding, High; caught by this diff's own tests).
+full_result="$GP_v_result"
 full_dirty="$GP_v_dirty"
 full_ndirty="$GP_n_dirty"
 full_tsdirty="$GP_v_tsdirty"
+# Captured for the SAME reason (#4268 roborev finding, Medium — job 121):
+# this anchor blocks own run-id:, snapshotted before the recert block's
+# gate_parse_file call below overwrites GP_v_run_id with the RECERT run's
+# OWN id. Case C's cross-check (inside the C) case body below, the only
+# place run-id: is actually REQUIRED — plenty of pre-existing fixtures here
+# test unrelated shapes without one) compares THIS against the recert
+# block's recert-anchor-run-id: — the gate's own record of which anchor it
+# validated — never the live global.
+full_run_id="$GP_v_run_id"
+full_n_run_id="$GP_n_run_id"
 full_ntsdirty="$GP_n_tsdirty"
 
-if [ -z "$delta_file" ]; then
+case "$case_kind" in
+A)
   # CASE A — DIRECT: the gate of record ran on the merged tree itself.
   assert_covers commit "$full_commit" "$certified" "full-gate block" "certified sha"
   assert_covers tree-start "$full_ts" "$certified" "full-gate block" "certified sha"
-else
+  ;;
+C)
+  # CASE C — RECERTIFY (#4268). The full block is the ANCHOR — a same-tree-digest
+  # host-fault re-certification, so UNLIKE Case B its sha is not merely an
+  # ANCESTOR of the certified sha: it must be the certified sha EXACTLY (a
+  # recert never advances the tree; that is the whole point of "same digest").
+  #
+  # THIS BINDING IS LOAD-BEARING AND WAS MISSING FROM THE FIRST CUT (roborev
+  # finding, High): an earlier comment here claimed it was "already asserted
+  # above", which was false — the case_kind==C branch above only relaxes
+  # assert_pass_block and checks RESULT is PASS|FAIL; it never compares the
+  # anchor's own commit/tree-start to anything. Without this, a recert pair
+  # was accepted when the ANCHOR block came from a completely different
+  # commit (e.g. a stale green `main` gate), as long as the recert block
+  # alone named $certified — defeating "anchor + recert together certify the
+  # sha", this whole case's reason to exist. Matches Case A exactly (a recert
+  # never advances the tree, so the anchor's own binding is identical to the
+  # direct case's).
+  assert_covers commit "$full_commit" "$certified" "full-gate block" "certified sha"
+  assert_covers tree-start "$full_ts" "$certified" "full-gate block" "certified sha"
+
+  # Readability was already asserted above (before the content classification;
+  # $recert_file IS $delta_file in this branch).
+  gate_parse_file "$recert_file" recert "recert summary"
+
+  if [ "$GP_blocks" -eq 0 ]; then
+    refuse_no_gate \
+      "The fourth argument holds ZERO recert blocks (found $GP_full full, $GP_lite lite, $GP_delta delta)." \
+      "It must be the AGENT_GATE_SUMMARY_FILE of a 'scripts/agent-gate.sh --recertify' run" \
+      "('==== AGENT-GATE RECERT SUMMARY ====' — a DISTINCT header, by construction)."
+  fi
+  if [ "$GP_blocks" -gt 1 ]; then
+    refuse_no_gate \
+      "The fourth argument holds $GP_blocks recert blocks — AMBIGUOUS." \
+      "Point at ONE run's summary file; picking one would let a stale run re-certify."
+  fi
+
+  # The INVERSE of the full block's belt: here a `MODE: recertify` line is
+  # REQUIRED and asserted AFFIRMATIVELY (scripts/agent-gate.sh's
+  # SUMMARY_MODE_LINE always carries it for a --recertify run).
+  assert_single_key "$GP_n_mode" MODE "recert block"
+  if [ "$GP_v_mode" != recertify ]; then
+    refuse_no_gate \
+      "The recert block's MODE token is '$GP_v_mode', not 'recertify'." \
+      "A --recertify run stamps 'MODE: recertify (HOST-FAULT RE-CERTIFICATION …)';" \
+      "anything else is a different mode wearing the recert header."
+  fi
+
+  # UNLIKE the anchor, the recert run's OWN block DOES require RESULT: PASS —
+  # agent-gate.sh only stamps `recert-verdict: CERTIFIED` when every rerun
+  # component was exactly PASS, which is also when it sets its own RESULT: PASS.
+  assert_pass_block "recert block"
+
+  assert_single_key "$GP_n_recert_verdict" recert-verdict "recert block"
+  if [ "$GP_v_recert_verdict" != CERTIFIED ]; then
+    refuse_no_gate \
+      "The recert block's 'recert-verdict:' token is '$GP_v_recert_verdict', not CERTIFIED." \
+      "NOT-CERTIFIED means at least one rerun component was not exactly PASS; this pair" \
+      "does not certify the merge."
+  fi
+
+  # recert-anchor: must name the FULL block above. Unlike Case B's delta-anchor
+  # (a 40-hex sha from `git rev-parse --verify`), agent-gate.sh stamps
+  # `recert-anchor:` as a 12-char abbreviation (`_tree_short` — the same width
+  # `tree-start:` uses), so this is compared with assert_covers (which accepts
+  # any width in the gate's 7..40 abbreviation range) rather than requiring the
+  # full 40 hex chars Case B's delta-anchor does.
+  assert_single_key "$GP_n_recert_anchor" recert-anchor "recert block"
+  recert_anchor="$GP_v_recert_anchor"
+  assert_covers recert-anchor "$recert_anchor" "$certified" "recert block" "certified sha"
+
+  # THE PASTED ANCHOR MUST BE THE SAME FILE run_recertify_preflight ACTUALLY
+  # VALIDATED (#4268 roborev finding, Medium — job 121). Every check above
+  # this point reasons about the anchor's CONTENT (sha, tree digest, rows,
+  # dirty) — none of them bind that content to a SPECIFIC gate run, because
+  # `commit:`/`tree-start:` only prove "some run at this tree", and a
+  # hand-trimmed two-row anchor at the SAME sha (one FAIL row for
+  # attributability, one PASS row to avoid a zero-row refusal) passes every
+  # one of them while 37 of 39 real components go unmeasured. agent-gate.sh
+  # already records exactly the binding needed: `recert-anchor-run-id:` in
+  # the recert block is the gate own read of the ANCHOR's `run-id:` at
+  # preflight time (scripts/agent-gate.sh:25851, RECERT_ANCHOR_RUN_ID).
+  # Requiring them equal makes the gate own 39-component check-4 census —
+  # already performed against the REAL anchor file at recert time —
+  # transitively binding on the PASTED pair, with no new component-count
+  # baseline invented here.
+  assert_single_key "$full_n_run_id" run-id "full-gate block"
+  assert_single_key "$GP_n_recert_anchor_run_id" recert-anchor-run-id "recert block"
+  if [ "$GP_v_recert_anchor_run_id" != "$full_run_id" ]; then
+    refuse_no_gate \
+      "The recert block's 'recert-anchor-run-id:' ($GP_v_recert_anchor_run_id) does not match the pasted anchor block's own 'run-id:' ($full_run_id)." \
+      "The anchor PASTED in this PR is not the file run_recertify_preflight actually" \
+      "validated — its full 39-component accounting does not transfer to a different file" \
+      "that merely shares the same tree sha. Paste the EXACT anchor file the recert run" \
+      "named in 'recert-anchor-summary-file:'."
+  fi
+
+  # recert-components: IS a security boundary (#4268 roborev finding, Medium —
+  # an earlier comment here claimed it was reporting evidence only, which was
+  # false): it is used VERBATIM below as the exemption set for the anchor's
+  # component accounting (a component named here is treated as "the failure
+  # being re-certified" rather than checked for PASS/OPT-OUT). agent-gate.sh
+  # enforces <=2 names and validates each against its live COMPONENTS array
+  # before it will even START a recert, but nothing here mirrors either bound
+  # — a pasted block whose `recert-components:` lists every component name
+  # would exempt every anchor failure from the check below and still reach
+  # `recert-verdict: CERTIFIED`/`PREMERGE: OK`. Bounded the same way the gate
+  # bounds it: 1 or 2 comma-separated names, each `[a-z0-9-]+`.
+  assert_single_key "$GP_n_recert_components" recert-components "recert block"
+  recert_components="$GP_v_recert_components"
+  _rc_comp_ifs_save="$IFS"; IFS=,
+  read -r -a _rc_comp_list <<<"$recert_components"
+  IFS="$_rc_comp_ifs_save"
+  if [ "${#_rc_comp_list[@]}" -eq 0 ] || [ "${#_rc_comp_list[@]}" -gt 2 ]; then
+    refuse_no_gate \
+      "The recert block's 'recert-components:' names ${#_rc_comp_list[@]} component(s) ('$recert_components')." \
+      "agent-gate.sh's own --recertify refuses to start on anything but 1 or 2 names;" \
+      "this assert must bound the same way, or a pasted block naming every component" \
+      "would exempt every anchor failure from the check below."
+  fi
+  for _rc_comp_check in "${_rc_comp_list[@]}"; do
+    case "$_rc_comp_check" in
+      ''|*[!a-z0-9-]*)
+        refuse_no_gate \
+          "The recert block's 'recert-components:' contains an invalid name" \
+          "('$_rc_comp_check' in '$recert_components') — component names are" \
+          "[a-z0-9-]+ only (agent-gate.sh's COMPONENTS array)."
+        ;;
+    esac
+  done
+
+  # EVERY COMPONENT IN THE ANCHOR THAT THIS RECERT DOES *NOT* NAME MUST ALREADY
+  # BE PASS OR OPT-OUT (#4268 AC; roborev finding, Medium).
+  #
+  # WHAT WAS MISSING. The checks above accept an anchor whose overall RESULT is
+  # FAIL — legitimately, since a recert exists precisely because a component
+  # failed — but nothing looked at WHICH components failed. So an anchor with
+  # TWO failures paired with a ONE-component recert naming only one of them
+  # reached `PREMERGE: OK`: the second failure was never re-run, never
+  # certified, and never mentioned. "Anchor + recert together certify the sha"
+  # then covered strictly less than the whole component set, which is this
+  # case's entire reason to exist.
+  #
+  # THE SAME RULE THE GATE ITSELF ENFORCES, READ FROM THE OPPOSITE SIDE.
+  # scripts/agent-gate.sh's run_recertify_preflight (check 4) walks its OWN
+  # COMPONENTS array and refuses to START a recert unless every non-named
+  # component is PASS/OPT-OUT in the anchor, with ONE declared exception:
+  # `tooling-tests: SKIP`, which #4266's diff-scoping makes a DECIDED, reviewed
+  # outcome on the common case rather than an unmeasured gap. Every other
+  # component's SKIP still refuses, because for them SKIP really does mean "not
+  # measured". This check mirrors that set exactly — a divergence would let one
+  # side certify what the other refuses.
+  #
+  # WHY IT IS NOT REDUNDANT WITH THE GATE'S OWN CHECK: the gate validated the
+  # anchor it was HANDED, while this assert validates the anchor PASTED IN THE
+  # PR. Nothing binds those to be the same file, which is exactly why every
+  # other Case C check re-reads the blocks here too.
+  #
+  # AFFIRMATIVE ZERO: zero component rows is an UNMEASURED census, not a clean
+  # one, so it refuses. No HIGHER floor is asserted: only the gate knows the
+  # live COMPONENTS array, and this side can measure only the rows the block
+  # actually carries — claiming a count here would be inventing a baseline.
+  _rc_rows=$(_gate_component_rows "$summary_file" full) \
+    || refuse_tool_failure awk "full-gate block's component rows"
+  _rc_nrows=0
+  _rc_offenders=""
+  _rc_named_nonpass=0
+  while read -r _rc_name _rc_status; do
+    [ -n "$_rc_name" ] || continue
+    _rc_nrows=$((_rc_nrows + 1))
+    # NAMED components are exempt: their status in the ANCHOR is the failure
+    # being re-certified. The recert block's own `recert-verdict: CERTIFIED`
+    # (asserted above) is what vouches for their RE-RUN.
+    case ",$recert_components," in
+      *",$_rc_name,"*)
+        # Tracked so the FAIL-attributability check below can tell a real
+        # anchor failure (named component genuinely non-PASS) apart from a
+        # cause with NO component-row representation at all — a SIDE-lane
+        # subshell failure (SIDE_LANE_EXIT != 0) forces OVERALL=FAIL with no
+        # row naming it, so every row, including the named ones, would
+        # otherwise read PASS (#4268 roborev finding, High).
+        #
+        # ONLY FAIL/VACUOUS CAN HAVE CAUSED RESULT: FAIL (job 122, Medium):
+        # agent-gate.sh's _status_is_nonfailing defines PASS|SKIP|OPT-OUT as
+        # non-failing, so a named component reading SKIP or OPT-OUT cannot be
+        # the anchor's real failure — `!= PASS` used to admit it anyway,
+        # laundering an unattributable FAIL exactly like an unnamed one
+        # would. mirrors agent-gate.sh's own check 4b fix.
+        case "$_rc_status" in FAIL|VACUOUS) _rc_named_nonpass=1 ;; esac
+        continue
+        ;;
+    esac
+    case "$_rc_status" in
+      PASS|OPT-OUT) ;;
+      SKIP)
+        [ "$_rc_name" = tooling-tests ] \
+          || _rc_offenders="${_rc_offenders:+$_rc_offenders }$_rc_name=$_rc_status"
+        ;;
+      *) _rc_offenders="${_rc_offenders:+$_rc_offenders }$_rc_name=$_rc_status" ;;
+    esac
+  done <<GATE_RECERT_ROWS
+$_rc_rows
+GATE_RECERT_ROWS
+  if [ "$_rc_nrows" -eq 0 ]; then
+    refuse_no_gate \
+      "The recert ANCHOR carries ZERO component status rows — nothing was measured." \
+      "A full-gate SUMMARY lists every component it ran (e.g. 'core-tests: PASS (412s)')." \
+      "With none present, 'every component this recert does not name already PASSed' is" \
+      "UNVERIFIABLE, and an unmeasured check is not a clean one. Paste the anchor run's" \
+      "real AGENT_GATE_SUMMARY_FILE, not an excerpt."
+  fi
+  if [ -n "$_rc_offenders" ]; then
+    refuse_no_gate \
+      "The recert ANCHOR has non-PASS component(s) this recert does NOT re-run: $_rc_offenders." \
+      "A recert re-certifies ONLY the components named in 'recert-components:'" \
+      "(here: $recert_components). Every OTHER component must already be PASS or OPT-OUT" \
+      "in the anchor — the same rule scripts/agent-gate.sh's own --recertify pre-flight" \
+      "enforces before it will start (tooling-tests: SKIP is the one declared exception," \
+      "#4266). Those component(s) were never re-run and are not certified by anything," \
+      "so this pair covers less than the full component set. REMEDY: name them in" \
+      "--components too (max 2), or re-run the FULL gate."
+  fi
+  # FAIL-ATTRIBUTABILITY (#4268 roborev finding, High): the checks above confirm
+  # every OTHER component is PASS/OPT-OUT, but say nothing about WHY the anchor's
+  # overall RESULT is FAIL in the first place. A SIDE-lane subshell failure
+  # (SIDE_LANE_EXIT != 0, scripts/agent-gate.sh) forces OVERALL=FAIL with no
+  # component row naming it at all — so an anchor can have RESULT: FAIL while
+  # EVERY row, including the named ones, reads PASS, and the checks above would
+  # accept it anyway (nothing to flag as an offender). A recert then "re-runs"
+  # components that were never the real cause and certifies a failure that was
+  # never attributed to anything. Require the FAIL to land on a NAMED component.
+  if [ "$full_result" = FAIL ] && [ "$_rc_named_nonpass" != 1 ]; then
+    refuse_no_gate \
+      "The recert ANCHOR's RESULT is FAIL, but no component named in" \
+      "'recert-components:' (here: $recert_components) reads FAIL or VACUOUS in the" \
+      "anchor's own rows — PASS, SKIP and OPT-OUT cannot have produced RESULT: FAIL" \
+      "(scripts/agent-gate.sh's _status_is_nonfailing)." \
+      "A recert exists to re-run the component(s) that actually failed. If none of the" \
+      "named components shows a FAIL/VACUOUS row, the anchor's FAIL has no component-row" \
+      "cause — e.g. a SIDE-lane subshell failure or a summary-integrity clobber — and" \
+      "re-running a PASSing/SKIPped/OPT-OUT component certifies nothing about the real" \
+      "failure." \
+      "REMEDY: name the component(s) whose row actually reads FAIL or VACUOUS, or re-run" \
+      "the FULL gate."
+  fi
+
+  # THE RECERT BLOCK'S OWN ROWS MUST BE MEASURED AND EXACTLY PASS (#4268 roborev
+  # finding, Medium — `_gate_component_rows`'s "recert" selector was DEAD CODE:
+  # wired for exactly this purpose but never called anywhere in Case C). Every
+  # check above reads the ANCHOR's rows; nothing yet reads the recert block's
+  # OWN. `recert-verdict: CERTIFIED` and `RESULT: PASS` (asserted earlier) are
+  # SCALAR tokens a hand-assembled block can stamp with zero components ever
+  # having run — this is what closes that gap. Mirrors the anchor's own
+  # affirmative-zero rule (a block with no rows is UNMEASURED, not clean), and
+  # requires each NAMED component's row to be EXACTLY PASS — not merely
+  # PASS/OPT-OUT the way an unnamed anchor component may be, because a recert
+  # exists specifically to RE-RUN the named component(s) for real.
+  _rcb_rows=$(_gate_component_rows "$recert_file" recert) \
+    || refuse_tool_failure awk "recert block's component rows"
+  _rcb_nrows=0
+  _rcb_seen=""
+  while read -r _rcb_name _rcb_status; do
+    [ -n "$_rcb_name" ] || continue
+    _rcb_nrows=$((_rcb_nrows + 1))
+    case ",$recert_components," in
+      *",$_rcb_name,"*)
+        _rcb_seen="${_rcb_seen:+$_rcb_seen,}$_rcb_name"
+        if [ "$_rcb_status" != PASS ]; then
+          refuse_no_gate \
+            "The recert block's own component row for '$_rcb_name' reads '$_rcb_status', not PASS." \
+            "A recert exists to RE-RUN its named component(s) for real; a non-PASS row on the" \
+            "rerun itself means the host fault was never actually cleared."
+        fi
+        ;;
+    esac
+  done <<GATE_RECERT_SELF_ROWS
+$_rcb_rows
+GATE_RECERT_SELF_ROWS
+  if [ "$_rcb_nrows" -eq 0 ]; then
+    refuse_no_gate \
+      "The recert block carries ZERO component status rows — nothing was measured." \
+      "A real 'scripts/agent-gate.sh --recertify' run dispatches each named" \
+      "component through the SAME full-gate flow and records its own row (e.g." \
+      "'file-size: PASS (1s)'). With none present, 'recert-verdict: CERTIFIED'" \
+      "names a rerun that never happened. Paste the recert run's real" \
+      "AGENT_GATE_SUMMARY_FILE, not a hand-assembled excerpt."
+  fi
+  for _rc_comp_check in "${_rc_comp_list[@]}"; do
+    case ",$_rcb_seen," in
+      *",$_rc_comp_check,"*) ;;
+      *)
+        refuse_no_gate \
+          "recert-components: names '$_rc_comp_check', but the recert block has NO component row for it." \
+          "Every named component must show its OWN row in the recert block, not merely be" \
+          "listed in 'recert-components:' — a listed-but-unrepresented name certifies a" \
+          "component that was never actually rerun."
+        ;;
+    esac
+  done
+  unset _rcb_rows _rcb_nrows _rcb_seen _rcb_name _rcb_status
+
+  # ...and the recert run's OWN provenance must cover the tree being merged —
+  # which, for a recert, IS the same tree the anchor covers: both are compared
+  # directly against $certified, never against each other, so there is no THIRD
+  # sha in play the way Case B's ancestor-anchor introduces one (no ancestry
+  # walk is needed here at all — same sha is a string compare, not a history walk).
+  assert_single_key "$GP_n_commit" commit "recert block"
+  assert_single_key "$GP_n_ts" tree-start "recert block"
+  assert_covers commit "$GP_v_commit" "$certified" "recert block" "certified sha"
+  assert_covers tree-start "$GP_v_ts" "$certified" "recert block" "certified sha"
+  recert_commit="$GP_v_commit"
+  recert_ts="$GP_v_ts"
+  recert_dirty="$GP_v_dirty"
+  recert_ndirty="$GP_n_dirty"
+  recert_tsdirty="$GP_v_tsdirty"
+  recert_ntsdirty="$GP_n_tsdirty"
+  assert_clean_tree "recert block" "$recert_dirty" recert "$recert_ndirty" commit:
+  assert_clean_tree "recert block" "$recert_tsdirty" recert "$recert_ntsdirty" tree-start:
+  ;;
+B)
   # CASE B — ANCHORED DELTA (#1892). The full block is the ANCHOR: its sha need
   # not be the certified sha, but it must still be a real, verifiable sha, and
   # the delta block must name exactly it.
   assert_hex_abbrev commit "$full_commit" "full-gate block"
   assert_hex_abbrev tree-start "$full_ts" "full-gate block"
 
-  assert_readable_summary "$delta_file" "delta summary"
+  # (readability already asserted above, before the content classification)
   gate_parse_file "$delta_file" delta "delta summary"
 
   if [ "$GP_blocks" -eq 0 ]; then
@@ -2130,7 +2796,19 @@ else
   # the PR exactly as a dirty full gate does.
   assert_clean_tree "delta block" "$delta_dirty" delta "$delta_ndirty" commit:
   assert_clean_tree "delta block" "$delta_tsdirty" delta "$delta_ntsdirty" tree-start:
-fi
+  ;;
+# REFUSE, don't guess (#4268 roborev finding, Low — job 122): every other
+# kind-dispatch in this file refuses on an unrecognized shape rather than
+# falling through to a specific arm's own logic (assert_clean_tree's own
+# comment: "Refusing rather than guessing a remedy"). B was previously the
+# bare `*)` catch-all — a future fourth classification, or a typo'd
+# case_kind assignment, would silently run the delta path and read
+# $delta_anchor, which no other arm ever sets (an unset-variable abort under
+# `set -u`, or worse, an unbound read if `set -u` is ever relaxed here).
+*)
+  refuse_no_gate "INTERNAL: unknown case_kind '$case_kind' — this is a defect in premerge-assert.sh itself, not a property of the pasted pair."
+  ;;
+esac
 
 # `dirty:` is REPORTED **AND ENFORCED** (#3648, replacing the deferral note this
 # line used to carry). In CASE B this is the ANCHOR's own tree: a full PASS taken
@@ -2147,7 +2825,12 @@ assert_clean_tree "full-gate block" "$full_tsdirty" full "$full_ntsdirty" tree-s
 # the first thing that is wrong), and running it after the full block's own
 # `dirty:` enforcement keeps a dirty anchor reported as dirty rather than as
 # unverifiable. It is the only check here that reads a repository.
-if [ -n "$delta_file" ]; then
+#
+# CASE C NEEDS NO EQUIVALENT: its anchor's commit/tree-start already had to
+# cover $certified EXACTLY (a string-prefix compare, asserted above at case_kind
+# == C), so there is no separate ancestor sha to walk history for — "same tree
+# digest" is a stronger, cheaper claim than "an ancestor of a later commit".
+if [ "$case_kind" = B ]; then
   assert_anchor_on_history "$delta_anchor" "$certified"
 fi
 
@@ -2365,7 +3048,16 @@ if [ -n "$hold_check_out" ]; then
 fi
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
   "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
-if [ -n "$delta_file" ]; then
+if [ "$case_kind" = C ]; then
+  # `recert-verdict:` is re-printed here (not merely asserted CERTIFIED above)
+  # so the pasted PR record carries the SAME affirmative token a reader would
+  # find in the recert summary itself — no reader has to cross-reference to
+  # confirm what this line's acceptance means.
+  printf 'PREMERGE: RECERTIFY anchor: %s components: %s recert-verdict: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
+    "$recert_anchor" "$recert_components" "$GP_v_recert_verdict" "$recert_commit" "$recert_ts" "$recert_dirty" \
+    "$recert_file"
+fi
+if [ "$case_kind" = B ]; then
   # `anchor-ancestry:` is the AFFIRMATIVE record that the #3653 binding RAN. After
   # assert_anchor_on_history it can only ever read BOUND — which is the point: a
   # silent pass is indistinguishable from a check that was never reached.

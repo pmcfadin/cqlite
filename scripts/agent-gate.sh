@@ -1011,6 +1011,30 @@
 #                                     # Record BOTH the anchor's full SUMMARY and this
 #                                     # DELTA block in the PR. Recovery default:
 #                                     # .agent-gate-delta-summary.txt.
+#   scripts/agent-gate.sh --recertify <anchor-summary-file> --components <c1[,c2]>
+#                                     # HOST-FAULT RE-CERTIFICATION (issue #4268): rerun
+#                                     # <=2 host-failed components against a SAME-TREE-
+#                                     # DIGEST full-gate anchor, instead of a full re-gate.
+#                                     # Preconditions (run_recertify_preflight), all
+#                                     # FAIL-CLOSED: the anchor is a genuine full-gate
+#                                     # SUMMARY (never lite/delta/recert — a recert can
+#                                     # never chain off another), <=24h old, every OTHER
+#                                     # anchor component already PASS/OPT-OUT (tooling-
+#                                     # tests: SKIP is the one declared #4266 exception),
+#                                     # the anchor's own RESULT:FAIL (if any) attributable
+#                                     # to a NAMED component, and the current tree's sha +
+#                                     # digest matching the anchor's exactly. It reruns in
+#                                     # FULL-GATE mode (NOT --only's lenient posture,
+#                                     # despite riding its dispatch — see `_gate_is_strict`)
+#                                     # and is EXEMPT from the #1825 slot cap only, never
+#                                     # from #3544's component-set strictness or any other
+#                                     # fail-closed preflight. Emits a DISTINCT
+#                                     # "==== AGENT-GATE RECERT SUMMARY ====" block (MODE:
+#                                     # recertify) that names the anchor + its run-id, so it
+#                                     # can NEVER be pasted as a full SUMMARY. It is NOT the
+#                                     # gate of record. Record BOTH the anchor's full
+#                                     # SUMMARY and this RECERT block in the PR. Recovery
+#                                     # default: .agent-gate-recert-summary.txt.
 #   scripts/agent-gate.sh --list      # list full-gate components without running
 #   scripts/agent-gate.sh --lite-list # list the --lite components without running
 #   scripts/agent-gate.sh --delta-list # list the --delta components without running
@@ -1793,6 +1817,17 @@ if [ -r "$REPO_ROOT/scripts/lib/tooling-tests-scope.sh" ]; then
   if . "$REPO_ROOT/scripts/lib/tooling-tests-scope.sh" 2>/dev/null; then _TOOLING_TESTS_SCOPE_LOADED=1; fi
 fi
 
+# #4268: the --recertify component-eligibility domain table (which components a
+# host-fault re-cert may name, given the PR's own diff). Sourced here, same
+# pattern as the two libs above — pure array/function definitions, no side
+# effects. Depends on TOOLING_TESTS_SCOPE_PATTERNS from the #4266 lib above for
+# its tooling-tests domain entry, hence sourced after it.
+_RECERT_DOMAINS_LOADED=0
+if [ -r "$REPO_ROOT/scripts/lib/recert-component-domains.sh" ]; then
+  # shellcheck source=scripts/lib/recert-component-domains.sh
+  if . "$REPO_ROOT/scripts/lib/recert-component-domains.sh" 2>/dev/null; then _RECERT_DOMAINS_LOADED=1; fi
+fi
+
 # _AGENT_GATE_OS: the host OS, resolved ONCE per gate run. `uname` is an external
 # process, so the OS question cannot be asked inside the per-emit token path above;
 # asking it at script scope costs one fork per RUN instead of one per summary. The
@@ -2524,9 +2559,12 @@ _missing_fixtures_marker() {
 # so the hidden --preflight-fixtures hook asserts the SAME decision
 # apply_fixture_preflight consumes (single-source; no drift).
 _fixture_status() {
-  # Only the FULL gate is strict: --only stays lenient, --lite already returned.
-  [ -z "$ONLY" ] || { echo OK; return 0; }
-  [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  # Strict for the FULL gate AND --recertify (#4268: it reruns named
+  # components "in full-gate mode" by its own doctrine, so it must not
+  # silently inherit --only's general leniency just because it reuses
+  # --only's dispatch — roborev finding, High). A bare --only stays lenient;
+  # --lite already returned before this is ever reached.
+  _gate_is_strict || { echo OK; return 0; }
   local n
   n=$(find "$CQLITE_DATASETS_ROOT/sstables/$CANONICAL_FIXTURE_KEYSPACE" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
   [ "${n:-0}" -gt 0 ] && { echo OK; return 0; }
@@ -3152,9 +3190,10 @@ _missing_schema_files() {
 # side effects, so the hidden --preflight-schemas hook asserts the SAME decision
 # apply_schemas_preflight consumes (single-source; no drift).
 _schemas_status() {
-  # Only the FULL gate is strict: --only stays lenient, --lite already returned.
-  [ -z "$ONLY" ] || { echo OK; return 0; }
-  [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  # Strict for the FULL gate AND --recertify — same reasoning as
+  # _fixture_status just above (#4268 roborev finding, High): a bare --only
+  # stays lenient; --lite already returned before this is ever reached.
+  _gate_is_strict || { echo OK; return 0; }
   # A rejected override FAILs even if the checkout's fixtures happen to be complete: the
   # operator asked for a root the contract cannot honor, and quietly using a different
   # one is the mis-certification this guard exists to prevent.
@@ -3206,9 +3245,37 @@ apply_schemas_preflight() {
   # Leniency (AC (g), unchanged from #2078's contract): only the FULL gate is strict.
   # --lite never reaches here (run_lite always exits first), but it is checked anyway so
   # the invariant holds by construction rather than by call-site archaeology.
-  if [ -n "$ONLY" ] || [ "$LITE" -ne 0 ]; then
+  #
+  # SPELLED VIA `_gate_is_strict`, NEVER THE BARE `[ -n "$ONLY" ]` IDIOM (#4268 roborev
+  # finding, High). `--recertify` reruns its named components in FULL-GATE mode, and it
+  # implements that by setting `ONLY="$RECERT_COMPONENTS"` before falling through into the
+  # shared flow — so the bare idiom classified every recert run as LENIENT and returned
+  # HERE, skipping the guard entirely and stamping `schemas: not checked`. That defeated
+  # #4268's "reruns in full-gate mode" requirement AND broke the single-source property
+  # this function's own header comment claims: `_schemas_status` (the PURE decision this
+  # function is documented to consume) already reads `_gate_is_strict`, so the effectful
+  # guard was branching on one mode test while the decision it renders branched on
+  # another — and the decision was never reached at all. There is deliberately no
+  # environment opt-out on either side.
+  if ! _gate_is_strict; then
+    # $_mode is derived from ALL THREE mode variables, not just `$ONLY`. A recert
+    # sets `ONLY`, so the old two-way spelling would have labelled any lenient
+    # state it reached `--only <components>` — naming a mode the run is not in,
+    # in the one line whose entire job is to say WHICH mode declined to check.
+    # The `--recertify` arms are unreachable while `_gate_is_strict` excepts
+    # RECERTIFY (that is the fix above); they exist so this text cannot LIE if
+    # that predicate is ever widened, the same reason the `$LITE` arm is kept
+    # for a path `run_lite` already exits before.
     local _mode
-    if [ -n "$ONLY" ]; then _mode="--only $ONLY"; else _mode="--lite"; fi
+    if [ "$LITE" -ne 0 ] && [ "$RECERTIFY" -eq 1 ]; then
+      _mode="--lite --recertify $ONLY"
+    elif [ "$LITE" -ne 0 ]; then
+      _mode="--lite"
+    elif [ "$RECERTIFY" -eq 1 ]; then
+      _mode="--recertify $ONLY"
+    else
+      _mode="--only $ONLY"
+    fi
     SCHEMAS_LINE="schemas: not checked ($_mode is lenient, #3148 AC (g)) — this block asserts NOTHING about the schemas root"
     return 0
   fi
@@ -6217,13 +6284,59 @@ _component_set_verdict() {
   esac
 }
 
-# _component_set_strict: rc 0 iff this mode may FAIL on the verdict — the FULL gate and
-# --delta, the two modes whose blocks are recorded in a PR as certification. `--lite`
-# and `--only` emit the SAME line ADVISORY, matching how the #2078 fixture and #3148
-# schemas pre-flights already split leniency: --lite runs every fix round and must not
-# require the network to function.
+# _gate_is_strict (#4268 roborev finding, High): rc 0 iff this run must enforce
+# the FULL gate's fixture/dataset strictness (a real corpus required,
+# CQLITE_REQUIRE_FIXTURES=1, etc.) — the full gate itself, OR a --recertify run.
+#
+# --recertify's OWN doctrine (its header comment, `docs/development/gate-ops.md`)
+# says it reruns the named components "in FULL-GATE mode" — but the
+# IMPLEMENTATION reuses `--only`'s dispatch (see the RECERTIFY design comment
+# below), and `--only` is the LENIENT posture throughout this script (a bare
+# diagnostic that cannot be a verdict — it exits 3 on success). Every strict/
+# lenient fork keyed on the bare `[ -z "$ONLY" ]` idiom therefore silently
+# degraded a recert too: `_fixture_status`/`_schemas_status` (the #2078/#3148
+# canonical-corpus guards) went lenient, `run_node_bindings` dropped
+# `CQLITE_REQUIRE_FIXTURES=1`, `cli-tests`'s sensor_data fixture preflight and
+# `feature-iso-delta-scan`'s fixture posture both degraded — so
+# `--recertify --components core-tests` on a worktree with an incomplete
+# corpus could run dataset-gated tests against data the full gate would have
+# refused to start on, then stamp `recert-verdict: CERTIFIED`. A re-run
+# strictly weaker than the run it claims to replace defeats the whole point.
+#
+# Every SUCH site now calls THIS predicate instead of `[ -z "$ONLY" ] && [
+# "$LITE" -eq 0 ]` directly. NOT every `-z "$ONLY"` site in this file needs
+# it, and two do NOT: `acquire_gate_slot`'s `[ -n "$ONLY" ] && return 0`
+# exemption from the #1825 slot cap is INTENTIONAL for --recertify (see its
+# own comment — recert is meant to be fast, not queued), and it already reads
+# `$ONLY` directly rather than through a leniency predicate, so it is
+# unaffected by this one either way.
+#
+# Distinct from `_component_set_strict()` just below, which governs a
+# DIFFERENT concern (component-set skew) with its own leniency boundary —
+# not merged with this one, so a future change to either cannot silently
+# perturb the other.
+_gate_is_strict() {
+  [ "$LITE" -eq 0 ] && { [ -z "$ONLY" ] || [ "$RECERTIFY" -eq 1 ]; }
+}
+
+# _component_set_strict: rc 0 iff this mode may FAIL on the verdict — the FULL gate,
+# --delta, and --recertify (#4268 roborev finding, Medium — see below), the modes whose
+# blocks are recorded in a PR as certification. `--lite` and a bare `--only` emit the
+# SAME line ADVISORY, matching how the #2078 fixture and #3148 schemas pre-flights
+# already split leniency: --lite runs every fix round and must not require the network
+# to function.
+#
+# RECERTIFY must be named explicitly, exactly like `_gate_is_strict` just above (NOT
+# merged with it — see that function's own comment on why they stay two predicates):
+# run_recertify_preflight sets `ONLY="$RECERT_COMPONENTS"` on success, so the bare
+# `[ -z "$ONLY" ]` test alone reads a --recertify run as lenient at
+# apply_component_set_preflight's SECOND call site (after `_tree_recapture_after_slot`,
+# guarding against a mid-queue mutation per roborev job 290) — exactly the call whose
+# verdict a Case C recert block now certifies in premerge-assert.sh. A skew introduced
+# during the slot queue would downgrade to an ADVISORY line instead of failing the run
+# that is about to certify a merge.
 _component_set_strict() {
-  [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]
+  [ "$LITE" -eq 0 ] && { [ -z "$ONLY" ] || [ "$RECERTIFY" -eq 1 ]; }
 }
 
 # _component_set_line: PURE text for the current probe state + mode. The strict wording
@@ -6800,6 +6913,24 @@ DELTA_EXECUTORS=""
 # --delta points it at the anchor commit so the ratchet + scoping cover exactly
 # the anchor..HEAD test/docs diff. Empty everywhere else (unchanged behavior).
 GATE_BASE_OVERRIDE=""
+# --recertify (issue #4268): host-fault re-certification. Given a same-tree-digest
+# full-gate anchor whose non-named components already PASS/OPT-OUT, rerun ONLY the
+# named (<=2) components in FULL-GATE mode instead of a whole new full gate. It
+# is NOT its own execution path: run_recertify_preflight validates the anchor and
+# eligibility, then sets ONLY="$RECERT_COMPONENTS" and RETURNS (never exits on
+# success) so the run falls through into the SAME full-gate flow `--only` already
+# uses — dispatch_component is defined too late in this file (~line 27300+) to
+# call directly from an early exit hook the way run_lite/run_delta do; reusing
+# --only's existing per-component ONLY-filter and acquire_gate_slot's existing
+# `[ -n "$ONLY" ] && return 0` exemption gets both effects for free. See
+# run_recertify_preflight (defined after run_delta) for the full validation and
+# the terminal-emission RECERTIFY branch (near the end of this file, beside the
+# `mode: PARTIAL (--only ...)` block) for the distinct summary + verdict.
+RECERTIFY=0
+RECERT_ANCHOR_FILE=""
+RECERT_COMPONENTS=""
+RECERT_ANCHOR_SHA=""
+RECERT_ANCHOR_RUN_ID=""
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
   # --lite alone runs the fast gate; `--lite --emit-summary-selftest` drives the
@@ -7063,6 +7194,22 @@ case "${1:-}" in
     echo "CAUSE: $TOOLING_SCOPE_CAUSE"
     echo "DETAIL: $TOOLING_SCOPE_DETAIL"
     exit 0 ;;
+  # --recertify <anchor-summary-file> --components <c1[,c2]> (issue #4268):
+  # rerun <=2 host-failed components against a same-digest full-gate anchor.
+  # Validation lives in run_recertify_preflight (defined after run_delta),
+  # dispatched right where --delta is (before acquire_gate_slot).
+  --recertify)
+    RECERTIFY=1
+    RECERT_ANCHOR_FILE="${2:?--recertify needs <anchor-summary-file>}"
+    shift 2 || true
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --components) RECERT_COMPONENTS="${2:?--components needs a comma-separated list (1 or 2 names)}"; shift 2 ;;
+        *) echo "unknown --recertify option: $1" >&2; exit 2 ;;
+      esac
+    done
+    [ -n "$RECERT_COMPONENTS" ] || { echo "--recertify requires --components <c1[,c2]>" >&2; exit 2; }
+    ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -7089,6 +7236,14 @@ elif [ "$DELTA" -eq 1 ]; then
   SUMMARY_START_MARKER="==== AGENT-GATE DELTA SUMMARY ===="
   SUMMARY_END_MARKER="==== END AGENT-GATE DELTA SUMMARY ===="
   SUMMARY_MODE_LINE="MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $DELTA_ANCHOR)"
+elif [ "$RECERTIFY" -eq 1 ]; then
+  # DISTINCT recert markers (issue #4268): can NEVER be mistaken for — or pasted
+  # as — a full SUMMARY. The gate of record remains the full agent-gate.sh run
+  # recorded at the anchor; this block plus that anchor's own SUMMARY together
+  # certify the sha.
+  SUMMARY_START_MARKER="==== AGENT-GATE RECERT SUMMARY ===="
+  SUMMARY_END_MARKER="==== END AGENT-GATE RECERT SUMMARY ===="
+  SUMMARY_MODE_LINE="MODE: recertify (HOST-FAULT RE-CERTIFICATION of $RECERT_COMPONENTS — NOT the gate of record; gate of record = the full agent-gate.sh run recorded at the anchor, combined with this block)"
 fi
 
 # #2874: capture the INHERITED parent-run marker (exported by an ENCLOSING gate)
@@ -11505,6 +11660,22 @@ elif [ "$DELTA" -eq 1 ]; then
   # the full or lite recovery artifact, and `cat`-ing it can never be misread as
   # the full gate's result.
   SUMMARY_FILE="$REPO_ROOT/.agent-gate-delta-summary.txt"
+elif [ "$RECERTIFY" -eq 1 ]; then
+  # DISTINCT recert recovery filename (#4268 roborev finding, Medium — job 115):
+  # without this, an UNPINNED --recertify shares the FULL gate's own default
+  # path, so the startup sentinel below truncates the gate-of-record's own
+  # recovery artifact the instant an operator anchors a recert there with no
+  # AGENT_GATE_SUMMARY_FILE override — the single most natural thing to do,
+  # and exactly the shape the pre-sentinel collision guard a few lines down
+  # exists to catch rather than prevent structurally. Mirrors LITE/DELTA's
+  # existing rationale exactly. The matching .gitignore entries (mirroring
+  # the lite/delta block) are what stop THIS path's own leftover artifacts
+  # from reading as "dirty" to an unrelated bare `--only`/full run sharing the
+  # checkout — tree-integrity's untracked-file scan honors .gitignore
+  # (`git ls-files --others --exclude-standard`), which is a SEPARATE
+  # mechanism from TREE_EXCLUDE_REL (which only ever self-excludes the
+  # CURRENT run's own artifact, never another mode's).
+  SUMMARY_FILE="$REPO_ROOT/.agent-gate-recert-summary.txt"
 else
   SUMMARY_FILE="$REPO_ROOT/.agent-gate-summary.txt"
 fi
@@ -11522,6 +11693,64 @@ case "$SUMMARY_FILE" in
   /*) ;; # absolute (incl. the repo-root default) -> use verbatim
   *)  SUMMARY_FILE="$INVOCATION_CWD/$SUMMARY_FILE" ;;
 esac
+# Same normalization for --recertify's own anchor argument (#4268 roborev
+# finding, Medium — job 127, escalated from a Low flagged twice before and
+# deferred to #4334: this round showed it ALSO defeats the collision guard
+# just below, not merely a usability gap). The gate cd's to the repo root
+# BEFORE arg parsing, so a relative `--recertify <path>` was resolved
+# against the repo root while a relative AGENT_GATE_SUMMARY_FILE is resolved
+# against the caller's CWD — two paths composed from DIFFERENT bases, so the
+# guard's own same-file tests (both the path compare and the `-e`-gated
+# `-ef` compare) silently missed a real collision, and `--recertify
+# ./anchor.txt` run from any subdirectory refused "not found" for a file
+# that plainly exists next to the caller. MUST run before the guard and
+# before check 2's existence test, both of which read RECERT_ANCHOR_FILE.
+if [ "$RECERTIFY" -eq 1 ]; then
+  case "$RECERT_ANCHOR_FILE" in
+    /*) ;; # absolute -> use verbatim
+    *)  RECERT_ANCHOR_FILE="$INVOCATION_CWD/$RECERT_ANCHOR_FILE" ;;
+  esac
+fi
+# #4268 roborev finding (High, job 112; narrowed job 115 — RECERTIFY now has
+# ITS OWN distinct default, so the common unpinned case this guard originally
+# caught structurally cannot collide anymore): a --recertify run whose
+# SUMMARY_FILE resolves to the SAME file as its own RECERT_ANCHOR_FILE —
+# still reachable via an EXPLICIT AGENT_GATE_SUMMARY_FILE override pinned to
+# the anchor (or to anything else RECERT_ANCHOR_FILE also names) — would have
+# the startup INCOMPLETE sentinel below truncate the anchor out from under
+# run_recertify_preflight before check 2 ever reads it. The run then fails
+# closed (a truncated sentinel can't pass check 3's full-SUMMARY test), but
+# the anchor's PASS content is already destroyed on disk — a data-loss
+# footgun regardless of the safe FAIL. Refuse BEFORE any write.
+#
+# TWO independent same-file tests, not one (#4268 roborev finding, Low — job
+# 115): the PATH compare (`cd … && pwd -P`, this file's existing
+# canonicalization idiom — see _tree_canon_rel below) catches a
+# relative-vs-absolute spelling of the SAME path even when neither file
+# exists yet; `-ef` (device+inode) catches a SYMLINK or HARD LINK whose
+# basename differs from its target's, which the path compare alone cannot
+# see — e.g. `--recertify /tmp/anchor.txt` where `/tmp/anchor.txt` is a
+# symlink to this run's own SUMMARY_FILE: the composed paths differ, but
+# `>"$SUMMARY_FILE"` still truncates the symlink's target, i.e. the anchor's
+# own bytes. `-ef` needs both sides to EXIST, so it is skipped (not refused)
+# when either does not — a nonexistent anchor just means "can't collide via
+# a link", leaving existence itself to run_recertify_preflight's own check 2.
+if [ "$RECERTIFY" -eq 1 ]; then
+  _recert_anchor_phys_d=$(cd "$(dirname -- "$RECERT_ANCHOR_FILE")" 2>/dev/null && pwd -P) || _recert_anchor_phys_d=""
+  _summary_phys_d=$(cd "$(dirname -- "$SUMMARY_FILE")" 2>/dev/null && pwd -P) || _summary_phys_d=""
+  _recert_collides=0
+  if [ -n "$_recert_anchor_phys_d" ] && [ -n "$_summary_phys_d" ] \
+     && [ "$_recert_anchor_phys_d/$(basename -- "$RECERT_ANCHOR_FILE")" = "$_summary_phys_d/$(basename -- "$SUMMARY_FILE")" ]; then
+    _recert_collides=1
+  elif [ -e "$RECERT_ANCHOR_FILE" ] && [ -e "$SUMMARY_FILE" ] && [ "$RECERT_ANCHOR_FILE" -ef "$SUMMARY_FILE" ]; then
+    _recert_collides=1
+  fi
+  if [ "$_recert_collides" -eq 1 ]; then
+    echo "agent-gate: --recertify anchor-summary-file ($RECERT_ANCHOR_FILE) resolves to the SAME file as this run's own SUMMARY_FILE ($SUMMARY_FILE) — refusing before the startup sentinel would truncate it. Pin a distinct AGENT_GATE_SUMMARY_FILE, or point --recertify at a 'cp -p' COPY of the anchor (plain 'cp' resets the copy's mtime, which silently defeats check 7's 24h anchor-staleness bound) (#4268)." >&2
+    exit 2
+  fi
+  unset _recert_anchor_phys_d _summary_phys_d _recert_collides
+fi
 # #2751: the summary path is now fully resolved into SUMMARY_FILE (the parent's own
 # var). Both the startup INCOMPLETE sentinel below and emit_summary write
 # SUMMARY_FILE and NEVER re-read AGENT_GATE_SUMMARY_FILE, so the env var has served
@@ -16335,7 +16564,7 @@ run_node_bindings() {
   local -a leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)
   local require_fixtures=0 fixture_note
   local -a fixture_env=()
-  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+  if _gate_is_strict && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
     require_fixtures=1
     fixture_note="CQLITE_REQUIRE_FIXTURES=1 — an absent corpus fails ONCE, by name, in setup.js instead of as 14 separate beforeAll throws, and parity.test.js's test.skip placeholder (the one corpus-conditional path that would pass silently) cannot fire"
   elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ]; then
@@ -17977,18 +18206,20 @@ run_flight_tests() {
   # behaviour in cqlite-flight and is filed separately, on the #3420/#3380 precedent that a defect
   # this lane REVEALS is fixed in its own PR. What this lane owes is not to report a green over it.
   #
-  # FULL gate only. `--only` and `--lite` stay lenient by design (they are probes, and `--only`
-  # cannot be a verdict — it exits 3 on success), which is the same split the #2078 fixture contract
-  # uses; an opt-out is deliberately visible rather than silent.
-  # "full" spelled the way this script spells it (`-z "$ONLY"` and `LITE -eq 0`), matching the
-  # #2078 preflight's own test rather than inventing a MODE variable that does not exist here.
+  # FULL gate (and --recertify, #4268 roborev finding High — it reruns named
+  # components "in full-gate mode" by its own doctrine) only. A bare `--only`
+  # and `--lite` stay lenient by design (they are probes, and `--only` cannot
+  # be a verdict — it exits 3 on success), which is the same split the #2078
+  # fixture contract uses; an opt-out is deliberately visible rather than silent.
+  # Spelled via `_gate_is_strict` (matching #2078's own predicate) rather than
+  # inventing a MODE variable that does not exist here.
   # HONOURS THE DOCUMENTED OPT-OUT (roborev round-31, Medium). Without this the #2078 escape hatch
   # became INEFFECTIVE: `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` got past the generic preflight and then
   # this lane failed the run anyway, so an opt-out that the SUMMARY reports as taken did not, in
   # fact, let the gate finish. A per-lane check that ignores the global opt-out is a second,
   # undocumented policy — and the opt-out's whole value is that it is VISIBLE in the block
   # (`missing-fixtures: OPT-OUT`), which a silent per-lane veto destroys.
-  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
+  if _gate_is_strict && [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
      && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
     # EVERY prefix-matching entry must be usable, not just one (roborev round-32, Medium). The Rust
     # test picks the FIRST entry whose name starts with `sensor_data-` in UNSPECIFIED `read_dir`
@@ -18120,7 +18351,7 @@ run_flight_tests() {
       return 0
     fi
     echo ">>> [$name] fixture preflight: test_timeseries/sensor_data + Statistics.db present"
-  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]; then
+  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && _gate_is_strict; then
     echo ">>> [$name] fixture preflight: SKIPPED (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the real-fixture stats test may return early, so this lane does NOT validate the wide-table stats path in this run (#3425)"
   fi
 
@@ -20104,8 +20335,10 @@ run_feature_iso_delta_scan() {
   local iso_features="all-compression,write-support,$feat"
 
   # ---- fixture posture, decided from THIS script's own state -----------------------
+  # _gate_is_strict here too (#4268 roborev finding, High): a --recertify of
+  # this component must not silently degrade below the full-gate posture.
   local _full=0
-  [ -z "$ONLY" ] && [ "${LITE:-0}" -eq 0 ] && _full=1
+  _gate_is_strict && _full=1
   local _posture _fx_mode _fx_note
   _posture=$(_ds_fixture_posture "$_full" "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}")
   _fx_mode=${_posture%%$'\t'*}; _fx_note=${_posture#*$'\t'}
@@ -21595,6 +21828,33 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_tooling_tests_scope.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tooling-tests diff-scoping self-test #4266); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # --recertify self-test (#4268): the non-vacuity proof for
+  # scripts/lib/recert-component-domains.sh (a completeness census over the
+  # LIVE COMPONENTS set + pure classify cases) and for run_recertify_preflight
+  # itself — every AC1 validation branch driven through REAL `--recertify`
+  # invocations against a scratch git fixture pinned to a local bare origin
+  # (never the network; mirrors test_agent_gate_delta.sh's own fixture pattern).
+  # The one component ever actually dispatched for real is file-size (cargo-free);
+  # a diff-eligibility case additionally dispatches dep-duplicates, which SKIPs
+  # (cause=guard-absent): run_dep_duplicates checks for
+  # scripts/ci/check-dep-duplicates.sh BEFORE ever invoking cargo, and
+  # build_fixture deliberately does not copy that guard into the fixture
+  # (job 118 roborev finding, Low — load-bearing for test_recertify.sh's R12c,
+  # which asserts the exact SKIP this produces; copying the guard in would
+  # change dep-duplicates' verdict and break that case). A failure FAILs the
+  # component.
+  echo ">>> [$name] bash scripts/tests/test_recertify.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_recertify.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (--recertify self-test #4268); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -24970,9 +25230,19 @@ run_delta() {
     fi
     if ! grep -qF "==== AGENT-GATE SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
        || grep -qF "==== AGENT-GATE LITE SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
-       || grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
+       || grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
+       || grep -qF "==== AGENT-GATE RECERT SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
+      # RECERT exclusion added (#4268 roborev finding, Low — job 121): this
+      # exclusion chain was exhaustive over the three PRE-#4268 dialects; a
+      # file carrying a full SUMMARY block PLUS a RECERT block (the exact
+      # pair --recertify's own doctrine tells operators to record together)
+      # used to pass this full-header test unexcluded, and `anchor_run_id`
+      # below would then read whichever block's `run-id:` `grep | head -1`
+      # happened to see first — possibly the RECERT run's, not the full
+      # gate's. Mirrors premerge-assert.sh's own mixed-family refusal
+      # (`_delta_ndelta`/`_delta_nrecert`) on the pasted-PR side.
       echo "--- [delta] ERROR: --anchor-summary-file is not a FULL-gate SUMMARY block." >&2
-      echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta run." >&2
+      echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta/recert run." >&2
       _tree_meta_array   # #2926
       # disk-exhaustion-exempt: --delta usage ERROR: the anchor summary is not a FULL-gate SUMMARY block. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
@@ -24980,7 +25250,7 @@ run_delta() {
         "$(accelerators_line)" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
-        "error: anchor summary is not a full-gate SUMMARY block (lite/delta cannot anchor a delta)"
+        "error: anchor summary is not a full-gate SUMMARY block (lite/delta/recert cannot anchor a delta)"
       exit 2
     fi
     if ! grep -qE '^RESULT: PASS' "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
@@ -25307,6 +25577,350 @@ run_delta() {
     PASS) exit 0 ;;
     *) exit 1 ;;
   esac
+}
+
+# ---- --recertify (issue #4268): host-fault re-certification -----------------
+#
+# When ONE component of a full gate of record fails for a reason PROVEN to be
+# the HOST's (IO starvation, a disk-full crash, a box reboot — never the code),
+# `--recertify` reruns ONLY that component (or a second one alongside it, <=2
+# total) against the SAME tree the anchor gated, instead of forcing a whole new
+# ~3h full gate. It certifies the sha only in COMBINATION with the anchor's own
+# full SUMMARY — record BOTH in the PR, exactly like --delta.
+#
+#   scripts/agent-gate.sh --recertify <anchor-summary-file> --components core-tests
+#   scripts/agent-gate.sh --recertify <anchor-summary-file> --components c1,c2
+#
+# `--components tooling-tests` is structurally UNREACHABLE on a PR diff
+# (roborev finding, Medium — job 121): its recert domain IS the #4266 trigger
+# set that decides whether tooling-tests runs at all, so check 8 refuses
+# exactly when tooling-tests would have run, and every other diff SKIPped it
+# (nothing to recertify). See docs/development/gate-ops.md's `--recertify`
+# section for the full reasoning and why a narrower domain was not rushed.
+#
+# _recertify_refuse <reason>: the ONE emit-and-exit path for every validation
+# failure below — mirrors run_delta's usage-error pattern (_tree_meta_array +
+# emit_summary ERROR + exit 2). <reason> is free text for the run log; nothing
+# here goes through _record_status_detail (no component has recorded yet).
+_recertify_refuse() {
+  local reason="$1"
+  echo "--- [recertify] REFUSED: $reason" >&2
+  _tree_meta_array   # #2926
+  # disk-exhaustion-exempt: --recertify usage/eligibility REFUSAL. Emitted before
+  # any recert component runs, so there is no component log to scan; the
+  # error: line already names the cause.
+  emit_summary ERROR \
+    "recert-anchor-summary-file: ${RECERT_ANCHOR_FILE:-<unset>}" \
+    "recert-components: ${RECERT_COMPONENTS:-<unset>}" \
+    "$(accelerators_line)" \
+    "$(_component_set_meta)" \
+    "${TREE_META_LINES[@]}" \
+    "error: $reason"
+  exit 2
+}
+
+# run_recertify_preflight: validate the anchor + the requested component list
+# (#4268 AC1). On any failure it calls _recertify_refuse (exit 2, with an ERROR
+# RECERT SUMMARY naming the cause) — there is no `report-only` seam here (unlike
+# apply_schemas_preflight's): dispatch_component is defined too late in this
+# file for an early hidden-hook exit to call it, but that constraint does NOT
+# apply here, since this function calls no such late-defined thing — the seam
+# was tried and removed because a hidden hook invoking THIS function early
+# (arg-parse time, before this function is even textually defined at top-level
+# execution) hits the EXACT SAME ordering problem `dispatch_component` does. So
+# scripts/tests/test_recertify.sh drives this function through REAL
+# `--recertify` invocations instead: the refusal path is asserted by exit code
+# 2 + the emitted `error:` line, and the acceptance path by choosing a
+# zero-cost component (file-size — no cargo) so the fall-through into the real
+# full-gate flow stays fast.
+#
+# ON SUCCESS: sets RECERT_ANCHOR_SHA / RECERT_ANCHOR_RUN_ID and
+# ONLY="$RECERT_COMPONENTS", then returns 0 — it NEVER exits on success. Every
+# run_* function already self-filters on $ONLY, and acquire_gate_slot already
+# self-exempts a non-empty $ONLY from the #1825 cap, so setting it here is the
+# WHOLE integration: --recertify rides the identical dispatch/slot machinery
+# --only already uses, with zero changes to dispatch_component or the main loop
+# (see the comment above the arg-parse case for why that matters).
+#
+# VALIDATION ORDER (fail fast, cheapest/most obviously wrong first):
+#   1. component-list shape: 1 or 2 names, no dupes, every name a REAL member
+#      of COMPONENTS (a loop compare, not `grep -w`, which mishandles the
+#      hyphens component names contain at word boundaries).
+#   2. anchor file exists + is readable.
+#   3. anchor is a FULL-gate SUMMARY: carries the literal "==== AGENT-GATE
+#      SUMMARY ====" header (which, by construction — verified: none of the
+#      LITE/DELTA/RECERT headers contain that exact substring, "LITE "/"DELTA
+#      "/"RECERT " always breaks the contiguous "GATE SUMMARY" run — is never
+#      satisfied by a lite/delta/recert block), and carries no `mode: PARTIAL`
+#      line (rules out an `--only` run, which shares the SAME full header).
+#      THIS IS ALSO WHAT MAKES "a recert cannot follow a recert" HOLD
+#      STRUCTURALLY (#4268's explicit limit): a RECERT SUMMARY's own header
+#      never matches, so it can never itself serve as a valid anchor — no
+#      separate chain-tracking state is needed.
+#   4. every component in COMPONENTS NOT named in --components must show
+#      PASS or OPT-OUT in the anchor (a stricter set than
+#      `_status_is_nonfailing`, which also admits SKIP — deliberately: a SKIP
+#      dodges validation the same way it would for a component being
+#      recertified now, see point 6), WITH ONE DECLARED EXCEPTION:
+#      `tooling-tests: SKIP` is accepted, because #4266's own diff-scoping
+#      makes that a DECIDED, reviewed outcome on the common case (a diff
+#      touching no harness path) rather than an unmeasured gap — refusing it
+#      would make --recertify unconditionally unusable on exactly the PRs
+#      #4266 exists to speed up. ALSO (#4268 roborev finding, High,
+#      attributability): if the anchor's overall RESULT is FAIL, at least one
+#      NAMED component must itself be non-PASS in the anchor — otherwise the
+#      FAIL has no component-row cause (a SIDE-lane subshell failure, e.g.)
+#      and starting a recert would "re-certify" components that were never
+#      the real cause.
+#   5. anchor tree identity: `tree-end:` parses to a sha/dirty/digest, dirty is
+#      `no`, and `tree-integrity: PASS` is present.
+#   6. CURRENT tree matches that identity exactly (same sha, same digest, not
+#      dirty) — compared via `_tree_short` against TREE_START_HEAD/DIGEST/DIRTY,
+#      which every gate mode captures unconditionally before this point runs,
+#      so this reuses the SAME hashing the anchor's own block used rather than
+#      re-deriving it.
+#   7. anchor age <=24h, via the portable `_tree_mtime` helper (already shipped
+#      for the tree-integrity mechanism) against the anchor FILE's mtime.
+#   8. no named component is DIFF-TOUCHED by the PR's own changes: resolve the
+#      diff base via #4266's `_tooling_tests_resolve_base`/
+#      `_tooling_tests_changed_paths` (fail-closed to "unmeasurable" on any git
+#      failure, exactly as tooling-tests-scope's own consumer does), then
+#      classify each requested component through
+#      `_recert_component_diff_touched` (scripts/lib/recert-component-domains.sh,
+#      #4268) — a component whose domain intersects the diff is a code-failure
+#      candidate, not a host-fault candidate, and needs a full gate.
+run_recertify_preflight() {
+  local reason=""
+
+  # ---- 1: component-list shape ----------------------------------------------
+  local -a rc_list=()
+  local _rc_ifs_save="$IFS"; IFS=,
+  read -r -a rc_list <<<"$RECERT_COMPONENTS"
+  IFS="$_rc_ifs_save"
+  if [ "${#rc_list[@]}" -eq 0 ] || [ "${#rc_list[@]}" -gt 2 ]; then
+    reason="--components must name 1 or 2 components (got ${#rc_list[@]}: '$RECERT_COMPONENTS')"
+  fi
+  if [ -z "$reason" ]; then
+    local _rc_c _rc_seen="" _rc_found _rc_cc
+    for _rc_c in "${rc_list[@]}"; do
+      if [ -z "$_rc_c" ]; then reason="empty component name in --components list"; break; fi
+      case " $_rc_seen " in *" $_rc_c "*) reason="duplicate component named twice: $_rc_c"; break ;; esac
+      _rc_seen="$_rc_seen $_rc_c"
+      _rc_found=0
+      for _rc_cc in "${COMPONENTS[@]}"; do [ "$_rc_cc" = "$_rc_c" ] && { _rc_found=1; break; }; done
+      if [ "$_rc_found" -ne 1 ]; then
+        reason="unknown component: '$_rc_c' (not in agent-gate.sh's COMPONENTS set)"
+        break
+      fi
+    done
+  fi
+
+  # ---- 2: anchor file exists / readable -------------------------------------
+  if [ -z "$reason" ] && { [ ! -f "$RECERT_ANCHOR_FILE" ] || [ ! -r "$RECERT_ANCHOR_FILE" ]; }; then
+    reason="--recertify anchor summary file not found or unreadable: $RECERT_ANCHOR_FILE"
+  fi
+
+  # ---- 3: anchor is a genuine full-gate SUMMARY (never lite/delta/recert/only) ----
+  if [ -z "$reason" ]; then
+    if ! grep -qF "==== AGENT-GATE SUMMARY ====" "$RECERT_ANCHOR_FILE" 2>/dev/null \
+       || grep -qF "==== AGENT-GATE LITE SUMMARY ====" "$RECERT_ANCHOR_FILE" 2>/dev/null \
+       || grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$RECERT_ANCHOR_FILE" 2>/dev/null \
+       || grep -qF "==== AGENT-GATE RECERT SUMMARY ====" "$RECERT_ANCHOR_FILE" 2>/dev/null; then
+      reason="anchor is not a full-gate SUMMARY block (a lite/delta/recert block, or a foreign file, cannot anchor a recert — this is also why a recert can never chain off another recert)"
+    elif grep -qE '^mode: PARTIAL' "$RECERT_ANCHOR_FILE" 2>/dev/null; then
+      reason="anchor is an --only PARTIAL run, not the gate of record — a recert must anchor to a genuine full agent-gate.sh run"
+    fi
+  fi
+
+  # ---- 3b: EXACTLY ONE full-gate block (#4268 roborev finding, Medium — job
+  # ---- 127) -------------------------------------------------------------
+  # Checks 3-5 read a MIX of block-scoped (grep ... | head -1, taking the
+  # FIRST occurrence: tree-end:, RESULT:, a named component's own row) and
+  # file-scoped (tree-integrity: PASS, summary-integrity: — grepped over the
+  # WHOLE file) fields. Without this count, a file concatenating TWO full
+  # blocks is validated by COMBINING them: a mutated-tree block 1 (whose own
+  # tree-integrity: FAIL) paired with a clean block 2 would have its
+  # scalar reads taken from block 1 while the tree-integrity: PASS grep is
+  # satisfied by block 2 alone. premerge-assert.sh:GP_blocks already refuses
+  # this on the pasted-PR side, so it is not independently mergeable — but
+  # this preflight's own documented fail-closed contract ("never admit an
+  # anchor it should have refused") was broken regardless of that backstop.
+  # Mirrors premerge-assert.sh's "holds N full-gate blocks — AMBIGUOUS" shape.
+  if [ -z "$reason" ]; then
+    local _rc_nfull
+    _rc_nfull=$(grep -cF "==== AGENT-GATE SUMMARY ====" "$RECERT_ANCHOR_FILE" 2>/dev/null)
+    if [ "${_rc_nfull:-0}" -gt 1 ]; then
+      reason="anchor holds $_rc_nfull full-gate blocks — AMBIGUOUS; a recert must anchor to exactly ONE run's summary, never a concatenation of several"
+    fi
+  fi
+
+  # ---- 4: every OTHER component in the anchor is PASS/OPT-OUT ---------------
+  # (with ONE declared exception — see below)
+  if [ -z "$reason" ]; then
+    local _rc_comp _rc_line _rc_st _rc_ignored_name _rc_ignored_rest
+    for _rc_comp in "${COMPONENTS[@]}"; do
+      case " ${rc_list[*]} " in *" $_rc_comp "*) continue ;; esac
+      _rc_line=$(grep -E "^${_rc_comp}: " "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1)
+      # Herestring, not `printf | awk` (#4061 sigpipe ratchet; #4268 roborev
+      # finding, Low — job 120: check 4b two blocks down already avoids this
+      # exact shape with a herestring `read`, so this arm now matches it).
+      read -r _rc_ignored_name _rc_st _rc_ignored_rest <<<"$_rc_line"
+      case "$_rc_st" in
+        PASS|OPT-OUT) ;;
+        # DECLARED EXCEPTION (roborev finding, High): tooling-tests's own #4266
+        # scoping records a decided, reviewed SKIP on the COMMON case (a diff
+        # touching no harness path) — it is not an unmeasured gap the way a
+        # missing python3/docker/systemd SKIP is for every other component.
+        # Refusing it here would make --recertify unconditionally unusable on
+        # exactly the product PRs #4266 exists to speed up: whatever OTHER
+        # component genuinely host-failed, the anchor's routine
+        # `tooling-tests: SKIP` would refuse the pair regardless. Scoped to
+        # this ONE component by name, not a general SKIP admission — every
+        # other component's SKIP still refuses, because for them SKIP really
+        # does mean "not measured", not "decided".
+        SKIP)
+          if [ "$_rc_comp" != tooling-tests ]; then
+            reason="anchor component '$_rc_comp' is not PASS/OPT-OUT (got 'SKIP') — every component NOT named in --components must already be PASS/OPT-OUT in the anchor (tooling-tests is the one declared exception, #4266/#4268)"
+            break
+          fi
+          ;;
+        *)
+          reason="anchor component '$_rc_comp' is not PASS/OPT-OUT (got '${_rc_st:-<absent>}') — every component NOT named in --components must already be PASS/OPT-OUT in the anchor"
+          break
+          ;;
+      esac
+    done
+  fi
+
+  # ---- 4b: FAIL-attributability (#4268 roborev finding, High; narrowed job
+  # ---- 122, Medium) ----------------------------------------------------------
+  # A SIDE-lane subshell failure (SIDE_LANE_EXIT != 0) forces OVERALL=FAIL with
+  # NO component row naming it — so an anchor can carry RESULT: FAIL while
+  # EVERY row, including the named ones, reads PASS, and check 4 above would
+  # accept it (nothing to flag as an offender). Require the FAIL to land on a
+  # named component — mirrors scripts/flow/premerge-assert.sh's identical
+  # check on the pasted-PR side.
+  #
+  # ONLY FAIL/VACUOUS CAN HAVE CAUSED IT (job 122): `_status_is_nonfailing`
+  # (this file) defines PASS|SKIP|OPT-OUT as the NON-failing set, so a named
+  # component whose anchor row is SKIP or OPT-OUT cannot be the reason
+  # OVERALL=FAIL — naming one used to satisfy this check anyway (`!= PASS`
+  # admitted SKIP/OPT-OUT alongside the real culprits), laundering exactly
+  # the unattributable-FAIL shape this guard exists to refuse. Concretely: a
+  # cqlite-core-only PR with `tooling-tests: SKIP` (the routine #4266
+  # scoping skip) alongside a SIDE-lane failure that forces RESULT: FAIL
+  # with no row of its own — naming `tooling-tests` passed every check
+  # including this one, though nothing about its SKIP explains the FAIL.
+  if [ -z "$reason" ]; then
+    local _rc_overall _rc_named_nonpass=0 _rc_nc _rc_nline _rc_nst _rc_nignored _rc_nrest
+    _rc_overall=$(grep -E '^RESULT: ' "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1 | awk '{print $2}')
+    if [ "$_rc_overall" = FAIL ]; then
+      for _rc_nc in "${rc_list[@]}"; do
+        _rc_nline=$(grep -E "^${_rc_nc}: " "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1)
+        # Herestring, not `printf | awk` (#4061 sigpipe ratchet: a bash builtin
+        # writer followed by a pipe is the flagged shape) — read splits the
+        # same whitespace-delimited fields with no pipe at all.
+        read -r _rc_nignored _rc_nst _rc_nrest <<<"$_rc_nline"
+        case "$_rc_nst" in FAIL|VACUOUS) _rc_named_nonpass=1 ;; esac
+      done
+      if [ "$_rc_named_nonpass" != 1 ]; then
+        reason="anchor RESULT is FAIL, but no named component (${rc_list[*]}) reads FAIL or VACUOUS in the anchor — the FAIL has no component-row cause (PASS/SKIP/OPT-OUT cannot have produced it — see _status_is_nonfailing), so this recert would certify nothing about the real failure"
+      fi
+    fi
+  fi
+
+  # ---- 5: anchor tree identity (dirty:no, tree-integrity: PASS) -------------
+  local _rc_a_sha="" _rc_a_dirty="" _rc_a_digest=""
+  if [ -z "$reason" ]; then
+    local _rc_te
+    _rc_te=$(grep -E '^tree-end:' "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1)
+    # Herestrings, not `printf | sed` (#4061 sigpipe ratchet; #4268 roborev
+    # finding, Low — job 120: matches check 4b's own herestring idiom).
+    _rc_a_sha=$(sed -n 's/^tree-end:[[:space:]]*\([^ ]*\).*/\1/p' <<<"$_rc_te")
+    _rc_a_dirty=$(sed -n 's/.* dirty: \([a-z]*\).*/\1/p' <<<"$_rc_te")
+    _rc_a_digest=$(sed -n 's/.* digest: \([^ ]*\).*/\1/p' <<<"$_rc_te")
+    if [ -z "$_rc_a_sha" ] || [ -z "$_rc_a_digest" ]; then
+      reason="anchor's tree-end: line could not be parsed — cannot verify the same-digest requirement"
+    elif [ "$_rc_a_dirty" != no ]; then
+      reason="anchor tree was dirty (dirty: $_rc_a_dirty) — a recert anchor must be a clean, committed tree"
+    elif ! grep -qE '^tree-integrity: PASS' "$RECERT_ANCHOR_FILE" 2>/dev/null; then
+      reason="anchor tree-integrity is not PASS — cannot trust the anchor's identity"
+    # summary-integrity: (#2874) is ONLY ever emitted with a FAIL value — a
+    # SIDE-lane component detected a mid-run clobber of the pinned summary
+    # path, so the anchor's component rows may not describe the tree that
+    # actually ran (#4268 roborev finding, High; mirrors
+    # scripts/flow/premerge-assert.sh's assert_pass_block check on the
+    # pasted-PR side — a divergence here would let the gate START a recert
+    # that side would then refuse anyway).
+    elif grep -qE '^summary-integrity:' "$RECERT_ANCHOR_FILE" 2>/dev/null; then
+      reason="anchor carries a 'summary-integrity:' line — a mid-run clobber of the pinned summary path was detected (#2874); this anchor's rows cannot be trusted"
+    fi
+  fi
+
+  # ---- 6: CURRENT tree matches the anchor's identity exactly ----------------
+  # TREE_START_HEAD/DIGEST/DIRTY are captured unconditionally before mode
+  # dispatch for every mode (full/lite/delta/recertify alike) — see
+  # _tree_capture_start, called well above this point — so this compares
+  # against the SAME capture the anchor's own block was built from, never a
+  # re-derivation.
+  if [ -z "$reason" ]; then
+    local _rc_cur_sha _rc_cur_digest
+    _rc_cur_sha=$(_tree_short "$TREE_START_HEAD")
+    _rc_cur_digest=$(_tree_short "$TREE_START_DIGEST")
+    if [ "${TREE_START_DIRTY:-}" != no ] || [ "$_rc_cur_sha" != "$_rc_a_sha" ] || [ "$_rc_cur_digest" != "$_rc_a_digest" ]; then
+      reason="current tree does not match the anchor's tree digest (anchor sha=$_rc_a_sha digest=$_rc_a_digest; current sha=${_rc_cur_sha:-<none>} digest=${_rc_cur_digest:-<none>} dirty=${TREE_START_DIRTY:-<none>}) — a recert only re-runs against the EXACT tree the anchor gated; rebase/re-fetch and use --delta or a full gate instead"
+    fi
+  fi
+
+  # ---- 7: anchor age <=24h ---------------------------------------------------
+  if [ -z "$reason" ]; then
+    local _rc_mt _rc_now _rc_age
+    _rc_mt=$(_tree_mtime "$RECERT_ANCHOR_FILE")
+    case "$_rc_mt" in
+      unknown|'')
+        reason="could not determine the anchor summary file's age (stat failed) — cannot verify the 24h staleness bound"
+        ;;
+      *)
+        _rc_now=$(date +%s)
+        _rc_age=$(( _rc_now - ${_rc_mt%.*} ))
+        if [ "$_rc_age" -gt 86400 ]; then
+          reason="anchor summary is stale: $((_rc_age / 3600))h old (limit 24h) — re-run the full gate"
+        fi
+        ;;
+    esac
+  fi
+
+  # ---- 8: no named component is diff-touched by the PR's own changes --------
+  if [ -z "$reason" ]; then
+    if [ "$_TOOLING_TESTS_SCOPE_LOADED" != 1 ] || [ "$_RECERT_DOMAINS_LOADED" != 1 ]; then
+      reason="a required library (tooling-tests-scope.sh or recert-component-domains.sh, #4266/#4268) did not source — cannot verify component eligibility (fail-closed)"
+    else
+      local _rc_base _rc_changed
+      if ! _rc_base=$(_tooling_tests_resolve_base 2>/dev/null) || [ -z "$_rc_base" ]; then
+        reason="could not resolve a diff base (origin/main/main/origin/master/master) — cannot verify a named component is unaffected by the PR's own diff (fail-closed)"
+      elif ! _rc_changed=$(_tooling_tests_changed_paths "$_rc_base"); then
+        reason="could not read the diff against $_rc_base — cannot verify component eligibility (fail-closed)"
+      else
+        local _rc_c
+        for _rc_c in "${rc_list[@]}"; do
+          if _recert_component_diff_touched "$_rc_c" "$_rc_changed"; then
+            reason="'$_rc_c' is in the PR's own diff domain (scripts/lib/recert-component-domains.sh) — a failure there may be a code defect, not a host fault; it needs a full gate, not a recert"
+            break
+          fi
+        done
+      fi
+    fi
+  fi
+
+  if [ -n "$reason" ]; then
+    _recertify_refuse "$reason"
+  fi
+
+  RECERT_ANCHOR_SHA="$_rc_a_sha"
+  RECERT_ANCHOR_RUN_ID=$(grep -E '^run-id:' "$RECERT_ANCHOR_FILE" 2>/dev/null | head -1 | sed 's/^run-id:[[:space:]]*//')
+  [ -n "$RECERT_ANCHOR_RUN_ID" ] || RECERT_ANCHOR_RUN_ID="(not recorded)"
+  ONLY="$RECERT_COMPONENTS"
+  return 0
 }
 
 # ---- Machine-wide full-gate concurrency cap (issue #1825) -------------------
@@ -26774,6 +27388,25 @@ _gate_release_slot() {
 acquire_gate_slot() {
   [ "$LITE" -eq 1 ] && return 0
   [ "$DELTA" -eq 1 ] && return 0
+  if [ "$RECERTIFY" -eq 1 ]; then
+    # #4268 roborev finding (Medium, job 116): RECERTIFY inherits the SAME
+    # `[ -n "$ONLY" ] && return 0` slot-cap exemption a bare `--only`
+    # diagnostic gets (recert is meant to be fast, never queued — see the
+    # RECERTIFY design comment above the arg-parse case) — but unlike a bare
+    # `--only`, a recert IS a certifying mode (premerge-assert.sh Case C), so
+    # returning before ANY disk-admission evaluation meant the one
+    # certifying mode this diff adds never free-space-admits, and
+    # `_disk_admission_meta` rendered the MISLEADING "--only self-exempts…"
+    # line for a mode the run is not in. Evaluate the probe here, exactly
+    # the way the "cap off" branch below binds it for the full gate, WITHOUT
+    # joining the actual queue/build machinery — a recert still never
+    # queues.
+    _DA_PROBE_REACHED=1
+    _gate_disk_admission_bar
+    _gate_disk_admission_launch
+    _gate_disk_admission_bind_launch "recertify self-exempts from the #1825 slot cap (#4268)"
+    return 0
+  fi
   [ -n "$ONLY" ] && return 0
   # #3755: reached by exactly the run class that queues and then builds — the full gate —
   # and by nothing else, because the exemptions above have already returned.
@@ -26997,6 +27630,18 @@ fi
 # EXITS before the full-gate flow. EXEMPT from the #1825 cap (never queued).
 if [ "$DELTA" -eq 1 ]; then
   run_delta "$DELTA_ANCHOR"
+fi
+
+# --recertify (issue #4268): validate the anchor + component-list eligibility.
+# UNLIKE run_lite/run_delta, this does NOT exit on success — it sets
+# ONLY="$RECERT_COMPONENTS" and returns, falling through into the SAME
+# acquire_gate_slot/preflight/main-loop flow --only already uses (see the
+# RECERTIFY comment above the arg-parse case for why). It DOES exit (2, with an
+# ERROR RECERT SUMMARY) on any validation failure, before acquire_gate_slot —
+# a bad anchor or an ineligible component never queues for a slot or compiles
+# anything.
+if [ "$RECERTIFY" -eq 1 ]; then
+  run_recertify_preflight
 fi
 
 # Machine-wide full-gate concurrency cap (issue #1825): block here until a slot is
@@ -28071,9 +28716,62 @@ SUMMARY_META+=("$(cpu_budget_line)")
 # #2926: tree provenance (tree-start / tree-end / tree-integrity [/ tree-hash-cap]).
 _tree_meta_array
 SUMMARY_META+=("${TREE_META_LINES[@]}")
-if [ -n "$ONLY" ]; then
+if [ -n "$ONLY" ] && [ "$RECERTIFY" -ne 1 ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
+elif [ "$RECERTIFY" -eq 1 ]; then
+  # #4268: certification requires every NAMED component to be exactly PASS —
+  # STRICTER than the generic `_status_is_nonfailing` set, which also admits
+  # SKIP/OPT-OUT. Those are legitimate outcomes for a component that is NOT
+  # being recertified right now (the anchor already recorded them, reviewed),
+  # but here they would mean the very re-run this whole mode exists to obtain
+  # never actually happened.
+  #
+  # EXACT MATCH, not the `${ONLY//,/ }` + `grep -qw` idiom every other
+  # component's own ONLY-filter uses (roborev finding, Medium): `grep -w`
+  # treats `-` as a word boundary, so e.g. `query-semantics-oracle` (a real,
+  # separate COMPONENTS entry) is a "whole word" match inside
+  # `flight-query-semantics-oracle` too. A verdict loop keyed on that idiom
+  # would silently CERTIFY a component that was never requested. Iterating the
+  # PARSED request list (comma-split, same as run_recertify_preflight's own
+  # rc_list) with an exact string compare has no such hazard. This does NOT
+  # fix the underlying dispatch-time exposure — dispatch_component's own
+  # per-component ONLY filter still uses the shared `grep -qw` idiom, so a
+  # colliding sibling component could still be DISPATCHED alongside the
+  # requested one; that is a pre-existing property of `--only` (unrelated to
+  # `--recertify`, which only reuses it) and out of scope here. What this loop
+  # closes is narrower and load-bearing for THIS mode specifically: the
+  # CERTIFICATION never credits a component that was not actually requested,
+  # and — the second half — never stamps CERTIFIED for a requested component
+  # that produced NO row at all (a component whose own preflight/dispatch
+  # never ran would otherwise pass this loop vacuously, since an EMPTY
+  # `_RC_BAD` was the only test for "any problems").
+  _RC_BAD=""
+  _RC_IFS_SAVE="$IFS"; IFS=,
+  read -r -a _RC_REQUESTED <<<"$RECERT_COMPONENTS"
+  IFS="$_RC_IFS_SAVE"
+  for _RC_C in "${_RC_REQUESTED[@]}"; do
+    _RC_FOUND=0
+    for _RC_I in "${!NAMES[@]}"; do
+      if [ "${NAMES[$_RC_I]}" = "$_RC_C" ]; then
+        _RC_FOUND=1
+        [ "${STATUSES[$_RC_I]}" = PASS ] || _RC_BAD="${_RC_BAD:+$_RC_BAD,}${NAMES[$_RC_I]}(${STATUSES[$_RC_I]})"
+        break
+      fi
+    done
+    [ "$_RC_FOUND" -eq 1 ] || _RC_BAD="${_RC_BAD:+$_RC_BAD,}${_RC_C}(NO-ROW)"
+  done
+  if [ -n "$_RC_BAD" ]; then
+    OVERALL=FAIL
+    SUMMARY_META+=("recert-verdict: NOT-CERTIFIED (rerun component(s) not PASS: $_RC_BAD)")
+  else
+    SUMMARY_META+=("recert-verdict: CERTIFIED (all rerun component(s) PASS: $ONLY)")
+  fi
+  SUMMARY_META+=("recert-anchor: $RECERT_ANCHOR_SHA")
+  SUMMARY_META+=("recert-anchor-run-id: $RECERT_ANCHOR_RUN_ID")
+  SUMMARY_META+=("recert-anchor-summary-file: $RECERT_ANCHOR_FILE")
+  SUMMARY_META+=("recert-components: $ONLY")
+  SUMMARY_META+=("mode: RECERT ($ONLY against anchor $RECERT_ANCHOR_SHA) - NOT a standalone gate of record; combine with the anchor's own full SUMMARY")
 fi
 # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
 # that names a status must be derived from the observed one, never assumed from the

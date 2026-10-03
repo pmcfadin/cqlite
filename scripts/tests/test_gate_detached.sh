@@ -1924,7 +1924,14 @@ if [ -r "$_gi" ] && command -v git >/dev/null 2>&1; then
       && git -c user.email=t@t -c user.name=t commit -qm seed ) >/dev/null 2>&1
   cp "$_gi" "$_gw/.gitignore"
   # Derive the artifact entries: anchored gate-summary siblings, ignoring the negations themselves.
-  _subjects=$(grep -E '^/\.agent-gate-(summary|lite-summary|delta-summary)\.txt\.' "$_gi" \
+  # Family-agnostic (#4268 roborev finding, Medium — job 121): the prior
+  # hard-coded alternation (summary|lite-summary|delta-summary) silently
+  # stopped covering the new recert family, despite the comment above
+  # claiming "a new artifact entry is covered without editing this test" —
+  # that claim is only true when the pattern itself names no closed family
+  # list. `[a-z-]*` matches every dialect prefix (none, lite-, delta-,
+  # recert-, and any future one) without naming any of them.
+  _subjects=$(grep -E '^/\.agent-gate-[a-z-]*summary\.txt\.' "$_gi" \
               | grep -v '^!' | sed 's|^/||' | sed 's/\*$/aB3xyZ/' | sort -u)
   _gi_n=0; _gi_blind=0
   for _sub in $_subjects; do
@@ -1935,7 +1942,12 @@ if [ -r "$_gi" ] && command -v git >/dev/null 2>&1; then
       _gi_blind=$((_gi_blind+1)); echo "     INVISIBLE to tree-integrity: $_sub/evil.rs"
     fi
   done
-  if [ "$_gi_n" -lt 6 ]; then
+  # Floor raised 6 -> 20 (#4268 roborev finding, Medium — job 121): measured
+  # 24 subjects across the 4 current families (summary/lite/delta/recert, 6
+  # each) with the family-agnostic pattern above; 20 catches a whole missing
+  # family (a regression dropping 4+ of the 24) without pinning the exact
+  # count, which would re-require editing this test for every new dialect.
+  if [ "$_gi_n" -lt 20 ]; then
     bad "4b.119 source under an artifact-named DIRECTORY is visible to tree-integrity" \
         "only $_gi_n subjects derived from .gitignore — the derivation failed, so this proves nothing"
   elif [ "$_gi_blind" = 0 ]; then
