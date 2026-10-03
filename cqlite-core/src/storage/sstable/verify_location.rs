@@ -188,9 +188,35 @@ pub(crate) struct PendingLocation {
     pub(crate) anchor: PhysicalAnchor,
 }
 
-/// Human-readable one-line rendering of a [`Location`] for text output
-/// (`VerifyFinding`'s `Display` impl and the CLI's text renderer, issue #4194).
+/// Human-readable one-line rendering of a [`Location`] for text output — the
+/// FULL form, enumerating every resolved partition key (issue #4194). Used by
+/// the CLI's explicit per-finding `location:` line in `verify` and `sweep`.
 pub fn format_location(loc: &Location) -> String {
+    format_location_impl(loc, true)
+}
+
+/// COMPACT one-line rendering of a [`Location`]: component, chunk and physical
+/// range plus the partition COUNT — never the key list (issue #4194, roborev
+/// job 131 MEDIUM).
+///
+/// `VerifyFinding`'s `Display` renders THIS, not [`format_location`].
+/// `VerifyReport::summary_line()` joins every finding's `Display` into a single
+/// line, and `cqlite verify --out text` prints that summary line first and then
+/// each finding's full location again two lines below. Rendering the full form
+/// in `Display` therefore made the "summary line" run to kilobytes (up to
+/// [`MAX_RESOLVED_KEYS`] hex keys per finding) and duplicated, verbatim, the
+/// `location:` detail printed beneath it; the same inflated strings flowed into
+/// `IntegrityCheckResult::parsing_errors`. A COUNT keeps those consumers a
+/// non-empty byte anchor without the enumeration.
+pub fn format_location_compact(loc: &Location) -> String {
+    format_location_impl(loc, false)
+}
+
+/// Shared renderer behind [`format_location`] and [`format_location_compact`].
+/// ONE implementation on purpose: the CLI previously carried a second,
+/// near-identical renderer that drifted from this one, so the compact variant
+/// is a flag here rather than a separate function body.
+fn format_location_impl(loc: &Location, full: bool) -> String {
     let chunk = loc
         .chunk_index
         .map(|c| format!("chunk {c}, "))
@@ -208,15 +234,19 @@ pub fn format_location(loc: &Location) -> String {
             } else {
                 String::new()
             };
-            format!(
-                "{} partition(s){}: {}",
-                keys.len(),
-                more,
-                keys.iter()
-                    .map(|k| k.key_hex.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            if full {
+                format!(
+                    "{} partition(s){}: {}",
+                    keys.len(),
+                    more,
+                    keys.iter()
+                        .map(|k| k.key_hex.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                format!("{} partition(s){}", keys.len(), more)
+            }
         }
         PartitionResolution::Unresolved(cause) => format!("partitions unresolved ({cause})"),
     };
@@ -236,6 +266,15 @@ pub fn format_location(loc: &Location) -> String {
         // tail runs past the end (data_len 1000, offset 998: two of those bytes
         // are readable). Claiming the range is absent would over-state the
         // evidence in exactly the way this anchor exists to prevent.
+        // The compact form keeps the `declared` LABEL — the distinction it
+        // draws (an offset the file does not reach, not a damaged extent) is
+        // the point of the anchor and survives dropping the prose.
+        PhysicalAnchor::DeclaredRecord if !full => {
+            format!(
+                "declared offset 0x{:x} len {}",
+                loc.byte_offset, loc.byte_len
+            )
+        }
         PhysicalAnchor::DeclaredRecord => format!(
             "declared offset 0x{:x} len {} (declared by metadata; the record does not fit \
              within the file)",

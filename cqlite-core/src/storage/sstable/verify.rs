@@ -54,8 +54,8 @@ use std::sync::Arc;
 // module path. Resolution LOGIC lives in `verify_location.rs` (file-size
 // relocation); only check-site plumbing stays here.
 pub use crate::storage::sstable::verify_location::{
-    format_location, KeyRef, Location, PartitionResolution, PhysicalAnchor,
-    BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS, BOUNDARY_ENTRY_ORDER_VIOLATION,
+    format_location, format_location_compact, KeyRef, Location, PartitionResolution,
+    PhysicalAnchor, BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS, BOUNDARY_ENTRY_ORDER_VIOLATION,
     BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE, BTI_IDENTITY_UNCORROBORATED,
     MAX_RESOLVED_KEYS, PARTITION_KEY_UNAVAILABLE,
 };
@@ -246,7 +246,11 @@ impl std::fmt::Display for VerifyFinding {
             self.detail
         )?;
         if let Some(loc) = &self.location {
-            write!(f, " (location: {})", format_location(loc))?;
+            // COMPACT, not the full renderer (roborev job 131 MEDIUM): this
+            // Display feeds `VerifyReport::summary_line()`, which the CLI prints
+            // ABOVE its own explicit per-finding `location:` line. See
+            // `format_location_compact`.
+            write!(f, " (location: {})", format_location_compact(loc))?;
         }
         Ok(())
     }

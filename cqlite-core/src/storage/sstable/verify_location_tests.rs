@@ -2,10 +2,14 @@
 //! logic (issue #4194).
 //!
 //! Carried in a sibling file wired via
-//! `#[cfg(test)] #[path = "verify_location_tests.rs"] mod tests;` so the
-//! production module stays under the 800-line source threshold (campsite
-//! rule, epic #1116/#1135) while the added BIG boundary-source validation
-//! lands. `#[path]` keeps this a CHILD module of `verify_location`, so
+//! `#[cfg(test)] #[path = "verify_location_tests.rs"] mod tests;` to keep the
+//! production module's SOURCE line count down (campsite rule, epic
+//! #1116/#1135). That module is currently 839 lines — OVER the 800-line
+//! source threshold, disclosed under this PR's `CQLITE_ALLOW_FILE_GROWTH=1`
+//! opt-out, not under it: the `format_location_compact` fix for roborev job
+//! 131 pushed it past 800, and splitting the module by responsibility is
+//! tracked as its own campsite-rule follow-up rather than done inline here.
+//! `#[path]` keeps this a CHILD module of `verify_location`, so
 //! `use super::*` still reaches its private items unchanged.
 
 use super::*;
@@ -363,5 +367,86 @@ fn a_rejected_boundary_source_propagates_its_own_cause_verbatim() {
         rendered.contains("Permission denied"),
         "the operator-visible text MUST name the real I/O cause, not just \
          'boundary source unavailable': {rendered}"
+    );
+}
+
+// `format_location_compact` and the `Display` that uses it (roborev job 131
+// MEDIUM, issue #4194). `VerifyReport::summary_line()` joins every finding's
+// `Display` into ONE line and `cqlite verify --out text` prints each finding's
+// FULL location again two lines below, so rendering the full form in `Display`
+// made that line run to kilobytes and duplicated the detail verbatim. These
+// cases pin both halves of the fix: the enumeration is GONE from the compact
+// form, and the byte anchor is STILL THERE (a compact form that dropped the
+// anchor too would leave `parsing_errors` consumers with nothing to go on).
+#[test]
+fn format_location_compact_keeps_the_anchor_and_drops_the_key_list() {
+    let loc = Location {
+        component: "Data.db".to_string(),
+        byte_offset: 0x1006,
+        byte_len: 4,
+        anchor: PhysicalAnchor::DamagedExtent,
+        chunk_index: Some(7),
+        partitions: PartitionResolution::Resolved {
+            keys: vec![KeyRef::from_raw(b"k0"), KeyRef::from_raw(b"k1")],
+            truncated: 842,
+        },
+    };
+    let compact = format_location_compact(&loc);
+    let full = format_location(&loc);
+
+    // The anchor — component, chunk, physical range — survives.
+    assert!(
+        compact.contains("Data.db")
+            && compact.contains("chunk 7")
+            && compact.contains("offset 0x1006"),
+        "the compact form MUST keep the byte anchor: {compact}"
+    );
+    // The COUNT survives, including the capped disclosure…
+    assert!(
+        compact.contains("2 partition(s)") && compact.contains("(+842 more, capped)"),
+        "the compact form MUST keep the partition count and cap disclosure: {compact}"
+    );
+    // …but the enumeration does NOT. `6b30`/`6b31` are hex("k0")/hex("k1").
+    assert!(
+        !compact.contains("6b30") && !compact.contains("6b31"),
+        "the compact form MUST NOT enumerate partition keys: {compact}"
+    );
+    // The full renderer is unchanged and still enumerates — the two forms are
+    // genuinely different, so this test cannot pass vacuously by both being
+    // compact.
+    assert!(
+        full.contains("6b30") && full.contains("6b31"),
+        "format_location MUST still enumerate: {full}"
+    );
+}
+
+#[test]
+fn verify_finding_display_does_not_enumerate_partition_keys() {
+    // Struct literal, not `VerifyFinding::new` — that constructor is private to
+    // `verify.rs` and this is a child module of `verify_location`.
+    let finding = VerifyFinding {
+        class: VerifyErrorClass::ChunkOffsetOutOfBounds,
+        component: "Data.db".to_string(),
+        detail: "chunk offset out of bounds".to_string(),
+        location: Some(Location {
+            component: "Data.db".to_string(),
+            byte_offset: 0x1006,
+            byte_len: 4,
+            anchor: PhysicalAnchor::DamagedExtent,
+            chunk_index: Some(7),
+            partitions: PartitionResolution::Resolved {
+                keys: vec![KeyRef::from_raw(b"k0")],
+                truncated: 0,
+            },
+        }),
+    };
+    let shown = finding.to_string();
+    assert!(
+        shown.contains("location:") && shown.contains("1 partition(s)"),
+        "Display MUST still carry a location anchor: {shown}"
+    );
+    assert!(
+        !shown.contains("6b30"),
+        "Display feeds summary_line(); it MUST NOT enumerate partition keys: {shown}"
     );
 }
