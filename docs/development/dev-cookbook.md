@@ -813,6 +813,36 @@ cargo run --package cqlite-cli --features write-support -- \
   the actual distinct count instead (correct for membership, not always
   byte-identical).
 
+## Locate corruption + sweep a data directory (issue #4194, epic #4192)
+
+`cqlite verify --mode full` names WHICH partitions a chunk/offset-anchored
+finding touches (`location.partitions`), resolved from the healthy `Index.db`
+(BIG) / `Partitions.db` trie (BTI) — `Unresolved("boundary-source-unreadable")`
+when that boundary source is itself corrupt (never a guess). `cqlite sweep`
+runs `verify` over every SSTable GENERATION under a data dir in one pass — a
+real table directory routinely holds several generations, and sweep reports
+one row per generation, never just the first.
+
+```bash
+# A single generation's located findings (JSON carries a `location` object on
+# each chunk/offset-anchored finding when present).
+cargo run --package cqlite-cli --features cli-helpers -- \
+  verify ./corrupted-table-dir --mode full --out json
+
+# Sweep every SSTable generation under every <keyspace>/<table>-<id>/
+# directory under a data dir. Omitting --jobs is SEQUENTIAL (one table open at
+# a time, the safe default for a damaged/stressed host); --jobs N opts in to
+# parallelism, clamped to 8 (peak RSS scales with jobs).
+cargo run --package cqlite-cli --features cli-helpers -- \
+  sweep ./test-data/datasets/sstables --mode quick --out json --jobs 4
+
+# Exit codes: 0 = every row ok (a `degraded`-only sweep — e.g. a Filter.db
+# false negative, issue #1398 — still exits 0); 2 = any row corrupt/unreadable,
+# OR zero generations were found under <data-dir> at all (pointing sweep one
+# level too high must not read as a clean sweep); 1 = usage error (<data-dir>
+# missing or not a directory).
+```
+
 ## Delta-export (CDC Parquet, Issue #705 / Epic #696 DS9)
 
 Requires `--features delta-export`. Schema must be a bare `CREATE TABLE` statement

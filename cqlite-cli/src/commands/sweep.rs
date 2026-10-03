@@ -1,0 +1,770 @@
+//! `cqlite sweep` — verify every SSTable GENERATION under a data directory in
+//! one pass (issue #4194).
+//!
+//! Thin CLI wrapper over the SAME
+//! [`cqlite_core::storage::sstable::verify::verify_sstable_generation`] a
+//! single-directory `cqlite verify` call effectively targets — one call per
+//! discovered `*-Data.db` generation, bounded to at most `--jobs`
+//! concurrently (omitting `--jobs` is SEQUENTIAL — one generation open at a
+//! time; an explicit `--jobs N` opts in and is clamped to [`MAX_JOBS`], see
+//! [`resolve_jobs`] — NOT "identical to `verify --mode full`"'s
+//! memory profile multiplied by an unbounded `--jobs`, an earlier draft of
+//! this doc's claim; roborev round-4 MEDIUM finding: `check_digest` reads
+//! the WHOLE `Data.db` into memory even in QUICK mode, so peak RSS is
+//! genuinely `jobs x largest Data.db`, not `O(1)` regardless of `jobs`).
+//! Each generation's own resident structure (one `VerifyReport`, including
+//! its FULL-mode scan) is otherwise identical to `verify --mode full`'s
+//! (design.md §S3) — see this file's own note on the ACCUMULATED-across-rows
+//! cost that bound does NOT cover, at `execute_sweep_command`.
+//!
+//! **Per-GENERATION, not per-directory** (roborev round-2 HIGH finding): a
+//! real Cassandra table directory routinely holds several generations
+//! (verified directly against this repo's own fetched corpus — seven table
+//! directories under `test-data/datasets/sstables` carry 2+ `*-Data.db`
+//! files). `verify_sstable` itself only resolves the LEXICOGRAPHICALLY-FIRST
+//! generation in a directory (its own doc says so); sweeping directories
+//! with it would silently skip every later generation, exactly the
+//! "never a silently-dropped entry" guarantee design.md §D3 promises. This
+//! module instead enumerates every `*-Data.db` per table directory and calls
+//! [`cqlite_core::storage::sstable::verify::verify_sstable_generation`] once
+//! per generation; a `SweepRow`'s `path` is that generation's exact `Data.db`
+//! file, and a table directory with zero `*-Data.db` files is still exactly
+//! one `unreadable` row.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::Result;
+use cqlite_core::platform::Platform;
+use cqlite_core::storage::sstable::verify::{
+    format_location, verify_sstable_generation, VerifyErrorClass, VerifyFinding, VerifyMode,
+};
+use cqlite_core::Config;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
+use crate::cli_types::{SweepArgs, VerifyModeArg, VerifyOutputArg};
+use crate::commands::verify::{finding_to_json, json_str};
+
+/// Hard upper bound on `--jobs`, applied regardless of source (issue #4194,
+/// roborev round-4 MEDIUM findings — see [`resolve_jobs`]).
+pub const MAX_JOBS: usize = 8;
+
+/// Resolve the effective concurrency from `--jobs`.
+///
+/// **Omitting `--jobs` means `1` — sequential, one generation open at a time**
+/// (issue #4194, roborev M3, owner ruling: AC5's literal wording is
+/// "one table open at a time", and this verb runs against damaged, possibly
+/// stressed production hosts, so the default must be the safest one). Passing
+/// `--jobs N` OPTS IN to parallelism and is clamped to `[1, MAX_JOBS]`:
+///
+/// * `check_digest` (Check 2, runs in QUICK mode too) reads the WHOLE
+///   `Data.db` into a `Vec<u8>`, so peak RSS is `jobs x largest Data.db` —
+///   against real GB-sized production SSTables an unbounded value is an OOM
+///   risk `verify` alone never had (it only ever processes one generation).
+/// * Each generation runs on `spawn_blocking` + `Handle::block_on`, and
+///   `verify_one`'s own async awaits (`tokio::fs::metadata`/`File::open`,
+///   `IndexReader::open`) are themselves `spawn_blocking` — an unbounded
+///   value past tokio's `max_blocking_threads` (default 512) can occupy every
+///   blocking-pool thread with OUTER tasks parked in `block_on`, each waiting
+///   on an INNER blocking task that can never be scheduled: a permanent hang
+///   with no output. `MAX_JOBS` sits far below that default.
+///
+/// `0` is not a usable permit count, so it clamps up to `1` rather than
+/// deadlocking the sweep.
+pub fn resolve_jobs(requested: Option<usize>) -> usize {
+    requested.unwrap_or(1).clamp(1, MAX_JOBS)
+}
+
+/// Per-table severity (design.md §D3/§S1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Severity {
+    Ok,
+    /// A CQLite-only detection with no Cassandra-verified corruption (today
+    /// exactly `FilterFalseNegative`, issue #1398) — worth attention, not
+    /// proof the SSTable is unreadable.
+    Degraded,
+    Corrupt,
+    /// The directory could not even be opened for verification (no readable
+    /// `Data.db`, unopenable directory, or `verify_sstable` failed to resolve
+    /// components).
+    Unreadable,
+}
+
+impl Severity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Severity::Ok => "ok",
+            Severity::Degraded => "degraded",
+            Severity::Corrupt => "corrupt",
+            Severity::Unreadable => "unreadable",
+        }
+    }
+
+    /// Index into a 4-slot `[ok, degraded, corrupt, unreadable]` totals array.
+    /// Roborev finding (final round, #4194): this mapping used to be written
+    /// twice (once in `print_text`, once in `print_json`), each un-checked
+    /// against the other — a new variant added to one renderer's `match` and
+    /// missed in the other would silently disagree on totals.
+    fn index(self) -> usize {
+        match self {
+            Severity::Ok => 0,
+            Severity::Degraded => 1,
+            Severity::Corrupt => 2,
+            Severity::Unreadable => 3,
+        }
+    }
+}
+
+/// One swept table directory's outcome.
+struct SweepRow {
+    path: PathBuf,
+    severity: Severity,
+    /// Human-readable cause; `None` only when `severity == Ok`.
+    cause: Option<String>,
+    /// The underlying `VerifyReport.findings` (empty for `Unreadable`, since
+    /// `verify_sstable` never returned a report for that directory).
+    findings: Vec<VerifyFinding>,
+}
+
+/// Discover every SSTable GENERATION (`*-Data.db`) under every
+/// `<keyspace>/<table>-<id>/` directory under `data_dir`, structurally
+/// (readdir only — no `Data.db` CONTENT is touched here), so an unreadable
+/// keyspace, an unreadable table directory, or a table directory with zero
+/// generations still becomes exactly one row later, never a silent omission
+/// (design.md §D3; roborev round-1 MEDIUM + round-2 HIGH/LOW findings).
+///
+/// `unreadable_*` entries are returned separately, by (path, cause), so the
+/// caller can turn each directly into an `unreadable` [`SweepRow`] WITHOUT
+/// calling `verify_sstable_generation` on it (there is nothing under it to
+/// verify).
+struct Discovered {
+    /// Every discovered generation's exact `*-Data.db` path.
+    generations: Vec<PathBuf>,
+    unreadable_keyspaces: Vec<(PathBuf, String)>,
+    /// A table directory that itself could not be `read_dir`'d, OR that
+    /// parsed cleanly but named zero `*-Data.db` files.
+    unreadable_table_dirs: Vec<(PathBuf, String)>,
+}
+
+fn discover_table_dirs(data_dir: &Path) -> Result<Discovered> {
+    // Probe metadata EXPLICITLY, exactly as `descendable_dir` does one level
+    // down (spec S5: "every level SHALL probe metadata explicitly"). `is_dir()`
+    // collapses EVERY stat failure into `false`, so an EACCES, an ELOOP symlink
+    // loop or an EIO would all have been reported as "does not exist or is not
+    // a directory" — a confidently wrong diagnosis that sends the operator
+    // looking for a typo instead of at a permission or hardware fault. Both
+    // arms still fail closed (exit 1, usage error) and still name the path;
+    // only the stated CAUSE changes.
+    match std::fs::metadata(data_dir) {
+        Ok(md) if md.is_dir() => {}
+        Ok(_) => anyhow::bail!(
+            "sweep target exists but is not a directory: {}",
+            data_dir.display()
+        ),
+        Err(e) => anyhow::bail!("cannot stat sweep target {}: {e}", data_dir.display()),
+    }
+    let mut generations = Vec::new();
+    let mut unreadable_keyspaces = Vec::new();
+    let mut unreadable_table_dirs = Vec::new();
+    let keyspaces = std::fs::read_dir(data_dir)
+        .map_err(|e| anyhow::anyhow!("cannot read data dir {}: {e}", data_dir.display()))?;
+    // roborev round-3 MEDIUM finding: round-2's `.flatten()` -> `let Ok(..)
+    // else { continue }` swap changed NOTHING observable — a per-entry
+    // `io::Error` (e.g. a race with a concurrent delete) still `continue`s
+    // with no row and no cause, the exact silent omission the comment
+    // claimed to fix. `DirEntry::path()` is unavailable on an `Err`, so the
+    // row names the PARENT directory the failing entry was under, not the
+    // entry itself.
+    //
+    // Aggregated to ONE row per PARENT, not one row per failing entry
+    // (roborev round-4 LOW finding): the original per-entry form pushed
+    // MULTIPLE rows sharing the identical synthesized
+    // `<parent>/<unreadable directory entry>` path, which `rows.sort_by(path)`
+    // cannot distinguish and which names nothing real on disk — matching
+    // the count+last-error pattern already used one level down for
+    // `unreadable_file_entries`.
+    let mut unreadable_ks_entries = 0usize;
+    let mut last_ks_entry_error: Option<String> = None;
+    for ks_entry in keyspaces {
+        let ks_entry = match ks_entry {
+            Ok(e) => e,
+            Err(e) => {
+                unreadable_ks_entries += 1;
+                last_ks_entry_error = Some(e.to_string());
+                continue;
+            }
+        };
+        let ks_path = ks_entry.path();
+        match descendable_dir(&ks_path) {
+            Ok(true) => {}
+            // A stray file next to the keyspace dirs is not a defect.
+            Ok(false) => continue,
+            // Unstattable: COUNT it, never drop it (roborev job 102 MEDIUM).
+            Err(cause) => {
+                unreadable_ks_entries += 1;
+                last_ks_entry_error = Some(cause);
+                continue;
+            }
+        }
+        match std::fs::read_dir(&ks_path) {
+            Ok(tables) => {
+                let mut unreadable_table_entries = 0usize;
+                let mut last_table_entry_error: Option<String> = None;
+                for table_entry in tables {
+                    let table_entry = match table_entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            unreadable_table_entries += 1;
+                            last_table_entry_error = Some(e.to_string());
+                            continue;
+                        }
+                    };
+                    let table_path = table_entry.path();
+                    match descendable_dir(&table_path) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(cause) => {
+                            unreadable_table_entries += 1;
+                            last_table_entry_error = Some(cause);
+                            continue;
+                        }
+                    }
+                    match std::fs::read_dir(&table_path) {
+                        Ok(files) => {
+                            let (mut data_dbs, unreadable_file_entries, last_file_entry_error) =
+                                classify_table_dir_entries(files.map(|e| e.map(|e| e.path())));
+                            // Captured BEFORE the branch below: the `data_dbs.is_empty()`
+                            // arm consumes `last_file_entry_error` by value in its own
+                            // `match`, and `found_count` needs `data_dbs.len()` before
+                            // the non-empty arm moves it into `generations`.
+                            let found_count = data_dbs.len();
+                            let file_entry_error_for_unreadable_note =
+                                last_file_entry_error.clone();
+                            if data_dbs.is_empty() {
+                                let cause = match last_file_entry_error {
+                                    // At least one *-Data.db might have been
+                                    // among the unreadable entries — name
+                                    // that explicitly rather than a bare
+                                    // "not found" that would misattribute an
+                                    // I/O failure as a design absence.
+                                    Some(e) if unreadable_file_entries > 0 => format!(
+                                        "no *-Data.db component found in {} ({} directory \
+                                         entry(ies) unreadable, last error: {e})",
+                                        table_path.display(),
+                                        unreadable_file_entries
+                                    ),
+                                    _ => format!(
+                                        "no *-Data.db component found in {}",
+                                        table_path.display()
+                                    ),
+                                };
+                                unreadable_table_dirs.push((table_path.clone(), cause));
+                            } else {
+                                data_dbs.sort();
+                                generations.extend(data_dbs);
+                            }
+                            // roborev job 4376: the branch above only ever names
+                            // `unreadable_file_entries` when `data_dbs` is ALSO empty
+                            // (folded into the "no *-Data.db" cause) — a table dir that
+                            // has BOTH readable generations AND unreadable directory
+                            // entries lost that count entirely, with `generations.extend`
+                            // being the only trace. Report it as its OWN unreadable row,
+                            // mirroring the aggregated `unreadable_table_entries` pattern
+                            // below: this affects the exit code exactly like any other
+                            // unreadable row, and the readable generations found
+                            // alongside it are still verified (not skipped).
+                            if let Some(row) = mixed_readability_row(
+                                &table_path,
+                                found_count,
+                                unreadable_file_entries,
+                                file_entry_error_for_unreadable_note.as_deref(),
+                            ) {
+                                unreadable_table_dirs.push(row);
+                            }
+                        }
+                        Err(e) => unreadable_table_dirs.push((table_path, e.to_string())),
+                    }
+                }
+                if unreadable_table_entries > 0 {
+                    unreadable_table_dirs.push((
+                        ks_path.clone(),
+                        format!(
+                            "{unreadable_table_entries} unreadable directory entry(ies) under {} \
+                             (last error: {})",
+                            ks_path.display(),
+                            last_table_entry_error.unwrap_or_default()
+                        ),
+                    ));
+                }
+            }
+            Err(e) => unreadable_keyspaces.push((ks_path, e.to_string())),
+        }
+    }
+    if unreadable_ks_entries > 0 {
+        unreadable_keyspaces.push((
+            data_dir.to_path_buf(),
+            format!(
+                "{unreadable_ks_entries} unreadable directory entry(ies) under {} (last error: {})",
+                data_dir.display(),
+                last_ks_entry_error.unwrap_or_default()
+            ),
+        ));
+    }
+    generations.sort();
+    unreadable_keyspaces.sort_by(|a, b| a.0.cmp(&b.0));
+    unreadable_table_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Discovered {
+        generations,
+        unreadable_keyspaces,
+        unreadable_table_dirs,
+    })
+}
+
+/// A path's final component, rendered lossily for an operator-facing cause.
+///
+/// `to_string_lossy`, never `to_str().unwrap_or("<non-utf8 name>")` (roborev
+/// I2, #4194): the placeholder named NO file, so a cause carrying it could
+/// not be acted on — and a non-UTF-8 generation is exactly the case most in
+/// need of being named. Lossy rendering keeps every ASCII byte of the name
+/// (so the `-Data.db` suffix and the generation number survive) and
+/// substitutes U+FFFD only for the invalid bytes.
+fn file_name_lossy(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+/// Classify one table directory's `read_dir` entries into the `*-Data.db`
+/// paths found and the unreadable-entry count/last error (roborev job 4376's
+/// injectable seam). Takes `io::Result<PathBuf>` rather than
+/// `io::Result<DirEntry>` — a `DirEntry` has no public constructor, so a test
+/// cannot synthesize one to inject a failing entry; the caller maps its
+/// `ReadDir` iterator down to this same shape (`e.map(|e| e.path())`), so
+/// production behavior is unchanged.
+fn classify_table_dir_entries(
+    entries: impl Iterator<Item = std::io::Result<PathBuf>>,
+) -> (Vec<PathBuf>, usize, Option<String>) {
+    let mut data_dbs: Vec<PathBuf> = Vec::new();
+    let mut unreadable_file_entries = 0usize;
+    let mut last_file_entry_error: Option<String> = None;
+    for entry in entries {
+        match entry {
+            Ok(p) => {
+                // NAME FIRST, THEN STAT (roborev job 92 MEDIUM). `is_file()`
+                // collapses every stat failure into `false`, so an entry whose
+                // metadata cannot be read — a dangling symlink after a partial
+                // restore, an EACCES component — was neither counted as a
+                // generation NOR as an unreadable entry: it vanished with no
+                // row and no cause, the exact silent omission this module's own
+                // comments above claim to have closed. Testing the NAME first
+                // is what makes the drop attributable at all: `is_file()` &&
+                // name meant the code could not even tell that what it dropped
+                // was a `*-Data.db`.
+                // RAW BYTES, NOT `&str` (roborev important finding I2,
+                // #4194). `and_then(|n| n.to_str())` returned `None` for a
+                // filename that is not valid UTF-8, `unwrap_or(false)` made
+                // the name test false, and the entry was `continue`d below
+                // with NO row, NO unreadable count and NO effect on the exit
+                // code: `sweep` reported success over a directory it had not
+                // fully swept. A filename is an `OsStr`, and nothing about a
+                // Cassandra generation requires it to be UTF-8 — a restore
+                // from a foreign filesystem, or a locale-mangled copy, is
+                // enough. `as_encoded_bytes` is the portable byte view (it
+                // is NOT OS-specific like `OsStrExt`), and comparing a
+                // suffix of bytes is exact: `-Data.db` is pure ASCII, and
+                // UTF-8 is self-synchronising, so a byte-suffix match can
+                // never split a multi-byte character.
+                let is_data_db = p
+                    .file_name()
+                    .map(|n| n.as_encoded_bytes().ends_with(b"-Data.db"))
+                    .unwrap_or(false);
+                if !is_data_db {
+                    continue;
+                }
+                match std::fs::metadata(&p) {
+                    Ok(md) if md.is_file() => data_dbs.push(p),
+                    // A `*-Data.db` NAME that is not a regular file (a
+                    // directory, a fifo) is not a generation, and saying
+                    // nothing about it would be the same silent drop.
+                    Ok(_) => {
+                        unreadable_file_entries += 1;
+                        last_file_entry_error =
+                            Some(format!("{} is not a regular file", file_name_lossy(&p)));
+                    }
+                    Err(e) => {
+                        unreadable_file_entries += 1;
+                        last_file_entry_error =
+                            Some(format!("cannot stat {}: {e}", file_name_lossy(&p)));
+                    }
+                }
+            }
+            Err(e) => {
+                unreadable_file_entries += 1;
+                last_file_entry_error = Some(e.to_string());
+            }
+        }
+    }
+    (data_dbs, unreadable_file_entries, last_file_entry_error)
+}
+
+/// Is this path a directory we should descend into? Fail-closed (roborev job
+/// 102 MEDIUM).
+///
+/// `Path::is_dir()` collapses EVERY stat failure into `false`, so a keyspace or
+/// table directory that cannot be stat'ed — a dangling symlink from a partial
+/// restore, an `EACCES` after a parent lost its execute bit, a race with a
+/// concurrent `mv` — was silently `continue`d with no row, no cause, and NO
+/// EFFECT ON THE EXIT CODE. That is the same silent-drop class
+/// `classify_table_dir_entries` is hardened against, in the more dangerous
+/// direction: it can leave a sweep reporting success.
+///
+/// `DirEntry::file_type()` is deliberately NOT used — it does not follow
+/// symlinks, so it would report a dangling link as a symlink rather than
+/// surfacing the broken target.
+///
+/// `Ok(true)` descend · `Ok(false)` a genuine non-directory (a stray file,
+/// skip silently) · `Err(cause)` unstattable, which the caller MUST record.
+fn descendable_dir(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(md) => Ok(md.is_dir()),
+        Err(e) => Err(format!("cannot stat {}: {e}", path.display())),
+    }
+}
+
+/// The extra `unreadable` row a table directory earns when it holds BOTH
+/// readable `*-Data.db` generations AND unreadable directory entries, or
+/// `None` when it does not (roborev job 92 MEDIUM: the decision used to be an
+/// inline `if` at the single call site, so the only test for it exercised the
+/// CLASSIFIER in isolation and never this branch — a refactor inverting the
+/// guard to `found_count == 0` would have left every assertion green).
+///
+/// Returning `Option<(PathBuf, String)>` makes both the guard AND the cause
+/// string observable from a unit test, which is the property that was missing.
+fn mixed_readability_row(
+    table_path: &Path,
+    found_count: usize,
+    unreadable_file_entries: usize,
+    last_file_entry_error: Option<&str>,
+) -> Option<(PathBuf, String)> {
+    if found_count == 0 || unreadable_file_entries == 0 {
+        return None;
+    }
+    Some((
+        table_path.to_path_buf(),
+        format!(
+            "{unreadable_file_entries} unreadable directory entry(ies) under {} (last \
+             error: {}) alongside {found_count} readable *-Data.db generation(s), which \
+             are still verified below",
+            table_path.display(),
+            last_file_entry_error.unwrap_or_default(),
+        ),
+    ))
+}
+
+/// Map a completed [`VerifyReport`] to its severity + cause (design.md §D3):
+/// `FilterFalseNegative`-only is `Degraded`; any other non-empty finding set
+/// is `Corrupt`. A closed function of `VerifyErrorClass`, stated once.
+fn classify_report(findings: &[VerifyFinding]) -> (Severity, Option<String>) {
+    if findings.is_empty() {
+        return (Severity::Ok, None);
+    }
+    let only_filter_false_negative = findings
+        .iter()
+        .all(|f| f.class == VerifyErrorClass::FilterFalseNegative);
+    if only_filter_false_negative {
+        (
+            Severity::Degraded,
+            Some(VerifyErrorClass::FilterFalseNegative.code().to_string()),
+        )
+    } else {
+        // roborev job 4376: `findings.first()` could name a
+        // `FilterFalseNegative` sitting ahead of a REAL corruption finding in
+        // the same report (this arm is reached whenever the set is not
+        // FilterFalseNegative-only, so a mix is possible) — the row's cause
+        // is meant to name the reason it is `Corrupt`, not merely the first
+        // finding recorded. Prefer the first finding that is NOT
+        // FilterFalseNegative; fall back to `findings.first()` only when
+        // every finding (impossible here, but kept fail-safe) is one.
+        let cause = findings
+            .iter()
+            .find(|f| f.class != VerifyErrorClass::FilterFalseNegative)
+            .or_else(|| findings.first())
+            .map(|f| f.class.code().to_string())
+            .unwrap_or_default();
+        (Severity::Corrupt, Some(cause))
+    }
+}
+
+/// Verify exactly one GENERATION (`data_db_path`) via
+/// [`verify_sstable_generation`] — never [`cqlite_core::storage::sstable::verify::verify_sstable`],
+/// which would silently resolve `data_db_path`'s DIRECTORY's
+/// lexicographically-first generation instead (roborev round-2 HIGH finding).
+async fn verify_one(
+    data_db_path: PathBuf,
+    mode: VerifyMode,
+    config: Config,
+    platform: Arc<Platform>,
+) -> SweepRow {
+    match verify_sstable_generation(&data_db_path, mode, &config, platform).await {
+        Ok(report) => {
+            let (severity, cause) = classify_report(&report.findings);
+            SweepRow {
+                path: data_db_path,
+                severity,
+                cause,
+                findings: report.findings,
+            }
+        }
+        Err(e) => SweepRow {
+            path: data_db_path,
+            severity: Severity::Unreadable,
+            cause: Some(e.to_string()),
+            findings: Vec::new(),
+        },
+    }
+}
+
+/// Execute `cqlite sweep <data-dir> [--mode] [--out] [--jobs]`.
+///
+/// Exit codes (design.md §S2, `std::process::exit` — the SAME
+/// environmental-vs-verification-failure split `verify` already established):
+/// `1` on a usage error (bad `--data-dir`, before any verification is
+/// attempted); `2` if any row is `corrupt`/`unreadable`, OR if zero
+/// generations were discovered at all (roborev round-2 MEDIUM finding — see
+/// the `rows.is_empty()` check below: a THIRD exit-2 cause beyond the two
+/// design.md §S2 names, now stated here and in `SweepArgs`' `long_about` and
+/// the dev-cookbook entry); `0` otherwise (`degraded` rows alone never trip a
+/// non-zero exit).
+///
+/// **Rows are fully accumulated in `rows: Vec<SweepRow>` before ANY
+/// rendering** (roborev round-2 MEDIUM finding — this is NOT the "no
+/// data-dir-wide structure" claim this module's earlier doc draft made; that
+/// claim is true only of the PER-GENERATION verification work itself, not of
+/// this accumulation). Each `SweepRow.findings` is bounded per-finding by
+/// [`cqlite_core::storage::sstable::verify::MAX_RESOLVED_KEYS`]
+/// (round-2's companion fix for the dominant per-row cost — an unbounded
+/// resolved-partition list), so the resident total is `O(generations x
+/// bounded-per-row-size)`, not unbounded — but it is still `O(generations)`,
+/// not `O(1)`. A true `O(1)` (streamed) rendering is a larger, separate
+/// change, not attempted in this round; documented here so the claim in code
+/// matches the claim in prose, rather than re-asserting a bound this
+/// function does not hold.
+pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
+    let discovered = match discover_table_dirs(&args.data_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Issue #4194, roborev round-1 MEDIUM + round-2 LOW findings: a keyspace
+    // or table directory this walk could not even `read_dir` (or a table
+    // directory naming zero `*-Data.db` generations) becomes its own
+    // `unreadable` row here, directly — never passed to
+    // `verify_sstable_generation` (there is nothing under it to verify) and
+    // never silently absent from `rows`.
+    let mut rows: Vec<SweepRow> = discovered
+        .unreadable_keyspaces
+        .into_iter()
+        .chain(discovered.unreadable_table_dirs)
+        .map(|(path, cause)| SweepRow {
+            path,
+            severity: Severity::Unreadable,
+            cause: Some(cause),
+            findings: Vec::new(),
+        })
+        .collect();
+    let dirs = discovered.generations;
+
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await?);
+    let mode = match args.mode {
+        VerifyModeArg::Quick => VerifyMode::Quick,
+        VerifyModeArg::Full => VerifyMode::Full,
+    };
+    // Omitted `--jobs` = 1 (sequential); an explicit `--jobs N` opts in and is
+    // clamped to `MAX_JOBS`. Rationale (memory + blocking-pool exhaustion) and
+    // the owner ruling behind the sequential default live on [`resolve_jobs`].
+    let jobs = resolve_jobs(args.jobs);
+
+    // Bounded concurrency (design.md §S3): at most `jobs`
+    // `verify_sstable_generation` calls in flight, each with the SAME
+    // single-generation memory profile as `verify` already has.
+    //
+    // `spawn_blocking`, not `set.spawn` on the async worker threads (roborev
+    // round-2 LOW + round-3 LOW findings — round-2's fix was a doc-only
+    // caveat, judged insufficient): `verify_sstable_generation`'s hot checks
+    // use blocking `std::fs` I/O, so running them as ordinary async tasks
+    // would park up to `jobs` worker threads inside blocking I/O
+    // simultaneously (the runtime is sized by `available_parallelism()`, which
+    // on a small box can be at or below `MAX_JOBS`), starving every OTHER task
+    // on the runtime for the duration —
+    // not a deadlock (permits still release on completion), but a real cost
+    // this verb introduces beyond a single `cqlite verify` call. Each
+    // blocking-pool task drives the SAME async fn to completion via
+    // `Handle::block_on` from its OWN dedicated thread (never nested inside
+    // an async-worker poll, so this is the standard safe pattern for an
+    // async fn whose hot path is secretly synchronous) — `--jobs` now maps
+    // to blocking-pool concurrency, which is what the doc always claimed.
+    let semaphore = Arc::new(Semaphore::new(jobs));
+    let mut set = JoinSet::new();
+    for dir in dirs {
+        // `Semaphore` is never explicitly closed on this path, so `Err` here
+        // is unreachable in practice — but this is user-facing CLI code, not
+        // a test invariant, so it fails closed (a named row) rather than
+        // panicking the whole sweep over one acquire (roborev round-2 LOW
+        // finding).
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                set.spawn(async move {
+                    SweepRow {
+                        path: dir,
+                        severity: Severity::Unreadable,
+                        cause: Some(format!("sweep concurrency semaphore closed: {e}")),
+                        findings: Vec::new(),
+                    }
+                });
+                continue;
+            }
+        };
+        let config = config.clone();
+        let platform = platform.clone();
+        let runtime = tokio::runtime::Handle::current();
+        set.spawn_blocking(move || {
+            let row = runtime.block_on(verify_one(dir, mode, config, platform));
+            drop(permit);
+            row
+        });
+    }
+
+    rows.reserve(set.len());
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(row) => rows.push(row),
+            Err(e) => {
+                // A panicked/cancelled task is itself an unreadable-class
+                // outcome — named rather than silently dropping the row
+                // (design.md §D3's "never a silent skip").
+                rows.push(SweepRow {
+                    path: PathBuf::from("<unknown: sweep worker task failed>"),
+                    severity: Severity::Unreadable,
+                    cause: Some(format!("sweep worker task failed: {e}")),
+                    findings: Vec::new(),
+                });
+            }
+        }
+    }
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // Issue #4194, roborev round-1 MEDIUM finding: a data dir that exists but
+    // holds zero table directories previously produced `totals: ok=0 …` and
+    // exit 0 — a "clean bill of health" indistinguishable from an all-healthy
+    // corpus, for a sweep that verified NOTHING. Pointing `sweep` one level
+    // too high (or at an unpopulated root) must not read as success —
+    // affirmative-zero doctrine, and the "never let a dataset-dependent
+    // operation pass on an empty dataset" rule.
+    if rows.is_empty() {
+        eprintln!(
+            "Error: no table directories found under {} (expected <keyspace>/<table>-<id>/ \
+             subdirectories) — nothing was verified",
+            args.data_dir.display()
+        );
+        std::process::exit(2);
+    }
+
+    match args.out {
+        VerifyOutputArg::Text => print_text(&rows),
+        VerifyOutputArg::Json => print_json(&rows),
+    }
+
+    let any_bad = rows
+        .iter()
+        .any(|r| matches!(r.severity, Severity::Corrupt | Severity::Unreadable));
+    if any_bad {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn print_text(rows: &[SweepRow]) {
+    let mut totals = [0usize; 4]; // ok, degraded, corrupt, unreadable
+    for row in rows {
+        totals[row.severity.index()] += 1;
+        match row.severity {
+            Severity::Ok => println!("ok         {}", row.path.display()),
+            _ => {
+                let cause = row.cause.as_deref().unwrap_or("(no cause recorded)");
+                println!(
+                    "{:<11}{} — {}",
+                    row.severity.as_str(),
+                    row.path.display(),
+                    cause
+                );
+                for f in &row.findings {
+                    println!(
+                        "             - [{}] {}: {}",
+                        f.class.code(),
+                        f.component,
+                        f.detail
+                    );
+                    // Roborev finding (final round, #4194): mirror `verify`'s text
+                    // renderer — `--out text` is `sweep`'s default, so omitting the
+                    // location here silently dropped the very detail this verb
+                    // exists to surface, while `--out json` already carried it via
+                    // the shared `finding_to_json`.
+                    if let Some(loc) = &f.location {
+                        println!("               location: {}", format_location(loc));
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "totals: ok={} degraded={} corrupt={} unreadable={} (rows={})",
+        totals[0],
+        totals[1],
+        totals[2],
+        totals[3],
+        rows.len()
+    );
+}
+
+fn print_json(rows: &[SweepRow]) {
+    let mut totals = [0usize; 4];
+    let row_json: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            totals[row.severity.index()] += 1;
+            let cause = row
+                .cause
+                .as_deref()
+                .map(json_str)
+                .unwrap_or_else(|| "null".to_string());
+            let findings: Vec<String> = row.findings.iter().map(finding_to_json).collect();
+            format!(
+                "{{\"path\":{},\"severity\":{},\"cause\":{},\"findings\":[{}]}}",
+                json_str(&row.path.display().to_string()),
+                json_str(row.severity.as_str()),
+                cause,
+                findings.join(","),
+            )
+        })
+        .collect();
+
+    // Affirmative-zero doctrine: every severity key is present even at 0.
+    println!(
+        "{{\"rows\":[{}],\"totals\":{{\"ok\":{},\"degraded\":{},\"corrupt\":{},\"unreadable\":{}}}}}",
+        row_json.join(","),
+        totals[0],
+        totals[1],
+        totals[2],
+        totals[3],
+    );
+}
+
+#[cfg(test)]
+#[path = "sweep_tests.rs"]
+mod tests;

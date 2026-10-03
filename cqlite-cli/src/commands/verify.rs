@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use cqlite_core::platform::Platform;
-use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyMode, VerifyReport};
+use cqlite_core::storage::sstable::verify::{
+    format_location, verify_sstable, Location, PartitionResolution, PhysicalAnchor, VerifyFinding,
+    VerifyMode, VerifyReport,
+};
 use cqlite_core::Config;
 
 use crate::cli_types::{VerifyModeArg, VerifyOutputArg};
@@ -54,6 +57,15 @@ fn print_text(report: &VerifyReport) {
         println!("findings ({}):", report.findings.len());
         for f in &report.findings {
             println!("  - [{}] {}: {}", f.class.code(), f.component, f.detail);
+            if let Some(loc) = &f.location {
+                // Issue #4194, roborev round-1 LOW finding: this used to be a
+                // second, near-identical renderer (`format_location_text`)
+                // that had already drifted from core's own `format_location`
+                // (different separator, different "0 partitions" wording).
+                // `format_location` is `pub` and re-exported exactly so the
+                // CLI never needs its own copy.
+                println!("      location: {}", format_location(loc));
+            }
         }
     }
 }
@@ -61,18 +73,7 @@ fn print_text(report: &VerifyReport) {
 fn print_json(report: &VerifyReport) {
     // Hand-rolled JSON keeps the verifier free of a serde dependency in the
     // core API while still emitting a stable, CI-consumable artifact.
-    let findings: Vec<String> = report
-        .findings
-        .iter()
-        .map(|f| {
-            format!(
-                "{{\"class\":{},\"component\":{},\"detail\":{}}}",
-                json_str(f.class.code()),
-                json_str(&f.component),
-                json_str(&f.detail)
-            )
-        })
-        .collect();
+    let findings: Vec<String> = report.findings.iter().map(finding_to_json).collect();
     let toc: Vec<String> = report.toc_components.iter().map(|c| json_str(c)).collect();
     let rows = report
         .rows_scanned
@@ -92,8 +93,85 @@ fn print_json(report: &VerifyReport) {
     );
 }
 
+/// One `VerifyFinding` as a JSON object, `location` included when present
+/// (issue #4194) — shared with `sweep`'s JSON report so the two verbs never
+/// disagree on a finding's shape.
+pub(crate) fn finding_to_json(f: &VerifyFinding) -> String {
+    let location = f
+        .location
+        .as_ref()
+        .map(location_to_json)
+        .unwrap_or_else(|| "null".to_string());
+    format!(
+        "{{\"class\":{},\"component\":{},\"detail\":{},\"location\":{}}}",
+        json_str(f.class.code()),
+        json_str(&f.component),
+        json_str(&f.detail),
+        location,
+    )
+}
+
+/// One `Location` as a JSON object (issue #4194): `chunk_index` is JSON
+/// `null` when the finding has no chunk grid; `partitions` is either
+/// `{"resolved":[...]}` or `{"unresolved":"<cause>"}` — the two states are
+/// never conflated into a bare array that could not tell "zero intersecting
+/// partitions" from "could not resolve".
+fn location_to_json(loc: &Location) -> String {
+    let chunk_index = loc
+        .chunk_index
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let partitions = match &loc.partitions {
+        PartitionResolution::Resolved { keys, truncated } => {
+            let entries: Vec<String> = keys
+                .iter()
+                .map(|k| {
+                    let rendered = k
+                        .rendered
+                        .as_deref()
+                        .map(json_str)
+                        .unwrap_or_else(|| "null".to_string());
+                    format!(
+                        "{{\"key_hex\":{},\"rendered\":{}}}",
+                        json_str(&k.key_hex),
+                        rendered
+                    )
+                })
+                .collect();
+            // `truncated` (issue #4194, roborev round-2 MEDIUM finding): how
+            // many more intersecting partitions exist beyond the resolver's
+            // MAX_RESOLVED_KEYS cap, `0` when nothing was omitted.
+            format!(
+                "{{\"resolved\":[{}],\"truncated\":{}}}",
+                entries.join(","),
+                truncated
+            )
+        }
+        PartitionResolution::Unresolved(cause) => {
+            format!("{{\"unresolved\":{}}}", json_str(cause))
+        }
+    };
+    // `anchor` (roborev job 92 MEDIUM): a JSON consumer sees the same two
+    // physical fields the text renderer does, so it needs the same disclosure —
+    // fixing only the human channel would leave the machine channel asserting
+    // "these bytes are damaged" about an offset past EOF.
+    let anchor = match loc.anchor {
+        PhysicalAnchor::DamagedExtent => "damaged_extent",
+        PhysicalAnchor::DeclaredRecord => "declared_record",
+    };
+    format!(
+        "{{\"component\":{},\"byte_offset\":{},\"byte_len\":{},\"anchor\":{},\"chunk_index\":{},\"partitions\":{}}}",
+        json_str(&loc.component),
+        loc.byte_offset,
+        loc.byte_len,
+        json_str(anchor),
+        chunk_index,
+        partitions,
+    )
+}
+
 /// Minimal JSON string escaper (quotes, backslashes, control chars).
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
