@@ -179,9 +179,11 @@ pub(crate) struct PendingLocation {
     /// the space `Index.db`/the BTI trie address (see this module's doc for
     /// why this differs from the physical range above).
     pub(crate) damaged_logical: (u64, u64),
-    /// The boundary source's declared total LOGICAL length, bounding the last
-    /// boundary entry's extent.
+    /// The total LOGICAL length bounding the last boundary entry's extent.
     pub(crate) logical_len: u64,
+    /// Where `logical_len` came from. Carried per-check-site because only the
+    /// check site knows (see [`LogicalLenSource`]).
+    pub(crate) logical_len_source: LogicalLenSource,
     /// Whether the physical range above is a damaged extent or a declared
     /// record location — carried per-finding because it is a property of the
     /// CHECK that produced it, not of the component.
@@ -411,6 +413,58 @@ pub const BOUNDARY_ENTRY_ORDER_VIOLATION: &str =
 pub const BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS: &str =
     "boundary source declares a Data.db position at or past the declared logical length";
 
+/// `Data.db` is SHORTER than the boundary source describes — an OBSERVATION,
+/// deliberately naming no culprit (roborev job 133 MEDIUM, issue #4194).
+///
+/// Distinct from [`BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS`], which does accuse the
+/// boundary source and is correct ONLY against a DECLARED length. Against a
+/// MEASURED length the identical arithmetic has TWO indistinguishable
+/// explanations:
+///
+/// * `Data.db` was truncated and the boundary source is intact, or
+/// * `Data.db` is intact and a boundary entry's position is corrupt.
+///
+/// Nothing available on the uncompressed path separates them — `CRC.db` cannot
+/// (a truncation inside the final chunk leaves the chunk count unchanged, which
+/// is exactly the reachable window), and there is no declared original length
+/// to compare against. Both live cases are covered:
+/// `l1_4_truncated_uncompressed_data_db_names_data_db_not_the_boundary_source`
+/// truncates an intact table, and
+/// `blocker2_index_position_past_the_logical_length_is_refused_by_name`
+/// corrupts an index position on an intact one — and they are
+/// INDISTINGUISHABLE from this evidence, so naming either as the culprit would
+/// be a guess (issue #28). Stating the observation and the ambiguity is the
+/// fail-closed answer; resolving it needs a declared length (follow-up).
+pub const DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE: &str =
+    "Data.db is shorter than the boundary source describes";
+
+/// Where a `logical_len` came from — carried, never guessed (issue #28).
+///
+/// This distinction is load-bearing, not bookkeeping. The bounds check in
+/// [`resolve_partitions`] asks "does the last boundary entry start beyond the
+/// end of `Data.db`'s logical stream?", and the answer means OPPOSITE things
+/// depending on where the end came from:
+///
+/// * A DECLARED length is independent of the file's current size, so an entry
+///   past it can only mean the boundary source disagrees with itself.
+/// * A MEASURED length SHRINKS when `Data.db` is truncated, so an entry past
+///   it is the expected, correct reading of an INTACT boundary source
+///   describing bytes that no longer exist.
+///
+/// Conflating them made every uncompressed truncation — the headline class
+/// this verb exists to locate — refuse resolution while blaming an intact
+/// `Index.db`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalLenSource {
+    /// The boundary source's own DECLARED total logical length
+    /// (`CompressionInfo::data_length`). Unaffected by truncation.
+    Declared,
+    /// The CURRENT physical `Data.db` length, measured by `stat` at verify
+    /// time (the uncompressed path, where physical == logical). A truncation
+    /// shrinks this value.
+    MeasuredDataDbLength,
+}
+
 /// The boundary source's trust decision for a WHOLE report (design.md §D2:
 /// fully trusted or not trusted at all, never partially).
 ///
@@ -490,9 +544,10 @@ pub fn first_order_violation(entries: &[BoundaryEntry]) -> Option<usize> {
 /// [`PARTITION_KEY_UNAVAILABLE`]).
 ///
 /// `logical_len` bounds the LAST entry's extent (there is no "next entry" to
-/// derive it from) — the boundary source's own declared total logical length
-/// (`CompressionInfo::data_length` when compressed, the physical `Data.db`
-/// length when not).
+/// derive it from): `CompressionInfo::data_length` when compressed, the
+/// physical `Data.db` length when not. `logical_len_source` says WHICH of
+/// those it is — see [`LogicalLenSource`] for why that changes the meaning of
+/// a failed bounds check, and therefore which component gets named.
 ///
 /// This is a closed-interval test only — no `Data.db` bytes are read or
 /// scanned here (design.md §D1/§D6, issue #28).
@@ -500,6 +555,7 @@ pub fn resolve_partitions(
     damaged: (u64, u64),
     sorted_boundary_entries: &[BoundaryEntry],
     logical_len: u64,
+    logical_len_source: LogicalLenSource,
 ) -> PartitionResolution {
     // The clear form, restored (roborev job 102 LOW). This was written as a
     // manual `zip(iter().skip(1))` purely to dodge the no-resync-scan guard's
@@ -536,12 +592,29 @@ pub fn resolve_partitions(
     // the declared end has the same degenerate `[len, len)` extent, so `>`
     // would leave that one value silently dropped. O(1), not O(n): the input
     // is sorted (asserted above), so the last entry is the only candidate.
+    //
+    // WHICH COMPONENT THIS ACCUSES DEPENDS ON `logical_len_source` (roborev job
+    // 133 MEDIUM). The test above is sound only against a length the boundary
+    // source DECLARED. Against a MEASURED `Data.db` length it fires on the
+    // normal, correct reading of a TRUNCATED file — an intact `Index.db`
+    // faithfully describing bytes that no longer exist — so reporting
+    // `BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS` there names the wrong suspect and
+    // suppresses exactly the partition list this verb exists to produce.
     if let Some((last_start, _)) = sorted_boundary_entries.last() {
         if *last_start >= logical_len {
-            return PartitionResolution::Unresolved(format!(
-                "{BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS}: declared position {last_start} \
-                 (0x{last_start:x}) is not below the declared logical length {logical_len}"
-            ));
+            return PartitionResolution::Unresolved(match logical_len_source {
+                LogicalLenSource::Declared => format!(
+                    "{BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS}: declared position {last_start} \
+                     (0x{last_start:x}) is not below the declared logical length {logical_len}"
+                ),
+                LogicalLenSource::MeasuredDataDbLength => format!(
+                    "{DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE}: boundary source declares a \
+                     partition at position {last_start} (0x{last_start:x}), but Data.db is \
+                     only {logical_len} bytes — from this evidence a Data.db truncation and \
+                     a corrupt boundary-source position are INDISTINGUISHABLE (no declared \
+                     original length exists on the uncompressed path)"
+                ),
+            });
         }
     }
 
@@ -628,10 +701,11 @@ pub fn resolve_location(
     boundary: &BoundarySource<'_>,
     damaged_logical: (u64, u64),
     logical_len: u64,
+    logical_len_source: LogicalLenSource,
 ) -> Location {
     let partitions = match boundary {
         BoundarySource::Trusted(entries) => {
-            resolve_partitions(damaged_logical, entries, logical_len)
+            resolve_partitions(damaged_logical, entries, logical_len, logical_len_source)
         }
         BoundarySource::Rejected(cause) => PartitionResolution::Unresolved(cause.clone()),
     };
@@ -827,6 +901,7 @@ pub(crate) async fn finalize_locations(
             &boundary,
             p.damaged_logical,
             p.logical_len,
+            p.logical_len_source,
         );
         if let Some(f) = findings.get_mut(p.finding_index) {
             f.location = Some(location);

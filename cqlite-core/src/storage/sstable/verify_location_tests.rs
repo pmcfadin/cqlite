@@ -31,7 +31,7 @@ fn resolved(keys: Vec<KeyRef>) -> PartitionResolution {
 fn intersects_a_single_partition() {
     let e = entries(&[(0, b"k0"), (100, b"k1"), (200, b"k2")]);
     // Damaged range [100, 150) falls entirely inside k1's extent [100,200).
-    let res = resolve_partitions((100, 150), &e, 300);
+    let res = resolve_partitions((100, 150), &e, 300, LogicalLenSource::Declared);
     assert_eq!(res, resolved(vec![KeyRef::from_raw(b"k1")]));
 }
 
@@ -39,7 +39,7 @@ fn intersects_a_single_partition() {
 fn intersects_two_adjacent_partitions_when_the_range_spans_the_boundary() {
     let e = entries(&[(0, b"k0"), (100, b"k1"), (200, b"k2")]);
     // [90, 110) straddles k0's end and k1's start.
-    let res = resolve_partitions((90, 110), &e, 300);
+    let res = resolve_partitions((90, 110), &e, 300, LogicalLenSource::Declared);
     assert_eq!(
         res,
         resolved(vec![KeyRef::from_raw(b"k0"), KeyRef::from_raw(b"k1")])
@@ -50,23 +50,23 @@ fn intersects_two_adjacent_partitions_when_the_range_spans_the_boundary() {
 fn touching_but_not_overlapping_is_not_an_intersection() {
     let e = entries(&[(0, b"k0"), (100, b"k1")]);
     // [100, 150) starts exactly where k0 ends — no overlap with k0.
-    let res = resolve_partitions((100, 150), &e, 300);
+    let res = resolve_partitions((100, 150), &e, 300, LogicalLenSource::Declared);
     assert_eq!(res, resolved(vec![KeyRef::from_raw(b"k1")]));
 }
 
 #[test]
 fn last_partition_extent_is_bounded_by_logical_len() {
     let e = entries(&[(0, b"k0"), (100, b"k1")]);
-    let res = resolve_partitions((250, 260), &e, 300);
+    let res = resolve_partitions((250, 260), &e, 300, LogicalLenSource::Declared);
     assert_eq!(res, resolved(vec![KeyRef::from_raw(b"k1")]));
-    let res_past_end = resolve_partitions((300, 310), &e, 300);
+    let res_past_end = resolve_partitions((300, 310), &e, 300, LogicalLenSource::Declared);
     assert_eq!(res_past_end, resolved(vec![]));
 }
 
 #[test]
 fn no_intersection_resolves_to_an_empty_resolved_set() {
     let e = entries(&[(1000, b"k0")]);
-    let res = resolve_partitions((0, 10), &e, 2000);
+    let res = resolve_partitions((0, 10), &e, 2000, LogicalLenSource::Declared);
     assert_eq!(res, resolved(vec![]));
 }
 
@@ -83,7 +83,12 @@ fn resolved_set_is_capped_and_names_the_truncated_count() {
         .map(|(o, k)| (*o, Some(Arc::from(k.as_slice()))))
         .collect();
     let logical_len = (MAX_RESOLVED_KEYS as u64 + 11) * 10;
-    let res = resolve_partitions((0, logical_len), &e, logical_len);
+    let res = resolve_partitions(
+        (0, logical_len),
+        &e,
+        logical_len,
+        LogicalLenSource::Declared,
+    );
     match res {
         PartitionResolution::Resolved { keys, truncated } => {
             assert_eq!(keys.len(), MAX_RESOLVED_KEYS);
@@ -103,7 +108,7 @@ fn duplicate_raw_keys_do_not_inflate_the_truncated_count() {
         (10, Some(Arc::from(b"dup".as_slice()))),
         (20, Some(Arc::from(b"unique".as_slice()))),
     ];
-    let res = resolve_partitions((0, 30), &e, 30);
+    let res = resolve_partitions((0, 30), &e, 30, LogicalLenSource::Declared);
     match res {
         PartitionResolution::Resolved { keys, truncated } => {
             assert_eq!(truncated, 0, "no key exceeds MAX_RESOLVED_KEYS here");
@@ -123,7 +128,7 @@ fn duplicate_raw_keys_do_not_inflate_the_truncated_count() {
 #[test]
 fn an_unknown_intersecting_key_unresolves_the_whole_finding() {
     let e: Vec<BoundaryEntry> = vec![(0u64, Some(Arc::from(b"k0".as_slice()))), (100u64, None)];
-    let res = resolve_partitions((100, 150), &e, 300);
+    let res = resolve_partitions((100, 150), &e, 300, LogicalLenSource::Declared);
     assert_eq!(
         res,
         PartitionResolution::Unresolved(PARTITION_KEY_UNAVAILABLE.to_string())
@@ -216,6 +221,7 @@ fn resolve_location_fails_closed_on_a_damaged_boundary_source() {
         &BoundarySource::Rejected(BOUNDARY_SOURCE_UNREADABLE.to_string()),
         (0, 16384),
         16384,
+        LogicalLenSource::Declared,
     );
     assert_eq!(
         loc.partitions,
@@ -235,6 +241,7 @@ fn resolve_location_resolves_when_the_boundary_source_is_healthy() {
         &BoundarySource::Trusted(&e),
         (0, 100),
         16384,
+        LogicalLenSource::Declared,
     );
     assert_eq!(loc.partitions, resolved(vec![KeyRef::from_raw(b"k0")]));
     assert_eq!(loc.component, "Data.db");
@@ -266,7 +273,7 @@ fn hex_encode_matches_lower_case_pairs() {
 fn an_out_of_bounds_boundary_offset_is_refused_rather_than_silently_dropped() {
     let logical_len = 300u64;
     let e = entries(&[(0, b"k0"), (100, b"k1"), (100 + (1 << 24), b"k2")]);
-    let res = resolve_partitions((100, 150), &e, logical_len);
+    let res = resolve_partitions((100, 150), &e, logical_len, LogicalLenSource::Declared);
     match res {
         PartitionResolution::Unresolved(cause) => {
             assert!(
@@ -294,7 +301,7 @@ fn an_out_of_bounds_boundary_offset_is_refused_rather_than_silently_dropped() {
 #[test]
 fn a_boundary_offset_exactly_at_the_logical_length_is_also_refused() {
     let e = entries(&[(0, b"k0"), (300, b"k1")]);
-    match resolve_partitions((0, 300), &e, 300) {
+    match resolve_partitions((0, 300), &e, 300, LogicalLenSource::Declared) {
         PartitionResolution::Unresolved(cause) => assert!(
             cause.contains(BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS),
             "cause: {cause}"
@@ -309,7 +316,7 @@ fn a_boundary_offset_exactly_at_the_logical_length_is_also_refused() {
 fn a_boundary_offset_just_below_the_logical_length_still_resolves() {
     let e = entries(&[(0, b"k0"), (299, b"k1")]);
     assert_eq!(
-        resolve_partitions((299, 300), &e, 300),
+        resolve_partitions((299, 300), &e, 300, LogicalLenSource::Declared),
         resolved(vec![KeyRef::from_raw(b"k1")])
     );
 }
@@ -360,6 +367,7 @@ fn a_rejected_boundary_source_propagates_its_own_cause_verbatim() {
         &BoundarySource::Rejected(cause.clone()),
         (0, 16384),
         16384,
+        LogicalLenSource::Declared,
     );
     assert_eq!(loc.partitions, PartitionResolution::Unresolved(cause));
     let rendered = format_location(&loc);
@@ -449,4 +457,52 @@ fn verify_finding_display_does_not_enumerate_partition_keys() {
         !shown.contains("6b30"),
         "Display feeds summary_line(); it MUST NOT enumerate partition keys: {shown}"
     );
+}
+
+// The uncompressed-truncation misdiagnosis (roborev job 133 MEDIUM, #4194).
+// IDENTICAL inputs, differing ONLY in the provenance of `logical_len`, must
+// name DIFFERENT suspect components — that is the whole content of the fix, so
+// asserting both arms in one case keeps them from drifting apart.
+#[test]
+fn a_boundary_entry_past_a_measured_data_db_len_blames_data_db_not_the_index() {
+    // `k1` starts at 200, but Data.db is only 150 bytes: a truncation.
+    let e = entries(&[(0, b"k0"), (200, b"k1")]);
+
+    let truncated = resolve_partitions((0, 150), &e, 150, LogicalLenSource::MeasuredDataDbLength);
+    let cause = match &truncated {
+        PartitionResolution::Unresolved(c) => c.clone(),
+        other => panic!("a measured length past the last entry must refuse: {other:?}"),
+    };
+    assert!(
+        cause.contains(DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE),
+        "a truncated Data.db MUST be named as the suspect: {cause}"
+    );
+    assert!(
+        !cause.contains(BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS),
+        "an intact boundary source MUST NOT be blamed for a Data.db truncation: {cause}"
+    );
+    assert!(
+        cause.contains("150"),
+        "the refusal must name the actual Data.db length: {cause}"
+    );
+
+    // Same entries, same length — but DECLARED. Now the boundary source really
+    // does contradict itself, so the original cause is the correct one.
+    let declared = resolve_partitions((0, 150), &e, 150, LogicalLenSource::Declared);
+    let dcause = match &declared {
+        PartitionResolution::Unresolved(c) => c.clone(),
+        other => panic!("a declared length past the last entry must refuse: {other:?}"),
+    };
+    assert!(
+        dcause.contains(BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS),
+        "a declared-length violation MUST still blame the boundary source: {dcause}"
+    );
+    assert!(
+        !dcause.contains(DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE),
+        "a declared-length violation is not a truncation: {dcause}"
+    );
+
+    // The two causes are genuinely different text — this case cannot pass
+    // vacuously by both arms rendering the same string.
+    assert_ne!(cause, dcause, "the two provenances must be distinguishable");
 }

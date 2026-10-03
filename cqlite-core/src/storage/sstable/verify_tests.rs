@@ -798,6 +798,7 @@ fn pending_at(finding_index: usize, logical_len: u64) -> PendingLocation {
         chunk_index: Some(0),
         damaged_logical: (0, 16),
         logical_len,
+        logical_len_source: LogicalLenSource::Declared,
         anchor: crate::storage::sstable::verify_location::PhysicalAnchor::DamagedExtent,
     }
 }

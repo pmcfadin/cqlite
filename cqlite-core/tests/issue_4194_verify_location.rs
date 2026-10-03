@@ -34,7 +34,8 @@ use std::sync::Arc;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
     format_location, verify_sstable, PartitionResolution, PhysicalAnchor, VerifyErrorClass,
-    VerifyMode, BTI_IDENTITY_UNCORROBORATED, MAX_RESOLVED_KEYS,
+    VerifyMode, BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS, BTI_IDENTITY_UNCORROBORATED,
+    DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE, MAX_RESOLVED_KEYS,
 };
 use cqlite_core::Config;
 
@@ -1323,10 +1324,23 @@ async fn blocker2_index_position_past_the_logical_length_is_refused_by_name() {
 
     let loc = crc_mismatch_location(&staged).await;
     let cause = unresolved_cause(&loc.partitions);
+    // This fixture is UNCOMPRESSED, so `logical_len` is the MEASURED Data.db
+    // length and the refusal names the OBSERVATION rather than accusing the
+    // boundary source (roborev job 133 MEDIUM). That is deliberate: a corrupt
+    // index position (this case) and a Data.db truncation
+    // (`l1_4_...`) are indistinguishable from this evidence, so naming either
+    // culprit would be a guess. The requirement this case actually pins is
+    // unchanged — the refusal is SPECIFIC, naming the offending position and
+    // the length it exceeds, never a generic fallback.
     assert!(
-        cause.contains("at or past the declared logical length"),
-        "the refusal must NAME the out-of-bounds offset as its cause, not fall back to a \
+        cause.contains(DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE),
+        "the refusal must NAME the bounds violation as its cause, not fall back to a \
          generic one: {cause}"
+    );
+    assert!(
+        cause.contains(&bogus.to_string()) && cause.contains(&data_len.to_string()),
+        "the refusal must name BOTH the offending position ({bogus}) and the length it \
+         exceeds ({data_len}): {cause}"
     );
     assert!(
         cause.contains(&bogus.to_string()) && cause.contains(&data_len.to_string()),
@@ -1491,4 +1505,118 @@ async fn i3_corrupt_compression_info_is_never_checked_as_an_uncompressed_table()
          against a grid that is not this table's. Got: {misdispatched:#?}"
     );
     drop(staging);
+}
+
+// ---------------------------------------------------------------------------
+// UNCOMPRESSED truncation must name Data.db, not Index.db (roborev job 133
+// MEDIUM, issue #4194).
+//
+// The compressed path feeds `resolve_partitions` the DECLARED
+// `CompressionInfo::data_length`, which a truncation does not change. The
+// uncompressed path has no such declaration and feeds the CURRENT stat()
+// length, which a truncation DOES shrink — so the last boundary entry lands
+// past it and the bounds check fires on an INTACT `Index.db`. Before the fix
+// that was reported as `BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS`, i.e. it accused
+// the wrong component on the exact corruption class this verb exists to
+// locate, and suppressed the partition list.
+//
+// `l1_3` covers the COMPRESSED truncation; this is its uncompressed sibling,
+// which previously had no coverage at all.
+// ---------------------------------------------------------------------------
+
+/// Chunk size from `CRC.db`'s own 4-byte big-endian header, never a hardcoded
+/// 64 KiB — the fixture declares it, so read it (issue #28, and roborev job
+/// 133 LOW on hardcoded fixture constants).
+fn oracle_crc_chunk_size(path: &Path) -> u64 {
+    let b = std::fs::read(path).expect("read CRC.db");
+    assert!(
+        b.len() >= 4,
+        "CRC.db too short to carry a header: {}",
+        b.len()
+    );
+    u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64
+}
+
+#[tokio::test]
+async fn l1_4_truncated_uncompressed_data_db_names_data_db_not_the_boundary_source() {
+    // `test_basic/uncompressed_table`, NOT `test_comp`'s: the latter is a SINGLE
+    // partition at offset 0, so no truncation can place its last boundary entry
+    // past EOF without also collapsing the CRC chunk count — it cannot express
+    // this case at all. This one spans many partitions inside a single CRC
+    // chunk, so truncating below the last partition keeps the chunk count
+    // intact and the sidecar valid.
+    let Some(clean_dir) = fetched_clean_source_dir("test_basic", "uncompressed_table") else {
+        return;
+    };
+
+    let data_path = clean_dir.join("nb-1-big-Data.db");
+    let data_len = std::fs::metadata(&data_path)
+        .expect("stat clean Data.db")
+        .len();
+    let chunk_size = oracle_crc_chunk_size(&clean_dir.join("nb-1-big-CRC.db"));
+    let positions = oracle_index_positions(&clean_dir.join("nb-1-big-Index.db"));
+    let (_, last_start) = positions
+        .last()
+        .cloned()
+        .expect("uncompressed_table must declare at least one partition");
+
+    // Truncate exactly AT the last partition's start: the bounds test is `>=`,
+    // so this is the minimal truncation that triggers it.
+    let keep = last_start;
+
+    // PRECONDITION, asserted with its numbers rather than assumed: the kept
+    // prefix must span the SAME number of CRC chunks as the original, or
+    // `CrcDb::open`'s oversize guard rejects the sidecar and the located-finding
+    // path is never reached — the case would then prove nothing.
+    let chunks_before = data_len.div_ceil(chunk_size);
+    let chunks_after = keep.div_ceil(chunk_size);
+    assert_eq!(
+        chunks_before, chunks_after,
+        "fixture geometry cannot express this case: truncating to the last partition \
+         start ({keep}) changes the CRC chunk count ({chunks_before} -> {chunks_after}) \
+         for a {data_len}-byte Data.db at chunk_size {chunk_size}, so CRC.db would be \
+         rejected as oversized before the location path runs"
+    );
+
+    let staging = tempfile::Builder::new()
+        .prefix("cqlite-4194-l1-4-")
+        .tempdir()
+        .expect("create staging temp dir");
+    let staged = staging.path().join("nb-1-big");
+    copy_generation(&clean_dir, &staged);
+    truncate_to(&staged.join("nb-1-big-Data.db"), keep);
+
+    let report = run_verify(&staged).await;
+    let located: Vec<_> = report
+        .findings
+        .iter()
+        .filter_map(|f| f.location.as_ref().map(|l| (f.class, l)))
+        .collect();
+    assert!(
+        !located.is_empty(),
+        "a truncated uncompressed Data.db must produce at least one located finding; got {:#?}",
+        report.findings
+    );
+
+    // Every refusal caused by the truncation must name Data.db as the suspect.
+    let mut saw_truncation_cause = false;
+    for (class, loc) in &located {
+        if let PartitionResolution::Unresolved(cause) = &loc.partitions {
+            assert!(
+                !cause.contains(BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS),
+                "{class:?} blames an INTACT boundary source for a Data.db truncation: {cause}"
+            );
+            if cause.contains(DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE) {
+                saw_truncation_cause = true;
+            }
+        }
+    }
+    assert!(
+        saw_truncation_cause,
+        "no finding named Data.db as short; causes were {:#?}",
+        located
+            .iter()
+            .map(|(c, l)| (c, format_location(l)))
+            .collect::<Vec<_>>()
+    );
 }

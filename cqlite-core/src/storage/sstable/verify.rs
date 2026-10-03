@@ -54,10 +54,11 @@ use std::sync::Arc;
 // module path. Resolution LOGIC lives in `verify_location.rs` (file-size
 // relocation); only check-site plumbing stays here.
 pub use crate::storage::sstable::verify_location::{
-    format_location, format_location_compact, KeyRef, Location, PartitionResolution,
-    PhysicalAnchor, BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS, BOUNDARY_ENTRY_ORDER_VIOLATION,
-    BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE, BTI_IDENTITY_UNCORROBORATED,
-    MAX_RESOLVED_KEYS, PARTITION_KEY_UNAVAILABLE,
+    format_location, format_location_compact, KeyRef, Location, LogicalLenSource,
+    PartitionResolution, PhysicalAnchor, BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS,
+    BOUNDARY_ENTRY_ORDER_VIOLATION, BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE,
+    BTI_IDENTITY_UNCORROBORATED, DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE, MAX_RESOLVED_KEYS,
+    PARTITION_KEY_UNAVAILABLE,
 };
 
 /// Verification depth. QUICK and FULL are intentionally distinct — see the
@@ -1089,6 +1090,7 @@ fn check_compression_info(
                     chunk_index: Some(i),
                     damaged_logical: (logical_start, info.data_length.max(logical_start)),
                     logical_len: info.data_length,
+                    logical_len_source: LogicalLenSource::Declared,
                 });
             }
         }
@@ -1660,6 +1662,7 @@ fn check_inline_chunk_crc(
                     chunk_index: Some(i),
                     damaged_logical: (logical_start, logical_end),
                     logical_len: info.data_length,
+                    logical_len_source: LogicalLenSource::Declared,
                 });
             }
             break;
@@ -1801,6 +1804,7 @@ async fn check_uncompressed_crc_db(
                         chunk_index: Some(chunk_index),
                         damaged_logical: (offset, offset.saturating_add(filled as u64)),
                         logical_len: data_len,
+                        logical_len_source: LogicalLenSource::MeasuredDataDbLength,
                     });
                     // Report the first failing chunk and stop (matches the
                     // fail-fast read-path posture; naming one chunk is sufficient).
