@@ -42,11 +42,24 @@
 use crate::platform::Platform;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
+use crate::storage::sstable::verify_location::{self, PendingLocation};
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Config, Error, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+// Corruption-location types (issue #4194), re-exported through `verify` so
+// `VerifyFinding.location`'s type is reachable via the existing `verify`
+// module path. Resolution LOGIC lives in `verify_location.rs` (file-size
+// relocation); only check-site plumbing stays here.
+pub use crate::storage::sstable::verify_location::{
+    format_location, format_location_compact, KeyRef, Location, LogicalLenSource,
+    PartitionResolution, PhysicalAnchor, BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS,
+    BOUNDARY_ENTRY_ORDER_VIOLATION, BOUNDARY_SOURCE_UNREADABLE as BOUNDARY_SOURCE_UNREADABLE_CAUSE,
+    BTI_IDENTITY_UNCORROBORATED, DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE, MAX_RESOLVED_KEYS,
+    PARTITION_KEY_UNAVAILABLE,
+};
 
 /// Verification depth. QUICK and FULL are intentionally distinct — see the
 /// module docs. A QUICK success MUST NOT be presented as FULL corruption
@@ -201,6 +214,12 @@ pub struct VerifyFinding {
     /// Human-readable message including locating context (offset / chunk index
     /// / checksum field / missing-component name).
     pub detail: String,
+    /// Which `Data.db` byte range and partitions this finding is anchored to,
+    /// when it has a natural byte range (issue #4194). `None` for a finding
+    /// with no chunk/offset anchor (e.g. `MissingComponent`,
+    /// `StatisticsHeaderCorrupt`) — additive: every pre-#4194 finding site
+    /// that does not explicitly populate this leaves it `None`, unchanged.
+    pub location: Option<Location>,
 }
 
 impl VerifyFinding {
@@ -213,6 +232,7 @@ impl VerifyFinding {
             class,
             component: component.into(),
             detail: detail.into(),
+            location: None,
         }
     }
 }
@@ -225,7 +245,15 @@ impl std::fmt::Display for VerifyFinding {
             self.class.code(),
             self.component,
             self.detail
-        )
+        )?;
+        if let Some(loc) = &self.location {
+            // COMPACT, not the full renderer (roborev job 131 MEDIUM): this
+            // Display feeds `VerifyReport::summary_line()`, which the CLI prints
+            // ABOVE its own explicit per-finding `location:` line. See
+            // `format_location_compact`.
+            write!(f, " (location: {})", format_location_compact(loc))?;
+        }
+        Ok(())
     }
 }
 
@@ -288,16 +316,17 @@ impl VerifyReport {
 }
 
 /// Resolved set of component files for one SSTable generation in a directory.
-struct ComponentSet {
+/// `pub(crate)`: `verify_location::finalize_locations` reads `format`/`path()`.
+pub(crate) struct ComponentSet {
     base_name: String,
-    format: SsTableFormat,
+    pub(crate) format: SsTableFormat,
     /// Map of bare component name (e.g. `Data.db`) -> absolute path on disk.
     present: BTreeMap<String, PathBuf>,
     data_path: PathBuf,
 }
 
 impl ComponentSet {
-    fn path(&self, dir: &Path, component: &str) -> PathBuf {
+    pub(crate) fn path(&self, dir: &Path, component: &str) -> PathBuf {
         dir.join(format!("{}-{}", self.base_name, component))
     }
 
@@ -380,6 +409,14 @@ async fn verify_components(
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
     let mut findings: Vec<VerifyFinding> = Vec::new();
+    // Issue #4194: chunk/offset-anchored findings awaiting location
+    // resolution, resolved in one pass at the end (`finalize_locations`) once
+    // every check has run and the boundary source's own health is known.
+    let mut pending_locations: Vec<PendingLocation> = Vec::new();
+    // Cloned up front (cheap: an `Arc` bump) so it survives the `platform`
+    // move into `full_row_scan_partitions` below, for `finalize_locations`'s
+    // own `IndexReader::open` re-read of `Index.db` (BIG).
+    let platform_for_location = platform.clone();
 
     // ---- Check 1: TOC.txt completeness + component presence ----------------
     let toc_components = check_toc_and_presence(dir, &components, &mut findings)?;
@@ -388,7 +425,8 @@ async fn verify_components(
     check_digest(dir, &components, &mut findings)?;
 
     // ---- Check 3: CompressionInfo.db parse + chunk-offset bounds -----------
-    let compression_info = check_compression_info(dir, &components, &mut findings)?;
+    let compression_info =
+        check_compression_info(dir, &components, &mut findings, &mut pending_locations)?;
 
     // ---- Check 4: index structure (Index.db for BIG, BTI tries for BTI) ----
     //
@@ -417,18 +455,50 @@ async fn verify_components(
 
     let mut rows_scanned = None;
 
+    // Issue #4194: the position -> raw-key map recovered by the FULL-mode row
+    // scan (populated below, `None` in QUICK mode or when the scan does not
+    // run) — used by `finalize_locations` to resolve a BTI `DataOffset`
+    // leaf's raw key (its identity is only recoverable through the scan; a
+    // `RowsOffset` leaf's key is already inline on `bti_leaves`).
+    let mut scan_position_map: Option<std::collections::HashMap<u64, Vec<u8>>> = None;
+
+    // Issue #4194 (owner ruling 2026-10-02: option (a), fail closed): whether
+    // the BTI identity cross-check below RAN TO COMPLETION and AGREED. Starts
+    // `false` and is only ever set by the affirmative outcome — never derived
+    // from the ABSENCE of a mismatch finding, which is the whole defect
+    // (CLAUDE.md: key the permissive branch on the affirmative value). QUICK
+    // mode, a `compression_metadata_corrupt` skip, a failed scan and an absent
+    // `bti_leaves` all leave it `false`, and each of those is a state in which
+    // "no mismatch was reported" means "nothing looked". See
+    // `verify_location::BTI_IDENTITY_UNCORROBORATED`.
+    let mut bti_identity_corroborated = false;
+
     if mode == VerifyMode::Full {
         // ---- Check 5: inline Data.db chunk CRC validation (#998) -----------
-        if let Some(info) = compression_info.as_ref() {
-            check_inline_chunk_crc(&components, info, &mut findings)?;
-        } else if components.format == SsTableFormat::Big {
-            // ---- Check 5b: uncompressed CRC.db per-chunk validation (#1396) --
-            // An uncompressed BIG SSTable (no CompressionInfo.db) carries a CRC.db
-            // per-chunk checksum sidecar. Read it and validate every Data.db chunk
-            // — the uncompressed analogue of the inline chunk-CRC check above.
-            // Replaces the prior behavior where CRC.db was only name-whitelisted
-            // (recognized as a component) but never content-validated.
-            check_uncompressed_crc_db(dir, &components, &mut findings).await;
+        // THREE-WAY (roborev I3, #4194): an unreadable `CompressionInfo.db`
+        // means the table is COMPRESSED and neither chunk check may run —
+        // the inline check needs trustworthy offsets, and the uncompressed
+        // check would validate this Data.db against a `CRC.db` grid that is
+        // not its grid, reporting a physical range as a logical damaged
+        // extent. The cause is already a finding; adding a second, wrong one
+        // is strictly worse than adding none.
+        match &compression_info {
+            CompressionState::Compressed(info) => {
+                check_inline_chunk_crc(&components, info, &mut findings, &mut pending_locations)?;
+            }
+            CompressionState::Unreadable => {}
+            // ---- Check 5b: uncompressed CRC.db per-chunk validation (#1396)
+            // An uncompressed BIG SSTable (no CompressionInfo.db) carries a
+            // CRC.db per-chunk checksum sidecar. Read it and validate every
+            // Data.db chunk — the uncompressed analogue of the inline
+            // chunk-CRC check above. Replaces the prior behavior where CRC.db
+            // was only name-whitelisted (recognized as a component) but never
+            // content-validated.
+            CompressionState::Uncompressed if components.format == SsTableFormat::Big => {
+                check_uncompressed_crc_db(dir, &components, &mut findings, &mut pending_locations)
+                    .await;
+            }
+            CompressionState::Uncompressed => {}
         }
 
         // ---- Check 6a: Statistics.db parse ---------------------------------
@@ -490,16 +560,41 @@ async fn verify_components(
                     // corruption that keeps a leaf's emitted prefix but rewrites its
                     // payload to a different partition. Resolving the payload closes
                     // both gaps.
-                    if let Some(leaves) = bti_leaves {
-                        if let Some(detail) =
-                            bti_partition_identity_mismatch(&leaves, &scan_partitions)
-                        {
-                            findings.push(VerifyFinding::new(
+                    //
+                    // Issue #4194: borrowed (not moved) — `bti_leaves` is needed
+                    // again by `finalize_locations` below.
+                    if let Some(leaves) = bti_leaves.as_ref() {
+                        match bti_partition_identity_mismatch(leaves, &scan_partitions) {
+                            Some(detail) => findings.push(VerifyFinding::new(
                                 VerifyErrorClass::BtiRootPointerCorrupt,
                                 "Partitions.db",
                                 detail,
-                            ));
+                            )),
+                            // THE one affirmative corroboration point (#4194
+                            // option (a)): every leaf's payload, resolved back
+                            // to a raw key by authoritative data, was compared
+                            // against the keys decoded from Data.db and they
+                            // agreed. Only this outcome licenses a BTI
+                            // `Resolved` location. A mismatch is left `false`
+                            // too — it also pushes `BtiRootPointerCorrupt`,
+                            // which distrusts the source by class anyway, so
+                            // the two signals agree rather than race.
+                            None => bti_identity_corroborated = true,
                         }
+                    }
+                    // Issue #4194, roborev round-4 MEDIUM finding: only built
+                    // when it can actually be USED — BTI with at least one
+                    // pending location. Previously retained unconditionally
+                    // (including for BIG, which never reads it, and for the
+                    // overwhelmingly common clean-file case), materializing a
+                    // whole-table position->key map — tens of MB on a large
+                    // table — for zero benefit.
+                    if components.format == SsTableFormat::Bti && !pending_locations.is_empty() {
+                        scan_position_map = Some(
+                            scan_partitions
+                                .into_iter()
+                                .collect::<std::collections::HashMap<_, _>>(),
+                        );
                     }
                 }
                 Err(e) => findings.push(classify_scan_error(&components, &e)),
@@ -523,6 +618,24 @@ async fn verify_components(
             )
             .await;
         } // end: if !compression_metadata_corrupt
+    }
+
+    // Issue #4194: resolve every pending location in one pass, now that every
+    // check has run and the boundary source's own health is fully known.
+    // Lives in `verify_location.rs` (file-size relocation) — this call site
+    // is the only thing that stays here.
+    if !pending_locations.is_empty() {
+        verify_location::finalize_locations(
+            dir,
+            &components,
+            &mut findings,
+            pending_locations,
+            bti_leaves.as_deref(),
+            scan_position_map.as_ref(),
+            bti_identity_corroborated,
+            platform_for_location,
+        )
+        .await;
     }
 
     Ok(VerifyReport {
@@ -818,18 +931,50 @@ fn check_digest(
     Ok(())
 }
 
+/// What Check 3 established about this generation's compression — THREE
+/// states, not two (roborev important finding I3, #4194).
+///
+/// `Option<CompressionInfo>` conflated "genuinely uncompressed" with
+/// "compressed, but `CompressionInfo.db` cannot be trusted", and the caller's
+/// `else` branch then dispatched the second case into
+/// [`check_uncompressed_crc_db`]. MEASURED consequence, on a staged
+/// `compression_info_bad_offset` generation carrying a `CRC.db`: an
+/// `UncompressedChunkCrcMismatch` finding with
+/// `location: Data.db: chunk 0, offset 0x0 len 6979 — 1 partition(s)` — a
+/// COMPRESSED table's PHYSICAL byte range reported as a logical damaged
+/// extent, checked against a chunk grid that is not its grid, with a
+/// confidently-resolved partition list attached. A wrong answer presented as
+/// a right one, which §D2 exists to prevent.
+enum CompressionState {
+    /// No `CompressionInfo.db` on disk: a genuinely uncompressed table. Its
+    /// `CRC.db` (BIG) IS the authoritative chunk grid.
+    Uncompressed,
+    /// Parsed and bounds-checked. Usable by the FULL-mode inline-CRC check.
+    Compressed(CompressionInfo),
+    /// A `CompressionInfo.db` IS present but cannot be trusted — it failed to
+    /// parse, or it declares a chunk offset out of bounds for `Data.db`. The
+    /// table is COMPRESSED, so no uncompressed check may run against it, and
+    /// the inline chunk-CRC check cannot run either (it derives each chunk's
+    /// size from adjacent offsets).
+    ///
+    /// Carries no cause: the cause is already recorded as a `VerifyFinding` by
+    /// the check that detected it, which is its single source of truth.
+    /// Duplicating it here would invite two divergent renderings of one fact.
+    Unreadable,
+}
+
 /// Check 3: `CompressionInfo.db` parses (#1001) and all chunk offsets are
-/// in-bounds for `Data.db`. Returns the parsed `CompressionInfo` for reuse by
-/// the FULL-mode inline-CRC check, or `None` (genuinely uncompressed table, or
-/// the file failed to parse — in which case a finding is recorded).
+/// in-bounds for `Data.db`. See [`CompressionState`] for why the result is
+/// three-valued.
 fn check_compression_info(
     dir: &Path,
     components: &ComponentSet,
     findings: &mut Vec<VerifyFinding>,
-) -> Result<Option<CompressionInfo>> {
+    pending_locations: &mut Vec<PendingLocation>,
+) -> Result<CompressionState> {
     let ci_path = components.path(dir, "CompressionInfo.db");
     if !ci_path.exists() {
-        return Ok(None); // uncompressed SSTable
+        return Ok(CompressionState::Uncompressed);
     }
     let bytes = std::fs::read(&ci_path).map_err(|e| {
         Error::corruption(format!(
@@ -847,7 +992,9 @@ fn check_compression_info(
                 "CompressionInfo.db",
                 format!("CompressionInfo.db failed to parse: {}", e),
             ));
-            return Ok(None);
+            // PRESENT but unparseable: the table is compressed and nothing
+            // downstream may treat it as uncompressed (I3).
+            return Ok(CompressionState::Unreadable);
         }
     };
 
@@ -862,15 +1009,37 @@ fn check_compression_info(
                 "Data.db",
                 format!("cannot stat Data.db for chunk-bounds check: {}", e),
             ));
-            return Ok(Some(info));
+            // The offsets were never bounds-checked, so `info` is not
+            // established as trustworthy — refuse it rather than handing
+            // unvalidated offsets to the inline-CRC check (same fail-closed
+            // direction as I4 below: a stat failure must not fail OPEN).
+            return Ok(CompressionState::Unreadable);
         }
     };
     let mut offset_out_of_bounds = false;
+    // Issue #4194, roborev round-1 HIGH finding: a location is attached ONLY
+    // to the FIRST out-of-bounds chunk. This loop has no cap on how many
+    // `ChunkOffsetOutOfBounds` findings it can push (one per bad chunk offset,
+    // unbounded on a maliciously/severely truncated CompressionInfo.db), and
+    // attaching a `Resolved(Vec<KeyRef>)` to EVERY one of them — each holding
+    // a hex string for every partition from that chunk to EOF — makes the
+    // resident location data O(bad_chunks × partitions_past_eof): quadratic
+    // in the corruption's own severity, materialized as ONE `VerifyFinding`
+    // per bad chunk and then serialized into a single JSON line, directly
+    // contradicting this change's own <128 MB / no-data-dir-wide-structure
+    // posture. The FIRST out-of-bounds chunk's range IS the most inclusive
+    // (design.md §D1's `[new_eof, original_logical_length)` — every later
+    // chunk's range is a strict subset), so it alone already answers "which
+    // partitions does this truncation touch"; every subsequent
+    // `ChunkOffsetOutOfBounds` finding still fires (unchanged corruption
+    // signal) but is left `location: None`.
+    let mut first_out_of_bounds_located = false;
     for (i, &offset) in info.chunk_offsets.iter().enumerate() {
         // Every chunk record is at least its 4-byte inline CRC, so the offset
         // itself must leave room for that. Offsets at/after EOF are corrupt.
         if offset.saturating_add(4) > data_len {
             offset_out_of_bounds = true;
+            let finding_index = findings.len();
             findings.push(VerifyFinding::new(
                 VerifyErrorClass::ChunkOffsetOutOfBounds,
                 "CompressionInfo.db",
@@ -879,6 +1048,51 @@ fn check_compression_info(
                     i, offset, offset, data_len
                 ),
             ));
+            if !first_out_of_bounds_located {
+                first_out_of_bounds_located = true;
+                // Issue #4194: this is the truncation-anchored finding this
+                // corruption class actually produces (verified against the real
+                // `test_comp_corrupt/data_db_truncation` fixture — the boundary
+                // source's declared LOGICAL length (`data_length`) is the extent
+                // every partition past this chunk's logical start is measured
+                // against; design.md §D1's "new_eof .. original_logical_length"
+                // derivation, computed here rather than deferred since `info` is
+                // only in scope in this function).
+                let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
+                pending_locations.push(PendingLocation {
+                    finding_index,
+                    component: "Data.db".to_string(),
+                    byte_offset: offset,
+                    byte_len: 4,
+                    // The declared record does not FIT in the file, so this
+                    // physical range is a declared location rather than a
+                    // damaged extent; the damage is the logical tail
+                    // `partitions` enumerates (roborev job 92 MEDIUM).
+                    //
+                    // `byte_len: 4` is a chunk record's MINIMUM SIZE, and the
+                    // range `[offset, offset + 4)` is the record's HEAD at the
+                    // declared offset -- NOT a length prefix (roborev job 108)
+                    // and NOT the trailing CRC32 (roborev nit N1, #4194: this
+                    // comment said "TRAILING inline CRC32", which names the
+                    // wrong end of the record; the CRC lies at the record's far
+                    // end, whose position is unknown for an out-of-bounds chunk
+                    // because the payload length is not known). 4 IS the
+                    // minimum because `compression_info.rs` documents the
+                    // record layout as `[compressed_bytes][4-byte CRC32]`,
+                    // citing CompressedSequentialWriter.java:203's
+                    // `chunkOffset += compressedLength + 4`, so even a
+                    // zero-length payload occupies 4 bytes -- which is also
+                    // exactly what the bounds check three lines above asserts.
+                    // Cassandra source was NOT re-read here (no pinned clone on
+                    // this host), so this states the in-repo records rather than
+                    // claiming fresh primary-source verification.
+                    anchor: PhysicalAnchor::DeclaredRecord,
+                    chunk_index: Some(i),
+                    damaged_logical: (logical_start, info.data_length.max(logical_start)),
+                    logical_len: info.data_length,
+                    logical_len_source: LogicalLenSource::Declared,
+                });
+            }
         }
     }
 
@@ -889,10 +1103,10 @@ fn check_compression_info(
     // is already recorded, so returning None just skips the chunk-CRC check
     // (roborev).
     if offset_out_of_bounds {
-        return Ok(None);
+        return Ok(CompressionState::Unreadable);
     }
 
-    Ok(Some(info))
+    Ok(CompressionState::Compressed(info))
 }
 
 /// One BTI `Partitions.db` leaf, with its PAYLOAD resolved back to a raw
@@ -902,7 +1116,8 @@ fn check_compression_info(
 /// emitted byte-comparable prefix while rewriting its payload to point at a
 /// DIFFERENT partition is still caught (a same-count, wrong-IDENTITY
 /// corruption the prefix-only compare missed).
-struct BtiResolvedLeaf {
+/// `pub(crate)`: `verify_location::finalize_locations` reads its fields.
+pub(crate) struct BtiResolvedLeaf {
     /// The path-compressed byte-comparable prefix emitted by the trie walk
     /// (`[0x40 ++ token]` truncated to the shortest distinguishing prefix). Used
     /// only for the prefix/payload-consistency assertion.
@@ -911,12 +1126,12 @@ struct BtiResolvedLeaf {
     /// recovered directly (a `RowsOffset` leaf stores the raw key INLINE in
     /// `Rows.db`). `None` for a `DataOffset` leaf, whose raw key is recovered via
     /// the Data.db position map ([`Self::data_position`]).
-    inline_raw_key: Option<Vec<u8>>,
+    pub(crate) inline_raw_key: Option<Vec<u8>>,
     /// The decompressed-`Data.db` partition-start position the payload points at:
     /// the `DataOffset` value directly, or the `data_position` recovered from the
     /// `RowsOffset` row-index entry. Resolved to a raw key via the Data.db scan's
     /// position map in [`bti_partition_identity_mismatch`].
-    data_position: u64,
+    pub(crate) data_position: u64,
 }
 
 /// Check 4 (BTI): structurally validate the `Partitions.db` and `Rows.db`
@@ -1373,6 +1588,7 @@ fn check_inline_chunk_crc(
     components: &ComponentSet,
     info: &CompressionInfo,
     findings: &mut Vec<VerifyFinding>,
+    pending_locations: &mut Vec<PendingLocation>,
 ) -> Result<()> {
     use crate::storage::sstable::chunk_reader::ChunkReader;
     use std::fs::File;
@@ -1408,9 +1624,49 @@ fn check_inline_chunk_crc(
     // separately by the full row scan (Check 7), so we deliberately do NOT
     // re-decompress here (that would false-positive on the last/incompressible
     // chunk's size bookkeeping for some BTI Data.db files).
+    //
+    // Issue #4194: reads chunk-by-chunk (rather than `read_all_chunks()` in one
+    // call) so the FAILING chunk's index is known directly from the loop
+    // variable — never parsed back out of the error message text (no-heuristics
+    // mandate, issue #28) — for the location this finding carries. Fails fast
+    // on the first bad chunk, same as `read_all_chunks()` did.
     let mut chunk_reader = ChunkReader::new(reader, info.clone(), total_size);
-    if let Err(e) = chunk_reader.read_all_chunks() {
-        findings.push(classify_data_error("Data.db", &e));
+    for i in 0..chunk_reader.chunk_count() {
+        if let Err(e) = chunk_reader.read_chunk(i) {
+            let finding_index = findings.len();
+            findings.push(classify_data_error("Data.db", &e));
+            // Issue #4194, roborev round-3 LOW finding: `compressed_chunk_size`
+            // returns `None` precisely when the chunk_offsets table is corrupt
+            // enough that the checked subtraction underflows — the case this
+            // check exists to detect. `.unwrap_or(0)` used to collapse that
+            // into a fabricated `byte_len: 0`, indistinguishable from a
+            // legitimately empty range and pointing an operator at the wrong
+            // bytes ("never a guess" — this module's own doc). Skip the
+            // location entirely when either physical lookup is unmeasurable;
+            // the finding itself (chunk `i`, the decode error) is unaffected.
+            if let (Some(phys_offset), Some(phys_len)) = (
+                info.compressed_chunk_offset(i),
+                info.compressed_chunk_size(i, total_size),
+            ) {
+                let logical_start = (i as u64).saturating_mul(info.chunk_length as u64);
+                let logical_end = ((i as u64).saturating_add(1))
+                    .saturating_mul(info.chunk_length as u64)
+                    .min(info.data_length)
+                    .max(logical_start);
+                pending_locations.push(PendingLocation {
+                    finding_index,
+                    component: "Data.db".to_string(),
+                    byte_offset: phys_offset,
+                    byte_len: phys_len,
+                    anchor: PhysicalAnchor::DamagedExtent,
+                    chunk_index: Some(i),
+                    damaged_logical: (logical_start, logical_end),
+                    logical_len: info.data_length,
+                    logical_len_source: LogicalLenSource::Declared,
+                });
+            }
+            break;
+        }
     }
     Ok(())
 }
@@ -1430,6 +1686,7 @@ async fn check_uncompressed_crc_db(
     dir: &Path,
     components: &ComponentSet,
     findings: &mut Vec<VerifyFinding>,
+    pending_locations: &mut Vec<PendingLocation>,
 ) {
     use crate::storage::sstable::reader::crc::CrcDb;
     use tokio::io::AsyncReadExt;
@@ -1442,10 +1699,29 @@ async fn check_uncompressed_crc_db(
 
     // Data.db length bounds the maximum plausible CRC.db size (issue #1396
     // Fix 2): `CrcDb::open` rejects an oversized sidecar before reading its body.
-    let data_len = tokio::fs::metadata(&components.data_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
+    //
+    // A TYPED FINDING, never `unwrap_or(0)` (roborev important finding I4,
+    // #4194). `data_len` is not only that bound: it becomes the
+    // `PendingLocation::logical_len` below, which bounds the LAST partition's
+    // extent. A silent `0` collapsed that extent to `[last_start, 0)` — empty
+    // — so the last partition could never be reported for any damage in the
+    // file: the same silent-drop shape as blocker #2, reached through a failed
+    // stat instead of a corrupt offset. It also disabled the oversize guard
+    // the value exists for, since every CRC.db is "larger than 0 bytes of
+    // Data.db". Fail CLOSED: name the stat failure and stop, exactly as
+    // `check_compression_info`'s own bounds check already does for the same
+    // call.
+    let data_len = match tokio::fs::metadata(&components.data_path).await {
+        Ok(m) => m.len(),
+        Err(e) => {
+            findings.push(VerifyFinding::new(
+                VerifyErrorClass::MissingComponent,
+                "Data.db",
+                format!("cannot stat Data.db for CRC.db check: {e}"),
+            ));
+            return;
+        }
+    };
     let crc = match CrcDb::open(&crc_path, data_len).await {
         Ok(c) => c,
         Err(e) => {
@@ -1509,6 +1785,7 @@ async fn check_uncompressed_crc_db(
         match crc.crc_for_chunk(chunk_index) {
             Ok(expected) => {
                 if computed != expected {
+                    let finding_index = findings.len();
                     findings.push(VerifyFinding::new(
                         VerifyErrorClass::UncompressedChunkCrcMismatch,
                         "Data.db",
@@ -1516,6 +1793,19 @@ async fn check_uncompressed_crc_db(
                             "uncompressed CRC32 mismatch for chunk {chunk_index} at Data.db offset 0x{offset:x} ({filled} bytes): expected=0x{expected:08x} (CRC.db), computed=0x{computed:08x}"
                         ),
                     ));
+                    // Issue #4194: uncompressed, so physical == logical offset
+                    // space — the CRC.db grid IS the chunk grid (design.md §D1).
+                    pending_locations.push(PendingLocation {
+                        finding_index,
+                        component: "Data.db".to_string(),
+                        byte_offset: offset,
+                        byte_len: filled as u64,
+                        anchor: PhysicalAnchor::DamagedExtent,
+                        chunk_index: Some(chunk_index),
+                        damaged_logical: (offset, offset.saturating_add(filled as u64)),
+                        logical_len: data_len,
+                        logical_len_source: LogicalLenSource::MeasuredDataDbLength,
+                    });
                     // Report the first failing chunk and stop (matches the
                     // fail-fast read-path posture; naming one chunk is sufficient).
                     return;
@@ -2094,668 +2384,5 @@ fn classify_scan_error_class(err: &Error) -> VerifyErrorClass {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn error_class_codes_are_stable() {
-        assert_eq!(VerifyErrorClass::DigestMismatch.code(), "DigestMismatch");
-        assert_eq!(
-            VerifyErrorClass::ChunkOffsetOutOfBounds.code(),
-            "ChunkOffsetOutOfBounds"
-        );
-        assert_eq!(
-            VerifyErrorClass::BtiRootPointerCorrupt.code(),
-            "BtiRootPointerCorrupt"
-        );
-        // issue #1282: the two new classes must expose stable codes.
-        assert_eq!(
-            VerifyErrorClass::OutOfOrderKeyOrRow.code(),
-            "OutOfOrderKeyOrRow"
-        );
-        assert_eq!(
-            VerifyErrorClass::InvalidLocalDeletionTime.code(),
-            "InvalidLocalDeletionTime"
-        );
-        // issue #1414: the unsupported-compression-feature class must be stable.
-        assert_eq!(
-            VerifyErrorClass::UnsupportedCompressionFeature.code(),
-            "UnsupportedCompressionFeature"
-        );
-    }
-
-    #[test]
-    fn unsupported_compression_feature_classified_distinctly() {
-        // issue #1414: a zstd dictionary rejection reaches the scan classifier as
-        // `Error::UnsupportedFormat` and MUST map to the dedicated
-        // `UnsupportedCompressionFeature` class — never the truncation/bit-flip
-        // `ChunkDecompressionError` nor the checksum `DigestMismatch`.
-        let dict_err = Error::UnsupportedFormat(
-            "zstd dictionary compression (Dictionary_ID=1234) is unsupported for chunk 0 at offset 0x0"
-                .to_string(),
-        );
-        assert_eq!(
-            classify_scan_error_class(&dict_err),
-            VerifyErrorClass::UnsupportedCompressionFeature
-        );
-        assert_ne!(
-            classify_scan_error_class(&dict_err),
-            VerifyErrorClass::ChunkDecompressionError
-        );
-        assert_ne!(
-            classify_scan_error_class(&dict_err),
-            VerifyErrorClass::DigestMismatch
-        );
-
-        // Regression guard: a genuine plain-decode failure (truncation/bit-flip)
-        // stays `ChunkDecompressionError` — the new class must not swallow it.
-        let decode_err = Error::InvalidFormat(
-            "Zstd decompression failed for chunk 0 at offset 0x0: corrupted input".to_string(),
-        );
-        assert_eq!(
-            classify_scan_error_class(&decode_err),
-            VerifyErrorClass::ChunkDecompressionError
-        );
-
-        // A chunk inline-CRC mismatch also stays `ChunkDecompressionError`.
-        let crc_err = Error::Corruption("Data.db chunk 0 CRC32 mismatch".to_string());
-        assert_eq!(
-            classify_scan_error_class(&crc_err),
-            VerifyErrorClass::ChunkDecompressionError
-        );
-    }
-
-    #[test]
-    fn non_compression_unsupported_format_falls_through_to_generic() {
-        // roborev (issue #1414): the compression-specific class is reserved for
-        // compression-related `UnsupportedFormat`. A NON-compression `UnsupportedFormat`
-        // reaching this scan classifier (e.g. a hypothetical future decode-path feature
-        // rejection) MUST NOT be mislabeled as an unsupported compression feature — it
-        // falls through to the generic `RowScanFailed`.
-        let non_compression = Error::UnsupportedFormat(
-            "tuple element type not yet supported for chunk 0 at offset 0x0".to_string(),
-        );
-        assert_eq!(
-            classify_scan_error_class(&non_compression),
-            VerifyErrorClass::RowScanFailed
-        );
-        assert_ne!(
-            classify_scan_error_class(&non_compression),
-            VerifyErrorClass::UnsupportedCompressionFeature
-        );
-
-        // Every real compression-related producer still earns the compression class,
-        // regardless of the exact wording: the "not compiled in" build-config path…
-        let not_compiled = Error::UnsupportedFormat("Zstd support not compiled in".to_string());
-        assert_eq!(
-            classify_scan_error_class(&not_compiled),
-            VerifyErrorClass::UnsupportedCompressionFeature
-        );
-        // …and the unknown/unsupported algorithm path.
-        let unknown_algo =
-            Error::UnsupportedFormat("Unknown compression algorithm: BogusCompressor".to_string());
-        assert_eq!(
-            classify_scan_error_class(&unknown_algo),
-            VerifyErrorClass::UnsupportedCompressionFeature
-        );
-    }
-
-    /// End-to-end wiring (issue #1414): a REAL trained-dictionary zstd frame,
-    /// driven through the shipped `ChunkDecompressor`, must surface the typed
-    /// `Error::UnsupportedFormat` that `classify_scan_error_class` maps to
-    /// `UnsupportedCompressionFeature` — proving the reader error and the verify
-    /// class agree end to end (not just on a hand-written message).
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn dictionary_frame_wires_reader_error_to_unsupported_class() {
-        use crate::parser::header::CassandraVersion;
-        use crate::storage::sstable::chunk_decompressor::ChunkDecompressor;
-        use crate::storage::sstable::compression_info::CompressionInfo;
-        use std::io::Cursor;
-
-        let plaintext =
-            b"cqlite|zstd|dictionary|row=verify|table=zstd_dictionary_table|value=payload-7"
-                .to_vec();
-        let samples: Vec<Vec<u8>> = (0..1024u32)
-            .map(|i| format!("cqlite|zstd|dictionary|row={i}|value={}", i % 37).into_bytes())
-            .collect();
-        let dict = zstd::dict::from_samples(&samples, 4 * 1024).expect("train zstd dictionary");
-        let dict_frame = zstd::bulk::Compressor::with_dictionary(3, &dict)
-            .expect("dictionary compressor")
-            .compress(&plaintext)
-            .expect("dictionary-compress chunk");
-
-        // Cassandra chunk framing: [compressed payload][4-byte BE CRC32].
-        let mut image = dict_frame.clone();
-        image.extend_from_slice(&crc32fast::hash(&dict_frame).to_be_bytes());
-
-        let info = CompressionInfo {
-            algorithm: "ZstdCompressor".to_string(),
-            option_pairs: vec![],
-            chunk_length: plaintext.len() as u32,
-            max_compressed_length: i32::MAX as u32,
-            data_length: plaintext.len() as u64,
-            chunk_offsets: vec![0],
-        };
-        let mut dec = ChunkDecompressor::new(info, CassandraVersion::V5_0Release)
-            .expect("build decompressor");
-        let err = dec
-            .decompress_chunk_by_index(&mut Cursor::new(image), 0)
-            .expect_err("dictionary frame must be rejected");
-
-        assert!(
-            matches!(err, Error::UnsupportedFormat(_)),
-            "reader must reject with UnsupportedFormat; got: {err}"
-        );
-        assert_eq!(
-            classify_scan_error_class(&err),
-            VerifyErrorClass::UnsupportedCompressionFeature,
-            "verify must classify the reader's dictionary rejection as \
-             UnsupportedCompressionFeature; got err: {err}"
-        );
-    }
-
-    #[test]
-    fn mode_labels() {
-        assert_eq!(VerifyMode::Quick.as_str(), "quick");
-        assert_eq!(VerifyMode::Full.as_str(), "full");
-        assert_ne!(VerifyMode::Quick, VerifyMode::Full);
-    }
-
-    #[test]
-    fn real_component_recognition_excludes_sidecars() {
-        assert!(is_real_component("Data.db"));
-        assert!(is_real_component("Statistics.db"));
-        assert!(is_real_component("CompressionInfo.db"));
-        assert!(is_real_component("TOC.txt"));
-        assert!(is_real_component("Digest.crc32"));
-        // sidecar / reference goldens are NOT components
-        assert!(!is_real_component("Data.db.jsonl"));
-        assert!(!is_real_component("Statistics.db.txt"));
-        assert!(!is_real_component("CompressionInfo.db.txt"));
-        assert!(!is_real_component("README.md"));
-    }
-
-    #[test]
-    fn report_summary_line_distinguishes_ok_and_fail() {
-        let ok = VerifyReport {
-            directory: PathBuf::from("/x"),
-            base_name: "nb-1-big".to_string(),
-            format: SsTableFormat::Big,
-            mode: VerifyMode::Full,
-            findings: vec![],
-            toc_components: vec![],
-            rows_scanned: Some(3),
-        };
-        assert!(ok.is_ok());
-        assert!(ok.summary_line().contains("VERIFY OK"));
-
-        let fail = VerifyReport {
-            directory: PathBuf::from("/x"),
-            base_name: "nb-1-big".to_string(),
-            format: SsTableFormat::Big,
-            mode: VerifyMode::Full,
-            findings: vec![VerifyFinding::new(
-                VerifyErrorClass::DigestMismatch,
-                "Digest.crc32",
-                "boom",
-            )],
-            toc_components: vec![],
-            rows_scanned: None,
-        };
-        assert!(!fail.is_ok());
-        assert_eq!(fail.primary_class(), Some(VerifyErrorClass::DigestMismatch));
-        assert!(fail.summary_line().contains("VERIFY FAIL"));
-        assert!(fail.summary_line().contains("DigestMismatch"));
-    }
-
-    // ---- BTI partition identity cross-check (issue #1103) ------------------
-    //
-    // These exercise `bti_partition_identity_mismatch` over RESOLVED leaves: each
-    // leaf carries its emitted byte-comparable prefix plus a payload resolved back
-    // to a raw partition key (an inline raw key for a `RowsOffset` leaf, or a
-    // Data.db position for a `DataOffset` leaf). The Data.db side is the
-    // `(position, raw_key)` set from the scan.
-
-    use crate::storage::sstable::bti::parser::encode_partition_key_for_bti_trie;
-
-    /// Build the path-compressed trie key for a raw partition key: the
-    /// byte-comparable `[0x40 ++ token]` key truncated to its first `prefix_len`
-    /// bytes, mirroring how a real Patricia trie stores only the shortest
-    /// distinguishing prefix.
-    fn trie_key_prefix(raw: &[u8], prefix_len: usize) -> Vec<u8> {
-        encode_partition_key_for_bti_trie(raw)[..prefix_len].to_vec()
-    }
-
-    /// A `RowsOffset`-style leaf: authoritative inline raw key + matching Data.db
-    /// position, with a 2-byte emitted prefix (what `test_da/wide_table` does).
-    fn inline_leaf(raw: &[u8], data_position: u64) -> BtiResolvedLeaf {
-        BtiResolvedLeaf {
-            prefix: trie_key_prefix(raw, 2),
-            inline_raw_key: Some(raw.to_vec()),
-            data_position,
-        }
-    }
-
-    /// A `DataOffset`-style leaf: no inline key, resolved purely via its Data.db
-    /// position, with a 2-byte emitted prefix derived from the key it *should*
-    /// resolve to (so the prefix/payload-consistency check passes when healthy).
-    fn data_offset_leaf(prefix_from: &[u8], data_position: u64) -> BtiResolvedLeaf {
-        BtiResolvedLeaf {
-            prefix: trie_key_prefix(prefix_from, 2),
-            inline_raw_key: None,
-            data_position,
-        }
-    }
-
-    /// The Data.db scan side: distinct partition keys, each at a synthetic
-    /// monotonically-increasing position (0, 100, 200, ...).
-    fn data_partitions(keys: &[Vec<u8>]) -> Vec<(u64, Vec<u8>)> {
-        keys.iter()
-            .enumerate()
-            .map(|(i, k)| (i as u64 * 100, k.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn identity_check_passes_for_inline_rows_leaves() {
-        // Healthy wide-table shape: every leaf resolves to its inline raw key,
-        // matching the Data.db key at the same position.
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        let leaves: Vec<BtiResolvedLeaf> =
-            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
-        assert_eq!(bti_partition_identity_mismatch(&leaves, &data), None);
-    }
-
-    #[test]
-    fn identity_check_passes_for_data_offset_leaves() {
-        // Healthy small-partition shape (`da-2-bti`): leaves carry only a Data.db
-        // position; the raw key is resolved through the position map.
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        let leaves: Vec<BtiResolvedLeaf> = data
-            .iter()
-            .map(|(pos, k)| data_offset_leaf(k, *pos))
-            .collect();
-        assert_eq!(bti_partition_identity_mismatch(&leaves, &data), None);
-    }
-
-    #[test]
-    fn identity_check_detects_inline_payload_pointing_at_wrong_partition() {
-        // The exact reviewer scenario for a `RowsOffset` leaf: the leaf's emitted
-        // prefix is unchanged but its INLINE raw key (the payload) is rewritten to
-        // a partition NOT present in Data.db. Same leaf count, wrong identity.
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        let mut leaves: Vec<BtiResolvedLeaf> =
-            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
-        // Keep the emitted prefix; rewrite the inline raw key to pk=99.
-        leaves[0].inline_raw_key = Some(99u32.to_be_bytes().to_vec());
-        assert!(
-            bti_partition_identity_mismatch(&leaves, &data).is_some(),
-            "an inline payload pointing at a partition absent from Data.db must be flagged"
-        );
-    }
-
-    #[test]
-    fn identity_check_detects_data_offset_payload_pointing_at_wrong_partition() {
-        // The reviewer scenario for a `DataOffset` leaf: the leaf's emitted prefix
-        // is unchanged but its Data.db position payload is rewritten to point at a
-        // DIFFERENT partition's start. The resolved key then no longer matches the
-        // partition the prefix encodes.
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        let mut leaves: Vec<BtiResolvedLeaf> = data
-            .iter()
-            .map(|(pos, k)| data_offset_leaf(k, *pos))
-            .collect();
-        // Leaf 0's prefix still encodes pk=1, but its position now points at pk=2.
-        leaves[0].data_position = data[1].0;
-        let detail = bti_partition_identity_mismatch(&leaves, &data)
-            .expect("a DataOffset payload pointing at the wrong partition must be flagged");
-        // It is caught by the prefix/payload-consistency check (the resolved key's
-        // encoding no longer starts with the leaf's prefix) OR the multiset compare.
-        assert!(
-            detail.contains("inconsistent") || detail.contains("identities"),
-            "unexpected detail: {detail}"
-        );
-    }
-
-    #[test]
-    fn identity_check_detects_data_offset_payload_pointing_at_non_partition() {
-        // A `DataOffset` flipped to a byte position that is NOT a partition start
-        // resolves to no key at all.
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        let mut leaves: Vec<BtiResolvedLeaf> = data
-            .iter()
-            .map(|(pos, k)| data_offset_leaf(k, *pos))
-            .collect();
-        leaves[0].data_position = 37; // not any partition start
-        let detail = bti_partition_identity_mismatch(&leaves, &data)
-            .expect("a DataOffset pointing at a non-partition position must be flagged");
-        assert!(detail.contains("not a decoded partition start"));
-    }
-
-    #[test]
-    fn identity_check_detects_same_count_wrong_keys_via_multiset() {
-        // Same leaf count as Data.db and every leaf is individually well-formed
-        // (valid key, valid in-map position, consistent prefix) — but the trie
-        // resolves the SAME partition three times instead of {1,2,3}. Only the
-        // multiset comparison catches this; it is the core of issue #1103.
-        let data_keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&data_keys);
-        // Three leaves all resolving to partition 1 (key + position from data[0]).
-        let leaves: Vec<BtiResolvedLeaf> =
-            (0..3).map(|_| inline_leaf(&data[0].1, data[0].0)).collect();
-        let detail = bti_partition_identity_mismatch(&leaves, &data)
-            .expect("same-count wrong-identity must be flagged");
-        assert!(
-            detail.contains("identities") || detail.contains("time(s)"),
-            "expected a multiset-identity mismatch, got: {detail}"
-        );
-    }
-
-    #[test]
-    fn identity_check_detects_inline_leaf_with_corrupt_data_position() {
-        // Reviewer (roborev #1431): a `RowsOffset` leaf whose INLINE key is valid
-        // and present in Data.db but whose recorded Data.db position points at a
-        // non-partition offset must be flagged — a BTI read would seek to the wrong
-        // partition even though the inline key looks fine.
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        let mut leaves: Vec<BtiResolvedLeaf> =
-            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
-        // Keep the valid inline key; corrupt only the recorded Data.db position.
-        leaves[0].data_position = 9999; // not any partition start
-        let detail = bti_partition_identity_mismatch(&leaves, &data).expect(
-            "an inline leaf with a valid key but a non-partition data position must be flagged",
-        );
-        assert!(detail.contains("not a decoded partition start"));
-    }
-
-    #[test]
-    fn identity_check_detects_one_swapped_key() {
-        // Two keys match, one is wrong — the minimal wrong-root that a count check
-        // cannot see.
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        let mut leaves: Vec<BtiResolvedLeaf> =
-            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
-        // Replace leaf 0 with a key (pk=99) absent from Data.db, including its
-        // prefix, and a position that is not a partition start.
-        leaves[0] = inline_leaf(&99u32.to_be_bytes(), 10_000);
-        assert!(bti_partition_identity_mismatch(&leaves, &data).is_some());
-    }
-
-    // ---- Check 8: key/row order + partition-level LDT (issue #1282) --------
-
-    use crate::util::cassandra_murmur3::cassandra_murmur3_token;
-
-    /// Build the on-disk-ordered partition list the classifier consumes, sorting
-    /// the supplied keys by their real Murmur3 `(token, key)` order so the "in
-    /// order" input mirrors what a healthy Cassandra SSTable produces.
-    fn ordered_partitions(keys: &[Vec<u8>]) -> Vec<(Vec<u8>, Option<i32>)> {
-        let mut v: Vec<Vec<u8>> = keys.to_vec();
-        v.sort_by_key(|k| (cassandra_murmur3_token(k), k.clone()));
-        v.into_iter().map(|k| (k, None)).collect()
-    }
-
-    #[test]
-    fn order_ldt_clean_partitions_produce_no_findings() {
-        let keys: Vec<Vec<u8>> = (1u32..=6).map(|i| i.to_be_bytes().to_vec()).collect();
-        let partitions = ordered_partitions(&keys);
-        assert!(
-            classify_order_and_ldt(&partitions, true).is_empty(),
-            "in-token-order partitions with live LDT must produce zero findings"
-        );
-    }
-
-    #[test]
-    fn order_ldt_detects_out_of_order_partition_keys() {
-        // Take the correctly-ordered set and swap the first two, forcing a
-        // descending (token, key) step Cassandra's verifier rejects.
-        let keys: Vec<Vec<u8>> = (1u32..=6).map(|i| i.to_be_bytes().to_vec()).collect();
-        let mut partitions = ordered_partitions(&keys);
-        partitions.swap(0, 1);
-        let findings = classify_order_and_ldt(&partitions, true);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
-            "swapping two partitions must be flagged OutOfOrderKeyOrRow, got {:?}",
-            findings
-        );
-    }
-
-    #[test]
-    fn order_ldt_detects_duplicate_partition_token_as_out_of_order() {
-        // Equal (token, key) is NOT strictly greater → out of order.
-        let k = 7u32.to_be_bytes().to_vec();
-        let partitions = vec![(k.clone(), None), (k, None)];
-        let findings = classify_order_and_ldt(&partitions, true);
-        assert!(findings
-            .iter()
-            .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow));
-    }
-
-    #[test]
-    fn order_ldt_flags_negative_ldt_on_signed_nb_form() {
-        // A deleted partition (Some(ldt)) with a negative ldt on the SIGNED (nb)
-        // form is corrupt — Cassandra's DeletionTime/Verifier rejects it.
-        let mut partitions = ordered_partitions(&[1u32.to_be_bytes().to_vec()]);
-        partitions[0].1 = Some(-1);
-        let findings = classify_order_and_ldt(&partitions, /*signed_ldt=*/ true);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.class == VerifyErrorClass::InvalidLocalDeletionTime),
-            "negative nb localDeletionTime must be flagged, got {:?}",
-            findings
-        );
-    }
-
-    #[test]
-    fn order_ldt_does_not_flag_far_future_ldt_on_unsigned_oa_form() {
-        // On the UNSIGNED (oa/da) form a value in [2^31, 2^32) is a legitimate
-        // far-future deletion time carried as a negative i32 — it MUST NOT be
-        // flagged. This is the no-heuristic guard: the format, not the sign, decides.
-        let mut partitions = ordered_partitions(&[1u32.to_be_bytes().to_vec()]);
-        partitions[0].1 = Some(-1); // == 0xFFFFFFFF unsigned == far-future seconds
-        let findings = classify_order_and_ldt(&partitions, /*signed_ldt=*/ false);
-        assert!(
-            !findings
-                .iter()
-                .any(|f| f.class == VerifyErrorClass::InvalidLocalDeletionTime),
-            "far-future unsigned oa/da LDT must NOT be flagged, got {:?}",
-            findings
-        );
-    }
-
-    #[test]
-    fn order_ldt_positive_deletion_time_is_clean() {
-        // A normal positive epoch-seconds partition tombstone is valid on both forms.
-        let mut partitions = ordered_partitions(&[1u32.to_be_bytes().to_vec()]);
-        partitions[0].1 = Some(1_700_000_000); // ~2023, valid
-        assert!(classify_order_and_ldt(&partitions, true).is_empty());
-        assert!(classify_order_and_ldt(&partitions, false).is_empty());
-    }
-
-    // ---- Check 8 ROW half: clustering-row order (issue #1282 follow-up) -----
-
-    use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
-    use crate::types::Value;
-    use std::collections::HashMap;
-
-    fn schema_one_ck(order: ClusteringOrder) -> TableSchema {
-        TableSchema {
-            keyspace: "issue_1282".to_string(),
-            table: "tbl".to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "pk".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![ClusteringColumn {
-                name: "ck".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-                order,
-            }],
-            columns: vec![Column {
-                name: "v".to_string(),
-                data_type: "text".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            }],
-            comments: HashMap::new(),
-            dropped_columns: HashMap::new(),
-        }
-    }
-
-    fn ck_int(n: i32) -> Vec<Value> {
-        vec![Value::Integer(n)]
-    }
-
-    #[test]
-    fn clustering_order_ascending_rows_are_clean() {
-        let schema = schema_one_ck(ClusteringOrder::Asc);
-        let partitions = vec![(0usize, vec![ck_int(1), ck_int(2), ck_int(3)])];
-        assert!(
-            classify_clustering_row_order(&partitions, &schema).is_empty(),
-            "in-order ASC clustering rows must produce no findings"
-        );
-    }
-
-    #[test]
-    fn clustering_order_out_of_order_row_is_flagged() {
-        // Row 3 comes before row 2 on disk under ASC — corrupt.
-        let schema = schema_one_ck(ClusteringOrder::Asc);
-        let partitions = vec![(0usize, vec![ck_int(1), ck_int(3), ck_int(2)])];
-        let findings = classify_clustering_row_order(&partitions, &schema);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
-            "an out-of-order clustering row must be flagged OutOfOrderKeyOrRow, got {:?}",
-            findings
-        );
-    }
-
-    #[test]
-    fn clustering_order_duplicate_row_is_flagged() {
-        // Equal consecutive clustering keys are NOT strictly increasing → corrupt.
-        let schema = schema_one_ck(ClusteringOrder::Asc);
-        let partitions = vec![(0usize, vec![ck_int(5), ck_int(5)])];
-        let findings = classify_clustering_row_order(&partitions, &schema);
-        assert!(findings
-            .iter()
-            .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow));
-    }
-
-    #[test]
-    fn clustering_order_respects_desc_ordering() {
-        let schema = schema_one_ck(ClusteringOrder::Desc);
-        // DESC on disk stores clustering values descending; 3,2,1 is IN ORDER.
-        let ok = vec![(0usize, vec![ck_int(3), ck_int(2), ck_int(1)])];
-        assert!(
-            classify_clustering_row_order(&ok, &schema).is_empty(),
-            "descending rows under DESC clustering order must be clean"
-        );
-        // Ascending 1,2,3 is OUT OF ORDER under DESC.
-        let bad = vec![(0usize, vec![ck_int(1), ck_int(2), ck_int(3)])];
-        assert!(
-            classify_clustering_row_order(&bad, &schema)
-                .iter()
-                .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
-            "ascending rows under a DESC clustering column must be flagged"
-        );
-    }
-
-    #[test]
-    fn identity_check_detects_count_mismatch() {
-        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
-        let data = data_partitions(&keys);
-        // Only two leaves recovered from the trie (undercount).
-        let leaves: Vec<BtiResolvedLeaf> = data
-            .iter()
-            .take(2)
-            .map(|(pos, k)| inline_leaf(k, *pos))
-            .collect();
-        let detail =
-            bti_partition_identity_mismatch(&leaves, &data).expect("undercount must be flagged");
-        assert!(detail.contains("2 partition keys"));
-        assert!(detail.contains("3 distinct partitions"));
-    }
-
-    // ---- Finding 1 (roborev round 2): tolerate reader filename shapes -------
-    //
-    // `SSTableReader::open` does not enforce a "-Data.db" suffix and still opens a
-    // file whose name it cannot map (it just skips siblings). A reader that opened
-    // MUST get an `IntegrityCheckResult` from `perform_integrity_check`, not an
-    // `Err`, so `build_component_set` (the resolution the integrity check ultimately
-    // drives) must never reject on the suffix.
-
-    #[test]
-    fn build_component_set_matches_reader_base_name_for_non_data_db_name() {
-        // A name that does NOT end in "-Data.db" but that the reader's own
-        // base-name derivation accepts must resolve to the SAME base name the
-        // reader uses for sibling lookup — never an Err (issue #1283, roborev).
-        let p = PathBuf::from("/dir/nb-7-big-Statistics.db");
-        let set = build_component_set(std::slice::from_ref(&p), p.clone())
-            .expect("reader-accepted non-Data.db name must not error");
-        assert_eq!(
-            Some(set.base_name),
-            extract_sstable_base_name(&p),
-            "verify base name must match SSTableReader::open's base-name derivation"
-        );
-    }
-
-    #[test]
-    fn build_component_set_degrades_on_unmappable_name() {
-        // A name the reader can open but that neither ends in "-Data.db" nor maps
-        // via the reader's derivation degrades to the filename minus ".db" (verify
-        // what we can) rather than erroring.
-        let p = PathBuf::from("/dir/weird.db");
-        let set = build_component_set(&[], p.clone()).expect("must degrade, not error");
-        assert_eq!(set.base_name, "weird");
-        assert_eq!(set.data_path, p);
-    }
-
-    #[test]
-    fn build_component_set_standard_name_still_resolves_canonically() {
-        let p = PathBuf::from("/dir/nb-3-big-Data.db");
-        let set = build_component_set(std::slice::from_ref(&p), p.clone())
-            .expect("standard name resolves");
-        assert_eq!(set.base_name, "nb-3-big");
-    }
-
-    // ---- Finding 2 (roborev round 2): relative Data.db path, empty parent ---
-    //
-    // A relative, directory-less filename yields an EMPTY parent from
-    // `Path::parent()` (Some(""), not None). `generation_dir` must normalize that
-    // to "." so sibling components are scanned in the current directory — matching
-    // where `SSTableReader::open` found the file.
-
-    #[test]
-    fn generation_dir_normalizes_empty_parent_to_current_dir() {
-        // Relative bare filename opened from the SSTable dir as cwd: empty parent → ".".
-        assert_eq!(
-            generation_dir(Path::new("nb-1-big-Data.db")),
-            Path::new("."),
-            "a relative directory-less Data.db must resolve against the current directory"
-        );
-        // Absolute path keeps its real parent.
-        assert_eq!(
-            generation_dir(Path::new("/x/y/nb-1-big-Data.db")),
-            Path::new("/x/y")
-        );
-        // Relative path WITH a directory component keeps that directory.
-        assert_eq!(
-            generation_dir(Path::new("sub/nb-1-big-Data.db")),
-            Path::new("sub")
-        );
-    }
-}
+#[path = "verify_tests.rs"]
+mod tests;

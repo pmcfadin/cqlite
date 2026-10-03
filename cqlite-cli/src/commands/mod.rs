@@ -45,6 +45,7 @@ pub mod salvage;
 // `all(write-support, not(tombstones))` gate.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod rebuild;
+pub mod sweep;
 pub mod verify;
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).
