@@ -273,12 +273,12 @@ pub const BOUNDARY_SOURCE_UNREADABLE: &str = "boundary-source-unreadable";
 /// corrupt enough to fail the chunk-CRC check is in practice ALSO corrupt
 /// enough to fail the full row scan on the SAME bytes — the scan errors,
 /// `scan_position_map` stays `None`, and a `DataOffset` leaf's raw key is
-/// recoverable ONLY through that map. So a BTI table whose intersecting
-/// leaves are `DataOffset` (narrow partitions) commonly reports this even
-/// with a healthy boundary source, while a `RowsOffset` leaf (wide
-/// partitions) resolves its key INLINE from `Rows.db` and is unaffected. See
-/// `issue_4194_verify_location.rs`'s
-/// `bti_compressed_chunk_crc_flip_resolves_via_rows_offset_leaves`.
+/// recoverable ONLY through that map. A `RowsOffset` leaf carries its raw
+/// key INLINE from `Rows.db`, so it never hits THIS cause — but under the
+/// owner's fail-closed ruling (option (a), 2026-10-02) an uncorroborated one
+/// is refused via [`BTI_IDENTITY_UNCORROBORATED`] instead, not silently
+/// resolved. See `issue_4194_verify_location.rs`'s
+/// `bti_compressed_chunk_crc_flip_refuses_uncorroborated_rows_offset_leaves`.
 pub const PARTITION_KEY_UNAVAILABLE: &str =
     "partition key unavailable for an intersecting boundary entry (requires a full-mode scan)";
 
