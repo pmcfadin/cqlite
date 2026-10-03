@@ -57,7 +57,7 @@ pub mod metadata;
 mod serialization_header;
 
 pub use estimated_histogram::EstimatedHistogram;
-pub use metadata::{StatisticsMetadata, TombstoneHistogram};
+pub use metadata::{EncodingStatsBaseline, StatisticsMetadata, TombstoneHistogram};
 // Re-exported so callers can keep using the pre-split path
 // `...writer::stats_writer::cql_type_to_marshal_type` (e.g. data_writer.rs).
 // TEST-ONLY re-export since #4158: the sibling non-test caller

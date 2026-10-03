@@ -1,0 +1,18 @@
+{
+  "input": "<input>/nb-1-big-Data.db",
+  "output": "<out>",
+  "format": "nb",
+  "compressed_input": true,
+  "requested": [
+    "index"
+  ],
+  "regenerated": [],
+  "skipped_not_applicable": [],
+  "classification": {},
+  "refused": {
+    "reason": "data-corrupt",
+    "remedy": "Data.db cannot be trusted as the source of truth: chunk 0 failed CRC validation: Invalid format: CRC32 mismatch for chunk 0 at offset 0x0: expected=0xea9bb0d2, computed=0x31a28538, chunk_size=600 — remedy: cqlite salvage (issue #4196) to recover a fresh generation from what is still decodable",
+    "offset": 0
+  },
+  "rolled_back": false
+}

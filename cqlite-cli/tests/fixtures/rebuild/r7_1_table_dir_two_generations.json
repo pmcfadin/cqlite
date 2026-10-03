@@ -1,0 +1,38 @@
+[
+  {
+    "input": "<input>/nb-1-big-Data.db",
+    "output": "<out>/nb-1-big",
+    "format": "nb",
+    "compressed_input": true,
+    "requested": [
+      "digest",
+      "toc"
+    ],
+    "regenerated": [
+      "digest",
+      "toc"
+    ],
+    "skipped_not_applicable": [],
+    "classification": {},
+    "refused": null,
+    "rolled_back": false
+  },
+  {
+    "input": "<input>/nb-2-big-Data.db",
+    "output": "<out>/nb-2-big",
+    "format": "nb",
+    "compressed_input": true,
+    "requested": [
+      "digest",
+      "toc"
+    ],
+    "regenerated": [
+      "digest",
+      "toc"
+    ],
+    "skipped_not_applicable": [],
+    "classification": {},
+    "refused": null,
+    "rolled_back": false
+  }
+]

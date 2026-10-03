@@ -735,6 +735,84 @@ cargo run --package cqlite-cli --features write-support -- \
 # Data.db written; remedy is `cqlite rebuild`, issue #4197); 1 = usage error.
 ```
 
+## Rebuild derived SSTable components (issue #4197, epic #4192)
+
+Regenerate requested derived components (`Index.db`, `Summary.db`, `Filter.db`,
+`Digest.crc32`, `TOC.txt`, `CRC.db`, `Statistics.db`) from a healthy, UNCHANGED
+`Data.db` — the companion to `salvage` for the common case where `Data.db` is
+fine but a derived component is missing or corrupt.
+
+```bash
+# Rebuild Index.db + Digest.crc32 + TOC.txt for one Data.db (or a whole
+# table dir — each generation is rebuilt separately). --schema is the
+# global flag. --out ends up holding a COMPLETE component set: every
+# untouched original (including Data.db itself) is copied verbatim
+# alongside the freshly regenerated components.
+cargo run --package cqlite-cli --features write-support -- \
+  --schema test-data/schemas/basic-types.cql \
+  rebuild ./table-dir --components index,digest,toc --out /tmp/rebuilt \
+  --manifest /tmp/rebuilt/rebuild.json
+
+# Statistics.db rebuild is OPT-IN and LOSSY BY DECLARATION — aggregates are
+# recomputed from a full Data.db scan; repaired_at/pending_repair/
+# is_transient are recovered only if the original Statistics.db is still
+# readable, else lost; origin-host/compaction-ancestry are always lost
+# (CQLite carries no fields for either). Never implied by a bare
+# --components omission.
+cargo run --package cqlite-cli --features write-support -- \
+  --schema test-data/schemas/basic-types.cql \
+  rebuild ./table-dir --components statistics --out /tmp/rebuilt
+
+# Exit codes: 0 = every requested component regenerated (or correctly
+# skipped_not_applicable); 2 = refused; 1 = usage error.
+#   refused, reason `data-corrupt`      — Data.db itself cannot be trusted;
+#                                         remedy `cqlite salvage` (#4196).
+#   refused, reason `reencode-mismatch` — Data.db decodes fine but rebuild
+#                                         cannot reproduce a partition's byte
+#                                         extent, so promoted-index offsets
+#                                         would be wrong. Almost always a
+#                                         MISSING original Statistics.db,
+#                                         whose SerializationHeader carries
+#                                         the authoritative delta-encoding
+#                                         baseline: restore it and re-run.
+# A table-dir run is ALL-OR-NOTHING: one generation refusing removes every
+# earlier generation's output again, and those manifest entries are marked
+# `rolled_back: true` with an empty `regenerated` — so
+# `jq '.[] | select(.refused == null and .rolled_back == false) | .output'`
+# names exactly the surviving output directories.
+# The human text rendering always goes to stderr; --out-format selects only
+# what (if anything) is printed to stdout.
+# --in-place refuses today (exit 1), naming the #4195 dependency
+# (verify --mode audit does not exist yet) — use --out.
+```
+
+**Known scope limits (declared, not silent):**
+- BTI (`da`) `index` (`Partitions.db`/`Rows.db`) rebuild is NOT implemented
+  in this change — a usage error, never a silent wrong-format guess.
+  `filter`/`digest`/`toc`/`statistics` work normally for BTI;
+  `summary`/`crc` are correctly `skipped_not_applicable` (BTI has neither).
+- `Summary.db`'s `min_index_interval` is always `recomputed` to Cassandra's
+  default 128 — `SSTableWriter` hardcodes this value with no schema
+  plumbing for a non-default one yet.
+- `CRC.db` regeneration assumes the flush trailer convention (no trailing
+  empty-chunk CRC32) — correct for every flush-produced input; a
+  compaction-produced uncompressed `Data.db`'s rebuilt `CRC.db` will differ
+  by exactly one trailing `00000000` group until a detection mechanism
+  exists.
+- `Statistics.db`'s `EncodingStats` baseline (min timestamp / TTL /
+  local-deletion-time) is `recovered` verbatim from the ORIGINAL
+  `Statistics.db` when it is readable, because Data.db's own content cannot
+  bound it (Cassandra inherits the minima from compaction inputs). With no
+  original to read, all six timestamp/TTL/LDT aggregates are classified
+  `lost` — the decode that would recompute them needs the very baseline that
+  is missing — and an `index`/`summary` request in that state REFUSES rather
+  than writing offsets it cannot reproduce.
+- `Filter.db` byte-identity additionally depends on Cassandra's original
+  `estimatedKeys`, which for a compaction-produced SSTable is an ESTIMATE
+  that can exceed the true final distinct partition count — rebuild uses
+  the actual distinct count instead (correct for membership, not always
+  byte-identical).
+
 ## Delta-export (CDC Parquet, Issue #705 / Epic #696 DS9)
 
 Requires `--features delta-export`. Schema must be a bare `CREATE TABLE` statement

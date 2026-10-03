@@ -213,6 +213,61 @@ pub struct StatisticsMetadata {
     /// `MetadataCollector.defaultCellPerPartitionCountHistogram` → `EstimatedHistogram(118)`).
     /// Populated by [`Self::record_partition`].
     pub estimated_cell_count: EstimatedHistogram,
+
+    /// An EXPLICIT `SerializationHeader.EncodingStats` delta-encoding baseline,
+    /// for the case where it is NOT the same triple as this SSTable's own
+    /// content minima (issue #4197).
+    ///
+    /// `None` — the overwhelmingly common case, and every write path's — means
+    /// "the baseline IS `min_timestamp`/`min_local_deletion_time`/`min_ttl`",
+    /// which is correct for a flush: Cassandra derives a flushed SSTable's
+    /// `EncodingStats` from the same memtable content the `StatsMetadata`
+    /// minima are collected over, so one triple serves both.
+    ///
+    /// `Some(..)` separates them, because in Cassandra they are TWO DIFFERENT
+    /// VALUES produced by two different mechanisms:
+    ///
+    /// * `EncodingStats` (SERIALIZATION_HEADER) is the baseline every row's
+    ///   timestamp/TTL/LDT VInt was delta-encoded against. At compaction it is
+    ///   MERGED FORWARD from the input SSTables' own headers
+    ///   (`SerializationHeader.make(metadata, sstables)` → `EncodingStats.merge`,
+    ///   `cassandra-5.0.8`), so it can sit strictly BELOW anything present in
+    ///   the output's own rows.
+    /// * `StatsMetadata.minTimestamp`/`minLocalDeletionTime`/`minTTL` (STATS)
+    ///   are folded from the cells and tombstones actually WRITTEN
+    ///   (`MetadataCollector`).
+    ///
+    /// `cqlite rebuild` is the first caller that must hold both at once: it
+    /// RECOVERS the baseline verbatim from the original `Statistics.db` (the
+    /// only authoritative record of what the unchanged `Data.db` was encoded
+    /// against) while RE-FOLDING the STATS minima from the rows it decodes. If
+    /// one field carried both, a compaction-produced input's regenerated
+    /// `Statistics.db` would claim the inherited baseline as its STATS minimum
+    /// — a value no row in the file has.
+    ///
+    /// Read ONLY by `build_serialization_header_component`, via
+    /// [`Self::effective_encoding_stats_baseline`]. The STATS body never reads
+    /// it.
+    pub encoding_stats_baseline: Option<EncodingStatsBaseline>,
+}
+
+/// The whole-SSTable `SerializationHeader.EncodingStats` triple — the
+/// delta-encoding baseline every row's timestamp/TTL/local-deletion-time VInt
+/// in `Data.db` is measured against (issue #4197).
+///
+/// Distinct from `StatsMetadata`'s minima of the same names; see
+/// [`StatisticsMetadata::encoding_stats_baseline`] for why Cassandra has two.
+/// `i64::MAX`/`i32::MAX` are the "nothing recorded" sentinels the header
+/// serializer normalises to Cassandra's own epoch/`LIVE` baselines, exactly as
+/// it does for the content minima.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodingStatsBaseline {
+    /// `EncodingStats.minTimestamp` (microseconds).
+    pub min_timestamp: i64,
+    /// `EncodingStats.minLocalDeletionTime` (seconds).
+    pub min_local_deletion_time: i32,
+    /// `EncodingStats.minTTL` (seconds).
+    pub min_ttl: i32,
 }
 
 impl Default for StatisticsMetadata {
@@ -241,6 +296,10 @@ impl Default for StatisticsMetadata {
             // defaultPartitionSizeHistogram / defaultCellPerPartitionCountHistogram.
             estimated_partition_size: EstimatedHistogram::partition_size(),
             estimated_cell_count: EstimatedHistogram::cell_per_partition_count(),
+            // `None` = "the EncodingStats baseline IS the content minima
+            // above", which is what every write path wants (see the field's
+            // doc comment).
+            encoding_stats_baseline: None,
         }
     }
 }
@@ -249,6 +308,25 @@ impl StatisticsMetadata {
     /// Create a new empty statistics metadata
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The `SerializationHeader.EncodingStats` baseline to serialize: the
+    /// explicit [`Self::encoding_stats_baseline`] when a caller set one, else
+    /// this SSTable's own content minima (the write-path default — see that
+    /// field's doc comment for why the two can legitimately differ).
+    ///
+    /// Returns the RAW (pre-[`Self::finalize`]) values, sentinels included:
+    /// `build_serialization_header_component` does its own
+    /// `i64::MAX`/`i32::MAX` → epoch/`LIVE` normalisation, and the EncodingStats
+    /// baseline must match what `DataWriter` delta-encoded against, which is
+    /// also the raw value.
+    pub fn effective_encoding_stats_baseline(&self) -> EncodingStatsBaseline {
+        self.encoding_stats_baseline
+            .unwrap_or(EncodingStatsBaseline {
+                min_timestamp: self.min_timestamp,
+                min_local_deletion_time: self.min_local_deletion_time,
+                min_ttl: self.min_ttl,
+            })
     }
 
     /// Update timestamp range with a new timestamp value.

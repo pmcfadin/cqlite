@@ -284,62 +284,6 @@ impl SSTableReader {
         Ok(keys)
     }
 
-    /// Return the distinct raw partition keys decoded from `Data.db` together with
-    /// the byte offset at which each partition begins in the DECOMPRESSED data
-    /// section (issue #1103).
-    ///
-    /// Each tuple is `(data_position, raw_partition_key)`, where `data_position`
-    /// is exactly the value a BTI `Partitions.db` leaf encodes as
-    /// [`BtiPartitionLocation::DataOffset`](crate::storage::sstable::bti::parser::BtiPartitionLocation::DataOffset)
-    /// (and the `data_position` recovered from a `RowsOffset` entry via
-    /// [`resolve_rows_db_entry`](crate::storage::sstable::bti::parser::resolve_rows_db_entry)).
-    /// The verifier's BTI cross-check resolves each leaf PAYLOAD back to its raw
-    /// partition key through this map so it catches a corruption that keeps the
-    /// emitted trie prefix but rewrites the payload to point at a DIFFERENT
-    /// partition (a same-count wrong-IDENTITY corruption the prefix-only compare
-    /// missed).
-    ///
-    /// The stitch/parse strategy mirrors [`Self::distinct_partition_keys`]; only
-    /// the parser entry point differs (it threads the partition-start offset).
-    pub async fn distinct_partition_keys_with_positions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
-        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
-        use std::collections::HashSet;
-
-        let cursor = self.new_scan_cursor().await?;
-        let header_size = self.calculate_header_size();
-        {
-            let mut file_guard = cursor.file.lock().await;
-            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-        }
-        let whole = self.stitch_all_chunks(&cursor).await?;
-
-        let effective_schema = self.get_table_schema(None);
-        let parser = self.build_v5_parser(false);
-
-        // `seen` dedups partition keys; the recorded position is the FIRST row's
-        // offset for a partition (a partition spans contiguous rows, so the first
-        // row's offset is the partition start). `result` preserves first-seen
-        // order and is the only place the position is read back.
-        let mut seen: HashSet<Vec<u8>> = HashSet::new();
-        let mut result: Vec<(u64, Vec<u8>)> = Vec::new();
-        // #3782: `whole` is the entire data section (see above).
-        parser.parse_block_for_compaction_emit_with_offset(
-            &whole,
-            BufferExtent::Complete,
-            effective_schema.as_ref(),
-            self,
-            |partition_start, row| {
-                let k = row.key.as_bytes().to_vec();
-                if seen.insert(k.clone()) {
-                    result.push((partition_start as u64, k));
-                }
-                Ok(std::ops::ControlFlow::Continue(()))
-            },
-        )?;
-
-        Ok(result)
-    }
-
     /// Verifier-facing scan (issue #1282): return, in on-disk order, every
     /// distinct partition's raw key together with its raw partition-level
     /// `localDeletionTime` (when the partition carries a tombstone).
@@ -627,6 +571,30 @@ impl SSTableReader {
         &self,
         schema: Option<&crate::schema::TableSchema>,
         scan_cancel: &ScanCancel,
+        emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
+    {
+        self.stream_all_partitions_for_compaction_observed(
+            schema,
+            scan_cancel,
+            super::partition_boundaries::PartitionBoundaryObserver::inactive(),
+            emit,
+        )
+        .await
+    }
+
+    /// [`Self::stream_all_partitions_for_compaction`] with a partition-BOUNDARY
+    /// observer threaded through the drain loop (issue #4197). Row semantics,
+    /// cancellation and window mechanics are that method's; the observer and
+    /// the one branch that treats a boundary walk differently are documented on
+    /// [`PartitionBoundaryObserver`](super::partition_boundaries::PartitionBoundaryObserver).
+    pub(crate) async fn stream_all_partitions_for_compaction_observed<F>(
+        &self,
+        schema: Option<&crate::schema::TableSchema>,
+        scan_cancel: &ScanCancel,
+        mut observer: super::partition_boundaries::PartitionBoundaryObserver<'_>,
         mut emit: F,
     ) -> Result<()>
     where
@@ -658,7 +626,17 @@ impl SSTableReader {
         // for it — the non-stitch fallback (`sequential_scan`) has no BTI branch
         // and would hit the no-schema `parse_block_entries` error; the stitch+parse
         // drain below decodes BTI correctly (as `bti_scan_with_metadata` does).
-        if !self.requires_chunk_stitching() && self.bti_partitions_db.is_none() {
+        // Issue #4197: a BOUNDARY walk is EXCLUDED from this fallback for the
+        // same shape of reason #2372 excludes BTI — the index walk reports no
+        // decompressed-section partition offset, and inventing one is not an
+        // option (issue #28). It is routed to the drain loop below instead,
+        // which reads the same chunk sequence `stitch_all_chunks` does. See
+        // `partition_boundaries.rs` for why this is load-bearing rather than
+        // defensive (a real committed fixture reaches here).
+        if !self.requires_chunk_stitching()
+            && self.bti_partitions_db.is_none()
+            && !observer.is_reporting()
+        {
             self.stream_all_partitions_cancellable(scan_cancel, None, |(key, value)| {
                 let row =
                     super::super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
@@ -794,6 +772,7 @@ impl SSTableReader {
                 &mut broke,
                 &mut partition_state,
                 scan_cancel,
+                &mut observer,
             )?;
             if broke {
                 return Ok(());
@@ -813,6 +792,7 @@ impl SSTableReader {
                 &mut broke,
                 &mut partition_state,
                 scan_cancel,
+                &mut observer,
             )?;
         }
 
@@ -848,6 +828,7 @@ impl SSTableReader {
         broke: &mut bool,
         partition_state: &mut crate::storage::sstable::reader::parsing::CompactionPartitionState,
         scan_cancel: &ScanCancel,
+        observer: &mut super::partition_boundaries::PartitionBoundaryObserver<'_>,
     ) -> Result<()>
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
@@ -869,6 +850,15 @@ impl SSTableReader {
                 scan_cancel.check()?;
             }
             drained += 1;
+            // Partition-boundary bookkeeping (issue #4197): the window front's
+            // LOGICAL offset BEFORE the call is the start offset of the
+            // structure about to be confirmed, so if that structure turns out
+            // to be a partition HEADER it is the partition's `data_position`.
+            // Captured unconditionally (two integer reads) so a boundary walk
+            // and an ordinary compaction stream run the SAME driver code; the
+            // derivation is documented on `PartitionBoundaryObserver`.
+            let structure_start = observer.front();
+            let was_header_parsed = partition_state.header_parsed();
             let step = parser.stream_partition_body_incremental(
                 window.as_slice(),
                 schema,
@@ -877,6 +867,15 @@ impl SSTableReader {
                 at_final_chunk,
                 partition_state,
                 &mut |row: super::super::compaction_row::CompactionRow| emit(row),
+            )?;
+            // Report the boundary BEFORE matching on `step`: a header that
+            // parsed and then had its tombstone carrier BREAK the scan
+            // (`PartitionStreamStep::Break`) is still a real on-disk partition
+            // the walk must not lose.
+            observer.note_if_partition_started(
+                was_header_parsed,
+                structure_start,
+                partition_state,
             )?;
             match step {
                 // A confirmed mid-partition structure: advance the cursor over
@@ -904,7 +903,7 @@ impl SSTableReader {
                 // reintroducing the pre-#2299 hang, restoring the invariant the
                 // type signature alone does not enforce.
                 PartitionStreamStep::Consumed(consumed) => {
-                    window.consume(clamp_forward_progress(consumed));
+                    observer.consume(window, clamp_forward_progress(consumed));
                 }
                 // The partition ended. Advance over its final bytes (`consumed ==
                 // 0` for a terminal trailing partition makes no progress, but the
@@ -918,12 +917,12 @@ impl SSTableReader {
                     // exactly once. A token-range split keeps this bounded to its
                     // in-range slice, not the SSTable's whole partition count.
                     crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
-                    window.consume(consumed);
+                    observer.consume(window, consumed);
                 }
                 // Consumer dropped mid-emit: advance over the breaking structure and
                 // stop the whole scan.
                 PartitionStreamStep::Break(consumed) => {
-                    window.consume(consumed);
+                    observer.consume(window, consumed);
                     *broke = true;
                     return Ok(());
                 }

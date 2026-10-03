@@ -48,6 +48,15 @@ impl StatisticsWriter {
     ) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
+        // The baseline to serialize: an EXPLICIT `EncodingStats` triple when
+        // the caller set one (issue #4197 — `cqlite rebuild` recovers the
+        // original header's baseline while re-folding the STATS minima from
+        // content; in Cassandra these are two different values), else this
+        // SSTable's own content minima, which is what every flush/compaction
+        // write path wants. Byte-identical to reading `metadata.min_*`
+        // directly when no override is set.
+        let baseline = metadata.effective_encoding_stats_baseline();
+
         // EncodingStats: 3 unsigned VInts representing deltas from epochs.
         // These baselines MUST match the values used by DataWriter for delta encoding.
         // Cassandra: EncodingStats.Serializer.serialize() writes:
@@ -56,11 +65,11 @@ impl StatisticsWriter {
         //   writeUnsignedVInt(minTTL - TTL_EPOCH)
 
         // minTimestamp delta from epoch
-        let min_ts = if metadata.min_timestamp == i64::MAX {
+        let min_ts = if baseline.min_timestamp == i64::MAX {
             // No data recorded: use epoch as baseline
             TIMESTAMP_EPOCH as u64
         } else {
-            metadata.min_timestamp as u64
+            baseline.min_timestamp as u64
         };
         let min_ts_delta = min_ts.wrapping_sub(TIMESTAMP_EPOCH as u64);
         buffer.write_all(&encode_vuint(min_ts_delta))?;
@@ -83,21 +92,21 @@ impl StatisticsWriter {
         // `writeUnsignedVInt32` requires, and it also handles a far-future LDT stored as
         // a negative i32 bit pattern identically (the bit pattern IS the signed int the
         // reader expects). This mirrors the DataWriter per-row deletion deltas.
-        let min_ldt = if metadata.min_local_deletion_time == i32::MAX {
+        let min_ldt = if baseline.min_local_deletion_time == i32::MAX {
             // No deletions: use Integer.MAX_VALUE as baseline (DeletionTime.LIVE)
             i32::MAX
         } else {
-            metadata.min_local_deletion_time
+            baseline.min_local_deletion_time
         };
         let min_del_delta = (min_ldt.wrapping_sub(DELETION_TIME_EPOCH) as i64) as u64;
         buffer.write_all(&encode_vuint(min_del_delta))?;
 
         // minTTL delta from TTL_EPOCH (TTL_EPOCH=0)
-        let min_ttl = if metadata.min_ttl == i32::MAX {
+        let min_ttl = if baseline.min_ttl == i32::MAX {
             // No TTL: use 0 as baseline
             0u64
         } else {
-            metadata.min_ttl as u64
+            baseline.min_ttl as u64
         };
         let min_ttl_delta = min_ttl.wrapping_sub(TTL_EPOCH as u64);
         buffer.write_all(&encode_vuint(min_ttl_delta))?;
