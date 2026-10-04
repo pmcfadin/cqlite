@@ -684,8 +684,8 @@ impl StorageEngine {
     /// NOTE: Issue #176 removed compaction shutdown (compaction.rs deleted).
     /// Issue #175 removed flush operations (WAL/MemTable deleted).
     pub async fn shutdown(&self) -> Result<()> {
-        // Nothing to shutdown - read-only storage layer
-        Ok(())
+        // Bindings retain their Arc<Database> after close; release reader FDs now.
+        self.sstables.shutdown().await
     }
 
     /// Set the schema registry for schema-aware operations

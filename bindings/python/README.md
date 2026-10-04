@@ -73,6 +73,17 @@ db = cqlite.open(data_dir, schema=schema_path)
 db.close()
 ```
 
+Each open database retains readers for its discovered SSTable generations;
+queries reuse those readers. The process's operating-system open-file limit
+(`RLIMIT_NOFILE` on Unix) caps descriptor use. If another generation cannot be
+opened because that limit is reached, `open()` or `refresh()` raises an I/O
+error. It does not report missing rows as an empty result.
+
+`close()` releases the database's reader handles even while the closed Python
+object remains alive. A query already in flight may retain its reader until it
+finishes. Prefer a context manager or explicit `close()` when opening datasets
+repeatedly; garbage collection is not needed to release a closed handle.
+
 #### Cleanup on garbage collection (safety net, not the recommended path)
 
 A handle that is garbage-collected without `close()` still cleans up

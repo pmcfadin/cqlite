@@ -122,13 +122,8 @@ fn canon(p: &Path) -> PathBuf {
 }
 
 impl SSTableManager {
-    /// Open an `SSTableReader` at `path` and wire the schema/UDT registries onto
-    /// it (when the `state_machine` feature is enabled), returning a shared
-    /// handle. Extracted so the initial load paths and refresh open readers
-    /// identically. The `SSTableReader::open` error — including the issue #1626
-    /// corrupt-`Statistics.db` hard-fail — is propagated to the caller, which
-    /// decides whether to skip (initial best-effort load) or abort (fail-closed
-    /// refresh).
+    /// Open a shared reader with schema/UDT registries. Refresh propagates every
+    /// error; initial loads always propagate FD exhaustion and may skip other failures.
     pub(crate) async fn open_reader_with_schema(
         &self,
         path: &Path,
@@ -191,6 +186,7 @@ impl SSTableManager {
                     }
                     let mut entries = match self.platform.fs().read_dir(dir).await {
                         Ok(entries) => entries,
+                        Err(e) if super::manager_open::is_fd_exhaustion(&e) => return Err(e),
                         Err(_) => continue,
                     };
                     while let Some(entry) = entries.next_entry().await? {

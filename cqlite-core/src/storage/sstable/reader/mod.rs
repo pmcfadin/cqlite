@@ -529,7 +529,7 @@ impl SSTableReader {
         // §A) or falls back to today's eager parse (§A1's counted FellBack).
         let summary_reader = Self::load_summary_reader(path, &platform)
             .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))
-            .await;
+            .await?;
         let summary_usable = summary_reader
             .as_ref()
             .map(|s| !s.get_entries().is_empty())

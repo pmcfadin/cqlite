@@ -19,7 +19,39 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+/// Descriptor exhaustion is a process resource failure, never evidence that a
+/// generation is absent. Preserve the original typed I/O error at every fallback.
+pub(super) fn is_fd_exhaustion(error: &crate::Error) -> bool {
+    if let crate::Error::Io(error) = error {
+        return is_io_fd_exhaustion(error);
+    }
+    false
+}
+
+pub(super) fn is_io_fd_exhaustion(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 impl SSTableManager {
+    /// Release the manager's ownership of all readers on database shutdown.
+    /// In-flight operations may keep their own snapshots until they finish.
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        let _refresh = self.refresh_lock.lock().await;
+        let mut readers = self.readers.write().await;
+        let mut tables = self.table_readers.write().await;
+        readers.clear();
+        tables.clear();
+        Ok(())
+    }
+
     /// Create a new SSTable manager
     pub async fn new(
         path: &Path,
@@ -186,6 +218,7 @@ impl SSTableManager {
             // Read directory contents
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
                 Ok(entries) => entries,
+                Err(e) if is_fd_exhaustion(&e) => return Err(e),
                 Err(e) => {
                     tracing::warn!("Cannot read table directory {:?}: {}", table_dir, e);
                     continue;
@@ -237,6 +270,7 @@ impl SSTableManager {
                                     );
                                 }
                             }
+                            Err(e) if is_fd_exhaustion(&e) => return Err(e),
                             Err(e) => {
                                 // Log warning but continue loading other SSTables
                                 tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
@@ -331,6 +365,7 @@ impl SSTableManager {
                         );
                     }
                 }
+                Err(e) if is_fd_exhaustion(&e) => return Err(e),
                 Err(_) => {
                     // Skip problematic SSTable files during initialization
                     tracing::warn!("Could not load SSTable file: {:?}", path);
