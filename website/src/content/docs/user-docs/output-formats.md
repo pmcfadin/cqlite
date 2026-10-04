@@ -8,7 +8,7 @@ sidebar:
 
 # Output Formats
 
-CQLite query results can be written in four formats: `table`, `json`, `csv`, and `parquet`. This page covers the behavior and type mapping for each, with verified examples run against the real test datasets (`cassandra5-small-full-v3.1`).
+CQLite query results can be written in four formats via `--out`/`--format`: `table`, `json`, `csv`, and `parquet`, plus a fifth binary format, `vortex`, available only through `cqlite export` / `cqlite export-sstable` (see the [`vortex`](#vortex--vortex-columnar-file-format-export-only) section below — it is not a `--out` value). This page covers the behavior and type mapping for each, with verified examples run against the real test datasets (`cassandra5-small-full-v3.1`).
 
 ## Selecting a format
 
@@ -244,6 +244,64 @@ parquet-tools show results.parquet
 
 ---
 
+## `vortex` — Vortex columnar file format (export only)
+
+[Vortex](https://github.com/spiraldb/vortex) is a columnar file format with an adaptive,
+per-chunk sampling compressor. CQLite's Vortex writer consumes the exact same reconciled
+`SELECT` row stream and CQL→Arrow type mapping the Parquet writer above uses — no second
+mapping, no separate type table — so the two formats agree on every value for the same query
+(verified by the cross-format differential over all 33 fixture tables, issue #4237).
+
+The writer is embeddable: it lives in `cqlite-core` behind the off-by-default `vortex` cargo
+feature (`cargo build --features vortex`), mirroring `parquet` exactly.
+
+**Vortex is an export target only** in this release — reading `.vortex` files back into CQLite
+(query, Flight, Trino) is a later slice. It is available **only** through `cqlite export` and
+`cqlite export-sstable`, never through the general `--out`/`--format` flag on `query` — that flag
+still accepts the value `vortex` (so a typo is rejected with a clear message instead of a generic
+"unsupported" error), but always errors, naming `cqlite export --format vortex` as the command to
+use instead. There are no Python/Node.js binding methods for Vortex yet, unlike Parquet's
+`export_parquet`/`exportParquet`.
+
+```bash
+cqlite \
+  --schema test-data/schemas/basic-types.cql \
+  --data-dir test-data/datasets/sstables \
+  export results.vortex \
+  --format vortex \
+  --table test_basic.simple_table
+```
+
+Like Parquet, Vortex requires a file destination — it is a binary format and cannot be written to
+stdout.
+
+### Type mapping
+
+Identical to [Parquet's type table above](#type-mapping) — the Vortex writer never builds its own
+CQL→Arrow mapping; UUID/TimeUUID identity crosses the format boundary via Vortex's own recognition
+of the `arrow.uuid` extension metadata CQLite's Arrow schema already carries.
+
+### No compression options, no byte goldens
+
+This slice exposes no compression knobs — the writer uses Vortex's pinned default sampling
+compressor. Because that compressor is not byte-deterministic across runs (it samples per chunk),
+CQLite makes no byte-for-byte output guarantee for `.vortex` files: re-running the same export can
+produce a different but logically identical file. Correctness is established by decoded-value
+equality against the Parquet export of the same query, not by a committed binary golden.
+
+### Reading Vortex output
+
+The produced files are standard Vortex files and can be read with the
+[Vortex Python package](https://pypi.org/project/vortex-data/) or any other Vortex-compatible
+reader:
+
+```python
+import vortex
+arr = vortex.open("results.vortex").to_arrow_table()
+```
+
+---
+
 ## Choosing a format
 
 | Use case | Recommended format |
@@ -253,6 +311,7 @@ parquet-tools show results.parquet
 | Spreadsheet / pandas import | `csv` |
 | Analytics / Spark / DuckDB | `parquet` |
 | Lakehouse / columnar predicates on complex types | `parquet` (typed lists, maps, and structs — see table above) |
+| Read-time-performance-sensitive columnar analytics | `vortex` (`cqlite export` only — see above) |
 
 **See also**: [CLI Reference](/cqlite/user-docs/cli-reference/) for `--out`, `--format`, and `CQLITE_OUT` flag details.
 For agent recipes that use these formats, see [For Agents: Using CQLite](/cqlite/agents-using/).

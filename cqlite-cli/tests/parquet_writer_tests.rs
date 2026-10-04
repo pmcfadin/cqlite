@@ -2050,13 +2050,23 @@ fn test_set_uuid_schema_is_list_fixedsizebinary16() {
 
     let schema = batch.schema();
     let field = schema.field(0);
+    // Issue #4237: the LIST ELEMENT field carries the same `arrow.uuid` extension metadata a
+    // top-level uuid column does (`test_cql_uuid_schema_has_extension_metadata` above) — a bare
+    // FixedSizeBinary(16) with no metadata is indistinguishable from arbitrary 16-byte binary,
+    // which is harmless for Parquet but is refused outright by Vortex's Arrow importer
+    // (discovered via `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`). This file
+    // is already far over the campsite (#1135) test-file threshold; this fix's net growth is
+    // ~12 lines correcting two assertions that hard-coded the OLD, buggy schema, not new
+    // scope — the full gate's file-size component needs `CQLITE_ALLOW_FILE_GROWTH=1` for this
+    // PR (noted in the PR description).
+    let mut uuid_meta = std::collections::HashMap::new();
+    uuid_meta.insert("ARROW:extension:name".to_string(), "arrow.uuid".to_string());
     assert_eq!(
         field.data_type(),
-        &ArrowDataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
-            "item",
-            ArrowDataType::FixedSizeBinary(16),
-            true
-        )))
+        &ArrowDataType::List(std::sync::Arc::new(
+            arrow::datatypes::Field::new("item", ArrowDataType::FixedSizeBinary(16), true)
+                .with_metadata(uuid_meta)
+        ))
     );
 }
 
@@ -2759,10 +2769,16 @@ fn test_map_uuid_timestamp_schema() {
     let schema = batch.schema();
     let field = schema.field(0);
 
+    // Issue #4237: the MAP KEY field carries the same `arrow.uuid` extension metadata a
+    // top-level uuid column does — see `test_set_uuid_schema_is_list_fixedsizebinary16`'s
+    // comment for why this matters (Vortex's Arrow importer refuses a bare FixedSizeBinary(16)).
+    let mut uuid_meta = std::collections::HashMap::new();
+    uuid_meta.insert("ARROW:extension:name".to_string(), "arrow.uuid".to_string());
     let expected_entries = Arc::new(arrow::datatypes::Field::new(
         "entries",
         ArrowDataType::Struct(Fields::from(vec![
-            arrow::datatypes::Field::new("key", ArrowDataType::FixedSizeBinary(16), false),
+            arrow::datatypes::Field::new("key", ArrowDataType::FixedSizeBinary(16), false)
+                .with_metadata(uuid_meta),
             arrow::datatypes::Field::new(
                 "value",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),

@@ -133,6 +133,9 @@ pub async fn read_sstable(
                 OutputFormat::Parquet => {
                     return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
                 }
+                OutputFormat::Vortex => {
+                    return Err(anyhow::anyhow!("Vortex format is not supported for this command. Use --out json or --out csv instead."));
+                }
             }
 
             println!(
@@ -232,6 +235,9 @@ pub async fn read_sstable(
         OutputFormat::Csv => display_csv_format(&parser.get_column_names(), &parsed_rows)?,
         OutputFormat::Parquet => {
             return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
+        }
+        OutputFormat::Vortex => {
+            return Err(anyhow::anyhow!("Vortex format is not supported for this command. Use --out json or --out csv instead."));
         }
     }
 
