@@ -9,6 +9,14 @@ metadata:
   generatedBy: "1.4.1"
 ---
 
+## CQLite contract
+
+Read repository-root `AGENTS.md` and `.agents/skills/cqlite-development/SKILL.md`.
+Use available Codex tools or ordinary conversation; honor approval already given
+in this session. Missing owner decisions block dependent implementation, not
+independent preparation. This skill does not authorize external posting by itself.
+The OpenSpec CLI's context/rules and resolved paths remain authoritative for artifacts.
+
 Propose a new change - create the change and generate all artifacts in one step.
 
 I'll create a change with artifacts:
@@ -16,7 +24,7 @@ I'll create a change with artifacts:
 - design.md (how)
 - tasks.md (implementation steps)
 
-When ready to implement, run /opsx:apply
+After strict validation and owner design approval, use $openspec-apply-change
 
 ---
 
@@ -26,7 +34,7 @@ When ready to implement, run /opsx:apply
 
 1. **If no clear input provided, ask what they want to build**
 
-   Use the **AskUserQuestion tool** (open-ended, no preset options) to ask:
+   Use the available user-input tool or ordinary conversation (open-ended, no preset options) to ask:
    > "What change do you want to work on? Describe what you want to build or fix."
 
    From their description, derive a kebab-case name (e.g., "add user authentication" → `add-user-auth`).
@@ -50,7 +58,7 @@ When ready to implement, run /opsx:apply
 
 4. **Create artifacts in sequence until apply-ready**
 
-   Use the **TodoWrite tool** to track progress through the artifacts.
+   Track artifact progress with the available plan tool or a concise checklist.
 
    Loop through artifacts in dependency order (artifacts with no pending dependencies first):
 
@@ -77,10 +85,15 @@ When ready to implement, run /opsx:apply
       - Stop when all `applyRequires` artifacts are done
 
    c. **If an artifact requires user input** (unclear context):
-      - Use **AskUserQuestion tool** to clarify
+      - Use available user-input tool or ordinary conversation to clarify
       - Then continue with creation
 
-5. **Show final status**
+5. **Validate and show final status**
+
+   Run `openspec validate "<name>" --strict`. Present the design for approval
+   unless the conversation already contains explicit approval of that design.
+   Artifact completeness is not owner approval.
+
    ```bash
    openspec status --change "<name>"
    ```
@@ -90,8 +103,8 @@ When ready to implement, run /opsx:apply
 After completing all artifacts, summarize:
 - Change name and location
 - List of artifacts created with brief descriptions
-- What's ready: "All artifacts created! Ready for implementation."
-- Prompt: "Run `/opsx:apply` or ask me to implement to start working on the tasks."
+- What's ready: "Artifacts created; report strict validation and design-approval status."
+- Prompt: "After design approval, use `$openspec-apply-change` or ask me to implement."
 
 **Artifact Creation Guidelines**
 

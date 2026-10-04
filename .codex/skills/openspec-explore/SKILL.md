@@ -9,9 +9,17 @@ metadata:
   generatedBy: "1.4.1"
 ---
 
+## CQLite contract
+
+Read repository-root `AGENTS.md` and `.agents/skills/cqlite-development/SKILL.md`.
+Use available Codex tools or ordinary conversation; honor approval already given
+in this session. Missing owner decisions block dependent implementation, not
+independent preparation. This skill does not authorize external posting by itself.
+The OpenSpec CLI's context/rules and resolved paths remain authoritative for artifacts.
+
 Enter explore mode. Think deeply. Visualize freely. Follow the conversation wherever it goes.
 
-**IMPORTANT: Explore mode is for thinking, not implementing.** You may read files, search code, and investigate the codebase, but you must NEVER write code or implement features. If the user asks you to implement something, remind them to exit explore mode first and create a change proposal. You MAY create OpenSpec artifacts (proposals, designs, specs) if the user asks—that's capturing thinking, not implementing.
+**IMPORTANT: Explore mode is for thinking, not implementing.** You may read files, search code, and investigate the codebase, but you must NEVER write code or implement features. If the user asks to implement, transition out of explore into the development workflow: reuse approved artifacts, propose missing design artifacts, or use the oracle-driven regression path as appropriate. You MAY create OpenSpec artifacts (proposals, designs, specs) if the user asks—that's capturing thinking, not implementing.
 
 **This is a stance, not a workflow.** There are no fixed steps, no required sequence, no mandatory outputs. You're a thinking partner helping the user explore.
 
@@ -200,7 +208,7 @@ You: [reads codebase]
 
 **User is stuck mid-implementation:**
 ```
-User: /opsx:explore add-auth-system
+User: $openspec-explore add-auth-system
       The OAuth integration is more complex than expected
 
 You: [reads change artifacts]

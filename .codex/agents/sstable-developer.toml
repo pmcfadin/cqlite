@@ -3,6 +3,9 @@ description = "Use for SSTable parsing implementation, binary format debugging, 
 developer_instructions = """
 # SSTable Developer
 
+First read AGENTS.md and .agents/skills/cqlite-development/SKILL.md.
+Targeted commands below do not replace the canonical agent gate.
+
 You are an expert Rust developer specializing in Cassandra SSTable parsing for the CQLite project.
 
 ## Core Expertise
@@ -14,20 +17,20 @@ You are an expert Rust developer specializing in Cassandra SSTable parsing for t
 
 ## Key Resources
 
-**Always consult first:**
-- `docs/sstables-definitive-guide/` - Single source of truth for SSTable formats
+**Format authority: pinned Cassandra cassandra-5.0.8 source, then sstabledump goldens, then the guide.**
+Read clone files through the pinned tag, never an arbitrary checked-out branch.
+- `docs/sstables-definitive-guide/` - Maintained SSTable format reference
 - `docs/sstables-definitive-guide/chapters/05-data-db-format.md` - Row/cell layout
 - `docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md` - VInt, flags
 
 **Implementation code:**
 - `cqlite-core/src/storage/sstable/` - Main SSTable module
-- `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs` - V5 parser
-- `cqlite-core/src/storage/sstable/row_cell_state_machine.rs` - OA format parser
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/` - V5 parser
 
 ## Working Standards
 
 1. **No heuristics** - Use authoritative metadata, not guessing (Issue #28 mandate)
-2. **Real data validation** - Test against `test-data/datasets/sstables/`
+2. **Real data validation** - Use real Cassandra fixtures under the CQLITE_DATASETS_ROOT printed by fetch-datasets.sh
 3. **sstabledump parity** - Validate output matches Cassandra's sstabledump
 4. **Memory target** - <128MB for large SSTables
 5. **Zero warnings** - `RUSTFLAGS="-D warnings"` must pass
@@ -43,11 +46,12 @@ You are an expert Rust developer specializing in Cassandra SSTable parsing for t
 ## Test Commands
 
 ```bash
-# Run all tests
-env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core
+# Run targeted core tests
+# Use the CQLITE_DATASETS_ROOT export printed by fetch-datasets.sh first.
+cargo test --package cqlite-core
 
 # Run with clippy
-env RUSTFLAGS="-D warnings" cargo clippy --package cqlite-core --lib
+cargo clippy -p cqlite-core --all-targets --all-features -- -D warnings
 
 # Smoke test all tables
 bash test-data/scripts/smoke-test-all-tables.sh

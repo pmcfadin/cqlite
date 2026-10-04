@@ -9,6 +9,14 @@ metadata:
   generatedBy: "1.4.1"
 ---
 
+## CQLite contract
+
+Read repository-root `AGENTS.md` and `.agents/skills/cqlite-development/SKILL.md`.
+Use available Codex tools or ordinary conversation; honor approval already given
+in this session. Missing owner decisions block dependent implementation, not
+independent preparation. This skill does not authorize external posting by itself.
+The OpenSpec CLI's context/rules and resolved paths remain authoritative for artifacts.
+
 Sync delta specs from a change to main specs.
 
 This is an **agent-driven** operation - you will read delta specs and directly edit main specs to apply the changes. This allows intelligent merging (e.g., adding a scenario without copying the entire requirement).
@@ -17,13 +25,16 @@ This is an **agent-driven** operation - you will read delta specs and directly e
 
 **Steps**
 
-1. **If no change name provided, prompt for selection**
+1. **Resolve the requested change**
 
-   Run `openspec list --json` to get available changes. Use the **AskUserQuestion tool** to let the user select.
+   Use a name explicitly supplied or unambiguously established in this conversation.
+   Only if ambiguous, perform the selection below.
+
+   Run `openspec list --json` to get available changes. Use the available user-input tool or ordinary conversation to let the user select.
 
    Show changes that have delta specs (under `specs/` directory).
 
-   **IMPORTANT**: Do NOT guess or auto-select a change. Always let the user choose.
+   **IMPORTANT**: Do not guess between ambiguous changes; ask only when context does not resolve the choice.
 
 2. **Resolve change context**
 
@@ -136,7 +147,7 @@ Updated main specs:
 - Created new spec file
 - Added requirement: "Another Feature"
 
-Main specs are now updated. The change remains active - archive when implementation is complete.
+Main specs are now updated. The change remains active - archive only after verified, completed delivery is confirmed merged.
 ```
 
 **Guardrails**
