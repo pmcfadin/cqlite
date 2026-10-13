@@ -89,11 +89,13 @@
 //  exclude OR declare, never both. `lz4` arrives via the DEFAULT `all-compression`
 //  set, so no lane silently executes zero tests here (the #3375 hazard).
 
+#[cfg(feature = "cli-helpers")]
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "cli-helpers")]
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+#[cfg(feature = "cli-helpers")]
 use cqlite_core::types::{EmptyValueType, Value};
 #[cfg(feature = "cli-helpers")]
 use cqlite_core::Config;
@@ -338,6 +340,7 @@ fn map_entries(
         .collect()
 }
 
+#[cfg(feature = "cli-helpers")]
 fn peel_frozen(v: &Value) -> Value {
     match v {
         Value::Frozen(inner) => peel_frozen(inner),
