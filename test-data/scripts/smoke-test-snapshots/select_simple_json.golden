@@ -1,6 +1,6 @@
 [
   {
-    "account_balance": "69799.73",
+    "account_balance": 69799.73,
     "active": true,
     "age": 79,
     "ascii_field": "ascii",
@@ -21,7 +21,7 @@
     "work_time": "01:12:05.926782000"
   },
   {
-    "account_balance": "74196.78",
+    "account_balance": 74196.78,
     "active": false,
     "age": 58,
     "ascii_field": "ascii",
@@ -42,7 +42,7 @@
     "work_time": "01:12:05.872191000"
   },
   {
-    "account_balance": "47110.15",
+    "account_balance": 47110.15,
     "active": false,
     "age": 47,
     "ascii_field": "ascii",
