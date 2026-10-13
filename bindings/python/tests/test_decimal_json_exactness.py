@@ -107,6 +107,28 @@ def test_cli_leg_refuses_a_quoted_decimal():
         canon_cli(WIDE, DECIMAL)
 
 
+@pytest.mark.parametrize(
+    "doc", ['{"x": NaN}', '{"x": Infinity}', '{"x": -Infinity}', "[1.5, NaN]"]
+)
+def test_cli_json_loader_refuses_non_json_constants(doc):
+    """NaN/Infinity are not JSON; the CLI renders a non-finite value as null.
+    A CLI regressing to emit the bare token must red, not pass (#4350)."""
+    with pytest.raises(CanonicalError, match="non-JSON constant"):
+        load_cli_json(doc)
+    with pytest.raises(CanonicalError, match="non-JSON constant"):
+        cli_parity.parse_cli_json(doc)
+    assert load_cli_json('{"x": null}') == {"x": None}
+
+
+@pytest.mark.parametrize("text", ["-0", "-0.00", "-0.0000000", "-0E-8"])
+def test_cli_leg_refuses_a_negative_zero_decimal(text):
+    """A BigDecimal has no negative zero, so the CLI cannot legitimately emit
+    one: refused on the cli leg rather than folded (#4350)."""
+    with pytest.raises(CanonicalError, match="negative-zero"):
+        canon_cli(load_cli_json(text), DECIMAL)
+    assert canon_cli(load_cli_json(text.lstrip("-")), DECIMAL) is not None
+
+
 def test_cli_leg_keeps_the_scale_of_a_fractional_decimal():
     """Scale matters, exactly as on the python/node legs: 1.50 != 1.5."""
     assert canon_cli(load_cli_json("1.50"), DECIMAL) == "1.50"
