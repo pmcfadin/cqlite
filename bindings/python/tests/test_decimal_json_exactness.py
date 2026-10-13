@@ -41,6 +41,7 @@ from canonical import (  # noqa: E402
     canon_python,
     canon_row_cli,
     load_cli_json,
+    normalize_decimal_string,
     parse_type,
 )
 
@@ -132,6 +133,14 @@ def test_cli_loader_keeps_integer_and_float_columns_unchanged():
     # A fractional JSON number is still NOT an integer.
     with pytest.raises(CanonicalError, match="integer"):
         canon_cli(load_cli_json("42.0"), parse_type("int"))
+
+
+def test_python_decimal_parser_still_strips_leading_zeros():
+    """The two leading-zero parser probes' cli legs are now CLI-unreachable
+    nulls (`0000123.4500` is not a valid JSON number), so the Python string
+    parser's leading-zero branch is pinned here directly."""
+    assert normalize_decimal_string("0000123.4500") == "123.4500"
+    assert normalize_decimal_string("0001e5000") == "1e5000"
 
 
 # ---------------------------------------------------------------------------

@@ -9,10 +9,12 @@
  * KNOWN to agree.
  *
  * Note: this file `JSON.parse`s the vector table, so a `cli` field holding an
- * integer above 2^53 is read lossily here. That is harmless and deliberate --
+ * integer above 2^53 -- or a `decimal`, which the CLI emits as an UNQUOTED
+ * number since #3644 -- is read lossily here. That is harmless and deliberate --
  * the JS runner only ever consumes the `node` and `canonical` fields, and
  * every above-safe integer is expressed there as a {"$":"bigint"} tag or a
- * decimal STRING, never as a JSON number.
+ * decimal STRING, never as a JSON number. (vectors.py reads the `cli` leg
+ * exactly, through canonical.load_cli_json -- issue #4350.)
  *
  * Runnable standalone:
  *
