@@ -155,6 +155,13 @@ jobs:
         run: |
           bash test-data/scripts/fetch-datasets.sh
 
+      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
+        # The cache/bundle carries a snapshot of test-data/datasets that predates
+        # later fixture commits; extracting it over the checkout clobbers tracked
+        # files (references.yml, committed Data.db). Committed copies must win —
+        # mirrors fetch-datasets.sh::restore_tracked_dataset_files (#2878) and
+        # coverage.yml (#2022).
+        run: git restore --source=HEAD -- test-data/datasets
       - name: Run recipe smoke tests
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
