@@ -311,7 +311,23 @@ def load_cli_json(text: str) -> Any:
     ``float``/``double`` take ``float(value)`` (correctly rounded — the same
     double a default parse yields), integer kinds take ``int(value)``.
     """
-    return json.loads(text, parse_float=_decimal.Decimal, parse_int=CliJsonInteger)
+    return json.loads(
+        text,
+        parse_float=_decimal.Decimal,
+        parse_int=CliJsonInteger,
+        parse_constant=_refuse_json_constant,
+    )
+
+
+def _refuse_json_constant(token: str) -> Any:
+    """``NaN`` / ``Infinity`` / ``-Infinity`` are NOT JSON (RFC 8259), and the
+    CLI renders a non-finite float as ``null`` (README gap 4). Python's default
+    ``json.loads`` would quietly accept them, so a CLI that regressed to emitting
+    one would pass the harness; refuse instead (issue #4350)."""
+    raise CanonicalError(
+        f"CLI emitted a non-JSON constant {token!r}; a non-finite value must be "
+        "rendered as JSON null"
+    )
 
 
 def canon_int(n: int) -> Any:
@@ -892,6 +908,10 @@ class CliAdapter(_Adapter):
                 )
             if isinstance(value, _decimal.Decimal) and not value.is_finite():
                 raise CanonicalError(f"not a decimal string: {value!r}")
+            # A BigDecimal has no negative zero, so a `-0` token on the CLI leg
+            # is a renderer defect: refuse it rather than fold it (#4350).
+            if isinstance(value, _decimal.Decimal) and value.is_zero() and value.is_signed():
+                raise CanonicalError(f"CLI emitted a negative-zero decimal {value!r}")
             # str() of a Decimal is lossless (coefficient AND exponent), and
             # normalize_decimal_string accepts its `E+n` spelling.
             return normalize_decimal_string(str(value))
