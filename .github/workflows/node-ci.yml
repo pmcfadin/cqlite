@@ -426,6 +426,13 @@ jobs:
           $pin = "tag=$env:DATASET_TAG`nasset=$env:DATASET_ASSET`nsha256=$env:DATASET_SHA256`n"
           [System.IO.File]::WriteAllText("test-data/datasets/.dataset-pin", $pin)
 
+      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
+        # The cache/bundle carries a snapshot of test-data/datasets that predates
+        # later fixture commits; extracting it over the checkout clobbers tracked
+        # files (references.yml, committed Data.db). Committed copies must win —
+        # mirrors fetch-datasets.sh::restore_tracked_dataset_files (#2878) and
+        # coverage.yml (#2022).
+        run: git restore --source=HEAD -- test-data/datasets
       - name: Sanity check dataset
         shell: bash
         run: |
