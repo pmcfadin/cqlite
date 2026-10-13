@@ -23,6 +23,10 @@
 # Run standalone:   bash scripts/tests/test_tooling_tests_scope.sh
 set -uo pipefail
 unset AGENT_GATE_SUMMARY_FILE 2>/dev/null || true
+# The nightly lane exports CQLITE_TOOLING_TESTS_ALWAYS_RUN=1 (AC4). Inherited, it
+# forces RUN on every nested scope probe below, so each expected-SKIP case
+# fails. G5 re-sets it explicitly for its one positive check (#4347).
+unset CQLITE_TOOLING_TESTS_ALWAYS_RUN 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
