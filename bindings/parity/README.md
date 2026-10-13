@@ -287,7 +287,8 @@ reduce to one canonical string. It is deliberately **not** applied to a value
 with a fractional part: `0.10` must stay `0.10`, because both renderers preserve
 that scale and folding would discard a distinction the legs agree on. Verified
 against the pre-fix algorithm: every previously-agreeing value (`31595.67`,
-`0.10`, `-1.50`, `1.500`, `0.0015`, `-0.00`, `12345`) is **unchanged**.
+`0.10`, `-1.50`, `1.500`, `0.0015`, `0.00`, `12345`) is **unchanged** (`-0.00` was
+listed here until #4350 made zeros sign-free — see below).
 
 **Zeros (#4350).** A zero's scale is `len(frac) - exponent`, not the fractional
 digits alone: Python's `str(Decimal)` spells a scale-8 zero `0E-8` while the
