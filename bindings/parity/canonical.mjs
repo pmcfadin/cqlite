@@ -469,23 +469,33 @@ const nodeAdapter = {
     if (FLOAT_KINDS.has(kind)) {
       // `create_double` (value.rs:222-223) — always a JS number.
       requireJsType(value, 'number', kind);
-      // A declared `float` canonicalizes to its f32 value on every leg (issue
-      // #4350) — see canonical.py's `canon_float`. Exact, type-driven; a
-      // `double` is never rounded. A finite value outside the f32 range is
-      // REFUSED rather than silently becoming an infinity.
-      let v = value;
-      if (kind === 'float' && Number.isFinite(v)) {
-        v = Math.fround(v);
-        if (!Number.isFinite(v)) {
+      // A declared `float` is a 32-bit value (issue #4350) — see canonical.py's
+      // `canon_float`. This is a BINDING leg, so it must ALREADY hold an exact
+      // f32 (never rounded here: rounding would mask a binding that returns a
+      // non-f32 value). Exact, type-driven; a `double` is never checked. A
+      // finite value beyond FLT_MAX is refused, never made infinite.
+      if (kind === 'float' && Number.isFinite(value)) {
+        const f32 = Math.fround(value);
+        if (!Number.isFinite(f32)) {
           throw new CanonicalError(`declared float value ${value} is outside the f32 range`);
         }
+        if (f32 !== value) {
+          throw new CanonicalError(
+            `declared float expects an exact f32 value from the binding, got ${value} `
+            + `(nearest f32 is ${f32})`,
+          );
+        }
       }
-      // Negative zero canonicalizes to the STRING "-0.0" — see canonical.py's
-      // `canon_float`. JSON.stringify renders -0 as `0` (measured), so the sign
-      // bit cannot survive to the comparator as a JSON number; a sign-aware
-      // comparator alone would have red on correct bindings.
-      if (Object.is(v, -0)) return '-0.0';
-      return v;
+      // Values JSON cannot carry as a number canonicalize to STRINGS, as in
+      // canonical.py: non-finite (#4350 review N1), and negative zero —
+      // JSON.stringify renders -0 as `0` (measured), so the sign bit cannot
+      // survive to the comparator as a JSON number; a sign-aware comparator
+      // alone would have red on correct bindings.
+      if (Number.isNaN(value)) return 'NaN';
+      if (value === Infinity) return 'Infinity';
+      if (value === -Infinity) return '-Infinity';
+      if (Object.is(value, -0)) return '-0.0';
+      return value;
     }
     if (TEXT_KINDS.has(kind)) {
       requireJsType(value, 'string', kind);

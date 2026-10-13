@@ -12,8 +12,10 @@ exact compare. This module pins that the rounding is exact and type-driven:
 * for a ``double``, ``1.84`` and ``1.840000033378601`` still differ;
 * a finite value beyond FLT_MAX is refused, never rounded to an infinity.
 
-Each property is pinned on BOTH canonicalizers (``canonical.py`` here directly,
-``canonical.mjs`` through ``node``).
+Only the CLI's TEXT leg is rounded; a binding leg (Python, Node) must already hold
+an exact f32 and is refused otherwise. Non-finite values canonicalize to the strings
+``"NaN"``/``"Infinity"``/``"-Infinity"``. Each property is pinned on BOTH
+canonicalizers (``canonical.py`` here directly, ``canonical.mjs`` through ``node``).
 """
 
 from __future__ import annotations
@@ -88,6 +90,25 @@ def test_flt_max_spelling_rounds_to_flt_max_not_infinity():
     assert canon_cli(load_cli_json("3.4028235e38"), FLOAT) == FLT_MAX
 
 
+def test_binding_leg_must_already_hold_an_exact_f32():
+    """A binding is CHECKED, never rounded: a non-f32 value is refused, so a
+    binding that widened wrongly cannot be masked (#4350 hardening)."""
+    with pytest.raises(CanonicalError, match="exact f32"):
+        canon_python(1.84, FLOAT)
+    assert canon_python(F32_184_WIDENED, FLOAT) == F32_184_WIDENED
+    # A double binding value is never checked against f32.
+    assert canon_python(1.84, DOUBLE) == 1.84
+
+
+@pytest.mark.parametrize(
+    "value, canonical",
+    [(float("nan"), "NaN"), (float("inf"), "Infinity"), (float("-inf"), "-Infinity")],
+)
+def test_non_finite_float_canonicalizes_to_a_string(value, canonical):
+    assert canon_python(value, FLOAT) == canonical
+    assert canon_python(value, DOUBLE) == canonical
+
+
 def test_float_negative_zero_survives_the_rounding():
     assert canon_python(-0.0, FLOAT) == "-0.0"
     assert canon_cli(load_cli_json("-0.0"), FLOAT) == "-0.0"
@@ -114,17 +135,21 @@ def test_vector_table_pins_the_distinct_pairs():
 _JS = r"""
 import { canonNode, parseType, CanonicalError } from './canonical.mjs';
 const F = parseType('float'), D = parseType('double');
-let refused = null;
-try { canonNode(1e39, F); } catch (e) { refused = e instanceof CanonicalError ? e.message : 'other:' + e; }
+const refusal = (fn) => {
+  try { fn(); return null; } catch (e) { return e instanceof CanonicalError ? e.message : 'other:' + e; }
+};
 console.log(JSON.stringify({
-  cli_184: canonNode(1.84, F),
   widened: canonNode(1.840000033378601, F),
-  next_up: canonNode(1.8400002, F),
+  next_up: canonNode(1.8400001525878906, F),
+  non_f32_refused: refusal(() => canonNode(1.84, F)),
   double_184: canonNode(1.84, D),
   double_widened: canonNode(1.840000033378601, D),
-  flt_max: canonNode(3.4028235e38, F),
+  flt_max: canonNode(3.4028234663852886e38, F),
   neg_zero: canonNode(-0, F),
-  refused,
+  nan: canonNode(NaN, F),
+  pos_inf: canonNode(Infinity, F),
+  neg_inf: canonNode(-Infinity, F),
+  out_of_range_refused: refusal(() => canonNode(1e39, F)),
 }));
 """
 
@@ -142,9 +167,13 @@ def test_node_canonicalizer_rounds_float_to_f32_exactly():
     )
     assert proc.returncode == 0, proc.stderr
     got = json.loads(proc.stdout)
-    assert got["cli_184"] == got["widened"] == F32_184_WIDENED
-    assert got["next_up"] == F32_NEXT_UP_WIDENED != got["cli_184"]
+    # The Node leg is a BINDING leg: it is checked, never rounded.
+    assert got["widened"] == F32_184_WIDENED
+    assert got["next_up"] == F32_NEXT_UP_WIDENED != got["widened"]
+    assert got["non_f32_refused"] is not None and "exact f32" in got["non_f32_refused"]
     assert got["double_184"] == 1.84 != got["double_widened"]
     assert got["flt_max"] == FLT_MAX
     assert got["neg_zero"] == "-0.0"
-    assert got["refused"] is not None and "outside the f32 range" in got["refused"]
+    assert (got["nan"], got["pos_inf"], got["neg_inf"]) == ("NaN", "Infinity", "-Infinity")
+    assert got["out_of_range_refused"] is not None
+    assert "outside the f32 range" in got["out_of_range_refused"]

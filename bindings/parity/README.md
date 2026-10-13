@@ -131,7 +131,12 @@ README list in step.
    yields `nan`/`inf`, Node yields `NaN`/`Infinity`, and the CLI emits `null`
    (`cqlite-cli/src/output/json.rs:156-161`, `serde_json::Number::from_f64`
    returns `None`). No fixture contains one; a future one would need a rule
-   agreed across all three writers first.
+   agreed across all three writers first. The canonicalizers DO define the python/node
+   form (#4350 review N1): `"NaN"` / `"Infinity"` / `"-Infinity"` strings, the
+   same convention as `"-0.0"`, pinned by the `float_nan` / `float_*_infinity`
+   vectors with the cli leg explicitly null. A declared `float` must reach a
+   binding leg as an EXACT f32 (refused otherwise); only the CLI's text leg is
+   rounded to f32.
 5. **Absent vs null columns.** Measured, the leg that omits is the **Node**
    one: `bindings/node/src/row.rs:123-138` SKIPS a metadata column with no
    matching value (deliberately — null-filling would emit a phantom `col_0:

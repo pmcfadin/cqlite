@@ -167,6 +167,11 @@ def materialize_python(spec: Any) -> Any:
         return _dt.date.fromisoformat(spec["v"])
     if tag == "bigint":
         return int(spec["v"])
+    if tag == "float":
+        # A non-finite float, which JSON cannot spell as a number (#4350 N1).
+        if spec["v"] not in ("NaN", "Infinity", "-Infinity"):
+            raise ValueError(f"the `float` tag carries only NaN/Infinity/-Infinity, got {spec['v']!r}")
+        return float(spec["v"])
     if tag == "decimal":
         return _decimal.Decimal(spec["v"])
     if tag == "inet":
