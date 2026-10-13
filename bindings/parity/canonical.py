@@ -12,8 +12,9 @@ arrives in three shapes:
 
   * ``PythonAdapter`` -- native values from the PyO3 binding
     (``uuid.UUID``, ``datetime``, ``bytes``, ``decimal.Decimal``, ...)
-  * ``CliAdapter``    -- ``json.loads`` of ``cqlite --out json``
-    (strings for temporal/blob/decimal/duration, numbers for ints)
+  * ``CliAdapter``    -- :func:`load_cli_json` of ``cqlite --out json``
+    (strings for temporal/blob/duration, numbers for ints/floats/decimals;
+    a ``decimal`` is an UNQUOTED number since #3644, parsed EXACTLY, #4350)
   * (in ``canonical.mjs``) ``nodeAdapter`` -- native values from the napi
     binding (``Date``, ``BigInt``, ``Buffer``, ``Map``, ``Set``)
 
@@ -26,6 +27,8 @@ mandate (issue #28) applied to the harness itself -- a text column holding
 from __future__ import annotations
 
 import datetime as _dt
+import decimal as _decimal
+import json
 import re
 from functools import cmp_to_key
 from typing import Any, Callable, Iterable, List, NamedTuple, Sequence, Tuple
@@ -42,6 +45,8 @@ __all__ = [
     "canon_cli",
     "canon_row_python",
     "canon_row_cli",
+    "load_cli_json",
+    "CliJsonInteger",
     "normalize_decimal_string",
     "shape_tag",
     "canonical_equal",
@@ -271,6 +276,41 @@ canonical_sort_key = cmp_to_key(canonical_compare)
 # ---------------------------------------------------------------------------
 # Shared scalar canonicalizers
 # ---------------------------------------------------------------------------
+
+
+class CliJsonInteger(_decimal.Decimal):
+    """A JSON INTEGER lexeme from the CLI, held exactly (issue #4350).
+
+    :func:`load_cli_json` builds one per integer token instead of an ``int``:
+    Python refuses ``int(str)`` above 4300 digits, and the CLI legitimately
+    emits integral ``decimal`` values that long (a negative scale is expanded
+    positionally — see :func:`normalize_decimal_string`). A ``Decimal`` holds
+    any length exactly. It is a DISTINCT subclass so an integer-declared column
+    can still tell an integer token (``42``) from a fractional one (``42.0``,
+    a plain ``Decimal``), which is the check a default ``json.loads`` gave it.
+    """
+
+    __slots__ = ()
+
+
+def load_cli_json(text: str) -> Any:
+    """Parse ``cqlite --out json`` WITHOUT letting any number become a float.
+
+    The ONE sanctioned way to read CLI JSON into :class:`CliAdapter` (issue
+    #4350). Since #3644 the CLI renders a ``decimal`` as an UNQUOTED JSON
+    number, per ``cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/
+    DecimalType.java:314-317`` (``toJSONString`` is a bare
+    ``BigDecimal.toString()``). A default ``json.loads`` would turn
+    ``12345678901234567890.123456789`` into the nearest binary double and drop
+    its tail, so the comparison would silently stop being exact.
+
+    Here every fractional/exponent number becomes a ``decimal.Decimal`` built
+    from its exact lexeme, and every integer a :class:`CliJsonInteger`. The
+    adapter then converts per DECLARED type: ``decimal`` keeps the exact text,
+    ``float``/``double`` take ``float(value)`` (correctly rounded — the same
+    double a default parse yields), integer kinds take ``int(value)``.
+    """
+    return json.loads(text, parse_float=_decimal.Decimal, parse_int=CliJsonInteger)
 
 
 def canon_int(n: int) -> Any:
@@ -672,7 +712,8 @@ class PythonAdapter(_Adapter):
 
 
 class CliAdapter(_Adapter):
-    """``json.loads`` of ``cqlite --out json`` output."""
+    """:func:`load_cli_json` of ``cqlite --out json`` output (never a plain
+    ``json.loads``, which would make a ``decimal`` a lossy float — #4350)."""
 
     name = "cli"
 
@@ -717,14 +758,20 @@ class CliAdapter(_Adapter):
                 )
             return canon_int(int(value))
         if kind in _INT_KINDS:
+            # An INTEGER token from load_cli_json; a fractional token stays a
+            # plain Decimal and canon_int refuses it (#4350).
+            if isinstance(value, CliJsonInteger):
+                value = int(value)
             return canon_int(value)
         if kind in _FLOAT_KINDS:
             # R7 is DECLINED, deliberately: see the README. An int is accepted
             # here because nothing in serde_json's contract guarantees a whole
             # f64 always renders as `N.0`, and B4 is the standing evidence that
             # number-shape assumptions across a JSON boundary are where a false
-            # red comes from.
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            # red comes from. A Decimal is load_cli_json's exact lexeme (#4350);
+            # float() of it is correctly rounded, i.e. the very double a
+            # default json.loads would have produced.
+            if isinstance(value, bool) or not isinstance(value, (int, float, _decimal.Decimal)):
                 raise CanonicalError(
                     f"declared {kind} expects a JSON number, got {_pytype(value)}"
                 )
@@ -779,11 +826,27 @@ class CliAdapter(_Adapter):
             months, days, nanos = (int(g) if g is not None else 0 for g in m.groups())
             return _canon_duration(months, days, nanos)
         if kind == "decimal":
-            if not isinstance(value, str):
+            # An UNQUOTED JSON number since #3644 (DecimalType.toJSONString,
+            # cassandra-5.0.8 :314-317), accepted ONLY in an exact form
+            # (#4350): a Decimal/CliJsonInteger from load_cli_json, or an int.
+            # A float has already lost digits past ~17 — refusing it is the
+            # point, not a strictness nicety. A quoted string is the pre-#3644
+            # egress and is refused too, so a regression to quoting reds here.
+            if isinstance(value, float):
                 raise CanonicalError(
-                    f"declared decimal expects a JSON string, got {_pytype(value)}"
+                    "declared decimal expects an EXACTLY parsed JSON number "
+                    "(decimal.Decimal via load_cli_json), got float — a binary "
+                    "float cannot carry a decimal's digits"
                 )
-            return normalize_decimal_string(value)
+            if isinstance(value, bool) or not isinstance(value, (int, _decimal.Decimal)):
+                raise CanonicalError(
+                    f"declared decimal expects a JSON number, got {_pytype(value)}"
+                )
+            if isinstance(value, _decimal.Decimal) and not value.is_finite():
+                raise CanonicalError(f"not a decimal string: {value!r}")
+            # str() of a Decimal is lossless (coefficient AND exponent), and
+            # normalize_decimal_string accepts its `E+n` spelling.
+            return normalize_decimal_string(str(value))
         if kind == "inet":
             if not isinstance(value, str):
                 raise CanonicalError(
