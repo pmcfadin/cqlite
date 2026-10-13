@@ -593,8 +593,11 @@ def test_the_fold_leaves_already_agreeing_values_alone():
     """
     from canonical import normalize_decimal_string as norm
 
-    for text in ("31595.67", "0.10", "-1.50", "1.500", "0.0015", "-0.00", "12345", "0"):
+    for text in ("31595.67", "0.10", "-1.50", "1.500", "0.0015", "0.00", "12345", "0"):
         assert norm(text) == text, text
+    # A zero is SIGN-FREE since #4350 (a Java BigDecimal has no negative zero),
+    # but still keeps its scale.
+    assert norm("-0.00") == "0.00"
 
 
 def test_the_fold_cannot_expand_a_pathological_exponent():
