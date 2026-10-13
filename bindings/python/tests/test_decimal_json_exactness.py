@@ -193,6 +193,17 @@ def test_cli_parity_set_of_wide_decimals_compares_exactly():
     assert not _cli_parity_equal(py, f"[-1.5, 0, {WIDE_AS_FLOAT_TEXT}]")
 
 
+def test_cli_parity_shares_the_one_cli_json_loader():
+    """ONE loader (#4350 review N3): an integral decimal wider than Python's
+    4300-digit int-from-str limit parses and compares exactly."""
+    huge = "7" + "0" * 5000
+    assert cli_parity.parse_cli_json(f"[{huge}]") == [7 * 10**5000]
+    assert _cli_parity_equal(Decimal("7E+5000"), huge)
+    assert not _cli_parity_equal(Decimal("7E+5000"), "8" + "0" * 5000)
+    # Ordinary integers are still plain ints for the integer comparisons.
+    assert type(cli_parity.parse_cli_json("[42]")[0]) is int
+
+
 def test_cli_parity_float_columns_still_compare_as_floats():
     """A double column's fractional JSON number is still compared as a float."""
     assert _cli_parity_equal(0.1, "0.1")
