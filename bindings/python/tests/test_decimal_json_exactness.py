@@ -127,7 +127,9 @@ def test_cli_leg_accepts_an_integral_and_an_exponent_decimal_exactly():
 def test_cli_loader_keeps_integer_and_float_columns_unchanged():
     """The lossless parse must not change any OTHER declared type's result."""
     assert canon_cli(load_cli_json("42"), parse_type("int")) == 42
-    assert canon_cli(load_cli_json("1.67"), parse_type("float")) == 1.67
+    assert canon_cli(load_cli_json("1.67"), parse_type("double")) == 1.67
+    # A declared float is its f32 value (see test_float_f32_canonical.py).
+    assert canon_cli(load_cli_json("1.67"), parse_type("float")) == 1.6699999570846558
     assert canon_cli(load_cli_json("0.1"), parse_type("double")) == 0.1
     # A fractional JSON number is still NOT an integer.
     with pytest.raises(CanonicalError, match="integer"):
