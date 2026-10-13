@@ -2015,7 +2015,9 @@ class TestFixtureResolutionContract:
         monkeypatch.setenv("CQLITE_SCHEMAS_ROOT", str(missing))
         with pytest.raises(BaseException) as excinfo:
             _schemas_root()
-        assert str(missing) in str(excinfo.value)
+        # The refusal embeds the value via ``!r``, which doubles backslashes on
+        # Windows, so match its repr rather than the raw path (#4349).
+        assert repr(str(missing)) in str(excinfo.value)
 
     def test_relative_schemas_root_is_rejected_not_resolved(self, monkeypatch):
         """A RELATIVE override is refused: it would mean two different roots.
