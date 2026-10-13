@@ -85,7 +85,12 @@ from conftest import DATASETS, SCHEMAS, PROJECT_ROOT
 _PARITY_DIR = PROJECT_ROOT / "bindings" / "parity"
 if str(_PARITY_DIR) not in sys.path:
     sys.path.insert(0, str(_PARITY_DIR))
-from canonical import CanonicalError, normalize_decimal_string  # noqa: E402
+from canonical import (  # noqa: E402
+    CanonicalError,
+    CliJsonInteger,
+    load_cli_json,
+    normalize_decimal_string,
+)
 
 # ONE implementation of numeric equality, shared with test_parity.py (#3505).
 from numeric_compare import (
@@ -431,7 +436,10 @@ def _decimals_equal(py_val: Decimal, cli_val: Any) -> bool:
     if isinstance(cli_val, bool) or not isinstance(cli_val, (Decimal, int)):
         return False
     try:
-        return normalize_decimal_string(str(py_val)) == normalize_decimal_string(str(cli_val))
+        # Decimal(int) never goes through int->str, so an integral decimal
+        # wider than 4300 digits still compares (str(int) would raise).
+        cli_text = str(Decimal(cli_val)) if isinstance(cli_val, int) else str(cli_val)
+        return normalize_decimal_string(str(py_val)) == normalize_decimal_string(cli_text)
     except CanonicalError:
         return False
 
@@ -503,13 +511,26 @@ def parse_cli_json(text: str) -> Any:
     """Parse CLI JSON so no number passes through a binary float (#4350).
 
     Since #3644 a CQL ``decimal`` is an UNQUOTED JSON number
-    (``cassandra-5.0.8`` ``DecimalType.toJSONString:314-317``). A default
-    ``json.loads`` would round ``12345678901234567890.123456789`` to the nearest
-    double; ``parse_float=Decimal`` keeps every fractional/exponent number's
-    exact text instead. Integers stay ``int`` (already exact). A float/double
-    column's Decimal is converted back to ``float`` in :func:`values_equal`.
+    (``cassandra-5.0.8`` ``DecimalType.toJSONString:314-317``). This is the ONE
+    CLI JSON loader, ``canonical.load_cli_json``, shared with the cross-binding
+    harness: every fractional/exponent number stays an exact ``Decimal``, and
+    an integer token is parsed without ``int(str)``'s 4300-digit limit. Integer
+    tokens are then handed to this harness as plain ``int`` (``int(Decimal)``
+    has no digit limit), which is the shape its integer comparisons expect. A
+    float/double column's Decimal is converted to ``float`` in
+    :func:`values_equal`.
     """
-    return json.loads(text, parse_float=Decimal)
+    return _ints_from_cli_tokens(load_cli_json(text))
+
+
+def _ints_from_cli_tokens(node: Any) -> Any:
+    if isinstance(node, CliJsonInteger):
+        return int(node)
+    if isinstance(node, list):
+        return [_ints_from_cli_tokens(v) for v in node]
+    if isinstance(node, dict):
+        return {k: _ints_from_cli_tokens(v) for k, v in node.items()}
+    return node
 
 
 def run_cli_query(
