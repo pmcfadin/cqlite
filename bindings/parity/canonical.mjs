@@ -464,12 +464,23 @@ const nodeAdapter = {
     if (FLOAT_KINDS.has(kind)) {
       // `create_double` (value.rs:222-223) — always a JS number.
       requireJsType(value, 'number', kind);
+      // A declared `float` canonicalizes to its f32 value on every leg (issue
+      // #4350) — see canonical.py's `canon_float`. Exact, type-driven; a
+      // `double` is never rounded. A finite value outside the f32 range is
+      // REFUSED rather than silently becoming an infinity.
+      let v = value;
+      if (kind === 'float' && Number.isFinite(v)) {
+        v = Math.fround(v);
+        if (!Number.isFinite(v)) {
+          throw new CanonicalError(`declared float value ${value} is outside the f32 range`);
+        }
+      }
       // Negative zero canonicalizes to the STRING "-0.0" — see canonical.py's
       // `canon_float`. JSON.stringify renders -0 as `0` (measured), so the sign
       // bit cannot survive to the comparator as a JSON number; a sign-aware
       // comparator alone would have red on correct bindings.
-      if (Object.is(value, -0)) return '-0.0';
-      return value;
+      if (Object.is(v, -0)) return '-0.0';
+      return v;
     }
     if (TEXT_KINDS.has(kind)) {
       requireJsType(value, 'string', kind);
