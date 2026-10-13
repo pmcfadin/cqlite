@@ -56,7 +56,7 @@
       "each pins a defect that is silent when it is not refused, so a count alone",
       "would let one be swapped for a benign case."
     ],
-    "min_vectors": 88,
+    "min_vectors": 92,
     "min_errors": 61,
     "required_kinds": [
       "ascii",
@@ -763,6 +763,58 @@
       "_parts": "scale=0 unscaled=0"
     },
     {
+      "name": "decimal_zero_scale_8",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "0.00000000"
+      },
+      "node": "0.00000000",
+      "cli": 0.00000000,
+      "canonical": "0.00000000",
+      "_source": "synthetic (READ, not executed): cqlite-ffi-common/src/decimal.rs positive-scale branch renders (scale=8, unscaled=0) positionally as 0.00000000, while Python's str(Decimal) spells the same value 0E-8 -- the zero's scale must come from the exponent too (#4350 review blocker)",
+      "_parts": "scale=8 unscaled=0"
+    },
+    {
+      "name": "decimal_zero_exponent_form",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "0E-8"
+      },
+      "node": "0E-8",
+      "cli": 0E-8,
+      "canonical": "0.00000000",
+      "_source": "synthetic: the exponent spelling of a scale-8 zero (what str(Decimal) and BigDecimal.toString produce); pins that it canonicalizes to the SAME scale-8 zero on every leg's parser (#4350)",
+      "_parts": "scale=8 unscaled=0"
+    },
+    {
+      "name": "decimal_negative_zero_scale_7",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "-0.0000000"
+      },
+      "node": "-0.0000000",
+      "cli": -0.0000000,
+      "canonical": "0.0000000",
+      "_source": "synthetic: a signed scale-7 zero (str(Decimal) gives -0E-7). No renderer emits it -- BigDecimal has no negative zero -- so the canonical is SIGN-FREE and keeps scale 7 (#4350)",
+      "_parts": "scale=7 unscaled=0"
+    },
+    {
+      "name": "decimal_zero_scale_6_control",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "0.000000"
+      },
+      "node": "0.000000",
+      "cli": 0.000000,
+      "canonical": "0.000000",
+      "_source": "synthetic: control -- scale 6 is the last zero str(Decimal) still renders positionally (0.000000); scale 7 switches to 0E-7 (#4350)",
+      "_parts": "scale=6 unscaled=0"
+    },
+    {
       "name": "decimal_beyond_f64_precision",
       "type": "decimal",
       "python": {
@@ -1256,8 +1308,8 @@
       },
       "node": "-0",
       "cli": -0,
-      "canonical": "-0",
-      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: unscaled 0 has no sign, so no renderer emits it)"
+      "canonical": "0",
+      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: unscaled 0 has no sign, so no renderer emits it). Canonical is SIGN-FREE since #4350: a Java BigDecimal has no negative zero, so -0 and 0 are one value"
     },
     {
       "name": "decimal_negative_zero_scaled",
@@ -1268,8 +1320,8 @@
       },
       "node": "-0.00",
       "cli": -0.00,
-      "canonical": "-0.00",
-      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: no renderer emits it)"
+      "canonical": "0.00",
+      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: no renderer emits it). Canonical is SIGN-FREE since #4350: a Java BigDecimal has no negative zero, so -0 and 0 are one value"
     },
     {
       "name": "decimal_leading_zeros_stripped",
