@@ -36,6 +36,7 @@ from canonical import (  # noqa: E402
     canon_row_cli,
     canon_row_python,
     canonical_equal,
+    load_cli_json,
     parse_type,
     shape_tag,
     types_from_columns,
@@ -49,8 +50,58 @@ LEGS = ("python", "cli")
 
 
 def load_all(path: Path = VECTORS_PATH) -> dict:
-    with path.open(encoding="utf-8") as handle:
-        return json.load(handle)
+    """The vector table, with every ``cli`` leg parsed as the CLI's JSON is.
+
+    The ``cli`` leg stands for ``cqlite --out json`` output, so it is parsed
+    with :func:`canonical.load_cli_json` -- exactly like the live leg -- and a
+    ``decimal`` there is an exact ``Decimal``, never a float (issue #4350).
+    Every OTHER field keeps the plain ``json.loads`` shape the python leg and
+    the expected ``canonical`` values were written for. Both parses read the
+    SAME text, so the two trees align position for position.
+    """
+    text = path.read_text(encoding="utf-8")
+    # A cli leg may hold an integer token longer than Python's int-from-str
+    # limit (an integral decimal at a large negative scale, which the CLI
+    # expands positionally). The plain parse parks such a token as a sentinel;
+    # every cli leg is then REPLACED by the exact parse, and a sentinel that
+    # survives outside a cli leg is an error, never a silent substitute.
+    data = json.loads(text, parse_int=_plain_int)
+    exact = load_cli_json(text)
+    for section in ("vectors", "rows"):
+        for case, exact_case in zip(data[section], exact[section]):
+            if "cli" in case:
+                case["cli"] = exact_case["cli"]
+    for case, exact_case in zip(data["errors"], exact["errors"]):
+        legs = case.get("legs")
+        if isinstance(legs, dict) and "cli" in legs:
+            legs["cli"] = exact_case["legs"]["cli"]
+    _refuse_unreplaced_long_ints(data, path)
+    return data
+
+
+class _LongIntToken:
+    """Placeholder for an integer token too long for ``int(str)``."""
+
+
+def _plain_int(token: str) -> Any:
+    try:
+        return int(token)
+    except ValueError:
+        return _LongIntToken()
+
+
+def _refuse_unreplaced_long_ints(node: Any, path: Path) -> None:
+    if isinstance(node, _LongIntToken):
+        raise ValueError(
+            f"{path}: an integer token too long for int() appears outside a `cli` "
+            "leg; only the cli leg is parsed exactly (load_cli_json)"
+        )
+    if isinstance(node, dict):
+        for value in node.values():
+            _refuse_unreplaced_long_ints(value, path)
+    elif isinstance(node, list):
+        for value in node:
+            _refuse_unreplaced_long_ints(value, path)
 
 
 def load_vectors(path: Path = VECTORS_PATH) -> List[dict]:
@@ -116,6 +167,11 @@ def materialize_python(spec: Any) -> Any:
         return _dt.date.fromisoformat(spec["v"])
     if tag == "bigint":
         return int(spec["v"])
+    if tag == "float":
+        # A non-finite float, which JSON cannot spell as a number (#4350 N1).
+        if spec["v"] not in ("NaN", "Infinity", "-Infinity"):
+            raise ValueError(f"the `float` tag carries only NaN/Infinity/-Infinity, got {spec['v']!r}")
+        return float(spec["v"])
     if tag == "decimal":
         return _decimal.Decimal(spec["v"])
     if tag == "inet":

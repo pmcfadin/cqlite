@@ -302,19 +302,28 @@ def test_genuine_decimal_number_comparison_is_unchanged():
     so they are pinned per implementation rather than parametrized:
 
     - `test_parity` has an explicit `Decimal` branch and compares across types.
-    - `test_cli_parity` gates on `type(a) != type(b)` first and only admits
-      `int`/`float` pairs, so a `Decimal` against an `int` is already a
-      reported mismatch there.
+    - `test_cli_parity` (since #4350): a BINDING `Decimal` is a declared CQL
+      `decimal`, and the CLI emits it as an unquoted JSON number (#3644) that
+      `parse_cli_json` keeps exact — a `Decimal`, or an `int` for an integral
+      token such as `1`. So `Decimal(1)` vs `1` is now EQUAL (both exact),
+      while a `float` (digits already lost) and a `bool` never are. A CLI
+      `Decimal` against a non-decimal binding value is a fractional token,
+      compared as the `float` a default parse would have produced — so
+      `1` vs `Decimal(1)` behaves exactly as `1` vs `1.0` always did.
     """
     assert jsonl_values_equal(Decimal(1), 1) is True
     assert jsonl_values_equal(1, Decimal(1)) is True
     assert jsonl_values_equal(Decimal("1.5"), 1.5) is True
     assert jsonl_values_equal(Decimal(1), 2) is False
 
-    assert cli_values_equal(Decimal(1), 1) is False
-    assert cli_values_equal(1, Decimal(1)) is False
+    assert cli_values_equal(Decimal(1), 1) is True
+    assert cli_values_equal(1, Decimal(1)) is cli_values_equal(1, 1.0) is True
     assert cli_values_equal(Decimal("1.5"), 1.5) is False
     assert cli_values_equal(Decimal(1), Decimal(1)) is True
+    assert cli_values_equal(Decimal(1), 2) is False
+    # The bool sweep still holds on both sides of the Decimal branch.
+    assert cli_values_equal(Decimal(1), True) is False
+    assert cli_values_equal(True, Decimal(1)) is False
 
 
 def test_int_binding_value_vs_float_golden_stays_exact():

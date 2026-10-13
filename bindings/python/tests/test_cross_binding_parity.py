@@ -51,6 +51,7 @@ from canonical import (  # noqa: E402
     canon_python,
     canon_row_cli,
     canonical_equal,
+    load_cli_json,
     parse_type,
     shape_tag,
     subtree_has_udt,
@@ -329,7 +330,9 @@ def run_cli_leg(fixture: dict, cli_binary: Path, out_dir: Path) -> dict:
         raise RuntimeError(
             f"cqlite CLI exited {proc.returncode}\nstderr: {proc.stderr.strip()[-2000:]}"
         )
-    raw_rows = json.loads(proc.stdout)
+    # NEVER a plain json.loads: since #3644 a `decimal` is an unquoted JSON
+    # number, and a float parse would drop its digits past ~17 (#4350).
+    raw_rows = load_cli_json(proc.stdout)
     if not isinstance(raw_rows, list):
         raise RuntimeError(f"CLI --out json did not produce a top-level array: {type(raw_rows)}")
     if not raw_rows:
@@ -590,8 +593,11 @@ def test_the_fold_leaves_already_agreeing_values_alone():
     """
     from canonical import normalize_decimal_string as norm
 
-    for text in ("31595.67", "0.10", "-1.50", "1.500", "0.0015", "-0.00", "12345", "0"):
+    for text in ("31595.67", "0.10", "-1.50", "1.500", "0.0015", "0.00", "12345", "0"):
         assert norm(text) == text, text
+    # A zero is SIGN-FREE since #4350 (a Java BigDecimal has no negative zero),
+    # but still keeps its scale.
+    assert norm("-0.00") == "0.00"
 
 
 def test_the_fold_cannot_expand_a_pathological_exponent():

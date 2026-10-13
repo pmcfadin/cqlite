@@ -280,9 +280,14 @@ export function normalizeDecimalString(s) {
   }
 
   if (!digits) {
-    // Every digit was a zero. A FRACTIONAL zero keeps its scale (`-0.00`);
-    // an integral one is just `0`.
-    return fracPart ? `${sign}0.${'0'.repeat(fracPart.length)}` : `${sign}0`;
+    // Every digit was a zero. Its SCALE comes from the fractional digits AND
+    // the exponent (issue #4350) — `0E-8` and `0.00000000` are one value — see
+    // canonical.py. Integral (scale <= 0) is `0`; over the plain bound it takes
+    // the `<mantissa>e<exp>` shape. SIGN-FREE: BigDecimal has no negative zero.
+    const scale = fracPart.length - exp;
+    if (scale <= 0) return '0';
+    if (scale > DECIMAL_PLAIN_MAX_CHARS) return `0e${-scale}`;
+    return `0.${'0'.repeat(scale)}`;
   }
 
   const foldToExponent = () => {
@@ -464,10 +469,31 @@ const nodeAdapter = {
     if (FLOAT_KINDS.has(kind)) {
       // `create_double` (value.rs:222-223) — always a JS number.
       requireJsType(value, 'number', kind);
-      // Negative zero canonicalizes to the STRING "-0.0" — see canonical.py's
-      // `canon_float`. JSON.stringify renders -0 as `0` (measured), so the sign
-      // bit cannot survive to the comparator as a JSON number; a sign-aware
-      // comparator alone would have red on correct bindings.
+      // A declared `float` is a 32-bit value (issue #4350) — see canonical.py's
+      // `canon_float`. This is a BINDING leg, so it must ALREADY hold an exact
+      // f32 (never rounded here: rounding would mask a binding that returns a
+      // non-f32 value). Exact, type-driven; a `double` is never checked. A
+      // finite value beyond FLT_MAX is refused, never made infinite.
+      if (kind === 'float' && Number.isFinite(value)) {
+        const f32 = Math.fround(value);
+        if (!Number.isFinite(f32)) {
+          throw new CanonicalError(`declared float value ${value} is outside the f32 range`);
+        }
+        if (f32 !== value) {
+          throw new CanonicalError(
+            `declared float expects an exact f32 value from the binding, got ${value} `
+            + `(nearest f32 is ${f32})`,
+          );
+        }
+      }
+      // Values JSON cannot carry as a number canonicalize to STRINGS, as in
+      // canonical.py: non-finite (#4350 review N1), and negative zero —
+      // JSON.stringify renders -0 as `0` (measured), so the sign bit cannot
+      // survive to the comparator as a JSON number; a sign-aware comparator
+      // alone would have red on correct bindings.
+      if (Number.isNaN(value)) return 'NaN';
+      if (value === Infinity) return 'Infinity';
+      if (value === -Infinity) return '-Infinity';
       if (Object.is(value, -0)) return '-0.0';
       return value;
     }
