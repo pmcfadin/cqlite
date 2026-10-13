@@ -65,6 +65,7 @@ Collection Identity Asymmetries (issue #1454):
 import json
 import re
 import subprocess
+import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address
@@ -77,6 +78,14 @@ import pytest
 import cqlite
 
 from conftest import DATASETS, SCHEMAS, PROJECT_ROOT
+
+# The cross-binding harness owns the ONE canonical decimal spelling (scale kept
+# for fractional values, an integer's trailing zeros folded to an exponent).
+# Reusing it keeps the two harnesses from drifting on what "equal" means (#4350).
+_PARITY_DIR = PROJECT_ROOT / "bindings" / "parity"
+if str(_PARITY_DIR) not in sys.path:
+    sys.path.insert(0, str(_PARITY_DIR))
+from canonical import CanonicalError, normalize_decimal_string  # noqa: E402
 
 # ONE implementation of numeric equality, shared with test_parity.py (#3505).
 from numeric_compare import (
@@ -169,8 +178,10 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
         return "".join(parts) if parts else "0ns"
 
     if isinstance(value, Decimal):
-        # CLI outputs decimals as string representation
-        return str(value)
+        # Kept EXACT: the CLI emits a decimal as an unquoted JSON number
+        # (#3644) that parse_cli_json reads as a Decimal, and values_equal
+        # compares the two as canonical decimals, never through a float (#4350).
+        return value
 
     if isinstance(value, (IPv4Address, IPv6Address)):
         # CLI outputs IP addresses as strings
@@ -303,7 +314,9 @@ def _sort_key(value: Any) -> tuple:
         return (0, "")
     if isinstance(value, bool):
         return (1, str(value))
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float, Decimal)):
+        # Decimal sorts numerically with int (an integral CLI decimal parses as
+        # an int), so both sides of a set<decimal> order the same way.
         return (2, value)
     if isinstance(value, str):
         return (3, value)
@@ -405,6 +418,24 @@ def rows_equal(py_rows: list[dict], cli_rows: list[dict], strict_columns: bool =
     return True, ""
 
 
+def _decimals_equal(py_val: Decimal, cli_val: Any) -> bool:
+    """Exact decimal equality against the CLI's unquoted JSON number (#4350).
+
+    The CLI side must still carry its exact text: a ``Decimal`` from
+    :func:`parse_cli_json` or an ``int`` (an integral token). A ``float`` has
+    already lost digits past ~17 and a ``str`` is the pre-#3644 quoted egress,
+    so neither can equal a decimal. Equality is the cross-binding canonical
+    decimal string, so a fractional value's SCALE counts (``1.50`` != ``1.5``)
+    exactly as it does on the python/node legs.
+    """
+    if isinstance(cli_val, bool) or not isinstance(cli_val, (Decimal, int)):
+        return False
+    try:
+        return normalize_decimal_string(str(py_val)) == normalize_decimal_string(str(cli_val))
+    except CanonicalError:
+        return False
+
+
 def values_equal(py_val: Any, cli_val: Any) -> bool:
     """Compare two normalized values with tolerance for floating point.
 
@@ -415,6 +446,15 @@ def values_equal(py_val: Any, cli_val: Any) -> bool:
     """
     if py_val is None and cli_val is None:
         return True
+
+    if isinstance(py_val, Decimal):
+        # The binding yields a Decimal ONLY for a declared CQL `decimal`.
+        return _decimals_equal(py_val, cli_val)
+    if isinstance(cli_val, Decimal):
+        # Any OTHER declared type (float/double): parse_cli_json kept the
+        # number's text, and float() of it is correctly rounded, i.e. exactly
+        # the double a default json.loads would have produced (#4350).
+        cli_val = float(cli_val)
 
     if type(py_val) != type(cli_val):
         # Allow int/float comparison, but NEVER at the cost of hiding precision
@@ -457,6 +497,19 @@ def values_equal(py_val: Any, cli_val: Any) -> bool:
 # =============================================================================
 # CLI Execution
 # =============================================================================
+
+
+def parse_cli_json(text: str) -> Any:
+    """Parse CLI JSON so no number passes through a binary float (#4350).
+
+    Since #3644 a CQL ``decimal`` is an UNQUOTED JSON number
+    (``cassandra-5.0.8`` ``DecimalType.toJSONString:314-317``). A default
+    ``json.loads`` would round ``12345678901234567890.123456789`` to the nearest
+    double; ``parse_float=Decimal`` keeps every fractional/exponent number's
+    exact text instead. Integers stay ``int`` (already exact). A float/double
+    column's Decimal is converted back to ``float`` in :func:`values_equal`.
+    """
+    return json.loads(text, parse_float=Decimal)
 
 
 def run_cli_query(
@@ -514,7 +567,7 @@ def run_cli_query(
         if not output:
             return []
 
-        return json.loads(output)
+        return parse_cli_json(output)
 
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"CLI command timed out after {timeout}s")
