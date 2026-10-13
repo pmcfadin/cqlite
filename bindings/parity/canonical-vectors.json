@@ -56,8 +56,8 @@
       "each pins a defect that is silent when it is not refused, so a count alone",
       "would let one be swapped for a benign case."
     ],
-    "min_vectors": 84,
-    "min_errors": 60,
+    "min_vectors": 88,
+    "min_errors": 61,
     "required_kinds": [
       "ascii",
       "bigint",
@@ -97,6 +97,7 @@
     "required_error_names": [
       "cli_blob_missing_prefix",
       "cli_decimal_quoted_string",
+      "float_outside_f32_range",
       "cli_blob_not_hex",
       "cli_date_unparseable",
       "cli_duration_empty",
@@ -304,6 +305,42 @@
       "node": 1.840000033378601,
       "cli": 1.840000033378601,
       "canonical": 1.840000033378601
+    },
+    {
+      "name": "float_cli_shortest_f32_spelling",
+      "type": "float",
+      "python": 1.840000033378601,
+      "node": 1.840000033378601,
+      "cli": 1.84,
+      "canonical": 1.840000033378601,
+      "_source": "measured: test_basic.simple_table `height` row 0 -- the CLI emits the shortest f32 round-trip `1.84` (#3777; cassandra-5.0.8 FloatType.toJSONString:115-124 = Float.toString) and both bindings the exact f64 widening 1.840000033378601. A declared float canonicalizes to its f32 value on every leg (#4350)."
+    },
+    {
+      "name": "float_next_f32_up_stays_distinct",
+      "type": "float",
+      "python": 1.8400001525878906,
+      "node": 1.8400001525878906,
+      "cli": 1.8400002,
+      "canonical": 1.8400001525878906,
+      "_source": "synthetic: the f32 one ulp above 1.84f (bits+1). Its canonical must DIFFER from float_cli_shortest_f32_spelling's: f32 rounding is exact, not a tolerance (#4350; the difference is asserted by test_decimal_json_exactness / vectors.mjs)."
+    },
+    {
+      "name": "double_is_never_rounded_to_f32",
+      "type": "double",
+      "python": 1.84,
+      "node": 1.84,
+      "cli": 1.84,
+      "canonical": 1.84,
+      "_source": "synthetic: a declared double keeps its f64 value; its canonical must DIFFER from double_f32_widening_stays_f64's (#4350)."
+    },
+    {
+      "name": "double_f32_widening_stays_f64",
+      "type": "double",
+      "python": 1.840000033378601,
+      "node": 1.840000033378601,
+      "cli": 1.840000033378601,
+      "canonical": 1.840000033378601,
+      "_source": "synthetic: the f64 that 1.84f widens to, declared DOUBLE -- not equal to 1.84 (#4350)."
     },
     {
       "name": "text_ascii",
@@ -2044,6 +2081,18 @@
         "cli": "31595.67"
       },
       "expect": "expects a JSON number"
+    },
+    {
+      "name": "float_outside_f32_range",
+      "_why": "A finite value beyond FLT_MAX must be REFUSED, never silently rounded to an infinity, when a declared float is canonicalized to its f32 value (#4350).",
+      "stage": "canonicalize",
+      "type": "float",
+      "legs": {
+        "python": 1e39,
+        "node": 1e39,
+        "cli": 1e39
+      },
+      "expect": "outside the f32 range"
     },
     {
       "name": "cli_blob_missing_prefix",

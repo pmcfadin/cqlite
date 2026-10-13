@@ -30,6 +30,7 @@ import datetime as _dt
 import decimal as _decimal
 import json
 import re
+import struct as _struct
 from functools import cmp_to_key
 from typing import Any, Callable, Iterable, List, NamedTuple, Sequence, Tuple
 
@@ -456,10 +457,30 @@ def shape_tag(v: Any) -> str:
 _NEGATIVE_ZERO = "-0.0"
 
 
-def canon_float(value: float) -> Any:
-    """Canonical form of a CQL float/double: the number, or "-0.0" for -0.0."""
+def canon_float(value: float, kind: str) -> Any:
+    """Canonical form of a CQL float/double: the number, or "-0.0" for -0.0.
+
+    A declared ``float`` is a 32-bit IEEE value, so it canonicalizes to that f32
+    value (carried as the f64 it widens to) on EVERY leg (issue #4350). The legs
+    spell the same f32 differently: the bindings hand over the exact widening
+    (``1.840000033378601``), while the CLI emits the shortest f32 round-trip
+    (``1.84``, matching ``cassandra-5.0.8`` ``FloatType.toJSONString:115-124`` =
+    ``Float.toString``), which as an f64 is a DIFFERENT number. Rounding to f32
+    is exact and type-driven — two values that differ as f32 still differ, and
+    no tolerance is involved. A ``double`` is NEVER rounded.
+
+    A finite value outside the f32 range is REFUSED rather than silently turned
+    into an infinity. Non-finite input keeps its pre-existing handling.
+    """
     import math as _math
 
+    if kind == "float" and _math.isfinite(value):
+        try:
+            value = _struct.unpack("<f", _struct.pack("<f", value))[0]
+        except OverflowError:
+            raise CanonicalError(
+                f"declared float value {value!r} is outside the f32 range"
+            ) from None
     if value == 0.0 and _math.copysign(1.0, value) < 0:
         return _NEGATIVE_ZERO
     return value
@@ -610,7 +631,7 @@ class PythonAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a Python float, got {_pytype(value)}"
                 )
-            return canon_float(value)
+            return canon_float(value, kind)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(
@@ -775,7 +796,7 @@ class CliAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a JSON number, got {_pytype(value)}"
                 )
-            return canon_float(float(value))
+            return canon_float(float(value), kind)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(
