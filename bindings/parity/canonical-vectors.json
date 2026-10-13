@@ -13,6 +13,7 @@
     "vectors.py / vectors.mjs:",
     "  {\"$\":\"uuid\"|\"decimal\"|\"inet\"|\"bigint\"|\"date\", \"v\": ...}",
     "  {\"$\":\"bytes\", \"hex\": ...}   {\"$\":\"datetime\", \"ms\": ...}",
+    "  {\"$\":\"float\", \"v\": \"NaN\"|\"Infinity\"|\"-Infinity\"}  (a non-finite float, #4350)",
     "  {\"$\":\"duration\", \"months\":..., \"days\":..., \"nanos\": \"...\"}",
     "  {\"$\":\"list\"|\"set\"|\"tuple\", \"items\": [...]}",
     "  {\"$\":\"map\", \"entries\": [[k, v], ...]}",
@@ -56,8 +57,8 @@
       "each pins a defect that is silent when it is not refused, so a count alone",
       "would let one be swapped for a benign case."
     ],
-    "min_vectors": 92,
-    "min_errors": 61,
+    "min_vectors": 95,
+    "min_errors": 62,
     "required_kinds": [
       "ascii",
       "bigint",
@@ -98,6 +99,7 @@
       "cli_blob_missing_prefix",
       "cli_decimal_quoted_string",
       "float_outside_f32_range",
+      "binding_non_f32_for_float",
       "cli_blob_not_hex",
       "cli_date_unparseable",
       "cli_duration_empty",
@@ -314,6 +316,51 @@
       "cli": 1.84,
       "canonical": 1.840000033378601,
       "_source": "measured: test_basic.simple_table `height` row 0 -- the CLI emits the shortest f32 round-trip `1.84` (#3777; cassandra-5.0.8 FloatType.toJSONString:115-124 = Float.toString) and both bindings the exact f64 widening 1.840000033378601. A declared float canonicalizes to its f32 value on every leg (#4350)."
+    },
+    {
+      "name": "float_nan",
+      "type": "float",
+      "python": {
+        "$": "float",
+        "v": "NaN"
+      },
+      "node": {
+        "$": "float",
+        "v": "NaN"
+      },
+      "cli": null,
+      "canonical": "NaN",
+      "_source": "synthetic: a non-finite declared float (#4350 review N1). Both bindings yield the IEEE value; it canonicalizes to the STRING \"NaN\" (JSON has no such number) and is never rounded or refused. cli is null: the CLI renders a non-finite float as JSON null (README declared gap 4)."
+    },
+    {
+      "name": "float_positive_infinity",
+      "type": "float",
+      "python": {
+        "$": "float",
+        "v": "Infinity"
+      },
+      "node": {
+        "$": "float",
+        "v": "Infinity"
+      },
+      "cli": null,
+      "canonical": "Infinity",
+      "_source": "synthetic: a non-finite declared float (#4350 review N1). Both bindings yield the IEEE value; it canonicalizes to the STRING \"Infinity\" (JSON has no such number) and is never rounded or refused. cli is null: the CLI renders a non-finite float as JSON null (README declared gap 4)."
+    },
+    {
+      "name": "float_negative_infinity",
+      "type": "float",
+      "python": {
+        "$": "float",
+        "v": "-Infinity"
+      },
+      "node": {
+        "$": "float",
+        "v": "-Infinity"
+      },
+      "cli": null,
+      "canonical": "-Infinity",
+      "_source": "synthetic: a non-finite declared float (#4350 review N1). Both bindings yield the IEEE value; it canonicalizes to the STRING \"-Infinity\" (JSON has no such number) and is never rounded or refused. cli is null: the CLI renders a non-finite float as JSON null (README declared gap 4)."
     },
     {
       "name": "float_next_f32_up_stays_distinct",
@@ -2145,6 +2192,17 @@
         "cli": 1e39
       },
       "expect": "outside the f32 range"
+    },
+    {
+      "name": "binding_non_f32_for_float",
+      "_why": "A declared float is a 32-bit value: a binding must hand over an EXACT f32 (its f64 widening). 1.84 is not one (1.84f widens to 1.840000033378601), so a binding returning it is REFUSED rather than masked by rounding; only the CLI's text leg is rounded (#4350).",
+      "stage": "canonicalize",
+      "type": "float",
+      "legs": {
+        "python": 1.84,
+        "node": 1.84
+      },
+      "expect": "exact f32"
     },
     {
       "name": "cli_blob_missing_prefix",

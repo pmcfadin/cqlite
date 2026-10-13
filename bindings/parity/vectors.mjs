@@ -65,6 +65,13 @@ export function materializeNode(spec) {
     case 'datetime': return new Date(spec.ms);
     case 'date': return new Date(`${spec.v}T00:00:00.000Z`);
     case 'bigint': return BigInt(spec.v);
+    // A non-finite float, which JSON cannot spell as a number (#4350 N1).
+    case 'float': {
+      if (!['NaN', 'Infinity', '-Infinity'].includes(spec.v)) {
+        throw new Error(`the \`float\` tag carries only NaN/Infinity/-Infinity, got ${spec.v}`);
+      }
+      return Number(spec.v);
+    }
     case 'duration': return {
       months: spec.months, days: spec.days, nanos: BigInt(spec.nanos),
     };

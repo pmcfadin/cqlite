@@ -466,30 +466,48 @@ def shape_tag(v: Any) -> str:
 _NEGATIVE_ZERO = "-0.0"
 
 
-def canon_float(value: float, kind: str) -> Any:
-    """Canonical form of a CQL float/double: the number, or "-0.0" for -0.0.
+def canon_float(value: float, kind: str, *, round_to_f32: bool) -> Any:
+    """Canonical form of a CQL float/double.
 
-    A declared ``float`` is a 32-bit IEEE value, so it canonicalizes to that f32
-    value (carried as the f64 it widens to) on EVERY leg (issue #4350). The legs
-    spell the same f32 differently: the bindings hand over the exact widening
-    (``1.840000033378601``), while the CLI emits the shortest f32 round-trip
-    (``1.84``, matching ``cassandra-5.0.8`` ``FloatType.toJSONString:115-124`` =
-    ``Float.toString``), which as an f64 is a DIFFERENT number. Rounding to f32
-    is exact and type-driven — two values that differ as f32 still differ, and
-    no tolerance is involved. A ``double`` is NEVER rounded.
+    The number itself, except the values JSON cannot carry as a number:
+    ``-0.0`` -> ``"-0.0"`` and the non-finite values -> ``"NaN"`` /
+    ``"Infinity"`` / ``"-Infinity"`` (issue #4350, review N1 — the same string
+    convention, so a non-finite value is pinnable and NaN compares equal to NaN).
 
-    A finite value outside the f32 range is REFUSED rather than silently turned
-    into an infinity. Non-finite input keeps its pre-existing handling.
+    A declared ``float`` is a 32-bit IEEE value (issue #4350). The legs spell
+    the same f32 differently: the bindings hand over its exact f64 widening
+    (``1.840000033378601``), the CLI the shortest f32 round-trip (``1.84``,
+    ``cassandra-5.0.8`` ``FloatType.toJSONString:115-124`` = ``Float.toString``).
+    So:
+
+    * ``round_to_f32=True`` — the CLI's TEXT leg: rounded to its f32 value;
+    * ``round_to_f32=False`` — a BINDING leg: it must ALREADY hold an exact
+      f32, and anything else is REFUSED, so a binding returning a non-f32 value
+      for a float column is caught rather than masked by the rounding.
+
+    Exact and type-driven, no tolerance; a ``double`` is never rounded. A finite
+    value beyond FLT_MAX is REFUSED rather than made infinite. Non-finite input
+    is never rounded or refused.
     """
     import math as _math
 
     if kind == "float" and _math.isfinite(value):
         try:
-            value = _struct.unpack("<f", _struct.pack("<f", value))[0]
+            f32 = _struct.unpack("<f", _struct.pack("<f", value))[0]
         except OverflowError:
             raise CanonicalError(
                 f"declared float value {value!r} is outside the f32 range"
             ) from None
+        if not round_to_f32 and f32 != value:
+            raise CanonicalError(
+                f"declared float expects an exact f32 value from the binding, got "
+                f"{value!r} (nearest f32 is {f32!r})"
+            )
+        value = f32
+    if _math.isnan(value):
+        return "NaN"
+    if _math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
     if value == 0.0 and _math.copysign(1.0, value) < 0:
         return _NEGATIVE_ZERO
     return value
@@ -640,7 +658,7 @@ class PythonAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a Python float, got {_pytype(value)}"
                 )
-            return canon_float(value, kind)
+            return canon_float(value, kind, round_to_f32=False)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(
@@ -805,7 +823,7 @@ class CliAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a JSON number, got {_pytype(value)}"
                 )
-            return canon_float(float(value), kind)
+            return canon_float(float(value), kind, round_to_f32=True)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(
