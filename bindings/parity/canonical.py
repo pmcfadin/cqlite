@@ -381,11 +381,20 @@ def normalize_decimal_string(s: str) -> str:
         point -= lead
 
     if not digits:
-        # Every digit was a zero. A FRACTIONAL zero keeps its scale (`-0.00`,
-        # which both legs render identically); an integral one is just `0`.
-        if frac_part:
-            return f"{sign}0.{'0' * len(frac_part)}"
-        return f"{sign}0"
+        # Every digit was a zero. The zero's SCALE comes from the fractional
+        # digits AND the exponent (issue #4350): Python spells a scale-8 zero
+        # `0E-8` (str(Decimal)), the bindings `0.00000000`, and both must
+        # canonicalize alike. A zero with a positive scale keeps it; an
+        # integral one (scale <= 0) is just `0`. Over the plain bound it takes
+        # the same `<mantissa>e<exp>` shape as every other over-bound value, so
+        # a pathological exponent never allocates. SIGN-FREE: a Java BigDecimal
+        # has no negative zero, so no leg reading Cassandra data can carry one.
+        scale = len(frac_part) - exp
+        if scale <= 0:
+            return "0"
+        if scale > DECIMAL_PLAIN_MAX_CHARS:
+            return f"0e{-scale}"
+        return f"0.{'0' * scale}"
 
     if point >= len(digits):
         # INTEGER: no fractional digits. `point - len(digits)` zeros are

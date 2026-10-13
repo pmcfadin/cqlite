@@ -284,6 +284,12 @@ that scale and folding would discard a distinction the legs agree on. Verified
 against the pre-fix algorithm: every previously-agreeing value (`31595.67`,
 `0.10`, `-1.50`, `1.500`, `0.0015`, `-0.00`, `12345`) is **unchanged**.
 
+**Zeros (#4350).** A zero's scale is `len(frac) - exponent`, not the fractional
+digits alone: Python's `str(Decimal)` spells a scale-8 zero `0E-8` while the
+bindings render `0.00000000`, and both canonicalize to `0.00000000`. Zeros are
+**sign-free** (`-0.00` -> `0.00`): a Java `BigDecimal` has no negative zero, so no
+leg reading Cassandra data carries one.
+
 **The CLI's renderer is NOT touched.** Reconciling in the harness is what a
 test-only change may do; unifying the two renderers would change shipped CLI
 output and belongs to its own issue.

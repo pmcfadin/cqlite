@@ -280,9 +280,14 @@ export function normalizeDecimalString(s) {
   }
 
   if (!digits) {
-    // Every digit was a zero. A FRACTIONAL zero keeps its scale (`-0.00`);
-    // an integral one is just `0`.
-    return fracPart ? `${sign}0.${'0'.repeat(fracPart.length)}` : `${sign}0`;
+    // Every digit was a zero. Its SCALE comes from the fractional digits AND
+    // the exponent (issue #4350) — `0E-8` and `0.00000000` are one value — see
+    // canonical.py. Integral (scale <= 0) is `0`; over the plain bound it takes
+    // the `<mantissa>e<exp>` shape. SIGN-FREE: BigDecimal has no negative zero.
+    const scale = fracPart.length - exp;
+    if (scale <= 0) return '0';
+    if (scale > DECIMAL_PLAIN_MAX_CHARS) return `0e${-scale}`;
+    return `0.${'0'.repeat(scale)}`;
   }
 
   const foldToExponent = () => {
