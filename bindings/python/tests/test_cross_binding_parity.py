@@ -51,6 +51,7 @@ from canonical import (  # noqa: E402
     canon_python,
     canon_row_cli,
     canonical_equal,
+    load_cli_json,
     parse_type,
     shape_tag,
     subtree_has_udt,
@@ -329,7 +330,9 @@ def run_cli_leg(fixture: dict, cli_binary: Path, out_dir: Path) -> dict:
         raise RuntimeError(
             f"cqlite CLI exited {proc.returncode}\nstderr: {proc.stderr.strip()[-2000:]}"
         )
-    raw_rows = json.loads(proc.stdout)
+    # NEVER a plain json.loads: since #3644 a `decimal` is an unquoted JSON
+    # number, and a float parse would drop its digits past ~17 (#4350).
+    raw_rows = load_cli_json(proc.stdout)
     if not isinstance(raw_rows, list):
         raise RuntimeError(f"CLI --out json did not produce a top-level array: {type(raw_rows)}")
     if not raw_rows:
