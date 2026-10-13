@@ -56,7 +56,7 @@
       "each pins a defect that is silent when it is not refused, so a count alone",
       "would let one be swapped for a benign case."
     ],
-    "min_vectors": 82,
+    "min_vectors": 84,
     "min_errors": 60,
     "required_kinds": [
       "ascii",
@@ -724,6 +724,32 @@
       "canonical": "0",
       "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
       "_parts": "scale=0 unscaled=0"
+    },
+    {
+      "name": "decimal_beyond_f64_precision",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "12345678901234567890.123456789"
+      },
+      "node": "12345678901234567890.123456789",
+      "cli": 12345678901234567890.123456789,
+      "canonical": "12345678901234567890.123456789",
+      "_source": "synthetic: #4350's acceptance literal, 29 significant digits (an f64 holds 15-17). It pins that the cli leg's UNQUOTED JSON number (#3644) is parsed EXACTLY (canonical.load_cli_json); a float parse would canonicalize it to 12345678901234567000. The measured twin is decimal_beyond_f64_precision_measured.",
+      "_parts": "scale=9 unscaled=12345678901234567890123456789"
+    },
+    {
+      "name": "decimal_beyond_f64_precision_measured",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "-999999999999999999999999999999.999"
+      },
+      "node": "-999999999999999999999999999999.999",
+      "cli": -999999999999999999999999999999.999,
+      "canonical": "-999999999999999999999999999999.999",
+      "_source": "measured: the cli number was OBSERVED from `cqlite --out json` and the python/node strings from the bindings, over the committed test_signed_coll.signed_special_collections table (sstabledump path token \"-999999999999999999999999999999.999\"); 33 significant digits. The live three-way pin is fixtures.json `signed_special_decimals` (#4350).",
+      "_parts": "scale=3 unscaled=-999999999999999999999999999999999"
     },
     {
       "name": "inet_v4",

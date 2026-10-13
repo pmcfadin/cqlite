@@ -70,7 +70,7 @@ no-heuristics). `frozen<X>` is transparent.
 | `date` | `"YYYY-MM-DD"` string |
 | `time` | integer **nanoseconds since midnight** |
 | `duration` | `{"months": int, "days": int, "nanos": int}` |
-| `decimal` | plain decimal string; scale trailing zeros PRESERVED, exponent expanded |
+| `decimal` | plain decimal string; scale trailing zeros PRESERVED, exponent expanded (the CLI leg's input is an UNQUOTED JSON number since #3644, parsed EXACTLY — see "Decimals on the CLI leg") |
 | `inet` | string |
 | `list<T>` | JSON array, **order preserved** |
 | `set<T>` | JSON array, **sorted by canonical element** |
@@ -291,6 +291,32 @@ output and belongs to its own issue.
 It also **strengthens** the bound R2 exists for rather than fighting it: the
 integer path allocates at most the mantissa, so `1E+1000000000` canonicalizes to
 `1e1000000000` in 1342 bytes instead of attempting a gigabyte of zeros.
+
+### Decimals on the CLI leg: an unquoted JSON number, parsed EXACTLY (#4350)
+
+Since #3644 the CLI emits a `decimal` as an **unquoted** JSON number, per
+`cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/DecimalType.java:314-317`
+(`toJSONString` is a bare `BigDecimal.toString()`). A default `json.loads` would
+make that a binary `float` — `12345678901234567890.123456789` and
+`12345678901234567890.1` become the SAME double — and the comparison would
+silently stop being a decimal comparison.
+
+So CLI JSON is read ONLY through `canonical.load_cli_json`
+(`parse_float=Decimal`, `parse_int=CliJsonInteger`, a `Decimal` subclass that
+also survives Python's 4300-digit `int()` limit). The CLI adapter then converts
+per **declared** type: `decimal` keeps the exact text; `float`/`double` take
+`float(Decimal)` — correctly rounded, the same double a default parse gives; the
+integer kinds accept only an integer token. For a declared `decimal` it
+**refuses** a `float` (digits already lost) and a quoted string (the pre-#3644
+egress). `vectors.load_all` reads every vector's `cli` leg the same way, so a
+`cli` decimal in `canonical-vectors.json` is written as the bare number the CLI
+emits; the two leading-zero parser probes are not valid JSON numbers and are
+therefore explicit CLI-unreachable nulls.
+
+The live pin is the `signed_special_decimals` fixture: Cassandra-written
+decimals of 33 significant digits, compared exactly across all three legs.
+`bindings/python/tests/test_decimal_json_exactness.py` pins the float-rounded,
+binary-float and quoted negative controls.
 
 ### Vector provenance: `measured` vs `synthetic`
 
