@@ -469,11 +469,16 @@ def values_equal(py_val: Any, cli_val: Any) -> bool:
         # the double a default json.loads would have produced (#4350). A
         # finite token past the f64 range would become inf here; it is a
         # renderer defect (non-finite is rendered null), never an infinity.
+        original = cli_val
         try:
             cli_val = float(cli_val)
         except OverflowError:
             return False
         if cli_val in (float("inf"), float("-inf")):
+            return False
+        # ...and a nonzero token that underflows to 0.0 is the same defect at
+        # the other end of the range, never a zero (roborev job 8).
+        if cli_val == 0.0 and not original.is_zero():
             return False
 
     if type(py_val) != type(cli_val):

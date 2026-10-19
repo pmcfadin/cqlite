@@ -341,7 +341,22 @@ def _cli_number_as_float(value: Any, kind: str) -> float:
         raise CanonicalError(
             f"declared {kind} value {value!r} is a finite JSON number outside the f64 range"
         )
+    # The other end of the same defect (roborev job 8): `1e-400` is nonzero
+    # and float() makes it 0.0. A CLI never prints a nonzero value that rounds
+    # to zero (its output is the shortest round-trip of the stored value), so
+    # refuse rather than let it compare equal to a real zero.
+    if out == 0.0 and not _is_zero_number(value):
+        raise CanonicalError(
+            f"declared {kind} value {value!r} is a nonzero JSON number that underflows "
+            "to zero in f64"
+        )
     return out
+
+
+def _is_zero_number(value: Any) -> bool:
+    if isinstance(value, _decimal.Decimal):
+        return value.is_zero()
+    return value == 0
 
 
 def _refuse_json_constant(token: str) -> Any:
@@ -539,6 +554,13 @@ def canon_float(value: float, kind: str, *, round_to_f32: bool) -> Any:
             raise CanonicalError(
                 f"declared float value {value!r} is outside the f32 range"
             ) from None
+        if round_to_f32 and f32 == 0.0 and value != 0.0:
+            # The CLI's f32 text is the shortest round-trip of a stored f32,
+            # so a nonzero token that rounds to f32 zero (`1e-50`) is a
+            # renderer defect, never a zero (roborev job 8).
+            raise CanonicalError(
+                f"declared float value {value!r} is nonzero but underflows to zero in f32"
+            )
         if not round_to_f32 and f32 != value:
             raise CanonicalError(
                 f"declared float expects an exact f32 value from the binding, got "

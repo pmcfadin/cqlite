@@ -273,3 +273,39 @@ def test_cli_parity_keeps_the_sign_of_a_negative_zero_integer_token():
     (token,) = cli_parity.parse_cli_json("[-0]")
     assert isinstance(token, Decimal) and token.is_zero() and token.is_signed()
     assert type(cli_parity.parse_cli_json("[0]")[0]) is int
+
+
+# The other end of the range (roborev job 8): a finite NONZERO token that
+# float() turns into 0.0 (f64 underflow), or that a declared float's f32
+# rounding turns into 0.0. The CLI prints the shortest round-trip of a stored
+# value, so neither can be a real zero.
+@pytest.mark.parametrize("token", ["1e-400", "-1e-400", "4.9e-325"])
+@pytest.mark.parametrize("kind", ["double", "float"])
+def test_cli_leg_refuses_a_nonzero_token_that_underflows_f64(token, kind):
+    with pytest.raises(CanonicalError, match="underflows to zero in f64"):
+        canon_cli(load_cli_json(token), parse_type(kind))
+
+
+@pytest.mark.parametrize("token", ["1e-50", "-1e-50", "7e-46"])
+def test_cli_leg_refuses_a_nonzero_float_token_that_underflows_f32(token):
+    with pytest.raises(CanonicalError, match="underflows to zero in f32"):
+        canon_cli(load_cli_json(token), parse_type("float"))
+    # The same token is a legitimate (subnormal or normal) double.
+    assert canon_cli(load_cli_json(token), parse_type("double")) == float(token)
+
+
+def test_cli_leg_keeps_real_zeros_and_the_smallest_nonzero_values():
+    """Controls: a real zero is still a zero, and the smallest nonzero f64/f32
+    (as the CLI would print them) still canonicalize as themselves."""
+    assert canon_cli(load_cli_json("0.0"), parse_type("double")) == 0.0
+    assert canon_cli(load_cli_json("0"), parse_type("float")) == 0.0
+    assert canon_cli(load_cli_json("0E-8"), parse_type("double")) == 0.0
+    assert canon_cli(load_cli_json("5e-324"), parse_type("double")) == 5e-324
+    assert canon_cli(load_cli_json("1.4E-45"), parse_type("float")) == 1.401298464324817e-45
+
+
+@pytest.mark.parametrize("token", ["1e-400", "-1e-400"])
+def test_cli_parity_never_equates_an_underflowing_token_with_zero(token):
+    assert _cli_parity_equal(0.0, "0.0")  # control
+    assert not _cli_parity_equal(0.0, token)
+    assert not _cli_parity_equal(-0.0, token)
