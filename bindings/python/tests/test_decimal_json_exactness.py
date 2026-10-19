@@ -231,3 +231,45 @@ def test_cli_parity_float_columns_still_compare_as_floats():
     assert _cli_parity_equal(0.1, "0.1")
     assert _cli_parity_equal(1.6699999570846558, "1.6699999570846558")
     assert not _cli_parity_equal(0.1, "0.2")
+
+
+# A finite JSON number past the f64 range. load_cli_json keeps it as an exact
+# Decimal (or CliJsonInteger), and float() of either is +/-inf, NOT an error.
+# The CLI renders a genuinely non-finite double as `null` (README gap 4), so
+# such a token can only be a renderer defect; it must never canonicalize as
+# "Infinity" (roborev job 7, finding 1).
+F64_OVERFLOW_TOKENS = ["1e400", "-1e400", "1.5E+309", "1" + "0" * 400, "-" + "1" + "0" * 400]
+
+
+@pytest.mark.parametrize("token", F64_OVERFLOW_TOKENS)
+@pytest.mark.parametrize("kind", ["double", "float"])
+def test_cli_leg_refuses_a_finite_token_past_the_f64_range(token, kind):
+    with pytest.raises(CanonicalError, match="outside the f64 range"):
+        canon_cli(load_cli_json(token), parse_type(kind))
+    # Control: the largest finite double still canonicalizes as itself.
+    assert canon_cli(load_cli_json("1.7976931348623157e308"), parse_type("double")) == 1.7976931348623157e308
+
+
+@pytest.mark.parametrize("token", F64_OVERFLOW_TOKENS)
+def test_cli_parity_never_equates_a_finite_overflow_token_with_infinity(token):
+    infinity = float("-inf") if token.startswith("-") else float("inf")
+    assert not _cli_parity_equal(infinity, token)
+
+
+@pytest.mark.parametrize("text", ["-0", "-0.00", "-0E-8"])
+def test_cli_parity_never_equates_a_negative_zero_decimal(text):
+    """A BigDecimal has no negative zero, so a signed-zero token is a renderer
+    defect and must not compare equal to the binding's zero. `-0` used to lose
+    its sign at int() and `-0.00` at normalize_decimal_string (roborev job 7,
+    finding 2)."""
+    unsigned = text.lstrip("-")
+    assert _cli_parity_equal(Decimal(unsigned), unsigned)  # control
+    assert not _cli_parity_equal(Decimal(unsigned), text)
+    assert not _cli_parity_equal(Decimal("0"), text)
+
+
+def test_cli_parity_keeps_the_sign_of_a_negative_zero_integer_token():
+    """The integer-token conversion must not erase the sign it is asked to judge."""
+    (token,) = cli_parity.parse_cli_json("[-0]")
+    assert isinstance(token, Decimal) and token.is_zero() and token.is_signed()
+    assert type(cli_parity.parse_cli_json("[0]")[0]) is int

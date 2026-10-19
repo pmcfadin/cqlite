@@ -319,6 +319,31 @@ def load_cli_json(text: str) -> Any:
     )
 
 
+def _cli_number_as_float(value: Any, kind: str) -> float:
+    """``float()`` of a CLI number, REFUSING a finite token past the f64 range.
+
+    ``float(Decimal("1e400"))`` is ``inf``, not an error, and an over-range
+    ``int`` raises ``OverflowError``. Neither may reach :func:`canon_float`,
+    which would canonicalize the first as ``"Infinity"``: the CLI renders a
+    genuinely non-finite double as JSON ``null`` and :func:`load_cli_json`
+    refuses the non-JSON constants, so a finite token that only BECOMES
+    infinite here is a renderer defect, never an infinity (roborev job 7).
+    """
+    import math as _math
+
+    if isinstance(value, float):
+        return value
+    try:
+        out = float(value)
+    except OverflowError:
+        out = _math.inf
+    if not _math.isfinite(out):
+        raise CanonicalError(
+            f"declared {kind} value {value!r} is a finite JSON number outside the f64 range"
+        )
+    return out
+
+
 def _refuse_json_constant(token: str) -> Any:
     """``NaN`` / ``Infinity`` / ``-Infinity`` are NOT JSON (RFC 8259), and the
     CLI renders a non-finite float as ``null`` (README gap 4). Python's default
@@ -839,7 +864,7 @@ class CliAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a JSON number, got {_pytype(value)}"
                 )
-            return canon_float(float(value), kind, round_to_f32=True)
+            return canon_float(_cli_number_as_float(value, kind), kind, round_to_f32=True)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(

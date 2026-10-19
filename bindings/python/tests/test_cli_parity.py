@@ -435,6 +435,11 @@ def _decimals_equal(py_val: Decimal, cli_val: Any) -> bool:
     """
     if isinstance(cli_val, bool) or not isinstance(cli_val, (Decimal, int)):
         return False
+    # A BigDecimal has no negative zero, so a signed-zero token is a renderer
+    # defect. normalize_decimal_string folds `-0.00` to `0.00`, so refuse it
+    # here, before that fold can hide it (roborev job 7, finding 2).
+    if isinstance(cli_val, Decimal) and cli_val.is_zero() and cli_val.is_signed():
+        return False
     try:
         # Decimal(int) never goes through int->str, so an integral decimal
         # wider than 4300 digits still compares (str(int) would raise).
@@ -461,8 +466,15 @@ def values_equal(py_val: Any, cli_val: Any) -> bool:
     if isinstance(cli_val, Decimal):
         # Any OTHER declared type (float/double): parse_cli_json kept the
         # number's text, and float() of it is correctly rounded, i.e. exactly
-        # the double a default json.loads would have produced (#4350).
-        cli_val = float(cli_val)
+        # the double a default json.loads would have produced (#4350). A
+        # finite token past the f64 range would become inf here; it is a
+        # renderer defect (non-finite is rendered null), never an infinity.
+        try:
+            cli_val = float(cli_val)
+        except OverflowError:
+            return False
+        if cli_val in (float("inf"), float("-inf")):
+            return False
 
     if type(py_val) != type(cli_val):
         # Allow int/float comparison, but NEVER at the cost of hiding precision
@@ -525,6 +537,10 @@ def parse_cli_json(text: str) -> Any:
 
 def _ints_from_cli_tokens(node: Any) -> Any:
     if isinstance(node, CliJsonInteger):
+        # `-0` stays a signed Decimal: int() would erase the very sign a
+        # decimal comparison must refuse (roborev job 7, finding 2).
+        if node.is_zero() and node.is_signed():
+            return node
         return int(node)
     if isinstance(node, list):
         return [_ints_from_cli_tokens(v) for v in node]
