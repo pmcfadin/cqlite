@@ -109,6 +109,9 @@ jobs:
 
       - name: Benchmark PR (merge ref) → baseline 'pr'
         run: |
+          # DIAGNOSTIC (#4352): sample memory + disk every 15s into this step's log.
+          ( while sleep 15; do echo "[mon] $(date -u +%T) mem_used=$(free -m | awk 'NR==2{print $3"/"$2"MB"}') swap=$(free -m | awk 'NR==3{print $3"MB"}') disk_avail=$(df -h / | awk 'NR==2{print $4}') top_rss=$(ps -eo rss,comm --sort=-rss | awk 'NR==2{print $2":"int($1/1024)"MB"}')"; done ) &
+          nproc; free -m; df -h /
           BENCH_ARGV=()
           if [[ -n "${BENCH_ARGS:-}" ]]; then
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
