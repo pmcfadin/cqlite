@@ -54,6 +54,15 @@ jobs:
         
     steps:
     - uses: actions/checkout@v5
+
+    # Issue #4371: the hosted image's preinstalled toolchains (~20G) are dead
+    # weight here; reclaim them before the instrumented test build (same step
+    # as ci.yml, issue #722).
+    - name: Free disk space (issue #4371)
+      run: |
+        df -h / | tail -1
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+        df -h / | tail -1
     
     # Pin to the repo toolchain (rust-toolchain.toml = 1.97.1), issue #1990.
     # dtolnay/rust-toolchain cannot read the pin file, so pin the version ref
@@ -72,16 +81,11 @@ jobs:
           target/
         key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         
-    # Install PREBUILT pinned binaries instead of `cargo install` from source
-    # (issue #1990). Source-building cargo-tarpaulin v0.37.0 fails on newer
-    # rustc; a prebuilt pinned binary avoids toolchain/edition drift breaking
-    # the install and runs against the pinned 1.97.1 toolchain.
-    - name: Install tarpaulin (prebuilt, pinned)
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-tarpaulin@0.37.0
-
-    - name: Install llvm-cov (validation, prebuilt, pinned)
+    # Install a PREBUILT pinned binary instead of `cargo install` from source
+    # (issue #1990): a prebuilt pin avoids toolchain/edition drift breaking the
+    # install and runs against the pinned 1.97.1 toolchain. Both legs use
+    # cargo-llvm-cov; tarpaulin was dropped from this workflow in issue #4371.
+    - name: Install llvm-cov (prebuilt, pinned)
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-llvm-cov@0.8.7
@@ -257,8 +261,17 @@ jobs:
           --ignore-filename-regex="$READPATH_IGNORE" \
           --verbose
           
+    # Issue #4371: this leg used `cargo tarpaulin` over cqlite-core + cqlite-cli.
+    # Tarpaulin forces full DWARF (-Cdebuginfo=2), which overrides the
+    # [profile.test] `debug = "line-tables-only"` saving (#4278) on every one of
+    # the ~500 test binaries. That filled the runner disk: ENOSPC every night,
+    # hidden by continue-on-error, until the runner itself stalled and the job
+    # was cancelled at its timeout (2026-10-20/21). cargo-llvm-cov (the enforced
+    # leg's tool) honours the profile's debuginfo setting. The step stays
+    # informational, but it now always reports free disk space so a
+    # disk-pressure regression shows up in the log instead of hiding.
     - name: Run Comprehensive Coverage (Informational)
-      if: matrix.coverage-type == 'comprehensive' 
+      if: matrix.coverage-type == 'comprehensive'
       continue-on-error: true
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
@@ -272,15 +285,22 @@ jobs:
           exit 1
         fi
         echo "📊 Running comprehensive coverage with $DB_COUNT real Cassandra 5 SSTable files"
-        cargo tarpaulin \
-          --timeout 600 \
-          --packages cqlite-core \
-          --packages cqlite-cli \
-          --out Html \
-          --output-dir ../validation_artifacts/coverage \
-          --fail-under 80 \
-          --verbose
-          
+        trap 'echo "disk after comprehensive coverage: $(df -h / | tail -1)"' EXIT
+        echo "disk before comprehensive coverage: $(df -h / | tail -1)"
+        cargo llvm-cov clean --workspace
+        cargo llvm-cov \
+          --package cqlite-core \
+          --package cqlite-cli \
+          --no-report
+        cargo llvm-cov report \
+          --html \
+          --output-dir ../validation_artifacts/coverage/html \
+          --ignore-filename-regex='(tests/|benches/|examples/)'
+        cargo llvm-cov report \
+          --summary-only \
+          --ignore-filename-regex='(tests/|benches/|examples/)' \
+          --fail-under-lines 80
+
     - name: Parse Coverage Results and Generate Reports
       if: matrix.coverage-type == 'enforced'
       run: |
