@@ -183,11 +183,17 @@ jobs:
             --out "$CQLITE_DATASETS_ROOT/sstables" \
             2>&1 | tee "$ARTIFACT_DIR/generate-issue-3790-comparator-ordering.log"
 
-      # Runs after regenerate-datasets.sh because it also re-adds its own
-      # references.yml entry, which the matrix regeneration rewrites.
+      # This generator rewrites its own entry in the datasets-root references.yml
+      # and fails closed when that file is absent. regenerate-datasets.sh deletes
+      # the datasets dir and does not re-emit references.yml (the #2222 gotcha), so
+      # restore the committed copy first; the generator then repoints its entry at
+      # the freshly minted table UUID.
       - name: Regenerate nested-UDT hashable-key fixture (test_nested_udt_keys, #3500)
         run: |
           set -euo pipefail
+          if [ ! -f "$CQLITE_DATASETS_ROOT/references.yml" ]; then
+            git checkout HEAD -- test-data/datasets/references.yml
+          fi
           bash test-data/scripts/generate-nested-udt-keys.sh --out "$CQLITE_DATASETS_ROOT" \
             2>&1 | tee "$ARTIFACT_DIR/generate-nested-udt-keys.log"
 
