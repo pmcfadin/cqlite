@@ -124,8 +124,11 @@ jobs:
       - name: Benchmark PR (merge ref) → baseline 'pr'
         run: |
           # Issue #4352: sample memory + disk every 30s into this step's log so a
-          # future resource kill (no other diagnostic) shows its cause.
+          # future resource kill (no other diagnostic) shows its cause. The trap
+          # stops the sampler when this step ends, so it never leaks into later steps.
           ( while sleep 30; do echo "[mon] $(date -u +%T) mem_used=$(free -m | awk 'NR==2{print $3"/"$2"MB"}') swap=$(free -m | awk 'NR==3{print $3"MB"}') disk_avail=$(df -h / | awk 'NR==2{print $4}') top_rss=$(ps -eo rss,comm --sort=-rss | awk 'NR==2{print $2":"int($1/1024)"MB"}')"; done ) &
+          MON_PID=$!
+          trap 'kill "$MON_PID" 2>/dev/null || true; wait "$MON_PID" 2>/dev/null || true' EXIT
           BENCH_ARGV=()
           if [[ -n "${BENCH_ARGS:-}" ]]; then
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
@@ -151,8 +154,11 @@ jobs:
         run: |
           set -euo pipefail
           # Issue #4352: sample memory + disk every 30s into this step's log so a
-          # future resource kill (no other diagnostic) shows its cause.
+          # future resource kill (no other diagnostic) shows its cause. The trap
+          # stops the sampler when this step ends, so it never leaks into later steps.
           ( while sleep 30; do echo "[mon] $(date -u +%T) mem_used=$(free -m | awk 'NR==2{print $3"/"$2"MB"}') swap=$(free -m | awk 'NR==3{print $3"MB"}') disk_avail=$(df -h / | awk 'NR==2{print $4}') top_rss=$(ps -eo rss,comm --sort=-rss | awk 'NR==2{print $2":"int($1/1024)"MB"}')"; done ) &
+          MON_PID=$!
+          trap 'kill "$MON_PID" 2>/dev/null || true; wait "$MON_PID" 2>/dev/null || true' EXIT
           BENCH_ARGV=()
           if [[ -n "${BENCH_ARGS:-}" ]]; then
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
