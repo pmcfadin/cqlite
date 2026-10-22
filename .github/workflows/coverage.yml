@@ -288,18 +288,33 @@ jobs:
         trap 'echo "disk after comprehensive coverage: $(df -h / | tail -1)"' EXIT
         echo "disk before comprehensive coverage: $(df -h / | tail -1)"
         cargo llvm-cov clean --workspace
+        # --no-fail-fast: this leg runs EVERY test target of both packages,
+        # including targets the agent-gate quarantines (e.g. cqlite-cli
+        # integration_sstable_tests). A failing test must not stop the coverage
+        # report from being produced. The failure is still surfaced: a warning
+        # annotation, and the step exits non-zero after the report is written.
+        TEST_RC=0
         cargo llvm-cov \
           --package cqlite-core \
           --package cqlite-cli \
-          --no-report
+          --no-report \
+          --no-fail-fast || TEST_RC=$?
         cargo llvm-cov report \
           --html \
           --output-dir ../validation_artifacts/coverage/html \
           --ignore-filename-regex='(tests/|benches/|examples/)'
+        COV_RC=0
         cargo llvm-cov report \
           --summary-only \
           --ignore-filename-regex='(tests/|benches/|examples/)' \
-          --fail-under-lines 80
+          --fail-under-lines 80 || COV_RC=$?
+        if [ "$TEST_RC" -ne 0 ]; then
+          echo "::warning title=Comprehensive coverage::one or more test targets failed (cargo exit $TEST_RC); the coverage report above still reflects every target that ran"
+        fi
+        if [ "$COV_RC" -ne 0 ]; then
+          echo "::warning title=Comprehensive coverage::line coverage is below the informational 80% floor"
+        fi
+        exit $(( TEST_RC != 0 || COV_RC != 0 ))
 
     - name: Parse Coverage Results and Generate Reports
       if: matrix.coverage-type == 'enforced'
