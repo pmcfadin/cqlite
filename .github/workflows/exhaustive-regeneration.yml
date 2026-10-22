@@ -169,6 +169,53 @@ jobs:
           OUT="$CQLITE_DATASETS_ROOT" bash test-data/scripts/gen-wide-big.sh \
             2>&1 | tee "$ARTIFACT_DIR/gen-wide-big.log"
 
+      # ---- exhaustive.regenerate.issue_fixtures (issue #4351) ----
+      # Four committed fixtures under test-data/datasets/sstables/ had a generator
+      # in test-data/scripts/ but none was invoked here, so regenerate-datasets.sh's
+      # wipe of sstables/ removed their committed goldens and the corpus audit
+      # reported 6 UNEXPECTED-COMPONENT-CHANGE findings every week since 2026-08-09.
+      # Each step below re-produces one of them; the audit's component identity is
+      # UUID- and generation-independent, so a fresh table UUID still matches.
+      - name: Regenerate comparator-ordering fixture (test_comparator_order, #3790)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-issue-3790-comparator-ordering.sh \
+            --out "$CQLITE_DATASETS_ROOT/sstables" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-issue-3790-comparator-ordering.log"
+
+      # Runs after regenerate-datasets.sh because it also re-adds its own
+      # references.yml entry, which the matrix regeneration rewrites.
+      - name: Regenerate nested-UDT hashable-key fixture (test_nested_udt_keys, #3500)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-nested-udt-keys.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-nested-udt-keys.log"
+
+      - name: Regenerate compound-clustering BTI fixture (test_da.multiclustering_table, #3032)
+        run: |
+          set -euo pipefail
+          OUT="$CQLITE_DATASETS_ROOT" bash test-data/scripts/gen-multiclustering-bti.sh \
+            2>&1 | tee "$ARTIFACT_DIR/gen-multiclustering-bti.log"
+
+      # --small-golden writes $OUT/schema.cql and $OUT/manifest-bti-3234.json beside
+      # the table, so it runs in a scratch root and only the table dir is copied
+      # into the corpus (the audit walks the whole repo).
+      - name: Regenerate small wide BTI golden (test_da.wide_multiclustering_small, #3234)
+        run: |
+          set -euo pipefail
+          SMALL_OUT="$RUNNER_TEMP/bti-small-golden"
+          bash test-data/scripts/gen-perf-corpus-bti.sh --small-golden --out "$SMALL_OUT" \
+            2>&1 | tee "$ARTIFACT_DIR/gen-perf-corpus-bti-small-golden.log"
+          shopt -s nullglob
+          dirs=("$SMALL_OUT"/sstables/test_da/wide_multiclustering_small-*)
+          if [ "${#dirs[@]}" -ne 1 ]; then
+            echo "expected exactly 1 wide_multiclustering_small table dir, found ${#dirs[@]}" >&2
+            exit 1
+          fi
+          mkdir -p "$CQLITE_DATASETS_ROOT/sstables/test_da"
+          rm -rf "$CQLITE_DATASETS_ROOT"/sstables/test_da/wide_multiclustering_small-*
+          cp -R "${dirs[0]}" "$CQLITE_DATASETS_ROOT/sstables/test_da/"
+
       # Package the regenerated corpus to obtain the asset name + SHA256 for the
       # provenance record. NO publish (design D6 / non-goal).
       - name: Package dataset asset (name + SHA256 only; no publish)
@@ -250,6 +297,10 @@ jobs:
                   "bash test-data/scripts/generate-signed-collection-parity.sh",
                   "bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh",
                   "bash test-data/scripts/gen-wide-big.sh",
+                  "bash test-data/scripts/generate-issue-3790-comparator-ordering.sh",
+                  "bash test-data/scripts/generate-nested-udt-keys.sh",
+                  "bash test-data/scripts/gen-multiclustering-bti.sh",
+                  "bash test-data/scripts/gen-perf-corpus-bti.sh --small-golden",
               ],
               "dataset_asset_name": "dataset-asset.tar.gz",
               "dataset_asset_sha256": asset_sha,
@@ -386,7 +437,7 @@ jobs:
             echo "- Branch: ${{ github.ref_name }}"
             echo "- Report artifact: exhaustive-regeneration-report (retained 90 days)"
             echo "- Failure artifact: parity-failures, when emitted (retained 90 days)"
-            echo "- Main logs: regenerate-datasets.log, generate-deltas.log, generate-compression-parity.log, gen-wide-bti.log, generate-corruption-corpus.log, generate-cql-type-parity.log, generate-tombstone-parity.log, generate-compaction-parity.log, generate-compaction-parity-udt.log, generate-write-load-parity.log, generate-signed-collection-parity.log, generate-compaction-tombstone-ttl-parity.log, gen-wide-big.log, package_datasets.log, corpus-audit-report.txt"
+            echo "- Main logs: regenerate-datasets.log, generate-deltas.log, generate-compression-parity.log, gen-wide-bti.log, generate-corruption-corpus.log, generate-cql-type-parity.log, generate-tombstone-parity.log, generate-compaction-parity.log, generate-compaction-parity-udt.log, generate-write-load-parity.log, generate-signed-collection-parity.log, generate-compaction-tombstone-ttl-parity.log, gen-wide-big.log, generate-issue-3790-comparator-ordering.log, generate-nested-udt-keys.log, gen-multiclustering-bti.log, gen-perf-corpus-bti-small-golden.log, package_datasets.log, corpus-audit-report.txt"
             echo ""
             echo "If this nightly run fails, download the report artifact first and start with corpus-audit-report.txt. Do not publish regenerated dataset assets from this workflow."
             echo "Policy: docs/ci/ci-tier-policy.md"
