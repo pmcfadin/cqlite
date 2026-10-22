@@ -18,7 +18,7 @@ context: |
   1. No-heuristics mandate (issue #28): decode using AUTHORITATIVE metadata only
      — the supplied schema, else Statistics.db serialization metadata. NEVER
      infer types/formats from byte content. Legacy fallbacks live only behind
-     the `experimental` feature flag, off by default.
+     the `legacy-heuristics` feature flag, off by default.
   2. The gate is `scripts/agent-gate.sh` — the ONLY run that counts. Its
      AGENT-GATE SUMMARY block must be pasted verbatim; ad-hoc cargo runs do not
      count. The script is the authoritative component set — run
@@ -62,7 +62,7 @@ rules:
     - Record decisions that touch authoritative-metadata decoding, the gate, or
       cross-binding parity, with rationale. Cite the relevant definitive-guide
       chapter or GitHub issue.
-  spec:
+  specs:
     - Every requirement MUST have at least one verifiable scenario (Given/When/
       Then) that maps to a concrete test or sstabledump-parity check.
     - Acceptance ties to the gate passing AND, for any user-facing feature, a

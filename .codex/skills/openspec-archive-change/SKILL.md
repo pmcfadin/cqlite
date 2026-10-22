@@ -9,20 +9,39 @@ metadata:
   generatedBy: "1.4.1"
 ---
 
+## CQLite contract
+
+Read repository-root `AGENTS.md` and `.agents/skills/cqlite-development/SKILL.md`.
+Use available Codex tools or ordinary conversation; honor approval already given
+in this session. Missing owner decisions block dependent implementation, not
+independent preparation. This skill does not authorize external posting by itself.
+The OpenSpec CLI's context/rules and resolved paths remain authoritative for artifacts.
+
 Archive a completed change in the experimental workflow.
 
 **Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
+**CQLite delivery prerequisite:** Establish the linked PR and confirm its live
+state is MERGED, the delivery is complete rather than a slice, and required gate,
+intent audit, test-quality review and final review evidence apply to the merged
+revision (or its certified PR head/squash mapping). Checkboxes and artifact status
+alone are insufficient. With no merged PR or missing evidence, leave the change
+active and report what remains; do not offer an incomplete-success override.
+An explicitly requested cancellation is not successful feature completion.
+
 **Steps**
 
-1. **If no change name provided, prompt for selection**
+1. **Resolve the requested change**
 
-   Run `openspec list --json` to get available changes. Use the **AskUserQuestion tool** to let the user select.
+   Use a name explicitly supplied or unambiguously established in this conversation.
+   Only if ambiguous, perform the selection below.
+
+   Run `openspec list --json` to get available changes. Use the available user-input tool or ordinary conversation to let the user select.
 
    Show only active changes (not already archived).
    Include the schema used for each change if available.
 
-   **IMPORTANT**: Do NOT guess or auto-select a change. Always let the user choose.
+   **IMPORTANT**: Do not guess between ambiguous changes; ask only when context does not resolve the choice.
 
 2. **Check artifact completion status**
 
@@ -37,8 +56,7 @@ Archive a completed change in the experimental workflow.
 
    **If any artifacts are not `done`:**
    - Display warning listing incomplete artifacts
-   - Use **AskUserQuestion tool** to confirm user wants to proceed
-   - Proceed if user confirms
+   - Leave the change active and report the incomplete work; do not archive it as completed.
 
 3. **Check task completion status**
 
@@ -48,10 +66,9 @@ Archive a completed change in the experimental workflow.
 
    **If incomplete tasks found:**
    - Display warning showing count of incomplete tasks
-   - Use **AskUserQuestion tool** to confirm user wants to proceed
-   - Proceed if user confirms
+   - Leave the change active and report the incomplete work; do not archive it as completed.
 
-   **If no tasks file exists:** Proceed without task-related warning.
+   **If no tasks file exists:** Establish completion from the schema and independent evidence; absence of a tasks file is not proof of completion.
 
 4. **Assess delta spec sync state**
 
@@ -63,10 +80,10 @@ Archive a completed change in the experimental workflow.
    - Show a combined summary before prompting
 
    **Prompt options:**
-   - If changes needed: "Sync now (recommended)", "Archive without syncing"
-   - If already synced: "Archive now", "Sync anyway", "Cancel"
+   - If changes are needed for completed delivery: sync them before archiving.
+   - If already synced and delivery prerequisites hold: archive without repeating the sync.
 
-   If user chooses sync, use Task tool (subagent_type: "general-purpose", prompt: "Use Skill tool to invoke openspec-sync-specs for change '<name>'. Delta spec analysis: <include the analyzed delta spec summary>"). Proceed to archive regardless of choice.
+   When sync is needed for a completed CQLite delivery, read `../openspec-sync-specs/SKILL.md` and perform the sync directly with available file tools. Verify the result before archiving. Do not invent a task or skill-invocation API. If sync cannot be completed, leave the change active and report the gap.
 
 5. **Perform the archive**
 
@@ -102,15 +119,15 @@ Archive a completed change in the experimental workflow.
 **Change:** <change-name>
 **Schema:** <schema-name>
 **Archived to:** the archive path derived from `planningHome.changesDir`/YYYY-MM-DD-<name>/
-**Specs:** ✓ Synced to main specs (or "No delta specs" or "Sync skipped")
+**Specs:** ✓ Synced to main specs (or "No delta specs")
 
 All artifacts complete. All tasks complete.
 ```
 
 **Guardrails**
-- Always prompt for change selection if not provided
+- Use explicit or unambiguous conversation context; prompt only when the change is ambiguous.
 - Use artifact graph (openspec status --json) for completion checking
-- Don't block archive on warnings - just inform and confirm
+- Incomplete requirements, missing verification, or unmerged work block completed-delivery archival.
 - Preserve .openspec.yaml when moving to archive (it moves with the directory)
 - Show clear summary of what happened
 - If sync is requested, use openspec-sync-specs approach (agent-driven)

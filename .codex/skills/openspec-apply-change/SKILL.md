@@ -9,6 +9,14 @@ metadata:
   generatedBy: "1.4.1"
 ---
 
+## CQLite contract
+
+Read repository-root `AGENTS.md` and `.agents/skills/cqlite-development/SKILL.md`.
+Use available Codex tools or ordinary conversation; honor approval already given
+in this session. Missing owner decisions block dependent implementation, not
+independent preparation. This skill does not authorize external posting by itself.
+The OpenSpec CLI's context/rules and resolved paths remain authoritative for artifacts.
+
 Implement tasks from an OpenSpec change.
 
 **Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
@@ -20,9 +28,9 @@ Implement tasks from an OpenSpec change.
    If a name is provided, use it. Otherwise:
    - Infer from conversation context if the user mentioned a change
    - Auto-select if only one active change exists
-   - If ambiguous, run `openspec list --json` to get available changes and use the **AskUserQuestion tool** to let the user select
+   - If ambiguous, run `openspec list --json` to get available changes and use the available user-input tool or ordinary conversation to let the user select
 
-   Always announce: "Using change: <name>" and how to override (e.g., `/opsx:apply <other>`).
+   Always announce: "Using change: <name>" and how to override (e.g., `$openspec-apply-change <other>`).
 
 2. **Check status to understand the schema**
    ```bash
@@ -46,13 +54,18 @@ Implement tasks from an OpenSpec change.
    - Dynamic instruction based on current state
 
    **Handle states:**
-   - If `state: "blocked"` (missing artifacts): show message, suggest using openspec-continue-change
-   - If `state: "all_done"`: congratulate, suggest archive
+   - If `state: "blocked"` (missing artifacts): report missing artifacts and use `openspec-propose` to complete them before implementation
+   - If `state: "all_done"`: inspect validation and review evidence; report remaining certification or merge work instead of automatically suggesting archive
    - Otherwise: proceed to implementation
 
    **Workspace guard:** If status JSON reports `actionContext.mode: "workspace-planning"` and `allowedEditRoots` is empty, explain that full workspace apply is not supported in this slice. Treat linked repos and folders as read-only context, ask the user to select an affected area through an explicit implementation workflow, and STOP before editing files.
 
-4. **Read context files**
+4. **Read context files and establish approval**
+
+   For design-driven work confirm that the owner approved the proposed design
+   in this session or the durable change context. Do not request approval twice.
+   If not approved, present the concrete design before implementing.
+
 
    Read every file path listed under `contextFiles` from the apply instructions output.
    The files depend on the schema being used:
@@ -79,7 +92,7 @@ Implement tasks from an OpenSpec change.
    **Pause if:**
    - Task is unclear → ask for clarification
    - Implementation reveals a design issue → suggest updating artifacts
-   - Error or blocker encountered → report and wait for guidance
+   - A missing owner decision or external prerequisite blocks dependent work → report it and continue independent work
    - User interrupts
 
 7. **On completion or pause, show status**
@@ -87,7 +100,7 @@ Implement tasks from an OpenSpec change.
    Display:
    - Tasks completed this session
    - Overall progress: "N/M tasks complete"
-   - If all done: suggest archive
+   - If all tasks are done: report test/review evidence and remaining delivery work; archive only after confirmed completed merge
    - If paused: explain why and wait for guidance
 
 **Output During Implementation**
@@ -118,7 +131,8 @@ Working on task 4/7: <task description>
 - [x] Task 2
 ...
 
-All tasks complete! Ready to archive this change.
+Implementation tasks complete. Report verification evidence and merge status;
+leave the change active until the completed delivery is confirmed merged.
 ```
 
 **Output On Pause (Issue Encountered)**
@@ -145,10 +159,10 @@ What would you like to do?
 - Keep going through tasks until done or blocked
 - Always read context files before starting (from the apply instructions output)
 - If task is ambiguous, pause and ask before implementing
-- If implementation reveals issues, pause and suggest artifact updates
+- If implementation reveals a product/design decision beyond approved scope, propose artifact updates; fix routine errors autonomously.
 - Keep code changes minimal and scoped to each task
 - Update task checkbox immediately after completing each task
-- Pause on errors, blockers, or unclear requirements - don't guess
+- Diagnose and fix routine errors autonomously within scope. Pause dependent work only for missing owner decisions or external prerequisites.
 - Use contextFiles from CLI output, don't assume specific file names
 
 **Fluid Workflow Integration**
