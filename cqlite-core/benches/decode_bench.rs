@@ -100,6 +100,22 @@ mod decode_impl {
         buf
     }
 
+    /// Assemble a FROZEN `list<int>` body. A frozen collection is one opaque
+    /// `CollectionSerializer.pack()` value: an `i32-BE` element count, then each
+    /// element as `i32-BE` length + bytes (cassandra-5.0.8
+    /// `CollectionSerializer.writeCollectionSize`/`writeValue`). That is NOT the
+    /// VInt framing [`collection_of_ints`] builds for a multicell collection
+    /// (issue #2339); feeding that buffer here made the decoder correctly
+    /// refuse it and panicked the whole `decode` bench (issue #4352).
+    fn frozen_list_of_ints(vals: &[i32]) -> Vec<u8> {
+        let mut buf = (vals.len() as i32).to_be_bytes().to_vec();
+        for v in vals {
+            buf.extend_from_slice(&4i32.to_be_bytes());
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        buf
+    }
+
     /// Assemble a `map<text,text>` body: entry count then per-entry
     /// (vlen(key), key, vlen(val), val).
     fn map_text_text(entries: &[(&str, &str)]) -> Vec<u8> {
@@ -314,7 +330,7 @@ mod decode_impl {
             TypeCase {
                 name: "frozen",
                 data_type: "frozen<list<int>>".into(),
-                buf: collection_of_ints(&[1, 2, 3]),
+                buf: frozen_list_of_ints(&[1, 2, 3]),
                 matches: |v| matches!(v, Value::Frozen(_)),
             },
         ]

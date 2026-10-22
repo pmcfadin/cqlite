@@ -50,13 +50,27 @@ env:
   # Criterion run config — kept small for CI. Tune here if the gate is too noisy
   # (more samples → stabler medians, slower job).
   BENCH_ARGS: "--sample-size 20 --warm-up-time 1 --measurement-time 3"
+  # Issue #4352: the bench build was OOM-killed on the 16 GB / 4 vCPU runner
+  # every night (runner "shutdown signal", exit 143). Measured in run
+  # 39720319790: used RAM reached 15.8/16 GB plus 2.7/3 GB swap, with single
+  # rustc processes at ~5 GB. [profile.bench] inherits release (fat LTO,
+  # codegen-units = 1) and adds full DWARF (`debug = true`), and cargo ran 4 of
+  # those rustc jobs at once. Disk was never the limit (83G free). Fix, CI only:
+  # cap concurrent rustc jobs, and drop bench debuginfo to line tables (it is
+  # for local profilers, not for the median timings this gate compares).
+  # Optimisation settings (LTO, codegen-units, opt-level) are unchanged, and
+  # both the PR arm and the main arm get the same env, so pr vs base still
+  # compares like with like.
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_BENCH_DEBUG: "line-tables-only"
 
 jobs:
   perf-gate:
     name: Bench regression vs main
     if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:perf') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Issue #4352: two fat-LTO bench builds (PR + main) at 2 jobs plus the runs.
+    timeout-minutes: 120
     steps:
       - name: Checkout (full history so we can also build main)
         uses: actions/checkout@v5
@@ -109,6 +123,12 @@ jobs:
 
       - name: Benchmark PR (merge ref) → baseline 'pr'
         run: |
+          # Issue #4352: sample memory + disk every 30s into this step's log so a
+          # future resource kill (no other diagnostic) shows its cause. The trap
+          # stops the sampler when this step ends, so it never leaks into later steps.
+          ( while sleep 30; do echo "[mon] $(date -u +%T) mem_used=$(free -m | awk 'NR==2{print $3"/"$2"MB"}') swap=$(free -m | awk 'NR==3{print $3"MB"}') disk_avail=$(df -h / | awk 'NR==2{print $4}') top_rss=$(ps -eo rss,comm --sort=-rss | awk 'NR==2{print $2":"int($1/1024)"MB"}')"; done ) &
+          MON_PID=$!
+          trap 'kill "$MON_PID" 2>/dev/null || true; wait "$MON_PID" 2>/dev/null || true' EXIT
           BENCH_ARGV=()
           if [[ -n "${BENCH_ARGS:-}" ]]; then
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
@@ -133,6 +153,12 @@ jobs:
       - name: Benchmark main → baseline 'base'
         run: |
           set -euo pipefail
+          # Issue #4352: sample memory + disk every 30s into this step's log so a
+          # future resource kill (no other diagnostic) shows its cause. The trap
+          # stops the sampler when this step ends, so it never leaks into later steps.
+          ( while sleep 30; do echo "[mon] $(date -u +%T) mem_used=$(free -m | awk 'NR==2{print $3"/"$2"MB"}') swap=$(free -m | awk 'NR==3{print $3"MB"}') disk_avail=$(df -h / | awk 'NR==2{print $4}') top_rss=$(ps -eo rss,comm --sort=-rss | awk 'NR==2{print $2":"int($1/1024)"MB"}')"; done ) &
+          MON_PID=$!
+          trap 'kill "$MON_PID" 2>/dev/null || true; wait "$MON_PID" 2>/dev/null || true' EXIT
           BENCH_ARGV=()
           if [[ -n "${BENCH_ARGS:-}" ]]; then
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
