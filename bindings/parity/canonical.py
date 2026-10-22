@@ -12,8 +12,9 @@ arrives in three shapes:
 
   * ``PythonAdapter`` -- native values from the PyO3 binding
     (``uuid.UUID``, ``datetime``, ``bytes``, ``decimal.Decimal``, ...)
-  * ``CliAdapter``    -- ``json.loads`` of ``cqlite --out json``
-    (strings for temporal/blob/decimal/duration, numbers for ints)
+  * ``CliAdapter``    -- :func:`load_cli_json` of ``cqlite --out json``
+    (strings for temporal/blob/duration, numbers for ints/floats/decimals;
+    a ``decimal`` is an UNQUOTED number since #3644, parsed EXACTLY, #4350)
   * (in ``canonical.mjs``) ``nodeAdapter`` -- native values from the napi
     binding (``Date``, ``BigInt``, ``Buffer``, ``Map``, ``Set``)
 
@@ -26,7 +27,10 @@ mandate (issue #28) applied to the harness itself -- a text column holding
 from __future__ import annotations
 
 import datetime as _dt
+import decimal as _decimal
+import json
 import re
+import struct as _struct
 from functools import cmp_to_key
 from typing import Any, Callable, Iterable, List, NamedTuple, Sequence, Tuple
 
@@ -42,6 +46,8 @@ __all__ = [
     "canon_cli",
     "canon_row_python",
     "canon_row_cli",
+    "load_cli_json",
+    "CliJsonInteger",
     "normalize_decimal_string",
     "shape_tag",
     "canonical_equal",
@@ -273,6 +279,97 @@ canonical_sort_key = cmp_to_key(canonical_compare)
 # ---------------------------------------------------------------------------
 
 
+class CliJsonInteger(_decimal.Decimal):
+    """A JSON INTEGER lexeme from the CLI, held exactly (issue #4350).
+
+    :func:`load_cli_json` builds one per integer token instead of an ``int``:
+    Python refuses ``int(str)`` above 4300 digits, and the CLI legitimately
+    emits integral ``decimal`` values that long (a negative scale is expanded
+    positionally — see :func:`normalize_decimal_string`). A ``Decimal`` holds
+    any length exactly. It is a DISTINCT subclass so an integer-declared column
+    can still tell an integer token (``42``) from a fractional one (``42.0``,
+    a plain ``Decimal``), which is the check a default ``json.loads`` gave it.
+    """
+
+    __slots__ = ()
+
+
+def load_cli_json(text: str) -> Any:
+    """Parse ``cqlite --out json`` WITHOUT letting any number become a float.
+
+    The ONE sanctioned way to read CLI JSON into :class:`CliAdapter` (issue
+    #4350). Since #3644 the CLI renders a ``decimal`` as an UNQUOTED JSON
+    number, per ``cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/
+    DecimalType.java:314-317`` (``toJSONString`` is a bare
+    ``BigDecimal.toString()``). A default ``json.loads`` would turn
+    ``12345678901234567890.123456789`` into the nearest binary double and drop
+    its tail, so the comparison would silently stop being exact.
+
+    Here every fractional/exponent number becomes a ``decimal.Decimal`` built
+    from its exact lexeme, and every integer a :class:`CliJsonInteger`. The
+    adapter then converts per DECLARED type: ``decimal`` keeps the exact text,
+    ``float``/``double`` take ``float(value)`` (correctly rounded — the same
+    double a default parse yields), integer kinds take ``int(value)``.
+    """
+    return json.loads(
+        text,
+        parse_float=_decimal.Decimal,
+        parse_int=CliJsonInteger,
+        parse_constant=_refuse_json_constant,
+    )
+
+
+def _cli_number_as_float(value: Any, kind: str) -> float:
+    """``float()`` of a CLI number, REFUSING a finite token past the f64 range.
+
+    ``float(Decimal("1e400"))`` is ``inf``, not an error, and an over-range
+    ``int`` raises ``OverflowError``. Neither may reach :func:`canon_float`,
+    which would canonicalize the first as ``"Infinity"``: the CLI renders a
+    genuinely non-finite double as JSON ``null`` and :func:`load_cli_json`
+    refuses the non-JSON constants, so a finite token that only BECOMES
+    infinite here is a renderer defect, never an infinity (roborev job 7).
+    """
+    import math as _math
+
+    if isinstance(value, float):
+        return value
+    try:
+        out = float(value)
+    except OverflowError:
+        out = _math.inf
+    if not _math.isfinite(out):
+        raise CanonicalError(
+            f"declared {kind} value {value!r} is a finite JSON number outside the f64 range"
+        )
+    # The other end of the same defect (roborev job 8): `1e-400` is nonzero
+    # and float() makes it 0.0. A CLI never prints a nonzero value that rounds
+    # to zero (its output is the shortest round-trip of the stored value), so
+    # refuse rather than let it compare equal to a real zero.
+    if out == 0.0 and not _is_zero_number(value):
+        raise CanonicalError(
+            f"declared {kind} value {value!r} is a nonzero JSON number that underflows "
+            "to zero in f64"
+        )
+    return out
+
+
+def _is_zero_number(value: Any) -> bool:
+    if isinstance(value, _decimal.Decimal):
+        return value.is_zero()
+    return value == 0
+
+
+def _refuse_json_constant(token: str) -> Any:
+    """``NaN`` / ``Infinity`` / ``-Infinity`` are NOT JSON (RFC 8259), and the
+    CLI renders a non-finite float as ``null`` (README gap 4). Python's default
+    ``json.loads`` would quietly accept them, so a CLI that regressed to emitting
+    one would pass the harness; refuse instead (issue #4350)."""
+    raise CanonicalError(
+        f"CLI emitted a non-JSON constant {token!r}; a non-finite value must be "
+        "rendered as JSON null"
+    )
+
+
 def canon_int(n: int) -> Any:
     if not isinstance(n, int) or isinstance(n, bool):
         raise CanonicalError(f"expected an integer, got {type(n).__name__}")
@@ -340,11 +437,20 @@ def normalize_decimal_string(s: str) -> str:
         point -= lead
 
     if not digits:
-        # Every digit was a zero. A FRACTIONAL zero keeps its scale (`-0.00`,
-        # which both legs render identically); an integral one is just `0`.
-        if frac_part:
-            return f"{sign}0.{'0' * len(frac_part)}"
-        return f"{sign}0"
+        # Every digit was a zero. The zero's SCALE comes from the fractional
+        # digits AND the exponent (issue #4350): Python spells a scale-8 zero
+        # `0E-8` (str(Decimal)), the bindings `0.00000000`, and both must
+        # canonicalize alike. A zero with a positive scale keeps it; an
+        # integral one (scale <= 0) is just `0`. Over the plain bound it takes
+        # the same `<mantissa>e<exp>` shape as every other over-bound value, so
+        # a pathological exponent never allocates. SIGN-FREE: a Java BigDecimal
+        # has no negative zero, so no leg reading Cassandra data can carry one.
+        scale = len(frac_part) - exp
+        if scale <= 0:
+            return "0"
+        if scale > DECIMAL_PLAIN_MAX_CHARS:
+            return f"0e{-scale}"
+        return f"0.{'0' * scale}"
 
     if point >= len(digits):
         # INTEGER: no fractional digits. `point - len(digits)` zeros are
@@ -416,10 +522,55 @@ def shape_tag(v: Any) -> str:
 _NEGATIVE_ZERO = "-0.0"
 
 
-def canon_float(value: float) -> Any:
-    """Canonical form of a CQL float/double: the number, or "-0.0" for -0.0."""
+def canon_float(value: float, kind: str, *, round_to_f32: bool) -> Any:
+    """Canonical form of a CQL float/double.
+
+    The number itself, except the values JSON cannot carry as a number:
+    ``-0.0`` -> ``"-0.0"`` and the non-finite values -> ``"NaN"`` /
+    ``"Infinity"`` / ``"-Infinity"`` (issue #4350, review N1 — the same string
+    convention, so a non-finite value is pinnable and NaN compares equal to NaN).
+
+    A declared ``float`` is a 32-bit IEEE value (issue #4350). The legs spell
+    the same f32 differently: the bindings hand over its exact f64 widening
+    (``1.840000033378601``), the CLI the shortest f32 round-trip (``1.84``,
+    ``cassandra-5.0.8`` ``FloatType.toJSONString:115-124`` = ``Float.toString``).
+    So:
+
+    * ``round_to_f32=True`` — the CLI's TEXT leg: rounded to its f32 value;
+    * ``round_to_f32=False`` — a BINDING leg: it must ALREADY hold an exact
+      f32, and anything else is REFUSED, so a binding returning a non-f32 value
+      for a float column is caught rather than masked by the rounding.
+
+    Exact and type-driven, no tolerance; a ``double`` is never rounded. A finite
+    value beyond FLT_MAX is REFUSED rather than made infinite. Non-finite input
+    is never rounded or refused.
+    """
     import math as _math
 
+    if kind == "float" and _math.isfinite(value):
+        try:
+            f32 = _struct.unpack("<f", _struct.pack("<f", value))[0]
+        except OverflowError:
+            raise CanonicalError(
+                f"declared float value {value!r} is outside the f32 range"
+            ) from None
+        if round_to_f32 and f32 == 0.0 and value != 0.0:
+            # The CLI's f32 text is the shortest round-trip of a stored f32,
+            # so a nonzero token that rounds to f32 zero (`1e-50`) is a
+            # renderer defect, never a zero (roborev job 8).
+            raise CanonicalError(
+                f"declared float value {value!r} is nonzero but underflows to zero in f32"
+            )
+        if not round_to_f32 and f32 != value:
+            raise CanonicalError(
+                f"declared float expects an exact f32 value from the binding, got "
+                f"{value!r} (nearest f32 is {f32!r})"
+            )
+        value = f32
+    if _math.isnan(value):
+        return "NaN"
+    if _math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
     if value == 0.0 and _math.copysign(1.0, value) < 0:
         return _NEGATIVE_ZERO
     return value
@@ -570,7 +721,7 @@ class PythonAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a Python float, got {_pytype(value)}"
                 )
-            return canon_float(value)
+            return canon_float(value, kind, round_to_f32=False)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(
@@ -672,7 +823,8 @@ class PythonAdapter(_Adapter):
 
 
 class CliAdapter(_Adapter):
-    """``json.loads`` of ``cqlite --out json`` output."""
+    """:func:`load_cli_json` of ``cqlite --out json`` output (never a plain
+    ``json.loads``, which would make a ``decimal`` a lossy float — #4350)."""
 
     name = "cli"
 
@@ -717,18 +869,24 @@ class CliAdapter(_Adapter):
                 )
             return canon_int(int(value))
         if kind in _INT_KINDS:
+            # An INTEGER token from load_cli_json; a fractional token stays a
+            # plain Decimal and canon_int refuses it (#4350).
+            if isinstance(value, CliJsonInteger):
+                value = int(value)
             return canon_int(value)
         if kind in _FLOAT_KINDS:
             # R7 is DECLINED, deliberately: see the README. An int is accepted
             # here because nothing in serde_json's contract guarantees a whole
             # f64 always renders as `N.0`, and B4 is the standing evidence that
             # number-shape assumptions across a JSON boundary are where a false
-            # red comes from.
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            # red comes from. A Decimal is load_cli_json's exact lexeme (#4350);
+            # float() of it is correctly rounded, i.e. the very double a
+            # default json.loads would have produced.
+            if isinstance(value, bool) or not isinstance(value, (int, float, _decimal.Decimal)):
                 raise CanonicalError(
                     f"declared {kind} expects a JSON number, got {_pytype(value)}"
                 )
-            return canon_float(float(value))
+            return canon_float(_cli_number_as_float(value, kind), kind, round_to_f32=True)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(
@@ -779,11 +937,31 @@ class CliAdapter(_Adapter):
             months, days, nanos = (int(g) if g is not None else 0 for g in m.groups())
             return _canon_duration(months, days, nanos)
         if kind == "decimal":
-            if not isinstance(value, str):
+            # An UNQUOTED JSON number since #3644 (DecimalType.toJSONString,
+            # cassandra-5.0.8 :314-317), accepted ONLY in an exact form
+            # (#4350): a Decimal/CliJsonInteger from load_cli_json, or an int.
+            # A float has already lost digits past ~17 — refusing it is the
+            # point, not a strictness nicety. A quoted string is the pre-#3644
+            # egress and is refused too, so a regression to quoting reds here.
+            if isinstance(value, float):
                 raise CanonicalError(
-                    f"declared decimal expects a JSON string, got {_pytype(value)}"
+                    "declared decimal expects an EXACTLY parsed JSON number "
+                    "(decimal.Decimal via load_cli_json), got float — a binary "
+                    "float cannot carry a decimal's digits"
                 )
-            return normalize_decimal_string(value)
+            if isinstance(value, bool) or not isinstance(value, (int, _decimal.Decimal)):
+                raise CanonicalError(
+                    f"declared decimal expects a JSON number, got {_pytype(value)}"
+                )
+            if isinstance(value, _decimal.Decimal) and not value.is_finite():
+                raise CanonicalError(f"not a decimal string: {value!r}")
+            # A BigDecimal has no negative zero, so a `-0` token on the CLI leg
+            # is a renderer defect: refuse it rather than fold it (#4350).
+            if isinstance(value, _decimal.Decimal) and value.is_zero() and value.is_signed():
+                raise CanonicalError(f"CLI emitted a negative-zero decimal {value!r}")
+            # str() of a Decimal is lossless (coefficient AND exponent), and
+            # normalize_decimal_string accepts its `E+n` spelling.
+            return normalize_decimal_string(str(value))
         if kind == "inet":
             if not isinstance(value, str):
                 raise CanonicalError(

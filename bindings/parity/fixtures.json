@@ -32,11 +32,12 @@
     "substitute is caught too."
   ],
   "floor": {
-    "min_fixtures": 3,
+    "min_fixtures": 4,
     "required_names": [
       "basic_types",
       "collections",
-      "typed_collections"
+      "typed_collections",
+      "signed_special_decimals"
     ]
   },
   "fixtures": [
@@ -100,6 +101,19 @@
         "decimal_set": "set<decimal>",
         "blob_list": "list<blob>",
         "inet_map": "map<text, inet>"
+      },
+      "known_divergence": []
+    },
+    {
+      "name": "signed_special_decimals",
+      "_why": "Issue #4350: a decimal with MORE significant digits than an f64 holds must compare EXACTLY across all three legs. This committed table carries Cassandra-written decimals of 33 significant digits (-999999999999999999999999999999.999 and 123456789012345678901234567890.123), which the CLI emits as UNQUOTED JSON numbers (#3644). A harness that parsed the CLI JSON through a float would see both collapse to ~17 digits. `sf` (set<double>, NaN/Infinity) is deliberately NOT selected: it is outside this fixture's subject.",
+      "keyspace": "test_signed_coll",
+      "table": "signed_special_collections",
+      "schema": "test-data/schemas/signed-collection-parity.cql",
+      "query": "SELECT id, sd FROM test_signed_coll.signed_special_collections",
+      "columns": {
+        "id": "int",
+        "sd": "set<decimal>"
       },
       "known_divergence": []
     }
