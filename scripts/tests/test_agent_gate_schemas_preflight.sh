@@ -545,6 +545,7 @@ fi
 #     exports the retired name anyway — and any other plausible spelling — because the point is
 #     that the ENVIRONMENT cannot reach the mode at all, not that one variable was renamed.
 ro_ok=1
+ro_failed=()   # #4171: only the FAILED runs' blocks go to the attribution helper
 for evil in _SCHEMAS_PREFLIGHT_REPORT_ONLY SCHEMAS_PREFLIGHT_REPORT_ONLY report_only mode; do
   ro_full="$tmp/3148-report-only-$evil.txt"
   env "$evil=1" CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_corpus" \
@@ -558,6 +559,7 @@ for evil in _SCHEMAS_PREFLIGHT_REPORT_ONLY SCHEMAS_PREFLIGHT_REPORT_ONLY report_
     :
   else
     ro_ok=0
+    ro_failed+=("$ro_full")
     echo "   (exported $evil=1 weakened the guard: rc=$ro_rc)"
     cat "$ro_full" 2>/dev/null
   fi
@@ -565,7 +567,7 @@ done
 if [ "$ro_ok" -eq 1 ]; then
   ok "3148-no-env-report-only: no exported variable can turn the fail-closed guard into a soft return"
 else
-  nested_gate_bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard (requirement 8)" "$SCHEMAS_REACHED" "$tmp"/3148-report-only-*.txt
+  nested_gate_bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard (requirement 8)" "$SCHEMAS_REACHED" ${ro_failed[@]+"${ro_failed[@]}"}
 fi
 
 # 2f. A NON-UTF-8 override is REJECTED at the REAL emit (roborev job 11, BLOCKER) — the THIRD

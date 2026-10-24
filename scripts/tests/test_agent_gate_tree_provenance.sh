@@ -1254,6 +1254,14 @@ if [ "$e9" = "${tmp_phys_e9#/}/x/agent-gate-summary.txt" ]; then
 else
   bad "E9: a root-mounted checkout cannot canonicalize its artifacts (got '$e9')"
 fi
+# …including when the artifact's nearest EXISTING ancestor is `/` itself (roborev job 30): the
+# missing suffix must join as `/suffix`, never `//suffix`.
+e9m=$( TREE_REPO_ROOT_PHYS=/; eval "$canon_fns"; _tree_canon_rel "/no-such-dir-4171-$$/sub/agent-gate-summary.txt" )
+if [ "$e9m" = "no-such-dir-4171-$$/sub/agent-gate-summary.txt" ]; then
+  ok "E9: with the checkout at /, a not-yet-created artifact directly under / canonicalizes without a doubled slash"
+else
+  bad "E9: a missing directory under / canonicalized to '$e9m' (doubled root slash?)"
+fi
 e9b=$( TREE_REPO_ROOT_PHYS="$tmp_phys_e9/repo"; eval "$canon_fns"; _tree_canon_rel "$tmp/elsewhere.txt" ) && e9b_rc=0 || e9b_rc=$?
 if [ "$e9b_rc" -ne 0 ] && [ -z "$e9b" ]; then
   ok "E9 control: a path outside a non-root checkout is still refused"
@@ -1295,6 +1303,17 @@ if [ "$e6_ctl" = "FAIL - 3148-x: real guard failure" ]; then
   ok "E6 control: a nested block that did NOT stop at the boundary reports the case's own text unchanged"
 else
   bad "E6 control: the helper rewrote a genuine guard failure ('$e6_ctl')"
+fi
+# …and with SEVERAL failed runs, one boundary stop cannot relabel another that shows a genuine
+# regression (roborev job 30): the helper reports the tree only when EVERY failed run stopped first.
+{ printf 'tree-integrity: PASS\nRESULT: PASS\n'; } > "$tmp/e6-genuine.txt"
+e6_mix=$( nested_gate_bad "3148-z: guard regressed in one run" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/e6-genuine.txt" )
+e6_all=$( nested_gate_bad "3148-w: both stopped" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/e1m-nested.txt" )
+if [ "$e6_mix" = "FAIL - 3148-z: guard regressed in one run" ] \
+   && printf '%s\n' "$e6_all" | grep -q 'INCONCLUSIVE.*(all 2 failed runs stopped there)'; then
+  ok "E6 control: a mixed set keeps the guard's text; only an all-stopped set is reported as the tree"
+else
+  bad "E6 control: multi-summary attribution is wrong (mixed='$e6_mix' all='$e6_all')"
 fi
 # …and a tree failure detected AFTER the guard ran (its line is in the block) is NOT relabelled:
 # the guard's own failure stands (roborev job 24).

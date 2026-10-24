@@ -12008,7 +12008,12 @@ _tree_canon_abs() {
     case "$comp" in ..) return 1 ;; .) ;; *) rest="$comp${rest:+/$rest}" ;; esac
     d=$(dirname -- "$d") || return 1
   done
-  d="$phys${rest:+/$rest}"
+  # Join without doubling the root's slash (roborev job 30): a nearest existing ancestor of `/`
+  # plus a missing suffix must be `/suffix`, never `//suffix`.
+  case "$phys" in
+    /) d="/$rest" ;;
+    *) d="$phys${rest:+/$rest}" ;;
+  esac
   case "$d" in
     /) printf '/%s\n' "$b" ;;
     *) printf '%s/%s\n' "$d" "$b" ;;

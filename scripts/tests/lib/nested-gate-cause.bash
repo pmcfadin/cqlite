@@ -9,26 +9,33 @@
 # fail-closed guard`.
 #
 # nested_gate_stop_cause <reached-ERE> <summary-file>…
-#   rc 0 + ONE line on stdout naming the boundary stop, when a given summary carries
-#   `tree-integrity: FAIL` AND no line of it matches <reached-ERE> — the evidence that the case's
-#   guard DID run (e.g. '^(missing-schemas|schemas): ' for the #3148 schemas preflight). A tree
-#   failure detected AFTER the guard ran (a later boundary, or the terminal capture) leaves that
-#   evidence in the block, so a genuine guard regression is never relabelled INCONCLUSIVE
-#   (roborev job 24). rc 1 and no output otherwise — including an absent/unreadable file, which is
-#   the case's own failure to report, not a boundary stop.
+#   Pass ONLY the summaries whose assertion FAILED. rc 0 + ONE line on stdout naming the boundary
+#   stop iff EVERY readable one of them carries `tree-integrity: FAIL` AND no line matching
+#   <reached-ERE> — the evidence that the case's guard DID run (e.g. '^(missing-schemas|schemas): '
+#   for the #3148 schemas preflight). So:
+#     * a tree failure detected AFTER the guard ran (a later boundary, or the terminal capture)
+#       leaves that evidence in the block, and the guard's own failure stands (roborev job 24);
+#     * when several failed, ONE boundary-stopped run cannot relabel another that shows a genuine
+#       regression (roborev job 30): any failed summary that is not a pre-guard stop keeps the
+#       case's own text.
+#   rc 1 and no output otherwise — including when no given file is readable, which is the case's
+#   own failure to report, not a boundary stop.
 nested_gate_stop_cause() {
-  local reached="$1" f line
+  local reached="$1" f line first="" n=0
   shift
   [ -n "$reached" ] || return 1     # no guard evidence to test against: never claim "never ran"
   for f in "$@"; do
     [ -n "$f" ] && [ -r "$f" ] || continue
-    line=$(grep -m1 '^tree-integrity: FAIL' "$f" 2>/dev/null) || continue
-    [ -n "$line" ] || continue
-    grep -Eq -- "$reached" "$f" 2>/dev/null && continue   # the guard ran: its own failure stands
-    printf 'the nested gate STOPPED at the tree-integrity boundary before this case'"'"'s guard ran — the cause is the tree, not the guard (#4171): %s\n' "$line"
-    return 0
+    line=$(grep -m1 '^tree-integrity: FAIL' "$f" 2>/dev/null) || return 1
+    [ -n "$line" ] || return 1
+    grep -Eq -- "$reached" "$f" 2>/dev/null && return 1   # this one reached the guard
+    n=$((n + 1))
+    [ -n "$first" ] || first=$line
   done
-  return 1
+  [ "$n" -gt 0 ] || return 1
+  printf 'the nested gate STOPPED at the tree-integrity boundary before this case'"'"'s guard ran — the cause is the tree, not the guard (#4171): %s%s\n' \
+    "$first" "$([ "$n" -gt 1 ] && printf ' (all %s failed runs stopped there)' "$n")"
+  return 0
 }
 
 # nested_gate_bad <message> <reached-ERE> <summary-file>…: the attribution-safe `bad`. When a
