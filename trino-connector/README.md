@@ -64,7 +64,7 @@ The Maven route above resolves ~50 runtime artifacts. If you would rather fetch
 **GitHub Release asset**:
 
 ```bash
-V=0.17.0
+V=0.18.0
 BASE=https://github.com/pmcfadin/cqlite/releases/download/v$V
 curl -fLO "$BASE/cqlite-trino-$V-all.jar"
 curl -fLO "$BASE/cqlite-trino-$V-all.jar.sha256"
