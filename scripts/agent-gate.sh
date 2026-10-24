@@ -12222,10 +12222,17 @@ _tree_inherited_refused=""
 # run: no /proc, so no `file:` records) leaves TREE_INHERITED_FILE_RELS empty.
 _tree_inherited_n=0
 _tia_manifest=""
+# A PRESENT marker that hands nothing usable down is DISCLOSED, never silently treated as a top-level
+# run (roborev jobs 28/31): a failed parent handoff must be distinguishable from no parent at all.
 case "${INHERITED_PARENT_RUN_ID:-}" in
+  "") ;;
   /*) _tia_manifest="$INHERITED_PARENT_RUN_ID/tree-artifacts" ;;
+  *)  _tree_inherited_refused="the enclosing-gate marker is not an absolute run directory" ;;
 esac
-if [ -n "$_tia_manifest" ] && { [ -e "$_tia_manifest" ] || [ -L "$_tia_manifest" ]; }; then
+if [ -n "$_tia_manifest" ] && ! { [ -e "$_tia_manifest" ] || [ -L "$_tia_manifest" ]; }; then
+  _tree_inherited_refused="the enclosing-gate marker names no tree-artifacts manifest"
+fi
+if [ -n "$_tia_manifest" ] && [ -z "$_tree_inherited_refused" ]; then
   _tia_pid=""
   if [ -L "$_tia_manifest" ] || [ ! -f "$_tia_manifest" ]; then
     _tree_inherited_refused="the enclosing-gate manifest is not a regular file"

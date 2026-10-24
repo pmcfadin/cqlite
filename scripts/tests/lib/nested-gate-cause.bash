@@ -18,14 +18,16 @@
 #     * when several failed, ONE boundary-stopped run cannot relabel another that shows a genuine
 #       regression (roborev job 30): any failed summary that is not a pre-guard stop keeps the
 #       case's own text.
-#   rc 1 and no output otherwise — including when no given file is readable, which is the case's
-#   own failure to report, not a boundary stop.
+#   rc 1 and no output otherwise — including when ANY given file is absent, unreadable or empty
+#   (it proves nothing about where that run stopped), or when none is given.
 nested_gate_stop_cause() {
   local reached="$1" f line first="" n=0
   shift
   [ -n "$reached" ] || return 1     # no guard evidence to test against: never claim "never ran"
   for f in "$@"; do
-    [ -n "$f" ] && [ -r "$f" ] || continue
+    # An absent, unreadable or EMPTY failed-run summary proves nothing about where that run stopped,
+    # so it blocks the attribution rather than being skipped (roborev job 31).
+    [ -n "$f" ] && [ -r "$f" ] && [ -s "$f" ] || return 1
     line=$(grep -m1 '^tree-integrity: FAIL' "$f" 2>/dev/null) || return 1
     [ -n "$line" ] || return 1
     grep -Eq -- "$reached" "$f" 2>/dev/null && return 1   # this one reached the guard

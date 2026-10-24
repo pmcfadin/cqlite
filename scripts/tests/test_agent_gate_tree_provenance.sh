@@ -1175,6 +1175,18 @@ else
   grep -E '^tree-integrity:|^tree-inherited' "$tmp/e7ctl-nested.txt" 2>/dev/null
 fi
 nested_clean "$r_nest"
+# [no-manifest]/[relative]: a PRESENT marker that hands nothing usable down is DISCLOSED, never
+# silently read as a top-level run (roborev jobs 28/31) — and inherits nothing.
+mkdir -p "$tmp/fake-run-empty"
+for e7m in "no-manifest:$tmp/fake-run-empty:the enclosing-gate marker names no tree-artifacts manifest" \
+           "relative:relative/run-dir:the enclosing-gate marker is not an absolute run directory"; do
+  e7_tag=${e7m%%:*}; e7_rest=${e7m#*:}; e7_dir=${e7_rest%%:*}; e7_why=${e7_rest#*:}
+  ( cd "$r_nest" && env PATH="$NSTUB:$PATH" AGENT_GATE_PARENT_RUN_ID="$e7_dir" \
+      FAKE_CARGO_MUTATE="$r_nest/agent-gate-summary.txt.heartbeat" AGENT_GATE_SUMMARY_FILE="$tmp/e7-$e7_tag.txt" \
+      bash "$r_nest/scripts/agent-gate.sh" --only fmt >"$tmp/e7-$e7_tag.out" 2>&1 ); rc=$?
+  e7_assert "$e7_tag" "$tmp/e7-$e7_tag.txt" "$rc" "$e7_why"
+  nested_clean "$r_nest"
+done
 # THE MUTANTS: each check removed alone lets exactly its own forgery through.
 e7_mutant() { # <label> <exact-line> <replacement> <driver> <tag>
   local m="$tmp/gate-mutant-4171-$5.sh" r
@@ -1298,7 +1310,16 @@ else
   bad "E6: the attribution helper did not lead with the tree-integrity stop"
   printf '%s\n' "$e6_out"
 fi
-e6_ctl=$( nested_gate_bad "3148-x: real guard failure" "$E6_REACHED" "$tmp/e1-nested.txt" "$tmp/does-not-exist.txt" )
+e6_ctl=$( nested_gate_bad "3148-x: real guard failure" "$E6_REACHED" "$tmp/e1-nested.txt" )
+# …and a missing/empty failed-run summary BLOCKS the attribution even beside a stopped one.
+: > "$tmp/e6-empty.txt"
+e6_gap=$( nested_gate_bad "3148-v: one run left no block" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/does-not-exist.txt" )
+e6_gap2=$( nested_gate_bad "3148-u: one run left an empty block" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/e6-empty.txt" )
+if [ "$e6_gap" = "FAIL - 3148-v: one run left no block" ] && [ "$e6_gap2" = "FAIL - 3148-u: one run left an empty block" ]; then
+  ok "E6 control: an absent or empty failed-run summary keeps the case's own text (it proves no boundary stop)"
+else
+  bad "E6 control: an evidence-less summary was skipped into an INCONCLUSIVE label ('$e6_gap' / '$e6_gap2')"
+fi
 if [ "$e6_ctl" = "FAIL - 3148-x: real guard failure" ]; then
   ok "E6 control: a nested block that did NOT stop at the boundary reports the case's own text unchanged"
 else
