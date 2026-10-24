@@ -869,7 +869,7 @@
 <p>Write mode enables mutations, memtable management, and SSTable export. All write operations require both <code dir="auto">--writable</code> and <code dir="auto">--write-dir</code>.</p>
 <p><strong>Prerequisites:</strong></p>
 <ul>
-<li>Build with <code dir="auto">--features write-support</code> (or use a release binary that includes write support)</li>
+<li>Use a release binary or a default build: write support is on by default in <code dir="auto">cqlite-cli</code> as of 0.18 (#4379)</li>
 <li>Provide <code dir="auto">--write-dir</code> pointing to a writable directory</li>
 </ul>
 <p><strong>Writing a mutation:</strong></p>
