@@ -118,7 +118,7 @@
 #                      issue #865 folded it into the workspace so fmt/clippy reach it)
 #   write-tests        cargo test -p cqlite-core --features write-support (lib + roundtrip + compaction)
 #   cli-tests          ENUMERATES the cqlite-cli/tests/*.rs glob (#2039), not a
-#                      hardcoded allowlist. Pass 1 (default/read-only): the glob minus
+#                      hardcoded allowlist. Pass 1 (default = write-capable since #4379): the glob minus
 #                      required-features targets minus a documented QUARANTINE of
 #                      pre-existing-red targets. Pass 2 (--features write-support):
 #                      the write-support-gated targets derived from Cargo.toml
@@ -28194,22 +28194,22 @@ dispatch_component() {
   # NEW test file invisible to the full gate — a false-green (a red integration
   # test the gate never ran; observed on #1483 with read_sstable_stdout_tests).
   #
-  # Two feature-correct passes (a single feature set cannot be right for every
-  # target — some tests ASSERT read-only-binary behavior and legitimately behave
-  # differently once write-support is compiled in, e.g. cli_schema_validation_tests
-  # expects the read-only "Schema not found" DML rejection, not the write-capable
-  # "DML statements require --writable mode" one), driven off the tests/*.rs glob so
-  # future files are auto-covered:
+  # Two passes, driven off the tests/*.rs glob so future files are auto-covered.
+  # Since #4379 `write-support` is a DEFAULT cqlite-cli feature, so BOTH passes build
+  # a write-capable binary (the shipped one); what separates them is target
+  # selection, not the binary. A test whose expectation differs by build keys it
+  # on `cfg!(feature = "write-support")` (e.g. cli_schema_validation_tests DML
+  # rejection message), never on which pass runs it.
   #
-  #  PASS 1 — DEFAULT features (read-only binary): run the glob of tests/*.rs MINUS
+  #  PASS 1 — DEFAULT features (the packaged binary): run the glob of tests/*.rs MINUS
   #  (a) targets that DECLARE required-features (cargo would error on `--test X` when
   #  X`s features are unmet) — those are handled by Pass 2 or deliberately excluded
   #  (delta-export/duckdb-tests source-built DuckDB, #916; dhat-heap global
   #  allocator) — and MINUS (b) the QUARANTINE set below. A NEW read-only test file
   #  lands here automatically and its failure FAILs the gate (acceptance #2). Targets
   #  with no required-features but write-support-#[cfg]-gated bodies
-  #  (write_readback_content_tests, graceful_shutdown_tests) run 0 tests here and are
-  #  executed for real by Pass 2.
+  #  (write_readback_content_tests, graceful_shutdown_tests) ran 0 tests here before
+  #  #4379 and now run in both passes; the zero-tests guard still tolerates 0 for them.
   #
   #  PASS 2 — write-support: EXECUTE the write-support-gated tests as an EXPLICIT set
   #  (NOT `--tests`, which would re-run read-only-only targets under a write-capable
