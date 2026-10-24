@@ -16,7 +16,7 @@ use super::arrow_convert::ArrowConvertError;
 use super::arrow_convert_util::{
     checked_offset, checked_string_offsets, unwrap_frozen_value, Cells,
 };
-use super::arrow_schema::cql_type_to_arrow_data_type;
+use super::arrow_schema::cql_type_to_arrow_child_field;
 use super::arrow_typed_value::build_typed_value_array;
 use crate::query::ColumnInfo;
 use crate::schema::CqlType;
@@ -39,8 +39,7 @@ pub(super) fn build_typed_list_or_set_array(
     inner: &CqlType,
     values: &[Option<&Value>],
 ) -> Result<ArrayRef, ArrowConvertError> {
-    let element_type = cql_type_to_arrow_data_type(inner);
-    let item_field = Arc::new(Field::new("item", element_type, true));
+    let item_field = Arc::new(cql_type_to_arrow_child_field("item", inner, true));
 
     // Collect flat elements for all list/set values,
     // recording offsets so we can reconstruct the list structure.
@@ -104,9 +103,6 @@ pub(super) fn build_typed_map_array(
     val_type: &CqlType,
     values: &[Option<&Value>],
 ) -> Result<ArrayRef, ArrowConvertError> {
-    let key_arrow = cql_type_to_arrow_data_type(key_type);
-    let val_arrow = cql_type_to_arrow_data_type(val_type);
-
     let mut offsets: Vec<i32> = vec![0];
     let mut flat_keys: Vec<Option<&Value>> = Vec::new();
     let mut flat_vals: Vec<Option<&Value>> = Vec::new();
@@ -148,8 +144,8 @@ pub(super) fn build_typed_map_array(
 
     // Build the entries StructArray (no validity buffer: all non-null).
     let struct_fields = Fields::from(vec![
-        Field::new("key", key_arrow, false),
-        Field::new("value", val_arrow, true),
+        cql_type_to_arrow_child_field("key", key_type, false),
+        cql_type_to_arrow_child_field("value", val_type, true),
     ]);
     let entries_array = StructArray::new(struct_fields.clone(), vec![key_array, val_array], None);
 
@@ -269,7 +265,7 @@ pub(super) fn build_typed_tuple_array(
         element_types
             .iter()
             .enumerate()
-            .map(|(i, t)| Field::new(format!("field_{i}"), cql_type_to_arrow_data_type(t), true))
+            .map(|(i, t)| cql_type_to_arrow_child_field(&format!("field_{i}"), t, true))
             .collect::<Vec<_>>(),
     );
 
@@ -375,11 +371,7 @@ pub(super) fn build_typed_udt_array(
         udt_fields
             .iter()
             .map(|(field_name, field_type)| {
-                Field::new(
-                    field_name.as_str(),
-                    cql_type_to_arrow_data_type(field_type),
-                    true,
-                )
+                cql_type_to_arrow_child_field(field_name.as_str(), field_type, true)
             })
             .collect::<Vec<_>>(),
     );
