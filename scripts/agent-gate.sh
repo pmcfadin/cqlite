@@ -12212,6 +12212,10 @@ _tree_gate_ancestor() {
 }
 _tree_inherited_shown=""
 _tree_inherited_refused=""
+# A SCALAR count (roborev job 29): `${#arr[@]}` on an EMPTY array is an unbound-variable error under
+# `set -u` on bash 3.2, the floor this script declares — and a summary-only manifest (every macOS
+# run: no /proc, so no `file:` records) leaves TREE_INHERITED_FILE_RELS empty.
+_tree_inherited_n=0
 _tia_manifest=""
 case "${INHERITED_PARENT_RUN_ID:-}" in
   /*) _tia_manifest="$INHERITED_PARENT_RUN_ID/tree-artifacts" ;;
@@ -12245,6 +12249,7 @@ if [ -n "$_tia_manifest" ] && { [ -e "$_tia_manifest" ] || [ -L "$_tia_manifest"
       else
         TREE_INHERITED_FILE_RELS+=("$_tia_rel")
       fi
+      _tree_inherited_n=$((_tree_inherited_n + 1))
       _tree_inherited_shown="${_tree_inherited_shown:+$_tree_inherited_shown, }$_tia_kind:$_tia_rel"
     done < "$_tia_manifest"
   fi
@@ -12253,9 +12258,9 @@ unset _tia_rec _tia_kind _tia_path _tia_rel _tia_pid _tia_manifest
 if [ -n "$_tree_inherited_refused" ]; then
   TREE_INHERITED_LINE="tree-inherited-carveouts: REFUSED — $_tree_inherited_refused; nothing inherited, the guard is fully armed (#4171)"
 elif [ -n "$_tree_inherited_shown" ]; then
-  TREE_INHERITED_LINE="tree-inherited-carveouts: $(( ${#TREE_INHERITED_SUMMARY_RELS[@]} + ${#TREE_INHERITED_FILE_RELS[@]} )) enclosing-gate artifact record(s), UNTRACKED side only, exact names (#4171): $_tree_inherited_shown"
+  TREE_INHERITED_LINE="tree-inherited-carveouts: $_tree_inherited_n enclosing-gate artifact record(s), UNTRACKED side only, exact names (#4171): $_tree_inherited_shown"
 fi
-unset _tree_inherited_shown _tree_inherited_refused
+unset _tree_inherited_shown _tree_inherited_refused _tree_inherited_n
 # This run's OWN artifacts, wherever they live (roborev job 24: a parent summary outside the
 # parent's checkout can still be INSIDE a nested gate's different checkout).
 [ -n "$SUMMARY_FILE" ] && _tree_artifact_rec_add summary "$SUMMARY_FILE"

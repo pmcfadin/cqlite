@@ -1261,6 +1261,20 @@ else
   bad "E9 control: an out-of-checkout path canonicalized to '$e9b'"
 fi
 
+# E10 — bash 3.2 `set -u` safety (roborev job 29): the inherited-record arrays are routinely EMPTY
+# (a summary-only manifest leaves the file list empty on every /proc-less host), and on bash 3.2 a
+# `${#arr[@]}` length expansion of an empty array is an unbound-variable abort. No 3.2 shell is
+# assumed to be installed, so this pins the construct statically: the arrays are only ever expanded
+# through the `${arr[@]+…}` guard, and counted through a scalar.
+if grep -nE '\$\{#TREE_INHERITED_(SUMMARY|FILE)_RELS\[@\]\}' "$GATE" >/dev/null; then
+  bad "E10: an unguarded \${#TREE_INHERITED_*_RELS[@]} length expansion is back (aborts on bash 3.2 under set -u)"
+  grep -nE '\$\{#TREE_INHERITED_(SUMMARY|FILE)_RELS\[@\]\}' "$GATE"
+elif grep -nE '"\$\{TREE_INHERITED_(SUMMARY|FILE)_RELS\[@\]\}"' "$GATE" | grep -vqF '[@]+"${TREE_INHERITED_'; then
+  bad "E10: an inherited-record array is expanded without the \${arr[@]+…} empty-array guard"
+else
+  ok "E10: the (often empty) inherited-record arrays are never length-expanded or expanded unguarded (bash 3.2 set -u safe)"
+fi
+
 # E6 — ATTRIBUTION (#4171 fix 4): a self-test asserting on a nested block that stopped at the
 # tree-integrity boundary reports THAT boundary as the cause, never the guard it never reached.
 # shellcheck source=scripts/tests/lib/nested-gate-cause.bash
