@@ -72,9 +72,17 @@ test-data/datasets/sstables/test_comp/zstd_dictionary_table/
 
 ## Validation once committed
 
+Until this fixture is commissioned (#1413), the three fixture-gated oracle tests
+carry `#[ignore = "fixture not commissioned: #1413"]` (#4375) so the CI gate's
+`CQLITE_REQUIRE_FIXTURES=1` strict mode does not hard-FAIL on a fixture no bundle
+holds. Commissioning means adding the fixture to the dataset bundle AND removing
+those three `#[ignore]` attributes in the same change. Before removing them,
+validate with `--include-ignored`:
+
 ```bash
 env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 \
-  cargo test --package cqlite-core --test sstable_zstd_dictionary_reject_test
+  cargo test --package cqlite-core --test sstable_zstd_dictionary_reject_test \
+  -- --include-ignored
 ```
 
 The two fixture-gated oracle tests

@@ -22,7 +22,7 @@
 #                      nightly gate.yml deep-check runs that full matrix in its own
 #                      parallel `clippy-full` job (issue #2662) so the otel/duckdb-
 #                      inclusive lint still runs within 24h (coverage moved, not deleted).
-#   core-tests         cargo test -p cqlite-core --features cli-helpers (CI skip-list applied)
+#   core-tests         cargo test --no-fail-fast -p cqlite-core --features cli-helpers (CI skip-list applied)
 #   scan-offload-guard cargo test -p cqlite-core --features cli-helpers,scan-offload-probe
 #                      --test issue_1143_scan_offload_thread (windowed-scan parse
 #                      runs off the async worker pool; probe is feature-gated so
@@ -27911,6 +27911,12 @@ run_core_tests() {
     nx_filter="$nx_filter and not test(under_cassandra5_sstabledump)"
     skip_args+=(--skip under_cassandra5_sstabledump)
   fi
+  # --no-fail-fast on BOTH branches (#4375), for the reason flight-tests and
+  # legacy-heuristics carry it: by default cargo test stops after the first failing
+  # test binary, and nextest cancels the rest of the run after the first failing
+  # test, so one red target hid every later one (a zstd-dictionary strict-fixture
+  # FAIL sat masked behind an earlier corruption-verify FAIL for weeks). The run must
+  # name EVERY failing target in one pass.
   # Per-gate core budget (#2640): cap the core-tests long pole at this gate's
   # fair share of cores so N concurrent gates never oversubscribe the box.
   # nextest reads --test-threads; the cargo-test fallback takes it after `--`.
@@ -27925,12 +27931,12 @@ run_core_tests() {
     local core_pkg=cqlite-core core_feats=cli-helpers
     run_component core-tests bash -c '
       _fm_observe_child core-tests nextest run --package '"$core_pkg"' --features '"$core_feats"' &&
-      cargo nextest run --package '"$core_pkg"' --features '"$core_feats"' --test-threads "$1" -E "$2" &&
+      cargo nextest run --no-fail-fast --package '"$core_pkg"' --features '"$core_feats"' --test-threads "$1" -E "$2" &&
       _fm_observe_child core-tests test --doc --package '"$core_pkg"' --features '"$core_feats"' &&
       cargo test --doc --package '"$core_pkg"' --features '"$core_feats"' -- "${@:3}"' \
       cqlite-agent-gate "$GATE_TEST_THREADS" "$nx_filter" "${skip_args[@]}"
   else
-    run_component core-tests cargo test --package cqlite-core --features cli-helpers -- \
+    run_component core-tests cargo test --no-fail-fast --package cqlite-core --features cli-helpers -- \
       --test-threads "$GATE_TEST_THREADS" "${skip_args[@]}"
   fi
 }

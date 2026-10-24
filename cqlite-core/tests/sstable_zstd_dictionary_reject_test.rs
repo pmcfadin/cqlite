@@ -14,10 +14,18 @@
 //! train, store, or apply a Zstd dictionary. No stock Apache Cassandra release
 //! can flush a dictionary-compressed SSTable, so a real end-to-end fixture must
 //! be *commissioned* (see the fixture-commission issue referenced below and
-//! `test-data/scripts/generate-zstd-dictionary-fixture.md`). The two
+//! `test-data/scripts/generate-zstd-dictionary-fixture.md`). The three
 //! reader/verify oracle tests below are therefore fixture-gated: they SKIP in a
 //! clean checkout and hard-FAIL under `CQLITE_REQUIRE_FIXTURES=1` when the
 //! commissioned fixture is absent (repo fixture-gating doctrine, issue #1094).
+//!
+//! Until #1413 commissions that fixture (it is in no dataset bundle), the three
+//! oracle tests are `#[ignore = "fixture not commissioned: #1413"]` (#4375):
+//! strict mode (`CQLITE_REQUIRE_FIXTURES=1`, set by CI's gate) must apply only
+//! to fixtures that exist, or the nightly `core-tests` can never go green. The
+//! fixture-gating stays in place, so `cargo test -- --include-ignored` still
+//! SKIPs without the fixture and hard-FAILs under strict mode. When #1413 lands
+//! the fixture in the bundle, remove the three `#[ignore]` attributes.
 //!
 //! ## What runs unconditionally
 //!
@@ -306,6 +314,7 @@ fn zstd_dictionary_frame_rejected_fail_closed() {
 }
 
 #[test]
+#[ignore = "fixture not commissioned: #1413"]
 fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
     // AC#1/#2 oracle: a real commissioned Cassandra zstd+dictionary SSTable,
     // opened via the reader/query path, must fail closed (typed rejection, no
@@ -414,11 +423,12 @@ fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
 }
 
 #[test]
+#[ignore = "fixture not commissioned: #1413"]
 fn zstd_dictionary_reader_fails_closed_current_behavior() {
     // CHARACTERIZATION of TODAY's reader behavior (the ACTIVE reader oracle the
     // manifest points at). Distinct from the sibling
-    // `zstd_dictionary_sstable_rejected_via_reader_fixture`, which is `#[ignore]`
-    // and encodes the #1414 TARGET (a typed `InvalidFormat` rejection that names
+    // `zstd_dictionary_sstable_rejected_via_reader_fixture`, which encodes the
+    // #1414 TARGET (a typed `InvalidFormat` rejection that names
     // the zstd/dictionary path and excludes CRC/checksum). This test asserts only
     // the SAFETY PROPERTY that must hold NOW: opening the commissioned
     // dictionary-compressed SSTable and driving a full scan must FAIL CLOSED —
@@ -426,7 +436,7 @@ fn zstd_dictionary_reader_fails_closed_current_behavior() {
     // `Error::InvalidFormat`, because the current full-scan stitch path wraps a
     // zstd-dictionary decode failure as `Corruption`. It deliberately does NOT
     // require the typed variant, so it stays green until #1414 flips the class;
-    // when #1414 lands, the ignored sibling proves the upgrade and this test keeps
+    // when #1414 lands, the sibling proves the upgrade and this test keeps
     // guarding against a regression back to returning rows.
     //
     // Fixture-gated identically to the other reader oracle: SKIPs cleanly without
@@ -500,6 +510,7 @@ fn zstd_dictionary_reader_fails_closed_current_behavior() {
 }
 
 #[test]
+#[ignore = "fixture not commissioned: #1413"]
 fn zstd_dictionary_verify_reports_unsupported_not_checksum_fixture() {
     // AC#3 oracle: `cqlite verify` over the commissioned fixture must reject and
     // must NOT report the failure as a checksum/digest mismatch (the inline chunk
