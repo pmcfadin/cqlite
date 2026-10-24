@@ -1890,7 +1890,7 @@ core-tests:        PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features cli-he
 format-compat:     PASS|FAIL|VACUOUS (<Ns>)  [test format-compatibility-tests default-features]  {verified: 10 tests passed (across 1 result line(s))}
 integration-tests: PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-integration-tests default-features x2]  {verified: <n> tests passed and <k> test binaries built/verified}
 write-tests:       PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features write-support x3]  {verified: <n> tests passed (across <k> result line(s))}
-cli-tests:         PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]  {verified: <n> tests passed (across <k> result line(s))}
+cli-tests:         PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support | test cqlite-cli --no-default-features --features tui,cli-helpers]  {verified: <n> tests passed (across <k> result line(s))}
 minimal-build:     PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]  {verified: <n> test binaries built/verified}
 all-features-check: PASS|FAIL|VACUOUS (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]  {no census — cargo check/clippy passes execute no tests; the subject is a feature set, not a count}
 pub-surface:       PASS|FAIL|VACUOUS (<Ns>)  [no-cargo]  {no census — shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)}

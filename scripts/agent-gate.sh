@@ -122,7 +122,9 @@
 #                      required-features targets minus a documented QUARANTINE of
 #                      pre-existing-red targets. Pass 2 (--features write-support):
 #                      the write-support-gated targets derived from Cargo.toml
-#                      required-features + two self-gated ground-truth targets. New
+#                      required-features + two self-gated ground-truth targets. Pass 3
+#                      (read-only, --no-default-features --features tui,cli-helpers,
+#                      #4379): cli_schema_validation_tests + the #4379 pin. New
 #                      files are auto-covered; fails closed on zero targets.
 #   bti-multiclustering  the compound-clustering BTI ('da') lane (issue #3032/#3220):
 #                      issue_3032_multiclustering_rows_trie_shape +
@@ -15001,6 +15003,15 @@ run_clippy() {
 "benchmarks,cli-helpers,delta-export,experimental,integration-tests,state_machine,tui,write-support" \
     || return 1
 
+  # (3b) cqlite-cli READ-ONLY configuration (issue #4379). `write-support` became a
+  #     DEFAULT cqlite-cli feature, so no other lane compiles the
+  #     `#[cfg(not(feature = "write-support"))]` stub arms any more. This is the
+  #     documented read-only build (the pre-#4379 default set); lint it so a
+  #     regression there cannot pass unnoticed.
+  env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --all-targets \
+    --no-default-features --features "tui,cli-helpers" \
+    || return 1
+
   # (4) cqlite-flight + the Python/Node bindings at their DEFAULT features (none of
   #     which enable observability), plus cqlite-node's write-support code path. This
   #     lints their real binding/connector surface without linking the otel shim.
@@ -28356,7 +28367,22 @@ dispatch_component() {
   cargo test --package '"$ct_pkg"' --features '"$ct_ws_feats"' "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2"' ;;
+  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2" || exit 1
+
+  # PASS 3 — READ-ONLY build (issue #4379): `--no-default-features --features
+  # tui,cli-helpers`, the pre-#4379 default set. Passes 1 and 2 both build a
+  # write-capable binary now, so this is the only pass that EXECUTES the
+  # `not(feature = "write-support")` stub arms. Deliberately narrow (one extra
+  # cqlite-cli test build, two targets): cli_schema_validation_tests asserts the
+  # read-only DML rejection, and issue_4379_default_features_write_verbs runs its
+  # always-on manifest pin (its binary tests compile out here by design).
+  log3="$_cli_tmp/pass3.log"
+  _fm_observe_child cli-tests test --package '"$ct_pkg"' --no-default-features --features tui,cli-helpers
+  cargo test --package '"$ct_pkg"' --no-default-features --features tui,cli-helpers \
+    --test cli_schema_validation_tests --test issue_4379_default_features_write_verbs 2>&1 | tee "$log3"
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || exit "$rc"
+  check_no_unexpected_zero_tests "cli-tests Pass 3 (read-only)" "$log3"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     bti-multiclustering) run_bti_multiclustering ;;
     query-semantics-oracle) run_query_semantics_oracle ;;
