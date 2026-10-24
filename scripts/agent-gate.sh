@@ -9511,6 +9511,12 @@ _logdir_is_launch_artifact() {
   if [ -n "${HEARTBEAT_FILE:-}" ]; then
     [ "$e" = "$HEARTBEAT_FILE" ] && return 0
   fi
+  # #4171: the tree-artifacts manifest a run writes for its NESTED gates is launch-time
+  # bookkeeping (written at script level, before any component), never evidence. Exact path,
+  # set in the main shell, so it reaches this EXIT-trap context.
+  if [ -n "${TREE_ARTIFACTS_MANIFEST:-}" ]; then
+    [ "$e" = "$TREE_ARTIFACTS_MANIFEST" ] && return 0
+  fi
   # #3755 INTERACTION. That feature writes its ADMISSION bookkeeping into this run's own
   # $LOG_DIR before any component runs: `gate-slot.ready` (the slot holder's flag) and the
   # `disk-admission*` family (`-cargo-metadata.json` plus the `.bcap.{out,err,rc}` capture
