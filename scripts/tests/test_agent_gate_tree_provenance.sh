@@ -1191,6 +1191,42 @@ e7_mutant() { # <label> <exact-line> <replacement> <driver> <tag>
 e7_mutant "no ancestor check" 'elif ! _tree_gate_ancestor "$_tia_pid"; then' 'elif false; then' fd-forged anc
 e7_mutant "no descriptor check" 'if ! [ "$_tia_manifest" -ef "/dev/fd/$TREE_ARTIFACTS_FD" ] 2>/dev/null; then' 'if false; then' real-pid fd
 
+# E8 — the ancestor walk accepts PID 1 (roborev job 26): a gate launched as a container
+# entrypoint IS PID 1, and rejecting it would re-break every nested gate under it. The REAL function
+# body is extracted from the gate and driven against a stub `ps` that models the chain
+# <this shell> -> 1 -> 0, so no PID namespace is needed.
+anc_fn=$(fn_body "$GATE" _tree_gate_ancestor)
+PSTUB="$tmp/ps-stubbin"; mkdir -p "$PSTUB"
+cat > "$PSTUB/ps" <<'STUB'
+#!/usr/bin/env bash
+# ps -o <ppid=|command=> -p <pid>, from the modelled chain FAKE_PS_SELF -> 1 -> 0
+f=$2; p=$4
+case "$f:$p" in
+  "ppid=:$FAKE_PS_SELF") echo "    1" ;;
+  ppid=:1)               echo "    0" ;;
+  command=:1)            echo "${FAKE_PS_ROOT_CMD:-/sbin/init}" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$PSTUB/ps"
+e8_run() { # <want> <root-cmd> -> rc of the real _tree_gate_ancestor
+  ( PATH="$PSTUB:$PATH" FAKE_PS_ROOT_CMD="$2"; export FAKE_PS_ROOT_CMD
+    export FAKE_PS_SELF=$$
+    eval "$anc_fn"; _tree_gate_ancestor "$1" )
+}
+if [ -n "$anc_fn" ]; then
+  e8_run 1 "bash /work/scripts/agent-gate.sh"; e8_a=$?
+  e8_run 1 "/sbin/init"; e8_b=$?
+  e8_run 4242 "bash /work/scripts/agent-gate.sh"; e8_c=$?
+  if [ "$e8_a" -eq 0 ] && [ "$e8_b" -ne 0 ] && [ "$e8_c" -ne 0 ]; then
+    ok "E8: an agent-gate.sh at PID 1 is a valid enclosing gate; a non-gate PID 1, or a pid off the chain, is not"
+  else
+    bad "E8: PID-1 ancestry is wrong (gate@1 rc=$e8_a, init@1 rc=$e8_b, off-chain rc=$e8_c)"
+  fi
+else
+  bad "E8: could not extract _tree_gate_ancestor from the gate — the case is vacuous"
+fi
+
 # E6 — ATTRIBUTION (#4171 fix 4): a self-test asserting on a nested block that stopped at the
 # tree-integrity boundary reports THAT boundary as the cause, never the guard it never reached.
 # shellcheck source=scripts/tests/lib/nested-gate-cause.bash

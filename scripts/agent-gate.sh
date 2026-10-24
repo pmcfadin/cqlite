@@ -12186,15 +12186,18 @@ _tree_artifact_rec_add() {   # <kind> <path>: append one canonical record (no ne
 _tree_gate_ancestor() {
   local want="$1" cur="$$" n=0 cmd
   case "$want" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$want" -gt 1 ] 2>/dev/null || return 1
+  # PID 1 IS a legitimate enclosing gate (roborev job 26): a gate launched as a container
+  # entrypoint runs as PID 1, so the walk compares BEFORE it stops at the root.
+  [ "$want" -ge 1 ] 2>/dev/null || return 1
   while [ "$n" -lt 64 ]; do
     cur=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ') || return 1
     case "$cur" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$cur" -gt 1 ] || return 1
+    [ "$cur" -ge 1 ] || return 1          # 0: walked past the root without meeting <want>
     if [ "$cur" = "$want" ]; then
       cmd=$(ps -o command= -p "$cur" 2>/dev/null) || return 1
       case "$cmd" in *agent-gate.sh*) return 0 ;; *) return 1 ;; esac
     fi
+    [ "$cur" -eq 1 ] && return 1          # the root, and it was not <want>
     n=$((n + 1))
   done
   return 1
