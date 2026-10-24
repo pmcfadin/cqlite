@@ -306,7 +306,15 @@ required-features = ["cli-helpers"]
 # M2+ production defaults: Interactive REPL with query engine
 # `interactive` was deleted in #1698: it had zero cfg sites, so enabling it (even
 # from `default`) changed nothing. The REPL is unconditional in src/.
-default = ["tui", "cli-helpers"]
+#
+# Issue #4379 (owner decision, v0.18.0): `write-support` is ON by default so the
+# PACKAGED CLI (release.yml, the Homebrew tap, `cargo install cqlite-cli`, all of
+# which build default features) ships the write-backed verbs `salvage` (#4196),
+# `rebuild` (#4197) and `compact` instead of their "Write support is not enabled"
+# stubs. Pinned by tests/issue_4379_default_features_write_verbs.rs. The
+# production write surface stays UNCOMPRESSED-only (#1406). A read-only binary
+# is still buildable: `--no-default-features --features tui,cli-helpers`.
+default = ["tui", "cli-helpers", "write-support"]
 tui = ["ratatui", "crossterm"]
 benchmarks = []
 integration-tests = []

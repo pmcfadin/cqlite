@@ -10,13 +10,13 @@ sidebar:
 
 **Task**: Insert a row via the JSON mutation format and flush the in-memory write buffer to disk.
 
-**Prerequisite**: The CLI must be built with write support:
+**Prerequisite**: The CLI must be built with write support, which is on by default in `cqlite-cli` as of 0.18 (#4379):
 
 ```bash
-cargo build --package cqlite-cli --features write-support
+cargo build --package cqlite-cli
 ```
 
-The write-support flag adds `--writable`, `--write-dir`, `--mutation`, `--flush`, and write subcommands.
+The `write-support` feature (a default) adds `--writable`, `--write-dir`, `--mutation`, `--flush`, and write subcommands.
 
 ## Write a single row
 

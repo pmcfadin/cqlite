@@ -10,10 +10,10 @@ sidebar:
 
 **Task**: Export rows written through CQLite's write engine as Cassandra-compatible SSTable files for use with `sstableloader` or direct Cassandra data directory placement.
 
-**Prerequisite**: The CLI must be built with write support:
+**Prerequisite**: The CLI must be built with write support, which is on by default in `cqlite-cli` as of 0.18 (#4379):
 
 ```bash
-cargo build --package cqlite-cli --features write-support
+cargo build --package cqlite-cli
 ```
 
 ## Full workflow: write, flush, then export
