@@ -954,6 +954,7 @@ if [ "${1:-}" = fmt ] && [ -n "${FAKE_NESTED_SUMMARY:-}" ]; then
   # PARENT's fmt: spawn the nested gate with the parent's real environment (minus this trigger).
   _ns=$FAKE_NESTED_SUMMARY
   env -u FAKE_NESTED_SUMMARY FAKE_PARENT_BEAT="$FAKE_NESTED_REPO/agent-gate-summary.txt.heartbeat" \
+    FAKE_CARGO_CREATE="${FAKE_N_CREATE:-}" FAKE_CARGO_MUTATE="${FAKE_N_MUTATE:-}" \
     AGENT_GATE_SUMMARY_FILE="$_ns" \
     bash "$FAKE_NESTED_REPO/scripts/agent-gate.sh" --only fmt >"$_ns.out" 2>&1
   printf '%s\n' "$?" > "$_ns.rc"
@@ -972,14 +973,16 @@ exit 0
 STUB
 chmod +x "$NSTUB/cargo"
 
-# run_nested_pair <repo> <tag>: parent (summary IN the checkout) -> nested (summary outside).
+# run_nested_pair <repo> <tag> [env…]: a REAL parent gate (summary IN the checkout unless
+# PARENT_SUMMARY/PARENT_OUT override it) whose component spawns a REAL nested gate (summary
+# outside). FAKE_N_CREATE / FAKE_N_MUTATE are performed by the NESTED run's component only.
 # Leaves the nested block at $tmp/<tag>-nested.txt and its exit code in …-nested.txt.rc.
 run_nested_pair() {
-  local repo="$1" tag="$2"
-  ( cd "$repo" && PATH="$NSTUB:$PATH" FAKE_NESTED_REPO="$repo" \
+  local repo="$1" tag="$2"; shift 2
+  ( cd "$repo" && env PATH="$NSTUB:$PATH" FAKE_NESTED_REPO="$repo" \
       FAKE_NESTED_SUMMARY="$tmp/$tag-nested.txt" \
-      AGENT_GATE_SUMMARY_FILE="$repo/agent-gate-summary.txt" \
-      bash "$repo/scripts/agent-gate.sh" --only fmt >"$tmp/$tag-parent.out" 2>&1 )
+      AGENT_GATE_SUMMARY_FILE="${PARENT_SUMMARY:-$repo/agent-gate-summary.txt}" ${1+"$@"} \
+      bash "$repo/scripts/agent-gate.sh" --only fmt >"${PARENT_OUT:-$tmp/$tag-parent.out}" 2>&1 )
 }
 nested_clean() { # <repo>: remove every artifact the pair left inside the fixture checkout
   local repo="${1:?nested_clean needs a fixture repo}"
@@ -1038,68 +1041,113 @@ else
   bad "E1 mutant: the untracked-side consult was not found — the mutant is vacuous"
 fi
 
-# run_inherit <repo> <tag> <records> [env…]: a nested-shaped run handed <records> directly.
-run_inherit() {
-  local repo="$1" tag="$2" recs="$3"; shift 3
-  ( cd "$repo" && env PATH="$NSTUB:$PATH" AGENT_GATE_PARENT_RUN_ID=fake-parent \
-      AGENT_GATE_PARENT_TREE_ARTIFACTS="$recs" AGENT_GATE_SUMMARY_FILE="$tmp/$tag.txt" ${1+"$@"} \
-      bash "$repo/scripts/agent-gate.sh" --only fmt >"$tmp/$tag.out" 2>&1 )
-}
-# E2 — TRACKED side never consults the inherited set: a record naming a TRACKED file cannot hide
-# an edit to it. (A gate's artifacts are never tracked, so this costs nothing real.)
-run_inherit "$r_nest" e2 "summary:$r_nest_phys/README.md" FAKE_CARGO_MUTATE="$r_nest/README.md"; rc=$?
-if grep -q 'tree-integrity: FAIL (tree-mutated-midrun;' "$tmp/e2.txt" 2>/dev/null \
-   && grep -q 'changed: README.md' "$tmp/e2.txt" 2>/dev/null && [ "$rc" -ne 0 ]; then
+# E2 — TRACKED side never consults the inherited set. The parent pins its summary ON a tracked
+# file (README.md), so the inherited record names a tracked path; the nested component then edits
+# README.md — and the nested run must still catch it. (Real gates never put an artifact on a tracked
+# path, so this rail costs nothing real; it is what keeps an inherited record from hiding an edit.)
+PARENT_SUMMARY="$r_nest/README.md" run_nested_pair "$r_nest" e2 FAKE_N_MUTATE="$r_nest/README.md"
+if grep -q 'tree-integrity: FAIL (tree-mutated-midrun;' "$tmp/e2-nested.txt" 2>/dev/null \
+   && grep -q 'changed: README.md' "$tmp/e2-nested.txt" 2>/dev/null \
+   && grep -q '^tree-inherited-carveouts: 1 .*summary:README.md' "$tmp/e2-nested.txt" 2>/dev/null; then
   ok "E2: an inherited record naming a TRACKED file cannot mask its mid-run edit (untracked side only)"
 else
-  bad "E2: an inherited record hid a tracked-file mutation (rc=$rc)"
-  grep -E '^tree-integrity:' "$tmp/e2.txt" 2>/dev/null
+  bad "E2: an inherited record hid a tracked-file mutation (nested rc=$(cat "$tmp/e2-nested.txt.rc" 2>/dev/null))"
+  grep -E '^tree-integrity:|^tree-inherited' "$tmp/e2-nested.txt" 2>/dev/null
 fi
-( cd "$r_nest" && git checkout -q -- README.md )
+( cd "$r_nest" && git checkout -q -- README.md ); nested_clean "$r_nest"
 # E3 — EXACT names only: an untracked file beside the inherited summary that is NOT one of the
 # sibling artifacts is still a fatal, named mutation.
-run_inherit "$r_nest" e3 "summary:$r_nest_phys/agent-gate-summary.txt" \
-  FAKE_CARGO_CREATE="$r_nest/agent-gate-summary.txt.bak"; rc=$?
-if grep -q 'changed: agent-gate-summary.txt.bak' "$tmp/e3.txt" 2>/dev/null && [ "$rc" -ne 0 ]; then
+run_nested_pair "$r_nest" e3 FAKE_N_CREATE="$r_nest/agent-gate-summary.txt.bak"
+if grep -q 'changed: agent-gate-summary.txt.bak' "$tmp/e3-nested.txt" 2>/dev/null \
+   && ! grep -q 'changed: .*agent-gate-summary.txt.heartbeat' "$tmp/e3-nested.txt" 2>/dev/null; then
   ok "E3: a non-sibling untracked file beside an inherited summary is STILL fatal and named (not widened)"
 else
-  bad "E3: the inherited carve-out was wider than the exact sibling family (rc=$rc)"
-  grep -E '^tree-integrity:' "$tmp/e3.txt" 2>/dev/null
+  bad "E3: the inherited carve-out was wider than the exact sibling family"
+  grep -E '^tree-integrity:' "$tmp/e3-nested.txt" 2>/dev/null
 fi
 nested_clean "$r_nest"
-# E4 — the fd-target kind: an inherited `file:` record carves that path out (and only on the
-# untracked side), so a parent redirecting its log into the checkout does not trip its children.
-run_inherit "$r_nest" e4 "file:$r_nest_phys/parent-out.txt" FAKE_CARGO_CREATE="$r_nest/parent-out.txt"; rc=$?
-if grep -q '^tree-integrity: PASS$' "$tmp/e4.txt" 2>/dev/null && [ "$rc" -eq 3 ]; then
-  ok "E4: an inherited fd-target record (file:) is carved out for the nested run"
+# E4 — the fd-target kind: a parent whose stdout is redirected to a NON-ignored file inside the
+# checkout passes that target down, so the nested run does not trip when the parent's log grows.
+PARENT_OUT="$r_nest/parent-out.txt" run_nested_pair "$r_nest" e4 FAKE_N_MUTATE="$r_nest/parent-out.txt"
+if grep -q '^tree-integrity: PASS$' "$tmp/e4-nested.txt" 2>/dev/null \
+   && grep -q '^tree-inherited-carveouts: .*file:parent-out.txt' "$tmp/e4-nested.txt" 2>/dev/null; then
+  ok "E4: an enclosing gate's in-checkout stdout target (file:) is carved out for the nested run"
 else
-  bad "E4: an inherited fd-target record was not carved out (rc=$rc)"
-  grep -E '^tree-integrity:' "$tmp/e4.txt" 2>/dev/null
+  bad "E4: an enclosing gate's fd-target record was not carved out (nested rc=$(cat "$tmp/e4-nested.txt.rc" 2>/dev/null))"
+  grep -E '^tree-integrity:|^tree-inherited' "$tmp/e4-nested.txt" 2>/dev/null
 fi
-rm -f -- "$r_nest_phys/parent-out.txt"
-# E5 — re-canonicalized per child: a record outside THIS checkout carves out nothing here, yet is
-# PASSED THROUGH so a grandchild in that other checkout still gets it; a malformed or relative
-# record is dropped, never guessed at; and the child appends its OWN artifacts.
-e5_out=$( cd "$r_nest" && env AGENT_GATE_PARENT_RUN_ID=fake-parent \
-            AGENT_GATE_PARENT_TREE_ARTIFACTS="summary:/elsewhere/s.txt"$'\n'"bogus:/x"$'\n'"summary:rel/s.txt" \
-            AGENT_GATE_SUMMARY_FILE="$r_nest/child-summary.txt" AGENT_GATE_TREE_SELFTEST=capture \
-            bash "$r_nest/scripts/agent-gate.sh" 2>/dev/null )
-e5_exp=$(printf '%s\n' "$e5_out" | sed -n 's/^tree-selftest: exported-artifacts=//p' | head -1)
-if printf '%s\n' "$e5_out" | grep -qx 'tree-selftest: inherited-line=<none>' \
-   && [ "$e5_exp" = "summary:/elsewhere/s.txt summary:$r_nest_phys/child-summary.txt" ]; then
-  ok "E5: an out-of-checkout record carves out nothing here but is passed through; junk is dropped; the child appends its own"
+rm -f -- "$r_nest_phys/parent-out.txt"; nested_clean "$r_nest"
+# E5 — the MANIFEST a run writes for its children: its own pid first, then every artifact's
+# PHYSICAL absolute path WHEREVER it lives (roborev job 24: a summary outside this checkout can be
+# inside a child's different one), and nothing it was not given.
+tmp_phys=$(cd "$tmp" && pwd -P)
+e5_out=$( cd "$r_nest" && env -u AGENT_GATE_PARENT_RUN_ID AGENT_GATE_SUMMARY_FILE="$tmp/elsewhere-summary.txt" \
+            AGENT_GATE_TREE_SELFTEST=capture bash "$r_nest/scripts/agent-gate.sh" 2>/dev/null )
+e5_man=$(printf '%s\n' "$e5_out" | sed -n 's/^tree-selftest: artifacts-manifest=//p' | head -1)
+case "$e5_man" in
+  "pid:"[0-9]*" summary:$tmp_phys/elsewhere-summary.txt")
+    ok "E5: the manifest carries the gate's pid and its out-of-checkout summary's physical path (exported wherever it lives)" ;;
+  *) bad "E5: unexpected tree-artifacts manifest '$e5_man'" ;;
+esac
+if printf '%s\n' "$e5_out" | grep -qx 'tree-selftest: inherited-line=<none>'; then
+  ok "E5: a top-level run inherits nothing"
 else
-  bad "E5: inherited-record canonicalization/export is wrong (exported='$e5_exp')"
-  printf '%s\n' "$e5_out" | grep -E 'inherited-line|exported-artifacts'
+  bad "E5: a top-level run reported an inherited line"
 fi
-rm -f -- "$r_nest_phys"/child-summary.txt "$r_nest_phys"/child-summary.txt.*
+
+# E7 — NO ENVIRONMENT VALUE CAN WIDEN THE SET (roborev job 24). A caller exporting the parent
+# marker at a manifest it crafted — naming ITS OWN shell (a real ancestor, but not a gate), or a pid
+# that is no ancestor at all — is REFUSED, the refusal is disclosed, and the heartbeat mutation the
+# forged record names is still caught.
+for e7 in self-shell not-ancestor; do
+  fake_run="$tmp/fake-run-$e7"; mkdir -p "$fake_run"
+  case "$e7" in self-shell) e7_pid=$$ ;; not-ancestor) e7_pid=999999 ;; esac
+  printf 'pid:%s\nsummary:%s/agent-gate-summary.txt\n' "$e7_pid" "$r_nest_phys" > "$fake_run/tree-artifacts"
+  ( cd "$r_nest" && env PATH="$NSTUB:$PATH" AGENT_GATE_PARENT_RUN_ID="$fake_run" \
+      FAKE_CARGO_MUTATE="$r_nest/agent-gate-summary.txt.heartbeat" \
+      AGENT_GATE_SUMMARY_FILE="$tmp/e7-$e7.txt" \
+      bash "$r_nest/scripts/agent-gate.sh" --only fmt >"$tmp/e7-$e7.out" 2>&1 ); rc=$?
+  if grep -q 'changed: agent-gate-summary.txt.heartbeat' "$tmp/e7-$e7.txt" 2>/dev/null && [ "$rc" -ne 0 ] \
+     && grep -q '^tree-inherited-carveouts: REFUSED — the manifest.s pid is not a live agent-gate.sh ancestor' "$tmp/e7-$e7.txt" 2>/dev/null; then
+    ok "E7[$e7]: a forged enclosing-gate manifest is REFUSED (disclosed) and the mutation it names is still fatal"
+  else
+    bad "E7[$e7]: a forged manifest widened the carve-out or was not disclosed (rc=$rc)"
+    grep -E '^tree-integrity:|^tree-inherited' "$tmp/e7-$e7.txt" 2>/dev/null
+  fi
+  nested_clean "$r_nest"
+done
+
+# …and E7 can fail: with the ancestor verification removed, the forged manifest IS honoured — the
+# heartbeat mutation it names is hidden and the run certifies. Without this the refusal above could
+# be passing for an unrelated reason (e.g. the manifest never being read at all).
+mut7="$tmp/gate-mutant-4171-anc.sh"
+if gate_replace_line "$GATE" "$mut7" 'if ! _tree_gate_ancestor "$_tia_pid"; then' 'if false; then'; then
+  r_am=$(mkrepo_from nested-anc-mutant-repo "$mut7")
+  r_am_phys=$(cd "$r_am" && pwd -P)
+  fake_run="$tmp/fake-run-mutant"; mkdir -p "$fake_run"
+  printf 'pid:%s\nsummary:%s/agent-gate-summary.txt\n' "$$" "$r_am_phys" > "$fake_run/tree-artifacts"
+  ( cd "$r_am" && env PATH="$NSTUB:$PATH" AGENT_GATE_PARENT_RUN_ID="$fake_run" \
+      FAKE_CARGO_MUTATE="$r_am/agent-gate-summary.txt.heartbeat" \
+      AGENT_GATE_SUMMARY_FILE="$tmp/e7m.txt" \
+      bash "$r_am/scripts/agent-gate.sh" --only fmt >"$tmp/e7m.out" 2>&1 )
+  if grep -q '^tree-integrity: PASS$' "$tmp/e7m.txt" 2>/dev/null; then
+    ok "E7 mutant: without the ancestor check a forged manifest hides the mutation (the check is load-bearing)"
+  else
+    bad "E7 mutant: removing the ancestor check changed nothing — E7 cannot fail"
+    grep -E '^tree-integrity:|^tree-inherited' "$tmp/e7m.txt" 2>/dev/null
+  fi
+  nested_clean "$r_am"
+else
+  bad "E7 mutant: the ancestor-check site was not found — the mutant is vacuous"
+fi
 
 # E6 — ATTRIBUTION (#4171 fix 4): a self-test asserting on a nested block that stopped at the
 # tree-integrity boundary reports THAT boundary as the cause, never the guard it never reached.
 # shellcheck source=scripts/tests/lib/nested-gate-cause.bash
 . "$SCRIPT_DIR/lib/nested-gate-cause.bash"
+E6_REACHED='^(missing-schemas|schemas): '
 e6_out=$( nested_gate_bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard" \
-            "$tmp/e1m-nested.txt" )
+            "$E6_REACHED" "$tmp/e1m-nested.txt" )
 if printf '%s\n' "$e6_out" | grep -q '^FAIL - 3148-no-env-report-only: INCONCLUSIVE — the nested gate STOPPED at the tree-integrity boundary' \
    && printf '%s\n' "$e6_out" | grep -q 'tree-mutated-midrun' \
    && printf '%s\n' "$e6_out" | grep -q 'NOT the cause: an environment value defeated'; then
@@ -1113,6 +1161,15 @@ if [ "$e6_ctl" = "FAIL - 3148-x: real guard failure" ]; then
   ok "E6 control: a nested block that did NOT stop at the boundary reports the case's own text unchanged"
 else
   bad "E6 control: the helper rewrote a genuine guard failure ('$e6_ctl')"
+fi
+# …and a tree failure detected AFTER the guard ran (its line is in the block) is NOT relabelled:
+# the guard's own failure stands (roborev job 24).
+{ cat "$tmp/e1m-nested.txt"; printf 'missing-schemas: FAIL-CLOSED (#3148) synthetic evidence the guard ran\n'; } > "$tmp/e6-reached.txt"
+e6_late=$( nested_gate_bad "3148-y: guard regressed" "$E6_REACHED" "$tmp/e6-reached.txt" )
+if [ "$e6_late" = "FAIL - 3148-y: guard regressed" ]; then
+  ok "E6 control: a tree FAIL in a block where the guard DID run keeps the guard's own failure text"
+else
+  bad "E6 control: a post-guard tree failure was relabelled INCONCLUSIVE ('$e6_late')"
 fi
 
 echo "----"

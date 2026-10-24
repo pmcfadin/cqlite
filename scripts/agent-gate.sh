@@ -11984,7 +11984,12 @@ declare -a TREE_META_LINES=()
 # anything `mkdir -p`s the parent it becomes a guaranteed false FAIL. So we resolve the
 # NEAREST EXISTING ancestor physically and re-append the missing components verbatim.
 # A `..` inside the missing part cannot be resolved without guessing, so it is refused.
-_tree_canon_rel() {
+# _tree_canon_abs <path> -> the PHYSICAL absolute path of <path> on stdout (directory resolved with
+# `cd … && pwd -P` via its nearest existing ancestor, final component verbatim); rc 1 when it cannot
+# be resolved without guessing. Split out of _tree_canon_rel (#4171) so a gate can EXPORT its
+# artifacts' canonical paths wherever they live — a nested gate in a DIFFERENT checkout decides for
+# itself whether a path belongs to it.
+_tree_canon_abs() {
   local p="$1" d b phys rest="" comp
   [ -n "$p" ] || return 1
   d=$(dirname -- "$p") || return 1
@@ -11999,8 +12004,15 @@ _tree_canon_rel() {
   done
   d="$phys${rest:+/$rest}"
   case "$d" in
-    "$TREE_REPO_ROOT_PHYS")   printf '%s\n' "$b" ;;
-    "$TREE_REPO_ROOT_PHYS"/*) printf '%s/%s\n' "${d#"$TREE_REPO_ROOT_PHYS"/}" "$b" ;;
+    /) printf '/%s\n' "$b" ;;
+    *) printf '%s/%s\n' "$d" "$b" ;;
+  esac
+}
+_tree_canon_rel() {
+  local a
+  a=$(_tree_canon_abs "$1") || return 1
+  case "$a" in
+    "$TREE_REPO_ROOT_PHYS"/*) printf '%s\n' "${a#"$TREE_REPO_ROOT_PHYS"/}" ;;
     *) return 1 ;;
   esac
 }
@@ -12042,7 +12054,7 @@ fi
 # one of the EXACT sibling artifacts a gate writes beside it by contract (integrity-fail markers,
 # heartbeat + its atomic temp, launch-lock reservations). Factored out of _tree_excluded (#4171) so
 # the SAME arms serve this run's own summary AND every ENCLOSING gate's summary inherited through
-# AGENT_GATE_PARENT_TREE_ARTIFACTS — one definition, so the two can never drift apart.
+# the enclosing gate's verified tree-artifacts manifest — one definition, so the two can never drift.
 _tree_summary_family() {
   local b="$1" p="$2" _tsfx
   [ -n "$b" ] && [ -n "$p" ] || return 1
@@ -12117,68 +12129,116 @@ _tree_excluded() {
 # The carve-out above covers only THIS run's artifacts. A gate spawned by a component of another
 # gate (tooling-tests drives ~a dozen nested full gates) computes its own TREE_EXCLUDE_REL from its
 # own summary path and so used to see the PARENT's artifacts as foreign: with the parent's summary
-# inside the checkout (the nightly pins `$GITHUB_WORKSPACE/agent-gate-summary.txt`), the parent's
+# inside the checkout (the nightly pinned `$GITHUB_WORKSPACE/agent-gate-summary.txt`), the parent's
 # heartbeat — rewritten every 20s — landed after the nested run's start capture and the nested run
-# STOPPED at its first boundary with `tree-mutated-midrun; changed: <parent>.heartbeat`. A 20s beat
-# against a multi-minute nested run is deterministic, not a race.
+# STOPPED at its first boundary with `tree-mutated-midrun; changed: <parent>.heartbeat`.
 #
-# Fix: every run EXPORTS the absolute physical paths of its own artifacts (plus every valid record
-# it inherited, so a grandchild carves out the whole chain) in AGENT_GATE_PARENT_TREE_ARTIFACTS,
-# one `<kind>:<abs-path>` record per line:
-#   summary:<abs>  — a summary path; its EXACT sibling family is carved out (_tree_summary_family)
-#   file:<abs>     — an stdout/stderr fd target; that path and its `.launch-lock` are carved out
-# A child re-canonicalizes each record against ITS OWN repo root, so a record pointing outside the
-# child's checkout (a fixture repo under /tmp, a parent summary in $RUNNER_TEMP) matches nothing.
+# Fix: every run writes a TREE-ARTIFACTS MANIFEST into its own private LOG_DIR (== RUN_ID, the
+# marker it already exports as AGENT_GATE_PARENT_RUN_ID, #2874): line 1 `pid:<this gate's $$>`,
+# then one `<kind>:<abs-path>` record per artifact —
+#   summary:<abs>  a summary path; its EXACT sibling family is carved out (_tree_summary_family)
+#   file:<abs>     an stdout/stderr fd target; that path and its `.launch-lock` are carved out
+# — every artifact's PHYSICAL absolute path wherever it lives, plus every record this run itself
+# accepted from ITS parent, so a grandchild carves out the whole chain. A child re-canonicalizes each
+# record against ITS OWN root; a record outside its checkout matches nothing there.
 #
-# The inherited set is deliberately NARROWER than a run's own, because an environment variable must
-# never be able to hide a real edit (the hole #2926 closed):
-#   * UNTRACKED side ONLY. A gate's artifacts are never tracked files, so an inherited record can
-#     never mask a modification to a tracked path — that comparison ignores this set entirely.
-#   * EXACT names only — the same single-component sibling arms as the own carve-out; no subtree.
-#   * DISCLOSED: when any inherited record resolves into this checkout, every SUMMARY block carries
-#     a `tree-inherited-carveouts:` line naming each one, so a run of record with a stray export is
-#     visible in the one artifact agents retain.
+# NO ENVIRONMENT VARIABLE CAN WIDEN THE SET (roborev job 24, the #2926 hole): the manifest is
+# accepted only when it is VERIFIABLY an enclosing gate's —
+#   * it is a regular file named `tree-artifacts` inside $AGENT_GATE_PARENT_RUN_ID, owned by us;
+#   * its `pid:` is a LIVE ANCESTOR of this process (walked via `ps -o ppid=`, portable) whose
+#     command line runs agent-gate.sh. A caller can export any marker it likes; it cannot make a
+#     gate it did not launch be its ancestor.
+# Anything else is REFUSED and the refusal is disclosed. And even an accepted set is narrow:
+#   * UNTRACKED side ONLY — a gate's artifacts are never tracked, so an inherited record can never
+#     mask an edit to a tracked path;
+#   * EXACT names only — the same single-component sibling arms as the own carve-out;
+#   * DISCLOSED on a `tree-inherited-carveouts:` line in every SUMMARY block.
 TREE_INHERITED_SUMMARY_RELS=()
 TREE_INHERITED_FILE_RELS=()
 TREE_INHERITED_LINE=""
+TREE_ARTIFACTS_MANIFEST=""
 _tree_artifacts_out=""
-_tree_artifact_rec_add() {   # <kind> <abs-path>: append one record to the export (no newline paths)
-  case "$2" in ''|*$'\n'*) return 0 ;; esac
-  case "$2" in /*) ;; *) return 0 ;; esac
-  if [ -n "$_tree_artifacts_out" ]; then
-    _tree_artifacts_out="$_tree_artifacts_out"$'\n'"$1:$2"
-  else
-    _tree_artifacts_out="$1:$2"
-  fi
+_tree_artifact_rec_add() {   # <kind> <path>: append one canonical record (no newline paths)
+  local a
+  a=$(_tree_canon_abs "$2") || return 0
+  case "$a" in ''|*$'\n'*) return 0 ;; /*) ;; *) return 0 ;; esac
+  _tree_artifacts_out="${_tree_artifacts_out:+$_tree_artifacts_out$'\n'}$1:$a"
+}
+# _tree_gate_ancestor <pid>: rc 0 iff <pid> is a strict ancestor of this process AND its command
+# line runs agent-gate.sh. Bounded walk; any read failure refuses (never "assume yes").
+_tree_gate_ancestor() {
+  local want="$1" cur="$$" n=0 cmd
+  case "$want" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$want" -gt 1 ] 2>/dev/null || return 1
+  while [ "$n" -lt 64 ]; do
+    cur=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ') || return 1
+    case "$cur" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$cur" -gt 1 ] || return 1
+    if [ "$cur" = "$want" ]; then
+      cmd=$(ps -o command= -p "$cur" 2>/dev/null) || return 1
+      case "$cmd" in *agent-gate.sh*) return 0 ;; *) return 1 ;; esac
+    fi
+    n=$((n + 1))
+  done
+  return 1
 }
 _tree_inherited_shown=""
-while IFS= read -r _tia_rec; do
-  case "$_tia_rec" in
-    summary:/*) _tia_kind=summary; _tia_path=${_tia_rec#summary:} ;;
-    file:/*)    _tia_kind=file;    _tia_path=${_tia_rec#file:} ;;
-    *) continue ;;                 # malformed / relative: ignored, never guessed at
-  esac
-  _tree_artifact_rec_add "$_tia_kind" "$_tia_path"
-  _tia_rel=$(_tree_canon_rel "$_tia_path") || continue
-  [ -n "$_tia_rel" ] || continue
-  if [ "$_tia_kind" = summary ]; then
-    TREE_INHERITED_SUMMARY_RELS+=("$_tia_rel")
+_tree_inherited_refused=""
+_tia_manifest=""
+case "${INHERITED_PARENT_RUN_ID:-}" in
+  /*) _tia_manifest="$INHERITED_PARENT_RUN_ID/tree-artifacts" ;;
+esac
+if [ -n "$_tia_manifest" ] && { [ -e "$_tia_manifest" ] || [ -L "$_tia_manifest" ]; }; then
+  _tia_pid=""
+  if [ -L "$_tia_manifest" ] || [ ! -f "$_tia_manifest" ]; then
+    _tree_inherited_refused="the enclosing-gate manifest is not a regular file"
+  elif [ ! -O "$_tia_manifest" ]; then
+    _tree_inherited_refused="the enclosing-gate manifest is not owned by this user"
   else
-    TREE_INHERITED_FILE_RELS+=("$_tia_rel")
+    _tia_pid=$(sed -n '1s/^pid://p' "$_tia_manifest" 2>/dev/null)
+    if ! _tree_gate_ancestor "$_tia_pid"; then
+      _tree_inherited_refused="the manifest's pid is not a live agent-gate.sh ancestor of this run"
+    fi
   fi
-  _tree_inherited_shown="${_tree_inherited_shown:+$_tree_inherited_shown, }$_tia_kind:$_tia_rel"
-done <<EOF_TREE_INHERITED
-${AGENT_GATE_PARENT_TREE_ARTIFACTS:-}
-EOF_TREE_INHERITED
-unset _tia_rec _tia_kind _tia_path _tia_rel
-if [ -n "$_tree_inherited_shown" ]; then
+  if [ -z "$_tree_inherited_refused" ]; then
+    while IFS= read -r _tia_rec; do
+      case "$_tia_rec" in
+        summary:/*) _tia_kind=summary; _tia_path=${_tia_rec#summary:} ;;
+        file:/*)    _tia_kind=file;    _tia_path=${_tia_rec#file:} ;;
+        *) continue ;;               # the pid line, or a malformed record: never guessed at
+      esac
+      _tree_artifacts_out="${_tree_artifacts_out:+$_tree_artifacts_out$'\n'}$_tia_kind:$_tia_path"
+      _tia_rel=$(_tree_canon_rel "$_tia_path") || continue
+      [ -n "$_tia_rel" ] || continue
+      if [ "$_tia_kind" = summary ]; then
+        TREE_INHERITED_SUMMARY_RELS+=("$_tia_rel")
+      else
+        TREE_INHERITED_FILE_RELS+=("$_tia_rel")
+      fi
+      _tree_inherited_shown="${_tree_inherited_shown:+$_tree_inherited_shown, }$_tia_kind:$_tia_rel"
+    done < "$_tia_manifest"
+  fi
+fi
+unset _tia_rec _tia_kind _tia_path _tia_rel _tia_pid _tia_manifest
+if [ -n "$_tree_inherited_refused" ]; then
+  TREE_INHERITED_LINE="tree-inherited-carveouts: REFUSED — $_tree_inherited_refused; nothing inherited, the guard is fully armed (#4171)"
+elif [ -n "$_tree_inherited_shown" ]; then
   TREE_INHERITED_LINE="tree-inherited-carveouts: $(( ${#TREE_INHERITED_SUMMARY_RELS[@]} + ${#TREE_INHERITED_FILE_RELS[@]} )) enclosing-gate artifact record(s), UNTRACKED side only, exact names (#4171): $_tree_inherited_shown"
 fi
-[ -n "$TREE_EXCLUDE_REL" ] && _tree_artifact_rec_add summary "$TREE_REPO_ROOT_PHYS/$TREE_EXCLUDE_REL"
-[ -n "$TREE_STDOUT_REL" ] && _tree_artifact_rec_add file "$TREE_REPO_ROOT_PHYS/$TREE_STDOUT_REL"
-[ -n "$TREE_STDERR_REL" ] && _tree_artifact_rec_add file "$TREE_REPO_ROOT_PHYS/$TREE_STDERR_REL"
-export AGENT_GATE_PARENT_TREE_ARTIFACTS="$_tree_artifacts_out"
-unset _tree_inherited_shown
+unset _tree_inherited_shown _tree_inherited_refused
+# This run's OWN artifacts, wherever they live (roborev job 24: a parent summary outside the
+# parent's checkout can still be INSIDE a nested gate's different checkout).
+[ -n "$SUMMARY_FILE" ] && _tree_artifact_rec_add summary "$SUMMARY_FILE"
+for _tfd in 1 2; do
+  _tfd_link=$(readlink "/proc/$$/fd/$_tfd" 2>/dev/null) || _tfd_link=""
+  [ -n "$_tfd_link" ] && [ -f "$_tfd_link" ] && _tree_artifact_rec_add file "$_tfd_link"
+done
+unset _tfd _tfd_link
+if [ -n "$LOG_DIR" ] && [ -d "$LOG_DIR" ]; then
+  TREE_ARTIFACTS_MANIFEST="$LOG_DIR/tree-artifacts"
+  { printf 'pid:%s\n' "$$"; [ -n "$_tree_artifacts_out" ] && printf '%s\n' "$_tree_artifacts_out"; } \
+    > "$TREE_ARTIFACTS_MANIFEST" 2>/dev/null || TREE_ARTIFACTS_MANIFEST=""
+fi
 
 # _tree_inherited_excluded <path>: rc 0 iff <path> is an ENCLOSING gate's artifact (see above).
 # Called on the UNTRACKED side of the capture only.
@@ -14959,7 +15019,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       printf 'tree-selftest: stderr-rel=%s\n' "${TREE_STDERR_REL:-<none>}"
       # #4171: what this run carves out on behalf of its enclosing gates, and what it exports.
       printf 'tree-selftest: inherited-line=%s\n' "${TREE_INHERITED_LINE:-<none>}"
-      printf 'tree-selftest: exported-artifacts=%s\n' "$(printf '%s' "$AGENT_GATE_PARENT_TREE_ARTIFACTS" | tr '\n' ' ')"
+      printf 'tree-selftest: artifacts-manifest=%s\n' "$(tr '\n' ' ' < "${TREE_ARTIFACTS_MANIFEST:-/dev/null}" 2>/dev/null | sed 's/ *$//')"
       exit 0 ;;
     validate-manifest)
       # READ-ONLY (no fixture marker needed): the production manifest validator, run
