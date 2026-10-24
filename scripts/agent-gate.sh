@@ -12017,6 +12017,11 @@ _tree_canon_abs() {
 _tree_canon_rel() {
   local a
   a=$(_tree_canon_abs "$1") || return 1
+  # A checkout mounted AT `/` (a container) has no `<root>/` prefix to strip: `"/"/*` would be
+  # `//*`, matching nothing (roborev job 28). Every absolute path is then inside it.
+  if [ "$TREE_REPO_ROOT_PHYS" = / ]; then
+    printf '%s\n' "${a#/}"; return 0
+  fi
   case "$a" in
     "$TREE_REPO_ROOT_PHYS"/*) printf '%s\n' "${a#"$TREE_REPO_ROOT_PHYS"/}" ;;
     *) return 1 ;;

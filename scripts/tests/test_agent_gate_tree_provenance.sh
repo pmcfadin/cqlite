@@ -1243,6 +1243,24 @@ else
   bad "E8: could not extract _tree_gate_ancestor from the gate — the case is vacuous"
 fi
 
+# E9 — canonicalization of a checkout mounted AT `/` (roborev job 28): the real _tree_canon_abs /
+# _tree_canon_rel bodies, driven with TREE_REPO_ROOT_PHYS=/ (no root-mounted fixture needed).
+canon_fns="$(fn_body "$GATE" _tree_canon_abs)
+$(fn_body "$GATE" _tree_canon_rel)"
+e9=$( TREE_REPO_ROOT_PHYS=/; eval "$canon_fns"; _tree_canon_rel "$tmp/x/agent-gate-summary.txt" )
+tmp_phys_e9=$(cd "$tmp" && pwd -P)
+if [ "$e9" = "${tmp_phys_e9#/}/x/agent-gate-summary.txt" ]; then
+  ok "E9: with the checkout at /, an artifact path canonicalizes to its root-relative form ($e9)"
+else
+  bad "E9: a root-mounted checkout cannot canonicalize its artifacts (got '$e9')"
+fi
+e9b=$( TREE_REPO_ROOT_PHYS="$tmp_phys_e9/repo"; eval "$canon_fns"; _tree_canon_rel "$tmp/elsewhere.txt" ) && e9b_rc=0 || e9b_rc=$?
+if [ "$e9b_rc" -ne 0 ] && [ -z "$e9b" ]; then
+  ok "E9 control: a path outside a non-root checkout is still refused"
+else
+  bad "E9 control: an out-of-checkout path canonicalized to '$e9b'"
+fi
+
 # E6 — ATTRIBUTION (#4171 fix 4): a self-test asserting on a nested block that stopped at the
 # tree-integrity boundary reports THAT boundary as the cause, never the guard it never reached.
 # shellcheck source=scripts/tests/lib/nested-gate-cause.bash
