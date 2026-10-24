@@ -12194,7 +12194,10 @@ _tree_gate_ancestor() {
     case "$cur" in ''|*[!0-9]*) return 1 ;; esac
     [ "$cur" -ge 1 ] || return 1          # 0: walked past the root without meeting <want>
     if [ "$cur" = "$want" ]; then
-      cmd=$(ps -o command= -p "$cur" 2>/dev/null) || return 1
+      # `-ww`: UNLIMITED width (roborev job 27). Without it ps may cut the command line at the
+      # display width, and a long checkout path would push `agent-gate.sh` off the end — refusing a
+      # genuine enclosing gate. Supported by procps and by BSD/macOS ps alike.
+      cmd=$(ps -ww -o command= -p "$cur" 2>/dev/null) || return 1
       case "$cmd" in *agent-gate.sh*) return 0 ;; *) return 1 ;; esac
     fi
     [ "$cur" -eq 1 ] && return 1          # the root, and it was not <want>
@@ -12251,6 +12254,10 @@ unset _tree_inherited_shown _tree_inherited_refused
 # This run's OWN artifacts, wherever they live (roborev job 24: a parent summary outside the
 # parent's checkout can still be INSIDE a nested gate's different checkout).
 [ -n "$SUMMARY_FILE" ] && _tree_artifact_rec_add summary "$SUMMARY_FILE"
+# fd targets are named through /proc, exactly as the run's OWN fd carve-out is (#2926 J3): where
+# /proc is absent (macOS/BSD) no `file:` record is written, so a nested gate there still trips on an
+# enclosing gate's IN-CHECKOUT log — and says so through TREE_FD_HINT. DECLARED, not guessed at:
+# macOS never certifies (#4225), and the documented invocation logs to an ignored `*.log` anyway.
 for _tfd in 1 2; do
   _tfd_link=$(readlink "/proc/$$/fd/$_tfd" 2>/dev/null) || _tfd_link=""
   [ -n "$_tfd_link" ] && [ -f "$_tfd_link" ] && _tree_artifact_rec_add file "$_tfd_link"

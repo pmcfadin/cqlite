@@ -1077,6 +1077,12 @@ fi
 nested_clean "$r_nest"
 # E4 — the fd-target kind: a parent whose stdout is redirected to a NON-ignored file inside the
 # checkout passes that target down, so the nested run does not trip when the parent's log grows.
+# CAPABILITY-GATED (roborev job 27): fd targets are named through /proc, as the own-fd carve-out
+# is (J3), so on a host without /proc there is no `file:` record to hand down — a declared
+# limitation (macOS never certifies, #4225), reported here as a named SKIP, never a silent pass.
+if ! { [ -e "/proc/$$/fd/1" ] || [ -L "/proc/$$/fd/1" ]; }; then
+  ok "E4: SKIP — this host has no /proc, so fd-target records are not produced (declared, Linux-only like J3)"
+else
 PARENT_OUT="$r_nest/parent-out.txt" run_nested_pair "$r_nest" e4 FAKE_N_MUTATE="$r_nest/parent-out.txt"
 if grep -q '^tree-integrity: PASS$' "$tmp/e4-nested.txt" 2>/dev/null \
    && grep -q '^tree-inherited-carveouts: .*file:parent-out.txt' "$tmp/e4-nested.txt" 2>/dev/null; then
@@ -1086,6 +1092,7 @@ else
   grep -E '^tree-integrity:|^tree-inherited' "$tmp/e4-nested.txt" 2>/dev/null
 fi
 rm -f -- "$r_nest_phys/parent-out.txt"; nested_clean "$r_nest"
+fi
 # E5 — the MANIFEST a run writes for its children: its own pid first, then every artifact's
 # PHYSICAL absolute path WHEREVER it lives (roborev job 24: a summary outside this checkout can be
 # inside a child's different one), and nothing it was not given.
@@ -1199,8 +1206,16 @@ anc_fn=$(fn_body "$GATE" _tree_gate_ancestor)
 PSTUB="$tmp/ps-stubbin"; mkdir -p "$PSTUB"
 cat > "$PSTUB/ps" <<'STUB'
 #!/usr/bin/env bash
-# ps -o <ppid=|command=> -p <pid>, from the modelled chain FAKE_PS_SELF -> 1 -> 0
-f=$2; p=$4
+# ps [-ww] -o <ppid=|command=> -p <pid>, from the modelled chain FAKE_PS_SELF -> 1 -> 0.
+# Without -ww the command is CUT at 20 columns, modelling ps's display-width truncation.
+ww=0; f=""; p=""
+while [ $# -gt 0 ]; do
+  case "$1" in -ww) ww=1 ;; -o) f=$2; shift ;; -p) p=$2; shift ;; esac
+  shift
+done
+if [ "$f:$p" = command=:1 ] && [ "$ww" -ne 1 ]; then
+  printf '%.20s\n' "${FAKE_PS_ROOT_CMD:-/sbin/init}"; exit 0
+fi
 case "$f:$p" in
   "ppid=:$FAKE_PS_SELF") echo "    1" ;;
   ppid=:1)               echo "    0" ;;
@@ -1215,11 +1230,12 @@ e8_run() { # <want> <root-cmd> -> rc of the real _tree_gate_ancestor
     eval "$anc_fn"; _tree_gate_ancestor "$1" )
 }
 if [ -n "$anc_fn" ]; then
-  e8_run 1 "bash /work/scripts/agent-gate.sh"; e8_a=$?
+  # A LONG checkout path puts agent-gate.sh beyond the (modelled) display width.
+  e8_run 1 "bash /home/runner/work/a-very-long-checkout-path/scripts/agent-gate.sh"; e8_a=$?
   e8_run 1 "/sbin/init"; e8_b=$?
   e8_run 4242 "bash /work/scripts/agent-gate.sh"; e8_c=$?
   if [ "$e8_a" -eq 0 ] && [ "$e8_b" -ne 0 ] && [ "$e8_c" -ne 0 ]; then
-    ok "E8: an agent-gate.sh at PID 1 is a valid enclosing gate; a non-gate PID 1, or a pid off the chain, is not"
+    ok "E8: an agent-gate.sh at PID 1 (on a command line longer than the display width) is a valid enclosing gate; a non-gate PID 1, or a pid off the chain, is not"
   else
     bad "E8: PID-1 ancestry is wrong (gate@1 rc=$e8_a, init@1 rc=$e8_b, off-chain rc=$e8_c)"
   fi
