@@ -12038,6 +12038,58 @@ else
   TREE_FD_HINT=" (note: this host cannot name the run's own stdout/stderr redirect target, so if you redirected this run's output to a non-ignored path INSIDE the checkout, that file is the change)"
 fi
 
+# _tree_summary_family <summary-rel> <path>: rc 0 iff <path> is the summary file <summary-rel> or
+# one of the EXACT sibling artifacts a gate writes beside it by contract (integrity-fail markers,
+# heartbeat + its atomic temp, launch-lock reservations). Factored out of _tree_excluded (#4171) so
+# the SAME arms serve this run's own summary AND every ENCLOSING gate's summary inherited through
+# AGENT_GATE_PARENT_TREE_ARTIFACTS — one definition, so the two can never drift apart.
+_tree_summary_family() {
+  local b="$1" p="$2" _tsfx
+  [ -n "$b" ] && [ -n "$p" ] || return 1
+  case "$p" in
+    "$b") return 0 ;;
+    "$b".integrity-fail.*)
+      _tsfx=${p#"$b".integrity-fail.}
+      case "$_tsfx" in
+        */*|'') ;;              # nested path (or nothing): NOT the sibling artifact
+        *) return 0 ;;
+      esac ;;
+    # #3473: the liveness heartbeat, a THIRD file this run writes beside its summary by
+    # contract — and the one it rewrites most often (every 20s for the whole run).
+    # Without this arm a default-path (or any in-repo-pinned) gate creates a
+    # non-ignored untracked file after the start capture and then FAILS ITSELF with
+    # `tree-mutated-midrun`, naming its own heartbeat as the mutation. On a short
+    # `--only` run that is a RACE the gate can win (the first beat can land after the
+    # last boundary check); on a 30-50 min full gate the beat always precedes the first
+    # boundary, so it would be a DETERMINISTIC failure of the gate of record.
+    "$b".heartbeat) return 0 ;;
+    # The beater writes atomically via a sibling temp then renames, so the temp can be
+    # observed mid-write by a concurrent capture. Same artifact, same carve-out.
+    "$b".heartbeat.tmp.*)
+      # `mktemp` produces exactly six alphanumeric characters. Pinning that shape excludes a
+      # nested path twice over: the non-alnum guard rejects `/` before the length test runs.
+      _tsfx=${p#"$b".heartbeat.tmp.}
+      case "$_tsfx" in
+        *[!A-Za-z0-9]*|'') ;;   # contains a slash or anything mktemp would not emit
+        ??????) return 0 ;;     # exactly six, and provably slash-free by the arm above
+      esac ;;
+    # #3473: gate-detached.sh's summary-path reservation, a fourth artifact written beside the
+    # summary by contract. Self-healing rather than released (the gate outlives its launcher), so
+    # it can legitimately be present for the whole run.
+    # EXACT artifacts only (roborev job 203). This was `.launch-lock|.launch-lock/*`, a whole
+    # SUBTREE — but the reservation is a SYMLINK and never has children, so the wildcard excused
+    # nothing real and instead blinded tree-integrity to any file placed under that path,
+    # letting a direct gate emit a false clean result. The `.stale.*` arm is gone with the
+    # rename-based reclamation it covered; the mutex is a plain file `flock` needs.
+    "$b".launch-lock) return 0 ;;
+    "$b".launch-lock.mutex) return 0 ;;
+    # job 261: every write destination is now reserved, so the heartbeat and log carry their own
+    # `.launch-lock` markers. Exact names only — the subtree lesson from jobs 203/204 stands.
+    "$b".heartbeat.launch-lock) return 0 ;;
+  esac
+  return 1
+}
+
 _tree_excluded() {
   # A `case` glob matches `/` — VERIFIED, both `*` and `?` (roborev job 204). So every arm below that
   # ends in a wildcard would otherwise exclude a whole SUBTREE, not one sibling artifact, and a
@@ -12045,53 +12097,10 @@ _tree_excluded() {
   # from the gate of record. Job 203 narrowed `.launch-lock/*` for exactly this reason and left the
   # two sibling arms untouched — fixing the named instance instead of the class it belonged to. Both
   # are now required to be a SINGLE PATH COMPONENT, which is the property that was actually meant.
-  local _tsfx
   case "$1" in
     "") return 1 ;;
   esac
-  if [ -n "$TREE_EXCLUDE_REL" ]; then
-    case "$1" in
-      "$TREE_EXCLUDE_REL") return 0 ;;
-      "$TREE_EXCLUDE_REL".integrity-fail.*)
-        _tsfx=${1#"$TREE_EXCLUDE_REL".integrity-fail.}
-        case "$_tsfx" in
-          */*|'') ;;              # nested path (or nothing): NOT the sibling artifact
-          *) return 0 ;;
-        esac ;;
-      # #3473: the liveness heartbeat, a THIRD file this run writes beside its summary by
-      # contract — and the one it rewrites most often (every 20s for the whole run).
-      # Without this arm a default-path (or any in-repo-pinned) gate creates a
-      # non-ignored untracked file after the start capture and then FAILS ITSELF with
-      # `tree-mutated-midrun`, naming its own heartbeat as the mutation. On a short
-      # `--only` run that is a RACE the gate can win (the first beat can land after the
-      # last boundary check); on a 30-50 min full gate the beat always precedes the first
-      # boundary, so it would be a DETERMINISTIC failure of the gate of record.
-      "$TREE_EXCLUDE_REL".heartbeat) return 0 ;;
-      # The beater writes atomically via a sibling temp then renames, so the temp can be
-      # observed mid-write by a concurrent capture. Same artifact, same carve-out.
-      "$TREE_EXCLUDE_REL".heartbeat.tmp.*)
-        # `mktemp` produces exactly six alphanumeric characters. Pinning that shape excludes a
-        # nested path twice over: the non-alnum guard rejects `/` before the length test runs.
-        _tsfx=${1#"$TREE_EXCLUDE_REL".heartbeat.tmp.}
-        case "$_tsfx" in
-          *[!A-Za-z0-9]*|'') ;;   # contains a slash or anything mktemp would not emit
-          ??????) return 0 ;;     # exactly six, and provably slash-free by the arm above
-        esac ;;
-      # #3473: gate-detached.sh's summary-path reservation, a fourth artifact written beside the
-      # summary by contract. Self-healing rather than released (the gate outlives its launcher), so
-      # it can legitimately be present for the whole run.
-      # EXACT artifacts only (roborev job 203). This was `.launch-lock|.launch-lock/*`, a whole
-      # SUBTREE — but the reservation is a SYMLINK and never has children, so the wildcard excused
-      # nothing real and instead blinded tree-integrity to any file placed under that path,
-      # letting a direct gate emit a false clean result. The `.stale.*` arm is gone with the
-      # rename-based reclamation it covered; the mutex is a plain file `flock` needs.
-      "$TREE_EXCLUDE_REL".launch-lock) return 0 ;;
-      "$TREE_EXCLUDE_REL".launch-lock.mutex) return 0 ;;
-      # job 261: every write destination is now reserved, so the heartbeat and log carry their own
-      # `.launch-lock` markers. Exact names only — the subtree lesson from jobs 203/204 stands.
-      "$TREE_EXCLUDE_REL".heartbeat.launch-lock) return 0 ;;
-    esac
-  fi
+  _tree_summary_family "$TREE_EXCLUDE_REL" "$1" && return 0
   # job 261: the launcher now RESERVES every write destination, so an in-repo `--log` carries its own
   # `<log>.launch-lock` beside it. Without this a caller pinning the log inside the checkout would make
   # the gate fail ITSELF with tree-mutated-midrun, naming a lock the launcher created on its behalf.
@@ -12101,6 +12110,88 @@ _tree_excluded() {
   if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL.launch-lock" ]; then return 0; fi
   if [ -n "$TREE_STDERR_REL" ] && [ "$1" = "$TREE_STDERR_REL.launch-lock" ]; then return 0; fi
   if [ -n "$TREE_STDERR_REL" ] && [ "$1" = "$TREE_STDERR_REL" ]; then return 0; fi
+  return 1
+}
+
+# ==== #4171: a NESTED gate carves out its ENCLOSING gates' artifacts ====
+# The carve-out above covers only THIS run's artifacts. A gate spawned by a component of another
+# gate (tooling-tests drives ~a dozen nested full gates) computes its own TREE_EXCLUDE_REL from its
+# own summary path and so used to see the PARENT's artifacts as foreign: with the parent's summary
+# inside the checkout (the nightly pins `$GITHUB_WORKSPACE/agent-gate-summary.txt`), the parent's
+# heartbeat — rewritten every 20s — landed after the nested run's start capture and the nested run
+# STOPPED at its first boundary with `tree-mutated-midrun; changed: <parent>.heartbeat`. A 20s beat
+# against a multi-minute nested run is deterministic, not a race.
+#
+# Fix: every run EXPORTS the absolute physical paths of its own artifacts (plus every valid record
+# it inherited, so a grandchild carves out the whole chain) in AGENT_GATE_PARENT_TREE_ARTIFACTS,
+# one `<kind>:<abs-path>` record per line:
+#   summary:<abs>  — a summary path; its EXACT sibling family is carved out (_tree_summary_family)
+#   file:<abs>     — an stdout/stderr fd target; that path and its `.launch-lock` are carved out
+# A child re-canonicalizes each record against ITS OWN repo root, so a record pointing outside the
+# child's checkout (a fixture repo under /tmp, a parent summary in $RUNNER_TEMP) matches nothing.
+#
+# The inherited set is deliberately NARROWER than a run's own, because an environment variable must
+# never be able to hide a real edit (the hole #2926 closed):
+#   * UNTRACKED side ONLY. A gate's artifacts are never tracked files, so an inherited record can
+#     never mask a modification to a tracked path — that comparison ignores this set entirely.
+#   * EXACT names only — the same single-component sibling arms as the own carve-out; no subtree.
+#   * DISCLOSED: when any inherited record resolves into this checkout, every SUMMARY block carries
+#     a `tree-inherited-carveouts:` line naming each one, so a run of record with a stray export is
+#     visible in the one artifact agents retain.
+TREE_INHERITED_SUMMARY_RELS=()
+TREE_INHERITED_FILE_RELS=()
+TREE_INHERITED_LINE=""
+_tree_artifacts_out=""
+_tree_artifact_rec_add() {   # <kind> <abs-path>: append one record to the export (no newline paths)
+  case "$2" in ''|*$'\n'*) return 0 ;; esac
+  case "$2" in /*) ;; *) return 0 ;; esac
+  if [ -n "$_tree_artifacts_out" ]; then
+    _tree_artifacts_out="$_tree_artifacts_out"$'\n'"$1:$2"
+  else
+    _tree_artifacts_out="$1:$2"
+  fi
+}
+_tree_inherited_shown=""
+while IFS= read -r _tia_rec; do
+  case "$_tia_rec" in
+    summary:/*) _tia_kind=summary; _tia_path=${_tia_rec#summary:} ;;
+    file:/*)    _tia_kind=file;    _tia_path=${_tia_rec#file:} ;;
+    *) continue ;;                 # malformed / relative: ignored, never guessed at
+  esac
+  _tree_artifact_rec_add "$_tia_kind" "$_tia_path"
+  _tia_rel=$(_tree_canon_rel "$_tia_path") || continue
+  [ -n "$_tia_rel" ] || continue
+  if [ "$_tia_kind" = summary ]; then
+    TREE_INHERITED_SUMMARY_RELS+=("$_tia_rel")
+  else
+    TREE_INHERITED_FILE_RELS+=("$_tia_rel")
+  fi
+  _tree_inherited_shown="${_tree_inherited_shown:+$_tree_inherited_shown, }$_tia_kind:$_tia_rel"
+done <<EOF_TREE_INHERITED
+${AGENT_GATE_PARENT_TREE_ARTIFACTS:-}
+EOF_TREE_INHERITED
+unset _tia_rec _tia_kind _tia_path _tia_rel
+if [ -n "$_tree_inherited_shown" ]; then
+  TREE_INHERITED_LINE="tree-inherited-carveouts: $(( ${#TREE_INHERITED_SUMMARY_RELS[@]} + ${#TREE_INHERITED_FILE_RELS[@]} )) enclosing-gate artifact record(s), UNTRACKED side only, exact names (#4171): $_tree_inherited_shown"
+fi
+[ -n "$TREE_EXCLUDE_REL" ] && _tree_artifact_rec_add summary "$TREE_REPO_ROOT_PHYS/$TREE_EXCLUDE_REL"
+[ -n "$TREE_STDOUT_REL" ] && _tree_artifact_rec_add file "$TREE_REPO_ROOT_PHYS/$TREE_STDOUT_REL"
+[ -n "$TREE_STDERR_REL" ] && _tree_artifact_rec_add file "$TREE_REPO_ROOT_PHYS/$TREE_STDERR_REL"
+export AGENT_GATE_PARENT_TREE_ARTIFACTS="$_tree_artifacts_out"
+unset _tree_inherited_shown
+
+# _tree_inherited_excluded <path>: rc 0 iff <path> is an ENCLOSING gate's artifact (see above).
+# Called on the UNTRACKED side of the capture only.
+_tree_inherited_excluded() {
+  local r
+  [ -n "$1" ] || return 1
+  for r in ${TREE_INHERITED_SUMMARY_RELS[@]+"${TREE_INHERITED_SUMMARY_RELS[@]}"}; do
+    _tree_summary_family "$r" "$1" && return 0
+  done
+  for r in ${TREE_INHERITED_FILE_RELS[@]+"${TREE_INHERITED_FILE_RELS[@]}"}; do
+    [ "$1" = "$r" ] && return 0
+    [ "$1" = "$r.launch-lock" ] && return 0
+  done
   return 1
 }
 
@@ -12301,8 +12392,9 @@ _tree_identity() {
     fi | _tree_sort0
   )
   # Untracked side: --exclude-standard is what makes .gitignore the exclusion set.
+  # #4171: ONLY this side consults the inherited (enclosing-gate) set — see _tree_inherited_excluded.
   while IFS= read -r -d '' p; do
-    _tree_excluded "$p" || upaths+=("$p")
+    _tree_excluded "$p" || _tree_inherited_excluded "$p" || upaths+=("$p")
   done < <(git --no-optional-locks ls-files --others --exclude-standard -z | _tree_sort0)
 
   # Oversized UNTRACKED files (one batched find, never a fork per file).
@@ -14437,6 +14529,7 @@ _tree_meta_render_lines() {
   printf '%s\n' "$TREE_END_LINE"
   printf '%s\n' "$TREE_INTEGRITY_LINE"
   [ -n "$TREE_HASH_CAP_LINE" ] && printf '%s\n' "$TREE_HASH_CAP_LINE"
+  [ -n "$TREE_INHERITED_LINE" ] && printf '%s\n' "$TREE_INHERITED_LINE"
   return 0
 }
 
@@ -14864,6 +14957,9 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       # assert BOTH that it names this run's redirect target and that it names nothing else.
       printf 'tree-selftest: stdout-rel=%s\n' "${TREE_STDOUT_REL:-<none>}"
       printf 'tree-selftest: stderr-rel=%s\n' "${TREE_STDERR_REL:-<none>}"
+      # #4171: what this run carves out on behalf of its enclosing gates, and what it exports.
+      printf 'tree-selftest: inherited-line=%s\n' "${TREE_INHERITED_LINE:-<none>}"
+      printf 'tree-selftest: exported-artifacts=%s\n' "$(printf '%s' "$AGENT_GATE_PARENT_TREE_ARTIFACTS" | tr '\n' ' ')"
       exit 0 ;;
     validate-manifest)
       # READ-ONLY (no fixture marker needed): the production manifest validator, run
