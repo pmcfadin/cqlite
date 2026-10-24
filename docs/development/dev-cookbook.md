@@ -680,17 +680,17 @@ strings. Normalization required for comparison — see
 ## Write support (CLI)
 
 ```bash
-# Build with write support (Issue #392)
-cargo build --package cqlite-cli --features write-support
+# Build the CLI (write support, Issue #392, is on by default as of 0.18, #4379)
+cargo build --package cqlite-cli
 
 # Write a mutation (requires --writable and --write-dir)
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/cqlite-write \
   --schema test-data/schemas/basic-types.cql \
   --mutation '{"table":{"keyspace":"test_basic","table":"simple_table"},"partition_key":[{"Uuid":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}],"clustering_key":[],"operations":[{"Write":{"column":"name","value":{"Text":"Test"}}}],"timestamp_micros":1704067200000000}'
 
 # Flush memtable to SSTable
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/cqlite-write \
   --schema test-data/schemas/basic-types.cql \
   --flush
@@ -698,24 +698,24 @@ cargo run --package cqlite-cli --features write-support -- \
 # Issue #1253: a single combined invocation persists durably. `--execute` DML
 # now runs BEFORE the flush within the same invocation, so the inserted row
 # lands in Data.db (not just the WAL):
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/cqlite-write \
   --schema test-data/schemas/basic-types.cql \
   --execute "INSERT INTO test_basic.simple_table (id, name) VALUES (33333333-3333-3333-3333-333333333333, 'Carol')" \
   --flush
 
 # Write subcommands
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   maintenance --budget-ms 100 \
   --writable --write-dir /tmp/cqlite-write \
   --schema test-data/schemas/basic-types.cql
 
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   write-stats \
   --writable --write-dir /tmp/cqlite-write \
   --schema test-data/schemas/basic-types.cql
 
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   export-sstable /tmp/export --keyspace my_ks --table my_tbl \
   --writable --write-dir /tmp/cqlite-write \
   --schema test-data/schemas/basic-types.cql
@@ -726,7 +726,7 @@ cargo run --package cqlite-cli --features write-support -- \
 ```bash
 # Salvage one Data.db (or a whole table dir — each generation is salvaged
 # separately, into the SAME --out root). --schema is the global flag.
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --schema test-data/schemas/basic-types.cql \
   salvage ./damaged-table-dir --out /tmp/recovered --manifest /tmp/recovered/salvage.json
 
@@ -748,7 +748,7 @@ fine but a derived component is missing or corrupt.
 # global flag. --out ends up holding a COMPLETE component set: every
 # untouched original (including Data.db itself) is copied verbatim
 # alongside the freshly regenerated components.
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --schema test-data/schemas/basic-types.cql \
   rebuild ./table-dir --components index,digest,toc --out /tmp/rebuilt \
   --manifest /tmp/rebuilt/rebuild.json
@@ -759,7 +759,7 @@ cargo run --package cqlite-cli --features write-support -- \
 # readable, else lost; origin-host/compaction-ancestry are always lost
 # (CQLite carries no fields for either). Never implied by a bare
 # --components omission.
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --schema test-data/schemas/basic-types.cql \
   rebuild ./table-dir --components statistics --out /tmp/rebuilt
 

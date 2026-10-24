@@ -37,10 +37,10 @@ Every recipe assumes:
 export CQLITE_DATASETS_ROOT=/path/to/test-data/datasets
 ```
 
-Schemas are in `test-data/schemas/`. The write-support recipes require the CLI built with `--features write-support`:
+Schemas are in `test-data/schemas/`. The write-support recipes need the CLI built with `write-support`, which is on by default in `cqlite-cli` as of 0.18 (#4379):
 
 ```bash
-cargo build --package cqlite-cli --features write-support
+cargo build --package cqlite-cli
 ```
 
 ## Design principles

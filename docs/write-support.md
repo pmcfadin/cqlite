@@ -159,30 +159,30 @@ See the full Node.js API in [bindings/node/README.md](../bindings/node/README.md
 ## CLI Quickstart
 
 ```bash
-# Build with write support enabled
-cargo build --package cqlite-cli --features write-support
+# Build the CLI (write support is on by default as of 0.18, #4379)
+cargo build --package cqlite-cli
 
 # Write via CQL INSERT
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/my-writes \
   --schema test-data/schemas/write-test.cql \
   --execute "INSERT INTO test_basic.simple_table (id, name, age) \
              VALUES (33333333-3333-3333-3333-333333333333, 'Carol', 28)"
 
 # Flush memtable to SSTable
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/my-writes \
   --schema test-data/schemas/write-test.cql \
   --flush
 
 # Run compaction (100 ms budget)
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   maintenance --budget-ms 100 \
   --writable --write-dir /tmp/my-writes \
   --schema test-data/schemas/write-test.cql
 
 # Print write statistics
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   write-stats \
   --writable --write-dir /tmp/my-writes \
   --schema test-data/schemas/write-test.cql
@@ -194,7 +194,7 @@ You can bypass the CQL parser and write mutations directly in JSON. This is the
 lowest-overhead path and has no parser dependency:
 
 ```bash
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/my-writes \
   --schema test-data/schemas/write-test.cql \
   --mutation '{
@@ -222,7 +222,7 @@ SSTable components. Copy them into the Cassandra data directory and refresh:
 
 ```bash
 # 1. Flush to portable SSTables
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/my-writes \
   --schema schema.cql --flush
 
@@ -242,7 +242,7 @@ The `export-sstable` subcommand packages the current write directory SSTables in
 a separate export path:
 
 ```bash
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   export-sstable /tmp/export --keyspace my_ks --table my_tbl \
   --writable --write-dir /tmp/my-writes \
   --schema schema.cql

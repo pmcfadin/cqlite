@@ -226,18 +226,18 @@ await db.close();
 ### CLI
 
 ```bash
-# Build with write support
-cargo build --package cqlite-cli --features write-support
+# Build the CLI (write support is on by default as of 0.18, #4379)
+cargo build --package cqlite-cli
 
 # Write via CQL INSERT
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/my-writes \
   --schema test-data/schemas/write-test.cql \
   --execute "INSERT INTO test_basic.simple_table (id, name, age) \
              VALUES (33333333-3333-3333-3333-333333333333, 'Carol', 28)"
 
 # Flush memtable to SSTable
-cargo run --package cqlite-cli --features write-support -- \
+cargo run --package cqlite-cli -- \
   --writable --write-dir /tmp/my-writes \
   --schema test-data/schemas/write-test.cql \
   --flush

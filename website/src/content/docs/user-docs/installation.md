@@ -99,10 +99,10 @@ cargo build --release
 ./target/release/cqlite --version
 ```
 
-To build with write support (M5 feature):
+Write support (the M5 feature) is on by default in `cqlite-cli` as of 0.18 (#4379), so the build above already includes it. A read-only CLI without it:
 
 ```bash
-cargo build --package cqlite-cli --features write-support --release
+cargo build --package cqlite-cli --release --no-default-features --features tui,cli-helpers
 ```
 
 ## Python package

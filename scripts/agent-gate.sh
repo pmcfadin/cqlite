@@ -118,11 +118,13 @@
 #                      issue #865 folded it into the workspace so fmt/clippy reach it)
 #   write-tests        cargo test -p cqlite-core --features write-support (lib + roundtrip + compaction)
 #   cli-tests          ENUMERATES the cqlite-cli/tests/*.rs glob (#2039), not a
-#                      hardcoded allowlist. Pass 1 (default/read-only): the glob minus
+#                      hardcoded allowlist. Pass 1 (default = write-capable since #4379): the glob minus
 #                      required-features targets minus a documented QUARANTINE of
 #                      pre-existing-red targets. Pass 2 (--features write-support):
 #                      the write-support-gated targets derived from Cargo.toml
-#                      required-features + two self-gated ground-truth targets. New
+#                      required-features + two self-gated ground-truth targets. Pass 3
+#                      (read-only, --no-default-features --features tui,cli-helpers,
+#                      #4379): cli_schema_validation_tests + the #4379 pin. New
 #                      files are auto-covered; fails closed on zero targets.
 #   bti-multiclustering  the compound-clustering BTI ('da') lane (issue #3032/#3220):
 #                      issue_3032_multiclustering_rows_trie_shape +
@@ -15001,6 +15003,15 @@ run_clippy() {
 "benchmarks,cli-helpers,delta-export,experimental,integration-tests,state_machine,tui,write-support" \
     || return 1
 
+  # (3b) cqlite-cli READ-ONLY configuration (issue #4379). `write-support` became a
+  #     DEFAULT cqlite-cli feature, so no other lane compiles the
+  #     `#[cfg(not(feature = "write-support"))]` stub arms any more. This is the
+  #     documented read-only build (the pre-#4379 default set); lint it so a
+  #     regression there cannot pass unnoticed.
+  env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --all-targets \
+    --no-default-features --features "tui,cli-helpers" \
+    || return 1
+
   # (4) cqlite-flight + the Python/Node bindings at their DEFAULT features (none of
   #     which enable observability), plus cqlite-node's write-support code path. This
   #     lints their real binding/connector surface without linking the otel shim.
@@ -28194,22 +28205,22 @@ dispatch_component() {
   # NEW test file invisible to the full gate — a false-green (a red integration
   # test the gate never ran; observed on #1483 with read_sstable_stdout_tests).
   #
-  # Two feature-correct passes (a single feature set cannot be right for every
-  # target — some tests ASSERT read-only-binary behavior and legitimately behave
-  # differently once write-support is compiled in, e.g. cli_schema_validation_tests
-  # expects the read-only "Schema not found" DML rejection, not the write-capable
-  # "DML statements require --writable mode" one), driven off the tests/*.rs glob so
-  # future files are auto-covered:
+  # Two passes, driven off the tests/*.rs glob so future files are auto-covered.
+  # Since #4379 `write-support` is a DEFAULT cqlite-cli feature, so BOTH passes build
+  # a write-capable binary (the shipped one); what separates them is target
+  # selection, not the binary. A test whose expectation differs by build keys it
+  # on `cfg!(feature = "write-support")` (e.g. cli_schema_validation_tests DML
+  # rejection message), never on which pass runs it.
   #
-  #  PASS 1 — DEFAULT features (read-only binary): run the glob of tests/*.rs MINUS
+  #  PASS 1 — DEFAULT features (the packaged binary): run the glob of tests/*.rs MINUS
   #  (a) targets that DECLARE required-features (cargo would error on `--test X` when
   #  X`s features are unmet) — those are handled by Pass 2 or deliberately excluded
   #  (delta-export/duckdb-tests source-built DuckDB, #916; dhat-heap global
   #  allocator) — and MINUS (b) the QUARANTINE set below. A NEW read-only test file
   #  lands here automatically and its failure FAILs the gate (acceptance #2). Targets
   #  with no required-features but write-support-#[cfg]-gated bodies
-  #  (write_readback_content_tests, graceful_shutdown_tests) run 0 tests here and are
-  #  executed for real by Pass 2.
+  #  (write_readback_content_tests, graceful_shutdown_tests) ran 0 tests here before
+  #  #4379 and now run in both passes; the zero-tests guard still tolerates 0 for them.
   #
   #  PASS 2 — write-support: EXECUTE the write-support-gated tests as an EXPLICIT set
   #  (NOT `--tests`, which would re-run read-only-only targets under a write-capable
@@ -28356,7 +28367,23 @@ dispatch_component() {
   cargo test --package '"$ct_pkg"' --features '"$ct_ws_feats"' "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2"' ;;
+  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2" || exit 1
+
+  # PASS 3 — READ-ONLY build (issue #4379): `--no-default-features --features
+  # tui,cli-helpers`, the pre-#4379 default set. Passes 1 and 2 both build a
+  # write-capable binary now, so this is the only pass that EXECUTES the
+  # `not(feature = "write-support")` stub arms. Deliberately narrow (one extra
+  # cqlite-cli test build, two targets): cli_schema_validation_tests asserts the
+  # read-only DML rejection, and issue_4379_default_features_write_verbs runs its
+  # always-on manifest pin plus its read-only tests, which invoke salvage, rebuild
+  # and compact and assert each one hits its "not built" stub.
+  log3="$_cli_tmp/pass3.log"
+  _fm_observe_child cli-tests test --package '"$ct_pkg"' --no-default-features --features tui,cli-helpers
+  cargo test --package '"$ct_pkg"' --no-default-features --features tui,cli-helpers \
+    --test cli_schema_validation_tests --test issue_4379_default_features_write_verbs 2>&1 | tee "$log3"
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || exit "$rc"
+  check_no_unexpected_zero_tests "cli-tests Pass 3 (read-only)" "$log3"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     bti-multiclustering) run_bti_multiclustering ;;
     query-semantics-oracle) run_query_semantics_oracle ;;

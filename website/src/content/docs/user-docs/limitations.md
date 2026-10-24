@@ -119,7 +119,7 @@ write/flush/compact workflows.
 | `SELECT` with partition-key `WHERE` | Full |
 | `SELECT` with clustering-key `WHERE` | Partial (point-lookup path works; range filtering via residual scan) |
 | `ORDER BY` | Not implemented |
-| `INSERT` / `UPDATE` / `DELETE` via CQL | Requires write-support feature flag; write mutations via API |
+| `INSERT` / `UPDATE` / `DELETE` via CQL | Requires the `write-support` feature (on by default in `cqlite-cli` as of 0.18, #4379) and `--writable`; write mutations via API |
 | Aggregate functions (`COUNT`, `SUM`, etc.) | Not implemented |
 | `GROUP BY` | Not implemented |
 
