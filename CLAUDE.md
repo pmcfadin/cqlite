@@ -102,7 +102,7 @@ AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt bash scripts/agent-gate.sh > gate.
 cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent retains
 ```
 
-Read the summary file, not `gate.log`. Prefer `run_in_background` (or a long timeout) so a subagent
+Keep the summary path **outside the worktree** (#4171) — `/tmp` or another durable out-of-repo path, never "in the lane". Read the summary file, not `gate.log`. Prefer `run_in_background` (or a long timeout) so a subagent
 never idle-waits into a watchdog kill. A queued gate ≠ a hung gate.
 
 The merge-blocking rules — each one FAILs closed, and the full mechanism for every one of them is in
