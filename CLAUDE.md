@@ -8,15 +8,15 @@ it holds the **rules and pointers**; recipes and examples live in `docs/developm
 CQLite is a Rust library for local Apache Cassandra SSTable access — it reads (and writes)
 Cassandra 5.0 data files without cluster dependencies.
 
-**Status** (Sep 2026): **v0.17.0 released 2026-09-08**; **0.18 in progress = the SSTable toolbox
-release** — the whole of epic #4192 (offline detect / salvage / repair / fix / move / diagnose tools
-for damaged SSTables), plus raw SSTable view #4222 and Vortex export #4237. Shipped toward 0.18
-so far: `cqlite salvage` (#4196), the macOS gate fixes (#4215), and the arrow 59 / DataFusion 55.1
-rev (#4236, which raised the Rust floor to 1.95). Milestone 0.19 is memtable freshness. Earlier
-releases delivered core reading, CLI, output writers, Python + Node bindings, write support + STCS
-compaction with byte-for-byte parity vs Cassandra, Arrow Flight + the Trino connector, BTI (`da`)
-read/write, delta-export, and the CommitLog reader. Later: M6 (WASM bindings), M7 (perf validation
-+ v1.0).
+**Status** (Oct 2026): **v0.18.0 = the SSTable toolbox release** — `cqlite verify` corruption
+locations + `cqlite sweep` (#4194), `cqlite salvage` (#4196), `cqlite rebuild` (#4197), the raw SSTable
+view (#4222), the arrow 59 / DataFusion 55.1 rev (#4236, Rust floor 1.95), and `write-support` on by
+default in `cqlite-cli` (#4379). The rest of epic #4192 (explain / audit / scrub / diff / diagnose …)
+and Vortex export #4237 are milestone 0.19, alongside memtable freshness. Earlier releases delivered
+core reading, CLI, output writers, Python + Node bindings, write support + STCS compaction with
+byte-for-byte parity vs Cassandra, Arrow Flight + the Trino connector, BTI (`da`) read/write,
+delta-export, the CommitLog reader, and the 0.17 read-correctness + read-path program. Later: M6
+(WASM bindings), M7 (perf validation + v1.0).
 
 ## Documentation
 
