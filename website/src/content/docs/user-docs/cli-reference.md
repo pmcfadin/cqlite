@@ -551,7 +551,7 @@ id,name,age
 Write mode enables mutations, memtable management, and SSTable export. All write operations require both `--writable` and `--write-dir`.
 
 **Prerequisites:**
-- Build with `--features write-support` (or use a release binary that includes write support)
+- Use a release binary or a default build: write support is on by default in `cqlite-cli` as of 0.18 (#4379)
 - Provide `--write-dir` pointing to a writable directory
 
 **Writing a mutation:**

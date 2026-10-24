@@ -21,6 +21,22 @@ use std::path::PathBuf;
 // Helper Functions
 // ============================================================================
 
+/// The rejection a DML `--execute` WITHOUT `--writable` must produce.
+///
+/// Issue #4379 made `write-support` a DEFAULT `cqlite-cli` feature. In a
+/// write-capable binary, DML is routed to the WriteEngine before any read-path
+/// schema lookup, so it fails fast with the `--writable` requirement
+/// (`main.rs`, `is_dml_statement` arm). Only a read-only build
+/// (`--no-default-features --features tui,cli-helpers`) reaches the read path's
+/// "Schema not found" rejection. Both are failures; the message differs by build.
+fn expected_dml_rejection() -> &'static str {
+    if cfg!(feature = "write-support") {
+        "DML statements require --writable mode"
+    } else {
+        "Schema not found"
+    }
+}
+
 /// Helper to get test data directory
 fn test_data_dir() -> PathBuf {
     let root = std::env::var("CQLITE_DATASETS_ROOT")
@@ -182,7 +198,7 @@ fn test_insert_statement_validation() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Schema not found"));
+        .stderr(predicate::str::contains(expected_dml_rejection()));
 }
 
 #[test]
@@ -208,7 +224,7 @@ fn test_update_statement_validation() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Schema not found"));
+        .stderr(predicate::str::contains(expected_dml_rejection()));
 }
 
 #[test]
@@ -234,7 +250,7 @@ fn test_delete_statement_validation() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Schema not found"));
+        .stderr(predicate::str::contains(expected_dml_rejection()));
 }
 
 // ============================================================================

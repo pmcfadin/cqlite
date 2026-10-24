@@ -17,10 +17,10 @@ For known limitations (promoted index, compaction deferral, etc.) see
 
 ## CLI
 
-Build with write support enabled:
+Write support is on by default in `cqlite-cli` as of 0.18 (#4379), so a plain build includes it:
 
 ```bash
-cargo build --package cqlite-cli --features write-support --release
+cargo build --package cqlite-cli --release
 ```
 
 ### Write a mutation
