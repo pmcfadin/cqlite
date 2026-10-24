@@ -12169,6 +12169,9 @@ _tree_excluded() {
 #   * its `pid:` is a LIVE ANCESTOR of this process (walked via `ps -o ppid=`, portable) whose
 #     command line runs agent-gate.sh — so a stray descriptor from a non-gate ancestor is refused.
 # Anything else is REFUSED and the refusal is disclosed.
+# DECLARED RESIDUAL (roborev job 32): a launcher between the gates that closes non-standard
+# descriptors (Python subprocess's default close_fds) defeats the handoff; that is REFUSED with its
+# own named reason. Every nested-gate launch in this repo is bash -> bash, which preserves it.
 # DECLARED RESIDUAL: a process INSIDE the gate's own tree that deliberately re-opens the descriptor
 # on a file it wrote, under an ancestor it named agent-gate.sh, can still forge a record. Same-user
 # code running inside the gate can equally edit the gate itself; what is closed is every
@@ -12240,7 +12243,13 @@ if [ -n "$_tia_manifest" ] && [ -z "$_tree_inherited_refused" ]; then
     _tree_inherited_refused="the enclosing-gate manifest is not owned by this user"
   else
     _tia_pid=$(sed -n '1s/^pid://p' "$_tia_manifest" 2>/dev/null)
-    if ! [ "$_tia_manifest" -ef "/dev/fd/$TREE_ARTIFACTS_FD" ] 2>/dev/null; then
+    if ! { : <&"$TREE_ARTIFACTS_FD"; } 2>/dev/null; then
+      # NAMED apart from a forgery (roborev job 32): a launcher BETWEEN the gates that closes
+      # non-standard descriptors (Python's subprocess does by default) keeps the marker but drops
+      # the descriptor. That is refused — trusting the marker alone is the job-24 hole — but the
+      # reason names the launcher as the cause so the resulting tree-mutated-midrun is legible.
+      _tree_inherited_refused="descriptor $TREE_ARTIFACTS_FD was not inherited (a launcher between the gates closed it, e.g. Python subprocess close_fds); launch nested gates through a descriptor-preserving path"
+    elif ! [ "$_tia_manifest" -ef "/dev/fd/$TREE_ARTIFACTS_FD" ] 2>/dev/null; then
       _tree_inherited_refused="the manifest is not the one an enclosing gate handed down on descriptor $TREE_ARTIFACTS_FD"
     elif ! _tree_gate_ancestor "$_tia_pid"; then
       _tree_inherited_refused="the manifest's pid is not a live agent-gate.sh ancestor of this run"

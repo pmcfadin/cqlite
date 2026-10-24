@@ -961,7 +961,13 @@ if [ "${1:-}" = fmt ] && [ -n "${FAKE_NESTED_SUMMARY:-}" ]; then
       > "$FAKE_FORGE_DIR/tree-artifacts"
     AGENT_GATE_PARENT_RUN_ID=$FAKE_FORGE_DIR
   fi
-  env -u FAKE_NESTED_SUMMARY -u FAKE_FORGE_DIR FAKE_PARENT_BEAT="$FAKE_PARENT_SUMMARY.heartbeat" \
+  set --
+  # E7[fd-closed]: launch the nested gate through Python's subprocess, whose default close_fds
+  # drops every non-standard descriptor while keeping the environment — the launcher shape the
+  # handoff cannot survive (roborev job 32).
+  [ -n "${FAKE_VIA_PYTHON:-}" ] \
+    && set -- python3 -c 'import subprocess, sys; sys.exit(subprocess.call(sys.argv[1:]))'
+  "$@" env -u FAKE_NESTED_SUMMARY -u FAKE_FORGE_DIR -u FAKE_VIA_PYTHON FAKE_PARENT_BEAT="$FAKE_PARENT_SUMMARY.heartbeat" \
     FAKE_CARGO_CREATE="${FAKE_N_CREATE:-}" FAKE_CARGO_MUTATE="${FAKE_N_MUTATE:-}" \
     AGENT_GATE_SUMMARY_FILE="$_ns" \
     bash "$FAKE_NESTED_REPO/scripts/agent-gate.sh" --only fmt >"$_ns.out" 2>&1
@@ -1153,7 +1159,17 @@ e7_real_pid() { # <repo> <tag>: a REAL parent; its stub re-points the nested run
     FAKE_FORGE_DIR="$tmp/fake-run-$2" FAKE_N_MUTATE="$1/agent-gate-summary.txt.heartbeat"
 }
 e7_env_only "$r_nest" "$tmp/e7-env.txt"; rc=$?
-e7_assert env-only "$tmp/e7-env.txt" "$rc" "the manifest is not the one an enclosing gate handed down"
+e7_assert env-only "$tmp/e7-env.txt" "$rc" "descriptor 17 was not inherited"
+nested_clean "$r_nest"
+# [fd-closed]: a GENUINE parent, but the nested gate is launched through a descriptor-closing
+# launcher — REFUSED with the launcher named as the cause (a declared residual, never a silent pass).
+if command -v python3 >/dev/null 2>&1; then
+  run_nested_pair "$r_nest" e7fc FAKE_VIA_PYTHON=1
+  e7_assert fd-closed "$tmp/e7fc-nested.txt" "$(cat "$tmp/e7fc-nested.txt.rc" 2>/dev/null || echo 0)" \
+    "descriptor 17 was not inherited (a launcher between the gates closed it"
+else
+  ok "E7[fd-closed]: SKIP — no python3 on this host to stand in for a descriptor-closing launcher"
+fi
 nested_clean "$r_nest"
 e7_fd_forged "$r_nest" "$tmp/e7-fd.txt"; rc=$?
 e7_assert fd-forged "$tmp/e7-fd.txt" "$rc" "the manifest's pid is not a live agent-gate.sh ancestor"
@@ -1208,7 +1224,7 @@ e7_mutant() { # <label> <exact-line> <replacement> <driver> <tag>
   fi
 }
 e7_mutant "no ancestor check" 'elif ! _tree_gate_ancestor "$_tia_pid"; then' 'elif false; then' fd-forged anc
-e7_mutant "no descriptor check" 'if ! [ "$_tia_manifest" -ef "/dev/fd/$TREE_ARTIFACTS_FD" ] 2>/dev/null; then' 'if false; then' real-pid fd
+e7_mutant "no descriptor check" 'elif ! [ "$_tia_manifest" -ef "/dev/fd/$TREE_ARTIFACTS_FD" ] 2>/dev/null; then' 'elif false; then' real-pid fd
 
 # E8 — the ancestor walk accepts PID 1 (roborev job 26): a gate launched as a container
 # entrypoint IS PID 1, and rejecting it would re-break every nested gate under it. The REAL function
