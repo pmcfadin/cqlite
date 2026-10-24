@@ -388,7 +388,7 @@ if ! grep -q 'expected absolute path: *packaged/schemas' "$rel_full_out" 2>/dev/
    && grep -q 'must be an ABSOLUTE path' "$rel_full_out" 2>/dev/null; then
   ok "3148-relative-absolute-label: no relative path is ever labelled absolute (AC (b), real emit)"
 else
-  bad "3148-relative-absolute-label: a relative path reached an 'expected absolute path' line"
+  nested_gate_bad "3148-relative-absolute-label: a relative path reached an 'expected absolute path' line" "$rel_full"
   grep -n 'expected absolute path' "$rel_full_out" "$rel_full" 2>/dev/null | head -5
 fi
 
