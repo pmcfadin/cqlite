@@ -15,7 +15,7 @@
 //! evaluates those preconditions, and a clap argument error never prints them, so
 //! the assertion distinguishes "handler reached" from "stub" and from "parse error".
 //!
-//! Two layers, so a read-only build stays testable:
+//! Three layers, so a read-only build stays testable:
 //!   * `default_features_include_write_support` — runs in EVERY build. It reads
 //!     this crate's own `Cargo.toml` and asserts `write-support` is in `default`.
 //!     That is the property `release.yml` / Homebrew / `cargo install` depend on,
@@ -26,6 +26,9 @@
 //!     (`--no-default-features --features tui,cli-helpers`) compiles them out
 //!     instead of failing them. Under a plain `cargo test -p cqlite-cli` (default
 //!     features) they run, which is exactly the packaged build.
+//!   * `read_only_binary` — the inverse, gated `not(write-support)`: in the
+//!     read-only build each verb must still parse and must hit its stub. The
+//!     gate's cli-tests Pass 3 runs it.
 
 use std::path::Path;
 
@@ -197,5 +200,52 @@ mod packaged_binary {
             ],
             "Failed to read input directory",
         );
+    }
+}
+
+/// The documented READ-ONLY build (`--no-default-features --features
+/// tui,cli-helpers`) keeps the verbs parsed and advertised but routes each one to
+/// its "not built" stub. Run by the gate's cli-tests Pass 3 (issue #4379), the
+/// only pass that builds without `write-support`.
+#[cfg(not(feature = "write-support"))]
+mod read_only_binary {
+    use assert_cmd::Command;
+    use tempfile::TempDir;
+
+    const STUB_MARKER: &str = "Write support is not enabled";
+
+    fn assert_stub(args: &[&str]) {
+        let out = Command::cargo_bin("cqlite")
+            .expect("cqlite binary is built for integration tests")
+            .env("NO_COLOR", "1")
+            .env("RUST_LOG", "off")
+            .args(args)
+            .output()
+            .expect("spawn cqlite");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let shown = args.join(" ");
+        assert!(
+            !out.status.success(),
+            "`cqlite {shown}` succeeded in a read-only build; output:\n{combined}"
+        );
+        assert!(
+            combined.contains(STUB_MARKER),
+            "`cqlite {shown}` did not print the write-support-disabled stub in a \
+             read-only build; output:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn write_verbs_are_stubs_in_read_only_build() {
+        let tmp = TempDir::new().expect("tempdir");
+        let p = |name: &str| tmp.path().join(name).to_string_lossy().into_owned();
+        let (input, out, schema) = (p("in"), p("out"), p("schema.cql"));
+        assert_stub(&["salvage", &input, "--out", &out]);
+        assert_stub(&["rebuild", &input, "--components", "index", "--out", &out]);
+        assert_stub(&["compact", &input, "--output", &out, "--schema", &schema]);
     }
 }

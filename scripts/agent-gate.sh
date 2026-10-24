@@ -28375,7 +28375,8 @@ dispatch_component() {
   # `not(feature = "write-support")` stub arms. Deliberately narrow (one extra
   # cqlite-cli test build, two targets): cli_schema_validation_tests asserts the
   # read-only DML rejection, and issue_4379_default_features_write_verbs runs its
-  # always-on manifest pin (its binary tests compile out here by design).
+  # always-on manifest pin plus its read-only tests, which invoke salvage, rebuild
+  # and compact and assert each one hits its "not built" stub.
   log3="$_cli_tmp/pass3.log"
   _fm_observe_child cli-tests test --package '"$ct_pkg"' --no-default-features --features tui,cli-helpers
   cargo test --package '"$ct_pkg"' --no-default-features --features tui,cli-helpers \
