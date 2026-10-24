@@ -8,29 +8,32 @@
 # heartbeat inside the checkout surfaced as `3148-…: an environment value defeated the schemas
 # fail-closed guard`.
 #
-# nested_gate_stop_cause <reached-ERE> <summary-file>…
+# nested_gate_stop_cause <pre-guard-ERE> <summary-file>…
 #   Pass ONLY the summaries whose assertion FAILED. rc 0 + ONE line on stdout naming the boundary
-#   stop iff EVERY readable one of them carries `tree-integrity: FAIL` AND no line matching
-#   <reached-ERE> — the evidence that the case's guard DID run (e.g. '^(missing-schemas|schemas): '
-#   for the #3148 schemas preflight). So:
-#     * a tree failure detected AFTER the guard ran (a later boundary, or the terminal capture)
-#       leaves that evidence in the block, and the guard's own failure stands (roborev job 24);
-#     * when several failed, ONE boundary-stopped run cannot relabel another that shows a genuine
-#       regression (roborev job 30): any failed summary that is not a pre-guard stop keeps the
-#       case's own text.
-#   rc 1 and no output otherwise — including when ANY given file is absent, unreadable or empty
-#   (it proves nothing about where that run stopped), or when none is given.
+#   stop iff EVERY one of them PROVES, from the gate's own boundary-stage record, that the run
+#   stopped BEFORE the case's guard could execute:
+#     * `tree-integrity: FAIL`, AND
+#     * `components-completed: … (run STOPPED at the tree-integrity boundary …` — a boundary stop,
+#       not a terminal-capture failure after everything ran, AND
+#     * its `detected-after-component:` line matches <pre-guard-ERE>: the components the gate runs
+#       BEFORE that guard (e.g. '^detected-after-component: (file-size)$' for the #3148 schemas
+#       preflight — `run_file_size` executes before both preflights, and its boundary stops the run
+#       before they are reached).
+#   POSITIVE evidence only (roborev job 35): the ABSENCE of a guard's output is never read as "the
+#   guard never ran", because a guard that runs and regresses silently leaves the same absence.
+#   rc 1 and no output otherwise — any absent, unreadable or EMPTY summary (it proves nothing about
+#   where that run stopped; roborev job 31), any summary lacking the proof, or none given. So one
+#   boundary-stopped run cannot relabel another that shows a genuine regression (roborev job 30).
 nested_gate_stop_cause() {
-  local reached="$1" f line first="" n=0
+  local pre="$1" f line first="" n=0
   shift
-  [ -n "$reached" ] || return 1     # no guard evidence to test against: never claim "never ran"
+  [ -n "$pre" ] || return 1         # no pre-guard boundary set: never claim "never ran"
   for f in "$@"; do
-    # An absent, unreadable or EMPTY failed-run summary proves nothing about where that run stopped,
-    # so it blocks the attribution rather than being skipped (roborev job 31).
     [ -n "$f" ] && [ -r "$f" ] && [ -s "$f" ] || return 1
     line=$(grep -m1 '^tree-integrity: FAIL' "$f" 2>/dev/null) || return 1
     [ -n "$line" ] || return 1
-    grep -Eq -- "$reached" "$f" 2>/dev/null && return 1   # this one reached the guard
+    grep -q '^components-completed: .*run STOPPED at the tree-integrity boundary' "$f" 2>/dev/null || return 1
+    grep -Eq -- "$pre" "$f" 2>/dev/null || return 1
     n=$((n + 1))
     [ -n "$first" ] || first=$line
   done
@@ -40,14 +43,14 @@ nested_gate_stop_cause() {
   return 0
 }
 
-# nested_gate_bad <message> <reached-ERE> <summary-file>…: the attribution-safe `bad`. When a
-# nested summary shows a boundary stop BEFORE the guard ran, the reported line LEADS with that
-# cause and labels the case's own text as NOT the cause; otherwise it is exactly `bad <message>`.
+# nested_gate_bad <message> <pre-guard-ERE> <failed-summary-file>…: the attribution-safe `bad`.
+# When every failed summary PROVES a boundary stop before the guard ran, the reported line LEADS
+# with that cause and labels the case's own text as NOT the cause; otherwise exactly `bad <message>`.
 # Requires the caller's `bad` function.
 nested_gate_bad() {
-  local msg="$1" reached="$2" cause
+  local msg="$1" pre="$2" cause
   shift 2
-  if cause=$(nested_gate_stop_cause "$reached" "$@"); then
+  if cause=$(nested_gate_stop_cause "$pre" "$@"); then
     bad "${msg%%:*}: INCONCLUSIVE — $cause [case text, NOT the cause: ${msg#*: }]"
   else
     bad "$msg"

@@ -1315,9 +1315,10 @@ fi
 # tree-integrity boundary reports THAT boundary as the cause, never the guard it never reached.
 # shellcheck source=scripts/tests/lib/nested-gate-cause.bash
 . "$SCRIPT_DIR/lib/nested-gate-cause.bash"
-E6_REACHED='^(missing-schemas|schemas): '
+# In this fixture the only component before any guard is `fmt` (--only fmt).
+E6_PRE='^detected-after-component: (fmt)$'
 e6_out=$( nested_gate_bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard" \
-            "$E6_REACHED" "$tmp/e1m-nested.txt" )
+            "$E6_PRE" "$tmp/e1m-nested.txt" )
 if printf '%s\n' "$e6_out" | grep -q '^FAIL - 3148-no-env-report-only: INCONCLUSIVE — the nested gate STOPPED at the tree-integrity boundary' \
    && printf '%s\n' "$e6_out" | grep -q 'tree-mutated-midrun' \
    && printf '%s\n' "$e6_out" | grep -q 'NOT the cause: an environment value defeated'; then
@@ -1326,11 +1327,11 @@ else
   bad "E6: the attribution helper did not lead with the tree-integrity stop"
   printf '%s\n' "$e6_out"
 fi
-e6_ctl=$( nested_gate_bad "3148-x: real guard failure" "$E6_REACHED" "$tmp/e1-nested.txt" )
+e6_ctl=$( nested_gate_bad "3148-x: real guard failure" "$E6_PRE" "$tmp/e1-nested.txt" )
 # …and a missing/empty failed-run summary BLOCKS the attribution even beside a stopped one.
 : > "$tmp/e6-empty.txt"
-e6_gap=$( nested_gate_bad "3148-v: one run left no block" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/does-not-exist.txt" )
-e6_gap2=$( nested_gate_bad "3148-u: one run left an empty block" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/e6-empty.txt" )
+e6_gap=$( nested_gate_bad "3148-v: one run left no block" "$E6_PRE" "$tmp/e1m-nested.txt" "$tmp/does-not-exist.txt" )
+e6_gap2=$( nested_gate_bad "3148-u: one run left an empty block" "$E6_PRE" "$tmp/e1m-nested.txt" "$tmp/e6-empty.txt" )
 if [ "$e6_gap" = "FAIL - 3148-v: one run left no block" ] && [ "$e6_gap2" = "FAIL - 3148-u: one run left an empty block" ]; then
   ok "E6 control: an absent or empty failed-run summary keeps the case's own text (it proves no boundary stop)"
 else
@@ -1344,22 +1345,28 @@ fi
 # …and with SEVERAL failed runs, one boundary stop cannot relabel another that shows a genuine
 # regression (roborev job 30): the helper reports the tree only when EVERY failed run stopped first.
 { printf 'tree-integrity: PASS\nRESULT: PASS\n'; } > "$tmp/e6-genuine.txt"
-e6_mix=$( nested_gate_bad "3148-z: guard regressed in one run" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/e6-genuine.txt" )
-e6_all=$( nested_gate_bad "3148-w: both stopped" "$E6_REACHED" "$tmp/e1m-nested.txt" "$tmp/e1m-nested.txt" )
+e6_mix=$( nested_gate_bad "3148-z: guard regressed in one run" "$E6_PRE" "$tmp/e1m-nested.txt" "$tmp/e6-genuine.txt" )
+e6_all=$( nested_gate_bad "3148-w: both stopped" "$E6_PRE" "$tmp/e1m-nested.txt" "$tmp/e1m-nested.txt" )
 if [ "$e6_mix" = "FAIL - 3148-z: guard regressed in one run" ] \
    && printf '%s\n' "$e6_all" | grep -q 'INCONCLUSIVE.*(all 2 failed runs stopped there)'; then
   ok "E6 control: a mixed set keeps the guard's text; only an all-stopped set is reported as the tree"
 else
   bad "E6 control: multi-summary attribution is wrong (mixed='$e6_mix' all='$e6_all')"
 fi
-# …and a tree failure detected AFTER the guard ran (its line is in the block) is NOT relabelled:
-# the guard's own failure stands (roborev job 24).
-{ cat "$tmp/e1m-nested.txt"; printf 'missing-schemas: FAIL-CLOSED (#3148) synthetic evidence the guard ran\n'; } > "$tmp/e6-reached.txt"
-e6_late=$( nested_gate_bad "3148-y: guard regressed" "$E6_REACHED" "$tmp/e6-reached.txt" )
-if [ "$e6_late" = "FAIL - 3148-y: guard regressed" ]; then
-  ok "E6 control: a tree FAIL in a block where the guard DID run keeps the guard's own failure text"
+# …and only POSITIVE boundary evidence relabels (roborev job 35). A stop detected after a component
+# that runs AFTER the guard, or a terminal-capture failure (no boundary stop at all), keeps the
+# guard's own text — even though neither block carries any guard output.
+sed 's/detected-after-component: fmt/detected-after-component: core-tests/' "$tmp/e1m-nested.txt" > "$tmp/e6-late.txt"
+grep -v '^components-completed:' "$tmp/e1m-nested.txt" > "$tmp/e6-terminal.txt"
+e6_late=$( nested_gate_bad "3148-y: guard regressed silently" "$E6_PRE" "$tmp/e6-late.txt" )
+e6_term=$( nested_gate_bad "3148-t: guard regressed, terminal capture failed" "$E6_PRE" "$tmp/e6-terminal.txt" )
+if [ "$e6_late" = "FAIL - 3148-y: guard regressed silently" ] \
+   && [ "$e6_term" = "FAIL - 3148-t: guard regressed, terminal capture failed" ] \
+   && grep -q '^components-completed: .*run STOPPED at the tree-integrity boundary' "$tmp/e1m-nested.txt" \
+   && grep -q '^detected-after-component: fmt$' "$tmp/e1m-nested.txt"; then
+  ok "E6 control: without positive pre-guard boundary evidence (later stop, or no boundary stop) the guard's own text stands"
 else
-  bad "E6 control: a post-guard tree failure was relabelled INCONCLUSIVE ('$e6_late')"
+  bad "E6 control: a block without pre-guard boundary proof was relabelled ('$e6_late' / '$e6_term'), or the fixture lacks the proof lines"
 fi
 
 echo "----"
