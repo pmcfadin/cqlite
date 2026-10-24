@@ -36,6 +36,11 @@ PASS=0
 FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# #4171: every case below that asserts on a NESTED full gate's block reports through
+# nested_gate_bad, so a nested run that stopped at the tree-integrity boundary is reported as
+# THAT, never as the guard the case targets (which it never reached).
+# shellcheck source=scripts/tests/lib/nested-gate-cause.bash
+. "$SCRIPT_DIR/lib/nested-gate-cause.bash"
 
 # Scratch root, VALIDATED before anything is built under it (roborev job 10, finding 1).
 # This script runs `set -uo pipefail` deliberately (no `errexit`: every case must run so a
@@ -369,7 +374,7 @@ if [ "$rel_full_rc" -ne 0 ] \
    && ! grep -q "^schemas: " "$rel_full" 2>/dev/null; then
   ok "3148-relative-full: FULL gate FAILs CLOSED on a relative override and stamps no positive schemas line"
 else
-  bad "3148-relative-full: expected fail-closed with the relative-override reason (rc=$rel_full_rc)"
+  nested_gate_bad "3148-relative-full: expected fail-closed with the relative-override reason (rc=$rel_full_rc)" "$rel_full"
   cat "$rel_full" 2>/dev/null
 fi
 
@@ -408,7 +413,7 @@ if [ "$full_rc" -ne 0 ] \
    && ! grep -q "^RESULT: PASS" "$full_fail" 2>/dev/null; then
   ok "3148-full-fail: FULL gate FAILs CLOSED on a schemas-less root (marker + RESULT: FAIL, no cargo)"
 else
-  bad "3148-full-fail: expected non-zero exit + missing-schemas FAIL-CLOSED + RESULT: FAIL (rc=$full_rc)"
+  nested_gate_bad "3148-full-fail: expected non-zero exit + missing-schemas FAIL-CLOSED + RESULT: FAIL (rc=$full_rc)" "$full_fail"
   cat "$full_fail" 2>/dev/null
 fi
 
@@ -417,7 +422,7 @@ fi
 if ! grep -q "missing-fixtures:" "$full_fail" 2>/dev/null; then
   ok "3148-marker-distinct: schemas failure carries no missing-fixtures line (#2078 vs #3148 separable)"
 else
-  bad "3148-marker-distinct: the schemas failure also stamped #2078's missing-fixtures marker"
+  nested_gate_bad "3148-marker-distinct: the schemas failure also stamped #2078's missing-fixtures marker" "$full_fail"
 fi
 
 # AC (b): the failure text names the exact expected ABSOLUTE path and the fix command.
@@ -426,7 +431,7 @@ if grep -q "$schemas_empty/basic-types.cql" "$full_fail" 2>/dev/null \
    && grep -q "restore --source=HEAD -- test-data/schemas" "$full_fail" 2>/dev/null; then
   ok "3148-remedy: block names the exact absolute path + both fix commands"
 else
-  bad "3148-remedy: expected the absolute .cql path and the remedy commands in the block"
+  nested_gate_bad "3148-remedy: expected the absolute .cql path and the remedy commands in the block" "$full_fail"
   cat "$full_fail" 2>/dev/null
 fi
 
@@ -505,7 +510,7 @@ if [ "$cc_full_rc" -ne 0 ] \
    && grep -q "^RESULT: FAIL" "$cc_full" 2>/dev/null; then
   ok "3148-cc-emit-wording: the real FAIL emit names the control-character cause, not a false 'relative' one"
 else
-  bad "3148-cc-emit-wording: the emitted block/stderr misnames the rejection cause (rc=$cc_full_rc)"
+  nested_gate_bad "3148-cc-emit-wording: the emitted block/stderr misnames the rejection cause (rc=$cc_full_rc)" "$cc_full"
   cat "$cc_full" 2>/dev/null
 fi
 
@@ -525,7 +530,7 @@ if [ "$optout_full_rc" -ne 0 ] \
    && ! grep -q "^RESULT: PASS" "$optout_full" 2>/dev/null; then
   ok "3148-no-optout: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 does NOT buy a pass on a schemas-less root"
 else
-  bad "3148-no-optout: the #2078 opt-out must not weaken the schemas guard (rc=$optout_full_rc)"
+  nested_gate_bad "3148-no-optout: the #2078 opt-out must not weaken the schemas guard (rc=$optout_full_rc)" "$optout_full"
   cat "$optout_full" 2>/dev/null
 fi
 
@@ -558,7 +563,7 @@ done
 if [ "$ro_ok" -eq 1 ]; then
   ok "3148-no-env-report-only: no exported variable can turn the fail-closed guard into a soft return"
 else
-  bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard (requirement 8)"
+  nested_gate_bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard (requirement 8)" "$tmp"/3148-report-only-*.txt
 fi
 
 # 2f. A NON-UTF-8 override is REJECTED at the REAL emit (roborev job 11, BLOCKER) — the THIRD
@@ -585,7 +590,7 @@ if [ "$nu_rc" -ne 0 ] \
    && ! grep -q "^schemas: " "$nu_full" 2>/dev/null; then
   ok "3148-non-utf8-override: a non-UTF-8 override fails closed at the real emit, naming the cause"
 else
-  bad "3148-non-utf8-override: a non-UTF-8 override did not fail closed (rc=$nu_rc)"
+  nested_gate_bad "3148-non-utf8-override: a non-UTF-8 override did not fail closed (rc=$nu_rc)" "$nu_full"
   cat "$nu_full" 2>/dev/null
 fi
 
@@ -674,7 +679,7 @@ if [ "$lite_rc" -eq 0 ] \
    && ! grep -q "^schemas: " "$lite_block" 2>/dev/null; then
   ok "3148-lite: --lite unaffected by an unreachable schemas root (no schemas line at all)"
 else
-  bad "3148-lite: --lite must stay lenient (rc=$lite_rc)"
+  nested_gate_bad "3148-lite: --lite must stay lenient (rc=$lite_rc)" "$lite_block"
   cat "$lite_block" 2>/dev/null
 fi
 
