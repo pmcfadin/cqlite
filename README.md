@@ -16,9 +16,9 @@
   <a href="https://cassandra.apache.org"><img src="https://img.shields.io/badge/cassandra-5.0+-green.svg" alt="Cassandra"></a>
 </p>
 
-> **Status**: **v0.17.0** (2026-09-08) — read correctness and read-path performance against **stock Cassandra 5.0**. CQLite reads (and writes) Cassandra 5.0 SSTables with no cluster dependency: CLI, Rust library, Python and Node.js bindings, an Arrow Flight server, and a Trino connector are all shipped and published on every tag. v0.17.0 closed 97 issues: a read-correctness campaign pinned against Cassandra-written bytes (silently truncated rows, a misaligned point-read cell offset, BTI row-index framing, empty collection keys, `inet`/`time` ordering), a measured read-path program (a 3.06× Arrow Flight single-SSTable fast path; 1.25× stock Cassandra's `count(*)` and 1.12× its `SELECT *` on the same core and SSTable), and one value/error contract across Python, Node and the CLI. **[Release notes](docs/releases/RELEASE_NOTES_v0.17.0.md)** · [CHANGELOG.md](CHANGELOG.md) · [all releases](https://pmcfadin.github.io/cqlite/releases/).
+> **Status**: **v0.18.0** — the SSTable toolbox. CQLite reads (and writes) Cassandra 5.0 SSTables with no cluster dependency: CLI, Rust library, Python and Node.js bindings, an Arrow Flight server, and a Trino connector are all shipped and published on every tag. v0.18.0 adds offline tools for **damaged** SSTables — `cqlite verify` reports where corruption is (component, offset, chunk, partitions), `cqlite sweep` checks a whole data directory, `cqlite salvage` recovers every decodable partition with a loss manifest, and `cqlite rebuild` regenerates derived components from a healthy `Data.db` — plus a raw SSTable view (`<ks>.<table>_raw_sstable_data`) of unreconciled physical rows with per-cell timestamps, TTLs and tombstones. **[Release notes](docs/releases/RELEASE_NOTES_v0.18.0.md)** · [CHANGELOG.md](CHANGELOG.md) · [all releases](https://pmcfadin.github.io/cqlite/releases/).
 
-> **Upgrading to v0.17?** It carries breaking changes with before/after examples and consumer guidance in the [`[v0.17.0]` CHANGELOG section](CHANGELOG.md): `cqlite-core`'s `Value` gains `Value::Empty`, `Config.storage` is the single storage config and decorative knobs are gone, CLI `--format json` renders `decimal`/`varint` unquoted and drops the injected UDT `_type` key, and the bindings carry UDT type identity out of band. Earlier migrations: [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md).
+> **Upgrading to v0.18?** The [`[v0.18.0]` CHANGELOG section](CHANGELOG.md) lists the breaking changes: the minimum Rust version is now 1.95, `cqlite-core`'s `arrow`/`parquet` features expose Arrow 59 types, the CommitLog `PartitionUpdate` struct gains a `columns_read` field, and `cqlite-cli` builds `write-support` by default. Coming from 0.16 or earlier, read the [`[v0.17.0]` section](CHANGELOG.md) too (`Value::Empty`, the single `Config.storage`, unquoted `decimal`/`varint` JSON, UDT identity out of band). Earlier migrations: [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md).
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -322,6 +322,13 @@ cargo build -p cqlite-core --no-default-features
 - [x] Real BTI trie node-type dispatch and schema-typed query result columns
 - [x] Published documentation site at [pmcfadin.github.io/cqlite](https://pmcfadin.github.io/cqlite/)
 
+### ✅ v0.18.0 (Oct 2026) — the SSTable toolbox
+- [x] **Detect** — `cqlite verify` locates corruption (component, byte offset, chunk, partitions); `cqlite sweep` verifies every generation under a data directory
+- [x] **Salvage + repair** — `cqlite salvage` recovers every fully decodable partition of a damaged SSTable with a loss manifest; `cqlite rebuild` regenerates Index/Summary/Filter/Digest/TOC/CRC from a healthy `Data.db`; all in the default CLI build
+- [x] **Raw SSTable view** — `<ks>.<table>_raw_sstable_data` returns unreconciled physical rows with per-cell timestamps, TTLs, tombstones and source file, matching `sstabledump` on 22 fixtures
+- [x] Writer statistics derived from emitted data (byte parity); CommitLog reader hardening; self-contained Trino connector jar; Arrow 59, Rust 1.95 floor
+- See [`docs/releases/RELEASE_NOTES_v0.18.0.md`](docs/releases/RELEASE_NOTES_v0.18.0.md)
+
 ### ✅ v0.17.0 (Sep 2026) — read correctness + read-path performance vs stock Cassandra 5
 - [x] **Read correctness campaign** — row assembly no longer swallows a decode error into a silently truncated row; a P0 misaligned cell offset on point reads is fixed; BTI `Rows.db` row-index root base matches Cassandra's framing; empty map keys / set members are kept, nested types are bounds-checked at every level, `inet`/`time` order as Cassandra orders them; `frozen<scalar>` is refused instead of guessed, which also fixed the writer's `Statistics.db` header type for `frozen<UDT>`
 - [x] **Measured read path** — Arrow Flight `do_get` single-SSTable merge bypass (**3.06×** rows/s per core); admission default derived from core count; byte-bounded Arrow batches; box ceiling established at 2.73M rows/s on 6 physical cores; opt-in `jemalloc` feature for `cqlite-flight`
@@ -383,13 +390,13 @@ The roadmap follows real-world use. Want something prioritized?
 
 ## Known Issues
 
-CQLite is honest about its sharp edges. The current release (`v0.17.0`) has a few
+CQLite is honest about its sharp edges. The current release (`v0.18.0`) has a few
 known gaps — none of which block the core read/export workflows. Full, dated list:
 [pmcfadin.github.io/cqlite → Known Issues](https://pmcfadin.github.io/cqlite/user-docs/known-issues/).
 
 | Issue | Impact | Tracking |
 |-------|--------|----------|
-| A scan over an SSTable whose metadata is refused returns empty rows instead of an error | Pre-existing in every release; a malformed file reads as "no data" rather than failing loudly | [#4159](https://github.com/pmcfadin/cqlite/issues/4159) (fix in flight, 0.18) |
+| A scan over an SSTable whose metadata is refused returns empty rows instead of an error | Pre-existing in every release; a malformed file reads as "no data" rather than failing loudly | [#4159](https://github.com/pmcfadin/cqlite/issues/4159) |
 | Unbounded `SELECT count(*)` through the Trino `cqlite` catalog can stall | Use a bounded predicate or an aggregate that reads a column; found on a 3-node field run | [#4170](https://github.com/pmcfadin/cqlite/issues/4170) |
 | Trino scans are served by the `sidecar-uri` host's Flight pod only | Single-node throughput on multi-node clusters; other replicas idle | [#4175](https://github.com/pmcfadin/cqlite/issues/4175) |
 | `timeuuid` maps to `varchar` in the Trino `cqlite` catalog (stock connector: `uuid`) | "Same SQL" does not hold for `timeuuid` columns | [#4173](https://github.com/pmcfadin/cqlite/issues/4173) |
@@ -490,10 +497,10 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-cor
 - Type roundtrips verified for all major types including Inet, Varint, Duration, Tuple, Frozen
 - E2E validation against live Cassandra 5.0 (write → flush → `nodetool refresh` → `cqlsh`)
 
-### ✅ v0.10 → v0.17.0 (Jun–Sep 2026)
-Eight releases since M5 — compaction parity, Arrow Flight + Trino, BTI write/read, delta export, the performance
-release, Flight field-readiness, Trino latency/throughput, the CommitLog reader, and the 0.17 read-correctness +
-read-path program. Per-release notes: [`docs/releases/`](docs/releases/) · [website releases](https://pmcfadin.github.io/cqlite/releases/).
+### ✅ v0.10 → v0.18.0 (Jun–Oct 2026)
+Nine releases since M5 — compaction parity, Arrow Flight + Trino, BTI write/read, delta export, the performance
+release, Flight field-readiness, Trino latency/throughput, the CommitLog reader, the 0.17 read-correctness +
+read-path program, and the 0.18 SSTable toolbox. Per-release notes: [`docs/releases/`](docs/releases/) · [website releases](https://pmcfadin.github.io/cqlite/releases/).
 
 See [docs/development/PRD.md](docs/development/PRD.md) for the qualification milestones (SE1–SE7) that follow M1–M5.
 

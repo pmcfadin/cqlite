@@ -252,7 +252,7 @@ artifacts — a container build, an air-gapped host, a per-node `hostPath` cache
 a shaded jar is published as a GitHub Release asset, with a `.sha256` sidecar:
 
 ```bash
-V=0.17.0
+V=0.18.0
 BASE=https://github.com/pmcfadin/cqlite/releases/download/v$V
 curl -fLO "$BASE/cqlite-trino-$V-all.jar"
 curl -fLO "$BASE/cqlite-trino-$V-all.jar.sha256"
