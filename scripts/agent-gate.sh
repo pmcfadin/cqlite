@@ -12148,13 +12148,21 @@ _tree_excluded() {
 # accepted from ITS parent, so a grandchild carves out the whole chain. A child re-canonicalizes each
 # record against ITS OWN root; a record outside its checkout matches nothing there.
 #
-# NO ENVIRONMENT VARIABLE CAN WIDEN THE SET (roborev job 24, the #2926 hole): the manifest is
+# NO ENVIRONMENT VARIABLE CAN WIDEN THE SET (roborev jobs 24/25, the #2926 hole): the manifest is
 # accepted only when it is VERIFIABLY an enclosing gate's —
 #   * it is a regular file named `tree-artifacts` inside $AGENT_GATE_PARENT_RUN_ID, owned by us;
+#   * it IS the file the enclosing gate holds open on descriptor $TREE_ARTIFACTS_FD, which every
+#     descendant inherits through the process tree (`[ path -ef /dev/fd/N ]`, same device+inode;
+#     bash resolves /dev/fd/N itself, so this holds on macOS too). An exported marker can name any
+#     directory; it cannot change which file a real enclosing gate handed down — so a fabricated
+#     manifest beside a GENUINE gate's pid is refused here;
 #   * its `pid:` is a LIVE ANCESTOR of this process (walked via `ps -o ppid=`, portable) whose
-#     command line runs agent-gate.sh. A caller can export any marker it likes; it cannot make a
-#     gate it did not launch be its ancestor.
-# Anything else is REFUSED and the refusal is disclosed. And even an accepted set is narrow:
+#     command line runs agent-gate.sh — so a stray descriptor from a non-gate ancestor is refused.
+# Anything else is REFUSED and the refusal is disclosed.
+# DECLARED RESIDUAL: a process INSIDE the gate's own tree that deliberately re-opens the descriptor
+# on a file it wrote, under an ancestor it named agent-gate.sh, can still forge a record. Same-user
+# code running inside the gate can equally edit the gate itself; what is closed is every
+# ACCIDENTAL route (a stray export, a stale run dir, a re-used pid). And even an accepted set is narrow:
 #   * UNTRACKED side ONLY — a gate's artifacts are never tracked, so an inherited record can never
 #     mask an edit to a tracked path;
 #   * EXACT names only — the same single-component sibling arms as the own carve-out;
@@ -12163,6 +12171,9 @@ TREE_INHERITED_SUMMARY_RELS=()
 TREE_INHERITED_FILE_RELS=()
 TREE_INHERITED_LINE=""
 TREE_ARTIFACTS_MANIFEST=""
+# The descriptor the manifest is handed down on. Fixed (bash 3.2 has no `{var}<` allocation) and
+# deliberately high: 0-2 are stdio, 9 is the launcher's flock mutex (gate-detached.sh).
+TREE_ARTIFACTS_FD=17
 _tree_artifacts_out=""
 _tree_artifact_rec_add() {   # <kind> <path>: append one canonical record (no newline paths)
   local a
@@ -12202,7 +12213,9 @@ if [ -n "$_tia_manifest" ] && { [ -e "$_tia_manifest" ] || [ -L "$_tia_manifest"
     _tree_inherited_refused="the enclosing-gate manifest is not owned by this user"
   else
     _tia_pid=$(sed -n '1s/^pid://p' "$_tia_manifest" 2>/dev/null)
-    if ! _tree_gate_ancestor "$_tia_pid"; then
+    if ! [ "$_tia_manifest" -ef "/dev/fd/$TREE_ARTIFACTS_FD" ] 2>/dev/null; then
+      _tree_inherited_refused="the manifest is not the one an enclosing gate handed down on descriptor $TREE_ARTIFACTS_FD"
+    elif ! _tree_gate_ancestor "$_tia_pid"; then
       _tree_inherited_refused="the manifest's pid is not a live agent-gate.sh ancestor of this run"
     fi
   fi
@@ -12244,6 +12257,15 @@ if [ -n "$LOG_DIR" ] && [ -d "$LOG_DIR" ]; then
   TREE_ARTIFACTS_MANIFEST="$LOG_DIR/tree-artifacts"
   { printf 'pid:%s\n' "$$"; [ -n "$_tree_artifacts_out" ] && printf '%s\n' "$_tree_artifacts_out"; } \
     > "$TREE_ARTIFACTS_MANIFEST" 2>/dev/null || TREE_ARTIFACTS_MANIFEST=""
+fi
+# Hand the manifest down: hold it open on $TREE_ARTIFACTS_FD for the rest of the run, REPLACING any
+# descriptor inherited there (a child reads only its own parent's). Read-only, never read through
+# (a dup shares the offset), only stat'ed by `-ef`. A failed open simply hands nothing down — the
+# children then refuse, which is the fail-closed direction.
+if [ -n "$TREE_ARTIFACTS_MANIFEST" ]; then
+  eval "exec $TREE_ARTIFACTS_FD<\"\$TREE_ARTIFACTS_MANIFEST\"" 2>/dev/null || true
+else
+  eval "exec $TREE_ARTIFACTS_FD<&-" 2>/dev/null || true
 fi
 
 # _tree_inherited_excluded <path>: rc 0 iff <path> is an ENCLOSING gate's artifact (see above).
