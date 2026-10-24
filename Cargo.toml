@@ -38,7 +38,7 @@ resolver = "2"
 # belongs to an unrelated project; the CLI publishes as `cqlite-cli` (binary
 # `cqlite`). See issue #782.
 name = "cqlite"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 rust-version.workspace = true
 publish = false
@@ -65,7 +65,7 @@ crc32fast = { workspace = true }
 cqlite-integration-tests = { path = "tests" }
 
 [workspace.package]
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 authors = ["CQLite Team"]
 license = "Apache-2.0"
