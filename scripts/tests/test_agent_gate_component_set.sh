@@ -5441,21 +5441,69 @@ fi
 # (c) An `origin` that resolves to NO URL. Its own kind: the identity cannot be established,
 # which is an unmeasurable baseline — never a pass, and never folded into "no origin at all",
 # whose remedy is different.
+#
+# BUILT WITH A WHITESPACE-ONLY URL, NOT AN EMPTY ONE (#4384). This fixture used to write
+# `remote.origin.url ""`, but current git gives an EMPTY value a meaning: it CLEARS the URL list
+# (git-config(1): "Setting this key to the empty string clears the list of urls"; remote.c
+# add_url → strvec_clear), and a URL-less remote then takes its own NAME as its URL
+# (remotes_remote_get_1 → add_url_alias). So on CI's git 2.55 `git remote get-url origin` printed
+# `origin`, the gate correctly called that a non-canonical LOCAL path, and this case — written on
+# a git that kept the empty entry (2.43 does) — failed every night it ran. A single space is
+# non-empty, so every git version stores and returns it verbatim, and the gate's own blank test
+# (`tr -d '[:space:]'`) is exactly what classifies it — the branch stays covered on every git.
 git clone -q "$fk_upstream" "$tmp/nourl-branch" >/dev/null 2>&1
 agent_gate_pin_canonical_remote "$tmp/nourl-branch/scripts/agent-gate.sh" "$fk_upstream" \
   || { echo "FATAL: could not pin the no-URL fixture's gate copy" >&2; exit 1; }
 ( fx "$tmp/nourl-branch" && git config --unset-all remote.origin.url \
-   && git config --add remote.origin.url "" ) >/dev/null 2>&1
-nu_out=$(hook "$tmp/nourl-branch")
-nu_line=$(field COMPONENT_SET_LINE "$nu_out")
-if [ "$(field VERDICT "$nu_out")" = UNMEASURED ] \
-   && [ "$(field KIND "$nu_out")" = remote-unreadable ] \
-   && grep -q 'FAIL-CLOSED (#3544)' <<<"$nu_line" \
-   && grep -q 'returned no URL' <<<"$nu_line"; then
-  ok "3544-remote-unreadable: an origin with no URL is its own named non-PASS, not a pass and not 'no remote'"
+   && git config --add remote.origin.url " " ) >/dev/null 2>&1
+# PRECONDITION, asserted rather than assumed: the fixture is only a no-URL origin if git itself
+# reports a blank URL for it. If a future git rewrites this shape too, say so by name instead of
+# failing as a gate regression.
+nu_git=$(git -C "$tmp/nourl-branch" remote get-url origin 2>/dev/null)
+if [ -n "$(printf '%s' "$nu_git" | tr -d '[:space:]')" ]; then
+  bad "3544-remote-unreadable: PRECONDITION — this git ($(git --version 2>/dev/null)) reports origin URL '$nu_git' for a whitespace-only remote.origin.url, so the fixture is not a no-URL origin; the case measured nothing"
 else
-  bad "3544-remote-unreadable: expected KIND remote-unreadable FAIL-CLOSED naming the empty URL"
-  printf '%s\n' "$nu_out"
+  nu_out=$(hook "$tmp/nourl-branch")
+  nu_line=$(field COMPONENT_SET_LINE "$nu_out")
+  if [ "$(field VERDICT "$nu_out")" = UNMEASURED ] \
+     && [ "$(field KIND "$nu_out")" = remote-unreadable ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$nu_line" \
+     && grep -q 'returned no URL' <<<"$nu_line"; then
+    ok "3544-remote-unreadable: an origin with no URL is its own named non-PASS, not a pass and not 'no remote'"
+  else
+    bad "3544-remote-unreadable: expected KIND remote-unreadable FAIL-CLOSED naming the empty URL"
+    printf '%s\n' "$nu_out"
+  fi
+fi
+
+# (c2) …and the EMPTY-STRING shape is still FAIL-CLOSED on EVERY git (#4384), whichever meaning this
+# git gives it. The expected kind is derived from what git ITSELF reports for the fixture, never
+# from a version number: a blank URL (older git keeps the empty entry) is `remote-unreadable`; the
+# remote's own NAME (newer git clears the list, then falls back to the name) is a relative local
+# path and therefore `remote-not-canonical`. Either way: never a PASS, and never `no-remote`.
+git clone -q "$fk_upstream" "$tmp/emptyurl-branch" >/dev/null 2>&1
+agent_gate_pin_canonical_remote "$tmp/emptyurl-branch/scripts/agent-gate.sh" "$fk_upstream" \
+  || { echo "FATAL: could not pin the empty-URL fixture's gate copy" >&2; exit 1; }
+( fx "$tmp/emptyurl-branch" && git config --unset-all remote.origin.url \
+   && git config --add remote.origin.url "" ) >/dev/null 2>&1
+eu_git=$(git -C "$tmp/emptyurl-branch" remote get-url origin 2>/dev/null)
+if [ -z "$(printf '%s' "$eu_git" | tr -d '[:space:]')" ]; then
+  eu_want=remote-unreadable; eu_how="this git keeps the empty entry"
+elif [ "$eu_git" = origin ]; then
+  eu_want=remote-not-canonical; eu_how="this git clears the list and falls back to the remote's name"
+else
+  eu_want=""; eu_how="this git reports '$eu_git'"
+fi
+eu_out=$(hook "$tmp/emptyurl-branch")
+if [ -z "$eu_want" ]; then
+  bad "3544-empty-url-any-git: PRECONDITION — unrecognised git behaviour for an empty remote.origin.url ($eu_how; $(git --version 2>/dev/null)); the case measured nothing"
+elif [ "$(field VERDICT "$eu_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$eu_out")" = "$eu_want" ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$(field COMPONENT_SET_LINE "$eu_out")"; then
+  ok "3544-empty-url-any-git: an empty remote.origin.url is FAIL-CLOSED as $eu_want ($eu_how) — never a PASS, never no-remote"
+else
+  bad "3544-empty-url-any-git: expected FAIL-CLOSED KIND $eu_want ($eu_how)"
+  printf '%s\n' "$eu_out"
 fi
 
 # (d) NO CREDENTIAL LEAK (roborev job 227). A remote URL legitimately carries a token —
