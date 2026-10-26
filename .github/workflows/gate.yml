@@ -247,11 +247,18 @@ jobs:
       # even if the streamed stdout is truncated. Use a NON-hidden path (no
       # leading dot) so actions/upload-artifact publishes it — v6 excludes
       # hidden files by default, which would silently drop a dotfile summary.
+      # And keep it OUTSIDE the checkout (#4171): a non-gitignored summary inside the
+      # workspace put its 20s heartbeat inside every NESTED gate's tree identity, so the
+      # nested runs tooling-tests drives stopped with `tree-mutated-midrun` (and the
+      # report blamed the schemas guard they never reached). The gate now carves its
+      # enclosing gates' artifacts out of a nested run's identity
+      # (an ancestor-verified tree-artifacts manifest), and runner.temp keeps this lane independent
+      # of that carve-out, with no artifact in the tree at all.
       - name: Run full agent gate
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           CQLITE_REQUIRE_FIXTURES: '1'
-          AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/agent-gate-summary.txt
+          AGENT_GATE_SUMMARY_FILE: ${{ runner.temp }}/agent-gate-summary.txt
           # #4266: tooling-tests is diff-scoped in the full gate (SKIPs when the diff
           # touches no harness path — scripts/lib/tooling-tests-scope.sh). This job runs
           # on `main` itself, where HEAD IS its own merge-base with origin/main, so a
@@ -290,7 +297,8 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: agent-gate-summary
-          path: agent-gate-summary.txt
+          # Same runner.temp path the gate step pins (#4171) — absolute, outside the checkout.
+          path: ${{ runner.temp }}/agent-gate-summary.txt
           if-no-files-found: warn
           retention-days: 14
 
