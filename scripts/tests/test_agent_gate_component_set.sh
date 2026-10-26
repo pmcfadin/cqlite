@@ -2742,7 +2742,12 @@ if [ "$(field VERDICT "$ind_out")" = INDETERMINATE ] \
    && grep -q -- "$SENTINEL" <<<"$ind_line" \
    && grep -q 'ancestry probe could not tell BEHIND from a deliberate removal' <<<"$ind_line" \
    && grep -q 'merge-base --is-ancestor' <<<"$ind_line" \
+   && grep -q 'exited 128; HEAD does not resolve to a commit in this checkout' <<<"$ind_line" \
+   && ! grep -q 'HEAD is ' <<<"$ind_line" \
+   && ! grep -q 'SHALLOW' <<<"$ind_line" \
    && grep -q "origin/main $ind_sha" <<<"$ind_line"; then
+  # #4390: an UNRESOLVED HEAD names that cause exactly once and never takes the rc-128
+  # shallowness consult (that arm is reserved for a walk that STARTED from a real HEAD).
   ok "3544-indeterminate: an unanswerable ancestry probe is its OWN fail-closed verdict, naming the probe"
 else
   bad "3544-indeterminate: expected VERDICT INDETERMINATE naming the ancestry probe and $SENTINEL"
