@@ -6230,7 +6230,34 @@ _component_set_probe_inner() {
               _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> answered 'not an ancestor', and whether this repository is SHALLOW could NOT be determined ('git rev-parse --is-shallow-repository' and the shallow-file probe both failed), so that answer is not definitive" ;;
        esac ;;
     *) _CS_ANCESTOR=unknown
-       _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited $rc${_CS_HEAD_SHA:+ (HEAD is ${_CS_HEAD_SHA})}${_CS_HEAD_SHA:-; HEAD does not resolve to a commit in this checkout}" ;;
+       if [ -z "$_CS_HEAD_SHA" ]; then
+         _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited $rc; HEAD does not resolve to a commit in this checkout"
+       else
+         _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited $rc (HEAD is ${_CS_HEAD_SHA})"
+       fi
+       # rc 128 WITH A RESOLVED HEAD IS THE SHALLOW CASE ON CURRENT GIT (#4390). The walk runs in
+       # a NON-shallow scratch repo that reads this lane's objects through an alternate, so in a
+       # shallow lane it reaches a parent beyond the shallow boundary that is simply absent.
+       # MEASURED (merge-base from an empty repo, a --depth 1 clone's objects as the alternate):
+       # git 2.43 prints "Could not read <parent>" and still answers 1, the `1)` arm above;
+       # git 2.55 adds "could not parse commit <parent>" and exits 128. Same lane, same cause,
+       # so the same shallowness consult — otherwise the operator on current git is told only
+       # "exited 128" and never given the unshallow remedy. The verdict is unknown either way;
+       # only the named cause and remedy depend on this.
+       if [ "$rc" -eq 128 ] && [ -n "$_CS_HEAD_SHA" ]; then
+         shallow="$(_component_set_is_shallow)"
+         case "$shallow" in
+           blocked)
+             _CS_KIND=repo-read-blocked
+             _CS_DETAIL="deciding whether $REPO_ROOT is a SHALLOW clone required reading its repository state, and that read EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and an \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
+             return 0 ;;
+           yes)
+             _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited 128 (HEAD is ${_CS_HEAD_SHA}) — it could not read a parent commit, and this is a SHALLOW clone, where the connecting history is absent by construction — remedy: git fetch --unshallow (then re-run)" ;;
+           no) ;;
+           *)
+             _CS_DETAIL="${_CS_DETAIL}, and whether this repository is SHALLOW could NOT be determined ('git rev-parse --is-shallow-repository' and the shallow-file probe both failed); if it is shallow, the remedy is git fetch --unshallow (then re-run)" ;;
+         esac
+       fi ;;
   esac
 
   # PROVENANCE OF A REMOVAL (job 215, blocker 2). Consulted ONLY where it DECIDES something:
