@@ -85,6 +85,10 @@ The SSTable toolbox release. Narrative and limits:
 - Agent gate: diff-scoped `tooling-tests` (#4266), `--recertify` host-fault re-certification
   (#4268, PR #4283), committed fleet gate launcher (#4267, PR #4270), macOS gate fixes (#4206,
   #4220, #4221; PR #4215), flake fixes (#4144, #4282, #4287, #4347).
+- Nightly deep-check repaired: `core-tests` runs `--no-fail-fast` and the uncommissioned
+  zstd-dictionary fixture tests are ignored pending #1413 (#4375, PR #4382); nested gates carve out
+  their enclosing gate's artifacts and the nightly summary moves out of the checkout (#4171,
+  PR #4383); the component-set self-test works on git 2.55 (#4384, PR #4385).
 
 ## [v0.17.0] - 2026-09-08
 
