@@ -233,7 +233,7 @@ class TestScalingFloor:
     scaling = degree_ratio · median(n1) / median(n4), evaluated on the `pr`
     baseline. Healthy parallel scans measure ≈3.0; a re-serialized read path
     (shared Mutex) collapses median(n4)→≈4·median(n1) so scaling→≈1.0, below the
-    1.8 floor in perf-gate.json.
+    1.5 floor in perf-gate.json.
     """
 
     def test_healthy_scaling_passes(self, capsys):
@@ -245,7 +245,7 @@ class TestScalingFloor:
         )
 
     def test_serialized_scaling_fails(self, capsys):
-        """median(n4) ≈ 4·median(n1) → scaling ≈1.0 < 1.8 → non-zero exit."""
+        """median(n4) ≈ 4·median(n1) → scaling ≈1.0 < 1.5 → non-zero exit."""
         exit_code = _run_scaling_only(_CRIT_SCALING_FAIL)
         assert exit_code != 0, (
             "Expected non-zero exit when concurrent_scan n4 median is ~4x the n1 "
@@ -257,6 +257,36 @@ class TestScalingFloor:
         _run_scaling_only(_CRIT_SCALING_FAIL)
         captured = capsys.readouterr()
         assert "concurrent_scan/buffered/n4" in captured.out
+
+    def test_measured_ubuntu_latest_scaling_passes(self, tmp_path, capsys):
+        """The real floor admits a healthy scan on the CI runner it gates (#4376).
+
+        Medians from nightly run 40672785567 (main 1a45cb3f, ubuntu-latest):
+        buffered scaling 1.69, mmap 1.72. The 4-vCPU runner has 2 physical cores,
+        so throughput flattens past n2 and a healthy n4 cannot reach the old
+        1.8 floor. A floor above this measurement reds every nightly run.
+        """
+        import json
+
+        crit = tmp_path / "criterion"
+        measured = {
+            "buffered": (1_881_139.0, 4_457_939.0),
+            "mmap": (1_870_617.0, 4_360_419.0),
+        }
+        for backend, (n1, n4) in measured.items():
+            for name, ns in (("n1", n1), ("n4", n4)):
+                d = crit / "concurrent_scan" / backend / name / "pr"
+                d.mkdir(parents=True)
+                (d / "estimates.json").write_text(
+                    json.dumps({"median": {"point_estimate": ns}})
+                )
+
+        exit_code = _run_scaling_only(str(crit))
+        captured = capsys.readouterr()
+        assert exit_code == 0, (
+            "Expected zero exit for scaling measured on a healthy ubuntu-latest "
+            f"run (1.69/1.72), but got exit code {exit_code}.\n{captured.out}"
+        )
 
     def test_passing_scaling_does_not_mask_missing_median(self, capsys):
         """A passing scaling floor must NOT mask uncompared median benches.

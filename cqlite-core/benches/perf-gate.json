@@ -142,15 +142,15 @@
       "id": "concurrent_scan/buffered/n4",
       "baseline_id": "concurrent_scan/buffered/n1",
       "degree_ratio": 4,
-      "min_scaling": 1.8,
-      "_note": "throughput(n4)/throughput(n1)=degree_ratio*median(n1)/median(n4); healthy≈2.98, serialized≈1.0 → floor 1.8 leaves CI-runner headroom (issue #1564)"
+      "min_scaling": 1.5,
+      "_note": "throughput(n4)/throughput(n1)=degree_ratio*median(n1)/median(n4); serialized≈1.0. Floor calibrated on ubuntu-latest (4 vCPU / 2 physical cores, scaling flattens past n2): healthy measured 1.69–1.82 over 9 nightly runs (issue #4376; ≈2.98 on a many-core dev host, issue #1564). 1.5 sits below the CI band and 50% above the serialization signature."
     },
     {
       "id": "concurrent_scan/mmap/n4",
       "baseline_id": "concurrent_scan/mmap/n1",
       "degree_ratio": 4,
-      "min_scaling": 1.8,
-      "_note": "throughput(n4)/throughput(n1)=degree_ratio*median(n1)/median(n4); healthy≈3.19, serialized≈1.0 → floor 1.8 leaves CI-runner headroom (issue #1564)"
+      "min_scaling": 1.5,
+      "_note": "throughput(n4)/throughput(n1)=degree_ratio*median(n1)/median(n4); serialized≈1.0. Floor calibrated on ubuntu-latest (4 vCPU / 2 physical cores, scaling flattens past n2): healthy measured 1.69–1.82 over 9 nightly runs (issue #4376; ≈3.19 on a many-core dev host, issue #1564). 1.5 sits below the CI band and 50% above the serialization signature."
     }
   ]
 }

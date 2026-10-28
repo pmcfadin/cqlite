@@ -337,9 +337,9 @@ ratio* is not. The gate policy carries this in a `scaling_floors` array in
 ```jsonc
 "scaling_floors": [
   { "id": "concurrent_scan/buffered/n4", "baseline_id": "concurrent_scan/buffered/n1",
-    "degree_ratio": 4, "min_scaling": 1.8 },
+    "degree_ratio": 4, "min_scaling": 1.5 },
   { "id": "concurrent_scan/mmap/n4",     "baseline_id": "concurrent_scan/mmap/n1",
-    "degree_ratio": 4, "min_scaling": 1.8 }
+    "degree_ratio": 4, "min_scaling": 1.5 }
 ]
 ```
 
@@ -357,9 +357,13 @@ speed cancels — this is exactly the property absolute-time gating lacks.
 - **Re-serialized read path** (e.g. a reintroduced shared `Mutex`, exactly what
   #815 removed): `median(n4) ≈ 4·median(n1)` → `scaling ≈ 1.0`.
 
-The **floor is `1.8`**: below observed healthy (≈2.98/3.19) with ~40% headroom for
-CI-runner variance (fewer cores, shared scheduler; ubuntu-latest is ~4 vCPU),
-while still failing decisively against the ≈1.0 serialization signature. `n2`/`n8`
+The **floor is `1.5`**, calibrated on the runner that evaluates it (issue #4376).
+`ubuntu-latest` has 4 vCPUs but 2 physical cores, so throughput scales almost
+perfectly to `n2` and then flattens. A healthy `n4` measured **1.69–1.82** across
+nine nightly runs, so the original `1.8` floor (#1564, set against the many-core
+numbers above) failed every night without a regression. `1.5` sits below that band
+and still fails decisively against the ≈1.0 serialization signature. Recalibrate
+from the nightly table if the runner class changes. `n2`/`n8`
 are still measured for the local scaling curve but are not floored. Because a
 scaling floor is **intra-run** (its data is always present on any run that benches
 `concurrent_scan`), a configured floor whose `n1`/`n4` median is **missing** is a
