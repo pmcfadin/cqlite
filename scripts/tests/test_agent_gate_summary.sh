@@ -1560,7 +1560,9 @@ fi
 # THE NEAR-CAPACITY WARN IS GONE, DELIBERATELY (lead ruling req-3727-w4): a threshold plus a
 # remedy is an interpretation of the number, and the number is on the line. Asserted the other
 # way round now — the capacity path must emit NO advice — so nobody reintroduces it by reflex.
-if ! grep -q 'WARN:.*sccache' "$tmp/scc-used-full.stderr"; then
+# The install-check WARN ("sccache not installed") is host state, not capacity advice: the test
+# fakes the sccache STATE but not its presence, so a host without sccache always prints it.
+if ! awk '/WARN:.*sccache/ && !/sccache not installed/ { f = 1 } END { exit !f }' "$tmp/scc-used-full.stderr"; then
   ok "sccache-used: a full cache reports 100% and emits NO remediation WARN (reporting stays, advising goes)"
 else
   bad "sccache-used: a capacity remedy WARN is back — the ruling removed the advice layer"
