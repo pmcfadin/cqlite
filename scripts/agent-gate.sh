@@ -6217,9 +6217,12 @@ _component_set_probe_inner() {
   # unshallow remedy. The verdict cannot loosen: a rc-128 walk is NEVER read as "not an
   # ancestor" (the `no` arm keeps it unknown), so BEHIND stays reserved for rc 1 in a repo
   # PROVEN complete. A HEAD that did not resolve (rc forced to 128 above) stays generic.
+  # 128 IS ANY FATAL GIT ERROR (roborev job 42, Medium): an invalid ${_CS_SHA} or a corrupt
+  # object store exit 128 too, so the shallow arm names the boundary as the LIKELY cause and
+  # keeps the generic one in view; it never asserts the missing parent as established.
   if [ "$rc" -eq 128 ] && [ -n "$_CS_HEAD_SHA" ]; then
     _cs_arm=128-head
-    _cs_answer="exited 128 (HEAD is ${_CS_HEAD_SHA}) — it could not read a parent commit"
+    _cs_answer="exited 128 (HEAD is ${_CS_HEAD_SHA}) — a fatal git error"
   fi
   case "$_cs_arm" in
     0) _CS_ANCESTOR=yes ;;
@@ -6244,7 +6247,11 @@ _component_set_probe_inner() {
                _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, and this repository is NOT shallow, so the missing history is not explained by a shallow clone"
              fi ;;
          yes) _CS_ANCESTOR=unknown
-              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, but this is a SHALLOW clone, where that answer is indistinguishable from 'the connecting history is absent' — remedy: git fetch --unshallow (then re-run)" ;;
+              if [ "$rc" -eq 1 ]; then
+                _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, but this is a SHALLOW clone, where that answer is indistinguishable from 'the connecting history is absent' — remedy: git fetch --unshallow (then re-run)"
+              else
+                _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, and this is a SHALLOW clone, so the LIKELY cause is a parent commit beyond the shallow boundary (not established: an invalid sha or a corrupt object store also exits 128) — if so, remedy: git fetch --unshallow (then re-run)"
+              fi ;;
          *)   _CS_ANCESTOR=unknown
               _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, and whether this repository is SHALLOW could NOT be determined ('git rev-parse --is-shallow-repository' and the shallow-file probe both failed), so that answer is not definitive" ;;
        esac ;;

@@ -2918,6 +2918,11 @@ else
   done
   grep -q 'SHALLOW clone' <<<"$r128_sh_line" && grep -q -- 'git fetch --unshallow' <<<"$r128_sh_line" \
     || r128_bad="$r128_bad shallow:no-shallow-diagnosis"
+  # roborev job 42: 128 is ANY fatal git error, so the shallow boundary is named as LIKELY,
+  # never asserted, and the parent-read claim is not stated as fact.
+  grep -q 'LIKELY cause is a parent commit beyond the shallow boundary (not established' <<<"$r128_sh_line" \
+    || r128_bad="$r128_bad shallow:asserts-cause"
+  grep -q 'could not read a parent commit' <<<"$r128_sh_line$r128_cp_line" && r128_bad="$r128_bad asserts-parent-read"
   grep -q 'NOT shallow' <<<"$r128_cp_line" || r128_bad="$r128_bad complete:no-not-shallow-cause"
   grep -q -- '--unshallow' <<<"$r128_cp_line" && r128_bad="$r128_bad complete:blames-shallowness"
   if [ -z "$r128_bad" ]; then
