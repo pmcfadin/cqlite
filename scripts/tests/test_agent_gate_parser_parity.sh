@@ -284,7 +284,9 @@ prop_feats() {
     accept-any) REALN_feats=$((REALN_feats + 1)); [ -n "$out" ] && AGGREAL_feats=1 ;;
     *)          SYNNE_feats=$((SYNNE_feats + 1)); [ -n "$out" ] && AGG_feats=1 ;;
   esac
-  if [ "$out" = "$(printf '%s' "$out" | sort -u)" ]; then ok "$lbl"; else bad "$lbl — output is not sorted/unique: [$out]"; fi
+  # Both producers order by codepoint (python sorted(), jq sort), so the oracle is C collation.
+  # A locale-aware `sort` (en_US.UTF-8 folds case and skips `_`/`-`) reds correct output by host.
+  if [ "$out" = "$(printf '%s' "$out" | LC_ALL=C sort -u)" ]; then ok "$lbl"; else bad "$lbl — output is not sorted/unique: [$out]"; fi
 }
 
 # cmp_pair <name> <validity> <jq-fn> <py-fn> <args...> — validity-aware property checks on every
