@@ -6206,10 +6206,27 @@ _component_set_probe_inner() {
     return 0
   fi
   fi
-  local shallow
-  case "$rc" in
+  local shallow _cs_arm="$rc" _cs_answer="answered 'not an ancestor'"
+  # rc 128 WITH A RESOLVED HEAD IS THE SHALLOW CASE ON CURRENT GIT (#4390), so it takes the
+  # SAME shallowness consult as rc 1 below. The walk runs in a NON-shallow scratch repo that
+  # reads this lane's objects through an alternate, so in a shallow lane it reaches a parent
+  # beyond the shallow boundary that is simply absent. MEASURED (merge-base from an empty repo,
+  # a --depth 1 clone's objects as the alternate): git 2.43 prints "Could not read <parent>"
+  # and still answers 1; git 2.55 adds "could not parse commit <parent>" and exits 128.
+  # Without this, an operator on current git read only "exited 128" and never got the
+  # unshallow remedy. The verdict cannot loosen: a rc-128 walk is NEVER read as "not an
+  # ancestor" (the `no` arm keeps it unknown), so BEHIND stays reserved for rc 1 in a repo
+  # PROVEN complete. A HEAD that did not resolve (rc forced to 128 above) stays generic.
+  # 128 IS ANY FATAL GIT ERROR (roborev job 42, Medium): an invalid ${_CS_SHA} or a corrupt
+  # object store exit 128 too, so the shallow arm names the boundary as the LIKELY cause and
+  # keeps the generic one in view; it never asserts the missing parent as established.
+  if [ "$rc" -eq 128 ] && [ -n "$_CS_HEAD_SHA" ]; then
+    _cs_arm=128-head
+    _cs_answer="exited 128 (HEAD is ${_CS_HEAD_SHA}) — a fatal git error"
+  fi
+  case "$_cs_arm" in
     0) _CS_ANCESTOR=yes ;;
-    1) # rc 1 IS AMBIGUOUS IN A SHALLOW CLONE (job 227): it means "not an ancestor" OR "the
+    1|128-head) # rc 1 IS AMBIGUOUS IN A SHALLOW CLONE (job 227): it means "not an ancestor" OR "the
        # connecting history is not here". Only a repo PROVEN complete may read it as the
        # former; `yes`/`unknown` shallowness both go to INDETERMINATE, which is fail-closed
        # with a diagnostic naming the shallow clone — never a false BEHIND on correct input,
@@ -6223,14 +6240,29 @@ _component_set_probe_inner() {
            _CS_KIND=repo-read-blocked
            _CS_DETAIL="deciding whether $REPO_ROOT is a SHALLOW clone required reading its repository state, and that read EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and an \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
            return 0 ;;
-         no) _CS_ANCESTOR=no ;;
+         no) if [ "$rc" -eq 1 ]; then
+               _CS_ANCESTOR=no
+             else
+               _CS_ANCESTOR=unknown
+               _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, and this repository is NOT shallow, so the missing history is not explained by a shallow clone"
+             fi ;;
          yes) _CS_ANCESTOR=unknown
-              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> answered 'not an ancestor', but this is a SHALLOW clone, where that answer is indistinguishable from 'the connecting history is absent' — remedy: git fetch --unshallow (then re-run)" ;;
+              if [ "$rc" -eq 1 ]; then
+                _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, but this is a SHALLOW clone, where that answer is indistinguishable from 'the connecting history is absent' — remedy: git fetch --unshallow (then re-run)"
+              else
+                _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, and this is a SHALLOW clone, so the LIKELY cause is a parent commit beyond the shallow boundary (not established: an invalid sha or a corrupt object store also exits 128) — if so, remedy: git fetch --unshallow (then re-run)"
+              fi ;;
          *)   _CS_ANCESTOR=unknown
-              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> answered 'not an ancestor', and whether this repository is SHALLOW could NOT be determined ('git rev-parse --is-shallow-repository' and the shallow-file probe both failed), so that answer is not definitive" ;;
+              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> ${_cs_answer}, and whether this repository is SHALLOW could NOT be determined ('git rev-parse --is-shallow-repository' and the shallow-file probe both failed), so that answer is not definitive" ;;
        esac ;;
     *) _CS_ANCESTOR=unknown
-       _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited $rc${_CS_HEAD_SHA:+ (HEAD is ${_CS_HEAD_SHA})}${_CS_HEAD_SHA:-; HEAD does not resolve to a commit in this checkout}" ;;
+       # ONE suffix, chosen by whether HEAD resolved (#4390): the old `${_CS_HEAD_SHA:-…}` expanded
+       # to the sha itself when HEAD DID resolve, so the detail printed "(HEAD is X)X".
+       if [ -n "$_CS_HEAD_SHA" ]; then
+         _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited $rc (HEAD is ${_CS_HEAD_SHA})"
+       else
+         _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited $rc; HEAD does not resolve to a commit in this checkout"
+       fi ;;
   esac
 
   # PROVENANCE OF A REMOVAL (job 215, blocker 2). Consulted ONLY where it DECIDES something:

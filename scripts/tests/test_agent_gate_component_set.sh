@@ -613,6 +613,12 @@ mkgitshim() {
       # repository read, and the probe would refuse before this helper is ever called.
       hang-is-shallow)
         printf 'for a in "$@"; do if [ "$a" = --is-shallow-repository ]; then sleep 90; fi; done\n' ;;
+      # EXIT 128 FROM THE ANCESTRY WALK ONLY (#4390, roborev job 38). git 2.55 exits 128 when
+      # the walk reaches a parent missing beyond a shallow boundary; git 2.43 answers 1 for the
+      # same shape. This makes the 128 arm reachable on EVERY git, so it is pinned regardless
+      # of which one the host runs.
+      is-ancestor-128)
+        printf 'for a in "$@"; do if [ "$a" = --is-ancestor ]; then echo "gitshim: could not parse commit" >&2; exit 128; fi; done\n' ;;
       lsremote-sha256)
         printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then printf "%%s\\t%%s\\n" "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "refs/heads/main"; exit 0; fi; done\n' ;;
       *) echo "FATAL: mkgitshim: unknown mode '$mode'" >&2; exit 1 ;;
@@ -2742,7 +2748,12 @@ if [ "$(field VERDICT "$ind_out")" = INDETERMINATE ] \
    && grep -q -- "$SENTINEL" <<<"$ind_line" \
    && grep -q 'ancestry probe could not tell BEHIND from a deliberate removal' <<<"$ind_line" \
    && grep -q 'merge-base --is-ancestor' <<<"$ind_line" \
+   && grep -q 'exited 128; HEAD does not resolve to a commit in this checkout' <<<"$ind_line" \
+   && ! grep -q 'HEAD is ' <<<"$ind_line" \
+   && ! grep -q 'SHALLOW' <<<"$ind_line" \
    && grep -q "origin/main $ind_sha" <<<"$ind_line"; then
+  # #4390: an UNRESOLVED HEAD names that cause exactly once and never takes the rc-128
+  # shallowness consult (that arm is reserved for a walk that STARTED from a real HEAD).
   ok "3544-indeterminate: an unanswerable ancestry probe is its OWN fail-closed verdict, naming the probe"
 else
   bad "3544-indeterminate: expected VERDICT INDETERMINATE naming the ancestry probe and $SENTINEL"
@@ -2873,6 +2884,52 @@ else
   else
     bad "3544-shallow-ancestry: expected INDETERMINATE naming the shallow clone (got '$(field VERDICT "$sh_out")')"
     printf '%s\n' "$sh_out"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3544-shallow-rc128 (#4390). git >= 2.55 answers the walk above with EXIT 128, not 1: the walk
+# runs in a NON-shallow scratch repo reading the lane's objects through an alternate, and the
+# parent beyond the shallow boundary is absent. A 128 with a RESOLVED HEAD must take the same
+# shallowness consult as rc 1. Forced with a shim so it holds on every git, over the SAME two
+# fixtures: the shallow clone must name the shallow clone + the unshallow remedy; the complete
+# clone must stay INDETERMINATE (a 128 is never "not an ancestor", so never BEHIND) and must NOT
+# blame shallowness. Each side is the other's control: one shim, one difference.
+# ---------------------------------------------------------------------------
+if [ "$sh_is_shallow" != true ]; then
+  echo "skip - 3544-shallow-rc128: the shallow fixture is not shallow on this git (shallow='$sh_is_shallow')"
+else
+  r128_bin=$(mkgitshim rc128 is-ancestor-128)
+  r128_sh=$( fx "$tmp/shallow-branch" && PATH="$r128_bin:$PATH" bash "$tmp/shallow-branch/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+  r128_cp=$( fx "$tmp/complete-branch" && PATH="$r128_bin:$PATH" bash "$tmp/complete-branch/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+  r128_sh_line=$(field COMPONENT_SET_LINE "$r128_sh")
+  r128_cp_line=$(field COMPONENT_SET_LINE "$r128_cp")
+  r128_bad=""
+  for _o in r128_sh r128_cp; do
+    _out=${!_o}; _line=$(field COMPONENT_SET_LINE "$_out")
+    [ "$(field VERDICT "$_out")" = INDETERMINATE ] || r128_bad="$r128_bad $_o:verdict=$(field VERDICT "$_out")"
+    [ "$(field KIND "$_out")" = ok ] || r128_bad="$r128_bad $_o:kind=$(field KIND "$_out")"
+    [ "$(field ANCESTOR "$_out")" = unknown ] || r128_bad="$r128_bad $_o:ancestor=$(field ANCESTOR "$_out")"
+    # The shim must have been the cause (proves the 128 arm ran, not the real walk's answer),
+    # and HEAD's sha is named exactly ONCE (the duplicated-sha defect, #4390).
+    grep -q 'exited 128 (HEAD is [0-9a-f]*)' <<<"$_line" || r128_bad="$r128_bad $_o:no-128-head-cause"
+    grep -qE 'HEAD is ([0-9a-f]+)\)\1' <<<"$_line" && r128_bad="$r128_bad $_o:sha-duplicated"
+    grep -q 'is BEHIND origin/main' <<<"$_line" && r128_bad="$r128_bad $_o:false-BEHIND"
+  done
+  grep -q 'SHALLOW clone' <<<"$r128_sh_line" && grep -q -- 'git fetch --unshallow' <<<"$r128_sh_line" \
+    || r128_bad="$r128_bad shallow:no-shallow-diagnosis"
+  # roborev job 42: 128 is ANY fatal git error, so the shallow boundary is named as LIKELY,
+  # never asserted, and the parent-read claim is not stated as fact.
+  grep -q 'LIKELY cause is a parent commit beyond the shallow boundary (not established' <<<"$r128_sh_line" \
+    || r128_bad="$r128_bad shallow:asserts-cause"
+  grep -q 'could not read a parent commit' <<<"$r128_sh_line$r128_cp_line" && r128_bad="$r128_bad asserts-parent-read"
+  grep -q 'NOT shallow' <<<"$r128_cp_line" || r128_bad="$r128_bad complete:no-not-shallow-cause"
+  grep -q -- '--unshallow' <<<"$r128_cp_line" && r128_bad="$r128_bad complete:blames-shallowness"
+  if [ -z "$r128_bad" ]; then
+    ok "3544-shallow-rc128: a walk exiting 128 from a RESOLVED HEAD names the SHALLOW clone + unshallow remedy in a shallow lane, and stays INDETERMINATE without blaming shallowness in a complete one — never BEHIND, sha named once"
+  else
+    bad "3544-shallow-rc128: misclassified:$r128_bad"
+    printf '%s\n' "$r128_sh" "$r128_cp"
   fi
 fi
 
