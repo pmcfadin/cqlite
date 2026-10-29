@@ -68,6 +68,13 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 export TMPDIR="$tmp/tmpdir"
 mkdir -p "$TMPDIR" || { printf 'FAIL - could not create the scoped TMPDIR %s\n' "$TMPDIR"; exit 1; }
 
+# #3755: this suite's subject is TREE INTEGRITY, not disk. Its slot-grant cases (B4, C3, F1, G4)
+# run full stub gates, which probe the HOST's cargo target filesystem; without this pin a box
+# under 40 GiB free (routinely so while the enclosing gate of record is building) refuses them
+# before the slot, and the suite's verdict becomes a function of the host — as in
+# test_gate_concurrency_cap.sh.
+export CQLITE_GATE_MIN_FREE_GB=0
+
 GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 
 # shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash

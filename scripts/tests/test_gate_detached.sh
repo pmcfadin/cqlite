@@ -1262,6 +1262,9 @@ fi
 _tx="$TMP/tree-excluded.sh"
 {
   echo 'TREE_EXCLUDE_REL=".agent-gate-summary.txt"; TREE_STDOUT_REL=""; TREE_STDERR_REL=""'
+  # #4171 factored the summary-sibling arms out into _tree_summary_family, which _tree_excluded
+  # calls; lift both or the predicate dies with "command not found" and excuses nothing.
+  sed -n '/^_tree_summary_family()/,/^}/p' "$REPO_ROOT/scripts/agent-gate.sh"
   sed -n '/^_tree_excluded()/,/^}/p' "$REPO_ROOT/scripts/agent-gate.sh"
 } > "$_tx"
 _texcl() { ( . "$_tx"; _tree_excluded "$1" ); }
