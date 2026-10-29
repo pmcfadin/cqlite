@@ -155,7 +155,16 @@ else
     summary
   fi
   rm -f "$build_log"
-  BIN="$REPO_ROOT/target/debug/examples/bti_perf_scan"
+  # Ask cargo where it built: a CARGO_TARGET_DIR or build.target-dir moves the
+  # output out of $REPO_ROOT/target, and a hardcoded path then fails a correct build.
+  target_dir="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')" \
+    || target_dir=""
+  if [ -z "$target_dir" ]; then
+    fail "could not resolve cargo's target_directory (cargo metadata --no-deps)"
+    summary
+  fi
+  BIN="$target_dir/debug/examples/bti_perf_scan"
 fi
 if [ ! -x "$BIN" ]; then
   fail "harness binary not executable: $BIN"
