@@ -9,6 +9,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [v0.18.0] - 2026-10-30
+
+The SSTable toolbox release. Narrative and limits:
+[`docs/releases/RELEASE_NOTES_v0.18.0.md`](docs/releases/RELEASE_NOTES_v0.18.0.md).
+
+### Added
+
+- **`cqlite salvage <input> --out <dir> [--table] [--manifest] [--out-format text|json]`** (#4196,
+  PR #4213): recovers every fully decodable partition of a damaged BIG or BTI SSTable into a fresh
+  uncompressed generation, plus a JSON loss manifest. Partitions are recovered whole or not at all;
+  a damaged partition index is refused. Exit codes: 0 clean, 3 losses or verification gap, 2
+  refused, 1 usage.
+- **`cqlite rebuild <input> --components <list> [--out <dir> | --in-place]`** (#4197, PR #4250):
+  regenerates `index`, `summary`, `filter`, `digest`, `toc`, `crc` and (opt-in, declared lossy)
+  `statistics` from a healthy `Data.db`, which is never modified. Refuses (exit 2) on a damaged
+  `Data.db`. `--in-place` always refuses until #4195; on BTI input `index` is refused and
+  `summary`/`crc` report `skipped_not_applicable`.
+- **`cqlite verify` location detail** (#4194, PR #4252): every finding carries component, byte
+  offset, chunk index, anchor (`damaged_extent`/`declared_record`) and the partitions involved
+  (`resolved` with a `truncated` count, or `unresolved`). Additive `location` key in JSON. BTI
+  locations are always `unresolved` (#4337).
+- **`cqlite sweep <data-dir> [--mode quick|full] [--out text|json] [--jobs N]`** (#4194, PR #4252):
+  verifies every generation under a Cassandra data directory and reports
+  `ok|degraded|corrupt|unreadable`. Exit 2 on any corrupt/unreadable generation or when none is
+  found. `--jobs` defaults to 1, capped at 8.
+- **Raw SSTable view `<ks>.<table>_raw_sstable_data`** (#4222, PR #4264; parity sweep #4309, PR
+  #4312): unreconciled physical rows, one per row per generation, with per-cell timestamp, TTL,
+  local deletion time and tombstone flag, row/partition/range deletion metadata, `row_kind`, and
+  source `sstable`/`generation`/`format`/`position`. Queried through the existing `SELECT` path (CLI,
+  Python, Node, Flight). `ORDER BY`, `DISTINCT`, aggregates and non-pushable `WHERE` fail closed.
+  Matches `sstabledump` on all 22 spec fixtures.
+- **Trino connector fat jar** (#2869, PR #4188): `cqlite-trino-<version>-all.jar` + `.sha256` as a
+  GitHub Release asset on every tag (and a `trino-connector-dev` channel). Maven Central keeps the
+  thin jar. Fixes gRPC service-file merging in the shaded jar.
+- **`cqlite read-commitlog`** reports `columns_read`, and `last_mutation_partial` in JSON (#2798, PR
+  #4291).
+
+### Changed
+
+- **BREAKING (MSRV): Rust floor 1.85 → 1.95** (#4236, PR #4242).
+- **BREAKING (Rust API, `arrow`/`parquet` features): Arrow, Parquet and arrow-flight 53 → 59**
+  (tonic 0.12 → 0.14.1; #4236, PR #4242). Arrow 59 types appear in
+  `export::arrow_size::arrow_payload_bytes` and `ArrowRowAccumulator::to_record_batch`. The
+  non-default `datafusion-spike` feature of `cqlite-flight` moves from DataFusion `=44.0.0` to
+  `=55.1.0`. Parquet and Flight output is semantically unchanged.
+- **BREAKING (Rust API): `cqlite_core` CommitLog `PartitionUpdate` gains `pub columns_read: bool`**
+  (#2798, PR #4291). The struct is not `#[non_exhaustive]`; struct literals need the new field.
+- **`cqlite-cli` default features now include `write-support`** (#4379), so the packaged CLI
+  (release binaries, Homebrew, `cargo install`) ships `salvage`, `rebuild` and `compact`. Opt out
+  with `--no-default-features --features tui,cli-helpers`. The write surface stays uncompressed-only
+  (#1406).
+- Dev/test cargo profiles use `debug = "line-tables-only"` (#4278, PR #4281). Release and bench
+  profiles are unchanged.
+
+### Fixed
+
+- **Writer statistics are derived from emitted data** (#4246, also #4243; PR #4289): tombstone-shadowed
+  rows no longer lower the `Statistics.db` minimums or the `Data.db` delta-encoding baseline in
+  flush, compaction and maintenance writes, which had diverged from Cassandra's bytes.
+- **CommitLog corruption checks** (#2798, PR #4291): malformed descriptor JSON/UTF-8, a wrongly typed
+  `compressionClass` and invalid backward sync markers are rejected per `cassandra-5.0.8`; a
+  `--limit` that clips output clears `all_updates_complete`.
+- `cqlite-core` tests no longer shell out to `npx claude-flow@alpha` (#4238, PR #4277).
+- Parity harnesses (CLI parity, cross-binding canonicalizer, smoke golden) handle unquoted
+  `decimal` and `f32` `float` JSON exactly (#4350, #4058; PR #4359). CLI output is unchanged from
+  0.17.
+
+### CI and tooling
+
+- CI dataset bundle v3.6 and four exhaustive-regeneration generators wired (#4351, PR #4370);
+  dataset cache restores re-assert committed fixtures (#4356, PR #4358); perf gate bench build OOM
+  (#4352, PR #4372); coverage leg on `cargo-llvm-cov` (#4371, PR #4373); Coverage Gate compile fix
+  (#4348, PR #4354); Windows schemas-root test (#4349, PR #4355).
+- Agent gate: diff-scoped `tooling-tests` (#4266), `--recertify` host-fault re-certification
+  (#4268, PR #4283), committed fleet gate launcher (#4267, PR #4270), macOS gate fixes (#4206,
+  #4220, #4221; PR #4215), flake fixes (#4144, #4282, #4287, #4347).
+- Nightly deep-check repaired: `core-tests` runs `--no-fail-fast` and the uncommissioned
+  zstd-dictionary fixture tests are ignored pending #1413 (#4375, PR #4382); nested gates carve out
+  their enclosing gate's artifacts and the nightly summary moves out of the checkout (#4171,
+  PR #4383); the component-set self-test works on git 2.55 (#4384, PR #4385), and the
+  component-set pre-flight names the shallow clone when `merge-base` exits 128 on git 2.55
+  (#4390, PR #4391).
+- Performance Regression Gate: the `concurrent_scan` n4 scaling floor is calibrated to the
+  `ubuntu-latest` runner that evaluates it, 1.8 → 1.5 (#4376, PR #4393).
+
 ## [v0.17.0] - 2026-09-08
 
 ### Changed
