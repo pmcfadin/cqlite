@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LoadErrorType"],"struct":["AggregatorConfig","LoadResult","SchemaAggregator","SchemaLoadError","SchemaLoadWarning"]};

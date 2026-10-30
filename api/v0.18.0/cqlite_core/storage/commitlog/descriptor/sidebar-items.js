@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SUPPORTED_COMMITLOG_VERSION"],"struct":["CommitLogDescriptor","CommitLogVersionGates"]};

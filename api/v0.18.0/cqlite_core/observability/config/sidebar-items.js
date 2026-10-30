@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_ENDPOINT","DEFAULT_SERVICE_NAME","DEFAULT_TIMEOUT"],"enum":["OtelProtocol"],"struct":["ObservabilityConfig","ObservabilityConfigBuilder"]};

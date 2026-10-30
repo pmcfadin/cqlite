@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["compression_benchmarks","memory_benchmarks","throughput_benchmarks","utils","zerocopy_benchmarks"],"struct":["BenchmarkResult","Cassandra5PerformanceSuite","PRDTargets"]};

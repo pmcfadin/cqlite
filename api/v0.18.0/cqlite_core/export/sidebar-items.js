@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["arrow_convert","arrow_row_accumulator","arrow_size","delta_parquet","delta_schema","parquet"]};

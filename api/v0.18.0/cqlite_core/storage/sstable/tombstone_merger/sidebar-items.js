@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["EntryMetadata","GenerationValue","TombstoneMerger"]};

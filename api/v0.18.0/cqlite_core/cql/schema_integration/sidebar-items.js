@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_table_name_enhanced","parse_cql_schema_compat","parse_cql_schema_enhanced","parse_cql_schema_fast","parse_cql_schema_simple","parse_cql_schema_strict","parse_cql_schemas_batch","table_name_matches_enhanced","validate_cql_schema_syntax"],"struct":["SchemaParserConfig"]};
