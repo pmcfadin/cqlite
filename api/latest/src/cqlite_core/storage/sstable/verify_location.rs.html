@@ -1,0 +1,915 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/verify_location.rs`."><title>verify_location.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/</div>verify_location.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Corruption-location resolution for [`VerifyFinding`] (issue #4194).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! This module owns exactly one piece of logic: given a `Data.db` byte range a
+<a href=#4 id=4 data-nosnippet>4</a>//! finding is anchored to, intersect it against a boundary source's own decoded
+<a href=#5 id=5 data-nosnippet>5</a>//! partition extents to name which partitions the damage touches. It is a pure,
+<a href=#6 id=6 data-nosnippet>6</a>//! closed-interval computation — **no byte-pattern scanning of `Data.db` is ever
+<a href=#7 id=7 data-nosnippet>7</a>//! performed here** (no-heuristics mandate, issue #28; mechanically enforced by
+<a href=#8 id=8 data-nosnippet>8</a>//! `scripts/tests/test_verify_location_no_resync_scan.sh`, which runs in the
+<a href=#9 id=9 data-nosnippet>9</a>//! gate's UNSCOPED `roborev-lints` component — `tooling-tests` is diff-scoped
+<a href=#10 id=10 data-nosnippet>10</a>//! and does not declare `cqlite-core/**` (#4266), so a core-only diff would
+<a href=#11 id=11 data-nosnippet>11</a>//! skip it there).
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! # Coordinate spaces (read this before touching call sites)
+<a href=#14 id=14 data-nosnippet>14</a>//!
+<a href=#15 id=15 data-nosnippet>15</a>//! `Index.db`'s `data_offset` and the BTI trie's resolved partition positions
+<a href=#16 id=16 data-nosnippet>16</a>//! both address the **decompressed (logical)** `Data.db` byte stream — Cassandra
+<a href=#17 id=17 data-nosnippet>17</a>//! opens a compressed `Data.db` through a reader that presents a virtual
+<a href=#18 id=18 data-nosnippet>18</a>//! uncompressed view, and both boundary sources were written against that view.
+<a href=#19 id=19 data-nosnippet>19</a>//! For an uncompressed table logical and physical coordinates coincide.
+<a href=#20 id=20 data-nosnippet>20</a>//! [`resolve_partitions`] therefore always operates on a *logical* damaged
+<a href=#21 id=21 data-nosnippet>21</a>//! range; callers computing a chunk's *physical* on-disk byte range (for
+<a href=#22 id=22 data-nosnippet>22</a>//! [`Location::byte_offset`]/[`Location::byte_len`], which are reported for a
+<a href=#23 id=23 data-nosnippet>23</a>//! human to go find the bytes) additionally derive the matching logical range
+<a href=#24 id=24 data-nosnippet>24</a>//! before calling in — see `verify.rs`'s call sites for the per-check
+<a href=#25 id=25 data-nosnippet>25</a>//! derivation (compressed: `chunk_index * chunk_length`; uncompressed: the
+<a href=#26 id=26 data-nosnippet>26</a>//! physical offset, unchanged).
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! [`VerifyFinding`]: super::verify::VerifyFinding
+<a href=#29 id=29 data-nosnippet>29</a>//! [`Location::byte_offset`]: Location::byte_offset
+<a href=#30 id=30 data-nosnippet>30</a>//! [`Location::byte_len`]: Location::byte_len
+<a href=#31 id=31 data-nosnippet>31</a>
+<a href=#32 id=32 data-nosnippet>32</a></span><span class="kw">use </span>std::path::Path;
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">use </span>std::sync::Arc;
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">use </span><span class="kw">crate</span>::platform::Platform;
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">use </span><span class="kw">crate</span>::storage::sstable::verify::{
+<a href=#37 id=37 data-nosnippet>37</a>    BtiResolvedLeaf, ComponentSet, VerifyErrorClass, VerifyFinding,
+<a href=#38 id=38 data-nosnippet>38</a>};
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">use </span><span class="kw">crate</span>::storage::sstable::version_gate::SsTableFormat;
+<a href=#40 id=40 data-nosnippet>40</a>
+<a href=#41 id=41 data-nosnippet>41</a><span class="doccomment">/// What a [`Location`]'s physical `byte_offset`/`byte_len` actually describe.
+<a href=#42 id=42 data-nosnippet>42</a>///
+<a href=#43 id=43 data-nosnippet>43</a>/// The two readings are not interchangeable: rendering a declared range
+<a href=#44 id=44 data-nosnippet>44</a>/// identically to a damaged one told the operator that 4 bytes were damaged
+<a href=#45 id=45 data-nosnippet>45</a>/// when the real damage is the whole logical tail `partitions` enumerates.
+<a href=#46 id=46 data-nosnippet>46</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">pub enum </span>PhysicalAnchor {
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="doccomment">/// `byte_offset`/`byte_len` cover bytes that are PRESENT in the file and
+<a href=#49 id=49 data-nosnippet>49</a>    /// damaged — a failed chunk CRC, a decompression error. Reading that range
+<a href=#50 id=50 data-nosnippet>50</a>    /// off disk yields the damaged bytes themselves.
+<a href=#51 id=51 data-nosnippet>51</a>    </span>DamagedExtent,
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="doccomment">/// `byte_offset`/`byte_len` are a location the SSTable's OWN metadata
+<a href=#53 id=53 data-nosnippet>53</a>    /// declares that the file does not satisfy: for `ChunkOffsetOutOfBounds`
+<a href=#54 id=54 data-nosnippet>54</a>    /// the declared chunk offset plus a chunk record's MINIMUM SIZE of 4 bytes
+<a href=#55 id=55 data-nosnippet>55</a>    /// does not FIT inside `Data.db`. The 4 is the minimum because a record is
+<a href=#56 id=56 data-nosnippet>56</a>    /// `[compressed_bytes][4-byte trailing CRC32]`
+<a href=#57 id=57 data-nosnippet>57</a>    /// (`compression_info.rs`), so even a zero-length payload occupies 4
+<a href=#58 id=58 data-nosnippet>58</a>    /// bytes. The reported range `[byte_offset, byte_offset + 4)` is therefore
+<a href=#59 id=59 data-nosnippet>59</a>    /// the record's HEAD at the declared offset — NOT the trailing CRC32,
+<a href=#60 id=60 data-nosnippet>60</a>    /// which lies at the record's far end and whose position is unknown here
+<a href=#61 id=61 data-nosnippet>61</a>    /// (the payload length is not known for an out-of-bounds chunk). Roborev
+<a href=#62 id=62 data-nosnippet>62</a>    /// nit N1 (#4194): this doc called the reported range "the 4-byte TRAILING
+<a href=#63 id=63 data-nosnippet>63</a>    /// inline CRC32", which names the wrong end of the record.
+<a href=#64 id=64 data-nosnippet>64</a>    ///
+<a href=#65 id=65 data-nosnippet>65</a>    /// The test is `offset + 4 &gt; data_len` (verify.rs), so it ALSO fires when
+<a href=#66 id=66 data-nosnippet>66</a>    /// the offset is itself readable and only the record's minimum extent runs
+<a href=#67 id=67 data-nosnippet>67</a>    /// past EOF — hence "does not fit", never "absent"/"cannot be read",
+<a href=#68 id=68 data-nosnippet>68</a>    /// matching `format_location`.
+<a href=#69 id=69 data-nosnippet>69</a>    /// The damaged extent here is the LOGICAL range, which `partitions` names.
+<a href=#70 id=70 data-nosnippet>70</a>    </span>DeclaredRecord,
+<a href=#71 id=71 data-nosnippet>71</a>}
+<a href=#72 id=72 data-nosnippet>72</a>
+<a href=#73 id=73 data-nosnippet>73</a><span class="doccomment">/// Where a [`VerifyFinding`] anchored to a `Data.db` byte range is located, and
+<a href=#74 id=74 data-nosnippet>74</a>/// which partitions that range intersects.
+<a href=#75 id=75 data-nosnippet>75</a>///
+<a href=#76 id=76 data-nosnippet>76</a>/// [`VerifyFinding`]: super::verify::VerifyFinding
+<a href=#77 id=77 data-nosnippet>77</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#78 id=78 data-nosnippet>78</a></span><span class="kw">pub struct </span>Location {
+<a href=#79 id=79 data-nosnippet>79</a>    <span class="doccomment">/// The component the byte range belongs to — always `"Data.db"` today (the
+<a href=#80 id=80 data-nosnippet>80</a>    /// only component with a chunk/offset grid a finding can anchor to).
+<a href=#81 id=81 data-nosnippet>81</a>    </span><span class="kw">pub </span>component: String,
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="doccomment">/// Physical (on-disk) start of the range this finding is ANCHORED to in
+<a href=#83 id=83 data-nosnippet>83</a>    /// `component`. Whether those bytes are damaged, or merely DECLARED by the
+<a href=#84 id=84 data-nosnippet>84</a>    /// SSTable's own metadata and absent from the file, is stated by
+<a href=#85 id=85 data-nosnippet>85</a>    /// [`Location::anchor`] — read it before describing this range to a human
+<a href=#86 id=86 data-nosnippet>86</a>    /// (roborev job 92 MEDIUM: these two fields previously claimed to be "the
+<a href=#87 id=87 data-nosnippet>87</a>    /// damaged range" unconditionally, which for `ChunkOffsetOutOfBounds` named
+<a href=#88 id=88 data-nosnippet>88</a>    /// 4 bytes at an offset PAST EOF beside a 900-partition damage list).
+<a href=#89 id=89 data-nosnippet>89</a>    </span><span class="kw">pub </span>byte_offset: u64,
+<a href=#90 id=90 data-nosnippet>90</a>    <span class="doccomment">/// Physical (on-disk) length of the anchored range in `component`. See
+<a href=#91 id=91 data-nosnippet>91</a>    /// [`Location::byte_offset`] and [`Location::anchor`].
+<a href=#92 id=92 data-nosnippet>92</a>    </span><span class="kw">pub </span>byte_len: u64,
+<a href=#93 id=93 data-nosnippet>93</a>    <span class="doccomment">/// Whether `byte_offset`/`byte_len` describe damaged bytes or a declared
+<a href=#94 id=94 data-nosnippet>94</a>    /// record location that the file does not satisfy.
+<a href=#95 id=95 data-nosnippet>95</a>    </span><span class="kw">pub </span>anchor: PhysicalAnchor,
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="doccomment">/// The chunk index the damage falls in, when `component` has a chunk grid
+<a href=#97 id=97 data-nosnippet>97</a>    /// (compressed `CompressionInfo.db` chunks, or the fixed-size `CRC.db`
+<a href=#98 id=98 data-nosnippet>98</a>    /// grid). `None` for a finding with no chunk grid.
+<a href=#99 id=99 data-nosnippet>99</a>    </span><span class="kw">pub </span>chunk_index: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#100 id=100 data-nosnippet>100</a>    <span class="doccomment">/// The partitions whose `Data.db` extent intersects the damaged range.
+<a href=#101 id=101 data-nosnippet>101</a>    </span><span class="kw">pub </span>partitions: PartitionResolution,
+<a href=#102 id=102 data-nosnippet>102</a>}
+<a href=#103 id=103 data-nosnippet>103</a>
+<a href=#104 id=104 data-nosnippet>104</a><span class="doccomment">/// The largest number of partition keys [`resolve_partitions`] will
+<a href=#105 id=105 data-nosnippet>105</a>/// materialize into `Resolved.keys` (roborev round-2 MEDIUM finding): a
+<a href=#106 id=106 data-nosnippet>106</a>/// truncation's damaged range is `[first_bad_chunk_start, data_length)` —
+<a href=#107 id=107 data-nosnippet>107</a>/// for a badly truncated file that can intersect essentially every partition
+<a href=#108 id=108 data-nosnippet>108</a>/// in the SSTable, and this module's job is precisely to enumerate them by
+<a href=#109 id=109 data-nosnippet>109</a>/// hex key, materializing one `String` (2x key length) per hit. A `Location`
+<a href=#110 id=110 data-nosnippet>110</a>/// is a per-FINDING, not per-file, structure, so nothing else in this module
+<a href=#111 id=111 data-nosnippet>111</a>/// bounds that count. `Resolved.truncated` names how many more intersected
+<a href=#112 id=112 data-nosnippet>112</a>/// but were not materialized, so the report stays affirmative about what it
+<a href=#113 id=113 data-nosnippet>113</a>/// omitted rather than either silently truncating or growing unbounded.
+<a href=#114 id=114 data-nosnippet>114</a></span><span class="kw">pub const </span>MAX_RESOLVED_KEYS: usize = <span class="number">100</span>;
+<a href=#115 id=115 data-nosnippet>115</a>
+<a href=#116 id=116 data-nosnippet>116</a><span class="doccomment">/// The outcome of resolving [`Location::partitions`] against a boundary source.
+<a href=#117 id=117 data-nosnippet>117</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#118 id=118 data-nosnippet>118</a></span><span class="kw">pub enum </span>PartitionResolution {
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="doccomment">/// The boundary source was healthy and every intersecting partition's raw
+<a href=#120 id=120 data-nosnippet>120</a>    /// key was recoverable. `keys` is empty when no boundary entry intersects
+<a href=#121 id=121 data-nosnippet>121</a>    /// the damaged range (legitimate — e.g. the range falls entirely past the
+<a href=#122 id=122 data-nosnippet>122</a>    /// last known partition); it is capped at [`MAX_RESOLVED_KEYS`], with
+<a href=#123 id=123 data-nosnippet>123</a>    /// `truncated` naming how many additional intersecting partitions exist
+<a href=#124 id=124 data-nosnippet>124</a>    /// beyond the cap (`0` when nothing was omitted).
+<a href=#125 id=125 data-nosnippet>125</a>    </span>Resolved { keys: Vec&lt;KeyRef&gt;, truncated: usize },
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="doccomment">/// The boundary source could not be trusted (or a needed partition key was
+<a href=#127 id=127 data-nosnippet>127</a>    /// unavailable) — the cause is named, never a guess and never a silent
+<a href=#128 id=128 data-nosnippet>128</a>    /// empty list standing in for "unknown".
+<a href=#129 id=129 data-nosnippet>129</a>    </span>Unresolved(String),
+<a href=#130 id=130 data-nosnippet>130</a>}
+<a href=#131 id=131 data-nosnippet>131</a>
+<a href=#132 id=132 data-nosnippet>132</a><span class="doccomment">/// One partition key, as recovered from the boundary source.
+<a href=#133 id=133 data-nosnippet>133</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#134 id=134 data-nosnippet>134</a></span><span class="kw">pub struct </span>KeyRef {
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="doccomment">/// The raw partition key's bytes, lower-case hex. Always populated when
+<a href=#136 id=136 data-nosnippet>136</a>    /// the key is known.
+<a href=#137 id=137 data-nosnippet>137</a>    </span><span class="kw">pub </span>key_hex: String,
+<a href=#138 id=138 data-nosnippet>138</a>    <span class="doccomment">/// Reserved for a schema-decoded rendering of the raw key (parity with
+<a href=#139 id=139 data-nosnippet>139</a>    /// `sstable-salvage`'s manifest `key`/`key_hex` split). **Never populated
+<a href=#140 id=140 data-nosnippet>140</a>    /// today** — `KeyRef::from_raw` is the only constructor and always sets
+<a href=#141 id=141 data-nosnippet>141</a>    /// this to `None`; wiring `--schema` support through to this field is a
+<a href=#142 id=142 data-nosnippet>142</a>    /// follow-up, not something already partially implemented (roborev
+<a href=#143 id=143 data-nosnippet>143</a>    /// finding, final round, #4194).
+<a href=#144 id=144 data-nosnippet>144</a>    </span><span class="kw">pub </span>rendered: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#145 id=145 data-nosnippet>145</a>}
+<a href=#146 id=146 data-nosnippet>146</a>
+<a href=#147 id=147 data-nosnippet>147</a><span class="kw">impl </span>KeyRef {
+<a href=#148 id=148 data-nosnippet>148</a>    <span class="kw">fn </span>from_raw(raw: <span class="kw-2">&amp;</span>[u8]) -&gt; <span class="self">Self </span>{
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="self">Self </span>{
+<a href=#150 id=150 data-nosnippet>150</a>            key_hex: hex_encode(raw),
+<a href=#151 id=151 data-nosnippet>151</a>            rendered: <span class="prelude-val">None</span>,
+<a href=#152 id=152 data-nosnippet>152</a>        }
+<a href=#153 id=153 data-nosnippet>153</a>    }
+<a href=#154 id=154 data-nosnippet>154</a>}
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a><span class="doccomment">/// A chunk/offset-anchored finding awaiting location resolution (issue #4194).
+<a href=#157 id=157 data-nosnippet>157</a>///
+<a href=#158 id=158 data-nosnippet>158</a>/// Pushed alongside its finding at the check site — where the physical byte
+<a href=#159 id=159 data-nosnippet>159</a>/// range and the LOGICAL (decompressed) damaged range are cheaply computable
+<a href=#160 id=160 data-nosnippet>160</a>/// from local context (`CompressionInfo`, the CRC.db chunk grid) — because
+<a href=#161 id=161 data-nosnippet>161</a>/// whether the boundary source (`Index.db` / `Partitions.db`) can be TRUSTED
+<a href=#162 id=162 data-nosnippet>162</a>/// is only knowable once every check has run (design.md §D2). Resolved in one
+<a href=#163 id=163 data-nosnippet>163</a>/// pass at the end of `verify_components` by [`finalize_locations`].
+<a href=#164 id=164 data-nosnippet>164</a>///
+<a href=#165 id=165 data-nosnippet>165</a>/// `pub(crate)` fields (#1116/#1135 file-size relocation): constructed at each
+<a href=#166 id=166 data-nosnippet>166</a>/// check site in `verify.rs`, resolved here, so both must cross that boundary.
+<a href=#167 id=167 data-nosnippet>167</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>PendingLocation {
+<a href=#168 id=168 data-nosnippet>168</a>    <span class="doccomment">/// Index into `findings` of the finding this location belongs to.
+<a href=#169 id=169 data-nosnippet>169</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) finding_index: usize,
+<a href=#170 id=170 data-nosnippet>170</a>    <span class="doccomment">/// Component the byte range belongs to — always `"Data.db"` today.
+<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) component: String,
+<a href=#172 id=172 data-nosnippet>172</a>    <span class="doccomment">/// Physical (on-disk) start of the damaged range.
+<a href=#173 id=173 data-nosnippet>173</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) byte_offset: u64,
+<a href=#174 id=174 data-nosnippet>174</a>    <span class="doccomment">/// Physical (on-disk) length of the damaged range.
+<a href=#175 id=175 data-nosnippet>175</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) byte_len: u64,
+<a href=#176 id=176 data-nosnippet>176</a>    <span class="doccomment">/// The chunk index the damage falls in, when the component has a chunk grid.
+<a href=#177 id=177 data-nosnippet>177</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) chunk_index: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="doccomment">/// The damaged range in `Data.db` LOGICAL (decompressed) offset space —
+<a href=#179 id=179 data-nosnippet>179</a>    /// the space `Index.db`/the BTI trie address (see this module's doc for
+<a href=#180 id=180 data-nosnippet>180</a>    /// why this differs from the physical range above).
+<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) damaged_logical: (u64, u64),
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// The total LOGICAL length bounding the last boundary entry's extent.
+<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) logical_len: u64,
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="doccomment">/// Where `logical_len` came from. Carried per-check-site because only the
+<a href=#185 id=185 data-nosnippet>185</a>    /// check site knows (see [`LogicalLenSource`]).
+<a href=#186 id=186 data-nosnippet>186</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) logical_len_source: LogicalLenSource,
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="doccomment">/// Whether the physical range above is a damaged extent or a declared
+<a href=#188 id=188 data-nosnippet>188</a>    /// record location — carried per-finding because it is a property of the
+<a href=#189 id=189 data-nosnippet>189</a>    /// CHECK that produced it, not of the component.
+<a href=#190 id=190 data-nosnippet>190</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) anchor: PhysicalAnchor,
+<a href=#191 id=191 data-nosnippet>191</a>}
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a><span class="doccomment">/// Human-readable one-line rendering of a [`Location`] for text output — the
+<a href=#194 id=194 data-nosnippet>194</a>/// FULL form, enumerating every resolved partition key (issue #4194). Used by
+<a href=#195 id=195 data-nosnippet>195</a>/// the CLI's explicit per-finding `location:` line in `verify` and `sweep`.
+<a href=#196 id=196 data-nosnippet>196</a></span><span class="kw">pub fn </span>format_location(loc: <span class="kw-2">&amp;</span>Location) -&gt; String {
+<a href=#197 id=197 data-nosnippet>197</a>    format_location_impl(loc, <span class="bool-val">true</span>)
+<a href=#198 id=198 data-nosnippet>198</a>}
+<a href=#199 id=199 data-nosnippet>199</a>
+<a href=#200 id=200 data-nosnippet>200</a><span class="doccomment">/// COMPACT one-line rendering of a [`Location`]: component, chunk and physical
+<a href=#201 id=201 data-nosnippet>201</a>/// range plus the partition COUNT — never the key list (issue #4194, roborev
+<a href=#202 id=202 data-nosnippet>202</a>/// job 131 MEDIUM).
+<a href=#203 id=203 data-nosnippet>203</a>///
+<a href=#204 id=204 data-nosnippet>204</a>/// `VerifyFinding`'s `Display` renders THIS, not [`format_location`].
+<a href=#205 id=205 data-nosnippet>205</a>/// `VerifyReport::summary_line()` joins every finding's `Display` into a single
+<a href=#206 id=206 data-nosnippet>206</a>/// line, and `cqlite verify --out text` prints that summary line first and then
+<a href=#207 id=207 data-nosnippet>207</a>/// each finding's full location again two lines below. Rendering the full form
+<a href=#208 id=208 data-nosnippet>208</a>/// in `Display` therefore made the "summary line" run to kilobytes (up to
+<a href=#209 id=209 data-nosnippet>209</a>/// [`MAX_RESOLVED_KEYS`] hex keys per finding) and duplicated, verbatim, the
+<a href=#210 id=210 data-nosnippet>210</a>/// `location:` detail printed beneath it; the same inflated strings flowed into
+<a href=#211 id=211 data-nosnippet>211</a>/// `IntegrityCheckResult::parsing_errors`. A COUNT keeps those consumers a
+<a href=#212 id=212 data-nosnippet>212</a>/// non-empty byte anchor without the enumeration.
+<a href=#213 id=213 data-nosnippet>213</a></span><span class="kw">pub fn </span>format_location_compact(loc: <span class="kw-2">&amp;</span>Location) -&gt; String {
+<a href=#214 id=214 data-nosnippet>214</a>    format_location_impl(loc, <span class="bool-val">false</span>)
+<a href=#215 id=215 data-nosnippet>215</a>}
+<a href=#216 id=216 data-nosnippet>216</a>
+<a href=#217 id=217 data-nosnippet>217</a><span class="doccomment">/// Shared renderer behind [`format_location`] and [`format_location_compact`].
+<a href=#218 id=218 data-nosnippet>218</a>/// ONE implementation on purpose: the CLI previously carried a second,
+<a href=#219 id=219 data-nosnippet>219</a>/// near-identical renderer that drifted from this one, so the compact variant
+<a href=#220 id=220 data-nosnippet>220</a>/// is a flag here rather than a separate function body.
+<a href=#221 id=221 data-nosnippet>221</a></span><span class="kw">fn </span>format_location_impl(loc: <span class="kw-2">&amp;</span>Location, full: bool) -&gt; String {
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="kw">let </span>chunk = loc
+<a href=#223 id=223 data-nosnippet>223</a>        .chunk_index
+<a href=#224 id=224 data-nosnippet>224</a>        .map(|c| <span class="macro">format!</span>(<span class="string">"chunk {c}, "</span>))
+<a href=#225 id=225 data-nosnippet>225</a>        .unwrap_or_default();
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">let </span>partitions = <span class="kw">match </span><span class="kw-2">&amp;</span>loc.partitions {
+<a href=#227 id=227 data-nosnippet>227</a>        PartitionResolution::Resolved { keys, .. } <span class="kw">if </span>keys.is_empty() =&gt; <span class="string">"0 partitions"</span>.to_string(),
+<a href=#228 id=228 data-nosnippet>228</a>        PartitionResolution::Resolved { keys, truncated } =&gt; {
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="comment">// Issue #4194, roborev round-2 MEDIUM finding: `truncated` names
+<a href=#230 id=230 data-nosnippet>230</a>            // how many more intersecting partitions exist beyond the
+<a href=#231 id=231 data-nosnippet>231</a>            // `MAX_RESOLVED_KEYS` cap, so a badly truncated Data.db's report
+<a href=#232 id=232 data-nosnippet>232</a>            // stays affirmative about what it omitted rather than silently
+<a href=#233 id=233 data-nosnippet>233</a>            // showing a partial list as if it were complete.
+<a href=#234 id=234 data-nosnippet>234</a>            </span><span class="kw">let </span>more = <span class="kw">if </span><span class="kw-2">*</span>truncated &gt; <span class="number">0 </span>{
+<a href=#235 id=235 data-nosnippet>235</a>                <span class="macro">format!</span>(<span class="string">" (+{truncated} more, capped)"</span>)
+<a href=#236 id=236 data-nosnippet>236</a>            } <span class="kw">else </span>{
+<a href=#237 id=237 data-nosnippet>237</a>                String::new()
+<a href=#238 id=238 data-nosnippet>238</a>            };
+<a href=#239 id=239 data-nosnippet>239</a>            <span class="kw">if </span>full {
+<a href=#240 id=240 data-nosnippet>240</a>                <span class="macro">format!</span>(
+<a href=#241 id=241 data-nosnippet>241</a>                    <span class="string">"{} partition(s){}: {}"</span>,
+<a href=#242 id=242 data-nosnippet>242</a>                    keys.len(),
+<a href=#243 id=243 data-nosnippet>243</a>                    more,
+<a href=#244 id=244 data-nosnippet>244</a>                    keys.iter()
+<a href=#245 id=245 data-nosnippet>245</a>                        .map(|k| k.key_hex.as_str())
+<a href=#246 id=246 data-nosnippet>246</a>                        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+<a href=#247 id=247 data-nosnippet>247</a>                        .join(<span class="string">", "</span>)
+<a href=#248 id=248 data-nosnippet>248</a>                )
+<a href=#249 id=249 data-nosnippet>249</a>            } <span class="kw">else </span>{
+<a href=#250 id=250 data-nosnippet>250</a>                <span class="macro">format!</span>(<span class="string">"{} partition(s){}"</span>, keys.len(), more)
+<a href=#251 id=251 data-nosnippet>251</a>            }
+<a href=#252 id=252 data-nosnippet>252</a>        }
+<a href=#253 id=253 data-nosnippet>253</a>        PartitionResolution::Unresolved(cause) =&gt; <span class="macro">format!</span>(<span class="string">"partitions unresolved ({cause})"</span>),
+<a href=#254 id=254 data-nosnippet>254</a>    };
+<a href=#255 id=255 data-nosnippet>255</a>    <span class="comment">// The physical range is rendered according to what it IS (roborev job 92
+<a href=#256 id=256 data-nosnippet>256</a>    // MEDIUM). A `DeclaredRecord` anchor names an offset the file does not
+<a href=#257 id=257 data-nosnippet>257</a>    // reach, so it is labelled `declared` and explicitly disclosed as absent —
+<a href=#258 id=258 data-nosnippet>258</a>    // rendering it identically to a damaged extent told the operator that 4
+<a href=#259 id=259 data-nosnippet>259</a>    // bytes were damaged when the real damage was the whole logical tail the
+<a href=#260 id=260 data-nosnippet>260</a>    // partition list enumerates.
+<a href=#261 id=261 data-nosnippet>261</a>    </span><span class="kw">let </span>physical = <span class="kw">match </span>loc.anchor {
+<a href=#262 id=262 data-nosnippet>262</a>        PhysicalAnchor::DamagedExtent =&gt; {
+<a href=#263 id=263 data-nosnippet>263</a>            <span class="macro">format!</span>(<span class="string">"offset 0x{:x} len {}"</span>, loc.byte_offset, loc.byte_len)
+<a href=#264 id=264 data-nosnippet>264</a>        }
+<a href=#265 id=265 data-nosnippet>265</a>        <span class="comment">// "does not fit within the file", NOT "not present" (roborev job
+<a href=#266 id=266 data-nosnippet>266</a>        // 108). The out-of-bounds test is `offset + 4 &gt; data_len`, which also
+<a href=#267 id=267 data-nosnippet>267</a>        // fires when the offset itself is INSIDE the file and only the record's
+<a href=#268 id=268 data-nosnippet>268</a>        // tail runs past the end (data_len 1000, offset 998: two of those bytes
+<a href=#269 id=269 data-nosnippet>269</a>        // are readable). Claiming the range is absent would over-state the
+<a href=#270 id=270 data-nosnippet>270</a>        // evidence in exactly the way this anchor exists to prevent.
+<a href=#271 id=271 data-nosnippet>271</a>        // The compact form keeps the `declared` LABEL — the distinction it
+<a href=#272 id=272 data-nosnippet>272</a>        // draws (an offset the file does not reach, not a damaged extent) is
+<a href=#273 id=273 data-nosnippet>273</a>        // the point of the anchor and survives dropping the prose.
+<a href=#274 id=274 data-nosnippet>274</a>        </span>PhysicalAnchor::DeclaredRecord <span class="kw">if </span>!full =&gt; {
+<a href=#275 id=275 data-nosnippet>275</a>            <span class="macro">format!</span>(
+<a href=#276 id=276 data-nosnippet>276</a>                <span class="string">"declared offset 0x{:x} len {}"</span>,
+<a href=#277 id=277 data-nosnippet>277</a>                loc.byte_offset, loc.byte_len
+<a href=#278 id=278 data-nosnippet>278</a>            )
+<a href=#279 id=279 data-nosnippet>279</a>        }
+<a href=#280 id=280 data-nosnippet>280</a>        PhysicalAnchor::DeclaredRecord =&gt; <span class="macro">format!</span>(
+<a href=#281 id=281 data-nosnippet>281</a>            <span class="string">"declared offset 0x{:x} len {} (declared by metadata; the record does not fit \
+<a href=#282 id=282 data-nosnippet>282</a>             within the file)"</span>,
+<a href=#283 id=283 data-nosnippet>283</a>            loc.byte_offset, loc.byte_len
+<a href=#284 id=284 data-nosnippet>284</a>        ),
+<a href=#285 id=285 data-nosnippet>285</a>    };
+<a href=#286 id=286 data-nosnippet>286</a>    <span class="macro">format!</span>(<span class="string">"{}: {}{} — {}"</span>, loc.component, chunk, physical, partitions)
+<a href=#287 id=287 data-nosnippet>287</a>}
+<a href=#288 id=288 data-nosnippet>288</a>
+<a href=#289 id=289 data-nosnippet>289</a><span class="doccomment">/// Lower-case hex encode, one `write!` per byte rather than one `String`
+<a href=#290 id=290 data-nosnippet>290</a>/// allocation per byte (roborev round-2 LOW: `format!` in the loop is on the
+<a href=#291 id=291 data-nosnippet>291</a>/// path [`MAX_RESOLVED_KEYS`] makes hot — up to 100 calls per `Location`).
+<a href=#292 id=292 data-nosnippet>292</a></span><span class="kw">fn </span>hex_encode(bytes: <span class="kw-2">&amp;</span>[u8]) -&gt; String {
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="kw">use </span>std::fmt::Write;
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = String::with_capacity(bytes.len() * <span class="number">2</span>);
+<a href=#295 id=295 data-nosnippet>295</a>    <span class="kw">for </span>b <span class="kw">in </span>bytes {
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="kw">let _ </span>= <span class="macro">write!</span>(out, <span class="string">"{:02x}"</span>, b);
+<a href=#297 id=297 data-nosnippet>297</a>    }
+<a href=#298 id=298 data-nosnippet>298</a>    out
+<a href=#299 id=299 data-nosnippet>299</a>}
+<a href=#300 id=300 data-nosnippet>300</a>
+<a href=#301 id=301 data-nosnippet>301</a><span class="doccomment">/// The cause named when the boundary source (`Index.db` / `Partitions.db`)
+<a href=#302 id=302 data-nosnippet>302</a>/// itself is the corrupt component in the same report — every OTHER location
+<a href=#303 id=303 data-nosnippet>303</a>/// in that report is poisoned by this cause (design.md §D2).
+<a href=#304 id=304 data-nosnippet>304</a></span><span class="kw">pub const </span>BOUNDARY_SOURCE_UNREADABLE: <span class="kw-2">&amp;</span>str = <span class="string">"boundary-source-unreadable"</span>;
+<a href=#305 id=305 data-nosnippet>305</a>
+<a href=#306 id=306 data-nosnippet>306</a><span class="doccomment">/// A partition key was needed to resolve a location but was not recoverable
+<a href=#307 id=307 data-nosnippet>307</a>/// at resolution time (e.g. a BTI `DataOffset` leaf whose raw key needs a
+<a href=#308 id=308 data-nosnippet>308</a>/// FULL-mode `Data.db` scan, and QUICK mode never scans). Named rather than
+<a href=#309 id=309 data-nosnippet>309</a>/// silently dropped from the resolved set, which would under-report.
+<a href=#310 id=310 data-nosnippet>310</a>///
+<a href=#311 id=311 data-nosnippet>311</a>/// **The COMMON case for a `DataOffset` leaf whose finding is
+<a href=#312 id=312 data-nosnippet>312</a>/// Data.db-anchored**, not an edge case. Not because the scan runs too late
+<a href=#313 id=313 data-nosnippet>313</a>/// (it does not: `finalize_locations` runs AFTER it), but because a `Data.db`
+<a href=#314 id=314 data-nosnippet>314</a>/// corrupt enough to fail the chunk-CRC check is in practice ALSO corrupt
+<a href=#315 id=315 data-nosnippet>315</a>/// enough to fail the full row scan on the SAME bytes — the scan errors,
+<a href=#316 id=316 data-nosnippet>316</a>/// `scan_position_map` stays `None`, and a `DataOffset` leaf's raw key is
+<a href=#317 id=317 data-nosnippet>317</a>/// recoverable ONLY through that map. A `RowsOffset` leaf carries its raw
+<a href=#318 id=318 data-nosnippet>318</a>/// key INLINE from `Rows.db`, so it never hits THIS cause — but under the
+<a href=#319 id=319 data-nosnippet>319</a>/// owner's fail-closed ruling (option (a), 2026-10-02) an uncorroborated one
+<a href=#320 id=320 data-nosnippet>320</a>/// is refused via [`BTI_IDENTITY_UNCORROBORATED`] instead, not silently
+<a href=#321 id=321 data-nosnippet>321</a>/// resolved. See `issue_4194_verify_location.rs`'s
+<a href=#322 id=322 data-nosnippet>322</a>/// `bti_compressed_chunk_crc_flip_refuses_uncorroborated_rows_offset_leaves`.
+<a href=#323 id=323 data-nosnippet>323</a></span><span class="kw">pub const </span>PARTITION_KEY_UNAVAILABLE: <span class="kw-2">&amp;</span>str =
+<a href=#324 id=324 data-nosnippet>324</a>    <span class="string">"partition key unavailable for an intersecting boundary entry (requires a full-mode scan)"</span>;
+<a href=#325 id=325 data-nosnippet>325</a>
+<a href=#326 id=326 data-nosnippet>326</a><span class="doccomment">/// `true` when the half-open ranges `[a.0, a.1)` and `[b.0, b.1)` overlap.
+<a href=#327 id=327 data-nosnippet>327</a></span><span class="kw">fn </span>ranges_intersect(a: (u64, u64), b: (u64, u64)) -&gt; bool {
+<a href=#328 id=328 data-nosnippet>328</a>    a.<span class="number">0 </span>&lt; b.<span class="number">1 </span>&amp;&amp; b.<span class="number">0 </span>&lt; a.<span class="number">1
+<a href=#329 id=329 data-nosnippet>329</a></span>}
+<a href=#330 id=330 data-nosnippet>330</a>
+<a href=#331 id=331 data-nosnippet>331</a><span class="doccomment">/// One boundary-source entry: `(LOGICAL Data.db position, raw key when
+<a href=#332 id=332 data-nosnippet>332</a>/// known)`. `None` marks an entry whose identity is not yet resolvable (see
+<a href=#333 id=333 data-nosnippet>333</a>/// [`PARTITION_KEY_UNAVAILABLE`]).
+<a href=#334 id=334 data-nosnippet>334</a>///
+<a href=#335 id=335 data-nosnippet>335</a>/// The key is `Arc&lt;[u8]&gt;`, not `Vec&lt;u8&gt;` (roborev round-1 MEDIUM finding): BIG's
+<a href=#336 id=336 data-nosnippet>336</a>/// `PartitionIndexEntry::raw_key`/`key_digest` are ALREADY `Arc&lt;[u8]&gt;` in
+<a href=#337 id=337 data-nosnippet>337</a>/// `IndexReader`'s materialized entries, so building a boundary-entry list from
+<a href=#338 id=338 data-nosnippet>338</a>/// them is an O(1) refcount bump per entry rather than an O(key_len) byte copy —
+<a href=#339 id=339 data-nosnippet>339</a>/// doubling the resident partition-index memory for a large table was the
+<a href=#340 id=340 data-nosnippet>340</a>/// exact cost this type existed to avoid.
+<a href=#341 id=341 data-nosnippet>341</a></span><span class="kw">pub type </span>BoundaryEntry = (u64, <span class="prelude-ty">Option</span>&lt;Arc&lt;[u8]&gt;&gt;);
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a><span class="doccomment">/// The cause named when the boundary source could not be OPENED at all — a
+<a href=#344 id=344 data-nosnippet>344</a>/// permission error, an I/O failure, a path that went away mid-report.
+<a href=#345 id=345 data-nosnippet>345</a>///
+<a href=#346 id=346 data-nosnippet>346</a>/// Roborev "important" finding I1 (#4194): the `Err(_) =&gt; None` arm of
+<a href=#347 id=347 data-nosnippet>347</a>/// [`finalize_locations`]'s `IndexReader::open` DISCARDED the real
+<a href=#348 id=348 data-nosnippet>348</a>/// `io::Error` and fell through to the generic [`BOUNDARY_SOURCE_UNAVAILABLE`],
+<a href=#349 id=349 data-nosnippet>349</a>/// so an operator hitting `Permission denied` on `Index.db` was told only that
+<a href=#350 id=350 data-nosnippet>350</a>/// a boundary source was "unavailable" — violating this module's own contract
+<a href=#351 id=351 data-nosnippet>351</a>/// ([`PartitionResolution::Unresolved`]) that "the cause is named".
+<a href=#352 id=352 data-nosnippet>352</a></span><span class="kw">pub const </span>BOUNDARY_SOURCE_OPEN_FAILED: <span class="kw-2">&amp;</span>str = <span class="string">"boundary source could not be opened"</span>;
+<a href=#353 id=353 data-nosnippet>353</a>
+<a href=#354 id=354 data-nosnippet>354</a><span class="doccomment">/// The cause named when no boundary source was produced for this report at
+<a href=#355 id=355 data-nosnippet>355</a>/// all, with no error to attribute it to (the BTI arm's `bti_leaves == None`).
+<a href=#356 id=356 data-nosnippet>356</a></span><span class="kw">pub const </span>BOUNDARY_SOURCE_UNAVAILABLE: <span class="kw-2">&amp;</span>str = <span class="string">"boundary source unavailable for location resolution"</span>;
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a><span class="doccomment">/// The cause named when a BTI boundary source's leaves were never
+<a href=#359 id=359 data-nosnippet>359</a>/// CORROBORATED against `Data.db` (issue #4194; owner ruling 2026-10-02:
+<a href=#360 id=360 data-nosnippet>360</a>/// option (a), fail closed).
+<a href=#361 id=361 data-nosnippet>361</a>///
+<a href=#362 id=362 data-nosnippet>362</a>/// # Why a BTI `Resolved` needs corroboration and a BIG one does not
+<a href=#363 id=363 data-nosnippet>363</a>///
+<a href=#364 id=364 data-nosnippet>364</a>/// A BIG `Index.db` entry is `(raw key, data position)` — one declaration,
+<a href=#365 id=365 data-nosnippet>365</a>/// parsed together, whose position is now checked against the file's own
+<a href=#366 id=366 data-nosnippet>366</a>/// declared logical length ([`BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS`],
+<a href=#367 id=367 data-nosnippet>367</a>/// [`first_order_violation`]). A BTI leaf's identity is NOT one declaration:
+<a href=#368 id=368 data-nosnippet>368</a>/// the trie emits a byte-comparable PREFIX, and the raw key is recovered
+<a href=#369 id=369 data-nosnippet>369</a>/// separately through the leaf's PAYLOAD (`Rows.db` for a `RowsOffset` leaf, a
+<a href=#370 id=370 data-nosnippet>370</a>/// `Data.db` scan for a `DataOffset` leaf). A corruption that keeps a leaf's
+<a href=#371 id=371 data-nosnippet>371</a>/// prefix while rewriting its payload to point at a DIFFERENT partition thus
+<a href=#372 id=372 data-nosnippet>372</a>/// yields a trie that parses cleanly and resolves confidently to the WRONG
+<a href=#373 id=373 data-nosnippet>373</a>/// key — and the only thing that can see it is the FULL-mode identity
+<a href=#374 id=374 data-nosnippet>374</a>/// cross-check (`bti_partition_identity_mismatch`), which compares every
+<a href=#375 id=375 data-nosnippet>375</a>/// leaf's resolved payload against the keys decoded from `Data.db`.
+<a href=#376 id=376 data-nosnippet>376</a>///
+<a href=#377 id=377 data-nosnippet>377</a>/// # Why "no mismatch reported" is not evidence the leaves agree
+<a href=#378 id=378 data-nosnippet>378</a>///
+<a href=#379 id=379 data-nosnippet>379</a>/// The cross-check sits two levels deep inside conditions a corrupt file
+<a href=#380 id=380 data-nosnippet>380</a>/// routinely trips, so its silence usually means nothing looked:
+<a href=#381 id=381 data-nosnippet>381</a>///
+<a href=#382 id=382 data-nosnippet>382</a>///   1. QUICK mode never scans at all.
+<a href=#383 id=383 data-nosnippet>383</a>///   2. It is nested in `if !compression_metadata_corrupt`, which ANY
+<a href=#384 id=384 data-nosnippet>384</a>///      `CompressionInfoCorrupt` or `ChunkOffsetOutOfBounds` finding sets — so
+<a href=#385 id=385 data-nosnippet>385</a>///      a footer-flip plus a corrupt `CompressionInfo.db` evades it with no
+<a href=#386 id=386 data-nosnippet>386</a>///      `Data.db` damage at all.
+<a href=#387 id=387 data-nosnippet>387</a>///   3. Most sharply, `ChunkOffsetOutOfBounds` is pushed in
+<a href=#388 id=388 data-nosnippet>388</a>///      `check_compression_info` ALONGSIDE the very `PendingLocation` that
+<a href=#389 id=389 data-nosnippet>389</a>///      needs resolving: ONE corruption event both creates the location and
+<a href=#390 id=390 data-nosnippet>390</a>///      disables the only guard on it.
+<a href=#391 id=391 data-nosnippet>391</a>///   4. A `Data.db` corrupt enough to produce a location at all commonly
+<a href=#392 id=392 data-nosnippet>392</a>///      fails the scan outright, which skips the cross-check too.
+<a href=#393 id=393 data-nosnippet>393</a>///
+<a href=#394 id=394 data-nosnippet>394</a>/// Resolving against an uncorroborated trie in any of those states is the
+<a href=#395 id=395 data-nosnippet>395</a>/// confident wrong answer §D2 exists to refuse. A CORROBORATED `Resolved` is
+<a href=#396 id=396 data-nosnippet>396</a>/// unaffected; restoring an UNCORROBORATED one as a distinct state is option
+<a href=#397 id=397 data-nosnippet>397</a>/// (b) (milestone 0.19).
+<a href=#398 id=398 data-nosnippet>398</a></span><span class="kw">pub const </span>BTI_IDENTITY_UNCORROBORATED: <span class="kw-2">&amp;</span>str = <span class="macro">concat!</span>(
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="string">"BTI partition-index leaves were not corroborated against Data.db "</span>,
+<a href=#400 id=400 data-nosnippet>400</a>    <span class="string">"(the FULL-mode identity cross-check did not run to completion)"
+<a href=#401 id=401 data-nosnippet>401</a></span>);
+<a href=#402 id=402 data-nosnippet>402</a>
+<a href=#403 id=403 data-nosnippet>403</a><span class="doccomment">/// The cause named when the boundary source's own declared `Data.db`
+<a href=#404 id=404 data-nosnippet>404</a>/// positions are not STRICTLY ascending in ON-DISK PARSE ORDER — see
+<a href=#405 id=405 data-nosnippet>405</a>/// [`first_order_violation`] for why that is a corruption signal and not a
+<a href=#406 id=406 data-nosnippet>406</a>/// tolerable quirk.
+<a href=#407 id=407 data-nosnippet>407</a></span><span class="kw">pub const </span>BOUNDARY_ENTRY_ORDER_VIOLATION: <span class="kw-2">&amp;</span>str =
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="string">"boundary source declares non-ascending Data.db positions"</span>;
+<a href=#409 id=409 data-nosnippet>409</a>
+<a href=#410 id=410 data-nosnippet>410</a><span class="doccomment">/// The cause named when a boundary entry declares a `Data.db` position at or
+<a href=#411 id=411 data-nosnippet>411</a>/// past the declared logical length — see [`resolve_partitions`]'s bounds
+<a href=#412 id=412 data-nosnippet>412</a>/// check for the silent-drop/mis-attribution failure this refuses.
+<a href=#413 id=413 data-nosnippet>413</a></span><span class="kw">pub const </span>BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS: <span class="kw-2">&amp;</span>str =
+<a href=#414 id=414 data-nosnippet>414</a>    <span class="string">"boundary source declares a Data.db position at or past the declared logical length"</span>;
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a><span class="doccomment">/// `Data.db` is SHORTER than the boundary source describes — an OBSERVATION,
+<a href=#417 id=417 data-nosnippet>417</a>/// deliberately naming no culprit (roborev job 133 MEDIUM, issue #4194).
+<a href=#418 id=418 data-nosnippet>418</a>///
+<a href=#419 id=419 data-nosnippet>419</a>/// Distinct from [`BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS`], which does accuse the
+<a href=#420 id=420 data-nosnippet>420</a>/// boundary source and is correct ONLY against a DECLARED length. Against a
+<a href=#421 id=421 data-nosnippet>421</a>/// MEASURED length the identical arithmetic has TWO indistinguishable
+<a href=#422 id=422 data-nosnippet>422</a>/// explanations:
+<a href=#423 id=423 data-nosnippet>423</a>///
+<a href=#424 id=424 data-nosnippet>424</a>/// * `Data.db` was truncated and the boundary source is intact, or
+<a href=#425 id=425 data-nosnippet>425</a>/// * `Data.db` is intact and a boundary entry's position is corrupt.
+<a href=#426 id=426 data-nosnippet>426</a>///
+<a href=#427 id=427 data-nosnippet>427</a>/// Nothing available on the uncompressed path separates them — `CRC.db` cannot
+<a href=#428 id=428 data-nosnippet>428</a>/// (a truncation inside the final chunk leaves the chunk count unchanged, which
+<a href=#429 id=429 data-nosnippet>429</a>/// is exactly the reachable window), and there is no declared original length
+<a href=#430 id=430 data-nosnippet>430</a>/// to compare against. Both live cases are covered:
+<a href=#431 id=431 data-nosnippet>431</a>/// `l1_4_truncated_uncompressed_data_db_names_data_db_not_the_boundary_source`
+<a href=#432 id=432 data-nosnippet>432</a>/// truncates an intact table, and
+<a href=#433 id=433 data-nosnippet>433</a>/// `blocker2_index_position_past_the_logical_length_is_refused_by_name`
+<a href=#434 id=434 data-nosnippet>434</a>/// corrupts an index position on an intact one — and they are
+<a href=#435 id=435 data-nosnippet>435</a>/// INDISTINGUISHABLE from this evidence, so naming either as the culprit would
+<a href=#436 id=436 data-nosnippet>436</a>/// be a guess (issue #28). Stating the observation and the ambiguity is the
+<a href=#437 id=437 data-nosnippet>437</a>/// fail-closed answer; resolving it needs a declared length (follow-up).
+<a href=#438 id=438 data-nosnippet>438</a></span><span class="kw">pub const </span>DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE: <span class="kw-2">&amp;</span>str =
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="string">"Data.db is shorter than the boundary source describes"</span>;
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a><span class="doccomment">/// Where a `logical_len` came from — carried, never guessed (issue #28).
+<a href=#442 id=442 data-nosnippet>442</a>///
+<a href=#443 id=443 data-nosnippet>443</a>/// This distinction is load-bearing, not bookkeeping. The bounds check in
+<a href=#444 id=444 data-nosnippet>444</a>/// [`resolve_partitions`] asks "does the last boundary entry start beyond the
+<a href=#445 id=445 data-nosnippet>445</a>/// end of `Data.db`'s logical stream?", and the answer means OPPOSITE things
+<a href=#446 id=446 data-nosnippet>446</a>/// depending on where the end came from:
+<a href=#447 id=447 data-nosnippet>447</a>///
+<a href=#448 id=448 data-nosnippet>448</a>/// * A DECLARED length is independent of the file's current size, so an entry
+<a href=#449 id=449 data-nosnippet>449</a>///   past it can only mean the boundary source disagrees with itself.
+<a href=#450 id=450 data-nosnippet>450</a>/// * A MEASURED length SHRINKS when `Data.db` is truncated, so an entry past
+<a href=#451 id=451 data-nosnippet>451</a>///   it is the expected, correct reading of an INTACT boundary source
+<a href=#452 id=452 data-nosnippet>452</a>///   describing bytes that no longer exist.
+<a href=#453 id=453 data-nosnippet>453</a>///
+<a href=#454 id=454 data-nosnippet>454</a>/// Conflating them made every uncompressed truncation — the headline class
+<a href=#455 id=455 data-nosnippet>455</a>/// this verb exists to locate — refuse resolution while blaming an intact
+<a href=#456 id=456 data-nosnippet>456</a>/// `Index.db`.
+<a href=#457 id=457 data-nosnippet>457</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#458 id=458 data-nosnippet>458</a></span><span class="kw">pub enum </span>LogicalLenSource {
+<a href=#459 id=459 data-nosnippet>459</a>    <span class="doccomment">/// The boundary source's own DECLARED total logical length
+<a href=#460 id=460 data-nosnippet>460</a>    /// (`CompressionInfo::data_length`). Unaffected by truncation.
+<a href=#461 id=461 data-nosnippet>461</a>    </span>Declared,
+<a href=#462 id=462 data-nosnippet>462</a>    <span class="doccomment">/// The CURRENT physical `Data.db` length, measured by `stat` at verify
+<a href=#463 id=463 data-nosnippet>463</a>    /// time (the uncompressed path, where physical == logical). A truncation
+<a href=#464 id=464 data-nosnippet>464</a>    /// shrinks this value.
+<a href=#465 id=465 data-nosnippet>465</a>    </span>MeasuredDataDbLength,
+<a href=#466 id=466 data-nosnippet>466</a>}
+<a href=#467 id=467 data-nosnippet>467</a>
+<a href=#468 id=468 data-nosnippet>468</a><span class="doccomment">/// The boundary source's trust decision for a WHOLE report (design.md §D2:
+<a href=#469 id=469 data-nosnippet>469</a>/// fully trusted or not trusted at all, never partially).
+<a href=#470 id=470 data-nosnippet>470</a>///
+<a href=#471 id=471 data-nosnippet>471</a>/// Replaces the former `boundary_source_healthy: bool` + `Option&lt;&amp;[_]&gt;` pair
+<a href=#472 id=472 data-nosnippet>472</a>/// (roborev #4194): two parameters could express four states, two of which
+<a href=#473 id=473 data-nosnippet>473</a>/// ("healthy but absent", "unhealthy but present") had to be reconciled by
+<a href=#474 id=474 data-nosnippet>474</a>/// convention at every call site, and the `None` arm could only ever render
+<a href=#475 id=475 data-nosnippet>475</a>/// ONE generic cause. A rejection now CARRIES its cause, which is what lets
+<a href=#476 id=476 data-nosnippet>476</a>/// `Index.db`'s open error, its order violation and its out-of-bounds offset
+<a href=#477 id=477 data-nosnippet>477</a>/// each reach the operator under their own name.
+<a href=#478 id=478 data-nosnippet>478</a></span><span class="kw">pub enum </span>BoundarySource&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#479 id=479 data-nosnippet>479</a>    <span class="doccomment">/// Trusted, pre-sorted ascending by logical `data_offset`.
+<a href=#480 id=480 data-nosnippet>480</a>    </span>Trusted(<span class="kw-2">&amp;</span><span class="lifetime">'a </span>[BoundaryEntry]),
+<a href=#481 id=481 data-nosnippet>481</a>    <span class="doccomment">/// Not trusted — the named cause, never a silent empty list.
+<a href=#482 id=482 data-nosnippet>482</a>    </span>Rejected(String),
+<a href=#483 id=483 data-nosnippet>483</a>}
+<a href=#484 id=484 data-nosnippet>484</a>
+<a href=#485 id=485 data-nosnippet>485</a><span class="doccomment">/// The index of the first boundary entry whose declared `Data.db` position
+<a href=#486 id=486 data-nosnippet>486</a>/// does not STRICTLY exceed its predecessor's, in ON-DISK PARSE ORDER, or
+<a href=#487 id=487 data-nosnippet>487</a>/// `None` when the sequence ascends strictly.
+<a href=#488 id=488 data-nosnippet>488</a>///
+<a href=#489 id=489 data-nosnippet>489</a>/// # Why non-ascending parse order is corruption, not a quirk
+<a href=#490 id=490 data-nosnippet>490</a>///
+<a href=#491 id=491 data-nosnippet>491</a>/// `Index.db` entries are written in decorated-key order, which the format
+<a href=#492 id=492 data-nosnippet>492</a>/// guarantees is also ascending `Data.db` offset order — the definitive
+<a href=#493 id=493 data-nosnippet>493</a>/// guide states it outright: "the ordering guarantee that `Index.db` entries
+<a href=#494 id=494 data-nosnippet>494</a>/// ascend in token order and therefore in `Data.db` offset order"
+<a href=#495 id=495 data-nosnippet>495</a>/// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`,
+<a href=#496 id=496 data-nosnippet>496</a>/// §"Token Ordering Requirement" and the sequential-windowing note). So a
+<a href=#497 id=497 data-nosnippet>497</a>/// descent in parse order is a declaration this format cannot produce.
+<a href=#498 id=498 data-nosnippet>498</a>///
+<a href=#499 id=499 data-nosnippet>499</a>/// # Why STRICT, not merely non-decreasing
+<a href=#500 id=500 data-nosnippet>500</a>///
+<a href=#501 id=501 data-nosnippet>501</a>/// Two partitions cannot share a start offset — every partition occupies at
+<a href=#502 id=502 data-nosnippet>502</a>/// least a header's worth of bytes. Two EQUAL positions give the earlier
+<a href=#503 id=503 data-nosnippet>503</a>/// entry the extent `[s, s)`, which intersects nothing, so that partition
+<a href=#504 id=504 data-nosnippet>504</a>/// would be silently dropped from every location in the report: the same
+<a href=#505 id=505 data-nosnippet>505</a>/// silent-drop shape as the out-of-bounds offset below, reached by a
+<a href=#506 id=506 data-nosnippet>506</a>/// different corruption.
+<a href=#507 id=507 data-nosnippet>507</a>///
+<a href=#508 id=508 data-nosnippet>508</a>/// This is a consistency check over AUTHORITATIVE metadata the file declares
+<a href=#509 id=509 data-nosnippet>509</a>/// about itself, not a byte-pattern guess (issue #28) — the same pattern
+<a href=#510 id=510 data-nosnippet>510</a>/// `verify.rs`'s `check_compression_info` already applies to
+<a href=#511 id=511 data-nosnippet>511</a>/// `CompressionInfo.db`'s chunk offsets, whose own rationale ("`validate()`
+<a href=#512 id=512 data-nosnippet>512</a>/// only enforces ascending order; a single corrupted offset (e.g. an MSB set)
+<a href=#513 id=513 data-nosnippet>513</a>/// is ascending yet points past EOF") transfers here verbatim.
+<a href=#514 id=514 data-nosnippet>514</a></span><span class="kw">pub fn </span>first_order_violation(entries: <span class="kw-2">&amp;</span>[BoundaryEntry]) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+<a href=#515 id=515 data-nosnippet>515</a>    <span class="comment">// A running `prev`, deliberately: the slice-pairs and closure-predicate
+<a href=#516 id=516 data-nosnippet>516</a>    // search primitives `test_verify_location_no_resync_scan.sh` refuses in
+<a href=#517 id=517 data-nosnippet>517</a>    // this file are the idiomatic alternatives, and this form needs no waiver
+<a href=#518 id=518 data-nosnippet>518</a>    // for any of them — while the obvious bare indexed `for` loop tripped
+<a href=#519 id=519 data-nosnippet>519</a>    // clippy's `manual_find`, which is what pushed the first two attempts
+<a href=#520 id=520 data-nosnippet>520</a>    // toward a waiver. (Naming those primitives literally here would itself
+<a href=#521 id=521 data-nosnippet>521</a>    // trip the guard, which is purely lexical.)
+<a href=#522 id=522 data-nosnippet>522</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>prev: <span class="prelude-ty">Option</span>&lt;u64&gt; = <span class="prelude-val">None</span>;
+<a href=#523 id=523 data-nosnippet>523</a>    <span class="kw">for </span>(i, (offset, <span class="kw">_</span>)) <span class="kw">in </span>entries.iter().enumerate() {
+<a href=#524 id=524 data-nosnippet>524</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(previous) = prev {
+<a href=#525 id=525 data-nosnippet>525</a>            <span class="kw">if </span><span class="kw-2">*</span>offset &lt;= previous {
+<a href=#526 id=526 data-nosnippet>526</a>                <span class="kw">return </span><span class="prelude-val">Some</span>(i);
+<a href=#527 id=527 data-nosnippet>527</a>            }
+<a href=#528 id=528 data-nosnippet>528</a>        }
+<a href=#529 id=529 data-nosnippet>529</a>        prev = <span class="prelude-val">Some</span>(<span class="kw-2">*</span>offset);
+<a href=#530 id=530 data-nosnippet>530</a>    }
+<a href=#531 id=531 data-nosnippet>531</a>    <span class="prelude-val">None
+<a href=#532 id=532 data-nosnippet>532</a></span>}
+<a href=#533 id=533 data-nosnippet>533</a>
+<a href=#534 id=534 data-nosnippet>534</a><span class="doccomment">/// Intersect `damaged` (a closed-open `[start, end)` range in `Data.db`
+<a href=#535 id=535 data-nosnippet>535</a>/// LOGICAL/decompressed offset space) against `sorted_boundary_entries` — one
+<a href=#536 id=536 data-nosnippet>536</a>/// `(data_offset, raw_key)` pair per partition the boundary source (`Index.db`
+<a href=#537 id=537 data-nosnippet>537</a>/// or the BTI `Partitions.db` trie) names, **already sorted ascending by
+<a href=#538 id=538 data-nosnippet>538</a>/// `data_offset`** (a precondition, not re-sorted here — roborev round-1
+<a href=#539 id=539 data-nosnippet>539</a>/// MEDIUM finding: this function used to sort its input on EVERY call, i.e.
+<a href=#540 id=540 data-nosnippet>540</a>/// once per pending location, even though the boundary source is read once
+<a href=#541 id=541 data-nosnippet>541</a>/// per report and its natural on-disk order is already ascending offset; the
+<a href=#542 id=542 data-nosnippet>542</a>/// caller sorts once — see `verify.rs`'s `finalize_locations`). `raw_key` is
+<a href=#543 id=543 data-nosnippet>543</a>/// `None` when the entry's identity is not yet known (see
+<a href=#544 id=544 data-nosnippet>544</a>/// [`PARTITION_KEY_UNAVAILABLE`]).
+<a href=#545 id=545 data-nosnippet>545</a>///
+<a href=#546 id=546 data-nosnippet>546</a>/// `logical_len` bounds the LAST entry's extent (there is no "next entry" to
+<a href=#547 id=547 data-nosnippet>547</a>/// derive it from): `CompressionInfo::data_length` when compressed, the
+<a href=#548 id=548 data-nosnippet>548</a>/// physical `Data.db` length when not. `logical_len_source` says WHICH of
+<a href=#549 id=549 data-nosnippet>549</a>/// those it is — see [`LogicalLenSource`] for why that changes the meaning of
+<a href=#550 id=550 data-nosnippet>550</a>/// a failed bounds check, and therefore which component gets named.
+<a href=#551 id=551 data-nosnippet>551</a>///
+<a href=#552 id=552 data-nosnippet>552</a>/// This is a closed-interval test only — no `Data.db` bytes are read or
+<a href=#553 id=553 data-nosnippet>553</a>/// scanned here (design.md §D1/§D6, issue #28).
+<a href=#554 id=554 data-nosnippet>554</a></span><span class="kw">pub fn </span>resolve_partitions(
+<a href=#555 id=555 data-nosnippet>555</a>    damaged: (u64, u64),
+<a href=#556 id=556 data-nosnippet>556</a>    sorted_boundary_entries: <span class="kw-2">&amp;</span>[BoundaryEntry],
+<a href=#557 id=557 data-nosnippet>557</a>    logical_len: u64,
+<a href=#558 id=558 data-nosnippet>558</a>    logical_len_source: LogicalLenSource,
+<a href=#559 id=559 data-nosnippet>559</a>) -&gt; PartitionResolution {
+<a href=#560 id=560 data-nosnippet>560</a>    <span class="comment">// The clear form, restored (roborev job 102 LOW). This was written as a
+<a href=#561 id=561 data-nosnippet>561</a>    // manual `zip(iter().skip(1))` purely to dodge the no-resync-scan guard's
+<a href=#562 id=562 data-nosnippet>562</a>    // lexical slice-pairs pattern — contorting production code to satisfy a
+<a href=#563 id=563 data-nosnippet>563</a>    // grep, over a slice of `(u64, Option&lt;Arc&lt;[u8]&gt;&gt;)` tuples that has nothing
+<a href=#564 id=564 data-nosnippet>564</a>    // to do with scanning `Data.db` bytes for a header. The guard now has a
+<a href=#565 id=565 data-nosnippet>565</a>    // named line-level opt-out, which is the right place for the exception, so
+<a href=#566 id=566 data-nosnippet>566</a>    // the code says what it means and the marker records WHY it is allowed.
+<a href=#567 id=567 data-nosnippet>567</a>    </span><span class="macro">debug_assert!</span>(
+<a href=#568 id=568 data-nosnippet>568</a>        sorted_boundary_entries
+<a href=#569 id=569 data-nosnippet>569</a>            .windows(<span class="number">2</span>) <span class="comment">// no-resync-scan-allow:windows — sortedness over boundary tuples, not a byte scan
+<a href=#570 id=570 data-nosnippet>570</a>            </span>.all(|w| w[<span class="number">0</span>].<span class="number">0 </span>&lt;= w[<span class="number">1</span>].<span class="number">0</span>),
+<a href=#571 id=571 data-nosnippet>571</a>        <span class="string">"resolve_partitions requires its input sorted ascending by data_offset"
+<a href=#572 id=572 data-nosnippet>572</a>    </span>);
+<a href=#573 id=573 data-nosnippet>573</a>
+<a href=#574 id=574 data-nosnippet>574</a>    <span class="comment">// BOUNDS CHECK AGAINST THE DECLARED LOGICAL LENGTH — roborev blocker #2
+<a href=#575 id=575 data-nosnippet>575</a>    // (#4194). Both halves of the extent derivation below come from
+<a href=#576 id=576 data-nosnippet>576</a>    // AUTHORITATIVE metadata, but nothing checked that the two AGREE, and
+<a href=#577 id=577 data-nosnippet>577</a>    // `Index.db`'s own parse cannot: flip one bit of a NON-LEADING byte of a
+<a href=#578 id=578 data-nosnippet>578</a>    // multi-byte `position` vint and the length prefix is unchanged, so every
+<a href=#579 id=579 data-nosnippet>579</a>    // entry still parses, `is_fully_parsed()` is true, and no
+<a href=#580 id=580 data-nosnippet>580</a>    // `IndexEntryCorrupt` fires. The bogus position then sorts LAST, where
+<a href=#581 id=581 data-nosnippet>581</a>    // `end` is `logical_len` — below its own `start` — and the `end.max(*start)`
+<a href=#582 id=582 data-nosnippet>582</a>    // clamp below made it the empty extent `[huge, huge)`. That dropped the
+<a href=#583 id=583 data-nosnippet>583</a>    // partition from the report silently (it intersects nothing, so it is
+<a href=#584 id=584 data-nosnippet>584</a>    // never reported, never counted in `truncated`, never `Unresolved`) AND
+<a href=#585 id=585 data-nosnippet>585</a>    // widened its former left neighbour's extent over its real bytes, so a
+<a href=#586 id=586 data-nosnippet>586</a>    // clean key was printed as damaged with full confidence.
+<a href=#587 id=587 data-nosnippet>587</a>    //
+<a href=#588 id=588 data-nosnippet>588</a>    // A consistency check over metadata the file declares about itself, NOT a
+<a href=#589 id=589 data-nosnippet>589</a>    // byte-pattern guess (issue #28) — the same check `check_compression_info`
+<a href=#590 id=590 data-nosnippet>590</a>    // already applies to `CompressionInfo.db`'s chunk offsets, for the reason
+<a href=#591 id=591 data-nosnippet>591</a>    // stated there. `&gt;= logical_len`, not `&gt;`: an entry starting exactly AT
+<a href=#592 id=592 data-nosnippet>592</a>    // the declared end has the same degenerate `[len, len)` extent, so `&gt;`
+<a href=#593 id=593 data-nosnippet>593</a>    // would leave that one value silently dropped. O(1), not O(n): the input
+<a href=#594 id=594 data-nosnippet>594</a>    // is sorted (asserted above), so the last entry is the only candidate.
+<a href=#595 id=595 data-nosnippet>595</a>    //
+<a href=#596 id=596 data-nosnippet>596</a>    // WHICH COMPONENT THIS ACCUSES DEPENDS ON `logical_len_source` (roborev job
+<a href=#597 id=597 data-nosnippet>597</a>    // 133 MEDIUM). The test above is sound only against a length the boundary
+<a href=#598 id=598 data-nosnippet>598</a>    // source DECLARED. Against a MEASURED `Data.db` length it fires on the
+<a href=#599 id=599 data-nosnippet>599</a>    // normal, correct reading of a TRUNCATED file — an intact `Index.db`
+<a href=#600 id=600 data-nosnippet>600</a>    // faithfully describing bytes that no longer exist — so reporting
+<a href=#601 id=601 data-nosnippet>601</a>    // `BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS` there names the wrong suspect and
+<a href=#602 id=602 data-nosnippet>602</a>    // suppresses exactly the partition list this verb exists to produce.
+<a href=#603 id=603 data-nosnippet>603</a>    </span><span class="kw">if let </span><span class="prelude-val">Some</span>((last_start, <span class="kw">_</span>)) = sorted_boundary_entries.last() {
+<a href=#604 id=604 data-nosnippet>604</a>        <span class="kw">if </span><span class="kw-2">*</span>last_start &gt;= logical_len {
+<a href=#605 id=605 data-nosnippet>605</a>            <span class="kw">return </span>PartitionResolution::Unresolved(<span class="kw">match </span>logical_len_source {
+<a href=#606 id=606 data-nosnippet>606</a>                LogicalLenSource::Declared =&gt; <span class="macro">format!</span>(
+<a href=#607 id=607 data-nosnippet>607</a>                    <span class="string">"{BOUNDARY_ENTRY_OFFSET_OUT_OF_BOUNDS}: declared position {last_start} \
+<a href=#608 id=608 data-nosnippet>608</a>                     (0x{last_start:x}) is not below the declared logical length {logical_len}"
+<a href=#609 id=609 data-nosnippet>609</a>                </span>),
+<a href=#610 id=610 data-nosnippet>610</a>                LogicalLenSource::MeasuredDataDbLength =&gt; <span class="macro">format!</span>(
+<a href=#611 id=611 data-nosnippet>611</a>                    <span class="string">"{DATA_DB_SHORTER_THAN_BOUNDARY_SOURCE}: boundary source declares a \
+<a href=#612 id=612 data-nosnippet>612</a>                     partition at position {last_start} (0x{last_start:x}), but Data.db is \
+<a href=#613 id=613 data-nosnippet>613</a>                     only {logical_len} bytes — from this evidence a Data.db truncation and \
+<a href=#614 id=614 data-nosnippet>614</a>                     a corrupt boundary-source position are INDISTINGUISHABLE (no declared \
+<a href=#615 id=615 data-nosnippet>615</a>                     original length exists on the uncompressed path)"
+<a href=#616 id=616 data-nosnippet>616</a>                </span>),
+<a href=#617 id=617 data-nosnippet>617</a>            });
+<a href=#618 id=618 data-nosnippet>618</a>        }
+<a href=#619 id=619 data-nosnippet>619</a>    }
+<a href=#620 id=620 data-nosnippet>620</a>
+<a href=#621 id=621 data-nosnippet>621</a>    <span class="comment">// Bounded DURING accumulation (`hits.len() &lt; MAX_RESOLVED_KEYS`), not just
+<a href=#622 id=622 data-nosnippet>622</a>    // at the end: a truncation's damaged range `[first_bad_chunk_start,
+<a href=#623 id=623 data-nosnippet>623</a>    // logical_len)` can intersect essentially every partition in the file, so
+<a href=#624 id=624 data-nosnippet>624</a>    // materializing them all before capping would defeat the cap.
+<a href=#625 id=625 data-nosnippet>625</a>    //
+<a href=#626 id=626 data-nosnippet>626</a>    // `seen` dedups by raw key DURING accumulation too. A post-hoc dedup after
+<a href=#627 id=627 data-nosnippet>627</a>    // the cap would let a boundary source naming one raw key twice
+<a href=#628 id=628 data-nosnippet>628</a>    // (defensive-only; not an expected shape) consume TWO cap slots and inflate
+<a href=#629 id=629 data-nosnippet>629</a>    // `truncated` with pre-dedup entries — rendering e.g. "40 partition(s)
+<a href=#630 id=630 data-nosnippet>630</a>    // (+60 more, capped)" when only 100 DISTINCT partitions intersect.
+<a href=#631 id=631 data-nosnippet>631</a>    //
+<a href=#632 id=632 data-nosnippet>632</a>    // `seen` is itself bounded to MAX_RESOLVED_KEYS: growing it to O(distinct
+<a href=#633 id=633 data-nosnippet>633</a>    // intersecting partitions) would reintroduce exactly the O(partitions)
+<a href=#634 id=634 data-nosnippet>634</a>    // growth the cap exists to eliminate. Once `hits` is full, dedup stops — a
+<a href=#635 id=635 data-nosnippet>635</a>    // duplicate past the cap just counts as one more `truncated` entry, a minor
+<a href=#636 id=636 data-nosnippet>636</a>    // over-count traded for a hard memory bound.
+<a href=#637 id=637 data-nosnippet>637</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>hits: Vec&lt;KeyRef&gt; = Vec::new();
+<a href=#638 id=638 data-nosnippet>638</a>    <span class="kw">let </span><span class="kw-2">mut </span>seen: std::collections::HashSet&lt;<span class="kw-2">&amp;</span>[u8]&gt; = std::collections::HashSet::new();
+<a href=#639 id=639 data-nosnippet>639</a>    <span class="kw">let </span><span class="kw-2">mut </span>unknown = <span class="bool-val">false</span>;
+<a href=#640 id=640 data-nosnippet>640</a>    <span class="kw">let </span><span class="kw-2">mut </span>truncated = <span class="number">0usize</span>;
+<a href=#641 id=641 data-nosnippet>641</a>    <span class="kw">for </span>(i, (start, key)) <span class="kw">in </span>sorted_boundary_entries.iter().enumerate() {
+<a href=#642 id=642 data-nosnippet>642</a>        <span class="kw">let </span>end = sorted_boundary_entries
+<a href=#643 id=643 data-nosnippet>643</a>            .get(i + <span class="number">1</span>)
+<a href=#644 id=644 data-nosnippet>644</a>            .map(|(next_start, <span class="kw">_</span>)| <span class="kw-2">*</span>next_start)
+<a href=#645 id=645 data-nosnippet>645</a>            .unwrap_or(logical_len);
+<a href=#646 id=646 data-nosnippet>646</a>        <span class="comment">// `end &gt;= *start` for EVERY entry, on BOTH arms — so `.max(*start)` is
+<a href=#647 id=647 data-nosnippet>647</a>        // UNREACHABLE and no longer load-bearing (it was what silently turned a
+<a href=#648 id=648 data-nosnippet>648</a>        // corrupt BIG entry into an empty extent, blocker #2). BIG: strict
+<a href=#649 id=649 data-nosnippet>649</a>        // ascent is enforced by `first_order_violation` and the last entry by
+<a href=#650 id=650 data-nosnippet>650</a>        // the bounds check above. BTI: a `Trusted` source is now CORROBORATED
+<a href=#651 id=651 data-nosnippet>651</a>        // (#4194 option (a)), and corroboration requires every leaf's
+<a href=#652 id=652 data-nosnippet>652</a>        // `data_position` to be a DECODED PARTITION START carrying the matching
+<a href=#653 id=653 data-nosnippet>653</a>        // key, so positions are real and distinct. Kept purely as a
+<a href=#654 id=654 data-nosnippet>654</a>        // non-panicking release fallback — dropping it would let a future
+<a href=#655 id=655 data-nosnippet>655</a>        // invariant break compute a reversed range silently instead.
+<a href=#656 id=656 data-nosnippet>656</a>        </span><span class="macro">debug_assert!</span>(
+<a href=#657 id=657 data-nosnippet>657</a>            end &gt;= <span class="kw-2">*</span>start,
+<a href=#658 id=658 data-nosnippet>658</a>            <span class="string">"boundary entry {i} has extent end {end} below its start {start}; the bounds \
+<a href=#659 id=659 data-nosnippet>659</a>             check in resolve_partitions should have refused this source"
+<a href=#660 id=660 data-nosnippet>660</a>        </span>);
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let </span>extent = (<span class="kw-2">*</span>start, end.max(<span class="kw-2">*</span>start));
+<a href=#662 id=662 data-nosnippet>662</a>        <span class="kw">if </span>ranges_intersect(damaged, extent) {
+<a href=#663 id=663 data-nosnippet>663</a>            <span class="kw">match </span>key {
+<a href=#664 id=664 data-nosnippet>664</a>                <span class="prelude-val">Some</span>(k) =&gt; {
+<a href=#665 id=665 data-nosnippet>665</a>                    <span class="kw">let </span>raw: <span class="kw-2">&amp;</span>[u8] = k;
+<a href=#666 id=666 data-nosnippet>666</a>                    <span class="kw">if </span>hits.len() &lt; MAX_RESOLVED_KEYS {
+<a href=#667 id=667 data-nosnippet>667</a>                        <span class="kw">if </span>seen.insert(raw) {
+<a href=#668 id=668 data-nosnippet>668</a>                            hits.push(KeyRef::from_raw(raw));
+<a href=#669 id=669 data-nosnippet>669</a>                        }
+<a href=#670 id=670 data-nosnippet>670</a>                    } <span class="kw">else if </span>!seen.contains(raw) {
+<a href=#671 id=671 data-nosnippet>671</a>                        truncated += <span class="number">1</span>;
+<a href=#672 id=672 data-nosnippet>672</a>                    }
+<a href=#673 id=673 data-nosnippet>673</a>                }
+<a href=#674 id=674 data-nosnippet>674</a>                <span class="prelude-val">None </span>=&gt; unknown = <span class="bool-val">true</span>,
+<a href=#675 id=675 data-nosnippet>675</a>            }
+<a href=#676 id=676 data-nosnippet>676</a>        }
+<a href=#677 id=677 data-nosnippet>677</a>    }
+<a href=#678 id=678 data-nosnippet>678</a>
+<a href=#679 id=679 data-nosnippet>679</a>    <span class="kw">if </span>unknown {
+<a href=#680 id=680 data-nosnippet>680</a>        <span class="kw">return </span>PartitionResolution::Unresolved(PARTITION_KEY_UNAVAILABLE.to_string());
+<a href=#681 id=681 data-nosnippet>681</a>    }
+<a href=#682 id=682 data-nosnippet>682</a>    hits.sort_by(|a, b| a.key_hex.cmp(<span class="kw-2">&amp;</span>b.key_hex));
+<a href=#683 id=683 data-nosnippet>683</a>    PartitionResolution::Resolved {
+<a href=#684 id=684 data-nosnippet>684</a>        keys: hits,
+<a href=#685 id=685 data-nosnippet>685</a>        truncated,
+<a href=#686 id=686 data-nosnippet>686</a>    }
+<a href=#687 id=687 data-nosnippet>687</a>}
+<a href=#688 id=688 data-nosnippet>688</a>
+<a href=#689 id=689 data-nosnippet>689</a><span class="doccomment">/// Build a [`Location`] for a chunk/offset-anchored finding, fail-closed on a
+<a href=#690 id=690 data-nosnippet>690</a>/// damaged boundary source (design.md §D2): a
+<a href=#691 id=691 data-nosnippet>691</a>/// [`BoundarySource::Rejected`] always yields `Unresolved` carrying that
+<a href=#692 id=692 data-nosnippet>692</a>/// rejection's OWN cause — the boundary source is either fully trusted or not
+<a href=#693 id=693 data-nosnippet>693</a>/// trusted at all, never partially, and a refusal always names why.
+<a href=#694 id=694 data-nosnippet>694</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#695 id=695 data-nosnippet>695</a></span><span class="kw">pub fn </span>resolve_location(
+<a href=#696 id=696 data-nosnippet>696</a>    component: <span class="kw-2">&amp;</span>str,
+<a href=#697 id=697 data-nosnippet>697</a>    byte_offset: u64,
+<a href=#698 id=698 data-nosnippet>698</a>    byte_len: u64,
+<a href=#699 id=699 data-nosnippet>699</a>    anchor: PhysicalAnchor,
+<a href=#700 id=700 data-nosnippet>700</a>    chunk_index: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#701 id=701 data-nosnippet>701</a>    boundary: <span class="kw-2">&amp;</span>BoundarySource&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#702 id=702 data-nosnippet>702</a>    damaged_logical: (u64, u64),
+<a href=#703 id=703 data-nosnippet>703</a>    logical_len: u64,
+<a href=#704 id=704 data-nosnippet>704</a>    logical_len_source: LogicalLenSource,
+<a href=#705 id=705 data-nosnippet>705</a>) -&gt; Location {
+<a href=#706 id=706 data-nosnippet>706</a>    <span class="kw">let </span>partitions = <span class="kw">match </span>boundary {
+<a href=#707 id=707 data-nosnippet>707</a>        BoundarySource::Trusted(entries) =&gt; {
+<a href=#708 id=708 data-nosnippet>708</a>            resolve_partitions(damaged_logical, entries, logical_len, logical_len_source)
+<a href=#709 id=709 data-nosnippet>709</a>        }
+<a href=#710 id=710 data-nosnippet>710</a>        BoundarySource::Rejected(cause) =&gt; PartitionResolution::Unresolved(cause.clone()),
+<a href=#711 id=711 data-nosnippet>711</a>    };
+<a href=#712 id=712 data-nosnippet>712</a>    Location {
+<a href=#713 id=713 data-nosnippet>713</a>        component: component.to_string(),
+<a href=#714 id=714 data-nosnippet>714</a>        byte_offset,
+<a href=#715 id=715 data-nosnippet>715</a>        byte_len,
+<a href=#716 id=716 data-nosnippet>716</a>        anchor,
+<a href=#717 id=717 data-nosnippet>717</a>        chunk_index,
+<a href=#718 id=718 data-nosnippet>718</a>        partitions,
+<a href=#719 id=719 data-nosnippet>719</a>    }
+<a href=#720 id=720 data-nosnippet>720</a>}
+<a href=#721 id=721 data-nosnippet>721</a>
+<a href=#722 id=722 data-nosnippet>722</a><span class="doccomment">/// Resolve every [`PendingLocation`] in one pass and write the result back
+<a href=#723 id=723 data-nosnippet>723</a>/// onto its owning finding (issue #4194, design.md §D1/§D2).
+<a href=#724 id=724 data-nosnippet>724</a>///
+<a href=#725 id=725 data-nosnippet>725</a>/// The boundary source is either fully trusted for this whole report or not
+<a href=#726 id=726 data-nosnippet>726</a>/// trusted at all — never partially: `boundary_healthy` is a single decision
+<a href=#727 id=727 data-nosnippet>727</a>/// (no finding against the boundary component, and no index-structure-corrupt
+<a href=#728 id=728 data-nosnippet>728</a>/// finding class) applied uniformly to every pending location, so a damaged
+<a href=#729 id=729 data-nosnippet>729</a>/// boundary source poisons ALL of them with
+<a href=#730 id=730 data-nosnippet>730</a>/// [`BOUNDARY_SOURCE_UNREADABLE`], never just the finding that happens to be
+<a href=#731 id=731 data-nosnippet>731</a>/// nearest the damage.
+<a href=#732 id=732 data-nosnippet>732</a>///
+<a href=#733 id=733 data-nosnippet>733</a>/// `pub(crate)` (#1116 relocation): called from `verify.rs`'s
+<a href=#734 id=734 data-nosnippet>734</a>/// `verify_components` once every check has run.
+<a href=#735 id=735 data-nosnippet>735</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>finalize_locations(
+<a href=#736 id=736 data-nosnippet>736</a>    dir: <span class="kw-2">&amp;</span>Path,
+<a href=#737 id=737 data-nosnippet>737</a>    components: <span class="kw-2">&amp;</span>ComponentSet,
+<a href=#738 id=738 data-nosnippet>738</a>    findings: <span class="kw-2">&amp;mut </span>[VerifyFinding],
+<a href=#739 id=739 data-nosnippet>739</a>    pending: Vec&lt;PendingLocation&gt;,
+<a href=#740 id=740 data-nosnippet>740</a>    bti_leaves: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>[BtiResolvedLeaf]&gt;,
+<a href=#741 id=741 data-nosnippet>741</a>    scan_position_map: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>std::collections::HashMap&lt;u64, Vec&lt;u8&gt;&gt;&gt;,
+<a href=#742 id=742 data-nosnippet>742</a>    <span class="comment">// Whether the FULL-mode BTI identity cross-check ran to completion AND
+<a href=#743 id=743 data-nosnippet>743</a>    // agreed — see `BTI_IDENTITY_UNCORROBORATED`. Never consulted for BIG.
+<a href=#744 id=744 data-nosnippet>744</a>    </span>bti_identity_corroborated: bool,
+<a href=#745 id=745 data-nosnippet>745</a>    platform: Arc&lt;Platform&gt;,
+<a href=#746 id=746 data-nosnippet>746</a>) {
+<a href=#747 id=747 data-nosnippet>747</a>    <span class="comment">// Distrust on EITHER signal (a union, never component-only): a finding
+<a href=#748 id=748 data-nosnippet>748</a>    // whose CLASS says the index structure is corrupt, OR any finding at all
+<a href=#749 id=749 data-nosnippet>749</a>    // against the boundary component itself. The class test alone missed
+<a href=#750 id=750 data-nosnippet>750</a>    // `MissingComponent`/`UnexpectedEof` against `Index.db`/`Partitions.db`,
+<a href=#751 id=751 data-nosnippet>751</a>    // and — the genuine wrong-answer case — a missing `Rows.db`, where
+<a href=#752 id=752 data-nosnippet>752</a>    // `check_bti_structure` still returns the `DataOffset` leaves it could
+<a href=#753 id=753 data-nosnippet>753</a>    // read: a PARTIAL boundary list that would then be presented as
+<a href=#754 id=754 data-nosnippet>754</a>    // `Resolved`. The component test cannot replace the class test either,
+<a href=#755 id=755 data-nosnippet>755</a>    // since `BtiTrieCorrupt` is raised on `Rows.db`, which spec L2 does not
+<a href=#756 id=756 data-nosnippet>756</a>    // name as a boundary source. Deliberately over-conservative where the two
+<a href=#757 id=757 data-nosnippet>757</a>    // overlap (a boundary component present on disk but unlisted in TOC.txt
+<a href=#758 id=758 data-nosnippet>758</a>    // poisons every location): §D2 prefers a refused answer to a confident
+<a href=#759 id=759 data-nosnippet>759</a>    // wrong one.
+<a href=#760 id=760 data-nosnippet>760</a>    //
+<a href=#761 id=761 data-nosnippet>761</a>    // Expressed as an `Option&lt;String&gt;` CAUSE rather than a bool: every
+<a href=#762 id=762 data-nosnippet>762</a>    // rejection path below (this one, a partial `IndexReader` parse, an open
+<a href=#763 id=763 data-nosnippet>763</a>    // error, an order violation) carries its own cause through to the
+<a href=#764 id=764 data-nosnippet>764</a>    // operator (roborev I1/#blocker 2, #4194).
+<a href=#765 id=765 data-nosnippet>765</a>    </span><span class="kw">let </span>boundary_components: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str] = <span class="kw">match </span>components.format {
+<a href=#766 id=766 data-nosnippet>766</a>        SsTableFormat::Big =&gt; <span class="kw-2">&amp;</span>[<span class="string">"Index.db"</span>],
+<a href=#767 id=767 data-nosnippet>767</a>        SsTableFormat::Bti =&gt; <span class="kw-2">&amp;</span>[<span class="string">"Partitions.db"</span>, <span class="string">"Rows.db"</span>],
+<a href=#768 id=768 data-nosnippet>768</a>    };
+<a href=#769 id=769 data-nosnippet>769</a>    <span class="kw">let </span>component_or_class_distrust = findings.iter().any(|f| {
+<a href=#770 id=770 data-nosnippet>770</a>        boundary_components.contains(<span class="kw-2">&amp;</span>f.component.as_str())
+<a href=#771 id=771 data-nosnippet>771</a>            || <span class="kw">match </span>components.format {
+<a href=#772 id=772 data-nosnippet>772</a>                SsTableFormat::Big =&gt; f.class == VerifyErrorClass::IndexEntryCorrupt,
+<a href=#773 id=773 data-nosnippet>773</a>                SsTableFormat::Bti =&gt; <span class="macro">matches!</span>(
+<a href=#774 id=774 data-nosnippet>774</a>                    f.class,
+<a href=#775 id=775 data-nosnippet>775</a>                    VerifyErrorClass::BtiRootPointerCorrupt | VerifyErrorClass::BtiTrieCorrupt
+<a href=#776 id=776 data-nosnippet>776</a>                ),
+<a href=#777 id=777 data-nosnippet>777</a>            }
+<a href=#778 id=778 data-nosnippet>778</a>    });
+<a href=#779 id=779 data-nosnippet>779</a>
+<a href=#780 id=780 data-nosnippet>780</a>    <span class="comment">// Boundary entries: `(logical Data.db position, raw key when known)`, one
+<a href=#781 id=781 data-nosnippet>781</a>    // per partition the boundary source names — built only when the boundary
+<a href=#782 id=782 data-nosnippet>782</a>    // source is healthy (an unhealthy one is never read for this purpose,
+<a href=#783 id=783 data-nosnippet>783</a>    // matching the fail-closed contract regardless of what re-reading it
+<a href=#784 id=784 data-nosnippet>784</a>    // might yield). Keys are `Arc&lt;[u8]&gt;` (roborev round-1 MEDIUM finding): BIG
+<a href=#785 id=785 data-nosnippet>785</a>    // reuses `PartitionIndexEntry::raw_key`/`key_digest`'s ALREADY-`Arc`
+<a href=#786 id=786 data-nosnippet>786</a>    // storage via a refcount bump, never an `O(key_len)` byte copy that would
+<a href=#787 id=787 data-nosnippet>787</a>    // double the resident partition-index memory for a large table.
+<a href=#788 id=788 data-nosnippet>788</a>    // BTI CORROBORATION GATE (issue #4194, owner ruling: option (a), fail
+<a href=#789 id=789 data-nosnippet>789</a>    // closed). Checked AFTER `component_or_class_distrust` so a direct finding
+<a href=#790 id=790 data-nosnippet>790</a>    // against the boundary source still reports its own, more specific cause.
+<a href=#791 id=791 data-nosnippet>791</a>    </span><span class="kw">let </span>bti_uncorroborated = components.format == SsTableFormat::Bti &amp;&amp; !bti_identity_corroborated;
+<a href=#792 id=792 data-nosnippet>792</a>    <span class="kw">let </span><span class="kw-2">mut </span>built: <span class="prelude-ty">Result</span>&lt;Vec&lt;BoundaryEntry&gt;, String&gt; = <span class="kw">if </span>component_or_class_distrust {
+<a href=#793 id=793 data-nosnippet>793</a>        <span class="prelude-val">Err</span>(BOUNDARY_SOURCE_UNREADABLE.to_string())
+<a href=#794 id=794 data-nosnippet>794</a>    } <span class="kw">else if </span>bti_uncorroborated {
+<a href=#795 id=795 data-nosnippet>795</a>        <span class="prelude-val">Err</span>(BTI_IDENTITY_UNCORROBORATED.to_string())
+<a href=#796 id=796 data-nosnippet>796</a>    } <span class="kw">else </span>{
+<a href=#797 id=797 data-nosnippet>797</a>        <span class="kw">match </span>components.format {
+<a href=#798 id=798 data-nosnippet>798</a>            SsTableFormat::Big =&gt; {
+<a href=#799 id=799 data-nosnippet>799</a>                <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::index_reader::IndexReader;
+<a href=#800 id=800 data-nosnippet>800</a>                <span class="kw">let </span>index_path = components.path(dir, <span class="string">"Index.db"</span>);
+<a href=#801 id=801 data-nosnippet>801</a>                <span class="kw">match </span>IndexReader::open(<span class="kw-2">&amp;</span>index_path, platform).<span class="kw">await </span>{
+<a href=#802 id=802 data-nosnippet>802</a>                    <span class="comment">// `IndexReader` uses a DIFFERENT parser from
+<a href=#803 id=803 data-nosnippet>803</a>                    // `check_big_index`'s structural walk above, and per Check
+<a href=#804 id=804 data-nosnippet>804</a>                    // 4's own doc it "silently TRUNCATES the partition list on
+<a href=#805 id=805 data-nosnippet>805</a>                    // the first malformed Index.db entry" (#2302) — exposed via
+<a href=#806 id=806 data-nosnippet>806</a>                    // `is_fully_parsed()`. So no `IndexEntryCorrupt` does NOT
+<a href=#807 id=807 data-nosnippet>807</a>                    // mean `IndexReader` parsed the whole file; if the two
+<a href=#808 id=808 data-nosnippet>808</a>                    // parsers disagree, presenting a partial prefix as
+<a href=#809 id=809 data-nosnippet>809</a>                    // `Resolved` is a confident WRONG answer, exactly what the
+<a href=#810 id=810 data-nosnippet>810</a>                    // fail-closed contract (§D2) exists to
+<a href=#811 id=811 data-nosnippet>811</a>                    // prevent. Downgrade `boundary_healthy` itself (not just
+<a href=#812 id=812 data-nosnippet>812</a>                    // this arm's `None`) so every OTHER pending location in
+<a href=#813 id=813 data-nosnippet>813</a>                    // this report is poisoned too, matching "fully trusted or
+<a href=#814 id=814 data-nosnippet>814</a>                    // not at all".
+<a href=#815 id=815 data-nosnippet>815</a>                    </span><span class="prelude-val">Ok</span>(reader) <span class="kw">if </span>!reader.is_fully_parsed() =&gt; {
+<a href=#816 id=816 data-nosnippet>816</a>                        <span class="prelude-val">Err</span>(BOUNDARY_SOURCE_UNREADABLE.to_string())
+<a href=#817 id=817 data-nosnippet>817</a>                    }
+<a href=#818 id=818 data-nosnippet>818</a>                    <span class="prelude-val">Ok</span>(reader) =&gt; {
+<a href=#819 id=819 data-nosnippet>819</a>                        <span class="kw">let </span>entries: Vec&lt;BoundaryEntry&gt; = reader
+<a href=#820 id=820 data-nosnippet>820</a>                            .get_partition_entries()
+<a href=#821 id=821 data-nosnippet>821</a>                            .iter()
+<a href=#822 id=822 data-nosnippet>822</a>                            .map(|e| {
+<a href=#823 id=823 data-nosnippet>823</a>                                <span class="kw">let </span>raw = e.raw_key.clone().unwrap_or_else(|| e.key_digest.clone());
+<a href=#824 id=824 data-nosnippet>824</a>                                (e.data_offset, <span class="prelude-val">Some</span>(raw))
+<a href=#825 id=825 data-nosnippet>825</a>                            })
+<a href=#826 id=826 data-nosnippet>826</a>                            .collect();
+<a href=#827 id=827 data-nosnippet>827</a>                        <span class="comment">// PARSE-ORDER VALIDATION (roborev blocker #2, #4194).
+<a href=#828 id=828 data-nosnippet>828</a>                        // Checked BEFORE the sort below, because the sort is
+<a href=#829 id=829 data-nosnippet>829</a>                        // exactly what HIDES this corruption: a bit flip in a
+<a href=#830 id=830 data-nosnippet>830</a>                        // non-leading byte of a `position` vint leaves every
+<a href=#831 id=831 data-nosnippet>831</a>                        // entry parsing cleanly, and sorting then quietly
+<a href=#832 id=832 data-nosnippet>832</a>                        // moves the bogus entry into a position where its
+<a href=#833 id=833 data-nosnippet>833</a>                        // extent collapses and its neighbour's widens. The
+<a href=#834 id=834 data-nosnippet>834</a>                        // format guarantees strict ascent in parse order
+<a href=#835 id=835 data-nosnippet>835</a>                        // (definitive guide Ch.6, cited on
+<a href=#836 id=836 data-nosnippet>836</a>                        // `first_order_violation`), so a violation is
+<a href=#837 id=837 data-nosnippet>837</a>                        // corruption and the source is refused by name.
+<a href=#838 id=838 data-nosnippet>838</a>                        </span><span class="kw">match </span>first_order_violation(<span class="kw-2">&amp;</span>entries) {
+<a href=#839 id=839 data-nosnippet>839</a>                            <span class="prelude-val">Some</span>(i) =&gt; <span class="prelude-val">Err</span>(<span class="macro">format!</span>(
+<a href=#840 id=840 data-nosnippet>840</a>                                <span class="string">"{BOUNDARY_ENTRY_ORDER_VIOLATION}: Index.db entry {i} declares \
+<a href=#841 id=841 data-nosnippet>841</a>                                 Data.db position {} (0x{:x}) after entry {} declared {} \
+<a href=#842 id=842 data-nosnippet>842</a>                                 (0x{:x})"</span>,
+<a href=#843 id=843 data-nosnippet>843</a>                                entries[i].<span class="number">0</span>,
+<a href=#844 id=844 data-nosnippet>844</a>                                entries[i].<span class="number">0</span>,
+<a href=#845 id=845 data-nosnippet>845</a>                                i - <span class="number">1</span>,
+<a href=#846 id=846 data-nosnippet>846</a>                                entries[i - <span class="number">1</span>].<span class="number">0</span>,
+<a href=#847 id=847 data-nosnippet>847</a>                                entries[i - <span class="number">1</span>].<span class="number">0
+<a href=#848 id=848 data-nosnippet>848</a>                            </span>)),
+<a href=#849 id=849 data-nosnippet>849</a>                            <span class="prelude-val">None </span>=&gt; <span class="prelude-val">Ok</span>(entries),
+<a href=#850 id=850 data-nosnippet>850</a>                        }
+<a href=#851 id=851 data-nosnippet>851</a>                    }
+<a href=#852 id=852 data-nosnippet>852</a>                    <span class="comment">// The REAL error, named (roborev I1, #4194): this arm used
+<a href=#853 id=853 data-nosnippet>853</a>                    // to discard it and fall through to the generic
+<a href=#854 id=854 data-nosnippet>854</a>                    // "unavailable", so `Permission denied` on `Index.db`
+<a href=#855 id=855 data-nosnippet>855</a>                    // reached the operator as no cause at all.
+<a href=#856 id=856 data-nosnippet>856</a>                    </span><span class="prelude-val">Err</span>(e) =&gt; <span class="prelude-val">Err</span>(<span class="macro">format!</span>(
+<a href=#857 id=857 data-nosnippet>857</a>                        <span class="string">"{BOUNDARY_SOURCE_OPEN_FAILED}: {}: {e}"</span>,
+<a href=#858 id=858 data-nosnippet>858</a>                        index_path.display()
+<a href=#859 id=859 data-nosnippet>859</a>                    )),
+<a href=#860 id=860 data-nosnippet>860</a>                }
+<a href=#861 id=861 data-nosnippet>861</a>            }
+<a href=#862 id=862 data-nosnippet>862</a>            SsTableFormat::Bti =&gt; <span class="kw">match </span>bti_leaves {
+<a href=#863 id=863 data-nosnippet>863</a>                <span class="prelude-val">Some</span>(leaves) =&gt; <span class="prelude-val">Ok</span>(leaves
+<a href=#864 id=864 data-nosnippet>864</a>                    .iter()
+<a href=#865 id=865 data-nosnippet>865</a>                    .map(|leaf| {
+<a href=#866 id=866 data-nosnippet>866</a>                        <span class="kw">let </span>key = leaf.inline_raw_key.as_deref().map(Arc::from).or_else(|| {
+<a href=#867 id=867 data-nosnippet>867</a>                            scan_position_map
+<a href=#868 id=868 data-nosnippet>868</a>                                .and_then(|m| m.get(<span class="kw-2">&amp;</span>leaf.data_position))
+<a href=#869 id=869 data-nosnippet>869</a>                                .map(|k| Arc::from(k.as_slice()))
+<a href=#870 id=870 data-nosnippet>870</a>                        });
+<a href=#871 id=871 data-nosnippet>871</a>                        (leaf.data_position, key)
+<a href=#872 id=872 data-nosnippet>872</a>                    })
+<a href=#873 id=873 data-nosnippet>873</a>                    .collect()),
+<a href=#874 id=874 data-nosnippet>874</a>                <span class="prelude-val">None </span>=&gt; <span class="prelude-val">Err</span>(BOUNDARY_SOURCE_UNAVAILABLE.to_string()),
+<a href=#875 id=875 data-nosnippet>875</a>            },
+<a href=#876 id=876 data-nosnippet>876</a>        }
+<a href=#877 id=877 data-nosnippet>877</a>    };
+<a href=#878 id=878 data-nosnippet>878</a>    <span class="comment">// `resolve_partitions` requires its input pre-sorted ascending by
+<a href=#879 id=879 data-nosnippet>879</a>    // `data_offset` (roborev round-1 MEDIUM — sort ONCE here, not per pending
+<a href=#880 id=880 data-nosnippet>880</a>    // location). For BIG it is a NO-OP by the time it runs: the format
+<a href=#881 id=881 data-nosnippet>881</a>    // guarantees strict ascent in parse order (guide Ch.6) and
+<a href=#882 id=882 data-nosnippet>882</a>    // `first_order_violation` has just refused the source if it did not hold.
+<a href=#883 id=883 data-nosnippet>883</a>    // Retained because BTI leaves come from a byte-comparable-KEY-order DFS
+<a href=#884 id=884 data-nosnippet>884</a>    // trie walk, which is NOT Data.db offset order, and so the precondition is
+<a href=#885 id=885 data-nosnippet>885</a>    // established for BOTH arms by one statement.
+<a href=#886 id=886 data-nosnippet>886</a>    </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(entries) = built.as_mut() {
+<a href=#887 id=887 data-nosnippet>887</a>        entries.sort_by_key(|(offset, <span class="kw">_</span>)| <span class="kw-2">*</span>offset);
+<a href=#888 id=888 data-nosnippet>888</a>    }
+<a href=#889 id=889 data-nosnippet>889</a>    <span class="kw">let </span>boundary = <span class="kw">match </span><span class="kw-2">&amp;</span>built {
+<a href=#890 id=890 data-nosnippet>890</a>        <span class="prelude-val">Ok</span>(entries) =&gt; BoundarySource::Trusted(entries),
+<a href=#891 id=891 data-nosnippet>891</a>        <span class="prelude-val">Err</span>(cause) =&gt; BoundarySource::Rejected(cause.clone()),
+<a href=#892 id=892 data-nosnippet>892</a>    };
+<a href=#893 id=893 data-nosnippet>893</a>
+<a href=#894 id=894 data-nosnippet>894</a>    <span class="kw">for </span>p <span class="kw">in </span>pending {
+<a href=#895 id=895 data-nosnippet>895</a>        <span class="kw">let </span>location = resolve_location(
+<a href=#896 id=896 data-nosnippet>896</a>            <span class="kw-2">&amp;</span>p.component,
+<a href=#897 id=897 data-nosnippet>897</a>            p.byte_offset,
+<a href=#898 id=898 data-nosnippet>898</a>            p.byte_len,
+<a href=#899 id=899 data-nosnippet>899</a>            p.anchor,
+<a href=#900 id=900 data-nosnippet>900</a>            p.chunk_index,
+<a href=#901 id=901 data-nosnippet>901</a>            <span class="kw-2">&amp;</span>boundary,
+<a href=#902 id=902 data-nosnippet>902</a>            p.damaged_logical,
+<a href=#903 id=903 data-nosnippet>903</a>            p.logical_len,
+<a href=#904 id=904 data-nosnippet>904</a>            p.logical_len_source,
+<a href=#905 id=905 data-nosnippet>905</a>        );
+<a href=#906 id=906 data-nosnippet>906</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(f) = findings.get_mut(p.finding_index) {
+<a href=#907 id=907 data-nosnippet>907</a>            f.location = <span class="prelude-val">Some</span>(location);
+<a href=#908 id=908 data-nosnippet>908</a>        }
+<a href=#909 id=909 data-nosnippet>909</a>    }
+<a href=#910 id=910 data-nosnippet>910</a>}
+<a href=#911 id=911 data-nosnippet>911</a>
+<a href=#912 id=912 data-nosnippet>912</a><span class="attr">#[cfg(test)]
+<a href=#913 id=913 data-nosnippet>913</a>#[path = <span class="string">"verify_location_tests.rs"</span>]
+<a href=#914 id=914 data-nosnippet>914</a></span><span class="kw">mod </span>tests;
+</code></pre></div></section></main></body></html>

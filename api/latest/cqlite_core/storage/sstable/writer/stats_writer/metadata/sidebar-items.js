@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["StatisticsMetadata","TombstoneHistogram"]};
+window.SIDEBAR_ITEMS = {"struct":["EncodingStatsBaseline","StatisticsMetadata","TombstoneHistogram"]};
