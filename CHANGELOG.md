@@ -88,7 +88,11 @@ The SSTable toolbox release. Narrative and limits:
 - Nightly deep-check repaired: `core-tests` runs `--no-fail-fast` and the uncommissioned
   zstd-dictionary fixture tests are ignored pending #1413 (#4375, PR #4382); nested gates carve out
   their enclosing gate's artifacts and the nightly summary moves out of the checkout (#4171,
-  PR #4383); the component-set self-test works on git 2.55 (#4384, PR #4385).
+  PR #4383); the component-set self-test works on git 2.55 (#4384, PR #4385), and the
+  component-set pre-flight names the shallow clone when `merge-base` exits 128 on git 2.55
+  (#4390, PR #4391).
+- Performance Regression Gate: the `concurrent_scan` n4 scaling floor is calibrated to the
+  `ubuntu-latest` runner that evaluates it, 1.8 → 1.5 (#4376, PR #4393).
 
 ## [v0.17.0] - 2026-09-08
 
