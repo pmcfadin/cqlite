@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
-## [v0.18.0] - TBD
+## [v0.18.0] - 2026-10-30
 
 The SSTable toolbox release. Narrative and limits:
 [`docs/releases/RELEASE_NOTES_v0.18.0.md`](docs/releases/RELEASE_NOTES_v0.18.0.md).

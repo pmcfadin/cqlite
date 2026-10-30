@@ -1,6 +1,6 @@
 # CQLite v0.18.0 — the SSTable toolbox: detect, salvage and repair damaged SSTables offline
 
-Released: TBD (set on the tag commit)
+Released: 2026-10-30
 
 v0.18.0 adds the first offline tools for **damaged** Cassandra 5.0 SSTables: locate corruption down to
 the chunk, offset and partition, sweep a whole data directory, salvage every decodable partition from a
