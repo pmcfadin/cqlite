@@ -243,7 +243,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -340,7 +340,7 @@ jobs:
     # behaviors, e.g. refresh expects readersRemoved===1 but gets 0). They are NOT
     # release-gating for v0.13 (owner decision 2026-07-05). Keep the leg RUNNING for
     # visibility but non-blocking, so a windows failure does not red the workflow.
-    # ubuntu-latest + macos-14 remain required. Debt tracked in #1979.
+    # ubuntu-latest + macos-15 remain required. Debt tracked in #1979.
     continue-on-error: ${{ matrix.os == 'windows-latest' }}
 
     strategy:
@@ -352,7 +352,7 @@ jobs:
           # Note: aarch64-unknown-linux-gnu is build-only (cross-compiled, can't test)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -463,7 +463,7 @@ jobs:
           # UNSETS this variable, so the only relaxed runs are the ones that ask.
           #
           # Why these legs ask: every budget number in that file was measured on one
-          # Linux fleet box, and this matrix (ubuntu-latest, macos-14, windows-latest)
+          # Linux fleet box, and this matrix (ubuntu-latest, macos-15, windows-latest)
           # has never been measured. node-ci.yml is a registered exemption in
           # .github/ci-gating-tiers.yml, so a red here is triage noise rather than a
           # merge block — and a flaky red on an exempt lane teaches people to ignore the
