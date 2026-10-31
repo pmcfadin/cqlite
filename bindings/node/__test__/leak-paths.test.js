@@ -283,7 +283,7 @@ const MEASURE_PASSES = 9;
 // something else.
 //
 // WHY THE RELAXATION STILL EXISTS AT ALL (option (b), on the evidence): its only
-// beneficiaries are node-ci.yml's three `test`-job legs (ubuntu-latest, macos-14,
+// beneficiaries are node-ci.yml's three `test`-job legs (ubuntu-latest, macos-15,
 // windows-latest), which are a REGISTERED EXEMPTION in .github/ci-gating-tiers.yml —
 // a red there is triage noise, not a merge block. Deleting the knob would also change
 // those legs from relaxed to strict in the same commit that fixes the gate leak, on
