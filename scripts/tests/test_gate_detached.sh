@@ -276,6 +276,12 @@ else
     printf '%s' "$out" | grep -qE '^env: *forwarded [1-9][0-9]* variables' \
       && ok "4.3 the launcher reports how many variables it forwarded" \
       || bad "4.3 the launcher reports how many variables it forwarded" "$out"
+    # #4401: the unit must not inherit the manager's DefaultTasksMax (15% of the pids limit —
+    # 2457 on a 16384-pid container), which a 32-core gate exceeds and rustc/node then die
+    # with EAGAIN. Read back from the MANAGER via the launcher's report, not from our argv.
+    printf '%s' "$out" | grep -qE '^tasks-max: *infinity$' \
+      && ok "4.3b the detached unit's TasksMax is infinity (#4401)" \
+      || bad "4.3b the detached unit's TasksMax is infinity (#4401)" "$(printf '%s' "$out" | grep -m1 '^tasks-max:' || echo 'no tasks-max: line')"
     # Wait for the gate to reach a verdict, using the mechanism under test.
     for ((_i_=0; _i_<60; _i_++)); do
       grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$summ" 2>/dev/null && break
