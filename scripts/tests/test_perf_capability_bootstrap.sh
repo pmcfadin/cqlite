@@ -95,7 +95,7 @@ check_out=$(PATH="$perfshims:$perfbin:$tmp:$PATH" HOME="$host_home" CARGO_HOME="
   CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$perf_sysctl_d" CQLITE_PERF_TEST_PRIV_DIR="$perfshims" \
   bash "$tmp/perf-root-check/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 check_rc=$?
-if printf '%s' "$check_out" | grep -q 'Perf profiling capability'; then
+if grep -q 'Perf profiling capability' <<<"$check_out"; then
   ok "perf section: present in the bootstrap run"
 else
   bad "perf section: MISSING from the bootstrap run"
@@ -123,8 +123,8 @@ fi
 # unprofileable box until reboot — the very failure the functional verification
 # exists to prevent, on the path most people take (no --yes). Plus the AC5 posture
 # and the BPF caveat (#3217).
-if printf '%s' "$check_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
-   && printf '%s' "$check_out" | grep -q 're-run with --yes'; then
+if grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' <<<"$check_out" \
+   && grep -q 're-run with --yes' <<<"$check_out"; then
   ok "perf section: prints the complete WRITE-AND-APPLY remedy line instead of running it"
 else
   bad "perf section: the printed remedy is missing the apply (or absent)"
@@ -133,21 +133,21 @@ fi
 # The PRE-state line is asserted SPECIFICALLY (not just "a line somewhere mentions
 # paranoid-4"): it is the diagnosis an operator reads first, and a later warn line
 # carrying the same token would otherwise satisfy a loose grep.
-if printf '%s\n' "$check_out" | grep -q 'runtime now: perf_event_paranoid=4 kptr_restrict=1 .*gate stamps perf=paranoid-4'; then
+if grep -q 'runtime now: perf_event_paranoid=4 kptr_restrict=1 .*gate stamps perf=paranoid-4' <<<"$check_out"; then
   ok "perf section: the pre-state line reports the ACTUAL /proc values and the token the gate will stamp"
 else
   bad "perf section: the pre-state line is wrong or missing"
-  printf '%s\n' "$check_out" | grep 'runtime now' || true
+  grep 'runtime now' <<<"$check_out" || true
 fi
-if printf '%s' "$check_out" | grep -qi 'BPF collectors .* require sudo' \
-   && printf '%s' "$check_out" | grep -qi 'never apply it to a shared or multi-tenant host'; then
+if grep -qi 'BPF collectors .* require sudo' <<<"$check_out" \
+   && grep -qi 'never apply it to a shared or multi-tenant host' <<<"$check_out"; then
   ok "perf section: states the BPF-still-needs-sudo caveat and the single-tenant posture"
 else
   bad "perf section: missing the BPF caveat or the security posture"
 fi
 # A blocked box must be DIAGNOSED as a permission verdict, not a capability one.
-if printf '%s' "$check_out" | grep -q 'perf=paranoid-4' \
-   && printf '%s' "$check_out" | grep -qi 'PERMISSION verdict'; then
+if grep -q 'perf=paranoid-4' <<<"$check_out" \
+   && grep -qi 'PERMISSION verdict' <<<"$check_out"; then
   ok "perf section: paranoid-4 is reported as a PERMISSION verdict with the gate's token"
 else
   bad "perf section: a blocked box was not diagnosed as a permission verdict"
@@ -242,9 +242,9 @@ fi
 # ORDER: the apply must precede the read-back verdict, and the functional verify
 # must come last (it is the verdict on the whole section).
 yes_perf_block=$(printf '%s\n' "$yes_out" | sed -n '/Perf profiling capability/,/^$/p')
-n_wrote=$(printf '%s\n' "$yes_perf_block" | grep -n 'wrote .*99-cqlite-perf.conf' | head -1 | cut -d: -f1)
-n_read=$(printf '%s\n' "$yes_perf_block" | grep -n 'READ BACK from /proc' | head -1 | cut -d: -f1)
-n_verify=$(printf '%s\n' "$yes_perf_block" | grep -n 'perf capability VERIFIED' | head -1 | cut -d: -f1)
+n_wrote=$(grep -n 'wrote .*99-cqlite-perf.conf' <<<"$yes_perf_block" | head -1 | cut -d: -f1)
+n_read=$(grep -n 'READ BACK from /proc' <<<"$yes_perf_block" | head -1 | cut -d: -f1)
+n_verify=$(grep -n 'perf capability VERIFIED' <<<"$yes_perf_block" | head -1 | cut -d: -f1)
 if [ -n "$n_wrote" ] && [ -n "$n_read" ] && [ -n "$n_verify" ] \
    && [ "$n_wrote" -lt "$n_read" ] && [ "$n_read" -lt "$n_verify" ]; then
   ok "perf section: order is write -> read-back from /proc -> functional verify"
@@ -257,7 +257,7 @@ fi
 yes2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
-if printf '%s' "$yes2_out" | grep -q 'drop-in already current' \
+if grep -q 'drop-in already current' <<<"$yes2_out" \
    && ! perf_wrote_dropin "$yestrip"; then
   ok "perf section: a second --yes run is an idempotent no-op (no re-write)"
 else
@@ -289,8 +289,8 @@ symtgt_rc=$?
 symtgt_leftover=$(ls -A "$symtgt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
 symtgt_priv=$(grep -E 'perf-symtarget' "$yestrip" || true)
 if [ "$symtgt_rc" -eq 0 ] \
-   && printf '%s' "$symtgt_run" | grep -q 'is a SYMLINK' \
-   && printf '%s' "$symtgt_run" | grep -q 'perf capability SKIPPED' \
+   && grep -q 'is a SYMLINK' <<<"$symtgt_run" \
+   && grep -q 'perf capability SKIPPED' <<<"$symtgt_run" \
    && [ "$(cat "$symtgt_out")" = "$symtgt_before" ] \
    && [ -L "$symtgt_d/99-cqlite-perf.conf" ] && [ -z "$symtgt_leftover" ] \
    && [ -z "$symtgt_priv" ]; then
@@ -309,8 +309,8 @@ unsup_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$y
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 unsup_rc=$?
-if printf '%s' "$unsup_out" | grep -q 'perf capability NOT verified' \
-   && ! printf '%s' "$unsup_out" | grep -q 'perf capability VERIFIED' \
+if grep -q 'perf capability NOT verified' <<<"$unsup_out" \
+   && ! grep -q 'perf capability VERIFIED' <<<"$unsup_out" \
    && [ "$unsup_rc" -eq 0 ]; then
   ok "perf section: an rc-0 perf with an unusable counter WARNs (never 'verified'), run still exits 0"
 else
@@ -322,8 +322,8 @@ mkperfshim 0
 zero_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
-if printf '%s' "$zero_out" | grep -q 'perf capability NOT verified' \
-   && ! printf '%s' "$zero_out" | grep -q 'perf capability VERIFIED'; then
+if grep -q 'perf capability NOT verified' <<<"$zero_out" \
+   && ! grep -q 'perf capability VERIFIED' <<<"$zero_out"; then
   ok "perf section: a zero cycle count WARNs (never 'verified')"
 else
   bad "perf section: a zero cycle count was accepted as verified"
@@ -348,9 +348,9 @@ nosudo_out=$(PATH="$nosudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 nosudo_rc=$?
 if [ "$nosudo_rc" -eq 0 ] && [ -z "$(ls -A "$nosudo_sysctl")" ] \
-   && printf '%s' "$nosudo_out" | grep -q "no 'sudo' binary on this box" \
-   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*bootstrap-agent-machine.sh --yes' \
-   && ! printf '%s' "$nosudo_out" | grep -q 'perf-capability.sh --install'; then
+   && grep -q "no 'sudo' binary on this box" <<<"$nosudo_out" \
+   && grep -q 'ROOT shell:.*bootstrap-agent-machine.sh --yes' <<<"$nosudo_out" \
+   && ! grep -q 'perf-capability.sh --install' <<<"$nosudo_out"; then
   ok "perf section: a box with no sudo BINARY warns + prints the root-shell remedy (never a useless 'sudo tee'), writes nothing, exits 0"
 else
   bad "perf section: no-sudo box mishandled (rc=$nosudo_rc, dir='$(ls -A "$nosudo_sysctl")')"
@@ -381,10 +381,10 @@ pwsudo_out=$(PATH="$pwsudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 pwsudo_rc=$?
 if [ "$pwsudo_rc" -eq 0 ] && [ -z "$(ls -A "$pwsudo_sysctl")" ] \
-   && printf '%s' "$pwsudo_out" | grep -q 'sudo needs a password' \
-   && printf '%s' "$pwsudo_out" | grep -q 'authenticate first, then re-run:.*sudo -v && bash scripts/bootstrap-agent-machine.sh --yes' \
-   && ! printf '%s' "$pwsudo_out" | grep -q "no 'sudo' binary" \
-   && ! printf '%s' "$pwsudo_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes'; then
+   && grep -q 'sudo needs a password' <<<"$pwsudo_out" \
+   && grep -q 'authenticate first, then re-run:.*sudo -v && bash scripts/bootstrap-agent-machine.sh --yes' <<<"$pwsudo_out" \
+   && ! grep -q "no 'sudo' binary" <<<"$pwsudo_out" \
+   && ! grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' <<<"$pwsudo_out"; then
   ok "perf section: a password-requiring sudo is diagnosed distinctly (not 'no sudo binary') with the interactive remedy, writes nothing, exits 0"
 else
   bad "perf section: password-requiring sudo mishandled (rc=$pwsudo_rc, dir='$(ls -A "$pwsudo_sysctl")')"
@@ -425,10 +425,10 @@ rootbox_out=$(PATH="$rootbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$rootbox_d" CQLITE_PERF_TEST_PRIV_DIR="$rootbox" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 rootbox_rc=$?
-rootbox_remedy=$(printf '%s\n' "$rootbox_out" | grep 'write + apply the drop-in' || true)
+rootbox_remedy=$(grep 'write + apply the drop-in' <<<"$rootbox_out" || true)
 if [ "$rootbox_rc" -eq 0 ] && [ -z "$(ls -A "$rootbox_d")" ] \
-   && printf '%s' "$rootbox_remedy" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
-   && ! printf '%s' "$rootbox_remedy" | grep -q 'sudo'; then
+   && grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' <<<"$rootbox_remedy" \
+   && ! grep -q 'sudo' <<<"$rootbox_remedy"; then
   ok "perf section: when ALREADY ROOT the printed write+apply remedy carries no 'sudo' prefix"
 else
   bad "perf section: root-box remedy line wrong (rc=$rootbox_rc, line='$rootbox_remedy')"
@@ -469,10 +469,10 @@ revert_out=$(PATH="$revert_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOM
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 revert_rc=$?
 if [ "$revert_rc" -eq 0 ] \
-   && printf '%s' "$revert_out" | grep -q 'the value did NOT take' \
-   && printf '%s' "$revert_out" | grep -q 'perf=paranoid-4' \
-   && ! printf '%s' "$revert_out" | grep -q 'READ BACK from /proc' \
-   && ! printf '%s' "$revert_out" | grep -q 'perf capability VERIFIED' \
+   && grep -q 'the value did NOT take' <<<"$revert_out" \
+   && grep -q 'perf=paranoid-4' <<<"$revert_out" \
+   && ! grep -q 'READ BACK from /proc' <<<"$revert_out" \
+   && ! grep -q 'perf capability VERIFIED' <<<"$revert_out" \
    && grep -q 'sysctl -q --system' "$revert_trip"; then
   ok "perf section: a sysctl that exits 0 without the value taking is reported as 'did NOT take' from /proc (no READ BACK, no VERIFIED), rc 0"
 else
@@ -482,8 +482,8 @@ fi
 # ...and the diagnostics must name /etc/sysctl.conf, which BOTH `sysctl --system` and
 # systemd-sysctl apply AFTER the sysctl.d drop-ins — so a stale entry there beats our
 # 99- file and is the likeliest cause of exactly this state.
-if printf '%s' "$revert_out" | grep -q '/etc/sysctl.conf' \
-   && printf '%s' "$revert_out" | grep -qi 'applied AFTER the sysctl.d drop-ins'; then
+if grep -q '/etc/sysctl.conf' <<<"$revert_out" \
+   && grep -qi 'applied AFTER the sysctl.d drop-ins' <<<"$revert_out"; then
   ok "perf section: the did-NOT-take diagnostics name /etc/sysctl.conf and its precedence over the drop-ins"
 else
   bad "perf section: diagnostics omit the /etc/sysctl.conf precedence trap"
@@ -512,10 +512,10 @@ checkapply_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" C
 checkapply_rc=$?
 checkapply_mutating=$(grep -vE '^sudo -n true$' "$checkapply_trip" | grep -E '^(sudo|sysctl|tee) ' | head -5)
 if [ "$checkapply_rc" -eq 0 ] \
-   && printf '%s' "$checkapply_out" | grep -q 'drop-in already current' \
-   && printf '%s' "$checkapply_out" | grep -q 'has NOT been applied to the running kernel' \
-   && ! printf '%s' "$checkapply_out" | grep -q 'READ BACK from /proc' \
-   && ! printf '%s' "$checkapply_out" | grep -q 'sysctl --system reported success' \
+   && grep -q 'drop-in already current' <<<"$checkapply_out" \
+   && grep -q 'has NOT been applied to the running kernel' <<<"$checkapply_out" \
+   && ! grep -q 'READ BACK from /proc' <<<"$checkapply_out" \
+   && ! grep -q 'sysctl --system reported success' <<<"$checkapply_out" \
    && [ -z "$checkapply_mutating" ]; then
   ok "perf section: check mode with a current drop-in but a non-ok runtime WARNs that it is not applied (and applies nothing)"
 else
@@ -571,13 +571,13 @@ rcfail_rc=$?
 # drop-in), and the two must not contradict: no "nothing was applied", no "did NOT
 # take", no "NOT in the profileable state" alongside a good read-back. rc still 0.
 if [ "$rcfail_rc" -eq 0 ] \
-   && printf '%s' "$rcfail_out" | grep -q "READ BACK from /proc as profileable: perf_event_paranoid=-1 kptr_restrict=0" \
-   && printf '%s' "$rcfail_out" | grep -q "'sysctl -q --system' exited 1" \
-   && printf '%s' "$rcfail_out" | grep -q 'UNRELATED pre-existing entry' \
-   && ! printf '%s' "$rcfail_out" | grep -q 'nothing was applied' \
-   && ! printf '%s' "$rcfail_out" | grep -q 'the value did NOT take' \
-   && ! printf '%s' "$rcfail_out" | grep -q 'NOT in the profileable state' \
-   && ! printf '%s' "$rcfail_out" | grep -q 'are NOT in effect' \
+   && grep -q "READ BACK from /proc as profileable: perf_event_paranoid=-1 kptr_restrict=0" <<<"$rcfail_out" \
+   && grep -q "'sysctl -q --system' exited 1" <<<"$rcfail_out" \
+   && grep -q 'UNRELATED pre-existing entry' <<<"$rcfail_out" \
+   && ! grep -q 'nothing was applied' <<<"$rcfail_out" \
+   && ! grep -q 'the value did NOT take' <<<"$rcfail_out" \
+   && ! grep -q 'NOT in the profileable state' <<<"$rcfail_out" \
+   && ! grep -q 'are NOT in effect' <<<"$rcfail_out" \
    && grep -q 'sysctl -q --system' "$rcfail_trip"; then
   ok "perf section: a sysctl that FAILS while the controls DO take reports the command failure distinctly and still reads the good verdict back from /proc, rc 0"
 else
@@ -602,10 +602,10 @@ rcfail2_out=$(PATH="$rcfail2_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_H
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 rcfail2_rc=$?
 if [ "$rcfail2_rc" -eq 0 ] \
-   && printf '%s' "$rcfail2_out" | grep -q "'sysctl -q --system' exited 1" \
-   && printf '%s' "$rcfail2_out" | grep -q 'the controls are NOT in effect' \
-   && ! printf '%s' "$rcfail2_out" | grep -q 'READ BACK from /proc as profileable' \
-   && ! printf '%s' "$rcfail2_out" | grep -q 'reported success'; then
+   && grep -q "'sysctl -q --system' exited 1" <<<"$rcfail2_out" \
+   && grep -q 'the controls are NOT in effect' <<<"$rcfail2_out" \
+   && ! grep -q 'READ BACK from /proc as profileable' <<<"$rcfail2_out" \
+   && ! grep -q 'reported success' <<<"$rcfail2_out"; then
   ok "perf section: a failing sysctl whose controls did NOT take reports BOTH facts (command exited 1 + controls not in effect), never a good read-back"
 else
   bad "perf section: the both-bad case mishandled (rc=$rcfail2_rc)"
@@ -628,10 +628,10 @@ noapply_out=$(PATH="$nosudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 noapply_rc=$?
 if [ "$noapply_rc" -eq 0 ] \
    && cmp -s "$noapply_ref" "$noapply_d/99-cqlite-perf.conf" \
-   && printf '%s' "$noapply_out" | grep -q 'drop-in already current' \
-   && printf '%s' "$noapply_out" | grep -q 'NOT in the profileable state' \
-   && printf '%s' "$noapply_out" | grep -q "no 'sudo' on this box — apply it from a ROOT shell:  sysctl -q --system" \
-   && ! printf '%s' "$noapply_out" | grep -q 'sudo sysctl'; then
+   && grep -q 'drop-in already current' <<<"$noapply_out" \
+   && grep -q 'NOT in the profileable state' <<<"$noapply_out" \
+   && grep -q "no 'sudo' on this box — apply it from a ROOT shell:  sysctl -q --system" <<<"$noapply_out" \
+   && ! grep -q 'sudo sysctl' <<<"$noapply_out"; then
   ok "perf section: a current drop-in that cannot be applied (no sudo binary) still prints a RUNNABLE root-shell apply remedy, writes nothing, exits 0"
 else
   bad "perf section: the current-drop-in/no-privilege branch printed no usable apply remedy (rc=$noapply_rc)"
@@ -643,9 +643,9 @@ noapply2_out=$(PATH="$pwsudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 noapply2_rc=$?
 if [ "$noapply2_rc" -eq 0 ] \
    && cmp -s "$noapply_ref" "$noapply_d/99-cqlite-perf.conf" \
-   && printf '%s' "$noapply2_out" | grep -q 'NOT in the profileable state' \
-   && printf '%s' "$noapply2_out" | grep -q 'apply the drop-in now:  sudo sysctl -q --system' \
-   && ! printf '%s' "$noapply2_out" | grep -q "no 'sudo' on this box"; then
+   && grep -q 'NOT in the profileable state' <<<"$noapply2_out" \
+   && grep -q 'apply the drop-in now:  sudo sysctl -q --system' <<<"$noapply2_out" \
+   && ! grep -q "no 'sudo' on this box" <<<"$noapply2_out"; then
   ok "perf section: the same branch on a password-requiring sudo prints the INTERACTIVE 'sudo sysctl -q --system' apply remedy"
 else
   bad "perf section: the password-sudo current-drop-in branch remedy is wrong (rc=$noapply2_rc)"
@@ -677,9 +677,9 @@ noperfbox_out=$(PATH="$noperfbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo"
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 noperfbox_rc=$?
 if [ "$noperfbox_rc" -eq 0 ] \
-   && printf '%s' "$noperfbox_out" | grep -q 'perf MISSING' \
-   && printf '%s' "$noperfbox_out" | grep -q 'install perf:.*linux-tools' \
-   && ! printf '%s' "$noperfbox_out" | grep -q 'perf capability VERIFIED'; then
+   && grep -q 'perf MISSING' <<<"$noperfbox_out" \
+   && grep -q 'install perf:.*linux-tools' <<<"$noperfbox_out" \
+   && ! grep -q 'perf capability VERIFIED' <<<"$noperfbox_out"; then
   ok "perf section: a box with no 'perf' binary warns UNVERIFIED + prints the linux-tools remedy and still exits 0"
 else
   bad "perf section: missing-perf box mishandled (rc=$noperfbox_rc)"
@@ -708,9 +708,9 @@ darwin_out=$(PATH="$darwin_dir:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME=
 darwin_rc=$?
 darwin_mutating=$(grep -vE '^sudo -n true$' "$darwin_trip" | grep -E '^(sudo|sysctl|tee) ' | head -5)
 if [ "$darwin_rc" -eq 0 ] \
-   && printf '%s' "$darwin_out" | grep -q 'nothing to configure on macos' \
+   && grep -q 'nothing to configure on macos' <<<"$darwin_out" \
    && [ -z "$(ls -A "$darwin_d")" ] && [ -z "$darwin_mutating" ] \
-   && ! printf '%s' "$darwin_out" | grep -q 'perf capability VERIFIED'; then
+   && ! grep -q 'perf capability VERIFIED' <<<"$darwin_out"; then
   ok "perf section: on Darwin the section is an explicit no-op — no write, no privileged call, rc 0"
 else
   bad "perf section: Darwin no-op mishandled (rc=$darwin_rc, dir='$(ls -A "$darwin_d")', tripwire='$darwin_mutating')"
@@ -730,11 +730,11 @@ darwin_inherit_out=$(PERF_SECTION_OK=1 PATH="$darwin_dir:$perfbin:$tmp:$PATH" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 darwin_inherit_rc=$?
 if [ "$darwin_inherit_rc" -eq 0 ] \
-   && printf '%s' "$darwin_inherit_out" | grep -q 'nothing to configure on macos' \
+   && grep -q 'nothing to configure on macos' <<<"$darwin_inherit_out" \
    && [ -z "$(ls -A "$darwin_d")" ] \
-   && ! printf '%s' "$darwin_inherit_out" | grep -q 'runtime now: perf_event_paranoid' \
-   && ! printf '%s' "$darwin_inherit_out" | grep -q 'perf capability VERIFIED' \
-   && ! printf '%s' "$darwin_inherit_out" | grep -qi 'command not found'; then
+   && ! grep -q 'runtime now: perf_event_paranoid' <<<"$darwin_inherit_out" \
+   && ! grep -q 'perf capability VERIFIED' <<<"$darwin_inherit_out" \
+   && ! grep -qi 'command not found' <<<"$darwin_inherit_out"; then
   ok "perf section: an INHERITED PERF_SECTION_OK=1 cannot drag a Darwin run into the Linux-only implementation"
 else
   bad "perf section: an inherited PERF_SECTION_OK=1 steered the section (rc=$darwin_inherit_rc)"
@@ -750,11 +750,11 @@ nolib_out=$(PERF_SECTION_OK=1 PATH="$checkapply_shims:$perfbin:$tmp:$PATH" \
   bash "$nolib_root/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 nolib_rc=$?
 if [ "$nolib_rc" -eq 0 ] \
-   && printf '%s' "$nolib_out" | grep -q 'perf-capability.sh missing from this checkout' \
+   && grep -q 'perf-capability.sh missing from this checkout' <<<"$nolib_out" \
    && [ -z "$(ls -A "$nolib_d")" ] \
-   && ! printf '%s' "$nolib_out" | grep -q 'runtime now: perf_event_paranoid' \
-   && ! printf '%s' "$nolib_out" | grep -q 'perf capability VERIFIED' \
-   && ! printf '%s' "$nolib_out" | grep -qi 'command not found'; then
+   && ! grep -q 'runtime now: perf_event_paranoid' <<<"$nolib_out" \
+   && ! grep -q 'perf capability VERIFIED' <<<"$nolib_out" \
+   && ! grep -qi 'command not found' <<<"$nolib_out"; then
   ok "perf section: an INHERITED PERF_SECTION_OK=1 cannot enter the implementation with no perf-capability.sh in the checkout"
 else
   bad "perf section: an inherited PERF_SECTION_OK=1 entered the section without its library (rc=$nolib_rc)"
@@ -775,12 +775,12 @@ subord_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 subord_rc=$?
 if [ "$subord_rc" -eq 0 ] \
-   && ! printf '%s' "$subord_out" | grep -q 'perf capability VERIFIED' \
-   && printf '%s' "$subord_out" | grep -q 'perf capability NOT verified' \
-   && printf '%s' "$subord_out" | grep -q 'PARTIAL DIAGNOSTIC INFORMATION' \
-   && printf '%s' "$subord_out" | grep -q '/proc is the AUTHORITY here: perf=paranoid-4' \
-   && printf '%s' "$subord_out" | grep -qi 'PERMISSION verdict' \
-   && printf '%s' "$subord_out" | grep -q 'cycles=8888888'; then
+   && ! grep -q 'perf capability VERIFIED' <<<"$subord_out" \
+   && grep -q 'perf capability NOT verified' <<<"$subord_out" \
+   && grep -q 'PARTIAL DIAGNOSTIC INFORMATION' <<<"$subord_out" \
+   && grep -q '/proc is the AUTHORITY here: perf=paranoid-4' <<<"$subord_out" \
+   && grep -qi 'PERMISSION verdict' <<<"$subord_out" \
+   && grep -q 'cycles=8888888' <<<"$subord_out"; then
   ok "perf section: a SUCCESSFUL perf stat while /proc says paranoid-4 is never 'VERIFIED' — reported as partial info, /proc governs"
 else
   bad "perf section: a functional pass overrode a non-ok /proc verdict (rc=$subord_rc)"
@@ -798,10 +798,10 @@ kptr_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_H
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 kptr_rc=$?
 if [ "$kptr_rc" -eq 0 ] \
-   && ! printf '%s' "$kptr_out" | grep -q 'perf capability VERIFIED' \
-   && printf '%s' "$kptr_out" | grep -q 'perf capability NOT verified' \
-   && printf '%s' "$kptr_out" | grep -q '/proc is the AUTHORITY here: perf=kptr-restricted' \
-   && printf '%s' "$kptr_out" | grep -q 'kptr_restrict != 0'; then
+   && ! grep -q 'perf capability VERIFIED' <<<"$kptr_out" \
+   && grep -q 'perf capability NOT verified' <<<"$kptr_out" \
+   && grep -q '/proc is the AUTHORITY here: perf=kptr-restricted' <<<"$kptr_out" \
+   && grep -q 'kptr_restrict != 0' <<<"$kptr_out"; then
   ok "perf section: a SUCCESSFUL perf stat while /proc says kptr-restricted is never 'VERIFIED' (the silent symbol loss still governs)"
 else
   bad "perf section: a functional pass masked a kptr-restricted verdict (rc=$kptr_rc)"
@@ -849,10 +849,10 @@ drop_out=$(PATH="$droproot" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 drop_rc=$?
 if [ "$drop_rc" -eq 0 ] \
-   && printf '%s' "$drop_out" | grep -q 'this run is ROOT and root BYPASSES perf_event_paranoid' \
-   && printf '%s' "$drop_out" | grep -q 'DROPS PRIVILEGE (dropped:setpriv:uid=1000)' \
+   && grep -q 'this run is ROOT and root BYPASSES perf_event_paranoid' <<<"$drop_out" \
+   && grep -q 'DROPS PRIVILEGE (dropped:setpriv:uid=1000)' <<<"$drop_out" \
    && grep -q 'setpriv --reuid=1000 --regid=1000 --clear-groups' "$droptrip" \
-   && printf '%s' "$drop_out" | grep -q 'perf capability VERIFIED .*UNPRIVILEGED perf stat -C 0 -e cycles reports cycles=1212121'; then
+   && grep -q 'perf capability VERIFIED .*UNPRIVILEGED perf stat -C 0 -e cycles reports cycles=1212121' <<<"$drop_out"; then
   ok "perf section: a ROOT run DROPS PRIVILEGE for the probe (setpriv, resolved uid/gid) and only then reports VERIFIED"
 else
   bad "perf section: the root run did not probe as an unprivileged identity (rc=$drop_rc, tripwire='$(cat "$droptrip")')"
@@ -881,11 +881,11 @@ nodrop_out=$(PATH="$nodroproot" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 nodrop_rc=$?
 if [ "$nodrop_rc" -eq 0 ] \
-   && ! printf '%s' "$nodrop_out" | grep -q 'perf capability VERIFIED' \
-   && printf '%s' "$nodrop_out" | grep -q 'perf capability NOT verified' \
-   && printf '%s' "$nodrop_out" | grep -q 'ran AS ROOT (root-no-drop-mechanism) and root BYPASSES perf_event_paranoid' \
-   && printf '%s' "$nodrop_out" | grep -q 'NOT evidence that an UNPRIVILEGED process can profile this box' \
-   && printf '%s' "$nodrop_out" | grep -q 'sudo -u <agent-user> perf stat'; then
+   && ! grep -q 'perf capability VERIFIED' <<<"$nodrop_out" \
+   && grep -q 'perf capability NOT verified' <<<"$nodrop_out" \
+   && grep -q 'ran AS ROOT (root-no-drop-mechanism) and root BYPASSES perf_event_paranoid' <<<"$nodrop_out" \
+   && grep -q 'NOT evidence that an UNPRIVILEGED process can profile this box' <<<"$nodrop_out" \
+   && grep -q 'sudo -u <agent-user> perf stat' <<<"$nodrop_out"; then
   ok "perf section: a ROOT probe with NO way to drop privilege is labelled NOT evidence of unprivileged capability (never 'VERIFIED'), even with /proc ok"
 else
   bad "perf section: a root-only functional pass was reported as verification (rc=$nodrop_rc)"
@@ -912,8 +912,8 @@ notarget_out=$(PATH="$notarget" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 notarget_rc=$?
 if [ "$notarget_rc" -eq 0 ] \
-   && ! printf '%s' "$notarget_out" | grep -q 'perf capability VERIFIED' \
-   && printf '%s' "$notarget_out" | grep -q 'ran AS ROOT (root-no-unprivileged-target)'; then
+   && ! grep -q 'perf capability VERIFIED' <<<"$notarget_out" \
+   && grep -q 'ran AS ROOT (root-no-unprivileged-target)' <<<"$notarget_out"; then
   ok "perf section: root with no resolvable unprivileged identity reports that distinctly and claims no verification"
 else
   bad "perf section: root with no unprivileged target mishandled (rc=$notarget_rc)"
@@ -929,7 +929,7 @@ sudouid_out=$(PATH="$droproot" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 sudouid_rc=$?
 if [ "$sudouid_rc" -eq 0 ] \
-   && printf '%s' "$sudouid_out" | grep -q 'DROPS PRIVILEGE (dropped:setpriv:uid=1234)' \
+   && grep -q 'DROPS PRIVILEGE (dropped:setpriv:uid=1234)' <<<"$sudouid_out" \
    && grep -q 'setpriv --reuid=1234 --regid=1235 --clear-groups' "$droptrip"; then
   ok "perf section: under sudo the probe drops to SUDO_UID/SUDO_GID (the account actually in question), not to nobody"
 else
@@ -944,8 +944,8 @@ fi
 mkperfshim 5151515
 vu_self=$(PATH="$perfbin:$tmp:$PATH" bash "$PERFLIB" --verify-unpriv 2>&1); vu_self_rc=$?
 vu_root=$(PATH="$nodroproot" bash "$PERFLIB" --verify-unpriv 2>&1); vu_root_rc=$?
-if [ "$vu_self_rc" -eq 0 ] && printf '%s' "$vu_self" | grep -q 'cycles=5151515 identity=self-unprivileged' \
-   && [ "$vu_root_rc" -ne 0 ] && printf '%s' "$vu_root" | grep -q 'cycles=5151515 identity=root-no-drop-mechanism'; then
+if [ "$vu_self_rc" -eq 0 ] && grep -q 'cycles=5151515 identity=self-unprivileged' <<<"$vu_self" \
+   && [ "$vu_root_rc" -ne 0 ] && grep -q 'cycles=5151515 identity=root-no-drop-mechanism' <<<"$vu_root"; then
   ok "perf-capability: --verify-unpriv passes only when the result is attributable to an unprivileged identity (and names the state)"
 else
   bad "perf-capability: --verify-unpriv identity attribution wrong (self rc=$vu_self_rc '$vu_self'; root rc=$vu_root_rc '$vu_root')"
@@ -999,11 +999,11 @@ noseam_after="$tmp/perf-noseam-real-after"
 perf_test_real_dropin_state >"$noseam_after" 2>/dev/null
 noseam_mutating=$(grep -E '^(sudo|sysctl|tee) ' "$noseam_trip" | head -5)
 if [ "$noseam_rc" -eq 0 ] \
-   && printf '%s' "$noseam_out" | grep -q 'perf capability SKIPPED' \
-   && printf '%s' "$noseam_out" | grep -q 'REFUSING' \
+   && grep -q 'perf capability SKIPPED' <<<"$noseam_out" \
+   && grep -q 'REFUSING' <<<"$noseam_out" \
    && [ -z "$noseam_mutating" ] \
-   && ! printf '%s' "$noseam_out" | grep -q 'wrote /etc/sysctl.d' \
-   && ! printf '%s' "$noseam_out" | grep -q 'perf capability VERIFIED' \
+   && ! grep -q 'wrote /etc/sysctl.d' <<<"$noseam_out" \
+   && ! grep -q 'perf capability VERIFIED' <<<"$noseam_out" \
    && cmp -s "$noseam_before" "$noseam_after"; then
   ok "perf section: test mode + ROOT + NO seams REFUSES to act — no privileged command, no verdict, rc 0, and the real drop-in is byte/metadata-unchanged"
 else
@@ -1030,8 +1030,8 @@ for badseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d"; do
   rs_after="$tmp/perf-resolve-after"; perf_test_real_dropin_state >"$rs_after" 2>/dev/null
   rs_mutating=$(grep -E '^(sudo|sysctl|tee) ' "$noseam_trip" | head -5)
   if [ "$rs_rc" -eq 0 ] \
-     && printf '%s' "$rs_out" | grep -q 'perf capability SKIPPED' \
-     && printf '%s' "$rs_out" | grep -q 'REFUSING' \
+     && grep -q 'perf capability SKIPPED' <<<"$rs_out" \
+     && grep -q 'REFUSING' <<<"$rs_out" \
      && [ -z "$rs_mutating" ] \
      && cmp -s "$rs_before" "$rs_after"; then
     :
@@ -1074,7 +1074,7 @@ nlfix_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$y
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 nlfix_rc=$?
 if [ "$nlfix_rc" -eq 0 ] \
-   && ! printf '%s' "$nlfix_out" | grep -q 'drop-in already current' \
+   && ! grep -q 'drop-in already current' <<<"$nlfix_out" \
    && perf_wrote_dropin "$yestrip" \
    && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
   ok "perf section: a drop-in MISSING its final newline is judged NOT current and REWRITTEN to the canonical bytes"
@@ -1088,7 +1088,7 @@ printf '\n' >>"$nlfix_d/99-cqlite-perf.conf"
 nlfix2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$nlfix_d" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
-if ! printf '%s' "$nlfix2_out" | grep -q 'drop-in already current' \
+if ! grep -q 'drop-in already current' <<<"$nlfix2_out" \
    && perf_wrote_dropin "$yestrip" \
    && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
   ok "perf section: a drop-in with an EXTRA trailing blank line is judged NOT current and REWRITTEN"
@@ -1116,11 +1116,11 @@ comp_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_H
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 comp_rc=$?
 if [ "$comp_rc" -eq 0 ] \
-   && printf '%s' "$comp_out" | grep -q "OVERRIDE: $compbox_d/99-zzz-late.conf" \
-   && printf '%s' "$comp_out" | grep -q 'sorts AFTER 99-cqlite-perf.conf' \
-   && printf '%s' "$comp_out" | grep -q "competing file: $compbox_d/10-kernel-hardening.conf" \
-   && printf '%s' "$comp_out" | grep -q "99-' prefix is load-bearing" \
-   && ! printf '%s' "$comp_out" | grep -q '50-unrelated'; then
+   && grep -q "OVERRIDE: $compbox_d/99-zzz-late.conf" <<<"$comp_out" \
+   && grep -q 'sorts AFTER 99-cqlite-perf.conf' <<<"$comp_out" \
+   && grep -q "competing file: $compbox_d/10-kernel-hardening.conf" <<<"$comp_out" \
+   && grep -q "99-' prefix is load-bearing" <<<"$comp_out" \
+   && ! grep -q '50-unrelated' <<<"$comp_out"; then
   ok "perf section: a non-ok read-back NAMES the competing sysctl.d files, flags the later-sorting one as an actual OVERRIDE, and says why the 99- prefix is load-bearing"
 else
   bad "perf section: the diagnostics did not name the competing file (rc=$comp_rc)"
@@ -1133,9 +1133,9 @@ bash "$PERFLIB" --drop-in >"$nocomp_d/99-cqlite-perf.conf"
 nocomp_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$nocomp_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-if printf '%s' "$nocomp_out" | grep -q "no other file on the 'sysctl --system' search path" \
-   && printf '%s' "$nocomp_out" | grep -q '/run/sysctl.d' \
-   && ! printf '%s' "$nocomp_out" | grep -q 'OVERRIDE:'; then
+if grep -q "no other file on the 'sysctl --system' search path" <<<"$nocomp_out" \
+   && grep -q '/run/sysctl.d' <<<"$nocomp_out" \
+   && ! grep -q 'OVERRIDE:' <<<"$nocomp_out"; then
   ok "perf section: with no competing file the scan says so explicitly AND names the whole search path it covered (a silent scan is indistinguishable from no scan)"
 else
   bad "perf section: the no-competitor case printed no scan result"
@@ -1167,12 +1167,12 @@ multi_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 multi_rc=$?
 if [ "$multi_rc" -eq 0 ] \
-   && printf '%s' "$multi_out" | grep -q "OVERRIDE: $multi_run/99-zzz-run.conf" \
-   && printf '%s' "$multi_out" | grep -q "OVERRIDE: $multi_conf_d/sysctl.conf" \
-   && printf '%s' "$multi_out" | grep -q 'applied AFTER every sysctl.d drop-in' \
-   && printf '%s' "$multi_out" | grep -q "competing file: $multi_hi/50-shadow.conf" \
-   && printf '%s' "$multi_out" | grep -q "competing file: $multi_lib/95-usrlib.conf" \
-   && ! printf '%s' "$multi_out" | grep -q "$multi_run/50-shadow.conf"; then
+   && grep -q "OVERRIDE: $multi_run/99-zzz-run.conf" <<<"$multi_out" \
+   && grep -q "OVERRIDE: $multi_conf_d/sysctl.conf" <<<"$multi_out" \
+   && grep -q 'applied AFTER every sysctl.d drop-in' <<<"$multi_out" \
+   && grep -q "competing file: $multi_hi/50-shadow.conf" <<<"$multi_out" \
+   && grep -q "competing file: $multi_lib/95-usrlib.conf" <<<"$multi_out" \
+   && ! grep -q "$multi_run/50-shadow.conf" <<<"$multi_out"; then
   ok "perf section: the competitor scan covers every search-path directory (a later-sorting /run file is an OVERRIDE, /etc/sysctl.conf is flagged as applied-last, and a SHADOWED same-basename copy is not named)"
 else
   bad "perf section: the multi-directory search-path scan is wrong (rc=$multi_rc)"
@@ -1198,10 +1198,10 @@ idless_out=$(PATH="$idlessbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 idless_rc=$?
 if [ "$idless_rc" -eq 0 ] \
-   && ! printf '%s' "$idless_out" | grep -q 'perf capability VERIFIED' \
-   && printf '%s' "$idless_out" | grep -q 'perf capability NOT verified' \
-   && printf '%s' "$idless_out" | grep -q "identity of this process could NOT be determined" \
-   && ! printf '%s' "$idless_out" | grep -q 'the probe ran AS ROOT'; then
+   && ! grep -q 'perf capability VERIFIED' <<<"$idless_out" \
+   && grep -q 'perf capability NOT verified' <<<"$idless_out" \
+   && grep -q "identity of this process could NOT be determined" <<<"$idless_out" \
+   && ! grep -q 'the probe ran AS ROOT' <<<"$idless_out"; then
   ok "perf section: with 'id' unusable the run reports the identity as UNKNOWN and claims no verification (and does not assert it ran as root either)"
 else
   bad "perf section: an unknown identity was resolved to a capability claim (rc=$idless_rc)"
@@ -1226,13 +1226,13 @@ uns_out=$(PATH="$uns_bin:$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_H
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$uns_dir" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1); uns_rc=$?
 if [ "$uns_rc" -eq 0 ] \
-   && printf '%s' "$uns_out" | grep -q 'cannot install .* on this host' \
+   && grep -q 'cannot install .* on this host' <<<"$uns_out" \
    && [ -z "$(ls -A "$uns_dir")" ] \
-   && ! printf '%s' "$uns_out" | grep -q 'write + apply the drop-in'; then
+   && ! grep -q 'write + apply the drop-in' <<<"$uns_out"; then
   ok "perf section: an UNSUPPORTED host (no GNU mv -T) is NAMED, nothing is written, and the retry remedy is deliberately NOT printed — re-running cannot help"
 else
   bad "perf section: unsupported-host handling wrong (rc=$uns_rc, dir='$(ls -A "$uns_dir")')"
-  printf '%s\n' "$uns_out" | grep -iE 'perf|drop-in' | tail -4
+  grep -iE 'perf|drop-in' <<<"$uns_out" | tail -4
 fi
 
 perf_test_report

@@ -35,7 +35,9 @@
 # mistake could reach the host's real /etc/sysctl.d. So before anything is created, re-exec the
 # sourcing suite as a non-root uid: the invoking account under sudo (SUDO_UID), else 1000. Root
 # CASES stay covered — they are stubbed (`mkid <dir> 0 ...`), never real privilege.
-if [ "$(id -u 2>/dev/null)" = 0 ]; then
+# $EUID, never `id -u`: a missing, broken or shadowed `id` yields an empty answer, which would
+# FAIL OPEN and keep real root (roborev job 48). bash sets EUID itself.
+if [ "${EUID:-}" = 0 ]; then
   _perf_drop_uid=${SUDO_UID:-1000}
   case "$_perf_drop_uid" in ''|0|*[!0-9]*) _perf_drop_uid=1000 ;; esac
   command -v setpriv >/dev/null 2>&1 || {
@@ -250,7 +252,7 @@ mkuname "$tmp" Linux   # every bootstrap run that includes $tmp in PATH is Linux
 # privileged writer uid Y", and Y is what the stub answers. A hardcoded 1000 held only on hosts
 # whose runner happens to be uid 1000 — on a uid-1001 box every --yes write was refused. The
 # privilege drop at the top of this file guarantees the real uid is non-root here.
-PERF_TEST_NONROOT_UID=$(id -u)
+PERF_TEST_NONROOT_UID=$EUID
 mkid "$tmp" "$PERF_TEST_NONROOT_UID"   # ...and is a NON-ROOT runner, whatever UID runs the suite
 host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
