@@ -227,7 +227,14 @@ mkshim cargo
 mkshim roborev
 mkshim gh
 mkuname "$tmp" Linux   # every bootstrap run that includes $tmp in PATH is Linux
-mkid "$tmp" 1000       # ...and is a NON-ROOT runner, whatever UID runs the suite
+# THE non-root uid the `id` stubs report (#4403). It must be the uid that OWNS this suite's
+# directories: the privileged installer refuses a drop-in dir "owned by uid X, not by the
+# privileged writer uid Y", and Y is what the stub answers. A hardcoded 1000 held only on hosts
+# whose runner happens to be uid 1000 — on a uid-1001 box every --yes write was refused. Under
+# root the directories are root-owned and the suite still needs a NON-root identity, so 1000.
+PERF_TEST_NONROOT_UID=$(id -u)
+[ "$PERF_TEST_NONROOT_UID" != 0 ] || PERF_TEST_NONROOT_UID=1000
+mkid "$tmp" "$PERF_TEST_NONROOT_UID"   # ...and is a NON-ROOT runner, whatever UID runs the suite
 host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # ---- the `perf` shims -------------------------------------------------------------

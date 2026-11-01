@@ -339,7 +339,7 @@ for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$nosudo/$t"
 done
 mkuname "$nosudo" Linux
-mkid "$nosudo" 1000    # non-root, whatever UID runs the suite
+mkid "$nosudo" "$PERF_TEST_NONROOT_UID"    # non-root, whatever UID runs the suite
 ln -sf "$perfbin/perf" "$nosudo/perf"
 mkperfshim 5555555
 nosudo_sysctl="$tmp/perf-nosudo.d"; mkdir -p "$nosudo_sysctl"
@@ -366,7 +366,7 @@ for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$pwsudo/$t"
 done
 mkuname "$pwsudo" Linux
-mkid "$pwsudo" 1000    # non-root, whatever UID runs the suite
+mkid "$pwsudo" "$PERF_TEST_NONROOT_UID"    # non-root, whatever UID runs the suite
 ln -sf "$perfbin/perf" "$pwsudo/perf"
 pwtrip="$tmp/perf-pwsudo-tripwire.log"; : >"$pwtrip"
 cat >"$pwsudo/sudo" <<EOF
@@ -662,7 +662,7 @@ for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$noperfbox/$t"
 done
 mkuname "$noperfbox" Linux
-mkid "$noperfbox" 1000    # non-root, whatever UID runs the suite
+mkid "$noperfbox" "$PERF_TEST_NONROOT_UID"    # non-root, whatever UID runs the suite
 cat >"$noperfbox/sudo" <<EOF
 #!/usr/bin/env bash
 while [ "\${1:-}" = "-n" ]; do shift; done
