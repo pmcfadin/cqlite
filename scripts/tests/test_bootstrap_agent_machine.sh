@@ -1897,6 +1897,12 @@ mk_push_bin() {
   # shipped awk rather than guessed).
   mk_stub "$dir" perf 'case "$*" in *stat*) echo "1234567,,cycles" >&2 ;; esac
 exit 0'
+  # The perf stub covers only the FUNCTIONAL probe; the section's VERDICT is the /proc read, and
+  # that read used to hit the HOST's real /proc (#4403): on a paranoid-4 box every sandbox here
+  # gained two perf warns and the green-path cases failed on a healthy host. run_push now points
+  # the section at the suite's profileable PUSH_PERF_PROC under test mode, and test mode refuses
+  # a reachable REAL sysctl, so this dir must shadow it (`sudo` is already shimmed below).
+  mk_stub "$dir" sysctl 'exit 0'
   # A REAL-SHAPED sccache (issue #3727): section 5b2 asks it for the value->bytes map through
   # an isolated read AND for the running server's enforced cap, so a bare `exit 0` yields
   # `sccache-cap: UNMEASURED` — one extra warn in every sandbox here. SCC_STUB_MAX pairs with
@@ -1950,6 +1956,15 @@ exit 0"
 # --skip-smoke: the gate fmt run is a different subject (and minutes long).
 push_rc=0
 push_out=""
+# A PROFILEABLE kernel for the perf section (#4403), in the shape the perf suite uses
+# (scripts/tests/lib/perf-capability-test-lib.sh): a stamped sandbox root, and both path seams
+# inside it. paranoid -1 / kptr 0 is the state the production drop-in sets, so the section's
+# verdict no longer depends on the host's real kernel.perf_event_paranoid.
+: >"$tmp/.cqlite-perf-sandbox"
+PUSH_PERF_PROC="$tmp/push-perf-proc"; mkdir -p "$PUSH_PERF_PROC"
+printf -- '-1\n' >"$PUSH_PERF_PROC/perf_event_paranoid"
+printf '0\n' >"$PUSH_PERF_PROC/kptr_restrict"
+PUSH_PERF_SYSCTL_D="$tmp/push-perf-sysctl.d"; mkdir -p "$PUSH_PERF_SYSCTL_D"
 run_push() {
   local repo="$1" bin="$2" gc="$3"; shift 3
   push_rc=0
@@ -1963,6 +1978,8 @@ run_push() {
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
+    CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$tmp" CQLITE_PERF_TEST_PRIV_DIR="$bin" \
+    CQLITE_PERF_PROC_DIR="$PUSH_PERF_PROC" CQLITE_PERF_SYSCTL_DIR="$PUSH_PERF_SYSCTL_D" \
     "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
 }
 # ANSI colour is stripped with a printf-built ESC, not a `\x1b` escape: BSD sed (the
