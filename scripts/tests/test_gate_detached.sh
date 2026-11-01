@@ -279,9 +279,10 @@ else
     # #4401: the unit must not inherit the manager's DefaultTasksMax (15% of the pids limit —
     # 2457 on a 16384-pid container), which a 32-core gate exceeds and rustc/node then die
     # with EAGAIN. Read back from the MANAGER via the launcher's report, not from our argv.
-    printf '%s' "$out" | grep -qE '^tasks-max: *infinity$' \
+    _tm_line=$(sed -n '/^tasks-max:/{p;q}' <<<"$out")
+    grep -qE '^tasks-max: *infinity$' <<<"$_tm_line" \
       && ok "4.3b the detached unit's TasksMax is infinity (#4401)" \
-      || bad "4.3b the detached unit's TasksMax is infinity (#4401)" "$(printf '%s' "$out" | grep -m1 '^tasks-max:' || echo 'no tasks-max: line')"
+      || bad "4.3b the detached unit's TasksMax is infinity (#4401)" "${_tm_line:-no tasks-max: line}"
     # Wait for the gate to reach a verdict, using the mechanism under test.
     for ((_i_=0; _i_<60; _i_++)); do
       grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$summ" 2>/dev/null && break
