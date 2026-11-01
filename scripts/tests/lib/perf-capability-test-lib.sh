@@ -28,36 +28,20 @@
 # Sourced, never executed. The sourcing suite must NOT have `set -e` (the cases test
 # failing commands on purpose); `set -uo pipefail` is what both use.
 
-# NEVER RUN AS REAL ROOT (#4403 roborev job 47). Every case models its identity with an `id` stub,
-# and the privileged installer refuses a drop-in dir not owned by the writer uid that stub reports;
-# a real-root run creates root-owned dirs while the non-root cases report a non-root uid, so those
-# cases failed on ownership instead of behaviour. A real-root run is also the one place a seam
-# mistake could reach the host's real /etc/sysctl.d. So before anything is created, re-exec the
-# sourcing suite as a non-root uid: the invoking account under sudo (SUDO_UID), else 1000. Root
-# CASES stay covered — they are stubbed (`mkid <dir> 0 ...`), never real privilege.
-# $EUID, never `id -u`: a missing, broken or shadowed `id` yields an empty answer, which would
-# FAIL OPEN and keep real root (roborev job 48). bash sets EUID itself.
+# NEVER RUN AS REAL ROOT (#4403). Every case models its identity with an `id` stub, and the
+# privileged installer refuses a drop-in dir not owned by the writer uid that stub reports; a
+# real-root run creates root-owned dirs while the non-root cases report a non-root uid, so those
+# cases fail on ownership instead of behaviour. A real-root run is also the one place a seam
+# mistake could reach the host's real /etc/sysctl.d. Root CASES stay covered — they are stubbed
+# (`mkid <dir> 0 ...`), never real privilege. So a real-root run REFUSES, loudly and before
+# anything is created. Re-executing as the invoking account instead (setpriv) was tried and kept
+# growing identity edge cases (gid, supplementary groups, passwd lookup — roborev jobs 47-51);
+# proper root support is a follow-up, not this fix. $EUID, never `id -u`: a missing or shadowed
+# `id` answers empty and would FAIL OPEN.
 if [ "${EUID:-}" = 0 ]; then
-  _perf_drop_uid=${SUDO_UID:-1000}
-  case "$_perf_drop_uid" in ''|0|*[!0-9]*) _perf_drop_uid=1000 ;; esac
-  # The invoking account's OWN primary gid (roborev job 49): uid and gid often differ, and a
-  # fabricated gid with groups cleared can lose read access to a group-readable checkout.
-  _perf_drop_gid=${SUDO_GID:-$_perf_drop_uid}
-  case "$_perf_drop_gid" in ''|0|*[!0-9]*) _perf_drop_gid=$_perf_drop_uid ;; esac
-  # The invoking account's SUPPLEMENTARY groups too (roborev job 50): a checkout readable only
-  # through one of them must stay readable after the drop. Restored only when SUDO_USER's passwd
-  # entry names the SAME uid; a numeric-only or mismatched identity keeps groups cleared.
-  _perf_drop_groups=--clear-groups
-  if [ -n "${SUDO_USER:-}" ] \
-     && [ "$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f3)" = "$_perf_drop_uid" ]; then
-    _perf_drop_groups=--init-groups
-  fi
-  command -v setpriv >/dev/null 2>&1 || {
-    printf 'FAIL - perf suites refuse to run as real root and cannot drop privilege here (no setpriv); run as a non-root user\n'
-    exit 1; }
-  exec setpriv --reuid="$_perf_drop_uid" --regid="$_perf_drop_gid" "$_perf_drop_groups" -- \
-    env -u SUDO_UID -u SUDO_GID -u SUDO_USER bash "$0" "$@"
-  exit 1   # exec failed: never fall through as root
+  printf 'FAIL - perf suites refuse to run as real root (EUID 0): run them as a non-root user (#4403)\n'
+  printf 'PASS=0 FAIL=1 SKIP=0\n'
+  exit 1
 fi
 
 PERF_TEST_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -263,7 +247,7 @@ mkuname "$tmp" Linux   # every bootstrap run that includes $tmp in PATH is Linux
 # directories: the privileged installer refuses a drop-in dir "owned by uid X, not by the
 # privileged writer uid Y", and Y is what the stub answers. A hardcoded 1000 held only on hosts
 # whose runner happens to be uid 1000 — on a uid-1001 box every --yes write was refused. The
-# privilege drop at the top of this file guarantees the real uid is non-root here.
+# root refusal at the top of this file guarantees the real uid is non-root here.
 PERF_TEST_NONROOT_UID=$EUID
 mkid "$tmp" "$PERF_TEST_NONROOT_UID"   # ...and is a NON-ROOT runner, whatever UID runs the suite
 host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
