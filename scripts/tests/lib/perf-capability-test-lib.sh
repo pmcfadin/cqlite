@@ -28,6 +28,24 @@
 # Sourced, never executed. The sourcing suite must NOT have `set -e` (the cases test
 # failing commands on purpose); `set -uo pipefail` is what both use.
 
+# NEVER RUN AS REAL ROOT (#4403 roborev job 47). Every case models its identity with an `id` stub,
+# and the privileged installer refuses a drop-in dir not owned by the writer uid that stub reports;
+# a real-root run creates root-owned dirs while the non-root cases report a non-root uid, so those
+# cases failed on ownership instead of behaviour. A real-root run is also the one place a seam
+# mistake could reach the host's real /etc/sysctl.d. So before anything is created, re-exec the
+# sourcing suite as a non-root uid: the invoking account under sudo (SUDO_UID), else 1000. Root
+# CASES stay covered — they are stubbed (`mkid <dir> 0 ...`), never real privilege.
+if [ "$(id -u 2>/dev/null)" = 0 ]; then
+  _perf_drop_uid=${SUDO_UID:-1000}
+  case "$_perf_drop_uid" in ''|0|*[!0-9]*) _perf_drop_uid=1000 ;; esac
+  command -v setpriv >/dev/null 2>&1 || {
+    printf 'FAIL - perf suites refuse to run as real root and cannot drop privilege here (no setpriv); run as a non-root user\n'
+    exit 1; }
+  exec setpriv --reuid="$_perf_drop_uid" --regid="$_perf_drop_uid" --clear-groups -- \
+    env -u SUDO_UID -u SUDO_GID -u SUDO_USER bash "$0" "$@"
+  exit 1   # exec failed: never fall through as root
+fi
+
 PERF_TEST_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_DIR=$(cd "$PERF_TEST_LIB_DIR/.." && pwd)          # scripts/tests
 BOOTSTRAP="$SCRIPT_DIR/../bootstrap-agent-machine.sh"
@@ -230,10 +248,9 @@ mkuname "$tmp" Linux   # every bootstrap run that includes $tmp in PATH is Linux
 # THE non-root uid the `id` stubs report (#4403). It must be the uid that OWNS this suite's
 # directories: the privileged installer refuses a drop-in dir "owned by uid X, not by the
 # privileged writer uid Y", and Y is what the stub answers. A hardcoded 1000 held only on hosts
-# whose runner happens to be uid 1000 — on a uid-1001 box every --yes write was refused. Under
-# root the directories are root-owned and the suite still needs a NON-root identity, so 1000.
+# whose runner happens to be uid 1000 — on a uid-1001 box every --yes write was refused. The
+# privilege drop at the top of this file guarantees the real uid is non-root here.
 PERF_TEST_NONROOT_UID=$(id -u)
-[ "$PERF_TEST_NONROOT_UID" != 0 ] || PERF_TEST_NONROOT_UID=1000
 mkid "$tmp" "$PERF_TEST_NONROOT_UID"   # ...and is a NON-ROOT runner, whatever UID runs the suite
 host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
