@@ -544,7 +544,7 @@ done
 : >"$tripwire"
 guard_out=$(PATH="$tmp:/usr/bin:/bin" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if printf '%s' "$guard_out" | grep -Eq "install sccache:|sccache MISSING"; then
+if grep -Eq "install sccache:|sccache MISSING" <<<"$guard_out"; then
   ok "missing accelerator prints install guidance (does not auto-install)"
 else
   bad "missing accelerator did not surface install guidance"
@@ -848,7 +848,7 @@ if out_has "$outG" "mold MISSING" \
   ok "mold: missing + apt prints install command, installs nothing, writes no config"
 else
   bad "mold: missing+apt path did not print-only (tripwire=$(cat "$tripG" 2>/dev/null))"
-  printf '%s\n' "$outG" | grep -i mold
+  grep -i mold <<<"$outG"
 fi
 
 # 6h. missing mold + NO supported package manager -> warn, no config. HERMETIC PATH
@@ -862,7 +862,7 @@ if out_has "$outH" "no supported package manager" \
   ok "mold: missing + no package manager warns and writes no config"
 else
   bad "mold: missing + no-manager path missed the warn or wrote config"
-  printf '%s\n' "$outH" | grep -i mold
+  grep -i mold <<<"$outH"
 fi
 
 # 6j. legacy extension-less ~/.cargo/config (blocker A): the block must be written
@@ -1061,11 +1061,11 @@ ln -s "$sbP/.cargo/config.toml" "$sbP/.cargo/loop-b.toml"
 outP=$(PATH="$stubO:$PATH" HOME="$sbP" CARGO_HOME="$sbP/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if [ -L "$sbP/.cargo/config.toml" ] && [ -L "$sbP/.cargo/loop-b.toml" ] \
-   && printf '%s' "$outP" | grep -q "symlink whose target could not be resolved"; then
+   && grep -q "symlink whose target could not be resolved" <<<"$outP"; then
   ok "mold/symlink: a symlink LOOP is refused with a named warning and both links are left untouched, rather than one being replaced by a plain file"
 else
   bad "mold/symlink: the symlink-loop case did not refuse (config-is-link=$([ -L "$sbP/.cargo/config.toml" ] && echo yes || echo no) b-is-link=$([ -L "$sbP/.cargo/loop-b.toml" ] && echo yes || echo no))"
-  printf '%s\n' "$outP" | grep -i 'mold\|symlink' | head -5
+  grep -i 'mold\|symlink' <<<"$outP" | head -5
 fi
 
 # 6q. A symlink whose TARGET DOES NOT EXIST YET but whose parent directory does is WRITTEN
@@ -1111,11 +1111,11 @@ ln -s "$sbS/.cargo/no-such-dir/legacy-config" "$sbS/.cargo/config"
 outS=$(PATH="$stubO:$PATH" HOME="$sbS" CARGO_HOME="$sbS/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if [ -L "$sbS/.cargo/config" ] && [ ! -e "$sbS/.cargo/no-such-dir" ] \
-   && printf '%s' "$outS" | grep -q "symlink whose target could not be resolved"; then
+   && grep -q "symlink whose target could not be resolved" <<<"$outS"; then
   ok "mold/symlink: a legacy config symlink into a NONEXISTENT directory is refused with a named warning and left untouched — 6r widened selection without widening what may be clobbered"
 else
   bad "mold/symlink: the unresolvable legacy symlink case did not refuse (still-link=$([ -L "$sbS/.cargo/config" ] && echo yes || echo no) dir-created=$([ -e "$sbS/.cargo/no-such-dir" ] && echo yes || echo no))"
-  printf '%s\n' "$outS" | grep -i 'mold\|symlink' | head -5
+  grep -i 'mold\|symlink' <<<"$outS" | head -5
 fi
 
 # 6t. AN INTERMEDIATE DIRECTORY SYMLINK FOLLOWED BY `..` RESOLVES PHYSICALLY (#3756 roborev
@@ -1162,11 +1162,11 @@ outU=$(PATH="$stubO:$PATH" HOME="$sbU" CARGO_HOME="$sbU/.cargo" \
 if [ -L "$sbU/.cargo/second" ] && [ "$(readlink "$sbU/.cargo/second")" = "$sbU/.cargo/actual.toml" ] \
    && [ -L "$sbU/.cargo/config.toml" ] && [ "$(readlink "$sbU/.cargo/config.toml")" = "$sbU/.cargo/second/" ] \
    && [ "$(count_begin "$sbU/.cargo/actual.toml")" = 0 ] \
-   && printf '%s' "$outU" | grep -qE "could not be resolved|which is itself a symlink or a directory|trailing '/' denotes a directory it does not name"; then
+   && grep -qE "could not be resolved|which is itself a symlink or a directory|trailing '/' denotes a directory it does not name" <<<"$outU"; then
   ok "mold/symlink: a trailing-slash target naming a SECOND symlink is refused — the intermediate guards can be bypassed by normalisation, so the no-clobber test is re-run on the write target itself"
 else
   bad "mold/symlink: the trailing-slash second-symlink case was not refused (second-is-link=$([ -L "$sbU/.cargo/second" ] && echo yes || echo no) actual-begin=$(count_begin "$sbU/.cargo/actual.toml"))"
-  printf '%s\n' "$outU" | grep -i 'mold\|symlink' | head -5
+  grep -i 'mold\|symlink' <<<"$outU" | head -5
 fi
 
 # 6v. A DANGLING LEGACY `config` SYMLINK MUST NOT SHADOW A REAL `config.toml` (#3756 roborev
@@ -1190,11 +1190,11 @@ outV=$(PATH="$stubO:$PATH" HOME="$sbV" CARGO_HOME="$sbV/.cargo" \
 if [ ! -e "$sbV/dotfiles/legacy-config" ] \
    && [ -L "$sbV/.cargo/config" ] && [ "$(readlink "$sbV/.cargo/config")" = "$sbV/dotfiles/legacy-config" ] \
    && cmp -s "$sbV/pristine-config.toml" "$sbV/.cargo/config.toml" \
-   && printf '%s' "$outV" | grep -q "broken symlink and .* also exists"; then
+   && grep -q "broken symlink and .* also exists" <<<"$outV"; then
   ok "mold/symlink: a DANGLING legacy config symlink beside a real config.toml is refused with a named warning — the legacy target is NOT materialised, so cargo's preference does not flip and the user's config.toml is left byte-identical"
 else
   bad "mold/symlink: the shadowing case was not refused (legacy-materialised=$([ -e "$sbV/dotfiles/legacy-config" ] && echo yes || echo no) config.toml-changed=$(cmp -s "$sbV/pristine-config.toml" "$sbV/.cargo/config.toml" && echo no || echo yes))"
-  printf '%s\n' "$outV" | grep -i 'mold\|symlink' | head -5
+  grep -i 'mold\|symlink' <<<"$outV" | head -5
   echo "--- config.toml ---"; cat "$sbV/.cargo/config.toml"
 fi
 
@@ -1211,11 +1211,11 @@ outW=$(PATH="$stubO:$PATH" HOME="$sbW" CARGO_HOME="$sbW/.cargo" \
 if [ ! -e "$sbW/dotfiles/legacy-config" ] && [ ! -e "$sbW/dotfiles/modern-config" ] \
    && [ -L "$sbW/.cargo/config" ] && [ "$(readlink "$sbW/.cargo/config")" = "$sbW/dotfiles/legacy-config" ] \
    && [ -L "$sbW/.cargo/config.toml" ] && [ "$(readlink "$sbW/.cargo/config.toml")" = "$sbW/dotfiles/modern-config" ] \
-   && printf '%s' "$outW" | grep -q "broken symlink and .* also exists"; then
+   && grep -q "broken symlink and .* also exists" <<<"$outW"; then
   ok "mold/symlink: a dangling legacy config symlink beside a DANGLING config.toml symlink is refused too — neither target is materialised, so the run does not pick a winner between two broken declarations"
 else
   bad "mold/symlink: the two-dangling-symlinks case was not refused (legacy=$([ -e "$sbW/dotfiles/legacy-config" ] && echo materialised || echo no) modern=$([ -e "$sbW/dotfiles/modern-config" ] && echo materialised || echo no))"
-  printf '%s\n' "$outW" | grep -i 'mold\|symlink' | head -5
+  grep -i 'mold\|symlink' <<<"$outW" | head -5
 fi
 
 # 6x. A TRAILING-SLASH TARGET NAMING A REGULAR FILE DESTROYS NOTHING (#3756 roborev round 6,
@@ -1238,12 +1238,12 @@ outX=$(PATH="$stubO:$PATH" HOME="$sbX" CARGO_HOME="$sbX/.cargo" \
 if cmp -s "$sbX/pristine-regular-file" "$sbX/data/regular-file" \
    && [ -L "$sbX/.cargo/config.toml" ] \
    && [ "$(count_begin "$sbX/data/regular-file")" = 0 ] \
-   && printf '%s' "$outX" | grep -q "trailing '/' denotes a directory it does not name"; then
+   && grep -q "trailing '/' denotes a directory it does not name" <<<"$outX"; then
   ok "mold/symlink: a trailing-slash target naming a REGULAR FILE is refused by name — the file keeps its contents byte-for-byte and the symlink is untouched (this path used to OVERWRITE it)"
 else
   bad "mold/symlink: the trailing-slash regular-file case lost data or was not refused (content-preserved=$(cmp -s "$sbX/pristine-regular-file" "$sbX/data/regular-file" && echo yes || echo NO) still-link=$([ -L "$sbX/.cargo/config.toml" ] && echo yes || echo no) block-written=$(count_begin "$sbX/data/regular-file"))"
   echo "--- file now ---"; cat "$sbX/data/regular-file"; echo "----------------"
-  printf '%s\n' "$outX" | grep -i 'mold\|symlink' | head -5
+  grep -i 'mold\|symlink' <<<"$outX" | head -5
 fi
 
 # 6y. THE PRESERVE READ FOLLOWS THE RESOLVED PATH, NOT THE LINK (#3756 roborev round 6, the
@@ -1278,12 +1278,12 @@ if command -v mkfifo >/dev/null 2>&1; then
     outZ=$(PATH="$stubO:$PATH" HOME="$sbZ" CARGO_HOME="$sbZ/.cargo" \
       "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
     if [ -p "$sbZ/special/pipe" ] && [ -L "$sbZ/.cargo/config" ] \
-       && printf '%s' "$outZ" | grep -q "is not a regular file"; then
+       && grep -q "is not a regular file" <<<"$outZ"; then
       ok "mold/symlink: a config symlink pointing at a SPECIAL FILE (FIFO) is refused by name — the special file keeps its type and the link is untouched; only a regular file or a nonexistent path is a write target"
     else
       bad "mold/symlink: the special-file target was not refused (still-fifo=$([ -p "$sbZ/special/pipe" ] && echo yes || echo NO) still-link=$([ -L "$sbZ/.cargo/config" ] && echo yes || echo no))"
       ls -l "$sbZ/special/pipe" "$sbZ/.cargo/config" 2>&1 | head -4
-      printf '%s\n' "$outZ" | grep -i 'mold\|symlink\|regular file' | head -5
+      grep -i 'mold\|symlink\|regular file' <<<"$outZ" | head -5
     fi
   else
     # A SKIP, never a silent pass: the subject could not be created, so the case has no verdict.
@@ -1306,12 +1306,12 @@ if command -v mkfifo >/dev/null 2>&1; then
     outAA=$(PATH="$stubO:$PATH" HOME="$sbAA" CARGO_HOME="$sbAA/.cargo" \
       "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
     if [ -p "$sbAA/.cargo/config.toml" ] \
-       && printf '%s' "$outAA" | grep -q "is not a regular file"; then
+       && grep -q "is not a regular file" <<<"$outAA"; then
       ok "mold/symlink: a config.toml that IS a FIFO — reached directly, with no symlink anywhere — is refused by name and keeps its type; the write-target type check guards every route, not just the symlink branch"
     else
       bad "mold/symlink: a DIRECT special-file config.toml was not refused (still-fifo=$([ -p "$sbAA/.cargo/config.toml" ] && echo yes || echo NO))"
       ls -l "$sbAA/.cargo/config.toml" 2>&1 | head -2
-      printf '%s\n' "$outAA" | grep -i 'mold\|regular file' | head -5
+      grep -i 'mold\|regular file' <<<"$outAA" | head -5
     fi
   else
     skip "mold/symlink: direct special-file case — mkfifo did not produce a FIFO on this filesystem, so the subject does not exist"
@@ -1331,11 +1331,11 @@ outAB=$(PATH="$stubO:$PATH" HOME="$sbAB" CARGO_HOME="$sbAB/.cargo" \
 # `1699-find-tristate`). An unreadable directory must not read as an empty one.
 ab_listing=$(ls -A "$sbAB/.cargo/config.toml" 2>/dev/null); ab_ls_rc=$?
 if [ -d "$sbAB/.cargo/config.toml" ] && [ "$ab_ls_rc" -eq 0 ] && [ -z "$ab_listing" ] \
-   && printf '%s' "$outAB" | grep -q "is not a regular file"; then
+   && grep -q "is not a regular file" <<<"$outAB"; then
   ok "mold/symlink: a DIRECTORY at config.toml is refused by name and left empty — nothing is moved inside it and no success is reported"
 else
   bad "mold/symlink: a directory at config.toml was not refused (still-dir=$([ -d "$sbAB/.cargo/config.toml" ] && echo yes || echo no) ls-rc=$ab_ls_rc contents=[$(printf '%s' "$ab_listing" | tr '\n' ' ')])"
-  printf '%s\n' "$outAB" | grep -i 'mold\|regular file' | head -5
+  grep -i 'mold\|regular file' <<<"$outAB" | head -5
 fi
 
 # 6ac. A LONG-BUT-OPENABLE SYMLINK CHAIN RESOLVES (#3756 roborev round 10). The hop cap exists
@@ -1436,9 +1436,9 @@ if out_has "$out7a" "\[warn\].*git push" \
   ok "cred: no helper -> warn naming the 'could not read Username' symptom + remediation"
 else
   bad "cred: no-helper case did not warn with the symptom/remediation"
-  printf '%s\n' "$out7a" | grep -i -A3 "credential"
+  grep -i -A3 "credential" <<<"$out7a"
 fi
-if printf '%s' "$out7a" | grep -Eq '\[ok\].*(git push credentials|git credentials).*(resolve|configured)'; then
+if grep -Eq '\[ok\].*(git push credentials|git credentials).*(resolve|configured)' <<<"$out7a"; then
   bad "cred: reported OK for git push credentials while no helper is configured"
 else
   ok "cred: authenticated gh alone is NOT reported as git push credentials"
@@ -1492,11 +1492,11 @@ if [ -z "$leak7b" ]; then
 else
   bad "cred: token value leaked into: $leak7b"
 fi
-if printf '%s' "$out7b" | grep -Eq '\[ok\].*git.*credential'; then
+if grep -Eq '\[ok\].*git.*credential' <<<"$out7b"; then
   ok "cred: --yes run reports the configured credential path as ok"
 else
   bad "cred: --yes run never confirmed a working credential path"
-  printf '%s\n' "$out7b" | grep -i -A2 "credential"
+  grep -i -A2 "credential" <<<"$out7b"
 fi
 
 # 7c. --yes where `gh auth setup-git` genuinely works -> use it, and do NOT also
@@ -1571,11 +1571,11 @@ fi
 out7g=$(PATH="$stub7g" HOME="$sb7g" CARGO_HOME="$sb7g/.cargo" GIT_CONFIG_GLOBAL="$gc7g" \
   GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if out_has "$out7g" "\[warn\].*git push has NO credentials" \
-   && ! printf '%s' "$out7g" | grep -Eq '\[ok\].*git push credentials resolve'; then
+   && ! grep -Eq '\[ok\].*git push credentials resolve' <<<"$out7g"; then
   ok "cred: helper present but GH_TOKEN unset -> WARN (a declining helper is not a credential)"
 else
   bad "cred: empty-token case reported ok — probe accepted a non-answer"
-  printf '%s\n' "$out7g" | grep -i -A2 "git push"
+  grep -i -A2 "git push" <<<"$out7g"
 fi
 
 # 7g-ii. The case the `^password=.` check exists for, which nothing covered: a helper
@@ -1601,11 +1601,11 @@ fi
 out7ge=$(PATH="$stub7ge" HOME="$sb7ge" CARGO_HOME="$sb7ge/.cargo" GIT_CONFIG_GLOBAL="$gc7ge" \
   GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7ge/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if out_has "$out7ge" "\[warn\].*git push has NO credentials" \
-   && ! printf '%s' "$out7ge" | grep -Eq '\[ok\].*git push credentials resolve'; then
+   && ! grep -Eq '\[ok\].*git push credentials resolve' <<<"$out7ge"; then
   ok "cred: a helper answering with an EMPTY password is not accepted as a credential"
 else
   bad "cred: empty-password helper reported ok — the probe trusted exit status"
-  printf '%s\n' "$out7ge" | grep -i -A2 "git push"
+  grep -i -A2 "git push" <<<"$out7ge"
 fi
 
 # 7h. A HANGING credential helper must not hang the bootstrap. Neither
@@ -1726,7 +1726,7 @@ if out_has "$out7e" 'reads \$GH_TOKEN from the ENVIRONMENT'; then
   ok "cred: env-dependency caveat fires for the HOST-SCOPED helper the script writes"
 else
   bad "cred: env-dependency caveat missed a host-scoped helper"
-  printf '%s\n' "$out7e" | grep -i -A2 "git push credentials"
+  grep -i -A2 "git push credentials" <<<"$out7e"
 fi
 
 # 7i. Same blind spot on the other advisory: a host-scoped helper at REPO-LOCAL scope
@@ -1742,7 +1742,7 @@ if out_has "$out7i" 'REPO-LOCAL scope only'; then
   ok "cred: repo-local-scope note fires for a HOST-SCOPED local helper"
 else
   bad "cred: repo-local-scope note missed a host-scoped local helper"
-  printf '%s\n' "$out7i" | grep -i -A3 "git push credentials"
+  grep -i -A3 "git push credentials" <<<"$out7i"
 fi
 
 # --- 7p. git PUSH capability is MEASURED, not inferred (issue #3369) --------
@@ -1897,6 +1897,12 @@ mk_push_bin() {
   # shipped awk rather than guessed).
   mk_stub "$dir" perf 'case "$*" in *stat*) echo "1234567,,cycles" >&2 ;; esac
 exit 0'
+  # The perf stub covers only the FUNCTIONAL probe; the section's VERDICT is the /proc read, and
+  # that read used to hit the HOST's real /proc (#4403): on a paranoid-4 box every sandbox here
+  # gained two perf warns and the green-path cases failed on a healthy host. run_push now points
+  # the section at the suite's profileable PUSH_PERF_PROC under test mode, and test mode refuses
+  # a reachable REAL sysctl, so this dir must shadow it (`sudo` is already shimmed below).
+  mk_stub "$dir" sysctl 'exit 0'
   # A REAL-SHAPED sccache (issue #3727): section 5b2 asks it for the value->bytes map through
   # an isolated read AND for the running server's enforced cap, so a bare `exit 0` yields
   # `sccache-cap: UNMEASURED` — one extra warn in every sandbox here. SCC_STUB_MAX pairs with
@@ -1950,6 +1956,15 @@ exit 0"
 # --skip-smoke: the gate fmt run is a different subject (and minutes long).
 push_rc=0
 push_out=""
+# A PROFILEABLE kernel for the perf section (#4403), in the shape the perf suite uses
+# (scripts/tests/lib/perf-capability-test-lib.sh): a stamped sandbox root, and both path seams
+# inside it. paranoid -1 / kptr 0 is the state the production drop-in sets, so the section's
+# verdict no longer depends on the host's real kernel.perf_event_paranoid.
+: >"$tmp/.cqlite-perf-sandbox"
+PUSH_PERF_PROC="$tmp/push-perf-proc"; mkdir -p "$PUSH_PERF_PROC"
+printf -- '-1\n' >"$PUSH_PERF_PROC/perf_event_paranoid"
+printf '0\n' >"$PUSH_PERF_PROC/kptr_restrict"
+PUSH_PERF_SYSCTL_D="$tmp/push-perf-sysctl.d"; mkdir -p "$PUSH_PERF_SYSCTL_D"
 run_push() {
   local repo="$1" bin="$2" gc="$3"; shift 3
   push_rc=0
@@ -1963,6 +1978,8 @@ run_push() {
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
+    CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$tmp" CQLITE_PERF_TEST_PRIV_DIR="$bin" \
+    CQLITE_PERF_PROC_DIR="$PUSH_PERF_PROC" CQLITE_PERF_SYSCTL_DIR="$PUSH_PERF_SYSCTL_D" \
     "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
 }
 # ANSI colour is stripped with a printf-built ESC, not a `\x1b` escape: BSD sed (the
@@ -2070,7 +2087,7 @@ if [ "$base_warns" -eq 1 ]; then
   fi
 else
   skip "push: residual assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
-  printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
+  grep -F '[warn]' <<<"$out7pd" | sed 's/\x1b\[[0-9;]*m//g' | head -5
 fi
 
 # ---------------------------------------------------------------------------
@@ -2085,8 +2102,8 @@ fi
 # 7o-a. THE AFFIRMATIVE VERDICT, on the same run block 7p just proved goes fully green.
 #   Its zero-warning baseline is the second half of the assertion: a section that reported
 #   ok while warning would have shown up as base_warns drift.
-if printf '%s' "$out7pa" | grep -q '\[ok\].*object-store: VERIFIED' &&
-  printf '%s' "$out7pa" | grep -q 'point-in-time'; then
+if grep -q '\[ok\].*object-store: VERIFIED' <<<"$out7pa" &&
+  grep -q 'point-in-time' <<<"$out7pa"; then
   ok "obj: a clean store is reported VERIFIED as [ok], declared as a POINT-IN-TIME sweep (not a per-read guarantee)"
 else
   bad "obj: section 5d did not report VERIFIED as [ok] on a clean sandbox"
@@ -2096,7 +2113,7 @@ fi
 # 7o-b. THE OPT-OUT: loud, non-passing, and it names WHICH spelling was used. One property
 #   apart from 7o-a — the flag.
 run_push "$repo7pa" "$bin7pa" "$gc7pa" --skip-push-probe --skip-object-store-sweep --strict
-if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: OPT-OUT (--skip-object-store-sweep)' &&
+if grep -q '\[warn\].*object-store: OPT-OUT (--skip-object-store-sweep)' <<<"$push_out" &&
   ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
   ok "obj: --skip-object-store-sweep is a LOUD [warn] OPT-OUT that withholds green and fails --strict"
 else
@@ -2131,20 +2148,20 @@ else
   bad "obj: the corruption plant did not take — the case below would prove nothing"
 fi
 run_push "$repo7oc" "$bin7pa" "$gc7pa" --skip-push-probe --strict
-if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+if grep -q '\[warn\].*object-store: CORRUPT' <<<"$push_out" &&
   ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
   ok "obj: a corrupt shared store is reported CORRUPT, withholds green and fails --strict"
 else
   bad "obj: a corrupt store did not produce a CORRUPT verdict (rc=$push_rc)"
   push_plain "$push_out" | grep -F 'object-store:' | head -4
 fi
-if [ -n "$oc_a" ] && printf '%s' "$push_out" | grep -q "object $oc_a"; then
+if [ -n "$oc_a" ] && grep -q "object $oc_a" <<<"$push_out"; then
   ok "obj: the CORRUPT report NAMES the affected object id ($oc_a)"
 else
   bad "obj: the affected object id is not named in the bootstrap output"
 fi
-if printf '%s' "$push_out" | grep -q 'REMEDY' &&
-  printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT'; then
+if grep -q 'REMEDY' <<<"$push_out" &&
+  grep -q 'SHARED OBJECT STORE CORRUPT' <<<"$push_out"; then
   ok "obj: CORRUPT carries a remedy AND is restated in the summary banner (one [warn] among many is missable)"
 else
   bad "obj: CORRUPT lacks a remedy line or the summary restatement"
@@ -2184,7 +2201,7 @@ else
   bad "obj: type='$od2_type' fsck-status=$od2_rc — not the fatal-death shape; the case below would prove nothing"
 fi
 run_push "$repo7od2" "$bin7pa" "$gc7pa" --skip-push-probe --strict
-if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNSWEEPABLE' &&
+if grep -q '\[warn\].*object-store: UNSWEEPABLE' <<<"$push_out" &&
   ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
   ok "obj: a store whose sweep RUNS and reproducibly DIES is reported UNSWEEPABLE, withholds green and fails --strict — never the permissive 'not measured' that let every lane carry on"
 else
@@ -2194,9 +2211,9 @@ fi
 # IT MUST NOT CLAIM DAMAGE, and it must be restated in the banner under its OWN wording:
 # nothing here established a cause, so the CORRUPT text and its measured re-clone remedy
 # would be a confidently-wrong instruction (round 9's class).
-if printf '%s' "$push_out" | grep -q 'COULD NOT BE SWEPT' &&
-  ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
-  ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT'; then
+if grep -q 'COULD NOT BE SWEPT' <<<"$push_out" &&
+  ! grep -q '\[warn\].*object-store: CORRUPT' <<<"$push_out" &&
+  ! grep -q 'SHARED OBJECT STORE CORRUPT' <<<"$push_out"; then
   ok "obj: UNSWEEPABLE is restated in the summary banner under its own wording and claims NO damage — a different fact from CORRUPT, with a different remedy"
 else
   bad "obj: UNSWEEPABLE either lacks its banner restatement or claims damage nothing established"
@@ -2230,8 +2247,8 @@ else
   bad "obj: fsck-status=$od3_rc key='$od3_key' — not the undamaged-with-policy shape; the case below would prove nothing"
 fi
 run_push "$repo7od3" "$bin7pa" "$gc7pa" --skip-push-probe --strict
-if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNSWEEPABLE' &&
-  printf '%s' "$push_out" | grep -q 'COULD NOT BE SWEPT' &&
+if grep -q '\[warn\].*object-store: UNSWEEPABLE' <<<"$push_out" &&
+  grep -q 'COULD NOT BE SWEPT' <<<"$push_out" &&
   ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
   ok "obj: a store whose own fsck policy could suppress the diagnostics reaches the SAME stopping verdict, withholds green and fails --strict — the verdict is about what can be measured, not about what was found"
 else
@@ -2240,9 +2257,9 @@ else
 fi
 # AND IT STILL CLAIMS NO DAMAGE — nothing was rehashed on this path either, so the damage
 # text and its measured repairs would be as wrong here as on the fatal path.
-if ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
-  ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT' &&
-  printf '%s' "$push_out" | grep -qi 'no damage was established'; then
+if ! grep -q '\[warn\].*object-store: CORRUPT' <<<"$push_out" &&
+  ! grep -q 'SHARED OBJECT STORE CORRUPT' <<<"$push_out" &&
+  grep -qi 'no damage was established' <<<"$push_out"; then
   ok "obj: the fsck-policy refusal claims NO damage and is not folded into the CORRUPT banner"
 else
   bad "obj: the fsck-policy refusal claims damage nothing established, or lost its no-damage statement"
@@ -2290,7 +2307,7 @@ for _arm in "NONE:4:status-only" "CORRUPT:5:line-only"; do
   _src=0
   _sout=$(bash "$repo7oe/scripts/check-object-store-integrity.sh" --repo "$repo7oe" 2>&1) || _src=$?
   _sline=no
-  printf '%s' "$_sout" | grep -q 'OBJECT-STORE: verdict ' && _sline=yes
+  grep -q 'OBJECT-STORE: verdict ' <<<"$_sout" && _sline=yes
   _swant=yes
   [ "$_av" = NONE ] && _swant=no
   if [ "$_src" -eq "$_ar" ] && [ "$_sline" = "$_swant" ]; then
@@ -2299,9 +2316,9 @@ for _arm in "NONE:4:status-only" "CORRUPT:5:line-only"; do
     bad "obj: the inconsistency plant ($_an) exited $_src with verdict-line=$_sline (wanted $_ar/$_swant) — the case below would prove nothing"
   fi
   run_push "$repo7oe" "$bin7pa" "$gc7pa" --skip-push-probe --strict
-  if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNMEASURED — INCONSISTENT' &&
-    ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
-    ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT' &&
+  if grep -q '\[warn\].*object-store: UNMEASURED — INCONSISTENT' <<<"$push_out" &&
+    ! grep -q '\[warn\].*object-store: CORRUPT' <<<"$push_out" &&
+    ! grep -q 'SHARED OBJECT STORE CORRUPT' <<<"$push_out" &&
     ! push_green "$push_out"; then
     ok "obj: $_an — exactly ONE channel saying CORRUPT is reported UNMEASURED/INCONSISTENT, never the CORRUPT verdict, and never certified"
   else
@@ -2320,8 +2337,8 @@ else
   bad "obj: could not remove the sweep script from the sandbox"
 fi
 run_push "$repo7od" "$bin7pa" "$gc7pa" --skip-push-probe --strict
-if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNMEASURED' &&
-  ! printf '%s' "$push_out" | grep -q '\[ok\].*object-store:' &&
+if grep -q '\[warn\].*object-store: UNMEASURED' <<<"$push_out" &&
+  ! grep -q '\[ok\].*object-store:' <<<"$push_out" &&
   ! push_green "$push_out"; then
   ok "obj: an unmeasurable store is a [warn] UNMEASURED with no [ok] anywhere — unmeasured is never certified"
 else
@@ -2345,14 +2362,14 @@ repo7oe2="$tmp/repo7oe-remedy"; mk_push_repo "$repo7oe2" "file://$bare7pa"
 _rtok="REMEDY: PLANTED-REPAIR-TEXT-7oe-$$"
 mk_sweep_stub "$repo7oe2" CORRUPT 4 "$_rtok"
 _rout=$(bash "$repo7oe2/scripts/check-object-store-integrity.sh" --repo "$repo7oe2" 2>&1 || true)
-if printf '%s' "$_rout" | grep -qF "OBJECT-STORE: verdict-detail $_rtok"; then
+if grep -qF "OBJECT-STORE: verdict-detail $_rtok" <<<"$_rout"; then
   ok "obj: the remedy plant IS the shape described (the stub sweep prints that verdict-detail line)"
 else
   bad "obj: the remedy plant did not take — the case below would prove nothing (stub said: $(printf '%s' "$_rout" | tr '\n' ';'))"
 fi
 run_push "$repo7oe2" "$bin7pa" "$gc7pa" --skip-push-probe --strict
-if printf '%s' "$push_out" | grep -qF "$_rtok" &&
-  printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+if grep -qF "$_rtok" <<<"$push_out" &&
+  grep -q '\[warn\].*object-store: CORRUPT' <<<"$push_out" &&
   ! push_green "$push_out"; then
   ok "obj: the CORRUPT report QUOTES the sweep's own operator remedy verbatim — the guidance is owned by the file that measured it"
 else
@@ -2364,8 +2381,8 @@ fi
 repo7oe3="$tmp/repo7oe-remedy-none"; mk_push_repo "$repo7oe3" "file://$bare7pa"
 mk_sweep_stub "$repo7oe3" CORRUPT 4
 run_push "$repo7oe3" "$bin7pa" "$gc7pa" --skip-push-probe --strict
-if printf '%s' "$push_out" | grep -q 'REMEDY' &&
-  printf '%s' "$push_out" | grep -q 'check-object-store-integrity.sh' &&
+if grep -q 'REMEDY' <<<"$push_out" &&
+  grep -q 'check-object-store-integrity.sh' <<<"$push_out" &&
   ! push_green "$push_out"; then
   ok "obj: with nothing to quote, CORRUPT still carries a remedy naming the sweep to run by hand — the diagnostic fails closed"
 else
@@ -2646,9 +2663,9 @@ else
   # nothing (measured: two occurrences on #3756, neither attributable from the output).
   # Same rule as #3758 nit 7, one case over.
   printf '     which condition failed: setup-git=%s fix-credentials=%s deletion-policy=%s no-cause-attributed=%s\n' \
-    "$(printf '%s' "$out7pk" | grep -c 'gh auth setup-git')" \
-    "$(printf '%s' "$out7pk" | grep -c -- '--fix-credentials')" \
-    "$(printf '%s' "$out7pk" | grep -ci 'ref-deletion policy')" \
+    "$(grep -c 'gh auth setup-git' <<<"$out7pk")" \
+    "$(grep -c -- '--fix-credentials' <<<"$out7pk")" \
+    "$(grep -ci 'ref-deletion policy' <<<"$out7pk")" \
     "$(push_plain "$out7pk" | grep -c 'no cause is attributed')"
   push_plain "$out7pk" | grep -nE 'CLAIM:|cause|setup-git|--fix-credentials|ref-deletion policy' | head -8
 fi
@@ -3301,7 +3318,7 @@ if out_has "$BOARD_OUT" "updateProjectV2ItemFieldValue"; then
   ok "board: names the updateProjectV2ItemFieldValue GraphQL write fallback"
 else
   bad "board: never named the updateProjectV2ItemFieldValue fallback"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+  grep -i -A3 "board" <<<"$BOARD_OUT"
 fi
 if out_has "$BOARD_OUT" -i "read:org"; then
   ok "board: surfaces the read:org scope gap gh itself reports"
@@ -3317,7 +3334,7 @@ if ! out_has "$BOARD_OUT" "board dispatch works" \
   ok "board: read-OK + missing required scopes -> qualified verdict naming the fallback"
 else
   bad "board: read-OK + missing scopes reported as unqualified success"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+  grep -i -A3 "board" <<<"$BOARD_OUT"
 fi
 
 # 8c. Fully healthy token: probe succeeds, gh reports no missing scopes -> an ok.
@@ -3327,31 +3344,31 @@ fi
 #     catch. In a change about false OKs, a test that passes against the bug is the
 #     one thing that must not ship.
 run_board_case healthy "'project', 'read:org', 'repo', 'workflow'" "" 0 0
-if printf '%s' "$BOARD_OUT" | grep -Eq "\[ok\].*board #1 \(pmcfadin\) reachable.*read probe OK"; then
+if grep -Eq "\[ok\].*board #1 \(pmcfadin\) reachable.*read probe OK" <<<"$BOARD_OUT"; then
   ok "board: healthy token reports ok with a PROBE-derived verdict"
 else
   bad "board: healthy token did not produce a probe-derived ok verdict"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board #"
+  grep -i -A3 "board #" <<<"$BOARD_OUT"
 fi
 
 # 8d. Unreachable board (both probes fail) -> a loud warn, never a scope-based pass.
 run_board_case unreachable "'project', 'repo', 'workflow'" "" 1 1
-if printf '%s' "$BOARD_OUT" | grep -Eq '\[warn\].*board' \
+if grep -Eq '\[warn\].*board' <<<"$BOARD_OUT" \
    && ! out_has "$BOARD_OUT" "board dispatch works"; then
   ok "board: both probes failing -> warn (scope match never rescues the verdict)"
 else
   bad "board: unreachable board did not warn"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+  grep -i -A3 "board" <<<"$BOARD_OUT"
 fi
 
 # 8f. GraphQL exits 0 but resolves to NO project (wrong owner kind / wrong number).
 #     An exit-code-only probe would call that reachable — it must not.
 run_board_case nullproject "'project', 'repo', 'workflow'" "" 1 null
-if printf '%s' "$BOARD_OUT" | grep -Eq '\[warn\].*(UNREACHABLE|BOTH probes failed)'; then
+if grep -Eq '\[warn\].*(UNREACHABLE|BOTH probes failed)' <<<"$BOARD_OUT"; then
   ok "board: GraphQL exit 0 with a null project counts as a FAILED probe, not reachable"
 else
   bad "board: null-project GraphQL reply was treated as a working fallback"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board #"
+  grep -i -A3 "board #" <<<"$BOARD_OUT"
 fi
 
 # 8g. READ-ONLY project access ('read:project', no 'project') with a clean probe and
@@ -3359,13 +3376,13 @@ fi
 #     fail, so an unqualified ok as the section's LAST word would be a false OK even
 #     though an earlier line warned about the scope.
 run_board_case readonlyscope "'read:project', 'repo', 'workflow'" "" 0 0
-if printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #1.*reachable'; then
+if grep -Eq '\[ok\].*board #1.*reachable' <<<"$BOARD_OUT"; then
   bad "board: read-only project scope still printed an unqualified 'reachable' ok"
-elif printf '%s' "$BOARD_OUT" | grep -Eq "\[warn\].*board READ works.*'project' WRITE scope is MISSING"; then
+elif grep -Eq "\[warn\].*board READ works.*'project' WRITE scope is MISSING" <<<"$BOARD_OUT"; then
   ok "board: read-only project scope -> READ-works warn naming the missing WRITE scope"
 else
   bad "board: read-only project scope produced neither the ok nor the expected warn"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "board"
+  grep -i -A2 "board" <<<"$BOARD_OUT"
 fi
 
 # --- 8h. The verdict must be attributed to the ACTIVE account ----------------
@@ -3386,11 +3403,11 @@ run_board_auth_case active-clean 'github.com
   ✓ Logged in to github.com account pmcfadin (keyring)
   - Active account: true
   - Token scopes: '"'"'project'"'"', '"'"'read:org'"'"', '"'"'repo'"'"''
-if printf '%s' "$BOARD_OUT" | grep -Eq "\[ok\].*board #1.*reachable as 'pmcfadin'"; then
+if grep -Eq "\[ok\].*board #1.*reachable as 'pmcfadin'" <<<"$BOARD_OUT"; then
   ok "board: a NON-active account's missing-scopes line does not qualify the verdict"
 else
   bad "board: verdict read a non-active account's stanza"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "board\|account"
+  grep -i -A2 "board\|account" <<<"$BOARD_OUT"
 fi
 
 # 8h-ii. A NON-active account listed FIRST has 'project'; the ACTIVE one does not. A
@@ -3403,12 +3420,12 @@ run_board_auth_case active-noproject 'github.com
   ✓ Logged in to github.com account pmcfadin (keyring)
   - Active account: true
   - Token scopes: '"'"'read:project'"'"', '"'"'repo'"'"''
-if ! printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #1.*reachable' \
+if ! grep -Eq '\[ok\].*board #1.*reachable' <<<"$BOARD_OUT" \
    && out_has "$BOARD_OUT" "'project' scope MISSING on gh account 'pmcfadin'"; then
   ok "board: scopes are read from the ACTIVE stanza, not the first one printed"
 else
   bad "board: scopes were read from a non-active (first-listed) account"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "scope\|board #"
+  grep -i -A2 "scope\|board #" <<<"$BOARD_OUT"
 fi
 
 # 8h-iii. The operator must be able to see WHICH account the verdict is about.
@@ -3478,11 +3495,11 @@ if grep -q -- 'auth switch --user other-emu' "$log8i" && [ "$(cat "$state8i")" =
 else
   bad "board: left the active account switched to '$(cat "$state8i")' — a check mutated host state"
 fi
-if printf '%s' "$out8i" | grep -Eq '\[ok\].*board #1.*reachable' ; then
+if grep -Eq '\[ok\].*board #1.*reachable' <<<"$out8i" ; then
   ok "board: reports reachable for the account dispatch actually uses"
 else
   bad "board: did not reach a green verdict after switching to the board account"
-  printf '%s\n' "$out8i" | grep -i -A2 "board #"
+  grep -i -A2 "board #" <<<"$out8i"
 fi
 
 # 8j. With an env token, gh ignores the keyring and `gh auth switch` cannot change the
@@ -3532,20 +3549,20 @@ chmod +x "$stub8k/gh"
 repo8k="$tmp/repo8k"; mk_fake_repo "$repo8k" "https://github.com/pmcfadin/cqlite.git"
 out8k=$(PATH="$stub8k" HOME="$sb8k" CARGO_HOME="$sb8k/.cargo" GIT_CONFIG_GLOBAL="$sb8k/gitconfig" \
   CQLITE_PROJECT_ACCOUNT=tester GH_TOKEN="" "$PIN_BS" "$repo8k/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-if printf '%s' "$out8k" | grep -Eq '\[ok\].*board #.*reachable'; then
+if grep -Eq '\[ok\].*board #.*reachable' <<<"$out8k"; then
   bad "board: unexported CQLITE_PROJECT_NUMBER still produced a green 'reachable' verdict"
 elif out_has "$out8k" 'CQLITE_PROJECT_NUMBER is NOT exported'; then
   ok "board: unexported CQLITE_PROJECT_NUMBER is reported as a dispatch blocker"
 else
   bad "board: unexported CQLITE_PROJECT_NUMBER neither warned nor blocked the green verdict"
-  printf '%s\n' "$out8k" | grep -i -A2 "board"
+  grep -i -A2 "board" <<<"$out8k"
 fi
 if [ -n "$jqp" ]; then
   if out_has "$out8k" 'export CQLITE_PROJECT_NUMBER=7'; then
     ok "board: discovers the number by title and prints the exact export line"
   else
     bad "board: did not resolve the board by title / print the export line"
-    printf '%s\n' "$out8k" | grep -i "PROJECT_NUMBER"
+    grep -i "PROJECT_NUMBER" <<<"$out8k"
   fi
 else
   skip "board: title discovery needs jq (absent on this host)"
@@ -3556,12 +3573,12 @@ run_board_auth_case nonumber 'github.com
   ✓ Logged in to github.com account pmcfadin (keyring)
   - Active account: true
   - Token scopes: '"'"'project'"'"', '"'"'read:org'"'"', '"'"'repo'"'"'' CQLITE_PROJECT_NUMBER=
-if ! printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #.*reachable' \
+if ! grep -Eq '\[ok\].*board #.*reachable' <<<"$BOARD_OUT" \
    && out_has "$BOARD_OUT" 'setup-project-board.sh'; then
   ok "board: unresolvable board number -> no green, points at setup-project-board.sh"
 else
   bad "board: unresolvable board number did not block the green verdict"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "board"
+  grep -i -A2 "board" <<<"$BOARD_OUT"
 fi
 
 # 8l. The account restore must be armed by a TRAP, not just an inline block: two
@@ -3632,7 +3649,7 @@ if out_has "$redact_out" 'notify target configured' \
   ok "notify: URL userinfo is redacted from the reported target"
 else
   bad "notify: the reported target leaked URL userinfo"
-  printf '%s\n' "$redact_out" | grep -i 'notify target' | head -2
+  grep -i 'notify target' <<<"$redact_out" | head -2
 fi
 
 # --- 10. The notify CAPABILITY assert is HONOURED, not merely present ---------
@@ -3708,7 +3725,7 @@ if [ -n "$NOTIFY_TIMEOUT_BIN" ]; then
       ok "notify capability: a HEALTHY wrapper is reported verified"
     else
       bad "notify capability: healthy wrapper was not reported verified"
-      printf '%s\n' "$good_out" | grep -i 'notify' | head -4
+      grep -i 'notify' <<<"$good_out" | head -4
     fi
   else
     bad "notify capability: could not stage the healthy wrapper tree"
@@ -3724,7 +3741,7 @@ if [ -n "$NOTIFY_TIMEOUT_BIN" ]; then
       ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
     else
       bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
-      printf '%s\n' "$bad_out" | grep -i 'notify' | head -4
+      grep -i 'notify' <<<"$bad_out" | head -4
     fi
   else
     bad "notify capability: could not stage the broken wrapper tree (mutation did not apply)"
@@ -3744,7 +3761,7 @@ if [ -n "$NOTIFY_TIMEOUT_BIN" ]; then
       ok "notify no-target: warns, prints the exact export line, and still exits 0"
     else
       bad "notify no-target case (rc=$notarget_rc)"
-      printf '%s\n' "$notarget_out" | grep -i 'notify' | head -4
+      grep -i 'notify' <<<"$notarget_out" | head -4
     fi
   else
     bad "notify no-target: could not stage the tree"
@@ -3870,7 +3887,7 @@ else
     ok "gate-pin: an INHERITED-but-not-persisted value is FAILED, never VERIFIED (the scrub is honoured)"
   else
     bad "gate-pin: an inherited value was accepted as evidence the box is pinned"
-    printf '%s\n' "$out_a" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_a" | head -3
   fi
 
   # 11b. POSITIVE twin: the pin IS visible to a fresh session (and this run's own
@@ -3884,7 +3901,7 @@ else
     ok "gate-pin: a pin a fresh profile-free session CAN see is reported VERIFIED"
   else
     bad "gate-pin: a genuinely visible pin was not reported VERIFIED"
-    printf '%s\n' "$out_b" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_b" | head -3
   fi
 
   # 11c. NO SUDO BINARY: no session can be created, so nothing was measured. It must
@@ -3899,7 +3916,7 @@ else
     ok "gate-pin: no sudo binary => UNMEASURED as a [warn], never an [ok]"
   else
     bad "gate-pin: a box with no sudo did not report UNMEASURED-as-a-warn"
-    printf '%s\n' "$out_c" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_c" | head -3
   fi
 
   # 11d. SUDO NEEDS A PASSWORD: `sudo -n` never prompts, so the probe cannot run.
@@ -3915,7 +3932,7 @@ else
     ok "gate-pin: a sudo that cannot open a self-session => UNMEASURED as a [warn], with its own cause"
   else
     bad "gate-pin: a password-requiring sudo did not report UNMEASURED-as-a-warn"
-    printf '%s\n' "$out_d" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_d" | head -3
   fi
 
   # 11e. --yes PERSISTS into the system env file, and does so IDEMPOTENTLY. Two runs
@@ -3960,7 +3977,7 @@ else
   else
     bad "gate-pin: --yes rewrote a deliberate override (or never looked at the file) — ${pin_f_n:-0} pin assignment(s), value '$pin_f_val'"
     cat "$envf_f"
-    printf '%s\n' "$out_f" | grep -i 'gate-pin\|already carries' | head -2
+    grep -i 'gate-pin\|already carries' <<<"$out_f" | head -2
   fi
 
   # 11g. A file whose last byte is not a newline must not have the pin welded onto its
@@ -3988,7 +4005,7 @@ else
     ok "gate-pin: a profile that carries the export produces NO success verdict"
   else
     bad "gate-pin: a profile grep (or the inherited value) still bought a success verdict"
-    printf '%s\n' "$out_h" | grep -iE 'gate-pin|CQLITE_GATE_MAX_CONCURRENCY' | head -4
+    grep -iE 'gate-pin|CQLITE_GATE_MAX_CONCURRENCY' <<<"$out_h" | head -4
   fi
 
   # 11i. STRUCTURAL, because the behavioural cases above can only cover the branches
@@ -4004,8 +4021,8 @@ else
   # must be an [ok] so a correctly-configured Mac is not permanently non-passing). Naming
   # them is what keeps this a real guard — a bare count of 2 would let a third `ok` in as
   # soon as someone removed one of these.
-  pin_ok_total=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "' || true)
-  pin_ok_named=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: VERIFIED [(]' || true)
+  pin_ok_total=$(grep -cE '^[[:space:]]*ok "' <<<"$pin_section" || true)
+  pin_ok_named=$(grep -cE '^[[:space:]]*ok "gate-pin: VERIFIED [(]' <<<"$pin_section" || true)
   # ONE success verdict again (#3414 round 14): the non-Linux `ok` was deleted, because on a
   # platform with no system-wide file to correlate against no verdict that reports a state
   # is available. A second `ok` reappearing here means someone re-added an exemption.
@@ -4027,7 +4044,7 @@ else
     ok "gate-pin: --skip-gate-pin is a [warn] OPT-OUT that can never buy a green"
   else
     bad "gate-pin: the opt-out did not report as a non-passing OPT-OUT"
-    printf '%s\n' "$out_j" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_j" | head -3
   fi
 
   # 11l. VISIBLE IS NOT HONOURED. A value the gate DISCARDS (non-numeric/empty) or
@@ -4047,7 +4064,7 @@ else
       ok "gate-pin: a visible '$pin_val' the gate does not honour is NOT-HONOURED, never VERIFIED"
     else
       bad "gate-pin: a visible-but-not-honoured '$pin_val' was not surfaced"
-      printf '%s\n' "$out_nh" | grep -i 'gate-pin' | head -3
+      grep -i 'gate-pin' <<<"$out_nh" | head -3
     fi
   done
 
@@ -4063,7 +4080,7 @@ else
     ok "gate-pin: a deliberate override >1 is VERIFIED and reported as the cap the gate will apply"
   else
     bad "gate-pin: a legitimate >1 override was not VERIFIED"
-    printf '%s\n' "$out_m" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_m" | head -3
   fi
 
   # 11n. THE HONOURING ORACLE IS NOT OPTIONAL. With no agent-gate.sh to consult, the
@@ -4079,7 +4096,7 @@ else
       ok "gate-pin: a visible pin whose honouring could NOT be checked is UNMEASURED, not VERIFIED"
     else
       bad "gate-pin: an unconsultable gate still produced a verdict about honouring"
-      printf '%s\n' "$out_n" | grep -i 'gate-pin' | head -3
+      grep -i 'gate-pin' <<<"$out_n" | head -3
     fi
   else
     bad "gate-pin: could not stage the gate-less bootstrap tree"
@@ -4098,7 +4115,7 @@ else
     ok "gate-pin: a present-but-invisible pin is diagnosed as a PAM condition, not handed the persist remedy"
   else
     bad "gate-pin: the two FAILED boxes were not told apart"
-    printf '%s\n' "$out_o" | grep -i 'gate-pin\|pam_env\|fix:' | head -4
+    grep -i 'gate-pin\|pam_env\|fix:' <<<"$out_o" | head -4
   fi
 
   # 11p. ...and the ABSENT-file box is not handed a remedy naming a file it does not
@@ -4123,7 +4140,7 @@ else
     ok "gate-pin: a LINUX box with no env file is pointed at --fix-gate-pin, which creates it — not told there is nowhere to persist"
   else
     bad "gate-pin: the absent-env-file Linux box got the unmanaged-platform remedy (job 332)"
-    printf '%s\n' "$out_p" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
+    grep -i 'gate-pin\|nowhere\|fix:' <<<"$out_p" | head -4
   fi
 
   # 11p2. ...and the UNMANAGED-PLATFORM box keeps the original ruling: no remedy naming a
@@ -4140,7 +4157,7 @@ else
     ok "gate-pin: an unmanaged-platform box with no env file is never pointed at a file its platform does not read"
   else
     bad "gate-pin: the unmanaged-platform box was handed a create-the-file remedy"
-    printf '%s\n' "$out_p2" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
+    grep -i 'gate-pin\|nowhere\|fix:' <<<"$out_p2" | head -4
   fi
 
   # 11q. PERSIST-THEN-PROBE WITHIN ONE RUN — the property `verify.run` depends on.
@@ -4158,7 +4175,7 @@ else
     ok "gate-pin: --fix-gate-pin persists AND the same run's probe then sees it (no --yes, no re-login)"
   else
     bad "gate-pin: persist-then-probe did not close within one run"
-    printf '%s\n' "$out_q" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_q" | head -3
     cat "$envf_q"
   fi
 
@@ -4179,7 +4196,7 @@ else
     ok "gate-pin: an oversized pin is diagnosed BY SIZE and its remedy states the 18-digit bound (not 'use a positive integer')"
   else
     bad "gate-pin: an oversized pin was diagnosed as non-numeric or given advice it already satisfies (job 333)"
-    printf '%s\n' "$out_q4" | grep -i 'gate-pin\|fix the VALUE' | head -4
+    grep -i 'gate-pin\|fix the VALUE' <<<"$out_q4" | head -4
   fi
 
   # 11q2. A VALID LEADING-ZERO PIN MUST REACH VERIFIED (roborev job 333, Medium). The gate
@@ -4200,7 +4217,7 @@ else
     ok "gate-pin: a valid leading-zero pin (08) reaches VERIFIED — the gate's normalisation is not read as oracle drift"
   else
     bad "gate-pin: a correctly persisted 08 was not VERIFIED (job 333 — raw-vs-normalised compare)"
-    printf '%s\n' "$out_q2" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_q2" | head -3
   fi
 
   # 11q3. ...and the drift check it must NOT break: the whole point of comparing against our
@@ -4226,7 +4243,7 @@ FAKEGATE
     ok "gate-pin: an oracle answering about a DIFFERENT value is still refused — canonicalising did not delete the drift check"
   else
     bad "gate-pin: the drift check was lost — a gate answering 9(pinned) for a session showing 08 read VERIFIED"
-    printf '%s\n' "$out_q3" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_q3" | head -3
   fi
 
   # 11r. The NEGATIVE twin of 11q, so it cannot pass for the wrong reason: with the SAME
@@ -4246,7 +4263,7 @@ FAKEGATE
     ok "gate-pin: without a repair flag the same unpinned box stays FAILED and nothing is written"
   else
     bad "gate-pin: the no-flag twin did not stay FAILED (or wrote without being asked)"
-    printf '%s\n' "$out_r" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_r" | head -3
   fi
 
   # 11s. --fix-gate-pin must stay NON-PASSING on a box it cannot certify. An onboarding
@@ -4266,7 +4283,7 @@ FAKEGATE
     ok "gate-pin: --fix-gate-pin on a box it cannot certify stays non-passing (so --strict exits 1)"
   else
     bad "gate-pin: --fix-gate-pin reported ok on a box without passwordless sudo"
-    printf '%s\n' "$out_s" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_s" | head -3
   fi
 
   # 11s2. ...and a genuine COULD-NOT-PERSIST condition refuses the write, says why, and
@@ -4297,7 +4314,7 @@ FAKEGATE
       ok "gate-pin: an unreadable env file refuses the append, says why, and does not pass"
     else
       bad "gate-pin: an unreadable env file was appended to blind (or still passed)"
-      printf '%s\n' "$out_s2" | grep -i 'gate-pin\|cannot read' | head -3
+      grep -i 'gate-pin\|cannot read' <<<"$out_s2" | head -3
       cat "$envf_s2"
     fi
   fi
@@ -4333,7 +4350,7 @@ FAKEGATE
     ok "gate-pin: an explicit --fix-gate-pin overrides the weaker env opt-out"
   else
     bad "gate-pin: the env opt-out neutered an explicit --fix-gate-pin"
-    printf '%s\n' "$out_u" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_u" | head -3
   fi
 
 
@@ -4356,7 +4373,7 @@ FAKEGATE
     ok "gate-pin: a BASH_ENV file exporting the pin cannot forge VERIFIED (BASH_ENV is scrubbed)"
   else
     bad "gate-pin: BASH_ENV injected a pin the box does not have"
-    printf '%s\n' "$out_w" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_w" | head -3
   fi
 
   # 11x. ...and its POSITIVE twin, so 11w cannot pass against a probe that is simply
@@ -4372,7 +4389,7 @@ FAKEGATE
     ok "gate-pin: scrubbing BASH_ENV does not break a genuinely pinned box"
   else
     bad "gate-pin: the BASH_ENV scrub broke the positive path"
-    printf '%s\n' "$out_x" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_x" | head -3
   fi
 
   # 11y. VERIFIED STATES ITS OWN SCOPE (issue #3414 review B2). The probe measures a
@@ -4392,7 +4409,7 @@ FAKEGATE
     ok "gate-pin: VERIFIED does not re-assert the unestablishable attribution, and names cpu-budget as authoritative"
   else
     bad "gate-pin: VERIFIED claims an attribution the probe cannot make (or dropped the cpu-budget pointer)"
-    printf '%s\n' "$out_x" | grep -iA 2 'gate-pin: VERIFIED' | head -4
+    grep -iA 2 'gate-pin: VERIFIED' <<<"$out_x" | head -4
   fi
 
   # 11z. VERIFIED REQUIRES BOTH HALVES (issue #3414 roborev round 2). A session that sees
@@ -4410,7 +4427,7 @@ FAKEGATE
     ok "gate-pin: a session-visible value with NO line in the system env file is NOT-SYSTEM-WIDE, never VERIFIED"
   else
     bad "gate-pin: a sudo-only value was certified as a system-wide pin"
-    printf '%s\n' "$out_z" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_z" | head -3
   fi
 
   # 11z2. ...and the file half alone is not enough either, which is the ORIGINAL #3414
@@ -4424,7 +4441,7 @@ FAKEGATE
     ok "gate-pin: the file half ALONE is not VERIFIED either (the original #3414 defect)"
   else
     bad "gate-pin: a file line with no session visibility was treated as a pin"
-    printf '%s\n' "$out_z2" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_z2" | head -3
   fi
 
   # 11z3. An UNREADABLE system env file cannot be correlated, so the run has only half the
@@ -4442,7 +4459,7 @@ FAKEGATE
       ok "gate-pin: an unreadable system env file cannot be correlated => UNMEASURED, not VERIFIED"
     else
       bad "gate-pin: an uncorrelatable file still produced a verdict about system-wide scope"
-      printf '%s\n' "$out_z3" | grep -i 'gate-pin' | head -3
+      grep -i 'gate-pin' <<<"$out_z3" | head -3
     fi
   fi
 
@@ -4472,7 +4489,7 @@ FAKEGATE
     ok "gate-pin: the scope note states what it did NOT check, that the verdict covers FUTURE sessions only, and names the gate's token as authority"
   else
     bad "gate-pin: the scope note does not match the correlated verdict"
-    printf '%s\n' "$out_x" | grep -iA 3 'gate-pin: VERIFIED' | head -4
+    grep -iA 3 'gate-pin: VERIFIED' <<<"$out_x" | head -4
   fi
 
   # 11z5. THE NEGATIVE ROW IS INDEPENDENT OF FILE STATE (issue #3414, lead ruling). The
@@ -4505,7 +4522,7 @@ FAKEGATE
       ok "gate-pin: session-cannot-see-it => FAILED with the env file $pin_row (file state cannot soften a negative)"
     else
       bad "gate-pin: file state '$pin_row' changed a NEGATIVE probe's verdict"
-      printf '%s\n' "$out_r5" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_r5" | head -2
     fi
   done
 
@@ -4523,7 +4540,7 @@ FAKEGATE
     ok "gate-pin: a file value the session does NOT match is not VERIFIED (presence is not the predicate)"
   else
     bad "gate-pin: a file/session VALUE mismatch was certified"
-    printf '%s\n' "$out_aa" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_aa" | head -3
   fi
 
   # 11ab. ...and the equality is a STRING comparison, deliberately not a numeric one. The
@@ -4537,7 +4554,7 @@ FAKEGATE
     ok "gate-pin: '1 ' in the file is not equal to '1' in the session (string equality, as the gate resolves it)"
   else
     bad "gate-pin: a value the gate would DISCARD was normalised into a match"
-    printf '%s\n' "$out_ab" | grep -i 'gate-pin' | head -2
+    grep -i 'gate-pin' <<<"$out_ab" | head -2
   fi
 
   # 11ac. A NON-LINUX HOST IS ASKED A NARROWER QUESTION, NOT EXEMPTED FROM IT (#3414 final
@@ -4559,7 +4576,7 @@ FAKEGATE
     ok "gate-pin: a non-Linux host with a session-visible pin is UNMEASURED, never certified"
   else
     bad "gate-pin: a non-Linux host was given a verdict its platform cannot support"
-    printf '%s\n' "$out_ac" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_ac" | head -3
   fi
 
   # 11ac2. THE CASE THE OLD CONTRACT GOT WRONG: a non-Linux host whose fresh session sees
@@ -4574,7 +4591,7 @@ FAKEGATE
     ok "gate-pin: an UNPINNED non-Linux host is also NON-PASSING — no platform exemption certifies it"
   else
     bad "gate-pin: an unpinned non-Linux host was certified (the finding-BB defect)"
-    printf '%s\n' "$out_ac2" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_ac2" | head -3
   fi
 
   # 11ad. ...and the scoping is on PLATFORM, not on "the file is missing". A LINUX box
@@ -4588,7 +4605,7 @@ FAKEGATE
     ok "gate-pin: a LINUX box with no system env file stays non-passing (scoped by platform, not by file absence)"
   else
     bad "gate-pin: a Linux anomaly was excused as a platform inapplicability"
-    printf '%s\n' "$out_ad" | grep -i 'gate-pin' | head -2
+    grep -i 'gate-pin' <<<"$out_ad" | head -2
   fi
 
   # 11ae. A QUOTED-BUT-CORRECT FILE MUST STILL VERIFY (issue #3414, lead correction).
@@ -4605,7 +4622,7 @@ FAKEGATE
       ok "gate-pin: a file value written as $pin_q still VERIFIES (pam_env's quoting is read, not reinterpreted)"
     else
       bad "gate-pin: a correctly-pinned box written as $pin_q was reported non-passing"
-      printf '%s\n' "$out_ae" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_ae" | head -2
     fi
   done
 
@@ -4620,7 +4637,7 @@ FAKEGATE
     ok "gate-pin: de-quoting leaves the interior alone — a quoted ' 1 ' still mismatches '1'"
   else
     bad "gate-pin: de-quoting slid into normalisation and certified a value the gate discards"
-    printf '%s\n' "$out_af" | grep -i 'gate-pin' | head -2
+    grep -i 'gate-pin' <<<"$out_af" | head -2
   fi
 
   # 11ag. THE GATE ORACLE MUST NOT BE POLLUTABLE EITHER (issue #3414 roborev round 4).
@@ -4642,7 +4659,7 @@ FAKEGATE
     ok "gate-pin: a BASH_ENV-injected valid value cannot make the ORACLE certify an invalid pin"
   else
     bad "gate-pin: the gate oracle was polluted into certifying a value it never saw"
-    printf '%s\n' "$out_ag" | grep -i 'gate-pin' | head -3
+    grep -i 'gate-pin' <<<"$out_ag" | head -3
   fi
 
   # 11ah. ...and the SOURCE TOKEN ALONE is not the check: the oracle's resolved N must be
@@ -4683,7 +4700,7 @@ FAKEGATE
     ok "gate-pin: --yes on a box pinned to 4 leaves the profile alone (no manufactured 1-vs-4 divergence)"
   else
     bad "gate-pin: the profile append manufactured a divergence with the system-wide value"
-    printf '%s\n' "$out_ai" | grep -i 'gate-pin\|profile\|not touching' | head -3
+    grep -i 'gate-pin\|profile\|not touching' <<<"$out_ai" | head -3
     cat "$pin_home_ai/.bashrc"
   fi
 
@@ -4717,7 +4734,7 @@ FAKEGATE
     # append was skipped, and it was misdiagnosed as a flake in unrelated code. A failure
     # diagnostic must carry the evidence its own assertion turns on (#3758 nit 7).
     cat "$pin_home_aj/.bashrc"
-    printf '%s\n' "$out_aj" | grep -iE 'CREATED|not touching|NOT persisted|gate-pin:' | head -8
+    grep -iE 'CREATED|not touching|NOT persisted|gate-pin:' <<<"$out_aj" | head -8
     # GNU `stat -c` FIRST, BSD `stat -f` fallback: this is a failure diagnostic, and a
     # diagnostic that prints an empty mode on the one platform class the suite exists to
     # protect (#3756) is worse than none — it is what stops the next reader looking.
@@ -4748,7 +4765,7 @@ FAKEGATE
       ok "gate-pin: a ROOT run with the seam set refuses and writes nothing to the env-chosen path"
     else
       bad "gate-pin: the seam was honoured under root (a privileged write could be steered)"
-      printf '%s\n' "$out_ak" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_ak" | head -2
       ls -l "$pin_seam_probe" 2>/dev/null
     fi
     sudo -n rm -f "$pin_seam_probe" 2>/dev/null || true
@@ -4782,7 +4799,7 @@ FAKEGATE
       ok "gate-pin: an unresolvable sudo invoker is UNMEASURED, never answered about root instead"
     else
       bad "gate-pin: an unresolvable invoker fell back to probing the wrong user"
-      printf '%s\n' "$out_am" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_am" | head -2
     fi
     out_an=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_USER="$(id -un)" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
@@ -4792,7 +4809,7 @@ FAKEGATE
       ok "gate-pin: a resolvable sudo invoker becomes the probe subject, and the run says so"
     else
       bad "gate-pin: the sudo invoker was not adopted as the probe subject"
-      printf '%s\n' "$out_an" | grep -i 'gate-pin\|subject' | head -2
+      grep -i 'gate-pin\|subject' <<<"$out_an" | head -2
     fi
   else
     skip "gate-pin sudo-invocation-mode cases (no passwordless sudo here)"
@@ -5251,7 +5268,7 @@ FAKEGATE
       ok "gate-pin: SUDO_USER disagreeing with SUDO_UID is UNMEASURED, not a probe of the wrong account"
     else
       bad "gate-pin: inconsistent sudo metadata was trusted"
-      printf '%s\n' "$out_au" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_au" | head -2
     fi
 
     # 11av. ...and root invoking sudo (SUDO_UID=0) tells us nothing about a gate's account.
@@ -5264,7 +5281,7 @@ FAKEGATE
       ok "gate-pin: SUDO_UID=0 is UNMEASURED — root invoking sudo says nothing about a gate's account"
     else
       bad "gate-pin: SUDO_UID=0 was treated as a usable probe subject"
-      printf '%s\n' "$out_av" | grep -i 'gate-pin' | head -2
+      grep -i 'gate-pin' <<<"$out_av" | head -2
     fi
     sudo -n rm -rf "$pin_root_sandbox" 2>/dev/null || true; mkdir -p "$pin_root_sandbox/.cargo"
   else
@@ -5288,7 +5305,7 @@ FAKEGATE
       ok "gate-pin: an UNREADABLE env file does not get the hardcoded profile export (unreadable is not absent)"
     else
       bad "gate-pin: an unreadable env file fell through to the append, recreating the divergence Q removed"
-      printf '%s\n' "$out_aw" | grep -i 'not touching\|could not determine' | head -2
+      grep -i 'not touching\|could not determine' <<<"$out_aw" | head -2
       cat "$pin_home_aw/.bashrc"
     fi
   fi
@@ -5323,7 +5340,7 @@ FAKEGATE
     ok "gate-pin: with no timeout utility the section refuses AND invokes sudo zero times"
   else
     bad "gate-pin: a probe ran unbounded (or the refusal was not reported): $(wc -l <"$pin_nt_trip") sudo call(s)"
-    printf '%s\n' "$out_ax" | grep -i 'gate-pin' | head -2
+    grep -i 'gate-pin' <<<"$out_ax" | head -2
     cat "$pin_nt_trip"
   fi
 
@@ -5348,7 +5365,7 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: root execution denied but the self-session permitted still MEASURES (no false red)"
   else
     bad "gate-pin: a box permitting the self-session was failed for lacking unrestricted root"
-    printf '%s\n' "$out_ay" | grep -i 'gate-pin' | head -2
+    grep -i 'gate-pin' <<<"$out_ay" | head -2
   fi
 
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
@@ -5378,8 +5395,8 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: a MISSING env file is created under --fix-gate-pin (with the pin in it), and is NOT created without authorisation — which SAYS it would be"
   else
     bad "gate-pin: the create path is wrong (created=$ba_created, unauthorised-file-exists=$([ -e "$envf_bb" ] && echo yes || echo no))"
-    printf '%s\n' "$out_ba" | grep -iE 'CREATED|gate-pin' | head -2
-    printf '%s\n' "$out_bb" | grep -iE 'CREATED|gate-pin' | head -2
+    grep -iE 'CREATED|gate-pin' <<<"$out_ba" | head -2
+    grep -iE 'CREATED|gate-pin' <<<"$out_bb" | head -2
   fi
 
   # 11bc. THE CREATE IS TWO STEPS, AND ITS FAILURE MUST NOT LEAVE A POPULATED FILE
@@ -5418,7 +5435,7 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: a create whose mode cannot be established on the STAGED file never links it, so the destination is untouched (nothing to roll back, hence no rollback race)"
   else
     bad "gate-pin: the failed create left a residue, or did not report rolling it back"
-    printf '%s\n' "$out_bc" | grep -iE 'gate-pin|CREATED|REMOVED|persisted' | head -4
+    grep -iE 'gate-pin|CREATED|REMOVED|persisted' <<<"$out_bc" | head -4
     echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
   fi
 
@@ -5450,7 +5467,7 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: a staging-write failure reports itself and writes NOTHING at the destination (no destructive cleanup of a path that was never ours)"
   else
     bad "gate-pin: the pre-link failure path did not report cleanly, or touched the destination"
-    printf '%s\n' "$out_bi" | grep -iE 'gate-pin|staging|persisted|CREATED' | head -4
+    grep -iE 'gate-pin|staging|persisted|CREATED' <<<"$out_bi" | head -4
     echo "  dest exists=$([ -e "$envf_bi" ] && echo yes || echo no)"
   fi
 
@@ -5521,7 +5538,7 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: a bad SESSION value over a CORRECT system file is diagnosed as an override, not as a bad file"
   else
     bad "gate-pin: the override case was handed the edit-the-system-file remedy"
-    printf '%s\n' "$out_bd" | grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' | head -4
+    grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' <<<"$out_bd" | head -4
   fi
 
   # 11be. THE NEGATIVE TWIN, so 11bd cannot pass by suppressing the remedy outright: where
@@ -5535,7 +5552,7 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: where the system file really holds the bad value, the edit-the-file remedy survives"
   else
     bad "gate-pin: the genuine bad-file case lost its remedy to the override branch"
-    printf '%s\n' "$out_be" | grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' | head -4
+    grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' <<<"$out_be" | head -4
   fi
 
   # 11bf. VERIFIED DISCLOSES WHAT IT MEASURED (roborev job 311, Medium). Matching values do
@@ -5554,7 +5571,7 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: VERIFIED states that it measured agreement and NOT provenance (the alternate-source residual is disclosed with the verdict)"
   else
     bad "gate-pin: VERIFIED did not disclose the agreement-vs-provenance limit"
-    printf '%s\n' "$out_bf" | grep -iE 'VERIFIED|provenance|scope:' | head -4
+    grep -iE 'VERIFIED|provenance|scope:' <<<"$out_bf" | head -4
   fi
 
   envf_k="$tmp/pin-env-k"; : >"$envf_k"
@@ -5573,8 +5590,8 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     ok "gate-pin: the test seam is fail-closed (no marker / relative path => SKIPPED, no fallback)"
   else
     bad "gate-pin: the test seam was honoured without its marker, or accepted a relative path"
-    printf '%s\n' "$out_k" | grep -i 'gate-pin' | head -2
-    printf '%s\n' "$out_k2" | grep -i 'gate-pin' | head -2
+    grep -i 'gate-pin' <<<"$out_k" | head -2
+    grep -i 'gate-pin' <<<"$out_k2" | head -2
   fi
 fi
 
@@ -5747,9 +5764,9 @@ runscc() {
 scc_slice() {
   push_plain "$1" | awk '/== sccache cache-size cap/{f=1;next} /^== /{f=0} f'
 }
-scc_warns() { printf '%s\n' "$1" | grep -cE '^[[:space:]]+\[warn\] '; }
-scc_oks()   { printf '%s\n' "$1" | grep -cE '^[[:space:]]+\[ok\] '; }
-scc_gaps()  { printf '%s\n' "$1" | grep -cE '^[[:space:]]+\[gap\]  '; }
+scc_warns() { grep -cE '^[[:space:]]+\[warn\] ' <<<"$1"; }
+scc_oks()   { grep -cE '^[[:space:]]+\[ok\] ' <<<"$1"; }
+scc_gaps()  { grep -cE '^[[:space:]]+\[gap\]  ' <<<"$1"; }
 
 if [ "$(id -u)" = 0 ]; then
   skip "sccache-cap: the ENTIRE block (the test seam is refused under root, so section 5b2 cannot be driven here)"
@@ -5814,7 +5831,7 @@ else
     ok "sccache-cap: the best state emits NO [ok] line and no 'sccache-cap: VERIFIED' anywhere, and SAYS the gate's cap is not established (round 426)"
   else
     bad "sccache-cap: a success token is back — the false certification of this section's own subject"
-    printf '%s\n' "$scc_sl_v" | grep -E 'VERIFIED|\[ok\]' | head -4
+    grep -E 'VERIFIED|\[ok\]' <<<"$scc_sl_v" | head -4
   fi
   # BOTH DIRECTIONS (the traded-false-pass check): the SCOPED verdict must still carry every
   # measured fact, or a false pass has merely become a content-free warn.
@@ -5824,7 +5841,7 @@ else
     ok "sccache-cap: the SCOPED verdict still NAMES all three measured links (file value, session agreement, bytes the running server enforces)"
   else
     bad "sccache-cap: the scoped verdict dropped a measured fact — it now reports LESS than was measured"
-    printf '%s\n' "$scc_sl_v" | grep 'sccache-cap:' | head -3
+    grep 'sccache-cap:' <<<"$scc_sl_v" | head -3
   fi
   # The scope note must state what the verdict does NOT cover — a success token would read as
   # "every gate on this box gets this cap", and the server-startup caveat is the new one.
@@ -5842,7 +5859,7 @@ else
     ok "sccache-cap: the scoped verdict prints its scope — the ONE session type measured, the login shell DECLARED as unmeasured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
   else
     bad "sccache-cap: the scope note is missing a statement, or still claims a context this section no longer measures"
-    printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
+    grep 'scope:' <<<"$scc_sl_v" | head -4
   fi
   # THE PROMISE MUST NOT COME BACK. That line used to end "...a disagreement would have been
   # reported as CONFLICTING-SOURCES, and a difference in an SCCACHE_* name this check does not
@@ -5857,7 +5874,7 @@ else
     ok "sccache-cap: no emitted line promises a detection this section no longer performs (no CONFLICTING-SOURCES, no would-have-been, no routing classification)"
   else
     bad "sccache-cap: emitted text promises a REMOVED detection — the exact failure mode this PR is about"
-    printf '%s\n' "$scc_sl_v" | grep -n 'CONFLICTING-SOURCES\|would have been\|classify as routing' | head -3
+    grep -n 'CONFLICTING-SOURCES\|would have been\|classify as routing' <<<"$scc_sl_v" | head -3
   fi
 
   # 12b-a2. THE ATTRIBUTION DIFFERENTIAL CHECKS UNIQUENESS ON **BOTH** READINGS (#3727 roborev
@@ -5883,7 +5900,7 @@ else
     ok "sccache-cap: duplicate max_cache_size on the SECOND reading REFUSES and names the count — attribution is not established from an ambiguous payload (job 435)"
   else
     bad "sccache-cap: a duplicate-field second reading established attribution, or refused without naming the planted count"
-    printf '%s\n' "$scc_sl_dup" | grep 'sccache-cap:' | head -3
+    grep 'sccache-cap:' <<<"$scc_sl_dup" | head -3
   fi
 
   # 12b-b. NOT-HONOURED — the #3727 state itself: the value is persisted, visible and accepted,
@@ -6088,11 +6105,11 @@ else
   #          bootstrap keeps only one in this block for that reason; an EMPTY or truncated slice
   #          is reported rather than passed over.
   scc_pre_src=$(sed -n '/^scc_pre_euid=/,/^fi$/p' "$BOOTSTRAP")
-  scc_pre_lines=$(printf '%s\n' "$scc_pre_src" | grep -c . || true)
+  scc_pre_lines=$(grep -c . <<<"$scc_pre_src" || true)
   # CODE ONLY for the negative assert: the paragraph in bootstrap QUOTES `have sccache` to say
   # why it is gone, so without this filter the check reds on its own rationale — the same trap
   # case 13 records for its own pattern.
-  scc_pre_code=$(printf '%s\n' "$scc_pre_src" | grep -v '^[[:space:]]*#' || true)
+  scc_pre_code=$(grep -v '^[[:space:]]*#' <<<"$scc_pre_src" || true)
   if [ "${scc_pre_lines:-0}" -lt 12 ]; then
     bad "sccache-cap: the precondition slice is $scc_pre_lines lines — the sed range broke (a nested column-0 'fi'?), so the asserts below would pass or fail for the wrong reason"
   elif out_has "$scc_pre_src" -E '^scc_pre_euid="\$\{EUID-\}"$' \
@@ -6225,7 +6242,7 @@ else
     ok "sccache-cap: a cargo-installed sccache absent from the session's own PATH is still resolved from ~/.cargo/bin, and the emitted line names the RETRY as the stage that answered"
   else
     bad "sccache-cap: the ~/.cargo/bin retry did not resolve the binary, or the line still claims the session named it on its own PATH"
-    printf '%s\n' "$scc_sl_cb" | grep -E 'sccache binary|sccache-cap:' | head -4
+    grep -E 'sccache binary|sccache-cap:' <<<"$scc_sl_cb" | head -4
   fi
   # AND THE SCOPE NOTE CARRIES THE SAME PROVENANCE, because it is the second place the claim is
   # made and the two must not disagree about which stage answered.
@@ -6234,7 +6251,7 @@ else
     ok "sccache-cap: the scope note names the retried binary with the same provenance clause, never the old unqualified 'the probed session itself named'"
   else
     bad "sccache-cap: the scope note disagrees with the resolution line about which binary or which stage"
-    printf '%s\n' "$scc_sl_cb" | grep -F 'scope: every sccache call' | head -2
+    grep -F 'scope: every sccache call' <<<"$scc_sl_cb" | head -2
   fi
 
   # 12b-f4. NEITHER STAGE ANSWERS -> REFUSAL THAT NAMES BOTH. The same fixture with NO ~/.cargo/bin:
@@ -6254,7 +6271,7 @@ else
     ok "sccache-cap: with neither the session's own PATH nor ~/.cargo/bin naming an sccache, the refusal NAMES both stages and stays UNMEASURED, never an [ok]"
   else
     bad "sccache-cap: the two-stage refusal does not name both stages, or it certified something"
-    printf '%s\n' "$scc_sl_nc" | grep -E 'sccache binary|sccache-cap:' | head -4
+    grep -E 'sccache binary|sccache-cap:' <<<"$scc_sl_nc" | head -4
   fi
 
   # 12b-g2. A FRESH PROVISIONED BOX: NO SERVER YET, AND THE SECTION BECOMES THE FIRST STARTER
@@ -6283,7 +6300,7 @@ else
     ok "sccache-cap: the verdict DECLARES that this run started the server (not an independent observation)"
   else
     bad "sccache-cap: a run that started the server reported the best state without saying so"
-    printf '%s\n' "$scc_sl_fresh" | grep -E 'SCOPED-NON-LOGIN|scope:' | head -4
+    grep -E 'SCOPED-NON-LOGIN|scope:' <<<"$scc_sl_fresh" | head -4
   fi
   if grep -q -- '--start-server' "$scc_log_fresh"; then
     ok "sccache-cap: the start is REAL — 'sccache --start-server' appears in the recorded argv"
@@ -6598,13 +6615,13 @@ fi
 #        waive. Both counts are pinned, because each without the other permits one of the two
 #        ways this section has already been wrong.
 scc_section=$(awk '/^# ---- 5b2\./,/^# ---- 5c\./' "$BOOTSTRAP")
-scc_ok_total=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*ok "' || true)
-scc_scoped_named=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*gap "sccache-cap: SCOPED-NON-LOGIN [(]' || true)
+scc_ok_total=$(grep -cE '^[[:space:]]*ok "' <<<"$scc_section" || true)
+scc_scoped_named=$(grep -cE '^[[:space:]]*gap "sccache-cap: SCOPED-NON-LOGIN [(]' <<<"$scc_section" || true)
 # AND THE VERDICT MAY NOT ALSO EXIST AS A warn() CALL. Round 426 emitted it as a warn, which
 # counted it toward WARNINGS and made --strict fail on every host forever; round 428 moved it to
 # gap(). Asserting only the gap() count would pass if a warn() copy were ADDED beside it, which
 # would restore exactly that always-red state — so the warn() count for this verdict must be 0.
-scc_scoped_warned=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*warn "sccache-cap: SCOPED-NON-LOGIN [(]' || true)
+scc_scoped_warned=$(grep -cE '^[[:space:]]*warn "sccache-cap: SCOPED-NON-LOGIN [(]' <<<"$scc_section" || true)
 if [ -n "$scc_section" ] && [ "${scc_ok_total:-0}" = 0 ] && [ "${scc_scoped_named:-0}" = 1 ] \
    && [ "${scc_scoped_warned:-0}" = 0 ]; then
   ok "sccache-cap: section 5b2 emits NO ok() at all, reaches its best state through exactly one named SCOPED-NON-LOGIN gap(), and never emits that verdict as a warn() (rounds 426 + 428)"
@@ -6971,13 +6988,13 @@ if [ "$scc413c_ok" -eq 1 ]; then
     ok "sccache-strict-e2e: a box whose sccache is ONLY in ~/.cargo/bin CERTIFIES (--strict exit 0, zero warnings) — the false 'sccache MISSING' that failed a healthy machine is gone"
   else
     bad "sccache-strict-e2e: that box did not certify (rc=$scc413c_rc warns=$scc413c_warns, $(push_warns_ex_scc "$scc413c_out") of them not 5b2's gap)"
-    printf '%s\n' "$scc413c_plain" | grep -E '^[[:space:]]+\[(warn|gap)\]' | head -5
+    grep -E '^[[:space:]]+\[(warn|gap)\]' <<<"$scc413c_plain" | head -5
   fi
   if out_has "$scc413c_out" -F -- "sccache present" && out_has "$scc413c_out" -F -- "at '$scc413c_scc'"; then
     ok "sccache-strict-e2e: section 2 reports it PRESENT and names the absolute path a gate will run"
   else
     bad "sccache-strict-e2e: section 2 did not report the ~/.cargo/bin sccache as present"
-    printf '%s\n' "$scc413c_plain" | grep -i sccache | head -5
+    grep -i sccache <<<"$scc413c_plain" | head -5
   fi
   if ! out_has "$scc413c_out" -F -- 'sccache MISSING'; then
     ok "sccache-strict-e2e: no 'sccache MISSING' warning for an sccache that IS installed"
@@ -6991,7 +7008,7 @@ if [ "$scc413c_ok" -eq 1 ]; then
     ok "sccache-strict-e2e: section 5b2 ran and MEASURED every link — persistence/measurement is no longer skipped on this layout"
   else
     bad "sccache-strict-e2e: section 5b2 did not reach SCOPED-NON-LOGIN — the precondition skip (or a session that could not resolve the binary) is back"
-    printf '%s\n' "$scc413c_plain" | grep -i 'sccache-cap' | head -5
+    grep -i 'sccache-cap' <<<"$scc413c_plain" | head -5
   fi
   if ! out_has "$scc413c_out" -F -- "no 'sccache' for the account gates run as"; then
     ok "sccache-strict-e2e: 5b2's absence verdict was NOT emitted for a box that has one"
@@ -7062,7 +7079,7 @@ else
   scc415_cands=$(printf '%s\n' "$scc415_logical" \
     | grep -vE '^[0-9]+:[[:space:]]*#' \
     | grep -E '"\$(SCC_)?SCCACHE_BIN"[[:space:]]+[^]|)&;]' || true)
-  scc415_n=$(printf '%s' "$scc415_cands" | grep -c '^' 2>/dev/null || true)
+  scc415_n=$(grep -c '^' <<<"$scc415_cands" 2>/dev/null || true)
   [ -n "$scc415_cands" ] || scc415_n=0
   # A FLOOR, because a count is what goes silently to zero: rename the variable, or wrap the
   # exec in a helper the regex no longer sees, and an EMPTY subject set would report a clean
@@ -7095,8 +7112,8 @@ EOF
   # BOTH ROUTES MUST BE PRESENT. Without this, deleting `scc_selfrun` and inlining a bare
   # exec would be caught, but deleting section 2's exec ENTIRELY and leaving the census to
   # pass on the five session sites would look identical to a fix.
-  if printf '%s\n' "$scc415_cands" | grep -q 'scc_selfrun' \
-     && printf '%s\n' "$scc415_cands" | grep -q 'scc_session_run'; then
+  if grep -q 'scc_selfrun' <<<"$scc415_cands" \
+     && grep -q 'scc_session_run' <<<"$scc415_cands"; then
     ok "sccache-exec: both sanctioned routes are in use (section 2's not-root-only runner and 5b2's privilege-dropped session)"
   else
     bad "sccache-exec: one of the two sanctioned execution routes has no site at all — the census may be passing over a shrunken subject"
@@ -7179,7 +7196,7 @@ HEOF
   # AND THE PREDICATE IS ENFORCED AT THE EXEC, NOT ONLY BY THE CALLER. Structural, because
   # the behavioural cases above pass just as well if the guard lives in section 2's caller —
   # and then the next caller added inherits nothing. Both facts, from the shipped text.
-  if printf '%s\n' "$scc415_run_fn" | grep -q 'scc_selfrun_ok "\$euid" || return 1'; then
+  if grep -q 'scc_selfrun_ok "\$euid" || return 1' <<<"$scc415_run_fn"; then
     ok "sccache-selfrun: the runner asks the predicate ITSELF before exec'ing, so a future caller that forgets cannot make root run it"
   else
     bad "sccache-selfrun: the exec is no longer guarded inside the runner — the invariant would rest on every caller remembering"
@@ -7220,14 +7237,14 @@ if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     PATH="$scc415f_farm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 180 "$PIN_BS" "$BOOTSTRAP" \
       --skip-smoke --skip-push-probe --skip-sccache-cap --skip-gate-pin 2>&1)
-  scc415f_line=$(printf '%s\n' "$scc415f_out" | grep -F 'sccache present' | head -1)
+  scc415f_line=$(grep -F 'sccache present' <<<"$scc415f_out" | head -1)
   if [ -z "$scc415f_line" ]; then
     bad "sccache-root-exec: the root run did not report sccache present, so the execution site under test was never reached"
-    printf '%s\n' "$scc415f_out" | grep -i sccache | head -5
+    grep -i sccache <<<"$scc415f_out" | head -5
   elif [ ! -e "$scc415f_mark" ] \
-       && printf '%s\n' "$scc415f_line" | grep -q 'version NOT read' \
-       && printf '%s\n' "$scc415f_line" | grep -q 'ROOT' \
-       && ! printf '%s\n' "$scc415f_line" | grep -q '9\.9\.9'; then
+       && grep -q 'version NOT read' <<<"$scc415f_line" \
+       && grep -q 'ROOT' <<<"$scc415f_line" \
+       && ! grep -q '9\.9\.9' <<<"$scc415f_line"; then
     ok "sccache-root-exec: a REAL root run resolves an sccache this account can replace and NEVER EXECUTES IT (canary marker never written), reporting the version as unread and saying why"
   else
     bad "sccache-root-exec: a real root run executed a user-writable binary, or claimed a version it must not have read (job 415):"

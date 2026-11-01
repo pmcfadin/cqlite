@@ -28,6 +28,22 @@
 # Sourced, never executed. The sourcing suite must NOT have `set -e` (the cases test
 # failing commands on purpose); `set -uo pipefail` is what both use.
 
+# NEVER RUN AS REAL ROOT (#4403). Every case models its identity with an `id` stub, and the
+# privileged installer refuses a drop-in dir not owned by the writer uid that stub reports; a
+# real-root run creates root-owned dirs while the non-root cases report a non-root uid, so those
+# cases fail on ownership instead of behaviour. A real-root run is also the one place a seam
+# mistake could reach the host's real /etc/sysctl.d. Root CASES stay covered — they are stubbed
+# (`mkid <dir> 0 ...`), never real privilege. So a real-root run REFUSES, loudly and before
+# anything is created. Re-executing as the invoking account instead (setpriv) was tried and kept
+# growing identity edge cases (gid, supplementary groups, passwd lookup — roborev jobs 47-51);
+# proper root support is a follow-up, not this fix. $EUID, never `id -u`: a missing or shadowed
+# `id` answers empty and would FAIL OPEN.
+if [ "${EUID:-}" = 0 ]; then
+  printf 'FAIL - perf suites refuse to run as real root (EUID 0): run them as a non-root user (#4403)\n'
+  printf 'PASS=0 FAIL=1 SKIP=0\n'
+  exit 1
+fi
+
 PERF_TEST_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_DIR=$(cd "$PERF_TEST_LIB_DIR/.." && pwd)          # scripts/tests
 BOOTSTRAP="$SCRIPT_DIR/../bootstrap-agent-machine.sh"
@@ -227,7 +243,13 @@ mkshim cargo
 mkshim roborev
 mkshim gh
 mkuname "$tmp" Linux   # every bootstrap run that includes $tmp in PATH is Linux
-mkid "$tmp" 1000       # ...and is a NON-ROOT runner, whatever UID runs the suite
+# THE non-root uid the `id` stubs report (#4403). It must be the uid that OWNS this suite's
+# directories: the privileged installer refuses a drop-in dir "owned by uid X, not by the
+# privileged writer uid Y", and Y is what the stub answers. A hardcoded 1000 held only on hosts
+# whose runner happens to be uid 1000 — on a uid-1001 box every --yes write was refused. The
+# root refusal at the top of this file guarantees the real uid is non-root here.
+PERF_TEST_NONROOT_UID=$EUID
+mkid "$tmp" "$PERF_TEST_NONROOT_UID"   # ...and is a NON-ROOT runner, whatever UID runs the suite
 host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # ---- the `perf` shims -------------------------------------------------------------
