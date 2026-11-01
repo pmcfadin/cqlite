@@ -40,10 +40,14 @@
 if [ "${EUID:-}" = 0 ]; then
   _perf_drop_uid=${SUDO_UID:-1000}
   case "$_perf_drop_uid" in ''|0|*[!0-9]*) _perf_drop_uid=1000 ;; esac
+  # The invoking account's OWN primary gid (roborev job 49): uid and gid often differ, and a
+  # fabricated gid with groups cleared can lose read access to a group-readable checkout.
+  _perf_drop_gid=${SUDO_GID:-$_perf_drop_uid}
+  case "$_perf_drop_gid" in ''|0|*[!0-9]*) _perf_drop_gid=$_perf_drop_uid ;; esac
   command -v setpriv >/dev/null 2>&1 || {
     printf 'FAIL - perf suites refuse to run as real root and cannot drop privilege here (no setpriv); run as a non-root user\n'
     exit 1; }
-  exec setpriv --reuid="$_perf_drop_uid" --regid="$_perf_drop_uid" --clear-groups -- \
+  exec setpriv --reuid="$_perf_drop_uid" --regid="$_perf_drop_gid" --clear-groups -- \
     env -u SUDO_UID -u SUDO_GID -u SUDO_USER bash "$0" "$@"
   exit 1   # exec failed: never fall through as root
 fi
