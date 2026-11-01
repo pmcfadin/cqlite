@@ -44,10 +44,18 @@ if [ "${EUID:-}" = 0 ]; then
   # fabricated gid with groups cleared can lose read access to a group-readable checkout.
   _perf_drop_gid=${SUDO_GID:-$_perf_drop_uid}
   case "$_perf_drop_gid" in ''|0|*[!0-9]*) _perf_drop_gid=$_perf_drop_uid ;; esac
+  # The invoking account's SUPPLEMENTARY groups too (roborev job 50): a checkout readable only
+  # through one of them must stay readable after the drop. Restored only when SUDO_USER's passwd
+  # entry names the SAME uid; a numeric-only or mismatched identity keeps groups cleared.
+  _perf_drop_groups=--clear-groups
+  if [ -n "${SUDO_USER:-}" ] \
+     && [ "$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f3)" = "$_perf_drop_uid" ]; then
+    _perf_drop_groups=--init-groups
+  fi
   command -v setpriv >/dev/null 2>&1 || {
     printf 'FAIL - perf suites refuse to run as real root and cannot drop privilege here (no setpriv); run as a non-root user\n'
     exit 1; }
-  exec setpriv --reuid="$_perf_drop_uid" --regid="$_perf_drop_gid" --clear-groups -- \
+  exec setpriv --reuid="$_perf_drop_uid" --regid="$_perf_drop_gid" "$_perf_drop_groups" -- \
     env -u SUDO_UID -u SUDO_GID -u SUDO_USER bash "$0" "$@"
   exit 1   # exec failed: never fall through as root
 fi
