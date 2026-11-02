@@ -284,14 +284,14 @@ near-independent issues instead of running one to done before starting the next:
 You are the only long-lived agent, so nothing compacts between issues unless you do it. After each
 `flow-finalize`, **reset**:
 
-- **Board is the sole re-hydration source for the next item.** `flow-finalize` already stamped the
-  telemetry ledger (one line: issue, PR, verdict); carry **zero prior-issue history** forward — no retained
+- **Board is the sole re-hydration source for the next item.** `flow-finalize` has already closed out the
+  issue (telemetry is retired, #4406); carry **zero prior-issue history** forward — no retained
   board renders, gate summaries, roborev findings, PR bodies, or spec renders. Pick the next item from the
   board alone.
 - **Be re-runnable from board + disk alone.** All durable state already lives outside your window — the
   worktree, the origin **claim ref** `refs/claims/issue-<N>` (the lock) and its PR-plumbing branch, the
   heartbeat ref, the issue/PR bodies, the OpenSpec files under `openspec/changes/`, the
-  gate summary files, the telemetry ledger. A fresh session must rehydrate in one board read; if it can't,
+  gate summary files. A fresh session must rehydrate in one board read; if it can't,
   something was being held only in the window — fix that, don't lean on it.
 - **Seam-1 spec bodies are NOT retained after owner approval** — render inline for approval, get the call,
   then drop them. `spec-auditor` (C) re-reads the spec from `openspec/changes/<slug>/` anyway, so keeping
