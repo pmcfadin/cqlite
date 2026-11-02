@@ -453,7 +453,7 @@ minimal-features build that was never broken. Every SUMMARY block **that carries
 table**, plus the four FULL-gate pre-flight blocks reachable after `run_file_size` — 11 of the
 script's 26 emit sites — now carries a `disk-exhaustion:` line naming a
 recognised signature, the component and the log line, plus a start→emit free-space delta; see
-the gate section of `CLAUDE.md` for its closed value set. (The pre-flight blocks were exempt
+*A DISK-EXHAUSTION FAIL now NAMES ITSELF* below for its closed value set. (The pre-flight blocks were exempt
 until #3800/job 358, on the stated ground that no component had run — false, because
 `run_file_size` executes before them, so a file-size that died of ENOSPC was named nowhere.) The other 15, emitted before any
 component runs (the pre-flight FAIL-CLOSED blocks, the `--delta` usage errors and
