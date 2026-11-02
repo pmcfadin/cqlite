@@ -1427,7 +1427,12 @@ fi
 # is fine. Not a new class here — `agent-gate.sh` carries the identical fix and citation (job-2108).
 # The `+` form expands to NOTHING when unset/empty and to the quoted elements otherwise, so it is
 # also correct on bash 5; the rollback loop over `_extra_locks` gets it for the same reason.
+# TasksMax=infinity (#4401): a transient unit otherwise inherits the manager's DefaultTasksMax,
+# 15% of the pids limit — 2457 on a 16384-pid container — and a 32-core gate peaks above 3000
+# tasks, so rustc and node die with EAGAIN in a way that reads as a code failure. The parent
+# slice and the container pids limit still bound the unit; this only removes the lower default.
 if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
+     --property=TasksMax=infinity \
      --property=StandardInput=null \
      --property="StandardOutput=append:$LOGFILE" \
      --property="StandardError=append:$LOGFILE" \
@@ -1446,6 +1451,7 @@ if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
   exit 1
 fi
 CG=$(systemctl --user show "$UNIT" -p ControlGroup --value 2>/dev/null)
+TASKS_MAX=$(systemctl --user show "$UNIT" -p TasksMax --value 2>/dev/null)
 
 # ---------------------------------------------------------------------------
 # VERIFY BY OUTCOME, not by permission model (roborev job 166).
@@ -1664,6 +1670,7 @@ cat <<EOF
 ==== GATE DETACHED (#3473) ====
 unit:        $UNIT
 cgroup:      ${CG:-<unavailable>}
+tasks-max:   ${TASKS_MAX:-<unavailable>}
 args:        agent-gate.sh ${GATE_ARGS[*]:-<full gate>}
 summary:     $SUMMARY
 heartbeat:   $SUMMARY.heartbeat
