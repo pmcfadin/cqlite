@@ -453,7 +453,7 @@ minimal-features build that was never broken. Every SUMMARY block **that carries
 table**, plus the four FULL-gate pre-flight blocks reachable after `run_file_size` — 11 of the
 script's 26 emit sites — now carries a `disk-exhaustion:` line naming a
 recognised signature, the component and the log line, plus a start→emit free-space delta; see
-the gate section of `CLAUDE.md` for its closed value set. (The pre-flight blocks were exempt
+*A DISK-EXHAUSTION FAIL now NAMES ITSELF* below for its closed value set. (The pre-flight blocks were exempt
 until #3800/job 358, on the stated ground that no component had run — false, because
 `run_file_size` executes before them, so a file-size that died of ENOSPC was named nowhere.) The other 15, emitted before any
 component runs (the pre-flight FAIL-CLOSED blocks, the `--delta` usage errors and
@@ -3551,3 +3551,42 @@ Deleted by #1698: `events`, `ci_zero_tolerance` (5 manifests), the four
 `default`), `cqlite-core/unit-tests-only` (the cqlite-integration-tests feature of the
 same name keeps its 25 cfg sites) and `wasm` with its three wasm32-only deps — the 27
 `cfg(target_arch = "wasm32")` sites stay, they gate on target, not on that feature.
+
+## Gate modes, host and workspace notes moved from CLAUDE.md (#4406)
+
+CLAUDE.md (2026-11-02 rewrite) keeps only the rules; the operator detail it used to carry is here.
+Mode mechanics are specified above in this file; this section is the quick reference.
+
+| Mode | Command | Use |
+|------|---------|-----|
+| Full (gate of record) | `scripts/agent-gate.sh` | Once per issue, right before merge, on Linux. The whole component set (`--list` shows it). Tests run at the target granularity each component names, never whole packages; several crates' tests execute nowhere (#3522, `scripts/tests/workspace-test-disposition.txt`). `tooling-tests` is diff-scoped and SKIPs, naming the cause, when the diff touches no declared harness path (#4266). |
+| Lite (#1821) | `scripts/agent-gate.sh --lite` | Every fix round. file-size + fmt + clippy + roborev-lints + diff-scoped tests. Cost is not proportional to the diff: clippy is the full per-package matrix (16–24 min cold) and a `cqlite-core/src/` diff also compile-checks every direct dependent's test targets (median ~20 min). Exempt from the gate-slot cap, no admission check yet (#3763). Emits a distinct lite summary; it can never stand in for the full one. |
+| Delta (#1892) | `--delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certifies a post-full-PASS polish round whose diff is only executable tests or docs (#2081). Fails closed on anything else. Record both the delta summary and the anchor's full summary in the PR. Not the gate of record. |
+| Recertify (#4268) | `--recertify <anchor-summary-file> --components <c1[,c2]>` | Reruns at most two components against a same-tree full-gate anchor when their failure is proven to be the host's. Eligibility (all other components PASS/OPT-OUT, `dirty: no`, anchor ≤24h, components outside the PR's diff domain in `scripts/lib/recert-component-domains.sh`) and the no-chaining rule are in the Recertify section of this file. Not the gate of record. |
+
+**Gate host (#4225, owner ruling 2026-09-13; single box since 2026-11-01).** The gate of record runs on
+the Linux dev box. macOS is a development host: `--lite`, `--only` and targeted `cargo test` are fine
+there, but a full-gate summary produced on macOS never certifies a merge, even at PASS. Reason: a 110-file
+tooling self-test sweep went 36/110 non-PASS on Darwin, several Linux-only by construction (`/proc` lane
+locks, `flock(1)`, the `systemd-run` cgroup detach that `scripts/flow/gate-detached.sh` requires; it exits
+69 without it). Nothing enforces this mechanically — `agent-gate.sh` prints a full summary on a Mac — so
+check the host before citing a run. Self-test: `bash scripts/tests/test_agent_gate_summary.sh`.
+
+**Summary path.** Keep `AGENT_GATE_SUMMARY_FILE` outside the worktree (#4171). Run the gate detached from
+the session cgroup (`scripts/flow/gate-detached.sh`) so it survives the session.
+
+**Workspace notes.** Do not add `default-members` (#1716): the root package already makes a bare
+`cargo build` build only `cqlite`, and an explicit list would expand it to every member. The first time
+you touch a long-unwired `tools/` crate expect latent test failures: no component runs workspace-wide
+tests, `--lite` runs a crate's tests only when your diff maps to it, and those failures are yours to fix
+(see *tools/ crates* above).
+
+**Test data.** `bash test-data/scripts/fetch-datasets.sh` prints the `export CQLITE_DATASETS_ROOT=<abs>`
+line to use; that printed root beats any remembered one. The script rejects unknown arguments (exit 2)
+because its default path is destructive; `--verify-only` probes without mutating and reports git-tracked
+fixtures a killed fetch deleted (with the `git restore` one-liner), `NO SUBJECT` for an out-of-repo root and
+`COULD NOT MEASURE` when the census can't be taken (#3310). `CQLITE_DATASETS_ROOT` alone suffices (#3131,
+#3148): `test-data/schemas` is committed and resolved checkout-relative. `CQLITE_SCHEMAS_ROOT` is an
+optional override and must be absolute — the gate resolves a relative value against the repo root and cargo
+against each package dir, so it would certify one root while tests read another. Without Data.db files,
+query tests pass with 0 rows.

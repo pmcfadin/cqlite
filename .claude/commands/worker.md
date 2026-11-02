@@ -198,7 +198,7 @@ onto its own branch). Rules, non-negotiable:
       a terminal packet `{verdict, PR URL, summary-file path, C, roborev, ≤10 lines residual}`.
    You coordinate and read summaries/packets; you never open the source or read raw gate/roborev output.
 7. **Write the iteration marker, then EXIT (issues #2090/#2085).** As your **last act before exiting the
-   session** — after the closer's merge/finalize/telemetry-stamp is complete, whatever the outcome — write
+   session** — after the closer's merge/finalize is complete, whatever the outcome — write
    the machine-readable marker the supervisor reads (schema in step 9), then EXIT. **Never claim a second
    issue in this session.** All state is durable (board, origin branch, worktree commits, issue body,
    `openspec/`, summary file) — the next issue gets a fresh process. Escalations from the closer
@@ -215,8 +215,7 @@ onto its own branch). Rules, non-negotiable:
    {"outcome": "finalized", "issue": 1234, "pr": "https://github.com/pmcfadin/cqlite/pull/1235", "duration_s": 842, "reason": null}
    ```
    `outcome` is EXACTLY one of:
-   - **`finalized`** — claimed + drove through gate → C/review → merge-on-green → `flow-finalize` → telemetry
-     stamp. `issue`+`pr` MUST be set. Counts vs `MAX_ISSUES`.
+   - **`finalized`** — claimed + drove through gate → C/review → merge-on-green → `flow-finalize`. `issue`+`pr` MUST be set. Counts vs `MAX_ISSUES`.
    - **`no-work`** — rehydrated and found nothing to do (empty Ready, no own resumable claim). `issue`/`pr`
      may be `null`. Supervisor backs off before the next iteration.
    - **`blocked`** — real progress but stopped short of merge for an owner reason (design-call finding, scope/
