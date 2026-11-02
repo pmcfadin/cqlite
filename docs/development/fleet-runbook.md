@@ -1,5 +1,7 @@
 # Fleet Runbook — Running the Agentic Delivery Pipeline as the Owner
 
+> **Legacy — retired 2026-11-01.** The multi-machine fleet is no longer operated (owner decision; #4406). CLAUDE.md no longer routes agents here. Kept for history; the single-box flow is in `docs/development/pm-operating-loop.md`.
+
 The exact, user-level version of how to run CQLite delivery across one or more machines.
 This is the *operator's* doc — what you type, what you'll see, when the system needs you.
 Doctrine and internals live elsewhere ([delivery pipeline](https://pmcfadin.github.io/cqlite/agents-developing/delivery-pipeline/),

@@ -66,7 +66,7 @@ ORDER: k                # queue rank when several are Ready at once
    the one irreversible step in the pipeline, so it is the one step that must never run on stale
    instructions. See `process_improvements.md` (2026-08-03 / #3249, entry 4).
 6. **Finalize follows the merge.** The merge event triggers `flow-finalize` (archive any OpenSpec change,
-   **stamp the telemetry ledger** with the roborev blocker/nit split, remove the worktree, delete the origin
+   remove the worktree, delete the origin
    claim branch + clear the heartbeat, close the issue with a traceable comment). Board → Done (built-in).
    The lead then **resets** — zero prior-issue carryover, next item re-hydrated from the board alone (#2085).
 
@@ -89,7 +89,7 @@ an empty `contexts=[]` set. `--auto` therefore can never land a PR against an un
 admin bypass. Branch protection is the green-signal guard, enforced by GitHub itself.
 
 **Finalize follows the merge across a possible session boundary (#2667).** Because `--auto` can complete
-after the arming session exits, finalize (telemetry, board, claim release) runs on whichever wake observes
+after the arming session exits, finalize (board, claim release) runs on whichever wake observes
 the merge:
 - **Fast path (DEFAULT when the `required` check is already green at arm time):** the closer briefly confirms
   `gh pr view <pr> --json state -q .state` == `MERGED` (hard-deadline poll, not a tight loop) and finalizes
@@ -150,7 +150,10 @@ roborev round-trips):
   overlaps. No manual `pgrep`-serialization needed.
 - **(d)** Long waits use **scheduled wakeups**, never idle polling.
 
-## Self-improvement loop (telemetry + retro)
+## Self-improvement loop (telemetry + retro) — RETIRED 2026-11-02 (#4406)
+
+> Delivery telemetry is retired: `flow-finalize` no longer stamps the ledger and no retro cadence runs.
+> `docs/reports/delivery-telemetry.jsonl` is kept as history. The text below is the historical design.
 
 The pipeline measures itself so improvement is data-driven, not anecdotal:
 - **Sense** — at finalize, the worker stamps one record per delivery cycle (issue, pr) into the
@@ -714,3 +717,53 @@ that build survives a live round, and vice versa. New round trackers seed from
   `gate.yml` deep-check re-runs the FULL gate on `main` as the standing backstop.
 - `--lite` NEVER replaces the full gate — the full `AGENT-GATE SUMMARY` is the only run that counts.
 
+
+## Pipeline and PM detail moved from CLAUDE.md (#4406)
+
+The 2026-11-02 rewrite of CLAUDE.md (single box, fleet retired) keeps only rules there. The detail:
+
+- **Optional personas.** `flow-lead` (`claude --agent flow-lead`) is an optional orchestrating persona that
+  writes no production code; any agent can follow the flow-* skills directly. `flow-closer` is the endgame
+  checklist: rebase → full gate of record → C (OpenSpec work) → roborev last → `premerge-assert` → arm
+  `gh pr merge --auto --squash --delete-branch` → finalize. `flow-closer` has no `Agent` tool, so C is
+  spawned by whoever drives it. Always pass an explicit accessible `model` when spawning subagents.
+- **Seam 1** (owner approves spec + design before implementation) remains the one standing human gate for
+  design-driven work. Unattended sessions park instead of blocking: post one structured question, add
+  `needs-decision`, write a `blocked` marker and exit; `resume-dont-ask` is a standing Seam-1 seal.
+- **1:1:1:1.** One issue ↔ one worktree/branch `issue-<N>-<slug>` from `origin/main` ↔ one OpenSpec change
+  (only when the issue changes a public surface) ↔ one PR. Worktrees lack gitignored Data.db binaries; point
+  `CQLITE_DATASETS_ROOT` at the root the fetch script prints.
+- **Board.** The Project `Status` field is the dispatch authority; one `P0`–`P3` per issue. Read it with
+  `--query` (an unfiltered `gh project item-list` silently truncates on this 900+ item board):
+  `gh project item-list 1 --owner pmcfadin --query "status:Ready" --format json -L 100`. `status:*`
+  labels are a discovery-only mirror lagging up to 30 min; the filtered board read wins.
+- **Claim.** The lock is the per-issue claim ref from `bash scripts/flow/claim.sh claim <N>` (atomic push);
+  the branch is PR plumbing. Claim first, then worktree; `claim.sh verify <N>` confirms; heartbeat at claim
+  and each stage transition. Git itself must be authenticated, not just `gh` (`reason=auth` is not
+  retryable — fix the box).
+- **Inter-issue reset.** After each finalize drop prior-issue context; re-hydrate from board + disk.
+- **Merging.** Only `gh pr merge --auto` (REST `PUT …/merge` bypasses the required-check wait). Never poll a
+  PR's CI with `ScheduleWakeup`. Escalate and hold only for a design-call roborev finding, a scope/product
+  question, an unmet requirement, or out-of-issue work; obey `HOLD: merge after #N`. Stop a merge by
+  converting the PR to draft, not by comment alone. Required checks and `ci:waive:<tier-id>`:
+  `docs/development/merge-gate.md`.
+- **Review.** Review before the first full gate (skip only for mechanical diffs). A rebase voids the roborev
+  round. Blockers re-trigger fix → `--lite` → re-review; nits go into one linked follow-up. A code-free diff
+  can't be roborev-certified: record primary-source verification in the PR. `exclude_patterns` scoping is a
+  root-checkout operation (`.roborev.toml` in a worktree is a silent no-op), so a PR whose subject is a
+  config the daemon/gate reads from root cannot certify itself. Post-gate test/docs-only polish uses
+  `--delta`. Rubric: `docs/development/roborev-severity.md`; internals: `roborev-contract.md`.
+- **Autonomous GitHub writes:** comments, status labels, assignment; closing a fully-done non-epic issue
+  with a merged linked PR. Never close an epic, change scope/title or make a product decision without the
+  owner (collect under "NEEDS YOU"). Number every issue/PR with a short description; comment on every write.
+- **Done** means tests pass, coverage meets threshold, roborev clean and — for OpenSpec work — C PASS (every
+  requirement satisfied with a public-surface test); coverage-reviewer sign-off where the lead asks for it.
+  Stay inside your issue's scope and flag cross-cutting changes. Wiring evidence: a feature is done only when
+  a public surface exercises it end to end; helper-only unit tests don't count.
+- **Pre-roborev self-check** classes (full guidance: the website `roborev-findings` page). Mechanized:
+  GitHub Actions injection (`roborev-lints`, mark `injection-lint-allow`), clippy `manual_range_contains`,
+  wall-clock threshold asserts (`perf-gate-allow`, #2642). Hand-checked: integer overflow (use
+  `num_bigint::BigInt`, never materialize `10^scale`), Float/Double ordering vs Java (`total_cmp` ≠
+  `Double.compare`: NaN last, `-0.0 < +0.0`), cargo-output parses keyed on literal status text (route via
+  `_ansi_stripped_log`, read by redirection, #3400/#3499), no-heuristics, and gitignored reference binaries
+  (`git add -f`, verify in a fresh `git worktree add --detach HEAD`).

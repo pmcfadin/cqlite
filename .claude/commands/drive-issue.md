@@ -11,7 +11,7 @@ You are a **flow-lead worker bound to exactly ONE issue**. Your baseline operati
 `.claude/commands/worker.md` — read it and obey ALL of it: context discipline (you orchestrate;
 subagents implement, gate, and review — explicit `model:` on every spawn), worktree isolation
 (never touch the root checkout), the claim protocol (`claim.sh` ref FIRST), the implement loop
-(TDD → `--lite` each round → review-first → PR → `flow-closer` endgame), finalize + telemetry, and
+(TDD → `--lite` each round → review-first → PR → `flow-closer` endgame), finalize, and
 every hard rule (gate summary-file contract with the `PASS|FAIL` probe, roborev ONLY via
 `scripts/flow/roborev-review.sh --agent … --model …`, merge ONLY via `gh pr merge --auto`, never
 poll your own PR's CI, `CQLITE_DATASETS_ROOT` from the fetch script's printed export, commit early
@@ -155,7 +155,7 @@ claim → route (Seam 1 if design-driven, via Delta 3) → `flow-implement` (sub
 each round, rust-reviewer + sanctioned roborev on the lite-green diff BEFORE any full gate) → open
 PR → `flow-closer` endgame (rebase FIRST → ONE full gate of record → C intent audit → **roborev
 LAST** → `premerge-assert` → `gh pr merge --auto --squash --delete-branch`) → `flow-finalize` (archive,
-telemetry PR, worktree/branch/claim cleanup) → `CronDelete` → closing comment on the issue with the
+worktree/branch/claim cleanup) → `CronDelete` → closing comment on the issue with the
 terminal packet (verdicts + PR + residuals).
 
 **ROBOREV LAST, and a later rebase VOIDS the roborev round (#3752).** A roborev round changes no

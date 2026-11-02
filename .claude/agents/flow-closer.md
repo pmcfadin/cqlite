@@ -465,9 +465,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
      The gate completion push-signal (#2667) and GitHub's own auto-merge notification are the
      callbacks — the summary file is a push signal now, not a poll target.
 
-   `flow-finalize <N>` archives the OpenSpec change if design, stamps the telemetry ledger
-   (supply the honest `--roborev-blockers`/`--roborev-nits` split you observed; and any
-   `--nudges`/`--orphan-minutes` you incurred, #2667), removes the worktree, deletes the
+   `flow-finalize <N>` archives the OpenSpec change if design (no telemetry stamp — retired, #4406),
+   removes the worktree, deletes the
    origin claim branch, clears the heartbeat, and closes the issue with a traceable comment.
 
 ## Terminal packet — the ONLY thing you return (≤10 lines residual)
