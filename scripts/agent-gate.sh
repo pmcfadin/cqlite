@@ -505,11 +505,10 @@
 #                      a shape check documenting `<table>-<uuid>` while accepting
 #                      `<table>-*`). Runs both directions: the surface must pass, an
 #                      injected unenforced claim must FAIL.
-#                      Also runs (no python3/sudo/perf needed) the PAIR
+#                      Also runs (no python3/sudo/perf needed)
 #                      scripts/tests/test_perf_capability.sh (the helper's unit
-#                      contract) and scripts/tests/test_perf_capability_bootstrap.sh
-#                      (the bootstrap section end-to-end), sharing
-#                      scripts/tests/lib/perf-capability-test-lib.sh (#3249) — they pin
+#                      contract), using
+#                      scripts/tests/lib/perf-capability-test-lib.sh (#3249) — it pins
 #                      the perf profiling capability path: scripts/perf-capability.sh
 #                      (free /proc token, canonical /etc/sysctl.d/99-cqlite-perf.conf
 #                      bytes, byte-exact idempotency compare, side-effect-free
@@ -1158,8 +1157,7 @@ fi
 # server keeps its old cap until `sccache --stop-server`, and the accepted spelling
 # is `<digits>[KkMmGgTt]` (`30GiB`/`30GB` are SILENTLY DISCARDED). The cap actually
 # in force is reported on the accelerators: line as `sccache-cap=<bytes>(<source>)`
-# (issue #3727); persist it with
-# `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`.
+# (issue #3727); persist it in the sccache config (SCCACHE_CACHE_SIZE).
 # Measurement (issue #1822): 25.6% speedup on fresh worktrees with warm cache.
 #
 # Accelerator state (issue #1848): every optional accelerator the gate depends on
@@ -1180,8 +1178,8 @@ fi
 # `cargo install sccache` — the install this repo's own bootstrap documents — writes to
 # ~/.cargo/bin, and the PATH prepend above fires ONLY when `cargo` itself is absent. So a
 # box with a SYSTEM cargo and sccache only in ~/.cargo/bin resolved NOTHING here, while
-# bootstrap-agent-machine.sh's own two-stage resolution (`scc_resolve_binary`) found that
-# binary, started its server and reported VERIFIED — a false certification for a binary
+# a machine bootstrap script (since removed, #4413) once resolved that binary in two
+# stages and reported VERIFIED — a false certification for a binary
 # this gate would not run, and a false `[ok]` stops anyone looking. The fallback is
 # resolved for sccache SPECIFICALLY and touches PATH not at all: widening the prepend
 # above would change which cargo/toolchain a gate uses, a far larger blast radius than
@@ -1375,7 +1373,7 @@ _sccache_health() {
 }
 
 # ---- sccache cache-size cap + occupancy (issue #3727) -----------------------
-# WHY THIS IS ON THE LINE AT ALL. `.agent-ami/profile.yaml` declared
+# WHY THIS IS ON THE LINE AT ALL. a since-removed machine profile declared
 # SCCACHE_CACHE_SIZE and nothing ever persisted it, so the fleet's effective cap was
 # sccache's 10 GiB default for months and NO ARTIFACT SAID SO — the same shape as
 # #3414's `max-concurrency=N(pinned|default)`, and the same fix: put the number in
@@ -1705,7 +1703,7 @@ _sccache_used_token() {
 # ---- mold link-accelerator state (issue #2859) ------------------------------
 # On Linux agent workers the link step is the one build cost sccache cannot cache
 # (every --lite round and full gate re-links every test binary from scratch), so
-# bootstrap-agent-machine.sh provisions the mold linker and wires it through a
+# a (since-removed, #4413) bootstrap script provisioned the mold linker and wired it through a
 # managed block in the per-machine ~/.cargo/config.toml. The gate surfaces that
 # state on the accelerators: line so an installed-but-unwired worker (silent
 # degradation) is visible in the pasted block — exactly the contract sccache
@@ -1727,7 +1725,7 @@ _sccache_used_token() {
 # states (and the Darwin no-token case) assert deterministically without mold
 # installed or a real ~/.cargo/config.toml.
 
-# The EXACT managed-block begin marker bootstrap-agent-machine.sh writes. Match the
+# The EXACT managed-block begin marker the removed bootstrap-agent-machine.sh wrote. Match the
 # full line (grep -Fxq) — NOT a prefix — so a user's own `# BEGIN cqlite-mold-...`
 # comment can never false-positive as the managed block.
 _MOLD_BEGIN_MARKER='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
@@ -1912,7 +1910,7 @@ accelerators_line() {
 #   per-gate cores = max(1, floor(ncpu / N))
 # where N is the resolved machine-wide concurrency (CQLITE_GATE_MAX_CONCURRENCY
 # override, else the #1825 default formula). When this gate is the SOLE gate
-# (N=1 — the bootstrap default, see bootstrap-agent-machine.sh) it gets the FULL
+# (N=1 — the single-box default) it gets the FULL
 # core count, i.e. no throttling at all. The budget drives:
 #   * CARGO_BUILD_JOBS  — caps rustc codegen-unit / crate parallelism, and
 #   * GATE_TEST_THREADS — the nextest / cargo-test `--test-threads` for the
@@ -5918,9 +5916,9 @@ _component_set_probe_inner() {
     # damage — but does NOT rehash content against the requested object id. DELIBERATE forgery by a
     # same-host peer is INVOKER-CLASS and OUT OF MODEL (#3312 triage rule: a peer able to plant
     # objects can equally edit this script). ACCIDENTAL corruption is in model, and its control is
-    # NOT here: it is the periodic full `git fsck` sweep in
-    # `scripts/check-object-store-integrity.sh`, run at bootstrap and on the worker supervisor's
-    # throttled cadence. The emitted `component-set:` line DECLARES this boundary on every
+    # NOT here: it is a periodic full `git fsck` sweep
+    # (the former check-object-store-integrity.sh was removed with the fleet code, #4413; run
+    # `git fsck` by hand when in doubt). The emitted `component-set:` line DECLARES this boundary on every
     # BASELINE-BEARING arm (the `src_note` suffix); the UNMEASURED arms have no baseline to name
     # and so do not carry it, which is CLAUDE.md's scoping of the same sentence.
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
@@ -6434,13 +6432,10 @@ _component_set_line() {
   # inside this process. No check inside a process defends against a party that controls the
   # process; pretending otherwise is the false-assurance shape #3312 exists to remove.
   #
-  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION, AND ITS CONTROL IS A PERIODIC SWEEP, NAMED HERE SO
-  # THE POINTER SURVIVES: `scripts/check-object-store-integrity.sh` rehashes the whole shared store
-  # with a full `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not
-  # detect this), reporting VERIFIED / CORRUPT / UNMEASURED. It runs at machine onboarding
-  # (`scripts/bootstrap-agent-machine.sh` section 5d) and on the worker supervisor's throttled
-  # per-iteration cadence (`scripts/local/worker-supervisor.sh`, default every 6h; a CORRUPT verdict
-  # stops that supervisor loudly rather than letting a worker certify against a damaged store).
+  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION, AND ITS CONTROL IS A PERIODIC SWEEP, NOT
+  # AUTOMATED ANY MORE (the sweep script was removed with the fleet code, #4413): a full
+  # `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not detect
+  # this) is the manual control.
   # THAT IS PERIODIC, NOT PER-READ — which is exactly why the emitted clause still says TRUSTED,
   # not verified. Do not inflate it.
   #
@@ -21818,10 +21813,7 @@ run_features_load_bearing() {
 # outcomes; that nesting is BOUNDED (--only parity-report never selects
 # tooling-tests, so it cannot recurse) and the cassandra-parity build is already
 # warm from the earlier parity-report component, so it stays cheap. Also runs
-# scripts/tests/test_bootstrap_agent_machine.sh (#1921), which proves the
-# new-machine bootstrap's pure-check paths never install anything (it runs with
-# --skip-smoke, so it never invokes the real gate — no recursion). Also runs
-# scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
+# # scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
 # --delta-classify hook + --delta entry guards + --delta-...-emit-summary-selftest
 # to assert the test/docs-only fail-closed re-cert policy and DISTINCT delta
 # markers (hermetic — classification/emission only, never runs cargo). Also runs
@@ -23694,21 +23686,6 @@ run_tooling_tests() {
     return 0
   fi
 
-  # the fleet box launcher (#4267): env scrubbing (LANE_ID, npx-bearing PATH),
-  # stale-base refusal, and profile loading, all against throwaway git fixtures this
-  # script builds and destroys itself — no network, no real box, no systemd, no cargo.
-  echo ">>> [$name] bash scripts/tests/test_gate_box_launch.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_box_launch.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (fleet box launcher #4267); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
-
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   # BANNER IMMEDIATELY BEFORE ITS OWN INVOCATION (roborev job 238). It used to sit ~30 lines earlier,
   # and the #3473 liveness and detached suites were inserted between — so the log announced pub-surface,
@@ -24091,22 +24068,6 @@ run_tooling_tests() {
     return 0
   fi
 
-  # shared-object-store sweep guard (#3749): ABOVE the python3 gate on purpose. This suite
-  # needs nothing beyond bash + git, and folding a never-SKIPping suite into a SKIP-aware
-  # block would be a coverage hole wearing a SKIP's clothes (#3522's ruling). A failure
-  # here FAILs the component, mirroring the two guards above.
-  echo ">>> [$name] bash scripts/tests/test_check_object_store_integrity.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_check_object_store_integrity.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (object-store integrity sweep #3749); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
-
   # disk-exhaustion attribution guard (#3800): hermetic (temp dirs + the two hidden
   # selftest hooks; no cargo/python3/datasets/network, ~1s). A full gate killed by ENOSPC
   # reported only `minimal-build: FAIL (611s)` in the ONE artifact doctrine retains, so the
@@ -24395,7 +24356,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   # CommitLog fixture derivation (#2798): committed fixtures, no Docker/network.
   # Keep its Python dependency in tooling validation, outside core Cargo tests.
   echo ">>> [$name] python3 test-data/scripts/commitlog_fixture_derivation.py --self-test"
@@ -24406,10 +24367,7 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_claude_auth_capability.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
@@ -24417,7 +24375,6 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_premerge_review_binding.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_census.sh" >>"$log" 2>&1; then
@@ -25252,7 +25209,7 @@ run_scoped_tests() {
 #
 # PRESENT-ONLY (not fail-closed on a missing result): a component that did not run is
 # skipped, never force-failed. This preserves the lenient `--lite --only <c>` contract
-# (e.g. bootstrap-agent-machine.sh runs `--lite --only fmt`, which skips file-size and
+# (e.g. `--lite --only fmt` skips file-size and
 # clippy). Fail-open is not a risk here because these components run in the foreground
 # and always reach record_result; the only way a `.result` is absent is a deliberate
 # --only skip. The full gate keeps its own fail-closed missing-result guard for its
@@ -26284,7 +26241,7 @@ run_recertify_preflight() {
 #
 # THE PREMISE CORRECTION worth recording, because #3755 is written as if a launch-time
 # check existed: it did not. Before this block the only `df` in scripts/ was
-# worker-supervisor.sh's DISK_FLOOR_GB=40, which gates WORKER SPAWN and not the gate.
+# the removed worker-supervisor.sh's DISK_FLOOR_GB=40, which gated WORKER SPAWN and not the gate.
 # So "the same predicate as the launch-time check" had no referent, and delivering it
 # means introducing ONE predicate and evaluating it at BOTH moments — which is what
 # _gate_disk_admission_measure is. There is deliberately no second implementation:
@@ -26331,7 +26288,7 @@ run_recertify_preflight() {
 # precedent.
 
 # The bar, in GiB. 40 is #3755's own "40G building floor" and the value the committed
-# fleet tooling already uses (worker-supervisor.sh's DISK_FLOOR_GB).
+# fleet tooling formerly used (worker-supervisor.sh's DISK_FLOOR_GB).
 _GATE_MIN_FREE_GB_DEFAULT=40
 
 # The largest bar this gate accepts, STATED HERE rather than inherited from whatever
@@ -26437,7 +26394,7 @@ _gate_is_nonneg_decimal() {
 # reason: an UNSET variable and a MIS-SET one are different operational facts, and
 # `${VAR:-40}` renders them IDENTICALLY — which is how a pin that was never in effect
 # read as installed for months. `${VAR+set}` is the only spelling that tells unset from
-# set-empty. Fractional values are legal (worker-supervisor's DISK_FLOOR_GB accepts
+# set-empty. Fractional values are legal (the removed worker-supervisor's DISK_FLOOR_GB accepted
 # them). A negative bar clamps to 0 rather than being refused: "never refuse" is a
 # coherent thing to ask for, and `-0` clamping to `0` is the same value.
 _gate_min_free_gb() {
@@ -28761,7 +28718,7 @@ dispatch_component() {
 #
 # EXCLUDED from SIDE (issue #2657, gate FAIL): tooling-tests stays on the SERIAL MAIN
 # lane despite being non-cargo. It embeds TIMING-SENSITIVE shell self-tests --
-# notably test_worker_supervisor.sh's exit-latency assertion (#2666, <15s ceiling) --
+# notably (formerly) test_worker_supervisor.sh's exit-latency assertion (#2666, <15s ceiling) --
 # that STARVE under co-scheduled SIDE-lane CPU load: measured ~20s under the parallel
 # pool vs ~7s in isolation, so parallelizing it degraded the very component it moved.
 # Keeping it serial preserves its latency headroom; the other five isolatable
