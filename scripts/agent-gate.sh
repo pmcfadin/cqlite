@@ -5916,9 +5916,9 @@ _component_set_probe_inner() {
     # damage — but does NOT rehash content against the requested object id. DELIBERATE forgery by a
     # same-host peer is INVOKER-CLASS and OUT OF MODEL (#3312 triage rule: a peer able to plant
     # objects can equally edit this script). ACCIDENTAL corruption is in model, and its control is
-    # NOT here: it is a periodic full `git fsck` sweep
-    # (the former check-object-store-integrity.sh was removed with the fleet code, #4413; run
-    # `git fsck` by hand when in doubt). The emitted `component-set:` line DECLARES this boundary on every
+    # NOT here: it is the periodic full `git fsck` sweep in
+    # `scripts/check-object-store-integrity.sh`. Its fleet schedulers (bootstrap, the worker
+    # supervisor) were removed in #4413; scheduling it on the single box is a follow-up. The emitted `component-set:` line DECLARES this boundary on every
     # BASELINE-BEARING arm (the `src_note` suffix); the UNMEASURED arms have no baseline to name
     # and so do not carry it, which is CLAUDE.md's scoping of the same sentence.
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
@@ -6432,10 +6432,12 @@ _component_set_line() {
   # inside this process. No check inside a process defends against a party that controls the
   # process; pretending otherwise is the false-assurance shape #3312 exists to remove.
   #
-  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION, AND ITS CONTROL IS A PERIODIC SWEEP, NOT
-  # AUTOMATED ANY MORE (the sweep script was removed with the fleet code, #4413): a full
-  # `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not detect
-  # this) is the manual control.
+  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION, AND ITS CONTROL IS A PERIODIC SWEEP, NAMED HERE SO
+  # THE POINTER SURVIVES: `scripts/check-object-store-integrity.sh` rehashes the whole shared store
+  # with a full `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not
+  # detect this), reporting VERIFIED / CORRUPT / UNMEASURED. It ran at fleet machine onboarding and
+  # on the worker supervisor's cadence; both were removed in #4413, so on the single box it is not
+  # scheduled yet (follow-up) and the store is TRUSTED, not verified.
   # THAT IS PERIODIC, NOT PER-READ — which is exactly why the emitted clause still says TRUSTED,
   # not verified. Do not inflate it.
   #
@@ -24342,6 +24344,22 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_cargo_target_prune.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (cargo target prune #4411); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # shared-object-store sweep guard (#3749): ABOVE the python3 gate on purpose. This suite
+  # needs nothing beyond bash + git, and folding a never-SKIPping suite into a SKIP-aware
+  # block would be a coverage hole wearing a SKIP's clothes (#3522's ruling). A failure
+  # here FAILs the component, mirroring the two guards above.
+  echo ">>> [$name] bash scripts/tests/test_check_object_store_integrity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_object_store_integrity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (object-store integrity sweep #3749); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
