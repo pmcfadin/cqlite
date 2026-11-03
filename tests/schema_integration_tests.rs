@@ -536,8 +536,9 @@ async fn test_udt_frozen_table_parsing_parity() {
         .parse_clustering_keys(&clustering_data)
         .expect_err("date clustering key is unsupported by SchemaParser");
     assert!(
-        err.to_string().contains("Unsupported type"),
-        "expected fail-closed unsupported-type error, got {err}"
+        err.to_string()
+            .contains("Unsupported type for schema-driven parsing: Date"),
+        "expected the fail-closed unsupported-type error to name Date (#4426), got {err}"
     );
 
     // Test 3: Frozen UDT (server_info_type)
