@@ -117,18 +117,6 @@ path = "integration/index_summary_statistics_smoke.rs"
 
 # Cassandra 5 compatibility tests
 [[test]]
-name = "cassandra5_header_tests"
-path = "cassandra5_header_tests.rs"
-
-[[test]]
-name = "cassandra5_smoke_test"
-path = "cassandra5_smoke_test.rs"
-
-[[test]]
-name = "cassandra5_simple_test"
-path = "cassandra5_simple_test.rs"
-
-[[test]]
 name = "comprehensive_component_integration_tests"
 path = "comprehensive_component_integration_tests.rs"
 

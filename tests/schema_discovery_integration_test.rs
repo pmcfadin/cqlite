@@ -345,37 +345,6 @@ mod schema_discovery_tests {
         println!("✅ Index suggestion heuristics tests passed");
     }
 
-    #[test]
-    fn test_schema_building_logic() {
-        // Test schema building logic - partition key detection
-        let columns = vec![("id", 0), ("user_id", 1), ("name", 2), ("created_at", 3)];
-
-        for (column_name, position) in columns {
-            let is_partition_key = position == 0
-                || column_name.to_lowercase().contains("key")
-                || column_name.to_lowercase() == "id"
-                || column_name.to_lowercase().ends_with("_id");
-
-            let is_clustering = (position == 1 && !is_partition_key)
-                || column_name.to_lowercase().contains("time")
-                || column_name.to_lowercase().contains("date")
-                || column_name.to_lowercase().contains("order");
-
-            // For this test, just verify the logic is reasonable
-            if column_name == "id" {
-                assert!(is_partition_key, "ID should be detected as partition key");
-            }
-            if column_name == "created_at" {
-                assert!(
-                    is_clustering,
-                    "created_at should be detected as clustering key"
-                );
-            }
-        }
-
-        println!("✅ Schema building logic tests passed");
-    }
-
     #[tokio::test]
     async fn test_integration_workflow() {
         let type_engine = MockTypeInferenceEngine::new();

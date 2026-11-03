@@ -491,7 +491,7 @@ classify_out=$(printf '%s\n' \
   "cqlite-cli/tests/common/mod.rs" \
   "cqlite-core/src/storage/sstable/reader.rs" \
   "cqlite-core/tests/compact_command.rs" \
-  "tests/cassandra5_header_tests.rs" \
+  "tests/golden_path_get_operations_tests.rs" \
   "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
   | bash "$GATE" --classify-test-targets 2>/dev/null)
 # Nested helper + module files must be EXCLUDED (testname is the middle field).
@@ -512,8 +512,8 @@ fi
 # Finding 1: a top-level tests/*.rs target is owned by BOTH the workspace-root
 # `cqlite` package AND the cqlite-integration-tests crate; BOTH must be emitted
 # so the root package's target is never silently dropped from --lite selection.
-if out_has "$classify_out" -xF "cqlite|cassandra5_header_tests|" \
-   && out_has "$classify_out" -xF "cqlite-integration-tests|cassandra5_header_tests|"; then
+if out_has "$classify_out" -xF "cqlite|golden_path_get_operations_tests|" \
+   && out_has "$classify_out" -xF "cqlite-integration-tests|golden_path_get_operations_tests|"; then
   ok "classify: root-cqlite + integration-tests BOTH emitted for a top-level tests/*.rs target (finding 1)"
 else
   bad "classify: top-level tests/*.rs target did NOT emit both owning packages (root cqlite dropped)"
@@ -606,7 +606,7 @@ fi
 #     including a feature-gated target and real direct targets.
 noparser_out=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 printf '%s\n' \
   "cqlite-core/tests/compact_command.rs" \
-  "tests/cassandra5_header_tests.rs" \
+  "tests/golden_path_get_operations_tests.rs" \
   "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
   | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --classify-test-targets 2>/dev/null)
 if [ -z "$noparser_out" ]; then

@@ -728,6 +728,15 @@ jobs:
           "cqlite-examples tests"
           -- bash scripts/ci/run-counted-tests.sh "cqlite-examples" -- -p cqlite-examples
 
+      - name: Test cqlite (root package)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite root package tests"
+          -- bash scripts/ci/run-counted-tests.sh "cqlite (root package)" -- -p cqlite
+
       - name: CI runtime timing summary
         if: always()
         run: bash scripts/ci/ci-timing-summary.sh summary "CI workspace unit test timing"

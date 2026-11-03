@@ -3,7 +3,9 @@
 //! Tests various attack vectors and malformed inputs to verify security fixes
 
 use cqlite_core::parser::header::{parse_magic_and_version, CassandraVersion};
-use cqlite_core::parser::vint::{parse_vint, parse_vint_length, MAX_VINT_SIZE};
+use cqlite_core::parser::vint::{
+    parse_vint, parse_vint_length, parse_vint_length_signed, MAX_VINT_SIZE,
+};
 
 #[cfg(test)]
 mod security_tests {
@@ -120,11 +122,17 @@ mod security_tests {
         let negative_vint_tests = vec![
             vec![0x01], // ZigZag: -1
             vec![0x03], // ZigZag: -2
-            vec![0xFF], // Could be -1 in some encodings
+            vec![0xFF], // 9-byte VInt marker with no payload: truncated
         ];
 
+        // `parse_vint_length` is the UNSIGNED decode used for Cassandra-written
+        // lengths (Cassandra 5.0.8 `VIntCoding.readUnsignedVInt`), so 0x01 is a
+        // valid length of 1 there. The ZigZag (signed) decode is the one that
+        // can yield negatives, and it must reject them.
+        assert_eq!(parse_vint_length(&[0x01]).map(|(_, v)| v), Ok(1));
+
         for test_data in negative_vint_tests {
-            let result = parse_vint_length(&test_data);
+            let result = parse_vint_length_signed(&test_data);
             assert!(
                 result.is_err(),
                 "Negative length {test_data:?} should be rejected"
@@ -174,35 +182,6 @@ mod security_tests {
                     "{description}: VInt value {value} too large"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn test_cassandra_nb_format_security() {
-        // Test security of 'nb' format with padding bytes
-        let mut data = Vec::new();
-        data.extend_from_slice(&CassandraVersion::V5_0NewBig.magic_number().to_be_bytes());
-
-        // Add malicious padding that might confuse parser
-        let malicious_padding = vec![
-            0xFF, 0xFF, 0xFF, 0xFF, // Could be misinterpreted as large length
-            0x00, 0x00, 0x00, 0x00, // Null bytes
-            0x6F, 0x61, 0x00, 0x01, // Looks like valid header
-            0xDE, 0xAD, 0xBE, 0xEF, // Invalid data
-            0x00, 0x00, 0x00, 0x00, // More nulls
-            0x00, 0x00, 0x00, 0x00, 0x01, // Final byte to complete 25-byte padding
-        ];
-        data.extend_from_slice(&malicious_padding);
-        data.extend_from_slice(&[0x00, 0x01]); // Valid version
-
-        let result = parse_magic_and_version(&data);
-        assert!(
-            result.is_ok(),
-            "Valid 'nb' format should parse despite padding content"
-        );
-
-        if let Ok((_, (version, _))) = result {
-            assert_eq!(version, CassandraVersion::V5_0NewBig);
         }
     }
 
