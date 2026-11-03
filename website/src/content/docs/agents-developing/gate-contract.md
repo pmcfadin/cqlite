@@ -725,7 +725,7 @@ used to call a peer lane planting objects "a non-invoker route, hence a defect";
 peer wanting a false `PASS` can simply edit `scripts/agent-gate.sh`, which is cheaper than forging
 pack data; no check inside a process defends against the party that controls the process.
 *Accidental* corruption **is** in model, and its control is a periodic full-rehash sweep:
-`scripts/check-object-store-integrity.sh` runs a full `git fsck` (never `--connectivity-only`, which
+`scripts/check-object-store-integrity.sh` (removed, #4413) runs a full `git fsck` (never `--connectivity-only`, which
 does not rehash content) over the shared store and emits an anchored four-valued
 `VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — exit 0/4/6/5, and **a consumer must not
 read `UNMEASURED` as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5d, where
@@ -1531,7 +1531,7 @@ reviewer's copy of this bug and #3250 fixed the gate's.
 ## New-machine setup
 
 A fresh machine that will run the gate should first run
-`bash scripts/bootstrap-agent-machine.sh` (see
+the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413) (see
 `docs/development/agent-machine-setup.md`): it installs/verifies the accelerators
 below, the datasets, `gh` auth + the `project` scope, and roborev's local config,
 then prints the gate's `accelerators:` line as a health check.
@@ -1580,7 +1580,7 @@ slot cap **and where it came from** — see the concurrency-cap section below.)
   resolve to bare addresses — a silent attribution loss) · `absent` (the `/proc`
   controls are not present, e.g. a container — tune the host) · `unknown` (present but
   unparseable; never guessed). Anything but `ok` on a box you intend to measure means
-  **re-run `bash scripts/bootstrap-agent-machine.sh --yes`**, which installs
+  **re-run the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413)**, which installs
   `/etc/sysctl.d/99-cqlite-perf.conf` and then *verifies* it by running
   `perf stat -C 0 -e cycles`. Rationale + security posture:
   `docs/development/fleet-runbook.md`.
@@ -1614,7 +1614,7 @@ DISCARDED** to sccache's 10 GiB default, and a bare integer means BYTES — with
 anywhere. **`sccache-health` cannot answer any of this**: it is the sum of four ERROR counters with
 no capacity input, so a `warn` there can never be cleared by raising the cap and a permanently-full,
 thrashing cache reads `ok`. Persist and verify the cap with
-`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, which correlates the
+the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413), which correlates the
 `/etc/environment` line, the value a fresh non-login PAM session sees, that value in bytes (its own
 isolated sccache oracle) and the bytes the running server enforces. **Declared residual:** a LOGIN
 shell can see a different value (on this fleet `/etc/profile.d` runs after `pam_env`) and that
@@ -1647,7 +1647,7 @@ caller blocks cleanly rather than spin-failing.
 
   **The remedy DIFFERS BY TOKEN, and getting that wrong sends you in a circle.** A
   `default` box has no pin line at all, so
-  `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin` (or `--yes`) persists one.
+  the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413) (or `--yes`) persists one.
   An `invalid` or `clamped` box ALREADY HAS the line, holding a bad value — and
   bootstrap deliberately never rewrites an existing value, because a box running >1
   gate on purpose must not be clobbered — so re-running it there is a **silent

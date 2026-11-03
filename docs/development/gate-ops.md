@@ -117,7 +117,7 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
 * raising the value has **no effect until `sccache --stop-server`** (the next compile restarts it);
 * an env var being *visible* proves nothing about the cap in force — which is why every SUMMARY now
   carries `sccache-cap=<bytes>` read from the **running server**, and why
-  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the `/etc/environment`
+  the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413) correlates the `/etc/environment`
   line, the value a fresh **non-login PAM session** sees, what sccache makes of that value in
   **bytes** (its own isolated oracle), and the **bytes the running server enforces**. With all four
   measured and agreeing it reports `sccache-cap: SCOPED-NON-LOGIN` — its **strongest** verdict, a
@@ -131,7 +131,7 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
   box that an operator can clear on it; a `[gap]` is a declared limit of what bootstrap can
   **measure**, identical on every correctly provisioned host and clearable only by landing the
   issue it names. Round 426 emitted this verdict as a `[warn]`, which counted it toward
-  `WARNINGS` and so made **`--strict` — and therefore `.agent-ami/profile.yaml`'s `verify.run`
+  `WARNINGS` and so made **`--strict` — and therefore `.agent-ami/profile.yaml` (removed, #4413)'s `verify.run`
   — fail on EVERY host forever, including a perfectly configured one**; that is strictly worse
   than the false `[ok]` it replaced, because an alarm that always fires is one operators waive
   and then nothing is checked at all. So `--strict` keys on `WARNINGS` **alone**, gaps are
@@ -180,7 +180,7 @@ classifier**: the 7-state suffix (`pinned`/`default`/`inherited`/`stale`/`invali
 `unattributed`), the value-grammar map that computed it, the probed default and the four
 remediation `WARN`s were **removed** by lead ruling `req-3727-w4` — reporting stays, interpreting
 goes. Read the number, and read `sccache-cap: SCOPED-NON-LOGIN` from
-`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` for the correlation — remembering
+the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413) for the correlation — remembering
 that it is a `[gap]` scoped to one launch context — loud, counted separately from warnings, and
 not a certification of the cap this gate will get (#3946).
 
@@ -221,7 +221,7 @@ report and section 5b2's precondition were plain PATH checks. On that same syste
 and a root run recorded a false `sccache MISSING` `[warn]` — which is what `--strict` reads, so
 `verify.run` failed a healthy machine. Both now call ONE resolver, `sccache_bin`, with the gate's
 two stages. **The home is the crux:** under the documented
-`sudo bash scripts/bootstrap-agent-machine.sh` bootstrap's own `$HOME` is ROOT's, so
+`sudo bash `scripts/bootstrap-agent-machine.sh` (removed, #4413) bootstrap's own `$HOME` is ROOT's, so
 `$HOME/.cargo/bin` evaluated in that process is the wrong directory. The session-probed
 `scc_resolve_binary` sidesteps it by leaving `$HOME` single-quoted for the SESSION to expand; the
 in-process checks resolve the invoking account's home from the **passwd database**, keyed on a
@@ -302,7 +302,7 @@ since issue #4278 — dev/test binaries carry far less debug info than the full
 DWARF this section originally measured against, so link time is smaller than it
 was, but still uncached), so on a warm worker link time is a large slice of the
 remaining wall-clock. On Linux agent
-workers `scripts/bootstrap-agent-machine.sh` provisions the **mold** linker and
+workers `scripts/bootstrap-agent-machine.sh` (removed, #4413) provisions the **mold** linker and
 wires it through a delimited managed block in the **per-machine** `~/.cargo/config.toml`
 (honoring `$CARGO_HOME`) — it never touches the repo-committed `.cargo/config.toml`,
 so GitHub-hosted CI runners (which have no mold) stay on their defaults.
@@ -326,7 +326,7 @@ State values (Linux only):
   it per-command (as the gate's own clippy/minimal-build components do).
 - `mold=present-unconfigured` — mold on `$PATH` but **no** managed block (bootstrap
   not re-run) → the installed-but-unwired silent-degradation the token exists to
-  surface; re-run `bash scripts/bootstrap-agent-machine.sh`.
+  surface; re-run the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413).
 - `mold=absent` — mold not installed.
 
 Provisioning is **advisory** (mirrors sccache/nextest): a missing or uninstallable
@@ -376,7 +376,7 @@ stderr-silenced exec cannot hide). State values (Linux only):
   procfs → tune the HOST). `perf=unknown` — present but unparseable, never guessed.
 
 Anything but `ok` on a box you intend to measure means **re-run
-`bash scripts/bootstrap-agent-machine.sh --yes`** (installs + applies + verifies
+the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413)** (installs + applies + verifies
 `/etc/sysctl.d/99-cqlite-perf.conf`), not "perf is unavailable here". Rationale
 (`-1`, not `1`), the BPF-still-needs-sudo caveat, the single-tenant security posture
 and the `/etc/sysctl.conf` precedence trap: `docs/development/fleet-runbook.md`.
@@ -452,8 +452,8 @@ disk peak even when no new feature is compiled.
 `target/` on a **295G** disk. They do not fit. `flow-finalize` removes a finished issue's
 worktree; additionally prune stale worktrees' `target/` dirs and size the shared cache with
 `SCCACHE_CACHE_SIZE` (`50G` on the fleet boxes — derived from a measured working set, see
-`.agent-ami/profile.yaml`; persist it with
-`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, because a value only in a launcher
+`.agent-ami/profile.yaml` (removed, #4413); persist it with
+the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413), because a value only in a launcher
 profile reaches launcher-created processes alone — #3727) (previously `30G` on the
 10-core machine).
 
@@ -550,7 +550,7 @@ no arbitration. There is no admission check for `--lite` today; issue #3763 owns
 gap.
 
 **And the cost lands on the NEXT lane, not the one that spent the disk.**
-`scripts/local/worker-supervisor.sh` sets `DISK_FLOOR_GB="${DISK_FLOOR_GB:-40}"`
+`scripts/local/worker-supervisor.sh` (removed, #4413) sets `DISK_FLOOR_GB="${DISK_FLOOR_GB:-40}"`
 (`:155`) and enforces it in `preflight_reason()` (`:3204-3208`), so the incident's end
 state — 16 GB free — is **below** that floor: nothing stopped the `--lite` that spent
 the disk, but the very next worker iteration on that box would have held on `disk`.
@@ -768,7 +768,7 @@ Running many sessions/worktrees at once used to let ~15 full gates hit the CPU a
   `~/.bashrc` and invisible to every non-interactive shell (stock Ubuntu `.bashrc` returns
   early when not interactive), and no artifact said so.
 - **The remedy differs by token.** `default` = no pin line at all, so
-  `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin` (or `--yes`) persists one into
+  the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413) (or `--yes`) persists one into
   `/etc/environment`, and its `gate-pin:` line VERIFIES the result by probing a fresh
   profile-free PAM session rather than by grepping the file it wrote. `invalid`/`clamped` =
   the line is ALREADY there with a bad value, and bootstrap never rewrites an existing value,
@@ -2500,7 +2500,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   able to write these scripts are invoker-class, and a peer wanting a false PASS can simply edit
   `scripts/agent-gate.sh`, which is cheaper than forging pack data; no check inside a process
   defends against the party that controls the process. **ACCIDENTAL corruption IS in model**, and
-  its control is a periodic full-rehash sweep: `scripts/check-object-store-integrity.sh` (full
+  its control is a periodic full-rehash sweep: `scripts/check-object-store-integrity.sh` (removed, #4413) (full
   `git fsck`, never `--connectivity-only`, which does not rehash content), emitting an anchored
   four-valued `VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — run at machine onboarding
   (`bootstrap-agent-machine.sh` section 5d, where VERIFIED is the ONLY `[ok]`) and on the
@@ -2774,7 +2774,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   CORRUPT, since nothing observed damage and that remedy would send an operator to re-clone a
   healthy store — and **`unkeyed`**, the one permissive answer, announced once: no key means no
   latch was ever NAMED, the writer derives the name through the same resolver, and stopping instead
-  would make a missing `check-object-store-integrity.sh` (ordinary on any branch cut before #3749)
+  would make a missing `check-object-store-integrity.sh` (removed, #4413) (ordinary on any branch cut before #3749)
   halt every lane for want of a hygiene probe. Its residual is stated at the branch: a TRANSIENT
   resolver failure in one lane misses a peer's verdict for one iteration.
   **THE THUNDERING HERD IS CLOSED, WITH THE HAZARD ITS FIX INTRODUCES (round 5, item 2 — a Low in
@@ -3240,7 +3240,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   and `clamped` exist because `${VAR:-dflt}` cannot tell unset from set-empty (`${VAR+set}` can), so a
   mis-set variable was textually identical to a healthy defaulted box.
   **THE REMEDY DIFFERS BY TOKEN, and getting that wrong sends an operator in a circle.** A
-  `default` box has NO pin line, so `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin`
+  `default` box has NO pin line, so the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413)
   (or `--yes`) persists one. An `invalid`/`clamped` box ALREADY HAS the line, with a bad value —
   and bootstrap deliberately never rewrites an existing value (a box running >1 gate on purpose
   must not be clobbered), so re-running it is a **silent no-op**: fix the VALUE in
@@ -3395,7 +3395,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
-  PERMISSION verdict, not a missing capability): re-run `bash scripts/bootstrap-agent-machine.sh
+  PERMISSION verdict, not a missing capability): re-run `bash `scripts/bootstrap-agent-machine.sh` (removed, #4413)
   --yes`, which installs + verifies `/etc/sysctl.d/99-cqlite-perf.conf`. Self-test:
   `bash scripts/tests/test_agent_gate_summary.sh`.
 

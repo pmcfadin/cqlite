@@ -102,7 +102,7 @@ those defects live inside that binary, past any caller-side flag probe, which is
 git. `agent-notify` remains only an **optional local desktop/sound adjunct**, invoked positionally (never
 `--category`) with its webhook env neutralized so it cannot double-publish. Configure the target with
 `CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<topic>` (the fleet uses `/etc/environment`);
-`bash scripts/bootstrap-agent-machine.sh` verifies the **capability** via `gate-notify.sh --self-test` and
+the former `bootstrap-agent-machine.sh` (removed, #4413) verified the **capability** via `gate-notify.sh --self-test` and
 records the pinned contract version. Payload fidelity is pinned by
 `scripts/tests/test_gate_notify_contract.sh` (gate component `tooling-tests`), which asserts the **published
 bytes** at the transport boundary — an argv-level assertion is explicitly not evidence, since that is exactly
@@ -449,8 +449,7 @@ signature as **`CLAIM: ERROR reason=auth … (NOT retryable)`** naming the fix, 
 `reason=infra … (transient — retry)` that sent workers into a retry loop on a fault which can never
 self-clear; `reason=infra (transient — retry)` continues to mean a genuine, retryable blip. That
 classification covers `claim.sh` (`claim`/`adopt`/`release`/`smoke`) only — `claim-heartbeat.sh` surfaces
-git's raw error on its own pushes. Fix a box with `gh auth setup-git` or
-`bash scripts/bootstrap-agent-machine.sh --yes`, whose preflight checks git push credentials (configuring
+git's raw error on its own pushes. Fix a box with `gh auth setup-git` (the former `bootstrap-agent-machine.sh --yes`, removed in #4413, whose preflight checks git push credentials (configuring
 a helper **scoped to the origin host** that dereferences `$GH_TOKEN` at call time — never writing the
 token to disk; because it reads the environment it works only where `GH_TOKEN` is exported, so prefer
 `gh auth setup-git` for systemd/cron workers) and probes **board access functionally** instead of trusting
@@ -518,8 +517,9 @@ deleting a branch that carries commits). This replaces the old "no recent commit
 releases the claim (`claim.sh release <N>`, which refuses under an open PR without `--force`) and clears
 the heartbeat on cleanup.
 
-For unattended/overnight runs a **worker supervisor** (`scripts/local/worker-supervisor.sh`, issue #2090)
-recycles one worker process per issue — the hard context bound is process exit: the worker rehydrates from
+*(Historical — the worker supervisor `scripts/local/worker-supervisor.sh` was removed in #4413 with the fleet; kept for context.)*
+For unattended/overnight runs a **worker supervisor** (issue #2090)
+recycled one worker process per issue — the hard context bound is process exit: the worker rehydrates from
 the board, resumes this machine's own claim branch first (crash recovery) else claims the next Ready item,
 runs it to merged + finalized, writes a `.worker-last-iteration.json` marker, and **exits** (never a second
 issue per session). The supervisor adds a **per-LANE** single-instance lock (scoped to the lane's checkout root, so a box runs
@@ -602,7 +602,7 @@ box**.
 **AND ON A SUPERVISOR-LESS FLEET IT ANSWERED ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
 by owner ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is
 `refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and the only in-tree CALLER that creates
-or refreshes either is `worker-supervisor.sh` (`stamp` is a public subcommand and can be invoked directly). This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
+or refreshes either was `worker-supervisor.sh` (removed, #4413) (`stamp` is a public subcommand and can be invoked directly). This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
 had no subject and exited 1 — persisted or manually `stamp`ed refs can still produce rows, and either
 way **1 means "nothing was reported", never a clean bill of health.** The two *populated* namespaces
 are deliberately not read, both refusals measured: `refs/claims/issue-<N>` records the transient
@@ -881,9 +881,9 @@ same board-only rehydration rule applies to worker sessions (see the supervisor 
 
 ## Machine setup + accelerators
 
-A fresh machine that will run the pipeline should first run
-`bash scripts/bootstrap-agent-machine.sh` (details in `docs/development/agent-machine-setup.md`): it
-verifies the gate accelerators (`sccache`, `cargo-nextest`, modern bash — issue #1848), the datasets +
+*(Historical — `bootstrap-agent-machine.sh` and its setup doc were removed in #4413 with the fleet.)*
+A fresh machine that ran the pipeline first ran the bootstrap script, which
+verified the gate accelerators (`sccache`, `cargo-nextest`, modern bash — issue #1848), the datasets +
 `CQLITE_DATASETS_ROOT`, `gh` auth + the `project` scope, and roborev's local config. **roborev is invoked
 ONLY through the fail-closed wrapper `bash scripts/flow/roborev-review.sh --agent <agent> --model <model>
 [--repo <abs-path>] [--base <ref>]`** (#2964) — fleet form `--agent codex --model gpt-5.6-sol`; the Claude
