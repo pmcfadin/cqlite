@@ -651,6 +651,29 @@ jobs:
           "cqlite-cli lib/bins tests"
           -- bash scripts/ci/run-counted-tests.sh "cqlite-cli lib/bins" -- -p cqlite-cli --lib --bins
 
+      # Several of the package's UNIT tests run the `cqlite` CLI through
+      # assert_cmd's `Command::cargo_bin("cqlite")`. Cargo sets
+      # `CARGO_BIN_EXE_cqlite` only for integration tests of the package that
+      # owns the binary (cqlite-cli), so build it here and pass its path in
+      # explicitly. A stale binary in a shared target dir must never be what
+      # these tests run (#4422).
+      - name: Build the cqlite CLI binary for cqlite-integration-tests
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite CLI binary build"
+          -- cargo build -p cqlite-cli --bin cqlite
+
+      - name: Test cqlite-integration-tests lib/bins
+        # #4422: the package's lib/bin unit suite never executed before (AUDIT GAP 4).
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CARGO_BIN_EXE_cqlite: ${{ github.workspace }}/target/debug/cqlite
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite-integration-tests lib/bins tests"
+          -- bash scripts/ci/run-counted-tests.sh "cqlite-integration-tests lib/bins" -- -p cqlite-integration-tests --lib --bins
+
       - name: Test cassandra-parity
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets

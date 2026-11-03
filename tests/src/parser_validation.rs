@@ -306,21 +306,31 @@ mod vint_validation_tests {
 
     #[test]
     fn test_vint_length_parsing() {
-        // Test positive length values
+        // `parse_vint_length` decodes an UNSIGNED vint (Cassandra
+        // `VIntCoding.writeUnsignedVInt`, cassandra-5.0.8, used for lengths); it does NOT
+        // ZigZag-decode. `encode_vint` is the ZigZag (`writeVInt`) encoder, so the matching
+        // writer is `encode_vuint`.
         let lengths = vec![0usize, 1, 10, 100, 1000, 65535];
 
         for length in lengths {
-            let encoded = encode_vint(length as i64);
+            let encoded = cqlite_core::parser::vint::encode_vuint(length as u64);
             let (remaining, parsed_length) =
                 parse_vint_length(&encoded).expect("Failed to parse length");
             assert!(remaining.is_empty());
             assert_eq!(parsed_length, length);
         }
 
-        // Test that negative values are rejected for lengths
+        // An unsigned vint has no negative values; instead, lengths above the 1 GiB
+        // safety cap are rejected.
+        let oversized = cqlite_core::parser::vint::encode_vuint((1u64 << 30) + 1);
+        assert!(
+            parse_vint_length(&oversized).is_err(),
+            "Should reject lengths above MAX_VINT_LENGTH"
+        );
+        // The signed (ZigZag) variant still rejects negatives.
         let negative_encoded = encode_vint(-1);
         assert!(
-            parse_vint_length(&negative_encoded).is_err(),
+            cqlite_core::parser::vint::parse_vint_length_signed(&negative_encoded).is_err(),
             "Should reject negative lengths"
         );
     }
