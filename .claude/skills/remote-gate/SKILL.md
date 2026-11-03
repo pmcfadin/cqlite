@@ -1,7 +1,10 @@
 ---
 name: remote-gate
-description: Use when a full agent-gate.sh run should happen on a remote agent-ami worker instead of this laptop — the gate of record for a PR, a bisect, a fixture regeneration, or several branches gated in parallel. Returns only the AGENT-GATE SUMMARY block, never a log stream.
+description: RETIRED — do not use. Fleet remote-gate skill, retired 2026-11-01 with the fleet; the gate of record runs locally via scripts/flow/gate-detached.sh.
 ---
+
+> **Retired 2026-11-01 with the fleet; do not use.** The gate of record runs locally via
+> `scripts/flow/gate-detached.sh` on the dev box. Kept as history until the fleet code is removed (#4410).
 
 # remote-gate — run the gate of record on a remote worker
 
