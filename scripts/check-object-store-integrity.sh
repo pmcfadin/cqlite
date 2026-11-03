@@ -189,10 +189,11 @@
 #   scripts/check-object-store-integrity.sh [--repo <path>] [--timeout <secs>]
 #   scripts/check-object-store-integrity.sh --help
 #
-# CALLERS (both go through THIS script — a second implementation would be a second
-# place for the verdict to drift):
-#   * scripts/bootstrap-agent-machine.sh          — once, at machine onboarding
-#   * scripts/local/worker-supervisor.sh          — throttled, per-iteration
+# CALLERS: the fleet's two callers, scripts/bootstrap-agent-machine.sh (once, at machine
+# onboarding) and scripts/local/worker-supervisor.sh (throttled, per-iteration), were removed
+# with the fleet code (#4413). Scheduling this sweep on the single dev box is #4415; any new
+# caller must go through THIS script — a second implementation would be a second place for the
+# verdict to drift.
 #
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -uo pipefail
