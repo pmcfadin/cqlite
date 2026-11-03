@@ -588,8 +588,7 @@ else
 $outAuth"
 fi
 # The verdict must name the remediation, not just the fault.
-if printf '%s\n' "$outAuth" | grep -q 'gh auth setup-git' \
-   || printf '%s\n' "$outAuth" | grep -q 'bootstrap-agent-machine'; then
+if printf '%s\n' "$outAuth" | grep -q 'gh auth setup-git'; then
   ok "(a) auth verdict names the remediation"
 else
   bad "(a) auth verdict named no remediation:

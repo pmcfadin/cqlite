@@ -2,7 +2,7 @@
 # shellcheck shell=bash
 # Shared harness for the PERF PROFILING CAPABILITY suites (issue #3249):
 #   scripts/tests/test_perf_capability.sh            — the helper's own contract
-#   scripts/tests/test_perf_capability_bootstrap.sh  — the bootstrap section end-to-end
+# (the sibling bootstrap-section suite was removed with the fleet code, #4413)
 #
 # WHY A LIB. The two suites were one 1333-line file, over the ~800/~1500 campsite
 # targets and still growing a case per review round. They are split by RESPONSIBILITY
@@ -46,7 +46,6 @@ fi
 
 PERF_TEST_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_DIR=$(cd "$PERF_TEST_LIB_DIR/.." && pwd)          # scripts/tests
-BOOTSTRAP="$SCRIPT_DIR/../bootstrap-agent-machine.sh"
 PERFLIB="$SCRIPT_DIR/../perf-capability.sh"
 
 PASS=0

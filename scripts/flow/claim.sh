@@ -334,7 +334,7 @@ emit_unreadable_holder() {
 # The remediation is deliberately fixed text: git's raw stderr is NEVER echoed,
 # because a remote URL can carry an embedded token.
 emit_auth() {
-  emit "ERROR reason=auth $* (NOT retryable — git cannot authenticate to $REMOTE; fix credentials: 'gh auth setup-git' or 'bash scripts/bootstrap-agent-machine.sh --yes', then re-run)"
+  emit "ERROR reason=auth $* (NOT retryable — git cannot authenticate to $REMOTE; fix credentials: 'gh auth setup-git', then re-run)"
 }
 
 # git_stderr_is_auth <captured-stderr> — 0 iff the text carries the signature of a
@@ -1766,7 +1766,7 @@ cmd_smoke() {
     # and blaming the ref namespace sends the operator hunting the wrong thing
     # (#2942) — so name the credential fault when the stderr says so.
     if git_stderr_is_auth "$smoke_err"; then
-      emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=auth (git cannot authenticate — NOT a namespace restriction; fix with 'gh auth setup-git' or 'bash scripts/bootstrap-agent-machine.sh --yes')"
+      emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=auth (git cannot authenticate — NOT a namespace restriction; fix with 'gh auth setup-git')"
       return 1
     fi
     emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=push-rejected (does $REMOTE permit the refs/claims/* namespace?)"

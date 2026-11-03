@@ -328,11 +328,6 @@ if grep -qF 'head -1 <<<"$GL_OUT"' "$REPO_ROOT/scripts/gate-component-verdict.sh
 else
   bad "22 gate-component-verdict.sh" "the #4061 site is not the expected \`head -1 <<<\"\$GL_OUT\"\` form"
 fi
-if grep -qF 'head -4 <<<"$obj_out"' "$REPO_ROOT/scripts/bootstrap-agent-machine.sh"; then
-  ok "23 bootstrap-agent-machine.sh reads the object-store lines via a herestring"
-else
-  bad "23 bootstrap-agent-machine.sh" "the #4061 site is not the expected \`head -4 <<<\"\$obj_out\"\` form"
-fi
 
 
 # ---------------------------------------------------------------------------
