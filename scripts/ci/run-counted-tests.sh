@@ -18,8 +18,10 @@ if [ "$rc" -ne 0 ]; then
   exit "$rc"
 fi
 
-# Sum the `passed` counts over every `test result:` line (one per test binary).
-passed="$(grep -E '^test result: ok\.' "$log" | sed -E 's/.* ([0-9]+) passed.*/\1/' | awk '{s+=$1} END {print s+0}')"
+# Sum the `passed` counts over every `test result:` line (one per test binary),
+# after stripping ANSI colour codes (CARGO_TERM_COLOR=always is set in CI).
+passed="$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" |
+  awk '/^test result: ok\./ { for (i = 1; i < NF; i++) if ($(i + 1) ~ /^passed/) s += $i } END { print s + 0 }')"
 passed="${passed:-0}"
 if [ "$passed" -eq 0 ]; then
   echo "::error::${label}: ran 0 tests; an unmeasured suite is not a passing one" >&2
