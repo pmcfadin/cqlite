@@ -82,8 +82,20 @@ if [ "$action" = uninstall ]; then
 fi
 
 if [ "$action" = install ]; then
-  # Install a COPY: the root checkout may sit on an old commit or be switched,
-  # and a timer must not depend on which branch a worktree has checked out.
+  # Install a COPY of the script and pin everything a scheduled run needs, so
+  # it never depends on the installing worktree (which flow-finalize deletes)
+  # or on the systemd user manager's PATH (which usually lacks ~/.cargo/bin).
+  cargo_bin=$(command -v cargo) || { echo "PRUNE: cargo not on PATH; cannot pin it for the timer"; result ERROR; exit 1; }
+  # The main checkout outlives every linked worktree: the parent of git's common dir.
+  common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=""
+  stable_repo=${common:+$(dirname "$common")}
+  [ -n "$stable_repo" ] && [ -f "$stable_repo/Cargo.toml" ] || stable_repo=$repo
+  pin_target=${target:-${CARGO_TARGET_DIR:-}}
+  if [ -z "$pin_target" ]; then
+    pin_target=$(cd "$stable_repo" && cargo metadata --no-deps --format-version 1 2>/dev/null |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])') || pin_target=""
+  fi
+  [ -n "$pin_target" ] || { echo "PRUNE: cannot resolve the target dir to pin"; result ERROR; exit 1; }
   mkdir -p "$unit_dir" "$libexec"
   install -m 0755 "$script_dir/cargo-target-prune.sh" "$libexec/cargo-target-prune.sh"
   cat >"$unit_dir/$UNIT.service" <<EOF
@@ -94,7 +106,8 @@ Description=CQLite: prune stale incremental + workspace fingerprints in the shar
 Type=oneshot
 Nice=19
 IOSchedulingClass=idle
-ExecStart=/usr/bin/env bash $libexec/cargo-target-prune.sh --repo $repo
+Environment=PATH=$(dirname "$cargo_bin"):/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash $libexec/cargo-target-prune.sh --repo $stable_repo --target $pin_target
 EOF
   cat >"$unit_dir/$UNIT.timer" <<EOF
 [Unit]
@@ -110,7 +123,7 @@ WantedBy=timers.target
 EOF
   "$SYSTEMCTL" --user daemon-reload
   "$SYSTEMCTL" --user enable --now "$UNIT.timer"
-  echo "PRUNE: timer installed: $unit_dir/$UNIT.timer -> $libexec/cargo-target-prune.sh --repo $repo"
+  echo "PRUNE: timer installed: $unit_dir/$UNIT.timer -> $libexec/cargo-target-prune.sh --repo $stable_repo --target $pin_target"
   result INSTALLED
   exit 0
 fi

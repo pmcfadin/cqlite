@@ -96,10 +96,23 @@ check "unknown flag: exit 2" '[ "$rc" = 2 ]'
 
 # 6. timer install/uninstall into a private config/data home.
 export XDG_CONFIG_HOME="$tmp/cfg" XDG_DATA_HOME="$tmp/data"; rm -f "$tmp/systemctl.log"
-run --install-timer
+mk_target
+# The pinned repo is the MAIN checkout (parent of git's common dir), never the
+# worktree the install ran from, since flow-finalize deletes worktrees.
+stable=$(dirname "$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)")
+svc="$tmp/cfg/systemd/user/cqlite-cargo-prune.service"
+CARGO_TARGET_DIR="$T" run --install-timer
 check "install: exit 0, INSTALLED" '[ "$rc" = 0 ] && grep -q "^RESULT: INSTALLED$" <<<"$out"'
 check "install: copied script is executable" '[ -x "$tmp/data/cqlite/cargo-target-prune.sh" ]'
-check "install: service runs the copy with --repo" 'grep -q "ExecStart=/usr/bin/env bash $tmp/data/cqlite/cargo-target-prune.sh --repo $REPO_ROOT" "$tmp/cfg/systemd/user/cqlite-cargo-prune.service"'
+check "install: service pins the main checkout and the target" 'grep -qxF "ExecStart=/usr/bin/env bash $tmp/data/cqlite/cargo-target-prune.sh --repo $stable --target $T" "$svc"'
+check "install: service PATH carries cargo's dir" 'grep -qxF "Environment=PATH=$(dirname "$(command -v cargo)"):/usr/local/bin:/usr/bin:/bin" "$svc"'
+# Execute the installed command the way systemd would: empty environment plus
+# the unit's PATH. Real pgrep/systemctl run here, so inside a gate it SKIPs as
+# busy; either way it must resolve cargo and its args, never ERROR.
+unit_path=$(sed -n 's/^Environment=PATH=//p' "$svc"); exec_cmd=$(sed -n 's/^ExecStart=//p' "$svc")
+read -ra exec_argv <<<"$exec_cmd"
+out=$(env -i HOME="$HOME" PATH="$unit_path" "${exec_argv[@]}" 2>&1); rc=$?
+check "installed command runs under a minimal env (PRUNED or SKIPPED-BUSY)" '[ "$rc" = 0 ] && grep -qE "^RESULT: (PRUNED|SKIPPED-BUSY)$" <<<"$out"'
 check "install: timer is weekly and persistent" 'grep -q "^OnCalendar=Sun" "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer" && grep -q "^Persistent=true" "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer"'
 check "install: enabled the timer" 'grep -q "enable --now cqlite-cargo-prune.timer" "$tmp/systemctl.log"'
 run --uninstall-timer
