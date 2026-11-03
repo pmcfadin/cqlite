@@ -394,6 +394,17 @@ mode (both path seams mandatory, no production fallback).
 
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
+**Weekly prune of the shared target (#4411).** On the dev box every session builds into one
+`CARGO_TARGET_DIR`, and nothing deletes cache there automatically. Install the weekly user
+timer once with `bash scripts/local/cargo-target-prune.sh --install-timer`. Each run removes
+`incremental/` dirs older than 7 days and the **workspace** crates' `.fingerprint/` entries in
+every profile dir, `agent-gate-side/*` included, so workspace crates rebuild once and stale
+test binaries carrying another worktree's `CARGO_MANIFEST_DIR` (#4387) are not reused.
+Third-party dependencies stay cached. It skips with `RESULT: SKIPPED-BUSY` while any
+cargo/rustc process or `cqlite-gate-*` unit is active, and holds every profile's `.cargo-lock`
+while deleting. Run it by hand after removing a finished worktree; `--dry-run` shows what
+it would remove.
+
 **A full gate's `target/` dir is ~100–145GB per active worktree, NOT the ~25–30GB
 this section claimed until #3800.** That figure was 4–5x low and is exactly what made
 current fleet capacity look adequate. Measured, twice, on two different boxes:
