@@ -523,14 +523,23 @@ async fn test_udt_frozen_table_parsing_parity() {
     assert_eq!(values[1], Value::text("dc1".to_string()));
     assert_eq!(values[2], Value::Integer(5));
 
-    // Test 2: Triple-component clustering key (date + tinyint + tinyint)
-    let mut clustering_data = create_date_data(2022, 1, 1); // Simplified date representation
+    // Test 2: clustering key led by a `date` column. The schema-driven
+    // `SchemaParser` has no `date` decoder (parser.rs `parse_typed_value` falls
+    // to its `_` arm), so it fails CLOSED with an "Unsupported type" schema
+    // error rather than mis-decoding. This pins the fail-closed contract; the
+    // fabricated `create_date_data` bytes were never Cassandra's date format
+    // (Cassandra 5.0.8 `SimpleDateType`: unsigned 32-bit day count, epoch 2^31).
+    let mut clustering_data = create_date_data(2022, 1, 1);
     clustering_data.push(14u8); // hour
     clustering_data.push(30u8); // minute
-    let result = parser.parse_clustering_keys(&clustering_data);
-    assert!(result.is_ok());
-    let values = result.unwrap();
-    assert_eq!(values.len(), 3);
+    let err = parser
+        .parse_clustering_keys(&clustering_data)
+        .expect_err("date clustering key is unsupported by SchemaParser");
+    assert!(
+        err.to_string()
+            .contains("Unsupported type for schema-driven parsing: Date"),
+        "expected the fail-closed unsupported-type error to name Date (#4426), got {err}"
+    );
 
     // Test 3: Frozen UDT (server_info_type)
     // This would require the UDT definition to be registered first

@@ -1,90 +1,48 @@
-//! Test for query integration fix
+//! `Database::execute` write-path contract at the root package's feature set.
 //!
-//! This test validates that INSERT and SELECT operations work correctly
-//! after fixing the Value::Map deserialization issue.
+//! The root `cqlite` package builds `cqlite-core` WITHOUT `experimental`, and
+//! INSERT is gated behind that feature: it must fail closed with
+//! `Error::UnsupportedFormat` naming the feature, never silently succeed or
+//! drop the row. CREATE TABLE and an empty SELECT stay available. (#4421: this
+//! test previously expected INSERT to succeed, which no default build allows.)
 
-use cqlite_core::{Config, Database};
+use cqlite_core::{Config, Database, Error};
 use tempfile::TempDir;
 
 #[tokio::test]
-async fn test_insert_and_select_fix() {
+async fn test_insert_fails_closed_without_experimental() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let config = Config::default();
-
-    let db = Database::open(temp_dir.path(), config)
+    let db = Database::open(temp_dir.path(), Config::default())
         .await
         .expect("Failed to open database");
 
-    // Create table
     let create_result = db
         .execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
         .await
-        .expect("Failed to create table");
+        .expect("CREATE TABLE should succeed without experimental");
+    assert_eq!(create_result.rows_affected, 0);
 
-    println!(
-        "Create table result: rows_affected={}",
-        create_result.rows_affected
-    );
-
-    // Insert test data
-    let insert_result = db
+    let err = db
         .execute("INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')")
         .await
-        .expect("Failed to insert data");
+        .expect_err("INSERT must fail closed without the experimental feature");
+    match &err {
+        Error::UnsupportedFormat(msg) => assert!(
+            msg.contains("experimental"),
+            "refusal should name the experimental feature, got: {msg}"
+        ),
+        other => panic!("expected Error::UnsupportedFormat, got: {other:?}"),
+    }
 
-    println!(
-        "Insert result: rows_affected={}",
-        insert_result.rows_affected
-    );
-    assert_eq!(insert_result.rows_affected, 1, "INSERT should affect 1 row");
-
-    // Insert more test data
-    let insert_result2 = db
-        .execute("INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com')")
-        .await
-        .expect("Failed to insert second row");
-
-    println!(
-        "Insert 2 result: rows_affected={}",
-        insert_result2.rows_affected
-    );
-    assert_eq!(
-        insert_result2.rows_affected, 1,
-        "Second INSERT should affect 1 row"
-    );
-
-    // Query data - this should now work correctly
+    // Nothing was written, so a SELECT returns no rows.
     let select_result = db
         .execute("SELECT * FROM users")
         .await
-        .expect("Failed to execute SELECT");
-
-    println!(
-        "Select result: rows.len()={}, execution_time_ms={}",
-        select_result.rows.len(),
-        select_result.execution_time_ms
+        .expect("SELECT should succeed on an empty table");
+    assert!(
+        select_result.rows.is_empty(),
+        "a refused INSERT must not leave rows behind"
     );
-
-    // Debug: Print row contents
-    for (i, row) in select_result.rows.iter().enumerate() {
-        println!("Row {}: {:?}", i, row.values);
-    }
-
-    // Validate results
-    assert_eq!(select_result.rows.len(), 2, "SELECT should return 2 rows");
-
-    // Check that we have the expected columns in the results
-    for row in &select_result.rows {
-        assert!(row.values.contains_key("id"), "Row should have 'id' column");
-        assert!(
-            row.values.contains_key("name"),
-            "Row should have 'name' column"
-        );
-        assert!(
-            row.values.contains_key("email"),
-            "Row should have 'email' column"
-        );
-    }
 
     db.close().await.expect("Failed to close database");
 }

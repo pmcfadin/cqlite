@@ -381,8 +381,16 @@ async fn test_error_on_missing_schema() {
         .get_parsing_context("nonexistent_ks", "nonexistent_table")
         .await;
 
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Schema not found"));
+    // With the default `enable_auto_discovery = true`, a table that was never
+    // registered falls through to auto-discovery, which fails closed with a
+    // schema error naming the table (registry.rs `auto_discover_schema`). The
+    // "Schema not found" text is only produced when auto-discovery is disabled.
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, cqlite_core::Error::Schema(_)),
+        "expected Error::Schema, got {err:?}"
+    );
+    assert!(err.to_string().contains("nonexistent_ks.nonexistent_table"));
 }
 
 #[tokio::test]
