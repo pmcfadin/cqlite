@@ -21813,7 +21813,7 @@ run_features_load_bearing() {
 # outcomes; that nesting is BOUNDED (--only parity-report never selects
 # tooling-tests, so it cannot recurse) and the cassandra-parity build is already
 # warm from the earlier parity-report component, so it stays cheap. Also runs
-# # scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
+# scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
 # --delta-classify hook + --delta entry guards + --delta-...-emit-summary-selftest
 # to assert the test/docs-only fail-closed re-cert policy and DISTINCT delta
 # markers (hermetic — classification/emission only, never runs cargo). Also runs
