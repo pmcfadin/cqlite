@@ -651,6 +651,16 @@ jobs:
           "cqlite-cli lib/bins tests"
           -- bash scripts/ci/run-counted-tests.sh "cqlite-cli lib/bins" -- -p cqlite-cli --lib --bins
 
+      - name: Test cqlite-integration-tests lib/bins
+        # #4422: the package's lib/bin unit suite never executed before (AUDIT GAP 4).
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite-integration-tests lib/bins tests"
+          -- bash scripts/ci/run-counted-tests.sh "cqlite-integration-tests lib/bins" -- -p cqlite-integration-tests --lib --bins
+
       - name: Test cassandra-parity
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
