@@ -12,6 +12,7 @@ on:
     branches: [ main ]
     paths:
       - '.github/workflows/core-tests-ci.yml'
+      - '.github/actions/setup-rust-ci/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
