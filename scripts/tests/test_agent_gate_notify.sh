@@ -387,6 +387,88 @@ else
   bad "unresolvable-topic case (rc=$rc publishes=$(publishes "$log"))"; cat "$log"
 fi
 
+# ---------------------------------------------------------------------------
+# The CALL SITE (issue #3119 spec R1 scenario 4 / R3 scenario 3). Every case above
+# drives the extracted gate_push_signal FUNCTION, so none of them observes how the
+# gate DECIDES what to pass it. Those two scenarios are about exactly that decision,
+# so they are asserted here by extracting the call-site block from agent-gate.sh and
+# driving it in a sandbox with the surrounding gate state faked — READ-ONLY: nothing
+# in agent-gate.sh is modified, and no testability seam was added to it.
+# ---------------------------------------------------------------------------
+callsite="$tmp/callsite.sh"
+awk '/^if \[ -z "\$ONLY" \] && \[ "\$LITE" -eq 0 \] && \[ "\$DELTA" -eq 0 \] && \[ "\$SELFTEST" -eq 0 \]; then/{grab=1}
+     grab{print}
+     grab&&/^fi$/{exit}' "$GATE" > "$callsite"
+nonfailing_src=$(sed -n '/^_status_is_nonfailing() {/,/^}$/p' "$GATE")
+if ! grep -q 'gate_push_signal "\$_push_result"' "$callsite" \
+   || ! grep -q 'TREE_COMMIT_LINE' "$callsite" \
+   || ! grep -q 'SUMMARY_WRITE_FAILED' "$callsite" \
+   || [ -z "$nonfailing_src" ]; then
+  bad "could not extract the push-signal CALL SITE (or _status_is_nonfailing) from $GATE"
+else
+  # drive_callsite <overall> <summary-write-failed> <commit-line> [statuses...]
+  # Replaces gate_push_signal with a recorder so the assertion is about the
+  # ARGUMENTS THE GATE CHOSE, which is what both scenarios specify.
+  drive_callsite() {
+    local overall="$1" swf="$2" commitline="$3"; shift 3
+    ONLY="" LITE=0 DELTA=0 SELFTEST=0 \
+    OVERALL="$overall" SUMMARY_WRITE_FAILED="$swf" TREE_COMMIT_LINE="$commitline" \
+    STATUS_LIST="$*" \
+    bash -c '
+      ONLY="$ONLY"; LITE=$LITE; DELTA=$DELTA; SELFTEST=$SELFTEST
+      OVERALL="$OVERALL"; SUMMARY_WRITE_FAILED=$SUMMARY_WRITE_FAILED
+      TREE_COMMIT_LINE="$TREE_COMMIT_LINE"
+      NAMES=(); STATUSES=()
+      i=0; for st in $STATUS_LIST; do NAMES+=("c$i"); STATUSES+=("$st"); i=$((i+1)); done
+      gate_push_signal() { printf "%s|%s|%s|%s\n" "$1" "$2" "$3" "$4"; }
+      # #3625: the call site asks _status_is_nonfailing which components are non-passing
+      # (the CLOSED set — PASS and SKIP — rather than the single literal FAIL token), so
+      # that ONE definition must be in scope here. Sourced from the SHIPPED gate, never
+      # re-implemented: a copy of a closed set is a second place for it to drift, and an
+      # UNDEFINED function would silently make every component "non-passing" (127 is
+      # non-zero) and this case would then be asserting on a command-not-found.
+      eval "$2"
+      . "$1"
+    ' _ "$callsite" "$(sed -n '/^_status_is_nonfailing() {/,/^}$/p' "$GATE")" 2>/dev/null
+  }
+
+  # ---- R1 S4: the title names the identity the SUMMARY BLOCK stamped ----------
+  # A fresh emit-time `git` read would report the CURRENT checkout; the block's
+  # stamped line is the authority (#2926 review C1). Feed a commit line that could
+  # not possibly match this worktree and assert it is what comes through.
+  out=$(drive_callsite PASS 0 "commit: feedface branch: stamped-branch dirty: no" PASS PASS)
+  if [ "$out" = "PASS|stamped-branch|feedface|" ]; then
+    ok "R1 S4: push identity is taken from the SUMMARY's stamped line, not a fresh git read"
+  else
+    bad "R1 S4: expected 'PASS|stamped-branch|feedface|', got '$out'"
+  fi
+  # A malformed/absent stamp must degrade to the documented placeholders, never to a
+  # silently wrong identity.
+  out=$(drive_callsite PASS 0 "" PASS)
+  case "$out" in
+    PASS\|unknown\|unknown\|*) ok "R1 S4: an unparseable stamp degrades to 'unknown', never a guess" ;;
+    *) bad "R1 S4 placeholder: got '$out'" ;;
+  esac
+
+  # ---- R3 S3: a summary-write failure forces FAIL severity --------------------
+  # Correctness components all PASSed, but the run produced no artifact of record,
+  # so the signal must say FAIL — a green page for a run with no summary file is the
+  # inversion this whole issue exists to prevent.
+  out=$(drive_callsite PASS 1 "commit: abc1234 branch: b dirty: no" PASS PASS)
+  if [ "${out%%|*}" = FAIL ]; then
+    ok "R3 S3: SUMMARY_WRITE_FAILED forces the FAIL severity despite all-PASS components"
+  else
+    bad "R3 S3: expected FAIL severity, got '$out'"
+  fi
+  # ...and the failing-component list is still assembled from the real statuses.
+  out=$(drive_callsite FAIL 0 "commit: abc1234 branch: b dirty: no" PASS FAIL FAIL)
+  if [ "$out" = "FAIL|b|abc1234|c1,c2" ]; then
+    ok "R3 S3: the body lists exactly the FAILed components, comma-joined"
+  else
+    bad "R3 S3 components: expected 'FAIL|b|abc1234|c1,c2', got '$out'"
+  fi
+fi
+
 # ---- Case 12: structural — the function cannot alter gate state -------------
 # rc=0 in every case above is necessary but not sufficient: the function must
 # also be incapable of exiting, trapping, or rewriting the artifact of record.
