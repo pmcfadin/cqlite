@@ -1076,11 +1076,11 @@ wherever they are named. Because the wrapper's INTERNAL invocation form is the w
 call site SHALL NOT prescribe the arguments the WRAPPER passes to roborev (it may mark a direct-CLI form
 non-sanctioned; it may not specify the sanctioned one). The corrected, measured statement of which forms
 are sanctioned lives on the doctrine surfaces enumerated in the next requirement, so a later change to the
-wrapper's internal form can never leave sixteen surfaces stale. **The migrated set is SIXTEEN surfaces** — thirteen under `.claude/**`
-plus three non-`.claude` doctrine surfaces — carrying THREE different obligations, because some of them
+wrapper's internal form can never leave fifteen surfaces stale. **The migrated set is FIFTEEN surfaces** — thirteen under `.claude/**`
+plus two non-`.claude` doctrine surfaces — carrying THREE different obligations, because some of them
 contain no roborev invocation at all and an obligation to "invoke the wrapper" would be unsatisfiable
 for those. (Two further surfaces, CLAUDE.md and the published `roborev-findings` page, are covered by
-the doctrine requirement below, for eighteen surfaces referencing the wrapper in total.)
+the doctrine requirement below, for seventeen surfaces referencing the wrapper in total.)
 
 **(a) Invocation sites (9)** — surfaces whose documented procedure runs or prescribes the wrapper. Each
 SHALL express its roborev step as a call to `scripts/flow/roborev-review.sh`, SHALL pass BOTH the
@@ -1114,9 +1114,9 @@ docs-only diff cannot be roborev-certified). `.claude/agents/rust-reviewer.md` S
 require that a diff reintroducing a bare `roborev review --branch` or the two-positional range form is
 flagged as a **BLOCKER**.
 
-**(c) Non-`.claude` doctrine surfaces (3)** — the fleet-facing prose that prescribes how roborev is
-run: `website/src/content/docs/agents-developing/delivery-pipeline.md`,
-`docs/development/pm-operating-loop.md`, `docs/development/agent-machine-setup.md`. Each SHALL name the
+**(c) Non-`.claude` doctrine surfaces (2)** — the prose that prescribes how roborev is
+run: `website/src/content/docs/agents-developing/delivery-pipeline.md` and
+`docs/development/pm-operating-loop.md` (`docs/development/agent-machine-setup.md` was removed with the fleet, #4413). Each SHALL name the
 wrapper as the only sanctioned invocation with BOTH flags required, SHALL state push-first, and SHALL
 state that any non-PASS terminal `RESULT` (`NOTHING-TO-REVIEW` included) is a failed round and a blocked
 merge. These are NOT optional extras: each previously carried the INVERSE instruction — "roborev follows
@@ -1131,8 +1131,8 @@ historical so it cannot be copied as guidance. (`.claude/hooks/issue-gate.sh` is
 this set: it documents that no hook path runs roborev at all (#2671) and contains no invocation to
 migrate.)
 
-#### Scenario: All sixteen migrated surfaces route through the wrapper and none documents a bare --branch invocation
-- **WHEN** the sixteen migrated surfaces — the thirteen under `.claude/**` (`skills/flow-implement`, `agents/flow-closer`, `skills/flow-address`, `commands/worker`, `agents/flow-lead`, `skills/ci-cd-validation/SKILL.md`, `skills/ci-cd-validation/merge-process.md`, `skills/flow-activate`, `commands/manager`, `skills/flow-finalize`, `agents/rust-reviewer`, `agents/sstable-developer`, `agents/test-validator`) plus `website/src/content/docs/agents-developing/delivery-pipeline.md`, `docs/development/pm-operating-loop.md` and `docs/development/agent-machine-setup.md` — are inspected for roborev invocations
+#### Scenario: All fifteen migrated surfaces route through the wrapper and none documents a bare --branch invocation
+- **WHEN** the fifteen migrated surfaces — the thirteen under `.claude/**` (`skills/flow-implement`, `agents/flow-closer`, `skills/flow-address`, `commands/worker`, `agents/flow-lead`, `skills/ci-cd-validation/SKILL.md`, `skills/ci-cd-validation/merge-process.md`, `skills/flow-activate`, `commands/manager`, `skills/flow-finalize`, `agents/rust-reviewer`, `agents/sstable-developer`, `agents/test-validator`) plus `website/src/content/docs/agents-developing/delivery-pipeline.md` and `docs/development/pm-operating-loop.md` — are inspected for roborev invocations
 - **THEN** every one of them names `scripts/flow/roborev-review.sh` as the sanctioned invocation, each of the nine class-(a) sites expresses its roborev step as a wrapper call passing both the reviewer agent and the reviewer model, none instructs a bare `roborev review --branch` invocation or the two-positional commit-range form as sanctioned, and the bare `--branch` form is explicitly marked non-sanctioned wherever it appears
 
 #### Scenario: Each review-round site states push-first and treats any non-PASS RESULT as a failed round
@@ -1148,8 +1148,8 @@ migrate.)
 - **WHEN** `.claude/skills/flow-finalize/SKILL.md`, `.claude/agents/rust-reviewer.md`, `.claude/agents/sstable-developer.md`, and `.claude/agents/test-validator.md` are inspected
 - **THEN** each states that it never invokes roborev directly, each points at `scripts/flow/roborev-review.sh` as the only sanctioned invocation, none contradicts any of the four doctrine rules, and `.claude/agents/rust-reviewer.md` additionally requires flagging a reintroduced bare `--branch` or two-positional range form as a BLOCKER
 
-#### Scenario: The three non-.claude doctrine surfaces no longer prescribe the inverse rule
-- **GIVEN** that `website/src/content/docs/agents-developing/delivery-pipeline.md`, `docs/development/pm-operating-loop.md` and `docs/development/agent-machine-setup.md` previously instructed running roborev with the machine's configured agent and NO `--agent`/`--model` flags, with one of them calling explicit agent/model "never doctrine"
+#### Scenario: The two non-.claude doctrine surfaces no longer prescribe the inverse rule
+- **GIVEN** that `website/src/content/docs/agents-developing/delivery-pipeline.md` and `docs/development/pm-operating-loop.md` previously instructed running roborev with the machine's configured agent and NO `--agent`/`--model` flags, with one of them calling explicit agent/model "never doctrine"
 - **WHEN** they are inspected after this change
 - **THEN** none of them still carries that instruction, each names the wrapper with both flags required and push-first, and each states that any non-PASS terminal `RESULT` (`NOTHING-TO-REVIEW` included) is a failed round and a blocked merge
 
@@ -1176,7 +1176,7 @@ serve the previous page for minutes after a successful deploy.
 
 **THREE MEASURED CORRECTIONS SHALL land on EVERY surface that states the rule** — CLAUDE.md,
 `website/.../agents-developing/roborev-findings.md`, `website/.../agents-developing/delivery-pipeline.md`,
-`docs/development/pm-operating-loop.md`, `docs/development/agent-machine-setup.md` — because the earlier
+`docs/development/pm-operating-loop.md` — because the earlier
 wording FORBIDS the form now known to be correct:
 
 1. **`--repo` is what makes `--branch` correct from a worktree.** The non-sanctioned form is therefore
@@ -1253,7 +1253,7 @@ delete it as AC4 residue. The assertion is unchanged; only its criterion number 
 - **THEN** both state that the wrapper is the only sanctioned invocation, that the reviewed scope must be verified against the census range, that a "contains no code changes to review" verdict on a non-empty diff is a HARD FAIL, and that a docs-only diff cannot be roborev-certified
 
 #### Scenario: Every rule-stating surface carries the three measured corrections
-- **WHEN** CLAUDE.md, `roborev-findings.md`, `delivery-pipeline.md`, `docs/development/pm-operating-loop.md` and `docs/development/agent-machine-setup.md` are inspected
+- **WHEN** CLAUDE.md, `roborev-findings.md`, `delivery-pipeline.md` and `docs/development/pm-operating-loop.md` are inspected
 - **THEN** none of them still forbids `--branch` unconditionally (each names the non-sanctioned form as `--branch` WITHOUT an explicit `--repo`), each names the single-SHA form as a partial review, and the roborev-findings page records that roborev drops exactly the paths its configured `exclude_patterns` match rather than making a code/non-code judgement
 
 #### Scenario: No surface still claims roborev excludes non-code paths
