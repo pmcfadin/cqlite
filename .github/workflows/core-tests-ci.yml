@@ -1,0 +1,658 @@
+name: Core tests CI
+
+# REGISTERED GATING TIER (issue #4418, part of #4407; .github/ci-gating-tiers.yml).
+# The full `cqlite-core --features cli-helpers` suite against the fetched
+# datasets-v3 corpus: a lib/doc job, a nextest archive of every
+# metadata-enumerated `--test` target, three partitions, and the `Core tier gate`.
+# These jobs used to live in ci.yml behind the ci:broad label, so an ordinary PR
+# ran only `cargo test -p cqlite-core --lib` with no datasets.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/core-tests-ci.yml'
+      - '.github/actions/setup-rust-ci/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'cqlite-cli/**'
+      - 'tests/**'
+      - 'test-data/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'examples/**'
+  pull_request:
+    # The trigger MUST always fire so the `Core tier gate` context is emitted on
+    # every PR (an absent registered context is an error, never "not
+    # applicable"). Same always-fire sentinel as flight-ci.yml / ci.yml: a
+    # paths-ignore that can never match. No `branches:` filter either — a PR
+    # based on anything but main would otherwise leave `required` waiting out the
+    # full deadline. validate-workflows.rb enforces both absences.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-tests-ci-${{ github.ref }}
+  # A new head sha obsoletes the in-flight run; a LABEL mutation does not
+  # (issue #2910 round 4: applying the ci:waive:core-tests break-glass must not
+  # cancel this tier's in-flight run). gating_event_rules.rb enforces this.
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    && github.event.action != 'labeled'
+    && github.event.action != 'unlabeled' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  DATASET_TAG: datasets-v3
+  DATASET_ASSET: cassandra5-small-full-v3.6.tar.gz
+  DATASET_SHA256: a3448929ff141b6c57d2421e8f474687c52e1e4b173a0d515e36f2bb1a47729a
+
+jobs:
+  # ALWAYS-RUN classifier. EXACTLY ONE applicability output (`run_tier`), shared
+  # by every heavy job: the tier is skipped only for a genuinely docs-only diff
+  # (scripts/ci/classify-docs-only.sh — the same classifier pr-gate.yml uses),
+  # and everything else, including an empty/unreadable diff and every non-PR
+  # event, runs it (fail-closed). No label is needed.
+  classify:
+    name: Classify Core tier scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_tier: ${{ steps.scope.outputs.run_tier }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify diff
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=non-PR event (${EVENT_NAME}): full tier" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # core.quotePath=false (issue #3250): raw paths so the classifier sees
+          # real extensions. Same invocation as pr-gate.yml.
+          git -c core.quotePath=false diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          echo "Changed files:"
+          sed 's/^/  - /' changed-files.txt
+
+          # FAIL-CLOSED on an empty/ambiguous changed-file set.
+          if [ ! -s changed-files.txt ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=empty changed-file set; running the full tier fail-closed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Mandate: every diff that is NOT docs-only (see
+          # `.github/workflows/core-tests-ci.yml` in mandate_paths).
+          if bash scripts/ci/classify-docs-only.sh < changed-files.txt; then
+            echo "run_tier=false" >> "$GITHUB_OUTPUT"
+            echo "reason=docs-only diff cannot change the compiled binary" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=diff is not docs-only; running the full core tier" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Core tier verdict: $(grep -h run_tier "$GITHUB_OUTPUT" | tail -1)"
+
+  core_lib_doc_tests:
+    name: Core lib/doc tests
+    needs: classify
+    if: needs.classify.outputs.run_tier == 'true'
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Rust test jobs can sit near the standard runner's disk ceiling (issue
+      # #722). Dropping preinstalled toolchains we never use frees ~14 GB.
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup Rust
+        # Consolidated caching (issue #2649): one composite keyed on
+        # Cargo.lock+toolchain across every Rust lane. sccache below is a
+        # complementary compiler cache, not a second dependency/target cache.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - name: Restore dataset cache
+        id: dataset-cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if required fixture data missing
+        # Do NOT trust cache-hit alone (#1097): a restored cache can be partial.
+        # Keep the CI path on the shared fetch script so binary fixtures and
+        # git-tracked JSONL reference files are validated together.
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
+        # The cache/bundle carries a snapshot of test-data/datasets that predates
+        # later fixture commits; extracting it over the checkout clobbers tracked
+        # files (references.yml, committed Data.db). Committed copies must win —
+        # mirrors fetch-datasets.sh::restore_tracked_dataset_files (#2878) and
+        # coverage.yml (#2022).
+        run: git restore --source=HEAD -- test-data/datasets
+      - name: Sanity check dataset
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          # Fail loudly here rather than letting the #1080 guard panic mid-test (#1097).
+          # Capture into a var (see Fetch step) to stay pipefail-safe.
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -z "$CORE_FIXTURE" ]; then
+            echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
+            exit 1
+          fi
+          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+          if [ ! -s "$GOLDEN_JSONL" ]; then
+            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
+            exit 1
+          fi
+          echo "✅ Core fixture present: ${CORE_FIXTURE}"
+          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+          # Issue #1230: broaden the sanity check beyond the single core fixture —
+          # assert the WHOLE 39-table enforced corpus (33 nb + 6 test_oa) is
+          # present so a partial extraction or a dropped table reds CI here
+          # instead of letting the dataset-dependent lanes skip-and-pass.
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Validate environment
+        run: |
+          echo "🔧 Environment validation"
+          rustc --version
+          cargo --version
+          # Quick validation that datasets are available
+          echo "Dataset files: $(find test-data -name '*.db' | wc -l)"
+
+      - name: Validate references manifest (non-blocking)
+        run: |
+          echo "::group::References manifest validation (non-blocking)"
+          if [ -f test-data/datasets/references.yml ]; then
+            echo "✅ Found references.yml; validating presence of JSONL and Statistics refs..."
+            MISSING=0
+            while IFS= read -r -d '' DATA_FILE; do
+              DIR="$(dirname "$DATA_FILE")"
+              BASE="$(basename "$DATA_FILE")"
+              PREFIX_NAME="${BASE%-Data.db}"
+              JSONL="$DIR/${PREFIX_NAME}-Data.db.jsonl"
+              STATS="$DIR/${PREFIX_NAME}-Statistics.db.txt"
+              if [ ! -s "$JSONL" ]; then echo "::warning::Missing or empty $JSONL"; MISSING=$((MISSING+1)); fi
+              if [ ! -s "$STATS" ]; then echo "::warning::Missing or empty $STATS"; MISSING=$((MISSING+1)); fi
+            done < <(find test-data/datasets/sstables -type f -name "*-Data.db" -print0 2>/dev/null || true)
+            echo "References validation complete; missing_count=$MISSING"
+          else
+            echo "ℹ️ references.yml not found; skipping validation (expected until datasets-v3)."
+          fi
+          echo "::endgroup::"
+
+      - name: Run core lib/doc tests with timings
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Issue #1230: fail-closed on the MAIN dataset corpus — the ~70 legacy
+          # dataset-dependent tests skip on missing data; this flag makes an
+          # absent/empty fetched corpus FAIL the lane instead of false-greening.
+          # NOTE (#1995): CQLITE_REQUIRE_FIXTURES is deliberately NOT set on this
+          # general fast lane — it additionally demands Docker/corruption-corpus/
+          # byte-oracle fixtures this lane does not provision (hard-panicking the
+          # skip-clean tests). That strict enforcement lives in the provisioned
+          # nightly tiers (nightly-docker-parity, compression-corruption-parity,
+          # sstabledump-parity-gate, exhaustive-regeneration).
+          CQLITE_PARITY_REQUIRE_DATASETS: "1"
+          RUST_LOG: debug
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "core lib/doc tests"
+          -- bash scripts/ci/run-core-test-group.sh lib-doc
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI core lib/doc timing"
+
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
+  core_integration_archive:
+    name: Core integration nextest archive
+    needs: classify
+    if: needs.classify.outputs.run_tier == 'true'
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Rust test jobs can sit near the standard runner's disk ceiling (issue
+      # #722). Dropping preinstalled toolchains we never use frees ~14 GB.
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup Rust
+        # Consolidated caching (issue #2649): one composite keyed on
+        # Cargo.lock+toolchain across every Rust lane. sccache below is a
+        # complementary compiler cache, not a second dependency/target cache.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: ci
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - name: Restore dataset cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if required fixture data missing
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
+        # The cache/bundle carries a snapshot of test-data/datasets that predates
+        # later fixture commits; extracting it over the checkout clobbers tracked
+        # files (references.yml, committed Data.db). Committed copies must win —
+        # mirrors fetch-datasets.sh::restore_tracked_dataset_files (#2878) and
+        # coverage.yml (#2022).
+        run: git restore --source=HEAD -- test-data/datasets
+      - name: Sanity check dataset
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -z "$CORE_FIXTURE" ]; then
+            echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
+            exit 1
+          fi
+          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+          if [ ! -s "$GOLDEN_JSONL" ]; then
+            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
+            exit 1
+          fi
+          echo "✅ Core fixture present: ${CORE_FIXTURE}"
+          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Archive core integration tests
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_PARITY_REQUIRE_DATASETS: "1"
+          RUST_LOG: debug
+          RUST_BACKTRACE: full
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "core integration archive" -- bash <<'BASH'
+          set -euo pipefail
+          ARCHIVE_FILE="target/nextest/core-integration-tests.tar.zst"
+          # Enumerate cqlite-core integration `--test` targets from authoritative
+          # Cargo metadata (issue #2359). A feature-blind `find` archived every
+          # tests/*.rs with only `--features cli-helpers`, so a target carrying
+          # `required-features` NOT satisfiable here (the arrow-only
+          # issue_1495_arrow_accessor_parity, the work-counters+write-support
+          # issue_2302_written_index_resolve) broke the archive build. Each such
+          # target has its OWN dedicated gate executor (see cqlite-core/Cargo.toml),
+          # so we skip them here — LOUDLY, never silently — and this stays correct
+          # as new feature-gated targets land.
+          core_metadata="$(cargo metadata --no-deps --format-version 1)"
+          # Subset rule: skip a target ONLY when its required-features are not a
+          # subset of this build's transitively-enabled feature set — the closure
+          # of cqlite-core's `default` feature + `cli-helpers` (`--features` ADDS
+          # to defaults, it does not replace them) over the metadata `.features`
+          # graph, never a hand-maintained list. A target gated on an
+          # already-enabled feature (e.g. the default `write-support`) is
+          # satisfiable and stays archived.
+          enabled_features="$(printf '%s' "$core_metadata" | jq -c '
+            .packages[] | select(.name == "cqlite-core") | .features as $f
+            | def close: . as $s
+                | ([$s[], ($s[] | ($f[.] // [])[] | select(in($f)))] | unique)
+                | if length == ($s | length) then . else close end;
+            (["default", "cli-helpers"] | map(select(in($f)))) | close')"
+          echo "Archive-enabled cqlite-core feature closure: $enabled_features"
+          mapfile -t integration_tests < <(
+            printf '%s' "$core_metadata" | jq -r --argjson enabled "$enabled_features" '
+              .packages[] | select(.name == "cqlite-core") | .targets[]
+              | select(.kind[] == "test")
+              | select((((."required-features" // []) - $enabled) | length) == 0)
+              | .name' | sort
+          )
+          mapfile -t skipped_tests < <(
+            printf '%s' "$core_metadata" | jq -r --argjson enabled "$enabled_features" '
+              .packages[] | select(.name == "cqlite-core") | .targets[]
+              | select(.kind[] == "test")
+              | select((((."required-features" // []) - $enabled) | length) > 0)
+              | "\(.name) [requires: \((."required-features") | join(","))]"' | sort
+          )
+          if [ "${#integration_tests[@]}" -eq 0 ]; then
+            echo "No cqlite-core integration test targets found" >&2
+            exit 1
+          fi
+          if [ "${#skipped_tests[@]}" -gt 0 ]; then
+            echo "⚠️  Skipping ${#skipped_tests[@]} cqlite-core --test target(s) whose required-features are not a subset of this archive's enabled feature closure (default + cli-helpers); each has a dedicated gate executor:" >&2
+            for skipped in "${skipped_tests[@]}"; do
+              echo "     - $skipped" >&2
+            done
+          fi
+
+          cmd=(
+            cargo nextest archive
+            --package cqlite-core
+            --features cli-helpers
+            --archive-file "$ARCHIVE_FILE"
+          )
+          for test_name in "${integration_tests[@]}"; do
+            cmd+=(--test "$test_name")
+          done
+
+          mkdir -p "$(dirname "$ARCHIVE_FILE")"
+          "${cmd[@]}"
+          test -s "$ARCHIVE_FILE"
+          {
+            echo "### Core integration nextest archive"
+            echo
+            echo "- Archive: \`$ARCHIVE_FILE\`"
+            echo "- Target set: ${#integration_tests[@]} metadata-enumerated \`cqlite-core\` integration \`--test\` targets"
+            echo "- Skipped (required-features not satisfiable here; dedicated gate executors): ${#skipped_tests[@]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          BASH
+
+      - name: Upload core integration test archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: core-integration-nextest-archive
+          path: target/nextest/core-integration-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI core integration archive timing"
+
+  core_integration_partitions:
+    name: Core integration nextest partition ${{ matrix.partition }}/3
+    runs-on: ubuntu-latest
+    needs:
+      - classify
+      - core_integration_archive
+    if: needs.classify.outputs.run_tier == 'true'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup Rust
+        # Consolidated caching (issue #2649): one composite keyed on
+        # Cargo.lock+toolchain across every Rust lane. sccache below is a
+        # complementary compiler cache, not a second dependency/target cache.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: ci
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Download core integration test archive
+        uses: actions/download-artifact@v6
+        with:
+          name: core-integration-nextest-archive
+          path: target/nextest
+
+      - name: Restore dataset cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if required fixture data missing
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
+        # The cache/bundle carries a snapshot of test-data/datasets that predates
+        # later fixture commits; extracting it over the checkout clobbers tracked
+        # files (references.yml, committed Data.db). Committed copies must win —
+        # mirrors fetch-datasets.sh::restore_tracked_dataset_files (#2878) and
+        # coverage.yml (#2022).
+        run: git restore --source=HEAD -- test-data/datasets
+      - name: Sanity check dataset
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -z "$CORE_FIXTURE" ]; then
+            echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
+            exit 1
+          fi
+          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+          if [ ! -s "$GOLDEN_JSONL" ]; then
+            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
+            exit 1
+          fi
+          echo "✅ Core fixture present: ${CORE_FIXTURE}"
+          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Run core integration nextest partition
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_PARITY_REQUIRE_DATASETS: "1"
+          RUST_LOG: debug
+          RUST_BACKTRACE: full
+        run: |
+          set -euo pipefail
+          ARCHIVE_FILE="target/nextest/core-integration-tests.tar.zst"
+          PARTITION="count:${{ matrix.partition }}/3"
+          OUTPUT_FILE="target/nextest/partition-${{ matrix.partition }}.log"
+          test -s "$ARCHIVE_FILE"
+
+          start="$(date +%s)"
+          set +e
+          cargo nextest run \
+            --archive-file "$ARCHIVE_FILE" \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --partition "$PARTITION" \
+            --no-tests fail \
+            --no-fail-fast \
+            -E 'not test(test_legacy_format_allows_blob_fallback_with_feature)' \
+            2>&1 | tee "$OUTPUT_FILE"
+          status="${PIPESTATUS[0]}"
+          set -e
+          end="$(date +%s)"
+          duration="$((end - start))"
+
+          starting_line="$(grep -E 'Starting [0-9]+ tests?' "$OUTPUT_FILE" | tail -1 || true)"
+          summary_line="$(grep -E 'Summary .* tests? run' "$OUTPUT_FILE" | tail -1 || true)"
+
+          {
+            echo "### Core integration nextest partition ${{ matrix.partition }}/3"
+            echo
+            echo "- Partition: \`$PARTITION\`"
+            echo "- Duration: ${duration}s"
+            echo "- Status: ${status}"
+            if [ -n "$starting_line" ]; then
+              echo "- Started: \`$starting_line\`"
+            fi
+            if [ -n "$summary_line" ]; then
+              echo "- Summary: \`$summary_line\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          bash scripts/ci/ci-timing-summary.sh note \
+            "core integration partition ${{ matrix.partition }}/3" \
+            "$status" \
+            "$duration"
+
+          exit "$status"
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI core integration partition timing"
+
+  # ALWAYS-EMIT gate job; its `name:` IS the check-run context registered in
+  # .github/ci-gating-tiers.yml. `!cancelled()`, not `always()` (see flight-ci.yml
+  # for the reasoning). Skipped counts as a pass only when run_tier is exactly
+  # 'false'; an unreadable verdict reds.
+  tier-gate:
+    name: Core tier gate
+    needs: [classify, core_lib_doc_tests, core_integration_archive, core_integration_partitions]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the Core tier result
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          LIB_DOC_RESULT: ${{ needs.core_lib_doc_tests.result }}
+          ARCHIVE_RESULT: ${{ needs.core_integration_archive.result }}
+          PARTITIONS_RESULT: ${{ needs.core_integration_partitions.result }}
+          SCOPE_REASON: ${{ needs.classify.outputs.reason }}
+          RUN_TIER: ${{ needs.classify.outputs.run_tier }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Core tier gate (issue #4418)"
+            echo ""
+            echo "- scope: run_tier=\`${RUN_TIER:-unknown}\` (${SCOPE_REASON:-no reason recorded})"
+            echo "- classify: \`${CLASSIFY_RESULT}\`"
+            echo "- core_lib_doc_tests: \`${LIB_DOC_RESULT}\`"
+            echo "- core_integration_archive: \`${ARCHIVE_RESULT}\`"
+            echo "- core_integration_partitions: \`${PARTITIONS_RESULT}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `skipped` is a PASS here and only here (an inapplicable tier reports
+          # itself that way); anything else that is not `success` reds the context.
+          failed=""
+          for pair in \
+            "classify:${CLASSIFY_RESULT}" \
+            "core_lib_doc_tests:${LIB_DOC_RESULT}" \
+            "core_integration_archive:${ARCHIVE_RESULT}" \
+            "core_integration_partitions:${PARTITIONS_RESULT}"; do
+            job="${pair%%:*}"
+            result="${pair#*:}"
+            case "$result" in
+              success|skipped) ;;
+              *) failed="${failed}${job}(${result}) " ;;
+            esac
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::Core tier failed: ${failed}"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Core tier FAILED: ${failed}**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # UNKNOWN MUST NOT READ AS PASS: `skipped` is a pass only as a claim
+          # about run_tier, so the verdict is validated, not assumed.
+          case "${RUN_TIER:-}" in
+            true|false) ;;
+            *)
+              echo "::error::Core tier gate: the classifier's applicability verdict is" \
+                   "run_tier='${RUN_TIER:-}' (neither 'true' nor 'false'). An unreadable verdict is" \
+                   "NOT inapplicability — the tier reds rather than reporting a vacuous success." \
+                   "Check the classify job's 'scope' step output."
+              {
+                echo ""
+                echo "**Core tier FAILED: unreadable applicability verdict"
+                echo "\`run_tier='${RUN_TIER:-}'\` (expected \`true\` or \`false\`).**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+          # When the tier IS applicable the work must actually have run.
+          if [ "$RUN_TIER" = "true" ]; then
+            inconsistent=""
+            for pair in \
+              "classify:${CLASSIFY_RESULT}" \
+              "core_lib_doc_tests:${LIB_DOC_RESULT}" \
+              "core_integration_archive:${ARCHIVE_RESULT}" \
+              "core_integration_partitions:${PARTITIONS_RESULT}"; do
+              job="${pair%%:*}"
+              result="${pair#*:}"
+              [ "$result" = "success" ] || inconsistent="${inconsistent}${job}(${result}) "
+            done
+            if [ -n "$inconsistent" ]; then
+              echo "::error::Core tier gate: run_tier=true (${SCOPE_REASON:-no reason recorded}) but" \
+                   "${inconsistent}did not run to success. A mandating diff whose work was skipped must" \
+                   "never report a green tier."
+              {
+                echo ""
+                echo "**Core tier FAILED: run_tier=true but ${inconsistent}was not a success.**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          else
+            echo "Core tier not applicable to this diff (${SCOPE_REASON:-}); reporting success."
+          fi
+          echo "Core tier gate: PASS"

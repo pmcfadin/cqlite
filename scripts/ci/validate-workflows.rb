@@ -59,10 +59,6 @@ LEGACY_TIMEOUT_MIGRATION_EXEMPTIONS = {
     default_dependency_guard
   ],
   "ci.yml" => %w[
-    core_lib_doc_tests
-    core_integration_archive
-    core_integration_partitions
-    core_tests
     integration_tests
     write_support_tests
     delta_scan_tests
