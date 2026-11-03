@@ -557,13 +557,169 @@ jobs:
         if: always()
         run: bash scripts/ci/ci-timing-summary.sh summary "CI core integration partition timing"
 
+  # Issue #4420: unit/integration suites of the workspace members the full gate
+  # never executed (scripts/tests/workspace-test-disposition.txt). Each step runs
+  # `cargo test --no-fail-fast` and fails on any failure or on a 0-test run.
+
+  workspace_unit_tests:
+    name: Workspace unit tests
+    needs: classify
+    if: needs.classify.outputs.run_tier == 'true'
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Rust test jobs can sit near the standard runner's disk ceiling (issue
+      # #722). Dropping preinstalled toolchains we never use frees ~14 GB.
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup Rust
+        # Consolidated caching (issue #2649): one composite keyed on
+        # Cargo.lock+toolchain across every Rust lane. sccache below is a
+        # complementary compiler cache, not a second dependency/target cache.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - name: Restore dataset cache
+        id: dataset-cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if required fixture data missing
+        # Do NOT trust cache-hit alone (#1097): a restored cache can be partial.
+        # Keep the CI path on the shared fetch script so binary fixtures and
+        # git-tracked JSONL reference files are validated together.
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
+        # The cache/bundle carries a snapshot of test-data/datasets that predates
+        # later fixture commits; extracting it over the checkout clobbers tracked
+        # files (references.yml, committed Data.db). Committed copies must win —
+        # mirrors fetch-datasets.sh::restore_tracked_dataset_files (#2878) and
+        # coverage.yml (#2022).
+        run: git restore --source=HEAD -- test-data/datasets
+      - name: Sanity check dataset
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          # Fail loudly here rather than letting the #1080 guard panic mid-test (#1097).
+          # Capture into a var (see Fetch step) to stay pipefail-safe.
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -z "$CORE_FIXTURE" ]; then
+            echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
+            exit 1
+          fi
+          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+          if [ ! -s "$GOLDEN_JSONL" ]; then
+            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
+            exit 1
+          fi
+          echo "✅ Core fixture present: ${CORE_FIXTURE}"
+          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+          # Issue #1230: broaden the sanity check beyond the single core fixture —
+          # assert the WHOLE 39-table enforced corpus (33 nb + 6 test_oa) is
+          # present so a partial extraction or a dropped table reds CI here
+          # instead of letting the dataset-dependent lanes skip-and-pass.
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Test cqlite-cli lib/bins
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite-cli lib/bins tests"
+          -- bash scripts/ci/run-counted-tests.sh "cqlite-cli lib/bins" -- -p cqlite-cli --lib --bins
+
+      - name: Test cassandra-parity
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cassandra-parity tests"
+          -- bash scripts/ci/run-counted-tests.sh "cassandra-parity" -- -p cassandra-parity
+
+      - name: Test xtask
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "xtask tests"
+          -- bash scripts/ci/run-counted-tests.sh "xtask" -- -p xtask
+
+      - name: Test sstabledump-validator
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "sstabledump-validator tests"
+          -- bash scripts/ci/run-counted-tests.sh "sstabledump-validator" -- -p sstabledump-validator
+
+      - name: Test flight-loadgen
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "flight-loadgen tests"
+          -- bash scripts/ci/run-counted-tests.sh "flight-loadgen" -- -p flight-loadgen
+
+      - name: Test format-validator
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "format-validator tests"
+          -- bash scripts/ci/run-counted-tests.sh "format-validator" -- -p format-validator
+
+      - name: Test cqlite-examples
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_BACKTRACE: full
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite-examples tests"
+          -- bash scripts/ci/run-counted-tests.sh "cqlite-examples" -- -p cqlite-examples
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI workspace unit test timing"
+
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
   # ALWAYS-EMIT gate job; its `name:` IS the check-run context registered in
   # .github/ci-gating-tiers.yml. `!cancelled()`, not `always()` (see flight-ci.yml
   # for the reasoning). Skipped counts as a pass only when run_tier is exactly
   # 'false'; an unreadable verdict reds.
   tier-gate:
     name: Core tier gate
-    needs: [classify, core_lib_doc_tests, core_integration_archive, core_integration_partitions]
+    needs: [classify, core_lib_doc_tests, core_integration_archive, core_integration_partitions, workspace_unit_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -574,6 +730,7 @@ jobs:
           LIB_DOC_RESULT: ${{ needs.core_lib_doc_tests.result }}
           ARCHIVE_RESULT: ${{ needs.core_integration_archive.result }}
           PARTITIONS_RESULT: ${{ needs.core_integration_partitions.result }}
+          WORKSPACE_UNIT_RESULT: ${{ needs.workspace_unit_tests.result }}
           SCOPE_REASON: ${{ needs.classify.outputs.reason }}
           RUN_TIER: ${{ needs.classify.outputs.run_tier }}
         run: |
@@ -587,6 +744,7 @@ jobs:
             echo "- core_lib_doc_tests: \`${LIB_DOC_RESULT}\`"
             echo "- core_integration_archive: \`${ARCHIVE_RESULT}\`"
             echo "- core_integration_partitions: \`${PARTITIONS_RESULT}\`"
+            echo "- workspace_unit_tests: \`${WORKSPACE_UNIT_RESULT}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
           # `skipped` is a PASS here and only here (an inapplicable tier reports
@@ -596,7 +754,8 @@ jobs:
             "classify:${CLASSIFY_RESULT}" \
             "core_lib_doc_tests:${LIB_DOC_RESULT}" \
             "core_integration_archive:${ARCHIVE_RESULT}" \
-            "core_integration_partitions:${PARTITIONS_RESULT}"; do
+            "core_integration_partitions:${PARTITIONS_RESULT}" \
+            "workspace_unit_tests:${WORKSPACE_UNIT_RESULT}"; do
             job="${pair%%:*}"
             result="${pair#*:}"
             case "$result" in
@@ -637,7 +796,8 @@ jobs:
               "classify:${CLASSIFY_RESULT}" \
               "core_lib_doc_tests:${LIB_DOC_RESULT}" \
               "core_integration_archive:${ARCHIVE_RESULT}" \
-              "core_integration_partitions:${PARTITIONS_RESULT}"; do
+              "core_integration_partitions:${PARTITIONS_RESULT}" \
+            "workspace_unit_tests:${WORKSPACE_UNIT_RESULT}"; do
               job="${pair%%:*}"
               result="${pair#*:}"
               [ "$result" = "success" ] || inconsistent="${inconsistent}${job}(${result}) "

@@ -173,7 +173,10 @@ tiers:
       The gate job reports the aggregate of the classifier, the lib/doc job, the
       nextest-archive job and the three-way partition job, which together run the
       whole `cqlite-core --features cli-helpers` suite (lib, doc and every
-      metadata-enumerated `--test` target) against the datasets-v3 corpus. ONE
+      metadata-enumerated `--test` target) against the datasets-v3 corpus, plus
+      the `workspace_unit_tests` job (#4420), which runs the cqlite-cli lib/bin
+      units and the cassandra-parity, xtask, sstabledump-validator,
+      flight-loadgen, format-validator and cqlite-examples suites. ONE
       applicability verdict (`run_tier`) covers all of them: false ONLY for a
       docs-only diff, true for everything else, for an empty diff and for every
       non-PR event. The pr-gate `--lib` step is unchanged; deduplicating it is a
