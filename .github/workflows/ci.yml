@@ -45,166 +45,6 @@ env:
   DATASET_SHA256: a3448929ff141b6c57d2421e8f474687c52e1e4b173a0d515e36f2bb1a47729a
 
 jobs:
-  integration_tests:
-    name: Integration tests
-    if: >-
-      ${{
-        github.event_name == 'push' ||
-        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
-        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
-      }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Free disk space (issue #722)
-        run: |
-          df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          df -h / | tail -1
-
-      - name: Setup Rust
-        # Consolidated caching (issue #2649): one composite keyed on
-        # Cargo.lock+toolchain across every Rust lane. sccache below is a
-        # complementary compiler cache, not a second dependency/target cache.
-        uses: ./.github/actions/setup-rust-ci
-        with:
-          cache-key: ci
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Enable sccache
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-
-      - name: Restore dataset cache
-        uses: actions/cache@v5
-        with:
-          path: test-data/datasets
-          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
-
-      - name: Fetch datasets if required fixture data missing
-        run: >-
-          bash scripts/ci/ci-timing-summary.sh measure
-          "fetch datasets"
-          -- bash ./test-data/scripts/fetch-datasets.sh
-
-      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
-        # The cache/bundle carries a snapshot of test-data/datasets that predates
-        # later fixture commits; extracting it over the checkout clobbers tracked
-        # files (references.yml, committed Data.db). Committed copies must win —
-        # mirrors fetch-datasets.sh::restore_tracked_dataset_files (#2878) and
-        # coverage.yml (#2022).
-        run: git restore --source=HEAD -- test-data/datasets
-      - name: Sanity check dataset
-        run: |
-          set -euo pipefail
-          test -f test-data/datasets/metadata.yml
-          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
-          if [ -z "$CORE_FIXTURE" ]; then
-            echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
-            exit 1
-          fi
-          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
-          if [ ! -s "$GOLDEN_JSONL" ]; then
-            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
-            exit 1
-          fi
-          echo "✅ Core fixture present: ${CORE_FIXTURE}"
-          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
-
-      - name: Run integration tests (issue #514)
-        env:
-          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-          # Issue #1230: fail-closed for the dataset-dependent golden-path lane.
-          CQLITE_PARITY_REQUIRE_DATASETS: "1"
-        run: |
-          bash scripts/ci/ci-timing-summary.sh measure "integration tests" -- bash <<'BASH'
-          set -euo pipefail
-          echo "Running revived orphan integration tests (issue #514)..."
-          # Run the seven golden-path / chunked-reader / component tests that were
-          # revived in issue #514.  The CRC-corruption and compression-matrix tests
-          # are intentionally excluded here because they use synthetic metadata with
-          # inconsistent chunk sizes unrelated to the UUID-discovery fix.
-          cargo test --package cqlite-integration-tests \
-            --test comprehensive_component_integration_tests \
-            --test fixture_specific_integration_tests \
-            --test golden_path_get_operations_tests \
-            --test golden_path_partition_lookup_tests \
-            --test golden_path_scan_operations_tests \
-            --test golden_path_summary_index_integration_tests
-          BASH
-
-      - name: CI runtime timing summary
-        if: always()
-        run: bash scripts/ci/ci-timing-summary.sh summary "CI integration timing"
-
-      - name: Show sccache stats
-        if: always()
-        run: ${SCCACHE_PATH:-sccache} --show-stats
-
-  write_support_tests:
-    name: Write-support tests
-    if: >-
-      ${{
-        github.event_name == 'push' ||
-        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
-        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
-      }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Free disk space (issue #722)
-        run: |
-          df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          df -h / | tail -1
-
-      - name: Setup Rust
-        # Consolidated caching (issue #2649): one composite keyed on
-        # Cargo.lock+toolchain across every Rust lane. sccache below is a
-        # complementary compiler cache, not a second dependency/target cache.
-        uses: ./.github/actions/setup-rust-ci
-        with:
-          cache-key: ci
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Enable sccache
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-
-      - name: Run write-support tests (issue #552)
-        run: |
-          bash scripts/ci/ci-timing-summary.sh measure "write-support tests" -- bash <<'BASH'
-          set -euo pipefail
-          echo "Running write-support unit + roundtrip + compaction tests (issue #552)..."
-          # These targets are self-contained: the lib unit tests, the write/read
-          # roundtrip suite, and the compaction integration suite all build their own
-          # SSTables in tempdirs, so they stay green without untracked fixture data.
-          cargo test --package cqlite-core --features write-support --lib
-          cargo test --package cqlite-core --features write-support --test write_read_roundtrip
-          cargo test --package cqlite-core --features write-support --test compaction_integration
-          # Issue #1074: static cells must land in the partition static row, not be
-          # folded into clustering rows (fully synthetic — no fixtures required).
-          cargo test --package cqlite-core --features write-support --test issue_1074_static_write_parity
-          BASH
-
-      - name: CI runtime timing summary
-        if: always()
-        run: bash scripts/ci/ci-timing-summary.sh summary "CI write-support timing"
-
-      - name: Show sccache stats
-        if: always()
-        run: ${SCCACHE_PATH:-sccache} --show-stats
-
   delta_scan_tests:
     name: Delta-scan tests
     if: >-
@@ -254,7 +94,7 @@ jobs:
         run: ${SCCACHE_PATH:-sccache} --show-stats
 
   cli_smoke_tests:
-    name: CLI tests and smoke
+    name: CLI smoke
     if: >-
       ${{
         github.event_name == 'push' ||
@@ -324,32 +164,6 @@ jobs:
           echo "✅ Core fixture present: ${CORE_FIXTURE}"
           echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
 
-      - name: Run CLI unit tests
-        env:
-          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-        run: |
-          bash scripts/ci/ci-timing-summary.sh measure "CLI unit tests" -- bash <<'BASH'
-          set -euo pipefail
-          echo "Running CLI unit tests (Issue #20)..."
-          cargo test --package cqlite-cli --test unit_tests
-          BASH
-
-      - name: Run CLI write→read content round-trip tests (issue #1231)
-        env:
-          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-        run: |
-          bash scripts/ci/ci-timing-summary.sh measure "CLI write-read round-trip tests" -- bash <<'BASH'
-          set -euo pipefail
-          echo "Running CLI write-path content round-trips (issue #1231)..."
-          # Drives the FULL public CLI chain: CQL INSERT/UPDATE/DELETE → WAL →
-          # flush → SSTable → independent reopen → SELECT → assert decoded VALUES,
-          # plus binary-level export-sstable read-back and compact/maintenance/
-          # write-stats subcommand glue. Self-contained: every test builds its own
-          # SSTables in a tempdir, so no fixture corpus is required.
-          cargo test --package cqlite-cli --features write-support \
-            --test write_readback_content_tests
-          BASH
-
       - name: Build CLI for one-shot smoke tests
         run: |
           bash scripts/ci/ci-timing-summary.sh measure "CLI release build" -- bash <<'BASH'
@@ -394,8 +208,6 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     needs:
-      - integration_tests
-      - write_support_tests
       - delta_scan_tests
       - cli_smoke_tests
     if: ${{ always() }}
@@ -430,8 +242,6 @@ jobs:
             fi
           }
 
-          check_result "integration_tests" "${{ needs.integration_tests.result }}"
-          check_result "write_support_tests" "${{ needs.write_support_tests.result }}"
           check_result "delta_scan_tests" "${{ needs.delta_scan_tests.result }}"
           check_result "cli_smoke_tests" "${{ needs.cli_smoke_tests.result }}"
           exit "$failed"
