@@ -8,9 +8,9 @@
 
 use cqlite_core::{
     error::{Error, Result},
-    schema::{Column, KeyColumn, TableSchema},
+    parser::header::CassandraVersion,
     storage::sstable::compression_info::CompressionInfo,
-    types::ComparatorType,
+    storage::sstable::row_cell_state_machine::RowCellStateMachine,
 };
 
 /// Test that modern BIG v5 format does not use header heuristics
