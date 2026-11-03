@@ -21,9 +21,10 @@
 # `pr-gate-core` did not conclude `success`, so adding a PR-triggered workflow
 # without enrolling it still reds `required` — one job removed.
 #
-# Of the 26 workflows that carry a `pull_request`/`pull_request_target` trigger,
-# one is the aggregator (pr-gate.yml), two are gating tiers (flight-ci.yml and
-# core-tests-ci.yml) and the remaining 23 are exempted below.
+# Of the 27 workflows that carry a `pull_request`/`pull_request_target` trigger,
+# one is the aggregator (pr-gate.yml), three are gating tiers (flight-ci.yml,
+# core-tests-ci.yml and component-tests-ci.yml) and the remaining 23 are
+# exempted below.
 #
 # SCHEMA
 #   version:        must be 1.
@@ -182,6 +183,27 @@ tiers:
       non-PR event. The pr-gate `--lib` step is unchanged; deduplicating it is a
       later step.
 
+  # Registered by #4429 (part of #4407). Same always-emit shape as core-tests:
+  # every diff except a docs-only one runs it, no label needed.
+  - id: component-tests
+    workflow: component-tests-ci.yml
+    context: Component tier gate
+    # Each component job has a 60-minute timeout and the four run in parallel;
+    # strictly below the aggregator job's 75-minute timeout.
+    wait_minutes: 60
+    mandate_paths:
+      # Every diff that is not docs-only (classify-docs-only.sh); the workflow
+      # itself is named here so the anti-drift check has a concrete anchor.
+      - .github/workflows/component-tests-ci.yml
+    notes: >-
+      The gate job reports the aggregate of the classifier and a four-way matrix
+      that runs `scripts/agent-gate.sh --only <component>` for write-tests,
+      cli-tests, integration-tests and format-compat. CI executes the gate's own
+      component bodies, so the target lists have one source. Each job verifies
+      the corpus against the committed manifest first, exports
+      CQLITE_REQUIRE_FIXTURES=1, and reads completion and the component's own
+      verdict through gate-liveness.sh and gate-component-verdict.sh.
+
 exempt:
   - workflow: cassandra-parity.yml
     reason: >-
@@ -224,20 +246,21 @@ exempt:
   - workflow: ci.yml
     reason: >-
       Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run
-      on an unlabelled PR at all — NOT because the local agent gate is a superset of
-      it. The cqlite-core test jobs (lib/doc, nextest archive, partitions, roll-up)
-      NO LONGER LIVE HERE: #4418 moved them into the registered `core-tests` tier
-      (core-tests-ci.yml), so `required` now waits on them for every non-docs PR.
-      What remains in ci.yml is the other broad lanes (integration, write-support,
-      delta-scan, CLI smoke). The delta-scan lane's `cargo test -p cqlite-core
-      --features delta-scan --lib` pass has a merge-gating counterpart in the local
-      gate's feature-iso-delta-scan component (#3725: it EXECUTES, dropping
-      `--no-run`, and names the cqlite-core integration targets crate-level-gated on
+      on an unlabelled PR at all, NOT because the local agent gate is a superset of
+      it. The cqlite-core test jobs moved to the registered `core-tests` tier
+      (#4418), and the integration and write-support jobs and the two CLI test
+      steps moved to the registered `component-tests` tier (#4429), which runs the
+      gate's own integration-tests, write-tests and cli-tests bodies. What remains
+      here is the delta-scan lane and the CLI release build + one-shot smoke. The
+      delta-scan lane's `cargo test -p cqlite-core --features delta-scan --lib`
+      pass has a merge-gating counterpart in the local gate's
+      feature-iso-delta-scan component (#3725: it EXECUTES, dropping `--no-run`,
+      and names the cqlite-core integration targets crate-level-gated on
       `delta-scan`). KEEP THIS ENTRY AND run_feature_iso_delta_scan IN STEP, for the
       reason node-ci.yml's entry records: an exemption that defers to a local
       component is only as true as that component's scope, and narrowing one for
-      speed is a change to a merge gate. SCOPE DIFFERENCE that remains: the other
-      broad lanes are not claimed here.
+      speed is a change to a merge gate. SCOPE DIFFERENCE that remains: the
+      one-shot smoke is not claimed here.
     issue: "#2910"
     merge_gating_half:
       - kind: gate-component
