@@ -188,9 +188,11 @@ tiers:
   - id: component-tests
     workflow: component-tests-ci.yml
     context: Component tier gate
-    # Each component job has a 60-minute timeout and the four run in parallel;
-    # strictly below the aggregator job's 75-minute timeout.
-    wait_minutes: 60
+    # Critical path: classify (5-min timeout) + the parallel component jobs
+    # (45-min timeout; slowest measured cold 18m44s, cli-tests) + tier-gate (5)
+    # = 55 minutes, with 15 minutes of queueing margin; strictly below the
+    # aggregator job's 75-minute timeout.
+    wait_minutes: 70
     mandate_paths:
       # Every diff that is not docs-only (classify-docs-only.sh); the workflow
       # itself is named here so the anti-drift check has a concrete anchor.

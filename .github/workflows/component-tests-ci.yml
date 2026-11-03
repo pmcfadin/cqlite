@@ -116,7 +116,10 @@ jobs:
     needs: classify
     if: ${{ needs.classify.outputs.run_tier == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Measured cold on PR #4430: cli-tests 18m44s, write-tests 12m03s,
+    # integration-tests 7m34s, format-compat 6m05s. Classify (5) + this (45) +
+    # tier-gate (5) stays inside the registry's wait_minutes: 70.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -176,9 +179,14 @@ jobs:
           AGENT_GATE_SUMMARY_FILE: ${{ runner.temp }}/agent-gate-summary.txt
         run: |
           set -uo pipefail
+          # GitHub runs this step under `bash -e`, and `--only` exits 3 even on
+          # success (its run is PARTIAL by design), so the exit status is
+          # captured with errexit off and the verdict comes from the readers below.
+          set +e
           bash scripts/ci/ci-timing-summary.sh measure "agent-gate --only ${COMPONENT}" \
             -- bash scripts/agent-gate.sh --only "${COMPONENT}" < /dev/null
           rc=$?
+          set -e
           echo "agent-gate.sh --only ${COMPONENT} exited ${rc}"
           test -s "$AGENT_GATE_SUMMARY_FILE" || { echo "::error::no gate summary was written"; exit 1; }
           cat "$AGENT_GATE_SUMMARY_FILE"
