@@ -773,19 +773,13 @@ rm -f "$probe_marker"
 # ===========================================================================
 echo "TEST 33: the recorded pid is the SUPERVISOR's — the semantic dead-lanes actually tests"
 # ===========================================================================
-# roborev round 1 (High) was right about the mechanism: worker-supervisor.sh stamps
+# roborev round 1 (High) was right about the mechanism: worker-supervisor.sh (since removed, #4413) stamped
 # its OWN pid ($$) — "the stable per-machine anchor, not a transient worker
 # subprocess" (its own comment). So DEAD-NO-PROCESS means the LANE-OWNING process is
 # gone (the whole tmux scope died, which is what #3393's three lane deaths did), NOT
 # that some worker subprocess was killed under a live supervisor. Pinned here so the
 # documentation cannot drift from the mechanism, and so nobody "fixes" dead-lanes to
 # expect a worker pid without also changing what stamp records.
-if grep -q 'PID stamped is the SUPERVISOR' "$SCRIPT_DIR/../local/worker-supervisor.sh" \
-  && grep -qE '\$CLAIM_CMD stamp "\$lane_id" "\$\$"' "$SCRIPT_DIR/../local/worker-supervisor.sh"; then
-  ok "the supervisor stamps its OWN pid, so DEAD-NO-PROCESS means the lane-owning process is gone (semantic pinned)"
-else
-  bad "worker-supervisor.sh no longer stamps the supervisor pid alongside a lane id — dead-lanes' documented meaning must be revisited"
-fi
 if grep -q 'the SUPERVISOR' "$HB" && grep -qi 'worker-only kill' "$HB"; then
   ok "claim-heartbeat.sh documents WHOSE pid it checks and states the worker-only-kill non-coverage"
 else

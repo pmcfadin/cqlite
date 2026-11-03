@@ -35,7 +35,8 @@ MATCHER_REL="scripts/tests/lib/sigpipe-matcher.sh"
 
 # Case floor (CLAUDE.md #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. ENFORCED. May only go DOWN with a stated reason.
-CASE_FLOOR=43
+# 43 -> 42 (#4413): case 23 asserted a herestring site in bootstrap-agent-machine.sh, now removed.
+CASE_FLOOR=42
 
 pass=0; fail=0; cases=0
 ok()  { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
