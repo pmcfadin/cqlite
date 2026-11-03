@@ -137,8 +137,8 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    - `refs/claims/issue-<N>` — the **per-issue lock** (`claim.sh`, #2665). THE arbiter of who owns an issue.
    - `refs/lane-claims/<machine>/<issue>` — the **supervisor-authored LANE claim** (#2655/#2499, per-lane
      since #3393's ruling; the legacy `refs/machine-claims/<machine>` is still read only so a
-     pre-ruling ref gets drained), stamped by
-     `worker-supervisor.sh` via `claim-heartbeat.sh stamp`. It records which *machine* is busy and feeds the
+     pre-ruling ref gets drained), stamped via
+     `claim-heartbeat.sh stamp` (its former caller, `worker-supervisor.sh`, was removed in #4413). It records which *machine* is busy and feeds the
      CI reaper's `should-reap` predicate. It is **NOT** an issue lock, and its presence/absence says nothing
      about whether a given issue is claimable.
    A `refs/lane-claims/` entry read as a per-issue claim (or vice versa) produces exactly the
