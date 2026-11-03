@@ -95,7 +95,16 @@ if [ "$action" = install ]; then
     pin_target=$(cd "$stable_repo" && cargo metadata --no-deps --format-version 1 2>/dev/null |
       python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])') || pin_target=""
   fi
+  # Canonicalize: a relative path would later resolve against systemd's cwd.
+  pin_target=$( [ -n "$pin_target" ] && cd "$pin_target" 2>/dev/null && pwd -P) || pin_target=""
   [ -n "$pin_target" ] || { echo "PRUNE: cannot resolve the target dir to pin"; result ERROR; exit 1; }
+  # Fail closed rather than escape: whitespace, quotes, backslash, `$` and the
+  # systemd specifier `%` would all change how the unit's lines parse.
+  for v in "$libexec" "$stable_repo" "$pin_target" "$(dirname "$cargo_bin")"; do
+    if [[ "$v" =~ [[:space:]\"\'\\\$%] ]]; then
+      echo "PRUNE: refusing to write a unit for a path systemd would mis-parse: $v"; result ERROR; exit 1
+    fi
+  done
   mkdir -p "$unit_dir" "$libexec"
   install -m 0755 "$script_dir/cargo-target-prune.sh" "$libexec/cargo-target-prune.sh"
   cat >"$unit_dir/$UNIT.service" <<EOF

@@ -115,6 +115,15 @@ out=$(env -i HOME="$HOME" PATH="$unit_path" "${exec_argv[@]}" 2>&1); rc=$?
 check "installed command runs under a minimal env (PRUNED or SKIPPED-BUSY)" '[ "$rc" = 0 ] && grep -qE "^RESULT: (PRUNED|SKIPPED-BUSY)$" <<<"$out"'
 check "install: timer is weekly and persistent" 'grep -q "^OnCalendar=Sun" "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer" && grep -q "^Persistent=true" "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer"'
 check "install: enabled the timer" 'grep -q "enable --now cqlite-cargo-prune.timer" "$tmp/systemctl.log"'
+rel=$(realpath --relative-to="$REPO_ROOT" "$T")
+(cd "$REPO_ROOT" && CARGO_TARGET_DIR="$rel" bash "$SCRIPT" --repo "$REPO_ROOT" --install-timer >/dev/null 2>&1)
+check "install: a relative target is pinned as an absolute path" 'grep -q -- "--target $(cd "$T" && pwd -P)\$" "$svc"'
+rm -f "$svc"; mkdir -p "$tmp/sp ace/t"; : >"$tmp/sp ace/t/CACHEDIR.TAG"
+CARGO_TARGET_DIR="$tmp/sp ace/t" run --install-timer
+check "install: a target path with a space is refused, no unit written" '[ "$rc" = 1 ] && grep -q "^RESULT: ERROR$" <<<"$out" && [ ! -e "$svc" ]'
+mkdir -p "$tmp/pct%n"; : >"$tmp/pct%n/CACHEDIR.TAG"
+CARGO_TARGET_DIR="$tmp/pct%n" run --install-timer
+check "install: a target path with a systemd % specifier is refused" '[ "$rc" = 1 ] && [ ! -e "$svc" ]'
 run --uninstall-timer
 check "uninstall: units removed" '[ "$rc" = 0 ] && [ ! -e "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer" ] && [ ! -e "$tmp/cfg/systemd/user/cqlite-cargo-prune.service" ]'
 
