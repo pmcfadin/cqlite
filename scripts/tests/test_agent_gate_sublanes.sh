@@ -33,8 +33,11 @@ EXPECTED_NEW_SIDE="parity-report delivery-telemetry binding-unwind-profile smoke
 EXPECTED_EXISTING_SIDE="python-bindings node-bindings"
 # The #1699 feature-matrix lanes. Each builds cqlite-core (or cqlite-flight against it) at a
 # feature set that DIVERGES from MAIN's cli-helpers set, which is precisely the shared-target
-# thrash shape #2657 documents — so all four belong on SIDE, each in its own CARGO_TARGET_DIR.
-EXPECTED_FEATURE_MATRIX_SIDE="flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan"
+# thrash shape #2657 documents — so all six belong on SIDE, each in its own CARGO_TARGET_DIR.
+# issue #4237 (owner Seam-1 ruling 2026-09-23: slim gate wiring) adds feature-iso-vortex
+# (mirrors feature-iso-parquet's compile-only form) and vortex-parquet-differential (the ONLY
+# component enabling parquet AND vortex together), the same class-(a) rationale.
+EXPECTED_FEATURE_MATRIX_SIDE="flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan feature-iso-vortex vortex-parquet-differential"
 # The #3522 binding-side Rust lane. SIDE for the SAME class-(a) reason, and the decision
 # rests on the lane's own build properties rather than on where the classifier happened to
 # put it: it compiles TWO packages whose cqlite-core feature resolutions BOTH diverge from
@@ -154,7 +157,7 @@ expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE 
 # issues, because that is the part a reader needs and the part arithmetic cannot express.
 n_expected_side=$(printf '%s\n' $expected_side_sorted | grep -c .)
 if [ "$side_sorted" = "$expected_side_sorted" ]; then
-  ok "SIDE lane is exactly the $n_expected_side expected isolatable components (2 #1737 bindings + 5 #2657 isolatable + 4 #1699 feature-matrix lanes + 1 #3522 binding-side Rust lane + 1 #3453 all-features lane; tooling-tests excluded)"
+  ok "SIDE lane is exactly the $n_expected_side expected isolatable components (2 #1737 bindings + 5 #2657 isolatable + 6 #1699 feature-matrix lanes + 1 #3522 binding-side Rust lane + 1 #3453 all-features lane; tooling-tests excluded)"
 else
   bad "SIDE lane membership drifted:
 --- got ---

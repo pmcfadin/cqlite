@@ -105,6 +105,17 @@ pub async fn execute_query(
             ParquetWriter::write(&result, config)
                 .map_err(|e| anyhow::anyhow!("Failed to format Parquet output: {}", e))?
         }
+        OutputFormat::Vortex => {
+            // Issue #4237: Vortex is wired as a streaming FILE writer on `cqlite export`
+            // (mirroring `create_streaming_parquet_writer`), not as a batch `Vec<u8>`
+            // writer here — `query --out` writes to stdout by default,
+            // and Vortex is a binary file format like Parquet, so route users to the
+            // actual writer surface rather than silently producing bytes nobody asked
+            // for a second time.
+            return Err(anyhow::anyhow!(
+                "Vortex format is not supported for `cqlite query --out`. Use `cqlite export --format vortex --out <file>` instead."
+            ));
+        }
     };
 
     // Write to target (stdout or file)
@@ -426,6 +437,9 @@ pub async fn execute_select_query(
         OutputFormat::Csv => result.display_csv()?,
         OutputFormat::Parquet => {
             return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
+        }
+        OutputFormat::Vortex => {
+            return Err(anyhow::anyhow!("Vortex format is not supported for this command. Use --out json or --out csv instead."));
         }
     }
 
