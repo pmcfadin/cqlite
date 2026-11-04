@@ -1,16 +1,22 @@
-name: Pin git to the dev box's Ubuntu noble 2.43
+name: Dev-box parity for the tooling-tests suites
 description: >-
-  Replace the runner image's git-core PPA git (2.5x) with the Ubuntu noble
-  archive's 2.43, the git the local gate of record runs under, and fail if the
-  installed git is not 2.43.x afterwards.
+  Give a GitHub runner the two dev-box properties the tooling-tests self-tests
+  depend on: the Ubuntu noble archive's git 2.43 (not the image's git-core PPA
+  2.5x), and a writable /data/lanes lane root. Fails if either did not take.
 
-# Why (#4437): several tooling-tests self-tests pin git's own exit statuses. On
+# Why git (#4437): several tooling-tests self-tests pin git's own exit statuses. On
 # git 2.56 a truncated multi-pack-index makes `git fsck` exit 1 (ERROR_OBJECT)
 # where 2.43 exits 32 (ERROR_MULTI_PACK_INDEX), which reds
 # scripts/tests/test_check_object_store_integrity.sh on a stock runner while it
 # passes on the dev box. Run this step after checkout and before the gate, on a
 # job pinned to `runs-on: ubuntu-24.04`: the 2.43 package exists only in the
 # noble archive, so a moving `ubuntu-latest` would eventually lose it.
+#
+# Why /data/lanes (#4437): the dev box's lanes live under /data/lanes, and the
+# lane-lock pre-commit hook keys on /data/lanes/lane-<N>, so
+# scripts/tests/test_lane_lock_precommit_hook.sh builds its fixtures there on
+# purpose ("THE LANE PATH IS PART OF THE CONTRACT"). A runner has no /data, so
+# the suite died on `mkdir: cannot create directory '/data'`.
 
 runs:
   using: composite
@@ -38,3 +44,13 @@ runs:
           exit 1
         fi
         echo "pinned git: $(git --version)"
+
+    - name: Provision a writable /data/lanes
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo mkdir -p /data/lanes
+        sudo chown "$(id -u):$(id -g)" /data/lanes
+        probe=$(mktemp -d /data/lanes/.probe.XXXXXX)
+        rmdir "$probe"
+        echo "lane root: $(ls -ld /data/lanes)"

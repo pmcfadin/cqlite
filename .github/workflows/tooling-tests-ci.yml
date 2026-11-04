@@ -24,7 +24,7 @@ on:
     paths:
       - '.github/workflows/tooling-tests-ci.yml'
       - '.github/actions/setup-rust-ci/**'
-      - '.github/actions/pin-dev-box-git/**'
+      - '.github/actions/dev-box-parity/**'
       - 'scripts/**'
   pull_request:
     # The trigger MUST always fire so the `Tooling tier gate` context is
@@ -148,7 +148,7 @@ jobs:
     name: Gate component tooling-tests
     needs: classify
     if: ${{ needs.classify.outputs.run_tier == 'true' }}
-    # Pinned, not ubuntu-latest: the pin-dev-box-git action installs the noble
+    # Pinned, not ubuntu-latest: the dev-box-parity action installs the noble
     # archive's git 2.43, which a later image's apt sources would not carry.
     runs-on: ubuntu-24.04
     # The nightly gate.yml measured tooling-tests at 2348s on ubuntu-latest.
@@ -174,9 +174,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           df -h / | tail -1
 
-      # The gate of record runs under the dev box's noble git 2.43 (#4437).
-      - name: Pin git to the dev box's 2.43
-        uses: ./.github/actions/pin-dev-box-git
+      # The gate of record runs on the dev box: noble git 2.43 and /data/lanes (#4437).
+      - name: Dev-box parity (git 2.43, /data/lanes)
+        uses: ./.github/actions/dev-box-parity
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
