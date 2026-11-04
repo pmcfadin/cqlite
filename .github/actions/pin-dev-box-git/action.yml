@@ -8,7 +8,9 @@ description: >-
 # git 2.56 a truncated multi-pack-index makes `git fsck` exit 1 (ERROR_OBJECT)
 # where 2.43 exits 32 (ERROR_MULTI_PACK_INDEX), which reds
 # scripts/tests/test_check_object_store_integrity.sh on a stock runner while it
-# passes on the dev box. Run this step after checkout and before the gate.
+# passes on the dev box. Run this step after checkout and before the gate, on a
+# job pinned to `runs-on: ubuntu-24.04`: the 2.43 package exists only in the
+# noble archive, so a moving `ubuntu-latest` would eventually lose it.
 
 runs:
   using: composite
@@ -18,6 +20,11 @@ runs:
       run: |
         set -euo pipefail
         echo "runner image git: $(git --version)"
+        codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+        if [ "$codename" != noble ]; then
+          echo "::error::runner is '${codename:-unknown}', not Ubuntu noble; pin the job to runs-on: ubuntu-24.04"
+          exit 1
+        fi
         sudo apt-get update -qq
         ver=$(apt-cache madison git | awk '$3 ~ /^1:2\.43\./ {print $3; exit}')
         if [ -z "$ver" ]; then

@@ -23,6 +23,7 @@ on:
     paths:
       - '.github/workflows/tooling-tests-ci.yml'
       - '.github/actions/setup-rust-ci/**'
+      - '.github/actions/pin-dev-box-git/**'
       - 'scripts/**'
   pull_request:
     # The trigger MUST always fire so the `Tooling tier gate` context is
@@ -135,7 +136,9 @@ jobs:
     name: Gate component tooling-tests
     needs: classify
     if: ${{ needs.classify.outputs.run_tier == 'true' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the pin-dev-box-git action installs the noble
+    # archive's git 2.43, which a later image's apt sources would not carry.
+    runs-on: ubuntu-24.04
     # The nightly gate.yml measured tooling-tests at 2348s on ubuntu-latest.
     # Classify (5) + this (55) + tier-gate (5) stays inside the registry's
     # wait_minutes: 70.
