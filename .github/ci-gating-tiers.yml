@@ -21,10 +21,10 @@
 # `pr-gate-core` did not conclude `success`, so adding a PR-triggered workflow
 # without enrolling it still reds `required` — one job removed.
 #
-# Of the 28 workflows that carry a `pull_request`/`pull_request_target` trigger,
-# one is the aggregator (pr-gate.yml), four are gating tiers (flight-ci.yml,
-# core-tests-ci.yml, component-tests-ci.yml and bindings-tests-ci.yml) and the
-# remaining 23 are exempted below.
+# Of the 29 workflows that carry a `pull_request`/`pull_request_target` trigger,
+# one is the aggregator (pr-gate.yml), five are gating tiers (flight-ci.yml,
+# core-tests-ci.yml, component-tests-ci.yml, bindings-tests-ci.yml and
+# gate-lanes-ci.yml) and the remaining 23 are exempted below.
 #
 # SCHEMA
 #   version:        must be 1.
@@ -224,6 +224,29 @@ tiers:
       and Node 20 provisioned. A component that SKIPs (missing toolchain) is
       NOT-PASS under gate-component-verdict.sh, so the tier reds.
 
+  # Registered by #4433 (part of #4407). Same always-emit shape and the same
+  # `agent-gate.sh --only` mechanism as component-tests, grouped four ways.
+  - id: gate-lanes
+    workflow: gate-lanes-ci.yml
+    context: Gate lanes tier gate
+    # Critical path: classify (5) + the parallel group jobs (45-min timeout) +
+    # tier-gate (5) = 55 minutes; strictly below the aggregator job's 75.
+    wait_minutes: 70
+    mandate_paths:
+      - .github/workflows/gate-lanes-ci.yml
+    notes: >-
+      The gate job reports the aggregate of the classifier and a four-group
+      matrix, each running `scripts/agent-gate.sh --only <list>` and requiring
+      every listed component's own line to read PASS. lint: file-size, clippy,
+      roborev-lints, pub-surface, features-load-bearing, oom-audit,
+      parity-report, kit-dashboard-drift, binding-unwind-profile,
+      operator-metrics-doc. guards: tombstones-scan, scan-offload-guard,
+      work-counters-guard, byte-budget-guard, arrow-parity-guard, memory-budget,
+      bti-multiclustering, compaction-byte-parity, flight-query-semantics-oracle.
+      features: legacy-heuristics, feature-iso-parquet, feature-iso-delta-scan,
+      minimal-build. smoke: smoke. NOT here: tooling-tests (#4433), the advisory
+      dep-duplicates, and the retired delivery-telemetry.
+
 exempt:
   - workflow: cassandra-parity.yml
     reason: >-
@@ -251,6 +274,8 @@ exempt:
 
   - workflow: ci-minimal-features.yml
     reason: >-
+      Since #4433 the minimal-build component named below also runs on every non-docs
+      PR in the registered `gate-lanes` tier (gate-lanes-ci.yml).
       Feature-matrix build lane. The local gate's minimal-build component runs
       `cargo build -p cqlite-core --no-default-features --features all-compression`
       plus `cargo test … --lib --no-run` under RUSTFLAGS=-D warnings, which is the
@@ -265,6 +290,8 @@ exempt:
 
   - workflow: ci.yml
     reason: >-
+      Since #4433 the feature-iso-delta-scan component named below also runs on every non-docs
+      PR in the registered `gate-lanes` tier (gate-lanes-ci.yml).
       Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run
       on an unlabelled PR at all, NOT because the local agent gate is a superset of
       it. The cqlite-core test jobs moved to the registered `core-tests` tier
@@ -288,6 +315,8 @@ exempt:
 
   - workflow: compaction-parity.yml
     reason: >-
+      Since #4433 the compaction-byte-parity component named below also runs on every non-docs
+      PR in the registered `gate-lanes` tier (gate-lanes-ci.yml).
       Byte-parity lane whose merge-gating half is the local gate's
       compaction-byte-parity component.
     issue: "#2910"
@@ -582,7 +611,10 @@ exempt:
         component: python-bindings
 
   - workflow: smoke-tests.yml
-    reason: Dataset smoke lane; the merge-gating half is the local gate's smoke component.
+    reason: >-
+      Dataset smoke lane; the merge-gating half is the local gate's smoke
+      component, which since #4433 also runs on every non-docs PR in the
+      registered `gate-lanes` tier (gate-lanes-ci.yml).
     issue: "#2910"
     merge_gating_half:
       - kind: gate-component
