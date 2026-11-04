@@ -156,6 +156,11 @@ jobs:
       # rust-toolchain.toml (1.97.1) via the @1.97.1 ref so the nightly deep
       # gate matches how the gate runs locally instead of tracking latest
       # stable (issue #1990; dtolnay/rust-toolchain cannot read the pin file).
+      # The local gate of record runs under the dev box's noble git 2.43; the
+      # runner image's newer git changes fsck exit statuses tooling-tests pins (#4437).
+      - name: Pin git to the dev box's 2.43
+        uses: ./.github/actions/pin-dev-box-git
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
         with:

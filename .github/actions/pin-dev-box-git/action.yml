@@ -1,0 +1,33 @@
+name: Pin git to the dev box's Ubuntu noble 2.43
+description: >-
+  Replace the runner image's git-core PPA git (2.5x) with the Ubuntu noble
+  archive's 2.43, the git the local gate of record runs under, and fail if the
+  installed git is not 2.43.x afterwards.
+
+# Why (#4437): several tooling-tests self-tests pin git's own exit statuses. On
+# git 2.56 a truncated multi-pack-index makes `git fsck` exit 1 (ERROR_OBJECT)
+# where 2.43 exits 32 (ERROR_MULTI_PACK_INDEX), which reds
+# scripts/tests/test_check_object_store_integrity.sh on a stock runner while it
+# passes on the dev box. Run this step after checkout and before the gate.
+
+runs:
+  using: composite
+  steps:
+    - name: Install noble git 2.43
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "runner image git: $(git --version)"
+        sudo apt-get update -qq
+        ver=$(apt-cache madison git | awk '$3 ~ /^1:2\.43\./ {print $3; exit}')
+        if [ -z "$ver" ]; then
+          echo "::error::no 2.43 git in the apt archive"
+          apt-cache madison git
+          exit 1
+        fi
+        sudo apt-get install -y -qq --allow-downgrades "git=${ver}" "git-man=${ver}"
+        if ! git --version | grep -q '^git version 2\.43\.'; then
+          echo "::error::git is '$(git --version)' after the pin, wanted 2.43.x"
+          exit 1
+        fi
+        echo "pinned git: $(git --version)"

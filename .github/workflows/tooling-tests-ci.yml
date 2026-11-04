@@ -159,6 +159,10 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           df -h / | tail -1
 
+      # The gate of record runs under the dev box's noble git 2.43 (#4437).
+      - name: Pin git to the dev box's 2.43
+        uses: ./.github/actions/pin-dev-box-git
+
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
         with:
