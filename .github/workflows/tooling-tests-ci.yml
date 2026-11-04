@@ -260,6 +260,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # The component's own log, on failure: the step above prints only its last
+      # 40 lines, which carry a suite's tally but not which assertion failed.
+      - name: Locate the gate log directory
+        if: failure()
+        id: gatelogs
+        env:
+          AGENT_GATE_SUMMARY_FILE: ${{ runner.temp }}/agent-gate-summary.txt
+        run: |
+          dir=$(sed -n 's/^logs: //p' "$AGENT_GATE_SUMMARY_FILE" 2>/dev/null | head -1)
+          echo "dir=${dir}" >> "$GITHUB_OUTPUT"
+          echo "gate log directory: ${dir:-<none recorded>}"
+
+      - name: Upload the tooling-tests log
+        if: failure() && steps.gatelogs.outputs.dir != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: tooling-tests-log
+          path: ${{ steps.gatelogs.outputs.dir }}/tooling-tests.log
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: CI runtime timing summary
         if: always()
         run: bash scripts/ci/ci-timing-summary.sh summary "CI gate component timing"
