@@ -1,0 +1,333 @@
+name: Tooling tests CI
+
+# REGISTERED GATING TIER (issue #4437, part of #4407; .github/ci-gating-tiers.yml).
+# Runs the local full gate's tooling-tests component (the ~80 shell self-tests
+# for the delivery harness and the gate itself) on every PR whose diff the
+# gate's own #4266 scope marks RUN. The job calls
+# `scripts/agent-gate.sh --only tooling-tests`, so CI executes the gate's own
+# component body and the suite list has exactly one source.
+#
+# Scope follows the LOCAL FULL GATE, not the docs-only classifier: `docs/*` is in
+# the declared tooling-scope set (scripts/lib/tooling-tests-scope.sh), so a
+# docs-only diff runs this tier. The verdict is RUN when EITHER the head's or the
+# base's scope lib classifies the changed paths as in scope, so a PR cannot
+# narrow the declared set and scope itself out in the same diff.
+#
+# `--only` demotes its terminal token to PARTIAL, so the job reads completion
+# (scripts/gate-liveness.sh) and the component's own verdict
+# (scripts/gate-component-verdict.sh) as two separate assertions.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/tooling-tests-ci.yml'
+      - '.github/actions/setup-rust-ci/**'
+      - 'scripts/**'
+  pull_request:
+    # The trigger MUST always fire so the `Tooling tier gate` context is
+    # emitted on every PR (an absent registered context is an error, never "not
+    # applicable"). Same always-fire sentinel and no `branches:` filter as
+    # flight-ci.yml / core-tests-ci.yml; validate-workflows.rb enforces both.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tooling-tests-ci-${{ github.ref }}
+  # A new head sha obsoletes the in-flight run; a LABEL mutation does not
+  # (applying the ci:waive:tooling-tests break-glass must not cancel this
+  # tier's in-flight run). gating_event_rules.rb enforces this.
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    && github.event.action != 'labeled'
+    && github.event.action != 'unlabeled' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  DATASET_TAG: datasets-v3
+  DATASET_ASSET: cassandra5-small-full-v3.6.tar.gz
+  DATASET_SHA256: a3448929ff141b6c57d2421e8f474687c52e1e4b173a0d515e36f2bb1a47729a
+
+jobs:
+  # ALWAYS-RUN classifier with EXACTLY ONE applicability output (`run_tier`),
+  # decided by the gate's own #4266 tooling-tests scope (see the header). An
+  # empty diff, an unreadable scope lib and every non-PR event run the tier.
+  classify:
+    name: Classify Tooling tier scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_tier: ${{ steps.scope.outputs.run_tier }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify diff
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=non-PR event (${EVENT_NAME}): full tier" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # core.quotePath=false (issue #3250): raw paths so the classifier sees
+          # real names. Same invocation as pr-gate.yml.
+          git -c core.quotePath=false diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          echo "Changed files:"
+          sed 's/^/  - /' changed-files.txt
+
+          if [ ! -s changed-files.txt ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=empty changed-file set; running the tier fail-closed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # classify <lib>: the scope lib's own pure classifier over the changed
+          # paths, printing RUN, SKIP or UNREADABLE (a lib that fails to source
+          # or emits no verdict line). Only an explicit SKIP can skip the tier.
+          classify() {
+            local out verdict
+            if ! out=$(bash -c '. "$1" && _tooling_tests_classify_stdin' _ "$1" < changed-files.txt 2>&1); then
+              printf '%s\n' "$out" | sed 's/^/    /' >&2
+              echo UNREADABLE
+              return 0
+            fi
+            printf '%s\n' "$out" | sed 's/^/    /' >&2
+            verdict=$(printf '%s\n' "$out" | sed -n 's/^VERDICT: \(RUN\|SKIP\)$/\1/p' | tail -1)
+            echo "${verdict:-UNREADABLE}"
+          }
+
+          base_verdict=UNREADABLE
+          base_lib="${RUNNER_TEMP}/tooling-tests-scope.base.sh"
+          if git show "${BASE_SHA}:scripts/lib/tooling-tests-scope.sh" > "$base_lib" 2>/dev/null; then
+            echo "Base scope lib (${BASE_SHA}):"
+            base_verdict=$(classify "$base_lib")
+          fi
+          echo "Head scope lib (${HEAD_SHA}):"
+          head_verdict=$(classify scripts/lib/tooling-tests-scope.sh)
+          echo "base=${base_verdict} head=${head_verdict}"
+
+          if [ "$base_verdict" = SKIP ] && [ "$head_verdict" = SKIP ]; then
+            echo "run_tier=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no harness path in the diff under the base or head tooling-tests scope (#4266); the nightly gate.yml covers drift" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=tooling-tests scope base=${base_verdict} head=${head_verdict}; RUN unless both read SKIP" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Tooling tier verdict: $(grep -h run_tier "$GITHUB_OUTPUT" | tail -1)"
+
+  gate_component:
+    name: Gate component tooling-tests
+    needs: classify
+    if: ${{ needs.classify.outputs.run_tier == 'true' }}
+    runs-on: ubuntu-latest
+    # The nightly gate.yml measured tooling-tests at 2348s on ubuntu-latest.
+    # Classify (5) + this (55) + tier-gate (5) stays inside the registry's
+    # wait_minutes: 70.
+    timeout-minutes: 55
+    env:
+      # Same build posture as the nightly full gate (gate.yml), whose
+      # unconditional lane runs tooling-tests on ubuntu-latest.
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # agent-gate.sh resolves origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: tooling-tests
+
+      # Same toolchain set the nightly gate.yml measured tooling-tests under.
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore dataset cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if required fixture data missing
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
+        # The cache/bundle predates later fixture commits; committed copies must
+        # win (fetch-datasets.sh::restore_tracked_dataset_files, #2878).
+        run: git restore --source=HEAD -- test-data/datasets
+
+      - name: Verify dataset corpus
+        # `--only` keeps the gate's fixture preflight lenient, so the corpus is
+        # verified here, before the run, against the committed manifest.
+        run: bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Run the gate component
+        env:
+          COMPONENT: tooling-tests
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_REQUIRE_FIXTURES: '1'
+          CQLITE_PARITY_REQUIRE_DATASETS: '1'
+          AGENT_GATE_SUMMARY_FILE: ${{ runner.temp }}/agent-gate-summary.txt
+        run: |
+          set -uo pipefail
+          # GitHub runs this step under `bash -e`, and `--only` exits 3 even on
+          # success (its run is PARTIAL by design), so the exit status is
+          # captured with errexit off and the verdict comes from the readers below.
+          set +e
+          bash scripts/ci/ci-timing-summary.sh measure "agent-gate --only ${COMPONENT}" \
+            -- bash scripts/agent-gate.sh --only "${COMPONENT}" < /dev/null
+          rc=$?
+          set -e
+          echo "agent-gate.sh --only ${COMPONENT} exited ${rc}"
+          test -s "$AGENT_GATE_SUMMARY_FILE" || { echo "::error::no gate summary was written"; exit 1; }
+          cat "$AGENT_GATE_SUMMARY_FILE"
+
+          # Two separate assertions (docs/development/gate-ops.md): did the run
+          # finish, and did THIS component's own line read PASS. The run-id comes
+          # from the only block in a file this job alone wrote.
+          run_id=$(sed -n 's/^run-id: //p' "$AGENT_GATE_SUMMARY_FILE" | head -1)
+          [ -n "$run_id" ] || { echo "::error::the gate summary carries no run-id"; exit 1; }
+          bash scripts/gate-liveness.sh "$AGENT_GATE_SUMMARY_FILE" --run-id "$run_id" ||
+            { echo "::error::gate run did not complete (gate-liveness.sh)"; exit 1; }
+          bash scripts/gate-component-verdict.sh "$AGENT_GATE_SUMMARY_FILE" \
+            --mode only --component "${COMPONENT}" --run-id "$run_id" ||
+            { echo "::error::${COMPONENT} did not PASS (gate-component-verdict.sh)"; exit 1; }
+          echo "${COMPONENT}: PASS"
+
+      - name: Upload gate summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: agent-gate-summary-tooling-tests
+          path: ${{ runner.temp }}/agent-gate-summary.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI gate component timing"
+
+  # ALWAYS-EMIT gate job; its `name:` IS the check-run context registered in
+  # .github/ci-gating-tiers.yml. `!cancelled()`, not `always()` (see
+  # flight-ci.yml). Skipped counts as a pass only when run_tier is exactly
+  # 'false'; an unreadable verdict reds.
+  tier-gate:
+    name: Tooling tier gate
+    needs: [classify, gate_component]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the Tooling tier result
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          COMPONENTS_RESULT: ${{ needs.gate_component.result }}
+          SCOPE_REASON: ${{ needs.classify.outputs.reason }}
+          RUN_TIER: ${{ needs.classify.outputs.run_tier }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Tooling tier gate (issue #4437)"
+            echo ""
+            echo "- scope: run_tier=\`${RUN_TIER:-unknown}\` (${SCOPE_REASON:-no reason recorded})"
+            echo "- classify: \`${CLASSIFY_RESULT}\`"
+            echo "- gate_component (tooling-tests): \`${COMPONENTS_RESULT}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `skipped` is a PASS here and only here; anything else that is not
+          # `success` reds the context.
+          failed=""
+          for pair in "classify:${CLASSIFY_RESULT}" "gate_component:${COMPONENTS_RESULT}"; do
+            job="${pair%%:*}"
+            result="${pair#*:}"
+            case "$result" in
+              success|skipped) ;;
+              *) failed="${failed}${job}(${result}) " ;;
+            esac
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::Tooling tier failed: ${failed}"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Tooling tier FAILED: ${failed}**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # UNKNOWN MUST NOT READ AS PASS: `skipped` is a pass only as a claim
+          # about run_tier, so the verdict is validated, not assumed.
+          case "${RUN_TIER:-}" in
+            true|false) ;;
+            *)
+              echo "::error::Tooling tier gate: the classifier's applicability verdict is" \
+                   "run_tier='${RUN_TIER:-}' (neither 'true' nor 'false'). An unreadable verdict is" \
+                   "NOT inapplicability; the tier reds rather than reporting a vacuous success."
+              {
+                echo ""
+                echo "**Tooling tier FAILED: unreadable applicability verdict"
+                echo "\`run_tier='${RUN_TIER:-}'\` (expected \`true\` or \`false\`).**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+          # When the tier IS applicable the work must actually have run.
+          if [ "$RUN_TIER" = "true" ]; then
+            inconsistent=""
+            for pair in "classify:${CLASSIFY_RESULT}" "gate_component:${COMPONENTS_RESULT}"; do
+              job="${pair%%:*}"
+              result="${pair#*:}"
+              [ "$result" = "success" ] || inconsistent="${inconsistent}${job}(${result}) "
+            done
+            if [ -n "$inconsistent" ]; then
+              echo "::error::Tooling tier gate: run_tier=true (${SCOPE_REASON:-no reason recorded}) but" \
+                   "${inconsistent}did not run to success. A mandating diff whose work was skipped must" \
+                   "never report a green tier."
+              {
+                echo ""
+                echo "**Tooling tier FAILED: run_tier=true but ${inconsistent}was not a success.**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          else
+            echo "Tooling tier not applicable to this diff (${SCOPE_REASON:-}); reporting success."
+          fi
+          echo "Tooling tier gate: PASS"

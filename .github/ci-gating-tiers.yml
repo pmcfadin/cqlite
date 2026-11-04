@@ -21,10 +21,11 @@
 # `pr-gate-core` did not conclude `success`, so adding a PR-triggered workflow
 # without enrolling it still reds `required` — one job removed.
 #
-# Of the 29 workflows that carry a `pull_request`/`pull_request_target` trigger,
-# one is the aggregator (pr-gate.yml), five are gating tiers (flight-ci.yml,
-# core-tests-ci.yml, component-tests-ci.yml, bindings-tests-ci.yml and
-# gate-lanes-ci.yml) and the remaining 23 are exempted below.
+# Of the 30 workflows that carry a `pull_request`/`pull_request_target` trigger,
+# one is the aggregator (pr-gate.yml), six are gating tiers (flight-ci.yml,
+# core-tests-ci.yml, component-tests-ci.yml, bindings-tests-ci.yml,
+# gate-lanes-ci.yml and tooling-tests-ci.yml) and the remaining 23 are exempted
+# below.
 #
 # SCHEMA
 #   version:        must be 1.
@@ -249,8 +250,28 @@ tiers:
       work-counters-guard, byte-budget-guard, arrow-parity-guard, memory-budget,
       bti-multiclustering, compaction-byte-parity, flight-query-semantics-oracle.
       features: legacy-heuristics, feature-iso-parquet, feature-iso-delta-scan,
-      minimal-build. smoke: smoke. NOT here: tooling-tests (#4433), the advisory
-      dep-duplicates, and the retired delivery-telemetry.
+      minimal-build. smoke: smoke. NOT here: tooling-tests (its own tier,
+      tooling-tests below), the advisory dep-duplicates, and the retired
+      delivery-telemetry.
+
+  # Registered by #4437 (part of #4407). Same always-emit shape and the same
+  # `agent-gate.sh --only` mechanism, scoped by the gate's own #4266 rule.
+  - id: tooling-tests
+    workflow: tooling-tests-ci.yml
+    context: Tooling tier gate
+    # Critical path: classify (5) + the component job (55-min timeout; the
+    # nightly measured 2348s) + tier-gate (5) = 65 minutes; strictly below the
+    # aggregator job's 75.
+    wait_minutes: 70
+    mandate_paths:
+      - .github/workflows/tooling-tests-ci.yml
+    notes: >-
+      The gate job reports the aggregate of the classifier and one job running
+      `scripts/agent-gate.sh --only tooling-tests`, requiring the component's
+      own line to read PASS. Applicability is the local full gate's #4266
+      tooling-tests scope (scripts/lib/tooling-tests-scope.sh), evaluated under
+      both the base and the head copy of that lib: the tier is skipped only when
+      both read SKIP. docs/* is in that scope, so docs-only diffs run it.
 
 exempt:
   - workflow: cassandra-parity.yml
