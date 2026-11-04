@@ -3664,6 +3664,8 @@ case_begin 49-no-piped-printf-grep-q-assertions "issue #4436: this file's own as
 # `2>&1` / `>&2` / `&>f` may sit before the pipe. DECLARED RESIDUAL (not detected, by design - this is
 # a lint, not a shell parser): pipelines built through variables/eval/functions, a subshell or group
 # `( printf ... ) | grep -q`, `printf` reached via `command`/`builtin`, and process substitution.
+# A `|`, `;` or `&` inside a quoted printf format or argument ends the printf segment early, so such a
+# pipeline is not detected (pinned by the residual control below; update this comment if it ever is).
 SP49_RE='printf(>&[0-9]*|&>|[^;&|])*\|[[:space:]]*grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)([[:space:]]|$)'
 sp49_join() { # <file> -> "startline:joined logical line"; joins lines ending in | (not ||) or \, skips comments
   awk '
@@ -3717,6 +3719,15 @@ if [ "$sp49_n" -eq 10 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
 else
   bad "scan positive control failed: n=$sp49_n hits=[$sp49_ctl]"
 fi
+# Residual pin: a metacharacter inside a quoted printf format ends the segment early, so this form is
+# NOT detected today. If this check starts failing, the matcher improved - update the comment above.
+sp49_resid="$T/49-resid.sh"
+echo "if $sp49_pf '%s|%s\\n' \"\$x\" \"\$y\" | $sp49_gr -q FOO; then :; fi" >"$sp49_resid"
+if [ -z "$(sp49_scan "$sp49_resid")" ]; then
+  ok "declared residual pinned: a quoted | inside the printf format is NOT flagged (documented limitation)"
+else
+  bad "residual pin changed: the scan now flags a quoted-metacharacter printf; update the TEST 49 residual comment and this pin"
+fi
 
 # ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
@@ -3756,10 +3767,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 195 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 195)"
+if [ "$PASS" -ge 196 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 196)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 195)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 196)"
 fi
 
 # ===========================================================================
