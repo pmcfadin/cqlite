@@ -3660,9 +3660,25 @@ case_begin 49-no-piped-printf-grep-q-assertions "issue #4436: this file's own as
 # subject, and this file's `set -o pipefail` turns the MATCH into a failed condition. Read the
 # subject with a here-string instead (`grep -q PAT <<<"$x"`). The scan skips comment lines; a
 # deliberately planted fixture line must carry the marker `sigpipe-fixture` on the same line.
-SP49_RE='printf[^;&|]*\|[[:space:]]*grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)([[:space:]]|$)'
+# Lines ending in `|` (not `||`) or `\` are joined with the next before matching; redirections such as
+# `2>&1` / `>&2` / `&>f` may sit before the pipe. DECLARED RESIDUAL (not detected, by design - this is
+# a lint, not a shell parser): pipelines built through variables/eval/functions, a subshell or group
+# `( printf ... ) | grep -q`, `printf` reached via `command`/`builtin`, and process substitution.
+SP49_RE='printf(>&[0-9]*|&>|[^;&|])*\|[[:space:]]*grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)([[:space:]]|$)'
+sp49_join() { # <file> -> "startline:joined logical line"; joins lines ending in | (not ||) or \, skips comments
+  awk '
+    function flush() { if (buf != "") print start ":" buf; buf = "" }
+    {
+      if (buf == "") { if ($0 ~ /^[[:space:]]*#/) next; start = FNR; buf = $0 } else buf = buf " " $0
+      t = $0; sub(/[[:space:]]+$/, "", t)
+      if (t ~ /\\$/) { sub(/[[:space:]]*\\[[:space:]]*$/, "", buf); next }
+      if (t ~ /\|$/ && t !~ /\|\|$/) next
+      flush()
+    }
+    END { flush() }' "$1"
+}
 sp49_scan() { # <file> -> prints offending "line:text" rows
-  grep -nE "$SP49_RE" "$1" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -v 'sigpipe-fixture' || true
+  sp49_join "$1" | grep -E "$SP49_RE" | grep -v 'sigpipe-fixture' || true
 }
 SP49_SELF="$SCRIPT_DIR/test_drive_issue_state.sh"
 sp49_hits="$(sp49_scan "$SP49_SELF")"
@@ -3685,12 +3701,19 @@ sp49_pf=printf; sp49_gr=grep   # split tokens so the planted lines below are not
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -F --quiet FOO; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr --quiet FOO; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -Fqx FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" 2>&1 | $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" |"
+  echo "   $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" \\"
+  echo "   | $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_gr -q FOO \\"
+  echo "   <<<\"\$x\"; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi # sigpipe-fixture"
 } >"$sp49_plant"
 sp49_ctl="$(sp49_scan "$sp49_plant")"
 sp49_n="$(printf '%s' "$sp49_ctl" | grep -c '' || true)"
-if [ "$sp49_n" -eq 7 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
-  ok "positive control: scan flags exactly the 7 planted piped lines (-q -Fq -qF -qE -Fqx --quiet, -F --quiet), not the here-string or marked fixture"
+if [ "$sp49_n" -eq 10 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
+  ok "positive control: scan flags exactly the 10 planted piped assertions (option spellings, 2>&1, pipe- and backslash-continuations), not the here-strings (incl. one spread over a continuation) or the marked fixture"
 else
   bad "scan positive control failed: n=$sp49_n hits=[$sp49_ctl]"
 fi
