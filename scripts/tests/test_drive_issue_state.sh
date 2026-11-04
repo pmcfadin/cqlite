@@ -3675,11 +3675,12 @@ fi
 # Positive control: a planted piped assertion (built at runtime so this file stays clean) is caught,
 # a here-string form and a marked fixture are not.
 sp49_plant="$T/49-plant.sh"
+sp49_pf=printf; sp49_gr=grep   # split tokens so the planted lines below are not themselves hits
 {
-  printf '%s\n' "if printf '%s\\n' \"\$x\" | grep -q FOO; then :; fi"
-  printf '%s\n' "if grep -q FOO <<<\"\$x\"; then :; fi"
-  printf '%s\n' "if printf '%s\\n' \"\$x\" | grep -Fq FOO; then :; fi"
-  printf '%s\n' "if printf '%s\\n' \"\$x\" | grep -q FOO; then :; fi # sigpipe-fixture"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_gr -q FOO <<<\"\$x\"; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -Fq FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi # sigpipe-fixture"
 } >"$sp49_plant"
 sp49_ctl="$(sp49_scan "$sp49_plant")"
 sp49_n="$(printf '%s' "$sp49_ctl" | grep -c '' || true)"
