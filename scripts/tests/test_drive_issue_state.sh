@@ -57,13 +57,13 @@ run() {
 
 # verdict_of <output> — echo the token from the single `verdict ` line.
 verdict_of() {
-  printf '%s\n' "$1" | sed -n 's/^DRIVE-STATE: verdict \([^ ]*\).*/\1/p' | head -1
+  sed -n 's/^DRIVE-STATE: verdict \([^ ]*\).*/\1/p' <<<"$1" | head -1
 }
 
 # verdict_count <output> — how many `verdict ` lines the run emitted. Contract (c) says
 # EXACTLY ONE, so both zero (a consumer's `case` falls through every arm) and two (a consumer
 # reads whichever its parser picks first) are failures.
-verdict_count() { printf '%s\n' "$1" | grep -c '^DRIVE-STATE: verdict ' || true; }
+verdict_count() { grep -c '^DRIVE-STATE: verdict ' <<<"$1" || true; }
 
 # The CLOSED verdict token set (the script's own grammar). An unrecognised token is
 # a refusal, so the test pins the set rather than accepting whatever is printed.
@@ -81,7 +81,7 @@ verdict_in_set() {
 # the #3387 shape, and it cost a round here.
 all_lines_anchored() {
   local bad
-  bad="$(printf '%s\n' "$1" | grep -v '^$' | grep -cv '^DRIVE-STATE: ' || true)"
+  bad="$(grep -v '^$' <<<"$1" | grep -cv '^DRIVE-STATE: ' || true)"
   [ "${bad:-1}" = 0 ]
 }
 
@@ -627,7 +627,7 @@ if [ "$cc_rc" -ne 0 ] && [ "$(verdict_of "$cc_out")" = FOREIGN-MACHINE ] && all_
   ok "control characters in a recorded value are masked for display; every line stays anchored"
 else
   bad "control-character value broke the anchor: rc=$cc_rc
-$(printf '%s' "$cc_out" | cat -v)"
+$(cat -v <<<"$cc_out")"
 fi
 
 # ===========================================================================
@@ -645,7 +645,7 @@ if mkdir -p "$nl_dir" 2>/dev/null; then
     ok "a newline-bearing worktree path is refused (rc=$nl_rc) with an anchored ERROR and nothing written"
   else
     bad "newline-bearing worktree path was not refused: rc=$nl_rc
-$(printf '%s' "$nl_out" | cat -v)"
+$(cat -v <<<"$nl_out")"
   fi
 else
   bad "could not create a newline-bearing directory, so the worktree-recordability refusal was NOT measured (this is a gap, not a pass)"
@@ -844,7 +844,7 @@ for st in $DL_STATES; do
   dl_covered="$dl_covered $exp"
   # Every subcommand of THIS script named in the refusal text must not return the same
   # refusal when invoked on the same state.
-  subs="$(printf '%s\n' "$out" | grep -oE 'drive-issue-state\.sh [a-z]+' | awk '{print $2}' | sort -u)"
+  subs="$(grep -oE 'drive-issue-state\.sh [a-z]+' <<<"$out" | awk '{print $2}' | sort -u)"
   for sub in $subs; do
     case "$sub" in write | verify | adopt | show) : ;; *) continue ;; esac
     dl_named=$((dl_named + 1))
@@ -1269,7 +1269,7 @@ leak_probe() {
     return 0
   fi
   leak_fail=$((leak_fail + 1))
-  printf 'note   LEAK via %s (rc=%s):\n%s\n' "$c" "$rc" "$(printf '%s' "$out" | cat -v)"
+  printf 'note   LEAK via %s (rc=%s):\n%s\n' "$c" "$rc" "$(cat -v <<<"$out")"
   return 1
 }
 # mktemp / mv / date / tr / hostname: reached by an ordinary write in a fresh lane.
@@ -1284,7 +1284,7 @@ lh_out=$( cd "$L30H" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u CLAIM_MAC
 leak_probed=$((leak_probed + 1))
 if all_lines_anchored "$lh_out"; then :; else
   leak_fail=$((leak_fail + 1))
-  printf 'note   LEAK via hostname:\n%s\n' "$(printf '%s' "$lh_out" | cat -v)"
+  printf 'note   LEAK via hostname:\n%s\n' "$(cat -v <<<"$lh_out")"
 fi
 # cat: only reached with a non-empty --body-file.
 L30C=$(lane leak-cat); body30="$T/body30.md"; printf 'lane notes\n' >"$body30"
@@ -1335,7 +1335,7 @@ if [ "$rm_rc" -eq 0 ] && [ "$(verdict_of "$rm_out")" = WRITTEN ] && all_lines_an
   ok "a failing (noisy) rm in the cleanup trap neither leaks a line nor changes the WRITTEN(0) verdict"
 else
   bad "the cleanup trap's rm changed the outcome or leaked: rc=$rm_rc verdict=$(verdict_of "$rm_out")
-$(printf '%s' "$rm_out" | cat -v)"
+$(cat -v <<<"$rm_out")"
 fi
 # A FAILING `date` MUST NOT COMMIT A SELF-BRICKING MARKER. Found by this very case: because
 # every caller invokes write_marker as `if ! write_marker ...`, `set -e` is suppressed for its
@@ -1350,7 +1350,7 @@ if [ "$d30_rc" -ne 0 ] && [ "$(verdict_of "$d30_out")" = ERROR ] && all_lines_an
   ok "a failing 'date' refuses with an anchored ERROR and commits NOTHING — no marker with an empty required field"
 else
   bad "a failing date committed a self-bricking marker or emitted no verdict: rc=$d30_rc verdict=$(verdict_of "$d30_out")
-$(printf '%s' "$d30_out" | cat -v)"
+$(cat -v <<<"$d30_out")"
 fi
 # THE RESIDUAL THIS CASE ONCE DECLARED IS NOW CLOSED (roborev job 34 H1). With `tr` shimmed the
 # identity sanitizer cannot run, so every sanitized field degraded to sanitize_field's
@@ -1368,7 +1368,7 @@ if all_lines_anchored "$tr_out" && [ ! -e "$L30T/$MARKER" ] \
   ok "a failing 'tr' leaks nothing AND no longer fails open: the machine axis is refused (ERROR, axis=machine) and NO marker with a placeholder identity is committed"
 else
   bad "a failing tr leaked a line, or committed a placeholder identity instead of refusing:
-$(printf '%s' "$tr_out" | cat -v)
+$(cat -v <<<"$tr_out")
 $(cat "$L30T/$MARKER" 2>/dev/null | cat -v)"
 fi
 
@@ -1737,7 +1737,7 @@ for row in $SHIFT_ROWS; do
   [ "$rc" -eq 64 ] || why="$why rc=$rc"
   if [ -n "$why" ]; then
     sv_fail=$((sv_fail + 1))
-    printf 'note   %s %s ->%s\n%s\n' "$sub" "${opt:-<no-issue-arg>}" "$why" "$(printf '%s' "$out" | cat -v)"
+    printf 'note   %s %s ->%s\n%s\n' "$sub" "${opt:-<no-issue-arg>}" "$why" "$(cat -v <<<"$out")"
   fi
 done
 if [ "$sv_fail" -eq 0 ]; then
@@ -2018,7 +2018,7 @@ for row in $INV_ROWS; do
   [ "$rc" = "$want_rc" ] || why="$why rc=$rc(want $want_rc)"
   if [ -n "$why" ]; then
     inv_fail=$((inv_fail + 1))
-    printf 'note   row %s ->%s\n%s\n' "$nm" "$why" "$(printf '%s' "$out" | cat -v)"
+    printf 'note   row %s ->%s\n%s\n' "$nm" "$why" "$(cat -v <<<"$out")"
   fi
 done
 if [ "$inv_fail" -eq 0 ]; then
@@ -2060,10 +2060,10 @@ for row in $INV_ROWS; do
   nm="${row%%:*}"
   anch_rows=$((anch_rows + 1))
   out="$(cat "$INV_DIR/$nm.out")"
-  anch_lines=$((anch_lines + $(printf '%s\n' "$out" | grep -c '' || true)))
+  anch_lines=$((anch_lines + $(grep -c '' <<<"$out" || true)))
   if all_lines_anchored "$out"; then :; else
     anch_fail=$((anch_fail + 1))
-    printf 'note   row %s emitted an UNPREFIXED line:\n%s\n' "$nm" "$(printf '%s' "$out" | grep -v '^DRIVE-STATE: ' | grep -v '^$' | cat -v)"
+    printf 'note   row %s emitted an UNPREFIXED line:\n%s\n' "$nm" "$(grep -v '^DRIVE-STATE: ' <<<"$out" | grep -v '^$' | cat -v)"
   fi
 done
 if [ "$anch_fail" -eq 0 ]; then
@@ -2389,12 +2389,12 @@ $g_out"
   # DECLARED RESIDUAL, MEASURED: bash prints `shell-init:` / `chdir:` for a deleted cwd BEFORE
   # the script's first line runs, so those two are the INTERPRETER's and cannot be suppressed
   # from inside the script. Every line the SCRIPT itself emits must still carry the anchor.
-  ours=$(printf '%s\n' "$g_out" | grep -v '^shell-init: ' | grep -v '^chdir: ' || true)
+  ours=$(grep -v '^shell-init: ' <<<"$g_out" | grep -v '^chdir: ' || true)
   if all_lines_anchored "$ours"; then
     ok "'$sub': every line the SCRIPT emits is anchored (bash's own pre-exec shell-init/chdir lines are a DECLARED, unsuppressable residual)"
   else
     bad "'$sub' leaked an unprefixed line of its own:
-$(printf '%s' "$ours" | cat -v)"
+$(cat -v <<<"$ours")"
   fi
 done
 # NOTHING IS DERIVED AT THE ROOT: a marker at / must never be consulted or created. Asserted by
@@ -2427,8 +2427,8 @@ fi
 # (which derives its path from that axis). A reordering that reintroduces K2 reds here even if a
 # future refactor changes the refusal text.
 adopt_body=$(LC_ALL=C sed -n '/^cmd_adopt() {/,/^}/p' "$DS")
-a_axis_ln=$(printf '%s\n' "$adopt_body" | grep -n '^  require_worktree_axis$' | head -1 | cut -d: -f1)
-a_lock_ln=$(printf '%s\n' "$adopt_body" | grep -n '^  lock_marker$' | head -1 | cut -d: -f1)
+a_axis_ln=$(grep -n '^  require_worktree_axis$' <<<"$adopt_body" | head -1 | cut -d: -f1)
+a_lock_ln=$(grep -n '^  lock_marker$' <<<"$adopt_body" | head -1 | cut -d: -f1)
 if [ -n "$a_axis_ln" ] && [ -n "$a_lock_ln" ] && [ "$a_axis_ln" -lt "$a_lock_ln" ]; then
   ok "STRUCTURAL: cmd_adopt calls require_worktree_axis (line $a_axis_ln of the function) BEFORE lock_marker (line $a_lock_ln)"
 else
@@ -2549,11 +2549,11 @@ cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$SCRATCH42/lib/process-livenes
 # COMMENTS ARE STRIPPED BEFORE THE ORDER IS READ: these functions document the very identifiers
 # being located, so a prose mention would otherwise "occur" before the code and the assert would
 # be about the comment (measured — it did, on the first run of this case).
-uncomment() { printf '%s\n' "$1" | grep -v '^[[:space:]]*#'; }
+uncomment() { grep -v '^[[:space:]]*#' <<<"$1"; }
 v42_body=$(awk '/^verdict\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
 v42_code=$(uncomment "$v42_body")
-v42_print=$(printf '%s\n' "$v42_code" | grep -n "printf '%s verdict" | head -1 | cut -d: -f1)
-v42_flag=$(printf '%s\n' "$v42_code" | grep -n '^ *VERDICT_EMITTED=1$' | head -1 | cut -d: -f1)
+v42_print=$(grep -n "printf '%s verdict" <<<"$v42_code" | head -1 | cut -d: -f1)  # sigpipe-fixture: printf is inside a quoted grep pattern, not a printf pipe
+v42_flag=$(grep -n '^ *VERDICT_EMITTED=1$' <<<"$v42_code" | head -1 | cut -d: -f1)
 if [ -n "$v42_print" ] && [ -n "$v42_flag" ] && [ "$v42_print" -lt "$v42_flag" ]; then
   ok "STRUCTURAL: inside verdict(), the verdict line is PRINTED (body line $v42_print) before VERDICT_EMITTED is committed (body line $v42_flag)"
 else
@@ -2579,8 +2579,8 @@ $(grep -n "printf '%s verdict %s" "$DS")"
 fi
 s42_body=$(awk '/^on_signal\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
 s42_code=$(uncomment "$s42_body")
-s42_ing=$(printf '%s\n' "$s42_code" | grep -n 'VERDICT_EMITTING' | head -1 | cut -d: -f1)
-s42_ed=$(printf '%s\n' "$s42_code" | grep -n 'VERDICT_EMITTED' | head -1 | cut -d: -f1)
+s42_ing=$(grep -n 'VERDICT_EMITTING' <<<"$s42_code" | head -1 | cut -d: -f1)
+s42_ed=$(grep -n 'VERDICT_EMITTED' <<<"$s42_code" | head -1 | cut -d: -f1)
 if [ -n "$s42_ing" ] && [ -n "$s42_ed" ] && [ "$s42_ing" -lt "$s42_ed" ]; then
   ok "STRUCTURAL: on_signal consults the in-flight flag (body line $s42_ing) BEFORE it may conclude 'already emitted' (body line $s42_ed)"
 else
@@ -3582,7 +3582,7 @@ sp_probe() {
   else
     sp_leaks=$((sp_leaks + 1))
     bad "$tag: the SHIPPED $pf:$pl LEAKED an unprefixed line:
-$(printf '%s\n' "$out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+$(grep -v '^DRIVE-STATE: ' <<<"$out" | cut -c1-200 | head -5 | cat -v)"
   fi
   broken="$(sp_tree "$tag" "$pf" "$pl")" || {
     bad "$tag: planting the defect at $pf:$pl changed NOTHING (or the scratch copy failed), so NO positive control was taken for this site — read the row above as an unverified probe, not as coverage. The usual cause is that $pf:$pl ALREADY lacks its own suppressor (the sweep above names it)."; return 1; }
@@ -3603,7 +3603,7 @@ $(printf '%s\n' "$out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat 
     ok "POSITIVE CONTROL $tag: with $pf:$pl's OWN suppressor removed the probe LEAKS, and the leaked line NAMES the planted site ($needle) — so this probe demonstrably reaches it"
   else
     bad "POSITIVE CONTROL $tag DID NOT REPRODUCE: planting the defect at $pf:$pl produced no leak naming that site, so the shipped row ABOVE covers NOTHING. Do not read it as coverage.
-$(printf '%s\n' "$ctl" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+$(grep -v '^DRIVE-STATE: ' <<<"$ctl" | cut -c1-200 | head -5 | cat -v)"
   fi
 }
 
@@ -3648,25 +3648,30 @@ if [ -n "$sp_gap_line" ] && [ -n "$sp_gap_tree" ]; then
     ok "DECLARED GAP: 1 RECOGNISED — drive-issue-state.sh:$sp_gap_line (the --reason placeholder fold) is covered STRUCTURALLY (the sweep + the disposition table) and NOT behaviourally. MEASURED: with its suppressor removed and an 81920-byte --reason offered, the reader was REACHED (witness present) and nothing leaked, because sanitize_field truncates \$tok to 120 bytes (printf '%.120s') — far under pipe capacity. The reader-exits-first route is a real scheduling race and is deliberately not asserted."
   else
     bad "the declared gap's own measurement did not hold: witness=$([ -f "$sp_gap_witness" ] && echo reached || echo NOT-REACHED) anchored=$(all_lines_anchored "$sp_gap_out" && echo yes || echo NO) cap-present=$(grep -Fq "printf '%.120s'" "$DS" && echo yes || echo NO). If the 120-byte cap is gone this site is now FORCEABLE and owes a behavioural probe, not a gap.
-$(printf '%s\n' "$sp_gap_out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+$(grep -v '^DRIVE-STATE: ' <<<"$sp_gap_out" | cut -c1-200 | head -5 | cat -v)"
   fi
 else
   bad "could not derive or plant the --reason placeholder-fold site, so its DECLARED GAP is itself unmeasured (line='$sp_gap_line')"
 fi
 # ===========================================================================
-case_begin 49-no-piped-printf-grep-q-assertions "issue #4436: this file's own assertions must not pipe printf into an early-exit grep -q (SIGPIPE + pipefail false-FAIL)"
+case_begin 49-no-printf-pipes-in-assertions "issue #4436: this file must not pipe printf into any reader (SIGPIPE + pipefail false-FAIL)"
 # ===========================================================================
-# `grep -q` exits on first match, the upstream printf takes SIGPIPE writing the rest of a large
-# subject, and this file's `set -o pipefail` turns the MATCH into a failed condition. Read the
-# subject with a here-string instead (`grep -q PAT <<<"$x"`). The scan skips comment lines; a
-# deliberately planted fixture line must carry the marker `sigpipe-fixture` on the same line.
+# THE SUBJECT IS "a printf whose stdout goes into a pipe", WHATEVER THE READER IS. Any reader can exit
+# before it has consumed all input (`grep -q`, `head`, `sed q`, ...); the upstream printf then takes
+# SIGPIPE writing the rest of a large subject and this file's `set -o pipefail` turns a correct match
+# into a failed condition. The safe form feeds the reader a here-string (`grep -q PAT <<<"$x"`).
+# Banning the pipe, not parsing grep's options, removes the reader axis entirely (four rounds of review
+# kept finding a new quiet-grep spelling). The scan skips comment lines; a deliberately planted or
+# otherwise unavoidable line carries the marker `sigpipe-fixture` plus a reason on the same line.
 # Lines ending in `|` (not `||`) or `\` are joined with the next before matching; redirections such as
 # `2>&1` / `>&2` / `&>f` may sit before the pipe. DECLARED RESIDUAL (not detected, by design - this is
-# a lint, not a shell parser): pipelines built through variables/eval/functions, a subshell or group
-# `( printf ... ) | grep -q`, `printf` reached via `command`/`builtin`, and process substitution.
-# A `|`, `;` or `&` inside a quoted printf format or argument ends the printf segment early, so such a
-# pipeline is not detected (pinned by the residual control below; update this comment if it ever is).
-SP49_RE='printf(>&[0-9]*|&>|[^;&|])*\|[[:space:]]*grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)([[:space:]]|$)'
+# a lint, not a shell parser, #3312): pipelines built through variables/eval/functions, a subshell or
+# group `( printf ... ) | rdr`, `printf` reached via `command`/`builtin`, process substitution, and a
+# printf whose own arguments contain `(` (e.g. `$(...)`) before the pipe, since `(` ends the segment.
+# A `;` or `&` inside a quoted printf format or argument also ends the printf segment early, so
+# such a pipeline is not detected (pinned by the residual control below; update if it ever is). A
+# quoted `|` is itself flagged, which is harmless: a real pipe follows it anyway.
+SP49_RE='printf(>&[0-9]*|&>|[^;&|(])*\|([^|]|$)'
 sp49_join() { # <file> -> "startline:joined logical line"; joins lines ending in | (not ||) or \, skips comments
   awk '
     function flush() { if (buf != "") print start ":" buf; buf = "" }
@@ -3685,24 +3690,22 @@ sp49_scan() { # <file> -> prints offending "line:text" rows
 SP49_SELF="$SCRIPT_DIR/test_drive_issue_state.sh"
 sp49_hits="$(sp49_scan "$SP49_SELF")"
 if [ -f "$SP49_SELF" ] && [ -z "$sp49_hits" ]; then
-  ok "no piped-printf early-exit-grep assertion in this file"
+  ok "no printf-into-pipe in this file (every subject is read via a here-string)"
 else
-  bad "piped-printf early-exit-grep assertion(s) in $SP49_SELF (use grep -q PAT <<<\"\$x\"):
+  bad "printf piped into a reader in $SP49_SELF (use READER <<<\"\$x\"):
 $sp49_hits"
 fi
-# Positive control: a planted piped assertion (built at runtime so this file stays clean) is caught,
-# a here-string form and a marked fixture are not.
+# Positive control: planted printf pipes (built at runtime so this file stays clean) are caught; here-strings,
+# an `||` and a marked fixture are not.
 sp49_plant="$T/49-plant.sh"
 sp49_pf=printf; sp49_gr=grep   # split tokens so the planted lines below are not themselves hits
 {
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi"
   echo "if $sp49_gr -q FOO <<<\"\$x\"; then :; fi"
-  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -Fq FOO; then :; fi"
-  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -qF FOO; then :; fi"
-  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -qE FOO; then :; fi"
-  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -F --quiet FOO; then :; fi"
-  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr --quiet FOO; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -Fqx FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -e FOO -q; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr --silent FOO; then :; fi"
+  echo "x=\$(if $sp49_pf '%s\\n' \"\$x\" | head -1)"
   echo "if $sp49_pf '%s\\n' \"\$x\" 2>&1 | $sp49_gr -q FOO; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" |"
   echo "   $sp49_gr -q FOO; then :; fi"
@@ -3710,21 +3713,22 @@ sp49_pf=printf; sp49_gr=grep   # split tokens so the planted lines below are not
   echo "   | $sp49_gr -q FOO; then :; fi"
   echo "if $sp49_gr -q FOO \\"
   echo "   <<<\"\$x\"; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" || $sp49_gr -q FOO; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi # sigpipe-fixture"
 } >"$sp49_plant"
 sp49_ctl="$(sp49_scan "$sp49_plant")"
-sp49_n="$(printf '%s' "$sp49_ctl" | grep -c '' || true)"
-if [ "$sp49_n" -eq 10 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
-  ok "positive control: scan flags exactly the 10 planted piped assertions (option spellings, 2>&1, pipe- and backslash-continuations), not the here-strings (incl. one spread over a continuation) or the marked fixture"
+sp49_n="$(grep -c '' <<<"$sp49_ctl" || true)"
+if [ "$sp49_n" -eq 8 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
+  ok "positive control: scan flags exactly the 8 planted printf pipes (-q, -Fqx, -e FOO -q, --silent, head -1, 2>&1, pipe- and backslash-continuations), not the here-strings (incl. one over a continuation), the || form or the marked fixture"
 else
   bad "scan positive control failed: n=$sp49_n hits=[$sp49_ctl]"
 fi
-# Residual pin: a metacharacter inside a quoted printf format ends the segment early, so this form is
+# Residual pin: a `;` inside a quoted printf format ends the segment early, so this form is
 # NOT detected today. If this check starts failing, the matcher improved - update the comment above.
 sp49_resid="$T/49-resid.sh"
-echo "if $sp49_pf '%s|%s\\n' \"\$x\" \"\$y\" | $sp49_gr -q FOO; then :; fi" >"$sp49_resid"
+echo "if $sp49_pf '%s;%s\\n' \"\$x\" \"\$y\" | $sp49_gr -q FOO; then :; fi" >"$sp49_resid"
 if [ -z "$(sp49_scan "$sp49_resid")" ]; then
-  ok "declared residual pinned: a quoted | inside the printf format is NOT flagged (documented limitation)"
+  ok "declared residual pinned: a quoted ; inside the printf format is NOT flagged (documented limitation)"
 else
   bad "residual pin changed: the scan now flags a quoted-metacharacter printf; update the TEST 49 residual comment and this pin"
 fi
@@ -3754,7 +3758,7 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated
 45-unknown-prologue-keys-survive 46-symlink-marker-is-never-clobbered
 47-non-regular-paths-never-block
-48-piped-printf-sigpipe-stays-anchored 49-no-piped-printf-grep-q-assertions 28-case-floor"
+48-piped-printf-sigpipe-stays-anchored 49-no-printf-pipes-in-assertions 28-case-floor"
 CASE_FLOOR=49
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
