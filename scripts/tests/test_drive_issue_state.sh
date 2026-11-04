@@ -3660,7 +3660,7 @@ case_begin 49-no-piped-printf-grep-q-assertions "issue #4436: this file's own as
 # subject, and this file's `set -o pipefail` turns the MATCH into a failed condition. Read the
 # subject with a here-string instead (`grep -q PAT <<<"$x"`). The scan skips comment lines; a
 # deliberately planted fixture line must carry the marker `sigpipe-fixture` on the same line.
-SP49_RE='printf[^;&|]*\|[[:space:]]*grep[[:space:]]+(-[A-Za-z]*q|--quiet)'
+SP49_RE='printf[^;&|]*\|[[:space:]]*grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)([[:space:]]|$)'
 sp49_scan() { # <file> -> prints offending "line:text" rows
   grep -nE "$SP49_RE" "$1" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -v 'sigpipe-fixture' || true
 }
@@ -3680,12 +3680,17 @@ sp49_pf=printf; sp49_gr=grep   # split tokens so the planted lines below are not
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi"
   echo "if $sp49_gr -q FOO <<<\"\$x\"; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -Fq FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -qF FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -qE FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -F --quiet FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr --quiet FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -Fqx FOO; then :; fi"
   echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi # sigpipe-fixture"
 } >"$sp49_plant"
 sp49_ctl="$(sp49_scan "$sp49_plant")"
 sp49_n="$(printf '%s' "$sp49_ctl" | grep -c '' || true)"
-if [ "$sp49_n" -eq 2 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
-  ok "positive control: scan flags exactly the 2 planted piped lines (-q and -Fq), not the here-string or marked fixture"
+if [ "$sp49_n" -eq 7 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
+  ok "positive control: scan flags exactly the 7 planted piped lines (-q -Fq -qF -qE -Fqx --quiet, -F --quiet), not the here-string or marked fixture"
 else
   bad "scan positive control failed: n=$sp49_n hits=[$sp49_ctl]"
 fi
