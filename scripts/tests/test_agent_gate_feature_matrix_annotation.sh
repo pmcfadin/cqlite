@@ -870,6 +870,14 @@ printf '%s\n' "$*" >> "${FM_SHIM_LOG:?}"
 exit 0
 SHIM
 chmod +x "$shim_dir/cargo"
+# PIN core-tests' branch on every host (#4398). The gate takes its nextest branch iff
+# `command -v cargo-nextest` finds one, so without this the branch under test was the
+# HOST's: a runner with no nextest ran the single-invocation `cargo test` fallback, and
+# section (D)'s "strictly fewer invocations under failure" premise had no headroom there.
+# The stub is only ever found, never run: the gate calls `cargo nextest …`, which the cargo
+# shim beside it records. Each shim dir gets its own copy, below and in (D).
+pin_nextest() { printf '#!/usr/bin/env bash\nexit 0\n' > "$1/cargo-nextest"; chmod +x "$1/cargo-nextest"; }
+pin_nextest "$shim_dir"
 
 # describe_shim_log <log> <out-sidecar>: turn the argv the shim ACTUALLY received into
 # descriptors using the gate's OWN _fm_describe_cargo (no second implementation).
@@ -1027,6 +1035,7 @@ printf '%s\n' "$*" >> "${FM_SHIM_LOG:?}"
 exit 1
 FSHIM
 chmod +x "$failshim/cargo"
+pin_nextest "$failshim"
 
 # cli-tests is deliberately NOT in this loop: under the PASSING shim its Pass-1 zero-tests
 # guard already fires, so its baseline is itself a one-invocation short-circuit and the
