@@ -95,7 +95,7 @@ module GatingRegistry
   # subject field. An unrecognised kind, an unknown field, a missing field or an
   # empty list is a NAMED refusal — never accepted, and never silently skipped.
   #
-  # A KIND IS ADDED ONLY WITH ITS VALIDATOR. Each of the three below is checkable
+  # A KIND IS ADDED ONLY WITH ITS VALIDATOR. Each of the four below is checkable
   # against committed source, which is the whole point; a kind whose subject
   # cannot be verified would be prose wearing a schema's clothes.
   MERGE_GATING_HALF_KINDS = {
@@ -106,6 +106,10 @@ module GatingRegistry
     # depends on — i.e. a step whose failure fails `required` directly. Verified
     # to exist in the aggregator workflow's `needs` closure.
     "required-gate-step" => "step",
+    # A registered CI gating tier (#4438): the `id` of an entry under `tiers:` in
+    # the same registry, whose context `required` waits on. Verified to EXIST
+    # there; like the other kinds, it does not prove the tier covers the workflow.
+    "ci-tier" => "tier",
     # NOTHING merge-gating covers this workflow. An honest declaration of a hole,
     # which is the state several of these lanes are genuinely in; `ground` states
     # why that is acceptable.

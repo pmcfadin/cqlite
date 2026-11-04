@@ -258,7 +258,8 @@ module GatingRegistry
     if raw.nil?
       return ["#{label} needs a `merge_gating_half:` declaring what DOES gate the merge in this " \
               "workflow's place — a list of {kind: gate-component, component: <name>} / " \
-              "{kind: required-gate-step, step: <name>} / {kind: none, ground: <why that is " \
+              "{kind: required-gate-step, step: <name>} / {kind: ci-tier, tier: <id>} / " \
+              "{kind: none, ground: <why that is " \
               "acceptable>} (issue #3725)"]
     end
     return ["#{label} `merge_gating_half` must be a list"] unless raw.is_a?(Array)
@@ -343,6 +344,14 @@ module GatingRegistry
 
       ["#{label} names required-gate step `#{subject}`, which is not a step of any job the " \
        "aggregating job depends on (#{names.length} named steps are). Same EXISTENCE-not-SCOPE " \
+       "caveat as `gate-component`."]
+    when "ci-tier"
+      tiers = registry.is_a?(Hash) && registry["tiers"].is_a?(Array) ? registry["tiers"] : []
+      ids = tiers.filter_map { |tier| tier["id"] if tier.is_a?(Hash) && tier["id"].is_a?(String) }
+      return [] if ids.include?(subject)
+
+      ["#{label} names CI tier `#{subject}`, which is not the `id` of any entry under `tiers:` " \
+       "(registered: #{ids.empty? ? 'none' : ids.join(', ')}) (#4438). Same EXISTENCE-not-SCOPE " \
        "caveat as `gate-component`."]
     else
       # Unreachable: `kind` was matched against MERGE_GATING_HALF_KINDS before we

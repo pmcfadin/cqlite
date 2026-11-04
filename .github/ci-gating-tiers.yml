@@ -63,6 +63,11 @@
 #             a named step of a job the branch-protection context `required`
 #             depends on, so its failure fails `required` directly. VERIFIED to
 #             exist in the aggregator workflow's `needs` closure.
+#         - {kind: ci-tier,            tier: <id>}
+#             a registered gating tier under `tiers:` below, whose context
+#             `required` waits on (#4438). VERIFIED to be a tier `id` in this
+#             file. It sits BESIDE the gate-component claim for the same lane
+#             while the local gate remains the gate of record (#4407).
 #         - {kind: none,               ground: <why that is acceptable>}
 #             NOTHING merge-gating covers this workflow. An honest declaration of
 #             a hole — several of these lanes are genuinely in that state, and
@@ -257,6 +262,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: parity-report
+      - kind: ci-tier
+        tier: gate-lanes
 
   - workflow: cassandra-validation.yml
     reason: >-
@@ -287,6 +294,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: minimal-build
+      - kind: ci-tier
+        tier: gate-lanes
 
   - workflow: ci.yml
     reason: >-
@@ -312,6 +321,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: feature-iso-delta-scan
+      - kind: ci-tier
+        tier: gate-lanes
 
   - workflow: compaction-parity.yml
     reason: >-
@@ -323,6 +334,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: compaction-byte-parity
+      - kind: ci-tier
+        tier: gate-lanes
 
   - workflow: coverage-baseline.yml
     reason: Advisory coverage trend lane; a coverage dip must not block a merge.
@@ -437,6 +450,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: compaction-byte-parity
+      - kind: ci-tier
+        tier: gate-lanes
 
   - workflow: node-ci.yml
     reason: >-
@@ -479,6 +494,8 @@ exempt:
         component: node-bindings
       - kind: gate-component
         component: binding-rust-tests
+      - kind: ci-tier
+        tier: bindings-tests
 
   - workflow: observability-gate.yml
     reason: >-
@@ -560,6 +577,10 @@ exempt:
         component: compaction-byte-parity
       - kind: gate-component
         component: feature-iso-delta-scan
+      - kind: ci-tier
+        tier: core-tests
+      - kind: ci-tier
+        tier: gate-lanes
 
   - workflow: perf-regression.yml
     reason: Label-gated performance lane (ci:perf); a bench delta is advisory and must not block a merge.
@@ -609,6 +630,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: python-bindings
+      - kind: ci-tier
+        tier: bindings-tests
 
   - workflow: smoke-tests.yml
     reason: >-
@@ -619,6 +642,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: smoke
+      - kind: ci-tier
+        tier: gate-lanes
 
   - workflow: sstabledump-parity-gate.yml
     reason: >-
@@ -634,6 +659,8 @@ exempt:
     merge_gating_half:
       - kind: gate-component
         component: core-tests
+      - kind: ci-tier
+        tier: core-tests
 
   - workflow: trino-connector-ci.yml
     reason: Java connector build lane; the connector releases on its own cadence.

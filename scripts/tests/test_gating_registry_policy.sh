@@ -870,6 +870,42 @@ else
   bad "a truthful required-gate-step declaration was rejected: $OUT"
 fi
 
+echo "== a named CI tier must be a registered tier id (#4438) =="
+DIR=$(new_case exempt-half-ghost-tier)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: ci-tier
+        tier: retired-tier'
+run_policy "$DIR"
+expect_fail_named "an exemption deferring to a tier id that is not registered is rejected" "retired-tier"
+
+DIR=$(new_case exempt-half-tier-by-context)
+# The CONTEXT is not the id: a claim must name the registry key `required` resolves.
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: ci-tier
+        tier: Alpha gate'
+run_policy "$DIR"
+expect_fail_named "a tier named by its context rather than its id is rejected" "Alpha gate"
+
+DIR=$(new_case exempt-half-good-tier)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: ci-tier
+        tier: alpha'
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then
+  ok "an exemption naming a registered tier id passes"
+else
+  bad "a truthful ci-tier declaration was rejected: $OUT"
+fi
+
+DIR=$(new_case exempt-half-none-beside-tier)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: none
+        ground: Nothing merge-gating covers this lane at all, by decision.
+      - kind: ci-tier
+        tier: alpha'
+run_policy "$DIR"
+expect_fail_named "\`kind: none\` beside a ci-tier claim is incoherent and rejected" "none"
+
 echo "== \`none\` is an HONEST declaration, not a wildcard =="
 DIR=$(new_case exempt-half-none-no-ground)
 exempt_registry "$DIR" '    merge_gating_half:
