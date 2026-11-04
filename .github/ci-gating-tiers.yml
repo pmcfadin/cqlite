@@ -21,10 +21,10 @@
 # `pr-gate-core` did not conclude `success`, so adding a PR-triggered workflow
 # without enrolling it still reds `required` — one job removed.
 #
-# Of the 27 workflows that carry a `pull_request`/`pull_request_target` trigger,
-# one is the aggregator (pr-gate.yml), three are gating tiers (flight-ci.yml,
-# core-tests-ci.yml and component-tests-ci.yml) and the remaining 23 are
-# exempted below.
+# Of the 28 workflows that carry a `pull_request`/`pull_request_target` trigger,
+# one is the aggregator (pr-gate.yml), four are gating tiers (flight-ci.yml,
+# core-tests-ci.yml, component-tests-ci.yml and bindings-tests-ci.yml) and the
+# remaining 23 are exempted below.
 #
 # SCHEMA
 #   version:        must be 1.
@@ -205,6 +205,24 @@ tiers:
       the corpus against the committed manifest first, exports
       CQLITE_REQUIRE_FIXTURES=1, and reads completion and the component's own
       verdict through gate-liveness.sh and gate-component-verdict.sh.
+
+  # Registered by #4431 (part of #4407). Same always-emit shape and the same
+  # `agent-gate.sh --only` mechanism as component-tests.
+  - id: bindings-tests
+    workflow: bindings-tests-ci.yml
+    context: Bindings tier gate
+    # Critical path: classify (5) + the parallel component jobs (45-min
+    # timeout) + tier-gate (5) = 55 minutes; strictly below the aggregator
+    # job's 75-minute timeout.
+    wait_minutes: 70
+    mandate_paths:
+      - .github/workflows/bindings-tests-ci.yml
+    notes: >-
+      The gate job reports the aggregate of the classifier and a three-way
+      matrix that runs `scripts/agent-gate.sh --only <component>` for
+      python-bindings, node-bindings and binding-rust-tests, with Python 3.12
+      and Node 20 provisioned. A component that SKIPs (missing toolchain) is
+      NOT-PASS under gate-component-verdict.sh, so the tier reds.
 
 exempt:
   - workflow: cassandra-parity.yml
@@ -393,6 +411,9 @@ exempt:
 
   - workflow: node-ci.yml
     reason: >-
+      Since #4431 the node-bindings and binding-rust-tests components named below
+      also run on every non-docs PR in the registered `bindings-tests` tier
+      (bindings-tests-ci.yml), so their merge gate is CI as well as the local gate.
       Node binding lane; the merge-gating half is the local gate's node-bindings
       component, which since #3522 runs the WHOLE jest suite (it ran 1 of 27 files
       before), plus binding-rust-tests for cqlite-node's Rust unit tests, which ran
@@ -532,6 +553,8 @@ exempt:
 
   - workflow: python-ci.yml
     reason: >-
+      Since #4431 the python-bindings component named below also runs on every
+      non-docs PR in the registered `bindings-tests` tier (bindings-tests-ci.yml).
       Python binding lane. For the PYTEST SUITE the merge-gating half is the local
       gate's python-bindings component, which runs the WHOLE pytest suite (contrast
       node-ci.yml, whose identically-worded exemption was false for ~2 days because
