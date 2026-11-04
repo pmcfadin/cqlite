@@ -270,8 +270,8 @@ tiers:
       `scripts/agent-gate.sh --only tooling-tests`, requiring the component's
       own line to read PASS. Applicability is the local full gate's #4266
       tooling-tests scope (scripts/lib/tooling-tests-scope.sh), evaluated under
-      both the base and the head copy of that lib: the tier is skipped only when
-      both read SKIP. docs/* is in that scope, so docs-only diffs run it.
+      the base, PR-head and checked-out merge copies of that lib: the tier is
+      skipped only when all three read SKIP. docs/* is in that scope, so docs-only diffs run it.
 
 exempt:
   - workflow: cassandra-parity.yml

@@ -9,9 +9,10 @@ name: Tooling tests CI
 #
 # Scope follows the LOCAL FULL GATE, not the docs-only classifier: `docs/*` is in
 # the declared tooling-scope set (scripts/lib/tooling-tests-scope.sh), so a
-# docs-only diff runs this tier. The verdict is RUN when EITHER the head's or the
-# base's scope lib classifies the changed paths as in scope, so a PR cannot
-# narrow the declared set and scope itself out in the same diff.
+# docs-only diff runs this tier. The verdict is RUN when ANY of the base's, the
+# PR head's or the checked-out merge commit's scope lib classifies the changed
+# paths as in scope, so a PR cannot narrow the declared set and scope itself out
+# in the same diff.
 #
 # `--only` demotes its terminal token to PARTIAL, so the job reads completion
 # (scripts/gate-liveness.sh) and the component's own verdict
@@ -113,22 +114,33 @@ jobs:
             echo "${verdict:-UNREADABLE}"
           }
 
-          base_verdict=UNREADABLE
-          base_lib="${RUNNER_TEMP}/tooling-tests-scope.base.sh"
-          if git show "${BASE_SHA}:scripts/lib/tooling-tests-scope.sh" > "$base_lib" 2>/dev/null; then
-            echo "Base scope lib (${BASE_SHA}):"
-            base_verdict=$(classify "$base_lib")
-          fi
-          echo "Head scope lib (${HEAD_SHA}):"
-          head_verdict=$(classify scripts/lib/tooling-tests-scope.sh)
-          echo "base=${base_verdict} head=${head_verdict}"
+          # Three copies of the lib, each read from an explicit source: the base
+          # and the PR head by sha, and the checked-out tree, which for
+          # pull_request is GitHub's synthetic MERGE commit and so may be
+          # neither (it is the copy whose tests actually run).
+          # scope_verdict <rev>: classify that revision's lib (UNREADABLE if absent).
+          scope_verdict() {
+            local lib="${RUNNER_TEMP}/tooling-tests-scope.$2.sh"
+            if git show "$1:scripts/lib/tooling-tests-scope.sh" > "$lib" 2>/dev/null; then
+              echo "$2 scope lib ($1):" >&2
+              classify "$lib"
+            else
+              echo UNREADABLE
+            fi
+          }
+          base_verdict=$(scope_verdict "$BASE_SHA" base)
+          head_verdict=$(scope_verdict "$HEAD_SHA" head)
+          echo "merged scope lib (checked-out tree):"
+          merged_verdict=$(classify scripts/lib/tooling-tests-scope.sh)
+          verdicts="base=${base_verdict} head=${head_verdict} merged=${merged_verdict}"
+          echo "$verdicts"
 
-          if [ "$base_verdict" = SKIP ] && [ "$head_verdict" = SKIP ]; then
+          if [ "$base_verdict" = SKIP ] && [ "$head_verdict" = SKIP ] && [ "$merged_verdict" = SKIP ]; then
             echo "run_tier=false" >> "$GITHUB_OUTPUT"
-            echo "reason=no harness path in the diff under the base or head tooling-tests scope (#4266); the nightly gate.yml covers drift" >> "$GITHUB_OUTPUT"
+            echo "reason=no harness path in the diff under the base, head or merged tooling-tests scope (#4266); the nightly gate.yml covers drift" >> "$GITHUB_OUTPUT"
           else
             echo "run_tier=true" >> "$GITHUB_OUTPUT"
-            echo "reason=tooling-tests scope base=${base_verdict} head=${head_verdict}; RUN unless both read SKIP" >> "$GITHUB_OUTPUT"
+            echo "reason=tooling-tests scope ${verdicts}; RUN unless all three read SKIP" >> "$GITHUB_OUTPUT"
           fi
           echo "Tooling tier verdict: $(grep -h run_tier "$GITHUB_OUTPUT" | tail -1)"
 
