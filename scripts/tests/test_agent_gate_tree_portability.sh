@@ -489,18 +489,18 @@ ESCAPE_RULES="awk-v-escape-processing"
 LINT_ALLOW="_tree_probe_tools:stat-gnu _tree_mtime:stat-gnu _tree_probe_tools:sort-nul _tree_sort0:sort-nul"
 lint_rule_pat() {
   case "$1" in
-    bre-escape)   printf '%s' '(sed|grep)[[:space:]].*\\[tsSwWdb+|]' ;;
-    sed-in-place) printf '%s' 'sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-i([[:space:]]|$)' ;;
-    grep-perl)    printf '%s' 'grep[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*P([[:space:]]|$)' ;;
-    date-d)       printf '%s' 'date[[:space:]]+(-d([[:space:]]|$)|--date)' ;;
-    readlink-f)   printf '%s' 'readlink[[:space:]]+-[a-zA-Z]*f' ;;
-    sort-version) printf '%s' 'sort[[:space:]]+(-[a-zA-Z]*V([[:space:]]|$)|--version-sort)' ;;
-    sort-nul)     printf '%s' 'sort[[:space:]]+(-[a-zA-Z]*z([[:space:]]|$)|--zero-terminated)' ;;
-    stat-gnu)     printf '%s' 'stat[[:space:]]+-c' ;;
-    xargs-r)      printf '%s' 'xargs[[:space:]]+(-[a-zA-Z]*r([[:space:]]|$)|--no-run-if-empty)' ;;
-    find-printf)  printf '%s' 'find[[:space:]].*-printf' ;;
-    mktemp-p)     printf '%s' 'mktemp[[:space:]]+(-p([[:space:]]|$)|--tmpdir)' ;;
-    echo-e)       printf '%s' 'echo[[:space:]]+-e([[:space:]]|$)' ;;
+    bre-escape)   printf '%s' '(sed|grep)[[:space:]].*\\[tsSwWdb+|]' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    sed-in-place) printf '%s' 'sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-i([[:space:]]|$)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    grep-perl)    printf '%s' 'grep[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*P([[:space:]]|$)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    date-d)       printf '%s' 'date[[:space:]]+(-d([[:space:]]|$)|--date)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    readlink-f)   printf '%s' 'readlink[[:space:]]+-[a-zA-Z]*f' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    sort-version) printf '%s' 'sort[[:space:]]+(-[a-zA-Z]*V([[:space:]]|$)|--version-sort)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    sort-nul)     printf '%s' 'sort[[:space:]]+(-[a-zA-Z]*z([[:space:]]|$)|--zero-terminated)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    stat-gnu)     printf '%s' 'stat[[:space:]]+-c' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    xargs-r)      printf '%s' 'xargs[[:space:]]+(-[a-zA-Z]*r([[:space:]]|$)|--no-run-if-empty)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    find-printf)  printf '%s' 'find[[:space:]].*-printf' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    mktemp-p)     printf '%s' 'mktemp[[:space:]]+(-p([[:space:]]|$)|--tmpdir)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
+    echo-e)       printf '%s' 'echo[[:space:]]+-e([[:space:]]|$)' ;;  # sigpipe-fixture: false positive: the printed regex literal contains a pipe
     awk-v-escape-processing)
                   printf '%s' 'awk[[:space:]].*[[:space:]]-v[[:space:]]' ;;
   esac
@@ -517,7 +517,7 @@ rule_hits() {
     [ -n "$body" ] || continue
     for rule in $rules; do
       lint_allowed "$fn" "$rule" && continue
-      hit=$(printf '%s\n' "$body" | grep -nE "$(lint_rule_pat "$rule")" | head -1)
+      hit=$(grep -m1 -nE "$(lint_rule_pat "$rule")" <<<"$body")
       [ -n "$hit" ] && found="${found}${fn}/${rule}: ${hit}"$'\n'
     done
   done
@@ -533,8 +533,8 @@ missing_fns=""
 for fn in $TREE_FNS; do
   [ -n "$(fn_body "$GATE" "$fn")" ] || missing_fns="${missing_fns:+$missing_fns }$fn"
 done
-n_tree_fns=$(printf '%s\n' $TREE_FNS | grep -c . | tr -d ' ')
-n_uniq_fns=$(printf '%s\n' $TREE_FNS | LC_ALL=C sort -u | grep -c . | tr -d ' ')
+n_tree_fns=$(grep -c . <<<"${TREE_FNS// /$'\n'}" | tr -d ' ')
+n_uniq_fns=$(LC_ALL=C sort -u <<<"${TREE_FNS// /$'\n'}" | grep -c . | tr -d ' ')
 anchor_missing=""
 for fn in _tree_identity _tree_finalize _assert_tree_integrity _tree_label_post_mutation; do
   case " $TREE_FNS " in *" $fn "*) ;; *) anchor_missing="${anchor_missing:+$anchor_missing }$fn" ;; esac
@@ -547,7 +547,7 @@ else
 fi
 # shellcheck disable=SC2086  # intentional word-split over the space-separated name list
 if gnu_hits=$(rule_hits "$GATE" "$GNU_RULES" $TREE_FNS); then
-  ok "PORTABILITY: no GNU-only construct in any tree-integrity function ($(printf '%s\n' $GNU_RULES | grep -c . | tr -d ' ') rules)"
+  ok "PORTABILITY: no GNU-only construct in any tree-integrity function ($(grep -c . <<<"${GNU_RULES//[[:space:]]/$'\n'}" | tr -d ' ') rules)"
 else
   bad "PORTABILITY: GNU-only construct(s) in the tree-integrity code:"
   printf '%s' "$gnu_hits"
@@ -589,7 +589,7 @@ mktemp-p|mktemp -p /tmp
 echo-e|echo -e "a"
 awk-v-escape-processing|awk -F'\t' -v p="$2" '$4 == p { print }' "$1"
 MUTANTS
-n_lint_rules=$(printf '%s\n' $GNU_RULES $ESCAPE_RULES | grep -c . | tr -d ' ')
+n_lint_rules=$(grep -c . <<<"${GNU_RULES//[[:space:]]/$'\n'}"$'\n'"${ESCAPE_RULES//[[:space:]]/$'\n'}" | tr -d ' ')
 if [ "$lint_caught" -eq "$lint_total" ] && [ "$lint_total" -eq 13 ] \
    && [ "$n_lint_rules" -eq 13 ]; then
   ok "PORTABILITY+ESCAPING: every one of the $lint_total lint rules is proved discriminating (one mutant each, checked against its OWN rule)"
@@ -611,18 +611,18 @@ for shape in top nested commented oneliner; do
   case "$shape" in
     top)
       { printf '%s() {\n' "$newfn"
-        printf "  comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"
+        printf "  comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"  # sigpipe-fixture: planted subject: text written into a generated fixture script
         printf '}\n'; } >> "$mut" ;;
     nested)   # defined inside a conditional block — indented, the shape a column-0-only
               # extractor returned EMPTY for and therefore skipped entirely
       { printf 'if [ "${SOME_FLAG:-0}" = 1 ]; then\n'
         printf '  %s() {\n' "$newfn"
-        printf "    comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"
+        printf "    comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"  # sigpipe-fixture: planted subject: text written into a generated fixture script
         printf '  }\n'
         printf 'fi\n'; } >> "$mut" ;;
     commented)   # a trailing comment on the definition line
       { printf '%s() {   # <fd> -> something\n' "$newfn"
-        printf "  comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"
+        printf "  comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"  # sigpipe-fixture: planted subject: text written into a generated fixture script
         printf '}\n'; } >> "$mut" ;;
     oneliner)    # whole definition on one line
       printf "%s() { sed -i 's/a/b/' \"\$1\"; }\n" "$newfn" >> "$mut" ;;
@@ -684,7 +684,7 @@ else
 fi
 # The structural half of G5: the blob-id rule is SHARED, never a second hard-coded length.
 if body_has "$(fn_body "$GATE" _tree_lockfile_admissible)" '  _tree_hex_id_ok "$vb" || return 1' \
-   && ! printf '%s\n' "$(fn_body "$GATE" _tree_lockfile_admissible)" | grep -q '"${#vb}" -eq 40'; then
+   && ! grep -q '"${#vb}" -eq 40' <<<"$(fn_body "$GATE" _tree_lockfile_admissible)"; then
   ok "G5: the carve-out reuses _tree_hex_id_ok (40|64) — no second, hard-coded length rule"
 else
   bad "G5: the lockfile carve-out carries its own blob-id length rule again"
