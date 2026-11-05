@@ -113,12 +113,12 @@ print_scope() {
   printf 'DECLARED FALSE POSITIVES -- correct code this guard REPORTS. Accepted noise, because a\n'
   printf '           guard with false-PASSes hides defects while a guard with loud false POSITIVES\n'
   printf '           only costs noise (#3229). Remedy is always: restructure the line.\n'
-  printf '           1. pipe inside a format string       printf %%s "a | b"\n'  # sigpipe-fixture: help text describing the matcher's declared shapes
-  printf '           2. pipe inside a quoted argument     echo "col1|col2"\n'  # sigpipe-fixture: help text describing the matcher's declared shapes
-  printf '           3. pipe in a trailing comment        printf %%s "$x"   # see: cmd | head\n'  # sigpipe-fixture: help text describing the matcher's declared shapes
-  printf '           4. unrelated later pipeline          v=$(printf %%s "$x"); other | grep -q y\n'  # sigpipe-fixture: help text describing the matcher's declared shapes
-  printf '           5. quoted option-looking pattern     printf %%s "$t" | grep -e "text -q"\n'  # sigpipe-fixture: help text describing the matcher's declared shapes
-  printf '           6. run-to-EOF reader                 printf %%s "$t" | grep -c foo\n'  # sigpipe-fixture: help text describing the matcher's declared shapes
+  printf '           1. pipe inside a format string       printf %%s "a | b"\n'
+  printf '           2. pipe inside a quoted argument     echo "col1|col2"\n'
+  printf '           3. pipe in a trailing comment        printf %%s "$x"   # see: cmd | head\n'
+  printf '           4. unrelated later pipeline          v=$(printf %%s "$x"); other | grep -q y\n'
+  printf '           5. quoted option-looking pattern     printf %%s "$t" | grep -e "text -q"\n'
+  printf '           6. run-to-EOF reader                 printf %%s "$t" | grep -c foo\n'
   printf '           Pinned as cases 6,7,8,9,9e,9i. Narrowing any of them is issue #3992.\n'
   printf 'RESIDUALS of the broad form (all false-NEGATIVE direction, all declared):\n'
   printf '           a. The scan is LEXICAL and PER-LINE. A writer split across a line\n'
@@ -220,7 +220,7 @@ cat >"$tmp/pos.sh" <<'POS'
 #!/usr/bin/env bash
 _field() {
   local text="$1" k="$2" line
-  line=$(printf '%s\n' "$text" | grep -m1 "^$k: ") || return 0  # sigpipe-fixture: planted #3803 shape, the positive control needs the hazard
+  line=$(printf '%s\n' "$text" | grep -m1 "^$k: ") || return 0
   printf '%s' "${line#"$k": }"
 }
 POS
@@ -240,8 +240,8 @@ fi
 # ---------------------------------------------------------------------------
 cat >"$tmp/pos2.sh" <<'POS2'
 #!/usr/bin/env bash
-open_ln=$(printf '%s\n' "$t" | grep -nxF 'X' | head -1 | cut -d: -f1)  # sigpipe-fixture: planted two-hop shape
-_bp=$(printf '%s\n' "$1" | sed -n 's/^beater-pid: //p' | head -1)  # sigpipe-fixture: planted two-hop shape
+open_ln=$(printf '%s\n' "$t" | grep -nxF 'X' | head -1 | cut -d: -f1)
+_bp=$(printf '%s\n' "$1" | sed -n 's/^beater-pid: //p' | head -1)
 POS2
 pos2_n=$(n_violations "$tmp/pos2.sh")
 if [ "$pos2_n" -eq 2 ]; then
@@ -297,13 +297,13 @@ _declared_fp() { # _declared_fp <n> <label> <line-of-bash>
     bad "$n DECLARED false positive: $label" "expected the broad form to REPORT this shape and it did not — the matcher has been narrowed; see #3992 and update the declaration in scripts/tests/lib/sigpipe-matcher.sh"
   fi
 }
-_declared_fp 6 "a pipe inside the FORMAT STRING"        "printf 'a | b\\n'"  # sigpipe-fixture: planted matcher fixture
-_declared_fp 7 "a pipe inside a TRAILING COMMENT"       'printf '"'"'%s\n'"'"' "x"   # comment with | pipes in it'  # sigpipe-fixture: planted matcher fixture
+_declared_fp 6 "a pipe inside the FORMAT STRING"        "printf 'a | b\\n'"
+_declared_fp 7 "a pipe inside a TRAILING COMMENT"       'printf '"'"'%s\n'"'"' "x"   # comment with | pipes in it'
 _declared_fp 8 "a pipe inside a QUOTED ARGUMENT"        'echo "col1|col2"'
 # NOTE: the reader here is DELIBERATELY a recognised one (`grep -q`). With a non-reader such as
 # `thing` this case passes on the reader requirement alone and never exercises the `;` handling it
 # claims to test -- a case passing for the wrong reason.
-_declared_fp 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"' "$x"); other | grep -q x'  # sigpipe-fixture: planted matcher fixture
+_declared_fp 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"' "$x"); other | grep -q x'
 
 # ---------------------------------------------------------------------------
 # 9b. CONVERSE CONTROL. Cases 6-9 assert the matcher stays QUIET on correct code; alone they are
@@ -311,7 +311,7 @@ _declared_fp 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"'
 #    direction on the same shapes: a quoted pipe, and a `;`, must NOT MASK a genuine
 #    builtin-into-pipe on the same line.
 # ---------------------------------------------------------------------------
-printf '#!/usr/bin/env bash\n%s\n%s\n' 'echo "col1|col2" | grep -q x' 'printf %s "$v"; :; printf %s\n "$t" | head -1' >"$tmp/conv.sh"  # sigpipe-fixture: planted matcher fixture
+printf '#!/usr/bin/env bash\n%s\n%s\n' 'echo "col1|col2" | grep -q x' 'printf %s "$v"; :; printf %s\n "$t" | head -1' >"$tmp/conv.sh"
 conv_n=$(violations "$tmp/conv.sh" | grep -c .)
 if [ "$conv_n" -eq 2 ]; then
   ok "9b converse control: neither a quoted pipe nor a \`;\` masks a real hazardous pipeline"
@@ -325,8 +325,8 @@ fi
 #    safe code (roborev job 22). Paired with a positive half so this cannot be satisfied by a
 #    matcher that simply stopped looking.
 # ---------------------------------------------------------------------------
-printf '#!/usr/bin/env bash\n%s\n' 'producer | grep -q x | printf %s done' >"$tmp/down.sh"  # sigpipe-fixture: planted matcher fixture
-printf '#!/usr/bin/env bash\n%s\n' 'printf %s "$t" | grep -q x' >"$tmp/up.sh"  # sigpipe-fixture: planted matcher fixture
+printf '#!/usr/bin/env bash\n%s\n' 'producer | grep -q x | printf %s done' >"$tmp/down.sh"
+printf '#!/usr/bin/env bash\n%s\n' 'printf %s "$t" | grep -q x' >"$tmp/up.sh"
 if [ "$(violations "$tmp/down.sh" | grep -c .)" -eq 0 ] && [ "$(violations "$tmp/up.sh" | grep -c .)" -eq 1 ]; then
   ok "9c a builtin DOWNSTREAM of the reader is safe (0 RECOGNISED); upstream is still flagged"
 else
@@ -350,16 +350,16 @@ _pin() { # _pin <id> <expected-count> <label> <line-of-bash>
 }
 
 # finding 1, false-NEGATIVE half: a quoted `;` must not hide a real hazard.
-_pin 9d 1 "a quoted semicolon does NOT hide a real hazard" 'printf '"'"'x;y\n'"'"' | grep -q x'  # sigpipe-fixture: planted matcher fixture
+_pin 9d 1 "a quoted semicolon does NOT hide a real hazard" 'printf '"'"'x;y\n'"'"' | grep -q x'
 # finding 1, false-POSITIVE half: a quoted `|` is not a pipe.
-_pin 9e 1 "DECLARED noise: a quoted pipe IS reported (accepted; #3992)"        'printf '"'"'x | grep -q y\n'"'"''  # sigpipe-fixture: planted matcher fixture
+_pin 9e 1 "DECLARED noise: a quoted pipe IS reported (accepted; #3992)"        'printf '"'"'x | grep -q y\n'"'"''
 # finding 2 (job 36): these long-option forms were once unrecognised; the broad form catches
 # them because it does not inspect options at all.
-_pin 9f 3 "grep long options --quiet/--silent/--max-count are recognised" 'printf %s "$t" | grep --quiet a # sigpipe-fixture
-printf %s "$t" | grep --silent a # sigpipe-fixture
-printf %s "$t" | grep --max-count=1 a' # sigpipe-fixture
+_pin 9f 3 "grep long options --quiet/--silent/--max-count are recognised" 'printf %s "$t" | grep --quiet a
+printf %s "$t" | grep --silent a
+printf %s "$t" | grep --max-count=1 a'
 # and the sed quit form, which the destructuring had to be taught about explicitly.
-_pin 9g 1 "sed quit inside quotes is still recognised"     'printf %s "$t" | sed -n '"'"'p;q'"'"''  # sigpipe-fixture: planted matcher fixture
+_pin 9g 1 "sed quit inside quotes is still recognised"     'printf %s "$t" | sed -n '"'"'p;q'"'"''
 
 # ---------------------------------------------------------------------------
 # 9h-9i. REGRESSION PINS for roborev job 74 (two Mediums, both consequences of the quote
@@ -367,8 +367,8 @@ _pin 9g 1 "sed quit inside quotes is still recognised"     'printf %s "$t" | sed
 #    desynchronised the quote state and MASKED a real pipe, which is how the #3803 channel
 #    could have come back under a green gate.
 # ---------------------------------------------------------------------------
-_pin 9h 1 "an escaped double quote does NOT mask a real pipe" 'printf "%s\n" "a\"b" | grep -q a'  # sigpipe-fixture: planted matcher fixture
-_pin 9i 1 "DECLARED noise: a quoted arg containing the word printf IS reported (accepted; #3992)" 'grep -F "printf value" "$file" | grep -q value'  # sigpipe-fixture: planted matcher fixture
+_pin 9h 1 "an escaped double quote does NOT mask a real pipe" 'printf "%s\n" "a\"b" | grep -q a'
+_pin 9i 1 "DECLARED noise: a quoted arg containing the word printf IS reported (accepted; #3992)" 'grep -F "printf value" "$file" | grep -q value'
 
 # ---------------------------------------------------------------------------
 # 9j-9k. The two hazards the BROAD form exists to catch that EVERY narrow revision missed.
@@ -379,7 +379,7 @@ _pin 9i 1 "DECLARED noise: a quoted arg containing the word printf IS reported (
 #    direction this whole design change exists to eliminate.
 # ---------------------------------------------------------------------------
 _pin 9j 1 "no-argument writer: echo|head is caught (every narrow revision missed it)" 'echo|head -n 0'
-_pin 9k 1 "a writer preceded by an unrelated pipe is still caught" 'producer | printf %s "$x" | grep -q y'  # sigpipe-fixture: planted matcher fixture
+_pin 9k 1 "a writer preceded by an unrelated pipe is still caught" 'producer | printf %s "$x" | grep -q y'
 
 # ---------------------------------------------------------------------------
 # 9l-9n. Redirection immediately after the writer (roborev job 110, false-NEGATIVE direction).
@@ -391,7 +391,7 @@ _pin 9k 1 "a writer preceded by an unrelated pipe is still caught" 'producer | p
 _pin 9l 1 "herestring straight after the writer: printf<<<...|head" 'printf<<<"$text"|head -1'
 _pin 9m 1 "fd dup straight after the writer: echo>&1|head"          'echo>&1|head -1'
 _pin 9n 1 "redirect straight after the writer: printf>/dev/null|head" 'printf>/dev/null|head -1'
-_pin 9o 0 "printfoo is NOT the printf builtin"                       'printfoo | head -1'  # sigpipe-fixture: planted matcher fixture
+_pin 9o 0 "printfoo is NOT the printf builtin"                       'printfoo | head -1'
 _pin 9p 0 "echoes is NOT the echo builtin"                           'echoes | head -1'
 
 # ---------------------------------------------------------------------------
@@ -400,14 +400,14 @@ _pin 9p 0 "echoes is NOT the echo builtin"                           'echoes | h
 #    leading `|` was consumed by match() and then found by the pipe scan. An UNDECLARED false
 #    positive is worse than a declared one -- it contradicts the rule the guard prints.
 # ---------------------------------------------------------------------------
-_pin 9q 0 "final-stage writer, no whitespace: producer|printf is NOT a hazard" 'producer|printf %s done'  # sigpipe-fixture: planted matcher fixture
+_pin 9q 0 "final-stage writer, no whitespace: producer|printf is NOT a hazard" 'producer|printf %s done'
 
 # ---------------------------------------------------------------------------
 # 9r-9s. Command names that merely BEGIN with a builtin name (roborev job 116). The boundary
 #    classes are symmetric so these are not writers. 9o/9p pin the alnum case; these pin the
 #    punctuation case that the asymmetry let through.
 # ---------------------------------------------------------------------------
-_pin 9r 0 "printf.local is NOT the printf builtin" 'printf.local | head -1'  # sigpipe-fixture: planted matcher fixture
+_pin 9r 0 "printf.local is NOT the printf builtin" 'printf.local | head -1'
 _pin 9s 0 "echo/tool is NOT the echo builtin"      'echo/tool | head -1'
 
 # Case 9t pins a DECLARED MISS (residual c), not a success: bash DOES run the builtin for the
