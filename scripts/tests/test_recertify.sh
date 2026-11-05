@@ -69,7 +69,7 @@ bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 # ==== Layer 1: domain table + pure classification ============================
 declared_components=$(bash "$GATE" --list 2>/dev/null)
-n_components=$(printf '%s\n' "$declared_components" | awk 'NF' | wc -l | tr -d ' ')
+n_components=$(awk 'NF' <<<"$declared_components" | wc -l | tr -d ' ')
 if [ "$n_components" -lt 30 ]; then
   echo "FATAL: agent-gate.sh --list returned $n_components names (expected ~39) — cannot run the completeness census"
   exit 1
@@ -435,9 +435,9 @@ if ! build_fixture "$fixture" >"$TMPROOT/build.log" 2>&1; then
   cat "$TMPROOT/build.log" 2>/dev/null
 else
   ident=$(tree_identity "$fixture")
-  f_sha=$(printf '%s' "$ident" | awk '{print $1}')
-  f_dirty=$(printf '%s' "$ident" | awk '{print $2}')
-  f_digest=$(printf '%s' "$ident" | awk '{print $3}')
+  f_sha=$(awk '{print $1}' <<<"$ident")
+  f_dirty=$(awk '{print $2}' <<<"$ident")
+  f_digest=$(awk '{print $3}' <<<"$ident")
   if [ -z "$f_sha" ] || [ -z "$f_digest" ]; then
     bad "could not scrape a real tree identity from the fixture's own --only file-size run — skipping all real-invocation cases"
   else
@@ -834,8 +834,8 @@ else
     ( cd "$fixture" && echo 'changed' >>cqlite-core/src/lib.rs \
         && git add -A && git commit -qm "touch core src" ) >/dev/null 2>&1
     ident2=$(tree_identity "$fixture")
-    f2_sha=$(printf '%s' "$ident2" | awk '{print $1}')
-    f2_digest=$(printf '%s' "$ident2" | awk '{print $3}')
+    f2_sha=$(awk '{print $1}' <<<"$ident2")
+    f2_digest=$(awk '{print $3}' <<<"$ident2")
     diff_anchor="$TMPROOT/anchor-diff.txt"
     write_anchor "$diff_anchor" "$f2_sha" "$f2_digest"
     run_recert "$fixture" "$diff_anchor" file-size
