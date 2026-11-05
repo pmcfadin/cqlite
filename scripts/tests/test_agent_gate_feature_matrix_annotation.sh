@@ -179,7 +179,7 @@ else
   dyn_names=$( { grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" | sed -E 's/.*\("(.*)"\)/\1/'
                  grep -E '^[^#]*record_result "[a-z0-9][a-z0-9-]*"' "$GATE" \
                    | sed -E 's/.*record_result "([a-z0-9][a-z0-9-]*)".*/\1/'; } | sort -u)
-  dyn_n=$(printf '%s\n' "$dyn_names" | grep -c . || true)
+  dyn_n=$(grep -c . <<<"$dyn_names" || true)
   # Fail-closed on a broken derivation: an empty — or merely SHRUNKEN — set would silently
   # narrow the domain back toward COMPONENTS and re-open exactly this finding. Floor of 4,
   # the same discipline and the same number as the census guard: node-tests, scoped-tests,
@@ -187,7 +187,7 @@ else
   if [ "${dyn_n:-0}" -lt 4 ]; then
     bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names (expected at least the 4 known: node-tests, scoped-tests, shell-selftests, tree-selftest) — the domain would silently narrow toward COMPONENTS, which is how job 277 F2 escaped and how job 401 escaped again"
   else
-    ok "A0b: dynamic summary-name set DERIVED from the emit path: ${dyn_n} name(s) [$(printf '%s' "$dyn_names" | tr '\n' ' ')]"
+    ok "A0b: dynamic summary-name set DERIVED from the emit path: ${dyn_n} name(s) [$(tr '\n' ' ' < <(printf '%s' "$dyn_names"))]"
   fi
   for c in "${comps_arr[@]}" $dyn_names; do
     if cls=$(_fm_component_class "$c"); then
@@ -307,7 +307,7 @@ stray=$(grep -nE '(^|[^_[:alnum:]])_fm_observe_cargo_argv ' "$GATE" \
   | awk -F: -v e="${fm_end_for_b9:-0}" '$1 > e' \
   | grep -vE '^[0-9]+:[[:space:]]*#' \
   | grep -v 'AGENT_GATE_FM_COMPONENT=' || true)
-[ -n "$stray" ] && b9+=("parent-side-pre-record: $(printf '%s' "$stray" | cut -d: -f1 | tr '\n' ' ')")
+[ -n "$stray" ] && b9+=("parent-side-pre-record: $(cut -d: -f1 <<<"$stray" | tr '\n' ' ')")
 if [ "${#b9[@]}" -eq 0 ]; then
   ok "B9: all eight bash -c components record from INSIDE the body, and no parent-side pre-record remains (a record now means an invocation that STARTED)"
 else
@@ -379,7 +379,7 @@ esac
 # (`run_<name-with-underscores>`), whose body is extracted here. Existence-anywhere is the
 # permissive answer, and a guard that accepts it green-lights the next unrecorded driver.
 _b11_runner_body() { # <component> -> the body of run_<component>, or nothing
-  awk -v fn="run_$(printf '%s' "$1" | tr '-' '_')" '
+  awk -v fn="run_$(tr '-' '_' <<<"$1")" '
     $0 ~ "^" fn "\\(\\) \\{" { inside = 1; next }
     inside && /^}/ { exit }
     inside { print }
@@ -834,7 +834,7 @@ fi
 # artifact instead of the wrapper — a vacuous pass (it did, first try).
 got_stdin=$(
   PATH="$fid:$PATH"
-  printf hello-stdin | cargo build | sed -n 's/^STDIN\[\(.*\)\]$/\1/p'
+  printf hello-stdin | cargo build | sed -n 's/^STDIN\[\(.*\)\]$/\1/p'  # sigpipe-fixture: planted subject: printf-into-cargo wrapper stand-in under test
 )
 [ "$got_stdin" = hello-stdin ] && ok "W5: stdin passes through the cargo wrapper untouched" \
   || bad "W5: stdin arrived as '$got_stdin'"
