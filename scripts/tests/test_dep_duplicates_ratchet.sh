@@ -701,7 +701,7 @@ else
 fi
 # The described command, taken from the guard's own `probe … INVOKED` line, must be
 # covered by that argv — the description and the command may not drift apart.
-p20_desc="$(sed -n 's/^dep-duplicates: probe \(.*\) INVOKED .*/\1/;T;p;q' <<<"$OUT")"
+p20_desc="$(sed -n 's/^dep-duplicates: probe \(.*\) INVOKED .*/\1/p' <<<"$OUT")"; p20_desc=${p20_desc%%$'\n'*}
 p20_undescribed=""
 for _w in $p20_desc; do
   case "$_w" in cargo) continue ;; esac
