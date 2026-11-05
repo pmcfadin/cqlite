@@ -1105,13 +1105,13 @@ fi
 tmp_phys=$(cd "$tmp" && pwd -P)
 e5_out=$( cd "$r_nest" && env -u AGENT_GATE_PARENT_RUN_ID AGENT_GATE_SUMMARY_FILE="$tmp/elsewhere-summary.txt" \
             AGENT_GATE_TREE_SELFTEST=capture bash "$r_nest/scripts/agent-gate.sh" 2>/dev/null )
-e5_man=$(printf '%s\n' "$e5_out" | sed -n 's/^tree-selftest: artifacts-manifest=//p' | head -1)
+e5_man=$(sed -n 's/^tree-selftest: artifacts-manifest=//;T;p;q' <<<"$e5_out")
 case "$e5_man" in
   "pid:"[0-9]*" summary:$tmp_phys/elsewhere-summary.txt")
     ok "E5: the manifest carries the gate's pid and its out-of-checkout summary's physical path (exported wherever it lives)" ;;
   *) bad "E5: unexpected tree-artifacts manifest '$e5_man'" ;;
 esac
-if printf '%s\n' "$e5_out" | grep -qx 'tree-selftest: inherited-line=<none>'; then
+if grep -qx 'tree-selftest: inherited-line=<none>' <<<"$e5_out"; then
   ok "E5: a top-level run inherits nothing"
 else
   bad "E5: a top-level run reported an inherited line"
@@ -1319,9 +1319,9 @@ fi
 E6_PRE='^detected-after-component: (fmt)$'
 e6_out=$( nested_gate_bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard" \
             "$E6_PRE" "$tmp/e1m-nested.txt" )
-if printf '%s\n' "$e6_out" | grep -q '^FAIL - 3148-no-env-report-only: INCONCLUSIVE — the nested gate STOPPED at the tree-integrity boundary' \
-   && printf '%s\n' "$e6_out" | grep -q 'tree-mutated-midrun' \
-   && printf '%s\n' "$e6_out" | grep -q 'NOT the cause: an environment value defeated'; then
+if grep -q '^FAIL - 3148-no-env-report-only: INCONCLUSIVE — the nested gate STOPPED at the tree-integrity boundary' <<<"$e6_out" \
+   && grep -q 'tree-mutated-midrun' <<<"$e6_out" \
+   && grep -q 'NOT the cause: an environment value defeated' <<<"$e6_out"; then
   ok "E6: a boundary-stopped nested block is reported as tree-mutation, with the guard's text labelled NOT the cause"
 else
   bad "E6: the attribution helper did not lead with the tree-integrity stop"
@@ -1348,7 +1348,7 @@ fi
 e6_mix=$( nested_gate_bad "3148-z: guard regressed in one run" "$E6_PRE" "$tmp/e1m-nested.txt" "$tmp/e6-genuine.txt" )
 e6_all=$( nested_gate_bad "3148-w: both stopped" "$E6_PRE" "$tmp/e1m-nested.txt" "$tmp/e1m-nested.txt" )
 if [ "$e6_mix" = "FAIL - 3148-z: guard regressed in one run" ] \
-   && printf '%s\n' "$e6_all" | grep -q 'INCONCLUSIVE.*(all 2 failed runs stopped there)'; then
+   && grep -q 'INCONCLUSIVE.*(all 2 failed runs stopped there)' <<<"$e6_all"; then
   ok "E6 control: a mixed set keeps the guard's text; only an all-stopped set is reported as the tree"
 else
   bad "E6 control: multi-summary attribution is wrong (mixed='$e6_mix' all='$e6_all')"
