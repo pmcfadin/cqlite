@@ -109,11 +109,11 @@ fi
 dyn_names=$( { grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" | sed -E 's/.*\("(.*)"\)/\1/'
                grep -E '^[^#]*record_result "[a-z0-9][a-z0-9-]*"' "$GATE" \
                  | sed -E 's/.*record_result "([a-z0-9][a-z0-9-]*)".*/\1/'; } | sort -u)
-dyn_n=$(printf '%s\n' "$dyn_names" | grep -c . || true)
+dyn_n=$(grep -c . <<<"$dyn_names" || true)
 if [ "${dyn_n:-0}" -lt 4 ]; then
   bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names (expected at least the 4 known: node-tests, scoped-tests, shell-selftests, tree-selftest) — the domain would silently shrink toward COMPONENTS, which is exactly how an undeclared name reaches a block"
 else
-  ok "A0b: dynamic summary-name set DERIVED from the emit path: $dyn_n name(s) [$(printf '%s' "$dyn_names" | tr '\n' ' ')]"
+  ok "A0b: dynamic summary-name set DERIVED from the emit path: $dyn_n name(s) [$(tr '\n' ' ' < <(printf '%s' "$dyn_names"))]"
 fi
 
 undeclared=()
@@ -627,7 +627,7 @@ else
   # contains " PASS ", so F2 fired for a reason unrelated to the status. Same lesson as
   # Q1's status-claim check — a word scan over a line that legitimately names other
   # statuses is a guard that reds on correct input.
-  plant_st=$(printf '%s' "$plant_line" | awk '{print $2}')
+  plant_st=$(awk '{print $2}' <<<"$plant_line")
   if [ "$plant_st" = PASS ]; then
     bad "F2 (AC2): the planted component still reports PASS — a component that verified nothing must not pass: $plant_line"
   else
@@ -1243,27 +1243,27 @@ for spec in \
   # The expected bucket must hold exactly 1, and the OTHER status-derived buckets must
   # hold 0 — a label that fires for two different pairs is the defect, not the count.
   case "$q_want" in
-    AFFIRMED)       q_got=$(printf '%s' "$q_line" | sed -n 's/^census: \([0-9]*\)\/1 .*/\1/p') ;;
-    DECLARED-GAP)   q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) DECLARED-GAP .*/\1/p') ;;
-    NOT-MEASURED)   q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) NOT-MEASURED (RECOGNISED).*/\1/p') ;;
-    measured-ZERO)  q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) measured-ZERO .*/\1/p') ;;
-    not-applicable) q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) not-applicable (component did not PASS).*/\1/p') ;;
-    no-subject)     q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) no-subject (PASSed.*/\1/p') ;;
-    UNDECLARED)     q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) UNDECLARED;.*/\1/p') ;;
-    unrecognised)   q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) unrecognised;.*/\1/p') ;;
+    AFFIRMED)       q_got=$(sed -n 's/^census: \([0-9]*\)\/1 .*/\1/p' <<<"$q_line") ;;
+    DECLARED-GAP)   q_got=$(sed -n 's/.*; \([0-9]*\) DECLARED-GAP .*/\1/p' <<<"$q_line") ;;
+    NOT-MEASURED)   q_got=$(sed -n 's/.*; \([0-9]*\) NOT-MEASURED (RECOGNISED).*/\1/p' <<<"$q_line") ;;
+    measured-ZERO)  q_got=$(sed -n 's/.*; \([0-9]*\) measured-ZERO .*/\1/p' <<<"$q_line") ;;
+    not-applicable) q_got=$(sed -n 's/.*; \([0-9]*\) not-applicable (component did not PASS).*/\1/p' <<<"$q_line") ;;
+    no-subject)     q_got=$(sed -n 's/.*; \([0-9]*\) no-subject (PASSed.*/\1/p' <<<"$q_line") ;;
+    UNDECLARED)     q_got=$(sed -n 's/.*; \([0-9]*\) UNDECLARED;.*/\1/p' <<<"$q_line") ;;
+    unrecognised)   q_got=$(sed -n 's/.*; \([0-9]*\) unrecognised;.*/\1/p' <<<"$q_line") ;;
     *)              q_got="(no extractor for $q_want)" ;;
   esac
   [ "$q_got" = 1 ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] expected 1 in '$q_want', got '$q_got'")
   # THE STATUS-DERIVED FIGURES must track the STATUS, never the state.
-  q_vac=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) row(s) carry a VACUOUS status.*/\1/p')
+  q_vac=$(sed -n 's/.*; \([0-9]*\) row(s) carry a VACUOUS status.*/\1/p' <<<"$q_line")
   if [ "$q_st" = VACUOUS ]; then
     [ "$q_vac" = 1 ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] a VACUOUS row was counted as '$q_vac' VACUOUS")
   else
     [ "$q_vac" = 0 ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] a non-VACUOUS row was counted as '$q_vac' VACUOUS")
   fi
   # …and no rendered word may assert the WRONG status. The two directions that bit:
-  q_np=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) not-applicable (component did not PASS).*/\1/p')
-  q_ns=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) no-subject (PASSed.*/\1/p')
+  q_np=$(sed -n 's/.*; \([0-9]*\) not-applicable (component did not PASS).*/\1/p' <<<"$q_line")
+  q_ns=$(sed -n 's/.*; \([0-9]*\) no-subject (PASSed.*/\1/p' <<<"$q_line")
   if [ "$q_st" = PASS ] && [ "$q_np" != 0 ]; then
     q_bad+=("[$q_comp $q_st / ${q_rec%% *}] a PASSing row was counted as 'did not PASS'")
   fi
@@ -1281,7 +1281,7 @@ for spec in \
   q_missing=""
   _qf() { # _qf <label> <sed-program>
     local v
-    v=$(printf '%s' "$q_line" | sed -n "$2")
+    v=$(sed -n "$2" <<<"$q_line")
     case "$v" in
       ''|*[!0-9]*) q_missing="$q_missing '$1'" ;;
       *)           q_tot=$(( q_tot + v )) ;;
@@ -1309,7 +1309,7 @@ for spec in \
   q_ann=$(_census_annotate "$q_comp" "$q_st")
   case "$q_ann" in
     *'component ended '*)
-      q_claim=$(printf '%s' "$q_ann" | sed -n 's/.*component ended \([A-Z][A-Z-]*\).*/\1/p')
+      q_claim=$(sed -n 's/.*component ended \([A-Z][A-Z-]*\).*/\1/p' <<<"$q_ann")
       [ "$q_claim" = "$q_st" ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] the row suffix CLAIMS 'component ended $q_claim' on a $q_st row") ;;
   esac
 done
@@ -1387,7 +1387,7 @@ r_hits=$(grep -rlF -- "$r_needle" "$REPO_ROOT/scripts" 2>/dev/null | sort || tru
 if [ -z "$r_hits" ]; then
   ok "R1 (job 376 F2 + sweep): no script enumerates the component-status set as a bare three-token PASS/FAIL/SKIP alternation — VACUOUS is a status now, and a pattern that omits it stops seeing the rows that report a component verified nothing"
 else
-  bad "R1: three-token component-status alternation(s) survive (VACUOUS omitted) in: $(printf '%s' "$r_hits" | tr '\n' ' ') — remedy: add VACUOUS to each, or (if the site is a different artifact's vocabulary) extend that alternation so it is not the bare three"
+  bad "R1: three-token component-status alternation(s) survive (VACUOUS omitted) in: $(tr '\n' ' ' < <(printf '%s' "$r_hits")) — remedy: add VACUOUS to each, or (if the site is a different artifact's vocabulary) extend that alternation so it is not the bare three"
 fi
 # The guard must be DISCRIMINATING and must not fire on the roborev block's own, longer
 # vocabulary — asserted both ways so a future narrowing or widening of R1 is caught.
