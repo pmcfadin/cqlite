@@ -243,7 +243,7 @@ one_logdir() {
   listing=$(find "$1" -maxdepth 1 -type d -name 'agent-gate.*' 2>/dev/null); rc=$?
   [ "$rc" -eq 0 ] || return 2
   [ -n "$listing" ] || return 1
-  printf '%s' "$listing" | head -1
+  head -1 <<<"$listing"
 }
 
 # artifact_field <bundle-dir> <key> -> the value of <key> in the bundle's own
@@ -857,7 +857,7 @@ if [ "$git_init_ok" = 1 ]; then
   # remedies. Each scan captures its own status; `could not tell` gets its own bad().
   d7_listing=$(find "$td7" -maxdepth 1 -type d -name 'agent-gate.*' 2>/dev/null); d7_rc=$?
   d7=""
-  [ "$d7_rc" -eq 0 ] && d7=$(printf '%s\n' "$d7_listing" | head -1)
+  [ "$d7_rc" -eq 0 ] && d7=$(head -1 <<<"$d7_listing")
   if [ "$d7_rc" -ne 0 ]; then
     bad "AC6: could not scan $td7 for the run's bundle (find rc=$d7_rc) — UNMEASURED, not 'no bundle'"
   elif [ -z "$d7" ]; then
@@ -1513,12 +1513,12 @@ guard_src=$(awk '/^_logdir_rm_guarded\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$
 if [ -z "$guard_src" ]; then
   bad "AC14: could not extract _logdir_rm_guarded from the shipped gate — UNMEASURED"
 else
-  if printf '%s\n' "$guard_src" | grep -qF '[ "${d%/*}" = "$GATE_LOGDIR_PARENT" ]'; then
+  if grep -qF '[ "${d%/*}" = "$GATE_LOGDIR_PARENT" ]' <<<"$guard_src"; then
     bad "AC14: the guard still compares the RAW \${d%/*} against GATE_LOGDIR_PARENT — empty at the root, so it refuses every removal under TMPDIR=/"
   else
     ok "AC14: the guard does not compare a raw \${d%/*} against the recorded parent"
   fi
-  if printf '%s\n' "$guard_src" | grep -qF 'parent="/"'; then
+  if grep -qF 'parent="/"' <<<"$guard_src"; then
     ok "AC14: the guard normalises an EMPTY derived parent to the root"
   else
     bad "AC14: the guard has no empty-derived-parent normalisation — a root temp parent leaks"
@@ -1928,7 +1928,7 @@ predicted_window() {   # <run-id>
     k=$((k + 1))
   done
 }
-setstr() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' ' '; }
+setstr() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' ' '; }  # sigpipe-fixture: line of a quoted-heredoc driver script, run as the subject of the test
 
 # ---- PHASE 1: exact windows, over a population NOTHING can remove ----------------
 # The stub REFUSES every removal, so the population and its order are constant across
@@ -2225,7 +2225,7 @@ predicted_window() {   # <run-id>
     k=$((k + 1))
   done
 }
-setstr() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' ' '; }
+setstr() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' ' '; }  # sigpipe-fixture: line of a quoted-heredoc driver script, run as the subject of the test
 union="$plog.union"
 : >"$union"
 sweep=0
@@ -3468,7 +3468,7 @@ if [ "$inj24_ok" = 1 ]; then
   mut24="$tmp/ac24-mutant-gate.sh"
   if awk '
       { l = $0; sub(/^[[:space:]]+/, "", l) }
-      !done && l == "printf '"'"'%s'"'"' \"${1-}\" | LC_ALL=C tr -d '"'"'[:cntrl:]'"'"'" {
+      !done && l == "printf '"'"'%s'"'"' \"${1-}\" | LC_ALL=C tr -d '"'"'[:cntrl:]'"'"'" { # sigpipe-fixture: false positive, printf text inside an awk match literal
         done = 1
         print substr($0, 1, match($0, /[^[:space:]]/) - 1) "printf '"'"'%s'"'"' \"${1-}\""
         next
@@ -3803,7 +3803,7 @@ if mkdir -p "$td27" 2>/dev/null; then
       ok "AC27: the refusal is NAMED and says WHY (agent-gate: REFUSED … control character)" ;;
     *)
       bad "AC27: no named control-character refusal on the run's own output — a silent abort is indistinguishable from a crash"
-      printf '%s\n' "$out27" | head -5 ;;
+      head -5 <<<"$out27";;
   esac
   ac27_remedy=0
   case "$out27" in *"unset TMPDIR"*) ac27_remedy=$((ac27_remedy + 1)) ;; esac
@@ -3823,7 +3823,7 @@ if mkdir -p "$td27" 2>/dev/null; then
   else
     ok "AC27: the refused run published NO terminal verdict (no summary block at all)"
   fi
-  if printf '%s\n' "$out27" | grep -Eq 'RESULT: (PASS|FAIL)'; then
+  if grep -Eq 'RESULT: (PASS|FAIL)' <<<"$out27"; then
     bad "AC27: the refused run's own output carries a line matching the completion probe's pattern — the refusal itself is a forgery channel"
   else
     ok "AC27: and its output carries NO line matching 'RESULT: (PASS|FAIL)' — nothing downstream can read a verdict out of it"
@@ -3999,17 +3999,17 @@ if [ -f "$SELF" ]; then
   else
     bad "AC28: could not read the _age_dir_apply header block — the derivation-claim guard is UNMEASURED"
   fi
-  if printf '%s' "$hdr28" | grep -q 'GATE_LOGDIR_SWEEP_AGE_DAYS'; then
-    if printf '%s' "$hdr28" | grep -q 'HARDCODED, NOT DERIVED'; then
+  if grep -q 'GATE_LOGDIR_SWEEP_AGE_DAYS' <<<"$hdr28"; then
+    if grep -q 'HARDCODED, NOT DERIVED' <<<"$hdr28"; then
       ok "AC28: the header names GATE_LOGDIR_SWEEP_AGE_DAYS only to say the floor is HARDCODED, not read from it"
     else
       bad "AC28: the _age_dir_apply header claims its self-check uses GATE_LOGDIR_SWEEP_AGE_DAYS — the body hardcodes +7 and the shipped constant is out of scope here, so that is a derivation the code does not have"
-      printf '%s' "$hdr28" | grep -n 'GATE_LOGDIR_SWEEP_AGE_DAYS'
+      grep -n 'GATE_LOGDIR_SWEEP_AGE_DAYS' <<<"$hdr28"
     fi
   else
     ok "AC28: the _age_dir_apply header makes no GATE_LOGDIR_SWEEP_AGE_DAYS derivation claim"
   fi
-  if printf '%s' "$hdr28" | grep -q 'CLOSED' && printf '%s' "$hdr28" | grep -q '30'; then
+  if grep -q 'CLOSED' <<<"$hdr28" && grep -q '30' <<<"$hdr28"; then
     ok "AC28: and it records WHY the literal is safe — a floor raised past the 30-day offset fails CLOSED (the suite reds; no vacuous green)"
   else
     bad "AC28: the header does not record why the hardcoded floor is safe, so the next reader has no reason not to 'fix' it back into a derivation"
@@ -4343,12 +4343,12 @@ if [ "$discovered_rc" -ne 0 ]; then
   # #1699's find-tristate rule: an unreadable scan is UNMEASURED, never "no strays".
   bad "hermetic: could not scan $tmp for agent-gate.* directories (find rc=$discovered_rc) — UNMEASURED, not clean"
 else
-  exp_sorted=$(printf '%s' "$expected_dirs" | cut -f1 | sort -u)
-  got_sorted=$(printf '%s\n' "$discovered_listing" | sed '/^$/d' | sort -u)
+  exp_sorted=$(cut -f1 <<<"$expected_dirs" | sort -u)
+  got_sorted=$(sed '/^$/d' <<<"$discovered_listing" | sort -u)
   unexpected=$(comm -13 <(printf '%s\n' "$exp_sorted") <(printf '%s\n' "$got_sorted"))
   missing=$(comm -23 <(printf '%s\n' "$exp_sorted") <(printf '%s\n' "$got_sorted"))
   if [ -z "$unexpected" ] && [ -z "$missing" ]; then
-    ok "hermetic: the agent-gate.* directories surviving under the scratch root are EXACTLY the $(printf '%s\n' "$exp_sorted" | sed '/^$/d' | wc -l | tr -d ' ') expected survivors"
+    ok "hermetic: the agent-gate.* directories surviving under the scratch root are EXACTLY the $(sed '/^$/d' <<<"$exp_sorted" | wc -l | tr -d ' ') expected survivors"
   fi
   if [ -n "$unexpected" ]; then
     while IFS= read -r u; do
@@ -4361,7 +4361,7 @@ EOF
   if [ -n "$missing" ]; then
     while IFS= read -r m; do
       [ -n "$m" ] || continue
-      owner=$(printf '%s' "$expected_dirs" | awk -F'\t' -v p="$m" '$1==p{print $2; exit}')
+      owner=$(awk -F'\t' -v p="$m" '$1==p{print $2; exit}' <<<"$expected_dirs")
       bad "hermetic: EXPECTED survivor '$m' (${owner:-unattributed}) is GONE — a retention this suite proves was not honoured"
     done <<EOF
 $missing
