@@ -433,7 +433,7 @@ assert_case() {
   if [ -z "$missing" ]; then
     ok "$label"
   else
-    bad "$label — missing:$missing; output was: $(printf '%s' "$OUT" | tr '\n' '|')"
+    bad "$label — missing:$missing; output was: $(tr '\n' '|' < <(printf '%s' "$OUT"))"
   fi
 }
 
@@ -461,7 +461,7 @@ case "$OUT" in
   *"probe bound: $d/bin/timeout "*)
     ok "P1: the probe was bound by the scratch tree's HERMETIC timeout shim, not by a host binary (planted cases are host-independent by construction)" ;;
   *)
-    bad "P1: the bound was NOT the planted shim ($d/bin/timeout) — a planted case has picked up an ambient dependency: $(printf '%s' "$OUT" | grep -F 'probe bound:' | head -1)" ;;
+    bad "P1: the bound was NOT the planted shim ($d/bin/timeout) — a planted case has picked up an ambient dependency: $(grep -m1 -F 'probe bound:' <<<"$OUT")" ;;
 esac
 
 # --- P2: a crate grew ------------------------------------------------------
@@ -701,7 +701,7 @@ else
 fi
 # The described command, taken from the guard's own `probe … INVOKED` line, must be
 # covered by that argv — the description and the command may not drift apart.
-p20_desc="$(printf '%s\n' "$OUT" | sed -n 's/^dep-duplicates: probe \(.*\) INVOKED .*/\1/p' | head -1)"
+p20_desc="$(sed -n 's/^dep-duplicates: probe \(.*\) INVOKED .*/\1/;T;p;q' <<<"$OUT")"
 p20_undescribed=""
 for _w in $p20_desc; do
   case "$_w" in cargo) continue ;; esac
@@ -899,7 +899,7 @@ assert_case "P16a: instances UP while crates DOWN renders each delta with its ow
   0 'ADVISORY-INCREASE the duplicate census GREW: 5 instance(s) vs baseline 4 (delta +1), 1 crate(s) vs baseline 2 (delta -1)' \
   'verdict ADVISORY-INCREASE (5/1 vs baseline 4/2)'
 case "$OUT" in
-  *'+-'*) bad "P16a: the advisory line contains a MALFORMED delta ('+-'): $(printf '%s' "$OUT" | grep -F '+-' | head -1)" ;;
+  *'+-'*) bad "P16a: the advisory line contains a MALFORMED delta ('+-'): $(grep -m1 -F '+-' <<<"$OUT")" ;;
   *)      ok "P16a: no malformed '+-' delta anywhere in the advisory block" ;;
 esac
 d=$(new_tree p16b); printf 'instances 8\ncrates 2\ncrate foo 4\ncrate bar 4\n' > "$d/$BASELINE_REL"
@@ -908,7 +908,7 @@ assert_case "P16b: crates UP while instances DOWN renders each delta with its ow
   0 'ADVISORY-INCREASE the duplicate census GREW: 6 instance(s) vs baseline 8 (delta -2), 3 crate(s) vs baseline 2 (delta +1)' \
   'verdict ADVISORY-INCREASE (6/3 vs baseline 8/2)'
 case "$OUT" in
-  *'+-'*) bad "P16b: the advisory line contains a MALFORMED delta ('+-'): $(printf '%s' "$OUT" | grep -F '+-' | head -1)" ;;
+  *'+-'*) bad "P16b: the advisory line contains a MALFORMED delta ('+-'): $(grep -m1 -F '+-' <<<"$OUT")" ;;
   *)      ok "P16b: no malformed '+-' delta anywhere in the advisory block" ;;
 esac
 
