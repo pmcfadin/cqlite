@@ -67,10 +67,10 @@ lanes_out=$("$GATE" --classify-lanes 2>/dev/null) \
   || bad "--classify-lanes hook failed to run"
 
 # Extract the components assigned to each lane.
-side_list=$(printf '%s\n' "$lanes_out" | awk '$1=="side"{print $2}')
-main_list=$(printf '%s\n' "$lanes_out" | awk '$1=="main"{print $2}')
+side_list=$(awk '$1=="side"{print $2}' <<<"$lanes_out")
+main_list=$(awk '$1=="main"{print $2}' <<<"$lanes_out")
 
-lane_of() { printf '%s\n' "$lanes_out" | awk -v c="$1" '$2==c{print $1}'; }
+lane_of() { awk -v c="$1" '$2==c{print $1}' <<<"$lanes_out"; }
 
 # 2) Every newly-isolatable non-core component must be on the SIDE lane.
 for c in $EXPECTED_NEW_SIDE; do
@@ -145,14 +145,14 @@ done
 
 # 5) The SIDE lane must be exactly the union of the two sets — nothing else silently
 #    joined it, so the MAIN build profile is unchanged for every other component.
-side_sorted=$(printf '%s\n' $side_list | sort)
-expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE $EXPECTED_BINDING_RUST_SIDE $EXPECTED_ALL_FEATURES_SIDE | sort)
+side_sorted=$(sort < <(printf '%s\n' $side_list))
+expected_side_sorted=$(sort < <(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE $EXPECTED_BINDING_RUST_SIDE $EXPECTED_ALL_FEATURES_SIDE))
 # The COUNT IS DERIVED from the expected sets, never written as a literal (#3522). It used
 # to read "the 11 expected isolatable components", and adding a twelfth made that number
 # wrong in a message that is only ever printed on SUCCESS — so the stale figure would have
 # been asserted as fact by a passing test. The decomposition below stays as PROSE naming the
 # issues, because that is the part a reader needs and the part arithmetic cannot express.
-n_expected_side=$(printf '%s\n' $expected_side_sorted | grep -c .)
+n_expected_side=$(grep -c . < <(printf '%s\n' $expected_side_sorted))
 if [ "$side_sorted" = "$expected_side_sorted" ]; then
   ok "SIDE lane is exactly the $n_expected_side expected isolatable components (2 #1737 bindings + 5 #2657 isolatable + 4 #1699 feature-matrix lanes + 1 #3522 binding-side Rust lane + 1 #3453 all-features lane; tooling-tests excluded)"
 else
