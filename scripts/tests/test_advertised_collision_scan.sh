@@ -91,8 +91,8 @@ mk_gh() {
         # calls schema drift (#3436, roborev round 21). The round-14 rewrite expanded every bare
         # value as an Issue, so this mock was manufacturing an impossible row and a control case
         # was asserting the scan tolerate it.
-        null)  printf 'printf "%%s\\n" %s\n' "$(printf '%q' "DraftIssue|null|null")" ;;
-        *)     printf 'printf "%%s\\n" %s\n' "$(printf '%q' "Issue|pmcfadin/cqlite|$n")" ;;
+        null)  printf 'printf "%%s\\n" %s\n' "$(printf '%q' "DraftIssue|null|null")" ;;  # sigpipe-fixture: the pipe is text planted into a generated stub script (or a quoted payload), not a pipeline here
+        *)     printf 'printf "%%s\\n" %s\n' "$(printf '%q' "Issue|pmcfadin/cqlite|$n")" ;;  # sigpipe-fixture: the pipe is text planted into a generated stub script (or a quoted payload), not a pipeline here
       esac
     done
     printf 'exit 0\n'
@@ -117,11 +117,11 @@ out=$(run_scan "$GH1"); rc=$?
 # The prefix says WINDOW, never bare COLLISION: the three facts are a signature of a window in
 # which a collision is possible, not proof one is occurring — nobody may be in that lane. A
 # revert to `COLLISION:` reds here rather than passing.
-if [ "$rc" -eq 3 ] && printf '%s\n' "$out" | grep -q '^COLLISION-WINDOW: issue=600 ' \
-   && ! printf '%s\n' "$out" | grep -qE '^COLLISION: ' \
-   && printf '%s\n' "$out" | grep -q 'branches=refs/heads/issue-600-slug' \
-   && printf '%s\n' "$out" | grep -q 'claim-ref=absent' \
-   && printf '%s\n' "$out" | grep -q 'RESULT=FOUND'; then
+if [ "$rc" -eq 3 ] && grep -q '^COLLISION-WINDOW: issue=600 ' <<<"$out" \
+   && ! grep -qE '^COLLISION: ' <<<"$out" \
+   && grep -q 'branches=refs/heads/issue-600-slug' <<<"$out" \
+   && grep -q 'claim-ref=absent' <<<"$out" \
+   && grep -q 'RESULT=FOUND' <<<"$out"; then
   ok "board Ready + pushed branch + no claim ref => one COLLISION row, exit 3"
 else
   bad "expected a COLLISION row for issue 600 and exit 3; got rc=$rc
@@ -129,7 +129,7 @@ $out"
 fi
 
 # The row composes the two locks the issue says know nothing about each other.
-if printf '%s\n' "$out" | grep -q 'lane-lock='; then
+if grep -q 'lane-lock=' <<<"$out"; then
   ok "the row carries the machine-local lane-lock state"
 else
   bad "the row carried no lane-lock= field:
@@ -140,11 +140,11 @@ fi
 # silently truncates this 900+ item board and has produced wrong 'nothing is
 # Ready' reads, so the filter must be server-side and the limit explicit.
 ghargs=$(cat "$GH1/gh-args.txt" 2>/dev/null)
-if printf '%s\n' "$ghargs" | grep -qx 'status:Ready' \
-   && printf '%s\n' "$ghargs" | grep -qx 'item-list' \
-   && printf '%s\n' "$ghargs" | grep -qx -- '--query' \
-   && printf '%s\n' "$ghargs" | grep -qx -- '-L' \
-   && ! printf '%s\n' "$ghargs" | grep -qx 'api'; then
+if grep -qx 'status:Ready' <<<"$ghargs" \
+   && grep -qx 'item-list' <<<"$ghargs" \
+   && grep -qx -- '--query' <<<"$ghargs" \
+   && grep -qx -- '-L' <<<"$ghargs" \
+   && ! grep -qx 'api' <<<"$ghargs"; then
   ok "the board is read with a SERVER-SIDE filtered item-list (--query status:Ready, explicit -L), not GraphQL"
 else
   bad "board read was not a filtered item-list; gh argv was:
@@ -158,8 +158,8 @@ push_branch 601
 push_claim 601
 GH2="$T/gh-601"; mk_gh "$GH2" 601
 out=$(run_scan "$GH2"); rc=$?
-if [ "$rc" -eq 1 ] && ! printf '%s\n' "$out" | grep -q 'issue=601' \
-   && printf '%s\n' "$out" | grep -q 'RESULT=NONE-REPORTED'; then
+if [ "$rc" -eq 1 ] && ! grep -q 'issue=601' <<<"$out" \
+   && grep -q 'RESULT=NONE-REPORTED' <<<"$out"; then
   ok "a held refs/claims/issue-601 is NOT reported (exit 1)"
 else
   bad "expected issue 601 unreported with exit 1; got rc=$rc
@@ -171,7 +171,7 @@ echo "TEST 3: fact (2) false — Ready with NO pushed branch (exit 1)"
 # ===========================================================================
 GH3="$T/gh-602"; mk_gh "$GH3" 602    # 602 is Ready, and has no branch at all
 out=$(run_scan "$GH3"); rc=$?
-if [ "$rc" -eq 1 ] && ! printf '%s\n' "$out" | grep -q 'issue=602'; then
+if [ "$rc" -eq 1 ] && ! grep -q 'issue=602' <<<"$out"; then
   ok "a Ready issue with no pushed issue-602-* branch is NOT reported (exit 1)"
 else
   bad "expected issue 602 unreported with exit 1; got rc=$rc
@@ -184,7 +184,7 @@ echo "TEST 4: fact (1) false — a pushed branch whose board Status is NOT Ready
 push_branch 603
 GH4="$T/gh-nonready"; mk_gh "$GH4" 999999   # 603 absent from the Ready column
 out=$(run_scan "$GH4"); rc=$?
-if [ "$rc" -eq 1 ] && ! printf '%s\n' "$out" | grep -q 'issue=603'; then
+if [ "$rc" -eq 1 ] && ! grep -q 'issue=603' <<<"$out"; then
   ok "a pushed branch for an issue the board does NOT offer as Ready is NOT reported (exit 1)"
 else
   bad "expected issue 603 unreported with exit 1; got rc=$rc
@@ -203,9 +203,9 @@ out=$(run_scan "$GH5"); rc=$?
 # second check and was none (#3436 FIX 13e). What actually needs asserting alongside the
 # exit code is the TEXT: the run must SAY it is not a clean bill of health, since that
 # sentence is the only thing standing between exit 1 and a cron treating it as all-clear.
-if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'RESULT=NONE-REPORTED' \
-   && printf '%s\n' "$out" | grep -q 'positive-detection only' \
-   && printf '%s\n' "$out" | grep -q 'NEVER 0'; then
+if [ "$rc" -eq 1 ] && grep -q 'RESULT=NONE-REPORTED' <<<"$out" \
+   && grep -q 'positive-detection only' <<<"$out" \
+   && grep -q 'NEVER 0' <<<"$out"; then
   ok "an empty Ready column yields exit 1 (never 0) and SAYS in words that it is not a clean bill of health"
 else
   bad "expected exit 1 with RESULT=NONE-REPORTED; got rc=$rc
@@ -219,9 +219,9 @@ GHFAIL="$T/gh-fail"; mkdir -p "$GHFAIL"
 printf '#!/usr/bin/env bash\necho "gh: HTTP 502" >&2\nexit 1\n' >"$GHFAIL/gh"
 chmod +x "$GHFAIL/gh"
 out=$(run_scan "$GHFAIL" 2>/dev/null); rc=$?
-if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'UNMEASURABLE' \
-   && printf '%s\n' "$out" | grep -q 'what=board-status' \
-   && ! printf '%s\n' "$out" | grep -q 'RESULT=NONE-REPORTED'; then
+if [ "$rc" -eq 1 ] && grep -q 'UNMEASURABLE' <<<"$out" \
+   && grep -q 'what=board-status' <<<"$out" \
+   && ! grep -q 'RESULT=NONE-REPORTED' <<<"$out"; then
   ok "a failing gh is UNMEASURABLE what=board-status (exit 1), NOT a 'none found'"
 else
   bad "expected UNMEASURABLE what=board-status exit 1; got rc=$rc
@@ -239,9 +239,9 @@ for tool in bash git awk grep head sort tr cut basename dirname timeout cat find
   p=$(command -v "$tool" 2>/dev/null) && ln -sf "$p" "$MINBIN/$tool"
 done
 out=$( PATH="$MINBIN" CLAIM_REMOTE="$ORIGIN" "$REALBASH" "$SCAN" 2>/dev/null ); rc=$?
-if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'UNMEASURABLE' \
-   && printf '%s\n' "$out" | grep -q 'what=board-status' \
-   && printf '%s\n' "$out" | grep -q 'not on PATH'; then
+if [ "$rc" -eq 1 ] && grep -q 'UNMEASURABLE' <<<"$out" \
+   && grep -q 'what=board-status' <<<"$out" \
+   && grep -q 'not on PATH' <<<"$out"; then
   ok "gh absent from PATH is UNMEASURABLE what=board-status naming the missing tool (exit 1)"
 else
   bad "expected UNMEASURABLE naming gh-not-on-PATH exit 1; got rc=$rc
@@ -253,10 +253,10 @@ echo "TEST 8: unmeasurable branches — ls-remote against an unreachable remote 
 # ===========================================================================
 GH8="$T/gh-600b"; mk_gh "$GH8" 600
 out=$( PATH="$GH8:$PATH" CLAIM_REMOTE="$T/does-not-exist.git" bash "$SCAN" 2>/dev/null ); rc=$?
-if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'UNMEASURABLE' \
-   && printf '%s\n' "$out" | grep -q 'what=issue-branches' \
-   && printf '%s\n' "$out" | grep -q 'ls-remote' \
-   && ! printf '%s\n' "$out" | grep -q 'RESULT=NONE-REPORTED'; then
+if [ "$rc" -eq 1 ] && grep -q 'UNMEASURABLE' <<<"$out" \
+   && grep -q 'what=issue-branches' <<<"$out" \
+   && grep -q 'ls-remote' <<<"$out" \
+   && ! grep -q 'RESULT=NONE-REPORTED' <<<"$out"; then
   ok "an unreachable remote is UNMEASURABLE what=issue-branches naming ls-remote (exit 1)"
 else
   bad "expected UNMEASURABLE what=issue-branches exit 1; got rc=$rc
@@ -337,7 +337,7 @@ fi
 # (un-muting this suite on macOS) undone two assertions later: a partial accommodation is not an
 # accommodation. Both clauses now key on ONE variable so they cannot drift apart again.
 if [ "$acs_lane_lock_supported" = "1" ]; then
-  if printf '%s\n' "$out" | grep -q 'issue=600 .*lane-lock=HELD/ALIVE'; then
+  if grep -q 'issue=600 .*lane-lock=HELD/ALIVE' <<<"$out"; then
     ok "the row reports the probe's own verdict for a live holder (lane-lock=HELD/ALIVE), not a re-derived one"
   else
     bad "expected lane-lock=HELD/ALIVE for issue 600 with a live holder:
@@ -345,7 +345,7 @@ $out"
   fi
 else
   # Affirmatively stated, not silently dropped: with no /proc there IS no live holder to report.
-  if printf '%s\n' "$out" | grep -q 'issue=600 .*lane-lock='; then
+  if grep -q 'issue=600 .*lane-lock=' <<<"$out"; then
     ok "the row still carries a lane-lock= field (its VALUE is not asserted: no /proc, so acquire records no holder)"
   else
     bad "the row carried no lane-lock= field at all:
@@ -360,8 +360,8 @@ echo "TEST 10: --issue narrows the scan; the three facts are unchanged"
 # ===========================================================================
 out=$(run_scan "$GH9" --issue 600); rc=$?
 outOther=$(run_scan "$GH9" --issue 601); rcOther=$?
-if [ "$rc" -eq 3 ] && printf '%s\n' "$out" | grep -q 'issue=600' \
-   && [ "$rcOther" -eq 1 ] && ! printf '%s\n' "$outOther" | grep -q '^COLLISION:'; then
+if [ "$rc" -eq 3 ] && grep -q 'issue=600' <<<"$out" \
+   && [ "$rcOther" -eq 1 ] && ! grep -q '^COLLISION:' <<<"$outOther"; then
   ok "--issue 600 reports only 600 (exit 3); --issue 601 (claim held) reports nothing (exit 1)"
 else
   bad "--issue filtering wrong: rc=$rc rcOther=$rcOther
@@ -373,9 +373,9 @@ fi
 echo "TEST 11: --json emits one object per row plus a summary, same exit codes"
 # ===========================================================================
 out=$(run_scan "$GH9" --json --issue 600); rc=$?
-if [ "$rc" -eq 3 ] && printf '%s\n' "$out" | grep -q '"issue":600' \
-   && printf '%s\n' "$out" | grep -q '"result":"FOUND"' \
-   && ! printf '%s\n' "$out" | grep -q '^COLLISION:'; then
+if [ "$rc" -eq 3 ] && grep -q '"issue":600' <<<"$out" \
+   && grep -q '"result":"FOUND"' <<<"$out" \
+   && ! grep -q '^COLLISION:' <<<"$out"; then
   ok "--json emits a row object and a FOUND summary object, exit 3, with no text rows mixed in"
 else
   bad "expected JSON row + summary with exit 3; got rc=$rc
@@ -396,11 +396,11 @@ rcBad=0; outBad=$(bash "$SCAN" --bogus 2>&1) || rcBad=$?
 # express `^ *3 +…`; this is the minimal change that removes the race and not the assertion.
 # Fixed here BEFORE it flaked, because the writer is the same size class.
 if [ "$rcHelp" -eq 0 ] \
-   && printf '%s\n' "$outHelp" | grep 'POSITIVE-DETECTION ONLY' >/dev/null \
-   && printf '%s\n' "$outHelp" | grep -E '^ *3 +at least one row' >/dev/null \
-   && printf '%s\n' "$outHelp" | grep -E '^ *1 +no row was reported' >/dev/null \
-   && printf '%s\n' "$outHelp" | grep -E '^ *64 +usage error' >/dev/null \
-   && [ "$rcBad" -eq 64 ] && printf '%s\n' "$outBad" | grep -q 'unknown argument'; then
+   && grep 'POSITIVE-DETECTION ONLY' >/dev/null <<<"$outHelp" \
+   && grep -E '^ *3 +at least one row' >/dev/null <<<"$outHelp" \
+   && grep -E '^ *1 +no row was reported' >/dev/null <<<"$outHelp" \
+   && grep -E '^ *64 +usage error' >/dev/null <<<"$outHelp" \
+   && [ "$rcBad" -eq 64 ] && grep -q 'unknown argument' <<<"$outBad"; then
   ok "--help exits 0 documenting exit 3/1/64 and never-exit-0; an unknown flag is REFUSED (exit 64), not ignored"
 else
   bad "help/usage contract wrong: rcHelp=$rcHelp rcBad=$rcBad
@@ -445,7 +445,7 @@ if [ "$py_usable" = yes ]; then
   # python3 is used WHEN PRESENT and never required: this suite runs in `tooling-tests`
   # before the gate's python3 gate, so the fallback below must be able to carry the case
   # alone.
-  if printf '%s\n' "$out13" | python3 -c '
+  if python3 -c '
 import json, sys
 want = sys.argv[1]
 lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
@@ -454,14 +454,14 @@ if not lines:
 objs = [json.loads(l) for l in lines]          # raises on invalid JSON
 if not any(want in str(o.get("detail", "")) for o in objs):
     sys.exit("the raw remote did not round-trip through the escaping")
-' "$BAD_REMOTE" >/dev/null 2>&1; then
-    if printf '%s\n' "$out13ok" | python3 -c '
+' "$BAD_REMOTE" >/dev/null 2>&1 <<<"$out13"; then
+    if python3 -c '
 import json, sys
 lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
 if len(lines) < 2:
     sys.exit("expected a row object and a summary object")
 [json.loads(l) for l in lines]
-' >/dev/null 2>&1; then
+' >/dev/null 2>&1 <<<"$out13ok"; then
       json_verdict="parsed-by-python3"
     fi
   fi
@@ -503,9 +503,9 @@ mk_ready_page() {   # <dir> <numeric-rows> <draft-rows>
   {
     printf '#!/usr/bin/env bash\n'
     i=0
-    while [ "$i" -lt "$nums" ]; do printf 'printf "%%s\\n" %s\n' "Issue\\|pmcfadin/cqlite\\|$((7000 + i))"; i=$((i + 1)); done
+    while [ "$i" -lt "$nums" ]; do printf 'printf "%%s\\n" %s\n' "Issue\\|pmcfadin/cqlite\\|$((7000 + i))"; i=$((i + 1)); done  # sigpipe-fixture: the pipe is text planted into a generated stub script (or a quoted payload), not a pipeline here
     i=0
-    while [ "$i" -lt "$drafts" ]; do printf 'printf "DraftIssue|null|null\\n"\n'; i=$((i + 1)); done
+    while [ "$i" -lt "$drafts" ]; do printf 'printf "DraftIssue|null|null\\n"\n'; i=$((i + 1)); done  # sigpipe-fixture: the pipe is text planted into a generated stub script (or a quoted payload), not a pipeline here
     printf 'exit 0\n'
   } >"$dir/gh"
   chmod +x "$dir/gh"
@@ -516,10 +516,10 @@ mk_ready_page "$T/gh-page-100" 97 3
 out14a=$(run_scan "$T/gh-page-100" --json); rc14a=$?
 out14at=$(run_scan "$T/gh-page-100"); rc14at=$?
 if [ "$rc14a" -eq 1 ] && [ "$rc14at" -eq 1 ] \
-   && printf '%s\n' "$out14a" | grep -q '"board_page_at_limit":true' \
-   && printf '%s\n' "$out14a" | grep -q '"board_page_rows":100' \
-   && printf '%s\n' "$out14a" | grep -q '"ready":97' \
-   && printf '%s\n' "$out14at" | grep -q 'notice=board-page-at-limit'; then
+   && grep -q '"board_page_at_limit":true' <<<"$out14a" \
+   && grep -q '"board_page_rows":100' <<<"$out14a" \
+   && grep -q '"ready":97' <<<"$out14a" \
+   && grep -q 'notice=board-page-at-limit' <<<"$out14at"; then
   ok "(a) a 100-row page whose limit is reached partly by DRAFTS is reported at-limit (page-rows=100, ready=97) in both output modes"
 else
   bad "(a) expected board_page_at_limit=true with board_page_rows=100 and ready=97; got rc=$rc14a/$rc14at
@@ -532,9 +532,9 @@ mk_ready_page "$T/gh-page-99" 96 3
 out14b=$(run_scan "$T/gh-page-99" --json); rc14b=$?
 out14bt=$(run_scan "$T/gh-page-99"); rc14bt=$?
 if [ "$rc14b" -eq 1 ] \
-   && printf '%s\n' "$out14b" | grep -q '"board_page_at_limit":false' \
-   && printf '%s\n' "$out14b" | grep -q '"board_page_rows":99' \
-   && ! printf '%s\n' "$out14bt" | grep -q 'notice=board-page-at-limit'; then
+   && grep -q '"board_page_at_limit":false' <<<"$out14b" \
+   && grep -q '"board_page_rows":99' <<<"$out14b" \
+   && ! grep -q 'notice=board-page-at-limit' <<<"$out14bt"; then
   ok "(b) control: a 99-row page is NOT reported at-limit and prints no notice — the guard is measuring, not asserting"
 else
   bad "(b) expected board_page_at_limit=false with board_page_rows=99 and no notice; got rc=$rc14b
@@ -544,8 +544,8 @@ fi
 
 # (c) A DRAFT ROW IS NOT A CANDIDATE. The `null` rows must never be read as issue numbers
 # — otherwise the fix would trade a fail-open guard for a fabricated row.
-if ! printf '%s\n' "$out14a" | grep -q '"issue":null' \
-   && ! printf '%s\n' "$out14a" | grep -q '"issue":"null"'; then
+if ! grep -q '"issue":null' <<<"$out14a" \
+   && ! grep -q '"issue":"null"' <<<"$out14a"; then
   ok "(c) draft rows count toward the page length but are never emitted as candidate issues"
 else
   bad "(c) a draft row leaked into the candidate set:
@@ -568,11 +568,11 @@ echo "TEST 15: an UNRECOGNISED board row is UNMEASURABLE, not a silent non-candi
 mk_gh "$T/bin13" not-an-issue-number
 rc13=0; out13="$( run_scan "$T/bin13" 2>&1 )" || rc13=$?
 if [ "$rc13" -eq 1 ] \
-   && printf '%s' "$out13" | grep -q 'UNMEASURABLE what=board-status' \
-   && printf '%s' "$out13" | grep -q 'not-an-issue-number' \
-   && printf '%s' "$out13" | grep -q 'schema drift' \
-   && printf '%s' "$out13" | grep -qE '^SCAN: advertised-collision .*measured=no' \
-   && ! printf '%s' "$out13" | grep -qE '^SCAN: advertised-collision .*measured=yes'; then
+   && grep -q 'UNMEASURABLE what=board-status' <<<"$out13" \
+   && grep -q 'not-an-issue-number' <<<"$out13" \
+   && grep -q 'schema drift' <<<"$out13" \
+   && grep -qE '^SCAN: advertised-collision .*measured=no' <<<"$out13" \
+   && ! grep -qE '^SCAN: advertised-collision .*measured=yes' <<<"$out13"; then
   ok "an unrecognised board row is UNMEASURABLE (exit 1), NAMES the offending value and says gh ANSWERED — never measured=yes with rows hidden"
 else
   bad "expected UNMEASURABLE naming the row and schema drift; got rc=$rc13
@@ -583,8 +583,8 @@ fi
 # NOT trip the guard -- otherwise every board with a draft item reads as unmeasurable.
 mk_gh "$T/bin13b" null 600
 rc13b=0; out13b="$( run_scan "$T/bin13b" 2>&1 )" || rc13b=$?
-if printf '%s' "$out13b" | grep -qE '^SCAN: advertised-collision .*measured=yes' \
-   && ! printf '%s' "$out13b" | grep -q 'UNMEASURABLE'; then
+if grep -qE '^SCAN: advertised-collision .*measured=yes' <<<"$out13b" \
+   && ! grep -q 'UNMEASURABLE' <<<"$out13b"; then
   ok "control: a DRAFT row (null) is a recognised non-candidate — measured=yes, no UNMEASURABLE, so the guard does not fire on ordinary boards"
 else
   bad "expected a null draft row to be skipped with measured=yes; got rc=$rc13b
@@ -600,9 +600,9 @@ fi
 mk_gh "$T/bin13c" "Issue|pmcfadin/cqlite|"
 rc13c=0; out13c="$( run_scan "$T/bin13c" 2>&1 )" || rc13c=$?
 if [ "$rc13c" -eq 1 ] \
-   && printf '%s' "$out13c" | grep -q 'UNMEASURABLE what=board-status' \
-   && printf '%s' "$out13c" | grep -qE '^SCAN: advertised-collision .*measured=no' \
-   && ! printf '%s' "$out13c" | grep -qE '^SCAN: advertised-collision .*measured=yes'; then
+   && grep -q 'UNMEASURABLE what=board-status' <<<"$out13c" \
+   && grep -qE '^SCAN: advertised-collision .*measured=no' <<<"$out13c" \
+   && ! grep -qE '^SCAN: advertised-collision .*measured=yes' <<<"$out13c"; then
   ok "an EMPTY issue number is UNMEASURABLE too, not accepted as a candidate (round 31)"
 else
   bad "expected an empty issue number to read UNMEASURABLE; got rc=$rc13c
@@ -622,8 +622,8 @@ CRED_REMOTE="https://bot:${SECRET}@example.invalid/org/repo.git"
 for mode in "" "--json"; do
   out16=$( cd "$T" && CLAIM_REMOTE="$CRED_REMOTE" LANE_ROOT="$LANE_ROOT" bash "$SCAN" $mode 2>&1 )
   label="${mode:-text}"
-  if ! printf '%s' "$out16" | grep -q "$SECRET" \
-     && printf '%s' "$out16" | grep -q '\*\*\*@example.invalid'; then
+  if ! grep -q "$SECRET" <<<"$out16" \
+     && grep -q '\*\*\*@example.invalid' <<<"$out16"; then
     ok "($label) the token is ABSENT and the remote is shown redacted as ***@example.invalid — host and path kept, so 'which remote failed' stays answerable"
   else
     bad "($label) credential leaked or redaction missing:
@@ -643,7 +643,7 @@ done
 # API quota is the guard agents learn to waive, and the fix is the mock the suite already has.
 GH16C="$T/gh-ctl-redact"; mk_gh "$GH16C" 600
 out16c=$( cd "$T" && PATH="$GH16C:$PATH" CLAIM_REMOTE="$ORIGIN" LANE_ROOT="$LANE_ROOT" bash "$SCAN" 2>&1 )
-if printf '%s' "$out16c" | grep -qF "$ORIGIN" && ! printf '%s' "$out16c" | grep -q '\*\*\*@'; then
+if grep -qF "$ORIGIN" <<<"$out16c" && ! grep -q '\*\*\*@' <<<"$out16c"; then
   ok "control: a remote with no userinfo is printed unchanged — the redaction does not over-reach"
 else
   bad "control: a credential-free remote was altered:
@@ -660,7 +660,7 @@ fi
 # row's KIND changes, so the row's kind is the only thing under test.
 GHPR="$T/gh-pr-600"; mk_gh "$GHPR" 'PullRequest|pmcfadin/cqlite|600'
 out_pr=$(run_scan "$GHPR"); rc_pr=$?
-if [ "$rc_pr" -eq 1 ] && ! printf '%s\n' "$out_pr" | grep -q '^COLLISION-WINDOW: issue=600 '; then
+if [ "$rc_pr" -eq 1 ] && ! grep -q '^COLLISION-WINDOW: issue=600 ' <<<"$out_pr"; then
   ok "a Ready PULL REQUEST numbered 600 is NOT a collision candidate (exit 1, no row)"
 else
   bad "a Ready PR was treated as issue 600: rc=$rc_pr
@@ -669,7 +669,7 @@ fi
 
 GHFR="$T/gh-foreign-600"; mk_gh "$GHFR" 'Issue|someone-else/other-repo|600'
 out_fr=$(run_scan "$GHFR"); rc_fr=$?
-if [ "$rc_fr" -eq 1 ] && ! printf '%s\n' "$out_fr" | grep -q '^COLLISION-WINDOW: issue=600 '; then
+if [ "$rc_fr" -eq 1 ] && ! grep -q '^COLLISION-WINDOW: issue=600 ' <<<"$out_fr"; then
   ok "an Issue numbered 600 in ANOTHER repository is NOT a collision candidate (exit 1, no row)"
 else
   bad "another repo's issue 600 was treated as ours: rc=$rc_fr
@@ -680,7 +680,7 @@ fi
 # refusals above are the kind filter working, not the case having stopped reaching the report.
 GHOK="$T/gh-ctl-600"; mk_gh "$GHOK" 600
 out_ok=$(run_scan "$GHOK"); rc_ok=$?
-if [ "$rc_ok" -eq 3 ] && printf '%s\n' "$out_ok" | grep -q '^COLLISION-WINDOW: issue=600 '; then
+if [ "$rc_ok" -eq 3 ] && grep -q '^COLLISION-WINDOW: issue=600 ' <<<"$out_ok"; then
   ok "CONTROL: the same number as an Issue on the scanned repo IS still reported (exit 3)"
 else
   bad "CONTROL: the kind filter is refusing everything, not just PRs/foreign repos: rc=$rc_ok
@@ -691,7 +691,7 @@ fi
 # new three-field row must not weaken.
 GHUK="$T/gh-unknown-kind"; mk_gh "$GHUK" 'Sponsorship|pmcfadin/cqlite|600'
 out_uk=$(run_scan "$GHUK"); rc_uk=$?
-if [ "$rc_uk" -eq 1 ] && printf '%s\n' "$out_uk" | grep -q 'UNMEASURABLE'; then
+if [ "$rc_uk" -eq 1 ] && grep -q 'UNMEASURABLE' <<<"$out_uk"; then
   ok "an unrecognised board row KIND is UNMEASURABLE, not silently dropped"
 else
   bad "unrecognised kind was dropped instead of reported unmeasurable: rc=$rc_uk
@@ -707,9 +707,9 @@ fi
 mk_ready_page "$T/gh-page-100b" 97 3
 out_j=$(run_scan "$T/gh-page-100b" --json)
 out_t=$(run_scan "$T/gh-page-100b")
-if printf '%s\n' "$out_j" | grep -q '"board_page_at_limit":true' \
-   && printf '%s\n' "$out_j" | grep -q '"measured":"no"' \
-   && printf '%s\n' "$out_t" | grep -q 'measured=no'; then
+if grep -q '"board_page_at_limit":true' <<<"$out_j" \
+   && grep -q '"measured":"no"' <<<"$out_j" \
+   && grep -q 'measured=no' <<<"$out_t"; then
   ok "at the page limit, BOTH the JSON and the text report measured=no — the two branches agree"
 else
   bad "JSON/text disagree on measured at the page limit:
@@ -737,7 +737,7 @@ fi
 push_branch 0620                       # a zero-padded BRANCH ref: refs/heads/issue-0620-slug
 GH18="$T/gh-0620"; mk_gh "$GH18" 620   # board carries the CANONICAL number
 out18=$(run_scan "$GH18"); rc18=$?
-if [ "$rc18" -eq 3 ] && printf '%s\n' "$out18" | grep -q '^COLLISION-WINDOW: issue=620 '; then
+if [ "$rc18" -eq 3 ] && grep -q '^COLLISION-WINDOW: issue=620 ' <<<"$out18"; then
   ok "a zero-padded BRANCH (issue-0620-slug) matches board issue 620 and is reported"
 else
   bad "zero-padded branch dropped the row: rc=$rc18
@@ -745,7 +745,7 @@ $out18"
 fi
 
 out18b=$(run_scan "$GH18" --issue 0620); rc18b=$?
-if [ "$rc18b" -eq 3 ] && printf '%s\n' "$out18b" | grep -q '^COLLISION-WINDOW: issue=620 '; then
+if [ "$rc18b" -eq 3 ] && grep -q '^COLLISION-WINDOW: issue=620 ' <<<"$out18b"; then
   ok "--issue 0620 selects the same row as the canonical number"
 else
   bad "--issue 0620 selected nothing: rc=$rc18b
@@ -761,7 +761,7 @@ fi
 # the SEQUENCE above it in a post-fix run: the row is PRESENT at out18/out18b and ABSENT here.
 push_claim 0620
 out18c=$(run_scan "$GH18"); rc18c=$?
-if [ "$rc18c" -eq 1 ] && ! printf '%s\n' "$out18c" | grep -q '^COLLISION-WINDOW: issue=620 '; then
+if [ "$rc18c" -eq 1 ] && ! grep -q '^COLLISION-WINDOW: issue=620 ' <<<"$out18c"; then
   ok "CONTROL: a zero-padded CLAIM ref suppresses the row — canonicalisation works both ways"
 else
   bad "CONTROL: a padded claim ref failed to suppress: rc=$rc18c
