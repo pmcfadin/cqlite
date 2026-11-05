@@ -63,10 +63,10 @@ echo "TEST 1: A claims, B claims same issue -> exactly one HELD, other LOST(2)"
 outA=$(runA claim 1); rcA=$?
 outB=$(runB claim 1); rcB=$?
 held=0; lost=0
-printf '%s\n' "$outA" | grep -q 'CLAIM: HELD' && held=$((held+1))
-printf '%s\n' "$outB" | grep -q 'CLAIM: HELD' && held=$((held+1))
-printf '%s\n' "$outA" | grep -q 'CLAIM: LOST' && lost=$((lost+1))
-printf '%s\n' "$outB" | grep -q 'CLAIM: LOST' && lost=$((lost+1))
+grep -q 'CLAIM: HELD' <<<"$outA" && held=$((held+1))
+grep -q 'CLAIM: HELD' <<<"$outB" && held=$((held+1))
+grep -q 'CLAIM: LOST' <<<"$outA" && lost=$((lost+1))
+grep -q 'CLAIM: LOST' <<<"$outB" && lost=$((lost+1))
 if [ "$held" -eq 1 ] && [ "$lost" -eq 1 ] && [ "$rcA" -eq 0 ] && [ "$rcB" -eq 2 ]; then
   ok "exactly one HELD (rcA=0) and one LOST (rcB=2)"
 else
@@ -110,7 +110,7 @@ echo "TEST 3: legacy-guard — pre-existing issue-7-oldslug branch blocks claim 
 )
 ( cd "$B" && gg fetch -q origin )
 outB=$(runB claim 7); rcB=$?
-if [ "$rcB" -eq 2 ] && printf '%s\n' "$outB" | grep -q 'legacy-branch-lock'; then
+if [ "$rcB" -eq 2 ] && grep -q 'legacy-branch-lock' <<<"$outB"; then
   ok "legacy issue-7-oldslug branch blocks a fresh claim 7 (exit 2)"
 else
   bad "expected legacy-branch-lock refusal exit 2; got rc=$rcB
@@ -129,9 +129,9 @@ outAver=$(runA verify 4); rcAver=$?
 # A tries to adopt back with the STALE expected sha it remembers -> refused.
 outAstale=$(runA adopt 4 --expect "$oldsha"); rcStale=$?
 if [ "$rcClaim" -eq 0 ] && [ "$rcAdopt" -eq 0 ] && [ "$newsha" != "$oldsha" ] \
-   && printf '%s\n' "$outB" | grep -q 'CLAIM: ADOPTED' \
+   && grep -q 'CLAIM: ADOPTED' <<<"$outB" \
    && [ "$rcAver" -eq 2 ] \
-   && [ "$rcStale" -eq 2 ] && printf '%s\n' "$outAstale" | grep -q 'CLAIM: ADOPT-LOST'; then
+   && [ "$rcStale" -eq 2 ] && grep -q 'CLAIM: ADOPT-LOST' <<<"$outAstale"; then
   ok "adopt CAS: correct-expect wins, original detects loss, stale-expect refused (exit 2)"
 else
   bad "adopt CAS chain unexpected: rcClaim=$rcClaim rcAdopt=$rcAdopt old=$oldsha new=$newsha rcAver=$rcAver rcStale=$rcStale
@@ -159,7 +159,7 @@ chmod +x "$SHIMDIR/gh"
 rc=0; outRef=$( cd "$A" && PATH="$SHIMDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 5 ) || rc=$?
 rcRefuse=$rc
 still=$(ref_sha 5)
-if [ "$rcRefuse" -eq 2 ] && printf '%s\n' "$outRef" | grep -q 'RELEASE-REFUSED' && [ -n "$still" ]; then
+if [ "$rcRefuse" -eq 2 ] && grep -q 'RELEASE-REFUSED' <<<"$outRef" && [ -n "$still" ]; then
   ok "release refused under an open PR (exit 2, ref intact)"
 else
   bad "expected RELEASE-REFUSED exit 2 with ref intact; got rc=$rcRefuse still=$still
@@ -169,7 +169,7 @@ fi
 rc=0; outForce=$( cd "$A" && PATH="$SHIMDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 5 --force ) || rc=$?
 rcForce=$rc
 gone=$(ref_sha 5)
-if [ "$rcForce" -eq 0 ] && printf '%s\n' "$outForce" | grep -q 'RELEASED' && [ -z "$gone" ]; then
+if [ "$rcForce" -eq 0 ] && grep -q 'RELEASED' <<<"$outForce" && [ -z "$gone" ]; then
   ok "release --force deletes the ref even under an open PR (exit 0)"
 else
   bad "expected RELEASED exit 0 with ref gone; got rc=$rcForce gone='$gone'
@@ -184,7 +184,7 @@ sha1=$(ref_sha 6)
 outRe=$(runA claim 6); rc2=$?
 sha2=$(ref_sha 6)
 if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && [ "$sha1" = "$sha2" ] \
-   && printf '%s\n' "$outRe" | grep -q 're-entrant'; then
+   && grep -q 're-entrant' <<<"$outRe"; then
   ok "re-entrant claim by the same holder exits 0 and leaves the ref unchanged"
 else
   bad "expected re-entrant exit 0, ref unchanged; got rc1=$rc1 rc2=$rc2 sha1=$sha1 sha2=$sha2
@@ -198,8 +198,8 @@ runA verify 6 >/dev/null; rcVok=$?         # A holds 6
 runB verify 6 >/dev/null; rcVbad=$?        # B does not
 outStat=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" status 6 )
 if [ "$rcVok" -eq 0 ] && [ "$rcVbad" -eq 2 ] \
-   && printf '%s\n' "$outStat" | grep -q 'CLAIM: STATUS issue=6' \
-   && printf '%s\n' "$outStat" | grep -q 'machine=machineA'; then
+   && grep -q 'CLAIM: STATUS issue=6' <<<"$outStat" \
+   && grep -q 'machine=machineA' <<<"$outStat"; then
   ok "verify true for holder / false for other; status renders holder + machine"
 else
   bad "verify/status unexpected: rcVok=$rcVok rcVbad=$rcVbad
@@ -223,7 +223,7 @@ chmod +x "$FAILDIR/gh"
 rc=0; outNoGh=$( cd "$A" && PATH="$FAILDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 8 ) || rc=$?
 rcNoGh=$rc
 intact=$(ref_sha 8)
-if [ "$rcNoGh" -eq 2 ] && printf '%s\n' "$outNoGh" | grep -q 'open-pr-check-unavailable' && [ -n "$intact" ]; then
+if [ "$rcNoGh" -eq 2 ] && grep -q 'open-pr-check-unavailable' <<<"$outNoGh" && [ -n "$intact" ]; then
   ok "release fails loud (exit 2) when the gh PR check errors and no --force (ref intact)"
 else
   bad "expected fail-loud refusal exit 2 with ref intact; got rc=$rcNoGh intact=$intact
@@ -240,9 +240,9 @@ mv "$ORIGIN" "$ORIGIN.bak"
 rc=0; outInfra=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" claim 99 ) || rc=$?
 rcInfra=$rc
 mv "$ORIGIN.bak" "$ORIGIN"
-if [ "$rcInfra" -eq 1 ] && printf '%s\n' "$outInfra" | grep -q 'CLAIM: ERROR' \
-   && printf '%s\n' "$outInfra" | grep -q 'infra' \
-   && ! printf '%s\n' "$outInfra" | grep -q 'CLAIM: LOST'; then
+if [ "$rcInfra" -eq 1 ] && grep -q 'CLAIM: ERROR' <<<"$outInfra" \
+   && grep -q 'infra' <<<"$outInfra" \
+   && ! grep -q 'CLAIM: LOST' <<<"$outInfra"; then
   ok "unreachable origin → CLAIM ERROR infra exit 1 (not a bogus LOST)"
 else
   bad "expected CLAIM ERROR infra exit 1, no LOST; got rc=$rcInfra
@@ -273,11 +273,11 @@ SHIM
 chmod +x "$SHIMG/git"
 rc=0; outUnk=$( cd "$A" && PATH="$SHIMG:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 10 ) || rc=$?
 rcUnk=$rc
-if [ "$rcUnk" -eq 1 ] && printf '%s\n' "$outUnk" | grep -q 'CLAIM: ERROR' \
-   && printf '%s\n' "$outUnk" | grep -q 'reason=infra' \
-   && printf '%s\n' "$outUnk" | grep -q 'detail=push-accepted-but-ref-absent-on-confirm' \
-   && ! printf '%s\n' "$outUnk" | grep -q 'CLAIM: LOST' \
-   && ! printf '%s\n' "$outUnk" | grep -q 'holder=' \
+if [ "$rcUnk" -eq 1 ] && grep -q 'CLAIM: ERROR' <<<"$outUnk" \
+   && grep -q 'reason=infra' <<<"$outUnk" \
+   && grep -q 'detail=push-accepted-but-ref-absent-on-confirm' <<<"$outUnk" \
+   && ! grep -q 'CLAIM: LOST' <<<"$outUnk" \
+   && ! grep -q 'holder=' <<<"$outUnk" \
    && [ -n "$(ref_sha 10)" ]; then
   ok "an empty confirm read over a LANDED push → ERROR infra exit 1, naming no holder (never our own commit, never LOST)"
 else
@@ -302,7 +302,7 @@ chmod +x "$OTHERDIR/gh"
 rc=0; outOther=$( cd "$A" && PATH="$OTHERDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 11 ) || rc=$?
 rcOther=$rc
 goneOther=$(ref_sha 11)
-if [ "$rcOther" -eq 0 ] && printf '%s\n' "$outOther" | grep -q 'RELEASED' && [ -z "$goneOther" ]; then
+if [ "$rcOther" -eq 0 ] && grep -q 'RELEASED' <<<"$outOther" && [ -z "$goneOther" ]; then
   ok "release ignores non-matching head branches (issue-266/issue-99 do not block issue 11)"
 else
   bad "expected RELEASED exit 0 (unrelated PRs ignored); got rc=$rcOther gone='$goneOther'
@@ -320,8 +320,8 @@ chmod +x "$MATCHDIR/gh"
 rc=0; outMatch=$( cd "$A" && PATH="$MATCHDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 11 ) || rc=$?
 rcMatch=$rc
 intactMatch=$(ref_sha 11)
-if [ "$rcMatch" -eq 2 ] && printf '%s\n' "$outMatch" | grep -q 'RELEASE-REFUSED' \
-   && printf '%s\n' "$outMatch" | grep -q 'reason=open-pr' && [ -n "$intactMatch" ]; then
+if [ "$rcMatch" -eq 2 ] && grep -q 'RELEASE-REFUSED' <<<"$outMatch" \
+   && grep -q 'reason=open-pr' <<<"$outMatch" && [ -n "$intactMatch" ]; then
   ok "release refuses when a matching issue-11-* head branch has an open PR (exit 2)"
 else
   bad "expected RELEASE-REFUSED open-pr exit 2 (matching head branch); got rc=$rcMatch intact=$intactMatch
@@ -338,9 +338,9 @@ mv "$ORIGIN" "$ORIGIN.bak"
 rc=0; outVinfra=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" verify 13 ) || rc=$?
 rcVinfra=$rc
 mv "$ORIGIN.bak" "$ORIGIN"
-if [ "$rcVinfra" -eq 1 ] && printf '%s\n' "$outVinfra" | grep -q 'CLAIM: ERROR' \
-   && printf '%s\n' "$outVinfra" | grep -q 'infra' \
-   && ! printf '%s\n' "$outVinfra" | grep -q 'VERIFY-FAIL'; then
+if [ "$rcVinfra" -eq 1 ] && grep -q 'CLAIM: ERROR' <<<"$outVinfra" \
+   && grep -q 'infra' <<<"$outVinfra" \
+   && ! grep -q 'VERIFY-FAIL' <<<"$outVinfra"; then
   ok "verify on unreachable origin → ERROR infra exit 1 (not a bogus VERIFY-FAIL)"
 else
   bad "expected verify ERROR infra exit 1, no VERIFY-FAIL; got rc=$rcVinfra
@@ -400,9 +400,9 @@ rc=0; outWin=$( cd "$A" && PATH="$SHIMF:$PATH" CLAIM_MACHINE=machineA bash "$CLA
 rcWin=$rc
 # Sanity: the push really landed — the ref exists when read with real git.
 wonRef=$(ref_sha 14)
-if [ "$rcWin" -eq 1 ] && printf '%s\n' "$outWin" | grep -q 'CLAIM: ERROR' \
-   && printf '%s\n' "$outWin" | grep -q 'infra' \
-   && ! printf '%s\n' "$outWin" | grep -q 'CLAIM: LOST' \
+if [ "$rcWin" -eq 1 ] && grep -q 'CLAIM: ERROR' <<<"$outWin" \
+   && grep -q 'infra' <<<"$outWin" \
+   && ! grep -q 'CLAIM: LOST' <<<"$outWin" \
    && [ -n "$wonRef" ]; then
   ok "won push + confirm-read failure → ERROR infra exit 1 (not a false LOST; ref actually landed)"
 else
@@ -422,9 +422,9 @@ oldsha15=$(ref_sha 15)
 rc=0; outAdoptInfra=$( cd "$B" && PATH="$SHIMF:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" adopt 15 --expect "$oldsha15" ) || rc=$?
 rcAdoptInfra=$rc
 newsha15=$(ref_sha 15)
-if [ "$rcAdoptInfra" -eq 1 ] && printf '%s\n' "$outAdoptInfra" | grep -q 'CLAIM: ERROR' \
-   && printf '%s\n' "$outAdoptInfra" | grep -q 'infra' \
-   && ! printf '%s\n' "$outAdoptInfra" | grep -q 'ADOPT-LOST' \
+if [ "$rcAdoptInfra" -eq 1 ] && grep -q 'CLAIM: ERROR' <<<"$outAdoptInfra" \
+   && grep -q 'infra' <<<"$outAdoptInfra" \
+   && ! grep -q 'ADOPT-LOST' <<<"$outAdoptInfra" \
    && [ -n "$newsha15" ] && [ "$newsha15" != "$oldsha15" ]; then
   ok "adopt CAS lands + confirm-read failure → ERROR infra exit 1 (not ADOPT-LOST; ref actually adopted)"
 else
@@ -439,8 +439,8 @@ runA claim 16 >/dev/null   # A (machineA) holds issue 16
 # (a) a non-holder (machineB) releasing without --force is refused (ref intact).
 rc=0; outNH=$( cd "$B" && CLAIM_MACHINE=machineB bash "$CLAIM" release 16 ) || rc=$?
 rcNH=$rc; ref16a=$(ref_sha 16)
-if [ "$rcNH" -eq 2 ] && printf '%s\n' "$outNH" | grep -q 'RELEASE-REFUSED' \
-   && printf '%s\n' "$outNH" | grep -q 'reason=not-holder' && [ -n "$ref16a" ]; then
+if [ "$rcNH" -eq 2 ] && grep -q 'RELEASE-REFUSED' <<<"$outNH" \
+   && grep -q 'reason=not-holder' <<<"$outNH" && [ -n "$ref16a" ]; then
   ok "(a) non-holder release without --force refused (exit 2, ref intact)"
 else
   bad "(a) expected not-holder refusal exit 2, ref intact; got rc=$rcNH intact=$ref16a
@@ -457,7 +457,7 @@ SHIM
 chmod +x "$NOPR/gh"
 rc=0; outH=$( cd "$A" && PATH="$NOPR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 16 ) || rc=$?
 rcH=$rc; ref16b=$(ref_sha 16)
-if [ "$rcH" -eq 0 ] && printf '%s\n' "$outH" | grep -q 'RELEASED' && [ -z "$ref16b" ]; then
+if [ "$rcH" -eq 0 ] && grep -q 'RELEASED' <<<"$outH" && [ -z "$ref16b" ]; then
   ok "(b) holder release (no open PR) via CAS → RELEASED exit 0 (ref gone)"
 else
   bad "(b) expected RELEASED exit 0, ref gone; got rc=$rcH gone='$ref16b'
@@ -467,7 +467,7 @@ fi
 runA claim 16 >/dev/null
 rc=0; outF=$( cd "$B" && CLAIM_MACHINE=machineB bash "$CLAIM" release 16 --force ) || rc=$?
 rcF=$rc; ref16c=$(ref_sha 16)
-if [ "$rcF" -eq 0 ] && printf '%s\n' "$outF" | grep -q 'RELEASED' && [ -z "$ref16c" ]; then
+if [ "$rcF" -eq 0 ] && grep -q 'RELEASED' <<<"$outF" && [ -z "$ref16c" ]; then
   ok "(c) --force overrides identity — non-holder reaper delete succeeds (exit 0, ref gone)"
 else
   bad "(c) expected --force RELEASED exit 0, ref gone; got rc=$rcF gone='$ref16c'
@@ -517,8 +517,8 @@ rcMisId=$rc; ref18a=$(ref_sha 18)
 # (b) B impersonating A's CLAIM_MACHINE (machineA) matches the holder → releases.
 rc=0; outSameId=$( cd "$B" && PATH="$NOPR2:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 18 ) || rc=$?
 rcSameId=$rc; ref18b=$(ref_sha 18)
-if [ "$rcMisId" -eq 2 ] && printf '%s\n' "$outMisId" | grep -q 'reason=not-holder' && [ -n "$ref18a" ] \
-   && [ "$rcSameId" -eq 0 ] && printf '%s\n' "$outSameId" | grep -q 'RELEASED' && [ -z "$ref18b" ]; then
+if [ "$rcMisId" -eq 2 ] && grep -q 'reason=not-holder' <<<"$outMisId" && [ -n "$ref18a" ] \
+   && [ "$rcSameId" -eq 0 ] && grep -q 'RELEASED' <<<"$outSameId" && [ -z "$ref18b" ]; then
   ok "CLAIM_MACHINE drives holder identity: machineB refused, CLAIM_MACHINE=machineA released"
 else
   bad "expected machineB refused (exit2, intact) then machineA released (exit0, gone); got rcMisId=$rcMisId intact=$ref18a rcSameId=$rcSameId gone='$ref18b'
@@ -534,8 +534,8 @@ echo "TEST 19: status skips a stray non-issue ref under refs/claims/* (smoke lef
 runA claim 19 >/dev/null
 ( cd "$A" && gg push -q origin HEAD:refs/claims/smoke-stray )
 statusOut=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" status )
-if printf '%s\n' "$statusOut" | grep -q 'CLAIM: STATUS issue=19' \
-   && ! printf '%s\n' "$statusOut" | grep -q 'smoke-stray'; then
+if grep -q 'CLAIM: STATUS issue=19' <<<"$statusOut" \
+   && ! grep -q 'smoke-stray' <<<"$statusOut"; then
   ok "status renders issue-19 and skips the stray refs/claims/smoke-stray ref"
 else
   bad "expected issue=19 rendered and smoke-stray skipped; got:
@@ -576,26 +576,26 @@ AUTHSHIM="$T/shim-git-noauth"
 mk_push_fail_shim "$AUTHSHIM" "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
 rc=0; outAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 20 ) || rc=$?
 rcAuth=$rc
-if [ "$rcAuth" -eq 1 ] && printf '%s\n' "$outAuth" | grep -q 'CLAIM: ERROR' \
-   && printf '%s\n' "$outAuth" | grep -q 'reason=auth' \
-   && printf '%s\n' "$outAuth" | grep -q 'NOT retryable' \
-   && ! printf '%s\n' "$outAuth" | grep -q 'transient' \
-   && ! printf '%s\n' "$outAuth" | grep -q -- '— retry' \
-   && ! printf '%s\n' "$outAuth" | grep -q 'CLAIM: LOST'; then
+if [ "$rcAuth" -eq 1 ] && grep -q 'CLAIM: ERROR' <<<"$outAuth" \
+   && grep -q 'reason=auth' <<<"$outAuth" \
+   && grep -q 'NOT retryable' <<<"$outAuth" \
+   && ! grep -q 'transient' <<<"$outAuth" \
+   && ! grep -q -- '— retry' <<<"$outAuth" \
+   && ! grep -q 'CLAIM: LOST' <<<"$outAuth"; then
   ok "(a) unauthenticated push → CLAIM ERROR reason=auth, no transient/retry advice"
 else
   bad "(a) expected reason=auth exit 1 with no transient/retry wording; got rc=$rcAuth
 $outAuth"
 fi
 # The verdict must name the remediation, not just the fault.
-if printf '%s\n' "$outAuth" | grep -q 'gh auth setup-git'; then
+if grep -q 'gh auth setup-git' <<<"$outAuth"; then
   ok "(a) auth verdict names the remediation"
 else
   bad "(a) auth verdict named no remediation:
 $outAuth"
 fi
 # It must NOT echo git's raw stderr (a remote URL can carry an embedded secret).
-if ! printf '%s\n' "$outAuth" | grep -q 'terminal prompts disabled'; then
+if ! grep -q 'terminal prompts disabled' <<<"$outAuth"; then
   ok "(a) auth verdict does not echo raw git stderr"
 else
   bad "(a) auth verdict echoed raw git stderr (secret-leak surface):
@@ -607,10 +607,10 @@ NETSHIM="$T/shim-git-netfail"
 mk_push_fail_shim "$NETSHIM" "fatal: unable to access 'https://github.com/x.git/': Could not resolve host: github.com"
 rc=0; outNet=$( cd "$A" && PATH="$NETSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 21 ) || rc=$?
 rcNet=$rc
-if [ "$rcNet" -eq 1 ] && printf '%s\n' "$outNet" | grep -q 'CLAIM: ERROR' \
-   && printf '%s\n' "$outNet" | grep -q 'reason=infra' \
-   && printf '%s\n' "$outNet" | grep -q 'transient' \
-   && ! printf '%s\n' "$outNet" | grep -q 'reason=auth'; then
+if [ "$rcNet" -eq 1 ] && grep -q 'CLAIM: ERROR' <<<"$outNet" \
+   && grep -q 'reason=infra' <<<"$outNet" \
+   && grep -q 'transient' <<<"$outNet" \
+   && ! grep -q 'reason=auth' <<<"$outNet"; then
   ok "(b) genuine transient still reports the retryable infra verdict (#2665 contract intact)"
 else
   bad "(b) expected reason=infra transient exit 1; got rc=$rcNet
@@ -623,8 +623,8 @@ fi
 F403="$T/shim-git-403"
 mk_push_fail_shim "$F403" "fatal: unable to access 'https://github.com/x.git/': The requested URL returned error: 403 Forbidden"
 rc=0; out403=$( cd "$A" && PATH="$F403:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 24 ) || rc=$?
-if [ "$rc" -eq 1 ] && printf '%s\n' "$out403" | grep -q 'reason=infra' \
-   && ! printf '%s\n' "$out403" | grep -q 'reason=auth'; then
+if [ "$rc" -eq 1 ] && grep -q 'reason=infra' <<<"$out403" \
+   && ! grep -q 'reason=auth' <<<"$out403"; then
   ok "(c) a 403 stays a RETRYABLE transient (an edge/proxy outage is not a credential fault)"
 else
   bad "(c) expected reason=infra for a 403; got rc=$rc
@@ -637,8 +637,8 @@ fi
 runA claim 25 >/dev/null
 oldsha25=$(ref_sha 25)
 rc=0; outAdoptAuth=$( cd "$B" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" adopt 25 --expect "$oldsha25" ) || rc=$?
-if [ "$rc" -eq 1 ] && printf '%s\n' "$outAdoptAuth" | grep -q 'reason=auth' \
-   && ! printf '%s\n' "$outAdoptAuth" | grep -q 'ADOPT-LOST'; then
+if [ "$rc" -eq 1 ] && grep -q 'reason=auth' <<<"$outAdoptAuth" \
+   && ! grep -q 'ADOPT-LOST' <<<"$outAdoptAuth"; then
   ok "(d) adopt under an auth failure → reason=auth, never ADOPT-LOST"
 else
   bad "(d) expected adopt reason=auth exit 1 with no ADOPT-LOST; got rc=$rc
@@ -649,8 +649,8 @@ fi
 runA claim 26 >/dev/null
 rc=0; outRelAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 26 --force ) || rc=$?
 ref26=$(ref_sha 26)
-if [ "$rc" -eq 1 ] && printf '%s\n' "$outRelAuth" | grep -q 'reason=auth' \
-   && ! printf '%s\n' "$outRelAuth" | grep -q 'transient' \
+if [ "$rc" -eq 1 ] && grep -q 'reason=auth' <<<"$outRelAuth" \
+   && ! grep -q 'transient' <<<"$outRelAuth" \
    && [ -n "$ref26" ]; then
   ok "(e) release --force under an auth failure → reason=auth (ref intact, no false RELEASED)"
 else
@@ -662,9 +662,9 @@ fi
 # refs/claims/* namespace for a credential fault sends the operator hunting the
 # wrong thing on a brand-new box.
 rc=0; outSmokeAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
-if [ "$rc" -eq 1 ] && printf '%s\n' "$outSmokeAuth" | grep -q 'SMOKE-FAIL' \
-   && printf '%s\n' "$outSmokeAuth" | grep -q 'reason=auth' \
-   && ! printf '%s\n' "$outSmokeAuth" | grep -q 'push-rejected'; then
+if [ "$rc" -eq 1 ] && grep -q 'SMOKE-FAIL' <<<"$outSmokeAuth" \
+   && grep -q 'reason=auth' <<<"$outSmokeAuth" \
+   && ! grep -q 'push-rejected' <<<"$outSmokeAuth"; then
   ok "(f) smoke under an auth failure → reason=auth, not 'does origin permit refs/claims/*?'"
 else
   bad "(f) expected SMOKE-FAIL reason=auth; got rc=$rc
@@ -692,11 +692,11 @@ strayDel=$(gg -C "$A" ls-remote "$DELORIGIN" 'refs/claims/smoke-*' | wc -l | tr 
 # cause: one exit status cannot distinguish this remote's deletion policy from a network
 # drop or a post-readback auth failure, and naming one would be the affirmative-
 # measurement violation this whole change exists to remove (#3369 review).
-if [ "$rc" -ne 0 ] && printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-FAIL' \
-   && printf '%s\n' "$outSmokeDel" | grep -q 'reason=cleanup-unverified' \
-   && printf '%s\n' "$outSmokeDel" | grep -q 'no cause is attributed' \
-   && printf '%s\n' "$outSmokeDel" | grep -q 'UNPROVEN' \
-   && ! printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-OK'; then
+if [ "$rc" -ne 0 ] && grep -q 'SMOKE-FAIL' <<<"$outSmokeDel" \
+   && grep -q 'reason=cleanup-unverified' <<<"$outSmokeDel" \
+   && grep -q 'no cause is attributed' <<<"$outSmokeDel" \
+   && grep -q 'UNPROVEN' <<<"$outSmokeDel" \
+   && ! grep -q 'SMOKE-OK' <<<"$outSmokeDel"; then
   ok "(g) smoke whose cleanup delete fails → SMOKE-FAIL reason=cleanup-unverified, no cause attributed, never SMOKE-OK (refs left on that remote: $strayDel)"
 else
   bad "(g) expected SMOKE-FAIL reason=cleanup-unverified attributing no cause; got rc=$rc
@@ -710,7 +710,7 @@ fi
 strayBefore=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
 rc=0; outSmokeOk=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
 strayAfter=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
-if [ "$rc" -eq 0 ] && printf '%s\n' "$outSmokeOk" | grep -q 'SMOKE-OK' && [ "$strayAfter" = "$strayBefore" ]; then
+if [ "$rc" -eq 0 ] && grep -q 'SMOKE-OK' <<<"$outSmokeOk" && [ "$strayAfter" = "$strayBefore" ]; then
   ok "(g) positive control: a normal remote still yields SMOKE-OK and leaves NO new stray ref"
 else
   bad "(g) positive control failed: rc=$rc strays $strayBefore -> $strayAfter
@@ -744,10 +744,10 @@ exit 0
 HOOK
 chmod +x "$GHOSTORIGIN/hooks/post-receive" "$GHOSTORIGIN/hooks/pre-receive"
 rc=0; outGhost=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$GHOSTORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
-if [ "$rc" -ne 0 ] && printf '%s\n' "$outGhost" | grep -q 'reason=ls-remote-mismatch' \
-   && printf '%s\n' "$outGhost" | grep -q 'cleanup-delete=FAILED' \
-   && printf '%s\n' "$outGhost" | grep -q 'git ls-remote' \
-   && ! printf '%s\n' "$outGhost" | grep -q 'SMOKE-OK'; then
+if [ "$rc" -ne 0 ] && grep -q 'reason=ls-remote-mismatch' <<<"$outGhost" \
+   && grep -q 'cleanup-delete=FAILED' <<<"$outGhost" \
+   && grep -q 'git ls-remote' <<<"$outGhost" \
+   && ! grep -q 'SMOKE-OK' <<<"$outGhost"; then
   ok "(h) readback mismatch + failed cleanup → one verdict naming BOTH, with the ls-remote check"
 else
   bad "(h) expected reason=ls-remote-mismatch carrying cleanup-delete=FAILED; got rc=$rc
@@ -768,8 +768,8 @@ exit 0
 HOOK
 chmod +x "$CLEANORIGIN/hooks/post-receive"
 rc=0; outGhost2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$CLEANORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
-if [ "$rc" -ne 0 ] && printf '%s\n' "$outGhost2" | grep -q 'reason=ls-remote-mismatch' \
-   && ! printf '%s\n' "$outGhost2" | grep -q 'cleanup-delete=FAILED'; then
+if [ "$rc" -ne 0 ] && grep -q 'reason=ls-remote-mismatch' <<<"$outGhost2" \
+   && ! grep -q 'cleanup-delete=FAILED' <<<"$outGhost2"; then
   ok "(h) control: a mismatch whose cleanup SUCCEEDED reports no cleanup failure"
 else
   bad "(h) control: cleanup-delete=FAILED reported on a successful cleanup; rc=$rc
@@ -791,13 +791,13 @@ rcI2=0; outI2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CL
 strayI_after=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
 # The name is announced in the probe's own note line, which is where an operator chasing a
 # stranded ref reads it — so that is what is parsed, not an internal variable.
-refI1=$(printf '%s\n' "$outI1" | grep -oE 'refs/claims/smoke-[0-9a-f]{40}' | head -1)
-refI2=$(printf '%s\n' "$outI2" | grep -oE 'refs/claims/smoke-[0-9a-f]{40}' | head -1)
+_sp_t=$(grep -oE 'refs/claims/smoke-[0-9a-f]{40}' <<<"$outI1"); refI1=$(head -1 <<<"$_sp_t")
+_sp_t=$(grep -oE 'refs/claims/smoke-[0-9a-f]{40}' <<<"$outI2"); refI2=$(head -1 <<<"$_sp_t")
 # Guard the guard: a 40-hex suffix could be hex-shaped by accident. It must be the OBJECT
 # NAME of this run's smoke claim commit, which is the whole content-addressed claim.
 objI1=$(gg -C "$A" cat-file commit "${refI1##*-}" 2>/dev/null | grep -c 'claim issue=smoke' || true)
 if [ "$rcI1" -eq 0 ] && [ "$rcI2" -eq 0 ] \
-   && printf '%s\n' "$outI1" | grep -q 'SMOKE-OK' && printf '%s\n' "$outI2" | grep -q 'SMOKE-OK' \
+   && grep -q 'SMOKE-OK' <<<"$outI1" && grep -q 'SMOKE-OK' <<<"$outI2" \
    && [ -n "$refI1" ] && [ -n "$refI2" ] && [ "$refI1" != "$refI2" ] \
    && [ "${objI1:-0}" -ge 1 ] && [ "$strayI_after" = "$strayI_before" ]; then
   ok "(i) two smoke runs on ONE origin use DISTINCT content-addressed refs (each = its own claim commit's sha), both SMOKE-OK, no strays left"
@@ -848,8 +848,8 @@ else
   # (a) no lane directory at all — the ordinary case for a fresh claim. It must read
   # as unremarkable (a distinct state, not a warning).
   out21a=$(runA claim 30); rc21a=$?
-  if [ "$rc21a" -eq 0 ] && printf '%s\n' "$out21a" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21a" | grep -q 'lane-lock=no-lock-record(default-path-absent)'; then
+  if [ "$rc21a" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21a" \
+     && grep -q 'lane-lock=no-lock-record(default-path-absent)' <<<"$out21a"; then
     ok "(a) AC5: with no record and no default lane dir, the state is what was MEASURED (no-lock-record) and the absent default path is a NAMED parenthetical, never a lane census (#3436 round 12)"
   else
     bad "(a) expected HELD + lane-lock=no-lock-record(default-path-absent) exit 0; got rc=$rc21a
@@ -860,9 +860,9 @@ else
   # and deliberately not called 'free': absence of a record is not evidence of an empty lane).
   mkdir -p "$LANE_ROOT/lane-31"
   out21b=$(runA claim 31); rc21b=$?
-  if [ "$rc21b" -eq 0 ] && printf '%s\n' "$out21b" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21b" | grep -q 'lane-lock=no-lock-record' \
-     && ! printf '%s\n' "$out21b" | grep -q 'lane-lock=free'; then
+  if [ "$rc21b" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21b" \
+     && grep -q 'lane-lock=no-lock-record' <<<"$out21b" \
+     && ! grep -q 'lane-lock=free' <<<"$out21b"; then
     ok "(b) AC5: an existing but unlocked lane directory reports lane-lock=no-lock-record — NOT 'free', which would assert the lane is unoccupied when all that was measured is the absence of a record — and the claim is still HELD (exit 0)"
   else
     bad "(b) expected HELD + lane-lock=no-lock-record (never 'free') exit 0; got rc=$rc21b
@@ -881,8 +881,8 @@ else
   out21c=$(runAerr "$T/err21c" claim 32); rc21c=$?
   err21c=$(cat "$T/err21c" 2>/dev/null)
   ref32=$(ref_sha 32)
-  if [ "$rc21c" -eq 0 ] && printf '%s\n' "$out21c" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21c" | grep -q 'lane-lock=occupied-alive-unattributed' \
+  if [ "$rc21c" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21c" \
+     && grep -q 'lane-lock=occupied-alive-unattributed' <<<"$out21c" \
      && [ -n "$ref32" ]; then
     ok "(c) AC5/FIX7: a live holder with our own identity UNRESOLVED reports lane-lock=occupied-alive-unattributed — not 'occupied-alive' — and the claim is STILL GRANTED (exit 0, ref created)"
   else
@@ -891,12 +891,12 @@ else
   fi
   # AC2's principle: a collision diagnosed generically sends the reader to the wrong
   # problem, so the note must NAME the occupant — while NOT claiming it is someone else.
-  if printf '%s\n' "$err21c" | grep -q "holder-pid=$OCCUPANT_PID" \
-     && printf '%s\n' "$err21c" | grep -q 'acquired-ts=' \
-     && printf '%s\n' "$err21c" | grep -q 'age=' \
-     && printf '%s\n' "$err21c" | grep -q 'could NOT establish whether it is YOU' \
-     && printf '%s\n' "$err21c" | grep -q 'our-identity=UNRESOLVED' \
-     && ! printf '%s\n' "$err21c" | grep -q 'ALREADY OCCUPIED'; then
+  if grep -q "holder-pid=$OCCUPANT_PID" <<<"$err21c" \
+     && grep -q 'acquired-ts=' <<<"$err21c" \
+     && grep -q 'age=' <<<"$err21c" \
+     && grep -q 'could NOT establish whether it is YOU' <<<"$err21c" \
+     && grep -q 'our-identity=UNRESOLVED' <<<"$err21c" \
+     && ! grep -q 'ALREADY OCCUPIED' <<<"$err21c"; then
     ok "(c) AC5: the note NAMES the occupant (pid=$OCCUPANT_PID, acquired-ts, age) AND says the relationship is undetermined, without the 'ALREADY OCCUPIED' accusation"
   else
     bad "(c) the unattributed note is wrong (want holder-pid=$OCCUPANT_PID + acquired-ts + age + 'could NOT establish whether it is YOU' + our-identity=UNRESOLVED, and NO 'ALREADY OCCUPIED'):
@@ -910,10 +910,10 @@ else
   LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 36 >/dev/null 2>&1
   out21c2=$(LANE_LOCK_PID=$$ runAerr "$T/err21c2" claim 36); rc21c2=$?
   err21c2=$(cat "$T/err21c2" 2>/dev/null)
-  if [ "$rc21c2" -eq 0 ] && printf '%s\n' "$out21c2" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21c2" | grep -q 'lane-lock=occupied-alive' \
-     && ! printf '%s\n' "$out21c2" | grep -q 'unattributed' \
-     && printf '%s\n' "$err21c2" | grep -q 'ALREADY OCCUPIED'; then
+  if [ "$rc21c2" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21c2" \
+     && grep -q 'lane-lock=occupied-alive' <<<"$out21c2" \
+     && ! grep -q 'unattributed' <<<"$out21c2" \
+     && grep -q 'ALREADY OCCUPIED' <<<"$err21c2"; then
     ok "(c2) AC5/FIX7 control: with our identity ESTABLISHED and a differing token the state IS occupied-alive and the note DOES accuse — so the unattributed state is not a blanket answer"
   else
     bad "(c2) expected lane-lock=occupied-alive (not unattributed) with the ALREADY OCCUPIED note; got rc=$rc21c2
@@ -928,8 +928,8 @@ else
   mkdir -p "$T/scratch-nolanelock/flow"
   cp "$CLAIM" "$T/scratch-nolanelock/flow/claim.sh"
   rc=0; out21d=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$T/scratch-nolanelock/flow/claim.sh" claim 34 2>/dev/null ) || rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s\n' "$out21d" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21d" | grep -q 'lane-lock=unmeasured('; then
+  if [ "$rc" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21d" \
+     && grep -q 'lane-lock=unmeasured(' <<<"$out21d"; then
     ok "(d) AC5 non-vacuity: with lane-lock.sh absent the claim still succeeds and reports lane-lock=unmeasured(...)"
   else
     bad "(d) expected HELD + lane-lock=unmeasured(...) exit 0 with lane-lock.sh absent; got rc=$rc
@@ -941,8 +941,8 @@ else
   # post-push win; this covers the pre-check re-entrant one.
   runA claim 35 >/dev/null 2>&1
   out21e=$(runA claim 35); rc21e=$?
-  if [ "$rc21e" -eq 0 ] && printf '%s\n' "$out21e" | grep -q 're-entrant' \
-     && printf '%s\n' "$out21e" | grep -q 'lane-lock='; then
+  if [ "$rc21e" -eq 0 ] && grep -q 're-entrant' <<<"$out21e" \
+     && grep -q 'lane-lock=' <<<"$out21e"; then
     ok "(e) AC5: the re-entrant HELD line carries lane-lock= too (not just the post-push win)"
   else
     bad "(e) expected a re-entrant HELD carrying lane-lock=; got rc=$rc21e
@@ -963,8 +963,8 @@ else
   LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 33 >/dev/null 2>&1
   out21f=$(LANE_LOCK_PID=$$ runAerr "$T/err21f" claim 33); rc21f=$?
   err21f=$(cat "$T/err21f" 2>/dev/null)
-  if [ "$rc21f" -eq 0 ] && printf '%s\n' "$out21f" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21f" | grep -q 'lane-lock=self'; then
+  if [ "$rc21f" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21f" \
+     && grep -q 'lane-lock=self' <<<"$out21f"; then
     ok "(f) AC5: a lane held by THIS session reports lane-lock=self, still HELD (exit 0)"
   else
     bad "(f) expected HELD + lane-lock=self exit 0; got rc=$rc21f
@@ -972,8 +972,8 @@ else
   fi
   # ...and it must NOT emit the alarming peer-occupancy note about our own lock: a
   # warning fired on correct input is the warning readers learn to ignore.
-  if printf '%s\n' "$err21f" | grep -q 'held by THIS session' \
-     && ! printf '%s\n' "$err21f" | grep -q 'ALREADY OCCUPIED'; then
+  if grep -q 'held by THIS session' <<<"$err21f" \
+     && ! grep -q 'ALREADY OCCUPIED' <<<"$err21f"; then
     ok "(f) AC5: a self-held lane gets the THIS-session note and NOT the peer-occupancy warning"
   else
     bad "(f) expected the THIS-session note without the ALREADY OCCUPIED warning; got:
@@ -992,9 +992,9 @@ else
   out21h=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_ROOT="$SPACE_ROOT" bash "$CLAIM" claim 38 2>"$T/err21h" ) || rc=$?
   rc21h=$rc
   err21h=$(cat "$T/err21h" 2>/dev/null)
-  if [ "$rc21h" -eq 0 ] && printf '%s\n' "$out21h" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21h" | grep -q 'lane-lock=no-lock-record' \
-     && ! printf '%s\n' "$out21h" | grep -q 'no-lane-dir'; then
+  if [ "$rc21h" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21h" \
+     && grep -q 'lane-lock=no-lock-record' <<<"$out21h" \
+     && ! grep -q 'no-lane-dir' <<<"$out21h"; then
     ok "(h) FIX9b: an EXISTING lane directory whose path contains a SPACE reports lane-lock=no-lock-record, not no-lane-dir"
   else
     bad "(h) expected lane-lock=no-lock-record for a space-bearing lane path; got rc=$rc21h
@@ -1008,9 +1008,9 @@ else
   rc=0
   out21h2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_ROOT="$SPACE_ROOT" bash "$CLAIM" claim 39 2>"$T/err21h2" ) || rc=$?
   err21h2=$(cat "$T/err21h2" 2>/dev/null)
-  if [ "$rc" -eq 0 ] && printf '%s\n' "$out21h2" | grep -q 'CLAIM: HELD' \
-     && printf '%s\n' "$out21h2" | grep -q 'lane-lock=occupied-alive' \
-     && printf '%s\n' "$err21h2" | grep -qF "lane-dir=$SPACE_ROOT/lane-39"; then
+  if [ "$rc" -eq 0 ] && grep -q 'CLAIM: HELD' <<<"$out21h2" \
+     && grep -q 'lane-lock=occupied-alive' <<<"$out21h2" \
+     && grep -qF "lane-dir=$SPACE_ROOT/lane-39" <<<"$err21h2"; then
     ok "(h) FIX9b: the occupant note carries the WHOLE space-bearing path ($SPACE_ROOT/lane-39), not its first word"
   else
     bad "(h) expected the full space-bearing lane-dir in the occupant note; got rc=$rc
@@ -1021,12 +1021,13 @@ else
   # (g) control: the field is not a constant. Four claims above measured four
   # different lane states, so a hard-coded value cannot satisfy all of them, and
   # `self` vs `occupied-alive` in particular cannot be one value.
-  s21a=$(printf '%s\n' "$out21a" | grep -o 'lane-lock=[^ ]*' | head -1)
-  s21b=$(printf '%s\n' "$out21b" | grep -o 'lane-lock=[^ ]*' | head -1)
-  s21c=$(printf '%s\n' "$out21c" | grep -o 'lane-lock=[^ ]*' | head -1)
-  s21f=$(printf '%s\n' "$out21f" | grep -o 'lane-lock=[^ ]*' | head -1)
-  s21c2=$(printf '%s\n' "$out21c2" | grep -o 'lane-lock=[^ ]*' | head -1)
-  uniq_states=$(printf '%s\n%s\n%s\n%s\n%s\n' "$s21a" "$s21b" "$s21c" "$s21c2" "$s21f" | sort -u | grep -c .)
+  _sp_t=$(grep -o 'lane-lock=[^ ]*' <<<"$out21a"); s21a=$(head -1 <<<"$_sp_t")
+  _sp_t=$(grep -o 'lane-lock=[^ ]*' <<<"$out21b"); s21b=$(head -1 <<<"$_sp_t")
+  _sp_t=$(grep -o 'lane-lock=[^ ]*' <<<"$out21c"); s21c=$(head -1 <<<"$_sp_t")
+  _sp_t=$(grep -o 'lane-lock=[^ ]*' <<<"$out21f"); s21f=$(head -1 <<<"$_sp_t")
+  _sp_t=$(grep -o 'lane-lock=[^ ]*' <<<"$out21c2"); s21c2=$(head -1 <<<"$_sp_t")
+  _sp_in=$(printf '%s\n%s\n%s\n%s\n%s\n' "$s21a" "$s21b" "$s21c" "$s21c2" "$s21f")
+  uniq_states=$(sort -u <<<"$_sp_in" | grep -c .)
   if [ -n "$s21a" ] && [ -n "$s21b" ] && [ -n "$s21c" ] && [ -n "$s21c2" ] && [ -n "$s21f" ] \
      && [ "$uniq_states" -eq 5 ]; then
     ok "(g) AC5 control: the lane states measured here are all DISTINCT values ($s21a / $s21b / $s21c / $s21c2 / $s21f)"
@@ -1067,10 +1068,10 @@ else
   # (a) NO local evidence -> the unchanged generic verdict.
   push_legacy_branch 40
   out22a=$(runA claim 40 2>/dev/null); rc22a=$?
-  if [ "$rc22a" -eq 2 ] && printf '%s\n' "$out22a" | grep -q 'reason=legacy-branch-lock' \
-     && printf '%s\n' "$out22a" | grep -q 'claim-ref=free' \
-     && printf '%s\n' "$out22a" | grep -q 'lane-evidence=none' \
-     && ! printf '%s\n' "$out22a" | grep -q 'released-then-resumed'; then
+  if [ "$rc22a" -eq 2 ] && grep -q 'reason=legacy-branch-lock' <<<"$out22a" \
+     && grep -q 'claim-ref=free' <<<"$out22a" \
+     && grep -q 'lane-evidence=none' <<<"$out22a" \
+     && ! grep -q 'released-then-resumed' <<<"$out22a"; then
     ok "(a) AC6: an issue-40-* branch with NO local lane evidence keeps reason=legacy-branch-lock (exit 2, lane-evidence=none)"
   else
     bad "(a) expected reason=legacy-branch-lock exit 2 with no released-then-resumed; got rc=$rc22a
@@ -1085,11 +1086,11 @@ else
   LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 41 >/dev/null 2>&1
   rc=0; out22b=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$OCCUPANT_PID bash "$CLAIM" claim 41 2>/dev/null ) || rc=$?
   rc22b=$rc
-  if [ "$rc22b" -eq 2 ] && printf '%s\n' "$out22b" | grep -q 'reason=released-then-resumed' \
-     && printf '%s\n' "$out22b" | grep -q 'claim-ref=free' \
-     && printf '%s\n' "$out22b" | grep -q 'lane-evidence=lane-lock-self' \
-     && ! printf '%s\n' "$out22b" | grep -q 'reason=legacy-branch-lock' \
-     && ! printf '%s\n' "$out22b" | grep -q 'reason=lane-occupied-by-live-peer'; then
+  if [ "$rc22b" -eq 2 ] && grep -q 'reason=released-then-resumed' <<<"$out22b" \
+     && grep -q 'claim-ref=free' <<<"$out22b" \
+     && grep -q 'lane-evidence=lane-lock-self' <<<"$out22b" \
+     && ! grep -q 'reason=legacy-branch-lock' <<<"$out22b" \
+     && ! grep -q 'reason=lane-occupied-by-live-peer' <<<"$out22b"; then
     ok "(b) AC6: the lane lock held by THIS session yields reason=released-then-resumed (exit 2, lane-evidence=lane-lock-self)"
   else
     bad "(b) expected reason=released-then-resumed exit 2 with lane-evidence=lane-lock-self; got rc=$rc22b
@@ -1105,11 +1106,11 @@ else
   # names), and should-reap / board Status / branch author are the ONLY signals here that
   # can see another machine. Telling the reader to skip them fails toward two writers. So
   # the text must now SCOPE the claim and KEEP those checks, and still name verify first.
-  if printf '%s\n' "$out22b" | grep -q 'should-reap' \
-     && printf '%s\n' "$out22b" | grep -qi 'machine-local' \
-     && printf '%s\n' "$out22b" | grep -qi 'does NOT establish that the branch' \
-     && ! printf '%s\n' "$out22b" | grep -qi 'PROCEDURE DOES NOT APPLY' \
-     && printf '%s\n' "$out22b" | grep -q "'verify' subcommand"; then
+  if grep -q 'should-reap' <<<"$out22b" \
+     && grep -qi 'machine-local' <<<"$out22b" \
+     && grep -qi 'does NOT establish that the branch' <<<"$out22b" \
+     && ! grep -qi 'PROCEDURE DOES NOT APPLY' <<<"$out22b" \
+     && grep -q "'verify' subcommand" <<<"$out22b"; then
     ok "(c) AC6: the released-then-resumed text scopes its claim to LOCAL evidence, keeps the cross-machine checks, and points at verify"
   else
     bad "(c) released-then-resumed text over-claims (branch ownership from a machine-local lock) or drops the cross-machine checks:
@@ -1132,10 +1133,10 @@ else
     gg checkout -q -b issue-42-slug
   )
   out22f=$(runA claim 42 2>/dev/null); rc22f=$?
-  if [ "$rc22f" -eq 2 ] && printf '%s\n' "$out22f" | grep -q 'reason=legacy-branch-lock' \
-     && printf '%s\n' "$out22f" | grep -q 'lane-evidence=lane-worktree-branch' \
-     && ! printf '%s\n' "$out22f" | grep -q 'released-then-resumed' \
-     && ! printf '%s\n' "$out22f" | grep -q 'lane-occupied-by-live-peer'; then
+  if [ "$rc22f" -eq 2 ] && grep -q 'reason=legacy-branch-lock' <<<"$out22f" \
+     && grep -q 'lane-evidence=lane-worktree-branch' <<<"$out22f" \
+     && ! grep -q 'released-then-resumed' <<<"$out22f" \
+     && ! grep -q 'lane-occupied-by-live-peer' <<<"$out22f"; then
     ok "(f) AC6: a local lane checkout on issue-42-* (no lane lock) keeps reason=legacy-branch-lock, with the worktree still REPORTED in lane-evidence="
   else
     bad "(f) expected reason=legacy-branch-lock with lane-evidence=lane-worktree-branch...; got rc=$rc22f
@@ -1153,9 +1154,9 @@ else
     echo x >x.txt; gg add x.txt; gg commit -qm x
   )
   out22g=$(runA claim 43 2>/dev/null); rc22g=$?
-  if [ "$rc22g" -eq 2 ] && printf '%s\n' "$out22g" | grep -q 'reason=legacy-branch-lock' \
-     && printf '%s\n' "$out22g" | grep -q 'lane-evidence=none' \
-     && ! printf '%s\n' "$out22g" | grep -q 'released-then-resumed'; then
+  if [ "$rc22g" -eq 2 ] && grep -q 'reason=legacy-branch-lock' <<<"$out22g" \
+     && grep -q 'lane-evidence=none' <<<"$out22g" \
+     && ! grep -q 'released-then-resumed' <<<"$out22g"; then
     ok "(g) AC6 control: a lane checkout NOT on issue-43-* is no evidence at all (lane-evidence=none) — so (f)'s branch match is proven to do work"
   else
     bad "(g) expected the generic legacy-branch-lock verdict for a non-matching branch; got rc=$rc22g
@@ -1182,11 +1183,11 @@ else
   LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 44 >/dev/null 2>&1
   rc=0; out22h=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 44 2>/dev/null ) || rc=$?
   rc22h=$rc
-  if [ "$rc22h" -eq 2 ] && printf '%s\n' "$out22h" | grep -q 'reason=lane-occupied-by-live-peer' \
-     && printf '%s\n' "$out22h" | grep -q 'lane-evidence=lane-lock-alive-local-peer' \
-     && printf '%s\n' "$out22h" | grep -q "lane-holder-pid=$OCCUPANT_PID" \
-     && ! printf '%s\n' "$out22h" | grep -q 'reason=released-then-resumed' \
-     && ! printf '%s\n' "$out22h" | grep -q 'reason=legacy-branch-lock'; then
+  if [ "$rc22h" -eq 2 ] && grep -q 'reason=lane-occupied-by-live-peer' <<<"$out22h" \
+     && grep -q 'lane-evidence=lane-lock-alive-local-peer' <<<"$out22h" \
+     && grep -q "lane-holder-pid=$OCCUPANT_PID" <<<"$out22h" \
+     && ! grep -q 'reason=released-then-resumed' <<<"$out22h" \
+     && ! grep -q 'reason=legacy-branch-lock' <<<"$out22h"; then
     ok "(h) AC6 regression: a LIVE LOCAL lane-lock holder that is NOT this session is reason=lane-occupied-by-live-peer (exit 2), naming the holder pid — NOT released-then-resumed"
   else
     bad "(h) expected reason=lane-occupied-by-live-peer exit 2 with lane-evidence=lane-lock-alive-local-peer and lane-holder-pid=$OCCUPANT_PID; got rc=$rc22h
@@ -1195,10 +1196,10 @@ else
 
   # (h2) ...and its PROSE must send the reader somewhere else again: not to adoption,
   # and not to the abandonment tests, which describe a lane nobody is in.
-  if printf '%s\n' "$out22h" | grep -q 'DO NOT ADOPT THE CLAIM REF' \
-     && printf '%s\n' "$out22h" | grep -q 'should-reap' \
-     && printf '%s\n' "$out22h" | grep -qi 'does not apply' \
-     && printf '%s\n' "$out22h" | grep -qi 'find that session'; then
+  if grep -q 'DO NOT ADOPT THE CLAIM REF' <<<"$out22h" \
+     && grep -q 'should-reap' <<<"$out22h" \
+     && grep -qi 'does not apply' <<<"$out22h" \
+     && grep -qi 'find that session' <<<"$out22h"; then
     ok "(h) AC6: the live-peer text refuses BOTH other remedies by name (no adoption, no abandonment procedure) and says to find that session"
   else
     bad "(h) live-peer text did not refuse adoption + the abandonment procedure:
@@ -1215,10 +1216,10 @@ else
   push_legacy_branch 45
   LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 45 >/dev/null 2>&1
   out22i=$(runA claim 45 2>/dev/null); rc22i=$?
-  if [ "$rc22i" -eq 2 ] && printf '%s\n' "$out22i" | grep -q 'reason=legacy-branch-lock' \
-     && ! printf '%s\n' "$out22i" | grep -q 'reason=lane-occupied-by-live-peer' \
-     && printf '%s\n' "$out22i" | grep -q 'lane-evidence=lane-lock-alive-local-unattributed:our-identity-UNRESOLVED' \
-     && printf '%s\n' "$out22i" | grep -q 'lane-lock=occupied-alive-unattributed'; then
+  if [ "$rc22i" -eq 2 ] && grep -q 'reason=legacy-branch-lock' <<<"$out22i" \
+     && ! grep -q 'reason=lane-occupied-by-live-peer' <<<"$out22i" \
+     && grep -q 'lane-evidence=lane-lock-alive-local-unattributed:our-identity-UNRESOLVED' <<<"$out22i" \
+     && grep -q 'lane-lock=occupied-alive-unattributed' <<<"$out22i"; then
     ok "(i) AC6/FIX7: a live LOCAL holder with our own identity UNRESOLVED keeps reason=legacy-branch-lock, records BOTH facts in lane-evidence=, and reports the unattributed AC5 state"
   else
     bad "(i) expected legacy-branch-lock + lane-evidence=lane-lock-alive-local-unattributed:our-identity-UNRESOLVED + lane-lock=occupied-alive-unattributed; got rc=$rc22i
@@ -1226,8 +1227,8 @@ else
   fi
   # ...and (h) vs (i) differ ONLY in whether our own identity was resolvable. Same lane
   # state, same holder liveness, OPPOSITE attribution — so neither verdict can be a constant.
-  r22h_chk=$(printf '%s\n' "$out22h" | grep -o 'reason=[^ ]*' | head -1)
-  r22i_chk=$(printf '%s\n' "$out22i" | grep -o 'reason=[^ ]*' | head -1)
+  _sp_t=$(grep -o 'reason=[^ ]*' <<<"$out22h"); r22h_chk=$(head -1 <<<"$_sp_t")
+  _sp_t=$(grep -o 'reason=[^ ]*' <<<"$out22i"); r22i_chk=$(head -1 <<<"$_sp_t")
   if [ -n "$r22h_chk" ] && [ -n "$r22i_chk" ] && [ "$r22h_chk" != "$r22i_chk" ]; then
     ok "(i) control: identical setup, identity established vs not, yields DIFFERENT verdicts ($r22h_chk vs $r22i_chk)"
   else
@@ -1246,8 +1247,8 @@ else
   d22_bad=""
   for v in a b f h i; do
     eval "d22_out=\"\$out22$v\""
-    if printf '%s\n' "$d22_out" | grep -q 'claim.sh adopt' \
-       || printf '%s\n' "$d22_out" | grep -q -- '--expect none'; then
+    if grep -q 'claim.sh adopt' <<<"$d22_out" \
+       || grep -q -- '--expect none' <<<"$d22_out"; then
       d22_bad="$d22_bad ($v)"
     fi
   done
@@ -1264,10 +1265,10 @@ else
   LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 46 --actor flow >/dev/null 2>&1
   rc=0; out22k=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ CLAIM_ACTOR=other bash "$CLAIM" claim 46 --actor other 2>/dev/null ) || rc=$?
   rc22k=$rc
-  if [ "$rc22k" -eq 2 ] && printf '%s\n' "$out22k" | grep -q 'reason=legacy-branch-lock' \
-     && printf '%s\n' "$out22k" | grep -q 'lane-evidence=lane-lock-alive-local-same-process-other-actor' \
-     && ! printf '%s\n' "$out22k" | grep -q 'reason=lane-occupied-by-live-peer' \
-     && ! printf '%s\n' "$out22k" | grep -q 'reason=released-then-resumed'; then
+  if [ "$rc22k" -eq 2 ] && grep -q 'reason=legacy-branch-lock' <<<"$out22k" \
+     && grep -q 'lane-evidence=lane-lock-alive-local-same-process-other-actor' <<<"$out22k" \
+     && ! grep -q 'reason=lane-occupied-by-live-peer' <<<"$out22k" \
+     && ! grep -q 'reason=released-then-resumed' <<<"$out22k"; then
     ok "(k) AC6/round-2: the SAME process holding under a different actor is NOT lane-occupied-by-live-peer; the verdict is generic and the evidence records same-process-other-actor"
   else
     bad "(k) expected reason=legacy-branch-lock with lane-evidence=...same-process-other-actor; got rc=$rc22k
@@ -1281,7 +1282,7 @@ else
   OCC47=$!
   LANE_LOCK_PID=$OCC47 bash "$LANELOCK" acquire 47 >/dev/null 2>&1
   rc=0; out22k2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 47 2>/dev/null ) || rc=$?
-  if [ "$rc" -eq 2 ] && printf '%s\n' "$out22k2" | grep -q 'reason=lane-occupied-by-live-peer'; then
+  if [ "$rc" -eq 2 ] && grep -q 'reason=lane-occupied-by-live-peer' <<<"$out22k2"; then
     ok "(k2) control: a DIFFERENT live pid, same actor, still yields lane-occupied-by-live-peer — so (k) is not satisfied by never naming a peer"
   else
     bad "(k2) expected lane-occupied-by-live-peer for a different live pid; got rc=$rc
@@ -1299,10 +1300,10 @@ else
   LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 48 --actor flow >/dev/null 2>&1
   rc=0; out22l=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ CLAIM_ACTOR=other bash "$CLAIM" claim 48 --actor other 2>"$T/err22l" ) || rc=$?
   err22l=$(cat "$T/err22l" 2>/dev/null)
-  if printf '%s\n' "$out22l" | grep -q 'lane-lock=self-other-actor' \
-     && ! printf '%s\n' "$out22l" | grep -q 'lane-lock=occupied-alive' \
-     && printf '%s\n' "$err22l" | grep -q 'DIFFERENT actor' \
-     && ! printf '%s\n' "$err22l" | grep -q 'ALREADY OCCUPIED'; then
+  if grep -q 'lane-lock=self-other-actor' <<<"$out22l" \
+     && ! grep -q 'lane-lock=occupied-alive' <<<"$out22l" \
+     && grep -q 'DIFFERENT actor' <<<"$err22l" \
+     && ! grep -q 'ALREADY OCCUPIED' <<<"$err22l"; then
     ok "(l) AC5/round-4: our own PROCESS under another actor is lane-lock=self-other-actor, NOT occupied-alive, and the note does not warn about a peer"
   else
     bad "(l) expected lane-lock=self-other-actor and no ALREADY OCCUPIED note; got rc=$rc
@@ -1317,8 +1318,8 @@ else
   OCC49=$!
   LANE_LOCK_PID=$OCC49 bash "$LANELOCK" acquire 49 >/dev/null 2>&1
   rc=0; out22m=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 49 2>/dev/null ) || rc=$?
-  if printf '%s\n' "$out22m" | grep -q 'lane-lock=occupied-alive' \
-     && ! printf '%s\n' "$out22m" | grep -q 'self-other-actor'; then
+  if grep -q 'lane-lock=occupied-alive' <<<"$out22m" \
+     && ! grep -q 'self-other-actor' <<<"$out22m"; then
     ok "(l2) control: a DIFFERENT live pid still reports lane-lock=occupied-alive — so (l) is not satisfied by never reporting occupancy"
   else
     bad "(l2) expected lane-lock=occupied-alive for a different live pid; got
@@ -1337,7 +1338,7 @@ else
   OCC50=$!
   LANE_LOCK_MACHINE='site:host' LANE_LOCK_PID=$OCC50 bash "$LANELOCK" acquire 50 >/dev/null 2>&1
   rc=0; out22n=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_MACHINE='site:host' LANE_LOCK_PID=$$ bash "$CLAIM" claim 50 2>/dev/null ) || rc=$?
-  if [ "$rc" -eq 2 ] && printf '%s\n' "$out22n" | grep -q 'reason=lane-occupied-by-live-peer'; then
+  if [ "$rc" -eq 2 ] && grep -q 'reason=lane-occupied-by-live-peer' <<<"$out22n"; then
     ok "(n) AC6/round-5: a colon-bearing machine identity ('site:host') still reaches lane-occupied-by-live-peer — the machine is read as a FIELD, not split out of the token"
   else
     bad "(n) expected lane-occupied-by-live-peer with a colon-bearing machine; got rc=$rc
@@ -1366,11 +1367,11 @@ else
   LANE_LOCK_PID=$OCCUPANT45 bash "$LANELOCK" acquire 45 --lane-dir "$LANE_ROOT/lane-45" >/dev/null 2>&1
   rc=0; out22j=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 45 2>/dev/null ) || rc=$?
   rc22j=$rc
-  if [ "$rc22j" -eq 2 ] && printf '%s\n' "$out22j" | grep -q 'reason=lane-occupied-by-live-peer' \
-     && printf '%s\n' "$out22j" | grep -q 'lane-evidence=lane-lock-alive-local-peer,lane-worktree-branch:issue-45-slug' \
-     && printf '%s\n' "$out22j" | grep -q "lane-holder-pid=$OCCUPANT45" \
-     && ! printf '%s\n' "$out22j" | grep -q 'reason=released-then-resumed' \
-     && ! printf '%s\n' "$out22j" | grep -q 'reason=legacy-branch-lock'; then
+  if [ "$rc22j" -eq 2 ] && grep -q 'reason=lane-occupied-by-live-peer' <<<"$out22j" \
+     && grep -q 'lane-evidence=lane-lock-alive-local-peer,lane-worktree-branch:issue-45-slug' <<<"$out22j" \
+     && grep -q "lane-holder-pid=$OCCUPANT45" <<<"$out22j" \
+     && ! grep -q 'reason=released-then-resumed' <<<"$out22j" \
+     && ! grep -q 'reason=legacy-branch-lock' <<<"$out22j"; then
     ok "(j) AC6: composed evidence (live LOCAL peer + a checkout on issue-45-*) is reason=lane-occupied-by-live-peer, and lane-evidence carries BOTH rungs — (b) decides, (c) only reports"
   else
     bad "(j) expected reason=lane-occupied-by-live-peer with lane-evidence=lane-lock-alive-local-peer,lane-worktree-branch:issue-45-slug; got rc=$rc22j
@@ -1392,10 +1393,11 @@ else
   # as VALUES, never searched for as substrings (`legacy-branch-lock` is a substring of
   # nothing else here, but `released-then-resumed` vs a hypothetical
   # `released-then-resumed-peer` would defeat a substring test).
-  r22a=$(printf '%s\n' "$out22a" | grep -o 'reason=[^ ]*' | head -1)
-  r22b=$(printf '%s\n' "$out22b" | grep -o 'reason=[^ ]*' | head -1)
-  r22h=$(printf '%s\n' "$out22h" | grep -o 'reason=[^ ]*' | head -1)
-  uniq_reasons=$(printf '%s\n%s\n%s\n' "$r22a" "$r22b" "$r22h" | sort -u | grep -c .)
+  _sp_t=$(grep -o 'reason=[^ ]*' <<<"$out22a"); r22a=$(head -1 <<<"$_sp_t")
+  _sp_t=$(grep -o 'reason=[^ ]*' <<<"$out22b"); r22b=$(head -1 <<<"$_sp_t")
+  _sp_t=$(grep -o 'reason=[^ ]*' <<<"$out22h"); r22h=$(head -1 <<<"$_sp_t")
+  _sp_in=$(printf '%s\n%s\n%s\n' "$r22a" "$r22b" "$r22h")
+  uniq_reasons=$(sort -u <<<"$_sp_in" | grep -c .)
   if [ -n "$r22a" ] && [ -n "$r22b" ] && [ -n "$r22h" ] && [ "$uniq_reasons" -eq 3 ]; then
     ok "(e) AC6 control: the three refusals carry THREE DISTINCT reason tokens ($r22a / $r22b / $r22h)"
   else
@@ -1424,7 +1426,7 @@ echo 'TEST: a LEADING-ZERO issue is refused, because the claim ref is built from
 # spelling it actually has.
 for sub in claim adopt; do
   out_z="$(bash "$CLAIM" "$sub" 03436 2>&1)"; rc_z=$?
-  if [ "$rc_z" -ne 0 ] && printf '%s' "$out_z" | grep -q 'leading zero'; then
+  if [ "$rc_z" -ne 0 ] && grep -q 'leading zero' <<<"$out_z"; then
     ok "($sub) MINTS a ref, so a zero-padded issue is refused with the raw-derivation reason"
   else
     bad "($sub) a zero-padded issue was accepted by a ref-creating command: rc=$rc_z
@@ -1433,7 +1435,7 @@ $out_z"
 done
 for sub in status verify release; do
   out_r="$(bash "$CLAIM" "$sub" 03436 2>&1)"; rc_r=$?
-  if ! printf '%s' "$out_r" | grep -q 'leading zero'; then
+  if ! grep -q 'leading zero' <<<"$out_r"; then
     ok "($sub) MATCHES an existing ref, so a legacy zero-padded issue is still reachable"
   else
     bad "($sub) a read/cleanup command refused a legacy padded ref, stranding it: rc=$rc_r
@@ -1442,7 +1444,7 @@ $out_r"
 done
 # CONTROL: the canonical spelling still works — a guard that refuses everything is broken.
 out_c="$(bash "$CLAIM" status 3436 2>&1)"; rc_c=$?
-if [ "$rc_c" -eq 0 ] || printf '%s' "$out_c" | grep -q 'CLAIM: STATUS'; then
+if [ "$rc_c" -eq 0 ] || grep -q 'CLAIM: STATUS' <<<"$out_c"; then
   ok "CONTROL: the canonical issue number is still accepted"
 else
   bad "CONTROL: the canonical number was refused too: rc=$rc_c
@@ -1476,8 +1478,8 @@ bounded_claim() {  # bounded_claim <env-assignments...> -- runs $CLAIM with them
 
 o_red="$( bounded_claim CLAIM_REMOTE='https://user:ghp_TESTSECRET123@example.invalid/o/r.git' \
           GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
-if ! printf '%s' "$o_red" | grep -q 'ghp_TESTSECRET123' \
-   && printf '%s' "$o_red" | grep -q '\*\*\*@example.invalid'; then
+if ! grep -q 'ghp_TESTSECRET123' <<<"$o_red" \
+   && grep -q '\*\*\*@example.invalid' <<<"$o_red"; then
   ok "a credential-bearing CLAIM_REMOTE is redacted to ***@host in claim.sh's emitted diagnostics"
 else
   bad "the token survived into claim.sh output, or the host was lost:
@@ -1490,8 +1492,8 @@ fi
 # which is the property; the locale pin is the mechanism.
 o_utf="$( bounded_claim CLAIM_REMOTE="$(printf 'https://user:tok@ex\xff\xfeample.invalid/o/r.git')" \
           LC_ALL=en_US.UTF-8 GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
-if printf '%s' "$o_utf" | grep -q 'ls-remote-unreachable-on' \
-   && ! printf '%s' "$o_utf" | grep -qE '^CLAIM: *$'; then
+if grep -q 'ls-remote-unreachable-on' <<<"$o_utf" \
+   && ! grep -qE '^CLAIM: *$' <<<"$o_utf"; then
   ok "a remote carrying INVALID UTF-8 still emits its full verdict — the redactor did not swallow the line"
 else
   bad "an invalid-UTF-8 remote produced an empty or truncated verdict:
