@@ -269,7 +269,7 @@ ps_measured_field() {
   v="$(sed -nE "s/^pub-surface: ${body}/\1/p" "$f")"
   case "$v" in
     ''|*[!0-9]*)
-      fail_case "extraction of '$what' from $f did not yield a single integer (got: $(printf '%s' "$v" | tr '\n' '|')). The guard's measurement line is missing, reshaped, or another line matched — an unanchored parse of multi-line output is what broke this suite once (#3162)." ;;
+      fail_case "extraction of '$what' from $f did not yield a single integer (got: $(tr '\n' '|' < <(printf '%s' "$v"))). The guard's measurement line is missing, reshaped, or another line matched — an unanchored parse of multi-line output is what broke this suite once (#3162)." ;;
   esac
   printf '%s' "$v"
 }
