@@ -1021,7 +1021,7 @@ if perf_install_supported; then
     ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, which NARROWS the create-to-reopen window but does NOT close it — see the note above), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
   else
     bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
-    grep -n '\$@\|mktemp\|mv -' <<<"$wt_body" | head -8
+    grep -m8 -n '\$@\|mktemp\|mv -' <<<"$wt_body"
   fi
   # ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted —
   # the check now lives INSIDE the privileged shell, so this also proves it survived consolidation.
