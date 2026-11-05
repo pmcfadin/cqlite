@@ -206,7 +206,7 @@ capture_identity() {
            AGENT_GATE_SUMMARY_FILE="$tmp/capture-sentinel.txt" \
            AGENT_GATE_TREE_SELFTEST=capture \
            bash "$repo/scripts/agent-gate.sh" 2>/dev/null )
-  printf '%s\n' "$raw" | sed -n "s/.*[ =]${field}=\([^ ]*\).*/\1/p" | head -1
+  sed -n "s/.*[ =]${field}=\([^ ]*\).*/\1/;T;p;q" <<<"$raw"
 }
 digest_of() { local r="$1"; shift; capture_identity "$r" digest ${1+"$@"}; }
 
@@ -379,11 +379,11 @@ mkbig "$r1/big-untracked.bin" 8192
 cap_out=$( cd "$r1" && env AGENT_GATE_SUMMARY_FILE="$tmp/cap-sentinel.txt" \
              AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
              bash "$r1/scripts/agent-gate.sh" 2>/dev/null )
-if printf '%s' "$cap_out" | grep -q 'cap-line=tree-hash-cap: 4096 bytes (1 untracked file(s) recorded by size+mtime)'; then
+if grep -q 'cap-line=tree-hash-cap: 4096 bytes (1 untracked file(s) recorded by size+mtime)' <<<"$cap_out"; then
   ok "cap: a non-default AGENT_GATE_TREE_HASH_CAP_BYTES and the fallback use are STAMPED"
 else
   bad "cap: tree-hash-cap: stamp missing/incorrect"
-  printf '%s\n' "$cap_out" | sed -n 's/^tree-selftest: cap-line=/  got: /p'
+  sed -n 's/^tree-selftest: cap-line=/  got: /p' <<<"$cap_out"
 fi
 
 # --- F4: the cap is FLOORED, and the normalization is stamped ---------------------
@@ -821,14 +821,14 @@ sum="$tmp/hook-lock-multi.txt"
     bash "$r3/scripts/agent-gate.sh" >"$tmp/hook-lock-multi.out" 2>&1 ); rc=$?
 lock_line=$(sed -n 's/^tree-integrity: PASS (lockfile-settled: \(.*\))$/\1/p' "$sum" | head -1)
 if [ "$rc" -eq 0 ] && grep -q '^RESULT: PASS' "$sum" \
-   && printf '%s' "$lock_line" | grep -q 'Cargo.lock ' \
-   && printf '%s' "$lock_line" | grep -q 'member/Cargo.lock '; then
+   && grep -q 'Cargo.lock ' <<<"$lock_line" \
+   && grep -q 'member/Cargo.lock ' <<<"$lock_line"; then
   ok "lockfile: BOTH settled lockfiles are named in the stamp ($lock_line)"
 else
   bad "lockfile: the multi-lockfile stamp under-reports (rc=$rc, stamp='$lock_line')"
   grep -E 'tree-integrity|RESULT' "$sum" 2>/dev/null
 fi
-if [ "$(printf '%s\n' "$lock_line" | grep -o '→' | wc -l | tr -d ' ')" = 2 ]; then
+if [ "$(grep -o '→' <<<"$lock_line" | wc -l | tr -d ' ')" = 2 ]; then
   ok "lockfile: each named lockfile carries its own before→after hash pair"
 else
   bad "lockfile: the multi-lockfile stamp does not carry one before→after pair per lockfile"
@@ -849,8 +849,8 @@ sum="$tmp/hook-many.txt"
     bash "$r_many/scripts/agent-gate.sh" >"$tmp/hook-many.out" 2>&1 ); rc=$?
 assert_named_fail "truncation (7 changed paths)" "$sum" "$rc"
 changed_list=$(sed -n 's/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p' "$sum" | head -1)
-n_named=$(printf '%s\n' "$changed_list" | grep -o 'f[0-9]\.txt' | wc -l | tr -d ' ')
-if [ "$n_named" = 5 ] && printf '%s' "$changed_list" | grep -q '(+2 more)'; then
+n_named=$(grep -o 'f[0-9]\.txt' <<<"$changed_list" | wc -l | tr -d ' ')
+if [ "$n_named" = 5 ] && grep -q '(+2 more)' <<<"$changed_list"; then
   ok "truncation: 7 changed paths render as 5 named + '(+2 more)' ($changed_list)"
 else
   bad "truncation: the >5-path branch renders wrongly ($n_named named, list='$changed_list')"
@@ -864,8 +864,8 @@ sum="$tmp/hook-many5.txt"
     bash "$r_many/scripts/agent-gate.sh" >"$tmp/hook-many5.out" 2>&1 ); rc=$?
 assert_named_fail "truncation control (exactly 5 changed paths)" "$sum" "$rc"
 changed5=$(sed -n 's/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p' "$sum" | head -1)
-if [ "$(printf '%s\n' "$changed5" | grep -o 'f[0-9]\.txt' | wc -l | tr -d ' ')" = 5 ] \
-   && ! printf '%s' "$changed5" | grep -q 'more)'; then
+if [ "$(grep -o 'f[0-9]\.txt' <<<"$changed5" | wc -l | tr -d ' ')" = 5 ] \
+   && ! grep -q 'more)' <<<"$changed5"; then
   ok "truncation control: exactly 5 changed paths are ALL named with no remainder marker"
 else
   bad "truncation control: a 5-path list was truncated or under-reported ('$changed5')"
@@ -1656,7 +1656,7 @@ fi
 
 # --list stays exempt and unchanged (it exits before the run is established).
 list_out=$( cd "$r4" && bash "$r4/scripts/agent-gate.sh" --list 2>&1 )
-if printf '%s' "$list_out" | grep -q 'fmt' && ! printf '%s' "$list_out" | grep -q 'tree-'; then
+if grep -q 'fmt' <<<"$list_out" && ! grep -q 'tree-' <<<"$list_out"; then
   ok "helper modes: --list is exempt (no capture, output unchanged)"
 else
   bad "helper modes: --list output changed"
@@ -1731,8 +1731,8 @@ fi
 # B2: the lazy finalize must run in the CURRENT shell, before the process substitution,
 # or its OVERALL=FAIL/TREE_MUTATED=1 die in the subshell and only the text survives.
 mabody=$(awk '/^_tree_meta_array\(\) \{/,/^\}/' "$GATE")
-fin_at=$(printf '%s\n' "$mabody" | grep -n '_tree_finalize' | head -1 | cut -d: -f1)
-sub_at=$(printf '%s\n' "$mabody" | grep -n '< <(_tree_meta_lines)' | head -1 | cut -d: -f1)
+fin_at=$(grep -n '_tree_finalize' <<<"$mabody" | head -1 | cut -d: -f1)
+sub_at=$(grep -n '< <(_tree_meta_lines)' <<<"$mabody" | head -1 | cut -d: -f1)
 if [ -n "$fin_at" ] && [ -n "$sub_at" ] && [ "$fin_at" -lt "$sub_at" ]; then
   ok "WIRING: _tree_meta_array finalizes in the current shell BEFORE the process substitution"
 else
@@ -1928,7 +1928,7 @@ if [ -z "$bml_missing" ]; then
 else
   bad "WIRING: the boundary-FAIL assembly is missing: $bml_missing"
 fi
-lazy_hits=$(printf '%s\n' "$bml" | sed 's/[[:space:]]*#.*$//' \
+lazy_hits=$(sed 's/[[:space:]]*#.*$//' <<<"$bml" \
               | grep -nE '(^|[[:space:]])(_tree_finalize|_tree_meta_lines|_tree_meta_array|_tree_commit_meta)([[:space:]]|$)' || true)
 if [ -z "$lazy_hits" ]; then
   ok "WIRING: the boundary-FAIL assembly takes NO capture (no lazy finalize can overwrite the component-named verdict)"
