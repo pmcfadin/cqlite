@@ -239,7 +239,7 @@ module GatingRegistry
   # caught, by `enrolment_errors` below, for any workflow in neither `tiers:` nor
   # `exempt:` — measured on a scratch tree: a well-formed unregistered PR-triggered
   # workflow yields EXACTLY ONE error naming the file. And for the EXEMPT population
-  # the clause is vacuous, also measured: all 23 exempt entries ALREADY carry a
+  # the clause is vacuous, also measured: all 24 exempt entries ALREADY carry a
   # `pull_request`/`pull_request_target` trigger (`pull_request_workflow?` over the
   # real tree), so there is no "new trigger" event left to detect there.
   #

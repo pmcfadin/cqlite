@@ -1,6 +1,9 @@
 name: Tooling tests CI
 
-# REGISTERED GATING TIER (issue #4437, part of #4407; .github/ci-gating-tiers.yml).
+# ADVISORY TIER (issue #4437, part of #4407): listed under `exempt:` in
+# .github/ci-gating-tiers.yml, so `required` does not wait on it yet. It is built
+# to the gating-tier shape (always-fire trigger, one `Tooling tier gate` context)
+# so promotion is a registry move once #4443 removes the SIGPIPE flake class.
 # Runs the local full gate's tooling-tests component (the ~80 shell self-tests
 # for the delivery harness and the gate itself) on every PR whose diff the
 # gate's own #4266 scope marks RUN. The job calls

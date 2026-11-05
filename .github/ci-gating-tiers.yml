@@ -22,10 +22,9 @@
 # without enrolling it still reds `required` — one job removed.
 #
 # Of the 30 workflows that carry a `pull_request`/`pull_request_target` trigger,
-# one is the aggregator (pr-gate.yml), six are gating tiers (flight-ci.yml,
-# core-tests-ci.yml, component-tests-ci.yml, bindings-tests-ci.yml,
-# gate-lanes-ci.yml and tooling-tests-ci.yml) and the remaining 23 are exempted
-# below.
+# one is the aggregator (pr-gate.yml), five are gating tiers (flight-ci.yml,
+# core-tests-ci.yml, component-tests-ci.yml, bindings-tests-ci.yml and
+# gate-lanes-ci.yml) and the remaining 24 are exempted below.
 #
 # SCHEMA
 #   version:        must be 1.
@@ -86,7 +85,7 @@
 #       author-controlled prose never closes). Declared residual: an entry whose
 #       prose contradicts its structured field is NOT caught. A deliberate trade.
 #
-#       NOTE ON THE TRIGGER FACT, which is derived and never stored: ALL 23
+#       NOTE ON THE TRIGGER FACT, which is derived and never stored: ALL 24
 #       exemptions below carry a `pull_request`/`pull_request_target` trigger
 #       (measured with `GatingRegistry.pull_request_workflow?`). A stored
 #       `pr_triggered:` boolean would be constant across every entry, carry no
@@ -250,28 +249,9 @@ tiers:
       work-counters-guard, byte-budget-guard, arrow-parity-guard, memory-budget,
       bti-multiclustering, compaction-byte-parity, flight-query-semantics-oracle.
       features: legacy-heuristics, feature-iso-parquet, feature-iso-delta-scan,
-      minimal-build. smoke: smoke. NOT here: tooling-tests (its own tier,
-      tooling-tests below), the advisory dep-duplicates, and the retired
-      delivery-telemetry.
-
-  # Registered by #4437 (part of #4407). Same always-emit shape and the same
-  # `agent-gate.sh --only` mechanism, scoped by the gate's own #4266 rule.
-  - id: tooling-tests
-    workflow: tooling-tests-ci.yml
-    context: Tooling tier gate
-    # Critical path: classify (5) + the component job (55-min timeout; the
-    # nightly measured 2348s) + tier-gate (5) = 65 minutes; strictly below the
-    # aggregator job's 75.
-    wait_minutes: 70
-    mandate_paths:
-      - .github/workflows/tooling-tests-ci.yml
-    notes: >-
-      The gate job reports the aggregate of the classifier and one job running
-      `scripts/agent-gate.sh --only tooling-tests`, requiring the component's
-      own line to read PASS. Applicability is the local full gate's #4266
-      tooling-tests scope (scripts/lib/tooling-tests-scope.sh), evaluated under
-      the base, PR-head and checked-out merge copies of that lib: the tier is
-      skipped only when all three read SKIP. docs/* is in that scope, so docs-only diffs run it.
+      minimal-build. smoke: smoke. NOT here: tooling-tests (advisory for now,
+      tooling-tests-ci.yml under exempt:), the advisory dep-duplicates, and the
+      retired delivery-telemetry.
 
 exempt:
   - workflow: cassandra-parity.yml
@@ -682,6 +662,22 @@ exempt:
         component: core-tests
       - kind: ci-tier
         tier: core-tests
+
+  - workflow: tooling-tests-ci.yml
+    reason: >-
+      ADVISORY FOR NOW, by owner decision (2026-11-05, #4437). Runs the local
+      full gate's tooling-tests component on every PR the #4266 scope marks RUN,
+      exactly as a gating tier would (always-fire trigger, `Tooling tier gate`
+      context), but `required` does not wait on it: its suites still carry the
+      printf|reader SIGPIPE false-FAIL class (1904 sites in 70 suites), which
+      went red on unrelated runs, and a required tier on that would block PRs at
+      random. Promotion to `tiers:` is #4443's done-condition. Until then
+      tooling-tests is a declared CI-parity gap (#4407), covered for the merge
+      only by the local full gate.
+    issue: "#4443"
+    merge_gating_half:
+      - kind: gate-component
+        component: tooling-tests
 
   - workflow: trino-connector-ci.yml
     reason: Java connector build lane; the connector releases on its own cadence.
