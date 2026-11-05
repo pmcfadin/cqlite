@@ -901,7 +901,7 @@ if [ "${struct_present:-0}" -ge 1 ] && ! grep -q '^UNMARKED' <<<"$struct_out" \
    && ! grep -q '^NO-SUBJECT' <<<"$struct_out"; then
   pass "STRUCTURAL (joined-vs-physical): all $struct_present use(s) of the physical line inside census() carry a physical-ok: marker — a classification added against physical text fails here rather than in a sixth review round"
 else
-  fail "STRUCTURAL (joined-vs-physical): $(grep -c '^UNMARKED' <<<"$struct_out") unmarked physical-text use(s) in census(), present=${struct_present:-0} — classification must read the JOINED line; mark a diagnostic-only use with physical-ok: $(grep '^UNMARKED' <<<"$struct_out" | head -2 | tr '\n' ' ')$(grep '^NO-SUBJECT' <<<"$struct_out")"
+  fail "STRUCTURAL (joined-vs-physical): $(grep -c '^UNMARKED' <<<"$struct_out") unmarked physical-text use(s) in census(), present=${struct_present:-0} — classification must read the JOINED line; mark a diagnostic-only use with physical-ok: $(grep -m2 '^UNMARKED' <<<"$struct_out" | tr '\n' ' ')$(grep '^NO-SUBJECT' <<<"$struct_out")"
 fi
 
 # --- CONTROL 1k: the SKIP PATH IS AN ALLOWLIST, so an unanticipated word cannot slip through ---
@@ -1074,7 +1074,7 @@ control_compile() { # control_compile <label> <placeholder> <mapping> <key>
   # interpreter-specific, so grepping it would red on the 3.9-3.11 this repository pins. Both
   # tokens are produced by the checker itself (`DOES NOT COMPILE`, and the exception class name).
   if grep -q 'DOES NOT COMPILE' <<<"$out" && grep -q 'SyntaxError' <<<"$out"; then
-    pass "compile CONTROL fired ($label): $(grep 'DOES NOT COMPILE' <<<"$out" | head -1 | cut -c1-120)"
+    pass "compile CONTROL fired ($label): $(grep -m1 'DOES NOT COMPILE' <<<"$out" | cut -c1-120)"
   else
     fail "compile CONTROL did NOT fire ($label): the injected defect must be reported, got: $(findings_of "$out" | head -2)"
   fi
@@ -1169,7 +1169,7 @@ print(" ".join(sorted(MANIFEST_CONFIG_FIELDS)) + " ")
 PY
 )"
 if [ "$cfg_keys" = "$shipped_keys" ]; then
-  pass "config-fields: this suite supplies EXACTLY ws0_session.MANIFEST_CONFIG_FIELDS ($(echo "$shipped_keys" | wc -w) fields), so the environment it builds is the shipped list rather than a guess"
+  pass "config-fields: this suite supplies EXACTLY ws0_session.MANIFEST_CONFIG_FIELDS ($(wc -w <<<"$shipped_keys") fields), so the environment it builds is the shipped list rather than a guess"
 else
   fail "config-fields: the suite's WS0_CFG_* keys [$cfg_keys] differ from the shipped MANIFEST_CONFIG_FIELDS [$shipped_keys]"
 fi
@@ -1306,7 +1306,7 @@ fi
 driver_pin_keys="$(grep -oE '^WS0_PIN_[A-Z_]+=' "$DRIVER" | sed 's/=$//' | sort -u | tr '\n' ' ')"
 block_pin_keys="$(emit_block "$DRIVER" "$CPU_BLOCK" | grep -oE 'WS0_PIN_[A-Z_]+' | sort -u | tr '\n' ' ')"
 if [ -n "$block_pin_keys" ] && [ "$driver_pin_keys" = "$block_pin_keys" ]; then
-  pass "pin-exports: the DRIVER exports exactly the WS0_PIN_* names the CPU-pin step reads ($(echo "$block_pin_keys" | wc -w) of them) — the step reads them with os.environ[...], which raises KeyError on a rename and exits 2"
+  pass "pin-exports: the DRIVER exports exactly the WS0_PIN_* names the CPU-pin step reads ($(wc -w <<<"$block_pin_keys") of them) — the step reads them with os.environ[...], which raises KeyError on a rename and exits 2"
 else
   fail "pin-exports: the driver exports [$driver_pin_keys] and the CPU-pin step reads [$block_pin_keys]"
 fi
@@ -1373,7 +1373,7 @@ run_pin_step() {
       # exported" is the condition being tested and `-u` is the only spelling that states it.
       # UNSET for the child, and also REMOVED from the driver-derived list — `env -u NAME`
       # after `NAME=value` on the same command line does not win, so both halves are needed.
-      local omit_var="WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')"
+      local omit_var="WS0_CFG_$(tr '[:lower:]' '[:upper:]' <<<"$field")"
       unset_args+=("-u" "$omit_var")
       local -a kept=()
       local e
@@ -1686,7 +1686,8 @@ fi
 # THE TWO SETS MUST AGREE before the values are compared: everything the driver maps must have a
 # stated expectation, and nothing stated may be absent from the driver.
 pin_derived="$(driver_pin_fields "$DRIVER")"
-pin_stated="$(printf '%s\n' "${WS0_EXPECTED_PIN[@]}" | sed 's/=.*//' | sort | tr '\n' ' ' | sed 's/ $//')"
+_pin_lines=$(printf '%s\n' "${WS0_EXPECTED_PIN[@]}")
+pin_stated="$(sed 's/=.*//' <<<"$_pin_lines" | sort | tr '\n' ' ' | sed 's/ $//')"
 if [ -n "$pin_derived" ] && [ "$pin_derived" = "$pin_stated" ]; then
   pass "cpu-pin field coverage: the fields the driver sources from the environment [$pin_derived] are EXACTLY those with a stated expected value — a field added to the driver cannot be silently uncovered, and the values stay independent of the driver's own mapping"
 else
