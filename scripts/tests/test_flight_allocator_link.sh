@@ -354,7 +354,7 @@ check_startup_allocator_line() {
     sed "s/^/${P}    stdout | /" <<<"$logged"
     return 1
   fi
-  line=$(grep 'cqlite-flight starting' <<<"$logged" | head -1)
+  line=$(grep -m1 'cqlite-flight starting' <<<"$logged")
   # BOTH RENDERINGS of the field are accepted — `allocator="system"` (tracing's own quoting for
   # a `&str` field, which is what it emits today, measured) and a bare `allocator=system` (what
   # a `%allocator` Display field would print, and what the README shows). Quoting is a
