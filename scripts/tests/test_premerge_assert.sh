@@ -510,7 +510,7 @@ fi
 export MOCK_GH_OUT="$CERTIFIED OPEN"
 
 # --- Case 7: certified SHA passed UPPERCASE -> still matches (normalization) --
-CERT_UPPER=$(printf '%s' "$CERTIFIED" | tr '[:lower:]' '[:upper:]')
+CERT_UPPER=$(tr '[:lower:]' '[:upper:]' < <(printf '%s' "$CERTIFIED"))
 if run 0 "uppercase certified SHA -> normalized match -> exit 0" 2421 "$CERT_UPPER" "$GOOD"; then
   ok "normalization: uppercase certified SHA still matches lowercase head + summary"
 fi
@@ -1166,7 +1166,7 @@ anc_pair() {
 anc_same_but_anchor() {
   sed -e "s/$1/$R_ANCHOR/g" \
       -e "s/$(printf '%.12s' "$1")/$RA12/g" \
-      -e "s/$(printf '%.7s' "$1")/$RA7/g" "$2" | cmp -s - "$3"
+      -e "s/$(printf '%.7s' "$1")/$RA7/g" "$2" | cmp -s - "$3"  # sigpipe-fixture: printf is inside a command substitution; the pipe is sed|cmp"
 }
 anc_pair good "$R_ANCHOR"
 anc_pair foreign "$R_FOREIGN"
@@ -1882,7 +1882,7 @@ if [ -n "$BR_A" ] && [ -n "$BR_C" ] && [ -n "$BR_MID" ] &&
   # Objects are loose here (no repack was run), so removing the intermediate
   # COMMIT object is a single unlink. Trees and blobs are untouched: the point is
   # that the COMMIT graph — what `--is-ancestor` traverses — is broken.
-  _br_obj="$BR_SRC/.git/objects/$(printf '%s' "$BR_MID" | cut -c1-2)/$(printf '%s' "$BR_MID" | cut -c3-)"
+  _br_obj="$BR_SRC/.git/objects/$(cut -c1-2 <<<"$BR_MID")/$(cut -c3- <<<"$BR_MID")"
   if [ -f "$_br_obj" ] && rm -f "$_br_obj"; then
     # FIXTURE SELF-CONSISTENCY, four conditions. The third is the whole subject
     # (no shallow marker) and the fourth is what makes the case ambiguous.
