@@ -310,7 +310,7 @@ fi
 new_case >/dev/null
 seed_state "$(printf '107\tReady\t%s\tstatus:in-progress' "$OLD_TS")"
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::"; then
+if [ "$rc" -ne 0 ] && grep -q "::error::" <<<"$out"; then
   pass "Detector exits non-zero + ::error:: on a seeded mismatch"
 else
   fail "Detector did not fail on mismatch (rc=$rc): $out"
@@ -337,13 +337,13 @@ new_case >/dev/null
 seed_state "$(printf '111\tReady\t%s\t' "$OLD_TS")"
 unset GH_TOKEN
 out="$(bash "$MIRROR" mirror 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "PROJECTS_TOKEN not set"; then
+if [ "$rc" -ne 0 ] && grep -q "PROJECTS_TOKEN not set" <<<"$out"; then
   pass "Missing PROJECTS_TOKEN fails loud (mirror)"
 else
   fail "Missing token did not fail loud (rc=$rc): $out"
 fi
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "PROJECTS_TOKEN not set"; then
+if [ "$rc" -ne 0 ] && grep -q "PROJECTS_TOKEN not set" <<<"$out"; then
   pass "Missing PROJECTS_TOKEN fails loud (detect)"
 else
   fail "Missing token did not fail loud on detect (rc=$rc): $out"
@@ -416,8 +416,8 @@ gh issue create --title "x" --body "y" --label "P2" --label "status:ready"
 gh issue list --label status:ready --json number
 EOF
 hits="$(blm_doctrine_hits "$tmp_skill_dir/SKILL.md")"
-if printf '%s' "$hits" | grep -q "issue create" \
-  && ! printf '%s' "$hits" | grep -q "issue list"; then
+if grep -q "issue create" <<<"$hits" \
+  && ! grep -q "issue list" <<<"$hits"; then
   pass "F3/G5 helper catches the create-write but excludes the list-read (same pipeline)"
 else
   fail "F3/G5 helper wrong: hits=[$hits]"
@@ -434,7 +434,7 @@ out_m="$(bash "$MIRROR" mirror 2>&1)"; rc_m=$?
 out_d="$(bash "$MIRROR" detect 2>&1)"; rc_d=$?
 unset GH_FAIL_GRAPHQL
 if [ "$rc_m" -ne 0 ] && [ "$rc_d" -ne 0 ] \
-  && printf '%s%s' "$out_m" "$out_d" | grep -q "::error::"; then
+  && grep -q "::error::" <<<"$out_m$out_d"; then
   pass "F1: gh api graphql failure fails BOTH mirror and detect (non-zero + ::error::)"
 else
   fail "F1: graphql failure not fail-closed (mirror rc=$rc_m detect rc=$rc_d): $out_m | $out_d"
@@ -451,7 +451,7 @@ export ISSUE_LIST_FILE="$d/issuelist.tsv"
 printf 'status:ready\t199\n' >"$ISSUE_LIST_FILE"
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
 unset ISSUE_LIST_FILE
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "199"; then
+if [ "$rc" -ne 0 ] && grep -q "199" <<<"$out"; then
   pass "F2: off-board OPEN issue with a board-derived label fails the detector"
 else
   fail "F2: off-board issue not detected (rc=$rc): $out"
@@ -465,7 +465,7 @@ new_case >/dev/null
 seed_state "$(printf '114\tStaging\t%s\tstatus:ready' "$OLD_TS")"
 out="$(bash "$MIRROR" mirror 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] \
-  && printf '%s' "$out" | grep -q "unknown board Status" \
+  && grep -q "unknown board Status" <<<"$out" \
   && has_label 114 "status:ready"; then
   pass "F6: unknown board Status fails the mirror and does NOT strip labels"
 else
@@ -473,7 +473,7 @@ else
 fi
 # and the detector likewise fails on an unknown Status
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "unknown board Status"; then
+if [ "$rc" -ne 0 ] && grep -q "unknown board Status" <<<"$out"; then
   pass "F6: unknown board Status also fails the detector"
 else
   fail "F6: unknown Status not caught by detector (rc=$rc): $out"
@@ -488,8 +488,8 @@ seed_state "$(printf '115\tReady\t%s\t' "$OLD_TS")"
 export GH_FAIL_EDIT=1
 out="$(bash "$MIRROR" mirror 2>&1)"; rc=$?
 unset GH_FAIL_EDIT
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::" \
-  && ! printf '%s' "$out" | grep -q "^mirror: #115 .*+status:ready"; then
+if [ "$rc" -ne 0 ] && grep -q "::error::" <<<"$out" \
+  && ! grep -q "^mirror: #115 .*+status:ready" <<<"$out"; then
   pass "F7: failed gh issue edit fails the mirror (no false success log)"
 else
   fail "F7: failed edit not fail-closed (rc=$rc): $out"
@@ -518,8 +518,8 @@ export ISSUE_LIST_FILE="$d/issuelist.tsv"
 printf 'status:ready\t900\n' >"$ISSUE_LIST_FILE"
 out="$(bash "$MIRROR" mirror-one 900 2>&1)"; rc=$?
 unset ISSUE_LIST_FILE
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::" \
-  && printf '%s' "$out" | grep -q "stale board-derived label"; then
+if [ "$rc" -ne 0 ] && grep -q "::error::" <<<"$out" \
+  && grep -q "stale board-derived label" <<<"$out"; then
   pass "M1: mirror-one on off-board issue WITH a stale status label fails (::error::)"
 else
   fail "M1: mirror-one off-board-with-stale-label did not fail (rc=$rc): $out"
@@ -534,8 +534,8 @@ new_case >/dev/null
 seed_state "$(printf '118\tReady\t%s\t' "$OLD_TS")"
 # ISSUE_LIST_FILE unset -> gh issue list returns nothing -> #901 has no derived label.
 out="$(bash "$MIRROR" mirror-one 901 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q "::error::" \
-  && printf '%s' "$out" | grep -q "::notice::"; then
+if [ "$rc" -eq 0 ] && ! grep -q "::error::" <<<"$out" \
+  && grep -q "::notice::" <<<"$out"; then
   pass "M1: mirror-one on off-board issue with NO derived label exits 0 (::notice::)"
 else
   fail "M1: off-board-no-derived-label should be a benign notice (rc=$rc): $out"
@@ -555,7 +555,7 @@ printf 'status:ready\t201\n' >>"$ISSUE_LIST_FILE"
 export BLM_OFFBOARD_LIMIT=2
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
 unset ISSUE_LIST_FILE BLM_OFFBOARD_LIMIT
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "may be truncated"; then
+if [ "$rc" -ne 0 ] && grep -q "may be truncated" <<<"$out"; then
   pass "G1: off-board list hitting --limit fails the detector (non-truncation assert)"
 else
   fail "G1: limit-truncation not caught (rc=$rc): $out"
@@ -570,7 +570,7 @@ seed_state "$(printf '119\tReady\t%s\t' "$OLD_TS")"
 export CLOSED_NODES=119
 out="$(bash "$MIRROR" mirror-one 119 node-119 2>&1)"; rc=$?
 unset CLOSED_NODES
-if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q "::error::"; then
+if [ "$rc" -eq 0 ] && ! grep -q "::error::" <<<"$out"; then
   pass "G2: mirror-one on a closed issue exits 0 with no error"
 else
   fail "G2: closed-issue mirror-one not benign (rc=$rc): $out"
@@ -588,7 +588,7 @@ export ISSUE_LIST_FILE="$d/issuelist.tsv"
 printf 'status:ready\t900\n' >"$ISSUE_LIST_FILE"
 out="$(bash "$MIRROR" mirror-one 900 node-900 2>&1)"; rc=$?
 unset ISSUE_LIST_FILE
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::"; then
+if [ "$rc" -ne 0 ] && grep -q "::error::" <<<"$out"; then
   pass "G2/M1: mirror-one on an open off-board issue WITH a stale label still fails (::error::)"
 else
   fail "G2/M1: open off-board mirror-one with stale label should fail (rc=$rc): $out"
@@ -647,7 +647,7 @@ seed_state "$(printf '311\tReady\t%s\tstatus:in-progress' "$OLD_TS")"
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
 gq_seen=$(cat "$STATE_FILE.gq_calls" 2>/dev/null || echo 0)
 if [ "$rc" -ne 0 ] && [ "$gq_seen" -ge 2 ] \
-  && printf '%s' "$out" | grep -q "::error::"; then
+  && grep -q "::error::" <<<"$out"; then
   pass "G6b F5: persistent drift reds the run after a re-read ($gq_seen graphql calls)"
 else
   fail "G6b F5: persistent drift should fail after re-read (rc=$rc, graphql=$gq_seen): $out"
@@ -665,7 +665,7 @@ export GH_FAIL_GRAPHQL_AFTER=1
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
 unset GH_FAIL_GRAPHQL_AFTER
 if [ "$rc" -ne 0 ] \
-  && printf '%s' "$out" | grep -q "re-read (self-heal) failed"; then
+  && grep -q "re-read (self-heal) failed" <<<"$out"; then
   pass "G6b F5: a FAILED self-heal re-read reds the run (never declares consistent)"
 else
   fail "G6b F5: failed re-read not fail-closed (rc=$rc): $out"
@@ -684,7 +684,7 @@ seed_state "$(printf '313\tReady\t%s\tstatus:in-progress' "$fresh_ts")"
 export BLM_GRACE_SECS=600
 out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
 unset BLM_GRACE_SECS
-if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q "::error::"; then
+if [ "$rc" -eq 0 ] && ! grep -q "::error::" <<<"$out"; then
   pass "G6b: a fresh-createdAt drift within BLM_GRACE_SECS is skipped (detect exits 0)"
 else
   fail "G6b: grace-window skip failed (rc=$rc): $out"
