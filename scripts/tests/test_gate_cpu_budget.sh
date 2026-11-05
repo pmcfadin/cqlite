@@ -37,7 +37,9 @@ skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 budget_field() {
   local _bf_t
   _bf_t=$(tr ' ' '\n' <<<"$1")
-  sed -n "s/^$2=//;T;p;q" <<<"$_bf_t"
+  local _sp_v
+  _sp_v=$(sed -n "s/^$2=//p" <<<"$_bf_t"); _sp_v=${_sp_v%%$'\n'*}
+  [ -z "$_sp_v" ] || printf '%s\n' "$_sp_v"
 }
 
 # cpu_budget <extra-env...>: run the hidden hook with a pinned ncpu + no-wrapper
