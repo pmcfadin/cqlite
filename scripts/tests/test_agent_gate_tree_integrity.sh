@@ -1731,8 +1731,8 @@ fi
 # B2: the lazy finalize must run in the CURRENT shell, before the process substitution,
 # or its OVERALL=FAIL/TREE_MUTATED=1 die in the subshell and only the text survives.
 mabody=$(awk '/^_tree_meta_array\(\) \{/,/^\}/' "$GATE")
-fin_at=$(grep -n '_tree_finalize' <<<"$mabody" | head -1 | cut -d: -f1)
-sub_at=$(grep -n '< <(_tree_meta_lines)' <<<"$mabody" | head -1 | cut -d: -f1)
+fin_at=$(grep -m1 -n '_tree_finalize' <<<"$mabody" | cut -d: -f1)
+sub_at=$(grep -m1 -n '< <(_tree_meta_lines)' <<<"$mabody" | cut -d: -f1)
 if [ -n "$fin_at" ] && [ -n "$sub_at" ] && [ "$fin_at" -lt "$sub_at" ]; then
   ok "WIRING: _tree_meta_array finalizes in the current shell BEFORE the process substitution"
 else
