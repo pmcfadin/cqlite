@@ -210,7 +210,8 @@ if ! judge_out=$(python3 "$PERF/ws0_quiescence.py" judge --before "$TMP/b.json" 
   fail "the shipped writer could not compose a baseline verdict from the SYNTHETIC timeseries"
   echo "       This is not a skip condition: the fixture is hermetic, so a refusal here is a real"
   echo "       defect in either the writer or this fixture. Writer said:"
-  printf '%s\n' "$judge_out" | sed 's/^/       /' | head -6
+  _sp_t=$(sed 's/^/       /' <<<"$judge_out")
+  head -6 <<<"$_sp_t"
   echo
   echo "ws0-quiescence-evidence guards: $fails of $checks check(s) FAILED"
   exit 1
