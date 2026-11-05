@@ -147,7 +147,7 @@ RECORD_OUT
 # verdict_lines — how many `verdict ` lines $OUT carries (exactly one per
 # measurement run; zero for a usage error).
 verdict_lines() {
-  printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: verdict ' | tr -d ' '
+  grep -c '^BASE-STALENESS: verdict ' <<<"$OUT" | tr -d ' '
 }
 
 # whole_suite_checks — the ACCUMULATED-OUTPUT assertions (was Case 17, was Case
@@ -647,8 +647,8 @@ fi
 # --- Case 8 (AC5): a zero blast radius is affirmative, and non-exhaustive ---
 if run 0 "zero blast radius prints 0 RECOGNISED, never a bare 0" "$R_UNREL"; then
   has "zero: prints '0 RECOGNISED', not a bare 0" "blast-radius 0 RECOGNISED"
-  if printf '%s\n' "$OUT" | grep -qE '^BASE-STALENESS: blast-radius 0( |$)' &&
-    ! printf '%s\n' "$OUT" | grep -q 'blast-radius 0 RECOGNISED'; then
+  if grep -qE '^BASE-STALENESS: blast-radius 0( |$)' <<<"$OUT" &&
+    ! grep -q 'blast-radius 0 RECOGNISED' <<<"$OUT"; then
     bad "zero: the blast-radius line is a bare 0"
   else
     ok "zero: no bare blast-radius 0 appears anywhere"
@@ -990,7 +990,7 @@ if [ "$RC" -eq 3 ]; then
 else
   bad "usage(no PATH): expected exit 3, got $RC (got: $OUT)"
 fi
-if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+if grep -qv '^BASE-STALENESS: ' <<<"$OUT"; then
   bad "usage(no PATH): an output line lacks the prefix: $(printf '%s\n' "$OUT" |
     grep -m1 -v '^BASE-STALENESS: ')"
 else
@@ -1012,7 +1012,7 @@ else
   bad "basename-mutant: the plant is not the defect described (syntax or content mismatch)"
 fi
 MUT_OUT=$(cd "$R_MOTIV" && PATH="$EMPTY_BIN" "$BASH" "$MUT_BN" --help 2>&1)
-mut_unpref=$(printf '%s\n' "$MUT_OUT" | grep -m1 -v '^BASE-STALENESS: ')
+mut_unpref=$(grep -m1 -v '^BASE-STALENESS: ' <<<"$MUT_OUT")
 # The unprefixed line must be ABOUT `basename`, not about anything else: the
 # first draft of this case broke the anchor with `bash: No such file or
 # directory` and read as proof of a defect it never exercised.
@@ -1251,8 +1251,8 @@ if run 4 "reserved-substring / space / NEWLINE / CR-TAB-ESC-DEL matched paths" "
   fi
   # The per-line anchor for THIS run specifically (the whole-suite roll-up is
   # Case 16; this one names the case that would break it).
-  if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
-    bad "reserved: an output line lacks the prefix: $(printf '%s\n' "$OUT" | grep -m1 -v '^BASE-STALENESS: ')"
+  if grep -qv '^BASE-STALENESS: ' <<<"$OUT"; then
+    bad "reserved: an output line lacks the prefix: $(grep -m1 -v '^BASE-STALENESS: ' <<<"$OUT")"
   else
     ok "reserved: every line stays prefixed even with a newline-bearing path in the matched set"
   fi
@@ -1282,7 +1282,7 @@ fi
 NL_REV=$'no-such\nbranch'
 OUT=$(cd "$R_RES" && bash "$MUT_SANE" "$NL_REV" 2>&1)
 RC=$?
-if [ "$RC" -eq 5 ] && printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+if [ "$RC" -eq 5 ] && grep -qv '^BASE-STALENESS: ' <<<"$OUT"; then
   ok "sane-mutant: WITHOUT sanitization a newline in a field emits an UNPREFIXED line"
 else
   bad "sane-mutant: the pass-through must break the anchor (exit $RC, all lines prefixed?)"
@@ -1291,7 +1291,7 @@ fi
 if run 5 "a NEWLINE-bearing subject rev stays anchored and is escaped visibly" \
   "$R_RES" "$NL_REV"; then
   has "sanitize: the caller-supplied newline is escaped, not emitted raw" "no-such\nbranch"
-  if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+  if grep -qv '^BASE-STALENESS: ' <<<"$OUT"; then
     bad "sanitize: a newline-bearing rev broke the prefix in the SHIPPED script"
   else
     ok "sanitize: every line stays prefixed with a newline-bearing rev (the mutant reds here)"
@@ -1317,10 +1317,10 @@ fi
 # on CORRECT input once the fixture reaches 22 staling commits (17 more than today).
 # Deriving removes the drift that BIT (4 -> 5); it does not remove all of it.
 OUT=$(cd "$R_RES" && bash "$MUT_SANE" 2>&1)
-mut_matched=$(printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: matched ')
+mut_matched=$(grep -c '^BASE-STALENESS: matched ' <<<"$OUT")
 OUT=$(cd "$R_RES" && bash "$ADVISORY" 2>&1)
 record_out "shipped run on the reserved fixture"
-ship_matched=$(printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: matched ')
+ship_matched=$(grep -c '^BASE-STALENESS: matched ' <<<"$OUT")
 ship_declared=$(printf '%s\n' "$OUT" |
   sed -n 's/^BASE-STALENESS: blast-radius \([0-9][0-9]*\) RECOGNISED .*/\1/p' | head -1)
 if [ -z "$ship_declared" ]; then
@@ -1473,8 +1473,8 @@ else
 fi
 
 # Reconcile the two, naming any difference in BOTH directions.
-printf '%s\n' ${GG_LIST[@]+"${GG_LIST[@]}"} | sort >"$T/gg-script"
-printf '%s\n' ${GG_DOC[@]+"${GG_DOC[@]}"} | sort >"$T/gg-doc"
+sort < <(printf '%s\n' ${GG_LIST[@]+"${GG_LIST[@]}"}) >"$T/gg-script"
+sort < <(printf '%s\n' ${GG_DOC[@]+"${GG_DOC[@]}"}) >"$T/gg-doc"
 gg_only_script=$(comm -23 "$T/gg-script" "$T/gg-doc" | tr '\n' ' ')
 gg_only_doc=$(comm -13 "$T/gg-script" "$T/gg-doc" | tr '\n' ' ')
 if [ -z "$gg_only_script" ] && [ -z "$gg_only_doc" ] && [ -s "$T/gg-script" ]; then
@@ -1654,7 +1654,7 @@ while IFS='|' read -r sp_label sp_anchor sp_inject sp_cause; do
     has "scratch-read($sp_label): the verdict is UNMEASURED" "verdict UNMEASURED"
     lacks "scratch-read($sp_label): no permissive verdict is emitted" "NO-STALENESS-RECOGNISED"
     lacks "scratch-read($sp_label): and no blast-radius count at all" "blast-radius"
-    if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+    if grep -qv '^BASE-STALENESS: ' <<<"$OUT"; then
       bad "scratch-read($sp_label): an output line lacks the prefix: $(printf '%s\n' "$OUT" |
         grep -m1 -v '^BASE-STALENESS: ')"
     else
@@ -1687,7 +1687,7 @@ else
 fi
 SO_OUT=$(cd "$R_DIFF" && bash "$MUT_SCRATCH_OPEN" 2>&1)
 SO_RC=$?
-so_unpref=$(printf '%s\n' "$SO_OUT" | grep -m1 -v '^BASE-STALENESS: ')
+so_unpref=$(grep -m1 -v '^BASE-STALENESS: ' <<<"$SO_OUT")
 if [ "$SO_RC" -eq 0 ] && [ -n "$so_unpref" ] &&
   [ "${SO_OUT#*blast-radius 0 RECOGNISED}" != "$SO_OUT" ] &&
   [ "${SO_OUT#*verdict NO-STALENESS-RECOGNISED}" != "$SO_OUT" ]; then
@@ -1879,7 +1879,7 @@ while IFS='|' read -r wp_label wp_anchor wp_inject; do
     has "scratch-write($wp_label): the verdict is UNMEASURED" "verdict UNMEASURED"
     lacks "scratch-write($wp_label): no permissive verdict is emitted" "NO-STALENESS-RECOGNISED"
     lacks "scratch-write($wp_label): and no blast-radius count at all" "blast-radius"
-    if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+    if grep -qv '^BASE-STALENESS: ' <<<"$OUT"; then
       bad "scratch-write($wp_label): an output line lacks the prefix: $(printf '%s\n' "$OUT" |
         grep -m1 -v '^BASE-STALENESS: ')"
     else
