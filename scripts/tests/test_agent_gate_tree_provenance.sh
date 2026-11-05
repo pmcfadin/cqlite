@@ -1105,7 +1105,7 @@ fi
 tmp_phys=$(cd "$tmp" && pwd -P)
 e5_out=$( cd "$r_nest" && env -u AGENT_GATE_PARENT_RUN_ID AGENT_GATE_SUMMARY_FILE="$tmp/elsewhere-summary.txt" \
             AGENT_GATE_TREE_SELFTEST=capture bash "$r_nest/scripts/agent-gate.sh" 2>/dev/null )
-e5_man=$(sed -n 's/^tree-selftest: artifacts-manifest=//;T;p;q' <<<"$e5_out")
+e5_man=$(sed -n 's/^tree-selftest: artifacts-manifest=//p' <<<"$e5_out"); e5_man=${e5_man%%$'\n'*}
 case "$e5_man" in
   "pid:"[0-9]*" summary:$tmp_phys/elsewhere-summary.txt")
     ok "E5: the manifest carries the gate's pid and its out-of-checkout summary's physical path (exported wherever it lives)" ;;
