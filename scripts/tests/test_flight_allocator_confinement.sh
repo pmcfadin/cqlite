@@ -126,7 +126,7 @@ tools/flight-loadgen/Cargo.toml'
 # `exit`, and an `exit` inside a command substitution leaves only the SUBSHELL.
 count_lines() {
   local n
-  n=$(printf '%s\n' "$1" | grep -c .)
+  n=$(grep -c . <<<"$1")
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$n"
 }
@@ -136,7 +136,7 @@ count_lines() {
 # allocator sites are documented in prose directly above them), so counting cfg
 # attributes without stripping comments would read documentation as code.
 strip_code() {
-  printf '%s\n' "$1" | sed -e 's://.*::' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+  sed -e 's://.*::' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$1"
 }
 
 # =============================================================================
@@ -209,7 +209,7 @@ while IFS= read -r occ; do
       esac
 
       attrs=$(collect_attrs "$ROOT/$file" "$lineno")
-      n_cfg=$(printf '%s\n' "$attrs" | grep -o '#\[cfg(' | grep -c .)
+      n_cfg=$(grep -o '#\[cfg(' <<<"$attrs" | grep -c .)
       case "$n_cfg" in ''|*[!0-9]*) fail "$file:$lineno — cannot count the cfg attributes guarding this \`#[global_allocator]\`; unmeasurable is not a pass" ;; esac
       if [ "$n_cfg" -ne 1 ]; then
         fail "$file:$lineno — this \`#[global_allocator]\` is guarded by $n_cfg recognised \`#[cfg(...)]\` attribute(s); exactly 1 is required (issue #3997, R4.1). Either it is UNGATED (a process-wide allocator imposed on every build), or it is preceded by a shape this scan does not recognise — most likely a MULTI-LINE cfg attribute, which the walk stops at. If the latter, extend collect_attrs() in $(basename "$0"). Collected attribute text: '${attrs}'"
@@ -222,7 +222,7 @@ while IFS= read -r occ; do
       #
       # The `test` token is matched with word boundaries so `feature = "test-util"`
       # or an identifier ending in `test` cannot satisfy it.
-      if printf '%s\n' "$attrs" | grep -qE '(^|[^A-Za-z0-9_])test([^A-Za-z0-9_]|$)'; then
+      if grep -qE '(^|[^A-Za-z0-9_])test([^A-Za-z0-9_]|$)' <<<"$attrs"; then
         n_cfgtest=$((n_cfgtest + 1)); continue
       fi
 
@@ -231,7 +231,7 @@ while IFS= read -r occ; do
       # --- anywhere else — or here but ungated by the feature — is the incident
       # --- this guard exists for.
       if [ "$file" = "$PRODUCTION_SITE" ]; then
-        printf '%s\n' "$attrs" | grep -qF "$PRODUCTION_FEATURE" \
+        grep -qF "$PRODUCTION_FEATURE" <<<"$attrs" \
           || fail "$file:$lineno — the production \`#[global_allocator]\` is NOT guarded by \`$PRODUCTION_FEATURE\` (issue #3997, R4.1). \`default = []\`, so an unguarded site would put jemalloc in every build, including one whose operator never asked for it. Collected attribute text: '${attrs}'"
         n_production=$((n_production + 1))
         production_sites="$production_sites$file:$lineno
@@ -274,11 +274,11 @@ rc=$?
 # or the feature does not exist and this guard's whole subject is gone.
 [ "$rc" -eq 0 ] || fail "no Cargo.toml names \`$ALLOCATOR_CRATE\` (git grep exited $rc) — the jemalloc feature's dependency has gone missing, so this check has no subject; refusing to pass vacuously"
 n_alloc=$(count_lines "$alloc_manifests") || fail "cannot count the allocator-manifest census — unmeasurable is not a pass"
-printf '%s\n' "$alloc_manifests" | grep -qxF 'cqlite-flight/Cargo.toml' \
+grep -qxF 'cqlite-flight/Cargo.toml' <<<"$alloc_manifests" \
   || fail "cqlite-flight/Cargo.toml does NOT name \`$ALLOCATOR_CRATE\`, but some other manifest does ($(printf '%s ' $alloc_manifests)) — the allocator has moved out of the crate that owns it"
 while IFS= read -r m; do
   [ -n "$m" ] || continue
-  printf '%s\n' "$ALLOCATOR_MANIFESTS" | grep -qxF "$m" \
+  grep -qxF "$m" <<<"$ALLOCATOR_MANIFESTS" \
     || fail "$m names \`$ALLOCATOR_CRATE\` (issue #3997, R5.1). Only cqlite-flight may depend on the allocator crate, and only the workspace root may DECLARE it in [workspace.dependencies] (inert until a member opts in). A library crate, a binding or the CLI naming it would impose a process-wide allocator on every embedder that links it."
 done <<EOF
 $alloc_manifests
@@ -309,7 +309,7 @@ while IFS= read -r entry; do
   # Trim only. A TOML comment is `#`-introduced and is rejected below by SHAPE;
   # no comment-tail stripping here, because a `#` inside a string value is not a
   # comment and stripping from it would mangle a real dependency line.
-  code=$(printf '%s\n' "$text" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  code=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$text")
   # A TOML comment declares nothing. Tested FIRST so a comment mentioning a
   # dependency line cannot be read as one.
   case "$code" in '#'*) continue ;; esac
@@ -345,7 +345,7 @@ while IFS= read -r entry; do
   n_dep_entries=$((n_dep_entries + 1))
   seen_dependents="$seen_dependents$file
 "
-  printf '%s\n' "$FLIGHT_DEPENDENTS" | grep -qxF "$file" \
+  grep -qxF "$file" <<<"$FLIGHT_DEPENDENTS" \
     || fail "$file:$lineno declares a NEW dependency on cqlite-flight that is not in this guard's recorded dependent set (issue #3997, R5.1). Every dependent widens the blast radius of anything in that crate, so the set is reviewed rather than inferred: if this is intended, add $file to FLIGHT_DEPENDENTS in $(basename "$0") and state in the diff that it links the LIBRARY target."
 done <<EOF
 $flight_lines
@@ -359,7 +359,7 @@ n_expected=$(count_lines "$FLIGHT_DEPENDENTS") || fail "cannot count the recorde
 while IFS= read -r m; do
   [ -n "$m" ] || continue
   [ -f "$ROOT/$m" ] || fail "$m is in this guard's recorded dependent set but does not exist on disk — remove it from FLIGHT_DEPENDENTS in $(basename "$0")"
-  printf '%s\n' "$seen_dependents" | grep -qxF "$m" \
+  grep -qxF "$m" <<<"$seen_dependents" \
     || fail "$m is in this guard's recorded dependent set but declares no cqlite-flight dependency any more — remove it from FLIGHT_DEPENDENTS in $(basename "$0") so the recorded set stays a fact rather than a leftover"
 done <<EOF
 $FLIGHT_DEPENDENTS
