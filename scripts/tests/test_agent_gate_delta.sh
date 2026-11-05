@@ -157,8 +157,8 @@ copy_gate_with_pin() {
 assert_verdict() {
   local label="$1" expected="$2"; shift 2
   local out verdict
-  out=$(printf '%s\n' "$@" | bash "$GATE" --delta-classify 2>/dev/null)
-  verdict=$(printf '%s\n' "$out" | grep -E '^VERDICT: ' | head -1 | sed 's/^VERDICT: //')
+  out=$(bash "$GATE" --delta-classify < <(printf '%s\n' "$@") 2>/dev/null)
+  verdict=$(grep -m1 -E '^VERDICT: ' <<<"$out" | sed 's/^VERDICT: //')
   if [ "$verdict" = "$expected" ]; then
     ok "$label: VERDICT $verdict (expected $expected)"
   else
@@ -176,8 +176,8 @@ assert_verdict "src-file-refuses" REFUSE \
 src_out=$(printf '%s\n' "cqlite-core/src/storage/sstable/reader.rs" "cqlite-core/tests/write_read_roundtrip.rs" \
   | bash "$GATE" --delta-classify 2>/dev/null)
 if [ "$METADATA_PARSER" -eq 1 ]; then
-  if printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" \
-     && printf '%s\n' "$src_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
+  if grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" <<<"$src_out" \
+     && grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs" <<<"$src_out"; then
     ok "src-file-refuses: the src file is marked REFUSE, the test file ALLOW"
   else
     bad "src-file-refuses: per-file classification wrong"
@@ -187,8 +187,8 @@ else
   skip "SKIP: no jq/python3 metadata parser — .rs ALLOW cases require cargo metadata (src-file-refuses per-file ALLOW)"
   # Degraded fail-closed: with no parser, the src file AND the real --test target
   # .rs both REFUSE (the test-target line can no longer be ALLOW).
-  if printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" \
-     && printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip.rs"; then
+  if grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" <<<"$src_out" \
+     && grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip.rs" <<<"$src_out"; then
     ok "src-file-refuses (no parser): both src and the real --test target .rs REFUSE (fail-closed)"
   else
     bad "src-file-refuses (no parser): expected both paths REFUSE without a metadata parser"
@@ -339,8 +339,8 @@ if [ "$METADATA_PARSER" -eq 1 ]; then
   assert_verdict "top-level-integration-root-allows" ALLOW "tests/cache_metrics_test.rs"
   # Per-file check: in a mixed nested-helper + top-level-target diff, the nested
   # helper is the one marked REFUSE while the top-level target stays ALLOW.
-  if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" \
-     && printf '%s\n' "$nested_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
+  if grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" <<<"$nested_out" \
+     && grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs" <<<"$nested_out"; then
     ok "nested-vs-target: nested helper REFUSE, top-level target ALLOW"
   else
     bad "nested-vs-target: per-file classification wrong"
@@ -352,8 +352,8 @@ else
   # REFUSES, so both the nested helper and the top-level target REFUSE.
   assert_verdict "top-level-integration-target-refuses (no parser, fail-closed)" REFUSE "cqlite-core/tests/compaction_integration.rs"
   assert_verdict "top-level-integration-root-refuses (no parser, fail-closed)" REFUSE "tests/cache_metrics_test.rs"
-  if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" \
-     && printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip.rs"; then
+  if grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" <<<"$nested_out" \
+     && grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip.rs" <<<"$nested_out"; then
     ok "nested-vs-target (no parser): both nested helper and top-level target REFUSE (fail-closed)"
   else
     bad "nested-vs-target (no parser): expected both paths REFUSE without a metadata parser"
@@ -372,7 +372,8 @@ fi
 assert_python_gap() {  # <label> <expected GAP|OK> <note> <allowed-paths...>
   local label="$1" expected="$2" note="$3"; shift 3
   local got
-  got=$(printf '%s\n' "$@" | bash "$GATE" --delta-python-gap "$note" 2>/dev/null | head -1)
+  got=$(bash "$GATE" --delta-python-gap "$note" 2>/dev/null < <(printf '%s\n' "$@"))
+  got=$(head -1 <<<"$got")
   if [ "$got" = "$expected" ]; then
     ok "$label: $got (expected $expected)"
   else
@@ -589,7 +590,7 @@ if [ "$rn_ok" = 1 ]; then
   # collapse the rename to the destination only (old path absent). If the local git
   # does not collapse it, the --no-renames path is not exercisable → SKIP.
   rn_naive=$(cd "$rn_repo" && git diff --name-only "$rn_anchor" HEAD 2>/dev/null)
-  if printf '%s\n' "$rn_naive" | grep -qxF "scripts/deploy.sh"; then
+  if grep -qxF "scripts/deploy.sh" <<<"$rn_naive"; then
     skip "rename-refuses: git did not collapse the rename (detection unavailable) — --no-renames path not exercisable"
   elif [ "$rn_rc" -ne 0 ] \
     && grep -q "^RESULT: REFUSED" "$rn_out" \
@@ -626,20 +627,20 @@ sentinel="$tmp/shell-probe-ran"
 rm -f "$sentinel"
 shell_out=$(printf '%s\n' "$probe" \
   | DELTA_SHELL_PROBE_SENTINEL="$sentinel" bash "$GATE" --delta-run-shell 2>/dev/null)
-if [ -f "$sentinel" ] && printf '%s\n' "$shell_out" | grep -qxF "shell-selftest: $probe PASS"; then
+if [ -f "$sentinel" ] && grep -qxF "shell-selftest: $probe PASS" <<<"$shell_out"; then
   ok "shell-executor: changed scripts/tests/*.sh was EXECUTED (sentinel written) and reported PASS"
 else
   bad "shell-executor: fixture did not run or did not report PASS"
   echo "------- out -------"; printf '%s\n' "$shell_out"; echo "sentinel: $(test -f "$sentinel" && echo present || echo absent)"; echo "-------------------"
 fi
-if printf '%s\n' "$probe" | DELTA_SHELL_PROBE_FAIL=1 bash "$GATE" --delta-run-shell >/dev/null 2>&1; then
+if DELTA_SHELL_PROBE_FAIL=1 bash "$GATE" --delta-run-shell <<<"$probe" >/dev/null 2>&1; then
   bad "shell-executor: a failing self-test script should make the executor exit non-zero"
 else
   ok "shell-executor: a failing self-test script makes the executor FAIL (non-zero exit)"
 fi
 # A non-scripts/tests/*.sh path passed to the executor is a no-op (not matched).
-noop_out=$(printf '%s\n' "docs/x.md" | bash "$GATE" --delta-run-shell 2>/dev/null)
-if printf '%s\n' "$noop_out" | grep -qxF "shell-selftest: (none)"; then
+noop_out=$(bash "$GATE" --delta-run-shell 2>/dev/null <<<"docs/x.md")
+if grep -qxF "shell-selftest: (none)" <<<"$noop_out"; then
   ok "shell-executor: non-scripts/tests path is a no-op (nothing executed)"
 else
   bad "shell-executor: expected '(none)' for a non-shell path (got '$noop_out')"
