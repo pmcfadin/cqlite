@@ -181,7 +181,7 @@ fi
 # LOW: the private/sibling write is `|| true`, so a silent dark path would leave the suite green).
 # Assert BOTH the co-located sibling ($integ.integrity-fail.<run-id>) AND the private log named in
 # the stderr line carry the full named block.
-sib=$(printf '%s\n' "$integ".integrity-fail.* | head -1)
+_sibs=("$integ".integrity-fail.*); sib=${_sibs[0]}
 priv=$(sed -n 's/.*verdict in \([^ ]*\) and .*/\1/p' "$integ_err" | head -1)
 sib_ok=0
 [ -f "$sib" ] \
@@ -254,7 +254,7 @@ else
   bad "marker mode: contended path was rewritten (peer clobbered)"
   echo "------- marker summary -------"; cat "$marker_sum" 2>/dev/null; echo "-----------------------------"
 fi
-msib=$(printf '%s\n' "$marker_sum".integrity-fail.* | head -1)
+_msibs=("$marker_sum".integrity-fail.*); msib=${_msibs[0]}
 if [ -f "$msib" ] && grep -q 'summary-integrity: FAIL' "$msib" && grep -q 'RESULT: FAIL' "$msib"; then
   ok "marker mode: sibling carries summary-integrity FAIL + RESULT FAIL (verdict never lost)"
 else
@@ -299,7 +299,7 @@ else
 fi
 # The published sibling on the marker-less path must ALSO carry the SUMMARY_META (job-2107 MED#2:
 # a live-peer FAIL block keeps the commit/branch meta, not just reason/component).
-tnm_sib=$(printf '%s\n' "$tmp/tnm-integ.txt".integrity-fail.* | head -1)
+_tnms=("$tmp/tnm-integ.txt".integrity-fail.*); tnm_sib=${_tnms[0]}
 if [ -f "$tnm_sib" ] && grep -q 'commit: selftest branch: selftest' "$tnm_sib"; then
   ok "live-peer FAIL block preserves SUMMARY_META (component/commit context not dropped) — MED#2"
 else
@@ -332,7 +332,7 @@ done
 # _apply_integrity_marker call must appear AFTER `launch_components` and BEFORE the full-gate
 # terminal `_emit_terminal_summary "$OVERALL"` (the shared MAIN/SIDE no-clobber emit).
 rr_body=$(awk '/^record_result\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
-if printf '%s\n' "$rr_body" | grep -q '_assert_summary_integrity "\$1"'; then
+if grep -q '_assert_summary_integrity "\$1"' <<<"$rr_body"; then
   ok "WIRING: record_result() body calls _assert_summary_integrity \"\$1\""
 else
   bad "WIRING: record_result() does NOT call the integrity guard — mechanism inert on a real gate"
