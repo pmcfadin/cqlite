@@ -250,7 +250,7 @@ if [ "$SENTINEL_OK" -eq 1 ]; then
 else
   bad "reuse: the venv sentinel was removed — a healthy venv was torn down unnecessarily"
 fi
-if printf '%s\n' "$OUT" | grep -qF "self-healing into a private venv"; then
+if grep -qF "self-healing into a private venv" <<<"$OUT"; then
   bad "reuse: unexpectedly emitted the self-heal notice for an already-healthy venv"
 else
   ok "reuse: no self-heal notice emitted (nothing to heal)"
@@ -283,7 +283,7 @@ if [ "$COUNTER" -eq 2 ]; then
 else
   bad "self-heal: expected 2 import-verify attempts (heal ONCE), got $COUNTER"
 fi
-if printf '%s\n' "$OUT" | grep -qF "self-healing into a private venv"; then
+if grep -qF "self-healing into a private venv" <<<"$OUT"; then
   ok "self-heal: emits the self-heal notice"
 else
   bad "self-heal: missing the self-heal notice"
@@ -298,7 +298,7 @@ else
   bad "real-defect: expected exit 3, got $RC"
   echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
 fi
-if printf '%s\n' "$OUT" | grep -qF "$DISTINCT_MARKER"; then
+if grep -qF "$DISTINCT_MARKER" <<<"$OUT"; then
   ok "real-defect: emits the DISTINCT 'real binding defect, not a venv miss' message"
 else
   bad "real-defect: missing the distinct binding-defect marker"
@@ -434,10 +434,10 @@ fi
 lite_tier_src=$(awk '/SKIP vs FAIL split \(roborev job 1449, Low\)/{flag=1} flag{print; if (/^  fi$/) exit}' "$GATE")
 if [ -z "$lite_tier_src" ]; then
   bad "lite-tier-classification: could not locate the python-tier block in $GATE (source shape changed — update this test)"
-elif printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-eq 2' \
-   && printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-eq 3' \
-   && printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-eq 4' \
-   && printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-ne 0'; then
+elif grep -qE 'pbv_rc.*-eq 2' <<<"$lite_tier_src" \
+   && grep -qE 'pbv_rc.*-eq 3' <<<"$lite_tier_src" \
+   && grep -qE 'pbv_rc.*-eq 4' <<<"$lite_tier_src" \
+   && grep -qE 'pbv_rc.*-ne 0' <<<"$lite_tier_src"; then
   ok "lite-tier-classification: rc 1 has NO explicit branch (only 2/3/4 do), so it falls through the catch-all 'pbv_rc -ne 0' branch → SKIP (source-verified, not re-implemented)"
 else
   bad "lite-tier-classification: expected explicit rc==2/rc==3/rc==4 branches plus a catch-all 'pbv_rc -ne 0' branch in the python tier; the source shape has changed"
@@ -446,7 +446,7 @@ fi
 # The catch-all branch's OWN note text must say SKIPPED, not FAIL — pinning
 # that the fallthrough destination is really the SKIP branch, not some other
 # unnamed non-zero-handling code path.
-if printf '%s\n' "$lite_tier_src" | grep -A2 'pbv_rc.*-ne 0' | grep -q 'SKIP'; then
+if grep -q 'SKIP' <<<"$(grep -A2 'pbv_rc.*-ne 0' <<<"$lite_tier_src")"; then
   ok "lite-tier-classification: the catch-all 'pbv_rc -ne 0' branch is the SKIP branch (not FAIL)"
 else
   bad "lite-tier-classification: the catch-all 'pbv_rc -ne 0' branch does not read as SKIP"
