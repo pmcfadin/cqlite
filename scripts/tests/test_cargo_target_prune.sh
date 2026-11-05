@@ -124,6 +124,15 @@ check "install: a target path with a space is refused, no unit written" '[ "$rc"
 mkdir -p "$tmp/pct%n"; : >"$tmp/pct%n/CACHEDIR.TAG"
 CARGO_TARGET_DIR="$tmp/pct%n" run --install-timer
 check "install: a target path with a systemd % specifier is refused" '[ "$rc" = 1 ] && [ ! -e "$svc" ]'
+rm -f "$svc" "${svc%.service}.timer"
+for bad in 'bs\dir' 'bs\x2fdir' 'dq"dir' "sq'dir" 'dl$dir'; do
+  mkdir -p "$tmp/$bad"; : >"$tmp/$bad/CACHEDIR.TAG"
+  CARGO_TARGET_DIR="$tmp/$bad" run --install-timer
+  check "install: a target path containing [$bad] is refused (exit 1, ERROR), no unit written" '[ "$rc" = 1 ] && grep -q "^RESULT: ERROR$" <<<"$out" && [ ! -e "$svc" ] && [ ! -e "${svc%.service}.timer" ]'
+done
+check "install: the backslash refusal is its own named error" 'grep -q "containing a backslash" <<<"$(CARGO_TARGET_DIR="$tmp/bs\\x2fdir" bash "$SCRIPT" --repo "$REPO_ROOT" --install-timer 2>&1)"'
+CARGO_TARGET_DIR="$T" run --install-timer
+check "install: POSITIVE CONTROL - a normal path is still accepted after the refusals" '[ "$rc" = 0 ] && grep -q "^RESULT: INSTALLED$" <<<"$out" && [ -e "$svc" ]'
 run --uninstall-timer
 check "uninstall: units removed" '[ "$rc" = 0 ] && [ ! -e "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer" ] && [ ! -e "$tmp/cfg/systemd/user/cqlite-cargo-prune.service" ]'
 
