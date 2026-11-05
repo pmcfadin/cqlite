@@ -79,7 +79,9 @@ ll() {
 
 # field <text> <key> — the value of a `key=value` field in a verdict line.
 field() {
-  printf '%s\n' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | cut -d= -f2- || true
+  local _fld_t
+  _fld_t=$(tr ' ' '\n' <<<"$1")
+  { grep -m1 "^$2=" <<<"$_fld_t" | cut -d= -f2-; } || true
 }
 
 # The lock FILES live in a sibling LOCK ROOT, never inside the lane directory: `git
@@ -183,9 +185,9 @@ echo "TEST 1: acquire on a FREE lane succeeds, verify then confirms it"
 sleeper; A=$REPLY_SLEEPER
 ll acquire 101 --pid "$A"; rc1=$RC; out1="$OUT"
 ll verify 101 --pid "$A"; rc2=$RC; out2="$OUT"
-if [ "$rc1" -eq 0 ] && printf '%s' "$out1" | grep -q '^LANE-LOCK: ACQUIRED issue=101 ' \
+if [ "$rc1" -eq 0 ] && grep -q '^LANE-LOCK: ACQUIRED issue=101 ' <<<"$out1" \
    && [ -f "$(record_of 101)" ] \
-   && [ "$rc2" -eq 0 ] && printf '%s' "$out2" | grep -q 'LANE-LOCK: VERIFY-OK'; then
+   && [ "$rc2" -eq 0 ] && grep -q 'LANE-LOCK: VERIFY-OK' <<<"$out2"; then
   ok "free lane: ACQUIRED (rc=0) + record written + VERIFY-OK (rc=0)"
 else
   bad "free acquire/verify failed: rc=$rc1/$rc2
@@ -208,7 +210,7 @@ ll acquire 101 --actor flow --pid "$B"; rc=$RC; out="$OUT"
 tok_after=$(token_of 101)
 holder_pid=$(field "$out" holder-pid)
 liveness=$(field "$out" liveness)
-if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: OCCUPIED ' \
+if [ "$rc" -eq 2 ] && grep -q '^LANE-LOCK: OCCUPIED ' <<<"$out" \
    && [ "$liveness" = "ALIVE" ] && [ "$holder_pid" = "$A" ] \
    && [ "$tok_after" = "$tok_before" ] && [ -n "$tok_before" ]; then
   ok "second live pid (same machine+actor) is OCCUPIED rc=2, liveness=ALIVE, holder-pid=$A, record untouched"
@@ -223,7 +225,7 @@ echo "TEST 3: re-entrancy requires ALL FIVE token components"
 tok_before=$(token_of 101)
 ll acquire 101 --actor flow --pid "$A"; rc=$RC; out="$OUT"
 tok_after=$(token_of 101)
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ACQUIRED (re-entrant)' && [ "$tok_after" = "$tok_before" ]; then
+if [ "$rc" -eq 0 ] && grep -q 'ACQUIRED (re-entrant)' <<<"$out" && [ "$tok_after" = "$tok_before" ]; then
   ok "identical machine+actor+pid+boot-id+start-ticks is ACQUIRED (re-entrant) rc=0, token unchanged"
 else
   bad "expected re-entrant grant with unchanged token; got rc=$rc tok '$tok_before' -> '$tok_after'
@@ -241,14 +243,14 @@ ll acquire 101 --actor flow --pid "$B"; rc=$RC; out="$OUT"
 tok_new=$(token_of 101)
 logline="$(grep -c 'verdict=ACQUIRED-RECLAIMED' "$(log_of 101)" 2>/dev/null || echo 0)"
 logtext="$(grep 'verdict=ACQUIRED-RECLAIMED' "$(log_of 101)" 2>/dev/null || true)"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ACQUIRED (reclaimed)' \
+if [ "$rc" -eq 0 ] && grep -q 'ACQUIRED (reclaimed)' <<<"$out" \
    && [ "$(field "$out" prev-liveness)" = "DEAD-NO-PROCESS" ] \
    && [ -n "$tok_new" ] && [ "$tok_new" != "$tok_dead" ] \
-   && printf '%s' "$tok_new" | grep -q ":$B:" \
+   && grep -q ":$B:" <<<"$tok_new" \
    && [ "${logline:-0}" -ge 1 ] \
-   && printf '%s' "$logtext" | grep -q "prev-token=$tok_dead" \
-   && printf '%s' "$logtext" | grep -q 'prev-liveness=DEAD-NO-PROCESS' \
-   && printf '%s' "$logtext" | grep -q 'reason=auto-reclaim-dead-holder'; then
+   && grep -q "prev-token=$tok_dead" <<<"$logtext" \
+   && grep -q 'prev-liveness=DEAD-NO-PROCESS' <<<"$logtext" \
+   && grep -q 'reason=auto-reclaim-dead-holder' <<<"$logtext"; then
   ok "dead holder: ACQUIRED (reclaimed) prev-liveness=DEAD-NO-PROCESS, token replaced by ours, audit line names prev-token/prev-liveness/reason"
 else
   bad "dead-holder reclaim incomplete: rc=$rc tok '$tok_dead' -> '$tok_new' log-lines=$logline
@@ -268,12 +270,12 @@ tok_stale=$(token_of 101)
 ll acquire 101 --actor flow --pid "$B"; rc=$RC; out="$OUT"
 tok_after=$(token_of 101)
 logtext="$(tail -1 "$(log_of 101)" 2>/dev/null || true)"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ACQUIRED (reclaimed)' \
+if [ "$rc" -eq 0 ] && grep -q 'ACQUIRED (reclaimed)' <<<"$out" \
    && [ "$(field "$out" prev-liveness)" = "DEAD-PID-REUSED" ] \
    && [ "$(field "$out" prev-token)" = "$tok_stale" ] \
    && [ "$tok_after" != "$tok_stale" ] \
-   && printf '%s' "$tok_after" | grep -q ":$B:" \
-   && printf '%s' "$logtext" | grep -q 'prev-liveness=DEAD-PID-REUSED'; then
+   && grep -q ":$B:" <<<"$tok_after" \
+   && grep -q 'prev-liveness=DEAD-PID-REUSED' <<<"$logtext"; then
   ok "start-ticks mismatch at a LIVE pid is DEAD-PID-REUSED and auto-reclaims (stale token displaced, recorded)"
 else
   bad "expected DEAD-PID-REUSED reclaim displacing '$tok_stale'; got rc=$rc prev-liveness=$(field "$out" prev-liveness) tok_after='$tok_after'
@@ -287,7 +289,7 @@ set_rec_field 101 boot-id 00000000-0000-0000-0000-000000000000
 tok_stale=$(token_of 101)
 ll acquire 101 --actor flow --pid "$B"; rc=$RC; out="$OUT"
 tok_after=$(token_of 101)
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ACQUIRED (reclaimed)' \
+if [ "$rc" -eq 0 ] && grep -q 'ACQUIRED (reclaimed)' <<<"$out" \
    && [ "$(field "$out" prev-liveness)" = "DEAD-REBOOT" ] \
    && [ "$(field "$out" prev-token)" = "$tok_stale" ] \
    && [ "$tok_after" != "$tok_stale" ]; then
@@ -321,7 +323,7 @@ unknown_case() {
   tok_a=$(token_of "$issue")
   rec_a=$(cat "$(record_of "$issue")" 2>/dev/null)
   lv=$(field "$out_l" liveness)
-  if [ "$rc_l" -eq 2 ] && printf '%s' "$out_l" | grep -q '^LANE-LOCK: OCCUPIED ' \
+  if [ "$rc_l" -eq 2 ] && grep -q '^LANE-LOCK: OCCUPIED ' <<<"$out_l" \
      && [ "$lv" = "$label" ] && [ "$tok_a" = "$tok_b" ] \
      && [ -n "$rec_b" ] && [ "$rec_a" = "$rec_b" ]; then
     ok "$label REFUSES (OCCUPIED rc=2) and leaves the record BYTE-IDENTICAL"
@@ -364,8 +366,8 @@ tok_before=$(token_of 301)
 rcr=0
 outr="$(env LANE_LOCK_PID="$E" LANE_ROOT="$LANES" bash "$LL" release 301 --actor flow 2>&1)" || rcr=$?
 tok_after=$(token_of 301)
-if [ "$rcv" -eq 2 ] && printf '%s' "$outv" | grep -q 'VERIFY-FAIL' && [ "$(field "$outv" reason)" = "not-holder" ] \
-   && [ "$rcr" -eq 2 ] && printf '%s' "$outr" | grep -q 'RELEASE-REFUSED' \
+if [ "$rcv" -eq 2 ] && grep -q 'VERIFY-FAIL' <<<"$outv" && [ "$(field "$outv" reason)" = "not-holder" ] \
+   && [ "$rcr" -eq 2 ] && grep -q 'RELEASE-REFUSED' <<<"$outr" \
    && [ "$(field "$outr" holder-pid)" = "$D" ] \
    && [ -f "$(record_of 301)" ] && [ "$tok_after" = "$tok_before" ]; then
   ok "non-holder: VERIFY-FAIL rc=2 and RELEASE-REFUSED rc=2 naming holder-pid=$D, record intact"
@@ -380,7 +382,7 @@ fi
 # plus the recorded pid: run it as the recorded holder by naming the same pid via env.
 rc=0
 outh="$(env LANE_LOCK_PID="$D" LANE_ROOT="$LANES" bash "$LL" release 301 --actor flow 2>&1)" || rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$outh" | grep -q '^LANE-LOCK: RELEASED ' && [ ! -f "$(record_of 301)" ]; then
+if [ "$rc" -eq 0 ] && grep -q '^LANE-LOCK: RELEASED ' <<<"$outh" && [ ! -f "$(record_of 301)" ]; then
   ok "holder release: RELEASED rc=0 and the record is gone"
 else
   bad "expected holder RELEASED rc=0 with the record removed; got rc=$rc record-exists=$([ -f "$(record_of 301)" ] && echo yes || echo no)
@@ -388,7 +390,7 @@ $outh"
 fi
 
 ll release 301 --actor flow; rc=$RC; out="$OUT"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'RELEASED (already free)'; then
+if [ "$rc" -eq 0 ] && grep -q 'RELEASED (already free)' <<<"$out"; then
   ok "releasing a free lane is idempotent: RELEASED (already free) rc=0"
 else
   bad "expected idempotent RELEASED (already free) rc=0; got rc=$rc
@@ -400,7 +402,7 @@ echo "TEST 9: release --force is the reaper path (deletes a foreign holder's rec
 # ===========================================================================
 ll acquire 302 --actor flow --pid "$D" >/dev/null 2>&1
 ll release 302 --actor other-actor --force; rc=$RC; out="$OUT"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'mode=forced' && [ ! -f "$(record_of 302)" ]; then
+if [ "$rc" -eq 0 ] && grep -q 'mode=forced' <<<"$out" && [ ! -f "$(record_of 302)" ]; then
   ok "release --force deletes a record we do not hold (mode=forced) rc=0"
 else
   bad "expected forced RELEASED rc=0 with the record removed; got rc=$rc
@@ -420,11 +422,11 @@ rec_exists=$([ -e "$(record_of 401)" ] && echo yes || echo no)
 mutex_exists=$([ -e "$LOCKS/lane-401.flock" ] && echo yes || echo no)
 ll acquire 402 --actor flow --pid "$D" >/dev/null 2>&1
 ll probe 402; rch=$RC; outh2="$OUT"
-if [ "$rcf" -eq 0 ] && printf '%s' "$outf" | grep -q '^LANE-LOCK: FREE ' \
+if [ "$rcf" -eq 0 ] && grep -q '^LANE-LOCK: FREE ' <<<"$outf" \
    && [ "$(field "$outf" liveness)" = "NO-RECORD" ] \
    && [ "$dir_exists" = "no" ] && [ "${created:-0}" = "0" ] \
    && [ "$rec_exists" = "no" ] && [ "$mutex_exists" = "no" ] \
-   && [ "$rch" -eq 0 ] && printf '%s' "$outh2" | grep -q '^LANE-LOCK: HELD ' \
+   && [ "$rch" -eq 0 ] && grep -q '^LANE-LOCK: HELD ' <<<"$outh2" \
    && [ "$(field "$outh2" liveness)" = "ALIVE" ] \
    && [ "$(field "$outh2" holder-pid)" = "$D" ] \
    && [ -n "$(field "$outh2" acquired-ts)" ] && [ -n "$(field "$outh2" age)" ] \
@@ -482,8 +484,8 @@ tok=$(token_of 402)
 lease402=$(lease_of 402)   # --expect compares the record INCARNATION, not the token (ABA)
 ll reclaim 402 --expect "$lease402" --reason lane-holder-oom-killed-verified-by-dmesg --actor flow --pid "$E"; rc=$RC; out="$OUT"
 tok_new=$(token_of 402)
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED ' \
-   && [ "$tok_new" != "$tok" ] && printf '%s' "$tok_new" | grep -q ":$E:" \
+if [ "$rc" -eq 0 ] && grep -q '^LANE-LOCK: RECLAIMED ' <<<"$out" \
+   && [ "$tok_new" != "$tok" ] && grep -q ":$E:" <<<"$tok_new" \
    && grep -q "reclaim-reason=lane-holder-oom-killed-verified-by-dmesg" "$(record_of 402)" \
    && grep -q "reclaimed-from=$tok" "$(record_of 402)" \
    && grep -q 'verdict=RECLAIMED' "$(log_of 402)"; then
@@ -497,7 +499,7 @@ tok=$(token_of 402)
 lease402b=$(lease_of 402)   # `actual=` reports the LEASE (record incarnation), not the token
 ll reclaim 402 --expect "not-the-current-token" --reason stale-lease-check --actor flow --pid "$D"; rc=$RC; out="$OUT"
 tok_after=$(token_of 402)
-if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIM-LOST ' \
+if [ "$rc" -eq 2 ] && grep -q '^LANE-LOCK: RECLAIM-LOST ' <<<"$out" \
    && [ "$(field "$out" expected)" = "not-the-current-token" ] \
    && [ "$(field "$out" actual)" = "$lease402b" ] && [ "$tok_after" = "$tok" ]; then
   ok "violated --expect: RECLAIM-LOST rc=2 naming expected= and actual=, record unchanged"
@@ -507,7 +509,7 @@ $out"
 fi
 
 ll reclaim 402 --expect none --reason lane-should-be-free-after-finalize --actor flow --pid "$D"; rc=$RC; out="$OUT"
-if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'RECLAIM-LOST' && [ "$(field "$out" expected)" = "none" ]; then
+if [ "$rc" -eq 2 ] && grep -q 'RECLAIM-LOST' <<<"$out" && [ "$(field "$out" expected)" = "none" ]; then
   ok "--expect none over an EXISTING record: RECLAIM-LOST rc=2"
 else
   bad "expected RECLAIM-LOST for --expect none over an existing record; got rc=$rc
@@ -515,7 +517,7 @@ $out"
 fi
 
 ll reclaim 403 --expect none --reason resume-after-supervisor-crash --actor flow --pid "$D"; rc=$RC; out="$OUT"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED ' && [ -f "$(record_of 403)" ]; then
+if [ "$rc" -eq 0 ] && grep -q '^LANE-LOCK: RECLAIMED ' <<<"$out" && [ -f "$(record_of 403)" ]; then
   ok "--expect none over a FREE lane: RECLAIMED rc=0"
 else
   bad "expected RECLAIMED for --expect none over a free lane; got rc=$rc
@@ -530,10 +532,10 @@ ll reclaim 403 --expect none --reason re-entrant-retry-after-confirm-blip --acto
 # THE VERDICT WORD ITSELF MUST DIFFER (#3436 FIX 13i): both this and a satisfied CAS exit
 # 0, so a consumer matching on the first token (or on the exit code) could not otherwise see
 # that its --expect did NOT hold. The exit code stays 0 — we demonstrably hold the lane.
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIM-LEASE-MISMATCH ' \
-   && printf '%s' "$out" | grep -q 'expected=none' \
-   && printf '%s' "$out" | grep -q "actual=$lease403" \
-   && ! printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED'; then
+if [ "$rc" -eq 0 ] && grep -q '^LANE-LOCK: RECLAIM-LEASE-MISMATCH ' <<<"$out" \
+   && grep -q 'expected=none' <<<"$out" \
+   && grep -q "actual=$lease403" <<<"$out" \
+   && ! grep -q '^LANE-LOCK: RECLAIMED' <<<"$out"; then
   ok "re-entrant reclaim with a violated lease: its own verdict word RECLAIM-LEASE-MISMATCH (never RECLAIMED), rc=0, naming BOTH expected=none and actual=<our token>"
 else
   bad "expected the distinct RECLAIM-LEASE-MISMATCH verdict naming both values; got rc=$rc
@@ -546,8 +548,8 @@ fi
 # asserting the hole rather than the fix.
 lease403b=$(lease_of 403)
 ll reclaim 403 --expect "$lease403b" --reason re-entrant-retry-lease-held --actor flow --pid "$D"; rc=$RC; out="$OUT"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED (re-entrant)' \
-   && ! printf '%s' "$out" | grep -qi 'lease-mismatch'; then
+if [ "$rc" -eq 0 ] && grep -q '^LANE-LOCK: RECLAIMED (re-entrant)' <<<"$out" \
+   && ! grep -qi 'lease-mismatch' <<<"$out"; then
   ok "re-entrant reclaim whose lease DID hold: plain RECLAIMED (re-entrant), no phantom mismatch"
 else
   bad "expected a plain re-entrant verdict when --expect matches; got rc=$rc
@@ -564,7 +566,7 @@ reason_case() {
   rc_l=0
   out_l="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" reclaim 403 --expect "$lease403" "$@" --actor flow 2>&1)" || rc_l=$?
   tok_a=$(token_of 403)
-  if [ "$rc_l" -eq 64 ] && [ "$tok_a" = "$tok" ] && ! printf '%s' "$out_l" | grep -q 'LANE-LOCK:'; then
+  if [ "$rc_l" -eq 64 ] && [ "$tok_a" = "$tok" ] && ! grep -q 'LANE-LOCK:' <<<"$out_l"; then
     ok "--reason $label -> exit 64 (usage error on stderr, no LANE-LOCK: line), record unchanged"
   else
     bad "--reason $label expected exit 64 with an unchanged record and no verdict line; got rc=$rc_l tok '$tok' -> '$tok_a'
@@ -591,7 +593,7 @@ usage_case() {
   local rc_l out_l
   rc_l=0
   out_l="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" "$@" 2>&1)" || rc_l=$?
-  if [ "$rc_l" -eq 64 ] && ! printf '%s' "$out_l" | grep -q 'LANE-LOCK:'; then
+  if [ "$rc_l" -eq 64 ] && ! grep -q 'LANE-LOCK:' <<<"$out_l"; then
     ok "$label -> exit 64, no LANE-LOCK: verdict line"
   else
     bad "$label expected exit 64 with no verdict line; got rc=$rc_l
@@ -618,7 +620,7 @@ ll acquire 405 --lane-dir "$T/explicit-lane" --actor flow --pid "$D"; rc=$RC; ou
 if [ "$rc" -eq 0 ] && [ -f "$(record_of 405)" ] \
    && grep -q "^lane-dir=$T/explicit-lane$" "$(record_of 405)" \
    && [ ! -e "$T/explicit-lane" ] \
-   && printf '%s' "$out" | grep -q "lane-dir=$T/explicit-lane"; then
+   && grep -q "lane-dir=$T/explicit-lane" <<<"$out"; then
   ok "an ABSOLUTE --lane-dir is honoured and RECORDED, and the lane directory is NOT created (control for the relative-path refusals)"
 else
   bad "expected an absolute --lane-dir to be honoured; got rc=$rc
@@ -672,9 +674,9 @@ ll status 402; rc1=$RC; out1="$OUT"
 ll status; rc2=$RC; out2="$OUT"
 locks=$(field "$out2" locks)
 records_on_disk=$(ls -1 "$LOCKS"/lane-*.lock 2>/dev/null | wc -l | tr -d ' ')
-if [ "$rc1" -eq 0 ] && printf '%s' "$out1" | grep -q '^LANE-LOCK: HELD issue=402 ' \
+if [ "$rc1" -eq 0 ] && grep -q '^LANE-LOCK: HELD issue=402 ' <<<"$out1" \
    && [ "$(field "$out1" holder-pid)" = "$E" ] \
-   && [ "$rc2" -eq 0 ] && printf '%s' "$out2" | grep -q '^LANE-LOCK: STATUS ' \
+   && [ "$rc2" -eq 0 ] && grep -q '^LANE-LOCK: STATUS ' <<<"$out2" \
    && [ -n "$locks" ] && [ "$locks" = "$records_on_disk" ] && [ "$locks" -ge 1 ]; then
   ok "status <N> renders lane 402 as HELD naming its holder; bare status enumerates EXACTLY the $records_on_disk records on disk (rc=0)"
 else
@@ -804,10 +806,10 @@ ll acquire 889; rc18a=$RC; out18a=$OUT
 a_rec=$([ -e "$(record_of 889)" ] && echo yes || echo no)
 a_mut=$([ -e "$LOCKS/lane-889.flock" ] && echo yes || echo no)
 a_log=$([ -e "$(log_of 889)" ] && echo yes || echo no)
-if [ "$rc18a" -eq 1 ] && printf '%s' "$out18a" | grep -q '^LANE-LOCK: ERROR reason=unresolved-identity ' \
+if [ "$rc18a" -eq 1 ] && grep -q '^LANE-LOCK: ERROR reason=unresolved-identity ' <<<"$out18a" \
    && [ "$a_rec" = no ] && [ "$a_mut" = no ] && [ "$a_log" = no ] \
-   && printf '%s' "$out18a" | grep -q -- '--pid' \
-   && printf '%s' "$out18a" | grep -q 'cd '; then
+   && grep -q -- '--pid' <<<"$out18a" \
+   && grep -q 'cd ' <<<"$out18a"; then
   ok "acquire with no durable owner: ERROR reason=unresolved-identity rc=1, NOTHING written (no record/mutex/log), and BOTH corrections printed"
 else
   bad "expected reason=unresolved-identity rc=1 writing nothing; got rc=$rc18a record=$a_rec mutex=$a_mut log=$a_log
@@ -826,10 +828,10 @@ ll acquire 890; rc18b=$RC; out18b=$OUT
 ll acquire 890; rc18c=$RC; out18c=$OUT
 ll verify  890; rc18d=$RC
 cd "$ORIG_CWD" || true
-if [ "$rc18b" -eq 0 ] && printf '%s' "$out18b" | grep -q '^LANE-LOCK: ACQUIRED issue=890 ' \
+if [ "$rc18b" -eq 0 ] && grep -q '^LANE-LOCK: ACQUIRED issue=890 ' <<<"$out18b" \
    && [ "$(field "$out18b" pid-scope)" = "cwd-match" ] \
    && [ "$(field "$out18b" pid)" = "$$" ] \
-   && [ "$rc18c" -eq 0 ] && printf '%s' "$out18c" | grep -q 'ACQUIRED (re-entrant)' \
+   && [ "$rc18c" -eq 0 ] && grep -q 'ACQUIRED (re-entrant)' <<<"$out18c" \
    && [ "$rc18d" -eq 0 ]; then
   ok "acquire from the SESSION's own cwd records $$ (pid-scope=cwd-match, a DURABLE process because this suite is that process); a SECOND acquire from a new shell is ACQUIRED (re-entrant) and verify still passes -- a transient holder would fail BOTH halves, which is what keeps the wiring honest (#3436 FIX 14)"
 else
@@ -918,8 +920,8 @@ HOLDER950=$(grep '^pid=' "$LANES/.lane-locks/lane-950.lock" 2>/dev/null | cut -d
 ll release 950; rc20b=$RC; out20b=$OUT
 cd "$ORIG20" || true
 if [ "$rc20a" -eq 0 ] && [ "$rc20b" -eq 0 ] \
-   && printf '%s' "$out20b" | grep -q '^LANE-LOCK: RELEASED issue=950 ' \
-   && printf '%s' "$out20b" | grep -q "lane-dir=$ODD_LANE" \
+   && grep -q '^LANE-LOCK: RELEASED issue=950 ' <<<"$out20b" \
+   && grep -q "lane-dir=$ODD_LANE" <<<"$out20b" \
    && [ ! -f "$LANES/.lane-locks/lane-950.lock" ]; then
   ok "(a1) release with NO --lane-dir releases a lock taken for a non-default path, reporting the RECORDED lane-dir"
 else
@@ -939,8 +941,8 @@ cd "$ORIG20" || true
 rm -rf "$ODD_LANE"                     # the lane is gone, as after `worktree remove`
 ll release 950; rc20e=$RC; out20e=$OUT                       # no identity available
 ll release 950 --pid "$HOLDER950"; rc20f=$RC; out20f=$OUT     # named explicitly
-if [ "$rc20e" -eq 2 ] && printf '%s' "$out20e" | grep -q 'RELEASE-REFUSED' \
-   && [ "$rc20f" -eq 0 ] && printf '%s' "$out20f" | grep -q '^LANE-LOCK: RELEASED issue=950 ' \
+if [ "$rc20e" -eq 2 ] && grep -q 'RELEASE-REFUSED' <<<"$out20e" \
+   && [ "$rc20f" -eq 0 ] && grep -q '^LANE-LOCK: RELEASED issue=950 ' <<<"$out20f" \
    && [ ! -f "$LANES/.lane-locks/lane-950.lock" ]; then
   ok "(a3) with the lane dir REMOVED, an identity-less release is REFUSED (not silently successful) and --pid $HOLDER950 releases it"
 else
@@ -954,8 +956,8 @@ fi
 # lock roots and BOTH acquire. It must fail at the entry point, in the main shell.
 rc20c=0; out20c="$( cd /tmp && LANE_ROOT=relative/lanes bash "$LL" probe 1 2>&1 )" || rc20c=$?
 rc20d=0; ( cd /tmp && LANE_ROOT=rel bash "$LL" --help >/dev/null 2>&1 ) || rc20d=$?
-if [ "$rc20c" -eq 64 ] && printf '%s' "$out20c" | grep -q 'LANE_ROOT must be an ABSOLUTE path' \
-   && ! printf '%s' "$out20c" | grep -q '^LANE-LOCK:' \
+if [ "$rc20c" -eq 64 ] && grep -q 'LANE_ROOT must be an ABSOLUTE path' <<<"$out20c" \
+   && ! grep -q '^LANE-LOCK:' <<<"$out20c" \
    && [ "$rc20d" -eq 0 ]; then
   ok "(b) a RELATIVE LANE_ROOT is exit 64 with no LANE-LOCK: verdict line; --help still works on a misconfigured box"
 else
@@ -977,17 +979,17 @@ sleep 300 & ABA_P=$!
 sleep 300 & ABA_Q=$!
 LANE_961="$LANES/lane-961"; mkdir -p "$LANE_961"
 ll acquire 961 --pid "$ABA_P" --lane-dir "$LANE_961" >/dev/null 2>&1
-ll probe 961; LEASE1=$(printf '%s' "$OUT" | grep -oE 'lease=[^ ]+' | cut -d= -f2-)
+ll probe 961; LEASE1=$(grep -oE 'lease=[^ ]+' <<<"$OUT" | cut -d= -f2-)
 ll release 961 --pid "$ABA_P" >/dev/null 2>&1
 ll acquire 961 --pid "$ABA_P" --lane-dir "$LANE_961" >/dev/null 2>&1
-ll probe 961; LEASE2=$(printf '%s' "$OUT" | grep -oE 'lease=[^ ]+' | cut -d= -f2-)
+ll probe 961; LEASE2=$(grep -oE 'lease=[^ ]+' <<<"$OUT" | cut -d= -f2-)
 TOK1="${LEASE1%%#*}"; TOK2="${LEASE2%%#*}"
 ll reclaim 961 --expect "$LEASE1" --reason aba-stale-lease --pid "$ABA_Q"; rc21a=$RC; out21a=$OUT
 ll reclaim 961 --expect "$LEASE2" --reason aba-current-lease --pid "$ABA_Q"; rc21b=$RC; out21b=$OUT
 if [ -n "$LEASE1" ] && [ -n "$LEASE2" ] && [ "$LEASE1" != "$LEASE2" ] \
    && [ "$TOK1" = "$TOK2" ] \
-   && [ "$rc21a" -eq 2 ] && printf '%s' "$out21a" | grep -q '^LANE-LOCK: RECLAIM-LOST' \
-   && [ "$rc21b" -eq 0 ] && printf '%s' "$out21b" | grep -q '^LANE-LOCK: RECLAIMED'; then
+   && [ "$rc21a" -eq 2 ] && grep -q '^LANE-LOCK: RECLAIM-LOST' <<<"$out21a" \
+   && [ "$rc21b" -eq 0 ] && grep -q '^LANE-LOCK: RECLAIMED' <<<"$out21b"; then
   ok "(a) a lease observed BEFORE a same-process release+reacquire LOSES (RECLAIM-LOST) while the CURRENT lease still wins — and the token halves are IDENTICAL, so only the nonce closed the ABA hole"
 else
   bad "(a) ABA: expected stale=RECLAIM-LOST(2) current=RECLAIMED(0) with identical token halves; got rc=$rc21a/$rc21b tok1=$TOK1 tok2=$TOK2
@@ -1004,9 +1006,9 @@ kill "$ABA_P" "$ABA_Q" 2>/dev/null || true
 ll acquire 03436 --lane-dir "$LANE_961"; rc21c=$RC; out21c=$OUT
 ll probe 0;    rc21d=$RC
 ll probe 3436; rc21e=$RC
-if [ "$rc21c" -eq 64 ] && printf '%s' "$out21c" | grep -q 'leading zero' \
-   && printf '%s' "$out21c" | grep -q "canonical form '3436'" \
-   && ! printf '%s' "$out21c" | grep -q '^LANE-LOCK:' \
+if [ "$rc21c" -eq 64 ] && grep -q 'leading zero' <<<"$out21c" \
+   && grep -q "canonical form '3436'" <<<"$out21c" \
+   && ! grep -q '^LANE-LOCK:' <<<"$out21c" \
    && [ "$rc21d" -eq 64 ] && [ "$rc21e" -eq 0 ]; then
   ok "(b) a leading-zero issue key is exit 64 naming the canonical form (no LANE-LOCK: verdict), issue 0 is refused, and the canonical key still works"
 else
@@ -1053,9 +1055,9 @@ kill "$DG" 2>/dev/null || true
 # is sent to the right remedy: "run from inside the lane / pass --pid" is useless advice
 # when the problem is that /proc could not be read at all.
 ll acquire 971 --lane-dir "$LANES/lane-971"; rc22b=$RC; out22b=$OUT
-if [ "$rc22b" -eq 1 ] && printf '%s' "$out22b" | grep -q 'reason=unresolved-identity' \
-   && printf '%s' "$out22b" | grep -q 'detail=no-durable-session-process' \
-   && printf '%s' "$out22b" | grep -q 'NOTHING WAS WRITTEN' \
+if [ "$rc22b" -eq 1 ] && grep -q 'reason=unresolved-identity' <<<"$out22b" \
+   && grep -q 'detail=no-durable-session-process' <<<"$out22b" \
+   && grep -q 'NOTHING WAS WRITTEN' <<<"$out22b" \
    && [ ! -f "$LANES/.lane-locks/lane-971.lock" ]; then
   ok "(b) the EPHEMERAL refusal names its own cause (detail=no-durable-session-process), writes nothing, and exits 1. NOT ASSERTED HERE: the DEGRADED branch (detail=degraded-process-identity) — it needs an unreadable boot-id or start-ticks for a live pid, which is not producible on a /proc host without a test-only seam, so it is covered by inspection only, like UNKNOWN-STATE and UNKNOWN-NO-PROC"
 else
@@ -1077,7 +1079,7 @@ ll acquire 980 --pid "$DEADP" --lane-dir "$LANE_980" >/dev/null 2>&1
 kill "$DEADP" 2>/dev/null; wait "$DEADP" 2>/dev/null
 # the holder is now DEAD and LANE_LOCK_PID in the environment still names it
 rc23a=0; out23a="$(LANE_ROOT="$LANES" LANE_LOCK_PID="$DEADP" bash "$LL" release 980 --force 2>&1)" || rc23a=$?
-if [ "$rc23a" -eq 0 ] && printf '%s' "$out23a" | grep -q '^LANE-LOCK: RELEASED issue=980 ' \
+if [ "$rc23a" -eq 0 ] && grep -q '^LANE-LOCK: RELEASED issue=980 ' <<<"$out23a" \
    && [ ! -f "$LANES/.lane-locks/lane-980.lock" ]; then
   ok "(a) release --force succeeds with a DEAD inherited LANE_LOCK_PID and removes the record — the break-glass needs no identity"
 fi
@@ -1094,7 +1096,7 @@ for _bad in "LANE_LOCK_ACTOR=**" "LANE_LOCK_PID=$DEADP" "LANE_LOCK_ACTOR=** LANE
   ( cd "$LANE_982" && env -u LANE_LOCK_ACTOR LANE_ROOT="$LANES" bash "$LL" acquire 982 --pid "$_h" >/dev/null 2>&1 )
   kill "$_h" 2>/dev/null; wait "$_h" 2>/dev/null
   _rc=0; _out="$(env $_bad LANE_ROOT="$LANES" bash "$LL" release 982 --force 2>&1)" || _rc=$?
-  if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q '^LANE-LOCK: RELEASED issue=982 ' \
+  if [ "$_rc" -eq 0 ] && grep -q '^LANE-LOCK: RELEASED issue=982 ' <<<"$_out" \
      && [ ! -f "$LANES/.lane-locks/lane-982.lock" ]; then
     ok "(a2) release --force survives a hostile inherited environment [$_bad] — no identity is resolved on the forced path, so nothing on it can refuse"
   else
@@ -1113,7 +1115,7 @@ fi
 sleep 300 & LIVEP=$!
 ll acquire 981 --pid "$LIVEP" --lane-dir "$LANES/lane-981" >/dev/null 2>&1
 rc23b=0; out23b="$(LANE_ROOT="$LANES" LANE_LOCK_PID="$$" bash "$LL" release 981 2>&1)" || rc23b=$?
-if [ "$rc23b" -eq 2 ] && printf '%s' "$out23b" | grep -q 'RELEASE-REFUSED' \
+if [ "$rc23b" -eq 2 ] && grep -q 'RELEASE-REFUSED' <<<"$out23b" \
    && [ -f "$LANES/.lane-locks/lane-981.lock" ]; then
   ok "(b) control: WITHOUT --force a non-holder release is still RELEASE-REFUSED and the record survives"
 else
@@ -1136,10 +1138,10 @@ echo "TEST 24: the SCOPE LIMIT is in the EMITTED line, not only the header"
 # that and failed against a 20-lock render).
 EMPTY_ROOT="$T/empty-root"; mkdir -p "$EMPTY_ROOT"
 OUT="$(env -u LANE_LOCK_PID LANE_ROOT="$EMPTY_ROOT" bash "$LL" status 2>&1)"
-if printf '%s' "$OUT" | grep -q 'locks=0' \
-   && printf '%s' "$OUT" | grep -q 'scope=lock-takers-only' \
-   && printf '%s' "$OUT" | grep -qi 'does NOT.*mean no lane is occupied' \
-   && printf '%s' "$OUT" | grep -qi 'not a clean bill of health'; then
+if grep -q 'locks=0' <<<"$OUT" \
+   && grep -q 'scope=lock-takers-only' <<<"$OUT" \
+   && grep -qi 'does NOT.*mean no lane is occupied' <<<"$OUT" \
+   && grep -qi 'not a clean bill of health' <<<"$OUT"; then
   ok "(a) an EMPTY status render states that 0 means no lane RECORDED a lock, not that no lane is occupied, and refuses to read as a clean bill of health"
 else
   bad "(a) the empty status render does not carry its own scope limit:
@@ -1152,9 +1154,9 @@ sleep 300 & SCOPE_H=$!
 mkdir -p "$LANES/lane-906"
 ( cd "$LANES/lane-906" && env LANE_ROOT="$LANES" bash "$LL" acquire 906 --pid "$SCOPE_H" >/dev/null 2>&1 )
 ll status
-if printf '%s' "$OUT" | grep -qE 'locks=[1-9]' \
-   && printf '%s' "$OUT" | grep -q 'scope=lock-takers-only' \
-   && printf '%s' "$OUT" | grep -qi 'not occupied lanes'; then
+if grep -qE 'locks=[1-9]' <<<"$OUT" \
+   && grep -q 'scope=lock-takers-only' <<<"$OUT" \
+   && grep -qi 'not occupied lanes' <<<"$OUT"; then
   ok "(b) a NON-EMPTY status render also states it counts RECORDED locks rather than occupied lanes"
 else
   bad "(b) the non-empty status render lost its scope limit:
@@ -1175,12 +1177,12 @@ LANE_970b="$LANES/lane-970b"; mkdir -p "$LANE_970b"
 ll acquire 970 --lane-dir "$LANE_970b" --pid "$BP_H" >/dev/null 2>&1
 REC970="$LANES/.lane-locks/lane-970.lock"
 real_boot=$(grep '^boot-id=' "$REC970" | cut -d= -f2)
-forged_boot="${real_boot:0:8}$(printf '%s' "${real_boot:8}" | tr 'abcdef0123456789' 'bcdefa1234567890')"
+forged_boot="${real_boot:0:8}$(tr 'abcdef0123456789' 'bcdefa1234567890' <<<"${real_boot:8}")"
 set_rec_field 970 boot-id "$forged_boot"
 ll probe 970 --pid "$BP_H"
 if [ "${real_boot:0:8}" = "${forged_boot:0:8}" ] && [ "$real_boot" != "$forged_boot" ] \
-   && printf '%s' "$OUT" | grep -q 'liveness=DEAD-REBOOT' \
-   && ! printf '%s' "$OUT" | grep -q 'liveness=SELF'; then
+   && grep -q 'liveness=DEAD-REBOOT' <<<"$OUT" \
+   && ! grep -q 'liveness=SELF' <<<"$OUT"; then
   ok "(a) a boot id sharing the 8-char DISPLAY prefix but differing in full is DEAD-REBOOT, never a false SELF"
 else
   bad "(a) prefix-colliding boot id was not rejected: same-prefix=$([ "${real_boot:0:8}" = "${forged_boot:0:8}" ] && echo y || echo n)
@@ -1206,8 +1208,8 @@ for shape in "trailing-slash" "dotdot"; do
   ll probe "$iss" --pid "$CN_H"; probe_out="$OUT"
   ll release "$iss" --pid "$CN_H"; rel_rc=$RC; rel_out="$OUT"
   if [ "$recorded" = "$want" ] \
-     && printf '%s' "$probe_out" | grep -q 'liveness=SELF' \
-     && [ "$rel_rc" -eq 0 ] && printf '%s' "$rel_out" | grep -q '^LANE-LOCK: RELEASED' ; then
+     && grep -q 'liveness=SELF' <<<"$probe_out" \
+     && [ "$rel_rc" -eq 0 ] && grep -q '^LANE-LOCK: RELEASED' <<<"$rel_out" ; then
     ok "(b/$shape) a non-canonical acquisition path is recorded CANONICAL ($recorded), the holder is SELF, and release succeeds WITHOUT --force"
   else
     bad "(b/$shape) recorded='$recorded' want='$want' rel_rc=$rel_rc
@@ -1232,8 +1234,8 @@ sleep 300 & SH_B=$!
 ll acquire 826 --lane-dir "$SHARED" --pid "$SH_A"; rc26a=$RC
 ll acquire 827 --lane-dir "$SHARED" --pid "$SH_B"; rc26b=$RC; out26b=$OUT
 if [ "$rc26a" -eq 0 ] && [ "$rc26b" -eq 2 ] \
-   && printf '%s' "$out26b" | grep -q 'reason=same-lane-dir-other-issue' \
-   && printf '%s' "$out26b" | grep -q 'conflicting-issue=826'; then
+   && grep -q 'reason=same-lane-dir-other-issue' <<<"$out26b" \
+   && grep -q 'conflicting-issue=826' <<<"$out26b"; then
   ok "(a) a SECOND issue naming the SAME lane directory is OCCUPIED and NAMES the conflicting issue — one directory, one writer"
 else
   bad "(a) expected the second issue to be refused; got rc=$rc26a/$rc26b
@@ -1243,7 +1245,7 @@ fi
 # CONTROLS. A guard that never permits work is broken, not fail-closed — so all three of these
 # must still ACQUIRE, and each rules out a different way of over-refusing.
 ll acquire 826 --lane-dir "$SHARED" --pid "$SH_A"
-if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 're-entrant'; then
+if [ "$RC" -eq 0 ] && grep -q 're-entrant' <<<"$OUT"; then
   ok "(b) control: the SAME issue re-acquiring its own directory is re-entrant, not blocked by itself"
 else bad "(b) same-issue re-acquire was refused: $OUT"; fi
 
@@ -1326,7 +1328,7 @@ lease28=$(lease_of 928)
 sleep 300 & S28_B=$!
 ll reclaim 929 --lane-dir "$SH28" --pid "$S28_B" --expect none --reason round9-directory-conflict-probe
 rc28b=$RC; out28b=$OUT
-if [ "$rc28a" -eq 0 ] && [ "$rc28b" -eq 2 ] && printf '%s' "$out28b" | grep -q 'reason=same-lane-dir-other-issue'; then
+if [ "$rc28a" -eq 0 ] && [ "$rc28b" -eq 2 ] && grep -q 'reason=same-lane-dir-other-issue' <<<"$out28b"; then
   ok "(a) reclaim under a DIFFERENT issue naming a live-held directory is OCCUPIED, not granted"
 else
   bad "(a) reclaim minted a second writer for one directory: rc=$rc28a/$rc28b
@@ -1355,14 +1357,14 @@ ll acquire 929 --lane-dir "$X29" --pid "$P29"; rc29a=$RC
 ll acquire 929 --lane-dir "$Y29" --pid "$P29"; rc29b=$RC; out29b=$OUT
 ll acquire 929 --lane-dir "$X29" --pid "$P29"; rc29c=$RC; out29c=$OUT
 if [ "$rc29a" -eq 0 ] && [ "$rc29b" -eq 2 ] \
-   && printf '%s' "$out29b" | grep -q 'reason=reentrant-lane-dir-mismatch' \
-   && printf '%s' "$out29b" | grep -q 'recorded-lane-dir=' ; then
+   && grep -q 'reason=reentrant-lane-dir-mismatch' <<<"$out29b" \
+   && grep -q 'recorded-lane-dir=' <<<"$out29b" ; then
   ok "(a) a re-entrant acquire naming a DIFFERENT directory is refused and names the recorded one"
 else
   bad "(a) expected reentrant-lane-dir-mismatch; got rc=$rc29a/$rc29b
 $out29b"
 fi
-if [ "$rc29c" -eq 0 ] && printf '%s' "$out29c" | grep -q 'ACQUIRED (re-entrant)'; then
+if [ "$rc29c" -eq 0 ] && grep -q 'ACQUIRED (re-entrant)' <<<"$out29c"; then
   ok "(b) CONTROL: the same process re-acquiring the SAME directory is still re-entrant"
 else
   bad "(b) CONTROL over-refused a legitimate re-entrant acquire: rc=$rc29c
@@ -1385,8 +1387,8 @@ lease30=$(lease_of 930)
 ll reclaim 930 --lane-dir "$Y30" --pid "$P30" --expect "$lease30" --reason round10-wrong-directory-probe
 rc30b=$RC; out30b=$OUT
 if [ "$rc30a" -eq 0 ] && [ "$rc30b" -eq 2 ] \
-   && printf '%s' "$out30b" | grep -q 'reason=reentrant-lane-dir-mismatch' \
-   && printf '%s' "$out30b" | grep -q 'recorded-lane-dir='; then
+   && grep -q 'reason=reentrant-lane-dir-mismatch' <<<"$out30b" \
+   && grep -q 'recorded-lane-dir=' <<<"$out30b"; then
   ok "(a) a re-entrant RECLAIM naming a DIFFERENT directory is refused and names the recorded one"
 else
   bad "(a) reclaim reported success for a directory its record does not protect: rc=$rc30a/$rc30b
@@ -1394,7 +1396,7 @@ $out30b"
 fi
 # CONTROL: the same holder reclaiming the RECORDED directory still succeeds.
 ll reclaim 930 --lane-dir "$X30" --pid "$P30" --expect "$lease30" --reason round10-control-correct-directory
-if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'RECLAIMED (re-entrant)'; then
+if [ "$RC" -eq 0 ] && grep -q 'RECLAIMED (re-entrant)' <<<"$OUT"; then
   ok "(b) CONTROL: reclaiming under the RECORDED directory is still re-entrant success"
 else
   bad "(b) CONTROL over-refused a legitimate re-entrant reclaim: rc=$RC
@@ -1417,7 +1419,7 @@ sleep 300 & B31=$!
 ll acquire 931 --lane-dir "$LANES/realp31/lane31" --pid "$A31"; rc31a=$RC
 ll acquire 932 --lane-dir "$LANES/aliasp31/lane31" --pid "$B31"; rc31b=$RC; out31b=$OUT
 rec31=$(grep '^lane-dir=' "$(record_of 931)" 2>/dev/null | cut -d= -f2-)
-if [ "$rc31a" -eq 0 ] && [ "$rc31b" -eq 2 ] && printf '%s' "$out31b" | grep -q 'reason=same-lane-dir-other-issue'; then
+if [ "$rc31a" -eq 0 ] && [ "$rc31b" -eq 2 ] && grep -q 'reason=same-lane-dir-other-issue' <<<"$out31b"; then
   ok "(a) two spellings of one directory (via a symlinked parent) contend: the second is OCCUPIED"
 else
   bad "(a) the alias evaded the directory lock: rc=$rc31a/$rc31b recorded='$rec31'
@@ -1457,11 +1459,11 @@ SIB_PARENT=$!
 # wait for both children to have written their verdicts (bounded, no bare sleep race)
 i=0; while [ "$i" -lt 60 ] && { [ ! -s "$T/sib.a" ] || [ ! -s "$T/sib.b" ]; }; do sleep 1; i=$((i+1)); done
 sib_a="$(cat "$T/sib.a" 2>/dev/null)"; sib_b="$(cat "$T/sib.b" 2>/dev/null)"
-sib_a_pid=$(printf '%s' "$sib_a" | sed -n 's/.* pid=\([0-9]*\).*/\1/p' | head -1)
-sib_b_pid=$(printf '%s' "$sib_b" | sed -n 's/.* pid=\([0-9]*\).*/\1/p' | head -1)
-if printf '%s' "$sib_a" | grep -q 'ACQUIRED issue=932' && printf '%s' "$sib_b" | grep -q 'ACQUIRED (re-entrant)' \
+sib_a_pid=$(sed -n 's/.* pid=\([0-9]*\).*/\1/;T;p;q' <<<"$sib_a")
+sib_b_pid=$(sed -n 's/.* pid=\([0-9]*\).*/\1/;T;p;q' <<<"$sib_b")
+if grep -q 'ACQUIRED issue=932' <<<"$sib_a" && grep -q 'ACQUIRED (re-entrant)' <<<"$sib_b" \
    && [ -n "$sib_a_pid" ] && [ "$sib_a_pid" = "$sib_b_pid" ] \
-   && printf '%s' "$sib_a" | grep -q 'pid-scope=cwd-match'; then
+   && grep -q 'pid-scope=cwd-match' <<<"$sib_a"; then
   ok "(a) DOCUMENTED LIMIT: two SEPARATE processes under one in-lane parent, SAME issue, resolve to the SAME pid ($sib_a_pid); the second is granted (re-entrant) though it is a different process. Record discloses pid-scope=cwd-match. Mitigation is --pid (b)."
 else
   bad "(a) expected both to resolve to one shared ancestor pid under auto-resolution (this pins the header's scope limit; if it is now FIXED, update the header rather than the test)
@@ -1476,7 +1478,7 @@ sleep 300 & SB_A=$!
 sleep 300 & SB_B=$!
 ll acquire 934 --lane-dir "$SIB2" --pid "$SB_A"; rc32a=$RC
 ll acquire 935 --lane-dir "$SIB2" --pid "$SB_B"; rc32b=$RC; out32b=$OUT
-if [ "$rc32a" -eq 0 ] && [ "$rc32b" -eq 2 ] && printf '%s' "$out32b" | grep -q 'reason=same-lane-dir-other-issue'; then
+if [ "$rc32a" -eq 0 ] && [ "$rc32b" -eq 2 ] && grep -q 'reason=same-lane-dir-other-issue' <<<"$out32b"; then
   ok "(b) MITIGATION: with explicit --pid the two workers are distinct identities and the second is refused — the contract in the header works"
 else
   bad "(b) --pid did not separate the workers: rc=$rc32a/$rc32b
@@ -1574,7 +1576,7 @@ if [ -r "$FIN_SKILL" ]; then
   # documents: a phrase found by grep means the doc MENTIONS it, often to retract it. So strip
   # everything from the first `#` and test what would actually execute.
   fin_cmd="$(grep 'lane-lock\.sh release <N>' "$FIN_SKILL" | grep -v '^\s*#' | head -1 | sed 's/#.*//')"
-  if ! printf '%s' "$fin_cmd" | grep -q '|| true'; then
+  if ! grep -q '|| true' <<<"$fin_cmd"; then
     ok "(b) the release is not suppressed with \`|| true\` — a refused release is a LEAK, not noise"
   else
     bad "(b) the release is suppressed with \`|| true\`, which is what made the leak silent"
@@ -1607,7 +1609,7 @@ ll acquire 936 --lane-dir "$SPELL_A" --pid "$S36_A"; rc36a=$RC
 ll acquire 937 --lane-dir "$SPELL_B" --pid "$S36_B"; rc36b=$RC; out36b=$OUT
 rec36=$(grep '^lane-dir=' "$(record_of 936)" 2>/dev/null | cut -d= -f2-)
 if [ "$rc36a" -eq 0 ] && [ "$rc36b" -eq 2 ] \
-   && printf '%s' "$out36b" | grep -q 'reason=same-lane-dir-other-issue' \
+   && grep -q 'reason=same-lane-dir-other-issue' <<<"$out36b" \
    && [ "$rec36" = "$SPELL_B" ]; then
   ok "(a) missing leaf: '<sym>/../lane' and the physical path contend, and the RECORDED path is the physical one"
 else
@@ -1647,7 +1649,7 @@ LC_ALL=en_US.UTF-8 ll acquire 937 --lane-dir "$U37" --pid "$U37P"; rc37=$RC; out
 longest_bytes=0
 for f in "$LOCKS"/*; do
   [ -e "$f" ] || continue
-  b=$(printf '%s' "${f##*/}" | wc -c | tr -d ' ')
+  b=$(( $(wc -c <<<"${f##*/}" | tr -d ' ') - 1 ))
   [ "$b" -gt "$longest_bytes" ] && longest_bytes=$b
 done
 if [ "$rc37" -eq 0 ] && [ "$longest_bytes" -le 255 ]; then
@@ -1668,8 +1670,8 @@ sleep 300 & SPB=$!
 ll acquire 938 --lane-dir "$SP37" --pid "$SPA"
 ll acquire 939 --lane-dir "$SP37" --pid "$SPB"; out39="$OUT"
 # read lane-dir the way claim.sh does: everything after the key, to end of line
-got37="$(printf '%s' "$out39" | sed -n 's/.* lane-dir=\(.*\)$/\1/p' | head -1)"
-if printf '%s' "$out39" | grep -q 'reason=same-lane-dir-other-issue' && [ "$got37" = "$SP37" ]; then
+got37="$(sed -n 's/.* lane-dir=\(.*\)$/\1/;T;p;q' <<<"$out39")"
+if grep -q 'reason=same-lane-dir-other-issue' <<<"$out39" && [ "$got37" = "$SP37" ]; then
   ok "(b) a SPACE-BEARING lane dir survives a to-end-of-line field read intact ('$got37')"
 else
   bad "(b) lane-dir was truncated or is not last: got='$got37' want='$SP37'
@@ -1695,7 +1697,7 @@ while [ "$i" -lt 30 ] && [ -z "$Z" ]; do
 done
 if [ -n "$Z" ]; then
   ll acquire 940 --lane-dir "$LANES/zlane" --pid "$Z"; rc38a=$RC; out38a=$OUT
-  if [ "$rc38a" -ne 0 ] && printf '%s' "$out38a" | grep -qi 'zombie'; then
+  if [ "$rc38a" -ne 0 ] && grep -qi 'zombie' <<<"$out38a"; then
     ok "(a) acquire --pid <zombie> is refused and names the state (a record naming it would read DEAD)"
   else
     bad "(a) a zombie pid was accepted as a holder: rc=$rc38a
@@ -1732,7 +1734,7 @@ else
   # into the directory, and the READERS agreeing rather than reporting FREE — that last one is the
   # actual defect round 25 named, where status said FREE for a state acquire refused.
   if [ "$rc38b" -ne 0 ] && [ "$inside38" -eq 0 ] \
-     && ! printf '%s' "$st38b" | grep -q 'FREE'; then
+     && ! grep -q 'FREE' <<<"$st38b"; then
     ok "(b) a DIRECTORY at the record path: acquire refused (rc=$rc38b), nothing written into it, and status does NOT report FREE"
   else
     bad "(b) rc=$rc38b entries-written-inside=$inside38
@@ -1753,7 +1755,7 @@ chmod 000 "$UNS/inner" 2>/dev/null
 sleep 300 & UP38=$!
 ll acquire 942 --lane-dir "$UNS/inner/lane" --pid "$UP38"; out38c="$OUT"
 chmod 755 "$UNS/inner" 2>/dev/null
-if printf '%s' "$out38c" | grep -q 'could not physically resolve existing component'; then
+if grep -q 'could not physically resolve existing component' <<<"$out38c"; then
   ok "(c) an unsearchable existing component is REPORTED — the round-19 note actually fires now"
 else
   bad "(c) the unresolved-component note did not appear (round 19's subshell defect):
@@ -1785,7 +1787,7 @@ fi
 # the stale release, carrying the FIRST lease, must be refused rather than deleting the live lock
 ll release 943 --pid "$A39" --expect "$lease_first"; rc39=$RC; out39=$OUT
 still="$(cat "$(record_of 943)" 2>/dev/null | head -c 1)"
-if [ "$rc39" -ne 0 ] && printf '%s' "$out39" | grep -q 'RELEASE-LOST' && [ -n "$still" ]; then
+if [ "$rc39" -ne 0 ] && grep -q 'RELEASE-LOST' <<<"$out39" && [ -n "$still" ]; then
   ok "(a2) a stale release carrying the OLD lease is refused and the live record SURVIVES"
 else
   bad "(a2) a stale release deleted a live lock: rc=$rc39 record-present=${still:+yes}
@@ -1830,7 +1832,7 @@ if [ -n "$Z39" ]; then
   done
   if [ "$rc39b_acq" -eq 0 ] && [ "$zstate" = "Z" ]; then
     out39b="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" probe 944 --lane-dir "$Z39_LANE" --pid "$Z39" 2>&1)"
-    if ! printf '%s' "$out39b" | grep -q 'liveness=SELF' && printf '%s' "$out39b" | grep -q 'issue=944'; then
+    if ! grep -q 'liveness=SELF' <<<"$out39b" && grep -q 'issue=944' <<<"$out39b"; then
       ok "(b) probe does NOT report SELF for a record whose holder is now a zombie"
     else
       bad "(b) compare mode matched a dead holder as SELF:
@@ -1865,13 +1867,13 @@ chmod 000 "$D40/.lane-locks/lane-888.lock" 2>/dev/null       # present, enumerab
 sleep 300 & P40=$!
 out40="$(env -u LANE_LOCK_PID LANE_ROOT="$D40" bash "$LL" acquire 940 --lane-dir "$D40/lane40" --actor flow --pid "$P40" 2>&1)"; rc40=$?
 chmod 644 "$D40/.lane-locks/lane-888.lock" 2>/dev/null
-if [ "$rc40" -eq 0 ] && printf '%s' "$out40" | grep -q 'dir-guard=NOT-EXHAUSTIVE'; then
+if [ "$rc40" -eq 0 ] && grep -q 'dir-guard=NOT-EXHAUSTIVE' <<<"$out40"; then
   ok "(a) an unreadable record does not block the acquire, and the ACQUIRED line DISCLOSES that the directory guard was partial"
   # AND lane-dir MUST STILL BE THE LAST FIELD (round 17's contract, re-broken in round 23 by
   # appending the caveat AFTER it — a to-end-of-line read then swallowed the guard text into the
   # path). Asserted HERE, on the ACQUIRE line, because that is where the displacement happened;
   # the same check on reclaim cannot red against pre-fix code, which had no caveat there at all.
-  got40="$(printf '%s' "$out40" | sed -n 's/.* lane-dir=\(.*\)$/\1/p' | head -1)"
+  got40="$(sed -n 's/.* lane-dir=\(.*\)$/\1/;T;p;q' <<<"$out40")"
   if [ "$got40" = "$D40/lane40" ]; then
     ok "(a2) lane-dir is still the LAST field on ACQUIRED with the caveat present"
   else
@@ -1889,7 +1891,7 @@ rm -rf "$D40"
 D40B="$(mktemp -d)"; mkdir -p "$D40B/.lane-locks" "$D40B/lane40b"
 sleep 300 & P40B=$!
 out40b="$(env -u LANE_LOCK_PID LANE_ROOT="$D40B" bash "$LL" acquire 941 --lane-dir "$D40B/lane40b" --actor flow --pid "$P40B" 2>&1)"; rc40b=$?
-if [ "$rc40b" -eq 0 ] && ! printf '%s' "$out40b" | grep -q 'dir-guard='; then
+if [ "$rc40b" -eq 0 ] && ! grep -q 'dir-guard=' <<<"$out40b"; then
   ok "(b) CONTROL: with every record readable the ACQUIRED line carries no caveat"
 else
   bad "(b) CONTROL: the caveat fired on a clean scan: rc=$rc40b
@@ -1912,7 +1914,7 @@ chmod 000 "$D41/.lane-locks/lane-887.lock" 2>/dev/null
 sleep 300 & P41=$!
 out41="$(env -u LANE_LOCK_PID LANE_ROOT="$D41" bash "$LL" reclaim 946 --lane-dir "$D41/lane41" --actor flow --pid "$P41" --expect none --reason round24-disclosure-on-reclaim 2>&1)"; rc41=$?
 chmod 644 "$D41/.lane-locks/lane-887.lock" 2>/dev/null
-if [ "$rc41" -eq 0 ] && printf '%s' "$out41" | grep -q 'dir-guard=NOT-EXHAUSTIVE'; then
+if [ "$rc41" -eq 0 ] && grep -q 'dir-guard=NOT-EXHAUSTIVE' <<<"$out41"; then
   ok "(a) RECLAIM discloses a partial directory guard, exactly as acquire does"
 else
   bad "(a) reclaim minted a record with no disclosure: rc=$rc41
@@ -1920,7 +1922,7 @@ $out41"
 fi
 # CONTRACT: lane-dir stays the LAST field even with the caveat present (round 17, re-broken in
 # round 23 by appending the guard AFTER it — a to-end-of-line read then swallowed the guard text).
-got41="$(printf '%s' "$out41" | sed -n 's/.* lane-dir=\(.*\)$/\1/p' | head -1)"
+got41="$(sed -n 's/.* lane-dir=\(.*\)$/\1/;T;p;q' <<<"$out41")"
 # NOTE: unlike TEST 40(a2) this half CANNOT red-proof against pre-fix code — reclaim carried no
 # caveat there, so lane-dir was already last on its line. It guards the two paths from diverging
 # from here on, which is its purpose; TEST 40(a2) is the one that catches the original defect.
@@ -1945,7 +1947,7 @@ D42="$(mktemp -d)"; mkdir -p "$D42/.lane-locks"
 printf 'version=1\nissue=950\nlane-dir=%s/l\nmachine=%s\nactor=flow\npid=99999\npid-scope=ephemeral\nboot-id=00000000-dead-beef-0000-000000000000\nstart-ticks=1\nacquired-ts=2020-01-01T00:00:00Z\nnonce=x\n' \
   "$D42" "$(hostname -s 2>/dev/null || hostname)" > "$D42/.lane-locks/lane-950.lock"
 out42="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 950 2>&1)"
-if printf '%s' "$out42" | grep -q 'liveness=DEAD-REBOOT' && printf '%s' "$out42" | grep -q 'reclaimable=yes'; then
+if grep -q 'liveness=DEAD-REBOOT' <<<"$out42" && grep -q 'reclaimable=yes' <<<"$out42"; then
   ok "(a) a PRE-REBOOT record with pid-scope=ephemeral is DEAD-REBOOT and reclaimable — the documented un-brick holds"
 else
   bad "(a) a pre-reboot ephemeral record is still not reclaimable:
@@ -1956,7 +1958,7 @@ fi
 printf 'version=1\nissue=952\nlane-dir=%s/l\nmachine=%s\nactor=flow\npid=99999\npid-scope=ephemeral\nstart-ticks=1\nnonce=x\n' \
   "$D42" "$(hostname -s 2>/dev/null || hostname)" > "$D42/.lane-locks/lane-952.lock"
 out42b="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 952 2>&1)"
-if printf '%s' "$out42b" | grep -q 'liveness=UNKNOWN-NO-BOOT-ID'; then
+if grep -q 'liveness=UNKNOWN-NO-BOOT-ID' <<<"$out42b"; then
   ok "(b) CONTROL: a record with NO boot id stays UNKNOWN-NO-BOOT-ID — cannot-tell is not dead"
 else
   bad "(b) CONTROL: an absent boot id produced a non-UNKNOWN verdict:
@@ -1994,7 +1996,7 @@ _st43() { env -u LANE_LOCK_PID LANE_ROOT="$D43" bash "$LL" status "$1" 2>&1; }
 # (a) corrupt boot-id => UNKNOWN-BAD-BOOT-ID, NOT reclaimable
 _mk43 431 1 'deadbeef-nope'
 o43a="$(_st43 431)"
-if printf '%s' "$o43a" | grep -q 'liveness=UNKNOWN-BAD-BOOT-ID' && printf '%s' "$o43a" | grep -q 'reclaimable=no'; then
+if grep -q 'liveness=UNKNOWN-BAD-BOOT-ID' <<<"$o43a" && grep -q 'reclaimable=no' <<<"$o43a"; then
   ok "(a) a corrupt boot-id is UNKNOWN-BAD-BOOT-ID and NOT reclaimable"
 else
   bad "(a) corrupt boot-id was not refused:
@@ -2004,7 +2006,7 @@ fi
 # (b) truncated boot-id (a real uuid with its tail cut) => same refusal
 _mk43 432 1 '00000000-dead-beef-0000-0000000'
 o43b="$(_st43 432)"
-if printf '%s' "$o43b" | grep -q 'liveness=UNKNOWN-BAD-BOOT-ID'; then
+if grep -q 'liveness=UNKNOWN-BAD-BOOT-ID' <<<"$o43b"; then
   ok "(b) a TRUNCATED boot-id is refused too — length is part of the shape"
 else
   bad "(b) truncated boot-id was not refused:
@@ -2016,7 +2018,7 @@ fi
 #     the documented reboot un-brick — the exact over-correction FIX 5/14 warns about.
 _mk43 433 1 '00000000-dead-beef-0000-000000000000'
 o43c="$(_st43 433)"
-if printf '%s' "$o43c" | grep -q 'liveness=DEAD-REBOOT' && printf '%s' "$o43c" | grep -q 'reclaimable=yes'; then
+if grep -q 'liveness=DEAD-REBOOT' <<<"$o43c" && grep -q 'reclaimable=yes' <<<"$o43c"; then
   ok "(c) CONTROL: a well-formed foreign boot-id is still DEAD-REBOOT and reclaimable"
 else
   bad "(c) CONTROL FAILED — the reboot un-brick was broken by the shape check:
@@ -2026,7 +2028,7 @@ fi
 # (d) an unknown record version refuses BEFORE any field is interpreted
 _mk43 434 2 '00000000-dead-beef-0000-000000000000'
 o43d="$(_st43 434)"
-if printf '%s' "$o43d" | grep -q 'liveness=UNKNOWN-RECORD-VERSION' && printf '%s' "$o43d" | grep -q 'reclaimable=no'; then
+if grep -q 'liveness=UNKNOWN-RECORD-VERSION' <<<"$o43d" && grep -q 'reclaimable=no' <<<"$o43d"; then
   ok "(d) a future record version refuses, and outranks the DEAD-REBOOT its own fields would give"
 else
   bad "(d) future version was interpreted as v1:
@@ -2038,7 +2040,7 @@ fi
 printf 'issue=435\nlane-dir=%s/l\nmachine=%s\nactor=flow\npid=99999\npid-scope=cwd-match\nboot-id=00000000-dead-beef-0000-000000000000\nstart-ticks=1\nnonce=x\n' \
   "$D43" "$(hostname -s 2>/dev/null || hostname)" > "$D43/.lane-locks/lane-435.lock"
 o43e="$(_st43 435)"
-if printf '%s' "$o43e" | grep -q 'liveness=UNKNOWN-RECORD-VERSION'; then
+if grep -q 'liveness=UNKNOWN-RECORD-VERSION' <<<"$o43e"; then
   ok "(e) an ABSENT version is uninterpretable too — not silently treated as v1"
 else
   bad "(e) absent version was defaulted to v1:
@@ -2062,13 +2064,13 @@ o44a="$(LANE_ROOT="$D44" LANE_LOCK_PID=$S44 bash "$LL" acquire 800 --lane-dir "$
 LANE_ROOT="$D44" LANE_LOCK_PID=$S44 bash "$LL" release 800 >/dev/null 2>&1
 ln -s /nonexistent/target "$D44/.lane-locks/lane-999.lock"
 o44b="$(LANE_ROOT="$D44" LANE_LOCK_PID=$S44 bash "$LL" acquire 800 --lane-dir "$D44/lane-800" 2>&1)"
-if printf '%s' "$o44a" | grep -q 'dir-guard='; then
+if grep -q 'dir-guard=' <<<"$o44a"; then
   bad "(a) CONTROL: a clean lock root disclosed a partial dir guard, so the disclosure says nothing:
 $o44a"
 else
   ok "(a) CONTROL: a clean lock root discloses NO dir-guard narrowing"
 fi
-if printf '%s' "$o44b" | grep -q 'dir-guard=NOT-EXHAUSTIVE'; then
+if grep -q 'dir-guard=NOT-EXHAUSTIVE' <<<"$o44b"; then
   ok "(b) a DANGLING symlink is counted unreadable and DISCLOSED on the ACQUIRED line"
 else
   bad "(b) a dangling symlink escaped the counter — ACQUIRED claimed an exhaustive scan it did not do:
@@ -2088,7 +2090,7 @@ echo "TEST 45: ACQUIRE PUBLISHES THE LEASE, so the acquirer can use release --ex
 D45="$(mktemp -d)"; mkdir -p "$D45/lane-810"
 sleeper; S45="$REPLY_SLEEPER"   # NEVER $(sleeper): same subshell trap
 o45="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" acquire 810 --lane-dir "$D45/lane-810" 2>&1)"
-l45="$(printf '%s' "$o45" | tr ' ' '\n' | sed -n 's/^lease=//p')"
+l45="$(tr ' ' '\n' <<<"$o45" | sed -n 's/^lease=//p')"
 p45="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" probe 810 2>&1 | tr ' ' '\n' | sed -n 's/^lease=//p')"
 if [ -n "$l45" ] && [ "$l45" = "$p45" ]; then
   ok "(a) acquire publishes lease= and it is byte-identical to probe's"
@@ -2096,7 +2098,7 @@ else
   bad "(a) acquire lease '$l45' != probe lease '$p45' (empty means acquire published none)"
 fi
 o45r="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" release 810 --expect "$l45" 2>&1)"; rc45r=$?
-if [ "$rc45r" -eq 0 ] && printf '%s' "$o45r" | grep -q 'RELEASED issue=810'; then
+if [ "$rc45r" -eq 0 ] && grep -q 'RELEASED issue=810' <<<"$o45r"; then
   ok "(b) the lease acquire printed is ACCEPTED by release --expect (the path is usable end to end)"
 else
   bad "(b) release --expect rejected the lease acquire itself published: rc=$rc45r
@@ -2106,7 +2108,7 @@ fi
 # would pass simply because --expect validates nothing.
 LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" acquire 811 --lane-dir "$D45/lane-811" >/dev/null 2>&1
 o45x="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" release 811 --expect "not-the-lease#1" 2>&1)"; rc45x=$?
-if [ "$rc45x" -ne 0 ] && printf '%s' "$o45x" | grep -q 'RELEASE-LOST.*lease-mismatch'; then
+if [ "$rc45x" -ne 0 ] && grep -q 'RELEASE-LOST.*lease-mismatch' <<<"$o45x"; then
   ok "(c) RED: a lease that is not the record's incarnation is REFUSED, so (b) is a real acceptance"
 else
   bad "(c) a bogus lease was accepted by release --expect: rc=$rc45x
@@ -2132,7 +2134,7 @@ for sub46 in acquire verify probe release reclaim; do
   esac
   # shellcheck disable=SC2086
   o46="$(LANE_ROOT="$D46" bash "$LL" "$sub46" 900 --pid '' --lane-dir "$D46/lane-900" $extra46 2>&1)"; rc46=$?
-  if [ "$rc46" -eq 64 ] && printf '%s' "$o46" | grep -q "rejected on purpose"; then
+  if [ "$rc46" -eq 64 ] && grep -q "rejected on purpose" <<<"$o46"; then
     ok "($sub46) --pid '' is a usage error (rc=64), not a silent fallback to ancestor resolution"
   else
     bad "($sub46) --pid '' was accepted: rc=$rc46
@@ -2143,7 +2145,7 @@ done
 sleep46_started=0
 sleeper; S46="$REPLY_SLEEPER"
 o46c="$(LANE_ROOT="$D46" bash "$LL" acquire 900 --pid "$S46" --lane-dir "$D46/lane-900" 2>&1)"; rc46c=$?
-if [ "$rc46c" -eq 0 ] && printf '%s' "$o46c" | grep -q 'ACQUIRED issue=900'; then
+if [ "$rc46c" -eq 0 ] && grep -q 'ACQUIRED issue=900' <<<"$o46c"; then
   ok "(control) a REAL --pid still acquires, so the refusals above are about EMPTINESS"
 else
   bad "(control) a real --pid was refused too — the guard is over-broad: rc=$rc46c
@@ -2172,14 +2174,14 @@ echo "TEST 47: a SET-but-EMPTY LANE_LOCK_PID is refused WHERE IT IS CONSUMED (ro
 # something else, not a divergence. Tracked with the identical CLAIM_* shape in #3884.
 D47="$(mktemp -d)"; mkdir -p "$D47/lane-910"
 o47="$(LANE_ROOT="$D47" LANE_LOCK_PID= bash "$LL" acquire 910 --lane-dir "$D47/lane-910" 2>&1)"; rc47=$?
-if [ "$rc47" -eq 64 ] && printf '%s' "$o47" | grep -q 'must be numeric'; then
+if [ "$rc47" -eq 64 ] && grep -q 'must be numeric' <<<"$o47"; then
   ok "(pid) a SET-but-EMPTY LANE_LOCK_PID is a usage error, not a silent fallback to the ancestor walk"
 else
   bad "(pid) set-but-empty LANE_LOCK_PID was accepted: rc=$rc47
 $o47"
 fi
 o47n="$(LANE_ROOT="$D47" LANE_LOCK_PID=abc bash "$LL" acquire 910 --lane-dir "$D47/lane-910" 2>&1)"; rc47n=$?
-if [ "$rc47n" -eq 64 ] && printf '%s' "$o47n" | grep -q 'must be numeric'; then
+if [ "$rc47n" -eq 64 ] && grep -q 'must be numeric' <<<"$o47n"; then
   ok "(numeric) a non-numeric LANE_LOCK_PID is refused — the same case arm, still reachable"
 else
   bad "(numeric) expected a numeric refusal; got rc=$rc47n
@@ -2216,21 +2218,21 @@ echo "TEST 48: the pid check respects PRECEDENCE and leaves identity-free comman
 D48="$(mktemp -d)"; mkdir -p "$D48/lane-920"
 sleeper; S48="$REPLY_SLEEPER"
 o48a="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" acquire 920 --pid "$S48" --lane-dir "$D48/lane-920" 2>&1)"; rc48a=$?
-if [ "$rc48a" -eq 0 ] && printf '%s' "$o48a" | grep -q 'ACQUIRED issue=920'; then
+if [ "$rc48a" -eq 0 ] && grep -q 'ACQUIRED issue=920' <<<"$o48a"; then
   ok "(a) an explicit --pid OVERRIDES an empty inherited LANE_LOCK_PID — precedence is respected"
 else
   bad "(a) explicit --pid was refused because of an env var it overrides: rc=$rc48a
 $o48a"
 fi
 o48b="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" release 920 --force 2>&1)"; rc48b=$?
-if [ "$rc48b" -eq 0 ] && printf '%s' "$o48b" | grep -q 'RELEASED'; then
+if [ "$rc48b" -eq 0 ] && grep -q 'RELEASED' <<<"$o48b"; then
   ok "(b) release --force works with an empty identity var — the break-glass needs no identity"
 else
   bad "(b) the break-glass was refused over an env var it does not use: rc=$rc48b
 $o48b"
 fi
 o48c="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" status 2>&1)"; rc48c=$?
-if [ "$rc48c" -eq 0 ] && printf '%s' "$o48c" | grep -q 'STATUS'; then
+if [ "$rc48c" -eq 0 ] && grep -q 'STATUS' <<<"$o48c"; then
   ok "(c) status works with an empty identity var — it resolves no identity"
 else
   bad "(c) status was refused over an env var it does not use: rc=$rc48c
@@ -2251,7 +2253,7 @@ echo "TEST 49: release --expect on an ABSENT record declares the precondition un
 # exists, the other after -- round 35 named the first and the second was its sibling.
 D49="$(mktemp -d)"
 o49a="$(LANE_ROOT="$D49" bash "$LL" release 940 --expect 'x#1' 2>&1)"; rc49a=$?
-if [ "$rc49a" -eq 0 ] && printf '%s' "$o49a" | grep -q 'precondition=NOT-EVALUATED'; then
+if [ "$rc49a" -eq 0 ] && grep -q 'precondition=NOT-EVALUATED' <<<"$o49a"; then
   ok "(a) no lock root + --expect: exit 0 AND the line says the lease was not compared"
 else
   bad "(a) expected an exit-0 declaration; got rc=$rc49a
@@ -2259,7 +2261,7 @@ $o49a"
 fi
 mkdir -p "$D49/.lane-locks"
 o49b="$(LANE_ROOT="$D49" bash "$LL" release 940 --expect 'x#1' 2>&1)"; rc49b=$?
-if [ "$rc49b" -eq 0 ] && printf '%s' "$o49b" | grep -q 'precondition=NOT-EVALUATED'; then
+if [ "$rc49b" -eq 0 ] && grep -q 'precondition=NOT-EVALUATED' <<<"$o49b"; then
   ok "(b) lock root present but no record + --expect: same declaration (the sibling path)"
 else
   bad "(b) the second early-return still claimed an unevaluated precondition: rc=$rc49b
@@ -2268,8 +2270,8 @@ fi
 # CONTROL: without --expect nothing changes. Without this, (a) and (b) would also pass if the
 # text were printed unconditionally, which would be noise on every ordinary cleanup release.
 o49c="$(LANE_ROOT="$D49" bash "$LL" release 940 2>&1)"; rc49c=$?
-if [ "$rc49c" -eq 0 ] && printf '%s' "$o49c" | grep -q 'RELEASED (already free)' \
-   && ! printf '%s' "$o49c" | grep -q 'precondition='; then
+if [ "$rc49c" -eq 0 ] && grep -q 'RELEASED (already free)' <<<"$o49c" \
+   && ! grep -q 'precondition=' <<<"$o49c"; then
   ok "(control) a plain release is untouched — no precondition= noise when none was asked for"
 else
   bad "(control) a plain release changed shape: rc=$rc49c
@@ -2280,7 +2282,7 @@ sleeper; S49="$REPLY_SLEEPER"
 mkdir -p "$D49/lane-941"
 LANE_ROOT="$D49" LANE_LOCK_PID=$S49 bash "$LL" acquire 941 --lane-dir "$D49/lane-941" >/dev/null 2>&1
 o49d="$(LANE_ROOT="$D49" LANE_LOCK_PID=$S49 bash "$LL" release 941 --expect 'not-the-lease#1' 2>&1)"; rc49d=$?
-if [ "$rc49d" -ne 0 ] && printf '%s' "$o49d" | grep -q 'RELEASE-LOST.*lease-mismatch'; then
+if [ "$rc49d" -ne 0 ] && grep -q 'RELEASE-LOST.*lease-mismatch' <<<"$o49d"; then
   ok "(control) a PRESENT record with a wrong lease is still REFUSED — --expect is not inert"
 else
   bad "(control) a real lease mismatch was accepted: rc=$rc49d
