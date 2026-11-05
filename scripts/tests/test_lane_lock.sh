@@ -1459,8 +1459,8 @@ SIB_PARENT=$!
 # wait for both children to have written their verdicts (bounded, no bare sleep race)
 i=0; while [ "$i" -lt 60 ] && { [ ! -s "$T/sib.a" ] || [ ! -s "$T/sib.b" ]; }; do sleep 1; i=$((i+1)); done
 sib_a="$(cat "$T/sib.a" 2>/dev/null)"; sib_b="$(cat "$T/sib.b" 2>/dev/null)"
-sib_a_pid=$(sed -n 's/.* pid=\([0-9]*\).*/\1/;T;p;q' <<<"$sib_a")
-sib_b_pid=$(sed -n 's/.* pid=\([0-9]*\).*/\1/;T;p;q' <<<"$sib_b")
+sib_a_pid=$(sed -n 's/.* pid=\([0-9]*\).*/\1/p' <<<"$sib_a"); sib_a_pid=${sib_a_pid%%$'\n'*}
+sib_b_pid=$(sed -n 's/.* pid=\([0-9]*\).*/\1/p' <<<"$sib_b"); sib_b_pid=${sib_b_pid%%$'\n'*}
 if grep -q 'ACQUIRED issue=932' <<<"$sib_a" && grep -q 'ACQUIRED (re-entrant)' <<<"$sib_b" \
    && [ -n "$sib_a_pid" ] && [ "$sib_a_pid" = "$sib_b_pid" ] \
    && grep -q 'pid-scope=cwd-match' <<<"$sib_a"; then
@@ -1670,7 +1670,7 @@ sleep 300 & SPB=$!
 ll acquire 938 --lane-dir "$SP37" --pid "$SPA"
 ll acquire 939 --lane-dir "$SP37" --pid "$SPB"; out39="$OUT"
 # read lane-dir the way claim.sh does: everything after the key, to end of line
-got37="$(sed -n 's/.* lane-dir=\(.*\)$/\1/;T;p;q' <<<"$out39")"
+got37=$(sed -n 's/.* lane-dir=\(.*\)$/\1/p' <<<"$out39"); got37=${got37%%$'\n'*}
 if grep -q 'reason=same-lane-dir-other-issue' <<<"$out39" && [ "$got37" = "$SP37" ]; then
   ok "(b) a SPACE-BEARING lane dir survives a to-end-of-line field read intact ('$got37')"
 else
@@ -1873,7 +1873,7 @@ if [ "$rc40" -eq 0 ] && grep -q 'dir-guard=NOT-EXHAUSTIVE' <<<"$out40"; then
   # appending the caveat AFTER it — a to-end-of-line read then swallowed the guard text into the
   # path). Asserted HERE, on the ACQUIRE line, because that is where the displacement happened;
   # the same check on reclaim cannot red against pre-fix code, which had no caveat there at all.
-  got40="$(sed -n 's/.* lane-dir=\(.*\)$/\1/;T;p;q' <<<"$out40")"
+  got40=$(sed -n 's/.* lane-dir=\(.*\)$/\1/p' <<<"$out40"); got40=${got40%%$'\n'*}
   if [ "$got40" = "$D40/lane40" ]; then
     ok "(a2) lane-dir is still the LAST field on ACQUIRED with the caveat present"
   else
@@ -1922,7 +1922,7 @@ $out41"
 fi
 # CONTRACT: lane-dir stays the LAST field even with the caveat present (round 17, re-broken in
 # round 23 by appending the guard AFTER it — a to-end-of-line read then swallowed the guard text).
-got41="$(sed -n 's/.* lane-dir=\(.*\)$/\1/;T;p;q' <<<"$out41")"
+got41=$(sed -n 's/.* lane-dir=\(.*\)$/\1/p' <<<"$out41"); got41=${got41%%$'\n'*}
 # NOTE: unlike TEST 40(a2) this half CANNOT red-proof against pre-fix code — reclaim carried no
 # caveat there, so lane-dir was already last on its line. It guards the two paths from diverging
 # from here on, which is its purpose; TEST 40(a2) is the one that catches the original defect.

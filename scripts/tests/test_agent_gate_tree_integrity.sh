@@ -206,7 +206,9 @@ capture_identity() {
            AGENT_GATE_SUMMARY_FILE="$tmp/capture-sentinel.txt" \
            AGENT_GATE_TREE_SELFTEST=capture \
            bash "$repo/scripts/agent-gate.sh" 2>/dev/null )
-  sed -n "s/.*[ =]${field}=\([^ ]*\).*/\1/;T;p;q" <<<"$raw"
+  local _sp_v
+  _sp_v=$(sed -n "s/.*[ =]${field}=\([^ ]*\).*/\1/p" <<<"$raw"); _sp_v=${_sp_v%%$'\n'*}
+  [ -z "$_sp_v" ] || printf '%s\n' "$_sp_v"
 }
 digest_of() { local r="$1"; shift; capture_identity "$r" digest ${1+"$@"}; }
 

@@ -214,7 +214,7 @@ metadata=$(timeout -k 30 300 cargo metadata --format-version 1 --no-deps --manif
 rc=$?
 [ "$rc" -eq 0 ] || fail "\`cargo metadata\` exited $rc — the workspace manifests do not read, which is a broken tree rather than an unmeasurable host. Remedy: fix the manifest, then re-run."
 _sp_meta=$(tr ',' '\n' <<<"$metadata")
-TARGET_DIR=$(sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/;T;p;q' <<<"$_sp_meta")
+TARGET_DIR=$(sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' <<<"$_sp_meta"); TARGET_DIR=${TARGET_DIR%%$'\n'*}
 [ -n "$TARGET_DIR" ] || skip "could not read \`target_directory\` out of \`cargo metadata\`'s output — the reader did not recognise it, so nothing was measured (a cargo JSON shape change, or a target path holding an escaped character)"
 say "target-dir $TARGET_DIR (reported for diagnosis only — NO arm asserts on \$TARGET_DIR/debug/cqlite-flight; see the header)"
 
@@ -360,8 +360,8 @@ check_startup_allocator_line() {
   # a `%allocator` Display field would print, and what the README shows). Quoting is a
   # rendering choice of the subscriber; the VALUE is the contract, and it is compared exactly.
   local got
-  got=$(sed -n 's/.*[[:space:]]allocator="\([^"]*\)".*/\1/;T;p;q' <<<"$line")
-  [ -n "$got" ] || got=$(sed -n 's/.*[[:space:]]allocator=\([^ 	"]*\).*/\1/;T;p;q' <<<"$line")
+  got=$(sed -n 's/.*[[:space:]]allocator="\([^"]*\)".*/\1/p' <<<"$line"); got=${got%%$'\n'*}
+  [ -n "$got" ] || { got=$(sed -n 's/.*[[:space:]]allocator=\([^ 	"]*\).*/\1/p' <<<"$line"); got=${got%%$'\n'*}; }
   if [ -z "$got" ]; then
     say "verdict-detail arm $label (R2.2): the \`cqlite-flight starting\` line carries NO \`allocator=\` field, so the value the README shows operators is not being logged at all. Line as read (ANSI-stripped): $line"
     return 1
