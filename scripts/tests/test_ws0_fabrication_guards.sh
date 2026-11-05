@@ -301,11 +301,11 @@ for bad_pass in '{ "pass": 0, "rows": 1000, "cells": 12000 }' \
                 '{ "pass": 0, "rows": -1000, "cells": 12000, "secs": 2.0 }' \
                 '{ "pass": 0, "rows": 1000.5, "cells": 12000, "secs": 2.0 }' \
                 '{ "pass": 0, "rows": true, "cells": 12000, "secs": 2.0 }'; do
-  d="$TMP/f2-bad-pass-$(printf '%s' "$bad_pass" | md5 -q 2>/dev/null || printf '%s' "$bad_pass" | md5sum | cut -c1-8)"
+  d="$TMP/f2-bad-pass-$(md5 -q 2>/dev/null < <(printf '%s' "$bad_pass") || cut -c1-8 < <(md5sum < <(printf '%s' "$bad_pass")))"
   scan_payload "$d" 1000 2.0 "[ $bad_pass ]"
   out=$(run_report "$d" "$TMP/corpus"); rc=$?
   if [ "$rc" -ne 0 ] && grep -q 'pass 0' <<<"$out"; then
-    pass "a bad per-pass value ($(printf '%s' "$bad_pass" | cut -c1-42)…) is REFUSED, naming the pass"
+    pass "a bad per-pass value ($(cut -c1-42 <<<"$bad_pass")…) is REFUSED, naming the pass"
   else
     fail "a bad per-pass value must be refused naming the pass (rc=$rc, out: $out)"
   fi
@@ -374,7 +374,7 @@ expect_reject "an ABSENT requests_unavailable is FATAL (never a fabricated 0)" \
 # ...and the DOMAIN cases, so the shed counter is validated exactly as its sibling is rather
 # than merely being present: negative, fractional and boolean all refused.
 for bad_shed in '-3' '0.9' 'true' '"none"'; do
-  d="$TMP/shed-domain-$(printf '%s' "$bad_shed" | tr -dc 'a-z0-9')"
+  d="$TMP/shed-domain-$(tr -dc 'a-z0-9' < <(printf '%s' "$bad_shed"))"
   make_session "$d" "{\"schema\":\"flight-loadgen.step/v1\",\"step\":0,\"target_concurrency\":1,\"shape\":\"full\",\"round\":\"__TAG__\",\"endpoint\":\"__ENDPOINT__\",\"requests_ok\":1,\"requests_error\":0,\"error_codes\":{},\"requests_unavailable\":$bad_shed,\"rows_total\":1000,\"bytes_total\":$WS0_PREFLIGHT_BYTES_PER_SCAN,\"rows_per_s\":250.0,\"duration_s\":4.0}"
   out=$(run_report "$d" "$TMP/corpus"); rc=$?
   if [ "$rc" -ne 0 ] && grep -q 'requests_unavailable' <<<"$out"; then
@@ -461,7 +461,7 @@ done
 # R6/B5 two checks over.
 for f3_bad in true 1.9 '"1"'; do
   BAD_CONC=${GOOD_FLIGHT/'"target_concurrency":1'/"\"target_concurrency\":$f3_bad"}
-  d="$TMP/f3-badconc-$(printf '%s' "$f3_bad" | tr -dc 'a-z0-9.')"; make_session "$d" "$BAD_CONC"
+  d="$TMP/f3-badconc-$(tr -dc 'a-z0-9.' < <(printf '%s' "$f3_bad"))"; make_session "$d" "$BAD_CONC"
   out=$(run_report "$d" "$TMP/corpus"); rc=$?
   if [ "$rc" -ne 0 ] && grep -q 'target_concurrency' <<<"$out"; then
     pass "OBSERVED (round11 F3): target_concurrency=$f3_bad is REFUSED (\`True == 1\` and \`int(1.9) == 1\`, so a coercing comparison would accept it)"
@@ -785,7 +785,7 @@ else
   fail "the duration_s refusal must name its role (out: $out)"
 fi
 for bad_dur in 0 0.0 -4.0 '"4s"' 'null'; do
-  d="$TMP/dur-$(printf '%s' "$bad_dur" | tr -dc 'a-zA-Z0-9')x"
+  d="$TMP/dur-$(tr -dc 'a-zA-Z0-9' < <(printf '%s' "$bad_dur"))x"
   make_session "$d" "{\"schema\":\"flight-loadgen.step/v1\",\"step\":0,\"target_concurrency\":1,\"shape\":\"full\",\"round\":\"__TAG__\",\"endpoint\":\"__ENDPOINT__\",\"requests_ok\":1,\"requests_error\":0,\"error_codes\":{},\"requests_unavailable\":0,\"rows_total\":1000,\"bytes_total\":$WS0_PREFLIGHT_BYTES_PER_SCAN,\"rows_per_s\":250.0,\"duration_s\":$bad_dur}"
   expect_reject "duration_s=$bad_dur is REFUSED (it was UNVALIDATED entirely)" \
     "duration_s" "$d" "$TMP/corpus"
