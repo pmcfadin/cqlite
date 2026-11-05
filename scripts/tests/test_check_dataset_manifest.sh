@@ -748,7 +748,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     if grep -q "$want" <<<"$dg_out"; then
       ok "the '$shape' shape reports its OWN cause ($want)"
     else
-      bad "the '$shape' shape did not report '$want'; got: $(grep 'test_basic/counters' <<<"$dg_out" | head -1)"
+      bad "the '$shape' shape did not report '$want'; got: $(grep -m1 'test_basic/counters' <<<"$dg_out")"
     fi
   done
 fi
@@ -1358,7 +1358,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
                    printf 'Data.db\nTOC.txt\n' > "$d/$pfx-2-big-TOC.txt" ;;
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
-    grep -F "$entry" <<<"$_o" | head -1
+    grep -m1 -F "$entry" <<<"$_o"
   }
 
   # 71: each shape names ITS OWN cause.
@@ -1578,7 +1578,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   pc_out=$(NO_AUTO_TOC=1 mrun "$WORK/manifest-pc-prefix-collision" 2>&1 || true)
   grep -q "SHARES a real generation's prefix" <<<"$pc_out" \
     && ok "the prefix-collision diagnostic names its own cause" \
-    || bad "the prefix collision was reported as something else: $(grep 'test_basic/counters' <<<"$pc_out" | head -1)"
+    || bad "the prefix collision was reported as something else: $(grep -m1 'test_basic/counters' <<<"$pc_out")"
 
   for shape in truncated-toc toc-omits-stats; do
     [ "$(pc_case "$shape")" = reject ] \
@@ -1628,7 +1628,7 @@ if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstable
     if grep -q 'does NOT match the git-tracked committed twin' <<<"$ct_out"; then
       ok "the coherent-truncation diagnostic names the committed-twin mismatch"
     else
-      bad "coherent truncation was reported as some other cause: $(grep 'test_basic/simple_table' <<<"$ct_out" | head -1 | cut -c1-90)"
+      bad "coherent truncation was reported as some other cause: $(grep -m1 'test_basic/simple_table' <<<"$ct_out" | cut -c1-90)"
     fi
   else
     echo "info - no simple_table generation with a TOC in the corpus copy; skipping"
