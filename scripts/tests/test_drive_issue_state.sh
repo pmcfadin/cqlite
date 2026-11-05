@@ -57,13 +57,13 @@ run() {
 
 # verdict_of <output> — echo the token from the single `verdict ` line.
 verdict_of() {
-  printf '%s\n' "$1" | sed -n 's/^DRIVE-STATE: verdict \([^ ]*\).*/\1/p' | head -1
+  sed -n 's/^DRIVE-STATE: verdict \([^ ]*\).*/\1/p' <<<"$1" | head -1
 }
 
 # verdict_count <output> — how many `verdict ` lines the run emitted. Contract (c) says
 # EXACTLY ONE, so both zero (a consumer's `case` falls through every arm) and two (a consumer
 # reads whichever its parser picks first) are failures.
-verdict_count() { printf '%s\n' "$1" | grep -c '^DRIVE-STATE: verdict ' || true; }
+verdict_count() { grep -c '^DRIVE-STATE: verdict ' <<<"$1" || true; }
 
 # The CLOSED verdict token set (the script's own grammar). An unrecognised token is
 # a refusal, so the test pins the set rather than accepting whatever is printed.
@@ -81,7 +81,7 @@ verdict_in_set() {
 # the #3387 shape, and it cost a round here.
 all_lines_anchored() {
   local bad
-  bad="$(printf '%s\n' "$1" | grep -v '^$' | grep -cv '^DRIVE-STATE: ' || true)"
+  bad="$(grep -v '^$' <<<"$1" | grep -cv '^DRIVE-STATE: ' || true)"
   [ "${bad:-1}" = 0 ]
 }
 
@@ -154,7 +154,7 @@ else
   bad "AC3: unstamped prose marker was not refused by name: rc=$p_rc
 $p_out"
 fi
-if printf '%s\n' "$p_out" | grep -q '3822'; then
+if grep -q '3822' <<<"$p_out"; then
   ok "AC3 refusal names the issue it refused for"
 else
   bad "AC3 refusal does not name the issue:
@@ -168,7 +168,7 @@ L3=$(lane lane3)
 run "$L3" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 9999 >/dev/null 2>&1
 i_out=$(run "$L3" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822); i_rc=$?
 if [ "$i_rc" -ne 0 ] && [ "$(verdict_of "$i_out")" = FOREIGN-ISSUE ] \
-   && printf '%s\n' "$i_out" | grep -q 'axis=issue'; then
+   && grep -q 'axis=issue' <<<"$i_out"; then
   ok "foreign issue -> FOREIGN-ISSUE(rc=$i_rc) naming axis=issue"
 else
   bad "foreign issue not refused on the issue axis: rc=$i_rc
@@ -182,7 +182,7 @@ L4=$(lane lane4)
 run "$L4" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
 m_out=$(run "$L4" CLAIM_MACHINE=boxB "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822); m_rc=$?
 if [ "$m_rc" -ne 0 ] && [ "$(verdict_of "$m_out")" = FOREIGN-MACHINE ] \
-   && printf '%s\n' "$m_out" | grep -q 'axis=machine'; then
+   && grep -q 'axis=machine' <<<"$m_out"; then
   ok "foreign machine -> FOREIGN-MACHINE(rc=$m_rc) naming axis=machine"
 else
   bad "foreign machine not refused on the machine axis: rc=$m_rc
@@ -198,7 +198,7 @@ run "$L5" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" --
 cp "$L5/$MARKER" "$L5B/$MARKER"
 wt_out=$(run "$L5B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822); wt_rc=$?
 if [ "$wt_rc" -ne 0 ] && [ "$(verdict_of "$wt_out")" = FOREIGN-WORKTREE ] \
-   && printf '%s\n' "$wt_out" | grep -q 'axis=worktree'; then
+   && grep -q 'axis=worktree' <<<"$wt_out"; then
   ok "foreign worktree -> FOREIGN-WORKTREE(rc=$wt_rc) naming axis=worktree"
 else
   bad "foreign worktree not refused on the worktree axis: rc=$wt_rc
@@ -539,16 +539,16 @@ else
   bad "$grammar_fail verdict tokens outside the closed grammar"
 fi
 sh_out=$(run "$L1" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822); sh_rc=$?
-if [ "$sh_rc" -eq 0 ] && printf '%s\n' "$sh_out" | grep -q 'machine=boxA' \
-   && printf '%s\n' "$sh_out" | grep -q "session=$SESS_A" && all_lines_anchored "$sh_out"; then
+if [ "$sh_rc" -eq 0 ] && grep -q 'machine=boxA' <<<"$sh_out" \
+   && grep -q "session=$SESS_A" <<<"$sh_out" && all_lines_anchored "$sh_out"; then
   ok "show prints the recorded stamp fields, anchored"
 else
   bad "show output wrong: rc=$sh_rc
 $sh_out"
 fi
 h_out=$(run "$L1" -- --help); h_rc=$?
-if [ "$h_rc" -eq 0 ] && printf '%s\n' "$h_out" | grep -q 'ADOPTABLE' \
-   && printf '%s\n' "$h_out" | grep -q 'EXIT CODES'; then
+if [ "$h_rc" -eq 0 ] && grep -q 'ADOPTABLE' <<<"$h_out" \
+   && grep -q 'EXIT CODES' <<<"$h_out"; then
   ok "--help is authoritative: it documents the verdict tokens and the exit codes"
 else
   bad "--help does not document the contract: rc=$h_rc"
@@ -599,7 +599,7 @@ printf '#!/bin/sh\nexit 1\n' >"$wf_bin/mktemp"; chmod +x "$wf_bin/mktemp"
 wf2_out=$(run "$L17B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
   "PATH=$wf_bin:$PATH" -- write 3822 2>/dev/null); wf2_rc=$?
 if [ "$wf2_rc" -ne 0 ] && [ "$(verdict_of "$wf2_out")" = ERROR ] \
-   && printf '%s\n' "$wf2_out" | grep -q 'temporary file' \
+   && grep -q 'temporary file' <<<"$wf2_out" \
    && all_lines_anchored "$wf2_out" && [ ! -f "$L17B/$MARKER" ]; then
   ok "a failing mktemp inside write_marker yields ERROR(rc=$wf2_rc) naming the cause, on stdout, with nothing written — the path the uid-dependent probe cannot reach"
 else
@@ -623,11 +623,11 @@ awk -v new="machine: $cc_val" '/^machine: /{print new; next} {print}' "$L17/$MAR
   && mv "$T/m17cc" "$L17/$MARKER"
 cc_out=$(run "$L17" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); cc_rc=$?
 if [ "$cc_rc" -ne 0 ] && [ "$(verdict_of "$cc_out")" = FOREIGN-MACHINE ] && all_lines_anchored "$cc_out" \
-   && ! printf '%s' "$cc_out" | grep -q $'\x1b'; then
+   && ! grep -q $'\x1b' <<<"$cc_out"; then
   ok "control characters in a recorded value are masked for display; every line stays anchored"
 else
   bad "control-character value broke the anchor: rc=$cc_rc
-$(printf '%s' "$cc_out" | cat -v)"
+$(cat -v <<<"$cc_out")"
 fi
 
 # ===========================================================================
@@ -645,7 +645,7 @@ if mkdir -p "$nl_dir" 2>/dev/null; then
     ok "a newline-bearing worktree path is refused (rc=$nl_rc) with an anchored ERROR and nothing written"
   else
     bad "newline-bearing worktree path was not refused: rc=$nl_rc
-$(printf '%s' "$nl_out" | cat -v)"
+$(cat -v <<<"$nl_out")"
   fi
 else
   bad "could not create a newline-bearing directory, so the worktree-recordability refusal was NOT measured (this is a gap, not a pass)"
@@ -716,7 +716,7 @@ else
   bad "the unstamped body SURVIVED the restamp:
 $(cat "$L21/$MARKER")"
 fi
-if printf '%s\n' "$mig_w" | grep -q 'DISCARDED its body' && all_lines_anchored "$mig_w"; then
+if grep -q 'DISCARDED its body' <<<"$mig_w" && all_lines_anchored "$mig_w"; then
   ok "the discard is ANNOUNCED on an anchored verdict-detail line (a quiet overwrite of someone's notes is not acceptable)"
 else
   bad "the discard was not announced:
@@ -844,7 +844,7 @@ for st in $DL_STATES; do
   dl_covered="$dl_covered $exp"
   # Every subcommand of THIS script named in the refusal text must not return the same
   # refusal when invoked on the same state.
-  subs="$(printf '%s\n' "$out" | grep -oE 'drive-issue-state\.sh [a-z]+' | awk '{print $2}' | sort -u)"
+  subs="$(grep -oE 'drive-issue-state\.sh [a-z]+' <<<"$out" | awk '{print $2}' | sort -u)"
   for sub in $subs; do
     case "$sub" in write | verify | adopt | show) : ;; *) continue ;; esac
     dl_named=$((dl_named + 1))
@@ -892,10 +892,10 @@ run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -
 run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- \
   write 3822 --stage review >/dev/null 2>&1
 fp_show=$(run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822)
-if printf '%s\n' "$fp_show" | grep -q 'request-id=coord-3822-7' \
-   && printf '%s\n' "$fp_show" | grep -q 'pr=4001' \
-   && printf '%s\n' "$fp_show" | grep -q 'branch=issue-3822-slug' \
-   && printf '%s\n' "$fp_show" | grep -q 'stage=review'; then
+if grep -q 'request-id=coord-3822-7' <<<"$fp_show" \
+   && grep -q 'pr=4001' <<<"$fp_show" \
+   && grep -q 'branch=issue-3822-slug' <<<"$fp_show" \
+   && grep -q 'stage=review' <<<"$fp_show"; then
   ok "a later 'write --stage' PRESERVES request-id/pr/branch and updates the stage"
 else
   bad "a write with one flag erased the other durable fields:
@@ -905,8 +905,8 @@ run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -
   write 3822 --clear request-id >/dev/null 2>&1
 fp_show2=$(run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822)
 fp_bad=$(run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --clear frobnicate 2>&1); fp_badrc=$?
-if printf '%s\n' "$fp_show2" | grep -q 'request-id=none' \
-   && printf '%s\n' "$fp_show2" | grep -q 'pr=4001' && [ "$fp_badrc" -eq 64 ]; then
+if grep -q 'request-id=none' <<<"$fp_show2" \
+   && grep -q 'pr=4001' <<<"$fp_show2" && [ "$fp_badrc" -eq 64 ]; then
   ok "'--clear request-id' erases exactly that field (pr survives), and an unknown field name is exit 64 — the field set is CLOSED"
 else
   bad "--clear misbehaved: unknown-field rc=$fp_badrc
@@ -921,11 +921,11 @@ kill "$fp_dead" 2>/dev/null; wait "$fp_dead" 2>/dev/null
 fp_ad=$(run "$L23B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- \
   adopt 3822 --reason cron-reinvoke:writer-pid-gone); fp_adrc=$?
 fp_show3=$(run "$L23B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- show 3822)
-if [ "$fp_adrc" -eq 0 ] && printf '%s\n' "$fp_show3" | grep -q 'request-id=coord-3822-9' \
-   && printf '%s\n' "$fp_show3" | grep -q 'pr=4002' \
-   && printf '%s\n' "$fp_show3" | grep -q 'branch=issue-3822-b' \
-   && printf '%s\n' "$fp_show3" | grep -q 'stage=implement' \
-   && printf '%s\n' "$fp_show3" | grep -q "prior-session=$SESS_A"; then
+if [ "$fp_adrc" -eq 0 ] && grep -q 'request-id=coord-3822-9' <<<"$fp_show3" \
+   && grep -q 'pr=4002' <<<"$fp_show3" \
+   && grep -q 'branch=issue-3822-b' <<<"$fp_show3" \
+   && grep -q 'stage=implement' <<<"$fp_show3" \
+   && grep -q "prior-session=$SESS_A" <<<"$fp_show3"; then
   ok "an adopt carries stage/request-id/pr/branch across the ownership transfer (and still records the prior session)"
 else
   bad "adopt destroyed durable state: rc=$fp_adrc
@@ -966,7 +966,7 @@ fi
 ser_out=$( cd "$L24" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
   "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$SCRATCH/drive-issue-state.sh" write 3822 2>&1 ); ser_rc=$?
 if [ "$ser_rc" -ne 0 ] && [ "$(verdict_of "$ser_out")" = ERROR ] \
-   && printf '%s\n' "$ser_out" | grep -q 'holds the marker lock' && [ ! -f "$L24/$MARKER" ]; then
+   && grep -q 'holds the marker lock' <<<"$ser_out" && [ ! -f "$L24/$MARKER" ]; then
   ok "with the lock held elsewhere, write REFUSES (rc=$ser_rc) rather than mutating unserialized, and writes nothing"
 else
   bad "write ignored a held lock: rc=$ser_rc verdict=$(verdict_of "$ser_out")
@@ -1018,7 +1018,7 @@ fi
 # The surviving stamp must be ONE coherent record: the winner's session, and the durable
 # stage it inherited. A clobber would show as a lost stage or a torn prologue.
 sc_show=$(run "$L24C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- show 3822 2>&1); sc_shrc=$?
-if [ "$sc_shrc" -eq 0 ] && printf '%s\n' "$sc_show" | grep -q 'stage=implement'; then
+if [ "$sc_shrc" -eq 0 ] && grep -q 'stage=implement' <<<"$sc_show"; then
   ok "the surviving marker is one coherent stamp and kept the inherited stage — no torn or clobbered record"
 else
   bad "the surviving marker is not readable/coherent: rc=$sc_shrc
@@ -1192,7 +1192,7 @@ ml_out=$( cd "$L29" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE
 ml_v="$(verdict_of "$ml_out")"
 if [ "$ml_rc" -eq 1 ] && [ "$ml_v" = ERROR ] && verdict_in_set "$ml_v" \
    && all_lines_anchored "$ml_out" \
-   && printf '%s\n' "$ml_out" | grep -q 'process-liveness.sh'; then
+   && grep -q 'process-liveness.sh' <<<"$ml_out"; then
   ok "an ABSENT lib/process-liveness.sh yields exit 1 AND a closed-set 'verdict ERROR' line naming the unreadable path"
 else
   bad "the missing-liveness-library guard emitted no usable verdict token: rc=$ml_rc verdict='$ml_v'
@@ -1269,7 +1269,7 @@ leak_probe() {
     return 0
   fi
   leak_fail=$((leak_fail + 1))
-  printf 'note   LEAK via %s (rc=%s):\n%s\n' "$c" "$rc" "$(printf '%s' "$out" | cat -v)"
+  printf 'note   LEAK via %s (rc=%s):\n%s\n' "$c" "$rc" "$(cat -v <<<"$out")"
   return 1
 }
 # mktemp / mv / date / tr / hostname: reached by an ordinary write in a fresh lane.
@@ -1284,7 +1284,7 @@ lh_out=$( cd "$L30H" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u CLAIM_MAC
 leak_probed=$((leak_probed + 1))
 if all_lines_anchored "$lh_out"; then :; else
   leak_fail=$((leak_fail + 1))
-  printf 'note   LEAK via hostname:\n%s\n' "$(printf '%s' "$lh_out" | cat -v)"
+  printf 'note   LEAK via hostname:\n%s\n' "$(cat -v <<<"$lh_out")"
 fi
 # cat: only reached with a non-empty --body-file.
 L30C=$(lane leak-cat); body30="$T/body30.md"; printf 'lane notes\n' >"$body30"
@@ -1307,7 +1307,7 @@ fi
 # learns WHY. Suppression alone would satisfy the anchor and lose the diagnosis.
 if leak_probe mktemp "$(lane leak-mktemp2)" write 3822; then :; fi
 if [ "$LEAK_RC" -ne 0 ] && [ "$(verdict_of "$LEAK_OUT")" = ERROR ] \
-   && printf '%s\n' "$LEAK_OUT" | grep -q "$LEAK"; then
+   && grep -q "$LEAK" <<<"$LEAK_OUT"; then
   ok "a failing mktemp's NATIVE text is FOLDED into the anchored ERROR detail (captured, not merely suppressed)"
 else
   bad "the failing mktemp's native diagnostic was lost entirely: rc=$LEAK_RC verdict=$(verdict_of "$LEAK_OUT")
@@ -1315,7 +1315,7 @@ $LEAK_OUT"
 fi
 if leak_probe mv "$(lane leak-mv2)" write 3822; then :; fi
 if [ "$LEAK_RC" -ne 0 ] && [ "$(verdict_of "$LEAK_OUT")" = ERROR ] \
-   && printf '%s\n' "$LEAK_OUT" | grep -q "$LEAK"; then
+   && grep -q "$LEAK" <<<"$LEAK_OUT"; then
   ok "a failing mv's NATIVE text is FOLDED into the anchored ERROR detail"
 else
   bad "the failing mv's native diagnostic was lost entirely: rc=$LEAK_RC verdict=$(verdict_of "$LEAK_OUT")
@@ -1335,7 +1335,7 @@ if [ "$rm_rc" -eq 0 ] && [ "$(verdict_of "$rm_out")" = WRITTEN ] && all_lines_an
   ok "a failing (noisy) rm in the cleanup trap neither leaks a line nor changes the WRITTEN(0) verdict"
 else
   bad "the cleanup trap's rm changed the outcome or leaked: rc=$rm_rc verdict=$(verdict_of "$rm_out")
-$(printf '%s' "$rm_out" | cat -v)"
+$(cat -v <<<"$rm_out")"
 fi
 # A FAILING `date` MUST NOT COMMIT A SELF-BRICKING MARKER. Found by this very case: because
 # every caller invokes write_marker as `if ! write_marker ...`, `set -e` is suppressed for its
@@ -1350,7 +1350,7 @@ if [ "$d30_rc" -ne 0 ] && [ "$(verdict_of "$d30_out")" = ERROR ] && all_lines_an
   ok "a failing 'date' refuses with an anchored ERROR and commits NOTHING — no marker with an empty required field"
 else
   bad "a failing date committed a self-bricking marker or emitted no verdict: rc=$d30_rc verdict=$(verdict_of "$d30_out")
-$(printf '%s' "$d30_out" | cat -v)"
+$(cat -v <<<"$d30_out")"
 fi
 # THE RESIDUAL THIS CASE ONCE DECLARED IS NOW CLOSED (roborev job 34 H1). With `tr` shimmed the
 # identity sanitizer cannot run, so every sanitized field degraded to sanitize_field's
@@ -1364,11 +1364,11 @@ tr_out=$( cd "$L30T" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHIN
   "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$tr_dir:$PATH" \
   bash "$DS" write 3822 2>&1 ) || true
 if all_lines_anchored "$tr_out" && [ ! -e "$L30T/$MARKER" ] \
-   && [ "$(verdict_of "$tr_out")" = ERROR ] && printf '%s\n' "$tr_out" | grep -q 'axis=machine'; then
+   && [ "$(verdict_of "$tr_out")" = ERROR ] && grep -q 'axis=machine' <<<"$tr_out"; then
   ok "a failing 'tr' leaks nothing AND no longer fails open: the machine axis is refused (ERROR, axis=machine) and NO marker with a placeholder identity is committed"
 else
   bad "a failing tr leaked a line, or committed a placeholder identity instead of refusing:
-$(printf '%s' "$tr_out" | cat -v)
+$(cat -v <<<"$tr_out")
 $(cat "$L30T/$MARKER" 2>/dev/null | cat -v)"
 fi
 
@@ -1410,12 +1410,12 @@ ap_w=$(run "$L31" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PI
   write 3822 --stage review); ap_wrc=$?
 ap_show=$(run "$L31" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$ap_d2" -- show 3822 2>&1)
 if [ "$ap_wrc" -eq 0 ] && [ "$(verdict_of "$ap_w")" = WRITTEN ] \
-   && printf '%s\n' "$ap_show" | grep -q "prior-session=$SESS_A" \
-   && printf '%s\n' "$ap_show" | grep -q "prior-session-pid=$ap_d1" \
-   && printf '%s\n' "$ap_show" | grep -q "prior-ts=$ap_ts1" \
-   && printf '%s\n' "$ap_show" | grep -q 'adopt-reason=cron-reinvoke:writer-pid-gone-31' \
-   && printf '%s\n' "$ap_show" | grep -q 'stage=review' \
-   && printf '%s\n' "$ap_show" | grep -q 'request-id=coord-3822-31'; then
+   && grep -q "prior-session=$SESS_A" <<<"$ap_show" \
+   && grep -q "prior-session-pid=$ap_d1" <<<"$ap_show" \
+   && grep -q "prior-ts=$ap_ts1" <<<"$ap_show" \
+   && grep -q 'adopt-reason=cron-reinvoke:writer-pid-gone-31' <<<"$ap_show" \
+   && grep -q 'stage=review' <<<"$ap_show" \
+   && grep -q 'request-id=coord-3822-31' <<<"$ap_show"; then
   ok "a later 'write --stage' PRESERVES all four adoption-provenance fields AND still updates the stage"
 else
   bad "the stage update erased the adoption provenance: rc=$ap_wrc
@@ -1427,10 +1427,10 @@ ap_ad2=$(run "$L31" CLAIM_MACHINE=boxA CLAUDE_CODE_SESSION_ID=sess-cccccccc "CLA
   adopt 3822 --reason second-handover:31); ap_ad2rc=$?
 ap_show2=$(run "$L31" CLAIM_MACHINE=boxA CLAUDE_CODE_SESSION_ID=sess-cccccccc "CLAUDE_PID=$$" -- show 3822 2>&1)
 if [ "$ap_ad2rc" -eq 0 ] && [ "$(verdict_of "$ap_ad2")" = ADOPTED ] \
-   && printf '%s\n' "$ap_show2" | grep -q "prior-session=$SESS_B" \
-   && printf '%s\n' "$ap_show2" | grep -q "prior-session-pid=$ap_d2" \
-   && printf '%s\n' "$ap_show2" | grep -q 'adopt-reason=second-handover:31' \
-   && ! printf '%s\n' "$ap_show2" | grep -q 'cron-reinvoke:writer-pid-gone-31'; then
+   && grep -q "prior-session=$SESS_B" <<<"$ap_show2" \
+   && grep -q "prior-session-pid=$ap_d2" <<<"$ap_show2" \
+   && grep -q 'adopt-reason=second-handover:31' <<<"$ap_show2" \
+   && ! grep -q 'cron-reinvoke:writer-pid-gone-31' <<<"$ap_show2"; then
   ok "a LATER adopt OVERWRITES the provenance with the newest hand-over (it is not accumulated)"
 else
   bad "a second adopt did not replace the provenance: rc=$ap_ad2rc
@@ -1445,8 +1445,8 @@ run "$L31C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" 
 ap_negshow=$(run "$L31B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822 2>&1)
 if ! grep -qE '^(prior-session|prior-session-pid|prior-ts|adopt-reason): ' "$L31B/$MARKER" \
    && ! grep -qE '^(prior-session|prior-session-pid|prior-ts|adopt-reason): ' "$L31C/$MARKER" \
-   && ! printf '%s\n' "$ap_negshow" | grep -q 'prior-' \
-   && ! printf '%s\n' "$ap_negshow" | grep -q 'adopt-reason'; then
+   && ! grep -q 'prior-' <<<"$ap_negshow" \
+   && ! grep -q 'adopt-reason' <<<"$ap_negshow"; then
   ok "a fresh write (ABSENT marker) and the UNSTAMPED migration invent NO provenance fields, and show prints none"
 else
   bad "provenance fields were invented where there was no adoption:
@@ -1737,7 +1737,7 @@ for row in $SHIFT_ROWS; do
   [ "$rc" -eq 64 ] || why="$why rc=$rc"
   if [ -n "$why" ]; then
     sv_fail=$((sv_fail + 1))
-    printf 'note   %s %s ->%s\n%s\n' "$sub" "${opt:-<no-issue-arg>}" "$why" "$(printf '%s' "$out" | cat -v)"
+    printf 'note   %s %s ->%s\n%s\n' "$sub" "${opt:-<no-issue-arg>}" "$why" "$(cat -v <<<"$out")"
   fi
 done
 if [ "$sv_fail" -eq 0 ]; then
@@ -1750,7 +1750,7 @@ fi
 # clean sweep above is a property of the script and not of an inert fixture.
 sv_probe="$T/shift-probe.sh"; printf 'set -- one\nshift 2 || true\n' >"$sv_probe"
 sv_ctl=$(env BASHOPTS=shift_verbose bash "$sv_probe" 2>&1)
-if printf '%s\n' "$sv_ctl" | grep -q 'shift count out of range'; then
+if grep -q 'shift count out of range' <<<"$sv_ctl"; then
   ok "POSITIVE CONTROL: the same environment DOES make bash print an unprefixed shift diagnostic, so the sweep above measured something"
 else
   bad "shift_verbose did not reach the child at all — the sweep above proves nothing (control output: $sv_ctl)"
@@ -2018,7 +2018,7 @@ for row in $INV_ROWS; do
   [ "$rc" = "$want_rc" ] || why="$why rc=$rc(want $want_rc)"
   if [ -n "$why" ]; then
     inv_fail=$((inv_fail + 1))
-    printf 'note   row %s ->%s\n%s\n' "$nm" "$why" "$(printf '%s' "$out" | cat -v)"
+    printf 'note   row %s ->%s\n%s\n' "$nm" "$why" "$(cat -v <<<"$out")"
   fi
 done
 if [ "$inv_fail" -eq 0 ]; then
@@ -2060,10 +2060,10 @@ for row in $INV_ROWS; do
   nm="${row%%:*}"
   anch_rows=$((anch_rows + 1))
   out="$(cat "$INV_DIR/$nm.out")"
-  anch_lines=$((anch_lines + $(printf '%s\n' "$out" | grep -c '' || true)))
+  anch_lines=$((anch_lines + $(grep -c '' <<<"$out" || true)))
   if all_lines_anchored "$out"; then :; else
     anch_fail=$((anch_fail + 1))
-    printf 'note   row %s emitted an UNPREFIXED line:\n%s\n' "$nm" "$(printf '%s' "$out" | grep -v '^DRIVE-STATE: ' | grep -v '^$' | cat -v)"
+    printf 'note   row %s emitted an UNPREFIXED line:\n%s\n' "$nm" "$(grep -v '^DRIVE-STATE: ' <<<"$out" | grep -v '^$' | cat -v)"
   fi
 done
 if [ "$anch_fail" -eq 0 ]; then
@@ -2117,7 +2117,7 @@ for hk in fail empty; do
     bad "hostname '$hk': write did not refuse, or committed a marker: rc=$m37_rc verdict=$(verdict_of "$m37_out") marker=$([ -e "$L37/$MARKER" ] && echo present || echo absent)
 $m37_out"
   fi
-  if printf '%s\n' "$m37_out" | grep -q 'axis=machine'; then
+  if grep -q 'axis=machine' <<<"$m37_out"; then
     ok "hostname '$hk': the refusal NAMES the axis (axis=machine)"
   else
     bad "hostname '$hk': the refusal does not name the axis:
@@ -2193,7 +2193,7 @@ for probe in A B; do
     B) p_out="$b38_out"; p_rc="$b38_rc"; p_lane="$L38B"; p_before="$T/38b-before.md" ;;
   esac
   if [ "$p_rc" -eq 0 ] && [ "$(verdict_of "$p_out")" = ADOPTED ] \
-     && ! printf '%s\n' "$p_out" | grep -q "$GONE_TEXT"; then
+     && ! grep -q "$GONE_TEXT" <<<"$p_out"; then
     ok "($probe) adopt over a marker whose writer is THIS LIVE PROCESS does NOT claim the writer was gone"
   else
     bad "($probe) adopt claimed a live writer was gone (or did not succeed re-entrantly): rc=$p_rc verdict=$(verdict_of "$p_out")
@@ -2220,7 +2220,7 @@ run "$L38C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$dea
 kill "$dead38" 2>/dev/null; wait "$dead38" 2>/dev/null
 c38_out=$(run "$L38C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason cron-reinvoke:writer-pid-gone); c38_rc=$?
 if [ "$c38_rc" -eq 0 ] && [ "$(verdict_of "$c38_out")" = ADOPTED ] \
-   && printf '%s\n' "$c38_out" | grep -q "$GONE_TEXT" \
+   && grep -q "$GONE_TEXT" <<<"$c38_out" \
    && grep -q "^prior-session: $SESS_A\$" "$L38C/$MARKER" \
    && grep -q "^prior-session-pid: $dead38\$" "$L38C/$MARKER"; then
   ok "NEGATIVE CONTROL: a provably GONE writer is still adopted, and the hand-over provenance IS recorded — the distinction is real, not a disabled adopt"
@@ -2378,7 +2378,7 @@ for sub in $WT_SUBS; do
   # shellcheck disable=SC2086 -- deliberate word splitting: the extra args are a token list
   g_out=$(wt_gone_run "$sub" 3822 $wt_xargs); g_rc=$?
   if [ "$g_rc" -ne 0 ] && [ "$(verdict_of "$g_out")" = ERROR ] \
-     && printf '%s\n' "$g_out" | grep -q 'axis=worktree' \
+     && grep -q 'axis=worktree' <<<"$g_out" \
      && [ "$(verdict_count "$g_out")" = 1 ]; then
     ok "'$sub' with a deleted worktree: exactly ONE verdict, ERROR, and it NAMES axis=worktree"
   else
@@ -2389,12 +2389,12 @@ $g_out"
   # DECLARED RESIDUAL, MEASURED: bash prints `shell-init:` / `chdir:` for a deleted cwd BEFORE
   # the script's first line runs, so those two are the INTERPRETER's and cannot be suppressed
   # from inside the script. Every line the SCRIPT itself emits must still carry the anchor.
-  ours=$(printf '%s\n' "$g_out" | grep -v '^shell-init: ' | grep -v '^chdir: ' || true)
+  ours=$(grep -v '^shell-init: ' <<<"$g_out" | grep -v '^chdir: ' || true)
   if all_lines_anchored "$ours"; then
     ok "'$sub': every line the SCRIPT emits is anchored (bash's own pre-exec shell-init/chdir lines are a DECLARED, unsuppressable residual)"
   else
     bad "'$sub' leaked an unprefixed line of its own:
-$(printf '%s' "$ours" | cat -v)"
+$(cat -v <<<"$ours")"
   fi
 done
 # NOTHING IS DERIVED AT THE ROOT: a marker at / must never be consulted or created. Asserted by
@@ -2427,8 +2427,8 @@ fi
 # (which derives its path from that axis). A reordering that reintroduces K2 reds here even if a
 # future refactor changes the refusal text.
 adopt_body=$(LC_ALL=C sed -n '/^cmd_adopt() {/,/^}/p' "$DS")
-a_axis_ln=$(printf '%s\n' "$adopt_body" | grep -n '^  require_worktree_axis$' | head -1 | cut -d: -f1)
-a_lock_ln=$(printf '%s\n' "$adopt_body" | grep -n '^  lock_marker$' | head -1 | cut -d: -f1)
+a_axis_ln=$(grep -n '^  require_worktree_axis$' <<<"$adopt_body" | head -1 | cut -d: -f1)
+a_lock_ln=$(grep -n '^  lock_marker$' <<<"$adopt_body" | head -1 | cut -d: -f1)
 if [ -n "$a_axis_ln" ] && [ -n "$a_lock_ln" ] && [ "$a_axis_ln" -lt "$a_lock_ln" ]; then
   ok "STRUCTURAL: cmd_adopt calls require_worktree_axis (line $a_axis_ln of the function) BEFORE lock_marker (line $a_lock_ln)"
 else
@@ -2549,11 +2549,11 @@ cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$SCRATCH42/lib/process-livenes
 # COMMENTS ARE STRIPPED BEFORE THE ORDER IS READ: these functions document the very identifiers
 # being located, so a prose mention would otherwise "occur" before the code and the assert would
 # be about the comment (measured — it did, on the first run of this case).
-uncomment() { printf '%s\n' "$1" | grep -v '^[[:space:]]*#'; }
+uncomment() { grep -v '^[[:space:]]*#' <<<"$1"; }
 v42_body=$(awk '/^verdict\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
 v42_code=$(uncomment "$v42_body")
-v42_print=$(printf '%s\n' "$v42_code" | grep -n "printf '%s verdict" | head -1 | cut -d: -f1)
-v42_flag=$(printf '%s\n' "$v42_code" | grep -n '^ *VERDICT_EMITTED=1$' | head -1 | cut -d: -f1)
+v42_print=$(grep -n "printf '%s verdict" <<<"$v42_code" | head -1 | cut -d: -f1)  # sigpipe-fixture: printf is inside a quoted grep pattern, not a printf pipe
+v42_flag=$(grep -n '^ *VERDICT_EMITTED=1$' <<<"$v42_code" | head -1 | cut -d: -f1)
 if [ -n "$v42_print" ] && [ -n "$v42_flag" ] && [ "$v42_print" -lt "$v42_flag" ]; then
   ok "STRUCTURAL: inside verdict(), the verdict line is PRINTED (body line $v42_print) before VERDICT_EMITTED is committed (body line $v42_flag)"
 else
@@ -2579,8 +2579,8 @@ $(grep -n "printf '%s verdict %s" "$DS")"
 fi
 s42_body=$(awk '/^on_signal\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
 s42_code=$(uncomment "$s42_body")
-s42_ing=$(printf '%s\n' "$s42_code" | grep -n 'VERDICT_EMITTING' | head -1 | cut -d: -f1)
-s42_ed=$(printf '%s\n' "$s42_code" | grep -n 'VERDICT_EMITTED' | head -1 | cut -d: -f1)
+s42_ing=$(grep -n 'VERDICT_EMITTING' <<<"$s42_code" | head -1 | cut -d: -f1)
+s42_ed=$(grep -n 'VERDICT_EMITTED' <<<"$s42_code" | head -1 | cut -d: -f1)
 if [ -n "$s42_ing" ] && [ -n "$s42_ed" ] && [ "$s42_ing" -lt "$s42_ed" ]; then
   ok "STRUCTURAL: on_signal consults the in-flight flag (body line $s42_ing) BEFORE it may conclude 'already emitted' (body line $s42_ed)"
 else
@@ -2671,7 +2671,7 @@ L43=$(lane lane43)
 lm_w=$(run "$L43" "CLAIM_MACHINE=build box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); lm_wrc=$?
 if [ "$lm_wrc" -eq 1 ] && [ "$(verdict_of "$lm_w")" = ERROR ] \
    && [ "$(verdict_count "$lm_w")" = 1 ] \
-   && printf '%s\n' "$lm_w" | grep -q 'axis=machine' \
+   && grep -q 'axis=machine' <<<"$lm_w" \
    && all_lines_anchored "$lm_w" && [ ! -f "$L43/$MARKER" ]; then
   ok "a LOSSY machine identity ('build box') is ERROR(1) naming axis=machine, exactly one verdict, and NOTHING is written"
 else
@@ -2716,7 +2716,7 @@ L43d=$(lane lane43d)
 ls_w=$(run "$L43d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=sess a" "CLAUDE_PID=$$" -- write 3822 2>&1); ls_wrc=$?
 if [ "$ls_wrc" -eq 1 ] && [ "$(verdict_of "$ls_w")" = ERROR ] \
    && [ "$(verdict_count "$ls_w")" = 1 ] \
-   && printf '%s\n' "$ls_w" | grep -q 'axis=session' \
+   && grep -q 'axis=session' <<<"$ls_w" \
    && all_lines_anchored "$ls_w" && [ ! -f "$L43d/$MARKER" ]; then
   ok "a LOSSY session id ('sess a') is ERROR(1) naming axis=session, exactly one verdict, and NOTHING is written"
 else
@@ -2921,8 +2921,8 @@ run "$L45" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$p45"
 u45_keep2=$(LC_ALL=C grep -c '^future-field: keep-me$' "$L45/$MARKER" || true)
 u45_show=$(run "$L45" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$p45" -- show 3822 2>&1)
 if [ "$u45_keep2" = 1 ] \
-   && printf '%s\n' "$u45_show" | grep -q '^DRIVE-STATE: field unrecognised future-field=keep-me$' \
-   && printf '%s\n' "$u45_show" | grep -q '^DRIVE-STATE: field unrecognised x-9=v2$' \
+   && grep -q '^DRIVE-STATE: field unrecognised future-field=keep-me$' <<<"$u45_show" \
+   && grep -q '^DRIVE-STATE: field unrecognised x-9=v2$' <<<"$u45_show" \
    && all_lines_anchored "$u45_show"; then
   ok "repeated writes neither duplicate nor drop them, and 'show' reports each on an anchored 'field unrecognised' line"
 else
@@ -2989,7 +2989,7 @@ d46_w=$(run "$L46" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_P
 d46_link_after=$(readlink "$L46/$MARKER" 2>/dev/null || true)
 if [ "$d46_wrc" -ne 0 ] && [ "$(verdict_of "$d46_w")" = ERROR ] \
    && [ "$(verdict_count "$d46_w")" = 1 ] \
-   && printf '%s\n' "$d46_w" | grep -q 'not a readable regular file'; then
+   && grep -q 'not a readable regular file' <<<"$d46_w"; then
   ok "write over a DANGLING symlink: exactly ONE verdict, ERROR, naming the not-regular refusal (it used to classify absent and replace it)"
 else
   bad "write over a dangling symlink did not refuse: rc=$d46_wrc verdict=$(verdict_of "$d46_w") count=$(verdict_count "$d46_w")
@@ -3022,7 +3022,7 @@ b46_w=$(run "$L46b" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_
 b46_link_after=$(readlink "$L46b/$MARKER" 2>/dev/null || true)
 b46_bytes=$(cat "$K46_TARGET" 2>/dev/null || true)
 if [ "$b46_wrc" -ne 0 ] && [ "$(verdict_of "$b46_w")" = ERROR ] \
-   && printf '%s\n' "$b46_w" | grep -q 'not a readable regular file' \
+   && grep -q 'not a readable regular file' <<<"$b46_w" \
    && [ -L "$L46b/$MARKER" ] && [ "$b46_link_after" = "$K46_TARGET" ] \
    && [ "$b46_bytes" = 'peer plan, do not touch' ]; then
   ok "write over a symlink to a REAL file takes the same not-regular refusal; the link and the target's bytes are both untouched"
@@ -3044,7 +3044,7 @@ ln -s "$K46C_TARGET" "$L46c/$MARKER.lock"
 c46_w=$(run "$L46c" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); c46_wrc=$?
 c46_link_after=$(readlink "$L46c/$MARKER.lock" 2>/dev/null || true)
 if [ "$c46_wrc" -ne 0 ] && [ "$(verdict_of "$c46_w")" = ERROR ] \
-   && printf '%s\n' "$c46_w" | grep -q 'lock path .* is NOT a regular file (it is a symlink)' \
+   && grep -q 'lock path .* is NOT a regular file (it is a symlink)' <<<"$c46_w" \
    && [ -L "$L46c/$MARKER.lock" ] && [ "$c46_link_after" = "$K46C_TARGET" ] \
    && [ ! -e "$K46C_TARGET" ] && [ ! -e "$L46c/$MARKER" ]; then
   ok "a SYMLINK at the lock path is refused by name; the link survives, its target was NOT created, and no marker was written"
@@ -3135,8 +3135,8 @@ for kind in $L47_ROWS; do
   # The refusal NAMES what the path actually is — "not a regular file" alone would send an
   # operator looking at the wrong thing.
   case "$kind" in
-    symlink-*) printf '%s\n' "$out" | grep -q 'it is a symlink' || why="$why kind-unnamed" ;;
-    *)         printf '%s\n' "$out" | grep -q "it is a $kind"   || why="$why kind-unnamed" ;;
+    symlink-*) grep -q 'it is a symlink' <<<"$out" || why="$why kind-unnamed" ;;
+    *)         grep -q "it is a $kind" <<<"$out"   || why="$why kind-unnamed" ;;
   esac
   # NOTHING was written, and the planted entry was neither opened nor replaced.
   [ ! -e "$d/$MARKER" ] || why="$why marker-written"
@@ -3189,7 +3189,7 @@ for kind in $B47_ROWS; do
   [ "$(verdict_count "$out")" = 1 ] || why="$why verdicts=$(verdict_count "$out")"
   [ "$(verdict_of "$out")" = USAGE ] || why="$why token=$(verdict_of "$out")"
   all_lines_anchored "$out" || why="$why unanchored-line"
-  printf '%s\n' "$out" | grep -q 'is not a REGULAR file' || why="$why reason-unnamed"
+  grep -q 'is not a REGULAR file' <<<"$out" || why="$why reason-unnamed"
   [ ! -e "$d/$MARKER" ] || why="$why marker-written"
   if [ -n "$why" ]; then
     b47_fail=$((b47_fail + 1)); printf 'note   body/%s ->%s\n%s\n' "$kind" "$why" "$out"
@@ -3582,7 +3582,7 @@ sp_probe() {
   else
     sp_leaks=$((sp_leaks + 1))
     bad "$tag: the SHIPPED $pf:$pl LEAKED an unprefixed line:
-$(printf '%s\n' "$out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+$(grep -v '^DRIVE-STATE: ' <<<"$out" | cut -c1-200 | head -5 | cat -v)"
   fi
   broken="$(sp_tree "$tag" "$pf" "$pl")" || {
     bad "$tag: planting the defect at $pf:$pl changed NOTHING (or the scratch copy failed), so NO positive control was taken for this site — read the row above as an unverified probe, not as coverage. The usual cause is that $pf:$pl ALREADY lacks its own suppressor (the sweep above names it)."; return 1; }
@@ -3603,7 +3603,7 @@ $(printf '%s\n' "$out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat 
     ok "POSITIVE CONTROL $tag: with $pf:$pl's OWN suppressor removed the probe LEAKS, and the leaked line NAMES the planted site ($needle) — so this probe demonstrably reaches it"
   else
     bad "POSITIVE CONTROL $tag DID NOT REPRODUCE: planting the defect at $pf:$pl produced no leak naming that site, so the shipped row ABOVE covers NOTHING. Do not read it as coverage.
-$(printf '%s\n' "$ctl" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+$(grep -v '^DRIVE-STATE: ' <<<"$ctl" | cut -c1-200 | head -5 | cat -v)"
   fi
 }
 
@@ -3648,11 +3648,91 @@ if [ -n "$sp_gap_line" ] && [ -n "$sp_gap_tree" ]; then
     ok "DECLARED GAP: 1 RECOGNISED — drive-issue-state.sh:$sp_gap_line (the --reason placeholder fold) is covered STRUCTURALLY (the sweep + the disposition table) and NOT behaviourally. MEASURED: with its suppressor removed and an 81920-byte --reason offered, the reader was REACHED (witness present) and nothing leaked, because sanitize_field truncates \$tok to 120 bytes (printf '%.120s') — far under pipe capacity. The reader-exits-first route is a real scheduling race and is deliberately not asserted."
   else
     bad "the declared gap's own measurement did not hold: witness=$([ -f "$sp_gap_witness" ] && echo reached || echo NOT-REACHED) anchored=$(all_lines_anchored "$sp_gap_out" && echo yes || echo NO) cap-present=$(grep -Fq "printf '%.120s'" "$DS" && echo yes || echo NO). If the 120-byte cap is gone this site is now FORCEABLE and owes a behavioural probe, not a gap.
-$(printf '%s\n' "$sp_gap_out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+$(grep -v '^DRIVE-STATE: ' <<<"$sp_gap_out" | cut -c1-200 | head -5 | cat -v)"
   fi
 else
   bad "could not derive or plant the --reason placeholder-fold site, so its DECLARED GAP is itself unmeasured (line='$sp_gap_line')"
 fi
+# ===========================================================================
+case_begin 49-no-printf-pipes-in-assertions "issue #4436: this file must not pipe printf into any reader (SIGPIPE + pipefail false-FAIL)"
+# ===========================================================================
+# THE SUBJECT IS "a printf whose stdout goes into a pipe", WHATEVER THE READER IS. Any reader can exit
+# before it has consumed all input (`grep -q`, `head`, `sed q`, ...); the upstream printf then takes
+# SIGPIPE writing the rest of a large subject and this file's `set -o pipefail` turns a correct match
+# into a failed condition. The safe form feeds the reader a here-string (`grep -q PAT <<<"$x"`).
+# Banning the pipe, not parsing grep's options, removes the reader axis entirely (four rounds of review
+# kept finding a new quiet-grep spelling). The scan skips comment lines; a deliberately planted or
+# otherwise unavoidable line carries the marker `sigpipe-fixture` plus a reason on the same line.
+# Lines ending in `|` (not `||`) or `\` are joined with the next before matching; redirections such as
+# `2>&1` / `>&2` / `&>f` may sit before the pipe. DECLARED RESIDUAL (not detected, by design - this is
+# a lint, not a shell parser, #3312): pipelines built through variables/eval/functions, a subshell or
+# group `( printf ... ) | rdr`, `printf` reached via `command`/`builtin`, process substitution, and a
+# printf whose own arguments contain `(` (e.g. `$(...)`) before the pipe, since `(` ends the segment.
+# A `;` or `&` inside a quoted printf format or argument also ends the printf segment early, so
+# such a pipeline is not detected (pinned by the residual control below; update if it ever is). A
+# quoted `|` is itself flagged, which is harmless: a real pipe follows it anyway.
+SP49_RE='printf(>&[0-9]*|&>|[^;&|(])*\|([^|]|$)'
+sp49_join() { # <file> -> "startline:joined logical line"; joins lines ending in | (not ||) or \, skips comments
+  awk '
+    function flush() { if (buf != "") print start ":" buf; buf = "" }
+    {
+      if (buf == "") { if ($0 ~ /^[[:space:]]*#/) next; start = FNR; buf = $0 } else buf = buf " " $0
+      t = $0; sub(/[[:space:]]+$/, "", t)
+      if (t ~ /\\$/) { sub(/[[:space:]]*\\[[:space:]]*$/, "", buf); next }
+      if (t ~ /\|$/ && t !~ /\|\|$/) next
+      flush()
+    }
+    END { flush() }' "$1"
+}
+sp49_scan() { # <file> -> prints offending "line:text" rows
+  sp49_join "$1" | grep -E "$SP49_RE" | grep -v 'sigpipe-fixture' || true
+}
+SP49_SELF="$SCRIPT_DIR/test_drive_issue_state.sh"
+sp49_hits="$(sp49_scan "$SP49_SELF")"
+if [ -f "$SP49_SELF" ] && [ -z "$sp49_hits" ]; then
+  ok "no printf-into-pipe in this file (every subject is read via a here-string)"
+else
+  bad "printf piped into a reader in $SP49_SELF (use READER <<<\"\$x\"):
+$sp49_hits"
+fi
+# Positive control: planted printf pipes (built at runtime so this file stays clean) are caught; here-strings,
+# an `||` and a marked fixture are not.
+sp49_plant="$T/49-plant.sh"
+sp49_pf=printf; sp49_gr=grep   # split tokens so the planted lines below are not themselves hits
+{
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_gr -q FOO <<<\"\$x\"; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -Fqx FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -e FOO -q; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr --silent FOO; then :; fi"
+  echo "x=\$(if $sp49_pf '%s\\n' \"\$x\" | head -1)"
+  echo "if $sp49_pf '%s\\n' \"\$x\" 2>&1 | $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" |"
+  echo "   $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" \\"
+  echo "   | $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_gr -q FOO \\"
+  echo "   <<<\"\$x\"; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" || $sp49_gr -q FOO; then :; fi"
+  echo "if $sp49_pf '%s\\n' \"\$x\" | $sp49_gr -q FOO; then :; fi # sigpipe-fixture"
+} >"$sp49_plant"
+sp49_ctl="$(sp49_scan "$sp49_plant")"
+sp49_n="$(grep -c '' <<<"$sp49_ctl" || true)"
+if [ "$sp49_n" -eq 8 ] && [ "${sp49_ctl%%:*}" = 1 ]; then
+  ok "positive control: scan flags exactly the 8 planted printf pipes (-q, -Fqx, -e FOO -q, --silent, head -1, 2>&1, pipe- and backslash-continuations), not the here-strings (incl. one over a continuation), the || form or the marked fixture"
+else
+  bad "scan positive control failed: n=$sp49_n hits=[$sp49_ctl]"
+fi
+# Residual pin: a `;` inside a quoted printf format ends the segment early, so this form is
+# NOT detected today. If this check starts failing, the matcher improved - update the comment above.
+sp49_resid="$T/49-resid.sh"
+echo "if $sp49_pf '%s;%s\\n' \"\$x\" \"\$y\" | $sp49_gr -q FOO; then :; fi" >"$sp49_resid"
+if [ -z "$(sp49_scan "$sp49_resid")" ]; then
+  ok "declared residual pinned: a quoted ; inside the printf format is NOT flagged (documented limitation)"
+else
+  bad "residual pin changed: the scan now flags a quoted-metacharacter printf; update the TEST 49 residual comment and this pin"
+fi
+
 # ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
@@ -3678,8 +3758,8 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated
 45-unknown-prologue-keys-survive 46-symlink-marker-is-never-clobbered
 47-non-regular-paths-never-block
-48-piped-printf-sigpipe-stays-anchored 28-case-floor"
-CASE_FLOOR=48
+48-piped-printf-sigpipe-stays-anchored 49-no-printf-pipes-in-assertions 28-case-floor"
+CASE_FLOOR=49
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -3691,10 +3771,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 192 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 192)"
+if [ "$PASS" -ge 196 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 196)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 192)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 196)"
 fi
 
 # ===========================================================================
