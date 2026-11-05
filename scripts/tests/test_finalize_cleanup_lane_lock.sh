@@ -70,7 +70,7 @@ mkdir -p "$T/lane-902"
 sleeper; S2="$REPLY_SLEEPER"
 LANE_LOCK_PID=$S2 bash "$LL" acquire 902 --lane-dir "$T/lane-902" >/dev/null 2>&1
 out2="$(bash "$LL" release 902 --force --expect "not-the-lease#1" 2>&1)"; rc2=$?
-if [ "$rc2" -ne 0 ] && printf '%s' "$out2" | grep -q 'lease-mismatch' && [ -f "$(record_of 902)" ]; then
+if [ "$rc2" -ne 0 ] && grep -q 'lease-mismatch' <<<"$out2" && [ -f "$(record_of 902)" ]; then
   ok "--force does NOT defeat --expect: a wrong lease is refused and the record SURVIVES"
 else
   bad "a wrong lease under --force was accepted, or the record vanished: rc=$rc2
@@ -95,7 +95,7 @@ mkdir -p "$T/lane-903"
 sleeper; S3="$REPLY_SLEEPER"
 LANE_LOCK_PID=$S3 bash "$LL" acquire 903 --lane-dir "$T/lane-903" >/dev/null 2>&1
 out3="$(bash "$FC" --issue 903 --merged-branch issue-903-x --lane-lease 'someone-elses#1' --dry-run 2>&1)"; rc3=$?
-if [ "$rc3" -eq 6 ] && printf '%s' "$out3" | grep -q 'DIFFERENT incarnation'; then
+if [ "$rc3" -eq 6 ] && grep -q 'DIFFERENT incarnation' <<<"$out3"; then
   ok "a mismatched --lane-lease REFUSES with exit 6 and names the conflict"
 else
   bad "expected exit 6 naming a different incarnation; got rc=$rc3
@@ -161,7 +161,7 @@ mk_probe_stub() { printf '%s\n' '#!/usr/bin/env bash' "$1" > "$FCDIR/lane-lock.s
 mk_probe_stub 'exit 1'
 red_md5="$(md5sum "$FCDIR/lane-lock.sh" | cut -d" " -f1)"
 out5="$(bash "$FCDIR/finalize-cleanup.sh" --issue 905 --merged-branch issue-905-x --dry-run 2>&1)"; rc5=$?
-if [ "$rc5" -eq 6 ] && printf '%s' "$out5" | grep -q 'could not be MEASURED'; then
+if [ "$rc5" -eq 6 ] && grep -q 'could not be MEASURED' <<<"$out5"; then
   ok "an unmeasurable probe REFUSES (exit 6) instead of reading as an empty lane"
 else
   bad "expected exit 6 naming an unmeasurable probe; got rc=$rc5
@@ -184,7 +184,7 @@ else
   bad "(construction) both arms are byte-identical — the RED arm proved nothing"
 fi
 out5b="$(bash "$FCDIR/finalize-cleanup.sh" --issue 905 --merged-branch issue-905-x --dry-run 2>&1)"; rc5b=$?
-if [ "$rc5b" -ne 6 ] || ! printf '%s' "$out5b" | grep -q 'could not be MEASURED'; then
+if [ "$rc5b" -ne 6 ] || ! grep -q 'could not be MEASURED' <<<"$out5b"; then
   ok "(control) an affirmative 'FREE ... record=absent' still proceeds"
 else
   bad "(control) an affirmatively empty lane was refused as unmeasurable: rc=$rc5b
@@ -196,7 +196,7 @@ fi
 # still slip through on the empty-lease path.
 mk_probe_stub 'echo "something else entirely"'
 out5c="$(bash "$FCDIR/finalize-cleanup.sh" --issue 905 --merged-branch issue-905-x --dry-run 2>&1)"; rc5c=$?
-if [ "$rc5c" -eq 6 ] && printf '%s' "$out5c" | grep -q 'could not be MEASURED'; then
+if [ "$rc5c" -eq 6 ] && grep -q 'could not be MEASURED' <<<"$out5c"; then
   ok "(control) rc=0 with UNRECOGNISED output is unmeasurable too, not an empty lane"
 else
   bad "(control) unrecognised probe output was read as an empty lane: rc=$rc5c
@@ -214,7 +214,7 @@ mkdir -p "$T/lane-906"
 sleeper; S6="$REPLY_SLEEPER"
 LANE_LOCK_PID=$S6 bash "$LL" acquire 906 --lane-dir "$T/lane-906" >/dev/null 2>&1
 out6="$(bash "$FC" --issue 906 --merged-branch issue-906-x --dry-run 2>&1)"; rc6=$?
-if [ "$rc6" -eq 6 ] && printf '%s' "$out6" | grep -q 'no --lane-lease was asserted'; then
+if [ "$rc6" -eq 6 ] && grep -q 'no --lane-lease was asserted' <<<"$out6"; then
   ok "a HELD lane with no --lane-lease REFUSES (exit 6) instead of releasing an unasserted lease"
 else
   bad "expected exit 6 naming the unasserted lease; got rc=$rc6
