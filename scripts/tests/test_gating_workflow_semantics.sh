@@ -406,7 +406,7 @@ readlink-f sort-version sort-nul stat-gnu xargs-r find-printf mktemp-p echo-e"
 
 lint_rule_pat() {
   case "$1" in
-    bre-escape)              printf '%s' '(sed|grep)[[:space:]].*\\[tsSwWdb+|]' ;;
+    bre-escape)              printf '%s' '(sed|grep)[[:space:]].*\\[tsSwWdb+|]' ;;  # sigpipe-fixture: the pipes are inside a quoted regex payload, not a pipeline
     sed-newline-replacement) printf '%s' 'sed[[:space:]].*s[|/#].*[|/#].*\\n' ;;
     sed-relative-range)      printf '%s' 'sed[[:space:]].*,\+[0-9]' ;;
     sed-in-place)            printf '%s' 'sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-i([[:space:]]|$)' ;;
@@ -438,7 +438,7 @@ lint_file() {
   local file="$1" rule hit found="" body
   body=$(lint_body "$file")
   for rule in $LINT_RULES; do
-    hit=$(printf '%s\n' "$body" | grep -nE "$(lint_rule_pat "$rule")" | head -1)
+    _sp_t=$(grep -nE "$(lint_rule_pat "$rule")" <<<"$body"); hit=$(head -1 <<<"$_sp_t")
     [ -n "$hit" ] && found="${found}${file##*/}/${rule}: ${hit}"$'\n'
   done
   [ -z "$found" ] || { printf '%s' "$found"; return 1; }
@@ -453,7 +453,7 @@ while IFS= read -r file; do
 done <<EOF
 $GATING_SHELL
 EOF
-n_lint_rules=$(printf '%s\n' $LINT_RULES | grep -c . | tr -d ' ')
+n_lint_rules=$(tr -d ' ' < <(grep -c . < <(printf '%s\n' $LINT_RULES)))
 if [ -z "$lint_found" ]; then
   ok "PORTABILITY: the gating shell is clean under all $n_lint_rules rules (4 files)"
 else
