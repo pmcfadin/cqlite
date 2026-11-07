@@ -56,7 +56,8 @@ env:
 jobs:
   gate:
     name: Full agent gate
-    runs-on: ubuntu-latest
+    # Pinned for the dev-box-parity step (noble archive git 2.43, #4437).
+    runs-on: ubuntu-24.04
     # Timeout budget (issue #2662). MEASURED EVIDENCE: from Jul 6 -> Jul 17 this
     # lane was CANCELLED 12 nights in a row — every run hit the old 75m
     # `timeout-minutes` and was killed ~76m in. A `cancelled` conclusion pages
@@ -156,6 +157,11 @@ jobs:
       # rust-toolchain.toml (1.97.1) via the @1.97.1 ref so the nightly deep
       # gate matches how the gate runs locally instead of tracking latest
       # stable (issue #1990; dtolnay/rust-toolchain cannot read the pin file).
+      # The local gate of record runs on the dev box (noble git 2.43, /data/lanes);
+      # tooling-tests pins both (#4437, .github/actions/dev-box-parity).
+      - name: Dev-box parity (git 2.43, /data/lanes)
+        uses: ./.github/actions/dev-box-parity
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
         with:

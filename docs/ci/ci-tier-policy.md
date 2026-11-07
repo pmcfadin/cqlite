@@ -130,10 +130,11 @@ Rules for `pull_request`-triggered workflows:
   `tiers:` (it gates the merge) or under `exempt:` with a `reason` and an `issue`.
   This is enforced by `scripts/ci/validate-workflows.rb`, which runs as a step in
   `pr-gate-core`; `required` needs that job and fails unconditionally unless it
-  concluded `success`, so forgetting to enrol reds `required`. (Of the 29
+  concluded `success`, so forgetting to enrol reds `required`. (Of the 30
   PR-triggered workflows today, one is the aggregator, five are gating tiers
   (`flight-ci.yml`, `core-tests-ci.yml`, `component-tests-ci.yml`,
-  `bindings-tests-ci.yml`, `gate-lanes-ci.yml`) and 23 are exempted.)
+  `bindings-tests-ci.yml`, `gate-lanes-ci.yml`) and 24 are exempted, one of
+  them the advisory `tooling-tests-ci.yml` pending #4443.)
 - A workflow under `tiers:` must ALWAYS fire — no blocking trigger `paths:` /
   `paths-ignore:` / `branches:` (only the
   `__required_ci_context_never_matches__` sentinel used by `ci.yml`), and its

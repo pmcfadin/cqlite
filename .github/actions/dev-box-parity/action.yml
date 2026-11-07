@@ -1,0 +1,56 @@
+name: Dev-box parity for the tooling-tests suites
+description: >-
+  Give a GitHub runner the two dev-box properties the tooling-tests self-tests
+  depend on: the Ubuntu noble archive's git 2.43 (not the image's git-core PPA
+  2.5x), and a writable /data/lanes lane root. Fails if either did not take.
+
+# Why git (#4437): several tooling-tests self-tests pin git's own exit statuses. On
+# git 2.56 a truncated multi-pack-index makes `git fsck` exit 1 (ERROR_OBJECT)
+# where 2.43 exits 32 (ERROR_MULTI_PACK_INDEX), which reds
+# scripts/tests/test_check_object_store_integrity.sh on a stock runner while it
+# passes on the dev box. Run this step after checkout and before the gate, on a
+# job pinned to `runs-on: ubuntu-24.04`: the 2.43 package exists only in the
+# noble archive, so a moving `ubuntu-latest` would eventually lose it.
+#
+# Why /data/lanes (#4437): the dev box's lanes live under /data/lanes, and the
+# lane-lock pre-commit hook keys on /data/lanes/lane-<N>, so
+# scripts/tests/test_lane_lock_precommit_hook.sh builds its fixtures there on
+# purpose ("THE LANE PATH IS PART OF THE CONTRACT"). A runner has no /data, so
+# the suite died on `mkdir: cannot create directory '/data'`.
+
+runs:
+  using: composite
+  steps:
+    - name: Install noble git 2.43
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "runner image git: $(git --version)"
+        codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+        if [ "$codename" != noble ]; then
+          echo "::error::runner is '${codename:-unknown}', not Ubuntu noble; pin the job to runs-on: ubuntu-24.04"
+          exit 1
+        fi
+        sudo apt-get update -qq
+        ver=$(apt-cache madison git | awk '$3 ~ /^1:2\.43\./ {print $3; exit}')
+        if [ -z "$ver" ]; then
+          echo "::error::no 2.43 git in the apt archive"
+          apt-cache madison git
+          exit 1
+        fi
+        sudo apt-get install -y -qq --allow-downgrades "git=${ver}" "git-man=${ver}"
+        if ! git --version | grep -q '^git version 2\.43\.'; then
+          echo "::error::git is '$(git --version)' after the pin, wanted 2.43.x"
+          exit 1
+        fi
+        echo "pinned git: $(git --version)"
+
+    - name: Provision a writable /data/lanes
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo mkdir -p /data/lanes
+        sudo chown "$(id -u):$(id -g)" /data/lanes
+        probe=$(mktemp -d /data/lanes/.probe.XXXXXX)
+        rmdir "$probe"
+        echo "lane root: $(ls -ld /data/lanes)"
