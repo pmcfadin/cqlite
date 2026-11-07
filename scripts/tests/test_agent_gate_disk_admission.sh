@@ -1749,6 +1749,12 @@ printf '%s\n' "\$*" >> "\$CARGO_RECORD"
 exec "$_Q_REAL_CARGO" "\$@"
 QSHIM
 chmod +x "$tmp/q-cargoshim/cargo"
+# #4459 (same class as #4398, fixed for the feature-matrix suite in #4435): the gate runs its
+# startup `cargo nextest --version` probe only when `cargo-nextest` is on PATH, so the final
+# assertion below held on the dev box and failed on runners without it. Pin the branch: this
+# stub is only ever found, never run (the probe's `cargo nextest` hits the shim above).
+printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/q-cargoshim/cargo-nextest"
+chmod +x "$tmp/q-cargoshim/cargo-nextest"
 # `grep -c` PRINTS 0 and EXITS 1 when nothing matches, so a `|| printf '0'` fallback
 # emits BOTH and the result is the two-line string "0\n0" — which then blows up in
 # `[ -eq ]`. Take grep's output and sanitize it; never add a fallback beside it.
