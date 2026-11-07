@@ -184,7 +184,9 @@ while IFS= read -r fp; do profiles+=("$(dirname "$fp")"); done < <(find "$target
 # Hold every profile's build lock for the whole prune.
 if [ -z "$busy" ]; then
   for prof in "${profiles[@]}"; do
-    [ -f "$prof/.cargo-lock" ] || continue
+    # Open-or-create: cargo creates this same empty file itself, and an absent
+    # one must not leave a window for a build to start mid-prune.
+    if ! { : >>"$prof/.cargo-lock"; } 2>/dev/null; then busy="$busy lock-uncreatable:${prof#"$target"/}"; break; fi
     exec {fd}<>"$prof/.cargo-lock"
     if ! flock -n "$fd"; then busy="$busy lock:${prof#"$target"/}"; break; fi
   done

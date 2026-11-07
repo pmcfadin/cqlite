@@ -82,7 +82,7 @@ flock "$T/agent-gate-side/legacy-heuristics/debug/.cargo-lock" sleep 30 & lockpi
 for _ in $(seq 50); do flock -n "$T/agent-gate-side/legacy-heuristics/debug/.cargo-lock" true 2>/dev/null || break; sleep 0.1; done
 run --target "$T"; kill "$lockpid" 2>/dev/null; wait "$lockpid" 2>/dev/null
 check "held side-lane .cargo-lock: SKIPPED-BUSY naming the lock" 'grep -q "^RESULT: SKIPPED-BUSY$" <<<"$out" && grep -q "lock:agent-gate-side/legacy-heuristics/debug" <<<"$out"'
-check "held lock: nothing removed" '[ -d "$T/debug/.fingerprint/cqlite-$H1" ]'
+check "held lock: nothing removed (held profile and the free one)" '[ -d "$T/debug/.fingerprint/cqlite-$H1" ] && [ -d "$T/debug/incremental/old-abc" ] && [ -d "$T/agent-gate-side/legacy-heuristics/debug/.fingerprint/cqlite-$H1" ] && [ -d "$T/agent-gate-side/legacy-heuristics/debug/incremental/old-abc" ]'
 
 # 5. refusals and usage.
 mk_target; rm -f "$T/CACHEDIR.TAG"; run --target "$T"
@@ -97,6 +97,15 @@ check "unknown flag: exit 2" '[ "$rc" = 2 ]'
 # 6. timer install/uninstall into a private config/data home.
 export XDG_CONFIG_HOME="$tmp/cfg" XDG_DATA_HOME="$tmp/data"; rm -f "$tmp/systemctl.log"
 mk_target
+# Absent .cargo-lock: still locked (created) and pruned.
+mk_target; rm -f "$T/debug/.cargo-lock"
+run --target "$T"
+check "absent .cargo-lock: PRUNED, lock file created, fingerprints removed" 'grep -q "^RESULT: PRUNED$" <<<"$out" && [ -f "$T/debug/.cargo-lock" ] && [ ! -e "$T/debug/.fingerprint/cqlite-$H1" ]'
+# Absent lock that cannot be created: SKIPPED-BUSY with a named reason, nothing deleted.
+mk_target; rm -f "$T/debug/.cargo-lock"; mkdir "$T/debug/.cargo-lock"
+run --target "$T"
+check "uncreatable .cargo-lock: SKIPPED-BUSY naming it, nothing deleted" 'grep -q "^RESULT: SKIPPED-BUSY$" <<<"$out" && grep -q "lock-uncreatable:debug\|lock:debug" <<<"$out" && [ -d "$T/debug/.fingerprint/cqlite-$H1" ] && [ -d "$T/debug/incremental/old-abc" ]'
+
 # Exact-name match: workspace `foo_bar` removes `foo_bar-<hash>` but never a
 # foreign `foo-bar-<hash>` (Cargo keeps the name verbatim on disk).
 mk_target; mkdir -p "$T/debug/.fingerprint/foo_bar-$H1" "$T/debug/.fingerprint/foo-bar-$H1"
