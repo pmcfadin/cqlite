@@ -906,7 +906,7 @@ fi
 # fixed at argument-parse time), so a per-poll annotation would be a dozen identical
 # lines. THE DISCRIMINATOR is a multi-poll run: 3 polls, still one annotation.
 invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 --labels "ci:waive:beta"
-UNCONF_WARNINGS=$(printf '%s\n' "$OUT" | grep -c 'waiver evidence UNAVAILABLE' || true)
+UNCONF_WARNINGS=$(grep -c 'waiver evidence UNAVAILABLE' <<<"$OUT" || true)
 if [ "${UNCONF_WARNINGS:-0}" -eq 1 ] && contains "$(evidence_line "$SUMMARY")" "UNAVAILABLE"; then
   ok "the unconfigured warning is emitted once per run, not once per poll"
 else
@@ -1396,7 +1396,7 @@ fi
 # to 100 labels on a pull request.
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
   --labels "ci:waive:beta,ci:waive:beta"
-DUP_COUNT=$(printf '%s\n' "$(evidence_line "$SUMMARY")" | grep -o 'ci:waive:beta' | grep -c . || true)
+DUP_COUNT=$(grep -o 'ci:waive:beta' <<<"$(evidence_line "$SUMMARY")" | grep -c . || true)
 if [ "${DUP_COUNT:-0}" -eq 1 ]; then
   ok "a repeated waiver label is named once, not once per occurrence"
 else
@@ -1540,7 +1540,7 @@ fi
 # durable record is the summary's count. A DIFFERENT failure still annotates.
 invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 \
   --labels-cmd "$WORK/labels-403.sh"
-LABEL_WARNINGS=$(printf '%s\n' "$OUT" | grep -c "could not read the PR's current labels" || true)
+LABEL_WARNINGS=$(grep -c "could not read the PR's current labels" <<<"$OUT" || true)
 if [ "${LABEL_WARNINGS:-0}" -eq 1 ] && contains "$(cat "$SUMMARY")" "failed read(s)"; then
   ok "a persistent label-read failure is annotated once per run, with the count in the summary"
 else
@@ -1559,7 +1559,7 @@ chmod +x "$WORK/labels-403-then-client-fail.sh"
 rm -f "$WORK/labels-mixed-fail.count"
 invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 \
   --labels-cmd "$WORK/labels-403-then-client-fail.sh"
-MIXED_WARNINGS=$(printf '%s\n' "$OUT" | grep -c "could not read the PR's current labels" || true)
+MIXED_WARNINGS=$(grep -c "could not read the PR's current labels" <<<"$OUT" || true)
 if [ "${MIXED_WARNINGS:-0}" -ge 2 ] && contains "$OUT" "HTTP 403" && contains "$OUT" "exit status 127"; then
   ok "a DIFFERENT label-read failure is still annotated — the dedup keys on the detail, not a boolean"
 else

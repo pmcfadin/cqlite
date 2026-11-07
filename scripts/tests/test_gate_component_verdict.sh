@@ -144,19 +144,19 @@ expect() {
   local label="$1" want="$2" wantrc="$3" needle="$4"; shift 5
   local out rc
   out=$(bash "$VERDICT" "$@" 2>&1); rc=$?
-  if printf '%s' "$out" | grep -qE '^gate-verdict: [A-Z-]+ [^(]*\([[:space:]]*\)[[:space:]]*$'; then
-    bad "$label" "verdict carried an EMPTY cause: $(printf '%s' "$out" | head -1)"; return
+  if grep -qE '^gate-verdict: [A-Z-]+ [^(]*\([[:space:]]*\)[[:space:]]*$' <<<"$out"; then
+    bad "$label" "verdict carried an EMPTY cause: $(head -1 < <(printf '%s' "$out"))"; return
   fi
-  if printf '%s' "$out" | grep -qE 'RESULT:[[:space:]]*[A-Z]'; then
-    bad "$label" "output carries a RESULT: token (pastable as a gate verdict): $(printf '%s' "$out" | head -3)"; return
+  if grep -qE 'RESULT:[[:space:]]*[A-Z]' <<<"$out"; then
+    bad "$label" "output carries a RESULT: token (pastable as a gate verdict): $(head -3 < <(printf '%s' "$out"))"; return
   fi
   # The mktemp SUFFIX, not the bare name: the script's own file name is
   # `gate-component-verdict.sh`, which --help legitimately prints.
-  if printf '%s' "$out" | grep -qE 'gate-component-verdict\.[A-Za-z0-9]{6}'; then
-    bad "$label" "output names the PRIVATE SNAPSHOT path, which will not exist when anyone reads it: $(printf '%s' "$out" | head -2)"; return
+  if grep -qE 'gate-component-verdict\.[A-Za-z0-9]{6}' <<<"$out"; then
+    bad "$label" "output names the PRIVATE SNAPSHOT path, which will not exist when anyone reads it: $(head -2 < <(printf '%s' "$out"))"; return
   fi
-  if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
-    bad "$label" "output carries an AGENT-GATE block marker: $(printf '%s' "$out" | head -3)"; return
+  if grep -qF '==== AGENT-GATE' <<<"$out"; then
+    bad "$label" "output carries an AGENT-GATE block marker: $(head -3 < <(printf '%s' "$out"))"; return
   fi
   # (5) A VERDICT MAY NOT OPINE ON LIVENESS. This tool is not a completion probe and has no
   # three-valued view of a running gate; `gate-liveness.sh` is the authority and the only one
@@ -165,25 +165,25 @@ expect() {
   # relaunch it — two gates on one summary path, the outcome gate-ops.md exists to prevent.
   # Asserted for EVERY case, so no branch can grow one back. Scoped to verdicts on purpose:
   # --help legitimately EXPLAINS the boundary (section 11).
-  if printf '%s' "$out" | grep -qiE 'retryab|poll on exit|do not poll'; then
-    bad "$label" "verdict asserts a retryability claim it cannot support: $(printf '%s' "$out" | head -2)"; return
+  if grep -qiE 'retryab|poll on exit|do not poll' <<<"$out"; then
+    bad "$label" "verdict asserts a retryability claim it cannot support: $(head -2 < <(printf '%s' "$out"))"; return
   fi
   # (4) EVERY non-empty output line, stdout AND stderr, must carry the anchor, or the
   # output is not reliably attributable and a fragment of it could be pasted as
   # something else. Same property base-staleness.sh's `BASE-STALENESS: ` prefix has.
   local unanchored
-  unanchored=$(printf '%s\n' "$out" | grep -vE '^gate-verdict: ' | grep -v '^$' || true)
+  unanchored=$(grep -vE '^gate-verdict: ' <<<"$out" | grep -v '^$' || true)
   if [ -n "$unanchored" ]; then
-    bad "$label" "output line(s) missing the gate-verdict: anchor: $(printf '%s' "$unanchored" | head -2)"; return
+    bad "$label" "output line(s) missing the gate-verdict: anchor: $(head -2 < <(printf '%s' "$unanchored"))"; return
   fi
-  if ! printf '%s' "$out" | grep -q "^gate-verdict: $want "; then
-    bad "$label" "expected verdict $want, got: $(printf '%s' "$out" | head -1)"; return
+  if ! grep -q "^gate-verdict: $want " <<<"$out"; then
+    bad "$label" "expected verdict $want, got: $(head -1 < <(printf '%s' "$out"))"; return
   fi
   if [ "$rc" != "$wantrc" ]; then
-    bad "$label" "expected exit $wantrc, got $rc (output: $(printf '%s' "$out" | head -1))"; return
+    bad "$label" "expected exit $wantrc, got $rc (output: $(head -1 < <(printf '%s' "$out")))"; return
   fi
-  if [ -n "$needle" ] && ! printf '%s' "$out" | grep -q "$needle"; then
-    bad "$label" "expected cause to mention '$needle', got: $(printf '%s' "$out" | head -2)"; return
+  if [ -n "$needle" ] && ! grep -q "$needle" <<<"$out"; then
+    bad "$label" "expected cause to mention '$needle', got: $(head -2 < <(printf '%s' "$out"))"; return
   fi
   ok "$label"
 }
@@ -320,8 +320,8 @@ expect "5.6 a component name outside the closed grammar is refused, not injected
 # range, which bleeds into the code the moment the header changes length — and a --help
 # that prints `set -uo pipefail` is a reader being shown the wrong thing.
 _h=$(bash "$VERDICT" --help 2>&1); _hrc=$?
-_hlast=$(printf '%s\n' "$_h" | grep -v '^$' | tail -1)
-if [ "$_hrc" -eq 0 ] && [ -n "$_h" ] && printf '%s' "$_hlast" | grep -q '^gate-verdict: #'; then
+_hlast=$(grep -v '^$' <<<"$_h" | tail -1)
+if [ "$_hrc" -eq 0 ] && [ -n "$_h" ] && grep -q '^gate-verdict: #' <<<"$_hlast"; then
   ok "5.7 --help exits 0 and stops at the header boundary (never bleeds into the code)"
 else
   bad "5.7 --help exits 0 and stops at the header boundary (never bleeds into the code)" \
@@ -403,12 +403,12 @@ _map=$(sed -n '/^case "\$OVERALL" in$/,/^esac$/p' "$_gate" | tr -s '[:space:]' '
 _map_n=$(grep -c '^case "\$OVERALL" in$' "$_gate")
 _other3=$(grep -cE '^[[:space:]]*(\*\)|[A-Z]+\))[[:space:]]*exit 3' "$_gate")
 if [ "$_map_n" = 1 ] \
-   && printf '%s' "$_map" | grep -qF 'PASS) exit 0 ;; PARTIAL) exit 3 ;; *) exit 1 ;;' \
+   && grep -qF 'PASS) exit 0 ;; PARTIAL) exit 3 ;; *) exit 1 ;;' <<<"$_map" \
    && [ "$_other3" = 1 ]; then
   ok "6.8 the gate's terminal exit mapping is PASS->0 / PARTIAL->3 / else->1, and 3 is PARTIAL's alone"
 else
   bad "6.8 the gate's terminal exit mapping is PASS->0 / PARTIAL->3 / else->1, and 3 is PARTIAL's alone" \
-      "terminal-case-blocks=$_map_n exit-3-arms=$_other3 map='$(printf '%s' "$_map" | cut -c1-90)'"
+      "terminal-case-blocks=$_map_n exit-3-arms=$_other3 map='$(cut -c1-90 <<<"$_map")'"
 fi
 
 echo "=== section 7: COMPLETION is the shared reader's question, and it says COMPLETE on PARTIAL ==="
@@ -418,18 +418,18 @@ echo "=== section 7: COMPLETION is the shared reader's question, and it says COM
 # so if that ever changes, this suite reds instead of the verdict script silently
 # becoming unable to answer about any --only run.
 _gl=$(bash "$READER" "$S2" --run-id run-1 --no-wait 2>&1); _glrc=$?
-if [ "$_glrc" -eq 0 ] && printf '%s' "$_gl" | grep -q '^gate-liveness: COMPLETE '; then
+if [ "$_glrc" -eq 0 ] && grep -q '^gate-liveness: COMPLETE ' <<<"$_gl"; then
   ok "7.1 gate-liveness.sh reports COMPLETE (exit 0) for a --only PARTIAL block"
 else
   bad "7.1 gate-liveness.sh reports COMPLETE (exit 0) for a --only PARTIAL block" \
-      "rc=$_glrc out=$(printf '%s' "$_gl" | head -1)"
+      "rc=$_glrc out=$(head -1 < <(printf '%s' "$_gl"))"
 fi
 _gl=$(bash "$READER" "$S9" --run-id run-1 --no-wait 2>&1); _glrc=$?
-if [ "$_glrc" -eq 4 ] && printf '%s' "$_gl" | grep -q '^gate-liveness: UNKNOWN '; then
+if [ "$_glrc" -eq 4 ] && grep -q '^gate-liveness: UNKNOWN ' <<<"$_gl"; then
   ok "7.2 control: gate-liveness.sh reports UNKNOWN (4), not COMPLETE, for an INCOMPLETE block"
 else
   bad "7.2 control: gate-liveness.sh reports UNKNOWN (4), not COMPLETE, for an INCOMPLETE block" \
-      "rc=$_glrc out=$(printf '%s' "$_gl" | head -1)"
+      "rc=$_glrc out=$(head -1 < <(printf '%s' "$_gl"))"
 fi
 
 echo "=== section 8: every read is BOUNDED BY THE VALIDATED BLOCK (B1) ==="
@@ -562,7 +562,7 @@ expect "10.1 tree-integrity FAIL + a PASSing component line => NOT-PASS" \
 # TRAP: a THIRD legitimate value exists. SKIP means the check never ran, which is
 # unmeasurable — never FAIL.
 for _v in "SKIP (no capture)" "PENDING" "PASSENGER"; do
-  _f="$TMP/ti-$(printf '%s' "$_v" | tr -c 'A-Za-z' '-').txt"
+  _f="$TMP/ti-$(tr -c 'A-Za-z' '-' < <(printf '%s' "$_v")).txt"
   { echo "==== AGENT-GATE SUMMARY ===="
     echo "run-id: run-1"
     echo "tree-integrity: $_v"
@@ -704,23 +704,23 @@ expect_raw_help() {
   # floor added a SPURIOUS failure to an already-failing run.
   if [ "$rc" -eq 0 ]; then ok "11.1 --help exits 0"; else bad "11.1 --help exits 0" "rc=$rc"; fi
   local unanchored
-  unanchored=$(printf '%s\n' "$out" | grep -vE '^gate-verdict: ' | grep -v '^$' || true)
+  unanchored=$(grep -vE '^gate-verdict: ' <<<"$out" | grep -v '^$' || true)
   if [ -n "$unanchored" ]; then
-    bad "11.2 every --help line carries the gate-verdict: anchor" "$(printf '%s' "$unanchored" | head -2)"
+    bad "11.2 every --help line carries the gate-verdict: anchor" "$(head -2 < <(printf '%s' "$unanchored"))"
   else ok "11.2 every --help line carries the gate-verdict: anchor"; fi
-  if printf '%s' "$out" | grep -qE 'RESULT:[[:space:]]*[A-Z]'; then
-    bad "11.3 --help carries no bare RESULT token" "$(printf '%s' "$out" | grep -E 'RESULT:[[:space:]]*[A-Z]' | head -2)"
+  if grep -qE 'RESULT:[[:space:]]*[A-Z]' <<<"$out"; then
+    bad "11.3 --help carries no bare RESULT token" "$(grep -m2 -E 'RESULT:[[:space:]]*[A-Z]' <<<"$out")"
   else ok "11.3 --help carries no bare RESULT token"; fi
-  if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
-    bad "11.4 --help carries no AGENT-GATE block marker" "$(printf '%s' "$out" | grep -F '==== AGENT-GATE' | head -2)"
+  if grep -qF '==== AGENT-GATE' <<<"$out"; then
+    bad "11.4 --help carries no AGENT-GATE block marker" "$(grep -m2 -F '==== AGENT-GATE' <<<"$out")"
   else ok "11.4 --help carries no AGENT-GATE block marker"; fi
   # The whole point, stated as the property rather than as a spelling: the UNANCHORED
   # record probe — the one every stale poll site still carries — must not match --help.
-  if printf '%s\n' "$out" | grep -qE 'RESULT: (PASS|FAIL)'; then
+  if grep -qE 'RESULT: (PASS|FAIL)' <<<"$out"; then
     bad "11.5 the unanchored record probe does NOT match --help output"
   else ok "11.5 the unanchored record probe does NOT match --help output"; fi
   # AND it must still TEACH both grammars, or the fix would be "delete the content".
-  if printf '%s' "$out" | grep -qF 'PARTIAL' && printf '%s' "$out" | grep -qF '[[:space:]]'; then
+  if grep -qF 'PARTIAL' <<<"$out" && grep -qF '[[:space:]]' <<<"$out"; then
     ok "11.6 --help still teaches both anchored, token-terminated grammars"
   else
     bad "11.6 --help still teaches both anchored, token-terminated grammars"
@@ -885,7 +885,7 @@ else ok "15.9 widening to ERROR/REFUSED must not readmit the #3041 INCOMPLETE se
 # a token added to the reader and not here (or vice versa) reds instead of drifting. A
 # second independent list is what this case exists to forbid.
 _reader_set=$(grep -oE '^[[:space:]]*PASS\|FAIL\|[A-Z|]+\)' "$READER" | head -1 | tr -d ' )')
-_delta_set=$(printf '%s' "$DELTA_RE" | sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p')
+_delta_set=$(sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p' <<<"$DELTA_RE")
 if [ -n "$_reader_set" ] && [ "$_reader_set" = "$_delta_set" ]; then
   ok "15.10 the DELTA grammar's token set is DERIVED-equal to gate-liveness.sh's terminal set"
 else
@@ -1015,7 +1015,7 @@ expect "16.3 control: a full-gate PASS token is IN --only's set and still reache
 # ONE SOURCE OF TRUTH, DERIVED: the set the code enforces must equal the set the header
 # PUBLISHES for this mode, read out of the shipped script at run time (the 15.10 idiom), so
 # a token added to one and not the other reds instead of drifting.
-_only_pub=$(printf '%s' "$_pub_only" | sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p')
+_only_pub=$(sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p' <<<"$_pub_only")
 # The ENFORCING case arm, as it is really written (`  PASS|FAIL|PARTIAL) ;;`): the trailing
 # `;;` is part of the arm, so the extractor must allow it rather than require end-of-line.
 _only_code=$(sed -n 's/^[[:space:]]*\([A-Z|]\{1,\}\))[[:space:]]*;;[[:space:]]*$/\1/p' "$VERDICT" | grep -m1 '^PASS|')
@@ -1351,7 +1351,7 @@ _rejected=""
 while IFS= read -r _n; do
   case "$_n" in ''|'#'*) continue ;; esac
   _o=$(bash "$VERDICT" "$TMP/nope-21.txt" --mode only --component "$_n" 2>&1)
-  printf '%s' "$_o" | grep -q '^gate-verdict: USAGE' && _rejected="$_rejected $_n"
+  grep -q '^gate-verdict: USAGE' <<<"$_o" && _rejected="$_rejected $_n"
 done < "$_man"
 if [ -z "$_rejected" ]; then
   ok "21.3 control: every name in the committed manifest is accepted by the membership test"
@@ -1382,11 +1382,11 @@ fi
 _sub=$(mktemp -d "${TMPDIR:-/tmp}/gcv-nomanifest.XXXXXX")
 cp "$VERDICT" "$READER" "$_sub/" 2>/dev/null
 _o=$(bash "$_sub/gate-component-verdict.sh" "$S8c" --mode only --component tooling-tests --run-id run-1 2>&1); _rc=$?
-if [ "$_rc" = 64 ] && printf '%s' "$_o" | grep -q 'manifest is not readable'; then
+if [ "$_rc" = 64 ] && grep -q 'manifest is not readable' <<<"$_o"; then
   ok "21.5 an unreadable manifest is a fail-closed refusal, never a silently skipped test"
 else
   bad "21.5 an unreadable manifest is a fail-closed refusal, never a silently skipped test" \
-      "rc=$_rc out=$(printf '%s' "$_o" | head -1)"
+      "rc=$_rc out=$(head -1 < <(printf '%s' "$_o"))"
 fi
 rm -rf "$_sub"
 
@@ -1483,12 +1483,12 @@ expect "22.7 control: RESULT: was already correct — a malformed one refuses, n
 # violated by the one branch that could not route through the sanitizer. Same family as the
 # round-6 `--help` finding: the artifact breaking the invariant it documents.
 _mo=$(TMPDIR=/nonexistent-dir-3951-guard bash "$VERDICT" "$S8c" --mode only --component tooling-tests 2>&1)
-_mu=$(printf '%s\n' "$_mo" | grep -vE '^gate-verdict: ' | grep -v '^$' || true)
+_mu=$(grep -vE '^gate-verdict: ' <<<"$_mo" | grep -v '^$' || true)
 if [ -z "$_mu" ]; then
   ok "22.8 the mktemp-failure path emits no unanchored line (stderr included)"
 else
   bad "22.8 the mktemp-failure path emits no unanchored line (stderr included)" \
-      "unanchored: $(printf '%s' "$_mu" | head -2)"
+      "unanchored: $(head -2 < <(printf '%s' "$_mu"))"
 fi
 
 # STRUCTURAL: the two-step must be the ONLY way a reserved line is counted, enumerated in ONE

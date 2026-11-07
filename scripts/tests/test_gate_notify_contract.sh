@@ -311,8 +311,8 @@ redact_probe=$(bash -c '. "$1"; for u in \
     "https://ntfy.invalid/t#frag-s3cr3t" \
     "https://alice:s3cr3t@ntfy.invalid/t?auth=tk_s3cr3t"; do
       _gate_notify_redact "$u"; done' _ "$LIB" 2>&1)
-if ! printf '%s' "$redact_probe" | grep -qE 's3cr3t|alice:|token=|auth=' \
-   && [ "$(printf '%s\n' "$redact_probe" | grep -c 'https://ntfy.invalid/')" -eq 3 ]; then
+if ! grep -qE 's3cr3t|alice:|token=|auth=' <<<"$redact_probe" \
+   && [ "$(grep -c 'https://ntfy.invalid/' <<<"$redact_probe")" -eq 3 ]; then
   ok "printable target form: query, fragment and userinfo all redacted (no credential can reach a log)"
 else
   bad "printable target form leaked a credential: $redact_probe"

@@ -112,23 +112,23 @@ ok()   { echo "ok: $*"; }
 # with an empty value. So the status is checked at each call site with `|| fail`.
 count_lines() {
   local n
-  n=$(printf '%s\n' "$1" | grep -c .)
+  n=$(grep -c . <<<"$1")
   case "$n" in
     ''|*[!0-9]*) return 1 ;;
   esac
   printf '%s\n' "$n"
 }
 
-wired_sorted=$(printf '%s\n' "$WIRED_TOOLS" | grep . | sort -u)
-unwired_sorted=$(printf '%s\n' "$UNWIRED_TOOLS" | grep . | sort -u)
-mixed_sorted=$(printf '%s\n' "$MIXED_TOOLS" | grep . | sort -u)
+wired_sorted=$(grep . <<<"$WIRED_TOOLS" | sort -u)
+unwired_sorted=$(grep . <<<"$UNWIRED_TOOLS" | sort -u)
+mixed_sorted=$(grep . <<<"$MIXED_TOOLS" | sort -u)
 n_wired=$(count_lines "$wired_sorted")     || fail "cannot count WIRED_TOOLS — unmeasurable is not a pass"
 n_unwired=$(count_lines "$unwired_sorted") || fail "cannot count UNWIRED_TOOLS — unmeasurable is not a pass"
 n_mixed=$(count_lines "$mixed_sorted")     || fail "cannot count MIXED_TOOLS — unmeasurable is not a pass"
 
 # Crates that carry orphaned targets: UNWIRED (wholly) + MIXED (partly). Both owe a
 # README label.
-labelled_sorted=$(printf '%s\n%s\n' "$unwired_sorted" "$mixed_sorted" | grep . | sort -u)
+labelled_sorted=$(grep . <<<"$unwired_sorted"$'\n'"$mixed_sorted" | sort -u)
 n_labelled=$(count_lines "$labelled_sorted") || fail "cannot count the label-bearing crate set — unmeasurable is not a pass"
 
 # --- affirmative-measurement floor: the label-bearing set must be non-empty, or the
@@ -166,9 +166,9 @@ for manifest in "$ROOT"/tools/*/Cargo.toml; do
   [ -f "$manifest" ] || continue
   n_disk=$((n_disk + 1))
   crate=$(basename "$(dirname "$manifest")")
-  if printf '%s\n' "$wired_sorted"   | grep -qxF "$crate"; then continue; fi
-  if printf '%s\n' "$unwired_sorted" | grep -qxF "$crate"; then continue; fi
-  if printf '%s\n' "$mixed_sorted"   | grep -qxF "$crate"; then continue; fi
+  if grep -qxF "$crate" <<<"$wired_sorted"; then continue; fi
+  if grep -qxF "$crate" <<<"$unwired_sorted"; then continue; fi
+  if grep -qxF "$crate" <<<"$mixed_sorted"; then continue; fi
   fail "tools/$crate exists on disk but is in NONE of the three recorded lists (issue #1716). Classify it in $SCRIPT_DIR/$(basename "$0"): WIRED_TOOLS if a CI workflow or script runs it, UNWIRED_TOOLS if nothing runs it and nothing depends on it, or MIXED_TOOLS if only SOME of its targets are live. The latter two also need a README.md labeling it '$LABEL_MARKER'."
 done
 [ "$n_disk" -gt 0 ] || fail "found no tools/*/Cargo.toml on disk — the filesystem half of this guard measured nothing; refusing to pass vacuously"

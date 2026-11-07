@@ -104,21 +104,21 @@ META=$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.
 [ -n "$META" ] || fail "\`cargo metadata --no-deps\` produced no output — the DERIVATION failed"
 
 if command -v jq >/dev/null 2>&1; then
-  MEMBERS=$(printf '%s' "$META" | jq -r '.packages[].name' | sort -u) \
+  MEMBERS=$(jq -r '.packages[].name' <<<"$META" | sort -u) \
     || fail "jq could not extract package names from cargo metadata — the DERIVATION failed"
 elif command -v python3 >/dev/null 2>&1; then
-  MEMBERS=$(printf '%s' "$META" | python3 -c '
+  MEMBERS=$(python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 for n in sorted({p["name"] for p in d.get("packages", [])}):
     print(n)
-') || fail "python3 could not extract package names from cargo metadata — the DERIVATION failed"
+' <<<"$META") || fail "python3 could not extract package names from cargo metadata — the DERIVATION failed"
 else
   fail "neither jq nor python3 is available, so cargo metadata cannot be parsed — the DERIVATION failed; an unparseable subject set is not a pass"
 fi
 [ -n "$MEMBERS" ] || fail "cargo metadata named ZERO workspace members — the DERIVATION failed (this workspace has 18). A census over an empty subject set would report OK having measured nothing"
 
-n_members=$(printf '%s\n' "$MEMBERS" | grep -c .)
+n_members=$(grep -c . <<<"$MEMBERS")
 case "$n_members" in ''|*[!0-9]*) fail "could not count the derived workspace members — unmeasurable is not a pass" ;; esac
 [ "$n_members" -gt 0 ] || fail "counted 0 derived workspace members — refusing to pass vacuously"
 
@@ -134,12 +134,12 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
   # Field-count first: a line with the wrong shape must be named as malformed rather
   # than silently yielding an empty package or an empty label.
-  nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+  nf=$(awk -F'\t' '{print NF}' <<<"$line")
   [ "$nf" -eq 4 ] || fail "$CENSUS line $lineno is not a TAB-separated record (<package> TAB <LABEL> TAB <CLASS> TAB <detail>; found $nf field(s)): $line"
-  pkg=$(printf '%s' "$line" | awk -F'\t' '{print $1}')
-  label=$(printf '%s' "$line" | awk -F'\t' '{print $2}')
-  class=$(printf '%s' "$line" | awk -F'\t' '{print $3}')
-  detail=$(printf '%s' "$line" | awk -F'\t' '{print $4}')
+  pkg=$(awk -F'\t' '{print $1}' <<<"$line")
+  label=$(awk -F'\t' '{print $2}' <<<"$line")
+  class=$(awk -F'\t' '{print $3}' <<<"$line")
+  detail=$(awk -F'\t' '{print $4}' <<<"$line")
   [ -n "$pkg" ]   || fail "$CENSUS line $lineno has an empty package name: $line"
   [ -n "$label" ] || fail "$CENSUS line $lineno has an empty label: $line"
   [ -n "$class" ] || fail "$CENSUS line $lineno has an empty class: $line"
@@ -148,10 +148,10 @@ while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$detail" ] || fail "$CENSUS line $lineno records '$pkg' as $label with NO detail. EXECUTED must NAME the gate component; PARTIAL must name the component AND what is not run AND why; NOT-EXECUTED must say why (+ the tracking issue, when one is filed)"
   # CLOSED set, matched EXACTLY (grep -qxF): a prefix or case-insensitive match would
   # accept `EXECUTEDish` / `Executed`, i.e. check a spelling rather than a state.
-  printf '%s\n' "$VALID_LABELS" | grep -qxF "$label" \
-    || fail "$CENSUS line $lineno labels '$pkg' as '$label', which is not in the closed label set ($(printf '%s' "$VALID_LABELS" | tr '\n' '/' | sed 's:/$::')). An unrecognised label is a FAIL, never a pass"
-  printf '%s\n' "$VALID_CLASSES" | grep -qxF "$class" \
-    || fail "$CENSUS line $lineno classes '$pkg' as '$class', which is not in the closed class set ($(printf '%s' "$VALID_CLASSES" | tr '\n' '/' | sed 's:/$::')). An unrecognised class is a FAIL, never a pass"
+  grep -qxF "$label" <<<"$VALID_LABELS" \
+    || fail "$CENSUS line $lineno labels '$pkg' as '$label', which is not in the closed label set ($(tr '\n' '/' <<<"$VALID_LABELS" | sed 's:/$::')). An unrecognised label is a FAIL, never a pass"
+  grep -qxF "$class" <<<"$VALID_CLASSES" \
+    || fail "$CENSUS line $lineno classes '$pkg' as '$class', which is not in the closed class set ($(tr '\n' '/' <<<"$VALID_CLASSES" | sed 's:/$::')). An unrecognised class is a FAIL, never a pass"
   # The one CROSS-FIELD property this guard can check without modelling the gate. Both
   # directions matter: `no-gap` on a PARTIAL/NOT-EXECUTED record is how an uncomfortable
   # record gets excused without relabelling it (the shape the visible-gap floor below
@@ -190,10 +190,10 @@ ok "all $n_members derived workspace member(s) carry a recorded disposition"
 # ---    renamed or removed crate would leave a stale record that the count check
 # ---    below could be satisfied by a compensating addition.
 stale=""
-recorded_list=$(printf '%s' "$RECORDED" | tr '|' '\n' | grep . | sort -u)
+recorded_list=$(tr '|' '\n' <<<"$RECORDED" | grep . | sort -u)
 while IFS= read -r pkg; do
   [ -n "$pkg" ] || continue
-  printf '%s\n' "$MEMBERS" | grep -qxF "$pkg" || stale="$stale $pkg"
+  grep -qxF "$pkg" <<<"$MEMBERS" || stale="$stale $pkg"
 done <<< "$recorded_list"
 [ -z "$stale" ] || fail "$CENSUS records package(s)$stale that \`cargo metadata\` does not name as a workspace member — they were renamed or removed; update the census (issue #3522)"
 ok "every recorded package is a current workspace member"

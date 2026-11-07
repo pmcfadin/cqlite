@@ -120,7 +120,7 @@ fi
 
 echo "=== section 1: usage ==="
 out=$(bash "$LAUNCHER" --help 2>&1); rc=$?
-[ "$rc" = 0 ] && printf '%s' "$out" | grep -q 'gate-detached' \
+[ "$rc" = 0 ] && grep -q 'gate-detached' <<<"$out" \
   && ok "1.1 --help exits 0 and describes itself" || bad "1.1 --help exits 0 and describes itself" "rc=$rc"
 
 echo "=== section 2: the refusal path is a NAMED refusal, never a silent fallback ==="
@@ -141,9 +141,9 @@ done
 out=$(PATH="$fakebin" "$fakebin/bash" "$LAUNCHER" --summary "$TMP/never.txt" -- --only file-size 2>&1); rc=$?
 if [ "$rc" = 69 ]; then ok "2.1 systemd-run ABSENT => exit 69 (EX_UNAVAILABLE)"
 else bad "2.1 systemd-run ABSENT => exit 69 (EX_UNAVAILABLE)" "rc=$rc: $out"; fi
-printf '%s' "$out" | grep -q 'WILL die with the session' \
+grep -q 'WILL die with the session' <<<"$out" \
   && ok "2.2 the refusal states the consequence" || bad "2.2 the refusal states the consequence" "$out"
-printf '%s' "$out" | grep -qi 'ssh' \
+grep -qi 'ssh' <<<"$out" \
   && ok "2.3 the refusal names the alternative" || bad "2.3 the refusal names the alternative" "$out"
 [ ! -f "$TMP/never.txt" ] \
   && ok "2.4 a refused launch starts no gate" || bad "2.4 a refused launch starts no gate" "summary exists"
@@ -153,7 +153,7 @@ printf '#!/bin/sh\nexit 1\n' > "$brokenbin/systemd-run"; chmod +x "$brokenbin/sy
 out=$(PATH="$brokenbin:$PATH" bash "$LAUNCHER" --summary "$TMP/never2.txt" -- --only file-size 2>&1); rc=$?
 if [ "$rc" = 69 ]; then ok "2.5 systemd-run PRESENT but broken => exit 69"
 else bad "2.5 systemd-run PRESENT but broken => exit 69" "rc=$rc: $out"; fi
-printf '%s' "$out" | grep -q "does not work here" \
+grep -q "does not work here" <<<"$out" \
   && ok "2.6 the broken-manager refusal is textually distinct from the absent one" \
   || bad "2.6 the broken-manager refusal is textually distinct from the absent one" "$out"
 [ ! -f "$TMP/never2.txt" ] \
@@ -257,13 +257,13 @@ else
   # detached unit the block says `sccache-health=na` instead of the detected value.
   out=$(AGENT_GATE_TEST_SCCACHE_STATE=absent CQLITE_T3473_MARKER=forwarded \
         bash "$LAUNCHER" --summary "$summ" --log "$TMP/detached.log" -- --only file-size 2>&1); rc=$?
-  unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p')
+  unit=$(sed -n 's/^unit:  *//p' <<<"$out")
   [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
   if [ "$rc" != 0 ] || [ -z "$unit" ]; then
     bad "4.1 the launcher starts a unit and reports it" "rc=$rc out=$out"
   else
     ok "4.1 the launcher starts a unit and reports it"
-    gate_cg=$(printf '%s' "$out" | sed -n 's/^cgroup:  *//p')
+    gate_cg=$(sed -n 's/^cgroup:  *//p' <<<"$out")
     # THE property. Not "a different string" — NOT A DESCENDANT: a child cgroup of the
     # caller's would be torn down right along with it, so a prefix match must fail.
     if [ -z "$gate_cg" ]; then
@@ -273,7 +273,7 @@ else
     else
       ok "4.2 the gate's cgroup is not a descendant of ours"
     fi
-    printf '%s' "$out" | grep -qE '^env: *forwarded [1-9][0-9]* variables' \
+    grep -qE '^env: *forwarded [1-9][0-9]* variables' <<<"$out" \
       && ok "4.3 the launcher reports how many variables it forwarded" \
       || bad "4.3 the launcher reports how many variables it forwarded" "$out"
     # #4401: the unit must not inherit the manager's DefaultTasksMax (15% of the pids limit —
@@ -326,14 +326,14 @@ else
 out=$(bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$TMP/nx.log" -- --only file-size 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "4b.1 a nonexistent summary directory is refused (exit $rc)" \
                || bad "4b.1 a nonexistent summary directory is refused" "exit 0: $out"
-printf '%s' "$out" | grep -q 'does not exist' \
+grep -q 'does not exist' <<<"$out" \
   && ok "4b.2 the refusal names the cause" || bad "4b.2 the refusal names the cause" "$out"
 if [ "$(id -u)" != 0 ]; then
   ro="$TMP/readonly"; mkdir -p "$ro"; chmod 500 "$ro"
   out=$(bash "$LAUNCHER" --summary "$ro/s.txt" --log "$TMP/ro.log" -- --only file-size 2>&1); rc=$?
   [ "$rc" != 0 ] && ok "4b.3 an unwritable summary directory is refused (exit $rc)" \
                  || bad "4b.3 an unwritable summary directory is refused" "exit 0: $out"
-  printf '%s' "$out" | grep -qE 'cannot create a file|cannot RENAME' \
+  grep -qE 'cannot create a file|cannot RENAME' <<<"$out" \
     && ok "4b.4 the refusal names the missing capability" || bad "4b.4 the refusal names the missing capability" "$out"
   chmod 700 "$ro"
 else
@@ -364,7 +364,7 @@ if [ "$(id -u)" != 0 ]; then
   out=$(bash "$LAUNCHER" --summary "$roF" --log "$TMP/rof.log" -- --only file-size 2>&1); rc=$?
   [ "$rc" != 0 ] && ok "4b.7 an existing UNWRITABLE summary file is refused (exit $rc)" \
                  || bad "4b.7 an existing UNWRITABLE summary file is refused" "exit 0: $out"
-  printf '%s' "$out" | grep -q 'NOT writable' \
+  grep -q 'NOT writable' <<<"$out" \
     && ok "4b.8 the refusal names writability, not the directory" || bad "4b.8 the refusal names writability" "$out"
   chmod 600 "$roF"
 else
@@ -388,7 +388,7 @@ mkdir -p "$hbdir.heartbeat"          # the destination is a DIRECTORY
 out=$(bash "$LAUNCHER" --summary "$hbdir" --log "$TMP/hbd.log" -- --only file-size 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "4b.11 a DIRECTORY at the heartbeat destination is refused (exit $rc)" \
                || bad "4b.11 a DIRECTORY at the heartbeat destination is refused" "exit 0: $out"
-printf '%s' "$out" | grep -q 'not a regular file' \
+grep -q 'not a regular file' <<<"$out" \
   && ok "4b.12 the refusal names the destination's file type" || bad "4b.12 the refusal names the file type" "$out"
 rmdir "$hbdir.heartbeat" 2>/dev/null || true
 # An existing heartbeat with mode 400 must still LAUNCH FINE — and this case is kept because
@@ -400,7 +400,7 @@ rmdir "$hbdir.heartbeat" 2>/dev/null || true
 if [ "$(id -u)" != 0 ]; then
   hbro="$TMP/hbro.txt"; : > "$hbro.heartbeat"; chmod 400 "$hbro.heartbeat"
   out=$(bash "$LAUNCHER" --summary "$hbro" --log "$TMP/hbro.log" -- --only file-size 2>&1); rc=$?
-  unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
+  unit=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
   [ "$rc" = 0 ] && ok "4b.13 a mode-400 existing heartbeat still launches (rename permission is the DIRECTORY's)" \
                || bad "4b.13 a mode-400 existing heartbeat still launches" "rc=$rc: $out"
   chmod 600 "$hbro.heartbeat" 2>/dev/null || true
@@ -421,7 +421,7 @@ hbafter=$(cat "$peerhb.heartbeat" 2>/dev/null)
 # And when the destination does NOT exist, the probe proves real replacement and cleans up.
 fresh="$TMP/fresh.txt"
 out=$(bash "$LAUNCHER" --summary "$fresh" --log "$TMP/fresh.log" -- --only file-size 2>&1); rc=$?
-unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
+unit=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
 [ "$rc" = 0 ] && ok "4b.15 a fresh destination launches (real replacement proven)" \
              || bad "4b.15 a fresh destination launches" "rc=$rc: $out"
 if ls "$TMP"/fresh.txt.heartbeat.tmp.* >/dev/null 2>&1; then
@@ -509,7 +509,7 @@ else
   bad "4b.24 the heartbeat's run-binding is delegated to the reader" "delegation not found"
 fi
 body=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
-if printf '%s\n' "$body" | grep -qE 'grep -q "\^run-id: '; then
+if grep -qE 'grep -q "\^run-id: ' <<<"$body"; then
   bad "4b.24b the run-id binding uses no regex interpolation" "a regex form remains"
 else
   ok "4b.24b the run-id binding uses no regex interpolation"
@@ -539,7 +539,7 @@ fi
 # while /proc/<pid>/environ is owner-only, and this fleet's environment holds real tokens.
 # Comments are stripped first: the launcher explains WHY it avoids --setenv, and a naive scan
 # matched its own explanation (the same self-match trap as the portability guard).
-if printf '%s\n' "$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")" | grep -q -- '--setenv='; then
+if grep -q -- '--setenv=' <<<"$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")"; then
   bad "4b.27 no environment value is passed via --setenv (argv is world-readable)" "still present in code"
 else
   ok "4b.27 no environment value is passed via --setenv (argv is world-readable)"
@@ -554,7 +554,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   probe="cqlite3473secret$$"
   ls="$TMP/leak-summary.txt"
   out=$(env "SECRET_PROBE_3473=$probe" bash "$LAUNCHER" --summary "$ls" --log "$TMP/leak.log" -- --only roborev-lints 2>&1)
-  lu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$lu" ] && echo "$lu" >> "$UNITS_FILE"
+  lu=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$lu" ] && echo "$lu" >> "$UNITS_FILE"
   mp=$(systemctl --user show "$lu" -p MainPID --value 2>/dev/null)
   if [ -n "$mp" ] && [ -r "/proc/$mp/environ" ]; then
     LC_ALL=C tr '\0' '\n' < "/proc/$mp/environ" | grep -q "SECRET_PROBE_3473=$probe" \
@@ -595,7 +595,7 @@ else
   bad "4b.33 the launcher delegates the terminal-verdict decision to gate-liveness.sh" "not found"
 fi
 body=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
-if printf '%s\n' "$body" | grep -qE "RESULT: \(PASS\|FAIL"; then
+if grep -qE "RESULT: \(PASS\|FAIL" <<<"$body"; then
   bad "4b.34 no second copy of the verdict grammar remains in the launcher" "still grepping RESULT itself"
 else
   ok "4b.34 no second copy of the verdict grammar remains in the launcher"
@@ -620,8 +620,8 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   et="$TMP/envorder"; mkdir -p "$et"
   TMPDIR="$et" bash "$LAUNCHER" --summary "$TMP/eo.txt" --log "$TMP/eo.log" -- --only file-size >/dev/null 2>&1
   # the script is gone by now, so assert the ORDER from the generator instead
-  gen_rm=$(grep -n "printf '%q -f -- %q" "$LAUNCHER" | head -1 | cut -d: -f1)
-  gen_exec=$(grep -n "printf 'exec %q %q" "$LAUNCHER" | head -1 | cut -d: -f1)
+  gen_rm=$(grep -n "printf '%q -f -- %q" "$LAUNCHER" | head -1 | cut -d: -f1)  # sigpipe-fixture: printf is inside a quoted grep pattern, not a printf pipe
+  gen_exec=$(grep -n "printf 'exec %q %q" "$LAUNCHER" | head -1 | cut -d: -f1)  # sigpipe-fixture: printf is inside a quoted grep pattern, not a printf pipe
   if [ -n "$gen_rm" ] && [ -n "$gen_exec" ] && [ "$gen_rm" -lt "$gen_exec" ]; then
     ok "4b.35c the self-unlink is emitted immediately before the exec line"
   else
@@ -643,7 +643,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   envtmp="$TMP/envscope"; mkdir -p "$envtmp"
   cs="$TMP/clean-summary.txt"
   out=$(TMPDIR="$envtmp" bash "$LAUNCHER" --summary "$cs" --log "$TMP/clean.log" -- --only file-size 2>&1)
-  cu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$cu" ] && echo "$cu" >> "$UNITS_FILE"
+  cu=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$cu" ] && echo "$cu" >> "$UNITS_FILE"
   leftover=$(find "$envtmp" -name 'gate-env.sh' 2>/dev/null | wc -l | tr -d ' ')
   [ "$leftover" -eq 0 ] && ok "4b.36 a successful launch leaves NO env script behind (scoped TMPDIR)" \
                         || bad "4b.36 a successful launch leaves NO env script behind" "$leftover found under $envtmp"
@@ -658,7 +658,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # its private dir (default paths) must leave it there, proving TMPDIR is honoured.
   envtmp3="$TMP/envscope3"; mkdir -p "$envtmp3"
   out3=$(TMPDIR="$envtmp3" bash "$LAUNCHER" -- --only file-size 2>&1)
-  u3=$(printf '%s' "$out3" | sed -n 's/^unit:  *//p'); [ -n "$u3" ] && echo "$u3" >> "$UNITS_FILE"
+  u3=$(sed -n 's/^unit:  *//p' <<<"$out3"); [ -n "$u3" ] && echo "$u3" >> "$UNITS_FILE"
   if [ "$(find "$envtmp3" -maxdepth 1 -name 'cqlite-gate-*' 2>/dev/null | wc -l | tr -d ' ')" -ge 1 ]; then
     ok "4b.36b the launcher honours TMPDIR (so 4b.36/4b.37 are not vacuous)"
   else
@@ -672,9 +672,9 @@ fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   sp="$TMP/with space.txt"
   out=$(bash "$LAUNCHER" --summary "$sp" --log "$TMP/sp.log" -- --only file-size 2>&1)
-  su=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$su" ] && echo "$su" >> "$UNITS_FILE"
-  pc=$(printf '%s' "$out" | grep -A1 'poll it with' | tail -1)
-  printf '%s' "$pc" | grep -q -- '--run-id' \
+  su=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$su" ] && echo "$su" >> "$UNITS_FILE"
+  pc=$(grep -A1 'poll it with' <<<"$out" | tail -1)
+  grep -q -- '--run-id' <<<"$pc" \
     && ok "4b.38 the advertised poll command carries --run-id" \
     || bad "4b.38 the advertised poll command carries --run-id" "$pc"
   # It must be RUNNABLE as printed, for a path containing a space.
@@ -694,7 +694,7 @@ al="$TMP/alias.txt"
 out=$(bash "$LAUNCHER" --summary "$al" --log "$al" -- --only file-size 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "4b.40 --log aliasing --summary is refused (exit $rc)" \
                || bad "4b.40 --log aliasing --summary is refused" "exit 0: $out"
-printf '%s' "$out" | grep -q 'is the summary' \
+grep -q 'is the summary' <<<"$out" \
   && ok "4b.41 the refusal names which artifact it collides with" || bad "4b.41 the refusal names the collision" "$out"
 out=$(bash "$LAUNCHER" --summary "$al" --log "$al.heartbeat" -- --only file-size 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "4b.42 --log aliasing the heartbeat is refused (exit $rc)" \
@@ -707,7 +707,7 @@ hl="$TMP/hardlink.log"; : > "$hl"; ln -f "$hl" "$TMP/hardlink-alias.log" 2>/dev/
 } || skipc "4b.43 hard-link alias" "ln -f unavailable on this filesystem"
 # CONTROL: distinct paths must still launch, or the check is just a refusal.
 out=$(bash "$LAUNCHER" --summary "$TMP/ok-s.txt" --log "$TMP/ok-l.log" -- --only file-size 2>&1); rc=$?
-ou=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$ou" ] && echo "$ou" >> "$UNITS_FILE"
+ou=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$ou" ] && echo "$ou" >> "$UNITS_FILE"
 [ "$rc" = 0 ] && ok "4b.44 control: distinct summary and log paths still launch" \
              || bad "4b.44 control: distinct summary and log paths still launch" "rc=$rc: $out"
 
@@ -759,7 +759,7 @@ else
 fi
 # CONTROL: distinct paths in the same directory must still launch.
 out=$(bash "$LAUNCHER" --summary "$ad/s1.txt" --log "$ad/l1.log" -- --only file-size 2>&1); rc=$?
-au=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
+au=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
 [ "$rc" = 0 ] && ok "4b.54 control: distinct paths in one directory still launch" \
              || bad "4b.54 control: distinct paths in one directory still launch" "rc=$rc: $out"
 rm -rf "$ad"
@@ -778,13 +778,13 @@ else
   bad "4b.56 the beater state is three-valued" "_hb_state not found"
 fi
 ensblk2=$(sed -n '/^_hb_ensure() {$/,/^}$/p' "$GATE_SH")
-if printf '%s\n' "$ensblk2" | grep -q '_hb_state)" = gone'; then
+if grep -q '_hb_state)" = gone' <<<"$ensblk2"; then
   ok "4b.57 _hb_ensure respawns ONLY on a verifiable 'gone' (never on 'unverifiable')"
 else
   bad "4b.57 _hb_ensure respawns only on a verifiable 'gone'" "respawn condition not restricted"
 fi
 stopblk2=$(sed -n '/^_hb_stop() {$/,/^}$/p' "$GATE_SH")
-if printf '%s\n' "$stopblk2" | grep -q '_hb_state)" != ours'; then
+if grep -q '_hb_state)" != ours' <<<"$stopblk2"; then
   ok "4b.58 _hb_stop signals ONLY on a verifiable 'ours'"
 else
   bad "4b.58 _hb_stop signals only on a verifiable 'ours'" "signal condition not restricted"
@@ -806,11 +806,11 @@ done
 # omitted the invocation syntax entirely. A range that must be re-tuned whenever a comment is
 # edited is a latent defect.
 h=$(bash "$LAUNCHER" --help 2>&1)
-printf '%s' "$h" | grep -q 'bash scripts/flow/gate-detached.sh \[--summary' \
+grep -q 'bash scripts/flow/gate-detached.sh \[--summary' <<<"$h" \
   && ok "4b.60 --help prints the invocation syntax" || bad "4b.60 --help prints the invocation syntax" "absent"
-printf '%s' "$h" | grep -q -- '--summary <path>' && printf '%s' "$h" | grep -q -- '--log <path>' \
+grep -q -- '--summary <path>' <<<"$h" && grep -q -- '--log <path>' <<<"$h" \
   && ok "4b.61 --help documents both options" || bad "4b.61 --help documents both options" "absent"
-printf '%s' "$h" | grep -q '69 ' \
+grep -q '69 ' <<<"$h" \
   && ok "4b.62 --help documents the exit codes (incl. 69)" || bad "4b.62 --help documents the exit codes" "absent"
 # It must not be a fixed line range any more, or it will drift again.
 if grep -qE "sed -n '[0-9]+,[0-9]+p' \"\\$0\"" "$LAUNCHER"; then
@@ -826,12 +826,12 @@ fi
 # appearance of a guarantee.
 BEATER_SH="$REPO_ROOT/scripts/lib/gate-heartbeat.sh"
 aliveblk=$(sed -n '/^_gate_alive() {$/,/^}$/p' "$BEATER_SH")
-if printf '%s\n' "$aliveblk" | grep -q 'starttime|lstart'; then
+if grep -q 'starttime|lstart' <<<"$aliveblk"; then
   ok "4b.64 _gate_alive compares the identity for BOTH proc and lstart tiers"
 else
   bad "4b.64 _gate_alive compares the identity for both tiers" "lstart still falls through to kill -0"
 fi
-if printf '%s\n' "$aliveblk" | grep -q 'kill -0'; then
+if grep -q 'kill -0' <<<"$aliveblk"; then
   ok "4b.65 ...and bare existence remains only as the kill0-tier fallback"
 else
   bad "4b.65 bare existence remains as the kill0 fallback" "fallback missing entirely"
@@ -868,7 +868,7 @@ _nb=$(grep -c 'launch-nonce: $LAUNCH_NONCE' "$LAUNCHER")
 if [ "$HAVE_SYSTEMD" = yes ]; then
   ns="$TMP/nonce-s.txt"
   out=$(bash "$LAUNCHER" --summary "$ns" --log "$TMP/nonce.log" -- --only file-size 2>&1)
-  nu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$nu" ] && echo "$nu" >> "$UNITS_FILE"
+  nu=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$nu" ] && echo "$nu" >> "$UNITS_FILE"
   for ((_i_=0; _i_<60; _i_++)); do grep -q '^launch-nonce: ' "$ns" 2>/dev/null && break; sleep 0.5; done
   sn=$(sed -n 's/^launch-nonce: //p' "$ns" 2>/dev/null | head -1)
   hn=$(sed -n 's/^launch-nonce: //p' "$ns.heartbeat" 2>/dev/null | head -1)
@@ -912,7 +912,7 @@ fi
 # pointing at ONE summary path: each proves ownership of its own artifacts while their heartbeat
 # renames and summary rewrites destroy each other.
 body=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
-if printf '%s\n' "$body" | grep -q '_pre_sum_rid\|_pre_hb_rid'; then
+if grep -q '_pre_sum_rid\|_pre_hb_rid' <<<"$body"; then
   bad "4b.72 the dead pre-launch run-id captures are gone" "still present"
 else
   ok "4b.72 the dead pre-launch run-id captures are gone"
@@ -962,20 +962,20 @@ fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   cp1="$TMP/concurrent.txt"
   o1=$(bash "$LAUNCHER" --summary "$cp1" --log "$TMP/c1.log" -- --only roborev-lints 2>&1); r1=$?
-  u1=$(printf '%s' "$o1" | sed -n 's/^unit:  *//p'); [ -n "$u1" ] && echo "$u1" >> "$UNITS_FILE"
+  u1=$(sed -n 's/^unit:  *//p' <<<"$o1"); [ -n "$u1" ] && echo "$u1" >> "$UNITS_FILE"
   o2=$(bash "$LAUNCHER" --summary "$cp1" --log "$TMP/c2.log" -- --only file-size 2>&1); r2=$?
-  u2=$(printf '%s' "$o2" | sed -n 's/^unit:  *//p'); [ -n "$u2" ] && echo "$u2" >> "$UNITS_FILE"
+  u2=$(sed -n 's/^unit:  *//p' <<<"$o2"); [ -n "$u2" ] && echo "$u2" >> "$UNITS_FILE"
   if [ "$r1" = 0 ] && [ "$r2" != 0 ]; then
     ok "4b.75 a SECOND launcher on the same summary path is refused (first=$r1, second=$r2)"
   else
     bad "4b.75 a second launcher on the same summary path is refused" "first=$r1 second=$r2"
   fi
-  printf '%s' "$o2" | grep -q 'already owned by a LIVE run' \
+  grep -q 'already owned by a LIVE run' <<<"$o2" \
     && ok "4b.76 the refusal says the owner is LIVE" || bad "4b.76 the refusal says the owner is live" "$o2"
   systemctl --user stop "$u1" >/dev/null 2>&1 || true
   # ...and once that owner is gone, the reservation is reclaimed rather than blocking forever.
   o3=$(bash "$LAUNCHER" --summary "$cp1" --log "$TMP/c3.log" -- --only file-size 2>&1); r3=$?
-  u3=$(printf '%s' "$o3" | sed -n 's/^unit:  *//p'); [ -n "$u3" ] && echo "$u3" >> "$UNITS_FILE"
+  u3=$(sed -n 's/^unit:  *//p' <<<"$o3"); [ -n "$u3" ] && echo "$u3" >> "$UNITS_FILE"
   [ "$r3" = 0 ] && ok "4b.77 a STALE reservation is reclaimed (a dead owner does not block forever)" \
                 || bad "4b.77 a stale reservation is reclaimed" "exit $r3: $o3"
 else
@@ -1037,8 +1037,8 @@ fi
 # same channel-sharing shape CLAUDE.md anchors the roborev census matcher at column zero for. The
 # separation is the fix, not a reworded comment: strip comment lines, then judge the code.
 _launcher_code=$(grep -vE '^[[:space:]]*#' "$LAUNCHER")
-if printf '%s' "$_launcher_code" | grep -qF 'exec 9>>"$_mutex"' \
-   && ! printf '%s' "$_launcher_code" | grep -qF 'exec 9>"$_mutex" 2>/dev/null'; then
+if grep -qF 'exec 9>>"$_mutex"' <<<"$_launcher_code" \
+   && ! grep -qF 'exec 9>"$_mutex" 2>/dev/null' <<<"$_launcher_code"; then
   ok "4b.81c the mutex fd is opened without a permanent stderr redirection"
 else
   bad "4b.81c the mutex fd is opened without a permanent stderr redirection" "stderr may be silenced"
@@ -1053,7 +1053,7 @@ fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   dl="$TMP/dirlock.txt"
   o1=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl1.log" -- --only roborev-lints 2>&1); r1=$?
-  du1=$(printf '%s' "$o1" | sed -n 's/^unit:  *//p'); [ -n "$du1" ] && echo "$du1" >> "$UNITS_FILE"
+  du1=$(sed -n 's/^unit:  *//p' <<<"$o1"); [ -n "$du1" ] && echo "$du1" >> "$UNITS_FILE"
   [ -L "$dl.launch-lock" ] && ok "4b.83 a launch creates the reservation symlink" \
                            || bad "4b.83 a launch creates the reservation symlink" "absent"
   _lt=$(readlink "$dl.launch-lock" 2>/dev/null)
@@ -1062,13 +1062,13 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
     *) bad "4b.84 the link target names unit, pid and start identity" "target='$_lt'" ;;
   esac
   o2=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl2.log" -- --only file-size 2>&1); r2=$?
-  du2=$(printf '%s' "$o2" | sed -n 's/^unit:  *//p'); [ -n "$du2" ] && echo "$du2" >> "$UNITS_FILE"
+  du2=$(sed -n 's/^unit:  *//p' <<<"$o2"); [ -n "$du2" ] && echo "$du2" >> "$UNITS_FILE"
   [ "$r1" = 0 ] && [ "$r2" != 0 ] \
     && ok "4b.85 a LIVE owner refuses a second launcher (first=$r1 second=$r2)" \
     || bad "4b.85 a live owner refuses a second launcher" "first=$r1 second=$r2"
   systemctl --user stop "$du1" >/dev/null 2>&1 || true
   o3=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl3.log" -- --only file-size 2>&1); r3=$?
-  du3=$(printf '%s' "$o3" | sed -n 's/^unit:  *//p'); [ -n "$du3" ] && echo "$du3" >> "$UNITS_FILE"
+  du3=$(sed -n 's/^unit:  *//p' <<<"$o3"); [ -n "$du3" ] && echo "$du3" >> "$UNITS_FILE"
   [ "$r3" = 0 ] && ok "4b.86 a STALE owner is reclaimed (a finished gate does not block the path)" \
                 || bad "4b.86 a stale owner is reclaimed" "exit $r3: $o3"
   # No stale-rename litter may survive a successful reclamation.
@@ -1139,8 +1139,8 @@ fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   za="$TMP/alias.txt"
   ao=$(bash "$LAUNCHER" --summary "$za" --log "$za.launch-lock" -- --only file-size 2>&1); ar=$?
-  au=$(printf '%s' "$ao" | sed -n 's/^unit:  *//p'); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
-  if [ "$ar" != 0 ] && printf '%s' "$ao" | grep -q 'FOLLOWS a symlink'; then
+  au=$(sed -n 's/^unit:  *//p' <<<"$ao"); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
+  if [ "$ar" != 0 ] && grep -q 'FOLLOWS a symlink' <<<"$ao"; then
     ok "4b.93 --log aliasing the reservation is REFUSED, naming the symlink mechanism (exit $ar)"
   else
     bad "4b.93 --log aliasing the reservation is refused naming the mechanism" "exit $ar: $ao"
@@ -1205,7 +1205,7 @@ _proc_is_zombie 999999999 && bad "4b.99 an unmeasurable state reads as NOT-a-zom
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")
 out=$(bash "$LAUNCHER" --summary "$okF" --log "$TMP/okf.log" -- --only file-size 2>&1); rc=$?
-unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
+unit=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
 [ "$rc" = 0 ] && ok "4b.10 control: a writable existing summary still launches" \
              || bad "4b.10 control: a writable existing summary still launches" "rc=$rc: $out"
 fi
@@ -1220,10 +1220,10 @@ if [ "$HAVE_SYSTEMD" != yes ]; then
   skipc "5.x default artifact paths" "no working 'systemd-run --user' on this host"
 else
   out=$(bash "$LAUNCHER" -- --only file-size 2>&1); rc=$?
-  unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p')
+  unit=$(sed -n 's/^unit:  *//p' <<<"$out")
   [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
-  dsum=$(printf '%s' "$out" | sed -n 's/^summary:  *//p')
-  dlog=$(printf '%s' "$out" | sed -n 's/^log:  *//p')
+  dsum=$(sed -n 's/^summary:  *//p' <<<"$out")
+  dlog=$(sed -n 's/^log:  *//p' <<<"$out")
   if [ "$rc" != 0 ] || [ -z "$dsum" ] || [ -z "$dlog" ]; then
     bad "5.1 a launch with no --summary/--log still reports both paths" "rc=$rc out=$out"
   else
@@ -1321,13 +1321,13 @@ _lstub() {  # <what-loginctl-should-do> -> prints a PATH prefix dir
 if [ "$HAVE_SYSTEMD" = yes ]; then
   _d=$(_lstub no)
   _o=$(PATH="$_d:$PATH" bash "$LAUNCHER" --summary "$TMP/lg1.txt" --log "$TMP/lg1.log" -- --only fmt 2>&1); _r=$?
-  if [ "$_r" = 69 ] && printf '%s' "$_o" | grep -q 'lingering is DISABLED'; then
+  if [ "$_r" = 69 ] && grep -q 'lingering is DISABLED' <<<"$_o"; then
     ok "4b.115 Linger=no REFUSES with 69 rather than claiming an unprotected gate is protected"
   else
     bad "4b.115 Linger=no refuses with 69" "exit $_r: $_o"
   fi
   # A refusal is only useful if it says what to do about it.
-  printf '%s' "$_o" | grep -q 'loginctl enable-linger' \
+  grep -q 'loginctl enable-linger' <<<"$_o" \
     && ok "4b.116 the Linger=no refusal names the one-command remedy" \
     || bad "4b.116 the Linger=no refusal names the remedy" "no remedy in the message"
   # UNMEASURABLE must refuse too: a positive verdict needs an affirmative measurement, and
@@ -1336,7 +1336,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   for _mode in silent broken; do
     _d2=$(_lstub "$_mode")
     _o2=$(PATH="$_d2:$PATH" bash "$LAUNCHER" --summary "$TMP/lg2.txt" --log "$TMP/lg2.log" -- --only fmt 2>&1); _r2=$?
-    if [ "$_r2" != 69 ] || ! printf '%s' "$_o2" | grep -q 'could NOT determine'; then
+    if [ "$_r2" != 69 ] || ! grep -q 'could NOT determine' <<<"$_o2"; then
       _bad_unknown=$((_bad_unknown+1)); echo "     mode=$_mode exit=$_r2"
     fi
   done
@@ -1347,8 +1347,8 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # the three cases above would prove only that the launcher always refuses.
   _d3=$(_lstub yes)
   _o3=$(PATH="$_d3:$PATH" bash "$LAUNCHER" --summary "$TMP/lg3.txt" --log "$TMP/lg3.log" -- --only fmt 2>&1); _r3=$?
-  _u3=$(printf '%s' "$_o3" | sed -n 's/^unit:  *//p'); [ -n "$_u3" ] && echo "$_u3" >> "$UNITS_FILE"
-  if printf '%s' "$_o3" | grep -qE 'lingering is DISABLED|could NOT determine'; then
+  _u3=$(sed -n 's/^unit:  *//p' <<<"$_o3"); [ -n "$_u3" ] && echo "$_u3" >> "$UNITS_FILE"
+  if grep -qE 'lingering is DISABLED|could NOT determine' <<<"$_o3"; then
     bad "4b.118 control: Linger=yes passes the precondition" "refused anyway: $_o3"
   else
     ok "4b.118 control: Linger=yes passes the precondition (exit $_r3)"
@@ -1367,8 +1367,8 @@ fi
 # holds. Asserted as TWO ARMS rather than one alternation: a fallback with only an `0)` arm is the
 # defect job 251 was written for, and that is what this case exists to catch.
 _j147=$(sed -n '/THIS ONE CALL IS ALLOWED TO BLOCK/,/esac/p' "$LAUNCHER")
-if printf '%s' "$_j147" | grep -qE '^[[:space:]]*0\)[[:space:]]*_hb_seen=1' \
-   && printf '%s' "$_j147" | grep -qE '^[[:space:]]*2\)'; then
+if grep -qE '^[[:space:]]*0\)[[:space:]]*_hb_seen=1' <<<"$_j147" \
+   && grep -qE '^[[:space:]]*2\)' <<<"$_j147"; then
   ok "4b.147 the blocking fallback accepts COMPLETE or RUNNING, not just COMPLETE"
 else
   bad "4b.147 the blocking fallback accepts COMPLETE or RUNNING" "a RUNNING gate would still be stopped"
@@ -1460,7 +1460,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   ln -s "unit=cqlite-gate-dead.service|pid=999999999|start=proc:1" "$_sm.txt.heartbeat.launch-lock"
   ln -s "unit=cqlite-gate-dead2.service|pid=999999998|start=proc:1" "$_sm.log.launch-lock"
   _so=$(bash "$LAUNCHER" --summary "$_sm.txt" --log "$_sm.log" -- --only roborev-lints 2>&1); _sr=$?
-  _su=$(printf '%s' "$_so" | sed -n 's/^unit:  *//p'); [ -n "$_su" ] && echo "$_su" >> "$UNITS_FILE"
+  _su=$(sed -n 's/^unit:  *//p' <<<"$_so"); [ -n "$_su" ] && echo "$_su" >> "$UNITS_FILE"
   _stale_left=0
   for _f in "$_sm.txt.heartbeat.launch-lock" "$_sm.log.launch-lock"; do
     case "$(readlink "$_f" 2>/dev/null)" in
@@ -1477,9 +1477,9 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # CONTROL: a LIVE foreign marker must still refuse, or reclamation has become "take everything".
   _lv="$TMP/livemark"
   _lo=$(bash "$LAUNCHER" --summary "$_lv-a" --log "$_lv-shared" -- --only roborev-lints 2>&1)
-  _lu=$(printf '%s' "$_lo" | sed -n 's/^unit:  *//p'); [ -n "$_lu" ] && echo "$_lu" >> "$UNITS_FILE"
+  _lu=$(sed -n 's/^unit:  *//p' <<<"$_lo"); [ -n "$_lu" ] && echo "$_lu" >> "$UNITS_FILE"
   _l2=$(bash "$LAUNCHER" --summary "$_lv-b" --log "$_lv-shared" -- --only fmt 2>&1); _l2r=$?
-  _l2u=$(printf '%s' "$_l2" | sed -n 's/^unit:  *//p'); [ -n "$_l2u" ] && echo "$_l2u" >> "$UNITS_FILE"
+  _l2u=$(sed -n 's/^unit:  *//p' <<<"$_l2"); [ -n "$_l2u" ] && echo "$_l2u" >> "$UNITS_FILE"
   [ "$_l2r" != 0 ] && ok "4b.153 control: a LIVE foreign marker still refuses (exit $_l2r)" \
                    || bad "4b.153 control: a live foreign marker still refuses" "accepted: $_l2"
   for _u in $_lu $_l2u; do systemctl --user stop "$_u" >/dev/null 2>&1; done
@@ -1498,11 +1498,11 @@ fi
 # wait. Tracking beat-seq progression inside the launcher would have been a second implementation of the
 # reader's progression grammar, which jobs 172 and 198 exist to prevent.
 _lcode2=$(grep -vE '^[[:space:]]*#' "$LAUNCHER")
-_loop_nw=$(printf '%s' "$_lcode2" | grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" --no-wait' || true)
+_loop_nw=$(grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" --no-wait' < <(printf '%s' "$_lcode2") || true)
 # Re-pointed by job 256: the fallback is no longer `if bash ...; then` — it is a bare call followed by
 # `case "$?" in 0|2)`, because accepting only exit 0 discarded the RUNNING verdict this fallback exists to
 # receive. Matching the OLD shape made this assertion report fallback-blocking=0 against a correct fix.
-_fallback=$(printf '%s' "$_lcode2" | grep -c 'gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" >/dev/null 2>&1$' || true)
+_fallback=$(grep -c 'gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" >/dev/null 2>&1$' < <(printf '%s' "$_lcode2") || true)
 if [ "$_loop_nw" -ge 1 ] && [ "$_fallback" = 1 ]; then
   ok "4b.141 the loop call is non-blocking and exactly ONE fallback may block"
 else
@@ -1533,7 +1533,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # which exits 2).
   _uhost=$(grep -c '^host:' "$TMP/unproven.txt.heartbeat" 2>/dev/null)
   _uhost=${_uhost:-0}
-  _uu=$(printf '%s' "$_uo" | sed -n 's/^unit:  *//p'); [ -n "$_uu" ] && echo "$_uu" >> "$UNITS_FILE"
+  _uu=$(sed -n 's/^unit:  *//p' <<<"$_uo"); [ -n "$_uu" ] && echo "$_uu" >> "$UNITS_FILE"
   if [ "$_uhost" != 0 ]; then
     bad "4b.142 a healthy gate launches with an UNPROVEN clock domain" \
         "the beat carries host, so the clock domain was PROVEN — the premise failed and this proves nothing"
@@ -1563,15 +1563,15 @@ fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   _ax="$TMP/alias-x"
   _ao=$(bash "$LAUNCHER" --summary "$_ax" --log "$TMP/alias-a.log" -- --only roborev-lints 2>&1); _ar=$?
-  _au=$(printf '%s' "$_ao" | sed -n 's/^unit:  *//p'); [ -n "$_au" ] && echo "$_au" >> "$UNITS_FILE"
+  _au=$(sed -n 's/^unit:  *//p' <<<"$_ao"); [ -n "$_au" ] && echo "$_au" >> "$UNITS_FILE"
   _bo=$(bash "$LAUNCHER" --summary "$_ax.heartbeat" --log "$TMP/alias-b.log" -- --only fmt 2>&1); _br=$?
-  _bu=$(printf '%s' "$_bo" | sed -n 's/^unit:  *//p'); [ -n "$_bu" ] && echo "$_bu" >> "$UNITS_FILE"
+  _bu=$(sed -n 's/^unit:  *//p' <<<"$_bo"); [ -n "$_bu" ] && echo "$_bu" >> "$UNITS_FILE"
   # Once every write destination is reserved (job 261), this case trips the SUMMARY-first check: B's
   # summary path IS reserved — by A, as A's heartbeat. The accurate statement is "already owned by a LIVE
   # run", and the reservation target records the owner rather than the role, so the launcher cannot
   # honestly say which. The generic "artifact-set collision" wording remains reachable for the LOG
   # collision, covered by 4b.144b.
-  if [ "$_ar" = 0 ] && [ "$_br" != 0 ] && printf '%s' "$_bo" | grep -q 'already owned by a LIVE run'; then
+  if [ "$_ar" = 0 ] && [ "$_br" != 0 ] && grep -q 'already owned by a LIVE run' <<<"$_bo"; then
     ok "4b.144 a launch whose SUMMARY is a live run's beat destination is refused (A=$_ar B=$_br)"
   else
     bad "4b.144 an aliasing launch is refused" "A=$_ar B=$_br: $_bo"
@@ -1581,9 +1581,9 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # its log at all and B was accepted while A wrote into B's summary.
   _lg="$TMP/logcoll"
   _la=$(bash "$LAUNCHER" --summary "$_lg-a" --log "$_lg-shared" -- --only roborev-lints 2>&1); _lar=$?
-  _lau=$(printf '%s' "$_la" | sed -n 's/^unit:  *//p'); [ -n "$_lau" ] && echo "$_lau" >> "$UNITS_FILE"
+  _lau=$(sed -n 's/^unit:  *//p' <<<"$_la"); [ -n "$_lau" ] && echo "$_lau" >> "$UNITS_FILE"
   _lb=$(bash "$LAUNCHER" --summary "$_lg-shared" --log "$_lg-c" -- --only fmt 2>&1); _lbr=$?
-  _lbu=$(printf '%s' "$_lb" | sed -n 's/^unit:  *//p'); [ -n "$_lbu" ] && echo "$_lbu" >> "$UNITS_FILE"
+  _lbu=$(sed -n 's/^unit:  *//p' <<<"$_lb"); [ -n "$_lbu" ] && echo "$_lbu" >> "$UNITS_FILE"
   if [ "$_lar" = 0 ] && [ "$_lbr" != 0 ]; then
     ok "4b.144b a launch whose SUMMARY is a live run's LOG is refused (A=$_lar B=$_lbr)"
   else
@@ -1592,7 +1592,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   for _u in $_lau $_lbu; do systemctl --user stop "$_u" >/dev/null 2>&1; done
   # CONTROL: disjoint launches must still both work, or "refuse everything" would pass 4b.144.
   _co=$(bash "$LAUNCHER" --summary "$TMP/alias-disjoint" --log "$TMP/alias-c.log" -- --only fmt 2>&1); _cr=$?
-  _cu=$(printf '%s' "$_co" | sed -n 's/^unit:  *//p'); [ -n "$_cu" ] && echo "$_cu" >> "$UNITS_FILE"
+  _cu=$(sed -n 's/^unit:  *//p' <<<"$_co"); [ -n "$_cu" ] && echo "$_cu" >> "$UNITS_FILE"
   [ "$_cr" = 0 ] && ok "4b.145 control: a DISJOINT launch still succeeds" \
                  || bad "4b.145 control: a disjoint launch still succeeds" "exit $_cr: $_co"
   for _u in $_au $_bu $_cu; do systemctl --user stop "$_u" >/dev/null 2>&1; done
@@ -1614,8 +1614,8 @@ fi
 _uil=$(sed -n '/^_unit_state()/,/^}/p' "$LAUNCHER"
        sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
 _us_only=$(sed -n '/^_unit_state()/,/^}/p' "$LAUNCHER")
-if printf '%s' "$_us_only" | grep -qE "inactive\|failed\) +printf 'terminal'" \
-   && printf '%s' "$_us_only" | grep -qE "\*\) +printf 'unknown'"; then
+if grep -qE "inactive\|failed\) +printf 'terminal'" <<<"$_us_only" \
+   && grep -qE "\*\) +printf 'unknown'" <<<"$_us_only"; then
   ok "4b.139 only inactive|failed are terminal; every other state reads LIVE"
 else
   bad "4b.139 only inactive|failed are terminal" "the grammar is closed on the wrong side"
@@ -1706,7 +1706,7 @@ fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   _dt="$TMP/deadline.txt"; _ds=$(date +%s)
   _do=$(bash "$LAUNCHER" --summary "$_dt" --log "$TMP/deadline.log" -- --only fmt 2>&1); _dr=$?
-  _du=$(printf '%s' "$_do" | sed -n 's/^unit:  *//p'); [ -n "$_du" ] && echo "$_du" >> "$UNITS_FILE"
+  _du=$(sed -n 's/^unit:  *//p' <<<"$_do"); [ -n "$_du" ] && echo "$_du" >> "$UNITS_FILE"
   _del=$(( $(date +%s) - _ds ))
   if [ "$_dr" = 0 ] && [ "$_del" -le 25 ]; then
     ok "4b.136 a healthy launch still verifies well inside the deadline (${_del}s)"
@@ -1762,13 +1762,13 @@ else
 fi
 # The defect SHAPE must be gone: no run-id read straight from the live artifacts.
 _lcode=$(grep -vE '^[[:space:]]*#' "$LAUNCHER")
-if printf '%s' "$_lcode" | grep -qE 'grep -m1 .\^run-id: . "\$(_hbdest|SUMMARY)"'; then
+if grep -qE 'grep -m1 .\^run-id: . "\$(_hbdest|SUMMARY)"' <<<"$_lcode"; then
   bad "4b.128 no run-id is read from a live artifact" "a direct read remains"
 else
   ok "4b.128 no run-id is read from a live artifact"
 fi
 # Both facts must be checked against the SAME copy, so the nonce grep targets the snapshot too.
-if printf '%s' "$_lcode" | grep -qF 'grep -qxF "launch-nonce: $LAUNCH_NONCE" "$snap"'; then
+if grep -qF 'grep -qxF "launch-nonce: $LAUNCH_NONCE" "$snap"' <<<"$_lcode"; then
   ok "4b.129 the nonce is verified against that same snapshot"
 else
   bad "4b.129 the nonce is verified against the same snapshot" "nonce and run-id may come from different reads"
@@ -1778,12 +1778,12 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # by one of two different blocks depending on whether the caller supplied paths.
   _sp1="$TMP/snap1.txt"
   _o1=$(bash "$LAUNCHER" --summary "$_sp1" --log "$TMP/snap1.log" -- --only fmt 2>&1); _r1=$?
-  _u1=$(printf '%s' "$_o1" | sed -n 's/^unit:  *//p'); [ -n "$_u1" ] && echo "$_u1" >> "$UNITS_FILE"
+  _u1=$(sed -n 's/^unit:  *//p' <<<"$_o1"); [ -n "$_u1" ] && echo "$_u1" >> "$UNITS_FILE"
   [ "$_r1" = 0 ] && ok "4b.130 explicit --summary AND --log still launch (snapshot path reachable)" \
                  || bad "4b.130 explicit --summary and --log still launch" "exit $_r1: $_o1"
   [ -n "$_u1" ] && systemctl --user stop "$_u1" >/dev/null 2>&1
   _o2=$(bash "$LAUNCHER" -- --only fmt 2>&1); _r2=$?
-  _u2=$(printf '%s' "$_o2" | sed -n 's/^unit:  *//p'); [ -n "$_u2" ] && echo "$_u2" >> "$UNITS_FILE"
+  _u2=$(sed -n 's/^unit:  *//p' <<<"$_o2"); [ -n "$_u2" ] && echo "$_u2" >> "$UNITS_FILE"
   [ "$_r2" = 0 ] && ok "4b.131 DEFAULT paths still launch (the other PRIVDIR block)" \
                  || bad "4b.131 default paths still launch" "exit $_r2: $_o2"
   [ -n "$_u2" ] && systemctl --user stop "$_u2" >/dev/null 2>&1
@@ -1822,7 +1822,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # beat is published. It must be ACCEPTED, and must reach a terminal verdict.
   _ft="$TMP/fast.txt"
   _fo=$(bash "$LAUNCHER" --summary "$_ft" --log "$TMP/fast.log" -- --only fmt 2>&1); _fr=$?
-  _fu=$(printf '%s' "$_fo" | sed -n 's/^unit:  *//p'); [ -n "$_fu" ] && echo "$_fu" >> "$UNITS_FILE"
+  _fu=$(sed -n 's/^unit:  *//p' <<<"$_fo"); [ -n "$_fu" ] && echo "$_fu" >> "$UNITS_FILE"
   if [ "$_fr" = 0 ]; then
     ok "4b.125 a very fast gate is ACCEPTED, not refused as unmonitorable"
   else
@@ -1887,7 +1887,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   systemctl --user set-environment GATE_ENV_LEAK_PROBE=iamhere >/dev/null 2>&1
   _lt="$TMP/envleak.txt"
   _lo=$(bash "$LAUNCHER" --summary "$_lt" --log "$TMP/envleak.log" -- --only roborev-lints 2>&1)
-  _lu=$(printf '%s' "$_lo" | sed -n 's/^unit:  *//p'); [ -n "$_lu" ] && echo "$_lu" >> "$UNITS_FILE"
+  _lu=$(sed -n 's/^unit:  *//p' <<<"$_lo"); [ -n "$_lu" ] && echo "$_lu" >> "$UNITS_FILE"
   _cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice/$_lu.service/cgroup.procs"
   _gp=""
   for _i in {1..60}; do
@@ -1990,7 +1990,7 @@ else
   bad "4b.109 owner liveness is three-valued and unknown refuses" "unknown may still reclaim"
 fi
 _pscode=$(sed -n '/^_pid_state()/,/^}/p' "$LAUNCHER")
-if printf '%s' "$_pscode" | grep -q 'EPERM, not ESRCH'; then
+if grep -q 'EPERM, not ESRCH' <<<"$_pscode"; then
   ok "4b.110 an existing-but-unsignallable pid is EXISTS, not gone (kill -0 cannot tell them apart)"
 else
   bad "4b.110 an existing-but-unsignallable pid is exists" "kill -0 alone still decides"
@@ -2013,7 +2013,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # A reservation owned by a pid that cannot exist, and a unit that does not exist.
   ln -s "unit=cqlite-gate-nonexistent-$.service|pid=999999999|start=proc:1" "$_dl.launch-lock"
   _o=$(bash "$LAUNCHER" --summary "$_dl" --log "$TMP/inv.log" -- --only file-size 2>&1); _r=$?
-  _u=$(printf '%s' "$_o" | sed -n 's/^unit:  *//p'); [ -n "$_u" ] && echo "$_u" >> "$UNITS_FILE"
+  _u=$(sed -n 's/^unit:  *//p' <<<"$_o"); [ -n "$_u" ] && echo "$_u" >> "$UNITS_FILE"
   if [ "$_r" = 0 ]; then
     ok "4b.112 NO DEADLOCK: a provably-dead owner is still reclaimed after the inversion"
   else
@@ -2024,14 +2024,14 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   _dl2="$TMP/inv2.txt"
   ln -s "unit=|pid=abc|start=" "$_dl2.launch-lock"
   _o2=$(bash "$LAUNCHER" --summary "$_dl2" --log "$TMP/inv2.log" -- --only file-size 2>&1); _r2=$?
-  _u2=$(printf '%s' "$_o2" | sed -n 's/^unit:  *//p'); [ -n "$_u2" ] && echo "$_u2" >> "$UNITS_FILE"
-  if [ "$_r2" != 0 ] && printf '%s' "$_o2" | grep -q 'could NOT be'; then
+  _u2=$(sed -n 's/^unit:  *//p' <<<"$_o2"); [ -n "$_u2" ] && echo "$_u2" >> "$UNITS_FILE"
+  if [ "$_r2" != 0 ] && grep -q 'could NOT be' <<<"$_o2"; then
     ok "4b.113 an unparseable owner REFUSES instead of being reclaimed (exit $_r2)"
   else
     bad "4b.113 an unparseable owner refuses instead of being reclaimed" "exit $_r2: $_o2"
   fi
   # A refusal with no way out IS a permanent block, so the message must name the remedy.
-  if printf '%s' "$_o2" | grep -q 'remove that one file and retry'; then
+  if grep -q 'remove that one file and retry' <<<"$_o2"; then
     ok "4b.114 the unknown-owner refusal names its manual remedy (not a silent dead end)"
   else
     bad "4b.114 the unknown-owner refusal names its manual remedy" "no remedy in the message"
@@ -2077,7 +2077,7 @@ done
 if [ "$HAVE_SYSTEMD" = yes ]; then
   _obsdir=$(mktemp -d "$TMP/observed.XXXXXX")
   _oo=$(bash "$LAUNCHER" --summary "$_obsdir/s.txt" --log "$_obsdir/s.log" -- --only fmt 2>&1)
-  _ou=$(printf '%s' "$_oo" | sed -n 's/^unit:  *//p'); [ -n "$_ou" ] && echo "$_ou" >> "$UNITS_FILE"
+  _ou=$(sed -n 's/^unit:  *//p' <<<"$_oo"); [ -n "$_ou" ] && echo "$_ou" >> "$UNITS_FILE"
   _obs_n=0; _obs_bad=0
   for _f in "$_obsdir"/*; do
     [ -e "$_f" ] || [ -L "$_f" ] || continue
@@ -2242,11 +2242,11 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   _sp="$TMP/has space"
   mkdir -p "$_sp"
   _spa=$(bash "$LAUNCHER" --summary "$_sp/a.txt" --log "$_sp/shared.log" -- --only roborev-lints 2>&1)
-  _spau=$(printf '%s' "$_spa" | sed -n 's/^unit:  *//p'); [ -n "$_spau" ] && echo "$_spau" >> "$UNITS_FILE"
+  _spau=$(sed -n 's/^unit:  *//p' <<<"$_spa"); [ -n "$_spau" ] && echo "$_spau" >> "$UNITS_FILE"
   _spb=$(bash "$LAUNCHER" --summary "$_sp/b.txt" --log "$_sp/shared.log" -- --only fmt 2>&1); _spbr=$?
-  _spbu=$(printf '%s' "$_spb" | sed -n 's/^unit:  *//p'); [ -n "$_spbu" ] && echo "$_spbu" >> "$UNITS_FILE"
+  _spbu=$(sed -n 's/^unit:  *//p' <<<"$_spb"); [ -n "$_spbu" ] && echo "$_spbu" >> "$UNITS_FILE"
   if [ -n "$_spau" ] && [ "$_spbr" != 0 ] && [ ! -e "$_sp/b.txt.heartbeat.launch-lock" ] \
-     && printf '%s' "$_spb" | grep -q 'artifact-set collision'; then
+     && grep -q 'artifact-set collision' <<<"$_spb"; then
     ok "4b.155 a conflicting artifact set is refused by the PRE-CHECK, leaving no lock behind"
   else
     bad "4b.155 a conflicting artifact set is refused before any lock is created" \
@@ -2279,28 +2279,28 @@ _rt_src=$(awk '
   inb && /exit 69/ {seen=1; next}
   inb && seen && /^fi$/ {exit}
 ' "$LAUNCHER")
-if [ -z "$_rt_src" ] || ! printf '%s' "$_rt_src" | grep -q 'exit 69'; then
+if [ -z "$_rt_src" ] || ! grep -q 'exit 69' <<<"$_rt_src"; then
   bad "4b.156 the runtime-dir validation block could be extracted" \
       "extraction produced nothing usable — this case proves nothing"
 else
   # Substitute the canonical literal in the EXTRACTED copy, and verify the substitution took: a
   # rewrite that silently missed would leave the case testing the real directory and passing.
-  _rt_fake=$(printf '%s' "$_rt_src" | sed "s#^_rundir=\"/run/user/\$(id -u)\"#_rundir=\"$_badrt\"#")
-  if ! printf '%s' "$_rt_fake" | grep -qF "_rundir=\"$_badrt\""; then
+  _rt_fake=$(sed "s#^_rundir=\"/run/user/\$(id -u)\"#_rundir=\"$_badrt\"#" <<<"$_rt_src")
+  if ! grep -qF "_rundir=\"$_badrt\"" <<<"$_rt_fake"; then
     bad "4b.156 the canonical literal could be pinned to a fake dir" "substitution did not take"
   else
     _f2o=$( TMPDIR="$_goodtmp" bash -c "set -uo pipefail; $_rt_fake" 2>&1 ); _f2r=$?
     if [ "$_f2r" = 69 ] && ! [ -e "$_goodtmp/cqlite-gate-launch.lock" ] \
-       && printf '%s' "$_f2o" | grep -q 'per-user runtime directory'; then
+       && grep -q 'per-user runtime directory' <<<"$_f2o"; then
       ok "4b.156 a mode-0777 runtime dir refuses (69) and does NOT fall back to TMPDIR"
     else
       bad "4b.156 an unverifiable runtime dir refuses without falling back to TMPDIR" \
-          "exit=$_f2r tmpdir-lock=$([ -e "$_goodtmp/cqlite-gate-launch.lock" ] && echo created || echo absent) out=$(printf '%s' "$_f2o" | head -2 | tr '\n' ' ')"
+          "exit=$_f2r tmpdir-lock=$([ -e "$_goodtmp/cqlite-gate-launch.lock" ] && echo created || echo absent) out=$(head -2 <<<"$_f2o" | tr '\n' ' ')"
     fi
     # CONTROL: the same extracted block must ACCEPT a 0700 dir we own, or the case above passes by
     # refusing everything and says nothing about the check.
     _okrt="$TMP/okrt"; mkdir -p "$_okrt"; chmod 700 "$_okrt"
-    _rt_ok=$(printf '%s' "$_rt_src" | sed "s#^_rundir=\"/run/user/\$(id -u)\"#_rundir=\"$_okrt\"#")
+    _rt_ok=$(sed "s#^_rundir=\"/run/user/\$(id -u)\"#_rundir=\"$_okrt\"#" <<<"$_rt_src")
     ( bash -c "set -uo pipefail; $_rt_ok" ) >/dev/null 2>&1
     [ "$?" = 0 ] \
       && ok "4b.156b control: a 0700 dir we own is ACCEPTED by the same extracted block" \
@@ -2321,8 +2321,8 @@ _goodrt="$TMP/goodrt"; mkdir -p "$_goodrt"; chmod 700 "$_goodrt"
 rm -f "$_goodrt/cqlite-gate-launch.lock"
 _f2c=$(XDG_RUNTIME_DIR="$_goodrt" bash "$LAUNCHER" \
          --summary "$TMP/f2c.txt" --log "$TMP/f2c.log" -- --only fmt 2>&1)
-_f2cu=$(printf '%s' "$_f2c" | sed -n 's/^unit:  *//p'); [ -n "$_f2cu" ] && echo "$_f2cu" >> "$UNITS_FILE"
-if printf '%s' "$_f2c" | grep -q 'per-user runtime directory'; then
+_f2cu=$(sed -n 's/^unit:  *//p' <<<"$_f2c"); [ -n "$_f2cu" ] && echo "$_f2cu" >> "$UNITS_FILE"
+if grep -q 'per-user runtime directory' <<<"$_f2c"; then
   bad "4b.157 a caller-set XDG_RUNTIME_DIR neither refuses nor moves the lock" \
       "refused on a canonical dir that is fine"
 elif [ -e "$_goodrt/cqlite-gate-launch.lock" ]; then
@@ -2384,7 +2384,7 @@ fi
 # reaches the pre-check, so the blind case is not reachable from the CLI -- the same reason the
 # rollback is not. A unit test reaches it; a launcher-level test would pass vacuously.
 _fr_src=$(sed -n '/^_foreign_reservation() {/,/^}$/p' "$LAUNCHER")
-if [ -z "$_fr_src" ] || ! printf '%s' "$_fr_src" | grep -q 'launch-lock'; then
+if [ -z "$_fr_src" ] || ! grep -q 'launch-lock' <<<"$_fr_src"; then
   bad "4b.160 _foreign_reservation could be extracted for unit test" "extraction produced nothing usable"
 else
   # POSITIVE CONTROL FIRST: a searchable directory with no lock must still answer `free`, or the case
@@ -2561,7 +2561,7 @@ else
 fi
 
 # And scope state must no longer be consulted where the owner is affirmatively dead.
-if sed -n '/gone) : ;;/,/printf .free./p' "$LAUNCHER" | grep -q '_unit_is_live'; then
+if sed -n '/gone) : ;;/,/printf .free./p' "$LAUNCHER" | grep -q '_unit_is_live'; then  # sigpipe-fixture: printf is inside a sed range pattern, not a printf pipe
   bad "4b.169 the dead-owner fall-through no longer consults ActiveState" "_unit_is_live still reachable there"
 else
   ok "4b.169 the dead-owner fall-through no longer consults ActiveState"
@@ -2580,8 +2580,8 @@ _j319f1_src=$( sed -n '/^_pid_state() {/,/^}$/p'        "$LAUNCHER"
            sed -n '/^_proc_is_zombie() {/,/^}$/p'   "$LAUNCHER"
            sed -n '/^_pid_ruled_out() {/,/^}$/p'    "$LAUNCHER"
            sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER" )
-if ! printf '%s' "$_j319f1_src" | grep -q '_pid_ruled_out()' \
-   || ! printf '%s' "$_j319f1_src" | grep -q '^_unit_runs_a_gate()'; then
+if ! grep -q '_pid_ruled_out()' <<<"$_j319f1_src" \
+   || ! grep -q '^_unit_runs_a_gate()' <<<"$_j319f1_src"; then
   bad "4b.177 job-319 F1 helpers could be extracted" "extraction produced nothing usable"
 else
   _f1d="$TMP/f1"; mkdir -p "$_f1d/fs/unit" "$_f1d/proc"
@@ -2645,8 +2645,8 @@ fi
 _f2_src=$( sed -n '/^_unit_state() {/,/^}$/p'                  "$LAUNCHER"
            sed -n '/^_unit_is_affirmatively_live() {/,/^}$/p'  "$LAUNCHER"
            sed -n '/^_unit_is_live() {/,/^}$/p'                "$LAUNCHER" )
-if ! printf '%s' "$_f2_src" | grep -q '^_unit_state()' \
-   || ! printf '%s' "$_f2_src" | grep -q '^_unit_is_affirmatively_live()'; then
+if ! grep -q '^_unit_state()' <<<"$_f2_src" \
+   || ! grep -q '^_unit_is_affirmatively_live()' <<<"$_f2_src"; then
   bad "4b.182 job-319 F2 helpers could be extracted" "extraction produced nothing usable"
 else
   # `_f2_st`, NOT `st`: bash locals are DYNAMICALLY scoped, and `_unit_state` declares its own
@@ -2808,9 +2808,9 @@ fi
 # NAMES the collision. Both are required: a bare non-zero exit is produced by the defect too.
 rp_t=$(mktemp -d)
 rp_out=$(bash "$LAUNCHER" --summary "$rp_t/g.log.launch-lock" --log "$rp_t/g.log" 2>&1 </dev/null)
-rp_u=$(printf '%s' "$rp_out" | sed -n 's/^unit:  *//p'); [ -n "$rp_u" ] && echo "$rp_u" >> "$UNITS_FILE"
-if printf '%s' "$rp_out" | grep -q 'is also a reservation path this launcher creates'; then
-  if [ -z "$rp_u" ] && ! printf '%s' "$rp_out" | grep -q 'gate started but published no'; then
+rp_u=$(sed -n 's/^unit:  *//p' <<<"$rp_out"); [ -n "$rp_u" ] && echo "$rp_u" >> "$UNITS_FILE"
+if grep -q 'is also a reservation path this launcher creates' <<<"$rp_out"; then
+  if [ -z "$rp_u" ] && ! grep -q 'gate started but published no' <<<"$rp_out"; then
     ok "4b.172 an output path that doubles as a reservation path is refused BEFORE any launch"
   else
     bad "4b.172 an output path that doubles as a reservation path is refused before any launch" \
@@ -2818,14 +2818,14 @@ if printf '%s' "$rp_out" | grep -q 'is also a reservation path this launcher cre
   fi
 else
   bad "4b.172 an output path that doubles as a reservation path is refused" \
-      "did not name the collision: $(printf '%s' "$rp_out" | head -3)"
+      "did not name the collision: $(head -3 < <(printf '%s' "$rp_out"))"
 fi
 # 4b.173: the tailored diagnoses must WIN over that backstop, or a reader is sent to the wrong
 # mechanism (4b.93 caught exactly this when the backstop was placed first).
-if printf '%s' "$rp_out" | grep -q 'SYMLINK at every reservation path'; then
+if grep -q 'SYMLINK at every reservation path' <<<"$rp_out"; then
   ok "4b.173 the backstop refusal explains the symlink-then-remove mechanism"
 else
-  bad "4b.173 the backstop refusal explains the mechanism" "$(printf '%s' "$rp_out" | head -3)"
+  bad "4b.173 the backstop refusal explains the mechanism" "$(head -3 < <(printf '%s' "$rp_out"))"
 fi
 rm -rf "$rp_t"
 # 4b.174/4b.175 (roborev job 318, Medium): the launcher must not accept the reader's RUNNING (exit 2)
@@ -2912,13 +2912,13 @@ else
   # `find`, never `stat`: stat's format flags are GNU-vs-BSD incompatible and this script refuses to
   # depend on them elsewhere. And the scan must be THREE-valued — `[ -z "$(find …)" ]` collapses "the
   # scan FAILED" onto "no match", the shape this repo lints for (1699-find-tristate).
-  if printf '%s' "$_lc_src" | grep -q 'find ' \
-     && ! printf '%s' "$_lc_src" | grep -qE '\bstat ' \
-     && printf '%s' "$_lc_src" | grep -q "printf 'unknown'"; then
+  if grep -q 'find ' <<<"$_lc_src" \
+     && ! grep -qE '\bstat ' <<<"$_lc_src" \
+     && grep -q "printf 'unknown'" <<<"$_lc_src"; then
     ok "4b.196 the link scan uses find (not stat) and has a third UNKNOWN answer"
   else
     bad "4b.196 the link scan uses find and is three-valued" \
-        "$(printf '%s' "$_lc_src" | grep -nE 'stat |find |unknown' | head -3)"
+        "$(grep -m3 -nE 'stat |find |unknown' <<<"$_lc_src")"
   fi
   _al_missing=""
   for _dest in '"$LOGFILE" log' '"$SUMMARY" summary' '"$_hbdest" heartbeat'; do
@@ -2940,7 +2940,7 @@ fi
 _acc_src=$( sed -n '/^_unit_state() {/,/^}$/p'                    "$LAUNCHER"
             sed -n '/^_unit_is_affirmatively_live() {/,/^}$/p'    "$LAUNCHER"
             sed -n '/^_unit_accepts_as_monitorable() {/,/^}$/p'   "$LAUNCHER" )
-if ! printf '%s' "$_acc_src" | grep -q '^_unit_accepts_as_monitorable()'; then
+if ! grep -q '^_unit_accepts_as_monitorable()' <<<"$_acc_src"; then
   bad "4b.198 _unit_accepts_as_monitorable could be extracted" "extraction produced nothing usable"
 else
   _acc() {  # <ActiveState> <_unit_runs_a_gate rc> -> rc
@@ -3081,7 +3081,7 @@ _neuter_release() {  # <copy-path>
 # three-line result carries two newlines and `wc -l` answers 2 — which is how the first version of
 # 4b.212 FAILED while holding exactly the three markers it demanded. An off-by-one in a test's own
 # arithmetic is indistinguishable, in the log, from the defect it pins.
-_locks_count() { printf '%s\n' "$1" | grep -c . ; }
+_locks_count() { grep -c . <<<"$1" ; }
 _locks_left() {  # <summary> <log> -> prints the surviving reservation paths, one per line
   local l
   for l in "$1.launch-lock" "$1.heartbeat.launch-lock" "$2.launch-lock"; do
@@ -3117,7 +3117,7 @@ else
     ok "4b.204 _release_reservations removes the WHOLE set, twice, through a space-bearing path"
   else
     bad "4b.204 _release_reservations removes the whole set through a space-bearing path" \
-        "out=[$_rr_out] survived: $(printf '%s' "$_rr_left" | tr '\n' ' ')"
+        "out=[$_rr_out] survived: $(tr '\n' ' ' < <(printf '%s' "$_rr_left"))"
   fi
   # An EMPTY array expanded as "${a[@]}" is UNBOUND under `set -u` on bash 3.2 (job 319 F3), and the
   # acquisition-failure site can call this with nothing acquired yet.
@@ -3163,12 +3163,12 @@ else
     _f3s="$TMP/f3a-sum"; _f3l="$TMP/f3a.log"
     _f3o=$(bash "$_f3a" --summary "$_f3s" --log "$_f3l" -- --only fmt 2>&1); _f3r=$?
     _f3left=$(_locks_left "$_f3s" "$_f3l")
-    if [ "$_f3r" != 0 ] && printf '%s' "$_f3o" | grep -q 'became a symlink after it was checked' \
+    if [ "$_f3r" != 0 ] && grep -q 'became a symlink after it was checked' <<<"$_f3o" \
        && [ -z "$_f3left" ]; then
       ok "4b.207 the late symlink refusal leaves NO reservation behind (exit $_f3r)"
     else
       bad "4b.207 the late symlink refusal leaves no reservation behind" \
-          "exit $_f3r survived: $(printf '%s' "$_f3left" | tr '\n' ' ') out=$_f3o"
+          "exit $_f3r survived: $(tr '\n' ' ' < <(printf '%s' "$_f3left")) out=$_f3o"
     fi
     # NEGATIVE CONTROL on the same injected copy: with the release calls neutered the markers MUST
     # survive, or 4b.207 is passing on an observable it cannot actually move.
@@ -3207,12 +3207,12 @@ else
     _f3bs="$TMP/f3b-sum"; _f3bl="$TMP/f3b.log"
     _f3bo=$(bash "$_f3b" --summary "$_f3bs" --log "$_f3bl" -- --only fmt 2>&1); _f3br=$?
     _f3bleft=$(_locks_left "$_f3bs" "$_f3bl")
-    if [ "$_f3br" != 0 ] && printf '%s' "$_f3bo" | grep -q 'cannot truncate the log' \
+    if [ "$_f3br" != 0 ] && grep -q 'cannot truncate the log' <<<"$_f3bo" \
        && [ -z "$_f3bleft" ]; then
       ok "4b.209 the truncation refusal leaves NO reservation behind (exit $_f3br)"
     else
       bad "4b.209 the truncation refusal leaves no reservation behind" \
-          "exit $_f3br survived: $(printf '%s' "$_f3bleft" | tr '\n' ' ') out=$_f3bo"
+          "exit $_f3br survived: $(tr '\n' ' ' < <(printf '%s' "$_f3bleft")) out=$_f3bo"
     fi
   fi
   # (c) THE FAILED LAUNCH. Guarded differently ON PURPOSE: `systemd-run` has already spoken to the
@@ -3229,12 +3229,12 @@ else
     _f3ds="$TMP/f3d-sum"; _f3dl="$TMP/f3d.log"
     _f3do=$(bash "$_f3d" --summary "$_f3ds" --log "$_f3dl" -- --only fmt 2>&1); _f3dr=$?
     _f3dleft=$(_locks_left "$_f3ds" "$_f3dl")
-    if [ "$_f3dr" != 0 ] && printf '%s' "$_f3do" | grep -q 'systemd-run failed to start unit' \
+    if [ "$_f3dr" != 0 ] && grep -q 'systemd-run failed to start unit' <<<"$_f3do" \
        && [ -z "$_f3dleft" ]; then
       ok "4b.210 a FAILED systemd-run leaves NO reservation behind (exit $_f3dr)"
     else
       bad "4b.210 a failed systemd-run leaves no reservation behind" \
-          "exit $_f3dr survived: $(printf '%s' "$_f3dleft" | tr '\n' ' ') out=$_f3do"
+          "exit $_f3dr survived: $(tr '\n' ' ' < <(printf '%s' "$_f3dleft")) out=$_f3do"
     fi
   fi
   # (d) THE OTHER HALF OF THAT GUARD — the case an UNCONDITIONAL rollback would also pass (roborev
@@ -3277,13 +3277,13 @@ else
     _f3fo=$(bash "$_f3f" --summary "$_f3fs" --log "$_f3fl" -- --only fmt 2>&1); _f3fr=$?
     _f3fleft=$(_locks_left "$_f3fs" "$_f3fl")
     # The copy stops the unit itself; record whatever it named so cleanup can still reach it.
-    _f3fu=$(printf '%s' "$_f3fo" | sed -n 's/^unit:  *//p'); [ -n "$_f3fu" ] && echo "$_f3fu" >> "$UNITS_FILE"
-    if [ "$_f3fr" != 0 ] && printf '%s' "$_f3fo" | grep -q 'published no readable liveness' \
+    _f3fu=$(sed -n 's/^unit:  *//p' <<<"$_f3fo"); [ -n "$_f3fu" ] && echo "$_f3fu" >> "$UNITS_FILE"
+    if [ "$_f3fr" != 0 ] && grep -q 'published no readable liveness' <<<"$_f3fo" \
        && [ "$(_locks_count "$_f3fleft")" = 3 ]; then
       ok "4b.212 the post-launch heartbeat refusal KEEPS all three markers (exit $_f3fr)"
     else
       bad "4b.212 the post-launch heartbeat refusal keeps the whole reservation" \
-          "exit $_f3fr held: $(printf '%s' "$_f3fleft" | tr '\n' ' ') out=$(printf '%s' "$_f3fo" | head -2)"
+          "exit $_f3fr held: $(tr '\n' ' ' < <(printf '%s' "$_f3fleft")) out=$(head -2 < <(printf '%s' "$_f3fo"))"
     fi
   fi
   # POSITIVE CONTROL FOR THE COPIES THEMSELVES. 4b.212 only means what it says if an UNINJECTED copy
@@ -3298,12 +3298,12 @@ else
   else
     _f3gs="$TMP/f3g-sum"; _f3gl="$TMP/f3g.log"
     _f3go=$(bash "$_f3g" --summary "$_f3gs" --log "$_f3gl" -- --only fmt 2>&1); _f3gr=$?
-    _f3gu=$(printf '%s' "$_f3go" | sed -n 's/^unit:  *//p'); [ -n "$_f3gu" ] && echo "$_f3gu" >> "$UNITS_FILE"
+    _f3gu=$(sed -n 's/^unit:  *//p' <<<"$_f3go"); [ -n "$_f3gu" ] && echo "$_f3gu" >> "$UNITS_FILE"
     if [ "$_f3gr" = 0 ]; then
       ok "4b.212b control: an uninjected copy launches a MONITORABLE gate, so 4b.212's refusal is the injection's"
     else
       bad "4b.212b control: an uninjected copy launches a monitorable gate" \
-          "exit $_f3gr: 4b.212 may be reaching its refusal because a COPY cannot run a gate at all. out=$(printf '%s' "$_f3go" | head -3)"
+          "exit $_f3gr: 4b.212 may be reaching its refusal because a COPY cannot run a gate at all. out=$(head -3 < <(printf '%s' "$_f3go"))"
     fi
     [ -n "$_f3gu" ] && systemctl --user stop "$_f3gu" >/dev/null 2>&1
   fi
@@ -3336,7 +3336,7 @@ fi
 _inj_why_set "canary-must-be-overwritten"
 _dw=$(_inject_before diag-selftest 'this line does not exist in the launcher' 'irrelevant') || _dw=""
 _dwhy=$(_inj_why)
-if [ -z "$_dw" ] && printf '%s' "$_dwhy" | grep -q 'matches 0 times'; then
+if [ -z "$_dw" ] && grep -q 'matches 0 times' <<<"$_dwhy"; then
   ok "4b.215 a build refusal REACHES the case that reports it ($_dwhy)"
 else
   bad "4b.215 a build refusal reaches the case that reports it" \
