@@ -235,7 +235,8 @@ near-independent issues instead of running one to done before starting the next:
 - **(b) Arm merge-on-green per PR, then move on.** Do NOT block the queue on each PR's CI; arm merge-on-green
   and advance to the next lane. The PR lands when green (see Autonomy).
 - **(c) Full gates run serially — enforced mechanically (#2640).** Different lanes' full gates run
-  one-at-a-time: `CQLITE_GATE_MAX_CONCURRENCY=1` (pinned by `bootstrap-agent-machine.sh`) makes the
+  one-at-a-time: `CQLITE_GATE_MAX_CONCURRENCY=1` (set in the dev box's `/etc/environment`, which agent tool shells do
+  not load, so export it before `gate-detached.sh`, #4000) makes the
   #1825 cap admit one full gate and the per-gate core budget give it full cores; each gate also
   derives `CARGO_BUILD_JOBS`/`--test-threads` from its slot count and runs under `taskpolicy`/`nice`,
   so an accidental overlap no longer oversubscribes the CPU. Only the full-gate step serializes — the

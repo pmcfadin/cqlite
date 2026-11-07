@@ -5,11 +5,10 @@
 # test-mode env guard, the functional `perf stat` verdict and the privilege-drop
 # identity resolution.
 #
-# The BOOTSTRAP-side integration cases (install + apply + read-back + verdict, across
-# root/no-sudo/Darwin/missing-perf boxes) live in the sibling
-# scripts/tests/test_perf_capability_bootstrap.sh; the shared harness (identity/platform
+# The bootstrap-side integration cases lived in a sibling suite that was removed with the
+# fleet code (#4413); the shared harness (identity/platform
 # stubs, perf shims, host-safety asserts) lives in
-# scripts/tests/lib/perf-capability-test-lib.sh. Both are wired into the gate's
+# scripts/tests/lib/perf-capability-test-lib.sh. This suite is wired into the gate's
 # `tooling-tests` component.
 #
 # WHY THIS EXISTS. Agent/worker images ship kernel.perf_event_paranoid = 4 — ALL

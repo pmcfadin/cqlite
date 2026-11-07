@@ -260,8 +260,7 @@ worktree (the manager never rebases someone else's branch).
   `docs/reports/*-artifacts/` harness executables ARE reviewed code. Nothing predicts that exclusion set
   pre-enqueue (deferred, #3283), so a swallowed path FAILs AFTER the round under `prompt-content:` — if
   `prompt-content:` FAILs, suspect `.roborev.toml` first (#3229). Any non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW`
-  included, is a failed round and a blocked merge — never "roborev clean". See CLAUDE.md +
-  `docs/development/agent-machine-setup.md`.
+  included, is a failed round and a blocked merge — never "roborev clean". See CLAUDE.md.
 - **Coverage is not equivalence — a per-slice review ledger is an audit trail, never a certification**
   (owner, 2026-08-03). The only certifying review artifact is ONE genuine full-range `<base>...HEAD`
   round with `prompt-content: PASS`; never slice the base to get a green. On a non-PASS round, raise

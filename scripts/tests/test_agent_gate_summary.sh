@@ -1115,34 +1115,6 @@ if [ "$accel_link_fail" -eq 0 ]; then
     assert_accelerators "accel-sccache-cargobin" "$scc_cb_out"
   fi
 fi
-# THE DIRECTORY THE TWO SIDES MUST AGREE ON, pinned from bootstrap's own source. Each side's
-# behaviour is pinned behaviourally in its own suite (here, and 12b-f3/12b-f4 there); what no
-# single-suite case can catch is one side later moving the fallback directory. Both must name
-# ~/.cargo/bin.
-scc_boot="$(dirname "$GATE")/bootstrap-agent-machine.sh"
-if [ ! -r "$scc_boot" ]; then
-  bad "accel-sccache-agree: cannot read bootstrap-agent-machine.sh — the agreement assert would pass vacuously"
-elif grep -q 'PATH="\$HOME/.cargo/bin:\$PATH"; command -v sccache' "$scc_boot" \
-     && grep -q '\[ -x "\$HOME/.cargo/bin/sccache" \]' "$GATE"; then
-  ok "accel-sccache-agree: bootstrap's retry stage and the gate's fallback name the SAME directory (~/.cargo/bin)"
-else
-  bad "accel-sccache-agree: bootstrap and the gate no longer name the same fallback directory — one side moved, and the #3727 job-411 divergence returns"
-fi
-# THE THIRD SITE (#3727 job 413). Bootstrap answers this question in TWO contexts — a probed
-# SESSION (`scc_resolve_binary`, above) and its OWN process (`sccache_bin`, which section 2's
-# accelerator report and section 5b2's precondition both call). All three must name ~/.cargo/bin;
-# the in-process one resolves the INVOKING account's home from the passwd database rather than
-# from `$HOME`, because under `sudo bash bootstrap` that variable is root's. Its behaviour is
-# pinned in test_bootstrap_agent_machine.sh (12c); what no single-suite case can catch is one
-# side moving the directory, which is what this asserts.
-if [ ! -r "$scc_boot" ]; then
-  : # already reported above
-elif grep -q 'SCCACHE_FALLBACK_DIR="\$home/.cargo/bin"' "$scc_boot" \
-     && grep -q 'SCCACHE_FALLBACK_DIR="\$HOME/.cargo/bin"' "$scc_boot"; then
-  ok "accel-sccache-agree: bootstrap's IN-PROCESS resolver names the same ~/.cargo/bin, from the passwd home and from \$HOME"
-else
-  bad "accel-sccache-agree: bootstrap's in-process sccache_bin no longer names ~/.cargo/bin — the three sites have drifted apart"
-fi
 # AND THE GATE'S OWN CENSUS IS CLOSED: every line in agent-gate.sh that decides sccache presence
 # must be INSIDE `_gate_sccache_bin`. Counting today's sites proves nothing about tomorrow's, so
 # this is derived at run time and names any line it cannot account for. Comments are excluded

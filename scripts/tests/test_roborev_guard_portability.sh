@@ -185,8 +185,6 @@ trap 'rm -rf "$tmp"' EXIT
 # banned constructs, in two places only — its BSD-emulation fixtures and its positive controls —
 # and each such LINE carries a `portability-lint-allow` marker naming why, so the exemption is
 # visible in the diff and every other line of this file is scanned like any other target.
-BOOTSTRAP_SH="$REPO_ROOT/scripts/bootstrap-agent-machine.sh"
-BOOTSTRAP_TEST="$SCRIPT_DIR/test_bootstrap_agent_machine.sh"
 SCAN_FILES=(
   "$GUARD"
   "$SCRIPT_DIR/$(basename "$0")"
@@ -195,8 +193,6 @@ SCAN_FILES=(
   "$FLOW_DIR/lib/roborev-findings-count.sh"
   "$FLOW_DIR/roborev-review-oracles.sh"
   "$FLOW_DIR/roborev-job-facts.py"
-  "$BOOTSTRAP_SH"
-  "$BOOTSTRAP_TEST"
 )
 
 # THE SCOPE IS DECLARED AT RUN TIME, NOT ONLY IN THIS COMMENT (#3756 AC2). A reader of a green
@@ -1094,7 +1090,7 @@ assert_flagged "this file with its exemption markers NEUTRALISED (proving the ma
 # stopped at the file that used to hold the code. That is #3756's own defect: the rule was fine,
 # the subject set was the gap.
 _bs_i=0
-for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST" "$FLOW_DIR/lib/roborev-findings-count.sh"; do
+for _bs_f in "$FLOW_DIR/lib/roborev-findings-count.sh"; do
   _bs_i=$((_bs_i + 1))
   _bs_name=$(basename "$_bs_f")
   _bs_member=no

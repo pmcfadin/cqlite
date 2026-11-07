@@ -52,9 +52,7 @@
 # also reads `bindings/node/__test__/**`; `test_gate_detached.sh` derives its
 # subjects from the committed `.gitignore`; test_gate_component_verdict.sh greps
 # `CLAUDE.md`, `process_improvements.md`, `docs/**` and
-# `website/src/content/docs/**` for completion-grammar drift; and
-# test_worker_supervisor.sh reads `docs/development/fleet-runbook.md` (also
-# subsumed by `docs/*`).
+# `website/src/content/docs/**` for completion-grammar drift.
 #
 # DECLARED RESIDUAL (round-2 finding 5, left as-is rather than restructured under
 # the 2-roborev-round cap): the `cargo test -p ws0-corpus-gen` block inside

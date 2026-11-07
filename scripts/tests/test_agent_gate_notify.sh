@@ -387,61 +387,6 @@ else
   bad "unresolvable-topic case (rc=$rc publishes=$(publishes "$log"))"; cat "$log"
 fi
 
-# ---- Case 11b: the supervisor's EXIT-PATH notify budget fits under #2666 -----
-# #2666 pins a <15s supervisor exit latency; its own Test 22 stubs the notifier, so
-# it cannot see the real bound. finalize_exit fires TWO notifies, and each runs THREE
-# bounded steps SEQUENTIALLY (encoder, publish, adjunct) — so the per-notify worst
-# case is their SUM, not the two the first revision of that block counted. Read the
-# three values out of worker-supervisor.sh and measure the real thing with ALL THREE
-# helpers wedged, so the arithmetic cannot drift silently.
-SUPERVISOR="$SCRIPT_DIR/../local/worker-supervisor.sh"
-LIBFILE="$SCRIPT_DIR/../lib/gate-notify.sh"
-bound_of() { # <var-name> <file>
-  sed -n "s/^$1=\"\${$1:-\([0-9]*\)}\".*/\1/p" "$2" | head -1
-}
-ep=$(bound_of NOTIFY_EXIT_PAYLOAD_TIMEOUT "$SUPERVISOR")
-ec=$(bound_of NOTIFY_EXIT_CURL_TIMEOUT "$SUPERVISOR")
-ea=$(bound_of NOTIFY_EXIT_ADJUNCT_TIMEOUT "$SUPERVISOR")
-# The SIGKILL grace is ADDITIVE WALL-CLOCK and must be counted ONCE PER STEP.
-# Omitting a term from this sum is the exact defect this assertion exists to catch —
-# it has already happened twice (the encoder bound, then this grace).
-gr=$(bound_of GATE_NOTIFY_KILL_GRACE "$LIBFILE")
-if [ -z "$ep" ] || [ -z "$ec" ] || [ -z "$ea" ] || [ -z "$gr" ]; then
-  bad "exit-path budget: could not read the NOTIFY_EXIT_* bounds and/or GATE_NOTIFY_KILL_GRACE"
-else
-  # SIGTERM-IGNORING wedges. A `sleep`-based wedge DIES on SIGTERM, so it cannot
-  # observe an escapable bound at all — that structural blindness is why the plain
-  # `timeout` defect reached review instead of the fast loop.
-  wedged="$tmp/wedged"; mkdir -p "$wedged"
-  for helper in curl python3 agent-notify; do
-    printf '#!/usr/bin/env bash\ntrap "" TERM\nwhile :; do sleep 0.2; done\n' > "$wedged/$helper"
-    chmod +x "$wedged/$helper"
-  done
-  # 2 notifies x 3 sequential steps, each step costing (bound + grace).
-  budget=$(( 2 * ((ep + gr) + (ec + gr) + (ea + gr)) ))
-  # Independent SIGKILL cap per notify, for the same reason case 3e has one: under a
-  # regression to an escapable bound this must RED, not hang the component until the
-  # gate's own timeout. Measured: without a cap the suite ran past 200s with no verdict.
-  cap=$(( budget + 10 ))
-  t0=$(date +%s)
-  for _ in 1 2; do   # finalize_exit's two notifies
-    env CURL_LOG="$tmp/case11b.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$wedged:$PATH" \
-      GATE_NOTIFY_PAYLOAD_TIMEOUT="$ep" GATE_NOTIFY_CURL_TIMEOUT="$ec" \
-      GATE_NOTIFY_ADJUNCT_TIMEOUT="$ea" \
-      timeout -s KILL "$cap" \
-      bash -c '. "$0"; gate_push_signal FAIL advisory-branch abc1234 "fmt"' "$fnfile" \
-      >"$tmp/out.txt" 2>"$tmp/err.txt"
-  done
-  elapsed=$(( $(date +%s) - t0 ))
-  # The DECLARED budget must fit the pinned ceiling, and the MEASURED worst case must
-  # not exceed the declared budget (plus process-spawn slack).
-  if [ "$budget" -lt 15 ] && [ "$elapsed" -le $((budget + 8)) ]; then
-    ok "exit-path notify budget: 2 x [($ep+$gr)+($ec+$gr)+($ea+$gr)] = ${budget}s < 15s (#2666), measured ${elapsed}s against SIGTERM-ignoring wedges"
-  else
-    bad "exit-path notify budget: declared ${budget}s (2 x [($ep+$gr)+($ec+$gr)+($ea+$gr)]) vs #2666's 15s ceiling; measured ${elapsed}s"
-  fi
-fi
-
 # ---------------------------------------------------------------------------
 # The CALL SITE (issue #3119 spec R1 scenario 4 / R3 scenario 3). Every case above
 # drives the extracted gate_push_signal FUNCTION, so none of them observes how the

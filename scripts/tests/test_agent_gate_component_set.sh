@@ -55,7 +55,8 @@
 #                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (3a-v);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10); repo-read-blocked (3a-iv-ter/quater,
-#                  3757-head-object-fifo); read-dir-unisolated (3757-read-dir-unisolated).
+#                  3757-head-object-fifo); read-dir-unisolated (3757-read-dir-unisolated);
+#                  object-store-corrupt (3a-iv-quinquies), object-store-unverified (3a-iv-sexies).
 # THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
@@ -597,6 +598,10 @@ mkgitshim() {
     case "$mode" in
       fail-ls-tree)
         printf 'for a in "$@"; do if [ "$a" = ls-tree ]; then echo "gitshim: ls-tree refused" >&2; exit 128; fi; done\n' ;;
+      # EVERY `hash-object` FAILS (#4413 job 100): the rehash itself cannot run, which must be its own
+      # fail-closed answer (object-store-unverified) and never a silent skip of the check.
+      fail-hash-object)
+        printf 'for a in "$@"; do if [ "$a" = hash-object ]; then echo "gitshim: hash-object refused" >&2; exit 128; fi; done\n' ;;
       fail-manifest-show)
         printf 'for a in "$@"; do case "$a" in *:scripts/agent-gate.components) echo "gitshim: manifest blob read refused" >&2; exit 128 ;; esac; done\n' ;;
       lsremote-not-a-sha)
@@ -699,6 +704,158 @@ elif [ "$(field VERDICT "$probe_out")" = UNMEASURED ] \
 else
   bad "3544-manifest-probe-unmeasured: expected KIND baseline-probe-unmeasured naming the probe, with no fallback"
   printf '%s\n' "$probe_out"
+fi
+
+# 3a-iv-quinquies. EVERY OBJECT THE VERDICT CONSUMES IS REHASHED AGAINST ITS ID (#4413 roborev job 100,
+#     owner decision 2026-11-07). With the periodic `git fsck` sweep deleted (#4441), nothing else
+#     catches an object whose content does not hash to its own name, and git does not rehash on an
+#     ordinary read. THE PLANT IS A REAL LOOSE OBJECT: the baseline's manifest blob is replaced, in the
+#     lane's store, by a well-formed blob (right header, right length, valid zlib) holding a SHORTER
+#     component list. Unverified, that is a false PASS — the shortened list is a subset of the
+#     branch's set, so nothing is "missing". The POSITIVE CONTROL is the same fixture before the
+#     plant: it must PASS and its line must declare the rehash, or a refusal proves nothing.
+base_ob=$(mkbaseline objstore - )
+br_ob=$(mkbranch objstore "$base_ob" - --from-origin )
+ob_ctl=$(hook "$br_ob")
+ob_ctl_line=$(field COMPONENT_SET_LINE "$ob_ctl")
+ob_id=$( fx "$br_ob" && git rev-parse "origin/main:scripts/agent-gate.components" 2>/dev/null )
+ob_path=""
+[ -n "$ob_id" ] && ob_path="$br_ob/.git/objects/${ob_id:0:2}/${ob_id:2}"
+if ! command -v python3 >/dev/null 2>&1; then
+  ok "3544-object-rehash: SKIP (no python3 to plant a loose object)"
+elif [ "$(field VERDICT "$ob_ctl")" != PASS ] || ! grep -qF 'REHASHED against their ids' <<<"$ob_ctl_line"; then
+  bad "3544-object-rehash: the POSITIVE CONTROL (the real, unplanted store) did not PASS with the rehash declared (verdict '$(field VERDICT "$ob_ctl")', kind '$(field KIND "$ob_ctl")'): $ob_ctl_line"
+elif [ -z "$ob_id" ] || [ ! -f "$ob_path" ]; then
+  bad "3544-object-rehash: the manifest blob '$ob_id' is not a loose object at '$ob_path', so it cannot be planted (the fixture shape changed)"
+else
+  # READ THE ORIGINAL FIRST: once the loose object is replaced, git can no longer produce it.
+  ( fx "$br_ob" && git cat-file blob "$ob_id" ) >"$tmp/ob-orig" 2>/dev/null
+  rm -f "$ob_path"
+  ob_planted=$(python3 - "$ob_path" "$tmp/ob-orig" <<'PYEOF'
+import os, sys, zlib
+path, orig_file = sys.argv[1], sys.argv[2]
+with open(orig_file, "rb") as fh:
+    orig = fh.read()
+lines = orig.splitlines(True)
+data = b"".join(lines[:-1]) if len(lines) > 1 else b""
+with open(path, "wb") as fh:
+    fh.write(zlib.compress(b"blob %d\0" % len(data) + data))
+os.chmod(path, 0o444)
+print(len(lines) - 1)
+PYEOF
+  )
+  ob_out=$(hook "$br_ob")
+  ob_line=$(field COMPONENT_SET_LINE "$ob_out")
+  if [ -z "$ob_planted" ]; then
+    bad "3544-object-rehash: the plant did not run"
+  elif [ "$(field VERDICT "$ob_out")" = UNMEASURED ] \
+     && [ "$(field KIND "$ob_out")" = object-store-corrupt ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$ob_line" \
+     && grep -qF 'object-store-corrupt' <<<"$ob_line" \
+     && grep -qF "$ob_id" <<<"$ob_line" \
+     && ! grep -q 'component-set: \(ADVISORY-\)\?PASS' <<<"$ob_line"; then
+    ok "3544-object-rehash: a manifest blob whose content does not hash to its id (planted; $ob_planted component name(s) dropped) is REFUSED as object-store-corrupt, naming the id — and the unplanted store PASSes with the rehash declared"
+  else
+    bad "3544-object-rehash: expected UNMEASURED / KIND object-store-corrupt naming $ob_id, got verdict '$(field VERDICT "$ob_out")' kind '$(field KIND "$ob_out")'"
+    printf '%s\n' "$ob_out"
+  fi
+fi
+
+# 3a-iv-sexies. A REHASH THAT CANNOT RUN IS A REFUSAL, NOT A SKIP (#4413 job 100). Same positive
+#     control as above (the unshimmed real store PASSes), then the SAME fixture with `hash-object`
+#     failing: the answer is the distinct token `object-store-unverified`, never a PASS.
+ob_bin=$(mkgitshim hashfail fail-hash-object)
+ob_unv=$( fx "$br_ob" && PATH="$ob_bin:$PATH" bash "$br_ob/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+ob_unv_line=$(field COMPONENT_SET_LINE "$ob_unv")
+ob_unv_ctl=$(hook "$nofb")
+if [ "$(field KIND "$ob_unv_ctl")" != ok ]; then
+  bad "3544-object-unverified: the POSITIVE CONTROL (real store, no shim) did not reach KIND ok"
+elif [ "$(field VERDICT "$ob_unv")" = UNMEASURED ] \
+   && [ "$(field KIND "$ob_unv")" = object-store-unverified ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$ob_unv_line" \
+   && grep -qF 'object-store-unverified' <<<"$ob_unv_line"; then
+  ok "3544-object-unverified: when the rehash cannot run the baseline is NOT measured, under the distinct token object-store-unverified"
+else
+  bad "3544-object-unverified: expected UNMEASURED / KIND object-store-unverified, got '$(field VERDICT "$ob_unv")' / '$(field KIND "$ob_unv")'"
+  printf '%s\n' "$ob_unv"
+fi
+
+# 3a-iv-septies. THE TRAVERSAL READS ONLY VERIFIED BYTES (#4413 roborev job 103). Hashing a tree and
+#     then letting `git ls-tree` RE-READ it from the shared store is a time-of-check/time-of-use gap.
+#     STAGED HERMETICALLY with a git shim: right after the pre-flight hashes the `scripts/` tree, the
+#     shim swaps the shared-store copy of that tree for a TAMPERED one (same id, the manifest entry
+#     pointing at a different blob), and puts the original back at the next hash of a blob. Code that
+#     re-reads the tree in that window follows the tampered entry and refuses (object-store-corrupt);
+#     code that walks the snapshot of the verified bytes never sees it and PASSes. The marker file
+#     proves the swap really happened, and the structural assertions below prove no read in the
+#     function targets the shared store after hashing.
+base_tt=$(mkbaseline toctou - )
+br_tt=$(mkbranch toctou "$base_tt" - --from-origin )
+tt_scripts=$( fx "$br_tt" && git rev-parse "origin/main:scripts" 2>/dev/null )
+tt_path="$br_tt/.git/objects/${tt_scripts:0:2}/${tt_scripts:2}"
+if ! command -v python3 >/dev/null 2>&1; then
+  ok "3544-toctou-verified-bytes: SKIP (no python3 to build the tampered tree)"
+elif [ -z "$tt_scripts" ] || [ ! -f "$tt_path" ]; then
+  bad "3544-toctou-verified-bytes: the scripts/ tree '$tt_scripts' is not a loose object at '$tt_path' (the fixture shape changed)"
+else
+  ( fx "$br_tt" && git cat-file tree "$tt_scripts" ) >"$tmp/tt-orig-tree" 2>/dev/null
+  cp "$tt_path" "$tmp/tt-orig-loose"
+  python3 - "$tmp/tt-orig-tree" "$tmp/tt-tampered-loose" <<'PYEOF'
+import sys, zlib
+tree = open(sys.argv[1], "rb").read()
+needle = b" agent-gate.components\0"
+i = tree.index(needle) + len(needle)
+tampered = tree[:i] + bytes(20 * [0xAB]) + tree[i + 20:]
+open(sys.argv[2], "wb").write(zlib.compress(b"tree %d\0" % len(tampered) + tampered))
+PYEOF
+  tt_bin="$tmp/toctou-gitbin"; mkdir -p "$tt_bin"
+  real_git=$(command -v git)
+  {
+    printf '#!/bin/sh\nREAL=%s\n' "$real_git"
+    printf 'OBJ=%s\nORIG=%s\nTAMP=%s\nMARK=%s\nTREEF=%s\n' "$tt_path" "$tmp/tt-orig-loose" "$tmp/tt-tampered-loose" "$tmp/tt-swapped" "$tmp/tt-orig-tree"
+    cat <<'SHIM'
+case " $* " in
+  *" hash-object "*)
+    case " $* " in *" -w "*) exec "$REAL" "$@" ;; esac
+    for last in "$@"; do :; done
+    "$REAL" "$@"; rc=$?
+    if [ ! -e "$MARK" ] && cmp -s "$last" "$TREEF"; then
+      rm -f "$OBJ"; cp "$TAMP" "$OBJ"; chmod 444 "$OBJ"; : >"$MARK"
+    elif [ -e "$MARK" ] && [ ! -e "$MARK.restored" ]; then
+      case " $* " in *" -t blob "*) rm -f "$OBJ"; cp "$ORIG" "$OBJ"; chmod 444 "$OBJ"; : >"$MARK.restored" ;; esac
+    fi
+    exit $rc ;;
+esac
+exec "$REAL" "$@"
+SHIM
+  } >"$tt_bin/git"
+  chmod +x "$tt_bin/git"
+  tt_out=$( fx "$br_tt" && PATH="$tt_bin:$PATH" bash "$br_tt/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+  tt_ctl=$(hook "$nofb")
+  if [ ! -e "$tmp/tt-swapped" ]; then
+    bad "3544-toctou-verified-bytes: the shim never swapped the shared-store tree, so the case staged nothing (kind '$(field KIND "$tt_out")')"
+  elif [ "$(field KIND "$tt_ctl")" != ok ]; then
+    bad "3544-toctou-verified-bytes: the positive control did not reach KIND ok"
+  elif [ "$(field VERDICT "$tt_out")" = PASS ] && [ "$(field KIND "$tt_out")" = ok ]; then
+    ok "3544-toctou-verified-bytes: with the shared-store tree SWAPPED between its hash and the traversal, the verdict still comes from the verified bytes (PASS) — the swap is proven by the marker"
+  else
+    bad "3544-toctou-verified-bytes: ONLY PASS with KIND ok is acceptable (a refusal means the traversal re-read the swapped shared tree); got verdict '$(field VERDICT "$tt_out")' kind '$(field KIND "$tt_out")'"
+  fi
+fi
+
+# 3a-iv-septies-b. STRUCTURAL: inside `_component_set_verify_path`, nothing reads a tree through the
+#     shared store. Every `ls-tree` runs against the throwaway store (`--git-dir="$_vs"`), and the
+#     only `cat-file` in the verification code is the one helper whose output is hashed from the same
+#     file. A new read added later that targets `$_CS_READ_DIR` inside the function fails here.
+vp_body=$(awk '/^_component_set_verify_path\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$GATE" | grep -v '^ *#')
+vp_ls=$(grep -c 'ls-tree' <<<"$vp_body")
+vp_ls_iso=$(grep 'ls-tree' <<<"$vp_body" | grep -c -- '--git-dir="\$_vs"')
+vp_readdir=$(grep -c -- '-C "\$_CS_READ_DIR" \(ls-tree\|cat-file\|show\)' <<<"$vp_body" || true)
+if [ -n "$vp_body" ] && [ "$vp_ls" -ge 1 ] && [ "$vp_ls" -eq "$vp_ls_iso" ] && [ "$vp_readdir" -eq 0 ] \
+   && ! grep -q 'ls-tree.*_CS_READ_DIR' <<<"$vp_body"; then
+  ok "3544-toctou-structural: every ls-tree in _component_set_verify_path ($vp_ls) runs against the throwaway store and none targets the shared --git-dir"
+else
+  bad "3544-toctou-structural: _component_set_verify_path reads through the shared store after hashing (ls-tree $vp_ls, isolated $vp_ls_iso, shared-dir reads $vp_readdir)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2959,9 +3116,9 @@ _cs_pass_line_ok() {
   local l="$1" h="$2" tail
   case "$l" in "$h"*) tail="${l#"$h"}" ;; *) return 1 ;; esac
   case "$tail" in
-    "; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)") return 0 ;;
-    "; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3749)") return 0 ;;
-    "; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3749)") return 0 ;;
+    "; objects: baseline REUSED from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)") return 0 ;;
+    "; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)") return 0 ;;
+    "; objects: provenance NOT RECORDED — the consumed commit, tree and manifest objects were still REHASHED against their ids (object-store-corrupt on mismatch) (#3749, #4413)") return 0 ;;
   esac
   return 1
 }
@@ -4061,7 +4218,8 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=20   # 19 -> 20: +read-dir-unisolated (#3757 — `$_CS_READ_DIR` still naming
+DECLARED_KIND_COUNT=22   # 20 -> 22: +object-store-corrupt (3a-iv-quinquies) and +object-store-unverified (3a-iv-sexies), #4413 job 100.
+# 19 -> 20: +read-dir-unisolated (#3757 — `$_CS_READ_DIR` still naming
                          # the LIVE checkout, or left at the empty sentinel that `git -C ""`
                          # reads AS the live checkout, at the point an object read would be
                          # handed to git. Hardening: no reachable route today, and the refusal is
@@ -4370,7 +4528,7 @@ else
   #       from declared_externals rather than left in place when the two `--list` spawns went. The
   #       same rule now applies to both sets.
   git_ops=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | sort -u)
-  declared_git_ops="cat-file fetch init ls-remote ls-tree merge-base remote rev-list rev-parse show"
+  declared_git_ops="cat-file fetch hash-object init ls-remote ls-tree merge-base remote rev-list rev-parse show"
   undeclared_ops=""; stale_ops=""; stale_externals=""
   passthrough_n=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | grep -cx '<wrapper-passthrough>')
   for _o in $git_ops; do

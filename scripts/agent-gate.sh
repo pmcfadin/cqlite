@@ -505,11 +505,10 @@
 #                      a shape check documenting `<table>-<uuid>` while accepting
 #                      `<table>-*`). Runs both directions: the surface must pass, an
 #                      injected unenforced claim must FAIL.
-#                      Also runs (no python3/sudo/perf needed) the PAIR
+#                      Also runs (no python3/sudo/perf needed)
 #                      scripts/tests/test_perf_capability.sh (the helper's unit
-#                      contract) and scripts/tests/test_perf_capability_bootstrap.sh
-#                      (the bootstrap section end-to-end), sharing
-#                      scripts/tests/lib/perf-capability-test-lib.sh (#3249) — they pin
+#                      contract), using
+#                      scripts/tests/lib/perf-capability-test-lib.sh (#3249) — it pins
 #                      the perf profiling capability path: scripts/perf-capability.sh
 #                      (free /proc token, canonical /etc/sysctl.d/99-cqlite-perf.conf
 #                      bytes, byte-exact idempotency compare, side-effect-free
@@ -1158,8 +1157,7 @@ fi
 # server keeps its old cap until `sccache --stop-server`, and the accepted spelling
 # is `<digits>[KkMmGgTt]` (`30GiB`/`30GB` are SILENTLY DISCARDED). The cap actually
 # in force is reported on the accelerators: line as `sccache-cap=<bytes>(<source>)`
-# (issue #3727); persist it with
-# `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`.
+# (issue #3727); persist it in the sccache config (SCCACHE_CACHE_SIZE).
 # Measurement (issue #1822): 25.6% speedup on fresh worktrees with warm cache.
 #
 # Accelerator state (issue #1848): every optional accelerator the gate depends on
@@ -1180,8 +1178,8 @@ fi
 # `cargo install sccache` — the install this repo's own bootstrap documents — writes to
 # ~/.cargo/bin, and the PATH prepend above fires ONLY when `cargo` itself is absent. So a
 # box with a SYSTEM cargo and sccache only in ~/.cargo/bin resolved NOTHING here, while
-# bootstrap-agent-machine.sh's own two-stage resolution (`scc_resolve_binary`) found that
-# binary, started its server and reported VERIFIED — a false certification for a binary
+# a machine bootstrap script (since removed, #4413) once resolved that binary in two
+# stages and reported VERIFIED — a false certification for a binary
 # this gate would not run, and a false `[ok]` stops anyone looking. The fallback is
 # resolved for sccache SPECIFICALLY and touches PATH not at all: widening the prepend
 # above would change which cargo/toolchain a gate uses, a far larger blast radius than
@@ -1375,7 +1373,7 @@ _sccache_health() {
 }
 
 # ---- sccache cache-size cap + occupancy (issue #3727) -----------------------
-# WHY THIS IS ON THE LINE AT ALL. `.agent-ami/profile.yaml` declared
+# WHY THIS IS ON THE LINE AT ALL. a since-removed machine profile declared
 # SCCACHE_CACHE_SIZE and nothing ever persisted it, so the fleet's effective cap was
 # sccache's 10 GiB default for months and NO ARTIFACT SAID SO — the same shape as
 # #3414's `max-concurrency=N(pinned|default)`, and the same fix: put the number in
@@ -1705,7 +1703,7 @@ _sccache_used_token() {
 # ---- mold link-accelerator state (issue #2859) ------------------------------
 # On Linux agent workers the link step is the one build cost sccache cannot cache
 # (every --lite round and full gate re-links every test binary from scratch), so
-# bootstrap-agent-machine.sh provisions the mold linker and wires it through a
+# a (since-removed, #4413) bootstrap script provisioned the mold linker and wired it through a
 # managed block in the per-machine ~/.cargo/config.toml. The gate surfaces that
 # state on the accelerators: line so an installed-but-unwired worker (silent
 # degradation) is visible in the pasted block — exactly the contract sccache
@@ -1727,7 +1725,7 @@ _sccache_used_token() {
 # states (and the Darwin no-token case) assert deterministically without mold
 # installed or a real ~/.cargo/config.toml.
 
-# The EXACT managed-block begin marker bootstrap-agent-machine.sh writes. Match the
+# The EXACT managed-block begin marker the removed bootstrap-agent-machine.sh wrote. Match the
 # full line (grep -Fxq) — NOT a prefix — so a user's own `# BEGIN cqlite-mold-...`
 # comment can never false-positive as the managed block.
 _MOLD_BEGIN_MARKER='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
@@ -1912,7 +1910,7 @@ accelerators_line() {
 #   per-gate cores = max(1, floor(ncpu / N))
 # where N is the resolved machine-wide concurrency (CQLITE_GATE_MAX_CONCURRENCY
 # override, else the #1825 default formula). When this gate is the SOLE gate
-# (N=1 — the bootstrap default, see bootstrap-agent-machine.sh) it gets the FULL
+# (N=1 — the single-box default) it gets the FULL
 # core count, i.e. no throttling at all. The budget drives:
 #   * CARGO_BUILD_JOBS  — caps rustc codegen-unit / crate parallelism, and
 #   * GATE_TEST_THREADS — the nextest / cargo-test `--test-threads` for the
@@ -3564,7 +3562,7 @@ apply_schemas_preflight() {
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
 _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
                    # | manifest-* | head-set-unmeasured | repo-read-blocked
-                   # | read-dir-unisolated
+                   # | read-dir-unisolated | object-store-corrupt | object-store-unverified
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
@@ -4924,6 +4922,11 @@ _component_set_set_at_rev() {
       fi
       rm -rf "$tmpd"; return 1
     fi
+    # REHASH WHAT WAS CONSUMED before parsing it (#4413 job 100; see `_component_set_verify_path`).
+    if ! _component_set_verify_path "$rev" "$_CS_MANIFEST_REL" "$tmpd/manifest" "$tmpd"; then
+      _CS_REV_ERRKIND="$_CS_VERR_KIND"; _CS_REV_ERR="$_CS_VERR_DETAIL"
+      rm -rf "$tmpd"; return 1
+    fi
     _component_set_parse_manifest_file "$tmpd/manifest"; prc=$?
     rm -rf "$tmpd"
     case "$prc" in
@@ -4938,6 +4941,13 @@ _component_set_set_at_rev() {
   fi
 
   # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
+  # THE "ABSENT" ANSWER IS READ FROM A TREE, SO THAT TREE IS REHASHED TOO (#4413 job 100): a damaged
+  # `scripts/` tree that merely omitted the manifest would otherwise route a baseline that HAS one
+  # into the brittle TEXT fallback.
+  if ! _component_set_verify_path "$rev" "$_CS_MANIFEST_REL" - "$tmpd"; then
+    _CS_REV_ERRKIND="$_CS_VERR_KIND"; _CS_REV_ERR="$_CS_VERR_DETAIL"
+    rm -rf "$tmpd"; return 1
+  fi
   _component_set_declaration_at_rev "$rev" "$tmpd" "$gate_rel" fallback
   return $?
 }
@@ -4972,6 +4982,10 @@ _component_set_declaration_at_rev() {
     fi
     rm -rf "$tmpd"; return 1
   fi
+  if ! _component_set_verify_path "$rev" "$gate_rel" "$tmpd/gate" "$tmpd"; then
+    _CS_REV_ERRKIND="$_CS_VERR_KIND"; _CS_REV_ERR="$_CS_VERR_DETAIL"
+    rm -rf "$tmpd"; return 1
+  fi
   _component_set_extract_declaration "$tmpd/gate"; prc=$?
   rm -rf "$tmpd"
   case "$prc" in
@@ -4983,6 +4997,216 @@ _component_set_declaration_at_rev() {
        _CS_REV_ERR="${pre}$rev:$gate_rel could not be read as TEXT: $_CS_DECL_ERR (this path never EXECUTES the script; it refuses instead)"
        return 1 ;;
   esac
+}
+
+# ---- #4413 job 100 / #4441: EVERY OBJECT THE PRE-FLIGHT CONSUMES IS REHASHED AGAINST ITS ID ----
+#
+# WHY. The periodic `git fsck` sweep that used to be the control for accidental corruption of
+# the lane's SHARED object store was removed in #4441, and git does not rehash a loose or packed
+# object against the id it was asked for on an ordinary read. So a damaged object could steer
+# this verdict: a manifest blob that no longer hashes to its own name can list fewer components,
+# and `PASS` is a false certification. The control is now AT THE READ, and it is exact: the
+# bytes this function CONSUMED are hashed and compared with the id they were read under.
+#
+# WHAT IS CONSUMED, AND SO WHAT IS VERIFIED (nothing else is read for the verdict):
+#   * the baseline commit and HEAD's commit        -> commit object, content hashed vs its id
+#   * each tree on the path to the file read       -> root tree, `scripts/` tree, hashed vs its id
+#     (this also covers the ABSENT answer of the manifest-presence probe: it is read from the
+#     verified `scripts/` tree, and a verified tree that lists the manifest contradicts it)
+#   * the manifest blob, or the gate-script blob   -> the very bytes that were parsed, hashed vs
+#     the blob id the verified tree names
+#   * the commits of the ancestry walk             -> only where it DECIDES something (see
+#     `_component_set_verify_ancestry`)
+# NOT per-read of anything else, and nothing is imported or written: the check hashes with
+# `git hash-object --literally` (no write, no fsck-style format check that could reject an old
+# but valid object) and every git call goes through the same bounded, `env -i`, scratch-rooted
+# runner as the reads it checks. Output goes to files, never a pipe (SIGPIPE ratchet #4061).
+#
+# FAIL CLOSED, NEVER TRUSTED. `_CS_VERR_KIND` is `corrupt` (the content does NOT hash to its id,
+# surfaced as `object-store-corrupt`) or `unverified` (the check itself could not run or the
+# object could not be read, surfaced as `object-store-unverified`). There is no third outcome and
+# no fallback to trusting the object.
+_CS_VERR_KIND=""
+_CS_VERR_DETAIL=""
+
+# _component_set_vcat <type> <id> <outfile>: raw content of one object into a file (rc of the read).
+_component_set_vcat() {
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" cat-file "$1" "$2" >"$3" 2>/dev/null
+}
+
+# _component_set_vhash <type> <file> <outfile>: the id git would give those exact bytes.
+_component_set_vhash() {
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" hash-object --literally -t "$1" "$2" >"$3" 2>/dev/null
+}
+
+# _component_set_vsnap <type> <id> <file> <store>: write the VERIFIED bytes of <file> into the
+# throwaway object store <store> and check that the id git assigns them is <id>. Everything that
+# later needs to READ that object (ls-tree) reads it from <store>, never from the lane's shared
+# store again: re-reading the shared copy after it was hashed is a time-of-check/time-of-use gap
+# (a swap between the hash and the read would steer the traversal; #4413 job 103). The file is
+# passed by PATH, not stdin, because the bounded runner's bash-watchdog arm runs the command in
+# the background where stdin is /dev/null.
+_component_set_vsnap() {
+  local type="$1" id="$2" file="$3" store="$4" tmpd got="" rc
+  tmpd="${file%/*}"
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --git-dir="$store" hash-object -w --literally -t "$type" "$file" >"$tmpd/v.snap" 2>/dev/null; rc=$?
+  if [ "$rc" -eq 0 ]; then read -r got <"$tmpd/v.snap" || got=""; fi
+  if [ "$rc" -ne 0 ] || [ "$got" != "$id" ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not snapshot the verified $type $id into the isolated store to read it from there (rc $rc, got '$got') — the shared store is never re-read after hashing"
+    return 1
+  fi
+  return 0
+}
+
+# _component_set_verify_bytes <type> <id> <file> <tmpd> <what>: rc 0 iff <file>'s bytes hash to <id>.
+_component_set_verify_bytes() {
+  local type="$1" id="$2" file="$3" tmpd="$4" what="$5" got="" rc
+  _component_set_vhash "$type" "$file" "$tmpd/v.hash"; rc=$?
+  if [ "$rc" -eq 0 ]; then read -r got <"$tmpd/v.hash" || got=""; fi
+  if [ "$rc" -ne 0 ] || [ -z "$got" ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not rehash the $what ($type $id) to check it against its id (rc $rc) — an object that cannot be verified is not trusted"
+    return 1
+  fi
+  if [ "$got" != "$id" ]; then
+    _CS_VERR_KIND=corrupt
+    _CS_VERR_DETAIL="the $what ($type) read from the lane's SHARED object store as $id has content that hashes to $got — the store holds a damaged or substituted object; this verdict is REFUSED rather than derived from it (repair the store, e.g. re-clone or 'git fsck --full')"
+    return 1
+  fi
+  return 0
+}
+
+# _component_set_verify_object <type> <id> <tmpd> <what>: read an object and check it hashes to its id.
+# On success the verified content stays in "$tmpd/v.obj" for the caller to parse.
+_component_set_verify_object() {
+  local type="$1" id="$2" tmpd="$3" what="$4" rc
+  case "$id" in
+    ''|*[!0-9a-f]*) _CS_VERR_KIND=unverified
+       _CS_VERR_DETAIL="the $what id '$id' is not a lowercase hex object id, so it cannot be verified"
+       return 1 ;;
+  esac
+  _component_set_vcat "$type" "$id" "$tmpd/v.obj"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not read the $what ($type $id) from the lane's SHARED object store to verify it (rc $rc)"
+    return 1
+  fi
+  _component_set_verify_bytes "$type" "$id" "$tmpd/v.obj" "$tmpd" "$what"
+}
+
+# _component_set_verify_path <rev> <relpath> <consumed-file|-> <tmpd>: rc 0 iff the commit <rev>
+# names, every tree down to <relpath>, and (when a consumed file is given) the blob at <relpath>
+# all hash to their ids, AND the consumed file's bytes are that verified blob. With `-` the leaf is
+# required to be ABSENT in the verified tree (it backs an "absent" answer). A verified tree that
+# contradicts the caller's premise is `corrupt`: two views of one object cannot both be right.
+_component_set_verify_path() {
+  local rev="$1" rel="$2" consumed="$3" tmpd="$4"
+  local id tree comp rest mode type oid name _vs
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-parse --verify --quiet "$rev^{commit}" >"$tmpd/v.rev" 2>/dev/null
+  id=""; read -r id <"$tmpd/v.rev" || id=""
+  if [ -z "$id" ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not resolve $rev to a commit to verify it"
+    return 1
+  fi
+  _component_set_verify_object commit "$id" "$tmpd" "commit $rev" || return 1
+  tree=$(sed -n '1s/^tree //p' "$tmpd/v.obj" 2>/dev/null)
+  _component_set_verify_object tree "$tree" "$tmpd" "root tree of $rev" || return 1
+  # THE TRAVERSAL READS ONLY VERIFIED BYTES (#4413 job 103). Each tree is snapshotted into this
+  # throwaway store straight from the bytes that were just hashed, and `ls-tree` runs against the
+  # store. READ AUDIT of this function, every read of the shared store and what it feeds:
+  #   rev-parse <rev>^{commit}  -> resolves a NAME to an id; the id is then hashed, so it is the
+  #                                 claim being checked and no content comes from it
+  #   cat-file commit <id>      -> v.obj; hashed from that same file, parent/tree lines parsed
+  #                                 from that same file (no second read)
+  #   cat-file tree <id>        -> v.obj; hashed from that same file, snapshotted from it
+  #   ls-tree                   -> against the throwaway store only, NEVER the shared one
+  #   the consumed blob         -> the file `git show` produced; hashed from that same file
+  _vs="$tmpd/vs"
+  if ! _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git init --bare -q "$_vs" >/dev/null 2>&1; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not create the isolated store the verified trees are read from"
+    return 1
+  fi
+  _component_set_vsnap tree "$tree" "$tmpd/v.obj" "$_vs" || return 1
+  rest="$rel"
+  while :; do
+    comp="${rest%%/*}"
+    _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --git-dir="$_vs" ls-tree "$tree" "$comp" >"$tmpd/v.ls" 2>/dev/null
+    if [ "$?" -ne 0 ]; then
+      _CS_VERR_KIND=unverified
+      _CS_VERR_DETAIL="could not list the verified tree $tree of $rev for '$comp' (path $rel)"
+      return 1
+    fi
+    mode=""; type=""; oid=""; name=""
+    read -r mode type oid name <"$tmpd/v.ls" || true
+    if [ -z "$oid" ]; then
+      if [ "$consumed" = - ]; then return 0; fi
+      _CS_VERR_KIND=corrupt
+      _CS_VERR_DETAIL="$rel was read at $rev but the VERIFIED tree $tree has no '$comp' entry — the objects disagree about one path"
+      return 1
+    fi
+    if [ "$rest" = "$comp" ]; then
+      if [ "$consumed" = - ]; then
+        _CS_VERR_KIND=corrupt
+        _CS_VERR_DETAIL="$rel was probed as ABSENT at $rev but the VERIFIED tree $tree lists it — the objects disagree about one path"
+        return 1
+      fi
+      [ "$type" = blob ] || { _CS_VERR_KIND=corrupt; _CS_VERR_DETAIL="$rel at $rev is a '$type' in the verified tree, not a blob"; return 1; }
+      _component_set_verify_bytes blob "$oid" "$consumed" "$tmpd" "bytes read from $rev:$rel" || return 1
+      return 0
+    fi
+    [ "$type" = tree ] || { _CS_VERR_KIND=corrupt; _CS_VERR_DETAIL="$comp on the path $rel at $rev is a '$type' in the verified tree, not a directory"; return 1; }
+    _component_set_verify_object tree "$oid" "$tmpd" "tree $comp/ of $rev" || return 1
+    _component_set_vsnap tree "$oid" "$tmpd/v.obj" "$_vs" || return 1
+    tree="$oid"
+    rest="${rest#*/}"
+  done
+}
+
+# _component_set_verify_ancestry <ancestor-sha> <head-sha>: rc 0 iff HEAD reaches <ancestor-sha>
+# through commits that each HASH to their ids. Called ONLY when `git merge-base --is-ancestor`
+# answered "yes" AND a component is missing — the one case where that answer decides anything
+# (it turns a fatal BEHIND/UNCOMMITTED into the non-fatal DECLARED). A fake "no" can only make
+# the gate refuse, so it needs no check. git's own answer is used purely as a CANDIDATE set
+# (`rev-list --ancestry-path`); the edges that count come from the rehashed commit contents.
+_component_set_verify_ancestry() {
+  local sha="$1" head="$2" tmpd rc c cand=" " n=0 todo seen=" " cur p
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs.XXXXXX" 2>/dev/null) || tmpd=""
+  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
+    _CS_VERR_KIND=unverified; _CS_VERR_DETAIL="could not create a temp dir to verify the ancestry walk"
+    return 1
+  fi
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-list --ancestry-path --parents "$sha..$head" >"$tmpd/v.cand" 2>/dev/null; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_VERR_KIND=unverified; _CS_VERR_DETAIL="could not list the commits between $sha and HEAD to verify the ancestry answer (rc $rc)"
+    rm -rf "$tmpd"; return 1
+  fi
+  while read -r c _; do
+    [ -n "$c" ] || continue
+    n=$((n + 1))
+    cand="$cand$c "
+  done <"$tmpd/v.cand"
+  if [ "$n" -gt 1000 ]; then
+    _CS_VERR_KIND=unverified; _CS_VERR_DETAIL="$n commits lie between $sha and HEAD, more than the 1000 this check will rehash — rebase onto origin/main or shorten the branch"
+    rm -rf "$tmpd"; return 1
+  fi
+  todo="$head"
+  while [ -n "$todo" ]; do
+    cur="${todo%% *}"; todo="${todo#"$cur"}"; todo="${todo# }"
+    [ "$cur" = "$sha" ] && { rm -rf "$tmpd"; return 0; }
+    case "$seen" in *" $cur "*) continue ;; esac
+    seen="$seen$cur "
+    case "$cand" in *" $cur "*) : ;; *) continue ;; esac
+    _component_set_verify_object commit "$cur" "$tmpd" "ancestry commit $cur" || { rm -rf "$tmpd"; return 1; }
+    for p in $(sed -n 's/^parent //p' "$tmpd/v.obj" 2>/dev/null); do todo="$todo $p"; done
+    todo="${todo# }"
+  done
+  _CS_VERR_KIND=corrupt
+  _CS_VERR_DETAIL="git answered that $sha is an ancestor of HEAD, but no chain of commits that hash to their ids connects HEAD to it — the commit objects on that walk are damaged or substituted"
+  rm -rf "$tmpd"
+  return 1
 }
 
 # _component_set_is_shallow: `yes` | `no` | `unknown` — is $REPO_ROOT a SHALLOW clone?
@@ -5918,9 +6142,11 @@ _component_set_probe_inner() {
     # damage — but does NOT rehash content against the requested object id. DELIBERATE forgery by a
     # same-host peer is INVOKER-CLASS and OUT OF MODEL (#3312 triage rule: a peer able to plant
     # objects can equally edit this script). ACCIDENTAL corruption is in model, and its control is
-    # NOT here: it is the periodic full `git fsck` sweep in
-    # `scripts/check-object-store-integrity.sh`, run at bootstrap and on the worker supervisor's
-    # throttled cadence. The emitted `component-set:` line DECLARES this boundary on every
+    # NOT here: the periodic full `git fsck` sweep that was its control
+    # (`scripts/check-object-store-integrity.sh`) was removed in #4441 with its fleet
+    # schedulers. Its replacement is the REHASH AT THE READ in `_component_set_verify_path` /
+    # `_component_set_verify_ancestry` (#4413 job 100): every object this verdict consumes is
+    # hashed against its id. The emitted `component-set:` line DECLARES this boundary on every
     # BASELINE-BEARING arm (the `src_note` suffix); the UNMEASURED arms have no baseline to name
     # and so do not carry it, which is CLAUDE.md's scoping of the same sentence.
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
@@ -6042,6 +6268,10 @@ _component_set_probe_inner() {
       # shared name would hide exactly the distinction this gating was added for.
       probe)            _CS_KIND=baseline-probe-unmeasured ;;
       unreadable)       _CS_KIND=baseline-unreadable ;;
+      # THE OBJECT STORE FAILED ITS REHASH (#4413 job 100): named tokens, never folded into
+      # baseline-unreadable, because the remedy (repair the store) is a different one.
+      corrupt)          _CS_KIND=object-store-corrupt ;;
+      unverified)       _CS_KIND=object-store-unverified ;;
       decl-unrecognised) _CS_KIND=baseline-decl-unrecognised ;;
       garbage)          _CS_KIND=baseline-set-garbage ;;
       empty)            _CS_KIND=baseline-set-empty ;;
@@ -6265,6 +6495,21 @@ _component_set_probe_inner() {
        fi ;;
   esac
 
+  # A "YES" THAT DECIDES SOMETHING IS REHASHED (#4413 job 100). With a component missing, `yes` is
+  # what turns a fatal BEHIND/UNCOMMITTED into DECLARED, so it must rest on commits that hash to
+  # their ids; a damaged commit could otherwise fake the ancestry. A fake `no` can only make the
+  # gate refuse, so it needs no check.
+  if [ "$_CS_ANCESTOR" = yes ] && [ -n "$_CS_MISSING" ]; then
+    if ! _component_set_verify_ancestry "$_CS_SHA" "${_CS_HEAD_SHA:-HEAD}"; then
+      case "$_CS_VERR_KIND" in
+        corrupt) _CS_KIND=object-store-corrupt ;;
+        *)       _CS_KIND=object-store-unverified ;;
+      esac
+      _CS_DETAIL="$_CS_VERR_DETAIL"
+      return 0
+    fi
+  fi
+
   # PROVENANCE OF A REMOVAL (job 215, blocker 2). Consulted ONLY where it DECIDES something:
   # a missing component with origin/main an ancestor of HEAD is about to be EXCUSED as this
   # branch's own committed removal, so that claim is measured against HEAD's own set. With
@@ -6289,7 +6534,11 @@ _component_set_probe_inner() {
         esac
       done
     else
-      _CS_KIND=head-set-unmeasured
+      case "$_CS_REV_ERRKIND" in
+        corrupt)    _CS_KIND=object-store-corrupt ;;
+        unverified) _CS_KIND=object-store-unverified ;;
+        *)          _CS_KIND=head-set-unmeasured ;;
+      esac
       _CS_HEAD_ERR="$_CS_REV_ERR"
       _CS_DETAIL="$_CS_REV_ERR"
       return 0
@@ -6412,7 +6661,7 @@ _component_set_line() {
     manifest)    src_note=" — baseline read via the committed manifest" ;;
     declaration) src_note=" — baseline read via the TEXTUAL FALLBACK: $_CS_MANIFEST_REL is VERIFIED ABSENT at that sha (#3544 transitional; the declaration is parsed as TEXT, never executed)" ;;
   esac
-  # THE OBJECT STORE IS TRUSTED, NOT VERIFIED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
+  # THE OBJECT STORE IS NOT SWEPT; THE CONSUMED OBJECTS ARE REHASHED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
   # High; lead ruling on REQ-3544-OBJTRUST, option A; RESOLVED by #3749).
   #
   # Git does not rehash a packed object against the id it was asked for on an ordinary read, and on
@@ -6434,22 +6683,24 @@ _component_set_line() {
   # inside this process. No check inside a process defends against a party that controls the
   # process; pretending otherwise is the false-assurance shape #3312 exists to remove.
   #
-  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION, AND ITS CONTROL IS A PERIODIC SWEEP, NAMED HERE SO
-  # THE POINTER SURVIVES: `scripts/check-object-store-integrity.sh` rehashes the whole shared store
-  # with a full `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not
-  # detect this), reporting VERIFIED / CORRUPT / UNMEASURED. It runs at machine onboarding
-  # (`scripts/bootstrap-agent-machine.sh` section 5d) and on the worker supervisor's throttled
-  # per-iteration cadence (`scripts/local/worker-supervisor.sh`, default every 6h; a CORRUPT verdict
-  # stops that supervisor loudly rather than letting a worker certify against a damaged store).
-  # THAT IS PERIODIC, NOT PER-READ — which is exactly why the emitted clause still says TRUSTED,
-  # not verified. Do not inflate it.
+  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION. ITS FORMER CONTROL WAS A PERIODIC FULL `git fsck`
+  # SWEEP (`scripts/check-object-store-integrity.sh`), removed in #4441 with the fleet schedulers
+  # that ran it (#4413). ITS REPLACEMENT (#4413 roborev job 100, owner decision 2026-11-07) IS A
+  # REHASH AT THE READ: the commit, the trees down to the file, and the manifest/gate blob this
+  # verdict consumes are each hashed against their id (`_component_set_verify_path`), and an
+  # ancestry `yes` that excuses a removal is re-derived from rehashed commits
+  # (`_component_set_verify_ancestry`). A mismatch is `object-store-corrupt`, an object that could
+  # not be checked is `object-store-unverified`, both FAIL-CLOSED. What is NOT verified is every
+  # other object in the store, and the line says so ("the rest of the store is not swept").
   #
   # THREE ALTERNATIVES WERE CONSIDERED AND REJECTED BY THAT RULING. Recorded so they are not
   # re-derived a fourth time:
   #   * PER-LANE FULL CLONES — a permanent multi-GB, multi-minute tax on every lane for a threat
   #     that is out of model.
-  #   * PER-READ REHASHING of the consumed objects — the FOURTH carve into this one pre-flight, and
-  #     a permanent cost on every `--lite` round.
+  #   * PER-READ REHASHING of the consumed objects — REJECTED HERE AT #3749 AS "the FOURTH carve into
+  #     this one pre-flight, and a permanent cost on every `--lite` round". REVERSED by the owner on
+  #     2026-11-07 (#4413 job 100) once the sweep was deleted: with no periodic control left it is the
+  #     only one. The cost is a handful of object hashes (commit, ~3 trees, one blob, twice).
   #   * REMOVING THE REUSE OPTIMISATION — and this one is worth keeping the original argument for,
   #     because it is still correct and still load-bearing: the recorded "a third finding here
   #     should REMOVE the reuse optimisation" ruling assumes removal CLOSES the exposure, and it
@@ -6469,9 +6720,9 @@ _component_set_line() {
   case "${src_note:+set}" in
     set)
       case "$_CS_BASE_OBJ" in
-        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
-        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
-        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3749)" ;;
+        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)" ;;
+        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)" ;;
+        *)       src_note="$src_note; objects: provenance NOT RECORDED — the consumed commit, tree and manifest objects were still REHASHED against their ids (object-store-corrupt on mismatch) (#3749, #4413)" ;;
       esac ;;
   esac
   case "$verdict" in
@@ -21818,9 +22069,6 @@ run_features_load_bearing() {
 # outcomes; that nesting is BOUNDED (--only parity-report never selects
 # tooling-tests, so it cannot recurse) and the cassandra-parity build is already
 # warm from the earlier parity-report component, so it stays cheap. Also runs
-# scripts/tests/test_bootstrap_agent_machine.sh (#1921), which proves the
-# new-machine bootstrap's pure-check paths never install anything (it runs with
-# --skip-smoke, so it never invokes the real gate — no recursion). Also runs
 # scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
 # --delta-classify hook + --delta entry guards + --delta-...-emit-summary-selftest
 # to assert the test/docs-only fail-closed re-cert policy and DISTINCT delta
@@ -23694,21 +23942,6 @@ run_tooling_tests() {
     return 0
   fi
 
-  # the fleet box launcher (#4267): env scrubbing (LANE_ID, npx-bearing PATH),
-  # stale-base refusal, and profile loading, all against throwaway git fixtures this
-  # script builds and destroys itself — no network, no real box, no systemd, no cargo.
-  echo ">>> [$name] bash scripts/tests/test_gate_box_launch.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_box_launch.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (fleet box launcher #4267); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
-
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   # BANNER IMMEDIATELY BEFORE ITS OWN INVOCATION (roborev job 238). It used to sit ~30 lines earlier,
   # and the #3473 liveness and detached suites were inserted between — so the log announced pub-surface,
@@ -24091,22 +24324,6 @@ run_tooling_tests() {
     return 0
   fi
 
-  # shared-object-store sweep guard (#3749): ABOVE the python3 gate on purpose. This suite
-  # needs nothing beyond bash + git, and folding a never-SKIPping suite into a SKIP-aware
-  # block would be a coverage hole wearing a SKIP's clothes (#3522's ruling). A failure
-  # here FAILs the component, mirroring the two guards above.
-  echo ">>> [$name] bash scripts/tests/test_check_object_store_integrity.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_check_object_store_integrity.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (object-store integrity sweep #3749); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
-
   # disk-exhaustion attribution guard (#3800): hermetic (temp dirs + the two hidden
   # selftest hooks; no cargo/python3/datasets/network, ~1s). A full gate killed by ENOSPC
   # reported only `minimal-build: FAIL (611s)` in the ONE artifact doctrine retains, so the
@@ -24395,7 +24612,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   # CommitLog fixture derivation (#2798): committed fixtures, no Docker/network.
   # Keep its Python dependency in tooling validation, outside core Cargo tests.
   echo ">>> [$name] python3 test-data/scripts/commitlog_fixture_derivation.py --self-test"
@@ -24406,10 +24623,7 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_claude_auth_capability.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
@@ -24417,7 +24631,6 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_premerge_review_binding.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_census.sh" >>"$log" 2>&1; then
@@ -25252,7 +25465,7 @@ run_scoped_tests() {
 #
 # PRESENT-ONLY (not fail-closed on a missing result): a component that did not run is
 # skipped, never force-failed. This preserves the lenient `--lite --only <c>` contract
-# (e.g. bootstrap-agent-machine.sh runs `--lite --only fmt`, which skips file-size and
+# (e.g. `--lite --only fmt` skips file-size and
 # clippy). Fail-open is not a risk here because these components run in the foreground
 # and always reach record_result; the only way a `.result` is absent is a deliberate
 # --only skip. The full gate keeps its own fail-closed missing-result guard for its
@@ -26284,7 +26497,7 @@ run_recertify_preflight() {
 #
 # THE PREMISE CORRECTION worth recording, because #3755 is written as if a launch-time
 # check existed: it did not. Before this block the only `df` in scripts/ was
-# worker-supervisor.sh's DISK_FLOOR_GB=40, which gates WORKER SPAWN and not the gate.
+# the removed worker-supervisor.sh's DISK_FLOOR_GB=40, which gated WORKER SPAWN and not the gate.
 # So "the same predicate as the launch-time check" had no referent, and delivering it
 # means introducing ONE predicate and evaluating it at BOTH moments — which is what
 # _gate_disk_admission_measure is. There is deliberately no second implementation:
@@ -26331,7 +26544,7 @@ run_recertify_preflight() {
 # precedent.
 
 # The bar, in GiB. 40 is #3755's own "40G building floor" and the value the committed
-# fleet tooling already uses (worker-supervisor.sh's DISK_FLOOR_GB).
+# fleet tooling formerly used (worker-supervisor.sh's DISK_FLOOR_GB).
 _GATE_MIN_FREE_GB_DEFAULT=40
 
 # The largest bar this gate accepts, STATED HERE rather than inherited from whatever
@@ -26437,7 +26650,7 @@ _gate_is_nonneg_decimal() {
 # reason: an UNSET variable and a MIS-SET one are different operational facts, and
 # `${VAR:-40}` renders them IDENTICALLY — which is how a pin that was never in effect
 # read as installed for months. `${VAR+set}` is the only spelling that tells unset from
-# set-empty. Fractional values are legal (worker-supervisor's DISK_FLOOR_GB accepts
+# set-empty. Fractional values are legal (the removed worker-supervisor's DISK_FLOOR_GB accepted
 # them). A negative bar clamps to 0 rather than being refused: "never refuse" is a
 # coherent thing to ask for, and `-0` clamping to `0` is the same value.
 _gate_min_free_gb() {
@@ -28761,7 +28974,7 @@ dispatch_component() {
 #
 # EXCLUDED from SIDE (issue #2657, gate FAIL): tooling-tests stays on the SERIAL MAIN
 # lane despite being non-cargo. It embeds TIMING-SENSITIVE shell self-tests --
-# notably test_worker_supervisor.sh's exit-latency assertion (#2666, <15s ceiling) --
+# notably (formerly) test_worker_supervisor.sh's exit-latency assertion (#2666, <15s ceiling) --
 # that STARVE under co-scheduled SIDE-lane CPU load: measured ~20s under the parallel
 # pool vs ~7s in isolation, so parallelizing it degraded the very component it moved.
 # Keeping it serial preserves its latency headroom; the other five isolatable

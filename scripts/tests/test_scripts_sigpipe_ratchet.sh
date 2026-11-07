@@ -35,7 +35,8 @@ MATCHER_REL="scripts/tests/lib/sigpipe-matcher.sh"
 
 # Case floor (CLAUDE.md #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. ENFORCED. May only go DOWN with a stated reason.
-CASE_FLOOR=43
+# 43 -> 42 (#4413): case 23 asserted a herestring site in bootstrap-agent-machine.sh, now removed.
+CASE_FLOOR=42
 
 pass=0; fail=0; cases=0
 ok()  { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -327,11 +328,6 @@ if grep -qF 'head -1 <<<"$GL_OUT"' "$REPO_ROOT/scripts/gate-component-verdict.sh
   ok "22 gate-component-verdict.sh reads the liveness answer via a herestring"
 else
   bad "22 gate-component-verdict.sh" "the #4061 site is not the expected \`head -1 <<<\"\$GL_OUT\"\` form"
-fi
-if grep -qF 'head -4 <<<"$obj_out"' "$REPO_ROOT/scripts/bootstrap-agent-machine.sh"; then
-  ok "23 bootstrap-agent-machine.sh reads the object-store lines via a herestring"
-else
-  bad "23 bootstrap-agent-machine.sh" "the #4061 site is not the expected \`head -4 <<<\"\$obj_out\"\` form"
 fi
 
 

@@ -43,12 +43,7 @@
       "Bash(cargo clippy:*)",
       "Bash(cargo test:*)",
       "Bash(hexdump:*)",
-      "Bash(roborev:*)",
-      "Bash(agent-ami list:*)",
-      "Bash(agent-ami status:*)",
-      "Bash(agent-ami volumes)",
-      "Bash(agent-ami profiles:*)",
-      "Bash(agent-ami ssh:*)"
+      "Bash(roborev:*)"
     ],
     "deny": [
       "Bash(rm -rf /)",
