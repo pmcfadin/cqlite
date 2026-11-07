@@ -227,7 +227,7 @@ fi
 # The lint's POSITION is what makes the stamp a witness for it, so that is asserted
 # structurally rather than assumed from the driver's current shape.
 lint_line=$(grep -n '^_perf_lint_out="\$(perf_invocation_lint_tree' "$DRIVER" | head -1 | cut -d: -f1)
-stamp_line=$(grep -n '^  echo "ARGUMENTS OK' "$DRIVER" | head -1 | cut -d: -f1)
+stamp_line=$(grep -m1 -n '^  echo "ARGUMENTS OK' "$DRIVER" | cut -d: -f1)  # sigpipe-fixture: echo is inside a grep pattern over a file, not a pipe source
 if [ -n "$lint_line" ] && [ -n "$stamp_line" ] && [ "$lint_line" -lt "$stamp_line" ]; then
   pass "selfgrep-silent: the perf lint (line $lint_line) runs BEFORE the ARGUMENTS OK stamp (line $stamp_line), so the stamp witnesses it"
 else
@@ -275,7 +275,7 @@ lint_subject() {
 PERF_DIR="$REPO_ROOT/scripts/perf"
 on_disk=$(cd "$PERF_DIR" && ls -1 ./*.sh | sed 's#^\./##' | sort)
 subject=$(lint_subject "$PERF_DIR" | xargs -n1 basename | sort)
-n_on_disk=$(printf '%s\n' "$on_disk" | grep -c .)
+n_on_disk=$(grep -c . <<<"$on_disk")
 if [ "$n_on_disk" -ge 4 ] && [ "$subject" = "$on_disk" ]; then
   pass "lint-subject: the tree lint covers ALL $n_on_disk scripts/perf/*.sh (discovered, not enumerated)"
 else

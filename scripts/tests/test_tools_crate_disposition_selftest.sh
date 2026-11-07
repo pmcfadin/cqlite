@@ -88,7 +88,7 @@ expect_green() {
   if [ $r -eq 0 ] && grep -q '^PASS:' <<<"$o"; then
     pass_case "$label"
   else
-    fail_case "$label — did NOT pass (rc=$r):"; printf '%s\n' "$o" | sed 's/^/    /' >&2
+    fail_case "$label — did NOT pass (rc=$r):"; sed 's/^/    /' <<<"$o" >&2
   fi
 }
 
@@ -99,10 +99,10 @@ expect_red() {
   o=$(run_guard "$w"); r=$?
   if [ $r -eq 0 ]; then
     fail_case "$label: guard PASSED on a tree it must reject"
-    printf '%s\n' "$o" | sed 's/^/    /' >&2
+    sed 's/^/    /' <<<"$o" >&2
   elif ! grep -qF "$needle" <<<"$o"; then
     fail_case "$label: guard failed (good) but not for the expected reason (wanted '$needle')"
-    printf '%s\n' "$o" | sed 's/^/    /' >&2
+    sed 's/^/    /' <<<"$o" >&2
   else
     pass_case "$label: guard FAILs, naming the right cause"
   fi
@@ -173,7 +173,7 @@ if [ $rc -eq 0 ]; then
   fail_case "absent tools/ directory: guard PASSED with no subject at all (vacuous pass)"
 elif ! grep -qF "refusing to pass vacuously" <<<"$out"; then
   fail_case "absent tools/ directory: guard failed but not via the fail-closed path:"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
+  sed 's/^/    /' <<<"$out" >&2
 else
   pass_case "absent tools/ directory: guard FAILs closed rather than passing vacuously"
 fi
@@ -187,10 +187,10 @@ if [ "$(id -u)" = 0 ]; then
   pass_case "unreadable README: SKIPPED (running as root, which can read anything)"
 elif [ $rc -eq 0 ]; then
   fail_case "unreadable README: guard PASSED though it could not verify the label"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
+  sed 's/^/    /' <<<"$out" >&2
 elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
   fail_case "unreadable README: guard failed but not via the fail-closed path:"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
+  sed 's/^/    /' <<<"$out" >&2
 else
   pass_case "unreadable README: guard FAILs closed rather than treating it as unlabeled"
 fi

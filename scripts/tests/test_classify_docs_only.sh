@@ -38,7 +38,7 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # Expects exit 0 and STDOUT verdict "docs-only".
 assert_docs_only() {
   local label="$1" input="$2" out rc
-  out=$(printf '%s' "$input" | bash "$CLASSIFY" 2>/dev/null)
+  out=$(bash "$CLASSIFY" 2>/dev/null < <(printf '%s' "$input"))
   rc=$?
   if [ "$rc" -eq 0 ] && [ "$out" = "docs-only" ]; then
     ok "$label (short-circuit: exit 0, verdict=docs-only)"
@@ -51,7 +51,7 @@ assert_docs_only() {
 # Expects exit 1 and STDOUT verdict "full".
 assert_full() {
   local label="$1" input="$2" out rc
-  out=$(printf '%s' "$input" | bash "$CLASSIFY" 2>/dev/null)
+  out=$(bash "$CLASSIFY" 2>/dev/null < <(printf '%s' "$input"))
   rc=$?
   if [ "$rc" -eq 1 ] && [ "$out" = "full" ]; then
     ok "$label (full path: exit 1, verdict=full)"
@@ -128,7 +128,7 @@ decl_globs() {       # <declaring-file> -> one glob per line
 assert_full_reason() {
   local label="$1" input="$2" want="$3" out rc errf
   errf="$TMPROOT/err.$$"
-  out=$(printf '%s' "$input" | bash "$CLASSIFY" 2>"$errf")
+  out=$(bash "$CLASSIFY" 2>"$errf" < <(printf '%s' "$input"))
   rc=$?
   if [ "$rc" -eq 1 ] && [ "$out" = "full" ] && grep -Eq "$want" "$errf"; then
     ok "$label (full + reason matches /$want/)"
@@ -281,7 +281,7 @@ structural_s1_reason() {
 structural_s2_reason() {
   local f="$1" arms n range lo hi ln no defs
   arms=$(docs_case_arms "$f")
-  n=$(printf '%s\n' "$arms" | grep -c '[^[:space:]]')
+  n=$(grep -c '[^[:space:]]' <<<"$arms")
   [ "$n" -eq 1 ] || printf 'S2: expected exactly ONE docs/ case arm (the single dispatch), found %s\n' "$n"
   range=$(fn_body_range "$f" is_docs_file)
   if [ -z "$range" ]; then
@@ -305,7 +305,7 @@ _r=$(structural_reason "$CLASSIFY")
 if [ -z "$_r" ]; then
   ok "classifier has exactly one docs/ decision point (single dispatch in is_docs_file)"
 else
-  bad "classifier structure (#3250): $(printf '%s' "$_r" | tr '\n' '|')"
+  bad "classifier structure (#3250): $(tr '\n' '|' < <(printf '%s' "$_r"))"
 fi
 
 # MUTATION-TESTING THE STRUCTURAL ASSERTS. An assert that cannot fail on the
@@ -414,7 +414,7 @@ _r=$(partition_reason "$CLASSIFY" "$ORACLES")
 if [ -z "$_r" ]; then
   ok "the inert/code-bearing/image-layer buckets partition the imported extension set exactly"
 else
-  bad "bucket partition (#3250): $(printf '%s' "$_r" | tr '\n' '|')"
+  bad "bucket partition (#3250): $(tr '\n' '|' < <(printf '%s' "$_r"))"
 fi
 
 # --- the import, mutated in a temp tree ------------------------------------
@@ -430,7 +430,7 @@ make_tree() {  # <dir>
 assert_tree() {  # <label> <tree-dir> <file-list> <docs-only|full>
   local label="$1" d="$2" input="$3" want="$4" out rc wantrc=1
   [ "$want" = "docs-only" ] && wantrc=0
-  out=$(printf '%s' "$input" | bash "$d/scripts/ci/classify-docs-only.sh" 2>/dev/null)
+  out=$(bash "$d/scripts/ci/classify-docs-only.sh" 2>/dev/null < <(printf '%s' "$input"))
   rc=$?
   if [ "$rc" -eq "$wantrc" ] && [ "$out" = "$want" ]; then
     ok "$label (=> $want)"
@@ -480,10 +480,10 @@ assert_tree_mutated "declaration mutation: synthetic extension added upstream" \
   "$T_SYNTH" scripts/flow/roborev-review-oracles.sh
 assert_tree "upstream-only synthetic extension fails CLOSED" "$T_SYNTH" "$SYNTHETIC_EXT_PATH" full
 _r=$(partition_reason "$T_SYNTH/scripts/ci/classify-docs-only.sh" "$T_SYNTH/scripts/flow/roborev-review-oracles.sh")
-if printf '%s' "$_r" | grep -q 'zzz' && printf '%s' "$_r" | grep -q '#3250'; then
+if grep -q 'zzz' <<<"$_r" && grep -q '#3250' <<<"$_r"; then
   ok "partition assert FAILs on an unassigned upstream extension, naming it and #3250"
 else
-  bad "partition assert did not name the unassigned extension and #3250 (got: $(printf '%s' "$_r" | tr '\n' '|'))"
+  bad "partition assert did not name the unassigned extension and #3250 (got: $(tr '\n' '|' < <(printf '%s' "$_r")))"
 fi
 
 # Assigned on BOTH sides, the verdict moves to docs-only; assigned only in the
@@ -512,11 +512,11 @@ T_ABSENT="$TMPROOT/t-decl-absent"; make_tree "$T_ABSENT"
 rm -f "$T_ABSENT/scripts/flow/roborev-review-oracles.sh"
 assert_tree "declaration absent: inert .txt forces full" "$T_ABSENT" "$TXT_IN_ARTIFACT_DIR" full
 assert_tree "declaration absent: even prose under docs/ forces full" "$T_ABSENT" $'docs/a.md\n' full
-_out=$(printf '%s' "$TXT_IN_ARTIFACT_DIR" | bash "$T_ABSENT/scripts/ci/classify-docs-only.sh" 2>&1 >/dev/null)
-if printf '%s' "$_out" | grep -Eq 'artifact-declaration-unusable'; then
+_out=$(bash "$T_ABSENT/scripts/ci/classify-docs-only.sh" 2>&1 < <(printf '%s' "$TXT_IN_ARTIFACT_DIR") >/dev/null)
+if grep -Eq 'artifact-declaration-unusable' <<<"$_out"; then
   ok "declaration absent: reason names the unusable declaration"
 else
-  bad "declaration absent: no named reason (got: $(printf '%s' "$_out" | tr '\n' '|'))"
+  bad "declaration absent: no named reason (got: $(tr '\n' '|' < <(printf '%s' "$_out")))"
 fi
 
 T_EMPTY="$TMPROOT/t-decl-empty"; make_tree "$T_EMPTY"
@@ -525,17 +525,17 @@ T_EMPTY="$TMPROOT/t-decl-empty"; make_tree "$T_EMPTY"
 assert_tree_mutated "declaration mutation: emptied" "$T_EMPTY" scripts/flow/roborev-review-oracles.sh
 assert_tree "declaration empty: inert .txt forces full" "$T_EMPTY" "$TXT_IN_ARTIFACT_DIR" full
 assert_tree "declaration empty: even prose under docs/ forces full" "$T_EMPTY" $'docs/a.md\n' full
-_out=$(printf '%s' "$TXT_IN_ARTIFACT_DIR" | bash "$T_EMPTY/scripts/ci/classify-docs-only.sh" 2>&1 >/dev/null)
-if printf '%s' "$_out" | grep -Eq 'artifact-declaration-unusable'; then
+_out=$(bash "$T_EMPTY/scripts/ci/classify-docs-only.sh" 2>&1 < <(printf '%s' "$TXT_IN_ARTIFACT_DIR") >/dev/null)
+if grep -Eq 'artifact-declaration-unusable' <<<"$_out"; then
   ok "declaration empty: reason names the unusable declaration"
 else
-  bad "declaration empty: no named reason (got: $(printf '%s' "$_out" | tr '\n' '|'))"
+  bad "declaration empty: no named reason (got: $(tr '\n' '|' < <(printf '%s' "$_out")))"
 fi
 
 # Sourcing the declaration must not pollute the classifier's contract: STDOUT
 # stays exactly the one-word verdict.
-_lines=$(printf '%s' $'docs/a.md\n' | bash "$CLASSIFY" 2>/dev/null | wc -l | tr -d ' ')
-_lines_full=$(printf '%s' $'docs/tools/run.rb\n' | bash "$CLASSIFY" 2>/dev/null | wc -l | tr -d ' ')
+_lines=$(bash "$CLASSIFY" 2>/dev/null <<<'docs/a.md' | wc -l | tr -d ' ')
+_lines_full=$(bash "$CLASSIFY" 2>/dev/null <<<'docs/tools/run.rb' | wc -l | tr -d ' ')
 if [ "$_lines" = "1" ] && [ "$_lines_full" = "1" ]; then
   ok "STDOUT is exactly the one-word verdict in both branches (import has no side effects)"
 else

@@ -206,7 +206,7 @@ if [ -f "$manifest" ]; then
   fake="$WORK/manifest-fake"
   mkdir -p "$fake/sstables/test_basic/counters-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db"
   fake_out=$(mrun "$fake" 2>&1 || true)
-  if printf '%s' "$fake_out" | grep -q 'missing Data.db for expected table: test_basic/counters'; then
+  if grep -q 'missing Data.db for expected table: test_basic/counters' <<<"$fake_out"; then
     ok "manifest check rejects a DIRECTORY named *-Data.db (matches the shared predicate)"
   else
     bad "manifest check accepted a DIRECTORY named *-Data.db as a fixture for test_basic/counters"
@@ -218,7 +218,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$real_fake/sstables/test_basic/counters-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db"
   printf 'row\n' > "$real_fake/sstables/test_basic/counters-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db.jsonl"
   real_out=$(mrun "$real_fake" 2>&1 || true)
-  if printf '%s' "$real_out" | grep -q 'missing Data.db for expected table: test_basic/counters'; then
+  if grep -q 'missing Data.db for expected table: test_basic/counters' <<<"$real_out"; then
     bad "manifest check rejected a REGULAR FILE fixture for test_basic/counters"
   else
     ok "manifest check accepts the same path as a REGULAR FILE (type, not pattern)"
@@ -250,7 +250,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$overlap/sstables/test_collections/frozen_collection_table-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db"
   printf 'row\n' > "$overlap/sstables/test_collections/frozen_collection_table-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db.jsonl"
   ov_out=$(mrun "$overlap" 2>&1 || true)
-  if printf '%s' "$ov_out" | grep -q 'missing Data.db for expected table: test_collections/collection_table'; then
+  if grep -q 'missing Data.db for expected table: test_collections/collection_table' <<<"$ov_out"; then
     ok "a same-keyspace sibling whose name CONTAINS the table does not satisfy it (glob anchored)"
   else
     bad "frozen_collection_table satisfied the expectation for the distinct table collection_table"
@@ -261,7 +261,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$overlap/sstables/test_collections/collection_table-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db"
   printf 'row\n' > "$overlap/sstables/test_collections/collection_table-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db.jsonl"
   ov_out2=$(mrun "$overlap" 2>&1 || true)
-  if printf '%s' "$ov_out2" | grep -q 'missing Data.db for expected table: test_collections/collection_table'; then
+  if grep -q 'missing Data.db for expected table: test_collections/collection_table' <<<"$ov_out2"; then
     bad "the correctly-named collection_table- directory did not satisfy its expectation"
   else
     ok "the correctly-named table directory still satisfies its expectation"
@@ -275,7 +275,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$nested/sstables/test_basic/other/counters-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db"
   printf 'row\n' > "$nested/sstables/test_basic/other/counters-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db.jsonl"
   ns_out=$(mrun "$nested" 2>&1 || true)
-  if printf '%s' "$ns_out" | grep -q 'missing Data.db for expected table: test_basic/counters'; then
+  if grep -q 'missing Data.db for expected table: test_basic/counters' <<<"$ns_out"; then
     ok "a table directory nested below the keyspace does not satisfy it (depth anchored)"
   else
     bad "a nested other/counters-* directory satisfied the expectation for test_basic/counters"
@@ -289,7 +289,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$oafake/sstables/test_oa/simple_table-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db"   # generic, NOT oa-
   printf 'row\n' > "$oafake/sstables/test_oa/simple_table-4b892c6064e711f1bd3ac7dbf655c673/nb-1-big-Data.db.jsonl"
   oa_out=$(mrun "$oafake" 2>&1 || true)
-  if printf '%s' "$oa_out" | grep -q 'no OA-format Data.db.*test_oa/simple_table'; then
+  if grep -q 'no OA-format Data.db.*test_oa/simple_table' <<<"$oa_out"; then
     ok "a generic *-Data.db does not satisfy a test_oa table (OA format required)"
   else
     bad "a generic *-Data.db satisfied test_oa/simple_table"
@@ -298,7 +298,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$oafake/sstables/test_oa/simple_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db"
   printf 'row\n' > "$oafake/sstables/test_oa/simple_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl"
   oa_out2=$(mrun "$oafake" 2>&1 || true)
-  if printf '%s' "$oa_out2" | grep -q 'test_oa/simple_table'; then
+  if grep -q 'test_oa/simple_table' <<<"$oa_out2"; then
     bad "an oa-<n>-big-Data.db did not satisfy test_oa/simple_table"
   else
     ok "an oa-<n>-big-Data.db satisfies the same table (check is format, not blanket)"
@@ -313,7 +313,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$badu/sstables/test_collections/collection_table-abc/nb-1-big-Data.db"
   printf 'row\n' > "$badu/sstables/test_collections/collection_table-abc/nb-1-big-Data.db.jsonl"
   bu_out=$(mrun "$badu" 2>&1 || true)
-  if printf '%s' "$bu_out" | grep -q 'missing Data.db for expected table: test_collections/collection_table'; then
+  if grep -q 'missing Data.db for expected table: test_collections/collection_table' <<<"$bu_out"; then
     ok "a non-UUID table-directory suffix does not satisfy the table (matches TABLE_DIR_RE)"
   else
     bad "collection_table-abc satisfied the expectation Jest would never discover"
@@ -322,7 +322,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$badu/sstables/test_collections/collection_table-$UUID/nb-1-big-Data.db"
   printf 'row\n' > "$badu/sstables/test_collections/collection_table-$UUID/nb-1-big-Data.db.jsonl"
   bu_out2=$(mrun "$badu" 2>&1 || true)
-  if printf '%s' "$bu_out2" | grep -q 'missing Data.db for expected table: test_collections/collection_table'; then
+  if grep -q 'missing Data.db for expected table: test_collections/collection_table' <<<"$bu_out2"; then
     bad "a valid 32-hex UUID suffix did not satisfy the table"
   else
     ok "a valid 32-hex UUID suffix does satisfy it (check is the shape, not a blanket reject)"
@@ -336,7 +336,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$oagen/sstables/test_oa/simple_table-$UUID/oa-invalid-big-Data.db"
   printf 'row\n' > "$oagen/sstables/test_oa/simple_table-$UUID/oa-invalid-big-Data.db.jsonl"
   og_out=$(mrun "$oagen" 2>&1 || true)
-  if printf '%s' "$og_out" | grep -q 'no OA-format Data.db.*test_oa/simple_table'; then
+  if grep -q 'no OA-format Data.db.*test_oa/simple_table' <<<"$og_out"; then
     ok "a non-numeric OA generation is rejected (matches oaBinariesPresent's regex)"
   else
     bad "oa-invalid-big-Data.db satisfied test_oa/simple_table"
@@ -344,7 +344,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$oagen/sstables/test_oa/simple_table-$UUID/oa-2-big-Data.db"
   printf 'row\n' > "$oagen/sstables/test_oa/simple_table-$UUID/oa-2-big-Data.db.jsonl"
   og_out2=$(mrun "$oagen" 2>&1 || true)
-  if printf '%s' "$og_out2" | grep -q 'test_oa/simple_table'; then
+  if grep -q 'test_oa/simple_table' <<<"$og_out2"; then
     bad "a numeric OA generation did not satisfy test_oa/simple_table"
   else
     ok "a numeric OA generation does satisfy it (check is the shape, not a blanket reject)"
@@ -359,7 +359,7 @@ if [ -f "$manifest" ]; then
   printf 'x\n' > "$untr/sstables/test_collections/collection_table-$UNTRACKED_UUID/nb-1-big-Data.db"
   printf 'row\n' > "$untr/sstables/test_collections/collection_table-$UNTRACKED_UUID/nb-1-big-Data.db.jsonl"
   ut_out=$(bash "$manifest" "$untr" 2>&1 || true)
-  if printf '%s' "$ut_out" | grep -q 'missing Data.db for expected table: test_collections/collection_table'; then
+  if grep -q 'missing Data.db for expected table: test_collections/collection_table' <<<"$ut_out"; then
     ok "a valid-UUID but UNTRACKED table dir does not satisfy the table (matches isCommittedTableDir)"
   else
     bad "an untracked table dir satisfied a table Jest would never enforce"
@@ -367,7 +367,7 @@ if [ -f "$manifest" ]; then
   # Fallback: the same corpus, with the script copied OUTSIDE any work tree, must ACCEPT
   # -- git reports nothing tracked, so every discovered dir counts (Jest's rule).
   ng_out=$(mrun "$untr" 2>&1 || true)
-  if printf '%s' "$ng_out" | grep -q 'missing Data.db for expected table: test_collections/collection_table'; then
+  if grep -q 'missing Data.db for expected table: test_collections/collection_table' <<<"$ng_out"; then
     bad "the git-less fallback rejected an untracked dir; it must treat all as committed"
   else
     ok "outside a work tree, every discovered dir counts (Jest's graceful fallback)"
@@ -381,7 +381,7 @@ if [ -f "$manifest" ]; then
   ln -s "$symd/sstables/test_collections/real-$UUID" \
         "$symd/sstables/test_collections/collection_table-$UUID"
   sy_out=$(mrun "$symd" 2>&1 || true)
-  if printf '%s' "$sy_out" | grep -q 'missing Data.db for expected table: test_collections/collection_table'; then
+  if grep -q 'missing Data.db for expected table: test_collections/collection_table' <<<"$sy_out"; then
     ok "a SYMLINKED table directory does not satisfy the table (matches Dirent.isDirectory)"
   else
     bad "a symlinked table directory satisfied the expectation Jest would skip"
@@ -395,14 +395,14 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   mkdir -p "$gdir"
   printf 'x\n' > "$gdir/nb-1-big-Data.db"
   g_out=$(mrun "$gold" 2>&1 || true)
-  if printf '%s' "$g_out" | grep -q 'not the JSONL golden Jest reads.*test_basic/counters'; then
+  if grep -q 'not the JSONL golden Jest reads.*test_basic/counters' <<<"$g_out"; then
     ok "a Data.db without its .jsonl golden does not satisfy the table"
   else
     bad "a Data.db with no JSONL golden satisfied test_basic/counters"
   fi
   printf 'row\n' > "$gdir/nb-1-big-Data.db.jsonl"
   g_out2=$(mrun "$gold" 2>&1 || true)
-  if printf '%s' "$g_out2" | grep -q 'not the JSONL golden Jest reads.*test_basic/counters'; then
+  if grep -q 'not the JSONL golden Jest reads.*test_basic/counters' <<<"$g_out2"; then
     bad "the table still reported a missing golden after one was created"
   else
     ok "adding the .jsonl golden satisfies it (check is the golden, not a blanket reject)"
@@ -417,7 +417,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'x\n' > "$gdir2/nb-2-big-Data.db"
   printf 'row\n' > "$gdir2/nb-2-big-Data.db.jsonl"
   gen_out=$(mrun "$gen" 2>&1 || true)
-  if printf '%s' "$gen_out" | grep -q 'not the JSONL golden Jest reads.*test_basic/counters'; then
+  if grep -q 'not the JSONL golden Jest reads.*test_basic/counters' <<<"$gen_out"; then
     ok "an alternate generation with its OWN golden does not satisfy a non-OA table"
   else
     bad "nb-2-big-Data.db.jsonl satisfied a table whose golden Jest reads as nb-1"
@@ -428,7 +428,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'row\n' > "$gdir2/nb-1-big-Data.db.jsonl"
   printf 'x\n' > "$gdir2/nb-1-big-Data.db"
   gen_out2=$(mrun "$gen" 2>&1 || true)
-  if printf '%s' "$gen_out2" | grep -q 'not the JSONL golden Jest reads.*test_basic/counters'; then
+  if grep -q 'not the JSONL golden Jest reads.*test_basic/counters' <<<"$gen_out2"; then
     bad "adding nb-1-big-Data.db.jsonl (and its binary) did not satisfy the table"
   else
     ok "adding the golden Jest actually reads satisfies it (name, not a blanket reject)"
@@ -444,7 +444,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'x\n' > "$mdir/oa-2-big-Data.db"          # later generation, WITH golden -- Jest finds this
   printf 'row\n' > "$mdir/oa-2-big-Data.db.jsonl"
   mg_out=$(mrun "$multi" 2>&1 || true)
-  if printf '%s' "$mg_out" | grep -q 'test_oa/simple_table'; then
+  if grep -q 'test_oa/simple_table' <<<"$mg_out"; then
     bad "a golden-less earlier OA generation masked a complete later one"
   else
     ok "a complete later OA generation satisfies the table despite a golden-less earlier one"
@@ -453,7 +453,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   # the fix must not have turned the golden check off.
   rm -f "$mdir/oa-2-big-Data.db.jsonl"
   mg_out2=$(mrun "$multi" 2>&1 || true)
-  if printf '%s' "$mg_out2" | grep -q 'not the JSONL golden Jest reads.*test_oa/simple_table'; then
+  if grep -q 'not the JSONL golden Jest reads.*test_oa/simple_table' <<<"$mg_out2"; then
     ok "with no complete generation, the missing golden is still reported"
   else
     bad "no generation had a golden, yet the table was accepted"
@@ -473,7 +473,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   # separately below; keeping both is what stops the rule being re-generalised a third
   # time.
   ng_out2=$(mrun "$ngen" 2>&1 || true)
-  if printf '%s' "$ng_out2" | grep -q 'test_basic/counters'; then
+  if grep -q 'test_basic/counters' <<<"$ng_out2"; then
     bad "an nb-2 binary with the nb-1 golden was rejected for a table that does not pin the generation"
   else
     ok "a non-OA table other than simple_table accepts any generation with the nb-1 golden"
@@ -488,7 +488,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'x\n' > "$cdir/oa-1-big-Data.db"           # binary of one generation ...
   printf 'row\n' > "$cdir/oa-2-big-Data.db.jsonl"     # ... golden of ANOTHER; Jest accepts this
   cx_out=$(mrun "$cross" 2>&1 || true)
-  if printf '%s' "$cx_out" | grep -q 'test_oa/simple_table'; then
+  if grep -q 'test_oa/simple_table' <<<"$cx_out"; then
     bad "an OA binary and a DIFFERENT generation's golden were rejected, but Jest accepts them"
   else
     ok "an OA binary and a different generation's golden satisfy the table (matches Jest)"
@@ -497,7 +497,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   # simply stop checking.
   rm -f "$cdir/oa-2-big-Data.db.jsonl"
   cx_out2=$(mrun "$cross" 2>&1 || true)
-  if printf '%s' "$cx_out2" | grep -q 'not the JSONL golden Jest reads.*test_oa/simple_table'; then
+  if grep -q 'not the JSONL golden Jest reads.*test_oa/simple_table' <<<"$cx_out2"; then
     ok "with no OA golden at all the table is still rejected (decoupling is not disabling)"
   else
     bad "a table with no OA golden was accepted"
@@ -572,7 +572,7 @@ fi
 
 # ---------------------------------------------------------------------------
 if [ -f "$MANIFEST_SRC" ]; then
-  piped=$(grep -nE '^[[:space:]]*printf .*\|[[:space:]]*grep ' "$MANIFEST_SRC" || true)
+  piped=$(grep -nE '^[[:space:]]*printf .*\|[[:space:]]*grep ' "$MANIFEST_SRC" || true)  # sigpipe-fixture: printf|grep is a regex literal searched for in a source file, not a pipe
   if [ -z "$piped" ]; then
     ok "no grep predicate is fed by a pipeline (SIGPIPE cannot be read as a malfunction)"
   else
@@ -627,7 +627,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
       nb1ok)    echo x > "$nbdir/nb-1-big-Data.db" ;;
     esac
     nb_out=$(mrun "$nb" 2>&1 || true)
-    if printf '%s' "$nb_out" | grep -q 'test_basic/simple_table'; then hit=rejected; else hit=accepted; fi
+    if grep -q 'test_basic/simple_table' <<<"$nb_out"; then hit=rejected; else hit=accepted; fi
     case "$shape" in
       nb2only)
         [ "$hit" = rejected ] \
@@ -653,7 +653,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'x\n' > "$odir/nb-2-big-Data.db"
   printf 'row\n' > "$odir/nb-1-big-Data.db.jsonl"
   o_out=$(mrun "$other" 2>&1 || true)
-  if printf '%s' "$o_out" | grep -q 'test_basic/counters'; then
+  if grep -q 'test_basic/counters' <<<"$o_out"; then
     bad "the nb-1 binary pin leaked to test_basic/counters, which does not require it"
   else
     ok "the nb-1 binary pin applies ONLY to test_basic/simple_table"
@@ -669,7 +669,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   : > "$ozdir/oa-2-big-Data.db"          # deliberately ZERO-LENGTH
   printf 'row\n' > "$ozdir/oa-2-big-Data.db.jsonl"
   oz_out=$(mrun "$oz" 2>&1 || true)
-  if printf '%s' "$oz_out" | grep -q 'test_oa/simple_table'; then
+  if grep -q 'test_oa/simple_table' <<<"$oz_out"; then
     ok "a ZERO-LENGTH OA binary does not satisfy the table (size rule is not non-OA-only)"
   else
     bad "an empty oa-2-big-Data.db satisfied test_oa/simple_table"
@@ -681,7 +681,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'x\n' > "$jndir/junk-Data.db"
   printf 'row\n' > "$jndir/nb-1-big-Data.db.jsonl"
   jn_out=$(mrun "$jn" 2>&1 || true)
-  if printf '%s' "$jn_out" | grep -q 'test_basic/counters'; then
+  if grep -q 'test_basic/counters' <<<"$jn_out"; then
     ok "a name the reader would not recognise (junk-Data.db) does not satisfy a table"
   else
     bad "junk-Data.db satisfied test_basic/counters"
@@ -694,7 +694,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'x\n' > "$btidir/da-2-bti-Data.db"
   printf 'row\n' > "$btidir/nb-1-big-Data.db.jsonl"
   bti_out=$(mrun "$bti" 2>&1 || true)
-  if printf '%s' "$bti_out" | grep -q 'test_basic/counters'; then
+  if grep -q 'test_basic/counters' <<<"$bti_out"; then
     bad "a da-<n>-bti descriptor was rejected; it is a real shape in this corpus"
   else
     ok "a da-<n>-bti descriptor IS recognised (format rule, not a single-name whitelist)"
@@ -722,7 +722,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     printf 'x\n' > "$ddir/$dname"
     printf 'row\n' > "$ddir/nb-1-big-Data.db.jsonl"
     d_out=$(mrun "$dcase" 2>&1 || true)
-    if printf '%s' "$d_out" | grep -q 'test_basic/counters'; then got=reject; else got=accept; fi
+    if grep -q 'test_basic/counters' <<<"$d_out"; then got=reject; else got=accept; fi
     if [ "$got" = "$want" ]; then
       ok "descriptor $dname -> $want (matches the version gates)"
     else
@@ -745,10 +745,10 @@ if [ -n "$MANIFEST_NOGIT" ]; then
       nogolden) printf 'x\n' > "$dgdir/nb-1-big-Data.db" ;;
     esac
     dg_out=$(mrun "$dg" 2>&1 || true)
-    if printf '%s' "$dg_out" | grep -q "$want"; then
+    if grep -q "$want" <<<"$dg_out"; then
       ok "the '$shape' shape reports its OWN cause ($want)"
     else
-      bad "the '$shape' shape did not report '$want'; got: $(printf '%s' "$dg_out" | grep 'test_basic/counters' | head -1)"
+      bad "the '$shape' shape did not report '$want'; got: $(grep -m1 'test_basic/counters' <<<"$dg_out")"
     fi
   done
 fi
@@ -777,7 +777,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
         printf 'row\n' > "$ufdir/nb-1-big-Data.db.jsonl" ;;
     esac
     uf_out=$(mrun "$uf" 2>&1 || true)
-    if printf '%s' "$uf_out" | grep -q 'test_basic/counters'; then got=reject; else got=accept; fi
+    if grep -q 'test_basic/counters' <<<"$uf_out"; then got=reject; else got=accept; fi
     case "$shape" in
       golden-dir|binary-dir)
         [ "$got" = reject ] \
@@ -808,7 +808,7 @@ if [ -n "$MANIFEST_NOGIT" ] && [ "$(id -u)" -ne 0 ]; then
       golden) chmod 000 "$urdir/nb-1-big-Data.db.jsonl" ;;
     esac
     ur_out=$(mrun "$ur" 2>&1 || true)
-    if printf '%s' "$ur_out" | grep -q 'test_basic/counters'; then
+    if grep -q 'test_basic/counters' <<<"$ur_out"; then
       ok "an UNREADABLE $target does not satisfy the table"
     else
       bad "an unreadable $target satisfied test_basic/counters"
@@ -823,7 +823,7 @@ if [ -n "$MANIFEST_NOGIT" ] && [ "$(id -u)" -ne 0 ]; then
   printf 'x\n'   > "$urokdir/nb-1-big-Data.db"
   printf 'row\n' > "$urokdir/nb-1-big-Data.db.jsonl"
   urok_out=$(mrun "$urok" 2>&1 || true)
-  if printf '%s' "$urok_out" | grep -q 'test_basic/counters'; then
+  if grep -q 'test_basic/counters' <<<"$urok_out"; then
     bad "readable fixtures were rejected; the readability rule is over-tightened"
   else
     ok "the same fixtures READABLE are accepted (permission test, not existence)"
@@ -847,7 +847,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
       two-valid)     printf 'row\n' > "$ogdir/oa-1-big-Data.db.jsonl" ;;
     esac
     og_out=$(mrun "$og" 2>&1 || true)
-    if printf '%s' "$og_out" | grep -q 'test_oa/simple_table'; then got=reject; else got=accept; fi
+    if grep -q 'test_oa/simple_table' <<<"$og_out"; then got=reject; else got=accept; fi
     case "$shape" in
       one-valid|two-valid)
         [ "$got" = accept ] \
@@ -877,7 +877,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
       one-broken) : > "$tck/counters-$UUID2/nb-1-big-Data.db.jsonl" ;;   # ZERO-LENGTH
     esac
     tc_out=$(mrun "$tc" 2>&1 || true)
-    if printf '%s' "$tc_out" | grep -q 'test_basic/counters'; then got=reject; else got=accept; fi
+    if grep -q 'test_basic/counters' <<<"$tc_out"; then got=reject; else got=accept; fi
     case "$shape" in
       both-good)
         [ "$got" = accept ] \
@@ -921,7 +921,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     # `pipefail` makes the pipeline rc 141 -- the `if` takes the else branch and every
     # REJECT case reads as "accepted". This suite has now been bitten by that four times.
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$tc" 2>&1 || true)
-    if printf '%s' "$_o" | grep -q 'test_basic/counters'; then
+    if grep -q 'test_basic/counters' <<<"$_o"; then
       echo reject
     else
       echo accept
@@ -949,7 +949,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   printf 'row\n' > "$tcd/sstables/test_basic/counters-$UUID/nb-1-big-Data.db.jsonl"
   printf 'Data.db\nCompressionInfo.db\nTOC.txt\n' > "$tcd/sstables/test_basic/counters-$UUID/nb-1-big-TOC.txt"
   tcd_out=$(NO_AUTO_TOC=1 mrun "$tcd" 2>&1 || true)
-  if printf '%s' "$tcd_out" | grep -q 'TOC.txt is absent, or lists a component'; then
+  if grep -q 'TOC.txt is absent, or lists a component' <<<"$tcd_out"; then
     ok "the incomplete-generation diagnostic names the TOC as the cause"
   else
     bad "the incomplete-generation diagnostic did not name the TOC"
@@ -978,7 +978,7 @@ if command -v node >/dev/null 2>&1 && [ -f "$PU_SRC" ]; then
   }
 
   pu_out=$(pu_probe "$pu_tree/bindings/node/__test__/parity-utils.js")
-  if [ "$(printf '%s' "$pu_out" | grep -c 'null')" = 2 ]; then
+  if [ "$(grep -c 'null' <<<"$pu_out")" = 2 ]; then
     ok "both golden lookups ignore a committed non-UUID sibling"
   else
     bad "a golden lookup selected a committed non-UUID sibling the manifest never validates"
@@ -995,7 +995,7 @@ if command -v node >/dev/null 2>&1 && [ -f "$PU_SRC" ]; then
       ['orders-wip', 'orders', false],
       ['orders-extra-$UUID', 'orders', false],
       ['orders-extra-$UUID', 'orders-extra', true],
-      ['orders-$(printf '%s' "$UUID" | tr 'a-f' 'A-F')', 'orders', false]
+      ['orders-$(tr 'a-f' 'A-F' <<<"$UUID")', 'orders', false]
     ];
     let n = 0;
     for (const [d, t, e] of cases) if (u.isTableDirFor(d, t) === e) n++;
@@ -1012,7 +1012,7 @@ if command -v node >/dev/null 2>&1 && [ -f "$PU_SRC" ]; then
     "$PU_SRC" > "$pu_red/bindings/node/__test__/parity-utils.js"
   if grep -q 'startsWith(`${table}-`)' "$pu_red/bindings/node/__test__/parity-utils.js"; then
     red_out=$(pu_probe "$pu_red/bindings/node/__test__/parity-utils.js")
-    if [ "$(printf '%s' "$red_out" | grep -c 'SELECTED')" = 2 ]; then
+    if [ "$(grep -c 'SELECTED' <<<"$red_out")" = 2 ]; then
       ok "RED control: the pre-fix startsWith predicate does select the broken sibling"
     else
       bad "RED control did not reproduce the defect, so the case above proves nothing"
@@ -1261,7 +1261,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
       junk-sibling)    printf 'x\n' > "$d/junk-Data.db" ;;
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$gc" 2>&1 || true)
-    if printf '%s' "$_o" | grep -q 'test_basic/counters'; then echo reject; else echo accept; fi
+    if grep -q 'test_basic/counters' <<<"$_o"; then echo reject; else echo accept; fi
   }
 
   for shape in one-good two-good junk-sibling; do
@@ -1296,7 +1296,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
                       printf 'Data.db\nFilter.db\nTOC.txt\n' > "$d/nb-2-big-TOC.txt" ;;
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$pc" 2>&1 || true)
-    if printf '%s' "$_o" | grep -q 'test_basic/simple_table'; then echo reject; else echo accept; fi
+    if grep -q 'test_basic/simple_table' <<<"$_o"; then echo reject; else echo accept; fi
   }
   for pair in pinned-only:accept second-good:accept second-zero:reject second-partial:reject; do
     pin_shape=${pair%%:*}; pin_want=${pair#*:}
@@ -1324,7 +1324,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
                      printf 'Data.db\nTOC.txt\n' > "$d/oa-$UUID-big-TOC.txt" ;;
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$oc" 2>&1 || true)
-    if printf '%s' "$_o" | grep -q 'test_oa/simple_table'; then echo reject; else echo accept; fi
+    if grep -q 'test_oa/simple_table' <<<"$_o"; then echo reject; else echo accept; fi
   }
   for pair in one-oa:accept second-oa-zero:reject nb-sibling-zero:reject uuid-oa-zero:reject; do
     oa_shape=${pair%%:*}; oa_want=${pair#*:}
@@ -1358,16 +1358,16 @@ if [ -n "$MANIFEST_NOGIT" ]; then
                    printf 'Data.db\nTOC.txt\n' > "$d/$pfx-2-big-TOC.txt" ;;
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
-    printf '%s\n' "$_o" | grep -F "$entry" | head -1
+    grep -m1 -F "$entry" <<<"$_o"
   }
 
   # 71: each shape names ITS OWN cause.
   dg_out=$(dg_case test_basic/counters nb directory)
-  printf '%s' "$dg_out" | grep -q 'NOT A REGULAR FILE' \
+  grep -q 'NOT A REGULAR FILE' <<<"$dg_out" \
     && ok "a directory-valued Data.db is reported as NOT A REGULAR FILE, not as zero-length" \
     || bad "directory-valued Data.db misattributed: $dg_out"
   dg_out=$(dg_case test_basic/counters nb zero-length)
-  printf '%s' "$dg_out" | grep -q 'ZERO-LENGTH' \
+  grep -q 'ZERO-LENGTH' <<<"$dg_out" \
     && ok "a zero-length Data.db is still reported as ZERO-LENGTH (truncated fetch)" \
     || bad "zero-length Data.db misattributed: $dg_out"
 
@@ -1378,7 +1378,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     # attributable to the dangling sibling and not to a fixture this case builds wrong.
     if [ -z "$(dg_case "$dg_entry" "$dg_pfx" valid-only)" ]; then
       dg_out=$(dg_case "$dg_entry" "$dg_pfx" dangling)
-      if printf '%s' "$dg_out" | grep -q 'NOT A REGULAR FILE'; then
+      if grep -q 'NOT A REGULAR FILE' <<<"$dg_out"; then
         ok "$dg_entry: a DANGLING sibling generation disqualifies the table, and is named"
       else
         bad "$dg_entry: a dangling sibling was skipped or misnamed: ${dg_out:-<accepted>}"
@@ -1410,7 +1410,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
     # The table-specific line, never the generic "missing Data.db" summary line.
-    printf '%s\n' "$_o" | grep -F "$ks/$tb" | grep -v 'missing Data.db for expected table' \
+    grep -F "$ks/$tb" <<<"$_o" | grep -v 'missing Data.db for expected table' \
       | head -1 | cut -c1-60
     chmod 0644 "$t/nb-1-big-Data.db" 2>/dev/null || true   # so _cleanup can remove it
   }
@@ -1428,8 +1428,8 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     && ok "all seven manifest failure causes are reachable" \
     || bad "manifest cause(s) went dark (no diagnostic emitted):$cause_unreached"
 
-  cause_n=$(printf '%s' "$cause_msgs" | grep -c . || true)
-  cause_u=$(printf '%s' "$cause_msgs" | sort -u | grep -c . || true)
+  cause_n=$(grep -c . <<<"$cause_msgs" || true)
+  cause_u=$({ sort -u <<<"$cause_msgs" | grep -c .; } || true)
   [ "$cause_n" -eq 7 ] && [ "$cause_u" -eq 7 ] \
     && ok "all seven causes emit DISTINCT diagnostics (no cause borrows another's message)" \
     || bad "manifest diagnostics are not pairwise distinct ($cause_u distinct of $cause_n emitted)"
@@ -1446,7 +1446,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     printf 'Data.db\n%s\nTOC.txt\n' "$comp" > "$d/nb-1-big-TOC.txt"
     : > "$d/nb-1-big-$comp"                      # the component exists but is ZERO-LENGTH
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$ec" 2>&1 || true)
-    if printf '%s' "$_o" | grep -q 'test_basic/counters'; then echo reject; else echo accept; fi
+    if grep -q 'test_basic/counters' <<<"$_o"; then echo reject; else echo accept; fi
   }
 
   # The two measured to produce a silently-wrong read, plus three that are merely tolerated
@@ -1555,7 +1555,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
                         rm -f "$t/nb-1-big-Statistics.db" ;;
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
-    if printf '%s' "$_o" | grep -q 'test_basic/counters'; then echo reject; else echo accept; fi
+    if grep -q 'test_basic/counters' <<<"$_o"; then echo reject; else echo accept; fi
   }
 
   # ACCEPT controls first: without them a manifest that rejected everything would pass the
@@ -1576,9 +1576,9 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     || bad "a prefix-colliding *-Data.db was accepted; the reader maps it to that generation and FAILS"
   # The collision must be NAMED, not reported as some other cause.
   pc_out=$(NO_AUTO_TOC=1 mrun "$WORK/manifest-pc-prefix-collision" 2>&1 || true)
-  printf '%s' "$pc_out" | grep -q "SHARES a real generation's prefix" \
+  grep -q "SHARES a real generation's prefix" <<<"$pc_out" \
     && ok "the prefix-collision diagnostic names its own cause" \
-    || bad "the prefix collision was reported as something else: $(printf '%s' "$pc_out" | grep 'test_basic/counters' | head -1)"
+    || bad "the prefix collision was reported as something else: $(grep -m1 'test_basic/counters' <<<"$pc_out")"
 
   for shape in truncated-toc toc-omits-stats; do
     [ "$(pc_case "$shape")" = reject ] \
@@ -1619,16 +1619,16 @@ if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstable
     rm -f "$ct_dir"/nb-1-big-CompressionInfo.db "$ct_dir"/nb-1-big-Filter.db \
           "$ct_dir"/nb-1-big-Index.db "$ct_dir"/nb-1-big-Summary.db
     ct_out=$(bash "$MANIFEST_SRC" "$ct_root" 2>&1 || true)
-    if printf '%s' "$ct_out" | grep -q 'test_basic/simple_table'; then
+    if grep -q 'test_basic/simple_table' <<<"$ct_out"; then
       ok "a COHERENTLY truncated TOC disqualifies the generation"
     else
       bad "a coherently truncated TOC was ACCEPTED; both derived directions are satisfied by it"
     fi
     # And it must NAME the trusted-inventory mismatch, not the generic listed-component cause.
-    if printf '%s' "$ct_out" | grep -q 'does NOT match the git-tracked committed twin'; then
+    if grep -q 'does NOT match the git-tracked committed twin' <<<"$ct_out"; then
       ok "the coherent-truncation diagnostic names the committed-twin mismatch"
     else
-      bad "coherent truncation was reported as some other cause: $(printf '%s' "$ct_out" | grep 'test_basic/simple_table' | head -1 | cut -c1-90)"
+      bad "coherent truncation was reported as some other cause: $(grep -m1 'test_basic/simple_table' <<<"$ct_out" | cut -c1-90)"
     fi
   else
     echo "info - no simple_table generation with a TOC in the corpus copy; skipping"
@@ -1911,7 +1911,7 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     # the shared /tmp for `cqlite-toc-norm.*` would fail `tooling-tests` whenever a peer had
     # one in flight — a nondeterministic red caused by a healthy neighbour.
     local _o; _o=$(NO_AUTO_TOC=1 TMPDIR="$crlf_tmp" mrun "$root" 2>&1 || true)
-    if printf '%s' "$_o" | grep -q 'test_basic/counters'; then echo reject; else echo accept; fi
+    if grep -q 'test_basic/counters' <<<"$_o"; then echo reject; else echo accept; fi
   }
   # LF is the control: if it were rejected too, the CRLF result would say nothing about CRLF.
   [ "$(crlf_case lf)" = accept ] \
@@ -2307,7 +2307,7 @@ _nb_pin() { # <label> <awk-pattern> <symbol>
     bad "$label: run_node_bindings NO LONGER runs $sym — the node-ci.yml exemption in .github/ci-gating-tiers.yml claims it does, so that exemption is now FALSE. Restore the line or correct the registry entry in the same diff (#3642/#3493)."
     return 0
   fi
-  stripped="$WORK/nb-stripped-$$-$(echo "$sym" | tr -c 'a-zA-Z0-9' '-')"
+  stripped="$WORK/nb-stripped-$$-$(tr -c 'a-zA-Z0-9' '-' <<<"$sym")"
   _nb_strip_line "$GATE_SRC4" "$stripped" "$pat"
   m=$(_nb_body_line "$stripped" "$pat")
   if [ "$m" -eq 0 ]; then
@@ -2482,13 +2482,13 @@ _nbgate_measure() { # <tag>
   # which is #3650 SLICE 2 and is explicitly not implemented; that issue owns this
   # residual. No second guard is added here for the combination.
   toks=$(sed -n 's/^>>> \[node-bindings\] \([A-Za-z][A-Za-z-]*\) (.*)$/\1/p' "$log" 2>/dev/null)
-  NBG_LOG_TOKS=$(printf '%s\n' "$toks" | grep -E '.' | tr '\n' ' ')
-  NBG_LOG_N=$(printf '%s\n' "$toks" | grep -cE '.')
-  NBG_LOG_LAST=$(printf '%s\n' "$toks" | grep -E '.' | tail -1)
+  NBG_LOG_TOKS=$(grep -E '.' <<<"$toks" | tr '\n' ' ')
+  NBG_LOG_N=$(grep -cE '.' <<<"$toks")
+  NBG_LOG_LAST=$(grep -E '.' <<<"$toks" | tail -1)
   # `^node-bindings:` cannot match the sibling `node-bindings-leak-lane:` line.
   sumtoks=$(sed -n 's/^node-bindings:[[:space:]]*\([A-Za-z-]*\).*/\1/p' "$sum" 2>/dev/null)
-  NBG_SUM_TOKS=$(printf '%s\n' "$sumtoks" | grep -E '.' | tr '\n' ' ')
-  NBG_SUM_N=$(printf '%s\n' "$sumtoks" | grep -cE '.')
+  NBG_SUM_TOKS=$(grep -E '.' <<<"$sumtoks" | tr '\n' ' ')
+  NBG_SUM_N=$(grep -cE '.' <<<"$sumtoks")
   NBG_LIVE=0; NBG_TEST=0; NBG_BUILD=0; NBG_TYPECHECK=0
   grep -qE '^(ci|install)( |$)' "$argv" 2>/dev/null && NBG_LIVE=1
   grep -qE '^test( |$)' "$argv" 2>/dev/null && NBG_TEST=1

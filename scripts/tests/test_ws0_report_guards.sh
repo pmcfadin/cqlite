@@ -1678,7 +1678,7 @@ PY
 
 q_evidence_case() { # q_evidence_case <label> <expect-substring> <mutation>
   local label="$1" expect="$2" mutation="$3" dd out rc
-  dd="$TMP/q-ev-$(printf '%s' "$label" | tr -cd 'a-z0-9')"
+  dd="$TMP/q-ev-$(tr -cd 'a-z0-9' <<<"$label")"
   q_judged_session "$dd" "$TMP/corpus"; q_stamp_ts "$dd" "$Q_TS_MS"
   q_write_verdict "$dd" -60 60 -none-
   q_mutate_verdict "$dd" "$mutation"
@@ -1806,8 +1806,8 @@ q_evidence_case "a sampling gap wider than the verdict's OWN bound is REFUSED" \
 q_baseline_agreement() { # q_baseline_agreement <label> <dir> <expect-baseline:0|1>
   local label="$1" dir="$2" want="$3" out t pl
   out=$(python3 "$REPORT" --dir "$dir" --corpus "$TMP/corpus" 2>&1) || true
-  t=$(printf '%s' "$out" | grep -m1 '^====' | grep -c 'SAME-SESSION BASELINE' || true)
-  pl=$(printf '%s' "$out" | grep -m1 '^profile ' | grep -c 'throughput is a baseline' || true)
+  t=$(grep -m1 '^====' <<<"$out" | grep -c 'SAME-SESSION BASELINE' || true)
+  pl=$(grep -m1 '^profile ' <<<"$out" | grep -c 'throughput is a baseline' || true)
   if [ "$t" != "$pl" ]; then
     fail "$label: the report CONTRADICTS ITSELF — title-baseline=$t profile-baseline=$pl"
   elif [ "$t" != "$want" ]; then

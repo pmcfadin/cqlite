@@ -93,7 +93,7 @@ if [ -n "$scan_body" ] \
   && grep -q 'prewarm.status' <<<"$scan_body"; then
   pass "measure_scan itself records a prewarm status (not just the reporter) — read from lib-measure.sh, the file that owns the legs"
 else
-  fail "measure_scan must run and record its own prewarm (body lines=$(printf '%s' "$scan_body" | grep -c . ))"
+  fail "measure_scan must run and record its own prewarm (body lines=$(grep -c . <<<"$scan_body" ))"
 fi
 
 # ==========================================================================
@@ -251,7 +251,7 @@ if [ -n "$flight_leg" ] \
   && grep -q 'ws0_prewarm.py' <<<"$flight_leg"; then
   pass "WIRED (F-A): measure_flight's CODE retains the prewarm JSONL (no --out /dev/null) and derives its status via ws0_prewarm.py"
 else
-  fail "measure_flight must retain the prewarm JSONL and classify it (code lines=$(printf '%s' "$flight_leg" | grep -c . ), still-devnull=$(grep -c -- '--out /dev/null' <<<"$flight_leg"))"
+  fail "measure_flight must retain the prewarm JSONL and classify it (code lines=$(grep -c . <<<"$flight_leg" ), still-devnull=$(grep -c -- '--out /dev/null' <<<"$flight_leg"))"
 fi
 
 # NON-VACUITY for the strip: the raw body MUST still contain both forbidden strings (in its
@@ -434,7 +434,7 @@ if [ -n "$scan_leg" ] \
   && ! grep -q 'prewarm_status="ok"' <<<"$scan_leg"; then
   pass "WIRED (round12 F2): measure_scan's CODE derives its prewarm status via ws0_prewarm.py from the bench's retained JSON, and has NO literal assignment of the ok status"
 else
-  fail "measure_scan must classify the bench's JSON rather than trusting its exit status (code lines=$(printf '%s' "$scan_leg" | grep -c . ), literal-ok=$(grep -c 'prewarm_status="ok"' <<<"$scan_leg"))"
+  fail "measure_scan must classify the bench's JSON rather than trusting its exit status (code lines=$(grep -c . <<<"$scan_leg" ), literal-ok=$(grep -c 'prewarm_status="ok"' <<<"$scan_leg"))"
 fi
 # ...and the bare-scan leg must still FAIL CLOSED on a degraded label, which is what distinguishes
 # it from the Flight arm's record-and-continue: a partly-cold bare scan reads SLOWER, shrinking
@@ -450,7 +450,7 @@ fi
 # The SESSION DIR is the LAST argument, so the pattern anchors on the classifier call ending in a
 # bare `"$OUT_DIR"` — a path UNDER it (`"$OUT_DIR/$tag…"`) is the ARTIFACT argument, and matching
 # that instead would pass while the pin was unreachable.
-pw_wired=$(printf '%s\n%s\n' "$scan_leg" "$flight_leg" | grep -c 'ws0_prewarm\.py.*"\$OUT_DIR")')
+pw_wired=$(grep -c 'ws0_prewarm\.py.*"\$OUT_DIR")' <<<"$scan_leg"$'\n'"$flight_leg")
 if [ "$pw_wired" -eq 2 ]; then
   pass "WIRED (round12 F2): BOTH legs pass \$OUT_DIR as the classifier's LAST argument, so each reads the session's own corpus pin as its completeness oracle rather than trusting a count the leg supplied"
 else
@@ -664,10 +664,10 @@ fi
 # substring test over the whole summary would pass over the very defect. The flight figure line and
 # the caveat must be CONSECUTIVE-ish within the arm's block — measured as: the caveat appears
 # between the flight figure and the `ratio` line.
-pw_r20_fig=$(grep -n 'flight do_get (bypass requested)' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
-pw_r20_cav=$(grep -n 'ARROW PAYLOAD VOLUME NOT COMPARED' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
-pw_r20_rat=$(grep -n 'ratio bare/flight' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
-pw_r20_vrd=$(grep -n 'verdict and the ratio above are CONDITIONAL' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
+pw_r20_fig=$(grep -m1 -n 'flight do_get (bypass requested)' <<<"$pw_r20_out" | cut -d: -f1)
+pw_r20_cav=$(grep -m1 -n 'ARROW PAYLOAD VOLUME NOT COMPARED' <<<"$pw_r20_out" | cut -d: -f1)
+pw_r20_rat=$(grep -m1 -n 'ratio bare/flight' <<<"$pw_r20_out" | cut -d: -f1)
+pw_r20_vrd=$(grep -m1 -n 'verdict and the ratio above are CONDITIONAL' <<<"$pw_r20_out" | cut -d: -f1)
 if [ -n "$pw_r20_fig" ] && [ -n "$pw_r20_cav" ] && [ -n "$pw_r20_rat" ] \
   && [ "$pw_r20_cav" -gt "$pw_r20_fig" ] && [ "$pw_r20_cav" -lt "$pw_r20_rat" ]; then
   pass "round20: the NOT-COMPARED caveat sits BETWEEN the flight figure (line $pw_r20_fig) and the ratio (line $pw_r20_rat) — beside the number, not appended at the bottom"
@@ -768,7 +768,7 @@ if ! grep -q 'ARROW PAYLOAD VOLUME NOT COMPARED' <<<"$pw_r20_pre_out" \
   && ! grep -q 'verdict and the ratio above are CONDITIONAL' <<<"$pw_r20_pre_out"; then
   pass "round20 NON-VACUITY: that published report carries NO Arrow-volume caveat anywhere in the human summary — the figure and verdict stood bare"
 else
-  fail "round20: the pre-fix summary must carry no caveat, else the flip is not a flip (out: $(grep -n 'ARROW PAYLOAD\|CONDITIONAL' <<<"$pw_r20_pre_out" | head -3))"
+  fail "round20: the pre-fix summary must carry no caveat, else the flip is not a flip (out: $(grep -m3 -n 'ARROW PAYLOAD\|CONDITIONAL' <<<"$pw_r20_pre_out"))"
 fi
 # ...and the MUTANT IS NOT UNIFORMLY BROKEN: it still writes the record's own withdrawal into
 # `results.json`, so what the probe measured is the loss of the HUMAN-READABLE caveat specifically
@@ -913,7 +913,7 @@ for pw_r21_mode in absent bogus; do
     && grep -q 'PREWARM DEGRADED' <<<"$pw_r21_pre_out"; then
     pass "round21 NON-VACUITY (MEASURED, $pw_r21_mode): the PRE-FIX code ACCEPTS a COLD session whose prewarm status is unverifiable and PUBLISHES its cold figures, a 2.00x ratio and a [BELOW TARGET] verdict — captioned 'PREWARM DEGRADED' and reported anyway"
   else
-    fail "round21 non-vacuity ($pw_r21_mode): the pre-fix reporter must publish the cold figure and verdict, else the refusal closed nothing (rc=$pw_r21_pre_rc, out: $(grep -nE '\[COLD\]|ratio|PREWARM' <<<"$pw_r21_pre_out" | head -5))"
+    fail "round21 non-vacuity ($pw_r21_mode): the pre-fix reporter must publish the cold figure and verdict, else the refusal closed nothing (rc=$pw_r21_pre_rc, out: $(grep -m5 -nE '\[COLD\]|ratio|PREWARM' <<<"$pw_r21_pre_out"))"
   fi
   # The pre-fix run above also wrote a `results.json` into this dir, carrying the unverified cold
   # figure into the machine-readable record — which is the finding's other half, asserted rather than

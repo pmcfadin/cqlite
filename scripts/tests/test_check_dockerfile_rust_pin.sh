@@ -97,7 +97,7 @@ fi
 # guard's intended non-zero exit): assert the failure is the PARSE error, proving
 # the extraction yielded an empty pin rather than a whole-line passthrough (L4).
 latest_out="$(bash "$GUARD" "$tmp/Dockerfile.latest" "$tmp/rust-toolchain.toml" 2>&1 || true)"
-if ! printf '%s' "$latest_out" | grep -q "could not parse a numeric version"; then
+if ! grep -q "could not parse a numeric version" <<<"$latest_out"; then
   echo "FAIL: rust:latest did not produce the intended parse error (dead-branch regression)"
   printf '%s\n' "$latest_out"
   exit 1
