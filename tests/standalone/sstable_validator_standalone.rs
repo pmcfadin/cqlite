@@ -7,10 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use cqlite_core::{
     platform::Platform,
-    storage::sstable::{
-        reader::SSTableReader,
-        writer::SSTableWriter,
-    },
+    storage::sstable::{reader::SSTableReader, writer::SSTableWriter},
     types::TableId,
     Config, Result, RowKey, Value,
 };
@@ -71,15 +68,29 @@ async fn test_basic_write_read(
 
     // Write test data
     let mut writer = SSTableWriter::create(&test_path, config, platform.clone()).await?;
-    
+
     let test_data = vec![
-        (TableId::new("users"), RowKey::from("user1"), Value::text("Alice".to_string())),
-        (TableId::new("users"), RowKey::from("user2"), Value::text("Bob".to_string())),
-        (TableId::new("posts"), RowKey::from("post1"), Value::text("Hello World".to_string())),
+        (
+            TableId::new("users"),
+            RowKey::from("user1"),
+            Value::text("Alice".to_string()),
+        ),
+        (
+            TableId::new("users"),
+            RowKey::from("user2"),
+            Value::text("Bob".to_string()),
+        ),
+        (
+            TableId::new("posts"),
+            RowKey::from("post1"),
+            Value::text("Hello World".to_string()),
+        ),
     ];
 
     for (table_id, key, value) in &test_data {
-        writer.add_entry(table_id, key.clone(), value.clone()).await?;
+        writer
+            .add_entry(table_id, key.clone(), value.clone())
+            .await?;
     }
 
     writer.finish().await?;
@@ -116,7 +127,8 @@ async fn test_basic_write_read(
             }
             None => {
                 return Err(cqlite_core::error::Error::storage(format!(
-                    "Could not read back written value for key {:?}", key
+                    "Could not read back written value for key {:?}",
+                    key
                 )));
             }
         }
@@ -135,7 +147,7 @@ async fn test_data_types(
     let mut writer = SSTableWriter::create(&test_path, config, platform.clone()).await?;
 
     let table_id = TableId::new("data_types_test");
-    
+
     // Test all basic types
     let test_data = vec![
         ("null_value", Value::Null),
@@ -151,18 +163,29 @@ async fn test_data_types(
         ("text_empty", Value::text("".to_string())),
         ("blob_simple", Value::blob(vec![1, 2, 3, 4, 5])),
         ("blob_empty", Value::blob(vec![])),
-        ("timestamp", Value::Timestamp(
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
-        )),
-        ("uuid", Value::Uuid(vec![
-            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0
-        ])),
+        (
+            "timestamp",
+            Value::Timestamp(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros() as u64,
+            ),
+        ),
+        (
+            "uuid",
+            Value::Uuid(vec![
+                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,
+                0xde, 0xf0,
+            ]),
+        ),
     ];
 
     // Write all test data
     for (key, value) in &test_data {
-        writer.add_entry(&table_id, RowKey::from(*key), value.clone()).await?;
+        writer
+            .add_entry(&table_id, RowKey::from(*key), value.clone())
+            .await?;
     }
 
     writer.finish().await?;
@@ -182,7 +205,8 @@ async fn test_data_types(
             }
             None => {
                 return Err(cqlite_core::error::Error::storage(format!(
-                    "Could not read back data for key '{}'", key
+                    "Could not read back data for key '{}'",
+                    key
                 )));
             }
         }
@@ -201,31 +225,41 @@ async fn test_file_format(
 
     // Create minimal SSTable
     let mut writer = SSTableWriter::create(&test_path, config, platform).await?;
-    writer.add_entry(&TableId::new("test"), RowKey::from("key"), Value::text("value".to_string())).await?;
+    writer
+        .add_entry(
+            &TableId::new("test"),
+            RowKey::from("key"),
+            Value::text("value".to_string()),
+        )
+        .await?;
     writer.finish().await?;
 
     // Read file as binary and validate basic format
-    let file_data = std::fs::read(&test_path)
-        .map_err(|e| cqlite_core::error::Error::storage(format!("Failed to read test file: {}", e)))?;
+    let file_data = std::fs::read(&test_path).map_err(|e| {
+        cqlite_core::error::Error::storage(format!("Failed to read test file: {}", e))
+    })?;
 
     // Check minimum file size
     if file_data.len() < 48 {
         return Err(cqlite_core::error::Error::storage(format!(
-            "File too small for valid SSTable: {} bytes", file_data.len()
+            "File too small for valid SSTable: {} bytes",
+            file_data.len()
         )));
     }
 
     // Validate magic bytes
     if &file_data[0..4] != [0x5A, 0x5A, 0x5A, 0x5A] {
         return Err(cqlite_core::error::Error::storage(format!(
-            "Invalid magic bytes in header: {:?}", &file_data[0..4]
+            "Invalid magic bytes in header: {:?}",
+            &file_data[0..4]
         )));
     }
 
     // Validate format version
     if &file_data[4..6] != b"oa" {
         return Err(cqlite_core::error::Error::storage(format!(
-            "Invalid format version: {:?}", String::from_utf8_lossy(&file_data[4..6])
+            "Invalid format version: {:?}",
+            String::from_utf8_lossy(&file_data[4..6])
         )));
     }
 
@@ -233,7 +267,8 @@ async fn test_file_format(
     let footer_start = file_data.len() - 8;
     if &file_data[footer_start..] != [0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A] {
         return Err(cqlite_core::error::Error::storage(format!(
-            "Invalid footer magic bytes: {:?}", &file_data[footer_start..]
+            "Invalid footer magic bytes: {:?}",
+            &file_data[footer_start..]
         )));
     }
 
@@ -256,14 +291,26 @@ async fn test_large_data(
     let mut writer = SSTableWriter::create(&test_path, config, platform.clone()).await?;
 
     let table_id = TableId::new("large_data_test");
-    
+
     // Create large text value
     let large_text = "A".repeat(10000); // 10KB of 'A's
-    writer.add_entry(&table_id, RowKey::from("large_text"), Value::text(large_text.clone())).await?;
+    writer
+        .add_entry(
+            &table_id,
+            RowKey::from("large_text"),
+            Value::text(large_text.clone()),
+        )
+        .await?;
 
     // Create large binary value
     let large_binary: Vec<u8> = (0..5000).map(|i| (i % 256) as u8).collect();
-    writer.add_entry(&table_id, RowKey::from("large_binary"), Value::blob(large_binary.clone())).await?;
+    writer
+        .add_entry(
+            &table_id,
+            RowKey::from("large_binary"),
+            Value::blob(large_binary.clone()),
+        )
+        .await?;
 
     writer.finish().await?;
 
@@ -275,13 +322,13 @@ async fn test_large_data(
         Some(Value::Text(text)) => {
             if text.len() != 10000 || !text.chars().all(|c| c == 'A') {
                 return Err(cqlite_core::error::Error::storage(
-                    "Large text data corruption detected".to_string()
+                    "Large text data corruption detected".to_string(),
                 ));
             }
         }
         _ => {
             return Err(cqlite_core::error::Error::storage(
-                "Could not read large text data".to_string()
+                "Could not read large text data".to_string(),
             ));
         }
     }
@@ -291,13 +338,13 @@ async fn test_large_data(
         Some(Value::Blob(blob)) => {
             if blob != large_binary {
                 return Err(cqlite_core::error::Error::storage(
-                    "Large binary data corruption detected".to_string()
+                    "Large binary data corruption detected".to_string(),
                 ));
             }
         }
         _ => {
             return Err(cqlite_core::error::Error::storage(
-                "Could not read large binary data".to_string()
+                "Could not read large binary data".to_string(),
             ));
         }
     }
@@ -333,7 +380,9 @@ async fn test_unicode_data(
 
     // Write Unicode data
     for (key, text) in &unicode_test_data {
-        writer.add_entry(&table_id, RowKey::from(*key), Value::text(text.to_string())).await?;
+        writer
+            .add_entry(&table_id, RowKey::from(*key), Value::text(text.to_string()))
+            .await?;
     }
 
     writer.finish().await?;
@@ -353,7 +402,8 @@ async fn test_unicode_data(
             }
             _ => {
                 return Err(cqlite_core::error::Error::storage(format!(
-                    "Could not read Unicode data for key '{}'", key
+                    "Could not read Unicode data for key '{}'",
+                    key
                 )));
             }
         }
