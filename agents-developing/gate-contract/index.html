@@ -803,9 +803,8 @@ coverage. It is format-brittle in a <strong>shared</strong> direction — a refl
 branch at once, which is fail-closed rather than a false green, and the named diagnostic turns a
 fleet-wide stop into a five-minute fix. Every baseline-bearing verdict line ends by naming its
 baseline source (<code dir="auto">— baseline read via the committed manifest</code> / <code dir="auto">— baseline read via the TEXTUAL FALLBACK: … VERIFIED ABSENT at that sha</code>), so use of the fallback is visible rather than inferred.</p>
-<p><strong>And it ends by naming the OBJECT provenance too, because the shared object store is TRUSTED, not
-verified per-read</strong> (<code dir="auto">; objects: baseline REUSED from this lane's SHARED store</code> / <code dir="auto">baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store</code> / <code dir="auto">provenance NOT RECORDED</code> —
-each followed by <code dir="auto">store TRUSTED, not verified (#3749)</code>). Git does not rehash a packed object against
+<p><strong>And it ends by naming the OBJECT provenance too, because the shared object store is not swept and the consumed objects are REHASHED at the read (#4413)</strong> (<code dir="auto">; objects: baseline REUSED from this lane's SHARED store</code> / <code dir="auto">baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store</code> / <code dir="auto">provenance NOT RECORDED</code> —
+each followed by <code dir="auto">the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept)</code>). Git does not rehash a packed object against
 the id it was asked for on an ordinary read, and on this fleet <strong>every lane on a box is a worktree of
 one shared <code dir="auto">.git</code></strong>, so a planted pack/index can make a canonical sha resolve to a shortened
 manifest — a false <code dir="auto">PASS</code>. What an ordinary read <em>does</em> verify is the pack CRC and the zlib stream,
@@ -817,8 +816,8 @@ used to call a peer lane planting objects “a non-invoker route, hence a defect
 #3312 triage rule already says same-host actors able to write these scripts are invoker-class, and a
 peer wanting a false <code dir="auto">PASS</code> can simply edit <code dir="auto">scripts/agent-gate.sh</code>, which is cheaper than forging
 pack data; no check inside a process defends against the party that controls the process.
-<em>Accidental</em> corruption <strong>is</strong> in model, and its control is a periodic full-rehash sweep:
-<code dir="auto">scripts/check-object-store-integrity.sh</code> runs a full <code dir="auto">git fsck</code> (never <code dir="auto">--connectivity-only</code>, which
+<em>Accidental</em> corruption <strong>is</strong> in model, and its control was a periodic full-rehash sweep, <strong>removed with its fleet schedulers (#4441) and REPLACED by a rehash at the read (#4413 job 100)</strong>: the pre-flight hashes every object it consumes — the baseline and HEAD commits, the trees down to the manifest or gate script, the manifest blob’s very bytes, and the commits of an ancestry <code dir="auto">yes</code> that would excuse a removal — against its id, and a mismatch refuses as <code dir="auto">object-store-corrupt</code> (an object that cannot be checked refuses as <code dir="auto">object-store-unverified</code>; never a fallback to trusting it). The old sweep was:
+<code dir="auto">scripts/check-object-store-integrity.sh</code> (removed, #4441) runs a full <code dir="auto">git fsck</code> (never <code dir="auto">--connectivity-only</code>, which
 does not rehash content) over the shared store and emits an anchored four-valued
 <code dir="auto">VERIFIED</code>/<code dir="auto">CORRUPT</code>/<code dir="auto">UNSWEEPABLE</code>/<code dir="auto">UNMEASURED</code> verdict — exit 0/4/6/5, and <strong>a consumer must not
 read <code dir="auto">UNMEASURED</code> as clean</strong>. It runs at machine onboarding (<code dir="auto">bootstrap-agent-machine.sh</code> section 5d, where
@@ -828,8 +827,7 @@ supervisor loudly</strong> instead of holding — corruption is non-self-clearin
 would spin to the wall-clock budget taking no useful action — and so does <code dir="auto">UNSWEEPABLE</code> (below),
 while <code dir="auto">UNMEASURED</code> is journalled and
 paged once and deliberately does <strong>not</strong> stop the loop, because refusing to run any worker over a
-hygiene probe that could not run is a self-DoS. <strong>That sweep is periodic, not per-read, which is why
-the emitted clause still says <code dir="auto">TRUSTED, not verified</code>.</strong></p>
+hygiene probe that could not run is a self-DoS. <strong>That sweep is gone; the rest of the store is not swept, which is why the emitted clause says so.</strong></p>
 <p><strong>The fatal verdict is affirmative, and it had to be made so.</strong> A <code dir="auto">git fsck</code> over a store up to
 eight peer lanes are concurrently writing prints <code dir="auto">error:</code> lines on a <strong>healthy</strong> store (measured on
 this fleet: <code dir="auto">invalid reflog entry</code> naming a different branch each run, on a quarter to a half of all
@@ -1584,7 +1582,7 @@ cross-referenced deliberately so they cannot drift apart again — #3229 fixed t
 reviewer’s copy of this bug and #3250 fixed the gate’s.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="new-machine-setup">New-machine setup</h2><a class="sl-anchor-link" href="#new-machine-setup"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “New-machine setup”</span></a></div>
 <p>A fresh machine that will run the gate should first run
-<code dir="auto">bash scripts/bootstrap-agent-machine.sh</code> (see
+the former bootstrap script (<code dir="auto">bootstrap-agent-machine.sh</code>, removed in #4413) (see
 <code dir="auto">docs/development/agent-machine-setup.md</code>): it installs/verifies the accelerators
 below, the datasets, <code dir="auto">gh</code> auth + the <code dir="auto">project</code> scope, and roborev’s local config,
 then prints the gate’s <code dir="auto">accelerators:</code> line as a health check.</p>
@@ -1622,7 +1620,7 @@ agent images ship <code dir="auto">4</code>, which on Debian/Ubuntu kernels deni
 resolve to bare addresses — a silent attribution loss) · <code dir="auto">absent</code> (the <code dir="auto">/proc</code>
 controls are not present, e.g. a container — tune the host) · <code dir="auto">unknown</code> (present but
 unparseable; never guessed). Anything but <code dir="auto">ok</code> on a box you intend to measure means
-<strong>re-run <code dir="auto">bash scripts/bootstrap-agent-machine.sh --yes</code></strong>, which installs
+<strong>re-run the former bootstrap script (<code dir="auto">bootstrap-agent-machine.sh</code>, removed in #4413)</strong>, which installs
 <code dir="auto">/etc/sysctl.d/99-cqlite-perf.conf</code> and then <em>verifies</em> it by running
 <code dir="auto">perf stat -C 0 -e cycles</code>. Rationale + security posture:
 <code dir="auto">docs/development/fleet-runbook.md</code>.</li>
@@ -1653,7 +1651,7 @@ DISCARDED</strong> to sccache’s 10 GiB default, and a bare integer means BYTES
 anywhere. <strong><code dir="auto">sccache-health</code> cannot answer any of this</strong>: it is the sum of four ERROR counters with
 no capacity input, so a <code dir="auto">warn</code> there can never be cleared by raising the cap and a permanently-full,
 thrashing cache reads <code dir="auto">ok</code>. Persist and verify the cap with
-<code dir="auto">bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap</code>, which correlates the
+the former bootstrap script (<code dir="auto">bootstrap-agent-machine.sh</code>, removed in #4413), which correlates the
 <code dir="auto">/etc/environment</code> line, the value a fresh non-login PAM session sees, that value in bytes (its own
 isolated sccache oracle) and the bytes the running server enforces. <strong>Declared residual:</strong> a LOGIN
 shell can see a different value (on this fleet <code dir="auto">/etc/profile.d</code> runs after <code dir="auto">pam_env</code>) and that
@@ -1688,7 +1686,7 @@ formula, <code dir="auto">clamped</code> = it was a valid integer &#x3C; 1 and w
 <code dir="auto">N(default)</code> on a fleet box as <em>the pin is not provisioned</em>.</p>
 <p><strong>The remedy DIFFERS BY TOKEN, and getting that wrong sends you in a circle.</strong> A
 <code dir="auto">default</code> box has no pin line at all, so
-<code dir="auto">bash scripts/bootstrap-agent-machine.sh --fix-gate-pin</code> (or <code dir="auto">--yes</code>) persists one.
+the former bootstrap script (<code dir="auto">bootstrap-agent-machine.sh</code>, removed in #4413) (or <code dir="auto">--yes</code>) persists one.
 An <code dir="auto">invalid</code> or <code dir="auto">clamped</code> box ALREADY HAS the line, holding a bad value — and
 bootstrap deliberately never rewrites an existing value, because a box running >1
 gate on purpose must not be clobbered — so re-running it there is a <strong>silent
