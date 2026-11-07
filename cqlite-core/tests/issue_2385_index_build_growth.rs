@@ -8,10 +8,17 @@
 //! ~257s cold `LIMIT 5` at 1.42M partitions (local 150k→1.8s, 2M→312s: ~13× data
 //! → ~173× time ≈ 13²).
 //!
-//! This pins the fix with a GROWTH RATIO, not an absolute wall-clock (loaded-box
-//! safe): building 4× the entries must cost ≤ ~8× the time. A quadratic build
-//! gives ~16× (=4²); a linearithmic build gives ~4.3× (4 · log(4N)/log(N)). The
-//! bound of 8 sits between them with generous headroom for scheduler noise.
+//! Two layers (#4232):
+//!
+//! * LIVE (merge-gating): `from_entries_matches_add_entry_semantics` is a
+//!   deterministic equivalence check against the per-entry `add_entry` path
+//!   (ordering, dedup, last-write-wins, counts). It cannot flake on load.
+//! * OPT-IN (`#[ignore]`, `cargo test -- --ignored`): the GROWTH RATIO. Building 4×
+//!   the entries must cost ≤ ~8× the time (quadratic ≈ 16×, linearithmic ≈ 4.3×).
+//!   It is a wall-clock ratio over 18–255 ms samples and flaked under load (9.26x,
+//!   9.70x, 8.16x), so it is out of the default gate. No deterministic operation
+//!   count is reachable without touching library code: `RowKey` derives `Ord`
+//!   over `Arc<[u8]>` and `from_entries` is not generic over the comparator.
 //!
 //! Insertion order is DESCENDING by key bytes — the worst case for the old
 //! binary-search-then-insert loop (every insert lands at position 0 → a full
@@ -69,7 +76,52 @@ fn time_build_min(entries: &[IndexEntry], runs: usize) -> f64 {
     best
 }
 
+/// Deterministic live check: `from_entries` (sort-once bulk build) must equal the
+/// incremental `add_entry` path, including duplicates (last write wins).
 #[test]
+fn from_entries_matches_add_entry_semantics() {
+    let table_id = TableId::new("growth_ks.growth_tbl");
+    let mut entries = descending_entries(&table_id, 2_000);
+    // Duplicate keys with different offsets: the later entry must win.
+    for i in 0..50u64 {
+        entries.push(IndexEntry {
+            table_id: table_id.clone(),
+            key: RowKey::new((1 + i * 7).to_be_bytes().to_vec()),
+            offset: 1_000_000 + i,
+            size: 0,
+            compressed: false,
+        });
+    }
+
+    let bulk = Index::from_entries(entries.clone());
+    let mut incremental = Index::new();
+    for e in entries.iter().cloned() {
+        incremental.add_entry(e);
+    }
+
+    assert_eq!(bulk.len(), incremental.len(), "total_entries must match");
+    let a: Vec<(Vec<u8>, u64)> = bulk
+        .get_range(&table_id, None, None)
+        .expect("range")
+        .into_iter()
+        .map(|e| (e.key.0.to_vec(), e.offset))
+        .collect();
+    let b: Vec<(Vec<u8>, u64)> = incremental
+        .get_range(&table_id, None, None)
+        .expect("range")
+        .into_iter()
+        .map(|e| (e.key.0.to_vec(), e.offset))
+        .collect();
+    assert_eq!(a.len(), 2_000, "duplicates collapse to unique keys");
+    assert!(
+        a.windows(2).all(|w| w[0].0 < w[1].0),
+        "keys must be strictly ascending by bytes"
+    );
+    assert_eq!(a, b, "bulk build must equal incremental add_entry result");
+}
+
+#[test]
+#[ignore = "wall-clock growth ratio flakes under load (#4232); run with --ignored on a quiet host"]
 fn index_build_is_not_quadratic() {
     let table_id = TableId::new("growth_ks.growth_tbl");
 
@@ -97,6 +149,7 @@ fn index_build_is_not_quadratic() {
          (quadratic ~16, linearithmic ~4.3, bound 8)"
     );
 
+    // perf-gate-allow: #[ignore]d opt-in perf lane (#4232), not in the default gate.
     assert!(
         ratio <= 8.0,
         "Index::from_entries must build in ~O(N log N): 4x the entries took {ratio:.2}x the time \
