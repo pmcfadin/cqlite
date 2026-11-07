@@ -113,7 +113,7 @@ run_case() {
 $out"
         return
       fi
-      printf '%s\n' "$out" | grep -q '^FLIGHT-ALLOC-CONF: verdict PASS' \
+      grep -q '^FLIGHT-ALLOC-CONF: verdict PASS' <<<"$out" \
         || { fail_case "$label: exited 0 but printed no PASS verdict line. Output:
 $out"; return; }
       ;;
@@ -123,14 +123,14 @@ $out"; return; }
 $out"
         return
       fi
-      printf '%s\n' "$out" | grep -q '^FLIGHT-ALLOC-CONF: verdict FAIL' \
+      grep -q '^FLIGHT-ALLOC-CONF: verdict FAIL' <<<"$out" \
         || { fail_case "$label: exited $rc but printed no FAIL verdict line. Output:
 $out"; return; }
       ;;
     *) fail_case "$label: internal — unknown expectation '$expect'"; return ;;
   esac
   for needle in "$@"; do
-    printf '%s\n' "$out" | grep -qF -- "$needle" \
+    grep -qF -- "$needle" <<<"$out" \
       || { fail_case "$label: verdict was $expect but the output does not NAME '$needle' — a verdict that does not identify its subject is not evidence. Output:
 $out"; return; }
   done
@@ -319,7 +319,7 @@ run_case "R17 a non-git tree is refused, never walked as a filesystem" "$ws" fai
 
 # ------------------------------------------------------------------------ usage
 out=$(bash "$GUARD" --help 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'Usage: test_flight_allocator_confinement.sh'; then
+if [ "$rc" -eq 0 ] && grep -q 'Usage: test_flight_allocator_confinement.sh' <<<"$out"; then
   pass_case "U1 --help exits 0 and prints usage"
 else
   fail_case "U1 --help: rc=$rc output:

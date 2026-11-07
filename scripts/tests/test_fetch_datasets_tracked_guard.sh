@@ -1869,7 +1869,8 @@ if [ "$R32_CENSUS_BEFORE" = "$R32_CENSUS_AFTER" ]; then
   ok "3310-report: the dataset root is byte-for-byte unchanged (no writes, no repair)"
 else
   bad "3310-report: the root CHANGED across a report-only probe:"
-  diff <(printf '%s\n' "$R32_CENSUS_BEFORE") <(printf '%s\n' "$R32_CENSUS_AFTER") | head -10
+  _r32_diff=$(diff <(cat <<<"$R32_CENSUS_BEFORE") <(cat <<<"$R32_CENSUS_AFTER"))  || true
+  head -10 <<<"$_r32_diff"
 fi
 if [ "$R32_STATUS_BEFORE" = "$R32_STATUS_AFTER" ]; then
   ok "3310-report: git status --porcelain is unchanged (the index was not touched)"
@@ -2125,7 +2126,7 @@ run_verify "$R38" "$R38/test-data/datasets"
 # The printed line carries this script's `ERROR:   ` prefix; the COMMAND is what
 # follows it, and that is what an operator copies. Strip the prefix, then run the
 # remainder VERBATIM — anything less would not test the advertised text.
-R38_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+R38_CMD="$(grep -m1 -E "git -C .* restore --worktree --" <<<"$OUT" | sed 's/^ERROR:[[:space:]]*//')"
 if [ -n "$R38_CMD" ]; then
   ok "3310-scoped-repair: a --worktree repair line was printed"
 else
@@ -2177,7 +2178,7 @@ if [ "$RC" -ne 0 ]; then
 else
   bad "3310-staged-delete: exited 0; output: $OUT"
 fi
-R39_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+R39_CMD="$(grep -m1 -E "git -C .* restore --staged --worktree --" <<<"$OUT" | sed 's/^ERROR:[[:space:]]*//')"
 if [ -n "$R39_CMD" ]; then
   ok "3310-staged-delete: a --staged --worktree repair line was printed"
 else
@@ -2288,7 +2289,7 @@ stage_delete_case() {
     *"test-data/datasets/$rel"*) ok "$label: the report names the exact path" ;;
     *) bad "$label: the exact path is absent (truncated or re-quoted?); output: $OUT" ;;
   esac
-  cmd="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+  cmd="$(grep -m1 -E "git -C .* restore --staged --worktree --" <<<"$OUT" | sed 's/^ERROR:[[:space:]]*//')"
   if [ -n "$cmd" ]; then
     ok "$label: a --staged --worktree repair line was printed"
   else
@@ -2336,7 +2337,7 @@ if [ "$RC" -ne 0 ]; then
 else
   bad "3310-worktree-newline: exited 0 with the fixture gone; output: $OUT"
 fi
-R42_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+R42_CMD="$(grep -m1 -E "git -C .* restore --worktree --" <<<"$OUT" | sed 's/^ERROR:[[:space:]]*//')"
 ( cd "$R42" && eval "$R42_CMD" ) >/dev/null 2>&1
 if [ -f "$R42/test-data/datasets/$R42_NL" ]; then
   ok "3310-worktree-newline: the advertised command restores a newline-bearing path"
@@ -2497,7 +2498,7 @@ esac
 # probe cannot classify, it must not print a command for anyone to paste.
 assert_no_repair_advertised() {
   local label="$1" n
-  n="$(printf '%s\n' "$OUT" | grep -cE "git -C .* restore " || true)"
+  n="$(grep -cE "git -C .* restore " <<<"$OUT" || true)"
   if [ "$n" -eq 0 ]; then
     ok "$label: advertises NO repair command"
   else
@@ -2578,7 +2579,7 @@ else
 fi
 # Case 49 (dedup): the path is listed once per STAGE by git; the report must name
 # it exactly once however the verdict was reached.
-R48_MENTIONS="$(printf '%s\n' "$OUT" | grep -o "goldens/simple_table-Data.db.jsonl" | wc -l | tr -d ' ')"
+R48_MENTIONS="$(grep -o "goldens/simple_table-Data.db.jsonl" <<<"$OUT" | wc -l | tr -d ' ')"
 if [ "$R48_MENTIONS" -eq 1 ]; then
   ok "3310-unmerged-dedup: the multi-stage path is named exactly once"
 else

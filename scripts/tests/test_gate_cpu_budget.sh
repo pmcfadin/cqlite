@@ -35,7 +35,11 @@ skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
 # budget_field <line> <field>: extract "<field>=<value>" from a `cpu-budget:` line.
 budget_field() {
-  printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
+  local _bf_t
+  _bf_t=$(tr ' ' '\n' <<<"$1")
+  local _sp_v
+  _sp_v=$(sed -n "s/^$2=//p" <<<"$_bf_t"); _sp_v=${_sp_v%%$'\n'*}
+  [ -z "$_sp_v" ] || printf '%s\n' "$_sp_v"
 }
 
 # cpu_budget <extra-env...>: run the hidden hook with a pinned ncpu + no-wrapper
@@ -225,7 +229,7 @@ fi
 #     INSIDE the max-concurrency token, exactly as build-jobs carries its own source.
 #     (6 key=value tokens after the `cpu-budget:` label = 7 whitespace-separated words.)
 line=$(cpu_budget AGENT_GATE_TEST_NCPU=16 CQLITE_GATE_MAX_CONCURRENCY=2)
-if [ "$(printf '%s\n' "$line" | wc -w | tr -d ' ')" = 7 ]; then
+if [ "$(wc -w <<<"$line" | tr -d ' ')" = 7 ]; then
   ok "source: the token count is unchanged (max-concurrency stays ONE token): $line"
 else
   bad "source: the source token leaked a space into the cpu-budget line: $line"

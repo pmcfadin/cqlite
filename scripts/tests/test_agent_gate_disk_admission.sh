@@ -881,7 +881,7 @@ BAR_KIB=$(gib_kib 40)
 # bar, i.e. when the old code would have ADMITTED this payload.
 prefix_parse_admits() {
   local v
-  v=$(printf '%s\n' "$1" | awk 'END { print $4 }' 2>/dev/null)
+  v=$(awk 'END { print $4 }' 2>/dev/null <<<"$1")
   case "$v" in ''|*[!0-9]*) return 1 ;; esac
   [ "$v" -ge "$BAR_KIB" ]
 }
@@ -1778,7 +1778,7 @@ q_derive_free() {
   )
 }
 q_free=$(q_derive_free)
-q_free_n=$(printf '%s\n' "$q_free" | grep -c '[^[:space:]]' || true)
+q_free_n=$(grep -c '[^[:space:]]' <<<"$q_free" || true)
 q_free_n="${q_free_n%%$'\n'*}"; case "$q_free_n" in ''|*[!0-9]*) q_free_n=0 ;; esac
 # A derivation that yields nothing would make every assertion below vacuous.
 if [ "$q_free_n" -ge 3 ]; then
@@ -2163,7 +2163,7 @@ v_unisolated=$(awk '
   }
   { lines[NR] = $0 }
 ' "$0" | tr '\n' ' ')
-if [ -z "$(printf '%s' "$v_unisolated" | tr -d '[:space:]')" ]; then
+if [ -z "$(tr -d '[:space:]' <<<"$v_unisolated")" ]; then
   ok "env-isolation: every gate invocation in this file routes through the DA_ISOLATE list"
 else
   bad "env-isolation: UNISOLATED gate invocation(s) at line(s): $v_unisolated — an inherited variable would reach that case"
@@ -2297,7 +2297,7 @@ fi
 # ===========================================================================
 W_NEG=-1048576   # -1 GiB
 # THE POSITIVE CONTROL: the PRE-FIX validators, reproduced verbatim, on the same value.
-if printf '%s' "$W_NEG" | grep -qE '^[0-9]+$'; then
+if grep -qE '^[0-9]+$' <<<"$W_NEG"; then
   bad "negative-avail CONTROL: the pre-fix unsigned pattern ACCEPTED $W_NEG; this case does not demonstrate the defect"
 else
   ok "negative-avail CONTROL: the PRE-FIX unsigned pattern REJECTED $W_NEG — it became UNMEASURED, i.e. non-fatal, i.e. admitted"
@@ -3155,7 +3155,7 @@ case "$ad2_line" in
   *) bad "leftover-accumulates: unexpected rendering: ${ad2_line:-<none>}" ;;
 esac
 # Both paths must actually appear, not just a count.
-ad2_paths=$(printf '%s' "$ad2_line" | grep -o "$tmp/ad-two-target/\.[0-9a-f]*\.agent-gate-writeprobe" | sort -u | grep -c . || true)
+ad2_paths=$(grep -o "$tmp/ad-two-target/\.[0-9a-f]*\.agent-gate-writeprobe" <<<"$ad2_line" | sort -u | grep -c . || true)
 ad2_paths="${ad2_paths%%$'\n'*}"; case "$ad2_paths" in ''|*[!0-9]*) ad2_paths=0 ;; esac
 if [ "$ad2_paths" -eq 2 ]; then
   ok "leftover-accumulates: TWO DISTINCT paths are named (each probe makes its own random name)"

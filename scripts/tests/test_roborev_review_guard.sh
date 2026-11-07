@@ -549,7 +549,7 @@ if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
         printf '%s\n' "$STUB_GH_ISSUE_COMMENTS_JSON"
         exit 0
       fi
-      printf '%b' "${STUB_GH_ISSUE_COMMENTS:-}" | STUB_WANT_ISSUE="${3:-}" python3 -c '
+      printf '%b' "${STUB_GH_ISSUE_COMMENTS:-}" | STUB_WANT_ISSUE="${3:-}" python3 -c '  # sigpipe-fixture: line of the generated gh stub script (quoted heredoc), not a pipe of the suite itself
 import json, os, sys
 want = os.environ.get("STUB_WANT_ISSUE", "")
 raw = sys.stdin.read()
@@ -623,7 +623,7 @@ if [ -n "${STUB_GH_COMMENTS_FILE:-}" ] && [ -f "${STUB_GH_COMMENTS_FILE}" ]; the
 else
   STUB_GH_SRC=$(printf '%b' "${STUB_GH_COMMENTS:-}")
 fi
-printf '%s' "$STUB_GH_SRC" | python3 -c '
+printf '%s' "$STUB_GH_SRC" | python3 -c '  # sigpipe-fixture: line of a generated stub script (quoted heredoc), not a pipe of the suite itself
 import json, sys
 raw = sys.stdin.read()
 comments = []
@@ -2018,9 +2018,9 @@ cx3j_shape() { # cx3j_shape <file> [funcname]
   if str_matches "$body" -E '(^|[^[:alnum:]_])(break|continue)([^[:alnum:]_]|$)'; then
     printf 'HAS-BREAK-OR-CONTINUE\n'; return 0
   fi
-  nret=$(printf '%s\n' "$body" | grep -cE '(^|[^[:alnum:]_])return([^[:alnum:]_]|$)' || true)
+  nret=$(grep -cE '(^|[^[:alnum:]_])return([^[:alnum:]_]|$)' <<<"$body" || true)
   if [ "$nret" -ne 1 ]; then printf 'RETURNS=%s\n' "$nret"; return 0; fi
-  last=$(printf '%s\n' "$body" | tail -1)
+  last=$(tail -1 <<<"$body")
   case "$last" in
     *return*) printf 'OK\n' ;;
     *) printf 'RETURN-NOT-LAST\n' ;;
@@ -2101,7 +2101,7 @@ if [ -z "$cx3j_pred" ]; then
   bad 'case (cx3j): _roborev_mode_exec_state_at was not found, so its range-blindness was not checked'
 else
   _cx3j_exec="$tmp/cx3j-pred-exec.txt"
-  printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' >"$_cx3j_exec" || true
+  grep -vE '^[[:space:]]*#' <<<"$cx3j_pred" >"$_cx3j_exec" || true
   if ! grep -qE 'RANGE_BASE_SHA|BASE_TIP_SHA|\bHEAD\b' "$_cx3j_exec"; then
     ok 'case (cx3j): the per-endpoint predicate names no endpoint (range-blind, so it cannot encode an ordering)'
   else
@@ -3219,7 +3219,7 @@ printf '== case (t2): an UPPERCASE announcement is normalised, not fed on as gar
 reset_stub
 work=$(make_fixture case_t2 pushed)
 base_sha=$(git -C "$work" rev-parse origin/main)
-STUB_ANNOUNCE_SHA=$(printf '%s' "${base_sha:0:9}" | tr 'a-f' 'A-F')
+STUB_ANNOUNCE_SHA=$(tr 'a-f' 'A-F' <<<"${base_sha:0:9}")
 run_wrapper "$work"
 assert_verdict 'case (t2)' PASS 0
 assert_says 'case (t2) the upper-case announcement was parsed' '^job: 4656$'
@@ -7229,7 +7229,7 @@ else
 fi
 _unq_callers=$(grep -nE '(^|[^#])roborev_unquote_path ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL" \
   | grep -v '^[^:]*:[0-9]*: *#' || true)
-_unq_caller_files=$(printf '%s\n' "$_unq_callers" | sed -n 's|^\([^:]*\):.*|\1|p' | sort -u | wc -l | tr -d '[:space:]')
+_unq_caller_files=$(sed -n 's|^\([^:]*\):.*|\1|p' <<<"$_unq_callers" | sort -u | wc -l | tr -d '[:space:]')
 if [ "${_unq_caller_files:-0}" -eq 1 ] && str_matches "$_unq_callers" -F 'roborev-review-oracles.sh'; then
   ok 'structural: roborev_unquote_path is called ONLY from the oracles file (one boundary)'
 else
@@ -7589,9 +7589,9 @@ fi
 _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | head -1 | cut -d: -f1)
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
 _pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
-_pc_exec=$(printf '%s\n' "$_pc_body" | grep -v '^[[:space:]]*#')
+_pc_exec=$(grep -v '^[[:space:]]*#' <<<"$_pc_body")
 if str_matches "$_pc_exec" -F 'roborev_absence_waiver_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
-  && [ "$(printf '%s\n' "$_pc_exec" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
+  && [ "$(grep -cF 'roborev_absence_waiver_lookup' <<<"$_pc_exec")" -eq 1 ] \
   && str_matches "$_pc_body" -F 'PROMPT_CONTENT="WAIVED ('; then
   ok 'structural: the waiver is looked up EXACTLY ONCE, inside the absence branch, so it can excuse only that verdict (constraint (c))'
 else
@@ -7966,7 +7966,7 @@ fi
 # and no content identity", and a statement of ABSENCE is exactly what must survive.
 _diag=$(grep -hnE 'DETAILS\+=\(|^[[:space:]]*(PROMPT_CONTENT|REVIEW_COMPLETED|TIER1|TIER2|FINDINGS|CENSUS_CHECK|CODE_FREE|PUSH_ASSERT|SHA_ASSERT|JOB_RECORD)=' \
   "$WRAPPER_REAL" "$CHECKS_FILE" "$ORACLES" 2>/dev/null || true)
-_diag_stale=$(printf '%s\n' "$_diag" | grep -inE 'captur|watcher|watchdog|observer|digest(ed|ing)? (of|the snapshot)|snapshot digest|mid-copy|SNAPSHOT_(DIGEST|BYTES)|bounded read|read the snapshot' || true)
+_diag_stale=$(grep -inE 'captur|watcher|watchdog|observer|digest(ed|ing)? (of|the snapshot)|snapshot digest|mid-copy|SNAPSHOT_(DIGEST|BYTES)|bounded read|read the snapshot' <<<"$_diag" || true)
 if [ -z "$_diag_stale" ]; then
   ok 'structural: no emitted diagnostic names a retired mechanism (capture/watcher/watchdog/observer/digest) as current behaviour'
 else
@@ -8069,7 +8069,7 @@ else
     | grep -vE '^[[:space:]]*(if|elif) \[' \
     | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
   _em_printfs=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER_REAL" \
-    | grep -E '^[[:space:]]*printf' | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
+    | grep -E '^[[:space:]]*printf' | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)  # sigpipe-fixture: false positive: printf is inside grep patterns over a file
   if [ -n "$_em_printfs" ]; then
     bad "structural: emit_summary printf's a value directly, bypassing the neutralising boundary: ${_em_printfs%%$'\n'*}"
   else
@@ -8196,8 +8196,8 @@ _scan_case=''
 if [ -n "$_scan_start" ] && [ -n "$_scan_end" ]; then
   _scan_block=$(sed -n "${_scan_start},${_scan_end}p" "$WRAPPER_REAL")
   # The key list ends at the first line that does not continue with a trailing backslash.
-  _scan_keys=$(printf '%s\n' "$_scan_block" | awk '{print} !/\\$/{exit}')
-  _scan_case=$(printf '%s\n' "$_scan_block" | grep -E 'case "\$verdict_token" in' | head -1 || printf '')
+  _scan_keys=$(awk '{print} !/\\$/{exit}' <<<"$_scan_block")
+  _scan_case=$(grep -m1 -E 'case "\$verdict_token" in' <<<"$_scan_block" || printf '')
 fi
 if [ -z "$_scan_block" ] || [ -z "$_scan_keys" ] || [ -z "$_scan_case" ]; then
   bad 'structural: could not locate the wrapper verdict scan STATEMENT (for scan_keyed in … case … done) to inspect'
@@ -8557,7 +8557,7 @@ else
       _gr_b=$(LC_ALL="$_gr_l" bash -c 'RE=$1; [[ $2 =~ ^${RE}$ ]] && echo M || echo n' _ "$_gr_re" "$_gr_s" 2>/dev/null)
       _gr_p=$(LC_ALL="$_gr_l" python3 -c 'import re,sys; print("M" if re.compile(sys.argv[1]).fullmatch(sys.argv[2]) else "n")' "$_gr_re" "$_gr_s" 2>/dev/null)
       _gr_pairs=$((_gr_pairs + 1))
-      [ "$_gr_b" = "$_gr_p" ] || _gr_bad="$_gr_bad ${_gr_l}:$(printf '%s' "$_gr_s" | tr -d '\n')(bash=$_gr_b,py=$_gr_p)"
+      [ "$_gr_b" = "$_gr_p" ] || _gr_bad="$_gr_bad ${_gr_l}:$(tr -d '\n' <<<"$_gr_s")(bash=$_gr_b,py=$_gr_p)"
     done
   done
   if [ -z "$_gr_bad" ]; then
@@ -9238,7 +9238,7 @@ for _bs_f in "$CHECKS_SRC" "$SCRIPT_DIR/../flow/premerge-review-binding.sh"; do
   if [ -z "$_bs_bad" ]; then
     ok "structural (cor4050): $(basename "$_bs_f") sources the shared recogniser only in a conditional, so a corrupt library cannot kill it under set -e"
   else
-    bad "structural (cor4050): $(basename "$_bs_f") sources the shared recogniser BARE at line(s) $(printf '%s' "$_bs_bad" | cut -d: -f1 | tr '\n' ',') — in roborev-review-checks.sh that is FATAL (it is sourced under roborev-review.sh's set -e, so a syntax error kills the shell with no verdict); in premerge-review-binding.sh it is not fatal (no -e, and it is executed) but it degrades the cause to 'did not define' for a file that does not parse"
+    bad "structural (cor4050): $(basename "$_bs_f") sources the shared recogniser BARE at line(s) $(cut -d: -f1 <<<"$_bs_bad" | tr '\n' ',') — in roborev-review-checks.sh that is FATAL (it is sourced under roborev-review.sh's set -e, so a syntax error kills the shell with no verdict); in premerge-review-binding.sh it is not fatal (no -e, and it is executed) but it degrades the cause to 'did not define' for a file that does not parse"
   fi
 done
 

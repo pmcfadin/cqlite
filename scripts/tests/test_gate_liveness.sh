@@ -125,17 +125,17 @@ expect_reader() {
   # audit then found FOUR more cases asserting `UNKNOWN 4 ""` — any of which could have hidden the same
   # thing — so the invariant belongs in the helper: every one of this suite's assertions now checks it,
   # and a case added later inherits it without anyone remembering to ask.
-  if printf '%s' "$OUT" | grep -qE '^gate-liveness: [A-Z]+ \(\)[[:space:]]*$'; then
-    bad "$label" "verdict carried an EMPTY cause: $(printf '%s' "$OUT" | head -1)"; _dump_artifacts "$@"; return
+  if grep -qE '^gate-liveness: [A-Z]+ \(\)[[:space:]]*$' <<<"$OUT"; then
+    bad "$label" "verdict carried an EMPTY cause: $(head -1 <<<"$OUT")"; _dump_artifacts "$@"; return
   fi
-  if ! printf '%s' "$OUT" | grep -q "^gate-liveness: $want "; then
-    bad "$label" "expected status $want, got: $(printf '%s' "$OUT" | head -1)"; _dump_artifacts "$@"; return
+  if ! grep -q "^gate-liveness: $want " <<<"$OUT"; then
+    bad "$label" "expected status $want, got: $(head -1 <<<"$OUT")"; _dump_artifacts "$@"; return
   fi
   if [ "$RC" != "$wantrc" ]; then
     bad "$label" "expected exit $wantrc, got $RC"; _dump_artifacts "$@"; return
   fi
-  if [ -n "$needle" ] && ! printf '%s' "$OUT" | grep -q "$needle"; then
-    bad "$label" "expected cause to mention '$needle', got: $(printf '%s' "$OUT" | head -1)"; _dump_artifacts "$@"; return
+  if [ -n "$needle" ] && ! grep -q "$needle" <<<"$OUT"; then
+    bad "$label" "expected cause to mention '$needle', got: $(head -1 <<<"$OUT")"; _dump_artifacts "$@"; return
   fi
   ok "$label"
 }
@@ -317,10 +317,10 @@ mk_beat "$TMP/a.txt.heartbeat" run-a 60 20
 run_reader "$TMP/a.txt"
 # NON-VACUITY FIRST: a negative assertion over $OUT is satisfied by output that has no note at all,
 # which is precisely how the `--` bug made 5.2b green. Establish the subject exists before judging it.
-if ! printf '%s' "$OUT" | grep -q 'gate-liveness: RUNNING'; then
+if ! grep -q 'gate-liveness: RUNNING' <<<"$OUT"; then
   bad "5.2b RUNNING no longer claims the parent pid's cumulative cpu shows progress" \
-      "the fixture did not produce a RUNNING verdict, so there is no note to judge: $(printf '%s' "$OUT" | head -1)"
-elif printf '%s' "$OUT" | grep -qE 'a working one is >=?1|sits near 0\.01 cores'; then
+      "the fixture did not produce a RUNNING verdict, so there is no note to judge: $(head -1 <<<"$OUT")"
+elif grep -qE 'a working one is >=?1|sits near 0\.01 cores' <<<"$OUT"; then
   bad "5.2b RUNNING no longer claims the parent pid's cumulative cpu shows progress" \
       "the retracted >=1-core recipe is still emitted"
 else
@@ -331,19 +331,19 @@ fi
 # emitted TWICE -- and one was, for two hours, because a slice boundary in my own edit was off by
 # one. A content assertion is not a well-formedness assertion, so this asserts uniqueness over the
 # whole emitted response rather than over the note alone (the same defect could land anywhere).
-_dup=$(printf '%s\n' "$OUT" | sort | uniq -d | grep -c . || true)
+_dup=$(sort <<<"$OUT" | uniq -d | grep -c . || true)
 if [ "${_dup:-0}" -eq 0 ]; then
   ok "5.2d no line of the RUNNING response is emitted twice"
 else
   bad "5.2d no line of the RUNNING response is emitted twice" \
-      "$_dup duplicated line(s): $(printf '%s\n' "$OUT" | sort | uniq -d | head -2 | tr '\n' '|')"
+      "$_dup duplicated line(s): $(head -2 < <(sort <<<"$OUT" | uniq -d) | tr '\n' '|')"
 fi
-if printf '%s' "$OUT" | grep -q 'PID-SET TURNOVER' \
-   && printf '%s' "$OUT" | grep -qi 'REAPED children only'; then
+if grep -q 'PID-SET TURNOVER' <<<"$OUT" \
+   && grep -qi 'REAPED children only' <<<"$OUT"; then
   ok "5.2c RUNNING names a sound progress signal AND why the pid reading fails"
 else
   bad "5.2c RUNNING names a sound progress signal and why the pid reading fails" \
-      "$(printf '%s' "$OUT" | grep -c . ) lines, no turnover/reaped explanation"
+      "$(grep -c . <<<"$OUT" ) lines, no turnover/reaped explanation"
 fi
 mk_beat "$TMP/a.txt.heartbeat" run-a 120 1
 expect_reader "5.3 age 120s, well past the 90s floor => STALLED" STALLED 3 "window 90s" -- "$TMP/a.txt"
@@ -510,7 +510,7 @@ echo "=== section 11: the /proc starttime parser, differentially vs awk ==="
 # implementation over every pid on this host, not against a model of one.
 if [ -d /proc/1 ]; then
   fn=$(sed -n '/^_starttime() {$/,/^}$/p' "$BEATER")
-  if ! printf '%s' "$fn" | grep -q '_starttime()'; then
+  if ! grep -q '_starttime()' <<<"$fn"; then
     # A failed derivation is a FAIL naming the derivation, never a silent skip: a
     # renamed function would otherwise make this whole section vacuous.
     bad "11.0 extract _starttime from the beater" "sed found no _starttime() { ... } block in $BEATER"
@@ -552,12 +552,12 @@ if [ -d /proc/1 ]; then
     # f2=comm, f3=state, so starttime (f22) is the 20th token AFTER the comm. The 18
     # fillers below are f4..f21, putting 987654 at f22 exactly.
     weird='4242 (my ) proc) S 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 987654 23 24'
-    got=$(printf '%s' "$weird" | { read -r raw; rest="${raw##*) }"; set -- $rest; printf '%s' "${20}"; })
+    got=$({ read -r raw <<<"$weird"; rest="${raw##*) }"; set -- $rest; printf '%s' "${20}"; })
     [ "$got" = 987654 ] && ok "11.2 comm with a space and ')' parses to field 22" \
                         || bad "11.2 comm with a space and ')' parses to field 22" "got '$got', want 987654"
     # RED control for 11.2: the naive whole-line `$22` reads INTO the comm on this
     # input, so the case above is proving something a wrong parser would fail.
-    naive=$(printf '%s\n' "$weird" | awk '{print $22}')
+    naive=$(awk '{print $22}' <<<"$weird")
     [ "$naive" != 987654 ] && ok "11.3 naive awk \$22 is wrong on this input (case 11.2 is non-vacuous)" \
                            || bad "11.3 naive awk \$22 is wrong on this input" "naive also got 987654 — 11.2 proves nothing"
   fi
@@ -584,9 +584,9 @@ grep -qE "^[[:space:]]*trap '_gate_atexit' EXIT" "$GATE" && ok "12.2 the compose
 #     parent's beater and freezes the beat under a LIVE gate.
 for f in _hb_stop _hb_ensure; do
   body=$(sed -n "/^$f() {\$/,/^}\$/p" "$GATE")
-  if ! printf '%s' "$body" | grep -q "$f()"; then
+  if ! grep -q "$f()" <<<"$body"; then
     bad "12.3 $f is present and extractable" "no $f() { ... } block in $GATE"
-  elif printf '%s' "$body" | grep -q 'BASHPID:-\$\$'; then
+  elif grep -q 'BASHPID:-\$\$' <<<"$body"; then
     ok "12.3 $f carries the BASHPID pool-subshell guard"
   else
     bad "12.3 $f carries the BASHPID pool-subshell guard" "guard missing from $f"
@@ -605,7 +605,7 @@ done
 # lints for.) `kill` is stubbed so the loop sees a live daemon instead of failing open.
 _sw_loop=$(sed -n '/^acquire_gate_slot() {$/,/^}$/p' "$GATE" \
            | awk '/while \[ ! -f "\$ready" \]/{f=1} f{print} f&&/^  done$/{exit}')
-if [ -z "$_sw_loop" ] || ! printf '%s' "$_sw_loop" | grep -q '_hb_ensure'; then
+if [ -z "$_sw_loop" ] || ! grep -q '_hb_ensure' <<<"$_sw_loop"; then
   bad "12.2b the slot-wait loop calls _hb_ensure (a queued gate's beater can recover)" \
       "$([ -z "$_sw_loop" ] && echo 'could not extract the wait loop — this proves nothing' \
                             || echo 'no _hb_ensure inside the wait loop')"
@@ -833,7 +833,7 @@ expect_reader "11c.2d control: truncated INCOMPLETE still consults the beat" RUN
 # Controls: all four real marker dialects must still be accepted (#4268
 # roborev finding, Medium: RECERT added alongside full/LITE/DELTA).
 for m in "AGENT-GATE SUMMARY" "AGENT-GATE LITE SUMMARY" "AGENT-GATE DELTA SUMMARY" "AGENT-GATE RECERT SUMMARY"; do
-  f="$TMP/mk-$(echo "$m" | tr ' ' '_').txt"
+  f="$TMP/mk-$(tr ' ' '_' <<<"$m").txt"
   { echo "==== $m ===="; echo "run-id: run-x"; echo "RESULT: PASS"; echo "==== END $m ===="; } > "$f"
   expect_reader "11c.3 control: '$m' framing is accepted" COMPLETE 0 "" -- "$f"
 done
@@ -855,21 +855,21 @@ mk_summary "$TMP/st.txt" run-S "INCOMPLETE (gate did not finish)"
 mk_beat "$TMP/st.txt.heartbeat" run-S 4000 1
 expect_reader "11c.5 stale beat => STALLED" STALLED 3 "no liveness" -- "$TMP/st.txt"
 run_reader "$TMP/st.txt"
-printf '%s' "$OUT" | grep -q 'NOT a claim that the process is dead' \
+grep -q 'NOT a claim that the process is dead' <<<"$OUT" \
   && ok "11c.6 STALLED states it is NOT a death claim" \
-  || bad "11c.6 STALLED states it is NOT a death claim" "$(printf '%s' "$OUT" | head -1)"
+  || bad "11c.6 STALLED states it is NOT a death claim" "$(head -1 <<<"$OUT")"
 # THE PROPERTY, NOT THE PHRASE. This asserted the exact words "relaunches it at the next component
 # boundary", and job 322 made that INCOMPLETE: the beater is now also relaunched while the gate is
 # QUEUED for the #1825 slot, which is the case where an operator reading "next component boundary"
 # would conclude recovery is far off -- there is no component boundary yet. Pinning the sentence
 # rather than the property is what made a correct behaviour change into a test failure, twice in this
 # change (cf. the deleted 4b.175). Both recovery paths must be DISCLOSED; the wording may move.
-if printf '%s' "$OUT" | grep -q 'relaunches it' \
-   && printf '%s' "$OUT" | grep -q 'component boundary' \
-   && printf '%s' "$OUT" | grep -q 'queued for the gate slot'; then
+if grep -q 'relaunches it' <<<"$OUT" \
+   && grep -q 'component boundary' <<<"$OUT" \
+   && grep -q 'queued for the gate slot' <<<"$OUT"; then
   ok "11c.7 STALLED discloses BOTH beater-recovery paths (component boundary AND queued) instead of advising a re-run"
 else
-  bad "11c.7 STALLED discloses both beater-recovery paths" "$(printf '%s' "$OUT" | head -1)"
+  bad "11c.7 STALLED discloses both beater-recovery paths" "$(head -1 <<<"$OUT")"
 fi
 # Host-independence, asserted at the source: no verdict may depend on /proc, a pid check or a
 # machine identity, or this suite becomes host-dependent again.
@@ -889,14 +889,14 @@ _proc_scan() { # <file> -> prints offending lines
   grep -nE '/proc|kill -0|boot-id|boot_id|gate-starttime' "$1" 2>/dev/null | awk '{
       line = $0; sub(/^[0-9]+:/, "", line);
       if (line ~ /^[[:space:]]*#/) next;
-      if (line ~ /^[[:space:]]*(echo|printf)/ && line !~ /[$][(]/ && line !~ /`/) next;
+      if (line ~ /^[[:space:]]*(echo|printf)/ && line !~ /[$][(]/ && line !~ /`/) next;  # sigpipe-fixture: false positive: printf is a word inside an awk program text
       print
     }'
 }
 _proc_offenders=$(_proc_scan "$READER")
 if [ -n "$_proc_offenders" ]; then
   bad "11c.8 no verdict depends on /proc, a pid probe or machine identity" \
-      "$(printf '%s' "$_proc_offenders" | head -3)"
+      "$(head -3 <<<"$_proc_offenders")"
 else
   ok "11c.8 no verdict depends on /proc, a pid probe or machine identity"
 fi
@@ -929,10 +929,10 @@ for f in "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" "$REPO_ROOT/scripts/te
   # The needle is SPLIT so this guard cannot match its own source line — the first
   # version did exactly that and reported a violation against itself.
   _sed_needle="sed"' -i'
-  if printf '%s\n' "$body" | grep -qE "(^|[^a-zA-Z_])$_sed_needle"; then
+  if grep -qE "(^|[^a-zA-Z_])$_sed_needle" <<<"$body"; then
     bad "11c.12 no GNU-only in-place sed in $(basename "$f")" "found one (BSD sed needs a suffix argument)"; port_bad=1
   fi
-  if printf '%s\n' "$body" | grep -qE '(^|[^A-Z_$])timeout [0-9]'; then
+  if grep -qE '(^|[^A-Z_$])timeout [0-9]' <<<"$body"; then
     bad "11c.13 no unconditional 'timeout N' in $(basename "$f")" "stock macOS has no timeout(1)"; port_bad=1
   fi
 done
@@ -1145,9 +1145,9 @@ kill "$BUMP_PID" 2>/dev/null; wait "$BUMP_PID" 2>/dev/null || true
 # the default case; this one asserts the clock-domain wording is present).
 mk_beat "$TMP/fut.txt.heartbeat" run-F2 -600 20
 run_reader "$TMP/fut.txt"
-printf '%s' "$OUT" | grep -q 'the beat claims THIS host' \
+grep -q 'the beat claims THIS host' <<<"$OUT" \
   && ok "11g.12 a same-host future epoch is refused, and says why" \
-  || bad "11g.12 a same-host future epoch is refused, and says why" "$(printf '%s' "$OUT" | head -1)"
+  || bad "11g.12 a same-host future epoch is refused, and says why" "$(head -1 <<<"$OUT")"
 
 # Structural: the epoch shortcut must be gated on the shared-clock test, not stand alone.
 if grep -q '\[ "\$_shared_clock" = yes \] && \[ "\$AGE" -le "\$STALE_AFTER" \]' "$READER"; then
@@ -1325,7 +1325,7 @@ for v in 08 09 007; do
   run_reader "$TMP/oct.txt"
   case "$RC" in
     0|2|3|4) ok "11k.1 interval '$v' yields a documented verdict (rc=$RC), not a shell abort" ;;
-    *)       bad "11k.1 interval '$v' yields a documented verdict" "rc=$RC: $(printf '%s' "$OUT" | head -1)" ;;
+    *)       bad "11k.1 interval '$v' yields a documented verdict" "rc=$RC: $(head -1 <<<"$OUT")" ;;
   esac
 done
 _mkbeat_num 20 08 "$(date +%s)"
@@ -1467,9 +1467,9 @@ expect_reader "11m.4 control: two valid samples, no progress => STALLED" \
 # The verdict text must say it is not a stall, so nobody re-runs a gate on an unmeasurable read.
 _mkcm run-C2; ( sleep 1; rm -f "$TMP/cm.txt.heartbeat" ) & _c4=$!; remember_pid "$_c4"
 run_reader "$TMP/cm.txt"
-printf '%s' "$OUT" | grep -q 'This is NOT a stall' \
+grep -q 'This is NOT a stall' <<<"$OUT" \
   && ok "11m.5 the unmeasurable verdict says explicitly that it is not a stall" \
-  || bad "11m.5 the unmeasurable verdict says it is not a stall" "$(printf '%s' "$OUT" | head -1)"
+  || bad "11m.5 the unmeasurable verdict says it is not a stall" "$(head -1 <<<"$OUT")"
 wait "$_c4" 2>/dev/null || true
 
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
@@ -1482,9 +1482,9 @@ tf_bad=0
 for f in "$REPO_ROOT/scripts/gate-liveness.sh" "$REPO_ROOT/scripts/lib/gate-heartbeat.sh" \
          "$REPO_ROOT/scripts/flow/gate-detached.sh"; do
   body=$(sed 's/[[:space:]]*#.*$//' "$f")
-  if printf '%s\n' "$body" | grep -qE '\.\$\$'; then
+  if grep -qE '\.\$\$' <<<"$body"; then
     bad "11f.1 no temp path is built from \$\$ in $(basename "$f")" \
-        "$(printf '%s\n' "$body" | grep -nE '\.\$\$' | head -2)"; tf_bad=1
+        "$(grep -m2 -nE '\.\$\$' <<<"$body")"; tf_bad=1
   fi
 done
 [ "$tf_bad" -eq 0 ] && ok "11f.1 no temp path is built from \$\$ in any of the three scripts"
@@ -1675,13 +1675,13 @@ expect_reader "11n.4 terminal verdict + MALFORMED foreign beat => UNKNOWN" \
 # The diagnostic must not claim what it cannot know: no "live", no "NEWER".
 mk_beat "$TMP/sup.txt.heartbeat" run-OTHER 4000 1
 _fr_out=$(bash "$READER" "$TMP/sup.txt" 2>&1 || true)
-if printf '%s' "$_fr_out" | grep -qE 'live heartbeat|a NEWER run is starting'; then
+if grep -qE 'live heartbeat|a NEWER run is starting' <<<"$_fr_out"; then
   bad "11n.5 the diagnostic claims neither liveness nor ordering" "overclaims: $_fr_out"
 else
   ok "11n.5 the diagnostic claims neither liveness nor ordering"
 fi
 # ...and it must name the way to ask a question that HAS an answer.
-printf '%s' "$_fr_out" | grep -q -- '--run-id' \
+grep -q -- '--run-id' <<<"$_fr_out" \
   && ok "11n.6 the refusal names --run-id as the remedy" \
   || bad "11n.6 the refusal names --run-id as the remedy" "$_fr_out"
 
@@ -1766,8 +1766,8 @@ for _spec in "garbage-one:not-a-pid" "0:zero" "123456789012:out-of-range" " :not
   run_reader "$_bp" --run-id run-P
   if [ "$RC" != 4 ]; then
     _bp_bad=$((_bp_bad+1)); echo "     beater-pid '$_v' accepted (rc=$RC)"
-  elif ! printf '%s' "$OUT" | grep -q "heartbeat-beater-pid-$_want"; then
-    _bp_bad=$((_bp_bad+1)); echo "     beater-pid '$_v' refused WITHOUT the named cause: $(printf '%s' "$OUT" | head -1)"
+  elif ! grep -q "heartbeat-beater-pid-$_want" <<<"$OUT"; then
+    _bp_bad=$((_bp_bad+1)); echo "     beater-pid '$_v' refused WITHOUT the named cause: $(head -1 <<<"$OUT")"
   fi
 done
 [ "$_bp_bad" = 0 ] && ok "11t.1 a malformed beater-pid invalidates the beat AND names its cause (6 shapes)" \
@@ -2134,9 +2134,9 @@ if [ -z "$_reg" ]; then
   bad "11q.1 no summary-side path verdicts UNKNOWN outside the funnel" \
       "could not delimit the summary region — the derivation failed, so this proves nothing"
 else
-  _bare=$(printf '%s\n' "$_reg" | grep -c 'verdict UNKNOWN' || true)
+  _bare=$(grep -c 'verdict UNKNOWN' <<<"$_reg" || true)
   if [ "$_bare" = 0 ]; then
-    ok "11q.1 no summary-side path verdicts UNKNOWN outside the funnel ($(printf '%s\n' "$_reg" | grep -c '_summary_refusal_or_defer' ) routed)"
+    ok "11q.1 no summary-side path verdicts UNKNOWN outside the funnel ($(grep -c '_summary_refusal_or_defer' <<<"$_reg" ) routed)"
   else
     bad "11q.1 no summary-side path verdicts UNKNOWN outside the funnel" \
         "$_bare bare UNKNOWN verdict(s) bypass the beat check"
@@ -2144,7 +2144,7 @@ else
 fi
 # ...and every routed call must BREAK, or a deferral falls through into the next check instead of
 # reaching the heartbeat side. One site had exactly that defect (it sat above the wrapper entirely).
-_unbroken=$(printf '%s\n' "$_reg" | grep '_summary_refusal_or_defer "' | grep -vc '|| break' || true)
+_unbroken=$(grep '_summary_refusal_or_defer "' <<<"$_reg" | grep -vc '|| break' || true)
 [ "$_unbroken" = 0 ] && ok "11q.2 every routed refusal breaks out to the heartbeat side" \
                      || bad "11q.2 every routed refusal breaks out to the heartbeat side" "$_unbroken site(s) do not"
 

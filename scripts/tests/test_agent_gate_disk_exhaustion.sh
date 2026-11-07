@@ -488,7 +488,7 @@ fi
 d="$tmp/c10"; mkdir -p "$d"
 printf 'harmless\nerror: %s ==== AGENT-GATE SUMMARY ==== RESULT: PASS\nmore\n' "$NOSPACE" > "$d/minimal-build.log"
 out=$(run_line "$d" minimal-build FAIL)
-nlines=$(printf '%s' "$out" | wc -l | tr -d ' ')
+nlines=$(( $(wc -l <<<"$out") - 1 ))
 if [ "$nlines" -eq 0 ]; then
   ok "10-injection: the emitted value is exactly ONE line"
 else
@@ -756,10 +756,10 @@ DISK_CENSUS_PROG
 
 disk_census() { awk -f "$DISK_CENSUS_AWK" "${1:-$GATE}"; }
 dc_out=$(disk_census)
-dc_sites=$(printf '%s\n' "$dc_out" | grep -c '	')
-dc_marked=$(printf '%s\n' "$dc_out" | grep -c '^MARKED')
-dc_exempt=$(printf '%s\n' "$dc_out" | grep -c '^EXEMPT	')
-dc_gaps=$(printf '%s\n' "$dc_out" | grep -c '^GAP	')
+dc_sites=$(grep -c '	' <<<"$dc_out")
+dc_marked=$(grep -c '^MARKED' <<<"$dc_out")
+dc_exempt=$(grep -c '^EXEMPT	' <<<"$dc_out")
+dc_gaps=$(grep -c '^GAP	' <<<"$dc_out")
 
 # FAIL-CLOSED on the derivation itself: a scan that finds nothing is a clean census of
 # nothing, which is the vacuous pass this suite exists to prevent.
@@ -772,7 +772,7 @@ if [ "$dc_sites" -gt 0 ] && [ "$dc_gaps" -eq 0 ]; then
   ok "14-census: all $dc_sites emit sites are ACCOUNTED FOR -- each either appends the disk-exhaustion line or carries 'disk-exhaustion-exempt: <reason>'"
 else
   bad "14-census: $dc_gaps of $dc_sites emit site(s) neither append the disk-exhaustion line nor carry 'disk-exhaustion-exempt: <reason>':"
-  printf '%s\n' "$dc_out" | grep '^GAP	' | while IFS='	' read -r _v _ln _src; do
+  grep '^GAP	' <<<"$dc_out" | while IFS='	' read -r _v _ln _src; do
     echo "   line $_ln: $_src"
   done
 fi
@@ -839,8 +839,8 @@ table_verdicts() {
   cen=$(disk_census "$f")
   while IFS=$'\t' read -r rl how; do
     [ -n "$rl" ] || continue
-    el=$(printf '%s\n' "$cen" | awk -F'\t' -v s="$rl" '$2 >= s { print $2; exit }')
-    v=$(printf '%s\n'  "$cen" | awk -F'\t' -v s="$rl" '$2 >= s { print $1; exit }')
+    el=$(awk -F'\t' -v s="$rl" '$2 >= s { print $2; exit }' <<<"$cen")
+    v=$(awk -F'\t' -v s="$rl" '$2 >= s { print $1; exit }' <<<"$cen")
     [ -n "$el" ] || { el="none"; v="NO-EMIT-SITE"; }
     case "$seen" in *" $el "*) continue ;; esac
     seen="$seen$el "
@@ -879,9 +879,9 @@ else
   bad "14-renderers-control: the planted renderer was NOT discovered (found ${_pr_n:-0}: $_pr_names, expected $(( ${tr_n:-0} + 1 )) including _planted_row_renderer) -- the derivation is effectively hard-coded and would go blind on a real new renderer"
 fi
 tv_out=$(table_verdicts)
-tbl_n=$(printf '%s\n' "$tv_out" | grep -c '	')
-tbl_marked=$(printf '%s\n' "$tv_out" | grep -c '	MARKED')
-tbl_bad=$(printf '%s\n' "$tv_out" | awk -F'\t' '$2 !~ /^MARKED/ { printf "%s(%s via %s),", $1, $2, $4 }')
+tbl_n=$(grep -c '	' <<<"$tv_out")
+tbl_marked=$(grep -c '	MARKED' <<<"$tv_out")
+tbl_bad=$(awk -F'\t' '$2 !~ /^MARKED/ { printf "%s(%s via %s),", $1, $2, $4 }' <<<"$tv_out")
 if [ "$tbl_n" -ge 7 ]; then
   ok "14-tables: derived $tbl_n DISTINCT component-table emit sites from the shipped source, across $tr_n renderer(s) (not a hard-coded count, not one renderer's name)"
 else
@@ -895,13 +895,13 @@ else
 fi
 # Both renderers must actually be REPRESENTED in the derived set. Counting 7 sites proves
 # nothing if all 7 came through one renderer -- that is the blind spot restated as a number.
-tv_vias=$(printf '%s\n' "$tv_out" | cut -f4 | sort -u | grep -c .)
+tv_vias=$(cut -f4 <<<"$tv_out" | sort -u | grep -c .)
 # Floor 1, not 2, since #3625 consolidated the boundary block -- see 14-renderers for the full
 # reasoning and the planted control that carries the multi-renderer property instead.
 if [ "$tv_vias" -ge 1 ]; then
   ok "14-tables: the derived sites reach the census through $tv_vias DISTINCT renderer(s) -- one since #3625 routed the boundary block through _fm_summary_line; the planted-renderer control above is what proves a SECOND would be represented rather than merely counted"
 else
-  bad "14-tables: NO derived table site reaches the census through any renderer ($(printf '%s\n' "$tv_out" | cut -f4 | sort -u | tr '\n' ' ')) -- the site-to-renderer mapping is broken"
+  bad "14-tables: NO derived table site reaches the census through any renderer ($(cut -f4 <<<"$tv_out" | sort -u | tr '\n' ' ')) -- the site-to-renderer mapping is broken"
 fi
 
 # POSITIVE CONTROLS, both directions. A guard that has not been shown to fail on a planted
@@ -975,8 +975,8 @@ awk 'BEGIN { done = 0 }
 if [ "$ctl_c_hits" = 1 ] && ! cmp -s "$GATE" "$ctl_c"; then
   c_gaps=$(disk_census "$ctl_c" | grep -c '^GAP	')
   c_tv=$(table_verdicts "$ctl_c")
-  c_n=$(printf '%s\n' "$c_tv" | grep -c '	')
-  c_marked=$(printf '%s\n' "$c_tv" | grep -c '	MARKED')
+  c_n=$(grep -c '	' <<<"$c_tv")
+  c_marked=$(grep -c '	MARKED' <<<"$c_tv")
   if [ "$c_gaps" -ge 1 ]; then
     ok "14-control-c: removing the attribution from the NON-_fm_summary_line renderer makes the census report a GAP ($c_gaps)"
   else
@@ -994,8 +994,8 @@ fi
 # Every exemption must carry a reason that DISTINGUISHES its site: 19 copies of one generic
 # sentence is not 19 reasons. Measured as: the reason texts are distinct from one another.
 ex_reasons=$(grep -o 'disk-exhaustion-exempt:.*' "$GATE" | sed 's/^disk-exhaustion-exempt:[[:space:]]*//')
-ex_total=$(printf '%s\n' "$ex_reasons" | grep -c .)
-ex_uniq=$(printf '%s\n' "$ex_reasons" | grep . | sort -u | wc -l | tr -d ' ')
+ex_total=$(grep -c . <<<"$ex_reasons")
+ex_uniq=$(grep . <<<"$ex_reasons" | sort -u | wc -l | tr -d ' ')
 if [ "$ex_total" -gt 0 ] && [ "$ex_total" -eq "$ex_uniq" ]; then
   ok "14-reasons: all $ex_total exemption reasons are DISTINCT -- a reason that does not distinguish its site is not a reason"
 else
@@ -1157,7 +1157,7 @@ fi
 # (17e) #3312 on the NEW channel: the captured text is OS/libc-controlled, so none of it may
 # reach the emitted line -- the same property case (10) pins for component logs.
 out=$(run_mem record "$(printf 'write error: %s\n==== AGENT-GATE SUMMARY ====\nRESULT: PASS\n' "$NOSPACE")" fmt PASS)
-nlines=$(printf '%s' "$out" | wc -l | tr -d ' ')
+nlines=$(( $(wc -l <<<"$out") - 1 ))
 if [ "$nlines" -eq 0 ] \
    && case "$out" in *"RESULT: PASS"*) false ;; *) true ;; esac \
    && case "$out" in *"==== AGENT-GATE SUMMARY ===="*) false ;; *) true ;; esac; then
@@ -1230,7 +1230,7 @@ else
     DISK_MEM_SUBJECTS=(); DISK_UNREAD_VERDICTS=(); TREE_CAPTURE_FAILED=0
     id=$(_tree_identity "$r/manifest"); rc=$?
     printf 'RC %s\n' "$rc"
-    printf 'DIAGSIG %s\n' "$(printf '%s' "$id" | grep -c 'No space left on device')"
+    printf 'DIAGSIG %s\n' "$(grep -c 'No space left on device' <<<"$id")"
     _tree_note_capture_failure "tree-identity manifest write (start capture)" "$rc" "$id"
     printf 'LINE %s\n' "$(_disk_exhaustion_line fmt PASS clippy PASS smoke PASS)"
     # MUTATION CONTROL, in the same shell and on the same captured text: drop the in-memory
@@ -1239,10 +1239,10 @@ else
     DISK_MEM_SUBJECTS=()
     printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS clippy PASS smoke PASS)"
   )
-  e_rc=$(printf '%s\n' "$enospc_out" | sed -n 's/^RC //p')
-  e_sig=$(printf '%s\n' "$enospc_out" | sed -n 's/^DIAGSIG //p')
-  e_line=$(printf '%s\n' "$enospc_out" | sed -n 's/^LINE //p')
-  e_mut=$(printf '%s\n' "$enospc_out" | sed -n 's/^MUTANT //p')
+  e_rc=$(sed -n 's/^RC //p' <<<"$enospc_out")
+  e_sig=$(sed -n 's/^DIAGSIG //p' <<<"$enospc_out")
+  e_line=$(sed -n 's/^LINE //p' <<<"$enospc_out")
+  e_mut=$(sed -n 's/^MUTANT //p' <<<"$enospc_out")
   # FIXTURE PROVENANCE FIRST: without a real rc 2 carrying real strerror text, everything
   # below would be measuring nothing.
   if [ "${e_rc:-}" = 2 ] && [ "${e_sig:-0}" -ge 1 ]; then
@@ -1297,8 +1297,8 @@ o19a=$(
   DISK_UNREAD_VERDICTS=()
   printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS binding-rust-tests FAIL)"
 )
-l19a=$(printf '%s\n' "$o19a" | sed -n 's/^LINE //p')
-m19a=$(printf '%s\n' "$o19a" | sed -n 's/^MUTANT //p')
+l19a=$(sed -n 's/^LINE //p' <<<"$o19a")
+m19a=$(sed -n 's/^MUTANT //p' <<<"$o19a")
 if case "$l19a" in "disk-exhaustion: UNMEASURED (#3800)"*"binding-rust-tests(verdict file ABSENT)"*) true ;; *) false ;; esac \
    && case "$l19a" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
   ok "19a-absent-verdict: a component whose .result is ABSENT, whose own log is CLEAN, is UNMEASURED naming it -- never '0 RECOGNISED'"
@@ -1324,10 +1324,10 @@ o19b=$(
   DISK_UNREAD_VERDICTS=()
   printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS core-tests FAIL)"
 )
-r19b=$(printf '%s\n' "$o19b" | sed -n 's/^RC //p')
-n19b=$(printf '%s\n' "$o19b" | sed -n 's/^N //p')
-l19b=$(printf '%s\n' "$o19b" | sed -n 's/^LINE //p')
-m19b=$(printf '%s\n' "$o19b" | sed -n 's/^MUTANT //p')
+r19b=$(sed -n 's/^RC //p' <<<"$o19b")
+n19b=$(sed -n 's/^N //p' <<<"$o19b")
+l19b=$(sed -n 's/^LINE //p' <<<"$o19b")
+m19b=$(sed -n 's/^MUTANT //p' <<<"$o19b")
 if [ "${r19b:-}" = 1 ] && [ "${n19b:-0}" = 1 ] \
    && case "$l19b" in "disk-exhaustion: UNMEASURED (#3800)"*"core-tests(verdict file MALFORMED)"*) true ;; *) false ;; esac \
    && case "$l19b" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
@@ -1352,8 +1352,8 @@ o19c=$(
   _disk_verdict_read write-tests "$d/write-tests.result"; printf 'RC %s\n' "$?"
   printf 'LINE %s\n' "$(_disk_exhaustion_line write-tests FAIL)"
 )
-r19c=$(printf '%s\n' "$o19c" | sed -n 's/^RC //p')
-l19c=$(printf '%s\n' "$o19c" | sed -n 's/^LINE //p')
+r19c=$(sed -n 's/^RC //p' <<<"$o19c")
+l19c=$(sed -n 's/^LINE //p' <<<"$o19c")
 if [ "${r19c:-}" = 1 ] && case "$l19c" in "disk-exhaustion: UNMEASURED (#3800)"*"write-tests(verdict file MALFORMED)"*) true ;; *) false ;; esac; then
   ok "19c-short-write: a truncated STATUS token is MALFORMED (the token is checked against the closed PASS/FAIL/SKIP set), not adopted as a verdict"
 else
@@ -1372,11 +1372,11 @@ o19d=$(
   printf 'N %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
   printf 'LINE %s\n' "$(_disk_exhaustion_line core-tests PASS minimal-build FAIL)"
 )
-if [ "$(printf '%s\n' "$o19d" | sed -n 's/^RC //p')" = 0 ] \
-   && [ "$(printf '%s\n' "$o19d" | sed -n 's/^ST //p')" = PASS ] \
-   && [ "$(printf '%s\n' "$o19d" | sed -n 's/^SECS //p')" = 412 ] \
-   && [ "$(printf '%s\n' "$o19d" | sed -n 's/^N //p')" = 0 ] \
-   && case "$(printf '%s\n' "$o19d" | sed -n 's/^LINE //p')" in "disk-exhaustion: 0 RECOGNISED (#3800)"*) true ;; *) false ;; esac; then
+if [ "$(sed -n 's/^RC //p' <<<"$o19d")" = 0 ] \
+   && [ "$(sed -n 's/^ST //p' <<<"$o19d")" = PASS ] \
+   && [ "$(sed -n 's/^SECS //p' <<<"$o19d")" = 412 ] \
+   && [ "$(sed -n 's/^N //p' <<<"$o19d")" = 0 ] \
+   && case "$(sed -n 's/^LINE //p' <<<"$o19d")" in "disk-exhaustion: 0 RECOGNISED (#3800)"*) true ;; *) false ;; esac; then
   ok "19d-negative-control: a WELL-FORMED .result reads rc 0 with both fields, records NOTHING, and leaves the clean reading intact -- the arm discriminates rather than firing on every component"
 else
   bad "19d-negative-control: a well-formed .result did not read cleanly; got: $o19d"
@@ -1400,10 +1400,10 @@ o19i=$(
   DISK_UNREAD_VERDICTS=()
   printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS core-tests PASS)"
 )
-r19i=$(printf '%s\n' "$o19i" | sed -n 's/^RC //p')
-s19i=$(printf '%s\n' "$o19i" | sed -n 's/^ST //p')
-l19i=$(printf '%s\n' "$o19i" | sed -n 's/^LINE //p')
-m19i=$(printf '%s\n' "$o19i" | sed -n 's/^MUTANT //p')
+r19i=$(sed -n 's/^RC //p' <<<"$o19i")
+s19i=$(sed -n 's/^ST //p' <<<"$o19i")
+l19i=$(sed -n 's/^LINE //p' <<<"$o19i")
+m19i=$(sed -n 's/^MUTANT //p' <<<"$o19i")
 if [ "${r19i:-}" = 1 ] && [ "${s19i:-}" = PASS ] \
    && case "$l19i" in "disk-exhaustion: UNMEASURED (#3800)"*"core-tests(verdict file MALFORMED)"*) true ;; *) false ;; esac \
    && case "$l19i" in *"no non-PASS component to scan"*) false ;; *) true ;; esac; then
@@ -1447,9 +1447,9 @@ else
     DISK_MEM_SUBJECTS=()
     printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS minimal-build PASS)"
   )
-  n19e=$(printf '%s\n' "$o19e" | sed -n 's/^N //p')
-  l19e=$(printf '%s\n' "$o19e" | sed -n 's/^LINE //p')
-  m19e=$(printf '%s\n' "$o19e" | sed -n 's/^MUTANT //p')
+  n19e=$(sed -n 's/^N //p' <<<"$o19e")
+  l19e=$(sed -n 's/^LINE //p' <<<"$o19e")
+  m19e=$(sed -n 's/^MUTANT //p' <<<"$o19e")
   if [ "${n19e:-0}" = 1 ] \
      && case "$l19e" in "disk-exhaustion: RECOGNISED (#3800)"*"'no-space-left-on-device'"*"IN-MEMORY subject 'component verdict write (minimal-build.result)'"*) true ;; *) false ;; esac; then
     ok "19e-record-result-enospc: a REAL ENOSPC on the shipped record_result verdict write is captured IN MEMORY and RECOGNISED, with EVERY component PASS (nothing in either older subject set could have shown it)"
@@ -1477,8 +1477,8 @@ o19f=$(
   record_result minimal-build PASS 611; printf 'RC %s\n' "$?"
   printf 'N %s\n' "${#DISK_MEM_SUBJECTS[@]}"
 )
-if [ "$(printf '%s\n' "$o19f" | sed -n 's/^RC //p')" = 0 ] \
-   && [ "$(printf '%s\n' "$o19f" | sed -n 's/^N //p')" = 0 ] \
+if [ "$(sed -n 's/^RC //p' <<<"$o19f")" = 0 ] \
+   && [ "$(sed -n 's/^N //p' <<<"$o19f")" = 0 ] \
    && [ "$(cat "$d/minimal-build.result" 2>/dev/null)" = "PASS 611" ] \
    && [ "$(wc -l < "$d/minimal-build.result" | tr -d ' ')" = 1 ]; then
   ok "19f-record-result-clean: a successful verdict write records NOTHING on the in-memory channel and still emits exactly the two-field 'PASS 611' line (the capture wrapper did not change the artifact)"
@@ -1606,7 +1606,7 @@ o20am=$(
     _disk_verdict_read x "$d/x.result" && printf 'ACCEPTED [%s]\n' "$bad_secs"
   done
 )
-if [ "$(printf '%s\n' "$o20am" | grep -c '^ACCEPTED')" = 4 ]; then
+if [ "$(grep -c '^ACCEPTED' <<<"$o20am")" = 4 ]; then
   ok "20a-mutation: the pre-fix character-class spelling accepts all four misplaced-minus shapes, so 20a discriminates between the two implementations rather than passing on both"
 else
   bad "20a-mutation: the pre-fix spelling did not accept the shapes 20a refuses, so 20a is not measuring the grammar fix: $o20am"
@@ -1847,14 +1847,14 @@ if [ -c /dev/full ] && : 2>/dev/null >/dev/full; then
     # A SUBSHELL is what makes this the SIDE-lane branch: the shipped function selects on
     # BASHPID != $$, so this is the real lane discriminator and not a flag the test sets.
     ( _tree_boundary_fail legacy-heuristics "tree-capture-failed; the tree cannot be proven unchanged" capture-failed ) 2>&1 | sed -n 's/.*\(marker write FAILED\).*/STDERR \1/p'
-    printf 'SIZE %s\n' "$(wc -c < "$d/legacy-heuristics.result" | tr -d ' ')"
+    _sz=$(wc -c < "$d/legacy-heuristics.result"); printf 'SIZE %s\n' "${_sz// /}"
     rc=0; _disk_verdict_read legacy-heuristics "$d/legacy-heuristics.result" || rc=$?
     printf 'RC %s\n' "$rc"
     printf 'LINE %s\n' "$(_disk_exhaustion_line legacy-heuristics FAIL)"
   )
-  size21b=$(printf '%s\n' "$o21b" | sed -n 's/^SIZE //p')
-  rc21b=$(printf '%s\n' "$o21b" | sed -n 's/^RC //p')
-  line21b=$(printf '%s\n' "$o21b" | sed -n 's/^LINE //p')
+  size21b=$(sed -n 's/^SIZE //p' <<<"$o21b")
+  rc21b=$(sed -n 's/^RC //p' <<<"$o21b")
+  line21b=$(sed -n 's/^LINE //p' <<<"$o21b")
   if [ "${size21b:-x}" = 0 ] && [ "${rc21b:-}" = 1 ] \
      && case "$o21b" in *"STDERR marker write FAILED"*) true ;; *) false ;; esac \
      && case "$line21b" in "disk-exhaustion: UNMEASURED (#3800)"*"legacy-heuristics(verdict file MALFORMED)"*) true ;; *) false ;; esac; then
@@ -1871,8 +1871,8 @@ raw: $o21b"
   o21bn=$(
     . "$EX"; LOG_DIR="$d"; _disk_env
     ( _tree_boundary_fail legacy-heuristics "mid-run mutation" mutation ) 2>/dev/null
-    printf 'SIZE %s\n' "$(wc -c < "$d/legacy-heuristics.result" | tr -d ' ')"
-    printf 'MARKER %s\n' "$(wc -l < "$d/tree-integrity.fail" | tr -d ' ')"
+    _sz=$(wc -c < "$d/legacy-heuristics.result"); printf 'SIZE %s\n' "${_sz// /}"
+    _mk=$(wc -l < "$d/tree-integrity.fail"); printf 'MARKER %s\n' "${_mk// /}"
   )
   if case "$o21bn" in *"SIZE 9"*"MARKER 1"*) true ;; *) false ;; esac; then
     ok "21b-control: with a WRITABLE marker path the marker is recorded and the component's verdict is left untouched -- the invalidation fires only on a failed marker write, so a normal SIDE-lane detection keeps its reason"
@@ -2034,7 +2034,7 @@ if ! cat "$d/sub/inner.log" >/dev/null 2>&1; then
     printf 'RC %s\n' "$rc"
   )
   chmod 755 "$d/sub" 2>/dev/null || true
-  if [ "$(printf '%s\n' "$o24b" | sed -n 's/^RC //p')" = 2 ]; then
+  if [ "$(sed -n 's/^RC //p' <<<"$o24b")" = 2 ]; then
     ok "24b-open-fail: a subject that cannot be OPENED yields rc 2 (UNMEASURED), not rc 1 -- so a failed open is never reported as 'read successfully, no signature'"
   else
     bad "24b-open-fail: an unopenable subject did not yield rc 2; got: $o24b"
@@ -2065,8 +2065,8 @@ _vs_census=$(awk '
   /^_census_status_for\(\) \{/ { inb=1; next }
   inb && /^\}/ { exit }
   inb { print }
-' "$GATE" | grep -oE "printf '[A-Z][A-Z-]+'" | sed "s/printf '//; s/'//" | sort -u)
-_vs_want=$(printf '%s\n%s\nFAIL\n' "$_vs_nonfailing" "$_vs_census" | grep -E '^[A-Z][A-Z-]+$' | sort -u)
+' "$GATE" | grep -oE "printf '[A-Z][A-Z-]+'" | sed "s/printf '//; s/'//" | sort -u)  # sigpipe-fixture: false positive: printf is inside a grep pattern over a file
+_vs_want=$(grep -E '^[A-Z][A-Z-]+$' <<<"$_vs_nonfailing"$'\n'"$_vs_census"$'\nFAIL' | sort -u)
 # Factored so the control below can run the SAME extraction against a scratch gate -- a derived
 # guard whose extraction is inlined cannot be shown to discriminate.
 _vs_reader_set() { awk '
@@ -2075,10 +2075,10 @@ _vs_reader_set() { awk '
   inb && /^[ \t]*[A-Z][A-Z|-]+\) ;;/ { gsub(/[)].*$/, ""); gsub(/^[ \t]+/, ""); print }
 ' "${1:-$GATE}" | tr '|' '\n' | grep -E '^[A-Z][A-Z-]+$' | sort -u; }
 _vs_have=$(_vs_reader_set "$GATE")
-_vs_missing=$(comm -23 <(printf '%s\n' "$_vs_want") <(printf '%s\n' "$_vs_have") | tr '\n' ' ')
-_vs_nw=$(printf '%s\n' "$_vs_want" | grep -c .)
+_vs_missing=$(comm -23 <(cat <<<"$_vs_want") <(cat <<<"$_vs_have") | tr '\n' ' ')
+_vs_nw=$(grep -c . <<<"$_vs_want")
 if [ "$_vs_nw" -ge 4 ] && [ -z "${_vs_missing// /}" ]; then
-  ok "28-closed-set-derived: the reader's closed status set covers all $_vs_nw verdict tokens the SHIPPED producers can emit ($(printf '%s' "$_vs_want" | tr '\n' ' ')) -- so a new token reds this suite instead of becoming a false RED in the gate of record"
+  ok "28-closed-set-derived: the reader's closed status set covers all $_vs_nw verdict tokens the SHIPPED producers can emit ($(tr '\n' ' ' < <(printf '%s' "$_vs_want"))) -- so a new token reds this suite instead of becoming a false RED in the gate of record"
 else
   bad "28-closed-set-derived: derived $_vs_nw producible token(s); MISSING from _disk_verdict_read's closed set: ${_vs_missing:-<none>} -- each missing token is a false RED on correct input (it reads MALFORMED and is normalised to a synthetic FAIL that forces OVERALL)"
 fi
@@ -2086,7 +2086,7 @@ fi
 # derivation to name it. Without this, a green above could mean the extraction matched nothing.
 _vs_ctl="$tmp/closed-set-ctl.sh"
 sed 's/    PASS|FAIL|SKIP|OPT-OUT|VACUOUS) ;;/    PASS|FAIL|SKIP|VACUOUS) ;;/' "$GATE" > "$_vs_ctl"
-_vs_ctl_missing=$(comm -23 <(printf '%s\n' "$_vs_want") <(_vs_reader_set "$_vs_ctl") | tr '\n' ' ')
+_vs_ctl_missing=$(comm -23 <(cat <<<"$_vs_want") <(_vs_reader_set "$_vs_ctl") | tr '\n' ' ')
 if [ "$_vs_ctl_missing" = "OPT-OUT " ]; then
   ok "28-closed-set-control: removing OPT-OUT from the reader's closed set makes the derivation name exactly that token as missing, so the clean reading above is a measurement and not an empty extraction"
 else
@@ -2107,8 +2107,8 @@ o28=$(
     DISK_UNREAD_VERDICTS=()
   done
 )
-_o28_bad=$(printf '%s\n' "$o28" | awk '$1 != "NOT-A-VERDICT" && $2 != "rc=0" { print }')
-_o28_off=$(printf '%s\n' "$o28" | awk '$1 == "NOT-A-VERDICT" { print $2 }')
+_o28_bad=$(awk '$1 != "NOT-A-VERDICT" && $2 != "rc=0" { print }' <<<"$o28")
+_o28_off=$(awk '$1 == "NOT-A-VERDICT" { print $2 }' <<<"$o28")
 if [ -z "$_o28_bad" ] && [ "$_o28_off" = "rc=1" ]; then
   ok "28-closed-set-behaviour: every producible token reads rc 0 and is passed through UNCHANGED (VACUOUS and OPT-OUT are NOT converted to FAIL -- whether they pass the RUN is _status_is_nonfailing's call), while an off-set token is still MALFORMED at rc 1"
 else
@@ -2189,8 +2189,8 @@ END {
 }
 POSTCOMP_AWK
 _pc_out=$(awk -f "$_pc_prog" "$GATE")
-_pc_total=$(printf '%s\n' "$_pc_out" | grep -c '^POST-' || true)
-_pc_bad=$(printf '%s\n' "$_pc_out" | grep -c '^POST-EXEMPT' || true)
+_pc_total=$(grep -c '^POST-' <<<"$_pc_out" || true)
+_pc_bad=$(grep -c '^POST-EXEMPT' <<<"$_pc_out" || true)
 if case "$_pc_out" in *ERROR*) true ;; *) false ;; esac; then
   bad "27-postcomponent: the derivation could not find the top-level run_file_size call, so this class check is vacuous: $_pc_out"
 elif [ "$_pc_total" -ge 4 ] && [ "$_pc_bad" = 0 ]; then
@@ -2212,7 +2212,7 @@ awk '
   { print }
 ' "$GATE" > "$_pc_ctl"
 _pc_ctl_out=$(awk -f "$_pc_prog" "$_pc_ctl")
-if [ "$(printf '%s\n' "$_pc_ctl_out" | grep -c '^POST-EXEMPT')" -ge 1 ]; then
+if [ "$(grep -c '^POST-EXEMPT' <<<"$_pc_ctl_out")" -ge 1 ]; then
   ok "27-control: removing the attribution from EVERY post-component pre-flight site makes the class check report them, so the clean reading above is a measurement rather than an empty classification"
 else
   bad "27-control: the class check did not notice a stripped post-component site -- it is blind:
@@ -2286,9 +2286,9 @@ o26b=$(
   printf 'UNREAD %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
   printf 'UNREADLINE %s\n' "${DISK_PREFLIGHT_META[0]:-<none>}"
 )
-l26b=$(printf '%s\n' "$o26b" | sed -n 's/^LINE //p')
-m26b=$(printf '%s\n' "$o26b" | sed -n 's/^MEMLINE //p')
-u26b=$(printf '%s\n' "$o26b" | sed -n 's/^UNREADLINE //p')
+l26b=$(sed -n 's/^LINE //p' <<<"$o26b")
+m26b=$(sed -n 's/^MEMLINE //p' <<<"$o26b")
+u26b=$(sed -n 's/^UNREADLINE //p' <<<"$o26b")
 if case "$o26b" in *"PAIRS 2"*) true ;; *) false ;; esac \
    && case "$l26b" in "disk-exhaustion: RECOGNISED (#3800)"*"component 'file-size'"*"file-size.log:1"*) true ;; *) false ;; esac \
    && case "$o26b" in *"MEMPAIRS 0"*) true ;; *) false ;; esac \
@@ -2384,9 +2384,9 @@ _mem_body=$(awk '
   ins && $0 !~ /^[[:space:]]*#/ { print }
   inb && /^\}$/ { inb=0 }
 ' "$GATE")
-_mem_pipestatus=$(printf '%s\n' "$_mem_body" | grep -c 'PIPESTATUS\[1\]' || true)
-_mem_nopf=$(printf '%s\n' "$_mem_body" | grep -c 'set +o pipefail' || true)
-_mem_bare=$(printf '%s\n' "$_mem_body" | grep -cE '\)"; rc=\$\?' || true)
+_mem_pipestatus=$(grep -c 'PIPESTATUS\[1\]' <<<"$_mem_body" || true)
+_mem_nopf=$(grep -c 'set +o pipefail' <<<"$_mem_body" || true)
+_mem_bare=$(grep -cE '\)"; rc=\$\?' <<<"$_mem_body" || true)
 if [ "$_mem_pipestatus" -ge 1 ] && [ "$_mem_nopf" -ge 1 ]; then
   ok "25d-grep-status: the in-memory branch takes grep's OWN status via PIPESTATUS[1] under a subshell-scoped 'set +o pipefail' -- so printf dying of SIGPIPE is irrelevant rather than avoided, which is what lets -m1 (and the bound) come back"
 else
@@ -2406,14 +2406,14 @@ fi
 # unwritten. The MUTATION control is what makes the clean reading a measurement: the pre-fix form
 # (printf unredirected) must LEAK on the identical input, or this case is asserting nothing.
 _e5=$(mktemp -d "$tmp/c25e.XXXXXX")
-_e5_payload_cmd='payload=$(printf "NEEDLE here\n"; head -c 2000000 /dev/zero | tr "\0" "x")'
+_e5_payload_cmd='payload=$(printf "NEEDLE here\n"; head -c 2000000 /dev/zero | tr "\0" "x")'  # sigpipe-fixture: planted subject: payload builder text for the generated driver scripts
 cat > "$_e5/fixed.sh" <<EOF
 #!/usr/bin/env bash
 $_e5_payload_cmd
 trap '' PIPE
 hit="\$(
   set +o pipefail
-  printf '%s\n' "\$payload" 2>/dev/null | LC_ALL=C grep -n -o -m1 -a -F -e "NEEDLE" 2>/dev/null
+  printf '%s\n' "\$payload" 2>/dev/null | LC_ALL=C grep -n -o -m1 -a -F -e "NEEDLE" 2>/dev/null  # sigpipe-fixture: planted subject: the stderr-redirected FIXED form that the generated driver exercises
   exit "\${PIPESTATUS[1]}"
 )"; printf 'RC %s HIT %s\n' "\$?" "\$hit"
 EOF
@@ -2423,7 +2423,7 @@ $_e5_payload_cmd
 trap '' PIPE
 hit="\$(
   set +o pipefail
-  printf '%s\n' "\$payload" | LC_ALL=C grep -n -o -m1 -a -F -e "NEEDLE" 2>/dev/null
+  printf '%s\n' "\$payload" | LC_ALL=C grep -n -o -m1 -a -F -e "NEEDLE" 2>/dev/null  # sigpipe-fixture: mutation-control driver: the pre-fix unredirected printf-into-grep -m1 form IS the planted subject
   exit "\${PIPESTATUS[1]}"
 )"; printf 'RC %s HIT %s\n' "\$?" "\$hit"
 EOF
@@ -2520,7 +2520,7 @@ fi
 # behavioural case would need a full `--only` run to see it.
 _rt_body=$(awk '/^_disk_retarget\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
 if [ -n "$_rt_body" ] \
-   && ! printf '%s\n' "$_rt_body" | grep -vE '^[[:space:]]*#' | grep -qE 'cargo|_gate_resolve_target_dir'; then
+   && ! grep -qE 'cargo|_gate_resolve_target_dir' <<<"$(grep -vE '^[[:space:]]*#' <<<"$_rt_body")"; then
   ok "25g-retarget-no-cargo: _disk_retarget's body invokes neither cargo nor _gate_resolve_target_dir -- it reads the directory #3755's admission already resolved, so a no-cargo --only run stays hermetic BY CONSTRUCTION rather than by a guard someone must remember"
 else
   bad "25g-retarget-no-cargo: _disk_retarget's body still reaches a cargo path (or could not be extracted):
@@ -2533,8 +2533,8 @@ fi
 # the path to the TERMINAL EMIT -- so unbounded, the gate publishes NO verdict at all. Structural:
 # a behavioural case would need a genuinely wedged mount, which cannot be synthesised portably.
 _dp_body=$(awk '/^_disk_df_probe\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
-_dp_code=$(printf '%s\n' "$_dp_body" | grep -vE '^[[:space:]]*#')
-if [ -n "$_dp_body" ] && printf '%s\n' "$_dp_code" | grep -q '_disk_bounded'; then
+_dp_code=$(grep -vE '^[[:space:]]*#' <<<"$_dp_body")
+if [ -n "$_dp_body" ] && grep -q '_disk_bounded' <<<"$_dp_code"; then
   ok "25h-probe-bounded: the shipped _disk_df_probe routes its filesystem reads through _disk_bounded, so a wedged mount cannot hold the terminal emit open"
 else
   bad "25h-probe-bounded: the shipped _disk_df_probe does NOT route through a bounded runner -- an unbounded stat(2) here means no verdict at all on a wedged mount:
@@ -2548,10 +2548,10 @@ fi
 # shell". The first draft of this case did exactly that and red on correct code. What is checked
 # is the ORDER: the walk, and every stat, must fall between the `_component_set_bounded` line that
 # opens the quoted argument and the line that closes it.
-_dp_open=$(printf '%s\n' "$_dp_code" | grep -n '_disk_bounded' | head -1 | cut -d: -f1)
-_dp_close=$(printf '%s\n' "$_dp_code" | grep -n "^[[:space:]]*' _ \"\$p\")" | head -1 | cut -d: -f1)
-_dp_walk=$(printf '%s\n' "$_dp_code" | grep -nE '\[ ! -e' | head -1 | cut -d: -f1)
-_dp_stat_out=$(printf '%s\n' "$_dp_code" | grep -nE 'stat ' | awk -F: '{print $1}' | tail -1)
+_dp_open=$(grep -m1 -n '_disk_bounded' <<<"$_dp_code" | cut -d: -f1)
+_dp_close=$(grep -m1 -n "^[[:space:]]*' _ \"\$p\")" <<<"$_dp_code" | cut -d: -f1)
+_dp_walk=$(grep -m1 -nE '\[ ! -e' <<<"$_dp_code" | cut -d: -f1)
+_dp_stat_out=$(grep -nE 'stat ' <<<"$_dp_code" | awk -F: '{print $1}' | tail -1)
 if [ -n "$_dp_open" ] && [ -n "$_dp_close" ] && [ -n "$_dp_walk" ] && [ -n "$_dp_stat_out" ] \
    && [ "$_dp_walk" -gt "$_dp_open" ] && [ "$_dp_walk" -lt "$_dp_close" ] \
    && [ "$_dp_stat_out" -gt "$_dp_open" ] && [ "$_dp_stat_out" -lt "$_dp_close" ]; then
@@ -2590,8 +2590,8 @@ if command -v mkfifo >/dev/null 2>&1 && [ -n "$DISK_TIMEOUT" ]; then
       ' _ "$EX" "$d" 2>&1
       printf 'EXIT %s\n' "$?"
     )
-    ex23=$(printf '%s\n' "$o23" | sed -n 's/^EXIT //p')
-    l23=$(printf '%s\n' "$o23" | sed -n 's/^LINE //p')
+    ex23=$(sed -n 's/^EXIT //p' <<<"$o23")
+    l23=$(sed -n 's/^LINE //p' <<<"$o23")
     if [ "${ex23:-x}" = 0 ] \
        && case "$l23" in "disk-exhaustion: UNMEASURED (#3800)"*"core-tests.log(not-a-regular-file)"*) true ;; *) false ;; esac \
        && case "$l23" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
@@ -2650,7 +2650,7 @@ if command -v mkfifo >/dev/null 2>&1 && [ -n "$DISK_TIMEOUT" ]; then
     printf 'SKIP - 23a-fifo: mkfifo did not produce a FIFO on this filesystem, so a blocking subject cannot be induced. DECLARED, not silently omitted.\n'
   fi
 else
-  printf 'SKIP - 23a-fifo: this host lacks mkfifo and/or a working timeout|gtimeout (stock macOS has the first and not the second), so a blocking subject cannot be induced under a watchdog. DECLARED, not silently omitted.\n'
+  printf 'SKIP - 23a-fifo: this host lacks mkfifo and/or a working timeout|gtimeout (stock macOS has the first and not the second), so a blocking subject cannot be induced under a watchdog. DECLARED, not silently omitted.\n'  # sigpipe-fixture: false positive: the pipe is inside the printed message text
 fi
 
 # (21c) THE LADDER'S LOWER RUNGS -- roborev job 319 round 2. The first version of 21b's fallback
@@ -2679,7 +2679,7 @@ if [ -c /dev/full ] && ! : 2>/dev/null > "$d/logs/legacy-heuristics.result" && !
     printf 'EXIT %s\n' "$?"
   )
   chmod 755 "$d/logs" 2>/dev/null || true
-  ex21c=$(printf '%s\n' "$o21c" | sed -n 's/^EXIT //p')
+  ex21c=$(sed -n 's/^EXIT //p' <<<"$o21c")
   if [ "${ex21c:-0}" = 137 ] \
      && case "$o21c" in *"D1 TRUNCATION also failed"*) true ;; *) false ;; esac \
      && case "$o21c" in *"D2 GATE is being terminated"*) true ;; *) false ;; esac \
@@ -2714,7 +2714,7 @@ $o21c"
     printf 'EXIT %s\n' "$?"
   )
   chmod 755 "$d/logs" 2>/dev/null || true
-  ex21d=$(printf '%s\n' "$o21d" | sed -n 's/^EXIT //p')
+  ex21d=$(sed -n 's/^EXIT //p' <<<"$o21d")
   if [ "${ex21d:-0}" = 137 ] && case "$o21d" in *SURVIVED*) false ;; *) true ;; esac; then
     ok "21d-unignorable: with SIGTERM IGNORED the outcome is UNCHANGED -- the gate still dies (exit 137) and the shell never reaches its next statement, so a 'kill' that returns 0 can no longer be mistaken for the target having died"
   else
@@ -2732,9 +2732,9 @@ $o21d"
     ins { print }
     inb && /^\}$/ { inb=0 }
   ' "$GATE")
-  _sig_kill=$(printf '%s\n' "$_rung_body" | grep -c 'kill -KILL "\$\$"' || true)
-  _sig_other=$(printf '%s\n' "$_rung_body" | grep -cE 'kill -(TERM|INT|HUP|QUIT) "\$\$"' || true)
-  _sig_sleep=$(printf '%s\n' "$_rung_body" | grep -cE '^[[:space:]]*sleep ' || true)
+  _sig_kill=$(grep -c 'kill -KILL "\$\$"' <<<"$_rung_body" || true)
+  _sig_other=$(grep -cE 'kill -(TERM|INT|HUP|QUIT) "\$\$"' <<<"$_rung_body" || true)
+  _sig_sleep=$(grep -cE '^[[:space:]]*sleep ' <<<"$_rung_body" || true)
   if [ "$_sig_kill" = 1 ] && [ "$_sig_other" = 0 ] && [ "$_sig_sleep" = 0 ]; then
     ok "21d-one-signal: the SIDE branch signals \$\$ exactly once and with KILL (no TERM, no sleep) -- so there is no window in which the gate can be reaped and its pid reassigned to a peer lane's gate before a second signal lands"
   else
@@ -2757,8 +2757,8 @@ $o21d"
     ins { print }
     inb && /^\}$/ { inb=0 }
   ' "$_ctl_gate")
-  _ctl_other=$(printf '%s\n' "$_ctl_body" | grep -cE 'kill -(TERM|INT|HUP|QUIT) "\$\$"' || true)
-  _ctl_sleep=$(printf '%s\n' "$_ctl_body" | grep -cE '^[[:space:]]*sleep ' || true)
+  _ctl_other=$(grep -cE 'kill -(TERM|INT|HUP|QUIT) "\$\$"' <<<"$_ctl_body" || true)
+  _ctl_sleep=$(grep -cE '^[[:space:]]*sleep ' <<<"$_ctl_body" || true)
   if [ "$_ctl_other" -ge 1 ] && [ "$_ctl_sleep" -ge 1 ]; then
     ok "21d-one-signal-control: the planted TERM+sleep+KILL sequence IS seen by the same extraction (other-signals=$_ctl_other sleeps=$_ctl_sleep), so the clean reading above is a measurement and not an empty match"
   else
@@ -2794,7 +2794,7 @@ if [ -c /dev/full ] && ! : 2>/dev/null > "$d/logs/legacy-heuristics.result" && !
     ' _ "$EX" "$d/logs" 2>&1
     printf 'EXIT %s\n' "$?"
   )
-  ex21e=$(printf '%s\n' "$o21e" | sed -n 's/^EXIT //p')
+  ex21e=$(sed -n 's/^EXIT //p' <<<"$o21e")
   if [ "${ex21e:-1}" = 0 ] \
      && case "$o21e" in *"D3 REFUSING to signal pid"*) true ;; *) false ;; esac \
      && case "$o21e" in *ALIVE*) true ;; *) false ;; esac; then
@@ -2816,7 +2816,7 @@ $o21e"
     ' _ "$EX" "$d/logs" 2>&1
     printf 'EXIT %s\n' "$?"
   )
-  ex21f=$(printf '%s\n' "$o21f" | sed -n 's/^EXIT //p')
+  ex21f=$(sed -n 's/^EXIT //p' <<<"$o21f")
   case "$o21f" in
     *NOIDENT*)
       printf 'SKIP - 21e-identity-match: this host publishes no process start-time identity (no /proc, no ps), so the VERIFIED-ours direction cannot be induced. DECLARED, not silently omitted.\n' ;;

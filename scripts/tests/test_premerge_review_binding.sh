@@ -684,7 +684,7 @@ fi
 pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 304)"
 roborev_job 304 "$(cd "$WORK" && git rev-parse main~1)" "$REVIEWED_PRE"
 OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$SB" review-binding 1 pmcfadin/cqlite "$HEAD_AFTER" 2>&1)
-unanchored=$(printf '%s\n' "$OUT" | grep -cv '^PREMERGE: REVIEW-BINDING ')
+unanchored=$(grep -cv '^PREMERGE: REVIEW-BINDING ' <<<"$OUT")
 if [ "$unanchored" -eq 0 ]; then
   ok "anchor: every emitted line begins with the leg's prefix"
 else
@@ -697,7 +697,7 @@ hold_payload "$MOCK_GH_DIR/pr-hold.json" \
   "[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$HOLD_AT\",\"body\":\"HOLD: stop\"}]"
 printf '[]\n' >"$MOCK_GH_DIR/timeline.json"
 HOUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$SB" hold-check 1 pmcfadin/cqlite 2>&1)
-hold_unanchored=$(printf '%s\n' "$HOUT" | grep -cv '^PREMERGE: HOLD-CHECK ')
+hold_unanchored=$(grep -cv '^PREMERGE: HOLD-CHECK ' <<<"$HOUT")
 if [ "$hold_unanchored" -eq 0 ]; then
   ok "anchor: every hold-check line begins with the leg's prefix"
 else
