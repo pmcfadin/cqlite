@@ -838,10 +838,8 @@ SHIM
     bad "3544-toctou-verified-bytes: the positive control did not reach KIND ok"
   elif [ "$(field VERDICT "$tt_out")" = PASS ] && [ "$(field KIND "$tt_out")" = ok ]; then
     ok "3544-toctou-verified-bytes: with the shared-store tree SWAPPED between its hash and the traversal, the verdict still comes from the verified bytes (PASS) — the swap is proven by the marker"
-  elif [ "$(field KIND "$tt_out")" = object-store-corrupt ] || [ "$(field KIND "$tt_out")" = object-store-unverified ]; then
-    ok "3544-toctou-verified-bytes: with the shared-store tree SWAPPED between its hash and the traversal, the pre-flight refuses by name ($(field KIND "$tt_out")) instead of following the tampered entry"
   else
-    bad "3544-toctou-verified-bytes: unexpected outcome verdict '$(field VERDICT "$tt_out")' kind '$(field KIND "$tt_out")'"
+    bad "3544-toctou-verified-bytes: ONLY PASS with KIND ok is acceptable (a refusal means the traversal re-read the swapped shared tree); got verdict '$(field VERDICT "$tt_out")' kind '$(field KIND "$tt_out")'"
   fi
 fi
 
