@@ -376,7 +376,7 @@ hook() {
   ( fx "$repo" && bash "$repo/scripts/agent-gate.sh" --component-set-line "$mode" 2>/dev/null )
 }
 field() { # field <name> <hook-output>
-  printf '%s\n' "$2" | grep "^$1: " | sed "s/^$1: //"
+  grep "^$1: " <<<"$2" | sed "s/^$1: //"
 }
 
 # THE PRE-FLIGHT REGION, EXTRACTED ONCE (#3757). Section 9b's unbounded-operation audit and
@@ -433,7 +433,7 @@ cs_region_code() {
 # ---------------------------------------------------------------------------
 base_ok=$(mkbaseline base-ok "$ADD_SENTINEL")
 base_list=$( fx "$tmp/base-ok-src" && bash scripts/agent-gate.sh --list 2>/dev/null )
-if grep -qx -- "$SENTINEL" <<<"$base_list" && [ "$(printf '%s\n' "$base_list" | wc -l)" -gt 30 ]; then
+if grep -qx -- "$SENTINEL" <<<"$base_list" && [ "$(wc -l <<<"$base_list")" -gt 30 ]; then
   ok "3544-fixture: the baseline fixture's --list really carries the sentinel component"
 else
   bad "3544-fixture: the sentinel transformation did not change the baseline component set"
@@ -444,7 +444,7 @@ fi
 # all). Proven where it is observable: a repo with a DEAD origin still lists fine.
 dead_list_repo=$(mkbranch dead-list "$tmp/nonexistent-origin.git" - )
 dl_out=$( fx "$dead_list_repo" && bash scripts/agent-gate.sh --list 2>/dev/null ); dl_rc=$?
-if [ "$dl_rc" -eq 0 ] && [ "$(printf '%s\n' "$dl_out" | wc -l)" -gt 30 ] \
+if [ "$dl_rc" -eq 0 ] && [ "$(wc -l <<<"$dl_out")" -gt 30 ] \
    && ! grep -q 'component-set' <<<"$dl_out"; then
   ok "3544-list-no-preflight: --list exits at arg parse (no fetch, no pre-flight, no recursion)"
 else
@@ -1186,8 +1186,8 @@ CS_PINNED_REPO_ROOT_LINES=$(cat <<'CS_PIN_RR_EOF'
            _CS_DETAIL="deciding whether $REPO_ROOT is a SHALLOW clone required reading its repository state, and that read EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and an \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
 CS_PIN_RR_EOF
 )
-cs_pin_live_n=$(printf '%s\n' "$CS_PINNED_LIVE_CALL_LINES" | grep -c .)
-cs_pin_rr_n=$(printf '%s\n' "$CS_PINNED_REPO_ROOT_LINES" | grep -c .)
+cs_pin_live_n=$(grep -c . <<<"$CS_PINNED_LIVE_CALL_LINES")
+cs_pin_rr_n=$(grep -c . <<<"$CS_PINNED_REPO_ROOT_LINES")
 
 # cs_pinned_line_findings <gate-path>: one FINDING per deviation from either pin. Empty = both
 # pins hold. `grep -Fxq` is WHOLE-LINE fixed-string membership, and the needle is always a SINGLE
@@ -1351,7 +1351,7 @@ cs_scratch_peel_findings() {
   # ANCHORED comment strip (roborev job 325, nit 3): an unanchored `:[[:space:]]*#` also matches a
   # `#` LATER on the line, so a real call line carrying a trailing `# note: …` was dropped.
   site=$(grep -n 'rev-parse --verify --quiet "\${head_unpeeled}\^{commit}"' "$g" | grep -v '^[0-9][0-9]*:[[:space:]]*#')
-  n=$(printf '%s\n' "$site" | grep -c . )
+  n=$(grep -c . <<<"$site" )
   if [ "$n" -ne 1 ]; then
     printf 'FINDING: expected exactly ONE scratch peel of HEAD, found %s\n' "$n"
     return 0
@@ -2023,7 +2023,7 @@ else
     ok "3544-manifest-locale: a non-ASCII manifest name is refused as manifest-garbage even under $loc_pick, where [:alnum:] accepts it (control: that locale was verified to accept it) — the grammar is the documented ASCII one on every host"
   else
     bad "3544-manifest-locale: expected KIND manifest-garbage under $loc_pick; got '$loc_kind' (manifest-stale means the non-ASCII name PARSED, i.e. the grammar is still locale-dependent)"
-    printf '%s\n' "$loc_out" | head -4
+    head -4 <<<"$loc_out"
   fi
 fi
 
@@ -2061,7 +2061,7 @@ if ! awk -v v="$cap_small_cap" '
   cap_ok=0
 fi
 osz_prog="$tmp/oversize-writer.sh"
-{ printf '#!/usr/bin/env bash\n'; printf 'head -c 200000 /dev/zero | tr "\\\\0" "x"\n'; printf 'exit 0\n'; } >"$osz_prog"
+{ printf '#!/usr/bin/env bash\n'; printf 'head -c 200000 /dev/zero | tr "\\\\0" "x"\n'; printf 'exit 0\n'; } >"$osz_prog"  # sigpipe-fixture: the pipe is text planted into a generated fixture script, not a pipeline here
 chmod +x "$osz_prog"
 osz_small="$tmp/small-writer.sh"
 { printf '#!/usr/bin/env bash\n'; printf 'printf "component-set-small\\\\n"\n'; printf 'exit 0\n'; } >"$osz_small"
@@ -2141,7 +2141,7 @@ fi
 # ---------------------------------------------------------------------------
 serr_prog="$tmp/stderr-writer.sh"
 { printf '#!/usr/bin/env bash\n'
-  printf '( head -c 8388608 /dev/zero | tr "\\\\0" "e" >&2 ) &\n'
+  printf '( head -c 8388608 /dev/zero | tr "\\\\0" "e" >&2 ) &\n'  # sigpipe-fixture: the pipe is text planted into a generated fixture script, not a pipeline here
   printf 'exit 0\n'
 } >"$serr_prog"
 chmod +x "$serr_prog"
@@ -2259,18 +2259,18 @@ x"
 mkdir -p "$nl_dir/scripts"
 cp "$GATE" "$nl_dir/scripts/agent-gate.sh"
 nl_out=$(hook "$nl_dir")
-nl_forged=$(printf '%s\n' "$nl_out" | grep -c '^RESULT: PASS')
-nl_fields=$(printf '%s\n' "$nl_out" | grep -c '^COMPONENT_SET_LINE: ')
+nl_forged=$(grep -c '^RESULT: PASS' <<<"$nl_out")
+nl_fields=$(grep -c '^COMPONENT_SET_LINE: ' <<<"$nl_out")
 # THE CONTROL, and it is what makes the zero above mean anything: the injected text must still be
 # PRESENT somewhere in the emitted line, flattened inline. Without this, a run that rejected the
 # path BEFORE rendering it would also report 0 forged lines and the case would pass while testing
 # nothing — an absence proving a property it never exercised.
-nl_rendered=$(printf '%s\n' "$nl_out" | grep -c 'RESULT: PASS')
+nl_rendered=$(grep -c 'RESULT: PASS' <<<"$nl_out")
 if [ "$nl_forged" -eq 0 ] && [ "$nl_fields" -eq 1 ] && [ "$nl_rendered" -ge 1 ]; then
   ok "3544-detail-one-line: a newline-bearing checkout path is FLATTENED into one physical line — the injected text is rendered inline (control) yet adds NO field at column zero"
 else
   bad "3544-detail-one-line: expected forged-at-column-zero=0, COMPONENT_SET_LINE fields=1, injected-text-rendered>=1; got $nl_forged / $nl_fields / $nl_rendered"
-  printf '%s\n' "$nl_out" | head -6
+  head -6 <<<"$nl_out"
 fi
 
 # 3f-ii. baseline-workspace: the scratch dir for extracting the baseline script cannot be
@@ -3244,7 +3244,7 @@ if [ "$upstream_tag" -ge 1 ] \
    && [ "$(field KIND "$tg_out")" = ok ] \
    && [ "$(field BASELINE_OBJECTS "$tg_out")" = fetched ] \
    && [ "$tags_after" = "$tags_before" ] \
-   && ! printf '%s\n' "$tags_after" | grep -q 'v99.99.99-selftest'; then
+   && ! grep -q 'v99.99.99-selftest' <<<"$tags_after"; then
   ok "3544-no-tag-writes: the baseline fetch leaves shared refs/tags/* UNCHANGED even with tagOpt=--tags and a new upstream tag (and a fetch DID happen: BASELINE_OBJECTS=fetched)"
 else
   bad "3544-no-tag-writes: expected an unchanged tag ref set after a REAL fetch (upstream_tag=$upstream_tag kind=$(field KIND "$tg_out") objects=$(field BASELINE_OBJECTS "$tg_out"))"
@@ -3520,15 +3520,15 @@ CENSUS_PROG
 
 emit_census() { awk -f "$CENSUS_AWK" "${1:-$GATE}"; }
 census_out=$(emit_census)
-census_sites=$(printf '%s\n' "$census_out" | grep -c '	')
-census_gaps=$(printf '%s\n' "$census_out" | grep -c '^GAP	')
+census_sites=$(grep -c '	' <<<"$census_out")
+census_gaps=$(grep -c '^GAP	' <<<"$census_out")
 if [ "$census_sites" -eq 0 ]; then
   bad "3544-every-emitter: the emit-site derivation found NO call sites in $GATE — the call shape changed or the scan broke (fail-closed: this is not a clean census)"
 elif [ "$census_gaps" -eq 0 ]; then
   ok "3544-every-emitter: all $census_sites emit sites account for the component-set line (stamped, or exempt with a reason) — source census; the lite/delta/pre-flight blocks are proved behaviourally above"
 else
   bad "3544-every-emitter: $census_gaps of $census_sites emit site(s) neither stamp the component-set line nor carry 'component-set-exempt: <reason>':"
-  printf '%s\n' "$census_out" | grep '^GAP	' | while IFS='	' read -r _v _ln _src; do
+  grep '^GAP	' <<<"$census_out" | while IFS='	' read -r _v _ln _src; do
     echo "   line $_ln: $_src"
   done
 fi
@@ -3628,18 +3628,18 @@ MANUAL_PROG
 
 manual_census() { awk -f "$MANUAL_AWK" "${1:-$GATE}"; }
 man_out=$(manual_census)
-man_sites=$(printf '%s\n' "$man_out" | grep -c '	')
-man_gaps=$(printf '%s\n' "$man_out" | grep -c '^GAP	')
-man_unterm=$(printf '%s\n' "$man_out" | grep -c '^UNTERMINATED	')
-man_canon=$(printf '%s\n' "$man_out" | grep -c '^CANONICAL	')
-man_stamped=$(printf '%s\n' "$man_out" | grep -c '^STAMPED	')
+man_sites=$(grep -c '	' <<<"$man_out")
+man_gaps=$(grep -c '^GAP	' <<<"$man_out")
+man_unterm=$(grep -c '^UNTERMINATED	' <<<"$man_out")
+man_canon=$(grep -c '^CANONICAL	' <<<"$man_out")
+man_stamped=$(grep -c '^STAMPED	' <<<"$man_out")
 if [ "$man_sites" -eq 0 ] || [ "$man_canon" -eq 0 ] || [ "$man_stamped" -eq 0 ]; then
   bad "3544-manual-emitter: the renderer derivation found sites=$man_sites canonical=$man_canon stamped=$man_stamped in $GATE — the marker-echo shape changed or the scan broke (fail-closed: this is not a clean census)"
 elif [ "$man_gaps" -eq 0 ] && [ "$man_unterm" -eq 0 ]; then
   ok "3544-manual-emitter: all $man_sites SUMMARY-block renderers account for the component-set line ($man_canon canonical, $man_stamped hand-rolled+stamped, rest exempt with a reason)"
 else
   bad "3544-manual-emitter: $man_gaps hand-rolled SUMMARY block(s) neither stamp the component-set line nor carry 'component-set-exempt: <reason>' ($man_unterm unterminated):"
-  printf '%s\n' "$man_out" | grep -E '^(GAP|UNTERMINATED)	' | while IFS='	' read -r _v _ln _src; do
+  grep -E '^(GAP|UNTERMINATED)	' <<<"$man_out" | while IFS='	' read -r _v _ln _src; do
     echo "   $_v line $_ln: $_src"
   done
 fi
@@ -3673,14 +3673,14 @@ cp "$GATE" "$man_home/scripts/agent-gate.sh"
 man_block=$( fx "$man_home" && AGENT_GATE_SUMMARY_FILE="$man_home/sum.txt" \
                AGENT_GATE_INTEGRITY_SELFTEST=marker CQLITE_GATE_NO_NICE=1 \
                bash scripts/agent-gate.sh 2>/dev/null )
-man_lines=$(printf '%s\n' "$man_block" | grep -c '^component-set: ')
+man_lines=$(grep -c '^component-set: ' <<<"$man_block")
 if [ "$man_lines" -eq 1 ] \
    && grep -q '^summary-integrity: FAIL' <<<"$man_block" \
    && grep -q '^RESULT: FAIL' <<<"$man_block"; then
   ok "3544-manual-emitter-emit: the hand-rolled summary-integrity FAIL block carries the component-set line exactly once"
 else
   bad "3544-manual-emitter-emit: expected exactly 1 'component-set:' line in the emitted integrity block (got $man_lines)"
-  printf '%s\n' "$man_block" | sed -n '1,25p'
+  sed -n '1,25p' <<<"$man_block"
 fi
 
 # ---------------------------------------------------------------------------
@@ -3700,9 +3700,9 @@ if ( fx "$inj_dir" && git remote set-url origin \
   # not-canonical verdict, an absence of injected lines proves nothing.
   if [ "$(field KIND "$inj_out")" != remote-not-canonical ]; then
     bad "3544-detail-flattened: fixture did not reach remote-not-canonical (kind '$(field KIND "$inj_out")') — cannot discriminate"
-  elif printf '%s\n' "$inj_out" | grep -qE '^(RESULT|fabricated):'; then
+  elif grep -qE '^(RESULT|fabricated):' <<<"$inj_out"; then
     bad "3544-detail-flattened: a newline in the origin URL INJECTED a line at column zero — a forged 'RESULT:' can defeat the summary probe"
-    printf '%s\n' "$inj_out" | grep -nE '^(RESULT|fabricated):'
+    grep -nE '^(RESULT|fabricated):' <<<"$inj_out"
   else
     ok "3544-detail-flattened: newlines in the origin URL are flattened, so no injected line reaches column zero (redaction alone did not do this)"
   fi
@@ -3756,11 +3756,11 @@ sd_in=$(printf 'fatal: unable to access '"'"'https://x-access-token:ghp_SECRET12
 sd_out=$(bash "$GATE" --component-set-safe-detail "$sd_in" 2>/dev/null | sed -n 's/^SAFE_DETAIL: //p')
 if [ -z "$sd_out" ]; then
   bad "3544-detail-safe: the --component-set-safe-detail hook produced nothing — the sanitiser cannot be asserted (fail-closed)"
-elif printf '%s' "$sd_out" | grep -q 'ghp_SECRET123'; then
+elif grep -q 'ghp_SECRET123' <<<"$sd_out"; then
   bad "3544-detail-safe: a CREDENTIAL survived into the detail text — it would reach the SUMMARY block agents paste into PR comments"
-elif ! printf '%s' "$sd_out" | grep -q '<redacted>'; then
+elif ! grep -q '<redacted>' <<<"$sd_out"; then
   bad "3544-detail-safe: no redaction marker in the detail text; the userinfo was dropped silently rather than visibly redacted"
-elif printf '%s\n' "$sd_out" | grep -qE '^RESULT:'; then
+elif grep -qE '^RESULT:' <<<"$sd_out"; then
   bad "3544-detail-safe: a newline in external text INJECTED a line at column zero — a forged 'RESULT:' defeats the summary probe"
 else
   ok "3544-detail-safe: external text is BOTH redacted (credential gone, marker present) and flattened (no column-zero injection) in one pass"
@@ -3796,24 +3796,24 @@ cfg_write=$(grep -n 'url = %s' "$GATE" | head -1)
 # RED-verified after the change: each plant now reports its OWN cause.
 fetch_line=$(grep -n 'git -C "\$csdir/repo" fetch' "$GATE" | head -1)
 if [ -z "$cfg_write" ] || [ -z "$fetch_line" ]; then
-  bad "3544-fetch-config-pinned: could not locate the config write (got '$(printf '%s' "$cfg_write" | cut -c1-40)') or the isolated fetch (got '$(printf '%s' "$fetch_line" | cut -c1-40)') in $GATE — the shape changed or the scan broke (fail-closed: this is not a clean result)"
-elif ! printf '%s' "$cfg_write" | grep -q 'printf .*url = %s.*"\$origin_url"'; then
-  bad "3544-fetch-config-pinned: the config write does not pass the VALIDATED \$origin_url through printf: $(printf '%s' "$cfg_write" | cut -c1-120)"
-elif ! printf '%s' "$cfg_write" | grep -q '>>"\$csconf"'; then
-  bad "3544-fetch-config-pinned: the URL is not written into the isolated \$csconf by redirection — a spawned writer would put it back in an argv: $(printf '%s' "$cfg_write" | cut -c1-120)"
-elif printf '%s' "$fetch_line" | grep -q 'origin_url'; then
-  bad "3544-fetch-config-pinned: the isolated fetch still interpolates the URL: $(printf '%s' "$fetch_line" | cut -c1-120)"
-elif printf '%s' "$fetch_line" | grep -qE 'fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline"'; then
+  bad "3544-fetch-config-pinned: could not locate the config write (got '$(cut -c1-40 <<<"$cfg_write")') or the isolated fetch (got '$(cut -c1-40 <<<"$fetch_line")') in $GATE — the shape changed or the scan broke (fail-closed: this is not a clean result)"
+elif ! grep -q 'printf .*url = %s.*"\$origin_url"' <<<"$cfg_write"; then
+  bad "3544-fetch-config-pinned: the config write does not pass the VALIDATED \$origin_url through printf: $(cut -c1-120 <<<"$cfg_write")"
+elif ! grep -q '>>"\$csconf"' <<<"$cfg_write"; then
+  bad "3544-fetch-config-pinned: the URL is not written into the isolated \$csconf by redirection — a spawned writer would put it back in an argv: $(cut -c1-120 <<<"$cfg_write")"
+elif grep -q 'origin_url' <<<"$fetch_line"; then
+  bad "3544-fetch-config-pinned: the isolated fetch still interpolates the URL: $(cut -c1-120 <<<"$fetch_line")"
+elif grep -qE 'fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline"' <<<"$fetch_line"; then
   ok "3544-fetch-config-pinned: the validated URL is pinned into the isolated config by a shell builtin, and the fetch names the remote 'csbaseline' with a literal refspec"
 else
-  bad "3544-fetch-config-pinned: the isolated fetch does not name the csbaseline remote with the literal refspec: $(printf '%s' "$fetch_line" | cut -c1-120)"
+  bad "3544-fetch-config-pinned: the isolated fetch does not name the csbaseline remote with the literal refspec: $(cut -c1-120 <<<"$fetch_line")"
 fi
 
 # …and the 0600 must be applied BEFORE the URL is written, because the URL may carry a token:
 # a mode change AFTER the write leaves a credential world-readable for the window in between.
 # ORDER assert, which is the only thing a source read can answer here.
 cfg_chmod_ln=$(grep -n 'chmod 600 "\$csconf"' "$GATE" | head -1 | cut -d: -f1)
-cfg_write_ln=$(printf '%s' "$cfg_write" | cut -d: -f1)
+cfg_write_ln=$(cut -d: -f1 <<<"$cfg_write")
 if [ -z "$cfg_chmod_ln" ] || [ -z "$cfg_write_ln" ]; then
   bad "3544-config-mode-first: could not locate the chmod (got '$cfg_chmod_ln') or the URL write (got '$cfg_write_ln') — the shape changed or the scan broke (fail-closed)"
 elif [ "$cfg_chmod_ln" -lt "$cfg_write_ln" ]; then
@@ -3837,10 +3837,10 @@ fi
 # signals it used to send (`kill -KILL -$pid`), so counting them made the assert report 2 of 6 and
 # fail on correct code. A structural check must read code, not prose about code.
 own_arm=$(awk '/^_component_set_bounded\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
-own_kills=$(printf '%s\n' "$own_arm" | grep -c 'kill -' || true)
-own_sup_kills=$(printf '%s\n' "$own_arm" | grep -c 'kill -[A-Z]* "-\$sup"' || true)
-own_park=$(printf '%s\n' "$own_arm" | grep -c 'sleep "\$(( secs + 5 ))"' || true)
-own_stale=$(printf '%s\n' "$own_arm" | grep -c 'kill -[A-Z]* "-\$pid"' || true)
+own_kills=$(grep -c 'kill -' <<<"$own_arm" || true)
+own_sup_kills=$(grep -c 'kill -[A-Z]* "-\$sup"' <<<"$own_arm" || true)
+own_park=$(grep -c 'sleep "\$(( secs + 5 ))"' <<<"$own_arm" || true)
+own_stale=$(grep -c 'kill -[A-Z]* "-\$pid"' <<<"$own_arm" || true)
 if [ "${own_kills:-0}" -lt 2 ] || [ "${own_park:-0}" -lt 1 ]; then
   bad "3544-owned-pgid-structural: could not locate the escalation in _component_set_bounded (kills=$own_kills park=$own_park) — the shape changed or the scan broke (fail-closed: this is not a clean result)"
 elif [ "${own_stale:-0}" -ne 0 ]; then
@@ -3868,7 +3868,7 @@ for _ur in 'query:https://github.com/pmcfadin/cqlite?access_token=SEK_query_3544
            'multiat:https://a@b:SEK_multi_3544@github.com/pmcfadin/cqlite.git'; do
   _ur_label="${_ur%%:*}"
   _ur_url="${_ur#*:}"
-  _ur_secret=$(printf '%s' "$_ur_url" | sed -n 's/.*\(SEK_[a-z]*_3544\).*/\1/p')
+  _ur_secret=$(sed -n 's/.*\(SEK_[a-z]*_3544\).*/\1/p' <<<"$_ur_url")
   _ur_norm=$(bash "$GATE" --component-set-remote-identity "$_ur_url" 2>/dev/null | sed -n 's/^NORMALISED: //p')
   _ur_id=$(bash "$GATE" --component-set-remote-identity "$_ur_url" 2>/dev/null | sed -n 's/^IDENTITY: //p')
   _ur_fx="$tmp/urlrender-$_ur_label"
@@ -3881,11 +3881,11 @@ for _ur in 'query:https://github.com/pmcfadin/cqlite?access_token=SEK_query_3544
     bad "3544-url-not-rendered[$_ur_label]: could not build the case (secret='$_ur_secret' normalised='$_ur_norm') — fail-closed rather than assert on nothing"
   elif [ "$_ur_id" = canonical ]; then
     bad "3544-url-not-rendered[$_ur_label]: this URL was accepted as CANONICAL — a credential-bearing or query-bearing origin must be refused"
-  elif printf '%s' "$_ur_norm" | grep -qF "$_ur_secret"; then
+  elif grep -qF "$_ur_secret" <<<"$_ur_norm"; then
     bad "3544-url-not-rendered[$_ur_label]: the NORMALISED value carries the secret, and that value is rendered into the diagnostic"
-  elif printf '%s' "$_ur_line" | grep -qF "$_ur_secret"; then
+  elif grep -qF "$_ur_secret" <<<"$_ur_line"; then
     bad "3544-url-not-rendered[$_ur_label]: the emitted component-set line carries the secret"
-  elif ! printf '%s' "$_ur_line" | grep -qF 'NOT RENDERED'; then
+  elif ! grep -qF 'NOT RENDERED' <<<"$_ur_line"; then
     bad "3544-url-not-rendered[$_ur_label]: the line does not state that the URL is withheld — a reader cannot tell a withheld value from a lost one"
   else
     ok "3544-url-not-rendered[$_ur_label]: a secret in this position never reaches the normalised value or the emitted line, and the line says the URL is withheld rather than dropping it silently"
@@ -4088,7 +4088,7 @@ for win_edit in manifest; do
       bad "3544-preflight-in-window[$win_edit]: the fixture gate did not COMPLETE within ${WIN_BOUND_SECS}s of the slot being released — the unmet wait is the gate exiting after its post-slot pre-flight; FAILED rather than skipped or waited on forever (#3698)"
       grep -n 'gate slot' "$win_log" 2>/dev/null | head -3
       tail -3 "$win_log" 2>/dev/null
-    elif ! printf '%s' "$win_rc" | grep -qE '^[0-9]+$'; then
+    elif ! grep -qE '^[0-9]+$' <<<"$win_rc"; then
       bad "3544-preflight-in-window[$win_edit]: the fixture gate recorded NO exit status (marker '$win_done' absent or unparseable: '$win_rc'), so no verdict can be derived from it — an unmeasured status is not a passing one"
       tail -3 "$win_log" 2>/dev/null
     elif [ "$win_raced" -eq 1 ]; then
@@ -4253,13 +4253,13 @@ DECLARED_KIND_COUNT=22   # 20 -> 22: +object-store-corrupt (3a-iv-quinquies) and
 # count would silently keep agreeing with this constant. A superset scan cannot miss.
 derived_kinds=$(grep -o '_CS_KIND=[A-Za-z][A-Za-z0-9-]*' "$GATE" 2>/dev/null \
                   | sed 's/_CS_KIND=//' | grep -vx ok | sort -u)
-derived_count=$(printf '%s\n' "$derived_kinds" | grep -c '[a-z]')
+derived_count=$(grep -c '[a-z]' <<<"$derived_kinds")
 if [ "$derived_count" -eq 0 ]; then
   bad "3544-kind-census: could not DERIVE any _CS_KIND value from $GATE — the assignment shape changed or the scan broke (fail-closed: this is not a count of 0)"
 elif [ "$derived_count" -eq "$DECLARED_KIND_COUNT" ]; then
   ok "3544-kind-census: the declared kind count ($DECLARED_KIND_COUNT) matches the gate's derived set ($derived_count) — the census was re-read; this asserts NOTHING about coverage"
 else
-  bad "3544-kind-census: the gate has $derived_count non-ok _CS_KIND values but this file declares $DECLARED_KIND_COUNT — update DECLARED_KIND_COUNT, the census comment AND a case for each new kind. Derived: $(printf '%s' "$derived_kinds" | tr '\n' ' ')"
+  bad "3544-kind-census: the gate has $derived_count non-ok _CS_KIND values but this file declares $DECLARED_KIND_COUNT — update DECLARED_KIND_COUNT, the census comment AND a case for each new kind. Derived: $(tr '\n' ' ' < <(printf '%s' "$derived_kinds"))"
 fi
 
 # ---------------------------------------------------------------------------
@@ -4465,7 +4465,7 @@ if [ "$region_lines" -lt 100 ]; then
   bad "3544-no-unbounded: could not extract the pre-flight region from $GATE (got $region_lines lines) — the block markers changed (fail-closed: not a clean audit)"
 else
   audit_out=$(awk -f "$GIT_AUDIT_AWK" "$region")
-  git_gaps=$(printf '%s\n' "$audit_out" | sed -n 's/^GAP\t//p')
+  git_gaps=$(sed -n 's/^GAP\t//p' <<<"$audit_out")
   # (ii) the external-program census: first word of every command fragment, minus shell
   #      keywords/builtins and minus every function this gate defines (derived, not listed).
   gate_fns=$(grep -Eo '^[A-Za-z_][A-Za-z0-9_]*\(\) \{' "$GATE" | sed 's/() {//' | sort -u)
@@ -4505,13 +4505,13 @@ else
   # design: losing part of a diagnostic must not turn a measured result into a refusal. The bound
   # matters on the STDOUT path because that is the one whose bytes are PARSED.
   declared_externals="basename cat chmod cut env find git gtimeout head kill mktemp rm sed sleep timeout tr true wc"
-  externals=$(printf '%s\n' "$audit_out" | sed -n 's/^EXT\t//p' | sort -u)
+  externals=$(sed -n 's/^EXT\t//p' <<<"$audit_out" | sort -u)
   undeclared=""
   for _w in $externals; do
     case " then if fi else elif return local echo printf esac case do done while for shift exit continue wait set true : command read eval test unset export trap cd type hash pwd let declare readonly source break " in
       *" $_w "*) continue ;;
     esac
-    printf '%s\n' "$gate_fns" | grep -qx -- "$_w" && continue
+    grep -qx -- "$_w" <<<"$gate_fns" && continue
     case " $declared_externals " in *" $_w "*) continue ;; esac
     undeclared="${undeclared:+$undeclared }$_w"
   done
@@ -4527,21 +4527,21 @@ else
   #       PRE-AUTHORISES a re-introduction, which is exactly why `bash` and `mkdir` were REMOVED
   #       from declared_externals rather than left in place when the two `--list` spawns went. The
   #       same rule now applies to both sets.
-  git_ops=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | sort -u)
+  git_ops=$(sed -n 's/^OP\t//p' <<<"$audit_out" | sort -u)
   declared_git_ops="cat-file fetch hash-object init ls-remote ls-tree merge-base remote rev-list rev-parse show"
   undeclared_ops=""; stale_ops=""; stale_externals=""
-  passthrough_n=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | grep -cx '<wrapper-passthrough>')
+  passthrough_n=$(sed -n 's/^OP\t//p' <<<"$audit_out" | grep -cx '<wrapper-passthrough>')
   for _o in $git_ops; do
     [ "$_o" = "<wrapper-passthrough>" ] && continue
     case " $declared_git_ops " in *" $_o "*) continue ;; esac
     undeclared_ops="${undeclared_ops:+$undeclared_ops }$_o"
   done
   for _o in $declared_git_ops; do
-    printf '%s\n' "$git_ops" | grep -qx -- "$_o" && continue
+    grep -qx -- "$_o" <<<"$git_ops" && continue
     stale_ops="${stale_ops:+$stale_ops }$_o"
   done
   for _w in $declared_externals; do
-    printf '%s\n' "$externals" | grep -qx -- "$_w" && continue
+    grep -qx -- "$_w" <<<"$externals" && continue
     stale_externals="${stale_externals:+$stale_externals }$_w"
   done
   if [ "$passthrough_n" -gt 1 ]; then
@@ -4550,7 +4550,7 @@ else
     bad "3544-no-unbounded: the git-operation census came back EMPTY on a region of $region_lines lines — the derivation broke (fail-closed: an empty subject set would declare every operation classified)"
   elif [ -n "$git_gaps" ]; then
     bad "3544-no-unbounded: UNBOUNDED git invocation(s) in the pre-flight — every one must go through _component_set_bounded or _cs_live_git; the '# local-only' excusal was removed (job 315) after three findings came through it:"
-    printf '%s\n' "$git_gaps" | while IFS= read -r _g; do echo "   $_g"; done
+    while IFS= read -r _g; do echo "   $_g"; done <<<"$git_gaps"
   elif [ -n "$undeclared" ]; then
     bad "3544-no-unbounded: UNDECLARED external program(s) in the pre-flight region: $undeclared — classify each in the enumeration comment (bounded or local-only) and add it to declared_externals"
   elif [ -n "$undeclared_ops" ]; then
@@ -4558,7 +4558,7 @@ else
   elif [ -n "$stale_ops" ] || [ -n "$stale_externals" ]; then
     bad "3544-no-unbounded: DECLARED but NO LONGER USED — git operation(s): ${stale_ops:-none}; external program(s): ${stale_externals:-none}. Remove each from its declared set and from the enumeration comment: a stale entry pre-authorises a re-introduction (the reason `bash` and `mkdir` were removed rather than left)"
   else
-    ok "3544-no-unbounded: every git invocation in the pre-flight is bounded or annotated local-only, no undeclared external program appears, and the git-operation inventory matches the region EXACTLY in both directions ($(printf '%s' "$git_ops" | wc -w | tr -d ' ') operations, region $region_lines lines)"
+    ok "3544-no-unbounded: every git invocation in the pre-flight is bounded or annotated local-only, no undeclared external program appears, and the git-operation inventory matches the region EXACTLY in both directions ($(wc -w <<<"$git_ops" | tr -d ' ') operations, region $region_lines lines)"
   fi
 
   # POSITIVE CONTROLS for BOTH halves, through the SAME audit program: plant each defect
@@ -4755,8 +4755,8 @@ printf '[url "/nonexistent/evil-redirect.git"]\n\tinsteadOf = https://github.com
 # CONTROL: the rewrite must actually redirect a plain fetch, or this case proves nothing.
 git init -q "$rw_dir/ctl" >/dev/null 2>&1
 rw_ctl=$(GIT_CONFIG_GLOBAL="$rw_dir/gitconfig" git -C "$rw_dir/ctl" fetch --quiet --refmap= --no-tags "https://github.com/pmcfadin/cqlite.git" 'refs/heads/main:refs/x' 2>&1)
-if ! printf '%s' "$rw_ctl" | grep -q 'evil-redirect'; then
-  bad "3544-rewrite-immune: the POSITIVE CONTROL did not redirect — the rewrite is not effective in this environment, so this case cannot discriminate (control said: $(printf '%s' "$rw_ctl" | head -1 | cut -c1-80))"
+if ! grep -q 'evil-redirect' <<<"$rw_ctl"; then
+  bad "3544-rewrite-immune: the POSITIVE CONTROL did not redirect — the rewrite is not effective in this environment, so this case cannot discriminate (control said: $(head -1 <<<"$rw_ctl" | cut -c1-80))"
 else
   rw_out=$(GIT_CONFIG_GLOBAL="$rw_dir/gitconfig" bash "$GATE" --component-set-line full 2>/dev/null)
   if [ "$(field KIND "$rw_out")" = ok ]; then
@@ -4865,18 +4865,19 @@ scp_secret=ghp_scp_must_not_appear_3544
 scp_url="$scp_secret@github.com:pmcfadin/cqlite.git"
 scp_norm=$(bash "$GATE" --component-set-remote-identity "$scp_url" 2>/dev/null | sed -n 's/^NORMALISED: //p')
 scp_verdict=$(bash "$GATE" --component-set-remote-identity "$scp_url" 2>/dev/null | sed -n 's/^IDENTITY: //p')
-scp_detail=$(bash "$GATE" --component-set-safe-detail "$(printf 'fatal: %s: Permission denied (publickey).\nRESULT: PASS' "$scp_url")" 2>/dev/null | sed -n 's/^SAFE_DETAIL: //p')
+scp_arg=$(printf 'fatal: %s: Permission denied (publickey).\nRESULT: PASS' "$scp_url")
+scp_detail=$(bash "$GATE" --component-set-safe-detail "$scp_arg" 2>/dev/null | sed -n 's/^SAFE_DETAIL: //p')
 if [ -z "$scp_norm" ] || [ -z "$scp_detail" ]; then
   bad "3544-scp-userinfo: the identity or sanitiser hook produced nothing (norm='$scp_norm') — neither half can be asserted (fail-closed)"
 elif [ "$scp_verdict" != not-canonical ]; then
   bad "3544-scp-userinfo: a credential-bearing scp remote was accepted as canonical ('$scp_verdict') — the identity check must refuse it (ONE rule now covers every URL form: userinfo must be absent or exactly 'git'), not merely drop the userinfo before comparing"
-elif printf '%s' "$scp_norm" | grep -qF "$scp_secret"; then
+elif grep -qF "$scp_secret" <<<"$scp_norm"; then
   bad "3544-scp-userinfo: the REJECTION MARKER carries part of the value — it is rendered into _CS_DETAIL and thence into a pasted SUMMARY block"
-elif printf '%s' "$scp_detail" | grep -qF "$scp_secret"; then
+elif grep -qF "$scp_secret" <<<"$scp_detail"; then
   bad "3544-scp-userinfo: an scp-style credential survived the sanitiser — the redactor only handled scheme://user@ forms"
-elif ! printf '%s' "$scp_detail" | grep -q '<redacted>'; then
+elif ! grep -q '<redacted>' <<<"$scp_detail"; then
   bad "3544-scp-userinfo: no redaction marker in the sanitised text; the credential was dropped silently rather than visibly redacted"
-elif printf '%s\n' "$scp_detail" | grep -qE '^RESULT:'; then
+elif grep -qE '^RESULT:' <<<"$scp_detail"; then
   bad "3544-scp-userinfo: the sanitised text still injects a line at column zero (flattening regressed)"
 else
   ok "3544-scp-userinfo: a credential-bearing scp remote is NOT canonical, its verdict marker carries no part of the value, and the same text is redacted AND flattened if it is rendered anyway"
@@ -5169,7 +5170,7 @@ pc_promisor=$(git -C "$pc_lane" config --get-regexp 'remote\..*\.promisor|extens
 # CONTROL: a read of an object this clone does not have must reach the promisor and execute the
 # helper. The sha is a hash of text no repository here contains, so it is absent by construction.
 rm -f "$pc_marker"
-git -C "$pc_lane" cat-file -e "$(printf 'absent-object-for-3544-partial-clone-case' | git hash-object --stdin 2>/dev/null)" >/dev/null 2>&1
+git -C "$pc_lane" cat-file -e "$(git hash-object --stdin 2>/dev/null < <(printf 'absent-object-for-3544-partial-clone-case'))" >/dev/null 2>&1
 pc_ctl=no
 [ -f "$pc_marker" ] && pc_ctl=yes
 if [ "$pc_ok" -ne 1 ] || [ -z "$pc_tip" ]; then
@@ -5675,7 +5676,7 @@ agent_gate_pin_canonical_remote "$tmp/nourl-branch/scripts/agent-gate.sh" "$fk_u
 # reports a blank URL for it. If a future git rewrites this shape too, say so by name instead of
 # failing as a gate regression.
 nu_git=$(git -C "$tmp/nourl-branch" remote get-url origin 2>/dev/null)
-if [ -n "$(printf '%s' "$nu_git" | tr -d '[:space:]')" ]; then
+if [ -n "$(tr -d '[:space:]' < <(printf '%s' "$nu_git"))" ]; then
   bad "3544-remote-unreadable: PRECONDITION — this git ($(git --version 2>/dev/null)) reports origin URL '$nu_git' for a whitespace-only remote.origin.url, so the fixture is not a no-URL origin; the case measured nothing"
 else
   nu_out=$(hook "$tmp/nourl-branch")
@@ -5702,7 +5703,7 @@ agent_gate_pin_canonical_remote "$tmp/emptyurl-branch/scripts/agent-gate.sh" "$f
 ( fx "$tmp/emptyurl-branch" && git config --unset-all remote.origin.url \
    && git config --add remote.origin.url "" ) >/dev/null 2>&1
 eu_git=$(git -C "$tmp/emptyurl-branch" remote get-url origin 2>/dev/null)
-if [ -z "$(printf '%s' "$eu_git" | tr -d '[:space:]')" ]; then
+if [ -z "$(tr -d '[:space:]' < <(printf '%s' "$eu_git"))" ]; then
   eu_want=remote-unreadable; eu_how="this git keeps the empty entry"
 elif [ "$eu_git" = origin ]; then
   eu_want=remote-not-canonical; eu_how="this git clears the list and falls back to the remote's name"
@@ -5770,7 +5771,7 @@ canon_assign=$(grep -n '^_CS_CANONICAL_REMOTE=' "$GATE")
 # whole-file because they are `^`-anchored and a comment cannot satisfy them.
 canon_code=$(grep -v '^[[:space:]]*#' "$GATE")
 if [ -n "$canon_assign" ] \
-   && [ "$(printf '%s\n' "$canon_assign" | grep -c .)" -eq 1 ] \
+   && [ "$(grep -c . <<<"$canon_assign")" -eq 1 ] \
    && grep -q '^_CS_CANONICAL_REMOTE="[A-Za-z0-9._/-]*"$' "$GATE" \
    && grep -q '^_CS_CANONICAL_REMOTE="[A-Za-z0-9.-]*\.[A-Za-z]*/[A-Za-z0-9._-]*/[A-Za-z0-9._-]*"$' "$GATE" \
    && ! grep -qE '_CS_CANONICAL_REMOTE=.*(\$\{|\$\(|git config)' <<<"$canon_code"; then

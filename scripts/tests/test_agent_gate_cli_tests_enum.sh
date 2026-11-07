@@ -218,8 +218,8 @@ required-features = ["write-support"]
 EOF
 
 derive() {
-  { awk -F\" "/^[[:space:]]*name[[:space:]]*=/{cur=\$2} /^[[:space:]]*required-features[[:space:]]*=/ && /write-support/{print cur}" "$1"; \
-    printf "%s\n" write_readback_content_tests graceful_shutdown_tests; } | sort -u
+  sort -u < <({ awk -F\" "/^[[:space:]]*name[[:space:]]*=/{cur=\$2} /^[[:space:]]*required-features[[:space:]]*=/ && /write-support/{print cur}" "$1"; \
+    printf "%s\n" write_readback_content_tests graceful_shutdown_tests; })
 }
 
 got=$(derive "$tmp/Cargo.toml" | tr '\n' ' ' | sed 's/ *$//')
@@ -250,7 +250,7 @@ done
 QUARANTINE_T="comprehensive_select_test table_snapshot_tests"
 all_t=$(for f in "$tmp"/pass1/tests/*.rs; do basename "$f" .rs; done | sort -u)
 rf_t=$(awk -F\" "/^[[:space:]]*name[[:space:]]*=/{cur=\$2} /^[[:space:]]*required-features[[:space:]]*=/{if(cur!=\"\")print cur}" "$tmp/Cargo.toml" | sort -u)
-default_t=$(printf "%s\n" "$all_t" | grep -vxF -f <(printf "%s\n" $rf_t $QUARANTINE_T))
+default_t=$(grep -vxF -f <(printf "%s\n" $rf_t $QUARANTINE_T) <<<"$all_t")
 
 # Required-features targets and quarantined targets must be EXCLUDED from Pass 1.
 excluded_ok=1

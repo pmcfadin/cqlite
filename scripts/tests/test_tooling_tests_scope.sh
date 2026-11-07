@@ -80,8 +80,8 @@ fi
 # classify <path> <want RUN|SKIP> <description>
 classify() {
   local path="$1" want="$2" desc="$3" out verdict
-  out=$(printf '%s\n' "$path" | bash "$GATE" --tooling-tests-classify 2>/dev/null)
-  verdict=$(printf '%s\n' "$out" | sed -n 's/^VERDICT: //p')
+  out=$(bash "$GATE" --tooling-tests-classify 2>/dev/null <<<"$path")
+  verdict=$(sed -n 's/^VERDICT: //p' <<<"$out")
   if [ "$verdict" = "$want" ]; then
     ok "$desc"
   else
@@ -147,8 +147,8 @@ fi
 scope_line() { # run the fixture's own gate, print DECISION/CAUSE
   ( cd "$wt" && bash scripts/agent-gate.sh --tooling-tests-scope-line 2>/dev/null )
 }
-decision_of() { printf '%s\n' "$1" | sed -n 's/^DECISION: //p'; }
-cause_of()    { printf '%s\n' "$1" | sed -n 's/^CAUSE: //p'; }
+decision_of() { sed -n 's/^DECISION: //p' <<<"$1"; }
+cause_of()    { sed -n 's/^CAUSE: //p' <<<"$1"; }
 
 if ! ( cd "$wt" \
     && git init -q -b main . \
@@ -279,8 +279,8 @@ fi
 # self-test invocation, so a scoped SKIP genuinely short-circuits the ~80-suite
 # body rather than merely being computed and ignored.
 fn_body=$(awk '/^run_tooling_tests\(\) \{/{f=1} f{print; if (/^}/ && NR>1) exit}' "$GATE")
-scope_ln=$(printf '%s\n' "$fn_body" | grep -n '_tooling_tests_scope_decide' | head -1 | cut -d: -f1)
-first_suite_ln=$(printf '%s\n' "$fn_body" | grep -n 'test_generator_keyspace_scoping.sh' | head -1 | cut -d: -f1)
+_sp_t=$(grep -n '_tooling_tests_scope_decide' <<<"$fn_body"); scope_ln=$(head -1 <<<"$_sp_t" | cut -d: -f1)
+_sp_t=$(grep -n 'test_generator_keyspace_scoping.sh' <<<"$fn_body"); first_suite_ln=$(head -1 <<<"$_sp_t" | cut -d: -f1)
 if [ -n "$scope_ln" ] && [ -n "$first_suite_ln" ] && [ "$scope_ln" -lt "$first_suite_ln" ]; then
   ok "G6: the scope decision is wired before the first tooling-tests self-test invocation"
 else
@@ -296,7 +296,7 @@ fi
 # were removed, as long as some unrelated guard elsewhere in the file happened
 # to match the same literal text) — and requires the guard to appear BEFORE the
 # scope-decision call within that body, not merely to exist somewhere in it.
-only_guard_ln=$(printf '%s\n' "$fn_body" | grep -n 'if \[ -z "\$ONLY" \]; then' | head -1 | cut -d: -f1)
+_sp_t=$(grep -n 'if \[ -z "\$ONLY" \]; then' <<<"$fn_body"); only_guard_ln=$(head -1 <<<"$_sp_t" | cut -d: -f1)
 if [ -n "$only_guard_ln" ] && [ -n "$scope_ln" ] && [ "$only_guard_ln" -lt "$scope_ln" ]; then
   ok "G7: run_tooling_tests's OWN scope block is gated on ONLY being empty, before the scope decision runs"
 else

@@ -650,7 +650,7 @@ prefix_skip_expand() {
     out+=("$part")
   done
   ((${#out[@]} == 0)) && return 0
-  printf '%s\n' "${out[@]}" | tr '\n' ' ' | sed 's/ $//'
+  sed 's/ $//' < <(tr '\n' ' ' < <(printf '%s\n' "${out[@]}"))
 }
 pre_skip="$(prefix_skip_expand '2,,10')"
 if [ "$pre_skip" = "2 10" ]; then
@@ -1140,7 +1140,7 @@ if grep -qE '^require_socket_prober( |$)' "$DRV" \
    && grep -q 'await_server_ready' <<<"$flight_body"; then
   pass "server-owner: the driver CALLS require_socket_prober at startup, and measure_flight (now in lib-measure.sh) calls await_server_ready per rep"
 else
-  fail "server-owner: the rig must wire both the prober check and the readiness check (lib present=$([ -s "$MEASURE_LIB" ] && echo yes || echo NO), measure_flight body lines=$(printf '%s' "$flight_body" | grep -c . ))"
+  fail "server-owner: the rig must wire both the prober check and the readiness check (lib present=$([ -s "$MEASURE_LIB" ] && echo yes || echo NO), measure_flight body lines=$(grep -c . <<<"$flight_body" ))"
 fi
 # The prober check must run BEFORE the first measurement, or a run could reach a rep with
 # ownership unverifiable.

@@ -165,7 +165,7 @@ mkdir -p "$schemas_partial"                        # directory-existence check m
 : >"$schemas_partial/collections.cql"
 
 hook_field() {  # hook_field <field> <output>
-  printf '%s\n' "$2" | grep "^$1: " | sed "s/^$1: //"
+  grep "^$1: " <<<"$2" | sed "s/^$1: //"
 }
 
 # ---------------------------------------------------------------------------
@@ -359,7 +359,7 @@ if [ "$guard_rc" -ne 0 ] \
   ok "3148-scratch-root-guard: a failing mktemp aborts loudly instead of resolving paths under /"
 else
   bad "3148-scratch-root-guard: expected a loud abort and no root-level scratch paths (rc=$guard_rc)"
-  printf '%s\n' "$guard_out" | head -5
+  head -5 <<<"$guard_out"
 fi
 
 # The FULL gate must FAIL CLOSED on the relative override too — with its own reason, not
@@ -448,7 +448,7 @@ fi
 #     driven through the --preflight-schemas-line hook (a real `--only core-tests` run
 #     would spend minutes in cargo before printing anything).
 # ---------------------------------------------------------------------------
-line_field() { printf '%s\n' "$1" | grep '^SCHEMAS_LINE: ' | sed 's/^SCHEMAS_LINE: //'; }
+line_field() { grep '^SCHEMAS_LINE: ' <<<"$1" | sed 's/^SCHEMAS_LINE: //'; }
 
 only_line_out=$(CQLITE_SCHEMAS_ROOT="$schemas_empty" \
   bash "$GATE" --preflight-schemas-line core-tests 2>/dev/null)
@@ -627,7 +627,7 @@ else
   # is what gets asserted. A case that quietly stops testing is the pattern this change has
   # already had to dig out of itself three times.
   if [ "$(hook_field STATUS "$utf8_out")" = FAIL ] \
-     && printf '%s' "$utf8_out" | grep -q "must be valid UTF-8"; then
+     && grep -q "must be valid UTF-8" <<<"$utf8_out"; then
     ok "3148-utf8-override-ok: iconv ABSENT here, so a multibyte override fails closed (documented)"
   else
     bad "3148-utf8-override-ok: iconv absent, but a multibyte override was not rejected fail-closed"
@@ -642,7 +642,7 @@ fi
 noiconv_bin="$tmp/noiconv-bin"
 mkdir -p "$noiconv_bin"
 farm_n=0
-for d in $(printf '%s\n' "$PATH" | tr ':' '\n'); do
+for d in $(tr ':' '\n' <<<"$PATH"); do
   [ -d "$d" ] || continue
   for f in "$d"/*; do
     [ -x "$f" ] || continue
@@ -656,7 +656,7 @@ if [ "$farm_n" -gt 0 ] && [ -e "$noiconv_bin/bash" ] && [ ! -e "$noiconv_bin/ico
     bash "$GATE" --preflight-schemas 2>/dev/null)
   if [ "$(hook_field STATUS "$noiconv_out")" = FAIL ] \
      && [ "$(hook_field SOURCE "$noiconv_out")" = "CQLITE_SCHEMAS_ROOT override REJECTED" ] \
-     && printf '%s' "$noiconv_out" | grep -q "must be valid UTF-8"; then
+     && grep -q "must be valid UTF-8" <<<"$noiconv_out"; then
     ok "3148-utf8-no-iconv: iconv removed from PATH, so a VALID multibyte override fails CLOSED"
   else
     bad "3148-utf8-no-iconv: iconv absent from PATH but the multibyte override was not rejected fail-closed"
@@ -974,7 +974,7 @@ if [ "$warm_rc" -eq 0 ] \
   ok "3131-warm-cache: the warm-skip path VERIFIES the root and prints the export line it guarantees"
 else
   bad "3131-warm-cache: expected a verified warm-cache skip naming the root (rc=$warm_rc)"
-  printf '%s\n' "$warm_out" | head -8
+  head -8 <<<"$warm_out"
 fi
 
 # …and the divergence NOTE: the populated root here is NOT the checkout default, which is the
@@ -985,7 +985,7 @@ if grep -q "NOTE: this run populated $warm, NOT the checkout default" <<<"$warm_
   ok "3131-warm-cache-note: the run names the root it populated AND the checkout default it did not"
 else
   bad "3131-warm-cache-note: the divergence NOTE (or the schemas NOTE) is missing"
-  printf '%s\n' "$warm_out" | head -12
+  head -12 <<<"$warm_out"
 fi
 
 # 6e. The fetch script's REMEDY line must be pasteable too (roborev job 11, nit 3) — it
@@ -996,11 +996,11 @@ fi
 rem_root="$tmp/rem space & meta/datasets"
 mkdir -p "$rem_root"
 rem_out=$(CQLITE_DATASETS_ROOT="$rem_root" bash "$FETCH" --verify-only 2>&1)
-rem_line=$(printf '%s\n' "$rem_out" | grep 'CQLITE_DATASETS_ROOT=' | grep 'rm -f' | sed 's/^ERROR:   //')
+rem_line=$(grep 'CQLITE_DATASETS_ROOT=' <<<"$rem_out" | grep 'rm -f' | sed 's/^ERROR:   //')
 # Extract ONLY the assignment. Evaluating the whole remedy would run its `rm -f`, and appending
 # a command to the assignment would make it a per-command PREFIX (temporary), which never sets
 # the variable in the shell — that mistake made this case fail on a correctly-quoted line.
-rem_assign=$(printf '%s' "$rem_line" | sed 's/.*&& //; s/ bash .*//')
+rem_assign=$(sed 's/.*&& //; s/ bash .*//' <<<"$rem_line")
 rem_eval=$(
   unset CQLITE_DATASETS_ROOT
   eval "$rem_assign" 2>/dev/null

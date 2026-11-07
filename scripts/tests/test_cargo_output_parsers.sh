@@ -162,7 +162,7 @@ check_no_unexpected_zero_tests() {
   local bad="" target=""
   while IFS= read -r line; do
     if [[ "$line" == *"Running tests/"* ]]; then
-      target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
+      target=$(sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#" <<<"$line")
     elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
       if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
         bad="$bad $target"

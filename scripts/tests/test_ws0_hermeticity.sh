@@ -487,16 +487,16 @@ lint_kw=$(ws0_hermeticity_lint_reserved | awk -F'\t' '/^(TRANSPARENT|OPAQUE)\t/{
 if [ -z "$lint_kw" ]; then
   fail "reserved-closure: the lint reported NO reserved words — an empty set would compare equal to nothing and prove nothing"
 elif [ "$bash_kw" = "$lint_kw" ]; then
-  pass "reserved-closure: RESERVED_WORDS equals \`compgen -k\` exactly ($(printf '%s\n' "$lint_kw" | wc -l | tr -d ' ') words) — the enumeration has an ORACLE, which is why it can be closed"
+  pass "reserved-closure: RESERVED_WORDS equals \`compgen -k\` exactly ($(wc -l <<<"$lint_kw" | tr -d ' ') words) — the enumeration has an ORACLE, which is why it can be closed"
 else
-  fail "reserved-closure: RESERVED_WORDS != \`compgen -k\`; only-in-bash: $(comm -23 <(printf '%s\n' "$bash_kw") <(printf '%s\n' "$lint_kw") | tr '\n' ' '); only-in-lint: $(comm -13 <(printf '%s\n' "$bash_kw") <(printf '%s\n' "$lint_kw") | tr '\n' ' ')"
+  fail "reserved-closure: RESERVED_WORDS != \`compgen -k\`; only-in-bash: $(comm -23 <(cat <<<"$bash_kw") <(cat <<<"$lint_kw") | tr '\n' ' '); only-in-lint: $(comm -13 <(cat <<<"$bash_kw") <(cat <<<"$lint_kw") | tr '\n' ' ')"
 fi
 # ...and that the ORACLE ITSELF is non-vacuous: if `compgen -k` returned nothing the equality
 # above could pass against an empty lint set. A positive control on the oracle, per #3249.
-if [ "$(printf '%s\n' "$bash_kw" | wc -l | tr -d ' ')" -ge 20 ]; then
+if [ "$(wc -l <<<"$bash_kw" | tr -d ' ')" -ge 20 ]; then
   pass "reserved-closure: the \`compgen -k\` oracle itself returned a plausible set (>=20 words), so the equality above is not vacuous"
 else
-  fail "reserved-closure: \`compgen -k\` returned only $(printf '%s\n' "$bash_kw" | wc -l | tr -d ' ') words — the oracle is broken and the equality assertion means nothing"
+  fail "reserved-closure: \`compgen -k\` returned only $(wc -l <<<"$bash_kw" | tr -d ' ') words — the oracle is broken and the equality assertion means nothing"
 fi
 # The CLASSIFICATION is a TOTAL DISJOINT PARTITION of that set, asserted at IMPORT (an
 # AssertionError, not a test that could be skipped) so a newly-added reserved word cannot land
