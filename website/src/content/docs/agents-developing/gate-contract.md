@@ -708,10 +708,9 @@ fleet-wide stop into a five-minute fix. Every baseline-bearing verdict line ends
 baseline source (`— baseline read via the committed manifest` / `— baseline read via the TEXTUAL
 FALLBACK: … VERIFIED ABSENT at that sha`), so use of the fallback is visible rather than inferred.
 
-**And it ends by naming the OBJECT provenance too, because the shared object store is TRUSTED, not
-verified per-read** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED
+**And it ends by naming the OBJECT provenance too, because the shared object store is not swept and the consumed objects are REHASHED at the read (#4413)** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED
 from the canonical remote, HEAD's own from this lane's SHARED store` / `provenance NOT RECORDED` —
-each followed by `store TRUSTED, not verified (#3749)`). Git does not rehash a packed object against
+each followed by `the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept)`). Git does not rehash a packed object against
 the id it was asked for on an ordinary read, and on this fleet **every lane on a box is a worktree of
 one shared `.git`**, so a planted pack/index can make a canonical sha resolve to a shortened
 manifest — a false `PASS`. What an ordinary read *does* verify is the pack CRC and the zlib stream,
@@ -724,7 +723,7 @@ used to call a peer lane planting objects "a non-invoker route, hence a defect";
 #3312 triage rule already says same-host actors able to write these scripts are invoker-class, and a
 peer wanting a false `PASS` can simply edit `scripts/agent-gate.sh`, which is cheaper than forging
 pack data; no check inside a process defends against the party that controls the process.
-*Accidental* corruption **is** in model, and its control was a periodic full-rehash sweep, **now removed with its fleet schedulers (#4441), so no sweep runs and the store is `TRUSTED, not verified`**:
+*Accidental* corruption **is** in model, and its control was a periodic full-rehash sweep, **removed with its fleet schedulers (#4441) and REPLACED by a rehash at the read (#4413 job 100)**: the pre-flight hashes every object it consumes — the baseline and HEAD commits, the trees down to the manifest or gate script, the manifest blob's very bytes, and the commits of an ancestry `yes` that would excuse a removal — against its id, and a mismatch refuses as `object-store-corrupt` (an object that cannot be checked refuses as `object-store-unverified`; never a fallback to trusting it). The old sweep was:
 `scripts/check-object-store-integrity.sh` (removed, #4441) runs a full `git fsck` (never `--connectivity-only`, which
 does not rehash content) over the shared store and emits an anchored four-valued
 `VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — exit 0/4/6/5, and **a consumer must not
@@ -735,8 +734,7 @@ supervisor loudly** instead of holding — corruption is non-self-clearing, so a
 would spin to the wall-clock budget taking no useful action — and so does `UNSWEEPABLE` (below),
 while `UNMEASURED` is journalled and
 paged once and deliberately does **not** stop the loop, because refusing to run any worker over a
-hygiene probe that could not run is a self-DoS. **That sweep is periodic, not per-read, which is why
-the emitted clause still says `TRUSTED, not verified`.**
+hygiene probe that could not run is a self-DoS. **That sweep is gone; the rest of the store is not swept, which is why the emitted clause says so.**
 
 **The fatal verdict is affirmative, and it had to be made so.** A `git fsck` over a store up to
 eight peer lanes are concurrently writing prints `error:` lines on a **healthy** store (measured on

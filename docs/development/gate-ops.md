@@ -2486,7 +2486,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   deleted FOUR cases and the suite reported `failed: 0` at 102 instead of 105 for a whole round —
   a green tally over a shrunken suite is #3544's own subject inside its own test file. That suite
   now asserts a CASE FLOOR**, the idiom `test_agent_gate_summary.sh` already used.
-  **THE SHARED OBJECT STORE IS TRUSTED, NOT VERIFIED PER-READ — DECLARED IN THE EMITTED LINE, AND
+  **THE SHARED OBJECT STORE IS NOT SWEPT; THE OBJECTS THE VERDICT CONSUMES ARE REHASHED AT THE READ (#4413 job 100) — DECLARED IN THE EMITTED LINE, AND
   RESOLVED BY #3749 (roborev job 311; lead ruling on `REQ-3544-OBJTRUST`, then #3749's owner ruling
   2026-09-01).** Git does not rehash a packed object against the id it was asked for on an ordinary
   read, and on this fleet **every lane on a box is a worktree of ONE shared `.git`** (measured:
@@ -2500,7 +2500,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   able to write these scripts are invoker-class, and a peer wanting a false PASS can simply edit
   `scripts/agent-gate.sh`, which is cheaper than forging pack data; no check inside a process
   defends against the party that controls the process. **ACCIDENTAL corruption IS in model**, and
-  its control WAS a periodic full-rehash sweep, **now removed with its fleet schedulers (#4441), so no sweep runs and the store is TRUSTED, not verified**: `scripts/check-object-store-integrity.sh` (removed, #4441) (full
+  its control WAS a periodic full-rehash sweep, **removed with its fleet schedulers (#4441) and REPLACED by a rehash at the read (#4413 job 100): `_component_set_verify_path` hashes the baseline and HEAD commits, the trees down to the manifest/gate script and the very bytes of that blob against their ids, and `_component_set_verify_ancestry` re-derives an ancestry `yes` that would excuse a removal from rehashed commits; a mismatch is `object-store-corrupt`, a check that cannot run is `object-store-unverified`, both fail-closed, never a fallback to trusting the object**: `scripts/check-object-store-integrity.sh` (removed, #4441) (full
   `git fsck`, never `--connectivity-only`, which does not rehash content), emitting an anchored
   four-valued `VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — run at machine onboarding
   (`bootstrap-agent-machine.sh` section 5d, where VERIFIED is the ONLY `[ok]`) and on the
@@ -2926,11 +2926,10 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   latch, announced once naming both causes — never a silent fall back to the colliding form on
   exactly the hosts nobody tested. `cksum` is present everywhere and deliberately unused: CRC32 is
   not collision-resistant, and a colliding key is the defect being removed.
-  because a hygiene probe could not run is a self-DoS). **That sweep is PERIODIC, NOT PER-READ, so
-  the emitted clause still says `store TRUSTED, not verified (#3749)` — do not inflate it.**
+  because a hygiene probe could not run is a self-DoS). **That sweep is gone (#4441); the rest of the store is still not swept, and the emitted clause says exactly that — do not inflate it.**
   **THREE ALTERNATIVES WERE REJECTED and the reasons are recorded so they are not re-derived:**
   per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing
-  (the FOURTH carve into one pre-flight, charged to every `--lite` round); and **removing the reuse
+  (the FOURTH carve into one pre-flight, charged to every `--lite` round — **REVERSED 2026-11-07, #4413 job 100, once the sweep was deleted: a handful of hashes per run is now the only control**); and **removing the reuse
   optimisation, whose original argument still stands** — the recorded "a third finding here should
   REMOVE the reuse optimisation" ruling does NOT dispose of it, because removal does not CLOSE it:
   the ancestry walk and the provenance leg read HEAD's **committed** content, which has no source
@@ -2941,7 +2940,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   cheaper, it still ships the tip's whole tree). **A permanent tax for a half-closure is the guard
   agents learn to waive.** So the boundary is **DECLARED**: every baseline-bearing verdict line ends
   by naming the object provenance (`REUSED` from the shared store / `FETCHED` from the canonical
-  remote / `NOT RECORDED`) plus `store TRUSTED, not verified (#3749)`. **A check that claims nothing
+  remote / `NOT RECORDED`) plus `the consumed commit, tree and manifest objects were REHASHED against their ids … the rest of the store is not swept`. **A check that claims nothing
   false is worth more than one claiming a closure it does not deliver** — the same move the roborev
   waiver's threat model makes where a dependency cannot be removed. The declaration is folded into
   the ONE `src_note` suffix eleven printf arms already consume, never appended per-arm, and the

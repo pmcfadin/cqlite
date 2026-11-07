@@ -3562,7 +3562,7 @@ apply_schemas_preflight() {
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
 _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
                    # | manifest-* | head-set-unmeasured | repo-read-blocked
-                   # | read-dir-unisolated
+                   # | read-dir-unisolated | object-store-corrupt | object-store-unverified
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
@@ -4922,6 +4922,11 @@ _component_set_set_at_rev() {
       fi
       rm -rf "$tmpd"; return 1
     fi
+    # REHASH WHAT WAS CONSUMED before parsing it (#4413 job 100; see `_component_set_verify_path`).
+    if ! _component_set_verify_path "$rev" "$_CS_MANIFEST_REL" "$tmpd/manifest" "$tmpd"; then
+      _CS_REV_ERRKIND="$_CS_VERR_KIND"; _CS_REV_ERR="$_CS_VERR_DETAIL"
+      rm -rf "$tmpd"; return 1
+    fi
     _component_set_parse_manifest_file "$tmpd/manifest"; prc=$?
     rm -rf "$tmpd"
     case "$prc" in
@@ -4936,6 +4941,13 @@ _component_set_set_at_rev() {
   fi
 
   # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
+  # THE "ABSENT" ANSWER IS READ FROM A TREE, SO THAT TREE IS REHASHED TOO (#4413 job 100): a damaged
+  # `scripts/` tree that merely omitted the manifest would otherwise route a baseline that HAS one
+  # into the brittle TEXT fallback.
+  if ! _component_set_verify_path "$rev" "$_CS_MANIFEST_REL" - "$tmpd"; then
+    _CS_REV_ERRKIND="$_CS_VERR_KIND"; _CS_REV_ERR="$_CS_VERR_DETAIL"
+    rm -rf "$tmpd"; return 1
+  fi
   _component_set_declaration_at_rev "$rev" "$tmpd" "$gate_rel" fallback
   return $?
 }
@@ -4970,6 +4982,10 @@ _component_set_declaration_at_rev() {
     fi
     rm -rf "$tmpd"; return 1
   fi
+  if ! _component_set_verify_path "$rev" "$gate_rel" "$tmpd/gate" "$tmpd"; then
+    _CS_REV_ERRKIND="$_CS_VERR_KIND"; _CS_REV_ERR="$_CS_VERR_DETAIL"
+    rm -rf "$tmpd"; return 1
+  fi
   _component_set_extract_declaration "$tmpd/gate"; prc=$?
   rm -rf "$tmpd"
   case "$prc" in
@@ -4981,6 +4997,178 @@ _component_set_declaration_at_rev() {
        _CS_REV_ERR="${pre}$rev:$gate_rel could not be read as TEXT: $_CS_DECL_ERR (this path never EXECUTES the script; it refuses instead)"
        return 1 ;;
   esac
+}
+
+# ---- #4413 job 100 / #4441: EVERY OBJECT THE PRE-FLIGHT CONSUMES IS REHASHED AGAINST ITS ID ----
+#
+# WHY. The periodic `git fsck` sweep that used to be the control for accidental corruption of
+# the lane's SHARED object store was removed in #4441, and git does not rehash a loose or packed
+# object against the id it was asked for on an ordinary read. So a damaged object could steer
+# this verdict: a manifest blob that no longer hashes to its own name can list fewer components,
+# and `PASS` is a false certification. The control is now AT THE READ, and it is exact: the
+# bytes this function CONSUMED are hashed and compared with the id they were read under.
+#
+# WHAT IS CONSUMED, AND SO WHAT IS VERIFIED (nothing else is read for the verdict):
+#   * the baseline commit and HEAD's commit        -> commit object, content hashed vs its id
+#   * each tree on the path to the file read       -> root tree, `scripts/` tree, hashed vs its id
+#     (this also covers the ABSENT answer of the manifest-presence probe: it is read from the
+#     verified `scripts/` tree, and a verified tree that lists the manifest contradicts it)
+#   * the manifest blob, or the gate-script blob   -> the very bytes that were parsed, hashed vs
+#     the blob id the verified tree names
+#   * the commits of the ancestry walk             -> only where it DECIDES something (see
+#     `_component_set_verify_ancestry`)
+# NOT per-read of anything else, and nothing is imported or written: the check hashes with
+# `git hash-object --literally` (no write, no fsck-style format check that could reject an old
+# but valid object) and every git call goes through the same bounded, `env -i`, scratch-rooted
+# runner as the reads it checks. Output goes to files, never a pipe (SIGPIPE ratchet #4061).
+#
+# FAIL CLOSED, NEVER TRUSTED. `_CS_VERR_KIND` is `corrupt` (the content does NOT hash to its id,
+# surfaced as `object-store-corrupt`) or `unverified` (the check itself could not run or the
+# object could not be read, surfaced as `object-store-unverified`). There is no third outcome and
+# no fallback to trusting the object.
+_CS_VERR_KIND=""
+_CS_VERR_DETAIL=""
+
+# _component_set_vcat <type> <id> <outfile>: raw content of one object into a file (rc of the read).
+_component_set_vcat() {
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" cat-file "$1" "$2" >"$3" 2>/dev/null
+}
+
+# _component_set_vhash <type> <file> <outfile>: the id git would give those exact bytes.
+_component_set_vhash() {
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" hash-object --literally -t "$1" "$2" >"$3" 2>/dev/null
+}
+
+# _component_set_verify_bytes <type> <id> <file> <tmpd> <what>: rc 0 iff <file>'s bytes hash to <id>.
+_component_set_verify_bytes() {
+  local type="$1" id="$2" file="$3" tmpd="$4" what="$5" got="" rc
+  _component_set_vhash "$type" "$file" "$tmpd/v.hash"; rc=$?
+  if [ "$rc" -eq 0 ]; then read -r got <"$tmpd/v.hash" || got=""; fi
+  if [ "$rc" -ne 0 ] || [ -z "$got" ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not rehash the $what ($type $id) to check it against its id (rc $rc) — an object that cannot be verified is not trusted"
+    return 1
+  fi
+  if [ "$got" != "$id" ]; then
+    _CS_VERR_KIND=corrupt
+    _CS_VERR_DETAIL="the $what ($type) read from the lane's SHARED object store as $id has content that hashes to $got — the store holds a damaged or substituted object; this verdict is REFUSED rather than derived from it (repair the store, e.g. re-clone or 'git fsck --full')"
+    return 1
+  fi
+  return 0
+}
+
+# _component_set_verify_object <type> <id> <tmpd> <what>: read an object and check it hashes to its id.
+# On success the verified content stays in "$tmpd/v.obj" for the caller to parse.
+_component_set_verify_object() {
+  local type="$1" id="$2" tmpd="$3" what="$4" rc
+  case "$id" in
+    ''|*[!0-9a-f]*) _CS_VERR_KIND=unverified
+       _CS_VERR_DETAIL="the $what id '$id' is not a lowercase hex object id, so it cannot be verified"
+       return 1 ;;
+  esac
+  _component_set_vcat "$type" "$id" "$tmpd/v.obj"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not read the $what ($type $id) from the lane's SHARED object store to verify it (rc $rc)"
+    return 1
+  fi
+  _component_set_verify_bytes "$type" "$id" "$tmpd/v.obj" "$tmpd" "$what"
+}
+
+# _component_set_verify_path <rev> <relpath> <consumed-file|-> <tmpd>: rc 0 iff the commit <rev>
+# names, every tree down to <relpath>, and (when a consumed file is given) the blob at <relpath>
+# all hash to their ids, AND the consumed file's bytes are that verified blob. With `-` the leaf is
+# required to be ABSENT in the verified tree (it backs an "absent" answer). A verified tree that
+# contradicts the caller's premise is `corrupt`: two views of one object cannot both be right.
+_component_set_verify_path() {
+  local rev="$1" rel="$2" consumed="$3" tmpd="$4"
+  local id tree comp rest mode type oid name
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-parse --verify --quiet "$rev^{commit}" >"$tmpd/v.rev" 2>/dev/null
+  id=""; read -r id <"$tmpd/v.rev" || id=""
+  if [ -z "$id" ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not resolve $rev to a commit to verify it"
+    return 1
+  fi
+  _component_set_verify_object commit "$id" "$tmpd" "commit $rev" || return 1
+  tree=$(sed -n '1s/^tree //p' "$tmpd/v.obj" 2>/dev/null)
+  _component_set_verify_object tree "$tree" "$tmpd" "root tree of $rev" || return 1
+  rest="$rel"
+  while :; do
+    comp="${rest%%/*}"
+    _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" ls-tree "$tree" "$comp" >"$tmpd/v.ls" 2>/dev/null
+    if [ "$?" -ne 0 ]; then
+      _CS_VERR_KIND=unverified
+      _CS_VERR_DETAIL="could not list the verified tree $tree of $rev for '$comp' (path $rel)"
+      return 1
+    fi
+    mode=""; type=""; oid=""; name=""
+    read -r mode type oid name <"$tmpd/v.ls" || true
+    if [ -z "$oid" ]; then
+      if [ "$consumed" = - ]; then return 0; fi
+      _CS_VERR_KIND=corrupt
+      _CS_VERR_DETAIL="$rel was read at $rev but the VERIFIED tree $tree has no '$comp' entry — the objects disagree about one path"
+      return 1
+    fi
+    if [ "$rest" = "$comp" ]; then
+      if [ "$consumed" = - ]; then
+        _CS_VERR_KIND=corrupt
+        _CS_VERR_DETAIL="$rel was probed as ABSENT at $rev but the VERIFIED tree $tree lists it — the objects disagree about one path"
+        return 1
+      fi
+      [ "$type" = blob ] || { _CS_VERR_KIND=corrupt; _CS_VERR_DETAIL="$rel at $rev is a '$type' in the verified tree, not a blob"; return 1; }
+      _component_set_verify_bytes blob "$oid" "$consumed" "$tmpd" "bytes read from $rev:$rel" || return 1
+      return 0
+    fi
+    [ "$type" = tree ] || { _CS_VERR_KIND=corrupt; _CS_VERR_DETAIL="$comp on the path $rel at $rev is a '$type' in the verified tree, not a directory"; return 1; }
+    _component_set_verify_object tree "$oid" "$tmpd" "tree $comp/ of $rev" || return 1
+    tree="$oid"
+    rest="${rest#*/}"
+  done
+}
+
+# _component_set_verify_ancestry <ancestor-sha> <head-sha>: rc 0 iff HEAD reaches <ancestor-sha>
+# through commits that each HASH to their ids. Called ONLY when `git merge-base --is-ancestor`
+# answered "yes" AND a component is missing — the one case where that answer decides anything
+# (it turns a fatal BEHIND/UNCOMMITTED into the non-fatal DECLARED). A fake "no" can only make
+# the gate refuse, so it needs no check. git's own answer is used purely as a CANDIDATE set
+# (`rev-list --ancestry-path`); the edges that count come from the rehashed commit contents.
+_component_set_verify_ancestry() {
+  local sha="$1" head="$2" tmpd rc c cand=" " n=0 todo seen=" " cur p
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs.XXXXXX" 2>/dev/null) || tmpd=""
+  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
+    _CS_VERR_KIND=unverified; _CS_VERR_DETAIL="could not create a temp dir to verify the ancestry walk"
+    return 1
+  fi
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-list --ancestry-path --parents "$sha..$head" >"$tmpd/v.cand" 2>/dev/null; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_VERR_KIND=unverified; _CS_VERR_DETAIL="could not list the commits between $sha and HEAD to verify the ancestry answer (rc $rc)"
+    rm -rf "$tmpd"; return 1
+  fi
+  while read -r c _; do
+    [ -n "$c" ] || continue
+    n=$((n + 1))
+    cand="$cand$c "
+  done <"$tmpd/v.cand"
+  if [ "$n" -gt 1000 ]; then
+    _CS_VERR_KIND=unverified; _CS_VERR_DETAIL="$n commits lie between $sha and HEAD, more than the 1000 this check will rehash — rebase onto origin/main or shorten the branch"
+    rm -rf "$tmpd"; return 1
+  fi
+  todo="$head"
+  while [ -n "$todo" ]; do
+    cur="${todo%% *}"; todo="${todo#"$cur"}"; todo="${todo# }"
+    [ "$cur" = "$sha" ] && { rm -rf "$tmpd"; return 0; }
+    case "$seen" in *" $cur "*) continue ;; esac
+    seen="$seen$cur "
+    case "$cand" in *" $cur "*) : ;; *) continue ;; esac
+    _component_set_verify_object commit "$cur" "$tmpd" "ancestry commit $cur" || { rm -rf "$tmpd"; return 1; }
+    for p in $(sed -n 's/^parent //p' "$tmpd/v.obj" 2>/dev/null); do todo="$todo $p"; done
+    todo="${todo# }"
+  done
+  _CS_VERR_KIND=corrupt
+  _CS_VERR_DETAIL="git answered that $sha is an ancestor of HEAD, but no chain of commits that hash to their ids connects HEAD to it — the commit objects on that walk are damaged or substituted"
+  rm -rf "$tmpd"
+  return 1
 }
 
 # _component_set_is_shallow: `yes` | `no` | `unknown` — is $REPO_ROOT a SHALLOW clone?
@@ -5918,7 +6106,9 @@ _component_set_probe_inner() {
     # objects can equally edit this script). ACCIDENTAL corruption is in model, and its control is
     # NOT here: the periodic full `git fsck` sweep that was its control
     # (`scripts/check-object-store-integrity.sh`) was removed in #4441 with its fleet
-    # schedulers, so the store is TRUSTED, not verified. The emitted `component-set:` line DECLARES this boundary on every
+    # schedulers. Its replacement is the REHASH AT THE READ in `_component_set_verify_path` /
+    # `_component_set_verify_ancestry` (#4413 job 100): every object this verdict consumes is
+    # hashed against its id. The emitted `component-set:` line DECLARES this boundary on every
     # BASELINE-BEARING arm (the `src_note` suffix); the UNMEASURED arms have no baseline to name
     # and so do not carry it, which is CLAUDE.md's scoping of the same sentence.
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
@@ -6040,6 +6230,10 @@ _component_set_probe_inner() {
       # shared name would hide exactly the distinction this gating was added for.
       probe)            _CS_KIND=baseline-probe-unmeasured ;;
       unreadable)       _CS_KIND=baseline-unreadable ;;
+      # THE OBJECT STORE FAILED ITS REHASH (#4413 job 100): named tokens, never folded into
+      # baseline-unreadable, because the remedy (repair the store) is a different one.
+      corrupt)          _CS_KIND=object-store-corrupt ;;
+      unverified)       _CS_KIND=object-store-unverified ;;
       decl-unrecognised) _CS_KIND=baseline-decl-unrecognised ;;
       garbage)          _CS_KIND=baseline-set-garbage ;;
       empty)            _CS_KIND=baseline-set-empty ;;
@@ -6263,6 +6457,21 @@ _component_set_probe_inner() {
        fi ;;
   esac
 
+  # A "YES" THAT DECIDES SOMETHING IS REHASHED (#4413 job 100). With a component missing, `yes` is
+  # what turns a fatal BEHIND/UNCOMMITTED into DECLARED, so it must rest on commits that hash to
+  # their ids; a damaged commit could otherwise fake the ancestry. A fake `no` can only make the
+  # gate refuse, so it needs no check.
+  if [ "$_CS_ANCESTOR" = yes ] && [ -n "$_CS_MISSING" ]; then
+    if ! _component_set_verify_ancestry "$_CS_SHA" "${_CS_HEAD_SHA:-HEAD}"; then
+      case "$_CS_VERR_KIND" in
+        corrupt) _CS_KIND=object-store-corrupt ;;
+        *)       _CS_KIND=object-store-unverified ;;
+      esac
+      _CS_DETAIL="$_CS_VERR_DETAIL"
+      return 0
+    fi
+  fi
+
   # PROVENANCE OF A REMOVAL (job 215, blocker 2). Consulted ONLY where it DECIDES something:
   # a missing component with origin/main an ancestor of HEAD is about to be EXCUSED as this
   # branch's own committed removal, so that claim is measured against HEAD's own set. With
@@ -6287,7 +6496,11 @@ _component_set_probe_inner() {
         esac
       done
     else
-      _CS_KIND=head-set-unmeasured
+      case "$_CS_REV_ERRKIND" in
+        corrupt)    _CS_KIND=object-store-corrupt ;;
+        unverified) _CS_KIND=object-store-unverified ;;
+        *)          _CS_KIND=head-set-unmeasured ;;
+      esac
       _CS_HEAD_ERR="$_CS_REV_ERR"
       _CS_DETAIL="$_CS_REV_ERR"
       return 0
@@ -6410,7 +6623,7 @@ _component_set_line() {
     manifest)    src_note=" — baseline read via the committed manifest" ;;
     declaration) src_note=" — baseline read via the TEXTUAL FALLBACK: $_CS_MANIFEST_REL is VERIFIED ABSENT at that sha (#3544 transitional; the declaration is parsed as TEXT, never executed)" ;;
   esac
-  # THE OBJECT STORE IS TRUSTED, NOT VERIFIED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
+  # THE OBJECT STORE IS NOT SWEPT; THE CONSUMED OBJECTS ARE REHASHED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
   # High; lead ruling on REQ-3544-OBJTRUST, option A; RESOLVED by #3749).
   #
   # Git does not rehash a packed object against the id it was asked for on an ordinary read, and on
@@ -6433,18 +6646,23 @@ _component_set_line() {
   # process; pretending otherwise is the false-assurance shape #3312 exists to remove.
   #
   # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION. ITS FORMER CONTROL WAS A PERIODIC FULL `git fsck`
-  # SWEEP (`scripts/check-object-store-integrity.sh`; NOT `--connectivity-only`, which does not
-  # rehash content). It ran at fleet machine onboarding and on the worker supervisor's cadence, and
-  # was removed in #4441 together with those schedulers (#4413), so no sweep exists now and the
-  # store is TRUSTED, not verified. There is no per-read check either, which is exactly why the
-  # emitted clause says TRUSTED, not verified. Do not inflate it.
+  # SWEEP (`scripts/check-object-store-integrity.sh`), removed in #4441 with the fleet schedulers
+  # that ran it (#4413). ITS REPLACEMENT (#4413 roborev job 100, owner decision 2026-11-07) IS A
+  # REHASH AT THE READ: the commit, the trees down to the file, and the manifest/gate blob this
+  # verdict consumes are each hashed against their id (`_component_set_verify_path`), and an
+  # ancestry `yes` that excuses a removal is re-derived from rehashed commits
+  # (`_component_set_verify_ancestry`). A mismatch is `object-store-corrupt`, an object that could
+  # not be checked is `object-store-unverified`, both FAIL-CLOSED. What is NOT verified is every
+  # other object in the store, and the line says so ("the rest of the store is not swept").
   #
   # THREE ALTERNATIVES WERE CONSIDERED AND REJECTED BY THAT RULING. Recorded so they are not
   # re-derived a fourth time:
   #   * PER-LANE FULL CLONES — a permanent multi-GB, multi-minute tax on every lane for a threat
   #     that is out of model.
-  #   * PER-READ REHASHING of the consumed objects — the FOURTH carve into this one pre-flight, and
-  #     a permanent cost on every `--lite` round.
+  #   * PER-READ REHASHING of the consumed objects — REJECTED HERE AT #3749 AS "the FOURTH carve into
+  #     this one pre-flight, and a permanent cost on every `--lite` round". REVERSED by the owner on
+  #     2026-11-07 (#4413 job 100) once the sweep was deleted: with no periodic control left it is the
+  #     only one. The cost is a handful of object hashes (commit, ~3 trees, one blob, twice).
   #   * REMOVING THE REUSE OPTIMISATION — and this one is worth keeping the original argument for,
   #     because it is still correct and still load-bearing: the recorded "a third finding here
   #     should REMOVE the reuse optimisation" ruling assumes removal CLOSES the exposure, and it
@@ -6464,9 +6682,9 @@ _component_set_line() {
   case "${src_note:+set}" in
     set)
       case "$_CS_BASE_OBJ" in
-        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
-        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
-        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3749)" ;;
+        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)" ;;
+        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)" ;;
+        *)       src_note="$src_note; objects: provenance NOT RECORDED — the consumed commit, tree and manifest objects were still REHASHED against their ids (object-store-corrupt on mismatch) (#3749, #4413)" ;;
       esac ;;
   esac
   case "$verdict" in

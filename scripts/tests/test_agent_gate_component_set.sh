@@ -55,7 +55,8 @@
 #                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (3a-v);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10); repo-read-blocked (3a-iv-ter/quater,
-#                  3757-head-object-fifo); read-dir-unisolated (3757-read-dir-unisolated).
+#                  3757-head-object-fifo); read-dir-unisolated (3757-read-dir-unisolated);
+#                  object-store-corrupt (3a-iv-quinquies), object-store-unverified (3a-iv-sexies).
 # THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
@@ -597,6 +598,10 @@ mkgitshim() {
     case "$mode" in
       fail-ls-tree)
         printf 'for a in "$@"; do if [ "$a" = ls-tree ]; then echo "gitshim: ls-tree refused" >&2; exit 128; fi; done\n' ;;
+      # EVERY `hash-object` FAILS (#4413 job 100): the rehash itself cannot run, which must be its own
+      # fail-closed answer (object-store-unverified) and never a silent skip of the check.
+      fail-hash-object)
+        printf 'for a in "$@"; do if [ "$a" = hash-object ]; then echo "gitshim: hash-object refused" >&2; exit 128; fi; done\n' ;;
       fail-manifest-show)
         printf 'for a in "$@"; do case "$a" in *:scripts/agent-gate.components) echo "gitshim: manifest blob read refused" >&2; exit 128 ;; esac; done\n' ;;
       lsremote-not-a-sha)
@@ -699,6 +704,80 @@ elif [ "$(field VERDICT "$probe_out")" = UNMEASURED ] \
 else
   bad "3544-manifest-probe-unmeasured: expected KIND baseline-probe-unmeasured naming the probe, with no fallback"
   printf '%s\n' "$probe_out"
+fi
+
+# 3a-iv-quinquies. EVERY OBJECT THE VERDICT CONSUMES IS REHASHED AGAINST ITS ID (#4413 roborev job 100,
+#     owner decision 2026-11-07). With the periodic `git fsck` sweep deleted (#4441), nothing else
+#     catches an object whose content does not hash to its own name, and git does not rehash on an
+#     ordinary read. THE PLANT IS A REAL LOOSE OBJECT: the baseline's manifest blob is replaced, in the
+#     lane's store, by a well-formed blob (right header, right length, valid zlib) holding a SHORTER
+#     component list. Unverified, that is a false PASS — the shortened list is a subset of the
+#     branch's set, so nothing is "missing". The POSITIVE CONTROL is the same fixture before the
+#     plant: it must PASS and its line must declare the rehash, or a refusal proves nothing.
+base_ob=$(mkbaseline objstore - )
+br_ob=$(mkbranch objstore "$base_ob" - --from-origin )
+ob_ctl=$(hook "$br_ob")
+ob_ctl_line=$(field COMPONENT_SET_LINE "$ob_ctl")
+ob_id=$( fx "$br_ob" && git rev-parse "origin/main:scripts/agent-gate.components" 2>/dev/null )
+ob_path=""
+[ -n "$ob_id" ] && ob_path="$br_ob/.git/objects/${ob_id:0:2}/${ob_id:2}"
+if ! command -v python3 >/dev/null 2>&1; then
+  ok "3544-object-rehash: SKIP (no python3 to plant a loose object)"
+elif [ "$(field VERDICT "$ob_ctl")" != PASS ] || ! grep -qF 'REHASHED against their ids' <<<"$ob_ctl_line"; then
+  bad "3544-object-rehash: the POSITIVE CONTROL (the real, unplanted store) did not PASS with the rehash declared (verdict '$(field VERDICT "$ob_ctl")', kind '$(field KIND "$ob_ctl")'): $ob_ctl_line"
+elif [ -z "$ob_id" ] || [ ! -f "$ob_path" ]; then
+  bad "3544-object-rehash: the manifest blob '$ob_id' is not a loose object at '$ob_path', so it cannot be planted (the fixture shape changed)"
+else
+  # READ THE ORIGINAL FIRST: once the loose object is replaced, git can no longer produce it.
+  ( fx "$br_ob" && git cat-file blob "$ob_id" ) >"$tmp/ob-orig" 2>/dev/null
+  rm -f "$ob_path"
+  ob_planted=$(python3 - "$ob_path" "$tmp/ob-orig" <<'PYEOF'
+import os, sys, zlib
+path, orig_file = sys.argv[1], sys.argv[2]
+with open(orig_file, "rb") as fh:
+    orig = fh.read()
+lines = orig.splitlines(True)
+data = b"".join(lines[:-1]) if len(lines) > 1 else b""
+with open(path, "wb") as fh:
+    fh.write(zlib.compress(b"blob %d\0" % len(data) + data))
+os.chmod(path, 0o444)
+print(len(lines) - 1)
+PYEOF
+  )
+  ob_out=$(hook "$br_ob")
+  ob_line=$(field COMPONENT_SET_LINE "$ob_out")
+  if [ -z "$ob_planted" ]; then
+    bad "3544-object-rehash: the plant did not run"
+  elif [ "$(field VERDICT "$ob_out")" = UNMEASURED ] \
+     && [ "$(field KIND "$ob_out")" = object-store-corrupt ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$ob_line" \
+     && grep -qF 'object-store-corrupt' <<<"$ob_line" \
+     && grep -qF "$ob_id" <<<"$ob_line" \
+     && ! grep -q 'component-set: \(ADVISORY-\)\?PASS' <<<"$ob_line"; then
+    ok "3544-object-rehash: a manifest blob whose content does not hash to its id (planted; $ob_planted component name(s) dropped) is REFUSED as object-store-corrupt, naming the id — and the unplanted store PASSes with the rehash declared"
+  else
+    bad "3544-object-rehash: expected UNMEASURED / KIND object-store-corrupt naming $ob_id, got verdict '$(field VERDICT "$ob_out")' kind '$(field KIND "$ob_out")'"
+    printf '%s\n' "$ob_out"
+  fi
+fi
+
+# 3a-iv-sexies. A REHASH THAT CANNOT RUN IS A REFUSAL, NOT A SKIP (#4413 job 100). Same positive
+#     control as above (the unshimmed real store PASSes), then the SAME fixture with `hash-object`
+#     failing: the answer is the distinct token `object-store-unverified`, never a PASS.
+ob_bin=$(mkgitshim hashfail fail-hash-object)
+ob_unv=$( fx "$br_ob" && PATH="$ob_bin:$PATH" bash "$br_ob/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+ob_unv_line=$(field COMPONENT_SET_LINE "$ob_unv")
+ob_unv_ctl=$(hook "$nofb")
+if [ "$(field KIND "$ob_unv_ctl")" != ok ]; then
+  bad "3544-object-unverified: the POSITIVE CONTROL (real store, no shim) did not reach KIND ok"
+elif [ "$(field VERDICT "$ob_unv")" = UNMEASURED ] \
+   && [ "$(field KIND "$ob_unv")" = object-store-unverified ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$ob_unv_line" \
+   && grep -qF 'object-store-unverified' <<<"$ob_unv_line"; then
+  ok "3544-object-unverified: when the rehash cannot run the baseline is NOT measured, under the distinct token object-store-unverified"
+else
+  bad "3544-object-unverified: expected UNMEASURED / KIND object-store-unverified, got '$(field VERDICT "$ob_unv")' / '$(field KIND "$ob_unv")'"
+  printf '%s\n' "$ob_unv"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2959,9 +3038,9 @@ _cs_pass_line_ok() {
   local l="$1" h="$2" tail
   case "$l" in "$h"*) tail="${l#"$h"}" ;; *) return 1 ;; esac
   case "$tail" in
-    "; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)") return 0 ;;
-    "; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3749)") return 0 ;;
-    "; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3749)") return 0 ;;
+    "; objects: baseline REUSED from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)") return 0 ;;
+    "; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — the consumed commit, tree and manifest objects were REHASHED against their ids (mismatch refuses as object-store-corrupt; the rest of the store is not swept) (#3749, #4413)") return 0 ;;
+    "; objects: provenance NOT RECORDED — the consumed commit, tree and manifest objects were still REHASHED against their ids (object-store-corrupt on mismatch) (#3749, #4413)") return 0 ;;
   esac
   return 1
 }
@@ -4061,7 +4140,8 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=20   # 19 -> 20: +read-dir-unisolated (#3757 — `$_CS_READ_DIR` still naming
+DECLARED_KIND_COUNT=22   # 20 -> 22: +object-store-corrupt (3a-iv-quinquies) and +object-store-unverified (3a-iv-sexies), #4413 job 100.
+# 19 -> 20: +read-dir-unisolated (#3757 — `$_CS_READ_DIR` still naming
                          # the LIVE checkout, or left at the empty sentinel that `git -C ""`
                          # reads AS the live checkout, at the point an object read would be
                          # handed to git. Hardening: no reachable route today, and the refusal is
@@ -4370,7 +4450,7 @@ else
   #       from declared_externals rather than left in place when the two `--list` spawns went. The
   #       same rule now applies to both sets.
   git_ops=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | sort -u)
-  declared_git_ops="cat-file fetch init ls-remote ls-tree merge-base remote rev-list rev-parse show"
+  declared_git_ops="cat-file fetch hash-object init ls-remote ls-tree merge-base remote rev-list rev-parse show"
   undeclared_ops=""; stale_ops=""; stale_externals=""
   passthrough_n=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | grep -cx '<wrapper-passthrough>')
   for _o in $git_ops; do
