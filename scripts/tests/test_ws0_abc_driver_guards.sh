@@ -1511,7 +1511,7 @@ for _case in $marker_verdicts; do
       fail "5h. marker grammar '$_name': answered against the contract ($_verdict)" ;;
   esac
 done
-if [ "$(printf '%s\n' $marker_verdicts | grep -c .)" -eq 8 ]; then
+if [ "$(grep -c . < <(printf '%s\n' $marker_verdicts))" -eq 8 ]; then
   pass "5h. ...and all 8 grammar cases ran — including the ACCEPT case, so the tightening is pinned against over-refusal too"
 else
   fail "5h. the grammar table must contribute 8 verdicts, got '$marker_verdicts'"
