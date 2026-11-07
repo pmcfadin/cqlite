@@ -1756,7 +1756,7 @@ _doc_counts=$(grep -E 'features-load-bearing' "$REPO_ROOT/scripts/agent-gate.sh"
                 | grep -oE '[0-9]+ cases' | grep -oE '^[0-9]+' | sort -u || true)
 [ -n "$_doc_counts" ] \
   || fail_case "case 63: found NO 'N cases' reference in scripts/agent-gate.sh — the doc no longer states a count, so this invariant cannot be checked and the assertion would pass vacuously"
-[ "$(printf '%s\n' "$_doc_counts" | wc -l)" -eq 1 ] \
+[ "$(wc -l <<<"$_doc_counts")" -eq 1 ] \
   || fail_case "case 63: scripts/agent-gate.sh states MORE THAN ONE distinct case count ($(printf '%s ' $_doc_counts)) — they cannot all be right"
 # The enforced count is read from THIS FILE'S OWN SOURCE rather than from
 # $CASE_COUNT_EXPECTED, because that variable is assigned in the CASE COUNT block BELOW

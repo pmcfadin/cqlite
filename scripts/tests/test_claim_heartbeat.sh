@@ -109,14 +109,14 @@ echo "TEST 3: list renders machine/issue/age for 2 machines"
 # ===========================================================================
 (cd "$WORK" && HEARTBEAT_MACHINE=machineB bash "$HB" beat 202 >/dev/null 2>&1)
 list_out=$(cd "$WORK" && bash "$HB" list)
-if printf '%s\n' "$list_out" | grep -qE '^machineA +101 ' \
-  && printf '%s\n' "$list_out" | grep -qE '^machineB +202 '; then
+if grep -qE '^machineA +101 ' <<<"$list_out" \
+  && grep -qE '^machineB +202 ' <<<"$list_out"; then
   ok "list rendered both machineA (issue 101) and machineB (issue 202)"
 else
   bad "list output missing expected machine/issue rows:
 $list_out"
 fi
-if printf '%s\n' "$list_out" | grep -qE '^machineA +[0-9]+ +[0-9TZ:-]+ +[0-9]+[smhd]$'; then
+if grep -qE '^machineA +[0-9]+ +[0-9TZ:-]+ +[0-9]+[smhd]$' <<<"$list_out"; then
   ok "list row shape is machine/issue/ts/age"
 else
   bad "list row shape unexpected:
@@ -128,8 +128,8 @@ echo "TEST 4: age reflects an old ts (crafted 10h in the past)"
 # ===========================================================================
 craft_old_heartbeat "$WORK" "machineOld" 6000 36000
 list_out=$(cd "$WORK" && bash "$HB" list)
-old_line=$(printf '%s\n' "$list_out" | grep -E '^machineOld ' || true)
-old_age=$(printf '%s\n' "$old_line" | awk '{print $NF}')
+old_line=$(grep -E '^machineOld ' <<<"$list_out" || true)
+old_age=$(awk '{print $NF}' <<<"$old_line")
 if [[ "$old_age" =~ ^([0-9]+)h$ ]] && [ "${BASH_REMATCH[1]}" -ge 9 ]; then
   ok "machineOld (crafted 10h old) reports age=$old_age (>= 9h)"
 else
@@ -179,7 +179,7 @@ EMPTY_ORIGIN="$T/empty.git"
 g init --bare -q "$EMPTY_ORIGIN"
 (cd "$WORK" && g remote add empty-origin "$EMPTY_ORIGIN")
 empty_out=$(cd "$WORK" && HEARTBEAT_REMOTE=empty-origin bash "$HB" list)
-if printf '%s\n' "$empty_out" | grep -qi "no heartbeats found"; then
+if grep -qi "no heartbeats found" <<<"$empty_out"; then
   ok "list against a heartbeat-free remote renders gracefully: '$empty_out'"
 else
   bad "expected a graceful 'no heartbeats found' message, got: $empty_out"
@@ -338,8 +338,8 @@ if [ -n "$claim_sha" ]; then
   claim_msg=$(g -C "$WORK" log -1 --format=%B refs/tmp/t9 2>/dev/null)
   g -C "$WORK" update-ref -d refs/tmp/t9 2>/dev/null || true
 fi
-if [ -n "$claim_sha" ] && printf '%s' "$claim_msg" | grep -q 'issue=900' \
-  && printf '%s' "$claim_msg" | grep -q 'pid=4242'; then
+if [ -n "$claim_sha" ] && grep -q 'issue=900' <<<"$claim_msg" \
+  && grep -q 'pid=4242' <<<"$claim_msg"; then
   ok "stamp created refs/lane-claims/claimA/900 carrying issue=900 pid=4242"
 else
   bad "stamp did not create a well-formed per-lane claim ref (sha='$claim_sha' msg='$claim_msg')"
@@ -364,7 +364,7 @@ fi
 echo "TEST 10: list-claims renders machine/issue/pid/age"
 # ===========================================================================
 lc_out=$(cd "$WORK" && bash "$HB" list-claims)
-if printf '%s\n' "$lc_out" | grep -qE '^claimA +900 +4242 '; then
+if grep -qE '^claimA +900 +4242 ' <<<"$lc_out"; then
   ok "list-claims rendered claimA issue=900 pid=4242"
 else
   bad "list-claims output missing expected row:
@@ -513,9 +513,9 @@ dl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadFresh CLAIM_OPEN_PR_CMD="$NO_OPEN_P
   bash "$HB" dead-lanes 2>&1)
 dl_rc=$?
 if [ "$dl_rc" -eq 3 ] \
-  && printf '%s\n' "$dl_out" | grep -q 'DEAD-NO-PROCESS' \
-  && printf '%s\n' "$dl_out" | grep -q 'deadFresh' \
-  && printf '%s\n' "$dl_out" | grep -q '3393'; then
+  && grep -q 'DEAD-NO-PROCESS' <<<"$dl_out" \
+  && grep -q 'deadFresh' <<<"$dl_out" \
+  && grep -q '3393' <<<"$dl_out"; then
   ok "dead-lanes reported DEAD-NO-PROCESS for a 30s-old claim with a dead pid (rc=3), naming machine and issue"
 else
   bad "dead-lanes must report a fresh dead-pid claim with rc=3: rc=$dl_rc out:
@@ -547,7 +547,7 @@ al_rc=$?
 # verdict: the same ref reads DEAD on its own machine and UNKNOWN elsewhere.
 # The ROW is the property. There is no longer any exit 0 to assert (round 13): the clean
 # verdict was REMOVED because a per-machine claim cannot establish the absence of a dead lane.
-if printf '%s\n' "$al_out" | grep -E '^aliveLocal ' | grep -q 'ALIVE' && [ "$al_rc" -ne 3 ]; then
+if grep -q 'ALIVE' <<<"$(grep -E '^aliveLocal ' <<<"$al_out")" && [ "$al_rc" -ne 3 ]; then
   ok "dead-lanes reported ALIVE for a live local pid and did NOT raise a finding (rc=$al_rc; the deadFresh ref reads UNKNOWN-FOREIGN from here, never dead)"
 else
   bad "dead-lanes must report ALIVE for a live local pid: out:
@@ -563,7 +563,7 @@ echo "TEST 24: a FOREIGN claim is UNKNOWN-FOREIGN — never guessed alive OR dea
 # shape doctrine forbids. So it gets its OWN token.
 fo_out=$(cd "$WORK" && HEARTBEAT_MACHINE=someThirdMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$fo_out" | grep -E '^deadFresh ' | grep -q 'UNKNOWN-FOREIGN'; then
+if grep -q 'UNKNOWN-FOREIGN' <<<"$(grep -E '^deadFresh ' <<<"$fo_out")"; then
   ok "dead-lanes reported UNKNOWN-FOREIGN for a claim owned by another machine (neither alive nor dead)"
 else
   bad "a foreign claim must be UNKNOWN-FOREIGN: out:
@@ -580,8 +580,8 @@ pr_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadFresh CLAIM_OPEN_PR_CMD="$HAS_OPEN_
   bash "$HB" dead-lanes 2>&1)
 pr_rc=$?
 if [ "$pr_rc" -eq 3 ] \
-  && printf '%s\n' "$pr_out" | grep -E '^deadFresh ' | grep -q 'DEAD-NO-PROCESS' \
-  && printf '%s\n' "$pr_out" | grep -E '^deadFresh ' | grep -q 'open-pr=yes'; then
+  && grep -q 'DEAD-NO-PROCESS' <<<"$(grep -E '^deadFresh ' <<<"$pr_out")" \
+  && grep -q 'open-pr=yes' <<<"$(grep -E '^deadFresh ' <<<"$pr_out")"; then
   ok "dead-lanes still reports a dead lane that holds an OPEN PR, annotating open-pr=yes (reap would refuse; the report must not)"
 else
   bad "an open PR must not suppress the dead-lane report: rc=$pr_rc out:
@@ -609,7 +609,7 @@ echo "TEST 26: a claim ref with NO pid is UNKNOWN-NO-PID, not silently alive"
 )
 np_out=$(cd "$WORK" && HEARTBEAT_MACHINE=noPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$np_out" | grep -E '^noPid ' | grep -q 'UNKNOWN-NO-PID'; then
+if grep -q 'UNKNOWN-NO-PID' <<<"$(grep -E '^noPid ' <<<"$np_out")"; then
   ok "dead-lanes reported UNKNOWN-NO-PID for a claim ref carrying no pid (never folded onto ALIVE)"
 else
   bad "a pid-less claim must be UNKNOWN-NO-PID: out:
@@ -636,8 +636,8 @@ g clone -q "$empty_origin" "$empty_work" 2>/dev/null
 ze_out=$(cd "$empty_work" && bash "$HB" dead-lanes 2>&1)
 ze_rc=$?
 if [ "$ze_rc" -eq 1 ] \
-  && printf '%s\n' "$ze_out" | grep -qi 'not the same as an idle fleet' \
-  && printf '%s\n' "$ze_out" | grep -q 'CLAIM_CMD'; then
+  && grep -qi 'not the same as an idle fleet' <<<"$ze_out" \
+  && grep -q 'CLAIM_CMD' <<<"$ze_out"; then
   ok "zero claim refs exits 1 and explains that an empty namespace is not an idle fleet (naming the disabled-stamping case)"
 else
   bad "zero claims must be exit 1 with the reason stated: rc=$ze_rc out:
@@ -658,8 +658,8 @@ fi
 stray_out=$(cd "$WORK" && bash "$HB" dead-lanes extra-arg 2>&1)
 stray_rc=$?
 if [ "$stray_rc" -eq 64 ] \
-  && printf '%s\n' "$stray_out" | grep -q 'dead-lanes takes no arguments' \
-  && ! printf '%s\n' "$stray_out" | grep -q 'unknown subcommand'; then
+  && grep -q 'dead-lanes takes no arguments' <<<"$stray_out" \
+  && ! grep -q 'unknown subcommand' <<<"$stray_out"; then
   ok "dead-lanes rejects a stray argument with exit 64 and its OWN diagnostic (not the unknown-subcommand arm)"
 else
   bad "dead-lanes must reject a stray argument with its own exit-64 diagnostic: rc=$stray_rc out: $stray_out"
@@ -674,13 +674,13 @@ echo "TEST 29: a git FAILURE is not an empty fleet — dead-lanes exits 1, never
 # during the very outage when lanes are dying, it reports all clear.
 ls_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" dead-lanes 2>&1)
 ls_rc=$?
-if [ "$ls_rc" -eq 1 ] && ! printf '%s\n' "$ls_out" | grep -qi 'no claims found'; then
+if [ "$ls_rc" -eq 1 ] && ! grep -qi 'no claims found' <<<"$ls_out"; then
   ok "dead-lanes on an unreachable remote exits 1 and does NOT claim an empty fleet"
 else
   bad "a git failure must be exit 1, not an empty-fleet exit 0: rc=$ls_rc out:
 $ls_out"
 fi
-if printf '%s\n' "$ls_out" | grep -qiE 'could not|failed|unreachable|cannot'; then
+if grep -qiE 'could not|failed|unreachable|cannot' <<<"$ls_out"; then
   ok "the git-failure diagnostic says the measurement failed (not that nothing was found)"
 else
   bad "the git-failure path must name the failure: $ls_out"
@@ -699,7 +699,7 @@ printf '%s\n' "$dangling" >"$ORIGIN/refs/machine-claims/unreadableMachine"
 ur_out=$(cd "$WORK" && HEARTBEAT_MACHINE=unreadableMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 ur_rc=$?
-if printf '%s\n' "$ur_out" | grep -q 'UNKNOWN-UNREADABLE' && [ "$ur_rc" -eq 1 ]; then
+if grep -q 'UNKNOWN-UNREADABLE' <<<"$ur_out" && [ "$ur_rc" -eq 1 ]; then
   ok "an unfetchable claim ref is UNKNOWN-UNREADABLE and makes the run exit 1 (incomplete, not clean)"
 else
   bad "an unreadable ref must yield UNKNOWN-UNREADABLE + exit 1: rc=$ur_rc out:
@@ -721,8 +721,8 @@ pr2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadPrecedence CLAIM_OPEN_PR_CMD="$NO_
   bash "$HB" dead-lanes 2>&1)
 pr2_rc=$?
 if [ "$pr2_rc" -eq 3 ] \
-  && printf '%s\n' "$pr2_out" | grep -q 'DEAD-NO-PROCESS' \
-  && printf '%s\n' "$pr2_out" | grep -qi 'incomplete'; then
+  && grep -q 'DEAD-NO-PROCESS' <<<"$pr2_out" \
+  && grep -qi 'incomplete' <<<"$pr2_out"; then
   ok "a dead lane returns 3 even alongside an unreadable ref, and the incompleteness is still reported"
 else
   bad "dead (3) must outrank incomplete (1), with the incompleteness still stated: rc=$pr2_rc out:
@@ -746,7 +746,7 @@ probe_marker="$T/probe-ran-marker"
 rm -f "$probe_marker"
 zi_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zeroIssue \
   CLAIM_OPEN_PR_CMD="touch '$probe_marker'; exit 0" bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$zi_out" | grep -E '^zeroIssue ' | grep -q 'DEAD-NO-PROCESS' \
+if grep -q 'DEAD-NO-PROCESS' <<<"$(grep -E '^zeroIssue ' <<<"$zi_out")" \
   && [ ! -e "$probe_marker" ]; then
   ok "a claim stamped issue=0 is still reported DEAD, without probing for a PR on issue 0"
 else
@@ -803,7 +803,7 @@ echo "TEST 34: a LOCAL pid-less claim makes the run INCOMPLETE; a FOREIGN one do
 npl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=noPidLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 npl_rc=$?
-if [ "$npl_rc" -eq 1 ] && printf '%s\n' "$npl_out" | grep -E '^noPidLocal ' | grep -q 'UNKNOWN-NO-PID'; then
+if [ "$npl_rc" -eq 1 ] && grep -q 'UNKNOWN-NO-PID' <<<"$(grep -E '^noPidLocal ' <<<"$npl_out")"; then
   ok "a LOCAL pid-less claim is UNKNOWN-NO-PID and makes the run exit 1 (cannot judge != clean)"
 else
   bad "a local pid-less claim must make the run incomplete (exit 1): rc=$npl_rc out:
@@ -817,8 +817,8 @@ fpl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=someFarMachine CLAIM_OPEN_PR_CMD="$NO_
   bash "$HB" dead-lanes 2>&1)
 fpl_rc=$?
 if [ "$fpl_rc" -eq 1 ] \
-  && printf '%s\n' "$fpl_out" | grep -E '^noPidLocal ' | grep -q 'UNKNOWN-FOREIGN' \
-  && printf '%s\n' "$fpl_out" | grep -qi 'LOCAL-ONLY'; then
+  && grep -q 'UNKNOWN-FOREIGN' <<<"$(grep -E '^noPidLocal ' <<<"$fpl_out")" \
+  && grep -qi 'LOCAL-ONLY' <<<"$fpl_out"; then
   ok "a run from a machine owning NO claim exits 1 and says it is LOCAL-ONLY — never 'no dead lanes' about a fleet it never inspected"
 else
   bad "an all-foreign run measured nothing and must exit 1 saying so: rc=$fpl_rc out:
@@ -840,7 +840,7 @@ craft_old_claim "$WORK" "reusedPid" 3398 "$live_pid" 7200   # claim stamped 2h B
 ru_out=$(cd "$WORK" && HEARTBEAT_MACHINE=reusedPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 ru_rc=$?
-if [ "$ru_rc" -eq 3 ] && printf '%s\n' "$ru_out" | grep -E '^reusedPid ' | grep -q 'DEAD-PID-REUSED'; then
+if [ "$ru_rc" -eq 3 ] && grep -q 'DEAD-PID-REUSED' <<<"$(grep -E '^reusedPid ' <<<"$ru_out")"; then
   ok "a LIVE pid that started AFTER its claim was stamped is DEAD-PID-REUSED, not ALIVE (rc=3)"
 else
   bad "a recycled pid must not read ALIVE: rc=$ru_rc out:
@@ -867,8 +867,8 @@ echo "TEST 36: a live pid CONSISTENT with its claim ts is ALIVE, and says identi
 craft_old_claim "$WORK" "goodPid" 3399 "$$" 0
 gp_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=goodPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$gp_out" | grep -E '^goodPid ' | grep -q 'ALIVE' \
-  && printf '%s\n' "$gp_out" | grep -E '^goodPid ' | grep -q 'identity=verified'; then
+if grep -q 'ALIVE' <<<"$(grep -E '^goodPid ' <<<"$gp_out")" \
+  && grep -q 'identity=verified' <<<"$(grep -E '^goodPid ' <<<"$gp_out")"; then
   ok "a live pid whose start precedes its claim ts is ALIVE with identity=verified"
 else
   bad "a consistent live pid must read ALIVE/identity=verified: out:
@@ -886,8 +886,8 @@ echo "TEST 37: a FAILED PR probe renders open-pr=unknown, never a definite yes"
 craft_old_claim "$WORK" "probeFail" 3400 "$ABSENT_PID" 30
 pf_out=$(cd "$WORK" && HEARTBEAT_MACHINE=probeFail \
   CLAIM_OPEN_PR_CMD='exit 7' bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$pf_out" | grep -E '^probeFail ' | grep -q 'open-pr=unknown' \
-  && ! printf '%s\n' "$pf_out" | grep -E '^probeFail ' | grep -q 'open-pr=yes'; then
+if grep -q 'open-pr=unknown' <<<"$(grep -E '^probeFail ' <<<"$pf_out")" \
+  && ! grep -q 'open-pr=yes' <<<"$(grep -E '^probeFail ' <<<"$pf_out")"; then
   ok "a failed PR probe renders open-pr=unknown (never a definite yes on a guess)"
 else
   bad "a failed PR probe must render unknown: out:
@@ -896,7 +896,7 @@ fi
 # ...and a CONFIRMED open PR still says yes, so unknown has not swallowed the real signal.
 pf2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=probeFail \
   CLAIM_OPEN_PR_CMD="$HAS_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$pf2_out" | grep -E '^probeFail ' | grep -q 'open-pr=yes'; then
+if grep -q 'open-pr=yes' <<<"$(grep -E '^probeFail ' <<<"$pf2_out")"; then
   ok "a CONFIRMED open PR still renders open-pr=yes (the orphaned-endgame signal survives)"
 else
   bad "a confirmed open PR must still say yes: out:
@@ -958,7 +958,7 @@ craft_old_claim "$WORK" "shimMachine" 3403 "$shim_pid" 0
 shim_out=$(cd "$WORK" && PATH="$shimdir:$PATH" HEARTBEAT_MACHINE=shimMachine \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 shim_rc=$?
-if printf '%s\n' "$shim_out" | grep -E '^shimMachine ' | grep -q 'UNKNOWN-IDENTITY' \
+if grep -q 'UNKNOWN-IDENTITY' <<<"$(grep -E '^shimMachine ' <<<"$shim_out")" \
   && [ "$shim_rc" -eq 1 ]; then
   ok "an unverifiable pid identity is UNKNOWN-IDENTITY and makes the run incomplete (exit 1), never a clean ALIVE"
 else
@@ -1023,15 +1023,15 @@ craft_old_claim "$WORK" "mixedLocal" 3405 "$$" 0
 mixed_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=mixedLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 mixed_rc=$?
-foreign_rows=$(printf '%s\n' "$mixed_out" | grep -c 'UNKNOWN-FOREIGN' || true)
+foreign_rows=$(grep -c 'UNKNOWN-FOREIGN' <<<"$mixed_out" || true)
 # REFRAMED in round 13. This case used to assert exit 0, which no longer exists — the clean
 # verdict was removed because a per-machine claim cannot establish the ABSENCE of a dead lane.
 # What still matters, and is what this case was really about, is that foreign rows must not
 # manufacture a FINDING: a healthy multi-machine fleet must not report a dead lane (exit 3).
 if [ "$mixed_rc" -ne 3 ] \
   && [ "$foreign_rows" -gt 0 ] \
-  && printf '%s\n' "$mixed_out" | grep -E '^mixedLocal ' | grep -q 'ALIVE' \
-  && ! printf '%s\n' "$mixed_out" | grep -q 'DEAD'; then
+  && grep -q 'ALIVE' <<<"$(grep -E '^mixedLocal ' <<<"$mixed_out")" \
+  && ! grep -q 'DEAD' <<<"$mixed_out"; then
   ok "a measured-healthy local lane alongside $foreign_rows foreign rows raises NO finding (rc=$mixed_rc, no DEAD row) — foreign rows cannot manufacture one"
 else
   bad "foreign rows must not produce a dead-lane finding: rc=$mixed_rc foreign=$foreign_rows out:
@@ -1074,7 +1074,7 @@ craft_old_claim "$WORK" "windowPid" 3406 "$win_pid" 5
 win_out=$(cd "$WORK" && PATH="$winshim:$PATH" PID_IDENTITY_SLACK_SECS=30 HEARTBEAT_MACHINE=windowPid \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 win_rc=$?
-if printf '%s\n' "$win_out" | grep -E '^windowPid ' | grep -q 'UNKNOWN-IDENTITY' \
+if grep -q 'UNKNOWN-IDENTITY' <<<"$(grep -E '^windowPid ' <<<"$win_out")" \
   && [ "$win_rc" -eq 1 ]; then
   ok "a start time inside the rounding window is UNKNOWN-IDENTITY + exit 1, never a clean ALIVE"
 else
@@ -1141,8 +1141,8 @@ if [ -n "$zpid" ] && [ "${zstate#Z}" != "$zstate" ]; then
     bash "$HB" dead-lanes 2>&1)
   z_rc=$?
   if [ "$z_rc" -eq 3 ] \
-    && printf '%s\n' "$z_out" | grep -E '^zombieMachine ' | grep -q 'DEAD-NO-PROCESS' \
-    && printf '%s\n' "$z_out" | grep -E '^zombieMachine ' | grep -qi 'zombie'; then
+    && grep -q 'DEAD-NO-PROCESS' <<<"$(grep -E '^zombieMachine ' <<<"$z_out")" \
+    && grep -qi 'zombie' <<<"$(grep -E '^zombieMachine ' <<<"$z_out")"; then
     ok "a ZOMBIE supervisor is reported DEAD-NO-PROCESS (rc=3), with the zombie state named in the detail"
   else
     bad "a zombie supervisor must be reported dead, naming the state: rc=$z_rc out:
@@ -1188,8 +1188,8 @@ us_rc=$?
 # BOTH directions, because "not DEAD" alone was too weak (roborev round 7, Medium): it
 # accepted the ALIVE + exit 0 that an unreadable state used to produce, which is the
 # false-clean. The correct answer is NEITHER — an UNKNOWN that counts as incomplete.
-if printf '%s\n' "$us_out" | grep -E '^unreadState ' | grep -q 'UNKNOWN-STATE' \
-  && ! printf '%s\n' "$us_out" | grep -E '^unreadState ' | grep -qE 'DEAD|ALIVE' \
+if grep -q 'UNKNOWN-STATE' <<<"$(grep -E '^unreadState ' <<<"$us_out")" \
+  && ! grep -qE 'DEAD|ALIVE' <<<"$(grep -E '^unreadState ' <<<"$us_out")" \
   && [ "$us_rc" -eq 1 ]; then
   ok "an unreadable process state is UNKNOWN-STATE + exit 1 — neither a false DEAD nor a false-clean ALIVE"
 else
@@ -1214,9 +1214,9 @@ for v in $emitted; do
   grep -q "$v" <<<"$help_text" || undocumented="$undocumented $v"
 done
 if [ -n "$emitted" ] && [ -z "$undocumented" ]; then
-  ok "all $(printf '%s\n' "$emitted" | wc -l | tr -d ' ') verdict tokens the code emits are documented in --help"
+  ok "all $(wc -l <<<"$emitted" | tr -d ' ') verdict tokens the code emits are documented in --help"
 else
-  bad "verdicts missing from --help:${undocumented:-<none>} (emitted: $(printf '%s' "$emitted" | tr '\n' ' '))"
+  bad "verdicts missing from --help:${undocumented:-<none>} (emitted: $(tr '\n' ' ' < <(printf '%s' "$emitted")))"
 fi
 # ...and the exit codes the help claims must match what the code actually returns, for the
 # two cases round 6 caught as stale.
@@ -1240,9 +1240,9 @@ for ns in $ns_emitted; do
   grep -q "$ns" <<<"$help_text" || ns_missing="$ns_missing $ns"
 done
 if [ -n "$ns_emitted" ] && [ -z "$ns_missing" ]; then
-  ok "every ref namespace the code touches is documented in --help ($(printf '%s' "$ns_emitted" | tr '\n' ' '))"
+  ok "every ref namespace the code touches is documented in --help ($(tr '\n' ' ' < <(printf '%s' "$ns_emitted")))"
 else
-  bad "ref namespaces missing from --help:${ns_missing:-<none>} (emitted: $(printf '%s' "$ns_emitted" | tr '\n' ' '))"
+  bad "ref namespaces missing from --help:${ns_missing:-<none>} (emitted: $(tr '\n' ' ' < <(printf '%s' "$ns_emitted")))"
 fi
 # The per-lane shape specifically, since that is the one that drifted: the help must show the
 # lane-id component and must mark the legacy namespace as legacy.
@@ -1262,7 +1262,7 @@ if grep -q 'stamp <lane-id>' <<<"$help_text" \
   && grep -qi 'list-claims .*one line per LANE' <<<"$help_text"; then
   ok "--help describes stamp as taking a <lane-id> and list-claims as one line per LANE"
 else
-  bad "--help still describes the per-lane world in per-machine terms: $(grep -E 'stamp <|list-claims ' <<<"$help_text" | head -3)"
+  bad "--help still describes the per-lane world in per-machine terms: $(grep -m3 -E 'stamp <|list-claims ' <<<"$help_text")"
 fi
 # ...and no line may cite #1930's retracted "one worker per machine" as a LIVE justification. The two
 # surviving citations are both explicitly marked as retracted, so the guard requires the retraction
@@ -1289,11 +1289,11 @@ fi
 # read as a threshold. The --help block was right and this summary was not, which is why both are
 # asserted rather than just the one that happened to be wrong.
 usage_text=$(cd "$WORK" && bash "$HB" 2>&1 || true)
-if printf '%s\n' "$usage_text" | grep -q 'should-reap <machine> \[threshold_secs\]' \
-  && printf '%s\n' "$usage_text" | grep -q 'should-reap <machine> <issue> <threshold_secs>'; then
+if grep -q 'should-reap <machine> \[threshold_secs\]' <<<"$usage_text" \
+  && grep -q 'should-reap <machine> <issue> <threshold_secs>' <<<"$usage_text"; then
   ok "the no-subcommand usage line names BOTH should-reap forms, so the two-argument trap is not advertised as a lane call"
 else
-  bad "the usage line must spell out both should-reap forms: $(printf '%s\n' "$usage_text" | tr '\n' ' ' | head -c 400)"
+  bad "the usage line must spell out both should-reap forms: $(head -c 400 < <(tr '\n' ' ' <<<"$usage_text"))"
 fi
 # ...and the help's exit-0 contract must match the CURRENT implementation, which restored the clean
 # verdict once per-lane refs removed the masking (#3393 ruling A).
@@ -1336,8 +1336,8 @@ craft_old_claim "$WORK" "probeDown" 3409 "$$" 0
 pd_out=$(cd "$WORK" && PATH="$psfail:$PATH" HEARTBEAT_MACHINE=probeDown \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 pd_rc=$?
-if printf '%s\n' "$pd_out" | grep -E '^probeDown ' | grep -q 'UNKNOWN-PROBE' \
-  && ! printf '%s\n' "$pd_out" | grep -E '^probeDown ' | grep -q 'DEAD' \
+if grep -q 'UNKNOWN-PROBE' <<<"$(grep -E '^probeDown ' <<<"$pd_out")" \
+  && ! grep -q 'DEAD' <<<"$(grep -E '^probeDown ' <<<"$pd_out")" \
   && [ "$pd_rc" -eq 1 ]; then
   ok "a failing ps yields UNKNOWN-PROBE + exit 1 for a live pid — not a false DEAD-NO-PROCESS + exit 3"
 else
@@ -1370,7 +1370,7 @@ craft_old_claim "$WORK" "symBand" 3410 "$$" 0
 sym_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" PID_IDENTITY_SLACK_SECS=2000000 \
   HEARTBEAT_MACHINE=symBand CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 sym_rc=$?
-if printf '%s\n' "$sym_out" | grep -E '^symBand ' | grep -q 'UNKNOWN-IDENTITY' \
+if grep -q 'UNKNOWN-IDENTITY' <<<"$(grep -E '^symBand ' <<<"$sym_out")" \
   && [ "$sym_rc" -eq 1 ]; then
   ok "a start inside the tolerance band on the NEGATIVE side is UNKNOWN-IDENTITY + exit 1, not a one-sided ALIVE"
 else
@@ -1381,7 +1381,7 @@ fi
 # above is about the band and not about the shim refusing to ever verify identity.
 sym2_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" PID_IDENTITY_SLACK_SECS=2 \
   HEARTBEAT_MACHINE=symBand CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$sym2_out" | grep -E '^symBand ' | grep -q 'ALIVE'; then
+if grep -q 'ALIVE' <<<"$(grep -E '^symBand ' <<<"$sym2_out")"; then
   ok "NON-VACUITY: the same fixture with a narrow tolerance IS ALIVE — the band is what decides, not the shim"
 else
   bad "NON-VACUITY broken: the fixture never verifies identity at any tolerance: out:
@@ -1421,8 +1421,8 @@ craft_old_claim "$WORK" "hiddenPid" 3411 "$$" 0
 hp_out=$(cd "$WORK" && PATH="$hideshim:$PATH" SHIM_HIDE_PID="$$" HEARTBEAT_MACHINE=hiddenPid \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 hp_rc=$?
-if printf '%s\n' "$hp_out" | grep -E '^hiddenPid ' | grep -q 'UNKNOWN-PROBE' \
-  && ! printf '%s\n' "$hp_out" | grep -E '^hiddenPid ' | grep -q 'DEAD' \
+if grep -q 'UNKNOWN-PROBE' <<<"$(grep -E '^hiddenPid ' <<<"$hp_out")" \
+  && ! grep -q 'DEAD' <<<"$(grep -E '^hiddenPid ' <<<"$hp_out")" \
   && [ "$hp_rc" -eq 1 ]; then
   ok "disagreeing presence probes (ps absent, /proc present) yield UNKNOWN-PROBE + exit 1, never a false DEAD"
 else
@@ -1566,7 +1566,7 @@ fi
 craft_old_claim "$WORK" "epermMachine" 3412 "$$" 0
 ep_out=$(cd "$WORK" && PATH="$hideshim:$PATH" SHIM_HIDE_PID="$$" HEARTBEAT_MACHINE=epermMachine \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if ! printf '%s\n' "$ep_out" | grep -E '^epermMachine ' | grep -q 'DEAD'; then
+if ! grep -q 'DEAD' <<<"$(grep -E '^epermMachine ' <<<"$ep_out")"; then
   ok "end-to-end: a pid hidden from ps but EPERM-on-signal is never reported DEAD"
 else
   bad "an EPERM pid must not be declared dead: out:
@@ -1662,8 +1662,8 @@ nc_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=noClean \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 nc_rc=$?
 if [ "$nc_rc" -ne 0 ] \
-  && printf '%s\n' "$nc_out" | grep -E '^noClean ' | grep -q 'ALIVE' \
-  && printf '%s\n' "$nc_out" | grep -qi 'POSITIVE-DETECTION ONLY'; then
+  && grep -q 'ALIVE' <<<"$(grep -E '^noClean ' <<<"$nc_out")" \
+  && grep -qi 'POSITIVE-DETECTION ONLY' <<<"$nc_out"; then
   ok "a measured-healthy local lane does NOT exit 0 (rc=$nc_rc) and the output says why — the clean verdict is out of this slice"
 else
   bad "this slice must never exit 0: rc=$nc_rc out:
@@ -1682,11 +1682,11 @@ craft_lane_claim "$WORK" "multiLane" 4002 "$$" 0             # live sibling, sam
 ml_out=$(cd "$WORK" && PATH="$MIXED_SHIM:$PATH" HEARTBEAT_MACHINE=multiLane \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 ml_rc=$?
-ml_rows=$(printf '%s\n' "$ml_out" | grep -cE '^multiLane ')
+ml_rows=$(grep -cE '^multiLane ' <<<"$ml_out")
 if [ "$ml_rc" -eq 3 ] \
   && [ "$ml_rows" -eq 2 ] \
-  && printf '%s\n' "$ml_out" | grep -E '^multiLane +4001 ' | grep -q 'DEAD' \
-  && printf '%s\n' "$ml_out" | grep -E '^multiLane +4002 ' | grep -q 'ALIVE'; then
+  && grep -q 'DEAD' <<<"$(grep -E '^multiLane +4001 ' <<<"$ml_out")" \
+  && grep -q 'ALIVE' <<<"$(grep -E '^multiLane +4002 ' <<<"$ml_out")"; then
   ok "both lanes on one machine are reported: 4001 DEAD beside a live 4002 (rc=3) — the blind spot ruling A closes"
 else
   bad "a dead lane must be visible beside a live sibling on the same machine: rc=$ml_rc rows=$ml_rows out:
@@ -1725,8 +1725,8 @@ og_out=$(cd "$WORK" && PATH="$oldgit:$PATH" HEARTBEAT_MACHINE=anyMachine \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 og_rc=$?
 if [ "$og_rc" -eq 1 ] \
-  && printf '%s\n' "$og_out" | grep -qi 'without writing FETCH_HEAD' \
-  && printf '%s\n' "$og_out" | grep -qi 'NOTHING was measured'; then
+  && grep -qi 'without writing FETCH_HEAD' <<<"$og_out" \
+  && grep -qi 'NOTHING was measured' <<<"$og_out"; then
   ok "a git too old to fetch safely makes dead-lanes refuse (exit 1) and say nothing was measured"
 else
   bad "an unsafe-fetch git must make the run refuse: rc=$og_rc out:
@@ -1849,18 +1849,18 @@ chmod +x "$slowshim/ps"
 craft_old_claim "$WORK" "slowPs" 3415 "$$" 0
 sp_out=$(cd "$WORK" && PATH="$slowshim:$PATH" HEARTBEAT_MACHINE=slowPs \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$sp_out" | grep -E '^slowPs ' | grep -q 'UNKNOWN-IDENTITY' \
-  && ! printf '%s\n' "$sp_out" | grep -E '^slowPs ' | grep -q 'ALIVE'; then
+if grep -q 'UNKNOWN-IDENTITY' <<<"$(grep -E '^slowPs ' <<<"$sp_out")" \
+  && ! grep -q 'ALIVE' <<<"$(grep -E '^slowPs ' <<<"$sp_out")"; then
   ok "a ps slow enough to matter yields UNKNOWN-IDENTITY, not an ALIVE bought by measurement delay"
 else
   bad "a slow ps must not produce ALIVE: out:
 $sp_out"
 fi
 # ...and the reported interval must actually be a RANGE, or the bracketing is cosmetic.
-if printf '%s\n' "$sp_out" | grep -E '^slowPs ' | grep -qE 'started somewhere in \[-?[0-9]+, -?[0-9]+\]s'; then
+if grep -qE 'started somewhere in \[-?[0-9]+, -?[0-9]+\]s' <<<"$(grep -E '^slowPs ' <<<"$sp_out")"; then
   ok "the detail reports the start as an INTERVAL, so the measurement uncertainty is visible to the operator"
 else
-  bad "the identity detail must report the bracketed interval: $(printf '%s\n' "$sp_out" | grep -E '^slowPs ')"
+  bad "the identity detail must report the bracketed interval: $(grep -E '^slowPs ' <<<"$sp_out")"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/slowPs" 2>/dev/null || true)
 
@@ -1876,8 +1876,8 @@ ul_out=$(cd "$WORK" && HEARTBEAT_MACHINE=unreadableLocal CLAIM_OPEN_PR_CMD="$NO_
   bash "$HB" dead-lanes 2>&1)
 ul_rc=$?
 if [ "$ul_rc" -eq 1 ] \
-  && printf '%s\n' "$ul_out" | grep -qi 'DO belong to this machine' \
-  && ! printf '%s\n' "$ul_out" | grep -qi 'none is owned by this machine'; then
+  && grep -qi 'DO belong to this machine' <<<"$ul_out" \
+  && ! grep -qi 'none is owned by this machine' <<<"$ul_out"; then
   ok "an unreadable LOCAL claim reports 'belongs to this machine but could not be read', not 'no local claim'"
 else
   bad "the unreadable-local diagnostic must not claim there is no local claim: rc=$ul_rc out:
@@ -1887,7 +1887,7 @@ fi
 # all-foreign message — so the two diagnostics are genuinely distinct rather than one renamed.
 uf_out=$(cd "$WORK" && HEARTBEAT_MACHINE=ownsNothingAtAll CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$uf_out" | grep -qi 'none is owned by this machine'; then
+if grep -qi 'none is owned by this machine' <<<"$uf_out"; then
   ok "NON-VACUITY: a machine owning no claim still gets the all-foreign diagnostic — the two messages are distinct"
 else
   bad "NON-VACUITY broken: the all-foreign diagnostic no longer appears: out:
@@ -1912,7 +1912,7 @@ gram_out=$(cd "$WORK" && HEARTBEAT_MACHINE=grammarBox CLAIM_OPEN_PR_CMD="$NO_OPE
 gram_rc=$?
 # rc=2 is "no such claim ref": the LEGACY ref refs/machine-claims/grammarBox does not exist. If the
 # argument had been read as a lane issue it would have judged the lane ref that DOES exist instead.
-if [ "$gram_rc" -eq 2 ] && ! printf '%s\n' "$gram_out" | grep -q 'lane-claims/grammarBox/14400'; then
+if [ "$gram_rc" -eq 2 ] && ! grep -q 'lane-claims/grammarBox/14400' <<<"$gram_out"; then
   ok "two arguments mean the THRESHOLD even though a lane ref named 14400 exists — the call cannot change meaning with the ref set"
 else
   bad "the two-arg form must always be the legacy threshold: rc=$gram_rc out:
@@ -1923,7 +1923,7 @@ fi
 gram2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=grammarBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" should-reap grammarBox 14400 14400 2>&1)
 gram2_rc=$?
-if [ "$gram2_rc" -eq 0 ] && printf '%s\n' "$gram2_out" | grep -q 'lane-claims/grammarBox/14400'; then
+if [ "$gram2_rc" -eq 0 ] && grep -q 'lane-claims/grammarBox/14400' <<<"$gram2_out"; then
   ok "NON-VACUITY: the three-arg form DOES judge lane 14400 (reaped, ref named) — so the two-arg case above is about the grammar, not about blindness"
 else
   bad "the three-arg form must judge the lane: rc=$gram2_rc out:
@@ -1970,8 +1970,8 @@ echo "TEST 59: delete_ref_guarded confirms ABSENCE rather than assuming it (roun
 abs_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" reap somebox 4242 2>&1)
 abs_rc=$?
 if [ "$abs_rc" -ne 0 ] \
-  && printf '%s\n' "$abs_out" | grep -qi 'could not determine whether' \
-  && ! printf '%s\n' "$abs_out" | grep -qi 'already absent'; then
+  && grep -qi 'could not determine whether' <<<"$abs_out" \
+  && ! grep -qi 'already absent' <<<"$abs_out"; then
   ok "an unreadable remote makes reap FAIL rather than report a successful clear (rc=$abs_rc)"
 else
   bad "an unreadable remote must not be read as 'already absent': rc=$abs_rc out:
@@ -1979,7 +1979,7 @@ $abs_out"
 fi
 # NON-VACUITY: a genuinely absent ref on a REACHABLE remote is still the quiet success path.
 gone_out=$(cd "$WORK" && bash "$HB" reap somebox 4242 2>&1); gone_rc=$?
-if [ "$gone_rc" -eq 0 ] && printf '%s\n' "$gone_out" | grep -qi 'already absent'; then
+if [ "$gone_rc" -eq 0 ] && grep -qi 'already absent' <<<"$gone_out"; then
   ok "NON-VACUITY: a confirmed-absent ref still returns 0 with 'already absent' — only the unreadable case changed"
 else
   bad "a confirmed-absent ref must still succeed quietly: rc=$gone_rc out:
@@ -1999,7 +1999,7 @@ stale_out=$(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
 stale_rc=$?
 still_there=$(g -C "$WORK" ls-remote origin 'refs/lane-claims/leaseBox/5501' | awk '{print $1}')
 if [ "$stale_rc" -eq 4 ] && [ -n "$still_there" ] \
-  && printf '%s\n' "$stale_out" | grep -qi 'lease.*was not held'; then
+  && grep -qi 'lease.*was not held' <<<"$stale_out"; then
   ok "a STALE lease refuses the delete (rc=4) and the ref survives — a concurrent refresh cannot be destroyed"
 else
   bad "a stale lease must refuse and preserve the ref: rc=$stale_rc still='$still_there' out:
@@ -2026,7 +2026,7 @@ craft_lane_claim "$WORK" "phReap" "p777-abc12345" "$ABSENT_PID" 20000
 ph_sr=$(cd "$WORK" && HEARTBEAT_MACHINE=phReap CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" should-reap phReap p777-abc12345 1 2>&1)
 ph_sr_rc=$?
-if [ "$ph_sr_rc" -eq 1 ] && printf '%s\n' "$ph_sr" | grep -qi 'names no issue'; then
+if [ "$ph_sr_rc" -eq 1 ] && grep -qi 'names no issue' <<<"$ph_sr"; then
   ok "should-reap KEEPS a placeholder lane even when stale and pid-dead (rc=1) — an open PR cannot be ruled out"
 else
   bad "a placeholder must never be automatically reaped: rc=$ph_sr_rc out:
@@ -2096,7 +2096,7 @@ fc_out=$(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" reap unreadabl
 fc_rc=$?
 still_msg=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/unreadableMsg' | awk '{print $1}')
 if [ "$fc_rc" -ne 0 ] && [ -n "$still_msg" ] \
-  && printf '%s\n' "$fc_out" | grep -qi 'could not be read'; then
+  && grep -qi 'could not be read' <<<"$fc_out"; then
   ok "an unreadable claim message REFUSES the delete (rc=$fc_rc) and the ref survives — the open-PR safeguard is not skipped"
 else
   bad "an unreadable claim message must fail closed: rc=$fc_rc still='$still_msg' out:
@@ -2110,8 +2110,8 @@ echo "TEST 64: list-claims reports an unreadable namespace instead of 'no claims
 lc_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" list-claims 2>&1)
 lc_rc=$?
 if [ "$lc_rc" -ne 0 ] \
-  && printf '%s\n' "$lc_out" | grep -qi 'could not list claim refs' \
-  && ! printf '%s\n' "$lc_out" | grep -qi 'no claims found'; then
+  && grep -qi 'could not list claim refs' <<<"$lc_out" \
+  && ! grep -qi 'no claims found' <<<"$lc_out"; then
   ok "list-claims on an unreadable remote exits non-zero and says the listing is incomplete"
 else
   bad "list-claims must not render an outage as 'no claims found': rc=$lc_rc out:
@@ -2121,11 +2121,11 @@ fi
 # auto-reaped and an operator needs to know WHICH ref to clean up by hand.
 craft_lane_claim "$WORK" "dispBox" "p88-c0ffee" "$ABSENT_PID" 30
 disp_out=$(cd "$WORK" && bash "$HB" list-claims 2>&1)
-if printf '%s\n' "$disp_out" | grep -qE '^dispBox +p88-c0ffee '; then
+if grep -qE '^dispBox +p88-c0ffee ' <<<"$disp_out"; then
   ok "list-claims shows the placeholder lane id from the ref PATH, not '?'"
 else
   bad "a placeholder lane must be identifiable in list-claims: out:
-$(printf '%s\n' "$disp_out" | head -5)"
+$(head -5 <<<"$disp_out")"
 fi
 (cd "$WORK" && g push -q origin ":refs/lane-claims/dispBox/p88-c0ffee" 2>/dev/null || true)
 
@@ -2144,7 +2144,7 @@ for _fnfile in "$HB" "$SCRIPT_DIR/../flow/claim.sh" "$SCRIPT_DIR/../local/worker
   if [ -z "$_dupes" ]; then
     ok "no duplicate function definition in $(basename "$_fnfile") — a later definition would silently shadow an earlier one"
   else
-    bad "duplicate function definition(s) in $(basename "$_fnfile"): $(printf '%s' "$_dupes" | tr '\n' ' ') — bash uses the LAST one, so the earlier is dead code"
+    bad "duplicate function definition(s) in $(basename "$_fnfile"): $(tr '\n' ' ' < <(printf '%s' "$_dupes")) — bash uses the LAST one, so the earlier is dead code"
   fi
 done
 
@@ -2162,7 +2162,7 @@ for _fh_file in "$SCRIPT_DIR/../flow/claim-heartbeat.sh" "$SCRIPT_DIR/../flow/cl
   [ -r "$_fh_file" ] || continue
   _hits=$(grep -nE 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD' "$_fh_file" \
     | grep -vE '^[0-9]+:[[:space:]]*#' || true)
-  [ -z "$_hits" ] || _fh_leaks="$_fh_leaks $(basename "$_fh_file"):$(printf '%s' "$_hits" | head -1 | cut -d: -f1)"
+  [ -z "$_hits" ] || _fh_leaks="$_fh_leaks $(basename "$_fh_file"):$(head -1 <<<"$_hits" | cut -d: -f1)"
 done
 if [ -z "$_fh_leaks" ]; then
   ok "no shipped flow script or workflow reads FETCH_HEAD with a revision-reading git command"
@@ -2204,7 +2204,7 @@ if grep -q 'claim-heartbeat.sh' <<<"$_help67_head" \
   ok "--help emits the help block and leaks no function body"
 else
   bad "--help does not look like help: first lines:
-$(printf '%s\n' "$_help67" | head -3)"
+$(head -3 <<<"$_help67")"
 fi
 # NON-VACUITY, and the probe has to MIRROR THE REAL DEFECT to be worth anything. My first attempt
 # planted a bare function definition at line 1 and failed — because `print_help` awks from line 2,
@@ -2254,7 +2254,7 @@ mf_out=$(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" reap malformed
 mf_rc=$?
 mf_still=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/malformedBox' | awk '{print $1}')
 if [ "$mf_rc" -ne 0 ] && [ -n "$mf_still" ] \
-  && printf '%s\n' "$mf_out" | grep -qi 'could not be read'; then
+  && grep -qi 'could not be read' <<<"$mf_out"; then
   ok "a claim message with no issue= field REFUSES the delete (rc=$mf_rc) and the ref survives — the open-PR safeguard is not skipped"
 else
   bad "an absent issue field must fail closed: rc=$mf_rc still='$mf_still' out:
@@ -2277,9 +2277,9 @@ for sub in "list" "list-claims" "clear oldgitBox" "reap oldgitBox 7001" "should-
     CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" $sub 2>&1)
   og2_rc=$?
   if [ "$og2_rc" -ne 0 ] \
-    && printf '%s\n' "$og2_out" | grep -qi 'without writing FETCH_HEAD' \
-    && printf '%s\n' "$og2_out" | grep -qi 'NOTHING was measured' \
-    && ! printf '%s\n' "$og2_out" | grep -qi 'fetch-failed'; then
+    && grep -qi 'without writing FETCH_HEAD' <<<"$og2_out" \
+    && grep -qi 'NOTHING was measured' <<<"$og2_out" \
+    && ! grep -qi 'fetch-failed' <<<"$og2_out"; then
     ok "'$sub' refuses on a git too old to fetch privately (rc=$og2_rc), naming git as the cause and printing no per-row verdict"
   else
     bad "'$sub' must refuse rather than measure nothing and report success: rc=$og2_rc out:
@@ -2294,7 +2294,7 @@ for pushsub in "beat 7001" "stamp 7001 $$"; do
   # shellcheck disable=SC2086
   ps_out=$(cd "$WORK" && PATH="$oldgit:$PATH" HEARTBEAT_MACHINE=oldgitBox bash "$HB" $pushsub 2>&1)
   ps_rc=$?
-  if [ "$ps_rc" -eq 0 ] && ! printf '%s\n' "$ps_out" | grep -qi 'NOTHING was measured'; then
+  if [ "$ps_rc" -eq 0 ] && ! grep -qi 'NOTHING was measured' <<<"$ps_out"; then
     ok "'$pushsub' still succeeds on an old git — it only pushes, so the fetch guard must not reach it"
   else
     bad "the fetch guard must NOT break a push-only subcommand: '$pushsub' rc=$ps_rc out:
@@ -2348,8 +2348,8 @@ lf_rc=$?
 # text assertion is defeated by any message that names the thing it rules out; key it on the
 # ASSERTING sentence's own tail instead, which only the empty-namespace claim carries.
 if [ "$lf_rc" -ne 0 ] \
-  && printf '%s\n' "$lf_out" | grep -qi 'never determined' \
-  && ! printf '%s\n' "$lf_out" | grep -q 'That is NOT the same as an idle fleet'; then
+  && grep -qi 'never determined' <<<"$lf_out" \
+  && ! grep -q 'That is NOT the same as an idle fleet' <<<"$lf_out"; then
   ok "an empty per-lane namespace with a FAILED legacy listing reports INCOMPLETE (rc=$lf_rc), never 'no claim refs exist'"
 else
   bad "an unread legacy namespace must not be asserted empty: rc=$lf_rc out:
@@ -2370,7 +2370,7 @@ else
 fi
 ctl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=noSuchLaneBox \
   HEARTBEAT_REMOTE="$EMPTYREMOTE" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$ctl_out" | grep -q 'That is NOT the same as an idle fleet'; then
+if grep -q 'That is NOT the same as an idle fleet' <<<"$ctl_out"; then
   ok "NON-VACUITY: without the shim the same empty state DOES print the empty-namespace sentence, so the INCOMPLETE branch was reached by the injected failure"
 else
   bad "NON-VACUITY broken: the control run did not reach the empty-namespace sentence, so TEST 70's two branches are not distinguished: out:
@@ -2388,8 +2388,8 @@ sr_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote CLAIM_OPEN_PR_CMD="$NO_OP
   bash "$HB" should-reap someBox 4242 1 2>&1)
 sr_rc=$?
 if [ "$sr_rc" -eq 1 ] \
-  && printf '%s\n' "$sr_out" | grep -qi 'operational failure' \
-  && printf '%s\n' "$sr_out" | grep -qi 'never confirmed absent'; then
+  && grep -qi 'operational failure' <<<"$sr_out" \
+  && grep -qi 'never confirmed absent' <<<"$sr_out"; then
   ok "an unreachable remote makes should-reap KEEP (rc=1) and name the operational failure — never rc=2 'no ref'"
 else
   bad "an unverified claim must not read as confirmed absent: rc=$sr_rc out:
@@ -2438,7 +2438,7 @@ only5555='[ "$1" = 5555 ] && exit 0; exit 1'   # "has an open PR" for 5555 ONLY
 pa_out=$(cd "$WORK" && HEARTBEAT_MACHINE=someOtherMachine CLAIM_OPEN_PR_CMD="$only5555" \
   bash "$HB" should-reap pathBox 5555 1 2>&1)
 pa_rc=$?
-if [ "$pa_rc" -eq 1 ] && printf '%s\n' "$pa_out" | grep -q 'issue #5555 has an open PR'; then
+if [ "$pa_rc" -eq 1 ] && grep -q 'issue #5555 has an open PR' <<<"$pa_out"; then
   ok "should-reap consults the issue from the REF PATH (5555), not the message's (9999) — so the open-PR safeguard runs"
 else
   bad "the ref path must outrank the claim message: rc=$pa_rc out:
@@ -2469,7 +2469,7 @@ fi
 ln_out=$(cd "$WORK" && HEARTBEAT_MACHINE=legacyNoIssue CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" should-reap legacyNoIssue 1 2>&1)
 ln_rc=$?
-if [ "$ln_rc" -eq 1 ] && printf '%s\n' "$ln_out" | grep -qi 'issue is unknown'; then
+if [ "$ln_rc" -eq 1 ] && grep -qi 'issue is unknown' <<<"$ln_out"; then
   ok "a legacy claim whose issue cannot be read is KEPT (rc=1), so the open-PR safeguard is never skipped"
 else
   bad "an unreadable legacy issue must not reach a reap verdict: rc=$ln_rc out:
@@ -2529,7 +2529,7 @@ lease_sha=$(g -C "$WORK" ls-remote origin 'refs/lane-claims/leaseBox/6001' | awk
 lp_out=$(cd "$WORK" && PATH="$pushfail:$PATH" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" reap leaseBox 6001 "$lease_sha" 2>&1)
 lp_rc=$?
-if [ "$lp_rc" -eq 1 ] && printf '%s\n' "$lp_out" | grep -qi 'operational failure'; then
+if [ "$lp_rc" -eq 1 ] && grep -qi 'operational failure' <<<"$lp_out"; then
   ok "a failed leased push with the ref STILL at the lease is an operational failure (rc=1), not a transfer"
 else
   bad "an operational push failure must not report a transfer: rc=$lp_rc out:
@@ -2540,7 +2540,7 @@ fi
 mv_out=$(cd "$WORK" && PATH="$pushfail:$PATH" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" reap leaseBox 6001 0000000000000000000000000000000000000001 2>&1)
 mv_rc=$?
-if [ "$mv_rc" -eq 4 ] && printf '%s\n' "$mv_out" | grep -qi 'was not held'; then
+if [ "$mv_rc" -eq 4 ] && grep -qi 'was not held' <<<"$mv_out"; then
   ok "a failed leased push whose ref is at a DIFFERENT sha is a genuine transfer (rc=4)"
 else
   bad "a real lease mismatch must still report 4: rc=$mv_rc out:
@@ -2560,7 +2560,7 @@ fi
 ab_out=$(cd "$WORK" && PATH="$pushfail:$PATH" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" reap leaseBox 6001 "$lease_sha" 2>&1)
 ab_rc=$?
-if [ "$ab_rc" -eq 0 ] && printf '%s\n' "$ab_out" | grep -qi 'already absent'; then
+if [ "$ab_rc" -eq 0 ] && grep -qi 'already absent' <<<"$ab_out"; then
   ok "a failed leased push against an ALREADY-ABSENT ref reports success — nothing remained to delete"
 else
   bad "an absent ref after a failed push must not be an error or a transfer: rc=$ab_rc out:
@@ -2593,8 +2593,8 @@ for sub in list list-claims; do
   rf_out=$(cd "$WORK" && PATH="$rowfail:$PATH" bash "$HB" "$sub" 2>&1)
   rf_rc=$?
   if [ "$rf_rc" -ne 0 ] \
-    && printf '%s\n' "$rf_out" | grep -q 'fetch-failed' \
-    && printf '%s\n' "$rf_out" | grep -qi 'INCOMPLETE'; then
+    && grep -q 'fetch-failed' <<<"$rf_out" \
+    && grep -qi 'INCOMPLETE' <<<"$rf_out"; then
     ok "'$sub' exits non-zero (rc=$rf_rc) when a row could not be read, while still rendering the rows that did"
   else
     bad "'$sub' must not exit 0 having measured nothing: rc=$rf_rc out:
@@ -2645,8 +2645,8 @@ for bad_issue in abc 0 007 12x; do
   rp_rc=$?
   survived=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/badIssue' | awk '{print $1}')
   if [ "$sr_rc" -eq 1 ] && [ "$rp_rc" -eq 5 ] && [ -n "$survived" ] \
-    && printf '%s\n' "$sr_out" | grep -qi 'not an issue number' \
-    && printf '%s\n' "$rp_out" | grep -qi 'not an issue number'; then
+    && grep -qi 'not an issue number' <<<"$sr_out" \
+    && grep -qi 'not an issue number' <<<"$rp_out"; then
     ok "issue='${bad_issue}' makes should-reap KEEP (rc=1) and reap REFUSE (rc=5), and the ref survives"
   else
     bad "issue='${bad_issue}' must not reach a reap: sr_rc=$sr_rc rp_rc=$rp_rc survived='${survived:-<gone>}' sr:
@@ -2703,20 +2703,20 @@ mp_rc=$?
 # NOTE the two renderings differ by command and that is not a defect: `dead-lanes` prints `none` for an
 # absent pid, `list-claims` prints `?`. The first cut of this case asserted `?` for both and failed
 # against a CORRECT fix — the assertion was wrong about the output, not the code.
-if printf '%s\n' "$mp_out" | grep -qE '^prefixBox +7100 +none +UNKNOWN-NO-PID' \
-  && ! printf '%s\n' "$mp_out" | grep -qE "^prefixBox +7100 +${live_prefix}"; then
+if grep -qE '^prefixBox +7100 +none +UNKNOWN-NO-PID' <<<"$mp_out" \
+  && ! grep -qE "^prefixBox +7100 +${live_prefix}" <<<"$mp_out"; then
   ok "a malformed pid '${live_prefix}x' reads as UNKNOWN-NO-PID, never coerced to its live numeric prefix"
 else
   bad "a numeric prefix must not be parsed as the pid: rc=$mp_rc out:
-$(printf '%s\n' "$mp_out" | grep prefixBox)"
+$(grep prefixBox <<<"$mp_out")"
 fi
 # ...and the same token must not reach `list-claims` as a number either.
 lc_mp=$(cd "$WORK" && bash "$HB" list-claims 2>&1)
-if printf '%s\n' "$lc_mp" | grep -qE '^prefixBox +7100 +\? ' \
-  && ! printf '%s\n' "$lc_mp" | grep -qE "^prefixBox +7100 +${live_prefix} "; then
+if grep -qE '^prefixBox +7100 +\? ' <<<"$lc_mp" \
+  && ! grep -qE "^prefixBox +7100 +${live_prefix} " <<<"$lc_mp"; then
   ok "list-claims shows '?' for the malformed pid rather than its numeric prefix"
 else
-  bad "list-claims coerced the malformed pid: $(printf '%s\n' "$lc_mp" | grep prefixBox)"
+  bad "list-claims coerced the malformed pid: $(grep prefixBox <<<"$lc_mp")"
 fi
 # NON-VACUITY, TRUE OF THE BROKEN CODE TOO: a WELL-FORMED pid equal to that same live pid must be read
 # and probed, producing a pid column with the number in it. If this failed, the case above could pass
@@ -2725,10 +2725,10 @@ fi
 craft_malformed_pid "prefixBox" "7101" "${live_prefix}"
 wf_out=$(cd "$WORK" && HEARTBEAT_MACHINE=prefixBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$wf_out" | grep -qE "^prefixBox +7101 +${live_prefix} "; then
+if grep -qE "^prefixBox +7101 +${live_prefix} " <<<"$wf_out"; then
   ok "NON-VACUITY: a WELL-FORMED pid equal to the same value IS read and reported, so the '?' above is a refusal and not a parser that never works"
 else
-  bad "NON-VACUITY broken: a well-formed pid was not parsed either: $(printf '%s\n' "$wf_out" | grep prefixBox)"
+  bad "NON-VACUITY broken: a well-formed pid was not parsed either: $(grep prefixBox <<<"$wf_out")"
 fi
 (cd "$WORK" && g push -q origin ":refs/lane-claims/prefixBox/7101" 2>/dev/null || true)
 
@@ -2759,17 +2759,17 @@ decoy_pid="$$"
 craft_decoy_msg "decoyBox" "7200" "claim notissue=99 machine=decoyBox rapid=${decoy_pid} nots=2026-08-29T00:00:00Z"
 dc_out=$(cd "$WORK" && HEARTBEAT_MACHINE=decoyBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$dc_out" | grep -qE '^decoyBox +7200 +none ' \
-  && ! printf '%s\n' "$dc_out" | grep -qE "^decoyBox +7200 +${decoy_pid}"; then
+if grep -qE '^decoyBox +7200 +none ' <<<"$dc_out" \
+  && ! grep -qE "^decoyBox +7200 +${decoy_pid}" <<<"$dc_out"; then
   ok "'rapid=${decoy_pid}' does NOT satisfy the pid key — the decoy value is never probed"
 else
-  bad "a substring key must not be accepted: $(printf '%s\n' "$dc_out" | grep decoyBox)"
+  bad "a substring key must not be accepted: $(grep decoyBox <<<"$dc_out")"
 fi
 lc_dc=$(cd "$WORK" && bash "$HB" list-claims 2>&1)
-if printf '%s\n' "$lc_dc" | grep -qE '^decoyBox +7200 +\? +\? ' ; then
+if grep -qE '^decoyBox +7200 +\? +\? ' <<<"$lc_dc" ; then
   ok "list-claims shows '?' for both pid and ts when only decoy keys are present"
 else
-  bad "list-claims accepted a decoy key: $(printf '%s\n' "$lc_dc" | grep decoyBox)"
+  bad "list-claims accepted a decoy key: $(grep decoyBox <<<"$lc_dc")"
 fi
 # And the LEGACY reap path: `notissue=` must not supply the issue the open-PR safeguard needs.
 (
@@ -2785,7 +2785,7 @@ fi
 dl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=decoyLegacy CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" should-reap decoyLegacy 1 2>&1)
 dl_rc=$?
-if [ "$dl_rc" -eq 1 ] && printf '%s\n' "$dl_out" | grep -qi 'could not be read\|issue is unknown'; then
+if [ "$dl_rc" -eq 1 ] && grep -qi 'could not be read\|issue is unknown' <<<"$dl_out"; then
   ok "'notissue=4242' does NOT supply the legacy issue — should-reap KEEPS (rc=1) rather than reaping"
 else
   bad "a decoy issue key must not reach a reap verdict: rc=$dl_rc out:
@@ -2797,10 +2797,10 @@ fi
 craft_decoy_msg "decoyBox" "7201" "claim issue=7201 machine=decoyBox pid=${decoy_pid} ts=2026-08-29T00:00:00Z"
 rk_out=$(cd "$WORK" && HEARTBEAT_MACHINE=decoyBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
-if printf '%s\n' "$rk_out" | grep -qE "^decoyBox +7201 +${decoy_pid}"; then
+if grep -qE "^decoyBox +7201 +${decoy_pid}" <<<"$rk_out"; then
   ok "NON-VACUITY: the REAL pid key on the same shape IS read and reported, so the decoy refusals are decisions"
 else
-  bad "NON-VACUITY broken: a real pid key was not read either: $(printf '%s\n' "$rk_out" | grep decoyBox)"
+  bad "NON-VACUITY broken: a real pid key was not read either: $(grep decoyBox <<<"$rk_out")"
 fi
 (cd "$WORK" && g push -q origin ":refs/lane-claims/decoyBox/7201" 2>/dev/null || true)
 
@@ -2827,7 +2827,7 @@ echo "TEST 78: should-reap must PROVE a local pid gone — EPERM and no-pid are 
 np_out=$(cd "$WORK" && HEARTBEAT_MACHINE=localNoPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" should-reap localNoPid 7300 1 2>&1)
 np_rc=$?
-if [ "$np_rc" -eq 1 ] && printf '%s\n' "$np_out" | grep -qi 'no usable pid'; then
+if [ "$np_rc" -eq 1 ] && grep -qi 'no usable pid' <<<"$np_out"; then
   ok "a LOCAL claim with no usable pid is KEPT (rc=1) — the unsatisfiable clause fails the predicate"
 else
   bad "a local claim with no pid must not be reaped: rc=$np_rc out:
@@ -2874,7 +2874,7 @@ else
   ep_out=$(cd "$WORK" && HEARTBEAT_MACHINE=epermBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
     bash "$HB" should-reap epermBox 7301 1 2>&1)
   ep_rc=$?
-  if [ "$ep_rc" -eq 1 ] && ! printf '%s\n' "$ep_out" | grep -qi 'CONFIRMED absent'; then
+  if [ "$ep_rc" -eq 1 ] && ! grep -qi 'CONFIRMED absent' <<<"$ep_out"; then
     ok "a pid we cannot signal (EPERM) is KEPT (rc=1) — 'not permitted' means the process EXISTS, never that it is gone"
   else
     bad "EPERM must not be read as dead: rc=$ep_rc out:
@@ -2990,7 +2990,7 @@ else
   z_rc=0
   z_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
     bash "$HB" should-reap zBox 7401 1 2>&1) || z_rc=$?
-  if [ "$z_rc" -eq 0 ] && printf '%s\n' "$z_out" | grep -qi 'zombie'; then
+  if [ "$z_rc" -eq 0 ] && grep -qi 'zombie' <<<"$z_out"; then
     ok "a ZOMBIE local pid is REAPED (rc=0) and the verdict names the zombie state"
   else
     bad "a zombie local pid must be reaped: rc=$z_rc out:
@@ -3012,7 +3012,7 @@ $z_out"
   l_rc=0
   l_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
     bash "$HB" should-reap zBox 7402 1 2>&1) || l_rc=$?
-  if [ "$l_rc" -eq 1 ] && printf '%s\n' "$l_out" | grep -qi 'still alive'; then
+  if [ "$l_rc" -eq 1 ] && grep -qi 'still alive' <<<"$l_out"; then
     ok "NON-VACUITY: a LIVE local pid is still KEPT (rc=1) — so the zombie reap is about the STATE, not about reaping every local claim"
   else
     bad "NON-VACUITY broken: a live local pid gave rc=$l_rc out:
@@ -3062,7 +3062,7 @@ for hb81_kind in fifo directory dangling-symlink symlink-to-device; do
     bad "TEST 81/$hb81_kind: the run HUNG (timeout 10 -> rc 124) — the \`source\` guard let a non-regular library be opened. Output: $HB81_OUT"
   elif [ "$HB81_RC" -eq 0 ]; then
     bad "TEST 81/$hb81_kind: the run SUCCEEDED (rc=0) with a $hb81_kind at lib/process-liveness.sh — the library was not required to be a regular file"
-  elif printf '%s\n' "$HB81_OUT" | grep -q 'process-liveness.sh as a regular file'; then
+  elif grep -q 'process-liveness.sh as a regular file' <<<"$HB81_OUT"; then
     ok "TEST 81/$hb81_kind: refused (rc=$HB81_RC, not 124) with a diagnostic naming the library and the regular-file requirement"
   else
     bad "TEST 81/$hb81_kind: rc=$HB81_RC but the diagnostic does not name the regular-file requirement. Output: $HB81_OUT"
