@@ -1963,10 +1963,14 @@ fi
 # every git call inside the capture helpers. Comment lines are stripped first so prose
 # ABOUT the rule cannot satisfy (or trip) the check.
 code_only() { sed 's/[[:space:]]*#.*$//'; }
-if grep 'hash-object' "$GATE" | code_only | grep -qE '(^|[[:space:]])-w([[:space:]]|$)'; then
+# SCOPED to the tree-capture helpers (`_tree_*` functions), the code this property is about. The
+# component-set pre-flight's `_component_set_vsnap` (#4413 job 103) writes with `hash-object -w`
+# on purpose, into a THROWAWAY store addressed by --git-dir, never the shared ODB.
+tree_fns=$(awk '/^_tree_[A-Za-z0-9_]*\(\) \{/{f=1} f{print} /^\}/{f=0}' "$GATE")
+if grep 'hash-object' <<<"$tree_fns" | code_only | grep -qE '(^|[[:space:]])-w([[:space:]]|$)'; then
   bad "SIDE-EFFECTS: a hash-object call uses -w — the capture would write to the shared ODB"
 else
-  ok "SIDE-EFFECTS: no hash-object call uses -w (nothing is written to the object database)"
+  ok "SIDE-EFFECTS: no hash-object call in the _tree_* capture helpers uses -w (nothing is written to the object database)"
 fi
 bare=$(awk '/^_tree_identity\(\) \{/,/^\}/' "$GATE" | code_only | grep -c 'git ' | tr -d ' ')
 locked=$(awk '/^_tree_identity\(\) \{/,/^\}/' "$GATE" | code_only | grep -c 'git --no-optional-locks' | tr -d ' ')

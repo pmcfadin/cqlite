@@ -5039,6 +5039,26 @@ _component_set_vhash() {
   _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" hash-object --literally -t "$1" "$2" >"$3" 2>/dev/null
 }
 
+# _component_set_vsnap <type> <id> <file> <store>: write the VERIFIED bytes of <file> into the
+# throwaway object store <store> and check that the id git assigns them is <id>. Everything that
+# later needs to READ that object (ls-tree) reads it from <store>, never from the lane's shared
+# store again: re-reading the shared copy after it was hashed is a time-of-check/time-of-use gap
+# (a swap between the hash and the read would steer the traversal; #4413 job 103). The file is
+# passed by PATH, not stdin, because the bounded runner's bash-watchdog arm runs the command in
+# the background where stdin is /dev/null.
+_component_set_vsnap() {
+  local type="$1" id="$2" file="$3" store="$4" tmpd got="" rc
+  tmpd="${file%/*}"
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --git-dir="$store" hash-object -w --literally -t "$type" "$file" >"$tmpd/v.snap" 2>/dev/null; rc=$?
+  if [ "$rc" -eq 0 ]; then read -r got <"$tmpd/v.snap" || got=""; fi
+  if [ "$rc" -ne 0 ] || [ "$got" != "$id" ]; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not snapshot the verified $type $id into the isolated store to read it from there (rc $rc, got '$got') — the shared store is never re-read after hashing"
+    return 1
+  fi
+  return 0
+}
+
 # _component_set_verify_bytes <type> <id> <file> <tmpd> <what>: rc 0 iff <file>'s bytes hash to <id>.
 _component_set_verify_bytes() {
   local type="$1" id="$2" file="$3" tmpd="$4" what="$5" got="" rc
@@ -5082,7 +5102,7 @@ _component_set_verify_object() {
 # contradicts the caller's premise is `corrupt`: two views of one object cannot both be right.
 _component_set_verify_path() {
   local rev="$1" rel="$2" consumed="$3" tmpd="$4"
-  local id tree comp rest mode type oid name
+  local id tree comp rest mode type oid name _vs
   _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-parse --verify --quiet "$rev^{commit}" >"$tmpd/v.rev" 2>/dev/null
   id=""; read -r id <"$tmpd/v.rev" || id=""
   if [ -z "$id" ]; then
@@ -5093,10 +5113,27 @@ _component_set_verify_path() {
   _component_set_verify_object commit "$id" "$tmpd" "commit $rev" || return 1
   tree=$(sed -n '1s/^tree //p' "$tmpd/v.obj" 2>/dev/null)
   _component_set_verify_object tree "$tree" "$tmpd" "root tree of $rev" || return 1
+  # THE TRAVERSAL READS ONLY VERIFIED BYTES (#4413 job 103). Each tree is snapshotted into this
+  # throwaway store straight from the bytes that were just hashed, and `ls-tree` runs against the
+  # store. READ AUDIT of this function, every read of the shared store and what it feeds:
+  #   rev-parse <rev>^{commit}  -> resolves a NAME to an id; the id is then hashed, so it is the
+  #                                 claim being checked and no content comes from it
+  #   cat-file commit <id>      -> v.obj; hashed from that same file, parent/tree lines parsed
+  #                                 from that same file (no second read)
+  #   cat-file tree <id>        -> v.obj; hashed from that same file, snapshotted from it
+  #   ls-tree                   -> against the throwaway store only, NEVER the shared one
+  #   the consumed blob         -> the file `git show` produced; hashed from that same file
+  _vs="$tmpd/vs"
+  if ! _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git init --bare -q "$_vs" >/dev/null 2>&1; then
+    _CS_VERR_KIND=unverified
+    _CS_VERR_DETAIL="could not create the isolated store the verified trees are read from"
+    return 1
+  fi
+  _component_set_vsnap tree "$tree" "$tmpd/v.obj" "$_vs" || return 1
   rest="$rel"
   while :; do
     comp="${rest%%/*}"
-    _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" ls-tree "$tree" "$comp" >"$tmpd/v.ls" 2>/dev/null
+    _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --git-dir="$_vs" ls-tree "$tree" "$comp" >"$tmpd/v.ls" 2>/dev/null
     if [ "$?" -ne 0 ]; then
       _CS_VERR_KIND=unverified
       _CS_VERR_DETAIL="could not list the verified tree $tree of $rev for '$comp' (path $rel)"
@@ -5122,6 +5159,7 @@ _component_set_verify_path() {
     fi
     [ "$type" = tree ] || { _CS_VERR_KIND=corrupt; _CS_VERR_DETAIL="$comp on the path $rel at $rev is a '$type' in the verified tree, not a directory"; return 1; }
     _component_set_verify_object tree "$oid" "$tmpd" "tree $comp/ of $rev" || return 1
+    _component_set_vsnap tree "$oid" "$tmpd/v.obj" "$_vs" || return 1
     tree="$oid"
     rest="${rest#*/}"
   done

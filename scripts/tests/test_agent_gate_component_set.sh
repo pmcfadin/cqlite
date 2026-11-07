@@ -780,6 +780,86 @@ else
   printf '%s\n' "$ob_unv"
 fi
 
+# 3a-iv-septies. THE TRAVERSAL READS ONLY VERIFIED BYTES (#4413 roborev job 103). Hashing a tree and
+#     then letting `git ls-tree` RE-READ it from the shared store is a time-of-check/time-of-use gap.
+#     STAGED HERMETICALLY with a git shim: right after the pre-flight hashes the `scripts/` tree, the
+#     shim swaps the shared-store copy of that tree for a TAMPERED one (same id, the manifest entry
+#     pointing at a different blob), and puts the original back at the next hash of a blob. Code that
+#     re-reads the tree in that window follows the tampered entry and refuses (object-store-corrupt);
+#     code that walks the snapshot of the verified bytes never sees it and PASSes. The marker file
+#     proves the swap really happened, and the structural assertions below prove no read in the
+#     function targets the shared store after hashing.
+base_tt=$(mkbaseline toctou - )
+br_tt=$(mkbranch toctou "$base_tt" - --from-origin )
+tt_scripts=$( fx "$br_tt" && git rev-parse "origin/main:scripts" 2>/dev/null )
+tt_path="$br_tt/.git/objects/${tt_scripts:0:2}/${tt_scripts:2}"
+if ! command -v python3 >/dev/null 2>&1; then
+  ok "3544-toctou-verified-bytes: SKIP (no python3 to build the tampered tree)"
+elif [ -z "$tt_scripts" ] || [ ! -f "$tt_path" ]; then
+  bad "3544-toctou-verified-bytes: the scripts/ tree '$tt_scripts' is not a loose object at '$tt_path' (the fixture shape changed)"
+else
+  ( fx "$br_tt" && git cat-file tree "$tt_scripts" ) >"$tmp/tt-orig-tree" 2>/dev/null
+  cp "$tt_path" "$tmp/tt-orig-loose"
+  python3 - "$tmp/tt-orig-tree" "$tmp/tt-tampered-loose" <<'PYEOF'
+import sys, zlib
+tree = open(sys.argv[1], "rb").read()
+needle = b" agent-gate.components\0"
+i = tree.index(needle) + len(needle)
+tampered = tree[:i] + bytes(20 * [0xAB]) + tree[i + 20:]
+open(sys.argv[2], "wb").write(zlib.compress(b"tree %d\0" % len(tampered) + tampered))
+PYEOF
+  tt_bin="$tmp/toctou-gitbin"; mkdir -p "$tt_bin"
+  real_git=$(command -v git)
+  {
+    printf '#!/bin/sh\nREAL=%s\n' "$real_git"
+    printf 'OBJ=%s\nORIG=%s\nTAMP=%s\nMARK=%s\nTREEF=%s\n' "$tt_path" "$tmp/tt-orig-loose" "$tmp/tt-tampered-loose" "$tmp/tt-swapped" "$tmp/tt-orig-tree"
+    cat <<'SHIM'
+case " $* " in
+  *" hash-object "*)
+    case " $* " in *" -w "*) exec "$REAL" "$@" ;; esac
+    for last in "$@"; do :; done
+    "$REAL" "$@"; rc=$?
+    if [ ! -e "$MARK" ] && cmp -s "$last" "$TREEF"; then
+      rm -f "$OBJ"; cp "$TAMP" "$OBJ"; chmod 444 "$OBJ"; : >"$MARK"
+    elif [ -e "$MARK" ] && [ ! -e "$MARK.restored" ]; then
+      case " $* " in *" -t blob "*) rm -f "$OBJ"; cp "$ORIG" "$OBJ"; chmod 444 "$OBJ"; : >"$MARK.restored" ;; esac
+    fi
+    exit $rc ;;
+esac
+exec "$REAL" "$@"
+SHIM
+  } >"$tt_bin/git"
+  chmod +x "$tt_bin/git"
+  tt_out=$( fx "$br_tt" && PATH="$tt_bin:$PATH" bash "$br_tt/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+  tt_ctl=$(hook "$nofb")
+  if [ ! -e "$tmp/tt-swapped" ]; then
+    bad "3544-toctou-verified-bytes: the shim never swapped the shared-store tree, so the case staged nothing (kind '$(field KIND "$tt_out")')"
+  elif [ "$(field KIND "$tt_ctl")" != ok ]; then
+    bad "3544-toctou-verified-bytes: the positive control did not reach KIND ok"
+  elif [ "$(field VERDICT "$tt_out")" = PASS ] && [ "$(field KIND "$tt_out")" = ok ]; then
+    ok "3544-toctou-verified-bytes: with the shared-store tree SWAPPED between its hash and the traversal, the verdict still comes from the verified bytes (PASS) — the swap is proven by the marker"
+  elif [ "$(field KIND "$tt_out")" = object-store-corrupt ] || [ "$(field KIND "$tt_out")" = object-store-unverified ]; then
+    ok "3544-toctou-verified-bytes: with the shared-store tree SWAPPED between its hash and the traversal, the pre-flight refuses by name ($(field KIND "$tt_out")) instead of following the tampered entry"
+  else
+    bad "3544-toctou-verified-bytes: unexpected outcome verdict '$(field VERDICT "$tt_out")' kind '$(field KIND "$tt_out")'"
+  fi
+fi
+
+# 3a-iv-septies-b. STRUCTURAL: inside `_component_set_verify_path`, nothing reads a tree through the
+#     shared store. Every `ls-tree` runs against the throwaway store (`--git-dir="$_vs"`), and the
+#     only `cat-file` in the verification code is the one helper whose output is hashed from the same
+#     file. A new read added later that targets `$_CS_READ_DIR` inside the function fails here.
+vp_body=$(awk '/^_component_set_verify_path\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$GATE" | grep -v '^ *#')
+vp_ls=$(grep -c 'ls-tree' <<<"$vp_body")
+vp_ls_iso=$(grep 'ls-tree' <<<"$vp_body" | grep -c -- '--git-dir="\$_vs"')
+vp_readdir=$(grep -c -- '-C "\$_CS_READ_DIR" \(ls-tree\|cat-file\|show\)' <<<"$vp_body" || true)
+if [ -n "$vp_body" ] && [ "$vp_ls" -ge 1 ] && [ "$vp_ls" -eq "$vp_ls_iso" ] && [ "$vp_readdir" -eq 0 ] \
+   && ! grep -q 'ls-tree.*_CS_READ_DIR' <<<"$vp_body"; then
+  ok "3544-toctou-structural: every ls-tree in _component_set_verify_path ($vp_ls) runs against the throwaway store and none targets the shared --git-dir"
+else
+  bad "3544-toctou-structural: _component_set_verify_path reads through the shared store after hashing (ls-tree $vp_ls, isolated $vp_ls_iso, shared-dir reads $vp_readdir)"
+fi
+
 # ---------------------------------------------------------------------------
 # 3a-iv-bis. A BLOCKING CONFIG INCLUDE MUST REFUSE, NOT HANG (roborev job 312, Medium). Four
 #     live-repository probes carried a `# local-only:` annotation justified against the NETWORK
