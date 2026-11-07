@@ -74,7 +74,15 @@ unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 libexec=${XDG_DATA_HOME:-$HOME/.local/share}/cqlite
 
 if [ "$action" = uninstall ]; then
-  "$SYSTEMCTL" --user disable --now "$UNIT.timer" >/dev/null 2>&1 || true
+  # Never remove the units while the timer may still be loaded: the stop must
+  # succeed, or `is-active` must positively report inactive.
+  if ! "$SYSTEMCTL" --user disable --now "$UNIT.timer" >/dev/null 2>&1; then
+    state=$("$SYSTEMCTL" --user is-active "$UNIT.timer" 2>/dev/null || true)
+    if [ "$state" != inactive ]; then
+      echo "PRUNE: could not stop $UNIT.timer (disable --now failed, is-active=${state:-unknown}); unit files kept"
+      result ERROR; exit 1
+    fi
+  fi
   rm -f "$unit_dir/$UNIT.service" "$unit_dir/$UNIT.timer"
   "$SYSTEMCTL" --user daemon-reload
   result UNINSTALLED
@@ -172,10 +180,18 @@ fi
 
 # ---- busy check ----------------------------------------------------------------
 busy=""
+# Fail closed: only pgrep exit 1 means "no match". Any other status (2+, 127 for
+# a missing command) or a failing list-units means we could not establish idle.
 for p in cargo rustc cargo-nextest; do
-  if "$PGREP" -u "$(id -u)" -x "$p" >/dev/null 2>&1; then busy="$busy process:$p"; fi
+  prc=0; "$PGREP" -u "$(id -u)" -x "$p" >/dev/null 2>&1 || prc=$?
+  case $prc in
+    0) busy="$busy process:$p" ;;
+    1) ;;
+    *) busy="$busy probe-error:pgrep(rc=$prc)"; break ;;
+  esac
 done
-units=$("$SYSTEMCTL" --user list-units --state=active --no-legend --plain 'cqlite-gate-*' 2>/dev/null || true)
+if units=$("$SYSTEMCTL" --user list-units --state=active --no-legend --plain 'cqlite-gate-*' 2>/dev/null); then :
+else busy="$busy probe-error:systemctl-list-units(rc=$?)"; units=""; fi
 if [ -n "$units" ]; then busy="$busy unit:$(awk '{print $1; exit}' <<<"$units")"; fi
 
 profiles=()
