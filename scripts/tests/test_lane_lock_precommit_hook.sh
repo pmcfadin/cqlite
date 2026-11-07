@@ -55,10 +55,10 @@ ISSUE2=$(( ${ISSUE} + 1 ))   # a DISTINCT issue for the second-layout fixture (T
 dirmutex_rm() {
   local canon="$1" key sum tail_
   [ -n "$canon" ] || return 0
-  key="$(printf '%s' "$canon" | tr '/' '_')"
+  key="$(tr '/' '_' <<<"$canon")"
   rm -f "$LANEROOT/.lane-locks/dir-${key}.flock"
-  sum="$(printf '%s' "$canon" | cksum | awk '{print $1}')"
-  tail_="$(printf '%s' "$key" | tail -c 180)"
+  sum="$(cksum < <(printf '%s' "$canon"))"; sum="${sum%% *}"
+  tail_="$(tail -c 180 < <(printf '%s' "$key"))"
   rm -f "$LANEROOT/.lane-locks/dir-x${sum}-${tail_}.flock"
 }
 cleanup() {
@@ -101,13 +101,13 @@ LANE_LOCK_PID=$PEER bash "$REPO/scripts/flow/lane-lock.sh" acquire "$ISSUE" --la
 before="$( git rev-list --count HEAD 2>/dev/null || echo 0 )"
 out1="$(commit_try peer)"; rc1=$?
 after="$( git rev-list --count HEAD 2>/dev/null || echo 0 )"
-if [ "$rc1" -ne 0 ] && printf '%s' "$out1" | grep -q 'REFUSED' && [ "$before" = "$after" ]; then
+if [ "$rc1" -ne 0 ] && grep -q 'REFUSED' <<<"$out1" && [ "$before" = "$after" ]; then
   ok "a second entrant is REFUSED and NO commit was created (the #3436 incident, prevented)"
 else
   bad "the peer-held lane accepted a commit: rc=$rc1 before=$before after=$after
 $out1"
 fi
-if printf '%s' "$out1" | grep -q "holder pid: $PEER"; then
+if grep -q "holder pid: $PEER" <<<"$out1"; then
   ok "the refusal NAMES the occupying pid, so the operator can find that session"
 else
   bad "the refusal did not name the holder pid ($PEER):
@@ -132,9 +132,9 @@ fi
 # hook cannot CLOSE that (the refusing form bricks the lane — lane-lock.sh:648), so it must
 # DECLARE it. Assert the CONTENT, not merely that something was printed: a bare "did it warn"
 # passes for any unrelated warning the hook might emit, which is membership, not detection.
-if printf '%s' "$out2" | grep -q 'DECLARED GAP 1 RECOGNISED' &&
-   printf '%s' "$out2" | grep -q 'COMMIT time' &&
-   printf '%s' "$out2" | grep -q 'UNLOCKED window'; then
+if grep -q 'DECLARED GAP 1 RECOGNISED' <<<"$out2" &&
+   grep -q 'COMMIT time' <<<"$out2" &&
+   grep -q 'UNLOCKED window' <<<"$out2"; then
   ok "a commit-time acquisition DECLARES the unlocked-window gap it cannot close"
 else
   bad "a commit-time acquisition did not declare the unlocked window (job 450 finding 1):
@@ -163,7 +163,7 @@ OUT="$T/notalane"; mkdir -p "$OUT"
 mkdir -p "$OUT/.git/hooks"; cp "$HOOK" "$OUT/.git/hooks/pre-commit"; chmod +x "$OUT/.git/hooks/pre-commit"
 out4="$( cd "$OUT" && echo x > a.txt && git add a.txt && git commit -q -m outside 2>&1 )"; rc4=$?
 cd "$LANE" || true
-if [ "$rc4" -eq 0 ] && [ -z "$(printf '%s' "$out4" | grep -c 'lane-lock' | grep -v '^0$')" ]; then
+if [ "$rc4" -eq 0 ] && [ -z "$(grep -c 'lane-lock' <<<"$out4" | grep -v '^0$')" ]; then
   ok "outside /data/lanes/lane-<N> the hook is silent and does not interfere"
 else
   bad "the hook acted outside a lane (would break the root checkout / telemetry worktrees): rc=$rc4
@@ -199,7 +199,7 @@ fi
 # lane WAS locked and its owner is known — there was no unlocked window, and declaring one here
 # would be affirmatively false. This case is what makes the TEST 2 assertion a measurement of
 # the NO-RECORD path rather than of "the hook prints it unconditionally".
-if printf '%s' "$out5" | grep -q 'DECLARED GAP'; then
+if grep -q 'DECLARED GAP' <<<"$out5"; then
   bad "a DEAD-holder reclaim falsely declared an unlocked window (that lane was locked):
 $out5"
 else
@@ -247,7 +247,7 @@ LANE_LOCK_PID=$PEER2 bash "$REPO/scripts/flow/lane-lock.sh" acquire "$ISSUE2" --
 before2="$( git -C "$WT2" rev-list --count HEAD 2>/dev/null || echo 0 )"
 out7="$( cd "$WT2" && printf 'x-%s\n' "$RANDOM" > f.txt && git add f.txt && git commit -q -m layout2 2>&1 )"; rc7=$?
 after2="$( git -C "$WT2" rev-list --count HEAD 2>/dev/null || echo 0 )"
-if [ "$rc7" -ne 0 ] && printf '%s' "$out7" | grep -q 'REFUSED' && [ "$before2" = "$after2" ]; then
+if [ "$rc7" -ne 0 ] && grep -q 'REFUSED' <<<"$out7" && [ "$before2" = "$after2" ]; then
   ok "a peer-held .claude/worktrees lane REFUSES the commit — the second layout is policed"
 else
   bad "the .claude/worktrees layout was NOT policed: rc=$rc7 before=$before2 after=$after2
@@ -271,7 +271,7 @@ WT3="$T/root/.claude/worktrees/issue-notanumber-slug"
 mkdir -p "$WT3"; ( cd "$WT3" && git init -q . && git config user.email t@t && git config user.name t )
 mkdir -p "$WT3/.git/hooks"; cp "$HOOK" "$WT3/.git/hooks/pre-commit"; chmod +x "$WT3/.git/hooks/pre-commit"
 out7c="$( cd "$WT3" && echo z > a.txt && git add a.txt && git commit -q -m nonnum 2>&1 )"; rc7c=$?
-if [ "$rc7c" -eq 0 ] && ! printf '%s' "$out7c" | grep -q 'lane-lock'; then
+if [ "$rc7c" -eq 0 ] && ! grep -q 'lane-lock' <<<"$out7c"; then
   ok "CONTROL: issue-<non-numeric> in that layout is silent and unpoliced"
 else
   bad "the hook acted on a non-numeric issue in the .claude/worktrees layout: rc=$rc7c

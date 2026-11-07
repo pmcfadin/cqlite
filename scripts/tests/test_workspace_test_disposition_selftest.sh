@@ -93,7 +93,7 @@ expect() {
   fi
   # ATTRIBUTED, not merely red: a red for an unrelated reason has the same exit code, so
   # the message must NAME the planted condition.
-  if printf '%s' "$GUARD_OUT" | grep -qF "$needle"; then
+  if grep -qF "$needle" <<<"$GUARD_OUT"; then
     pass_case "$case_name — guard FAILED and named the cause ('$needle')"
   else
     fail_case "$case_name — guard failed (exit $rc) but never named '$needle', so the red cannot be shown to be this case's: $GUARD_OUT"
@@ -148,7 +148,7 @@ if [ "$_rc" -eq 0 ]; then
 else
   _miss=""
   for _c in gamma delta; do
-    printf '%s' "$GUARD_OUT" | grep -qF "$_c" || _miss="$_miss $_c"
+    grep -qF "$_c" <<<"$GUARD_OUT" || _miss="$_miss $_c"
   done
   if [ -z "$_miss" ]; then
     pass_case "two unrecorded members — guard FAILED and named BOTH (gamma, delta)"

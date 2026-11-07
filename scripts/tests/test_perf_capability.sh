@@ -140,10 +140,10 @@ fi
 #      printed remedy (`--drop-in | sudo tee …`) is what produces them — so a
 #      hand-applied fix is byte-identical and the next bootstrap run is a no-op.
 dropin=$(bash "$PERFLIB" --drop-in)
-if printf '%s\n' "$dropin" | grep -q '^kernel.perf_event_paranoid = -1$' \
-   && printf '%s\n' "$dropin" | grep -q '^kernel.kptr_restrict = 0$' \
-   && printf '%s\n' "$dropin" | grep -qi 'cumulative' \
-   && printf '%s\n' "$dropin" | grep -qi 'multi-tenant'; then
+if grep -q '^kernel.perf_event_paranoid = -1$' <<<"$dropin" \
+   && grep -q '^kernel.kptr_restrict = 0$' <<<"$dropin" \
+   && grep -qi 'cumulative' <<<"$dropin" \
+   && grep -qi 'multi-tenant' <<<"$dropin"; then
   ok "perf-capability: drop-in sets both controls and states the rationale + posture"
 else
   bad "perf-capability: drop-in content is missing a control, the rationale or the posture"
@@ -189,7 +189,7 @@ else
 fi
 guard_out=$(env -u CQLITE_PERF_TEST_MODE CQLITE_PERF_SYSCTL_DIR="$tmp/evil-sysctl.d" \
   bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); guard_rc=$?
-if [ "$guard_rc" -ne 0 ] && printf '%s' "$guard_out" | grep -qi 'REFUSING'; then
+if [ "$guard_rc" -ne 0 ] && grep -qi 'REFUSING' <<<"$guard_out"; then
   ok "perf-capability: env guard REFUSES loudly when a seam is set without the marker"
 else
   bad "perf-capability: env guard allowed a marker-less seam (rc=$guard_rc, out='$guard_out')"
@@ -207,7 +207,7 @@ seamed_d="$tmp/seamed-sysctl.d"; mkdir -p "$seamed_d"
 guard2_out=$(PATH="$realpriv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$tmp/some-other-dir" \
   CQLITE_PERF_PROC_DIR="$seamed_proc" CQLITE_PERF_SYSCTL_DIR="$seamed_d" \
   bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); guard2_rc=$?
-if [ "$guard2_rc" -ne 0 ] && printf '%s' "$guard2_out" | grep -q 'outside the declared shim dir'; then
+if [ "$guard2_rc" -ne 0 ] && grep -q 'outside the declared shim dir' <<<"$guard2_out"; then
   ok "perf-capability: test mode REFUSES when sudo resolves outside the declared shim dir"
 else
   bad "perf-capability: test mode accepted an undeclared sudo (rc=$guard2_rc, out='$guard2_out')"
@@ -217,7 +217,7 @@ fi
 guard3_out=$(PATH="$realpriv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$tmp/only-sudo-here" \
   CQLITE_PERF_PROC_DIR="$seamed_proc" CQLITE_PERF_SYSCTL_DIR="$seamed_d" \
   bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1)
-if printf '%s' "$guard3_out" | grep -q 'sysctl resolves to\|sudo resolves to'; then
+if grep -q 'sysctl resolves to\|sudo resolves to' <<<"$guard3_out"; then
   ok "perf-capability: test mode guards BOTH sudo and sysctl against a real binary"
 else
   bad "perf-capability: test mode did not name the offending privileged tool: '$guard3_out'"
@@ -240,9 +240,9 @@ fi
 noseam_out=$(env -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR CQLITE_PERF_TEST_MODE=1 \
   bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); noseam_rc=$?
 if [ "$noseam_rc" -ne 0 ] \
-   && printf '%s' "$noseam_out" | grep -q 'requires CQLITE_PERF_PROC_DIR INSIDE the declared sandbox' \
-   && printf '%s' "$noseam_out" | grep -q 'requires CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' \
-   && printf '%s' "$noseam_out" | grep -q 'NEVER falls back'; then
+   && grep -q 'requires CQLITE_PERF_PROC_DIR INSIDE the declared sandbox' <<<"$noseam_out" \
+   && grep -q 'requires CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' <<<"$noseam_out" \
+   && grep -q 'NEVER falls back' <<<"$noseam_out"; then
   ok "perf-capability: test mode with NO path seams REFUSES loudly and names BOTH missing sandbox dirs"
 else
   bad "perf-capability: test mode without seams was allowed to act (rc=$noseam_rc, out='$noseam_out')"
@@ -257,7 +257,7 @@ guard_rejects_seam() { # guard_rejects_seam <which:PROC|SYSCTL> <proc-seam> <sys
   out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$realpriv" \
           CQLITE_PERF_PROC_DIR="$2" CQLITE_PERF_SYSCTL_DIR="$3" \
           bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1) && return 1
-  printf '%s' "$out" | grep -q "CQLITE_PERF_${1}_DIR INSIDE the declared sandbox"
+  grep -q "CQLITE_PERF_${1}_DIR INSIDE the declared sandbox" <<<"$out"
 }
 for badseam in /etc/sysctl.d /etc/sysctl.d/sub /etc /proc /proc/sys/kernel /sys relative/dir ''; do
   guard_rejects_seam SYSCTL "$seamed_proc" "$badseam" || {
@@ -312,13 +312,13 @@ bnd_fail=0
 guard_with_root "$sbx" "$sbx/inside-proc" "$sbx/inside" >/dev/null 2>&1 \
   || { bad "perf-capability: a seam genuinely INSIDE the declared sandbox was refused (the guard is vacuous)"; bnd_fail=1; }
 bnd_out=$(guard_with_root "$sbx" "$sbx/inside-proc" "${sbx}evil") && bnd_fail=1
-printf '%s' "$bnd_out" | grep -q 'CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' || bnd_fail=1
+grep -q 'CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' <<<"$bnd_out" || bnd_fail=1
 [ "$bnd_fail" -eq 0 ] || bad "perf-capability: '${sbx}evil' was treated as inside '$sbx' (prefix match without a / boundary), or a contained seam was refused"
 [ "$bnd_fail" -ne 0 ] || ok "perf-capability: containment is boundary-exact — a seam inside the declared sandbox is ACCEPTED while the sibling '<root>evil' is REFUSED by name"
 root_fail=0
 for badroot in '' relative/sandbox "//$tmp" "$tmp/no-such-root" "$nostamp"; do
   ro=$(guard_with_root "$badroot" "$sbx/inside-proc" "$sbx/inside") && root_fail=1
-  printf '%s' "$ro" | grep -q 'requires CQLITE_PERF_TEST_SANDBOX' || root_fail=1
+  grep -q 'requires CQLITE_PERF_TEST_SANDBOX' <<<"$ro" || root_fail=1
   [ "$root_fail" -eq 0 ] || { bad "perf-capability: sandbox root '$badroot' was accepted (or refused without naming CQLITE_PERF_TEST_SANDBOX)"; break; }
 done
 [ "$root_fail" -ne 0 ] || ok "perf-capability: the sandbox ROOT must prove itself — unset/relative/'//'-spelled/absent/UNSTAMPED are refusals naming CQLITE_PERF_TEST_SANDBOX (so a stray CQLITE_PERF_TEST_SANDBOX=/etc cannot make containment vacuous)"
@@ -403,7 +403,7 @@ fi
 # ...while a hybrid box where NO PMU counted is still a failure, not a pass.
 hybrid3_v=$(mkperfshim_raw 0 '<not supported>,,cpu_atom/cycles/,0,100.00,,' '<not counted>,,cpu_core/cycles/,0,100.00,,'
   PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1); hybrid3_rc=$?
-if [ "$hybrid3_rc" -ne 0 ] && printf '%s' "$hybrid3_v" | grep -q 'counter-not-supported'; then
+if [ "$hybrid3_rc" -ne 0 ] && grep -q 'counter-not-supported' <<<"$hybrid3_v"; then
   ok "perf-capability: a hybrid box where NO PMU counted still FAILS (counter-not-supported)"
 else
   bad "perf-capability: an all-unsupported hybrid collection was accepted (rc=$hybrid3_rc, '$hybrid3_v')"
@@ -416,8 +416,8 @@ fi
 mkperfshim_raw 1 'Error:' 'Access to performance monitoring and observability operations is limited.' \
   'Consider adjusting /proc/sys/kernel/perf_event_paranoid setting to open' >/dev/null
 denied_v=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1); denied_rc=$?
-if [ "$denied_rc" -ne 0 ] && printf '%s' "$denied_v" | grep -q '^perf-stat-failed rc=1' \
-   && printf '%s' "$denied_v" | grep -qi 'observability operations is limited'; then
+if [ "$denied_rc" -ne 0 ] && grep -q '^perf-stat-failed rc=1' <<<"$denied_v" \
+   && grep -qi 'observability operations is limited' <<<"$denied_v"; then
   ok "perf-capability: a DENIED perf (non-zero exit, 'access limited') fails with perf-stat-failed rc=1 + the text"
 else
   bad "perf-capability: a non-zero perf exit was not surfaced (rc=$denied_rc, '$denied_v')"
@@ -425,7 +425,7 @@ fi
 # 1d-iii. rc 0 with NO output at all: a masked/absent PMU. Must be no-cycles-row, not
 #         a pass (that branch was equally untested).
 empty_v=$(mkperfshim_raw 0 >/dev/null; PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1); empty_rc=$?
-if [ "$empty_rc" -ne 0 ] && printf '%s' "$empty_v" | grep -q 'no-cycles-row'; then
+if [ "$empty_rc" -ne 0 ] && grep -q 'no-cycles-row' <<<"$empty_v"; then
   ok "perf-capability: rc-0 perf with EMPTY output fails with no-cycles-row"
 else
   bad "perf-capability: rc-0 perf with empty output was accepted (rc=$empty_rc, '$empty_v')"
@@ -436,7 +436,7 @@ fi
 mkperfshim 99999999999999999999999
 big_out=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>/dev/null); big_rc=$?
 big_err=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1 >/dev/null)
-if [ "$big_rc" -ne 0 ] && printf '%s' "$big_out" | grep -q 'unparseable-count=' && [ -z "$big_err" ]; then
+if [ "$big_rc" -ne 0 ] && grep -q 'unparseable-count=' <<<"$big_out" && [ -z "$big_err" ]; then
   ok "perf-capability: an oversized cycle count fails CLOSED as unparseable-count, with no stderr leak"
 else
   bad "perf-capability: oversized count mishandled (rc=$big_rc, out='$big_out', err='$big_err')"
@@ -444,7 +444,7 @@ fi
 mkperfshim '12x'
 mal_out=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>/dev/null); mal_rc=$?
 mal_err=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1 >/dev/null)
-if [ "$mal_rc" -ne 0 ] && printf '%s' "$mal_out" | grep -q 'unparseable-count=12x' && [ -z "$mal_err" ]; then
+if [ "$mal_rc" -ne 0 ] && grep -q 'unparseable-count=12x' <<<"$mal_out" && [ -z "$mal_err" ]; then
   ok "perf-capability: a malformed cycle count fails CLOSED as unparseable-count, with no stderr leak"
 else
   bad "perf-capability: malformed count mishandled (rc=$mal_rc, out='$mal_out', err='$mal_err')"
@@ -518,9 +518,9 @@ fi
 #         "10-…". A future tidy-up to `cqlite-perf.conf` would silently hand kptr_restrict
 #         back to the hardening drop-in at the next boot — the "silent revert" three
 #         measurement reports recorded without ever naming a cause.
-if printf '%s\n' "$dropin" | grep -q '99-' \
-   && printf '%s\n' "$dropin" | grep -qi 'DO NOT RENAME' \
-   && printf '%s\n' "$dropin" | grep -q '10-kernel-hardening.conf'; then
+if grep -q '99-' <<<"$dropin" \
+   && grep -qi 'DO NOT RENAME' <<<"$dropin" \
+   && grep -q '10-kernel-hardening.conf' <<<"$dropin"; then
   ok "perf-capability: the drop-in header states that the '99-' prefix is load-bearing and NAMES 10-kernel-hardening.conf"
 else
   bad "perf-capability: the drop-in header does not explain the 99- ordering / name the competing hardening file"
@@ -539,11 +539,11 @@ printf 'vm.swappiness = 1\n'                                  >"$comp_d/50-unrel
 printf '#kernel.kptr_restrict = 1\n'                          >"$comp_d/20-commented.conf"
 comp_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$comp_d" \
   bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1)
-if printf '%s\n' "$comp_out" | grep -q "^earlier $comp_d/10-kernel-hardening.conf$" \
-   && printf '%s\n' "$comp_out" | grep -q "^override $comp_d/99-zzz-late.conf$" \
-   && ! printf '%s\n' "$comp_out" | grep -q '50-unrelated' \
-   && ! printf '%s\n' "$comp_out" | grep -q '20-commented' \
-   && ! printf '%s\n' "$comp_out" | grep -q '99-cqlite-perf.conf'; then
+if grep -q "^earlier $comp_d/10-kernel-hardening.conf$" <<<"$comp_out" \
+   && grep -q "^override $comp_d/99-zzz-late.conf$" <<<"$comp_out" \
+   && ! grep -q '50-unrelated' <<<"$comp_out" \
+   && ! grep -q '20-commented' <<<"$comp_out" \
+   && ! grep -q '99-cqlite-perf.conf' <<<"$comp_out"; then
   ok "perf-capability: competing sysctl files are found and ranked (10-kernel-hardening=earlier, 99-zzz-late=override; unrelated/commented/own file ignored)"
 else
   bad "perf-capability: competing-file detection wrong: '$comp_out'"
@@ -581,11 +581,11 @@ printf 'kernel.perf_event_paranoid = 2\n' >"$sp_conf_d/sysctl.conf"   # applied 
 sp_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$sp_hi" \
   CQLITE_PERF_SYSCTL_EXTRA_DIRS="$sp_run:$sp_lib:$sp_conf_d/sysctl.conf" \
   bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1)
-if printf '%s\n' "$sp_out" | grep -q "^earlier $sp_hi/10-hardening.conf$" \
-   && printf '%s\n' "$sp_out" | grep -q "^override $sp_run/99-zzz-run.conf$" \
-   && printf '%s\n' "$sp_out" | grep -q "^earlier $sp_lib/95-usrlib.conf$" \
-   && printf '%s\n' "$sp_out" | grep -q "^last $sp_conf_d/sysctl.conf$" \
-   && ! printf '%s\n' "$sp_out" | grep -q "$sp_run/60-inert.conf"; then
+if grep -q "^earlier $sp_hi/10-hardening.conf$" <<<"$sp_out" \
+   && grep -q "^override $sp_run/99-zzz-run.conf$" <<<"$sp_out" \
+   && grep -q "^earlier $sp_lib/95-usrlib.conf$" <<<"$sp_out" \
+   && grep -q "^last $sp_conf_d/sysctl.conf$" <<<"$sp_out" \
+   && ! grep -q "$sp_run/60-inert.conf" <<<"$sp_out"; then
   ok "perf-capability: competing files are found across the WHOLE search path, ranked by basename, /etc/sysctl.conf gets the applied-last verdict, and a masked same-basename copy is skipped"
 else
   bad "perf-capability: search-path scan wrong: '$sp_out'"
@@ -639,8 +639,8 @@ if [ -r "$unrf_d/10-secret.conf" ]; then
 else
   unrf_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$unrf_d" \
     bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); unrf_rc=$?
-  if [ "$unrf_rc" -ne 0 ] && printf '%s\n' "$unrf_out" | grep -q "could not scan .*10-secret.conf" \
-     && ! printf '%s\n' "$unrf_out" | grep -qE '^(earlier|override|last) '; then
+  if [ "$unrf_rc" -ne 0 ] && grep -q "could not scan .*10-secret.conf" <<<"$unrf_out" \
+     && ! grep -qE '^(earlier|override|last) ' <<<"$unrf_out"; then
     ok "perf-capability: an EXISTING but UNREADABLE competing .conf fails the scan (rc 1, 'could not scan' naming the file) instead of being silently skipped into a clean bill"
   else
     bad "perf-capability: an unreadable competing .conf was skipped silently (rc=$unrf_rc, '$unrf_out')"
@@ -666,8 +666,8 @@ ln -sf "$perfbin/perf" "$idbox/perf"
 #       unprivileged answer, so a ROOT run set PERF_UNPRIV_EVIDENCE=1 and printed a false
 #       VERIFIED — the R3-1 defect reintroduced through the detector meant to prevent it.
 noid_out=$(PATH="$idbox" bash "$PERFLIB" --verify-unpriv 2>&1); noid_rc=$?
-if [ "$noid_rc" -ne 0 ] && printf '%s' "$noid_out" | grep -q 'identity=identity-unknown' \
-   && ! printf '%s' "$noid_out" | grep -q 'self-unprivileged'; then
+if [ "$noid_rc" -ne 0 ] && grep -q 'identity=identity-unknown' <<<"$noid_out" \
+   && ! grep -q 'self-unprivileged' <<<"$noid_out"; then
   ok "perf-capability: with NO usable 'id' the identity is 'identity-unknown' and --verify-unpriv FAILS (never assumed unprivileged)"
 else
   bad "perf-capability: a missing 'id' was treated as unprivileged (rc=$noid_rc, '$noid_out')"
@@ -679,8 +679,8 @@ mkdir -p "$tmp/perf-idjunk" && cp -a "$idbox"/. "$tmp/perf-idjunk"/
 printf '#!/usr/bin/env bash\necho "uid=0(root) gid=0(root)"\n' >"$tmp/perf-idjunk/id"; chmod +x "$tmp/perf-idjunk/id"
 idbad_out=$(PATH="$tmp/perf-idbad" bash "$PERFLIB" --verify-unpriv 2>&1); idbad_rc=$?
 idjunk_out=$(PATH="$tmp/perf-idjunk" bash "$PERFLIB" --verify-unpriv 2>&1); idjunk_rc=$?
-if [ "$idbad_rc" -ne 0 ] && printf '%s' "$idbad_out" | grep -q 'identity=identity-unknown' \
-   && [ "$idjunk_rc" -ne 0 ] && printf '%s' "$idjunk_out" | grep -q 'identity=identity-unknown'; then
+if [ "$idbad_rc" -ne 0 ] && grep -q 'identity=identity-unknown' <<<"$idbad_out" \
+   && [ "$idjunk_rc" -ne 0 ] && grep -q 'identity=identity-unknown' <<<"$idjunk_out"; then
   ok "perf-capability: an 'id -u' that FAILS or prints unparseable output is 'identity-unknown', not unprivileged"
 else
   bad "perf-capability: a broken 'id -u' was accepted (fail rc=$idbad_rc '$idbad_out'; junk rc=$idjunk_rc '$idjunk_out')"
@@ -721,7 +721,7 @@ done
 stale_out=$(PATH="$tmp/perf-idroot" SUDO_UID=1000 SUDO_GID=1000 SUDO_USER=root \
   bash "$PERFLIB" --verify-unpriv 2>&1); stale_rc=$?
 if [ "$stale_rc" -eq 0 ] \
-   && printf '%s' "$stale_out" | grep -q 'identity=dropped:sudo:uid=1000' \
+   && grep -q 'identity=dropped:sudo:uid=1000' <<<"$stale_out" \
    && grep -q '^sudo -n -u #1000 -- perf stat' "$idroot_argv" \
    && ! grep -q 'runuser' "$idroot_argv" \
    && ! grep -q -- '-u root' "$idroot_argv"; then
@@ -734,7 +734,7 @@ fi
 : >"$idroot_argv"
 good_out=$(PATH="$tmp/perf-idroot" SUDO_UID=1000 SUDO_GID=1000 SUDO_USER=agentuser \
   bash "$PERFLIB" --verify-unpriv 2>&1); good_rc=$?
-if [ "$good_rc" -eq 0 ] && printf '%s' "$good_out" | grep -q 'identity=dropped:runuser:agentuser' \
+if [ "$good_rc" -eq 0 ] && grep -q 'identity=dropped:runuser:agentuser' <<<"$good_out" \
    && grep -q '^runuser -u agentuser -- perf stat' "$idroot_argv"; then
   ok "perf-capability: a SUDO_USER whose passwd uid/gid MATCH the validated numerics is still used for 'runuser -u <name>'"
 else
@@ -744,7 +744,7 @@ fi
 : >"$idroot_argv"
 inj_out=$(PATH="$tmp/perf-idroot" SUDO_UID=1000 SUDO_GID=1000 SUDO_USER='agent user; touch /tmp/pwn' \
   bash "$PERFLIB" --verify-unpriv 2>&1)
-if printf '%s' "$inj_out" | grep -q 'identity=dropped:sudo:uid=1000' \
+if grep -q 'identity=dropped:sudo:uid=1000' <<<"$inj_out" \
    && ! grep -q 'agent user' "$idroot_argv" && [ ! -e /tmp/pwn ]; then
   ok "perf-capability: a SUDO_USER containing shell metacharacters/whitespace never reaches the command prefix"
 else
@@ -767,7 +767,7 @@ notgt_fail=0
 for badsudo in -1 0 abc 99999999999999999999999 ''; do
   bs_out=$(PATH="$tmp/perf-idnotarget" SUDO_UID="$badsudo" SUDO_GID=1000 SUDO_USER=agentuser \
     bash "$PERFLIB" --verify-unpriv 2>&1); bs_rc=$?
-  if [ "$bs_rc" -eq 0 ] || ! printf '%s' "$bs_out" | grep -q 'identity=root-no-unprivileged-target'; then
+  if [ "$bs_rc" -eq 0 ] || ! grep -q 'identity=root-no-unprivileged-target' <<<"$bs_out"; then
     bad "perf-capability: SUDO_UID='$badsudo' did not fall through to root-no-unprivileged-target (rc=$bs_rc, '$bs_out')"
     notgt_fail=1
   fi
@@ -888,9 +888,9 @@ EOF
 # test_seams_ok, env_guard) plus the two allowlisted readers; the assert is a FLOOR, so adding
 # a consumer is fine and losing the parse is not.
 if [ "$seam_consumers" -ge 6 ] && [ -z "$seam_ungated" ] \
-   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_sysctl_search_path 1 1$' \
-   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_proc_dir_into 1 1$' \
-   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_env_guard 1 1$'; then
+   && grep -q '^perf_capability_sysctl_search_path 1 1$' <<<"$seam_audit" \
+   && grep -q '^perf_capability_proc_dir_into 1 1$' <<<"$seam_audit" \
+   && grep -q '^perf_capability_env_guard 1 1$' <<<"$seam_audit"; then
   ok "perf-capability: STRUCTURAL — all $seam_consumers seam-dereferencing functions (CQLITE_PERF_TEST_PRIV_DIR included) route through the single containment gate (only the documented presence-check + the root reader are allowlisted), so a new entry point cannot silently skip it"
 else
   bad "perf-capability: STRUCTURAL audit failed — seam consumers found: $seam_consumers; UNGATED:${seam_ungated:- none}"
@@ -940,7 +940,7 @@ done <<EOF
 $priv_audit
 EOF
 if [ "$priv_consumers" -ge 2 ] && [ -z "$priv_ungated" ] \
-   && printf '%s\n' "$priv_audit" | grep -q '^perf_capability_env_guard 1 1$'; then
+   && grep -q '^perf_capability_env_guard 1 1$' <<<"$priv_audit"; then
   ok "perf-capability: STRUCTURAL — all $priv_consumers functions that RESOLVE a privileged tool route through the containment gate (only the documented de-escalation prefix builder is allowlisted), so the EXECUTABLES the guard authorizes are validated by destination too (#3261 AC4)"
 else
   bad "perf-capability: STRUCTURAL privilege-shim audit failed — resolvers found: $priv_consumers; UNGATED:${priv_ungated:- none}"
@@ -960,7 +960,7 @@ if perf_install_supported; then
   wt_path=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>/dev/null); wt_rc=$?
   wt_err=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>&1 >/dev/null)
   if [ "$wt_rc" -ne 0 ] && [ -z "$wt_path" ] \
-     && printf '%s' "$wt_err" | grep -qi 'symlink' \
+     && grep -qi 'symlink' <<<"$wt_err" \
      && [ -L "$wt_d/99-cqlite-perf.conf" ] && [ "$(cat "$wt_outside")" = "$wt_before" ]; then
     ok "perf-capability: the drop-in WRITE TARGET is refused when the managed basename is itself a SYMLINK (rc 1, empty, named) — a contained directory does not license writing through its entries (#3261 AC1)"
   else
@@ -1008,20 +1008,20 @@ if perf_install_supported; then
   # ...structurally: the staging entry is created by `mktemp` with a random-suffix template, no
   # (rationale: fleet-runbook.md, perf seam containment, structurally-the-staging-entry-is-created-b)
   wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
-  wt_privcalls=$(printf '%s\n' "$wt_body" | grep -c '"\$@"')
+  wt_privcalls=$(grep -c '"\$@"' <<<"$wt_body")
   wt_struct_fail=''
-  printf '%s\n' "$wt_body" | grep -q 'mktemp -- "\$d/\.\$b\.XXXXXX"' \
+  grep -q 'mktemp -- "\$d/\.\$b\.XXXXXX"' <<<"$wt_body" \
     || wt_struct_fail="$wt_struct_fail no-mktemp-template"
-  printf '%s\n' "$wt_body" | grep -qF '.new"' && wt_struct_fail="$wt_struct_fail hardcoded-staging-name"
-  printf '%s\n' "$wt_body" | grep -q 'mv -fT -- "\$t" "\$p"' \
+  grep -qF '.new"' <<<"$wt_body" && wt_struct_fail="$wt_struct_fail hardcoded-staging-name"
+  grep -q 'mv -fT -- "\$t" "\$p"' <<<"$wt_body" \
     || wt_struct_fail="$wt_struct_fail no-mv-T"
   [ "$wt_privcalls" -eq 1 ] || wt_struct_fail="$wt_struct_fail privileged-invocations=$wt_privcalls"
-  printf '%s\n' "$wt_body" | grep -q '"\$@" sh -c' || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
+  grep -q '"\$@" sh -c' <<<"$wt_body" || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
   if [ -z "$wt_struct_fail" ]; then
     ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, which NARROWS the create-to-reopen window but does NOT close it — see the note above), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
   else
     bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
-    printf '%s\n' "$wt_body" | grep -n '\$@\|mktemp\|mv -' | head -8
+    grep -m8 -n '\$@\|mktemp\|mv -' <<<"$wt_body"
   fi
   # ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted —
   # the check now lives INSIDE the privileged shell, so this also proves it survived consolidation.
@@ -1034,7 +1034,7 @@ if perf_install_supported; then
   wt_mt_out=$(env PATH="$wt_mt:$PATH" CQLITE_PERF_SYSCTL_DIR="$wt_d" \
     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_mt_rc=$?
   if [ "$wt_mt_rc" -ne 0 ] \
-     && printf '%s' "$wt_mt_out" | grep -q 'mktemp did not create a staging entry inside the validated directory' \
+     && grep -q 'mktemp did not create a staging entry inside the validated directory' <<<"$wt_mt_out" \
      && [ ! -e "/tmp/perf-cap-elsewhere.$$" ]; then
     ok "perf-capability: a 'mktemp' answering a path OUTSIDE the validated directory is REFUSED by name from INSIDE the privileged shell, and that path is never created (the tool's answer is checked, not trusted)"
   else
@@ -1071,7 +1071,7 @@ if perf_install_supported; then
       bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_perm_rc=$?
     wt_perm_left=$(ls -A "$wt_perm_d")
     if [ "$wt_perm_rc" -eq 0 ] \
-       || ! printf '%s' "$wt_perm_out" | grep -q 'group- or world-writable' \
+       || ! grep -q 'group- or world-writable' <<<"$wt_perm_out" \
        || [ -n "$wt_perm_left" ]; then
       bad "perf-capability: a mode-$wt_mode drop-in directory was accepted for a privileged staged write (rc=$wt_perm_rc, left='$wt_perm_left', out='$wt_perm_out')"
       wt_perm_fail=1
@@ -1101,7 +1101,7 @@ if perf_install_supported; then
   # test is unchanged and is what matters: it FAILS CLOSED and NAMES why, never proceeding on a
   # directory whose ownership was never established. Either wording satisfies that; silence does not.
   if [ "$wt_ns_rc" -eq 0 ] \
-     || ! printf '%s' "$wt_ns_out" | grep -qE 'cannot determine owner/mode|UNSUPPORTED on this host'; then
+     || ! grep -qE 'cannot determine owner/mode|UNSUPPORTED on this host' <<<"$wt_ns_out"; then
     bad "perf-capability: an unusable 'stat' did not fail closed with a named reason (rc=$wt_ns_rc, out='$wt_ns_out')"
     wt_perm_fail=1
   fi
@@ -1117,7 +1117,7 @@ if perf_install_supported; then
   wt_sm_out=$(env PATH="$wt_short" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_sm_rc=$?
   if [ "$wt_sm_rc" -eq 0 ] || [ -e "$wt_perm_d/99-cqlite-perf.conf" ] \
-     || ! printf '%s' "$wt_sm_out" | grep -q 'group- or world-writable'; then
+     || ! grep -q 'group- or world-writable' <<<"$wt_sm_out"; then
     bad "perf-capability: a SHORT mode (stat reported '33' = 0033, group+world writable) was accepted — the zero-padding is missing or ineffective (rc=$wt_sm_rc, out='$wt_sm_out')"
     wt_perm_fail=1
   fi
@@ -1138,7 +1138,7 @@ if perf_install_supported; then
   for wt_ln_spell in "$wt_ln_dir" "$wt_ln_dir/" "$wt_ln_dir//"; do
     wt_ln_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_ln_spell" \
       bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ln_rc=$?
-    if [ "$wt_ln_rc" -eq 0 ] || ! printf '%s' "$wt_ln_out" | grep -q 'is a SYMLINK'; then
+    if [ "$wt_ln_rc" -eq 0 ] || ! grep -q 'is a SYMLINK' <<<"$wt_ln_out"; then
       bad "perf-capability: a SYMLINKED drop-in directory spelled '$wt_ln_spell' was not refused (rc=$wt_ln_rc, out='$wt_ln_out')"
       wt_perm_fail=1
     fi
@@ -1178,8 +1178,8 @@ wt_nl_extra=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR=
   CQLITE_PERF_SYSCTL_EXTRA_DIRS="$wt_nl_seam" \
   bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); wt_nl_extra_rc=$?
 if [ "$wt_nl_rc" -ne 0 ] && [ "$wt_nl_extra_rc" -ne 0 ] && [ "$wt_nl_base_rc" -eq 0 ] \
-   && ! printf '%s\n' "$wt_nl_out" | grep -qx -- /etc/sysctl.d \
-   && ! printf '%s\n' "$wt_nl_extra" | grep -qx -- /etc/sysctl.d; then
+   && ! grep -qx -- /etc/sysctl.d <<<"$wt_nl_out" \
+   && ! grep -qx -- /etc/sysctl.d <<<"$wt_nl_extra"; then
   ok "perf-capability: a CONTAINED path carrying an embedded newline is REFUSED as a seam and as an extra-dirs entry, so it can never SERIALIZE into two search-path entries whose second line is the host's real /etc/sysctl.d (#3261 roborev-3)"
 else
   bad "perf-capability: embedded-newline handling wrong (seam rc=$wt_nl_rc '$wt_nl_out'; extra rc=$wt_nl_extra_rc '$wt_nl_extra'; BASELINE rc=$wt_nl_base_rc must be 0 or the extra case proves nothing)"
@@ -1223,7 +1223,7 @@ for us_break in '' mv stat; do
   else
     [ "$us_rc" -eq 2 ] \
       || { bad "perf-capability: a broken '$us_break' gave rc=$us_rc, not the distinct rc 2 UNSUPPORTED (out='$us_out')"; us_fail=1; }
-    printf '%s' "$us_out" | grep -q 'UNSUPPORTED on this host' \
+    grep -q 'UNSUPPORTED on this host' <<<"$us_out" \
       || { bad "perf-capability: a broken '$us_break' failed without naming the host as unsupported (out='$us_out')"; us_fail=1; }
     [ "$us_wrote" = no ] \
       || { bad "perf-capability: a broken '$us_break' wrote the drop-in anyway"; us_fail=1; }
@@ -1249,7 +1249,7 @@ ed_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ed_root" CQLITE_
   bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>&1); ed_rc=$?
 [ "$ed_rc" -ne 0 ] \
   || { bad "perf-capability: an EXTRA_DIRS value hiding entries after a newline was ACCEPTED (rc=$ed_rc, out='$ed_out')"; ed_fail=1; }
-printf '%s\n' "$ed_out" | grep -qx -- /etc/sysctl.d \
+grep -qx -- /etc/sysctl.d <<<"$ed_out" \
   && { bad "perf-capability: the host /etc/sysctl.d reached the search path through a newline-hidden EXTRA_DIRS entry"; ed_fail=1; }
 [ "$ed_fail" -ne 0 ] || ok "perf-capability: an EXTRA_DIRS value whose FIRST line is a valid contained directory is still REFUSED when a newline hides more entries after it, and the host /etc/sysctl.d never reaches the search path — while the same value without the newline succeeds (#3261 roborev-31)"
 
@@ -1330,9 +1330,9 @@ cs_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
   CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
   bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_rc=$?
 [ "$cs_rc" -ne 0 ] || { bad "perf-capability: the competing-file scan ACCEPTED a symlinked *.conf inside the sandbox (rc=$cs_rc, out='$cs_out')"; cs_fail=1; }
-printf '%s' "$cs_out" | grep -q 'REFUSING to scan' \
+grep -q 'REFUSING to scan' <<<"$cs_out" \
   || { bad "perf-capability: the scan failed on a symlinked competitor without naming the refusal (out='$cs_out')"; cs_fail=1; }
-printf '%s' "$cs_out" | grep -q 'perf_event_paranoid = 2' \
+grep -q 'perf_event_paranoid = 2' <<<"$cs_out" \
   && { bad "perf-capability: the scan LEAKED host competitor content through a symlink"; cs_fail=1; }
 # ...the NEGATIVE CONTROL: a REAL file inside the sandbox is still scanned, so the check is not
 # refusing everything.
@@ -1355,7 +1355,7 @@ if printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/$cs_nl_name" 2>/dev/null; th
     bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_rc=$?
   [ "$cs_nl_rc" -ne 0 ] \
     || { bad "perf-capability: a newline-named competitor did NOT fail the scan closed (rc=$cs_nl_rc, out='$cs_nl_out')"; cs_fail=1; }
-  printf '%s' "$cs_nl_out" | grep -qx -- 'competitor.conf' \
+  grep -qx -- 'competitor.conf' <<<"$cs_nl_out" \
     && { bad "perf-capability: a newline in a competitor BASENAME split into an extra reported entry (out='$cs_nl_out')"; cs_fail=1; }
   rm -f -- "$cs_nl_dir/$cs_nl_name"
 else
@@ -1368,7 +1368,7 @@ rm -f -- "$cs_dir/00-host-link.conf"
 cs_ok2_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
   CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
   bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_ok2_rc=$?
-if [ "$cs_ok2_rc" -ne 0 ] || ! printf '%s' "$cs_ok2_out" | grep -q 'zz-real.conf'; then
+if [ "$cs_ok2_rc" -ne 0 ] || ! grep -q 'zz-real.conf' <<<"$cs_ok2_out"; then
   bad "perf-capability: a REAL contained competitor was not scanned once the symlink was removed — the per-file check is refusing everything (rc=$cs_ok2_rc, out='$cs_ok2_out')"
   cs_fail=1
 fi
@@ -1449,7 +1449,7 @@ done
 : >"$tmp/sysctl.conf"
 ac3_path=$(env CQLITE_PERF_SYSCTL_DIR="$seamed_d" CQLITE_PERF_SYSCTL_EXTRA_DIRS="$tmp/sysctl.conf" \
   bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); ac3_path_rc=$?
-if [ "$ac3_path_rc" -eq 0 ] && printf '%s\n' "$ac3_path" | grep -qx -- "$tmp/sysctl.conf"; then
+if [ "$ac3_path_rc" -eq 0 ] && grep -qx -- "$tmp/sysctl.conf" <<<"$ac3_path"; then
   ok "perf-capability: a sysctl.conf stand-in directly inside the sandbox root is accepted as a CQLITE_PERF_SYSCTL_EXTRA_DIRS entry and reaches the search path (#3261 AC3, end to end)"
 else
   bad "perf-capability: a contained sysctl.conf stand-in was dropped from the test-mode search path (rc=$ac3_path_rc, path='$ac3_path')"
@@ -1478,7 +1478,7 @@ else
   ac4_fail=0
   # (a) the `/usr` shape: absolute, CONTAINS the tools, not in the sandbox.
   ac4_out=$(ac4_guard "$ac4_sys" "$ac4_sys") && ac4_fail=1
-  printf '%s' "$ac4_out" | grep -q 'sandbox' || ac4_fail=1
+  grep -q 'sandbox' <<<"$ac4_out" || ac4_fail=1
   [ "$ac4_fail" -eq 0 ] || bad "perf-capability: an absolute shim dir OUTSIDE the sandbox root (the '/usr' shape) was accepted, or refused without naming the sandbox: '$ac4_out'"
   # (b) the SYMLINK shape: a declared shim dir genuinely inside the sandbox, whose `sudo`
   #     RESOLVES to the tool outside it.
@@ -1523,7 +1523,7 @@ seam_census=$(grep -oE 'CQLITE_PERF_[A-Z_]+' "$PERFLIB" | sort -u | grep -v '^CQ
 seam_census_n=0
 for seam_name in $seam_census; do
   seam_census_n=$((seam_census_n+1))
-  printf '%s\n' "$seam_set_body" | grep -q -- "$seam_name" \
+  grep -q -- "$seam_name" <<<"$seam_set_body" \
     || { bad "perf-capability: $seam_name is read by the library but NOT named in perf_capability_seam_set, so exporting it without CQLITE_PERF_TEST_MODE=1 passes the marker-less refusal"; seam_census_fail=1; }
 done
 [ "$seam_census_n" -ge 5 ] \
@@ -1550,7 +1550,7 @@ for seam_name in $seam_census; do
     bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); seam_rc=$?
   [ "$seam_rc" -ne 0 ] \
     || { bad "perf-capability: $seam_name set WITHOUT the marker was ACCEPTED by the env guard (rc=0, out='$seam_out') — a test-only seam is live on the production path"; seam_each_fail=1; }
-  printf '%s' "$seam_out" | grep -q 'REFUSING' \
+  grep -q 'REFUSING' <<<"$seam_out" \
     || { bad "perf-capability: $seam_name without the marker failed (rc=$seam_rc) but printed no REFUSING diagnostic: '$seam_out'"; seam_each_fail=1; }
 done
 [ "$seam_each_fail" -ne 0 ] || ok "perf-capability: EACH of the $seam_census_n non-marker seams, set alone without CQLITE_PERF_TEST_MODE=1, is refused loudly by the env guard — while an entirely seam-free environment still succeeds (#3261 roborev-32)"
@@ -1632,14 +1632,14 @@ if perf_install_supported; then
     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); pb_rc=$?
   [ "$pb_rc" -eq 1 ] \
     || { bad "perf-capability: an mv that ADVERTISES --no-target-directory but fails the rename gave rc=$pb_rc, not rc 1 — a working-but-failing mv is being reported as an unsupported host, which suppresses the retry remedy (out='$pb_out')"; pb_fail=1; }
-  printf '%s' "$pb_out" | grep -q 'NOT an unsupported host' \
+  grep -q 'NOT an unsupported host' <<<"$pb_out" \
     || { bad "perf-capability: the rename-probe failure did not say it is NOT an unsupported host: '$pb_out'"; pb_fail=1; }
   [ "$(cat "$pb_victim" 2>/dev/null)" = PRECIOUS ] \
     || { bad "perf-capability: a pre-existing .perfcap-probe.* entry was DELETED or truncated by the probe"; pb_fail=1; }
   # (b) STRUCTURAL, because the PID collision itself cannot be staged from outside: the probe must
   # carry no delete before its absence proof. The rm that remains must sit AFTER the proof.
   pb_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
-  pb_before=$(printf '%s\n' "$pb_body" | awk '/\[ -e "\$__x1" \]/{exit} /rm -f -- "\$__x1"/{c++} END{print c+0}')
+  pb_before=$(awk '/\[ -e "\$__x1" \]/{exit} /rm -f -- "\$__x1"/{c++} END{print c+0}' <<<"$pb_body")
   [ "$pb_before" -eq 0 ] \
     || { bad "perf-capability: the probe deletes \$__x1/\$__x2 ($pb_before time(s)) BEFORE proving they are absent — after PID reuse that destroys an unrelated file under privilege"; pb_fail=1; }
   [ "$pb_fail" -ne 0 ] || ok "perf-capability: the install probe deletes no entry it did not create (no rm before the absence proof, and a pre-existing probe-named file survives untouched), and an mv that advertises -T but fails the rename is rc 1 with a retry-worthy diagnostic rather than rc 2 UNSUPPORTED (#3261 roborev-34)"

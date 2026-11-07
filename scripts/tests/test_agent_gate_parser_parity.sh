@@ -226,7 +226,7 @@ prop_jest() {
   esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+    nf=$(awk -F'\t' '{print NF}' <<<"$line")
     [ "$nf" = 2 ] || errs="$errs [$line] has $nf TSV fields, want 2;"
     # THE G1 INVARIANT: a normalised suite path must not still contain the anchor. This alone
     # catches the defect that started all of this, with one tool and no comparison.
@@ -261,7 +261,7 @@ prop_ids() {
   esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+    nf=$(awk -F'\t' '{print NF}' <<<"$line")
     [ "$nf" = 3 ] || errs="$errs [$line] has $nf TSV fields, want 3;"
     case "$line" in
       *Cargo.toml*) errs="$errs [$line] leaks a manifest path;" ;;
@@ -286,7 +286,7 @@ prop_feats() {
   esac
   # Both producers order by codepoint (python sorted(), jq sort), so the oracle is C collation.
   # A locale-aware `sort` (en_US.UTF-8 folds case and skips `_`/`-`) reds correct output by host.
-  if [ "$out" = "$(printf '%s' "$out" | LC_ALL=C sort -u)" ]; then ok "$lbl"; else bad "$lbl — output is not sorted/unique: [$out]"; fi
+  if [ "$out" = "$(LC_ALL=C sort -u <<<"$out")" ]; then ok "$lbl"; else bad "$lbl — output is not sorted/unique: [$out]"; fi
 }
 
 # cmp_pair <name> <validity> <jq-fn> <py-fn> <args...> — validity-aware property checks on every

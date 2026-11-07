@@ -261,7 +261,7 @@ contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 # The count is taken from the rule's own output format — one `  - <message>` line
 # per error under a "validation failed:" header — so it moves if a message is added
 # OR removed.
-policy_error_count() { printf '%s\n' "$OUT" | grep -c '^  - ' || true; }
+policy_error_count() { grep -c '^  - ' <<<"$OUT" || true; }
 
 expect_exact_errors() {
   local label="$1" want="$2" needle="${3:-}"
@@ -288,7 +288,7 @@ expect_exact_errors() {
 # collapse one layer up: the operator learns that something blew up, not WHICH KEY
 # was wrong.
 policy_output_has_backtrace() {
-  printf '%s\n' "$OUT" | grep -qE '\.rb:[0-9]+:in |\((TypeError|NoMethodError|ArgumentError|NameError)\)'
+  grep -qE '\.rb:[0-9]+:in |\((TypeError|NoMethodError|ArgumentError|NameError)\)' <<<"$OUT"
 }
 
 expect_named_not_crash() {
@@ -1286,14 +1286,14 @@ fi
 for mandated in cqlite-core/src/storage/sstable/reader.rs cqlite-flight/tests/point_read_corpus_parity_test.rs \
                 Cargo.toml Cargo.lock rust-toolchain.toml test-data/datasets/x.jsonl \
                 .github/actions/setup-rust-ci/action.yml .github/workflows/flight-ci.yml; do
-  if printf '%s\n' "$mandated" | grep -Eq "$MANDATE_RE"; then
+  if grep -Eq "$MANDATE_RE" <<<"$mandated"; then
     ok "a diff touching $mandated mandates the Flight tier"
   else
     bad "$mandated does NOT mandate the Flight tier — the #2906 class is open for it"
   fi
 done
 for unmandated in docs/README.md cqlite-cli/src/main.rs bindings/python/src/lib.rs; do
-  if printf '%s\n' "$unmandated" | grep -Eq "$MANDATE_RE"; then
+  if grep -Eq "$MANDATE_RE" <<<"$unmandated"; then
     bad "$unmandated mandates the Flight tier; the mandate is indiscriminate, so the cases above prove nothing"
   else
     ok "a diff touching $unmandated does not mandate the Flight tier"

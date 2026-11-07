@@ -213,7 +213,8 @@ say "capabilities cargo, cc, make, bounded-timeout, symbol-reader=$SYMTOOL"
 metadata=$(timeout -k 30 300 cargo metadata --format-version 1 --no-deps --manifest-path "$ROOT/Cargo.toml" 2>/dev/null)
 rc=$?
 [ "$rc" -eq 0 ] || fail "\`cargo metadata\` exited $rc — the workspace manifests do not read, which is a broken tree rather than an unmeasurable host. Remedy: fix the manifest, then re-run."
-TARGET_DIR=$(printf '%s' "$metadata" | tr ',' '\n' | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -1)
+_sp_meta=$(tr ',' '\n' <<<"$metadata")
+TARGET_DIR=$(sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' <<<"$_sp_meta"); TARGET_DIR=${TARGET_DIR%%$'\n'*}
 [ -n "$TARGET_DIR" ] || skip "could not read \`target_directory\` out of \`cargo metadata\`'s output — the reader did not recognise it, so nothing was measured (a cargo JSON shape change, or a target path holding an escaped character)"
 say "target-dir $TARGET_DIR (reported for diagnosis only — NO arm asserts on \$TARGET_DIR/debug/cqlite-flight; see the header)"
 
@@ -235,8 +236,8 @@ read_symbols() {
   [ "$rc_local" -eq 0 ] || return 1
   # `grep -c` exits 1 on a count of ZERO while still printing "0", so its status is
   # deliberately not used as a signal — the printed count is the datum.
-  total=$(printf '%s\n' "$out" | grep -c .)
-  jem=$(printf '%s\n' "$out" | grep -cE '(_rjem_|[^A-Za-z0-9_]je_|^je_)')
+  total=$(grep -c . <<<"$out")
+  jem=$(grep -cE '(_rjem_|[^A-Za-z0-9_]je_|^je_)' <<<"$out")
   case "$total$jem" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -254,12 +255,12 @@ check_version_line() {
     say "verdict-detail \`$path --version\` exited $rc_local (expected 0; the flag must short-circuit before required-argument validation, with no --data-dir supplied)"
     return 1
   }
-  lines=$(printf '%s\n' "$out" | grep -E '^allocator: (jemalloc|system)$')
-  n=$(printf '%s\n' "$lines" | grep -c .)
+  lines=$(grep -E '^allocator: (jemalloc|system)$' <<<"$out")
+  n=$(grep -c . <<<"$lines")
   case "$n" in ''|*[!0-9]*) say "verdict-detail cannot count the allocator lines in \`--version\` output"; return 1 ;; esac
   [ "$n" -eq 1 ] || {
     say "verdict-detail R2.1 requires EXACTLY ONE line matching '^allocator: (jemalloc|system)\$'; found $n. Full --version output follows."
-    printf '%s\n' "$out" | sed "s/^/${P}    | /"
+    sed "s/^/${P}    | /" <<<"$out"
     return 1
   }
   [ "$lines" = "allocator: $expect" ] || {
@@ -340,27 +341,27 @@ check_startup_allocator_line() {
   wait "$pid" 2>/dev/null
   rc_local=$?
   logged=$(strip_ansi < "$dir/out" 2>/dev/null)
-  n=$(printf '%s\n' "$logged" | grep -c 'cqlite-flight starting')
+  n=$(grep -c 'cqlite-flight starting' <<<"$logged")
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   if [ "$n" -eq 0 ]; then
     say "verdict-detail arm $label (R2.2): the binary printed NO \`cqlite-flight starting\` line on stdout within the bound (child exited $rc_local). The startup line is the surface \`cqlite-flight/README.md\` shows to operators, so its absence is a FAIL and not an unmeasurable host. stdout and stderr follow, ANSI-stripped:"
-    printf '%s\n' "$logged" | sed "s/^/${P}    stdout | /"
+    sed "s/^/${P}    stdout | /" <<<"$logged"
     strip_ansi < "$dir/err" 2>/dev/null | sed "s/^/${P}    stderr | /"
     return 1
   fi
   if [ "$n" -ne 1 ]; then
     say "verdict-detail arm $label (R2.2): $n \`cqlite-flight starting\` lines on stdout; R2.2 describes ONE startup line, and a second would mean two configurations were logged in one process — neither can be read as the configuration this arm measured."
-    printf '%s\n' "$logged" | sed "s/^/${P}    stdout | /"
+    sed "s/^/${P}    stdout | /" <<<"$logged"
     return 1
   fi
-  line=$(printf '%s\n' "$logged" | grep 'cqlite-flight starting' | head -1)
+  line=$(grep -m1 'cqlite-flight starting' <<<"$logged")
   # BOTH RENDERINGS of the field are accepted — `allocator="system"` (tracing's own quoting for
   # a `&str` field, which is what it emits today, measured) and a bare `allocator=system` (what
   # a `%allocator` Display field would print, and what the README shows). Quoting is a
   # rendering choice of the subscriber; the VALUE is the contract, and it is compared exactly.
   local got
-  got=$(printf '%s\n' "$line" | sed -n 's/.*[[:space:]]allocator="\([^"]*\)".*/\1/p' | head -1)
-  [ -n "$got" ] || got=$(printf '%s\n' "$line" | sed -n 's/.*[[:space:]]allocator=\([^ 	"]*\).*/\1/p' | head -1)
+  got=$(sed -n 's/.*[[:space:]]allocator="\([^"]*\)".*/\1/p' <<<"$line"); got=${got%%$'\n'*}
+  [ -n "$got" ] || { got=$(sed -n 's/.*[[:space:]]allocator=\([^ 	"]*\).*/\1/p' <<<"$line"); got=${got%%$'\n'*}; }
   if [ -z "$got" ]; then
     say "verdict-detail arm $label (R2.2): the \`cqlite-flight starting\` line carries NO \`allocator=\` field, so the value the README shows operators is not being logged at all. Line as read (ANSI-stripped): $line"
     return 1
@@ -388,11 +389,11 @@ resolve_arm_artifact() {
           | grep '"name":"cqlite-flight"' \
           | grep '"crate_types":\["bin"\]' \
           | grep -o '{.*"executable":"[^"]*".*}')
-  n=$(printf '%s\n' "$lines" | grep -c .)
+  n=$(grep -c . <<<"$lines")
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
   [ "$n" -eq 1 ] || return 1
-  exe=$(printf '%s\n' "$lines" | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')
-  feats=$(printf '%s\n' "$lines" | sed -n 's/.*"features":\[\([^]]*\)\].*/\1/p' | tr -d '"')
+  exe=$(sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' <<<"$lines")
+  feats=$(sed -n 's/.*"features":\[\([^]]*\)\].*/\1/p' <<<"$lines" | tr -d '"')
   [ -n "$exe" ] || return 1
   printf '%s\t%s\n' "$exe" "$feats"
 }
@@ -443,14 +444,15 @@ run_arm() {
   [ "$rc_local" -eq 0 ] || skip "arm $label: the build succeeded but its \`--message-format=json\` stream holds no single recognisable \`cqlite-flight\` bin artifact record, so this arm cannot say WHICH binary it produced — nothing was measured (a cargo JSON shape change). Refusing to fall back to \$TARGET_DIR/debug/cqlite-flight: both arms uplift to that path, so an assertion against it is an assertion about whatever last wrote it."
   exe=${resolved%%	*}
   feats=${resolved##*	}
+  _sp_ft=$(tr ',' '\n' <<<"$feats")
 
   # --- the arm's IDENTITY, attested by cargo rather than inferred from our flags.
   case "$expect_syms" in
     present)
-      printf '%s\n' "$feats" | tr ',' '\n' | grep -qx 'jemalloc' \
+      grep -qx 'jemalloc' <<<"$_sp_ft" \
         || fail "arm $label: cargo reports this artifact was built with features [$feats], which does NOT include \`jemalloc\` — the positive arm did not build the binary it thinks it did, so any symbol verdict from it would be meaningless" ;;
     absent)
-      printf '%s\n' "$feats" | tr ',' '\n' | grep -qx 'jemalloc' \
+      grep -qx 'jemalloc' <<<"$_sp_ft" \
         && fail "arm $label: cargo reports this artifact was built with features [$feats], which DOES include \`jemalloc\` — the negative arm is not measuring a default-features build. \`default = []\`, so the allocator feature must not be reachable from a plain \`cargo build -p cqlite-flight\`" ;;
   esac
   say "arm $label: cargo attests features [${feats:-<none>}] for $exe"
