@@ -6,9 +6,10 @@ description: >-
 
 # Why git (#4437): several tooling-tests self-tests pin git's own exit statuses. On
 # git 2.56 a truncated multi-pack-index makes `git fsck` exit 1 (ERROR_OBJECT)
-# where 2.43 exits 32 (ERROR_MULTI_PACK_INDEX), which reds
-# scripts/tests/test_check_object_store_integrity.sh on a stock runner while it
-# passes on the dev box. Run this step after checkout and before the gate, on a
+# where 2.43 exits 32 (ERROR_MULTI_PACK_INDEX), which red the object-store sweep
+# suite (scripts/tests/test_check_object_store_integrity.sh, deleted in #4441) on a
+# stock runner while it passed on the dev box; the pin stays for the other suites
+# that assert git's own exit statuses. Run this step after checkout and before the gate, on a
 # job pinned to `runs-on: ubuntu-24.04`: the 2.43 package exists only in the
 # noble archive, so a moving `ubuntu-latest` would eventually lose it.
 #
