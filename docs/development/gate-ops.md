@@ -2500,7 +2500,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   able to write these scripts are invoker-class, and a peer wanting a false PASS can simply edit
   `scripts/agent-gate.sh`, which is cheaper than forging pack data; no check inside a process
   defends against the party that controls the process. **ACCIDENTAL corruption IS in model**, and
-  its control is a periodic full-rehash sweep: `scripts/check-object-store-integrity.sh` (removed, #4413) (full
+  its control WAS a periodic full-rehash sweep, **now removed with its fleet schedulers (#4441), so no sweep runs and the store is TRUSTED, not verified**: `scripts/check-object-store-integrity.sh` (removed, #4441) (full
   `git fsck`, never `--connectivity-only`, which does not rehash content), emitting an anchored
   four-valued `VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — run at machine onboarding
   (`bootstrap-agent-machine.sh` section 5d, where VERIFIED is the ONLY `[ok]`) and on the
@@ -2774,7 +2774,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   CORRUPT, since nothing observed damage and that remedy would send an operator to re-clone a
   healthy store — and **`unkeyed`**, the one permissive answer, announced once: no key means no
   latch was ever NAMED, the writer derives the name through the same resolver, and stopping instead
-  would make a missing `check-object-store-integrity.sh` (removed, #4413) (ordinary on any branch cut before #3749)
+  would make a missing `check-object-store-integrity.sh` (removed, #4441) (ordinary on any branch cut before #3749)
   halt every lane for want of a hygiene probe. Its residual is stated at the branch: a TRANSIENT
   resolver failure in one lane misses a peer's verdict for one iteration.
   **THE THUNDERING HERD IS CLOSED, WITH THE HAZARD ITS FIX INTRODUCES (round 5, item 2 — a Low in

@@ -724,8 +724,8 @@ used to call a peer lane planting objects "a non-invoker route, hence a defect";
 #3312 triage rule already says same-host actors able to write these scripts are invoker-class, and a
 peer wanting a false `PASS` can simply edit `scripts/agent-gate.sh`, which is cheaper than forging
 pack data; no check inside a process defends against the party that controls the process.
-*Accidental* corruption **is** in model, and its control is a periodic full-rehash sweep:
-`scripts/check-object-store-integrity.sh` (removed, #4413) runs a full `git fsck` (never `--connectivity-only`, which
+*Accidental* corruption **is** in model, and its control was a periodic full-rehash sweep, **now removed with its fleet schedulers (#4441), so no sweep runs and the store is `TRUSTED, not verified`**:
+`scripts/check-object-store-integrity.sh` (removed, #4441) runs a full `git fsck` (never `--connectivity-only`, which
 does not rehash content) over the shared store and emits an anchored four-valued
 `VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — exit 0/4/6/5, and **a consumer must not
 read `UNMEASURED` as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5d, where
