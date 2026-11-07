@@ -84,6 +84,23 @@ run --target "$T"; kill "$lockpid" 2>/dev/null; wait "$lockpid" 2>/dev/null
 check "held side-lane .cargo-lock: SKIPPED-BUSY naming the lock" 'grep -q "^RESULT: SKIPPED-BUSY$" <<<"$out" && grep -q "lock:agent-gate-side/legacy-heuristics/debug" <<<"$out"'
 check "held lock: nothing removed (held profile and the free one)" '[ -d "$T/debug/.fingerprint/cqlite-$H1" ] && [ -d "$T/debug/incremental/old-abc" ] && [ -d "$T/agent-gate-side/legacy-heuristics/debug/.fingerprint/cqlite-$H1" ] && [ -d "$T/agent-gate-side/legacy-heuristics/debug/incremental/old-abc" ]'
 
+# 4b. failing busy probes fail closed (SKIPPED-BUSY, named reason, nothing removed).
+shim() { printf '#!/usr/bin/env bash\n%s\n' "$2" >"$tmp/$1"; chmod +x "$tmp/$1"; }
+probe_case() { want=$4 # label pgrep systemctl reason
+ 
+  mk_target; CQLITE_PRUNE_PGREP=$2 CQLITE_PRUNE_SYSTEMCTL=$3 run --target "$T"
+  check "$1: SKIPPED-BUSY naming $want, nothing removed" 'grep -q "^RESULT: SKIPPED-BUSY$" <<<"$out" && grep -qF "$want" <<<"$out" && [ -d "$T/debug/.fingerprint/cqlite-$H1" ] && [ -d "$T/debug/incremental/old-abc" ]'
+}
+shim pgrep-rc2 'exit 2'
+shim systemctl-listfail 'case " $* " in *" list-units "*) exit 1;; esac; exit 0'
+probe_case "pgrep exits 2" "$tmp/pgrep-rc2" "$stub/systemctl" "probe-error:pgrep(rc=2)"
+probe_case "pgrep missing" "$tmp/no-such-pgrep" "$stub/systemctl" "probe-error:pgrep(rc=127)"
+probe_case "systemctl list-units fails" "$stub/pgrep" "$tmp/systemctl-listfail" "probe-error:systemctl-list-units"
+# positive control: pgrep exit 1 (no match) plus a succeeding systemctl still prunes.
+shim pgrep-rc1 'exit 1'
+mk_target; CQLITE_PRUNE_PGREP="$tmp/pgrep-rc1" run --target "$T"
+check "pgrep exit 1 (no match) is idle: PRUNED" 'grep -q "^RESULT: PRUNED$" <<<"$out" && [ ! -e "$T/debug/.fingerprint/cqlite-$H1" ]'
+
 # 5. refusals and usage.
 mk_target; rm -f "$T/CACHEDIR.TAG"; run --target "$T"
 check "no CACHEDIR.TAG: exit 1, ERROR, nothing removed" '[ "$rc" = 1 ] && grep -q "^RESULT: ERROR$" <<<"$out" && [ -d "$T/debug/.fingerprint/cqlite-$H1" ]'
@@ -151,6 +168,15 @@ CARGO_TARGET_DIR="$T" run --install-timer
 check "install: POSITIVE CONTROL - a normal path is still accepted after the refusals" '[ "$rc" = 0 ] && grep -q "^RESULT: INSTALLED$" <<<"$out" && [ -e "$svc" ]'
 run --uninstall-timer
 check "uninstall: units removed" '[ "$rc" = 0 ] && [ ! -e "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer" ] && [ ! -e "$tmp/cfg/systemd/user/cqlite-cargo-prune.service" ]'
+
+# 7. uninstall verifies the timer stopped before removing unit files.
+mkdir -p "$tmp/cfg/systemd/user"; : >"$svc"; : >"${svc%.service}.timer"
+shim systemctl-nostop 'case " $* " in *" disable "*) exit 1;; *" is-active "*) echo active; exit 3;; esac; exit 0'
+CQLITE_PRUNE_SYSTEMCTL="$tmp/systemctl-nostop" run --uninstall-timer
+check "uninstall: disable --now fails and timer still active -> ERROR, unit files kept" '[ "$rc" = 1 ] && grep -q "^RESULT: ERROR$" <<<"$out" && ! grep -q UNINSTALLED <<<"$out" && [ -e "$svc" ] && [ -e "${svc%.service}.timer" ]'
+shim systemctl-inactive 'case " $* " in *" disable "*) exit 1;; *" is-active "*) echo inactive; exit 3;; esac; exit 0'
+CQLITE_PRUNE_SYSTEMCTL="$tmp/systemctl-inactive" run --uninstall-timer
+check "uninstall: disable fails but is-active=inactive -> UNINSTALLED, files removed" '[ "$rc" = 0 ] && grep -q "^RESULT: UNINSTALLED$" <<<"$out" && [ ! -e "$svc" ] && [ ! -e "${svc%.service}.timer" ]'
 
 echo "PASS=$PASS FAIL=$FAIL SKIP=0"
 [ "$FAIL" = 0 ]
