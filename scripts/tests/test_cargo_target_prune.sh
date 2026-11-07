@@ -97,6 +97,13 @@ check "unknown flag: exit 2" '[ "$rc" = 2 ]'
 # 6. timer install/uninstall into a private config/data home.
 export XDG_CONFIG_HOME="$tmp/cfg" XDG_DATA_HOME="$tmp/data"; rm -f "$tmp/systemctl.log"
 mk_target
+# Exact-name match: workspace `foo_bar` removes `foo_bar-<hash>` but never a
+# foreign `foo-bar-<hash>` (Cargo keeps the name verbatim on disk).
+mk_target; mkdir -p "$T/debug/.fingerprint/foo_bar-$H1" "$T/debug/.fingerprint/foo-bar-$H1"
+CQLITE_PRUNE_PACKAGES="foo_bar" run --target "$T"
+check "underscore pkg: foo_bar-<hash> IS removed (positive control)" '[ ! -e "$T/debug/.fingerprint/foo_bar-$H1" ]'
+check "underscore pkg: foreign foo-bar-<hash> is untouched" '[ -d "$T/debug/.fingerprint/foo-bar-$H1" ]'
+
 # The pinned repo is the MAIN checkout (parent of git's common dir), never the
 # worktree the install ran from, since flow-finalize deletes worktrees.
 stable=$(dirname "$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)")
@@ -111,7 +118,7 @@ check "install: service PATH carries cargo's dir" 'grep -qxF "Environment=PATH=$
 # busy; either way it must resolve cargo and its args, never ERROR.
 unit_path=$(sed -n 's/^Environment=PATH=//p' "$svc"); exec_cmd=$(sed -n 's/^ExecStart=//p' "$svc")
 read -ra exec_argv <<<"$exec_cmd"
-out=$(env -i HOME="$HOME" PATH="$unit_path" "${exec_argv[@]}" 2>&1); rc=$?
+out=$(env -i HOME="$HOME" PATH="$unit_path" CQLITE_PRUNE_PACKAGES="$CQLITE_PRUNE_PACKAGES" "${exec_argv[@]}" 2>&1); rc=$?
 check "installed command runs under a minimal env (PRUNED or SKIPPED-BUSY)" '[ "$rc" = 0 ] && grep -qE "^RESULT: (PRUNED|SKIPPED-BUSY)$" <<<"$out"'
 check "install: timer is weekly and persistent" 'grep -q "^OnCalendar=Sun" "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer" && grep -q "^Persistent=true" "$tmp/cfg/systemd/user/cqlite-cargo-prune.timer"'
 check "install: enabled the timer" 'grep -q "enable --now cqlite-cargo-prune.timer" "$tmp/systemctl.log"'

@@ -207,14 +207,13 @@ for prof in "${profiles[@]}"; do
       < <(find "$prof/incremental" -mindepth 1 -maxdepth 1 -type d -mtime +"$days")
   fi
   for p in $pkgs; do
-    names=("$p"); [ "${p//_/-}" = "$p" ] || names+=("${p//_/-}")
-    for name in "${names[@]}"; do
-      for d in "$prof/.fingerprint/$name"-*; do
-        [ -d "$d" ] || continue
-        # Exactly `<name>-<16 hex>`: never let `cqlite` match `cqlite-core-…`.
-        [[ "${d##*/}" =~ ^"$name"-[0-9a-f]{16}$ ]] || continue
-        rm_dir "$d"; n_fp=$((n_fp + 1))
-      done
+    # Cargo keeps the package name verbatim in .fingerprint/<name>-<hash>, so
+    # match the exact name only: `foo_bar` must not evict a dep named `foo-bar`.
+    for d in "$prof/.fingerprint/$p"-*; do
+      [ -d "$d" ] || continue
+      # Exactly `<name>-<16 hex>`: never let `cqlite` match `cqlite-core-…`.
+      [[ "${d##*/}" =~ ^"$p"-[0-9a-f]{16}$ ]] || continue
+      rm_dir "$d"; n_fp=$((n_fp + 1))
     done
   done
 done
