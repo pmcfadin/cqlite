@@ -39,7 +39,7 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 # oom_status <summary-file>: the component's status token from the SUMMARY block.
 oom_status() {
-  sed -n 's/^oom-audit:[[:space:]]*\([A-Z]*\).*/\1/p' "$1" | head -1
+  sed -n '/^oom-audit:[[:space:]]*\([A-Z]*\).*/{s/^oom-audit:[[:space:]]*\([A-Z]*\).*/\1/p;q;}' "$1"
 }
 
 # --- Build the synthetic trees -------------------------------------------------
