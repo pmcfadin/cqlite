@@ -1907,7 +1907,7 @@ if bash "$cx3h_probe" "$ORACLES_SRC" "$cx3h_work" "$cx3h_base" >"$cx3h_out" 2>"$
     if grep -Fxq "$(printf '%s\t%s' "$_mpath" "$_mwant")" "$cx3h_out"; then
       ok "case (cx3h): $_mpath => $_mwant"
     else
-      bad "case (cx3h): $_mpath => want $_mwant, got '$(grep -F "$_mpath" "$cx3h_out" | head -1)'"
+      bad "case (cx3h): $_mpath => want $_mwant, got '$(grep -m 1 -F "$_mpath" "$cx3h_out")'"
     fi
   done
 else
@@ -2129,7 +2129,7 @@ cx3k_want() { # cx3k_want <tag> <label> <path> <expected-word>
   if grep -q "^$(printf '%s\t%s' "$3" "$4")" "$tmp/cx3k-$1.txt"; then
     ok "case (cx3k/$1): $3 => $4 — $2"
   else
-    bad "case (cx3k/$1): $3 => want $4, got '$(grep -F "$3" "$tmp/cx3k-$1.txt" | head -1)' — $2"
+    bad "case (cx3k/$1): $3 => want $4, got '$(grep -m 1 -F "$3" "$tmp/cx3k-$1.txt")' — $2"
   fi
 }
 cx3k_notrepo="$tmp/cx3k-not-a-git-repo"
@@ -2155,7 +2155,7 @@ cx3k_want both-unmeasurable 'a genuinely executable path with BOTH lookups faili
 if grep -q '^both-exec	UNMEASURABLE.*not a git repository\|^both-exec	UNMEASURABLE.*cannot change to\|^both-exec	UNMEASURABLE.*fatal' "$tmp/cx3k-both-unmeasurable.txt"; then
   ok "case (cx3k/both-unmeasurable): the unmeasurable refs carry git's OWN message, so the operator is told why"
 else
-  bad "case (cx3k/both-unmeasurable): no git message was recorded: '$(grep -F both-exec "$tmp/cx3k-both-unmeasurable.txt" | head -1)'"
+  bad "case (cx3k/both-unmeasurable): no git message was recorded: '$(grep -m 1 -F both-exec "$tmp/cx3k-both-unmeasurable.txt")'"
 fi
 # BOTH DIRECTIONS on the injector itself: it must NOT make everything unmeasurable by accident of
 # how the probe is invoked — `both-plain` is unmeasurable here too (correctly, the whole repo is
@@ -7237,7 +7237,7 @@ else
 fi
 # Every call site must sit inside `roborev_diff_header_has_path`, the one place text we did
 # NOT get from git plumbing is normalised. Bounded by the next top-level function.
-_matcher_start=$(grep -nE '^roborev_diff_header_has_path\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_matcher_start=$(grep -m 1 -nE '^roborev_diff_header_has_path\(\) \{' "$ORACLES" | cut -d: -f1)
 if [ -z "$_matcher_start" ]; then
   bad 'structural: roborev_diff_header_has_path is not defined — the canonical matcher is gone'
 else
@@ -7586,7 +7586,7 @@ fi
 
 
 # ===== ABSENCE IS A FAIL, AND THE WAIVER IS THE ONLY WAY PAST IT =====
-_pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | head -1 | cut -d: -f1)
+_pc_start=$(grep -m 1 -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | cut -d: -f1)
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
 _pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
 _pc_exec=$(grep -v '^[[:space:]]*#' <<<"$_pc_body")
@@ -7629,7 +7629,7 @@ fi
 # would put two spellings of one rule side by side, which is how a later edit "fixes" the wrong half.
 # This is the WAIVER's copy of the guard whose DEFERRAL sibling is hardened at `_dfe_exec` below —
 # an asymmetry inside one file reads as deliberate and invites exactly that mistake.
-_aff_start=$(grep -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
+_aff_start=$(grep -m 1 -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER_REAL" | cut -d: -f1)
 _aff_body_f="$tmp/aff-body.txt"
 sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER_REAL" >"$_aff_body_f"
 if [ ! -s "$_aff_body_f" ]; then
@@ -8017,7 +8017,7 @@ fi
 # The census must classify the RAW path. Asserted by the absence of any normalisation call
 # in the census loop AND by the `-z` read above: a quoted spelling reaching the extension
 # test is exactly blocker F1 (`docs/é notes.md` ⇒ ext `md"` ⇒ CODE).
-_census_start=$(grep -nE '^roborev_census\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_census_start=$(grep -m 1 -nE '^roborev_census\(\) \{' "$ORACLES" | cut -d: -f1)
 if [ -n "$_census_start" ]; then
   _census_end=$(awk -v s="$_census_start" 'NR>s && /^  \}$/ {print NR; exit}' "$ORACLES")
   # AN UNRESOLVED BOUND IS ITS OWN FAILURE, NEVER A SILENT 1-LINE RANGE. The previous
@@ -8052,7 +8052,7 @@ printf '== structural: NO summary value or DETAILS line is emitted un-neutralise
 # per-site escape is a list to keep complete — the next value to grow a path interpolation
 # would silently reopen the hole — so the boundary is `emit_kv` + `finish`, and it is
 # asserted against the emitting statements themselves.
-_em_start=$(grep -nE '^emit_summary\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
+_em_start=$(grep -m 1 -nE '^emit_summary\(\) \{' "$WRAPPER_REAL" | cut -d: -f1)
 _em_end=""
 [ -z "$_em_start" ] || _em_end=$(awk -v s="$_em_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
 if [ -z "$_em_start" ] || [ -z "$_em_end" ]; then
@@ -8103,7 +8103,7 @@ if grep -qE 'printf .%s..n. "\$\{DETAILS\[@\]\}"' "$WRAPPER_REAL"; then
 else
   ok 'structural: DETAILS are not bulk-printed (each entry is neutralised individually)'
 fi
-_fin_start=$(grep -nE '^finish\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
+_fin_start=$(grep -m 1 -nE '^finish\(\) \{' "$WRAPPER_REAL" | cut -d: -f1)
 _fin_end=""
 [ -z "$_fin_start" ] || _fin_end=$(awk -v s="$_fin_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
 _fin_body_f="$tmp/finish-body.txt"
@@ -8127,7 +8127,7 @@ printf '== structural: the authorization-keyword denylist lives at the TWO emit 
 # STRUCTURALLY: the denylist must be INSIDE the two renderers and NOWHERE ELSE, or the next value to
 # grow an interpolation silently reopens it.
 _rd_bad=""
-_rl_start=$(grep -nE '^roborev_safe_line\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
+_rl_start=$(grep -m 1 -nE '^roborev_safe_line\(\) \{' "$WRAPPER_REAL" | cut -d: -f1)
 _rl_end=""
 [ -z "$_rl_start" ] || _rl_end=$(awk -v s="$_rl_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
 if [ -z "$_rl_start" ] || [ -z "$_rl_end" ]; then
@@ -8185,7 +8185,7 @@ printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
 # because one arm of its grammar is key-scoped (`DEFERRED`, admitted for `findings` alone). The
 # needle is distinct from the affirmation backstop's `for keyed in "push-assert=` so the two
 # extractions cannot pick each other up.
-_scan_start=$(grep -nE '^[[:space:]]*for scan_keyed in ' "$WRAPPER_REAL" | head -1 | cut -d: -f1 || printf '')
+_scan_start=$(grep -m 1 -nE '^[[:space:]]*for scan_keyed in ' "$WRAPPER_REAL" | cut -d: -f1 || printf '')
 _scan_end=''
 if [ -n "$_scan_start" ]; then
   _scan_end=$(awk -v s="$_scan_start" 'NR>s && /^[[:space:]]*done[[:space:]]*$/ {print NR; exit}' "$WRAPPER_REAL")
@@ -8240,8 +8240,7 @@ else
   # That distinction is the general form of three separate defects on this issue, and a future
   # edit could delete the positive arm while every behavioural case except cx28 stayed green.
   # Both halves are required: an allow-list whose fallthrough is permissive pins nothing.
-  _scan_positive=$(printf '%s\n' "$_scan_block" \
-    | grep -E 'PASS\|WAIVED\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' | head -1 || printf '')
+  _scan_positive=$(grep -m 1 -E 'PASS\|WAIVED\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' <<<"$_scan_block" || printf '')
   if [ -n "$_scan_positive" ]; then
     ok 'structural: the verdict scan has a POSITIVE arm — the non-failing set is an allow-list, not "not-failing"'
   else
@@ -8527,7 +8526,7 @@ printf '== structural (#3759 r6): the ONE name grammar means the SAME THING to b
 #
 # THE GRAMMAR IS EXTRACTED FROM THE SHIPPED FILE, never re-typed here: a test that re-types its
 # subject tests its own copy of it, which is the second-implementation hazard one directory over.
-_gr_re=$(sed -n "s/^ROBOREV_GH_NAME_RE='\(.*\)'\$/\1/p" "$ORACLES" | head -1)
+_gr_re=$(sed -n "/^ROBOREV_GH_NAME_RE='\(.*\)'\$/{s/^ROBOREV_GH_NAME_RE='\(.*\)'\$/\1/p;q;}" "$ORACLES")
 if [ -z "$_gr_re" ]; then
   bad 'structural (#3759): the shared name grammar could not be extracted from the oracles, so neither its shape nor its agreement was measured — a failure to measure, not a measurement'
 else
@@ -8543,7 +8542,8 @@ else
   #     differentially tested against the first — this repository's standing ruling — and "one
   #     definition" does not exempt it, which is exactly what round 6 proved.
   _gr_locales="C"
-  for _gr_l in $(locale -a 2>/dev/null | grep -iE 'utf-?8$' | head -4); do
+  _gr_loc_all=$(locale -a 2>/dev/null | grep -iE 'utf-?8$')
+  for _gr_l in $(head -4 <<<"$_gr_loc_all"); do
     _gr_locales="$_gr_locales $_gr_l"
   done
   # The corpus deliberately mixes ASCII-valid, ASCII-invalid and NON-ASCII: the divergence lives only
@@ -8643,7 +8643,7 @@ grep -qF 'PROBE_NAME_RE="$ROBOREV_GH_NAME_RE"' "$_chk_exec" || _chk_bad="$_chk_b
 # ONE SPELLING, matched against the value the file actually defines rather than a literal repeated
 # here — a hard-coded copy would have to be edited in lockstep with the grammar, which is the drift
 # this clause exists to forbid.
-_chk_re_val=$(sed -n "s/^ROBOREV_GH_NAME_RE='\(.*\)'$/\1/p" "$ORACLES" | head -1)
+_chk_re_val=$(sed -n "/^ROBOREV_GH_NAME_RE='\(.*\)'$/{s/^ROBOREV_GH_NAME_RE='\(.*\)'$/\1/p;q;}" "$ORACLES")
 if [ -z "$_chk_re_val" ]; then
   _chk_bad="$_chk_bad name-grammar-value-unreadable"
 elif [ "$(grep -cF -- "$_chk_re_val" "$_chk_exec" || true)" != "1" ]; then
@@ -9145,7 +9145,7 @@ STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 # turn this into a different fixture.
 mkdir -p "$_fl_dir/lib"
 _part_src="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
-_part_start=$(grep -n '^roborev_findings_count()' "$_part_src" | head -1 | cut -d: -f1)
+_part_start=$(grep -m 1 -n '^roborev_findings_count()' "$_part_src" | cut -d: -f1)
 if [ -n "$_part_start" ]; then
   sed -n "${_part_start},\$p" "$_part_src" > "$_fl_dir/lib/roborev-findings-count.sh.part"
   mv "$_fl_dir/lib/roborev-findings-count.sh.part" "$_fl_dir/lib/roborev-findings-count.sh"
@@ -9284,8 +9284,8 @@ else
     _rc4050_ok=0
   else
     # ...and it must come BEFORE the lookup that can grant, or the gate is decorative.
-    _rc4050_gate=$(grep -n -F '[ -n "${RECHECK_JOB:-}" ] || return 0' "$_rc4050_body" | head -1 | cut -d: -f1)
-    _rc4050_look=$(grep -n 'roborev_findings_deferral_lookup' "$_rc4050_body" | head -1 | cut -d: -f1)
+    _rc4050_gate=$(grep -m 1 -n -F '[ -n "${RECHECK_JOB:-}" ] || return 0' "$_rc4050_body" | cut -d: -f1)
+    _rc4050_look=$(grep -m 1 -n 'roborev_findings_deferral_lookup' "$_rc4050_body" | cut -d: -f1)
     if [ -n "$_rc4050_gate" ] && [ -n "$_rc4050_look" ] && [ "$_rc4050_gate" -lt "$_rc4050_look" ]; then
       ok 'structural (#4050): a findings deferral is grantable ONLY on the --recheck-job path, and the gate precedes the granting lookup'
     else
