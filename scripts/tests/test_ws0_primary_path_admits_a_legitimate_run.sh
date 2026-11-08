@@ -167,7 +167,8 @@ accept_args() {
     return
   fi
   if ! ws0_driver_ran_hermetically; then
-    fail "primary-path ACCEPT ($label): argument validation must execute NOTHING (shims recorded: $(ws0_hermetic_calls | head -3))"
+    _spw18=$(ws0_hermetic_calls)
+    fail "primary-path ACCEPT ($label): argument validation must execute NOTHING (shims recorded: $(head -3 <<<"$_spw18"))"
     return
   fi
   pass "primary-path ACCEPT: $label"
