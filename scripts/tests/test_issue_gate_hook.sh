@@ -165,14 +165,14 @@ else
   bad "PASS path: hook exited $rcA (expected 0)"
 fi
 
-args_line=$(grep '^ARGS:' "$RECORD" | head -1)
+args_line=$(grep -m 1 '^ARGS:' "$RECORD")
 if [ "$args_line" = "ARGS:--lite" ]; then
   ok "gate invoked with '--lite'"
 else
   bad "gate argv was '$args_line' (expected 'ARGS:--lite')"
 fi
 
-summary_line=$(grep '^SUMMARY:' "$RECORD" | head -1)
+summary_line=$(grep -m 1 '^SUMMARY:' "$RECORD")
 summary_path=${summary_line#SUMMARY:}
 if [ -n "$summary_path" ] && [[ "$summary_path" == *issue-gate-lite-summary* ]] \
    && [ "$summary_path" != ".agent-gate-lite-summary.txt" ]; then
@@ -181,7 +181,7 @@ else
   bad "gate summary path was '$summary_path' (expected a unique mktemp issue-gate-lite-summary path)"
 fi
 
-cwd_line=$(grep '^CWD:' "$RECORD" | head -1)
+cwd_line=$(grep -m 1 '^CWD:' "$RECORD")
 gate_cwd=${cwd_line#CWD:}
 expected_root=$(cd "$repoA" && git rev-parse --show-toplevel)
 if [ "$gate_cwd" = "$expected_root" ]; then
