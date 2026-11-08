@@ -18,7 +18,10 @@ WRAP = {'command', 'builtin', 'exec', 'env', 'nice', 'timeout', 'stdbuf', 'sudo'
 LEAD = {'if', 'elif', 'then', 'else', 'do', '!', '{', '(', 'time', 'while', 'until'}
 FILTERS = {'grep', 'egrep', 'fgrep', 'sed', 'awk', 'cut', 'tr', 'sort', 'uniq', 'tail', 'head',
            'wc', 'xargs', 'tee', 'rev', 'fold', 'nl', 'paste', 'column', 'jq', 'cat', 'tac', 'expand'}
-REDUCERS = {'head', 'wc', 'uniq'}
+# Stages whose output is bounded by construction, so a chain through them cannot carry the source's
+# volume to a downstream early-exit reader: `head` (stops after N lines) and `wc` (one line).
+# `uniq` is NOT here: with distinct input lines it emits every one of them (#4451 review).
+REDUCERS = {'head', 'wc'}
 SMALL_SRC = {'date', 'stat', 'wc', 'basename', 'dirname', 'readlink', 'realpath', 'uname', 'id',
              'whoami', 'hostname', 'seq', 'sha256sum', 'shasum', 'md5sum', 'cksum', 'nproc',
              'getconf', 'tty', 'lsb_release', 'which', 'command', 'git_small'}
@@ -311,8 +314,42 @@ def reader_kind(stage, full_text_following):
                 return 'grep-m'
         return None
     if b in ('sed', 'gsed'):
-        scripts = re.findall(r"'([^']*)'|\"([^\"]*)\"", raw)
-        text = ' '.join(a or b_ for a, b_ in scripts)
+        # Collect every program text: each -e/--expression operand, or (no -e/-f given) the first
+        # non-option operand, quoted or not.
+        progs = []
+        have_e = False
+        opnds = []
+        wl = args
+        i = 0
+        while i < len(wl):
+            a = unq(wl[i])
+            if a == '--':
+                opnds += [unq(x) for x in wl[i + 1:]]
+                break
+            if a in ('-e', '--expression'):
+                have_e = True
+                if i + 1 < len(wl):
+                    progs.append(unq(wl[i + 1]))
+                i += 2
+                continue
+            if a.startswith('--expression='):
+                have_e = True
+                progs.append(a[len('--expression='):])
+            elif a.startswith('-e') and not a.startswith('--'):
+                have_e = True
+                progs.append(a[2:])
+            elif a in ('-f', '--file'):
+                have_e = True        # script file: not inspectable; skip its operand
+                i += 2
+                continue
+            elif a.startswith('-') and a != '-':
+                pass
+            else:
+                opnds.append(a)
+            i += 1
+        if not have_e and opnds:
+            progs.append(opnds[0])
+        text = ' '.join(progs)
         text = re.sub(r's(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpiIwe0-9]*', 's', text)
         text = re.sub(r'y(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1', 'y', text)
         text = re.sub(r'/(?:\\.|[^/])*/', '/', text)
@@ -489,8 +526,43 @@ def analyze_file(path, want_sites):
 EXCL = collections.Counter()
 
 
+def self_test():
+    """Inline checks of the reader/tier rules; returns a process exit code."""
+    bad = 0
+
+    def check(name, got, want):
+        nonlocal bad
+        if got != want:
+            bad += 1
+            print('SELF-TEST FAIL: %s: got %r, want %r' % (name, got, want))
+
+    # unquoted and quoted early-exit sed programs are all recognised as readers
+    for prog in ('sed 1q', 'sed -n 5q', 'sed -e q', "sed -n -e '/x/{p;q;}'", 'sed --expression=q',
+                 "sed -n '/x/{p;q;}'", 'sed -ne q', 'sed -n -e p -e 2q', 'sed q'):
+        check('reader ' + prog, reader_kind(prog, prog), 'sed-q')
+    for prog in ("sed -n 's/a/b/p'", 'sed p', "sed -e 's/q/Q/'", 'sed -n -e p'):
+        check('non-reader ' + prog, reader_kind(prog, prog), None)
+    # `uniq` must not bound a chain: find | uniq | head is still tier A (via filter)
+    import tempfile, os
+    with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as fh:
+        fh.write('x=$(find . -name f | uniq | head -1)\n'
+                 'y=$(find . -name f | wc -l | head -1)\n')
+        p = fh.name
+    try:
+        sites = analyze_file(p, False)
+    finally:
+        os.unlink(p)
+    tiers = {s[1]: s[5] for s in sites}
+    check('find|uniq|head', tiers.get(1), 'A-via-filter')
+    check('find|wc|head is bounded', tiers.get(2), 'C-small')
+    print('SELF-TEST', 'FAIL' if bad else 'PASS')
+    return 1 if bad else 0
+
+
 def main():
     args = sys.argv[1:]
+    if args and args[0] == '--self-test':
+        sys.exit(self_test())
     show = False
     files = []
     while args:
