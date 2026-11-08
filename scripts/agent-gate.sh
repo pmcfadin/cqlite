@@ -22344,20 +22344,20 @@ _tt_jobs() {
 # <log dir>/NNN.log and then <log dir>/NNN.rc ("<exit> <seconds>", published atomically LAST, so
 # its presence means "finished"). A non-empty TMPDIR base gives the suite its OWN TMPDIR.
 _tt_exec() {
-  local i=$1 d=$2 tb=$3 tf=${4:-} id s e rc
+  local i=$1 d=$2 tb=$3 id s e rc
   id=$(printf '%03d' "$i")
+  # The log is opened for APPEND: a surviving descendant of a dead worker keeps this descriptor, and a
+  # write at a stale offset must not clobber notes appended later (roborev job 146).
   s=$(date +%s)
-  [ -z "$tf" ] || _tt_start_tether "$tf"
   if [ -n "$tb" ]; then
     mkdir -p "$tb/$id"
-    ( export TMPDIR="$tb/$id"; eval "${_TT_CMD[$i]}" ) </dev/null >"$d/$id.log" 2>&1
+    ( export TMPDIR="$tb/$id"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
     rc=$?
   else
-    ( eval "${_TT_CMD[$i]}" ) >"$d/$id.log" 2>&1
+    ( eval "${_TT_CMD[$i]}" ) >>"$d/$id.log" 2>&1
     rc=$?
   fi
   e=$(date +%s)
-  [ -z "$tf" ] || _tt_stop_tether
   printf '%s %s\n' "$rc" "$((e - s))" >"$d/$id.rc.tmp" && mv "$d/$id.rc.tmp" "$d/$id.rc" || return 125
   return 0
 }
@@ -22390,7 +22390,12 @@ _tt_report() {
   # The replay is the canonical evidence: a failed append (ENOSPC, unwritable log) must not let the
   # suite pass with its output missing.
   replay_failed=""
-  if [ -f "$d/$id.log" ] && ! cat "$d/$id.log" >>"$log" 2>/dev/null; then
+  if [ ! -f "$d/$id.log" ]; then
+    replay_failed=1
+    echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); log missing: $d/$id.log is absent or not a regular file ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]} (log missing)"
+    rc=1
+  elif ! cat "$d/$id.log" >>"$log" 2>/dev/null; then
     replay_failed=1
     echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); log replay failed: could not append $d/$id.log to $log ---"
     _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]} (log replay failed)"
@@ -22413,12 +22418,9 @@ _tt_report() {
 # _tt_lane <lane> <log dir> <tmpdir base>: one serial lane - its suites, in registration order.
 _tt_lane() {
   local ln=$1 d=$2 tb=$3 i
-  _tt_start_tether "$d/lane-$ln.tether"
   for ((i = 0; i < _TT_N; i++)); do
     [ "${_TT_MODE[$i]}" = L ] && [ "${_TT_LANE[$i]}" = "$ln" ] && _tt_exec "$i" "$d" "$tb"
   done
-  _tt_stop_tether
-  : >"$d/lane-$ln.done"   # normal completion marker: its absence == the lane worker died
   return 0
 }
 
@@ -22430,68 +22432,41 @@ _tt_lane() {
 _tt_bg_begin() { _TT_WAS_M=0; case $- in *m*) _TT_WAS_M=1 ;; esac; set -m; }
 _tt_bg_end()   { [ "$_TT_WAS_M" = 1 ] || set +m; }
 
-# _tt_kill_groups <pgid...>: TERM every group, a short grace period, then KILL the survivors; returns
-# when they are gone (so a slot/TMPDIR is never released under a still-running suite).
-_tt_kill_groups() {
-  local g n alive
-  [ "$#" -gt 0 ] || return 0
-  for g in "$@"; do kill -TERM -- "-$g" 2>/dev/null; done
-  n=0
-  while [ "$n" -lt 10 ]; do
-    alive=""
-    for g in "$@"; do kill -0 -- "-$g" 2>/dev/null && alive="$alive $g"; done
-    [ -n "$alive" ] || return 0
-    sleep 0.2; n=$((n + 1))
-  done
-  for g in $alive; do kill -KILL -- "-$g" 2>/dev/null; done
-  n=0
-  while [ "$n" -lt 10 ]; do
-    alive=""
-    for g in "$@"; do kill -0 -- "-$g" 2>/dev/null && alive="$alive $g"; done
-    [ -n "$alive" ] || return 0
-    sleep 0.2; n=$((n + 1))
-  done
-  return 0
+# THE INVARIANT (roborev jobs 145, 146): we only ever signal a PGID whose LEADER this shell has not
+# yet reaped. The leader is a background job of this shell; bash reaps a finished child itself, at
+# once, so its pid (== the group id) can be reused from that instant. While the leader is still
+# listed by `jobs -rp` it is un-reaped, so it reserves its PGID and the number cannot mean anything
+# but our group. Hence: signals are sent only while the leader is listed, the listing is RE-CHECKED
+# immediately before the escalation to KILL, and `wait` comes only after the last signal. If the
+# leader is already gone (or goes between TERM and KILL) NOTHING further is sent and "descendants may
+# survive" is recorded - cleaning those up safely is #4475's subject.
+_tt_leader_alive() {
+  case " $(jobs -rp | tr '\n' ' ') " in *" $1 "*) return 0 ;; esac
+  return 1
 }
 
-# THE INVARIANT (roborev job 145): a process group is signalled only while the kernel provably
-# still holds its number. bash reaps a finished child itself, immediately (its pid is free for reuse
-# before we ever `wait` for it), so "kill the group while the leader is still a zombie" is NOT
-# available. Instead every worker starts a TETHER - a long sleep in the worker's own process group,
-# whose pid is recorded in <id>.tether - and a group is signalled only when that tether is still
-# alive AND still in group <pgid>. While any member exists the pgid cannot be allocated to another
-# process, so the number cannot refer to anything but our group; if the tether is gone we do not
-# signal, and a "descendants may survive" note goes into the suite log (the residual gap is #4475).
-# The tether is a child of the worker, stopped (builtin kill + wait) before the worker publishes its
-# status, so a normal run leaves nothing behind.
-_tt_start_tether() {
-  _TT_TETHER=""
-  sleep 21600 </dev/null >/dev/null 2>&1 &
-  _TT_TETHER=$!
-  printf '%s\n' "$_TT_TETHER" >"$1.tmp" && mv "$1.tmp" "$1"
-}
-_tt_stop_tether() {
-  [ -z "${_TT_TETHER:-}" ] || { builtin kill "$_TT_TETHER" 2>/dev/null; wait "$_TT_TETHER" 2>/dev/null; }
-  _TT_TETHER=""
-}
-# _tt_group_verified <pgid> <tether file>: 0 iff the tether is alive and still a member of <pgid>.
-_tt_group_verified() {
-  local g=$1 tf=$2 t pg
-  [ -r "$tf" ] || return 1
-  read -r t <"$tf" || return 1
-  [ -n "$t" ] || return 1
-  pg=$(ps -o pgid= -p "$t" 2>/dev/null)
-  pg=${pg// /}
-  [ "$pg" = "$g" ]
-}
-# _tt_kill_worker_group <pgid> <tether file> <suite log>: terminate the worker's group if (and only if)
-# it is verified; otherwise leave it alone and say so in the suite log.
-_tt_kill_worker_group() {
-  if _tt_group_verified "$1" "$2"; then
-    _tt_kill_groups "$1"
-  else
-    echo "descendants of this suite may survive: its process group $1 could no longer be verified as ours (no live tether), so it was NOT signalled (#4475)" >>"$3" 2>/dev/null
-  fi
+# _tt_signal_groups <pgid...>: TERM every group whose leader is alive, grace period, then KILL those
+# whose leader is STILL alive (re-checked right before). Sets _TT_GONE to the pgids that got no
+# (further) signal because their leader had left.
+_tt_signal_groups() {
+  local g n live="" still=""
+  _TT_GONE=""
+  for g in "$@"; do
+    if _tt_leader_alive "$g"; then kill -TERM -- "-$g" 2>/dev/null; live="$live $g"
+    else _TT_GONE="$_TT_GONE $g"; fi
+  done
+  n=0
+  while [ -n "${live// /}" ] && [ "$n" -lt 10 ]; do
+    sleep 0.2; n=$((n + 1)); still=""
+    for g in $live; do
+      if _tt_leader_alive "$g"; then still="$still $g"; else _TT_GONE="$_TT_GONE $g"; fi
+    done
+    live=$still
+  done
+  for g in $live; do
+    if _tt_leader_alive "$g"; then kill -KILL -- "-$g" 2>/dev/null; else _TT_GONE="$_TT_GONE $g"; fi
+  done
+  return 0
 }
 
 # Signal path (roborev jobs 140, 142). Workers are in their own process groups, so a terminal ^C /
@@ -22499,9 +22474,9 @@ _tt_kill_worker_group() {
 #   * DEFERS while a launch-and-register critical section is open (_TT_CRIT=1) - a signal between
 #     `worker &` and recording its pid would otherwise miss that worker - and handles the pending
 #     signal right after the section closes;
-#   * otherwise reaps whatever already finished (completed lane/pool pids are dropped, so a recycled
-#     pid is never signalled), terminates only groups whose leader is STILL in bash's job table,
-#     removes the scratch TMPDIR, restores default signal handling and re-raises the signal.
+#   * otherwise reaps whatever already finished, signals the groups of the workers still running
+#     (see THE INVARIANT), removes the scratch TMPDIR, restores default signal handling and
+#     re-raises the signal.
 _tt_on_signal() {
   if [ "${_TT_CRIT:-0}" = 1 ]; then _TT_SIGPEND=$1; return 0; fi
   _tt_interrupt "$1"
@@ -22512,14 +22487,10 @@ _tt_handle_pending() {
 _tt_interrupt() {
   local sig=$1 ent gs=""
   _TT_CRIT=1   # no re-entry while cleaning up
-  _tt_reap "${_TT_LOGDIR:-/nonexistent}"   # also drops (and, if abnormal, cleans) workers that already left
-  for ent in $_TT_ACTIVE; do
-    _tt_group_verified "${ent#*:}" "$_TT_LOGDIR/$(printf '%03d' "${ent%%:*}").tether" && gs="$gs ${ent#*:}"
-  done
-  for ent in $_TT_LANES; do
-    _tt_group_verified "${ent#*:}" "$_TT_LOGDIR/lane-${ent%%:*}.tether" && gs="$gs ${ent#*:}"
-  done
-  _tt_kill_groups $gs
+  _tt_reap "${_TT_LOGDIR:-/nonexistent}"   # drops workers that already left; those running remain listed
+  for ent in $_TT_ACTIVE $_TT_LANES; do gs="$gs ${ent#*:}"; done
+  _tt_signal_groups $gs
+  [ -z "${_TT_GONE// /}" ] || echo "interrupted: descendants of the worker group(s)${_TT_GONE} may survive (#4475)" >>"${_TT_LOGDIR:-/dev/null}/interrupt.note" 2>/dev/null
   [ -z "${_TT_TMPBASE:-}" ] || rm -rf "${_TT_TMPBASE:?}"
   _TT_TMPBASE=""
   trap - INT TERM HUP
@@ -22528,6 +22499,8 @@ _tt_interrupt() {
 
 # _tt_reap <log dir>: reap finished pool workers and lane workers (see the comment at the call site).
 # Leaves the still-running ones in $_TT_ACTIVE / $_TT_LANES and the pool's count in $_TT_RUNNING.
+# A worker that is no longer listed has been reaped, so by THE INVARIANT its group is never signalled
+# here; an abnormal exit only gets the "descendants may survive" note.
 _tt_reap() {
   local d=$1 ent pid idx id rp st keep="" ln
   rp=" $(jobs -rp | tr '\n' ' ') "
@@ -22538,13 +22511,10 @@ _tt_reap() {
       *" $pid "*) _TT_RUNNING=$((_TT_RUNNING + 1)); keep="$keep $ent"; continue ;;
     esac
     id=$(printf '%03d' "$idx")
-    # The group is signalled BEFORE `wait` and only if verified (see THE INVARIANT above); `wait` then
-    # just collects the status.
-    [ -r "$d/$id.rc" ] || _tt_kill_worker_group "$pid" "$d/$id.tether" "$d/$id.log"
     wait "$pid" 2>/dev/null; st=$?
     if [ ! -r "$d/$id.rc" ]; then
       [ "$st" -ne 0 ] || st=125
-      echo "no status was published by the worker (wait status $st)" >>"$d/$id.log"
+      echo "no status was published by the worker (wait status $st); descendants of this suite may survive: its process group $pid was NOT signalled because its leader had already been reaped (#4475)" >>"$d/$id.log"
       printf '%s ?\n' "$st" >"$d/$id.rc" 2>/dev/null || true
     fi
   done
@@ -22555,8 +22525,7 @@ _tt_reap() {
     case "$rp" in
       *" $pid "*) keep="$keep $ent"; continue ;;
     esac
-    [ -e "$d/lane-$ln.done" ] || _tt_kill_worker_group "$pid" "$d/lane-$ln.tether" "$d/lane-$ln.note"   # a lane worker that died
-    wait "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || echo "lane $ln: worker died (status $?); descendants may survive (#4475)" >>"$d/lane-$ln.note" 2>/dev/null
   done
   _TT_LANES=$keep
 }
@@ -22634,7 +22603,7 @@ _tt_run_all() {
     done
     _TT_CRIT=1
     _tt_bg_begin
-    _tt_exec "$i" "$d" "$tmpbase" "$d/$(printf '%03d' "$i").tether" &
+    _tt_exec "$i" "$d" "$tmpbase" &
     _TT_ACTIVE="$_TT_ACTIVE $i:$!"
     _tt_bg_end
     _TT_CRIT=0; _tt_handle_pending

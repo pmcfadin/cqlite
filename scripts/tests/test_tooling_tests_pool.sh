@@ -7,7 +7,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$HERE/../agent-gate.sh"
 W="$(mktemp -d "${TMPDIR:-/tmp}/tt-pool-selftest.XXXXXX")"
-trap 'rm -rf "$W"' EXIT
+trap "[ -n \"\${KEEP:-}\" ] || rm -rf \"\$W\"" EXIT
 a=$(grep -n '^_TT_N=0' "$GATE" | head -1 | cut -d: -f1)
 b=$(grep -n '^run_tooling_tests() {' "$GATE" | head -1 | cut -d: -f1)
 [ -n "$a" ] && [ -n "$b" ] || { echo "FAIL: cannot locate the _tt_ helpers in agent-gate.sh"; exit 1; }
@@ -27,23 +27,40 @@ pass=0; fail=0
 ok()  { pass=$((pass + 1)); echo "ok   - $1"; }
 bad() { fail=$((fail + 1)); echo "FAIL - $1"; }
 
-# 1. hostile kill: 8 one-second suites, width 2 => ~4s; must finish well inside the timeout.
+# 1. hostile kill + concurrency: 8 one-second suites at width 2. The pool must drain under a `kill` that
+#    reports every pid alive, AND the observed maximum overlap must be EXACTLY 2 (the planted job
+#    touches a marker, counts the live markers and appends the count; the max is computed from that).
+mkdir -p "$W/cc/active"
+cat >"$W/cc.sh" <<EOS
+touch "$W/cc/active/\$\$"
+set -- "$W"/cc/active/*
+echo \$# >>"$W/cc/counts"
+sleep 1
+rm -f "$W/cc/active/\$\$"
+EOS
 cat >"$W/t1.sh" <<EOS
 set -uo pipefail
 _ncpu=8; REPO_ROOT=/tmp
 kill() { return 0; }
 . "$W/helpers.sh"
 _tt_reset
-for n in 1 2 3 4 5 6 7 8; do _tt_add P "s\$n" 'sleep 1'; done
+for n in 1 2 3 4 5 6 7 8; do _tt_add P "s\$n" 'bash "$W/cc.sh"'; done
 : >"$W/c1.log"
 _tt_run_all "$W/c1.log" "$W/d1"
 echo "failed=[\$_TT_FAILED_NAMES]"
 EOS
 out=$(bounded 40 env CQLITE_TOOLING_TESTS_JOBS=2 bash "$W/t1.sh" 2>&1); rc=$?
+max=0; nruns=0
+while read -r c; do nruns=$((nruns + 1)); [ "$c" -gt "$max" ] && max=$c; done <"$W/cc/counts"
 if [ "$rc" -eq 0 ] && grep -q '^failed=\[\]$' <<<"$out"; then
   ok "pool drains with a pid-probe that reports every pid alive (liveness is bash's job table, not pid probes)"
 else
   bad "pool stalled or failed under a hostile kill shim (rc=$rc)"
+fi
+if [ "$nruns" -eq 8 ] && [ "$max" -eq 2 ]; then
+  ok "width 2 is honoured exactly: 8 suites ran, observed maximum concurrency = 2"
+else
+  bad "width-2 pool: $nruns suites ran, observed maximum concurrency $max (want 8 runs, max exactly 2)"
 fi
 # 2. every failure named (pool, lane, tail), unknown mode never executes.
 cat >"$W/t2.sh" <<EOS
@@ -111,16 +128,18 @@ if [ "$rc" -eq 0 ] && grep -q '^failed=\[killed-worker\]$' <<<"$out"; then
 else
   bad "killed worker: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
 fi
-orph=""
+# By THE INVARIANT a group is never signalled once its leader has been reaped, so the descendants of a
+# SIGKILLed worker are expected to survive; they must be NAMED in the suite log (#4475 owns cleaning
+# them up). This test removes them itself, by the pids the planted script recorded.
+alive=""
 for f in suite.pid child.pid; do
   pid=$(cat "$W/$f" 2>/dev/null)
-  if [ -z "$pid" ]; then orph="$orph $f(never written)"; elif kill -0 "$pid" 2>/dev/null; then orph="$orph $f=$pid(alive)"; fi
+  [ -n "$pid" ] && builtin kill -0 "$pid" 2>/dev/null && { alive="$alive $f"; builtin kill -9 "$pid" 2>/dev/null; }
 done
-if [ -z "$orph" ]; then
-  ok "after the worker was killed, the suite and its sleeping child are gone (process group terminated)"
+if grep -q 'descendants of this suite may survive' "$W/d3/001.log"; then
+  ok "a worker killed without a status: its group is NOT signalled (leader already reaped); the suite log notes descendants may survive (survivors:${alive:- none})"
 else
-  bad "orphaned processes survive the pool:$orph"
-  for f in suite.pid child.pid; do kill -9 "$(cat "$W/$f" 2>/dev/null)" 2>/dev/null; done
+  bad "no 'descendants may survive' note in the killed worker's suite log"
 fi
 # 4. a worker whose status write FAILS (mv of the .rc refused) must FAIL, named, without stalling.
 cat >"$W/t4.sh" <<EOS
@@ -217,9 +236,8 @@ if [ "$out" = "survived pending=TERM" ]; then
 else
   bad "critical-section deferral: got '$out'"
 fi
-# 8. THE INVARIANT (roborev job 145): a process group is signalled only while its number is provably
-#    ours, and never AFTER its leader has been waited on. Instrument `kill` and `wait` with a recorder
-#    shim and assert the order for a killed worker: every group-TERM precedes the wait of that leader.
+# 8. THE INVARIANT, ordering: on the interrupt path every group TERM must precede any `wait` of that
+#    group's leader. Instrument kill and wait with a recorder shim; TERM the runner (our own pid).
 cat >"$W/t8.sh" <<EOS
 set -uo pipefail
 _ncpu=8; REPO_ROOT=/tmp
@@ -228,48 +246,74 @@ kill() { case "\$*" in "-TERM -- -"*|"-KILL -- -"*) echo "kill \$*" >>"\$REC" ;;
 wait() { echo "wait \$*" >>"\$REC"; builtin wait "\$@"; }
 . "$W/helpers.sh"
 _tt_reset
-_tt_add P 'ok-a' 'sleep 1'
-_tt_add P 'killed-worker' 'TT_MAIN=\$TT_MAIN bash "$W/planted.sh"'
+_tt_add P 'w1' 'bash "$W/planted2.sh" 1'
+_tt_add P 'w2' 'bash "$W/planted2.sh" 2'
 : >"$W/c8.log"
-TT_MAIN=\$\$
-export TT_MAIN
-_tt_run_all "$W/c8.log" "$W/d8"
+CQLITE_TOOLING_TESTS_JOBS=4 _tt_run_all "$W/c8.log" "$W/d8"
+EOS
+rm -f "$W/w1.child" "$W/w2.child" "$W/w1.pid" "$W/w2.pid"
+bash "$W/t8.sh" >"$W/t8.out" 2>&1 &
+rp=$!
+n=0
+while [ "$n" -lt 100 ] && ! { [ -s "$W/w1.child" ] && [ -s "$W/w2.child" ]; }; do sleep 0.1; n=$((n + 1)); done
+kill -TERM "$rp"
+n=0
+while kill -0 "$rp" 2>/dev/null && [ "$n" -lt 300 ]; do sleep 0.1; n=$((n + 1)); done
+kill -0 "$rp" 2>/dev/null && kill -9 "$rp" 2>/dev/null
+wait "$rp" 2>/dev/null
+viol=$(awk '$1=="wait"{w[$2]=1} $1=="kill"{g=$4; sub(/^-/,"",g); if (g in w) print "signal to group " g " after its wait"; if ($2=="-TERM") k++} END{if(k<2) print "fewer than 2 group TERMs recorded"}' "$W/rec8")
+nkill=$(grep -c '^kill -KILL' "$W/rec8")
+for f in w1.pid w1.child w2.pid w2.child; do builtin kill -9 "$(cat "$W/$f" 2>/dev/null)" 2>/dev/null; done
+if [ -z "$viol" ] && [ "$nkill" -eq 0 ]; then
+  ok "every group TERM precedes the wait of its leader, and no KILL is sent once the leaders exited on TERM"
+else
+  bad "signal ordering: [$viol] KILLs=$nkill"
+fi
+# 9. THE INVARIANT, escalation: a leader that IGNORES TERM gets TERM then (leader re-checked alive) KILL;
+#    a leader that exits on TERM gets no KILL; a leader that is already gone gets nothing at all.
+cat >"$W/t9.sh" <<EOS
+set -uo pipefail
+REC="$W/rec9"; : >"\$REC"
+kill() { case "\$*" in "-TERM -- -"*|"-KILL -- -"*) echo "kill \$*" >>"\$REC" ;; esac; builtin kill "\$@"; }
+. "$W/helpers.sh"
+set -m
+( trap '' TERM; while :; do sleep 0.1; done ) >/dev/null 2>&1 & stubborn=\$!
+( while :; do sleep 0.1; done ) >/dev/null 2>&1 & polite=\$!
+( exit 0 ) & gone=\$!
+sleep 0.5
+_tt_signal_groups \$stubborn \$polite \$gone
+echo "stubborn=\$stubborn polite=\$polite gone=\$gone GONE=[\$_TT_GONE]"
+wait \$stubborn \$polite \$gone 2>/dev/null
+EOS
+out=$(bounded 40 bash "$W/t9.sh" 2>&1)
+eval "$(sed -n 's/^\(stubborn=[0-9]* polite=[0-9]* gone=[0-9]*\) .*/\1/p' <<<"$out")"
+g_ok=1
+grep -q "^kill -TERM -- -$stubborn\$" "$W/rec9" && grep -q "^kill -KILL -- -$stubborn\$" "$W/rec9" || g_ok=0
+grep -q "^kill -TERM -- -$polite\$" "$W/rec9" && ! grep -q "^kill -KILL -- -$polite\$" "$W/rec9" || g_ok=0
+! grep -q -- "-$gone\$" "$W/rec9" || g_ok=0
+case "$out" in *"GONE=["*" $gone"*) ;; *) g_ok=0 ;; esac
+if [ "$g_ok" -eq 1 ]; then
+  ok "TERM->KILL only while the leader is still listed: stubborn leader escalated, polite leader got no KILL, gone leader got nothing (reported in GONE)"
+else
+  bad "escalation rules violated: $(tr '\n' '|' <"$W/rec9") $out"
+fi
+# 10. a suite that PASSES but whose log file has vanished must FAIL, named (no PASS with missing evidence).
+cat >"$W/t10.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT=/tmp
+. "$W/helpers.sh"
+_tt_reset
+_tt_add P 'log-vanishes' 'rm -f "$W/d10/000.log"'
+_tt_add P 'fine' 'true'
+: >"$W/c10.log"
+_tt_run_all "$W/c10.log" "$W/d10"
 echo "failed=[\$_TT_FAILED_NAMES]"
 EOS
-rm -f "$W/suite.pid" "$W/child.pid"
-out=$(bounded 40 env CQLITE_TOOLING_TESTS_JOBS=2 bash "$W/t8.sh" 2>&1); rc=$?
-viol=$(awk '$1=="wait"{w[$2]=1} $1=="kill"{g=$4; sub(/^-/,"",g); if (g in w) print "kill of group " g " after wait"; k++} END{if(!k) print "no group kill was recorded"}' "$W/rec8")
-if [ "$rc" -eq 0 ] && [ -z "$viol" ] && grep -q '^failed=\[killed-worker\]$' <<<"$out"; then
-  ok "every group kill precedes the wait of its leader (never a group signalled by a reaped leader's id)"
+out=$(bounded 40 env CQLITE_TOOLING_TESTS_JOBS=2 bash "$W/t10.sh" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^failed=\[log-vanishes (log missing)\]$' <<<"$out"; then
+  ok "a suite whose log is missing FAILs, named '(log missing)'"
 else
-  bad "kill/wait order: rc=$rc viol=[$viol]; $(tail -1 <<<"$out")"
+  bad "missing suite log not reported: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
 fi
-for f in suite.pid child.pid; do builtin kill -9 "$(cat "$W/$f" 2>/dev/null)" 2>/dev/null; done
-# 9. when the tether is gone too, the group can no longer be verified: NO group signal is sent, the
-#    suite log says descendants may survive, and the worker is still reported failed.
-cat >"$W/planted3.sh" <<EOS
-echo \$\$ >"$W/suite.pid"
-sleep 30 & echo \$! >"$W/child.pid"
-p=\$\$
-while :; do
-  par=\$(ps -o ppid= -p "\$p"); set -- \$par; par=\$1
-  [ -n "\$par" ] || exit 9
-  [ "\$par" = "\$TT_MAIN" ] && break
-  p=\$par
-done
-read -r tp <"$W/d9/001.tether"
-kill -9 "\$p" "\$tp"
-wait
-EOS
-sed -e 's#rec8#rec9#g; s#c8.log#c9.log#; s#d8#d9#g; s#planted.sh#planted3.sh#' "$W/t8.sh" >"$W/t9.sh"
-out=$(bounded 40 env CQLITE_TOOLING_TESTS_JOBS=2 bash "$W/t9.sh" 2>&1); rc=$?
-nk=$(grep -c '^kill ' "$W/rec9" 2>/dev/null)
-if [ "$rc" -eq 0 ] && [ "${nk:-0}" -eq 0 ] && grep -q '^failed=\[killed-worker\]$' <<<"$out" \
-   && grep -q 'descendants of this suite may survive' "$W/d9/001.log"; then
-  ok "with no live tether the group is NOT signalled; the suite log notes descendants may survive; the worker still FAILs"
-else
-  bad "unverifiable group: rc=$rc kills=${nk:-?}; $(tail -1 <<<"$out")"
-fi
-for f in suite.pid child.pid; do builtin kill -9 "$(cat "$W/$f" 2>/dev/null)" 2>/dev/null; done
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
