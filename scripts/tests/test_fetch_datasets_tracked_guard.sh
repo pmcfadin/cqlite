@@ -997,16 +997,14 @@ if [ -n "$EXT_SHA" ]; then
 else
   bad "external-objects: could not resolve a staged blob SHA"
 fi
-if printf '%s\n' "$EXT_SHA" \
-  | GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ" git -C "$R20" cat-file --batch-check 2>/dev/null \
-  | grep -q ' blob '; then
+if _cf_ext=$(GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ" git -C "$R20" cat-file --batch-check 2>/dev/null <<<"$EXT_SHA") \
+   && grep -q ' blob ' <<<"$_cf_ext"; then
   ok "external-objects: the blob IS readable with GIT_ALTERNATE_OBJECT_DIRECTORIES set"
 else
   bad "external-objects: fixture setup failed (blob unreadable even WITH the env var)"
 fi
-if printf '%s\n' "$EXT_SHA" \
-  | git -C "$R20" cat-file --batch-check 2>/dev/null \
-  | grep -q ' blob '; then
+if _cf_noext=$(git -C "$R20" cat-file --batch-check 2>/dev/null <<<"$EXT_SHA") \
+   && grep -q ' blob ' <<<"$_cf_noext"; then
   bad "external-objects: fixture setup failed (blob still readable WITHOUT the env var)"
 else
   ok "external-objects: the blob is NOT readable without it (the scrubbed restore env)"
