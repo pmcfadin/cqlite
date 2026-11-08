@@ -734,17 +734,20 @@ leaked_root="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.leakedXXXXXX")"
 git -C "$REPO_ROOT" worktree add --detach --quiet "$leaked_root/leaked" HEAD >/dev/null 2>&1 \
   || fail_case "case 19 setup: could not create the decoy leaked worktree"
 ps_register_extra "$leaked_root/leaked" "$leaked_root"
-wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain || true)
+wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain) \
+  || fail_case "case 19: \`git worktree list --porcelain\` itself failed, so registration cannot be judged"
 grep -qF "$leaked_root/leaked" <<<"$wt_list" \
   || fail_case "case 19 setup: the decoy worktree was never registered, so the case would prove nothing"
 git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain || true)
+wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain) \
+  || fail_case "case 19: \`git worktree list --porcelain\` itself failed, so registration cannot be judged"
 grep -qF "$leaked_root/leaked" <<<"$wt_list" \
   || fail_case "case 19 setup: \`git worktree prune\` reclaimed the decoy, so it is not the state a killed run leaves"
 
 ps_remove_worktree "$REPO_ROOT" "$leaked_root/leaked"
 
-wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain || true)
+wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain) \
+  || fail_case "case 19: \`git worktree list --porcelain\` itself failed, so registration cannot be judged"
 grep -qF "$leaked_root/leaked" <<<"$wt_list" \
   && { echo "FAIL: case 19 — cleanup left a registered worktree behind:"
        git -C "$REPO_ROOT" worktree list | grep -F "pub-surface-selftest" || true
@@ -770,7 +773,8 @@ ps_scratch_init "$REPO_ROOT"
 PEER
 bash "$TMPROOT/peer-probe.sh" >"$TMPROOT/peer-probe.out" 2>&1 \
   || fail_case "case 19 setup: a bare init failed; got: $(cat "$TMPROOT/peer-probe.out")"
-wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain || true)
+wt_list=$(git -C "$REPO_ROOT" worktree list --porcelain) \
+  || fail_case "case 19: \`git worktree list --porcelain\` itself failed, so registration cannot be judged"
 if ! grep -qF "$peer_root/live" <<<"$wt_list"; then
   echo "FAIL: case 19 — starting a run DESTROYED a concurrent run's live scratch worktree"
   echo "      ($peer_root/live). Scratch removal must be by EXPLICIT PATH; a sweep over"
