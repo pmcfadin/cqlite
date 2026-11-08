@@ -764,7 +764,7 @@ printf 'ci:waive:alpha\tancient-labeller\t2025-06-01T00:00:00Z\n' >"$WORK/waiver
 # for a waiver label in force — a false "the evidence was observed" from nothing.
 printf 'needs-decision\tpm-bot\t2025-12-30T00:00:00Z\n\n' >"$WORK/waiver-events-blankline.tsv"
 
-evidence_line() { grep 'Waiver evidence' "$1" | head -n 1 || true; }
+evidence_line() { grep -m 1 'Waiver evidence' "$1" || true; }
 
 # STATE 1: no waiver label at all — the ordinary PR.
 invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3
@@ -1259,7 +1259,8 @@ echo "== the tier-id shape check is locale- and bash-version-independent =="
 # cannot drift from the code.
 # `[|]`, not `\|`: a backslash-escaped `|` inside an ERE is a GNU extension the
 # repo's portability lint (rightly) rejects — a bracket expression is POSIX.
-SHAPE_PAT=$(grep -E "^ *''[|]\[!" "$AGG_REAL" | head -n 1)
+_spw5=$(grep -E "^ *''[|]\[!" "$AGG_REAL")
+SHAPE_PAT=$(head -n 1 <<<"$_spw5")
 SHAPE_PAT=${SHAPE_PAT%)*}
 SHAPE_PAT=${SHAPE_PAT#"${SHAPE_PAT%%[![:space:]]*}"}
 # The pre-fix form, kept as the harness's own control: if THIS does not misclassify in
