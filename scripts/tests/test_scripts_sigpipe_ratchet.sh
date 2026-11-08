@@ -234,7 +234,7 @@ d=$(mkcase zerocount); printf '%s\n' "$GUARD_REL 0 $OKHASH" >>"$d/$BASE_REL"
 expect 12 "a ZERO count is not a record and is REFUSED" "$d" 3 "reason: baseline-grammar"
 
 d=$(mkcase truncated)
-{ grep '^#' "$PRISTINE/$BASE_REL"; grep '^scripts/' "$PRISTINE/$BASE_REL" | head -3; } >"$d/$BASE_REL"
+{ grep '^#' "$PRISTINE/$BASE_REL"; grep -m 3 '^scripts/' "$PRISTINE/$BASE_REL"; } >"$d/$BASE_REL"
 expect 13 "a TRUNCATED baseline trips the entry floor" "$d" 3 "reason: baseline-floor" "REMEDY"
 
 d=$(mkcase badpath);  printf '/etc/passwd 3 %s\n' "$OKHASH" >>"$d/$BASE_REL"
@@ -313,9 +313,11 @@ fi
 ship_rc=0
 ( cd "$REPO_ROOT" && bash "$REPO_ROOT/$GUARD_REL" ) >"$tmp/ship.txt" 2>&1 || ship_rc=$?
 if [ "$ship_rc" = 0 ] && grep -qF '0 INCREASE RECOGNISED' "$tmp/ship.txt"; then
-  ok "21 the SHIPPED tree holds the ratchet ($(grep -oE 'MEASURED [0-9]+ file\(s\)[^,]*, [0-9]+ match\(es\)' "$tmp/ship.txt" | head -1))"
+  _spw9=$(grep -oE 'MEASURED [0-9]+ file\(s\)[^,]*, [0-9]+ match\(es\)' "$tmp/ship.txt")
+  ok "21 the SHIPPED tree holds the ratchet ($(head -1 <<<"$_spw9"))"
 else
-  bad "21 the shipped tree" "the ratchet does not hold here (rc=$ship_rc): $(grep -E '^SIGPIPE-SITES: (INCREASE|NEW FILE|REFUSING)' "$tmp/ship.txt" | head -5)"
+  _spw8=$(grep -E '^SIGPIPE-SITES: (INCREASE|NEW FILE|REFUSING)' "$tmp/ship.txt")
+  bad "21 the shipped tree" "the ratchet does not hold here (rc=$ship_rc): $(head -5 <<<"$_spw8")"
 fi
 
 # ---------------------------------------------------------------------------
