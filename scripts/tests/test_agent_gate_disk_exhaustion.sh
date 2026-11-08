@@ -1044,7 +1044,7 @@ if [ -n "$_att_ctl_off" ]; then
 else
   bad "15-attribution-control: the planted assignment was NOT detected -- the attribution scan is blind and its green says nothing"
 fi
-if grep -n '_disk_exhaustion_line' "$GATE" | grep -v '^[0-9]*:#' | grep -qE 'OVERALL|if |&&|\|\|'; then
+if { _spw21=$(grep -n '_disk_exhaustion_line' "$GATE" | grep -v '^[0-9]*:#') && grep -qE 'OVERALL|if |&&|\|\|' <<<"$_spw21"; }; then
   bad "15-attribution: a call site of _disk_exhaustion_line feeds a conditional or OVERALL"
 else
   ok "15-attribution: every call site is a pure append to a summary meta array"
