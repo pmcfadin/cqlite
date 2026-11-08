@@ -295,7 +295,8 @@ chmod -x "$r1/NOTES.md"
 # --- deletion ------------------------------------------------------------------
 mv "$r1/NOTES.md" "$tmp/NOTES.md.parked"
 d_del=$(digest_of "$r1" AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT="$tmp/manifest-del")
-if [ "$d_del" != "$d_base" ] && tr '\0' '\n' < "$tmp/manifest-del" | grep -q 'DELETED.*NOTES.md'; then
+if [ "$d_del" != "$d_base" ] && manifest_del_txt=$(tr '\0' '\n' < "$tmp/manifest-del") \
+   && grep -q 'DELETED.*NOTES.md' <<<"$manifest_del_txt"; then
   ok "delete: removing a tracked file changes the digest and records DELETED in the manifest"
 else
   bad "delete: tracked-file removal not detected (digest '$d_del' vs base '$d_base')"
@@ -393,10 +394,11 @@ fi
 # one oversized blob — falls back to size+mtime, so the "can only weaken for one oversized
 # blob" claim was false. Values below the floor are clamped, and the clamp is disclosed.
 cap_field() { # cap_field <repo> <cap-value> <field>  (field: cap-line | fallbacks)
-  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/cap-sentinel.txt" \
+  local cf_raw
+  cf_raw=$( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/cap-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES="$2" \
-      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) \
-    | sed -n "s/^tree-selftest: $3=//p;s/.*[ ]$3=\([^ ]*\).*/\1/p" | head -1
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null )
+  sed -n "/^tree-selftest: $3=/{s/^tree-selftest: $3=//p;q;}; /.*[ ]$3=\([^ ]*\).*/{s/.*[ ]$3=\([^ ]*\).*/\1/p;q;}" <<<"$cf_raw"
 }
 for lowcap in 0 1 4095; do
   got=$(cap_field "$r1" "$lowcap" cap-line)
@@ -473,10 +475,12 @@ else
 fi
 
 validate_manifest() { # validate_manifest <repo> <file> <nul|nl> <head> <count> -> yes|no
-  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/validate-sentinel.txt" \
+  local vm_raw
+  vm_raw=$( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/validate-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=validate-manifest \
       AGENT_GATE_TREE_SELFTEST_VALIDATE="$2|$3|$4|$5" \
-      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) | sed -n 's/^tree-selftest: manifest-ok=//p' | head -1
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null )
+  sed -n '/^tree-selftest: manifest-ok=/{s/^tree-selftest: manifest-ok=//p;q;}' <<<"$vm_raw"
 }
 v_intact=$(validate_manifest "$r_t" "$mT1" nul "$t_head" "$body_n")
 v_trunc=$(validate_manifest "$r_t" "$mT1.trunc" nul "$t_head" "$body_n")
@@ -520,9 +524,10 @@ rm -f "$r_t/zz-untracked.txt"
 # DISARMING the carve-out (#2926 review). Benign only while the sentinel write also
 # fails — the day anything mkdir -p's the parent it is a guaranteed false FAIL.
 capture_exclude_rel() { # capture_exclude_rel <repo> <pinned-summary-path>
-  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$2" AGENT_GATE_TREE_SELFTEST=capture \
-      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) \
-    | sed -n 's/^tree-selftest: exclude-rel=//p' | head -1
+  local cx_raw
+  cx_raw=$( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$2" AGENT_GATE_TREE_SELFTEST=capture \
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null )
+  sed -n '/^tree-selftest: exclude-rel=/{s/^tree-selftest: exclude-rel=//p;q;}' <<<"$cx_raw"
 }
 mkdir -p "$r_t/existing"
 xr_have=$(capture_exclude_rel "$r_t" "$r_t/existing/sum.txt")
@@ -558,8 +563,8 @@ else
   cat "$sum" 2>/dev/null
 fi
 if grep -q '^tree-start: ' "$sum" && grep -q '^tree-end: ' "$sum"; then
-  s_start=$(sed -n 's/^tree-start: .*digest: //p' "$sum" | head -1)
-  s_end=$(sed -n 's/^tree-end: .*digest: //p' "$sum" | head -1)
+  s_start=$(sed -n '/^tree-start: .*digest: /{s/^tree-start: .*digest: //p;q;}' "$sum")
+  s_end=$(sed -n '/^tree-end: .*digest: /{s/^tree-end: .*digest: //p;q;}' "$sum")
   if [ -n "$s_start" ] && [ "$s_start" = "$s_end" ]; then
     ok "B(hook): the block carries tree-start/tree-end with EQUAL digests"
   else
@@ -667,8 +672,8 @@ b_before=$( cd "$r2" && git rev-parse HEAD )
     GIT_COMMITTER_NAME=gate GIT_COMMITTER_EMAIL=gate@example.invalid \
     bash "$r2/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
 b_after=$( cd "$r2" && git rev-parse HEAD )
-b_stamp=$(sed -n 's/^commit: \([^ ]*\).*/\1/p' "$sum" | head -1)
-b_end=$(sed -n 's/^tree-end: \([^ ]*\) .*/\1/p' "$sum" | head -1)
+b_stamp=$(sed -n '/^commit: \([^ ]*\).*/{s/^commit: \([^ ]*\).*/\1/p;q;}' "$sum")
+b_end=$(sed -n '/^tree-end: \([^ ]*\) .*/{s/^tree-end: \([^ ]*\) .*/\1/p;q;}' "$sum")
 if [ "$b_before" != "$b_after" ]; then
   ok "H2: the fixture really moved HEAD at the boundary (${b_before:0:7}→${b_after:0:7}) — start and post-mutation identities differ"
 else
@@ -709,9 +714,9 @@ pf_before=$( cd "$r2" && git rev-parse HEAD )
     GIT_COMMITTER_NAME=gate GIT_COMMITTER_EMAIL=gate@example.invalid \
     bash "$r2/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
 pf_after=$( cd "$r2" && git rev-parse HEAD )
-pf_stamp=$(sed -n 's/^commit: \([^ ]*\).*/\1/p' "$sum" | head -1)
-pf_dirty=$(sed -n 's/^commit: .*dirty: \([^ ]*\).*/\1/p' "$sum" | head -1)
-pf_endd=$(sed -n 's/^tree-end: .*dirty: \([^ ]*\).*/\1/p' "$sum" | head -1)
+pf_stamp=$(sed -n '/^commit: \([^ ]*\).*/{s/^commit: \([^ ]*\).*/\1/p;q;}' "$sum")
+pf_dirty=$(sed -n '/^commit: .*dirty: \([^ ]*\).*/{s/^commit: .*dirty: \([^ ]*\).*/\1/p;q;}' "$sum")
+pf_endd=$(sed -n '/^tree-end: .*dirty: \([^ ]*\).*/{s/^tree-end: .*dirty: \([^ ]*\).*/\1/p;q;}' "$sum")
 if [ "$pf_before" != "$pf_after" ]; then
   ok "C1: the fixture really moved HEAD between the terminal capture and the emit (${pf_before:0:7}→${pf_after:0:7})"
 else
@@ -736,8 +741,8 @@ fi
 # …and the CONTROL: on an unmutated run the same stamp is the real, current sha — the
 # capture-derived stamp is not a constant, and not a placeholder.
 ctl_head=$( cd "$r2" && git rev-parse HEAD )
-ctl_stamp=$(sed -n 's/^commit: \([^ ]*\).*/\1/p' "$tmp/hook-clean.txt" | head -1)
-ctl_branch=$(sed -n 's/^commit: .* branch: \([^ ]*\).*/\1/p' "$tmp/hook-clean.txt" | head -1)
+ctl_stamp=$(sed -n '/^commit: \([^ ]*\).*/{s/^commit: \([^ ]*\).*/\1/p;q;}' "$tmp/hook-clean.txt")
+ctl_branch=$(sed -n '/^commit: .* branch: \([^ ]*\).*/{s/^commit: .* branch: \([^ ]*\).*/\1/p;q;}' "$tmp/hook-clean.txt")
 if [ -n "$ctl_stamp" ] && [ "$ctl_stamp" != selftest ] && [ "$ctl_stamp" != unverified ]; then
   ok "C1 control: an unmutated run stamps a REAL capture-derived sha ($ctl_stamp), not a constant"
 else
@@ -760,7 +765,7 @@ sum="$tmp/hook-capcount.txt"
 ( cd "$r_cap" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=clean \
     AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
     bash "$r_cap/scripts/agent-gate.sh" >"$tmp/hook-capcount.out" 2>&1 ); rc=$?
-cap_line=$(grep '^tree-hash-cap: ' "$sum" 2>/dev/null | head -1)
+cap_line=$(grep -m 1 '^tree-hash-cap: ' "$sum" 2>/dev/null)
 if [ "$rc" -eq 0 ] && [ "$cap_line" = "tree-hash-cap: 4096 bytes (1 untracked file(s) recorded by size+mtime)" ]; then
   ok "cap: ONE oversized untracked file is reported ONCE across the start AND terminal captures"
 else
@@ -821,7 +826,7 @@ sum="$tmp/hook-lock-multi.txt"
 ( cd "$r3" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=terminal \
     AGENT_GATE_TREE_SELFTEST_MUTATE="Cargo.lock member/Cargo.lock" \
     bash "$r3/scripts/agent-gate.sh" >"$tmp/hook-lock-multi.out" 2>&1 ); rc=$?
-lock_line=$(sed -n 's/^tree-integrity: PASS (lockfile-settled: \(.*\))$/\1/p' "$sum" | head -1)
+lock_line=$(sed -n '/^tree-integrity: PASS (lockfile-settled: \(.*\))$/{s/^tree-integrity: PASS (lockfile-settled: \(.*\))$/\1/p;q;}' "$sum")
 if [ "$rc" -eq 0 ] && grep -q '^RESULT: PASS' "$sum" \
    && grep -q 'Cargo.lock ' <<<"$lock_line" \
    && grep -q 'member/Cargo.lock ' <<<"$lock_line"; then
@@ -850,7 +855,7 @@ sum="$tmp/hook-many.txt"
     AGENT_GATE_TREE_SELFTEST_MUTATE="$many" \
     bash "$r_many/scripts/agent-gate.sh" >"$tmp/hook-many.out" 2>&1 ); rc=$?
 assert_named_fail "truncation (7 changed paths)" "$sum" "$rc"
-changed_list=$(sed -n 's/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p' "$sum" | head -1)
+changed_list=$(sed -n '/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/{s/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p;q;}' "$sum")
 n_named=$(grep -o 'f[0-9]\.txt' <<<"$changed_list" | wc -l | tr -d ' ')
 if [ "$n_named" = 5 ] && grep -q '(+2 more)' <<<"$changed_list"; then
   ok "truncation: 7 changed paths render as 5 named + '(+2 more)' ($changed_list)"
@@ -865,7 +870,7 @@ sum="$tmp/hook-many5.txt"
     AGENT_GATE_TREE_SELFTEST_MUTATE="f1.txt f2.txt f3.txt f4.txt f5.txt" \
     bash "$r_many/scripts/agent-gate.sh" >"$tmp/hook-many5.out" 2>&1 ); rc=$?
 assert_named_fail "truncation control (exactly 5 changed paths)" "$sum" "$rc"
-changed5=$(sed -n 's/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p' "$sum" | head -1)
+changed5=$(sed -n '/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/{s/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p;q;}' "$sum")
 if [ "$(grep -o 'f[0-9]\.txt' <<<"$changed5" | wc -l | tr -d ' ')" = 5 ] \
    && ! grep -q 'more)' <<<"$changed5"; then
   ok "truncation control: exactly 5 changed paths are ALL named with no remainder marker"
@@ -916,8 +921,8 @@ else
 fi
 # No emitted block may claim PASS while its own start/end lines disagree.
 for f in "$tmp/hook-badhash.txt" "$tmp/hook-badhash-clean.txt" "$tmp/hook-clean.txt"; do
-  s_d=$(sed -n 's/^tree-start: .*dirty: \([^ ]*\).*/\1/p' "$f" | head -1)
-  e_d=$(sed -n 's/^tree-end: .*dirty: \([^ ]*\).*/\1/p' "$f" | head -1)
+  s_d=$(sed -n '/^tree-start: .*dirty: \([^ ]*\).*/{s/^tree-start: .*dirty: \([^ ]*\).*/\1/p;q;}' "$f")
+  e_d=$(sed -n '/^tree-end: .*dirty: \([^ ]*\).*/{s/^tree-end: .*dirty: \([^ ]*\).*/\1/p;q;}' "$f")
   if grep -q '^tree-integrity: PASS' "$f" 2>/dev/null && [ -n "$s_d" ] && [ "$s_d" != "$e_d" ]; then
     bad "B1: $(basename "$f") stamps PASS while tree-start/tree-end disagree (dirty $s_d vs $e_d)"
   else
@@ -1253,8 +1258,8 @@ QPY
       CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
       FAKE_QUEUE_MUTATE="$r6/README.md" \
       bash "$r6/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
-  q_start=$(sed -n 's/^tree-start: .*digest: //p' "$sum" | head -1)
-  q_end=$(sed -n 's/^tree-end: .*digest: //p' "$sum" | head -1)
+  q_start=$(sed -n '/^tree-start: .*digest: /{s/^tree-start: .*digest: //p;q;}' "$sum")
+  q_end=$(sed -n '/^tree-end: .*digest: /{s/^tree-end: .*digest: //p;q;}' "$sum")
   post_digest=$(digest_of "$r6")
   if grep -q '^tree-integrity: PASS$' "$sum" 2>/dev/null \
      && [ -n "$q_start" ] && [ "$q_start" = "$q_end" ]; then
@@ -1581,8 +1586,8 @@ fi
 ( cd "$r4" && git checkout -q -- README.md )
 sum="$tmp/lite-ctl.txt"; out="$tmp/lite-ctl.out"
 run_gate "$r4" "$sum" "$out" --lite; rc=$?
-l_start=$(sed -n 's/^tree-start: .*digest: //p' "$sum" | head -1)
-l_end=$(sed -n 's/^tree-end: .*digest: //p' "$sum" | head -1)
+l_start=$(sed -n '/^tree-start: .*digest: /{s/^tree-start: .*digest: //p;q;}' "$sum")
+l_end=$(sed -n '/^tree-end: .*digest: /{s/^tree-end: .*digest: //p;q;}' "$sum")
 if grep -q '^tree-integrity: PASS$' "$sum" && [ -n "$l_start" ] && [ "$l_start" = "$l_end" ]; then
   ok "G(--lite control): the LITE block carries tree-start/tree-end/tree-integrity: PASS with equal digests"
 else
@@ -1682,7 +1687,7 @@ if grep -q 'summary-integrity: FAIL' "$out" \
   ok "coexistence: a clobbered AND mutated run emits BOTH named lines under a single RESULT: FAIL"
 else
   bad "coexistence: the two guards do not compose (rc=$rc)"
-  grep -E 'summary-integrity|tree-integrity|^RESULT:' "$out" 2>/dev/null | head
+  grep -m 10 -E 'summary-integrity|tree-integrity|^RESULT:' "$out" 2>/dev/null
 fi
 ( cd "$r4" && git checkout -q -- README.md )
 
@@ -1708,14 +1713,15 @@ fi
 
 echo "=== phase 5: structural wiring (the mechanism cannot go inert) =============="
 
-if awk '/^record_result\(\) \{/,/^\}/' "$GATE" | grep -q '_assert_tree_integrity "\$1"'; then
+_sp_cap=$(awk '/^record_result\(\) \{/,/^\}/' "$GATE")
+if grep -q '_assert_tree_integrity "\$1"' <<<"$_sp_cap"; then
   ok "WIRING: record_result() calls _assert_tree_integrity \"\$1\" (boundary chokepoint live)"
 else
   bad "WIRING: record_result() does NOT call the tree guard — the mechanism is inert on a real gate"
 fi
 cap_ln=$(grep -n '^  _tree_capture_start$' "$GATE" | tail -1 | cut -d: -f1)
-lite_ln=$(grep -n '^  run_lite$' "$GATE" | head -1 | cut -d: -f1)
-delta_ln=$(grep -n '^  run_delta "\$DELTA_ANCHOR"$' "$GATE" | head -1 | cut -d: -f1)
+lite_ln=$(grep -m 1 -n '^  run_lite$' "$GATE" | cut -d: -f1)
+delta_ln=$(grep -m 1 -n '^  run_delta "\$DELTA_ANCHOR"$' "$GATE" | cut -d: -f1)
 slot_ln=$(grep -n '^acquire_gate_slot$' "$GATE" | tail -1 | cut -d: -f1)
 recap_ln=$(grep -n '^_tree_recapture_after_slot$' "$GATE" | tail -1 | cut -d: -f1)
 if [ -n "$cap_ln" ] && [ -n "$lite_ln" ] && [ -n "$delta_ln" ] && [ -n "$slot_ln" ] \
@@ -1741,14 +1747,16 @@ else
   bad "WIRING: _tree_meta_array's finalize would run inside the < <(…) subshell (fail-closed assignment discarded)"
 fi
 # B7: every capture artifact a SIDE lane can write must be per-lane, terminal included.
-if awk '/^_tree_finalize\(\) \{/,/^\}/' "$GATE" | grep -q 'tree-identity\.end\.\${BASHPID' \
+_sp_cap=$(awk '/^_tree_finalize\(\) \{/,/^\}/' "$GATE")
+if grep -q 'tree-identity\.end\.\${BASHPID' <<<"$_sp_cap" \
    && grep -q 'tree-identity\.probe\.\${BASHPID' "$GATE"; then
   ok "WIRING: both the boundary probe AND the terminal capture use per-lane paths (no SIDE-lane race)"
 else
   bad "WIRING: the terminal capture path is not per-lane — concurrent SIDE lanes would race it"
 fi
 # B1: the identity is never split with `IFS=$'\t' read` (which collapses empty fields).
-if awk '/^_tree_capture_start\(\) \{/,/^\}/' "$GATE" | grep -q "IFS=\$'\\\\t' read -r TREE_START_HEAD"; then
+_sp_cap=$(awk '/^_tree_capture_start\(\) \{/,/^\}/' "$GATE")
+if grep -q "IFS=\$'\\\\t' read -r TREE_START_HEAD" <<<"$_sp_cap"; then
   bad "WIRING: the start identity is still split with IFS=\$'\\t' read (empty fields collapse)"
 else
   ok "WIRING: the identity is split by _tree_split_identity, which preserves empty fields and validates each"
@@ -1969,7 +1977,8 @@ code_only() { sed 's/[[:space:]]*#.*$//'; }
 # component-set pre-flight's `_component_set_vsnap` (#4413 job 103) writes with `hash-object -w`
 # on purpose, into a THROWAWAY store addressed by --git-dir, never the shared ODB.
 tree_fns=$(awk '/^_tree_[A-Za-z0-9_]*\(\) \{/{f=1} f{print} /^\}/{f=0}' "$GATE")
-if grep 'hash-object' <<<"$tree_fns" | code_only | grep -qE '(^|[[:space:]])-w([[:space:]]|$)'; then
+tree_fns_ho=$(grep 'hash-object' <<<"$tree_fns" | code_only)
+if grep -qE '(^|[[:space:]])-w([[:space:]]|$)' <<<"$tree_fns_ho"; then
   bad "SIDE-EFFECTS: a hash-object call uses -w — the capture would write to the shared ODB"
 else
   ok "SIDE-EFFECTS: no hash-object call in the _tree_* capture helpers uses -w (nothing is written to the object database)"
