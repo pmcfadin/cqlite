@@ -57,7 +57,7 @@ run() {
 
 # verdict_of <output> — echo the token from the single `verdict ` line.
 verdict_of() {
-  sed -n 's/^DRIVE-STATE: verdict \([^ ]*\).*/\1/p' <<<"$1" | head -1
+  sed -n '/^DRIVE-STATE: verdict \([^ ]*\).*/{s/^DRIVE-STATE: verdict \([^ ]*\).*/\1/p;q;}' <<<"$1"
 }
 
 # verdict_count <output> — how many `verdict ` lines the run emitted. Contract (c) says
@@ -302,8 +302,8 @@ case_begin 9-writer-refuses-sentinel-body "the writer REFUSES a body carrying a 
 # ===========================================================================
 L9=$(lane lane9)
 body="$T/body9.md"
-sentinel=$(sed -n 's/^STAMP_BEGIN=.\(.*\).$/\1/p' "$DS" | head -1)
-sentinel_end=$(sed -n 's/^STAMP_END=.\(.*\).$/\1/p' "$DS" | head -1)
+sentinel=$(sed -n '/^STAMP_BEGIN=.\(.*\).$/{s/^STAMP_BEGIN=.\(.*\).$/\1/p;q;}' "$DS")
+sentinel_end=$(sed -n '/^STAMP_END=.\(.*\).$/{s/^STAMP_END=.\(.*\).$/\1/p;q;}' "$DS")
 # BOTH sentinels are load-bearing for cases 9, 10, 21 and 22. An empty extraction would make
 # `grep -vFx ""` strip blank lines instead of the end sentinel, so the state under test would
 # not be the state named — a case passing for the wrong reason. Asserted, not assumed.
@@ -420,7 +420,7 @@ fi
 # END-TO-END, on a CANONICAL value: what the marker records IS what claim.sh would record.
 cm_canon=$(CLAIM_MACHINE='build-box' bash "$cm_body")
 run "$L11" "CLAIM_MACHINE=build-box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
-ds_machine=$(sed -n 's/^machine: //p' "$L11/$MARKER" | head -1)
+ds_machine=$(sed -n '/^machine: /{s/^machine: //p;q;}' "$L11/$MARKER")
 if [ -n "$cm_canon" ] && [ "$cm_canon" = "$ds_machine" ]; then
   ok "end-to-end: the value RECORDED in the marker equals claim.sh's this_machine in the same environment ('$ds_machine')"
 else
@@ -1394,7 +1394,7 @@ kill "$ap_d1" 2>/dev/null; wait "$ap_d1" 2>/dev/null
 sleep 300 & ap_d2=$!
 ap_ad=$(run "$L31" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$ap_d2" -- \
   adopt 3822 --reason cron-reinvoke:writer-pid-gone-31); ap_adrc=$?
-ap_ts1="$(sed -n 's/^prior-ts: //p' "$L31/$MARKER" | head -1)"
+ap_ts1="$(sed -n '/^prior-ts: /{s/^prior-ts: //p;q;}' "$L31/$MARKER")"
 if [ "$ap_adrc" -eq 0 ] && [ "$(verdict_of "$ap_ad")" = ADOPTED ] \
    && grep -q "^prior-session: $SESS_A\$" "$L31/$MARKER" \
    && grep -q "^prior-session-pid: $ap_d1\$" "$L31/$MARKER" \
@@ -2264,7 +2264,7 @@ case_begin 39-body-bytes-survive-repeated-writes "the BODY survives an owned wri
 # script now uses, so a defect in one cannot cancel a defect in the other.
 after_sentinel() {
   local off
-  off=$(LC_ALL=C grep -abFx -e "$sentinel_end" "$1" 2>/dev/null | head -1 | cut -d: -f1)
+  off=$(LC_ALL=C grep -m 1 -abFx -e "$sentinel_end" "$1" 2>/dev/null | cut -d: -f1)
   case "$off" in ''|*[!0-9]*) : >"$2"; return 1 ;; esac
   # `off` is the 0-based byte offset of the sentinel line's first byte; the body begins after the
   # sentinel's own bytes AND its newline. `tail -c +N` is 1-based, hence the +2.
@@ -2280,16 +2280,17 @@ after_sentinel "$L39/$MARKER" "$T/39-r1"
 if cmp -s "$T/39-r1" "$T/39-canonical"; then
   ok "the first write lays down exactly one writer-owned separator followed by the body verbatim"
 else
+  d39_cmp=$(cmp -l "$T/39-canonical" "$T/39-r1"); d39_cat=$(cat -A "$T/39-r1")
   bad "the first write's post-sentinel bytes are not the canonical shape:
-$(cmp -l "$T/39-canonical" "$T/39-r1" | head -5)
-$(cat -A "$T/39-r1" | head -8)"
+$(head -5 <<<"$d39_cmp")
+$(head -8 <<<"$d39_cat")"
 fi
 b39_fail=0
 i=2
 while [ "$i" -le 4 ]; do
   run "$L39" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage "round$i" >/dev/null 2>&1
   after_sentinel "$L39/$MARKER" "$T/39-r$i"
-  cmp -s "$T/39-r1" "$T/39-r$i" || { b39_fail=1; printf 'note   write #%s changed the body bytes:\n%s\n' "$i" "$(cat -A "$T/39-r$i" | head -8)"; }
+  cmp -s "$T/39-r1" "$T/39-r$i" || { b39_fail=1; d39_ri=$(cat -A "$T/39-r$i"); printf 'note   write #%s changed the body bytes:\n%s\n' "$i" "$(head -8 <<<"$d39_ri")"; }
   i=$((i + 1))
 done
 if [ "$b39_fail" -eq 0 ]; then
@@ -2308,8 +2309,9 @@ after_sentinel "$L39A/$MARKER" "$T/39a-after"
 if cmp -s "$T/39a-before" "$T/39a-after" && cmp -s "$T/39a-after" "$T/39-canonical"; then
   ok "an adopt carries the body across BYTE-FOR-BYTE and adds no separator of its own"
 else
+  d39a_cat=$(cat -A "$T/39a-after")
   bad "the adopt mutated the body bytes:
-$(cat -A "$T/39a-after" | head -8)"
+$(head -8 <<<"$d39a_cat")"
 fi
 # NON-VACUITY: the comparisons above are over a REAL body, not an empty one.
 if [ -s "$T/39-r1" ] && grep -q 'step two' "$T/39-r1"; then
@@ -2427,8 +2429,8 @@ fi
 # (which derives its path from that axis). A reordering that reintroduces K2 reds here even if a
 # future refactor changes the refusal text.
 adopt_body=$(LC_ALL=C sed -n '/^cmd_adopt() {/,/^}/p' "$DS")
-a_axis_ln=$(grep -n '^  require_worktree_axis$' <<<"$adopt_body" | head -1 | cut -d: -f1)
-a_lock_ln=$(grep -n '^  lock_marker$' <<<"$adopt_body" | head -1 | cut -d: -f1)
+a_axis_ln=$(grep -m 1 -n '^  require_worktree_axis$' <<<"$adopt_body" | cut -d: -f1)
+a_lock_ln=$(grep -m 1 -n '^  lock_marker$' <<<"$adopt_body" | cut -d: -f1)
 if [ -n "$a_axis_ln" ] && [ -n "$a_lock_ln" ] && [ "$a_axis_ln" -lt "$a_lock_ln" ]; then
   ok "STRUCTURAL: cmd_adopt calls require_worktree_axis (line $a_axis_ln of the function) BEFORE lock_marker (line $a_lock_ln)"
 else
@@ -2469,8 +2471,9 @@ after_sentinel "$L41/$MARKER" "$T/41-r1"
 if cmp -s "$T/41-r1" "$T/41-canonical"; then
   ok "the FIRST write lays the body down verbatim — no newline added, no CRLF rewritten, no blank line trimmed"
 else
+  d41_cmp=$(cmp -l "$T/41-canonical" "$T/41-r1")
   bad "the first write already mutated the body:
-$(cmp -l "$T/41-canonical" "$T/41-r1" | head -5)
+$(head -5 <<<"$d41_cmp")
 $(cat -A "$T/41-r1" | tail -5)"
 fi
 b41_fail=0
@@ -2479,9 +2482,10 @@ while [ "$i" -le 4 ]; do
   run "$L41" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage "round$i" >/dev/null 2>&1
   after_sentinel "$L41/$MARKER" "$T/41-r$i"
   cmp -s "$T/41-canonical" "$T/41-r$i" || { b41_fail=1
+    d41_ri=$(cmp -l "$T/41-canonical" "$T/41-r$i")
     printf 'note   carry-forward write #%s changed the body bytes (%s -> %s bytes):\n%s\n' \
       "$i" "$(wc -c <"$T/41-canonical" | tr -d ' ')" "$(wc -c <"$T/41-r$i" | tr -d ' ')" \
-      "$(cmp -l "$T/41-canonical" "$T/41-r$i" | head -3)"; }
+      "$(head -3 <<<"$d41_ri")"; }
   i=$((i + 1))
 done
 if [ "$b41_fail" -eq 0 ]; then
@@ -2499,8 +2503,9 @@ after_sentinel "$L41A/$MARKER" "$T/41a-after"
 if cmp -s "$T/41-canonical" "$T/41a-after"; then
   ok "an ADOPT carries the unterminated body across byte-for-byte too"
 else
+  d41a_cmp=$(cmp -l "$T/41-canonical" "$T/41a-after")
   bad "the adopt mutated the body bytes ($(wc -c <"$T/41-canonical" | tr -d ' ') -> $(wc -c <"$T/41a-after" | tr -d ' ') bytes):
-$(cmp -l "$T/41-canonical" "$T/41a-after" | head -3)"
+$(head -3 <<<"$d41a_cmp")"
 fi
 # THE HELPER ITSELF IS PROVED BYTE-EXACT, or every cmp above is an assertion about the extractor.
 # A file whose post-sentinel region is KNOWN is extracted and compared to those known bytes.
@@ -2553,7 +2558,7 @@ uncomment() { grep -v '^[[:space:]]*#' <<<"$1"; }
 v42_body=$(awk '/^verdict\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
 v42_code=$(uncomment "$v42_body")
 v42_print=$(grep -n "printf '%s verdict" <<<"$v42_code" | head -1 | cut -d: -f1)  # sigpipe-fixture: printf is inside a quoted grep pattern, not a printf pipe
-v42_flag=$(grep -n '^ *VERDICT_EMITTED=1$' <<<"$v42_code" | head -1 | cut -d: -f1)
+v42_flag=$(grep -m 1 -n '^ *VERDICT_EMITTED=1$' <<<"$v42_code" | cut -d: -f1)
 if [ -n "$v42_print" ] && [ -n "$v42_flag" ] && [ "$v42_print" -lt "$v42_flag" ]; then
   ok "STRUCTURAL: inside verdict(), the verdict line is PRINTED (body line $v42_print) before VERDICT_EMITTED is committed (body line $v42_flag)"
 else
@@ -2579,8 +2584,8 @@ $(grep -n "printf '%s verdict %s" "$DS")"
 fi
 s42_body=$(awk '/^on_signal\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
 s42_code=$(uncomment "$s42_body")
-s42_ing=$(grep -n 'VERDICT_EMITTING' <<<"$s42_code" | head -1 | cut -d: -f1)
-s42_ed=$(grep -n 'VERDICT_EMITTED' <<<"$s42_code" | head -1 | cut -d: -f1)
+s42_ing=$(grep -m 1 -n 'VERDICT_EMITTING' <<<"$s42_code" | cut -d: -f1)
+s42_ed=$(grep -m 1 -n 'VERDICT_EMITTED' <<<"$s42_code" | cut -d: -f1)
 if [ -n "$s42_ing" ] && [ -n "$s42_ed" ] && [ "$s42_ing" -lt "$s42_ed" ]; then
   ok "STRUCTURAL: on_signal consults the in-flight flag (body line $s42_ing) BEFORE it may conclude 'already emitted' (body line $s42_ed)"
 else
@@ -2746,7 +2751,7 @@ fi
 L43f=$(lane "lane43 f")
 L43g=$(lane "lane43-f")
 wv_w=$(run "$L43f" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); wv_wrc=$?
-wv_rec=$(sed -n 's/^worktree: //p' "$L43f/$MARKER" | head -1)
+wv_rec=$(sed -n '/^worktree: /{s/^worktree: //p;q;}' "$L43f/$MARKER")
 cp "$L43f/$MARKER" "$L43g/$MARKER"
 wv_v=$(run "$L43g" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); wv_vrc=$?
 if [ "$wv_wrc" -eq 0 ] && [ "$wv_rec" = "$L43f" ] && [ "$wv_rec" != "$L43g" ] \
@@ -3372,7 +3377,7 @@ sp_line_of() {
   local f="$1" sig="$2" l hit=''
   while read -r l _; do
     [ -n "$l" ] || continue
-    if sed -n "${l}p" "$f" 2>/dev/null | grep -Fq -- "$sig"; then
+    if _sp_cap=$(sed -n "${l}p" "$f" 2>/dev/null) && grep -Fq -- "$sig" <<<"$_sp_cap"; then
       [ -z "$hit" ] || return 1     # ambiguous signature — refuse rather than guess
       hit="$l"
     fi
@@ -3558,7 +3563,7 @@ sp_run_startwindow() {   # sp_run_startwindow <script-dir>
       bash "$sd/drive-issue-state.sh" write 4032 2>&1 ) || true
 }
 
-sp_end="$(sed -n 's/^STAMP_END=.\(.*\).$/\1/p' "$DS" | head -1)"
+sp_end="$(sed -n '/^STAMP_END=.\(.*\).$/{s/^STAMP_END=.\(.*\).$/\1/p;q;}' "$DS")"
 if [ -n "$sp_end" ]; then :; else
   bad "could not derive STAMP_END from $DS — the oversize-prologue probe cannot be built"
 fi
@@ -3581,8 +3586,9 @@ sp_probe() {
     ok "$tag: the SHIPPED $pf:$pl emits nothing unprefixed with SIGPIPE ignored and its reader gone (both streams combined)"
   else
     sp_leaks=$((sp_leaks + 1))
+    sp_lk_out=$(grep -v '^DRIVE-STATE: ' <<<"$out" | cut -c1-200)
     bad "$tag: the SHIPPED $pf:$pl LEAKED an unprefixed line:
-$(grep -v '^DRIVE-STATE: ' <<<"$out" | cut -c1-200 | head -5 | cat -v)"
+$(head -5 <<<"$sp_lk_out" | cat -v)"
   fi
   broken="$(sp_tree "$tag" "$pf" "$pl")" || {
     bad "$tag: planting the defect at $pf:$pl changed NOTHING (or the scratch copy failed), so NO positive control was taken for this site — read the row above as an unverified probe, not as coverage. The usual cause is that $pf:$pl ALREADY lacks its own suppressor (the sweep above names it)."; return 1; }
@@ -3602,8 +3608,9 @@ $(grep -v '^DRIVE-STATE: ' <<<"$out" | cut -c1-200 | head -5 | cat -v)"
     sp_controls=$((sp_controls + 1))
     ok "POSITIVE CONTROL $tag: with $pf:$pl's OWN suppressor removed the probe LEAKS, and the leaked line NAMES the planted site ($needle) — so this probe demonstrably reaches it"
   else
+    sp_lk_ctl=$(grep -v '^DRIVE-STATE: ' <<<"$ctl" | cut -c1-200)
     bad "POSITIVE CONTROL $tag DID NOT REPRODUCE: planting the defect at $pf:$pl produced no leak naming that site, so the shipped row ABOVE covers NOTHING. Do not read it as coverage.
-$(grep -v '^DRIVE-STATE: ' <<<"$ctl" | cut -c1-200 | head -5 | cat -v)"
+$(head -5 <<<"$sp_lk_ctl" | cat -v)"
   fi
 }
 
@@ -3647,8 +3654,9 @@ if [ -n "$sp_gap_line" ] && [ -n "$sp_gap_tree" ]; then
      && grep -Fq "printf '%.120s'" "$DS"; then
     ok "DECLARED GAP: 1 RECOGNISED — drive-issue-state.sh:$sp_gap_line (the --reason placeholder fold) is covered STRUCTURALLY (the sweep + the disposition table) and NOT behaviourally. MEASURED: with its suppressor removed and an 81920-byte --reason offered, the reader was REACHED (witness present) and nothing leaked, because sanitize_field truncates \$tok to 120 bytes (printf '%.120s') — far under pipe capacity. The reader-exits-first route is a real scheduling race and is deliberately not asserted."
   else
+    sp_lk_gap=$(grep -v '^DRIVE-STATE: ' <<<"$sp_gap_out" | cut -c1-200)
     bad "the declared gap's own measurement did not hold: witness=$([ -f "$sp_gap_witness" ] && echo reached || echo NOT-REACHED) anchored=$(all_lines_anchored "$sp_gap_out" && echo yes || echo NO) cap-present=$(grep -Fq "printf '%.120s'" "$DS" && echo yes || echo NO). If the 120-byte cap is gone this site is now FORCEABLE and owes a behavioural probe, not a gap.
-$(grep -v '^DRIVE-STATE: ' <<<"$sp_gap_out" | cut -c1-200 | head -5 | cat -v)"
+$(head -5 <<<"$sp_lk_gap" | cat -v)"
   fi
 else
   bad "could not derive or plant the --reason placeholder-fold site, so its DECLARED GAP is itself unmeasured (line='$sp_gap_line')"

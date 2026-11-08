@@ -212,6 +212,14 @@ emit_block() { python3 "$EXTRACT" emit "$1" "$2"; }
 # does not interpret, so the record lines would survive this filter and every `findings_of` test
 # below would see them as findings — the mandatory gate failing on a supported host (#3451 review
 # round 4, same macOS family as the bash 3.2 item).
+# findings_head N BLOCK — first N findings, captured first so no pipe closes early on the writer (#4451).
+findings_head() {
+  local n="$1" fh_all fh_rc
+  fh_all=$(findings_of "$2"); fh_rc=$?
+  head -"$n" <<<"$fh_all"
+  return "$fh_rc"      # the writer's status, as the old pipeline reported it under pipefail
+}
+
 findings_of() {
   grep -v '^#COMPLETE ' <<<"$1" \
     | grep -vE '^(BLOCK|MENTION|SCRIPT)([[:space:]]|$)' \
@@ -429,7 +437,7 @@ census_out="$(census "$DRIVER")"
 if grep -q '^#COMPLETE ' <<<"$census_out" && [ -z "$(findings_of "$census_out")" ]; then
   pass "census: the shipped driver's python occurrences are ALL classified, with no finding ($(grep '^#COMPLETE ' <<<"$census_out"))"
 else
-  fail "census: the driver's python census did not COMPLETE cleanly — $(findings_of "$census_out" | head -3)"
+  fail "census: the driver's python census did not COMPLETE cleanly — $(findings_head 3 "$census_out")"
 fi
 
 block_count="$(grep -c '^BLOCK	' <<<"$census_out")"
@@ -511,7 +519,7 @@ pathlib.Path(sys.argv[2]).write_text(text[: i + len(opener)] + "import sys\nprin
 INJECT
 und_out="$(census "$UNDELIMITED")"
 if [ -n "$(findings_of "$und_out")" ] && grep -q 'never closed' <<<"$und_out"; then
-  pass "census CONTROL fired: an unterminated block is a FINDING — $(findings_of "$und_out" | head -1 | cut -c1-110)"
+  pass "census CONTROL fired: an unterminated block is a FINDING — $(findings_head 1 "$und_out" | cut -c1-110)"
 else
   fail "census CONTROL did not fire: an unterminated embedded block must be a finding, got: $(head -3 <<<"$und_out")"
 fi
@@ -525,7 +533,7 @@ unk_out="$(census "$UNKNOWN_SHAPE")"
 if grep -q 'matches none of the shapes' <<<"$unk_out"; then
   pass "census CONTROL fired: an unrecognised python3 invocation shape is a FINDING (fail-closed, so a future step cannot fall outside the compile check)"
 else
-  fail "census CONTROL did not fire: an unrecognised python3 shape must be a finding, got: $(findings_of "$unk_out" | head -2)"
+  fail "census CONTROL did not fire: an unrecognised python3 shape must be a finding, got: $(findings_head 2 "$unk_out")"
 fi
 
 # --- POSITIVE CONTROL 1c: a step that DISAPPEARED is a failure, not a suite testing one block twice
@@ -567,7 +575,7 @@ idiom_compile="$(compile_blocks "$IDIOM_FILE")"
 idiom_blocks="$(grep -c '^BLOCK	' <<<"$idiom_census")"
 idiom_apostrophe=0
 for ((bn = 1; bn <= idiom_blocks; bn++)); do
-  emit_block "$IDIOM_FILE" "$bn" | grep -q "'" && idiom_apostrophe=1
+  emit_blk_txt=$(emit_block "$IDIOM_FILE" "$bn") && grep -q "'" <<<"$emit_blk_txt" && idiom_apostrophe=1
 done
 # THE SUBJECT IS THE IDIOM, NOT A FINDING COUNT. This file also contains a python HEREDOC at
 # `lib-ws0-fixtures.sh:149`, and since round 6 removed heredoc support that is a finding BY
@@ -617,7 +625,7 @@ if [ "$tr_blocks" -eq "$((block_count + 1))" ] && [ -z "$(findings_of "$tr_censu
    && grep -q 'DOES NOT COMPILE' <<<"$tr_compile"; then
   pass "census CONTROL fired (trailing-closer shape): a block closed at the END of its last body line is DELIMITED ($tr_blocks blocks, no undelimited finding) and a defect inside it is REPORTED"
 else
-  fail "census CONTROL did not fire (trailing-closer shape): blocks=$tr_blocks (expected $((block_count + 1))), census='$(findings_of "$tr_census" | head -1)', compile='$(findings_of "$tr_compile" | head -1)'"
+  fail "census CONTROL did not fire (trailing-closer shape): blocks=$tr_blocks (expected $((block_count + 1))), census='$(findings_head 1 "$tr_census")', compile='$(findings_head 1 "$tr_compile")'"
 fi
 
 # --- CONTROL 1c-quater: TWO invocations on ONE line, the SECOND carrying the defect ------------
@@ -642,7 +650,7 @@ two_blocks="$(grep -c '^BLOCK	' <<<"$two_census")"
 if [ "$two_blocks" -eq "$((block_count + 2))" ] && grep -q 'DOES NOT COMPILE' <<<"$two_compile"; then
   pass "census CONTROL fired (two per line): BOTH invocations on one line are counted ($two_blocks blocks) and the defect in the SECOND is REPORTED — the scan advances by what each classification consumed, not by whole lines"
 else
-  fail "census CONTROL did not fire (two per line): blocks=$two_blocks (expected $((block_count + 2))), compile said '$(findings_of "$two_compile" | head -1)'"
+  fail "census CONTROL did not fire (two per line): blocks=$two_blocks (expected $((block_count + 2))), compile said '$(findings_head 1 "$two_compile")'"
 fi
 
 # --- CONTROL 1e: a block's closing quote must be followed by a shell WORD BOUNDARY -------------
@@ -678,7 +686,7 @@ if [ "$(grep -c '^BLOCK	' <<<"$bound_ok")" -eq 1 ] && [ -z "$(findings_of "$boun
    && grep -q 'word boundary' <<<"$bound_bad"; then
   pass "census word-boundary, BOTH directions: the driver's own \`')\" || {\` closer is ACCEPTED (a shell metacharacter is a boundary, not just whitespace) while an adjacent fragment is a FINDING — bash would concatenate it and python would receive different source"
 else
-  fail "census word-boundary: accept-blocks=$(grep -c '^BLOCK	' <<<"$bound_ok") accept-findings='$(findings_of "$bound_ok" | head -1)' reject='$(findings_of "$bound_bad" | head -1)'"
+  fail "census word-boundary: accept-blocks=$(grep -c '^BLOCK	' <<<"$bound_ok") accept-findings='$(findings_head 1 "$bound_ok")' reject='$(findings_head 1 "$bound_bad")'"
 fi
 
 # --- CONTROL 1f: A PATH-QUALIFIED INVOCATION IS SEEN AND NAMED (r6F3 regression) ---------------
@@ -694,7 +702,7 @@ pathlib.Path(sys.argv[1]).write_text("/usr/bin/python3 -c " + q + "import os," +
 INJECT
 pathq_out="$(census "$PATHQ")"
 if grep -q 'not the bare' <<<"$pathq_out"; then
-  pass "census CONTROL fired (path-qualified): /usr/bin/python3 is SEEN and NAMED rather than invisible — $(findings_of "$pathq_out" | head -1 | cut -c1-96)"
+  pass "census CONTROL fired (path-qualified): /usr/bin/python3 is SEEN and NAMED rather than invisible — $(findings_head 1 "$pathq_out" | cut -c1-96)"
 else
   fail "census CONTROL did not fire (path-qualified): a path-qualified invocation must be a finding, got: $(head -2 <<<"$pathq_out")"
 fi
@@ -758,7 +766,7 @@ elif [ "$(grep -c '^BLOCK	' <<<"$a_census")" -eq 1 ] && [ -z "$(findings_of "$a_
      && [ "$b_findings" -eq 1 ] && [ "$c_findings" -eq 1 ]; then
   pass "census CONTROL fired (logical-line reconstruction): a LITERAL python3 split across a continuation is a BLOCK whose defect the compile check reports, while an INDIRECT command word is exactly ONE finding whether the quote is on the same line or past the continuation"
 else
-  fail "census CONTROL did not fire: A-blocks=$(grep -c '^BLOCK	' <<<"$a_census") A-findings='$(findings_of "$a_census" | head -1)' A-compile='$(findings_of "$a_compile" | head -1)' B-findings=$b_findings C-findings=$c_findings"
+  fail "census CONTROL did not fire: A-blocks=$(grep -c '^BLOCK	' <<<"$a_census") A-findings='$(findings_head 1 "$a_census")' A-compile='$(findings_head 1 "$a_compile")' B-findings=$b_findings C-findings=$c_findings"
 fi
 
 # --- CONTROL 1h-bis: NO `-c` INVOCATION IS SILENTLY ABSENT --------------------------------------
@@ -1057,7 +1065,7 @@ comp_out="$(compile_blocks "$DRIVER")"
 if grep -q '^#COMPLETE compiled=' <<<"$comp_out" && [ -z "$(findings_of "$comp_out")" ]; then
   pass "compile-all: EVERY embedded python block in the driver compiles ($(grep '^#COMPLETE ' <<<"$comp_out"))"
 else
-  fail "compile-all: an embedded python block in $DRIVER does not compile — $(findings_of "$comp_out" | head -3)"
+  fail "compile-all: an embedded python block in $DRIVER does not compile — $(findings_head 3 "$comp_out")"
 fi
 
 # --- POSITIVE CONTROL 2: the compile check FIRES on the injected defect, per block --------------
@@ -1076,7 +1084,7 @@ control_compile() { # control_compile <label> <placeholder> <mapping> <key>
   if grep -q 'DOES NOT COMPILE' <<<"$out" && grep -q 'SyntaxError' <<<"$out"; then
     pass "compile CONTROL fired ($label): $(grep -m1 'DOES NOT COMPILE' <<<"$out" | cut -c1-120)"
   else
-    fail "compile CONTROL did NOT fire ($label): the injected defect must be reported, got: $(findings_of "$out" | head -2)"
+    fail "compile CONTROL did NOT fire ($label): the injected defect must be reported, got: $(findings_head 2 "$out")"
   fi
 }
 read -r cb_name cb_map cb_key <<<"$(local_binding_of "$DRIVER" write_session_corpus_pin)"
@@ -1217,7 +1225,7 @@ if [ "$inject_rc" -ne 0 ]; then
 elif [ "$renamed_keys" != "$shipped_keys" ] && [ -z "$(findings_of "$renamed_compile")" ]; then
   pass "config-exports CONTROL fired: a single renamed export is caught by the set comparison — and the compile check is SILENT about it (the python is untouched), which is why this check exists separately"
 else
-  fail "config-exports CONTROL did not fire: renamed=[$renamed_keys] shipped=[$shipped_keys], compile said '$(findings_of "$renamed_compile" | head -1)'"
+  fail "config-exports CONTROL did not fire: renamed=[$renamed_keys] shipped=[$shipped_keys], compile said '$(findings_head 1 "$renamed_compile")'"
 fi
 
 # ...and the assignments must be part of the step's ENVIRONMENT-ASSIGNMENT PREFIX, not merely
