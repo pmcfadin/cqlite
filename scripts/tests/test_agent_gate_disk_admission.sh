@@ -1228,7 +1228,7 @@ if [ -n "$j_path" ]; then
   ok "J setup: the run really terminated at an early preflight ($j_path, exit $j_status)"
 else
   bad "J setup: no early-terminal marker in the block — this case did not exercise an early-terminal path"
-  grep -E '^(RESULT|refusal|component-set|missing-)' "$j_sum" 2>/dev/null | head -4
+  { _spw4=$(grep -E '^(RESULT|refusal|component-set|missing-)' "$j_sum" 2>/dev/null) && head -4 <<<"$_spw4"; }
 fi
 if [ "$j_count" -eq 1 ]; then
   ok "J: the early-terminal block carries EXACTLY ONE disk-admission: line — the contract has no hole"
@@ -2849,7 +2849,7 @@ fi
 # w`) as one that DECIDES A VERDICT. Two different things. What the consolidation actually
 # guarantees is: ONE handler decides fatality, ONE reports an internal fault, and the set of
 # things this program can SAY is closed. All three are countable without knowing Python.
-ad_count() { grep -cF "$1" "$ac_cls" 2>/dev/null | head -1; }
+ad_count() { grep -cF "$1" "$ac_cls" 2>/dev/null; }
 ac_failcalls=$(grep -cE '^ +fail\(e, w\)$' "$ac_cls" 2>/dev/null); ac_failcalls="${ac_failcalls%%$'\n'*}"
 case "$ac_failcalls" in ''|*[!0-9]*) ac_failcalls=0 ;; esac
 if [ "$ac_failcalls" -eq 1 ]; then
