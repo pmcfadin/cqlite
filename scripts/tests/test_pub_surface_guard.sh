@@ -228,7 +228,8 @@ bench_add_inner_gate() { # <scratch root>
   printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$1/cqlite-core/src/benchmarks/mod.rs")" \
     >"$1/cqlite-core/src/benchmarks/mod.rs.new"
   mv "$1/cqlite-core/src/benchmarks/mod.rs.new" "$1/cqlite-core/src/benchmarks/mod.rs"
-  head -1 "$1/cqlite-core/src/benchmarks/mod.rs" | grep -qx '#!\[cfg(feature = "benchmarks")\]' \
+  bench_first_=$(head -1 "$1/cqlite-core/src/benchmarks/mod.rs") \
+    && grep -qx '#!\[cfg(feature = "benchmarks")\]' <<<"$bench_first_" \
     || fail_case "setup: could not put the inner gate back into benchmarks/mod.rs"
 }
 

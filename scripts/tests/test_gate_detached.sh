@@ -1846,7 +1846,8 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # past the load-inflated case while still bounded; the loop's early `break` keeps
   # the common (unloaded) pass fast.
   _4B126_BOUND_S=300
-  for _i in $(seq 1 "$_4B126_BOUND_S"); do grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null && break; sleep 1; done
+  _i=0
+  while [ "$_i" -lt "$_4B126_BOUND_S" ]; do _i=$((_i+1)); grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null && break; sleep 1; done
   if grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null; then
     ok "4b.126 ...and it reached a terminal verdict ($(sed -n '/^RESULT: /{s/^RESULT: //p;q;}' "$_ft"))"
   else

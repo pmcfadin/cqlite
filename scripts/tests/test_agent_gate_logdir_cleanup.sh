@@ -1414,7 +1414,7 @@ fi
 # (d) STRUCTURAL, and labelled as such: the ORDERING is the property, and a behavioural
 #     case can only sample the orderings that exist today. Three bounded reads of the
 #     shipped script pin it against a refactor that re-merges the two steps.
-if awk '/^_logdir_decide\(\) \{/,/^\}/' "$GATE" | grep -q 'GATE_LOGDIR_REMOVE=1'; then
+if dec_body_=$(awk '/^_logdir_decide\(\) \{/,/^\}/' "$GATE") && grep -q 'GATE_LOGDIR_REMOVE=1' <<<"$dec_body_"; then
   bad "AC11d: _logdir_decide arms the removal itself again — the decision must set the INTENT only"
 else
   ok "AC11d: _logdir_decide records an intent and arms no removal"
@@ -1425,8 +1425,8 @@ if [ "$clear_calls" = 1 ]; then
 else
   bad "AC11d: the removal has $clear_calls clearance sites — one is the whole point"
 fi
-verify_line=$(grep -n '^  if \[ -n "\$reason" \]; then$' "$GATE" | head -1 | cut -d: -f1)
-clear_line=$(grep -n '^ *_logdir_clear_removal$' "$GATE" | head -1 | cut -d: -f1)
+verify_line=$(grep -m1 -n '^  if \[ -n "\$reason" \]; then$' "$GATE" | cut -d: -f1)
+clear_line=$(grep -m1 -n '^ *_logdir_clear_removal$' "$GATE" | cut -d: -f1)
 if [ -n "$verify_line" ] && [ -n "$clear_line" ] && [ "$clear_line" -gt "$verify_line" ]; then
   ok "AC11d: the clearance sits DOWNSTREAM of the summary-write verification (line $clear_line > $verify_line)"
 else
@@ -1481,8 +1481,8 @@ fi
 # only sample the signal timings that happen to be reachable, so it is pinned with
 # two bounded reads of the shipped script.
 # ---------------------------------------------------------------------------
-sweep_line=$(grep -n '^_logdir_sweep$' "$GATE" | head -1 | cut -d: -f1)
-trap_line=$(grep -n "^trap '_logdir_cleanup" "$GATE" | head -1 | cut -d: -f1)
+sweep_line=$(grep -m1 -n '^_logdir_sweep$' "$GATE" | cut -d: -f1)
+trap_line=$(grep -m1 -n "^trap '_logdir_cleanup" "$GATE" | cut -d: -f1)
 if [ -n "$sweep_line" ] && [ -n "$trap_line" ]; then
   ok "AC13: both the sweep invocation (line $sweep_line) and the EXIT-trap arming (line $trap_line) are locatable"
   if [ "$trap_line" -lt "$sweep_line" ]; then
@@ -1852,7 +1852,7 @@ fi
 # offset and from nothing else, so no executable line of the shipped slab may read
 # $RANDOM (the comment that explains why it does not is excluded by the `^[[:space:]]*#`
 # filter, not by matching its text).
-if grep -vE '^[[:space:]]*#' "$rot_lib" | grep -q 'RANDOM'; then
+if rot_live_=$(grep -vE '^[[:space:]]*#' "$rot_lib") && grep -q 'RANDOM' <<<"$rot_live_"; then
   bad "AC17: the shipped sweep slab still reads \$RANDOM on an executable line — a probabilistic start offset makes both the mechanism and this case non-deterministic"
 else
   ok "AC17: no executable line of the shipped sweep slab reads \$RANDOM — the rotation start is derived, not drawn"
@@ -2689,7 +2689,7 @@ if [ "$scan_find_sites" = 1 ]; then
 else
   bad "AC19: the shipped sweep slab scans the temp parent in $scan_find_sites places — a second listing would reintroduce the unbounded materialization and the lost status"
 fi
-if grep -vE '^[[:space:]]*#' "$rot_lib" | grep -qE '(aged|cand)=\$\(find|mapfile|readarray'; then
+if rot_live2_=$(grep -vE '^[[:space:]]*#' "$rot_lib") && grep -qE '(aged|cand)=\$\(find|mapfile|readarray' <<<"$rot_live2_"; then
   bad "AC19: an executable line of the shipped sweep slab captures a whole find listing into shell state — the materialization bound is gone"
 else
   ok "AC19: no executable line of the shipped sweep slab captures a whole find listing into shell state"
@@ -2742,9 +2742,9 @@ else
   # The two EXECUTABLE lines immediately preceding the unlink must be the `fi` of the
   # re-check block and the `confirmed` test itself. Comments and blank lines are
   # stripped, so prose may be added freely; a COMMAND may not.
-  pre_rm=$(printf '%s\n' "$guard_src2" \
-    | grep -vE '^[[:space:]]*#' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' \
-    | awk '$0=="rm -rf \"$d\" 2>/dev/null || return 1"{print p2 "|" p1; exit} {p2=p1; p1=$0}')
+  pre_src_=$(grep -vE '^[[:space:]]*#' <<<"$guard_src2" \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+  pre_rm=$(awk '$0=="rm -rf \"$d\" 2>/dev/null || return 1"{print p2 "|" p1; exit} {p2=p1; p1=$0}' <<<"$pre_src_")
   case "$pre_rm" in
     '[ "$GATE_LOGDIR_RECHECK_STATE" = "confirmed" ] || return 2|fi')
       ok "AC20: the identity re-confirmation is the LAST thing the guard does before the unlink — nothing executes between the confirmed subject and the rm" ;;
@@ -3522,7 +3522,7 @@ if mkdir -p "$td24c" 2>/dev/null; then
     "")         bad "AC24: the logdir-sweep: KEY vanished with its value — a withheld value must not take the key with it" ;;
     *)          bad "AC24: the sweep census was rendered with the reserved token in it ('$sweep24c')" ;;
   esac
-  if sed -n 's/^logdir-sweep: //p' "$sf24c" | grep -Eq 'RESULT: (PASS|FAIL)'; then
+  if sweep_ln24c_=$(sed -n 's/^logdir-sweep: //p' "$sf24c") && grep -Eq 'RESULT: (PASS|FAIL)' <<<"$sweep_ln24c_"; then
     bad "AC24: the sweep line matches the completion probe's own pattern — it would forge a terminal verdict"
   else
     ok "AC24: the sweep line does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
@@ -3693,7 +3693,7 @@ case "$disp25e" in
   "")         bad "AC25e: the logdir-disposition: KEY vanished with its value — a withheld value must not take the key with it" ;;
   *)          bad "AC25e: the disposition was rendered with the reserved token in it ('$disp25e')" ;;
 esac
-if sed -n 's/^logdir-disposition: //p' "$sf25e" | grep -Eq 'RESULT: (PASS|FAIL)'; then
+if disp_ln25e_=$(sed -n 's/^logdir-disposition: //p' "$sf25e") && grep -Eq 'RESULT: (PASS|FAIL)' <<<"$disp_ln25e_"; then
   bad "AC25e: the disposition line matches the completion probe's own pattern — an opt-out value would forge a terminal verdict"
 else
   ok "AC25e: the disposition line does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
@@ -3735,7 +3735,7 @@ else
 fi
 # The window is anchored on the cleanup this comment exists to explain, so the
 # assertions below are about THAT block and not about the file at large.
-cli_anchor=$(grep -n '_cli_tmp=\$(mktemp -d' "$GATE" | head -1 | cut -d: -f1)
+cli_anchor=$(grep -m1 -n '_cli_tmp=\$(mktemp -d' "$GATE" | cut -d: -f1)
 if [ -n "$cli_anchor" ]; then
   ok "AC26: located the cli-tests private-tmpdir block in the shipped gate (line $cli_anchor)"
   cli_body=$(sed -n "$((cli_anchor - 20)),$((cli_anchor + 25))p" "$GATE")
@@ -3821,7 +3821,7 @@ if mkdir -p "$td27" 2>/dev/null; then
   # pattern.
   if [ -f "$sf27" ] && grep -Eq 'RESULT: (PASS|FAIL)' "$sf27" 2>/dev/null; then
     bad "AC27: the refused run PUBLISHED a terminal verdict into $sf27"
-    grep -nE 'RESULT: (PASS|FAIL)' "$sf27" | head -3
+    grep -m3 -nE 'RESULT: (PASS|FAIL)' "$sf27"
   else
     ok "AC27: the refused run published NO terminal verdict (no summary block at all)"
   fi
@@ -3854,7 +3854,7 @@ if mkdir -p "$td27" 2>/dev/null; then
     ok "AC27 mutant: with the refusal defeated the hostile \$TMPDIR DOES forge a RESULT: PASS line inside the block — proved discriminating"
   else
     bad "AC27 mutant: the refusal-defeated copy forged no verdict line, so the assertions above cannot fail (fixture or mutation is vacuous)"
-    grep -nE '^(run-id|logs|RESULT): ' "$sf27m" 2>/dev/null | head -5
+    grep -m5 -nE '^(run-id|logs|RESULT): ' "$sf27m" 2>/dev/null
   fi
   n27forged=$(grep -c '^RESULT: PASS' "$sf27m" 2>/dev/null || true)
   if [ "${n27forged:-0}" -ge 2 ]; then
@@ -3904,13 +3904,13 @@ if [ "$(sed -n '/^_gate_cntrl_strip() {/,/^}/p' "$GATE" | grep -cF "tr -d '[:cnt
 else
   bad "AC27: _gate_cntrl_strip does not hold the class definition — the shared helper is not where the class lives"
 fi
-if awk '/^_summary_block_value\(\) \{/,/^\}/' "$GATE" | grep -q '_gate_cntrl_strip'; then
+if sbv_body_=$(awk '/^_summary_block_value\(\) \{/,/^\}/' "$GATE") && grep -q '_gate_cntrl_strip' <<<"$sbv_body_"; then
   ok "AC27: _summary_block_value STRIPS through the shared helper"
 else
   bad "AC27: _summary_block_value no longer strips through _gate_cntrl_strip — the SUMMARY boundary has its own class again"
 fi
-ref27_line=$(grep -nF '_gate_cntrl_strip "$GATE_LOGDIR_PARENT"' "$GATE" | head -1 | cut -d: -f1)
-mk27_line=$(grep -nF 'LOG_DIR=$(mktemp -d "$GATE_LOGDIR_PARENT/agent-gate.XXXXXX"' "$GATE" | head -1 | cut -d: -f1)
+ref27_line=$(grep -m1 -nF '_gate_cntrl_strip "$GATE_LOGDIR_PARENT"' "$GATE" | cut -d: -f1)
+mk27_line=$(grep -m1 -nF 'LOG_DIR=$(mktemp -d "$GATE_LOGDIR_PARENT/agent-gate.XXXXXX"' "$GATE" | cut -d: -f1)
 if [ -n "$ref27_line" ] && [ -n "$mk27_line" ] && [ "$ref27_line" -lt "$mk27_line" ]; then
   ok "AC27: the refusal COMPARES through the shared helper and sits BEFORE the mktemp -d (line $ref27_line vs $mk27_line) — a refusal after creation would leak the husk it refuses"
 else
@@ -4057,7 +4057,7 @@ if grep -q 'bundle every gate keeps' "$GATE"; then
 else
   ok "AC29: the stale 'bundle every gate keeps' claim is ABSENT from the shipped gate"
 fi
-ans_anchor=$(grep -n 'ansi-stripped` sibling is a DERIVED DUPLICATE' "$GATE" | head -1 | cut -d: -f1)
+ans_anchor=$(grep -m1 -n 'ansi-stripped` sibling is a DERIVED DUPLICATE' "$GATE" | cut -d: -f1)
 if [ -n "$ans_anchor" ]; then
   ok "AC29: located the reworded .ansi-stripped rationale in the shipped gate (line $ans_anchor)"
   ans_body=$(sed -n "$ans_anchor,$((ans_anchor + 16))p" "$GATE")

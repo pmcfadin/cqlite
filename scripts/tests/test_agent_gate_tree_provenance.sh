@@ -135,7 +135,7 @@ gate_replace_line() {
 }
 
 # summary_field <summary> <line-prefix> -> that line, or empty.
-summary_line() { grep "^$2" "$1" 2>/dev/null | head -1; }
+summary_line() { grep -m1 "^$2" "$1" 2>/dev/null; }
 short7()  { printf '%.7s' "$1"; }
 short12() { printf '%.12s' "$1"; }
 
@@ -353,10 +353,12 @@ echo "=== phase B (J2): the boundary block's component table covers the RUNNING 
 # COMPONENTS never contains `scoped-tests`; LITE/DELTA are exactly where it runs.
 r_mc=$(mkrepo modeset-repo)
 mode_components() { # mode_components [gate args…] — the set THIS mode would dispatch
-  ( cd "$r_mc" && PATH="$STUBBIN:$PATH" env AGENT_GATE_SUMMARY_FILE="$tmp/mc-sentinel.txt" \
+  local mc_out_ mc_rc_
+  mc_out_=$( ( cd "$r_mc" && PATH="$STUBBIN:$PATH" env AGENT_GATE_SUMMARY_FILE="$tmp/mc-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=mode-components \
-      bash "$r_mc/scripts/agent-gate.sh" ${1+"$@"} 2>/dev/null ) \
-    | sed -n 's/^tree-selftest: mode-components=//p' | head -1
+      bash "$r_mc/scripts/agent-gate.sh" ${1+"$@"} 2>/dev/null ) ); mc_rc_=$?   # keep the gate's own status
+  sed -n '/^tree-selftest: mode-components=/{s/^tree-selftest: mode-components=//p;q;}' <<<"$mc_out_"
+  return "$mc_rc_"
 }
 mc_full=$(mode_components)
 mc_lite=$(mode_components --lite)
@@ -414,7 +416,7 @@ run_selftest "$r_tbl" boundary "$sum" "$out" AGENT_GATE_TREE_SELFTEST_MUTATE=REA
 # its token, so a grammar knowing four of five UNDERCOUNTS a healthy block. The equality is
 # between two counts, so the GRAMMAR, not the fixture, is what has to be complete.
 n_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT) \([0-9]+s\)' "$sum" 2>/dev/null | tr -d ' ')
-n_done=$(sed -n 's/^components-completed: \([0-9]*\) .*/\1/p' "$sum" | head -1)
+n_done=$(sed -n '/^components-completed: \([0-9]*\) .*/{s/^components-completed: \([0-9]*\) .*/\1/p;q;}' "$sum")
 if grep -qE '^tree-selftest: +PASS \([0-9]+s\)' "$sum"; then
   ok "J2: a recorded verdict whose component no static set names still appears in the table (tree-selftest row present)"
 else
@@ -439,7 +441,7 @@ if [ "$n_rows" -gt 0 ] && [ "$n_annot" = "$n_rows" ]; then
   ok "J2/#3625: all $n_rows boundary row(s) carry BOTH the feature matrix and the census suffix — the truncated table is the same dialect as a completed one"
 else
   bad "J2/#3625: only $n_annot of $n_rows boundary row(s) are fully annotated — this mode renders a block the others do not"
-  grep -E '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|VACUOUS) \(' "$sum" 2>/dev/null | head -5
+  grep -m5 -E '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|VACUOUS) \(' "$sum" 2>/dev/null
 fi
 if grep -qE '^census: [0-9]+/[0-9]+ components AFFIRMED a count;.*NON-EXHAUSTIVE' "$sum" 2>/dev/null; then
   ok "J2/#3625: the boundary block carries the aggregate census: line, so a stopped run states what it verified rather than only how far it got"
@@ -510,7 +512,7 @@ SEEDSTUB
     ok "B2: the seeded OPT-OUT row reaches the boundary table (the renderer is under test)"
   else
     bad "B2: no 'file-size: OPT-OUT' row in the boundary block — seeding failed, detail UNMEASURED"
-    grep -E '^[a-z][a-z0-9-]*: ' "$sum" 2>/dev/null | head -5
+    grep -m5 -E '^[a-z][a-z0-9-]*: ' "$sum" 2>/dev/null
   fi
   if grep -Fq -- "$seed_detail" "$sum"; then
     ok "B2 (#3402): the boundary row carries the status detail — the disclosure survives a boundary block"
@@ -587,7 +589,7 @@ else
   fi
   # The row must not itself match what the probe looks for — neither by passing the value
   # through NOR by quoting it inside the refusal.
-  if grep -E '^file-size: ' "$sum" 2>/dev/null | grep -qE 'RESULT: (PASS|FAIL)'; then
+  if fs_row_=$(grep -E '^file-size: ' "$sum" 2>/dev/null) && grep -qE 'RESULT: (PASS|FAIL)' <<<"$fs_row_"; then
     bad "B3 (#3402): the component row matches the probe's own pattern — it would forge a verdict"
   else
     ok "B3 (#3402): the row does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
@@ -611,7 +613,7 @@ else
         AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
         AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
         bash "$r_b3m/scripts/agent-gate.sh" >"$out" 2>&1 )
-    if grep -E '^file-size: ' "$sum" 2>/dev/null | grep -qE 'RESULT: (PASS|FAIL)'; then
+    if fs_row_mut_=$(grep -E '^file-size: ' "$sum" 2>/dev/null) && grep -qE 'RESULT: (PASS|FAIL)' <<<"$fs_row_mut_"; then
       ok "B3 mutant: passing the value through DOES put the probe's pattern on a row (proved discriminating)"
     else
       bad "B3 mutant: the mutant did not reproduce the hazard — the guard's coverage is vacuous"
@@ -639,8 +641,8 @@ fd_probe="$tmp/fd-probe.out"
 ( cd "$r_fd" && env AGENT_GATE_SUMMARY_FILE="$tmp/fd-probe-sentinel.txt" \
     AGENT_GATE_TREE_SELFTEST=capture bash "$r_fd/scripts/agent-gate.sh" >gate-out.txt 2>&1 )
 cp "$r_fd/gate-out.txt" "$fd_probe"
-if [ "$(sed -n 's/^tree-selftest: stdout-rel=//p' "$fd_probe" | head -1)" = gate-out.txt ] \
-   && [ "$(sed -n 's/^tree-selftest: stderr-rel=//p' "$fd_probe" | head -1)" = gate-out.txt ]; then
+if [ "$(sed -n '/^tree-selftest: stdout-rel=/{s/^tree-selftest: stdout-rel=//p;q;}' "$fd_probe")" = gate-out.txt ] \
+   && [ "$(sed -n '/^tree-selftest: stderr-rel=/{s/^tree-selftest: stderr-rel=//p;q;}' "$fd_probe")" = gate-out.txt ]; then
   ok "J3: the carve-out resolves to exactly this run's redirect target (gate-out.txt), for both fds"
 else
   bad "J3: the fd carve-out did not resolve the redirect target"
@@ -731,7 +733,10 @@ code_sites() { # <file> <fixed-string> -> count of comment-stripped code lines c
   sed 's/[[:space:]]*#.*$//' "$1" | grep -cF "$2" | tr -d ' '
 }
 in_fn() { # <file> <fn> <fixed-string>
-  fn_body "$1" "$2" | sed 's/[[:space:]]*#.*$//' | grep -qF "$3"
+  local body_ stripped_
+  body_=$(fn_body "$1" "$2") || return
+  stripped_=$(sed 's/[[:space:]]*#.*$//' <<<"$body_") || return
+  grep -qF "$3" <<<"$stripped_"
 }
 # pinned <label> <fixed-string> <owning-fn> — one site, and it is in the owning function.
 pinned() {
@@ -882,11 +887,13 @@ k2_fixture() {
 }
 # k2_capture <repo> <manifest-out> -> the capture's `fallbacks=` count (empty on failure)
 k2_capture() {
-  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/k2-sentinel.txt" \
+  local k2_out_ k2_rc_
+  k2_out_=$( ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/k2-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
       AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT="$2" \
-      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) \
-    | sed -n 's/^tree-selftest: .*fallbacks=//p' | head -1
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) ); k2_rc_=$?   # keep the gate's own status
+  sed -n '/^tree-selftest: .*fallbacks=/{s/^tree-selftest: .*fallbacks=//p;q;}' <<<"$k2_out_"
+  return "$k2_rc_"
 }
 # k2_value <report> <path> -> the VALUE field of that path's record. The path travels
 # through the ENVIRONMENT, never `awk -v`, for the escape-transparency reason the gate's own
@@ -1312,7 +1319,7 @@ fi
 if grep -nE '\$\{#TREE_INHERITED_(SUMMARY|FILE)_RELS\[@\]\}' "$GATE" >/dev/null; then
   bad "E10: an unguarded \${#TREE_INHERITED_*_RELS[@]} length expansion is back (aborts on bash 3.2 under set -u)"
   grep -nE '\$\{#TREE_INHERITED_(SUMMARY|FILE)_RELS\[@\]\}' "$GATE"
-elif grep -nE '"\$\{TREE_INHERITED_(SUMMARY|FILE)_RELS\[@\]\}"' "$GATE" | grep -vqF '[@]+"${TREE_INHERITED_'; then
+elif tp_hits_=$(grep -nE '"\$\{TREE_INHERITED_(SUMMARY|FILE)_RELS\[@\]\}"' "$GATE") && grep -vqF '[@]+"${TREE_INHERITED_' <<<"$tp_hits_"; then
   bad "E10: an inherited-record array is expanded without the \${arr[@]+…} empty-array guard"
 else
   ok "E10: the (often empty) inherited-record arrays are never length-expanded or expanded unguarded (bash 3.2 set -u safe)"
