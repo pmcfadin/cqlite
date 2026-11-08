@@ -604,8 +604,8 @@ done
 # ticks and to create the ready-file at a chosen tick, so no wall-clock is involved and the expected
 # call count is exact. (A wall-clock version of this would be the flaky-perf-assert shape this repo
 # lints for.) `kill` is stubbed so the loop sees a live daemon instead of failing open.
-_sw_loop=$(sed -n '/^acquire_gate_slot() {$/,/^}$/p' "$GATE" \
-           | awk '/while \[ ! -f "\$ready" \]/{f=1} f{print} f&&/^  done$/{exit}')
+_sw_fn=$(sed -n '/^acquire_gate_slot() {$/,/^}$/p' "$GATE")
+_sw_loop=$(awk '/while \[ ! -f "\$ready" \]/{f=1} f{print} f&&/^  done$/{exit}' <<<"$_sw_fn")
 if [ -z "$_sw_loop" ] || ! grep -q '_hb_ensure' <<<"$_sw_loop"; then
   bad "12.2b the slot-wait loop calls _hb_ensure (a queued gate's beater can recover)" \
       "$([ -z "$_sw_loop" ] && echo 'could not extract the wait loop — this proves nothing' \
@@ -738,13 +738,13 @@ expect_reader "11b.14d id-less summary + fresh beat for ANOTHER run => UNKNOWN" 
 #     impossible rather than merely unlikely.
 if grep -nE '_field "\$(SUMMARY|HB)"' "$READER" >/dev/null 2>&1; then
   bad "11b.15 no field is read by re-opening the artifact path" \
-      "$(grep -nE '_field "\$(SUMMARY|HB)"' "$READER" | head -3)"
+      "$(grep -m3 -nE '_field "\$(SUMMARY|HB)"' "$READER")"
 else
   ok "11b.15 no field is read by re-opening the artifact path"
 fi
 if grep -nE 'grep [^|]*"\$(SUMMARY|HB)"' "$READER" >/dev/null 2>&1; then
   bad "11b.16 no grep reads the artifact path directly" \
-      "$(grep -nE 'grep [^|]*"\$(SUMMARY|HB)"' "$READER" | head -3)"
+      "$(grep -m3 -nE 'grep [^|]*"\$(SUMMARY|HB)"' "$READER")"
 else
   ok "11b.16 no grep reads the artifact path directly"
 fi
@@ -756,7 +756,7 @@ _texts=$(grep -cE '^[A-Z_]+_TEXT=\$\(_slurp "\$_[A-Z_]+_SNAP"\)$' "$READER")
                     || bad "11b.17 both artifacts are parsed from a private snapshot" "found $_texts, want 2"
 # The NUL check must run on a SNAPSHOT, never on the live path — that was the defect.
 if grep -qE '_has_nul "\$(SUMMARY|HB)"' "$READER"; then
-  bad "11b.17b the NUL check reads a snapshot, not the live path" "$(grep -nE '_has_nul "\$(SUMMARY|HB)"' "$READER" | head -2)"
+  bad "11b.17b the NUL check reads a snapshot, not the live path" "$(grep -m2 -nE '_has_nul "\$(SUMMARY|HB)"' "$READER")"
 else
   ok "11b.17b the NUL check reads a snapshot, not the live path"
 fi
@@ -1084,8 +1084,8 @@ fi
 # roborev-lints reject (a loaded box makes it red for no reason), and the property is exactly
 # checkable — the confirmation `sleep` must sit BELOW the fresh-beat RUNNING verdict, so a
 # fresh beat returns before reaching it.
-_run_ln=$(grep -n 'verdict RUNNING 2 "this run beat' "$READER" | head -1 | cut -d: -f1)
-_slp_ln=$(grep -n 'sleep "$_confirm_wait"' "$READER" | head -1 | cut -d: -f1)
+_run_ln=$(grep -m1 -n 'verdict RUNNING 2 "this run beat' "$READER" | cut -d: -f1)
+_slp_ln=$(grep -m1 -n 'sleep "$_confirm_wait"' "$READER" | cut -d: -f1)
 if [ -n "$_run_ln" ] && [ -n "$_slp_ln" ] && [ "$_slp_ln" -gt "$_run_ln" ]; then
   ok "11g.5 the confirmation wait sits below the fresh-beat verdict (a fresh beat never waits)"
 else
@@ -1304,7 +1304,7 @@ wait "$_rp3" 2>/dev/null || true
 # needs no external utility at all, so there is nothing left to argue about (job 191).
 sq_bad=0
 for f in "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" "$REPO_ROOT/scripts/tests/test_gate_detached.sh"; do
-  if sed 's/[[:space:]]*#.*$//' "$f" | grep -qE '\$\(seq '; then
+  if dbg_src_=$(sed 's/[[:space:]]*#.*$//' "$f") && grep -qE '\$\(seq ' <<<"$dbg_src_"; then
     bad "11j.6 no external seq in $(basename "$f")" "found one"; sq_bad=1
   fi
 done
@@ -1774,7 +1774,7 @@ done
 [ "$_bp_bad" = 0 ] && ok "11t.1 a malformed beater-pid invalidates the beat AND names its cause (6 shapes)" \
                    || bad "11t.1 a malformed beater-pid invalidates the beat and names its cause" "$_bp_bad shape(s) wrong"
 # The invariant itself, so no future refusal in this validator can return silently.
-if sed -n '/beater-pid: \$_bp. is not a decimal/,/^  fi$/p' "$READER" | grep -c 'BEAT_ERR=' | grep -qx 3; then
+if _be_blk=$(sed -n '/beater-pid: \$_bp. is not a decimal/,/^  fi$/p' "$READER") && _be_cnt=$(grep -c 'BEAT_ERR=' <<<"$_be_blk") && grep -qx 3 <<<"$_be_cnt"; then
   ok "11t.1b every beater-pid refusal sets BEAT_ERR (3 of 3)"
 else
   bad "11t.1b every beater-pid refusal sets BEAT_ERR" "$(sed -n '/_bp=/,/^  fi$/p' "$READER" | grep -c 'BEAT_ERR=') of 3 branches"
@@ -2090,7 +2090,7 @@ expect_reader "11r.3 control: a REAL matching host still proves the clock domain
 # written to catch it. The fix is to separate the channels, not to reword the explanation.
 _ph_bad=0
 for _f in "$READER" "$BEATER"; do
-  grep -vE '^[[:space:]]*#' "$_f" | grep -q 'echo unknown' && { _ph_bad=$((_ph_bad+1)); echo "     placeholder in $(basename "$_f")"; }
+  _ph_src=$(grep -vE '^[[:space:]]*#' "$_f") && grep -q 'echo unknown' <<<"$_ph_src" && { _ph_bad=$((_ph_bad+1)); echo "     placeholder in $(basename "$_f")"; }
 done
 [ "$_ph_bad" = 0 ] && ok "11r.4 neither reader nor beater falls back to the literal 'unknown'" \
                    || bad "11r.4 neither reader nor beater falls back to 'unknown'" "$_ph_bad file(s) still do"
