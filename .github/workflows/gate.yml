@@ -308,6 +308,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # #4232: the wall-clock growth-ratio guard for Index::from_entries is
+      # #[ignore]d (perf-gate-allow) so scheduling noise cannot red a merge gate,
+      # and no other lane runs --ignored tests. Run it here, NON-BLOCKING, so the
+      # quadratic guard still executes nightly. A failure is reported in the step
+      # summary only; it never reds this workflow.
+      - name: Index-build growth ratio (non-blocking, #4232)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          cargo test -p cqlite-core --test issue_2385_index_build_growth -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/index-growth.log"
+          rc=${PIPESTATUS[0]}
+          {
+            echo "### Index-build growth ratio (#4232, non-blocking)"
+            echo "exit code: $rc"
+            grep -E 'index_build growth|test result' "$RUNNER_TEMP/index-growth.log" || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
   # Full-matrix clippy backstop (issue #1844), split off the main gate job's
   # critical path (issue #2662). The routine local gate runs a SCOPED per-package
   # clippy that skips the source-built DuckDB C++ amalgamation (cqlite-cli
