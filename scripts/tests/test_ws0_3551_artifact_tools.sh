@@ -1083,7 +1083,8 @@ fi
 #
 # The header must also NAME the CPUs the tool actually differences, derived from the tool's own
 # PINS rather than restated, so the column cannot claim one CPU set while measuring another.
-_pins_line=$(grep -oE '^PINS = \([^)]*\)' "$CENSUS_TOOL" | head -1) || true
+_spw10=$(grep -oE '^PINS = \([^)]*\)' "$CENSUS_TOOL")
+_pins_line=$(head -1 <<<"$_spw10") || true
 if [ -z "$_pins_line" ]; then
   fail "12. derivation: no top-level PINS = (...) in $CENSUS_TOOL, so the header's CPU set cannot be checked"
 else
