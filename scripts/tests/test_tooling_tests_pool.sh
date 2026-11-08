@@ -76,15 +76,32 @@ done
 # 3. a worker KILLED mid-run (only the pid this test's runner launched) must not stall the pool and
 #    must FAIL, named - and the planted suite's own process (and its sleeping child) must be gone
 #    when the pool returns: each worker is its own process group and the group is terminated.
+#    (bash 3.2 lacks the subshell-pid variable: the planted script uses $$ and walks up its ancestors to the worker,
+#    the child of this test's runner, TT_MAIN.)
+cat >"$W/planted.sh" <<EOS
+echo \$\$ >"$W/suite.pid"
+sleep 30 & echo \$! >"$W/child.pid"
+p=\$\$
+while :; do
+  par=\$(ps -o ppid= -p "\$p"); set -- \$par; par=\$1
+  [ -n "\$par" ] || exit 9
+  [ "\$par" = "\$TT_MAIN" ] && break
+  p=\$par
+done
+kill -9 "\$p"
+wait
+EOS
 cat >"$W/t3.sh" <<EOS
 set -uo pipefail
 _ncpu=8; REPO_ROOT=/tmp
 . "$W/helpers.sh"
 _tt_reset
 _tt_add P 'ok-a' 'sleep 1'
-_tt_add P 'killed-worker' 'echo \$BASHPID >"$W/suite.pid"; sleep 30 & echo \$! >"$W/child.pid"; me=\$BASHPID; w=\$(ps -o ppid= -p \$me); w=\${w// /}; kill -9 \$w; wait'
+_tt_add P 'killed-worker' 'TT_MAIN=\$TT_MAIN bash "$W/planted.sh"'
 _tt_add P 'ok-b' 'sleep 1'
 : >"$W/c3.log"
+TT_MAIN=\$\$
+export TT_MAIN
 _tt_run_all "$W/c3.log" "$W/d3"
 echo "failed=[\$_TT_FAILED_NAMES]"
 EOS
@@ -124,5 +141,25 @@ if [ "$rc" -eq 0 ] && grep -q '^failed=\[unpublished; unpublished-too\]$' <<<"$o
 else
   bad "unpublished status: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
 fi
+# 5. an unwritable canonical log (a directory in its place): the replay fails, so the suite must FAIL,
+#    named, even though it passed - no PASS with missing evidence.
+mkdir "$W/c5dir"
+cat >"$W/t5.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT=/tmp
+. "$W/helpers.sh"
+_tt_reset
+_tt_add P 'passes-but-unreplayable' 'true'
+_tt_run_all "$W/c5dir" "$W/d5"
+echo "failed=[\$_TT_FAILED_NAMES]"
+EOS
+for J in 4 1; do
+  out=$(bounded 40 env CQLITE_TOOLING_TESTS_JOBS=$J bash "$W/t5.sh" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && grep -q '^failed=\[passes-but-unreplayable (log replay failed)\]$' <<<"$out"; then
+    ok "JOBS=$J: a failed log replay FAILs the suite, named (no PASS with missing evidence)"
+  else
+    bad "JOBS=$J: log-replay failure not reported: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
+  fi
+done
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

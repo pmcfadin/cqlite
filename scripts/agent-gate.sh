@@ -22364,7 +22364,7 @@ _tt_exec() {
 # order (header, outcome, failure tail) and append its log to the component log. Sets
 # _TT_LAST_RC and, on failure, appends the suite to _TT_FAILED_NAMES.
 _tt_report() {
-  local i=$1 d=$2 log=$3 nohdr=${4:-} id rc secs
+  local i=$1 d=$2 log=$3 nohdr=${4:-} id rc secs replay_failed
   id=$(printf '%03d' "$i")
   if [ "${_TT_MODE[$i]}" = N ]; then
     echo "${_TT_HDR[$i]}"
@@ -22385,9 +22385,19 @@ _tt_report() {
     rc=255; secs=?   # no status published: the suite never finished — fail closed
     echo "no exit status was recorded for this suite (it did not finish)" >>"$d/$id.log"
   fi
-  [ -f "$d/$id.log" ] && cat "$d/$id.log" >>"$log"
+  # The replay is the canonical evidence: a failed append (ENOSPC, unwritable log) must not let the
+  # suite pass with its output missing.
+  replay_failed=""
+  if [ -f "$d/$id.log" ] && ! cat "$d/$id.log" >>"$log" 2>/dev/null; then
+    replay_failed=1
+    echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); log replay failed: could not append $d/$id.log to $log ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]} (log replay failed)"
+    rc=1
+  fi
   _TT_LAST_RC=$rc
-  if [ "$rc" != 0 ]; then
+  if [ -n "$replay_failed" ]; then
+    :   # already named above
+  elif [ "$rc" != 0 ]; then
     echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); exit $rc after ${secs}s; last 40 lines of $d/$id.log ---"
     tail -40 "$d/$id.log" 2>/dev/null
     echo "--- end of tooling-tests output ---"
