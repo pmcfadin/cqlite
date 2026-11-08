@@ -1551,8 +1551,8 @@ echo "TEST 35: finalize RELEASES BEFORE it deletes the lane — asserted on the 
 # nobody can clear.
 FIN_SKILL="$SCRIPT_DIR/../../.claude/skills/flow-finalize/SKILL.md"
 if [ -r "$FIN_SKILL" ]; then
-  ln_release=$(grep -n 'lane-lock\.sh release <N>' "$FIN_SKILL" | head -1 | cut -d: -f1)
-  ln_cleanup=$(grep -n 'finalize-cleanup\.sh --issue' "$FIN_SKILL" | head -1 | cut -d: -f1)
+  ln_release=$(grep -m1 -n 'lane-lock\.sh release <N>' "$FIN_SKILL" | cut -d: -f1)
+  ln_cleanup=$(grep -m1 -n 'finalize-cleanup\.sh --issue' "$FIN_SKILL" | cut -d: -f1)
   if [ -n "$ln_release" ] && [ -n "$ln_cleanup" ] && [ "$ln_release" -lt "$ln_cleanup" ]; then
     ok "(a) flow-finalize releases the lane lock (line $ln_release) BEFORE finalize-cleanup removes the worktree (line $ln_cleanup)"
   else
@@ -1575,7 +1575,8 @@ if [ -r "$FIN_SKILL" ]; then
   # release is a LEAK`) — a false FAIL on correct input, and the same proxy defect this PR
   # documents: a phrase found by grep means the doc MENTIONS it, often to retract it. So strip
   # everything from the first `#` and test what would actually execute.
-  fin_cmd="$(grep 'lane-lock\.sh release <N>' "$FIN_SKILL" | grep -v '^\s*#' | head -1 | sed 's/#.*//')"
+  fin_rel_=$(grep 'lane-lock\.sh release <N>' "$FIN_SKILL" | grep -v '^\s*#')
+  fin_cmd="$(head -1 <<<"$fin_rel_" | sed 's/#.*//')"
   if ! grep -q '|| true' <<<"$fin_cmd"; then
     ok "(b) the release is not suppressed with \`|| true\` — a refused release is a LEAK, not noise"
   else
@@ -1787,7 +1788,7 @@ else
 fi
 # the stale release, carrying the FIRST lease, must be refused rather than deleting the live lock
 ll release 943 --pid "$A39" --expect "$lease_first"; rc39=$RC; out39=$OUT
-still="$(cat "$(record_of 943)" 2>/dev/null | head -c 1)"
+still="$(head -c 1 2>/dev/null < "$(record_of 943)")"
 if [ "$rc39" -ne 0 ] && grep -q 'RELEASE-LOST' <<<"$out39" && [ -n "$still" ]; then
   ok "(a2) a stale release carrying the OLD lease is refused and the live record SURVIVES"
 else
