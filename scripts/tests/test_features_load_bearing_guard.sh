@@ -509,7 +509,7 @@ assert_contract_declares() { # <phrase> <label>
 }
 
 asserted_count() { # reads the last successful output
-  sed -n 's/^features-load-bearing: \([0-9]*\)\/.*/\1/p' "$TMPROOT/out.txt" | head -1
+  sed -n '/^features-load-bearing: \([0-9]*\)\/.*/{s/^features-load-bearing: \([0-9]*\)\/.*/\1/p;q;}' "$TMPROOT/out.txt"
 }
 
 echo "test_features_load_bearing_guard.sh"
@@ -1312,13 +1312,14 @@ ok "SOUNDNESS: a cfg_attr chain deeper than the recursion bound CREDITS at the b
 # component (which takes ~35 minutes).
 GATE="$REPO_ROOT/scripts/agent-gate.sh"
 [ -f "$GATE" ] || fail_case "case 46: scripts/agent-gate.sh not found"
-inv_line="$(grep -n 'bash "\$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh"' "$GATE" | head -1 | cut -d: -f1)"
+_spw39=$(grep -n 'bash "\$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh"' "$GATE")
+inv_line="$(head -1 <<<"$_spw39" | cut -d: -f1)"
 [ -n "$inv_line" ] \
   || fail_case "case 46: no invocation of this suite found in scripts/agent-gate.sh — either it was unwired (then nothing runs it) or the invocation was reworded (then update this case)"
 window_start=$((inv_line > 12 ? inv_line - 12 : 1))
-sed -n "${window_start},${inv_line}p" "$GATE" | grep -q 'command -v python3' \
+{ _spw7=$(sed -n "${window_start},${inv_line}p" "$GATE") && grep -q 'command -v python3' <<<"$_spw7"; } \
   || fail_case "case 46: the invocation at scripts/agent-gate.sh:$inv_line is NOT inside a \`command -v python3\` guard. tooling-tests is SKIP-aware for missing python3; invoking this suite unguarded turns a supported SKIP into a red gate of record (roborev job 62). The MANDATORY requirement belongs to the features-load-bearing component, which FAILs on it."
-sed -n "${inv_line},$((inv_line + 25))p" "$GATE" | grep -q 'SKIP scripts/tests/test_features_load_bearing_guard.sh' \
+{ _spw6=$(sed -n "${inv_line},$((inv_line + 25))p" "$GATE") && grep -q 'SKIP scripts/tests/test_features_load_bearing_guard.sh' <<<"$_spw6"; } \
   || fail_case "case 46: the python3 guard around scripts/agent-gate.sh:$inv_line has no LOUD SKIP branch. A silently skipped self-test is indistinguishable from one that ran."
 ok "STRUCTURAL: the gate invokes this suite inside a \`command -v python3\` guard with a LOUD SKIP branch, so tooling-tests' documented no-python3 SKIP still governs"
 
