@@ -194,7 +194,8 @@ fi
 if ! grep -q 'Internal' <<<"$ec_pre_out" && ! grep -qi 'error_codes' <<<"$ec_pre_out"; then
   pass "round 20 NON-VACUITY: that accepted report never names the failing code at all (the contradiction was INVISIBLE, not merely unchecked)"
 else
-  fail "round 20: the pre-fix report must not name the failing code (out: $(grep -i 'internal\|error_codes' <<<"$ec_pre_out" | head -3))"
+  _spw15=$(grep -i 'internal\|error_codes' <<<"$ec_pre_out")
+  fail "round 20: the pre-fix report must not name the failing code (out: $(head -3 <<<"$_spw15"))"
 fi
 # ...and the MUTANT MUST NOT BE UNIFORMLY BROKEN: it still refuses an OBSERVED non-zero
 # `requests_error`, so what the probe measured is the loss of the CROSS-CHECK rather than a copy that
