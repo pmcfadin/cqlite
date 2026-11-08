@@ -198,7 +198,8 @@ else
 fi
 # ...and the bare scan must NOT hold position 1 in every round — stated as its own
 # assertion because that is the defect, positionally.
-if [ "$(grep -o 'scan-[0-9]' <<<"$got" | head -1)" = "scan-1" ] \
+scan_hits=$(grep -o 'scan-[0-9]' <<<"$got")
+if [ "$(head -1 <<<"$scan_hits")" = "scan-1" ] \
    && grep -qE 'flight-bypass-2 scan-2' <<<"$got"; then
   pass "OBSERVED: the bare scan does NOT hold a fixed position across rounds (R4a)"
 else
@@ -595,12 +596,10 @@ else
 fi
 # And the DRIVER must record all three fields — the wiring half, so the reporter's
 # requirement cannot be satisfied only by test fixtures.
-if awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-     | grep -q 'round=%s' \
-   && awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-     | grep -q 'position=%s' \
-   && awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-     | grep -q 'arms_in_round=%s'; then
+if rr_body=$(awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh") \
+   && grep -q 'round=%s' <<<"$rr_body" \
+   && grep -q 'position=%s' <<<"$rr_body" \
+   && grep -q 'arms_in_round=%s' <<<"$rr_body"; then
   pass "the DRIVER records round/position/arms_in_round per rep (the reporter's requirement is wired)"
 else
   fail "ws0-baseline.sh must record all three round-metadata fields per rep"
@@ -952,8 +951,8 @@ else
 fi
 # The DRIVER must record the instant, or every check above is unreachable in practice.
 if grep -q 'monotonic_ns=%s' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-  && awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-     | grep -q 'time.monotonic_ns'; then
+  && rr_body=$(awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh") \
+  && grep -q 'time.monotonic_ns' <<<"$rr_body"; then
   pass "the DRIVER records a monotonic instant per rep (the reporter's requirement is wired)"
 else
   fail "ws0-baseline.sh must record monotonic_ns per rep, from a monotonic clock"
