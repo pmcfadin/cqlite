@@ -225,7 +225,7 @@ if ! grep -q "$(group "$CELLS_SHORT")" <<<"$r17_out" \
    && ! grep -qi 'cells' <<<"$r17_out"; then
   pass "round 17 NON-VACUITY: that accepted report never mentions cells at all (the shortfall was INVISIBLE, not merely unchecked)"
 else
-  fail "round 17: the pre-fix report must not name the cell shortfall (out: $(grep -i cells <<<"$r17_out" | head -3))"
+  fail "round 17: the pre-fix report must not name the cell shortfall (out: $(grep -m 3 -i cells <<<"$r17_out"))"
 fi
 # ...and the MUTANT MUST NOT BE UNIFORMLY BROKEN: it still refuses a ROW-short pass, so what the
 # probe measured is the loss of the CELL comparison rather than a copy that validates nothing.
