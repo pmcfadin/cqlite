@@ -109,7 +109,7 @@ fi
 # list: a fallback would restore exactly the copy this removes.
 CANONICAL=()
 while IFS= read -r _cf; do [ -n "$_cf" ] && CANONICAL+=("$_cf"); done < <(
-  sed -n 's/^CANONICAL_SCHEMA_FILES="\(.*\)"$/\1/p' "$GATE" | head -1 | tr ' ' '\n')
+  sed -n '/^CANONICAL_SCHEMA_FILES="\(.*\)"$/{s/^CANONICAL_SCHEMA_FILES="\(.*\)"$/\1/p;q;}' "$GATE" | tr ' ' '\n')
 if [ "${#CANONICAL[@]}" -eq 0 ]; then
   echo "FAIL - could not derive CANONICAL_SCHEMA_FILES from $GATE; refusing to run against a guessed list" >&2
   exit 1
@@ -392,7 +392,7 @@ if ! grep -q 'expected absolute path: *packaged/schemas' "$rel_full_out" 2>/dev/
   ok "3148-relative-absolute-label: no relative path is ever labelled absolute (AC (b), real emit)"
 else
   nested_gate_bad "3148-relative-absolute-label: a relative path reached an 'expected absolute path' line" "$SCHEMAS_PRE_GUARD" "$rel_full"
-  grep -n 'expected absolute path' "$rel_full_out" "$rel_full" 2>/dev/null | head -5
+  { _spw30=$(grep -n 'expected absolute path' "$rel_full_out" "$rel_full" 2>/dev/null) && head -5 <<<"$_spw30"; }
 fi
 
 # ---------------------------------------------------------------------------

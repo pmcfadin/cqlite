@@ -378,7 +378,7 @@ for f in \
   "$REPO_ROOT"/.claude/agents/flow-lead.md; do
   [ -f "$f" ] || continue
   scanned=$((scanned + 1))
-  if blm_doctrine_hits "$f" | grep -q .; then
+  if { _spw33=$(blm_doctrine_hits "$f") && grep -q . <<<"$_spw33"; }; then
     offenders="${offenders} ${f}"
   fi
 done

@@ -470,8 +470,9 @@ else
 fi
 # It must run BEFORE the host's perf sysctls are weakened and before the release build — an
 # argument-shaped mistake must cost an argument-shaped failure, not a mutated host.
-client_line=$(grep -nF 'verify_cpus_online "$CLIENT_CPUS"' "$DRIVER" | head -1 | cut -d: -f1)
-relax_line=$(grep -nE '^relax_perf_sysctls' "$DRIVER" | head -1 | cut -d: -f1)
+_spw59=$(grep -nF 'verify_cpus_online "$CLIENT_CPUS"' "$DRIVER")
+client_line=$(head -1 <<<"$_spw59" | cut -d: -f1)
+relax_line=$(grep -m 1 -nE '^relax_perf_sysctls' "$DRIVER" | cut -d: -f1)
 if [ -n "$client_line" ] && [ -n "$relax_line" ] && [ "$client_line" -lt "$relax_line" ]; then
   pass "round21 wiring: the client-CPU refusal (line $client_line) precedes relax_perf_sysctls (line $relax_line) — the host is not mutated for a run that cannot proceed"
 else
@@ -505,7 +506,8 @@ else
 fi
 # It must come BEFORE the sibling check, or the fabricated tree would already have
 # been used to vouch for the pinning by the time the refusal ran.
-assert_line=$(grep -n '^assert_real_cpu_topology || exit 2' "$DRIVER" | head -1 | cut -d: -f1)
+_spw58=$(grep -n '^assert_real_cpu_topology || exit 2' "$DRIVER")
+assert_line=$(head -1 <<<"$_spw58" | cut -d: -f1)
 # The SERVER sibling check, however it is spelled. It used to be a bare statement
 # (`^verify_sibling_pair "$SERVER_CPUS"`); #3272 F6 made it a command SUBSTITUTION, because the
 # verification's output (the expanded sibling set sysfs reported) is now CAPTURED and recorded into
@@ -513,7 +515,8 @@ assert_line=$(grep -n '^assert_real_cpu_topology || exit 2' "$DRIVER" | head -1 
 # anchor is therefore the CALL, not the line's opening token — and the `-n` guard below is what
 # caught this: after F6 the old pattern matched NOTHING and this check FAILED rather than passing
 # vacuously over an empty line number.
-verify_line=$(grep -nF 'verify_sibling_pair "$SERVER_CPUS"' "$DRIVER" | head -1 | cut -d: -f1)
+_spw57=$(grep -nF 'verify_sibling_pair "$SERVER_CPUS"' "$DRIVER")
+verify_line=$(head -1 <<<"$_spw57" | cut -d: -f1)
 if [ -n "$assert_line" ] && [ -n "$verify_line" ] && [ "$assert_line" -lt "$verify_line" ]; then
   pass "override-refused: the refusal (line $assert_line) precedes the sibling check (line $verify_line)"
 else
@@ -1074,8 +1077,8 @@ else
 fi
 # It must ACCEPT NO PORT ARGUMENT, i.e. the collision hazard is gone by construction rather than
 # by a check someone has to keep correct.
-if awk '/^require_socket_prober\(\)/,/^}/' "$SERVER_LIB" | grep -q 'bind(("127.0.0.1", 0))' \
-  && ! awk '/^require_socket_prober\(\)/,/^}/' "$SERVER_LIB" | grep -q 'local probe_port="\$1"'; then
+if { _spw9=$(awk '/^require_socket_prober\(\)/,/^}/' "$SERVER_LIB") && grep -q 'bind(("127.0.0.1", 0))' <<<"$_spw9"; } \
+  && ! { _spw4=$(awk '/^require_socket_prober\(\)/,/^}/' "$SERVER_LIB") && grep -q 'local probe_port="\$1"' <<<"$_spw4"; }; then
   pass "server-owner: STRUCTURAL — the prober binds port 0 and takes no port argument"
 else
   fail "server-owner: the prober must bind port 0 rather than a caller-supplied port"
@@ -1148,8 +1151,10 @@ fi
 # it takes no port argument, and a `^require_socket_prober ` grep (with the trailing space)
 # matched nothing and reported a MISSING call for a call that is right there — the same
 # "diagnosis names the wrong cause" shape as the nit itself, in the test.
-prober_line=$(grep -nE '^require_socket_prober( |$)' "$DRV" | head -1 | cut -d: -f1)
-loop_line=$(grep -n '^for temp in \$TEMPS' "$DRV" | head -1 | cut -d: -f1)
+_spw56=$(grep -nE '^require_socket_prober( |$)' "$DRV")
+prober_line=$(head -1 <<<"$_spw56" | cut -d: -f1)
+_spw55=$(grep -n '^for temp in \$TEMPS' "$DRV")
+loop_line=$(head -1 <<<"$_spw55" | cut -d: -f1)
 if [ -n "$prober_line" ] && [ -n "$loop_line" ] && [ "$prober_line" -lt "$loop_line" ]; then
   pass "server-owner: the prober check (line $prober_line) precedes the measurement loop (line $loop_line)"
 else

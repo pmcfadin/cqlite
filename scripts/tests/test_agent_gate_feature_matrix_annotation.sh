@@ -263,7 +263,7 @@ fi
 fm_export_needle="export"' -f (cargo|env)([^[:alnum:]_]|$)'
 if grep -RnE "$fm_export_needle" "$REPO_ROOT/scripts" >/dev/null 2>&1; then
   bad "B3: the cargo/env observers are EXPORTED — nested scripts would pollute a component's matrix"
-  grep -RnE "$fm_export_needle" "$REPO_ROOT/scripts" | head -5
+  { _spw28=$(grep -RnE "$fm_export_needle" "$REPO_ROOT/scripts") && head -5 <<<"$_spw28"; }
 else
   ok "B3: the cargo/env observers are not exported (no nested-run attribution)"
 fi
@@ -300,7 +300,8 @@ for c in core-tests memory-budget integration-tests write-tests cli-tests \
   # component names contain hyphens and `write-tests` must not match `write-tests-extra`.
   grep -qE "_fm_observe_child $c([^[:alnum:]_-]|$)" "$GATE" || b9+=("$c-does-not-record-in-body")
 done
-fm_end_for_b9=$(grep -n '^# ==== END feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
+_spw27=$(grep -n '^# ==== END feature-matrix annotation' "$GATE")
+fm_end_for_b9=$(head -1 <<<"$_spw27" | cut -d: -f1)
 # COMMENT lines are excluded: this file's own prose names the function repeatedly, and a
 # guard that reds on a comment is a guard people learn to waive.
 stray=$(grep -nE '(^|[^_[:alnum:]])_fm_observe_cargo_argv ' "$GATE" \
@@ -361,8 +362,9 @@ grep -qE '_fm_note_maturin_rc "\$name" "\$pbv_rc"' "$GATE" \
 # node-bindings: the recorder must sit IMMEDIATELY BEFORE the driver, inside the body — the
 # adjacency IS the property (a record anywhere earlier would describe intent again, which is
 # the defect job 269 blocker 2 fixed one level up).
-nb_next=$(grep -A2 '_fm_observe_driver node-bindings' "$GATE" \
-  | grep -vE '_fm_observe_driver|^--$' | grep -vE '^\s*#' | head -1 | sed 's/^[[:space:]]*//')
+nb_next_all=$(grep -A2 '_fm_observe_driver node-bindings' "$GATE" \
+  | grep -vE '_fm_observe_driver|^--$' | grep -vE '^\s*#')
+nb_next=$(head -1 <<<"$nb_next_all" | sed 's/^[[:space:]]*//')
 case "$nb_next" in
   'npm run build'*) ;;
   *) b11+=("node-bindings-recorder-is-not-immediately-before-npm-run-build(next-line:'${nb_next:-<none>}')") ;;
@@ -393,7 +395,7 @@ for _ic in "${comps_arr[@]}"; do
   if grep -qE "_fm_observe_driver $_ic" "$GATE"; then
     continue
   fi
-  if _b11_runner_body "$_ic" | grep -qE '_fm_note_driver "\$name"|_fm_note_maturin_rc "\$name"'; then
+  if { _spw26=$(_b11_runner_body "$_ic") && grep -qE '_fm_note_driver "\$name"|_fm_note_maturin_rc "\$name"' <<<"$_spw26"; }; then
     continue
   fi
   b11+=("$_ic-declares-a-driver-but-records-no-reach-attributable-to-it")
@@ -413,7 +415,8 @@ fi
 # block first, and every function defined below it is called later), while the one probe
 # above the block — the PATH-augmentation check near the top — runs before any function
 # exists and is correct as written.
-fm_begin=$(grep -n '^# ==== BEGIN feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
+_spw25=$(grep -n '^# ==== BEGIN feature-matrix annotation' "$GATE")
+fm_begin=$(head -1 <<<"$_spw25" | cut -d: -f1)
 if [ -z "$fm_begin" ]; then
   bad "B6: could not locate the '==== BEGIN feature-matrix annotation' marker in $GATE"
 else
@@ -442,7 +445,8 @@ fi
 #       recording before the first component;
 #   (c) no `.`/`source` of a variable-named file appears inside the block.
 # The needles are SPLIT so this assert cannot match its own source lines.
-fm_end_ln=$(grep -n '^# ==== END feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
+_spw24=$(grep -n '^# ==== END feature-matrix annotation' "$GATE")
+fm_end_ln=$(head -1 <<<"$_spw24" | cut -d: -f1)
 if [ -z "$fm_begin" ] || [ -z "$fm_end_ln" ] || [ "$fm_end_ln" -le "${fm_begin:-0}" ]; then
   bad "B7: could not locate a well-ordered BEGIN/END feature-matrix marker pair in $GATE"
 else
@@ -930,7 +934,8 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-d
   # read here because this grep decides "no component line emitted" (a `bad`), and a
   # name-keyed reader that knows a SUBSET answers that question wrongly the day the set grows
   # again — which it just did, twice, from two issues at once.
-  line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$sum" 2>/dev/null | head -1)
+  _spw23=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$sum" 2>/dev/null)
+  line=$(head -1 <<<"$_spw23")
   if [ -z "$line" ]; then
     bad "C-$c$tag: no '$c:' component line in the emitted block"
     return
@@ -1370,7 +1375,8 @@ for c in "${e2_cargo[@]+"${e2_cargo[@]}"}"; do
   AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
   PATH="$shim_dir:$PATH" \
     bash "$GATE" --only "$c" > "$e2_log" 2>&1
-  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$e2_sum" 2>/dev/null | head -1)
+  _spw22=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$e2_sum" 2>/dev/null)
+  e2_line=$(head -1 <<<"$_spw22")
   if [ -z "$e2_line" ]; then e2_missing+=("$c"); continue; fi
   e2_ran=$((e2_ran + 1))
   e2_ann=${e2_line#*\[}; e2_ann="[$e2_ann"

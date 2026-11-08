@@ -133,7 +133,7 @@ runB() { ( cd "$B" && CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "
 runA_gh() { ( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 runB_gh() { ( cd "$B" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 
-ref_sha()      { g -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}' | head -1; }
+ref_sha()      { local rs rc; rs=$(g -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}'); rc=$?; head -1 <<<"$rs"; return "$rc"; }
 ref_count()    { g -C "$A" ls-remote origin "refs/claims/issue-$1" | wc -l | tr -d ' '; }
 branch_exists() { [ -n "$(g -C "$A" ls-remote --heads origin "$1" | awk '{print $1}')" ]; }
 
@@ -146,7 +146,7 @@ accepted_olds()    { awk -v r="refs/claims/issue-$1" '$1==r {print $2}' "$HOOKLO
 # line_field <line> <key> — pull `<key>=<value>` out of a CLAIM: line using the same
 # exact-key/first-match token semantics claim.sh's own msg_field uses, so assertions
 # test the RECORD, not a verbatim rendering of the whole line.
-line_field() { printf '%s' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | sed "s/^$2=//"; }
+line_field() { local lf; lf=$(tr ' ' '\n' <<<"$1"); grep -m1 "^$2=" <<<"$lf" | sed "s/^$2=//"; }
 
 # --- THE WORK-BRANCH FIXTURE -----------------------------------------------
 # push_work_branch <branch> [msg] — an ORDINARY work branch on origin: cut from main,

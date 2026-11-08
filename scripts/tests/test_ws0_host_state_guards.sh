@@ -66,7 +66,7 @@ trap cleanup EXIT
 # EXIT **and** on the signals, and it must be part of the same trap that stops the
 # server rather than replacing it (a second bare `trap ... EXIT` would silently
 # discard the first).
-if awk '/^trap /' "$DRIVER" | grep -q 'INT TERM HUP'; then
+if { _spw61=$(awk '/^trap /' "$DRIVER") && grep -q 'INT TERM HUP' <<<"$_spw61"; }; then
   pass "the driver traps INT/TERM/HUP, not only EXIT (a Ctrl-C used to skip cleanup)"
 else
   fail "the driver must trap INT/TERM/HUP as well as EXIT"
@@ -77,16 +77,17 @@ else
   fail "multiple top-level 'trap' lines: a later bare EXIT trap discards the earlier one"
 fi
 if grep -q 'restore_sysctls' "$DRIVER" \
-  && awk '/^on_exit\(\)/,/^}/' "$DRIVER" | grep -q 'restore_sysctls' \
-  && awk '/^on_exit\(\)/,/^}/' "$DRIVER" | grep -q 'stop_server'; then
+  && { _spw9=$(awk '/^on_exit\(\)/,/^}/' "$DRIVER") && grep -q 'restore_sysctls' <<<"$_spw9"; } \
+  && { _spw8=$(awk '/^on_exit\(\)/,/^}/' "$DRIVER") && grep -q 'stop_server' <<<"$_spw8"; }; then
   pass "the single exit handler runs BOTH stop_server and restore_sysctls"
 else
   fail "the exit handler must run stop_server AND restore_sysctls"
 fi
 # The prior values must be CAPTURED BEFORE the mutation, or there is nothing to
 # restore to: assert the capture precedes the `sysctl -w` in file order.
-cap_line=$(grep -n 'PARANOID_PRIOR=' "$HOST_STATE" | head -1 | cut -d: -f1)
-mut_line=$(grep -n 'sysctl -w "\${writes\[@\]}"' "$HOST_STATE" | head -1 | cut -d: -f1)
+cap_line=$(grep -m 1 -n 'PARANOID_PRIOR=' "$HOST_STATE" | cut -d: -f1)
+_spw60=$(grep -n 'sysctl -w "\${writes\[@\]}"' "$HOST_STATE")
+mut_line=$(head -1 <<<"$_spw60" | cut -d: -f1)
 if [ -n "$cap_line" ] && [ -n "$mut_line" ] && [ "$cap_line" -lt "$mut_line" ]; then
   pass "the prior sysctl values are captured BEFORE the mutation (line $cap_line < $mut_line)"
 else
@@ -103,8 +104,8 @@ for knob in perf_event_paranoid kptr_restrict; do
 done
 # The restore must be IDEMPOTENT and must never fail the run: it is cleanup, and a
 # cleanup that can exit non-zero turns a successful measurement into a failed one.
-if awk '/^restore_sysctls\(\)/,/^}/' "$HOST_STATE" | grep -q 'SYSCTLS_MUTATED' \
-  && awk '/^restore_sysctls\(\)/,/^}/' "$HOST_STATE" | grep -q '^  return 0$'; then
+if { _spw11=$(awk '/^restore_sysctls\(\)/,/^}/' "$HOST_STATE") && grep -q 'SYSCTLS_MUTATED' <<<"$_spw11"; } \
+  && { _spw7=$(awk '/^restore_sysctls\(\)/,/^}/' "$HOST_STATE") && grep -q '^  return 0$' <<<"$_spw7"; }; then
   pass "restore_sysctls is guarded by a mutated-flag and returns 0 unconditionally"
 else
   fail "restore_sysctls must be flag-guarded (idempotent) and end in an explicit return 0"
@@ -303,8 +304,8 @@ else
 fi
 # And the driver must WIRE that: the kptr write is inside the successful-capture
 # branch, so an unreadable prior leaves the knob alone rather than weakening it.
-if awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$HOST_STATE" | grep -q 'kernel.kptr_restrict=0' \
-  && awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$HOST_STATE" | grep -q 'left ALONE'; then
+if { _spw10=$(awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$HOST_STATE") && grep -q 'kernel.kptr_restrict=0' <<<"$_spw10"; } \
+  && { _spw6=$(awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$HOST_STATE") && grep -q 'left ALONE' <<<"$_spw6"; }; then
   pass "the driver weakens kptr_restrict ONLY inside the successful-capture branch"
 else
   fail "the kptr_restrict write must be gated on its prior having been captured"
@@ -312,7 +313,7 @@ fi
 # An unreadable perf_event_paranoid prior is FATAL rather than a silent weakening: it
 # is the knob the measurement REQUIRES, so there is no correct run without it.
 if grep -q 'if ! PARANOID_PRIOR=' "$HOST_STATE" \
-  && awk '/^  if ! PARANOID_PRIOR=/,/^  fi$/' "$HOST_STATE" | grep -q 'exit 2'; then
+  && { _spw5=$(awk '/^  if ! PARANOID_PRIOR=/,/^  fi$/' "$HOST_STATE") && grep -q 'exit 2' <<<"$_spw5"; }; then
   pass "an unreadable perf_event_paranoid prior is FATAL (never weakened unrestorably)"
 else
   fail "an unreadable perf_event_paranoid prior must be fatal"

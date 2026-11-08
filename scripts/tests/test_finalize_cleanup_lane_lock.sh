@@ -39,7 +39,7 @@ sleeper() {
 T="$(mktemp -d)"
 export LANE_ROOT="$T"
 
-lease_of() { bash "$LL" probe "$1" 2>/dev/null | tr ' ' '\n' | sed -n 's/^lease=//p' | head -1; }
+lease_of() { local lo rc; lo=$(bash "$LL" probe "$1" 2>/dev/null | tr ' ' '\n'); rc=$?; sed -n '/^lease=/{s/^lease=//p;q;}' <<<"$lo"; return "$rc"; }
 record_of() { printf '%s/.lane-locks/lane-%s.lock\n' "$T" "$1"; }
 
 # ---------------------------------------------------------------------------

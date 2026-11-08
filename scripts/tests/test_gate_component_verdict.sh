@@ -825,7 +825,7 @@ echo "=== section 15: the THIRD per-mode completion grammar (--delta) ==="
 # behave as published; testing a constant that merely resembles the published one would
 # reproduce that gap one level up.
 _pub() {  # <mode-label> -> the grammar published for that mode, or empty
-  sed -n "s/^#[[:space:]]*$1[[:space:]]*(.*):[[:space:]]*grep -qE '\([^']*\)'.*/\1/p" "$VERDICT" | head -1
+  sed -n "/^#[[:space:]]*$1[[:space:]]*(.*):[[:space:]]*grep -qE '\([^']*\)'.*/{s/^#[[:space:]]*$1[[:space:]]*(.*):[[:space:]]*grep -qE '\([^']*\)'.*/\1/p;q;}" "$VERDICT"
 }
 _pub_record=$(_pub record); _pub_only=$(_pub only); _pub_delta=$(_pub delta)
 if [ -n "$_pub_record" ] && [ -n "$_pub_only" ] && [ -n "$_pub_delta" ]; then
@@ -884,7 +884,8 @@ else ok "15.9 widening to ERROR/REFUSED must not readmit the #3041 INCOMPLETE se
 # gate-liveness.sh enumerates in its own `case` arm — read out of that file at run time, so
 # a token added to the reader and not here (or vice versa) reds instead of drifting. A
 # second independent list is what this case exists to forbid.
-_reader_set=$(grep -oE '^[[:space:]]*PASS\|FAIL\|[A-Z|]+\)' "$READER" | head -1 | tr -d ' )')
+_spw42=$(grep -oE '^[[:space:]]*PASS\|FAIL\|[A-Z|]+\)' "$READER")
+_reader_set=$(head -1 <<<"$_spw42" | tr -d ' )')
 _delta_set=$(sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p' <<<"$DELTA_RE")
 if [ -n "$_reader_set" ] && [ "$_reader_set" = "$_delta_set" ]; then
   ok "15.10 the DELTA grammar's token set is DERIVED-equal to gate-liveness.sh's terminal set"
@@ -967,8 +968,8 @@ _scope_sites=$(grep -rlE 'RESULT: \(PASS\|FAIL(\|PARTIAL)?(\|ERROR\|REFUSED)?\)'
            | grep -v '/openspec/changes/archive/' | sort)
 _scoped=""
 for _f in $_scope_sites; do
-  if tr -s '[:space:]' ' ' < "$_f" | tr -d '`*' | sed 's| */ *|/|g' \
-     | grep -qF -- "$_needle"; then
+  if _vn=$(tr -s '[:space:]' ' ' < "$_f" | tr -d '`*' | sed 's| */ *|/|g') \
+     && grep -qF -- "$_needle" <<<"$_vn"; then
     _scoped="$_scoped ${_f#"$REPO_ROOT"/}"
   fi
 done
@@ -1018,7 +1019,8 @@ expect "16.3 control: a full-gate PASS token is IN --only's set and still reache
 _only_pub=$(sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p' <<<"$_pub_only")
 # The ENFORCING case arm, as it is really written (`  PASS|FAIL|PARTIAL) ;;`): the trailing
 # `;;` is part of the arm, so the extractor must allow it rather than require end-of-line.
-_only_code=$(sed -n 's/^[[:space:]]*\([A-Z|]\{1,\}\))[[:space:]]*;;[[:space:]]*$/\1/p' "$VERDICT" | grep -m1 '^PASS|')
+_spw41=$(sed -n 's/^[[:space:]]*\([A-Z|]\{1,\}\))[[:space:]]*;;[[:space:]]*$/\1/p' "$VERDICT")
+_only_code=$(grep -m1 '^PASS|' <<<"$_spw41")
 if [ -n "$_only_pub" ] && [ "$_only_pub" = "$_only_code" ]; then
   ok "16.4 the ENFORCED --only token set is DERIVED-equal to the one the header publishes"
 else

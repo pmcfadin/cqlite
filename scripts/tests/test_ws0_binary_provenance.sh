@@ -94,7 +94,7 @@ make_corpus "$TMP/corpus"
 # used to come from the parent suite's ticket section, and carrying the dependency rather than the
 # definition is how a split leaves a case comparing against an EMPTY variable — which under
 # `set -u`-without-`-e` would fail for the wrong reason.
-pin_write_line=$(grep -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+pin_write_line=$(grep -m 1 -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
 # ==========================================================================
 # ROUND 10, M2 — WHICH BINARIES PRODUCED THE RATIO
 # ==========================================================================
@@ -289,7 +289,7 @@ fi
 # ROUND 11's F1 (that check's SCOPING to `reused`) is verified in test_ws0_primary_path_admits_a_legitimate_run.sh.
 # ...and the driver must RECORD the binaries BEFORE it pins the session, so a stale-binary refusal
 # costs seconds rather than a full measurement run.
-binrec_line=$(grep -n 'record_measured_binaries' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+binrec_line=$(grep -m 1 -n 'record_measured_binaries' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
 if [ -n "$binrec_line" ] && [ -n "$pin_write_line" ] && [ "$binrec_line" -lt "$pin_write_line" ]; then
   pass "round10 M2: the driver records the measured binaries at line $binrec_line, BEFORE the session pin at line $pin_write_line (a stale-binary refusal costs seconds, not a full run)"
 else
@@ -358,8 +358,8 @@ fi
 # behaviour needs a real build: `lib-measure.sh` reads `$BIN` for every taskset invocation, and
 # `record_measured_binaries` is where the copies come into existence.
 if grep -q '^  BIN="$frozen"' "$REPO_ROOT/scripts/perf/lib-binaries.sh" \
-   && awk '/^record_measured_binaries\(\)/,/^}/' "$REPO_ROOT/scripts/perf/lib-binaries.sh" \
-        | grep -q 'measured_bin_dir'; then
+   && rmb_body=$(awk '/^record_measured_binaries\(\)/,/^}/' "$REPO_ROOT/scripts/perf/lib-binaries.sh") \
+   && grep -q 'measured_bin_dir' <<<"$rmb_body"; then
   pass "round11 F2 wired: record_measured_binaries repoints \$BIN at the frozen directory, resolved from ws0_binaries.measured_bin_dir (not a duplicated literal, so the shell and the python cannot disagree about where the copies are)"
 else
   fail "round11 F2: the driver must repoint \$BIN at the session's frozen copies"

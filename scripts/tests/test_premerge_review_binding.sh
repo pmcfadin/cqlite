@@ -2308,7 +2308,7 @@ done
 chmod +x "$FLOW_PARTLIB"/*.sh "$FLOW_PARTLIB"/*.py 2>/dev/null
 # The REAL library's tail from the entry point onward: sources cleanly, entry point defined,
 # helpers absent. Start line DERIVED, so moving the function cannot silently restage this.
-partlib_start=$(grep -n '^roborev_findings_count()' "$FLOW/lib/roborev-findings-count.sh" | head -1 | cut -d: -f1)
+partlib_start=$(grep -m 1 -n '^roborev_findings_count()' "$FLOW/lib/roborev-findings-count.sh" | cut -d: -f1)
 if [ -n "$partlib_start" ]; then
   sed -n "${partlib_start},\$p" "$FLOW/lib/roborev-findings-count.sh" > "$FLOW_PARTLIB/lib/roborev-findings-count.sh"
 fi

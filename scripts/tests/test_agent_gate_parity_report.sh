@@ -62,7 +62,7 @@ trap 'rm -rf "$tmp"; rm -f "$MUT"' EXIT INT TERM
 # parity_status <summary-file>: print the component's status token (PASS/FAIL/SKIP)
 # from the SUMMARY block, or empty if absent.
 parity_status() {
-  sed -n 's/^parity-report:[[:space:]]*\([A-Z]*\).*/\1/p' "$1" | head -1
+  sed -n '/^parity-report:[[:space:]]*\([A-Z]*\).*/{s/^parity-report:[[:space:]]*\([A-Z]*\).*/\1/p;q;}' "$1"
 }
 
 # --- Outcome 1: SKIP when the manifest is absent (no cargo needed). -----------

@@ -1161,7 +1161,8 @@ if ! grep -q "Both arms are counted identically, so the ratio" <<<"$out_dist" \
    && grep -q "PROPERTY UNDER TEST" <<<"$out_dist"; then
   pass "REPORT NOTES: the SMT bullet no longer asserts the two arms are counted identically, states the quantity in terms true of both configurations, and names the distinct-core case as the property under test"
 else
-  fail "the counting NOTES bullet must be true in both configurations (notes: $(grep -A3 'hardware thread' <<<"$out_dist" | head -5))"
+  _spw17=$(grep -A3 'hardware thread' <<<"$out_dist")
+  fail "the counting NOTES bullet must be true in both configurations (notes: $(head -5 <<<"$_spw17"))"
 fi
 # ...and the DEFAULT configuration still reads as close to the pre-#3551 report as is honest:
 # both arms name the same list, and the bullet says so.
@@ -1169,7 +1170,8 @@ if grep -qE '^  bare scan .*counted on cpus 2,10$' <<<"$out_sib" \
    && grep -q "each arm's figure is a per-physical-core one and the two are counted identically" <<<"$out_sib"; then
   pass "REPORT NOTES: with both pins at the default the bullet AFFIRMS the per-physical-core reading and the identical counting (the honest no-op-by-default half)"
 else
-  fail "the default configuration must still state the per-physical-core reading (out: $(grep -B1 -A2 'hardware thread' <<<"$out_sib" | head -6))"
+  _spw16=$(grep -B1 -A2 'hardware thread' <<<"$out_sib")
+  fail "the default configuration must still state the per-physical-core reading (out: $(head -6 <<<"$_spw16"))"
 fi
 # ...and results.json carries the same facts for a machine reader.
 if python3 - "$TMP/f-distinct/results.json" <<'PY'

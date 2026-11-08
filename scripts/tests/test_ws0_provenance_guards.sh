@@ -587,8 +587,9 @@ else
 fi
 # ...and it must do so BEFORE the first rep, or the pin describes the corpus as it was after
 # the run rather than before it.
-pin_line=$(grep -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
-loop_line=$(grep -n '^for temp in \$TEMPS; do' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+pin_line=$(grep -m 1 -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
+_spw67=$(grep -n '^for temp in \$TEMPS; do' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")
+loop_line=$(head -1 <<<"$_spw67" | cut -d: -f1)
 if [ -n "$pin_line" ] && [ -n "$loop_line" ] && [ "$pin_line" -lt "$loop_line" ]; then
   pass "the pin is stamped at line $pin_line, BEFORE the measurement loop at line $loop_line"
 else
@@ -885,7 +886,7 @@ fi
 # campsite target); the driver still owns the order, so the anchor is the driver-side call
 # `verify_corpus_schema_input`. An empty value fails these cases CLOSED rather than comparing against
 # nothing.
-schema_line=$(grep -n '^verify_corpus_schema_input' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+schema_line=$(grep -m 1 -n '^verify_corpus_schema_input' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
 # The GENERATION site, not the variable assignment: `TICKET_TEMPLATE=` (line ~359) is just a
 # path, while the `write_ticket_template` call is where the ticket is actually DERIVED from the
 # DDL. Anchoring on the assignment measured the wrong line and failed this case for the wrong
@@ -901,8 +902,9 @@ schema_line=$(grep -n '^verify_corpus_schema_input' "$REPO_ROOT/scripts/perf/ws0
 # Round 13's F2 split moved the derivation's BODY into `lib-inputs.sh` too, so the driver-side anchor
 # is now its call `write_ticket_template_for_session` — still the ONE place the driver derives the
 # ticket, and still anchored on a function name rather than an argv shape.
-ticket_line=$(grep -n '^write_ticket_template_for_session' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
-loop_line=$(grep -n '^for temp in \$TEMPS; do' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+ticket_line=$(grep -m 1 -n '^write_ticket_template_for_session' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
+_spw66=$(grep -n '^for temp in \$TEMPS; do' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")
+loop_line=$(head -1 <<<"$_spw66" | cut -d: -f1)
 if [ -n "$schema_line" ] && [ -n "$loop_line" ] && [ "$schema_line" -lt "$loop_line" ]; then
   pass "round6 R2: the DRIVER verifies the schema at line $schema_line, BEFORE the measurement loop at line $loop_line (wired, not reporter-only)"
 else
@@ -931,7 +933,7 @@ fi
 # THE WIRING HALF FIRST: the ticket must be written BEFORE the pin, because the pin records its
 # digest. Line-ordered, like the schema check above, because a pin that ran first would refuse
 # every session on an absent template — i.e. the ordering is not a style question.
-pin_write_line=$(grep -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+pin_write_line=$(grep -m 1 -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
 if [ -n "$ticket_line" ] && [ -n "$pin_write_line" ] && [ "$ticket_line" -lt "$pin_write_line" ]; then
   pass "round10 M1: the driver WRITES the Flight ticket at line $ticket_line, BEFORE it pins the session at line $pin_write_line (the pin records the ticket's digest, so the order is load-bearing)"
 else
@@ -1173,8 +1175,9 @@ chmod u+w "$TMP/corpus-readonly" "$TMP/corpus-readonly/ws0" "$TMP/corpus-readonl
 # reassigns `$BIN` beside the freeze). Scanning only the driver would have read as "no assignment
 # anywhere" and passed the negative half for free — so both halves are asserted over the same set of
 # files, and the ABSENCE of any assignment fails.
-ticket_var_line=$(grep -n '^ *TICKET_TEMPLATE=' \
-  "$REPO_ROOT/scripts/perf/ws0-baseline.sh" "$REPO_ROOT"/scripts/perf/lib-*.sh | head -1)
+ticket_var_all=$(grep -n '^ *TICKET_TEMPLATE=' \
+  "$REPO_ROOT/scripts/perf/ws0-baseline.sh" "$REPO_ROOT"/scripts/perf/lib-*.sh)
+ticket_var_line=$(head -1 <<<"$ticket_var_all")
 if grep -qE '^ *TICKET_TEMPLATE="\$OUT_DIR/' \
      "$REPO_ROOT/scripts/perf/ws0-baseline.sh" "$REPO_ROOT"/scripts/perf/lib-*.sh \
    && ! grep -qE '^ *TICKET_TEMPLATE="\$CORPUS/' \
@@ -1185,8 +1188,8 @@ else
 fi
 # ...and it must be written AFTER the output dir is created and claimed, or `$OUT_DIR` would be
 # empty at that point and the write would land at a path rooted at nothing.
-outdir_line=$(grep -n 'OUT_DIR="\$(create_out_dir' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
-ticket_write_line=$(grep -n '^write_ticket_template_for_session' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+outdir_line=$(grep -m 1 -n 'OUT_DIR="\$(create_out_dir' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
+ticket_write_line=$(grep -m 1 -n '^write_ticket_template_for_session' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | cut -d: -f1)
 if [ -n "$outdir_line" ] && [ -n "$ticket_write_line" ] && [ "$outdir_line" -lt "$ticket_write_line" ]; then
   pass "round13 F2 wired: the output dir is created+claimed at line $outdir_line BEFORE the ticket is written at line $ticket_write_line (the session must own the directory before it writes its request into it)"
 else
@@ -1254,7 +1257,7 @@ if [ "$rc" -eq 0 ] && grep -q 'physical-core siblings' <<<"$out" \
    && grep -q 'recorded in pinning-verification.json' <<<"$out"; then
   pass "OBSERVED (round9 F6): an untampered session REPORTS, and the pinning line cites the RECORDED observation (host + artifact) rather than printing 'verified' over a module name"
 else
-  fail "round9 F6: an honest session must report with an evidence-citing pinning line (rc=$rc, out: $(grep pinning <<<"$out" | head -2))"
+  fail "round9 F6: an honest session must report with an evidence-citing pinning line (rc=$rc, out: $(grep -m 2 pinning <<<"$out"))"
 fi
 # ...and results.json must carry the record's OWN provenance limit, so the document takes ONE
 # posture about its artifacts. The contradiction was the compounding half of the finding:

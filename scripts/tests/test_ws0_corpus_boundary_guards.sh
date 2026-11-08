@@ -464,7 +464,8 @@ fi
 unread_dir="$TMP/unreadable"; make_corpus "$TMP/corpus-unread"
 WS0_SCAN_CORPUS="$TMP/corpus-unread" make_session "$unread_dir" "$GOOD_FLIGHT"
 ws0_pin_session_corpus "$unread_dir" "$TMP/corpus-unread"
-unread_target="$(ls "$TMP/corpus-unread/ws0/events/"*-Index.db | head -1)"
+_spw54=$(ls "$TMP/corpus-unread/ws0/events/"*-Index.db)
+unread_target="$(head -1 <<<"$_spw54")"
 chmod 000 "$unread_target" 2>/dev/null
 if [ -r "$unread_target" ]; then
   # Running as root (or on a filesystem ignoring the mode) makes the file readable anyway, so the
@@ -514,7 +515,8 @@ fi
 gone_dir="$TMP/gone"; make_corpus "$TMP/corpus-gone"
 WS0_SCAN_CORPUS="$TMP/corpus-gone" make_session "$gone_dir" "$GOOD_FLIGHT"
 ws0_pin_session_corpus "$gone_dir" "$TMP/corpus-gone"
-gone_target="$(ls "$TMP/corpus-gone/ws0/events/"*-Index.db | head -1)"
+_spw53=$(ls "$TMP/corpus-gone/ws0/events/"*-Index.db)
+gone_target="$(head -1 <<<"$_spw53")"
 mv "$gone_target" "$TMP/gone-index.bak"
 gone_out=$(boundary "$gone_dir" "$TMP/corpus-gone" rep-2); gone_rc=$?
 if [ "$gone_rc" -ne 0 ] && grep -q 'COMPONENT SET CHANGED DURING MEASUREMENT' <<<"$gone_out"; then
@@ -876,7 +878,8 @@ driver_probe() {
 # --------------------------------------------------------------------------
 make_corpus "$TMP/corpus-driver-wired"
 wired_out=$(driver_probe "$TMP/driver-wired" "$TMP/corpus-driver-wired" wired); wired_rc=$?
-wired_component=$(grep -oE 'component nb-[0-9]+-big-Index\.db' <<<"$wired_out" | head -1)
+_spw52=$(grep -oE 'component nb-[0-9]+-big-Index\.db' <<<"$wired_out")
+wired_component=$(head -1 <<<"$_spw52")
 if [ "$wired_rc" -ne 0 ] \
    && grep -q 'THE CORPUS CHANGED DURING MEASUREMENT' <<<"$wired_out" \
    && [ -n "$wired_component" ]; then
@@ -913,7 +916,8 @@ fi
 make_corpus "$TMP/corpus-driver-bypassed"
 bypassed_out=$(driver_probe "$TMP/driver-bypassed" "$TMP/corpus-driver-bypassed" bypassed)
 bypassed_rc=$?
-bypassed_ratio=$(grep -oE 'ratio bare/flight = [0-9.]+x' <<<"$bypassed_out" | head -1)
+_spw51=$(grep -oE 'ratio bare/flight = [0-9.]+x' <<<"$bypassed_out")
+bypassed_ratio=$(head -1 <<<"$_spw51")
 if [ "$bypassed_rc" -eq 0 ] \
    && grep -q 'round 2/2' <<<"$bypassed_out" \
    && [ -e "$TMP/driver-bypassed/results.json" ] \

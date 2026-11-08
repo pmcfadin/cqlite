@@ -96,7 +96,8 @@ ABC_DRIVER="$REPO_ROOT/scripts/perf/ws0-3551-abc.sh"
 # this repo's standing rule the subject set is computed from committed source at run time, so a
 # new arm is picked up rather than breaking the suite; and a FAILED derivation is a FAIL that
 # NAMES the derivation, never a fallback to a default, which would silently re-curate the list.
-_arms_line=$(grep -oE '^ARMS=\([^)]*\)' "$ABC_DRIVER" | head -1) || true
+_spw13=$(grep -oE '^ARMS=\([^)]*\)' "$ABC_DRIVER")
+_arms_line=$(head -1 <<<"$_spw13") || true
 if [ -z "$_arms_line" ]; then
   printf 'FAIL - derivation: no top-level ARMS=(...) in %s, so the arm set cannot be derived\n' \
     "$ABC_DRIVER" >&2
@@ -1378,8 +1379,10 @@ fi
 # --- 5h. THE THREE FILES NAME THE SAME ARM AND THE SAME BINARY. The exception is implemented on
 # one side and granted on the other; two sides silently naming different arms is precisely how a
 # narrow exception becomes a disabled check, and neither file can detect it alone.
-drv_arm=$(grep -oE '^ARM_E="[^"]*"' "$ABC_DRIVER" | head -1 | cut -d'"' -f2)
-drv_bin=$(grep -oE '^ARM_E_BINARY="[^"]*"' "$ABC_DRIVER" | head -1 | cut -d'"' -f2)
+_spw48=$(grep -oE '^ARM_E="[^"]*"' "$ABC_DRIVER")
+drv_arm=$(head -1 <<<"$_spw48" | cut -d'"' -f2)
+_spw47=$(grep -oE '^ARM_E_BINARY="[^"]*"' "$ABC_DRIVER")
+drv_bin=$(head -1 <<<"$_spw47" | cut -d'"' -f2)
 # THE PYTHON SIDES ARE DERIVED BY IMPORT, not by grepping their source: the producer's field
 # names come from the dict `server_rss_block` actually RETURNS and the consumer's from the tuple
 # it actually READS, so a rename that a source-text scan would miss (a computed key, a moved
@@ -1542,13 +1545,13 @@ if grep -q "r1-E" "$ABC_STUB_LOG"; then
 else
   fail "5i. arm E's session must be launched (log: $(tr '\n' ' ' < "$ABC_STUB_LOG" | cut -c1-200))"
 fi
-if grep 'r1-E' "$ABC_STUB_LOG" | grep -qF -- "--bin-dir $BINS_E"; then
+if { _spw46=$(grep 'r1-E' "$ABC_STUB_LOG") && grep -qF -- "--bin-dir $BINS_E" <<<"$_spw46"; }; then
   pass "5i. ...and arm E was dispatched against --bin-dir-e's OWN binary set, which is the treatment"
 else
   fail "5i. arm E must receive --bin-dir-e's directory ($(grep 'r1-E' "$ABC_STUB_LOG"))"
 fi
-if grep 'r1-A' "$ABC_STUB_LOG" | grep -qF -- "--bin-dir $BINS" \
-   && ! grep 'r1-A' "$ABC_STUB_LOG" | grep -qF -- "--bin-dir $BINS_E"; then
+if { _spw8=$(grep 'r1-A' "$ABC_STUB_LOG") && grep -qF -- "--bin-dir $BINS" <<<"$_spw8"; } \
+   && ! { _spw3=$(grep 'r1-A' "$ABC_STUB_LOG") && grep -qF -- "--bin-dir $BINS_E" <<<"$_spw3"; }; then
   pass "5i. ...while every other arm still measures --bin-dir's set — arm A got $BINS and not the E one"
 else
   fail "5i. arm A must still receive --bin-dir (log: $(grep 'r1-A' "$ABC_STUB_LOG"))"
@@ -1685,12 +1688,12 @@ if [ "$rc" -eq 0 ] \
    && grep -qF "reports 'allocator: jemalloc' (R2.1)" <<<"$out"; then
   pass "5m. the correct pair is ACCEPTED and the driver PRINTS both reported allocators — observed to have ASKED, not merely to have not refused"
 else
-  fail "5m. the correct pair must be accepted with both allocators printed (rc=$rc, out: $(grep -i alloc <<<"$out" | head -4))"
+  fail "5m. the correct pair must be accepted with both allocators printed (rc=$rc, out: $(grep -m 4 -i alloc <<<"$out"))"
 fi
 if grep -qF -- "--bin-dir cqlite-flight" <<<"$out" && grep -qF -- "--bin-dir-e cqlite-flight" <<<"$out"; then
   pass "5m. ...and it names WHICH binary each answer came from, so a reader is not left guessing which side was asked"
 else
-  fail "5m. each printed line must name its binary set (out: $(grep -i alloc <<<"$out" | head -4))"
+  fail "5m. each printed line must name its binary set (out: $(grep -m 4 -i alloc <<<"$out"))"
 fi
 
 # THE FINDING'S OWN FAILURE SCENARIO: arm E's binary DIFFERS in bytes (so case 5j's digest
@@ -1798,7 +1801,8 @@ if [ "$rc" -ne 0 ] && grep -qE '^ +stderr \| allocator: jemalloc$' <<<"$out" \
    && ! grep -qE '^ +stdout \| allocator: jemalloc$' <<<"$out"; then
   pass "5m. ...and the refusal REPRINTS the stderr line LABELLED as stderr, never as stdout — the operator can see where the claim came from"
 else
-  fail "5m. the diagnostic must label the stream (rc=$rc, out: $(grep -E 'stdout|stderr' <<<"$out" | head -4))"
+  _spw12=$(grep -E 'stdout|stderr' <<<"$out")
+  fail "5m. the diagnostic must label the stream (rc=$rc, out: $(head -4 <<<"$_spw12"))"
 fi
 
 # AND THE CHECK IS PART OF THE OPT-IN, NOT OF THE DEFAULT. Without --bin-dir-e no allocator is
@@ -1811,7 +1815,8 @@ out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$CTRL_JEM" \
 if [ "$rc" -eq 0 ] && ! grep -q "(R2.1)" <<<"$out"; then
   pass "5m. WITHOUT --bin-dir-e no allocator is asked at all — even of a jemalloc-reporting control, so the pre-#3997 default is unchanged (declared scope, not a closed hole)"
 else
-  fail "5m. an arm-E-less set must not ask any binary its allocator (rc=$rc, out: $(grep -i 'alloc\|R2.1' <<<"$out" | head -3))"
+  _spw11=$(grep -i 'alloc\|R2.1' <<<"$out")
+  fail "5m. an arm-E-less set must not ask any binary its allocator (rc=$rc, out: $(head -3 <<<"$_spw11"))"
 fi
 
 # ===========================================================================

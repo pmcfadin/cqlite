@@ -1582,7 +1582,8 @@ PY
   # guard. A grep is the durable form of "it is not there": re-adding the number reds the
   # suite, whatever guard comes with it.
   if grep -qE '103804|127\.163|rows_per_second|wall_seconds' "$MANIFEST_PY"; then
-    fail "the manifest writer carries a throughput figure again ($(grep -nE '103804|127\.163|rows_per_second' "$MANIFEST_PY" | head -2 | tr '\n' ' '))"
+    _spw7=$(grep -nE '103804|127\.163|rows_per_second' "$MANIFEST_PY")
+    fail "the manifest writer carries a throughput figure again ($(head -2 <<<"$_spw7" | tr '\n' ' '))"
   else
     pass "the manifest writer holds NO throughput constant and no inheritable AC3 field"
   fi
@@ -1955,7 +1956,8 @@ PY
       fail "M2: a readable manifest survived a failed regeneration at $stale_manifest -- \
 stale provenance in the authoritative position (sha $stale_before)"
     fi
-    stale_aside="$(ls "$stale_root"/manifest-bti-3234.json.superseded-* 2>/dev/null | head -1)"
+    _spw44=$(ls "$stale_root"/manifest-bti-3234.json.superseded-* 2>/dev/null)
+    stale_aside="$(head -1 <<<"$_spw44")"
     if [ -n "$stale_aside" ] \
       && [ "$(sha256sum "$stale_aside" | cut -d' ' -f1)" = "$stale_before" ]; then
       pass "M2: the previous manifest survives ONLY under a superseded-* name (forensics)"

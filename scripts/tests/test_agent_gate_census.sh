@@ -609,8 +609,8 @@ plant_rc=$(run_only "$shim_noop" "$plant_sum")
 ctrl_sum="$tmp/ctrl.txt"
 ctrl_rc=$(run_only "$shim_real" "$ctrl_sum")
 
-plant_line=$(grep -E "^$PLANT_COMPONENT: " "$plant_sum" 2>/dev/null | head -1 || true)
-ctrl_line=$(grep -E "^$PLANT_COMPONENT: " "$ctrl_sum" 2>/dev/null | head -1 || true)
+plant_line=$(grep -m 1 -E "^$PLANT_COMPONENT: " "$plant_sum" 2>/dev/null || true)
+ctrl_line=$(grep -m 1 -E "^$PLANT_COMPONENT: " "$ctrl_sum" 2>/dev/null || true)
 
 if [ -z "$plant_line" ] || [ -z "$ctrl_line" ]; then
   bad "F0: the gate emitted no '$PLANT_COMPONENT:' component line (plant='$plant_line' control='$ctrl_line') — neither arm can be judged, so (F) certifies nothing"
@@ -752,9 +752,9 @@ fi
 # test_cargo_output_parsers.sh's own extraction is comment-blind).
 # The strip lives in the MEASURING CORE, which _census_measure delegates to; assert BOTH
 # links, or a future refactor could leave the core routed and nothing calling it.
-sed -n '/^_census_measure_kind() {/,/^}$/p' "$GATE" | grep -v '^[[:space:]]*#' | grep -q '_ansi_stripped_log' \
+{ _spw3=$(sed -n '/^_census_measure_kind() {/,/^}$/p' "$GATE" | grep -v '^[[:space:]]*#') && grep -q '_ansi_stripped_log' <<<"$_spw3"; } \
   || h_bad+=("_census_measure_kind-has-no-non-comment-call-to-_ansi_stripped_log")
-sed -n '/^_census_measure() {/,/^}$/p' "$GATE" | grep -v '^[[:space:]]*#' | grep -q '_census_measure_kind ' \
+{ _spw2=$(sed -n '/^_census_measure() {/,/^}$/p' "$GATE" | grep -v '^[[:space:]]*#') && grep -q '_census_measure_kind ' <<<"$_spw2"; } \
   || h_bad+=("_census_measure-does-not-delegate-to-the-measuring-core")
 # Both parsers must read by REDIRECTION. A pipe into awk is survivable for a counter, but
 # a pipe into a `while read` accumulator is the #3400 silent-verdict shape, and the rule
@@ -1641,7 +1641,7 @@ grep -qE '^[[:space:]]*rm -f "\$log"' <<<"$t_body" && t_bad+=("still-deletes-its
 # bare substring test would read that explanation as the thing it forbids — the artifact
 # describing the rule becoming a violation of it (#3312's shape, and the same reason this
 # repo's other structural scans strip comments first).
-grep -vE '^[[:space:]]*#' <<<"$t_body" | grep -q '_census_declare' \
+{ _spw1=$(grep -vE '^[[:space:]]*#' <<<"$t_body") && grep -q '_census_declare' <<<"$_spw1"; } \
   && t_bad+=("still-declares-an-input-count-instead-of-measuring-the-work")
 if [ "${#t_bad[@]}" -eq 0 ]; then
   ok "T5: the lane writes its jest output to \$LOG_DIR and keeps it, and no longer self-declares an input count"

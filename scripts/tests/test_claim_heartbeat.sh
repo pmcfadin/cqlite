@@ -1601,8 +1601,8 @@ if grep -q 'git log -1 --format=%B "\$tmpref"' "$dl_body"; then
 else
   bad "cmd_dead_lanes must read the claim message from \$tmpref: $(grep -n 'git log' "$dl_body")"
 fi
-if ! grep -vE '^[[:space:]]*#' "$dl_body" \
-  | grep -qE 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD'; then
+# (no pipefail in this suite: the writer's status was never part of the condition)
+if ! { dl_code=$(grep -vE '^[[:space:]]*#' "$dl_body"); grep -qE 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD' <<<"$dl_code"; }; then
   ok "no revision-reading git command in cmd_dead_lanes names FETCH_HEAD"
 else
   bad "a git revision read still names FETCH_HEAD: $(grep -vE '^[[:space:]]*#' "$dl_body" | grep -E 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD')"
@@ -1612,7 +1612,7 @@ fi
 # COMMENTS STRIPPED FIRST (roborev round 14, Low). The bare token search matched the comment
 # that EXPLAINS the flag, so the check stayed green with the actual flag deleted — vacuous in
 # the one direction that matters. It now asserts the executable fetch invocation.
-if grep -vE '^[[:space:]]*#' "$dl_body" | grep -qE 'git fetch[[:space:]]+--no-write-fetch-head'; then
+if { _spw35=$(grep -vE '^[[:space:]]*#' "$dl_body") && grep -qE 'git fetch[[:space:]]+--no-write-fetch-head' <<<"$_spw35"; }; then
   ok "the executable fetch in cmd_dead_lanes passes --no-write-fetch-head, so it cannot clobber FETCH_HEAD for its neighbours"
 else
   bad "the fetch command itself must carry --no-write-fetch-head: $(grep -vE '^[[:space:]]*#' "$dl_body" | grep -n 'git fetch')"

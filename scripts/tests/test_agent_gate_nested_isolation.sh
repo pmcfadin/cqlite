@@ -71,7 +71,7 @@ DEFAULT_SUMMARY="$fakeroot/.agent-gate-summary.txt"
 
 hash_of() { shasum "$1" 2>/dev/null | awk '{print $1}'; }
 # summary-file: line value emitted in a --emit-summary-selftest block on stdout.
-summary_path_of() { sed -n 's/^summary-file:[[:space:]]*//p' "$1" | head -1; }
+summary_path_of() { sed -n '/^summary-file:[[:space:]]*/{s/^summary-file:[[:space:]]*//p;q;}' "$1"; }
 
 # --- Property 1: nested-clobber immunity ---------------------------------------
 # 1a. A NON-nested run (no parent marker, no explicit summary) writes the checkout
@@ -182,7 +182,7 @@ fi
 # Assert BOTH the co-located sibling ($integ.integrity-fail.<run-id>) AND the private log named in
 # the stderr line carry the full named block.
 _sibs=("$integ".integrity-fail.*); sib=${_sibs[0]}
-priv=$(sed -n 's/.*verdict in \([^ ]*\) and .*/\1/p' "$integ_err" | head -1)
+priv=$(sed -n '/.*verdict in \([^ ]*\) and .*/{s/.*verdict in \([^ ]*\) and .*/\1/p;q;}' "$integ_err")
 sib_ok=0
 [ -f "$sib" ] \
   && grep -q 'summary-integrity: FAIL (foreign run-id detected mid-run;' "$sib" \
@@ -312,9 +312,9 @@ assert_tree_lines "terminal-nomarker mode" "$tnm_sib"
 for hook_fn in 'marker' 'terminal-nomarker'; do
   # The hook name reaches awk through ENVIRON, never `awk -v` (whose escape processing can
   # rewrite a value) — the convention the tree suites use throughout.
-  if TEST_AWK_H="  $hook_fn)" \
-       awk 'index($0, ENVIRON["TEST_AWK_H"]) == 1 { f = 1 } f { print } f && /exit 0 ;;/ { exit }' "$GATE" \
-       | grep -q '^    _tree_meta_array$'; then
+  if hook_body=$(TEST_AWK_H="  $hook_fn)" \
+       awk 'index($0, ENVIRON["TEST_AWK_H"]) == 1 { f = 1 } f { print } f && /exit 0 ;;/ { exit }' "$GATE") \
+     && grep -q '^    _tree_meta_array$' <<<"$hook_body"; then
     ok "WIRING: the '$hook_fn' self-test hook threads its block through _tree_meta_array (#2926 H3)"
   else
     bad "WIRING: the '$hook_fn' self-test hook emits without the tree renderers — an untraceable emit path"
@@ -337,7 +337,7 @@ if grep -q '_assert_summary_integrity "\$1"' <<<"$rr_body"; then
 else
   bad "WIRING: record_result() does NOT call the integrity guard — mechanism inert on a real gate"
 fi
-lc_ln=$(grep -n '^launch_components$' "$GATE" | head -1 | cut -d: -f1)
+lc_ln=$(grep -m 1 -n '^launch_components$' "$GATE" | cut -d: -f1)
 apply_ln=$(grep -nE '^[[:space:]]*_apply_integrity_marker[[:space:]]*$' "$GATE" | tail -1 | cut -d: -f1)
 # The TERMINAL full-gate emit is now `_emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}"` (the
 # shared no-clobber contract). The lite/delta paths still emit_summary the same shape and exit

@@ -264,9 +264,10 @@ fi
 # quoting puzzle whose most likely failure is a FALSE FAIL on correct code — the kind of red an
 # agent learns to waive. The three lines are asserted to exist and to be in the right ORDER,
 # which is the property (both lines present in the wrong order leaves the guard useless).
-raw_line=$(grep -nF 'raw_lo="${part%%-*}"' "$LIB" | head -1 | cut -d: -f1)
-le_line=$(grep -nF 'decimal_le "$raw_lo"' "$LIB" | head -1 | cut -d: -f1)
-conv_line=$(grep -nF 'lo=$((10#$raw_lo))' "$LIB" | head -1 | cut -d: -f1)
+raw_line=$(grep -m 1 -nF 'raw_lo="${part%%-*}"' "$LIB" | cut -d: -f1)
+_spw62=$(grep -nF 'decimal_le "$raw_lo"' "$LIB")
+le_line=$(head -1 <<<"$_spw62" | cut -d: -f1)
+conv_line=$(grep -m 1 -nF 'lo=$((10#$raw_lo))' "$LIB" | cut -d: -f1)
 if [ -n "$raw_line" ] && [ -n "$le_line" ] && [ -n "$conv_line" ]; then
   pass "wired: cpu_range_validate extracts RAW endpoints (line $raw_line), string-checks them (line $le_line) and only then converts (line $conv_line)"
 else
