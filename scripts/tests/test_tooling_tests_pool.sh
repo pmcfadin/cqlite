@@ -217,5 +217,59 @@ if [ "$out" = "survived pending=TERM" ]; then
 else
   bad "critical-section deferral: got '$out'"
 fi
+# 8. THE INVARIANT (roborev job 145): a process group is signalled only while its number is provably
+#    ours, and never AFTER its leader has been waited on. Instrument `kill` and `wait` with a recorder
+#    shim and assert the order for a killed worker: every group-TERM precedes the wait of that leader.
+cat >"$W/t8.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT=/tmp
+REC="$W/rec8"; : >"\$REC"
+kill() { case "\$*" in "-TERM -- -"*|"-KILL -- -"*) echo "kill \$*" >>"\$REC" ;; esac; builtin kill "\$@"; }
+wait() { echo "wait \$*" >>"\$REC"; builtin wait "\$@"; }
+. "$W/helpers.sh"
+_tt_reset
+_tt_add P 'ok-a' 'sleep 1'
+_tt_add P 'killed-worker' 'TT_MAIN=\$TT_MAIN bash "$W/planted.sh"'
+: >"$W/c8.log"
+TT_MAIN=\$\$
+export TT_MAIN
+_tt_run_all "$W/c8.log" "$W/d8"
+echo "failed=[\$_TT_FAILED_NAMES]"
+EOS
+rm -f "$W/suite.pid" "$W/child.pid"
+out=$(bounded 40 env CQLITE_TOOLING_TESTS_JOBS=2 bash "$W/t8.sh" 2>&1); rc=$?
+viol=$(awk '$1=="wait"{w[$2]=1} $1=="kill"{g=$4; sub(/^-/,"",g); if (g in w) print "kill of group " g " after wait"; k++} END{if(!k) print "no group kill was recorded"}' "$W/rec8")
+if [ "$rc" -eq 0 ] && [ -z "$viol" ] && grep -q '^failed=\[killed-worker\]$' <<<"$out"; then
+  ok "every group kill precedes the wait of its leader (never a group signalled by a reaped leader's id)"
+else
+  bad "kill/wait order: rc=$rc viol=[$viol]; $(tail -1 <<<"$out")"
+fi
+for f in suite.pid child.pid; do builtin kill -9 "$(cat "$W/$f" 2>/dev/null)" 2>/dev/null; done
+# 9. when the tether is gone too, the group can no longer be verified: NO group signal is sent, the
+#    suite log says descendants may survive, and the worker is still reported failed.
+cat >"$W/planted3.sh" <<EOS
+echo \$\$ >"$W/suite.pid"
+sleep 30 & echo \$! >"$W/child.pid"
+p=\$\$
+while :; do
+  par=\$(ps -o ppid= -p "\$p"); set -- \$par; par=\$1
+  [ -n "\$par" ] || exit 9
+  [ "\$par" = "\$TT_MAIN" ] && break
+  p=\$par
+done
+read -r tp <"$W/d9/001.tether"
+kill -9 "\$p" "\$tp"
+wait
+EOS
+sed -e 's#rec8#rec9#g; s#c8.log#c9.log#; s#d8#d9#g; s#planted.sh#planted3.sh#' "$W/t8.sh" >"$W/t9.sh"
+out=$(bounded 40 env CQLITE_TOOLING_TESTS_JOBS=2 bash "$W/t9.sh" 2>&1); rc=$?
+nk=$(grep -c '^kill ' "$W/rec9" 2>/dev/null)
+if [ "$rc" -eq 0 ] && [ "${nk:-0}" -eq 0 ] && grep -q '^failed=\[killed-worker\]$' <<<"$out" \
+   && grep -q 'descendants of this suite may survive' "$W/d9/001.log"; then
+  ok "with no live tether the group is NOT signalled; the suite log notes descendants may survive; the worker still FAILs"
+else
+  bad "unverifiable group: rc=$rc kills=${nk:-?}; $(tail -1 <<<"$out")"
+fi
+for f in suite.pid child.pid; do builtin kill -9 "$(cat "$W/$f" 2>/dev/null)" 2>/dev/null; done
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
