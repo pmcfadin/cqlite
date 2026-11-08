@@ -22291,9 +22291,9 @@ run_features_load_bearing() {
 # ---------------------------------------------------------------------------------------------
 _TT_N=0
 _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=()
-_TT_FAILED_NAMES=""
+_TT_FAILED_NAMES=""; _TT_REPORTED=0
 
-_tt_reset() { _TT_N=0; _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=(); _TT_FAILED_NAMES=""; }
+_tt_reset() { _TT_N=0; _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=(); _TT_FAILED_NAMES=""; _TT_REPORTED=0; }
 
 # _tt_add <P|H|S|L:lane> <failure label> <command> [serial reason]
 #   <command> is eval'd in a subshell (so it may be an `&&` chain or `(cd ... && ...)`); its
@@ -22303,7 +22303,14 @@ _tt_add() {
   hdr=${cmd//"$q"/}
   hdr=${hdr//\"/}
   hdr=${hdr//' && '/'; '}
-  _TT_MODE[$_TT_N]=$1; _TT_MSG[$_TT_N]=$2; _TT_CMD[$_TT_N]=$cmd; _TT_WHY[$_TT_N]=${4:-}
+  case "$1" in
+    P|H|S) _TT_MODE[$_TT_N]=$1; _TT_LANE[$_TT_N]="" ;;
+    L:?*)  _TT_MODE[$_TT_N]=L;  _TT_LANE[$_TT_N]=${1#L:} ;;
+    *)     # An unknown mode must never silently drop a suite: register it as invalid, which the
+           # runner reports as a FAILED suite.
+           _TT_MODE[$_TT_N]=X;  _TT_LANE[$_TT_N]="" ;;
+  esac
+  _TT_MSG[$_TT_N]=$2; _TT_CMD[$_TT_N]=$cmd; _TT_WHY[$_TT_N]=${4:-}
   _TT_HDR[$_TT_N]=$hdr
   _TT_N=$((_TT_N + 1))
 }
@@ -22365,6 +22372,13 @@ _tt_report() {
     return 0
   fi
   [ -n "$nohdr" ] || echo ">>> [tooling-tests] ${_TT_HDR[$i]}"
+  _TT_REPORTED=$((_TT_REPORTED + 1))
+  if [ "${_TT_MODE[$i]}" = X ]; then
+    echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); registered with an unknown mode, so it was never run ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]} (unknown mode)"
+    _TT_LAST_RC=1
+    return 0
+  fi
   if [ -f "$d/$id.rc" ]; then
     read -r rc secs <"$d/$id.rc"
   else
@@ -22396,7 +22410,7 @@ _tt_lane() {
 # _tt_run_all <component log> <scratch dir>: execute every registered suite. Returns 0 always;
 # the caller reads _TT_FAILED_NAMES (non-empty == the component FAILs).
 _tt_run_all() {
-  local log=$1 d=$2 jobs i pids pid order="" pcount=0 running tmpbase lanes="" lpids="" ln
+  local log=$1 d=$2 jobs i pids pid order="" pcount=0 running tmpbase lanes="" lpids="" ln want
   jobs=$(_tt_jobs)
   mkdir -p "$d" || { _TT_FAILED_NAMES="cannot create $d"; return 0; }
 
@@ -22453,7 +22467,7 @@ _tt_run_all() {
 
   # Deterministic replay of the pool + lanes (registration order; notes in place).
   for ((i = 0; i < _TT_N; i++)); do
-    case "${_TT_MODE[$i]}" in P|H|L|N) _tt_report "$i" "$d" "$log" ;; esac
+    case "${_TT_MODE[$i]}" in P|H|L|N|X) _tt_report "$i" "$d" "$log" ;; esac
   done
   # Serial tail, streamed live, ambient TMPDIR, alone on the box.
   for ((i = 0; i < _TT_N; i++)); do
@@ -22463,6 +22477,14 @@ _tt_run_all() {
       _tt_report "$i" "$d" "$log" noheader
     fi
   done
+  # Fail closed on a dropped suite: every registered suite (notes excepted) must have been
+  # reported exactly once, or the component cannot claim it ran them all.
+  want=0
+  for ((i = 0; i < _TT_N; i++)); do [ "${_TT_MODE[$i]}" = N ] || want=$((want + 1)); done
+  if [ "$_TT_REPORTED" -ne "$want" ]; then
+    echo "--- [tooling-tests] FAILED (suite accounting): $want suites registered but $_TT_REPORTED reported ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }suite accounting ($want registered, $_TT_REPORTED reported)"
+  fi
   return 0
 }
 
