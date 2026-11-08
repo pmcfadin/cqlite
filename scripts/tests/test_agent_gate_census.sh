@@ -1186,26 +1186,48 @@ fi
 # stated per function: every function that records a result for a component, and is not one of the
 # declared exceptions, must also print RECORDED_STATUS, and run_tooling_tests must (its epilogue).
 p_fin=$(grep -c 'RECORDED_STATUS (\$((end - start))s)' "$GATE")
-p_rc2=0
-p_missing=$(python3 - "$GATE" <<'PYX'
+# p3_missing <file>: names of functions that call `record_result "$name"` but never print the
+# finalized status. The scanner is a line scanner, NOT a shell parser, but it does not let a
+# function end early: it skips heredoc bodies (<<[-]'WORD' ... WORD) and tracks unindented `{`
+# groups, so a `}` inside a heredoc or a top-level `{ ...; }` group cannot truncate a body and let
+# a runner escape (roborev job 137). A function ends only at the unindented `}` that closes the
+# `name() {` which opened it.
+p3_missing() {
+  python3 - "$1" <<'PYX'
 import re, sys
 lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
-cur = None
-missing = []
+HD = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+cur = None; depth = 0; pend = []; missing = []
 for i, l in enumerate(lines):
+    if pend:                      # inside a heredoc body: only its terminator matters
+        strip, word = pend[0]
+        if (l.lstrip('\t') if strip else l) == word:
+            pend.pop(0)
+        continue
     m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\(\) \{', l)
-    if m:
-        cur = [m.group(1), i]
-    elif l == '}' and cur:
-        body = '\n'.join(lines[cur[1]:i + 1])
-        # _ds_lane_fail is a helper that records a lane failure; its caller prints the status.
-        if 'record_result "$name"' in body and cur[0] != '_ds_lane_fail' \
-           and 'RECORDED_STATUS ($((end - start))s)' not in body:
-            missing.append(cur[0])
-        cur = None
+    if cur is None and m:
+        cur = [m.group(1), i]; depth = 0
+    elif cur is not None:
+        if re.match(r'^\{(\s|$)', l):
+            depth += 1
+        elif re.match(r'^\}', l):
+            if depth > 0:
+                depth -= 1
+            else:
+                body = '\n'.join(lines[cur[1]:i + 1])
+                # _ds_lane_fail is a helper that records a lane failure; its caller prints the status.
+                if 'record_result "$name"' in body and cur[0] != '_ds_lane_fail' \
+                   and 'RECORDED_STATUS ($((end - start))s)' not in body:
+                    missing.append(cur[0])
+                cur = None
+    for hm in HD.finditer(l):
+        if '<<<' not in l[max(0, hm.start() - 1):hm.start() + 3]:
+            pend.append((hm.group(1) == '-', hm.group(3)))
 print(' '.join(missing))
 PYX
-) || p_rc2=$?
+}
+p_rc2=0
+p_missing=$(p3_missing "$GATE") || p_rc2=$?
 tt_fin=$(sed -n '/^run_tooling_tests() {/,/^}/p' "$GATE" | grep -c 'RECORDED_STATUS (\$((end - start))s)')
 if [ "$p_rc2" -ne 0 ]; then
   bad "P3: the per-function derivation could not run (python3 exited $p_rc2), so no runner was examined"
@@ -1213,6 +1235,40 @@ elif [ "$p_fin" -ge 50 ] && [ -z "$p_missing" ] && [ "$tt_fin" -ge 1 ]; then
   ok "P3: $p_fin progress lines print the finalized status; every runner that records a result prints it (run_tooling_tests: $tt_fin) — the fix reached the bespoke runners, not only run_component"
 else
   bad "P3: only $p_fin progress line(s) print RECORDED_STATUS (floor 50), run_tooling_tests prints $tt_fin, runner(s) recording a result without printing it: ${p_missing:-none}"
+fi
+# P3 mutation cases: the scanner must catch a runner whose body CONTAINS a heredoc with an unindented
+# `}` (which used to end the function early, hiding the record_result after it), pass the same runner
+# once it prints the status, and handle a top-level `{ ...; }` group the same way.
+p3_dir=$(mktemp -d "${TMPDIR:-/tmp}/census-p3.XXXXXX")
+p3_body() { # <echo line or empty>
+  cat <<PLANT
+run_planted() {
+  local name=planted
+  cat <<'HEREDOC_END'
+}
+HEREDOC_END
+{
+  echo grouped
+}
+  record_result "\$name" PASS 1
+$1
+}
+PLANT
+}
+p3_body '' >"$p3_dir/bad.sh"
+p3_body '  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"' >"$p3_dir/good.sh"
+p3_bad=$(p3_missing "$p3_dir/bad.sh") || p3_bad="ERR"
+p3_good=$(p3_missing "$p3_dir/good.sh") || p3_good="ERR"
+rm -rf "$p3_dir"
+if [ "$p3_bad" = "run_planted" ]; then
+  ok "P3-mut: a runner with no status echo, hidden behind a heredoc '}' and a { } group, is caught"
+else
+  bad "P3-mut: the scanner missed a runner without a status echo (got '${p3_bad}'), so a heredoc/group '}' can hide a runner from P3"
+fi
+if [ -z "$p3_good" ]; then
+  ok "P3-mut (control): the same runner WITH its status echo is not flagged"
+else
+  bad "P3-mut (control): the scanner flagged a runner that prints its status ('${p3_good}')"
 fi
 # ---------------------------------------------------------------------------
 # (Q) THE LABEL SWEEP — roborev job 371, and the class it belongs to.

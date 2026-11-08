@@ -582,8 +582,7 @@ Serial set (every entry was read, and its reason is the 4th `_tt_add` argument):
 
 | Suite(s) | Mode | Reason |
 |---|---|---|
-| `test_gate_liveness.sh` | `L:git-worktree` | `git worktree add/remove` against the repo's `.git` (section 14); pgrep of live heartbeat beaters |
-| `test_pub_surface_guard.sh` | `L:git-worktree-pub` | `git worktree add/remove/prune` against the repo's `.git`, but only its own path-addressed decoys; own lane so it overlaps the liveness long pole instead of queueing behind it |
+| `test_gate_liveness.sh`, `test_pub_surface_guard.sh` | `L:git-worktree` | both add/remove worktrees against the real repo's `.git`, and `git worktree prune` is repository-wide, so they race on one registry; one lane. Every other suite that runs worktree/ref/prune commands uses its own scratch repo |
 | `test_gate_detached.sh` | `L:systemd` | real `systemd-run --user` units, cgroup reads, pgrep of live `agent-gate.sh` |
 | `test_bti_perf_scan.sh`, `cargo test -p ws0-corpus-gen`, `test_flight_allocator_link.sh` | `L:shared-target` | cargo builds into the shared target dir |
 | `test_lane_lock_precommit_hook.sh` | `L:lane-root` | drives the real `/data/lanes` lane root |
