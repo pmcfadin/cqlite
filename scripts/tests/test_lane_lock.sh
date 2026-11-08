@@ -1692,7 +1692,8 @@ sh -c 'sleep 0.1 & exec sleep 30' &
 Z_PARENT=$!
 i=0; Z=""
 while [ "$i" -lt 30 ] && [ -z "$Z" ]; do
-  Z=$(ps -o pid=,stat= --ppid "$Z_PARENT" 2>/dev/null | awk '$2 ~ /^Z/ {print $1}' | head -1)
+  Z_ps=$(ps -o pid=,stat= --ppid "$Z_PARENT" 2>/dev/null)
+  Z=$(awk '$2 ~ /^Z/ {print $1; exit}' <<<"$Z_ps")
   [ -n "$Z" ] || { sleep 0.1; i=$((i + 1)); }
 done
 if [ -n "$Z" ]; then
@@ -1819,7 +1820,8 @@ sh -c 'sleep 3 & exec sleep 60' &
 Z39_PARENT=$!
 i=0; Z39=""
 while [ "$i" -lt 40 ] && [ -z "$Z39" ]; do
-  Z39=$(ps -o pid=,stat= --ppid "$Z39_PARENT" 2>/dev/null | awk '$2 !~ /^Z/ {print $1}' | head -1)
+  Z39_ps=$(ps -o pid=,stat= --ppid "$Z39_PARENT" 2>/dev/null)
+  Z39=$(awk '$2 !~ /^Z/ {print $1; exit}' <<<"$Z39_ps")
   [ -n "$Z39" ] || { sleep 0.1; i=$((i + 1)); }
 done
 if [ -n "$Z39" ]; then
@@ -1970,8 +1972,13 @@ fi
 #     omitted it, so `locks=` undercounted a state that blocks every acquire.
 mkdir -p "$D42/.lane-locks/lane-951.lock"
 ln -sfn /nonexistent "$D42/.lane-locks/lane-953.lock"
-locks42="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 2>&1 | grep -oE 'locks=[0-9]+' | head -1 | cut -d= -f2)"
-dir42="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 951 2>&1 | grep -oE 'liveness=[A-Z-]+' | head -1)"
+st42_all="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 2>&1)"
+locks42_all="$(grep -oE 'locks=[0-9]+' <<<"$st42_all")"
+locks42_first="$(head -1 <<<"$locks42_all")"
+locks42="${locks42_first#*=}"
+st42_951="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 951 2>&1)"
+dir42_all="$(grep -oE 'liveness=[A-Z-]+' <<<"$st42_951")"
+dir42="$(head -1 <<<"$dir42_all")"
 if [ "${locks42:-0}" -eq 4 ] && [ "$dir42" = "liveness=UNKNOWN-UNREADABLE" ]; then
   ok "(c) unscoped status counts the directory and broken symlink too (locks=$locks42), agreeing with direct status"
 else
