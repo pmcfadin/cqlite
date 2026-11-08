@@ -22410,7 +22410,7 @@ _tt_lane() {
 # _tt_run_all <component log> <scratch dir>: execute every registered suite. Returns 0 always;
 # the caller reads _TT_FAILED_NAMES (non-empty == the component FAILs).
 _tt_run_all() {
-  local log=$1 d=$2 jobs i pids pid order="" pcount=0 running tmpbase lanes="" lpids="" ln want
+  local log=$1 d=$2 jobs i pids pid order="" pcount=0 running keep ent active tmpbase lanes="" lpids="" ln want
   jobs=$(_tt_jobs)
   mkdir -p "$d" || { _TT_FAILED_NAMES="cannot create $d"; return 0; }
 
@@ -22451,19 +22451,31 @@ _tt_run_all() {
     _tt_lane "$ln" "$d" "$tmpbase" &
     lpids="$lpids $!"
   done
-  pids=""
+  # Capacity comes from the per-suite status files, never from probing pids: _tt_exec publishes
+  # <id>.rc atomically (tmp + mv) as the very LAST thing it does, so "rc exists" == "finished".
+  # (a signal-0 probe of a pid is unsound here: bash may reap a child early and the pid can be reused by an
+  # unrelated process, which would then be counted as a running suite and could stall the pool.)
+  active=""   # "<index>:<pid>" entries of pool suites launched and not yet seen finished
   for i in $order; do
     while :; do
-      running=0
-      for pid in $pids; do kill -0 "$pid" 2>/dev/null && running=$((running + 1)); done
+      running=0; keep=""
+      for ent in $active; do
+        if [ -f "$d/$(printf '%03d' "${ent%%:*}").rc" ]; then
+          wait "${ent#*:}" 2>/dev/null   # reap it; it has already published its status
+        else
+          running=$((running + 1)); keep="$keep $ent"
+        fi
+      done
+      active=$keep
       [ "$running" -lt "$jobs" ] && break
       sleep 0.2
     done
     _tt_exec "$i" "$d" "$tmpbase" &
-    pids="$pids $!"
+    active="$active $i:$!"
   done
   # Wait ONLY for the pids started here (a bare `wait` would also wait for the gate's heartbeat).
-  for pid in $pids $lpids; do wait "$pid" 2>/dev/null; done
+  for ent in $active; do wait "${ent#*:}" 2>/dev/null; done
+  for pid in $lpids; do wait "$pid" 2>/dev/null; done
   rm -rf "$tmpbase"
 
   # Deterministic replay of the pool + lanes (registration order; notes in place).
@@ -23958,6 +23970,9 @@ run_tooling_tests() {
   # shared Cargo target prune (#4411): hermetic fake target dir + stub
   # pgrep/systemctl, no cargo/network needed.
   _tt_add P 'cargo target prune #4411' 'bash "$REPO_ROOT/scripts/tests/test_cargo_target_prune.sh"'
+  # tooling-tests parallel runner (#4468): capacity from .rc files (hostile-kill shim must not stall
+  # the pool), every failure named, unknown modes never run. Hermetic, ~4s.
+  _tt_add P 'tooling-tests pool runner self-test #4468' 'bash "$REPO_ROOT/scripts/tests/test_tooling_tests_pool.sh"'
 
   if ! command -v python3 >/dev/null 2>&1; then
     # Original behaviour: every suite ABOVE ran; the python3-dependent tail is skipped and the
