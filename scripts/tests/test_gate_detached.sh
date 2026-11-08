@@ -195,10 +195,10 @@ CAGE
       [ -s "$TMP/in.log" ] && [ -s "$TMP/out.log" ] && break
       sleep 1
     done
-    in_cg=$(sed -n 's/^cgroup=//p' "$TMP/in.log" | head -1)
-    out_cg=$(sed -n 's/^cgroup=//p' "$TMP/out.log" | head -1)
-    in_pid=$(sed -n 's/^start pid=\([0-9]*\).*/\1/p' "$TMP/in.log" | head -1)
-    out_pid=$(sed -n 's/^start pid=\([0-9]*\).*/\1/p' "$TMP/out.log" | head -1)
+    in_cg=$(sed -n '/^cgroup=/{s/^cgroup=//p;q;}' "$TMP/in.log")
+    out_cg=$(sed -n '/^cgroup=/{s/^cgroup=//p;q;}' "$TMP/out.log")
+    in_pid=$(sed -n '/^start pid=\([0-9]*\).*/{s/^start pid=\([0-9]*\).*/\1/p;q;}' "$TMP/in.log")
+    out_pid=$(sed -n '/^start pid=\([0-9]*\).*/{s/^start pid=\([0-9]*\).*/\1/p;q;}' "$TMP/out.log")
     [ -n "$in_pid" ] && remember_pid "$in_pid"
     [ -n "$out_pid" ] && remember_pid "$out_pid"
 
@@ -211,7 +211,7 @@ CAGE
       [ -n "$in_cg" ] && [ -n "$out_cg" ] && [ "$in_cg" != "$out_cg" ] \
         && ok "3.2 the two tickers are in DIFFERENT cgroups" \
         || bad "3.2 the two tickers are in DIFFERENT cgroups" "in='$in_cg' out='$out_cg'"
-      in_sid=$(sed -n 's/.*sid=\([0-9]*\).*/\1/p' "$TMP/in.log" | head -1)
+      in_sid=$(sed -n '/.*sid=\([0-9]*\).*/{s/.*sid=\([0-9]*\).*/\1/p;q;}' "$TMP/in.log")
       [ "$in_sid" = "$in_pid" ] \
         && ok "3.3 the inheriting ticker DID detach (own session leader)" \
         || bad "3.3 the inheriting ticker DID detach (own session leader)" "sid=$in_sid pid=$in_pid"
@@ -557,13 +557,15 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   lu=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$lu" ] && echo "$lu" >> "$UNITS_FILE"
   mp=$(systemctl --user show "$lu" -p MainPID --value 2>/dev/null)
   if [ -n "$mp" ] && [ -r "/proc/$mp/environ" ]; then
-    LC_ALL=C tr '\0' '\n' < "/proc/$mp/environ" | grep -q "SECRET_PROBE_3473=$probe" \
+    mp_environ=$(LC_ALL=C tr '\0' '\n' < "/proc/$mp/environ")
+    grep -q "SECRET_PROBE_3473=$probe" <<<"$mp_environ" \
       && ok "4b.29 a caller variable REACHES the detached unit's environment" \
       || bad "4b.29 a caller variable REACHES the detached unit's environment" "absent"
     leak=0
     for c in /proc/[0-9]*/cmdline; do
       [ -r "$c" ] || continue
-      LC_ALL=C tr '\0' ' ' < "$c" 2>/dev/null | grep -q "$probe" && { leak=1; break; }
+      c_args=$(LC_ALL=C tr '\0' ' ' < "$c" 2>/dev/null)
+      grep -q "$probe" <<<"$c_args" && { leak=1; break; }
     done
     [ "$leak" -eq 0 ] && ok "4b.30 ...and appears in NO process command line" \
                       || bad "4b.30 the value leaked into a process command line" "found in argv"
@@ -870,8 +872,8 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   out=$(bash "$LAUNCHER" --summary "$ns" --log "$TMP/nonce.log" -- --only file-size 2>&1)
   nu=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$nu" ] && echo "$nu" >> "$UNITS_FILE"
   for ((_i_=0; _i_<60; _i_++)); do grep -q '^launch-nonce: ' "$ns" 2>/dev/null && break; sleep 0.5; done
-  sn=$(sed -n 's/^launch-nonce: //p' "$ns" 2>/dev/null | head -1)
-  hn=$(sed -n 's/^launch-nonce: //p' "$ns.heartbeat" 2>/dev/null | head -1)
+  sn=$(sed -n '/^launch-nonce: /{s/^launch-nonce: //p;q;}' "$ns" 2>/dev/null)
+  hn=$(sed -n '/^launch-nonce: /{s/^launch-nonce: //p;q;}' "$ns.heartbeat" 2>/dev/null)
   if [ -n "$sn" ] && [ "$sn" = "$hn" ]; then
     ok "4b.69 the same nonce reaches the summary AND the heartbeat"
   else
@@ -1389,7 +1391,8 @@ else
 fi
 # The lock must be RELEASED after the reservation exists, not before — releasing early reopens the race,
 # holding it for the gate's lifetime would block every later launch in that directory.
-if sed -n '/flock -u 9/,/exec 8>&-/p' "$LAUNCHER" | grep -q 'flock -u 8'; then
+_sp_cap=$(sed -n '/flock -u 9/,/exec 8>&-/p' "$LAUNCHER")
+if grep -q 'flock -u 8' <<<"$_sp_cap"; then
   ok "4b.149 the directory lock is released AFTER the reservation is acquired"
 else
   bad "4b.149 the directory lock is released after the reservation" "released too early, or never"
@@ -1427,8 +1430,10 @@ fi
 # lie. Two cross-file contracts have already broken in this change that way (the probe names vs the
 # gate's carve-out shape, and the pub-surface banner vs its invocation), so this one is asserted rather
 # than left to luck.
-_reader_cap=$(grep -oE '_confirm_wait" -le [0-9]+' "$REPO_ROOT/scripts/gate-liveness.sh" | grep -oE '[0-9]+$' | head -1)
-_adv_cap=$(grep -oE 'up to [0-9]+s where the clock domain is unproven' "$LAUNCHER" | grep -oE '[0-9]+' | head -1)
+_reader_caps=$(grep -oE '_confirm_wait" -le [0-9]+' "$REPO_ROOT/scripts/gate-liveness.sh" | grep -oE '[0-9]+$')
+_reader_cap=$(head -1 <<<"$_reader_caps")
+_adv_caps=$(grep -oE 'up to [0-9]+s where the clock domain is unproven' "$LAUNCHER" | grep -oE '[0-9]+')
+_adv_cap=$(head -1 <<<"$_adv_caps")
 if [ -z "$_reader_cap" ] || [ -z "$_adv_cap" ]; then
   bad "4b.146 the advertised confirmation cap matches the reader's real cap" \
       "could not extract one of them (reader='${_reader_cap:-?}' advertised='${_adv_cap:-?}') — this proves nothing"
@@ -1450,7 +1455,8 @@ fi
 # The consequence: a LIVE run's heartbeat or log stays represented by a DEAD owner, so a later launch
 # reads the path as reclaimable, takes it as ITS summary, and two writers land on one file. Reproduced: a
 # launch succeeded with its heartbeat lock still naming pid 999999999.
-if sed -n '/A STALE MARKER MUST BE REPLACED/,/esac/p' "$LAUNCHER" | grep -q 'rm -f "$_art.launch-lock"'; then
+_sp_cap=$(sed -n '/A STALE MARKER MUST BE REPLACED/,/esac/p' "$LAUNCHER")
+if grep -q 'rm -f "$_art.launch-lock"' <<<"$_sp_cap"; then
   ok "4b.151 a provably-stale extra marker is reclaimed, not left naming a dead owner"
 else
   bad "4b.151 a stale extra marker is reclaimed" "a live run would stay represented by a dead owner"
@@ -1690,7 +1696,9 @@ else
 fi
 # The advertised limit and the enforced limit must be the SAME NUMBER, or the diagnostic is a claim the
 # code does not keep — the same defect class as a comment asserting a property the code lacks.
-_adv=$(grep -oE "within [0-9]+s" "$LAUNCHER" | head -1 | grep -oE '[0-9]+')
+_adv_hits=$(grep -oE "within [0-9]+s" "$LAUNCHER")
+_adv_first=$(head -1 <<<"$_adv_hits")
+_adv=$(grep -oE '[0-9]+' <<<"$_adv_first")
 _enf=$(grep -oE '_verify_deadline=\$\(\( \$\(date \+%s\) \+ [0-9]+ \)\)' "$LAUNCHER" | grep -oE '\+ [0-9]+ ' | grep -oE '[0-9]+')
 if [ -n "$_adv" ] && [ -n "$_enf" ] && [ "$_adv" = "$_enf" ]; then
   ok "4b.135 the advertised limit (${_adv}s) equals the enforced deadline (${_enf}s)"
@@ -1812,7 +1820,8 @@ fi
 # UNSAFE two-grep re-derivation this case nominally guarded, so it locked the defect in. It now
 # requires the branch to re-derive through `_snap_pair`, which is the property that actually matters.
 if grep -qE 'SETTLED SNAPSHOT|ONE IMMUTABLE SNAPSHOT' "$LAUNCHER" \
-   && sed -n '/if ! _unit_is_live "\$UNIT"/,/^  fi$/p' "$LAUNCHER" | grep -q '_snap_pair'; then
+   && _uil_blk=$(sed -n '/if ! _unit_is_live "\$UNIT"/,/^  fi$/p' "$LAUNCHER") \
+   && grep -q '_snap_pair' <<<"$_uil_blk"; then
   ok "4b.124 the inactive-unit branch re-derives the run-id from a settled snapshot"
 else
   bad "4b.124 the inactive-unit branch re-derives from a settled snapshot" "a fast gate can still be refused"
@@ -1841,7 +1850,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   _4B126_BOUND_S=300
   for _i in $(seq 1 "$_4B126_BOUND_S"); do grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null && break; sleep 1; done
   if grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null; then
-    ok "4b.126 ...and it reached a terminal verdict ($(sed -n 's/^RESULT: //p' "$_ft" | head -1))"
+    ok "4b.126 ...and it reached a terminal verdict ($(sed -n '/^RESULT: /{s/^RESULT: //p;q;}' "$_ft"))"
   else
     bad "4b.126 a very fast gate reached a terminal verdict" "no RESULT in $_ft"
   fi
@@ -1948,7 +1957,8 @@ if [ -r "$_gi" ] && command -v git >/dev/null 2>&1; then
     _gi_n=$((_gi_n+1))
     mkdir -p "$_gw/$_sub" 2>/dev/null || continue
     echo 'fn evil() {}' > "$_gw/$_sub/evil.rs" 2>/dev/null || continue
-    if ! ( cd "$_gw" && git ls-files --others --exclude-standard ) 2>/dev/null | grep -q "^$_sub/evil.rs$"; then
+    _gi_ls=$( cd "$_gw" && git ls-files --others --exclude-standard 2>/dev/null )
+    if ! grep -q "^$_sub/evil.rs$" <<<"$_gi_ls"; then
       _gi_blind=$((_gi_blind+1)); echo "     INVISIBLE to tree-integrity: $_sub/evil.rs"
     fi
   done
@@ -2203,7 +2213,7 @@ if grep -q '^_extra_locks=()' "$_f1_src" \
   ok "4b.154 the rollback list is an ARRAY iterated QUOTED (no word-split, no glob)"
 else
   bad "4b.154 the rollback list is an array iterated quoted" \
-      "$(grep -n '_extra_locks' "$_f1_src" | head -4)"
+      "$(grep -m 4 -n '_extra_locks' "$_f1_src")"
 fi
 
 # 4b.189 (job 319): 4b.154 now accepts a SECOND spelling, so the equivalence it rests on is proved
@@ -2365,8 +2375,8 @@ CAPTURE_TO="$_cap" PATH="$_stub:$PATH" bash "$LAUNCHER" \
 if [ ! -s "$_cap" ]; then
   skipc "4b.159 generated wrapper uses absolute rm/bash" "wrapper not captured (stub did not observe it)"
 else
-  _rml=$(grep -E -- '^/[^ ]*rm -f -- ' "$_cap" | head -1)
-  _exl=$(grep -E '^exec /' "$_cap" | head -1)
+  _rml=$(grep -m 1 -E -- '^/[^ ]*rm -f -- ' "$_cap")
+  _exl=$(grep -m 1 -E '^exec /' "$_cap")
   if [ -n "$_rml" ] && [ -n "$_exl" ]; then
     ok "4b.159 the GENERATED wrapper self-unlinks and execs via absolute paths"
   else
@@ -2442,7 +2452,7 @@ fi
 # (a) EVERY direct read of the run-id must live inside _snap_pair, whatever variable it reads from and
 #     however the grep is spelled. Two separate greps against a LIVE artifact can pair our nonce with a
 #     peer's run-id; _snap_pair takes one immutable copy and reads both fields from it.
-_sp_start=$(grep -n '_snap_pair() {' "$LAUNCHER" | head -1 | cut -d: -f1)
+_sp_start=$(grep -m 1 -n '_snap_pair() {' "$LAUNCHER" | cut -d: -f1)
 if [ -z "$_sp_start" ]; then
   bad "4b.163 every run-id read is inside _snap_pair" "_snap_pair not found"
 else
@@ -2470,7 +2480,7 @@ fi
 #     `is-active --quiet` exits nonzero for every TRANSITIONAL state and for every QUERY FAILURE, so a
 #     healthy-but-unsettled gate (or one we could not ask about) read as dead and got stopped as
 #     unmonitorable. _unit_is_live treats only `inactive|failed` as affirmative terminal answers.
-_ua_start=$(grep -n '_unit_is_live() {' "$LAUNCHER" | head -1 | cut -d: -f1)
+_ua_start=$(grep -m 1 -n '_unit_is_live() {' "$LAUNCHER" | cut -d: -f1)
 if [ -z "$_ua_start" ]; then
   bad "4b.164 unit liveness decided by _unit_is_live" "_unit_is_live not found"
 else
@@ -2553,11 +2563,13 @@ fi
 if grep -q 'read -r -d "" a' "$LAUNCHER" \
    && grep -qE 'case "\$a" in \*agent-gate\.sh\)' "$LAUNCHER" \
    && ! grep -q '\*agent-gate\.sh\*' "$LAUNCHER" \
-   && ! sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER" | grep -qE '^\s+--lite\|--delta\|--only\)'; then
+   && _urg_blk=$(sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER") \
+   && ! grep -qE '^\s+--lite\|--delta\|--only\)' <<<"$_urg_blk"; then
   ok "4b.168 exact argv element, and ownership does NOT exclude partial-mode runs"
 else
+  _ura_blk=$(sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER")
   bad "4b.168 exact argv element, ownership does not exclude partial modes" \
-      "$(sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER" | grep -nE 'agent-gate|--lite' | head -4)"
+      "$(grep -m 4 -nE 'agent-gate|--lite' <<<"$_ura_blk")"
 fi
 
 # And scope state must no longer be consulted where the owner is affirmatively dead.
@@ -2876,14 +2888,15 @@ if grep -qE '^_rundir="/run/user/\$\(id -u\)"$' "$LAUNCHER" \
   ok "4b.193 the global launch lock path is canonical per-UID, not read from XDG_RUNTIME_DIR"
 else
   bad "4b.193 the global launch lock path is canonical per-UID" \
-      "$(grep -n '^_rundir=' "$LAUNCHER" | head -2)"
+      "$(grep -m 2 -n '^_rundir=' "$LAUNCHER")"
 fi
 # Scoped to ECHOED lines, not the whole file: the retired advice is still QUOTED in a comment that
 # explains why it was retired, and a whole-file grep matched that citation and failed on the fixed
 # tree. Third time in this change a test of mine matched its own explanatory text (cf. 4b.187, which
 # matched the safe form it was meant to forbid). The property is "the script does not TELL anyone to
 # do it", so only emitted lines can violate it.
-if grep -E '^\s*echo ' "$LAUNCHER" | grep -q 'export XDG_RUNTIME_DIR to a 0700 dir you own'; then
+_sp_cap=$(grep -E '^\s*echo ' "$LAUNCHER")
+if grep -q 'export XDG_RUNTIME_DIR to a 0700 dir you own' <<<"$_sp_cap"; then
   bad "4b.194 the runtime-dir refusal no longer advertises the XDG_RUNTIME_DIR bypass" \
       "still advertised in an emitted line"
 else
@@ -2985,13 +2998,15 @@ fi
 # This change corrected the "~850s" bound in four DOCUMENTATION sites and left the one an operator
 # actually reads — the reader's own STALLED output — untouched. Correcting a claim at the sites you
 # happen to notice is not correcting it; the disclosure path needs its own census.
-if grep -n 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh" | grep -qE '~?8[0-9][0-9] ?s'; then
+_sp_cap=$(grep -n 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh")
+if grep -qE '~?8[0-9][0-9] ?s' <<<"$_sp_cap"; then
   bad "4b.202 the emitted STALLED guidance carries no fixed wait figure" \
       "a fixed duration is still printed to operators"
 else
   ok "4b.202 the emitted STALLED guidance carries no fixed wait figure"
 fi
-if grep -E 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh" | grep -q 'LONGEST COMPONENT OF THIS RUN'; then
+_sp_cap=$(grep -E 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh")
+if grep -q 'LONGEST COMPONENT OF THIS RUN' <<<"$_sp_cap"; then
   ok "4b.203 the emitted STALLED guidance tells the reader to DERIVE the bound"
 else
   bad "4b.203 the emitted STALLED guidance tells the reader to derive the bound" "not found"
@@ -3093,7 +3108,8 @@ _locks_left() {  # <summary> <log> -> prints the surviving reservation paths, on
 # The function itself, extracted and run: the two hazards its comment names are the two the
 # acquisition loop was fixed for (job 269 / job 319), and a second implementation of that idiom is a
 # second place for it to regress.
-if ! sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER" | grep -q '^_release_reservations()'; then
+_sp_cap=$(sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER")
+if ! grep -q '^_release_reservations()' <<<"$_sp_cap"; then
   bad "4b.204 _release_reservations exists and could be extracted" "no such function in the launcher"
   bad "4b.205 _release_reservations survives an empty _extra_locks under set -u" "not run: extraction failed"
   bad "4b.206 a second release does not delete a peer's lock" "not run: extraction failed"
@@ -3323,7 +3339,8 @@ fi
 # And the ONE path that deliberately does NOT release must SAY so, or its omission reads as the same
 # oversight this finding was: the post-launch heartbeat refusal stops an already-started gate, whose
 # processes may still be draining, so handing its paths to a peer is worse than the litter.
-if sed -n '/^if \[ "\$_hb_seen" -ne 1 \]; then/,/^fi$/p' "$LAUNCHER" | grep -q 'DOES \*NOT\* RELEASE'; then
+_sp_cap=$(sed -n '/^if \[ "\$_hb_seen" -ne 1 \]; then/,/^fi$/p' "$LAUNCHER")
+if grep -q 'DOES \*NOT\* RELEASE' <<<"$_sp_cap"; then
   ok "4b.214 the post-launch refusal declares why it keeps the reservation"
 else
   bad "4b.214 the post-launch refusal declares why it keeps the reservation" \
