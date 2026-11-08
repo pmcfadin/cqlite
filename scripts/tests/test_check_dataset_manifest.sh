@@ -1410,8 +1410,8 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     esac
     local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
     # The table-specific line, never the generic "missing Data.db" summary line.
-    grep -F "$ks/$tb" <<<"$_o" | grep -v 'missing Data.db for expected table' \
-      | head -1 | cut -c1-60
+    local _tl; _tl=$(grep -F "$ks/$tb" <<<"$_o" | grep -v 'missing Data.db for expected table')
+    head -1 <<<"$_tl" | cut -c1-60
     chmod 0644 "$t/nb-1-big-Data.db" 2>/dev/null || true   # so _cleanup can remove it
   }
 
