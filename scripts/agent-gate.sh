@@ -22291,7 +22291,7 @@ run_features_load_bearing() {
 # ---------------------------------------------------------------------------------------------
 _TT_N=0
 _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=()
-_TT_FAILED_NAMES=""; _TT_REPORTED=0; _TT_ACTIVE=""; _TT_LANES=""; _TT_WAS_M=0
+_TT_FAILED_NAMES=""; _TT_REPORTED=0; _TT_ACTIVE=""; _TT_LANES=""; _TT_WAS_M=0; _TT_CRIT=0; _TT_SIGPEND=""; _TT_TMPBASE=""; _TT_LOGDIR=""
 
 _tt_reset() { _TT_N=0; _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=(); _TT_FAILED_NAMES=""; _TT_REPORTED=0; }
 
@@ -22425,31 +22425,60 @@ _tt_lane() {
 _tt_bg_begin() { _TT_WAS_M=0; case $- in *m*) _TT_WAS_M=1 ;; esac; set -m; }
 _tt_bg_end()   { [ "$_TT_WAS_M" = 1 ] || set +m; }
 
-# _tt_kill_group <pgid>: TERM the group, a short grace period, then KILL; returns when it is gone.
-_tt_kill_group() {
-  local g=$1 n=0
-  kill -TERM -- "-$g" 2>/dev/null || return 0
+# _tt_kill_groups <pgid...>: TERM every group, a short grace period, then KILL the survivors; returns
+# when they are gone (so a slot/TMPDIR is never released under a still-running suite).
+_tt_kill_groups() {
+  local g n alive
+  [ "$#" -gt 0 ] || return 0
+  for g in "$@"; do kill -TERM -- "-$g" 2>/dev/null; done
+  n=0
   while [ "$n" -lt 10 ]; do
-    kill -0 -- "-$g" 2>/dev/null || return 0
+    alive=""
+    for g in "$@"; do kill -0 -- "-$g" 2>/dev/null && alive="$alive $g"; done
+    [ -n "$alive" ] || return 0
     sleep 0.2; n=$((n + 1))
   done
-  kill -KILL -- "-$g" 2>/dev/null
+  for g in $alive; do kill -KILL -- "-$g" 2>/dev/null; done
   n=0
-  while [ "$n" -lt 10 ] && kill -0 -- "-$g" 2>/dev/null; do sleep 0.2; n=$((n + 1)); done
+  while [ "$n" -lt 10 ]; do
+    alive=""
+    for g in "$@"; do kill -0 -- "-$g" 2>/dev/null && alive="$alive $g"; done
+    [ -n "$alive" ] || return 0
+    sleep 0.2; n=$((n + 1))
+  done
   return 0
 }
+_tt_kill_group() { _tt_kill_groups "$1"; }
 
-# Workers are in their own process groups, so a terminal ^C / TERM to the gate no longer reaches them:
-# terminate every live group, then re-raise the signal with the default action.
+# Signal path (roborev jobs 140, 142). Workers are in their own process groups, so a terminal ^C /
+# TERM / HUP to the gate no longer reaches them. The trap therefore:
+#   * DEFERS while a launch-and-register critical section is open (_TT_CRIT=1) - a signal between
+#     `worker &` and recording its pid would otherwise miss that worker - and handles the pending
+#     signal right after the section closes;
+#   * otherwise reaps whatever already finished (completed lane/pool pids are dropped, so a recycled
+#     pid is never signalled), terminates only groups whose leader is STILL in bash's job table,
+#     removes the scratch TMPDIR, restores default signal handling and re-raises the signal.
 _tt_on_signal() {
-  local sig=$1 ent
-  for ent in $_TT_ACTIVE $_TT_LANES; do _tt_kill_group "${ent#*:}"; done
+  if [ "${_TT_CRIT:-0}" = 1 ]; then _TT_SIGPEND=$1; return 0; fi
+  _tt_interrupt "$1"
+}
+_tt_handle_pending() {
+  [ -z "${_TT_SIGPEND:-}" ] || _tt_interrupt "$_TT_SIGPEND"
+}
+_tt_interrupt() {
+  local sig=$1 ent gs=""
+  _TT_CRIT=1   # no re-entry while cleaning up
+  _tt_reap "${_TT_LOGDIR:-/nonexistent}"
+  for ent in $_TT_ACTIVE $_TT_LANES; do gs="$gs ${ent#*:}"; done
+  _tt_kill_groups $gs
+  [ -z "${_TT_TMPBASE:-}" ] || rm -rf "${_TT_TMPBASE:?}"
+  _TT_TMPBASE=""
   trap - INT TERM HUP
   kill -s "$sig" $$
 }
 
-# _tt_reap <log dir>: reap finished pool workers in $_TT_ACTIVE (see the comment at its caller);
-# leaves the still-running ones in $_TT_ACTIVE and their count in $_TT_RUNNING.
+# _tt_reap <log dir>: reap finished pool workers and lane workers (see the comment at the call site).
+# Leaves the still-running ones in $_TT_ACTIVE / $_TT_LANES and the pool's count in $_TT_RUNNING.
 _tt_reap() {
   local d=$1 ent pid idx id rp st keep=""
   rp=" $(jobs -rp | tr '\n' ' ') "
@@ -22469,12 +22498,21 @@ _tt_reap() {
     fi
   done
   _TT_ACTIVE=$keep
+  keep=""
+  for ent in $_TT_LANES; do
+    pid=${ent#*:}
+    case "$rp" in
+      *" $pid "*) keep="$keep $ent"; continue ;;
+    esac
+    wait "$pid" 2>/dev/null || _tt_kill_group "$pid"   # a lane worker that died: reap its group
+  done
+  _TT_LANES=$keep
 }
 
 # _tt_run_all <component log> <scratch dir>: execute every registered suite. Returns 0 always;
 # the caller reads _TT_FAILED_NAMES (non-empty == the component FAILs).
 _tt_run_all() {
-  local log=$1 d=$2 jobs i pids pid order="" pcount=0 tmpbase lanes="" ln ent want
+  local log=$1 d=$2 jobs i pids pid order="" pcount=0 tmpbase lanes="" ln want
   jobs=$(_tt_jobs)
   mkdir -p "$d" || { _TT_FAILED_NAMES="cannot create $d"; return 0; }
 
@@ -22509,45 +22547,57 @@ _tt_run_all() {
     fi
   done
   echo ">>> [tooling-tests] running $pcount parallel suites ($jobs at a time) alongside serial lane(s):${lanes:- none}; then the serial tail"
-  tmpbase=$(mktemp -d "${TMPDIR:-/tmp}/tt-par.XXXXXX") || { _TT_FAILED_NAMES="cannot create a scratch TMPDIR for the parallel set"; return 0; }
-  # Each lane is one background chain (its suites never overlap each other).
-  _TT_ACTIVE=""; _TT_LANES=""
+  # Everything from here to the end of the drain runs with the signal traps installed; each
+  # launch-and-register pair is a critical section during which a signal is only recorded.
+  _TT_ACTIVE=""; _TT_LANES=""; _TT_SIGPEND=""; _TT_LOGDIR=$d; _TT_CRIT=1
   trap '_tt_on_signal INT' INT; trap '_tt_on_signal TERM' TERM; trap '_tt_on_signal HUP' HUP
+  _TT_TMPBASE=$(mktemp -d "${TMPDIR:-/tmp}/tt-par.XXXXXX") || _TT_TMPBASE=""
+  if [ -z "$_TT_TMPBASE" ]; then
+    _TT_CRIT=0; trap - INT TERM HUP
+    _TT_FAILED_NAMES="cannot create a scratch TMPDIR for the parallel set"
+    return 0
+  fi
+  tmpbase=$_TT_TMPBASE
+  _TT_CRIT=0; _tt_handle_pending
+  # Each lane is one background chain (its suites never overlap each other).
   for ln in $lanes; do
+    _TT_CRIT=1
     _tt_bg_begin
     _tt_lane "$ln" "$d" "$tmpbase" &
     _TT_LANES="$_TT_LANES $ln:$!"
     _tt_bg_end
+    _TT_CRIT=0; _tt_handle_pending
   done
   # Liveness comes from bash's OWN job table (`jobs -rp`), which only tracks this shell's children
   # and so is immune to pid reuse (a signal-0 probe of a bare pid is not). A worker that left the
   # table is reaped with `wait <pid>` to get its real exit status; if it published no readable
   # status file (killed, or the status write failed - ENOSPC), _tt_reap synthesizes a failure so
   # _tt_report names it. The atomic .rc write in _tt_exec stays: it is the normal result channel.
+  # Completed lane workers are reaped by the same call, so only live groups are ever signalled.
   for i in $order; do
     while :; do
       _tt_reap "$d"
       [ "$_TT_RUNNING" -lt "$jobs" ] && break
       sleep 0.2
     done
+    _TT_CRIT=1
     _tt_bg_begin
     _tt_exec "$i" "$d" "$tmpbase" &
     _TT_ACTIVE="$_TT_ACTIVE $i:$!"
     _tt_bg_end
+    _TT_CRIT=0; _tt_handle_pending
   done
-  # Drain the pool (waits ONLY for the workers started here: a bare `wait` would also wait for the
-  # gate's heartbeat), then the lanes.
+  # Drain the pool and the lanes (waits ONLY for the workers started here: a bare `wait` would also
+  # wait for the gate's heartbeat).
   while :; do
     _tt_reap "$d"
-    [ "$_TT_RUNNING" -eq 0 ] && break
+    [ "$_TT_RUNNING" -eq 0 ] && [ -z "${_TT_LANES// /}" ] && break
     sleep 0.2
   done
-  for ent in $_TT_LANES; do
-    wait "${ent#*:}" 2>/dev/null || _tt_kill_group "${ent#*:}"   # a lane worker that died: reap its group
-  done
-  _TT_LANES=""
+  _TT_CRIT=1
+  rm -rf "${_TT_TMPBASE:?}"; _TT_TMPBASE=""
   trap - INT TERM HUP
-  rm -rf "$tmpbase"
+  _TT_CRIT=0; _tt_handle_pending
 
   # Deterministic replay of the pool + lanes (registration order; notes in place).
   for ((i = 0; i < _TT_N; i++)); do

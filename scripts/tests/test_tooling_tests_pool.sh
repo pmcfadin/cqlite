@@ -161,5 +161,61 @@ for J in 4 1; do
     bad "JOBS=$J: log-replay failure not reported: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
   fi
 done
+# 6. interrupt path: TERM to the runner (only the pid this test launched) while workers - two in the
+#    pool and one in a lane - are running. No planted worker or its sleeping child may survive, no
+#    tt-par.* scratch dir may remain, and the signal must be re-raised (the runner dies of TERM).
+mkdir "$W/tmp6"
+cat >"$W/planted2.sh" <<EOS
+echo \$\$ >"$W/w\$1.pid"
+sleep 30 & echo \$! >"$W/w\$1.child"
+wait
+EOS
+cat >"$W/t6.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT=/tmp
+TMPDIR="$W/tmp6"; export TMPDIR
+. "$W/helpers.sh"
+_tt_reset
+_tt_add P 'w1' 'bash "$W/planted2.sh" 1'
+_tt_add P 'w2' 'bash "$W/planted2.sh" 2'
+_tt_add L:x 'w3' 'bash "$W/planted2.sh" 3'
+: >"$W/c6.log"
+CQLITE_TOOLING_TESTS_JOBS=4 _tt_run_all "$W/c6.log" "$W/d6"
+echo "returned-normally"
+EOS
+bash "$W/t6.sh" >"$W/t6.out" 2>&1 &
+rp=$!
+n=0
+while [ "$n" -lt 100 ] && ! { [ -s "$W/w1.child" ] && [ -s "$W/w2.child" ] && [ -s "$W/w3.child" ]; }; do sleep 0.1; n=$((n + 1)); done
+kill -TERM "$rp"
+n=0
+while kill -0 "$rp" 2>/dev/null && [ "$n" -lt 300 ]; do sleep 0.1; n=$((n + 1)); done
+kill -0 "$rp" 2>/dev/null && kill -9 "$rp" 2>/dev/null   # our own runner only, never by pattern
+wait "$rp" 2>/dev/null; rc6=$?
+surv=""
+for f in w1.pid w1.child w2.pid w2.child w3.pid w3.child; do
+  pid=$(cat "$W/$f" 2>/dev/null)
+  if [ -z "$pid" ]; then surv="$surv $f(never written)"; elif kill -0 "$pid" 2>/dev/null; then surv="$surv $f=$pid(alive)"; kill -9 "$pid" 2>/dev/null; fi
+done
+left=$(ls -d "$W"/tmp6/tt-par.* 2>/dev/null)
+if [ -z "$surv" ] && [ -z "$left" ] && [ "$rc6" -eq 143 ] && ! grep -q returned-normally "$W/t6.out"; then
+  ok "TERM to the runner: every worker group is gone, no tt-par.* scratch dir remains, TERM was re-raised"
+else
+  bad "interrupt path: survivors=[$surv] scratch=[$left] rc=$rc6"
+fi
+# 7. a signal that arrives inside a launch-and-register critical section is only RECORDED (deferred).
+cat >"$W/t7.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+_TT_CRIT=1
+_tt_on_signal TERM
+echo "survived pending=\$_TT_SIGPEND"
+EOS
+out=$(bounded 20 bash "$W/t7.sh" 2>&1)
+if [ "$out" = "survived pending=TERM" ]; then
+  ok "a signal inside the launch-and-register critical section is deferred, not acted on"
+else
+  bad "critical-section deferral: got '$out'"
+fi
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
