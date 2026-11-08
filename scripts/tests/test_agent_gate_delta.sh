@@ -650,8 +650,10 @@ fi
 #      node __test__/ ONLY when the native module is already built — it must NEVER
 #      build with cargo. The hidden --delta-node-ready hook exposes the SAME decision
 #      run_delta's up-front refusal consumes.
-node_ready_out=$(bash "$GATE" --delta-node-ready 2>/dev/null)
+node_ready_out=$(bash "$GATE" --delta-node-ready 2>/dev/null); node_ready_rc=$?
 node_ready=$(head -1 <<<"$node_ready_out")
+# A hook that prints a valid token and then exits non-zero must not pass (the pipeline's pipefail status did this).
+[ "$node_ready_rc" -eq 0 ] || node_ready="HOOK-EXIT-$node_ready_rc:$node_ready"
 case "$node_ready" in
   READY|NOT-READY) ok "node-ready: hook reports a definite build state ($node_ready)" ;;
   *) bad "node-ready: unexpected build-state token '$node_ready'" ;;

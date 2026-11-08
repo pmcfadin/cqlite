@@ -384,12 +384,17 @@ if gate_replace_line "$GATE" "$mut" 'printf '"'"'%s\n'"'"' "${LITE_COMPONENTS[@]
                                     'printf '"'"'%s\n'"'"' "${COMPONENTS[@]}"'; then
   r_mcm=$(mkrepo_from modeset-mutant-repo "$mut")
   mcm_raw=$( cd "$r_mcm" && PATH="$STUBBIN:$PATH" env AGENT_GATE_SUMMARY_FILE="$tmp/mcm-sentinel.txt" \
-           AGENT_GATE_TREE_SELFTEST=mode-components bash "$r_mcm/scripts/agent-gate.sh" --lite 2>/dev/null )
+           AGENT_GATE_TREE_SELFTEST=mode-components bash "$r_mcm/scripts/agent-gate.sh" --lite 2>/dev/null ); mcm_rc=$?
   mcm=$(sed -n '/^tree-selftest: mode-components=/{s/^tree-selftest: mode-components=//p;q;}' <<<"$mcm_raw")
-  case " $mcm " in
-    *" scoped-tests "*) bad "J2 mutant: the lite set STILL contains scoped-tests with the pre-fix branch — the check cannot fail" ;;
-    *) ok "J2 mutant: hard-wiring the lite branch to COMPONENTS drops scoped-tests (proved discriminating)" ;;
-  esac
+  if [ "$mcm_rc" -ne 0 ]; then
+    # The pipeline's pipefail status used to cover this; a failing selftest proves nothing.
+    bad "J2 mutant: the mode-components selftest exited rc=$mcm_rc, so its output proves nothing"
+  else
+    case " $mcm " in
+      *" scoped-tests "*) bad "J2 mutant: the lite set STILL contains scoped-tests with the pre-fix branch — the check cannot fail" ;;
+      *) ok "J2 mutant: hard-wiring the lite branch to COMPONENTS drops scoped-tests (proved discriminating)" ;;
+    esac
+  fi
 else
   bad "J2 mutant: the LITE branch of _tree_mode_components was not found — the mutant is vacuous"
 fi
@@ -655,8 +660,10 @@ fi
 rm -f "$r_fd/gate-out.txt" "$r_fd/gate-err.txt"
 # …and NOT to an out-of-repo target, and not to a pipe/tty (nothing is excluded then).
 out_probe_raw=$( cd "$r_fd" && env AGENT_GATE_SUMMARY_FILE="$tmp/fd-out-sentinel.txt" \
-               AGENT_GATE_TREE_SELFTEST=capture bash "$r_fd/scripts/agent-gate.sh" 2>/dev/null )
+               AGENT_GATE_TREE_SELFTEST=capture bash "$r_fd/scripts/agent-gate.sh" 2>/dev/null ); out_probe_rc=$?
 out_probe=$(sed -n '/^tree-selftest: stdout-rel=/{s/^tree-selftest: stdout-rel=//p;q;}' <<<"$out_probe_raw")
+# A selftest that prints the token and then exits non-zero must not pass (pipefail used to cover this).
+[ "$out_probe_rc" -eq 0 ] || out_probe="SELFTEST-EXIT-$out_probe_rc:$out_probe"
 if [ "$out_probe" = "<none>" ]; then
   ok "J3 control: a non-file (pipe) stdout carves out NOTHING — the exclusion is not a blanket one"
 else

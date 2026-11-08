@@ -801,18 +801,19 @@ fi
 #    under /bin/bash when it is the 3.x default so the test is meaningful there.
 if [ -x /bin/bash ]; then
   bin_bash_major=$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)
-  bb_classify_out=$(printf '%s\n' "cqlite-core/tests/compact_command.rs" \
-        | /bin/bash "$GATE" --classify-test-targets 2>/dev/null)
+  # The classifier's own exit status is part of the condition (pipefail semantics, kept explicit).
   if /bin/bash "$GATE" --lite-list >/dev/null 2>&1 \
+     && bb_classify_out=$(printf '%s\n' "cqlite-core/tests/compact_command.rs" \
+        | /bin/bash "$GATE" --classify-test-targets 2>/dev/null) \
      && grep -qxF "cqlite-core|compact_command|" <<<"$bb_classify_out"; then
     ok "bash-compat: --lite classification path runs under /bin/bash (major ${bin_bash_major:-?})"
   else
     bad "bash-compat: --lite classification path failed under /bin/bash (major ${bin_bash_major:-?})"
   fi
   # 8b. The python-tier routing hook (issue #1893) must also run under /bin/bash 3.x.
-  bb_plan_out=$(printf '%s\n' "bindings/python/tests/conftest.py" \
-       | /bin/bash "$GATE" --classify-scoped-plan 2>/dev/null)
-  if grep -q "^python-tier: " <<<"$bb_plan_out"; then
+  if bb_plan_out=$(printf '%s\n' "bindings/python/tests/conftest.py" \
+       | /bin/bash "$GATE" --classify-scoped-plan 2>/dev/null) \
+     && grep -q "^python-tier: " <<<"$bb_plan_out"; then
     ok "bash-compat: --classify-scoped-plan python routing runs under /bin/bash (major ${bin_bash_major:-?})"
   else
     bad "bash-compat: --classify-scoped-plan python routing failed under /bin/bash (major ${bin_bash_major:-?})"
