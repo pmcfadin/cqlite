@@ -349,7 +349,7 @@ else
   # Keyed on the last line specifically, not on a tail WINDOW: the three-line window ending at
   # the banner still contains the FIRST target's result line, so a window test reported the
   # fixture malformed while it was in fact exactly right.
-  if [ "${orphan_banners:-0}" -eq 2 ] && tail -n 1 "$tmp/orphan.log" | grep -qE 'Running.*tests/'; then
+  if [ "${orphan_banners:-0}" -eq 2 ] && { _spw34=$(tail -n 1 "$tmp/orphan.log") && grep -qE 'Running.*tests/' <<<"$_spw34"; }; then
     ok "orphan: the fixture is genuinely the dangling case ($orphan_banners banners, the last line IS the second banner)"
   else
     bad "orphan: the fixture is not the dangling case (banners=${orphan_banners:-0}) — the case above would red for the wrong reason"
