@@ -1606,7 +1606,8 @@ if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstable
    && bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >/dev/null 2>&1; then
   ct_root="$WORK/coherent-toc"; rm -rf "$ct_root"; mkdir -p "$ct_root"
   cp -r "$CQLITE_DATASETS_ROOT/sstables" "$ct_root/" 2>/dev/null
-  ct_dir=$(find "$ct_root/sstables/test_basic" -maxdepth 1 -type d -name 'simple_table-*' | head -1)
+  ct_dirs=$(find "$ct_root/sstables/test_basic" -maxdepth 1 -type d -name 'simple_table-*')
+  ct_dir=$(head -1 <<<"$ct_dirs")
   if [ -n "$ct_dir" ] && [ -f "$ct_dir/nb-1-big-TOC.txt" ]; then
     # Control: the untouched copy still passes, so a reject below is caused by the edit.
     if bash "$MANIFEST_SRC" "$ct_root" >/dev/null 2>&1; then
