@@ -22418,11 +22418,12 @@ _tt_run_all() {
     # Historical serial semantics: registration order, ambient TMPDIR, first failure stops.
     echo ">>> [tooling-tests] running $_TT_N registered suites serially (CQLITE_TOOLING_TESTS_JOBS=1)"
     for ((i = 0; i < _TT_N; i++)); do
-      if [ "${_TT_MODE[$i]}" != N ]; then
+      if [ "${_TT_MODE[$i]}" != N ] && [ "${_TT_MODE[$i]}" != X ]; then
         echo ">>> [tooling-tests] ${_TT_HDR[$i]}"
         _tt_exec "$i" "$d" ""
         _tt_report "$i" "$d" "$log" noheader
       else
+        # Notes, and unknown-mode suites: reported (the latter as FAILED) WITHOUT being executed.
         _tt_report "$i" "$d" "$log"
       fi
       [ "$_TT_LAST_RC" = 0 ] || return 0
