@@ -1216,7 +1216,8 @@ esac
 if [ -z "$(git -C "$R21" status --porcelain 2>&1)" ]; then
   ok "hostile-tmpdir: git status --porcelain is EMPTY"
 else
-  bad "hostile-tmpdir: checkout dirty: $(git -C "$R21" status --porcelain | head -3)"
+  porcelain_r21=$(git -C "$R21" status --porcelain)
+  bad "hostile-tmpdir: checkout dirty: $(head -3 <<<"$porcelain_r21")"
 fi
 
 # --- Case 21b: NON-VACUITY for the guard-state location + consistency check ----
@@ -2158,7 +2159,8 @@ fi
 if [ -z "$(git -C "$R38" status --porcelain 2>&1)" ]; then
   ok "3310-scoped-repair: the checkout is clean after the advertised repair"
 else
-  bad "3310-scoped-repair: the repair left the checkout dirty: $(git -C "$R38" status --porcelain | head -3)"
+  porcelain_r38=$(git -C "$R38" status --porcelain)
+  bad "3310-scoped-repair: the repair left the checkout dirty: $(head -3 <<<"$porcelain_r38")"
 fi
 
 # === Case 39: a STAGED deletion needs a DIFFERENT repair command ==============
