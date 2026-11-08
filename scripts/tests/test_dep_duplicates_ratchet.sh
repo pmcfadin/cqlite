@@ -488,7 +488,7 @@ assert_case "P5: ANSI-coloured cargo output parses to the same counts (#3400 —
   0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE (4/2 vs baseline 4/2)'
 # POSITIVE CONTROL for the control: the fixture must really carry escapes, or P5 passes
 # for the wrong reason — the exact way a colour-immunity test goes inert.
-if tree_coloured | grep -q "$(printf '\033')"; then
+if { _spw38=$(tree_coloured) && grep -q "$(printf '\033')" <<<"$_spw38"; }; then
   ok "P5: the coloured fixture really contains ANSI escapes (so P5 cannot pass vacuously)"
 else
   bad "P5: the coloured fixture carries NO escape bytes — the colour-immunity case is inert"
@@ -1136,7 +1136,7 @@ else
       # "no component line — the component did not run". Returning the row instead lets
       # each caller's own arm red on it, which is what #1700 AC2 requires (VACUOUS is a
       # failing status, and this component may reach no failing status at all).
-      grep -E '^dep-duplicates: +(PASS|FAIL|SKIP|VACUOUS)' "$s" 2>/dev/null | head -1
+      { _spw37=$(grep -E '^dep-duplicates: +(PASS|FAIL|SKIP|VACUOUS)' "$s" 2>/dev/null) && head -1 <<<"$_spw37"; }
     }
 
     # G1a — THE CLEAN MEASUREMENT, planted. This is where the deterministic PASS
@@ -1178,7 +1178,7 @@ exit 0')
     # `remote-not-canonical` line is called out by name, since that is exactly what an
     # unpinned fixture would produce and it would mean the pre-flight stopped before
     # measuring anything.
-    cs_line=$(grep -E '^component-set:' "${COMPONENT_LOG%.log}.summary.txt" 2>/dev/null | head -1)
+    cs_line=$(grep -m 1 -E '^component-set:' "${COMPONENT_LOG%.log}.summary.txt" 2>/dev/null)
     case "$cs_line" in
       '')
         bad "G0b: no component-set line in the planted run's SUMMARY — the #3544 pre-flight left no record, so it cannot be shown to have run at all" ;;
@@ -1337,18 +1337,20 @@ exit 55')
     g3_log="$TMPROOT/g3.log"
     ( cd "$REPO_ROOT" && bash "$GUARD" ) >"$g3_log" 2>&1
     g3_rc=$?
-    g3_cause="$(sed -n 's/.*cause=\([a-z-]*\).*/\1/p' "$g3_log" | head -1)"
+    g3_cause="$(sed -n '/.*cause=\([a-z-]*\).*/{s/.*cause=\([a-z-]*\).*/\1/p;q;}' "$g3_log")"
     case "$g3_rc" in
       0)
         if grep -qE 'dep-duplicates: (0 INCREASE RECOGNISED|ADVISORY-INCREASE)' "$g3_log"; then
-          ok "G3: the committed guard measures the real workspace and prints an AFFIRMATIVE reading ($(grep -oE 'verdict (NO-INCREASE|ADVISORY-INCREASE)' "$g3_log" | head -1))"
+          _spw6=$(grep -oE 'verdict (NO-INCREASE|ADVISORY-INCREASE)' "$g3_log")
+          ok "G3: the committed guard measures the real workspace and prints an AFFIRMATIVE reading ($(head -1 <<<"$_spw6"))"
         else
           bad "G3: exit 0 with NEITHER an affirmative '0 INCREASE RECOGNISED' nor an ADVISORY-INCREASE — that is the vacuous pass this guard must never emit"
         fi
         # L1's property: the committed baseline was really READ and COMPARED against, not
         # merely present. The guard prints its comparison as `… vs baseline <inst>/<crates>`.
         if grep -qE 'vs baseline [0-9]+/[0-9]+' "$g3_log"; then
-          ok "G3/L1: the COMMITTED baseline was READ and COMPARED on the real workspace ($(grep -oE 'vs baseline [0-9]+/[0-9]+' "$g3_log" | head -1))"
+          _spw5=$(grep -oE 'vs baseline [0-9]+/[0-9]+' "$g3_log")
+          ok "G3/L1: the COMMITTED baseline was READ and COMPARED on the real workspace ($(head -1 <<<"$_spw5"))"
         else
           bad "G3/L1: exit 0 with no '… vs baseline <n>/<m>' comparison — the committed baseline was not evidenced as read"
         fi
@@ -1363,7 +1365,8 @@ exit 55')
           # `cargo tree -d` output no longer matches this guard's closed grammar, which is
           # precisely the signal this suite exists to surface rather than swallow.
           workspace-manifest-absent|unrecognised-section-header|unrecognised-line|malformed-record|unparseable-output|implausible-census)
-            bad "G3: cause=$g3_cause is NOT a host property — it means the committed tree or the pinned toolchain's cargo output does not match the guard's closed grammar, so nothing was measured and that must not read green: $(grep -o 'cause=.*' "$g3_log" | head -1)" ;;
+            _spw4=$(grep -o 'cause=.*' "$g3_log")
+            bad "G3: cause=$g3_cause is NOT a host property — it means the committed tree or the pinned toolchain's cargo output does not match the guard's closed grammar, so nothing was measured and that must not read green: $(head -1 <<<"$_spw4")" ;;
           '')
             bad "G3: the guard exited 3 (unmeasurable) with NO cause token — an unmeasured state must always name itself: $(tail -1 "$g3_log")" ;;
           *)
@@ -1372,7 +1375,8 @@ exit 55')
       4)
         # L1's ASYMMETRY: a broken COMMITTED baseline is a repository defect, never a host
         # property, so it FAILS here where every host-class cause skips.
-        bad "G3/L1: the COMMITTED baseline $BASELINE_REL does not parse in this checkout: $(grep -o 'cause=[a-z-]* detail=.*' "$g3_log" | head -1)" ;;
+        _spw3=$(grep -o 'cause=[a-z-]* detail=.*' "$g3_log")
+        bad "G3/L1: the COMMITTED baseline $BASELINE_REL does not parse in this checkout: $(head -1 <<<"$_spw3")" ;;
       *)
         bad "G3: the guard exited $g3_rc — on a plain invocation of the committed tree it may only ever exit 0 (measured), 3 (unmeasurable) or 4 (baseline unusable); 1 is an internal ERROR and 2 a usage error, and neither is reachable here: $(tail -1 "$g3_log")" ;;
     esac
