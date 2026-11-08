@@ -378,7 +378,7 @@ expect_driver_accepts() {
 # observed rather than assumed.
 _probe_helper() { # _probe_helper <args…> — echoes PASS or FAIL
   ( pass() { echo PASS; }; fail() { echo FAIL; }
-    expect_driver_accepts probe "$@" 2>/dev/null | head -1 )
+    pr_out=$(expect_driver_accepts probe "$@" 2>/dev/null); head -1 <<<"$pr_out" )
 }
 if [ "$(_probe_helper --corpus "$TMP/corpus" --reps 0)" = "FAIL" ]; then
   pass "expect_driver_accepts FAILS on a genuinely refused argument (it is not vacuous)"
@@ -399,7 +399,7 @@ if [ "$(
     DRIVER="$TMP/leaky-driver.sh"
     { echo 'sudo -n sysctl -w kernel.perf_event_paranoid=-1 >/dev/null 2>&1'
       echo 'echo "ARGUMENTS OK (stand-in)"'; } > "$DRIVER"
-    expect_driver_accepts probe --corpus "$TMP/corpus" 2>/dev/null | head -1 )
+    pr_out=$(expect_driver_accepts probe --corpus "$TMP/corpus" 2>/dev/null); head -1 <<<"$pr_out" )
 )" = "FAIL" ]; then
   pass "expect_driver_accepts FAILS when the run invokes sudo (the hermeticity half FIRES)"
 else
@@ -1223,8 +1223,8 @@ check_driver_reject "a 20-digit --port is refused before arithmetic" \
   "absurdly large" --corpus "$TMP/corpus" --port 99999999999999999999
 # The digit test must come BEFORE any arithmetic, or the bound is itself evaluated by
 # the arithmetic that wraps.
-if awk '/^require_positive_int\(\)/,/^}/' "$ARGS_LIB" \
-  | awk '/#value/{d=NR} /10#\$value/{if(!d) bad=1} END{exit(bad?1:0)}'; then
+if rpi_body=$(awk '/^require_positive_int\(\)/,/^}/' "$ARGS_LIB") \
+  && awk '/#value/{d=NR} /10#\$value/{if(!d) bad=1} END{exit(bad?1:0)}' <<<"$rpi_body"; then
   pass "the digit-count check precedes the arithmetic in require_positive_int"
 else
   fail "require_positive_int must test the digit count before any arithmetic"
