@@ -226,7 +226,7 @@ else
 fi
 # The lint's POSITION is what makes the stamp a witness for it, so that is asserted
 # structurally rather than assumed from the driver's current shape.
-lint_line=$(grep -n '^_perf_lint_out="\$(perf_invocation_lint_tree' "$DRIVER" | head -1 | cut -d: -f1)
+lint_line=$(grep -m 1 -n '^_perf_lint_out="\$(perf_invocation_lint_tree' "$DRIVER" | cut -d: -f1)
 stamp_line=$(grep -m1 -n '^  echo "ARGUMENTS OK' "$DRIVER" | cut -d: -f1)  # sigpipe-fixture: echo is inside a grep pattern over a file, not a pipe source
 if [ -n "$lint_line" ] && [ -n "$stamp_line" ] && [ "$lint_line" -lt "$stamp_line" ]; then
   pass "selfgrep-silent: the perf lint (line $lint_line) runs BEFORE the ARGUMENTS OK stamp (line $stamp_line), so the stamp witnesses it"
@@ -467,7 +467,7 @@ fi
 # shape), over the WHOLE DIRECTORY rather than `${BASH_SOURCE[0]}` (R2): the driver runs
 # it unconditionally at parse time and exits on any output.
 if grep -q '_perf_lint_out="\$(perf_invocation_lint_tree "\$HERE")"' "$DRIVER" \
-   && awk '/^if \[\[ -n "\$_perf_lint_out" \]\]/,/^fi$/' "$DRIVER" | grep -q 'exit 2'; then
+   && { _spw10=$(awk '/^if \[\[ -n "\$_perf_lint_out" \]\]/,/^fi$/' "$DRIVER") && grep -q 'exit 2' <<<"$_spw10"; }; then
   pass "selfgrep-wired: the lint runs over the whole scripts/perf TREE at startup and exits on any finding"
 else
   fail "selfgrep-wired: the lint must run over the tree (perf_invocation_lint_tree \"\$HERE\") unconditionally and exit"
@@ -776,7 +776,7 @@ else
 fi
 # STRUCTURAL: the awk's status is absorbed at the awk, NOT at the pipeline — the helper's own
 # status is meaningful and must stay intact.
-if awk '/^perf_invocation_lint\(\)/,/^}/' "$PERF_LINT_LIB" | grep -q '|| true; } | _perf_lint_verify_complete'; then
+if { _spw65=$(awk '/^perf_invocation_lint\(\)/,/^}/' "$PERF_LINT_LIB") && grep -q '|| true; } | _perf_lint_verify_complete' <<<"$_spw65"; }; then
   pass "lint-pipefail: STRUCTURAL — the status is absorbed at the AWK, leaving the helper's own status intact"
 else
   fail "lint-pipefail: the awk's status must be absorbed without swallowing the helper's"
