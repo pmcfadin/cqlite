@@ -1410,7 +1410,8 @@ fi
 # ---------------------------------------------------------------------------
 cs_read_dir_findings() {
   local g="$1" init sentinel_decl assign assign_ln body_lo body_hi consumers ln guard_ln guard_n refuse_body glob_init
-  init=$(cs_region_code "$g" | grep -F '_CS_READ_DIR=' | grep -F '_CS_READ_ENV=(); _CS_HEAD_SHA=' | head -1)
+  _spw18=$(cs_region_code "$g" | grep -F '_CS_READ_DIR=' | grep -F '_CS_READ_ENV=(); _CS_HEAD_SHA=')
+  init=$(head -1 <<<"$_spw18")
   if [ -z "$init" ]; then
     printf 'FINDING: could not locate the probe initialiser line that sets _CS_READ_DIR — the shape changed or the scan broke (fail-closed)\n'
   else
@@ -1427,7 +1428,8 @@ cs_read_dir_findings() {
   # file's own control and finding text call unsafe — one line below the sentinel introduced to
   # replace it, because the check covered only the PROBE initialiser. Two initialisers, one
   # property; pin both.
-  glob_init=$(cs_region_code "$g" | grep '^[0-9][0-9]*:_CS_READ_DIR=' | head -1)
+  _spw17=$(cs_region_code "$g" | grep '^[0-9][0-9]*:_CS_READ_DIR=')
+  glob_init=$(head -1 <<<"$_spw17")
   case "$glob_init" in
     *'_CS_READ_DIR="$_CS_READ_DIR_UNSET"'*) : ;;
     '') printf 'FINDING: could not locate the GLOBAL _CS_READ_DIR initialiser (fail-closed)\n' ;;
@@ -1450,7 +1452,8 @@ cs_read_dir_findings() {
   if [ -z "$sentinel_decl" ]; then
     printf 'FINDING: the UNSET sentinel is not declared as a literal /dev/null/... path — a sentinel that any user (or root) can create is a live read waiting to happen\n'
   fi
-  assign=$(cs_region_code "$g" | grep -F '_CS_READ_DIR="$csdir/repo"' | head -1)
+  _spw16=$(cs_region_code "$g" | grep -F '_CS_READ_DIR="$csdir/repo"')
+  assign=$(head -1 <<<"$_spw16")
   if [ -z "$assign" ]; then
     printf 'FINDING: could not locate the scratch assignment _CS_READ_DIR="$csdir/repo" — the shape changed or the scan broke (fail-closed)\n'
     return 0
@@ -1464,13 +1467,15 @@ cs_read_dir_findings() {
   # coincide, so that is where the rule applies. DECLARED RESIDUAL: consumers in helper bodies are
   # NOT covered by this rule; they are covered by the UNSET sentinel above (an unguarded read fails
   # closed) and, for the peel, by the runtime refusal below.
-  body_lo=$(cs_region_stream "$g" | grep '^[0-9][0-9]*:_component_set_probe_inner() {$' | head -1)
+  _spw15=$(cs_region_stream "$g" | grep '^[0-9][0-9]*:_component_set_probe_inner() {$')
+  body_lo=$(head -1 <<<"$_spw15")
   body_lo="${body_lo%%:*}"
   if [ -z "$body_lo" ]; then
     printf 'FINDING: could not locate _component_set_probe_inner in the region (fail-closed)\n'
     return 0
   fi
-  body_hi=$(cs_region_stream "$g" | awk -F: -v lo="$body_lo" '$1+0 > lo+0 && $0 ~ /^[0-9]+:}$/ { print $1; exit }')
+  _spw14=$(cs_region_stream "$g")
+  body_hi=$(awk -F: -v lo="$body_lo" '$1+0 > lo+0 && $0 ~ /^[0-9]+:}$/ { print $1; exit }' <<<"$_spw14")
   if [ -z "$body_hi" ]; then
     printf 'FINDING: could not locate the end of _component_set_probe_inner (fail-closed)\n'
     return 0
@@ -1504,7 +1509,8 @@ cs_read_dir_findings() {
   # there could only REPORT a prohibited live read that had already happened. Two consumer kinds,
   # so two comparisons: the direct `-C "$_CS_READ_DIR"` sites in the probe body, and the probe
   # body's CALLS to the helpers whose own bodies are lexically earlier.
-  guard_ln=$(cs_region_code "$g" | grep -F '_cs_read_dir_isolated_or_refuse "' | head -1)
+  _spw13=$(cs_region_code "$g" | grep -F '_cs_read_dir_isolated_or_refuse "')
+  guard_ln=$(head -1 <<<"$_spw13")
   guard_n=$(cs_region_code "$g" | grep -cF '_cs_read_dir_isolated_or_refuse "' || true)
   if [ -z "$guard_ln" ]; then
     printf 'FINDING: nothing calls _cs_read_dir_isolated_or_refuse — an unisolated value would be handed to git instead of refused by name\n'
@@ -3788,13 +3794,15 @@ fi
 #     behaviourally means mutating shared git config while a fetch is in flight, which is
 #     precisely what must never be done from a test on a shared checkout.
 # ---------------------------------------------------------------------------
-cfg_write=$(grep -n 'url = %s' "$GATE" | head -1)
+_spw12=$(grep -n 'url = %s' "$GATE")
+cfg_write=$(head -1 <<<"$_spw12")
 # LOCATED BY THE ISOLATED REPO PATH, not by the remote name: keying the locator on
 # `csbaseline` made the two SPECIFIC arms below (a re-interpolated URL, a renamed remote)
 # unreachable — every such mutation fell into the fail-closed "shape changed" arm instead, so
 # the messages would have been dead branches and the case would have been right by luck.
 # RED-verified after the change: each plant now reports its OWN cause.
-fetch_line=$(grep -n 'git -C "\$csdir/repo" fetch' "$GATE" | head -1)
+_spw11=$(grep -n 'git -C "\$csdir/repo" fetch' "$GATE")
+fetch_line=$(head -1 <<<"$_spw11")
 if [ -z "$cfg_write" ] || [ -z "$fetch_line" ]; then
   bad "3544-fetch-config-pinned: could not locate the config write (got '$(cut -c1-40 <<<"$cfg_write")') or the isolated fetch (got '$(cut -c1-40 <<<"$fetch_line")') in $GATE — the shape changed or the scan broke (fail-closed: this is not a clean result)"
 elif ! grep -q 'printf .*url = %s.*"\$origin_url"' <<<"$cfg_write"; then
@@ -3812,7 +3820,8 @@ fi
 # …and the 0600 must be applied BEFORE the URL is written, because the URL may carry a token:
 # a mode change AFTER the write leaves a credential world-readable for the window in between.
 # ORDER assert, which is the only thing a source read can answer here.
-cfg_chmod_ln=$(grep -n 'chmod 600 "\$csconf"' "$GATE" | head -1 | cut -d: -f1)
+_spw10=$(grep -n 'chmod 600 "\$csconf"' "$GATE")
+cfg_chmod_ln=$(head -1 <<<"$_spw10" | cut -d: -f1)
 cfg_write_ln=$(cut -d: -f1 <<<"$cfg_write")
 if [ -z "$cfg_chmod_ln" ] || [ -z "$cfg_write_ln" ]; then
   bad "3544-config-mode-first: could not locate the chmod (got '$cfg_chmod_ln') or the URL write (got '$cfg_write_ln') — the shape changed or the scan broke (fail-closed)"
@@ -4086,21 +4095,21 @@ for win_edit in manifest; do
       sed -n '1,5p' "$win_log" 2>/dev/null
     elif [ "$win_timedout" -eq 1 ]; then
       bad "3544-preflight-in-window[$win_edit]: the fixture gate did not COMPLETE within ${WIN_BOUND_SECS}s of the slot being released — the unmet wait is the gate exiting after its post-slot pre-flight; FAILED rather than skipped or waited on forever (#3698)"
-      grep -n 'gate slot' "$win_log" 2>/dev/null | head -3
+      { _spw9=$(grep -n 'gate slot' "$win_log" 2>/dev/null) && head -3 <<<"$_spw9"; }
       tail -3 "$win_log" 2>/dev/null
     elif ! grep -qE '^[0-9]+$' <<<"$win_rc"; then
       bad "3544-preflight-in-window[$win_edit]: the fixture gate recorded NO exit status (marker '$win_done' absent or unparseable: '$win_rc'), so no verdict can be derived from it — an unmeasured status is not a passing one"
       tail -3 "$win_log" 2>/dev/null
     elif [ "$win_raced" -eq 1 ]; then
       bad "3544-preflight-in-window[$win_edit]: the gate had ALREADY been granted its slot when the edit was made, so the edit did not land inside the queue window — this case cannot discriminate (a loaded box or a dead holder daemon, NOT a verdict about the guard)"
-      grep -n 'gate slot' "$win_log" 2>/dev/null | head -3
+      { _spw8=$(grep -n 'gate slot' "$win_log" 2>/dev/null) && head -3 <<<"$_spw8"; }
     elif [ "$win_rc" -ne 0 ] \
        && grep -q '^component-set: FAIL-CLOSED (#3544)' "$win_sum" 2>/dev/null \
        && grep -q "$win_want" "$win_sum" 2>/dev/null; then
       ok "3544-preflight-in-window[$win_edit]: an edit made WHILE THE RUN WAS QUEUED is caught after the slot wait ($win_want) — the check AND the input it reasons about are both inside the window the recapture opens"
     else
       bad "3544-preflight-in-window[$win_edit]: expected a FAIL-CLOSED component-set line naming $win_want after an in-queue edit (rc=$win_rc)"
-      grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null | head -4
+      { _spw7=$(grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null) && head -4 <<<"$_spw7"; }
     fi
   fi
 done
@@ -4987,7 +4996,7 @@ else
       ok "3544-signal-cleanup[$_sig_mech]: a signal during the probe stops the bounded command AND removes the isolated scratch repository (its config holds the origin URL) and the capture files — with nothing left running to recreate them"
     else
       bad "3544-signal-cleanup[$_sig_mech]: a signalled probe LEAKED (scratch dirs left=$_sig_left, capture files left=$_sig_caps)"
-      ls -la "$_sig_tmp" 2>/dev/null | head -5
+      { _spw6=$(ls -la "$_sig_tmp" 2>/dev/null) && head -5 <<<"$_spw6"; }
     fi
     reap_ticker "$sig_pidfile"
   done
@@ -5757,7 +5766,7 @@ if [ "$leak_rc" -ne 0 ] \
   ok "3544-no-credential-leak: a credential-bearing origin is refused and NEITHER the secret NOR the URL (not even its host) is rendered anywhere — the rejection AXIS is named instead"
 else
   bad "3544-no-credential-leak: the secret or the URL leaked, or the axis is not named (rc=$leak_rc)"
-  grep -n 'component-set\|preflight' "$leak_sum" 2>/dev/null | head -4
+  { _spw5=$(grep -n 'component-set\|preflight' "$leak_sum" 2>/dev/null) && head -4 <<<"$_spw5"; }
 fi
 
 # STRUCTURAL: the expected identity must be a LITERAL. An env-derived (or config-derived)
