@@ -222,7 +222,7 @@ echo "== the census reads /proc directly, not via pgrep -f =="
 # measuring; this lane hit exactly that (a field read `0\n0`). And `pgrep -x` is not the
 # alternative: the kernel `comm` field caps at 15 chars, so a longer name can never match —
 # pkill itself warns it "will result in zero matches". Asserted structurally.
-if grep -nE 'pgrep|pkill' "$Q" | grep -vE '^\s*[0-9]+:\s*#' | grep -qE 'pgrep|pkill'; then
+if { _spw68=$(grep -nE 'pgrep|pkill' "$Q" | grep -vE '^\s*[0-9]+:\s*#') && grep -qE 'pgrep|pkill' <<<"$_spw68"; }; then
   # allow the words inside comments/docstrings, refuse an actual invocation
   if python3 - "$Q" <<'ASTCHK'
 import ast, sys
