@@ -30,7 +30,7 @@ echo "failed=[\$_TT_FAILED_NAMES]"
 EOS
 out=$(CQLITE_TOOLING_TESTS_JOBS=2 timeout 40 bash "$W/t1.sh" 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q '^failed=\[\]$' <<<"$out"; then
-  ok "pool drains with a pid-probe that reports every pid alive (capacity is from .rc files)"
+  ok "pool drains with a pid-probe that reports every pid alive (liveness is bash's job table, not pid probes)"
 else
   bad "pool stalled or failed under a hostile kill shim (rc=$rc)"
 fi
@@ -62,5 +62,44 @@ for J in 4 1; do
     bad "JOBS=$J: wrong failure naming or the unknown-mode suite ran: $(tail -1 <<<"$out")"
   fi
 done
+# 3. a worker KILLED mid-run (only the pid this test's runner launched) must not stall the pool and
+#    must FAIL, named: liveness comes from bash's job table, and a missing status is synthesized.
+cat >"$W/t3.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT=/tmp
+. "$W/helpers.sh"
+_tt_reset
+_tt_add P 'ok-a' 'sleep 1'
+_tt_add P 'killed-worker' 'me=\$BASHPID; w=\$(ps -o ppid= -p \$me | tr -d " "); kill -9 \$w; sleep 3'
+_tt_add P 'ok-b' 'sleep 1'
+: >"$W/c3.log"
+_tt_run_all "$W/c3.log" "$W/d3"
+echo "failed=[\$_TT_FAILED_NAMES]"
+EOS
+out=$(CQLITE_TOOLING_TESTS_JOBS=2 timeout 40 bash "$W/t3.sh" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^failed=\[killed-worker\]$' <<<"$out"; then
+  ok "a SIGKILLed worker does not stall the pool and FAILs, named"
+else
+  bad "killed worker: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
+fi
+# 4. a worker whose status write FAILS (mv of the .rc refused) must FAIL, named, without stalling.
+cat >"$W/t4.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT=/tmp
+mv() { case "\${2:-}" in *.rc) return 1 ;; esac; command mv "\$@"; }
+. "$W/helpers.sh"
+_tt_reset
+_tt_add P 'unpublished' 'true'
+_tt_add P 'unpublished-too' 'true'
+: >"$W/c4.log"
+_tt_run_all "$W/c4.log" "$W/d4"
+echo "failed=[\$_TT_FAILED_NAMES]"
+EOS
+out=$(CQLITE_TOOLING_TESTS_JOBS=2 timeout 40 bash "$W/t4.sh" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^failed=\[unpublished; unpublished-too\]$' <<<"$out"; then
+  ok "workers whose status write fails FAIL, named, without stalling the pool"
+else
+  bad "unpublished status: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
+fi
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

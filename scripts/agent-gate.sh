@@ -22356,7 +22356,7 @@ _tt_exec() {
     rc=$?
   fi
   e=$(date +%s)
-  printf '%s %s\n' "$rc" "$((e - s))" >"$d/$id.rc.tmp" && mv "$d/$id.rc.tmp" "$d/$id.rc"
+  printf '%s %s\n' "$rc" "$((e - s))" >"$d/$id.rc.tmp" && mv "$d/$id.rc.tmp" "$d/$id.rc" || return 125
   return 0
 }
 
@@ -22407,10 +22407,32 @@ _tt_lane() {
   return 0
 }
 
+# _tt_reap <log dir>: reap finished pool workers in $_TT_ACTIVE (see the comment at its caller);
+# leaves the still-running ones in $_TT_ACTIVE and their count in $_TT_RUNNING.
+_tt_reap() {
+  local d=$1 ent pid idx id rp st keep=""
+  rp=" $(jobs -rp | tr '\n' ' ') "
+  _TT_RUNNING=0
+  for ent in $_TT_ACTIVE; do
+    pid=${ent#*:}; idx=${ent%%:*}
+    case "$rp" in
+      *" $pid "*) _TT_RUNNING=$((_TT_RUNNING + 1)); keep="$keep $ent"; continue ;;
+    esac
+    wait "$pid" 2>/dev/null; st=$?
+    id=$(printf '%03d' "$idx")
+    if [ ! -r "$d/$id.rc" ]; then
+      [ "$st" -ne 0 ] || st=125
+      echo "no status was published by the worker (wait status $st)" >>"$d/$id.log"
+      printf '%s ?\n' "$st" >"$d/$id.rc" 2>/dev/null || true
+    fi
+  done
+  _TT_ACTIVE=$keep
+}
+
 # _tt_run_all <component log> <scratch dir>: execute every registered suite. Returns 0 always;
 # the caller reads _TT_FAILED_NAMES (non-empty == the component FAILs).
 _tt_run_all() {
-  local log=$1 d=$2 jobs i pids pid order="" pcount=0 running keep ent active tmpbase lanes="" lpids="" ln want
+  local log=$1 d=$2 jobs i pids pid order="" pcount=0 tmpbase lanes="" lpids="" ln want
   jobs=$(_tt_jobs)
   mkdir -p "$d" || { _TT_FAILED_NAMES="cannot create $d"; return 0; }
 
@@ -22451,30 +22473,28 @@ _tt_run_all() {
     _tt_lane "$ln" "$d" "$tmpbase" &
     lpids="$lpids $!"
   done
-  # Capacity comes from the per-suite status files, never from probing pids: _tt_exec publishes
-  # <id>.rc atomically (tmp + mv) as the very LAST thing it does, so "rc exists" == "finished".
-  # (a signal-0 probe of a pid is unsound here: bash may reap a child early and the pid can be reused by an
-  # unrelated process, which would then be counted as a running suite and could stall the pool.)
-  active=""   # "<index>:<pid>" entries of pool suites launched and not yet seen finished
+  # Liveness comes from bash's OWN job table (`jobs -rp`), which only tracks this shell's children
+  # and so is immune to pid reuse (a signal-0 probe of a bare pid is not). A worker that left the
+  # table is reaped with `wait <pid>` to get its real exit status; if it published no readable
+  # status file (killed, or the status write failed - ENOSPC), _tt_reap synthesizes a failure so
+  # _tt_report names it. The atomic .rc write in _tt_exec stays: it is the normal result channel.
+  _TT_ACTIVE=""   # "<index>:<pid>" of pool workers launched and not yet reaped
   for i in $order; do
     while :; do
-      running=0; keep=""
-      for ent in $active; do
-        if [ -f "$d/$(printf '%03d' "${ent%%:*}").rc" ]; then
-          wait "${ent#*:}" 2>/dev/null   # reap it; it has already published its status
-        else
-          running=$((running + 1)); keep="$keep $ent"
-        fi
-      done
-      active=$keep
-      [ "$running" -lt "$jobs" ] && break
+      _tt_reap "$d"
+      [ "$_TT_RUNNING" -lt "$jobs" ] && break
       sleep 0.2
     done
     _tt_exec "$i" "$d" "$tmpbase" &
-    active="$active $i:$!"
+    _TT_ACTIVE="$_TT_ACTIVE $i:$!"
   done
-  # Wait ONLY for the pids started here (a bare `wait` would also wait for the gate's heartbeat).
-  for ent in $active; do wait "${ent#*:}" 2>/dev/null; done
+  # Drain the pool (waits ONLY for the workers started here: a bare `wait` would also wait for the
+  # gate's heartbeat), then the lanes.
+  while :; do
+    _tt_reap "$d"
+    [ "$_TT_RUNNING" -eq 0 ] && break
+    sleep 0.2
+  done
   for pid in $lpids; do wait "$pid" 2>/dev/null; done
   rm -rf "$tmpbase"
 
