@@ -843,7 +843,7 @@ fi
 FLOOR_HARD_MIN=5
 for suite in "$TESTS_DIR"/test_ws0_*.sh; do
   base="$(basename "$suite")"
-  floor=$(sed -n 's/^MIN_CHECKS=\([0-9]\{1,\}\)$/\1/p' "$suite" | head -1)
+  floor=$(sed -n '/^MIN_CHECKS=\([0-9]\{1,\}\)$/{s/^MIN_CHECKS=\([0-9]\{1,\}\)$/\1/p;q;}' "$suite")
   if [ -z "$floor" ]; then
     fail "floor-present: $base carries no numeric MIN_CHECKS floor — its suite-level 0/0 is open"
     continue
@@ -858,7 +858,7 @@ done
 # has teeth" is exactly the kind of claim that is true of the code and false of the check.
 floor_probe_dir="$TMP/floor-teeth"; mkdir -p "$floor_probe_dir"
 printf 'MIN_CHECKS=0\n' > "$floor_probe_dir/test_ws0_decorative.sh"
-decorative=$(sed -n 's/^MIN_CHECKS=\([0-9]\{1,\}\)$/\1/p' "$floor_probe_dir/test_ws0_decorative.sh" | head -1)
+decorative=$(sed -n '/^MIN_CHECKS=\([0-9]\{1,\}\)$/{s/^MIN_CHECKS=\([0-9]\{1,\}\)$/\1/p;q;}' "$floor_probe_dir/test_ws0_decorative.sh")
 if [ -n "$decorative" ] && [ "$decorative" -lt "$FLOOR_HARD_MIN" ]; then
   pass "floor-present: OBSERVED — MIN_CHECKS=0 is REJECTED by the hard minimum (the pre-fix grep accepted it)"
 else
