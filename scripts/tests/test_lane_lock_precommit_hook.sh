@@ -85,6 +85,20 @@ mkdir -p "$LANE/.git/hooks"; cp "$HOOK" "$LANE/.git/hooks/pre-commit"; chmod +x 
 # the test script cds ONCE and stays there, and $$ is that durable ancestor.
 cd "$LANE" || { echo "cannot enter $LANE"; exit 1; }
 COMMIT_N=0
+# probe_liveness: print the liveness= value of the lane lock for $ISSUE.
+# Capture-then-here-string: no external-writer | early-exit-reader pipe (#4451).
+# A probe that FAILS (exit 1 = infra error per lane-lock.sh's EXIT CODES; 0 is every
+# real verdict) prints NO token and returns its status, so a caller comparing against
+# ALIVE/DEAD-* fails closed instead of parsing whatever an erroring probe printed
+# (roborev job 126).
+probe_liveness() {
+  local pl_raw pl_rc=0
+  pl_raw=$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null) || pl_rc=$?
+  [ "$pl_rc" -eq 0 ] || return "$pl_rc"
+  pl_raw=${pl_raw// /$'\n'}
+  sed -n '/^liveness=/{s/^liveness=//p;q;}' <<<"$pl_raw"
+}
+
 commit_try() {
   COMMIT_N=$((COMMIT_N+1))
   # Unique content per call: `date` alone repeats within a second, and git then exits non-zero
@@ -119,7 +133,7 @@ bash "$REPO/scripts/flow/lane-lock.sh" release "$ISSUE" --force >/dev/null 2>&1
 echo "TEST 2: CONTROL — a FREE lane is ACQUIRED by the hook and the commit proceeds"
 # ---------------------------------------------------------------------------
 out2="$(commit_try free)"; rc2=$?
-held="$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n' | sed -n 's/^liveness=//p' | head -1)"
+held="$(probe_liveness)"
 if [ "$rc2" -eq 0 ] && [ "$held" = "SELF" ]; then
   ok "a FREE lane is acquired by the hook and the commit succeeds — entry wiring works"
 else
@@ -181,13 +195,13 @@ bash "$REPO/scripts/flow/lane-lock.sh" release "$ISSUE" --force >/dev/null 2>&1
 sleeper; DEADPID="$REPLY_SLEEPER"
 LANE_LOCK_PID=$DEADPID bash "$REPO/scripts/flow/lane-lock.sh" acquire "$ISSUE" --lane-dir "$LANE" >/dev/null 2>&1
 kill "$DEADPID" 2>/dev/null; while [ -e "/proc/$DEADPID" ]; do sleep 0.02; done
-lv="$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n' | sed -n 's/^liveness=//p' | head -1)"
+lv="$(probe_liveness)"
 case "$lv" in
   DEAD-*) ok "(setup) the holder is genuinely $lv" ;;
   *)      bad "(setup) expected a DEAD-* holder, got '$lv'" ;;
 esac
 out5="$(commit_try dead)"; rc5=$?
-lv5="$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n' | sed -n 's/^liveness=//p' | head -1)"
+lv5="$(probe_liveness)"
 if [ "$rc5" -eq 0 ] && [ "$lv5" = "SELF" ]; then
   ok "a DEAD holder is reclaimed and the lane ends up HELD BY US — the guard stays active"
 else
@@ -212,7 +226,7 @@ echo "TEST 6: the SAME process under a DIFFERENT actor is not treated as a peer 
 # `liveness=SELF` also requires the ACTOR to match, so one process probing under another
 # LANE_LOCK_ACTOR reports ALIVE. Refusing on the verdict alone refuses the true owner. The hook
 # compares holder-pid + holder-start-ticks against our own instead.
-if [ "$(LANE_LOCK_ACTOR=otheractor bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n' | sed -n 's/^liveness=//p' | head -1)" = "ALIVE" ]; then
+if [ "$(LANE_LOCK_ACTOR=otheractor probe_liveness)" = "ALIVE" ]; then
   ok "(premise) a different actor really does report ALIVE for our own held lane"
 else
   bad "(premise) expected ALIVE under a different actor — the case below would prove nothing"

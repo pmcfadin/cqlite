@@ -1190,9 +1190,10 @@ fi
 # wait_for_logdir <scratch-tmpdir> [tries] -> echoes the bundle path once it appears.
 # Bounded, and rc 1 if it never does — never an unbounded wait and never a silent skip.
 wait_for_logdir() {
-  local root="$1" tries="${2:-200}" i d
+  local root="$1" tries="${2:-200}" i d found
   for ((i = 0; i < tries; i++)); do
-    d=$(find "$root" -maxdepth 1 -type d -name 'agent-gate.*' 2>/dev/null | head -1)
+    found=$(find "$root" -maxdepth 1 -type d -name 'agent-gate.*' 2>/dev/null)
+    d=$(head -1 <<<"$found")
     [ -n "$d" ] && { printf '%s' "$d"; return 0; }
     sleep 0.05
   done
@@ -3308,7 +3309,8 @@ AC23STUB
     ok "AC23: a non-zero exit whose bundle holds ONLY launch artifacts left NO husk"
   else
     bad "AC23: the non-zero exit RETAINED $(count_logdirs "$td23a") husk directory/ies holding nothing but launch artifacts — the #3755 family is content on this arm"
-    find "$td23a" -maxdepth 2 2>/dev/null | head -8
+    husk_listing=$(find "$td23a" -maxdepth 2 2>/dev/null)
+    head -8 <<<"$husk_listing"
   fi
   # (b) CONTENT: the same launch set plus ONE component log.
   td23b="$tmp/ac23-content"; rcpt23b="$tmp/ac23-content.receipt"
@@ -3894,7 +3896,8 @@ if [ "${cntrl_sites:-0}" = 1 ]; then
   ok "AC27: the shipped gate has EXACTLY ONE control-character class site in code (not counting comments)"
 else
   bad "AC27: the shipped gate has ${cntrl_sites:-0} control-character class sites in code, expected exactly 1 — the refusal and the strip can now disagree about what a control character is"
-  grep -nvE '^[[:space:]]*#' "$GATE" | grep -F "tr -d '[:cntrl:]'" | head -5
+  cntrl_hits=$(grep -nvE '^[[:space:]]*#' "$GATE" | grep -F "tr -d '[:cntrl:]'")
+  head -5 <<<"$cntrl_hits"
 fi
 if [ "$(sed -n '/^_gate_cntrl_strip() {/,/^}/p' "$GATE" | grep -cF "tr -d '[:cntrl:]'" || true)" = 1 ]; then
   ok "AC27: and that site is inside _gate_cntrl_strip — THE shared definition"
@@ -3979,7 +3982,8 @@ if [ -f "$SELF" ]; then
     ok "AC28: exactly ONE mtime-synthesis site in code across the whole file (comments and diagnostic strings excluded)"
   else
     bad "AC28: ${touch_sites:-0} mtime-synthesis invocations in code, expected exactly 1 — a fixture can age itself without the fail-closed check again"
-    grep -nvE '^[[:space:]]*#' "$SELF" | grep -vE 'bad "|say BAD ' | grep -E 'touch -[dt] ' | head -5
+    touch_hits=$(grep -nvE '^[[:space:]]*#' "$SELF" | grep -vE 'bad "|say BAD ' | grep -E 'touch -[dt] ')
+    head -5 <<<"$touch_hits"
   fi
   if [ "$(sed -n '/^_age_dir_apply() {/,/^}/p' "$SELF" | grep -vE 'bad "' | grep -cE 'touch -[dt] ' || true)" = 1 ]; then
     ok "AC28: and that site is inside _age_dir_apply — THE one boundary"

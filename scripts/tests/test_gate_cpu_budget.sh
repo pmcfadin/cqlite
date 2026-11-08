@@ -63,9 +63,16 @@ budget_field() {
 # before the NAME=VALUE assignments, so a case that PASSES the variable still gets
 # the value it asked for, and a case that omits it gets a genuinely unset variable.
 cpu_budget() {
-  env -u CARGO_BUILD_JOBS -u AGENT_GATE_WRAPPED -u AGENT_GATE_WRAPPER \
+  # The gate's own exit status is preserved (#4451, roborev job 125): under the old
+  # `gate | grep | head` pipeline + pipefail, a gate that printed a budget line and
+  # then failed made this helper fail. Capture first (no early-exit reader on a live
+  # writer), print the first budget line, then return the gate's status.
+  local cb_out cb_rc=0
+  cb_out=$(env -u CARGO_BUILD_JOBS -u AGENT_GATE_WRAPPED -u AGENT_GATE_WRAPPER \
     -u CQLITE_GATE_MAX_CONCURRENCY \
-    CQLITE_GATE_NO_NICE=1 "$@" bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1
+    CQLITE_GATE_NO_NICE=1 "$@" bash "$GATE" --cpu-budget 2>/dev/null) || cb_rc=$?
+  grep -m 1 -E '^cpu-budget: ' <<<"$cb_out" || return 1
+  return "$cb_rc"
 }
 
 # --- 1. syntax check ---
@@ -136,7 +143,8 @@ if [ "$(uname -s)" = Darwin ] && command -v taskpolicy >/dev/null 2>&1; then
   # in `tooling-tests` they are already set, which would short-circuit the re-exec
   # guard and report wrapper=none (green standalone, red nested) — clear them so
   # this case genuinely exercises the wrap.
-  wline=$(env -u AGENT_GATE_WRAPPED -u AGENT_GATE_WRAPPER AGENT_GATE_TEST_NCPU=16 bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1)
+  wline_raw=$(env -u AGENT_GATE_WRAPPED -u AGENT_GATE_WRAPPER AGENT_GATE_TEST_NCPU=16 bash "$GATE" --cpu-budget 2>/dev/null)
+  wline=$(grep -m 1 -E '^cpu-budget: ' <<<"$wline_raw")
   w=$(budget_field "$wline" wrapper)
   case "$w" in
     taskpolicy) ok "macOS: gate wraps in taskpolicy -c utility (wrapper=$w)" ;;

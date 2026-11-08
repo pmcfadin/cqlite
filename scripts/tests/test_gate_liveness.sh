@@ -520,7 +520,8 @@ if [ -d /proc/1 ]; then
     { echo 'set -uo pipefail'; printf '%s\n' "$fn"
       echo 'for p in "$@"; do printf "%s %s\n" "$p" "$(_starttime "$p" 2>/dev/null)"; done'
     } > "$harness"
-    pids=$(ls -1 /proc 2>/dev/null | grep -E '^[0-9]+$' | head -400)
+    proc_entries=$(ls -1 /proc 2>/dev/null | grep -E '^[0-9]+$')
+    pids=$(head -400 <<<"$proc_entries")
     mismatch=0; compared=0
     while read -r pid mine; do
       # `_starttime` now returns a TIERED, TAGGED token (`proc:<ticks>` or `ps:<lstart>`) so the
