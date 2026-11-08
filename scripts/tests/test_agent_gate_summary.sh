@@ -336,7 +336,8 @@ iso_tmp=$(mktemp -d "$tmp/iso-tmpdir.XXXXXX")
 AGENT_GATE_KEEP_LOGS=1 AGENT_GATE_SUMMARY_FILE="$tmp/iso-default.txt" TMPDIR="$iso_tmp" \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 assert_exit "isolated-tmpdir" "$?" 0
-log_summary=$(ls -t "$iso_tmp"/agent-gate.*/summary.txt 2>/dev/null | head -1)
+iso_ls_=$(ls -t "$iso_tmp"/agent-gate.*/summary.txt 2>/dev/null)
+log_summary=$(head -1 <<<"$iso_ls_")
 if [ -n "$log_summary" ] && [ -f "$log_summary" ]; then
   assert_complete "isolated-tmpdir-log-copy" "$log_summary"
 else
@@ -2275,10 +2276,10 @@ fi
 # `^[[:space:]]*` anchor already excludes comment lines, so no extra comment filter is
 # needed (a `: #` trailing comment must NOT false-FAIL it). The `unset` fallback line
 # is deliberately NOT matched — deleting the primary scrub must still FAIL this test.
-scrub_ln=$(grep -nE '^[[:space:]]*(if[[:space:]]+![[:space:]]*)?(export -n|env -u) AGENT_GATE_SUMMARY_FILE' "$GATE" \
-             | head -1 | cut -d: -f1)
-resolve_ln=$(grep -n '^case "\$SUMMARY_FILE" in' "$GATE" | head -1 | cut -d: -f1)
-dispatch_ln=$(grep -n '^run_component() {' "$GATE" | head -1 | cut -d: -f1)
+scrub_ln=$(grep -m1 -nE '^[[:space:]]*(if[[:space:]]+![[:space:]]*)?(export -n|env -u) AGENT_GATE_SUMMARY_FILE' "$GATE" \
+             | cut -d: -f1)
+resolve_ln=$(grep -m1 -n '^case "\$SUMMARY_FILE" in' "$GATE" | cut -d: -f1)
+dispatch_ln=$(grep -m1 -n '^run_component() {' "$GATE" | cut -d: -f1)
 if [ -z "$resolve_ln" ]; then
   # The resolution anchor is the load-bearing "after" boundary; if it moved the
   # property is un-checkable — hard FAIL with a DISTINCT message (not "scrub missing").
@@ -2462,7 +2463,7 @@ done
 # Read out of the REAL script as a single space-delimited assignment; an extraction that
 # comes back empty is a FAILURE of the extraction, never a pass, because every
 # membership assert below would then be vacuous.
-dataset_components=$(sed -nE 's/^DATASET_COMPONENTS="([^"]*)".*/\1/p' "$GATE" | head -1)
+dataset_components=$(sed -nE '/^DATASET_COMPONENTS="([^"]*)".*/{s/^DATASET_COMPONENTS="([^"]*)".*/\1/p;q;}' "$GATE")
 if [ -n "$dataset_components" ]; then
   ok "1699-dataset-extract: extracted DATASET_COMPONENTS from the real script ($(printf '%s' "$dataset_components" | wc -w | tr -d ' ') entries)"
 else
@@ -3377,7 +3378,7 @@ for fn_ in run_legacy_heuristics run_flight_tests run_feature_iso run_feature_is
   # The comments deliberately NAME the forbidden constructs, so strip them first — an oracle
   # that reads its own rationale as a violation is the #3312 defect, and it already
   # false-FAILED once in this issue.
-  hits=$(grep -nE '(xargs[^|]*-r|readlink -f|stat -c|sed -i[^.]|date -d|grep -P|sort -V)' "$code_" | head -3)
+  hits=$(grep -m3 -nE '(xargs[^|]*-r|readlink -f|stat -c|sed -i[^.]|date -d|grep -P|sort -V)' "$code_")
   if [ -z "$hits" ]; then
     ok "1699-gnu-$fn_: no GNU-only construct"
   else
@@ -3751,7 +3752,7 @@ if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && comman
     elif cmp -s "$jq_out_" "$py_out_"; then
       ok "1699-r18-diff-$fn_: jq port and python original agree byte-for-byte over the real workspace metadata ($(grep -c . "$jq_out_") records)"
     else
-      bad "1699-r18-diff-$fn_: the jq PORT and the python ORIGINAL DISAGREE — one of the two lanes derives a different subject set depending on which parser the host has: $(diff "$py_out_" "$jq_out_" 2>/dev/null | head -4 | tr '\n' ' ')"
+      bad "1699-r18-diff-$fn_: the jq PORT and the python ORIGINAL DISAGREE — one of the two lanes derives a different subject set depending on which parser the host has: $(diff_hd_=$(diff "$py_out_" "$jq_out_" 2>/dev/null); head -4 <<<"$diff_hd_" | tr '\n' ' ')"
     fi
   done <<EOF_PARSER_DIFF_SPECS
 $PARSER_DIFF_SPEC_ROWS
@@ -3835,11 +3836,11 @@ else
   # as a MISS). Forbidding a bad spelling is guesswork about where the badness will appear;
   # requiring the derivation is a statement about what must be true.
   derived_ok_=1
-  grep -F 'contain an INNER cfg attribute' "$fl_body_" | grep -q '\$gated_n' || derived_ok_=0
+  cd_hits_=$(grep -F 'contain an INNER cfg attribute' "$fl_body_") && grep -q '\$gated_n' <<<"$cd_hits_" || derived_ok_=0
   if [ "$derived_ok_" -eq 1 ]; then
     ok "1699-r20-census-derived: the counting line interpolates its DERIVED variable (\$gated_n)"
   else
-    bad "1699-r20-census-derived: a census count is no longer interpolated from its derived variable — a literal there goes stale the moment a target is added or a feature joins default, silently: $(grep -nE 'EXECUTE NOWHERE|WHO RUNS THE REMAINING' "$fl_body_" | head -2 | tr '\n' ' ')"
+    bad "1699-r20-census-derived: a census count is no longer interpolated from its derived variable — a literal there goes stale the moment a target is added or a feature joins default, silently: $(grep -m2 -nE 'EXECUTE NOWHERE|WHO RUNS THE REMAINING' "$fl_body_" | tr '\n' ' ')"
   fi
 fi
 
@@ -4588,7 +4589,7 @@ PF_PY
     if grep -qF "$want_" "$pf_report_"; then
       ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
     else
-      bad "1699-r32-preflight-behaviour[${want_%%:*}]: expected '${want_#*: }' — got: $(grep -F "${want_%%:*}" "$pf_report_" | head -1)"
+      bad "1699-r32-preflight-behaviour[${want_%%:*}]: expected '${want_#*: }' — got: $(grep -m1 -F "${want_%%:*}" "$pf_report_")"
     fi
   done <<EOF_R32_CASES
 $R32_WANT_CASES
@@ -4729,8 +4730,8 @@ else
   fi
   # the comparison must happen BEFORE the loop needs it, and the gap must be reported
   ord_ok_=1
-  ln_res_=$(grep -nE 'lh_enabled=\$\(_resolved_package_features' "$lh_body_" | head -1 | cut -d: -f1)
-  ln_loop_=$(grep -nE 'read -r _mt_name' "$lh_body_" | head -1 | cut -d: -f1)
+  ln_res_=$(grep -m1 -nE 'lh_enabled=\$\(_resolved_package_features' "$lh_body_" | cut -d: -f1)
+  ln_loop_=$(grep -m1 -nE 'read -r _mt_name' "$lh_body_" | cut -d: -f1)
   [ -n "$ln_res_" ] && [ -n "$ln_loop_" ] && [ "$ln_res_" -lt "$ln_loop_" ] || ord_ok_=0
   if [ "$ord_ok_" -eq 1 ]; then
     ok "1699-r36-rf-order: the feature set is resolved (line $ln_res_) BEFORE the target loop that compares against it (line $ln_loop_)"
@@ -4761,9 +4762,9 @@ else
   # records and which already cost this file a false FAIL once (the round-14 GNU lint).
   lh40c_="$tmp/1699-r37-lh-code.txt"
   sed 's/[[:space:]]*#.*$//' "$lh40_" > "$lh40c_"
-  d_=$(grep -nE '_rf_off=""' "$lh40c_" | head -1 | cut -d: -f1)
-  o_=$(grep -nE 'observe_ids\+=' "$lh40c_" | head -1 | cut -d: -f1)
-  t_=$(grep -nE 'targets\+=\(--test' "$lh40c_" | head -1 | cut -d: -f1)
+  d_=$(grep -m1 -nE '_rf_off=""' "$lh40c_" | cut -d: -f1)
+  o_=$(grep -m1 -nE 'observe_ids\+=' "$lh40c_" | cut -d: -f1)
+  t_=$(grep -m1 -nE 'targets\+=\(--test' "$lh40c_" | cut -d: -f1)
   if [ -n "$d_" ] && [ -n "$o_" ] && [ -n "$t_" ] && [ "$d_" -lt "$o_" ] && [ "$d_" -lt "$t_" ]; then
     ok "1699-r37-decide-first: the required-features decision (line $d_) precedes observe_ids ($o_) and --test ($t_)"
   else
@@ -4843,11 +4844,11 @@ awk '/^run_legacy_heuristics\(\) \{/, /^\}/' "$GATE" | sed 's/[[:space:]]*#.*$//
 if [ ! -s "$lh42_" ]; then
   bad "1699-r43-order-scope: could not extract run_legacy_heuristics — these asserts would pass vacuously"
 else
-  m_=$(grep -nE '_mt_hit" -eq 1' "$lh42_" | head -1 | cut -d: -f1)
-  f_=$(grep -nE '_rf_off=""' "$lh42_" | head -1 | cut -d: -f1)
+  m_=$(grep -m1 -nE '_mt_hit" -eq 1' "$lh42_" | cut -d: -f1)
+  f_=$(grep -m1 -nE '_rf_off=""' "$lh42_" | cut -d: -f1)
   r_=$(grep -nE 'rf_unmet="' "$lh42_" | tail -1 | cut -d: -f1)
-  o_=$(grep -nE 'observe_ids\+=' "$lh42_" | head -1 | cut -d: -f1)
-  t_=$(grep -nE 'targets\+=\(--test' "$lh42_" | head -1 | cut -d: -f1)
+  o_=$(grep -m1 -nE 'observe_ids\+=' "$lh42_" | cut -d: -f1)
+  t_=$(grep -m1 -nE 'targets\+=\(--test' "$lh42_" | cut -d: -f1)
   if [ -n "$m_" ] && [ -n "$f_" ] && [ -n "$o_" ] && [ -n "$t_" ] \
      && [ "$m_" -lt "$f_" ] && [ "$f_" -lt "$o_" ] && [ "$f_" -lt "$t_" ]; then
     ok "1699-r43-order: membership ($m_) precedes the required-features filter ($f_), which precedes every record (observe_ids $o_, --test $t_)"
@@ -5062,9 +5063,9 @@ fi
 # legacy site at all (measured: issue_2827_partition_access_bytes), and a census diluted with
 # irrelevant entries is a census nobody reads. Same decide-then-record ordering as observe_ids.
 lh_code=$(printf '%s\n' "$lh_fn" | sed 's/^[[:space:]]*#.*$//')
-lh_gapline=$(printf '%s\n' "$lh_code" | grep -n 'lh_gap_detail+=' | head -1 | cut -d: -f1)
-lh_obsline=$(printf '%s\n' "$lh_code" | grep -n 'observe_ids+=' | head -1 | cut -d: -f1)
-lh_memline=$(printf '%s\n' "$lh_code" | grep -n '_mt_hit" -eq 1' | head -1 | cut -d: -f1)
+lh_gapline=$(grep -m1 -n 'lh_gap_detail+=' <<<"$lh_code" | cut -d: -f1)
+lh_obsline=$(grep -m1 -n 'observe_ids+=' <<<"$lh_code" | cut -d: -f1)
+lh_memline=$(grep -m1 -n '_mt_hit" -eq 1' <<<"$lh_code" | cut -d: -f1)
 if [ -n "$lh_gapline" ] && [ -n "$lh_memline" ] && [ "$lh_memline" -lt "$lh_gapline" ]; then
   ok "1699-cfggate-order: membership (line $lh_memline) is decided BEFORE a gap is recorded (line $lh_gapline)"
 else
@@ -5408,8 +5409,8 @@ fi
 #        leave a note that does NOT claim the budgets ran. Asserted on the component's
 #        source: the pre-write precedes STEP 1, and the only state that says RAN is
 #        written by the affirmation.
-nll_prewrite=$(printf '%s\n' "$nll_component" | grep -n '_node_leak_lane_note NOT-REACHED' | cut -d: -f1 | head -1)
-nll_step1=$(printf '%s\n' "$nll_component" | grep -n 'STEP 1 — install' | cut -d: -f1 | head -1)
+nll_prewrite=$(grep -m1 -n '_node_leak_lane_note NOT-REACHED' <<<"$nll_component" | cut -d: -f1)
+nll_step1=$(grep -m1 -n 'STEP 1 — install' <<<"$nll_component" | cut -d: -f1)
 nll_ran_writers=$(printf '%s\n' "$nll_component" | grep -c '_node_leak_lane_note RUN' || true)
 if [ -n "$nll_prewrite" ] && [ -n "$nll_step1" ] && [ "$nll_prewrite" -lt "$nll_step1" ] \
    && [ "$nll_ran_writers" -eq 0 ]; then
@@ -5559,8 +5560,9 @@ while IFS= read -r _envline; do
   nll_order_seen=$((nll_order_seen + 1))
   # position of the first NAME=VALUE (or the fixture_env array, which IS an assignment in
   # full-gate mode) vs the position of the option-bearing unset array
-  _first_assign=$(printf '%s\n' "$_envline" | tr ' ' '\n' | grep -nE '^[A-Za-z_][A-Za-z0-9_]*=|fixture_env\[@\]' | head -1 | cut -d: -f1)
-  _opt_pos=$(printf '%s\n' "$_envline" | tr ' ' '\n' | grep -nE '^-u$|^-i$|leak_strict_env\[@\]' | head -1 | cut -d: -f1)
+  _envsplit=$(tr ' ' '\n' <<<"$_envline")
+  _first_assign=$(grep -m1 -nE '^[A-Za-z_][A-Za-z0-9_]*=|fixture_env\[@\]' <<<"$_envsplit" | cut -d: -f1)
+  _opt_pos=$(grep -m1 -nE '^-u$|^-i$|leak_strict_env\[@\]' <<<"$_envsplit" | cut -d: -f1)
   if [ -n "$_first_assign" ] && [ -n "$_opt_pos" ] && [ "$_opt_pos" -gt "$_first_assign" ]; then
     nll_order_ok=0
     echo "  operand-order hazard: an option/unset-array at position $_opt_pos follows an assignment at $_first_assign in: $_envline"
@@ -5929,7 +5931,7 @@ if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/
   # #3625: the aggregate census line. It must be present, must declare its own
   # NON-EXHAUSTIVENESS, and must report every non-affirmed class as `N RECOGNISED` rather
   # than a bare N — a bare zero in a gate log reads as a verified all-clear.
-  fm_census=$(grep -E '^census: ' "$fm_sum" | head -1)
+  fm_census=$(grep -m1 -E '^census: ' "$fm_sum")
   # The line carries STATE buckets (which name no status) and STATUS-DERIVED figures. The
   # `VACUOUS (RECOGNISED)` heading this used to require is GONE on purpose (#3625, roborev
   # job 371 + sweep): it was a STATUS word counted from the ZERO STATE, and a shipping mode
@@ -5949,7 +5951,7 @@ if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/
   else
     ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   fi
-  if grep -E "$FM_ROW_RE" "$fm_sum" | grep -q 'RESULT:'; then
+  if fm_rows_=$(grep -E "$FM_ROW_RE" "$fm_sum") && grep -q 'RESULT:' <<<"$fm_rows_"; then
     bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
   else
     ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"
