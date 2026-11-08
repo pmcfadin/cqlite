@@ -206,7 +206,8 @@ make_corpus "$TMP/corpus-record"
 boundary_record_session "$TMP/rec-healthy" "$TMP/corpus-record"
 healthy_out=$(python3 "$REPORT" --dir "$TMP/rec-healthy" --corpus "$TMP/corpus-record" 2>&1)
 healthy_rc=$?
-healthy_ratio=$(grep -oE 'ratio bare/flight = [0-9.]+x' <<<"$healthy_out" | head -1)
+_spw50=$(grep -oE 'ratio bare/flight = [0-9.]+x' <<<"$healthy_out")
+healthy_ratio=$(head -1 <<<"$_spw50")
 if [ "$healthy_rc" -eq 0 ] \
    && [ -n "$healthy_ratio" ] \
    && [ -e "$TMP/rec-healthy/results.json" ] \
@@ -296,7 +297,8 @@ fi
 prefix_out=$(python3 "$prefix_report_dir/ws0_report.py" --dir "$TMP/rec-missing" \
   --corpus "$TMP/corpus-record" 2>&1)
 prefix_rc=$?
-prefix_ratio=$(grep -oE 'ratio bare/flight = [0-9.]+x' <<<"$prefix_out" | head -1)
+_spw49=$(grep -oE 'ratio bare/flight = [0-9.]+x' <<<"$prefix_out")
+prefix_ratio=$(head -1 <<<"$_spw49")
 if [ "$prefix_rc" -eq 0 ] \
    && [ -n "$prefix_ratio" ] \
    && [ -e "$TMP/rec-missing/results.json" ] \
