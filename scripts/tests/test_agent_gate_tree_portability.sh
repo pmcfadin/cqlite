@@ -409,12 +409,13 @@ lk="$tmp/lookup.report"
 } > "$lk"
 r_lk=$(mkrepo lookup-repo)
 lookup_field() { # lookup_field <escaped-path> <tag|value>
-  local lf_raw
+  local lf_raw lf_rc
   lf_raw=$( cd "$r_lk" && env AGENT_GATE_SUMMARY_FILE="$tmp/lookup-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=report-lookup \
       AGENT_GATE_TREE_SELFTEST_LOOKUP="$lk|$1" \
-      bash "$r_lk/scripts/agent-gate.sh" 2>/dev/null )
-  sed -n "/^tree-selftest: report-$2=/{s/^tree-selftest: report-$2=//p;q;}" <<<"$lf_raw"
+      bash "$r_lk/scripts/agent-gate.sh" 2>/dev/null ); lf_rc=$?
+  sed -n "/^tree-selftest: report-$2=/{s/^tree-selftest: report-$2=//p;q;}" <<<"$lf_raw" || return $?
+  return "$lf_rc"      # the gate's status, as the old pipeline reported it under pipefail
 }
 if [ "$(lookup_field 'weird\tdir/Cargo.lock' tag)" = T ] \
    && [ "$(lookup_field 'weird\tdir/Cargo.lock' value)" = 1111111111111111111111111111111111111111 ]; then

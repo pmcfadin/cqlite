@@ -133,7 +133,7 @@ runB() { ( cd "$B" && CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "
 runA_gh() { ( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 runB_gh() { ( cd "$B" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 
-ref_sha()      { local rs; rs=$(g -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}'); head -1 <<<"$rs"; }
+ref_sha()      { local rs rc; rs=$(g -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}'); rc=$?; head -1 <<<"$rs"; return "$rc"; }
 ref_count()    { g -C "$A" ls-remote origin "refs/claims/issue-$1" | wc -l | tr -d ' '; }
 branch_exists() { [ -n "$(g -C "$A" ls-remote --heads origin "$1" | awk '{print $1}')" ]; }
 
