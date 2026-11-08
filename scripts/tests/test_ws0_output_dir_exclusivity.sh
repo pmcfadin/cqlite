@@ -330,8 +330,9 @@ fi
 # creates nothing. Asserted by LINE ORDER against the boundary's own exit, because the
 # behavioural half (an absent --out is not created) is already driven above and this is the
 # property that keeps it true.
-f3_boundary=$(grep -nF 'ARGUMENTS OK (--validate-args-only)' "$DRIVER" | head -1 | cut -d: -f1)
-f3_create=$(grep -nF 'OUT_DIR="$(create_out_dir' "$DRIVER" | head -1 | cut -d: -f1)
+_spw64=$(grep -nF 'ARGUMENTS OK (--validate-args-only)' "$DRIVER")
+f3_boundary=$(head -1 <<<"$_spw64" | cut -d: -f1)
+f3_create=$(grep -m 1 -nF 'OUT_DIR="$(create_out_dir' "$DRIVER" | cut -d: -f1)
 if [ -n "$f3_boundary" ] && [ -n "$f3_create" ] && [ "$f3_boundary" -lt "$f3_create" ]; then
   pass "round7 F3: create_out_dir (line $f3_create) is BELOW the --validate-args-only boundary (line $f3_boundary) — the hermetic mode still creates nothing"
 else
@@ -339,7 +340,8 @@ else
 fi
 # ...and the REFUSAL stays ABOVE it, which is what makes the used-dir case observable hermetically
 # at all. The two halves on opposite sides of the boundary is the design, so both are pinned.
-f3_refusal=$(grep -nF 'require_unused_out_dir "${OUT_DIR:-}"' "$DRIVER" | head -1 | cut -d: -f1)
+_spw63=$(grep -nF 'require_unused_out_dir "${OUT_DIR:-}"' "$DRIVER")
+f3_refusal=$(head -1 <<<"$_spw63" | cut -d: -f1)
 if [ -n "$f3_refusal" ] && [ -n "$f3_boundary" ] && [ "$f3_refusal" -lt "$f3_boundary" ]; then
   pass "round7 F3: require_unused_out_dir (line $f3_refusal) is ABOVE the boundary (line $f3_boundary) — which is why the used-dir refusal is hermetically observable"
 else
