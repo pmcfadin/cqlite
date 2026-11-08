@@ -55,7 +55,7 @@ gg clone -q "$ORIGIN" "$B" 2>/dev/null
 runA() { ( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 runB() { ( cd "$B" && CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 
-ref_sha() { gg -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}' | head -1; }
+ref_sha() { local rs; rs=$(gg -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}'); head -1 <<<"$rs"; }
 
 # ===========================================================================
 echo "TEST 1: A claims, B claims same issue -> exactly one HELD, other LOST(2)"
