@@ -22529,6 +22529,10 @@ run_tooling_tests() {
   #                      -> drives the REAL lane root /data/lanes (shared lane-lock records)
   #   S (tail)         test_gate_concurrency_cap.sh, test_issue_gate_hook.sh
   #                      -> measure gate concurrency-cap / slot waits and timeout budgets: run alone after everything else
+  #   S (tail)         test_agent_gate_parity_report.sh
+  #                      -> writes the REAL repo tree (test-data/.tmp-parity-manifest-mutated.*); nested-gate tree-integrity
+  #                         and test_agent_gate_nested_isolation.sh's test-data fixture-set check observe that tree (found
+  #                         by the first parallel run: nested-isolation FAILed while parity-report's fixture existed)
   # H = parallel pool, launched first (long, but hermetic: private mktemp fixtures/slots dirs).
   # Everything else was read (or run in parallel and repeated) and is hermetic: it builds its own
   # mktemp fixtures, and in the parallel set additionally gets a private TMPDIR.
@@ -23351,7 +23355,7 @@ run_tooling_tests() {
 
   # parity-report component self-test (#1338): no python3 needed, always runs. A
   # failure FAILs the component, mirroring the keyspace-scoping guard semantics.
-  _tt_add P 'parity-report self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh"'
+  _tt_add S 'parity-report self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh"' 'writes the REAL repo tree (test-data/.tmp-parity-manifest-mutated.*), which nested-gate tree-integrity and the test-data fixture-set assertions of other suites observe: alone, last'
 
   # oom-audit component self-test (#2012): drives nested `agent-gate.sh --only
   # oom-audit` to assert the SKIP (xtask absent) / FAIL (planted violation) /
