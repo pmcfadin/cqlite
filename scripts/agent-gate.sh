@@ -22555,6 +22555,9 @@ run_tooling_tests() {
   #                      -> drives the REAL lane root /data/lanes (shared lane-lock records)
   #   S (tail)         test_gate_concurrency_cap.sh, test_issue_gate_hook.sh
   #                      -> measure gate concurrency-cap / slot waits and timeout budgets: run alone after everything else
+  #   S (tail)         test_drive_issue_state.sh
+  #                      -> pid-liveness/ownership timing (`sleep &`, kill/wait, stamp reads); FAILED once under full pool load
+  #                         (parallel run 5, "prior-ts duplicate ... UNSTAMPED"), passes alone: run alone, last
   #   S (tail)         test_agent_gate_parity_report.sh
   #                      -> writes the REAL repo tree (test-data/.tmp-parity-manifest-mutated.*); nested-gate tree-integrity
   #                         and test_agent_gate_nested_isolation.sh's test-data fixture-set check observe that tree (found
@@ -23972,7 +23975,7 @@ run_tooling_tests() {
     _tt_add H 'final tooling chain: test_agent_gate_disk_admission.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh"'
     _tt_add P 'final tooling chain: test_perf_capability.sh' 'bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh"'
     _tt_add P 'final tooling chain: test_claim_heartbeat.sh' 'bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh"'
-    _tt_add P 'final tooling chain: test_drive_issue_state.sh' 'bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh"'
+    _tt_add S 'final tooling chain: test_drive_issue_state.sh' 'bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh"' 'pid-liveness/ownership timing (sleep & kill/wait stamps): FAILED once under full pool load (parallel run 5: prior-ts duplicate read UNSTAMPED), passed alone 3/3 and 12x concurrently: alone, last'
     _tt_add P 'final tooling chain: claim-resume.test.sh' 'bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh"'
     _tt_add P 'final tooling chain: test_premerge_assert.sh' 'bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh"'
     _tt_add P 'final tooling chain: test_premerge_review_binding.sh' 'bash "$REPO_ROOT/scripts/tests/test_premerge_review_binding.sh"'
