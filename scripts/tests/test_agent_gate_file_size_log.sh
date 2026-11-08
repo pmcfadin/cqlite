@@ -191,7 +191,7 @@ run_only_file_size() {
 # fails closed with a readable diagnostic.
 logdir_of() {
   local d
-  d=$(sed -n 's/^logs:[[:space:]]*//p' "$1" 2>/dev/null | head -1)
+  d=$(sed -n '/^logs:[[:space:]]*/{s/^logs:[[:space:]]*//p;q;}' "$1" 2>/dev/null)
   case "$d" in
     /*) if [ -d "$d" ]; then printf '%s\n' "$d"; return 0; fi ;;
   esac
@@ -624,7 +624,7 @@ else
     ok "case4i: the fixture run really stopped at the #2078 corpus preflight (window under test)"
   else
     bad "case4i: the run did not reach the corpus preflight — the early-exit path is UNMEASURED"
-    grep -E '^(preflight|component-set|RESULT):' "$pf_sum" 2>/dev/null | head -3
+    { _spw29=$(grep -E '^(preflight|component-set|RESULT):' "$pf_sum" 2>/dev/null) && head -3 <<<"$_spw29"; }
   fi
   # The annotation is REQUIRED, not incidental (roborev job 76). #3453's contract is that
   # EVERY component line names the feature matrix it ran; a funnel-appended row that omitted
@@ -660,7 +660,7 @@ else
   # contradicting its own table, which is the invariant
   # scripts/tests/test_agent_gate_tree_provenance.sh asserts for the boundary block.
   pf_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|OPT-OUT) \([0-9]+s\)' "$pf_sum" 2>/dev/null | tr -d ' ')
-  pf_said=$(sed -n 's/^components-recorded: \([0-9]*\) .*/\1/p' "$pf_sum" | head -1)
+  pf_said=$(sed -n '/^components-recorded: \([0-9]*\) .*/{s/^components-recorded: \([0-9]*\) .*/\1/p;q;}' "$pf_sum")
   if [ -n "$pf_said" ] && [ "$pf_said" = "${pf_rows:-x}" ]; then
     ok "case4i (#3402): components-recorded ($pf_said) equals the rows printed — no contradicted count"
   else
