@@ -22291,7 +22291,7 @@ run_features_load_bearing() {
 # ---------------------------------------------------------------------------------------------
 _TT_N=0
 _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=()
-_TT_FAILED_NAMES=""; _TT_REPORTED=0
+_TT_FAILED_NAMES=""; _TT_REPORTED=0; _TT_ACTIVE=""; _TT_LANES=""; _TT_WAS_M=0
 
 _tt_reset() { _TT_N=0; _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=(); _TT_FAILED_NAMES=""; _TT_REPORTED=0; }
 
@@ -22407,6 +22407,37 @@ _tt_lane() {
   return 0
 }
 
+# Process groups (roborev job 140). Every pool/lane worker is launched with job control on
+# (`set -m`, which gives each background job its OWN process group; the pgid is the worker's pid), so
+# when a worker disappears without a status the whole group - the suite and everything it started -
+# can be terminated, instead of leaving an orphan running while its slot and TMPDIR are freed.
+# `set -m` is restored right after each launch so the rest of the gate is unaffected.
+_tt_bg_begin() { _TT_WAS_M=0; case $- in *m*) _TT_WAS_M=1 ;; esac; set -m; }
+_tt_bg_end()   { [ "$_TT_WAS_M" = 1 ] || set +m; }
+
+# _tt_kill_group <pgid>: TERM the group, a short grace period, then KILL; returns when it is gone.
+_tt_kill_group() {
+  local g=$1 n=0
+  kill -TERM -- "-$g" 2>/dev/null || return 0
+  while [ "$n" -lt 10 ]; do
+    kill -0 -- "-$g" 2>/dev/null || return 0
+    sleep 0.2; n=$((n + 1))
+  done
+  kill -KILL -- "-$g" 2>/dev/null
+  n=0
+  while [ "$n" -lt 10 ] && kill -0 -- "-$g" 2>/dev/null; do sleep 0.2; n=$((n + 1)); done
+  return 0
+}
+
+# Workers are in their own process groups, so a terminal ^C / TERM to the gate no longer reaches them:
+# terminate every live group, then re-raise the signal with the default action.
+_tt_on_signal() {
+  local sig=$1 ent
+  for ent in $_TT_ACTIVE $_TT_LANES; do _tt_kill_group "${ent#*:}"; done
+  trap - INT TERM HUP
+  kill -s "$sig" $$
+}
+
 # _tt_reap <log dir>: reap finished pool workers in $_TT_ACTIVE (see the comment at its caller);
 # leaves the still-running ones in $_TT_ACTIVE and their count in $_TT_RUNNING.
 _tt_reap() {
@@ -22421,6 +22452,7 @@ _tt_reap() {
     wait "$pid" 2>/dev/null; st=$?
     id=$(printf '%03d' "$idx")
     if [ ! -r "$d/$id.rc" ]; then
+      _tt_kill_group "$pid"   # nothing of the suite may outlive its slot or its TMPDIR
       [ "$st" -ne 0 ] || st=125
       echo "no status was published by the worker (wait status $st)" >>"$d/$id.log"
       printf '%s ?\n' "$st" >"$d/$id.rc" 2>/dev/null || true
@@ -22432,7 +22464,7 @@ _tt_reap() {
 # _tt_run_all <component log> <scratch dir>: execute every registered suite. Returns 0 always;
 # the caller reads _TT_FAILED_NAMES (non-empty == the component FAILs).
 _tt_run_all() {
-  local log=$1 d=$2 jobs i pids pid order="" pcount=0 tmpbase lanes="" lpids="" ln want
+  local log=$1 d=$2 jobs i pids pid order="" pcount=0 tmpbase lanes="" ln ent want
   jobs=$(_tt_jobs)
   mkdir -p "$d" || { _TT_FAILED_NAMES="cannot create $d"; return 0; }
 
@@ -22469,24 +22501,29 @@ _tt_run_all() {
   echo ">>> [tooling-tests] running $pcount parallel suites ($jobs at a time) alongside serial lane(s):${lanes:- none}; then the serial tail"
   tmpbase=$(mktemp -d "${TMPDIR:-/tmp}/tt-par.XXXXXX") || { _TT_FAILED_NAMES="cannot create a scratch TMPDIR for the parallel set"; return 0; }
   # Each lane is one background chain (its suites never overlap each other).
+  _TT_ACTIVE=""; _TT_LANES=""
+  trap '_tt_on_signal INT' INT; trap '_tt_on_signal TERM' TERM; trap '_tt_on_signal HUP' HUP
   for ln in $lanes; do
+    _tt_bg_begin
     _tt_lane "$ln" "$d" "$tmpbase" &
-    lpids="$lpids $!"
+    _TT_LANES="$_TT_LANES $ln:$!"
+    _tt_bg_end
   done
   # Liveness comes from bash's OWN job table (`jobs -rp`), which only tracks this shell's children
   # and so is immune to pid reuse (a signal-0 probe of a bare pid is not). A worker that left the
   # table is reaped with `wait <pid>` to get its real exit status; if it published no readable
   # status file (killed, or the status write failed - ENOSPC), _tt_reap synthesizes a failure so
   # _tt_report names it. The atomic .rc write in _tt_exec stays: it is the normal result channel.
-  _TT_ACTIVE=""   # "<index>:<pid>" of pool workers launched and not yet reaped
   for i in $order; do
     while :; do
       _tt_reap "$d"
       [ "$_TT_RUNNING" -lt "$jobs" ] && break
       sleep 0.2
     done
+    _tt_bg_begin
     _tt_exec "$i" "$d" "$tmpbase" &
     _TT_ACTIVE="$_TT_ACTIVE $i:$!"
+    _tt_bg_end
   done
   # Drain the pool (waits ONLY for the workers started here: a bare `wait` would also wait for the
   # gate's heartbeat), then the lanes.
@@ -22495,7 +22532,11 @@ _tt_run_all() {
     [ "$_TT_RUNNING" -eq 0 ] && break
     sleep 0.2
   done
-  for pid in $lpids; do wait "$pid" 2>/dev/null; done
+  for ent in $_TT_LANES; do
+    wait "${ent#*:}" 2>/dev/null || _tt_kill_group "${ent#*:}"   # a lane worker that died: reap its group
+  done
+  _TT_LANES=""
+  trap - INT TERM HUP
   rm -rf "$tmpbase"
 
   # Deterministic replay of the pool + lanes (registration order; notes in place).
@@ -24031,7 +24072,9 @@ run_tooling_tests() {
   elif [ "$_tt_skip_final" = 1 ]; then
     # No python3: every suite above passed, the python3-dependent tail could not run.
     status=SKIP
-    record_result "$name" "$status" 0
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   else
     status=PASS

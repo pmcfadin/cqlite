@@ -1187,39 +1187,62 @@ fi
 # declared exceptions, must also print RECORDED_STATUS, and run_tooling_tests must (its epilogue).
 p_fin=$(grep -c 'RECORDED_STATUS (\$((end - start))s)' "$GATE")
 # p3_missing <file>: names of functions that call `record_result "$name"` but never print the
-# finalized status. The scanner is a line scanner, NOT a shell parser, but it does not let a
-# function end early: it skips heredoc bodies (<<[-]'WORD' ... WORD) and tracks unindented `{`
-# groups, so a `}` inside a heredoc or a top-level `{ ...; }` group cannot truncate a body and let
-# a runner escape (roborev job 137). A function ends only at the unindented `}` that closes the
-# `name() {` which opened it.
+# finalized status, plus (as `fn@line`) every record_result that is NOT followed by a status echo
+# before the next `return` or the function's end. Exempt: `_ds_lane_fail` (its caller prints), and -
+# except in the STRICT runners (run_tooling_tests) - a SKIP/FAIL path, which announces itself with its own
+# `>>> [$name] SKIP|FAIL ...` line within the 24 lines above (the established pattern). The scanner is a line
+# scanner, NOT a shell parser, but it does not let a function end early: it skips heredoc bodies
+# (<<[-]'WORD' ... WORD) and tracks unindented `{` groups, so a `}` inside a heredoc or a top-level
+# `{ ...; }` group cannot truncate a body and let a runner escape (roborev jobs 137, 140). A function
+# ends only at the unindented `}` that closes the `name() {` which opened it.
 p3_missing() {
   python3 - "$1" <<'PYX'
 import re, sys
 lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
 HD = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
-cur = None; depth = 0; pend = []; missing = []
+STRICT = {'run_tooling_tests'}
+ECHO = 'RECORDED_STATUS ($((end - start))s)'
+cur = None; depth = 0; pend = []; missing = []; body = []
+def check(name, body):
+    text = '\n'.join(b for _, b in body)
+    if name == '_ds_lane_fail' or 'record_result "$name"' not in text:
+        return
+    if ECHO not in text:
+        missing.append(name)
+    for k, (ln, b) in enumerate(body):
+        if 'record_result "$name"' not in b or b.lstrip().startswith('#'):
+            continue
+        followed = False
+        for _, c in body[k + 1:]:
+            if ECHO in c:
+                followed = True; break
+            if re.search(r'\breturn\b', c):
+                break
+        if followed:
+            continue
+        if name not in STRICT and any(re.search(r'>>> \[\$name\] (SKIP|FAIL)', x) for _, x in body[max(0, k - 24):k]):
+            continue
+        missing.append('%s@%d' % (name, ln))
 for i, l in enumerate(lines):
     if pend:                      # inside a heredoc body: only its terminator matters
         strip, word = pend[0]
         if (l.lstrip('\t') if strip else l) == word:
             pend.pop(0)
+        if cur is not None:
+            body.append((i + 1, l))
         continue
     m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\(\) \{', l)
     if cur is None and m:
-        cur = [m.group(1), i]; depth = 0
-    elif cur is not None:
-        if re.match(r'^\{(\s|$)', l):
+        cur = m.group(1); depth = 0; body = []
+    if cur is not None:
+        body.append((i + 1, l))
+        if m is None and re.match(r'^\{(\s|$)', l):
             depth += 1
-        elif re.match(r'^\}', l):
+        elif m is None and re.match(r'^\}', l):
             if depth > 0:
                 depth -= 1
             else:
-                body = '\n'.join(lines[cur[1]:i + 1])
-                # _ds_lane_fail is a helper that records a lane failure; its caller prints the status.
-                if 'record_result "$name"' in body and cur[0] != '_ds_lane_fail' \
-                   and 'RECORDED_STATUS ($((end - start))s)' not in body:
-                    missing.append(cur[0])
-                cur = None
+                check(cur, body); cur = None
     for hm in HD.finditer(l):
         if '<<<' not in l[max(0, hm.start() - 1):hm.start() + 3]:
             pend.append((hm.group(1) == '-', hm.group(3)))
@@ -1255,12 +1278,39 @@ $1
 }
 PLANT
 }
+cat >"$p3_dir/early.sh" <<'PLANT'
+run_early() {
+  local name=early
+  if [ -z "${X:-}" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (nothing to do)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  record_result "$name" PASS 1
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+}
+PLANT
+sed 's/^run_early/run_tooling_tests/' "$p3_dir/early.sh" >"$p3_dir/early_strict.sh"
+p3_bad=""
 p3_body '' >"$p3_dir/bad.sh"
 p3_body '  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"' >"$p3_dir/good.sh"
 p3_bad=$(p3_missing "$p3_dir/bad.sh") || p3_bad="ERR"
 p3_good=$(p3_missing "$p3_dir/good.sh") || p3_good="ERR"
+p3_early=$(p3_missing "$p3_dir/early_strict.sh") || p3_early="ERR"
+p3_early_ok=$(p3_missing "$p3_dir/early.sh") || p3_early_ok="ERR"
 rm -rf "$p3_dir"
-if [ "$p3_bad" = "run_planted" ]; then
+if [ "$p3_early" = "run_tooling_tests@6" ]; then
+  ok "P3-mut: in a STRICT runner, a record_result followed by an early return with no status echo is caught"
+else
+  bad "P3-mut: the scanner missed a record_result + early return without a status echo (got '${p3_early}')"
+fi
+if [ -z "$p3_early_ok" ]; then
+  ok "P3-mut (control): the same early return on a declared SKIP path is allowed in a non-strict runner"
+else
+  bad "P3-mut (control): the SKIP-path pattern was flagged in a non-strict runner ('${p3_early_ok}')"
+fi
+if [ "${p3_bad%% *}" = "run_planted" ]; then
   ok "P3-mut: a runner with no status echo, hidden behind a heredoc '}' and a { } group, is caught"
 else
   bad "P3-mut: the scanner missed a runner without a status echo (got '${p3_bad}'), so a heredoc/group '}' can hide a runner from P3"
