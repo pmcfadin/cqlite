@@ -87,9 +87,15 @@ cd "$LANE" || { echo "cannot enter $LANE"; exit 1; }
 COMMIT_N=0
 # probe_liveness: print the liveness= value of the lane lock for $ISSUE.
 # Capture-then-here-string: no external-writer | early-exit-reader pipe (#4451).
+# A probe that FAILS (exit 1 = infra error per lane-lock.sh's EXIT CODES; 0 is every
+# real verdict) prints NO token and returns its status, so a caller comparing against
+# ALIVE/DEAD-* fails closed instead of parsing whatever an erroring probe printed
+# (roborev job 126).
 probe_liveness() {
-  local pl_raw
-  pl_raw=$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n')
+  local pl_raw pl_rc=0
+  pl_raw=$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null) || pl_rc=$?
+  [ "$pl_rc" -eq 0 ] || return "$pl_rc"
+  pl_raw=${pl_raw// /$'\n'}
   sed -n '/^liveness=/{s/^liveness=//p;q;}' <<<"$pl_raw"
 }
 
