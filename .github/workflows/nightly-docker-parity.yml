@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Nightly Docker Parity (nightly_docker tier)"
 
 # The single dedicated lane that implements the `nightly_docker` parity tier
@@ -144,7 +145,7 @@ jobs:
   # BTI sstabledump leg runs against.
   bti-bloom:
     name: BTI + Bloom parity (umbrella-unique legs)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
@@ -284,7 +285,7 @@ jobs:
     name: Nightly Docker parity aggregate (citable pass)
     needs: [live-readback, compaction, bti-bloom]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:

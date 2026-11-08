@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: cqlite-flight image
 
 # Build and publish the cqlite-flight Arrow Flight (gRPC) server container to
@@ -80,7 +81,7 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
@@ -154,7 +155,7 @@ jobs:
   # `version`): just that one custom tag, unchanged from before.
   merge:
     name: Publish multi-arch image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     # The build job carries an `if: !cancelled() && (preflight success|skipped)`
     # guard (#2652). On the workflow_dispatch path preflight is *skipped*; once an
@@ -342,7 +343,7 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:

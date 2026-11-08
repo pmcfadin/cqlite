@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Core tests CI
 
 # REGISTERED GATING TIER (issue #4418, part of #4407; .github/ci-gating-tiers.yml).
@@ -62,7 +63,7 @@ jobs:
   # event, runs it (fail-closed). No label is needed.
   classify:
     name: Classify Core tier scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run_tier: ${{ steps.scope.outputs.run_tier }}
@@ -117,7 +118,7 @@ jobs:
     needs: classify
     if: needs.classify.outputs.run_tier == 'true'
     timeout-minutes: 30
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -255,7 +256,7 @@ jobs:
     needs: classify
     if: needs.classify.outputs.run_tier == 'true'
     timeout-minutes: 45
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -425,7 +426,7 @@ jobs:
 
   core_integration_partitions:
     name: Core integration nextest partition ${{ matrix.partition }}/3
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - classify
       - core_integration_archive
@@ -566,7 +567,7 @@ jobs:
     needs: classify
     if: needs.classify.outputs.run_tier == 'true'
     timeout-minutes: 45
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -753,7 +754,7 @@ jobs:
     name: Core tier gate
     needs: [classify, core_lib_doc_tests, core_integration_archive, core_integration_partitions, workspace_unit_tests]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report the Core tier result

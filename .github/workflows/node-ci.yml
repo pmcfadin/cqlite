@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Node.js CI
 
 on:
@@ -49,7 +50,7 @@ env:
 jobs:
   smoke:
     name: PR smoke (Ubuntu)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -144,7 +145,7 @@ jobs:
         github.event_name != 'pull_request' ||
         contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: smoke
     timeout-minutes: 20
 
@@ -237,9 +238,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
           - os: macos-15-intel
             target: x86_64-apple-darwin
@@ -350,7 +351,7 @@ jobs:
           # Native test platforms only
           # Note: x86_64-apple-darwin is build-only (cross-compiled on ARM64, can't test)
           # Note: aarch64-unknown-linux-gnu is build-only (cross-compiled, can't test)
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
@@ -481,7 +482,7 @@ jobs:
 
   quality-gate:
     name: Node.js CI Quality Gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [smoke, smoke-floor, build, test]
     if: always()
     env:

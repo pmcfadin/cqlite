@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Parity Regen Matrix (Nightly Docker, Epic #2636)"
 
 # Consolidated Docker-regenerating nightly enforcement for the three
@@ -115,7 +116,7 @@ concurrency:
 jobs:
   parity:
     name: "Parity regen (${{ matrix.leg }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false

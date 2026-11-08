@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Coverage Regression Issue Automation"
 
 # Signal routing only (issue #2659, epic #2636). The read-path coverage gate
@@ -35,7 +36,7 @@ concurrency:
 
 jobs:
   coverage-regression-issue:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Lightweight gh-only routing job; matches peer lightweight workflow jobs.
     timeout-minutes: 10
     # Coarse pre-filter over trusted GitHub-computed fields (event name / conclusion /

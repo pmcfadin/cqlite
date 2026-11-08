@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Coverage Gate (read-path, ≥77%)"
 
 on:
@@ -44,7 +45,7 @@ jobs:
     # comment above) — job-level `name:` is static YAML and cannot read env, so
     # keep this literal in sync with `COVERAGE_THRESHOLD` by hand.
     name: Coverage Gate ≥77% (Phase 2 Enforcement, read-path scope)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     strategy:
@@ -472,7 +473,7 @@ jobs:
   # Quality gate integration job
   coverage-quality-gate:
     name: Coverage Quality Gate Integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [coverage-gate]
     if: always()
 
@@ -507,7 +508,7 @@ jobs:
   # Store coverage results for coordination
   store-coverage-results:
     name: Store Coverage Results
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [coverage-quality-gate]
     if: always()
 

@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Cassandra sstableloader Validation"
 
 # INGEST TIERING (issue #1368):
@@ -64,7 +65,7 @@ concurrency:
 jobs:
   sstableloader-validation:
     name: sstableloader Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     services:

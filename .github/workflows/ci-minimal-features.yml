@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Minimal Features CI
 
 on:
@@ -32,7 +33,7 @@ env:
 jobs:
   minimal_compression_build:
     name: Minimal Compression Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: cqlite-core
@@ -55,7 +56,7 @@ jobs:
 
   all_compression_test:
     name: All Compression Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: cqlite-core
@@ -88,7 +89,7 @@ jobs:
 
   parquet_export_test:
     name: Parquet Export Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: cqlite-core
@@ -115,7 +116,7 @@ jobs:
 
   default_dependency_guard:
     name: Default Dependency Guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: cqlite-core
@@ -147,7 +148,7 @@ jobs:
 
   feature-gate-validation:
     name: Feature Gate Validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code

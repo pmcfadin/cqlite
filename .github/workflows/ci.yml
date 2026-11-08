@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: CI
 
 on:
@@ -53,7 +54,7 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
         (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -101,7 +102,7 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
         (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -206,7 +207,7 @@ jobs:
 
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - delta_scan_tests
       - cli_smoke_tests
@@ -248,7 +249,7 @@ jobs:
 
   cleanup-validation:
     name: Cleanup Safety Validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: contains(github.head_ref, 'cleanup/')
 
     steps:
@@ -282,7 +283,7 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
         (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -334,7 +335,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout

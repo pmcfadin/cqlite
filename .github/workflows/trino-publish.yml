@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Publish Trino Connector
 
 # Publishes the Java Trino connector (in.mcfad:cqlite-trino) to Maven Central on
@@ -60,7 +61,7 @@ jobs:
 
   publish:
     name: publishToMavenCentral
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [preflight]
     # preflight is `if: push`-gated, so a workflow_dispatch run SKIPS it. Proceed
     # when it passed (tag push) or was skipped (dispatch), never when it failed.
