@@ -298,14 +298,15 @@ if [ "$rc" -eq 0 ] && grep -q '\*\*\* NOT A BASELINE \*\*\*' <<<"$out" \
    && grep -q 'NOT A WS0 BASELINE' <<<"$out"; then
   pass "OBSERVED (round13 F3): the report of a NONCANONICAL corpus is LABELLED in the TITLE LINE and on its own 'baseline :' line (pre-fix the title read 'WS0 SAME-SESSION BASELINE' over ANY corpus, so a smoke run was published under the word BASELINE in the report's first line)"
 else
-  fail "round13 F3: a non-baseline report must be labelled in words (rc=$rc, out: $(grep -E 'WS0 SAME-SESSION|baseline' <<<"$out" | head -3))"
+  _spw14=$(grep -E 'WS0 SAME-SESSION|baseline' <<<"$out")
+  fail "round13 F3: a non-baseline report must be labelled in words (rc=$rc, out: $(head -3 <<<"$_spw14"))"
 fi
 # ...and the divergences are NAMED, so a reader can see WHY it is not a baseline rather than
 # having to take the label on trust.
 if grep -q 'DIVERGES from tools/ws0-corpus-gen/src/measurement_corpus.rs' <<<"$out"; then
   pass "OBSERVED (round13 F3): the report NAMES the divergent fields and the pin they diverge from, so the label cites an observation rather than asserting a verdict"
 else
-  fail "round13 F3: the report must name the divergences (out: $(grep -i baseline <<<"$out" | head -3))"
+  fail "round13 F3: the report must name the divergences (out: $(grep -m 3 -i baseline <<<"$out"))"
 fi
 # NON-VACUITY for the label: the pre-fix title is ABSENT from a non-baseline report. Without this
 # the case above would pass on a report that printed BOTH titles.
