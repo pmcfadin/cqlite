@@ -22270,9 +22270,15 @@ run_features_load_bearing() {
 #               private TMPDIR (a fresh subdirectory), so mktemp collisions and shared scratch
 #               files are impossible. `H` is a P suite known to be long; heavy suites are LAUNCHED
 #               first so they do not become the tail (scheduling only, never verdict).
-#   * mode S    SERIAL set: run one at a time AFTER the parallel set has drained, with the
-#               ambient TMPDIR, exactly as before. The reason each suite is serial is the 4th
-#               `_tt_add` argument and is tabulated in the block above the registrations.
+#   * mode L:<lane>  SERIAL LANE: suites that must not overlap EACH OTHER (they share one
+#               resource: the repo's worktree registry, a systemd user manager, the shared cargo
+#               target dir, the real /data/lanes root). A lane is one background chain that runs
+#               its suites one at a time, in registration order, concurrently with the parallel
+#               pool and the other lanes. Lane suites also get a private TMPDIR.
+#   * mode S    SERIAL TAIL: run one at a time AFTER the pool and every lane have drained, alone
+#               on the box, with the ambient TMPDIR - for suites that MEASURE timing or
+#               concurrency and would be perturbed by neighbours. The reason each suite is
+#               serial is the 4th `_tt_add` argument, tabulated above the registrations.
 #   * JOBS=1    restores the historical behaviour exactly: every suite in the original order, the
 #               ambient TMPDIR, stop at the FIRST failure.
 #
@@ -22284,12 +22290,12 @@ run_features_load_bearing() {
 # the pool polls per-suite status files.
 # ---------------------------------------------------------------------------------------------
 _TT_N=0
-_TT_MODE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=()
+_TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=()
 _TT_FAILED_NAMES=""
 
-_tt_reset() { _TT_N=0; _TT_MODE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=(); _TT_FAILED_NAMES=""; }
+_tt_reset() { _TT_N=0; _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=(); _TT_FAILED_NAMES=""; }
 
-# _tt_add <P|H|S> <failure label> <command> [serial reason]
+# _tt_add <P|H|S|L:lane> <failure label> <command> [serial reason]
 #   <command> is eval'd in a subshell (so it may be an `&&` chain or `(cd ... && ...)`); its
 #   combined output goes to the suite's own log. The `>>> [name] ...` header is derived from it.
 _tt_add() {
@@ -22304,7 +22310,7 @@ _tt_add() {
 
 # _tt_note <text>: a line (declared SKIP notes) replayed at this position; runs nothing.
 _tt_note() {
-  _TT_MODE[$_TT_N]=N; _TT_MSG[$_TT_N]=""; _TT_CMD[$_TT_N]=""; _TT_WHY[$_TT_N]=""
+  _TT_MODE[$_TT_N]=N; _TT_LANE[$_TT_N]=""; _TT_MSG[$_TT_N]=""; _TT_CMD[$_TT_N]=""; _TT_WHY[$_TT_N]=""
   _TT_HDR[$_TT_N]=$1
   _TT_N=$((_TT_N + 1))
 }
@@ -22378,10 +22384,19 @@ _tt_report() {
   return 0
 }
 
+# _tt_lane <lane> <log dir> <tmpdir base>: one serial lane - its suites, in registration order.
+_tt_lane() {
+  local ln=$1 d=$2 tb=$3 i
+  for ((i = 0; i < _TT_N; i++)); do
+    [ "${_TT_MODE[$i]}" = L ] && [ "${_TT_LANE[$i]}" = "$ln" ] && _tt_exec "$i" "$d" "$tb"
+  done
+  return 0
+}
+
 # _tt_run_all <component log> <scratch dir>: execute every registered suite. Returns 0 always;
 # the caller reads _TT_FAILED_NAMES (non-empty == the component FAILs).
 _tt_run_all() {
-  local log=$1 d=$2 jobs i pids pid order="" pcount=0 launched finished tmpbase
+  local log=$1 d=$2 jobs i pids pid order="" pcount=0 running tmpbase lanes="" lpids="" ln
   jobs=$(_tt_jobs)
   mkdir -p "$d" || { _TT_FAILED_NAMES="cannot create $d"; return 0; }
 
@@ -22401,35 +22416,46 @@ _tt_run_all() {
     return 0
   fi
 
-  # Launch order: heavy (H) first, then the rest of the parallel set in registration order.
+  # Launch order: heavy (H) first, then the rest of the pool in registration order.
   for ((i = 0; i < _TT_N; i++)); do
     [ "${_TT_MODE[$i]}" = H ] && { order="$order $i"; pcount=$((pcount + 1)); }
   done
   for ((i = 0; i < _TT_N; i++)); do
     [ "${_TT_MODE[$i]}" = P ] && { order="$order $i"; pcount=$((pcount + 1)); }
   done
-  echo ">>> [tooling-tests] running $pcount parallel suites ($jobs at a time), then the serial set"
+  # Distinct lane names, in first-seen order.
+  for ((i = 0; i < _TT_N; i++)); do
+    if [ "${_TT_MODE[$i]}" = L ]; then
+      case " $lanes " in *" ${_TT_LANE[$i]} "*) ;; *) lanes="$lanes ${_TT_LANE[$i]}" ;; esac
+    fi
+  done
+  echo ">>> [tooling-tests] running $pcount parallel suites ($jobs at a time) alongside serial lane(s):${lanes:- none}; then the serial tail"
   tmpbase=$(mktemp -d "${TMPDIR:-/tmp}/tt-par.XXXXXX") || { _TT_FAILED_NAMES="cannot create a scratch TMPDIR for the parallel set"; return 0; }
-  launched=0; pids=""
+  # Each lane is one background chain (its suites never overlap each other).
+  for ln in $lanes; do
+    _tt_lane "$ln" "$d" "$tmpbase" &
+    lpids="$lpids $!"
+  done
+  pids=""
   for i in $order; do
     while :; do
-      finished=$(ls -1 "$d" 2>/dev/null | grep -c '\.rc$')
-      [ $((launched - finished)) -lt "$jobs" ] && break
+      running=0
+      for pid in $pids; do kill -0 "$pid" 2>/dev/null && running=$((running + 1)); done
+      [ "$running" -lt "$jobs" ] && break
       sleep 0.2
     done
     _tt_exec "$i" "$d" "$tmpbase" &
     pids="$pids $!"
-    launched=$((launched + 1))
   done
   # Wait ONLY for the pids started here (a bare `wait` would also wait for the gate's heartbeat).
-  for pid in $pids; do wait "$pid" 2>/dev/null; done
+  for pid in $pids $lpids; do wait "$pid" 2>/dev/null; done
   rm -rf "$tmpbase"
 
-  # Deterministic replay of the parallel set (registration order; notes in place).
+  # Deterministic replay of the pool + lanes (registration order; notes in place).
   for ((i = 0; i < _TT_N; i++)); do
-    case "${_TT_MODE[$i]}" in P|H|N) _tt_report "$i" "$d" "$log" ;; esac
+    case "${_TT_MODE[$i]}" in P|H|L|N) _tt_report "$i" "$d" "$log" ;; esac
   done
-  # Serial set, streamed live, ambient TMPDIR.
+  # Serial tail, streamed live, ambient TMPDIR, alone on the box.
   for ((i = 0; i < _TT_N; i++)); do
     if [ "${_TT_MODE[$i]}" = S ]; then
       echo ">>> [tooling-tests] ${_TT_HDR[$i]}"
@@ -22491,18 +22517,19 @@ run_tooling_tests() {
   # shared locks/lanes, real /data/lanes, `systemd-run --user`, git worktree/ref mutation of
   # the repo, cargo builds into the shared target, or measuring timing/concurrency.
   #
-  # SERIAL SET (suite -> why):
-  #   test_lane_lock_precommit_hook.sh         drives the REAL machine-local lane root /data/lanes (shared lane-lock records)
-  #   test_lane_lock.sh                        lane-lock machinery; creates scratch git worktrees of the repo (TEST 17)
-  #   test_gate_detached.sh                    launches real `systemd-run --user` units and pgreps live gate processes
-  #   test_gate_liveness.sh                    `git worktree add/remove` against the repo's .git and pgrep of live heartbeat beaters; timing-sensitive
-  #   test_pub_surface_guard.sh                `git worktree add/remove` against the repo's .git
-  #   test_bti_perf_scan.sh                    cargo build into the shared target dir
-  #   test_flight_allocator_link.sh            two cargo debug builds into the shared target dir
-  #   cargo test -q -p ws0-corpus-gen          cargo test into the shared target dir
-  #   test_gate_concurrency_cap.sh             measures the gate's concurrency-cap / slot machinery (observed parallelism)
-  #   test_agent_gate_disk_admission.sh        gate slot / disk-admission probes with timed stub sleeps
-  #   test_issue_gate_hook.sh                  gate-slot wait and hook timeout budgets (timing)
+  # SERIAL SET (mode -> suites -> why). L:<lane> suites never overlap each other but overlap the
+  # pool; S suites run alone, last.
+  #   L:git-worktree   test_gate_liveness.sh, test_pub_surface_guard.sh
+  #                      -> `git worktree add/remove/prune` against the repo's .git; pgrep of live heartbeat beaters
+  #   L:systemd        test_gate_detached.sh
+  #                      -> real `systemd-run --user` units, cgroup reads, pgrep of live agent-gate.sh
+  #   L:shared-target  test_bti_perf_scan.sh, ws0-corpus-gen cargo test, test_flight_allocator_link.sh
+  #                      -> cargo build/test into the shared target dir (cargo takes its lock; one at a time)
+  #   L:lane-root      test_lane_lock_precommit_hook.sh
+  #                      -> drives the REAL lane root /data/lanes (shared lane-lock records)
+  #   S (tail)         test_gate_concurrency_cap.sh, test_issue_gate_hook.sh
+  #                      -> measure gate concurrency-cap / slot waits and timeout budgets: run alone after everything else
+  # H = parallel pool, launched first (long, but hermetic: private mktemp fixtures/slots dirs).
   # Everything else was read (or run in parallel and repeated) and is hermetic: it builds its own
   # mktemp fixtures, and in the parallel set additionally gets a private TMPDIR.
   # ---------------------------------------------------------------------------------------
@@ -22524,7 +22551,7 @@ run_tooling_tests() {
   # #3493: the dataset-corpus completeness checker. Dataset-free, network-free — it builds
   # its own synthetic corpora and never touches CQLITE_DATASETS_ROOT except through cases
   # that explicitly need a real one.
-  _tt_add P 'test_check_dataset_manifest.sh' 'bash "$REPO_ROOT/scripts/tests/test_check_dataset_manifest.sh"'
+  _tt_add H 'test_check_dataset_manifest.sh' 'bash "$REPO_ROOT/scripts/tests/test_check_dataset_manifest.sh"'
 
   # tooling-tests diff-scoping self-test (#4266): the non-vacuity proof for
   # scripts/lib/tooling-tests-scope.sh AND its wiring into this very function —
@@ -22595,7 +22622,7 @@ run_tooling_tests() {
   # merges with no red anywhere. Also runs in --lite via roborev-lints; kept here so
   # the full gate covers it in its shell-tooling component set too. A failure FAILs
   # the component, mirroring the keyspace-scoping guard.
-  _tt_add P 'roborev vacuous-review guard' 'bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh"'
+  _tt_add H 'roborev vacuous-review guard' 'bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh"'
 
   # committed-schemas preflight guard (#3148 AC (c)): hermetic (temp dataset/schemas
   # roots, no real corpus/network/cargo — the FULL-gate cases exit AT the preflight).
@@ -22617,7 +22644,7 @@ run_tooling_tests() {
   # unrelated breakage produces an identical exit code. Hermetic: the fail-closed cases
   # exit AT the pre-flight, before any component, so no cargo and no #1825 slot.
   # A failure FAILs the component, mirroring the schemas guard above.
-  _tt_add P 'component-set skew preflight guard' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_component_set.sh"'
+  _tt_add H 'component-set skew preflight guard' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_component_set.sh"'
 
   # perf-run-contained argument-safety guard (#3068): no python3/sudo/systemd
   # needed, always runs (the wrapper's --check-args hook executes nothing). Pins
@@ -22664,7 +22691,7 @@ run_tooling_tests() {
   # and needs no docker/network/python3/datasets. It does `cargo build -p cqlite-core
   # --example bti_perf_scan --features cli-helpers` (incremental; the full gate has
   # already compiled that graph), and a build failure is a FAILURE, never a skip.
-  _tt_add S 'AC3 warm-scan harness guard' 'bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh"' 'cargo build into the shared target dir'
+  _tt_add L:shared-target 'AC3 warm-scan harness guard' 'bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh"' 'cargo build into the shared target dir'
 
   # Unenforced-constraint-comment guard (#3234): a comment that STATES a constraint
   # must name or sit beside its enforcement, or the comment goes. Mechanizes the class
@@ -23045,7 +23072,7 @@ run_tooling_tests() {
   # failure is SECURITY-ADJACENT rather than a wrong number.
   _tt_add P 'ws0 host-state restore guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_host_state_guards.sh"'
 
-  _tt_add P 'ws0 self-test hermeticity' 'bash "$REPO_ROOT/scripts/tests/test_ws0_hermeticity.sh"'
+  _tt_add H 'ws0 self-test hermeticity' 'bash "$REPO_ROOT/scripts/tests/test_ws0_hermeticity.sh"'
 
   _tt_add P 'ws0 no-fabricated-value guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_fabrication_guards.sh"'
 
@@ -23310,7 +23337,7 @@ run_tooling_tests() {
   #     #[ignore]d (it writes ~2.8 GB) and carries the operator command.
   # Cheap and hermetic: 1,000-row corpora in tempdirs (~0.3s total), no datasets,
   # no network. A build failure is a FAILURE, never a skip.
-  _tt_add S 'ws0 corpus determinism / pin' '(cd "$REPO_ROOT" && cargo test -q -p ws0-corpus-gen)' 'cargo test into the shared target dir'
+  _tt_add L:shared-target 'ws0 corpus determinism / pin' '(cd "$REPO_ROOT" && cargo test -q -p ws0-corpus-gen)' 'cargo test into the shared target dir'
 
   # fetch-datasets tracked-fixture guard (#2878): hermetic (throwaway git repo +
   # locally-built partial-overlap tarball + stub curl — no network, and the real
@@ -23415,7 +23442,7 @@ run_tooling_tests() {
   # --lite (never the full gate), uses a unique mktemp summary path from the hook's
   # own repo root, fails OPEN on a budget overrun, and runs no roborev. A failure
   # FAILs the component, mirroring the cpu-budget/delta/parity-report guards.
-  _tt_add S 'issue-gate hook defusal self-test' 'bash "$REPO_ROOT/scripts/tests/test_issue_gate_hook.sh"' 'gate-slot wait and hook timeout budgets (timing)'
+  _tt_add S 'issue-gate hook defusal self-test' 'bash "$REPO_ROOT/scripts/tests/test_issue_gate_hook.sh"' 'gate-slot wait and hook timeout budgets (timing): alone on the box'
 
   # parallel sub-lane scheduling self-test (#2657, epic #2636): no python3 needed,
   # always runs (hermetic — drives the --classify-lanes hook + static invariants;
@@ -23448,7 +23475,7 @@ run_tooling_tests() {
   # satisfy them. A failure FAILs the component.
   # gate liveness mechanism (#3473): the heartbeat beater + the three-valued reader.
   # No cargo, no datasets, no network; one bounded nested `--only file-size`.
-  _tt_add S 'gate liveness mechanism #3473' 'bash "$REPO_ROOT/scripts/tests/test_gate_liveness.sh"' '`git worktree add/remove` against the repo'\''s .git and pgrep of live heartbeat beaters; timing-sensitive'
+  _tt_add L:git-worktree 'gate liveness mechanism #3473' 'bash "$REPO_ROOT/scripts/tests/test_gate_liveness.sh"' '`git worktree add/remove` against the repo'\''s .git (section 14) and pgrep of live heartbeat beaters'
 
   # gate-liveness SIGPIPE guard (#3803): STRUCTURAL, because the defect is a race.
   # `printf '%s\n' "$t" | grep -m1 ...` lets bash's BUILTIN printf take EPIPE when the
@@ -23485,14 +23512,14 @@ run_tooling_tests() {
 
   # detached-gate launcher + the cgroup mechanism it rests on (#3473). Internally
   # SKIP-aware for hosts with no working `systemd-run --user`.
-  _tt_add S 'detached-gate launcher #3473' 'bash "$REPO_ROOT/scripts/tests/test_gate_detached.sh"' 'launches real `systemd-run --user` units and pgreps live gate processes'
+  _tt_add L:systemd 'detached-gate launcher #3473' 'bash "$REPO_ROOT/scripts/tests/test_gate_detached.sh"' 'real `systemd-run --user` units, cgroup reads, pgrep of live agent-gate.sh processes'
 
   # BANNER IMMEDIATELY BEFORE ITS OWN INVOCATION (roborev job 238). It used to sit ~30 lines earlier,
   # and the #3473 liveness and detached suites were inserted between — so the log announced pub-surface,
   # then showed a DIFFERENT suite's output, and a failure in mine read as a pub-surface failure. Worse,
   # a run that died in between left a log asserting pub-surface had run when it never did. A banner is a
   # claim about what happened next; it has to be adjacent to the thing it claims.
-  _tt_add S 'pub-surface guard self-test #1712' 'bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh"' '`git worktree add/remove` against the repo'\''s .git'
+  _tt_add L:git-worktree 'pub-surface guard self-test #1712' 'bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh"' '`git worktree add/remove/prune` against the repo'\''s .git (leaked/peer decoys)'
 
   # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
   # which for an always-non-failing guard is the harder property: its cases drive
@@ -23622,7 +23649,7 @@ run_tooling_tests() {
   # Proves a gate whose worktree mutates mid-run cannot certify (MAIN lane, SIDE lane,
   # terminal, --only/--lite/--delta) AND that an unmutated run still does — the two
   # halves are the discrimination proof. A failure FAILs the component.
-  _tt_add P 'tree-integrity self-test #2926' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_integrity.sh"'
+  _tt_add H 'tree-integrity self-test #2926' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_integrity.sh"'
 
   # …and its PORTABILITY half (#2926 review G1): the same guard re-run against BSD/macOS
   # shims (sed without GNU escapes, stat -f only, a sort(1) with no -z) plus a static lint
@@ -23684,7 +23711,7 @@ run_tooling_tests() {
   # described through the gate's own _fm_describe_cargo rather than re-derived here. That
   # last section is RED-verified: changing a feature literal in one of those bodies without
   # the hoisted variable reds it. A failure FAILs the component.
-  _tt_add P 'SUMMARY feature-matrix annotation guard #3453' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_feature_matrix_annotation.sh"'
+  _tt_add H 'SUMMARY feature-matrix annotation guard #3453' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_feature_matrix_annotation.sh"'
 
   # binding-rust-tests target-partition self-test (#3522, roborev C3): hermetic, no cargo /
   # network / datasets. Drives _brt_partition_targets — sourced OUT OF THE REAL GATE SCRIPT,
@@ -23794,7 +23821,7 @@ run_tooling_tests() {
     # BEFORE the python3 gate because it needs no python3 and must never be reached only
     # on hosts that happen to have one. A failure FAILs the component, mirroring the
     # keyspace-scoping guard.
-    _tt_add S 'machine-local lane-lock regression suite #3436' 'bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh"' 'lane-lock machinery; creates scratch git worktrees of the repo (TEST 17)'
+    _tt_add P 'machine-local lane-lock regression suite #3436' 'bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh"'
 
   fi
 
@@ -23837,7 +23864,7 @@ run_tooling_tests() {
     _tt_note ">>> [$name]   both drive the Linux-/proc-specific machine-local lane lock; every OTHER tooling-tests suite still runs here."
   else
 
-  _tt_add S 'lane-lock pre-commit enforcement #3436' 'bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh"' 'drives the REAL machine-local lane root /data/lanes (shared lane-lock records)'
+  _tt_add L:lane-root 'lane-lock pre-commit enforcement #3436' 'bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh"' 'drives the REAL machine-local lane root /data/lanes (shared lane-lock records)'
 
   _tt_add P 'finalize teardown lane-lock release #3436' 'bash "$REPO_ROOT/scripts/tests/test_finalize_cleanup_lane_lock.sh"'
 
@@ -23879,7 +23906,7 @@ run_tooling_tests() {
   # and always NAMING the cause (off-Linux printing the actual `uname -s`; no cargo/cc/make/
   # symbol tool/bounded `timeout`; unparseable symbol output), while a FAILING cargo build is
   # a FAIL, not a skip. Measured 5.3s warm on a fleet box. A failure FAILs the component.
-  _tt_add S 'flight linked-allocator guard #3997' 'bash "$REPO_ROOT/scripts/tests/test_flight_allocator_link.sh"' 'two cargo debug builds into the shared target dir'
+  _tt_add L:shared-target 'flight linked-allocator guard #3997' 'bash "$REPO_ROOT/scripts/tests/test_flight_allocator_link.sh"' 'two cargo debug builds into the shared target dir'
 
   # `cqlite salvage` no-resync-scan guard (issue #4196, spec R4.3): partitions
   # are located ONLY from the authoritative boundary source (`Index.db` /
@@ -23911,8 +23938,8 @@ run_tooling_tests() {
     _tt_add P 'final tooling chain: test_agent_gate_notify.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh"'
     _tt_add P 'final tooling chain: test_gate_notify_contract.sh' 'bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh"'
     _tt_add P 'final tooling chain: test_agent_gate_smoke_target_dir.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh"'
-    _tt_add S 'final tooling chain: test_gate_concurrency_cap.sh' 'bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh"' 'measures the gate'\''s concurrency-cap / slot machinery (observed parallelism)'
-    _tt_add S 'final tooling chain: test_agent_gate_disk_admission.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh"' 'gate slot / disk-admission probes with timed stub sleeps'
+    _tt_add S 'final tooling chain: test_gate_concurrency_cap.sh' 'bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh"' 'measures the gate concurrency cap / slot machinery (observed parallelism): alone on the box'
+    _tt_add H 'final tooling chain: test_agent_gate_disk_admission.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh"'
     _tt_add P 'final tooling chain: test_perf_capability.sh' 'bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh"'
     _tt_add P 'final tooling chain: test_claim_heartbeat.sh' 'bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh"'
     _tt_add P 'final tooling chain: test_drive_issue_state.sh' 'bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh"'

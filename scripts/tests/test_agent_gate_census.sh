@@ -1179,11 +1179,40 @@ elif [ -z "$p_raw" ]; then
 else
   bad "P2: progress line(s) still printing the PRE-census status at line(s): $p_raw"
 fi
+# #4468: the floor used to be 100 because run_tooling_tests carried ~85 copy-pasted early-return
+# bail-outs, each with its own finalized-status echo. They collapsed into the single epilogue of the
+# parallel runner, so a raw count now measures the real number of runners (53), not copy-paste. The
+# assertion's SUBJECT is unchanged — every bespoke runner must print the finalized status — and is now
+# stated per function: every function that records a result for a component, and is not one of the
+# declared exceptions, must also print RECORDED_STATUS, and run_tooling_tests must (its epilogue).
 p_fin=$(grep -c 'RECORDED_STATUS (\$((end - start))s)' "$GATE")
-if [ "$p_fin" -ge 100 ]; then
-  ok "P3: $p_fin progress lines print the finalized status — the fix reached the bespoke runners, not only run_component"
+p_rc2=0
+p_missing=$(python3 - "$GATE" <<'PYX'
+import re, sys
+lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
+cur = None
+missing = []
+for i, l in enumerate(lines):
+    m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\(\) \{', l)
+    if m:
+        cur = [m.group(1), i]
+    elif l == '}' and cur:
+        body = '\n'.join(lines[cur[1]:i + 1])
+        # _ds_lane_fail is a helper that records a lane failure; its caller prints the status.
+        if 'record_result "$name"' in body and cur[0] != '_ds_lane_fail' \
+           and 'RECORDED_STATUS ($((end - start))s)' not in body:
+            missing.append(cur[0])
+        cur = None
+print(' '.join(missing))
+PYX
+) || p_rc2=$?
+tt_fin=$(sed -n '/^run_tooling_tests() {/,/^}/p' "$GATE" | grep -c 'RECORDED_STATUS (\$((end - start))s)')
+if [ "$p_rc2" -ne 0 ]; then
+  bad "P3: the per-function derivation could not run (python3 exited $p_rc2), so no runner was examined"
+elif [ "$p_fin" -ge 50 ] && [ -z "$p_missing" ] && [ "$tt_fin" -ge 1 ]; then
+  ok "P3: $p_fin progress lines print the finalized status; every runner that records a result prints it (run_tooling_tests: $tt_fin) — the fix reached the bespoke runners, not only run_component"
 else
-  bad "P3: only $p_fin progress line(s) print RECORDED_STATUS; the rewrite did not reach every caller"
+  bad "P3: only $p_fin progress line(s) print RECORDED_STATUS (floor 50), run_tooling_tests prints $tt_fin, runner(s) recording a result without printing it: ${p_missing:-none}"
 fi
 # ---------------------------------------------------------------------------
 # (Q) THE LABEL SWEEP — roborev job 371, and the class it belongs to.
