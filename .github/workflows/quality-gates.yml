@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Quality Gates Coordination"
 
 on:
@@ -30,7 +31,7 @@ concurrency:
 jobs:
   essential-validations:
     name: Essential Validations
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -92,7 +93,7 @@ jobs:
 
   quality-gates-coordinator:
     name: Quality Gates Coordinator
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [essential-validations]
     if: always()
 

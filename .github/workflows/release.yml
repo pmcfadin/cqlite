@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Release
 
 on:
@@ -34,21 +35,21 @@ jobs:
           # ubuntu-latest host's glibc (2.39 on 24.04). This keeps the binary
           # runnable on enterprise distros like Rocky/RHEL 9 (glibc 2.34). (#864)
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             exe_suffix: ""
             use_cross: true
           # Static musl build — runs on any Linux without a libc dependency
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
             exe_suffix: ""
             use_cross: true
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             exe_suffix: ""
             use_cross: true
           # Windows builds use cross-compilation on Ubuntu
           - target: x86_64-pc-windows-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             exe_suffix: ".exe"
             use_cross: true
           # macOS builds run natively on macOS runners
@@ -137,7 +138,7 @@ jobs:
   # notes. Runs once per tag (no matrix) so the body is set a single time (#563).
   release-notes:
     name: Add changelog + API-docs links to release notes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build-cli
     steps:
     - uses: actions/checkout@v5
@@ -159,7 +160,7 @@ jobs:
   #
   # build-ffi:
   #   name: Build FFI Libraries
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   strategy:
   #     matrix:
   #       include:
@@ -207,7 +208,7 @@ jobs:
 
   # build-wasm:
   #   name: Build WASM Package
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
   #   - uses: actions/checkout@v5
   #   - name: Install Rust
@@ -240,7 +241,7 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: [preflight, build-cli]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
@@ -301,7 +302,7 @@ jobs:
   update-homebrew-tap:
     name: Update Homebrew tap
     needs: build-cli
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     steps:
     - name: Check out cqlite (for the formula generator)

@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: API Docs
 
 # Publishes per-tag rustdoc for cqlite-core to GitHub Pages so downstream
@@ -30,7 +31,7 @@ env:
 jobs:
   rustdoc:
     name: Build & publish rustdoc
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 

@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Performance Regression Gate"
 
 # Phase 1 of the performance plan (Epic #541): an in-repo regression wall.
@@ -68,7 +69,7 @@ jobs:
   perf-gate:
     name: Bench regression vs main
     if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:perf') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Issue #4352: two fat-LTO bench builds (PR + main) at 2 jobs plus the runs.
     timeout-minutes: 120
     steps:

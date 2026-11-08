@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Required PR Gate
 
 on:
@@ -57,7 +58,7 @@ jobs:
     # verifies that via the aggregator's --core-* options and fails closed if no
     # successful core is recorded. Skipping the WORK never skips the CHECK.
     if: ${{ github.event.action != 'labeled' && github.event.action != 'unlabeled' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -267,7 +268,7 @@ jobs:
     name: required
     needs: [pr-gate-core]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Strictly GREATER than the registry's aggregation deadline (60m default), so
     # expiry surfaces as a reported red with a diagnostic instead of an Actions
     # job cancellation. validate-workflows.rb asserts this relationship.

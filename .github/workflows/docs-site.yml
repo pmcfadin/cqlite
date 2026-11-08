@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Docs Site
 
 # Builds and deploys the Astro Starlight documentation site to the gh-pages branch.
@@ -50,7 +51,7 @@ env:
 jobs:
   build:
     name: Build docs site
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUN_FULL: >-
         ${{
@@ -107,7 +108,7 @@ jobs:
         github.event_name != 'pull_request' ||
         contains(github.event.pull_request.labels.*.name, 'ci:docs-full')
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -179,7 +180,7 @@ jobs:
   # context) and is fail-open (never changes the build result).
   notify-main-failure:
     name: Alert on docs-site failure (main)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [build, smoke]
     # Only on push to main, and only when build or smoke actually failed.
@@ -210,7 +211,7 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [build, smoke]
     # Only deploy on push to main (not on PRs or forks)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

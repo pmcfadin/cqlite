@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Nightly agent-gate (deep check)
 
 # Nightly deep-check backstop for the authoritative gate `scripts/agent-gate.sh`
@@ -343,7 +344,7 @@ jobs:
   # surfaces it.
   clippy-full:
     name: Full-matrix clippy (--all-features)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Clippy of the whole workspace under --all-features compiles the DuckDB C++
     # amalgamation + the OTel stack from source on a cold cache — heavy, but far
     # lighter than the full gate (no binding builds, no test set, no datasets,

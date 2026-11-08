@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Trino Connector CI
 
 # Builds and tests the Java Trino connector and publishes the assembled plugin
@@ -31,7 +32,7 @@ concurrency:
 jobs:
   build:
     name: gradle test (+ optional plugin)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUN_FULL: >-
         ${{

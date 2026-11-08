@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Python Release
 
 on:
@@ -26,7 +27,7 @@ jobs:
   # Build source distribution
   build-sdist:
     name: Build source distribution
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -57,10 +58,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             manylinux: "2_28"
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
           - os: macos-15
@@ -119,7 +120,7 @@ jobs:
   # Publish to TestPyPI for pre-release tags (contains hyphen after version)
   publish-testpypi:
     name: Publish to TestPyPI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [preflight, build-sdist, build-wheels]
     # Pre-release: any tag with hyphen suffix (v1.0.0-rc1, v1.0.0-alpha, v1.0.0-beta1, etc.)
     if: contains(github.ref_name, '-')
@@ -198,7 +199,7 @@ jobs:
   # Publish to PyPI for stable releases (no hyphen in version)
   publish-pypi:
     name: Publish to PyPI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [preflight, build-sdist, build-wheels]
     # Stable release: tag without hyphen suffix (v1.0.0, v0.3.0)
     if: ${{ !contains(github.ref_name, '-') }}
@@ -296,7 +297,7 @@ jobs:
   # Create GitHub Release with wheels attached
   github-release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [build-sdist, build-wheels]
     timeout-minutes: 10
 

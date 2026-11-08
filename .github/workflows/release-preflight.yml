@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Release preflight
 
 # Shared release-train preflight (issue #2652, epic #2636).
@@ -38,7 +39,7 @@ permissions:
 jobs:
   version-agreement:
     name: Assert tag == every manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout

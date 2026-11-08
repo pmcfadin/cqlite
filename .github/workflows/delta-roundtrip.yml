@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Delta Round-Trip Test (DS11 / Issue #707)"
 
 # DS11 reconciliation round-trip test.
@@ -69,7 +70,7 @@ concurrency:
 jobs:
   delta-roundtrip:
     name: DS11 Reconciliation Round-Trip
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 45 min headroom: the duckdb-tests feature builds DuckDB (+ parquet
     # extension) from source via the `bundled`/`parquet` features (issue #916),
     # which compiles across the build, test, and clippy steps on a cold cargo

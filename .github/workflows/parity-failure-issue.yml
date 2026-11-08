@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Parity Failure Issue Automation
 
 # Signal routing only (issue #1028, epic #974). When a manifest-backed parity lane
@@ -66,7 +67,7 @@ concurrency:
 
 jobs:
   file-parity-failure-issue:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # D1/R4: react to a FAILED (file path) OR a SUCCESS (resolve path) run whose origin
     # event was schedule / push(main) / workflow_dispatch. This `if` is a coarse pre-filter
     # over trusted GitHub-computed fields (event name / conclusion / branch); the Guard

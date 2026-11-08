@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: SSTableDump Parity Gate"
 
 on:
@@ -57,7 +58,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && inputs.parity_tier == 'smoke')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -286,7 +287,7 @@ jobs:
       github.event_name == 'release' ||
       github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && inputs.parity_tier == 'full')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
 
     steps:

@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Parser fuzz (safety net)
 
 # Standing parser fuzz harness (issue #1614, epic #1601 finding H1).
@@ -54,7 +55,7 @@ jobs:
   pr-smoke:
     name: PR smoke (${{ matrix.target }})
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -111,7 +112,7 @@ jobs:
   nightly:
     name: Nightly long-run (${{ matrix.target }})
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false

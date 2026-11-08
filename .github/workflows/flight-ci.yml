@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Flight CI
 
 # Builds, lints, and tests the cqlite-flight Arrow Flight server; publishes the
@@ -68,7 +69,7 @@ jobs:
   # mandate nothing.
   classify:
     name: Classify Flight tier scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     # EXACTLY ONE applicability output (issue #2910 round 2). The first cut had
     # two — `run_tier` (cheap fmt/clippy/lib test) and `run_full` (the end-to-end
@@ -171,7 +172,7 @@ jobs:
     name: fmt / clippy / lib test
     needs: classify
     if: needs.classify.outputs.run_tier == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -213,7 +214,7 @@ jobs:
     # `--lib` scope does not touch. It shares `run_tier` with that job precisely
     # so no mandating diff can reach the cheap half alone.
     if: needs.classify.outputs.run_tier == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -253,7 +254,7 @@ jobs:
         (github.event_name == 'push' && github.ref_type != 'tag') ||
         github.event_name == 'workflow_dispatch'
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -328,7 +329,7 @@ jobs:
     name: Flight tier gate
     needs: [classify, test, full, image]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report the Flight tier result

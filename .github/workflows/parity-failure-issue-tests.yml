@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: Parity Failure Issue Automation (unit tests)"
 
 # PR-blocking coverage for the parity-failure-issue automation (issue #1028, epic #974).
@@ -29,7 +30,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4

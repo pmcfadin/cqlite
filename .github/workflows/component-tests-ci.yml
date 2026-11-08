@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Component tests CI
 
 # REGISTERED GATING TIER (issue #4429, part of #4407; .github/ci-gating-tiers.yml).
@@ -64,7 +65,7 @@ jobs:
   # Everything else, including an empty diff and every non-PR event, runs it.
   classify:
     name: Classify Component tier scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run_tier: ${{ steps.scope.outputs.run_tier }}
@@ -115,7 +116,7 @@ jobs:
     name: Gate component ${{ matrix.component }}
     needs: classify
     if: ${{ needs.classify.outputs.run_tier == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Measured cold on PR #4430: cli-tests 18m44s, write-tests 12m03s,
     # integration-tests 7m34s, format-compat 6m05s. Classify (5) + this (45) +
     # tier-gate (5) stays inside the registry's wait_minutes: 70.
@@ -224,7 +225,7 @@ jobs:
     name: Component tier gate
     needs: [classify, gate_component]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report the Component tier result

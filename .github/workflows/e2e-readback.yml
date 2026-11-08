@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: "CI: E2E Cassandra Readback Gate"
 
 # PRD §4.1 acceptance gate (epic #663, issue #664):
@@ -57,7 +58,7 @@ jobs:
   e2e-cassandra-readback:
     name: E2E Cassandra Readback (${{ github.event_name }})
     if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:ingest-full') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:

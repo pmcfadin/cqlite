@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Python CI
 
 on:
@@ -174,7 +175,7 @@ env:
 jobs:
   smoke:
     name: PR smoke (Ubuntu, Python 3.12)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -259,7 +260,7 @@ jobs:
         github.event_name != 'pull_request' ||
         contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: smoke
     timeout-minutes: 15
 
@@ -381,7 +382,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
           - os: macos-15
@@ -466,7 +467,7 @@ jobs:
           # Native test platforms only
           # Note: x86_64-apple-darwin is build-only (cross-compiled on ARM64, can't test)
           # Note: aarch64-unknown-linux-gnu is build-only (cross-compiled, can't test)
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             python: "3.12"
             manylinux: "2_28"
@@ -674,7 +675,7 @@ jobs:
         github.event_name != 'pull_request' ||
         contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -779,7 +780,7 @@ jobs:
 
   quality-gate:
     name: Python CI Quality Gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [smoke, smoke-floors, build-only-wheels, test, cross-binding-parity]
     if: always()
     env:

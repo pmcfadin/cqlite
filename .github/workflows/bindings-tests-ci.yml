@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Bindings tests CI
 
 # REGISTERED GATING TIER (issue #4431, part of #4407; .github/ci-gating-tiers.yml).
@@ -62,7 +63,7 @@ jobs:
   # Everything else, including an empty diff and every non-PR event, runs it.
   classify:
     name: Classify Bindings tier scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run_tier: ${{ steps.scope.outputs.run_tier }}
@@ -113,7 +114,7 @@ jobs:
     name: Gate component ${{ matrix.component }}
     needs: classify
     if: ${{ needs.classify.outputs.run_tier == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Classify (5) + this (45) + tier-gate (5) stays inside the registry's
     # wait_minutes: 70.
     timeout-minutes: 45
@@ -233,7 +234,7 @@ jobs:
     name: Bindings tier gate
     needs: [classify, gate_component]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report the Bindings tier result

@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Tooling tests CI
 
 # ADVISORY TIER (issue #4437, part of #4407): listed under `exempt:` in
@@ -64,7 +65,7 @@ jobs:
   # empty diff, an unreadable scope lib and every non-PR event run the tier.
   classify:
     name: Classify Tooling tier scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run_tier: ${{ steps.scope.outputs.run_tier }}
@@ -296,7 +297,7 @@ jobs:
     name: Tooling tier gate
     needs: [classify, gate_component]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report the Tooling tier result

@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Project Board Sync
 
 # Server-side board hygiene the built-in Project workflows can't express.
@@ -82,7 +83,7 @@ jobs:
   # ---------------------------------------------------------------------------
   pr-closed-to-done:
     if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Guard token
         id: guard
@@ -158,7 +159,7 @@ jobs:
   # ---------------------------------------------------------------------------
   sweep:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SWEEP_GRACE_MINUTES: '10'
       # Board->label drift-detector grace (issue #2855): an OPEN issue younger than
@@ -328,7 +329,7 @@ jobs:
       github.event_name == 'issues'
       && github.event.issue.state == 'open'
       && (github.event.label.name == '' || startsWith(github.event.label.name, 'status:'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Guard token
@@ -375,7 +376,7 @@ jobs:
   # ---------------------------------------------------------------------------
   reap-claims:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Needs write to delete stale refs/lane-claims/* and legacy refs/machine-claims/* refs (the top-level
     # default is contents: read); the sweep/pr-closed jobs stay read-only.

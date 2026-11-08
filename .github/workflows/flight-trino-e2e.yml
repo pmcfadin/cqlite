@@ -1,3 +1,4 @@
+# Runner pinned to ubuntu-24.04: ubuntu-latest moved to 26.04 and broke duckdb + Python 3.9 (#4473).
 name: Flight ↔ Trino E2E
 
 # Full integration test of BOTH sides: builds the Java connector plugin and the
@@ -116,7 +117,7 @@ concurrency:
 jobs:
   tier-summary:
     name: E2E tier summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Write CI tier summary
         run: |
@@ -158,7 +159,7 @@ jobs:
     if: >-
       ${{ github.event.action != 'labeled'
       && github.event.action != 'unlabeled' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -232,7 +233,7 @@ jobs:
          github.event.action != 'unlabeled' &&
          contains(github.event.pull_request.labels.*.name, 'ci:trino-full'))
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Mandatory: this job is new, so it is not in the workflow validator's legacy
     # timeout-migration exemption table (and must never be added to it).
     timeout-minutes: 60
