@@ -22541,8 +22541,12 @@ run_tooling_tests() {
   #
   # SERIAL SET (mode -> suites -> why). L:<lane> suites never overlap each other but overlap the
   # pool; S suites run alone, last.
-  #   L:git-worktree   test_gate_liveness.sh, test_pub_surface_guard.sh
-  #                      -> `git worktree add/remove/prune` against the repo's .git; pgrep of live heartbeat beaters
+  #   L:git-worktree  test_gate_liveness.sh
+  #                      -> `git worktree add/remove` against the repo's .git (section 14); pgrep of live heartbeat beaters
+  #   L:git-worktree-pub test_pub_surface_guard.sh
+  #                      -> `git worktree add/remove/prune` against the repo's .git, but only its own path-addressed decoys
+  #                         (pub-surface-selftest* prefix; git names admin dirs uniquely). Its own lane so it overlaps
+  #                         test_gate_liveness.sh (431s, the long pole) instead of queueing behind it.
   #   L:systemd        test_gate_detached.sh
   #                      -> real `systemd-run --user` units, cgroup reads, pgrep of live agent-gate.sh
   #   L:shared-target  test_bti_perf_scan.sh, ws0-corpus-gen cargo test, test_flight_allocator_link.sh
@@ -23545,7 +23549,7 @@ run_tooling_tests() {
   # then showed a DIFFERENT suite's output, and a failure in mine read as a pub-surface failure. Worse,
   # a run that died in between left a log asserting pub-surface had run when it never did. A banner is a
   # claim about what happened next; it has to be adjacent to the thing it claims.
-  _tt_add L:git-worktree 'pub-surface guard self-test #1712' 'bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh"' '`git worktree add/remove/prune` against the repo'\''s .git (leaked/peer decoys)'
+  _tt_add L:git-worktree-pub 'pub-surface guard self-test #1712' 'bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh"' '`git worktree add/remove/prune` against the repo'\''s .git (leaked/peer decoys)'
 
   # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
   # which for an always-non-failing guard is the harder property: its cases drive
