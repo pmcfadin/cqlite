@@ -854,7 +854,8 @@ snap_worktree "$T/tmpdir-entries-after"
 if diff -q "$T/tmpdir-entries-before" "$T/tmpdir-entries-after" >/dev/null; then
   ok "tmpdir: the refused run left NOTHING in the repository (no file AND no directory)"
 else
-  bad "tmpdir: the refused run left entries in the repository: $(diff "$T/tmpdir-entries-before" "$T/tmpdir-entries-after" | tr '\n' ' ' | head -c 300)"
+  _spw2=$(diff "$T/tmpdir-entries-before" "$T/tmpdir-entries-after" | tr '\n' ' ')
+  bad "tmpdir: the refused run left entries in the repository: $(head -c 300 <<<"$_spw2")"
 fi
 rm -rf "$TMPDIR_IN_REPO"
 # NON-VACUITY: the refusal is caused by the LOCATION, not by TMPDIR being set at
@@ -923,7 +924,8 @@ else
   if diff -q "$T/common-entries-before" "$T/common-entries-after" >/dev/null; then
     ok "common-dir: the refused run created NOTHING under the shared git directory"
   else
-    bad "common-dir: the refused run created entries under the shared git dir: $(diff "$T/common-entries-before" "$T/common-entries-after" | tr '\n' ' ' | head -c 300)"
+    _spw1=$(diff "$T/common-entries-before" "$T/common-entries-after" | tr '\n' ' ')
+    bad "common-dir: the refused run created entries under the shared git dir: $(head -c 300 <<<"$_spw1")"
   fi
   rm -rf "$TMPDIR_IN_COMMON"
   # NON-VACUITY: the linked worktree itself MEASURES with an out-of-repo TMPDIR,
@@ -1105,8 +1107,7 @@ fi
 # RESOLVE to a commit in the fixture, and that commit must be one of the commits
 # BEHIND, not the subject.
 if run 4 "the matched record's sha resolves to a commit behind the base" "$R_MOTIV"; then
-  m_sha=$(printf '%s\n' "$OUT" |
-    sed -n 's/^BASE-STALENESS: matched \([^ ]*\) .*/\1/p' | head -1)
+  m_sha=$(sed -n '/^BASE-STALENESS: matched \([^ ]*\) .*/{s/^BASE-STALENESS: matched \([^ ]*\) .*/\1/p;q;}' <<<"$OUT")
   case "$m_sha" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
       ok "matched-sha: the field is a 9-hex abbreviation, never the empty string" ;;
@@ -1321,8 +1322,7 @@ mut_matched=$(grep -c '^BASE-STALENESS: matched ' <<<"$OUT")
 OUT=$(cd "$R_RES" && bash "$ADVISORY" 2>&1)
 record_out "shipped run on the reserved fixture"
 ship_matched=$(grep -c '^BASE-STALENESS: matched ' <<<"$OUT")
-ship_declared=$(printf '%s\n' "$OUT" |
-  sed -n 's/^BASE-STALENESS: blast-radius \([0-9][0-9]*\) RECOGNISED .*/\1/p' | head -1)
+ship_declared=$(sed -n '/^BASE-STALENESS: blast-radius \([0-9][0-9]*\) RECOGNISED .*/{s/^BASE-STALENESS: blast-radius \([0-9][0-9]*\) RECOGNISED .*/\1/p;q;}' <<<"$OUT")
 if [ -z "$ship_declared" ]; then
   bad "sane-mutant: could NOT derive the shipped blast-radius count from its own output (derivation failed; not defaulted)"
 elif [ "$ship_declared" -gt 0 ] && [ "$ship_matched" -eq "$ship_declared" ] &&
