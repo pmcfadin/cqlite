@@ -293,7 +293,7 @@ else
   # the size+mtime fallback while Linux catches it. That is a real, platform-specific
   # weakening of a correctness guard, so the cap line — the fallback's own disclosure —
   # states the resolution the host actually gave (#2926 review H5).
-  dw_cap=$(sed -n 's/^tree-selftest: cap-line=//p' "$tmp/darwin-cap.out" | head -1)
+  dw_cap=$(sed -n '/^tree-selftest: cap-line=/{s/^tree-selftest: cap-line=//p;q;}' "$tmp/darwin-cap.out")
   case "$dw_cap" in
     *"untracked file(s) recorded by size+mtime; mtime resolution: WHOLE SECONDS on this host"*)
       ok "H5: a whole-seconds-only stat host DISCLOSES the reduced mtime resolution in tree-hash-cap:" ;;
@@ -337,7 +337,7 @@ FRACSHIM
     bad "H5: the %Fm datum was not used — the BSD record stayed whole-seconds"
     grep 'one-big' "$mfr.report" 2>/dev/null
   fi
-  fr_cap=$(sed -n 's/^tree-selftest: cap-line=//p' "$tmp/frac-cap.out" | head -1)
+  fr_cap=$(sed -n '/^tree-selftest: cap-line=/{s/^tree-selftest: cap-line=//p;q;}' "$tmp/frac-cap.out")
   case "$fr_cap" in
     *"mtime resolution:"*)
       bad "H5 control: a sub-second host still claims reduced resolution — the disclosure is unconditional: '$fr_cap'" ;;
@@ -409,11 +409,12 @@ lk="$tmp/lookup.report"
 } > "$lk"
 r_lk=$(mkrepo lookup-repo)
 lookup_field() { # lookup_field <escaped-path> <tag|value>
-  ( cd "$r_lk" && env AGENT_GATE_SUMMARY_FILE="$tmp/lookup-sentinel.txt" \
+  local lf_raw
+  lf_raw=$( cd "$r_lk" && env AGENT_GATE_SUMMARY_FILE="$tmp/lookup-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=report-lookup \
       AGENT_GATE_TREE_SELFTEST_LOOKUP="$lk|$1" \
-      bash "$r_lk/scripts/agent-gate.sh" 2>/dev/null ) \
-    | sed -n "s/^tree-selftest: report-$2=//p" | head -1
+      bash "$r_lk/scripts/agent-gate.sh" 2>/dev/null )
+  sed -n "/^tree-selftest: report-$2=/{s/^tree-selftest: report-$2=//p;q;}" <<<"$lf_raw"
 }
 if [ "$(lookup_field 'weird\tdir/Cargo.lock' tag)" = T ] \
    && [ "$(lookup_field 'weird\tdir/Cargo.lock' value)" = 1111111111111111111111111111111111111111 ]; then
