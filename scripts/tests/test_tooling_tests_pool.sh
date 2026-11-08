@@ -82,7 +82,7 @@ _ncpu=8; REPO_ROOT=/tmp
 . "$W/helpers.sh"
 _tt_reset
 _tt_add P 'ok-a' 'sleep 1'
-_tt_add P 'killed-worker' 'echo \$BASHPID >"$W/suite.pid"; sleep 30 & echo \$! >"$W/child.pid"; me=\$BASHPID; w=\$(ps -o ppid= -p \$me | tr -d " "); kill -9 \$w; wait'
+_tt_add P 'killed-worker' 'echo \$BASHPID >"$W/suite.pid"; sleep 30 & echo \$! >"$W/child.pid"; me=\$BASHPID; w=\$(ps -o ppid= -p \$me); w=\${w// /}; kill -9 \$w; wait'
 _tt_add P 'ok-b' 'sleep 1'
 : >"$W/c3.log"
 _tt_run_all "$W/c3.log" "$W/d3"
