@@ -237,17 +237,17 @@ assert_verdict "unknown-test-target-refuses"  REFUSE "cqlite-core/tests/does_not
 #     test-target index is empty, so NO .rs is allowed — even a REAL --test target
 #     file REFUSES, forcing the full gate. (*.md and python tests are path-only, so
 #     they stay ALLOW even without metadata.)
-no_meta_v=$(printf '%s\n' "cqlite-core/tests/write_read_roundtrip.rs" \
-  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --delta-classify 2>/dev/null \
-  | grep -E '^VERDICT: ' | head -1 | sed 's/^VERDICT: //')
+no_meta_v_out_=$(printf '%s\n' "cqlite-core/tests/write_read_roundtrip.rs" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --delta-classify 2>/dev/null)
+no_meta_v=$(grep -m1 -E '^VERDICT: ' <<<"$no_meta_v_out_" | sed 's/^VERDICT: //')
 if [ "$no_meta_v" = REFUSE ]; then
   ok "no-metadata-parser: a real --test target .rs REFUSES when metadata is unavailable (fail-closed)"
 else
   bad "no-metadata-parser: expected REFUSE with no metadata parser (got '$no_meta_v')"
 fi
-no_meta_md=$(printf '%s\n' "README.md" \
-  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --delta-classify 2>/dev/null \
-  | grep -E '^VERDICT: ' | head -1 | sed 's/^VERDICT: //')
+no_meta_md_out_=$(printf '%s\n' "README.md" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --delta-classify 2>/dev/null)
+no_meta_md=$(grep -m1 -E '^VERDICT: ' <<<"$no_meta_md_out_" | sed 's/^VERDICT: //')
 if [ "$no_meta_md" = ALLOW ]; then
   ok "no-metadata-parser: *.md still ALLOWs (path-only, independent of cargo metadata)"
 else
