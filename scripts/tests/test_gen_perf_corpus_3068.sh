@@ -184,7 +184,7 @@ if grep -q 'DESCRIBE KEYSPACE' "$GEN" &&
 else
   fail "generator does not capture/publish schema.cql (manifest would not be reproducible)"
 fi
-if grep -A6 'capture_schema() {' "$GEN" | grep -q 'die '; then
+if { _spw43=$(grep -A6 'capture_schema() {' "$GEN") && grep -q 'die ' <<<"$_spw43"; }; then
   pass "schema capture is fail-closed"
 else
   fail "schema capture does not fail closed"
