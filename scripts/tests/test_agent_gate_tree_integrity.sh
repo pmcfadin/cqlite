@@ -394,11 +394,12 @@ fi
 # one oversized blob — falls back to size+mtime, so the "can only weaken for one oversized
 # blob" claim was false. Values below the floor are clamped, and the clamp is disclosed.
 cap_field() { # cap_field <repo> <cap-value> <field>  (field: cap-line | fallbacks)
-  local cf_raw
+  local cf_raw cf_rc
   cf_raw=$( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/cap-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES="$2" \
-      bash "$1/scripts/agent-gate.sh" 2>/dev/null )
-  sed -n "/^tree-selftest: $3=/{s/^tree-selftest: $3=//p;q;}; /.*[ ]$3=\([^ ]*\).*/{s/.*[ ]$3=\([^ ]*\).*/\1/p;q;}" <<<"$cf_raw"
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ); cf_rc=$?
+  sed -n "/^tree-selftest: $3=/{s/^tree-selftest: $3=//p;q;}; /.*[ ]$3=\([^ ]*\).*/{s/.*[ ]$3=\([^ ]*\).*/\1/p;q;}" <<<"$cf_raw" || return $?
+  return "$cf_rc"      # the gate's status, as the old pipeline reported it under pipefail
 }
 for lowcap in 0 1 4095; do
   got=$(cap_field "$r1" "$lowcap" cap-line)
@@ -475,12 +476,13 @@ else
 fi
 
 validate_manifest() { # validate_manifest <repo> <file> <nul|nl> <head> <count> -> yes|no
-  local vm_raw
+  local vm_raw vm_rc
   vm_raw=$( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/validate-sentinel.txt" \
       AGENT_GATE_TREE_SELFTEST=validate-manifest \
       AGENT_GATE_TREE_SELFTEST_VALIDATE="$2|$3|$4|$5" \
-      bash "$1/scripts/agent-gate.sh" 2>/dev/null )
-  sed -n '/^tree-selftest: manifest-ok=/{s/^tree-selftest: manifest-ok=//p;q;}' <<<"$vm_raw"
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ); vm_rc=$?
+  sed -n '/^tree-selftest: manifest-ok=/{s/^tree-selftest: manifest-ok=//p;q;}' <<<"$vm_raw" || return $?
+  return "$vm_rc"
 }
 v_intact=$(validate_manifest "$r_t" "$mT1" nul "$t_head" "$body_n")
 v_trunc=$(validate_manifest "$r_t" "$mT1.trunc" nul "$t_head" "$body_n")
@@ -524,10 +526,11 @@ rm -f "$r_t/zz-untracked.txt"
 # DISARMING the carve-out (#2926 review). Benign only while the sentinel write also
 # fails — the day anything mkdir -p's the parent it is a guaranteed false FAIL.
 capture_exclude_rel() { # capture_exclude_rel <repo> <pinned-summary-path>
-  local cx_raw
+  local cx_raw cx_rc
   cx_raw=$( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$2" AGENT_GATE_TREE_SELFTEST=capture \
-      bash "$1/scripts/agent-gate.sh" 2>/dev/null )
-  sed -n '/^tree-selftest: exclude-rel=/{s/^tree-selftest: exclude-rel=//p;q;}' <<<"$cx_raw"
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ); cx_rc=$?
+  sed -n '/^tree-selftest: exclude-rel=/{s/^tree-selftest: exclude-rel=//p;q;}' <<<"$cx_raw" || return $?
+  return "$cx_rc"
 }
 mkdir -p "$r_t/existing"
 xr_have=$(capture_exclude_rel "$r_t" "$r_t/existing/sum.txt")
@@ -1713,8 +1716,7 @@ fi
 
 echo "=== phase 5: structural wiring (the mechanism cannot go inert) =============="
 
-_sp_cap=$(awk '/^record_result\(\) \{/,/^\}/' "$GATE")
-if grep -q '_assert_tree_integrity "\$1"' <<<"$_sp_cap"; then
+if _sp_cap=$(awk '/^record_result\(\) \{/,/^\}/' "$GATE") && grep -q '_assert_tree_integrity "\$1"' <<<"$_sp_cap"; then
   ok "WIRING: record_result() calls _assert_tree_integrity \"\$1\" (boundary chokepoint live)"
 else
   bad "WIRING: record_result() does NOT call the tree guard — the mechanism is inert on a real gate"
@@ -1747,16 +1749,14 @@ else
   bad "WIRING: _tree_meta_array's finalize would run inside the < <(…) subshell (fail-closed assignment discarded)"
 fi
 # B7: every capture artifact a SIDE lane can write must be per-lane, terminal included.
-_sp_cap=$(awk '/^_tree_finalize\(\) \{/,/^\}/' "$GATE")
-if grep -q 'tree-identity\.end\.\${BASHPID' <<<"$_sp_cap" \
+if _sp_cap=$(awk '/^_tree_finalize\(\) \{/,/^\}/' "$GATE") && grep -q 'tree-identity\.end\.\${BASHPID' <<<"$_sp_cap" \
    && grep -q 'tree-identity\.probe\.\${BASHPID' "$GATE"; then
   ok "WIRING: both the boundary probe AND the terminal capture use per-lane paths (no SIDE-lane race)"
 else
   bad "WIRING: the terminal capture path is not per-lane — concurrent SIDE lanes would race it"
 fi
 # B1: the identity is never split with `IFS=$'\t' read` (which collapses empty fields).
-_sp_cap=$(awk '/^_tree_capture_start\(\) \{/,/^\}/' "$GATE")
-if grep -q "IFS=\$'\\\\t' read -r TREE_START_HEAD" <<<"$_sp_cap"; then
+if _sp_cap=$(awk '/^_tree_capture_start\(\) \{/,/^\}/' "$GATE") && grep -q "IFS=\$'\\\\t' read -r TREE_START_HEAD" <<<"$_sp_cap"; then
   bad "WIRING: the start identity is still split with IFS=\$'\\t' read (empty fields collapse)"
 else
   ok "WIRING: the identity is split by _tree_split_identity, which preserves empty fields and validates each"
@@ -1977,8 +1977,7 @@ code_only() { sed 's/[[:space:]]*#.*$//'; }
 # component-set pre-flight's `_component_set_vsnap` (#4413 job 103) writes with `hash-object -w`
 # on purpose, into a THROWAWAY store addressed by --git-dir, never the shared ODB.
 tree_fns=$(awk '/^_tree_[A-Za-z0-9_]*\(\) \{/{f=1} f{print} /^\}/{f=0}' "$GATE")
-tree_fns_ho=$(grep 'hash-object' <<<"$tree_fns" | code_only)
-if grep -qE '(^|[[:space:]])-w([[:space:]]|$)' <<<"$tree_fns_ho"; then
+if tree_fns_ho=$(grep 'hash-object' <<<"$tree_fns" | code_only) && grep -qE '(^|[[:space:]])-w([[:space:]]|$)' <<<"$tree_fns_ho"; then
   bad "SIDE-EFFECTS: a hash-object call uses -w — the capture would write to the shared ODB"
 else
   ok "SIDE-EFFECTS: no hash-object call in the _tree_* capture helpers uses -w (nothing is written to the object database)"

@@ -214,9 +214,10 @@ emit_block() { python3 "$EXTRACT" emit "$1" "$2"; }
 # round 4, same macOS family as the bash 3.2 item).
 # findings_head N BLOCK — first N findings, captured first so no pipe closes early on the writer (#4451).
 findings_head() {
-  local n="$1" fh_all
-  fh_all=$(findings_of "$2")
+  local n="$1" fh_all fh_rc
+  fh_all=$(findings_of "$2"); fh_rc=$?
   head -"$n" <<<"$fh_all"
+  return "$fh_rc"      # the writer's status, as the old pipeline reported it under pipefail
 }
 
 findings_of() {
@@ -574,7 +575,7 @@ idiom_compile="$(compile_blocks "$IDIOM_FILE")"
 idiom_blocks="$(grep -c '^BLOCK	' <<<"$idiom_census")"
 idiom_apostrophe=0
 for ((bn = 1; bn <= idiom_blocks; bn++)); do
-  emit_blk_txt=$(emit_block "$IDIOM_FILE" "$bn"); grep -q "'" <<<"$emit_blk_txt" && idiom_apostrophe=1
+  emit_blk_txt=$(emit_block "$IDIOM_FILE" "$bn") && grep -q "'" <<<"$emit_blk_txt" && idiom_apostrophe=1
 done
 # THE SUBJECT IS THE IDIOM, NOT A FINDING COUNT. This file also contains a python HEREDOC at
 # `lib-ws0-fixtures.sh:149`, and since round 6 removed heredoc support that is a finding BY

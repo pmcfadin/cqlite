@@ -3377,8 +3377,7 @@ sp_line_of() {
   local f="$1" sig="$2" l hit=''
   while read -r l _; do
     [ -n "$l" ] || continue
-    _sp_cap=$(sed -n "${l}p" "$f" 2>/dev/null)
-    if grep -Fq -- "$sig" <<<"$_sp_cap"; then
+    if _sp_cap=$(sed -n "${l}p" "$f" 2>/dev/null) && grep -Fq -- "$sig" <<<"$_sp_cap"; then
       [ -z "$hit" ] || return 1     # ambiguous signature — refuse rather than guess
       hit="$l"
     fi

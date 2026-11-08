@@ -557,15 +557,15 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   lu=$(sed -n 's/^unit:  *//p' <<<"$out"); [ -n "$lu" ] && echo "$lu" >> "$UNITS_FILE"
   mp=$(systemctl --user show "$lu" -p MainPID --value 2>/dev/null)
   if [ -n "$mp" ] && [ -r "/proc/$mp/environ" ]; then
-    mp_environ=$(LC_ALL=C tr '\0' '\n' < "/proc/$mp/environ")
-    grep -q "SECRET_PROBE_3473=$probe" <<<"$mp_environ" \
+    mp_environ=$(LC_ALL=C tr '\0' '\n' < "/proc/$mp/environ") \
+      && grep -q "SECRET_PROBE_3473=$probe" <<<"$mp_environ" \
       && ok "4b.29 a caller variable REACHES the detached unit's environment" \
       || bad "4b.29 a caller variable REACHES the detached unit's environment" "absent"
     leak=0
     for c in /proc/[0-9]*/cmdline; do
       [ -r "$c" ] || continue
-      c_args=$(LC_ALL=C tr '\0' ' ' < "$c" 2>/dev/null)
-      grep -q "$probe" <<<"$c_args" && { leak=1; break; }
+      c_args=$(LC_ALL=C tr '\0' ' ' < "$c" 2>/dev/null) \
+        && grep -q "$probe" <<<"$c_args" && { leak=1; break; }
     done
     [ "$leak" -eq 0 ] && ok "4b.30 ...and appears in NO process command line" \
                       || bad "4b.30 the value leaked into a process command line" "found in argv"
@@ -1391,8 +1391,7 @@ else
 fi
 # The lock must be RELEASED after the reservation exists, not before — releasing early reopens the race,
 # holding it for the gate's lifetime would block every later launch in that directory.
-_sp_cap=$(sed -n '/flock -u 9/,/exec 8>&-/p' "$LAUNCHER")
-if grep -q 'flock -u 8' <<<"$_sp_cap"; then
+if _sp_cap=$(sed -n '/flock -u 9/,/exec 8>&-/p' "$LAUNCHER") && grep -q 'flock -u 8' <<<"$_sp_cap"; then
   ok "4b.149 the directory lock is released AFTER the reservation is acquired"
 else
   bad "4b.149 the directory lock is released after the reservation" "released too early, or never"
@@ -1455,8 +1454,7 @@ fi
 # The consequence: a LIVE run's heartbeat or log stays represented by a DEAD owner, so a later launch
 # reads the path as reclaimable, takes it as ITS summary, and two writers land on one file. Reproduced: a
 # launch succeeded with its heartbeat lock still naming pid 999999999.
-_sp_cap=$(sed -n '/A STALE MARKER MUST BE REPLACED/,/esac/p' "$LAUNCHER")
-if grep -q 'rm -f "$_art.launch-lock"' <<<"$_sp_cap"; then
+if _sp_cap=$(sed -n '/A STALE MARKER MUST BE REPLACED/,/esac/p' "$LAUNCHER") && grep -q 'rm -f "$_art.launch-lock"' <<<"$_sp_cap"; then
   ok "4b.151 a provably-stale extra marker is reclaimed, not left naming a dead owner"
 else
   bad "4b.151 a stale extra marker is reclaimed" "a live run would stay represented by a dead owner"
@@ -1957,8 +1955,8 @@ if [ -r "$_gi" ] && command -v git >/dev/null 2>&1; then
     _gi_n=$((_gi_n+1))
     mkdir -p "$_gw/$_sub" 2>/dev/null || continue
     echo 'fn evil() {}' > "$_gw/$_sub/evil.rs" 2>/dev/null || continue
-    _gi_ls=$( cd "$_gw" && git ls-files --others --exclude-standard 2>/dev/null )
-    if ! grep -q "^$_sub/evil.rs$" <<<"$_gi_ls"; then
+    if ! { _gi_ls=$( cd "$_gw" && git ls-files --others --exclude-standard 2>/dev/null ) \
+           && grep -q "^$_sub/evil.rs$" <<<"$_gi_ls"; }; then
       _gi_blind=$((_gi_blind+1)); echo "     INVISIBLE to tree-integrity: $_sub/evil.rs"
     fi
   done
@@ -2895,8 +2893,7 @@ fi
 # tree. Third time in this change a test of mine matched its own explanatory text (cf. 4b.187, which
 # matched the safe form it was meant to forbid). The property is "the script does not TELL anyone to
 # do it", so only emitted lines can violate it.
-_sp_cap=$(grep -E '^\s*echo ' "$LAUNCHER")
-if grep -q 'export XDG_RUNTIME_DIR to a 0700 dir you own' <<<"$_sp_cap"; then
+if _sp_cap=$(grep -E '^\s*echo ' "$LAUNCHER") && grep -q 'export XDG_RUNTIME_DIR to a 0700 dir you own' <<<"$_sp_cap"; then
   bad "4b.194 the runtime-dir refusal no longer advertises the XDG_RUNTIME_DIR bypass" \
       "still advertised in an emitted line"
 else
@@ -2998,15 +2995,13 @@ fi
 # This change corrected the "~850s" bound in four DOCUMENTATION sites and left the one an operator
 # actually reads — the reader's own STALLED output — untouched. Correcting a claim at the sites you
 # happen to notice is not correcting it; the disclosure path needs its own census.
-_sp_cap=$(grep -n 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh")
-if grep -qE '~?8[0-9][0-9] ?s' <<<"$_sp_cap"; then
+if _sp_cap=$(grep -n 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh") && grep -qE '~?8[0-9][0-9] ?s' <<<"$_sp_cap"; then
   bad "4b.202 the emitted STALLED guidance carries no fixed wait figure" \
       "a fixed duration is still printed to operators"
 else
   ok "4b.202 the emitted STALLED guidance carries no fixed wait figure"
 fi
-_sp_cap=$(grep -E 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh")
-if grep -q 'LONGEST COMPONENT OF THIS RUN' <<<"$_sp_cap"; then
+if _sp_cap=$(grep -E 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh") && grep -q 'LONGEST COMPONENT OF THIS RUN' <<<"$_sp_cap"; then
   ok "4b.203 the emitted STALLED guidance tells the reader to DERIVE the bound"
 else
   bad "4b.203 the emitted STALLED guidance tells the reader to derive the bound" "not found"
@@ -3108,8 +3103,7 @@ _locks_left() {  # <summary> <log> -> prints the surviving reservation paths, on
 # The function itself, extracted and run: the two hazards its comment names are the two the
 # acquisition loop was fixed for (job 269 / job 319), and a second implementation of that idiom is a
 # second place for it to regress.
-_sp_cap=$(sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER")
-if ! grep -q '^_release_reservations()' <<<"$_sp_cap"; then
+if ! { _sp_cap=$(sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER") && grep -q '^_release_reservations()' <<<"$_sp_cap"; }; then
   bad "4b.204 _release_reservations exists and could be extracted" "no such function in the launcher"
   bad "4b.205 _release_reservations survives an empty _extra_locks under set -u" "not run: extraction failed"
   bad "4b.206 a second release does not delete a peer's lock" "not run: extraction failed"
@@ -3339,8 +3333,7 @@ fi
 # And the ONE path that deliberately does NOT release must SAY so, or its omission reads as the same
 # oversight this finding was: the post-launch heartbeat refusal stops an already-started gate, whose
 # processes may still be draining, so handing its paths to a peer is worse than the litter.
-_sp_cap=$(sed -n '/^if \[ "\$_hb_seen" -ne 1 \]; then/,/^fi$/p' "$LAUNCHER")
-if grep -q 'DOES \*NOT\* RELEASE' <<<"$_sp_cap"; then
+if _sp_cap=$(sed -n '/^if \[ "\$_hb_seen" -ne 1 \]; then/,/^fi$/p' "$LAUNCHER") && grep -q 'DOES \*NOT\* RELEASE' <<<"$_sp_cap"; then
   ok "4b.214 the post-launch refusal declares why it keeps the reservation"
 else
   bad "4b.214 the post-launch refusal declares why it keeps the reservation" \
