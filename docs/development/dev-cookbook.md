@@ -57,6 +57,28 @@ See `docs/profiling.md`.
 ./scripts/profile.sh report          # ranked bottleneck report + history.jsonl ledger
 ```
 
+### User-space profiling on the dev box (`wm-bench` + `perf record -g`, #4472)
+
+The dev box has `perf` with `kernel.perf_event_paranoid = 2` and `kptr_restrict = 1`: user-space
+events work (`perf stat -e cycles -- true` counts `cycles:u`), kernel and system-wide events do not.
+Check what a box offers with `bash scripts/perf-capability.sh --tier` (`full`, `user` or
+`none(<reason>)`); the gate's `accelerators:` line shows `perf=user` here.
+
+```bash
+wm-bench --cpus                              # the reserved set: 12-15,28-31
+wm-bench perf record -g -o /tmp/perf.data -- target/release/cqlite <args>   # user-space profile
+perf report -i /tmp/perf.data --no-children | head -50
+```
+
+- `wm-bench <cmd>` runs `<cmd>` on the reserved quiet cores (CPUs 12-15,28-31: 4 physical cores plus
+  SMT siblings, one L3) and moves the rest of `dev` off them while it runs. **Size thread pools for 8**
+  (`RAYON_NUM_THREADS=8`, tokio worker threads, etc.) and run **one `wm-bench` at a time**.
+- Never `kill -9` the `wm-bench` helper: the cores stay reserved until the next run ends.
+- Build with symbols (`CARGO_PROFILE_RELEASE_DEBUG=true`, or the `perfsym` profile) so frames resolve.
+- **Not available on this box:** kernel symbols and frames, `perf record -a` / `perf stat -a` /
+  `-C <cpu>` (CPU-wide), and anything else that needs `perf_event_paranoid <= 0`. The perf rig under
+  `scripts/perf/` needs that (it sets `-1` itself via sudo) and so cannot run here.
+
 FD/RSS resource-leak soak (long-running open/scan/drop loop): see
 `docs/development/soak-resource-leak.md`.
 
