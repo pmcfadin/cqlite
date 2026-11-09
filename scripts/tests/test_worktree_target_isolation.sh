@@ -52,7 +52,7 @@ run_where() {  # <worktree> <target-dir> -> prints the MANIFEST_DIR the test bin
       cargo test --offline -q --test where -- --nocapture 2>&1 ) | sed -n 's/^MANIFEST_DIR=//p'
 }
 gate_dir() {  # <worktree> -> CARGO_TARGET_DIR the gate would hand cargo
-  ( cd "$1" && CARGO_TARGET_DIR="${2-$SHARED}" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
+  ( cd "$1" && env -u CQLITE_SHARED_TARGET CARGO_TARGET_DIR="${2-$SHARED}" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
 }
 
 # 1. control: shared dir, no isolation
@@ -80,14 +80,17 @@ got=$(run_where "$B" "$DB")
 [ "$got" = "$B" ] && ok "B still passes after A is removed" || bad "after removing A, B reported '$got'"
 
 # 4. resolution properties
-( cd "$B" && . scripts/lib/worktree-target-dir.sh
+( cd "$B" && unset CQLITE_SHARED_TARGET && . scripts/lib/worktree-target-dir.sh
   [ "$(CARGO_TARGET_DIR=$DB gate_worktree_target_dir "$B")" = "$DB" ] ) && ok "idempotent: an inherited per-worktree dir resolves to itself" || bad "not idempotent"
 other=$(mktemp -d "$T/other.XXXXXX")
-( cd "$B" && . scripts/lib/worktree-target-dir.sh
+( cd "$B" && unset CQLITE_SHARED_TARGET && . scripts/lib/worktree-target-dir.sh
   r=$(CARGO_TARGET_DIR=$DB gate_worktree_target_dir "$other"); [ "$r" != "$DB" ] && case "$r" in "$SHARED"/wt/*) [ "${r#"$SHARED"/wt/}" = "${r##*/}" ] ;; *) false ;; esac ) \
   && ok "nested gate on another root moves to its own sibling dir, no wt/<h>/wt/<h> nesting" || bad "inherited suffix not stripped for a different root"
 ( cd "$B" && [ "$(CQLITE_SHARED_TARGET=1 CARGO_TARGET_DIR=$SHARED bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" = "$SHARED" ] ) && ok "CQLITE_SHARED_TARGET=1 opts out" || bad "opt-out ignored"
-( cd "$B" && [ -z "$(env -u CARGO_TARGET_DIR bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" ] ) && ok "unset CARGO_TARGET_DIR stays unset (cargo's default <root>/target is already per-checkout)" || bad "unset var was set"
+( cd "$B" && [ -z "$(env -u CARGO_TARGET_DIR -u CQLITE_SHARED_TARGET bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" ] ) && ok "unset CARGO_TARGET_DIR stays unset (cargo's default <root>/target is already per-checkout)" || bad "unset var was set"
+
+# 5. a fresh base gets cargo's CACHEDIR.TAG from the helper (the prune refuses a base without one)
+[ -f "$SHARED/CACHEDIR.TAG" ] && grep -q '^Signature: 8a477f597d28d172789f06886806bc55' "$SHARED/CACHEDIR.TAG" && ok "fresh base carries a valid CACHEDIR.TAG" || bad "no CACHEDIR.TAG on the base"
 
 printf '\n==== worktree target isolation self-test: PASS=%d FAIL=%d ====\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

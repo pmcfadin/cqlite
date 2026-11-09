@@ -19,7 +19,7 @@
 # worktree gets its own workspace artifacts. Third-party compiles still hit sccache's shared
 # object cache (RUSTC_WRAPPER), which is what keeps a new worktree's first build cheap.
 # `<dir>/.worktree-root` records the root so cargo-target-prune.sh can delete the dir once
-# that worktree is gone. A base that already ends in `/wt/<16 hex>` (inherited from an outer
+# that worktree is gone. A base that already ends in `/wt/<16 hex>` AND carries our `.worktree-root` marker (inherited from an outer
 # gate or shell) is stripped first, so resolution is idempotent and a nested gate on a
 # different root moves to its own dir rather than nesting.
 #
@@ -34,7 +34,7 @@
 gate_worktree_target_base() {
   local b=$1
   case "$b" in
-    */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) b=${b%/wt/*} ;;
+    */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) [ -f "$b/.worktree-root" ] && b=${b%/wt/*} ;;
   esac
   printf '%s' "$b"
 }
@@ -46,11 +46,17 @@ gate_worktree_target_dir() {
   root=$(cd "${1:-.}" 2>/dev/null && pwd -P) || return 1
   base=$(gate_worktree_target_base "$CARGO_TARGET_DIR")
   if command -v sha256sum >/dev/null 2>&1; then
-    h=$(printf '%s' "$root" | sha256sum | cut -c1-16)
+    h=$(sha256sum <<<"$root" | cut -c1-16)
   else
-    h=$(printf '%s' "$root" | shasum -a 256 | cut -c1-16)
+    h=$(shasum -a 256 <<<"$root" | cut -c1-16)
   fi
   dir="$base/wt/$h"
+  # The prune refuses a dir without cargo's CACHEDIR.TAG, and cargo only writes one inside the
+  # dir it builds in, so a fresh base needs the standard tag from us.
+  if [ ! -f "$base/CACHEDIR.TAG" ]; then
+    mkdir -p "$base" 2>/dev/null || return 1
+    printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cqlite (worktree-target-dir.sh).\n# For information about cache directory tags see https://bford.info/cachedir/\n' >"$base/CACHEDIR.TAG" 2>/dev/null || true
+  fi
   mkdir -p "$dir" 2>/dev/null || return 1
   printf '%s\n' "$root" >"$dir/.worktree-root" 2>/dev/null || true
   printf '%s' "$dir"

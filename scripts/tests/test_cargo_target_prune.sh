@@ -178,5 +178,24 @@ shim systemctl-inactive 'case " $* " in *" disable "*) exit 1;; *" is-active "*)
 CQLITE_PRUNE_SYSTEMCTL="$tmp/systemctl-inactive" run --uninstall-timer
 check "uninstall: disable fails but is-active=inactive -> UNINSTALLED, files removed" '[ "$rc" = 0 ] && grep -q "^RESULT: UNINSTALLED$" <<<"$out" && [ ! -e "$svc" ] && [ ! -e "${svc%.service}.timer" ]'
 
+# #4387: per-worktree dirs. A FRESH base made by the gate helper has no cargo CACHEDIR.TAG of its
+# own; the helper writes one, so the prune accepts the base and can remove an orphaned wt dir.
+HELPER="$REPO_ROOT/scripts/lib/worktree-target-dir.sh"
+base="$tmp/fresh-base"; live="$tmp/live-wt"; gone="$tmp/gone-wt"
+mkdir -p "$live" "$gone"; : >"$live/.git"; : >"$gone/.git"
+dl=$(CARGO_TARGET_DIR="$base" bash "$HELPER" "$live"); dg=$(CARGO_TARGET_DIR="$base" bash "$HELPER" "$gone")
+rm -rf "$gone"
+run --target "$base"
+check "fresh base (no cargo CACHEDIR.TAG of its own) still prunes an orphaned wt dir" '[ "$rc" = 0 ] && grep -q "orphan-worktree-dirs-removed=1" <<<"$out" && [ ! -d "$dg" ]'
+check "a live worktree's wt dir is kept" '[ -d "$dl" ] && [ -f "$dl/.worktree-root" ]'
+run --target "$dl" --dry-run
+check "a marked wt/<hash> target is widened to the shared base" 'grep -q "target=$(cd "$base" && pwd -P) " <<<"$out"'
+
+# A hand-configured target that merely ends in wt/<16 hex> has no marker: never widened.
+mk_target; manual="$T/wt/0123456789abcdef"; mkdir -p "$manual"; cp "$T/CACHEDIR.TAG" "$manual/CACHEDIR.TAG"
+mkdir -p "$manual/debug/.fingerprint"; : >"$manual/debug/.cargo-lock"
+run --target "$manual" --dry-run
+check "an unmarked .../wt/<16 hex> target is NOT widened to its parent" 'grep -q "target=$(cd "$manual" && pwd -P) " <<<"$out" && ! grep -q "profiles=2" <<<"$out"'
+
 echo "PASS=$PASS FAIL=$FAIL SKIP=0"
 [ "$FAIL" = 0 ]

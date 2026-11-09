@@ -164,8 +164,9 @@ if [ -z "$target" ] || [ ! -d "$target" ]; then
 fi
 target=$(cd "$target" && pwd -P)
 # Run from a gate shell, CARGO_TARGET_DIR is the per-worktree dir (#4387): prune the shared base.
+# Widen only when the dir carries the marker the gate writes; a hand-configured .../wt/<hex> is left as given.
 case "$target" in
-  */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) target=${target%/wt/*} ;;
+  */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) [ -f "$target/.worktree-root" ] && target=${target%/wt/*} ;;
 esac
 if [ "$target" = / ] || [ "$target" = "$(cd "$HOME" && pwd -P)" ] || [ ! -f "$target/CACHEDIR.TAG" ]; then
   echo "PRUNE: refusing $target: not a cargo target dir (no CACHEDIR.TAG)"; result ERROR; exit 1
