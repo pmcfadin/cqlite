@@ -89,7 +89,21 @@ other=$(mktemp -d "$T/other.XXXXXX")
 ( cd "$B" && [ "$(CQLITE_SHARED_TARGET=1 CARGO_TARGET_DIR=$SHARED bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" = "$SHARED" ] ) && ok "CQLITE_SHARED_TARGET=1 opts out" || bad "opt-out ignored"
 ( cd "$B" && [ -z "$(env -u CARGO_TARGET_DIR -u CQLITE_SHARED_TARGET bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" ] ) && ok "unset CARGO_TARGET_DIR stays unset (cargo's default <root>/target is already per-checkout)" || bad "unset var was set"
 
-# 5. a fresh base gets cargo's CACHEDIR.TAG from the helper (the prune refuses a base without one)
+# 5. cargo's other target-dir sources: CARGO_BUILD_TARGET_DIR and `[build] target-dir` in config
+bd=$( cd "$B" && env -u CQLITE_SHARED_TARGET -u CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR="$T/envbase" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
+case "$bd" in "$T"/envbase/wt/*) ok "CARGO_BUILD_TARGET_DIR is isolated too (exported as CARGO_TARGET_DIR)" ;; *) bad "CARGO_BUILD_TARGET_DIR gave '$bd'" ;; esac
+git -C "$T/main" worktree add -q "$T/C" -b c >/dev/null 2>&1
+mkdir -p "$T/C/.cargo"; printf '[build]\ntarget-dir = "%s/cfgbase"\n' "$T" >"$T/C/.cargo/config.toml"
+cd_=$( cd "$T/C" && env -u CQLITE_SHARED_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
+case "$cd_" in "$T"/cfgbase/wt/*) ok "a .cargo/config.toml build.target-dir is isolated too" ;; *) bad "config build.target-dir gave '$cd_'" ;; esac
+
+# 6. idempotent without the marker: `cargo clean` deletes the dir (marker included)
+( cd "$B" && unset CQLITE_SHARED_TARGET && . scripts/lib/worktree-target-dir.sh
+  rm -rf "$DB"
+  r=$(CARGO_TARGET_DIR=$DB gate_worktree_target_dir "$B")
+  [ "$r" = "$DB" ] && [ "$(cat "$DB/.worktree-root")" = "$B" ] ) && ok "after a cargo-clean-style wipe the same target resolves to itself (no nesting) and the marker is rewritten" || bad "wiped target nested or lost its marker"
+
+# 7. a fresh base gets cargo's CACHEDIR.TAG from the helper (the prune refuses a base without one)
 [ -f "$SHARED/CACHEDIR.TAG" ] && grep -q '^Signature: 8a477f597d28d172789f06886806bc55' "$SHARED/CACHEDIR.TAG" && ok "fresh base carries a valid CACHEDIR.TAG" || bad "no CACHEDIR.TAG on the base"
 
 printf '\n==== worktree target isolation self-test: PASS=%d FAIL=%d ====\n' "$PASS" "$FAIL"

@@ -19,37 +19,55 @@
 # worktree gets its own workspace artifacts. Third-party compiles still hit sccache's shared
 # object cache (RUSTC_WRAPPER), which is what keeps a new worktree's first build cheap.
 # `<dir>/.worktree-root` records the root so cargo-target-prune.sh can delete the dir once
-# that worktree is gone. A base that already ends in `/wt/<16 hex>` AND carries our `.worktree-root` marker (inherited from an outer
-# gate or shell) is stripped first, so resolution is idempotent and a nested gate on a
-# different root moves to its own dir rather than nesting.
+# that worktree is gone; it is the PRUNE's ownership proof only. Recognising an already-isolated
+# target does NOT depend on it (`cargo clean` deletes it): a target ending in `/wt/<h>` where
+# `<h>` is THIS checkout's hash resolves to itself, and the marker is rewritten every call.
+# A target ending in `/wt/<other 16 hex>` that carries a marker belongs to an outer gate on a
+# different root: it is stripped so a nested gate gets a sibling dir rather than nesting.
+#
+# The EFFECTIVE base follows cargo's own precedence: CARGO_TARGET_DIR, then
+# CARGO_BUILD_TARGET_DIR, then the `build.target-dir` config (read with
+# `cargo metadata --no-deps`, only when neither variable is set). The result is always exported
+# as CARGO_TARGET_DIR by the gate, which overrides all three.
 #
 # USAGE
 #   worktree-target-dir.sh [REPO_ROOT]     print the isolated dir (creates it + marker); rc 1
 #                                          with no output when isolation does not apply
 #   source it and call gate_worktree_target_dir REPO_ROOT
 #
-# Applies only when CARGO_TARGET_DIR is set to an absolute path: unset means cargo's default
-# `<root>/target`, already per-checkout. Opt out with CQLITE_SHARED_TARGET=1.
+# Does not apply when no ABSOLUTE base resolves, or the resolved base lies inside the checkout
+# (cargo's default `<root>/target` is already per-checkout). Opt out with CQLITE_SHARED_TARGET=1.
 
-gate_worktree_target_base() {
-  local b=$1
-  case "$b" in
-    */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) [ -f "$b/.worktree-root" ] && b=${b%/wt/*} ;;
-  esac
-  printf '%s' "$b"
+gate_worktree_target_hash() {  # <physical root>
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum <<<"$1" | cut -c1-16
+  else
+    shasum -a 256 <<<"$1" | cut -c1-16
+  fi
+}
+
+# gate_worktree_target_effective <root>: cargo's effective target dir, or rc 1 if none is absolute.
+gate_worktree_target_effective() {
+  local b="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-}}"
+  if [ -z "$b" ]; then
+    b=$(cd "$1" 2>/dev/null && cargo metadata --no-deps --format-version 1 2>/dev/null \
+          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+  fi
+  case "$b" in /*) printf '%s' "$b" ;; *) return 1 ;; esac
 }
 
 gate_worktree_target_dir() {
   local root base h dir
   [ "${CQLITE_SHARED_TARGET:-0}" = 1 ] && return 1
-  case "${CARGO_TARGET_DIR:-}" in /*) ;; *) return 1 ;; esac
   root=$(cd "${1:-.}" 2>/dev/null && pwd -P) || return 1
-  base=$(gate_worktree_target_base "$CARGO_TARGET_DIR")
-  if command -v sha256sum >/dev/null 2>&1; then
-    h=$(sha256sum <<<"$root" | cut -c1-16)
-  else
-    h=$(shasum -a 256 <<<"$root" | cut -c1-16)
-  fi
+  base=$(gate_worktree_target_effective "$root") || return 1
+  case "$base/" in "$root"/*) return 1 ;; esac   # checkout-local default: already per-worktree
+  h=$(gate_worktree_target_hash "$root")
+  case "$base" in
+    */wt/"$h") base=${base%/wt/*} ;;
+    */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+      [ -f "$base/.worktree-root" ] && base=${base%/wt/*} ;;
+  esac
   dir="$base/wt/$h"
   # The prune refuses a dir without cargo's CACHEDIR.TAG, and cargo only writes one inside the
   # dir it builds in, so a fresh base needs the standard tag from us.

@@ -406,11 +406,11 @@ member does not include the checkout's absolute path, so with one exported `CARG
 worktree B reuses the test binaries worktree A built, and they carry A's
 `env!("CARGO_MANIFEST_DIR")`: B fails with "No such file" once A is deleted, and while A exists B
 silently reads A's `test-data`/fixtures (a gate could certify B against another branch's files).
-When `CARGO_TARGET_DIR` is set to an absolute path, every gate mode (full, `--lite`, `--only`,
+When cargo's effective target dir is an absolute path outside the checkout (`CARGO_TARGET_DIR`, else `CARGO_BUILD_TARGET_DIR`, else `[build] target-dir` via `cargo metadata`), every gate mode (full, `--lite`, `--only`,
 `--delta`, `--recertify`) now resolves `<base>/wt/<16 hex sha256 of the physical checkout root>`
 before any cargo call (`scripts/lib/worktree-target-dir.sh`), so the SIDE lane's
 `agent-gate-side/<component>` dirs and the disk admission's measured dir are per worktree too.
-Third-party compiles stay cheap through sccache. An inherited `/wt/<hash>` suffix is stripped first
+Third-party compiles stay cheap through sccache. A target already ending in this checkout's own `/wt/<hash>` resolves to itself (no marker needed, so `cargo clean` cannot cause nesting); another root's marked `/wt/<hash>` suffix is stripped first
 (idempotent; a nested gate on another root gets its own sibling). `<dir>/.worktree-root` records
 the root. Opt out with `CQLITE_SHARED_TARGET=1`; unset `CARGO_TARGET_DIR` already means the
 per-checkout `<root>/target`. Cost: a new worktree's first build compiles its own workspace

@@ -191,6 +191,14 @@ check "a live worktree's wt dir is kept" '[ -d "$dl" ] && [ -f "$dl/.worktree-ro
 run --target "$dl" --dry-run
 check "a marked wt/<hash> target is widened to the shared base" 'grep -q "target=$(cd "$base" && pwd -P) " <<<"$out"'
 
+# After `cargo clean` removes the dir and marker, the gate re-resolves to the SAME dir (no nesting),
+# rewrites the marker, and the prune owns it again.
+rm -rf "$dl"
+dl2=$(CARGO_TARGET_DIR="$dl" bash "$HELPER" "$live")
+check "wiped per-worktree dir re-resolves to itself and regains its marker" '[ "$dl2" = "$dl" ] && [ -f "$dl/.worktree-root" ]'
+run --target "$dl" --dry-run
+check "the prune widens the re-marked dir to the base" 'grep -q "target=$(cd "$base" && pwd -P) " <<<"$out"'
+
 # A hand-configured target that merely ends in wt/<16 hex> has no marker: never widened.
 mk_target; manual="$T/wt/0123456789abcdef"; mkdir -p "$manual"; cp "$T/CACHEDIR.TAG" "$manual/CACHEDIR.TAG"
 mkdir -p "$manual/debug/.fingerprint"; : >"$manual/debug/.cargo-lock"
