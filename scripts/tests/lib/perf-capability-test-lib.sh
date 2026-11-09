@@ -290,6 +290,25 @@ EOF
   chmod +x "$perfbin/perf"
 }
 
+# ---- #4472 tier helpers: the user-space tier cases (--state / --tier) share these -----------
+tierproc="$tmp/tierproc"; mkdir -p "$tierproc"
+noperf="$tmp/tier-noperf-bin"; mkdir -p "$noperf"
+tier_run() { # tier_run <mode> <paranoid> <kptr> <withperf:1|0>; prints "<out>~<rc>"
+  local mode="$1" par="$2" kp="$3" wp="$4" out rc
+  printf '%s\n' "$par" >"$tierproc/perf_event_paranoid"; printf '%s\n' "$kp" >"$tierproc/kptr_restrict"
+  : >"$PERFSHIM_LOG"
+  if [ "$wp" = 1 ]; then
+    out=$(CQLITE_PERF_PROC_DIR="$tierproc" PATH="$perfbin:$PATH" bash "$PERFLIB" "$mode" 2>&1); rc=$?
+  else
+    out=$(CQLITE_PERF_PROC_DIR="$tierproc" PATH="$noperf" "$BASH" "$PERFLIB" "$mode" 2>&1); rc=$?
+  fi
+  printf '%s~%s' "$out" "$rc"
+}
+tier_fail=0
+tier_expect() { # tier_expect <label> <got> <want-out> <want-rc>
+  [ "$2" = "$3~$4" ] || { bad "perf-capability tier: $1 -> '$2' (expected '$3~$4')"; tier_fail=1; }
+}
+
 # perf_test_real_dropin_state [path]: the content-AND-metadata identity of the REAL
 # managed drop-in, for a BEFORE/AFTER "this run changed nothing" comparison.
 #

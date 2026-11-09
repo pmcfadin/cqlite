@@ -364,7 +364,14 @@ test asserts both halves: the substitution count statically, and the extracted p
 re-executed with an unresolvable `PATH` under xtrace subshell counting (so a
 stderr-silenced exec cannot hide). State values (Linux only):
 - `perf=ok` — unprivileged per-CPU profiling **and** kernel symbol resolution available.
-- `perf=paranoid-<N>` — `perf_event_paranoid = N >= 1`. Cumulative: `>= 1` forbids
+- `perf=user` — the **user-space tier** (#4472): `perf_event_paranoid` is 1 or 2 (or paranoid <= 0 with
+  `kptr_restrict != 0`) **and** a `perf` binary is on `PATH`. User-space events (`cycles:u`,
+  `perf record -g` of one process) work; kernel symbols and CPU-wide or system-wide events do not.
+  Like every state it is a free read (the PATH scan uses builtins only); the functional probe
+  (`perf stat -e cycles:u -- true`) is `bash scripts/perf-capability.sh --tier`, which prints
+  `full`, `user` or `none(<reason>)`. Without a `perf` binary the old `paranoid-<N>` /
+  `kptr-restricted` answer is kept, so `user` is never claimed for a box that cannot run perf.
+- `perf=paranoid-<N>` — `perf_event_paranoid = N >= 1` (and, since #4472, N >= 3, or no `perf` on PATH). Cumulative: `>= 1` forbids
   **CPU-wide** event access, which is exactly what the mandated `perf stat -C <cpu>`
   needs, so it is **denied**. Agent images ship `4`; on Debian/Ubuntu kernels `>= 3`
   denies unprivileged perf entirely. This is a **permission** verdict whose "access
@@ -375,7 +382,7 @@ stderr-silenced exec cannot hide). State values (Linux only):
 - `perf=absent` — the `/proc` controls are not present (container without a writable
   procfs → tune the HOST). `perf=unknown` — present but unparseable, never guessed.
 
-Anything but `ok` on a box you intend to measure means **re-run
+`ok` is the FULL tier and is what kernel or system-wide work needs; `user` suffices for user-space profiling only. Anything but `ok` on a box you intend to measure with `perf stat -C` or kernel symbols means **re-run
 the former bootstrap script (`bootstrap-agent-machine.sh`, removed in #4413)** (installs + applies + verifies
 `/etc/sysctl.d/99-cqlite-perf.conf`), not "perf is unavailable here". Rationale
 (`-1`, not `1`), the BPF-still-needs-sudo caveat, the single-tenant security posture

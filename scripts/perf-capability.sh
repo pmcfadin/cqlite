@@ -815,7 +815,8 @@ perf_capability_probe_user() {
     out=$(LC_ALL=C perf stat -x, -e cycles:u -- true 2>&1); rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
-    printf 'perf-stat-failed rc=%s: %s' "$rc" "$(printf '%s' "$out" | tr '\n' ';' | cut -c1-160)"
+    out=$(tr '\n' ';' <<<"$out" | cut -c1-160)
+    printf 'perf-stat-failed rc=%s: %s' "$rc" "$out"
     return 1
   fi
   perf_capability_cycles_result "$out"
@@ -1011,10 +1012,10 @@ perf_capability_cycles_result() {
 }
 
 perf_capability_usage() {
-  printf 'usage: %s --token | --state | --tier | --verify | --verify-unpriv | --drop-in | --drop-in-path\n' "${0##*/}"
+  printf 'usage: %s --token | --verify | --verify-unpriv | --drop-in | --drop-in-path\n' "${0##*/}"
   printf '  --token         free /proc capability read: ok|paranoid-<N>|kptr-restricted|absent|unknown\n'
   printf '  --state         the gate perf= value: --token, but user where paranoid <= 2 and perf is on PATH\n'
-  printf '  --tier          full | user | none(<reason>); user runs perf stat -e cycles:u -- true (rc 0 = full/user)\n'
+  printf '  --tier          full, user or none(<reason>); user runs perf stat -e cycles:u -- true (rc 0 = full/user)\n'
   printf '  --verify        functional check AS THIS USER: perf stat -C 0 -e cycles (rc 0 = it worked\n'
   printf '                  for THIS identity; run as root that proves nothing about an agent process)\n'
   printf '  --verify-unpriv the same check as an UNPRIVILEGED identity (drops privilege when root);\n'

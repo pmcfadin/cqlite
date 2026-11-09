@@ -1680,6 +1680,66 @@ rs_probe perf_capability_sandbox_file_ok_resolved "$rs_root/inside/file.conf" \
   || { bad "perf-capability: sandbox_file_ok_resolved ACCEPTED a '/./' spelling"; rs_fail=1; }
 [ "$rs_fail" -ne 0 ] || ok "perf-capability: both RESOLVING validators refuse a relative candidate (even one resolving inside the sandbox from the current cwd) and a non-canonical './' or '../' absolute spelling, while accepting the absolute canonical spelling of the same directory and file (#3261 roborev-35)"
 
+# ---- #4472: the USER-SPACE tier (--state / --tier) ------------------------------------------
+# One case per tier (helpers: tier_run/tier_expect in perf-capability-test-lib.sh). The proc seam supplies the controls, a PATH shim supplies perf (or its
+# absence), so none of this touches the real /proc or the real perf.
+mkperfshim 123456
+# FULL: paranoid<=0 and kptr 0. Decided by the controls; perf is never exec'd.
+tier_expect "full (-1/0, perf present)" "$(tier_run --tier -1 0 1)" full 0
+tier_expect "full (0/0, perf present)"  "$(tier_run --tier 0 0 1)" full 0
+[ ! -s "$PERFSHIM_LOG" ] || { bad "perf-capability tier: the FULL tier exec'd perf ($(head -1 "$PERFSHIM_LOG"))"; tier_fail=1; }
+tier_expect "full needs no perf binary on PATH" "$(tier_run --tier -1 0 0)" full 0
+# USER: paranoid 1..2, or kptr-restricted at paranoid<=0, with perf present and the probe passing.
+tier_expect "user (2/1)" "$(tier_run --tier 2 1 1)" user 0
+tier_expect "user (1/0)" "$(tier_run --tier 1 0 1)" user 0
+tier_expect "user (0/1: kernel frames hidden, user events fine)" "$(tier_run --tier 0 1 1)" user 0
+grep -q 'stat -x, -e cycles:u -- true' "$PERFSHIM_LOG" \
+  || { bad "perf-capability tier: the user probe was not 'perf stat -x, -e cycles:u -- true' (log: $(head -1 "$PERFSHIM_LOG"))"; tier_fail=1; }
+# NONE: the probe must be honoured, not merely attempted.
+mkperfshim_raw 1 ''
+case "$(tier_run --tier 2 1 1)" in
+  'none(probe-failed: perf-stat-failed rc=1'*'~1') ;;
+  *) bad "perf-capability tier: a perf whose probe exits 1 did not give none(probe-failed: ...) ($(tier_run --tier 2 1 1))"; tier_fail=1 ;;
+esac
+mkperfshim '<not supported>'
+case "$(tier_run --tier 2 1 1)" in
+  'none(probe-failed: counter-not-supported'*'~1') ;;
+  *) bad "perf-capability tier: rc-0 perf printing <not supported> did not give none ($(tier_run --tier 2 1 1))"; tier_fail=1 ;;
+esac
+mkperfshim 0
+case "$(tier_run --tier 2 1 1)" in
+  'none(probe-failed: zero-cycles)~1') ;;
+  *) bad "perf-capability tier: a flat-zero cycles count did not give none ($(tier_run --tier 2 1 1))"; tier_fail=1 ;;
+esac
+mkperfshim_raw 0
+case "$(tier_run --tier 2 1 1)" in
+  'none(probe-failed: no-cycles-row'*'~1') ;;
+  *) bad "perf-capability tier: rc-0 perf with no cycles row did not give none ($(tier_run --tier 2 1 1))"; tier_fail=1 ;;
+esac
+mkperfshim 123456
+tier_expect "none: paranoid 2 but no perf binary" "$(tier_run --tier 2 1 0)" 'none(paranoid-2)' 1
+tier_expect "none: paranoid 3 denies user events too" "$(tier_run --tier 3 1 1)" 'none(paranoid-3)' 1
+tier_expect "none: paranoid 4" "$(tier_run --tier 4 1 1)" 'none(paranoid-4)' 1
+tier_expect "none: unparseable control" "$(tier_run --tier garbage 0 1)" 'none(unknown)' 1
+# --state is the gate's value: the same classification WITHOUT the probe (free path).
+tier_expect "state ok (full)"           "$(tier_run --state -1 0 1)" ok 0
+tier_expect "state user (2/1, perf)"    "$(tier_run --state 2 1 1)" user 0
+tier_expect "state user (0/1, perf)"    "$(tier_run --state 0 1 1)" user 0
+tier_expect "state paranoid-2 no perf"  "$(tier_run --state 2 1 0)" paranoid-2 0
+tier_expect "state kptr-restricted no perf" "$(tier_run --state 0 1 0)" kptr-restricted 0
+tier_expect "state paranoid-3 with perf" "$(tier_run --state 3 1 1)" paranoid-3 0
+# --token keeps its strict meaning: it never says user.
+tier_expect "token stays strict (2/1, perf)" "$(tier_run --token 2 1 1)" paranoid-2 0
+# FULL-only callers (--verify, perf stat -C 0) are unchanged: still require the CPU-wide path.
+mkperfshim_raw 1 ''
+verify_user_box=$(CQLITE_PERF_PROC_DIR="$tierproc" PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1 || true)
+case "$verify_user_box" in
+  perf-stat-failed*) ;;
+  *) bad "perf-capability tier: --verify must still run the CPU-wide check (got '$verify_user_box')"; tier_fail=1 ;;
+esac
+mkperfshim 123456
+[ "$tier_fail" -ne 0 ] || ok "perf-capability: tiers full / user / none behave per contract (#4472): controls pick the tier, user needs perf on PATH plus a passing cycles:u probe, a failing/unsupported/zero probe gives none(probe-failed), --token stays strict, --verify stays CPU-wide"
+
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
 perf_test_report
