@@ -322,6 +322,10 @@ fi
 #     server's TMPDIR is read from /proc/<pid>/environ of the process that carries our port.
 REAL_ROOT="$(cd "$HERE/../.." && pwd)"
 SCC=$(command -v sccache 2>/dev/null || true)
+# The server-lifecycle cases find the server by its listening socket (ss) and read its environment
+# from /proc, so they need both; otherwise they are SKIPPED, declared, never silently passed.
+SCC_PROC_OK=0
+if command -v ss >/dev/null 2>&1 && [ -r /proc/self/environ ]; then SCC_PROC_OK=1; fi
 scc_port=0
 scc_stop() { # stop OUR server, by port only
   [ "$scc_port" != 0 ] || return 0
@@ -370,6 +374,8 @@ EOS
 }
 if [ -z "$SCC" ]; then
   echo "skip - sccache not installed: the #4479 TMPDIR-leak cases did not run"
+elif [ "$SCC_PROC_OK" != 1 ]; then
+  echo "skip - no ss(8) or unreadable /proc/self/environ: the #4479 TMPDIR-leak cases did not run"
 else
   trap 'scc_stop; [ -n "${KEEP:-}" ] || rm -rf "$W"' EXIT
   ctl=$(scc_case 0 0)
@@ -432,7 +438,10 @@ else
 fi
 # 11e. #4479 recovery: a RUNNING server that already holds a dead TMPDIR is replaced; a healthy one is left
 #      alone (same pid). Private port and cache dir; the server is stopped by its port.
-if [ -n "$SCC" ]; then
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" != 1 ]; then
+  echo "skip - no ss(8) or unreadable /proc/self/environ: the #4479 recovery cases did not run"
+fi
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ]; then
   scc_pid_of() { # the pid listening on our port
     local l; l=$(ss -H -ltnp "sport = :$scc_port" 2>/dev/null); l=${l#*pid=}; printf '%s' "${l%%[!0-9]*}"
   }
@@ -485,7 +494,10 @@ EOS
 fi
 # 11f. #4479 serialisation: two prestarts racing against ONE poisoned server end with exactly one
 #      replacement; the second re-reads the (now healthy) server under the lock and does not stop it.
-if [ -n "$SCC" ] && command -v flock >/dev/null 2>&1; then
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && ! command -v flock >/dev/null 2>&1; then
+  echo "skip - no flock(1): the #4479 serialisation and lock-timeout cases did not run"
+fi
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && command -v flock >/dev/null 2>&1; then
   scc_port=$(scc_free_port) || scc_port=0
   if [ "$scc_port" = 0 ]; then bad "#4479 serialisation: no free port"; else
     mkdir -p "$W/doomed2" "$W/stable-rec" "$W/lockdir"
@@ -506,6 +518,36 @@ EOS
       ok "#4479 serialisation: two racing prestarts replaced the poisoned server exactly once (pid $old -> $new, stable afterwards, 1 stop logged)"
     else
       bad "#4479 serialisation: stops logged=$stops old=$old new=$new later=$later tmpdir='$newtmp'"
+    fi
+    scc_stop; scc_port=0
+  fi
+fi
+# 11g. #4479 lock timeout: flock is present but the lock is HELD by someone else. The prestart must warn
+#      and skip recovery (no stop, same pid), not run it anyway. The holder is a background process this
+#      test starts and kills by its recorded pid.
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && command -v flock >/dev/null 2>&1; then
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 lock timeout: no free port"; else
+    mkdir -p "$W/doomed3" "$W/lockdir3"
+    scc_start_under "$W/doomed3"; old=$(scc_pid_of); rm -rf "$W/doomed3"
+    lockf="$W/lockdir3/cqlite-sccache-$scc_port.lock"
+    ( flock 9 && exec sleep 120 ) 9>>"$lockf" & holder=$!
+    n=0; while [ "$n" -lt 50 ] && ! grep -q . /proc/$holder/cmdline 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+    sleep 0.5
+    cat >"$W/t11g.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+_TT_STABLE_TMPDIR="$W/stable-rec"
+_tt_sccache_prestart
+EOS
+    logline=$(env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+      CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir3" CQLITE_TT_SCCACHE_LOCK_WAIT=1 bash "$W/t11g.sh" 2>&1 >/dev/null)
+    new=$(scc_pid_of)
+    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+    if [ -n "$old" ] && [ "$old" = "$new" ] && grep -q "could not take" <<<"$logline" && ! grep -q "holds a dead TMPDIR" <<<"$logline"; then
+      ok "#4479 lock timeout: with the lock held elsewhere the prestart warns and skips recovery (poisoned server pid $old untouched, no stop)"
+    else
+      bad "#4479 lock timeout: old=$old new=$new log='$logline'"
     fi
     scc_stop; scc_port=0
   fi

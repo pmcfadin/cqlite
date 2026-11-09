@@ -22409,7 +22409,14 @@ _tt_sccache_prestart() {
   _tt_sccache_wrapper_p || return 0
   local lock="${CQLITE_TT_SCCACHE_LOCK_DIR:-/tmp}/cqlite-sccache-${SCCACHE_SERVER_PORT:-4226}.lock"
   if command -v flock >/dev/null 2>&1 && ( : 9>>"$lock" ) 2>/dev/null; then
-    ( flock -w 120 9 || true; _tt_sccache_recover_and_start ) 9>>"$lock"
+    # flock present but the lock NOT acquired (timeout/failure): skip recovery AND start, leave the
+    # existing server as is - the wrapper still protects any server a compile spawns. This is
+    # distinct from "no flock(1)", which is unserialised by design (the else branch).
+    ( if flock -w "${CQLITE_TT_SCCACHE_LOCK_WAIT:-120}" 9; then
+        _tt_sccache_recover_and_start
+      else
+        echo ">>> [tooling-tests] WARNING: could not take $lock within ${CQLITE_TT_SCCACHE_LOCK_WAIT:-120}s; skipping sccache server recovery (the existing server is left as is) (#4479)" >&2
+      fi ) 9>>"$lock"
   else
     _tt_sccache_recover_and_start
   fi
