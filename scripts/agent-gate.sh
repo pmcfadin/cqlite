@@ -22389,8 +22389,12 @@ _tt_sccache_poisoned_tmpdir() {
   if [ -d "$t" ] && [ -w "$t" ] && [ -x "$t" ]; then return 1; fi
   printf '%s' "$t"
 }
-_tt_sccache_prestart() {
-  _tt_sccache_wrapper_p || return 0
+# The detect-stop-start sequence is serialised across gates and sessions with an flock on a fixed,
+# port-specific path (CQLITE_TT_SCCACHE_LOCK_DIR, default /tmp, like the slots dir): two gates that
+# both saw the old poisoned server could otherwise have the second stop the NEW healthy one. The
+# server is RE-READ after the lock is taken and acted on only if it is STILL poisoned. Without
+# flock(1) (macOS) or an openable lock file the sequence runs unserialised.
+_tt_sccache_recover_and_start() {
   local pid dead
   # Recovery (the ONE case the gate may stop the shared server): a server that already inherited a
   # deleted TMPDIR cannot compile for anyone, and --start-server would leave it in place. It is
@@ -22401,12 +22405,25 @@ _tt_sccache_prestart() {
   fi
   TMPDIR=$_TT_STABLE_TMPDIR "$RUSTC_WRAPPER" --start-server </dev/null >/dev/null 2>&1 || true
 }
-_tt_sccache_shim() { # _tt_sccache_shim <private base dir>: sets _TT_SCC_SHIM (empty when not applicable)
-  _TT_SCC_SHIM=""
+_tt_sccache_prestart() {
   _tt_sccache_wrapper_p || return 0
-  local f="$1/sccache-stable-tmpdir"
-  { printf '#!/usr/bin/env bash\nTMPDIR=%q\nexport TMPDIR\nexec %q "$@"\n' "$_TT_STABLE_TMPDIR" "$RUSTC_WRAPPER"; } >"$f" \
-    && chmod +x "$f" && _TT_SCC_SHIM=$f
+  local lock="${CQLITE_TT_SCCACHE_LOCK_DIR:-/tmp}/cqlite-sccache-${SCCACHE_SERVER_PORT:-4226}.lock"
+  if command -v flock >/dev/null 2>&1 && ( : 9>>"$lock" ) 2>/dev/null; then
+    ( flock -w 120 9 || true; _tt_sccache_recover_and_start ) 9>>"$lock"
+  else
+    _tt_sccache_recover_and_start
+  fi
+}
+_TT_SCC_REAL=""
+_tt_sccache_shim() { # sets _TT_SCC_SHIM to the CHECKED-IN wrapper script (empty when not applicable)
+  _TT_SCC_SHIM=""; _TT_SCC_REAL=""
+  _tt_sccache_wrapper_p || return 0
+  local w="$REPO_ROOT/scripts/lib/sccache-stable-tmpdir-wrapper.sh"
+  if [ -f "$w" ] && [ -x "$w" ]; then
+    _TT_SCC_SHIM=$w; _TT_SCC_REAL=$RUSTC_WRAPPER
+  else
+    echo ">>> [tooling-tests] WARNING: $w is missing or not executable; pool suites run WITHOUT the sccache TMPDIR guard (#4479)" >&2
+  fi
   return 0
 }
 
@@ -22421,7 +22438,7 @@ _tt_exec() {
   s=$(date +%s)
   if [ -n "$tb" ]; then
     mkdir -p "$tb/$id"
-    ( export TMPDIR="$tb/$id"; [ -z "$_TT_SCC_SHIM" ] || export RUSTC_WRAPPER="$_TT_SCC_SHIM"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
+    ( export TMPDIR="$tb/$id"; [ -z "$_TT_SCC_SHIM" ] || export RUSTC_WRAPPER="$_TT_SCC_SHIM" CQLITE_TT_STABLE_TMPDIR="$_TT_STABLE_TMPDIR" CQLITE_TT_REAL_RUSTC_WRAPPER="$_TT_SCC_REAL"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
     rc=$?
   else
     ( eval "${_TT_CMD[$i]}" ) >>"$d/$id.log" 2>&1

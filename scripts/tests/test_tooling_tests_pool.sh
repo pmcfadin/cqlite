@@ -320,6 +320,7 @@ fi
 #     TMPDIR (deleted when the suite ends). Hermetic: a private server port and cache dir, the server is
 #     stopped BY ITS PORT, and the shared server is never touched (a unique port cannot reach it). The
 #     server's TMPDIR is read from /proc/<pid>/environ of the process that carries our port.
+REAL_ROOT="$(cd "$HERE/../.." && pwd)"
 SCC=$(command -v sccache 2>/dev/null || true)
 scc_port=0
 scc_stop() { # stop OUR server, by port only
@@ -352,7 +353,7 @@ scc_case() { # scc_case <guard 0|1> <stub-prestart 0|1>: prints the server's TMP
   scc_port=$(scc_free_port) || { echo "NOPORT"; return 0; }
   cat >"$W/t11.sh" <<EOS
 set -uo pipefail
-_ncpu=8; REPO_ROOT=/tmp
+_ncpu=8; REPO_ROOT="$REAL_ROOT"
 . "$W/helpers.sh"
 $( [ "$stub" = 1 ] && echo '_tt_sccache_prestart() { :; }' )
 _tt_reset
@@ -387,25 +388,47 @@ else
     *) bad "#4479 pre-start: server TMPDIR='$full', want $W/stable-10" ;;
   esac
 fi
-# 11d. the shim must pass EVERY environment variable through, including names that are not shell
-#      identifiers: cargo hands rustc CARGO_BIN_EXE_<hyphenated-bin>, and dash drops such variables
-#      (an sh shim made `env!("CARGO_BIN_EXE_ws0-corpus-gen")` tests fail to compile). A fake
-#      `sccache` records its environment; the shim is built by the pool's own helper.
-mkdir -p "$W/fakebin" "$W/shimdir"
+# 11d. the RUSTC_WRAPPER shim is the CHECKED-IN scripts/lib/sccache-stable-tmpdir-wrapper.sh, never a file
+#      generated under TMPDIR (a noexec temp filesystem would stop cargo executing a generated one).
+#      Structural: the wrapper path is under the repo, not under TMPDIR; it is executable and tracked
+#      with mode 100755. Behavioural: it passes EVERY environment variable through, including names that
+#      are not shell identifiers (cargo hands rustc CARGO_BIN_EXE_<hyphenated-bin>; dash drops them),
+#      and sets the stable TMPDIR for the exec only.
+WRAP="$REAL_ROOT/scripts/lib/sccache-stable-tmpdir-wrapper.sh"
+mkdir -p "$W/fakebin"
 printf '#!/usr/bin/env bash\nenv > "%s"\n' "$W/fake.env" >"$W/fakebin/sccache"; chmod +x "$W/fakebin/sccache"
 cat >"$W/t11d.sh" <<EOS
 set -uo pipefail
+REPO_ROOT="$REAL_ROOT"
 . "$W/helpers.sh"
 _TT_STABLE_TMPDIR="$W/stable-shim"
-_tt_sccache_shim "$W/shimdir"
+_tt_sccache_shim
 [ -n "\$_TT_SCC_SHIM" ] || exit 3
-env 'CARGO_BIN_EXE_a-b=1' TMPDIR="$W/private" "\$_TT_SCC_SHIM" rustc --version
+echo "SHIM=\$_TT_SCC_SHIM" >"$W/shim.path"
+env 'CARGO_BIN_EXE_a-b=1' TMPDIR="$W/private" CQLITE_TT_STABLE_TMPDIR="\$_TT_STABLE_TMPDIR" \
+  CQLITE_TT_REAL_RUSTC_WRAPPER="\$_TT_SCC_REAL" "\$_TT_SCC_SHIM" rustc --version
 EOS
-RUSTC_WRAPPER="$W/fakebin/sccache" bash "$W/t11d.sh" >/dev/null 2>&1; shim_rc=$?
+RUSTC_WRAPPER="$W/fakebin/sccache" TMPDIR="$W/private" bash "$W/t11d.sh" >/dev/null 2>&1; shim_rc=$?
+shimpath=$(sed -n 's/^SHIM=//p' "$W/shim.path" 2>/dev/null)
 if [ "$shim_rc" -eq 0 ] && grep -qx 'CARGO_BIN_EXE_a-b=1' "$W/fake.env" && grep -qx "TMPDIR=$W/stable-shim" "$W/fake.env"; then
-  ok "#4479 shim: passes a hyphenated CARGO_BIN_EXE_* variable through and sets the stable TMPDIR (bash shim, not dash)"
+  ok "#4479 shim: passes a hyphenated CARGO_BIN_EXE_* variable through and sets the stable TMPDIR (bash, not dash)"
 else
   bad "#4479 shim: lost a non-identifier env var or did not set TMPDIR (rc=$shim_rc; $(grep -E '^(CARGO_BIN_EXE|TMPDIR)' "$W/fake.env" 2>/dev/null | tr '\n' ' '))"
+fi
+case "$shimpath" in
+  "$W"/*|"") bad "#4479 shim: the wrapper path ('$shimpath') is under TMPDIR or empty - a noexec temp dir would break it" ;;
+  "$WRAP") ok "#4479 shim: the wrapper is the checked-in script ($shimpath), outside TMPDIR, so a noexec temp filesystem cannot stop it" ;;
+  *) bad "#4479 shim: unexpected wrapper path '$shimpath'" ;;
+esac
+if [ -x "$WRAP" ]; then
+  mode=$(git -C "$REAL_ROOT" ls-files -s -- scripts/lib/sccache-stable-tmpdir-wrapper.sh 2>/dev/null | cut -d' ' -f1)
+  case "$mode" in
+    100755) ok "#4479 shim: the wrapper is tracked with mode 100755" ;;
+    '') ok "#4479 shim: the wrapper is executable (not a git checkout here, so the tracked mode was not checked)" ;;
+    *) bad "#4479 shim: the wrapper is tracked with mode $mode, not 100755" ;;
+  esac
+else
+  bad "#4479 shim: $WRAP is missing or not executable"
 fi
 # 11e. #4479 recovery: a RUNNING server that already holds a dead TMPDIR is replaced; a healthy one is left
 #      alone (same pid). Private port and cache dir; the server is stopped by its port.
@@ -439,8 +462,8 @@ EOS
       bad "#4479 recovery: poisoned server not replaced (old=$old new=$new tmpdir='$newtmp' log='$logline')"
     fi
     # a compile through the shim now works
-    printf '#!/usr/bin/env bash\nTMPDIR=%q\nexport TMPDIR\nexec %q "$@"\n' "$W/stable-rec" "$SCC" >"$W/rec-shim"; chmod +x "$W/rec-shim"
-    if env SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" "$W/rec-shim" rustc --version >/dev/null 2>&1; then
+    if env SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" CQLITE_TT_STABLE_TMPDIR="$W/stable-rec" \
+         CQLITE_TT_REAL_RUSTC_WRAPPER="$SCC" "$WRAP" rustc --version >/dev/null 2>&1; then
       ok "#4479 recovery: a compile through the shim succeeds against the replacement server"
     else
       bad "#4479 recovery: a compile through the shim failed against the replacement server"
@@ -456,6 +479,33 @@ EOS
       ok "#4479 recovery control: a server with a healthy TMPDIR keeps its pid ($old) and nothing is logged"
     else
       bad "#4479 recovery control: healthy server was disturbed (old=$old new=$new log='$logline')"
+    fi
+    scc_stop; scc_port=0
+  fi
+fi
+# 11f. #4479 serialisation: two prestarts racing against ONE poisoned server end with exactly one
+#      replacement; the second re-reads the (now healthy) server under the lock and does not stop it.
+if [ -n "$SCC" ] && command -v flock >/dev/null 2>&1; then
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 serialisation: no free port"; else
+    mkdir -p "$W/doomed2" "$W/stable-rec" "$W/lockdir"
+    scc_start_under "$W/doomed2"; old=$(scc_pid_of); rm -rf "$W/doomed2"
+    cat >"$W/t11f.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+_TT_STABLE_TMPDIR="$W/stable-rec"
+_tt_sccache_prestart
+EOS
+    envv=(RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir")
+    env "${envv[@]}" bash "$W/t11f.sh" >/dev/null 2>"$W/f1.err" & f1=$!
+    env "${envv[@]}" bash "$W/t11f.sh" >/dev/null 2>"$W/f2.err" & f2=$!
+    wait "$f1"; wait "$f2"
+    new=$(scc_pid_of); sleep 2; later=$(scc_pid_of); newtmp=$(scc_server_tmpdir)
+    stops=$(cat "$W/f1.err" "$W/f2.err" | grep -c "holds a dead TMPDIR")
+    if [ "$stops" -eq 1 ] && [ -n "$new" ] && [ "$new" != "$old" ] && [ "$new" = "$later" ] && [ "$newtmp" = "$W/stable-rec" ]; then
+      ok "#4479 serialisation: two racing prestarts replaced the poisoned server exactly once (pid $old -> $new, stable afterwards, 1 stop logged)"
+    else
+      bad "#4479 serialisation: stops logged=$stops old=$old new=$new later=$later tmpdir='$newtmp'"
     fi
     scc_stop; scc_port=0
   fi
