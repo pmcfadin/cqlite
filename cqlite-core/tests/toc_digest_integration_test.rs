@@ -118,7 +118,9 @@ mod toc_digest_tests {
 
     #[test]
     fn test_toc_ordering_matches_cassandra() {
-        // Verify that our TOC.txt component ordering matches Cassandra's
+        // Verify that our TOC.txt component ordering is deterministic and equals the
+        // Cassandra 5.0.2 write order (5.0.8 sorts lexicographically; readers are
+        // order-independent, see issue_4482_oracle_output_independence.rs)
 
         let temp_dir = TempDir::new().unwrap();
         let toc_path = temp_dir.path().join("nb-1-big-TOC.txt");

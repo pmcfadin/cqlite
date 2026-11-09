@@ -123,7 +123,10 @@ impl TocWriter {
             final_components.push(ComponentEntry::new(SSTableComponent::TOC));
         }
 
-        // Sort components for deterministic output (matches Cassandra behavior)
+        // Sort components for deterministic output. This is the Cassandra 5.0.2 write
+        // order; 5.0.8 writes TOC.txt lexicographically (CASSANDRA-20494). A TOC is an
+        // inventory and every CQLite reader treats it as a set (#4482), so either
+        // order is valid.
         // Order: Data, Statistics, Digest, TOC, CompressionInfo, Filter, Index, Summary
         final_components.sort_by_key(|entry| match entry.component {
             SSTableComponent::Data => 0,

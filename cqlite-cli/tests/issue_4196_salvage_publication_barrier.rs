@@ -348,10 +348,26 @@ fn compression_chunk_table(path: &Path) -> (usize, u64, Vec<u64>) {
     (chunk_length, data_length, offsets)
 }
 
+/// Index of the first chunk whose decompressed range STARTS at or after `position`.
+fn first_chunk_at_or_after(position: u64, chunk_length: usize) -> usize {
+    (position as usize).div_ceil(chunk_length)
+}
+
 /// Every `(partition key as the declared `int` pk, uncompressed data-section
 /// position)` pair the committed `sstabledump` golden records, in file order.
 ///
-/// This is Cassandra's OWN record of where each partition starts. Strict: a
+/// This is Cassandra's OWN record of where each partition's data lies, read as an
+/// UPPER BOUND on the partition's start, never an exact offset (#4482):
+/// `sstabledump`'s `position` is the scan reader's file pointer when the partition is
+/// serialized (`JsonTransformer.serializePartition` ->
+/// `SSTableScanner.getCurrentPosition()` -> `dfile.getFilePointer()` at
+/// `cassandra-5.0.8`), which is the exact partition start under 5.0.2 and a few header
+/// bytes PAST it under 5.0.8, so `start <= position`. [`first_chunk_at_or_after`] is
+/// sound for both: a chunk starting at or after `position` starts at or after the
+/// true start. The cost of the looseness is only that, when a chunk boundary falls
+/// between `start` and `position`, a LATER chunk is chosen; it still lies inside the
+/// last partition (which extends to the end of the data section), and the derivation
+/// asserts by name if no such chunk exists. Strict: a
 /// drifted golden shape, a non-ascending position list or fewer than two
 /// partitions each FAIL by name rather than yield a plausible-but-wrong needle.
 fn golden_partition_positions(fixture_dir: &Path) -> Vec<(i32, u64)> {
@@ -480,7 +496,7 @@ fn damaged_input_exits_3_with_losses_and_a_complete_generation_set() {
 
     // The FIRST chunk whose decompressed range starts at or after the LAST
     // partition's start: it can intersect that partition and no other.
-    let chunk_index = (last_pos as usize).div_ceil(chunk_length);
+    let chunk_index = first_chunk_at_or_after(last_pos, chunk_length);
     let chunk_start = chunk_index * chunk_length;
     assert!(
         chunk_index < offsets.len(),
@@ -895,4 +911,51 @@ fn all_attempted_generations_refused_with_no_skip_still_exits_2() {
         !data_db_exists_under(&out),
         "no generation may have written a Data.db when every one refused"
     );
+}
+
+/// #4482: the golden reader must accept a 5.0.8-style `sstabledump` golden, whose
+/// partition `position`s are shifted past the partition header (first partition 18,
+/// not 0). Sample provenance: `test-data/fixtures/issue_4482/README.md`.
+#[test]
+fn golden_partition_positions_accepts_5_0_8_header_shifted_positions() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-data/fixtures/issue_4482/cassandra-5.0.8/test_udt_wide_fields");
+    let got = golden_partition_positions(&dir);
+    assert!(
+        got.len() >= 2,
+        "guard: at least two partitions, got {got:?}"
+    );
+    assert!(
+        got[0].1 > 0,
+        "guard: this sample must carry the 5.0.8 shape (first partition position > 0), got {got:?}"
+    );
+    assert!(
+        got.windows(2).all(|w| w[0].1 < w[1].1),
+        "positions must ascend: {got:?}"
+    );
+}
+
+/// #4482 boundary case: whatever header shift (0 under 5.0.2, up to a few dozen bytes
+/// under 5.0.8) separates the true partition start `S` from the reported `position`,
+/// the chosen chunk starts at or after `S`, so it can never intersect an EARLIER
+/// partition (which ends at or before `S`). A start just before a chunk boundary is
+/// pushed to the LATER chunk by a 5.0.8 position, never to an earlier one.
+#[test]
+fn chunk_choice_never_starts_before_the_true_partition_start_for_any_header_shift() {
+    let chunk_length = 16_384usize;
+    for boundary in [chunk_length, 2 * chunk_length, 3 * chunk_length] {
+        for start in (boundary - 70)..=(boundary + 5) {
+            for shift in 0..=70usize {
+                let position = (start + shift) as u64;
+                let idx = first_chunk_at_or_after(position, chunk_length);
+                assert!(
+                    idx * chunk_length >= start,
+                    "start={start} shift={shift}: chunk {idx} begins before the partition"
+                );
+            }
+        }
+    }
+    // The exact 5.0.2 value picks the boundary chunk; a 5.0.8 shift past it picks the next.
+    assert_eq!(first_chunk_at_or_after(16_384, chunk_length), 1);
+    assert_eq!(first_chunk_at_or_after(16_384 + 19, chunk_length), 2);
 }
