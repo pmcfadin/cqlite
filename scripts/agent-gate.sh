@@ -22258,13 +22258,398 @@ run_features_load_bearing() {
 # its skip rather than dropping silently. Hermetic: temp dirs, one throwaway `git init`, and the
 # two hidden selftest hooks — no cargo, no python3, no datasets, no network — so it is
 # registered ABOVE the python3 SKIP branch and never SKIPs.
+# ---------------------------------------------------------------------------------------------
+# tooling-tests parallel runner (issue #4468)
+#
+# `run_tooling_tests` used to run ~115 independent self-test suites strictly one after another
+# (2644s of a ~67 minute full gate on a 32-core box that sat idle for it). It now REGISTERS every
+# suite with `_tt_add`, then `_tt_run_all` executes them:
+#
+#   * mode P/H  PARALLEL set: run concurrently, bounded by CQLITE_TOOLING_TESTS_JOBS (default
+#               min(ncpu/2, 16)). Each suite gets its OWN log file, exit-status file and its OWN
+#               private TMPDIR (a fresh subdirectory), so mktemp collisions and shared scratch
+#               files are impossible. `H` is a P suite known to be long; heavy suites are LAUNCHED
+#               first so they do not become the tail (scheduling only, never verdict).
+#   * mode L:<lane>  SERIAL LANE: suites that must not overlap EACH OTHER (they share one
+#               resource: the repo's worktree registry, a systemd user manager, the shared cargo
+#               target dir, the real /data/lanes root). A lane is one background chain that runs
+#               its suites one at a time, in registration order, concurrently with the parallel
+#               pool and the other lanes. Lane suites also get a private TMPDIR.
+#   * mode S    SERIAL TAIL: run one at a time AFTER the pool and every lane have drained, alone
+#               on the box, with the ambient TMPDIR - for suites that MEASURE timing or
+#               concurrency and would be perturbed by neighbours. The reason each suite is
+#               serial is the 4th `_tt_add` argument, tabulated above the registrations.
+#   * JOBS=1    restores the historical behaviour exactly: every suite in the original order, the
+#               ambient TMPDIR, stop at the FIRST failure.
+#
+# Verdict is fail-closed and order-independent: the component FAILs if ANY suite fails, and EVERY
+# failing suite is named (never first-wins or last-wins). Output is deterministic: after the
+# parallel set drains, each suite's header, outcome and log are replayed in REGISTRATION order and
+# appended to tooling-tests.log in that same order, whatever order they finished in.
+# Constructs are bash 3.2/BSD friendly (no `wait -n`, no associative arrays, no `mapfile`):
+# the pool polls per-suite status files.
+# ---------------------------------------------------------------------------------------------
+_TT_N=0
+_TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=()
+_TT_FAILED_NAMES=""; _TT_REPORTED=0; _TT_ACTIVE=""; _TT_LANES=""; _TT_WAS_M=0; _TT_CRIT=0; _TT_SIGPEND=""; _TT_TMPBASE=""; _TT_LOGDIR=""
+
+_tt_reset() { _TT_N=0; _TT_MODE=(); _TT_LANE=(); _TT_MSG=(); _TT_CMD=(); _TT_WHY=(); _TT_HDR=(); _TT_FAILED_NAMES=""; _TT_REPORTED=0; }
+
+# _tt_add <P|H|S|L:lane> <failure label> <command> [serial reason]
+#   <command> is eval'd in a subshell (so it may be an `&&` chain or `(cd ... && ...)`); its
+#   combined output goes to the suite's own log. The `>>> [name] ...` header is derived from it.
+_tt_add() {
+  local cmd=$3 hdr q='"$REPO_ROOT/'
+  hdr=${cmd//"$q"/}
+  hdr=${hdr//\"/}
+  hdr=${hdr//' && '/'; '}
+  case "$1" in
+    P|H|S) _TT_MODE[$_TT_N]=$1; _TT_LANE[$_TT_N]="" ;;
+    L:?*)  _TT_MODE[$_TT_N]=L;  _TT_LANE[$_TT_N]=${1#L:} ;;
+    *)     # An unknown mode must never silently drop a suite: register it as invalid, which the
+           # runner reports as a FAILED suite.
+           _TT_MODE[$_TT_N]=X;  _TT_LANE[$_TT_N]="" ;;
+  esac
+  _TT_MSG[$_TT_N]=$2; _TT_CMD[$_TT_N]=$cmd; _TT_WHY[$_TT_N]=${4:-}
+  _TT_HDR[$_TT_N]=$hdr
+  _TT_N=$((_TT_N + 1))
+}
+
+# _tt_note <text>: a line (declared SKIP notes) replayed at this position; runs nothing.
+_tt_note() {
+  _TT_MODE[$_TT_N]=N; _TT_LANE[$_TT_N]=""; _TT_MSG[$_TT_N]=""; _TT_CMD[$_TT_N]=""; _TT_WHY[$_TT_N]=""
+  _TT_HDR[$_TT_N]=$1
+  _TT_N=$((_TT_N + 1))
+}
+
+# _tt_jobs: resolve the parallel width. CQLITE_TOOLING_TESTS_JOBS (positive integer) wins;
+# otherwise min(ncpu/2, 16), at least 1.
+_tt_jobs() {
+  local j=${CQLITE_TOOLING_TESTS_JOBS:-}
+  case "$j" in
+    '') ;;
+    *[!0-9]*|0)
+      echo ">>> [tooling-tests] WARNING: CQLITE_TOOLING_TESTS_JOBS='$j' is not a positive integer — using the default" >&2
+      j="" ;;
+  esac
+  if [ -z "$j" ]; then
+    j=$(( ${_ncpu:-4} / 2 ))
+    [ "$j" -gt 16 ] && j=16
+    [ "$j" -lt 1 ] && j=1
+  fi
+  echo "$j"
+}
+
+# _tt_exec <index> <log dir> <private TMPDIR base or empty>: run suite <index>, writing
+# <log dir>/NNN.log and then <log dir>/NNN.rc ("<exit> <seconds>", published atomically LAST, so
+# its presence means "finished"). A non-empty TMPDIR base gives the suite its OWN TMPDIR.
+_tt_exec() {
+  local i=$1 d=$2 tb=$3 id s e rc
+  id=$(printf '%03d' "$i")
+  # The log is opened for APPEND: a surviving descendant of a dead worker keeps this descriptor, and a
+  # write at a stale offset must not clobber notes appended later (roborev job 146).
+  s=$(date +%s)
+  if [ -n "$tb" ]; then
+    mkdir -p "$tb/$id"
+    ( export TMPDIR="$tb/$id"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
+    rc=$?
+  else
+    ( eval "${_TT_CMD[$i]}" ) >>"$d/$id.log" 2>&1
+    rc=$?
+  fi
+  e=$(date +%s)
+  printf '%s %s\n' "$rc" "$((e - s))" >"$d/$id.rc.tmp" && mv "$d/$id.rc.tmp" "$d/$id.rc" || return 125
+  return 0
+}
+
+# _tt_report <index> <log dir> <component log> [noheader]: replay one suite in registration
+# order (header, outcome, failure tail) and append its log to the component log. Sets
+# _TT_LAST_RC and, on failure, appends the suite to _TT_FAILED_NAMES.
+_tt_report() {
+  local i=$1 d=$2 log=$3 nohdr=${4:-} id rc secs replay_failed
+  id=$(printf '%03d' "$i")
+  if [ "${_TT_MODE[$i]}" = N ]; then
+    echo "${_TT_HDR[$i]}"
+    _TT_LAST_RC=0
+    return 0
+  fi
+  [ -n "$nohdr" ] || echo ">>> [tooling-tests] ${_TT_HDR[$i]}"
+  _TT_REPORTED=$((_TT_REPORTED + 1))
+  if [ "${_TT_MODE[$i]}" = X ]; then
+    echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); registered with an unknown mode, so it was never run ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]} (unknown mode)"
+    _TT_LAST_RC=1
+    return 0
+  fi
+  if [ -f "$d/$id.rc" ]; then
+    read -r rc secs <"$d/$id.rc"
+  else
+    rc=255; secs=?   # no status published: the suite never finished — fail closed
+    echo "no exit status was recorded for this suite (it did not finish)" >>"$d/$id.log"
+  fi
+  # The replay is the canonical evidence: a failed append (ENOSPC, unwritable log) must not let the
+  # suite pass with its output missing.
+  replay_failed=""
+  if [ ! -f "$d/$id.log" ]; then
+    replay_failed=1
+    echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); log missing: $d/$id.log is absent or not a regular file ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]} (log missing)"
+    rc=1
+  elif ! cat "$d/$id.log" >>"$log" 2>/dev/null; then
+    replay_failed=1
+    echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); log replay failed: could not append $d/$id.log to $log ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]} (log replay failed)"
+    rc=1
+  fi
+  _TT_LAST_RC=$rc
+  if [ -n "$replay_failed" ]; then
+    :   # already named above
+  elif [ "$rc" != 0 ]; then
+    echo "--- [tooling-tests] FAILED (${_TT_MSG[$i]}); exit $rc after ${secs}s; last 40 lines of $d/$id.log ---"
+    tail -40 "$d/$id.log" 2>/dev/null
+    echo "--- end of tooling-tests output ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }${_TT_MSG[$i]}"
+  else
+    echo ">>> [tooling-tests]   ok (${secs}s)"
+  fi
+  return 0
+}
+
+# _tt_lane <lane> <log dir> <tmpdir base>: one serial lane - its suites, in registration order.
+_tt_lane() {
+  local ln=$1 d=$2 tb=$3 i
+  for ((i = 0; i < _TT_N; i++)); do
+    [ "${_TT_MODE[$i]}" = L ] && [ "${_TT_LANE[$i]}" = "$ln" ] && _tt_exec "$i" "$d" "$tb"
+  done
+  return 0
+}
+
+# Process groups (roborev job 140). Every pool/lane worker is launched with job control on
+# (`set -m`, which gives each background job its OWN process group; the pgid is the worker's pid), so
+# when a worker disappears without a status the whole group - the suite and everything it started -
+# can be terminated, instead of leaving an orphan running while its slot and TMPDIR are freed.
+# `set -m` is restored right after each launch so the rest of the gate is unaffected.
+_tt_bg_begin() { _TT_WAS_M=0; case $- in *m*) _TT_WAS_M=1 ;; esac; set -m; }
+_tt_bg_end()   { [ "$_TT_WAS_M" = 1 ] || set +m; }
+
+# THE INVARIANT (roborev jobs 145, 146): we only ever signal a PGID whose LEADER this shell has not
+# yet reaped. The leader is a background job of this shell; bash reaps a finished child itself, at
+# once, so its pid (== the group id) can be reused from that instant. While the leader is still
+# listed by `jobs -rp` it is un-reaped, so it reserves its PGID and the number cannot mean anything
+# but our group. Hence: signals are sent only while the leader is listed, the listing is RE-CHECKED
+# immediately before the escalation to KILL, and `wait` comes only after the last signal. If the
+# leader is already gone (or goes between TERM and KILL) NOTHING further is sent and "descendants may
+# survive" is recorded - cleaning those up safely is #4475's subject.
+_tt_leader_alive() {
+  case " $(jobs -rp | tr '\n' ' ') " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# _tt_signal_groups <pgid...>: TERM every group whose leader is alive, grace period, then KILL those
+# whose leader is STILL alive (re-checked right before). Sets _TT_GONE to the pgids that got no
+# (further) signal because their leader had left.
+_tt_signal_groups() {
+  local g n live="" still=""
+  _TT_GONE=""
+  for g in "$@"; do
+    if _tt_leader_alive "$g"; then kill -TERM -- "-$g" 2>/dev/null; live="$live $g"
+    else _TT_GONE="$_TT_GONE $g"; fi
+  done
+  n=0
+  while [ -n "${live// /}" ] && [ "$n" -lt 10 ]; do
+    sleep 0.2; n=$((n + 1)); still=""
+    for g in $live; do
+      if _tt_leader_alive "$g"; then still="$still $g"; else _TT_GONE="$_TT_GONE $g"; fi
+    done
+    live=$still
+  done
+  for g in $live; do
+    if _tt_leader_alive "$g"; then kill -KILL -- "-$g" 2>/dev/null; else _TT_GONE="$_TT_GONE $g"; fi
+  done
+  return 0
+}
+
+# Signal path (roborev jobs 140, 142). Workers are in their own process groups, so a terminal ^C /
+# TERM / HUP to the gate no longer reaches them. The trap therefore:
+#   * DEFERS while a launch-and-register critical section is open (_TT_CRIT=1) - a signal between
+#     `worker &` and recording its pid would otherwise miss that worker - and handles the pending
+#     signal right after the section closes;
+#   * otherwise reaps whatever already finished, signals the groups of the workers still running
+#     (see THE INVARIANT), removes the scratch TMPDIR, restores default signal handling and
+#     re-raises the signal.
+_tt_on_signal() {
+  if [ "${_TT_CRIT:-0}" = 1 ]; then _TT_SIGPEND=$1; return 0; fi
+  _tt_interrupt "$1"
+}
+_tt_handle_pending() {
+  [ -z "${_TT_SIGPEND:-}" ] || _tt_interrupt "$_TT_SIGPEND"
+}
+_tt_interrupt() {
+  local sig=$1 ent gs=""
+  _TT_CRIT=1   # no re-entry while cleaning up
+  _tt_reap "${_TT_LOGDIR:-/nonexistent}"   # drops workers that already left; those running remain listed
+  for ent in $_TT_ACTIVE $_TT_LANES; do gs="$gs ${ent#*:}"; done
+  _tt_signal_groups $gs
+  [ -z "${_TT_GONE// /}" ] || echo "interrupted: descendants of the worker group(s)${_TT_GONE} may survive (#4475)" >>"${_TT_LOGDIR:-/dev/null}/interrupt.note" 2>/dev/null
+  [ -z "${_TT_TMPBASE:-}" ] || rm -rf "${_TT_TMPBASE:?}"
+  _TT_TMPBASE=""
+  trap - INT TERM HUP
+  kill -s "$sig" $$
+}
+
+# _tt_reap <log dir>: reap finished pool workers and lane workers (see the comment at the call site).
+# Leaves the still-running ones in $_TT_ACTIVE / $_TT_LANES and the pool's count in $_TT_RUNNING.
+# A worker that is no longer listed has been reaped, so by THE INVARIANT its group is never signalled
+# here; an abnormal exit only gets the "descendants may survive" note.
+_tt_reap() {
+  local d=$1 ent pid idx id rp st keep="" ln
+  rp=" $(jobs -rp | tr '\n' ' ') "
+  _TT_RUNNING=0
+  for ent in $_TT_ACTIVE; do
+    pid=${ent#*:}; idx=${ent%%:*}
+    case "$rp" in
+      *" $pid "*) _TT_RUNNING=$((_TT_RUNNING + 1)); keep="$keep $ent"; continue ;;
+    esac
+    id=$(printf '%03d' "$idx")
+    wait "$pid" 2>/dev/null; st=$?
+    if [ ! -r "$d/$id.rc" ]; then
+      [ "$st" -ne 0 ] || st=125
+      echo "no status was published by the worker (wait status $st); descendants of this suite may survive: its process group $pid was NOT signalled because its leader had already been reaped (#4475)" >>"$d/$id.log"
+      printf '%s ?\n' "$st" >"$d/$id.rc" 2>/dev/null || true
+    fi
+  done
+  _TT_ACTIVE=$keep
+  keep=""
+  for ent in $_TT_LANES; do
+    pid=${ent#*:}; ln=${ent%%:*}
+    case "$rp" in
+      *" $pid "*) keep="$keep $ent"; continue ;;
+    esac
+    wait "$pid" 2>/dev/null || echo "lane $ln: worker died (status $?); descendants may survive (#4475)" >>"$d/lane-$ln.note" 2>/dev/null
+  done
+  _TT_LANES=$keep
+}
+
+# _tt_run_all <component log> <scratch dir>: execute every registered suite. Returns 0 always;
+# the caller reads _TT_FAILED_NAMES (non-empty == the component FAILs).
+_tt_run_all() {
+  local log=$1 d=$2 jobs i pids pid order="" pcount=0 tmpbase lanes="" ln want
+  jobs=$(_tt_jobs)
+  mkdir -p "$d" || { _TT_FAILED_NAMES="cannot create $d"; return 0; }
+
+  if [ "$jobs" -le 1 ]; then
+    # Historical serial semantics: registration order, ambient TMPDIR, first failure stops.
+    echo ">>> [tooling-tests] running $_TT_N registered suites serially (CQLITE_TOOLING_TESTS_JOBS=1)"
+    for ((i = 0; i < _TT_N; i++)); do
+      if [ "${_TT_MODE[$i]}" != N ] && [ "${_TT_MODE[$i]}" != X ]; then
+        echo ">>> [tooling-tests] ${_TT_HDR[$i]}"
+        _tt_exec "$i" "$d" ""
+        _tt_report "$i" "$d" "$log" noheader
+      else
+        # Notes, and unknown-mode suites: reported (the latter as FAILED) WITHOUT being executed.
+        _tt_report "$i" "$d" "$log"
+      fi
+      [ "$_TT_LAST_RC" = 0 ] || return 0
+    done
+    return 0
+  fi
+
+  # Launch order: heavy (H) first, then the rest of the pool in registration order.
+  for ((i = 0; i < _TT_N; i++)); do
+    [ "${_TT_MODE[$i]}" = H ] && { order="$order $i"; pcount=$((pcount + 1)); }
+  done
+  for ((i = 0; i < _TT_N; i++)); do
+    [ "${_TT_MODE[$i]}" = P ] && { order="$order $i"; pcount=$((pcount + 1)); }
+  done
+  # Distinct lane names, in first-seen order.
+  for ((i = 0; i < _TT_N; i++)); do
+    if [ "${_TT_MODE[$i]}" = L ]; then
+      case " $lanes " in *" ${_TT_LANE[$i]} "*) ;; *) lanes="$lanes ${_TT_LANE[$i]}" ;; esac
+    fi
+  done
+  echo ">>> [tooling-tests] running $pcount parallel suites ($jobs at a time) alongside serial lane(s):${lanes:- none}; then the serial tail"
+  # Everything from here to the end of the drain runs with the signal traps installed; each
+  # launch-and-register pair is a critical section during which a signal is only recorded.
+  _TT_ACTIVE=""; _TT_LANES=""; _TT_SIGPEND=""; _TT_LOGDIR=$d; _TT_CRIT=1
+  trap '_tt_on_signal INT' INT; trap '_tt_on_signal TERM' TERM; trap '_tt_on_signal HUP' HUP
+  _TT_TMPBASE=$(mktemp -d "${TMPDIR:-/tmp}/tt-par.XXXXXX") || _TT_TMPBASE=""
+  if [ -z "$_TT_TMPBASE" ]; then
+    _TT_CRIT=0; trap - INT TERM HUP
+    _TT_FAILED_NAMES="cannot create a scratch TMPDIR for the parallel set"
+    return 0
+  fi
+  tmpbase=$_TT_TMPBASE
+  _TT_CRIT=0; _tt_handle_pending
+  # Each lane is one background chain (its suites never overlap each other).
+  for ln in $lanes; do
+    _TT_CRIT=1
+    _tt_bg_begin
+    _tt_lane "$ln" "$d" "$tmpbase" &
+    _TT_LANES="$_TT_LANES $ln:$!"
+    _tt_bg_end
+    _TT_CRIT=0; _tt_handle_pending
+  done
+  # Liveness comes from bash's OWN job table (`jobs -rp`), which only tracks this shell's children
+  # and so is immune to pid reuse (a signal-0 probe of a bare pid is not). A worker that left the
+  # table is reaped with `wait <pid>` to get its real exit status; if it published no readable
+  # status file (killed, or the status write failed - ENOSPC), _tt_reap synthesizes a failure so
+  # _tt_report names it. The atomic .rc write in _tt_exec stays: it is the normal result channel.
+  # Completed lane workers are reaped by the same call, so only live groups are ever signalled.
+  for i in $order; do
+    while :; do
+      _tt_reap "$d"
+      [ "$_TT_RUNNING" -lt "$jobs" ] && break
+      sleep 0.2
+    done
+    _TT_CRIT=1
+    _tt_bg_begin
+    _tt_exec "$i" "$d" "$tmpbase" &
+    _TT_ACTIVE="$_TT_ACTIVE $i:$!"
+    _tt_bg_end
+    _TT_CRIT=0; _tt_handle_pending
+  done
+  # Drain the pool and the lanes (waits ONLY for the workers started here: a bare `wait` would also
+  # wait for the gate's heartbeat).
+  while :; do
+    _tt_reap "$d"
+    [ "$_TT_RUNNING" -eq 0 ] && [ -z "${_TT_LANES// /}" ] && break
+    sleep 0.2
+  done
+  _TT_CRIT=1
+  rm -rf "${_TT_TMPBASE:?}"; _TT_TMPBASE=""
+  trap - INT TERM HUP
+  _TT_CRIT=0; _tt_handle_pending
+
+  # Deterministic replay of the pool + lanes (registration order; notes in place).
+  for ((i = 0; i < _TT_N; i++)); do
+    case "${_TT_MODE[$i]}" in P|H|L|N|X) _tt_report "$i" "$d" "$log" ;; esac
+  done
+  # Serial tail, streamed live, ambient TMPDIR, alone on the box.
+  for ((i = 0; i < _TT_N; i++)); do
+    if [ "${_TT_MODE[$i]}" = S ]; then
+      echo ">>> [tooling-tests] ${_TT_HDR[$i]}"
+      _tt_exec "$i" "$d" ""
+      _tt_report "$i" "$d" "$log" noheader
+    fi
+  done
+  # Fail closed on a dropped suite: every registered suite (notes excepted) must have been
+  # reported exactly once, or the component cannot claim it ran them all.
+  want=0
+  for ((i = 0; i < _TT_N; i++)); do [ "${_TT_MODE[$i]}" = N ] || want=$((want + 1)); done
+  if [ "$_TT_REPORTED" -ne "$want" ]; then
+    echo "--- [tooling-tests] FAILED (suite accounting): $want suites registered but $_TT_REPORTED reported ---"
+    _TT_FAILED_NAMES="${_TT_FAILED_NAMES:+$_TT_FAILED_NAMES; }suite accounting ($want registered, $_TT_REPORTED reported)"
+  fi
+  return 0
+}
+
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
   fi
   local log="$LOG_DIR/$name.log"
-  local start end status
+  local start end status _tt_skip_final=0
   start=$(date +%s)
   : >"$log"
 
@@ -22301,35 +22686,51 @@ run_tooling_tests() {
   # self-tests below — several of which recursively invoke agent-gate.sh — can
   # inherit the parent's summary path and clobber it. No per-component scrub needed.
 
+  # ---------------------------------------------------------------------------------------
+  # Suite registry (#4468). Every suite below is registered with `_tt_add <MODE> <label> <cmd>
+  # [reason]`; see the "tooling-tests parallel runner" block above this function. MODE is P
+  # (parallel), H (parallel, launched first because it is long) or S (SERIAL, after the
+  # parallel set drains). A suite is SERIAL only for a reason read out of the suite itself:
+  # shared locks/lanes, real /data/lanes, `systemd-run --user`, git worktree/ref mutation of
+  # the repo, cargo builds into the shared target, or measuring timing/concurrency.
+  #
+  # SERIAL SET (mode -> suites -> why). L:<lane> suites never overlap each other but overlap the
+  # pool; S suites run alone, last.
+  #   L:git-worktree  test_gate_liveness.sh, test_pub_surface_guard.sh
+  #                      -> both add/remove worktrees against the REAL repo's .git, and `git worktree prune` is
+  #                         repository-wide, so they race on one worktree registry: one lane (roborev job 137).
+  #                         AUDIT: every other suite that runs worktree/ref/prune commands does so in its own
+  #                         scratch repo (base_staleness, fetch_datasets_tracked_guard, issue_gate_hook, lane_lock,
+  #                         claim_lock, precommit hook) and so is not in this lane.
+  #   L:systemd        test_gate_detached.sh
+  #                      -> real `systemd-run --user` units, cgroup reads, pgrep of live agent-gate.sh
+  #   L:shared-target  test_bti_perf_scan.sh, ws0-corpus-gen cargo test, test_flight_allocator_link.sh
+  #                      -> cargo build/test into the shared target dir (cargo takes its lock; one at a time)
+  #   L:lane-root      test_lane_lock_precommit_hook.sh
+  #                      -> drives the REAL lane root /data/lanes (shared lane-lock records)
+  #   S (tail)         test_gate_concurrency_cap.sh, test_issue_gate_hook.sh
+  #                      -> measure gate concurrency-cap / slot waits and timeout budgets: run alone after everything else
+  #   S (tail)         test_drive_issue_state.sh
+  #                      -> pid-liveness/ownership timing (`sleep &`, kill/wait, stamp reads); FAILED once under full pool load
+  #                         (parallel run 5, "prior-ts duplicate ... UNSTAMPED"), passes alone: run alone, last
+  #   S (tail)         test_agent_gate_parity_report.sh
+  #                      -> writes the REAL repo tree (test-data/.tmp-parity-manifest-mutated.*); nested-gate tree-integrity
+  #                         and test_agent_gate_nested_isolation.sh's test-data fixture-set check observe that tree (found
+  #                         by the first parallel run: nested-isolation FAILed while parity-report's fixture existed)
+  # H = parallel pool, launched first (long, but hermetic: private mktemp fixtures/slots dirs).
+  # Everything else was read (or run in parallel and repeated) and is hermetic: it builds its own
+  # mktemp fixtures, and in the parallel set additionally gets a private TMPDIR.
+  # ---------------------------------------------------------------------------------------
+  _tt_reset
   # generator keyspace-scoping guard (#1232): no python3 needed, always runs. A
   # failure here FAILs the component, mirroring the summary selftest semantics.
-  echo ">>> [$name] bash scripts/tests/test_generator_keyspace_scoping.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_generator_keyspace_scoping.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (keyspace-scoping guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'keyspace-scoping guard' 'bash "$REPO_ROOT/scripts/tests/test_generator_keyspace_scoping.sh"'
 
   # UDT row-builder tuple-shape guard (#1991): no python3/Docker needed, always
   # runs. Pins build_udt_value() to a positional tuple (a dict → KeyError: 0
   # under prepared inserts, aborting the exhaustive regen) + an actionable 0-row
   # abort. A failure FAILs the component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_udt_rowbuilder_tuple_shape.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_udt_rowbuilder_tuple_shape.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (udt-rowbuilder tuple-shape guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'udt-rowbuilder tuple-shape guard' 'bash "$REPO_ROOT/scripts/tests/test_udt_rowbuilder_tuple_shape.sh"'
 
   # flight Dockerfile Rust-pin lockstep guard (#2870): no python3/Docker/cargo
   # needed, always runs. Mechanizes #1990 — asserts cqlite-flight/Dockerfile has
@@ -22338,17 +22739,7 @@ run_tooling_tests() {
   # #3493: the dataset-corpus completeness checker. Dataset-free, network-free — it builds
   # its own synthetic corpora and never touches CQLITE_DATASETS_ROOT except through cases
   # that explicitly need a real one.
-  echo ">>> [$name] bash scripts/tests/test_check_dataset_manifest.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_check_dataset_manifest.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (test_check_dataset_manifest.sh); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add H 'test_check_dataset_manifest.sh' 'bash "$REPO_ROOT/scripts/tests/test_check_dataset_manifest.sh"'
 
   # tooling-tests diff-scoping self-test (#4266): the non-vacuity proof for
   # scripts/lib/tooling-tests-scope.sh AND its wiring into this very function —
@@ -22359,17 +22750,7 @@ run_tooling_tests() {
   # the scope check runs before this function's first heavy self-test and that
   # --only bypasses it. Hermetic: no cargo/python3/network/datasets, one local
   # `git init` scratch repo. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_tooling_tests_scope.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_tooling_tests_scope.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (tooling-tests diff-scoping self-test #4266); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'tooling-tests diff-scoping self-test #4266' 'bash "$REPO_ROOT/scripts/tests/test_tooling_tests_scope.sh"'
 
   # --recertify self-test (#4268): the non-vacuity proof for
   # scripts/lib/recert-component-domains.sh (a completeness census over the
@@ -22386,34 +22767,14 @@ run_tooling_tests() {
   # which asserts the exact SKIP this produces; copying the guard in would
   # change dep-duplicates' verdict and break that case). A failure FAILs the
   # component.
-  echo ">>> [$name] bash scripts/tests/test_recertify.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_recertify.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (--recertify self-test #4268); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P '--recertify self-test #4268' 'bash "$REPO_ROOT/scripts/tests/test_recertify.sh"'
 
   # #3689: the one-shot smoke harness must run its WHOLE suite through a failing
   # test. It used to abort on the first failure (a bare `set -e` inside run_test
   # clobbering main()'s `set +e`), so a stale CSV golden hid an identical
   # staleness in select_simple_table.golden. Hermetic: stub CLI, no cargo, no
   # dataset corpus, no network. Carries its own positive control.
-  echo ">>> [$name] bash scripts/tests/test_ci_one_shot_smoke_no_abort.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ci_one_shot_smoke_no_abort.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ci-one-shot-smoke no-abort guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ci-one-shot-smoke no-abort guard' 'bash "$REPO_ROOT/scripts/tests/test_ci_one_shot_smoke_no_abort.sh"'
 
   # #3637: the per-run LOG_DIR lifecycle. Hermetic (its own scratch TMPDIR + a fake
   # checkout, driving the no-cargo --lite-aggregate-selftest / --emit-summary-selftest /
@@ -22425,29 +22786,9 @@ run_tooling_tests() {
   # alone. A weakened assert here means either a five-figure inode leak returns or a
   # failed gate loses the evidence bundle its own SUMMARY points at. A failure FAILs the
   # component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_logdir_cleanup.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_logdir_cleanup.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (agent-gate LOG_DIR cleanup guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'agent-gate LOG_DIR cleanup guard' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_logdir_cleanup.sh"'
 
-  echo ">>> [$name] bash scripts/tests/test_check_dockerfile_rust_pin.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (flight Dockerfile rust-pin lockstep); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'flight Dockerfile rust-pin lockstep' 'bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh"'
 
   # auto-loaded-skill flag-table drift guard (#3054): no python3/Docker/cargo
   # needed, always runs. Pins the row/extended/cell flag tables in
@@ -22457,17 +22798,7 @@ run_tooling_tests() {
   # partition-boundary mis-detection (0x01 labeled IS_MARKER/IS_STATIC). Fails closed
   # when a source split moves the constants or the table is reformatted away. A
   # failure FAILs the component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_check_skill_flag_tables.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_check_skill_flag_tables.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (skill flag-table drift guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'skill flag-table drift guard' 'bash "$REPO_ROOT/scripts/tests/test_check_skill_flag_tables.sh"'
 
   # roborev vacuous-review guard (#2964): hermetic (stub roborev first on PATH +
   # throwaway git fixtures), no network/datasets/cargo, ~0.5s. Pins every recorded
@@ -22479,17 +22810,7 @@ run_tooling_tests() {
   # merges with no red anywhere. Also runs in --lite via roborev-lints; kept here so
   # the full gate covers it in its shell-tooling component set too. A failure FAILs
   # the component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_roborev_review_guard.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (roborev vacuous-review guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add H 'roborev vacuous-review guard' 'bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh"'
 
   # committed-schemas preflight guard (#3148 AC (c)): hermetic (temp dataset/schemas
   # roots, no real corpus/network/cargo — the FULL-gate cases exit AT the preflight).
@@ -22500,17 +22821,7 @@ run_tooling_tests() {
   # contract (the schemas root must not vary with CQLITE_DATASETS_ROOT — the retired
   # `..`-climb symlink trap) and the single-definition invariant. A failure FAILs the
   # component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_schemas_preflight.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_schemas_preflight.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (committed-schemas preflight guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'committed-schemas preflight guard' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_schemas_preflight.sh"'
 
   # component-set skew pre-flight guard (#3544): the POSITIVE CONTROL for the check that
   # refuses a gate script older than origin/main's component set — the skew that let PR
@@ -22521,17 +22832,7 @@ run_tooling_tests() {
   # unrelated breakage produces an identical exit code. Hermetic: the fail-closed cases
   # exit AT the pre-flight, before any component, so no cargo and no #1825 slot.
   # A failure FAILs the component, mirroring the schemas guard above.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_component_set.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_component_set.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (component-set skew preflight guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add H 'component-set skew preflight guard' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_component_set.sh"'
 
   # perf-run-contained argument-safety guard (#3068): no python3/sudo/systemd
   # needed, always runs (the wrapper's --check-args hook executes nothing). Pins
@@ -22540,17 +22841,7 @@ run_tooling_tests() {
   # uncontained one hard-hung a swapless host for 75 minutes, so a silently
   # misparsed cap is a host-availability bug, not a usability nit. A failure FAILs
   # the component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_perf_run_contained.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_perf_run_contained.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (perf-run-contained arg-safety guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'perf-run-contained arg-safety guard' 'bash "$REPO_ROOT/scripts/tests/test_perf_run_contained.sh"'
 
   # perf-corpus generator guard (#3068): hermetic (no docker/sudo/cassandra —
   # only the generator's --validate-only/--prune-dry-run hooks, which exit before
@@ -22558,17 +22849,7 @@ run_tooling_tests() {
   # plus the manifest writer's refusal to emit an empty `tables` array — together
   # they stop a typo silently overwriting the committed provenance manifest — and
   # (b) the tight scoping of stale-corpus pruning, which deletes multi-GB paths.
-  echo ">>> [$name] bash scripts/tests/test_gen_perf_corpus_3068.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (perf-corpus generator guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'perf-corpus generator guard' 'bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh"'
 
   # BTI perf-corpus generator guard (#3234): hermetic (no docker/sudo/cassandra —
   # --help/--validate-only/--verify-only, the row driver, the manifest writer's
@@ -22583,17 +22864,7 @@ run_tooling_tests() {
   # driver's (seed, chunk) determinism, which is what makes the manifest's
   # per-Data.db sha256 a reproducibility check. A failure FAILs the component,
   # mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_gen_perf_corpus_bti.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (BTI perf-corpus generator guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'BTI perf-corpus generator guard' 'bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh"'
 
   # AC3 warm-scan harness guard (#3234): the automated executor for
   # cqlite-core/examples/bti_perf_scan/, the instrument every #3234 throughput
@@ -22608,17 +22879,7 @@ run_tooling_tests() {
   # and needs no docker/network/python3/datasets. It does `cargo build -p cqlite-core
   # --example bti_perf_scan --features cli-helpers` (incremental; the full gate has
   # already compiled that graph), and a build failure is a FAILURE, never a skip.
-  echo ">>> [$name] bash scripts/tests/test_bti_perf_scan.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (AC3 warm-scan harness guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add L:shared-target 'AC3 warm-scan harness guard' 'bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh"' 'cargo build into the shared target dir'
 
   # Unenforced-constraint-comment guard (#3234): a comment that STATES a constraint
   # must name or sit beside its enforcement, or the comment goes. Mechanizes the class
@@ -22630,18 +22891,7 @@ run_tooling_tests() {
   # `--self-test` asserts the real surface passes, that an INJECTED unenforced claim
   # FAILS, and that the same claim passes once its enforcement follows it. Hermetic,
   # python3-only, sub-second.
-  echo ">>> [$name] python3 scripts/tests/check-constraint-comments.py --self-test"
-  if ! python3 "$REPO_ROOT/scripts/tests/check-constraint-comments.py" --self-test \
-    >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (unenforced constraint comment); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'unenforced constraint comment' 'python3 "$REPO_ROOT/scripts/tests/check-constraint-comments.py" --self-test'
 
   # ROOT JUNK-FILE guard (#3272 review round 5, F5). An empty file named `0` was
   # committed at the repo root of one branch THREE times — removed, re-added by a
@@ -22668,17 +22918,7 @@ run_tooling_tests() {
   # git repo under $TMPDIR — then scans THIS checkout, so the hook cannot certify the probe while
   # leaving the real root unexamined. git-only: no python3, no network, hence NO SKIP PATH to
   # record a vacuous success.
-  echo ">>> [$name] bash scripts/ci/check-root-junk-files.sh --self-test"
-  if ! bash "$REPO_ROOT/scripts/ci/check-root-junk-files.sh" --self-test >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (TRACKED accidental-redirect artifact at the repo root, or its self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'TRACKED accidental-redirect artifact at the repo root, or its self-test' 'bash "$REPO_ROOT/scripts/ci/check-root-junk-files.sh" --self-test'
 
   # ws0 measurement-rig integrity guards (#3096/#3272): hermetic (synthetic result
   # dirs + synthetic perf CSVs — no cargo, perf, sudo, corpus or network, and never
@@ -22712,27 +22952,8 @@ run_tooling_tests() {
   # The CLOSED verdict-evidence checker (#3248 jobs 73/75/78). Wired HERE rather than left to be
   # run by hand: an unwired suite is dead weight, and this one is the standing cover for a guard
   # that review holed three rounds running.
-  echo ">>> [$name] bash scripts/tests/test_ws0_quiescence_evidence_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_evidence_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 quiescence-evidence guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    return 1
-  fi
-  echo ">>> [$name] bash scripts/tests/test_ws0_report_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 measurement-rig integrity guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 quiescence-evidence guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_evidence_guards.sh"'
+  _tt_add P 'ws0 measurement-rig integrity guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh"'
 
   # ws0 CLOCK guards (#3248) — the occupancy-enforced clock derivation.
   # AC4 of #3248 asked for a reconciliation "stating the clock basis". This test exists
@@ -22747,33 +22968,13 @@ run_tooling_tests() {
   # token, plus an affirmative accept case that pins the frequency, the exact TSC, two
   # independent occupancy sources and the labelled trap value. Hermetic — the tool
   # consumes a perf CSV and invokes nothing, so no perf, corpus, cargo or network.
-  echo ">>> [$name] bash scripts/tests/test_ws0_clock_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_clock_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 occupancy-enforced clock guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 occupancy-enforced clock guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_clock_guards.sh"'
 
   # ws0 QUIESCENCE guards (#3248) — the box-quiescence gate for a measurement rep.
   # Wired here because roborev job 60 finding 7 caught that it was NOT: the clock suite was
   # added and this one was not, so 19 checks sat in the tree with no standing protection —
   # a guard that exists and never runs, which is this issue's own subject matter.
-  echo ">>> [$name] bash scripts/tests/test_ws0_quiescence_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 box-quiescence guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 box-quiescence guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_guards.sh"'
 
   # ws0 CELL-VOLUME guards — "rows were checked and CELLS were not" (#3272 round 17).
   # Split out of the reporter suite above under the campsite rule (that file reached 1602 lines
@@ -22789,17 +22990,7 @@ run_tooling_tests() {
   # count) and a different non-vacuity mutation site (`ws0_collect.py`'s per-pass requirement).
   # Hermetic: synthetic session dirs under $TMPDIR driven through the shipped reporter; no cargo,
   # perf, sudo, taskset, corpus, network or driver invocation.
-  echo ">>> [$name] bash scripts/tests/test_ws0_cell_volume_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cell_volume_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 cell-volume guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 cell-volume guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_cell_volume_guards.sh"'
 
   # ws0 CORPUS-BOUNDARY guards (#3272 round 21), its own suite under the campsite rule and WIRED
   # HERE IN THE SAME CHANGE — an unwired suite is the same defect class as a fail-open guard.
@@ -22815,17 +23006,7 @@ run_tooling_tests() {
   # measurement boundary against the PIN, refusing the rep and naming what changed — the half no
   # pre/post pair can see. Hermetic: synthetic session dirs and component files under $TMPDIR
   # through the shipped writer/verifier/reporter; no cargo, perf, sudo, corpus, network or driver.
-  echo ">>> [$name] bash scripts/tests/test_ws0_corpus_boundary_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_corpus_boundary_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 corpus-boundary guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 corpus-boundary guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_corpus_boundary_guards.sh"'
 
   # ws0 BOUNDARY-RECORD COMPLETENESS guards (#3272 round 25), split out of the corpus-boundary
   # suite above under the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a
@@ -22845,17 +23026,7 @@ run_tooling_tests() {
   # field while claiming the digest and every component verified. Hermetic: synthetic session dirs
   # under $TMPDIR through the shipped fixture generator and reporter; no cargo, perf, sudo, corpus,
   # network or driver invocation.
-  echo ">>> [$name] bash scripts/tests/test_ws0_boundary_record_completeness.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_boundary_record_completeness.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 boundary-record completeness guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 boundary-record completeness guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_boundary_record_completeness.sh"'
 
   # ws0 ERROR-CODE CROSS-CHECK guards (#3272 round 20), split out of the reporter suite under
   # the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a test nothing
@@ -22869,17 +23040,7 @@ run_tooling_tests() {
   # (another field of the SAME record) and a different non-vacuity mutation site
   # (`ws0_error_codes.py`). Hermetic: synthetic session dirs under $TMPDIR driven through the
   # shipped reporter; no cargo, perf, sudo, taskset, corpus, network or driver invocation.
-  echo ">>> [$name] bash scripts/tests/test_ws0_error_code_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_error_code_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 error-code guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 error-code guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_error_code_guards.sh"'
 
   # ws0 MEASUREMENT-APPARATUS guards (#3272, item 10): the sibling of the reporter
   # test above, split out because it covers a different question over disjoint
@@ -22920,17 +23081,7 @@ run_tooling_tests() {
   # test target, and the two subjects share no fixture and no helper).
   # Hermetic: a fake sysfs tree + a loopback listener under $TMPDIR. No perf, sudo,
   # taskset, root, real multi-socket hardware, corpus, network or cargo.
-  echo ">>> [$name] bash scripts/tests/test_ws0_cpu_pinning_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 cpu-pinning / server-ownership guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 cpu-pinning / server-ownership guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh"'
 
   # ws0 FLIGHT-ARM GUARDS (#3551) — the pin MODE, the ALLOCATOR and what the report
   # may SAY about either. Its own file because the suite above is at the ~1500-line
@@ -22952,17 +23103,7 @@ run_tooling_tests() {
   # Hermetic: fake sysfs, synthetic maps + session dirs + a few-KB corpus under $TMPDIR;
   # every driver call through ws0_driver_run. No cargo, perf, sudo, taskset, root,
   # libjemalloc, server, corpus or network.
-  echo ">>> [$name] bash scripts/tests/test_ws0_flight_arm_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_flight_arm_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 flight-arm pin/allocator guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 flight-arm pin/allocator guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_flight_arm_guards.sh"'
 
   # ws0 INTERLEAVED A/B/C GUARDS (#3551) — its own file because the two suites above are
   # about ONE SESSION (which CPUs, which program, what differs between the two arms of
@@ -23000,17 +23141,7 @@ run_tooling_tests() {
   # component that genuinely invoked the driver would then go unflagged) bought for a
   # comment. MEASURED: it reported exactly that, uncovered=1, the moment this comment first
   # named it.
-  echo ">>> [$name] bash scripts/tests/test_ws0_abc_driver_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 interleaved A/B/C set guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 interleaved A/B/C set guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh"'
 
   # ws0 #3551 ARTIFACT-TOOL GUARDS — the two MEASUREMENT-ANALYSIS tools under
   # docs/reports/ws0-3551-artifacts/ whose stdout IS the published result of that
@@ -23043,17 +23174,7 @@ run_tooling_tests() {
   # Hermetic: synthetic session dirs, window records and sampler JSONL under
   # $TMPDIR; NOTHING is read from /data/ws0-3551 (one lane's live outputs). No
   # cargo, perf, sudo, taskset, root, corpus bytes, server or network.
-  echo ">>> [$name] bash scripts/tests/test_ws0_3551_artifact_tools.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_3551_artifact_tools.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 #3551 artifact-tool guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 #3551 artifact-tool guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_3551_artifact_tools.sh"'
 
   # ws0 PERF-INVOCATION LINT, all three layers (#3272, item 10; split out of the
   # cpu-pinning suite above under the campsite rule, along a RESPONSIBILITY seam —
@@ -23081,17 +23202,7 @@ run_tooling_tests() {
   # from the absence of a bad signal. Hermetic: driver and scripts/perf copies under
   # $TMPDIR plus a shimmed `perf` function; no perf, sudo, taskset, root, corpus,
   # network or cargo.
-  echo ">>> [$name] bash scripts/tests/test_ws0_perf_invocation_lint.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_perf_invocation_lint.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 perf-invocation lint guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 perf-invocation lint guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_perf_invocation_lint.sh"'
 
   # ws0 NO-FABRICATED-VALUE guards (#3272 AC3, review round 1). The third file of the
   # rig's self-test set, for one subject: a counter or verdict that was not OBSERVED
@@ -23147,41 +23258,11 @@ run_tooling_tests() {
   # asserted instead. A separate file from the reporter guards because this is the only part
   # of the rig that changes anything OUTSIDE its own process tree, and the only part whose
   # failure is SECURITY-ADJACENT rather than a wrong number.
-  echo ">>> [$name] bash scripts/tests/test_ws0_host_state_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_host_state_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 host-state restore guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 host-state restore guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_host_state_guards.sh"'
 
-  echo ">>> [$name] bash scripts/tests/test_ws0_hermeticity.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_hermeticity.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 self-test hermeticity); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add H 'ws0 self-test hermeticity' 'bash "$REPO_ROOT/scripts/tests/test_ws0_hermeticity.sh"'
 
-  echo ">>> [$name] bash scripts/tests/test_ws0_fabrication_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_fabrication_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 no-fabricated-value guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 no-fabricated-value guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_fabrication_guards.sh"'
 
   # ws0 MEASUREMENT PROVENANCE (#3272 review round 6). Split out of the fabrication suite
   # under the campsite rule, by SUBJECT: that suite asserts a property of a NUMBER (a counter
@@ -23218,17 +23299,7 @@ run_tooling_tests() {
   # whose real sha256 is computed with hashlib; no cargo, perf, sudo, corpus, network or root.
   # python3 absence FAILS here (it is a hard requirement of the rig), never skips, and a
   # check-count floor closes the suite-level 0/0.
-  echo ">>> [$name] bash scripts/tests/test_ws0_provenance_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_provenance_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 measurement-provenance guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 measurement-provenance guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_provenance_guards.sh"'
 
   # ws0 OUTPUT-DIRECTORY EXCLUSIVITY (#3272 review round 13, campsite split). Split out of
   # `test_ws0_provenance_guards.sh` (1606 lines against the ~1500 test target — the `file-size`
@@ -23250,17 +23321,7 @@ run_tooling_tests() {
   # invocations ONLY through `ws0_driver_run`; no cargo, perf, sudo, taskset, corpus, network or
   # root. One case SKIPS as root (which bypasses the read bit the F4 trigger needs), with a stated
   # reason rather than a pass.
-  echo ">>> [$name] bash scripts/tests/test_ws0_output_dir_exclusivity.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_output_dir_exclusivity.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 output-dir exclusivity guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 output-dir exclusivity guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_output_dir_exclusivity.sh"'
 
   # ws0 CANONICAL-CORPUS COMPARISON (#3272 review round 13, F3). The third campsite split off
   # `test_ws0_provenance_guards.sh`, and a distinct SUBJECT: that file asks whether a report
@@ -23281,17 +23342,7 @@ run_tooling_tests() {
   # hand-copied Python literal could not satisfy the check), and a renamed constant observed to be
   # FATAL. Hermetic: synthetic corpora under $TMPDIR, the shipped oracle/writers called directly,
   # driver invocations only through `ws0_driver_run`; the Rust pin is READ, never compiled.
-  echo ">>> [$name] bash scripts/tests/test_ws0_canonical_corpus.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_canonical_corpus.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 canonical-corpus guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 canonical-corpus guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_canonical_corpus.sh"'
 
   # ws0 PER-REP ROUND METADATA (#3272 review round 4). Split out of the fabrication suite
   # under the campsite rule, by SUBJECT: the driver's loop order, the four RECORDED per-rep
@@ -23311,17 +23362,7 @@ run_tooling_tests() {
   # (`scripts/tests/ws0_assert_no_verdict_fields.py`), and two structural scans of the
   # reporter's ast-stripped executable code. Re-adding an OBSERVED drift control on real
   # hardware is #3287/#3299. Hermetic: synthetic session dirs only.
-  echo ">>> [$name] bash scripts/tests/test_ws0_round_metadata.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_round_metadata.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 round-metadata / no-interleaving-claim guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 round-metadata / no-interleaving-claim guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_round_metadata.sh"'
 
   # ws0 NUMERIC WRAPAROUND (#3272 review round 7, F2). Split out of the cpu-pinning suite
   # under the campsite rule, along a responsibility seam: the cpu suite's subject is TOPOLOGY
@@ -23341,17 +23382,7 @@ run_tooling_tests() {
   # input. The expansion-loop case runs under `timeout`, because the pre-fix failure mode is a
   # hang and a hanging test is not a failing test. Hermetic: two sourced libraries plus a
   # synthetic sysfs topology in $TMPDIR; sub-second.
-  echo ">>> [$name] bash scripts/tests/test_ws0_numeric_wraparound.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_numeric_wraparound.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 numeric-wraparound guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 numeric-wraparound guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_numeric_wraparound.sh"'
 
   # ws0 PRIMARY-PATH ACCEPT DIRECTION (#3272 review round 11). The complement of the five suites
   # above, and it exists because of a ROOT CAUSE rather than a sixth guard: review rounds 9, 10 and
@@ -23375,17 +23406,7 @@ run_tooling_tests() {
   # runs ONLY through `ws0_driver_run` (`--validate-args-only` + recording shims, every shim OBSERVED
   # to record), plus a throwaway git repo and a few KB under $TMPDIR — no cargo, perf, sudo, taskset,
   # corpus, network or root. What it deliberately does NOT reach is stated in the file's own header.
-  echo ">>> [$name] bash scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 primary-path ACCEPT-direction guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 primary-path ACCEPT-direction guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh"'
 
   # ws0 EMBEDDED-STEP EXECUTE DIRECTION (#3451). The complement of every suite above in a
   # different axis from the accept/reject one: those suites all stop at `--validate-args-only`,
@@ -23436,17 +23457,7 @@ run_tooling_tests() {
   # cannot fire looks identical to one that fired and found nothing. Hermetic: python3 and a few KB
   # under $TMPDIR; the driver is READ, never invoked — no sudo, cargo, perf, taskset, corpus,
   # network or root.
-  echo ">>> [$name] bash scripts/tests/test_ws0_embedded_steps_execute.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_embedded_steps_execute.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 embedded-step EXECUTE-direction coverage); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 embedded-step EXECUTE-direction coverage' 'bash "$REPO_ROOT/scripts/tests/test_ws0_embedded_steps_execute.sh"'
 
   # ws0 BINARY/BUILD PROVENANCE (#3272 review round 11, campsite split). Split out of
   # `test_ws0_provenance_guards.sh` (which reached 1652 lines against the ~1500 test target — the
@@ -23471,17 +23482,7 @@ run_tooling_tests() {
   # source after the last copy, refusing and naming whichever moved). Hermetic: synthetic
   # session dirs and perf CSVs, a few-KB Data.db hashed with hashlib, and a throwaway `git init` repo
   # in $TMPDIR; no cargo, perf, sudo, taskset, corpus, network or root.
-  echo ">>> [$name] bash scripts/tests/test_ws0_binary_provenance.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_binary_provenance.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 binary/build-provenance guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 binary/build-provenance guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_binary_provenance.sh"'
 
   # ws0 PREWARM COMPLETENESS — "was the measurement actually WARM?" (#3272 review round 12, F2).
   # Split out of the reporter suite along a responsibility seam: this property is decided at
@@ -23495,17 +23496,7 @@ run_tooling_tests() {
   # own row counts). Both legs now require a FULL corpus scan against the PINNED row count.
   # Hermetic: synthetic prewarm artifacts, a few-KB Data.db hashed with hashlib, a session pin from
   # the shipped writer; no cargo, perf, sudo, taskset, corpus, network, root or driver invocation.
-  echo ">>> [$name] bash scripts/tests/test_ws0_prewarm_completeness.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_prewarm_completeness.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 prewarm-completeness guards); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'ws0 prewarm-completeness guards' 'bash "$REPO_ROOT/scripts/tests/test_ws0_prewarm_completeness.sh"'
 
   # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
   # `tools/*` package tests are run by NO other gate component and by no CI lane
@@ -23534,17 +23525,7 @@ run_tooling_tests() {
   #     #[ignore]d (it writes ~2.8 GB) and carries the operator command.
   # Cheap and hermetic: 1,000-row corpora in tempdirs (~0.3s total), no datasets,
   # no network. A build failure is a FAILURE, never a skip.
-  echo ">>> [$name] cargo test -p ws0-corpus-gen (determinism byte-compare + corpus pin)"
-  if ! (cd "$REPO_ROOT" && cargo test -q -p ws0-corpus-gen) >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (ws0 corpus determinism / pin); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add L:shared-target 'ws0 corpus determinism / pin' '(cd "$REPO_ROOT" && cargo test -q -p ws0-corpus-gen)' 'cargo test into the shared target dir'
 
   # fetch-datasets tracked-fixture guard (#2878): hermetic (throwaway git repo +
   # locally-built partial-overlap tarball + stub curl — no network, and the real
@@ -23554,112 +23535,42 @@ run_tooling_tests() {
   # this very gate FAILs core-tests + cli-tests on a pristine main and the checkout
   # is left with stageable deletions of tracked files. A failure FAILs the
   # component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_fetch_datasets_tracked_guard.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_fetch_datasets_tracked_guard.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (fetch-datasets tracked-fixture guard); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'fetch-datasets tracked-fixture guard' 'bash "$REPO_ROOT/scripts/tests/test_fetch_datasets_tracked_guard.sh"'
 
   # parity-report component self-test (#1338): no python3 needed, always runs. A
   # failure FAILs the component, mirroring the keyspace-scoping guard semantics.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_parity_report.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (parity-report self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add S 'parity-report self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh"' 'writes the REAL repo tree (test-data/.tmp-parity-manifest-mutated.*), which nested-gate tree-integrity and the test-data fixture-set assertions of other suites observe: alone, last'
 
   # oom-audit component self-test (#2012): drives nested `agent-gate.sh --only
   # oom-audit` to assert the SKIP (xtask absent) / FAIL (planted violation) /
   # PASS (bounded tree) outcomes. The SKIP case needs no cargo; the FAIL/PASS
   # cases self-report INFO when cargo is unavailable. A failure FAILs the
   # component, mirroring the parity-report/keyspace-scoping guards.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_oom_audit.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_oom_audit.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (oom-audit self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'oom-audit self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_oom_audit.sh"'
 
   # --delta re-cert self-test (#1892): no python3 needed, always runs (hermetic —
   # classification + entry guards + delta summary emission, no cargo). A failure
   # FAILs the component, mirroring the parity-report/keyspace-scoping guards.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_delta.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_delta.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (delta re-cert self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'delta re-cert self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_delta.sh"'
 
   # python-bindings venv-determinism self-test (#1803): hermetic (PATH-shadowed
   # python3/pip/maturin/python — no real maturin build, no datasets/network),
   # always runs. Proves the import-verify + one-shot self-heal both self-heals a
   # transient venv-resolution miss to PASS AND fails distinctly on a real binding
   # defect. A failure FAILs the component, mirroring the guards above.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_python_bindings_determinism.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_python_bindings_determinism.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (python-bindings venv-determinism self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'python-bindings venv-determinism self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_python_bindings_determinism.sh"'
 
   # cli-tests enumeration self-test (#2039): no python3 needed, always runs
   # (hermetic — asserts the cli-tests component enumerates every cqlite-cli/tests/*.rs
   # target instead of a hardcoded allowlist, and exercises the fail-closed guard; no
   # cargo). A failure FAILs the component, mirroring the delta/parity-report guards.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_cli_tests_enum.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_cli_tests_enum.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (cli-tests enumeration self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'cli-tests enumeration self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_cli_tests_enum.sh"'
 
   # per-gate CPU-budget derivation self-test (#2640): no python3 needed, always
   # runs (hermetic — drives the --cpu-budget hook with a pinned ncpu, asserts the
   # CARGO_BUILD_JOBS + test-threads fair-share derivation from the slot count and
   # the taskpolicy/nice wrapping; no cargo). A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_gate_cpu_budget.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_cpu_budget.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (cpu-budget derivation self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'cpu-budget derivation self-test' 'bash "$REPO_ROOT/scripts/tests/test_gate_cpu_budget.sh"'
 
   # no-wall-clock-assert guard (#2642 / #2369 rule): SKIP-aware (no python3 ->
   # no-op SKIP), always runs its self-test AND scans the `tests/` correctness
@@ -23670,51 +23581,20 @@ run_tooling_tests() {
   # the automated scan yet (pre-existing src/ asserts + a tightened regex are
   # deferred to #2705). This prevents reintroduction into the `tests/` trees that
   # #2642 retired.
-  echo ">>> [$name] bash scripts/tests/test_check_no_wallclock_asserts.sh && bash scripts/tests/check-no-wallclock-asserts.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_check_no_wallclock_asserts.sh" >>"$log" 2>&1 ||
-     ! bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (no-wall-clock-assert guard #2642); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'no-wall-clock-assert guard #2642' 'bash "$REPO_ROOT/scripts/tests/test_check_no_wallclock_asserts.sh" && bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh"'
 
   # GHA command-injection guard self-test (#2656): no Docker/datasets needed
   # (python3-gated inside the script, always attempts). Regression-guards the
   # roborev-lints component's check-workflow-injection.sh — the real lint runs in
   # the roborev-lints component itself; this proves the lint still catches a planted
   # injection sink and does not false-positive. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_check_workflow_injection.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_check_workflow_injection.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (GHA injection guard self-test #2656); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'GHA injection guard self-test #2656' 'bash "$REPO_ROOT/scripts/tests/test_check_workflow_injection.sh"'
 
   # docs-only PR-gate classifier self-test (#2645): no python3 needed, always
   # runs (hermetic — pure-shell allowlist classification + pr-gate.yml structural
   # contract that the required status always reports and the #2644 oracle step is
   # gated fail-closed; no cargo). A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_classify_docs_only.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_classify_docs_only.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (docs-only classifier self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'docs-only classifier self-test' 'bash "$REPO_ROOT/scripts/tests/test_classify_docs_only.sh"'
 
   # required-tier aggregation self-test (#2910): no python3/network needed, always
   # runs (hermetic — synthetic check-run fixtures, injected deadlines/poll budgets,
@@ -23723,17 +23603,7 @@ run_tooling_tests() {
   # decided by run identity rather than name, that a waiver can never excuse a
   # failed tier, and — via an always-exit-0 stub aggregator — that the suite is
   # non-vacuous. SKIP-aware inside the script (no ruby -> SKIP, never silent PASS).
-  echo ">>> [$name] bash scripts/tests/test_aggregate_required_tiers.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_aggregate_required_tiers.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (required-tier aggregation self-test #2910); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'required-tier aggregation self-test #2910' 'bash "$REPO_ROOT/scripts/tests/test_aggregate_required_tiers.sh"'
 
   # gating-tier enrolment self-test (#2910): the other half — the rule that forces
   # every pull_request workflow into .github/ci-gating-tiers.yml (as a tier or an
@@ -23741,17 +23611,7 @@ run_tooling_tests() {
   # unconditionally. Hermetic synthetic workflow trees; includes an always-pass stub
   # enrolment rule wired through a copy of validate-workflows.rb, so the WIRING is
   # proven non-vacuous, not just the rule. SKIP-aware (no ruby -> SKIP).
-  echo ">>> [$name] bash scripts/tests/test_gating_registry_policy.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gating_registry_policy.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (gating-tier enrolment self-test #2910); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'gating-tier enrolment self-test #2910' 'bash "$REPO_ROOT/scripts/tests/test_gating_registry_policy.sh"'
 
   # gating workflow-semantics self-test (#2910 round 3): the CHAIN between the two
   # halves above. It models what conclusion a registered tier's gate job actually
@@ -23762,17 +23622,7 @@ run_tooling_tests() {
   # `always()` mutant proving the model discriminates. It also carries the
   # GNU-only-construct lint for this change's shell (macOS is a first-class gate
   # host; #2926's lint is scoped to the gate's own _tree_* functions).
-  echo ">>> [$name] bash scripts/tests/test_gating_workflow_semantics.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gating_workflow_semantics.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (gating workflow-semantics self-test #2910); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'gating workflow-semantics self-test #2910' 'bash "$REPO_ROOT/scripts/tests/test_gating_workflow_semantics.sh"'
 
   # TaskCompleted issue-gate hook defusal self-test (#2671, epic #2664): no python3
   # needed, always runs (hermetic — builds a throwaway repo, copies the real hook,
@@ -23780,17 +23630,7 @@ run_tooling_tests() {
   # --lite (never the full gate), uses a unique mktemp summary path from the hook's
   # own repo root, fails OPEN on a budget overrun, and runs no roborev. A failure
   # FAILs the component, mirroring the cpu-budget/delta/parity-report guards.
-  echo ">>> [$name] bash scripts/tests/test_issue_gate_hook.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_issue_gate_hook.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (issue-gate hook defusal self-test); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add S 'issue-gate hook defusal self-test' 'bash "$REPO_ROOT/scripts/tests/test_issue_gate_hook.sh"' 'gate-slot wait and hook timeout budgets (timing): alone on the box'
 
   # parallel sub-lane scheduling self-test (#2657, epic #2636): no python3 needed,
   # always runs (hermetic — drives the --classify-lanes hook + static invariants;
@@ -23798,34 +23638,14 @@ run_tooling_tests() {
   # SIDE lane with isolated CARGO_TARGET_DIR, the shared-target cargo components stay
   # on the serial MAIN lane, the serial fallback is intact, and the SUMMARY stays
   # reconstructed in canonical order. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_sublanes.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_sublanes.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (parallel sub-lane scheduling self-test #2657); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'parallel sub-lane scheduling self-test #2657' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_sublanes.sh"'
 
   # gate self-test hermeticity lint (#2874): no python3 needed, always runs (pure
   # static scan of scripts/tests/*.sh). FAILs the component if a macOS-unsafe mktemp
   # template (non-trailing X's) or a FIXED `.tmp-*` fixture name is (re)introduced —
   # the residual same-checkout/self-test-fixture sharing that killed full gates of
   # record. A failure FAILs the component, mirroring the guards above.
-  echo ">>> [$name] bash scripts/tests/test_gate_selftest_hermetic.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_selftest_hermetic.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (gate self-test hermeticity lint #2874); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'gate self-test hermeticity lint #2874' 'bash "$REPO_ROOT/scripts/tests/test_gate_selftest_hermetic.sh"'
 
   # pub-surface guard self-test (#1712): no python3/datasets/network needed, always
   # runs. Proves scripts/ci/check-pub-surface.sh actually FIRES — the consistency
@@ -23843,17 +23663,7 @@ run_tooling_tests() {
   # satisfy them. A failure FAILs the component.
   # gate liveness mechanism (#3473): the heartbeat beater + the three-valued reader.
   # No cargo, no datasets, no network; one bounded nested `--only file-size`.
-  echo ">>> [$name] bash scripts/tests/test_gate_liveness.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (gate liveness mechanism #3473); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add L:git-worktree 'gate liveness mechanism #3473' 'bash "$REPO_ROOT/scripts/tests/test_gate_liveness.sh"' '`git worktree add/remove` against the repo'\''s .git (section 14) and pgrep of live heartbeat beaters'
 
   # gate-liveness SIGPIPE guard (#3803): STRUCTURAL, because the defect is a race.
   # `printf '%s\n' "$t" | grep -m1 ...` lets bash's BUILTIN printf take EPIPE when the
@@ -23867,97 +23677,37 @@ run_tooling_tests() {
   # matcher that matches nothing. It DECLARES its narrowing on every run (scripts/flow/claim.sh
   # and scripts/flow/roborev-review-oracles.sh carry the same shape and are UNGUARDED).
   # Hermetic: no cargo, no datasets, no network, never invokes the gate.
-  echo ">>> [$name] bash scripts/tests/test_gate_liveness_no_sigpipe.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_liveness_no_sigpipe.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (gate-liveness SIGPIPE guard #3803); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'gate-liveness SIGPIPE guard #3803' 'bash "$REPO_ROOT/scripts/tests/test_gate_liveness_no_sigpipe.sh"'
 
   # the #4061 CLASS RATCHET: no NEW piped-builtin-writer site anywhere under scripts/**. The
   # subject set is derived at run time from the git index and the rule is sourced from the one
   # matcher the #3803 suite above pins, so this cannot drift from it. FAILs on an increase or on
   # any match in a file the baseline does not list; an unmeasurable run REFUSES (exit 3) naming
   # its cause. Needs git + awk only.
-  echo ">>> [$name] bash scripts/ci/check-sigpipe-sites.sh"
-  if ! bash "$REPO_ROOT/scripts/ci/check-sigpipe-sites.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (sigpipe-site class ratchet #4061); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'sigpipe-site class ratchet #4061' 'bash "$REPO_ROOT/scripts/ci/check-sigpipe-sites.sh"'
 
   # and that ratchet's SELF-TEST WITH TEETH (#4061): a green ratchet run proves nothing by
   # itself, so every FAIL and REFUSAL path is driven on PLANTED input in per-case scratch git
   # repos (no tracked file is mutated). The two central cases assert the guard exits non-zero AND
   # NAMES the planted file.
-  echo ">>> [$name] bash scripts/tests/test_scripts_sigpipe_ratchet.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_scripts_sigpipe_ratchet.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (sigpipe-site ratchet self-test #4061); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'sigpipe-site ratchet self-test #4061' 'bash "$REPO_ROOT/scripts/tests/test_scripts_sigpipe_ratchet.sh"'
 
   # the #3750 split of COMPLETION from VERDICT: scripts/gate-component-verdict.sh plus
   # the two DOCUMENTED text-completion grammars it sits beside. Pins the case the lead
   # named — a COMPLETED `--only` run whose component SKIPped is NOT a pass — and that the
   # gate-of-record grammar keeps REFUSING `PARTIAL`. No cargo, no datasets, no network.
-  echo ">>> [$name] bash scripts/tests/test_gate_component_verdict.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_component_verdict.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (completion-vs-verdict split #3750); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'completion-vs-verdict split #3750' 'bash "$REPO_ROOT/scripts/tests/test_gate_component_verdict.sh"'
 
   # detached-gate launcher + the cgroup mechanism it rests on (#3473). Internally
   # SKIP-aware for hosts with no working `systemd-run --user`.
-  echo ">>> [$name] bash scripts/tests/test_gate_detached.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_gate_detached.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (detached-gate launcher #3473); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add L:systemd 'detached-gate launcher #3473' 'bash "$REPO_ROOT/scripts/tests/test_gate_detached.sh"' 'real `systemd-run --user` units, cgroup reads, pgrep of live agent-gate.sh processes'
 
-  echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   # BANNER IMMEDIATELY BEFORE ITS OWN INVOCATION (roborev job 238). It used to sit ~30 lines earlier,
   # and the #3473 liveness and detached suites were inserted between — so the log announced pub-surface,
   # then showed a DIFFERENT suite's output, and a failure in mine read as a pub-surface failure. Worse,
   # a run that died in between left a log asserting pub-surface had run when it never did. A banner is a
   # claim about what happened next; it has to be adjacent to the thing it claims.
-  if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add L:git-worktree 'pub-surface guard self-test #1712' 'bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh"' '`git worktree add/remove/prune` against the repo'\''s .git (leaked/peer decoys)'
 
   # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
   # which for an always-non-failing guard is the harder property: its cases drive
@@ -23976,17 +23726,7 @@ run_tooling_tests() {
   # component cannot red on correct input. Cheap and offline (the only cargo is a warm metadata probe); it
   # SKIPs its live/gate cases where cargo or `git worktree` is unavailable. A failure FAILs
   # the component, mirroring the guards above.
-  echo ">>> [$name] bash scripts/tests/test_dep_duplicates_ratchet.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_dep_duplicates_ratchet.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (dep-duplicates ratchet self-test #1700); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'dep-duplicates ratchet self-test #1700' 'bash "$REPO_ROOT/scripts/tests/test_dep_duplicates_ratchet.sh"'
 
   # features-are-load-bearing guard self-test (#1698): needs cargo (which this
   # component's host always has) and nothing else — no datasets, no network. Proves
@@ -24076,22 +23816,12 @@ run_tooling_tests() {
   # without them — so the never-SKIPping lane is a SEPARATE component and is not folded
   # into this SKIP-aware one (#3522).
   if command -v python3 >/dev/null 2>&1; then
-    echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
-    if ! bash "$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh" >>"$log" 2>&1; then
-      status=FAIL
-      echo "--- [$name] FAILED (features-load-bearing guard self-test #1698); last 40 lines of $log ---"
-      tail -40 "$log"
-      echo "--- end of $name output ---"
-      end=$(date +%s)
-      record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-      return 0
-    fi
+    _tt_add P 'features-load-bearing guard self-test #1698' 'bash "$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh"'
   else
-    echo ">>> [$name] SKIP scripts/tests/test_features_load_bearing_guard.sh (no python3 —"
-    echo "    the guard it exercises is python3-based, so its subject cannot run on this"
-    echo "    box; the features-load-bearing component itself FAILs here with a named"
-    echo "    remedy, which is where that requirement is enforced)"
+    _tt_note ">>> [$name] SKIP scripts/tests/test_features_load_bearing_guard.sh (no python3 —"
+    _tt_note "    the guard it exercises is python3-based, so its subject cannot run on this"
+    _tt_note "    box; the features-load-bearing component itself FAILs here with a named"
+    _tt_note "    remedy, which is where that requirement is enforced)"
   fi
 
   # nested/concurrent-gate isolation regression self-test (#2874): the concurrency
@@ -24100,68 +23830,28 @@ run_tooling_tests() {
   # gate cannot clobber the parent gate of record's summary and that a foreign run-id
   # is caught with a NAMED FAIL (never a bare INCOMPLETE). A failure FAILs the
   # component, mirroring the guards above.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_nested_isolation.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_nested_isolation.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (nested-gate isolation self-test #2874); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'nested-gate isolation self-test #2874' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_nested_isolation.sh"'
 
   # mid-run tree-mutation guard self-test (#2926): no python3/cargo needed, always runs
   # (hermetic — fake checkouts under one per-run mktemp, a stub `cargo`, no compile).
   # Proves a gate whose worktree mutates mid-run cannot certify (MAIN lane, SIDE lane,
   # terminal, --only/--lite/--delta) AND that an unmutated run still does — the two
   # halves are the discrimination proof. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_tree_integrity.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_integrity.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (tree-integrity self-test #2926); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add H 'tree-integrity self-test #2926' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_integrity.sh"'
 
   # …and its PORTABILITY half (#2926 review G1): the same guard re-run against BSD/macOS
   # shims (sed without GNU escapes, stat -f only, a sort(1) with no -z) plus a static lint
   # that FAILs on any GNU-only construct in the tree-integrity code. macOS is a first-class
   # gate host, so a Linux-only token in the guard is a real defect — this is the lane that
   # catches it. Same hermetic shape (fake checkouts, stub cargo, nothing compiles).
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_tree_portability.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_portability.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (tree-integrity PORTABILITY self-test #2926); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'tree-integrity PORTABILITY self-test #2926' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_portability.sh"'
 
   # …and its PROVENANCE half (#2926 review J1/J2/J3): every mutation-detection path
   # (boundary, SIDE-lane marker, terminal) must publish the SAME labelled `commit:`/
   # `tree-end:` split, the boundary block's component table must cover the mode actually
   # running, and the run's own stdout/stderr redirect target must not be mistaken for a
   # mid-run mutation. Same hermetic shape; each fix carries a discrimination mutant.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_tree_provenance.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_provenance.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (tree-integrity PROVENANCE self-test #2926); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'tree-integrity PROVENANCE self-test #2926' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_provenance.sh"'
 
   # tools/ crate disposition census (#1716, epic #1688 finding AK5): no
   # python3/Docker/cargo needed, always runs. Every crate under tools/ must be
@@ -24174,18 +23864,7 @@ run_tooling_tests() {
   # subject; wiredness is RECORDED and reviewed in the diff, never grep-inferred
   # (a grep gets it wrong both ways — see the guard's header). A failure FAILs the
   # component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_tools_crate_disposition.sh; bash scripts/tests/test_tools_crate_disposition_selftest.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition.sh" >>"$log" 2>&1 ||
-     ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition_selftest.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (tools/ crate disposition census #1716); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'tools/ crate disposition census #1716' 'bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition.sh" && bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition_selftest.sh"'
 
   # jq/python3 PARSER PARITY differential test (#3522, roborev G1): drives BOTH branches of
   # every parser pair this lane added over ONE fixture set and requires byte-identical output
@@ -24198,17 +23877,7 @@ run_tooling_tests() {
   # It EXITS 2 (reported, not silently passed) when only one of jq/python3 is present, since a
   # parity claim over a comparison that never ran is a vacuous green — so the component treats
   # a non-zero exit as FAIL and an UNMEASURED run is visible rather than green.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_parser_parity.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parser_parity.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (jq/python3 parser parity #3522); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'jq/python3 parser parity #3522' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_parser_parity.sh"'
 
   # node-bindings jest guard self-test (#3522, roborev E1 + F1): hermetic, no node/npm/cargo/
   # network/datasets — synthetic jest summaries and synthetic --json reports, with both guards
@@ -24218,17 +23887,7 @@ run_tooling_tests() {
   # `Tests: N passed` is satisfied by its sibling, so the file-set guard ACCEPTS it (asserted
   # here, so the case provably still discriminates) and only the per-suite guard rejects it.
   # A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_jest_guards.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_jest_guards.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (node-bindings jest guard self-test #3522); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'node-bindings jest guard self-test #3522' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_jest_guards.sh"'
 
   # SUMMARY feature-matrix annotation guard (#3453). Hermetic (no cargo, no network, no
   # datasets — a PATH-shim cargo records argv and compiles nothing) and ~3s. Three
@@ -24240,17 +23899,7 @@ run_tooling_tests() {
   # described through the gate's own _fm_describe_cargo rather than re-derived here. That
   # last section is RED-verified: changing a feature literal in one of those bodies without
   # the hoisted variable reds it. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_feature_matrix_annotation.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_feature_matrix_annotation.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (SUMMARY feature-matrix annotation guard #3453); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add H 'SUMMARY feature-matrix annotation guard #3453' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_feature_matrix_annotation.sh"'
 
   # binding-rust-tests target-partition self-test (#3522, roborev C3): hermetic, no cargo /
   # network / datasets. Drives _brt_partition_targets — sourced OUT OF THE REAL GATE SCRIPT,
@@ -24261,17 +23910,7 @@ run_tooling_tests() {
   # have announced unrunnable targets as EXECUTED. That case is unreachable by running the
   # lane (cqlite-node declares zero integration targets today), which is precisely why it
   # needs a test. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_binding_partition.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_binding_partition.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (binding-rust-tests target-partition self-test #3522); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'binding-rust-tests target-partition self-test #3522' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_binding_partition.sh"'
 
   # Workspace test-execution disposition census (#3522). The PACKAGE-granular sibling
   # of the tools/ census above: every cargo workspace member must be recorded in
@@ -24287,18 +23926,7 @@ run_tooling_tests() {
   # TRUE (see its header for why #1716 removed the truth-verifying variant). It needs
   # `cargo metadata` — a failed derivation is a FAIL naming the derivation, never a
   # skip that greens. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_workspace_test_disposition.sh; bash scripts/tests/test_workspace_test_disposition_selftest.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition.sh" >>"$log" 2>&1 ||
-     ! bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition_selftest.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (workspace test-execution disposition census #3522); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'workspace test-execution disposition census #3522' 'bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition.sh" && bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition_selftest.sh"'
 
   # file-size component-log guard (#3401): hermetic (throwaway git repos under one
   # mktemp, each holding only a copy of the gate script, driven through the real
@@ -24312,17 +23940,7 @@ run_tooling_tests() {
   # LOG'S CONTENT (never its mere existence: a zero-byte file would satisfy that and
   # restore the whole defect) across all six paths, PASS ones included. A failure FAILs
   # the component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_file_size_log.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_file_size_log.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (file-size component-log guard #3401); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'file-size component-log guard #3401' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_file_size_log.sh"'
 
   # disk-exhaustion attribution guard (#3800): hermetic (temp dirs + the two hidden
   # selftest hooks; no cargo/python3/datasets/network, ~1s). A full gate killed by ENOSPC
@@ -24337,17 +23955,7 @@ run_tooling_tests() {
   # `&&`-chain below: that chain is behind `command -v python3`, and folding a suite that
   # needs nothing beyond bash into a SKIP-aware lane would be a coverage hole wearing a
   # SKIP's clothes (#3522's rule). It never SKIPs. Same shape as the file-size log guard.
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_disk_exhaustion.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_exhaustion.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (disk-exhaustion attribution guard #3800); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'disk-exhaustion attribution guard #3800' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_exhaustion.sh"'
 
   # PLATFORM GATE for the two #3436 suites below (roborev round 28, Medium). macOS is a
   # FIRST-CLASS gate host — this script carries `Darwin) … taskpolicy -c utility`, a BSD
@@ -24380,10 +23988,10 @@ run_tooling_tests() {
   # that misfires on Linux would silently disable both suites, which is the failure mode this
   # comment is warning about, and it would be invisible precisely where it matters.
   if [ "$_AGENT_GATE_OS" != "Linux" ]; then
-    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
-    echo ">>> [$name]   the machine-local lane lock is Linux-/proc-specific by design (boot-id + /proc/<pid>/stat"
-    echo ">>> [$name]   start-ticks); on a host without /proc \`acquire\` refuses with reason=unresolved-identity,"
-    echo ">>> [$name]   so there is no behaviour to assert. Every OTHER tooling-tests suite still runs here."
+    _tt_note ">>> [$name] DECLARED SKIP (#3436): test_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
+    _tt_note ">>> [$name]   the machine-local lane lock is Linux-/proc-specific by design (boot-id + /proc/<pid>/stat"
+    _tt_note ">>> [$name]   start-ticks); on a host without /proc \`acquire\` refuses with reason=unresolved-identity,"
+    _tt_note ">>> [$name]   so there is no behaviour to assert. Every OTHER tooling-tests suite still runs here."
   else
 
     # machine-local lane-lock regression suite (#3436): hermetic (mktemp lane roots, real
@@ -24401,17 +24009,7 @@ run_tooling_tests() {
     # BEFORE the python3 gate because it needs no python3 and must never be reached only
     # on hosts that happen to have one. A failure FAILs the component, mirroring the
     # keyspace-scoping guard.
-    echo ">>> [$name] bash scripts/tests/test_lane_lock.sh"
-    if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh" >>"$log" 2>&1; then
-      status=FAIL
-      echo "--- [$name] FAILED (machine-local lane-lock regression suite #3436); last 40 lines of $log ---"
-      tail -40 "$log"
-      echo "--- end of $name output ---"
-      end=$(date +%s)
-      record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-      return 0
-    fi
+    _tt_add P 'machine-local lane-lock regression suite #3436' 'bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh"'
 
   fi
 
@@ -24427,17 +24025,7 @@ run_tooling_tests() {
   # exits 0, and that it mutates nothing. Same
   # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
   # component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh' 'bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh"'
 
   # claim-lock suite (#3436 FIX 13d): it needs bash + git + coreutils and NO python3, and
   # it is the suite that pins #3436 AC5/AC6 — so leaving it in the post-python3 chain meant
@@ -24460,47 +24048,17 @@ run_tooling_tests() {
   # DECLARED-SKIP idiom as the test_lane_lock.sh guard above, so the narrowing is announced at
   # run time rather than inferred, and it stays exercisable on Linux via AGENT_GATE_TEST_OS.
   if [ "$_AGENT_GATE_OS" != "Linux" ]; then
-    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock_precommit_hook.sh and test_finalize_cleanup_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
-    echo ">>> [$name]   both drive the Linux-/proc-specific machine-local lane lock; every OTHER tooling-tests suite still runs here."
+    _tt_note ">>> [$name] DECLARED SKIP (#3436): test_lane_lock_precommit_hook.sh and test_finalize_cleanup_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
+    _tt_note ">>> [$name]   both drive the Linux-/proc-specific machine-local lane lock; every OTHER tooling-tests suite still runs here."
   else
 
-  echo ">>> [$name] bash scripts/tests/test_lane_lock_precommit_hook.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (lane-lock pre-commit enforcement #3436); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add L:lane-root 'lane-lock pre-commit enforcement #3436' 'bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh"' 'drives the REAL machine-local lane root /data/lanes (shared lane-lock records)'
 
-  echo ">>> [$name] bash scripts/tests/test_finalize_cleanup_lane_lock.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_finalize_cleanup_lane_lock.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (finalize teardown lane-lock release #3436); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'finalize teardown lane-lock release #3436' 'bash "$REPO_ROOT/scripts/tests/test_finalize_cleanup_lane_lock.sh"'
 
   fi
 
-  echo ">>> [$name] bash scripts/tests/test_claim_lock.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (claim-lock suite #3436 AC5/AC6); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'claim-lock suite #3436 AC5/AC6' 'bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh"'
 
   # cqlite-flight allocator CONFINEMENT guard + its positive control (#3997, R4.1/R5.1).
   # ABOVE the python3 gate on purpose: both need nothing beyond bash + git + grep, and
@@ -24519,18 +24077,7 @@ run_tooling_tests() {
   # positive control — 21 cases over scratch git trees, 2 green controls so a
   # refuse-everything guard cannot satisfy the 17 reds, each red required to NAME its
   # planted defect. A failure FAILs the component, mirroring the guards above.
-  echo ">>> [$name] bash scripts/tests/test_flight_allocator_confinement.sh; bash scripts/tests/test_flight_allocator_confinement_selftest.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement.sh" >>"$log" 2>&1 ||
-     ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement_selftest.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (flight allocator confinement #3997); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'flight allocator confinement #3997' 'bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement.sh" && bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement_selftest.sh"'
 
   # cqlite-flight LINKED-allocator guard (#3997, R1.1/R1.2/R2.1). THE gate-enforcing
   # surface for the jemalloc mechanism, and it is here because nothing else runs it: the
@@ -24547,99 +24094,71 @@ run_tooling_tests() {
   # and always NAMING the cause (off-Linux printing the actual `uname -s`; no cargo/cc/make/
   # symbol tool/bounded `timeout`; unparseable symbol output), while a FAILING cargo build is
   # a FAIL, not a skip. Measured 5.3s warm on a fleet box. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_flight_allocator_link.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_link.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (flight linked-allocator guard #3997); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add L:shared-target 'flight linked-allocator guard #3997' 'bash "$REPO_ROOT/scripts/tests/test_flight_allocator_link.sh"' 'two cargo debug builds into the shared target dir'
 
   # `cqlite salvage` no-resync-scan guard (issue #4196, spec R4.3): partitions
   # are located ONLY from the authoritative boundary source (`Index.db` /
   # the `Partitions.db` trie), never by scanning `Data.db` for a plausible
   # header (#3928 measured that inventing partitions). Pure grep, no
   # cargo/python3/network needed.
-  echo ">>> [$name] bash scripts/tests/test_salvage_no_resync_scan.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_salvage_no_resync_scan.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (salvage no-resync-scan guard #4196); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'salvage no-resync-scan guard #4196' 'bash "$REPO_ROOT/scripts/tests/test_salvage_no_resync_scan.sh"'
 
   # `cqlite rebuild` no-resync-scan guard (issue #4197, spec R2.3): mirrors
   # the salvage guard immediately above, scoped to
   # `storage/write_engine/rebuild/`. Pure grep, no cargo/python3/network
   # needed.
-  echo ">>> [$name] bash scripts/tests/test_rebuild_no_resync_scan.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_rebuild_no_resync_scan.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (rebuild no-resync-scan guard #4197); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
-    return 0
-  fi
+  _tt_add P 'rebuild no-resync-scan guard #4197' 'bash "$REPO_ROOT/scripts/tests/test_rebuild_no_resync_scan.sh"'
 
   # shared Cargo target prune (#4411): hermetic fake target dir + stub
   # pgrep/systemctl, no cargo/network needed.
-  echo ">>> [$name] bash scripts/tests/test_cargo_target_prune.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_cargo_target_prune.sh" >>"$log" 2>&1; then
+  _tt_add P 'cargo target prune #4411' 'bash "$REPO_ROOT/scripts/tests/test_cargo_target_prune.sh"'
+  # tooling-tests parallel runner (#4468): capacity from .rc files (hostile-kill shim must not stall
+  # the pool), every failure named, unknown modes never run. Hermetic, ~4s.
+  _tt_add P 'tooling-tests pool runner self-test #4468' 'bash "$REPO_ROOT/scripts/tests/test_tooling_tests_pool.sh"'
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    # Original behaviour: every suite ABOVE ran; the python3-dependent tail is skipped and the
+    # component records SKIP (not PASS) if nothing above failed.
+    _tt_skip_final=1
+    _tt_note ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
+  else
+    # CommitLog fixture derivation (#2798): committed fixtures, no Docker/network.
+    # Keep its Python dependency in tooling validation, outside core Cargo tests.
+    _tt_add P 'final tooling chain: commitlog_fixture_derivation.py' 'python3 "$REPO_ROOT/test-data/scripts/commitlog_fixture_derivation.py" --self-test'
+    _tt_add P 'final tooling chain: test_agent_gate_summary.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh"'
+    _tt_add P 'final tooling chain: test_agent_gate_notify.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh"'
+    _tt_add P 'final tooling chain: test_gate_notify_contract.sh' 'bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh"'
+    _tt_add P 'final tooling chain: test_agent_gate_smoke_target_dir.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh"'
+    _tt_add S 'final tooling chain: test_gate_concurrency_cap.sh' 'bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh"' 'measures the gate concurrency cap / slot machinery (observed parallelism): alone on the box'
+    _tt_add H 'final tooling chain: test_agent_gate_disk_admission.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh"'
+    _tt_add P 'final tooling chain: test_perf_capability.sh' 'bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh"'
+    _tt_add P 'final tooling chain: test_claim_heartbeat.sh' 'bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh"'
+    _tt_add S 'final tooling chain: test_drive_issue_state.sh' 'bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh"' 'pid-liveness/ownership timing (sleep & kill/wait stamps): FAILED once under full pool load (parallel run 5: prior-ts duplicate read UNSTAMPED), passed alone 3/3 and 12x concurrently: alone, last'
+    _tt_add P 'final tooling chain: claim-resume.test.sh' 'bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh"'
+    _tt_add P 'final tooling chain: test_premerge_assert.sh' 'bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh"'
+    _tt_add P 'final tooling chain: test_premerge_review_binding.sh' 'bash "$REPO_ROOT/scripts/tests/test_premerge_review_binding.sh"'
+    _tt_add P 'final tooling chain: test_base_staleness.sh' 'bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh"'
+    _tt_add P 'final tooling chain: test_board_label_mirror.sh' 'bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh"'
+    _tt_add P 'final tooling chain: test_gate_failure_mode.sh' 'bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh"'
+    _tt_add P 'final tooling chain: test_cargo_output_parsers.sh' 'bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh"'
+    _tt_add P 'final tooling chain: test_agent_gate_census.sh' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_census.sh"'
+  fi
+
+  # Run everything (parallel set, then serial set). A failing suite never short-circuits the
+  # others in the parallel set: the component FAILs if ANY suite failed and names every one.
+  _tt_run_all "$log" "$LOG_DIR/$name.d"
+  if [ -n "$_TT_FAILED_NAMES" ]; then
     status=FAIL
-    echo "--- [$name] FAILED (cargo target prune #4411); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
+    echo ">>> [$name] FAILED suite(s): $_TT_FAILED_NAMES"
+  elif [ "$_tt_skip_final" = 1 ]; then
+    # No python3: every suite above passed, the python3-dependent tail could not run.
+    status=SKIP
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
-  fi
-
-  if ! command -v python3 >/dev/null 2>&1; then
-    status=SKIP
-    echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
-    record_result "$name" "$status" 0
-    return 0
-  fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
-  # CommitLog fixture derivation (#2798): committed fixtures, no Docker/network.
-  # Keep its Python dependency in tooling validation, outside core Cargo tests.
-  echo ">>> [$name] python3 test-data/scripts/commitlog_fixture_derivation.py --self-test"
-  if python3 "$REPO_ROOT/test-data/scripts/commitlog_fixture_derivation.py" --self-test >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_premerge_review_binding.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_agent_gate_census.sh" >>"$log" 2>&1; then
-    status=PASS
   else
-    status=FAIL
-    echo "--- [$name] FAILED; last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
+    status=PASS
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"

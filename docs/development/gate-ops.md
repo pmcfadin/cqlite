@@ -565,6 +565,50 @@ tmutil listlocalsnapshots /                 # any snapshot pins freed blocks
 tmutil thinlocalsnapshots / 40000000000 4   # thin to reclaim (field: 9.1Gi -> 72Gi)
 ```
 
+## `tooling-tests` runs its suites in parallel (issue #4468)
+
+`run_tooling_tests()` used to run its ~110 independent shell self-test suites one after
+another: 2644s of a ~67 minute full gate, on a 32-core box that sat idle for it. It now
+registers every suite with `_tt_add <MODE> <label> <cmd> [reason]` and executes them with
+`_tt_run_all` (helpers directly above the function in `scripts/agent-gate.sh`).
+
+| Mode | Runs | Why |
+|---|---|---|
+| `P` / `H` | in a bounded pool, concurrently (`H` = long, launched first) | hermetic: builds its own `mktemp` fixtures; each gets a **private `TMPDIR`**, its own log and exit-status file |
+| `L:<lane>` | one background chain per lane; suites in a lane never overlap each other, but the lane overlaps the pool | the suites share one resource (see table) |
+| `S` | alone, after the pool and every lane drained, ambient `TMPDIR` | measures timing/concurrency, or writes the real repo tree |
+
+Serial set (every entry was read, and its reason is the 4th `_tt_add` argument):
+
+| Suite(s) | Mode | Reason |
+|---|---|---|
+| `test_gate_liveness.sh`, `test_pub_surface_guard.sh` | `L:git-worktree` | both add/remove worktrees against the real repo's `.git`, and `git worktree prune` is repository-wide, so they race on one registry; one lane. Every other suite that runs worktree/ref/prune commands uses its own scratch repo |
+| `test_gate_detached.sh` | `L:systemd` | real `systemd-run --user` units, cgroup reads, pgrep of live `agent-gate.sh` |
+| `test_bti_perf_scan.sh`, `cargo test -p ws0-corpus-gen`, `test_flight_allocator_link.sh` | `L:shared-target` | cargo builds into the shared target dir |
+| `test_lane_lock_precommit_hook.sh` | `L:lane-root` | drives the real `/data/lanes` lane root |
+| `test_gate_concurrency_cap.sh`, `test_issue_gate_hook.sh` | `S` | measure the gate's concurrency cap / slot waits / timeout budgets |
+| `test_agent_gate_parity_report.sh` | `S` | writes `test-data/.tmp-parity-manifest-mutated.*` into the real repo tree, which nested-gate tree-integrity and `test_agent_gate_nested_isolation.sh`'s fixture-set check observe (the first parallel run caught exactly this) |
+
+The lane-lock, claim and `claim-resume` suites are **not** serial: they use a `mktemp`
+`LANE_ROOT` and local bare origins, never `/data/lanes` or a real `refs/claims`.
+
+**Width.** `CQLITE_TOOLING_TESTS_JOBS` (positive integer), default `min(ncpu/2, 16)`.
+`CQLITE_TOOLING_TESTS_JOBS=1` restores the historical behaviour: every suite in
+registration order, ambient `TMPDIR`, stop at the first failure.
+
+**Verdict.** Fail-closed and order-independent: the component FAILs if **any** suite
+fails and prints `FAILED suite(s): a; b; ...` naming every one (never first-wins). A suite
+that publishes no exit status counts as failed. #4266 scoping, the SKIP semantics (no
+python3 tail, non-Linux lane-lock notes) and the census/detail lines are unchanged.
+
+**Logs.** Each suite writes `$LOG_DIR/tooling-tests.d/NNN.log` and `NNN.rc` (`<exit> <seconds>`).
+After the pool drains, headers, outcomes and failure tails are replayed, and the logs are
+appended to `tooling-tests.log`, in **registration order** whatever order they finished in.
+
+**Adding a suite.** Register it with `_tt_add P ...` unless it needs a reason from the table
+above. A suite that writes into the real checkout, shares a lock, port or lane, or measures
+timing must be `L:`/`S` with a reason.
+
 ## `tooling-tests` is diff-scoped in the full gate (issue #4266)
 
 `tooling-tests` — the ~80-nested-shell-self-test harness-regression component
