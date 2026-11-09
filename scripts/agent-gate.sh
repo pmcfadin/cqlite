@@ -22340,6 +22340,133 @@ _tt_jobs() {
   echo "$j"
 }
 
+# ---- sccache must never inherit a suite's private TMPDIR (#4479) ----------------------------
+# sccache has no temp-dir setting of its own: its server uses TMPDIR as it was when the CLIENT
+# spawned it. A suite's private TMPDIR is deleted when the suite ends, so a server auto-started by
+# the first suite to run cargo (none running, e.g. after the 10 minute idle timeout) kept a dead temp
+# dir and failed every compile on the box. Two layers, so neither alone is load-bearing:
+#   1. _tt_sccache_prestart: before the pool, make sure a server is running, started under the
+#      gate's STABLE TMPDIR. --start-server on a RUNNING server fails with "Address in use" and
+#      leaves it untouched (measured); it never stops or restarts it. (--show-stats does NOT start
+#      a server, so it cannot be used for this.)
+#   2. _tt_sccache_shim: the server can still idle out mid-run, so each suite gets RUSTC_WRAPPER
+#      replaced by a tiny script that restores the stable TMPDIR for the sccache process ONLY. The
+#      suite keeps its private TMPDIR for everything else. A server spawned by a compile therefore
+#      starts under the stable dir. The shim MUST be bash, not sh: dash drops environment variables
+#      whose names are not shell identifiers, and cargo passes CARGO_BIN_EXE_<bin-with-hyphen> that
+#      way, so an sh shim made every env!(CARGO_BIN_EXE_...) test fail to compile (measured on
+#      ws0-corpus-gen).
+# CQLITE_TT_SCCACHE_GUARD=0 disables both (the self-test uses it as the negative control that
+# proves the bug is observable).
+_TT_STABLE_TMPDIR=""; _TT_SCC_SHIM=""
+_tt_sccache_wrapper_p() {
+  [ "${CQLITE_TT_SCCACHE_GUARD:-1}" != 0 ] || return 1
+  case "${RUSTC_WRAPPER:-}" in sccache|*/sccache) return 0 ;; esac
+  return 1
+}
+# _tt_sccache_server_pid: the pid of the sccache server listening on OUR port
+# (SCCACHE_SERVER_PORT, default 4226), identified by the listening socket and confirmed by comm,
+# never by a name pattern. Prints nothing (rc 1) when there is none or `ss` is unavailable.
+_tt_sccache_server_pid() {
+  local port=${SCCACHE_SERVER_PORT:-4226} line pid
+  command -v ss >/dev/null 2>&1 || return 1
+  line=$(ss -H -ltnp "sport = :$port" 2>/dev/null) || return 1
+  case "$line" in *pid=*) ;; *) return 1 ;; esac
+  pid=${line#*pid=}; pid=${pid%%[!0-9]*}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = sccache ] || return 1
+  printf '%s' "$pid"
+}
+# _tt_sccache_poisoned_tmpdir <pid>: prints the server's TMPDIR and rc 0 iff it is POISONED, i.e.
+# that directory is gone or is not a writable directory (every compile through it fails). A server
+# whose TMPDIR is healthy is never reported, whatever the directory is.
+_tt_sccache_poisoned_tmpdir() {
+  local env t
+  env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null) || return 1
+  [ -n "$env" ] || return 1
+  t=$(sed -n 's/^TMPDIR=//p' <<<"$env" | head -n 1)
+  [ -n "$t" ] || t=/tmp
+  if [ -d "$t" ] && [ -w "$t" ] && [ -x "$t" ]; then return 1; fi
+  printf '%s' "$t"
+}
+# _tt_sccache_bounded <secs> <cmd...>: run <cmd> in the background with a watchdog that, after <secs>,
+# TERMs ONLY that recorded child, waits a short grace (_TT_SCC_GRACE, default 2s), and KILLs the same pid
+# if it is still alive (a TERM-ignoring command must not block `wait` forever). Returns the child's
+# status (143 after TERM, 137 after KILL). The watchdog is told to stop as soon as the child ends, so
+# it never signals a pid after the child was reaped. Every sccache lifecycle call goes through it so a
+# hung server cannot hang the gate.
+_tt_sccache_bounded() {
+  local secs=$1 p w rc; shift
+  "$@" </dev/null & p=$!
+  ( stop=""; s=""; trap 'stop=1; [ -z "$s" ] || kill "$s" 2>/dev/null' TERM
+    sleep "$secs" & s=$!; wait "$s" 2>/dev/null
+    [ -z "$stop" ] || exit 0
+    kill -TERM "$p" 2>/dev/null
+    sleep "${_TT_SCC_GRACE:-2}" & s=$!; wait "$s" 2>/dev/null
+    [ -z "$stop" ] || exit 0
+    kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
+    exit 0 ) >/dev/null 2>&1 & w=$!
+  wait "$p" 2>/dev/null; rc=$?
+  kill -TERM "$w" 2>/dev/null; wait "$w" 2>/dev/null
+  return "$rc"
+}
+# The detect-stop-start sequence is serialised across gates and sessions with an flock on a fixed,
+# port-specific path (CQLITE_TT_SCCACHE_LOCK_DIR, default /tmp, like the slots dir). RULE: a server is
+# NEVER stopped without holding that lock, because two gates that both saw the old poisoned server
+# could otherwise have the second stop the NEW healthy one. The server is RE-READ after the lock is
+# taken and acted on only if it is STILL poisoned. The lock is polled with `flock -n` in short steps
+# (CQLITE_TT_SCCACHE_LOCK_WAIT seconds, default 120) instead of one long blocking flock, so a TERM/HUP
+# is handled within a fraction of a second whatever the trap state; and this whole step runs BEFORE
+# the pool's signal-deferral critical section. fd 9 is closed for every sccache call so the daemonised
+# server cannot inherit and hold the lock.
+_tt_sccache_recover_and_start() {
+  local pid dead
+  if pid=$(_tt_sccache_server_pid) && dead=$(_tt_sccache_poisoned_tmpdir "$pid"); then
+    echo ">>> [tooling-tests] sccache server pid $pid holds a dead TMPDIR '$dead'; stopping it (port ${SCCACHE_SERVER_PORT:-4226}) and restarting under '$_TT_STABLE_TMPDIR' (#4479)" >&2
+    _tt_sccache_bounded 30 "$RUSTC_WRAPPER" --stop-server 9>&- >/dev/null 2>&1 || true
+  fi
+  _tt_sccache_start
+}
+_tt_sccache_start() { # the non-destructive part: a no-op when a server is already running
+  _tt_sccache_bounded 30 env TMPDIR="$_TT_STABLE_TMPDIR" "$RUSTC_WRAPPER" --start-server 9>&- >/dev/null 2>&1 || true
+}
+_tt_sccache_prestart() {
+  _tt_sccache_wrapper_p || return 0
+  local lock="${CQLITE_TT_SCCACHE_LOCK_DIR:-/tmp}/cqlite-sccache-${SCCACHE_SERVER_PORT:-4226}.lock"
+  local wait=${CQLITE_TT_SCCACHE_LOCK_WAIT:-120} steps=0
+  case "$wait" in ''|*[!0-9]*) wait=120 ;; esac
+  if command -v flock >/dev/null 2>&1 && ( : 9>>"$lock" ) 2>/dev/null && { exec 9>>"$lock"; } 2>/dev/null; then
+    until flock -n 9; do
+      if [ "$steps" -ge $((wait * 5)) ]; then
+        exec 9>&-
+        echo ">>> [tooling-tests] WARNING: could not take $lock within ${wait}s; skipping sccache server recovery (the existing server is left as is) (#4479)" >&2
+        return 0
+      fi
+      sleep 0.2; steps=$((steps + 1))
+    done
+    _tt_sccache_recover_and_start
+    exec 9>&-
+  else
+    # No lock available (no flock(1), or the lock file cannot be opened): never stop a server without
+    # the lock. Only the non-destructive start; recovery is skipped.
+    echo ">>> [tooling-tests] sccache server recovery skipped: no lock available at $lock (no flock(1) or unwritable); only starting a server if none is running (#4479)" >&2
+    _tt_sccache_start
+  fi
+  return 0
+}
+_TT_SCC_REAL=""
+_tt_sccache_shim() { # sets _TT_SCC_SHIM to the CHECKED-IN wrapper script (empty when not applicable)
+  _TT_SCC_SHIM=""; _TT_SCC_REAL=""
+  _tt_sccache_wrapper_p || return 0
+  local w="$REPO_ROOT/scripts/lib/sccache-stable-tmpdir-wrapper.sh"
+  if [ -f "$w" ] && [ -x "$w" ]; then
+    _TT_SCC_SHIM=$w; _TT_SCC_REAL=$RUSTC_WRAPPER
+  else
+    echo ">>> [tooling-tests] WARNING: $w is missing or not executable; pool suites run WITHOUT the sccache TMPDIR guard (#4479)" >&2
+  fi
+  return 0
+}
+
 # _tt_exec <index> <log dir> <private TMPDIR base or empty>: run suite <index>, writing
 # <log dir>/NNN.log and then <log dir>/NNN.rc ("<exit> <seconds>", published atomically LAST, so
 # its presence means "finished"). A non-empty TMPDIR base gives the suite its OWN TMPDIR.
@@ -22351,7 +22478,7 @@ _tt_exec() {
   s=$(date +%s)
   if [ -n "$tb" ]; then
     mkdir -p "$tb/$id"
-    ( export TMPDIR="$tb/$id"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
+    ( export TMPDIR="$tb/$id"; [ -z "$_TT_SCC_SHIM" ] || export RUSTC_WRAPPER="$_TT_SCC_SHIM" CQLITE_TT_STABLE_TMPDIR="$_TT_STABLE_TMPDIR" CQLITE_TT_REAL_RUSTC_WRAPPER="$_TT_SCC_REAL"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
     rc=$?
   else
     ( eval "${_TT_CMD[$i]}" ) >>"$d/$id.log" 2>&1
@@ -22570,15 +22697,21 @@ _tt_run_all() {
   echo ">>> [tooling-tests] running $pcount parallel suites ($jobs at a time) alongside serial lane(s):${lanes:- none}; then the serial tail"
   # Everything from here to the end of the drain runs with the signal traps installed; each
   # launch-and-register pair is a critical section during which a signal is only recorded.
+  # The sccache pre-start (lock wait, bounded server calls) runs BEFORE the signal-deferral critical
+  # section below, so a TERM/HUP during it is never held back (#4479).
+  _TT_STABLE_TMPDIR=${TMPDIR:-/tmp}
+  case "$_TT_STABLE_TMPDIR" in /*) ;; *) _TT_STABLE_TMPDIR="$PWD/$_TT_STABLE_TMPDIR" ;; esac
+  _tt_sccache_prestart
   _TT_ACTIVE=""; _TT_LANES=""; _TT_SIGPEND=""; _TT_LOGDIR=$d; _TT_CRIT=1
   trap '_tt_on_signal INT' INT; trap '_tt_on_signal TERM' TERM; trap '_tt_on_signal HUP' HUP
-  _TT_TMPBASE=$(mktemp -d "${TMPDIR:-/tmp}/tt-par.XXXXXX") || _TT_TMPBASE=""
+  _TT_TMPBASE=$(mktemp -d "$_TT_STABLE_TMPDIR/tt-par.XXXXXX") || _TT_TMPBASE=""
   if [ -z "$_TT_TMPBASE" ]; then
     _TT_CRIT=0; trap - INT TERM HUP
     _TT_FAILED_NAMES="cannot create a scratch TMPDIR for the parallel set"
     return 0
   fi
   tmpbase=$_TT_TMPBASE
+  _tt_sccache_shim "$tmpbase"
   _TT_CRIT=0; _tt_handle_pending
   # Each lane is one background chain (its suites never overlap each other).
   for ln in $lanes; do
@@ -22616,7 +22749,7 @@ _tt_run_all() {
     sleep 0.2
   done
   _TT_CRIT=1
-  rm -rf "${_TT_TMPBASE:?}"; _TT_TMPBASE=""
+  rm -rf "${_TT_TMPBASE:?}"; _TT_TMPBASE=""; _TT_SCC_SHIM=""
   trap - INT TERM HUP
   _TT_CRIT=0; _tt_handle_pending
 

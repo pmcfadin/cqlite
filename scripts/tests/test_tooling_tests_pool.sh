@@ -315,5 +315,301 @@ if [ "$rc" -eq 0 ] && grep -q '^failed=\[log-vanishes (log missing)\]$' <<<"$out
 else
   bad "missing suite log not reported: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
 fi
+
+# 11. #4479: a sccache server auto-started from INSIDE a pool suite must not keep that suite's private
+#     TMPDIR (deleted when the suite ends). Hermetic: a private server port and cache dir, the server is
+#     stopped BY ITS PORT, and the shared server is never touched (a unique port cannot reach it). The
+#     server's TMPDIR is read from /proc/<pid>/environ of the process that carries our port.
+REAL_ROOT="$(cd "$HERE/../.." && pwd)"
+SCC=$(command -v sccache 2>/dev/null || true)
+# The server-lifecycle cases find the server by its listening socket (ss) and read its environment
+# from /proc, so they need both; otherwise they are SKIPPED, declared, never silently passed.
+SCC_PROC_OK=0
+if command -v ss >/dev/null 2>&1 && [ -r /proc/self/environ ]; then SCC_PROC_OK=1; fi
+scc_port=0
+scc_stop() { # stop OUR server, by port only
+  [ "$scc_port" != 0 ] || return 0
+  SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" "$SCC" --stop-server >/dev/null 2>&1 || true
+}
+scc_free_port() { # a port nothing listens on
+  local p n=0
+  while [ "$n" -lt 50 ]; do
+    p=$((20000 + RANDOM % 20000)); n=$((n + 1))
+    (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null || { echo "$p"; return 0; }
+  done
+  return 1
+}
+scc_server_tmpdir() { # TMPDIR of the sccache server carrying our port ("" when none)
+  local e f
+  for e in /proc/[0-9]*/environ; do
+    [ -r "$e" ] || continue
+    f=$(tr '\0' '\n' <"$e" 2>/dev/null) || continue
+    grep -qx "SCCACHE_SERVER_PORT=$scc_port" <<<"$f" || continue
+    grep -qx 'SCCACHE_START_SERVER=1' <<<"$f" || continue
+    grep '^TMPDIR=' <<<"$f" | head -1 | cut -d= -f2-
+    return 0
+  done
+  return 0
+}
+scc_case() { # scc_case <guard 0|1> <stub-prestart 0|1>: prints the server's TMPDIR
+  local guard=$1 stub=$2 stable="$W/stable-$1$2"
+  mkdir -p "$stable" "$W/sccdir"
+  scc_port=$(scc_free_port) || { echo "NOPORT"; return 0; }
+  cat >"$W/t11.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT="$REAL_ROOT"
+. "$W/helpers.sh"
+$( [ "$stub" = 1 ] && echo '_tt_sccache_prestart() { :; }' )
+_tt_reset
+_tt_add P scc-suite '"\$RUSTC_WRAPPER" rustc --version'
+: >"$W/c11.log"
+_tt_run_all "$W/c11.log" "$W/d11"
+echo "failed=[\$_TT_FAILED_NAMES]"
+EOS
+  bounded 60 env TMPDIR="$stable" RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" \
+    SCCACHE_CACHE_SIZE=1G CQLITE_TOOLING_TESTS_JOBS=2 CQLITE_TT_SCCACHE_GUARD=$guard bash "$W/t11.sh" >"$W/t11.out" 2>&1
+  scc_server_tmpdir
+  scc_stop
+  scc_port=0
+}
+if [ -z "$SCC" ]; then
+  echo "skip - sccache not installed: the #4479 TMPDIR-leak cases did not run"
+elif [ "$SCC_PROC_OK" != 1 ]; then
+  echo "skip - no ss(8) or unreadable /proc/self/environ: the #4479 TMPDIR-leak cases did not run"
+else
+  trap 'scc_stop; [ -n "${KEEP:-}" ] || rm -rf "$W"' EXIT
+  ctl=$(scc_case 0 0)
+  case "$ctl" in
+    "$W"/stable-00/tt-par.*) ok "#4479 control (guard off): the server a pool suite auto-starts keeps the suite's private TMPDIR ($ctl) - the bug is observable" ;;
+    *) bad "#4479 control: guard off did not reproduce the leak (server TMPDIR='$ctl'); the test cannot see the bug" ;;
+  esac
+  shimonly=$(scc_case 1 1)
+  case "$shimonly" in
+    "$W"/stable-11) ok "#4479 shim only: a server spawned by a compile inside the suite starts under the gate's stable TMPDIR" ;;
+    *) bad "#4479 shim only (no pre-start): server TMPDIR='$shimonly', want $W/stable-11" ;;
+  esac
+  full=$(scc_case 1 0)
+  case "$full" in
+    "$W"/stable-10) ok "#4479 pre-start: with no server running, the pool starts it under the gate's stable TMPDIR before any suite runs" ;;
+    *) bad "#4479 pre-start: server TMPDIR='$full', want $W/stable-10" ;;
+  esac
+fi
+# 11d. the RUSTC_WRAPPER shim is the CHECKED-IN scripts/lib/sccache-stable-tmpdir-wrapper.sh, never a file
+#      generated under TMPDIR (a noexec temp filesystem would stop cargo executing a generated one).
+#      Structural: the wrapper path is under the repo, not under TMPDIR; it is executable and tracked
+#      with mode 100755. Behavioural: it passes EVERY environment variable through, including names that
+#      are not shell identifiers (cargo hands rustc CARGO_BIN_EXE_<hyphenated-bin>; dash drops them),
+#      and sets the stable TMPDIR for the exec only.
+WRAP="$REAL_ROOT/scripts/lib/sccache-stable-tmpdir-wrapper.sh"
+mkdir -p "$W/fakebin"
+printf '#!/usr/bin/env bash\nenv > "%s"\n' "$W/fake.env" >"$W/fakebin/sccache"; chmod +x "$W/fakebin/sccache"
+cat >"$W/t11d.sh" <<EOS
+set -uo pipefail
+REPO_ROOT="$REAL_ROOT"
+. "$W/helpers.sh"
+_TT_STABLE_TMPDIR="$W/stable-shim"
+_tt_sccache_shim
+[ -n "\$_TT_SCC_SHIM" ] || exit 3
+echo "SHIM=\$_TT_SCC_SHIM" >"$W/shim.path"
+env 'CARGO_BIN_EXE_a-b=1' TMPDIR="$W/private" CQLITE_TT_STABLE_TMPDIR="\$_TT_STABLE_TMPDIR" \
+  CQLITE_TT_REAL_RUSTC_WRAPPER="\$_TT_SCC_REAL" "\$_TT_SCC_SHIM" rustc --version
+EOS
+RUSTC_WRAPPER="$W/fakebin/sccache" TMPDIR="$W/private" bash "$W/t11d.sh" >/dev/null 2>&1; shim_rc=$?
+shimpath=$(sed -n 's/^SHIM=//p' "$W/shim.path" 2>/dev/null)
+if [ "$shim_rc" -eq 0 ] && grep -qx 'CARGO_BIN_EXE_a-b=1' "$W/fake.env" && grep -qx "TMPDIR=$W/stable-shim" "$W/fake.env"; then
+  ok "#4479 shim: passes a hyphenated CARGO_BIN_EXE_* variable through and sets the stable TMPDIR (bash, not dash)"
+else
+  bad "#4479 shim: lost a non-identifier env var or did not set TMPDIR (rc=$shim_rc; $(grep -E '^(CARGO_BIN_EXE|TMPDIR)' "$W/fake.env" 2>/dev/null | tr '\n' ' '))"
+fi
+case "$shimpath" in
+  "$W"/*|"") bad "#4479 shim: the wrapper path ('$shimpath') is under TMPDIR or empty - a noexec temp dir would break it" ;;
+  "$WRAP") ok "#4479 shim: the wrapper is the checked-in script ($shimpath), outside TMPDIR, so a noexec temp filesystem cannot stop it" ;;
+  *) bad "#4479 shim: unexpected wrapper path '$shimpath'" ;;
+esac
+if [ -x "$WRAP" ]; then
+  mode=$(git -C "$REAL_ROOT" ls-files -s -- scripts/lib/sccache-stable-tmpdir-wrapper.sh 2>/dev/null | cut -d' ' -f1)
+  case "$mode" in
+    100755) ok "#4479 shim: the wrapper is tracked with mode 100755" ;;
+    '') ok "#4479 shim: the wrapper is executable (not a git checkout here, so the tracked mode was not checked)" ;;
+    *) bad "#4479 shim: the wrapper is tracked with mode $mode, not 100755" ;;
+  esac
+else
+  bad "#4479 shim: $WRAP is missing or not executable"
+fi
+# 11e. #4479 recovery: a RUNNING server that already holds a dead TMPDIR is replaced; a healthy one is left
+#      alone (same pid). Private port and cache dir; the server is stopped by its port.
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" != 1 ]; then
+  echo "skip - no ss(8) or unreadable /proc/self/environ: the #4479 recovery cases did not run"
+fi
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ]; then
+  scc_pid_of() { # the pid listening on our port
+    local l; l=$(ss -H -ltnp "sport = :$scc_port" 2>/dev/null); l=${l#*pid=}; printf '%s' "${l%%[!0-9]*}"
+  }
+  scc_start_under() { # scc_start_under <tmpdir>: start our private server with that TMPDIR
+    TMPDIR=$1 SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G "$SCC" --start-server >/dev/null 2>&1
+  }
+  scc_prestart() { # run the pool's prestart against our server; stderr (the log line) is returned
+    cat >"$W/t11e.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+_TT_STABLE_TMPDIR="$W/stable-rec"
+_tt_sccache_prestart
+EOS
+    env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+      bash "$W/t11e.sh" 2>&1 >/dev/null
+  }
+  mkdir -p "$W/stable-rec" "$W/sccdir"
+  # (i) poisoned: the server's TMPDIR is deleted after it started.
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 recovery: no free port"; else
+    mkdir -p "$W/doomed"; scc_start_under "$W/doomed"; old=$(scc_pid_of); rm -rf "$W/doomed"
+    logline=$(scc_prestart); new=$(scc_pid_of); newtmp=$(scc_server_tmpdir)
+    if [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ] && [ "$newtmp" = "$W/stable-rec" ] \
+       && grep -q "holds a dead TMPDIR" <<<"$logline"; then
+      ok "#4479 recovery: a server holding a DELETED TMPDIR is replaced (pid $old -> $new) by one under the stable TMPDIR, with one log line"
+    else
+      bad "#4479 recovery: poisoned server not replaced (old=$old new=$new tmpdir='$newtmp' log='$logline')"
+    fi
+    # a compile through the shim now works
+    if env SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" CQLITE_TT_STABLE_TMPDIR="$W/stable-rec" \
+         CQLITE_TT_REAL_RUSTC_WRAPPER="$SCC" "$WRAP" rustc --version >/dev/null 2>&1; then
+      ok "#4479 recovery: a compile through the shim succeeds against the replacement server"
+    else
+      bad "#4479 recovery: a compile through the shim failed against the replacement server"
+    fi
+    scc_stop; scc_port=0
+  fi
+  # (ii) control: a healthy server (TMPDIR exists, writable) is NOT restarted.
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 recovery control: no free port"; else
+    mkdir -p "$W/healthy"; scc_start_under "$W/healthy"; old=$(scc_pid_of)
+    logline=$(scc_prestart); new=$(scc_pid_of)
+    if [ -n "$old" ] && [ "$old" = "$new" ] && [ -z "$logline" ]; then
+      ok "#4479 recovery control: a server with a healthy TMPDIR keeps its pid ($old) and nothing is logged"
+    else
+      bad "#4479 recovery control: healthy server was disturbed (old=$old new=$new log='$logline')"
+    fi
+    scc_stop; scc_port=0
+  fi
+fi
+# 11f. #4479 serialisation: two prestarts racing against ONE poisoned server end with exactly one
+#      replacement; the second re-reads the (now healthy) server under the lock and does not stop it.
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && ! command -v flock >/dev/null 2>&1; then
+  echo "skip - no flock(1): the #4479 serialisation and lock-timeout cases did not run"
+fi
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && command -v flock >/dev/null 2>&1; then
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 serialisation: no free port"; else
+    mkdir -p "$W/doomed2" "$W/stable-rec" "$W/lockdir"
+    scc_start_under "$W/doomed2"; old=$(scc_pid_of); rm -rf "$W/doomed2"
+    cat >"$W/t11f.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+_TT_STABLE_TMPDIR="$W/stable-rec"
+_tt_sccache_prestart
+EOS
+    envv=(RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir")
+    env "${envv[@]}" bash "$W/t11f.sh" >/dev/null 2>"$W/f1.err" & f1=$!
+    env "${envv[@]}" bash "$W/t11f.sh" >/dev/null 2>"$W/f2.err" & f2=$!
+    wait "$f1"; wait "$f2"
+    new=$(scc_pid_of); sleep 2; later=$(scc_pid_of); newtmp=$(scc_server_tmpdir)
+    stops=$(cat "$W/f1.err" "$W/f2.err" | grep -c "holds a dead TMPDIR")
+    if [ "$stops" -eq 1 ] && [ -n "$new" ] && [ "$new" != "$old" ] && [ "$new" = "$later" ] && [ "$newtmp" = "$W/stable-rec" ]; then
+      ok "#4479 serialisation: two racing prestarts replaced the poisoned server exactly once (pid $old -> $new, stable afterwards, 1 stop logged)"
+    else
+      bad "#4479 serialisation: stops logged=$stops old=$old new=$new later=$later tmpdir='$newtmp'"
+    fi
+    scc_stop; scc_port=0
+  fi
+fi
+# 11g-i. #4479 lock behaviour of the prestart. flock IS present in these cases. The lock is held by a
+#      background process this test starts: it creates a readiness file only AFTER flock succeeded, the
+#      test waits (bounded) for that file, and the holder is killed by its recorded pid.
+scc_hold_lock() { # scc_hold_lock <lockfile> <readyfile>: sets scc_holder (pid) once the lock IS held
+  rm -f "$2"
+  ( flock 9 && : >"$2" && exec sleep 120 ) 9>>"$1" & scc_holder=$!
+  local n=0; while [ "$n" -lt 100 ] && [ ! -f "$2" ]; do sleep 0.1; n=$((n + 1)); done
+  [ -f "$2" ]
+}
+scc_prestart_script() { # scc_prestart_script <file> [trap-term]
+  { printf 'set -uo pipefail\n. "%s/helpers.sh"\n_TT_STABLE_TMPDIR="%s/stable-rec"\n' "$W" "$W"
+    [ -z "${2:-}" ] || printf '%s\n' "trap 'echo got-term >\"$W/term.mark\"; exit 143' TERM"
+    printf '_tt_sccache_prestart\n'; } >"$1"
+}
+if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && command -v flock >/dev/null 2>&1; then
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 lock timeout: no free port"; else
+    mkdir -p "$W/doomed3" "$W/lockdir3"
+    scc_start_under "$W/doomed3"; old=$(scc_pid_of); rm -rf "$W/doomed3"
+    lockf="$W/lockdir3/cqlite-sccache-$scc_port.lock"
+    if ! scc_hold_lock "$lockf" "$W/ready3"; then
+      bad "#4479 lock timeout: the holder never acquired the lock"
+    else
+      scc_prestart_script "$W/t11g.sh"
+      logline=$(env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+        CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir3" CQLITE_TT_SCCACHE_LOCK_WAIT=1 bash "$W/t11g.sh" 2>&1 >/dev/null)
+      new=$(scc_pid_of)
+      if [ -n "$old" ] && [ "$old" = "$new" ] && grep -q "could not take" <<<"$logline" && ! grep -q "holds a dead TMPDIR" <<<"$logline"; then
+        ok "#4479 lock timeout: with the lock really held elsewhere the prestart warns and skips recovery (poisoned server pid $old untouched, no stop)"
+      else
+        bad "#4479 lock timeout: old=$old new=$new log='$logline'"
+      fi
+      # 11h. TERM during a LONG lock wait is handled promptly (the wait is polled, not a blocking flock,
+      #      so the trap runs within a fraction of a second). The prestart runs under a TERM trap like the gate's.
+      scc_prestart_script "$W/t11h.sh" trap
+      rm -f "$W/term.mark"
+      env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+        CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir3" CQLITE_TT_SCCACHE_LOCK_WAIT=60 bash "$W/t11h.sh" >/dev/null 2>&1 & hp=$!
+      sleep 1
+      t0=$SECONDS; kill -TERM "$hp" 2>/dev/null
+      n=0; while [ "$n" -lt 100 ] && kill -0 "$hp" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+      alive=0; kill -0 "$hp" 2>/dev/null && alive=1
+      wait "$hp" 2>/dev/null; hrc=$?
+      if [ "$alive" = 0 ] && [ "$((SECONDS - t0))" -le 4 ] && [ -f "$W/term.mark" ] && [ "$(scc_pid_of)" = "$old" ]; then
+        ok "#4479 TERM during a 60s lock wait: the prestart's trap ran and it exited in $((SECONDS - t0))s (rc $hrc), server untouched"
+      else
+        bad "#4479 TERM during a lock wait: still alive=$alive after $((SECONDS - t0))s (rc $hrc, mark=$([ -f "$W/term.mark" ] && echo yes || echo no))"
+        kill -KILL "$hp" 2>/dev/null
+      fi
+    fi
+    kill "$scc_holder" 2>/dev/null; wait "$scc_holder" 2>/dev/null
+    scc_stop; scc_port=0
+  fi
+  # 11i. no lock available (the lock dir does not exist): NEVER stop the poisoned server; only the
+  #      non-destructive start, with a log line saying recovery was skipped.
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 no-lock: no free port"; else
+    mkdir -p "$W/doomed4"
+    scc_start_under "$W/doomed4"; old=$(scc_pid_of); rm -rf "$W/doomed4"
+    scc_prestart_script "$W/t11i.sh"
+    logline=$(env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+      CQLITE_TT_SCCACHE_LOCK_DIR="$W/no-such-lock-dir" bash "$W/t11i.sh" 2>&1 >/dev/null)
+    new=$(scc_pid_of)
+    if [ -n "$old" ] && [ "$old" = "$new" ] && grep -q "recovery skipped: no lock available" <<<"$logline" && ! grep -q "holds a dead TMPDIR" <<<"$logline"; then
+      ok "#4479 no lock available: the poisoned server is NOT stopped (pid $old kept) and the skip is logged"
+    else
+      bad "#4479 no lock available: old=$old new=$new log='$logline'"
+    fi
+    scc_stop; scc_port=0
+  fi
+fi
+# 11j. #4479: _tt_sccache_bounded must END a lifecycle command that ignores TERM: TERM at the bound, a
+#      short grace, then KILL to the SAME recorded pid. Command: `trap "" TERM; exec sleep 60` (pid recorded).
+cat >"$W/t11j.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+t0=\$SECONDS
+_tt_sccache_bounded 1 bash -c 'trap "" TERM; echo \$\$ >"$W/ign.pid"; exec sleep 60'
+echo "rc=\$? elapsed=\$((SECONDS - t0))"
+EOS
+res=$(bash "$W/t11j.sh" 2>&1); ign=$(cat "$W/ign.pid" 2>/dev/null)
+elapsed=${res##*elapsed=}; jrc=${res#rc=}; jrc=${jrc%% *}
+gone=0; [ -n "$ign" ] && ! kill -0 "$ign" 2>/dev/null && gone=1
+if [ "$gone" = 1 ] && [ "$jrc" != 0 ] && [ "${elapsed:-99}" -le 4 ]; then
+  ok "#4479 bounded: a TERM-ignoring command is KILLed after the grace (returned rc $jrc in ${elapsed}s, bound 1s + grace 2s; pid $ign gone)"
+else
+  bad "#4479 bounded: TERM-ignoring command not ended (res='$res' pid=$ign gone=$gone)"
+  [ -z "$ign" ] || kill -KILL "$ign" 2>/dev/null
+fi
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
