@@ -968,36 +968,62 @@ fi
 # is DECLARED with its observed count and the behavioural pass assertion stands alone.
 if [ -r /proc/self/maps ]; then
   churn_big=$(printf '%*s' 300000 '')
-  ( churn_a=(); while :; do churn_t="$churn_big$RANDOM"; churn_a+=("$churn_t" "$churn_t$churn_t"); unset 'churn_a[0]'; churn_a=("${churn_a[@]}"); done ) >/dev/null 2>&1 &
+  # BOUNDED churn: four slots, each iteration replaces ONE slot with a fresh >128 KiB string (so the
+  # allocator keeps mapping and unmapping) - memory stays ~4 x 600 KB. The process also has a hard
+  # lifetime cap and exits by itself, so it can never outlive this test even if it is never killed.
+  ( churn_end=$((SECONDS + 30)); churn_n=0; s0=""; s1=""; s2=""; s3=""
+    while [ "$SECONDS" -lt "$churn_end" ]; do
+      churn_t="$churn_big$churn_big$RANDOM"
+      case $((churn_n % 4)) in 0) s0=$churn_t ;; 1) s1=$churn_t ;; 2) s2=$churn_t ;; *) s3=$churn_t ;; esac
+      churn_n=$((churn_n + 1))
+    done ) >/dev/null 2>&1 &
   churn_pid=$!
   sleep 0.3
   if [ -r "/proc/$churn_pid/maps" ] && [ -r "/proc/$churn_pid/environ" ]; then
-    torn_refusals=0; other_refusals=0; pass_n=0
+    torn_refusals=0; other_refusals=0; no_verdict=0; ok_calls=0; pass_n=0
     while [ "$pass_n" -lt 50 ]; do
       out=$(maps_call "/proc/$churn_pid/maps" "/proc/$churn_pid/environ" system "" "" flight-bypass-warm-1); rc=$?
       if grep -q "NOT a /proc/<pid>/maps mapping" <<<"$out"; then torn_refusals=$((torn_refusals + 1))
-      elif [ "$rc" -ne 0 ]; then other_refusals=$((other_refusals + 1)); fi
+      elif [ "$rc" -ne 0 ]; then other_refusals=$((other_refusals + 1))
+      elif ! grep -q "system VERIFIED" <<<"$out"; then no_verdict=$((no_verdict + 1))
+      else ok_calls=$((ok_calls + 1)); fi
       pass_n=$((pass_n + 1))
     done
+    churn_alive=0
+    builtin kill -0 "$churn_pid" 2>/dev/null && churn_alive=1
     maps_re_ctl='^[0-9a-fA-F]+-[0-9a-fA-F]+[[:space:]]+[-rwxsp]{4}[[:space:]]+[0-9a-fA-F]+[[:space:]]+[0-9a-fA-F]+:[0-9a-fA-F]+[[:space:]]+[0-9]+[[:space:]]*(.*)$'
     old_torn=0; old_pass=0
-    while [ "$old_pass" -lt 300 ] && [ "$old_torn" -eq 0 ]; do
+    while [ "$old_pass" -lt 150 ] && [ "$old_torn" -eq 0 ]; do
       while IFS= read -r ctl_line; do
         [[ -n "${ctl_line//[[:space:]]/}" ]] || continue
         [[ "$ctl_line" =~ $maps_re_ctl ]] || old_torn=$((old_torn + 1))
       done < "/proc/$churn_pid/maps"
       old_pass=$((old_pass + 1))
     done
+    # The churn process must STILL be alive here (checked above, before it is killed by its recorded pid):
+    # if it had died, its /proc files would have vanished and every call would have failed for that reason.
+    churn_still_alive=$churn_alive
     builtin kill "$churn_pid" 2>/dev/null; wait "$churn_pid" 2>/dev/null
-    if [ "$torn_refusals" -eq 0 ]; then
-      pass "3g-6e. the recogniser never refused a line of a LIVE maps file that was churning under it (50 passes; $other_refusals other refusals, which are not parse refusals)"
-    else
+    if [ "$churn_still_alive" -ne 1 ]; then
+      fail "3g-6e. the churn process died before the end of the case, so the passes did not read a live churning file"
+    fi
+    if [ "$torn_refusals" -ne 0 ]; then
       fail "3g-6e. the recogniser refused a torn line of a live maps file in $torn_refusals of 50 passes - the read is not atomic enough (#4477)"
+    fi
+    if [ "$other_refusals" -ne 0 ]; then
+      fail "3g-6e. $other_refusals of 50 calls on the live churning maps file were refused for a reason other than a torn line"
+    fi
+    if [ "$no_verdict" -ne 0 ]; then
+      fail "3g-6e. $no_verdict of 50 calls returned success WITHOUT the 'system VERIFIED' verdict"
+    fi
+    if [ "$churn_still_alive" -eq 1 ] && [ "$torn_refusals" -eq 0 ] && [ "$other_refusals" -eq 0 ] \
+       && [ "$no_verdict" -eq 0 ] && [ "$ok_calls" -eq 50 ]; then
+      pass "3g-6e. all 50 calls on a LIVE maps file churning under the reader returned 'system VERIFIED' (0 torn lines, 0 other refusals, churn process alive throughout)"
     fi
     if [ "$old_torn" -gt 0 ]; then
       pass "3g-6e. control: the OLD incremental read of the same churning file tears (first torn line within $old_pass pass(es)) - the case discriminates"
     else
-      echo "note - 3g-6e. CONTROL NOT REPRODUCED on this host: the old incremental read tore 0 times in 300 passes, so the behavioural case above could not be shown to discriminate here (declared, not fatal - the structural 3g-6d still pins the fix)"
+      echo "note - 3g-6e. CONTROL NOT REPRODUCED on this host: the old incremental read tore 0 times in 150 passes, so the behavioural case above could not be shown to discriminate here (declared, not fatal - the structural 3g-6d still pins the fix)"
     fi
   else
     builtin kill "$churn_pid" 2>/dev/null; wait "$churn_pid" 2>/dev/null
