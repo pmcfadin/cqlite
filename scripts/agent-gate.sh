@@ -1848,7 +1848,7 @@ _perf_state_into() {
   if [ -n "${AGENT_GATE_TEST_PERF_STATE:-}" ]; then
     __ps_v="$AGENT_GATE_TEST_PERF_STATE"
   elif [ "${_PERF_CAP_LOADED:-0}" = 1 ]; then
-    perf_capability_token_into __ps_v
+    perf_capability_state_into __ps_v
   fi
   [ -n "$__ps_v" ] || __ps_v=unknown
   eval "$__ps_out=\$__ps_v"
@@ -1883,8 +1883,8 @@ _perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
 # reading is always an affirmative measurement. They sit BEFORE the optional Linux-only groups so
 # `perf=` remains the last token on a Linux line. On Linux
 # a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
-# #2859), then ` perf=ok|paranoid-<N>|kptr-restricted|absent|unknown` (issue
-# #3249); Darwin output is unchanged.
+# #2859), then ` perf=ok|user|paranoid-<N>|kptr-restricted|absent|unknown` (issue
+# #3249, user tier #4472); Darwin output is unchanged.
 # The perf token is fetched through a VARIABLE, not a `$( )`: its path is
 # contractually free of forks (see above), and reading it back through a command
 # substitution here would reintroduce exactly the subshell that contract excludes.

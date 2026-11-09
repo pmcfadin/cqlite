@@ -148,7 +148,7 @@ export TMPDIR="$tmp"
 # one grammar serving both a Darwin line (ending at sccache-used) and a Linux one.
 ACCEL_CAP_RE='sccache-cap=([0-9]+|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size|no-running-server|unattributed)\)|na\(sccache-not-in-use\))'
 ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero|pct-[a-z-]+)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
-ACCEL_LINE_RE="^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn) $ACCEL_CAP_RE $ACCEL_USED_RE( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$"
+ACCEL_LINE_RE="^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn) $ACCEL_CAP_RE $ACCEL_USED_RE( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|user|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$"
 
 # accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
 # print nothing (rc 1). `grep -m1` + capture-to-a-variable, deliberately with NO
@@ -1817,14 +1817,18 @@ else
   perf_host_par=$(tr -d '[:space:]' <"$perf_host_par_f")
   perf_host_kptr=$(tr -d '[:space:]' <"$perf_host_kptr_f")
   # The rule, from openspec/specs/agent-fleet-runtime/spec.md: paranoid <= 0 AND kptr == 0
-  # => ok; paranoid >= 1 => paranoid-<N>; else kptr != 0 => kptr-restricted.
+  # => ok; paranoid >= 3 => paranoid-<N>; paranoid 1-2 or kptr != 0 => user when perf is on PATH (#4472), else paranoid-<N> / kptr-restricted.
   if ! printf '%s' "$perf_host_par" | grep -Eq '^-?[0-9]+$' \
      || ! printf '%s' "$perf_host_kptr" | grep -Eq '^-?[0-9]+$'; then
     perf_host_want=unknown
-  elif [ "$perf_host_par" -ge 1 ]; then
+  elif [ "$perf_host_par" -ge 3 ]; then
     perf_host_want="paranoid-$perf_host_par"
-  elif [ "$perf_host_kptr" -ne 0 ]; then
-    perf_host_want=kptr-restricted
+  elif [ "$perf_host_par" -ge 1 ] || [ "$perf_host_kptr" -ne 0 ]; then
+    # #4472: the controls permit user-space profiling, so a perf binary on PATH => user;
+    # without one the old token stands.
+    if command -v perf >/dev/null 2>&1; then perf_host_want=user
+    elif [ "$perf_host_par" -ge 1 ]; then perf_host_want="paranoid-$perf_host_par"
+    else perf_host_want=kptr-restricted; fi
   else
     perf_host_want=ok
   fi
@@ -1888,6 +1892,8 @@ done
 #   the silently-eroding-guard gap this issue exists to close. It is a CLOSED set: a function that
 #   is renamed or removed makes fn_text return empty and reds `perf_path_missing`, so this list
 #   cannot quietly under-count.
+#   perf_capability_state_into / perf_capability_on_path joined with #4472 (the user tier): the
+#   gate's perf= value now comes from state_into, which scans PATH with builtins only.
 #   perf_capability_path_lines_ok joined for the SAME reason one round later (#3261, roborev round
 #   3): path_within now calls it, so it is on this path, and a future `$(tr -d …)`/`$(printf …)`
 #   there would fork the emit chain invisibly. Adding a helper to the emit path and NOT to this list
@@ -1897,7 +1903,8 @@ for _fn in perf_capability_token_into perf_capability_proc_read \
            perf_capability_seam_set perf_capability_is_int \
            perf_capability_sandbox_ok perf_capability_sandbox_root_into \
            perf_capability_nosymlink perf_capability_path_lines_ok \
-           perf_capability_path_within; do
+           perf_capability_path_within perf_capability_state_into \
+           perf_capability_on_path; do
   _t=$(fn_text "$PERF_LIB" "$_fn")
   [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
   perf_path_text="$perf_path_text$_t
@@ -1984,6 +1991,33 @@ if [ "$perf_probe_out" = 'TOKEN[ perf=paranoid-4]' ] \
 else
   bad "perf-free: runtime probe failed (out='$perf_probe_out' subshells=$perf_probe_subshells exec-failures=$perf_probe_execfail external=$perf_probe_ext: $(head -3 "$perf_extlog" | tr '\n' ' '))"
   head -20 "$perf_trace"
+fi
+# (b2, #4472) the USER tier on the same free path: paranoid=2 plus an executable perf on PATH
+#     must yield perf=user with 0 subshells and 0 external commands (PATH scan is builtins only).
+perf_fixture_p2="$tmp/perf-proc-p2"; mkdir -p "$perf_fixture_p2"
+printf '2\n' >"$perf_fixture_p2/perf_event_paranoid"; printf '1\n' >"$perf_fixture_p2/kptr_restrict"
+perf_user_bin="$tmp/perf-user-bin"; mkdir -p "$perf_user_bin"
+printf '#!/bin/sh\nexit 0\n' >"$perf_user_bin/perf"; chmod +x "$perf_user_bin/perf"
+sed "s#^PATH=.*#PATH=$perf_user_bin#" "$perf_probe" >"$perf_probe.user"
+: >"$perf_extlog"
+perf_user_out=$(env -u AGENT_GATE_TEST_PERF_STATE -u AGENT_GATE_TEST_OS \
+  CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$perf_fixture_p2" \
+  bash "$perf_probe.user" "$PERF_LIB" 2>"$tmp/perf-user-trace.txt")
+perf_user_sub=$(grep -c 'SUB[1-9]' "$tmp/perf-user-trace.txt" 2>/dev/null || true)
+perf_user_ext=$(grep -c '^EXTERNAL:' "$perf_extlog" 2>/dev/null || true)
+if [ "$perf_user_out" = 'TOKEN[ perf=user]' ] && [ "${perf_user_sub:-0}" -eq 0 ] && [ "${perf_user_ext:-0}" -eq 0 ]; then
+  ok "perf-free: paranoid=2 with perf on PATH yields perf=user with 0 subshells and 0 external commands (#4472)"
+else
+  bad "perf-free: user tier probe failed (out='$perf_user_out' subshells=$perf_user_sub external=$perf_user_ext)"
+fi
+# ...and without perf on PATH the same paranoid=2 box keeps the old token (never claims user).
+sed "s#^PATH=.*#PATH=$tmp/perf-free-no-such-bin#" "$perf_probe" >"$perf_probe.nouser"
+perf_nouser_out=$(env -u AGENT_GATE_TEST_PERF_STATE -u AGENT_GATE_TEST_OS \
+  CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$perf_fixture_p2" bash "$perf_probe.nouser" "$PERF_LIB" 2>/dev/null)
+if [ "$perf_nouser_out" = 'TOKEN[ perf=paranoid-2]' ]; then
+  ok "perf-free: paranoid=2 WITHOUT perf on PATH stays perf=paranoid-2 (user is never claimed without a perf binary)"
+else
+  bad "perf-free: paranoid=2 without perf gave '$perf_nouser_out', expected TOKEN[ perf=paranoid-2]"
 fi
 perf_nopath="$tmp/perf-nopath.txt"
 nopath_dir="$tmp/nopath-bin"; mkdir -p "$nopath_dir"

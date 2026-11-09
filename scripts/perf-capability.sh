@@ -765,6 +765,79 @@ perf_capability_token() {
   printf '%s' "$__ptk_v"
 }
 
+# ---- TIERS: full vs user-space (issue #4472) -----------------------------------------------
+# Two profiling tiers exist, and a caller names the one it needs:
+#   FULL  paranoid <= 0 AND kptr_restrict == 0: kernel symbols, CPU-wide perf stat -C,
+#         system-wide perf record -a. The gate prints perf=ok; the CLI prints full.
+#   USER  paranoid <= 2 AND a perf binary on PATH: user-space-only events (cycles:u), which is
+#         what perf record -g of one CQLite process needs. The gate prints perf=user.
+#   NONE  anything else, with the reason (the --token vocabulary, no-perf-binary, or the
+#         probe's own failure).
+# The USER tier is NOT a weaker FULL: it never reports kernel frames or other processes.
+#
+# perf_capability_on_path: rc 0 iff an executable regular file named perf is on PATH. Shell
+# builtins only (no external process, no command substitution), so it is legal on the gate's
+# emit path. Empty PATH entries are skipped, never read as the cwd.
+perf_capability_on_path() {
+  local __pop_d __pop_rest="${PATH:-}:"
+  while [ -n "$__pop_rest" ]; do
+    __pop_d="${__pop_rest%%:*}"; __pop_rest="${__pop_rest#*:}"
+    [ -n "$__pop_d" ] || continue
+    if [ -f "$__pop_d/perf" ] && [ -x "$__pop_d/perf" ]; then return 0; fi
+  done
+  return 1
+}
+
+# perf_capability_state_into <outvar>: the gate's perf= value. Free read only (the /proc
+# controls plus a PATH scan): ok | user | paranoid-<N> | kptr-restricted | absent | unknown.
+# ok is the FULL tier. user means the controls permit user-space profiling and perf is
+# installed; the functional probe is --tier, not the gate. Where perf is not installed the
+# --token answer is kept unchanged, so a box without perf never claims user.
+perf_capability_state_into() {
+  local __pcs_out="$1" __pcs_t=""
+  perf_capability_token_into __pcs_t
+  case "$__pcs_t" in
+    paranoid-1|paranoid-2|kptr-restricted)
+      if perf_capability_on_path; then __pcs_t=user; fi ;;
+  esac
+  eval "$__pcs_out=\$__pcs_t"
+}
+
+# perf_capability_probe_user: the FUNCTIONAL user-space check, AS THIS USER:
+# perf stat -e cycles:u -- true. Parsed like --verify (CSV, a positive count required).
+perf_capability_probe_user() {
+  command -v perf >/dev/null 2>&1 || { printf 'no-perf-binary'; return 1; }
+  local bound="" out rc
+  bound=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+  if [ -n "$bound" ]; then
+    out=$(LC_ALL=C "$bound" 30 perf stat -x, -e cycles:u -- true 2>&1); rc=$?
+  else
+    out=$(LC_ALL=C perf stat -x, -e cycles:u -- true 2>&1); rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    printf 'perf-stat-failed rc=%s: %s' "$rc" "$(printf '%s' "$out" | tr '\n' ';' | cut -c1-160)"
+    return 1
+  fi
+  perf_capability_cycles_result "$out"
+}
+
+# perf_capability_tier: print full | user | none(<reason>); rc 0 for full and user, 1 for none.
+# FULL is decided by the free controls alone (same as perf=ok). USER requires the controls,
+# perf on PATH AND a passing probe, so a perf that exits 0 with <not supported> or a flat 0
+# is none(probe-failed: ...), never user.
+perf_capability_tier() {
+  local st="" pr="" rc=0
+  perf_capability_state_into st
+  case "$st" in
+    ok) printf 'full'; return 0 ;;
+    user)
+      pr=$(perf_capability_probe_user) || rc=1
+      if [ "$rc" -eq 0 ]; then printf 'user'; return 0; fi
+      printf 'none(probe-failed: %s)' "$pr"; return 1 ;;
+    *) printf 'none(%s)' "$st"; return 1 ;;
+  esac
+}
+
 # ---- WHOSE capability? the privilege dimension (issue #3249 review) -----------
 # perf_event_paranoid restricts UNPRIVILEGED users; ROOT BYPASSES IT ENTIRELY. So
 # `perf stat -C 0 -e cycles` run by root SUCCEEDS on a paranoid=4 box where every
@@ -902,6 +975,15 @@ perf_capability_verify() {
     printf 'perf-stat-failed rc=%s: %s' "$rc" "$(printf '%s' "$out" | tr '\n' ';' | cut -c1-160)"
     return 1
   fi
+  perf_capability_cycles_result "$out"
+}
+
+# perf_capability_cycles_result <csv-output>: parse perf stat -x, output for a positive
+# cycles count. Shared by --verify (cycles) and the user probe (cycles:u): a qualifier after
+# the colon is stripped, so both spellings reach the same row. Prints cycles=<n>, rc 0, or a
+# short reason, rc 1.
+perf_capability_cycles_result() {
+  local out="$1" count
   # Event-name matching must accept a QUALIFIED cycle event: on a hybrid-PMU CPU (Intel
   # (rationale: fleet-runbook.md, perf seam containment, event-name-matching-must-accept-a-qualified)
   count=$(printf '%s\n' "$out" | awk -F, '
@@ -929,8 +1011,10 @@ perf_capability_verify() {
 }
 
 perf_capability_usage() {
-  printf 'usage: %s --token | --verify | --verify-unpriv | --drop-in | --drop-in-path\n' "${0##*/}"
+  printf 'usage: %s --token | --state | --tier | --verify | --verify-unpriv | --drop-in | --drop-in-path\n' "${0##*/}"
   printf '  --token         free /proc capability read: ok|paranoid-<N>|kptr-restricted|absent|unknown\n'
+  printf '  --state         the gate perf= value: --token, but user where paranoid <= 2 and perf is on PATH\n'
+  printf '  --tier          full | user | none(<reason>); user runs perf stat -e cycles:u -- true (rc 0 = full/user)\n'
   printf '  --verify        functional check AS THIS USER: perf stat -C 0 -e cycles (rc 0 = it worked\n'
   printf '                  for THIS identity; run as root that proves nothing about an agent process)\n'
   printf '  --verify-unpriv the same check as an UNPRIVILEGED identity (drops privilege when root);\n'
@@ -942,6 +1026,8 @@ perf_capability_usage() {
 perf_capability_main() {
   case "${1:-}" in
     --token)        perf_capability_token; printf '\n' ;;
+    --state)        local sv=''; perf_capability_state_into sv; printf '%s\n' "$sv" ;;
+    --tier)         local tv rc=0; tv=$(perf_capability_tier) || rc=1; printf '%s\n' "$tv"; return $rc ;;
     --verify)       local v rc=0; v=$(perf_capability_verify) || rc=1; printf '%s\n' "$v"; return $rc ;;
     --verify-unpriv)
       # rc 0 requires BOTH a functional pass AND that it came from an unprivileged
