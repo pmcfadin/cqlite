@@ -417,7 +417,7 @@ per-checkout `<root>/target`. Cost: a new worktree's first build compiles its ow
 crates and test binaries (measured: `cargo test -p cqlite-core --no-run`, sccache warm, 3m28s wall
 on a box at load 40-58, about 6 GB per worktree) and each live worktree holds its own copy of the
 dependency artifacts. `cargo-target-prune.sh` removes `wt/<hash>` dirs whose checkout no longer
-exists (`orphan-worktree-dirs-removed=`) and leaves live ones alone. Pinned by
+exists (`orphan-worktree-dirs-removed=`) and prunes live ones like the base (stale `incremental/`, workspace fingerprints, same locks and busy-skip, at native, cross-target and side-lane depths); a `wt/<hash>` dir without a marker is left alone. Pinned by
 `scripts/tests/test_worktree_target_isolation.sh`. Ad-hoc cargo runs outside the gate still use the
 shared base: `export CARGO_TARGET_DIR="$(bash scripts/lib/worktree-target-dir.sh)"` gives a shell the
 same isolation.

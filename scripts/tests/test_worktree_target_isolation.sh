@@ -55,6 +55,8 @@ gate_dir() {  # <worktree> -> CARGO_TARGET_DIR the gate would hand cargo
   ( cd "$1" && env -u CQLITE_SHARED_TARGET CARGO_TARGET_DIR="${2-$SHARED}" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
 }
 
+mkdir -p "$T/empty-cargo-home"
+
 # 1. control: shared dir, no isolation
 run_where "$A" "$SHARED" >/dev/null
 ctl=$(run_where "$B" "$SHARED")
@@ -87,7 +89,7 @@ other=$(mktemp -d "$T/other.XXXXXX")
   r=$(CARGO_TARGET_DIR=$DB gate_worktree_target_dir "$other"); [ "$r" != "$DB" ] && case "$r" in "$SHARED"/wt/*) [ "${r#"$SHARED"/wt/}" = "${r##*/}" ] ;; *) false ;; esac ) \
   && ok "nested gate on another root moves to its own sibling dir, no wt/<h>/wt/<h> nesting" || bad "inherited suffix not stripped for a different root"
 ( cd "$B" && [ "$(CQLITE_SHARED_TARGET=1 CARGO_TARGET_DIR=$SHARED bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" = "$SHARED" ] ) && ok "CQLITE_SHARED_TARGET=1 opts out" || bad "opt-out ignored"
-( cd "$B" && [ -z "$(env -u CARGO_TARGET_DIR -u CQLITE_SHARED_TARGET bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" ] ) && ok "unset CARGO_TARGET_DIR stays unset (cargo's default <root>/target is already per-checkout)" || bad "unset var was set"
+( cd "$B" && [ -z "$(env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CQLITE_SHARED_TARGET CARGO_HOME="$T/empty-cargo-home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null)" ] ) && ok "unset CARGO_TARGET_DIR stays unset (cargo's default <root>/target is already per-checkout)" || bad "unset var was set"
 
 # 5. cargo's other target-dir sources: CARGO_BUILD_TARGET_DIR and `[build] target-dir` in config
 bd=$( cd "$B" && env -u CQLITE_SHARED_TARGET -u CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR="$T/envbase" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )

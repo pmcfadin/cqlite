@@ -199,8 +199,32 @@ if units=$("$SYSTEMCTL" --user list-units --state=active --no-legend --plain 'cq
 else busy="$busy probe-error:systemctl-list-units(rc=$?)"; units=""; fi
 if [ -n "$units" ]; then busy="$busy unit:$(awk '{print $1; exit}' <<<"$units")"; fi
 
+# Per-worktree target dirs (#4387): `wt/<hash>/.worktree-root` names the checkout. A dir whose
+# checkout is gone is ORPHANED and is removed whole below; a dir with no marker is not ours to
+# judge and is left alone entirely; a LIVE one is pruned like the base (incremental + workspace
+# fingerprints), at native, cross-target and agent-gate-side depths, under the same locks.
+orphans=() skip_wt=()
+if [ -d "$target/wt" ]; then
+  for d in "$target"/wt/*/; do
+    d=${d%/}
+    [ -d "$d" ] || continue
+    if [ ! -f "$d/.worktree-root" ]; then skip_wt+=("$d"); continue; fi
+    root=$(head -n1 "$d/.worktree-root")
+    if [ -z "$root" ]; then skip_wt+=("$d"); continue; fi
+    if [ ! -e "$root/.git" ]; then orphans+=("$d"); fi
+  done
+fi
+in_list() { local x=$1; shift; local y; for y in "$@"; do [ "$x" = "$y" ] && return 0; done; return 1; }
+
 profiles=()
-while IFS= read -r fp; do profiles+=("$(dirname "$fp")"); done < <(find "$target" -maxdepth 4 -path "$target/wt" -prune -o -type d -name .fingerprint -print | sort)
+while IFS= read -r fp; do
+  prof=$(dirname "$fp"); skip=0
+  if [[ "$prof" == "$target"/wt/* ]]; then
+    wtd="$target/wt/${prof#"$target"/wt/}"; wtd=${wtd%%/*}; wtd="$target/wt/$wtd"
+    in_list "$wtd" ${orphans[@]+"${orphans[@]}"} ${skip_wt[@]+"${skip_wt[@]}"} && skip=1
+  fi
+  [ "$skip" = 1 ] || profiles+=("$prof")
+done < <(find "$target" -maxdepth 6 -type d -name .fingerprint | sort)
 
 # Hold every profile's build lock for the whole prune.
 if [ -z "$busy" ]; then
@@ -224,18 +248,7 @@ before=$(du -sb "$target" 2>/dev/null | awk '{print $1}')
 n_inc=0 n_fp=0 n_wt=0
 rm_dir() { if [ "$dry_run" = 1 ]; then echo "would remove ${1#"$target"/}"; else rm -rf -- "$1"; fi; }
 
-# Per-worktree target dirs (#4387) whose worktree is gone: `wt/<hash>/.worktree-root` names the
-# checkout. Remove the whole dir when that path no longer exists. A dir with no marker is left
-# alone (not ours to judge). Live worktrees' dirs are never touched here.
-if [ -d "$target/wt" ]; then
-  for d in "$target"/wt/*/; do
-    d=${d%/}
-    [ -f "$d/.worktree-root" ] || continue
-    root=$(head -n1 "$d/.worktree-root")
-    [ -n "$root" ] || continue
-    if [ ! -e "$root/.git" ]; then rm_dir "$d"; n_wt=$((n_wt + 1)); fi
-  done
-fi
+for d in "${orphans[@]}"; do rm_dir "$d"; n_wt=$((n_wt + 1)); done
 
 for prof in "${profiles[@]}"; do
   if [ -d "$prof/incremental" ]; then

@@ -199,6 +199,22 @@ check "wiped per-worktree dir re-resolves to itself and regains its marker" '[ "
 run --target "$dl" --dry-run
 check "the prune widens the re-marked dir to the base" 'grep -q "target=$(cd "$base" && pwd -P) " <<<"$out"'
 
+# Live worktree dirs are pruned like the base: native, cross-target and side-lane depths.
+mk_target; lw="$tmp/live2-wt"; mkdir -p "$lw"; : >"$lw/.git"
+wd=$(CARGO_TARGET_DIR="$T" bash "$HELPER" "$lw")
+for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do
+  mkdir -p "$wd/$prof/.fingerprint/cqlite-$H1" "$wd/$prof/incremental/old-abc" "$wd/$prof/incremental/new-def"
+  : >"$wd/$prof/.cargo-lock"; touch -d '30 days ago' "$wd/$prof/incremental/old-abc"
+done
+run --target "$T"
+check "live wt dir: stale incremental pruned, fresh kept, workspace fingerprint pruned, at all three depths" '[ "$rc" = 0 ] && for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do [ ! -d "$wd/$prof/incremental/old-abc" ] && [ -d "$wd/$prof/incremental/new-def" ] && [ ! -d "$wd/$prof/.fingerprint/cqlite-$H1" ] || exit 1; done; [ -d "$wd" ]'
+mk_target; wd=$(CARGO_TARGET_DIR="$T" bash "$HELPER" "$lw")
+mkdir -p "$wd/debug/.fingerprint/cqlite-$H1" "$wd/debug/incremental/old-abc"; : >"$wd/debug/.cargo-lock"; touch -d '30 days ago' "$wd/debug/incremental/old-abc"
+flock "$wd/debug/.cargo-lock" sleep 30 & lockpid=$!
+for _ in $(seq 50); do flock -n "$wd/debug/.cargo-lock" true 2>/dev/null || break; sleep 0.1; done
+run --target "$T"; kill "$lockpid" 2>/dev/null; wait "$lockpid" 2>/dev/null
+check "a held lock inside a live wt dir: SKIPPED-BUSY, nothing removed" 'grep -q "^RESULT: SKIPPED-BUSY$" <<<"$out" && grep -q "lock:wt/" <<<"$out" && [ -d "$wd/debug/incremental/old-abc" ] && [ -d "$T/debug/incremental/old-abc" ]'
+
 # A hand-configured target that merely ends in wt/<16 hex> has no marker: never widened.
 mk_target; manual="$T/wt/0123456789abcdef"; mkdir -p "$manual"; cp "$T/CACHEDIR.TAG" "$manual/CACHEDIR.TAG"
 mkdir -p "$manual/debug/.fingerprint"; : >"$manual/debug/.cargo-lock"
