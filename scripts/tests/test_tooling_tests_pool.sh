@@ -593,5 +593,23 @@ if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && command -v flock >/dev/null 2>&1; 
     scc_stop; scc_port=0
   fi
 fi
+# 11j. #4479: _tt_sccache_bounded must END a lifecycle command that ignores TERM: TERM at the bound, a
+#      short grace, then KILL to the SAME recorded pid. Command: `trap "" TERM; exec sleep 60` (pid recorded).
+cat >"$W/t11j.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+t0=\$SECONDS
+_tt_sccache_bounded 1 bash -c 'trap "" TERM; echo \$\$ >"$W/ign.pid"; exec sleep 60'
+echo "rc=\$? elapsed=\$((SECONDS - t0))"
+EOS
+res=$(bash "$W/t11j.sh" 2>&1); ign=$(cat "$W/ign.pid" 2>/dev/null)
+elapsed=${res##*elapsed=}; jrc=${res#rc=}; jrc=${jrc%% *}
+gone=0; [ -n "$ign" ] && ! kill -0 "$ign" 2>/dev/null && gone=1
+if [ "$gone" = 1 ] && [ "$jrc" != 0 ] && [ "${elapsed:-99}" -le 4 ]; then
+  ok "#4479 bounded: a TERM-ignoring command is KILLed after the grace (returned rc $jrc in ${elapsed}s, bound 1s + grace 2s; pid $ign gone)"
+else
+  bad "#4479 bounded: TERM-ignoring command not ended (res='$res' pid=$ign gone=$gone)"
+  [ -z "$ign" ] || kill -KILL "$ign" 2>/dev/null
+fi
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

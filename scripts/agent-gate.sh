@@ -22389,13 +22389,23 @@ _tt_sccache_poisoned_tmpdir() {
   if [ -d "$t" ] && [ -w "$t" ] && [ -x "$t" ]; then return 1; fi
   printf '%s' "$t"
 }
-# _tt_sccache_bounded <secs> <cmd...>: run <cmd> in the background with a watchdog that TERMs ONLY that
-# recorded child after <secs>; returns the child's status (143 when the watchdog fired). Every sccache
-# lifecycle call goes through it so a hung server cannot hang the gate.
+# _tt_sccache_bounded <secs> <cmd...>: run <cmd> in the background with a watchdog that, after <secs>,
+# TERMs ONLY that recorded child, waits a short grace (_TT_SCC_GRACE, default 2s), and KILLs the same pid
+# if it is still alive (a TERM-ignoring command must not block `wait` forever). Returns the child's
+# status (143 after TERM, 137 after KILL). The watchdog is told to stop as soon as the child ends, so
+# it never signals a pid after the child was reaped. Every sccache lifecycle call goes through it so a
+# hung server cannot hang the gate.
 _tt_sccache_bounded() {
   local secs=$1 p w rc; shift
   "$@" </dev/null & p=$!
-  ( trap 'kill "$s" 2>/dev/null' TERM; sleep "$secs" & s=$!; wait "$s" 2>/dev/null; kill -TERM "$p" 2>/dev/null ) >/dev/null 2>&1 & w=$!
+  ( stop=""; s=""; trap 'stop=1; [ -z "$s" ] || kill "$s" 2>/dev/null' TERM
+    sleep "$secs" & s=$!; wait "$s" 2>/dev/null
+    [ -z "$stop" ] || exit 0
+    kill -TERM "$p" 2>/dev/null
+    sleep "${_TT_SCC_GRACE:-2}" & s=$!; wait "$s" 2>/dev/null
+    [ -z "$stop" ] || exit 0
+    kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
+    exit 0 ) >/dev/null 2>&1 & w=$!
   wait "$p" 2>/dev/null; rc=$?
   kill -TERM "$w" 2>/dev/null; wait "$w" 2>/dev/null
   return "$rc"
