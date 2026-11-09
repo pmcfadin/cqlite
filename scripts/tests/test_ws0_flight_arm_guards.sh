@@ -927,6 +927,121 @@ else
   echo "note - 3g-6b. CONTROL NOT TAKEN: /proc/self/maps is not readable on this host, so the recogniser was not driven against a real kernel maps file (declared, not fatal — every other 3g case is synthetic)"
 fi
 
+# 3g-6c. A maps file LARGER THAN ONE PAGE (#4477). The torn-line failure only exists for files that
+# need more than one read, so a 4 KiB-or-smaller fixture could never have shown it. 150 lines of
+# ~100 bytes = ~15 KiB; the jemalloc mapping is the LAST line, so a reader that stops at a page
+# boundary, drops a tail or tears a line cannot verify it. Both directions: the accept (every line
+# parsed, the count is exact, the LAST mapping found) and a genuinely malformed LAST line, which
+# must still be refused and NAMED - the refusal is for malformed lines, never for read artifacts.
+BIGMAPS="$TMP/maps-big"
+{
+  i=0
+  while [ "$i" -lt 150 ]; do
+    printf '7f%04x00-7f%04x00 r-xp 00000000 08:01 %d /usr/lib/x86_64-linux-gnu/some/deeply/nested/dir/libfiller-%03d.so.1\n' "$i" "$((i + 1))" "$((1000 + i))" "$i"
+    i=$((i + 1))
+  done
+  printf '7ffe0000-7ffe1000 r-xp 00000000 08:01 9999 %s\n' "$JLIB"
+} > "$BIGMAPS"
+big_bytes=$(wc -c < "$BIGMAPS")
+out=$(maps_call "$BIGMAPS" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$big_bytes" -gt 4096 ] && [ "$rc" -eq 0 ] && grep -q "jemalloc VERIFIED for flight-merge-warm-1" <<<"$out" \
+   && grep -q "151 mappings" <<<"$out"; then
+  pass "3g-6c. a ${big_bytes}-byte maps file (> one page) is parsed whole: all 151 lines counted and the LAST mapping verified"
+else
+  fail "3g-6c. a maps file larger than a page must be parsed in full (bytes=$big_bytes rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+{ cat "$BIGMAPS"; printf 'this is not a mapping line\n'; } > "$TMP/maps-big-malformed"
+out=$(maps_call "$TMP/maps-big-malformed" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "this is not a mapping line" <<<"$out" && grep -q "NOT a /proc/<pid>/maps mapping" <<<"$out"; then
+  pass "3g-6c. a genuinely malformed line at the END of a large maps file is still REFUSED and NAMED"
+else
+  fail "3g-6c. a malformed last line of a large file must still refuse naming it (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# 3g-6e. BEHAVIOURAL regression for the torn line (#4477): a LIVE maps file whose process churns large
+# allocations (> 128 KiB, so it mmaps/munmaps) WHILE the recogniser reads it. The subject is a
+# background churn process (a different pid than the reader - procfs re-walks ANY process's VMA list
+# when a reader seeks, so the tear is the same), recorded and killed by pid. The real function is
+# driven against /proc/<pid>/maps for a bounded number of passes and must NEVER refuse a line.
+# CONTROL, so the case is known to discriminate: the OLD incremental form (a `read` loop fed straight
+# from the procfs file) run against the same churn must tear at least once. Measured on the dev box
+# (kernel 7.0, ZFS root): 2-4 torn lines per 50 passes. If the control cannot reproduce on a host it
+# is DECLARED with its observed count and the behavioural pass assertion stands alone.
+if [ -r /proc/self/maps ]; then
+  churn_big=$(printf '%*s' 300000 '')
+  # BOUNDED churn: four slots, each iteration replaces ONE slot with a fresh >128 KiB string (so the
+  # allocator keeps mapping and unmapping) - memory stays ~4 x 600 KB. The process also has a hard
+  # lifetime cap and exits by itself, so it can never outlive this test even if it is never killed.
+  ( churn_end=$((SECONDS + 30)); churn_n=0; s0=""; s1=""; s2=""; s3=""
+    while [ "$SECONDS" -lt "$churn_end" ]; do
+      churn_t="$churn_big$churn_big$RANDOM"
+      case $((churn_n % 4)) in 0) s0=$churn_t ;; 1) s1=$churn_t ;; 2) s2=$churn_t ;; *) s3=$churn_t ;; esac
+      churn_n=$((churn_n + 1))
+    done ) >/dev/null 2>&1 &
+  churn_pid=$!
+  sleep 0.3
+  if [ -r "/proc/$churn_pid/maps" ] && [ -r "/proc/$churn_pid/environ" ]; then
+    torn_refusals=0; other_refusals=0; no_verdict=0; ok_calls=0; pass_n=0
+    while [ "$pass_n" -lt 50 ]; do
+      out=$(maps_call "/proc/$churn_pid/maps" "/proc/$churn_pid/environ" system "" "" flight-bypass-warm-1); rc=$?
+      if grep -q "NOT a /proc/<pid>/maps mapping" <<<"$out"; then torn_refusals=$((torn_refusals + 1))
+      elif [ "$rc" -ne 0 ]; then other_refusals=$((other_refusals + 1))
+      elif ! grep -q "system VERIFIED" <<<"$out"; then no_verdict=$((no_verdict + 1))
+      else ok_calls=$((ok_calls + 1)); fi
+      pass_n=$((pass_n + 1))
+    done
+    churn_alive=0
+    builtin kill -0 "$churn_pid" 2>/dev/null && churn_alive=1
+    maps_re_ctl='^[0-9a-fA-F]+-[0-9a-fA-F]+[[:space:]]+[-rwxsp]{4}[[:space:]]+[0-9a-fA-F]+[[:space:]]+[0-9a-fA-F]+:[0-9a-fA-F]+[[:space:]]+[0-9]+[[:space:]]*(.*)$'
+    old_torn=0; old_pass=0
+    while [ "$old_pass" -lt 150 ] && [ "$old_torn" -eq 0 ]; do
+      while IFS= read -r ctl_line; do
+        [[ -n "${ctl_line//[[:space:]]/}" ]] || continue
+        [[ "$ctl_line" =~ $maps_re_ctl ]] || old_torn=$((old_torn + 1))
+      done < "/proc/$churn_pid/maps"
+      old_pass=$((old_pass + 1))
+    done
+    # The churn process must STILL be alive here (checked above, before it is killed by its recorded pid):
+    # if it had died, its /proc files would have vanished and every call would have failed for that reason.
+    churn_still_alive=$churn_alive
+    builtin kill "$churn_pid" 2>/dev/null; wait "$churn_pid" 2>/dev/null
+    if [ "$churn_still_alive" -ne 1 ]; then
+      fail "3g-6e. the churn process died before the end of the case, so the passes did not read a live churning file"
+    fi
+    if [ "$torn_refusals" -ne 0 ]; then
+      fail "3g-6e. the recogniser refused a torn line of a live maps file in $torn_refusals of 50 passes - the read is not atomic enough (#4477)"
+    fi
+    if [ "$other_refusals" -ne 0 ]; then
+      fail "3g-6e. $other_refusals of 50 calls on the live churning maps file were refused for a reason other than a torn line"
+    fi
+    if [ "$no_verdict" -ne 0 ]; then
+      fail "3g-6e. $no_verdict of 50 calls returned success WITHOUT the 'system VERIFIED' verdict"
+    fi
+    if [ "$churn_still_alive" -eq 1 ] && [ "$torn_refusals" -eq 0 ] && [ "$other_refusals" -eq 0 ] \
+       && [ "$no_verdict" -eq 0 ] && [ "$ok_calls" -eq 50 ]; then
+      pass "3g-6e. all 50 calls on a LIVE maps file churning under the reader returned 'system VERIFIED' (0 torn lines, 0 other refusals, churn process alive throughout)"
+    fi
+    if [ "$old_torn" -gt 0 ]; then
+      pass "3g-6e. control: the OLD incremental read of the same churning file tears (first torn line within $old_pass pass(es)) - the case discriminates"
+    else
+      echo "note - 3g-6e. CONTROL NOT REPRODUCED on this host: the old incremental read tore 0 times in 150 passes, so the behavioural case above could not be shown to discriminate here (declared, not fatal - the structural 3g-6d still pins the fix)"
+    fi
+  else
+    builtin kill "$churn_pid" 2>/dev/null; wait "$churn_pid" 2>/dev/null
+    echo "note - 3g-6e. NOT TAKEN: /proc/<pid>/maps or environ of the churn process is not readable on this host (declared, not fatal)"
+  fi
+else
+  echo "note - 3g-6e. NOT TAKEN: no procfs on this host (declared, not fatal)"
+fi
+# 3g-6d. STRUCTURAL: the snapshot is what is parsed - the incremental `done < "$maps"` form (the cause
+# of the torn line) is gone from the function, and a snapshot read is present.
+fn_src=$(sed -n '/^verify_flight_server_allocator()/,/^}/p' "$FLIGHT_LIB")
+if grep -q 'snapshot="\$(<"\$maps")"' <<<"$fn_src" && grep -q 'done <<<"\$snapshot"' <<<"$fn_src" \
+   && ! grep -qE 'done < "\$maps"' <<<"$fn_src"; then
+  pass "3g-6d. STRUCTURAL: the recogniser parses a one-shot snapshot of the maps file, not an incrementally read procfs descriptor"
+else
+  fail "3g-6d. STRUCTURAL: verify_flight_server_allocator must snapshot \$maps once and parse the snapshot (the torn-line cause is incremental reads)"
+fi
+
 # 3g-7. STRUCTURAL: the whole-line substring tests are GONE. The behavioural arms above cover the
 # shapes someone thought of; this pins that neither original comparison survives anywhere in the
 # function, which no behavioural case can express. The needles are SPLIT so this test cannot

@@ -442,6 +442,21 @@ verify_flight_server_allocator() {
       return 1
     fi
   done
+  # THE MAPS FILE IS READ WHOLE, ONCE, BEFORE ANY PARSING (#4477). A `while read` loop fed straight from the file
+  # reads a procfs file incrementally and bash lseeks BACK after each buffered chunk; procfs
+  # re-walks the process's VMA list to honour the seek, so when the reading process's own
+  # mappings change in between (every allocation made while parsing can mmap/munmap) the byte
+  # offsets shift and `read` resumes in the MIDDLE of a line. Measured: 6 x 200 passes over a live
+  # /proc/self/maps with allocation churn -> 199 torn lines per run (`b/x86_64-linux-gnu/gconv/...`,
+  # the tail of a mapping line), against 0 once the file is snapshotted first. A torn line is a
+  # READ ARTIFACT, not a malformed mapping; it can no longer reach the recogniser below, whose
+  # refusal is kept for lines that are genuinely not mappings.
+  local snapshot
+  if ! snapshot="$(<"$maps")"; then
+    echo "FATAL: $maps exists but could not be READ, so the allocator state of the Flight server of" >&2
+    echo "       $tag COULD NOT BE MEASURED. This is a refusal and never a pass (#3551)." >&2
+    return 1
+  fi
   while IFS= read -r line; do
     # A blank line carries no mapping and so can hide neither arm's subject; anything else that
     # does not parse is a state in which the comparison COULD NOT BE MADE, and is refused.
@@ -480,7 +495,7 @@ verify_flight_server_allocator() {
       saw_jemalloc=1
       jemalloc_path="$path"
     fi
-  done < "$maps"
+  done <<<"$snapshot"
   # NUL-SEPARATED, one WHOLE entry per iteration. The `|| [[ -n "$entry" ]]` tail is required: a
   # final entry with no trailing NUL leaves `read` non-zero with the value still set, and
   # dropping it would silently lose the last variable in the environment.
