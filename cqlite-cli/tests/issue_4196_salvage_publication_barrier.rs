@@ -351,7 +351,14 @@ fn compression_chunk_table(path: &Path) -> (usize, u64, Vec<u64>) {
 /// Every `(partition key as the declared `int` pk, uncompressed data-section
 /// position)` pair the committed `sstabledump` golden records, in file order.
 ///
-/// This is Cassandra's OWN record of where each partition starts. Strict: a
+/// This is Cassandra's OWN record of where each partition's data lies, read as a
+/// LOWER BOUND on its start, never an exact offset (#4482): `sstabledump`'s
+/// `position` is the scan reader's file pointer when the partition is serialized
+/// (`JsonTransformer.serializePartition` -> `SSTableScanner.getCurrentPosition()` ->
+/// `dfile.getFilePointer()` at `cassandra-5.0.8`), which is the exact partition start
+/// under 5.0.2 and a few header bytes PAST it under 5.0.8. The derivation below only
+/// needs "a chunk starting at or after this position starts at or after the partition
+/// start", which holds for both. Strict: a
 /// drifted golden shape, a non-ascending position list or fewer than two
 /// partitions each FAIL by name rather than yield a plausible-but-wrong needle.
 fn golden_partition_positions(fixture_dir: &Path) -> Vec<(i32, u64)> {
@@ -894,5 +901,27 @@ fn all_attempted_generations_refused_with_no_skip_still_exits_2() {
     assert!(
         !data_db_exists_under(&out),
         "no generation may have written a Data.db when every one refused"
+    );
+}
+
+/// #4482: the golden reader must accept a 5.0.8-style `sstabledump` golden, whose
+/// partition `position`s are shifted past the partition header (first partition 18,
+/// not 0). Sample provenance: `test-data/fixtures/issue_4482/README.md`.
+#[test]
+fn golden_partition_positions_accepts_5_0_8_header_shifted_positions() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-data/fixtures/issue_4482/cassandra-5.0.8/test_udt_wide_fields");
+    let got = golden_partition_positions(&dir);
+    assert!(
+        got.len() >= 2,
+        "guard: at least two partitions, got {got:?}"
+    );
+    assert!(
+        got[0].1 > 0,
+        "guard: this sample must carry the 5.0.8 shape (first partition position > 0), got {got:?}"
+    );
+    assert!(
+        got.windows(2).all(|w| w[0].1 < w[1].1),
+        "positions must ascend: {got:?}"
     );
 }
