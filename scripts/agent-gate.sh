@@ -1152,7 +1152,13 @@ fi
 # `<base>/wt/<hash of this checkout>` BEFORE any cargo call so every mode (--lite, full,
 # --only, --delta, --recertify) and the SIDE lane's `<dir>/agent-gate-side/<component>` land
 # inside it. Third-party compiles stay cheap through sccache below. Opt out: CQLITE_SHARED_TARGET=1.
-if [ -f "$REPO_ROOT/scripts/lib/worktree-target-dir.sh" ]; then
+# Pure, side-effect-free hook modes never build, so they skip resolution (no `cargo metadata`, no
+# mkdir): their contract is no cargo and no side effects.
+case "${1:-}" in
+  --list|--lite-list|--delta-list|--classify-*|--scoped-noparser-fail-msg|--delta-classify|--delta-python-gap|--component-set-*|--cpu-budget|--tooling-tests-*|--preflight-*) _wt_skip=1 ;;
+  *) _wt_skip=0 ;;
+esac
+if [ "$_wt_skip" = 0 ] && [ -f "$REPO_ROOT/scripts/lib/worktree-target-dir.sh" ]; then
   # shellcheck source=lib/worktree-target-dir.sh
   . "$REPO_ROOT/scripts/lib/worktree-target-dir.sh"
   if _wt_dir=$(gate_worktree_target_dir "$REPO_ROOT"); then
@@ -1163,6 +1169,7 @@ if [ -f "$REPO_ROOT/scripts/lib/worktree-target-dir.sh" ]; then
   fi
   unset _wt_dir
 fi
+unset _wt_skip
 
 # sccache auto-detect (issue #1822): if sccache is available, use it as the
 # rustc wrapper for incremental compilation cache. Each worktree keeps its own

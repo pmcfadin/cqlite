@@ -36,6 +36,7 @@ git init -q "$T/main"
   mkdir -p src tests scripts
   printf '[package]\nname = "iso"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n' >Cargo.toml
   echo '' >src/lib.rs
+  cargo generate-lockfile --offline >/dev/null 2>&1
   cat >tests/where.rs <<'RS'
 #[test]
 fn where_am_i() { println!("MANIFEST_DIR={}", env!("CARGO_MANIFEST_DIR")); }
@@ -104,6 +105,25 @@ case "$cd_" in "$T"/cfgbase/wt/*) ok "a .cargo/config.toml build.target-dir is i
   rm -rf "$DB"
   r=$(CARGO_TARGET_DIR=$DB gate_worktree_target_dir "$B")
   [ "$r" = "$DB" ] && [ "$(cat "$DB/.worktree-root")" = "$B" ] ) && ok "after a cargo-clean-style wipe the same target resolves to itself (no nesting) and the marker is rewritten" || bad "wiped target nested or lost its marker"
+
+# 6b. metadata decoy: a [workspace.metadata] target_directory key must not be read as cargo's
+git -C "$T/main" worktree add -q "$T/E" -b e >/dev/null 2>&1
+printf '[workspace.metadata]\ntarget_directory = "/decoy-should-not-be-used"\n' >>"$T/E/Cargo.toml"
+e_=$( cd "$T/E" && env -u CQLITE_SHARED_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR CARGO_HOME="$T/empty-cargo-home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
+[ -z "$e_" ] && ok "a workspace.metadata target_directory decoy is ignored (cargo's real default is checkout-local)" || bad "decoy was used: '$e_'"
+
+# 6c. a checkout-local target that is a SYMLINK to a shared external dir must still be isolated
+git -C "$T/main" worktree add -q "$T/F" -b f >/dev/null 2>&1
+mkdir -p "$T/extshared"; ln -s "$T/extshared" "$T/F/target"
+f_=$( cd "$T/F" && env -u CQLITE_SHARED_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
+case "$f_" in "$(cd "$T/extshared" && pwd -P)"/wt/*) ok "<checkout>/target symlinked to a shared external dir is isolated" ;; *) bad "symlinked target gave '$f_'" ;; esac
+
+# 6d. pure hook modes never run `cargo metadata` (PATH stub records calls)
+mkdir -p "$T/stubbin"; printf '#!/usr/bin/env bash\necho "$*" >>"%s/cargo-calls.log"\nexit 0\n' "$T" >"$T/stubbin/cargo"; chmod +x "$T/stubbin/cargo"
+( cd "$B" && env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CQLITE_SHARED_TARGET PATH="$T/stubbin:$PATH" bash scripts/agent-gate.sh --classify-lanes >/dev/null 2>&1 )
+if [ -f "$T/cargo-calls.log" ] && grep -q metadata "$T/cargo-calls.log"; then bad "--classify-lanes ran cargo metadata"; else ok "--classify-lanes never runs cargo metadata"; fi
+( cd "$B" && env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CQLITE_SHARED_TARGET PATH="$T/stubbin:$PATH" bash scripts/agent-gate.sh --print-target-dir >/dev/null 2>&1 )
+grep -q metadata "$T/cargo-calls.log" 2>/dev/null && ok "control: a resolving mode does call cargo metadata through the stub" || bad "control: the stub saw no metadata call"
 
 # 7. a fresh base gets cargo's CACHEDIR.TAG from the helper (the prune refuses a base without one)
 [ -f "$SHARED/CACHEDIR.TAG" ] && grep -q '^Signature: 8a477f597d28d172789f06886806bc55' "$SHARED/CACHEDIR.TAG" && ok "fresh base carries a valid CACHEDIR.TAG" || bad "no CACHEDIR.TAG on the base"

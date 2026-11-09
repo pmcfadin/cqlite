@@ -46,14 +46,38 @@ gate_worktree_target_hash() {  # <physical root>
   fi
 }
 
-# gate_worktree_target_effective <root>: cargo's effective target dir, or rc 1 if none is absolute.
+# gate_worktree_canon <path>: physical path, also for a path that does not exist yet (resolve the
+# deepest existing ancestor with `cd -P`, then re-append the rest). Resolves symlinks, so a
+# checkout-local `target` symlinked to a shared dir is seen for what it is.
+gate_worktree_canon() {
+  local p=$1 rest="" parent
+  while [ ! -d "$p" ] && [ "$p" != / ] && [ -n "$p" ]; do rest="/${p##*/}$rest"; p=${p%/*}; done
+  [ -n "$p" ] || p=/
+  parent=$(cd -P "$p" 2>/dev/null && pwd -P) || return 1
+  printf '%s' "${parent%/}$rest"
+}
+
+# gate_worktree_target_effective <root>: cargo's effective target dir (absolute), or rc 1.
+# The config route reads ONLY the top-level `.target_directory` of `cargo metadata` (never a
+# `[workspace.metadata]` key of the same name), offline and --locked so it cannot touch the
+# network or Cargo.lock. Without jq or python3, or if metadata fails, it fails closed with a note.
 gate_worktree_target_effective() {
-  local b="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-}}"
+  local b="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-}}" json
   if [ -z "$b" ]; then
-    b=$(cd "$1" 2>/dev/null && cargo metadata --no-deps --format-version 1 2>/dev/null \
-          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+    json=$(cd "$1" 2>/dev/null && cargo metadata --no-deps --offline --locked --format-version 1 2>/dev/null) || json=""
+    if [ -z "$json" ]; then
+      echo "worktree-target-dir: 'cargo metadata --offline --locked' failed in $1; per-worktree isolation NOT applied for a config-set target dir (#4387)" >&2
+      return 1
+    elif command -v jq >/dev/null 2>&1; then
+      b=$(jq -r '.target_directory // empty' <<<"$json" 2>/dev/null)
+    elif command -v python3 >/dev/null 2>&1; then
+      b=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("target_directory") or "")' <<<"$json" 2>/dev/null)
+    else
+      echo "worktree-target-dir: neither jq nor python3 available to read cargo's target_directory; per-worktree isolation NOT applied for a config-set target dir (#4387)" >&2
+      return 1
+    fi
   fi
-  case "$b" in /*) printf '%s' "$b" ;; *) return 1 ;; esac
+  case "$b" in /*) gate_worktree_canon "$b" ;; *) return 1 ;; esac
 }
 
 gate_worktree_target_dir() {
