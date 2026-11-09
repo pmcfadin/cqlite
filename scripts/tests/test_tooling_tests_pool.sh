@@ -373,14 +373,13 @@ else
   trap 'scc_stop; [ -n "${KEEP:-}" ] || rm -rf "$W"' EXIT
   ctl=$(scc_case 0 0)
   case "$ctl" in
-    */tt-par.*) ok "#4479 control (guard off): the server a pool suite auto-starts keeps the suite's private TMPDIR ($ctl) - the bug is observable" ;;
+    "$W"/stable-00/tt-par.*) ok "#4479 control (guard off): the server a pool suite auto-starts keeps the suite's private TMPDIR ($ctl) - the bug is observable" ;;
     *) bad "#4479 control: guard off did not reproduce the leak (server TMPDIR='$ctl'); the test cannot see the bug" ;;
   esac
   shimonly=$(scc_case 1 1)
   case "$shimonly" in
-    ''|NOPORT|*/tt-par.*) bad "#4479 shim only (no pre-start): server TMPDIR='$shimonly', want the gate's stable dir" ;;
     "$W"/stable-11) ok "#4479 shim only: a server spawned by a compile inside the suite starts under the gate's stable TMPDIR" ;;
-    *) bad "#4479 shim only: unexpected server TMPDIR '$shimonly'" ;;
+    *) bad "#4479 shim only (no pre-start): server TMPDIR='$shimonly', want $W/stable-11" ;;
   esac
   full=$(scc_case 1 0)
   case "$full" in
