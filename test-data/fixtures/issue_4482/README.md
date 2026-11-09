@@ -33,8 +33,9 @@ and a test in `cqlite-cli/tests/issue_4196_salvage_publication_barrier.rs`.
    file through `openDataReaderForScan()` (5.0.2: `openDataReader()`), so the first
    partition now reports 18 (this sample) where 5.0.2 reported 0, and later
    partitions shift by the same header length. `Data.db` is unchanged.
-   Consequence: `position` is a lower bound on the partition's data offset in 5.0.8
-   and the exact start only in 5.0.2; it must never be compared for equality.
+   Consequence: `position` is an UPPER bound on the partition's start offset in 5.0.8
+   (`start <= position`, by the header length) and the exact start only in 5.0.2; it
+   must never be compared for equality.
 
 The sample's `local_delete_time` values are wall-clock (2026-11-09) and differ from
 the committed 5.0.2 fixture for that reason alone.
