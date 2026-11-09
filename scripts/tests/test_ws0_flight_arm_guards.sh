@@ -957,6 +957,55 @@ if [ "$rc" -ne 0 ] && grep -qF "this is not a mapping line" <<<"$out" && grep -q
 else
   fail "3g-6c. a malformed last line of a large file must still refuse naming it (rc=$rc, out: $(head -3 <<<"$out"))"
 fi
+# 3g-6e. BEHAVIOURAL regression for the torn line (#4477): a LIVE maps file whose process churns large
+# allocations (> 128 KiB, so it mmaps/munmaps) WHILE the recogniser reads it. The subject is a
+# background churn process (a different pid than the reader - procfs re-walks ANY process's VMA list
+# when a reader seeks, so the tear is the same), recorded and killed by pid. The real function is
+# driven against /proc/<pid>/maps for a bounded number of passes and must NEVER refuse a line.
+# CONTROL, so the case is known to discriminate: the OLD incremental form (a `read` loop fed straight
+# from the procfs file) run against the same churn must tear at least once. Measured on the dev box
+# (kernel 7.0, ZFS root): 2-4 torn lines per 50 passes. If the control cannot reproduce on a host it
+# is DECLARED with its observed count and the behavioural pass assertion stands alone.
+if [ -r /proc/self/maps ]; then
+  churn_big=$(printf '%*s' 300000 '')
+  ( churn_a=(); while :; do churn_t="$churn_big$RANDOM"; churn_a+=("$churn_t" "$churn_t$churn_t"); unset 'churn_a[0]'; churn_a=("${churn_a[@]}"); done ) >/dev/null 2>&1 &
+  churn_pid=$!
+  sleep 0.3
+  if [ -r "/proc/$churn_pid/maps" ] && [ -r "/proc/$churn_pid/environ" ]; then
+    torn_refusals=0; other_refusals=0; pass_n=0
+    while [ "$pass_n" -lt 50 ]; do
+      out=$(maps_call "/proc/$churn_pid/maps" "/proc/$churn_pid/environ" system "" "" flight-bypass-warm-1); rc=$?
+      if grep -q "NOT a /proc/<pid>/maps mapping" <<<"$out"; then torn_refusals=$((torn_refusals + 1))
+      elif [ "$rc" -ne 0 ]; then other_refusals=$((other_refusals + 1)); fi
+      pass_n=$((pass_n + 1))
+    done
+    maps_re_ctl='^[0-9a-fA-F]+-[0-9a-fA-F]+[[:space:]]+[-rwxsp]{4}[[:space:]]+[0-9a-fA-F]+[[:space:]]+[0-9a-fA-F]+:[0-9a-fA-F]+[[:space:]]+[0-9]+[[:space:]]*(.*)$'
+    old_torn=0; old_pass=0
+    while [ "$old_pass" -lt 300 ] && [ "$old_torn" -eq 0 ]; do
+      while IFS= read -r ctl_line; do
+        [[ -n "${ctl_line//[[:space:]]/}" ]] || continue
+        [[ "$ctl_line" =~ $maps_re_ctl ]] || old_torn=$((old_torn + 1))
+      done < "/proc/$churn_pid/maps"
+      old_pass=$((old_pass + 1))
+    done
+    builtin kill "$churn_pid" 2>/dev/null; wait "$churn_pid" 2>/dev/null
+    if [ "$torn_refusals" -eq 0 ]; then
+      pass "3g-6e. the recogniser never refused a line of a LIVE maps file that was churning under it (50 passes; $other_refusals other refusals, which are not parse refusals)"
+    else
+      fail "3g-6e. the recogniser refused a torn line of a live maps file in $torn_refusals of 50 passes - the read is not atomic enough (#4477)"
+    fi
+    if [ "$old_torn" -gt 0 ]; then
+      pass "3g-6e. control: the OLD incremental read of the same churning file tears (first torn line within $old_pass pass(es)) - the case discriminates"
+    else
+      echo "note - 3g-6e. CONTROL NOT REPRODUCED on this host: the old incremental read tore 0 times in 300 passes, so the behavioural case above could not be shown to discriminate here (declared, not fatal - the structural 3g-6d still pins the fix)"
+    fi
+  else
+    builtin kill "$churn_pid" 2>/dev/null; wait "$churn_pid" 2>/dev/null
+    echo "note - 3g-6e. NOT TAKEN: /proc/<pid>/maps or environ of the churn process is not readable on this host (declared, not fatal)"
+  fi
+else
+  echo "note - 3g-6e. NOT TAKEN: no procfs on this host (declared, not fatal)"
+fi
 # 3g-6d. STRUCTURAL: the snapshot is what is parsed - the incremental `done < "$maps"` form (the cause
 # of the torn line) is gone from the function, and a snapshot read is present.
 fn_src=$(sed -n '/^verify_flight_server_allocator()/,/^}/p' "$FLIGHT_LIB")
