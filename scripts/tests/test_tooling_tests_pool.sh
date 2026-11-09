@@ -388,5 +388,25 @@ else
     *) bad "#4479 pre-start: server TMPDIR='$full', want $W/stable-10" ;;
   esac
 fi
+# 11d. the shim must pass EVERY environment variable through, including names that are not shell
+#      identifiers: cargo hands rustc CARGO_BIN_EXE_<hyphenated-bin>, and dash drops such variables
+#      (an sh shim made `env!("CARGO_BIN_EXE_ws0-corpus-gen")` tests fail to compile). A fake
+#      `sccache` records its environment; the shim is built by the pool's own helper.
+mkdir -p "$W/fakebin" "$W/shimdir"
+printf '#!/usr/bin/env bash\nenv > "%s"\n' "$W/fake.env" >"$W/fakebin/sccache"; chmod +x "$W/fakebin/sccache"
+cat >"$W/t11d.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+_TT_STABLE_TMPDIR="$W/stable-shim"
+_tt_sccache_shim "$W/shimdir"
+[ -n "\$_TT_SCC_SHIM" ] || exit 3
+env 'CARGO_BIN_EXE_a-b=1' TMPDIR="$W/private" "\$_TT_SCC_SHIM" rustc --version
+EOS
+RUSTC_WRAPPER="$W/fakebin/sccache" bash "$W/t11d.sh" >/dev/null 2>&1; shim_rc=$?
+if [ "$shim_rc" -eq 0 ] && grep -qx 'CARGO_BIN_EXE_a-b=1' "$W/fake.env" && grep -qx "TMPDIR=$W/stable-shim" "$W/fake.env"; then
+  ok "#4479 shim: passes a hyphenated CARGO_BIN_EXE_* variable through and sets the stable TMPDIR (bash shim, not dash)"
+else
+  bad "#4479 shim: lost a non-identifier env var or did not set TMPDIR (rc=$shim_rc; $(grep -E '^(CARGO_BIN_EXE|TMPDIR)' "$W/fake.env" 2>/dev/null | tr '\n' ' '))"
+fi
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -22352,7 +22352,10 @@ _tt_jobs() {
 #   2. _tt_sccache_shim: the server can still idle out mid-run, so each suite gets RUSTC_WRAPPER
 #      replaced by a tiny script that restores the stable TMPDIR for the sccache process ONLY. The
 #      suite keeps its private TMPDIR for everything else. A server spawned by a compile therefore
-#      starts under the stable dir.
+#      starts under the stable dir. The shim MUST be bash, not sh: dash drops environment variables
+#      whose names are not shell identifiers, and cargo passes CARGO_BIN_EXE_<bin-with-hyphen> that
+#      way, so an sh shim made every env!(CARGO_BIN_EXE_...) test fail to compile (measured on
+#      ws0-corpus-gen).
 # CQLITE_TT_SCCACHE_GUARD=0 disables both (the self-test uses it as the negative control that
 # proves the bug is observable).
 _TT_STABLE_TMPDIR=""; _TT_SCC_SHIM=""
@@ -22369,7 +22372,7 @@ _tt_sccache_shim() { # _tt_sccache_shim <private base dir>: sets _TT_SCC_SHIM (e
   _TT_SCC_SHIM=""
   _tt_sccache_wrapper_p || return 0
   local f="$1/sccache-stable-tmpdir"
-  { printf '#!/bin/sh\nTMPDIR=%q\nexport TMPDIR\nexec %q "$@"\n' "$_TT_STABLE_TMPDIR" "$RUSTC_WRAPPER"; } >"$f" \
+  { printf '#!/usr/bin/env bash\nTMPDIR=%q\nexport TMPDIR\nexec %q "$@"\n' "$_TT_STABLE_TMPDIR" "$RUSTC_WRAPPER"; } >"$f" \
     && chmod +x "$f" && _TT_SCC_SHIM=$f
   return 0
 }
