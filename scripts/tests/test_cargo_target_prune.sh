@@ -207,13 +207,27 @@ for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristi
   : >"$wd/$prof/.cargo-lock"; touch -d '30 days ago' "$wd/$prof/incremental/old-abc"
 done
 run --target "$T"
-check "live wt dir: stale incremental pruned, fresh kept, workspace fingerprint pruned, at all three depths" '[ "$rc" = 0 ] && for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do [ ! -d "$wd/$prof/incremental/old-abc" ] && [ -d "$wd/$prof/incremental/new-def" ] && [ ! -d "$wd/$prof/.fingerprint/cqlite-$H1" ] || exit 1; done; [ -d "$wd" ]'
+check "live wt dir: stale incremental pruned, fresh kept, workspace fingerprint pruned, at all three depths" '[ "$rc" = 0 ] && ( for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do [ ! -d "$wd/$prof/incremental/old-abc" ] && [ -d "$wd/$prof/incremental/new-def" ] && [ ! -d "$wd/$prof/.fingerprint/cqlite-$H1" ] || exit 1; done ); [ -d "$wd" ]'
 mk_target; wd=$(CARGO_TARGET_DIR="$T" bash "$HELPER" "$lw")
 mkdir -p "$wd/debug/.fingerprint/cqlite-$H1" "$wd/debug/incremental/old-abc"; : >"$wd/debug/.cargo-lock"; touch -d '30 days ago' "$wd/debug/incremental/old-abc"
 flock "$wd/debug/.cargo-lock" sleep 30 & lockpid=$!
 for _ in $(seq 50); do flock -n "$wd/debug/.cargo-lock" true 2>/dev/null || break; sleep 0.1; done
 run --target "$T"; kill "$lockpid" 2>/dev/null; wait "$lockpid" 2>/dev/null
 check "a held lock inside a live wt dir: SKIPPED-BUSY, nothing removed" 'grep -q "^RESULT: SKIPPED-BUSY$" <<<"$out" && grep -q "lock:wt/" <<<"$out" && [ -d "$wd/debug/incremental/old-abc" ] && [ -d "$T/debug/incremental/old-abc" ]'
+
+# An UNMARKED wt/<hash> dir is not ours: nothing inside it is touched, at all three depths.
+mk_target; um="$T/wt/aaaaaaaaaaaaaaaa"
+for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do
+  mkdir -p "$um/$prof/.fingerprint/cqlite-$H1" "$um/$prof/incremental/old-abc"
+  : >"$um/$prof/.cargo-lock"; touch -d '30 days ago' "$um/$prof/incremental/old-abc"
+done
+run --target "$T"
+check "unmarked wt/<hash> dir: base prunes, but nothing inside the unmarked dir is touched (3 depths)" '[ "$rc" = 0 ] && [ ! -d "$T/debug/incremental/old-abc" ] && ( for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do [ -d "$um/$prof/incremental/old-abc" ] && [ -d "$um/$prof/.fingerprint/cqlite-$H1" ] || exit 1; done )'
+# An ORPHAN dir's profiles are not pruned in place either (the dir is removed whole).
+mk_target; og="$tmp/orph-wt"; mkdir -p "$og"; : >"$og/.git"; od=$(CARGO_TARGET_DIR="$T" bash "$HELPER" "$og"); rm -rf "$og"
+mkdir -p "$od/debug/.fingerprint/cqlite-$H1" "$od/debug/incremental/old-abc"; touch -d '30 days ago' "$od/debug/incremental/old-abc"
+run --target "$T" --dry-run
+check "orphan wt dir: removed whole, no per-profile removals listed inside it" 'grep -q "would remove wt/${od##*/}$" <<<"$out" && ! grep -q "would remove wt/${od##*/}/" <<<"$out"'
 
 # A hand-configured target that merely ends in wt/<16 hex> has no marker: never widened.
 mk_target; manual="$T/wt/0123456789abcdef"; mkdir -p "$manual"; cp "$T/CACHEDIR.TAG" "$manual/CACHEDIR.TAG"

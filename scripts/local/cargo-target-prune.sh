@@ -220,7 +220,7 @@ profiles=()
 while IFS= read -r fp; do
   prof=$(dirname "$fp"); skip=0
   if [[ "$prof" == "$target"/wt/* ]]; then
-    wtd="$target/wt/${prof#"$target"/wt/}"; wtd=${wtd%%/*}; wtd="$target/wt/$wtd"
+    rel=${prof#"$target"/wt/}; wtd="$target/wt/${rel%%/*}"
     in_list "$wtd" ${orphans[@]+"${orphans[@]}"} ${skip_wt[@]+"${skip_wt[@]}"} && skip=1
   fi
   [ "$skip" = 1 ] || profiles+=("$prof")
