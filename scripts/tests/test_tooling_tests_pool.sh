@@ -407,5 +407,58 @@ if [ "$shim_rc" -eq 0 ] && grep -qx 'CARGO_BIN_EXE_a-b=1' "$W/fake.env" && grep 
 else
   bad "#4479 shim: lost a non-identifier env var or did not set TMPDIR (rc=$shim_rc; $(grep -E '^(CARGO_BIN_EXE|TMPDIR)' "$W/fake.env" 2>/dev/null | tr '\n' ' '))"
 fi
+# 11e. #4479 recovery: a RUNNING server that already holds a dead TMPDIR is replaced; a healthy one is left
+#      alone (same pid). Private port and cache dir; the server is stopped by its port.
+if [ -n "$SCC" ]; then
+  scc_pid_of() { # the pid listening on our port
+    local l; l=$(ss -H -ltnp "sport = :$scc_port" 2>/dev/null); l=${l#*pid=}; printf '%s' "${l%%[!0-9]*}"
+  }
+  scc_start_under() { # scc_start_under <tmpdir>: start our private server with that TMPDIR
+    TMPDIR=$1 SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G "$SCC" --start-server >/dev/null 2>&1
+  }
+  scc_prestart() { # run the pool's prestart against our server; stderr (the log line) is returned
+    cat >"$W/t11e.sh" <<EOS
+set -uo pipefail
+. "$W/helpers.sh"
+_TT_STABLE_TMPDIR="$W/stable-rec"
+_tt_sccache_prestart
+EOS
+    env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+      bash "$W/t11e.sh" 2>&1 >/dev/null
+  }
+  mkdir -p "$W/stable-rec" "$W/sccdir"
+  # (i) poisoned: the server's TMPDIR is deleted after it started.
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 recovery: no free port"; else
+    mkdir -p "$W/doomed"; scc_start_under "$W/doomed"; old=$(scc_pid_of); rm -rf "$W/doomed"
+    logline=$(scc_prestart); new=$(scc_pid_of); newtmp=$(scc_server_tmpdir)
+    if [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ] && [ "$newtmp" = "$W/stable-rec" ] \
+       && grep -q "holds a dead TMPDIR" <<<"$logline"; then
+      ok "#4479 recovery: a server holding a DELETED TMPDIR is replaced (pid $old -> $new) by one under the stable TMPDIR, with one log line"
+    else
+      bad "#4479 recovery: poisoned server not replaced (old=$old new=$new tmpdir='$newtmp' log='$logline')"
+    fi
+    # a compile through the shim now works
+    printf '#!/usr/bin/env bash\nTMPDIR=%q\nexport TMPDIR\nexec %q "$@"\n' "$W/stable-rec" "$SCC" >"$W/rec-shim"; chmod +x "$W/rec-shim"
+    if env SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" "$W/rec-shim" rustc --version >/dev/null 2>&1; then
+      ok "#4479 recovery: a compile through the shim succeeds against the replacement server"
+    else
+      bad "#4479 recovery: a compile through the shim failed against the replacement server"
+    fi
+    scc_stop; scc_port=0
+  fi
+  # (ii) control: a healthy server (TMPDIR exists, writable) is NOT restarted.
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 recovery control: no free port"; else
+    mkdir -p "$W/healthy"; scc_start_under "$W/healthy"; old=$(scc_pid_of)
+    logline=$(scc_prestart); new=$(scc_pid_of)
+    if [ -n "$old" ] && [ "$old" = "$new" ] && [ -z "$logline" ]; then
+      ok "#4479 recovery control: a server with a healthy TMPDIR keeps its pid ($old) and nothing is logged"
+    else
+      bad "#4479 recovery control: healthy server was disturbed (old=$old new=$new log='$logline')"
+    fi
+    scc_stop; scc_port=0
+  fi
+fi
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

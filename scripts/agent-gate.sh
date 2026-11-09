@@ -22364,8 +22364,41 @@ _tt_sccache_wrapper_p() {
   case "${RUSTC_WRAPPER:-}" in sccache|*/sccache) return 0 ;; esac
   return 1
 }
+# _tt_sccache_server_pid: the pid of the sccache server listening on OUR port
+# (SCCACHE_SERVER_PORT, default 4226), identified by the listening socket and confirmed by comm,
+# never by a name pattern. Prints nothing (rc 1) when there is none or `ss` is unavailable.
+_tt_sccache_server_pid() {
+  local port=${SCCACHE_SERVER_PORT:-4226} line pid
+  command -v ss >/dev/null 2>&1 || return 1
+  line=$(ss -H -ltnp "sport = :$port" 2>/dev/null) || return 1
+  case "$line" in *pid=*) ;; *) return 1 ;; esac
+  pid=${line#*pid=}; pid=${pid%%[!0-9]*}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = sccache ] || return 1
+  printf '%s' "$pid"
+}
+# _tt_sccache_poisoned_tmpdir <pid>: prints the server's TMPDIR and rc 0 iff it is POISONED, i.e.
+# that directory is gone or is not a writable directory (every compile through it fails). A server
+# whose TMPDIR is healthy is never reported, whatever the directory is.
+_tt_sccache_poisoned_tmpdir() {
+  local env t
+  env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null) || return 1
+  [ -n "$env" ] || return 1
+  t=$(sed -n 's/^TMPDIR=//p' <<<"$env" | head -n 1)
+  [ -n "$t" ] || t=/tmp
+  if [ -d "$t" ] && [ -w "$t" ] && [ -x "$t" ]; then return 1; fi
+  printf '%s' "$t"
+}
 _tt_sccache_prestart() {
   _tt_sccache_wrapper_p || return 0
+  local pid dead
+  # Recovery (the ONE case the gate may stop the shared server): a server that already inherited a
+  # deleted TMPDIR cannot compile for anyone, and --start-server would leave it in place. It is
+  # stopped through its own port only, then restarted under the stable TMPDIR.
+  if pid=$(_tt_sccache_server_pid) && dead=$(_tt_sccache_poisoned_tmpdir "$pid"); then
+    echo ">>> [tooling-tests] sccache server pid $pid holds a dead TMPDIR '$dead'; stopping it (port ${SCCACHE_SERVER_PORT:-4226}) and restarting under '$_TT_STABLE_TMPDIR' (#4479)" >&2
+    "$RUSTC_WRAPPER" --stop-server </dev/null >/dev/null 2>&1 || true
+  fi
   TMPDIR=$_TT_STABLE_TMPDIR "$RUSTC_WRAPPER" --start-server </dev/null >/dev/null 2>&1 || true
 }
 _tt_sccache_shim() { # _tt_sccache_shim <private base dir>: sets _TT_SCC_SHIM (empty when not applicable)
