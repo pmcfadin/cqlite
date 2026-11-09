@@ -1146,6 +1146,24 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
+# Per-worktree target dir (#4387). A shared CARGO_TARGET_DIR (the dev box exports one) lets
+# worktree B reuse the workspace test binaries worktree A built, with A's CARGO_MANIFEST_DIR
+# baked in: B then fails on a deleted A, or silently reads A's fixtures. Resolve
+# `<base>/wt/<hash of this checkout>` BEFORE any cargo call so every mode (--lite, full,
+# --only, --delta, --recertify) and the SIDE lane's `<dir>/agent-gate-side/<component>` land
+# inside it. Third-party compiles stay cheap through sccache below. Opt out: CQLITE_SHARED_TARGET=1.
+if [ -f "$REPO_ROOT/scripts/lib/worktree-target-dir.sh" ]; then
+  # shellcheck source=lib/worktree-target-dir.sh
+  . "$REPO_ROOT/scripts/lib/worktree-target-dir.sh"
+  if _wt_dir=$(gate_worktree_target_dir "$REPO_ROOT"); then
+    if [ "$_wt_dir" != "${CARGO_TARGET_DIR:-}" ]; then
+      echo "agent-gate: per-worktree target dir $_wt_dir (shared base kept for sccache; #4387)" >&2
+    fi
+    export CARGO_TARGET_DIR="$_wt_dir"
+  fi
+  unset _wt_dir
+fi
+
 # sccache auto-detect (issue #1822): if sccache is available, use it as the
 # rustc wrapper for incremental compilation cache. Each worktree keeps its own
 # target/ dir (no lock contention); the shared object cache deduplicates
@@ -7267,6 +7285,9 @@ case "${1:-}" in
   # component in canonical COMPONENTS order, where <lane> is main|side, so the
   # self-test can assert the parallel-sublane split WITHOUT running cargo/git. No
   # side effects.
+  # Hidden self-test hook (#4387): print the CARGO_TARGET_DIR every cargo call of this run
+  # would use, after per-worktree isolation. No cargo, no git.
+  --print-target-dir) printf '%s\n' "${CARGO_TARGET_DIR:-}"; exit 0 ;;
   --classify-lanes)
     for _lc in "${COMPONENTS[@]}"; do printf '%s %s\n' "$(_component_lane "$_lc")" "$_lc"; done
     exit 0 ;;
@@ -24245,6 +24266,7 @@ run_tooling_tests() {
   # shared Cargo target prune (#4411): hermetic fake target dir + stub
   # pgrep/systemctl, no cargo/network needed.
   _tt_add P 'cargo target prune #4411' 'bash "$REPO_ROOT/scripts/tests/test_cargo_target_prune.sh"'
+  _tt_add P 'per-worktree target isolation #4387' 'bash "$REPO_ROOT/scripts/tests/test_worktree_target_isolation.sh"'
   # tooling-tests parallel runner (#4468): capacity from .rc files (hostile-kill shim must not stall
   # the pool), every failure named, unknown modes never run. Hermetic, ~4s.
   _tt_add P 'tooling-tests pool runner self-test #4468' 'bash "$REPO_ROOT/scripts/tests/test_tooling_tests_pool.sh"'

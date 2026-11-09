@@ -163,6 +163,10 @@ if [ -z "$target" ] || [ ! -d "$target" ]; then
   echo "PRUNE: cannot resolve a target dir (got '${target}')"; result ERROR; exit 1
 fi
 target=$(cd "$target" && pwd -P)
+# Run from a gate shell, CARGO_TARGET_DIR is the per-worktree dir (#4387): prune the shared base.
+case "$target" in
+  */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) target=${target%/wt/*} ;;
+esac
 if [ "$target" = / ] || [ "$target" = "$(cd "$HOME" && pwd -P)" ] || [ ! -f "$target/CACHEDIR.TAG" ]; then
   echo "PRUNE: refusing $target: not a cargo target dir (no CACHEDIR.TAG)"; result ERROR; exit 1
 fi
@@ -195,7 +199,7 @@ else busy="$busy probe-error:systemctl-list-units(rc=$?)"; units=""; fi
 if [ -n "$units" ]; then busy="$busy unit:$(awk '{print $1; exit}' <<<"$units")"; fi
 
 profiles=()
-while IFS= read -r fp; do profiles+=("$(dirname "$fp")"); done < <(find "$target" -maxdepth 4 -type d -name .fingerprint | sort)
+while IFS= read -r fp; do profiles+=("$(dirname "$fp")"); done < <(find "$target" -maxdepth 4 -path "$target/wt" -prune -o -type d -name .fingerprint -print | sort)
 
 # Hold every profile's build lock for the whole prune.
 if [ -z "$busy" ]; then
@@ -216,8 +220,21 @@ fi
 
 # ---- prune -------------------------------------------------------------------
 before=$(du -sb "$target" 2>/dev/null | awk '{print $1}')
-n_inc=0 n_fp=0
+n_inc=0 n_fp=0 n_wt=0
 rm_dir() { if [ "$dry_run" = 1 ]; then echo "would remove ${1#"$target"/}"; else rm -rf -- "$1"; fi; }
+
+# Per-worktree target dirs (#4387) whose worktree is gone: `wt/<hash>/.worktree-root` names the
+# checkout. Remove the whole dir when that path no longer exists. A dir with no marker is left
+# alone (not ours to judge). Live worktrees' dirs are never touched here.
+if [ -d "$target/wt" ]; then
+  for d in "$target"/wt/*/; do
+    d=${d%/}
+    [ -f "$d/.worktree-root" ] || continue
+    root=$(head -n1 "$d/.worktree-root")
+    [ -n "$root" ] || continue
+    if [ ! -e "$root/.git" ]; then rm_dir "$d"; n_wt=$((n_wt + 1)); fi
+  done
+fi
 
 for prof in "${profiles[@]}"; do
   if [ -d "$prof/incremental" ]; then
@@ -237,5 +254,5 @@ for prof in "${profiles[@]}"; do
 done
 
 after=$(du -sb "$target" 2>/dev/null | awk '{print $1}')
-echo "PRUNE: target=$target profiles=${#profiles[@]} days=$days incremental-removed=$n_inc fingerprints-removed=$n_fp freed-bytes=$(( ${before:-0} - ${after:-0} ))"
+echo "PRUNE: target=$target profiles=${#profiles[@]} days=$days incremental-removed=$n_inc fingerprints-removed=$n_fp orphan-worktree-dirs-removed=$n_wt freed-bytes=$(( ${before:-0} - ${after:-0} ))"
 if [ "$dry_run" = 1 ]; then result DRY-RUN; else result PRUNED; fi

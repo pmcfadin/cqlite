@@ -337,6 +337,10 @@ DA_ISOLATE=(CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
             AGENT_GATE_ALLOW_MISSING_FIXTURES AGENT_GATE_SUMMARY_FILE)
 # In-process, so the suite's OWN cargo calls (the Case U no-op demonstration) are clean too.
 unset "${DA_ISOLATE[@]}"
+# #4387: the gate moves a set CARGO_TARGET_DIR to <dir>/wt/<hash> (per-worktree isolation). These
+# cases assert the admission measures EXACTLY the dir they name, so they opt out; isolation itself
+# is pinned by test_worktree_target_isolation.sh.
+export CQLITE_SHARED_TARGET=1
 # ...and for every child, so a future edit that re-exports one cannot reach a case. Placed
 # BEFORE a case's own assignments, which `env` therefore still wins.
 DA_ENV_U=()

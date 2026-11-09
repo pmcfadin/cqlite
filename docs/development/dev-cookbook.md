@@ -18,6 +18,19 @@ answers differently depending on cwd, so it can confirm the worktree's file whil
 another. Under 1:1:1:1 every issue lives in a worktree, so this is the default situation, not an edge
 case. Invocation itself stays `scripts/flow/roborev-review.sh` (see `CLAUDE.md`).
 
+## Per-worktree target dir (issue #4387)
+
+On a box that exports one `CARGO_TARGET_DIR` for all worktrees, the gate builds into
+`$CARGO_TARGET_DIR/wt/<hash of the checkout>` so a worktree never runs another worktree's test
+binaries (which bake in that worktree's `CARGO_MANIFEST_DIR`). For your own `cargo test` runs:
+
+```bash
+export CARGO_TARGET_DIR="$(bash scripts/lib/worktree-target-dir.sh)"   # this worktree's dir
+```
+
+`CQLITE_SHARED_TARGET=1` makes the gate keep the shared dir. Details and cost: `gate-ops.md`
+("Disk hygiene for multi-worktree gates").
+
 ## Dev/test build debug info (issue #4278)
 
 `[profile.dev]`/`[profile.test]` build with `debug = "line-tables-only"`, not full DWARF (`true`) —
