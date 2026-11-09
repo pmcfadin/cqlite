@@ -22340,6 +22340,40 @@ _tt_jobs() {
   echo "$j"
 }
 
+# ---- sccache must never inherit a suite's private TMPDIR (#4479) ----------------------------
+# sccache has no temp-dir setting of its own: its server uses TMPDIR as it was when the CLIENT
+# spawned it. A suite's private TMPDIR is deleted when the suite ends, so a server auto-started by
+# the first suite to run cargo (none running, e.g. after the 10 minute idle timeout) kept a dead temp
+# dir and failed every compile on the box. Two layers, so neither alone is load-bearing:
+#   1. _tt_sccache_prestart: before the pool, make sure a server is running, started under the
+#      gate's STABLE TMPDIR. --start-server on a RUNNING server fails with "Address in use" and
+#      leaves it untouched (measured); it never stops or restarts it. (--show-stats does NOT start
+#      a server, so it cannot be used for this.)
+#   2. _tt_sccache_shim: the server can still idle out mid-run, so each suite gets RUSTC_WRAPPER
+#      replaced by a tiny script that restores the stable TMPDIR for the sccache process ONLY. The
+#      suite keeps its private TMPDIR for everything else. A server spawned by a compile therefore
+#      starts under the stable dir.
+# CQLITE_TT_SCCACHE_GUARD=0 disables both (the self-test uses it as the negative control that
+# proves the bug is observable).
+_TT_STABLE_TMPDIR=""; _TT_SCC_SHIM=""
+_tt_sccache_wrapper_p() {
+  [ "${CQLITE_TT_SCCACHE_GUARD:-1}" != 0 ] || return 1
+  case "${RUSTC_WRAPPER:-}" in sccache|*/sccache) return 0 ;; esac
+  return 1
+}
+_tt_sccache_prestart() {
+  _tt_sccache_wrapper_p || return 0
+  TMPDIR=$_TT_STABLE_TMPDIR "$RUSTC_WRAPPER" --start-server </dev/null >/dev/null 2>&1 || true
+}
+_tt_sccache_shim() { # _tt_sccache_shim <private base dir>: sets _TT_SCC_SHIM (empty when not applicable)
+  _TT_SCC_SHIM=""
+  _tt_sccache_wrapper_p || return 0
+  local f="$1/sccache-stable-tmpdir"
+  { printf '#!/bin/sh\nTMPDIR=%q\nexport TMPDIR\nexec %q "$@"\n' "$_TT_STABLE_TMPDIR" "$RUSTC_WRAPPER"; } >"$f" \
+    && chmod +x "$f" && _TT_SCC_SHIM=$f
+  return 0
+}
+
 # _tt_exec <index> <log dir> <private TMPDIR base or empty>: run suite <index>, writing
 # <log dir>/NNN.log and then <log dir>/NNN.rc ("<exit> <seconds>", published atomically LAST, so
 # its presence means "finished"). A non-empty TMPDIR base gives the suite its OWN TMPDIR.
@@ -22351,7 +22385,7 @@ _tt_exec() {
   s=$(date +%s)
   if [ -n "$tb" ]; then
     mkdir -p "$tb/$id"
-    ( export TMPDIR="$tb/$id"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
+    ( export TMPDIR="$tb/$id"; [ -z "$_TT_SCC_SHIM" ] || export RUSTC_WRAPPER="$_TT_SCC_SHIM"; eval "${_TT_CMD[$i]}" ) </dev/null >>"$d/$id.log" 2>&1
     rc=$?
   else
     ( eval "${_TT_CMD[$i]}" ) >>"$d/$id.log" 2>&1
@@ -22572,13 +22606,17 @@ _tt_run_all() {
   # launch-and-register pair is a critical section during which a signal is only recorded.
   _TT_ACTIVE=""; _TT_LANES=""; _TT_SIGPEND=""; _TT_LOGDIR=$d; _TT_CRIT=1
   trap '_tt_on_signal INT' INT; trap '_tt_on_signal TERM' TERM; trap '_tt_on_signal HUP' HUP
-  _TT_TMPBASE=$(mktemp -d "${TMPDIR:-/tmp}/tt-par.XXXXXX") || _TT_TMPBASE=""
+  _TT_STABLE_TMPDIR=${TMPDIR:-/tmp}
+  case "$_TT_STABLE_TMPDIR" in /*) ;; *) _TT_STABLE_TMPDIR="$PWD/$_TT_STABLE_TMPDIR" ;; esac
+  _tt_sccache_prestart
+  _TT_TMPBASE=$(mktemp -d "$_TT_STABLE_TMPDIR/tt-par.XXXXXX") || _TT_TMPBASE=""
   if [ -z "$_TT_TMPBASE" ]; then
     _TT_CRIT=0; trap - INT TERM HUP
     _TT_FAILED_NAMES="cannot create a scratch TMPDIR for the parallel set"
     return 0
   fi
   tmpbase=$_TT_TMPBASE
+  _tt_sccache_shim "$tmpbase"
   _TT_CRIT=0; _tt_handle_pending
   # Each lane is one background chain (its suites never overlap each other).
   for ln in $lanes; do
@@ -22616,7 +22654,7 @@ _tt_run_all() {
     sleep 0.2
   done
   _TT_CRIT=1
-  rm -rf "${_TT_TMPBASE:?}"; _TT_TMPBASE=""
+  rm -rf "${_TT_TMPBASE:?}"; _TT_TMPBASE=""; _TT_SCC_SHIM=""
   trap - INT TERM HUP
   _TT_CRIT=0; _tt_handle_pending
 

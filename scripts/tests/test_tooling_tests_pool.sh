@@ -315,5 +315,78 @@ if [ "$rc" -eq 0 ] && grep -q '^failed=\[log-vanishes (log missing)\]$' <<<"$out
 else
   bad "missing suite log not reported: rc=$rc; $(tail -2 <<<"$out" | tr '\n' ' ')"
 fi
+
+# 11. #4479: a sccache server auto-started from INSIDE a pool suite must not keep that suite's private
+#     TMPDIR (deleted when the suite ends). Hermetic: a private server port and cache dir, the server is
+#     stopped BY ITS PORT, and the shared server is never touched (a unique port cannot reach it). The
+#     server's TMPDIR is read from /proc/<pid>/environ of the process that carries our port.
+SCC=$(command -v sccache 2>/dev/null || true)
+scc_port=0
+scc_stop() { # stop OUR server, by port only
+  [ "$scc_port" != 0 ] || return 0
+  SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" "$SCC" --stop-server >/dev/null 2>&1 || true
+}
+scc_free_port() { # a port nothing listens on
+  local p n=0
+  while [ "$n" -lt 50 ]; do
+    p=$((20000 + RANDOM % 20000)); n=$((n + 1))
+    (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null || { echo "$p"; return 0; }
+  done
+  return 1
+}
+scc_server_tmpdir() { # TMPDIR of the sccache server carrying our port ("" when none)
+  local e f
+  for e in /proc/[0-9]*/environ; do
+    [ -r "$e" ] || continue
+    f=$(tr '\0' '\n' <"$e" 2>/dev/null) || continue
+    grep -qx "SCCACHE_SERVER_PORT=$scc_port" <<<"$f" || continue
+    grep -qx 'SCCACHE_START_SERVER=1' <<<"$f" || continue
+    grep '^TMPDIR=' <<<"$f" | head -1 | cut -d= -f2-
+    return 0
+  done
+  return 0
+}
+scc_case() { # scc_case <guard 0|1> <stub-prestart 0|1>: prints the server's TMPDIR
+  local guard=$1 stub=$2 stable="$W/stable-$1$2"
+  mkdir -p "$stable" "$W/sccdir"
+  scc_port=$(scc_free_port) || { echo "NOPORT"; return 0; }
+  cat >"$W/t11.sh" <<EOS
+set -uo pipefail
+_ncpu=8; REPO_ROOT=/tmp
+. "$W/helpers.sh"
+$( [ "$stub" = 1 ] && echo '_tt_sccache_prestart() { :; }' )
+_tt_reset
+_tt_add P scc-suite '"\$RUSTC_WRAPPER" rustc --version'
+: >"$W/c11.log"
+_tt_run_all "$W/c11.log" "$W/d11"
+echo "failed=[\$_TT_FAILED_NAMES]"
+EOS
+  bounded 60 env TMPDIR="$stable" RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" \
+    SCCACHE_CACHE_SIZE=1G CQLITE_TOOLING_TESTS_JOBS=2 CQLITE_TT_SCCACHE_GUARD=$guard bash "$W/t11.sh" >"$W/t11.out" 2>&1
+  scc_server_tmpdir
+  scc_stop
+  scc_port=0
+}
+if [ -z "$SCC" ]; then
+  echo "skip - sccache not installed: the #4479 TMPDIR-leak cases did not run"
+else
+  trap 'scc_stop; [ -n "${KEEP:-}" ] || rm -rf "$W"' EXIT
+  ctl=$(scc_case 0 0)
+  case "$ctl" in
+    */tt-par.*) ok "#4479 control (guard off): the server a pool suite auto-starts keeps the suite's private TMPDIR ($ctl) - the bug is observable" ;;
+    *) bad "#4479 control: guard off did not reproduce the leak (server TMPDIR='$ctl'); the test cannot see the bug" ;;
+  esac
+  shimonly=$(scc_case 1 1)
+  case "$shimonly" in
+    ''|NOPORT|*/tt-par.*) bad "#4479 shim only (no pre-start): server TMPDIR='$shimonly', want the gate's stable dir" ;;
+    "$W"/stable-11) ok "#4479 shim only: a server spawned by a compile inside the suite starts under the gate's stable TMPDIR" ;;
+    *) bad "#4479 shim only: unexpected server TMPDIR '$shimonly'" ;;
+  esac
+  full=$(scc_case 1 0)
+  case "$full" in
+    "$W"/stable-10) ok "#4479 pre-start: with no server running, the pool starts it under the gate's stable TMPDIR before any suite runs" ;;
+    *) bad "#4479 pre-start: server TMPDIR='$full', want $W/stable-10" ;;
+  esac
+fi
 echo "tooling-tests pool self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
