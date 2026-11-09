@@ -22389,37 +22389,60 @@ _tt_sccache_poisoned_tmpdir() {
   if [ -d "$t" ] && [ -w "$t" ] && [ -x "$t" ]; then return 1; fi
   printf '%s' "$t"
 }
+# _tt_sccache_bounded <secs> <cmd...>: run <cmd> in the background with a watchdog that TERMs ONLY that
+# recorded child after <secs>; returns the child's status (143 when the watchdog fired). Every sccache
+# lifecycle call goes through it so a hung server cannot hang the gate.
+_tt_sccache_bounded() {
+  local secs=$1 p w rc; shift
+  "$@" </dev/null & p=$!
+  ( trap 'kill "$s" 2>/dev/null' TERM; sleep "$secs" & s=$!; wait "$s" 2>/dev/null; kill -TERM "$p" 2>/dev/null ) >/dev/null 2>&1 & w=$!
+  wait "$p" 2>/dev/null; rc=$?
+  kill -TERM "$w" 2>/dev/null; wait "$w" 2>/dev/null
+  return "$rc"
+}
 # The detect-stop-start sequence is serialised across gates and sessions with an flock on a fixed,
-# port-specific path (CQLITE_TT_SCCACHE_LOCK_DIR, default /tmp, like the slots dir): two gates that
-# both saw the old poisoned server could otherwise have the second stop the NEW healthy one. The
-# server is RE-READ after the lock is taken and acted on only if it is STILL poisoned. Without
-# flock(1) (macOS) or an openable lock file the sequence runs unserialised.
+# port-specific path (CQLITE_TT_SCCACHE_LOCK_DIR, default /tmp, like the slots dir). RULE: a server is
+# NEVER stopped without holding that lock, because two gates that both saw the old poisoned server
+# could otherwise have the second stop the NEW healthy one. The server is RE-READ after the lock is
+# taken and acted on only if it is STILL poisoned. The lock is polled with `flock -n` in short steps
+# (CQLITE_TT_SCCACHE_LOCK_WAIT seconds, default 120) instead of one long blocking flock, so a TERM/HUP
+# is handled within a fraction of a second whatever the trap state; and this whole step runs BEFORE
+# the pool's signal-deferral critical section. fd 9 is closed for every sccache call so the daemonised
+# server cannot inherit and hold the lock.
 _tt_sccache_recover_and_start() {
   local pid dead
-  # Recovery (the ONE case the gate may stop the shared server): a server that already inherited a
-  # deleted TMPDIR cannot compile for anyone, and --start-server would leave it in place. It is
-  # stopped through its own port only, then restarted under the stable TMPDIR.
   if pid=$(_tt_sccache_server_pid) && dead=$(_tt_sccache_poisoned_tmpdir "$pid"); then
     echo ">>> [tooling-tests] sccache server pid $pid holds a dead TMPDIR '$dead'; stopping it (port ${SCCACHE_SERVER_PORT:-4226}) and restarting under '$_TT_STABLE_TMPDIR' (#4479)" >&2
-    "$RUSTC_WRAPPER" --stop-server </dev/null >/dev/null 2>&1 || true
+    _tt_sccache_bounded 30 "$RUSTC_WRAPPER" --stop-server 9>&- >/dev/null 2>&1 || true
   fi
-  TMPDIR=$_TT_STABLE_TMPDIR "$RUSTC_WRAPPER" --start-server </dev/null >/dev/null 2>&1 || true
+  _tt_sccache_start
+}
+_tt_sccache_start() { # the non-destructive part: a no-op when a server is already running
+  _tt_sccache_bounded 30 env TMPDIR="$_TT_STABLE_TMPDIR" "$RUSTC_WRAPPER" --start-server 9>&- >/dev/null 2>&1 || true
 }
 _tt_sccache_prestart() {
   _tt_sccache_wrapper_p || return 0
   local lock="${CQLITE_TT_SCCACHE_LOCK_DIR:-/tmp}/cqlite-sccache-${SCCACHE_SERVER_PORT:-4226}.lock"
-  if command -v flock >/dev/null 2>&1 && ( : 9>>"$lock" ) 2>/dev/null; then
-    # flock present but the lock NOT acquired (timeout/failure): skip recovery AND start, leave the
-    # existing server as is - the wrapper still protects any server a compile spawns. This is
-    # distinct from "no flock(1)", which is unserialised by design (the else branch).
-    ( if flock -w "${CQLITE_TT_SCCACHE_LOCK_WAIT:-120}" 9; then
-        _tt_sccache_recover_and_start
-      else
-        echo ">>> [tooling-tests] WARNING: could not take $lock within ${CQLITE_TT_SCCACHE_LOCK_WAIT:-120}s; skipping sccache server recovery (the existing server is left as is) (#4479)" >&2
-      fi ) 9>>"$lock"
-  else
+  local wait=${CQLITE_TT_SCCACHE_LOCK_WAIT:-120} steps=0
+  case "$wait" in ''|*[!0-9]*) wait=120 ;; esac
+  if command -v flock >/dev/null 2>&1 && ( : 9>>"$lock" ) 2>/dev/null && { exec 9>>"$lock"; } 2>/dev/null; then
+    until flock -n 9; do
+      if [ "$steps" -ge $((wait * 5)) ]; then
+        exec 9>&-
+        echo ">>> [tooling-tests] WARNING: could not take $lock within ${wait}s; skipping sccache server recovery (the existing server is left as is) (#4479)" >&2
+        return 0
+      fi
+      sleep 0.2; steps=$((steps + 1))
+    done
     _tt_sccache_recover_and_start
+    exec 9>&-
+  else
+    # No lock available (no flock(1), or the lock file cannot be opened): never stop a server without
+    # the lock. Only the non-destructive start; recovery is skipped.
+    echo ">>> [tooling-tests] sccache server recovery skipped: no lock available at $lock (no flock(1) or unwritable); only starting a server if none is running (#4479)" >&2
+    _tt_sccache_start
   fi
+  return 0
 }
 _TT_SCC_REAL=""
 _tt_sccache_shim() { # sets _TT_SCC_SHIM to the CHECKED-IN wrapper script (empty when not applicable)
@@ -22664,11 +22687,13 @@ _tt_run_all() {
   echo ">>> [tooling-tests] running $pcount parallel suites ($jobs at a time) alongside serial lane(s):${lanes:- none}; then the serial tail"
   # Everything from here to the end of the drain runs with the signal traps installed; each
   # launch-and-register pair is a critical section during which a signal is only recorded.
-  _TT_ACTIVE=""; _TT_LANES=""; _TT_SIGPEND=""; _TT_LOGDIR=$d; _TT_CRIT=1
-  trap '_tt_on_signal INT' INT; trap '_tt_on_signal TERM' TERM; trap '_tt_on_signal HUP' HUP
+  # The sccache pre-start (lock wait, bounded server calls) runs BEFORE the signal-deferral critical
+  # section below, so a TERM/HUP during it is never held back (#4479).
   _TT_STABLE_TMPDIR=${TMPDIR:-/tmp}
   case "$_TT_STABLE_TMPDIR" in /*) ;; *) _TT_STABLE_TMPDIR="$PWD/$_TT_STABLE_TMPDIR" ;; esac
   _tt_sccache_prestart
+  _TT_ACTIVE=""; _TT_LANES=""; _TT_SIGPEND=""; _TT_LOGDIR=$d; _TT_CRIT=1
+  trap '_tt_on_signal INT' INT; trap '_tt_on_signal TERM' TERM; trap '_tt_on_signal HUP' HUP
   _TT_TMPBASE=$(mktemp -d "$_TT_STABLE_TMPDIR/tt-par.XXXXXX") || _TT_TMPBASE=""
   if [ -z "$_TT_TMPBASE" ]; then
     _TT_CRIT=0; trap - INT TERM HUP

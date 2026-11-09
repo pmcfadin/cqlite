@@ -522,32 +522,73 @@ EOS
     scc_stop; scc_port=0
   fi
 fi
-# 11g. #4479 lock timeout: flock is present but the lock is HELD by someone else. The prestart must warn
-#      and skip recovery (no stop, same pid), not run it anyway. The holder is a background process this
-#      test starts and kills by its recorded pid.
+# 11g-i. #4479 lock behaviour of the prestart. flock IS present in these cases. The lock is held by a
+#      background process this test starts: it creates a readiness file only AFTER flock succeeded, the
+#      test waits (bounded) for that file, and the holder is killed by its recorded pid.
+scc_hold_lock() { # scc_hold_lock <lockfile> <readyfile>: sets scc_holder (pid) once the lock IS held
+  rm -f "$2"
+  ( flock 9 && : >"$2" && exec sleep 120 ) 9>>"$1" & scc_holder=$!
+  local n=0; while [ "$n" -lt 100 ] && [ ! -f "$2" ]; do sleep 0.1; n=$((n + 1)); done
+  [ -f "$2" ]
+}
+scc_prestart_script() { # scc_prestart_script <file> [trap-term]
+  { printf 'set -uo pipefail\n. "%s/helpers.sh"\n_TT_STABLE_TMPDIR="%s/stable-rec"\n' "$W" "$W"
+    [ -z "${2:-}" ] || printf '%s\n' "trap 'echo got-term >\"$W/term.mark\"; exit 143' TERM"
+    printf '_tt_sccache_prestart\n'; } >"$1"
+}
 if [ -n "$SCC" ] && [ "$SCC_PROC_OK" = 1 ] && command -v flock >/dev/null 2>&1; then
   scc_port=$(scc_free_port) || scc_port=0
   if [ "$scc_port" = 0 ]; then bad "#4479 lock timeout: no free port"; else
     mkdir -p "$W/doomed3" "$W/lockdir3"
     scc_start_under "$W/doomed3"; old=$(scc_pid_of); rm -rf "$W/doomed3"
     lockf="$W/lockdir3/cqlite-sccache-$scc_port.lock"
-    ( flock 9 && exec sleep 120 ) 9>>"$lockf" & holder=$!
-    n=0; while [ "$n" -lt 50 ] && ! grep -q . /proc/$holder/cmdline 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
-    sleep 0.5
-    cat >"$W/t11g.sh" <<EOS
-set -uo pipefail
-. "$W/helpers.sh"
-_TT_STABLE_TMPDIR="$W/stable-rec"
-_tt_sccache_prestart
-EOS
-    logline=$(env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
-      CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir3" CQLITE_TT_SCCACHE_LOCK_WAIT=1 bash "$W/t11g.sh" 2>&1 >/dev/null)
-    new=$(scc_pid_of)
-    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
-    if [ -n "$old" ] && [ "$old" = "$new" ] && grep -q "could not take" <<<"$logline" && ! grep -q "holds a dead TMPDIR" <<<"$logline"; then
-      ok "#4479 lock timeout: with the lock held elsewhere the prestart warns and skips recovery (poisoned server pid $old untouched, no stop)"
+    if ! scc_hold_lock "$lockf" "$W/ready3"; then
+      bad "#4479 lock timeout: the holder never acquired the lock"
     else
-      bad "#4479 lock timeout: old=$old new=$new log='$logline'"
+      scc_prestart_script "$W/t11g.sh"
+      logline=$(env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+        CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir3" CQLITE_TT_SCCACHE_LOCK_WAIT=1 bash "$W/t11g.sh" 2>&1 >/dev/null)
+      new=$(scc_pid_of)
+      if [ -n "$old" ] && [ "$old" = "$new" ] && grep -q "could not take" <<<"$logline" && ! grep -q "holds a dead TMPDIR" <<<"$logline"; then
+        ok "#4479 lock timeout: with the lock really held elsewhere the prestart warns and skips recovery (poisoned server pid $old untouched, no stop)"
+      else
+        bad "#4479 lock timeout: old=$old new=$new log='$logline'"
+      fi
+      # 11h. TERM during a LONG lock wait is handled promptly (the wait is polled, not a blocking flock,
+      #      so the trap runs within a fraction of a second). The prestart runs under a TERM trap like the gate's.
+      scc_prestart_script "$W/t11h.sh" trap
+      rm -f "$W/term.mark"
+      env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+        CQLITE_TT_SCCACHE_LOCK_DIR="$W/lockdir3" CQLITE_TT_SCCACHE_LOCK_WAIT=60 bash "$W/t11h.sh" >/dev/null 2>&1 & hp=$!
+      sleep 1
+      t0=$SECONDS; kill -TERM "$hp" 2>/dev/null
+      n=0; while [ "$n" -lt 100 ] && kill -0 "$hp" 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+      alive=0; kill -0 "$hp" 2>/dev/null && alive=1
+      wait "$hp" 2>/dev/null; hrc=$?
+      if [ "$alive" = 0 ] && [ "$((SECONDS - t0))" -le 4 ] && [ -f "$W/term.mark" ] && [ "$(scc_pid_of)" = "$old" ]; then
+        ok "#4479 TERM during a 60s lock wait: the prestart's trap ran and it exited in $((SECONDS - t0))s (rc $hrc), server untouched"
+      else
+        bad "#4479 TERM during a lock wait: still alive=$alive after $((SECONDS - t0))s (rc $hrc, mark=$([ -f "$W/term.mark" ] && echo yes || echo no))"
+        kill -KILL "$hp" 2>/dev/null
+      fi
+    fi
+    kill "$scc_holder" 2>/dev/null; wait "$scc_holder" 2>/dev/null
+    scc_stop; scc_port=0
+  fi
+  # 11i. no lock available (the lock dir does not exist): NEVER stop the poisoned server; only the
+  #      non-destructive start, with a log line saying recovery was skipped.
+  scc_port=$(scc_free_port) || scc_port=0
+  if [ "$scc_port" = 0 ]; then bad "#4479 no-lock: no free port"; else
+    mkdir -p "$W/doomed4"
+    scc_start_under "$W/doomed4"; old=$(scc_pid_of); rm -rf "$W/doomed4"
+    scc_prestart_script "$W/t11i.sh"
+    logline=$(env RUSTC_WRAPPER="$SCC" SCCACHE_SERVER_PORT=$scc_port SCCACHE_DIR="$W/sccdir" SCCACHE_CACHE_SIZE=1G \
+      CQLITE_TT_SCCACHE_LOCK_DIR="$W/no-such-lock-dir" bash "$W/t11i.sh" 2>&1 >/dev/null)
+    new=$(scc_pid_of)
+    if [ -n "$old" ] && [ "$old" = "$new" ] && grep -q "recovery skipped: no lock available" <<<"$logline" && ! grep -q "holds a dead TMPDIR" <<<"$logline"; then
+      ok "#4479 no lock available: the poisoned server is NOT stopped (pid $old kept) and the skip is logged"
+    else
+      bad "#4479 no lock available: old=$old new=$new log='$logline'"
     fi
     scc_stop; scc_port=0
   fi
