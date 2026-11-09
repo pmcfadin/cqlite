@@ -118,9 +118,10 @@ mod toc_digest_tests {
 
     #[test]
     fn test_toc_ordering_matches_cassandra() {
-        // Verify that our TOC.txt component ordering is deterministic and equals the
-        // Cassandra 5.0.2 write order (5.0.8 sorts lexicographically; readers are
-        // order-independent, see issue_4482_oracle_output_independence.rs)
+        // Verify that our TOC.txt component ordering equals Cassandra 5.0.8's: the
+        // distinct file names in String natural order (TOCComponent.updateTOC's
+        // TreeSet, CASSANDRA-20494; #4486). 5.0.2 used another order; readers are
+        // order-independent (issue_4482_oracle_output_independence.rs).
 
         let temp_dir = TempDir::new().unwrap();
         let toc_path = temp_dir.path().join("nb-1-big-TOC.txt");
@@ -141,15 +142,20 @@ mod toc_digest_tests {
         let contents = fs::read_to_string(&toc_path).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
 
-        // Verify the canonical order
-        assert_eq!(lines[0], "Data.db");
-        assert_eq!(lines[1], "Statistics.db");
-        assert_eq!(lines[2], "Digest.crc32");
-        assert_eq!(lines[3], "TOC.txt");
-        assert_eq!(lines[4], "CompressionInfo.db");
-        assert_eq!(lines[5], "Filter.db");
-        assert_eq!(lines[6], "Index.db");
-        assert_eq!(lines[7], "Summary.db");
+        // Verify the canonical (5.0.8) order
+        assert_eq!(
+            lines,
+            [
+                "CompressionInfo.db",
+                "Data.db",
+                "Digest.crc32",
+                "Filter.db",
+                "Index.db",
+                "Statistics.db",
+                "Summary.db",
+                "TOC.txt"
+            ]
+        );
     }
 
     #[test]
