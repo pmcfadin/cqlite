@@ -927,6 +927,46 @@ else
   echo "note - 3g-6b. CONTROL NOT TAKEN: /proc/self/maps is not readable on this host, so the recogniser was not driven against a real kernel maps file (declared, not fatal — every other 3g case is synthetic)"
 fi
 
+# 3g-6c. A maps file LARGER THAN ONE PAGE (#4477). The torn-line failure only exists for files that
+# need more than one read, so a 4 KiB-or-smaller fixture could never have shown it. 150 lines of
+# ~100 bytes = ~15 KiB; the jemalloc mapping is the LAST line, so a reader that stops at a page
+# boundary, drops a tail or tears a line cannot verify it. Both directions: the accept (every line
+# parsed, the count is exact, the LAST mapping found) and a genuinely malformed LAST line, which
+# must still be refused and NAMED - the refusal is for malformed lines, never for read artifacts.
+BIGMAPS="$TMP/maps-big"
+{
+  i=0
+  while [ "$i" -lt 150 ]; do
+    printf '7f%04x00-7f%04x00 r-xp 00000000 08:01 %d /usr/lib/x86_64-linux-gnu/some/deeply/nested/dir/libfiller-%03d.so.1\n' "$i" "$((i + 1))" "$((1000 + i))" "$i"
+    i=$((i + 1))
+  done
+  printf '7ffe0000-7ffe1000 r-xp 00000000 08:01 9999 %s\n' "$JLIB"
+} > "$BIGMAPS"
+big_bytes=$(wc -c < "$BIGMAPS")
+out=$(maps_call "$BIGMAPS" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$big_bytes" -gt 4096 ] && [ "$rc" -eq 0 ] && grep -q "jemalloc VERIFIED for flight-merge-warm-1" <<<"$out" \
+   && grep -q "151 mappings" <<<"$out"; then
+  pass "3g-6c. a ${big_bytes}-byte maps file (> one page) is parsed whole: all 151 lines counted and the LAST mapping verified"
+else
+  fail "3g-6c. a maps file larger than a page must be parsed in full (bytes=$big_bytes rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+{ cat "$BIGMAPS"; printf 'this is not a mapping line\n'; } > "$TMP/maps-big-malformed"
+out=$(maps_call "$TMP/maps-big-malformed" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "this is not a mapping line" <<<"$out" && grep -q "NOT a /proc/<pid>/maps mapping" <<<"$out"; then
+  pass "3g-6c. a genuinely malformed line at the END of a large maps file is still REFUSED and NAMED"
+else
+  fail "3g-6c. a malformed last line of a large file must still refuse naming it (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# 3g-6d. STRUCTURAL: the snapshot is what is parsed - the incremental `done < "$maps"` form (the cause
+# of the torn line) is gone from the function, and a snapshot read is present.
+fn_src=$(sed -n '/^verify_flight_server_allocator()/,/^}/p' "$FLIGHT_LIB")
+if grep -q 'snapshot="\$(<"\$maps")"' <<<"$fn_src" && grep -q 'done <<<"\$snapshot"' <<<"$fn_src" \
+   && ! grep -qE 'done < "\$maps"' <<<"$fn_src"; then
+  pass "3g-6d. STRUCTURAL: the recogniser parses a one-shot snapshot of the maps file, not an incrementally read procfs descriptor"
+else
+  fail "3g-6d. STRUCTURAL: verify_flight_server_allocator must snapshot \$maps once and parse the snapshot (the torn-line cause is incremental reads)"
+fi
+
 # 3g-7. STRUCTURAL: the whole-line substring tests are GONE. The behavioural arms above cover the
 # shapes someone thought of; this pins that neither original comparison survives anywhere in the
 # function, which no behavioural case can express. The needles are SPLIT so this test cannot
