@@ -1012,7 +1012,7 @@ perf_capability_cycles_result() {
 }
 
 perf_capability_usage() {
-  printf 'usage: %s --token | --verify | --verify-unpriv | --drop-in | --drop-in-path\n' "${0##*/}"
+  printf 'usage: %s [--token, --state, --tier, --verify, --verify-unpriv, --drop-in or --drop-in-path]\n' "${0##*/}"
   printf '  --token         free /proc capability read: ok|paranoid-<N>|kptr-restricted|absent|unknown\n'
   printf '  --state         the gate perf= value: --token, but user where paranoid <= 2 and perf is on PATH\n'
   printf '  --tier          full, user or none(<reason>); user runs perf stat -e cycles:u -- true (rc 0 = full/user)\n'
