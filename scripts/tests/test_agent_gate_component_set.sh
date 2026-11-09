@@ -5284,10 +5284,25 @@ fi
 # ---------------------------------------------------------------------------
 base_fp=$(mkbaseline base-fastpath - )
 fp_fx=$(mkbranch fastpath "$base_fp" - --from-origin)
-fp_before=$(git -C "$fp_fx" count-objects -v 2>/dev/null | tr '\n' ' ')
+# cs_objstat <repo>: the object-store census MINUS the block-accounting fields. `count-objects -v` reports
+# `size`, `size-pack` and `size-garbage` from st_blocks, which on a copy-on-write filesystem (ZFS here)
+# lags the write by a transaction-group commit (~5s): measured, a 3 MB loose object reads `size: 1`
+# right after the write and `size: 2949` seconds later with the object COUNT unchanged. That made this
+# case flake (size 5 -> 1443 KiB, count 11 -> 11) whenever the fixture was built shortly before the
+# sample - worse under load - with nothing transferred. What "transfers NOTHING" means is the object
+# counts (loose, in-pack, packs, prune-packable, garbage), which stay compared.
+cs_objstat() {
+  local out l keep=""
+  out=$(git -C "$1" count-objects -v 2>/dev/null) || return 1
+  while IFS= read -r l; do
+    case "$l" in size:*|size-pack:*|size-garbage:*) ;; *) keep="$keep$l " ;; esac
+  done <<<"$out"
+  printf '%s' "$keep"
+}
+fp_before=$(cs_objstat "$fp_fx")
 fp_fh_before=$(cat "$fp_fx/.git/FETCH_HEAD" 2>/dev/null || echo '<none>')
 fp_out=$(hook "$fp_fx")
-fp_after=$(git -C "$fp_fx" count-objects -v 2>/dev/null | tr '\n' ' ')
+fp_after=$(cs_objstat "$fp_fx")
 fp_fh_after=$(cat "$fp_fx/.git/FETCH_HEAD" 2>/dev/null || echo '<none>')
 fp_refs=$(git -C "$fp_fx" for-each-ref --format='%(refname)' 'refs/worktree/*' 2>/dev/null | grep -c . || true)
 if [ "$(field BASELINE_OBJECTS "$fp_out")" = reused ] \
@@ -5299,6 +5314,14 @@ if [ "$(field BASELINE_OBJECTS "$fp_out")" = reused ] \
 else
   bad "3544-fast-path-no-transfer: expected BASELINE_OBJECTS reused + KIND ok + an unchanged object count (objects='$(field BASELINE_OBJECTS "$fp_out")' kind='$(field KIND "$fp_out")' refs=$fp_refs; count before/after: [$fp_before] / [$fp_after])"
 fi
+# Control: the census still SEES a transfer (a new loose object changes the counts), so dropping the
+# size fields did not blind the comparison.
+fp_ctl_a=$(cs_objstat "$fp_fx")
+git -C "$fp_fx" hash-object -w --stdin >/dev/null 2>&1 <<<"objstat control $$"
+fp_ctl_b=$(cs_objstat "$fp_fx")
+[ -n "$fp_ctl_a" ] && [ "$fp_ctl_a" != "$fp_ctl_b" ] \
+  && ok "3544-fast-path-no-transfer (control): the count-only census still detects a newly written object" \
+  || bad "3544-fast-path-no-transfer (control): a new loose object did not change the census ('$fp_ctl_a' vs '$fp_ctl_b')"
 
 # ---------------------------------------------------------------------------
 # 7p-ii. A GRAFT MUST NOT DECIDE ANCESTRY (roborev job 285, High). `$GIT_DIR/info/grafts` rewrites
