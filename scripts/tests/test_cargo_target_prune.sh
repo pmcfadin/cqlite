@@ -178,5 +178,62 @@ shim systemctl-inactive 'case " $* " in *" disable "*) exit 1;; *" is-active "*)
 CQLITE_PRUNE_SYSTEMCTL="$tmp/systemctl-inactive" run --uninstall-timer
 check "uninstall: disable fails but is-active=inactive -> UNINSTALLED, files removed" '[ "$rc" = 0 ] && grep -q "^RESULT: UNINSTALLED$" <<<"$out" && [ ! -e "$svc" ] && [ ! -e "${svc%.service}.timer" ]'
 
+# #4387: per-worktree dirs. A FRESH base made by the gate helper has no cargo CACHEDIR.TAG of its
+# own; the helper writes one, so the prune accepts the base and can remove an orphaned wt dir.
+HELPER="$REPO_ROOT/scripts/lib/worktree-target-dir.sh"
+base="$tmp/fresh-base"; live="$tmp/live-wt"; gone="$tmp/gone-wt"
+mkdir -p "$live" "$gone"; : >"$live/.git"; : >"$gone/.git"
+dl=$(CARGO_TARGET_DIR="$base" bash "$HELPER" "$live"); dg=$(CARGO_TARGET_DIR="$base" bash "$HELPER" "$gone")
+rm -rf "$gone"
+run --target "$base"
+check "fresh base (no cargo CACHEDIR.TAG of its own) still prunes an orphaned wt dir" '[ "$rc" = 0 ] && grep -q "orphan-worktree-dirs-removed=1" <<<"$out" && [ ! -d "$dg" ]'
+check "a live worktree's wt dir is kept" '[ -d "$dl" ] && [ -f "$dl/.worktree-root" ]'
+run --target "$dl" --dry-run
+check "a marked wt/<hash> target is widened to the shared base" 'grep -q "target=$(cd "$base" && pwd -P) " <<<"$out"'
+
+# After `cargo clean` removes the dir and marker, the gate re-resolves to the SAME dir (no nesting),
+# rewrites the marker, and the prune owns it again.
+rm -rf "$dl"
+dl2=$(CARGO_TARGET_DIR="$dl" bash "$HELPER" "$live")
+check "wiped per-worktree dir re-resolves to itself and regains its marker" '[ "$dl2" = "$dl" ] && [ -f "$dl/.worktree-root" ]'
+run --target "$dl" --dry-run
+check "the prune widens the re-marked dir to the base" 'grep -q "target=$(cd "$base" && pwd -P) " <<<"$out"'
+
+# Live worktree dirs are pruned like the base: native, cross-target and side-lane depths.
+mk_target; lw="$tmp/live2-wt"; mkdir -p "$lw"; : >"$lw/.git"
+wd=$(CARGO_TARGET_DIR="$T" bash "$HELPER" "$lw")
+for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do
+  mkdir -p "$wd/$prof/.fingerprint/cqlite-$H1" "$wd/$prof/incremental/old-abc" "$wd/$prof/incremental/new-def"
+  : >"$wd/$prof/.cargo-lock"; touch -d '30 days ago' "$wd/$prof/incremental/old-abc"
+done
+run --target "$T"
+check "live wt dir: stale incremental pruned, fresh kept, workspace fingerprint pruned, at all three depths" '[ "$rc" = 0 ] && ( for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do [ ! -d "$wd/$prof/incremental/old-abc" ] && [ -d "$wd/$prof/incremental/new-def" ] && [ ! -d "$wd/$prof/.fingerprint/cqlite-$H1" ] || exit 1; done ); [ -d "$wd" ]'
+mk_target; wd=$(CARGO_TARGET_DIR="$T" bash "$HELPER" "$lw")
+mkdir -p "$wd/debug/.fingerprint/cqlite-$H1" "$wd/debug/incremental/old-abc"; : >"$wd/debug/.cargo-lock"; touch -d '30 days ago' "$wd/debug/incremental/old-abc"
+flock "$wd/debug/.cargo-lock" sleep 30 & lockpid=$!
+for _ in $(seq 50); do flock -n "$wd/debug/.cargo-lock" true 2>/dev/null || break; sleep 0.1; done
+run --target "$T"; kill "$lockpid" 2>/dev/null; wait "$lockpid" 2>/dev/null
+check "a held lock inside a live wt dir: SKIPPED-BUSY, nothing removed" 'grep -q "^RESULT: SKIPPED-BUSY$" <<<"$out" && grep -q "lock:wt/" <<<"$out" && [ -d "$wd/debug/incremental/old-abc" ] && [ -d "$T/debug/incremental/old-abc" ]'
+
+# An UNMARKED wt/<hash> dir is not ours: nothing inside it is touched, at all three depths.
+mk_target; um="$T/wt/aaaaaaaaaaaaaaaa"
+for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do
+  mkdir -p "$um/$prof/.fingerprint/cqlite-$H1" "$um/$prof/incremental/old-abc"
+  : >"$um/$prof/.cargo-lock"; touch -d '30 days ago' "$um/$prof/incremental/old-abc"
+done
+run --target "$T"
+check "unmarked wt/<hash> dir: base prunes, but nothing inside the unmarked dir is touched (3 depths)" '[ "$rc" = 0 ] && [ ! -d "$T/debug/incremental/old-abc" ] && ( for prof in debug x86_64-unknown-linux-gnu/debug agent-gate-side/legacy-heuristics/debug; do [ -d "$um/$prof/incremental/old-abc" ] && [ -d "$um/$prof/.fingerprint/cqlite-$H1" ] || exit 1; done )'
+# An ORPHAN dir's profiles are not pruned in place either (the dir is removed whole).
+mk_target; og="$tmp/orph-wt"; mkdir -p "$og"; : >"$og/.git"; od=$(CARGO_TARGET_DIR="$T" bash "$HELPER" "$og"); rm -rf "$og"
+mkdir -p "$od/debug/.fingerprint/cqlite-$H1" "$od/debug/incremental/old-abc"; touch -d '30 days ago' "$od/debug/incremental/old-abc"
+run --target "$T" --dry-run
+check "orphan wt dir: removed whole, no per-profile removals listed inside it" 'grep -q "would remove wt/${od##*/}$" <<<"$out" && ! grep -q "would remove wt/${od##*/}/" <<<"$out"'
+
+# A hand-configured target that merely ends in wt/<16 hex> has no marker: never widened.
+mk_target; manual="$T/wt/0123456789abcdef"; mkdir -p "$manual"; cp "$T/CACHEDIR.TAG" "$manual/CACHEDIR.TAG"
+mkdir -p "$manual/debug/.fingerprint"; : >"$manual/debug/.cargo-lock"
+run --target "$manual" --dry-run
+check "an unmarked .../wt/<16 hex> target is NOT widened to its parent" 'grep -q "target=$(cd "$manual" && pwd -P) " <<<"$out" && ! grep -q "profiles=2" <<<"$out"'
+
 echo "PASS=$PASS FAIL=$FAIL SKIP=0"
 [ "$FAIL" = 0 ]

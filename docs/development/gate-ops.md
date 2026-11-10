@@ -401,6 +401,27 @@ mode (both path seams mandatory, no production fallback).
 
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
+**Per-worktree target dir under the shared base (#4387).** Cargo's fingerprint for a workspace
+member does not include the checkout's absolute path, so with one exported `CARGO_TARGET_DIR`
+worktree B reuses the test binaries worktree A built, and they carry A's
+`env!("CARGO_MANIFEST_DIR")`: B fails with "No such file" once A is deleted, and while A exists B
+silently reads A's `test-data`/fixtures (a gate could certify B against another branch's files).
+When cargo's effective target dir is an absolute path outside the checkout (`CARGO_TARGET_DIR`, else `CARGO_BUILD_TARGET_DIR`, else `[build] target-dir` via `cargo metadata`), every gate mode (full, `--lite`, `--only`,
+`--delta`, `--recertify`) now resolves `<base>/wt/<16 hex sha256 of the physical checkout root>`
+before any cargo call (`scripts/lib/worktree-target-dir.sh`), so the SIDE lane's
+`agent-gate-side/<component>` dirs and the disk admission's measured dir are per worktree too.
+Third-party compiles stay cheap through sccache. A target already ending in this checkout's own `/wt/<hash>` resolves to itself (no marker needed, so `cargo clean` cannot cause nesting); another root's marked `/wt/<hash>` suffix is stripped first
+(idempotent; a nested gate on another root gets its own sibling). `<dir>/.worktree-root` records
+the root. If cargo's target dir cannot be resolved (e.g. `cargo metadata --offline --locked` fails) the gate ABORTS with rc 2 rather than risk a shared target; fix the lockfile/config or set `CARGO_TARGET_DIR`. Pure hook modes (`--classify-*`, `--*-list`, ...) never resolve. Opt out with `CQLITE_SHARED_TARGET=1`; unset `CARGO_TARGET_DIR` already means the
+per-checkout `<root>/target`. Cost: a new worktree's first build compiles its own workspace
+crates and test binaries (measured: `cargo test -p cqlite-core --no-run`, sccache warm, 3m28s wall
+on a box at load 40-58, about 6 GB per worktree) and each live worktree holds its own copy of the
+dependency artifacts. `cargo-target-prune.sh` removes `wt/<hash>` dirs whose checkout no longer
+exists (`orphan-worktree-dirs-removed=`) and prunes live ones like the base (stale `incremental/`, workspace fingerprints, same locks and busy-skip, at native, cross-target and side-lane depths); a `wt/<hash>` dir without a marker is left alone. Pinned by
+`scripts/tests/test_worktree_target_isolation.sh`. Ad-hoc cargo runs outside the gate still use the
+shared base: `export CARGO_TARGET_DIR="$(bash scripts/lib/worktree-target-dir.sh)"` gives a shell the
+same isolation.
+
 **Weekly prune of the shared target (#4411).** On the dev box every session builds into one
 `CARGO_TARGET_DIR`, and nothing deletes cache there automatically. Install the weekly user
 timer once with `bash scripts/local/cargo-target-prune.sh --install-timer`. Each run removes

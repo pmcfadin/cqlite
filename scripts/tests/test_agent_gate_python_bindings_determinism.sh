@@ -41,6 +41,9 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+# #4387: these cases stub or hide cargo, so the gate cannot ask it for a target dir and would fail closed;
+# there is no real build to isolate, so accept the shared-target path.
+export CQLITE_SHARED_TARGET=1
 # Resolve bash by its REAL absolute path from the CURRENT (unshadowed)
 # environment, before any scenario overrides PATH — used for the
 # toolchain-absent scenario so command resolution never depends on which

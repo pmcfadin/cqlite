@@ -163,6 +163,11 @@ if [ -z "$target" ] || [ ! -d "$target" ]; then
   echo "PRUNE: cannot resolve a target dir (got '${target}')"; result ERROR; exit 1
 fi
 target=$(cd "$target" && pwd -P)
+# Run from a gate shell, CARGO_TARGET_DIR is the per-worktree dir (#4387): prune the shared base.
+# Widen only when the dir carries the marker the gate writes; a hand-configured .../wt/<hex> is left as given.
+case "$target" in
+  */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) [ -f "$target/.worktree-root" ] && target=${target%/wt/*} ;;
+esac
 if [ "$target" = / ] || [ "$target" = "$(cd "$HOME" && pwd -P)" ] || [ ! -f "$target/CACHEDIR.TAG" ]; then
   echo "PRUNE: refusing $target: not a cargo target dir (no CACHEDIR.TAG)"; result ERROR; exit 1
 fi
@@ -194,8 +199,32 @@ if units=$("$SYSTEMCTL" --user list-units --state=active --no-legend --plain 'cq
 else busy="$busy probe-error:systemctl-list-units(rc=$?)"; units=""; fi
 if [ -n "$units" ]; then busy="$busy unit:$(awk '{print $1; exit}' <<<"$units")"; fi
 
+# Per-worktree target dirs (#4387): `wt/<hash>/.worktree-root` names the checkout. A dir whose
+# checkout is gone is ORPHANED and is removed whole below; a dir with no marker is not ours to
+# judge and is left alone entirely; a LIVE one is pruned like the base (incremental + workspace
+# fingerprints), at native, cross-target and agent-gate-side depths, under the same locks.
+orphans=() skip_wt=()
+if [ -d "$target/wt" ]; then
+  for d in "$target"/wt/*/; do
+    d=${d%/}
+    [ -d "$d" ] || continue
+    if [ ! -f "$d/.worktree-root" ]; then skip_wt+=("$d"); continue; fi
+    root=$(head -n1 "$d/.worktree-root")
+    if [ -z "$root" ]; then skip_wt+=("$d"); continue; fi
+    if [ ! -e "$root/.git" ]; then orphans+=("$d"); fi
+  done
+fi
+in_list() { local x=$1; shift; local y; for y in "$@"; do [ "$x" = "$y" ] && return 0; done; return 1; }
+
 profiles=()
-while IFS= read -r fp; do profiles+=("$(dirname "$fp")"); done < <(find "$target" -maxdepth 4 -type d -name .fingerprint | sort)
+while IFS= read -r fp; do
+  prof=$(dirname "$fp"); skip=0
+  if [[ "$prof" == "$target"/wt/* ]]; then
+    rel=${prof#"$target"/wt/}; wtd="$target/wt/${rel%%/*}"
+    in_list "$wtd" ${orphans[@]+"${orphans[@]}"} ${skip_wt[@]+"${skip_wt[@]}"} && skip=1
+  fi
+  [ "$skip" = 1 ] || profiles+=("$prof")
+done < <(find "$target" -maxdepth 6 -type d -name .fingerprint | sort)
 
 # Hold every profile's build lock for the whole prune.
 if [ -z "$busy" ]; then
@@ -216,8 +245,10 @@ fi
 
 # ---- prune -------------------------------------------------------------------
 before=$(du -sb "$target" 2>/dev/null | awk '{print $1}')
-n_inc=0 n_fp=0
+n_inc=0 n_fp=0 n_wt=0
 rm_dir() { if [ "$dry_run" = 1 ]; then echo "would remove ${1#"$target"/}"; else rm -rf -- "$1"; fi; }
+
+for d in "${orphans[@]}"; do rm_dir "$d"; n_wt=$((n_wt + 1)); done
 
 for prof in "${profiles[@]}"; do
   if [ -d "$prof/incremental" ]; then
@@ -237,5 +268,5 @@ for prof in "${profiles[@]}"; do
 done
 
 after=$(du -sb "$target" 2>/dev/null | awk '{print $1}')
-echo "PRUNE: target=$target profiles=${#profiles[@]} days=$days incremental-removed=$n_inc fingerprints-removed=$n_fp freed-bytes=$(( ${before:-0} - ${after:-0} ))"
+echo "PRUNE: target=$target profiles=${#profiles[@]} days=$days incremental-removed=$n_inc fingerprints-removed=$n_fp orphan-worktree-dirs-removed=$n_wt freed-bytes=$(( ${before:-0} - ${after:-0} ))"
 if [ "$dry_run" = 1 ]; then result DRY-RUN; else result PRUNED; fi
