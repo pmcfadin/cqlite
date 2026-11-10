@@ -118,15 +118,21 @@ fn golden_partitions() -> Vec<Json> {
 }
 
 /// Data.db START offset of int-keyed partition `pk`, from the fixture's own
-/// `Partitions.db` + `Rows.db` (definitive guide Ch.17).
+/// `Partitions.db` + `Rows.db` (definitive guide Ch.17), then PROVEN against the raw,
+/// independently decoded `Data.db`: a u16 key length, the key, and the live `0x80`
+/// header byte at that offset (issue #4501), so a lookup that returned the post-header
+/// offset could not validate itself.
 fn indexed_partition_start(pk: i32) -> u64 {
     let dir = resolve_table_generation_dir(KEYSPACE, TABLE)
         .unwrap_or_else(|e| panic!("committed BTI fixture must resolve: {e}"));
-    let read = |name: &str| {
-        std::fs::read(dir.join(format!("da-2-bti-{name}.db")))
-            .unwrap_or_else(|e| panic!("read da-2-bti-{name}.db: {e}"))
-    };
-    partition_start::bti_partition_start(&read("Partitions"), &read("Rows"), &pk.to_be_bytes())
+    let p = |name: &str| dir.join(format!("da-2-bti-{name}.db"));
+    partition_start::bti_partition_start_verified(
+        &p("Partitions"),
+        &p("Rows"),
+        &p("Data"),
+        &pk.to_be_bytes(),
+        partition_start::HeaderForm::ModernLive,
+    )
 }
 
 fn golden_partition(parts: &[Json], pk: i32) -> &Json {

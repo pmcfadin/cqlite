@@ -176,3 +176,134 @@ pub fn bti_partition_start(partitions_db: &[u8], rows_db: &[u8], raw_key: &[u8])
         None => panic!("Partitions.db has no entry for key {raw_key:02x?}"),
     }
 }
+
+/// Which partition-header form follows the key in `Data.db` (definitive guide Ch.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderForm {
+    /// `nb`: `i32 localDeletionTime` + `i64 markedForDeleteAt` (12 bytes).
+    Nb,
+    /// `oa`/`da`, partition not deleted: the single `0x80` live sentinel byte.
+    ModernLive,
+}
+
+/// The whole (decompressed) `Data.db`, read DIRECTLY from the file: uncompressed as-is,
+/// else decoded from its `CompressionInfo.db` chunk table with `lz4_flex` (layout as
+/// Cassandra 5.0 `CompressionMetadata.Writer`; each on-disk chunk is `[u32 LE size][lz4
+/// block][u32 CRC32]`). Deliberately NOT CQLite's reader: this is the independent view
+/// that a derived start is checked against (issue #4501).
+pub fn read_data_db_independent(data_db: &Path) -> Vec<u8> {
+    let data = std::fs::read(data_db).unwrap_or_else(|e| panic!("read {data_db:?}: {e}"));
+    let name = data_db.file_name().unwrap().to_string_lossy().to_string();
+    let ci_path = data_db.with_file_name(name.replace("-Data.db", "-CompressionInfo.db"));
+    let Ok(ci) = std::fs::read(&ci_path) else {
+        return data;
+    };
+    let be16 = |i: usize| u16::from_be_bytes([ci[i], ci[i + 1]]) as usize;
+    let be32 = |i: usize| i32::from_be_bytes(ci[i..i + 4].try_into().unwrap());
+    let be64 = |i: usize| i64::from_be_bytes(ci[i..i + 8].try_into().unwrap());
+    let mut i = 0usize;
+    let nlen = be16(i);
+    let class = String::from_utf8_lossy(&ci[i + 2..i + 2 + nlen]).to_string();
+    assert!(
+        class.ends_with("LZ4Compressor"),
+        "{ci_path:?}: independent reader only decodes LZ4, got {class}"
+    );
+    i += 2 + nlen;
+    assert_eq!(be32(i), 0, "{ci_path:?}: compression options not expected");
+    i += 4;
+    i += 4; // chunk_length
+    i += 4; // max_compressed_length
+    let data_length = be64(i) as usize;
+    i += 8;
+    let chunks = be32(i) as usize;
+    i += 4;
+    let mut offsets: Vec<usize> = (0..chunks).map(|j| be64(i + 8 * j) as usize).collect();
+    offsets.push(data.len());
+    let mut out = Vec::with_capacity(data_length);
+    for j in 0..chunks {
+        let body = &data[offsets[j]..offsets[j + 1] - 4];
+        out.extend_from_slice(
+            &lz4_flex::decompress_size_prepended(body).expect("LZ4 chunk decompress"),
+        );
+    }
+    assert_eq!(out.len(), data_length, "{ci_path:?}: decompressed length");
+    out
+}
+
+/// Check, from raw `Data.db` bytes alone, that a partition header really begins at
+/// `start`: a `u16` key length, EXACTLY `raw_key`, then a well-formed deletion-time form.
+/// An offset that is the START passes; start + header (the 5.0.8 `sstabledump` value)
+/// lands on row bytes and fails the key comparison.
+pub fn assert_partition_header_at(
+    what: &str,
+    data: &[u8],
+    start: u64,
+    raw_key: &[u8],
+    form: HeaderForm,
+) {
+    let s = start as usize;
+    let need = 2 + raw_key.len() + if form == HeaderForm::Nb { 12 } else { 1 };
+    assert!(
+        s + need <= data.len(),
+        "{what}: offset {start} leaves no room for a partition header"
+    );
+    let key_len = u16::from_be_bytes([data[s], data[s + 1]]) as usize;
+    assert_eq!(
+        key_len,
+        raw_key.len(),
+        "{what}: key length at offset {start}"
+    );
+    assert_eq!(
+        &data[s + 2..s + 2 + key_len],
+        raw_key,
+        "{what}: partition key bytes at offset {start}"
+    );
+    let d = s + 2 + key_len;
+    match form {
+        HeaderForm::Nb => {
+            let ldt = i32::from_be_bytes(data[d..d + 4].try_into().unwrap());
+            let mfda = i64::from_be_bytes(data[d + 4..d + 12].try_into().unwrap());
+            assert_eq!(
+                ldt == i32::MAX,
+                mfda == i64::MIN,
+                "{what}: deletion info at {start} is half live-sentinel (ldt={ldt}, mfda={mfda})"
+            );
+        }
+        HeaderForm::ModernLive => assert_eq!(
+            data[d], 0x80,
+            "{what}: live partition header at {start} must carry the 0x80 sentinel"
+        ),
+    }
+}
+
+/// BIG: the `Index.db` start, then proven against the raw (independently decoded)
+/// `Data.db` with [`assert_partition_header_at`].
+pub fn big_partition_start_verified(
+    index_db: &Path,
+    data_db: &Path,
+    raw_key: &[u8],
+    form: HeaderForm,
+) -> u64 {
+    let start = big_partition_start(index_db, raw_key);
+    let data = read_data_db_independent(data_db);
+    assert_partition_header_at(&format!("{index_db:?}"), &data, start, raw_key, form);
+    start
+}
+
+/// BTI: the `Partitions.db`/`Rows.db` start, proven the same way.
+pub fn bti_partition_start_verified(
+    partitions_db: &Path,
+    rows_db: &Path,
+    data_db: &Path,
+    raw_key: &[u8],
+    form: HeaderForm,
+) -> u64 {
+    let start = bti_partition_start(
+        &std::fs::read(partitions_db).unwrap_or_else(|e| panic!("read {partitions_db:?}: {e}")),
+        &std::fs::read(rows_db).unwrap_or_else(|e| panic!("read {rows_db:?}: {e}")),
+        raw_key,
+    );
+    let data = read_data_db_independent(data_db);
+    assert_partition_header_at(&format!("{partitions_db:?}"), &data, start, raw_key, form);
+    start
+}
