@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Fetch canonical Cassandra 5 datasets into test-data/datasets
-# Usage: DATASET_TAG=datasets-v4 DATASET_ASSET=cassandra5-small-full-v4.0.tar.gz DATASET_SHA256=a50fd65df9666bc583ef2b7821b10b4f2d0c301cd1fe457ec1b88835ca461c7e ./test-data/scripts/fetch-datasets.sh
+# Usage: DATASET_TAG=datasets-v4 DATASET_ASSET=cassandra5-small-full-v4.0.tar.gz DATASET_SHA256=1743766a8d0698c98fb4d9ec122d20de5f81b42332e4e90b5b0284b21e74de7b ./test-data/scripts/fetch-datasets.sh
 #        ./test-data/scripts/fetch-datasets.sh --verify-only   # report usability only; mutates nothing
 
 # ---- STRICT argument validation, FIRST, before ANY filesystem work -------------
@@ -56,7 +56,7 @@ fi
 
 TAG="${_ENV_TAG:-${_PIN_TAG:-datasets-v3}}"
 ASSET="${_ENV_ASSET:-${_PIN_ASSET:-cassandra5-small-full-v4.0.tar.gz}}"
-SHA256_EXPECTED="${_ENV_SHA:-${_PIN_SHA:-a50fd65df9666bc583ef2b7821b10b4f2d0c301cd1fe457ec1b88835ca461c7e}}"
+SHA256_EXPECTED="${_ENV_SHA:-${_PIN_SHA:-1743766a8d0698c98fb4d9ec122d20de5f81b42332e4e90b5b0284b21e74de7b}}"
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
 ARCHIVE_DATASET_ROOT="test-data/datasets"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"

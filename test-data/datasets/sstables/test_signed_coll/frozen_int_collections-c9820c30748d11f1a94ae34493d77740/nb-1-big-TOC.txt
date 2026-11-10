@@ -1,8 +1,8 @@
-CRC.db
 Data.db
+Statistics.db
 Digest.crc32
+TOC.txt
+CRC.db
 Filter.db
 Index.db
-Statistics.db
 Summary.db
-TOC.txt
