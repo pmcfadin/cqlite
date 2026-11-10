@@ -442,22 +442,32 @@ fn golden_partition_positions(fixture_dir: &Path) -> Vec<(i32, u64)> {
 /// relation to the start (equal under 5.0.2, start + 7 under 5.0.8 for a live int-keyed
 /// `da` partition) and is otherwise never used as an offset.
 fn indexed_partition_starts(fixture_dir: &Path) -> Vec<(i32, u64)> {
-    let read = |name: &str| {
-        let p = std::fs::read_dir(fixture_dir)
+    let component = |name: &str| {
+        std::fs::read_dir(fixture_dir)
             .unwrap_or_else(|e| panic!("read {fixture_dir:?}: {e}"))
             .flatten()
             .map(|e| e.path())
             .find(|p| p.to_string_lossy().ends_with(&format!("-{name}.db")))
-            .unwrap_or_else(|| panic!("{fixture_dir:?}: no *-{name}.db"));
-        std::fs::read(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}"))
+            .unwrap_or_else(|| panic!("{fixture_dir:?}: no *-{name}.db"))
     };
-    let (partitions_db, rows_db) = (read("Partitions"), read("Rows"));
+    let (partitions_db, rows_db, data_db) = (
+        component("Partitions"),
+        component("Rows"),
+        component("Data"),
+    );
     let mut related = Vec::new();
     let starts: Vec<(i32, u64)> = golden_partition_positions(fixture_dir)
         .into_iter()
         .map(|(pk, golden_position)| {
-            let start =
-                partition_start::bti_partition_start(&partitions_db, &rows_db, &pk.to_be_bytes());
+            // Proven against the raw, independently decoded Data.db (u16 key length, key,
+            // live 0x80 header byte), so a lookup off by the header cannot validate itself.
+            let start = partition_start::bti_partition_start_verified(
+                &partitions_db,
+                &rows_db,
+                &data_db,
+                &pk.to_be_bytes(),
+                partition_start::HeaderForm::ModernLive,
+            );
             related.push((
                 start,
                 partition_start::header_len_modern_live(4),
