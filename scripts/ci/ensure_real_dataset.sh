@@ -126,7 +126,7 @@ if echo "$INPUTS" | grep -E "(parity|sstabledump)" >/dev/null 2>&1; then
 📋 Required actions:
   1. Ensure test-data/datasets/ contains real Cassandra 5 SSTables
   2. Download datasets: gh release download datasets-v4 --pattern 'cassandra5-small-full-v4.0.tar.gz'
-  3. Verify SHA256: 0899c704a4e9807e3e2076492f73eb9c9e305d1fb235cd4cb062325bb4536635
+  3. Verify SHA256: a50fd65df9666bc583ef2b7821b10b4f2d0c301cd1fe457ec1b88835ca461c7e
   4. Extract to project root: tar -xzf cassandra5-small-full-v4.0.tar.gz
 
 💡 For unit tests with mocks, enable the 'unit-tests-only' feature flag.

@@ -64,11 +64,19 @@ The last two are the **sstabledump `position` convention change** (see F1). They
 * **F3 — `bump-dataset-pin.sh` never repointed the tag in the composite restore action**
   (`default: datasets-v3`), so the first tag change (v3 -> v4) left `check-dataset-pin.sh` red.
   Fixed here and checked on a scratch copy.
-* **F4 — corpus-audit provenance is one release per corpus** (`pin_binding_*`,
-  `the_5_0_2_override_corpus_passes_the_audit...`): flipping `evidence.cassandra_version` for only
-  the scenarios covered by rebuilt tables turns that audit red (43 scenarios). The scenario
-  evidence therefore moves in ONE change (stage 5) and is NOT touched here. This bundle is
-  mixed-provenance by design, as described above.
+* **F4 — corpus-audit provenance is one release per corpus** (`pin_binding_*`): the weekly lanes
+  record ONE pin for the whole corpus and 92 scenarios cover the broad `test-data/datasets` dir,
+  so ALL scenario evidence moved to 5.0.8 together in this change, the manifest primary pin is now
+  `cassandra-5.0.8` (5.0.2 stays a declared additional pin), and the
+  `CQLITE_CASSANDRA_RELEASE=5.0.2` overrides were removed from `exhaustive-regeneration.yml` and
+  `parity-regen-matrix.yml` with their guard assertions. The bundle itself is mixed-provenance
+  (kept-bytes and verbatim tables were written by 5.0.2; the format is identical, see #4482 2b).
+* **Corruption verdicts recaptured on 5.0.8** (`capture-cassandra-verify-verdicts.sh`, all 12
+  fixtures): every verdict is unchanged (corrupt x10, clean for `filter_db_bit_flip` and
+  `toc_missing_component`); the manifest and notes now name 5.0.8.
+* **test_types determinism:** counter shard values and `now()` timeuuid paths differ per run, so
+  the `ct_*`/timeuuid tables are replaced wholesale with a 5.0.8 run (stated reason), not masked;
+  `test_tomb` Data.db deletion-time deltas likewise. No test pinned the old values.
 * The `test_corrupted_file_handling` and `table_snapshot_tests` CLI tests fail identically on the
   v3.6 bundle (pre-existing, not caused by v4).
 

@@ -3,16 +3,16 @@
 # Each entry corrupts EXACTLY ONE component of a clean test_comp / test_da fixture.
 # Corrupted *.db binaries are gitignored and regeneratable byte-for-byte from this manifest.
 #
-# Per-fixture cassandra_verdict is the ACTUAL Apache Cassandra 5.0.2
+# Per-fixture cassandra_verdict is the ACTUAL Apache Cassandra 5.0.8
 # 'sstableverify --extended --force' outcome captured on that fixture's exact
 # bytes (issue #1236), NOT hand-encoded from Cassandra source. Capture tool:
-# test-data/scripts/capture-cassandra-verify-verdicts.sh (cassandra:5.0.2).
+# test-data/scripts/capture-cassandra-verify-verdicts.sh (cassandra:5.0.8).
 schema_version: 1
 epic: 970
 issue: 999
 verify_parity_issue: 1236
-cassandra_version: "5.0.2"
-cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+cassandra_version: "5.0.8"
+cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
 cassandra_verify_tool: "sstableverify --extended --force"
 clean_keyspace: test_comp
 corrupt_keyspace: test_comp_corrupt
@@ -37,7 +37,7 @@ fixtures:
     rationale: "Single-bit flip inside the first compressed chunk payload corrupts the LZ4 chunk so decompression / inline CRC check fails."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: Data.db digest integrity check failed (1177334624 != 1237888564) -> Invalid SSTable."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: Data.db digest integrity check failed (1177334624 != 1237888564) -> Invalid SSTable."
     verdict_captured_for_sha256: "4e1cdb2f32629770f9bb0611ec2240a62b37aab82226d75ad92c839b118e7cd7"
     verdict_byte_stable: yes
     fixture_dir_sha256: "75c42d25d46c2989c9270559ca7ba3c8df6f5fa2d0faaa4f351d249f658225cb"
@@ -62,7 +62,7 @@ fixtures:
     rationale: "Tail truncated so CompressionInfo.db chunk offsets now point past the shortened Data.db (ChunkOffsetOutOfBounds) and the Data.db digest no longer matches (DigestMismatch); the row scan then fails."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: Data.db digest integrity check failed (1177334624 != 2621715426) -> Invalid SSTable."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: Data.db digest integrity check failed (1177334624 != 2621715426) -> Invalid SSTable."
     verdict_captured_for_sha256: "c65b976244faf0b38f5dc08211aa495723acbc42d88fa1d6e1a2a0a27a8ca893"
     verdict_byte_stable: yes
     fixture_dir_sha256: "30937a5ece73e8229a529eace762f6c7c8d503f82cbf81d794b4a1ea640d5078"
@@ -87,7 +87,7 @@ fixtures:
     rationale: "chunk[1] offset MSB set -> caught as CompressionInfoCorrupt (parse rejects the out-of-range/non-ascending offset) or ChunkOffsetOutOfBounds (offset-vs-Data.db bounds check), depending on which guard trips first; either way the bad offset is surfaced, never silently read."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: extended verify failed reading values via the corrupt chunk offsets -> Invalid SSTable."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: extended verify failed reading values via the corrupt chunk offsets -> Invalid SSTable."
     verdict_captured_for_sha256: "5600275ab1ae62b60d1c0183183f71d456c82b7329caa26911c5d6c6eb0c01d1"
     verdict_byte_stable: yes
     fixture_dir_sha256: "2ebb05cb8ff786b7e1451ee01963038d9e8de140b2a9d96139222be57006990b"
@@ -112,7 +112,7 @@ fixtures:
     rationale: "Single-bit flip in the first Index.db partition entry corrupts the promoted index / position."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: EOF after 62 bytes out of 1024 reading the corrupt Index.db entry -> Invalid SSTable."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: EOF after 62 bytes out of 1024 reading the corrupt Index.db entry -> Invalid SSTable."
     verdict_captured_for_sha256: "d92731ebec124f46fbf51b83bba9da680aa7850bf39874c1a60710d0fa246c32"
     verdict_byte_stable: yes
     fixture_dir_sha256: "2fae6b2ea746e17f861383a5c2dbaaa774698f482f350ee8edd833537e9c526c"
@@ -137,7 +137,7 @@ fixtures:
     rationale: "Bit-array bit flip (byte 8, the first bitset byte past the valid 8-byte header): a SET bit is cleared 1->0 so a present partition key hashes to an unset bit -> Bloom-filter FALSE NEGATIVE (might_contain==false). The BIG point-lookup path then returns Ok(None) for a live partition (silent data invisibility); full scans and BTI lookups are unaffected. Filter.db has no checksum so the flip is not caught on load. CQLite adds a verify --mode full FilterFalseNegative detection Cassandra lacks."
     cassandra_verdict: clean
     verdict_parity: divergent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e verifies CLEAN (captured: 'Verify of BigTableReader:big(...nb-1-big-Data.db) succeeded. All 1 rows read successfully'): the standalone verifier does NOT read/validate Filter.db bit-array contents (Cassandra only rebuilds a filter it cannot deserialize; a parseable-but-wrong filter passes), so a flipped bit-array bit does NOT trip its verify. CQLite is intentionally STRICTER: verify --mode full re-probes every present Index.db key against the decoded filter and reports FilterFalseNegative. Recorded divergence + a detection tool Cassandra lacks; the read-side exposure (silent false negative on BIG point lookups) is Cassandra-equivalent (issue #1398)."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e verifies CLEAN (captured: 'Verify of BigTableReader:big(...nb-1-big-Data.db) succeeded. All 1 rows read successfully'): the standalone verifier does NOT read/validate Filter.db bit-array contents (Cassandra only rebuilds a filter it cannot deserialize; a parseable-but-wrong filter passes), so a flipped bit-array bit does NOT trip its verify. CQLite is intentionally STRICTER: verify --mode full re-probes every present Index.db key against the decoded filter and reports FilterFalseNegative. Recorded divergence + a detection tool Cassandra lacks; the read-side exposure (silent false negative on BIG point lookups) is Cassandra-equivalent (issue #1398)."
     verdict_captured_for_sha256: "5bad4443c287d42f9ccfcec1a151669549b4cf41bc4dc52e0bdb2fcf57dd2941"
     verdict_byte_stable: yes
     fixture_dir_sha256: "fea9decca11c0e7e58a5779ae73b215a1fd3ffba8f0f9f2d582ae0d2e66992f8"
@@ -162,7 +162,7 @@ fixtures:
     rationale: "Footer (root pointer) bit flip in the BTI Partitions.db trie -> root node seek lands at the wrong byte."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: Error Loading da-2-bti: Corrupted (Partitions.db trie root)."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: Error Loading da-2-bti: Corrupted (Partitions.db trie root)."
     verdict_captured_for_sha256: "e93871d0b753546cf6abaf0b0208f2689d1cb8970d8efcca98dab0bb7ee135ef"
     verdict_byte_stable: no
     fixture_dir_sha256: "8fdbdf811635fa6a08051fa9cd77c9ac17923fec60e27a4180575c6603786244"
@@ -187,7 +187,7 @@ fixtures:
     rationale: "Rows.db trie truncated mid-node so per-partition row-trie traversal fails (BtiTrieCorrupt)."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: Error Loading da-2-bti: Corrupted (Rows.db trie truncated)."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: Error Loading da-2-bti: Corrupted (Rows.db trie truncated)."
     verdict_captured_for_sha256: "8cdddaa6df572b3a233b84d91453c6f3c4ef3e0414a4ea117a69b081ebd92007"
     verdict_byte_stable: no
     fixture_dir_sha256: "606e20c7f7ea4e056f4830067f9e8d43357a92e7dd799b2cb078a715f418e573"
@@ -212,7 +212,7 @@ fixtures:
     rationale: "MetadataSerializer component-count high byte set to 0xFF -> count ~4.28e9, header parse fails."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: Error Loading nb-1-big: Corrupted Statistics.db."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: Error Loading nb-1-big: Corrupted Statistics.db."
     verdict_captured_for_sha256: "fd760e3095de3621a4441d8a21d6589ee14ffb718a7b7ff84a1d0804bc5fa5c3"
     verdict_byte_stable: yes
     fixture_dir_sha256: "c8fbc22f9397f0a2e10c2617fb121bf9b08c0e8f3e1720b7c61e754ed7a8a88e"
@@ -237,7 +237,7 @@ fixtures:
     rationale: "Summary.db truncated inside the index-samples block so the summary cannot be deserialized (SummaryCorrupt)."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: Index summary is corrupt / Summary.db missing -> Invalid SSTable."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: Index summary is corrupt / Summary.db missing -> Invalid SSTable."
     verdict_captured_for_sha256: "f9339a82b91eeb5ea41a1a8672c015e0f42539f5206e3ec07ec609a1fbb987eb"
     verdict_byte_stable: yes
     fixture_dir_sha256: "622ef3ef4a526995358a052a073007e4cba206976680f16f39e5fb5598611900"
@@ -262,7 +262,7 @@ fixtures:
     rationale: "TOC.txt no longer lists Statistics.db -> component discovery reports a missing mandatory component."
     cassandra_verdict: clean
     verdict_parity: divergent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e verifies CLEAN: the standalone verifier scans on-disk components and rebuilds the TOC, so a dropped TOC.txt line does NOT trip its verify. CQLite is intentionally STRICTER and reports MissingComponent (it treats TOC.txt as authoritative). Recorded divergence, not a CQLite bug; out-of-band of strict verdict parity."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e verifies CLEAN: the standalone verifier scans on-disk components and rebuilds the TOC, so a dropped TOC.txt line does NOT trip its verify. CQLite is intentionally STRICTER and reports MissingComponent (it treats TOC.txt as authoritative). Recorded divergence, not a CQLite bug; out-of-band of strict verdict parity."
     verdict_captured_for_sha256: "4556bc08483090928ccdddbdf3c545874c40f86f0721cf6caf5710b8e7a2d9a6"
     verdict_byte_stable: yes
     fixture_dir_sha256: "2f1c380ee280def36fa3c36a28d7d7a0a7b3f101aca7c5ca6f00a13934af0fd3"
@@ -287,7 +287,7 @@ fixtures:
     rationale: "Recorded whole-file CRC no longer matches Data.db -> digest verification fails."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Cassandra 5.0.2 sstableverify -e: Data.db digest integrity check failed (1177334620 != 1177334624) -> Invalid SSTable."
+    verdict_note: "Cassandra 5.0.8 sstableverify -e: Data.db digest integrity check failed (1177334620 != 1177334624) -> Invalid SSTable."
     verdict_captured_for_sha256: "3babd7a8e7d27188858449d00dbdbb413d75419a97b9fa4c43f0fb7af9b1e1c6"
     verdict_byte_stable: yes
     fixture_dir_sha256: "1402c745be4c52e38f4d2e75661247b5feede5416de6104f3a5148520f708462"
@@ -312,7 +312,7 @@ fixtures:
     rationale: "Single-bit flip at Data.db byte 70000 inside uncompressed chunk 1 (the 64 KiB block [65536,131072) of a ~190 KiB / 3-chunk uncompressed Data.db). The clean source is test_comp.uncompressed_table (NO CompressionInfo.db; ships a CRC.db). The flip changes chunk 1 so its CRC32 no longer matches the stored CRC.db entry: the read path fails fast with a typed Error::Corruption naming chunk 1 (never wrong values / never a silent 0 rows), and verify --mode full reports UncompressedChunkCrcMismatch for the chunk (issue #1396). A non-first chunk is chosen so the fixture also proves cross-boundary chunk attribution."
     cassandra_verdict: corrupt
     verdict_parity: equivalent
-    verdict_note: "Apache Cassandra 5.0.2 sstableverify -e: 'WARNING: Corrupted file: integrity check (digest) failed ... 65963209 != 3867023516' -> 'Invalid SSTable ..., please force a full repair' (rc=1). The clean uncompressed_table source verifies clean ('Verify ... succeeded. All 1 rows read successfully'). corrupt/corrupt parity; CQLite reports the per-chunk UncompressedChunkCrcMismatch (CRC.db) in addition to the whole-file DigestMismatch."
+    verdict_note: "Apache Cassandra 5.0.8 sstableverify -e: 'WARNING: Corrupted file: integrity check (digest) failed ... 65963209 != 3867023516' -> 'Invalid SSTable ..., please force a full repair' (rc=1). The clean uncompressed_table source verifies clean ('Verify ... succeeded. All 1 rows read successfully'). corrupt/corrupt parity; CQLite reports the per-chunk UncompressedChunkCrcMismatch (CRC.db) in addition to the whole-file DigestMismatch."
     verdict_captured_for_sha256: "8daa51d7fe8596eaf588eb69f53e4a5ae9103065f1975b8033d89f74ba8239d5"
     verdict_byte_stable: yes
     fixture_dir_sha256: "9c3272181fb473d685e52d2b75ca40d7f38161ae42e771aeb647bcaa0d18f87f"
