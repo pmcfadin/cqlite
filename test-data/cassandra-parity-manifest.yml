@@ -1460,8 +1460,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1719,8 +1719,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1771,8 +1771,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1822,8 +1822,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1875,8 +1875,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1928,8 +1928,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1989,8 +1989,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [offsets, jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -4610,11 +4610,11 @@ scenarios:
     evidence:
       type: partial
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/generate-deltas.sh  # cassandra:5.0.2 delete shapes → sstabledump JSONL
+        bash test-data/scripts/generate-deltas.sh  # cassandra:5.0.8 delete shapes → sstabledump JSONL
       reference_paths:
         - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
@@ -4710,8 +4710,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4761,8 +4761,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4812,8 +4812,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4864,8 +4864,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4915,8 +4915,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4968,8 +4968,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -5021,8 +5021,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -5074,8 +5074,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -5127,8 +5127,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -6092,11 +6092,11 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/generate-compaction-parity.sh  # cassandra:5.0.2 → 2 flushes → nodetool compact → compacted SSTable
+        bash test-data/scripts/generate-compaction-parity.sh  # cassandra:5.0.8 → 2 flushes → nodetool compact → compacted SSTable
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_1017_live_cell_compaction_byte_parity
@@ -6147,8 +6147,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity.sh
@@ -6201,8 +6201,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity.sh
@@ -6259,8 +6259,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity.sh
@@ -6321,8 +6321,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity.sh
@@ -6417,11 +6417,11 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/generate-compaction-parity-udt.sh  # cassandra:5.0.2 → 2 flushes → nodetool compact → compacted SSTable
+        bash test-data/scripts/generate-compaction-parity-udt.sh  # cassandra:5.0.8 → 2 flushes → nodetool compact → compacted SSTable
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
@@ -6476,8 +6476,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, component_files, jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity-udt.sh
@@ -6534,8 +6534,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity-udt.sh
@@ -6600,8 +6600,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity-udt.sh
@@ -6658,8 +6658,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, component_files, jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity-udt.sh
@@ -6714,8 +6714,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl, generated_report]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compaction-parity-udt.sh
@@ -7621,8 +7621,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7666,8 +7666,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7711,8 +7711,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7756,8 +7756,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7802,8 +7802,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7849,8 +7849,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7894,8 +7894,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -10644,8 +10644,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [component_files, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -10695,8 +10695,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [component_files, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -10745,8 +10745,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [component_files, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -10795,8 +10795,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [component_files, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -10844,8 +10844,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [component_files]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -10892,8 +10892,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [component_files, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -10942,8 +10942,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [component_files, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -10991,8 +10991,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11040,8 +11040,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11086,8 +11086,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11130,8 +11130,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11175,8 +11175,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11220,8 +11220,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11267,8 +11267,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11320,8 +11320,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11371,8 +11371,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11421,8 +11421,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11471,8 +11471,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -11521,8 +11521,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, checksums]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12130,8 +12130,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [checksums, jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12178,8 +12178,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [checksums, jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12273,8 +12273,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [checksums, jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12322,8 +12322,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [checksums, jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12370,8 +12370,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [offsets, jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12417,8 +12417,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12518,8 +12518,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12567,8 +12567,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12613,8 +12613,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12659,8 +12659,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12704,8 +12704,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12749,8 +12749,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh
@@ -12796,8 +12796,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl, logs]
-      cassandra_version: "5.0.2"
-      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      cassandra_version: "5.0.8"
+      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-compression-parity.sh

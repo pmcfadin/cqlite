@@ -1,13 +1,13 @@
-SSTable: /data/test_deltas/partial_updates-9f9e4410dcca11f1a41061729da903da/nb-1-big
+SSTable: /data/test_deltas/partial_updates-29b5e680701f11f1b5d1d98b0640ec05/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 11/10/2026 05:50:25 (1794289825423115)
-Maximum timestamp: 11/10/2026 05:50:25 (1794289825434105)
+Minimum timestamp: 06/24/2026 22:50:57 (1782341457712002)
+Maximum timestamp: 06/24/2026 22:50:57 (1782341457732903)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
 SSTable min local deletion time: no tombstones (9223372036854775807)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
-Compression ratio: 0.5795148247978437
+Compression ratio: 0.5946666666666667
 TTL min: 0
 TTL max: 0
 First token: -4069959284402364209 (1)
@@ -16,9 +16,9 @@ Covered clusterings: [1, 3]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: f534068a-eb91-4deb-92c3-4a4a9fddea90
+Originating host id: 2bf13587-78de-4749-8b0d-ab019cd8a570
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1794289755128, position=80352)=CommitLogPosition(segmentId=1794289755128, position=100500)}
+Replay positions covered: {CommitLogPosition(segmentId=1782341376474, position=80382)=CommitLogPosition(segmentId=1782341376474, position=100357)}
 totalColumnsSet: 18
 totalRows: 9
 Estimated tombstone drop times: 
@@ -33,15 +33,16 @@ Estimated tombstone drop times:
    Max       0 
 Partition Size: 
    Size (bytes) | Count  (%)  Histogram 
-   124 (124 B)  |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   124 (124 B)  |     2 ( 66) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   149 (149 B)  |     1 ( 33) OOOOOOOOOOOOOOO
    Percentiles
    50th      124 (124 B)
-   75th      124 (124 B)
-   95th      124 (124 B)
-   98th      124 (124 B)
-   99th      124 (124 B)
+   75th      149 (149 B)
+   95th      149 (149 B)
+   98th      149 (149 B)
+   99th      149 (149 B)
    Min       104 (104 B)
-   Max       124 (124 B)
+   Max       149 (149 B)
 Column Count: 
    Columns | Count  (%)  Histogram 
    6       |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
@@ -57,7 +58,7 @@ Local token space coverage: NaN
 Estimated cardinality: 3
 EncodingStats minTTL: 0
 EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
-EncodingStats minTimestamp: 11/10/2026 05:50:25 (1794289825423115)
+EncodingStats minTimestamp: 06/24/2026 22:50:57 (1782341457712002)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]
 StaticColumns: 

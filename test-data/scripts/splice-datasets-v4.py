@@ -15,11 +15,22 @@ prefixes instead of changing every reference.
 `--dest`  the new tree (created; must not exist). Everything not replaced is copied
           from the base byte-for-byte.
 
+`--preserve KS.TABLE` (repeatable) keeps that table's directory byte-for-byte from the base
+(bytes AND goldens), whichever --gen/--goldens would have replaced it: used for the aged TTL
+seams and for tables whose committed content is pinned by absolute wall-clock/offset values.
+
+`--goldens <dir>` overlays re-dumped goldens (see redump3.sh) for tables the generators did
+not rebuild: `<dir>/sstables/<ks>/<table-dir>/*-Data.db.jsonl.raw` (raw sstabledump -l
+output) and `*-Statistics.db.txt`. Each JSONL is written in the SAME style as the base golden
+(compact `{"a":1}` vs sstabledump's native `{"a": 1}`), because tests match literals such as
+`"type": "row"`.
+
 Per replaced table the old directory name is kept, the new generation numbers are mapped
 onto the old ones in sorted order, and any base file with no regenerated counterpart that
 is not a standard SSTable component (e.g. `*.counter-select.txt`) is carried over.
 """
 import argparse
+import json
 import os
 import re
 import shutil
@@ -48,6 +59,8 @@ def main():
     ap.add_argument("--base", required=True)
     ap.add_argument("--gen", action="append", required=True)
     ap.add_argument("--dest", required=True)
+    ap.add_argument("--preserve", action="append", default=[])
+    ap.add_argument("--goldens")
     ap.add_argument("--report")
     a = ap.parse_args()
     if os.path.exists(a.dest):
@@ -66,6 +79,9 @@ def main():
             for d in sorted(os.listdir(kd)):
                 name, _ = split_dir(d)
                 if not name:
+                    continue
+                if f"{ks}.{name}" in a.preserve:
+                    log.append(f"PRESERVED {ks}.{name} (verbatim from base)")
                     continue
                 newd = os.path.join(kd, d)
                 newfiles = sorted(os.listdir(newd))
@@ -103,6 +119,33 @@ def main():
                     shutil.copy2(os.path.join(newd, f), os.path.join(oldd, dst))
                 maps = ",".join(f"{n[0]}-{n[1]}->{o[0]}-{o[1]}" for o, n in zip(og, ng))
                 log.append(f"REPLACED {ks}.{name} -> {olds[0]} gens[{maps}] kept-extra={sorted(set(keep))}")
+    if a.goldens:
+        gs = os.path.join(a.goldens, "sstables")
+        for ks in sorted(os.listdir(gs)):
+            for d in sorted(os.listdir(os.path.join(gs, ks))):
+                name, _ = split_dir(d)
+                if f"{ks}.{name}" in a.preserve:
+                    log.append(f"PRESERVED {ks}.{name} (verbatim from base, goldens not re-dumped)")
+                    continue
+                src = os.path.join(gs, ks, d)
+                dst = os.path.join(a.dest, "sstables", ks, d)
+                for f in sorted(os.listdir(src)):
+                    if f.endswith(".jsonl.raw"):
+                        target = os.path.join(dst, f[: -len(".raw")])
+                        raw = open(os.path.join(src, f)).read()
+                        lines = [l for l in raw.splitlines() if l.strip()]
+                        old = [l for l in open(target).read().splitlines() if l.strip()] if os.path.exists(target) else []
+                        # pick the JSON dialect that reproduces EVERY base line exactly
+                        styles = [((",", ":"), False), ((",", ":"), True), ((",", ": "), False), ((",", ": "), True)]
+                        style = next((st for st in styles
+                                      if all(l == json.dumps(json.loads(l), separators=st[0], ensure_ascii=st[1]) for l in old)),
+                                     styles[0])
+                        out = [json.dumps(json.loads(l), separators=style[0], ensure_ascii=style[1]) for l in lines]
+                        compact = style[0] == (",", ":")
+                        open(target, "w").write("\n".join(out) + ("\n" if out else ""))
+                        log.append(f"GOLDEN {ks}/{d}/{f[:-4]} style={'compact' if compact else 'spaced'}{'' if style[1] else '+utf8'} lines={len(out)}")
+                    elif f.endswith("Statistics.db.txt"):
+                        shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
     text = "\n".join(log) + "\n"
     if a.report:
         open(a.report, "w").write(text)

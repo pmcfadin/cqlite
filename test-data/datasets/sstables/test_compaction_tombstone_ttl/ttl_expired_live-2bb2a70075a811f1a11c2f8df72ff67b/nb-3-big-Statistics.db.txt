@@ -1,10 +1,10 @@
-SSTable: /data/test_compaction_tombstone_ttl/ttl_expired_live-058cf900dccc11f18a0ce78a716fcb9b/nb-3-big
+SSTable: /data/test_compaction_tombstone_ttl/ttl_expired_live-2bb2a70075a811f1a11c2f8df72ff67b/nb-3-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (1000)
 Maximum timestamp: 01/01/1970 00:00:00 (2000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 11/10/2026 06:00:31 (1794290431)
+SSTable min local deletion time: 07/01/2026 23:54:22 (1782950062)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
@@ -12,17 +12,17 @@ TTL max: 1 (1 second)
 First token: -4069959284402364209 (1)
 Last token: -4069959284402364209 (1)
 Covered clusterings: [1, 2]
-Estimated droppable tombstones: 1.0
+Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 06417b83-16c4-479e-bf0b-72112862c14b
+Originating host id: 9ed42726-b01a-402a-9b19-5df589e84648
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1794290359310, position=63709)=CommitLogPosition(segmentId=1794290359310, position=72527)}
+Replay positions covered: {CommitLogPosition(segmentId=1782949948008, position=63848)=CommitLogPosition(segmentId=1782949948008, position=71036)}
 totalColumnsSet: 2
 totalRows: 2
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1794290460 (11/10/2026 06:01:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1782950100 (07/01/2026 23:55:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -56,7 +56,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 1
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 11/10/2026 06:00:32 (1794290432)
+EncodingStats minLocalDeletionTime: 07/01/2026 23:54:23 (1782950063)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (1000)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]
