@@ -144,6 +144,20 @@ else
     || bad "failed download left/changed cache entries: before=[$before] after=[$after]"
 fi
 
+# --- bash 3.2 (macOS) portability: no bash-4+ constructs in the lib or its smoke script ------
+# (roborev job 182). Comment lines are skipped. A real bash 3.2 run, which this cannot replace:
+#   docker run --rm -v "$PWD":/w bash:3.2 bash /w/scripts/tests/cassandra_image_lib_smoke.sh
+B4='mapfile|readarray|(declare|local|typeset) +-[A-Za-z]*[Ann][A-Za-z]*( |$)|\$\{[A-Za-z_][A-Za-z_0-9]*(,,|\^\^|,|\^)[^}]*\}|&>>|\|&|coproc|\[-[0-9]+\]|wait +-n|printf +-v|EPOCHSECONDS|EPOCHREALTIME|BASHPID|read +(-[A-Za-z]+ +)*-t +[0-9]*\.[0-9]|;;&|[^;];&|\$\{[A-Za-z_][A-Za-z_0-9]*@[UuLlQEPAa]\}'
+for f in "$ROOT/test-data/scripts/lib/cassandra-image.sh" "$ROOT/scripts/tests/cassandra_image_lib_smoke.sh"; do
+  hits="$(grep -vE '^[[:space:]]*#' "$f" | grep -nE "$B4" || true)"
+  [ -z "$hits" ] && ok "no bash-4+ construct in ${f#"$ROOT"/}" || bad "bash-4+ construct in ${f#"$ROOT"/}: $hits"
+done
+if smoke_out="$(bash "$ROOT/scripts/tests/cassandra_image_lib_smoke.sh" 2>&1)"; then
+  ok "the dependency-free smoke script passes under $(bash -c 'echo bash $BASH_VERSION') ($(printf '%s' "$smoke_out" | tail -1))"
+else
+  bad "the lib smoke script failed: $(printf '%s' "$smoke_out" | grep -E '^FAIL' | head -3 | tr '\n' ';')"
+fi
+
 # --- release selection: CQLITE_CASSANDRA_RELEASE picks one COHERENT tuple (#4482) -----------
 read -r -d '' PINS_PY <<'PY' || true
 import re, sys

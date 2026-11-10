@@ -115,7 +115,11 @@ _cqlite_cached_wheel() {
 _cqlite_driver_present() {
   local -a eng pins
   read -r -a eng <<<"$1"
-  mapfile -t pins < <(grep -E '^[A-Za-z0-9._-]+==' "$CQLITE_CASSANDRA_DRIVER_REQUIREMENTS" | sed -E 's/[[:space:]\\].*$//')
+  pins=()   # bash 3.2 (macOS) has no array-slurp builtin: read the pins line by line
+  while IFS= read -r _cqlite_pin; do
+    [ -n "$_cqlite_pin" ] && pins+=("$_cqlite_pin")
+  done < <(grep -E '^[A-Za-z0-9._-]+==' "$CQLITE_CASSANDRA_DRIVER_REQUIREMENTS" | sed -E 's/[[:space:]\\].*$//')
+  unset _cqlite_pin
   [ "${#pins[@]}" -gt 0 ] || return 1
   "${eng[@]}" exec "$2" python3 -c '
 import sys
