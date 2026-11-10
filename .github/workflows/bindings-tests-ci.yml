@@ -54,7 +54,7 @@ env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v4
   DATASET_ASSET: cassandra5-small-full-v4.0.tar.gz
-  DATASET_SHA256: 1743766a8d0698c98fb4d9ec122d20de5f81b42332e4e90b5b0284b21e74de7b
+  DATASET_SHA256: 8accf7607dc1d627d5d04860268b9313d707ee2749a379d3ff914d73358e2981
 
 jobs:
   # ALWAYS-RUN classifier with EXACTLY ONE applicability output (`run_tier`).
