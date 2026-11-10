@@ -1,7 +1,7 @@
 //! CommitLog reader parity oracle (issue #2389).
 //!
 //! The oracle is the CommitLog analog of CQLite's query-semantics oracle: a
-//! KNOWN set of mutations was inserted into a real Cassandra 5.0.2 node and the
+//! KNOWN set of mutations was inserted into a real Cassandra 5.0.8 node and the
 //! resulting segment captured before discard (see
 //! `test-data/scripts/generate-commitlog-fixtures.sh`). This test asserts that
 //! `CommitLogReader` decodes exactly those mutations — table id, partition key,

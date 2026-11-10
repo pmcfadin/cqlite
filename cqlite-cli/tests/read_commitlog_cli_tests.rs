@@ -2,7 +2,7 @@
 //!
 //! Proves the full call chain CLI entry point → `CommitLogReader` → decoded
 //! mutations by invoking the built `cqlite` binary against a real
-//! Cassandra-5.0.2-produced segment fixture committed under
+//! Cassandra-5.0.8-produced segment fixture committed under
 //! `test-data/datasets/commitlog/` (see `generate-commitlog-fixtures.sh`). The
 //! fixtures are small committed reference binaries, so this test never silently
 //! passes on missing data.
