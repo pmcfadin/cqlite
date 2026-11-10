@@ -1,10 +1,10 @@
-SSTable: /data/test_comparator_order/collection_order-f14bf420dcc911f18d78610d41a0deca/nb-1-big
+SSTable: /data/test_comparator_order/collection_order-3479a500a65e11f1895d413585556a46/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (999)
 Maximum timestamp: 01/01/1970 00:00:00 (1000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 11/10/2026 05:45:33 (1794289533)
+SSTable min local deletion time: 09/01/2026 23:38:17 (1788305897)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
@@ -15,14 +15,14 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: a6797f3f-1b08-4912-9872-f197e96dc459
+Originating host id: 9b4141f4-450d-4fb6-90ed-c4d63df0d40e
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1794289466222, position=61705)=CommitLogPosition(segmentId=1794289466222, position=63576)}
+Replay positions covered: {CommitLogPosition(segmentId=1788305833369, position=62620)=CommitLogPosition(segmentId=1788305833369, position=63579)}
 totalColumnsSet: 10
 totalRows: 2
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1794289560 (11/10/2026 05:46:00) |    10 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1788305940 (09/01/2026 23:39:00) |    10 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -58,7 +58,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 2
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 11/10/2026 05:45:33 (1794289533)
+EncodingStats minLocalDeletionTime: 09/01/2026 23:38:17 (1788305897)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (999)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: []
