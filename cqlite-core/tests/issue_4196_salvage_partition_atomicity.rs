@@ -379,6 +379,7 @@ fn indexed_partition_starts(fixture_dir: &std::path::Path) -> Vec<(i32, usize)> 
     };
     let text = std::fs::read_to_string(&golden).unwrap_or_else(|e| panic!("read {golden:?}: {e}"));
     let mut out: Vec<(i32, usize)> = Vec::new();
+    let mut related: Vec<(u64, u64, u64)> = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let v: serde_json::Value =
             serde_json::from_str(line).unwrap_or_else(|e| panic!("{golden:?}: not JSON: {e}"));
@@ -425,14 +426,11 @@ fn indexed_partition_starts(fixture_dir: &std::path::Path) -> Vec<(i32, usize)> 
             &read("Rows"),
             &pk.to_be_bytes(),
         );
-        partition_start::dump_position_convention(
-            &format!("{golden:?} pk={pk}"),
-            &[(
-                start,
-                partition_start::header_len_modern_live(4),
-                golden_position,
-            )],
-        );
+        related.push((
+            start,
+            partition_start::header_len_modern_live(4),
+            golden_position,
+        ));
         let position = start as usize;
         if let Some((prev_pk, prev)) = out.last() {
             assert!(
@@ -450,6 +448,8 @@ fn indexed_partition_starts(fixture_dir: &std::path::Path) -> Vec<(i32, usize)> 
          every OTHER partition survives' is unobservable; got {}",
         out.len()
     );
+    // ONE call for the whole golden: a single convention must hold for every partition.
+    partition_start::dump_position_convention(&format!("{golden:?}"), &related);
     out
 }
 

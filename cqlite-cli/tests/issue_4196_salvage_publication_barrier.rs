@@ -452,22 +452,23 @@ fn indexed_partition_starts(fixture_dir: &Path) -> Vec<(i32, u64)> {
         std::fs::read(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}"))
     };
     let (partitions_db, rows_db) = (read("Partitions"), read("Rows"));
-    golden_partition_positions(fixture_dir)
+    let mut related = Vec::new();
+    let starts: Vec<(i32, u64)> = golden_partition_positions(fixture_dir)
         .into_iter()
         .map(|(pk, golden_position)| {
             let start =
                 partition_start::bti_partition_start(&partitions_db, &rows_db, &pk.to_be_bytes());
-            partition_start::dump_position_convention(
-                &format!("{fixture_dir:?} pk={pk}"),
-                &[(
-                    start,
-                    partition_start::header_len_modern_live(4),
-                    golden_position,
-                )],
-            );
+            related.push((
+                start,
+                partition_start::header_len_modern_live(4),
+                golden_position,
+            ));
             (pk, start)
         })
-        .collect()
+        .collect();
+    // ONE call for the whole golden: a single convention must hold for every partition.
+    partition_start::dump_position_convention(&format!("{fixture_dir:?}"), &related);
+    starts
 }
 
 /// Flip one byte inside compressed chunk `chunk_index`'s PAYLOAD, leaving that

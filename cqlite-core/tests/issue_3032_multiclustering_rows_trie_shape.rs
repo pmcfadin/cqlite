@@ -527,6 +527,25 @@ fn rows_trie_root_matches_the_cassandra_derived_base() {
         return;
     };
 
+    // ONE convention for the whole golden (issue #4501): relate EVERY partition's golden
+    // position to its Rows.db start in a single call.
+    let related: Vec<(u64, u64, u64)> = PKS
+        .iter()
+        .map(|&pk| {
+            let e = decode_entry_independently(&rdb, rows_offset_of(&pdb, pk));
+            let (_, golden_part_pos, _) = golden
+                .iter()
+                .find(|(gpk, _, _)| *gpk == pk)
+                .expect("the golden must cover every pk");
+            (
+                e.data_position,
+                partition_start::header_len_modern_live(4),
+                *golden_part_pos,
+            )
+        })
+        .collect();
+    partition_start::dump_position_convention("multiclustering_table", &related);
+
     for pk in PKS {
         let rows_offset = rows_offset_of(&pdb, pk);
         let e = decode_entry_independently(&rdb, rows_offset);
@@ -648,18 +667,10 @@ fn rows_trie_root_matches_the_cassandra_derived_base() {
         // the 7-byte live header in 5.0.8 ones (issue #4501). The golden's partition
         // position is only RELATED to the start; its row positions are absolute file
         // offsets in both conventions, so they are rebased on the true start.
-        let (_, golden_part_pos, golden_rows) = golden
+        let (_, _, golden_rows) = golden
             .iter()
             .find(|(gpk, _, _)| *gpk == pk)
             .expect("the golden must cover every pk");
-        partition_start::dump_position_convention(
-            &format!("multiclustering_table pk={pk}"),
-            &[(
-                e.data_position,
-                partition_start::header_len_modern_live(4),
-                *golden_part_pos,
-            )],
-        );
         let row_offsets: BTreeSet<u64> = golden_rows
             .iter()
             .map(|abs| {

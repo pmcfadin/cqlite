@@ -188,6 +188,23 @@ fn bigint_of(row: &QueryRow, col: &str) -> Option<i64> {
 async fn bti_point_read_returns_every_clustering_row_with_the_trie_resolved_offset() {
     let (db, golden) = open_bti_fixture().await;
 
+    // ONE convention for the whole golden (issue #4501): every partition's golden
+    // position related to its Partitions.db/Rows.db start in a single call.
+    let related: Vec<(u64, u64, u64)> = [1, 2, 3]
+        .iter()
+        .map(|&pk| {
+            let position = golden_partition(&golden, pk)["partition"]["position"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("golden partition pk={pk} must carry a byte position"));
+            (
+                indexed_partition_start(pk),
+                partition_start::header_len_modern_live(4),
+                position,
+            )
+        })
+        .collect();
+    partition_start::dump_position_convention("wide_table", &related);
+
     for pk in [1, 2, 3] {
         let g = golden_partition(&golden, pk);
         let g_rows = g["rows"].as_array().expect("golden rows array");
@@ -196,17 +213,6 @@ async fn bti_point_read_returns_every_clustering_row_with_the_trie_resolved_offs
         // after the 7-byte live header in 5.0.8 ones (issue #4501). The golden is only
         // RELATED to it.
         let start = indexed_partition_start(pk);
-        let golden_position = g["partition"]["position"]
-            .as_u64()
-            .unwrap_or_else(|| panic!("golden partition pk={pk} must carry a byte position"));
-        partition_start::dump_position_convention(
-            &format!("wide_table pk={pk}"),
-            &[(
-                start,
-                partition_start::header_len_modern_live(4),
-                golden_position,
-            )],
-        );
         let g_position = start as i64;
 
         let result = db
