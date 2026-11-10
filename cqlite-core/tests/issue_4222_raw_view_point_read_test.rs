@@ -958,7 +958,7 @@ async fn point_read_reports_each_generations_own_partition_byte_offset() {
             &format!("{TABLE} gen-{generation} pk=2"),
             &[(
                 start as u64,
-                4,
+                partition_start::header_len_nb(4),
                 golden_position(golden_partition(golden, 2)) as u64,
             )],
         );

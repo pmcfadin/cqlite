@@ -1003,10 +1003,10 @@ async fn issue_1309_wide_partition_following_offset_is_not_off_by_three() {
     // convention for the whole file (issue #4501).
     let parts = parse_jsonl(&jsonl_path).expect("parse JSONL");
     assert_eq!(parts.len(), 3);
-    let related: Vec<(u64, usize, u64)> = [KEY1_OFF, KEY2_OFF, KEY3_OFF]
+    let related: Vec<(u64, u64, u64)> = [KEY1_OFF, KEY2_OFF, KEY3_OFF]
         .iter()
         .zip(parts.iter())
-        .map(|(start, p)| (*start, 4usize, p.position))
+        .map(|(start, p)| (*start, partition_start::header_len_nb(4), p.position))
         .collect();
     let convention =
         partition_start::dump_position_convention("wide_partition JSONL position", &related);

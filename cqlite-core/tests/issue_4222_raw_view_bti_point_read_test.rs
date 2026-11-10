@@ -50,6 +50,8 @@
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
+#[path = "support/partition_start.rs"]
+mod partition_start;
 
 use chrono::DateTime;
 use cqlite_core::query::result::QueryRow;
@@ -115,6 +117,18 @@ fn golden_partitions() -> Vec<Json> {
     parts
 }
 
+/// Data.db START offset of int-keyed partition `pk`, from the fixture's own
+/// `Partitions.db` + `Rows.db` (definitive guide Ch.17).
+fn indexed_partition_start(pk: i32) -> u64 {
+    let dir = resolve_table_generation_dir(KEYSPACE, TABLE)
+        .unwrap_or_else(|e| panic!("committed BTI fixture must resolve: {e}"));
+    let read = |name: &str| {
+        std::fs::read(dir.join(format!("da-2-bti-{name}.db")))
+            .unwrap_or_else(|e| panic!("read da-2-bti-{name}.db: {e}"))
+    };
+    partition_start::bti_partition_start(&read("Partitions"), &read("Rows"), &pk.to_be_bytes())
+}
+
 fn golden_partition(parts: &[Json], pk: i32) -> &Json {
     let wanted = pk.to_string();
     parts
@@ -177,9 +191,23 @@ async fn bti_point_read_returns_every_clustering_row_with_the_trie_resolved_offs
     for pk in [1, 2, 3] {
         let g = golden_partition(&golden, pk);
         let g_rows = g["rows"].as_array().expect("golden rows array");
-        let g_position = g["partition"]["position"]
-            .as_i64()
+        // The partition START, from Partitions.db/Rows.db (Ch.17) — NOT sstabledump's
+        // `partition.position`, which is the start in 5.0.2 goldens and the pointer
+        // after the 7-byte live header in 5.0.8 ones (issue #4501). The golden is only
+        // RELATED to it.
+        let start = indexed_partition_start(pk);
+        let golden_position = g["partition"]["position"]
+            .as_u64()
             .unwrap_or_else(|| panic!("golden partition pk={pk} must carry a byte position"));
+        partition_start::dump_position_convention(
+            &format!("wide_table pk={pk}"),
+            &[(
+                start,
+                partition_start::header_len_modern_live(4),
+                golden_position,
+            )],
+        );
+        let g_position = start as i64;
 
         let result = db
             .execute(&format!(
@@ -241,7 +269,7 @@ async fn bti_point_read_returns_every_clustering_row_with_the_trie_resolved_offs
                 bigint_of(row, "position"),
                 Some(g_position),
                 "pk={pk}'s `position` must be the BTI trie descent's resolved partition \
-                 offset, matching sstabledump's reported offset byte-exact — an \
+                 offset, matching the Partitions.db/Rows.db partition start byte-exact — an \
                  `IndexUnavailable` scan-and-filter degrade would return the same rows with \
                  NO position at all"
             );

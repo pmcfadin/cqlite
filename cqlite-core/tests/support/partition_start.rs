@@ -95,13 +95,18 @@ pub fn big_partition_start_checked(index_db: &Path, data: &[u8], raw_key: &[u8])
     start
 }
 
-/// Bytes of the partition header that `sstabledump` 5.0.8 skips before it reports
-/// `partition.position`: `u16 key_len + key + i32 localDeletionTime + i64
-/// markedForDeleteAt` (`UnfilteredSerializer`/`SortedTablePartitionWriter`, read at
-/// `cassandra-5.0.8`; the 5.0.2 value was the start itself). Documented relation only:
-/// tests assert it against an index-derived start, they never derive a start from it.
-pub fn dump_position_header_len(key_len: usize) -> u64 {
+/// Bytes of the partition header that `sstabledump` 5.0.8 has consumed when it reports
+/// `partition.position`, for an `nb` partition: `u16 key_len + key + i32
+/// localDeletionTime + i64 markedForDeleteAt` (12 bytes of `DeletionTime`).
+pub fn header_len_nb(key_len: usize) -> u64 {
     (2 + key_len + 4 + 8) as u64
+}
+
+/// The same for a LIVE `oa`/`da` partition: the modern `DeletionTime` serializer writes
+/// the single `0x80` live sentinel byte (so `test_da` int-keyed partitions: 2 + 4 + 1 = 7,
+/// which is why the first row there sits at `partition.position`).
+pub fn header_len_modern_live(key_len: usize) -> u64 {
+    (2 + key_len + 1) as u64
 }
 
 /// What a golden's `partition.position` means, per generator release.
@@ -109,40 +114,61 @@ pub fn dump_position_header_len(key_len: usize) -> u64 {
 pub enum DumpPositionConvention {
     /// The partition's start offset (the committed 5.0.2 goldens).
     PartitionStart,
-    /// The scanner pointer after the partition header (`start + 2 + key_len + 12`,
+    /// The scanner pointer after the partition header (`start + header_len_*`,
     /// Cassandra >= 5.0.5: `JsonTransformer` reads `SSTableSimpleScanner.getCurrentPosition()`
     /// = `dfile.getFilePointer()` once the partition header has been consumed).
     AfterHeader,
 }
 
-/// Classify a whole golden: for every `(index_start, key_len, dump_position)` the dump
+/// Classify a whole golden: for every `(index_start, header_len, dump_position)` the dump
 /// position must be EXACTLY the start or EXACTLY start + header, and one convention
 /// must hold for every partition of the file. Any other value (or a mix) panics, so a
 /// drifted golden can never pass by accident.
 pub fn dump_position_convention(
     what: &str,
-    partitions: &[(u64, usize, u64)],
+    partitions: &[(u64, u64, u64)],
 ) -> DumpPositionConvention {
     assert!(!partitions.is_empty(), "{what}: no partitions to classify");
     let mut seen: Option<DumpPositionConvention> = None;
-    for &(start, key_len, dump) in partitions {
+    for &(start, header_len, dump) in partitions {
         let this = if dump == start {
             DumpPositionConvention::PartitionStart
-        } else if dump == start + dump_position_header_len(key_len) {
+        } else if dump == start + header_len {
             DumpPositionConvention::AfterHeader
         } else {
             panic!(
                 "{what}: dump position {dump} is neither the index-derived start {start} nor \
                  start + header ({})",
-                start + dump_position_header_len(key_len)
+                start + header_len
             );
         };
-        // key_len 0 cannot disambiguate (header-only partition has len>=14), so no
-        // ambiguity exists between the two cases.
         match seen {
             None => seen = Some(this),
             Some(prev) => assert_eq!(prev, this, "{what}: mixed dump-position conventions"),
         }
     }
     seen.expect("non-empty")
+}
+
+/// Data.db START offset of the BTI partition whose raw key bytes are `raw_key`, from
+/// `Partitions.db` (+ `Rows.db` for wide partitions), definitive guide Ch.17:
+/// a narrow partition's trie payload is the `Data.db` offset itself
+/// (`BtiPartitionLocation::DataOffset`); a wide one points at a `Rows.db`
+/// `TrieIndexEntry` whose first field is the partition's `Data.db` position.
+pub fn bti_partition_start(partitions_db: &[u8], rows_db: &[u8], raw_key: &[u8]) -> u64 {
+    use cqlite_core::storage::sstable::bti::{
+        lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry, BtiPartitionLocation,
+    };
+    let mut cur = std::io::Cursor::new(partitions_db.to_vec());
+    match lookup_raw_key_in_bti_partitions_db(&mut cur, raw_key)
+        .expect("Partitions.db lookup must succeed")
+    {
+        Some(BtiPartitionLocation::DataOffset(o)) => o,
+        Some(BtiPartitionLocation::RowsOffset(o)) => {
+            resolve_rows_db_entry(rows_db, o as usize)
+                .expect("Rows.db entry must deserialize")
+                .data_position
+        }
+        None => panic!("Partitions.db has no entry for key {raw_key:02x?}"),
+    }
 }
