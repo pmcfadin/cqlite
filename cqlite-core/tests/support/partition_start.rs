@@ -26,29 +26,38 @@ use cqlite_core::Config;
 /// Every `(raw partition key bytes, Data.db start offset)` entry of a BIG `Index.db`,
 /// in file order.
 pub fn big_partition_starts(index_db: &Path) -> Vec<(Vec<u8>, u64)> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
     let path = index_db.to_path_buf();
-    let entries = rt.block_on(async move {
-        let config = Config::default();
-        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
-        let reader = IndexReader::open(&path, platform)
-            .await
-            .unwrap_or_else(|e| panic!("open {path:?}: {e}"));
-        reader
-            .get_partition_entries()
-            .iter()
-            .map(|e| {
-                let key = e
-                    .raw_key
-                    .clone()
-                    .unwrap_or_else(|| e.key_digest.clone())
-                    .to_vec();
-                (key, e.data_offset)
+    // A fresh OS thread owns its own runtime, so this is callable from sync tests AND
+    // from inside a `#[tokio::test]` (where `block_on` on the caller's thread panics).
+    let entries = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                rt.block_on(async {
+                    let config = Config::default();
+                    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+                    let reader = IndexReader::open(&path, platform)
+                        .await
+                        .unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+                    reader
+                        .get_partition_entries()
+                        .iter()
+                        .map(|e| {
+                            let key = e
+                                .raw_key
+                                .clone()
+                                .unwrap_or_else(|| e.key_digest.clone())
+                                .to_vec();
+                            (key, e.data_offset)
+                        })
+                        .collect::<Vec<_>>()
+                })
             })
-            .collect::<Vec<_>>()
+            .join()
+            .expect("index reader thread")
     });
     assert!(!entries.is_empty(), "{index_db:?} declares no partitions");
     entries
