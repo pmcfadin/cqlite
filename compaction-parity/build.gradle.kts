@@ -4,7 +4,7 @@ import org.gradle.api.tasks.testing.logging.TestLogEvent
 /*
  * Compaction-parity harness (issue #842).
  *
- * Builds against a pinned Apache Cassandra 5.0.2 source checkout produced by
+ * Builds against a pinned Apache Cassandra 5.0.8 source checkout produced by
  * scripts/bootstrap-cassandra.sh. The harness runs Cassandra's compaction in-JVM
  * (the reference) and shells out to the `cqlite compact` binary (the candidate),
  * then compares the outputs (logical tier now; byte tier in a follow-up).
@@ -16,7 +16,7 @@ plugins {
 
 // ── Locate the Cassandra source checkout ────────────────────────────────────
 val defaultCassandraSrc =
-    "${System.getProperty("user.home")}/.cache/cqlite/cassandra-src/cassandra-5.0.2"
+    "${System.getProperty("user.home")}/.cache/cqlite/cassandra-src/cassandra-5.0.8"
 val cassandraSrc: String =
     (findProperty("cassandraSrc") as String?)
         ?: System.getenv("CQLITE_CASSANDRA_SRC")
@@ -131,8 +131,8 @@ fun Test.configureParityHarness(label: String) {
     )
     // Pinned Cassandra provenance recorded in the failure-artifact record so it is
     // comparable to the manifest cassandra_source pin (issue #1027).
-    systemProperty("parity.cassandra.version", "5.0.2")
-    systemProperty("parity.cassandra.git.sha", "f278f6774fc76465c182041e081982105c3e7dbb")
+    systemProperty("parity.cassandra.version", "5.0.8")
+    systemProperty("parity.cassandra.git.sha", "172227094626d50d4bc9a3d9de2e3659a7844386")
 
     maxParallelForks = 1
 

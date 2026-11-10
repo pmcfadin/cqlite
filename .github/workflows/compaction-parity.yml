@@ -24,7 +24,7 @@ name: "CI: Compaction Parity (differential harness)"
 # TRIGGERS: PRs that touch the write/merge/compaction paths or this harness, plus
 # manual workflow_dispatch, plus `workflow_call` from the nightly-docker-parity.yml
 # umbrella. The pinned Cassandra source build (ant jar build-test) is slow, so it
-# is cached under ~/.cache/cqlite keyed on the cassandra-5.0.2 pin and the
+# is cached under ~/.cache/cqlite keyed on the cassandra-5.0.8 pin and the
 # bootstrap script hash.
 #
 # DE-DUPLICATION (issue #2650, epic #2636): this lane's standalone nightly
@@ -76,8 +76,8 @@ concurrency:
 env:
   # Single source of truth for the pinned Cassandra version. MUST match the pin
   # in compaction-parity/scripts/bootstrap-cassandra.sh (CASSANDRA_REF) and the
-  # cassandra:5.0.2 image used elsewhere (issue #669).
-  CASSANDRA_REF: cassandra-5.0.2
+  # cassandra:5.0.8 image used by the generators (issue #669).
+  CASSANDRA_REF: cassandra-5.0.8
   # Where bootstrap-cassandra.sh fetches+builds the pinned source. The script
   # uses $HOME/.cache/cqlite/cassandra-src/<ref>; pin the parent here for caching.
   CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src

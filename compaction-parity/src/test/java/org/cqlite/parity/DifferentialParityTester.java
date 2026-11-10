@@ -96,17 +96,17 @@ public abstract class DifferentialParityTester extends CQLTester
      * the failure-artifact {@code provenance} so it is comparable to the manifest
      * {@code cassandra_source} pin. Overridable via {@code -Dparity.cassandra.version}
      * / {@code -Dparity.cassandra.git.sha} (the Gradle build sets these from the
-     * pinned source); the defaults match the manifest's compaction scenarios.
+     * pinned source); the defaults match the pin in test-data/scripts/lib/cassandra-image.sh (#4482).
      */
     private static String cassandraVersion()
     {
-        return System.getProperty("parity.cassandra.version", "5.0.2");
+        return System.getProperty("parity.cassandra.version", "5.0.8");
     }
 
     private static String cassandraGitSha()
     {
         return System.getProperty("parity.cassandra.git.sha",
-                                  "f278f6774fc76465c182041e081982105c3e7dbb");
+                                  "172227094626d50d4bc9a3d9de2e3659a7844386");
     }
 
     @Rule
