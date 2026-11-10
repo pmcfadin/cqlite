@@ -107,19 +107,21 @@ fi
 # --- Outcome 3: FAIL when the manifest changed without regenerating the report.
 # Render a MUTATED manifest against the (unchanged) committed report: the fresh
 # render no longer matches the committed report -> --check prints "STALE" and exits
-# nonzero. We mutate a rendered field (cassandra_source.ref appears in the report
+# nonzero. We mutate a rendered field (cassandra_source.repo appears in the report
 # header), keeping the YAML valid. The mutated manifest lives at a real repo-layout
 # path ($MUT under test-data/) so the tool's repo_root() resolves correctly and lint
 # passes — otherwise --check would bail on lint errors BEFORE rendering and this case
 # would (wrongly) observe FAIL without ever exercising the STALE path. --output stays
 # the canonical committed report, which --check only READS, so the tree is unmodified.
-# Match the cassandra_source.ref by KEY, not by its current pinned value, so a
-# routine `ref:` bump does not silently turn this into a no-op (which would make
+# Match the cassandra_source.repo by KEY, not by its current value, so a
+# routine edit does not silently turn this into a no-op (which would make
 # the FAIL case unexercised and hard-FAIL the whole gate for an unrelated reason).
 # roborev finding (#1338): value-coupled `sed` on `cassandra-5.0.2` was brittle.
-sed -E 's/^(  ref: ).*/\1cassandra-5.0.99-staleness-probe/' "$MANIFEST" >"$MUT"
+# `repo` rather than `ref` (#4482): every scenario's evidence version/sha must match a
+# declared pin, so mutating `ref`/`sha` made the manifest fail LINT before it rendered.
+sed -E 's#^(  repo: ).*#\1https://github.com/apache/cassandra-staleness-probe#' "$MANIFEST" >"$MUT"
 if cmp -s "$MANIFEST" "$MUT"; then
-  bad "could not mutate manifest copy (cassandra_source.ref not found); FAIL case not exercised"
+  bad "could not mutate manifest copy (cassandra_source.repo not found); FAIL case not exercised"
 else
   sum="$tmp/fail.txt"; log="$tmp/fail.log"
   AGENT_GATE_SUMMARY_FILE="$sum" PARITY_REPORT_MANIFEST="$MUT" \
