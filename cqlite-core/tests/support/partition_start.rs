@@ -86,7 +86,11 @@ pub fn big_partition_start(index_db: &Path, raw_key: &[u8]) -> u64 {
 pub fn big_partition_start_checked(index_db: &Path, data: &[u8], raw_key: &[u8]) -> usize {
     let start = big_partition_start(index_db, raw_key) as usize;
     let key_len = u16::from_be_bytes([data[start], data[start + 1]]) as usize;
-    assert_eq!(key_len, raw_key.len(), "{index_db:?}: key length at {start}");
+    assert_eq!(
+        key_len,
+        raw_key.len(),
+        "{index_db:?}: key length at {start}"
+    );
     assert_eq!(
         &data[start + 2..start + 2 + key_len],
         raw_key,
