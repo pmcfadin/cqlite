@@ -143,16 +143,20 @@ pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFind
     out
 }
 
-/// Bind an ADDITIONAL pin to the scenarios the audited corpus covers (roborev job 178).
+/// Bind the matched pin to the scenarios the audited corpus covers (roborev jobs 178, 183).
 ///
 /// [`check_provenance`] proves the recorded run came from ONE declared pin. That alone
-/// would let a 5.0.8-generated corpus pass while every scenario still claims 5.0.2, so a
-/// non-primary pin is accepted only when the scenarios whose fixtures the corpus provides
-/// ([`refs::covering_scenarios`]) ALL declare that pin's release in
-/// `evidence.cassandra_version` AND `evidence.cassandra_git_sha` (a version alone is not enough: duplicate derived versions are also rejected by the linter). If none is covered, or any disagrees (a scenario that
-/// claims another release or none), the run is rejected naming those scenarios and the
-/// versions they declare. The primary pin is unchanged: the committed fixtures and
-/// scenarios are on it until a regeneration moves them.
+/// would let a 5.0.8-generated corpus pass while every scenario still claims 5.0.2 (or the
+/// reverse), so EVERY matched pin, primary included, is bound: the scenarios whose fixtures
+/// the corpus provides ([`refs::covering_scenarios`]) must ALL declare that pin's release in
+/// `evidence.cassandra_version` AND its commit in `evidence.cassandra_git_sha` (duplicate
+/// derived versions and shas are rejected by the linter, so the pair identifies one pin).
+///
+/// A covered scenario that declares NEITHER field predates per-fixture evidence and has
+/// always meant "the primary pin": it is treated as implicitly declaring the primary, so it
+/// binds to a primary-pin corpus and fails against an additional pin. A scenario declaring
+/// only one field matches no pin. If nothing is covered, or any scenario disagrees, the run
+/// is rejected naming those scenarios and what they declare.
 pub fn check_pin_binding(
     prov: &Provenance,
     manifest: &Manifest,
@@ -166,35 +170,47 @@ pub fn check_pin_binding(
     else {
         return Vec::new(); // not a declared pin: check_provenance already rejects it
     };
-    if index == 0 {
-        return Vec::new(); // the primary pin
-    }
+    let (primary_version, _, primary_sha) = &pins[0];
+    let is_primary = index == 0;
 
     let covering = refs::covering_scenarios(manifest, inventory);
     let disagree: Vec<String> = covering
         .iter()
-        .filter(|s| {
+        .filter_map(|s| {
             let e = &s.evidence;
-            e.cassandra_version.as_deref().map(str::trim) != Some(pin_version.as_str())
-                || e.cassandra_git_sha.as_deref().map(str::trim) != Some(*pin_sha)
-        })
-        .map(|s| {
-            let e = &s.evidence;
-            format!(
-                "{} (declares {} @ {})",
-                s.id,
-                e.cassandra_version.as_deref().unwrap_or("no version"),
-                e.cassandra_git_sha
-                    .as_deref()
-                    .map(|x| x.chars().take(12).collect::<String>())
+            let version = e.cassandra_version.as_deref().map(str::trim);
+            let sha = e.cassandra_git_sha.as_deref().map(str::trim);
+            let (version, sha, implicit) = match (version, sha) {
+                (None, None) => (Some(primary_version.as_str()), Some(*primary_sha), true),
+                (v, sh) => (v, sh, false),
+            };
+            if version == Some(pin_version.as_str()) && sha == Some(*pin_sha) {
+                return None;
+            }
+            let short = |x: Option<&str>| {
+                x.map(|x| x.chars().take(12).collect::<String>())
                     .unwrap_or_else(|| "no sha".to_string())
-            )
+            };
+            Some(format!(
+                "{} (declares {} @ {}{})",
+                s.id,
+                version.unwrap_or("no version"),
+                short(sha),
+                if implicit {
+                    ", absent evidence = primary"
+                } else {
+                    ""
+                }
+            ))
         })
         .collect();
     let subject = |detail: String| {
         AuditFinding::new(FindingKind::ProvenanceMismatch, pin_ref.to_string(), detail)
     };
     if covering.is_empty() {
+        if is_primary {
+            return Vec::new(); // nothing claims otherwise; the primary is the baseline
+        }
         return vec![subject(format!(
             "the corpus was generated from additional pin {pin_ref}, but no scenario's fixtures \
              are covered by this corpus, so no scenario declares {pin_version}"
@@ -215,9 +231,9 @@ pub fn check_pin_binding(
         String::new()
     };
     vec![subject(format!(
-        "the corpus was generated from additional pin {pin_ref} ({pin_version}), but \
-         {} of the {} scenarios whose fixtures it covers do not declare \
-         evidence.cassandra_version {pin_version} AND evidence.cassandra_git_sha {pin_sha}: {shown}{more}",
+        "the corpus was generated from pin {pin_ref} ({pin_version}), but {} of the {} scenarios \
+         whose fixtures it covers do not declare evidence.cassandra_version {pin_version} AND \
+         evidence.cassandra_git_sha {pin_sha}: {shown}{more}",
         disagree.len(),
         covering.len()
     ))]
