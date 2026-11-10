@@ -412,19 +412,22 @@ fn indexed_partition_starts(fixture_dir: &std::path::Path) -> Vec<(i32, usize)> 
                         derived from it, so its absence must fail loudly"
                 )
             });
-        let read = |name: &str| {
-            let p = std::fs::read_dir(fixture_dir)
+        let component = |name: &str| {
+            std::fs::read_dir(fixture_dir)
                 .expect("read fixture dir")
                 .flatten()
                 .map(|e| e.path())
                 .find(|p| p.to_string_lossy().ends_with(&format!("-{name}.db")))
-                .unwrap_or_else(|| panic!("{fixture_dir:?}: no *-{name}.db"));
-            std::fs::read(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}"))
+                .unwrap_or_else(|| panic!("{fixture_dir:?}: no *-{name}.db"))
         };
-        let start = partition_start::bti_partition_start(
-            &read("Partitions"),
-            &read("Rows"),
+        // Proven against the raw, independently decoded Data.db (u16 key length, key,
+        // live 0x80 header byte), so a lookup off by the header cannot validate itself.
+        let start = partition_start::bti_partition_start_verified(
+            &component("Partitions"),
+            &component("Rows"),
+            &component("Data"),
             &pk.to_be_bytes(),
+            partition_start::HeaderForm::ModernLive,
         );
         related.push((
             start,
