@@ -200,3 +200,45 @@ fn canonical_comparator_ignores_sstabledump_position() {
         );
     }
 }
+
+/// #4486: CQLite's `TocWriter` must emit the 5.0.8 `TOC.txt` BYTE FOR BYTE for the same
+/// component set. Expected bytes are the committed Cassandra-written 5.0.8 sample
+/// (`test-data/fixtures/issue_4482/cassandra-5.0.8/`), never CQLite's own output.
+#[test]
+fn toc_writer_is_byte_identical_to_the_cassandra_5_0_8_toc_for_the_same_components() {
+    use cqlite_core::storage::sstable::writer::{ComponentEntry, TocWriter};
+
+    let sample = sample_dir().join("nb-1-big-TOC.txt");
+    let expected = std::fs::read(&sample).unwrap();
+    let (components, unknown) = parse_toc_file_detailed(&sample).unwrap();
+    assert!(
+        unknown.is_empty(),
+        "guard: all sample components recognised"
+    );
+    assert!(components.len() >= 7, "guard: non-trivial component set");
+
+    // Feed the writer the set in several different input orders (the TOC itself is
+    // added by the writer when absent, so also try with it omitted).
+    let entries = |it: &mut dyn Iterator<Item = &SSTableComponent>| -> Vec<ComponentEntry> {
+        it.cloned().map(ComponentEntry::new).collect()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut variants: Vec<Vec<ComponentEntry>> = vec![
+        entries(&mut components.iter()),
+        entries(&mut components.iter().rev()),
+        entries(&mut components.iter().filter(|c| **c != SSTableComponent::TOC)),
+    ];
+    // Rotate for a third distinct permutation.
+    let mut rotated = entries(&mut components.iter());
+    rotated.rotate_left(3);
+    variants.push(rotated);
+    for (i, v) in variants.iter().enumerate() {
+        let out = tmp.path().join(format!("v{i}-nb-1-big-TOC.txt"));
+        TocWriter::new(out.clone()).write(v).unwrap();
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            expected,
+            "variant {i}: not byte-identical to 5.0.8"
+        );
+    }
+}

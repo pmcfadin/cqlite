@@ -45,13 +45,13 @@ impl ComponentEntry {
 ///
 /// Plain text file with one component filename per line:
 /// ```text
+/// CompressionInfo.db
 /// Data.db
-/// Index.db
+/// Digest.crc32
 /// Filter.db
+/// Index.db
 /// Statistics.db
 /// Summary.db
-/// CompressionInfo.db
-/// Digest.crc32
 /// TOC.txt
 /// ```
 ///
@@ -59,7 +59,8 @@ impl ComponentEntry {
 ///
 /// 1. TOC.txt MUST be written LAST after all other components
 /// 2. TOC.txt MUST include itself in the listing
-/// 3. Component order in the file doesn't matter (implementation orders for consistency)
+/// 3. Component order is Cassandra 5.0.8's (sorted file names, see `write`); readers
+///    treat the file as a set
 ///
 /// # Example
 ///
@@ -96,7 +97,8 @@ impl TocWriter {
     /// Write TOC.txt file with the given component list
     ///
     /// Automatically adds TOC.txt itself to the listing if not already present.
-    /// Components are written in a consistent order for deterministic output.
+    /// Components are written in Cassandra 5.0.8's order: distinct file names in
+    /// case-sensitive `String` natural order (see the ORDER RULE in the body).
     ///
     /// # Arguments
     ///
@@ -123,26 +125,20 @@ impl TocWriter {
             final_components.push(ComponentEntry::new(SSTableComponent::TOC));
         }
 
-        // Sort components for deterministic output. This is the Cassandra 5.0.2 write
-        // order; 5.0.8 writes TOC.txt lexicographically (CASSANDRA-20494). A TOC is an
-        // inventory and every CQLite reader treats it as a set (#4482), so either
-        // order is valid.
-        // Order: Data, Statistics, Digest, TOC, CompressionInfo, Filter, Index, Summary
-        final_components.sort_by_key(|entry| match entry.component {
-            SSTableComponent::Data => 0,
-            SSTableComponent::Statistics => 1,
-            SSTableComponent::Digest => 2,
-            SSTableComponent::TOC => 3,
-            SSTableComponent::CompressionInfo => 4,
-            // CRC.db (uncompressed per-chunk CRC) sorts next to CompressionInfo,
-            // its compressed-table counterpart; the two are mutually exclusive.
-            SSTableComponent::Crc => 5,
-            SSTableComponent::Filter => 6,
-            SSTableComponent::Index => 7,
-            SSTableComponent::Summary => 8,
-            SSTableComponent::Partitions => 9,
-            SSTableComponent::Rows => 10,
-        });
+        // ORDER RULE (#4486), pinned at `cassandra-5.0.8` (CASSANDRA-20494):
+        //   TOCComponent.updateTOC builds `new TreeSet<>(Collections2.transform(
+        //   components, Component::name))` and writes `new ArrayList<>(set)` with
+        //   FileUtils.write(..., CREATE, TRUNCATE_EXISTING, SYNC).
+        // i.e. the TOC lines are the DISTINCT component FILE-NAME strings (`Data.db`,
+        // `Digest.crc32`, `TOC.txt`, ...: the on-disk suffix after `<version>-<fmt>-`,
+        // no other normalisation) in `String.compareTo` natural order: UTF-16 code
+        // unit order, CASE-SENSITIVE (so `CRC.db` < `CompressionInfo.db` < `Data.db`),
+        // not "alphabetical, case-folded". For these ASCII names that equals Rust's
+        // `str` byte order, which is what `sort`/`dedup` on the file-name use here.
+        // Each line ends in `\n`. (5.0.2 wrote an arbitrary insertion order; every
+        // CQLite reader treats the TOC as a set, pinned by #4482 stage 1.)
+        final_components.sort_by(|a, b| a.filename().cmp(b.filename()));
+        final_components.dedup_by(|a, b| a.filename() == b.filename());
 
         // Create file with buffered writing
         let file = File::create(&self.path).map_err(|e| {
@@ -241,15 +237,44 @@ mod tests {
 
         assert_eq!(lines.len(), 8); // 7 components + TOC.txt
 
-        // Verify order matches expected canonical order
-        assert_eq!(lines[0], "Data.db");
-        assert_eq!(lines[1], "Statistics.db");
-        assert_eq!(lines[2], "Digest.crc32");
-        assert_eq!(lines[3], "TOC.txt");
-        assert_eq!(lines[4], "CompressionInfo.db");
-        assert_eq!(lines[5], "Filter.db");
-        assert_eq!(lines[6], "Index.db");
-        assert_eq!(lines[7], "Summary.db");
+        // Cassandra 5.0.8 order (#4486): sorted file names, case-sensitive.
+        assert_eq!(
+            lines,
+            [
+                "CompressionInfo.db",
+                "Data.db",
+                "Digest.crc32",
+                "Filter.db",
+                "Index.db",
+                "Statistics.db",
+                "Summary.db",
+                "TOC.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_toc_writer_order_is_case_sensitive_and_deduplicated() {
+        let temp_dir = TempDir::new().unwrap();
+        let toc_path = temp_dir.path().join("da-1-bti-TOC.txt");
+        // CRC.db sorts BEFORE CompressionInfo.db ('R' < 'o'), Rows.db after Partitions.db.
+        let components: Vec<_> = [
+            SSTableComponent::Rows,
+            SSTableComponent::Data,
+            SSTableComponent::Data,
+            SSTableComponent::CompressionInfo,
+            SSTableComponent::Partitions,
+            SSTableComponent::Crc,
+        ]
+        .into_iter()
+        .map(ComponentEntry::new)
+        .collect();
+        TocWriter::new(toc_path.clone()).write(&components).unwrap();
+        let contents = fs::read_to_string(&toc_path).unwrap();
+        assert_eq!(
+            contents,
+            "CRC.db\nCompressionInfo.db\nData.db\nPartitions.db\nRows.db\nTOC.txt\n"
+        );
     }
 
     #[test]
