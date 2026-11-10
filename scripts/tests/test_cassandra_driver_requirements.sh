@@ -54,6 +54,52 @@ case "$_CQLITE_DRIVER_WHEEL_aarch64 $_CQLITE_DRIVER_WHEEL_x86_64" in
   *aarch64*x86_64*) ok "driver wheel table carries aarch64 and x86_64";; *) bad "driver wheel table lacks an arch";;
 esac
 
+# --- fake container engine (python): config via env, state in $FE_DIR ------------------------
+T="$(mktemp -d)"
+cat > "$T/fake_engine.py" <<'PYENG'
+import os, shutil, sys
+a = sys.argv[1:]
+d = os.environ["FAKE_DIR"]
+with open(os.path.join(d, "calls.log"), "a") as f:
+    f.write(" ".join(a) + "\n")
+state = os.path.join(d, "installed")
+if os.path.exists(state):
+    installed = set(open(state).read().split())
+else:
+    installed = set(filter(None, os.environ.get("FAKE_PRESENT", "").split(",")))
+if a[0] == "exec":
+    cmd = a[2:]
+    if cmd[0] == "uname":
+        print(os.environ["FAKE_ARCH"])
+    elif cmd[0] == "bash":
+        sys.exit(1)                       # no pip3 in this container
+    elif cmd[0] == "python3":
+        if any("version_info" in x for x in cmd):
+            print("3.11")
+        else:                             # presence probe: python3 -c <script> pin...
+            sys.exit(0 if all(p in installed for p in cmd[3:]) else 1)
+elif a[0] == "cp":
+    src = a[1]
+    shutil.copytree(src, os.path.join(d, "dist"), dirs_exist_ok=True)
+    for e in os.listdir(src):
+        if e.endswith(".dist-info"):
+            n, v = e[: -len(".dist-info")].rsplit("-", 1)
+            installed.add(n.replace("_", "-") + "==" + v)
+    open(state, "w").write("\n".join(sorted(installed)))
+PYENG
+# fe_setup <name> <arch> <comma-list of pins already present>; sets FE_DIR FE_LOG FE_ENGINE
+fe_setup() {
+  FE_DIR="$T/fe-$1"; mkdir -p "$FE_DIR"; FE_LOG="$FE_DIR/calls.log"; : > "$FE_LOG"
+  FE_ENGINE="$FE_DIR/engine"
+  printf '#!/bin/sh\nFAKE_DIR="%s" FAKE_ARCH="%s" FAKE_PRESENT="%s" exec python3 "%s/fake_engine.py" "$@"\n' \
+    "$FE_DIR" "$2" "$3" "$T" > "$FE_ENGINE"; chmod +x "$FE_ENGINE"
+}
+# all four exact -> the install is SKIPPED entirely (no download, no copy, no arch probe)
+all_pins="$(grep -E '^[A-Za-z0-9._-]+==' "$REQ" | sed -E 's/[[:space:]\\].*$//' | paste -sd, -)"
+fe_setup "all-exact" x86_64 "$all_pins"
+CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$FE_ENGINE" fakec >/dev/null 2>&1
+if [ "$?" = 0 ] && ! grep -qE "^cp |uname" "$FE_LOG"; then ok "all four distributions at the pinned versions: the install is skipped"; else bad "all-exact container was not skipped: $(cat "$FE_LOG" | head -3 | tr '\n' ';')"; fi
+
 PIP=""
 for c in pip3 pip "python3 -m pip"; do $c --version >/dev/null 2>&1 && { PIP="$c"; break; }; done
 reach() {  # connectivity probe, separate from the resolver
@@ -67,7 +113,6 @@ elif ! reach; then
   echo "skip - pypi.org unreachable (HEAD https://pypi.org/simple/six/ failed): platform-resolution and tamper legs not run"
 else
   # Connectivity is CONFIRMED: from here a resolver or download failure is a FAIL.
-  T="$(mktemp -d)"
   for plat in manylinux2014_x86_64 manylinux2014_aarch64; do
     out="$($PIP download --quiet --no-deps --only-binary=:all: --platform "$plat" --python-version 3.11 \
          --require-hashes -r "$REQ" -d "$T/$plat" 2>&1)"; rc=$?
@@ -77,35 +122,33 @@ else
       bad "requirements did NOT resolve for cp311 / $plat (rc=$rc) with pypi reachable: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
     fi
   done
-  # Arch selection in the no-pip unpack path, driven through a FAKE engine script that
-  # reports a python3.11 / <arch> container with no pip: the unpacked driver extension
-  # must be built for that arch (ELF e_machine 183 = aarch64, 62 = x86_64).
+  # --- install paths through the FAKE engine (needs the wheels, so only with pypi reachable)
   for want_arch in aarch64 x86_64; do
-    FAKE="$T/fake-$want_arch"; mkdir -p "$FAKE"
-    cat > "$T/engine-$want_arch" <<ENG
-#!/usr/bin/env bash
-# fake container engine: argv = exec <c> <cmd...> | cp <src> <c>:<dst>
-case "\$1" in
-  exec)
-    case "\$3" in
-      uname) echo $want_arch ;;
-      bash) exit 1 ;;
-      python3)
-        if [[ "\$*" == *version_info* ]]; then echo 3.11
-        else [ -d "$FAKE/cassandra" ]; fi ;;
-    esac ;;
-  cp) cp -r "\$2" "$FAKE/" ;;
-esac
-ENG
-    chmod +x "$T/engine-$want_arch"
-    CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$T/engine-$want_arch" fakec >/dev/null 2>&1 || true
-    so="$(find "$FAKE/cassandra" -name 'cluster*.so' -o -name 'cython_marshal*.so' 2>/dev/null | head -1)"
-    [ -z "$so" ] && so="$(find "$FAKE" -name '*.so' 2>/dev/null | head -1)"
+    fe_setup "arch-$want_arch" "$want_arch" ""
+    CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$FE_ENGINE" fakec >/dev/null 2>&1 || true
+    so="$(find "$FE_DIR/dist" -name '*.so' 2>/dev/null | head -1)"
     mach="$(python3 -c 'import struct,sys; print(struct.unpack_from("<H", open(sys.argv[1],"rb").read(20), 18)[0])' "$so" 2>/dev/null)"
     exp=$([ "$want_arch" = aarch64 ] && echo 183 || echo 62)
     [ "$mach" = "$exp" ] && ok "no-pip unpack picks the $want_arch driver wheel (ELF e_machine $mach)" \
-      || bad "no-pip unpack for $want_arch produced ELF e_machine '${mach:-none}' (expected $exp) from '${so:-no .so}'"
+      || bad "no-pip unpack for $want_arch gave ELF e_machine '${mach:-none}' (expected $exp)"
   done
+  # a multi-word engine ("sudo -n <engine>") still works: every helper call goes through it
+  fe_setup "multiword" aarch64 ""
+  printf '#!/bin/sh\n[ "$1" = "-n" ] && shift\necho "$*" >> "%s/sudo.log"\nexec "$@"\n' "$FE_DIR" > "$T/fakesudo"; chmod +x "$T/fakesudo"
+  CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$T/fakesudo -n $FE_ENGINE" fakec >/dev/null 2>&1 || true
+  if [ -f "$FE_DIR/sudo.log" ] && grep -q "exec fakec" "$FE_DIR/sudo.log" && grep -q "^cp " "$FE_LOG" && [ -n "$(find "$FE_DIR/dist" -name '*.so' 2>/dev/null | head -1)" ]; then
+    ok "a multi-word engine ('sudo -n <engine>') is split once and used for every call ($(wc -l < "$FE_DIR/sudo.log" | tr -d ' ') calls)"
+  else
+    bad "multi-word engine did not drive the install (sudo.log: $(cat "$FE_DIR/sudo.log" 2>/dev/null | head -2 | tr '\n' ';'))"
+  fi
+  # driver alone present -> the hash-locked install MUST still run; a wrong click -> runs too
+  all_pins="$(grep -E '^[A-Za-z0-9._-]+==' "$REQ" | sed -E 's/[[:space:]\\].*$//' | paste -sd, -)"
+  fe_setup "driver-only" x86_64 "cassandra-driver==${CQLITE_CASSANDRA_DRIVER_VERSION}"
+  CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$FE_ENGINE" fakec >/dev/null 2>&1 || true
+  grep -q "^cp " "$FE_LOG" && ok "driver present but click/geomet/six missing: the install RUNS" || bad "driver-only container skipped the install"
+  fe_setup "wrong-click" x86_64 "$(printf '%s' "$all_pins" | sed 's/click==[0-9.]*/click==8.0.0/')"
+  CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$FE_ENGINE" fakec >/dev/null 2>&1 || true
+  grep -q "^cp " "$FE_LOG" && ok "a wrong click version: the install RUNS" || bad "wrong-click container skipped the install"
   python3 -c "
 import re,sys
 s=open('$REQ').read()

@@ -52,11 +52,27 @@ _cqlite_sha256() {
   fi
 }
 
-# True when the container already imports the pinned driver version.
+# True when the container already has ALL FOUR hash-locked distributions at their exact
+# pinned versions. The (name, version) pairs are read from the requirements file, so there
+# is no second copy of the pins. `$1` is the engine command, possibly several words
+# (`sudo -n docker`), split once here.
 _cqlite_driver_present() {
-  "$1" exec "$2" python3 -c \
-    "import sys, cassandra; sys.exit(0 if cassandra.__version__ == '${CQLITE_CASSANDRA_DRIVER_VERSION}' else 1)" \
-    >/dev/null 2>&1
+  local -a eng pins
+  read -r -a eng <<<"$1"
+  mapfile -t pins < <(grep -E '^[A-Za-z0-9._-]+==' "$CQLITE_CASSANDRA_DRIVER_REQUIREMENTS" | sed -E 's/[[:space:]\\].*$//')
+  [ "${#pins[@]}" -gt 0 ] || return 1
+  "${eng[@]}" exec "$2" python3 -c '
+import sys
+from importlib import metadata
+for pin in sys.argv[1:]:
+    name, _, want = pin.partition("==")
+    try:
+        if metadata.version(name) != want:
+            sys.exit(1)
+    except metadata.PackageNotFoundError:
+        sys.exit(1)
+import cassandra
+' "${pins[@]}" >/dev/null 2>&1
 }
 
 # cqlite_install_cassandra_driver <engine> <container>
@@ -73,17 +89,19 @@ _cqlite_driver_present() {
 #   4. otherwise: a clear error naming route 1.
 cqlite_install_cassandra_driver() {
   local engine="$1" container="$2" spec url sha name cache dir pyver arch have_pip=0 verified=0 wheels=()
+  local -a eng
+  read -r -a eng <<<"$engine"   # ENGINE may be several words, e.g. "sudo -n docker"
   _cqlite_driver_present "$engine" "$container" && return 0
 
-  pyver="$("$engine" exec "$container" python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
-  arch="$("$engine" exec "$container" uname -m 2>/dev/null)"
+  pyver="$("${eng[@]}" exec "$container" python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
+  arch="$("${eng[@]}" exec "$container" uname -m 2>/dev/null)"
   [ "$arch" = "arm64" ] && arch="aarch64"
   if [ "$pyver" = "3.11" ] && [ "$arch" = "x86_64" ]; then
     verified=1; wheels=("$_CQLITE_DRIVER_WHEEL_x86_64" "${_CQLITE_DRIVER_WHEELS_COMMON[@]}")
   elif [ "$pyver" = "3.11" ] && [ "$arch" = "aarch64" ]; then
     verified=1; wheels=("$_CQLITE_DRIVER_WHEEL_aarch64" "${_CQLITE_DRIVER_WHEELS_COMMON[@]}")
   fi
-  "$engine" exec "$container" bash -c 'command -v pip3 >/dev/null 2>&1' >/dev/null 2>&1 && have_pip=1
+  "${eng[@]}" exec "$container" bash -c 'command -v pip3 >/dev/null 2>&1' >/dev/null 2>&1 && have_pip=1
 
   if [ "$have_pip" = 0 ] && [ "$verified" = 0 ]; then
     echo "[driver] container has no pip3 and is python ${pyver:-?} on ${arch:-?}: no verified wheels for this platform." >&2
@@ -92,10 +110,10 @@ cqlite_install_cassandra_driver() {
   fi
 
   if [ "$have_pip" = 1 ]; then
-    "$engine" cp "$CQLITE_CASSANDRA_DRIVER_REQUIREMENTS" "$container:/tmp/cqlite-driver-requirements.txt" || return 1
-    "$engine" exec "$container" pip3 install --quiet --no-deps --require-hashes \
+    "${eng[@]}" cp "$CQLITE_CASSANDRA_DRIVER_REQUIREMENTS" "$container:/tmp/cqlite-driver-requirements.txt" || return 1
+    "${eng[@]}" exec "$container" pip3 install --quiet --no-deps --require-hashes \
         -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 \
-      || "$engine" exec "$container" pip3 install --quiet --no-deps --require-hashes \
+      || "${eng[@]}" exec "$container" pip3 install --quiet --no-deps --require-hashes \
         --break-system-packages -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 || true
     _cqlite_driver_present "$engine" "$container" && return 0
     [ "$verified" = 1 ] || {
@@ -121,11 +139,11 @@ cqlite_install_cassandra_driver() {
   done
 
   if [ "$have_pip" = 1 ]; then
-    "$engine" exec "$container" mkdir -p /tmp/cqlite-driver-wheels \
-      && "$engine" cp "$dir/wheels/." "$container:/tmp/cqlite-driver-wheels/" \
-      && { "$engine" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
+    "${eng[@]}" exec "$container" mkdir -p /tmp/cqlite-driver-wheels \
+      && "${eng[@]}" cp "$dir/wheels/." "$container:/tmp/cqlite-driver-wheels/" \
+      && { "${eng[@]}" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
              --find-links /tmp/cqlite-driver-wheels -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 \
-           || "$engine" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
+           || "${eng[@]}" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
              --break-system-packages --find-links /tmp/cqlite-driver-wheels \
              -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1; } || true
   else
@@ -134,7 +152,7 @@ cqlite_install_cassandra_driver() {
       python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
         "$name" "$dir/unpacked" || { rm -rf "$dir"; return 1; }
     done
-    "$engine" cp "$dir/unpacked/." "$container:/usr/lib/python3/dist-packages/" || { rm -rf "$dir"; return 1; }
+    "${eng[@]}" cp "$dir/unpacked/." "$container:/usr/lib/python3/dist-packages/" || { rm -rf "$dir"; return 1; }
   fi
   rm -rf "$dir"
   _cqlite_driver_present "$engine" "$container" || {
