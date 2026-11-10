@@ -972,3 +972,71 @@ fn pin_binding_rejects_an_additional_pin_when_no_scenario_is_covered() {
         "{findings:?}"
     );
 }
+
+// ---- #4482 / roborev job 179: the 5.0.2 override against TODAY's committed evidence ----
+
+fn real_manifest() -> Manifest {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test-data/cassandra-parity-manifest.yml");
+    Manifest::from_yaml(&std::fs::read_to_string(&path).expect("read real manifest"))
+        .expect("real manifest parses")
+}
+
+/// An inventory that provides every corpus-tree reference the real manifest names, i.e.
+/// the full regenerated corpus the weekly lane audits.
+fn real_corpus_inventory(m: &Manifest) -> CorpusInventory {
+    let mut files = BTreeSet::new();
+    for s in &m.scenarios {
+        for r in s
+            .fixtures
+            .references
+            .iter()
+            .chain(&s.fixtures.datasets)
+            .chain(&s.evidence.reference_paths)
+        {
+            if r.starts_with("test-data/datasets/") {
+                files.insert(r.clone());
+            }
+        }
+    }
+    CorpusInventory {
+        files,
+        checksums: BTreeMap::new(),
+    }
+}
+
+fn audit_provenance(m: &Manifest, prov: &Provenance, inv: &CorpusInventory) -> Vec<String> {
+    let mut f = corpus_audit::provenance::check_provenance(prov, m);
+    f.extend(corpus_audit::provenance::check_pin_binding(prov, m, inv));
+    f.into_iter()
+        .map(|x| format!("{} — {}", x.subject, x.detail))
+        .collect()
+}
+
+/// The coherent tuple `CQLITE_CASSANDRA_RELEASE=5.0.2` selects (the workflows that audit
+/// against committed evidence set it): the primary pin, image included.
+#[test]
+fn the_5_0_2_override_corpus_passes_the_audit_against_todays_committed_evidence() {
+    let m = real_manifest();
+    let inv = real_corpus_inventory(&m);
+    assert!(
+        !inv.files.is_empty(),
+        "guard: the real manifest names corpus references"
+    );
+    let findings = audit_provenance(&m, &good_provenance(), &inv);
+    assert!(
+        findings.is_empty(),
+        "5.0.2 override must audit clean: {findings:?}"
+    );
+}
+
+/// The default 5.0.8 release against the same evidence is rejected (every covered scenario
+/// still claims 5.0.2) - which is exactly why the audited lanes pin the override.
+#[test]
+fn the_default_5_0_8_corpus_is_rejected_against_todays_committed_evidence() {
+    let m = real_manifest();
+    let inv = real_corpus_inventory(&m);
+    let findings = audit_provenance(&m, &provenance_508(), &inv);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
+}

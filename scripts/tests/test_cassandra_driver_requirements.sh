@@ -100,6 +100,41 @@ fe_setup "all-exact" x86_64 "$all_pins"
 CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$FE_ENGINE" fakec >/dev/null 2>&1
 if [ "$?" = 0 ] && ! grep -qE "^cp |uname" "$FE_LOG"; then ok "all four distributions at the pinned versions: the install is skipped"; else bad "all-exact container was not skipped: $(cat "$FE_LOG" | head -3 | tr '\n' ';')"; fi
 
+# --- release selection: CQLITE_CASSANDRA_RELEASE picks one COHERENT tuple (#4482) -----------
+read -r -d '' PINS_PY <<'PY' || true
+import re, sys
+txt = open(sys.argv[1]).read()
+blk = txt[txt.index("cassandra_source:"):]
+blk = blk[: re.search(r"\n\S", blk[len("cassandra_source:"):]).start() + len("cassandra_source:")]
+refs = re.findall(r"^\s+(?:-\s+)?ref:\s*(\S+)", blk, re.M)
+shas = re.findall(r"^\s+(?:-\s+)?sha:\s*(\S+)", blk, re.M)
+for r, s in zip(refs, shas):
+    print(r[len("cassandra-"):], s)
+PY
+manifest_pins="$(python3 -c "$PINS_PY" "$ROOT/test-data/cassandra-parity-manifest.yml" | sort)"
+lib_pins="$(printf '%s\n' "${_CQLITE_CASSANDRA_RELEASES[@]}" | sort)"
+[ "$manifest_pins" = "$lib_pins" ] && ok "the lib's release table equals the manifest's primary + additional pins" \
+  || bad "lib release table != manifest pins: lib=[$lib_pins] manifest=[$manifest_pins]"
+primary="$(python3 -c "$PINS_PY" "$ROOT/test-data/cassandra-parity-manifest.yml" | head -1)"
+sel() { CQLITE_CASSANDRA_RELEASE="$1" bash -c '. "$0/test-data/scripts/lib/cassandra-image.sh" && echo "$CQLITE_CASSANDRA_VERSION $CQLITE_CASSANDRA_REF $CQLITE_CASSANDRA_GIT_SHA $CQLITE_CASSANDRA_IMAGE"' "$ROOT" 2>/dev/null; }
+got="$(sel 5.0.2)"
+[ "$got" = "${primary% *} cassandra-${primary% *} ${primary#* } cassandra:${primary% *}" ] \
+  && ok "CQLITE_CASSANDRA_RELEASE=5.0.2 selects the coherent primary tuple (version, ref, sha, image)" || bad "5.0.2 override tuple: $got"
+got="$(sel "")"
+[ "${got%% *}" = "$CQLITE_CASSANDRA_DEFAULT_RELEASE" ] && ok "the default release is $CQLITE_CASSANDRA_DEFAULT_RELEASE" || bad "default tuple: $got"
+for badrel in 5.0.9 5.0 cassandra-5.0.2 "5.0.2 "; do
+  if out="$(CQLITE_CASSANDRA_RELEASE="$badrel" bash -c 'set -e; . "$0/test-data/scripts/lib/cassandra-image.sh"; echo SOURCED' "$ROOT" 2>&1)" && printf '%s' "$out" | grep -q SOURCED; then
+    bad "an unknown release '$badrel' was accepted"
+  else
+    printf '%s' "$out" | grep -q "not a declared release" && ok "unknown release '$badrel' is rejected by name" || bad "'$badrel' rejected without the message: $out"
+  fi
+done
+# every audited workflow carries the override, with the removal comment
+for wf in exhaustive-regeneration parity-regen-matrix; do
+  grep -qE '^  CQLITE_CASSANDRA_RELEASE: "5\.0\.2"  # 5\.0\.2 until #4482 fixture-regeneration stage moves fixtures\+evidence together$' "$ROOT/.github/workflows/$wf.yml" \
+    && ok "$wf.yml pins CQLITE_CASSANDRA_RELEASE=5.0.2 with the removal comment" || bad "$wf.yml lacks the 5.0.2 override line"
+done
+
 PIP=""
 for c in pip3 pip "python3 -m pip"; do $c --version >/dev/null 2>&1 && { PIP="$c"; break; }; done
 reach() {  # connectivity probe, separate from the resolver

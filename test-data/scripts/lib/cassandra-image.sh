@@ -13,10 +13,36 @@
 # release is a ONE-LINE change here plus the matching manifest `cassandra_source`
 # entry (the corpus audit's provenance check fails when they diverge).
 
-CQLITE_CASSANDRA_VERSION="5.0.8"
+# The releases a generator may run against: exactly the primary pin and the declared
+# additional pins of test-data/cassandra-parity-manifest.yml `cassandra_source` (the guard
+# scripts/tests/test_cassandra_driver_requirements.sh checks the two agree). Each entry is
+# one COHERENT "<version> <git commit the tag points at>" tuple; a release is selected as a
+# whole, never field by field.
+_CQLITE_CASSANDRA_RELEASES=(
+  "5.0.8 172227094626d50d4bc9a3d9de2e3659a7844386"
+  "5.0.2 f278f6774fc76465c182041e081982105c3e7dbb"
+)
+CQLITE_CASSANDRA_DEFAULT_RELEASE="5.0.8"
+
+# CQLITE_CASSANDRA_RELEASE selects the release (default 5.0.8). Workflows and scripts that
+# AUDIT or COMPARE regenerated output against COMMITTED-fixture evidence (still 5.0.2) set
+# it to 5.0.2 until the #4482 fixture-regeneration stage moves fixtures and evidence
+# together; every such site is listed on issue #4482. Anything else is rejected, so a typo
+# can never select a release the manifest does not declare.
+CQLITE_CASSANDRA_RELEASE="${CQLITE_CASSANDRA_RELEASE:-$CQLITE_CASSANDRA_DEFAULT_RELEASE}"
+CQLITE_CASSANDRA_VERSION=""
+for _cqlite_rel in "${_CQLITE_CASSANDRA_RELEASES[@]}"; do
+  if [ "${_cqlite_rel%% *}" = "$CQLITE_CASSANDRA_RELEASE" ]; then
+    CQLITE_CASSANDRA_VERSION="${_cqlite_rel%% *}"
+    CQLITE_CASSANDRA_GIT_SHA="${_cqlite_rel##* }"
+  fi
+done
+unset _cqlite_rel
+if [ -z "$CQLITE_CASSANDRA_VERSION" ]; then
+  echo "cassandra-image.sh: CQLITE_CASSANDRA_RELEASE='${CQLITE_CASSANDRA_RELEASE}' is not a declared release (declared: ${_CQLITE_CASSANDRA_RELEASES[*]%% *})" >&2
+  return 1 2>/dev/null || exit 1
+fi
 CQLITE_CASSANDRA_REF="cassandra-${CQLITE_CASSANDRA_VERSION}"
-# Commit the `cassandra-5.0.8` tag points at (git rev-parse cassandra-5.0.8^{commit}).
-CQLITE_CASSANDRA_GIT_SHA="172227094626d50d4bc9a3d9de2e3659a7844386"
 CQLITE_CASSANDRA_IMAGE="cassandra:${CQLITE_CASSANDRA_VERSION}"
 
 # The Python driver the generators insert rows with. PINNED: an unpinned
