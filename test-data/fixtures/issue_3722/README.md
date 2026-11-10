@@ -135,3 +135,12 @@ multicell collection INSERT (`mw`, `sw`) also emits a collection tombstone whose
 
 The `*.db` binaries are gitignored and were committed with `git add -f`, per
 CLAUDE.md's "Gitignored reference binaries" doctrine.
+
+## Regeneration (#4490)
+
+Regenerated on `cassandra:5.0.8` by `test-data/scripts/generate-issue-3722-udt-wide-fields.sh` (stage 2 of #4482). Against the previous
+5.0.2 fixture every `*-Data.db.jsonl` is equal after masking only `position`,
+`local_delete_time` and `expires_at`, the component set is identical, `TOC.txt` lists the same
+components in 5.0.8's sorted order, and `Statistics.db.txt` differs only in the originating host
+id, SSTable path, replay position and wall-clock timestamp/deletion-time fields. `Data.db` is
+byte-identical to the 5.0.2 file.

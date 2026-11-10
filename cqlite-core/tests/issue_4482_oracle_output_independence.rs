@@ -35,6 +35,19 @@ fn sample_dir() -> PathBuf {
 }
 
 /// The 5.0.2-written generation committed for #3722 (a single `nb-1-big` dir).
+/// `TOC.txt` lines of an `nb` BIG generation with `CRC.db`, in the order Cassandra 5.0.2 wrote
+/// them (5.0.8 sorts them; CASSANDRA-20494).
+const FIVE_ZERO_TWO_TOC_ORDER: [&str; 8] = [
+    "Data.db",
+    "Statistics.db",
+    "Digest.crc32",
+    "TOC.txt",
+    "CRC.db",
+    "Filter.db",
+    "Index.db",
+    "Summary.db",
+];
+
 fn committed_generation() -> PathBuf {
     let ks = repo_file("test-data/fixtures/issue_3722/test_udt_wide_fields");
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&ks)
@@ -78,12 +91,11 @@ fn sample_toc_really_is_5_0_8_sorted_and_parses_to_the_same_set_as_the_5_0_2_ord
     );
     assert!(lines.len() >= 7, "guard: a non-trivial TOC, got {lines:?}");
 
-    let old_toc = std::fs::read_dir(committed_generation())
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.to_string_lossy().ends_with("-TOC.txt"))
-        .expect("committed 5.0.2 TOC");
+    // The Cassandra 5.0.2 write order of this component set (the committed fixture was
+    // regenerated on 5.0.8 in #4490, so the old order is pinned here as a literal).
+    let tmp = tempfile::tempdir().unwrap();
+    let old_toc = tmp.path().join("nb-1-big-TOC.txt");
+    std::fs::write(&old_toc, FIVE_ZERO_TWO_TOC_ORDER.join("\n") + "\n").unwrap();
     let old_lines = toc_lines(&old_toc);
     assert_ne!(
         old_lines, lines,
@@ -129,6 +141,14 @@ async fn verify_accepts_the_committed_generation_under_an_alphabetically_sorted_
     for e in std::fs::read_dir(&src).unwrap().flatten() {
         std::fs::copy(e.path(), tmp.path().join(e.file_name())).unwrap();
     }
+    let toc = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with("-TOC.txt"))
+        .unwrap();
+    // The committed generation is 5.0.8 (sorted TOC) since #4490: start from the 5.0.2 order.
+    std::fs::write(&toc, FIVE_ZERO_TWO_TOC_ORDER.join("\n") + "\n").unwrap();
     let baseline = verify_dir(tmp.path()).await;
     assert!(
         baseline.is_ok(),
@@ -136,12 +156,6 @@ async fn verify_accepts_the_committed_generation_under_an_alphabetically_sorted_
         baseline.findings
     );
 
-    let toc = std::fs::read_dir(tmp.path())
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.to_string_lossy().ends_with("-TOC.txt"))
-        .unwrap();
     std::fs::copy(sample_dir().join("nb-1-big-TOC.txt"), &toc).unwrap();
     let sorted = verify_dir(tmp.path()).await;
     assert!(
