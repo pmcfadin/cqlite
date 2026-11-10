@@ -210,6 +210,7 @@ pub fn audit(
     // 5: provenance vs the manifest's declared Cassandra pin.
     if let Some(prov) = provenance {
         findings.extend(provenance::check_provenance(prov, manifest));
+        findings.extend(provenance::check_pin_binding(prov, manifest, inventory));
     }
 
     // 6: corruption-fixture coverage of every required component type, verified

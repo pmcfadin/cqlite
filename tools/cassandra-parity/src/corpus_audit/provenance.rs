@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::model::Manifest;
 
-use super::{AuditFinding, FindingKind};
+use super::{refs, AuditFinding, CorpusInventory, FindingKind};
 
 /// The structured provenance of one regeneration run.
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +141,80 @@ pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFind
     }
 
     out
+}
+
+/// Bind an ADDITIONAL pin to the scenarios the audited corpus covers (roborev job 178).
+///
+/// [`check_provenance`] proves the recorded run came from ONE declared pin. That alone
+/// would let a 5.0.8-generated corpus pass while every scenario still claims 5.0.2, so a
+/// non-primary pin is accepted only when the scenarios whose fixtures the corpus provides
+/// ([`refs::covering_scenarios`]) ALL declare that pin's release in
+/// `evidence.cassandra_version`. If none is covered, or any disagrees (a scenario that
+/// claims another release or none), the run is rejected naming those scenarios and the
+/// versions they declare. The primary pin is unchanged: the committed fixtures and
+/// scenarios are on it until a regeneration moves them.
+pub fn check_pin_binding(
+    prov: &Provenance,
+    manifest: &Manifest,
+    inventory: &CorpusInventory,
+) -> Vec<AuditFinding> {
+    let pins = manifest.cassandra_source.pins();
+    let Some((index, (pin_version, pin_ref, _))) = pins
+        .iter()
+        .enumerate()
+        .find(|(_, (_, r, _))| *r == prov.cassandra_ref)
+    else {
+        return Vec::new(); // not a declared pin: check_provenance already rejects it
+    };
+    if index == 0 {
+        return Vec::new(); // the primary pin
+    }
+
+    let covering = refs::covering_scenarios(manifest, inventory);
+    let disagree: Vec<String> = covering
+        .iter()
+        .filter(|s| s.evidence.cassandra_version.as_deref().map(str::trim) != Some(pin_version))
+        .map(|s| {
+            format!(
+                "{} (declares {})",
+                s.id,
+                s.evidence
+                    .cassandra_version
+                    .as_deref()
+                    .unwrap_or("no version")
+            )
+        })
+        .collect();
+    let subject = |detail: String| {
+        AuditFinding::new(FindingKind::ProvenanceMismatch, pin_ref.to_string(), detail)
+    };
+    if covering.is_empty() {
+        return vec![subject(format!(
+            "the corpus was generated from additional pin {pin_ref}, but no scenario's fixtures \
+             are covered by this corpus, so no scenario declares {pin_version}"
+        ))];
+    }
+    if disagree.is_empty() {
+        return Vec::new();
+    }
+    let shown = disagree
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if disagree.len() > 10 {
+        format!(" and {} more", disagree.len() - 10)
+    } else {
+        String::new()
+    };
+    vec![subject(format!(
+        "the corpus was generated from additional pin {pin_ref} ({pin_version}), but \
+         {} of the {} scenarios whose fixtures it covers do not declare \
+         evidence.cassandra_version {pin_version}: {shown}{more}",
+        disagree.len(),
+        covering.len()
+    ))]
 }
 
 /// Extract the semver version a Docker image reference points at, so it can be

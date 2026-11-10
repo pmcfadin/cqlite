@@ -853,3 +853,122 @@ fn scenario_evidence_cannot_widen_the_provenance_pins() {
         "scenario evidence must not declare a release: {findings:?}"
     );
 }
+
+// ---- #4482 / roborev job 178: an additional pin is bound to the covered scenarios ----
+
+/// A manifest with the declared 5.0.8 pin whose scenarios claim `claims[i]` (each a
+/// (version, sha) pair) and all pin the same corpus reference, so every scenario is
+/// covered by [`clean_inventory`].
+fn manifest_with_claims(claims: &[(&str, &str)]) -> Manifest {
+    let base = manifest_yaml();
+    let start = base
+        .find("  - id: cass.sstable_format.simple")
+        .expect("scenario");
+    let head = &base[..start];
+    let scenario = &base[start..];
+    let mut yaml = head.replace(
+        "  assessment_report: docs/reports/x.md\n",
+        &format!(
+            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n"
+        ),
+    );
+    for (i, (version, sha)) in claims.iter().enumerate() {
+        yaml.push_str(
+            &scenario
+                .replace(
+                    "cass.sstable_format.simple",
+                    &format!("cass.sstable_format.simple{i}"),
+                )
+                .replace(
+                    "cassandra_version: \"5.0.2\"",
+                    &format!("cassandra_version: \"{version}\""),
+                )
+                .replace(
+                    &format!("cassandra_git_sha: {GOOD_SHA}"),
+                    &format!("cassandra_git_sha: {sha}"),
+                ),
+        );
+    }
+    Manifest::from_yaml(&yaml).expect("claims manifest parses")
+}
+
+fn provenance_findings_for(m: &Manifest, prov: &Provenance, inv: &CorpusInventory) -> Vec<String> {
+    corpus_audit::audit(
+        m,
+        &index_text(false),
+        inv,
+        &ExpectedInventory::default(),
+        Some(prov),
+        &all_corruption_fixtures(),
+    )
+    .findings
+    .into_iter()
+    .filter(|f| f.kind == FindingKind::ProvenanceMismatch)
+    .map(|f| format!("{} — {}", f.subject, f.detail))
+    .collect()
+}
+
+/// (a) a 5.0.8-generated corpus while every covered scenario still claims 5.0.2.
+#[test]
+fn pin_binding_rejects_a_5_0_8_corpus_when_all_covered_scenarios_claim_5_0_2() {
+    let m = manifest_with_claims(&[("5.0.2", GOOD_SHA), ("5.0.2", GOOD_SHA)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple0"),
+        "{findings:?}"
+    );
+    assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
+    assert!(findings[0].contains("2 of the 2 scenarios"), "{findings:?}");
+}
+
+/// (b) the same corpus passes once the covered scenarios claim 5.0.8.
+#[test]
+fn pin_binding_accepts_a_5_0_8_corpus_when_all_covered_scenarios_claim_5_0_8() {
+    let m = manifest_with_claims(&[("5.0.8", SHA_508), ("5.0.8", SHA_508)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+/// (c) a mixed claim is rejected, naming only the scenario that still claims 5.0.2.
+#[test]
+fn pin_binding_rejects_mixed_claims_naming_the_disagreeing_scenario() {
+    let m = manifest_with_claims(&[("5.0.8", SHA_508), ("5.0.2", GOOD_SHA)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple1 (declares 5.0.2)"),
+        "{findings:?}"
+    );
+    assert!(!findings[0].contains("simple0"), "{findings:?}");
+    assert!(findings[0].contains("1 of the 2 scenarios"), "{findings:?}");
+}
+
+/// (d) the primary pin path is unchanged, whatever the scenarios claim.
+#[test]
+fn pin_binding_leaves_the_primary_pin_unchanged() {
+    for claims in [
+        vec![("5.0.2", GOOD_SHA), ("5.0.2", GOOD_SHA)],
+        vec![("5.0.8", SHA_508), ("5.0.2", GOOD_SHA)],
+    ] {
+        let m = manifest_with_claims(&claims);
+        let findings = provenance_findings_for(&m, &good_provenance(), &clean_inventory());
+        assert!(
+            findings.is_empty(),
+            "primary pin must pass unchanged: {findings:?}"
+        );
+    }
+}
+
+/// An additional pin with NO covered scenario is rejected: nothing declares the release.
+#[test]
+fn pin_binding_rejects_an_additional_pin_when_no_scenario_is_covered() {
+    let m = manifest_with_claims(&[("5.0.8", SHA_508)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &inventory_with(&[]));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("no scenario's fixtures are covered")),
+        "{findings:?}"
+    );
+}

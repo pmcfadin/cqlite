@@ -91,6 +91,39 @@ pub fn check_references(manifest: &Manifest, inventory: &CorpusInventory) -> Vec
     out
 }
 
+/// The non-`planned` scenarios whose fixtures the audited corpus actually provides: a
+/// scenario is covered when at least one of its corpus-tree references (the same set
+/// [`check_references`] audits: `fixtures.references`, `fixtures.datasets`,
+/// `evidence.reference_paths`) resolves in `inventory` by the same rules (exact path,
+/// UUID-independent component identity, or a populated directory), skipping `system*`
+/// keyspaces. This is the manifest's own corpus-to-scenario mapping; a DIRECTORY
+/// reference (for example the `sstables` root) is satisfied by any produced file, so the
+/// mapping errs toward covering MORE scenarios, which can only make a binding check
+/// stricter, never laxer (#4482).
+pub fn covering_scenarios<'a>(
+    manifest: &'a Manifest,
+    inventory: &CorpusInventory,
+) -> Vec<&'a Scenario> {
+    let produced: BTreeSet<String> = inventory
+        .files
+        .iter()
+        .map(|f| component_identity(f))
+        .collect();
+    manifest
+        .scenarios
+        .iter()
+        .filter(|s| s.status != "planned")
+        .filter(|s| {
+            corpus_refs(s).iter().any(|r| {
+                !is_system_keyspace_path(r)
+                    && (inventory.files.contains(r)
+                        || produced.contains(&component_identity(r))
+                        || reference_is_satisfied_directory(r, &inventory.files))
+            })
+        })
+        .collect()
+}
+
 /// True when `reference` names a directory/keyspace under the corpus that the
 /// regeneration populated — i.e. some produced file lives strictly under it. Used
 /// so a scenario that references a keyspace dir (or the corpus root) rather than a
