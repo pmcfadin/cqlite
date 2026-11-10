@@ -27,6 +27,15 @@ pub struct Finding {
 }
 
 impl Finding {
+    pub(crate) fn warn(id: &str, field: &str, message: impl Into<String>) -> Self {
+        Finding {
+            level: Level::Warn,
+            id: id.to_string(),
+            field: field.to_string(),
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn error(id: &str, field: &str, message: impl Into<String>) -> Self {
         Finding {
             level: Level::Error,

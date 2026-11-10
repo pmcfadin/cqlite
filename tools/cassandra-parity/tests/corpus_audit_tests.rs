@@ -88,7 +88,7 @@ fn manifest_with_additional_pin() -> Manifest {
     yaml = yaml.replace(
         "  assessment_report: docs/reports/x.md\n",
         &format!(
-            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n"
+            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n",
         ),
     );
     Manifest::from_yaml(&yaml).expect("manifest with additional pin parses")
@@ -860,6 +860,12 @@ fn scenario_evidence_cannot_widen_the_provenance_pins() {
 /// sha))`, or `None` for ABSENT evidence: neither field), all pinning the same corpus
 /// reference so every scenario is covered by [`clean_inventory`].
 fn manifest_with_optional_claims(claims: &[Option<(&str, &str)>]) -> Manifest {
+    manifest_with_carried(claims, &[])
+}
+
+/// Like [`manifest_with_optional_claims`], plus a `cassandra_source.carried_over` entry for
+/// the primary 5.0.2 pin listing `carried` (#4492).
+fn manifest_with_carried(claims: &[Option<(&str, &str)>], carried: &[&str]) -> Manifest {
     let base = manifest_yaml();
     let start = base
         .find("  - id: cass.sstable_format.simple")
@@ -869,7 +875,15 @@ fn manifest_with_optional_claims(claims: &[Option<(&str, &str)>]) -> Manifest {
     let mut yaml = head.replace(
         "  assessment_report: docs/reports/x.md\n",
         &format!(
-            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n"
+            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n{}",
+            if carried.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  carried_over:\n    - pin: cassandra-5.0.2\n      tables: [{}]\n",
+                    carried.join(", ")
+                )
+            }
         ),
     );
     for (i, claim) in claims.iter().enumerate() {
@@ -938,6 +952,52 @@ fn pin_binding_rejects_a_5_0_8_corpus_when_all_covered_scenarios_claim_5_0_2() {
     );
     assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
     assert!(findings[0].contains("2 of the 2 scenarios"), "{findings:?}");
+}
+
+/// #4492: an UNDECLARED 5.0.2 table in a 5.0.8 corpus is rejected: the scenario claims 5.0.2
+/// for `test_basic.simple_table`, but nothing declares that table carried over.
+#[test]
+fn pin_binding_rejects_an_undeclared_5_0_2_table_in_a_5_0_8_corpus() {
+    let m = manifest_with_carried(&[Some(("5.0.2", GOOD_SHA))], &[]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
+}
+
+/// #4492: a DECLARED carry-over is accepted: every table the scenario covers is carried over
+/// from 5.0.2, so its 5.0.2 claim is true next to the 5.0.8 corpus.
+#[test]
+fn pin_binding_accepts_a_declared_carry_over_next_to_a_5_0_8_corpus() {
+    let m = manifest_with_carried(&[Some(("5.0.2", GOOD_SHA))], &["test_basic.simple_table"]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert!(findings.is_empty(), "{findings:?}");
+    // the keyspace pattern declares it just the same
+    let m = manifest_with_carried(&[Some(("5.0.2", GOOD_SHA))], &["test_basic.*"]);
+    assert!(provenance_findings_for(&m, &provenance_508(), &clean_inventory()).is_empty());
+}
+
+/// #4492: a scenario claiming the WRONG pin for its tables is rejected: it claims 5.0.8 but
+/// every table it covers is declared carried over from 5.0.2.
+#[test]
+fn pin_binding_rejects_a_scenario_claiming_the_wrong_pin_for_its_carried_over_tables() {
+    let m = manifest_with_carried(&[Some(("5.0.8", SHA_508))], &["test_basic.simple_table"]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("carried over from 5.0.2"),
+        "{findings:?}"
+    );
+}
+
+/// #4492: a scenario that also covers a REGENERATED table must claim the corpus pin, even
+/// when it covers carried-over tables too (evidence names the non-carried-over data).
+#[test]
+fn pin_binding_binds_a_mixed_scenario_to_the_corpus_pin() {
+    let m = manifest_with_carried(&[Some(("5.0.2", GOOD_SHA))], &["test_other.*"]);
+    assert_eq!(
+        provenance_findings_for(&m, &provenance_508(), &clean_inventory()).len(),
+        1
+    );
 }
 
 /// (b) the same corpus passes once the covered scenarios claim 5.0.8.

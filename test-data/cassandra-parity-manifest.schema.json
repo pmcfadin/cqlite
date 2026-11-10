@@ -18,7 +18,20 @@
         "sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
         "index": { "type": "string" },
         "assessment_report": { "type": "string" },
-        "additional_pins": {
+        "carried_over": {
+      "description": "Tables kept byte-for-byte from an earlier release (#4492): written by `pin`, not by the primary release the rest of the corpus was regenerated with. A scenario covering ONLY carried-over tables declares that pin; any scenario covering a regenerated table declares the corpus pin (the lint reports each partial claim; the corpus audit rejects an undeclared mix).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pin", "tables"],
+        "properties": {
+          "pin": { "type": "string", "description": "A declared pin ref, e.g. cassandra-5.0.2." },
+          "tables": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9_]+\\.([A-Za-z0-9_]+|\\*)$" } }
+        }
+      }
+    },
+    "additional_pins": {
           "description": "Further Cassandra releases fixtures may be (re)generated from (#4482); each scenario's evidence.cassandra_version must name the primary ref's release or one of these.",
           "type": "array",
           "items": {
@@ -190,7 +203,7 @@
                 "enum": ["bytes", "offsets", "checksums", "component_files", "jsonl", "logs", "generated_report"]
               }
             },
-            "cassandra_version": { "type": "string" },
+            "cassandra_version": { "type": "string", "description": "The Cassandra release that produced this scenario's NON-carried-over fixture data (or, when every table it covers is declared in cassandra_source.carried_over, the single carry-over pin). Per-table truth: cassandra_source.carried_over (#4492)." },
             "cassandra_git_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
             "storage_format_version": {
               "type": "array",

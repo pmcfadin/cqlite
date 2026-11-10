@@ -227,3 +227,70 @@ fn lint_accepts_distinct_pins() {
     let ok = pin_findings(&format!("    - ref: cassandra-5.0.8\n      sha: {SHA_A}\n"));
     assert!(ok.is_empty(), "{ok:?}");
 }
+
+fn carried_findings(carried: &str, version: &str, refs: &str) -> Vec<(bool, String)> {
+    let y = wrap(VALID_SCENARIO)
+        .replace(
+            "  ref: cassandra-5.0.2\n",
+            "  ref: cassandra-5.0.8\n",
+        )
+        .replace(
+            "  sha: f278f6774fc76465c182041e081982105c3e7dbb\n  index",
+            &format!(
+                "  sha: 172227094626d50d4bc9a3d9de2e3659a7844386\n  additional_pins:\n    - ref: cassandra-5.0.2\n      sha: f278f6774fc76465c182041e081982105c3e7dbb\n{carried}  index"
+            ),
+        )
+        .replace("    fixtures: {}\n", &format!("    fixtures:\n      datasets: [{refs}]\n"))
+        .replace(
+            "cassandra_version: \"5.0.2\"",
+            &format!("cassandra_version: \"{version}\""),
+        )
+        .replace(
+            "cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb",
+            if version == "5.0.2" {
+                "cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb"
+            } else {
+                "cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386"
+            },
+        );
+    let m = Manifest::from_yaml(&y).expect("parses");
+    lint(&m, None)
+        .into_iter()
+        .filter(|f| f.field.contains("carried_over") || f.field == "evidence.cassandra_version")
+        .map(|f| (f.level == cassandra_parity::lint::Level::Error, f.message))
+        .collect()
+}
+
+/// #4492: carried_over must name a declared pin, and no table may be carried over twice.
+#[test]
+fn lint_rejects_a_carried_over_entry_with_an_undeclared_pin_or_a_duplicate_table() {
+    let bad_pin = "  carried_over:\n    - pin: cassandra-5.0.3\n      tables: [ks.t]\n";
+    let f = carried_findings(bad_pin, "5.0.8", "");
+    assert!(
+        f.iter()
+            .any(|(e, m)| *e && m.contains("not a declared pin")),
+        "{f:?}"
+    );
+    let dup = "  carried_over:\n    - pin: cassandra-5.0.2\n      tables: [ks.t, ks.t]\n";
+    let f = carried_findings(dup, "5.0.8", "");
+    assert!(
+        f.iter().any(|(e, m)| *e && m.contains("more than once")),
+        "{f:?}"
+    );
+}
+
+/// #4492: a scenario that touches carried-over tables while declaring the corpus release is a
+/// PARTIAL claim; the lint reports it with the table count (warning, never silent).
+#[test]
+fn lint_reports_a_partial_claim_with_the_carried_over_table_count() {
+    let carried = "  carried_over:\n    - pin: cassandra-5.0.2\n      tables: [ks.a, ks.b]\n";
+    let f = carried_findings(carried, "5.0.8", "test-data/datasets/sstables/ks");
+    assert!(
+        f.iter()
+            .any(|(e, m)| !*e && m.contains("partial claim") && m.contains("2 carried-over")),
+        "{f:?}"
+    );
+    // a scenario that declares the carry-over pin is not a partial claim
+    let f = carried_findings(carried, "5.0.2", "test-data/datasets/sstables/ks");
+    assert!(f.iter().all(|(_, m)| !m.contains("partial claim")), "{f:?}");
+}
