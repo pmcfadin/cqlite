@@ -66,6 +66,7 @@ test-data/scripts/smoke-test-all-tables-results/
 # into the fetched dataset dir. The tracked source of truth is
 # test-data/dataset-pin.env — this generated file must stay untracked.
 test-data/datasets/.dataset-pin
+test-data/datasets/.dataset-manifest
 *.sstable
 *.db
 

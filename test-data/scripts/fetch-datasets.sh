@@ -176,6 +176,7 @@ PIN_FILE="${DATASET_ROOT}/.dataset-pin"
 WIDE_PARTITION_DIR="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
 WIDE_PARTITION_GOLDEN="${WIDE_PARTITION_DIR}/nb-2-big-Data.db.jsonl"
 
+. "$(dirname "${BASH_SOURCE[0]}")/lib/dataset-warm-restore.sh"   # warm-cache reconcile (#4508)
 write_pin() {
   mkdir -p "${DATASET_ROOT}"
   {
@@ -374,12 +375,11 @@ path_relative_inside() {
   esac
 }
 
-# Prints WHY the given directory is itself a git repository, else fails. Purely a
-# filesystem probe (no git binary needed), and it must recognise a BARE repository
-# too: `git init --bare .../datasets` leaves NO `.git` entry, so an
-# `-e "$dir/.git"` test alone classified it as an ordinary directory and the
-# `rm -rf` deleted the whole repository while REPORTING SUCCESS. A bare repo has
-# `HEAD` + `objects/` at its top level, and its `config` declares `bare = true`;
+# Prints WHY the given directory is itself a git repository, else fails. Purely a filesystem
+# probe (no git binary needed), and it must recognise a BARE repository too: `git init --bare
+# .../datasets` leaves NO `.git` entry, so an `-e "$dir/.git"` test alone classified it as an
+# ordinary directory and the `rm -rf` deleted the whole repository while REPORTING SUCCESS. A
+# bare repo has `HEAD` + `objects/` at its top level, and its `config` declares `bare = true`;
 # either signature is enough, and over-refusing here is the safe direction.
 git_repository_reason() {
   local dir="$1"
@@ -399,15 +399,14 @@ git_repository_reason() {
   return 1
 }
 
-# Prints the git ADMINISTRATIVE directory at or above the given path, else fails.
-# A target inside git's own storage (`/repo/.git/…`, `/mirror.git/objects/…`, a
-# submodule's `.git/modules/…`, a linked worktree's `.git/worktrees/…`) holds no
-# tracked files, so it used to classify as "nothing to protect" — and the `rm -rf`
-# then deleted the object store that the restore strategy itself depends on: the
-# guard destroying its own recovery source while reporting success. Filesystem-only
-# (a directory named `.git`, or the admin layout HEAD+objects/) so it fires even
-# when git is absent — a missing git binary must never downgrade a STRUCTURAL
-# refusal into an overridable one.
+# Prints the git ADMINISTRATIVE directory at or above the given path, else fails. A target
+# inside git's own storage (`/repo/.git/…`, `/mirror.git/objects/…`, a submodule's
+# `.git/modules/…`, a linked worktree's `.git/worktrees/…`) holds no tracked files, so it used
+# to classify as "nothing to protect" — and the `rm -rf` then deleted the object store that the
+# restore strategy itself depends on: the guard destroying its own recovery source while
+# reporting success. Filesystem-only (a directory named `.git`, or the admin layout
+# HEAD+objects/) so it fires even when git is absent — a missing git binary must never downgrade
+# a STRUCTURAL refusal into an overridable one.
 git_admin_dir_at_or_above() {
   local head="$1"
   while :; do
@@ -423,15 +422,13 @@ git_admin_dir_at_or_above() {
   done
 }
 
-# Prints the path of the first git repository found STRICTLY BENEATH the given
-# directory (depth >= 2 — a nested checkout, submodule or bare mirror, not the
-# directory's own repository), else fails. `rm -rf` on such a target destroys a
-# repository whose index we do not have, so restoration is impossible and the
-# guard's premise is void. Uses only `find` so it applies whether or not git is
-# installed and regardless of whether the target is itself inside a checkout. One
-# NUL-safe walk, matching the two entries that mark a repository root (`.git` for
-# a checkout, `HEAD` for a bare one); ~16ms over the real dataset tree, which
-# contains neither.
+# Prints the path of the first git repository found STRICTLY BENEATH the given directory (depth
+# >= 2 — a nested checkout, submodule or bare mirror, not the directory's own repository), else
+# fails. `rm -rf` on such a target destroys a repository whose index we do not have, so
+# restoration is impossible and the guard's premise is void. Uses only `find` so it applies
+# whether or not git is installed and regardless of whether the target is itself inside a
+# checkout. One NUL-safe walk, matching the two entries that mark a repository root (`.git` for
+# a checkout, `HEAD` for a bare one); ~16ms over the real dataset tree, which contains neither.
 nested_repo_under() {
   local dir="$1" candidate parent scan_out scan_err detail
   [ -d "${dir}" ] || return 1
@@ -1789,6 +1786,7 @@ capture_tracked_dataset_files
 restore_tracked_dataset_files missing-only || exit 1
 
 if has_required_dataset; then
+  warm_cache_reconcile
   write_pin
   echo "Dataset ${ASSET} (tag ${TAG}) already present in ${DATASET_ROOT}; skipping download"
   guarantee_usable_root "warm cache, download skipped"
@@ -1832,12 +1830,11 @@ capture_tracked_dataset_files
 # before the deletion, rather than discovering it afterwards.
 verify_captured_blobs_readable
 
-# ...and refuse outright if any tracked fixture carries a LOCAL modification: the
-# restore rebuilds from the INDEX, so the delete-and-restore would silently REVERT
-# it and still report success (issue #3245). Placed here — after the re-capture,
-# immediately before the destructive window opens — so the verdict is about the
-# tree state at deletion time; the warm-cache and --verify-only paths exit above
-# and are unaffected.
+# ...and refuse outright if any tracked fixture carries a LOCAL modification: the restore
+# rebuilds from the INDEX, so the delete-and-restore would silently REVERT it and still report
+# success (issue #3245). Placed here — after the re-capture, immediately before the destructive
+# window opens — so the verdict is about the tree state at deletion time; the warm-cache and
+# --verify-only paths exit above and are unaffected.
 refuse_modified_tracked_dataset_files
 
 # From here until the restore below verifies the tracked subtree clean, an abort
@@ -1886,6 +1883,7 @@ if ! has_required_content; then
   exit 1
 fi
 
+write_bundle_manifest "${ASSET_PATH}"
 write_pin
 echo "Dataset extracted to ${DATASET_ROOT}"
 guarantee_usable_root "fresh extraction"

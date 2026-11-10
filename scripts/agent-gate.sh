@@ -23695,14 +23695,13 @@ run_tooling_tests() {
   # no network. A build failure is a FAILURE, never a skip.
   _tt_add L:shared-target 'ws0 corpus determinism / pin' '(cd "$REPO_ROOT" && cargo test -q -p ws0-corpus-gen)' 'cargo test into the shared target dir'
 
-  # fetch-datasets tracked-fixture guard (#2878): hermetic (throwaway git repo +
-  # locally-built partial-overlap tarball + stub curl — no network, and the real
-  # test-data/datasets is never touched), no python3 needed, always runs. Pins the
-  # capture-before-`rm -rf`/restore-after guard in fetch-datasets.sh: without it a
-  # fetch DELETES the git-tracked reference fixtures under test-data/datasets, so
-  # this very gate FAILs core-tests + cli-tests on a pristine main and the checkout
-  # is left with stageable deletions of tracked files. A failure FAILs the component.
+  # fetch-datasets tracked-fixture guard (#2878): hermetic (throwaway git repo + locally-built partial-overlap
+  # tarball + stub curl — no network, and the real test-data/datasets is never touched), no python3 needed,
+  # always runs. Pins the capture-before-`rm -rf`/restore-after guard in fetch-datasets.sh: without it a fetch
+  # DELETES the git-tracked reference fixtures under test-data/datasets, so this very gate FAILs core-tests +
+  # cli-tests on a pristine main and the checkout is left with stageable deletions. A failure FAILs the component.
   _tt_add P 'fetch-datasets tracked-fixture guard' 'bash "$REPO_ROOT/scripts/tests/test_fetch_datasets_tracked_guard.sh"'
+  _tt_add P 'fetch-datasets warm-cache overlay guard #4508' 'bash "$REPO_ROOT/scripts/tests/test_fetch_datasets_warm_overlay.sh"'
   _tt_add P 'dev-box-parity git pin apt resilience #4510' 'bash "$REPO_ROOT/scripts/tests/test_install_noble_git.sh"'
 
   # parity-report component self-test (#1338): no python3 needed, always runs. A
