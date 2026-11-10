@@ -188,9 +188,12 @@ lib_pins="$(sort <<<"$(printf '%s\n' "${_CQLITE_CASSANDRA_RELEASES[@]}")")"
   || bad "lib release table != manifest pins: lib=[$lib_pins] manifest=[$manifest_pins]"
 primary="$(python3 -c "$PINS_PY" "$ROOT/test-data/cassandra-parity-manifest.yml" | head -1)"
 sel() { CQLITE_CASSANDRA_RELEASE="$1" bash -c '. "$0/test-data/scripts/lib/cassandra-image.sh" && echo "$CQLITE_CASSANDRA_VERSION $CQLITE_CASSANDRA_REF $CQLITE_CASSANDRA_GIT_SHA $CQLITE_CASSANDRA_IMAGE"' "$ROOT" 2>/dev/null; }
-got="$(sel 5.0.2)"
+got="$(sel 5.0.8)"
 [ "$got" = "${primary% *} cassandra-${primary% *} ${primary#* } cassandra:${primary% *}" ] \
-  && ok "CQLITE_CASSANDRA_RELEASE=5.0.2 selects the coherent primary tuple (version, ref, sha, image)" || bad "5.0.2 override tuple: $got"
+  && ok "CQLITE_CASSANDRA_RELEASE=5.0.8 selects the coherent primary tuple (version, ref, sha, image)" || bad "5.0.8 tuple: $got"
+got="$(sel 5.0.2)"
+[ "$got" = "5.0.2 cassandra-5.0.2 f278f6774fc76465c182041e081982105c3e7dbb cassandra:5.0.2" ] \
+  && ok "CQLITE_CASSANDRA_RELEASE=5.0.2 still selects its coherent declared (additional-pin) tuple" || bad "5.0.2 tuple: $got"
 got="$(sel "")"
 [ "${got%% *}" = "$CQLITE_CASSANDRA_DEFAULT_RELEASE" ] && ok "the default release is $CQLITE_CASSANDRA_DEFAULT_RELEASE" || bad "default tuple: $got"
 for badrel in 5.0.9 5.0 cassandra-5.0.2 "5.0.2 "; do
@@ -200,10 +203,13 @@ for badrel in 5.0.9 5.0 cassandra-5.0.2 "5.0.2 "; do
     grep -q "not a declared release" <<<"$out" && ok "unknown release '$badrel' is rejected by name" || bad "'$badrel' rejected without the message: $out"
   fi
 done
-# every audited workflow carries the override, with the removal comment
+# the audited lanes carry NO release override any more (#4492 moved fixtures and evidence to 5.0.8)
 for wf in exhaustive-regeneration parity-regen-matrix; do
-  grep -qE '^  CQLITE_CASSANDRA_RELEASE: "5\.0\.2"  # 5\.0\.2 until #4482 fixture-regeneration stage moves fixtures\+evidence together$' "$ROOT/.github/workflows/$wf.yml" \
-    && ok "$wf.yml pins CQLITE_CASSANDRA_RELEASE=5.0.2 with the removal comment" || bad "$wf.yml lacks the 5.0.2 override line"
+  if grep -qE '^[[:space:]]*CQLITE_CASSANDRA_RELEASE:' "$ROOT/.github/workflows/$wf.yml"; then
+    bad "$wf.yml still sets CQLITE_CASSANDRA_RELEASE (override must be gone)"
+  else
+    ok "$wf.yml carries no CQLITE_CASSANDRA_RELEASE override"
+  fi
 done
 
 PIP=""

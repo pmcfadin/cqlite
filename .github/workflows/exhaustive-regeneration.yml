@@ -32,9 +32,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # This lane regenerates the corpus and audits it against COMMITTED-fixture evidence
-  # (scenario evidence.cassandra_version is 5.0.2) via the provenance check, so the
-  # generators and the recorded provenance must stay on the 5.0.2 release.
-  CQLITE_CASSANDRA_RELEASE: "5.0.2"  # 5.0.2 until #4482 fixture-regeneration stage moves fixtures+evidence together
+  # (scenario evidence.cassandra_version is 5.0.8) via the provenance check, so the
+  # generators and the recorded provenance stay on the default 5.0.8 release.
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   MANIFEST: test-data/cassandra-parity-manifest.yml
   ARTIFACT_DIR: ${{ github.workspace }}/exhaustive-regeneration-report

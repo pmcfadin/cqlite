@@ -1070,32 +1070,32 @@ fn audit_provenance(m: &Manifest, prov: &Provenance, inv: &CorpusInventory) -> V
         .collect()
 }
 
-/// The coherent tuple `CQLITE_CASSANDRA_RELEASE=5.0.2` selects (the workflows that audit
-/// against committed evidence set it): the primary pin, image included.
+/// The default release (5.0.8, #4492) against TODAY's committed evidence: every covered
+/// scenario claims 5.0.8 and the primary pin is 5.0.8, so the lanes need no override.
 #[test]
-fn the_5_0_2_override_corpus_passes_the_audit_against_todays_committed_evidence() {
+fn the_default_5_0_8_corpus_passes_the_audit_against_todays_committed_evidence() {
     let m = real_manifest();
     let inv = real_corpus_inventory(&m);
     assert!(
         !inv.files.is_empty(),
         "guard: the real manifest names corpus references"
     );
-    let findings = audit_provenance(&m, &good_provenance(), &inv);
+    let findings = audit_provenance(&m, &provenance_508(), &inv);
     assert!(
         findings.is_empty(),
-        "5.0.2 override must audit clean: {findings:?}"
+        "default 5.0.8 corpus must audit clean: {findings:?}"
     );
 }
 
-/// The default 5.0.8 release against the same evidence is rejected (every covered scenario
-/// still claims 5.0.2) - which is exactly why the audited lanes pin the override.
+/// A corpus recorded at the old 5.0.2 pin is rejected now that all covered evidence moved:
+/// a stale `CQLITE_CASSANDRA_RELEASE=5.0.2` override must not silently pass the lanes.
 #[test]
-fn the_default_5_0_8_corpus_is_rejected_against_todays_committed_evidence() {
+fn a_5_0_2_corpus_is_rejected_against_todays_committed_evidence() {
     let m = real_manifest();
     let inv = real_corpus_inventory(&m);
-    let findings = audit_provenance(&m, &provenance_508(), &inv);
+    let findings = audit_provenance(&m, &good_provenance(), &inv);
     assert_eq!(findings.len(), 1, "{findings:?}");
-    assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
+    assert!(findings[0].contains("declares 5.0.8"), "{findings:?}");
 }
 
 /// roborev job 180: the binding compares version AND sha. Evidence that names the selected
