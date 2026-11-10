@@ -412,7 +412,7 @@ before any cargo call (`scripts/lib/worktree-target-dir.sh`), so the SIDE lane's
 `agent-gate-side/<component>` dirs and the disk admission's measured dir are per worktree too.
 Third-party compiles stay cheap through sccache. A target already ending in this checkout's own `/wt/<hash>` resolves to itself (no marker needed, so `cargo clean` cannot cause nesting); another root's marked `/wt/<hash>` suffix is stripped first
 (idempotent; a nested gate on another root gets its own sibling). `<dir>/.worktree-root` records
-the root. Opt out with `CQLITE_SHARED_TARGET=1`; unset `CARGO_TARGET_DIR` already means the
+the root. If cargo's target dir cannot be resolved (e.g. `cargo metadata --offline --locked` fails) the gate ABORTS with rc 2 rather than risk a shared target; fix the lockfile/config or set `CARGO_TARGET_DIR`. Pure hook modes (`--classify-*`, `--*-list`, ...) never resolve. Opt out with `CQLITE_SHARED_TARGET=1`; unset `CARGO_TARGET_DIR` already means the
 per-checkout `<root>/target`. Cost: a new worktree's first build compiles its own workspace
 crates and test binaries (measured: `cargo test -p cqlite-core --no-run`, sccache warm, 3m28s wall
 on a box at load 40-58, about 6 GB per worktree) and each live worktree holds its own copy of the

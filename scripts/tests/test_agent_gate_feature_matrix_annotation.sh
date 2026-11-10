@@ -54,6 +54,9 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$HERE/../.." && pwd)
 GATE="$REPO_ROOT/scripts/agent-gate.sh"
+# #4387: these cases stub or hide cargo, so the gate cannot ask it for a target dir and would fail closed;
+# there is no real build to isolate, so accept the shared-target path.
+export CQLITE_SHARED_TARGET=1
 
 PASS=0; FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }

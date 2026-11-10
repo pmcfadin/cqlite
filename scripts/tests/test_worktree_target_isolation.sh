@@ -125,6 +125,23 @@ if [ -f "$T/cargo-calls.log" ] && grep -q metadata "$T/cargo-calls.log"; then ba
 ( cd "$B" && env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CQLITE_SHARED_TARGET PATH="$T/stubbin:$PATH" bash scripts/agent-gate.sh --print-target-dir >/dev/null 2>&1 )
 grep -q metadata "$T/cargo-calls.log" 2>/dev/null && ok "control: a resolving mode does call cargo metadata through the stub" || bad "control: the stub saw no metadata call"
 
+# 6e. `.`/`..` in a not-yet-existing suffix are normalised before the containment test
+git -C "$T/main" worktree add -q "$T/H" -b h >/dev/null 2>&1
+h_=$( cd "$T/H" && env -u CQLITE_SHARED_TARGET -u CARGO_BUILD_TARGET_DIR CARGO_TARGET_DIR="$T/H/missing/../../shared-h" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
+case "$h_" in "$T"/shared-h/wt/*) ok "<checkout>/missing/../../shared is normalised and isolated" ;; *) bad "dot-dot path gave '$h_'" ;; esac
+h2_=$( cd "$T/H" && env -u CQLITE_SHARED_TARGET -u CARGO_BUILD_TARGET_DIR CARGO_TARGET_DIR="$T/H/./inside/../target" bash scripts/agent-gate.sh --print-target-dir 2>/dev/null )
+case "$h2_" in "$T"/shared-h/*|"") bad "a path that normalises INSIDE the checkout was moved out: '$h2_'" ;; *) ok "a path that normalises inside the checkout is left alone ('$h2_')" ;; esac
+
+# 6f. fail closed: a config-set shared target + a failing `cargo metadata` must refuse, not share
+git -C "$T/main" worktree add -q "$T/G" -b g >/dev/null 2>&1
+mkdir -p "$T/G/.cargo"; printf '[build]\ntarget-dir = "%s/cfgbase-g"\n' "$T" >"$T/G/.cargo/config.toml"
+mkdir -p "$T/failbin"; printf '#!/usr/bin/env bash\nexit 1\n' >"$T/failbin/cargo"; chmod +x "$T/failbin/cargo"
+g_out=$( cd "$T/G" && env -u CQLITE_SHARED_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR PATH="$T/failbin:$PATH" bash scripts/agent-gate.sh --print-target-dir 2>"$T/g.err" ); g_rc=$?
+if [ "$g_rc" = 2 ] && [ -z "$g_out" ] && grep -q "ABORT: cannot establish a per-worktree target dir" "$T/g.err"; then ok "unresolvable target dir (metadata fails) makes the gate refuse (rc 2, named reason)"; else bad "fail-closed: rc=$g_rc out='$g_out' err=$(head -c 300 "$T/g.err")"; fi
+g2=$( cd "$T/G" && env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR PATH="$T/failbin:$PATH" CQLITE_SHARED_TARGET=1 bash scripts/agent-gate.sh --print-target-dir 2>/dev/null ); g2_rc=$?
+[ "$g2_rc" = 0 ] && ok "CQLITE_SHARED_TARGET=1 still lets an operator proceed" || bad "opt-out refused (rc $g2_rc)"
+( cd "$T/G" && env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR PATH="$T/failbin:$PATH" bash scripts/agent-gate.sh --classify-lanes >/dev/null 2>&1 ) && ok "pure hook modes are unaffected by an unresolvable target dir" || bad "--classify-lanes refused"
+
 # 7. a fresh base gets cargo's CACHEDIR.TAG from the helper (the prune refuses a base without one)
 [ -f "$SHARED/CACHEDIR.TAG" ] && grep -q '^Signature: 8a477f597d28d172789f06886806bc55' "$SHARED/CACHEDIR.TAG" && ok "fresh base carries a valid CACHEDIR.TAG" || bad "no CACHEDIR.TAG on the base"
 

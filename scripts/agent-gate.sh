@@ -1161,12 +1161,19 @@ esac
 if [ "$_wt_skip" = 0 ] && [ -f "$REPO_ROOT/scripts/lib/worktree-target-dir.sh" ]; then
   # shellcheck source=lib/worktree-target-dir.sh
   . "$REPO_ROOT/scripts/lib/worktree-target-dir.sh"
-  if _wt_dir=$(gate_worktree_target_dir "$REPO_ROOT"); then
+  _wt_dir=$(gate_worktree_target_dir "$REPO_ROOT"); _wt_rc=$?
+  if [ "$_wt_rc" = 0 ]; then
     if [ "$_wt_dir" != "${CARGO_TARGET_DIR:-}" ]; then
       echo "agent-gate: per-worktree target dir $_wt_dir (shared base kept for sccache; #4387)" >&2
     fi
     export CARGO_TARGET_DIR="$_wt_dir"
+  elif [ "$_wt_rc" = 2 ]; then
+    # FAIL CLOSED (#4387): when cargo's target dir cannot be resolved a shared target may be in
+    # play, and building would silently reuse another worktree's test binaries.
+    echo "agent-gate: ABORT: cannot establish a per-worktree target dir (see the line above); set CARGO_TARGET_DIR to an absolute path or fix Cargo.lock/the cargo config, or CQLITE_SHARED_TARGET=1 to accept a shared target (#4387)" >&2
+    exit 2
   fi
+  unset _wt_rc
   unset _wt_dir
 fi
 unset _wt_skip
