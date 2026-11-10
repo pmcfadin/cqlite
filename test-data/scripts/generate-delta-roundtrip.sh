@@ -76,7 +76,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR="${DELTA_ROUNDTRIP_DATA:-/tmp/delta-roundtrip}"
 DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="cqlite-delta-roundtrip"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 
 # ---------------------------------------------------------------------------
 # Parse CLI flags
@@ -815,10 +816,8 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 fi
 
 # Install Python driver
-log "Installing python3-pip in container..."
-run $ENGINE exec "$CONTAINER_NAME" bash -c "apt-get update -qq && apt-get install -y -q python3-pip"
-log "Installing cassandra-driver in container..."
-run $ENGINE exec "$CONTAINER_NAME" pip3 install --quiet cassandra-driver
+log "Installing pinned cassandra-driver ${CQLITE_CASSANDRA_DRIVER_VERSION} in container..."
+run cqlite_install_cassandra_driver "$ENGINE" "$CONTAINER_NAME"
 
 # Write and apply the Cassandra schema
 CASSANDRA_SCHEMA_FILE="$(mktemp /tmp/roundtrip_cassandra_schema.XXXXXX.cql)"

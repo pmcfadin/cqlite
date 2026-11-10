@@ -97,7 +97,8 @@ DRY_RUN="${DRY_RUN:-0}"
 VERIFY_ONLY="${VERIFY_ONLY:-0}"
 KEEP_CONTAINER="${KEEP_CONTAINER:-0}"
 CONTAINER_NAME="cqlite-nestedudtkeys"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 KEYSPACE="test_nested_udt_keys"
 TABLES=(nested_udt_keys)
 

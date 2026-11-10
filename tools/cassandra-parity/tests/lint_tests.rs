@@ -1464,3 +1464,52 @@ fn ambiguous_bare_basename_is_rejected_when_index_present() {
         .any(|f| f.id == "cass.sstable_format.path_qualified"
             || f.id == "cass.sstable_format.bare_unambiguous"));
 }
+
+// ---- #4482: per-fixture Cassandra versions must be DECLARED releases ----
+
+fn manifest_with_scenario_version(version: &str, additional: bool) -> String {
+    let mut y = wrap(VALID_SCENARIO).replace(
+        "cassandra_version: \"5.0.2\"",
+        &format!("cassandra_version: \"{version}\""),
+    );
+    if additional {
+        y = y.replace(
+            "  ref: cassandra-5.0.2\n",
+            "  ref: cassandra-5.0.2\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: 172227094626d50d4bc9a3d9de2e3659a7844386\n",
+        );
+    }
+    y
+}
+
+fn version_findings(version: &str, additional: bool) -> Vec<String> {
+    let y = manifest_with_scenario_version(version, additional);
+    let m = Manifest::from_yaml(&y).expect("parses");
+    lint(&m, None)
+        .into_iter()
+        .filter(|f| f.field == "evidence.cassandra_version")
+        .map(|f| f.message)
+        .collect()
+}
+
+#[test]
+fn lint_accepts_a_per_fixture_version_declared_by_the_primary_or_an_additional_pin() {
+    for (version, additional) in [("5.0.2", false), ("5.0.2", true), ("5.0.8", true)] {
+        let found = version_findings(version, additional);
+        assert!(
+            found.is_empty(),
+            "{version} (additional={additional}): {found:?}"
+        );
+    }
+}
+
+#[test]
+fn lint_rejects_a_per_fixture_version_no_pin_declares() {
+    for (version, additional) in [("5.0.8", false), ("5.0.9", true)] {
+        let found = version_findings(version, additional);
+        assert_eq!(
+            found.len(),
+            1,
+            "{version} (additional={additional}): {found:?}"
+        );
+    }
+}

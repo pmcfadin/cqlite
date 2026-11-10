@@ -40,7 +40,11 @@ fn index_text(include_unclassified: bool) -> String {
 /// Build a manifest whose single scenario references `REF` and classifies
 /// `SortedTableWriterTest.java`.
 fn manifest() -> Manifest {
-    let yaml = format!(
+    Manifest::from_yaml(&manifest_yaml()).expect("fixture manifest parses")
+}
+
+fn manifest_yaml() -> String {
+    format!(
         r#"manifest_version: 1
 cassandra_source:
   repo: https://github.com/apache/cassandra
@@ -73,8 +77,33 @@ scenarios:
     ci:
       tier: exhaustive_regeneration
 "#
+    )
+}
+
+const SHA_508: &str = "172227094626d50d4bc9a3d9de2e3659a7844386";
+
+/// The primary 5.0.2 manifest plus a declared additional 5.0.8 pin (#4482).
+fn manifest_with_additional_pin() -> Manifest {
+    let mut yaml = manifest_yaml();
+    yaml = yaml.replace(
+        "  assessment_report: docs/reports/x.md\n",
+        &format!(
+            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n"
+        ),
     );
-    Manifest::from_yaml(&yaml).expect("fixture manifest parses")
+    Manifest::from_yaml(&yaml).expect("manifest with additional pin parses")
+}
+
+fn provenance_508() -> Provenance {
+    Provenance {
+        cassandra_version: "5.0.8".to_string(),
+        cassandra_ref: "cassandra-5.0.8".to_string(),
+        cassandra_git_sha: SHA_508.to_string(),
+        docker_image: "cassandra:5.0.8".to_string(),
+        generator_commands: vec!["bash test-data/scripts/regenerate-datasets.sh".to_string()],
+        dataset_asset_name: "dataset-asset.tar.gz".to_string(),
+        dataset_asset_sha256: "deadbeef".to_string(),
+    }
 }
 
 fn good_provenance() -> Provenance {
@@ -676,4 +705,48 @@ fn provenance_round_trips_from_json() {
     // Matches the fixture manifest pin -> no provenance findings.
     let findings = corpus_audit::provenance::check_provenance(&prov, &manifest());
     assert!(findings.is_empty(), "got: {findings:?}");
+}
+
+// ---- #4482: a declared additional pin (5.0.8) next to the primary (5.0.2) ----
+
+/// Fixtures generated with 5.0.2 stay valid until regenerated, and a regeneration
+/// from the DECLARED additional 5.0.8 release passes the provenance audit.
+#[test]
+fn provenance_accepts_a_declared_additional_pin_and_still_accepts_the_primary() {
+    let m = manifest_with_additional_pin();
+    let on_508 = corpus_audit::provenance::check_provenance(&provenance_508(), &m);
+    assert!(
+        on_508.is_empty(),
+        "declared 5.0.8 pin must pass: {on_508:?}"
+    );
+    let on_502 = corpus_audit::provenance::check_provenance(&good_provenance(), &m);
+    assert!(
+        on_502.is_empty(),
+        "primary 5.0.2 must still pass: {on_502:?}"
+    );
+}
+
+/// The same 5.0.8 regeneration against a manifest that does NOT declare it is the
+/// silent image bump the audit exists to catch: ref, sha, version and image all red.
+#[test]
+fn provenance_rejects_5_0_8_when_the_manifest_does_not_declare_it() {
+    let findings = corpus_audit::provenance::check_provenance(&provenance_508(), &manifest());
+    assert!(
+        findings.len() >= 3,
+        "an undeclared 5.0.8 must trip ref + sha/version/image, got: {findings:?}"
+    );
+    assert!(findings
+        .iter()
+        .any(|f| f.subject.contains("cassandra:5.0.8")));
+}
+
+/// Declaring 5.0.8 must not launder a DIFFERENT undeclared release.
+#[test]
+fn provenance_still_rejects_an_undeclared_release_when_an_additional_pin_exists() {
+    let m = manifest_with_additional_pin();
+    let mut prov = provenance_508();
+    prov.docker_image = "cassandra:5.0.9".to_string();
+    let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+    assert_eq!(findings.len(), 1, "only the image diverges: {findings:?}");
+    assert!(findings[0].subject.contains("cassandra:5.0.9"));
 }

@@ -17,7 +17,20 @@
         "ref": { "type": "string" },
         "sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
         "index": { "type": "string" },
-        "assessment_report": { "type": "string" }
+        "assessment_report": { "type": "string" },
+        "additional_pins": {
+          "description": "Further Cassandra releases fixtures may be (re)generated from (#4482); each scenario's evidence.cassandra_version must name the primary ref's release or one of these.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref", "sha"],
+            "properties": {
+              "ref": { "type": "string" },
+              "sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" }
+            }
+          }
+        }
       }
     },
     "program": {

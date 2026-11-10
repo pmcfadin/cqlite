@@ -13,7 +13,8 @@
 #   $OUT/sstables/test_da/wide_table-<hash>/da-*-Data.db.jsonl   (sstabledump -l)
 set -euo pipefail
 
-IMAGE="${IMAGE:-cassandra:5.0.2}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+IMAGE="${IMAGE:-$CQLITE_CASSANDRA_IMAGE}"
 CONTAINER="${CONTAINER:-cqlite-widebti}"
 OUT="${OUT:-/Users/pmcfadin/projects/cqlite/test-data/datasets}"
 KS="test_da"

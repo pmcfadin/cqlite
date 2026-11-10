@@ -45,11 +45,14 @@ impl Provenance {
 /// Fail when the recorded provenance was produced from a Cassandra
 /// version/ref/sha the manifest does not declare.
 ///
-/// - `cassandra_ref` MUST equal `cassandra_source.ref`.
-/// - `cassandra_git_sha` MUST be `cassandra_source.sha` or appear in some
-///   `evidence.cassandra_git_sha`.
-/// - `cassandra_version` MUST be the version implied by `cassandra_source.ref`
-///   (e.g. `cassandra-5.0.2` → `5.0.2`) or appear in some
+/// - `cassandra_ref` MUST equal `cassandra_source.ref` or the `ref` of a
+///   `cassandra_source.additional_pins` entry (#4482: fixtures generated with the
+///   primary release stay valid until regenerated, so a regeneration from a
+///   newer, DECLARED release is accepted; an undeclared one is not).
+/// - `cassandra_git_sha` MUST be `cassandra_source.sha`, an additional pin's
+///   `sha`, or appear in some `evidence.cassandra_git_sha`.
+/// - `cassandra_version` MUST be the version implied by `cassandra_source.ref` or
+///   an additional pin's `ref` (e.g. `cassandra-5.0.2` → `5.0.2`) or appear in some
 ///   `evidence.cassandra_version`.
 /// - `docker_image` MUST carry a tag whose leading `MAJOR[.MINOR[.PATCH…]]`
 ///   version is one of the manifest's declared versions. This field is the ONE
@@ -66,12 +69,18 @@ pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFind
     let mut out = Vec::new();
     let src = &manifest.cassandra_source;
 
-    if prov.cassandra_ref != src.git_ref {
+    let ref_declared = prov.cassandra_ref == src.git_ref
+        || src
+            .additional_pins
+            .iter()
+            .any(|p| p.git_ref == prov.cassandra_ref);
+    if !ref_declared {
         out.push(AuditFinding::new(
             FindingKind::ProvenanceMismatch,
             prov.cassandra_ref.clone(),
             format!(
-                "recorded cassandra_ref does not match manifest cassandra_source.ref ({})",
+                "recorded cassandra_ref does not match manifest cassandra_source.ref ({}) \
+                 or any cassandra_source.additional_pins ref",
                 src.git_ref
             ),
         ));
@@ -82,6 +91,12 @@ pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFind
     let mut declared_versions: BTreeSet<String> = BTreeSet::new();
     if let Some(v) = version_from_ref(&src.git_ref) {
         declared_versions.insert(v);
+    }
+    for pin in &src.additional_pins {
+        declared_shas.insert(pin.sha.as_str());
+        if let Some(v) = version_from_ref(&pin.git_ref) {
+            declared_versions.insert(v);
+        }
     }
     for s in &manifest.scenarios {
         if let Some(sha) = &s.evidence.cassandra_git_sha {

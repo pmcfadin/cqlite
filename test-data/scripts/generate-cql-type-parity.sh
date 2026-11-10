@@ -141,7 +141,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT/datasets}"
 DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="cqlite-types"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 KEYSPACE="test_types"
 
 # Fixed-timestamp constants (see header).
@@ -874,10 +875,8 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 fi
 
 # Install Python driver
-log "Installing python3-pip in container..."
-run $ENGINE exec "$CONTAINER_NAME" bash -c "apt-get update -qq && apt-get install -y -q python3-pip"
-log "Installing cassandra-driver in container..."
-run $ENGINE exec "$CONTAINER_NAME" pip3 install --quiet cassandra-driver
+log "Installing pinned cassandra-driver ${CQLITE_CASSANDRA_DRIVER_VERSION} in container..."
+run cqlite_install_cassandra_driver "$ENGINE" "$CONTAINER_NAME"
 
 # Apply schema (creates keyspace + UDTs + all twenty tables)
 apply_schema "$ROOT/schemas/cql-type-parity.cql"
