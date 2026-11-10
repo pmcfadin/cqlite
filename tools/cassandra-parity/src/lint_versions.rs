@@ -14,6 +14,7 @@ use crate::model::Manifest;
 /// required whenever one is present). A version in no pin is a typo or an undeclared
 /// release.
 pub(crate) fn lint_declared_fixture_versions(m: &Manifest, out: &mut Vec<Finding>) {
+    lint_pin_uniqueness(m, out);
     let pins = m.cassandra_source.pins();
     let declared: Vec<&str> = pins.iter().map(|(v, _, _)| v.as_str()).collect();
     for s in &m.scenarios {
@@ -74,6 +75,37 @@ pub(crate) fn lint_declared_fixture_versions(m: &Manifest, out: &mut Vec<Finding
                         "evidence.cassandra_git_sha {sha:?} is not the sha of the pin for \
                          evidence.cassandra_version {version:?} ({pin_sha}); version and sha \
                          must come from the same cassandra_source pin"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// The declared pins (primary plus `additional_pins`) must be distinct releases: a duplicate
+/// derived VERSION or a duplicate SHA would let evidence that matches one entry stand for
+/// the other (roborev job 180), so each is an error naming both entries.
+fn lint_pin_uniqueness(m: &Manifest, out: &mut Vec<Finding>) {
+    let pins = m.cassandra_source.pins();
+    for (i, (version, git_ref, sha)) in pins.iter().enumerate() {
+        for (other_version, other_ref, other_sha) in &pins[i + 1..] {
+            if version == other_version {
+                out.push(Finding::error(
+                    "cassandra_source",
+                    "cassandra_source.additional_pins",
+                    format!(
+                        "pins {git_ref} ({sha}) and {other_ref} ({other_sha}) derive the same \
+                         version {version:?}; each declared release must be distinct"
+                    ),
+                ));
+            }
+            if sha == other_sha {
+                out.push(Finding::error(
+                    "cassandra_source",
+                    "cassandra_source.additional_pins",
+                    format!(
+                        "pins {git_ref} and {other_ref} declare the same sha {sha}; each declared \
+                         release must be distinct"
                     ),
                 ));
             }

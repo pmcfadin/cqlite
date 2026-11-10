@@ -162,3 +162,68 @@ fn lint_requires_both_version_and_sha_when_either_is_present() {
         "version-only evidence must be rejected: {version_only:?}"
     );
 }
+
+fn pin_findings(extra_pins: &str) -> Vec<String> {
+    let y = wrap(VALID_SCENARIO).replace(
+        "  ref: cassandra-5.0.2\n",
+        &format!("  ref: cassandra-5.0.2\n  additional_pins:\n{extra_pins}"),
+    );
+    let m = Manifest::from_yaml(&y).expect("parses");
+    lint(&m, None)
+        .into_iter()
+        .filter(|f| f.field == "cassandra_source.additional_pins")
+        .map(|f| f.message)
+        .collect()
+}
+
+const SHA_A: &str = "172227094626d50d4bc9a3d9de2e3659a7844386";
+const SHA_B: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// roborev job 180: duplicate derived versions or shas let evidence for one pin stand for
+/// another, so the manifest is rejected naming both entries.
+#[test]
+fn lint_rejects_duplicate_pin_versions_and_duplicate_pin_shas() {
+    let same_version_ref = pin_findings(&format!(
+        "    - ref: cassandra-5.0.8\n      sha: {SHA_A}\n    - ref: cassandra-5.0.8\n      sha: {SHA_B}\n"
+    ));
+    assert_eq!(same_version_ref.len(), 1, "{same_version_ref:?}");
+    assert!(
+        same_version_ref[0].contains("same version")
+            && same_version_ref[0].contains(SHA_A)
+            && same_version_ref[0].contains(SHA_B)
+    );
+
+    let same_derived_version = pin_findings(&format!(
+        "    - ref: cassandra-5.0.8\n      sha: {SHA_A}\n    - ref: \"5.0.8\"\n      sha: {SHA_B}\n"
+    ));
+    assert_eq!(same_derived_version.len(), 1, "{same_derived_version:?}");
+    assert!(
+        same_derived_version[0].contains("cassandra-5.0.8")
+            && same_derived_version[0].contains("5.0.8")
+    );
+
+    let same_sha = pin_findings(&format!(
+        "    - ref: cassandra-5.0.8\n      sha: {SHA_A}\n    - ref: cassandra-5.0.9\n      sha: {SHA_A}\n"
+    ));
+    assert_eq!(same_sha.len(), 1, "{same_sha:?}");
+    assert!(
+        same_sha[0].contains("same sha")
+            && same_sha[0].contains("cassandra-5.0.8")
+            && same_sha[0].contains("cassandra-5.0.9")
+    );
+
+    let primary_dup = pin_findings(
+        "    - ref: cassandra-5.0.2\n      sha: 0123456789abcdef0123456789abcdef01234567\n",
+    );
+    assert_eq!(
+        primary_dup.len(),
+        1,
+        "an additional pin repeating the primary version: {primary_dup:?}"
+    );
+}
+
+#[test]
+fn lint_accepts_distinct_pins() {
+    let ok = pin_findings(&format!("    - ref: cassandra-5.0.8\n      sha: {SHA_A}\n"));
+    assert!(ok.is_empty(), "{ok:?}");
+}

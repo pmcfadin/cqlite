@@ -937,7 +937,7 @@ fn pin_binding_rejects_mixed_claims_naming_the_disagreeing_scenario() {
     let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert!(
-        findings[0].contains("cass.sstable_format.simple1 (declares 5.0.2)"),
+        findings[0].contains("cass.sstable_format.simple1 (declares 5.0.2 @ f278f6774fc7)"),
         "{findings:?}"
     );
     assert!(!findings[0].contains("simple0"), "{findings:?}");
@@ -1039,4 +1039,20 @@ fn the_default_5_0_8_corpus_is_rejected_against_todays_committed_evidence() {
     let findings = audit_provenance(&m, &provenance_508(), &inv);
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
+}
+
+/// roborev job 180: the binding compares version AND sha. Evidence that names the selected
+/// pin's version with a DIFFERENT sha does not bless the run.
+#[test]
+fn pin_binding_rejects_same_version_evidence_at_a_different_sha() {
+    let other_sha = "0123456789abcdef0123456789abcdef01234567";
+    let m = manifest_with_claims(&[("5.0.8", SHA_508), ("5.0.8", other_sha)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple1 (declares 5.0.8 @ 0123456789ab)"),
+        "{findings:?}"
+    );
+    assert!(!findings[0].contains("simple0"), "{findings:?}");
+    assert!(findings[0].contains("1 of the 2 scenarios"), "{findings:?}");
 }

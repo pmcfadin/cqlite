@@ -149,7 +149,7 @@ pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFind
 /// would let a 5.0.8-generated corpus pass while every scenario still claims 5.0.2, so a
 /// non-primary pin is accepted only when the scenarios whose fixtures the corpus provides
 /// ([`refs::covering_scenarios`]) ALL declare that pin's release in
-/// `evidence.cassandra_version`. If none is covered, or any disagrees (a scenario that
+/// `evidence.cassandra_version` AND `evidence.cassandra_git_sha` (a version alone is not enough: duplicate derived versions are also rejected by the linter). If none is covered, or any disagrees (a scenario that
 /// claims another release or none), the run is rejected naming those scenarios and the
 /// versions they declare. The primary pin is unchanged: the committed fixtures and
 /// scenarios are on it until a regeneration moves them.
@@ -159,7 +159,7 @@ pub fn check_pin_binding(
     inventory: &CorpusInventory,
 ) -> Vec<AuditFinding> {
     let pins = manifest.cassandra_source.pins();
-    let Some((index, (pin_version, pin_ref, _))) = pins
+    let Some((index, (pin_version, pin_ref, pin_sha))) = pins
         .iter()
         .enumerate()
         .find(|(_, (_, r, _))| *r == prov.cassandra_ref)
@@ -173,15 +173,21 @@ pub fn check_pin_binding(
     let covering = refs::covering_scenarios(manifest, inventory);
     let disagree: Vec<String> = covering
         .iter()
-        .filter(|s| s.evidence.cassandra_version.as_deref().map(str::trim) != Some(pin_version))
+        .filter(|s| {
+            let e = &s.evidence;
+            e.cassandra_version.as_deref().map(str::trim) != Some(pin_version.as_str())
+                || e.cassandra_git_sha.as_deref().map(str::trim) != Some(*pin_sha)
+        })
         .map(|s| {
+            let e = &s.evidence;
             format!(
-                "{} (declares {})",
+                "{} (declares {} @ {})",
                 s.id,
-                s.evidence
-                    .cassandra_version
+                e.cassandra_version.as_deref().unwrap_or("no version"),
+                e.cassandra_git_sha
                     .as_deref()
-                    .unwrap_or("no version")
+                    .map(|x| x.chars().take(12).collect::<String>())
+                    .unwrap_or_else(|| "no sha".to_string())
             )
         })
         .collect();
@@ -211,7 +217,7 @@ pub fn check_pin_binding(
     vec![subject(format!(
         "the corpus was generated from additional pin {pin_ref} ({pin_version}), but \
          {} of the {} scenarios whose fixtures it covers do not declare \
-         evidence.cassandra_version {pin_version}: {shown}{more}",
+         evidence.cassandra_version {pin_version} AND evidence.cassandra_git_sha {pin_sha}: {shown}{more}",
         disagree.len(),
         covering.len()
     ))]
