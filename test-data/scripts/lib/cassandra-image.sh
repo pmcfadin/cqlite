@@ -78,6 +78,36 @@ _cqlite_sha256() {
   fi
 }
 
+# _cqlite_cached_wheel <cache-dir> <url> <sha256>
+# Makes sure <cache-dir>/<wheel> exists and matches the sha256, safe against concurrent
+# generators sharing the cache (roborev job 181):
+#   * a cached file is trusted only after its sha256 is re-verified;
+#   * otherwise the wheel is fetched into a UNIQUE temp file in the SAME directory (so the
+#     final rename is atomic), verified BEFORE it is published, then `mv -f`'d into place;
+#   * a failure removes only this call's own temp file (the trap lives in a subshell and
+#     names that one path), never a peer's. If a peer published first, either verified copy
+#     is the same bytes, so the last rename winning is fine.
+# CQLITE_DRIVER_FETCH overrides the downloader (default `curl -fsSL`; called as
+# `$CQLITE_DRIVER_FETCH <url> -o <file>`), which the guard test uses to simulate slow peers.
+_cqlite_cached_wheel() {
+  local cache="$1" url="$2" sha="$3" name
+  name="${url##*/}"
+  if [ -f "$cache/$name" ] && [ "$(_cqlite_sha256 "$cache/$name")" = "$sha" ]; then
+    return 0
+  fi
+  (
+    tmp="$(mktemp "$cache/.${name}.XXXXXX")" || exit 1
+    trap 'rm -f "$tmp"' EXIT INT TERM
+    # shellcheck disable=SC2086  # the downloader is a command line, split on purpose
+    ${CQLITE_DRIVER_FETCH:-curl -fsSL} "$url" -o "$tmp" || { echo "[driver] cannot download $name" >&2; exit 1; }
+    if [ "$(_cqlite_sha256 "$tmp")" != "$sha" ]; then
+      echo "[driver] sha256 mismatch for $name (expected $sha)" >&2
+      exit 1
+    fi
+    mv -f "$tmp" "$cache/$name" && tmp=""
+  )
+}
+
 # True when the container already has ALL FOUR hash-locked distributions at their exact
 # pinned versions. The (name, version) pairs are read from the requirements file, so there
 # is no second copy of the pins. `$1` is the engine command, possibly several words
@@ -153,15 +183,9 @@ cqlite_install_cassandra_driver() {
   mkdir -p "$cache" "$dir/wheels"
   for spec in "${wheels[@]}"; do
     url="${spec% *}"; sha="${spec##* }"; name="${url##*/}"
-    if ! { [ -f "$cache/$name" ] && [ "$(_cqlite_sha256 "$cache/$name")" = "$sha" ]; }; then
-      curl -fsSL "$url" -o "$cache/$name.part" && mv "$cache/$name.part" "$cache/$name" \
-        || { echo "[driver] cannot download $name" >&2; rm -rf "$dir"; return 1; }
-    fi
-    if [ "$(_cqlite_sha256 "$cache/$name")" != "$sha" ]; then
-      echo "[driver] sha256 mismatch for $name (expected $sha)" >&2
-      rm -f "$cache/$name"; rm -rf "$dir"; return 1
-    fi
+    _cqlite_cached_wheel "$cache" "$url" "$sha" || { rm -rf "$dir"; return 1; }
     cp "$cache/$name" "$dir/wheels/$name"
+    [ "$(_cqlite_sha256 "$dir/wheels/$name")" = "$sha" ] || { echo "[driver] $name changed under us" >&2; rm -rf "$dir"; return 1; }
   done
 
   if [ "$have_pip" = 1 ]; then

@@ -100,6 +100,50 @@ fe_setup "all-exact" x86_64 "$all_pins"
 CQLITE_DRIVER_WHEEL_CACHE="$T/wheel-cache" cqlite_install_cassandra_driver "$FE_ENGINE" fakec >/dev/null 2>&1
 if [ "$?" = 0 ] && ! grep -qE "^cp |uname" "$FE_LOG"; then ok "all four distributions at the pinned versions: the install is skipped"; else bad "all-exact container was not skipped: $(cat "$FE_LOG" | head -3 | tr '\n' ';')"; fi
 
+# --- wheel cache: concurrent installs share it safely (roborev job 181) ---------------------
+CT="$T/cache-test"; mkdir -p "$CT/cache" "$CT/src"
+head -c 300 /dev/urandom > "$CT/src/a-1.0-py3-none-any.whl"; head -c 300 /dev/urandom > "$CT/src/b-1.0-py3-none-any.whl"
+shaA="$(_cqlite_sha256 "$CT/src/a-1.0-py3-none-any.whl")"; shaB="$(_cqlite_sha256 "$CT/src/b-1.0-py3-none-any.whl")"
+# slow fake downloader: `<fetch> <url> -o <dest>`; writes the wheel in 64-byte chunks with pauses
+cat > "$CT/slowfetch" <<'SF'
+#!/usr/bin/env bash
+src="$FAKE_SRC_DIR/${1##*/}"; [ -n "${FAKE_CORRUPT:-}" ] && src="$FAKE_SRC_DIR/a-1.0-py3-none-any.whl"
+python3 -c 'import sys, time
+d = open(sys.argv[1], "rb").read(); o = open(sys.argv[2], "wb")
+for i in range(0, len(d), 64):
+    o.write(d[i:i+64]); o.flush(); time.sleep(0.15)' "$src" "$3"
+SF
+chmod +x "$CT/slowfetch"
+: > "$CT/cache/.peer-a-1.0-py3-none-any.whl.PEER00"        # a peer's in-flight temp file
+pids=(); names=()
+for round in 1 2 3 4; do
+  for w in a b; do
+    sha=$shaA; [ "$w" = b ] && sha=$shaB
+    ( FAKE_SRC_DIR="$CT/src" CQLITE_DRIVER_FETCH="$CT/slowfetch" _cqlite_cached_wheel "$CT/cache" "fake://x/$w-1.0-py3-none-any.whl" "$sha" ) &
+    pids+=($!); names+=("$w$round")
+  done
+done
+bad_rc=0; for pid in "${pids[@]}"; do wait "$pid" || bad_rc=$((bad_rc+1)); done
+[ "$bad_rc" = 0 ] && ok "8 parallel fetches of 2 wheels all succeed" || bad "$bad_rc of 8 parallel fetches failed"
+left="$(ls -A "$CT/cache" | LC_ALL=C sort | tr '\n' ' ')"
+[ "$left" = ".peer-a-1.0-py3-none-any.whl.PEER00 a-1.0-py3-none-any.whl b-1.0-py3-none-any.whl " ] \
+  && ok "the cache holds exactly the two verified wheels (plus the peer's temp file, untouched)" || bad "unexpected cache contents: $left"
+[ "$(_cqlite_sha256 "$CT/cache/a-1.0-py3-none-any.whl")" = "$shaA" ] && [ "$(_cqlite_sha256 "$CT/cache/b-1.0-py3-none-any.whl")" = "$shaB" ] \
+  && ok "both published wheels match their sha256" || bad "a published wheel does not match its sha256"
+printf 'garbage' > "$CT/cache/a-1.0-py3-none-any.whl"
+FAKE_SRC_DIR="$CT/src" CQLITE_DRIVER_FETCH="$CT/slowfetch" _cqlite_cached_wheel "$CT/cache" "fake://x/a-1.0-py3-none-any.whl" "$shaA" \
+  && [ "$(_cqlite_sha256 "$CT/cache/a-1.0-py3-none-any.whl")" = "$shaA" ] \
+  && ok "a corrupted cached wheel is re-fetched and replaced" || bad "a corrupted cached wheel was not replaced"
+rm -f "$CT/cache/b-1.0-py3-none-any.whl"
+before="$(ls -A "$CT/cache" | LC_ALL=C sort | tr '\n' ' ')"
+if FAKE_CORRUPT=1 FAKE_SRC_DIR="$CT/src" CQLITE_DRIVER_FETCH="$CT/slowfetch" _cqlite_cached_wheel "$CT/cache" "fake://x/b-1.0-py3-none-any.whl" "$shaB" 2>/dev/null; then
+  bad "a download whose sha256 is wrong was published"
+else
+  after="$(ls -A "$CT/cache" | LC_ALL=C sort | tr '\n' ' ')"
+  [ "$before" = "$after" ] && ok "a wrong-sha download is refused, nothing is published, only its own temp file is removed (the peer's survives)" \
+    || bad "failed download left/changed cache entries: before=[$before] after=[$after]"
+fi
+
 # --- release selection: CQLITE_CASSANDRA_RELEASE picks one COHERENT tuple (#4482) -----------
 read -r -d '' PINS_PY <<'PY' || true
 import re, sys
