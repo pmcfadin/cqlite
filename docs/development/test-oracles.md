@@ -115,3 +115,29 @@ Related: [validation playbook](https://pmcfadin.github.io/cqlite/agents-developi
   committed source, and a number nobody can re-derive from the repo is what stops the next person
   looking.** That target's module header carries the numbers with the exact recipe — commands, cap
   values, and how the fix is reverted so detection is measured against the defect PRESENT.
+- **Sixth blind spot: a test that COMPILES is not a test that RUNS (#4420, #4421, #4422).** Seven
+  workspace suites (917 tests) built green in CI and were executed by no lane; the root
+  package had 14 latent failures and `cqlite-integration-tests` had 2 once they were run. A green
+  build says nothing about a suite no job invokes. **Rule: a new crate or test target is listed in
+  `scripts/tests/workspace-test-disposition.txt` and named in a gate component list (#3522), and you
+  confirm it appears in a run's output before citing it.** The disposition record is checked for
+  completeness, not for truth, so the confirmation is yours to make.
+- **Seventh blind spot: the ORACLE drifts between Cassandra versions (#4482, #4486).** Moving the
+  oracle from 5.0.2 to 5.0.8 changed goldens while `Data.db` stayed byte-identical: the TOC component
+  order differs, and `sstabledump` reports a different partition `position`. A reader or comparator
+  that depends on those passes or fails on the oracle's version, not on CQLite's behaviour. **Rule:
+  compare on what the format defines, never on incidental tool output order or position; record the
+  Cassandra version a golden was produced with; and never regenerate fixtures in the same PR that
+  adds a feature's new goldens**, or neither diff can be read.
+- **Eighth blind spot: a wall-clock or host-dependent assert measures the MACHINE (#4232, #4376,
+  #4403, #4459).** An index-build growth ratio, a concurrent-scan scaling floor and several
+  self-tests each passed on the host they were written on and failed elsewhere, or the reverse.
+  **Rule: an assertion in the merge path depends only on the code and the committed inputs. Timing,
+  scaling and host-capability checks run in a perf or nightly lane with a calibrated threshold**, and
+  a self-test pins the probe it depends on so it behaves the same on every host.
+- **Ninth blind spot: a swallowed read error looks like an EMPTY RESULT (#4159, #3721).** A scan over
+  an unreadable SSTable returned `Ok(empty)`, so every caller that counts, compares or reports on the
+  result saw "nothing there". For a tool whose job is to report on damaged files, that is a false
+  all-clear. **Rule: a read or decode error reaches the caller and the process exit code; a value
+  that could not be measured is reported as `unmeasured: <cause>`, never as 0 or empty; and a test
+  for a reporting tool includes an input it cannot read and asserts the failure is NAMED.**

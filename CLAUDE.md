@@ -11,8 +11,10 @@ data files without a cluster. Single Linux dev box; the multi-machine fleet was 
 
 **Status** (Nov 2026): v0.18.0 shipped as the SSTable toolbox release (`cqlite verify`/`sweep` #4194,
 `salvage` #4196, `rebuild` #4197, raw SSTable view #4222, arrow 59 / DataFusion 55.1 with Rust floor 1.95
-#4236). Milestone 0.19: the rest of epic #4192 (explain / audit / scrub / diff / diagnose), Vortex export
-#4237, memtable freshness. Later: M6 (WASM bindings), M7 (perf validation, v1.0).
+#4236). Milestone 0.19 is a read-only forensics release: Vortex export #4237, audit #4195, find #4205,
+diagnose #4204, explain #4193, with extract/split #4199 as a stretch item. Plan, work order and release
+criteria: `docs/development/release-0.19-plan.md`. Milestone 0.20: the write verbs of epic #4192 (scrub /
+convert / rekey / tombstones / diff / purge). Later: M6 (WASM bindings), M7 (perf validation, v1.0).
 
 ## Where things are
 

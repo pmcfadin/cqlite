@@ -75,6 +75,23 @@ Triage from the **failure bundle keyed by scenario id** (issue #1027):
       rendered from the manifest (`cargo run -p cassandra-parity -- report`); confirm
       it is not stale (`report ... --check` exits 0).
 
+## Release-commit criteria (from 0.19)
+
+Owner ruling 2026-11-10 ([0.19 release plan](./release-0.19-plan.md)). These apply to the release
+itself, whether or not a parity claim is published.
+
+- [ ] **Full gate of record on the release commit.** `scripts/agent-gate.sh` (full mode, Linux) passed
+      on the exact commit being tagged, run on `main` after the last merge. Branch-head gates do not
+      satisfy this: branch protection is `strict: false` with no merge queue, so `main` can move
+      between a PR's certification and its merge (#3680).
+- [ ] **Seven consecutive green nightlies.** The nightly full gate (`gate.yml`) passed on each of the
+      seven nights before the tag. A red night restarts the count and is triaged the next day (#2911).
+- [ ] **No open fuzz finding in a tool the release ships.** A fuzz finding does not block a merge, but
+      one in a tool new to the release blocks the release (#4502).
+- [ ] **Field round complete.** For 0.19: the easy-db-lab round over audit, find, diagnose and explain
+      (#4503) has a committed report, every anomaly is a filed issue, and no correctness anomaly in a
+      0.19 tool is open.
+
 ## Sign-off
 
 - [ ] Release manager has confirmed every box above on the release commit and
