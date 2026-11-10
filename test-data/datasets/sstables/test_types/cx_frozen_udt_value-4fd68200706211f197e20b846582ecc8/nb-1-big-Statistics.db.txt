@@ -1,4 +1,4 @@
-SSTable: /data/test_types/cx_frozen_udt_value-4fd68200706211f197e20b846582ecc8/nb-1-big
+SSTable: /data/test_types/cx_frozen_udt_value-37978490dcc911f1b8dc439bf62a3248/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/2021 00:00:00 (1609459200000000)
@@ -16,9 +16,9 @@ Covered clusterings: [1, 2]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 0ca8a62c-5f2b-48b2-bf00-1438908b20f7
+Originating host id: bad0322b-570d-4249-a7a5-3aef01b05f4b
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782369828325, position=166623)=CommitLogPosition(segmentId=1782369828325, position=259460)}
+Replay positions covered: {CommitLogPosition(segmentId=1794289149992, position=99525)=CommitLogPosition(segmentId=1794289149992, position=192336)}
 totalColumnsSet: 2
 totalRows: 2
 Estimated tombstone drop times: 

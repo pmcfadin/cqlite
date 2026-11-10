@@ -1,4 +1,4 @@
-SSTable: /data/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-3-big
+SSTable: /data/test_types/se_altered_then_dropped_column-33e32f20dcc911f1b8dc439bf62a3248/nb-3-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/03/2021 00:00:00 (1609632000000000)
@@ -16,9 +16,9 @@ Covered clusterings: [7, 9]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 0ca8a62c-5f2b-48b2-bf00-1438908b20f7
+Originating host id: bad0322b-570d-4249-a7a5-3aef01b05f4b
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782369828325, position=276515)=CommitLogPosition(segmentId=1782369828325, position=276835)}
+Replay positions covered: {CommitLogPosition(segmentId=1794289149992, position=209471)=CommitLogPosition(segmentId=1794289149992, position=209791)}
 totalColumnsSet: 3
 totalRows: 3
 Estimated tombstone drop times: 

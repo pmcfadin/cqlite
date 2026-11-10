@@ -57,6 +57,8 @@ def main():
     problems = 0
     for g in a.gen:
         sst = os.path.join(g, "sstables")
+        if not os.path.isdir(sst):  # e.g. generate-issue-3790 writes <out>/<ks>/ directly
+            sst = g
         for ks in sorted(os.listdir(sst)):
             kd = os.path.join(sst, ks)
             if not os.path.isdir(kd):

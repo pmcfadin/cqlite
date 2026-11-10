@@ -1,4 +1,4 @@
-SSTable: /var/lib/cassandra/data/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti
+SSTable: /data/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 06/10/2026 16:17:37 (1781108257396923)

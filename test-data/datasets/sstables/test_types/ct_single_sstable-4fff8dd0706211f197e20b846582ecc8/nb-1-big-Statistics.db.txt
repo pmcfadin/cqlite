@@ -1,13 +1,13 @@
-SSTable: /data/test_types/ct_single_sstable-4fff8dd0706211f197e20b846582ecc8/nb-1-big
+SSTable: /data/test_types/ct_single_sstable-39785280dcc911f1b8dc439bf62a3248/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 06/25/2026 06:51:38 (1782370298295504)
-Maximum timestamp: 06/25/2026 06:51:38 (1782370298298837)
+Minimum timestamp: 11/10/2026 05:40:27 (1794289227145777)
+Maximum timestamp: 11/10/2026 05:40:27 (1794289227152175)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
 SSTable min local deletion time: no tombstones (9223372036854775807)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
-Compression ratio: 0.7016129032258065
+Compression ratio: 0.6904761904761905
 TTL min: 0
 TTL max: 0
 First token: -4069959284402364209 (1)
@@ -16,9 +16,9 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 0ca8a62c-5f2b-48b2-bf00-1438908b20f7
+Originating host id: bad0322b-570d-4249-a7a5-3aef01b05f4b
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782369828325, position=177934)=CommitLogPosition(segmentId=1782369828325, position=259460)}
+Replay positions covered: {CommitLogPosition(segmentId=1794289149992, position=110876)=CommitLogPosition(segmentId=1794289149992, position=192336)}
 totalColumnsSet: 2
 totalRows: 2
 Estimated tombstone drop times: 
@@ -57,7 +57,7 @@ Local token space coverage: NaN
 Estimated cardinality: 2
 EncodingStats minTTL: 0
 EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
-EncodingStats minTimestamp: 06/25/2026 06:51:38 (1782370298289432)
+EncodingStats minTimestamp: 11/10/2026 05:40:27 (1794289227102311)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: []
 StaticColumns: 

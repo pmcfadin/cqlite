@@ -1,4 +1,4 @@
-SSTable: /var/lib/cassandra/data/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big
+SSTable: /data/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 10/06/2025 01:12:09 (1759713129355032)

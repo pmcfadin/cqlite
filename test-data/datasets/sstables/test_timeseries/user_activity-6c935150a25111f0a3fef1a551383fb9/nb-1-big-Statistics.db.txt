@@ -13,7 +13,7 @@ TTL max: 0
 First token: -9128257889805264706 (37ac9f53-bd8e-4da5-a41a-240f8f5a6cfd:2025-09-29)
 Last token: 9198705269753650361 (5f403a2e-8e7b-4442-8158-289f0cdb082e:2025-09-29)
 Covered clusterings: [2025-09-29T04:31:09.354Z, 2025-09-29T01:12:09.354Z]
-Estimated droppable tombstones: 0.0
+Estimated droppable tombstones: 0.2
 SSTable Level: 0
 Repaired at: 0
 Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681

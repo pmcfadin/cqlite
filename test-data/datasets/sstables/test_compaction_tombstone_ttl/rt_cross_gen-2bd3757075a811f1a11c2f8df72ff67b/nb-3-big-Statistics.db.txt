@@ -1,10 +1,10 @@
-SSTable: /data/test_compaction_tombstone_ttl/rt_cross_gen-2bd3757075a811f1a11c2f8df72ff67b/nb-3-big
+SSTable: /data/test_compaction_tombstone_ttl/rt_cross_gen-06b46200dccc11f18a0ce78a716fcb9b/nb-3-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (1000)
 Maximum timestamp: 01/01/1970 00:00:00 (3001)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 07/01/2026 23:54:34 (1782950074)
+SSTable min local deletion time: 11/10/2026 06:00:39 (1794290439)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
@@ -12,17 +12,17 @@ TTL max: 0
 First token: -4069959284402364209 (1)
 Last token: -4069959284402364209 (1)
 Covered clusterings: [5, 30]
-Estimated droppable tombstones: 0.0
+Estimated droppable tombstones: 2.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 9ed42726-b01a-402a-9b19-5df589e84648
+Originating host id: 06417b83-16c4-479e-bf0b-72112862c14b
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782949948008, position=69498)=CommitLogPosition(segmentId=1782949948008, position=71487)}
+Replay positions covered: {CommitLogPosition(segmentId=1794290359310, position=69383)=CommitLogPosition(segmentId=1794290359310, position=72978)}
 totalColumnsSet: 2
 totalRows: 2
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1782950100 (07/01/2026 23:55:00) |     4 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1794290460 (11/10/2026 06:01:00) |     4 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -56,7 +56,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 1
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 07/01/2026 23:54:34 (1782950074)
+EncodingStats minLocalDeletionTime: 11/10/2026 06:00:39 (1794290439)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (1000)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]
