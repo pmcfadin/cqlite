@@ -177,7 +177,7 @@ fn fixture_partition_tombstone_fixed_header_byte_parity() {
         p2.contains("\"deletion_info\""),
         "PK=2 must be a partition tombstone (deletion_info present): {p2}"
     );
-    let pos = golden_partition_position(p2);
+    let pos = indexed_partition_start(PARTITION_TOMBSTONES_DIR, &raw, 2);
 
     // Header at `pos`: [u16 key_len=4][i32 key=2][i32 LDT BE][i64 mfda BE].
     let key_len = read_be_u16(&raw, pos, "partition key length") as usize;
@@ -749,7 +749,7 @@ fn fixture_ttl_row_byte_parity() {
         !p10.contains("\"ttl\""),
         "PK=10 control partition must have NO ttl in the golden: {p10}"
     );
-    let p10_pos = golden_partition_position(p10);
+    let p10_pos = indexed_partition_start(TTL_CELLS_DIR, &raw, 10);
     let p10_row_pos = golden_first_data_row_position(p10);
     assert!(
         p10_pos < p10_row_pos,
@@ -768,7 +768,7 @@ fn fixture_ttl_row_byte_parity() {
 // ===========================================================================
 // JSONL golden field extractors used only by the TTL/tombstone suite
 // (string-scan; no JSON crate, mirroring #991). Cross-suite extractors
-// (`extract_after`, `golden_partition_position`) live in the shared helpers.
+// (`extract_after`, `indexed_partition_start`) live in the shared helpers.
 // ===========================================================================
 
 /// The first `"type":"row","position":<N>` row position after the partition obj.

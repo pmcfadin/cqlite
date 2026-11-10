@@ -145,8 +145,8 @@ fn fixture_range_bound_markers_byte_parity() {
     );
     let golden_mfda = golden_first_range_marked_deleted_micros(p2);
 
-    // PK=2 partition starts at golden position; walk past the header to the rows.
-    let p2_pos = golden_partition_position(p2);
+    // PK=2 partition starts at its Index.db offset; walk past the header to the rows.
+    let p2_pos = indexed_partition_start(RANGE_TOMBSTONES_DIR, &raw, 2);
     let rows_start = partition_rows_start(&raw, p2_pos);
     let start = find_marker(&raw, rows_start, INT_TEXT_CLUSTERING)
         .expect("a range tombstone START marker in PK=2");
@@ -216,7 +216,7 @@ fn fixture_range_inclusive_end_bound_kind() {
         p1.contains("\"end\":{\"type\":\"inclusive\",\"clustering\":[2,\"*\"]"),
         "PK=1 must carry an inclusive-end [2] bound: {p1}"
     );
-    let p1_pos = golden_partition_position(p1);
+    let p1_pos = indexed_partition_start(RANGE_TOMBSTONES_DIR, &raw, 1);
     let rows_start = partition_rows_start(&raw, p1_pos);
     let start = find_marker(&raw, rows_start, INT_TEXT_CLUSTERING).expect("PK=1 START marker");
     let (start_next, start_kind, _ck, _mfda, _ldt) = walk_bound_marker(&raw, start);
@@ -597,7 +597,7 @@ fn fixture_range_boundary_marker_byte_parity() {
     let (golden_start_mfda, golden_end_mfda) = golden_boundary_start_end_micros(p1);
 
     // Scan all markers in PK=1 for the FIRST boundary (kind 2 or 5).
-    let p1_pos = golden_partition_position(p1);
+    let p1_pos = indexed_partition_start(ADJACENT_RANGES_DIR, &raw, 1);
     let mut pos = partition_rows_start(&raw, p1_pos);
     let boundary = loop {
         let Some(mk) = find_marker(&raw, pos, INT_CLUSTERING) else {
@@ -671,7 +671,7 @@ fn fixture_range_boundary_kind5_byte_parity() {
         ) && p2.contains("\"end\":{\"type\":\"inclusive\",\"clustering\":[15]"),
         "PK=2 must carry an exclusive-start/inclusive-end boundary at [15]: {p2}"
     );
-    let p2_pos = golden_partition_position(p2);
+    let p2_pos = indexed_partition_start(ADJACENT_RANGES_DIR, &raw, 2);
     let mut pos = partition_rows_start(&raw, p2_pos);
     let boundary = loop {
         let Some(mk) = find_marker(&raw, pos, INT_CLUSTERING) else {
@@ -861,7 +861,7 @@ fn walk_boundary_marker(data: &[u8], offset: usize) -> (u8, Option<i32>, Loc, Lo
 // ===========================================================================
 // JSONL golden field extractors used only by the range/boundary suite
 // (string-scan; no JSON crate, mirroring #991). Cross-suite extractors
-// (`extract_after`, `golden_partition_position`) live in the shared helpers.
+// (`extract_after`, `indexed_partition_start`) live in the shared helpers.
 // ===========================================================================
 
 /// The first range-tombstone bound's `marked_deleted` ISO → epoch µs.
