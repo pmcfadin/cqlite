@@ -750,3 +750,106 @@ fn provenance_still_rejects_an_undeclared_release_when_an_additional_pin_exists(
     assert_eq!(findings.len(), 1, "only the image diverges: {findings:?}");
     assert!(findings[0].subject.contains("cassandra:5.0.9"));
 }
+
+/// roborev job 174: ref, sha and version are ONE tuple. Every mix across the two
+/// declared pins is rejected, and the two coherent tuples pass.
+#[test]
+fn provenance_is_validated_as_one_tuple_across_pins() {
+    let m = manifest_with_additional_pin();
+    // (version, ref, sha, image-version-matching-the-ref)
+    let p502 = ("5.0.2", "cassandra-5.0.2", GOOD_SHA);
+    let p508 = ("5.0.8", "cassandra-5.0.8", SHA_508);
+    for (name, v, r, s, img) in [
+        (
+            "5.0.8 version + 5.0.2 sha",
+            p508.0,
+            p508.1,
+            p502.2,
+            "cassandra:5.0.8",
+        ),
+        (
+            "5.0.2 ref + 5.0.8 sha",
+            p502.0,
+            p502.1,
+            p508.2,
+            "cassandra:5.0.2",
+        ),
+        (
+            "5.0.8 ref + 5.0.2 version",
+            p502.0,
+            p508.1,
+            p508.2,
+            "cassandra:5.0.8",
+        ),
+        (
+            "5.0.8 ref + 5.0.2 sha",
+            p508.0,
+            p508.1,
+            p502.2,
+            "cassandra:5.0.8",
+        ),
+        (
+            "5.0.2 ref + 5.0.8 version",
+            p508.0,
+            p502.1,
+            p502.2,
+            "cassandra:5.0.2",
+        ),
+        (
+            "coherent 5.0.8 tuple with the 5.0.2 image",
+            p508.0,
+            p508.1,
+            p508.2,
+            "cassandra:5.0.2",
+        ),
+        (
+            "coherent 5.0.2 tuple with the 5.0.8 image",
+            p502.0,
+            p502.1,
+            p502.2,
+            "cassandra:5.0.8",
+        ),
+    ] {
+        let mut prov = good_provenance();
+        prov.cassandra_version = v.to_string();
+        prov.cassandra_ref = r.to_string();
+        prov.cassandra_git_sha = s.to_string();
+        prov.docker_image = img.to_string();
+        let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+        assert!(!findings.is_empty(), "{name} must be rejected");
+    }
+    for (name, v, r, s, img) in [
+        ("5.0.2", p502.0, p502.1, p502.2, "cassandra:5.0.2"),
+        ("5.0.8", p508.0, p508.1, p508.2, "cassandra:5.0.8-jammy"),
+    ] {
+        let mut prov = good_provenance();
+        prov.cassandra_version = v.to_string();
+        prov.cassandra_ref = r.to_string();
+        prov.cassandra_git_sha = s.to_string();
+        prov.docker_image = img.to_string();
+        let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+        assert!(
+            findings.is_empty(),
+            "coherent {name} tuple must pass: {findings:?}"
+        );
+    }
+}
+
+/// A scenario's own version/sha no longer widen the provenance check: a scenario
+/// declaring 5.0.9 does not make a 5.0.9 record acceptable.
+#[test]
+fn scenario_evidence_cannot_widen_the_provenance_pins() {
+    let yaml = manifest_yaml().replace(
+        "cassandra_version: \"5.0.2\"",
+        "cassandra_version: \"5.0.9\"",
+    );
+    let m = Manifest::from_yaml(&yaml).expect("parses");
+    let mut prov = good_provenance();
+    prov.cassandra_version = "5.0.9".to_string();
+    prov.docker_image = "cassandra:5.0.9".to_string();
+    let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+    assert!(
+        !findings.is_empty(),
+        "scenario evidence must not declare a release: {findings:?}"
+    );
+}

@@ -94,3 +94,40 @@ fn lint_rejects_a_per_fixture_version_no_pin_declares() {
         );
     }
 }
+
+const SHA_502: &str = "f278f6774fc76465c182041e081982105c3e7dbb";
+const SHA_508: &str = "172227094626d50d4bc9a3d9de2e3659a7844386";
+
+fn sha_findings(version: &str, sha: &str) -> Vec<String> {
+    let y = manifest_with_scenario_version(version, true).replace(
+        &format!("cassandra_git_sha: {SHA_502}"),
+        &format!("cassandra_git_sha: {sha}"),
+    );
+    let m = Manifest::from_yaml(&y).expect("parses");
+    lint(&m, None)
+        .into_iter()
+        .filter(|f| f.field == "evidence.cassandra_git_sha")
+        .map(|f| f.message)
+        .collect()
+}
+
+/// roborev job 174: version and sha must come from the SAME pin.
+#[test]
+fn lint_requires_version_and_sha_from_the_same_pin() {
+    assert!(sha_findings("5.0.2", SHA_502).is_empty());
+    assert!(sha_findings("5.0.8", SHA_508).is_empty());
+    assert_eq!(
+        sha_findings("5.0.8", SHA_502).len(),
+        1,
+        "5.0.8 version + 5.0.2 sha"
+    );
+    assert_eq!(
+        sha_findings("5.0.2", SHA_508).len(),
+        1,
+        "5.0.2 version + 5.0.8 sha"
+    );
+    assert_eq!(
+        sha_findings("5.0.2", "0000000000000000000000000000000000000000").len(),
+        1
+    );
+}

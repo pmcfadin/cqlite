@@ -3,28 +3,53 @@
 use crate::lint::Finding;
 use crate::model::Manifest;
 
-/// A scenario's `evidence.cassandra_version` is a PER-FIXTURE declaration of the
-/// release that produced its fixtures (#4482): fixtures generated with the primary
-/// `cassandra_source.ref` stay valid until regenerated, and regenerated ones may
-/// declare any release listed in `cassandra_source.additional_pins`. A version in
-/// neither place is a typo or an undeclared release and is rejected.
+/// A scenario's `evidence.cassandra_version` / `evidence.cassandra_git_sha` are a
+/// PER-FIXTURE declaration of the release that produced its fixtures (#4482): fixtures
+/// generated with the primary `cassandra_source` pin stay valid until regenerated, and
+/// regenerated ones may declare any pin in `cassandra_source.additional_pins`.
+///
+/// The version and the sha must belong to the SAME declared pin (roborev job 174): a
+/// version from one pin with the sha of another is rejected, so a mismatched sha can
+/// never be laundered through a scenario. A version in no pin is a typo or an
+/// undeclared release.
 pub(crate) fn lint_declared_fixture_versions(m: &Manifest, out: &mut Vec<Finding>) {
-    let src = &m.cassandra_source;
-    let mut declared: Vec<&str> = Vec::new();
-    declared.extend(src.git_ref.strip_prefix("cassandra-"));
-    for pin in &src.additional_pins {
-        declared.extend(pin.git_ref.strip_prefix("cassandra-"));
-    }
+    let pins = m.cassandra_source.pins();
+    let declared: Vec<&str> = pins.iter().map(|(v, _, _)| v.as_str()).collect();
     for s in &m.scenarios {
-        if let Some(v) = s.evidence.cassandra_version.as_deref() {
-            if !v.trim().is_empty() && !declared.contains(&v) {
+        let version = s
+            .evidence
+            .cassandra_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let sha = s
+            .evidence
+            .cassandra_git_sha
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let Some(version) = version else { continue };
+        let Some((_, _, pin_sha)) = pins.iter().find(|(v, _, _)| v == version) else {
+            out.push(Finding::error(
+                &s.id,
+                "evidence.cassandra_version",
+                format!(
+                    "evidence.cassandra_version {version:?} is not a release declared by \
+                     cassandra_source.ref or cassandra_source.additional_pins \
+                     (declared: {declared:?})"
+                ),
+            ));
+            continue;
+        };
+        if let Some(sha) = sha {
+            if sha != *pin_sha {
                 out.push(Finding::error(
                     &s.id,
-                    "evidence.cassandra_version",
+                    "evidence.cassandra_git_sha",
                     format!(
-                        "evidence.cassandra_version {v:?} is not a release declared by \
-                         cassandra_source.ref or cassandra_source.additional_pins \
-                         (declared: {declared:?})"
+                        "evidence.cassandra_git_sha {sha:?} is not the sha of the pin for \
+                         evidence.cassandra_version {version:?} ({pin_sha}); version and sha \
+                         must come from the same cassandra_source pin"
                     ),
                 ));
             }
