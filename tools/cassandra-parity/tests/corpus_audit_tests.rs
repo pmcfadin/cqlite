@@ -1011,17 +1011,23 @@ fn pin_binding_rejects_an_additional_pin_corpus_when_evidence_is_absent() {
     assert!(findings[0].contains("1 of the 2 scenarios"), "{findings:?}");
 }
 
-/// An additional pin with NO covered scenario is rejected: nothing declares the release.
+/// A corpus that covers NO scenario binds nothing, so it is rejected for EVERY pin (roborev
+/// job 185): the additional pin and the primary alike.
 #[test]
-fn pin_binding_rejects_an_additional_pin_when_no_scenario_is_covered() {
+fn pin_binding_rejects_a_corpus_that_covers_no_scenario_for_every_pin() {
     let m = manifest_with_claims(&[("5.0.8", SHA_508)]);
-    let findings = provenance_findings_for(&m, &provenance_508(), &inventory_with(&[]));
-    assert!(
-        findings
-            .iter()
-            .any(|f| f.contains("no scenario's fixtures are covered")),
-        "{findings:?}"
-    );
+    for (name, prov) in [
+        ("additional 5.0.8", provenance_508()),
+        ("primary 5.0.2", good_provenance()),
+    ] {
+        let findings = provenance_findings_for(&m, &prov, &inventory_with(&[]));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("covers no manifest scenario")),
+            "{name}: {findings:?}"
+        );
+    }
 }
 
 // ---- #4482 / roborev job 179: the 5.0.2 override against TODAY's committed evidence ----

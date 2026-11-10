@@ -156,22 +156,20 @@ pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFind
 /// always meant "the primary pin": it is treated as implicitly declaring the primary, so it
 /// binds to a primary-pin corpus and fails against an additional pin. A scenario declaring
 /// only one field matches no pin. If nothing is covered, or any scenario disagrees, the run
-/// is rejected naming those scenarios and what they declare.
+/// is rejected naming those scenarios and what they declare. A corpus that covers NO scenario is
+/// rejected for every pin, the primary included: it binds nothing.
 pub fn check_pin_binding(
     prov: &Provenance,
     manifest: &Manifest,
     inventory: &CorpusInventory,
 ) -> Vec<AuditFinding> {
     let pins = manifest.cassandra_source.pins();
-    let Some((index, (pin_version, pin_ref, pin_sha))) = pins
-        .iter()
-        .enumerate()
-        .find(|(_, (_, r, _))| *r == prov.cassandra_ref)
+    let Some((pin_version, pin_ref, pin_sha)) =
+        pins.iter().find(|(_, r, _)| *r == prov.cassandra_ref)
     else {
         return Vec::new(); // not a declared pin: check_provenance already rejects it
     };
     let (primary_version, _, primary_sha) = &pins[0];
-    let is_primary = index == 0;
 
     let covering = refs::covering_scenarios(manifest, inventory);
     let disagree: Vec<String> = covering
@@ -208,12 +206,11 @@ pub fn check_pin_binding(
         AuditFinding::new(FindingKind::ProvenanceMismatch, pin_ref.to_string(), detail)
     };
     if covering.is_empty() {
-        if is_primary {
-            return Vec::new(); // nothing claims otherwise; the primary is the baseline
-        }
+        // Symmetric for every pin (roborev job 185): a corpus that covers no manifest
+        // scenario binds nothing, so provenance recorded against it proves nothing.
         return vec![subject(format!(
-            "the corpus was generated from additional pin {pin_ref}, but no scenario's fixtures \
-             are covered by this corpus, so no scenario declares {pin_version}"
+            "the corpus was generated from pin {pin_ref} ({pin_version}), but it covers no \
+             manifest scenario's fixtures, so no scenario's evidence can be bound to that pin"
         ))];
     }
     if disagree.is_empty() {
