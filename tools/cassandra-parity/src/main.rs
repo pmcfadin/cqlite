@@ -42,7 +42,7 @@ const USAGE: &str = "\
 cassandra-parity — CQLite ↔ Cassandra parity manifest tooling
 
 USAGE:
-  cassandra-parity lint               [--manifest PATH]
+  cassandra-parity lint               [--manifest PATH] [--verbose]
   cassandra-parity coverage           [--manifest PATH] [--strict]
   cassandra-parity report             [--manifest PATH] [--output PATH] [--check] [--json PATH]
   cassandra-parity tier-contract-check [--manifest PATH] [--tier-doc PATH] [--schema PATH]
@@ -60,6 +60,7 @@ struct Args {
     schema: PathBuf,
     strict: bool,
     check: bool,
+    verbose: bool,
     // corpus-audit (issue #1026)
     corpus: Option<PathBuf>,
     provenance: Option<PathBuf>,
@@ -78,6 +79,7 @@ fn parse_args(rest: &[String]) -> Result<Args> {
         schema: PathBuf::from(DEFAULT_SCHEMA),
         strict: false,
         check: false,
+        verbose: false,
         corpus: None,
         provenance: None,
         checksums: None,
@@ -95,6 +97,7 @@ fn parse_args(rest: &[String]) -> Result<Args> {
             "--schema" => args.schema = PathBuf::from(next_val(&mut it, "--schema")?),
             "--strict" => args.strict = true,
             "--check" => args.check = true,
+            "--verbose" => args.verbose = true,
             "--corpus" => args.corpus = Some(PathBuf::from(next_val(&mut it, "--corpus")?)),
             "--provenance" => {
                 args.provenance = Some(PathBuf::from(next_val(&mut it, "--provenance")?))
@@ -202,8 +205,32 @@ fn cmd_lint(args: &Args) -> Result<ExitCode> {
         .collect();
     findings.extend(claim_scan::scan_docs(&m, &inputs));
 
+    // Partial-claim reports (#4492) are one summary line; the per-scenario detail is printed
+    // only under --verbose so the real warnings are not drowned out.
+    let (partial, findings): (Vec<_>, Vec<_>) = findings
+        .into_iter()
+        .partition(|f| f.level == Level::Warn && f.message.starts_with("partial claim:"));
     let errors = findings.iter().filter(|f| f.level == Level::Error).count();
     let warns = findings.iter().filter(|f| f.level == Level::Warn).count();
+    if !partial.is_empty() {
+        let entries: usize = m
+            .cassandra_source
+            .carried_over
+            .iter()
+            .map(|c| c.tables.len())
+            .sum();
+        println!(
+            "carried-over: {} scenarios declare a release other than the one that wrote the \
+             carried-over tables they touch ({entries} carried-over table entries declared); \
+             see --verbose",
+            partial.len()
+        );
+        if args.verbose {
+            for f in &partial {
+                println!("info [{}] {}: {}", f.id, f.field, f.message);
+            }
+        }
+    }
     for f in &findings {
         let tag = match f.level {
             Level::Error => "ERROR",
