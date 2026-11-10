@@ -23023,16 +23023,16 @@ run_tooling_tests() {
   # --help/--validate-only/--verify-only, the row driver, the manifest writer's
   # pre-container guards, and a full end-to-end run through a STUB `docker`
   # (scripts/tests/fixtures/stub-docker-cassandra-bti.py); nothing here starts a
-  # container or needs root). Pins issue
-  # #3234's ACCEPTANCE ASSERTS IN BOTH DIRECTIONS against fabricated corpora: a
-  # stock Cassandra 5.0 node silently emits `nb` (BIG) when either mandatory yaml
-  # setting misses, so an assert only ever observed on a good corpus is untested —
-  # every case here carries a negative control (`nb-*` descriptor, empty Rows.db,
-  # sub-8-MiB Data.db, a TOC listing the BIG-only Index.db). Also pins the row
-  # driver's (seed, chunk) determinism, which is what makes the manifest's
-  # per-Data.db sha256 a reproducibility check. A failure FAILs the component,
-  # mirroring the keyspace-scoping guard.
+  # container or needs root). Pins issue #3234's ACCEPTANCE ASSERTS IN BOTH
+  # DIRECTIONS against fabricated corpora: a stock Cassandra 5.0 node silently
+  # emits `nb` (BIG) when either mandatory yaml setting misses, so an assert only
+  # ever observed on a good corpus is untested — every case here carries a negative
+  # control (`nb-*` descriptor, empty Rows.db, sub-8-MiB Data.db, a TOC listing the
+  # BIG-only Index.db). Also pins the row driver's (seed, chunk) determinism, which
+  # is what makes the manifest's per-Data.db sha256 a reproducibility check. A
+  # failure FAILs the component, mirroring the keyspace-scoping guard.
   _tt_add P 'BTI perf-corpus generator guard' 'bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh"'
+  _tt_add P 'generator driver-requirements guard #4482' 'bash "$REPO_ROOT/scripts/tests/test_cassandra_driver_requirements.sh"'
 
   # AC3 warm-scan harness guard (#3234): the automated executor for
   # cqlite-core/examples/bti_perf_scan/, the instrument every #3234 throughput
