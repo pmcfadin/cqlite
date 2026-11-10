@@ -1,10 +1,10 @@
-SSTable: /data/test_udt_wide_fields/udt_wide_fields-2e07ad10a5d811f1850a932aafce51bf/nb-1-big
+SSTable: /data/test_udt_wide_fields/udt_wide_fields-b0eae4f0dcc811f1a3a2679f1630c3bb/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (999)
 Maximum timestamp: 01/01/1970 00:00:00 (1000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 09/01/2026 07:38:54 (1788248334)
+SSTable min local deletion time: 11/10/2026 05:36:35 (1794288995)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
@@ -12,17 +12,17 @@ TTL max: 0
 First token: -4069959284402364209 (1)
 Last token: 9010454139840013625 (3)
 Covered clusterings: ALL
-Estimated droppable tombstones: 0.3333333333333333
+Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 8332ffa9-739f-4ab6-9414-4af40a088fc6
+Originating host id: 91fe73b4-6d69-44f6-a746-e25162ce7b21
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1788248271884, position=63664)=CommitLogPosition(segmentId=1788248271884, position=68817)}
+Replay positions covered: {CommitLogPosition(segmentId=1794288934878, position=62753)=CommitLogPosition(segmentId=1794288934878, position=68810)}
 totalColumnsSet: 10
 totalRows: 3
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1788248340 (09/01/2026 07:39:00) |     4 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1794289020 (11/10/2026 05:37:00) |     4 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -60,7 +60,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 3
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 09/01/2026 07:38:54 (1788248334)
+EncodingStats minLocalDeletionTime: 11/10/2026 05:36:35 (1794288995)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (999)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: []
