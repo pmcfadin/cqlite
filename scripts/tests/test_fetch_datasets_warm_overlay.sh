@@ -27,7 +27,7 @@ case "$T" in /?*) ;; *) echo "FAIL - sandbox path '$T' is not absolute"; exit 1 
 ASSET="cqlite-4508-fake-$$.tar.gz"
 trap 'rm -rf "$T" "/tmp/$ASSET"' EXIT
 
-# --- the fake bundle: carries an OLD copy of one tracked file (the overlay) ------------------
+# --- the fake bundle: carries OLD copies of tracked files (the overlay) and untracked binaries ----
 WIDE="sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
 AD="$T/archive-src/test-data/datasets"
 mkdir -p "$AD/sstables/test_basic/simple_table-aaaa" "$AD/$WIDE" "$AD/goldens"
@@ -35,7 +35,10 @@ printf 'meta\n' > "$AD/metadata.yml"
 for s in Data.db Index.db Summary.db Statistics.db; do printf 'a %s\n' "$s" > "$AD/sstables/test_basic/simple_table-aaaa/nb-1-big-$s"; done
 for s in Data.db Index.db Digest.crc32 CompressionInfo.db; do printf 'w %s\n' "$s" > "$AD/$WIDE/nb-2-big-$s"; done
 printf '{"wide":1}\n' > "$AD/$WIDE/nb-2-big-Data.db.jsonl"
-printf 'OLD-BUNDLE-BYTES\n' > "$AD/goldens/tracked-Data.db.jsonl"        # also tracked in the repo, NEW bytes there
+printf 'OLD-BUNDLE-BYTES\n' > "$AD/goldens/tracked-Data.db.jsonl"            # tracked in the repo with NEW bytes
+printf 'removed upstream\n' > "$AD/goldens/removed-Data.db.jsonl"             # tracked at build; the PR deletes it
+printf 'old name\n' > "$AD/goldens/old-name-Data.db.jsonl"                    # tracked at build; the PR renames it
+printf 'legit binary\n' > "$AD/goldens/bundle-only.db"                        # untracked bundle member: must survive
 TARBALL="$T/$ASSET"; tar -czf "$TARBALL" -C "$T/archive-src" test-data
 sha_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 SHA="$(sha_of "$TARBALL")"
@@ -45,13 +48,21 @@ printf '#!/usr/bin/env bash\nout=""\nwhile [ "$#" -gt 0 ]; do case "$1" in -o) o
 chmod +x "$BIN/curl"
 
 NEW='NEW-TRACKED-BYTES (this PR)'
-make_repo() {
-  local d="$1"; mkdir -p "$d/test-data/datasets/goldens"
+DS="test-data/datasets"
+make_repo() {   # the tree the cache was BUILT from: tracks tracked/removed/old-name
+  local d="$1"; mkdir -p "$d/$DS/goldens"
   git -C "$d" init -q; git -C "$d" config user.email t@example.com; git -C "$d" config user.name T
-  printf '*.db\ntest-data/datasets/metadata.yml\ntest-data/datasets/sstables/\ntest-data/datasets/.dataset-pin\ntest-data/datasets/.dataset-manifest\n' > "$d/.gitignore"
-  printf '%s\n' "$NEW" > "$d/test-data/datasets/goldens/tracked-Data.db.jsonl"
-  git -C "$d" add .gitignore; git -C "$d" add -f test-data/datasets/goldens/tracked-Data.db.jsonl
-  git -C "$d" commit -qm tracked
+  printf '*.db\n%s/metadata.yml\n%s/sstables/\n%s/.dataset-*\n' "$DS" "$DS" "$DS" > "$d/.gitignore"
+  printf '%s\n' "$NEW" > "$d/$DS/goldens/tracked-Data.db.jsonl"
+  printf 'removed upstream\n' > "$d/$DS/goldens/removed-Data.db.jsonl"
+  printf 'old name\n' > "$d/$DS/goldens/old-name-Data.db.jsonl"
+  git -C "$d" add .gitignore; git -C "$d" add -f "$DS/goldens"
+  git -C "$d" commit -qm built
+}
+pr_changes() {  # the PR: delete one tracked file, rename another
+  git -C "$1" rm -q "$DS/goldens/removed-Data.db.jsonl"
+  git -C "$1" mv "$DS/goldens/old-name-Data.db.jsonl" "$DS/goldens/new-name-Data.db.jsonl"
+  git -C "$1" commit -qm "PR: delete + rename"
 }
 # run_fetch <repo> [env assignments...] -> $OUT $RC   (CI is UNSET unless passed)
 run_fetch() {
@@ -62,47 +73,68 @@ run_fetch() {
          env "$@" DATASET_TAG=fake-tag DATASET_ASSET="$ASSET" DATASET_SHA256="$SHA" bash "$FETCH" 2>&1 )
   RC=$?
 }
-overlay_bundle_over_checkout() {   # what actions/cache does: extract the cached tree over the checkout
-  tar -xzf "$TARBALL" -C "$1" --strip-components=0 test-data/datasets/goldens/tracked-Data.db.jsonl
+overlay_cache() {   # what actions/cache does: extract the cached tree over the checkout
+  tar -xzf "$TARBALL" -C "$1" test-data/datasets/goldens/tracked-Data.db.jsonl test-data/datasets/goldens/removed-Data.db.jsonl test-data/datasets/goldens/old-name-Data.db.jsonl
 }
-TRK="test-data/datasets/goldens/tracked-Data.db.jsonl"
-content_is() { [ "$(cat "$1/$TRK")" = "$2" ]; }
+G="$DS/goldens"
+has() { [ -e "$1/$G/$2" ]; }
+tracked_is() { [ "$(cat "$1/$G/tracked-Data.db.jsonl")" = "$2" ]; }
+reset_extra() { printf 'stale\n' > "$1/$G/stale-leftover.log"; }
 
-# 1. cold run: bundle extracted, tracked bytes win, the manifest and pin are written
-R1="$T/r1"; make_repo "$R1"
-run_fetch "$R1"
+R="$T/r"; make_repo "$R"
+
+# 1. cold run on the BUILD tree: bundle extracted, tracked bytes win, both build-time lists written
+run_fetch "$R"
 [ "$RC" = 0 ] && ok "cold run succeeds" || bad "cold run failed ($RC): $OUT"
-content_is "$R1" "$NEW" && ok "cold run: the tracked file keeps the checkout's bytes over the bundle's" || bad "cold run: tracked bytes lost"
-[ -s "$R1/test-data/datasets/.dataset-manifest" ] && grep -qx 'goldens/tracked-Data.db.jsonl' "$R1/test-data/datasets/.dataset-manifest" \
-  && ok "cold run writes .dataset-manifest listing the bundle's files" || bad "no usable .dataset-manifest"
+tracked_is "$R" "$NEW" && ok "cold run: the tracked file keeps the checkout's bytes over the bundle's" || bad "cold run: tracked bytes lost"
+M="$R/$DS/.dataset-manifest"; B="$R/$DS/.dataset-tracked-at-build"
+{ [ -s "$M" ] && grep -qx 'goldens/bundle-only.db' "$M" && grep -qx 'goldens/old-name-Data.db.jsonl' "$M"; } \
+  && ok "cold run writes .dataset-manifest listing the bundle's members" || bad "no usable .dataset-manifest"
+{ grep -qx 'goldens/removed-Data.db.jsonl' "$B" && grep -qx 'goldens/old-name-Data.db.jsonl' "$B" && ! grep -qx 'goldens/bundle-only.db' "$B"; } \
+  && ok "cold run writes .dataset-tracked-at-build: the tracked-class files, not the untracked binary" || bad "wrong .dataset-tracked-at-build: $(cat "$B")"
 
-# 2. warm overlay in CI: the tracked file is overwritten by the cache, a stale extra appears
-overlay_bundle_over_checkout "$R1"
-content_is "$R1" "OLD-BUNDLE-BYTES" && ok "setup: the overlay really did replace the tracked file (this is the #4508 state)" || bad "setup: overlay did not apply"
-printf 'stale\n' > "$R1/test-data/datasets/goldens/stale-leftover.log"
-run_fetch "$R1" CI=true
+# the PR now deletes one tracked file and renames another; CI's cache is the build-time tree
+pr_changes "$R"
+
+# 2. warm overlay in CI
+overlay_cache "$R"; reset_extra "$R"
+tracked_is "$R" "OLD-BUNDLE-BYTES" && has "$R" removed-Data.db.jsonl && has "$R" old-name-Data.db.jsonl \
+  && ok "setup: the overlay replaced the tracked file and brought the deleted/renamed files back as untracked twins (the #4508/#4493 state)" || bad "setup: overlay did not apply"
+run_fetch "$R" CI=true
 [ "$RC" = 0 ] && ok "warm CI run succeeds" || bad "warm CI run failed ($RC): $OUT"
 case "$OUT" in *"already present"*) ok "warm CI run took the fast path (no download)" ;; *) bad "not the warm path: $OUT" ;; esac
-content_is "$R1" "$NEW" && ok "warm CI run RESTORES the tracked file to the checkout's bytes" || bad "warm CI run left the overlaid bytes in place"
-[ -z "$(git -C "$R1" diff --name-only -- test-data/datasets)" ] && ok "git diff over the dataset root is clean after the warm CI run" || bad "tracked drift remains"
-case "$OUT" in *"stale-leftover.log"*) ok "the stale untracked extra is reported by name" ;; *) bad "stale extra not reported: $OUT" ;; esac
-case "$OUT" in *"WARNING:   goldens/tracked"*|*"WARNING:   sstables/"*|*"WARNING:   .dataset"*) bad "bundle/tracked/pin files wrongly reported as extras: $OUT" ;; *) ok "bundle files, tracked files and the pin/manifest are not reported as extras" ;; esac
+tracked_is "$R" "$NEW" && ok "warm CI run RESTORES the overlaid tracked file" || bad "warm CI run left the overlaid bytes in place"
+{ ! has "$R" removed-Data.db.jsonl && ! has "$R" old-name-Data.db.jsonl; } && ok "deleted-tracked and renamed-tracked twins are REMOVED" || bad "a stale twin survived"
+has "$R" new-name-Data.db.jsonl && ok "the renamed file's new name is kept" || bad "the new name vanished"
+case "$OUT" in *"REMOVED stale twin"*"removed-Data.db.jsonl"*"REMOVED stale twin"*"old-name-Data.db.jsonl"*|*"REMOVED stale twin"*"old-name-Data.db.jsonl"*"REMOVED stale twin"*"removed-Data.db.jsonl"*) ok "each twin removal is logged by name" ;; *) bad "twin removals not logged: $OUT" ;; esac
+! has "$R" stale-leftover.log && case "$OUT" in *"REMOVED stale extra"*"stale-leftover.log"*) ok "an extra in neither git nor the bundle is removed and logged" ;; *) bad "extra not logged: $OUT" ;; esac || bad "the extra survived"
+has "$R" bundle-only.db && ok "an untracked bundle member (a binary) is never touched" || bad "a legitimate bundle binary was removed"
+[ -z "$(git -C "$R" diff --name-only -- "$DS")" ] && ok "git diff over the dataset root is clean" || bad "tracked drift remains"
 
-# 3. warm overlay locally (CI unset): reported, NOT touched
-overlay_bundle_over_checkout "$R1"
-run_fetch "$R1"
-[ "$RC" = 0 ] && content_is "$R1" "OLD-BUNDLE-BYTES" && ok "local warm run leaves a drifted tracked file alone (it may be your edit)" || bad "local warm run touched the file or failed ($RC)"
-case "$OUT" in *"differ from the index"*"tracked-Data.db.jsonl"*) ok "local warm run names the drifted tracked file" ;; *) bad "drift not reported locally: $OUT" ;; esac
+# 3. warm overlay locally: report only, nothing touched
+overlay_cache "$R"; reset_extra "$R"
+run_fetch "$R"
+{ [ "$RC" = 0 ] && tracked_is "$R" "OLD-BUNDLE-BYTES" && has "$R" removed-Data.db.jsonl && has "$R" old-name-Data.db.jsonl && has "$R" stale-leftover.log; } \
+  && ok "local warm run touches nothing" || bad "local warm run changed files or failed ($RC)"
+case "$OUT" in *"differ from the index"*"tracked-Data.db.jsonl"*) ok "local run names the drifted tracked file" ;; *) bad "drift not reported: $OUT" ;; esac
+case "$OUT" in *"no longer tracked but still on disk"*"removed-Data.db.jsonl"*) ok "local run names the stale twins" ;; *) bad "twins not reported: $OUT" ;; esac
+case "$OUT" in *"stale-leftover.log"*) ok "local run names the stale extra" ;; *) bad "extra not reported: $OUT" ;; esac
 
-# 4. explicit opt-in restores it locally
-run_fetch "$R1" CQLITE_DATASETS_RESTORE_TRACKED=1
-[ "$RC" = 0 ] && content_is "$R1" "$NEW" && ok "CQLITE_DATASETS_RESTORE_TRACKED=1 restores locally" || bad "opt-in restore failed ($RC)"
+# 4. explicit opt-in cleans up locally
+run_fetch "$R" CQLITE_DATASETS_RESTORE_TRACKED=1
+{ [ "$RC" = 0 ] && tracked_is "$R" "$NEW" && ! has "$R" removed-Data.db.jsonl && ! has "$R" old-name-Data.db.jsonl && ! has "$R" stale-leftover.log; } \
+  && ok "CQLITE_DATASETS_RESTORE_TRACKED=1 restores, removes twins and extras locally" || bad "opt-in cleanup failed ($RC)"
 
-# 5. a cache from before #4508 (no manifest): still restored in CI; extras not classified
-rm -f "$R1/test-data/datasets/.dataset-manifest"; overlay_bundle_over_checkout "$R1"
-run_fetch "$R1" CI=true
-[ "$RC" = 0 ] && content_is "$R1" "$NEW" && ok "pre-#4508 cache (no manifest): tracked bytes still restored in CI" || bad "pre-manifest cache not restored ($RC)"
-case "$OUT" in *"cannot be classified"*) ok "pre-#4508 cache: extras are declared unclassifiable, not guessed" ;; *) bad "no unclassifiable note: $OUT" ;; esac
+# 5. a cache from before #4508 (no lists): CI refuses to trust it and goes cold; locally it is only noted
+overlay_cache "$R"
+rm -f "$R/$DS/.dataset-manifest" "$R/$DS/.dataset-tracked-at-build"
+run_fetch "$R"
+{ [ "$RC" = 0 ] && case "$OUT" in *"cannot be classified"*) true ;; *) false ;; esac; } && ok "pre-#4508 cache, local: noted, not guessed" || bad "pre-manifest local run: $OUT"
+git -C "$R" checkout -q -- "$DS" 2>/dev/null
+run_fetch "$R" CI=true
+case "$OUT" in *"forcing a COLD restore"*"Fetching dataset"*) ok "pre-#4508 cache, CI: refuses the warm path and runs the cold restore" ;; *) bad "no cold restore: $OUT" ;; esac
+{ [ "$RC" = 0 ] && tracked_is "$R" "$NEW" && [ -s "$R/$DS/.dataset-manifest" ] && [ -f "$R/$DS/.dataset-tracked-at-build" ]; } \
+  && ok "after the forced cold restore the tracked bytes are the checkout's and both lists exist" || bad "cold restore left a bad state ($RC)"
 
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

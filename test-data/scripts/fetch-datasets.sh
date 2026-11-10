@@ -1785,7 +1785,7 @@ trap 'exit 129' HUP
 capture_tracked_dataset_files
 restore_tracked_dataset_files missing-only || exit 1
 
-if has_required_dataset; then
+if has_required_dataset && warm_cache_usable; then
   warm_cache_reconcile
   write_pin
   echo "Dataset ${ASSET} (tag ${TAG}) already present in ${DATASET_ROOT}; skipping download"

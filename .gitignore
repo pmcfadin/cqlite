@@ -65,8 +65,7 @@ test-data/scripts/smoke-test-all-tables-results/
 # GENERATED per-fetch dataset pin (issue #2646): written by fetch-datasets.sh
 # into the fetched dataset dir. The tracked source of truth is
 # test-data/dataset-pin.env — this generated file must stay untracked.
-test-data/datasets/.dataset-pin
-test-data/datasets/.dataset-manifest
+test-data/datasets/.dataset-*
 *.sstable
 *.db
 
