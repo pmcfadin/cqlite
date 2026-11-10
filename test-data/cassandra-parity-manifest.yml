@@ -1460,8 +1460,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1719,8 +1719,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1771,8 +1771,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1822,8 +1822,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1875,8 +1875,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1928,8 +1928,8 @@ scenarios:
       type: byte_for_byte
       strict: true
       artifacts: [bytes, offsets, jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -1989,8 +1989,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [offsets, jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
@@ -4610,11 +4610,11 @@ scenarios:
     evidence:
       type: partial
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/generate-deltas.sh  # cassandra:5.0.8 delete shapes → sstabledump JSONL
+        bash test-data/scripts/generate-deltas.sh  # cassandra:5.0.2 delete shapes → sstabledump JSONL
       reference_paths:
         - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
@@ -4710,8 +4710,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4761,8 +4761,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4812,8 +4812,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4864,8 +4864,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4915,8 +4915,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -4968,8 +4968,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -5021,8 +5021,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -5074,8 +5074,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -5127,8 +5127,8 @@ scenarios:
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
@@ -7621,8 +7621,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7666,8 +7666,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7711,8 +7711,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7756,8 +7756,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7802,8 +7802,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7849,8 +7849,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
@@ -7894,8 +7894,8 @@ scenarios:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
-      cassandra_version: "5.0.8"
-      cassandra_git_sha: 172227094626d50d4bc9a3d9de2e3659a7844386
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
