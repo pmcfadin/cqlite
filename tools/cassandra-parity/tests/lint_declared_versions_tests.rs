@@ -131,3 +131,34 @@ fn lint_requires_version_and_sha_from_the_same_pin() {
         1
     );
 }
+
+/// Either field alone is rejected (roborev job 175): the same-pin check cannot run on one
+/// field, so a lone value must not stand as a declaration.
+#[test]
+fn lint_requires_both_version_and_sha_when_either_is_present() {
+    let base = manifest_with_scenario_version("5.0.2", true);
+    let drop = |needle: &str| {
+        let y: String = base
+            .lines()
+            .filter(|l| !l.contains(needle))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let m = Manifest::from_yaml(&y).expect("parses");
+        lint(&m, None)
+            .into_iter()
+            .map(|f| f.field)
+            .collect::<Vec<_>>()
+    };
+    let sha_only = drop("cassandra_version:");
+    assert!(
+        sha_only.iter().any(|f| f == "evidence.cassandra_version"),
+        "sha-only evidence must be rejected: {sha_only:?}"
+    );
+    let version_only = drop("cassandra_git_sha:");
+    assert!(
+        version_only
+            .iter()
+            .any(|f| f == "evidence.cassandra_git_sha"),
+        "version-only evidence must be rejected: {version_only:?}"
+    );
+}

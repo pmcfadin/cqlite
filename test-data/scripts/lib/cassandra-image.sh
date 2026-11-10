@@ -23,12 +23,16 @@ CQLITE_CASSANDRA_IMAGE="cassandra:${CQLITE_CASSANDRA_VERSION}"
 # `pip3 install cassandra-driver` made two runs of the same generator differ by
 # whatever PyPI served that day.
 CQLITE_CASSANDRA_DRIVER_VERSION="3.30.1"
+_CQLITE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Hash-locked requirements: every published file's sha256 for each of the 4 pinned
+# packages (see the file's header for provenance). The ONLY source of install truth.
+CQLITE_CASSANDRA_DRIVER_REQUIREMENTS="${_CQLITE_LIB_DIR}/cassandra-driver-requirements.txt"
 
-# The COMPLETE, exact driver package set (roborev job 174): cp311 / x86_64 wheels, the
-# cassandra image's python3.11 and the dependency closure of cassandra-driver, each with
-# its sha256. Both install paths below use exactly these files, so an online run and an
-# offline run install identical packages; nothing is resolved from an index. Format:
-# "<url> <sha256>".
+# Host-fetchable wheels for the one platform the stock cassandra image has (python3.11 on
+# x86_64): used (1) to install into a container with pip but no network and (2) to unpack
+# into a container with NO pip. Each sha256 below must appear in
+# cassandra-driver-requirements.txt (scripts/tests/test_cassandra_driver_requirements.sh
+# checks it). Format: "<url> <sha256>".
 _CQLITE_DRIVER_WHEELS=(
   "https://files.pythonhosted.org/packages/0e/68/dd77df0e56a275f763ee38598c21abc4fd585b8319dc38eaee398433c231/cassandra_driver-3.30.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl 6c5ae0218e52944f92ddde07a03cfa941fa4a10097d501a18cfa1b525c92d013"
   "https://files.pythonhosted.org/packages/af/90/3bc780df088d439714af8295196a4332a26559ae66fd99865e36f92efa9e/geomet-1.1.0-py3-none-any.whl 4372fe4e286a34acc6f2e9308284850bd8c4aa5bc12065e2abbd4995900db12f"
@@ -44,24 +48,43 @@ _cqlite_driver_present() {
 }
 
 # cqlite_install_cassandra_driver <engine> <container>
-# Idempotent. The host downloads (once, cached) and sha256-verifies the exact wheel set
-# above, then installs ONLY those files into the container:
-#   * container has pip3: `pip3 install --no-deps --no-index --require-hashes` from the
-#     copied files (pip re-verifies every hash; no index, no resolver);
-#   * container has no pip (the stock cassandra image): the same wheels are unpacked
-#     into the interpreter's dist-packages.
-# Either way the installed packages are those same four wheels. Returns non-zero (with a
-# message) when the host cannot fetch/verify them, the container is not cp311/x86_64, or
-# the pinned driver is still not importable.
+# Idempotent. Every route installs only packages whose sha256 is listed in
+# cassandra-driver-requirements.txt (all four pinned packages, `--no-deps`), so any
+# platform pip supports gets the exact pinned set:
+#   1. container has pip3: `pip3 install --no-deps --require-hashes -r <requirements>`
+#      from the package index (works on any architecture / python version);
+#   2. that failed (container offline) and the container is python3.11 / x86_64: the same
+#      requirements installed `--no-index --find-links` from wheels the HOST downloaded
+#      and sha256-verified;
+#   3. container has NO pip (the stock cassandra image) and is python3.11 / x86_64: those
+#      same verified wheels are unpacked into dist-packages;
+#   4. otherwise: a clear error naming route 1.
 cqlite_install_cassandra_driver() {
-  local engine="$1" container="$2" spec url sha name cache dir pyver arch reqs=""
+  local engine="$1" container="$2" spec url sha name cache dir pyver arch have_pip=0 verified=0
   _cqlite_driver_present "$engine" "$container" && return 0
 
   pyver="$("$engine" exec "$container" python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
   arch="$("$engine" exec "$container" uname -m 2>/dev/null)"
-  if [ "$pyver" != "3.11" ] || [ "$arch" != "x86_64" ]; then
-    echo "[driver] the pinned wheel set is cp311/x86_64; container has python ${pyver:-?} on ${arch:-?}" >&2
+  [ "$pyver" = "3.11" ] && [ "$arch" = "x86_64" ] && verified=1
+  "$engine" exec "$container" bash -c 'command -v pip3 >/dev/null 2>&1' >/dev/null 2>&1 && have_pip=1
+
+  if [ "$have_pip" = 0 ] && [ "$verified" = 0 ]; then
+    echo "[driver] container has no pip3 and is python ${pyver:-?} on ${arch:-?}: no verified wheels for this platform." >&2
+    echo "[driver] use an image with pip3 (route 1: pip3 install --no-deps --require-hashes -r ${CQLITE_CASSANDRA_DRIVER_REQUIREMENTS##*/}) and rerun." >&2
     return 1
+  fi
+
+  if [ "$have_pip" = 1 ]; then
+    "$engine" cp "$CQLITE_CASSANDRA_DRIVER_REQUIREMENTS" "$container:/tmp/cqlite-driver-requirements.txt" || return 1
+    "$engine" exec "$container" pip3 install --quiet --no-deps --require-hashes \
+        -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 \
+      || "$engine" exec "$container" pip3 install --quiet --no-deps --require-hashes \
+        --break-system-packages -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 || true
+    _cqlite_driver_present "$engine" "$container" && return 0
+    [ "$verified" = 1 ] || {
+      echo "[driver] pip3 --require-hashes install failed in $container and no host-verified wheels exist for ${pyver} on ${arch}" >&2
+      return 1
+    }
   fi
 
   cache="${CQLITE_DRIVER_WHEEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cqlite/driver-wheels}"
@@ -78,19 +101,16 @@ cqlite_install_cassandra_driver() {
       rm -f "$cache/$name"; rm -rf "$dir"; return 1
     fi
     cp "$cache/$name" "$dir/wheels/$name"
-    reqs="${reqs}/tmp/cqlite-driver-wheels/${name} --hash=sha256:${sha}"$'\n'
   done
-  printf '%s' "$reqs" > "$dir/requirements.txt"
 
-  if "$engine" exec "$container" bash -c 'command -v pip3 >/dev/null 2>&1' >/dev/null 2>&1; then
+  if [ "$have_pip" = 1 ]; then
     "$engine" exec "$container" mkdir -p /tmp/cqlite-driver-wheels \
       && "$engine" cp "$dir/wheels/." "$container:/tmp/cqlite-driver-wheels/" \
-      && "$engine" cp "$dir/requirements.txt" "$container:/tmp/cqlite-driver-requirements.txt" \
-      && "$engine" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
-           -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 \
-      || "$engine" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
-           --break-system-packages -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 \
-      || true
+      && { "$engine" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
+             --find-links /tmp/cqlite-driver-wheels -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1 \
+           || "$engine" exec "$container" pip3 install --quiet --no-deps --no-index --require-hashes \
+             --break-system-packages --find-links /tmp/cqlite-driver-wheels \
+             -r /tmp/cqlite-driver-requirements.txt >/dev/null 2>&1; } || true
   else
     mkdir -p "$dir/unpacked"
     for name in "$dir"/wheels/*.whl; do

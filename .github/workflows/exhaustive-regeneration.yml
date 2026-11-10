@@ -265,35 +265,28 @@ jobs:
           # or any other `sha:` line that happens to precede it (issue #1026).
           # The ref drives the recorded version (cassandra-X.Y.Z -> X.Y.Z); the
           # audit then fails on any version/ref/sha the manifest does not declare.
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --user --break-system-packages 'pyyaml==6.0.2'
           python3 - "$MANIFEST" "$IMAGE" "${{ steps.package.outputs.asset_sha }}" \
             > "$ARTIFACT_DIR/provenance.json" <<'PY'
           import json, re, sys
           manifest, image, asset_sha = sys.argv[1:4]
-          # Collect every (ref, sha) pair declared in the cassandra_source block: the
-          # primary pin first, then `additional_pins` entries (#4482). The pair whose
-          # release matches the image is recorded; if none does, the primary pair is
-          # recorded and the audit reds the image-vs-pin divergence (silent image bump).
-          pins = []
-          cur = {}
-          in_src = False
+          # Read the manifest STRUCTURALLY (PyYAML, preinstalled on the ubuntu-24.04
+          # runners) so each pin is a mapping whose `ref` and `sha` belong together
+          # regardless of key order or layout (roborev job 175): the primary pin is
+          # `cassandra_source.{ref,sha}`, the others are the `additional_pins` mappings
+          # (#4482). The pin whose release matches the image is recorded; if none does,
+          # the primary pin is recorded and the audit reds the image-vs-pin divergence
+          # (silent image bump).
+          import yaml
           with open(manifest) as f:
-              for line in f:
-                  if re.match(r'^cassandra_source:\s*$', line):
-                      in_src = True
-                      continue
-                  if in_src:
-                      if re.match(r'^\S', line):  # next top-level key ends the block
-                          break
-                      m = re.match(r'^\s+(?:-\s+)?(ref|sha):\s*(.+?)\s*$', line)
-                      if m:
-                          val = m.group(2).strip().strip('"').strip("'")
-                          if m.group(1) in cur:  # a new pin begins
-                              pins.append(cur)
-                              cur = {}
-                          cur[m.group(1)] = val
-                          if len(cur) == 2:
-                              pins.append(cur)
-                              cur = {}
+              src = (yaml.safe_load(f) or {}).get("cassandra_source") or {}
+          pins = []
+          if src.get("ref") and src.get("sha"):
+              pins.append({"ref": str(src["ref"]), "sha": str(src["sha"])})
+          for pin in src.get("additional_pins") or []:
+              if isinstance(pin, dict) and pin.get("ref") and pin.get("sha"):
+                  pins.append({"ref": str(pin["ref"]), "sha": str(pin["sha"])})
           if not pins:
               sys.exit("cassandra_source.ref/.sha not found in manifest")
           m_img = re.search(r':(\d+(?:\.\d+)*)', image.rsplit('/', 1)[-1])

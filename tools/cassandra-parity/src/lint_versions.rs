@@ -10,8 +10,9 @@ use crate::model::Manifest;
 ///
 /// The version and the sha must belong to the SAME declared pin (roborev job 174): a
 /// version from one pin with the sha of another is rejected, so a mismatched sha can
-/// never be laundered through a scenario. A version in no pin is a typo or an
-/// undeclared release.
+/// never be laundered through a scenario. Either field alone is an error (both are
+/// required whenever one is present). A version in no pin is a typo or an undeclared
+/// release.
 pub(crate) fn lint_declared_fixture_versions(m: &Manifest, out: &mut Vec<Finding>) {
     let pins = m.cassandra_source.pins();
     let declared: Vec<&str> = pins.iter().map(|(v, _, _)| v.as_str()).collect();
@@ -28,7 +29,30 @@ pub(crate) fn lint_declared_fixture_versions(m: &Manifest, out: &mut Vec<Finding
             .as_deref()
             .map(str::trim)
             .filter(|v| !v.is_empty());
-        let Some(version) = version else { continue };
+        // EITHER field present requires BOTH: a lone sha (or lone version) would skip the
+        // same-pin check below and let an arbitrary value stand as a declaration.
+        let (version, sha) = match (version, sha) {
+            (None, None) => continue,
+            (Some(v), Some(s)) => (v, Some(s)),
+            (Some(_), None) => {
+                out.push(Finding::error(
+                    &s.id,
+                    "evidence.cassandra_git_sha",
+                    "evidence.cassandra_version is set but evidence.cassandra_git_sha is missing; \
+                     both are required and must come from the same cassandra_source pin",
+                ));
+                continue;
+            }
+            (None, Some(_)) => {
+                out.push(Finding::error(
+                    &s.id,
+                    "evidence.cassandra_version",
+                    "evidence.cassandra_git_sha is set but evidence.cassandra_version is missing; \
+                     both are required and must come from the same cassandra_source pin",
+                ));
+                continue;
+            }
+        };
         let Some((_, _, pin_sha)) = pins.iter().find(|(v, _, _)| v == version) else {
             out.push(Finding::error(
                 &s.id,

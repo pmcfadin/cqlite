@@ -1,0 +1,43 @@
+# Hash-locked requirements for the cassandra-driver the fixture generators insert rows with
+# (#4482). For EACH pinned package, the sha256 of EVERY file PyPI publishes for that exact
+# version (sdist and all wheels), so `pip install --no-deps --require-hashes -r <this file>`
+# is reproducible on any platform pip supports. Source: https://pypi.org/pypi/<name>/<version>/json
+# (`urls[].digests.sha256`), fetched 2026-11-10. To bump a pin, regenerate from that API for the
+# new exact version; cassandra-image.sh's CQLITE_CASSANDRA_DRIVER_VERSION must agree.
+# Packages are sorted by name.
+cassandra-driver==3.30.1 \
+    --hash=sha256:0c6a3e1428f7c6a9aa6c944b9c47a37cd2cdbeb5b5a82d42c33afdd56f14e398 \
+    --hash=sha256:0ea769cf9925206b8458db10477b78699660fbdaed7262157e43b8f21817f838 \
+    --hash=sha256:187bd1457e414bc019a0635603ea0001baada914942198ed23993198e44dec74 \
+    --hash=sha256:222c704c72a5880cfe9c89f04b375d03d1152dbdb6ec8c25a325267b8bc2ca4e \
+    --hash=sha256:30686850b9e0d0d8326ee07219113170b4e1d041e4d1434521a2f342c471108e \
+    --hash=sha256:3c32513a2f2c6832d4fe3464e11be59dc21096dba296b18ec3454bc8354a78ba \
+    --hash=sha256:3cb90ec9ac9d44cbfe17f1e9cb643dbc5f401e62980835aa6669a2fd5792863b \
+    --hash=sha256:546ad047abf96a6d7922d057010b4cfb22e9d473db7b907956bc7c6a8029f7d9 \
+    --hash=sha256:61bf2ded460fb0d2e909b70c9d193588b71148540bd85e29fe6954e00bb1a869 \
+    --hash=sha256:6c5ae0218e52944f92ddde07a03cfa941fa4a10097d501a18cfa1b525c92d013 \
+    --hash=sha256:71f3ccc8c60f41c83306c60704f7b1ee1a8ccd312aae286bf75d318aa47d0e71 \
+    --hash=sha256:799af594364475656d9eea69606713fbaa98b10da82cc6d90286322477c72828 \
+    --hash=sha256:80df7b705f71e1a6dae77aaea682cbe45fdd74b962cfcc6c6b0c05195f48b7c2 \
+    --hash=sha256:84b2cc578f542332b678fc3fcc801c6ef8110a377d3fd38c27eab5ec5f2d2b79 \
+    --hash=sha256:87822d6cce2c586aa72733a9dd1858276cee795834f7ad949c783bf19cf7a3a7 \
+    --hash=sha256:8f43abccb5b5a761582e4ba6d44a7ef4274b61b0bd3f8e3159af40ca2c10c0fa \
+    --hash=sha256:921403aa76c66d78d00c4a3dff542f989fa584b7450e3cb1dd2c267b4a5a55f0 \
+    --hash=sha256:9b54f7c6cbb1d9bb6a8b9f8ab6034e6f761527e97af0603aa1e9635720df03a0 \
+    --hash=sha256:9ff317f79b09eba52a44d46d8c4773e47533dfdd8b9ba4984268dc4a1fe5206e \
+    --hash=sha256:ab853bd2806899c5612c3e4ac2a355a7811084d06692e4460255e3b0a4fa556a \
+    --hash=sha256:af5c6f5d7d5a86725b908aba12d9554df60234c15bfe053a8175b15db791ada8 \
+    --hash=sha256:c0995dccff3df739a1df6e10da9f3fc95bbbc8b38bacc4cfb6172655f8351cba \
+    --hash=sha256:e10784b4f7d77332dc1a5c72855977a0d797160fd8ba50785414caed07fce95b \
+    --hash=sha256:e43d873de5f8dadf4c8dcc4fab87d66a8495137e844ae3c184fbc90a54c05bc0 \
+    --hash=sha256:eba7931a615207aab84ebaa000330024f1c614aa86ca58d119556edd338883ce \
+    --hash=sha256:ec04eebfadc74039b1f7df84356a822539992c7dc0b013fedbb5a33d9295af86
+click==8.5.1 \
+    --hash=sha256:8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37 \
+    --hash=sha256:9bbfada76703fd1d784b83eea012e3e8c6a001a876543ef104fa56aaaeb072b4
+geomet==1.1.0 \
+    --hash=sha256:4372fe4e286a34acc6f2e9308284850bd8c4aa5bc12065e2abbd4995900db12f \
+    --hash=sha256:51e92231a0ef6aaa63ac20c443377ba78a303fd2ecd179dc3567de79f3c11605
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
+    --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
