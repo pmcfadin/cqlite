@@ -40,7 +40,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT/datasets}"
 DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="cqlite-signedcoll"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 KEYSPACE="test_signed_coll"
 
 while [[ $# -gt 0 ]]; do

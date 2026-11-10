@@ -49,7 +49,8 @@
 #                                                     #   dirs a run WOULD remove
 set -euo pipefail
 
-IMAGE="${IMAGE:-cassandra:5.0.2}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+IMAGE="${IMAGE:-$CQLITE_CASSANDRA_IMAGE}"
 CONTAINER="${CONTAINER:-cqlite-perf3068}"
 # `${VAR-default}`, not `${VAR:-default}`: an EXPLICITLY EMPTY CORPUS_ROOT/TABLES
 # (typically a caller's unset variable) must fail validation, never silently

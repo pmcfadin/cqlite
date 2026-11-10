@@ -67,7 +67,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT/datasets}"
 DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="${CONTAINER_NAME:-cqlite-cttlparity}"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 KEYSPACE="test_compaction_tombstone_ttl"
 
 # Fixed writetimes (micros). MUST match the constants in

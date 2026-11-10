@@ -40,7 +40,11 @@ fn index_text(include_unclassified: bool) -> String {
 /// Build a manifest whose single scenario references `REF` and classifies
 /// `SortedTableWriterTest.java`.
 fn manifest() -> Manifest {
-    let yaml = format!(
+    Manifest::from_yaml(&manifest_yaml()).expect("fixture manifest parses")
+}
+
+fn manifest_yaml() -> String {
+    format!(
         r#"manifest_version: 1
 cassandra_source:
   repo: https://github.com/apache/cassandra
@@ -73,8 +77,33 @@ scenarios:
     ci:
       tier: exhaustive_regeneration
 "#
+    )
+}
+
+const SHA_508: &str = "172227094626d50d4bc9a3d9de2e3659a7844386";
+
+/// The primary 5.0.2 manifest plus a declared additional 5.0.8 pin (#4482).
+fn manifest_with_additional_pin() -> Manifest {
+    let mut yaml = manifest_yaml();
+    yaml = yaml.replace(
+        "  assessment_report: docs/reports/x.md\n",
+        &format!(
+            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n"
+        ),
     );
-    Manifest::from_yaml(&yaml).expect("fixture manifest parses")
+    Manifest::from_yaml(&yaml).expect("manifest with additional pin parses")
+}
+
+fn provenance_508() -> Provenance {
+    Provenance {
+        cassandra_version: "5.0.8".to_string(),
+        cassandra_ref: "cassandra-5.0.8".to_string(),
+        cassandra_git_sha: SHA_508.to_string(),
+        docker_image: "cassandra:5.0.8".to_string(),
+        generator_commands: vec!["bash test-data/scripts/regenerate-datasets.sh".to_string()],
+        dataset_asset_name: "dataset-asset.tar.gz".to_string(),
+        dataset_asset_sha256: "deadbeef".to_string(),
+    }
 }
 
 fn good_provenance() -> Provenance {
@@ -676,4 +705,411 @@ fn provenance_round_trips_from_json() {
     // Matches the fixture manifest pin -> no provenance findings.
     let findings = corpus_audit::provenance::check_provenance(&prov, &manifest());
     assert!(findings.is_empty(), "got: {findings:?}");
+}
+
+// ---- #4482: a declared additional pin (5.0.8) next to the primary (5.0.2) ----
+
+/// Fixtures generated with 5.0.2 stay valid until regenerated, and a regeneration
+/// from the DECLARED additional 5.0.8 release passes the provenance audit.
+#[test]
+fn provenance_accepts_a_declared_additional_pin_and_still_accepts_the_primary() {
+    let m = manifest_with_additional_pin();
+    let on_508 = corpus_audit::provenance::check_provenance(&provenance_508(), &m);
+    assert!(
+        on_508.is_empty(),
+        "declared 5.0.8 pin must pass: {on_508:?}"
+    );
+    let on_502 = corpus_audit::provenance::check_provenance(&good_provenance(), &m);
+    assert!(
+        on_502.is_empty(),
+        "primary 5.0.2 must still pass: {on_502:?}"
+    );
+}
+
+/// The same 5.0.8 regeneration against a manifest that does NOT declare it is the
+/// silent image bump the audit exists to catch: ref, sha, version and image all red.
+#[test]
+fn provenance_rejects_5_0_8_when_the_manifest_does_not_declare_it() {
+    let findings = corpus_audit::provenance::check_provenance(&provenance_508(), &manifest());
+    assert!(
+        findings.len() >= 3,
+        "an undeclared 5.0.8 must trip ref + sha/version/image, got: {findings:?}"
+    );
+    assert!(findings
+        .iter()
+        .any(|f| f.subject.contains("cassandra:5.0.8")));
+}
+
+/// Declaring 5.0.8 must not launder a DIFFERENT undeclared release.
+#[test]
+fn provenance_still_rejects_an_undeclared_release_when_an_additional_pin_exists() {
+    let m = manifest_with_additional_pin();
+    let mut prov = provenance_508();
+    prov.docker_image = "cassandra:5.0.9".to_string();
+    let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+    assert_eq!(findings.len(), 1, "only the image diverges: {findings:?}");
+    assert!(findings[0].subject.contains("cassandra:5.0.9"));
+}
+
+/// roborev job 174: ref, sha and version are ONE tuple. Every mix across the two
+/// declared pins is rejected, and the two coherent tuples pass.
+#[test]
+fn provenance_is_validated_as_one_tuple_across_pins() {
+    let m = manifest_with_additional_pin();
+    // (version, ref, sha, image-version-matching-the-ref)
+    let p502 = ("5.0.2", "cassandra-5.0.2", GOOD_SHA);
+    let p508 = ("5.0.8", "cassandra-5.0.8", SHA_508);
+    for (name, v, r, s, img) in [
+        (
+            "5.0.8 version + 5.0.2 sha",
+            p508.0,
+            p508.1,
+            p502.2,
+            "cassandra:5.0.8",
+        ),
+        (
+            "5.0.2 ref + 5.0.8 sha",
+            p502.0,
+            p502.1,
+            p508.2,
+            "cassandra:5.0.2",
+        ),
+        (
+            "5.0.8 ref + 5.0.2 version",
+            p502.0,
+            p508.1,
+            p508.2,
+            "cassandra:5.0.8",
+        ),
+        (
+            "5.0.8 ref + 5.0.2 sha",
+            p508.0,
+            p508.1,
+            p502.2,
+            "cassandra:5.0.8",
+        ),
+        (
+            "5.0.2 ref + 5.0.8 version",
+            p508.0,
+            p502.1,
+            p502.2,
+            "cassandra:5.0.2",
+        ),
+        (
+            "coherent 5.0.8 tuple with the 5.0.2 image",
+            p508.0,
+            p508.1,
+            p508.2,
+            "cassandra:5.0.2",
+        ),
+        (
+            "coherent 5.0.2 tuple with the 5.0.8 image",
+            p502.0,
+            p502.1,
+            p502.2,
+            "cassandra:5.0.8",
+        ),
+    ] {
+        let mut prov = good_provenance();
+        prov.cassandra_version = v.to_string();
+        prov.cassandra_ref = r.to_string();
+        prov.cassandra_git_sha = s.to_string();
+        prov.docker_image = img.to_string();
+        let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+        assert!(!findings.is_empty(), "{name} must be rejected");
+    }
+    for (name, v, r, s, img) in [
+        ("5.0.2", p502.0, p502.1, p502.2, "cassandra:5.0.2"),
+        ("5.0.8", p508.0, p508.1, p508.2, "cassandra:5.0.8-jammy"),
+    ] {
+        let mut prov = good_provenance();
+        prov.cassandra_version = v.to_string();
+        prov.cassandra_ref = r.to_string();
+        prov.cassandra_git_sha = s.to_string();
+        prov.docker_image = img.to_string();
+        let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+        assert!(
+            findings.is_empty(),
+            "coherent {name} tuple must pass: {findings:?}"
+        );
+    }
+}
+
+/// A scenario's own version/sha no longer widen the provenance check: a scenario
+/// declaring 5.0.9 does not make a 5.0.9 record acceptable.
+#[test]
+fn scenario_evidence_cannot_widen_the_provenance_pins() {
+    let yaml = manifest_yaml().replace(
+        "cassandra_version: \"5.0.2\"",
+        "cassandra_version: \"5.0.9\"",
+    );
+    let m = Manifest::from_yaml(&yaml).expect("parses");
+    let mut prov = good_provenance();
+    prov.cassandra_version = "5.0.9".to_string();
+    prov.docker_image = "cassandra:5.0.9".to_string();
+    let findings = corpus_audit::provenance::check_provenance(&prov, &m);
+    assert!(
+        !findings.is_empty(),
+        "scenario evidence must not declare a release: {findings:?}"
+    );
+}
+
+// ---- #4482 / roborev job 178: an additional pin is bound to the covered scenarios ----
+
+/// A manifest with the declared 5.0.8 pin whose scenarios claim `claims[i]` (`Some((version,
+/// sha))`, or `None` for ABSENT evidence: neither field), all pinning the same corpus
+/// reference so every scenario is covered by [`clean_inventory`].
+fn manifest_with_optional_claims(claims: &[Option<(&str, &str)>]) -> Manifest {
+    let base = manifest_yaml();
+    let start = base
+        .find("  - id: cass.sstable_format.simple")
+        .expect("scenario");
+    let head = &base[..start];
+    let scenario = &base[start..];
+    let mut yaml = head.replace(
+        "  assessment_report: docs/reports/x.md\n",
+        &format!(
+            "  assessment_report: docs/reports/x.md\n  additional_pins:\n    - ref: cassandra-5.0.8\n      sha: {SHA_508}\n"
+        ),
+    );
+    for (i, claim) in claims.iter().enumerate() {
+        let mut sc = scenario.replace(
+            "cass.sstable_format.simple",
+            &format!("cass.sstable_format.simple{i}"),
+        );
+        match claim {
+            Some((version, sha)) => {
+                sc = sc
+                    .replace(
+                        "cassandra_version: \"5.0.2\"",
+                        &format!("cassandra_version: \"{version}\""),
+                    )
+                    .replace(
+                        &format!("cassandra_git_sha: {GOOD_SHA}"),
+                        &format!("cassandra_git_sha: {sha}"),
+                    );
+            }
+            None => {
+                sc = sc
+                    .lines()
+                    .filter(|l| {
+                        !l.contains("cassandra_version:") && !l.contains("cassandra_git_sha:")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+            }
+        }
+        yaml.push_str(&sc);
+    }
+    Manifest::from_yaml(&yaml).expect("claims manifest parses")
+}
+
+fn manifest_with_claims(claims: &[(&str, &str)]) -> Manifest {
+    let v: Vec<Option<(&str, &str)>> = claims.iter().map(|c| Some(*c)).collect();
+    manifest_with_optional_claims(&v)
+}
+
+fn provenance_findings_for(m: &Manifest, prov: &Provenance, inv: &CorpusInventory) -> Vec<String> {
+    corpus_audit::audit(
+        m,
+        &index_text(false),
+        inv,
+        &ExpectedInventory::default(),
+        Some(prov),
+        &all_corruption_fixtures(),
+    )
+    .findings
+    .into_iter()
+    .filter(|f| f.kind == FindingKind::ProvenanceMismatch)
+    .map(|f| format!("{} — {}", f.subject, f.detail))
+    .collect()
+}
+
+/// (a) a 5.0.8-generated corpus while every covered scenario still claims 5.0.2.
+#[test]
+fn pin_binding_rejects_a_5_0_8_corpus_when_all_covered_scenarios_claim_5_0_2() {
+    let m = manifest_with_claims(&[("5.0.2", GOOD_SHA), ("5.0.2", GOOD_SHA)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple0"),
+        "{findings:?}"
+    );
+    assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
+    assert!(findings[0].contains("2 of the 2 scenarios"), "{findings:?}");
+}
+
+/// (b) the same corpus passes once the covered scenarios claim 5.0.8.
+#[test]
+fn pin_binding_accepts_a_5_0_8_corpus_when_all_covered_scenarios_claim_5_0_8() {
+    let m = manifest_with_claims(&[("5.0.8", SHA_508), ("5.0.8", SHA_508)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+/// (c) a mixed claim is rejected, naming only the scenario that still claims 5.0.2.
+#[test]
+fn pin_binding_rejects_mixed_claims_naming_the_disagreeing_scenario() {
+    let m = manifest_with_claims(&[("5.0.8", SHA_508), ("5.0.2", GOOD_SHA)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple1 (declares 5.0.2 @ f278f6774fc7)"),
+        "{findings:?}"
+    );
+    assert!(!findings[0].contains("simple0"), "{findings:?}");
+    assert!(findings[0].contains("1 of the 2 scenarios"), "{findings:?}");
+}
+
+/// (a) roborev job 183: a corpus from the PRIMARY pin is bound too. Covered scenarios that
+/// declare 5.0.8 (version and sha) do not match it and are named.
+#[test]
+fn pin_binding_rejects_a_primary_corpus_when_covered_scenarios_declare_5_0_8() {
+    let m = manifest_with_claims(&[("5.0.8", SHA_508), ("5.0.8", SHA_508)]);
+    let findings = provenance_findings_for(&m, &good_provenance(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple0 (declares 5.0.8 @ 172227094626)"),
+        "{findings:?}"
+    );
+    assert!(findings[0].contains("2 of the 2 scenarios"), "{findings:?}");
+    // the right version at the wrong sha is rejected as well
+    let m = manifest_with_claims(&[("5.0.2", SHA_508)]);
+    assert_eq!(
+        provenance_findings_for(&m, &good_provenance(), &clean_inventory()).len(),
+        1
+    );
+}
+
+/// (b) a primary corpus with scenarios declaring 5.0.2 @ the primary sha passes.
+#[test]
+fn pin_binding_accepts_a_primary_corpus_when_covered_scenarios_declare_the_primary() {
+    let m = manifest_with_claims(&[("5.0.2", GOOD_SHA), ("5.0.2", GOOD_SHA)]);
+    let findings = provenance_findings_for(&m, &good_provenance(), &clean_inventory());
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+/// (c) ABSENT evidence is implicitly the primary pin, so a primary corpus passes...
+#[test]
+fn pin_binding_treats_absent_evidence_as_the_primary_for_a_primary_corpus() {
+    let m = manifest_with_optional_claims(&[None, Some(("5.0.2", GOOD_SHA)), None]);
+    let findings = provenance_findings_for(&m, &good_provenance(), &clean_inventory());
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+/// (d) ...and fails against an additional pin, naming the scenario as implicitly primary.
+#[test]
+fn pin_binding_rejects_an_additional_pin_corpus_when_evidence_is_absent() {
+    let m = manifest_with_optional_claims(&[Some(("5.0.8", SHA_508)), None]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple1 (declares 5.0.2 @ f278f6774fc7, absent evidence = primary)"),
+        "{findings:?}"
+    );
+    assert!(findings[0].contains("1 of the 2 scenarios"), "{findings:?}");
+}
+
+/// A corpus that covers NO scenario binds nothing, so it is rejected for EVERY pin (roborev
+/// job 185): the additional pin and the primary alike.
+#[test]
+fn pin_binding_rejects_a_corpus_that_covers_no_scenario_for_every_pin() {
+    let m = manifest_with_claims(&[("5.0.8", SHA_508)]);
+    for (name, prov) in [
+        ("additional 5.0.8", provenance_508()),
+        ("primary 5.0.2", good_provenance()),
+    ] {
+        let findings = provenance_findings_for(&m, &prov, &inventory_with(&[]));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("covers no manifest scenario")),
+            "{name}: {findings:?}"
+        );
+    }
+}
+
+// ---- #4482 / roborev job 179: the 5.0.2 override against TODAY's committed evidence ----
+
+fn real_manifest() -> Manifest {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test-data/cassandra-parity-manifest.yml");
+    Manifest::from_yaml(&std::fs::read_to_string(&path).expect("read real manifest"))
+        .expect("real manifest parses")
+}
+
+/// An inventory that provides every corpus-tree reference the real manifest names, i.e.
+/// the full regenerated corpus the weekly lane audits.
+fn real_corpus_inventory(m: &Manifest) -> CorpusInventory {
+    let mut files = BTreeSet::new();
+    for s in &m.scenarios {
+        for r in s
+            .fixtures
+            .references
+            .iter()
+            .chain(&s.fixtures.datasets)
+            .chain(&s.evidence.reference_paths)
+        {
+            if r.starts_with("test-data/datasets/") {
+                files.insert(r.clone());
+            }
+        }
+    }
+    CorpusInventory {
+        files,
+        checksums: BTreeMap::new(),
+    }
+}
+
+fn audit_provenance(m: &Manifest, prov: &Provenance, inv: &CorpusInventory) -> Vec<String> {
+    let mut f = corpus_audit::provenance::check_provenance(prov, m);
+    f.extend(corpus_audit::provenance::check_pin_binding(prov, m, inv));
+    f.into_iter()
+        .map(|x| format!("{} — {}", x.subject, x.detail))
+        .collect()
+}
+
+/// The coherent tuple `CQLITE_CASSANDRA_RELEASE=5.0.2` selects (the workflows that audit
+/// against committed evidence set it): the primary pin, image included.
+#[test]
+fn the_5_0_2_override_corpus_passes_the_audit_against_todays_committed_evidence() {
+    let m = real_manifest();
+    let inv = real_corpus_inventory(&m);
+    assert!(
+        !inv.files.is_empty(),
+        "guard: the real manifest names corpus references"
+    );
+    let findings = audit_provenance(&m, &good_provenance(), &inv);
+    assert!(
+        findings.is_empty(),
+        "5.0.2 override must audit clean: {findings:?}"
+    );
+}
+
+/// The default 5.0.8 release against the same evidence is rejected (every covered scenario
+/// still claims 5.0.2) - which is exactly why the audited lanes pin the override.
+#[test]
+fn the_default_5_0_8_corpus_is_rejected_against_todays_committed_evidence() {
+    let m = real_manifest();
+    let inv = real_corpus_inventory(&m);
+    let findings = audit_provenance(&m, &provenance_508(), &inv);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("declares 5.0.2"), "{findings:?}");
+}
+
+/// roborev job 180: the binding compares version AND sha. Evidence that names the selected
+/// pin's version with a DIFFERENT sha does not bless the run.
+#[test]
+fn pin_binding_rejects_same_version_evidence_at_a_different_sha() {
+    let other_sha = "0123456789abcdef0123456789abcdef01234567";
+    let m = manifest_with_claims(&[("5.0.8", SHA_508), ("5.0.8", other_sha)]);
+    let findings = provenance_findings_for(&m, &provenance_508(), &clean_inventory());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("cass.sstable_format.simple1 (declares 5.0.8 @ 0123456789ab)"),
+        "{findings:?}"
+    );
+    assert!(!findings[0].contains("simple0"), "{findings:?}");
+    assert!(findings[0].contains("1 of the 2 scenarios"), "{findings:?}");
 }

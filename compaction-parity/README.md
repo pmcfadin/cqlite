@@ -59,7 +59,7 @@ files, or unexpected multiple outputs all throw / fail the build (no
 ## Layout
 
 ```
-scripts/bootstrap-cassandra.sh   # clone apache/cassandra @ cassandra-5.0.2; ant jar build-test
+scripts/bootstrap-cassandra.sh   # clone apache/cassandra @ cassandra-5.0.8; ant jar build-test
 build.gradle.kts                 # builds against that checkout; JDK 17 test JVM; test + byteParity tasks
 src/test/java/org/cqlite/parity/
   CqliteCompactionRunner.java    # shells out to `cqlite compact`

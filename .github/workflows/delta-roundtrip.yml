@@ -57,7 +57,7 @@ on:
         default: false
 
 env:
-  CASSANDRA_IMAGE: cassandra:5.0.2
+  CASSANDRA_IMAGE: cassandra:5.0.8  # informational: the generators take test-data/scripts/lib/cassandra-image.sh (#4482)
   DELTA_ROUNDTRIP_DATA: /tmp/delta-roundtrip
 
 permissions:

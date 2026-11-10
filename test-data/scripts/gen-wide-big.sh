@@ -27,7 +27,8 @@
 # test constants + manifest reference_paths to the new ones).
 set -euo pipefail
 
-IMAGE="${IMAGE:-cassandra:5.0.2}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+IMAGE="${IMAGE:-$CQLITE_CASSANDRA_IMAGE}"
 CONTAINER="${CONTAINER:-cqlite-widebig}"
 # Default OUT to the repo's test-data/datasets, derived from the repo root so the
 # manifest's `bash test-data/scripts/gen-wide-big.sh` works in any checkout.

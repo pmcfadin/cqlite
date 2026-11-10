@@ -7,6 +7,8 @@ pub mod coverage;
 pub mod enums;
 pub mod failure_artifact;
 pub mod lint;
+mod lint_claims;
+mod lint_versions;
 pub mod model;
 pub mod report;
 pub mod report_dedup;

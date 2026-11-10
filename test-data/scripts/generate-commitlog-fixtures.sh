@@ -34,7 +34,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT/datasets}"
 DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="cqlite-commitlog"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 KEYSPACE="commitlog_test"
 TABLE="users"
 
@@ -136,13 +137,12 @@ fi
 
 wait_cassandra
 
-log "Installing python driver in container..."
-$ENGINE exec "$CONTAINER_NAME" bash -c "apt-get update -qq && apt-get install -y -q python3-pip" >/dev/null
-$ENGINE exec "$CONTAINER_NAME" pip3 install --quiet cassandra-driver
+log "Installing pinned cassandra-driver ${CQLITE_CASSANDRA_DRIVER_VERSION} in container..."
+cqlite_install_cassandra_driver "$ENGINE" "$CONTAINER_NAME"
 
 # ---- Schema + KNOWN insert set (ground truth) -----------------------------
 log "Applying schema + inserting the known mutation set..."
-$ENGINE exec -i "$CONTAINER_NAME" env KEYSPACE="$KEYSPACE" TABLE="$TABLE" python3 - <<'PYEOF'
+$ENGINE exec -i "$CONTAINER_NAME" env KEYSPACE="$KEYSPACE" TABLE="$TABLE" CL_IMAGE="$CASSANDRA_IMAGE" python3 - <<'PYEOF'
 import os, sys, time, json, traceback
 from cassandra.cluster import Cluster
 
@@ -180,7 +180,7 @@ try:
         (KEYSPACE, TABLE)):
         tid = str(row.id)
     gt = {
-        "cassandra_image": "cassandra:5.0.2",
+        "cassandra_image": os.environ["CL_IMAGE"],
         "keyspace": KEYSPACE,
         "table": TABLE,
         "table_id": tid,

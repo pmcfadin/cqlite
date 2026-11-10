@@ -7,13 +7,11 @@
 //! The audit reads it back and fails if the corpus was produced from a Cassandra
 //! version/ref/sha the manifest does not declare — catching a silent image bump.
 
-use std::collections::BTreeSet;
-
 use serde::Deserialize;
 
 use crate::model::Manifest;
 
-use super::{AuditFinding, FindingKind};
+use super::{refs, AuditFinding, CorpusInventory, FindingKind};
 
 /// The structured provenance of one regeneration run.
 #[derive(Debug, Clone, Deserialize)]
@@ -42,104 +40,200 @@ impl Provenance {
     }
 }
 
-/// Fail when the recorded provenance was produced from a Cassandra
-/// version/ref/sha the manifest does not declare.
+/// Fail when the recorded provenance was produced from a Cassandra release the
+/// manifest does not declare.
 ///
-/// - `cassandra_ref` MUST equal `cassandra_source.ref`.
-/// - `cassandra_git_sha` MUST be `cassandra_source.sha` or appear in some
-///   `evidence.cassandra_git_sha`.
-/// - `cassandra_version` MUST be the version implied by `cassandra_source.ref`
-///   (e.g. `cassandra-5.0.2` → `5.0.2`) or appear in some
-///   `evidence.cassandra_version`.
-/// - `docker_image` MUST carry a tag whose leading `MAJOR[.MINOR[.PATCH…]]`
-///   version is one of the manifest's declared versions. This field is the ONE
-///   provenance value sourced independently of the manifest in the lane (it is
-///   grepped from `regenerate-datasets.sh`'s `CASSANDRA_IMAGE=`, while
-///   version/ref/sha are parsed from the manifest itself), so it is the only
-///   field that can catch a silent image bump (e.g. `cassandra:5.0.2` → `5.0.3`)
-///   that was not mirrored into the manifest pin (issue #1026). A legitimately
-///   pinned variant image (`cassandra:5.0.2-jdk11`, `cassandra:5.0.2-jammy`)
-///   compares by its numeric lead `5.0.2`, so the build/variant tail never reds
-///   the lane. A tag with no numeric lead (e.g. `latest`, empty) is itself a
-///   mismatch: an unverifiable image cannot be trusted against the pin.
+/// The recorded `(cassandra_version, cassandra_ref, cassandra_git_sha)` is validated as
+/// ONE TUPLE (roborev job 174): it must equal the primary `cassandra_source` pin or one
+/// `cassandra_source.additional_pins` entry in every component. Checking the three as
+/// independent allowlists would accept a mixed record such as the 5.0.8 ref and version
+/// with the 5.0.2 sha. `docker_image` is held to the SAME tuple: its numeric tag lead
+/// (a `-jdk11` style variant tail is ignored) must equal the matched pin's version.
+/// That field is the ONE provenance value sourced independently of the manifest in the
+/// lane (the lane sources it from `test-data/scripts/lib/cassandra-image.sh`, while
+/// version/ref/sha are parsed from the manifest itself), so it is the only field that
+/// can catch a silent image bump (e.g. `cassandra:5.0.2` → `5.0.3`) not mirrored into
+/// the manifest pin (issue #1026). A tag with no numeric lead (`latest`, empty) cannot
+/// be verified and is itself a mismatch.
+///
+/// Scenario `evidence.cassandra_*` values no longer widen this check: the linter requires
+/// every scenario's version and sha to be one declared pin's (see `lint_versions.rs`),
+/// so the pins are the single source of declared releases.
 pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFinding> {
     let mut out = Vec::new();
-    let src = &manifest.cassandra_source;
+    let pins = manifest.cassandra_source.pins();
+    let finding = |subject: &str, detail: String| {
+        AuditFinding::new(FindingKind::ProvenanceMismatch, subject.to_string(), detail)
+    };
 
-    if prov.cassandra_ref != src.git_ref {
-        out.push(AuditFinding::new(
-            FindingKind::ProvenanceMismatch,
-            prov.cassandra_ref.clone(),
-            format!(
-                "recorded cassandra_ref does not match manifest cassandra_source.ref ({})",
-                src.git_ref
-            ),
-        ));
-    }
+    let img_version = version_from_image(&prov.docker_image);
 
-    let mut declared_shas: BTreeSet<&str> = BTreeSet::new();
-    declared_shas.insert(src.sha.as_str());
-    let mut declared_versions: BTreeSet<String> = BTreeSet::new();
-    if let Some(v) = version_from_ref(&src.git_ref) {
-        declared_versions.insert(v);
-    }
-    for s in &manifest.scenarios {
-        if let Some(sha) = &s.evidence.cassandra_git_sha {
-            declared_shas.insert(sha.as_str());
+    match pins.iter().find(|(_, r, _)| *r == prov.cassandra_ref) {
+        Some((pin_version, pin_ref, pin_sha)) => {
+            if prov.cassandra_version != *pin_version {
+                out.push(finding(
+                    &prov.cassandra_version,
+                    format!(
+                        "recorded cassandra_version does not match the version of the declared pin \
+                         {pin_ref} ({pin_version}); ref, sha and version must come from ONE pin"
+                    ),
+                ));
+            }
+            if prov.cassandra_git_sha != *pin_sha {
+                out.push(finding(
+                    &prov.cassandra_git_sha,
+                    format!(
+                        "recorded cassandra_git_sha does not match the sha of the declared pin \
+                         {pin_ref} ({pin_sha}); ref, sha and version must come from ONE pin"
+                    ),
+                ));
+            }
+            match &img_version {
+                Ok(v) if v == pin_version => {}
+                Ok(v) => out.push(finding(
+                    &prov.docker_image,
+                    format!(
+                        "docker_image tag version {v} is not the version of the declared pin \
+                         {pin_ref} ({pin_version}) (silent image bump not mirrored into the \
+                         manifest pin?)"
+                    ),
+                )),
+                Err(reason) => out.push(finding(
+                    &prov.docker_image,
+                    format!("docker_image cannot be validated against the manifest pin: {reason}"),
+                )),
+            }
         }
-        if let Some(v) = &s.evidence.cassandra_version {
-            declared_versions.insert(v.clone());
+        None => {
+            let declared: Vec<&str> = pins.iter().map(|(_, r, _)| *r).collect();
+            out.push(finding(
+                &prov.cassandra_ref,
+                format!(
+                    "recorded cassandra_ref is not a declared pin (cassandra_source.ref or \
+                     cassandra_source.additional_pins: {declared:?})"
+                ),
+            ));
+            // With no pin to bind to, still name each value that no pin declares.
+            if !pins.iter().any(|(v, _, _)| *v == prov.cassandra_version) {
+                out.push(finding(
+                    &prov.cassandra_version,
+                    "recorded cassandra_version is not declared by any pin".to_string(),
+                ));
+            }
+            if !pins.iter().any(|(_, _, s)| *s == prov.cassandra_git_sha) {
+                out.push(finding(
+                    &prov.cassandra_git_sha,
+                    "recorded cassandra_git_sha is not declared by any pin".to_string(),
+                ));
+            }
+            match &img_version {
+                Ok(v) if pins.iter().any(|(pv, _, _)| pv == v) => {}
+                Ok(v) => out.push(finding(
+                    &prov.docker_image,
+                    format!("docker_image tag version {v} is not declared by any pin"),
+                )),
+                Err(reason) => out.push(finding(
+                    &prov.docker_image,
+                    format!("docker_image cannot be validated against the manifest pin: {reason}"),
+                )),
+            }
         }
-    }
-
-    if !declared_shas.contains(prov.cassandra_git_sha.as_str()) {
-        out.push(AuditFinding::new(
-            FindingKind::ProvenanceMismatch,
-            prov.cassandra_git_sha.clone(),
-            "recorded cassandra_git_sha is not declared by cassandra_source.sha or any \
-             evidence.cassandra_git_sha"
-                .to_string(),
-        ));
-    }
-
-    if !declared_versions.contains(&prov.cassandra_version) {
-        out.push(AuditFinding::new(
-            FindingKind::ProvenanceMismatch,
-            prov.cassandra_version.clone(),
-            "recorded cassandra_version is not declared by cassandra_source.ref or any \
-             evidence.cassandra_version"
-                .to_string(),
-        ));
-    }
-
-    // The independently-sourced docker_image is the only field that can catch a
-    // silent image bump: version/ref/sha are all parsed from the manifest in the
-    // lane, so validating them against the manifest is tautological, whereas the
-    // image tag is grepped from regenerate-datasets.sh's CASSANDRA_IMAGE=.
-    match version_from_image(&prov.docker_image) {
-        Ok(img_version) if declared_versions.contains(&img_version) => {}
-        Ok(img_version) => out.push(AuditFinding::new(
-            FindingKind::ProvenanceMismatch,
-            prov.docker_image.clone(),
-            format!(
-                "docker_image tag version {img_version} is not declared by cassandra_source.ref \
-                 or any evidence.cassandra_version (silent image bump not mirrored into the \
-                 manifest pin?)"
-            ),
-        )),
-        Err(reason) => out.push(AuditFinding::new(
-            FindingKind::ProvenanceMismatch,
-            prov.docker_image.clone(),
-            format!("docker_image cannot be validated against the manifest pin: {reason}"),
-        )),
     }
 
     out
 }
 
-/// Derive a version (`5.0.2`) from a `cassandra-<version>` ref; `None` otherwise.
-fn version_from_ref(git_ref: &str) -> Option<String> {
-    git_ref.strip_prefix("cassandra-").map(str::to_string)
+/// Bind the matched pin to the scenarios the audited corpus covers (roborev jobs 178, 183).
+///
+/// [`check_provenance`] proves the recorded run came from ONE declared pin. That alone
+/// would let a 5.0.8-generated corpus pass while every scenario still claims 5.0.2 (or the
+/// reverse), so EVERY matched pin, primary included, is bound: the scenarios whose fixtures
+/// the corpus provides ([`refs::covering_scenarios`]) must ALL declare that pin's release in
+/// `evidence.cassandra_version` AND its commit in `evidence.cassandra_git_sha` (duplicate
+/// derived versions and shas are rejected by the linter, so the pair identifies one pin).
+///
+/// A covered scenario that declares NEITHER field predates per-fixture evidence and has
+/// always meant "the primary pin": it is treated as implicitly declaring the primary, so it
+/// binds to a primary-pin corpus and fails against an additional pin. A scenario declaring
+/// only one field matches no pin. If nothing is covered, or any scenario disagrees, the run
+/// is rejected naming those scenarios and what they declare. A corpus that covers NO scenario is
+/// rejected for every pin, the primary included: it binds nothing.
+pub fn check_pin_binding(
+    prov: &Provenance,
+    manifest: &Manifest,
+    inventory: &CorpusInventory,
+) -> Vec<AuditFinding> {
+    let pins = manifest.cassandra_source.pins();
+    let Some((pin_version, pin_ref, pin_sha)) =
+        pins.iter().find(|(_, r, _)| *r == prov.cassandra_ref)
+    else {
+        return Vec::new(); // not a declared pin: check_provenance already rejects it
+    };
+    let (primary_version, _, primary_sha) = &pins[0];
+
+    let covering = refs::covering_scenarios(manifest, inventory);
+    let disagree: Vec<String> = covering
+        .iter()
+        .filter_map(|s| {
+            let e = &s.evidence;
+            let version = e.cassandra_version.as_deref().map(str::trim);
+            let sha = e.cassandra_git_sha.as_deref().map(str::trim);
+            let (version, sha, implicit) = match (version, sha) {
+                (None, None) => (Some(primary_version.as_str()), Some(*primary_sha), true),
+                (v, sh) => (v, sh, false),
+            };
+            if version == Some(pin_version.as_str()) && sha == Some(*pin_sha) {
+                return None;
+            }
+            let short = |x: Option<&str>| {
+                x.map(|x| x.chars().take(12).collect::<String>())
+                    .unwrap_or_else(|| "no sha".to_string())
+            };
+            Some(format!(
+                "{} (declares {} @ {}{})",
+                s.id,
+                version.unwrap_or("no version"),
+                short(sha),
+                if implicit {
+                    ", absent evidence = primary"
+                } else {
+                    ""
+                }
+            ))
+        })
+        .collect();
+    let subject = |detail: String| {
+        AuditFinding::new(FindingKind::ProvenanceMismatch, pin_ref.to_string(), detail)
+    };
+    if covering.is_empty() {
+        // Symmetric for every pin (roborev job 185): a corpus that covers no manifest
+        // scenario binds nothing, so provenance recorded against it proves nothing.
+        return vec![subject(format!(
+            "the corpus was generated from pin {pin_ref} ({pin_version}), but it covers no \
+             manifest scenario's fixtures, so no scenario's evidence can be bound to that pin"
+        ))];
+    }
+    if disagree.is_empty() {
+        return Vec::new();
+    }
+    let shown = disagree
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if disagree.len() > 10 {
+        format!(" and {} more", disagree.len() - 10)
+    } else {
+        String::new()
+    };
+    vec![subject(format!(
+        "the corpus was generated from pin {pin_ref} ({pin_version}), but {} of the {} scenarios \
+         whose fixtures it covers do not declare evidence.cassandra_version {pin_version} AND \
+         evidence.cassandra_git_sha {pin_sha}: {shown}{more}",
+        disagree.len(),
+        covering.len()
+    ))]
 }
 
 /// Extract the semver version a Docker image reference points at, so it can be

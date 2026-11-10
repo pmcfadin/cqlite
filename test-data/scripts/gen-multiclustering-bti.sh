@@ -39,7 +39,8 @@
 # empty JSONL golden all exit non-zero rather than emitting a useless fixture.
 set -euo pipefail
 
-IMAGE="${IMAGE:-cassandra:5.0.2}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+IMAGE="${IMAGE:-$CQLITE_CASSANDRA_IMAGE}"
 CONTAINER="${CONTAINER:-cqlite-mcbti}"
 DOCKER="${DOCKER:-docker}"
 # Default to THIS checkout's test-data/datasets (script lives in test-data/scripts).

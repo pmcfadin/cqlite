@@ -50,6 +50,48 @@ pub struct CassandraSource {
     pub sha: String,
     pub index: String,
     pub assessment_report: String,
+    /// Further Cassandra releases that fixtures may legitimately be (re)generated
+    /// from, declared next to the primary `ref`/`sha` (#4482). Fixtures generated
+    /// with the primary release stay valid until they are regenerated; a
+    /// regeneration run against one of these releases passes the provenance audit
+    /// only because the release is declared HERE, so an undeclared image bump still
+    /// fails. Empty when only the primary release is in use.
+    #[serde(default)]
+    pub additional_pins: Vec<SourcePin>,
+}
+
+impl CassandraSource {
+    /// Every declared release as one coherent `(version, ref, sha)` tuple: the primary
+    /// `ref`/`sha` first, then each `additional_pins` entry (#4482). The version is the
+    /// ref minus its `cassandra-` prefix (a ref without the prefix is its own version).
+    /// Consumers validate against a WHOLE tuple, never against the ref, sha and version
+    /// as independent allowlists, so a mixed record (5.0.8 ref with the 5.0.2 sha) is
+    /// not accepted.
+    pub fn pins(&self) -> Vec<(String, &str, &str)> {
+        std::iter::once((self.git_ref.as_str(), self.sha.as_str()))
+            .chain(
+                self.additional_pins
+                    .iter()
+                    .map(|p| (p.git_ref.as_str(), p.sha.as_str())),
+            )
+            .map(|(r, sha)| {
+                (
+                    r.strip_prefix("cassandra-").unwrap_or(r).to_string(),
+                    r,
+                    sha,
+                )
+            })
+            .collect()
+    }
+}
+
+/// One additional declared Cassandra source release (see
+/// [`CassandraSource::additional_pins`]).
+#[derive(Debug, Deserialize)]
+pub struct SourcePin {
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    pub sha: String,
 }
 
 #[derive(Debug, Deserialize)]

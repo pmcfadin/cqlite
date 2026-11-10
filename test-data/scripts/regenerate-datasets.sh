@@ -38,7 +38,8 @@ OUT_DIR="${OUT_DIR:-$ROOT/datasets}"
 ROWS_PER_TABLE="${ROWS:-50}"
 DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="cqlite-regen"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 
 # ---------------------------------------------------------------------------
 # Parse CLI flags
@@ -774,12 +775,10 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 fi
 
 # Install cassandra-driver inside container (needed for row insertion)
-# python3-pip is not present in the cassandra:5.0.2 image; install it first.
-log "Installing python3-pip in container..."
-run $ENGINE exec "$CONTAINER_NAME" bash -c "apt-get update -qq && apt-get install -y -q python3-pip"
-
-log "Installing cassandra-driver in container..."
-run $ENGINE exec "$CONTAINER_NAME" pip3 install --quiet cassandra-driver
+# The cassandra image has no pip and its apt mirrors may be unreachable;
+# cqlite_install_cassandra_driver (lib/cassandra-image.sh) handles both and pins the driver.
+log "Installing pinned cassandra-driver ${CQLITE_CASSANDRA_DRIVER_VERSION} in container..."
+run cqlite_install_cassandra_driver "$ENGINE" "$CONTAINER_NAME"
 
 # Apply core schemas (nb keyspaces)
 for schema in basic-types.cql collections.cql time-series.cql wide-rows.cql; do

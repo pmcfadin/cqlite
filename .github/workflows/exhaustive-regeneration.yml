@@ -31,6 +31,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # This lane regenerates the corpus and audits it against COMMITTED-fixture evidence
+  # (scenario evidence.cassandra_version is 5.0.2) via the provenance check, so the
+  # generators and the recorded provenance must stay on the 5.0.2 release.
+  CQLITE_CASSANDRA_RELEASE: "5.0.2"  # 5.0.2 until #4482 fixture-regeneration stage moves fixtures+evidence together
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   MANIFEST: test-data/cassandra-parity-manifest.yml
   ARTIFACT_DIR: ${{ github.workspace }}/exhaustive-regeneration-report
@@ -244,7 +248,8 @@ jobs:
 
       # Build the provenance record. version/ref/sha come from the manifest's
       # `cassandra_source` block, but `docker_image` MUST be the ACTUAL image used
-      # by regenerate-datasets.sh (grepped from its `CASSANDRA_IMAGE=`), sourced
+      # by regenerate-datasets.sh (its `CASSANDRA_IMAGE=` is `$CQLITE_CASSANDRA_IMAGE`
+      # from test-data/scripts/lib/cassandra-image.sh, which this step sources), sourced
       # INDEPENDENTLY of the manifest. That independence is what gives the audit
       # teeth: validating the manifest-derived version/ref/sha against the manifest
       # is tautological, so `check_provenance` parses the version out of
@@ -253,37 +258,45 @@ jobs:
       - name: Write provenance record
         run: |
           set -euo pipefail
-          IMAGE=$(grep -E '^CASSANDRA_IMAGE=' test-data/scripts/regenerate-datasets.sh \
-            | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          # Source the shared pin the generators use (#4482) instead of grepping a
+          # literal out of regenerate-datasets.sh, which no longer carries one.
+          IMAGE=$(. test-data/scripts/lib/cassandra-image.sh && printf '%s' "$CQLITE_CASSANDRA_IMAGE")
+          # Fail closed if regenerate-datasets.sh stopped taking its image from the pin.
+          grep -qE '^CASSANDRA_IMAGE="\$CQLITE_CASSANDRA_IMAGE"$' test-data/scripts/regenerate-datasets.sh
           # Parse the manifest's top-level `cassandra_source` block specifically
           # (YAML-aware, indentation-scoped) so we record the intended
           # cassandra_source.ref/.sha — never a scenario `evidence.cassandra_git_sha`
           # or any other `sha:` line that happens to precede it (issue #1026).
           # The ref drives the recorded version (cassandra-X.Y.Z -> X.Y.Z); the
           # audit then fails on any version/ref/sha the manifest does not declare.
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --user --break-system-packages 'pyyaml==6.0.2'
           python3 - "$MANIFEST" "$IMAGE" "${{ steps.package.outputs.asset_sha }}" \
             > "$ARTIFACT_DIR/provenance.json" <<'PY'
           import json, re, sys
           manifest, image, asset_sha = sys.argv[1:4]
-          ref = sha = ""
-          in_src = False
+          # Read the manifest STRUCTURALLY (PyYAML, preinstalled on the ubuntu-24.04
+          # runners) so each pin is a mapping whose `ref` and `sha` belong together
+          # regardless of key order or layout (roborev job 175): the primary pin is
+          # `cassandra_source.{ref,sha}`, the others are the `additional_pins` mappings
+          # (#4482). The pin whose release matches the image is recorded; if none does,
+          # the primary pin is recorded and the audit reds the image-vs-pin divergence
+          # (silent image bump).
+          import yaml
           with open(manifest) as f:
-              for line in f:
-                  if re.match(r'^cassandra_source:\s*$', line):
-                      in_src = True
-                      continue
-                  if in_src:
-                      if re.match(r'^\S', line):  # next top-level key ends the block
-                          break
-                      m = re.match(r'^\s+(ref|sha):\s*(.+?)\s*$', line)
-                      if m:
-                          val = m.group(2).strip().strip('"').strip("'")
-                          if m.group(1) == 'ref':
-                              ref = val
-                          else:
-                              sha = val
-          if not ref or not sha:
+              src = (yaml.safe_load(f) or {}).get("cassandra_source") or {}
+          pins = []
+          if src.get("ref") and src.get("sha"):
+              pins.append({"ref": str(src["ref"]), "sha": str(src["sha"])})
+          for pin in src.get("additional_pins") or []:
+              if isinstance(pin, dict) and pin.get("ref") and pin.get("sha"):
+                  pins.append({"ref": str(pin["ref"]), "sha": str(pin["sha"])})
+          if not pins:
               sys.exit("cassandra_source.ref/.sha not found in manifest")
+          m_img = re.search(r':(\d+(?:\.\d+)*)', image.rsplit('/', 1)[-1])
+          want = m_img.group(1) if m_img else None
+          chosen = next((p for p in pins if p["ref"] == "cassandra-" + (want or "")), pins[0])
+          ref, sha = chosen["ref"], chosen["sha"]
           version = ref[len("cassandra-"):] if ref.startswith("cassandra-") else ref
           rec = {
               "cassandra_version": version,

@@ -4,7 +4,7 @@
 # the compaction-parity harness can compile against its test-tree classes
 # (CQLTester, CompactionTask, JsonTransformer) which are NOT published to Maven.
 #
-# The version is pinned to the SAME release as the cassandra:5.0.2 Docker image
+# The version is pinned to the SAME release as the cassandra:5.0.8 Docker image (test-data/scripts/lib/cassandra-image.sh)
 # used to generate test data (single source of truth, issue #669). Build it once;
 # subsequent runs are a no-op unless --force is passed.
 #
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-CASSANDRA_REF="${CASSANDRA_REF:-cassandra-5.0.2}"
+CASSANDRA_REF="${CASSANDRA_REF:-cassandra-5.0.8}"
 CACHE_ROOT="${CQLITE_CASSANDRA_CACHE:-$HOME/.cache/cqlite/cassandra-src}"
 SRC_DIR="$CACHE_ROOT/$CASSANDRA_REF"
 MARKER="$SRC_DIR/.cqlite-build-complete"

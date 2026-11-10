@@ -9,7 +9,7 @@ name: "CI: Parity Regen Matrix (Nightly Docker, Epic #2636)"
 #   - tombstone-ttl-parity.yml          (epic #972)
 #
 # Each leg is a `strategy.matrix` entry that preserves its predecessor's EXACT
-# coverage: the same Cassandra 5.0.2 fixture regeneration, the same strict
+# coverage: the same Cassandra fixture regeneration (release selected by CQLITE_CASSANDRA_RELEASE, test-data/scripts/lib/cassandra-image.sh), the same strict
 # fixture-present enforcement, the same `--test` set run fail-closed
 # (CQLITE_REQUIRE_FIXTURES=1 → panic-instead-of-skip), the same extra proofs,
 # and the same structured failure artifact.
@@ -103,7 +103,10 @@ on:
       - 'test-data/datasets/sstables/test_compaction_tombstone_ttl/**'
 
 env:
-  CASSANDRA_IMAGE: cassandra:5.0.2
+  # Regenerated fixtures are compared with COMMITTED evidence here (the corruption verdicts
+  # were captured on 5.0.2; scenario evidence is 5.0.2), so the generators stay on 5.0.2.
+  CQLITE_CASSANDRA_RELEASE: "5.0.2"  # 5.0.2 until #4482 fixture-regeneration stage moves fixtures+evidence together
+  CASSANDRA_IMAGE: cassandra:5.0.2  # informational: the generators take the pin from test-data/scripts/lib/cassandra-image.sh
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 
 permissions:

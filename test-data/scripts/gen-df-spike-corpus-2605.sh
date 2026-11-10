@@ -97,7 +97,8 @@
 #   bash test-data/scripts/gen-df-spike-corpus-2605.sh --validate-only  # run nothing
 set -euo pipefail
 
-IMAGE="${IMAGE:-cassandra:5.0.2}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+IMAGE="${IMAGE:-$CQLITE_CASSANDRA_IMAGE}"
 CONTAINER="${CONTAINER:-cqlite-df2605}"
 # `${VAR-default}`, not `${VAR:-default}`: an EXPLICITLY EMPTY CORPUS_ROOT
 # (typically a caller's unset variable) must fail validation, never silently

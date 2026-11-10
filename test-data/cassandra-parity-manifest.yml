@@ -39,6 +39,13 @@ cassandra_source:
   sha: f278f6774fc76465c182041e081982105c3e7dbb
   index: docs/cassandra_test_index.md
   assessment_report: docs/reports/cassandra-test-parity-assessment.md
+  # Further releases fixtures may be (re)generated from (#4482). Fixtures generated with
+  # the primary ref above stay valid until regenerated; each scenario's own
+  # `evidence.cassandra_version` declares which release produced it, and the linter and
+  # the corpus-audit provenance check accept only releases declared here.
+  additional_pins:
+    - ref: cassandra-5.0.8
+      sha: 172227094626d50d4bc9a3d9de2e3659a7844386
 
 program:
   parent_epic: 966

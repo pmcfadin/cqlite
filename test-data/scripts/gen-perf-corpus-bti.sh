@@ -80,7 +80,8 @@ ROWS_PY="$SCRIPT_DIR/gen-perf-corpus-bti-rows.py"
 MANIFEST_PY="$SCRIPT_DIR/write-perf-corpus-bti-manifest.py"
 
 # --------------------------------------------------------------- defaults ----
-IMAGE="${IMAGE:-cassandra:5.0.2}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cassandra-image.sh"
+IMAGE="${IMAGE:-$CQLITE_CASSANDRA_IMAGE}"
 CONTAINER="${CONTAINER:-cqlite-perf-bti-3234}"
 # docker needs sudo on the agent fleet machines; override with DOCKER=docker.
 DOCKER="${DOCKER:-sudo -n docker}"
