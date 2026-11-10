@@ -81,9 +81,9 @@
 //! parse by a DIFFERENT route than BIG's `sequential_scan` (issue #3782) — a
 //! property proven on `nb` alone says nothing about `da`. BTI has no
 //! `Index.db`, so that leg derives the needle's identity from the committed
-//! `*-Data.db.jsonl` `sstabledump` golden's own per-partition `position`
-//! instead; see the section header above that test for why that is the
-//! equivalent authoritative record and not a substitute oracle.
+//! `Partitions.db`/`Rows.db` trie entries (Ch.17), read through CQLite's
+//! public BTI lookup, instead; the `sstabledump` golden contributes only the
+//! partition KEYS and a related-not-equal `position` check (issue #4501).
 
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
@@ -96,6 +96,8 @@ use tempfile::TempDir;
 mod datasets_root;
 #[path = "support/corrupt_byte_fixture.rs"]
 mod fixture;
+#[path = "support/partition_start.rs"]
+mod partition_start;
 
 use fixture::{FixtureSpec, BIG_COMPOSITE, BTI_MULTICLUSTERING, FIX_KS, FIX_TABLE};
 
@@ -330,29 +332,32 @@ async fn corrupt_row_loses_the_needle_partition_whole_never_a_prefix() {
 // through `sequential_scan`/`parse_block` (issue #3782). A partition-atomicity
 // property proven only on `nb` says nothing about `da`.
 //
-// # Why the needle's identity comes from the sstabledump GOLDEN here
+// # Why the needle's identity comes from Partitions.db/Rows.db here (issue #4501)
 //
 // The BIG leg derives it from `Index.db`'s own recorded positions. BTI has NO
-// `Index.db` — its partition index is the `Partitions.db` trie, which this
-// harness deliberately does not re-implement. The equivalent AUTHORITATIVE
-// Cassandra-written record is the committed `da-2-bti-Data.db.jsonl`
-// `sstabledump` golden: every `partition` object carries the `position` (the
-// UNCOMPRESSED data-file offset) Cassandra itself reported for that partition.
-// So the derivation stays Cassandra-written bytes (#3041/#3042) — never a scan
-// for a byte pattern (#28) and never CQLite's own output.
+// `Index.db`; its partition index is the `Partitions.db` trie, whose payload is the
+// partition's `Data.db` start (narrow) or a `Rows.db` `TrieIndexEntry` whose first
+// field is that start (wide). That on-disk metadata is the authority. The committed
+// `sstabledump` golden's `partition.position` is NOT the start (5.0.2: the start;
+// 5.0.8: the pointer after the 7-byte live header), so it supplies the partition KEYS
+// and is only RELATED to the start, never used as it. The derivation stays
+// Cassandra-written bytes (#3041/#3042) - never a scan for a byte pattern (#28) and
+// never CQLite's own output.
 //
 // The fixture is FULLY git-tracked (9 components incl. `Data.db`,
 // `Partitions.db`, `Rows.db` and the golden), so this leg fails CLOSED
 // unconditionally — unlike the BIG leg beside it, whose fixture is fetched.
 // ---------------------------------------------------------------------------
 
-/// Every `(partition key as declared `int` pk, UNCOMPRESSED data-section
-/// position)` pair the committed `sstabledump` golden records, in file order.
+/// Every `(partition key as declared `int` pk, UNCOMPRESSED data-section START)`
+/// pair, in golden file order: keys from the committed `sstabledump` golden, starts from
+/// the fixture's `Partitions.db`/`Rows.db` (the golden's `position` is only checked to
+/// stand in the documented relation to the start).
 ///
 /// Strict by construction: a golden whose shape drifts (a non-`int`-shaped key,
 /// a missing `position`, a non-ascending position list, zero partitions) FAILS
 /// by name rather than yielding a plausible-but-wrong needle.
-fn golden_partition_positions(fixture_dir: &std::path::Path) -> Vec<(i32, usize)> {
+fn indexed_partition_starts(fixture_dir: &std::path::Path) -> Vec<(i32, usize)> {
     let golden = {
         let mut found: Option<PathBuf> = None;
         for e in std::fs::read_dir(fixture_dir)
@@ -397,7 +402,7 @@ fn golden_partition_positions(fixture_dir: &std::path::Path) -> Vec<(i32, usize)
             .unwrap_or_else(|| panic!("{golden:?}: sstabledump renders an `int` pk as a string"))
             .parse()
             .unwrap_or_else(|e| panic!("{golden:?}: pk is not an i32: {e}"));
-        let position = partition
+        let golden_position = partition
             .get("position")
             .and_then(|p| p.as_u64())
             .unwrap_or_else(|| {
@@ -405,7 +410,30 @@ fn golden_partition_positions(fixture_dir: &std::path::Path) -> Vec<(i32, usize)
                     "{golden:?}: partition {pk} has no `position` — the needle's identity is \
                         derived from it, so its absence must fail loudly"
                 )
-            }) as usize;
+            });
+        let read = |name: &str| {
+            let p = std::fs::read_dir(fixture_dir)
+                .expect("read fixture dir")
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with(&format!("-{name}.db")))
+                .unwrap_or_else(|| panic!("{fixture_dir:?}: no *-{name}.db"));
+            std::fs::read(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}"))
+        };
+        let start = partition_start::bti_partition_start(
+            &read("Partitions"),
+            &read("Rows"),
+            &pk.to_be_bytes(),
+        );
+        partition_start::dump_position_convention(
+            &format!("{golden:?} pk={pk}"),
+            &[(
+                start,
+                partition_start::header_len_modern_live(4),
+                golden_position,
+            )],
+        );
+        let position = start as usize;
         if let Some((prev_pk, prev)) = out.last() {
             assert!(
                 position > *prev,
@@ -455,7 +483,7 @@ async fn corrupt_row_in_a_bti_partition_loses_it_whole_never_a_prefix() {
     let (ks, table) = (BTI_MULTICLUSTERING.keyspace, BTI_MULTICLUSTERING.table);
 
     // Cassandra's OWN recorded partition positions, before anything is staged.
-    let golden_positions = golden_partition_positions(&fixture_dir);
+    let golden_positions = indexed_partition_starts(&fixture_dir);
 
     let staged = fixture::stage_spec(&BTI_MULTICLUSTERING, &fixture_dir, "salvage-atomicity-bti");
 
