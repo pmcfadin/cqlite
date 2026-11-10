@@ -49,5 +49,14 @@
       "name": "eve",
       "age": 29
     }
-  ]
+  ],
+  "segment": {
+    "id": 1794289002839,
+    "version": 7,
+    "files": {
+      "clean": "clean-CommitLog-7-1794289002839.log",
+      "truncated": "truncated-CommitLog-7-1794289002839.log",
+      "corrupt_crc": "corrupt-crc-CommitLog-7-1794289002839.log"
+    }
+  }
 }

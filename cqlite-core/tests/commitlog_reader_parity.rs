@@ -38,6 +38,24 @@ fn commitlog_dir() -> PathBuf {
 struct GroundTruth {
     table_id: String,
     inserts: Vec<InsertRow>,
+    segment: SegmentRecord,
+}
+
+/// Which segment the three fixtures are, recorded by the generator: consumers select
+/// the files BY NAME from here, never by prefix glob, so a stale extra file under the
+/// directory can never be picked up.
+#[derive(serde::Deserialize)]
+struct SegmentRecord {
+    id: i64,
+    version: i32,
+    files: SegmentFiles,
+}
+
+#[derive(serde::Deserialize)]
+struct SegmentFiles {
+    clean: String,
+    truncated: String,
+    corrupt_crc: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -67,26 +85,20 @@ fn users_schema() -> CommitLogSchema {
     }
 }
 
-fn find_fixture(dir: &Path, prefix: &str) -> PathBuf {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("read commitlog dir {}: {e}", dir.display()));
-    let matches = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            (name.starts_with(prefix) && name.ends_with(".log")).then(|| entry.path())
-        })
-        .collect::<Vec<_>>();
+/// The fixture file the ground truth names, checked to be the recorded segment: it must
+/// exist and its descriptor (`i32 version`, `i64 segment id`, big-endian) must match.
+fn recorded_fixture(dir: &Path, gt: &GroundTruth, file_name: &str) -> PathBuf {
+    let path = dir.join(file_name);
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("ground truth names {file_name}, unreadable: {e}"));
+    let version = i32::from_be_bytes(bytes[0..4].try_into().expect("descriptor version"));
+    let id = i64::from_be_bytes(bytes[4..12].try_into().expect("descriptor segment id"));
     assert_eq!(
-        matches.len(),
-        1,
-        "expected exactly one fixture starting with {prefix:?} under {}; found {matches:?}",
-        dir.display()
+        (version, id),
+        (gt.segment.version, gt.segment.id),
+        "{file_name} is not the segment the ground truth records"
     );
-    matches
-        .into_iter()
-        .next()
-        .expect("one matching fixture was asserted above")
+    path
 }
 
 /// Requirement: mutation stream decoding matches ground truth.
@@ -99,7 +111,7 @@ fn decoded_mutations_match_inserted_set() {
     let mut schemas: SchemaSet = HashMap::new();
     schemas.insert(table_id, users_schema());
 
-    let clean = find_fixture(&dir, "clean-");
+    let clean = recorded_fixture(&dir, &gt, &gt.segment.files.clean);
     let reader = CommitLogReader::open_with_schemas(&clean, schemas).expect("open clean segment");
 
     // Requirement: valid Cassandra 5.0 segment header parses successfully.
@@ -203,7 +215,7 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
     let ground_truth_ids = gt.inserts.iter().map(|row| row.id).collect::<BTreeSet<_>>();
     assert_eq!(ground_truth_ids, BTreeSet::from([1, 2, 3, 4, 5]));
 
-    let torn = find_fixture(&dir, "truncated-");
+    let torn = recorded_fixture(&dir, &gt, &gt.segment.files.truncated);
     let reader = CommitLogReader::open(&torn).expect("open truncated segment");
 
     // The real truncated fixture ends after exactly the first four target-table
@@ -251,7 +263,8 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
 #[test]
 fn corrupt_crc_segment_returns_typed_error_without_panic() {
     let dir = commitlog_dir();
-    let corrupt = find_fixture(&dir, "corrupt-crc-");
+    let gt = load_ground_truth(&dir);
+    let corrupt = recorded_fixture(&dir, &gt, &gt.segment.files.corrupt_crc);
     let reader = CommitLogReader::open(&corrupt).expect("descriptor still parses");
 
     let mut saw_error = false;
@@ -265,4 +278,35 @@ fn corrupt_crc_segment_returns_typed_error_without_panic() {
         saw_error,
         "a flipped payload byte must surface as a typed CRC error"
     );
+}
+
+/// Selection is by the names the ground truth records: a stale extra segment that a
+/// prefix glob would also match (or match first) is ignored, and a file that is not the
+/// recorded segment is refused.
+#[test]
+fn fixtures_are_selected_by_recorded_name_not_by_prefix() {
+    let dir = commitlog_dir();
+    let gt = load_ground_truth(&dir);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for name in [
+        &gt.segment.files.clean,
+        &gt.segment.files.truncated,
+        &gt.segment.files.corrupt_crc,
+    ] {
+        std::fs::copy(dir.join(name), tmp.path().join(name)).expect("copy fixture");
+    }
+    // A decoy from an older generation: same prefix, different (still valid) segment.
+    let decoy = format!("clean-CommitLog-{}-1.log", gt.segment.version);
+    let mut bytes = std::fs::read(dir.join(&gt.segment.files.clean)).expect("read clean");
+    bytes[4..12].copy_from_slice(&1i64.to_be_bytes());
+    std::fs::write(tmp.path().join(&decoy), &bytes).expect("write decoy");
+
+    let picked = recorded_fixture(tmp.path(), &gt, &gt.segment.files.clean);
+    assert_eq!(
+        picked.file_name().and_then(|n| n.to_str()),
+        Some(gt.segment.files.clean.as_str())
+    );
+    // Asking for the decoy by name is refused: its descriptor is not the recorded segment.
+    let refused = std::panic::catch_unwind(|| recorded_fixture(tmp.path(), &gt, &decoy));
+    assert!(refused.is_err(), "a non-recorded segment must be refused");
 }
