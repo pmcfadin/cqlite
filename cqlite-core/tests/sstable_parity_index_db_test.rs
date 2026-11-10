@@ -45,6 +45,8 @@ use cqlite_core::Config;
 
 #[path = "parity_support/mod.rs"]
 mod parity_support;
+#[path = "support/partition_start.rs"]
+mod partition_start;
 use parity_support::{
     byte_diff, offset_delta_diff, parity_datasets_required, scenario, write_summary, LaneStatus,
     ParityFailure,
@@ -911,10 +913,11 @@ async fn truncated_big_index_db_is_not_silently_full_or_empty() {
 // CONCLUSION: cqlite's RowIndexEntry decode, the raw Index.db bytes, sstabledump,
 // and the actual decompressed on-disk partition headers ALL agree — the true
 // uncompressed start offset of partition key=2 is exactly 598601. There is NO
-// off-by-3, and NO sstabledump artifact: `Index.db.RowIndexEntry.position` and
-// `sstabledump.position` are by definition the same quantity (the partition's
-// uncompressed Data.db start; Cassandra 5.0 `org.apache.cassandra.io.sstable.format.big.RowIndexEntry`,
-// guide Ch.6 "Index.db" + Appendix B VInt). So the generic section-3c assertion
+// off-by-3. `Index.db.RowIndexEntry.position` is the partition's uncompressed Data.db
+// start (Cassandra 5.0 `org.apache.cassandra.io.sstable.format.big.RowIndexEntry`, guide
+// Ch.6 "Index.db" + Appendix B VInt). sstabledump's `position` is the same quantity in
+// the 5.0.2 goldens and the scanner pointer after the partition header in 5.0.8 ones
+// (#4501); the test relates the two explicitly instead of equating them. So the generic section-3c assertion
 // (`big_index_db_entry_byte_and_field_parity`) MUST stay unrestricted for
 // promoted-index partitions — adding a `promoted_total == 0` exclusion would
 // have hidden a real correctness check. This test pins that conclusion: if a
@@ -994,10 +997,20 @@ async fn issue_1309_wide_partition_following_offset_is_not_off_by_three() {
         "wide_partition fixture must exercise promoted-index entries"
     );
 
-    // sstabledump JSONL `position` must equal those same offsets.
+    // sstabledump's JSONL `position` is NOT a partition start: it is the start (<= 5.0.2
+    // goldens) or the scanner pointer after the 18-byte int-key header (5.0.8 goldens).
+    // Relate it to the Index.db-derived offsets explicitly, per partition, with one
+    // convention for the whole file (issue #4501).
     let parts = parse_jsonl(&jsonl_path).expect("parse JSONL");
     assert_eq!(parts.len(), 3);
-    assert_eq!(parts[1].position, KEY2_OFF, "sstabledump position(key=2)");
+    let related: Vec<(u64, usize, u64)> = [KEY1_OFF, KEY2_OFF, KEY3_OFF]
+        .iter()
+        .zip(parts.iter())
+        .map(|(start, p)| (*start, 4usize, p.position))
+        .collect();
+    let convention =
+        partition_start::dump_position_convention("wide_partition JSONL position", &related);
+    eprintln!("wide_partition golden uses the {convention:?} convention");
 
     // --- (2) Independently confirm the TRUE uncompressed offset of key=2 by
     //         decompressing the LZ4-compressed Data.db and reading the partition

@@ -94,3 +94,46 @@ pub fn big_partition_start_checked(index_db: &Path, data: &[u8], raw_key: &[u8])
 pub fn dump_position_header_len(key_len: usize) -> u64 {
     (2 + key_len + 4 + 8) as u64
 }
+
+/// What a golden's `partition.position` means, per generator release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpPositionConvention {
+    /// The partition's start offset (the committed 5.0.2 goldens).
+    PartitionStart,
+    /// The scanner pointer after the partition header (`start + 2 + key_len + 12`,
+    /// Cassandra >= 5.0.5: `JsonTransformer` reads `SSTableSimpleScanner.getCurrentPosition()`
+    /// = `dfile.getFilePointer()` once the partition header has been consumed).
+    AfterHeader,
+}
+
+/// Classify a whole golden: for every `(index_start, key_len, dump_position)` the dump
+/// position must be EXACTLY the start or EXACTLY start + header, and one convention
+/// must hold for every partition of the file. Any other value (or a mix) panics, so a
+/// drifted golden can never pass by accident.
+pub fn dump_position_convention(
+    what: &str,
+    partitions: &[(u64, usize, u64)],
+) -> DumpPositionConvention {
+    assert!(!partitions.is_empty(), "{what}: no partitions to classify");
+    let mut seen: Option<DumpPositionConvention> = None;
+    for &(start, key_len, dump) in partitions {
+        let this = if dump == start {
+            DumpPositionConvention::PartitionStart
+        } else if dump == start + dump_position_header_len(key_len) {
+            DumpPositionConvention::AfterHeader
+        } else {
+            panic!(
+                "{what}: dump position {dump} is neither the index-derived start {start} nor \
+                 start + header ({})",
+                start + dump_position_header_len(key_len)
+            );
+        };
+        // key_len 0 cannot disambiguate (header-only partition has len>=14), so no
+        // ambiguity exists between the two cases.
+        match seen {
+            None => seen = Some(this),
+            Some(prev) => assert_eq!(prev, this, "{what}: mixed dump-position conventions"),
+        }
+    }
+    seen.expect("non-empty")
+}
