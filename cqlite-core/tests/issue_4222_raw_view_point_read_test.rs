@@ -54,6 +54,8 @@
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
+#[path = "support/partition_start.rs"]
+mod partition_start;
 
 use chrono::DateTime;
 use cqlite_core::query::result::QueryRow;
@@ -220,12 +222,31 @@ fn golden_str<'a>(node: &'a Json, field: &str) -> &'a str {
         .unwrap_or_else(|| panic!("golden node must carry a string '{field}': {node}"))
 }
 
-/// The byte offset sstabledump reports for this partition — the oracle for
-/// the raw view's `position` column.
+/// The byte offset sstabledump reports for this partition. NOT a partition start
+/// (5.0.2 goldens: the start; 5.0.8 goldens: the scanner pointer after the header), so
+/// it is only ever RELATED to the index-derived start (`indexed_partition_start`),
+/// never used as the oracle for the raw view's `position` column (issue #4501).
 fn golden_position(partition: &Json) -> i64 {
     partition["partition"]["position"]
         .as_i64()
         .unwrap_or_else(|| panic!("golden partition must carry a byte position: {partition}"))
+}
+
+/// The authoritative Data.db START offset of int-keyed partition `pk` in generation
+/// `generation` of the fixture, read from that generation's own `Index.db` (BIG `nb`,
+/// definitive guide Ch.6) and then PROVEN against the raw, independently decoded
+/// `Data.db` (u16 key length, the key, a well-formed 12-byte deletion time at that
+/// offset) so a resolver that is off by the header cannot validate itself (issue #4501).
+fn indexed_partition_start(table: &str, generation: u32, pk: i32) -> i64 {
+    let root = sstables_root_for_table(KEYSPACE, table).expect("fixture root");
+    let dirs = datasets_root::table_generation_dirs(&root, KEYSPACE, table);
+    let dir = dirs.first().expect("fixture generation directory");
+    partition_start::big_partition_start_verified(
+        &dir.join(format!("nb-{generation}-big-Index.db")),
+        &dir.join(format!("nb-{generation}-big-Data.db")),
+        &pk.to_be_bytes(),
+        partition_start::HeaderForm::Nb,
+    ) as i64
 }
 
 /// Parse an sstabledump JSONL RFC3339 timestamp into epoch MICROSECONDS —
@@ -931,8 +952,28 @@ async fn point_read_reports_each_generations_own_partition_byte_offset() {
         return;
     };
     let (gen1_golden, gen2_golden) = fixture_goldens(TABLE).expect("the fixture just opened");
-    let gen1_position = golden_position(golden_partition(&gen1_golden, 2));
-    let gen2_position = golden_position(golden_partition(&gen2_golden, 2));
+    let gen1_position = indexed_partition_start(TABLE, 1, 2);
+    let gen2_position = indexed_partition_start(TABLE, 2, 2);
+    // sstabledump's own `position` must stand in the documented relation to the verified
+    // starts (equal, or start + header under 5.0.8): EVERY partition of each generation's
+    // golden, ONE call per generation, so a single convention holds per file.
+    for (generation, golden) in [(1u32, &gen1_golden), (2u32, &gen2_golden)] {
+        let related: Vec<(u64, u64, u64)> = golden
+            .iter()
+            .map(|p| {
+                let pk: i32 = p["partition"]["key"][0]
+                    .as_str()
+                    .and_then(|k| k.parse().ok())
+                    .unwrap_or_else(|| panic!("golden pk must be an int string: {p}"));
+                (
+                    indexed_partition_start(TABLE, generation, pk) as u64,
+                    partition_start::header_len_nb(4),
+                    golden_position(p) as u64,
+                )
+            })
+            .collect();
+        partition_start::dump_position_convention(&format!("{TABLE} gen-{generation}"), &related);
+    }
     // Without this the two per-generation assertions below could both be
     // satisfied by one shared value.
     assert_ne!(
@@ -969,7 +1010,7 @@ async fn point_read_reports_each_generations_own_partition_byte_offset() {
             bigint_of(row, "position"),
             Some(expected),
             "gen-{generation}'s rows must report THAT generation's own partition byte \
-             offset, matching sstabledump's reported offset byte-exact"
+             offset, matching the Index.db-derived partition start byte-exact"
         );
     }
 

@@ -185,6 +185,9 @@ pub fn fail_vint(loc: Loc, expected: u64, what: &str) {
 // FAIL-CLOSED / SKIP-ON-ABSENCE fixture access
 // ===========================================================================
 
+#[path = "../support/partition_start.rs"]
+pub mod partition_start;
+
 /// Resolve the datasets root (env first, else the in-repo path).
 pub fn datasets_root() -> PathBuf {
     if let Ok(r) = std::env::var("CQLITE_DATASETS_ROOT") {
@@ -467,7 +470,7 @@ pub mod minima {
 // ===========================================================================
 // JSONL golden field extractors shared across the issue #992 sibling test
 // files (string-scan; no JSON crate, mirroring #991). The TTL/tombstone and
-// range/boundary suites both locate a partition by its golden `position`, so
+// range/boundary suites both locate a partition by its Index.db start (#4501), so
 // these live in the shared module; suite-specific extractors stay with their
 // tests.
 // ===========================================================================
@@ -480,14 +483,12 @@ pub fn extract_after(line: &str, marker: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// `"position":<N>` of a `partition` object (the FIRST one in the line).
-pub fn golden_partition_position(line: &str) -> usize {
-    let p = line
-        .find("\"partition\":")
-        .unwrap_or_else(|| panic!("no partition object: {line}"));
-    let rest = &line[p..];
-    extract_after(rest, "\"position\":")
-        .unwrap_or_else(|| panic!("no partition position: {line}"))
-        .parse()
-        .expect("partition position int")
+/// Data.db START offset of the int-keyed partition `pk` in fixture `dir`, taken from the
+/// fixture's own `Index.db` and cross-checked against the decompressed `raw` bytes
+/// (issue #4501). NOT the golden's `partition.position`: `sstabledump` 5.0.8 reports the
+/// scanner pointer AFTER the partition header there, 5.0.2 reported the start, so the
+/// golden cannot say where a partition begins.
+pub fn indexed_partition_start(dir: &str, raw: &[u8], pk: i32) -> usize {
+    let index_db = datasets_root().join(format!("{dir}/nb-1-big-Index.db"));
+    partition_start::big_partition_start_checked(&index_db, raw, &int_key_bytes(pk))
 }

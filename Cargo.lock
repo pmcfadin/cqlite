@@ -1262,6 +1262,7 @@ dependencies = [
  "insta",
  "libc",
  "log",
+ "lz4_flex 0.11.6",
  "mockall",
  "num-bigint 0.4.8",
  "once_cell",

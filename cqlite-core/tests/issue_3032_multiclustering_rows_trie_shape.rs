@@ -54,6 +54,9 @@ use cqlite_core::storage::sstable::bti::{
     rows_strict_ceiling_block_for_test, BtiNodeData, BtiNodeType, BtiPartitionLocation,
     RowsTrieRootRejectReason,
 };
+#[path = "support/partition_start.rs"]
+mod partition_start;
+
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -91,7 +94,8 @@ const SHORT_LENGTH_PREFIX_LEN: usize = 2;
 /// Within-partition byte offset of the FIRST row body in every partition of this
 /// fixture: the `u16` key length (2) + the 4-byte `int` partition key + the 1-byte
 /// LIVE `DeletionTime` sentinel. Independently cross-checked below against the
-/// committed sstabledump golden (`row.position - partition.position`).
+/// committed sstabledump golden (`row.position - <Rows.db data_position>`; row positions are
+/// absolute in every `sstabledump` release, unlike `partition.position`, issue #4501).
 const BLOCK_0_OFFSET: u64 = 7;
 
 /// Human name of a `TrieNode` ordinal (pinned `TrieNode.java` `Types.values`), for
@@ -286,7 +290,7 @@ fn decode_entry_independently(rdb: &[u8], rows_offset: usize) -> EntryFields {
     }
 }
 
-/// `(partition_absolute_position, sorted within-partition row offsets)` per pk, read
+/// `(golden partition.position, sorted ABSOLUTE row positions)` per pk, read
 /// off the committed `sstabledump` golden — an oracle INDEPENDENT of every CQLite
 /// decoder. `None` SKIPs (hard FAIL under `CQLITE_REQUIRE_FIXTURES=1`).
 fn golden_row_offsets() -> Option<Vec<(i32, u64, BTreeSet<u64>)>> {
@@ -327,7 +331,6 @@ fn golden_row_offsets() -> Option<Vec<(i32, u64, BTreeSet<u64>)>> {
                 r.get("position")
                     .and_then(|p| p.as_u64())
                     .expect("golden row position")
-                    - part_pos
             })
             .collect();
         assert!(
@@ -524,6 +527,25 @@ fn rows_trie_root_matches_the_cassandra_derived_base() {
         return;
     };
 
+    // ONE convention for the whole golden (issue #4501): relate EVERY partition's golden
+    // position to its Rows.db start in a single call.
+    let related: Vec<(u64, u64, u64)> = PKS
+        .iter()
+        .map(|&pk| {
+            let e = decode_entry_independently(&rdb, rows_offset_of(&pdb, pk));
+            let (_, golden_part_pos, _) = golden
+                .iter()
+                .find(|(gpk, _, _)| *gpk == pk)
+                .expect("the golden must cover every pk");
+            (
+                e.data_position,
+                partition_start::header_len_modern_live(4),
+                *golden_part_pos,
+            )
+        })
+        .collect();
+    partition_start::dump_position_convention("multiclustering_table", &related);
+
     for pk in PKS {
         let rows_offset = rows_offset_of(&pdb, pk);
         let e = decode_entry_independently(&rdb, rows_offset);
@@ -639,14 +661,23 @@ fn rows_trie_root_matches_the_cassandra_derived_base() {
 
         // (3) Every block offset is a real row position in the Cassandra-produced
         // golden, and the entry's `data_position` is the partition's file position.
-        let (_, part_pos, row_offsets) = golden
+        // The partition START is the hand-decoded Rows.db entry's `data_position`
+        // (Ch.17: the first field of the `TrieIndexEntry`), NOT sstabledump's
+        // `partition.position` — that is the start in 5.0.2 goldens and the pointer after
+        // the 7-byte live header in 5.0.8 ones (issue #4501). The golden's partition
+        // position is only RELATED to the start; its row positions are absolute file
+        // offsets in both conventions, so they are rebased on the true start.
+        let (_, _, golden_rows) = golden
             .iter()
             .find(|(gpk, _, _)| *gpk == pk)
             .expect("the golden must cover every pk");
-        assert_eq!(
-            e.data_position, *part_pos,
-            "pk={pk}: the entry's data_position must be the golden's partition position"
-        );
+        let row_offsets: BTreeSet<u64> = golden_rows
+            .iter()
+            .map(|abs| {
+                abs.checked_sub(e.data_position)
+                    .unwrap_or_else(|| panic!("pk={pk}: golden row {abs} precedes the partition"))
+            })
+            .collect();
         assert!(
             row_offsets.contains(&BLOCK_0_OFFSET),
             "pk={pk}: the golden's first row must sit at the partition body start \

@@ -33,7 +33,9 @@ use std::sync::Arc;
 struct Partition {
     /// Raw 16-byte UUID (all bytes identical for these test UUIDs)
     uuid_byte: u8,
-    /// Expected Data.db uncompressed byte offset (from JSONL golden "position")
+    /// Expected Data.db uncompressed byte offset of the partition START (as resolved from
+    /// Partitions.db; pinned constants, NOT read from sstabledump's `position`, which is
+    /// the post-header pointer under 5.0.8 - issue #4501)
     expected_offset: u64,
     /// Canonical display UUID string (diagnostics)
     label: &'static str,

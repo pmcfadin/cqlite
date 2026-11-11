@@ -50,6 +50,8 @@
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
+#[path = "support/partition_start.rs"]
+mod partition_start;
 
 use chrono::DateTime;
 use cqlite_core::query::result::QueryRow;
@@ -115,6 +117,24 @@ fn golden_partitions() -> Vec<Json> {
     parts
 }
 
+/// Data.db START offset of int-keyed partition `pk`, from the fixture's own
+/// `Partitions.db` + `Rows.db` (definitive guide Ch.17), then PROVEN against the raw,
+/// independently decoded `Data.db`: a u16 key length, the key, and the live `0x80`
+/// header byte at that offset (issue #4501), so a lookup that returned the post-header
+/// offset could not validate itself.
+fn indexed_partition_start(pk: i32) -> u64 {
+    let dir = resolve_table_generation_dir(KEYSPACE, TABLE)
+        .unwrap_or_else(|e| panic!("committed BTI fixture must resolve: {e}"));
+    let p = |name: &str| dir.join(format!("da-2-bti-{name}.db"));
+    partition_start::bti_partition_start_verified(
+        &p("Partitions"),
+        &p("Rows"),
+        &p("Data"),
+        &pk.to_be_bytes(),
+        partition_start::HeaderForm::ModernLive,
+    )
+}
+
 fn golden_partition(parts: &[Json], pk: i32) -> &Json {
     let wanted = pk.to_string();
     parts
@@ -174,12 +194,32 @@ fn bigint_of(row: &QueryRow, col: &str) -> Option<i64> {
 async fn bti_point_read_returns_every_clustering_row_with_the_trie_resolved_offset() {
     let (db, golden) = open_bti_fixture().await;
 
+    // ONE convention for the whole golden (issue #4501): every partition's golden
+    // position related to its Partitions.db/Rows.db start in a single call.
+    let related: Vec<(u64, u64, u64)> = [1, 2, 3]
+        .iter()
+        .map(|&pk| {
+            let position = golden_partition(&golden, pk)["partition"]["position"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("golden partition pk={pk} must carry a byte position"));
+            (
+                indexed_partition_start(pk),
+                partition_start::header_len_modern_live(4),
+                position,
+            )
+        })
+        .collect();
+    partition_start::dump_position_convention("wide_table", &related);
+
     for pk in [1, 2, 3] {
         let g = golden_partition(&golden, pk);
         let g_rows = g["rows"].as_array().expect("golden rows array");
-        let g_position = g["partition"]["position"]
-            .as_i64()
-            .unwrap_or_else(|| panic!("golden partition pk={pk} must carry a byte position"));
+        // The partition START, from Partitions.db/Rows.db (Ch.17) — NOT sstabledump's
+        // `partition.position`, which is the start in 5.0.2 goldens and the pointer
+        // after the 7-byte live header in 5.0.8 ones (issue #4501). The golden is only
+        // RELATED to it.
+        let start = indexed_partition_start(pk);
+        let g_position = start as i64;
 
         let result = db
             .execute(&format!(
@@ -241,7 +281,7 @@ async fn bti_point_read_returns_every_clustering_row_with_the_trie_resolved_offs
                 bigint_of(row, "position"),
                 Some(g_position),
                 "pk={pk}'s `position` must be the BTI trie descent's resolved partition \
-                 offset, matching sstabledump's reported offset byte-exact — an \
+                 offset, matching the Partitions.db/Rows.db partition start byte-exact — an \
                  `IndexUnavailable` scan-and-filter degrade would return the same rows with \
                  NO position at all"
             );

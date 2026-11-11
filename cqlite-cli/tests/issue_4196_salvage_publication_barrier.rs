@@ -38,6 +38,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+#[path = "../../cqlite-core/tests/support/partition_start.rs"]
+mod partition_start;
+
 /// A fixture generation whose every component is git-TRACKED, so its absence is
 /// a broken checkout and never an unfetched dataset — the resolver below fails
 /// closed UNCONDITIONALLY, not gated on `CQLITE_REQUIRE_FIXTURES` (issue #3220).
@@ -433,6 +436,51 @@ fn golden_partition_positions(fixture_dir: &Path) -> Vec<(i32, u64)> {
     out
 }
 
+/// The TRUE `Data.db` start of every partition of the committed `da` fixture, in golden
+/// order, from its own `Partitions.db`/`Rows.db` (definitive guide Ch.17) - issue #4501.
+/// The golden supplies only the keys; its `position` must stand in the documented
+/// relation to the start (equal under 5.0.2, start + 7 under 5.0.8 for a live int-keyed
+/// `da` partition) and is otherwise never used as an offset.
+fn indexed_partition_starts(fixture_dir: &Path) -> Vec<(i32, u64)> {
+    let component = |name: &str| {
+        std::fs::read_dir(fixture_dir)
+            .unwrap_or_else(|e| panic!("read {fixture_dir:?}: {e}"))
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(&format!("-{name}.db")))
+            .unwrap_or_else(|| panic!("{fixture_dir:?}: no *-{name}.db"))
+    };
+    let (partitions_db, rows_db, data_db) = (
+        component("Partitions"),
+        component("Rows"),
+        component("Data"),
+    );
+    let mut related = Vec::new();
+    let starts: Vec<(i32, u64)> = golden_partition_positions(fixture_dir)
+        .into_iter()
+        .map(|(pk, golden_position)| {
+            // Proven against the raw, independently decoded Data.db (u16 key length, key,
+            // live 0x80 header byte), so a lookup off by the header cannot validate itself.
+            let start = partition_start::bti_partition_start_verified(
+                &partitions_db,
+                &rows_db,
+                &data_db,
+                &pk.to_be_bytes(),
+                partition_start::HeaderForm::ModernLive,
+            );
+            related.push((
+                start,
+                partition_start::header_len_modern_live(4),
+                golden_position,
+            ));
+            (pk, start)
+        })
+        .collect();
+    // ONE call for the whole golden: a single convention must hold for every partition.
+    partition_start::dump_position_convention(&format!("{fixture_dir:?}"), &related);
+    starts
+}
+
 /// Flip one byte inside compressed chunk `chunk_index`'s PAYLOAD, leaving that
 /// chunk's trailing CRC32 untouched — so the chunk fails its integrity check
 /// exactly as a rotted disk byte would. Returns the absolute `Data.db` offset
@@ -483,7 +531,7 @@ fn output_table_dir(out: &Path, keyspace: &str, table: &str) -> PathBuf {
 #[test]
 fn damaged_input_exits_3_with_losses_and_a_complete_generation_set() {
     let clean_dir = resolve_committed_fixture(&BTI_MULTICLUSTERING);
-    let golden = golden_partition_positions(&clean_dir);
+    let golden = indexed_partition_starts(&clean_dir);
     let (last_pk, last_pos) = *golden
         .last()
         .expect("at least two partitions, asserted above");
@@ -563,8 +611,8 @@ fn damaged_input_exits_3_with_losses_and_a_complete_generation_set() {
     assert_eq!(
         loss.get("data_offset").and_then(|o| o.as_u64()),
         Some(last_pos),
-        "the loss must report the partition's own data-section offset, which the golden records \
-         as {last_pos}; loss={loss}"
+        "the loss must report the partition's own data-section offset, which Partitions.db/Rows.db \
+         record as {last_pos}; loss={loss}"
     );
     assert!(
         loss.get("chunks")

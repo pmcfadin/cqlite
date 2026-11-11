@@ -158,6 +158,9 @@ proptest = { workspace = true }
 criterion = { workspace = true }
 once_cell = { workspace = true }
 tokio-test = { workspace = true }
+# Raw LZ4 chunk decoding for the independent Data.db view in
+# cqlite-core/tests/support/partition_start.rs (issue #4501).
+lz4_flex = { workspace = true }
 rand = { workspace = true }
 # Heap-allocation guard for the bounded-memory query test (issue #1581). Gated
 # behind the `dhat-heap` feature so it never installs a global allocator or runs
