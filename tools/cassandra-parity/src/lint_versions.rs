@@ -208,17 +208,18 @@ fn lint_carried_over(m: &Manifest, out: &mut Vec<Finding>) {
             .map(|(v, _, _)| v)
             .collect();
         if carried_versions.iter().any(|v| v != declared) {
-            out.push(Finding::warn(
-                &s.id,
-                "evidence.cassandra_version",
-                format!(
+            out.push(Finding {
+                level: crate::lint::Level::Warn,
+                id: s.id.clone(),
+                field: "evidence.cassandra_version".to_string(),
+                message: format!(
                     "partial claim: declares {declared} for its regenerated data, but covers {} \
                      carried-over table(s)/pattern(s) written by {:?} (per-table truth: \
                      cassandra_source.carried_over)",
                     touched.len(),
                     carried_versions
                 ),
-            ));
+            });
         }
     }
 }
