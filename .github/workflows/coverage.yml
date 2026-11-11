@@ -97,9 +97,9 @@ jobs:
         path: |
           test-data/datasets/
           validation_artifacts/sstabledump/
-        key: datasets-v3-5fa11922dd380d8c7516d287b666954d26dbe593937e5cba7c322889b9dd9142-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v3-bfb07a23356025d0f809e17fc72ff1e57cc69566a7a0deefeb825137a6789b78-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v3-5fa11922dd380d8c7516d287b666954d26dbe593937e5cba7c322889b9dd9142-
+          datasets-v3-bfb07a23356025d0f809e17fc72ff1e57cc69566a7a0deefeb825137a6789b78-
 
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
@@ -118,7 +118,7 @@ jobs:
           mkdir -p test-data
           echo "🔍 Downloading cassandra5-small-full-v4.0.tar.gz from datasets-v3 release..."
           gh release download datasets-v4 --pattern "cassandra5-small-full-v4.0.tar.gz" --dir /tmp
-          echo "5fa11922dd380d8c7516d287b666954d26dbe593937e5cba7c322889b9dd9142  /tmp/cassandra5-small-full-v4.0.tar.gz" | sha256sum -c -
+          echo "bfb07a23356025d0f809e17fc72ff1e57cc69566a7a0deefeb825137a6789b78  /tmp/cassandra5-small-full-v4.0.tar.gz" | sha256sum -c -
           echo "📦 Extracting datasets to repo root..."
           rm -rf test-data/datasets
           tar -xzf /tmp/cassandra5-small-full-v4.0.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'

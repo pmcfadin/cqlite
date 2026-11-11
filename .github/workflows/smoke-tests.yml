@@ -46,7 +46,7 @@ env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v4
   DATASET_ASSET: cassandra5-small-full-v4.0.tar.gz
-  DATASET_SHA256: 5fa11922dd380d8c7516d287b666954d26dbe593937e5cba7c322889b9dd9142
+  DATASET_SHA256: bfb07a23356025d0f809e17fc72ff1e57cc69566a7a0deefeb825137a6789b78
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   OUTPUT_DIR: ${{ github.workspace }}/smoke-test-results
 

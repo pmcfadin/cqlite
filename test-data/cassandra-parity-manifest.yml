@@ -61,11 +61,14 @@ cassandra_source:
         - test_timeseries.*
         - test_wide_rows.*
         - test_oa.*
-        - test_da.*                # incl. the aged BTI seams ttl_table (#1741) and wide_table
+        - test_da.simple_table     # bytes kept; goldens re-dumped with 5.0.8
+        - test_da.collection_table
+        - test_da.wide_multiclustering_small
+        - test_da.ttl_table        # aged BTI seam (#1741)
+        - test_da.wide_table       # aged BTI wide-partition fixture (gen-wide-bti.sh)
         - test_deltas.*            # wall-clock pinned (issue_992_*), now()-stamped
         - test_big.*               # wide_partition: index offsets pinned (issue_1309)
         - test_compaction_tombstone_ttl.ttl_expired_live   # pinned_now oracle needs it expired
-        - test_tomb.resurrection_gc_positive               # sstabledump position, until #4501
 
 program:
   parent_epic: 966
