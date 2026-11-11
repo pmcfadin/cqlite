@@ -110,7 +110,7 @@ impl DataWriter {
         // Issue #1196: a static row carries NO row-level primary-key liveness.
         // Cassandra's static block is the pseudo-row keyed on the empty
         // clustering; PK/row liveness lives on regular (clustering) rows, never
-        // on the static row. Every committed Cassandra 5.0.2 golden confirms
+        // on the static row. Every committed Cassandra (5.0.2 or 5.0.8) golden confirms
         // this — no `static_block` ever has a `liveness_info`, so the static-row
         // flags byte never sets ROW_HAS_TIMESTAMP (e.g. a static-only UPDATE
         // emits `0xa0`, not `0xa4`). The writetime instead rides on each static
