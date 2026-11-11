@@ -196,7 +196,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: test-data/datasets
-          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+          key: datasets-fmt2-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
       # Provision the pinned datasets so the dataset-dependent gate components
       # (core/integration/write/smoke/tombstones-scan) run against real

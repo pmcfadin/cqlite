@@ -136,5 +136,47 @@ case "$OUT" in *"forcing a COLD restore"*"Fetching dataset"*) ok "pre-#4508 cach
 { [ "$RC" = 0 ] && tracked_is "$R" "$NEW" && [ -s "$R/$DS/.dataset-manifest" ] && [ -f "$R/$DS/.dataset-tracked-at-build" ]; } \
   && ok "after the forced cold restore the tracked bytes are the checkout's and both lists exist" || bad "cold restore left a bad state ($RC)"
 
+# 6. a change that deletes EVERY tracked dataset file (roborev job 195): the tracked list is the empty set,
+#    not a failure, and the cached twins are still removed
+R2="$T/r2"; make_repo "$R2"
+run_fetch "$R2"
+git -C "$R2" rm -rq "$G"; git -C "$R2" commit -qm "PR: delete every tracked dataset file"
+[ -z "$(git -C "$R2" ls-files -- "$DS")" ] && ok "setup: no tracked file is left under the dataset root" || bad "setup: files still tracked"
+overlay_cache "$R2"; reset_extra "$R2"
+run_fetch "$R2" CI=true
+{ [ "$RC" = 0 ] && ! has "$R2" tracked-Data.db.jsonl && ! has "$R2" removed-Data.db.jsonl && ! has "$R2" old-name-Data.db.jsonl && ! has "$R2" stale-leftover.log; } \
+  && ok "all tracked files deleted: every cached twin and the extra are removed, exit 0" || bad "all-deleted case left stale files or failed ($RC): $OUT"
+has "$R2" bundle-only.db && ok "all tracked files deleted: the untracked binary is kept" || bad "the binary was removed"
+
+# 7. an unexpected classification failure propagates as a FAILURE in CI (not a silent warm success)
+classify() {   # <state> -> $OUT $RC from the sourced library with a fabricated guard state
+  OUT=$( DATASET_ROOT="$T/r/$DS" ARCHIVE_DATASET_ROOT=test-data/datasets TRACKED_GUARD_STATE="$1" TRACKED_GUARD_LIST="${2:-}" TRACKED_GUARD_REL="$DS" \
+         CI=1 bash -c 'set -e; . "$0"; warm_cache_reconcile; echo RECONCILED' "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh" 2>&1 )
+  RC=$?
+}
+printf 'x\n' > "$T/r/$DS/.dataset-manifest"; : > "$T/r/$DS/.dataset-tracked-at-build"
+classify unprotected
+{ [ "$RC" = 1 ] && case "$OUT" in *"could not classify"*) true ;; *) false ;; esac; } && ok "an unprotected guard state fails the CI reconcile (rc 1, named)" || bad "unprotected state did not fail: rc=$RC $OUT"
+classify in-repo "$T/does-not-exist"
+{ [ "$RC" = 1 ] && case "$OUT" in *"could not classify"*) true ;; *) false ;; esac; } && ok "a missing tracked list fails the CI reconcile" || bad "missing list did not fail: rc=$RC $OUT"
+classify out-of-repo
+{ [ "$RC" = 0 ] && case "$OUT" in *RECONCILED*) true ;; *) false ;; esac; } && ok "a dataset root outside any git repo has nothing to classify and succeeds" || bad "out-of-repo case: rc=$RC $OUT"
+
+# 8. the cache key carries the format version everywhere it is composed from the pin (roborev job 195): a cache built
+#    before the metadata existed must never be an exact hit, or it would force a cold download on every job forever.
+#    (coverage.yml keys a literal sha and downloads the release itself without fetch-datasets.sh: out of scope.)
+FMT="$(sed -n 's/^DATASET_CACHE_FORMAT=//p' "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh")"
+bad_keys=""; good=0
+for f in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/actions/*/action.yml; do
+  while IFS= read -r line; do
+    case "$line" in
+      *"datasets-${FMT}-"*) good=$((good + 1)) ;;
+      *) bad_keys="$bad_keys $(basename "$f"): ${line#"${line%%[![:space:]]*}"};" ;;
+    esac
+  done < <(grep -E '(^[[:space:]]*key:.*datasets-(fmt[0-9]+-)?[$]\{\{|^[[:space:]]+datasets-(fmt[0-9]+-)?[$]\{\{)' "$f" || true)
+done
+[ -z "$bad_keys" ] && [ "$good" -ge 15 ] && ok "every dataset cache key and restore-key carries the format segment datasets-${FMT}- ($good sites)" || bad "dataset cache keys without datasets-${FMT}-:$bad_keys (carrying: $good)"
+case "$FMT" in fmt[0-9]*) ok "the format constant has the fmtN shape" ;; *) bad "unexpected DATASET_CACHE_FORMAT '$FMT'" ;; esac
+
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

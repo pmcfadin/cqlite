@@ -46,6 +46,11 @@ write_bundle_manifest() {
   fi
 }
 
+# The cache KEY carries this format (the `fmt2` segment of `datasets-fmt2-<tag>-<sha>` in every workflow
+# and in the restore action): caches built before the two lists existed can never match, so the first
+# run cold-builds and SAVES one with the metadata instead of re-downloading on every job forever.
+DATASET_CACHE_FORMAT=fmt2
+
 _dataset_restore_mode() { [ -n "${CI:-}" ] || [ "${CQLITE_DATASETS_RESTORE_TRACKED:-}" = "1" ]; }
 
 # warm_cache_usable — the warm fast path may be taken only if the cache can be classified.
@@ -61,12 +66,17 @@ warm_cache_usable() {
 }
 
 # _dataset_stale_lists — sets STALE_TWINS and STALE_EXTRAS (newline-separated, dataset-relative).
+# Returns 0 classified, 2 not applicable (the dataset root is outside any git repo, so nothing is
+# tracked), 1 a failure: an unclassifiable cache, an unprotected guard state or a temp-file error.
+# An existing-but-EMPTY tracked list is the empty set, not a failure: a change that deletes every
+# tracked dataset file must still have its cached twins removed.
 _dataset_stale_lists() {
   local manifest="${DATASET_ROOT}/.dataset-manifest" built="${DATASET_ROOT}/.dataset-tracked-at-build"
   local now known disk
   STALE_TWINS=""; STALE_EXTRAS=""
+  [ "${TRACKED_GUARD_STATE:-}" = "out-of-repo" ] && return 2
   [ -s "${manifest}" ] && [ -f "${built}" ] || return 1
-  [ "${TRACKED_GUARD_STATE:-}" = "in-repo" ] && [ -s "${TRACKED_GUARD_LIST:-}" ] || return 1
+  [ "${TRACKED_GUARD_STATE:-}" = "in-repo" ] && [ -f "${TRACKED_GUARD_LIST:-}" ] || return 1
   now="$(mktemp "${TMPDIR:-/tmp}/cqlite-ds-now.XXXXXX")" || return 1
   known="$(mktemp "${TMPDIR:-/tmp}/cqlite-ds-known.XXXXXX")" || { rm -f "${now}"; return 1; }
   disk="$(mktemp "${TMPDIR:-/tmp}/cqlite-ds-disk.XXXXXX")" || { rm -f "${now}" "${known}"; return 1; }
@@ -94,11 +104,15 @@ _dataset_remove_list() {
 # warm_cache_reconcile — the warm fast path, after capture_tracked_dataset_files and warm_cache_usable
 # (which, in restore mode, has already restored every tracked file from the index).
 warm_cache_reconcile() {
-  local drift
+  local drift rc
   if _dataset_restore_mode; then
-    if _dataset_stale_lists; then
+    rc=0; _dataset_stale_lists || rc=$?
+    if [ "${rc}" = 0 ]; then
       _dataset_remove_list "twin of a deleted/renamed tracked file" "${STALE_TWINS}"
       _dataset_remove_list "extra (in neither git nor the bundle)" "${STALE_EXTRAS}"
+    elif [ "${rc}" != 2 ]; then
+      echo "ERROR: could not classify stale files under ${DATASET_ROOT} (rc=${rc}); refusing to continue on contents that may be stale (#4508)" >&2
+      exit 1
     fi
     return 0
   fi
@@ -108,10 +122,11 @@ warm_cache_reconcile() {
     echo "WARNING: tracked file(s) under ${TRACKED_GUARD_REL} differ from the index (a cache overlay, or your edits); not touched without CQLITE_DATASETS_RESTORE_TRACKED=1:" >&2
     head -20 <<<"${drift}" | sed 's/^/WARNING:   /' >&2
   fi
-  if _dataset_stale_lists; then
+  rc=0; _dataset_stale_lists || rc=$?
+  if [ "${rc}" = 0 ]; then
     [ -z "${STALE_TWINS}" ] || { echo "WARNING: tracked-at-build file(s) no longer tracked but still on disk (CI removes them):" >&2; head -20 <<<"${STALE_TWINS}" | sed 's/^/WARNING:   /' >&2; }
     [ -z "${STALE_EXTRAS}" ] || { echo "WARNING: stale untracked file(s) in neither git nor the bundle manifest (CI removes them):" >&2; head -20 <<<"${STALE_EXTRAS}" | sed 's/^/WARNING:   /' >&2; }
-  else
+  elif [ "${rc}" = 1 ]; then
     echo "NOTE: no .dataset-manifest/.dataset-tracked-at-build (a cache from before #4508); stale files cannot be classified" >&2
   fi
 }

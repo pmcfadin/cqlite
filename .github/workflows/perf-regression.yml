@@ -93,7 +93,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: test-data/datasets/
-          key: ${{ runner.os }}-datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+          key: ${{ runner.os }}-datasets-fmt2-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
       - name: Fetch canonical datasets
         run: bash ./test-data/scripts/fetch-datasets.sh

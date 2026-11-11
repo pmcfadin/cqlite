@@ -32,9 +32,9 @@ runs:
       uses: actions/cache@v5
       with:
         path: ${{ inputs.dataset-root }}
-        key: datasets-${{ inputs.dataset-tag }}-${{ inputs.dataset-sha256 }}
+        key: datasets-fmt2-${{ inputs.dataset-tag }}-${{ inputs.dataset-sha256 }}
         restore-keys: |
-          datasets-${{ inputs.dataset-tag }}-
+          datasets-fmt2-${{ inputs.dataset-tag }}-
 
     - name: Fetch or repair canonical datasets
       shell: bash
