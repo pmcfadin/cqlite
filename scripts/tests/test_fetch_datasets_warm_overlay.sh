@@ -178,5 +178,53 @@ done
 [ -z "$bad_keys" ] && [ "$good" -ge 15 ] && ok "every dataset cache key and restore-key carries the format segment datasets-${FMT}- ($good sites)" || bad "dataset cache keys without datasets-${FMT}-:$bad_keys (carrying: $good)"
 case "$FMT" in fmt[0-9]*) ok "the format constant has the fmtN shape" ;; *) bad "unexpected DATASET_CACHE_FORMAT '$FMT'" ;; esac
 
+# 9. NO workflow restores the dataset cache without an unconditional reconcile after it (roborev job 197): on an exact
+#    cache hit a `cache-hit != 'true'`-guarded fetch is skipped, so fetch-datasets.sh (which restores the tracked
+#    files and removes stale twins) would never run. Every cache site must be followed, in its job, by the composite
+#    action or a fetch-datasets.sh step whose `if:` does not mention cache-hit; a fetch gated only by
+#    `runner.os != 'Windows'` must be backed by the unconditional `git restore --source=HEAD` re-assert step.
+read -r -d '' STEP_PY <<'PY' || true
+import glob, re, sys
+root = sys.argv[1]
+bad, sites = [], 0
+for f in sorted(glob.glob(root + "/.github/workflows/*.yml")):
+    text = open(f).read()
+    parts = re.split(r"(?m)^(?=      - (?:name|uses):)", text)
+    for i, st in enumerate(parts):
+        if "actions/cache" in st and re.search(r"datasets-fmt\d+-", st):
+            sites += 1
+            rest = []
+            for nxt in parts[i + 1:]:
+                if "actions/cache" in nxt and re.search(r"datasets-fmt\d+-", nxt):
+                    break
+                rest.append(nxt)
+            ok_fetch, os_gated, reassert = False, False, False
+            for st2 in rest:
+                if "restore-canonical-datasets" in st2:
+                    ok_fetch = True
+                m = re.search(r"(?m)^\s+if:(.*)$", st2)
+                cond = m.group(1) if m else ""
+                code = "\n".join(l for l in st2.splitlines() if not l.lstrip().startswith("#"))
+                if re.search(r"bash\s+\S*fetch-datasets\.sh", code) and "cache-hit" not in cond:
+                    ok_fetch = True
+                    if "runner.os" in cond:
+                        os_gated = True
+                if "git restore --source=HEAD -- test-data/datasets" in code and "cache-hit" not in cond:
+                    reassert = True
+            name = f.split("/")[-1]
+            if not ok_fetch:
+                bad.append(name + ": no unconditional fetch-datasets.sh / restore-canonical-datasets after the cache restore")
+            elif os_gated and not reassert:
+                bad.append(name + ": the unconditional fetch is OS-gated and there is no unconditional git-restore re-assert")
+print(sites)
+for b in bad:
+    print("BAD " + b)
+PY
+step_out="$(python3 -c "$STEP_PY" "$REPO_ROOT")"
+step_sites="$(head -1 <<<"$step_out")"
+step_bad="$(grep '^BAD ' <<<"$step_out" || true)"
+[ -z "$step_bad" ] && [ "${step_sites:-0}" -ge 15 ] && ok "every dataset cache restore ($step_sites sites) is followed by an unconditional reconcile" \
+  || bad "a dataset cache restore lacks an unconditional reconcile (sites=$step_sites): $step_bad"
+
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

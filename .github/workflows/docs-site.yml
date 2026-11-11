@@ -151,10 +151,8 @@ jobs:
           # Cache key MUST include SHA256 — never tag alone (see dataset release gotchas)
           key: datasets-fmt2-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
-      - name: Fetch datasets if cache miss
-        if: steps.dataset-cache.outputs.cache-hit != 'true'
-        run: |
-          bash test-data/scripts/fetch-datasets.sh
+      - name: Fetch datasets (every run, so a warm cache is reconciled too - #4508)
+        run: bash ./test-data/scripts/fetch-datasets.sh
 
       - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
         # The cache/bundle carries a snapshot of test-data/datasets that predates
