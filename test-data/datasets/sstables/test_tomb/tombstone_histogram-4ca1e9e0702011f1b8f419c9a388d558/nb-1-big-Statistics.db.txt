@@ -1,10 +1,10 @@
-SSTable: /data/test_tomb/tombstone_histogram-1c8a5b90dcca11f18b4863e378be826d/nb-1-big
+SSTable: /data/test_tomb/tombstone_histogram-52b10200dd6a11f199c46d4cbb83f4d8/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/2021 00:00:00 (1609459200000000)
 Maximum timestamp: 01/02/2021 00:00:00 (1609545600000000)
 Duration: Days: 1 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 11/10/2026 05:46:50 (1794289610)
+SSTable min local deletion time: 11/11/2026 00:53:38 (1794358418)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
 Compression ratio: 0.5953002610966057
@@ -16,14 +16,14 @@ Covered clusterings: [1, 5]
 Estimated droppable tombstones: 0.20833333333333334
 SSTable Level: 0
 Repaired at: 0
-Originating host id: cac1a55e-56db-4060-99d2-e3ed06d1b46e
+Originating host id: e33b9fb6-0352-4ef9-873c-b5e1135345e9
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1794289542312, position=63795)=CommitLogPosition(segmentId=1794289542312, position=1152863)}
+Replay positions covered: {CommitLogPosition(segmentId=1794358348643, position=63770)=CommitLogPosition(segmentId=1794358348643, position=1152806)}
 totalColumnsSet: 24
 totalRows: 15
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1794289620 (11/10/2026 05:47:00) |     5 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1794358440 (11/11/2026 00:54:00) |     5 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -60,7 +60,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 3
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 11/10/2026 05:46:50 (1794289610)
+EncodingStats minLocalDeletionTime: 11/11/2026 00:53:38 (1794358418)
 EncodingStats minTimestamp: 01/01/2021 00:00:00 (1609459200000000)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]

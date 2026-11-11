@@ -1,11 +1,11 @@
-SSTable: /data/test_tomb/resurrection_gc0-1dc60fe0dcca11f18b4863e378be826d/nb-2-big
+SSTable: /data/test_tomb/resurrection_gc0-5320dad0dd6a11f199c46d4cbb83f4d8/nb-2-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/02/2021 00:00:00 (1609545600000000)
 Maximum timestamp: 01/02/2021 00:00:00 (1609545600000000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 11/10/2026 05:46:58 (1794289618)
-SSTable max local deletion time: 11/10/2026 05:46:58 (1794289618)
+SSTable min local deletion time: 11/11/2026 00:53:44 (1794358424)
+SSTable max local deletion time: 11/11/2026 00:53:44 (1794358424)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
 Compression ratio: 0.9666666666666667
 TTL min: 0
@@ -16,14 +16,14 @@ Covered clusterings: [2, 3]
 Estimated droppable tombstones: 1.5
 SSTable Level: 0
 Repaired at: 0
-Originating host id: cac1a55e-56db-4060-99d2-e3ed06d1b46e
+Originating host id: e33b9fb6-0352-4ef9-873c-b5e1135345e9
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1794289542312, position=1152863)=CommitLogPosition(segmentId=1794289542312, position=1157953)}
+Replay positions covered: {CommitLogPosition(segmentId=1794358348643, position=1152806)=CommitLogPosition(segmentId=1794358348643, position=1157896)}
 totalColumnsSet: 1
 totalRows: 2
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1794289620 (11/10/2026 05:47:00) |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1794358440 (11/11/2026 00:54:00) |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -58,7 +58,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 2
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 11/10/2026 05:46:58 (1794289618)
+EncodingStats minLocalDeletionTime: 11/11/2026 00:53:44 (1794358424)
 EncodingStats minTimestamp: 01/02/2021 00:00:00 (1609545600000000)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]

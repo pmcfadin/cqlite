@@ -6,13 +6,13 @@ tests, so regenerated tables are renamed onto the v3.6 names. `metadata.yml`, `r
 and all `system*` keyspaces are carried over unchanged. The tool is
 `test-data/scripts/splice-datasets-v4.py`.
 
-Bundle: sha256 `bfb07a23356025d0f809e17fc72ff1e57cc69566a7a0deefeb825137a6789b78`, 4,256,695 bytes.
+Bundle: sha256 `820a8031cfbd8badb690b22f5966123def6e2e84dada64131f63355deaffe714`, 4,257,128 bytes.
 
 ## Provenance per table (the per-table truth is `cassandra_source.carried_over` in the manifest)
 
 | Class | Tables | Bytes | Goldens |
 |---|---|---|---|
-| **Regenerated on `cassandra:5.0.8`** (committed generator, pinned driver 3.30.1, then spliced) | `test_types` (20), `test_tomb` (all 9, incl. `resurrection_gc_positive`), `test_compactionparity` (2), `test_compactionparityudt` (4), `test_compaction_tombstone_ttl` (3 of 4), `test_signed_coll` (4), `test_nested_udt_keys` (1), `test_comparator_order` (1), `test_comp` (7), `test_writeparity` (3), `test_da.multiclustering_table` | 5.0.8 | 5.0.8 |
+| **Regenerated on `cassandra:5.0.8`** (committed generator, pinned driver 3.30.1, then spliced) | `test_types` (20), `test_tomb` (all 9, from ONE generator run: `issue_1014` compares the `resurrection_gc0` and `resurrection_gc_positive` goldens byte for byte, so they cannot come from different runs), `test_compactionparity` (2), `test_compactionparityudt` (4), `test_compaction_tombstone_ttl` (3 of 4), `test_signed_coll` (4), `test_nested_udt_keys` (1), `test_comparator_order` (1), `test_comp` (7), `test_writeparity` (3), `test_da.multiclustering_table` | 5.0.8 | 5.0.8 |
 | **Corruption corpus** `corruption/test_comp_corrupt` | 12 fixtures | re-derived offline from the new clean `test_comp`/`test_da` sources by `generate-corruption-corpus.sh` | regenerated |
 | **Commitlog** `commitlog/` | 3 segments (id 1794289002839, v7) + ground truth | 5.0.8 (absorbed from #4493) | 5.0.8 |
 | **Carried over from 5.0.2: bytes kept, goldens re-dumped with 5.0.8 `sstabledump`/`sstablemetadata`** | `test_basic` (7 of 8), `test_collections` (8), `test_timeseries` (9), `test_wide_rows` (8), `test_oa` (6), `test_da.simple_table`, `test_da.collection_table`, `test_da.wide_multiclustering_small` | 5.0.2 | 5.0.8 |
