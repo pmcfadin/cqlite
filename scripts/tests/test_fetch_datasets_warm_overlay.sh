@@ -56,7 +56,8 @@ make_repo() {   # the tree the cache was BUILT from: tracks tracked/removed/old-
   printf '%s\n' "$NEW" > "$d/$DS/goldens/tracked-Data.db.jsonl"
   printf 'removed upstream\n' > "$d/$DS/goldens/removed-Data.db.jsonl"
   printf 'old name\n' > "$d/$DS/goldens/old-name-Data.db.jsonl"
-  git -C "$d" add .gitignore; git -C "$d" add -f "$DS/goldens"
+  printf '# sha256=%s\ngoldens/old-name-Data.db.jsonl\ngoldens/removed-Data.db.jsonl\ngoldens/tracked-Data.db.jsonl\n' "$SHA" > "$d/test-data/dataset-bundle-tracked.txt"
+  git -C "$d" add .gitignore test-data/dataset-bundle-tracked.txt; git -C "$d" add -f "$DS/goldens"
   git -C "$d" commit -qm built
 }
 pr_changes() {  # the PR: delete one tracked file, rename another
@@ -90,8 +91,7 @@ tracked_is "$R" "$NEW" && ok "cold run: the tracked file keeps the checkout's by
 M="$R/$DS/.dataset-manifest"; B="$R/$DS/.dataset-tracked-at-build"
 { [ -s "$M" ] && grep -qx 'goldens/bundle-only.db' "$M" && grep -qx 'goldens/old-name-Data.db.jsonl' "$M"; } \
   && ok "cold run writes .dataset-manifest listing the bundle's members" || bad "no usable .dataset-manifest"
-{ grep -qx 'goldens/removed-Data.db.jsonl' "$B" && grep -qx 'goldens/old-name-Data.db.jsonl' "$B" && ! grep -qx 'goldens/bundle-only.db' "$B"; } \
-  && ok "cold run writes .dataset-tracked-at-build: the tracked-class files, not the untracked binary" || bad "wrong .dataset-tracked-at-build: $(cat "$B")"
+[ ! -e "$B" ] && ok "the twin list is no longer cache-derived: no .dataset-tracked-at-build is written" || bad "a cache-derived .dataset-tracked-at-build was written"
 
 # the PR now deletes one tracked file and renames another; CI's cache is the build-time tree
 pr_changes "$R"
@@ -127,14 +127,14 @@ run_fetch "$R" CQLITE_DATASETS_RESTORE_TRACKED=1
 
 # 5. a cache from before #4508 (no lists): CI refuses to trust it and goes cold; locally it is only noted
 overlay_cache "$R"
-rm -f "$R/$DS/.dataset-manifest" "$R/$DS/.dataset-tracked-at-build"
+rm -f "$R/$DS/.dataset-manifest"
 run_fetch "$R"
 { [ "$RC" = 0 ] && case "$OUT" in *"cannot be classified"*) true ;; *) false ;; esac; } && ok "pre-#4508 cache, local: noted, not guessed" || bad "pre-manifest local run: $OUT"
 git -C "$R" checkout -q -- "$DS" 2>/dev/null
 run_fetch "$R" CI=true
 case "$OUT" in *"forcing a COLD restore"*"Fetching dataset"*) ok "pre-#4508 cache, CI: refuses the warm path and runs the cold restore" ;; *) bad "no cold restore: $OUT" ;; esac
-{ [ "$RC" = 0 ] && tracked_is "$R" "$NEW" && [ -s "$R/$DS/.dataset-manifest" ] && [ -f "$R/$DS/.dataset-tracked-at-build" ]; } \
-  && ok "after the forced cold restore the tracked bytes are the checkout's and both lists exist" || bad "cold restore left a bad state ($RC)"
+{ [ "$RC" = 0 ] && tracked_is "$R" "$NEW" && [ -s "$R/$DS/.dataset-manifest" ]; } \
+  && ok "after the forced cold restore the tracked bytes are the checkout's and the manifest exists" || bad "cold restore left a bad state ($RC)"
 
 # 6. a change that deletes EVERY tracked dataset file (roborev job 195): the tracked list is the empty set,
 #    not a failure, and the cached twins are still removed
@@ -154,7 +154,7 @@ classify() {   # <state> -> $OUT $RC from the sourced library with a fabricated 
          CI=1 bash -c 'set -e; . "$0"; warm_cache_reconcile; echo RECONCILED' "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh" 2>&1 )
   RC=$?
 }
-printf 'x\n' > "$T/r/$DS/.dataset-manifest"; : > "$T/r/$DS/.dataset-tracked-at-build"
+printf 'x\n' > "$T/r/$DS/.dataset-manifest"; : 
 classify unprotected
 { [ "$RC" = 1 ] && case "$OUT" in *"could not classify"*) true ;; *) false ;; esac; } && ok "an unprotected guard state fails the CI reconcile (rc 1, named)" || bad "unprotected state did not fail: rc=$RC $OUT"
 classify in-repo "$T/does-not-exist"
@@ -289,6 +289,52 @@ range_hits="$(grep -nE '^[[:space:]]*[^#[:space:]][^#]*(\[a-z\]|\[A-Z\])[^#]*\)[
 [ -z "$range_hits" ] && ok "no locale-sensitive [a-z]/[A-Z] case range in fetch-datasets.sh or the warm-restore lib" || bad "locale-sensitive case range: $range_hits"
 argv_hits="$(grep -nE '(^|[^#])[[:space:]](guard_git|git)[[:space:]].*"\$\{[A-Za-z_]+\[@\]' "$REPO_ROOT/test-data/scripts/fetch-datasets.sh" "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh" | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' | grep -v -e 'pri''ntf' -e TRACKED_PROBE_REASON -e report_ || true)"
 [ -z "$argv_hits" ] && ok "no git call takes a path array as argv" || bad "git called with an array argv: $argv_hits"
+
+# 13. roborev job 201 (1): a cache built COLD on the PR branch used to record the PR's tracked set, so a path the PR renamed
+#     away looked like a legitimate bundle member forever. The twin list is the pinned bundle's own tracked set (committed,
+#     sha-pinned), so a COLD extraction on the PR branch still removes the renamed-away and deleted twins.
+R4="$T/r4"; make_repo "$R4"; pr_changes "$R4"
+run_fetch "$R4" CI=true
+{ [ "$RC" = 0 ] && ! has "$R4" removed-Data.db.jsonl && ! has "$R4" old-name-Data.db.jsonl && has "$R4" new-name-Data.db.jsonl && has "$R4" bundle-only.db && tracked_is "$R4" "$NEW"; } \
+  && ok "COLD run on the PR branch: renamed-away and deleted twins are removed, the new name and the binary kept" || bad "cold PR run left twins or failed ($RC): $OUT"
+case "$OUT" in *"Fetching dataset"*"REMOVED stale twin"*) ok "the twin removal ran on the cold path" ;; *) bad "no twin removal on the cold path: $OUT" ;; esac
+
+# 14. roborev job 201 (2): a tracked path with a NEWLINE would split one NUL record into two lines, the second `../victim`.
+NL=$'\n'
+R6="$T/r6"; make_repo "$R6"; run_fetch "$R6"
+mkdir -p "$R6/$G/X${NL}.."; printf 'hostile\n' > "$R6/$G/X${NL}../victim"
+git -C "$R6" add -f "$DS/goldens"; git -C "$R6" commit -qm "hostile tracked name"
+printf 'precious\n' > "$R6/test-data/victim"
+run_fetch "$R6" CI=true
+{ [ "$RC" != 0 ] && [ -f "$R6/test-data/victim" ]; } && ok "a tracked path with a newline is refused and nothing outside the dataset root is deleted" || bad "hostile newline path: rc=$RC victim=$([ -f "$R6/test-data/victim" ] && echo kept || echo DELETED)"
+case "$OUT" in *"newline"*) ok "the refusal names the newline" ;; *) bad "refusal does not name the newline: $OUT" ;; esac
+# the removal step itself validates every candidate, whatever produced it (a hostile manifest, a symlink)
+mkdir -p "$T/rm/ds"; printf 'x\n' > "$T/rm/victim"; ln -s "$T/rm/victim" "$T/rm/ds/link"; printf 'y\n' > "$T/rm/ds/ok.txt"
+rmcase() { OUT=$( DATASET_ROOT="$T/rm/ds" bash -c 'set -e; . "$0"; _dataset_remove_list x "$1"' "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh" "$1" 2>&1 ); RC=$?; }
+rmcase '../victim';       { [ "$RC" = 1 ] && [ -f "$T/rm/victim" ]; } && ok "a '..' path is refused, the file outside survives" || bad "dotdot path not refused (rc=$RC)"
+rmcase "/$T/rm/victim";   { [ "$RC" = 1 ] && [ -f "$T/rm/victim" ]; } && ok "an absolute path is refused" || bad "absolute path not refused (rc=$RC)"
+rmcase 'link';            { [ "$RC" = 1 ] && [ -f "$T/rm/victim" ]; } && ok "a symlink is refused (never followed)" || bad "symlink not refused (rc=$RC)"
+rmcase 'ok.txt';          { [ "$RC" = 0 ] && [ ! -e "$T/rm/ds/ok.txt" ]; } && ok "an ordinary relative path is removed" || bad "ordinary path not removed (rc=$RC)"
+
+# 15. roborev job 201 (3): a restore-key hit from an OLDER pin used to skip the full tracked restore (it only ran behind
+#     has_required_dataset), so the cold path then rejected the overlaid tracked files as local modifications.
+R7="$T/r7"; make_repo "$R7"; run_fetch "$R7"
+overlay_cache "$R7"; sed 's/^sha256=.*/sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$R7/$DS/.dataset-pin" > "$T/pin.n"; cp "$T/pin.n" "$R7/$DS/.dataset-pin"
+tracked_is "$R7" "OLD-BUNDLE-BYTES" && ok "setup: older-pin cache overlaid the tracked file" || bad "setup failed"
+run_fetch "$R7" CI=true
+{ [ "$RC" = 0 ] && tracked_is "$R7" "$NEW"; } && ok "restore-key hit with an older pin: tracked files restored first, then the pin mismatch goes cold and succeeds" || bad "older-pin run failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
+case "$OUT" in *"Fetching dataset"*) ok "the older pin took the cold path" ;; *) bad "older pin did not re-fetch: $OUT" ;; esac
+
+# 16. roborev job 201 (4): the classifier runs inside `||` lists (errexit off); a failing sort must FAIL it, not yield partial lists.
+R8="$T/r8"; make_repo "$R8"; pr_changes "$R8"; run_fetch "$R8" CI=true
+overlay_cache "$R8"
+REAL_SORT="$(command -v sort)"
+printf '#!/bin/sh\ncase " $* " in *" -u "*) echo "sort: stub failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' "$REAL_SORT" > "$BIN/sort"; chmod +x "$BIN/sort"
+mkdir -p "$R8/$G"; printf 'old name\n' > "$R8/$G/old-name-Data.db.jsonl"
+run_fetch "$R8" CI=true
+rm -f "$BIN/sort"
+{ [ "$RC" = 1 ] && case "$OUT" in *"could not classify"*) true ;; *) false ;; esac && has "$R8" old-name-Data.db.jsonl; } \
+  && ok "a failing sort makes the classifier FAIL (rc 1, named); nothing is removed from partial lists" || bad "failing sort not fatal: rc=$RC $OUT"
 
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

@@ -191,7 +191,7 @@ IGN
     mkdir -p "$dir/test-data/datasets/$(dirname "$rel")"
     committed_content "$rel" >"$dir/test-data/datasets/$rel"
   done
-  git -C "$dir" add .gitignore
+  printf "# sha256=%s\n" "$SHA" >"$dir/test-data/dataset-bundle-tracked.txt"; git -C "$dir" add .gitignore test-data/dataset-bundle-tracked.txt   # #4508 twin list
   for rel in "${TRACKED_RELATIVE[@]}"; do
     git -C "$dir" add -f "test-data/datasets/$rel"
   done

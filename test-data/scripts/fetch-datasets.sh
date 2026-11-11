@@ -1783,7 +1783,7 @@ trap 'exit 129' HUP
 # intentional local edit to a tracked reference file survives, then let
 # has_required_dataset judge.
 capture_tracked_dataset_files
-restore_tracked_dataset_files missing-only || exit 1
+restore_tracked_dataset_files "$(_dataset_restore_mode && echo all || echo missing-only)" || exit 1   # CI: ALL, before the pin decision (#4508)
 
 if has_required_dataset && warm_cache_usable; then
   warm_cache_reconcile
@@ -1884,6 +1884,7 @@ if ! has_required_content; then
 fi
 
 write_bundle_manifest "${ASSET_PATH}"
+warm_cache_reconcile   # twins of tracked files the PR deleted/renamed come out of a cold extract too (#4508)
 write_pin
 echo "Dataset extracted to ${DATASET_ROOT}"
 guarantee_usable_root "fresh extraction"
