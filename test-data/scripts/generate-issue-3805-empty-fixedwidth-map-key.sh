@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-issue-3805-empty-fixedwidth-map-key.sh — Cassandra 5.0.2 EMPTY
+# generate-issue-3805-empty-fixedwidth-map-key.sh — Cassandra EMPTY
 # FIXED-WIDTH MULTICELL MAP KEY fixture (issue #3805).
 #
 # WHAT THIS PRODUCES AND WHY

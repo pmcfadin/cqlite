@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-compaction-tombstone-ttl-parity.sh — Cassandra 5.0.2 TOMBSTONE / TTL
+# generate-compaction-tombstone-ttl-parity.sh — Cassandra TOMBSTONE / TTL
 # COMPACTION byte-parity fixtures (issue #1387, epic #973; #1383/#4243).
 #
 # This is the tombstone/TTL analogue of generate-compaction-parity.sh (issue

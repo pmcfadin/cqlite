@@ -5,8 +5,9 @@
 //! of **sync-marker-delimited sections**. Each section begins with an 8-byte
 //! sync marker and holds a run of length-and-CRC-framed mutation records.
 //!
-//! All layouts below are verified byte-for-byte against a real Cassandra 5.0.2
-//! segment (the fixtures under `test-data/datasets/commitlog/`).
+//! All layouts below are verified byte-for-byte against real Cassandra 5.0.2 and
+//! 5.0.8 segments (version 7 is unchanged between them; the fixtures under
+//! `test-data/datasets/commitlog/`).
 //!
 //! ```text
 //! sync marker (8 bytes, big-endian):

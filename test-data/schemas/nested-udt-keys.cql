@@ -1,4 +1,4 @@
--- nested-udt-keys.cql — Cassandra 5.0.2 reference schema for the
+-- nested-udt-keys.cql — Cassandra reference schema for the
 -- NESTED-UDT-INSIDE-A-HASHABLE-POSITION read-fidelity slice (issue #3500).
 --
 -- WHY THIS FIXTURE EXISTS

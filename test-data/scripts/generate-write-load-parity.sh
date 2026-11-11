@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-write-load-parity.sh — Cassandra 5.0.2 write-load byte-parity fixtures
+# generate-write-load-parity.sh — Cassandra write-load byte-parity fixtures
 # (issue #1190, epic #969).
 #
 # Produces committed Cassandra-written reference SSTables for the three

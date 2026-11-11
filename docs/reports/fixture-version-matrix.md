@@ -78,7 +78,7 @@ the corpus (shipped in release `datasets-v3`).
 | `collection_table` | Collections (BTI index) | Yes |
 | `ttl_table` | TTL rows (BTI index) | Yes |
 
-**Note on sstabledump and BTI**: `sstabledump` from Cassandra 5.0.2 supports da/BTI format
+**Note on sstabledump and BTI**: `sstabledump` from Cassandra 5.0.8 (and 5.0.2) supports da/BTI format
 (it reads the Data.db directly, not the trie indexes). JSONL goldens were generated
 successfully for all 3 da tables.
 
@@ -129,20 +129,21 @@ enforced tables).  da/BTI tables remain SKIP-PENDING — see BTI read epic #660.
 UUID-based SSTable table IDs (e.g., `simple_table-6aa08200a25111f0a3fef1a551383fb9`)
 but the Data.db files inside use sequential integer IDs.
 
-### 2b. Docker-generated fixtures (Cassandra 5.0.2, Issue #654 permanent corpus)
+### 2b. Docker-generated fixtures (Cassandra 5.0.2 originally, 5.0.8 where regenerated; Issue #654 permanent corpus)
 
 These fixtures were generated with Cassandra 5.0.2 using the procedure below and are now
-permanently shipped as part of `datasets-v3` release. Schemas are in
+permanently shipped with the dataset release (`datasets-v3`, then `datasets-v4`, #4492). The `oa`/`da` tables
+are carried over from 5.0.2 byte-for-byte (`cassandra_source.carried_over`); only their goldens are re-dumped with 5.0.8. Schemas are in
 `test-data/schemas/oa-test.cql` and `test-data/schemas/da-test.cql`.
 
 #### Generation procedure
 
 ```bash
-# Start Cassandra 5.0.2 container
+# Start Cassandra container (5.0.2 when this corpus was cut; the generators now default to 5.0.8)
 docker run -d --name cqlite-oa-gen \
   -e MAX_HEAP_SIZE=1G -e HEAP_NEWSIZE=256m \
   -e CASSANDRA_CLUSTER_NAME=cqlite-oa-test \
-  cassandra:5.0.2
+  cassandra:5.0.8
 
 # Wait for readiness (~60s), then enable oa mode
 docker exec cqlite-oa-gen sed -i \
@@ -301,7 +302,7 @@ Provides:
 
 | Version letter | Format | Files (Data.db) | Source | Notes |
 |---|---|---|---|---|
-| `nb` | `big` | 59 | Main corpus (Cassandra 5.0.2, compat mode) | All 33 primary tables; CI-enforced |
+| `nb` | `big` | 59 | Main corpus (5.0.2 bytes carried over; regenerated tables 5.0.8; compat mode) | All 33 primary tables; CI-enforced |
 | `oa` | `big` | 6 | Issue #654 permanent corpus (5.0.2, `NONE` mode) | 6 tables; **CI-enforced (VG4 #656)** |
 | `da` | `bti` | 3 | Issue #654 permanent corpus (5.0.2, BTI format) | 3 tables; SKIP-PENDING (BTI read epic #660) |
 | `ma`–`me`, `na` | `big` | 0 | Not in corpus | Verified via synthetic unit tests only |

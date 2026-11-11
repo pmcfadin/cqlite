@@ -458,7 +458,7 @@ committed SSTable bytes and every recorded sha256 stay unchanged, which
 `scripts/tests/test_gen_perf_corpus_bti.sh` pins by re-hashing the committed `Data.db` against the
 manifest.
 
-- **It IS a correctness oracle** (issue #3042): Cassandra 5.0.2 wrote every byte, so the JSONL golden
+- **It IS a correctness oracle** (issue #3042): Cassandra wrote every byte (5.0.8; carried-over tables 5.0.2), so the JSONL golden
   can back BTI row/cell decode, `Rows.db` trie descent and compound-clustering-slice parity work.
 - **Its SIZE follows the repo's convention, not a row count.** The closest committed analogue is
   #3032's `test_da/multiclustering_table` — the *same* `PRIMARY KEY (pk, bucket, seq)` shape — at 468

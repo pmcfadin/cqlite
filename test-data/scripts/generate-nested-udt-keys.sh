@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-nested-udt-keys.sh — Cassandra 5.0.2 fixtures for NESTED UDTs reached
+# generate-nested-udt-keys.sh — Cassandra fixtures for NESTED UDTs reached
 # through a HASHABLE position (set element / map key) — issue #3500.
 #
 # WHY

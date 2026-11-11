@@ -1,4 +1,4 @@
--- write-load-parity.cql — Cassandra 5.0.2 reference schema for the three
+-- write-load-parity.cql — Cassandra reference schema for the three
 -- write_load_path byte-parity scenarios (issue #1190).
 --
 -- These three tables are written BY CASSANDRA (cqlsh + nodetool flush) to

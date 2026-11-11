@@ -111,7 +111,7 @@ Every fixture-backed scenario's `evidence` block MUST record enough to regenerat
 and re-compare the artifact against a snapshot or patched Cassandra build — not
 just a release tag:
 
-1. **Cassandra version** (`evidence.cassandra_version`, e.g. `5.0.2`).
+1. **Cassandra version** (`evidence.cassandra_version`, e.g. `5.0.8`).
 2. **Cassandra git SHA** (`evidence.cassandra_git_sha`) and **on-disk
    storage-format version** (`evidence.storage_format_version`, e.g. `nb`, `oa`,
    `da`). SHA + format version make the byte evidence reproducible against

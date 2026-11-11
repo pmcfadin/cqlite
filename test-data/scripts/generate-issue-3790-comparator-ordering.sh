@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-issue-3790-comparator-ordering.sh — Cassandra 5.0.2 INET/TIME
+# generate-issue-3790-comparator-ordering.sh — Cassandra INET/TIME
 # multicell-collection ORDERING fixture (issue #3790).
 #
 # WHAT THIS PRODUCES AND WHY

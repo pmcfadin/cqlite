@@ -1,4 +1,4 @@
--- compaction-parity.cql — Cassandra 5.0.2 reference schema for the live-cell
+-- compaction-parity.cql — Cassandra reference schema for the live-cell
 -- compaction byte-parity slice (issue #1017, epic #973).
 --
 -- These two tables are written BY CASSANDRA (cqlsh + nodetool flush) as TWO

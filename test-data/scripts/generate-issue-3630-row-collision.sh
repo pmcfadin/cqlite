@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-issue-3630-row-collision.sh — Cassandra 5.0.2 ROW-LEVEL
+# generate-issue-3630-row-collision.sh — Cassandra ROW-LEVEL
 # Object.prototype COLLISION fixture (issue #3630).
 #
 # WHAT THIS PRODUCES AND WHY

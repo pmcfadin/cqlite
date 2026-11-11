@@ -250,7 +250,7 @@ bash test-data/scripts/regenerate-datasets.sh --rows 200
 bash test-data/scripts/regenerate-datasets.sh --dry-run
 ```
 
-Requires Docker. The script runs a `cassandra:5.0.2` container through three phases
+Requires Docker. The script runs a `cassandra:5.0.8` container through three phases
 to produce nb, oa, and da/BTI SSTables. After regeneration, package and publish:
 
 ```bash

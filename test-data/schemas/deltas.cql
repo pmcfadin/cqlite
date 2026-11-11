@@ -1,7 +1,7 @@
 -- deltas.cql — Delete-bearing SSTable fixtures for CQLite issue #701
 -- Coordinates with issue #667 (tombstone readback coverage).
 --
--- Generated with Cassandra 5.0.2, storage_compatibility_mode: CASSANDRA_4 (nb BIG format)
+-- Generated with Cassandra 5.0.x (release pinned in test-data/scripts/lib/cassandra-image.sh; 5.0.2 for carried-over tables), storage_compatibility_mode: CASSANDRA_4 (nb BIG format)
 --
 -- Covers all eight delete/shape cases the delta-scan envelope must represent:
 --   1. Cell tombstone    (DELETE col FROM ...)                 → cell_tombstones

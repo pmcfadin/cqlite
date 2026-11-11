@@ -1,5 +1,5 @@
 -- OA Format Test Schema for CQLite Issue #654
--- Generated with Cassandra 5.0.2, storage_compatibility_mode: NONE (oa BIG format)
+-- Generated with Cassandra 5.0.x (release pinned in test-data/scripts/lib/cassandra-image.sh; 5.0.2 for carried-over tables), storage_compatibility_mode: NONE (oa BIG format)
 --
 -- Covers bug classes from epic #622:
 --   simple types, collections, tuple/UDT with >=128-byte field,

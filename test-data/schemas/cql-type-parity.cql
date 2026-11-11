@@ -1,6 +1,6 @@
 -- cql-type-parity.cql — CQL Type & Schema-Evolution parity SSTable fixtures for CQLite epic #971
 --
--- Generated with Cassandra 5.0.2, storage_compatibility_mode: CASSANDRA_4 (nb BIG format)
+-- Generated with Cassandra 5.0.x (release pinned in test-data/scripts/lib/cassandra-image.sh; 5.0.2 for carried-over tables), storage_compatibility_mode: CASSANDRA_4 (nb BIG format)
 --
 -- Keyspace: test_types (isolated from every other test corpus so they never collide)
 -- SSTable version: nb (BIG format, storage_compatibility_mode: CASSANDRA_4)

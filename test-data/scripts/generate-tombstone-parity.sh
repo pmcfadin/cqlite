@@ -618,7 +618,7 @@ log "gc_before_boundary TTLs: 86400 vs 86401 (localDeletionTime is wall-clock-de
 SSTABLES_DIR="$OUT_DIR/sstables"
 
 # ---------------------------------------------------------------------------
-# Start Cassandra container (nb/CASSANDRA_4 compat mode — default for 5.0.2)
+# Start Cassandra container (nb/CASSANDRA_4 compat mode — the default for 5.0.x)
 # ---------------------------------------------------------------------------
 log "Starting $CASSANDRA_IMAGE container ($CONTAINER_NAME)..."
 run $ENGINE run -d \

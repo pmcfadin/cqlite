@@ -404,7 +404,7 @@ strings. Normalization is needed for comparison — see
 ## Fail-closed guards vs non-deterministically-regenerated sources
 
 A fail-closed guard must key on something the source actually reproduces. CI regenerates
-clean SSTables from a live `cassandra:5.0.2` container on every run, and several
+clean SSTables from a live `cassandra:5.0.8` container on every run, and several
 components are **not byte-reproducible** between runs:
 
 - the **BTI (`da`) trie** — `Partitions.db` / `Rows.db`

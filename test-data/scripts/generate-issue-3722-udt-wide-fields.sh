@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-issue-3722-udt-wide-fields.sh — Cassandra 5.0.2 UDT FIELD-TYPE
+# generate-issue-3722-udt-wide-fields.sh — Cassandra UDT FIELD-TYPE
 # COVERAGE fixture (issue #3722).
 #
 # WHAT THIS PRODUCES AND WHY

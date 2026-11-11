@@ -1,5 +1,5 @@
 -- DA Format (BTI) Test Schema for CQLite Issue #654
--- Generated with Cassandra 5.0.2, sstable.selected_format: bti (da BTI format)
+-- Generated with Cassandra 5.0.x (release pinned in test-data/scripts/lib/cassandra-image.sh; 5.0.2 for carried-over tables), sstable.selected_format: bti (da BTI format)
 --
 -- Covers basic table types to validate BTI index file structure
 -- (Partitions.db, Rows.db instead of Index.db, Summary.db)
