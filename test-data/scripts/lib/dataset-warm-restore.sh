@@ -51,9 +51,22 @@ git_posix_path() {
 }
 
 # write_bundle_manifest <archive> — the bundle's regular files (the cache's own, bundle-derived list).
+# Built in a temp file in the same directory with EVERY stage's status checked, then renamed into place
+# only on success (atomic). On any failure no manifest is left behind (a partial one would be trusted and
+# make the reconcile delete legitimate files): returns 1, and the classifier then refuses (CI: the run
+# fails; local: it only notes that stale files cannot be classified).
 write_bundle_manifest() {
-  tar -tzf "$1" | sed -n "s#^${ARCHIVE_DATASET_ROOT}/##p" | grep -v -e '/$' -e '^$' -e '/\._' -e '^\._' -e '\.DS_Store$' \
-    | LC_ALL=C sort -u > "${DATASET_ROOT}/.dataset-manifest" || true
+  local dest="${DATASET_ROOT}/.dataset-manifest" w rc
+  rm -f "${dest}"
+  w="$(mktemp "${DATASET_ROOT}/.dataset-manifest.XXXXXX")" || return 1
+  tar -tzf "$1" > "${w}.1" || { rm -f "${w}" "${w}.1"; return 1; }
+  sed -n "s#^${ARCHIVE_DATASET_ROOT}/##p" "${w}.1" > "${w}.2" || { rm -f "${w}" "${w}".*; return 1; }
+  rc=0; grep -v -e '/$' -e '^$' -e '/\._' -e '^\._' -e '\.DS_Store$' "${w}.2" > "${w}.3" || rc=$?
+  [ "${rc}" -le 1 ] || { rm -f "${w}" "${w}".*; return 1; }          # grep rc 1 = no lines, checked by -s below
+  LC_ALL=C sort -u "${w}.3" > "${w}" || { rm -f "${w}" "${w}".*; return 1; }
+  rm -f "${w}".1 "${w}".2 "${w}".3
+  [ -s "${w}" ] || { rm -f "${w}"; return 1; }
+  mv -f "${w}" "${dest}" || { rm -f "${w}"; return 1; }
 }
 
 # The cache KEY carries this format (the `fmt2` segment of `datasets-fmt2-<tag>-<sha>` in every workflow

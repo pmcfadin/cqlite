@@ -336,5 +336,80 @@ rm -f "$BIN/sort"
 { [ "$RC" = 1 ] && case "$OUT" in *"could not classify"*) true ;; *) false ;; esac && has "$R8" old-name-Data.db.jsonl; } \
   && ok "a failing sort makes the classifier FAIL (rc 1, named); nothing is removed from partial lists" || bad "failing sort not fatal: rc=$RC $OUT"
 
+# 17. roborev job 208 (1): the fetch must be a STANDALONE command in every workflow/action step that runs it. A shell-level
+#     presence check (`[ -f x ] || bash fetch-datasets.sh`, `if ...; then bash ...; fi`, a case/loop) would let a complete
+#     warm cache skip the reconcile. Read each step's run: body (comments stripped, `\` continuations joined), not its `if:`.
+GUARD_PY='
+import glob, re, sys, yaml
+root = sys.argv[1]
+ALLOWED = re.compile(r"^(bash scripts/ci/ci-timing-summary\.sh measure \"[^\"]*\" -- )?bash \.?/?(test-data/scripts/fetch-datasets\.sh)$")
+seen, bad = 0, []
+def scan(label, text):
+    global seen
+    logical, cur = [], ""
+    for raw in text.splitlines():
+        line = re.sub(r"(^|\s)#.*$", "", raw).rstrip()
+        if line.endswith("\\"):
+            cur += line[:-1] + " "; continue
+        logical.append((cur + line).strip()); cur = ""
+    if cur: logical.append(cur.strip())
+    for l in logical:
+        if "fetch-datasets.sh" not in l: continue
+        seen += 1
+        if not ALLOWED.match(" ".join(l.split())):
+            bad.append(label + ": " + l)
+def walk(label, node):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in ("run", "generate", "script") and isinstance(v, str): scan(label, v)
+            else: walk(label, v)
+    elif isinstance(node, list):
+        for v in node: walk(label, v)
+for f in sorted(glob.glob(root + "/.github/workflows/*.y*ml") + glob.glob(root + "/.github/actions/*/action.y*ml")):
+    try: doc = yaml.safe_load(open(f))
+    except Exception as e: bad.append(f + ": unparsable: " + str(e)); continue
+    walk(f.split("/")[-1], doc)
+print(seen)
+for b in bad: print("BAD " + b)
+'
+guard_out="$(python3 -c "$GUARD_PY" "$REPO_ROOT")"
+guard_seen="$(head -1 <<<"$guard_out")"; guard_bad="$(grep '^BAD ' <<<"$guard_out" || true)"
+[ -z "$guard_bad" ] && [ "${guard_seen:-0}" -ge 17 ] && ok "every fetch-datasets.sh invocation ($guard_seen) is a standalone command: no shell-level if/case/loop/||/&& guard" \
+  || bad "a guarded or unparsed fetch invocation (seen=$guard_seen): $guard_bad"
+# mutation: reintroduce `[ -f x ] || bash ...` / `if ...; then` / `&&` and require each to be caught
+MUT="$T/wf-mut"; rm -rf "$MUT"; mkdir -p "$MUT/.github"; cp -R "$REPO_ROOT/.github/workflows" "$MUT/.github/workflows"; cp -R "$REPO_ROOT/.github/actions" "$MUT/.github/actions"
+for shape in '[ -f test-data/datasets/.dataset-pin ] || bash ./test-data/scripts/fetch-datasets.sh' 'if [ ! -d test-data/datasets ]; then bash ./test-data/scripts/fetch-datasets.sh; fi' 'test -f x && true && bash ./test-data/scripts/fetch-datasets.sh' 'bash ./test-data/scripts/fetch-datasets.sh || true'; do
+  cp "$REPO_ROOT/.github/workflows/observability-gate.yml" "$MUT/.github/workflows/observability-gate.yml"
+  python3 - "$MUT/.github/workflows/observability-gate.yml" "$shape" <<'PY'
+import sys
+p, shape = sys.argv[1], sys.argv[2]
+s = open(p).read()
+old = "run: bash ./test-data/scripts/fetch-datasets.sh"
+assert old in s
+open(p, "w").write(s.replace(old, "run: |\n          " + shape.replace("; ", ";\n          "), 1))
+PY
+  mut_out="$(python3 -c "$GUARD_PY" "$MUT")"
+  case "$mut_out" in *"BAD observability-gate.yml"*) ok "mutation caught: $shape" ;; *) bad "mutation NOT caught: $shape => $mut_out" ;; esac
+done
+
+# 18. roborev job 208 (2): write_bundle_manifest must not leave a partial manifest when a stage fails. A failing `sort -u`
+#     stub on a COLD run: no manifest and no temp file remain; CI refuses (exit 1), a local run continues with a note.
+R9="$T/r9"; make_repo "$R9"
+REAL_SORT="$(command -v sort)"
+printf '#!/bin/sh\ncase " $* " in *" -u "*) echo "sort: stub failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' "$REAL_SORT" > "$BIN/sort"; chmod +x "$BIN/sort"
+run_fetch "$R9" CI=true
+rm -f "$BIN/sort"
+{ [ "$RC" != 0 ] && [ ! -e "$R9/$DS/.dataset-manifest" ] && [ -z "$(find "$R9/$DS" -maxdepth 1 -name '.dataset-manifest*' 2>/dev/null)" ]; } \
+  && ok "a failing manifest stage: CI refuses (rc $RC), no partial manifest and no temp file left" || bad "partial manifest after a failing stage: rc=$RC $(find "$R9/$DS" -maxdepth 1 -name '.dataset-manifest*' | tr '\n' ' ') $OUT"
+R10="$T/r10"; make_repo "$R10"
+printf '#!/bin/sh\ncase " $* " in *" -u "*) echo "sort: stub failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' "$REAL_SORT" > "$BIN/sort"; chmod +x "$BIN/sort"
+run_fetch "$R10"
+rm -f "$BIN/sort"
+{ [ "$RC" = 0 ] && [ ! -e "$R10/$DS/.dataset-manifest" ] && case "$OUT" in *"could not write"*) true ;; *) false ;; esac; } \
+  && ok "a failing manifest stage, local: warned, no manifest, run continues" || bad "local failing-stage run: rc=$RC $OUT"
+overlay_cache "$R10"
+run_fetch "$R10" CI=true
+case "$OUT" in *"forcing a COLD restore"*) ok "a cache with no manifest is never classified from a partial one (forces a cold restore)" ;; *) bad "no cold restore after a missing manifest: $OUT" ;; esac
+
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

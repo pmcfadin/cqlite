@@ -1883,7 +1883,7 @@ if ! has_required_content; then
   exit 1
 fi
 
-write_bundle_manifest "${ASSET_PATH}"
+write_bundle_manifest "${ASSET_PATH}" || echo "WARNING: could not write ${DATASET_ROOT}/.dataset-manifest; stale files cannot be classified (CI refuses)" >&2
 warm_cache_reconcile   # twins of tracked files the PR deleted/renamed come out of a cold extract too (#4508)
 write_pin
 echo "Dataset extracted to ${DATASET_ROOT}"
