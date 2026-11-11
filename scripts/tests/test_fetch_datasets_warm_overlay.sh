@@ -222,13 +222,43 @@ step_bad="$(grep '^BAD ' <<<"$step_out" || true)"
 [ -z "$step_bad" ] && [ "${step_sites:-0}" -ge 15 ] && ok "every dataset cache restore ($step_sites sites) is followed by an unconditional reconcile" \
   || bad "a dataset cache restore lacks an unconditional reconcile (sites=$step_sites): $step_bad"
 
-# 10. Git Bash: a Windows-form root (C:\...) is normalised with cygpath instead of being appended to $PWD
-printf '#!/bin/sh\n[ "$1" = "-u" ] && printf "%%s\\n" "$STUB_CYGPATH_OUT"\n' > "$BIN/cygpath"; chmod +x "$BIN/cygpath"
+# 10. Git for Windows prints the paths it reports (toplevel, git dirs) in WINDOWS form (D:/a/x) and Git Bash maps them
+#     back with cygpath (roborev job 199 / the real Windows CI failure). Simulate both: a `git` shim that prefixes a
+#     drive letter on those rev-parse outputs, and a `cygpath -u` stub that strips it (and maps a fake Windows root).
+REAL_GIT="$(command -v git)"
+cat > "$BIN/git" <<SHIM
+#!/usr/bin/env bash
+# only the path-printing rev-parse calls are rewritten; every other call (ls-files -z, restore, diff) is the real git
+case " \$* " in
+  *" rev-parse "*)
+    case " \$* " in
+      *--show-toplevel*|*--absolute-git-dir*|*--git-common-dir*)
+        out=\$("$REAL_GIT" "\$@"); rc=\$?
+        [ -z "\$out" ] || out="D:\$out"
+        printf '%s\n' "\$out"; exit \$rc ;;
+    esac ;;
+esac
+exec "$REAL_GIT" "\$@"
+SHIM
+cat > "$BIN/cygpath" <<'CYG'
+#!/bin/sh
+[ "$1" = "-u" ] || exit 2
+case "$2" in
+  'C:\fake'*) printf '%s\n' "$STUB_CYGPATH_OUT" ;;
+  [A-Za-z]:*) p="${2#?:}"; printf '%s\n' "$p" ;;
+  *) printf '%s\n' "$2" ;;
+esac
+CYG
+chmod +x "$BIN/git" "$BIN/cygpath"
 R3="$T/r3"; make_repo "$R3"; run_fetch "$R3"
+[ "$RC" = 0 ] && ok "cold run succeeds with git printing D:/... toplevel and git dirs" || bad "cold run with Windows-form git paths failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
+overlay_cache "$R3"
+run_fetch "$R3" CI=true
+{ [ "$RC" = 0 ] && tracked_is "$R3" "$NEW"; } && ok "warm CI run reconciles with git printing Windows-form paths" || bad "warm run with Windows-form git paths failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
 overlay_cache "$R3"
 run_fetch "$R3" CI=true 'CQLITE_DATASETS_ROOT=C:\fake\checkout\test-data\datasets' STUB_CYGPATH_OUT="$R3/$DS"
 { [ "$RC" = 0 ] && tracked_is "$R3" "$NEW"; } && ok "a Windows-form CQLITE_DATASETS_ROOT is converted with cygpath and reconciled" || bad "windows-form root failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
-rm -f "$BIN/cygpath"
+rm -f "$BIN/git" "$BIN/cygpath"
 
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

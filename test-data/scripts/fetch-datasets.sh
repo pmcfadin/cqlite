@@ -115,13 +115,13 @@ guard_git() {
     git "$@"
   )
 }
+. "$(dirname "${BASH_SOURCE[0]}")/lib/dataset-warm-restore.sh"   # warm-cache reconcile (#4508)
 
 canonicalize_dataset_root() {
   local raw_root="$1"
   local abs_root parent base parent_abs repo_root
 
-  case "${raw_root}" in [A-Za-z]:[\\/]*) # Git Bash: a Windows-form root (C:\...) -> POSIX form
-    ! command -v cygpath >/dev/null 2>&1 || raw_root="$(cygpath -u "${raw_root}")" ;; esac
+  raw_root="$(git_posix_path "${raw_root}")"   # Git Bash: C:\... / D:/... -> /c/... (#4508)
   case "${raw_root}" in
     ""|"/"|".")
       fail_unsafe_dataset_root "must point at a dataset directory, not a filesystem root"
@@ -155,7 +155,7 @@ canonicalize_dataset_root() {
   abs_root="${parent_abs}/${base}"
 
   if repo_root="$(guard_git rev-parse --show-toplevel 2>/dev/null)"; then
-    repo_root="$(cd "${repo_root}" && pwd -P)"
+    repo_root="$(cd "$(git_posix_path "${repo_root}")" && pwd -P)"
     [ "${abs_root}" != "${repo_root}" ] \
       || fail_unsafe_dataset_root "refusing to replace the repository root"
   fi
@@ -178,7 +178,6 @@ PIN_FILE="${DATASET_ROOT}/.dataset-pin"
 WIDE_PARTITION_DIR="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
 WIDE_PARTITION_GOLDEN="${WIDE_PARTITION_DIR}/nb-2-big-Data.db.jsonl"
 
-. "$(dirname "${BASH_SOURCE[0]}")/lib/dataset-warm-restore.sh"   # warm-cache reconcile (#4508)
 write_pin() {
   mkdir -p "${DATASET_ROOT}"
   {
@@ -319,6 +318,7 @@ refuse_unprotected_dataset_root() {
 # restore.
 physical_path() {
   local target="$1" suffix="" head resolved
+  target="$(git_posix_path "${target}")"   # Git for Windows prints D:/a/x, which is NOT relative (#4508)
   case "${target}" in
     /*) ;;
     "") return 1 ;;
@@ -1150,7 +1150,7 @@ guarantee_usable_root() {
   # like a valid choice and yield a corpus-less root (the #3131 report).
   local repo_root repo_default
   if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-    repo_default="$(cd "${repo_root}" && pwd -P)/test-data/datasets"
+    repo_default="$(cd "$(git_posix_path "${repo_root}")" && pwd -P)/test-data/datasets"
     if [ "${DATASET_ROOT}" != "${repo_default}" ]; then
       echo "NOTE: this run populated ${DATASET_ROOT}, NOT the checkout default"
       echo "NOTE:   ${repo_default}"

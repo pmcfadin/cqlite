@@ -34,6 +34,18 @@
 # so a file the PR deleted is a plain bundle member there and cannot be told from a binary; the
 # canonical cache is built on main, so PR runs are warm.
 
+# git_posix_path <path> — Git for Windows prints the paths it reports (rev-parse --show-toplevel,
+# --absolute-git-dir, --git-common-dir) in WINDOWS form (D:/a/x), which a POSIX-minded caller reads as
+# RELATIVE and joins onto $PWD. Under Git Bash the same file is /d/a/x; cygpath converts. Anything that is
+# not Windows-form (every Linux/macOS path) is returned unchanged. Paths git prints REPO-RELATIVE
+# (ls-files, diff --name-only) need no conversion.
+git_posix_path() {
+  case "$1" in
+    [A-Za-z]:[\\/]*) if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; return; fi ;;
+  esac
+  printf '%s\n' "$1"
+}
+
 # write_bundle_manifest <archive> — both build-time lists.
 write_bundle_manifest() {
   tar -tzf "$1" | sed -n "s#^${ARCHIVE_DATASET_ROOT}/##p" | grep -v -e '/$' -e '^$' -e '/\._' -e '^\._' -e '\.DS_Store$' \
