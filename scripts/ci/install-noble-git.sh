@@ -113,7 +113,9 @@ if [ "$codename" != noble ]; then
 fi
 
 rc=0; pass "configured mirror" || rc=$?
-if [ "$rc" = 1 ]; then
+# rc 1 = the mirror failed; rc 2 = it answered but has no 2.43 (stale or incomplete mirror). Both try the canonical
+# origin; "no 2.43" is reported only if the fallback ALSO answers without one.
+if [ "$rc" = 1 ] || [ "$rc" = 2 ]; then
   fb="$(mktemp -d)" || plain_error "could not create a scratch directory for the fallback apt source"
   # archive.ubuntu.com serves noble and noble-updates (git 2.43.0-1ubuntu7.x is in noble-updates);
   # noble-security lives on security.ubuntu.com, so it gets its own stanza.
@@ -131,7 +133,7 @@ Components: main universe
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 SRC
   EXTRA_OPTS=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=${fb}")
-  echo "the configured mirror failed persistently; retrying once against ${FALLBACK_URI}" >&2
+  echo "the configured mirror failed or lacks git 2.43 (pass rc=${rc}); retrying once against ${FALLBACK_URI}" >&2
   rc=0; pass "fallback ${FALLBACK_URI}" || rc=$?
   rm -rf "$fb"
 fi

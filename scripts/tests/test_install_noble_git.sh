@@ -61,7 +61,8 @@ case "$fbk" in primary) lim="${STUB_CACHE_FAILS_PRIMARY:-0}" ;; *) lim="${STUB_C
 if [ "$n" -le "$lim" ]; then echo "E: apt-cache: could not open the package cache" >&2; exit 100; fi
 bar='|'
 row() { printf ' git %s %s %s http://example/ubuntu %s amd64 Packages\n' "$bar" "$1" "$bar" "$2"; }
-if [ -n "${STUB_NO_243:-}" ]; then row 1:2.50.0-1 noble/main; exit 0; fi
+[ "$fbk" = primary ] && np="${STUB_NO_243_PRIMARY:-}" || np="${STUB_NO_243_FALLBACK:-}"
+if [ -n "${STUB_NO_243:-}" ] || [ -n "$np" ]; then row 1:2.50.0-1 noble/main; exit 0; fi
 row 1:2.43.0-1ubuntu7.4 noble-updates/main
 row 1:2.43.0-1ubuntu7 noble/main
 STUB
@@ -141,6 +142,16 @@ run infra STUB_UPDATE_FAILS_PRIMARY=99 STUB_UPDATE_FAILS_FALLBACK=99
 # 7. genuine non-infra failures must NOT read as INFRA
 run no243 STUB_NO_243=1
 { [ "$RC" = 1 ] && has "no 2.43 git" && ! has "INFRA:"; } && ok "no 2.43 in the archive: plain error, not INFRA" || bad "no-2.43: rc=$RC $OUT"
+# 7b. the primary answers but has no 2.43 (stale/incomplete mirror): the canonical origin is still tried
+run stale STUB_NO_243_PRIMARY=1
+{ [ "$RC" = 0 ] && [ "$(cnt update.fallback)" = 1 ] && has "lacks git 2.43" && ! has "no 2.43 git"; } \
+  && ok "primary-only absence: the fallback runs and finds git 2.43 (no 'missing' report)" || bad "stale primary: rc=$RC $OUT"
+run bothno STUB_NO_243_PRIMARY=1 STUB_NO_243_FALLBACK=1
+{ [ "$RC" = 1 ] && has "no 2.43 git" && ! has "INFRA:" && [ "$(cnt update.fallback)" = 1 ]; } \
+  && ok "absence on BOTH sources (fallback query succeeded): plain 'no 2.43' error, not INFRA" || bad "both absent: rc=$RC $OUT"
+run stale_unreach STUB_NO_243_PRIMARY=1 STUB_UPDATE_FAILS_FALLBACK=99
+{ [ "$RC" = 75 ] && has "INFRA:" && ! has "no 2.43 git"; } \
+  && ok "primary lacks 2.43 and the fallback is unreachable: INFRA, not a verdict on the archive" || bad "stale+unreachable: rc=$RC $OUT"
 run wrong "GIT_VERSION_CMD=echo git version 2.50.0"
 { [ "$RC" = 1 ] && has "wanted 2.43" && ! has "INFRA:"; } && ok "wrong git after the pin: plain error, not INFRA" || bad "wrong git: rc=$RC $OUT"
 run jammy "OS_RELEASE_FILE=$T/os-jammy"
