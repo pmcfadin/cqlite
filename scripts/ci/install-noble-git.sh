@@ -28,6 +28,7 @@ APT_CACHE="${APT_CACHE:-apt-cache}"
 RETRIES="${INSTALL_GIT_RETRIES:-4}"
 BACKOFF="${INSTALL_GIT_BACKOFF:-5}"
 FALLBACK_URI="${INSTALL_GIT_FALLBACK_URI:-http://archive.ubuntu.com/ubuntu}"
+FALLBACK_SECURITY_URI="${INSTALL_GIT_FALLBACK_SECURITY_URI:-http://security.ubuntu.com/ubuntu}"
 OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 GIT_VERSION_CMD="${GIT_VERSION_CMD:-git --version}"
 APT_OPTS=(-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
@@ -52,8 +53,22 @@ with_retries() {
   done
 }
 
-apt_update()  { # shellcheck disable=SC2086
-  ${APT_GET} ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"} "${APT_OPTS[@]}" update -qq; }
+# apt-get update can exit 0 after fetch failures (it only WARNS that indexes were ignored), which would read as
+# "no 2.43 in the archive" and skip both retry and fallback. APT::Update::Error-Mode=any (apt >= 2.1; noble ships
+# 2.7) makes any failed index an error; the output scan is the belt to that brace for an apt that ignores it.
+apt_update() {
+  local out rc=0
+  out="$(mktemp)" || return 1
+  # shellcheck disable=SC2086
+  ${APT_GET} ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"} "${APT_OPTS[@]}" -o APT::Update::Error-Mode=any update -qq >"${out}" 2>&1 || rc=$?
+  cat "${out}" >&2
+  if [ "${rc}" = 0 ] && grep -q -e '^W: Failed to fetch' -e 'Some index files failed to download' -e '^E: ' "${out}"; then
+    echo "apt-get update exited 0 but reported failed index fetches; treating as a failure" >&2
+    rc=1
+  fi
+  rm -f "${out}"
+  return "${rc}"
+}
 apt_install() { # shellcheck disable=SC2086
   ${APT_GET} ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"} "${APT_OPTS[@]}" install -y -qq --allow-downgrades "git=$1" "git-man=$1"; }
 
@@ -83,10 +98,18 @@ fi
 rc=0; pass "configured mirror" || rc=$?
 if [ "$rc" = 1 ]; then
   fb="$(mktemp -d)" || plain_error "could not create a scratch directory for the fallback apt source"
+  # archive.ubuntu.com serves noble and noble-updates (git 2.43.0-1ubuntu7.x is in noble-updates);
+  # noble-security lives on security.ubuntu.com, so it gets its own stanza.
   cat > "$fb/fallback.sources" <<SRC
 Types: deb
 URIs: ${FALLBACK_URI}
-Suites: noble noble-updates noble-security
+Suites: noble noble-updates
+Components: main universe
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: ${FALLBACK_SECURITY_URI}
+Suites: noble-security
 Components: main universe
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 SRC

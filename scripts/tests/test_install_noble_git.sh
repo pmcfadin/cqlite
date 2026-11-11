@@ -24,11 +24,29 @@ case "$args" in *Dir::Etc::sourceparts=*) fb=fallback; fbdir="$(sed -E 's/.*Dir:
 case "$args" in *" update"*) act=update ;; *" install "*) act=install ;; *) act=other ;; esac
 cnt="$STUB_DIR/$act.$fb"; n=$(( $(cat "$cnt" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$cnt"
 if [ "$fb" = fallback ] && [ -f "$fbdir/fallback.sources" ]; then sed 's/^/FALLBACK-SOURCE /' "$fbdir/fallback.sources" >> "$STUB_LOG"; fi
+# reject suites a host does not serve: archive.ubuntu.com has no noble-security; security.ubuntu.com only noble-security
+if [ "$fb" = fallback ] && [ "$act" = update ] && [ -f "$fbdir/fallback.sources" ]; then
+  uri=""; while IFS= read -r l; do
+    case "$l" in
+      "URIs: "*) uri="${l#URIs: }" ;;
+      "Suites: "*) for su in ${l#Suites: }; do
+          case "$uri:$su" in
+            *archive.ubuntu.com*:noble|*archive.ubuntu.com*:noble-updates|*security.ubuntu.com*:noble-security) ;;
+            *) echo "E: The repository '$uri $su Release' does not have a Release file (404)" >&2; exit 100 ;;
+          esac; done ;;
+    esac; done < "$fbdir/fallback.sources"
+fi
 case "$act.$fb" in
   update.primary) lim="${STUB_UPDATE_FAILS_PRIMARY:-0}" ;;  update.fallback) lim="${STUB_UPDATE_FAILS_FALLBACK:-0}" ;;
   install.primary) lim="${STUB_INSTALL_FAILS_PRIMARY:-0}" ;; install.fallback) lim="${STUB_INSTALL_FAILS_FALLBACK:-0}" ;;
   *) lim=0 ;;
 esac
+if [ "$act" = update ] && [ "$n" -le "${STUB_UPDATE_WARN_PRIMARY:-0}" ] && [ "$fb" = primary ]; then
+  echo "W: Failed to fetch http://azure.archive.ubuntu.com/ubuntu/dists/noble/InRelease  Temporary failure resolving 'azure.archive.ubuntu.com'" >&2
+  echo "W: Some index files failed to download. They have been ignored, or old ones used instead." >&2
+  case "$args" in *APT::Update::Error-Mode=any*) [ -n "${STUB_IGNORE_ERROR_MODE:-}" ] || exit 100 ;; esac
+  exit 0     # warn-but-exit-0: what apt does without Error-Mode=any
+fi
 if [ "$n" -le "$lim" ]; then
   echo "W: Failed to fetch http://azure.archive.ubuntu.com/ubuntu/dists/noble/InRelease  Temporary failure resolving 'azure.archive.ubuntu.com'" >&2
   exit 100
@@ -80,6 +98,21 @@ run fb STUB_UPDATE_FAILS_PRIMARY=99
   && ok "persistent mirror failure: 3 bounded attempts, then ONE pass against the second source, which succeeds" || bad "fallback: rc=$RC $OUT"
 grep -q 'FALLBACK-SOURCE URIs: http://archive.ubuntu.com/ubuntu' "$LOG" && ok "the fallback apt source points at archive.ubuntu.com" || bad "fallback source not archive.ubuntu.com: $(grep FALLBACK "$LOG")"
 grep -q 'Dir::Etc::sourcelist=/dev/null' "$LOG" && ok "the fallback replaces, rather than edits, the runner's apt sources" || bad "fallback does not isolate the apt sources"
+
+# 4b. update WARNS about failed indexes and exits 0 (apt without Error-Mode, or ignoring it): still retried, not read as "no 2.43"
+grep -q 'APT::Update::Error-Mode=any' "$T/log-fb" && ok "update is invoked with APT::Update::Error-Mode=any" || bad "no Error-Mode=any on update"
+run warn STUB_UPDATE_WARN_PRIMARY=2 STUB_IGNORE_ERROR_MODE=1
+{ [ "$RC" = 0 ] && [ "$(cnt update.primary)" = 3 ] && has "treating as a failure" && ! has "no 2.43 git"; } \
+  && ok "warn-but-exit-0 update (Error-Mode ignored) is detected from its output, retried, then succeeds" || bad "warn-exit-0: rc=$RC updates=$(cnt update.primary) $OUT"
+run warn2 STUB_UPDATE_WARN_PRIMARY=99 STUB_IGNORE_ERROR_MODE=1
+{ [ "$RC" = 0 ] && [ "$(cnt update.fallback)" = 1 ]; } && ok "persistent warn-but-exit-0 reaches the fallback instead of reading as a missing git" || bad "warn-exit-0 fallback: rc=$RC $OUT"
+run warn3 STUB_UPDATE_WARN_PRIMARY=1
+{ [ "$RC" = 0 ] && [ "$(cnt update.primary)" = 2 ]; } && ok "with Error-Mode=any honoured the warned update exits non-zero and is retried" || bad "error-mode path: rc=$RC $OUT"
+
+# 4c. the fallback stanzas only ask each host for suites it serves (the stub rejects anything else)
+grep -q 'FALLBACK-SOURCE Suites: noble-security' "$LOG" 2>/dev/null; run fbs STUB_UPDATE_FAILS_PRIMARY=99
+{ [ "$RC" = 0 ] && grep -q 'URIs: http://security.ubuntu.com/ubuntu' "$LOG" && grep -q 'Suites: noble-security' "$LOG" && ! grep -q 'Suites: noble noble-updates noble-security' "$LOG"; } \
+  && ok "noble-security is requested from security.ubuntu.com in its own stanza, not from archive.ubuntu.com" || bad "fallback suites wrong: $(grep -E 'URIs|Suites' "$LOG")"
 
 # 5. install persistently fails on the primary -> fallback pass runs update + install again
 run fbi STUB_INSTALL_FAILS_PRIMARY=99
