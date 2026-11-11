@@ -1,11 +1,12 @@
 //! Issue #1236 (verify-parity): fail-closed Cassandra parity for the SSTable
-//! verifier over the Cassandra-5.0.8-written corrupted-component corpus.
+//! verifier over the corrupted-component corpus: mixed-version, the 5.0.8-written `test_comp`
+//! sources plus the carried-over 5.0.2-written `test_da/wide_table` BTI source.
 //!
 //! This is the parity layer on top of the shipped verify surface
 //! (`cqlite_core::storage::sstable::verify::verify_sstable`, the same call path
 //! behind `cqlite verify --mode full`). For every corrupted fixture in the
-//! `corruption/test_comp_corrupt` corpus — whose clean source was written by
-//! Apache Cassandra 5.0.8 — it asserts:
+//! `corruption/test_comp_corrupt` corpus — whose clean sources were written by
+//! Apache Cassandra 5.0.8 (`test_comp`) or 5.0.2 (carried-over `test_da/wide_table`) — it asserts:
 //!
 //! 1. **Class match.** The returned `VerifyReport.findings` contain the
 //!    fixture's manifest-declared `expected_error_class`.
