@@ -37,9 +37,11 @@ exit 0
 STUB
 cat > "$T/apt-cache" <<'STUB'
 #!/usr/bin/env bash
-[ -z "${STUB_NO_243:-}" ] || { echo " git | 1:2.50.0-1 | http://example/ noble/main amd64 Packages"; exit 0; }
-echo " git | 1:2.43.0-1ubuntu7.4 | http://azure.archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages"
-echo " git | 1:2.43.0-1ubuntu7 | http://azure.archive.ubuntu.com/ubuntu noble/main amd64 Packages"
+bar='|'
+row() { printf ' git %s %s %s http://example/ubuntu %s amd64 Packages\n' "$bar" "$1" "$bar" "$2"; }
+if [ -n "${STUB_NO_243:-}" ]; then row 1:2.50.0-1 noble/main; exit 0; fi
+row 1:2.43.0-1ubuntu7.4 noble-updates/main
+row 1:2.43.0-1ubuntu7 noble/main
 STUB
 chmod +x "$T/apt-get" "$T/apt-cache"
 printf 'VERSION_CODENAME=noble\n' > "$T/os-noble"; printf 'VERSION_CODENAME=jammy\n' > "$T/os-jammy"
