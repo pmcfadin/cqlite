@@ -7,7 +7,7 @@
 //! # Fixture approach (documented, honest)
 //!
 //! The shipped corruption corpus (issue #1236, `generate-corruption-corpus.sh`)
-//! commissions its fixtures from Apache-Cassandra-5.0.2-written clean sources and
+//! commissions its fixtures from Apache-Cassandra-written clean sources (5.0.8 `test_comp`; 5.0.2 carried-over `test_da/wide_table`) and
 //! captures the ACTUAL `sstableverify --extended` verdict per fixture. For the two
 //! classes here, capturing a *real* Cassandra verdict requires running the
 //! Cassandra container's `sstableverify` on custom-mutated bytes; that container is
@@ -83,7 +83,7 @@ fn uncompressed_source(root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Locate the committed real Cassandra-5.0.2-written UNCOMPRESSED multi-partition
+/// Locate the committed real Cassandra-5.0.8-written UNCOMPRESSED multi-partition
 /// `nb` source that HAS clustering columns (int PK, int CK, several clustering
 /// rows per partition). Returns `None` when its Data.db is not fetched.
 fn clustered_uncompressed_source(root: &Path) -> Option<PathBuf> {
@@ -348,7 +348,7 @@ async fn order_ldt_out_of_order_partition_keys_is_flagged_corrupt() {
 /// see module docs.)
 ///
 /// The source `test_writeparity/partition_boundary` is a real
-/// Cassandra-5.0.2-written UNCOMPRESSED `nb` table `(id INT, ck INT, v TEXT)
+/// Cassandra-5.0.8-written UNCOMPRESSED `nb` table `(id INT, ck INT, v TEXT)
 /// PRIMARY KEY (id, ck)`; partition `id=1` holds four fixed-width 16-byte
 /// clustering rows (`ck` = 1,2,3,4) at Data.db offsets 18/34/50/66. We SWAP the
 /// first two 16-byte row records (making the on-disk clustering order 2,1,3,4)

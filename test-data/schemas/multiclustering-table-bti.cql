@@ -1,6 +1,6 @@
 -- BTI (`da`) COMPOUND-CLUSTERING fixture schema (issue #3032).
 --
--- `test_da/multiclustering_table` is a Cassandra 5.0.2 BTI ("da") SSTable with 3
+-- `test_da/multiclustering_table` is a Cassandra 5.0.8 BTI ("da") SSTable with 3
 -- partitions (pk = 1, 2, 3) whose clustering key has TWO components of DIFFERING
 -- types — `bucket text` then `seq int`. Unlike `test_da/wide_table` (a single
 -- `int` clustering column, whose row-index separators are all
@@ -14,7 +14,7 @@
 -- other.
 --
 -- Fixture provenance: test-data/scripts/gen-multiclustering-bti.sh
--- (cassandra:5.0.2, storage_compatibility_mode NONE, selected_format bti,
+-- (cassandra:5.0.8, storage_compatibility_mode NONE, selected_format bti,
 -- column_index_size 2KiB, LZ4).
 
 CREATE KEYSPACE IF NOT EXISTS test_da WITH replication = {

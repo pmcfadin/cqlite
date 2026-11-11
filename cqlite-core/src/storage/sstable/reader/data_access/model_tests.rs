@@ -409,7 +409,7 @@ fn physical_bounds_no_order_defaults_ascending() {
 /// and the slice was truncated to it (12 of 60 rows on the
 /// `test_da/multiclustering_table` fixture).
 ///
-/// The literal separator bytes below are the real Cassandra 5.0.2-written ones
+/// The literal separator bytes below are the real Cassandra-written ones (captured from the 5.0.2-written fixture, pinned here as literals; the fixture was later regenerated on 5.0.8)
 /// from that fixture's `Rows.db` (`da-2-bti-Rows.db`, pk=1), not this encoder's
 /// output.
 #[cfg(not(feature = "tombstones"))]
