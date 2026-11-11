@@ -1,2 +1,2 @@
-{"table kind":"REGULAR","partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":18,"cells":[{"name":"c","value":422212677445164,"tstamp":"2026-06-25T06:51:41.291459Z"}]}]}
-{"table kind":"REGULAR","partition":{"key":["2"],"position":62},"rows":[{"type":"row","position":80,"cells":[{"name":"c","value":422212677445164,"tstamp":"2026-06-25T06:51:41.293399Z"}]}]}
+{"table kind":"REGULAR","partition":{"key":["1"],"position":18},"rows":[{"type":"row","position":18,"cells":[{"name":"c","value":422215599272491,"tstamp":"2026-11-10T05:40:39.654523Z"}]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":80},"rows":[{"type":"row","position":80,"cells":[{"name":"c","value":422215599272491,"tstamp":"2026-11-10T05:40:39.662750Z"}]}]}

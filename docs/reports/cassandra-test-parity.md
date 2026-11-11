@@ -2,7 +2,7 @@
 
 > Generated from `test-data/cassandra-parity-manifest.yml` by `cargo run -p cassandra-parity -- report`. Do not edit by hand — edit the manifest and regenerate.
 
-Cassandra source: [`cassandra-5.0.2`](https://github.com/apache/cassandra/tree/cassandra-5.0.2) @ `f278f6774fc76465c182041e081982105c3e7dbb` (git SHA). Program: parent epic #966, reporting epic #967.
+Cassandra source: [`cassandra-5.0.8`](https://github.com/apache/cassandra/tree/cassandra-5.0.8) @ `172227094626d50d4bc9a3d9de2e3659a7844386` (git SHA). Program: parent epic #966, reporting epic #967.
 
 Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) · [`docs/reports/cassandra-test-parity-assessment.md`](../../docs/reports/cassandra-test-parity-assessment.md)
 

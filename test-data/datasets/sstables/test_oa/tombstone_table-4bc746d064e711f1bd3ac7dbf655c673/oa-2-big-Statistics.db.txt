@@ -1,4 +1,4 @@
-SSTable: /var/lib/cassandra/data/test_oa/tombstone_table-4bc746d064e711f1bd3ac7dbf655c673/oa-2-big
+SSTable: /data/test_oa/tombstone_table-4bc746d064e711f1bd3ac7dbf655c673/oa-2-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 06/10/2026 16:14:00 (1781108040859663)

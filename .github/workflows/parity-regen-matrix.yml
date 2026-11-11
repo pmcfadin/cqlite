@@ -18,7 +18,7 @@ name: "CI: Parity Regen Matrix (Nightly Docker, Epic #2636)"
 # ---------------------------------------------------
 # The fixture matrices (test_comp / test_comp_corrupt, test_types, test_tomb /
 # test_deltas / test_compaction_tombstone_ttl) are regenerated from a Cassandra
-# 5.0.2 container by the generator scripts below. The fast PR gate
+# 5.0.8 container (test-data/scripts/lib/cassandra-image.sh) by the generator scripts below. The fast PR gate
 # (sstabledump-parity-gate.yml) only fetches the published bundle, so the
 # fixture-backed tests there skip-clean when those fixtures are absent and could
 # FALSE-PASS. This workflow REGENERATES the fixtures from scratch, then runs each
@@ -103,10 +103,9 @@ on:
       - 'test-data/datasets/sstables/test_compaction_tombstone_ttl/**'
 
 env:
-  # Regenerated fixtures are compared with COMMITTED evidence here (the corruption verdicts
-  # were captured on 5.0.2; scenario evidence is 5.0.2), so the generators stay on 5.0.2.
-  CQLITE_CASSANDRA_RELEASE: "5.0.2"  # 5.0.2 until #4482 fixture-regeneration stage moves fixtures+evidence together
-  CASSANDRA_IMAGE: cassandra:5.0.2  # informational: the generators take the pin from test-data/scripts/lib/cassandra-image.sh
+  # Regenerated fixtures are compared with COMMITTED evidence here (scenario evidence and the
+  # corruption verdicts are 5.0.8, #4492), so the generators run on the default release.
+  CASSANDRA_IMAGE: cassandra:5.0.8  # informational: the generators take the pin from test-data/scripts/lib/cassandra-image.sh
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 
 permissions:

@@ -58,8 +58,8 @@ bti_rows_truncation            da-2-bti-Rows.db     truncate     256       OK
 statistics_db_header_damage    nb-1-big-Statistics.db setbyte      0         OK
   statistics_db_header_damage:
       component        : nb-1-big-Statistics.db
-      clean   SHA256   : 8c82891a646ded766c048c8fddbaf948222ffdb290097f1391d84db9c766511f  (4847 bytes)
-      corrupt SHA256   : 9e225cc2d2500249be98d06bf3c3814ab58ff470de9034449b7fbfac38e78a00  (4847 bytes)
+      clean   SHA256   : 02f636e457c199296987c8d75de516d0e84b98b7fb41ee9e869d9a15457c1dde  (4847 bytes)
+      corrupt SHA256   : fd760e3095de3621a4441d8a21d6589ee14ffb718a7b7ff84a1d0804bc5fa5c3  (4847 bytes)
       mutation         : setbyte @ 0  (orig=00 mut=ff)
       single-mutation  : OK
 summary_db_truncation          nb-1-big-Summary.db  truncate     16        OK
@@ -72,8 +72,8 @@ summary_db_truncation          nb-1-big-Summary.db  truncate     16        OK
 toc_missing_component          nb-1-big-TOC.txt     tocdrop      line      OK
   toc_missing_component:
       component        : nb-1-big-TOC.txt
-      clean   SHA256   : cf526377ebd42f4caa5373174928b4135b907d829e714d0396accba86cdb1af5  (92 bytes)
-      corrupt SHA256   : 7989bb984960f1b552ca339295c192ffd976aae36db3135db71418e0ef3e71bc  (78 bytes)
+      clean   SHA256   : 33cfbe3387065ce18f0af14d1c00d9c70787938a4889d75fc6f7d400d83ca4f5  (92 bytes)
+      corrupt SHA256   : 4556bc08483090928ccdddbdf3c545874c40f86f0721cf6caf5710b8e7a2d9a6  (78 bytes)
       mutation         : tocdrop @ line  (orig=line:Statistics.db mut=removed)
       single-mutation  : OK
 digest_crc32_mismatch          nb-1-big-Digest.crc32 digest       text      OK

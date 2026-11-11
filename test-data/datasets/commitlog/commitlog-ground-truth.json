@@ -1,8 +1,8 @@
 {
-  "cassandra_image": "cassandra:5.0.2",
+  "cassandra_image": "cassandra:5.0.8",
   "keyspace": "commitlog_test",
   "table": "users",
-  "table_id": "d6de7150-8448-11f1-bf5a-bf4cbc47cb4a",
+  "table_id": "dc2d1cf0-dcc8-11f1-be1b-6d4cbb83f4d8",
   "schema": "CREATE TABLE commitlog_test.users (id int PRIMARY KEY, name text, age int)",
   "primary_key": {
     "partition": [
@@ -49,5 +49,14 @@
       "name": "eve",
       "age": 29
     }
-  ]
+  ],
+  "segment": {
+    "id": 1794289002839,
+    "version": 7,
+    "files": {
+      "clean": "clean-CommitLog-7-1794289002839.log",
+      "truncated": "truncated-CommitLog-7-1794289002839.log",
+      "corrupt_crc": "corrupt-crc-CommitLog-7-1794289002839.log"
+    }
+  }
 }

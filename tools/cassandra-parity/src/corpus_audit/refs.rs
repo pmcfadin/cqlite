@@ -128,13 +128,56 @@ pub fn covering_scenarios<'a>(
 /// regeneration populated — i.e. some produced file lives strictly under it. Used
 /// so a scenario that references a keyspace dir (or the corpus root) rather than a
 /// single component file is satisfied by coverage of that directory (issue #2009).
+/// The `keyspace.table` identities a scenario's corpus references cover, resolved against the
+/// corpus inventory (#4492). A component or table-directory reference names one table; a
+/// keyspace directory (or the `sstables` root) covers every table the inventory holds under
+/// it. A reference outside `sstables/` (commitlog, corruption, metadata) is never carried
+/// over, so it contributes a `<corpus>:<path>` token that no `carried_over` entry matches.
+/// System keyspaces are excluded exactly as in [`covering_scenarios`].
+pub fn scenario_tables(s: &Scenario, inventory: &CorpusInventory) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let table_of = |rel_parts: &[&str]| -> Option<String> {
+        (rel_parts.len() >= 2)
+            .then(|| format!("{}.{}", rel_parts[0], strip_uuid_suffix(rel_parts[1])))
+    };
+    for r in corpus_refs(s) {
+        if is_system_keyspace_path(&r) {
+            continue;
+        }
+        let rel = r[CORPUS_PREFIX.len()..].trim_end_matches('/');
+        let Some(under) = rel.strip_prefix("sstables") else {
+            out.insert(format!("<corpus>:{rel}"));
+            continue;
+        };
+        let parts: Vec<&str> = under.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.len() >= 2 {
+            out.extend(table_of(&parts));
+            continue;
+        }
+        // keyspace directory or the sstables root: expand through the inventory.
+        let prefix = format!(
+            "{CORPUS_PREFIX}sstables/{}",
+            parts.first().map(|k| format!("{k}/")).unwrap_or_default()
+        );
+        for f in inventory.files.iter().filter(|f| f.starts_with(&prefix)) {
+            let tail: Vec<&str> = f[prefix.len()..].split('/').collect();
+            let mut full: Vec<&str> = parts.clone();
+            full.extend(tail);
+            if !is_system_keyspace_path(f) {
+                out.extend(table_of(&full));
+            }
+        }
+    }
+    out
+}
+
 fn reference_is_satisfied_directory(reference: &str, files: &BTreeSet<String>) -> bool {
     let prefix = format!("{}/", reference.trim_end_matches('/'));
     files.iter().any(|f| f.starts_with(&prefix))
 }
 
 /// Collect a scenario's references that live under the regenerated corpus tree.
-fn corpus_refs(s: &Scenario) -> Vec<String> {
+pub(crate) fn corpus_refs(s: &Scenario) -> Vec<String> {
     let mut v = Vec::new();
     for r in &s.fixtures.references {
         if is_corpus(r) {
@@ -242,7 +285,7 @@ fn table_key(parent: &str) -> String {
 
 /// Strip a trailing `-<hex>` UUID suffix (>= 16 hex chars) from a directory
 /// segment; otherwise return it unchanged.
-fn strip_uuid_suffix(seg: &str) -> &str {
+pub(crate) fn strip_uuid_suffix(seg: &str) -> &str {
     if let Some(i) = seg.rfind('-') {
         let suffix = &seg[i + 1..];
         if suffix.len() >= 16 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {

@@ -2,7 +2,7 @@
 //!
 //! Proves the full call chain CLI entry point → `CommitLogReader` → decoded
 //! mutations by invoking the built `cqlite` binary against a real
-//! Cassandra-5.0.2-produced segment fixture committed under
+//! Cassandra-5.0.8-produced segment fixture committed under
 //! `test-data/datasets/commitlog/` (see `generate-commitlog-fixtures.sh`). The
 //! fixtures are small committed reference binaries, so this test never silently
 //! passes on missing data.
@@ -19,34 +19,48 @@ fn commitlog_dir() -> PathBuf {
 }
 
 fn clean_fixture() -> PathBuf {
-    find_fixture("clean-")
+    recorded_fixture("clean")
 }
 
 fn corrupt_crc_fixture() -> PathBuf {
-    find_fixture("corrupt-crc-")
+    recorded_fixture("corrupt_crc")
 }
 
-fn find_fixture(prefix: &str) -> PathBuf {
+/// The fixture the ground truth NAMES (`segment.files.<kind>`), never a prefix glob, so a
+/// stale extra file under the directory can never be picked up. Its descriptor
+/// (`i32 version`, `i64 segment id`) must match the recorded segment.
+fn recorded_fixture(kind: &str) -> PathBuf {
     let dir = commitlog_dir();
-    for entry in std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("read commitlog dir {}: {e}", dir.display()))
-        .flatten()
-    {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(prefix) && name.ends_with(".log") {
-            return entry.path();
-        }
-    }
-    panic!("no {prefix}*.log fixture under {}", dir.display());
+    let gt = ground_truth();
+    let name = gt["segment"]["files"][kind]
+        .as_str()
+        .unwrap_or_else(|| panic!("ground truth segment.files.{kind} missing"));
+    let path = dir.join(name);
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("ground truth names {name}, unreadable: {e}"));
+    let version = i32::from_be_bytes(bytes[0..4].try_into().expect("descriptor version"));
+    let id = i64::from_be_bytes(bytes[4..12].try_into().expect("descriptor segment id"));
+    assert_eq!(
+        (version as i64, id),
+        (
+            gt["segment"]["version"].as_i64().expect("segment.version"),
+            gt["segment"]["id"].as_i64().expect("segment.id")
+        ),
+        "{name} is not the segment the ground truth records"
+    );
+    path
+}
+
+fn ground_truth() -> serde_json::Value {
+    let path = commitlog_dir().join("commitlog-ground-truth.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read ground truth {}: {e}", path.display()));
+    serde_json::from_str(&text).expect("parse ground truth")
 }
 
 /// Ground-truth table id recorded alongside the fixture.
 fn ground_truth_table_id() -> String {
-    let path = commitlog_dir().join("commitlog-ground-truth.json");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read ground truth {}: {e}", path.display()));
-    let v: serde_json::Value = serde_json::from_str(&text).expect("parse ground truth");
-    v["table_id"]
+    ground_truth()["table_id"]
         .as_str()
         .expect("ground-truth table_id")
         .to_string()

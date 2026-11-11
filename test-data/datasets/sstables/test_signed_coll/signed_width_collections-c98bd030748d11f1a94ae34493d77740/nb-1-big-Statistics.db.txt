@@ -1,10 +1,10 @@
-SSTable: /data/test_signed_coll/signed_width_collections-c98bd030748d11f1a94ae34493d77740/nb-1-big
+SSTable: /data/test_signed_coll/signed_width_collections-cebadaa0dccb11f1a1f13f435fd3cfd8/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 06/30/2026 14:12:55 (1782828775900643)
-Maximum timestamp: 06/30/2026 14:12:55 (1782828775900644)
+Minimum timestamp: 11/10/2026 05:58:57 (1794290337535485)
+Maximum timestamp: 11/10/2026 05:58:57 (1794290337535486)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 06/30/2026 14:12:55 (1782828775)
+SSTable min local deletion time: 11/10/2026 05:58:57 (1794290337)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
@@ -15,14 +15,14 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.17647058823529413
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 93bec73c-31bf-4724-966e-3b40d93c1283
+Originating host id: f2adbeb6-1557-4483-a036-b0675ad4ec7a
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782828716947, position=66149)=CommitLogPosition(segmentId=1782828716947, position=71195)}
+Replay positions covered: {CommitLogPosition(segmentId=1794290266518, position=66213)=CommitLogPosition(segmentId=1794290266518, position=71440)}
 totalColumnsSet: 3
 totalRows: 1
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1782828780 (06/30/2026 14:13:00) |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1794290340 (11/10/2026 05:59:00) |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -56,8 +56,8 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 1
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 06/30/2026 14:12:55 (1782828775)
-EncodingStats minTimestamp: 06/30/2026 14:12:55 (1782828775900643)
+EncodingStats minLocalDeletionTime: 11/10/2026 05:58:57 (1794290337)
+EncodingStats minTimestamp: 11/10/2026 05:58:57 (1794290337535485)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: []
 StaticColumns: 

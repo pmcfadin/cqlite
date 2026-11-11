@@ -1,4 +1,4 @@
-SSTable: /data/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big
+SSTable: /data/test_writeparity/partition_boundary-63328e20dccd11f1baec63e378be826d/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 11/14/2023 22:13:20 (1700000000000000)
@@ -15,9 +15,9 @@ Covered clusterings: [1, 4]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: a2bfb685-06ac-4c2f-847c-7d7747b91fea
+Originating host id: 6b14989a-87c6-48fc-9c91-431135bd64c9
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782695272679, position=66020)=CommitLogPosition(segmentId=1782695272679, position=68223)}
+Replay positions covered: {CommitLogPosition(segmentId=1794290947350, position=66011)=CommitLogPosition(segmentId=1794290947350, position=68214)}
 totalColumnsSet: 6
 totalRows: 6
 Estimated tombstone drop times: 

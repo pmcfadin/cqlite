@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -239,9 +240,25 @@ def derive_fixtures(raw_path, output_dir, segment_name):
     tear_at, target_id, prefix_ids = select_truncated_tail(clean, ground_truth)
     corrupt, flip = corrupt_record_body(clean)
 
-    (output_dir / f"clean-{segment_name}").write_bytes(clean)
-    (output_dir / f"truncated-{segment_name}").write_bytes(clean[:tear_at])
-    (output_dir / f"corrupt-crc-{segment_name}").write_bytes(corrupt)
+    version, segment_id, _, _ = _descriptor(clean)
+    named = re.fullmatch(r"CommitLog-(\d+)-(\d+)\.log", segment_name)
+    if named and (int(named.group(1)), int(named.group(2))) != (version, segment_id):
+        raise FixtureFormatError(
+            f"segment name {segment_name} disagrees with its descriptor "
+            f"(version {version}, segment id {segment_id})"
+        )
+    files = {
+        "clean": f"clean-{segment_name}",
+        "truncated": f"truncated-{segment_name}",
+        "corrupt_crc": f"corrupt-crc-{segment_name}",
+    }
+    (output_dir / files["clean"]).write_bytes(clean)
+    (output_dir / files["truncated"]).write_bytes(clean[:tear_at])
+    (output_dir / files["corrupt_crc"]).write_bytes(corrupt)
+    # Record WHICH segment these files are, so consumers select them by name from the
+    # ground truth rather than by prefix glob: a stale extra file can never be picked.
+    ground_truth["segment"] = {"id": segment_id, "version": version, "files": files}
+    ground_truth_path.write_text(json.dumps(ground_truth, indent=2))
     print(f"[trim] raw={len(raw)} clean={len(clean)} (last_nonzero={last_nonzero})")
     print(f"[trunc] target_id={target_id} cut_at={tear_at} preserved_ids={prefix_ids}")
     print(f"[corrupt] flipped record-body byte at {flip}")
@@ -401,7 +418,39 @@ class CommitLogFixtureDerivationTests(unittest.TestCase):
                 (output_dir / "corrupt-crc-fresh.log").read_bytes(),
                 corrupt_record_body(self.clean)[0],
             )
-            self.assertEqual(ground_truth_path.read_bytes(), ground_truth_bytes)
+            # The ground truth gains EXACTLY the segment record (file names + descriptor
+            # segment id); every other field is untouched.
+            recorded = json.loads(ground_truth_path.read_text())
+            segment = recorded.pop("segment")
+            self.assertEqual(
+                recorded,
+                {k: v for k, v in self.ground_truth.items() if k != "segment"},
+            )
+            version, segment_id, _, _ = _descriptor(self.clean)
+            self.assertEqual(
+                segment,
+                {
+                    "id": segment_id,
+                    "version": version,
+                    "files": {
+                        "clean": "clean-fresh.log",
+                        "truncated": "truncated-fresh.log",
+                        "corrupt_crc": "corrupt-crc-fresh.log",
+                    },
+                },
+            )
+
+    def test_segment_name_must_agree_with_the_descriptor(self):
+        with tempfile.TemporaryDirectory(prefix="cqlite-commitlog-name-") as name:
+            output_dir = Path(name)
+            raw_path = output_dir / "raw-input.log"
+            raw_path.write_bytes(self.clean)
+            (output_dir / "commitlog-ground-truth.json").write_text(
+                json.dumps(self.ground_truth)
+            )
+            with self.assertRaisesRegex(FixtureFormatError, "disagrees with its descriptor"):
+                derive_fixtures(raw_path, output_dir, "CommitLog-7-1.log")
+            self.assertFalse(list(output_dir.glob("clean-*")))
 
     @unittest.skipUnless(os.name == "posix", "fixture generator requires Bash")
     def test_generator_rejects_existing_outputs_and_accepts_fresh_dry_run(self):

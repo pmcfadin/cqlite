@@ -135,12 +135,15 @@ for f in "${FILES[@]}"; do
     #   - release URL path:        releases/download/<tag>/
     #   - fetch-datasets default:  DATASET_TAG:-<tag>
     #   - tracked pin (dataset-pin.env): DATASET_TAG=<tag>
+    #   - composite restore action input default: a line `    default: <tag>`
+    #     (found by #4492: the tag was missed there on the first datasets-v3 -> v4 move)
     sed_inplace \
       "s|DATASET_TAG: $OLD_TAG|DATASET_TAG: $NEW_TAG|g; \
        s|release download $OLD_TAG|release download $NEW_TAG|g; \
        s|releases/download/$OLD_TAG/|releases/download/$NEW_TAG/|g; \
        s|DATASET_TAG:-$OLD_TAG|DATASET_TAG:-$NEW_TAG|g; \
-       s|DATASET_TAG=$OLD_TAG|DATASET_TAG=$NEW_TAG|g" "$f"
+       s|DATASET_TAG=$OLD_TAG|DATASET_TAG=$NEW_TAG|g; \
+       s|^\( *default: \)$OLD_TAG\$|\1$NEW_TAG|" "$f"
   fi
   if [[ "$(cat "$f")" != "$before" ]]; then
     echo "  ✓ updated ${f#"$REPO_ROOT"/}"

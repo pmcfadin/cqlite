@@ -1,4 +1,4 @@
-SSTable: /data/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big
+SSTable: /data/test_tomb/resurrection_gc0-5320dad0dd6a11f199c46d4cbb83f4d8/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/2021 00:00:00 (1609459200000000)
@@ -16,9 +16,9 @@ Covered clusterings: [1, 5]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: bc10a52e-0787-4df6-9cb0-d3c51766a151
+Originating host id: e33b9fb6-0352-4ef9-873c-b5e1135345e9
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782341859690, position=69700)=CommitLogPosition(segmentId=1782341859690, position=1153249)}
+Replay positions covered: {CommitLogPosition(segmentId=1794358348643, position=69615)=CommitLogPosition(segmentId=1794358348643, position=1152806)}
 totalColumnsSet: 16
 totalRows: 8
 Estimated tombstone drop times: 

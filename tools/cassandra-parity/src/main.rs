@@ -31,7 +31,7 @@ use cassandra_parity::corpus_audit::{
 };
 use cassandra_parity::lint::Level;
 use cassandra_parity::model::Manifest;
-use cassandra_parity::{coverage, enums, lint, report, retention, tier_contract};
+use cassandra_parity::{coverage, enums, lint, lint_report, report, retention, tier_contract};
 
 const DEFAULT_MANIFEST: &str = "test-data/cassandra-parity-manifest.yml";
 const DEFAULT_OUTPUT: &str = "docs/reports/cassandra-test-parity.md";
@@ -42,7 +42,7 @@ const USAGE: &str = "\
 cassandra-parity — CQLite ↔ Cassandra parity manifest tooling
 
 USAGE:
-  cassandra-parity lint               [--manifest PATH]
+  cassandra-parity lint               [--manifest PATH] [--verbose]
   cassandra-parity coverage           [--manifest PATH] [--strict]
   cassandra-parity report             [--manifest PATH] [--output PATH] [--check] [--json PATH]
   cassandra-parity tier-contract-check [--manifest PATH] [--tier-doc PATH] [--schema PATH]
@@ -60,6 +60,7 @@ struct Args {
     schema: PathBuf,
     strict: bool,
     check: bool,
+    verbose: bool,
     // corpus-audit (issue #1026)
     corpus: Option<PathBuf>,
     provenance: Option<PathBuf>,
@@ -78,6 +79,7 @@ fn parse_args(rest: &[String]) -> Result<Args> {
         schema: PathBuf::from(DEFAULT_SCHEMA),
         strict: false,
         check: false,
+        verbose: false,
         corpus: None,
         provenance: None,
         checksums: None,
@@ -95,6 +97,7 @@ fn parse_args(rest: &[String]) -> Result<Args> {
             "--schema" => args.schema = PathBuf::from(next_val(&mut it, "--schema")?),
             "--strict" => args.strict = true,
             "--check" => args.check = true,
+            "--verbose" => args.verbose = true,
             "--corpus" => args.corpus = Some(PathBuf::from(next_val(&mut it, "--corpus")?)),
             "--provenance" => {
                 args.provenance = Some(PathBuf::from(next_val(&mut it, "--provenance")?))
@@ -202,25 +205,7 @@ fn cmd_lint(args: &Args) -> Result<ExitCode> {
         .collect();
     findings.extend(claim_scan::scan_docs(&m, &inputs));
 
-    let errors = findings.iter().filter(|f| f.level == Level::Error).count();
-    let warns = findings.iter().filter(|f| f.level == Level::Warn).count();
-    for f in &findings {
-        let tag = match f.level {
-            Level::Error => "ERROR",
-            Level::Warn => "warn",
-        };
-        println!("{tag} [{}] {}: {}", f.id, f.field, f.message);
-    }
-    if errors == 0 {
-        println!(
-            "lint: OK — {} scenarios, 0 errors, {warns} warnings",
-            m.scenarios.len()
-        );
-        Ok(ExitCode::SUCCESS)
-    } else {
-        eprintln!("lint: FAILED — {errors} errors, {warns} warnings");
-        Ok(ExitCode::FAILURE)
-    }
+    Ok(lint_report::print_and_exit(findings, &m, args.verbose))
 }
 
 /// Cross-check the documented tier enum (`docs/development/parity-ci-tiers.md`)

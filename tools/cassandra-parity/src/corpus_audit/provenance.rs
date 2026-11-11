@@ -172,6 +172,10 @@ pub fn check_pin_binding(
     let (primary_version, _, primary_sha) = &pins[0];
 
     let covering = refs::covering_scenarios(manifest, inventory);
+    let short = |x: Option<&str>| {
+        x.map(|x| x.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "no sha".to_string())
+    };
     let disagree: Vec<String> = covering
         .iter()
         .filter_map(|s| {
@@ -182,14 +186,38 @@ pub fn check_pin_binding(
                 (None, None) => (Some(primary_version.as_str()), Some(*primary_sha), true),
                 (v, sh) => (v, sh, false),
             };
-            if version == Some(pin_version.as_str()) && sha == Some(*pin_sha) {
+            // Per-table provenance (#4492): a scenario whose covered tables are ALL declared
+            // carried over names the release that wrote them; any regenerated table makes
+            // the selected pin the expected declaration.
+            let tables = refs::scenario_tables(s, inventory);
+            let carried: Vec<Option<(String, &str, &str)>> = tables
+                .iter()
+                .map(|t| manifest.cassandra_source.carried_over_pin(t))
+                .collect();
+            let all_carried = !carried.is_empty() && carried.iter().all(Option::is_some);
+            let (want_version, want_sha) = if all_carried {
+                let mut wanted: Vec<(&str, &str)> = carried
+                    .iter()
+                    .flatten()
+                    .map(|(v, _, sha)| (v.as_str(), *sha))
+                    .collect();
+                wanted.sort_unstable();
+                wanted.dedup();
+                if wanted.len() != 1 {
+                    return Some(format!(
+                        "{} (every table it covers is carried over, but from {} different pins)",
+                        s.id,
+                        wanted.len()
+                    ));
+                }
+                wanted[0]
+            } else {
+                (pin_version.as_str(), *pin_sha)
+            };
+            if version == Some(want_version) && sha == Some(want_sha) {
                 return None;
             }
-            let short = |x: Option<&str>| {
-                x.map(|x| x.chars().take(12).collect::<String>())
-                    .unwrap_or_else(|| "no sha".to_string())
-            };
-            Some(format!(
+            let declared = format!(
                 "{} (declares {} @ {}{})",
                 s.id,
                 version.unwrap_or("no version"),
@@ -198,8 +226,16 @@ pub fn check_pin_binding(
                     ", absent evidence = primary"
                 } else {
                     ""
-                }
-            ))
+                },
+            );
+            Some(if all_carried {
+                format!(
+                    "{declared} [every table it covers is carried over from {want_version} @ {}]",
+                    short(Some(want_sha))
+                )
+            } else {
+                declared
+            })
         })
         .collect();
     let subject = |detail: String| {
@@ -229,8 +265,9 @@ pub fn check_pin_binding(
     };
     vec![subject(format!(
         "the corpus was generated from pin {pin_ref} ({pin_version}), but {} of the {} scenarios \
-         whose fixtures it covers do not declare evidence.cassandra_version {pin_version} AND \
-         evidence.cassandra_git_sha {pin_sha}: {shown}{more}",
+         whose fixtures it covers declare the release that wrote their data (the selected pin \
+         {pin_version} AND evidence.cassandra_git_sha {pin_sha} for any regenerated table; the \
+         carry-over pin only when every table is declared carried over): {shown}{more}",
         disagree.len(),
         covering.len()
     ))]

@@ -58,6 +58,23 @@ pub struct CassandraSource {
     /// fails. Empty when only the primary release is in use.
     #[serde(default)]
     pub additional_pins: Vec<SourcePin>,
+    /// Tables kept byte-for-byte from an earlier release (#4492): the corpus is a splice,
+    /// so a table here was WRITTEN by the declared pin while the rest of the corpus was
+    /// regenerated with the selected one. This is the per-table provenance truth;
+    /// `evidence.cassandra_version` of a scenario names the release that produced its
+    /// NON-carried-over data (or, when every table it covers is carried over, the one
+    /// carry-over pin). An undeclared mix is rejected by the lint and the corpus audit.
+    #[serde(default)]
+    pub carried_over: Vec<CarriedOver>,
+}
+
+/// One `cassandra_source.carried_over` entry: tables written by `pin_ref` (a declared pin).
+#[derive(Debug, Deserialize)]
+pub struct CarriedOver {
+    #[serde(rename = "pin")]
+    pub pin_ref: String,
+    /// `keyspace.table` or `keyspace.*`.
+    pub tables: Vec<String>,
 }
 
 impl CassandraSource {
@@ -82,6 +99,23 @@ impl CassandraSource {
                 )
             })
             .collect()
+    }
+}
+
+impl CassandraSource {
+    /// The declared pin (as the `pins()` tuple) that WROTE `table` (`keyspace.table`), if the
+    /// table is declared carried over. `None` means the table is regenerated with the
+    /// selected pin.
+    pub fn carried_over_pin(&self, table: &str) -> Option<(String, &str, &str)> {
+        let ks = table.split('.').next().unwrap_or(table);
+        let entry = self.carried_over.iter().find(|c| {
+            c.tables
+                .iter()
+                .any(|t| t == table || t.strip_suffix(".*").is_some_and(|k| k == ks))
+        })?;
+        self.pins()
+            .into_iter()
+            .find(|(_, r, _)| *r == entry.pin_ref)
     }
 }
 

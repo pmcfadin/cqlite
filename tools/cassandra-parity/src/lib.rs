@@ -8,6 +8,7 @@ pub mod enums;
 pub mod failure_artifact;
 pub mod lint;
 mod lint_claims;
+pub mod lint_report;
 mod lint_versions;
 pub mod model;
 pub mod report;

@@ -1,10 +1,10 @@
-SSTable: /data/test_types/nb_empty_collections-4faf9910706211f197e20b846582ecc8/nb-1-big
+SSTable: /data/test_types/nb_empty_collections-35e76390dcc911f1b8dc439bf62a3248/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 12/31/2020 23:59:59 (1609459199999999)
 Maximum timestamp: 01/01/2021 00:00:00 (1609459200000000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 06/25/2026 06:51:38 (1782370298)
+SSTable min local deletion time: 11/10/2026 05:40:26 (1794289226)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
 Compression ratio: 0.7225130890052356
@@ -16,14 +16,14 @@ Covered clusterings: [1, 2]
 Estimated droppable tombstones: 0.5
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 0ca8a62c-5f2b-48b2-bf00-1438908b20f7
+Originating host id: bad0322b-570d-4249-a7a5-3aef01b05f4b
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782369828325, position=154727)=CommitLogPosition(segmentId=1782369828325, position=259460)}
+Replay positions covered: {CommitLogPosition(segmentId=1794289149992, position=87549)=CommitLogPosition(segmentId=1794289149992, position=192336)}
 totalColumnsSet: 9
 totalRows: 2
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1782370320 (06/25/2026 06:52:00) |     6 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1794289260 (11/10/2026 05:41:00) |     6 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -57,7 +57,7 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 1
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 06/25/2026 06:51:38 (1782370298)
+EncodingStats minLocalDeletionTime: 11/10/2026 05:40:26 (1794289226)
 EncodingStats minTimestamp: 12/31/2020 23:59:59 (1609459199999999)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]

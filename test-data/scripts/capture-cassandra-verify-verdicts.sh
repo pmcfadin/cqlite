@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# capture-cassandra-verify-verdicts.sh — capture the REAL Apache Cassandra 5.0.2
+# capture-cassandra-verify-verdicts.sh — capture the REAL Apache Cassandra 5.0.8
 # `sstableverify --extended --force` verdict for every fixture in the corruption
 # corpus (issue #1236, verify-parity layer on top of epic #970 / issue #999).
 #
@@ -9,7 +9,7 @@
 # must be Cassandra's ACTUAL verdict on each fixture's exact bytes — not a
 # verdict hand-encoded from reading Cassandra source (the "trust me" gap this
 # layer closes). This tool runs each corrupted fixture (and the clean baseline)
-# through a `cassandra:5.0.2` container's standalone offline verifier and prints
+# through a `cassandra:5.0.8` container's standalone offline verifier and prints
 # a `clean`/`corrupt` verdict + the message that tripped.
 #
 # The captured verdicts are then recorded (once) into
@@ -20,7 +20,7 @@
 # is captured-and-committed. Re-run this tool only when a fixture's bytes change.
 #
 # REQUIREMENTS
-#   * Docker, with the cassandra:5.0.2 image pullable.
+#   * Docker, with the cassandra:5.0.8 image pullable.
 #   * The clean source binaries (test_comp/lz4_table, test_da/wide_table) and the
 #     regenerated corruption corpus present under CQLITE_DATASETS_ROOT.
 #
@@ -28,7 +28,7 @@
 #   CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 #     bash test-data/scripts/capture-cassandra-verify-verdicts.sh
 #
-# Backs: issue #1236 (verify-parity). Pins cassandra_git_sha f278f677... (5.0.2).
+# Backs: issue #1236 (verify-parity). Pins cassandra_git_sha 17222709... (5.0.8).
 #
 # FAIL-CLOSED (Finding 2 / issue #1236): the only nonzero exit this tool is
 # allowed to swallow is `sstableverify`'s — that exit code IS the verdict and is
