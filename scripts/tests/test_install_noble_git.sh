@@ -55,6 +55,10 @@ exit 0
 STUB
 cat > "$T/apt-cache" <<'STUB'
 #!/usr/bin/env bash
+fbk=primary; case "$*" in *Dir::Etc::sourceparts=*) fbk=fallback ;; esac
+c="$STUB_DIR/cache.$fbk"; n=$(( $(cat "$c" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$c"
+case "$fbk" in primary) lim="${STUB_CACHE_FAILS_PRIMARY:-0}" ;; *) lim="${STUB_CACHE_FAILS_FALLBACK:-0}" ;; esac
+if [ "$n" -le "$lim" ]; then echo "E: apt-cache: could not open the package cache" >&2; exit 100; fi
 bar='|'
 row() { printf ' git %s %s %s http://example/ubuntu %s amd64 Packages\n' "$bar" "$1" "$bar" "$2"; }
 if [ -n "${STUB_NO_243:-}" ]; then row 1:2.50.0-1 noble/main; exit 0; fi
@@ -113,6 +117,17 @@ run warn3 STUB_UPDATE_WARN_PRIMARY=1
 grep -q 'FALLBACK-SOURCE Suites: noble-security' "$LOG" 2>/dev/null; run fbs STUB_UPDATE_FAILS_PRIMARY=99
 { [ "$RC" = 0 ] && grep -q 'URIs: http://security.ubuntu.com/ubuntu' "$LOG" && grep -q 'Suites: noble-security' "$LOG" && ! grep -q 'Suites: noble noble-updates noble-security' "$LOG"; } \
   && ok "noble-security is requested from security.ubuntu.com in its own stanza, not from archive.ubuntu.com" || bad "fallback suites wrong: $(grep -E 'URIs|Suites' "$LOG")"
+
+# 4d. the version QUERY failing (apt-cache non-zero) is retryable, falls back, and ends INFRA: never "no 2.43"
+run qry STUB_CACHE_FAILS_PRIMARY=2
+{ [ "$RC" = 0 ] && [ "$(cnt cache.primary)" = 3 ] && [ "$(cnt update.fallback)" = 0 ] && ! has "no 2.43 git"; } \
+  && ok "apt-cache failing twice is retried and then succeeds" || bad "query retry: rc=$RC caches=$(cnt cache.primary) $OUT"
+run qryfb STUB_CACHE_FAILS_PRIMARY=99
+{ [ "$RC" = 0 ] && [ "$(cnt cache.primary)" = 3 ] && [ "$(cnt update.fallback)" = 1 ] && ! has "no 2.43 git"; } \
+  && ok "a persistently failing version query falls back to the second source (not read as a missing 2.43)" || bad "query fallback: rc=$RC $OUT"
+run qryinfra STUB_CACHE_FAILS_PRIMARY=99 STUB_CACHE_FAILS_FALLBACK=99
+{ [ "$RC" = 75 ] && has "INFRA:" && ! has "no 2.43 git" && [ "$(cnt cache.fallback)" = 3 ]; } \
+  && ok "a version query that always fails ends as INFRA (exit 75), never as a plain 'no 2.43' error" || bad "query infra: rc=$RC $OUT"
 
 # 5. install persistently fails on the primary -> fallback pass runs update + install again
 run fbi STUB_INSTALL_FAILS_PRIMARY=99

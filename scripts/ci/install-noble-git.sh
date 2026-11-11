@@ -72,16 +72,33 @@ apt_update() {
 apt_install() { # shellcheck disable=SC2086
   ${APT_GET} ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"} "${APT_OPTS[@]}" install -y -qq --allow-downgrades "git=$1" "git-man=$1"; }
 
-# find_version — the newest 1:2.43.x git in the configured sources (empty if none).
-find_version() { # shellcheck disable=SC2086
-  ${APT_CACHE} ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"} madison git | awk '$3 ~ /^1:2\.43\./ {print $3; exit}'; }
+# discover_version <out-file> — write the newest 1:2.43.x git in the configured sources to <out-file> (empty
+# if none). Returns NON-ZERO if the query itself fails (apt-cache or awk), which is retryable like any other
+# apt failure; an empty file with status 0 is the only "query succeeded, no matching version".
+discover_version() { # shellcheck disable=SC2086
+  local madison
+  madison="$(mktemp)" || return 1
+  if ! ${APT_CACHE} ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"} madison git >"${madison}"; then
+    rm -f "${madison}"; return 1
+  fi
+  if ! awk '$3 ~ /^1:2\.43\./ {print $3; exit}' "${madison}" >"$1"; then
+    rm -f "${madison}"; return 1
+  fi
+  rm -f "${madison}"
+}
 
-# pass <label> — one full update + select + install sequence. 0 ok; 1 network/apt failure; 2 no 2.43 in the archive.
+# pass <label> — one full update + select + install sequence. 0 ok; 1 network/apt failure (including a failed
+# version query); 2 the query succeeded and the archive has no 2.43.
 pass() {
-  local label="$1" ver
+  local label="$1" ver vf
   echo "apt pass: ${label}"
   with_retries "update (${label})" apt_update || return 1
-  ver="$(find_version)"
+  vf="$(mktemp)" || return 1
+  if ! with_retries "version query (${label})" discover_version "${vf}"; then
+    rm -f "${vf}"; return 1
+  fi
+  ver="$(cat "${vf}")" || { rm -f "${vf}"; return 1; }
+  rm -f "${vf}"
   if [ -z "$ver" ]; then
     return 2
   fi
