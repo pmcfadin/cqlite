@@ -714,7 +714,7 @@ capture_tracked_dataset_files() {
   while IFS= read -r -d '' record; do
     tag="${record%% *}"
     case "${tag}" in
-      S | [a-z])
+      S | [[:lower:]])
         blind_count=$((blind_count + 1))
         if [ -z "${blind_sample}" ]; then
           blind_sample="${record#* }"
@@ -984,29 +984,27 @@ restore_tracked_dataset_files() {
   [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
   [ -n "${TRACKED_GUARD_LIST}" ] && [ -s "${TRACKED_GUARD_LIST}" ] || return 0
 
-  local -a pathspecs=()
-  local rel_path
-  while IFS= read -r -d '' rel_path; do
-    if [ "${mode}" = "missing-only" ] && [ -e "${TRACKED_GUARD_REPO}/${rel_path}" ]; then
-      continue
-    fi
-    pathspecs+=( ":(literal)${rel_path}" )
-  done <"${TRACKED_GUARD_LIST}"
-
-  if [ "${#pathspecs[@]}" -gt 0 ]; then
-    echo "Restoring ${#pathspecs[@]} git-tracked file(s) under ${TRACKED_GUARD_REL} (of ${TRACKED_GUARD_COUNT} tracked; mode=${mode})"
-    # Batch so a very large fixture set cannot hit ARG_MAX.
-    local batch=400 i
-    for (( i = 0; i < ${#pathspecs[@]}; i += batch )); do
-      # Restore from the INDEX (not HEAD): the index is what `git ls-files`
-      # enumerated, so this reproduces the checkout's intended content and cannot
-      # clobber a developer's STAGED edit to a tracked reference file.
-      if ! guard_git -C "${TRACKED_GUARD_REPO}" restore --worktree -- "${pathspecs[@]:i:batch}"; then
-        echo "ERROR: failed to restore git-tracked files under ${TRACKED_GUARD_REL} in ${TRACKED_GUARD_REPO} (issue #2878)" >&2
-        return 1
-      fi
-    done
+  # The pathspecs travel on STDIN (--pathspec-from-file, NUL-separated, --literal-pathspecs), NEVER as
+  # argv: Windows caps a command line near 32 KB and 925 tracked paths overflowed it (ARG_MAX class).
+  local todo="${TRACKED_GUARD_LIST}" rel_path n
+  if [ "${mode}" = "missing-only" ]; then
+    todo="$(mktemp "${TRACKED_GUARD_STATE_DIR:-${TMPDIR:-/tmp}}/cqlite-restore-todo.XXXXXX")" || return 1
+    while IFS= read -r -d '' rel_path; do
+      [ -e "${TRACKED_GUARD_REPO}/${rel_path}" ] || printf '%s\0' "${rel_path}"
+    done <"${TRACKED_GUARD_LIST}" >"${todo}"
   fi
+  n="$(tr -cd '\0' <"${todo}" | wc -c | tr -d ' ')"
+  if [ "${n}" -gt 0 ]; then
+    echo "Restoring ${n} git-tracked file(s) under ${TRACKED_GUARD_REL} (of ${TRACKED_GUARD_COUNT} tracked; mode=${mode})"
+    # Restore from the INDEX (not HEAD): the index is what `git ls-files` enumerated, so this reproduces
+    # the checkout's intended content and cannot clobber a developer's STAGED edit to a tracked file.
+    if ! guard_git --literal-pathspecs -C "${TRACKED_GUARD_REPO}" restore --worktree --pathspec-from-file=- --pathspec-file-nul <"${todo}"; then
+      [ "${todo}" = "${TRACKED_GUARD_LIST}" ] || rm -f "${todo}"
+      echo "ERROR: failed to restore git-tracked files under ${TRACKED_GUARD_REL} in ${TRACKED_GUARD_REPO} (issue #2878)" >&2
+      return 1
+    fi
+  fi
+  [ "${todo}" = "${TRACKED_GUARD_LIST}" ] || rm -f "${todo}"
 
   # Post-condition (only meaningful for the post-destruction restore): no tracked
   # file under the dataset dir may be left deleted or modified relative to the
@@ -1564,7 +1562,7 @@ report_orphaned_tracked_fixtures() {
       continue
     fi
     case "${tag}" in
-      S | [a-z])
+      S | [[:lower:]])
         # ABSENT *and* flagged is the genuinely ambiguous case: for a sparse
         # checkout the absence is INTENTIONAL, for a lost fixture it is damage, and
         # git reports neither — nor could `git restore` rebuild a sparse-excluded

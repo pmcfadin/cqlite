@@ -260,5 +260,35 @@ run_fetch "$R3" CI=true 'CQLITE_DATASETS_ROOT=C:\fake\checkout\test-data\dataset
 { [ "$RC" = 0 ] && tracked_is "$R3" "$NEW"; } && ok "a Windows-form CQLITE_DATASETS_ROOT is converted with cygpath and reconciled" || bad "windows-form root failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
 rm -f "$BIN/git" "$BIN/cygpath"
 
+# 11. ARG_MAX class (the real Windows CI failure): 925 tracked paths overflowed Windows' ~32 KB command line when handed to
+#     `git restore` as argv. A git shim rejects any invocation whose arguments total more than 8 KiB; 700 long tracked paths
+#     (~60 KB of pathspecs) must still restore, in both the missing-only pre-flight and the post-extraction `all` mode.
+R5="$T/r5"; make_repo "$R5"
+mkdir -p "$R5/$G/big"
+for n in $(seq 1 700); do printf 'big %s\n' "$n" > "$R5/$G/big/file-$(printf '%04d' "$n")-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-Data.db.jsonl"; done
+git -C "$R5" add -f "$DS/goldens/big"; git -C "$R5" commit -qm "many tracked files"
+cat > "$BIN/git" <<SHIM
+#!/usr/bin/env bash
+n=0; for a in "\$@"; do n=\$((n + \${#a} + 1)); done
+if [ "\$n" -gt 8192 ]; then echo "git: Argument list too long" >&2; exit 126; fi
+exec "$REAL_GIT" "\$@"
+SHIM
+chmod +x "$BIN/git"
+run_fetch "$R5"
+[ "$RC" = 0 ] && ok "cold run restores 700 long tracked paths under an 8 KiB argv limit (pathspecs on stdin)" || bad "cold run under the argv limit failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
+find "$R5/$G/big" -name 'file-00[0-9][0-9]-*' -delete
+run_fetch "$R5" CI=true
+{ [ "$RC" = 0 ] && [ "$(find "$R5/$G/big" -type f | wc -l | tr -d ' ')" = 700 ]; } \
+  && ok "the missing-only pre-flight and the CI reconcile repair 99 deleted tracked files under the argv limit" || bad "argv-limit warm run failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
+rm -f "$BIN/git"
+
+# 12. locale-proof patterns: a `[a-z]` range matches UPPERCASE letters under bash 3.2 (macOS) with a UTF-8 locale, so the
+#     index-flag check read every ordinary `H` entry as assume-unchanged and refused all 925 tracked paths (the macOS CI
+#     failure). Case patterns must use [[:lower:]] / [[:upper:]]; and no git call may take an array of paths as argv.
+range_hits="$(grep -nE '^[[:space:]]*[^#[:space:]][^#]*(\[a-z\]|\[A-Z\])[^#]*\)[[:space:]]*$' "$REPO_ROOT/test-data/scripts/fetch-datasets.sh" "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh" || true)"
+[ -z "$range_hits" ] && ok "no locale-sensitive [a-z]/[A-Z] case range in fetch-datasets.sh or the warm-restore lib" || bad "locale-sensitive case range: $range_hits"
+argv_hits="$(grep -nE '(^|[^#])[[:space:]](guard_git|git)[[:space:]].*"\$\{[A-Za-z_]+\[@\]' "$REPO_ROOT/test-data/scripts/fetch-datasets.sh" "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh" | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' | grep -v -e 'pri''ntf' -e TRACKED_PROBE_REASON -e report_ || true)"
+[ -z "$argv_hits" ] && ok "no git call takes a path array as argv" || bad "git called with an array argv: $argv_hits"
+
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]
