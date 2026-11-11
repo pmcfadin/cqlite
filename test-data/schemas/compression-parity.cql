@@ -1,6 +1,6 @@
 -- compression-parity.cql — Compression / chunk-format parity SSTable fixtures for CQLite epic #970 (issue #996)
 --
--- Generated with Cassandra 5.0.2, storage_compatibility_mode: CASSANDRA_4 (nb BIG format)
+-- Generated with Cassandra 5.0.x (release pinned in test-data/scripts/lib/cassandra-image.sh; 5.0.2 for carried-over tables), storage_compatibility_mode: CASSANDRA_4 (nb BIG format)
 --
 -- Keyspace: test_comp (isolated from every other corpus so the compression
 --           fixtures never collide with test_basic/test_tomb/etc.)

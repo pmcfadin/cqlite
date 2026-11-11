@@ -156,7 +156,9 @@ session isn't killed waiting. A queued gate is not a hung gate.
 That root beats any path remembered from docs. `CQLITE_DATASETS_ROOT` alone suffices (schemas are committed,
 #3131); `CQLITE_SCHEMAS_ROOT` is an optional override and must be absolute. Without Data.db files, query
 tests pass with 0 rows. Details (`--verify-only` outputs, why absolute): `gate-ops.md`; pins: website
-`test-data`. Parsing problems: `docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`.
+`test-data`. The bundle is `datasets-v4` (Cassandra 5.0.8); tables kept byte-for-byte from 5.0.2 are declared in
+the parity manifest's `cassandra_source.carried_over`, and a scenario's `evidence.cassandra_version` names the
+release that produced its non-carried-over data (`test-data/REGEN-NOTES-4492.md`). Parsing problems: `docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`.
 
 ## Delivery
 

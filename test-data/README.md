@@ -1,7 +1,7 @@
 # CQLite Test Data (Cassandra 5 — datasets-v3)
 
 Test data for CQLite SSTable compatibility testing. The corpus covers three
-SSTable version/format combinations (nb, oa, da) produced by Cassandra 5.0.2.
+SSTable version/format combinations (nb, oa, da) produced by Cassandra 5.0.8 (tables declared in `cassandra_source.carried_over` of the parity manifest were written by 5.0.2).
 
 ## Current corpus: datasets-v3
 
@@ -83,7 +83,7 @@ bash test-data/scripts/regenerate-datasets.sh --dry-run
 
 ### What it does
 
-1. Starts a `cassandra:5.0.2` container named `cqlite-regen`
+1. Starts a `cassandra:5.0.8` container named `cqlite-regen`
 2. **Phase 1 — nb corpus**: applies core schemas, inserts rows via inline
    Python (using the cassandra-driver installed inside the container), then
    flushes and compacts all nb keyspaces

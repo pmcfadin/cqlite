@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-issue-3747-empty-map-key.sh — Cassandra 5.0.2 EMPTY MULTICELL MAP KEY
+# generate-issue-3747-empty-map-key.sh — Cassandra EMPTY MULTICELL MAP KEY
 # fixture (issue #3747).
 #
 # WHAT THIS PRODUCES AND WHY

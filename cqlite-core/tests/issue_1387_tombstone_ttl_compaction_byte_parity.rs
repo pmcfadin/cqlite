@@ -1,5 +1,5 @@
 //! Issue #1387 (epic #973): TOMBSTONE / TTL COMPACTION byte-parity — CQLite's
-//! compaction output vs a committed Cassandra 5.0.2-COMPACTED reference SSTable
+//! compaction output vs a committed Cassandra 5.0.2 or 5.0.8-COMPACTED reference SSTable
 //! for the same logical inputs, extending the live-cell slice
 //! (`issue_1017_live_cell_compaction_byte_parity.rs`) to tombstones and TTL.
 //!
@@ -535,7 +535,7 @@ async fn assert_compaction_byte_parity(
 
     eprintln!(
         "[issue_1387] {KEYSPACE}.{table}: TOMBSTONE/TTL compaction byte parity PASS — \
-         {BYTE_FOR_BYTE_COMPONENTS:?} byte-identical to the Cassandra 5.0.2 compacted reference."
+         {BYTE_FOR_BYTE_COMPONENTS:?} byte-identical to the Cassandra 5.0.2 or 5.0.8 compacted reference."
     );
 }
 

@@ -102,7 +102,7 @@ const FIXED_GC_BEFORE: i64 = 1_700_000_000;
 
 /// Per-scenario parity strength. The manifest evidence type MUST mirror this.
 /// Set to the strongest mode each scenario actually achieves against the
-/// Cassandra 5.0.2 compacted reference (honest classification, AC7).
+/// Cassandra 5.0.8 compacted reference (honest classification, AC7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     /// Data.db/Index.db/Summary.db/Digest.crc32 must byte-match the reference
@@ -114,7 +114,7 @@ enum Mode {
 }
 
 // `udt_collections` (frozen UDTs only INSIDE frozen collections) compacts
-// byte-for-byte against the Cassandra 5.0.2 reference today → byte_for_byte.
+// byte-for-byte against the Cassandra 5.0.8 reference today → byte_for_byte.
 const COLLECTIONS_MODE: Mode = Mode::ByteForByte;
 
 // `udt_frozen_person` / `udt_nested` have a TOP-LEVEL `frozen<UDT>` regular
@@ -122,7 +122,7 @@ const COLLECTIONS_MODE: Mode = Mode::ByteForByte;
 // (like a frozen collection), so once flush advertises the authoritative
 // `FrozenType(UserType(...))` SerializationHeader marshal (issue #1020 fix), the
 // frozen UDT cell round-trips through compaction and the output is byte-identical
-// to the Cassandra 5.0.2 compacted reference → byte_for_byte.
+// to the Cassandra 5.0.8 compacted reference → byte_for_byte.
 const FROZEN_PERSON_MODE: Mode = Mode::ByteForByte;
 const NESTED_MODE: Mode = Mode::ByteForByte;
 
@@ -657,7 +657,7 @@ async fn assert_udt_compaction_parity(
     if mode == Mode::CanonicalSemantic {
         eprintln!(
             "[issue_1020] {KEYSPACE}.{table}: CANONICAL-SEMANTIC parity PASS — typed sstabledump \
-             JSONL (UDT/frozen field decoding) matches the Cassandra 5.0.2 compacted reference. \
+             JSONL (UDT/frozen field decoding) matches the Cassandra 5.0.8 compacted reference. \
              Byte parity NOT claimed for this scenario (recorded canonical_semantic in manifest)."
         );
         return;
@@ -722,7 +722,7 @@ async fn assert_udt_compaction_parity(
 
     eprintln!(
         "[issue_1020] {KEYSPACE}.{table}: UDT/frozen COMPACTION byte parity PASS — \
-         {BYTE_FOR_BYTE_COMPONENTS:?} byte-identical to the Cassandra 5.0.2 compacted reference; \
+         {BYTE_FOR_BYTE_COMPONENTS:?} byte-identical to the Cassandra 5.0.8 compacted reference; \
          {PRESENT_NOT_DIFFED:?} present on both; typed JSONL cross-check OK."
     );
 }
@@ -1087,7 +1087,7 @@ const FROZEN_PERSON_EXPECTED: ExpectedRows = &[
 ///
 /// A top-level `frozen<person>` regular column round-trips through compaction as
 /// exactly ONE frozen single-cell value; the compacted output is byte-identical
-/// to the Cassandra 5.0.2 reference (issue #1020 fix: flush advertises the
+/// to the Cassandra 5.0.8 reference (issue #1020 fix: flush advertises the
 /// authoritative `FrozenType(UserType(...))` header marshal).
 #[tokio::test]
 async fn frozen_person_compaction_parity() {
@@ -1192,7 +1192,7 @@ const NESTED_EXPECTED: ExpectedRows = &[
 /// `FrozenType(UserType(...,home:UserType(...),...))` marshal (inner UDT field
 /// spelled as bare `UserType` per Cassandra), so the nested frozen UDT cell
 /// (incl. the inner null `city` for the gen-A losing row) round-trips through
-/// compaction byte-identical to the Cassandra 5.0.2 reference (issue #1020 fix).
+/// compaction byte-identical to the Cassandra 5.0.8 reference (issue #1020 fix).
 #[tokio::test]
 async fn nested_udt_compaction_parity() {
     let (group_a, group_b) = nested_groups();

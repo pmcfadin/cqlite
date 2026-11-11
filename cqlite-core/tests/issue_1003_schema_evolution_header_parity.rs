@@ -4,7 +4,7 @@
 //! types recorded in each generation's Cassandra `SerializationHeader`
 //! (Statistics.db), NOT by blindly applying the *current* schema. The six
 //! `test_types/se_*` fixtures model the schema-evolution surface that Cassandra
-//! 5.0.2 actually produces (ALTER ... TYPE is forbidden, so "altered" is modelled
+//! 5.0.2 or 5.0.8 actually produces (ALTER ... TYPE is forbidden, so "altered" is modelled
 //! as an ADD-column header divergence — the sanctioned fallback documented in
 //! `test-data/schemas/cql-type-parity.cql`, Group A):
 //!

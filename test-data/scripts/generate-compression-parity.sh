@@ -464,7 +464,7 @@ log "Fixed writetime: T_BASE=$T_BASE  PRNG seed: SEED=$SEED (0x00C0FFEE)"
 SSTABLES_DIR="$OUT_DIR/sstables"
 
 # ---------------------------------------------------------------------------
-# Start Cassandra container (nb/CASSANDRA_4 compat mode — default for 5.0.2)
+# Start Cassandra container (nb/CASSANDRA_4 compat mode — the default for 5.0.x)
 # ---------------------------------------------------------------------------
 log "Starting $CASSANDRA_IMAGE container ($CONTAINER_NAME)..."
 run $ENGINE run -d \
@@ -489,7 +489,7 @@ fi
 # REGARDLESS of whether the schema says DeflateCompressor / ZstdCompressor /
 # SnappyCompressor. The schema compressor would otherwise only take effect on
 # the next COMPACTION (which rewrites the SSTable). Empirically verified on
-# cassandra:5.0.2: with the default `flush_compression: fast`, deflate_table and
+# cassandra:5.0.x: with the default `flush_compression: fast`, deflate_table and
 # zstd_table flush as `LZ4Compressor` in CompressionInfo.db.
 #
 # Setting `flush_compression: table` makes the FIRST flush honor each table's

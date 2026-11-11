@@ -10,13 +10,13 @@ the corpus **with** those fixtures, publishes a `v3.2` asset, and repoints CI.
 > The PR-lane `test` failure was already mitigated separately (#1094 skip-on-
 > presence). This is the durable fix so the fixtures are actually present.
 
-**Prerequisites:** Docker (or Podman) with `cassandra:5.0.2` pullable, ~10 GB
+**Prerequisites:** Docker (or Podman) with `cassandra:5.0.8` pullable, ~10 GB
 free disk, ~4 GB RAM for the container, and `gh` authenticated as a user with
 release-upload rights to `pmcfadin/cqlite`. Run from a clean checkout of `main`.
 
 ---
 
-## 1. Generate the Epic #970 fixtures (Docker / Cassandra 5.0.2)
+## 1. Generate the Epic #970 fixtures (Docker / Cassandra 5.0.8)
 
 These are the same steps the strict nightly workflow
 (`.github/workflows/parity-regen-matrix.yml`, compression-corruption leg) runs.

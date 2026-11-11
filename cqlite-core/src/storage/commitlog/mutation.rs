@@ -4,8 +4,8 @@
 //! A record body (validated by [`super::frame`]) is a serialized Cassandra
 //! `Mutation` in **messaging** form (`Mutation.serializer` /
 //! `UnfilteredRowIteratorSerializer` with `isForSSTable() == false`). The
-//! grammar below is verified byte-for-byte against a real Cassandra 5.0.2
-//! segment:
+//! grammar below is verified byte-for-byte against real Cassandra 5.0.2 and
+//! 5.0.8 segments:
 //!
 //! ```text
 //! mutation:  uvint numUpdates, then numUpdates × partition-update

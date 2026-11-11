@@ -483,7 +483,7 @@ log "Output directory: $OUT_DIR"
 SSTABLES_DIR="$OUT_DIR/sstables"
 
 # ---------------------------------------------------------------------------
-# Start Cassandra container (nb/CASSANDRA_4 compat mode — default for 5.0.2)
+# Start Cassandra container (nb/CASSANDRA_4 compat mode — the default for 5.0.x)
 # ---------------------------------------------------------------------------
 log "Starting $CASSANDRA_IMAGE container ($CONTAINER_NAME)..."
 run $ENGINE run -d \

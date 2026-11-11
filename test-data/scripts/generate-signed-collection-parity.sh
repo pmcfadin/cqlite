@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-signed-collection-parity.sh — Cassandra 5.0.2 reference SSTables for
+# generate-signed-collection-parity.sh — Cassandra reference SSTables for
 # the SIGNED numeric collection-element / map-key ordering golden (issue #1295,
 # follow-up to #1275).
 #

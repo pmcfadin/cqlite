@@ -8,13 +8,13 @@
 //! gap is closed end-to-end, on the PLAIN public query surface — not a helper
 //! unit test.
 //!
-//! ## Fixture (real Cassandra 5.0.2 bytes, one deterministic bit flip)
+//! ## Fixture (real Cassandra 5.0.8 bytes, one deterministic bit flip)
 //!
 //! `corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-Data.db` — a
 //! single-bit flip (byte offset 70000, `0x62`→`0x63`) inside **chunk 1** (the
 //! 64 KiB block `[65536, 131072)`) of `test_comp/uncompressed_table` (a ~190 KiB /
 //! 3-chunk uncompressed table that ships a real Cassandra-written `CRC.db`). Apache
-//! Cassandra 5.0.2 `sstableverify -e` rejects this exact file ("Corrupted file:
+//! Cassandra 5.0.8 `sstableverify -e` rejects this exact file ("Corrupted file:
 //! integrity check (digest) failed … → Invalid SSTable"), while the clean source
 //! verifies clean — both captured into `corruption-manifest.yml`
 //! (`uncompressed_data_bit_flip`, `cassandra_verdict: corrupt`).
@@ -454,7 +454,7 @@ async fn manifest_carries_cassandra_oracle_and_cqlite_matches() {
     let cassandra_verdict = verdict_line.split(':').nth(1).unwrap().trim();
     assert_eq!(
         cassandra_verdict, "corrupt",
-        "captured Cassandra 5.0.2 oracle for this bit flip is 'corrupt'"
+        "captured Cassandra 5.0.8 oracle for this bit flip is 'corrupt'"
     );
     assert!(
         block.contains("expected_error_class: UncompressedChunkCrcMismatch"),

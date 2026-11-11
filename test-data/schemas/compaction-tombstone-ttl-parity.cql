@@ -1,4 +1,4 @@
--- compaction-tombstone-ttl-parity.cql — Cassandra 5.0.2 reference schema for the
+-- compaction-tombstone-ttl-parity.cql — Cassandra reference schema for the
 -- TOMBSTONE / TTL COMPACTION byte-parity slice (issue #1387, epic #973;
 -- issue #1383/#4243).
 --

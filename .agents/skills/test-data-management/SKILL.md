@@ -62,7 +62,7 @@ docker exec -it cqlite-cassandra-5-0 cqlsh
 Full corpus regeneration: nb + oa + da keyspaces, single Docker container.
 
 **What it does:**
-1. Starts `cassandra:5.0.2` container (`cqlite-regen`)
+1. Starts the pinned Cassandra container (`cassandra:5.0.8`, see `test-data/scripts/lib/cassandra-image.sh`) (`cqlite-regen`)
 2. Applies schemas and inserts rows for nb keyspaces (CASSANDRA_4 compat mode)
 3. Restarts with `storage_compatibility_mode: NONE`, creates oa keyspace
 4. Restarts with `sstable.selected_format: bti`, creates da keyspace

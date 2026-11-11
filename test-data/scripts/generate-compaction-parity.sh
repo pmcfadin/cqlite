@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-compaction-parity.sh — Cassandra 5.0.2 live-cell COMPACTION byte-parity
+# generate-compaction-parity.sh — Cassandra live-cell COMPACTION byte-parity
 # fixtures (issue #1017, epic #973).
 #
 # Produces committed Cassandra-COMPACTED reference SSTables for the two live-cell

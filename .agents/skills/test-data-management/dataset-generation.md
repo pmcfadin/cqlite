@@ -4,7 +4,7 @@ Complete guide to generating the CQLite test corpus (datasets-v3: nb + oa + da).
 
 ## Current corpus: datasets-v3
 
-Three SSTable version/format tiers produced by Cassandra 5.0.2:
+Three SSTable version/format tiers produced by Cassandra (5.0.8 for regenerated tables; tables declared in `cassandra_source.carried_over` were written by 5.0.2):
 
 | Tier | Version | Format | Keyspaces | Tables |
 |------|---------|--------|-----------|--------|
@@ -32,7 +32,7 @@ bash test-data/scripts/regenerate-datasets.sh --dry-run
 
 ### How it works
 
-The script runs a **single `cassandra:5.0.2` container** (`cqlite-regen`)
+The script runs a **single `cassandra:5.0.8` container** (`cqlite-regen`)
 through three phases, restarting the container between phases to change format:
 
 1. **nb phase** (default `storage_compatibility_mode: CASSANDRA_4`)

@@ -19,13 +19,13 @@
 //! `read_value_at_offset` (bypassing the digest-index miss that hides the path from
 //! `get`), proving the CRC check is on the ACTUAL offset path.
 //!
-//! ## Fixture (real Cassandra 5.0.2 bytes, one deterministic bit flip)
+//! ## Fixture (real Cassandra 5.0.8 bytes, one deterministic bit flip)
 //!
 //! Reuses the #1411 oracle:
 //! `corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db` — a single-bit
 //! flip inside the FIRST LZ4 compressed chunk (chunk 0) of `test_comp/lz4_table`,
 //! a single-partition table whose whole payload lives in chunk 0. Apache Cassandra
-//! 5.0.2 `sstableverify -e` rejects this exact file.
+//! 5.0.8 `sstableverify -e` rejects this exact file.
 //!
 //! ## Fixture-gating (issue #1094 doctrine)
 //!

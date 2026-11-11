@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-issue-4106-empty-fixedwidth-set-member.sh — Cassandra 5.0.2 EMPTY
+# generate-issue-4106-empty-fixedwidth-set-member.sh — Cassandra EMPTY
 # FIXED-WIDTH MULTICELL SET MEMBER fixture (issue #4106).
 #
 # THE SET HALF of generate-issue-3805-empty-fixedwidth-map-key.sh, from which

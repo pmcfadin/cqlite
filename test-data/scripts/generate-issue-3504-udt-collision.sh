@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-issue-3504-udt-collision.sh — Cassandra 5.0.2 UDT FIELD-NAME /
+# generate-issue-3504-udt-collision.sh — Cassandra UDT FIELD-NAME /
 # TYPE-IDENTITY COLLISION fixture (issue #3504).
 #
 # WHAT THIS PRODUCES AND WHY

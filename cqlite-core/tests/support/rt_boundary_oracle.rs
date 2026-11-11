@@ -11,7 +11,7 @@ mod datasets_root;
 // Criterion 5 - CASSANDRA BYTE ORACLE (fail-closed skip-on-absent)
 // ============================================================================
 
-/// The #1383/#4243 oracle extends the existing Cassandra 5.0.2 tombstone/TTL
+/// The #1383/#4243 oracle extends the existing Cassandra 5.0.8 tombstone/TTL
 /// fixture family. Cassandra 5.0.8 remains the pinned format/semantic authority;
 /// the fixture version is recorded in the parity manifest so the two are never
 /// silently mixed.

@@ -40,7 +40,7 @@
 //! # Fixture
 //!
 //! `corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db` — real
-//! Cassandra 5.0.2 bytes with ONE bit flipped (offset 64, `0x61`→`0x60`) inside
+//! Cassandra 5.0.8 bytes with ONE bit flipped (offset 64, `0x61`→`0x60`) inside
 //! LZ4 chunk 0 of `test_comp.lz4_table`, a single-partition table whose whole
 //! payload lives in chunk 0. Corruption is therefore unavoidable on any read of
 //! the data section. Gating follows #1094 doctrine (see `require_fixtures`).

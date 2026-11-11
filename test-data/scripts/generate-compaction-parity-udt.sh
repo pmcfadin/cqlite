@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate-compaction-parity-udt.sh — Cassandra 5.0.2 UDT / frozen-value
+# generate-compaction-parity-udt.sh — Cassandra UDT / frozen-value
 # COMPACTION byte-parity fixtures (issue #1020, epic #973).
 #
 # The UDT / frozen-value extension of generate-compaction-parity.sh (#1017).

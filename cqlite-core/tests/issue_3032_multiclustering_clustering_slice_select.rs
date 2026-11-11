@@ -13,7 +13,7 @@
 //! * the OSS50 VARIABLE-LENGTH (`text`) component encoding at all — every
 //!   `wide_table` separator is a fixed-width `40 80 00 00 <byte>`.
 //!
-//! All three run here, against a real Apache Cassandra 5.0.2 `da` SSTable.
+//! All three run here, against a real Apache Cassandra 5.0.8 `da` SSTable.
 //!
 //! ## Why it caught two defects
 //!

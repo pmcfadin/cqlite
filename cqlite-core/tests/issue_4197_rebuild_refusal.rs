@@ -7,7 +7,7 @@
 //! Oracle: `test_comp_corrupt/data_db_bit_flip` — a Cassandra-verified
 //! corrupt fixture (`cassandra_verdict: corrupt`,
 //! `corruption-manifest.yml`), captured against the REAL Apache Cassandra
-//! 5.0.2 `sstableverify --extended --force` outcome. Not a synthetic
+//! 5.0.8 `sstableverify --extended --force` outcome. Not a synthetic
 //! CQLite-fabricated corruption.
 //!
 //! The duplicate-partition-key case (roborev job 124) has no committed

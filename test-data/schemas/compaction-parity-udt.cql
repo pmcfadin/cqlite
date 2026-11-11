@@ -1,4 +1,4 @@
--- compaction-parity-udt.cql — Cassandra 5.0.2 reference schema for the UDT /
+-- compaction-parity-udt.cql — Cassandra reference schema for the UDT /
 -- frozen-value COMPACTION byte-parity slice (issue #1020, epic #973).
 --
 -- These three tables are written BY CASSANDRA (cqlsh + nodetool flush) as TWO

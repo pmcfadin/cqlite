@@ -1,16 +1,17 @@
 //! Issue #1236 (verify-parity): fail-closed Cassandra parity for the SSTable
-//! verifier over the Cassandra-5.0.2-written corrupted-component corpus.
+//! verifier over the corrupted-component corpus: mixed-version, the 5.0.8-written `test_comp`
+//! sources plus the carried-over 5.0.2-written `test_da/wide_table` BTI source.
 //!
 //! This is the parity layer on top of the shipped verify surface
 //! (`cqlite_core::storage::sstable::verify::verify_sstable`, the same call path
 //! behind `cqlite verify --mode full`). For every corrupted fixture in the
-//! `corruption/test_comp_corrupt` corpus — whose clean source was written by
-//! Apache Cassandra 5.0.2 — it asserts:
+//! `corruption/test_comp_corrupt` corpus — whose clean sources were written by
+//! Apache Cassandra 5.0.8 (`test_comp`) or 5.0.2 (carried-over `test_da/wide_table`) — it asserts:
 //!
 //! 1. **Class match.** The returned `VerifyReport.findings` contain the
 //!    fixture's manifest-declared `expected_error_class`.
 //! 2. **Verdict match.** CQLite's overall corrupt/clean verdict
-//!    (`!report.is_ok()` ⇒ corrupt) agrees with the actual Cassandra 5.0.2
+//!    (`!report.is_ok()` ⇒ corrupt) agrees with the actual Cassandra 5.0.8
 //!    `sstableverify --extended` verdict captured into the manifest
 //!    (`cassandra_verdict`).
 //! 3. **Clean baseline.** The uncorrupted Cassandra-written `lz4_table`
@@ -52,7 +53,7 @@ struct Fixture {
     component: String,
     expected_failing_component: String,
     expected_error_class: String,
-    /// Captured Apache Cassandra 5.0.2 `sstableverify --extended` verdict for
+    /// Captured Apache Cassandra 5.0.8 `sstableverify --extended` verdict for
     /// this fixture's exact bytes: `clean` or `corrupt`. This is the parity
     /// oracle — never hand-encoded from reading Cassandra source.
     cassandra_verdict: String,
@@ -353,7 +354,7 @@ async fn sstable_parity_corruption_verify_matches_cassandra_per_fixture() {
                     cqlite_corrupt,
                     cass_corrupt,
                     "fixture {} (verdict_parity=equivalent): CQLite verdict (corrupt={}) \
-                     disagrees with captured Cassandra 5.0.2 verdict '{}' (corrupt={}). \
+                     disagrees with captured Cassandra 5.0.8 verdict '{}' (corrupt={}). \
                      CQLite findings: {:?}",
                     fx.name,
                     cqlite_corrupt,
@@ -425,7 +426,7 @@ async fn sstable_parity_corruption_verify_matches_cassandra_per_fixture() {
 }
 
 // ---------------------------------------------------------------------------
-// Clean baseline: the uncorrupted Cassandra-5.0.2-written lz4_table verifies
+// Clean baseline: the uncorrupted Cassandra-5.0.8-written lz4_table verifies
 // clean (zero findings), agreeing with Cassandra's clean verdict.
 // ---------------------------------------------------------------------------
 

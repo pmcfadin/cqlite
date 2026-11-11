@@ -17,13 +17,13 @@
 //! (asserting the typed corruption error) that is un-ignored when #1411 lands — we
 //! do NOT codify today's `Ok(None)` defect.
 //!
-//! ## Fixture (real Cassandra 5.0.2 bytes, one deterministic bit flip)
+//! ## Fixture (real Cassandra 5.0.8 bytes, one deterministic bit flip)
 //!
 //! `corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db` — a single-bit
 //! flip (byte offset 64, `0x61`→`0x60`) inside the FIRST LZ4 compressed chunk of
 //! `test_comp/lz4_table`. That table is a single partition (`pk=1`) whose entire
 //! payload lives in chunk 0, so the corruption is unavoidable on any read of the
-//! data section. Apache Cassandra 5.0.2 `sstableverify -e` rejects this exact file
+//! data section. Apache Cassandra 5.0.8 `sstableverify -e` rejects this exact file
 //! ("Data.db digest integrity check failed -> Invalid SSTable"), per the corpus
 //! manifest (`corruption-manifest.yml`, fixture `data_db_bit_flip`).
 //!

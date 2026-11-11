@@ -21,7 +21,7 @@
 //! nested columns. This test closes that gap.
 //!
 //! ## What it asserts (AC: value round-trip + byte parity where a reference exists)
-//! The committed Cassandra 5.0.2 reference fixture
+//! The committed Cassandra 5.0.8 reference fixture
 //! `test_compactionparityudt/udt_collections-*` carries exactly the two nested
 //! columns this issue names — `lp frozen<list<frozen<person>>>` (a frozen list
 //! nesting a UDT) and `ma frozen<map<text, frozen<address>>>` (a frozen map nesting
@@ -963,7 +963,7 @@ fn jsonl_typed_cells(ref_dir: &Path) -> BTreeMap<(String, String), String> {
 /// FLOOR: nested-decode value round-trip (CQLite output == Cassandra reference,
 /// each decoded as structured `List<Udt>` / `Map<text,Udt>`, NOT a blob).
 /// CONDITIONAL: byte parity of the compacted output vs the committed Cassandra
-/// 5.0.2 golden (a reference exists for this fixture, so byte parity is asserted).
+/// 5.0.8 golden (a reference exists for this fixture, so byte parity is asserted).
 #[tokio::test]
 async fn nested_frozen_collection_of_udt_compaction_parity() {
     let Some(ref_dir) = reference_dir() else {
@@ -1195,7 +1195,7 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
     // ── 2. Byte parity (CONDITIONAL — a Cassandra reference exists) ──────────
     // The nested columns are part of the compacted Data.db, so byte equality of
     // the whole compacted output IS byte parity for the nested frozen-collection-
-    // of-UDT layout against ground-truth Cassandra 5.0.2 bytes.
+    // of-UDT layout against ground-truth Cassandra 5.0.8 bytes.
     for suffix in BYTE_FOR_BYTE_COMPONENTS {
         let reference = read_component(&ref_dir, suffix);
         let mine = read_component(&out_dir, suffix);
@@ -1218,7 +1218,7 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
 
     eprintln!(
         "[issue_1240] BYTE PARITY PASS — {BYTE_FOR_BYTE_COMPONENTS:?} of the compacted output are \
-         byte-identical to the Cassandra 5.0.2 reference (nested frozen-collection-of-UDT layout)."
+         byte-identical to the Cassandra 5.0.8 reference (nested frozen-collection-of-UDT layout)."
     );
 }
 
@@ -1522,6 +1522,6 @@ async fn nested_collection_udt_null_inner_field_compaction_parity() {
     }
     eprintln!(
         "[issue_1289] BYTE PARITY PASS — {BYTE_FOR_BYTE_COMPONENTS:?} of the compacted \
-         {TABLE_NULL} output are byte-identical to the Cassandra 5.0.2 reference (null inner field)."
+         {TABLE_NULL} output are byte-identical to the Cassandra 5.0.8 reference (null inner field)."
     );
 }
