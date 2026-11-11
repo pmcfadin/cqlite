@@ -1,5 +1,5 @@
 //! Issue #1017 (epic #973): the FOUNDATIONAL live-cell COMPACTION byte-parity
-//! slice — CQLite's compaction output vs a committed Cassandra 5.0.2-COMPACTED
+//! slice — CQLite's compaction output vs a committed Cassandra 5.0.8-COMPACTED
 //! reference SSTable for the same logical inputs.
 //!
 //! This is the FIRST strict byte-for-byte COMPACTION parity claim CQLite makes.
@@ -624,7 +624,7 @@ async fn assert_compaction_byte_parity(
 
     eprintln!(
         "[issue_1017] {KEYSPACE}.{table}: COMPACTION byte parity PASS — \
-         {BYTE_FOR_BYTE_COMPONENTS:?} byte-identical to the Cassandra 5.0.2 \
+         {BYTE_FOR_BYTE_COMPONENTS:?} byte-identical to the Cassandra 5.0.8 \
          compacted reference; {PRESENT_NOT_DIFFED:?} present on both (not diffed); \
          JSONL secondary OK."
     );
@@ -681,7 +681,7 @@ fn assert_crc_db_carries_compaction_trailer(table: &str, ref_dir: &Path) {
     eprintln!(
         "[issue_1017/#1222] {table}: CRC.db FULL byte parity — header + {} real chunk \
          CRC(s) + trailing empty-final-chunk CRC32=0, byte-identical to the Cassandra \
-         5.0.2 compacted golden.",
+         5.0.8 compacted golden.",
         (cass.len() - 8) / 4
     );
 }

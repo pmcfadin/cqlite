@@ -30,7 +30,7 @@
 //! goldens:
 //!
 //! * `test_writeparity.static_clustering_shape` — ONE partition, a static row plus
-//!   exactly one clustering row (`generate-write-load-parity.sh`, Cassandra 5.0.2);
+//!   exactly one clustering row (`generate-write-load-parity.sh`, Cassandra 5.0.8);
 //! * `test_deltas.static_with_rows` — a STATIC-ONLY partition (`pk = 99`, a
 //!   `static_block` and no `row`) alongside three partitions of four clustering
 //!   rows each (`generate-deltas.sh`, Cassandra 5.0.2). Every expectation below is
@@ -389,7 +389,7 @@ async fn assert_static_semantics(
 }
 
 // ---------------------------------------------------------------------------
-// Fixture 1: test_writeparity.static_clustering_shape (Cassandra 5.0.2)
+// Fixture 1: test_writeparity.static_clustering_shape (Cassandra 5.0.8)
 // ---------------------------------------------------------------------------
 
 const WP_KS: &str = "test_writeparity";

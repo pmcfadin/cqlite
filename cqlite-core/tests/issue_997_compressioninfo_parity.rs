@@ -1,6 +1,6 @@
 //! Issue #997 (Epic #970): strict CompressionInfo.db field & byte parity tests.
 //!
-//! These tests parse the real Cassandra 5.0.2 `CompressionInfo.db` files from the
+//! These tests parse the real Cassandra 5.0.8 `CompressionInfo.db` files from the
 //! `test_comp` compression fixture matrix and assert STRICTLY, byte-for-byte, that
 //! CQLite's parser produces the exact values Cassandra wrote.
 //!

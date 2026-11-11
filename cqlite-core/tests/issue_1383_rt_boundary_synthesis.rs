@@ -31,7 +31,7 @@
 //! No external Cassandra fixture is required for criteria 1–4: CQLite's writer emits
 //! the same on-disk markers Cassandra does and the reader/merge consume them. Criterion
 //! 5 is the executing Cassandra byte oracle for the same open-ended scenario. The
-//! committed fixture belongs to the existing Cassandra 5.0.2 compaction family; the
+//! committed fixture belongs to the existing Cassandra 5.0.8 compaction family; the
 //! pinned Cassandra 5.0.8 source remains the format/semantic authority.
 
 #![cfg(feature = "write-support")]

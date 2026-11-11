@@ -1260,7 +1260,7 @@ fn test_set_complex_column_with_ttl() {
 // `cqlite-core/tests/issue_1295_signed_collection_order_parity.rs`.
 // ---------------------------------------------------------------------------
 
-/// Locate the committed Cassandra 5.0.2 golden `Data.db` for a `test_signed_coll`
+/// Locate the committed Cassandra 5.0.2 or 5.0.8 golden `Data.db` for a `test_signed_coll`
 /// table (issue #1295). Returns `None` when `CQLITE_DATASETS_ROOT` is unset or
 /// the gitignored binary is absent (a fresh checkout / CI without datasets), so
 /// callers fall back to the documented wire-format expectation.
@@ -1344,7 +1344,7 @@ fn test_frozen_set_int_negative_sorts_signed() {
 
     // Wire format: [count i32]([len i32][value])... — int = 4 big-endian bytes.
     // Oracle: Int32Type signed order -> -2, -1, 0, 1, 3. The expected blob is now
-    // CONFIRMED byte-for-byte against the committed Cassandra 5.0.2 golden
+    // CONFIRMED byte-for-byte against the committed Cassandra 5.0.2 or 5.0.8 golden
     // `frozen_int_collections.fs` (issue #1295) when the dataset is present.
     let expected = expected_frozen_set_int_blob(&[-2, -1, 0, 1, 3]);
     assert_eq!(
@@ -1369,7 +1369,7 @@ fn test_frozen_map_int_key_negative_sorts_signed() {
 
     // Wire format: [count i32]([klen i32][key][vlen i32][val])...
     // Oracle: Int32Type signed KEY order -> -5, -1, 0, 2. The expected blob is now
-    // CONFIRMED byte-for-byte against the committed Cassandra 5.0.2 golden
+    // CONFIRMED byte-for-byte against the committed Cassandra 5.0.2 or 5.0.8 golden
     // `frozen_int_collections.fm` (issue #1295) when the dataset is present.
     let expected = expected_frozen_map_int_text_blob(&[
         (-5, "neg-five"),

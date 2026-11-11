@@ -20,7 +20,7 @@
 //! described (`test_da` fixtures, `Partitions.db`/`Rows.db` byte-identical
 //! to the Cassandra-written originals) rather than relaxing them.
 //!
-//! Oracle: real Cassandra 5.0.2-written `test_da` BTI fixtures from the
+//! Oracle: real Cassandra 5.0.2 or 5.0.8-written `test_da` BTI fixtures from the
 //! committed corpus — no synthetic input.
 
 #![cfg(all(feature = "write-support", not(feature = "tombstones")))]

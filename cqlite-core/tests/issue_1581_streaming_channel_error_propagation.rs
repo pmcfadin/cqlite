@@ -26,7 +26,7 @@
 //!
 //! ## The fixture
 //!
-//! Reuses the SAME real, single-bit-flipped Cassandra 5.0.2 `Data.db` that
+//! Reuses the SAME real, single-bit-flipped Cassandra 5.0.8 `Data.db` that
 //! `issue_1397_corrupt_query_surface.rs` already proves makes the raw
 //! `SSTableReader::scan_stream` primitive terminate with a typed corruption
 //! `Err` mid-iteration (`corruption/test_comp_corrupt/data_db_bit_flip`,

@@ -475,7 +475,7 @@ async fn salvage_of_healthy_uncompressed_zero_clustering_columns_content_only() 
 // nothing else, so it could not validate an on-disk property at all.
 //
 // The oracle here is the committed `*-Data.db.jsonl` — real `sstabledump`
-// output over the real Cassandra 5.0.2 `da` fixture, committed beside its
+// output over the real Cassandra 5.0.8 `da` fixture, committed beside its
 // Data.db. Every expectation below is read out of THAT file; nothing is
 // derived from CQLite's own behaviour or hardcoded from a previous CQLite run.
 // ===========================================================================
@@ -781,7 +781,7 @@ fn assert_rows_match_golden(
 ///
 /// 1. **The Cassandra-written one (spec R1.1; the one that can fail).** The
 ///    committed `da-2-bti-Data.db.jsonl` — real `sstabledump` output over this
-///    real Cassandra 5.0.2 `da` fixture — is parsed into every
+///    real Cassandra 5.0.8 `da` fixture — is parsed into every
 ///    `(pk, bucket, seq) -> payload` row it contains, and CQLite's decode of the
 ///    SALVAGED OUTPUT must equal that set exactly, in both directions (nothing
 ///    lost, nothing fabricated).
@@ -896,7 +896,7 @@ async fn salvage_of_healthy_bti_sstable_preserves_every_row() {
     // invariant to a uniform framing error (#3042). This block is what makes
     // the lane an assertion about the salvaged BYTES: the committed
     // `*-Data.db.jsonl` beside the SOURCE Data.db is real `sstabledump` output
-    // over the real Cassandra 5.0.2 `da` fixture, and CQLite's decode of the
+    // over the real Cassandra 5.0.8 `da` fixture, and CQLite's decode of the
     // SALVAGED output must reproduce every row it names, and no other.
     // ---------------------------------------------------------------------
     let golden_path = {
