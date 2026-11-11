@@ -1,0 +1,2 @@
+# Shell scripts must keep LF line endings on every checkout (Windows runners run them under Git Bash).
+*.sh text eol=lf

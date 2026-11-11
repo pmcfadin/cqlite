@@ -120,6 +120,8 @@ canonicalize_dataset_root() {
   local raw_root="$1"
   local abs_root parent base parent_abs repo_root
 
+  case "${raw_root}" in [A-Za-z]:[\\/]*) # Git Bash: a Windows-form root (C:\...) -> POSIX form
+    ! command -v cygpath >/dev/null 2>&1 || raw_root="$(cygpath -u "${raw_root}")" ;; esac
   case "${raw_root}" in
     ""|"/"|".")
       fail_unsafe_dataset_root "must point at a dataset directory, not a filesystem root"

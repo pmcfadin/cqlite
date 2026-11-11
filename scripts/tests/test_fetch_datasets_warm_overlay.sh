@@ -181,8 +181,8 @@ case "$FMT" in fmt[0-9]*) ok "the format constant has the fmtN shape" ;; *) bad 
 # 9. NO workflow restores the dataset cache without an unconditional reconcile after it (roborev job 197): on an exact
 #    cache hit a `cache-hit != 'true'`-guarded fetch is skipped, so fetch-datasets.sh (which restores the tracked
 #    files and removes stale twins) would never run. Every cache site must be followed, in its job, by the composite
-#    action or a fetch-datasets.sh step whose `if:` does not mention cache-hit; a fetch gated only by
-#    `runner.os != 'Windows'` must be backed by the unconditional `git restore --source=HEAD` re-assert step.
+#    action or a fetch-datasets.sh step whose `if:` mentions neither cache-hit nor runner.os: an OS-gated fetch leaves
+#    that OS (Windows, under Git Bash) unreconciled, so it does not count (roborev job 198).
 read -r -d '' STEP_PY <<'PY' || true
 import glob, re, sys
 root = sys.argv[1]
@@ -205,17 +205,13 @@ for f in sorted(glob.glob(root + "/.github/workflows/*.yml")):
                 m = re.search(r"(?m)^\s+if:(.*)$", st2)
                 cond = m.group(1) if m else ""
                 code = "\n".join(l for l in st2.splitlines() if not l.lstrip().startswith("#"))
-                if re.search(r"bash\s+\S*fetch-datasets\.sh", code) and "cache-hit" not in cond:
+                if re.search(r"bash\s+\S*fetch-datasets\.sh", code) and "cache-hit" not in cond and "runner.os" not in cond:
                     ok_fetch = True
-                    if "runner.os" in cond:
-                        os_gated = True
                 if "git restore --source=HEAD -- test-data/datasets" in code and "cache-hit" not in cond:
                     reassert = True
             name = f.split("/")[-1]
             if not ok_fetch:
                 bad.append(name + ": no unconditional fetch-datasets.sh / restore-canonical-datasets after the cache restore")
-            elif os_gated and not reassert:
-                bad.append(name + ": the unconditional fetch is OS-gated and there is no unconditional git-restore re-assert")
 print(sites)
 for b in bad:
     print("BAD " + b)
@@ -225,6 +221,14 @@ step_sites="$(head -1 <<<"$step_out")"
 step_bad="$(grep '^BAD ' <<<"$step_out" || true)"
 [ -z "$step_bad" ] && [ "${step_sites:-0}" -ge 15 ] && ok "every dataset cache restore ($step_sites sites) is followed by an unconditional reconcile" \
   || bad "a dataset cache restore lacks an unconditional reconcile (sites=$step_sites): $step_bad"
+
+# 10. Git Bash: a Windows-form root (C:\...) is normalised with cygpath instead of being appended to $PWD
+printf '#!/bin/sh\n[ "$1" = "-u" ] && printf "%%s\\n" "$STUB_CYGPATH_OUT"\n' > "$BIN/cygpath"; chmod +x "$BIN/cygpath"
+R3="$T/r3"; make_repo "$R3"; run_fetch "$R3"
+overlay_cache "$R3"
+run_fetch "$R3" CI=true 'CQLITE_DATASETS_ROOT=C:\fake\checkout\test-data\datasets' STUB_CYGPATH_OUT="$R3/$DS"
+{ [ "$RC" = 0 ] && tracked_is "$R3" "$NEW"; } && ok "a Windows-form CQLITE_DATASETS_ROOT is converted with cygpath and reconciled" || bad "windows-form root failed ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
+rm -f "$BIN/cygpath"
 
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

@@ -386,27 +386,9 @@ jobs:
           path: test-data/datasets
           key: datasets-fmt2-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
-      - name: Fetch datasets (every run, so a warm cache is reconciled too - #4508)
-        if: runner.os != 'Windows'
+      - name: Fetch datasets (every run, every OS, so a warm cache is reconciled too - #4508)
+        shell: bash
         run: bash ./test-data/scripts/fetch-datasets.sh
-
-      - name: Fetch datasets if cache miss (Windows)
-        if: steps.dataset-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path test-data/datasets
-          $url = "https://github.com/pmcfadin/cqlite/releases/download/$env:DATASET_TAG/$env:DATASET_ASSET"
-          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$env:DATASET_ASSET"
-          $hash = (Get-FileHash "$env:TEMP\$env:DATASET_ASSET" -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne $env:DATASET_SHA256) {
-            throw "SHA256 mismatch: expected $env:DATASET_SHA256, got $hash"
-          }
-          tar -xzf "$env:TEMP\$env:DATASET_ASSET" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
-          # Issue #1335: stamp the .dataset-pin fetch-datasets.sh writes so the
-          # shared cache entry is accepted by has_required_dataset(). LF newlines
-          # to match the bash-written pin (grep -qx exact-line match).
-          $pin = "tag=$env:DATASET_TAG`nasset=$env:DATASET_ASSET`nsha256=$env:DATASET_SHA256`n"
-          [System.IO.File]::WriteAllText("test-data/datasets/.dataset-pin", $pin)
 
       - name: Re-assert committed dataset fixtures over the cache/bundle (#4356)
         # The cache/bundle carries a snapshot of test-data/datasets that predates
