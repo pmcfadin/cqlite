@@ -42,6 +42,7 @@
 use crate::platform::Platform;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
+use crate::storage::sstable::verify_audit::{self, AuditInputs, AuditSummary};
 use crate::storage::sstable::verify_location::{self, PendingLocation};
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Config, Error, Result};
@@ -72,6 +73,9 @@ pub enum VerifyMode {
     /// QUICK plus inline chunk-CRC validation, Statistics.db parse, and a full
     /// row scan.
     Full,
+    /// Cross-component consistency audit (issue #4195): QUICK's structural
+    /// checks plus eight named invariants reported as `Pass | Fail | Skip`.
+    Audit,
 }
 
 impl VerifyMode {
@@ -80,6 +84,7 @@ impl VerifyMode {
         match self {
             VerifyMode::Quick => "quick",
             VerifyMode::Full => "full",
+            VerifyMode::Audit => "audit",
         }
     }
 }
@@ -169,6 +174,20 @@ pub enum VerifyErrorClass {
     /// so this is a detection tool Cassandra's `sstableverify` lacks — Cassandra
     /// does not verify Filter.db contents and would report the same fixture clean.
     FilterFalseNegative,
+    /// `Index.db` names a `Data.db` offset whose partition header carries a
+    /// different key (audit invariant 1, #4195).
+    IndexPositionKeyMismatch,
+    /// A `Summary.db` sample does not resolve to the claimed `Index.db` entry
+    /// (audit invariant 2, #4195).
+    SummarySampleMismatch,
+    /// A BTI `DataOffset` leaf points past the end of `Data.db` (audit
+    /// invariant 4, #4195).
+    BtiDataOffsetOutOfBounds,
+    /// `CompressionInfo.db`'s chunk table does not cover `Data.db` exactly
+    /// (audit invariant 7, #4195).
+    CompressionCoverageGap,
+    /// `Statistics.db` disagrees with a real scan (audit invariant 8, #4195).
+    StatisticsScanMismatch,
 }
 
 impl VerifyErrorClass {
@@ -192,6 +211,11 @@ impl VerifyErrorClass {
             VerifyErrorClass::OutOfOrderKeyOrRow => "OutOfOrderKeyOrRow",
             VerifyErrorClass::InvalidLocalDeletionTime => "InvalidLocalDeletionTime",
             VerifyErrorClass::FilterFalseNegative => "FilterFalseNegative",
+            VerifyErrorClass::IndexPositionKeyMismatch => "IndexPositionKeyMismatch",
+            VerifyErrorClass::SummarySampleMismatch => "SummarySampleMismatch",
+            VerifyErrorClass::BtiDataOffsetOutOfBounds => "BtiDataOffsetOutOfBounds",
+            VerifyErrorClass::CompressionCoverageGap => "CompressionCoverageGap",
+            VerifyErrorClass::StatisticsScanMismatch => "StatisticsScanMismatch",
         }
     }
 }
@@ -223,7 +247,7 @@ pub struct VerifyFinding {
 }
 
 impl VerifyFinding {
-    fn new(
+    pub(crate) fn new(
         class: VerifyErrorClass,
         component: impl Into<String>,
         detail: impl Into<String>,
@@ -274,12 +298,19 @@ pub struct VerifyReport {
     pub toc_components: Vec<String>,
     /// Number of rows seen during the FULL-mode scan (`None` in QUICK mode).
     pub rows_scanned: Option<usize>,
+    /// The audit checklist; `Some` only for [`VerifyMode::Audit`] (#4195).
+    pub audit: Option<AuditSummary>,
 }
 
 impl VerifyReport {
-    /// `true` when no findings were recorded (verification passed).
+    /// `true` when no findings were recorded (verification passed). An audit is
+    /// additionally not OK when it measured nothing (all rows `Skip`).
     pub fn is_ok(&self) -> bool {
         self.findings.is_empty()
+            && !self
+                .audit
+                .as_ref()
+                .is_some_and(|a| a.any_fail() || a.vacuous())
     }
 
     /// The first finding's error class, if any.
@@ -357,6 +388,21 @@ pub async fn verify_sstable(
     verify_components(dir, components, mode, config, platform).await
 }
 
+/// Run [`VerifyMode::Audit`] (issue #4195). `deep` additionally runs the one
+/// invariant that needs a full scan (`statistics-vs-scan`) and the BTI trie
+/// identity cross-check. Additive companion to [`verify_sstable`], whose
+/// signature is unchanged for its many existing callers; `verify_sstable(..,
+/// VerifyMode::Audit, ..)` is the same audit with `deep == false`.
+pub async fn verify_sstable_audit(
+    dir: &Path,
+    deep: bool,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
+    let components = resolve_components(dir)?;
+    verify_components_with(dir, components, VerifyMode::Audit, deep, config, platform).await
+}
+
 /// Verify the EXACT SSTable generation identified by `data_db_path`.
 ///
 /// Additive companion to [`verify_sstable`] (issue #1283, roborev). `verify_sstable`
@@ -379,6 +425,20 @@ pub async fn verify_sstable_generation(
     let dir = generation_dir(data_db_path);
     let components = resolve_components_for_data_path(dir, data_db_path)?;
     verify_components(dir, components, mode, config, platform).await
+}
+
+/// [`verify_sstable_audit`] for the EXACT generation named by `data_db_path`
+/// (the multi-generation-directory companion, as `verify_sstable_generation` is
+/// to `verify_sstable`).
+pub async fn verify_sstable_generation_audit(
+    data_db_path: &Path,
+    deep: bool,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
+    let dir = generation_dir(data_db_path);
+    let components = resolve_components_for_data_path(dir, data_db_path)?;
+    verify_components_with(dir, components, VerifyMode::Audit, deep, config, platform).await
 }
 
 /// Resolve the directory that holds `data_db_path`'s sibling components.
@@ -408,6 +468,17 @@ async fn verify_components(
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
+    verify_components_with(dir, components, mode, false, config, platform).await
+}
+
+async fn verify_components_with(
+    dir: &Path,
+    components: ComponentSet,
+    mode: VerifyMode,
+    deep: bool,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
     let mut findings: Vec<VerifyFinding> = Vec::new();
     // Issue #4194: chunk/offset-anchored findings awaiting location
     // resolution, resolved in one pass at the end (`finalize_locations`) once
@@ -417,12 +488,15 @@ async fn verify_components(
     // move into `full_row_scan_partitions` below, for `finalize_locations`'s
     // own `IndexReader::open` re-read of `Index.db` (BIG).
     let platform_for_location = platform.clone();
+    let platform_for_audit = platform.clone();
 
     // ---- Check 1: TOC.txt completeness + component presence ----------------
     let toc_components = check_toc_and_presence(dir, &components, &mut findings)?;
+    let toc_findings = 0..findings.len();
 
     // ---- Check 2: Digest.crc32 vs CRC32(Data.db) ---------------------------
     check_digest(dir, &components, &mut findings)?;
+    let digest_findings = toc_findings.end..findings.len();
 
     // ---- Check 3: CompressionInfo.db parse + chunk-offset bounds -----------
     let compression_info =
@@ -448,10 +522,12 @@ async fn verify_components(
     // payload resolved back to a raw partition key by AUTHORITATIVE data (issue
     // #1103).
     let mut bti_leaves: Option<Vec<BtiResolvedLeaf>> = None;
+    let structure_start = findings.len();
     match components.format {
         SsTableFormat::Bti => bti_leaves = check_bti_structure(dir, &components, &mut findings)?,
         SsTableFormat::Big => check_big_index(dir, &components, &mut findings)?,
     }
+    let structure_findings = structure_start..findings.len();
 
     let mut rows_scanned = None;
 
@@ -638,6 +714,30 @@ async fn verify_components(
         .await;
     }
 
+    // ---- Audit mode (#4195): eight named cross-component invariants -------
+    let audit = if mode == VerifyMode::Audit {
+        Some(
+            run_audit(
+                dir,
+                &components,
+                deep,
+                AuditRanges {
+                    toc_findings,
+                    digest_findings,
+                    structure_findings,
+                },
+                &compression_info,
+                bti_leaves.as_deref(),
+                config,
+                platform_for_audit,
+                &mut findings,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+
     Ok(VerifyReport {
         directory: dir.to_path_buf(),
         base_name: components.base_name,
@@ -646,7 +746,78 @@ async fn verify_components(
         findings,
         toc_components,
         rows_scanned,
+        audit,
     })
+}
+
+/// Finding ranges attributing each structural check's output (audit rows 4-6).
+struct AuditRanges {
+    toc_findings: std::ops::Range<usize>,
+    digest_findings: std::ops::Range<usize>,
+    structure_findings: std::ops::Range<usize>,
+}
+
+/// Audit-mode tail of `verify_components_with` (#4195): the cheap parse checks
+/// the audit's rows depend on, the `--deep` scan, then the eight invariants.
+#[allow(clippy::too_many_arguments)]
+async fn run_audit(
+    dir: &Path,
+    components: &ComponentSet,
+    deep: bool,
+    ranges: AuditRanges,
+    compression: &CompressionState,
+    bti_leaves: Option<&[BtiResolvedLeaf]>,
+    config: &Config,
+    platform: Arc<Platform>,
+    findings: &mut Vec<VerifyFinding>,
+) -> AuditSummary {
+    // Parse-level checks Quick lacks: a corrupt Summary.db / Statistics.db is a
+    // finding with its cause, not merely a Skip.
+    if components.format == SsTableFormat::Big {
+        check_summary(dir, components, platform.clone(), findings).await;
+    }
+    check_statistics(dir, components, platform.clone(), findings).await;
+    let mut observed = None;
+    let mut bti_identity_failed = false;
+    if deep {
+        observed = Some(
+            match full_row_scan_partitions(&components.data_path, config, platform.clone()).await {
+                Ok((_, partitions)) => {
+                    if let Some(detail) = bti_leaves
+                        .and_then(|leaves| bti_partition_identity_mismatch(leaves, &partitions))
+                    {
+                        bti_identity_failed = true;
+                        findings.push(VerifyFinding::new(
+                            VerifyErrorClass::BtiRootPointerCorrupt,
+                            "Partitions.db",
+                            detail,
+                        ));
+                    }
+                    Ok(partitions.len())
+                }
+                Err(e) => Err(e.to_string()),
+            },
+        );
+    }
+    let input = AuditInputs {
+        format: components.format,
+        data_path: components.data_path.clone(),
+        index_path: components.path(dir, "Index.db"),
+        summary_path: components.path(dir, "Summary.db"),
+        filter_path: components.path(dir, "Filter.db"),
+        digest_path: components.path(dir, "Digest.crc32"),
+        statistics_path: components.path(dir, "Statistics.db"),
+        deep,
+        compression,
+        bti_leaves,
+        toc_findings: ranges.toc_findings,
+        digest_findings: ranges.digest_findings,
+        structure_findings: ranges.structure_findings,
+        observed_partitions: observed,
+        bti_identity_failed,
+        platform,
+    };
+    verify_audit::run(input, findings).await
 }
 
 /// Read all regular files in `dir`, returning `(all_files, data_files)` where
@@ -945,7 +1116,7 @@ fn check_digest(
 /// extent, checked against a chunk grid that is not its grid, with a
 /// confidently-resolved partition list attached. A wrong answer presented as
 /// a right one, which §D2 exists to prevent.
-enum CompressionState {
+pub(crate) enum CompressionState {
     /// No `CompressionInfo.db` on disk: a genuinely uncompressed table. Its
     /// `CRC.db` (BIG) IS the authoritative chunk grid.
     Uncompressed,
@@ -1132,6 +1303,13 @@ pub(crate) struct BtiResolvedLeaf {
     /// `RowsOffset` row-index entry. Resolved to a raw key via the Data.db scan's
     /// position map in [`bti_partition_identity_mismatch`].
     pub(crate) data_position: u64,
+}
+
+impl BtiResolvedLeaf {
+    /// The emitted byte-comparable trie prefix.
+    pub(crate) fn prefix(&self) -> &[u8] {
+        &self.prefix
+    }
 }
 
 /// Check 4 (BTI): structurally validate the `Partitions.db` and `Rows.db`
