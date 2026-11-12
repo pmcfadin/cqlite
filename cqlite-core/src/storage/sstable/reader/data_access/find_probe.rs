@@ -132,14 +132,20 @@ impl SSTableReader {
             return Ok(GenerationProbe::IndexMiss);
         }
         if !self.has_partition_index() {
-            return self.fail_safe_scan(partition_key, schema, scan_cancel).await;
+            return self
+                .fail_safe_scan(partition_key, schema, scan_cancel)
+                .await;
         }
 
         let offset = if is_bti {
             match self.lookup_partition_via_bti_trie(partition_key) {
                 Ok(Some(off)) => off,
                 Ok(None) => return Ok(GenerationProbe::IndexMiss),
-                Err(_) => return self.fail_safe_scan(partition_key, schema, scan_cancel).await,
+                Err(_) => {
+                    return self
+                        .fail_safe_scan(partition_key, schema, scan_cancel)
+                        .await
+                }
             }
         } else {
             match self.lookup_partition_with_index(partition_key).await {
@@ -147,13 +153,21 @@ impl SSTableReader {
                 // Diagnostic fact: the index, taken at face value, has no entry (F1.3 — this
                 // is what an absent Filter.db degrades to, never "unmeasured").
                 Ok(None) => return Ok(GenerationProbe::IndexMiss),
-                Err(_) => return self.fail_safe_scan(partition_key, schema, scan_cancel).await,
+                Err(_) => {
+                    return self
+                        .fail_safe_scan(partition_key, schema, scan_cancel)
+                        .await
+                }
             }
         };
 
         let end_bound = match self.successor_partition_offset(offset, partition_key).await {
             Ok(b) => b,
-            Err(_) => return self.fail_safe_scan(partition_key, schema, scan_cancel).await,
+            Err(_) => {
+                return self
+                    .fail_safe_scan(partition_key, schema, scan_cancel)
+                    .await
+            }
         };
 
         match self
@@ -181,11 +195,17 @@ impl SSTableReader {
                         has_partition_deletion,
                     }))
                 }
-                None => self.fail_safe_scan(partition_key, schema, scan_cancel).await,
+                None => {
+                    self.fail_safe_scan(partition_key, schema, scan_cancel)
+                        .await
+                }
             },
             // Could not bound / BIG stale entry pointing at a foreign key: the index cannot be
             // trusted for this key — scan.
-            None => self.fail_safe_scan(partition_key, schema, scan_cancel).await,
+            None => {
+                self.fail_safe_scan(partition_key, schema, scan_cancel)
+                    .await
+            }
         }
     }
 

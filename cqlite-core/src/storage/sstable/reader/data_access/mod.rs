@@ -114,9 +114,9 @@ mod sequential;
 
 // Public surface re-export (unchanged: `reader::mod` re-exports
 // `data_access::ClusteringSlice`).
-pub use model::ClusteringSlice;
 #[cfg(not(feature = "tombstones"))]
 pub use find_probe::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
+pub use model::ClusteringSlice;
 #[cfg(not(feature = "tombstones"))]
 pub use point_compaction::SinglePartitionCompaction;
 // Crate-internal decode-at-offset primitive salvage's recovery loop is built

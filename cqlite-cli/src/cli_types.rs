@@ -412,6 +412,11 @@ pub enum Commands {
         long_about = "Walk every <keyspace>/<table>-<id>/ directory under <data-dir> (exactly two levels; a `.<index-name>/` secondary-index subdirectory, `snapshots/`, or `backups/` is NOT descended into and contributes no row -- out of scope for this verb), verify EVERY SSTable generation found there (not just the first) with the same check pipeline as `cqlite verify`, and report one row per generation: severity ok|degraded|corrupt|unreadable, plus a data-dir-wide exit code. `degraded` names a CQLite-only detection (e.g. a Filter.db false negative) that is not proof of unreadability -- it alone never trips a non-zero exit. A table directory with zero readable generations (no readable Data.db, unopenable directory, OR a table that has genuinely never been flushed -- e.g. sweeping a live Cassandra data directory will report many such rows for untouched system tables) is a row with severity `unreadable`, never a silently-dropped entry. Exit 0 = every row ok; 2 = any row corrupt or unreadable, OR zero generations were found under <data-dir> at all (degraded rows are OK-adjacent, see design.md S2); 1 = usage error (<data-dir> missing or not a directory). --jobs bounds how many generations verify concurrently on the blocking thread pool. Omitting it means 1 -- SEQUENTIAL, one table open at a time; passing --jobs N opts in to parallelism and is clamped to a fixed maximum of 8 (peak memory scales with jobs -- verification reads a whole Data.db into memory even in quick mode) -- it never changes which rows appear or their severities. Example: cqlite sweep ./test-data/datasets/sstables --mode full --out json --jobs 4"
     )]
     Sweep(SweepArgs),
+    /// Find which generations hold a partition key, and unflushed CommitLog mutations (issue #4205)
+    #[command(
+        long_about = "Report, for ONE partition key of a table directory, how EVERY generation answered: `hit` (offset, length or to-eof, max writetime, partition-deletion), `bloom-negative` (BIG Filter.db said no), `index-miss` (Index.db / the BTI trie said no -- also reported when Filter.db is absent), or `scanned` (no usable index, a full schema-driven scan decided). A generation that cannot be opened or probed is reported UNREADABLE with its cause -- never as absent. With --commitlog <dir>, every mutation in every *.log segment touching the key is listed with segment, byte position, writetime and `unflushed` (yes | no | unmeasured(<cause>)); writetime is `unmeasured(<cause>)` for shapes the CommitLog decoder does not model (clustered tables, complex columns, partition deletions) -- never a guess -- and an unreadable segment is its own line. <partition-key> is a CQL literal (comma-separated for a composite key). Needs the global --schema. Exit 0 = report complete (including 'absent everywhere'); 1 = usage error; 2 = any generation or segment could not be read. Example: cqlite --schema ks.cql find ./ks/users-<id> 42 --commitlog ./commitlog --out json"
+    )]
+    Find(FindArgs),
     /// Export an SSTable generation as a delta-envelope Parquet file (Issue #705)
     #[command(name = "delta-export")]
     #[command(
@@ -684,6 +689,8 @@ pub struct RebuildArgs {
     #[arg(long, value_enum, default_value = "text")]
     pub out_format: RebuildOutFormatArg,
 }
+
+pub use crate::commands::find_args::FindArgs;
 
 // Arguments for the sweep subcommand (issue #4194)
 #[derive(Args, Debug, Clone)]
