@@ -195,13 +195,6 @@ async fn genuinely_absent_table_is_ok_empty() {
 
 // ---- refresh x refusal ledger (roborev round 1) --------------------------------
 
-/// Damage `<dir>/nb-1-big-Statistics.db` exactly as `stage(.., damage = true)` does.
-fn damage(dir: &Path) {
-    let stats = dir.join("nb-1-big-Statistics.db");
-    let bytes = std::fs::read(&stats).expect("read stats");
-    std::fs::write(&stats, &bytes[..20.min(bytes.len())]).expect("truncate stats");
-}
-
 fn repair(dir: &Path, table: &str) {
     let src = generation_dir(table).join("nb-1-big-Statistics.db");
     std::fs::copy(src, dir.join("nb-1-big-Statistics.db")).expect("restore stats");
