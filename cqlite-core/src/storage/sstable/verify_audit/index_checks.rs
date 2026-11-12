@@ -63,10 +63,8 @@ pub(super) fn walk_index(path: &Path) -> IndexWalk {
                 });
                 remaining = rest;
             }
-            Ok(_) => return IndexWalk::Unreadable(format!("entry at {at} made no progress")),
-            Err(e) => {
-                return IndexWalk::Unreadable(format!("entry at {at} failed to parse: {e:?}"))
-            }
+            Ok(_) => return unreadable(format!("entry at {at} made no progress")),
+            Err(e) => return unreadable(format!("entry at {at} failed to parse: {e:?}")),
         }
     }
     IndexWalk::Entries(out)
