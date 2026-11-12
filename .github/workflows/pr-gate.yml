@@ -231,7 +231,7 @@ jobs:
             # its repo-root fallback. CQLITE_REQUIRE_FIXTURES=1 makes an absent/empty
             # fixture a HARD FAILURE (reds this required job) instead of a silent skip.
             CQLITE_REQUIRE_FIXTURES=1 \
-              cargo test -p cqlite-core --features "state_machine cli-helpers" \
+              cargo test -p cqlite-core --features "state_machine cli-helpers result-corruption-injection" \
                 --test query_semantics_oracle_parity
           '
 
