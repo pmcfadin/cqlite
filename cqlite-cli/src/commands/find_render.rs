@@ -54,6 +54,9 @@ fn unflushed_text(u: &Unflushed) -> String {
 /// Render the report as text, one line per generation / CommitLog entry.
 pub fn render_text(r: &FindReport) -> String {
     let mut lines = Vec::new();
+    if r.generations.is_empty() {
+        lines.push("(no SSTable generation in the table directory)".to_string());
+    }
     for g in &r.generations {
         let body = match &g.outcome {
             GenOutcome::Probe(GenerationProbe::Hit(d)) => format!("hit  {}", hit_text(d)),

@@ -140,7 +140,7 @@ pub fn scan_commitlog(
                 Err(e) => {
                     out.push(CommitEntry::SegmentFailure {
                         segment: segment.clone(),
-                        cause: format!("record decode failed after position {position}: {e}"),
+                        cause: format!("record at position {position} could not be read: {e}"),
                     });
                     break;
                 }

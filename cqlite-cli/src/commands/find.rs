@@ -276,11 +276,9 @@ pub async fn execute_find_command(
         Err(e) => usage(&format!("{e:#}")),
     };
     let gens = match list_generations(&args.table_dir) {
-        Ok(g) if !g.is_empty() => g,
-        Ok(_) => usage(&format!(
-            "no *-Data.db generation in {}",
-            args.table_dir.display()
-        )),
+        // A never-flushed table has no generation: a legitimate "where did my write go"
+        // answer (everything is in the CommitLog), not a usage error.
+        Ok(g) => g,
         Err(e) => usage(&format!("cannot list {}: {e}", args.table_dir.display())),
     };
     let generations = probe_generations(&gens, &key, &schema).await;
