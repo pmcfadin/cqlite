@@ -5,8 +5,8 @@
 //! The differential/parity suites each prove their COMPARATOR can fail on a
 //! synthetic diff, but none proved the WHOLE suite goes red when the real read
 //! path hands back one wrong decoded value. This seam lets a meta-test corrupt
-//! exactly one decoded cell of a real `SELECT` result — at the single chokepoint
-//! where the executor's final rows are assembled — and then assert the suite's own
+//! exactly one decoded cell of a real `SELECT` result — at the engine's single
+//! result chokepoint (`AdvancedQueryEngine::execute`) — and then assert the suite's own
 //! assertion fires. A suite that stays green under that corruption is comparing
 //! something other than the path's output.
 //!
@@ -14,7 +14,7 @@
 //!
 //! * Compiled ONLY with the `result-corruption-injection` feature (NOT in defaults;
 //!   no dependencies). Without it the module, the arming statics and the one call
-//!   site in `select_executor::execute` do not exist, so every default build, the
+//!   site in `engine::deadline` (`AdvancedQueryEngine::execute`) do not exist, so every default build, the
 //!   shipped CLI/bindings and CI are byte-identical.
 //! * Doc-hidden and unarmed by default: with the feature on but nothing armed, the
 //!   call site is one uncontended mutex read and rows are untouched.
