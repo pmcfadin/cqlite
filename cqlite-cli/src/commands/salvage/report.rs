@@ -254,7 +254,11 @@ pub(super) fn exit_after_partial_failure(
     // here to stderr; a second failure writing/rendering what WAS gathered
     // is not separately fatal — `reports` being non-empty already means
     // there is something worth a manifest, either way below.
-    let _ = write_manifest_file(reports, args, is_table_dir, guard);
+    // The failure is reported (never swallowed, issue #4528); the exit code below is unchanged:
+    // the run already failed, and `reports` having output still means 3.
+    if let Err(e) = write_manifest_file(reports, args, is_table_dir, guard) {
+        eprintln!("cqlite salvage: failed to write manifest: {e:#}");
+    }
     render_console(reports, args, is_table_dir);
     let any_output_written = out_has_data_db || reports.iter().any(|r| r.refused.is_none());
     if any_output_written {
@@ -385,8 +389,23 @@ pub(super) fn write_manifest_file(
     }
     let file = std::fs::File::create(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
-    write_manifest_json(std::io::BufWriter::new(file), reports, is_table_dir)
+    // Issue #4528: the BufWriter must be flushed EXPLICITLY. `serde_json::to_writer_pretty`
+    // never flushes, and a `BufWriter` dropped with unwritten bytes flushes them in `Drop` and
+    // DISCARDS the error — so a manifest small enough to sit in the buffer (every realistic one)
+    // hit ENOSPC/EIO only there and the run exited 0 with a missing or empty manifest.
+    use std::io::Write;
+    let mut writer = std::io::BufWriter::new(file);
+    write_manifest_json(&mut writer, reports, is_table_dir)
         .with_context(|| format!("failed to write {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    let file = writer
+        .into_inner()
+        .map_err(|e| e.into_error())
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", path.display()))?;
     Ok(())
 }
 

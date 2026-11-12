@@ -515,6 +515,9 @@ enum Scope {
     Enforced,
     /// ONLY the cells [`DEFECTS`] lists for this issue (driven by the `#[ignore]`d reproducers).
     KnownDefects(u32),
+    /// Only the `write` boundaries on paths ending in this suffix, in this mode (a named
+    /// regression for a fixed defect; the cells run are NOT in [`DEFECTS`]).
+    Only(&'static str, Mode),
     /// Crash mode only, against Cassandra's discoverability rule (see module doc; #4529).
     CassandraStrict,
 }
@@ -562,14 +565,6 @@ fn defects() -> Vec<Defect> {
         }
     }
     for fixture in ALL_FIXTURES {
-        // #4528: salvage swallows an ENOSPC on the --manifest write (exit 0).
-        v.push(Defect {
-            verb: Verb::Salvage,
-            fixture,
-            path_suffix: "manifest.json",
-            modes: &[Mode::Enospc, Mode::Short],
-            issue: 4528,
-        });
         // TORN_MANIFEST (#4549): `--manifest` is written in place
         // (`File::create`/`fs::write`, not temp + rename), so a crash mid-write leaves a 0-byte or
         // truncated manifest, and rebuild also leaves one after an ENOSPC/short write.
@@ -667,6 +662,9 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
                 Scope::KnownDefects(issue) if defect != Some(issue) => continue,
+                Scope::Only(suffix, m) if !(is_write && path.ends_with(suffix) && mode == m) => {
+                    continue
+                }
                 Scope::CassandraStrict if mode != Mode::Crash => continue,
                 _ => {}
             }
@@ -852,10 +850,20 @@ fn issue_4527_filter_write_error_swallowed() {
     );
 }
 
+/// Regression for #4528 (fixed): a failed `--manifest` write (ENOSPC / short write) must exit
+/// non-zero naming the cause; a `BufWriter` dropped unflushed used to swallow it.
 #[test]
-#[ignore = "#4528 salvage swallows a --manifest write error"]
-fn issue_4528_salvage_manifest_write_error_swallowed() {
-    check(Verb::Salvage, Scope::KnownDefects(4528), fixtures());
+fn issue_4528_salvage_manifest_write_error_exits_nonzero() {
+    check(
+        Verb::Salvage,
+        Scope::Only("manifest.json", Mode::Enospc),
+        fixtures(),
+    );
+    check(
+        Verb::Salvage,
+        Scope::Only("manifest.json", Mode::Short),
+        fixtures(),
+    );
 }
 
 #[test]
