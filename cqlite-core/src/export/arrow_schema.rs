@@ -366,7 +366,10 @@ mod tests {
     use crate::schema::CqlType;
 
     fn has_uuid_extension(field: &Field) -> bool {
-        field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(String::as_str)
+        field
+            .metadata()
+            .get(ARROW_EXTENSION_NAME_KEY)
+            .map(String::as_str)
             == Some(ARROW_UUID_EXTENSION_NAME)
     }
 

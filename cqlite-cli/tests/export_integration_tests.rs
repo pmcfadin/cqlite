@@ -1225,10 +1225,10 @@ async fn test_export_sstable_to_vortex() {
 /// Read a `.vortex` file back and return its total row count, via Vortex's own reader.
 #[cfg(feature = "vortex")]
 async fn read_vortex_row_count(path: &std::path::Path) -> anyhow::Result<usize> {
-    use vortex::VortexSessionDefault;
     use vortex::array::stream::ArrayStreamExt;
     use vortex::file::OpenOptionsSessionExt;
     use vortex::session::VortexSession;
+    use vortex::VortexSessionDefault;
 
     let session = VortexSession::default();
     let file = session.open_options().open_path(path.to_path_buf()).await?;

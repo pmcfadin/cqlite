@@ -550,7 +550,10 @@ fn differential_uuid_column_matches() {
 fn differential_read_sstable_rejects_vortex() {
     let strict = require_fixtures_strict();
     let Some(root) = datasets_root() else {
-        assert!(!strict, "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT is unset");
+        assert!(
+            !strict,
+            "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT is unset"
+        );
         eprintln!("CQLITE_DATASETS_ROOT not set, skipping");
         return;
     };
@@ -561,7 +564,10 @@ fn differential_read_sstable_rejects_vortex() {
         schema: schemas_dir().join("basic-types.cql"),
     };
     let Some(sstable_dir) = table_dir_has_data_db(&root, &table) else {
-        assert!(!strict, "CQLITE_REQUIRE_FIXTURES=1 but test_basic.simple_table has no Data.db");
+        assert!(
+            !strict,
+            "CQLITE_REQUIRE_FIXTURES=1 but test_basic.simple_table has no Data.db"
+        );
         eprintln!("test_basic.simple_table: no Data.db present, skipping");
         return;
     };

@@ -593,7 +593,10 @@ mod tests {
             .write_chunk(&[good_row(bad_row_values)])
             .await
             .expect("the bad row is only BUFFERED here, not yet converted");
-        assert_eq!(buffered, 0, "buffer has 1 row < row_group_size=2, nothing flushed yet");
+        assert_eq!(
+            buffered, 0,
+            "buffer has 1 row < row_group_size=2, nothing flushed yet"
+        );
 
         let err = writer
             .finalize()

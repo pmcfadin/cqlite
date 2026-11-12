@@ -107,10 +107,7 @@ pub async fn export_data(
         );
     }
 
-    // Configure streaming based on format. Vortex (issue #4237) shares Parquet's
-    // config: both are binary columnar formats writing row-group-sized chunks, and
-    // `StreamingVortexWriter`'s default `row_group_size` (10,000) matches
-    // `StreamingConfig::for_parquet()`'s `chunk_size` deliberately.
+    // Configure streaming based on format (Vortex shares Parquet's row-group-sized chunks, #4237).
     let config = match format {
         ExportFormat::Parquet | ExportFormat::Vortex => StreamingConfig::for_parquet(),
         _ => StreamingConfig::for_text_formats(),
@@ -473,13 +470,7 @@ pub async fn export_data(
                 .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet: {}", e))?;
         }
         ExportFormat::Vortex => {
-            // Issue #4237: the streaming loop (chunk collection, limit truncation,
-            // progress, deadline) lives in `export_vortex::run_vortex_export` so this
-            // 260-line per-format match gains ~15 lines instead of the ~65-line inline
-            // body the Parquet arm above has. This file was already over the campsite
-            // (#1116) threshold before this change; the extraction minimizes but cannot
-            // eliminate the growth, so the full gate's file-size component needs
-            // `CQLITE_ALLOW_FILE_GROWTH=1` for this PR (noted in the PR description).
+            // #4237: loop lives in `export_vortex::run_vortex_export` to keep this match small.
             #[cfg(feature = "vortex")]
             {
                 super::export_vortex::run_vortex_export(
@@ -763,10 +754,7 @@ mod tests {
 /// Keeping them together means a fifth consumption loop cannot be added that forgets
 /// one of them — the four existing ones each got the pre-check by hand, which is
 /// exactly the kind of per-site obligation that rots.
-/// `pub(crate)` (not `fn`) so `export_vortex::run_vortex_export` (issue #4237) can
-/// reuse the SAME deadline-aware chunk collection the CSV/JSON/Parquet loops use,
-/// rather than a duplicated fifth copy of the two-layer deadline check documented
-/// above.
+/// `pub(crate)` so `export_vortex` (#4237) reuses it.
 #[cfg(feature = "state_machine")]
 pub(crate) async fn collect_chunk_within(
     result_iter: &mut cqlite_core::query::result::QueryResultIterator,
