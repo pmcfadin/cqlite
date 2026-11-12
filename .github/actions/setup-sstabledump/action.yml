@@ -17,7 +17,7 @@ inputs:
   cassandra-version:
     description: Cassandra version that provides the sstabledump tool.
     required: false
-    default: 5.0.2
+    default: 5.0.8
 
 outputs:
   install-path:
