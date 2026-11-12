@@ -221,7 +221,7 @@ impl KeyDigestComputer {
                 ]);
                 Ok(Value::Timestamp(millis))
             }
-            ComparatorType::Uuid => {
+            ComparatorType::Uuid | ComparatorType::TimeUuid => {
                 if bytes.len() != 16 {
                     return Err(Error::corruption("Invalid UUID bytes".to_string()));
                 }

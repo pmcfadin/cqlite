@@ -15,12 +15,13 @@ pub use node::{
 };
 pub use parser::{
     decode_bti_partition_payload, encode_bti_trie_key_from_token, encode_clustering_bound_oss50,
-    encode_clustering_bound_oss50_with_order, encode_partition_key_for_bti_trie,
-    iterate_partition_locations_in_bti_file, iterate_partitions_in_bti_file,
-    iterate_rows_for_partition, iterate_rows_in_bti_file, iterate_rows_in_bti_trie,
-    lookup_partition_in_bti_file, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
-    select_row_index_blocks_for_range, BtiPartitionLocation, BtiRowIndexEntry,
-    BtiRowIndexEntryWithKey, BtiRowIndexHeader, FLAG_HAS_HASH_BYTE, FLAG_OPEN_MARKER,
+    encode_clustering_bound_oss50_typed, encode_clustering_bound_oss50_with_order,
+    encode_partition_key_for_bti_trie, iterate_partition_locations_in_bti_file,
+    iterate_partitions_in_bti_file, iterate_rows_for_partition, iterate_rows_in_bti_file,
+    iterate_rows_in_bti_trie, lookup_partition_in_bti_file, lookup_raw_key_in_bti_partitions_db,
+    resolve_rows_db_entry, select_row_index_blocks_for_range, BtiPartitionLocation,
+    BtiRowIndexEntry, BtiRowIndexEntryWithKey, BtiRowIndexHeader, FLAG_HAS_HASH_BYTE,
+    FLAG_OPEN_MARKER,
 };
 // Structural `Rows.db` row-index-root validation (issue #3002).
 pub use parser::{

@@ -927,6 +927,7 @@ impl SchemaRegistry {
             (ComparatorType::Blob, ComparatorType::Blob) => true,
             (ComparatorType::Timestamp, ComparatorType::Timestamp) => true,
             (ComparatorType::Uuid, ComparatorType::Uuid) => true,
+            (ComparatorType::TimeUuid, ComparatorType::TimeUuid) => true,
             (ComparatorType::Json, ComparatorType::Json) => true,
 
             // Collection types

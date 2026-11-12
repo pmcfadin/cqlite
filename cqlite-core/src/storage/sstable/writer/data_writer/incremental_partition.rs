@@ -386,10 +386,18 @@ impl<'w, 'r> IncrementalPartitionWriter<'w, 'r> {
                 .iter()
                 .map(|c| c.order == crate::schema::ClusteringOrder::Desc)
                 .collect();
+            // #4531: which clustering columns are DECLARED `timeuuid` (the swizzle differs
+            // from `uuid`'s; `Value::Uuid` cannot tell them apart).
+            let is_timeuuid: Vec<bool> = schema
+                .clustering_keys
+                .iter()
+                .map(|c| c.data_type.trim().eq_ignore_ascii_case("timeuuid"))
+                .collect();
             self.current_block_oss50 = Some(ck_values.and_then(|vals| {
-                crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order(
+                crate::storage::sstable::bti::encode_clustering_bound_oss50_typed(
                     &vals,
                     &is_reversed,
+                    &is_timeuuid,
                 )
                 .ok()
             }));

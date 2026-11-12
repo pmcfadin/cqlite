@@ -87,7 +87,9 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         // is trivially total (antisymmetric, transitive, no incomparable pair),
         // so this is safe; the total-order hazard lives in the float arms above.
         (Time(a), Time(b)) => Ok(a.to_be_bytes().cmp(&b.to_be_bytes())),
-        (Uuid(a), Uuid(b)) => Ok(a.cmp(b)),
+        // #4534: `UUIDType.compareCustom`, not raw bytes. This schema-free arm cannot know a
+        // `timeuuid`; `ClusteringKey::compare` (which has the schema) overrides it for those.
+        (Uuid(a), Uuid(b)) => Ok(crate::uuid_order::uuid_type_cmp(a, b)),
         (Inet(a), Inet(b)) => Ok(a.cmp(b)),
 
         // Collection types (element-wise lexicographic comparison)

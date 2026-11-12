@@ -320,14 +320,12 @@ async fn full_path_equality_finds_every_row() {
 }
 
 #[tokio::test]
-#[ignore = "#4531 uuid/timeuuid clustering equality lookup misses existing rows on the Rows.db window (raw-byte bound vs swizzled separators)"]
 async fn point_path_equality_finds_every_row() {
     let bad = equality_misses(ReadPathMode::Point).await;
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 #[tokio::test]
-#[ignore = "#4531 uuid/timeuuid clustering slices: the value comparator orders raw bytes (comparator.rs: TimeUuid -> Uuid 'for simplicity'), not UUIDType/TimeUUIDType"]
 async fn full_path_slices_match_the_golden() {
     let bad = run_matrix(ReadPathMode::Full).await;
     assert!(
@@ -338,7 +336,6 @@ async fn full_path_slices_match_the_golden() {
 }
 
 #[tokio::test]
-#[ignore = "#4531 uuid/timeuuid clustering slices: Rows.db window encoder (raw bytes) AND value comparator (raw bytes) disagree with Cassandra order"]
 async fn point_path_slices_match_the_golden() {
     let bad = run_matrix(ReadPathMode::Point).await;
     assert!(

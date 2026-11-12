@@ -204,7 +204,7 @@ fn parse_value_with_comparator_at_depth(
                 Err(Error::corruption("Invalid timestamp value length"))
             }
         }
-        ComparatorType::Uuid => {
+        ComparatorType::Uuid | ComparatorType::TimeUuid => {
             if value_data.len() == 16 {
                 let uuid_bytes: [u8; 16] = value_data
                     .try_into()

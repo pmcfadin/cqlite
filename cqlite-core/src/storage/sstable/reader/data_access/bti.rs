@@ -379,7 +379,16 @@ impl SSTableReader {
         // For a DESC column those roles SWAP (see `physical_byte_bounds_for_slice`).
         // An un-encodable bound makes the narrowing unsafe → decode the whole
         // partition (honest fallback).
-        let Some((start_bytes, end_bytes)) = physical_byte_bounds_for_slice(slice, &is_reversed)?
+        let is_timeuuid: Vec<bool> = schema
+            .map(|s| {
+                s.clustering_keys
+                    .iter()
+                    .map(|c| c.data_type.trim().eq_ignore_ascii_case("timeuuid"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some((start_bytes, end_bytes)) =
+            physical_byte_bounds_for_slice(slice, &is_reversed, &is_timeuuid)?
         else {
             return Ok(None);
         };

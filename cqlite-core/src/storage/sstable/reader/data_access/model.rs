@@ -114,8 +114,12 @@ const OSS50_GT_NEXT_COMPONENT: u8 = 0x60;
 pub(super) fn physical_byte_bounds_for_slice(
     slice: &ClusteringSlice,
     is_reversed: &[bool],
+    // `is_timeuuid[i]`: clustering column `i` is DECLARED `timeuuid` (#4531). `Value::Uuid`
+    // is the same variant for `uuid` and `timeuuid`, so the schema — never the bytes —
+    // selects Cassandra's `asComparableBytes` swizzle.
+    is_timeuuid: &[bool],
 ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    use crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order;
+    use crate::storage::sstable::bti::encode_clustering_bound_oss50_typed;
 
     // The physical-low sentinel: empty sorts before every separator (-∞).
     let neg_inf = Vec::<u8>::new();
@@ -128,7 +132,7 @@ pub(super) fn physical_byte_bounds_for_slice(
     // partition), but the encoder's error text is the ONLY diagnosis of WHICH
     // clustering type is unsupported, so log it rather than dropping it silently.
     let encode = |values: &[Value]| -> Option<Vec<u8>> {
-        match encode_clustering_bound_oss50_with_order(values, is_reversed) {
+        match encode_clustering_bound_oss50_typed(values, is_reversed, is_timeuuid) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
                 tracing::debug!(

@@ -90,7 +90,10 @@ impl PartialOrd for Value {
             (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
             (Value::Time(a), Value::Time(b)) => a.to_be_bytes().partial_cmp(&b.to_be_bytes()),
             (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),
-            (Value::Uuid(a), Value::Uuid(b)) => a.partial_cmp(b),
+            // #4534: `UUIDType.compareCustom` (version, then v1 timestamp / unsigned msb, then
+            // unsigned lsb), not raw bytes. Schema-free, so a `timeuuid` is ordered as a `uuid`:
+            // identical except for the lsb tie-break at an equal v1 timestamp.
+            (Value::Uuid(a), Value::Uuid(b)) => Some(crate::uuid_order::uuid_type_cmp(a, b)),
             (Value::TinyInt(a), Value::TinyInt(b)) => a.partial_cmp(b),
             (Value::SmallInt(a), Value::SmallInt(b)) => a.partial_cmp(b),
             (Value::Float32(a), Value::Float32(b)) => Some(fcmp(*a, *b)),

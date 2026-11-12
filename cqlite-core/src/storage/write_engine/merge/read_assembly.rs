@@ -564,6 +564,7 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
         | ComparatorType::Timestamp
         | ComparatorType::Date
         | ComparatorType::Uuid
+        | ComparatorType::TimeUuid
         | ComparatorType::Varint
         | ComparatorType::Decimal
         | ComparatorType::Duration => false,

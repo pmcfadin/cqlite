@@ -672,8 +672,10 @@ impl QueryExecutor {
             (Value::Float32(a), Value::Float32(b)) => Ok(fcmp(*a, *b)), // Cassandra order #1870/#2010
             (Value::Text(a), Value::Text(b)) => Ok(a.cmp(b)),
             (Value::Boolean(a), Value::Boolean(b)) => Ok(a.cmp(b)),
-            // UUID/TIMEUUID (both Value::Uuid): byte-wise, as Cassandra orders.
-            (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
+            // UUID/TIMEUUID (both Value::Uuid): `UUIDType.compareCustom` — NOT byte-wise
+            // (#4534). Schema-free, so a `timeuuid` orders as a `uuid` (differs only in the lsb
+            // tie-break at an identical v1 timestamp).
+            (Value::Uuid(a), Value::Uuid(b)) => Ok(crate::uuid_order::uuid_type_cmp(a, b)),
             (Value::Null, Value::Null) => Ok(Ordering::Equal),
             (Value::Null, _) => Ok(Ordering::Less),
             (_, Value::Null) => Ok(Ordering::Greater),

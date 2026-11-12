@@ -132,7 +132,11 @@ fn encode_varlen_oss50(bytes: &[u8], out: &mut Vec<u8>) {
 ///
 /// Any clustering type not enumerated here returns an explicit parse error
 /// (NO silent wrong results — issue #28 no-heuristics mandate).
-fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiResult<()> {
+fn encode_clustering_component_oss50(
+    value: &Value,
+    timeuuid: bool,
+    out: &mut Vec<u8>,
+) -> BtiResult<()> {
     match value {
         // int — Int32Type: sign-flip, big-endian (matches `wide_table` separators,
         // e.g. ck=8 → 80 00 00 08).
@@ -166,10 +170,19 @@ fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiRes
             out.extend_from_slice(&((*v as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
             Ok(())
         }
-        // uuid / timeuuid — raw 16 bytes (already byte-comparable in the on-disk
-        // separator form for this fixed-length type).
+        // uuid / timeuuid — NOT the raw bytes (issue #4531). Cassandra's
+        // `UUIDType.asComparableBytes` (cassandra-5.0.8 `UUIDType.java:122-140`) emits the
+        // version nibble first (a version-1 timestamp reordered), and
+        // `AbstractTimeUUIDType.asComparableBytes` (`AbstractTimeUUIDType.java:89-102`)
+        // reorders the timestamp and XORs the lsb with `0x8080808080808080`. `Value::Uuid`
+        // carries no type tag, so `timeuuid` is the DECLARED schema type passed in by the
+        // caller — never inferred from the bytes (#28).
         Value::Uuid(bytes) => {
-            out.extend_from_slice(bytes);
+            out.extend_from_slice(&if timeuuid {
+                crate::uuid_order::timeuuid_comparable_bytes(bytes)
+            } else {
+                crate::uuid_order::uuid_comparable_bytes(bytes)
+            });
             Ok(())
         }
         // text / ascii — OSS50 variable-length byte-comparable encoding.
@@ -219,7 +232,7 @@ pub fn encode_clustering_bound_oss50(values: &[Value]) -> BtiResult<Vec<u8>> {
     let mut out = Vec::new();
     for v in values {
         out.push(OSS50_NEXT_COMPONENT);
-        encode_clustering_component_oss50(v, &mut out)?;
+        encode_clustering_component_oss50(v, false, &mut out)?;
     }
     Ok(out)
 }
@@ -258,6 +271,19 @@ pub fn encode_clustering_bound_oss50_with_order(
     values: &[Value],
     is_reversed: &[bool],
 ) -> BtiResult<Vec<u8>> {
+    encode_clustering_bound_oss50_typed(values, is_reversed, &[])
+}
+
+/// [`encode_clustering_bound_oss50_with_order`] that also knows which components are declared
+/// `timeuuid` (issue #4531): `is_timeuuid[i]` is true when clustering column `i` is a
+/// `timeuuid` (a missing entry means `false`, i.e. a plain `uuid`). `Value::Uuid` is the same
+/// variant for both types, so the DECLARED schema type — not the bytes — must decide which
+/// Cassandra `asComparableBytes` swizzle applies.
+pub fn encode_clustering_bound_oss50_typed(
+    values: &[Value],
+    is_reversed: &[bool],
+    is_timeuuid: &[bool],
+) -> BtiResult<Vec<u8>> {
     let mut out = Vec::new();
     for (i, v) in values.iter().enumerate() {
         out.push(OSS50_NEXT_COMPONENT);
@@ -265,12 +291,20 @@ pub fn encode_clustering_bound_oss50_with_order(
             // Encode the base component into a scratch buffer, then complement
             // every byte (ReversedType / ByteSource.invert).
             let mut scratch = Vec::new();
-            encode_clustering_component_oss50(v, &mut scratch)?;
+            encode_clustering_component_oss50(
+                v,
+                is_timeuuid.get(i).copied().unwrap_or(false),
+                &mut scratch,
+            )?;
             for b in &scratch {
                 out.push(0xFF ^ *b);
             }
         } else {
-            encode_clustering_component_oss50(v, &mut out)?;
+            encode_clustering_component_oss50(
+                v,
+                is_timeuuid.get(i).copied().unwrap_or(false),
+                &mut out,
+            )?;
         }
     }
     Ok(out)

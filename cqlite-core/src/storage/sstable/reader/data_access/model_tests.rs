@@ -239,7 +239,7 @@ fn hi(mut bytes: Vec<u8>) -> Vec<u8> {
 fn physical_bounds_asc_no_swap() {
     // ck >= 100 AND ck < 110
     let slice = int_slice(Some(100), true, Some(110), false);
-    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false])
+    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false], &[])
         .expect("ok")
         .expect("encodable");
     assert_eq!(
@@ -265,7 +265,7 @@ fn physical_bounds_asc_no_swap() {
 fn physical_bounds_desc_swaps_roles() {
     // ck >= 100 AND ck < 110 on a DESC column.
     let slice = int_slice(Some(100), true, Some(110), false);
-    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true], &[])
         .expect("ok")
         .expect("encodable");
     // Physical-lower comes from the CQL UPPER bound (enc_desc(110)); physical-
@@ -305,7 +305,7 @@ fn physical_bounds_desc_swaps_roles() {
 fn physical_bounds_desc_lower_bound_only() {
     // ck >= 290, open above.
     let slice = int_slice(Some(290), true, None, false);
-    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true], &[])
         .expect("ok")
         .expect("encodable");
     assert_eq!(
@@ -341,7 +341,7 @@ fn physical_bounds_desc_lower_bound_only() {
 fn physical_bounds_desc_upper_bound_only() {
     // ck < 20, open below.
     let slice = int_slice(None, false, Some(20), false);
-    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true], &[])
         .expect("ok")
         .expect("encodable");
     assert_eq!(
@@ -370,7 +370,7 @@ fn physical_bounds_desc_upper_bound_only() {
 #[test]
 fn physical_bounds_desc_equality_is_point() {
     let slice = int_slice(Some(150), true, Some(150), true);
-    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true], &[])
         .expect("ok")
         .expect("encodable");
     assert_eq!(lower, lo(enc_int(150, true)));
@@ -390,7 +390,7 @@ fn physical_bounds_desc_equality_is_point() {
 #[test]
 fn physical_bounds_no_order_defaults_ascending() {
     let slice = int_slice(Some(5), true, Some(50), false);
-    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[])
+    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[], &[])
         .expect("ok")
         .expect("encodable");
     assert_eq!(lower, lo(enc_int(5, false)));
@@ -431,7 +431,7 @@ fn physical_bounds_bracket_extensions_of_a_prefix_bound() {
         end_inclusive: true,
     };
     // Two clustering columns, both ASC.
-    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false, false])
+    let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false, false], &[])
         .expect("ok")
         .expect("encodable");
 

@@ -602,7 +602,20 @@ impl ClusteringKey {
                 // Both present: compare through the type, then apply DESC
                 // reversal so empty-vs-valued ordering matches Cassandra.
                 (_, _) => {
-                    let ordering = compare_values(a_val, b_val)?;
+                    // #4534: `timeuuid` orders by `AbstractTimeUUIDType.compareCustom`, which
+                    // differs from `uuid`'s only in the lsb tie-break. `Value::Uuid` carries no
+                    // type tag, so the DECLARED schema type decides — never the bytes (#28).
+                    let ordering = match (a_val, b_val) {
+                        (Value::Uuid(a), Value::Uuid(b))
+                            if cluster_col
+                                .data_type
+                                .trim()
+                                .eq_ignore_ascii_case("timeuuid") =>
+                        {
+                            crate::uuid_order::timeuuid_type_cmp(a, b)
+                        }
+                        _ => compare_values(a_val, b_val)?,
+                    };
                     if cluster_col.order == ClusteringOrder::Desc {
                         ordering.reverse()
                     } else {
@@ -768,7 +781,7 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
             Ok(stored.to_be_bytes().to_vec())
         }
 
-        (Value::Uuid(bytes), ComparatorType::Uuid) => Ok(bytes.to_vec()),
+        (Value::Uuid(bytes), ComparatorType::Uuid | ComparatorType::TimeUuid) => Ok(bytes.to_vec()),
 
         // Time and Inet are mapped to Custom types in ComparatorType
         (Value::Time(nanos), ComparatorType::Custom(name)) if name == "time" => {
