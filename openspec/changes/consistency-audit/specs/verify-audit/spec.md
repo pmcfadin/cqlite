@@ -177,6 +177,11 @@ For a compressed SSTable, `CompressionInfo.db`'s declared chunk count SHALL equa
 - **Then** `Fail`, a `StatisticsScanMismatch` finding names the declared vs. observed value.
 
 #### DECLARED GAP — the timestamp/min-LDT/max-LDT half of A8 may ship as partition-count-only
+- **STATUS (implementation, task 0.5): TAKEN.** The write-path running-stats accumulator is merge-path
+  coupled and no cheap read-only extraction exists, so A8 ships `partition_count`-only; Scenario A8.3's
+  `statistics_timestamp_mismatch` is replaced by the equivalent `statistics_partition_count_mismatch`
+  fixture (one `estimatedPartitionSize` bucket +1, component CRC32 recomputed). The min/max
+  timestamp and local-deletion-time comparison is a follow-up.
 - Per design.md §D7/tasks.md 0.5: whether the write-path running-stats accumulator is cheaply
   reusable read-only is a task-0 premise. If it is not, within this change's size budget A8 checks
   `partition_count` only, and Scenario A8.3 (or an equivalent `min_timestamp`-only case) is NOT

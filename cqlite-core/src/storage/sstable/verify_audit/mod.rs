@@ -98,8 +98,9 @@ impl AuditSummary {
     pub fn verdict(&self, id: &str) -> Option<&AuditVerdict> {
         self.rows
             .iter()
-            .find(|r| r.invariant == id)
+            .filter(|r| r.invariant == id)
             .map(|r| &r.verdict)
+            .next()
     }
 }
 

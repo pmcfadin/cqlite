@@ -15618,12 +15618,19 @@ run_clippy() {
 #     that exists to catch it. `roborev-lints` is UNSCOPED (it runs on every --lite round and
 #     in the full gate whatever the diff touches), which is the property this guard needs.
 #     Pure grep over one committed file: no cargo/python3/network, ~0s.
+#   * test_verify_audit_no_resync_scan.sh — the same #28 class for `cqlite verify --mode
+#     audit` (issue #4195, spec verify-audit A11): every audit invariant reads decoded
+#     structures only (plus a header-only read at an Index-named offset), never a
+#     byte-pattern search of Data.db. A copy of the #4194 guard over
+#     `cqlite-core/src/storage/sstable/verify_audit/`, registered HERE for the same reason
+#     (UNSCOPED, so a core-only diff cannot skip it).
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh" &&
-    bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh"
+    bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh" &&
+    bash "$REPO_ROOT/scripts/tests/test_verify_audit_no_resync_scan.sh"
 }
 
 # check_no_unexpected_zero_tests <label> <logfile> [allowed-zero-target...]
