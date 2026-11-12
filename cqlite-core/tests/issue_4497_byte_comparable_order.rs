@@ -236,7 +236,7 @@ proptest! {
     /// bytes, so bytewise order disagrees with `UUIDType.compareCustom` as soon as versions
     /// differ (or for version 1).
     #[test]
-    #[ignore = "#TBD uuid clustering is encoded as raw bytes; UUIDType orders by version then reordered timestamp (UUIDType.java:122-140)"]
+    #[ignore = "#4531 uuid clustering is encoded as raw bytes; UUIDType orders by version then reordered timestamp (UUIDType.java:122-140)"]
     fn uuid_order_preserved(x in arb_uuid(), y in arb_uuid()) {
         for reversed in [false, true] {
             let got = enc(std::slice::from_ref(&x), &[reversed]).cmp(&enc(std::slice::from_ref(&y), &[reversed]));

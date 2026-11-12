@@ -431,7 +431,7 @@ jobs:
   # the existing nightly schedule (no new workflow). Every property prints its seed
   # (`[name] seed=N cases=C`), so a red night is reproducible with
   # `LAWS_SEED=N PROPTEST_CASES=C cargo test ...`. `#[ignore]`d tests are KNOWN findings
-  # (marker `#TBD` until filed) and are deliberately not run here.
+  # (tracked by #4530 and #4531) and are deliberately not run here.
   property-laws-sweep:
     name: Property laws sweep (reconcile + byte-comparable, high volume)
     runs-on: ubuntu-24.04
