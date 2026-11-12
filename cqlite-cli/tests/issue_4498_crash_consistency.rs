@@ -360,29 +360,83 @@ fn verify_clean(dir: &Path, f: &Fixture) -> bool {
 /// Which slice of the boundary x mode matrix a sweep exercises.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
-    /// Everything EXCEPT the known defects: the property the CLI must hold today.
+    /// Everything EXCEPT the listed [`DEFECTS`]: the property the CLI must hold today. Any
+    /// failure not listed there reds the test.
     Enforced,
-    /// ONLY the known defects (driven by the `#[ignore]`d reproducers).
-    KnownDefects,
-    /// Crash mode only, against Cassandra's discoverability rule (see module doc).
+    /// ONLY the cells [`DEFECTS`] lists for this issue (driven by the `#[ignore]`d reproducers).
+    KnownDefects(u32),
+    /// Crash mode only, against Cassandra's discoverability rule (see module doc; #4529).
     CassandraStrict,
 }
 
-/// A boundary x mode combination with a confirmed, un-fixed product defect. Each is
-/// reproduced by an `#[ignore = "#<tbd>"]` test below; the enforced sweep skips them so the
-/// rest of the matrix stays a live regression net.
-fn known_defect(kind: &str, path: &str, mode: Mode) -> Option<&'static str> {
-    let is_write = matches!(kind, "write" | "pwrite");
-    if is_write && path.ends_with("-TOC.txt") && matches!(mode, Mode::Crash | Mode::Short) {
-        return Some("torn-toc: TOC.txt is created in place and written non-atomically, so a crash or short write mid-write publishes a partial barrier");
+/// One boundary x mode cell with a confirmed, un-fixed product defect, keyed by
+/// `(verb, fixture table, boundary kind + path suffix, mode, issue)`. The enforced sweep skips
+/// exactly these cells and nothing else, so an unlisted failure always reds; each listed issue is
+/// reproduced by its own `#[ignore = "#<issue>"]` test below. Fixing an issue means deleting its
+/// entries and its `#[ignore]`.
+struct Defect {
+    verb: Verb,
+    fixture: &'static str,
+    /// `write` boundary on a path ending in this suffix.
+    path_suffix: &'static str,
+    modes: &'static [Mode],
+    issue: u32,
+}
+
+/// Fixture tables a defect applies to (all the harness fixtures: Filter/TOC/manifest writes are
+/// format-independent).
+const ALL_FIXTURES: [&str; 3] = ["lz4_table", "multiclustering_table", "wide_partition"];
+
+fn defects() -> Vec<Defect> {
+    let mut v = Vec::new();
+    for verb in [Verb::Rebuild, Verb::Salvage] {
+        for fixture in ALL_FIXTURES {
+            // #4526: TOC.txt is created in place and written non-atomically, so a crash or short
+            // write mid-write publishes a partial barrier.
+            v.push(Defect {
+                verb,
+                fixture,
+                path_suffix: "-TOC.txt",
+                modes: &[Mode::Crash, Mode::Short],
+                issue: 4526,
+            });
+            // #4527: an ENOSPC on Filter.db's write is not propagated (exit 0, TOC published over
+            // an incomplete set).
+            v.push(Defect {
+                verb,
+                fixture,
+                path_suffix: "-Filter.db",
+                modes: &[Mode::Enospc],
+                issue: 4527,
+            });
+        }
     }
-    if is_write && path.ends_with("-Filter.db") && mode == Mode::Enospc {
-        return Some("swallowed-filter-write-error: an ENOSPC on Filter.db's write is not propagated (exit 0, TOC published over an incomplete set)");
+    for fixture in ALL_FIXTURES {
+        // #4528: salvage swallows an ENOSPC on the --manifest write (exit 0).
+        v.push(Defect {
+            verb: Verb::Salvage,
+            fixture,
+            path_suffix: "manifest.json",
+            modes: &[Mode::Enospc, Mode::Short],
+            issue: 4528,
+        });
     }
-    if is_write && path.ends_with("manifest.json") && matches!(mode, Mode::Enospc | Mode::Short) {
-        return Some("swallowed-manifest-write-error: an ENOSPC on the --manifest write is not propagated (exit 0)");
+    v
+}
+
+fn known_defect(verb: Verb, f: &Fixture, kind: &str, path: &str, mode: Mode) -> Option<u32> {
+    if !matches!(kind, "write" | "pwrite") {
+        return None;
     }
-    None
+    defects()
+        .into_iter()
+        .find(|d| {
+            d.verb == verb
+                && d.fixture == f.table
+                && path.ends_with(d.path_suffix)
+                && d.modes.contains(&mode)
+        })
+        .map(|d| d.issue)
 }
 
 /// The per-verb, per-fixture sweep. Returns `(boundary_count, runs, failures)`.
@@ -432,10 +486,10 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             if mode == Mode::Short && !is_write {
                 continue; // identical to Enospc for a non-write boundary
             }
-            let defect = known_defect(kind, path, mode);
+            let defect = known_defect(verb, f, kind, path, mode);
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
-                Scope::KnownDefects if defect.is_none() => continue,
+                Scope::KnownDefects(issue) if defect != Some(issue) => continue,
                 Scope::CassandraStrict if mode != Mode::Crash => continue,
                 _ => {}
             }
@@ -543,11 +597,17 @@ fn report(verb: Verb, f: &Fixture, n: usize, runs: usize, failures: &[String]) {
 }
 
 fn check(verb: Verb, scope: Scope, fixtures: Vec<Fixture>) {
+    check_verbs(&[verb], scope, fixtures);
+}
+
+fn check_verbs(verbs: &[Verb], scope: Scope, fixtures: Vec<Fixture>) {
     let mut all = Vec::new();
-    for f in fixtures {
-        let (n, runs, failures) = sweep(verb, &f, scope);
-        report(verb, &f, n, runs, &failures);
-        all.extend(failures);
+    for verb in verbs {
+        for f in &fixtures {
+            let (n, runs, failures) = sweep(*verb, f, scope);
+            report(*verb, f, n, runs, &failures);
+            all.extend(failures);
+        }
     }
     assert!(all.is_empty(), "{} failure(s); see stderr", all.len());
 }
@@ -562,31 +622,45 @@ fn salvage_survives_a_fault_at_every_boundary() {
     check(Verb::Salvage, Scope::Enforced, fixtures());
 }
 
-// ---- Confirmed product defects, reproduced here and NOT fixed in this change (#4498
-// asks for the harness; the fixes need the owner's call). Each runs ONLY the matrix cells
-// `known_defect` names, so removing `#[ignore]` after a fix proves the fix.
+// ---- Confirmed product defects (issues named per test), each reproduced by running ONLY the
+// matrix cells `defects()` lists for it. Removing `#[ignore]` (and the entries) after a fix
+// proves the fix.
 
 #[test]
-#[ignore = "#<tbd> torn/in-place TOC.txt, swallowed Filter.db and manifest ENOSPC"]
-fn rebuild_known_defects_reproduce() {
-    check(Verb::Rebuild, Scope::KnownDefects, vec![BIG_SMALL]);
+#[ignore = "#4526 TOC.txt is written in place, non-atomically"]
+fn issue_4526_torn_toc() {
+    check_verbs(
+        &[Verb::Rebuild, Verb::Salvage],
+        Scope::KnownDefects(4526),
+        fixtures(),
+    );
 }
 
 #[test]
-#[ignore = "#<tbd> torn/in-place TOC.txt, swallowed Filter.db and manifest ENOSPC"]
-fn salvage_known_defects_reproduce() {
-    check(Verb::Salvage, Scope::KnownDefects, vec![BIG_SMALL]);
+#[ignore = "#4527 an ENOSPC on Filter.db's write exits 0"]
+fn issue_4527_filter_write_error_swallowed() {
+    check_verbs(
+        &[Verb::Rebuild, Verb::Salvage],
+        Scope::KnownDefects(4527),
+        fixtures(),
+    );
 }
 
 #[test]
-#[ignore = "#<tbd> output uses final SSTable names in place; a crash leaves a Cassandra-discoverable partial set"]
-fn cassandra_discoverable_partial_sets_after_crash_rebuild() {
+#[ignore = "#4528 salvage swallows a --manifest write error"]
+fn issue_4528_salvage_manifest_write_error_swallowed() {
+    check(Verb::Salvage, Scope::KnownDefects(4528), fixtures());
+}
+
+#[test]
+#[ignore = "#4529 final SSTable names in place: a crash leaves a Cassandra-discoverable partial set (owner decision pending)"]
+fn issue_4529_cassandra_discoverable_partial_sets_rebuild() {
     check(Verb::Rebuild, Scope::CassandraStrict, vec![BIG_SMALL]);
 }
 
 #[test]
-#[ignore = "#<tbd> output uses final SSTable names in place; a crash leaves a Cassandra-discoverable partial set"]
-fn cassandra_discoverable_partial_sets_after_crash_salvage() {
+#[ignore = "#4529 final SSTable names in place: a crash leaves a Cassandra-discoverable partial set (owner decision pending)"]
+fn issue_4529_cassandra_discoverable_partial_sets_salvage() {
     check(Verb::Salvage, Scope::CassandraStrict, vec![BIG_SMALL]);
 }
 
