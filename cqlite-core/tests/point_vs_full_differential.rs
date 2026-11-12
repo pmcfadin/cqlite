@@ -635,7 +635,15 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     // Issue #4255 (AC3) COLD-START PROOF: the very first point probe of the case, run
     // after the full-scan discovery above, must be a key-offset-cache MISS (and never
     // a hit) — i.e. the point leg exercised the cold index descent.
-    let first_key = keys[0];
+    //
+    // The proof key is the smallest DISCOVERED (live) key, not `keys[0]`: an
+    // always-probe key can sort first and may name a partition absent from every
+    // SSTable, which a bloom-filter reject answers without consulting the cache, so it
+    // would fail the `entries >= 1` leg for a reason unrelated to warmth. A case with
+    // no live partition falls back to its first declared probe key; those keys name
+    // shadowed partitions that still have an index entry, and if one ever does not,
+    // the proof fails loudly rather than passing.
+    let first_key = discovered.iter().min().copied().unwrap_or(keys[0]);
     let first_query = format!(
         "SELECT * FROM {}.{} WHERE {} = {}",
         case.keyspace, case.table, case.pk_column, first_key
