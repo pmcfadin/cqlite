@@ -539,7 +539,7 @@ exempt:
       cqlite-core/src/storage/sstable/reader/**, so it DOES run on matching pull
       requests, and it is the ONLY executor of that file's 6 delta-scan-gated tests.
       Why its PR result is nonetheless non-gating: each of the three legs
-      REGENERATES its fixture corpus from a `cassandra:5.0.2` Docker container
+      REGENERATES its fixture corpus from a `cassandra:5.0.8` Docker container
       before running any test (60-minute job timeout), so the lane depends on Docker
       Hub and on generator scripts that a `required` context cannot be made to wait
       on without wedging every unrelated PR; and it is `paths:`-filtered, so its
@@ -568,7 +568,7 @@ exempt:
       ran in no merge-gating lane at all. feature-iso-delta-scan now EXECUTES those
       targets under CQLITE_REQUIRE_FIXTURES=1. SCOPE DIFFERENCE that remains, stated
       rather than left to be discovered: this lane compares against a corpus
-      REGENERATED from a cassandra:5.0.2 container, where the gate compares against
+      REGENERATED from a cassandra:5.0.8 container, where the gate compares against
       the published one — so a generator-side regression is still caught only here.
     issue: "#1026"
     merge_gating_half:
