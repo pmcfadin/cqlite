@@ -84,6 +84,8 @@ impl super::StorageEngine {
         bool,
     )> {
         // Checked: a table with a refused SSTable is an `Err`, never an empty view (#4159).
-        self.sstables.resolve_reader_snapshot_checked(table_id).await
+        self.sstables
+            .resolve_reader_snapshot_checked(table_id)
+            .await
     }
 }

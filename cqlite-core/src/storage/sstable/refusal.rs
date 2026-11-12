@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// One refused `Data.db`: where, and the cause (kind-preserving).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Refusal {
     path: PathBuf,
     cause: Error,
