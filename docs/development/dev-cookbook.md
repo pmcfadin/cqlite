@@ -848,6 +848,21 @@ cargo run --package cqlite-cli -- \
   the actual distinct count instead (correct for membership, not always
   byte-identical).
 
+## Crash-consistency harness for the write verbs (issue #4498, epic #4192)
+
+`cqlite-cli/tests/issue_4498_crash_consistency.rs` runs the shipped `cqlite` binary under an
+`LD_PRELOAD` shim (`tests/support/crash_fault_shim.c`, compiled with `cc` at test time) that
+interposes every `write`/`pwrite`/`copy_file_range`/`fsync`/`rename`/`open(O_CREAT)`/`unlink`/`mkdir`
+under the run's work directory. A counting run enumerates the boundaries; one run per
+`(boundary, mode)` then faults exactly one (`crash` = SIGKILL, `enospc`, `short` = half a write then a
+full disk) and asserts: input byte-identical, exit non-zero naming "No space left on device"
+(crash = SIGKILL), any `*-TOC.txt` present means the generation is complete and `verify`-clean, and a
+retry into a cleared `--out` reproduces the uninterrupted bytes. The product carries no fault code, so
+nothing is compiled out of release builds; `shipped_cli_contains_no_fault_hook` proves it (set
+`CQLITE_RELEASE_CLI_BINARY` to also scan a release build). `CQLITE_CRASH_CONSISTENCY_LARGE=1` adds the
+large fixture (nightly). Add a new write verb by giving `Verb` an entry and its argv in `run_verb`.
+Confirmed defects are reproduced by the `#[ignore]`d tests in the same file (`known_defect`).
+
 ## Locate corruption + sweep a data directory (issue #4194, epic #4192)
 
 `cqlite verify --mode full` names WHICH partitions a chunk/offset-anchored

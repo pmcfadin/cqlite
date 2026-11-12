@@ -589,3 +589,50 @@ fn cassandra_discoverable_partial_sets_after_crash_rebuild() {
 fn cassandra_discoverable_partial_sets_after_crash_salvage() {
     check(Verb::Salvage, Scope::CassandraStrict, vec![BIG_SMALL]);
 }
+
+// ---- AC7: the shipped CLI contains no fault hook ----------------------------------------
+
+/// Env-var names of the fault protocol (`tests/support/crash_fault_shim.c`). The product has no
+/// fault code at all (the shim interposes libc from outside), so none of these may appear in
+/// the `cqlite` binary. A hook added to the product later would have to read some env var or
+/// name a symbol; the scan catches the protocol names, and the positive control proves the scan
+/// CAN see them (it finds them in the shim itself).
+const HOOK_MARKERS: &[&str] = &[
+    "CQLITE_FAULT_ROOT",
+    "CQLITE_FAULT_AT",
+    "CQLITE_FAULT_MODE",
+    "CQLITE_FAULT_LOG",
+    "crash_fault_shim",
+];
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    let n = needle.as_bytes();
+    haystack.windows(n.len()).any(|w| w == n)
+}
+
+#[test]
+fn shipped_cli_contains_no_fault_hook() {
+    // Positive control: the scan must find every marker in the shim, or it proves nothing.
+    let shim_bytes = std::fs::read(shim()).expect("read shim");
+    for m in HOOK_MARKERS.iter().filter(|m| **m != "crash_fault_shim") {
+        assert!(
+            contains(&shim_bytes, m),
+            "scan positive control: {m} not found in the shim"
+        );
+    }
+    // The CLI under test, plus (when the gate/nightly provides one) a RELEASE build of it.
+    let mut binaries = vec![PathBuf::from(env!("CARGO_BIN_EXE_cqlite"))];
+    if let Ok(rel) = std::env::var("CQLITE_RELEASE_CLI_BINARY") {
+        binaries.push(PathBuf::from(rel));
+    }
+    for bin in binaries {
+        let bytes = std::fs::read(&bin).unwrap_or_else(|e| panic!("read {}: {e}", bin.display()));
+        for m in HOOK_MARKERS {
+            assert!(
+                !contains(&bytes, m),
+                "{} contains fault-hook marker {m:?}",
+                bin.display()
+            );
+        }
+    }
+}
