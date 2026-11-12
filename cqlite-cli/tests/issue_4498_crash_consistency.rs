@@ -490,6 +490,9 @@ enum Scope {
     Enforced,
     /// ONLY the cells [`DEFECTS`] lists for this issue (driven by the `#[ignore]`d reproducers).
     KnownDefects(u32),
+    /// Only the `write` boundaries on paths ending in this suffix, in this mode (a named
+    /// regression for a fixed defect; the cells run are NOT in [`DEFECTS`]).
+    Only(&'static str, Mode),
     /// Crash mode only, against Cassandra's discoverability rule (see module doc; #4529).
     CassandraStrict,
 }
@@ -514,19 +517,6 @@ const ALL_FIXTURES: [&str; 3] = ["lz4_table", "multiclustering_table", "wide_par
 
 fn defects() -> Vec<Defect> {
     let mut v = Vec::new();
-    for verb in [Verb::Rebuild, Verb::Salvage] {
-        for fixture in ALL_FIXTURES {
-            // #4527: an ENOSPC on Filter.db's write is not propagated (exit 0, TOC published over
-            // an incomplete set).
-            v.push(Defect {
-                verb,
-                fixture,
-                path_suffix: "-Filter.db",
-                modes: &[Mode::Enospc],
-                issue: 4527,
-            });
-        }
-    }
     for fixture in ALL_FIXTURES {
         // #4528: salvage swallows an ENOSPC on the --manifest write (exit 0).
         v.push(Defect {
@@ -633,6 +623,9 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
                 Scope::KnownDefects(issue) if defect != Some(issue) => continue,
+                Scope::Only(suffix, m) if !(is_write && path.ends_with(suffix) && mode == m) => {
+                    continue
+                }
                 // #4529: ENOSPC / short-write faults only matter INSIDE the publish window (from
                 // the first rename on); a failure there must retain the stage (AC2).
                 Scope::CassandraStrict if mode != Mode::Crash && !in_publish_window(&bounds, i) => {
@@ -840,12 +833,13 @@ fn salvage_survives_a_fault_at_every_boundary() {
 // matrix cells `defects()` lists for it. Removing `#[ignore]` (and the entries) after a fix
 // proves the fix.
 
+/// Regression for #4527 (fixed): an ENOSPC on `Filter.db`'s write must exit non-zero naming the
+/// cause. `tokio::fs::File` defers the write error and `sync_all` dropped it.
 #[test]
-#[ignore = "#4527 an ENOSPC on Filter.db's write exits 0"]
-fn issue_4527_filter_write_error_swallowed() {
+fn issue_4527_filter_enospc_exits_nonzero() {
     check_verbs(
         &[Verb::Rebuild, Verb::Salvage],
-        Scope::KnownDefects(4527),
+        Scope::Only("-Filter.db", Mode::Enospc),
         fixtures(),
     );
 }
