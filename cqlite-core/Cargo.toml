@@ -680,6 +680,16 @@ arrow-shape-corpus = ["arrow"]
 # binary links it.
 producer-fault-injection = []
 
+# TEST-ONLY decoded-cell corruption seam (issue #4256) — gates `query::result_corruption`
+# and its single call site in `select_executor::execute`, the deterministic seam a
+# differential-suite META-TEST uses to corrupt ONE decoded cell of a real SELECT result
+# (optionally only on the partition-targeted or only on the full-scan leg) and prove the
+# suite's own assertion goes red. Adds NO dependencies and NO production behaviour:
+# without this feature the module and the call site do not exist. NOT in defaults. Run by
+# the gate's `bti-multiclustering` (point_vs_full_differential) and `query-semantics-oracle`
+# components, which enable it on those targets.
+result-corruption-injection = ["state_machine"]
+
 # Legacy heuristics support (backward compatibility for pre-5.0 formats)
 # NOT enabled in default CI configuration - opt-in only
 legacy-heuristics = []

@@ -29,6 +29,10 @@ pub mod prepared;
 /// module's own doc for why this is not private to `select_executor`.
 pub(crate) mod raw_view_naming;
 pub mod result;
+/// TEST-ONLY decoded-cell corruption seam (issue #4256); feature-gated, doc-hidden.
+#[cfg(feature = "result-corruption-injection")]
+#[doc(hidden)]
+pub mod result_corruption;
 pub(crate) mod result_budget;
 pub mod writetime_ttl_validator;
 
