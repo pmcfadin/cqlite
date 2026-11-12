@@ -51,7 +51,12 @@ pub async fn execute_read_commitlog_command(
 
     match format {
         OutputFormat::Json => render_json(&reader, limit),
-        _ => render_text(&reader, limit),
+        OutputFormat::Table | OutputFormat::Csv => render_text(&reader, limit),
+        // Binary columnar formats are not a CommitLog rendering: reject them by name rather
+        // than silently printing text (issue #4237 review).
+        OutputFormat::Parquet | OutputFormat::Vortex => Err(anyhow::anyhow!(
+            "{format} output is not supported by read-commitlog; use --format table or --format json"
+        )),
     }
 }
 

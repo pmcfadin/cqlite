@@ -122,17 +122,19 @@ rustyline = "14.0"
 duckdb = { version = "1.1", features = ["bundled", "parquet"], optional = true }
 
 # Development dependencies
+# Vortex's own reader, for the cross-format differential test's Vortex-side
+# read-back (issue #4237) — mirrors `parquet` above exactly: the writer lives
+# in cqlite-core behind the `vortex` feature, this optional NORMAL dependency (cargo forbids optional dev-dependencies; enabled only by the
+# CLI `vortex` feature, so default test builds never compile it) is the
+# READER half the differential test needs to verify what the CLI wrote,
+# exactly as the `parquet` dev-dependency above verifies the Parquet side.
+vortex = { workspace = true, optional = true }
+
 [dev-dependencies]
 # Arrow/Parquet readers for Parquet output validation tests (the writer itself
 # lives in cqlite-core behind its `parquet` feature, Epic #682)
 arrow = { workspace = true }
 parquet = { workspace = true }
-# Vortex's own reader, for the cross-format differential test's Vortex-side
-# read-back (issue #4237) — mirrors `parquet` above exactly: the writer lives
-# in cqlite-core behind the `vortex` feature, this dev-dependency is the
-# READER half the differential test needs to verify what the CLI wrote,
-# exactly as the `parquet` dev-dependency above verifies the Parquet side.
-vortex = { workspace = true }
 # Issue #1490: the Parquet-vs-sstabledump-JSONL value-parity harness parses the
 # goldens' float literals with serde_json, and serde_json's DEFAULT float parser
 # is approximate — measured: `1014.5449131979983` (a real `test_timeseries.sensor_data`
@@ -386,7 +388,7 @@ delta-export = ["state_machine", "cqlite-core/delta-scan", "cqlite-core/parquet"
 # `export-sstable --format vortex`). Forwarding-only, like `parquet` above but
 # deliberately NOT bundled into `state_machine` — Vortex stays strictly
 # opt-in (owner ruling; design.md), unlike Parquet's historical bundling.
-vortex = ["state_machine", "cqlite-core/vortex"]
+vortex = ["state_machine", "cqlite-core/vortex", "dep:vortex"]
 # Expensive, source-built DuckDB validation tests. Keep this out of default
 # and main PR unit-test CI; focused E2E/parity workflows opt in explicitly.
 duckdb-tests = ["dep:duckdb"]
