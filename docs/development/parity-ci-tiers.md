@@ -226,7 +226,8 @@ Rust-side re-compaction byte-parity subset:
   fail-closed on committed goldens; plus `issue_1019` static/dropped-column,
   skip-aware over its fetched-only `test_tomb` fixtures). CQLite re-produces the
   same inputs, runs its own compaction, and diffs the output components
-  byte-for-byte against committed Cassandra 5.0.2 compacted references. The same
+  byte-for-byte against committed Cassandra compacted references (regenerated on 5.0.8, #4492; the carried-over
+  `test_compaction_tombstone_ttl.ttl_expired_live` table stays 5.0.2, see `test-data/cassandra-parity-manifest.yml`). The same
   tests also run on PRs via
   [`live-cell-compaction-parity.yml`](../../.github/workflows/live-cell-compaction-parity.yml)
   and the tombstone-ttl leg of

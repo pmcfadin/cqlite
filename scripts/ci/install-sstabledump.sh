@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-CASSANDRA_VERSION="5.0.2"
+CASSANDRA_VERSION="5.0.8"
 INSTALL_DIR="$HOME/.local/bin"
 CASSANDRA_HOME="$HOME/.local/cassandra"
 

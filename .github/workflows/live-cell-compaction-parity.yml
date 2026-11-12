@@ -18,7 +18,7 @@ name: "CI: Live-Cell Compaction Byte Parity (issue #1017, #1020)"
 # (test-data/datasets/sstables/test_compactionparity/** and
 # test-data/datasets/sstables/test_compactionparityudt/**), so NO Docker
 # regeneration is needed. The test reads CQLITE_DATASETS_ROOT and compares
-# CQLite's compaction output against the committed Cassandra 5.0.2 golden
+# CQLite's compaction output against the committed Cassandra golden (regenerated on 5.0.8, #4492)
 # byte-for-byte. CQLITE_REQUIRE_FIXTURES=1 ensures the test PANICS (fails
 # the job) if the committed binaries are absent rather than silently skipping.
 #

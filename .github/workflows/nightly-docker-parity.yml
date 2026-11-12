@@ -2,7 +2,7 @@
 name: "CI: Nightly Docker Parity (nightly_docker tier)"
 
 # The single dedicated lane that implements the `nightly_docker` parity tier
-# (issue #1025, epic #974). It stands up a real, pinned Cassandra 5.0.2 and proves
+# (issue #1025, epic #974). It stands up a real, pinned Cassandra 5.0.8 and proves
 # the heavy live-Cassandra differential properties TOGETHER so the parity release
 # checklist's "recent `nightly_docker` pass" item (docs/development/
 # parity-release-checklist.md) has ONE workflow to cite.
@@ -29,7 +29,7 @@ name: "CI: Nightly Docker Parity (nightly_docker tier)"
 #
 # Leg map:
 #   Delegated (single execution, shared with the standalone lane):
-#     1. live read-back semantic   -> e2e-readback.yml (compose cassandra:5.0.2)
+#     1. live read-back semantic   -> e2e-readback.yml (compose cassandra:5.0.8)
 #     3. compaction LOGICAL parity  -> compaction-parity.yml `gradle test` (HARD)
 #     5. compaction BYTE tier        -> compaction-parity.yml `gradle byteParity`
 #                                       (#842 north star, non-blocking / owner F5)
@@ -49,11 +49,12 @@ name: "CI: Nightly Docker Parity (nightly_docker tier)"
 #     that citable evidence). No new release-gating machinery is built here.
 #   - Artifacts retained >= 30 days so a release can cite a recent pass.
 #
-# Cassandra is pinned to 5.0.2 ONLY (cassandra-5.0.2 / git f278f677…), the SAME
-# pin the committed corpus and every existing live lane use. No second pin is
-# introduced: the delegated live/compaction legs reuse
-# docker-compose-cassandra5.yml (cassandra:5.0.2) and bootstrap-cassandra.sh
-# (CASSANDRA_REF); the umbrella's BTI leg reuses the same cassandra:5.0.2 image.
+# Cassandra is pinned to the primary release, 5.0.8 (cassandra-5.0.8 / git 17222709…, #4482/#4512),
+# the SAME pin test-data/scripts/lib/cassandra-image.sh and every other live lane use. No second pin is
+# introduced: the delegated live/compaction legs reuse docker-compose-cassandra5.yml (cassandra:5.0.8)
+# and bootstrap-cassandra.sh (CASSANDRA_REF); the umbrella's BTI leg reuses the same cassandra:5.0.8
+# image. No leg compares live output with a committed fixture, so the corpus's 5.0.2 carry-over
+# tables are not involved.
 
 on:
   # Nightly at 06:11 UTC — off the existing nightly rush so a shared
@@ -89,13 +90,13 @@ concurrency:
 env:
   # Single source of truth for the pin lives in the reused machinery; restated
   # here only for the BTI leg's fixture metadata + image pull (NOT a second pin).
-  CASSANDRA_REF: cassandra-5.0.2
+  CASSANDRA_REF: cassandra-5.0.8
   # Single source of truth for the DOCKER IMAGE the BTI leg validates against.
   # The "Ensure pinned image" step pulls exactly this tag, and the BTI
   # sstabledump test honors it (CASSANDRA_IMAGE) — in strict mode it REQUIRES this
   # exact image (no fallback to a looser cassandra:5.0 tag). Matches
-  # docker-compose-cassandra5.yml / the committed corpus (5.0.2); NOT a second pin.
-  CASSANDRA_IMAGE: cassandra:5.0.2
+  # docker-compose-cassandra5.yml and lib/cassandra-image.sh (5.0.8); NOT a second pin.
+  CASSANDRA_IMAGE: cassandra:5.0.8
   # Canonical dataset pin — the SAME tag/asset/sha the other fixture-backed
   # parity lanes use (sstabledump-parity-gate.yml). The fixture-dependent HARD
   # BTI/Bloom legs require these *-Data.db / *-Filter.db / *-Index.db binaries,

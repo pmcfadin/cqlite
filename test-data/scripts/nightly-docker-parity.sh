@@ -25,12 +25,16 @@
 #           fixtures land — see manifest cass.filter_db.statistical_false_positive_rate
 #           scope.next_step)
 #
-# Cassandra is pinned to the SAME version the committed parity corpus was
-# generated against (5.0.2, cassandra-5.0.2 / git f278f677…). This script does
-# NOT introduce a second pin: the live read-back leg reuses
-# test-data/docker/docker-compose-cassandra5.yml (image cassandra:5.0.2) and the
+# Cassandra is pinned to the primary release (5.0.8, #4482/#4512), read from
+# test-data/scripts/lib/cassandra-image.sh. This script does NOT introduce a
+# second pin: the live read-back leg reuses
+# test-data/docker/docker-compose-cassandra5.yml (image cassandra:5.0.8) and the
 # compaction leg reuses compaction-parity/scripts/bootstrap-cassandra.sh
-# (CASSANDRA_REF=cassandra-5.0.2).
+# (CASSANDRA_REF=cassandra-5.0.8). No leg compares live Cassandra output with a
+# committed fixture: the read-back leg loads CQLite-written SSTables into a live
+# node, the BTI leg runs the image's sstabledump over SSTables CQLite just wrote,
+# and the compaction legs diff CQLite against the pinned Cassandra SOURCE. So the
+# 5.0.2 carry-over tables in the committed corpus never enter a comparison here.
 #
 # The exit code is 0 iff every HARD-FAIL leg passed. Advisory leg outcomes are
 # recorded in the report but never change the exit code.
@@ -83,17 +87,19 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 # Pinned Cassandra version — single source of truth lives in the reused
 # machinery; restated here only for the fixture-metadata artifact (NOT a new
-# pin). MUST match docker-compose-cassandra5.yml (cassandra:5.0.2) and
-# bootstrap-cassandra.sh (CASSANDRA_REF=cassandra-5.0.2).
+# pin). Taken from lib/cassandra-image.sh, which docker-compose-cassandra5.yml
+# (cassandra:5.0.8) and bootstrap-cassandra.sh (CASSANDRA_REF=cassandra-5.0.8) mirror.
 # ---------------------------------------------------------------------------
-CASSANDRA_REF="${CASSANDRA_REF:-cassandra-5.0.2}"
+# shellcheck source=lib/cassandra-image.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/cassandra-image.sh" || exit 1
+CASSANDRA_REF="${CASSANDRA_REF:-$CQLITE_CASSANDRA_REF}"
 # Single-source pin, but DON'T clobber a caller/workflow-provided value: the
 # workflow exports the image it pulled, and the BTI child leg must inherit the
-# SAME pin. Default to 5.0.2 only when unset, and keep it exported so child
+# SAME pin. Default to the primary release only when unset, and keep it exported so child
 # cargo processes see the identical image (issue #1025).
-CASSANDRA_IMAGE="${CASSANDRA_IMAGE:-cassandra:5.0.2}"
+CASSANDRA_IMAGE="${CASSANDRA_IMAGE:-$CQLITE_CASSANDRA_IMAGE}"
 export CASSANDRA_IMAGE
-CASSANDRA_GIT_SHA="f278f6774fc76465c182041e081982105c3e7dbb"
+CASSANDRA_GIT_SHA="$CQLITE_CASSANDRA_GIT_SHA"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -258,7 +264,7 @@ log "Using cqlite binary: $CQLITE_BIN"
 # ===========================================================================
 # Leg 1 — live read-back semantic equivalence (HARD)
 # Reuses the existing e2e-cassandra-readback.sh harness, which stands up
-# Cassandra 5.0.2 via docker-compose-cassandra5.yml (start-clean.sh + EXIT-trap
+# Cassandra 5.0.8 via docker-compose-cassandra5.yml (start-clean.sh + EXIT-trap
 # cleanup) and drives write -> flush -> export -> nodetool refresh -> cqlsh.
 # ===========================================================================
 LIVE_CMD="bash test-data/scripts/e2e-cassandra-readback.sh --no-build --bin <cqlite>"
@@ -357,7 +363,7 @@ fi
 # Leg 3 — differential compaction LOGICAL parity (HARD)
 # Leg 5 — differential compaction BYTE tier (ADVISORY)
 # Reuses compaction-parity/ exactly as compaction-parity.yml: build the pinned
-# Cassandra source via bootstrap-cassandra.sh (CASSANDRA_REF=cassandra-5.0.2),
+# Cassandra source via bootstrap-cassandra.sh (CASSANDRA_REF=cassandra-5.0.8),
 # then `gradle test` (logical, HARD) and `gradle byteParity` (byte, ADVISORY).
 # ===========================================================================
 LOGICAL_CMD="cd compaction-parity && gradle --no-daemon test"

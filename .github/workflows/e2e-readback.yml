@@ -3,7 +3,7 @@ name: "CI: E2E Cassandra Readback Gate"
 
 # PRD §4.1 acceptance gate (epic #663, issue #664):
 # Validates that SSTables produced by CQLite can be loaded by a real
-# Cassandra 5.0.2 cluster via `nodetool refresh` and queried with cqlsh.
+# Cassandra 5.0.8 cluster (the compose pin) via `nodetool refresh` and queried with cqlsh.
 #
 # INGEST TIERING (issue #1368):
 # This workflow validates the complementary `nodetool refresh` ingest path. It is
@@ -212,7 +212,7 @@ jobs:
               repo: context.repo.repo,
               body: `## E2E Cassandra Readback: PASSED
 
-            All selected tables passed the full write -> flush -> export -> \`nodetool refresh\` -> \`cqlsh\` verification cycle against Cassandra 5.0.2.
+            All selected tables passed the full write -> flush -> export -> \`nodetool refresh\` -> \`cqlsh\` verification cycle against Cassandra 5.0.8.
 
             This full ingest tier runs on PRs only when \`ci:ingest-full\` is present; ordinary writer-path PR smoke remains in \`cassandra-validation.yml\`.
 

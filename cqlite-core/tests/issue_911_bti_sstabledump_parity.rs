@@ -73,13 +73,13 @@ fn require_live_strict() -> bool {
 /// Single source of truth for the Cassandra image the BTI leg validates against.
 /// The `nightly_docker` workflow sets `CASSANDRA_IMAGE` (and pulls exactly that
 /// tag) so the hard BTI leg can never validate against a DIFFERENT image than the
-/// stated pin. Defaults to the corpus pin `cassandra:5.0.2` when unset (matching
-/// docker-compose-cassandra5.yml / the committed corpus — NOT a second pin).
+/// stated pin. Defaults to the primary release pin `cassandra:5.0.8` when unset (matching
+/// docker-compose-cassandra5.yml and test-data/scripts/lib/cassandra-image.sh — NOT a second pin).
 fn pinned_cassandra_image() -> String {
     std::env::var("CASSANDRA_IMAGE")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "cassandra:5.0.2".to_string())
+        .unwrap_or_else(|| "cassandra:5.0.8".to_string())
 }
 
 /// Return `true` if the exact image tag is present locally.
@@ -92,7 +92,7 @@ fn image_present_locally(listing: &str, image: &str) -> bool {
 /// outside strict mode.
 ///
 /// In strict mode (`CQLITE_REQUIRE_FIXTURES=1`, the `nightly_docker` HARD leg) we
-/// REQUIRE the EXACT pinned image (`CASSANDRA_IMAGE`, default `cassandra:5.0.2`):
+/// REQUIRE the EXACT pinned image (`CASSANDRA_IMAGE`, default `cassandra:5.0.8`):
 /// we do NOT fall back to a looser `cassandra:5.0` (or any other `5.0.*`) tag, so
 /// the hard leg validates against the stated pin and never a different image that
 /// merely happens to be on the runner. Outside strict mode we keep the lenient
@@ -186,7 +186,7 @@ fn cassandra_5_image() -> Option<String> {
                     "CQLITE_REQUIRE_FIXTURES=1 (strict nightly_docker BTI leg) but the live \
                      Cassandra 5 sstabledump check cannot run: {reason}. The BTI HARD leg must \
                      not vacuously pass — the workflow must provision Docker + the pinned \
-                     cassandra:5.0.2 image before this leg (issue #1025 fail-closed mandate)."
+                     cassandra:5.0.8 image before this leg (issue #1025 fail-closed mandate)."
                 );
             }
             None
