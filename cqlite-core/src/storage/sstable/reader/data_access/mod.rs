@@ -89,8 +89,7 @@ mod model;
 // Streaming partition-BOUNDARY enumeration (#1103, rewritten for #4197); split
 // out of the over-target `compaction.rs` per the campsite rule (epic #1116).
 mod partition_boundaries;
-// Single-partition compaction seek (#2207) + `find`'s per-generation probe (#4205): gated
-// `not(tombstones)` like the seek primitives they compose.
+// Single-partition seek (#2207) + `find`'s probe (#4205); `not(tombstones)` like the seek primitives.
 #[cfg(not(feature = "tombstones"))]
 mod find_probe;
 #[cfg(not(feature = "tombstones"))]
