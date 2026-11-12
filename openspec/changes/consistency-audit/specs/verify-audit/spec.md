@@ -53,7 +53,7 @@ Every BIG `Index.db` entry's declared `(key, data_offset)` SHALL be cross-checke
 
 ### Requirement: A2 — Summary.db samples resolve to the matching Index.db position and key (BIG)
 
-Every `Summary.db` sample's `(partition_key, index_position)` SHALL resolve, at `index_position` (a byte offset INTO `Index.db`), to an `Index.db` entry carrying the SAME key.
+Every `Summary.db` sample's `(partition_key, position)` SHALL resolve, at `position` (a byte offset INTO `Index.db`), to an `Index.db` entry carrying the SAME key.
 
 #### Scenario: A2.1 healthy BIG SSTable — every sample resolves correctly
 - **Given** a committed healthy BIG fixture with a non-trivial `Summary.db` (more than one sample)
@@ -62,7 +62,7 @@ Every `Summary.db` sample's `(partition_key, index_position)` SHALL resolve, at 
 
 #### Scenario: A2.2 a corrupted sample position is caught
 - **Given** `test_comp_corrupt/summary_sample_position_corrupt` (one `Summary.db` sample's
-  `index_position` rewritten to a DIFFERENT, still in-bounds `Index.db` entry)
+  `position` rewritten to a DIFFERENT, still in-bounds `Index.db` entry)
 - **When** `summary-index-correlation` runs
 - **Then** `Fail`, a `SummarySampleMismatch` finding names the sample index, the claimed key, and the
   key actually found at the corrupted position.
