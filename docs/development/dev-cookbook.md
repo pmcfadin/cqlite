@@ -861,7 +861,7 @@ retry into a cleared `--out` reproduces the uninterrupted bytes. The product car
 nothing is compiled out of release builds; `shipped_cli_contains_no_fault_hook` proves it (set
 `CQLITE_RELEASE_CLI_BINARY` to also scan a release build). `CQLITE_CRASH_CONSISTENCY_LARGE=1` adds the
 large fixture (nightly). Add a new write verb by giving `Verb` an entry and its argv in `run_verb`.
-Confirmed defects are reproduced by the `#[ignore]`d tests in the same file (`known_defect`).
+Confirmed defects are reproduced by the `#[ignore]`d tests in the same file (`defects()`, keyed by verb, fixture, boundary and issue).
 
 ## Locate corruption + sweep a data directory (issue #4194, epic #4192)
 
