@@ -267,7 +267,7 @@ fn varlen_prefix_edge_sorts_correctly_in_asc_and_desc() {
     let a = Value::text("A");
     let a0 = Value::text("A\0");
     assert!(
-        enc(&[a.clone()], &[false]) < enc(&[a0.clone()], &[false]),
+        enc(std::slice::from_ref(&a), &[false]) < enc(std::slice::from_ref(&a0), &[false]),
         "ASC: A < A\\0"
     );
     assert!(
