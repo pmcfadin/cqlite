@@ -64,7 +64,7 @@ full gate in `flow-closer`.
       or a dedicated walk in `verify_audit.rs`; task 0.1's re-read decides which is less invasive.
 - [ ] 2.2 `check_index_data_identity` (D2): header-only read at each `data_offset` via 0.2's confirmed
       entry point; `IndexPositionKeyMismatch` finding + `Fail` row on any mismatch.
-- [ ] 2.3 `check_summary_index_correlation` (D3): match each `Summary.db` sample's `index_position`
+- [ ] 2.3 `check_summary_index_correlation` (D3): match each `Summary.db` sample's `position`
       against the D2.1 walk's captured offsets; `SummarySampleMismatch` finding + `Fail` row on any
       mismatch or unresolved sample.
 - [ ] 2.4 Both `Skip("boundary source unreadable")` when `Index.db` is itself unhealthy (D8);

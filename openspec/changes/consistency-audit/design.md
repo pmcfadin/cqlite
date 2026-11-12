@@ -100,10 +100,10 @@ check_index_data_identity(components, index_entries) -> AuditVerdict:
 check_summary_index_correlation(components) -> AuditVerdict:
    Summary.db absent -> Skip("no Summary.db")
    Index.db unhealthy -> Skip("boundary source unreadable")
-   for each SummaryEntry { partition_key, index_position } in SummaryReader::get_entries():
-       # index_position is a BYTE OFFSET INTO Index.db (confirmed:
+   for each SummaryEntry { partition_key, position } in SummaryReader::get_entries():
+       # position is a BYTE OFFSET INTO Index.db (confirmed:
        # summary_reader/mod.rs:91, "Position in Index.db file (byte offset)")
-       look up the Index.db entry whose OWN byte offset == index_position, from the same
+       look up the Index.db entry whose OWN byte offset == position, from the same
        (offset, key) capture D2's re-walk produces
        found and key == partition_key? no -> Fail (SummarySampleMismatch, names the sample
        index and both keys)
@@ -258,7 +258,7 @@ one. Extend `test-data/datasets/corruption/test_comp_corrupt/corruption-manifest
 | New fixture | Mutation | Invariant exercised |
 |---|---|---|
 | `index_entry_offset_swap` | Swap two adjacent BIG `Index.db` entries' `data_offset` VInts (each remains a structurally valid entry — `check_big_index` stays green) | 1 (Fail) |
-| `summary_sample_position_corrupt` | Corrupt one `Summary.db` sample's recorded `index_position` to point at a DIFFERENT (still in-bounds) `Index.db` entry | 2 (Fail) |
+| `summary_sample_position_corrupt` | Corrupt one `Summary.db` sample's recorded `position` to point at a DIFFERENT (still in-bounds) `Index.db` entry | 2 (Fail) |
 | `filter_db_bit_flip_bti` | BTI analogue of the existing BIG-only `filter_db_bit_flip` — one bit 1→0 in a BTI `Filter.db` | 3 (Fail, BTI) |
 | `bti_data_offset_out_of_bounds` | Rewrite one `DataOffset` leaf's payload in `Partitions.db` to a position past `Data.db`'s end | 4 new sub-check (Fail) |
 | `compression_info_short_coverage` | Drop the LAST entry from `CompressionInfo.db`'s `chunk_offsets` (declared count falls short of `ceil(data_length/chunk_length)`) | 7 (Fail) |
