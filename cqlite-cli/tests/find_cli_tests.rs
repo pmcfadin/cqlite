@@ -116,7 +116,7 @@ fn bti_hits_match_the_golden_offsets_and_lengths() {
         .map(|(k, p)| (k.clone(), p - (2 + 16 + 1)))
         .collect();
     for (i, (key, start)) in starts.iter().enumerate() {
-        let (code, out, err) = find("da-test.cql", &dir, &format!("{key}"), &["--out", "json"]);
+        let (code, out, err) = find("da-test.cql", &dir, key, &["--out", "json"]);
         assert_eq!(code, 0, "stderr: {err}");
         let gen = &json_of(&out)["generations"][0];
         assert_eq!(gen["probe"], "hit", "key {key}: {out}");
