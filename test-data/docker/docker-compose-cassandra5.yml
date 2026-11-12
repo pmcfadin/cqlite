@@ -3,13 +3,13 @@
 
 services:
   # Cassandra 5.0 - Latest version with new features (Enhanced for Issue #30)
-  # Pinned to 5.0.2 (Issue #482) so e2e readback tests use a stable build.
-  # Version bump procedure (Issue #669): update this image tag AND the matching
-  # CASSANDRA_IMAGE env var in both CI workflow files:
-  #   - .github/workflows/cassandra-validation.yml
-  #   - .github/workflows/m1-ci.yml
+  # Pinned to the primary release (5.0.8, #4482) so e2e readback tests use a stable build; same pin as
+  # test-data/scripts/lib/cassandra-image.sh. Version bump procedure (Issues #669, #4512): update this
+  # image tag AND the matching CASSANDRA_IMAGE / CASSANDRA_REF in:
+  #   - .github/workflows/cassandra-validation.yml (env + service image literal)
+  #   - .github/workflows/nightly-docker-parity.yml and test-data/scripts/nightly-docker-parity.sh
   cassandra-5-0:
-    image: cassandra:5.0.2
+    image: cassandra:5.0.8
     container_name: cqlite-cassandra-5-0
     hostname: cassandra-5-0
     environment:
@@ -19,7 +19,7 @@ services:
       - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
       - CASSANDRA_START_RPC=true
       - CASSANDRA_RPC_ADDRESS=0.0.0.0
-      # Cassandra 5.0.2+ rejects a wildcard listen_address; use the entrypoint's
+      # Cassandra 5.0.x rejects a wildcard listen_address; use the entrypoint's
       # auto-detection so it picks up the container IP at startup.
       - CASSANDRA_LISTEN_ADDRESS=auto
       - CASSANDRA_BROADCAST_ADDRESS=cassandra-5-0
