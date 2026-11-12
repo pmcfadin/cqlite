@@ -23751,6 +23751,8 @@ run_tooling_tests() {
   # target instead of a hardcoded allowlist, and exercises the fail-closed guard; no
   # cargo). A failure FAILs the component, mirroring the delta/parity-report guards.
   _tt_add P 'cli-tests enumeration self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_cli_tests_enum.sh"'
+  # strict-fixture export self-test (#4230): hermetic, drives the shipped run_component() with stub children
+  _tt_add P 'strict-fixture export self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_strict_fixtures.sh"'
 
   # per-gate CPU-budget derivation self-test (#2640): no python3 needed, always
   # runs (hermetic — drives the --cpu-budget hook with a pinned ncpu, asserts the

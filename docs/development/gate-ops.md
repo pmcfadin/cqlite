@@ -3474,6 +3474,8 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 
 ## Component contracts (moved verbatim from CLAUDE.md)
 
+**Strict fixtures on the dataset-backed test components (#4230).** On the FULL gate and `--recertify` (`_gate_is_strict`), `run_component` runs `core-tests`, `write-tests`, `cli-tests` and `integration-tests` with `CQLITE_REQUIRE_FIXTURES=1` exported to the child (a subshell export, not `env`, so the `cargo()` observer function is not bypassed; it reaches every `bash -c` pass by inheritance). A corpus-gated test whose corpus is absent therefore FAILS instead of skip-passing; a test that may legitimately skip must say so through `skip_or_require`. `--only`/`--lite` probes and `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` keep the caller's own policy and do not certify. `core-tests-ci.yml` deliberately stays unset (#1995: that lane does not provision the Docker/corruption-corpus/byte-oracle fixtures, so the strict flag would hard-panic skip-clean tests), so the local gate of record is now the stricter of the two. Pinned by `scripts/tests/test_agent_gate_strict_fixtures.sh` (run in `tooling-tests`).
+
 These passages lived in `CLAUDE.md`, which every agent loads into context. They are mechanism, not
 rules, so they moved here unchanged when `CLAUDE.md` was trimmed back to rules and pointers.
 `CLAUDE.md` keeps a one-line summary of each and links here.
