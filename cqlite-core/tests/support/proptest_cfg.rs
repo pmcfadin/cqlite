@@ -2,7 +2,7 @@
 //!
 //! * **Bounded PR tier, higher-volume nightly.** The case count is [`PR_TIER_CASES`]
 //!   unless `PROPTEST_CASES` overrides it; the nightly sweep sets that variable
-//!   (`.github/workflows/nightly-property-laws.yml`).
+//!   (`.github/workflows/gate.yml (job `property-laws-sweep`)`).
 //! * **Seeded, and the seed is printed.** Every run picks (or is given, via
 //!   `LAWS_SEED`) a `u64` seed and prints it. The libtest harness only shows captured
 //!   output for a FAILING test, so a failure always carries the line
