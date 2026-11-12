@@ -247,6 +247,10 @@ jobs:
           # instead of SKIP when a required binary is absent — so a HARD leg can
           # never vacuously pass on an empty dataset.
           CQLITE_REQUIRE_FIXTURES: '1'
+          # Live-Docker HARD leg (#4230): split from CQLITE_REQUIRE_FIXTURES, which now also
+          # means "corpus required" in the local gate. The BTI sstabledump test panics on a
+          # missing Docker/pinned image only when THIS is set.
+          CQLITE_REQUIRE_LIVE_CASSANDRA: '1'
           # Strict mode (issue #1025): every HARD leg must RUN or FAIL. A HARD leg
           # that SKIPs for any reason OTHER than an explicit user skip flag is
           # converted to FAIL by the runner. --skip-live / --skip-compaction below
