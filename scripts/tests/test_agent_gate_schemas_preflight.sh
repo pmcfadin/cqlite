@@ -956,6 +956,12 @@ done
 for c in nb-1-big-Data.db nb-1-big-Index.db nb-1-big-Summary.db nb-1-big-Statistics.db; do
   : >"$warm/sstables/test_basic/simple_table-0001/$c"
 done
+# #4518: under CI (or CQLITE_DATASETS_RESTORE_TRACKED=1) fetch-datasets.sh refuses a warm root that has no
+# `.dataset-manifest` (a pre-#4508 cache) and forces a COLD restore, which would hit the curl guard below. So the
+# synthetic warm root carries a manifest in the format write_bundle_manifest produces (dataset-relative regular
+# files, one per line, `LC_ALL=C sort -u`, the dataset bookkeeping dotfiles excluded), making this case exercise the warm path
+# both locally and with CI=true. fetch-datasets.sh's CI refusal is deliberately NOT weakened.
+(cd "$warm" && find . -type f ! -name '.dataset-*' | sed 's#^\./##' | LC_ALL=C sort -u) >"$warm/.dataset-manifest"
 # The pin comes from the tracked source of truth, never hard-coded (issue #2646).
 # shellcheck disable=SC1090
 . "$REPO/test-data/dataset-pin.env"
