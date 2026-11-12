@@ -47,7 +47,7 @@ impl SSTableManager {
 
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (candidate prune + the block-walk delegated to the reader).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot_checked(table_id).await?;
 
         // Prune to the candidate generations that admit the key. Reverse iteration
         // covers ONLY the single-generation case: with several generations the same

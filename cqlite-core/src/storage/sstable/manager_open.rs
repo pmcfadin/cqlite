@@ -50,6 +50,7 @@ impl SSTableManager {
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::BasePath,
             refresh_lock: Arc::new(Mutex::new(())),
+            refusals: Default::default(),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
             chunk_cache: build_chunk_cache(config),
@@ -148,6 +149,7 @@ impl SSTableManager {
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::TableDirs(table_dirs.clone()),
             refresh_lock: Arc::new(Mutex::new(())),
+            refusals: Default::default(),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
             chunk_cache: build_chunk_cache(config),
@@ -238,8 +240,11 @@ impl SSTableManager {
                                 }
                             }
                             Err(e) => {
-                                // Log warning but continue loading other SSTables
-                                tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
+                                // Keep loading the OTHER SSTables, but RECORD the
+                                // refusal so reads of this table fail closed
+                                // instead of answering `Ok(empty)` (#4159).
+                                let key = refresh::table_dir_table_key(&path).unwrap_or_default();
+                                self.refusals.record(key, &path, &e);
                             }
                         }
                     }
@@ -331,9 +336,11 @@ impl SSTableManager {
                         );
                     }
                 }
-                Err(_) => {
-                    // Skip problematic SSTable files during initialization
-                    tracing::warn!("Could not load SSTable file: {:?}", path);
+                Err(e) => {
+                    // Keep loading the OTHER SSTables, but RECORD the refusal and
+                    // its cause so reads of this table fail closed (#4159).
+                    let key = super::refusal::refusal_key(&path, &base_dir_name);
+                    self.refusals.record(key, &path, &e);
                 }
             }
         }
