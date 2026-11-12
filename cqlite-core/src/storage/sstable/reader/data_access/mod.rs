@@ -89,10 +89,8 @@ mod model;
 // Streaming partition-BOUNDARY enumeration (#1103, rewritten for #4197); split
 // out of the over-target `compaction.rs` per the campsite rule (epic #1116).
 mod partition_boundaries;
-// Single-partition compaction seek (issue #2207): the public point-read primitive
-// composing the presence oracle + BTI/BIG offset resolution into a byte-identical
-// compaction-row seek for one partition. Gated `not(tombstones)` like the seek
-// primitives it composes (`successor_partition_offset`, `point_read_whole_section`).
+// Single-partition compaction seek (#2207) + `find`'s per-generation probe (#4205): gated
+// `not(tombstones)` like the seek primitives they compose.
 #[cfg(not(feature = "tombstones"))]
 mod find_probe;
 #[cfg(not(feature = "tombstones"))]
@@ -112,8 +110,7 @@ mod presence_verify;
 mod range_short_circuit;
 mod sequential;
 
-// Public surface re-export (unchanged: `reader::mod` re-exports
-// `data_access::ClusteringSlice`).
+// Public surface re-export (`reader::mod` re-exports `data_access::ClusteringSlice`).
 #[cfg(not(feature = "tombstones"))]
 pub use find_probe::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
 pub use model::ClusteringSlice;

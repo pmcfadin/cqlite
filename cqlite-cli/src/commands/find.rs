@@ -13,7 +13,8 @@ use cqlite_core::platform::Platform;
 use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::commitlog::Writetime;
 use cqlite_core::storage::scan_cancel::ScanCancel;
-use cqlite_core::storage::sstable::{GenerationProbe, SSTableReader, ScanOutcome};
+use cqlite_core::storage::sstable::reader::{GenerationProbe, ScanOutcome};
+use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::Config;
 
 use super::find_commitlog::{scan_commitlog, CommitEntry};

@@ -1,7 +1,7 @@
 //! Text and JSON rendering for `cqlite find` (issue #4205, design D6).
 
 use cqlite_core::storage::commitlog::Writetime;
-use cqlite_core::storage::sstable::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
+use cqlite_core::storage::sstable::reader::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
 use serde_json::{json, Value};
 
 use super::find::{FindReport, GenOutcome, Unflushed};

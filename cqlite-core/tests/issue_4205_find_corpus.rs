@@ -28,7 +28,8 @@ use cqlite_core::schema::cql_parser::split_cql_statements;
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
 use cqlite_core::storage::partition_key_codec::encode_partition_key_columns;
 use cqlite_core::storage::scan_cancel::ScanCancel;
-use cqlite_core::storage::sstable::{ByteLength, GenerationProbe, SSTableReader};
+use cqlite_core::storage::sstable::reader::{ByteLength, GenerationProbe};
+use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::{Config, Value};
 use serde_json::Value as Json;
 

@@ -1,8 +1,8 @@
 //! Unit tests for `find.rs`: the D5 comparison table, key-literal splitting, table-dir parsing.
 
 use super::*;
-use cqlite_core::storage::sstable::ByteLength;
-use cqlite_core::storage::sstable::HitDetail;
+use cqlite_core::storage::sstable::reader::ByteLength;
+use cqlite_core::storage::sstable::reader::HitDetail;
 
 fn hit(ts: i64) -> GenRow {
     GenRow {
