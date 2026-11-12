@@ -18,6 +18,23 @@ use cqlite_core::Config;
 
 use crate::cli_types::{VerifyModeArg, VerifyOutputArg};
 
+/// Destructure a `Commands::Verify` and run it (keeps `main.rs`'s dispatch block
+/// one line regardless of how many flags `verify` grows; file-size ratchet).
+pub async fn dispatch_verify(cmd: &crate::cli_types::Commands) -> Result<()> {
+    let crate::cli_types::Commands::Verify {
+        path,
+        mode,
+        out,
+        deep,
+    } = cmd
+    else {
+        return Err(anyhow::anyhow!(
+            "dispatch_verify called with a non-verify command"
+        ));
+    };
+    execute_verify_command(path, *mode, *out, *deep).await
+}
+
 /// Execute `cqlite verify <path> --mode <quick|full> --out <text|json>`.
 ///
 /// Returns `Err` only on an environmental failure (e.g. the directory has no
