@@ -1,8 +1,9 @@
 //! Directed equal-timestamp tie properties (issue #4497, AC 1: "equal-timestamp ties,
 //! the #498 tiebreak class"), each resolved against CASSANDRA, not against CQLite.
 //!
-//! For every tie class the property is commutativity of the real merge over exactly two
-//! contenders: `merge(x, y) == merge(y, x)`. Cassandra's reconcile is commutative by
+//! For every tie class the property is that the real merge over exactly two contenders,
+//! in BOTH orders, equals the merge of the winner Cassandra's rule names on its own
+//! (`resolves_to`), which implies `merge(x, y) == merge(y, x)`. Cassandra's reconcile is commutative by
 //! contract (`Cells.reconcile` javadoc, `db/rows/Cells.java:59`) and its tie-break is
 //! total, so ANY failure here is a CQLite-vs-Cassandra divergence.
 //!
@@ -40,6 +41,74 @@ fn commutes(expire: bool, x: &Spec, y: &Spec) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// Asserts the merge of `x` and `y`, in BOTH input orders, equals the merge of the
+/// contender Cassandra picks on its own. Commutativity alone would accept a rule that is
+/// deterministic but wrong (always the smaller value, say); naming the expected winner
+/// pins the Cassandra rule itself.
+fn resolves_to(expire: bool, x: &Spec, y: &Spec, winner: &Spec) -> Result<(), TestCaseError> {
+    let expected = norm(&merge(expire, &[std::slice::from_ref(winner)]));
+    for (a, b) in [(x, y), (y, x)] {
+        let got = norm(&merge(
+            expire,
+            &[std::slice::from_ref(a), std::slice::from_ref(b)],
+        ));
+        prop_assert_eq!(&got, &expected, "merge({:?}, {:?})", a, b);
+    }
+    Ok(())
+}
+
+/// Cassandra 5.0.8 `Cells.resolveRegular` (`db/rows/Cells.java:79-129`) for two cells with
+/// EQUAL timestamps, transcribed rule by rule. `Spec::Cell::expiring` is `(ttl, ldt)`.
+fn cassandra_cell_winner<'a>(left: &'a Spec, right: &'a Spec) -> &'a Spec {
+    // The cell payload is the text `v{value}` (generators.rs); Cassandra compares the
+    // serialized value bytes (UTF8Type is bytewise).
+    fn payload(v: u8) -> Vec<u8> {
+        format!("v{v}").into_bytes()
+    }
+    // (expiring-or-tombstone, tombstone, localDeletionTime, ttl, value bytes)
+    fn facts(s: &Spec) -> (bool, bool, i64, u32, Vec<u8>) {
+        match s {
+            Spec::Cell(c) => match c.expiring {
+                Some((ttl, ldt)) => (true, false, i64::from(ldt), ttl, payload(c.value)),
+                None => (false, false, i64::MAX, 0, payload(c.value)),
+            },
+            Spec::CellTomb { ldt, .. } => (true, true, i64::from(*ldt), 0, Vec::new()),
+            other => panic!("not a cell contender: {other:?}"),
+        }
+    }
+    let (l_et, l_tomb, l_ldt, l_ttl, l_val) = facts(left);
+    let (r_et, r_tomb, r_ldt, r_ttl, r_val) = facts(right);
+    if l_et || r_et {
+        if l_et != r_et {
+            return if l_et { left } else { right };
+        }
+        if l_tomb != r_tomb {
+            return if l_tomb { left } else { right };
+        }
+        if l_ldt != r_ldt {
+            return if l_ldt > r_ldt { left } else { right };
+        }
+        if !l_tomb && l_ttl != r_ttl {
+            return if l_ttl < r_ttl { left } else { right };
+        }
+    }
+    if l_val >= r_val {
+        left
+    } else {
+        right
+    }
+}
+
+/// `DeletionTime.supersedes` (`db/DeletionTime.java:158`) at equal timestamps: the larger
+/// local deletion time wins.
+fn larger_ldt<'a>(x: &'a Spec, y: &'a Spec, ldt: impl Fn(&Spec) -> i32) -> &'a Spec {
+    if ldt(x) >= ldt(y) {
+        x
+    } else {
+        y
+    }
+}
+
 fn cell(value: u8, expiring: Option<(u32, i32)>) -> Spec {
     Spec::Cell(CellSpec {
         ck: 0,
@@ -63,7 +132,7 @@ proptest! {
         expire in any::<bool>(),
     ) {
         let t = Spec::CellTomb { ck: 0, col: 0, ts: 3, ldt: tomb_ldt };
-        commutes(expire, &t, &cell(v, expiring))?;
+        resolves_to(expire, &t, &cell(v, expiring), &t)?;
     }
 
     /// Resolved class: equal-timestamp ROW / RANGE / PARTITION deletions with the SAME
@@ -84,7 +153,8 @@ proptest! {
     #[test]
     #[ignore = "#4530 equal-ts live cells with different values: winner depends on stream order (Cells.java:128)"]
     fn tie_live_vs_live_different_values(v1 in 0u8..3, v2 in 0u8..3) {
-        commutes(false, &cell(v1, None), &cell(v2, None))?;
+        let (x, y) = (cell(v1, None), cell(v2, None));
+        resolves_to(false, &x, &y, cassandra_cell_winner(&x, &y))?;
     }
 
     /// Cassandra rule (1): at equal timestamp an EXPIRING cell beats a LIVE one
@@ -92,7 +162,8 @@ proptest! {
     #[test]
     #[ignore = "#4530 equal-ts expiring vs live: winner depends on stream order (Cells.java:93-98)"]
     fn tie_expiring_vs_live(v1 in 0u8..3, v2 in 0u8..3, ttl in 1u32..4, ldt in 997i32..1004) {
-        commutes(false, &cell(v1, Some((ttl, ldt))), &cell(v2, None))?;
+        let (x, y) = (cell(v1, Some((ttl, ldt))), cell(v2, None));
+        resolves_to(false, &x, &y, cassandra_cell_winner(&x, &y))?;
     }
 
     /// Cassandra rules (3)+(4): two EXPIRING cells at equal timestamp — larger LDT, then
@@ -104,7 +175,8 @@ proptest! {
         t1 in 1u32..4, t2 in 1u32..4,
         l1 in 997i32..1004, l2 in 997i32..1004,
     ) {
-        commutes(false, &cell(v1, Some((t1, l1))), &cell(v2, Some((t2, l2))))?;
+        let (x, y) = (cell(v1, Some((t1, l1))), cell(v2, Some((t2, l2))));
+        resolves_to(false, &x, &y, cassandra_cell_winner(&x, &y))?;
     }
 
     /// Cassandra rule (3): two cell TOMBSTONES at equal timestamp — larger LDT wins.
@@ -112,7 +184,8 @@ proptest! {
     #[ignore = "#4530 equal-ts cell tombstones with different LDT: winner depends on stream order (Cells.java:111-118)"]
     fn tie_tombstone_vs_tombstone_different_ldt(l1 in 400i32..406, l2 in 400i32..406) {
         let t = |ldt| Spec::CellTomb { ck: 0, col: 0, ts: 3, ldt };
-        commutes(false, &t(l1), &t(l2))?;
+        let (x, y) = (t(l1), t(l2));
+        resolves_to(false, &x, &y, cassandra_cell_winner(&x, &y))?;
     }
 
     /// `DeletionTime.supersedes`: equal-timestamp ROW deletions — larger LDT wins.
@@ -120,7 +193,8 @@ proptest! {
     #[ignore = "#4530 equal-ts row deletions with different LDT: winner depends on stream order (DeletionTime.java:158)"]
     fn tie_row_deletion_different_ldt(l1 in 400i32..406, l2 in 400i32..406) {
         let d = |ldt| Spec::RowDel { ck: 0, ts: 3, ldt };
-        commutes(false, &d(l1), &d(l2))?;
+        let (x, y) = (d(l1), d(l2));
+        resolves_to(false, &x, &y, larger_ldt(&x, &y, |s| match s { Spec::RowDel { ldt, .. } => *ldt, _ => unreachable!() }))?;
     }
 
     /// Same, RANGE tombstones over the same range. CQLite agrees with Cassandra here (the
@@ -128,7 +202,8 @@ proptest! {
     #[test]
     fn tie_range_deletion_different_ldt(l1 in 400i32..406, l2 in 400i32..406) {
         let d = |ldt| Spec::RangeDel { lo: 0, hi: 1, ts: 3, ldt };
-        commutes(false, &d(l1), &d(l2))?;
+        let (x, y) = (d(l1), d(l2));
+        resolves_to(false, &x, &y, larger_ldt(&x, &y, |s| match s { Spec::RangeDel { ldt, .. } => *ldt, _ => unreachable!() }))?;
     }
 
     /// Same, PARTITION deletions.
@@ -136,6 +211,7 @@ proptest! {
     #[ignore = "#4530 equal-ts partition deletions with different LDT: winner depends on stream order (DeletionTime.java:158)"]
     fn tie_partition_deletion_different_ldt(l1 in 400i32..406, l2 in 400i32..406) {
         let d = |ldt| Spec::PartDel { ts: 3, ldt };
-        commutes(false, &d(l1), &d(l2))?;
+        let (x, y) = (d(l1), d(l2));
+        resolves_to(false, &x, &y, larger_ldt(&x, &y, |s| match s { Spec::PartDel { ldt, .. } => *ldt, _ => unreachable!() }))?;
     }
 }
