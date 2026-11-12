@@ -666,77 +666,8 @@ pub async fn export_data(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Spec R5 (Total-resolution and ETA-eligibility are independently
-    // verifiable): a present `--limit` resolves to a determinate total and is
-    // ETA-eligible.
-    #[test]
-    fn limit_present_resolves_to_determinate_total() {
-        let resolved = resolve_progress_total(Some(42));
-        assert_eq!(resolved.total, Some(42));
-        assert!(
-            resolved.eta_eligible,
-            "a known total must be ETA-eligible (determinate bar)"
-        );
-    }
-
-    // Spec R5: an absent `--limit` resolves to an unknown total (spinner) and
-    // is not ETA-eligible.
-    #[test]
-    fn limit_absent_resolves_to_unknown_total() {
-        let resolved = resolve_progress_total(None);
-        assert_eq!(resolved.total, None);
-        assert!(
-            !resolved.eta_eligible,
-            "an unknown total must not be ETA-eligible (spinner, no ETA)"
-        );
-    }
-
-    // Spec R1/R2/R5: the determinate-vs-spinner choice is driven by the
-    // resolved total's ETA-eligibility (a pure, terminal-free function), so the
-    // `eta_eligible` flag is the load-bearing signal — not a second derivation
-    // from `total`.
-    #[test]
-    fn total_selects_bar_kind() {
-        assert_eq!(
-            progress_bar_kind(resolve_progress_total(Some(100))),
-            BarKind::Determinate
-        );
-        assert_eq!(
-            progress_bar_kind(resolve_progress_total(None)),
-            BarKind::Spinner
-        );
-    }
-
-    // Spec R1 (determinate bar promises ETA + percent, observable without a
-    // TTY): the determinate template carries `{eta}` and `{percent}` plus the
-    // `{bar}`/`{pos}`/`{len}` evidence of a real bar.
-    #[test]
-    fn determinate_template_contains_eta_and_percent() {
-        let t = progress_template(progress_bar_kind(resolve_progress_total(Some(42))));
-        assert!(t.contains("{eta}"), "must show an ETA: {t:?}");
-        assert!(t.contains("{percent}"), "must show a percent: {t:?}");
-        assert!(t.contains("{bar"), "must render a bar: {t:?}");
-        assert!(
-            t.contains("{pos}") && t.contains("{len}"),
-            "must show pos/len: {t:?}"
-        );
-    }
-
-    // Spec R2 (spinner promises no ETA / no percent, observable without a TTY):
-    // the spinner template carries `{spinner}` and a `{pos}` row count but
-    // never `{eta}` or `{percent}`.
-    #[test]
-    fn spinner_template_omits_eta_and_percent() {
-        let t = progress_template(progress_bar_kind(resolve_progress_total(None)));
-        assert!(t.contains("{spinner"), "must render a spinner: {t:?}");
-        assert!(t.contains("{pos}"), "must show a row count: {t:?}");
-        assert!(!t.contains("{eta}"), "must NOT show an ETA: {t:?}");
-        assert!(!t.contains("{percent}"), "must NOT show a percent: {t:?}");
-    }
-}
+#[path = "export_tests.rs"]
+mod tests;
 
 /// Pull one chunk, abandoning the wait at `deadline` (issue #1695).
 ///
@@ -830,47 +761,5 @@ fn check_export_deadline(
 }
 
 #[cfg(all(test, feature = "state_machine"))]
-mod export_deadline_tests {
-    use super::check_export_deadline;
-    use std::time::Duration;
-
-    /// The `Duration::ZERO` sentinel reaches this as `None` and must never fail a
-    /// chunk pull — an unbounded export is a legal operator configuration.
-    #[test]
-    fn no_deadline_never_stops_an_export() {
-        assert!(
-            check_export_deadline(None, std::time::Instant::now(), Duration::ZERO).is_ok(),
-            "an unbounded export must not be interrupted"
-        );
-    }
-
-    /// An expired deadline must stop the export BEFORE the next chunk is pulled, and
-    /// must say so as the distinct timeout error carrying the export-side operation —
-    /// not the query-side one, so an operator can tell which loop elapsed.
-    ///
-    /// Deterministic by construction: the deadline is a full second in the past, so no
-    /// clock has to advance and no chunk has to be slow.
-    #[tokio::test]
-    async fn an_expired_deadline_stops_the_export_before_the_next_chunk() {
-        let budget = Duration::from_secs(30);
-        let err = check_export_deadline(
-            Some(tokio::time::Instant::now() - Duration::from_secs(1)),
-            std::time::Instant::now(),
-            budget,
-        )
-        .expect_err("an expired export deadline must stop the chunk loop");
-
-        match err.downcast_ref::<cqlite_core::Error>() {
-            Some(cqlite_core::Error::QueryTimeout {
-                operation, limit, ..
-            }) => {
-                assert_eq!(
-                    operation, "cli.export.collect",
-                    "must name the EXPORT loop, distinct from `cli.query.collect`"
-                );
-                assert_eq!(limit, &budget);
-            }
-            other => panic!("expected QueryTimeout, got {other:?}"),
-        }
-    }
-}
+#[path = "export_deadline_tests.rs"]
+mod export_deadline_tests;
