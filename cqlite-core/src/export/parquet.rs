@@ -18,7 +18,9 @@
 //! See [`super::arrow_convert`] for the full mapping table, decimal strategy,
 //! and recursive builder design.
 
-use crate::export::arrow_convert::{build_arrow_schema, convert_to_arrays, ArrowConvertError};
+use crate::export::arrow_convert::{
+    build_arrow_schema, convert_to_arrays, rows_to_record_batch_with_schema, ArrowConvertError,
+};
 use crate::query::{ColumnInfo, QueryMetadata, QueryResult, QueryRow};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
@@ -177,16 +179,6 @@ impl ParquetWriter {
     /// that hold a `&[ColumnInfo]` directly.
     pub(crate) fn build_schema(columns: &[ColumnInfo]) -> Result<Schema, ParquetExportError> {
         build_arrow_schema(columns).map_err(Into::into)
-    }
-
-    /// Convert all rows to Arrow arrays (column-oriented).
-    ///
-    /// Delegates to [`arrow_convert::convert_to_arrays`].
-    pub(crate) fn convert_to_arrays(
-        columns: &[ColumnInfo],
-        rows: &[QueryRow],
-    ) -> Result<Vec<arrow::array::ArrayRef>, ParquetExportError> {
-        convert_to_arrays(columns, rows).map_err(Into::into)
     }
 
     /// Write RecordBatch to Parquet bytes
@@ -351,6 +343,12 @@ impl<W: Write + Send> StreamingParquetWriter<W> {
     }
 
     /// Convert a slice of rows to a RecordBatch and write it as a row group.
+    ///
+    /// Issue #4237 (D1): routed through the shared `rows_to_record_batch_with_schema`
+    /// producer — the same one the Vortex writer (`export::vortex`) uses — rather than
+    /// a Parquet-private `convert_to_arrays` + `RecordBatch::try_new` pair, so the two
+    /// export formats consume identically-built batches and there is only ONE
+    /// CQL→Arrow mapping in the crate.
     fn write_row_group(&mut self, rows: &[QueryRow]) -> Result<(), ParquetExportError> {
         let writer = self.writer.as_mut().ok_or_else(|| {
             ParquetExportError::InvalidOptions(
@@ -358,8 +356,8 @@ impl<W: Write + Send> StreamingParquetWriter<W> {
             )
         })?;
 
-        let arrays = ParquetWriter::convert_to_arrays(&self.columns, rows)?;
-        let batch = RecordBatch::try_new(Arc::clone(&self.schema), arrays)?;
+        let batch =
+            rows_to_record_batch_with_schema(Arc::clone(&self.schema), &self.columns, rows)?;
         writer.write(&batch)?;
 
         Ok(())
