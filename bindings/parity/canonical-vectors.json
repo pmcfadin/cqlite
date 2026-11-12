@@ -288,25 +288,25 @@
       "node": {"$": "bigint", "v": "18446744073709551616"},
       "cli": 18446744073709551616,
       "canonical": "18446744073709551616",
-      "_source": "synthetic: 2^64, the first value no u64/i64 holds; cli leg is the bare JSON integer (#4360, IntegerType.toJSONString)"
+      "_source": "measured: the cli leg string was OBSERVED by running the release `cqlite --out json` on the Cassandra 5.0.8-written test-data/fixtures/issue_4360 varint_regular table (#4360): a bare JSON integer, e.g. id 11 -> 18446744073709551616"
     },
     {
       "name": "varint_negative_beyond_i64",
       "type": "varint",
-      "python": {"$": "bigint", "v": "-123456789012345678901234567890"},
-      "node": {"$": "bigint", "v": "-123456789012345678901234567890"},
-      "cli": -123456789012345678901234567890,
-      "canonical": "-123456789012345678901234567890",
-      "_source": "synthetic: negative varint below i64::MIN; cli leg is the bare JSON integer (#4360, IntegerType.toJSONString)"
+      "python": {"$": "bigint", "v": "-1234567890123456789012345678901234567890"},
+      "node": {"$": "bigint", "v": "-1234567890123456789012345678901234567890"},
+      "cli": -1234567890123456789012345678901234567890,
+      "canonical": "-1234567890123456789012345678901234567890",
+      "_source": "measured: the cli leg string was OBSERVED by running the release `cqlite --out json` on the Cassandra 5.0.8-written test-data/fixtures/issue_4360 varint_regular table (#4360): a bare JSON integer, id 15 -> -1234567890123456789012345678901234567890"
     },
     {
       "name": "varint_negative_small",
       "type": "varint",
-      "python": -7,
-      "node": {"$": "bigint", "v": "-7"},
-      "cli": -7,
-      "canonical": -7,
-      "_source": "synthetic: negative varint inside the JS safe range; cli leg is the bare JSON integer (#4360)"
+      "python": -1,
+      "node": {"$": "bigint", "v": "-1"},
+      "cli": -1,
+      "canonical": -1,
+      "_source": "measured: the cli leg string was OBSERVED by running the release `cqlite --out json` on the Cassandra 5.0.8-written test-data/fixtures/issue_4360 varint_regular table (#4360): a bare JSON integer, id 3 -> -1"
     },
     {
       "name": "counter",

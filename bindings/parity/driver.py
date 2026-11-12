@@ -100,6 +100,18 @@ def check_fixture_floor(data: Optional[dict] = None) -> List[str]:
     return failures
 
 
+def fixture_sstables_root(fixture: dict, datasets: Path) -> Path:
+    """The SSTables root a fixture reads: its own checkout-relative ``sstables_root``
+    (#4360, a committed Cassandra-written fixture), else the shared datasets root."""
+    own = fixture.get("sstables_root")
+    if own is None:
+        return datasets
+    root = REPO_ROOT / own
+    if not root.is_dir():
+        raise DriverError(f"fixture {fixture['name']!r}: sstables_root not found: {root}")
+    return root
+
+
 def fixture_types(fixture: dict) -> Dict[str, Any]:
     return types_from_columns(fixture["columns"])
 
@@ -116,6 +128,7 @@ def run_fixture(fixture: dict, datasets: Path) -> Dict[str, Any]:
     if not schema.exists():
         raise DriverError(f"schema not found: {schema}")
     types = fixture_types(fixture)
+    datasets = fixture_sstables_root(fixture, datasets)
     with cqlite.open(str(datasets), schema=str(schema)) as db:
         result = db.execute(fixture["query"])
         raw_rows = list(result)

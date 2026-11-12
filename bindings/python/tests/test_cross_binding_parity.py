@@ -57,6 +57,7 @@ from canonical import (  # noqa: E402
     subtree_has_udt,
 )
 from driver import (  # noqa: E402
+    fixture_sstables_root,
     check_fixture_floor,
     fixture_types,
     load_fixture_file,
@@ -313,7 +314,7 @@ def run_cli_leg(fixture: dict, cli_binary: Path, out_dir: Path) -> dict:
     cmd = [
         str(cli_binary),
         "--data-dir",
-        str(DATASETS),
+        str(fixture_sstables_root(fixture, DATASETS)),
         "--schema",
         str(PROJECT_ROOT / fixture["schema"]),
         "--query",

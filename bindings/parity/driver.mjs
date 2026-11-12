@@ -95,7 +95,18 @@ export function fixtureTypes(fixture) {
   return typesFromColumns(fixture.columns);
 }
 
-export async function runFixture(fixture, datasets) {
+/** A fixture's own checkout-relative `sstables_root` (#4360), else the shared root. */
+export function fixtureSstablesRoot(fixture, datasets) {
+  if (fixture.sstables_root === undefined) return datasets;
+  const root = path.join(REPO_ROOT, fixture.sstables_root);
+  if (!fs.existsSync(root)) {
+    throw new Error(`fixture '${fixture.name}': sstables_root not found: ${root}`);
+  }
+  return root;
+}
+
+export async function runFixture(fixture, shared) {
+  const datasets = fixtureSstablesRoot(fixture, shared);
   const { Database } = require(BINDING_PATH);
   const schema = path.join(REPO_ROOT, fixture.schema);
   if (!fs.existsSync(schema)) throw new Error(`schema not found: ${schema}`);
