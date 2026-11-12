@@ -863,9 +863,16 @@ class CliAdapter(_Adapter):
                 )
             return value
         if kind == "varint":
-            if not isinstance(value, str):
+            # The CLI renders a varint as an UNQUOTED JSON integer (BigInteger.toString,
+            # cassandra-5.0.8 IntegerType.toJSONString; cqlite-cli json_cell.rs
+            # numeric_cell, #4360). Only an INTEGER token from load_cli_json is
+            # accepted: it is held exactly (no float path, no 4300-digit str->int
+            # limit), whereas a quoted string (the pre-#3644 shape) or a fractional
+            # token (42.0, a plain Decimal) is a renderer regression and is refused.
+            if not isinstance(value, CliJsonInteger):
                 raise CanonicalError(
-                    f"declared varint expects a JSON decimal string, got {_pytype(value)}"
+                    "declared varint expects an unquoted JSON integer token "
+                    f"(load_cli_json), got {_pytype(value)}"
                 )
             return canon_int(int(value))
         if kind in _INT_KINDS:

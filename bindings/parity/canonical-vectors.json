@@ -57,8 +57,8 @@
       "each pins a defect that is silent when it is not refused, so a count alone",
       "would let one be swapped for a benign case."
     ],
-    "min_vectors": 95,
-    "min_errors": 62,
+    "min_vectors": 98,
+    "min_errors": 64,
     "required_kinds": [
       "ascii",
       "bigint",
@@ -262,9 +262,9 @@
         "$": "bigint",
         "v": "42"
       },
-      "cli": "42",
+      "cli": 42,
       "canonical": 42,
-      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: varint 42 -> \"42\""
+      "_source": "synthetic: the cli leg is the bare JSON integer the CLI emits for a varint (#4360; cassandra-5.0.8 IntegerType.toJSONString = BigInteger.toString, rendered unquoted by cqlite-cli json_cell.rs numeric_cell)"
     },
     {
       "name": "varint_huge",
@@ -277,9 +277,36 @@
         "$": "bigint",
         "v": "123456789012345678901234567890"
       },
-      "cli": "123456789012345678901234567890",
+      "cli": 123456789012345678901234567890,
       "canonical": "123456789012345678901234567890",
-      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: varint -> \"123456789012345678901234567890\""
+      "_source": "synthetic: the cli leg is the bare JSON integer the CLI emits for a varint (#4360; cassandra-5.0.8 IntegerType.toJSONString = BigInteger.toString, rendered unquoted by cqlite-cli json_cell.rs numeric_cell)"
+    },
+    {
+      "name": "varint_u64_max_plus_one",
+      "type": "varint",
+      "python": {"$": "bigint", "v": "18446744073709551616"},
+      "node": {"$": "bigint", "v": "18446744073709551616"},
+      "cli": 18446744073709551616,
+      "canonical": "18446744073709551616",
+      "_source": "synthetic: 2^64, the first value no u64/i64 holds; cli leg is the bare JSON integer (#4360, IntegerType.toJSONString)"
+    },
+    {
+      "name": "varint_negative_beyond_i64",
+      "type": "varint",
+      "python": {"$": "bigint", "v": "-123456789012345678901234567890"},
+      "node": {"$": "bigint", "v": "-123456789012345678901234567890"},
+      "cli": -123456789012345678901234567890,
+      "canonical": "-123456789012345678901234567890",
+      "_source": "synthetic: negative varint below i64::MIN; cli leg is the bare JSON integer (#4360, IntegerType.toJSONString)"
+    },
+    {
+      "name": "varint_negative_small",
+      "type": "varint",
+      "python": -7,
+      "node": {"$": "bigint", "v": "-7"},
+      "cli": -7,
+      "canonical": -7,
+      "_source": "synthetic: negative varint inside the JS safe range; cli leg is the bare JSON integer (#4360)"
     },
     {
       "name": "counter",
@@ -2074,6 +2101,24 @@
       "stage": "parse_type",
       "type": "int>",
       "expect": "trailing tokens"
+    },
+    {
+      "name": "varint_cli_quoted_refused",
+      "stage": "canonicalize",
+      "type": "varint",
+      "legs": {
+        "cli": "42"
+      },
+      "expect": "unquoted JSON integer"
+    },
+    {
+      "name": "varint_cli_fractional_refused",
+      "stage": "canonicalize",
+      "type": "varint",
+      "legs": {
+        "cli": 42.0
+      },
+      "expect": "unquoted JSON integer"
     },
     {
       "name": "tuple_arity_mismatch",
