@@ -194,6 +194,12 @@ impl FilterWriter {
         // Write to file atomically
         let mut file = File::create(&self.path).await?;
         file.write_all(&data).await?;
+        // Issue #4527: `tokio::fs::File::write_all` only QUEUES the write on the blocking pool,
+        // and `sync_all` (tokio `fs/file.rs`: `complete_inflight`) stores a failed in-flight write's
+        // error in `last_write_err` and carries on to `fsync` — which then succeeds — so the error
+        // is dropped with the file. An ENOSPC here used to leave a missing/short Filter.db and a
+        // successful exit. `flush` awaits the in-flight write and returns its error.
+        file.flush().await?;
         file.sync_all().await?;
 
         Ok(())
