@@ -131,6 +131,15 @@ def m_bti_data_offset_out_of_bounds(files):
 
 
 def m_compression_info_short_coverage(files):
+    """The chunk table is one chunk SHORT of what data_length implies.
+
+    D12 names "drop the LAST chunk_offsets entry". Measured against the clean
+    source, that edit is not isolating: the final surviving chunk record then
+    spans two real chunks, so `--mode full`'s inline chunk-CRC check
+    (ChunkDecompressionError) also fires (task 4.2). Raising `data_length` by one
+    chunk_length reaches the SAME state (declared chunks == implied - 1) with the
+    table's bytes untouched, and stays green under every existing check.
+    """
     b = files["CompressionInfo.db"]
     i = 0
     n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
@@ -139,16 +148,16 @@ def m_compression_info_short_coverage(files):
         n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
         n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
     cl, mx, dl, cnt = struct.unpack(">IIqI", b[i:i + 20])
-    count_at = i + 16
+    dl_at = i + 8
     assert len(b) == i + 20 + 8 * cnt and cnt == -(-dl // cl), "premise: exact-coverage table"
-    nb = bytearray(b[:-8])
-    nb[count_at:count_at + 4] = struct.pack(">I", cnt - 1)
+    nb = bytearray(b)
+    nb[dl_at:dl_at + 8] = struct.pack(">q", dl + cl)
     return "CompressionInfo.db", bytes(nb), {
-        "mutation_type": "drop_last_chunk_offset",
-        "byte_offset": count_at,
-        "original_bytes_hex": "%08x" % cnt,
-        "mutated_bytes_hex": "%08x" % (cnt - 1),
-        "detail": "chunk count %d -> %d and the final 8-byte offset removed" % (cnt, cnt - 1),
+        "mutation_type": "setint64_be",
+        "byte_offset": dl_at,
+        "original_bytes_hex": struct.pack(">q", dl).hex(),
+        "mutated_bytes_hex": struct.pack(">q", dl + cl).hex(),
+        "detail": "data_length %d -> %d (+ one chunk_length %d): %d declared chunks, ceil(data_length/chunk_length) = %d" % (dl, dl + cl, cl, cnt, cnt + 1),
     }
 
 
@@ -195,7 +204,7 @@ FIXTURES = [
      "A DataOffset leaf's payload is rewritten to a position past the end of Data.db."),
     ("compression_info_short_coverage", "cass.corruption.audit.compression_info_short_coverage", "test_comp", "lz4_table", "nb-1-big",
      ["CompressionInfo.db"], m_compression_info_short_coverage, "CompressionCoverageGap", "compression-coverage",
-     "The LAST chunk offset is dropped (count decremented): the chunk table declares one chunk fewer than ceil(data_length/chunk_length)."),
+     "data_length is raised by one chunk_length: the chunk table declares one chunk fewer than ceil(data_length/chunk_length) while its own bytes stay valid (dropping the last offset instead also trips the existing inline-CRC check)."),
     ("statistics_partition_count_mismatch", "cass.corruption.audit.statistics_partition_count_mismatch", "test_comp", "lz4_table", "nb-1-big",
      ["Statistics.db"], m_statistics_partition_count_mismatch, "StatisticsScanMismatch", "statistics-vs-scan",
      "One estimatedPartitionSize bucket count is raised by 1 (component CRC32 recomputed): the file stays valid but declares one more partition than a scan finds."),

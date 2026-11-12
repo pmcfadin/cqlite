@@ -21,6 +21,9 @@ mod compression_stats;
 mod data_view;
 mod index_checks;
 
+#[doc(hidden)]
+pub use data_view::take_header_bytes_requested;
+
 use crate::storage::sstable::verify::{
     BtiResolvedLeaf, CompressionState, VerifyErrorClass, VerifyFinding,
 };
@@ -114,6 +117,8 @@ pub(crate) struct AuditInputs<'a> {
     pub bti_leaves: Option<&'a [BtiResolvedLeaf]>,
     /// `findings.len()` after the TOC check / digest check / BTI-or-BIG index
     /// structure check: the slices between them attribute findings to checks.
+    /// Components `TOC.txt` lists (empty when there is no TOC).
+    pub toc_components: &'a [String],
     pub toc_findings: std::ops::Range<usize>,
     pub digest_findings: std::ops::Range<usize>,
     pub structure_findings: std::ops::Range<usize>,
@@ -227,6 +232,14 @@ pub(crate) async fn run(input: AuditInputs<'_>, findings: &mut Vec<VerifyFinding
         &[VerifyErrorClass::MissingComponent],
     ) {
         AuditVerdict::Fail
+    } else if input
+        .toc_components
+        .iter()
+        .all(|c| c == "Data.db" || c == "TOC.txt")
+    {
+        // A listing naming nothing but `Data.db` (and the TOC itself) agrees with the directory
+        // trivially; no cross-component listing was checked, so it is unmeasured.
+        skip("TOC.txt lists only Data.db: no cross-component listing to check")
     } else {
         AuditVerdict::Pass
     };

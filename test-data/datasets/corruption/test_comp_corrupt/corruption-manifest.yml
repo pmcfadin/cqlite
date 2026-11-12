@@ -420,23 +420,23 @@ fixtures:
     clean_source_table: "lz4_table"
     clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db"
     corrupted_path: "corruption/test_comp_corrupt/compression_info_short_coverage/nb-1-big-CompressionInfo.db"
-    mutation_type: drop_last_chunk_offset
-    byte_offset: 35
-    original_bytes_hex: "0000000c"
-    mutated_bytes_hex: "0000000b"
+    mutation_type: setint64_be
+    byte_offset: 27
+    original_bytes_hex: "000000000002f9ca"
+    mutated_bytes_hex: "00000000000339ca"
     original_sha256: "4af98f424e68f72b2c78d0f0d78c01117a6dca4f732a3571a3ecaa09a2c77b26"
-    corrupted_sha256: "82199de4a9093e4c5d5785de13b2a8cb8b5eeaf7d586c12d2c8b15686b2f7f17"
+    corrupted_sha256: "168f5f51d8a50ed8810d5cd1852d9553f867d8ce81a48f591b29fa55e6bdaee6"
     original_size_bytes: 135
-    corrupted_size_bytes: 127
+    corrupted_size_bytes: 135
     expected_failing_component: CompressionInfo.db
     expected_error_class: CompressionCoverageGap
     audit_invariant: compression-coverage
-    mutation_detail: "chunk count 12 -> 11 and the final 8-byte offset removed"
-    rationale: "The LAST chunk offset is dropped (count decremented): the chunk table declares one chunk fewer than ceil(data_length/chunk_length)."
+    mutation_detail: "data_length 195018 -> 211402 (+ one chunk_length 16384): 12 declared chunks, ceil(data_length/chunk_length) = 13"
+    rationale: "data_length is raised by one chunk_length: the chunk table declares one chunk fewer than ceil(data_length/chunk_length) while its own bytes stay valid (dropping the last offset instead also trips the existing inline-CRC check)."
     cassandra_verdict: n/a
     verdict_parity: "n/a: no Cassandra-side check for this invariant"
     verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
-    fixture_dir_sha256: "4db85b4de814cbef83fa1b16165a06688e7eca5c8d42c4d6d896db75c46f04a1"
+    fixture_dir_sha256: "09a3ec627f2e5f47c419b1cc83d52fa7fbc84872a158dd58fd8e056486423f3a"
   - name: statistics_partition_count_mismatch
     manifest_key: cass.corruption.audit.statistics_partition_count_mismatch
     status: audit
