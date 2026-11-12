@@ -878,6 +878,41 @@ cargo run --package cqlite-cli --features cli-helpers -- \
 # missing or not a directory).
 ```
 
+## Audit cross-component consistency (issue #4195, epic #4192)
+
+`cqlite verify` answers "is each component well-formed?"; `--mode audit` answers "do the
+components AGREE with each other?". It prints a fixed eight-row checklist, each row `pass`,
+`fail` (a matching finding is also printed) or `skip` naming the cause:
+
+```bash
+cqlite verify <generation-dir> --mode audit            # reads partition HEADERS only, never a body
+cqlite verify <generation-dir> --mode audit --deep     # + Statistics.db vs a full scan, BTI trie vs Data.db
+cqlite verify <generation-dir> --mode audit --out json # "audit": {"deep","measured","rows":[...]}
+```
+
+| row | checks | applies to |
+|---|---|---|
+| `index-data-identity` | each Index.db entry lands on a Data.db partition header carrying that key | BIG |
+| `summary-index-correlation` | each Summary.db sample's position is the Index.db entry with that key | BIG |
+| `bloom-no-false-negative` | Filter.db reports every present key | BIG, BTI |
+| `bti-trie-bounds` | DataOffset leaves in bounds; each leaf's key sits at its position and matches its trie prefix | BTI |
+| `toc-exact-listing` | TOC.txt lists exactly the files on disk | both |
+| `digest-matches-data` | Digest.crc32 == CRC32(Data.db) | both |
+| `compression-coverage` | the chunk table covers `data_length` exactly (plus Cassandra's one terminal empty chunk) | compressed |
+| `statistics-vs-scan` | Statistics.db's partition count equals a real scan's (`--deep` only) | both |
+
+Reading the result: `skip` is never a pass. An unreadable or absent input is a `skip` with its cause
+(`boundary source unreadable`, `no Summary.db`, `requires --deep`, ...); the corruption itself is the
+finding the structural check already printed. Exit `0` = no `fail`; `2` = any `fail`, **or every row
+skipped** (`audit: 0 invariants MEASURED`: nothing was verified, which is not a clean result); `1` =
+usage error (`--deep` without `--mode audit`). `sweep` does not accept `--mode audit`.
+
+The six audit-only corruption fixtures (`status: audit` in `corruption-manifest.yml`, so
+`sstable_parity_corruption_verify` is unaffected) are built by
+`test-data/scripts/generate_audit_corruption_fixtures.py`, called from
+`generate-corruption-corpus.sh`; `cqlite-core/tests/issue_4195_component_audit.rs` regenerates them
+and pins each to the manifest's `corrupted_sha256`.
+
 ## Delta-export (CDC Parquet, Issue #705 / Epic #696 DS9)
 
 Requires `--features delta-export`. Schema must be a bare `CREATE TABLE` statement

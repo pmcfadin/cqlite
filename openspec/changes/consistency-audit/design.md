@@ -283,3 +283,47 @@ fixture's manifest entry records `cassandra_verdict`/`verdict_parity` as `n/a: n
 check for this invariant` where no Cassandra check exists, and the real captured verdict (via
 `test-data/scripts/capture-cassandra-verify-verdicts.sh`) where one does (fixtures touching digest/
 chunk-CRC-adjacent invariants).
+
+## D14. Measured against real Cassandra data (implementation findings, for owner review)
+
+Recorded during implementation of #4195; each is a place where the design's wording and
+Cassandra-written bytes disagree, with the choice taken and the evidence. None changes a requirement
+or scenario; the first four narrow or complete a rule so the audit reports ZERO findings on all 149
+healthy datasets-v4 generations (298 audits, shallow + `--deep`).
+
+1. **D6 / A7 — the chunk table is not always exactly `ceil(data_length / chunk_length)`.** 17 healthy
+   compressed generations (every `test_da`/`test_oa` table, `test_big/wide_partition`, several system
+   tables) declare `ceil + 1` records; the extra is a ~9-byte record that decodes to zero bytes.
+   Cassandra's writer does this: `CompressedSequentialWriter.flushData` adds an offset unconditionally
+   (cassandra-5.0.8 line 183) and `doFlush(0)` at finish (line 357) can run on an empty buffer. Accepted
+   shapes: `ceil` records, or `ceil` data records plus ONE terminal record decoding to zero bytes. The
+   last data chunk must decode to exactly the logical remainder. Strict equality would fail 34 of 298
+   healthy audits. Format authority for `ceil`: `CompressionMetadata.Writer.open`, lines 447-449.
+2. **D12 `compression_info_short_coverage`** — "drop the LAST `chunk_offsets` entry" is not isolating:
+   the surviving final record then spans two chunks and `--mode full`'s inline chunk-CRC check also
+   fires (task 4.2). The fixture instead raises `data_length` by one `chunk_length` (declared chunks ==
+   implied - 1, table bytes untouched), which is green under every existing check.
+3. **D7 / A8 — partition-count-only** (the declared-gap fallback of task 0.5): see spec.md A8. The
+   declared count is Σ `estimatedPartitionSize` buckets (exact). A declared `0` is not distinguishable
+   from "not decodable" in the parser's contract, so it is `Skip`, never compared.
+4. **D5 / A4 — identity without a scan.** The runtime bound (proposal est. 5) forbids the existing
+   scan-based `bti_partition_identity_mismatch` without `--deep`, yet A4.2 expects the footer-flip fixture
+   to fail. The audit therefore runs the scan-free half of that check per leaf (the key at the leaf's
+   data position equals its inline key, and its byte-comparable encoding starts with the leaf's trie
+   prefix); the scan-based multiset equality ("no partition is unreachable from the root") runs with
+   `--deep`. Both push the existing `BtiRootPointerCorrupt`.
+5. **D5** — `bti_data_offset_out_of_bounds` is the one new fixture an existing check also sees under
+   `--mode full` (the scan-based identity check), exactly the gap A4 names; Quick is clean.
+6. **A10.1** — a TOC that names only `Data.db` (and `TOC.txt`) agrees with the directory trivially, so
+   `toc-exact-listing` is `Skip` there; otherwise the scenario's own fixture could not reach "every row
+   Skips".
+7. **Header read** — invariant 1 reads `u16 BE length + key` at the index-named offset, per
+   `SortedTablePartitionWriter.start` (`writeWithShortLength`), not CQLite's row decoder (whose key-length
+   model differs for keys >= 256 bytes, #3999). `Index.db`'s `data_offset` is a logical offset: compressed
+   tables go through `CompressionInfo` + the CRC-checking chunk reader. Measured: all 286 healthy BIG
+   audits `Pass`.
+8. **`--deep` plumbing** — `verify_sstable`/`verify_sstable_generation` have 12+ callers, so the extra
+   parameter is carried by additive `verify_sstable_audit` / `verify_sstable_generation_audit`;
+   `verify_sstable(.., VerifyMode::Audit, ..)` is the shallow audit.
+9. **Unparseable `Filter.db`** — `Skip("Filter.db unreadable: <cause>")`, no finding: Cassandra rebuilds
+   a filter it cannot read, and the spec names no finding class for it. Flagged as an open question.

@@ -81,7 +81,8 @@ pub use verify::{
 // through `verify` (see `verify.rs`'s own re-export) so `VerifyFinding.location`
 // stays reachable via the existing `verify` module path.
 pub mod verify_audit;
-mod verify_location; // Cross-component consistency audit (#4195).
+mod verify_location;
+mod verify_order; // Check 8 (key/row order + LDT), relocated from verify.rs (#4195). // Cross-component consistency audit (#4195).
 
 // M5: SSTable writer components (Issue #359)
 #[cfg(feature = "write-support")]
