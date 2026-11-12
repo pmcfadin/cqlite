@@ -100,14 +100,23 @@ pub(super) fn check_bloom_bti(
     AuditVerdict::Pass
 }
 
-/// BTI: every `DataOffset` leaf points inside `Data.db`, and (header-only) every
-/// leaf with an inline key lands on a partition header carrying that key.
-/// `--deep` identity against a full scan is added by the caller in `verify.rs`.
+/// BTI trie bounds and per-leaf identity, WITHOUT a scan:
+///
+/// * every `DataOffset` leaf points inside `Data.db`;
+/// * the raw key each leaf resolves to (inline from `Rows.db`, else a
+///   header-only read at its data position) is the key at that position, and
+///   its byte-comparable encoding starts with the leaf's emitted trie prefix
+///   (the per-leaf path/payload consistency of #1103, which needs no scan).
+///
+/// What a scan adds, and so stays `--deep`-only (`verify.rs`): the multiset
+/// equality between the trie's keys and every partition `Data.db` holds, i.e.
+/// that no partition is unreachable from the root.
 pub(super) fn check_bti_bounds(
     leaves: Option<&[BtiResolvedLeaf]>,
     view: &mut DataView,
     findings: &mut Vec<VerifyFinding>,
 ) -> AuditVerdict {
+    use crate::storage::sstable::bti::parser::encode_partition_key_for_bti_trie;
     let Some(leaves) = leaves else {
         return skip(BOUNDARY_SOURCE_UNREADABLE);
     };
@@ -133,27 +142,57 @@ pub(super) fn check_bti_bounds(
             ));
             continue;
         }
-        if let Some(inline) = &leaf.inline_raw_key {
-            match view.key_at(leaf.data_position) {
-                Ok(found) if &found == inline => {}
-                other => {
-                    failed = true;
-                    let got = match other {
-                        Ok(f) => format!("key {}", hex(&f)),
-                        Err(why) => format!("no readable header ({why})"),
-                    };
-                    findings.push(VerifyFinding::new(
-                        VerifyErrorClass::BtiRootPointerCorrupt,
-                        "Partitions.db",
-                        format!(
-                            "BTI leaf resolves to key {} at Data.db position {}, but the \
-                             partition header there has {got}",
-                            hex(inline),
-                            leaf.data_position
-                        ),
-                    ));
-                }
+        let at_position = view.key_at(leaf.data_position);
+        let key = match (&leaf.inline_raw_key, at_position) {
+            (Some(inline), Ok(found)) if &found == inline => found,
+            (Some(inline), other) => {
+                failed = true;
+                let got = match other {
+                    Ok(f) => format!("key {}", hex(&f)),
+                    Err(why) => format!("no readable header ({why})"),
+                };
+                findings.push(VerifyFinding::new(
+                    VerifyErrorClass::BtiRootPointerCorrupt,
+                    "Partitions.db",
+                    format!(
+                        "BTI leaf (prefix {}) resolves to key {} at Data.db position {}, but the \
+                         partition header there has {got}",
+                        hex(leaf.prefix()),
+                        hex(inline),
+                        leaf.data_position
+                    ),
+                ));
+                continue;
             }
+            (None, Ok(found)) => found,
+            (None, Err(why)) => {
+                failed = true;
+                findings.push(VerifyFinding::new(
+                    VerifyErrorClass::BtiRootPointerCorrupt,
+                    "Partitions.db",
+                    format!(
+                        "DataOffset leaf (prefix {}) points at Data.db position {}, where no \
+                         partition header can be read: {why}",
+                        hex(leaf.prefix()),
+                        leaf.data_position
+                    ),
+                ));
+                continue;
+            }
+        };
+        let encoded = encode_partition_key_for_bti_trie(&key);
+        if !encoded.starts_with(leaf.prefix()) {
+            failed = true;
+            findings.push(VerifyFinding::new(
+                VerifyErrorClass::BtiRootPointerCorrupt,
+                "Partitions.db",
+                format!(
+                    "Partitions.db leaf prefix {} is inconsistent with its payload's partition \
+                     key (encodes to {}) — the trie path does not match the leaf payload",
+                    hex(leaf.prefix()),
+                    hex(&encoded)
+                ),
+            ));
         }
     }
     if failed {

@@ -22,6 +22,18 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+thread_local! {
+    static HEADER_BYTES_REQUESTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: logical `Data.db` bytes the audit requested on THIS thread since the
+/// last call (then reset). Lets a test prove invariant 1 reads partition headers
+/// only. Meaningful on a current-thread runtime (`#[tokio::test]`).
+#[doc(hidden)]
+pub fn take_header_bytes_requested() -> u64 {
+    HEADER_BYTES_REQUESTED.with(|c| c.replace(0))
+}
+
 enum Backing {
     Plain,
     Chunked(Box<ChunkDecompressor>),
@@ -84,6 +96,7 @@ impl DataView {
             ));
         }
         self.bytes_requested = self.bytes_requested.saturating_add(len as u64);
+        HEADER_BYTES_REQUESTED.with(|c| c.set(c.get().saturating_add(len as u64)));
         match backing {
             Backing::Plain => {
                 file.seek(SeekFrom::Start(offset))
