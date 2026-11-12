@@ -583,6 +583,11 @@ pub async fn execute_sweep_command(args: &SweepArgs) -> Result<()> {
     let mode = match args.mode {
         VerifyModeArg::Quick => VerifyMode::Quick,
         VerifyModeArg::Full => VerifyMode::Full,
+        VerifyModeArg::Audit => {
+            return Err(anyhow::anyhow!(
+                "sweep does not support --mode audit (use `cqlite verify <dir> --mode audit` per generation)"
+            ))
+        }
     };
     // Omitted `--jobs` = 1 (sequential); an explicit `--jobs N` opts in and is
     // clamped to `MAX_JOBS`. Rationale (memory + blocking-pool exhaustion) and
