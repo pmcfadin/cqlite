@@ -189,7 +189,11 @@ impl SSTableManager {
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    tracing::warn!("Cannot read table directory {:?}: {}", table_dir, e);
+                    // An EXISTING directory we cannot list is unreadable, not
+                    // empty: record it so reads of the table fail closed (#4159).
+                    let probe = table_dir.join("unreadable-Data.db");
+                    let key = refresh::table_dir_table_key(&probe).unwrap_or_default();
+                    self.refusals.record(key, &table_dir, &e);
                     continue;
                 }
             };

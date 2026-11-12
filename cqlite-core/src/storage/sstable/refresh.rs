@@ -303,9 +303,7 @@ impl SSTableManager {
                 continue;
             };
             let sstable_id = SSTableId::from_filename(filename);
-            let reader_arc = self.open_reader_with_schema(path).await?;
-            // Opened cleanly now: a refusal recorded at initial load is stale (#4159).
-            self.refusals.clear_path(path);
+            let reader_arc = self.reopen_clearing_refusal(path).await?;
             let key = self.table_key_for(path, &reader_arc);
             opened.push((canon_of(path), sstable_id, key, reader_arc));
         }

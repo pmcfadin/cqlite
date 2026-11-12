@@ -140,3 +140,48 @@ impl RefusalLedger {
         })
     }
 }
+
+impl super::SSTableManager {
+    /// Reader snapshot for a read that returns rows: `Err` naming the cause when
+    /// any SSTable of the table was refused, else
+    /// [`resolve_reader_snapshot`](Self::resolve_reader_snapshot). Probes and shape
+    /// hints keep the unchecked form (they are fail-safe: the real read errs).
+    pub(crate) async fn checked_snapshot(
+        &self,
+        table_id: &crate::types::TableId,
+    ) -> crate::Result<(Vec<std::sync::Arc<super::reader::SSTableReader>>, bool)> {
+        self.refusals.ensure_readable(table_id.name())?;
+        Ok(self.resolve_reader_snapshot(table_id).await)
+    }
+
+    /// [`checked_snapshot`](Self::checked_snapshot) for the streaming scans.
+    #[cfg(not(feature = "tombstones"))]
+    pub(super) async fn checked_table_readers(
+        &self,
+        table_id: &crate::types::TableId,
+    ) -> crate::Result<Vec<std::sync::Arc<super::reader::SSTableReader>>> {
+        self.refusals.ensure_readable(table_id.name())?;
+        Ok(self.resolve_table_readers(table_id).await)
+    }
+
+    /// Hint-only form: a refused table yields no readers.
+    #[cfg(not(feature = "tombstones"))]
+    pub(super) async fn readers_if_readable(
+        &self,
+        table_id: &crate::types::TableId,
+    ) -> Vec<std::sync::Arc<super::reader::SSTableReader>> {
+        self.checked_table_readers(table_id)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Open for refresh and drop any stale refusal for `path` once it opens.
+    pub(super) async fn reopen_clearing_refusal(
+        &self,
+        path: &Path,
+    ) -> crate::Result<std::sync::Arc<super::reader::SSTableReader>> {
+        let reader = self.open_reader_with_schema(path).await?;
+        self.refusals.clear_path(path);
+        Ok(reader)
+    }
+}

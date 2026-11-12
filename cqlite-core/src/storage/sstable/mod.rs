@@ -481,10 +481,7 @@ pub struct SSTableManager {
     /// refresh; queries never take this lock (they use the `RwLock` read guards).
     refresh_lock: Arc<Mutex<()>>,
 
-    /// SSTables the best-effort initial load REFUSED, with their causes (issue
-    /// #4159). Read entry points consult it so a refused table errors instead of
-    /// answering `Ok(empty)`.
-    refusals: refusal::RefusalLedger,
+    refusals: refusal::RefusalLedger, // refused SSTables + causes; reads fail closed (#4159)
 
     /// Schema registry for schema-aware operations (feature-gated)
     #[cfg(feature = "state_machine")]
@@ -757,14 +754,9 @@ impl SSTableManager {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O. Holding it across the whole scan let one queued writer FIFO-park
         // every later point read behind the slowest in-flight scan.
-        let (reader_list, _fully_qualified_match) =
-            self.resolve_reader_snapshot_checked(table_id).await?;
+        let (reader_list, _fully_qualified_match) = self.checked_snapshot(table_id).await?;
 
         if reader_list.is_empty() {
-            tracing::debug!(
-                "SSTableManager::scan - No readers found for table '{}'",
-                table_id
-            );
             return Ok(Vec::new());
         }
 
@@ -1094,8 +1086,7 @@ impl SSTableManager {
 
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (bloom/BTI prune, per-candidate decode, cross-generation merge).
-        let (reader_list, _fully_qualified_match) =
-            self.resolve_reader_snapshot_checked(table_id).await?;
+        let (reader_list, _fully_qualified_match) = self.checked_snapshot(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), true));
         }
@@ -1240,8 +1231,7 @@ impl SSTableManager {
         // Format-agnostic: the operation spans a table's generations.
         let mut meter = ReadOpMeter::start(None);
 
-        let (reader_list, fully_qualified_match) =
-            self.resolve_reader_snapshot_checked(table_id).await?;
+        let (reader_list, fully_qualified_match) = self.checked_snapshot(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), false));
         }
@@ -1479,8 +1469,7 @@ impl SSTableManager {
     ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (per-reader metadata decode and cross-generation merge).
-        let (reader_list, _fully_qualified_match) =
-            self.resolve_reader_snapshot_checked(table_id).await?;
+        let (reader_list, _fully_qualified_match) = self.checked_snapshot(table_id).await?;
         if reader_list.is_empty() {
             return Ok(Vec::new());
         }
@@ -1576,17 +1565,6 @@ impl SSTableManager {
     /// scan never observed the new reader either. Readers removed from the map
     /// mid-scan stay alive for the snapshot holder — that is precisely what the
     /// `Arc` clone guarantees.
-    pub(crate) async fn resolve_reader_snapshot_checked(
-        &self,
-        table_id: &TableId,
-    ) -> Result<(Vec<Arc<reader::SSTableReader>>, bool)> {
-        self.refusals.ensure_readable(table_id.name())?;
-        Ok(self.resolve_reader_snapshot(table_id).await)
-    }
-
-    /// Unchecked snapshot: INTERNAL, fail-safe callers only (probes, shape
-    /// hints). Every read that returns rows to a caller must use
-    /// [`resolve_reader_snapshot_checked`](Self::resolve_reader_snapshot_checked).
     pub(crate) async fn resolve_reader_snapshot(
         &self,
         table_id: &TableId,
@@ -1660,11 +1638,7 @@ impl SSTableManager {
     /// `table_readers` read lock — needed by the streaming scan, which spawns a
     /// background merge task.
     #[cfg(not(feature = "tombstones"))]
-    async fn resolve_table_readers(
-        &self,
-        table_id: &TableId,
-    ) -> Result<Vec<Arc<reader::SSTableReader>>> {
-        self.refusals.ensure_readable(table_id.name())?;
+    async fn resolve_table_readers(&self, table_id: &TableId) -> Vec<Arc<reader::SSTableReader>> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
         let list = if table_readers.contains_key(table_name) {
@@ -1677,7 +1651,7 @@ impl SSTableManager {
             };
             table_readers.get(unqualified_name)
         };
-        Ok(list.cloned().unwrap_or_default())
+        list.cloned().unwrap_or_default()
     }
 
     /// Reports whether [`scan_stream`](Self::scan_stream) PRE-MATERIALIZES the
@@ -1724,11 +1698,8 @@ impl SSTableManager {
         table_id: &TableId,
         _schema: Option<&crate::schema::TableSchema>,
     ) -> bool {
-        // A refused table cannot be streamed at all (the stream constructors
-        // return the refusal as `Err`); the hint is `false` for it.
-        let Ok(readers) = self.resolve_table_readers(table_id).await else {
-            return false;
-        };
+        // Refused => no readers => `false` (the stream constructor itself Errs).
+        let readers = self.readers_if_readable(table_id).await;
 
         // Issue #1577: any BTI (`da`) reader makes `scan_stream` pre-materialize
         // (the trie-walk BTI branch decodes the whole reconciled table before
@@ -1809,7 +1780,7 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::RowScanStream> {
-        let readers = self.resolve_table_readers(table_id).await?;
+        let readers = self.checked_table_readers(table_id).await?;
 
         // Issue #957: keep the materializing `scan` and this streaming path in lockstep
         // ON THE SUCCESS PATH. Reuse the EXACT guard `scan` uses for cross-generation
@@ -1910,7 +1881,7 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::BatchedScanStream> {
-        let readers = self.resolve_table_readers(table_id).await?;
+        let readers = self.checked_table_readers(table_id).await?;
 
         if readers.len() == 1 {
             if let Some(reader) = readers.into_iter().next() {
