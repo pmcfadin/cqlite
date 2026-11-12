@@ -82,7 +82,7 @@ proptest! {
     /// Cassandra rule (5): two LIVE cells, equal timestamp, different values — the larger
     /// value wins, regardless of arrival order.
     #[test]
-    #[ignore = "#TBD equal-ts live cells with different values: winner depends on stream order (Cells.java:128)"]
+    #[ignore = "#4530 equal-ts live cells with different values: winner depends on stream order (Cells.java:128)"]
     fn tie_live_vs_live_different_values(v1 in 0u8..3, v2 in 0u8..3) {
         commutes(false, &cell(v1, None), &cell(v2, None))?;
     }
@@ -90,7 +90,7 @@ proptest! {
     /// Cassandra rule (1): at equal timestamp an EXPIRING cell beats a LIVE one
     /// (CASSANDRA-14592), regardless of arrival order.
     #[test]
-    #[ignore = "#TBD equal-ts expiring vs live: winner depends on stream order (Cells.java:93-98)"]
+    #[ignore = "#4530 equal-ts expiring vs live: winner depends on stream order (Cells.java:93-98)"]
     fn tie_expiring_vs_live(v1 in 0u8..3, v2 in 0u8..3, ttl in 1u32..4, ldt in 997i32..1004) {
         commutes(false, &cell(v1, Some((ttl, ldt))), &cell(v2, None))?;
     }
@@ -98,7 +98,7 @@ proptest! {
     /// Cassandra rules (3)+(4): two EXPIRING cells at equal timestamp — larger LDT, then
     /// lower TTL, then larger value.
     #[test]
-    #[ignore = "#TBD equal-ts expiring vs expiring: winner depends on stream order (Cells.java:111-125)"]
+    #[ignore = "#4530 equal-ts expiring vs expiring: winner depends on stream order (Cells.java:111-125)"]
     fn tie_expiring_vs_expiring(
         v1 in 0u8..3, v2 in 0u8..3,
         t1 in 1u32..4, t2 in 1u32..4,
@@ -109,7 +109,7 @@ proptest! {
 
     /// Cassandra rule (3): two cell TOMBSTONES at equal timestamp — larger LDT wins.
     #[test]
-    #[ignore = "#TBD equal-ts cell tombstones with different LDT: winner depends on stream order (Cells.java:111-118)"]
+    #[ignore = "#4530 equal-ts cell tombstones with different LDT: winner depends on stream order (Cells.java:111-118)"]
     fn tie_tombstone_vs_tombstone_different_ldt(l1 in 400i32..406, l2 in 400i32..406) {
         let t = |ldt| Spec::CellTomb { ck: 0, col: 0, ts: 3, ldt };
         commutes(false, &t(l1), &t(l2))?;
@@ -117,7 +117,7 @@ proptest! {
 
     /// `DeletionTime.supersedes`: equal-timestamp ROW deletions — larger LDT wins.
     #[test]
-    #[ignore = "#TBD equal-ts row deletions with different LDT: winner depends on stream order (DeletionTime.java:158)"]
+    #[ignore = "#4530 equal-ts row deletions with different LDT: winner depends on stream order (DeletionTime.java:158)"]
     fn tie_row_deletion_different_ldt(l1 in 400i32..406, l2 in 400i32..406) {
         let d = |ldt| Spec::RowDel { ck: 0, ts: 3, ldt };
         commutes(false, &d(l1), &d(l2))?;
@@ -133,7 +133,7 @@ proptest! {
 
     /// Same, PARTITION deletions.
     #[test]
-    #[ignore = "#TBD equal-ts partition deletions with different LDT: winner depends on stream order (DeletionTime.java:158)"]
+    #[ignore = "#4530 equal-ts partition deletions with different LDT: winner depends on stream order (DeletionTime.java:158)"]
     fn tie_partition_deletion_different_ldt(l1 in 400i32..406, l2 in 400i32..406) {
         let d = |ldt| Spec::PartDel { ts: 3, ldt };
         commutes(false, &d(l1), &d(l2))?;
