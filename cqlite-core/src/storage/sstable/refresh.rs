@@ -290,8 +290,8 @@ impl SSTableManager {
             .cloned()
             .collect();
 
-        // 4. Open every added generation OUTSIDE the write guard. Fail-closed:
-        //    the first open error aborts the whole refresh, mutating nothing.
+        // 4. Open added generations OUTSIDE the write guard; the first open error
+        //    (recorded in the refusal ledger) aborts the refresh, mutating nothing.
         let mut opened: Vec<(
             PathBuf,
             SSTableId,
@@ -303,7 +303,7 @@ impl SSTableManager {
                 continue;
             };
             let sstable_id = SSTableId::from_filename(filename);
-            let reader_arc = self.reopen_clearing_refusal(path).await?;
+            let reader_arc = self.open_candidate_recording(path).await?;
             let key = self.table_key_for(path, &reader_arc);
             opened.push((canon_of(path), sstable_id, key, reader_arc));
         }
@@ -370,8 +370,7 @@ impl SSTableManager {
             if after_removal_canon.contains(&cpath) {
                 continue;
             }
-            // Guard against inserting the same freshly-opened path twice if the
-            // discovery listed a duplicate (defensive; discovery does not).
+            // Defensive: never insert the same freshly-opened path twice.
             if readers.values().any(|r| canon_of(&r.file_path()) == cpath) {
                 continue;
             }
@@ -382,6 +381,7 @@ impl SSTableManager {
             readers_added += 1;
         }
 
+        self.commit_refusals(&added_paths, &discovered_paths); // ledger follows the swap (#4159)
         let tables_scanned = table_readers.len();
 
         Ok(RefreshReport {

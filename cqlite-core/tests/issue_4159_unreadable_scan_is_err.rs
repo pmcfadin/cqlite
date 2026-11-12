@@ -192,3 +192,89 @@ async fn genuinely_absent_table_is_ok_empty() {
         .expect("absent table");
     assert!(rows.is_empty());
 }
+
+// ---- refresh x refusal ledger (roborev round 1) --------------------------------
+
+/// Damage `<dir>/nb-1-big-Statistics.db` exactly as `stage(.., damage = true)` does.
+fn damage(dir: &Path) {
+    let stats = dir.join("nb-1-big-Statistics.db");
+    let bytes = std::fs::read(&stats).expect("read stats");
+    std::fs::write(&stats, &bytes[..20.min(bytes.len())]).expect("truncate stats");
+}
+
+fn repair(dir: &Path, table: &str) {
+    let src = generation_dir(table).join("nb-1-big-Statistics.db");
+    std::fs::copy(src, dir.join("nb-1-big-Statistics.db")).expect("restore stats");
+}
+
+/// A (previously refused) now opens, B (new) fails: refresh aborts, the failing
+/// candidate is NAMED, and A is not cleared ahead of a reader set that never
+/// installed — reads of both tables stay `Err`.
+#[tokio::test]
+async fn aborted_refresh_keeps_refusals_and_names_the_failing_candidate() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = stage(tmp.path(), TABLE, true);
+    let m = manager(tmp.path()).await;
+    assert!(m.scan(&tid(TABLE), None, None, None, None).await.is_err());
+
+    repair(&a, TABLE);
+    let b = stage(tmp.path(), BYSTANDER, true);
+    let b_name = b.file_name().expect("b name").to_string_lossy().to_string();
+
+    let refreshed = m.refresh_tables().await;
+    assert!(refreshed.is_err(), "refresh must abort on candidate B");
+
+    let ea = m
+        .scan(&tid(TABLE), None, None, None, None)
+        .await
+        .expect_err("A stays Err");
+    assert!(ea.to_string().contains("unreadable"), "{ea}");
+    let eb = m
+        .scan(&tid(BYSTANDER), None, None, None, None)
+        .await
+        .expect_err("B is Err");
+    assert!(
+        eb.to_string().contains(&b_name),
+        "failing candidate must be named: {eb}"
+    );
+
+    // Once B is repaired, the next refresh installs both and clears both refusals.
+    repair(&b, BYSTANDER);
+    m.refresh_tables().await.expect("refresh after repair");
+    assert!(!m
+        .scan(&tid(TABLE), None, None, None, None)
+        .await
+        .expect("A reads")
+        .is_empty());
+    assert!(!m
+        .scan(&tid(BYSTANDER), None, None, None, None)
+        .await
+        .expect("B reads")
+        .is_empty());
+}
+
+/// A refused SSTable that is deleted and accepted by refresh stops poisoning reads.
+#[tokio::test]
+async fn deleted_refused_sstable_is_reconciled_by_refresh() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = stage(tmp.path(), TABLE, true);
+    stage(tmp.path(), BYSTANDER, false);
+    let m = manager(tmp.path()).await;
+    assert!(m.scan(&tid(TABLE), None, None, None, None).await.is_err());
+
+    std::fs::remove_dir_all(&a).expect("delete refused generation");
+    m.refresh_tables()
+        .await
+        .expect("refresh accepts the removal");
+
+    let gone = m
+        .scan(&tid(TABLE), None, None, None, None)
+        .await
+        .expect("refused table is gone, not unreadable");
+    assert!(gone.is_empty());
+    assert!(!m
+        .scan(&tid(BYSTANDER), None, None, None, None)
+        .await
+        .expect("bystander")
+        .is_empty());
+}

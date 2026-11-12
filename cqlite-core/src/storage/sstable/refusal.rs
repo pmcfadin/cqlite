@@ -96,6 +96,27 @@ impl RefusalLedger {
         }
     }
 
+    /// Forget the refusals of every path in `paths` (they opened, and the refresh
+    /// that opened them has been committed).
+    pub(crate) fn clear_paths(&self, paths: &[PathBuf]) {
+        for p in paths {
+            self.clear_path(p);
+        }
+    }
+
+    /// Drop refusals of `Data.db` files that are no longer in the discovered set
+    /// (deleted since they were refused). Directory-level entries are kept.
+    pub(crate) fn retain_discovered(&self, discovered: &[PathBuf]) {
+        if let Ok(mut map) = self.by_table.lock() {
+            for list in map.values_mut() {
+                list.retain(|r| {
+                    !r.path.to_string_lossy().ends_with("-Data.db") || discovered.contains(&r.path)
+                });
+            }
+            map.retain(|_, l| !l.is_empty());
+        }
+    }
+
     /// `Err` naming the cause when any generation of `table_name` was refused.
     ///
     /// Matching mirrors the reader resolution: exact key first; otherwise the
@@ -119,19 +140,26 @@ impl RefusalLedger {
         let Some(first) = hits.first() else {
             return Ok(());
         };
-        let more = if hits.len() > 1 {
-            format!(" (and {} more refused SSTable(s))", hits.len() - 1)
-        } else {
-            String::new()
-        };
+        // Name EVERY refused file (capped) so no cause is hidden behind another.
+        let mut names: Vec<String> = hits
+            .iter()
+            .take(4)
+            .map(|r| r.path.display().to_string())
+            .collect();
+        if hits.len() > 4 {
+            names.push(format!("and {} more", hits.len() - 4));
+        }
         let msg = format!(
-            "table '{}' is unreadable: SSTable {} was refused{}: {}",
+            "table '{}' is unreadable: SSTable(s) refused: {}; first cause: {}",
             table_name,
-            first.path.display(),
-            more,
+            names.join(", "),
             first.cause
         );
         Err(match &first.cause {
+            Error::UnsupportedVersion { version, floor } => Error::UnsupportedVersion {
+                version: format!("{version} ({msg})"),
+                floor: floor.clone(),
+            },
             Error::Schema(_) => Error::Schema(msg),
             Error::Corruption(_) => Error::Corruption(msg),
             Error::InvalidFormat(_) => Error::InvalidFormat(msg),
@@ -175,13 +203,63 @@ impl super::SSTableManager {
             .unwrap_or_default()
     }
 
-    /// Open for refresh and drop any stale refusal for `path` once it opens.
-    pub(super) async fn reopen_clearing_refusal(
+    /// Open a refresh candidate. A failure is RECORDED before it is returned, so
+    /// an aborted refresh can never leave the failing file unnamed. A success does
+    /// NOT clear anything here: stale refusals are cleared together with the reader
+    /// set swap, by [`commit_refusals`](Self::commit_refusals).
+    pub(super) async fn open_candidate_recording(
         &self,
         path: &Path,
     ) -> crate::Result<std::sync::Arc<super::reader::SSTableReader>> {
-        let reader = self.open_reader_with_schema(path).await?;
-        self.refusals.clear_path(path);
-        Ok(reader)
+        match self.open_reader_with_schema(path).await {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                let key = match &self.discovery_source {
+                    super::refresh::DiscoverySource::BasePath => {
+                        let base = self.base_path.file_name().and_then(|n| n.to_str());
+                        refusal_key(path, base.unwrap_or(""))
+                    }
+                    _ => super::refresh::table_dir_table_key(path).unwrap_or_default(),
+                };
+                self.refusals.record(key, path, &e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Commit a SUCCESSFUL refresh's ledger changes with the reader-set swap:
+    /// the candidates that opened lose their refusals, and refusals of files no
+    /// longer on disk are reconciled away.
+    pub(super) fn commit_refusals(&self, opened: &[PathBuf], discovered: &[PathBuf]) {
+        self.refusals.clear_paths(opened);
+        self.refusals.retain_discovered(discovered);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_version_keeps_its_kind_and_names_the_file() {
+        let ledger = RefusalLedger::default();
+        ledger.record(
+            "ks.t".to_string(),
+            Path::new("/d/ks/t-1/nb-1-big-Data.db"),
+            &Error::UnsupportedVersion {
+                version: "ma".into(),
+                floor: "na".into(),
+            },
+        );
+        match ledger.ensure_readable("ks.t") {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert!(
+                    version.starts_with("ma") && version.contains("nb-1-big-Data.db"),
+                    "{version}"
+                );
+                assert_eq!(floor, "na");
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
     }
 }
