@@ -18,11 +18,21 @@ fn coverage_gap(detail: String) -> VerifyFinding {
     )
 }
 
-/// Invariant 7. `data_length` is the LOGICAL (uncompressed) size and the chunk
-/// count Cassandra writes is `ceil(data_length / chunk_length)`
-/// (cassandra-5.0.8 `CompressionMetadata.Writer.open`, lines 447-449:
-/// `dataLength / chunkLength`, plus one when the remainder is non-zero).
-/// The final chunk must also decode to exactly the remaining logical bytes.
+/// Invariant 7. `data_length` is the LOGICAL (uncompressed) size and the number
+/// of chunks that carry data is `ceil(data_length / chunk_length)`
+/// (cassandra-5.0.8 `CompressionMetadata.Writer.open`, lines 447-449).
+///
+/// # Measured against real Cassandra output (refines the spec's "equals")
+///
+/// 17 of the datasets-v4 compressed generations (every `test_da`/`test_oa`
+/// table, `test_big/wide_partition`, several system tables) declare exactly
+/// `ceil + 1` records, the last being a 9-byte chunk that decodes to ZERO bytes.
+/// That is Cassandra's own writer: `CompressedSequentialWriter.flushData` adds
+/// an offset unconditionally (line 183) and `doFlush(0)` at finish (line 357)
+/// can run on an empty buffer. A strict `== ceil` would flag healthy data, so
+/// the accepted shapes are exactly: `ceil` records, or `ceil` data records plus
+/// ONE terminal record that decodes to zero bytes. Anything else is a gap. The
+/// last data chunk must decode to exactly the logical remainder.
 pub(super) fn check_compression_coverage(
     state: &CompressionState,
     data_path: &Path,
@@ -39,7 +49,7 @@ pub(super) fn check_compression_coverage(
     }
     let expected = info.data_length.div_ceil(chunk_len);
     let declared = info.chunk_offsets.len() as u64;
-    if declared != expected {
+    if declared != expected && declared != expected.saturating_add(1) {
         findings.push(coverage_gap(format!(
             "CompressionInfo.db declares {declared} chunk(s), but data_length {} with chunk_length \
              {} implies {expected}",
@@ -50,37 +60,43 @@ pub(super) fn check_compression_coverage(
     if expected == 0 {
         return AuditVerdict::Pass;
     }
-    // Last chunk: its decoded length must be the logical remainder.
-    let last = (expected - 1) as usize;
-    let want = info
-        .data_length
-        .saturating_sub(chunk_len.saturating_mul(expected - 1));
-    let decoded = (|| -> Result<usize, String> {
+    let decode = |index: usize| -> Result<usize, String> {
         let mut file = std::fs::File::open(data_path).map_err(|e| e.to_string())?;
         let mut dec = ChunkDecompressor::new(info.clone(), CassandraVersion::V5_0Release)
             .map_err(|e| e.to_string())?;
-        dec.decompress_chunk_by_index(&mut file, last)
+        dec.decompress_chunk_by_index(&mut file, index)
             .map(|v| v.len())
             .map_err(|e| e.to_string())
-    })();
-    match decoded {
-        Ok(n) if n as u64 == want => AuditVerdict::Pass,
-        Ok(n) => {
-            findings.push(coverage_gap(format!(
-                "the last chunk (index {last}) decodes to {n} byte(s), but data_length {} implies \
-                 {want}",
-                info.data_length
-            )));
-            AuditVerdict::Fail
-        }
-        Err(why) => {
-            findings.push(coverage_gap(format!(
-                "the last chunk (index {last}) cannot be decoded, so the chunk table's coverage of \
-                 Data.db is not established: {why}"
-            )));
-            AuditVerdict::Fail
+    };
+    let last_data = (expected - 1) as usize;
+    let want = info
+        .data_length
+        .saturating_sub(chunk_len.saturating_mul(expected - 1));
+    let mut checks = vec![(last_data, want, "last data chunk")];
+    if declared == expected + 1 {
+        checks.push((expected as usize, 0, "terminal chunk"));
+    }
+    for (index, want, what) in checks {
+        match decode(index) {
+            Ok(n) if n as u64 == want => {}
+            Ok(n) => {
+                findings.push(coverage_gap(format!(
+                    "the {what} (index {index}) decodes to {n} byte(s), but data_length {} implies \
+                     {want}",
+                    info.data_length
+                )));
+                return AuditVerdict::Fail;
+            }
+            Err(why) => {
+                findings.push(coverage_gap(format!(
+                    "the {what} (index {index}) cannot be decoded, so the chunk table's coverage \
+                     of Data.db is not established: {why}"
+                )));
+                return AuditVerdict::Fail;
+            }
         }
     }
+    AuditVerdict::Pass
 }
 
 /// Invariant 8, `partition_count` half. The declared count is the sum of the
