@@ -63,6 +63,15 @@ pub(crate) fn timeuuid_type_cmp(a: &[u8; 16], b: &[u8; 16]) -> Ordering {
     })
 }
 
+/// `timeuuid` order of two serialized cell paths (a list element's position). A path that is not
+/// 16 bytes (never produced for a list) falls back to raw bytes.
+pub(crate) fn timeuuid_path_cmp(a: &[u8], b: &[u8]) -> Ordering {
+    match (<[u8; 16]>::try_from(a), <[u8; 16]>::try_from(b)) {
+        (Ok(x), Ok(y)) => timeuuid_type_cmp(&x, &y),
+        _ => a.cmp(b),
+    }
+}
+
 /// `UUIDType.asComparableBytes` (`:122-140`): the 16 bytes a declared `uuid` contributes to a
 /// byte-comparable key.
 pub(crate) fn uuid_comparable_bytes(u: &[u8; 16]) -> [u8; 16] {

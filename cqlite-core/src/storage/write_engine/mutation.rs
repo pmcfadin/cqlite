@@ -11,7 +11,7 @@
 //! - `CellOperation`: Cell-level write/delete operations
 
 mod clustering_order;
-use self::clustering_order::compare_values;
+use self::clustering_order::{compare_values, compare_values_typed};
 use crate::error::{Error, Result};
 use crate::schema::{ClusteringOrder, TableSchema};
 use crate::types::{ComparatorType, Value};
@@ -602,20 +602,7 @@ impl ClusteringKey {
                 // Both present: compare through the type, then apply DESC
                 // reversal so empty-vs-valued ordering matches Cassandra.
                 (_, _) => {
-                    // #4534: `timeuuid` orders by `AbstractTimeUUIDType.compareCustom`, which
-                    // differs from `uuid`'s only in the lsb tie-break. `Value::Uuid` carries no
-                    // type tag, so the DECLARED schema type decides — never the bytes (#28).
-                    let ordering = match (a_val, b_val) {
-                        (Value::Uuid(a), Value::Uuid(b))
-                            if cluster_col
-                                .data_type
-                                .trim()
-                                .eq_ignore_ascii_case("timeuuid") =>
-                        {
-                            crate::uuid_order::timeuuid_type_cmp(a, b)
-                        }
-                        _ => compare_values(a_val, b_val)?,
-                    };
+                    let ordering = compare_values_typed(a_val, b_val, &cluster_col.data_type)?;
                     if cluster_col.order == ClusteringOrder::Desc {
                         ordering.reverse()
                     } else {
