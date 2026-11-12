@@ -26,27 +26,9 @@ runs:
   steps:
     - name: Install noble git 2.43
       shell: bash
-      run: |
-        set -euo pipefail
-        echo "runner image git: $(git --version)"
-        codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
-        if [ "$codename" != noble ]; then
-          echo "::error::runner is '${codename:-unknown}', not Ubuntu noble; pin the job to runs-on: ubuntu-24.04"
-          exit 1
-        fi
-        sudo apt-get update -qq
-        ver=$(apt-cache madison git | awk '$3 ~ /^1:2\.43\./ {print $3; exit}')
-        if [ -z "$ver" ]; then
-          echo "::error::no 2.43 git in the apt archive"
-          apt-cache madison git
-          exit 1
-        fi
-        sudo apt-get install -y -qq --allow-downgrades "git=${ver}" "git-man=${ver}"
-        if ! git --version | grep -q '^git version 2\.43\.'; then
-          echo "::error::git is '$(git --version)' after the pin, wanted 2.43.x"
-          exit 1
-        fi
-        echo "pinned git: $(git --version)"
+      # Retries with backoff, falls back to archive.ubuntu.com, and reports a persistent apt/network
+      # failure as `INFRA:` (exit 75) so it is never read as a test failure (#4510).
+      run: bash "${{ github.action_path }}/../../../scripts/ci/install-noble-git.sh"
 
     - name: Provision a writable /data/lanes
       shell: bash
