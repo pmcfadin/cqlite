@@ -11,6 +11,7 @@
 //! |-----------------|----------------------------|--------------|
 //! | `arrow_convert` | `arrow`                    | No           |
 //! | `parquet`       | `parquet`                  | No           |
+//! | `vortex`        | `vortex`                   | No           |
 //! | `delta_schema`  | `delta-scan` + `arrow`     | No           |
 //! | `delta_parquet` | `delta-scan` + `parquet`   | No           |
 //!
@@ -21,6 +22,12 @@
 //! The `parquet` feature depends on `arrow` and additionally pulls in the
 //! `parquet` crate; it is off by default so the default build's dependency
 //! surface is unchanged.
+//!
+//! The `vortex` feature (issue #4237) depends on `arrow` the same way `parquet`
+//! does, and additionally pulls in the `vortex` crate (pinned exact, format
+//! stable since 0.36 but the crate API is not). It consumes the SAME
+//! `rows_to_record_batch_with_schema` producer `parquet` uses — Parquet and
+//! Vortex share one CQL→Arrow mapping, never two.
 //!
 //! The `delta_parquet` module (DS8, Issue #704) is compiled only when both
 //! `delta-scan` and `parquet` are enabled.  It depends on `delta_schema`
@@ -89,6 +96,16 @@ pub mod arrow_shape_corpus;
 
 #[cfg(feature = "parquet")]
 pub mod parquet;
+
+// Vortex export writer (feature = "vortex", issue #4237). Off by default,
+// mirroring `parquet` exactly. Consumes the SAME `rows_to_record_batch_with_schema`
+// producer `parquet` uses (design.md D1, openspec/changes/vortex-export) — no second
+// CQL→Arrow mapping. `pub mod vortex;` is UNCONDITIONAL at this declaration site
+// (gated only by the outer `#[cfg(feature = "vortex")]`, never a second inner
+// `#![cfg(...)]` inside the module file itself) so the pub-surface guard (#1712)
+// sees an honest declaration.
+#[cfg(feature = "vortex")]
+pub mod vortex;
 
 // Re-export the public arrow_convert API at the `export` module level.
 //
