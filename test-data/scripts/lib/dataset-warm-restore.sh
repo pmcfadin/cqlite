@@ -120,7 +120,7 @@ _dataset_stale_lists_in() {
   [ -s "${manifest}" ] || return 1
   [ "${TRACKED_GUARD_STATE:-}" = "in-repo" ] && [ -f "${TRACKED_GUARD_LIST:-}" ] || return 1
   [ -f "${repo_manifest}" ] || { echo "ERROR: ${repo_manifest} is missing (generate it with test-data/scripts/gen-dataset-tracked-manifest.sh)" >&2; return 1; }
-  [ "$(head -n 1 "${repo_manifest}")" = "# sha256=${SHA256_EXPECTED}" ] \
+  [ "$(head -n 1 "${repo_manifest}" | tr -d '\r')" = "# sha256=${SHA256_EXPECTED}" ] \
     || { echo "ERROR: ${repo_manifest} does not describe the pinned bundle ${SHA256_EXPECTED}; regenerate it in the re-pin PR" >&2; return 1; }
   # a newline inside a tracked path would split one NUL record into two lines: refuse, never guess
   [ "$(tr -cd '\n' < "${TRACKED_GUARD_LIST}" | wc -c | tr -d ' ')" = 0 ] || { echo "ERROR: a tracked dataset path contains a newline; refusing to classify" >&2; return 1; }
@@ -128,12 +128,13 @@ _dataset_stale_lists_in() {
   [ "$(tr -cd '\n' < "${w}/disk0" | wc -c | tr -d ' ')" = 0 ] || { echo "ERROR: a file under ${DATASET_ROOT} has a newline in its name; refusing to classify" >&2; return 1; }
 
   tr '\0' '\n' < "${TRACKED_GUARD_LIST}" > "${w}/now0" || return 1
-  sed "s#^${TRACKED_GUARD_REL}/##" "${w}/now0" > "${w}/now1" || return 1
+  # literal prefix strip (awk index/substr, the prefix via ENVIRON so no regex or backslash escape is interpreted)
+  CQ_PFX="${TRACKED_GUARD_REL}/" awk 'BEGIN { p = ENVIRON["CQ_PFX"]; n = length(p) } index($0, p) == 1 { print substr($0, n + 1); next } { print }' "${w}/now0" > "${w}/now1" || return 1
   LC_ALL=C sort -u "${w}/now1" > "${w}/now" || return 1
   tr '\0' '\n' < "${w}/disk0" > "${w}/disk1" || return 1
   sed 's#^\./##' "${w}/disk1" > "${w}/disk2" || return 1
   LC_ALL=C sort -u "${w}/disk2" > "${w}/disk" || return 1
-  tail -n +2 "${repo_manifest}" > "${w}/bt1" || return 1
+  tail -n +2 "${repo_manifest}" | tr -d '\r' > "${w}/bt1" || return 1   # a CRLF checkout must not break the exact compares
   LC_ALL=C sort -u "${w}/bt1" > "${w}/bundle-tracked" || return 1
   cat "${w}/now" "${manifest}" > "${w}/known0" || return 1
   printf '%s\n' .dataset-pin .dataset-manifest .dataset-tracked-at-build >> "${w}/known0" || return 1

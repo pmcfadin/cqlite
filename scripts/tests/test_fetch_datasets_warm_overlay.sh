@@ -411,5 +411,31 @@ overlay_cache "$R10"
 run_fetch "$R10" CI=true
 case "$OUT" in *"forcing a COLD restore"*) ok "a cache with no manifest is never classified from a partial one (forces a cold restore)" ;; *) bad "no cold restore after a missing manifest: $OUT" ;; esac
 
+# 19. roborev job 210 (1): a Windows autocrlf checkout turns the committed twin list into CRLF; exact line compares
+#     (the sha header, every path) must still hold. And .gitattributes pins the file to LF.
+R11="$T/r11"; make_repo "$R11"; run_fetch "$R11"; pr_changes "$R11"
+overlay_cache "$R11"; reset_extra "$R11"
+sed 's/$/\r/' "$R11/test-data/dataset-bundle-tracked.txt" > "$T/crlf.txt"; cp "$T/crlf.txt" "$R11/test-data/dataset-bundle-tracked.txt"
+[ "$(head -c 200 "$R11/test-data/dataset-bundle-tracked.txt" | tr -cd '\r' | wc -c | tr -d ' ')" -gt 0 ] && ok "setup: the twin list is CRLF" || bad "setup: not CRLF"
+run_fetch "$R11" CI=true
+{ [ "$RC" = 0 ] && ! has "$R11" removed-Data.db.jsonl && ! has "$R11" old-name-Data.db.jsonl && has "$R11" bundle-only.db; } \
+  && ok "a CRLF twin list still classifies exactly (header sha and every path match)" || bad "CRLF twin list broke the classifier ($RC): $(tail -3 <<<"$OUT" | tr "\n" " ")"
+grep -qx 'test-data/dataset-bundle-tracked.txt text eol=lf' "$REPO_ROOT/.gitattributes" && ok ".gitattributes forces LF for test-data/dataset-bundle-tracked.txt" || bad ".gitattributes does not pin the twin list to LF"
+
+# 20. roborev job 210 (2): the dataset path is interpolated into the prefix strip; regex metacharacters in it
+#     ('.', '[', '*', '|') must be literal. Classify directly against a root whose REL carries them all.
+MR="$T/meta/repo"; MREL='we.ird[x]*|y/datasets'; MD="$MR/$MREL"
+mkdir -p "$MD/goldens" "$MR/test-data"
+printf 'k\n' > "$MD/goldens/keep.jsonl"; printf 'g\n' > "$MD/goldens/gone.jsonl"
+printf 'goldens/keep.jsonl\ngoldens/gone.jsonl\n' > "$MD/.dataset-manifest"
+printf '# sha256=%s\ngoldens/keep.jsonl\ngoldens/gone.jsonl\n' "$SHA" > "$MR/test-data/dataset-bundle-tracked.txt"
+printf '%s\0' "$MREL/goldens/keep.jsonl" > "$T/meta/list0"
+META_OUT=$( DATASET_ROOT="$MD" TRACKED_GUARD_STATE=in-repo TRACKED_GUARD_LIST="$T/meta/list0" TRACKED_GUARD_REL="$MREL" TRACKED_GUARD_REPO="$MR" SHA256_EXPECTED="$SHA" \
+  bash -c 'set -e; . "$0"; _dataset_stale_lists; echo "TWINS=[$STALE_TWINS]"; echo "EXTRAS=[$STALE_EXTRAS]"' "$REPO_ROOT/test-data/scripts/lib/dataset-warm-restore.sh" 2>&1 )
+case "$META_OUT" in
+  *"TWINS=[goldens/gone.jsonl]"*"EXTRAS=[]"*) ok "a dataset path with . [ * | is stripped literally: only the deleted file is a twin" ;;
+  *) bad "metacharacter dataset path misclassified: $META_OUT" ;;
+esac
+
 echo "test_fetch_datasets_warm_overlay: pass=$PASS fail=$FAIL"
 [ "$FAIL" = 0 ]

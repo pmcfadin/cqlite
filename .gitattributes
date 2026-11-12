@@ -1,2 +1,4 @@
 # Shell scripts must keep LF line endings on every checkout (Windows runners run them under Git Bash).
 *.sh text eol=lf
+# Parsed with exact line compares (sha header + one path per line): never CRLF.
+test-data/dataset-bundle-tracked.txt text eol=lf

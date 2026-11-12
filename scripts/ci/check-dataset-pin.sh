@@ -111,7 +111,7 @@ done
 BT="$REPO_ROOT/test-data/dataset-bundle-tracked.txt"
 if [[ ! -f "$BT" ]]; then
   err "test-data/dataset-bundle-tracked.txt is missing (run test-data/scripts/gen-dataset-tracked-manifest.sh <bundle>)"
-elif [[ "$(head -n 1 "$BT")" != "# sha256=${DATASET_SHA256}" ]]; then
+elif [[ "$(head -n 1 "$BT" | tr -d '\r')" != "# sha256=${DATASET_SHA256}" ]]; then
   err "test-data/dataset-bundle-tracked.txt describes '$(head -n 1 "$BT")', not the pinned bundle ${DATASET_SHA256}; regenerate it with test-data/scripts/gen-dataset-tracked-manifest.sh"
 fi
 
