@@ -34,7 +34,7 @@
 //!
 //! # Fail-closed (R4)
 //!
-//! The writer opens a `<path>.tmp` sibling of the destination and only `rename`s it to the real
+//! The writer atomically creates a unique hidden `.<name>.<pid>.<n>.<t>.tmp` sibling of the destination (`create_new`; never a predictable name) and only `rename`s it to the real
 //! path on a fully successful `finalize()`. Any error during conversion, the push itself, or
 //! `finish()` removes the temp file (best-effort) before propagating; a [`Drop`] impl covers the
 //! remaining case — an error from OUTSIDE this writer's own methods (e.g. the caller's chunk-pull
@@ -82,6 +82,10 @@ pub enum VortexExportError {
     /// Invalid writer configuration (e.g. zero row group size).
     #[error("invalid Vortex export options: {0}")]
     InvalidOptions(String),
+    /// The writer hit a terminal failure earlier (its temp file is already removed); every
+    /// later `write_chunk`/`finalize` returns this instead of touching a closed writer.
+    #[error("Vortex writer is poisoned by an earlier failure; the export was abandoned")]
+    Poisoned,
     /// A conversion or write failure attributed to one batch and one column (R4 — fail closed,
     /// naming the batch index and column so the operator can find the offending row shape).
     #[error("Vortex export failed at batch {batch_index} (column: {column}): {message}")]
@@ -170,12 +174,44 @@ fn convert_batch_to_vortex(
     Ok(array)
 }
 
-/// Build the sibling temp path a [`StreamingVortexWriter`] writes to before renaming into place
-/// (fail-closed, R4): `<path>` with a literal `.tmp` suffix appended to the whole path.
-fn tmp_sibling_path(path: &Path) -> PathBuf {
-    let mut os = path.as_os_str().to_os_string();
-    os.push(".tmp");
-    PathBuf::from(os)
+/// Atomically create a UNIQUE same-directory temp file for `path` (fail-closed, R4).
+///
+/// A predictable `<path>.tmp` opened with a truncating create lets concurrent exports clobber
+/// each other and lets a pre-existing symlink at that name truncate an unrelated file. Here
+/// the name carries the pid, a process-wide counter and a timestamp, and the file is opened
+/// with `create_new` (`O_CREAT|O_EXCL`, which refuses an existing entry INCLUDING a symlink),
+/// retrying with a fresh name on `AlreadyExists`. The returned path is the exact file that is
+/// later renamed into place or removed.
+fn create_unique_tmp(path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    for _ in 0..32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let tmp_name = format!(
+            ".{name}.{}.{}.{nanos:x}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let tmp = dir.map_or_else(|| PathBuf::from(&tmp_name), |d| d.join(&tmp_name));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(f) => return Ok((f, tmp)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a unique Vortex temp file after 32 attempts",
+    ))
 }
 
 /// A streaming Vortex writer over query results, mirroring
@@ -214,6 +250,8 @@ pub struct StreamingVortexWriter {
     row_group_size: usize,
     rows_written: u64,
     batches_pushed: usize,
+    /// Set on the first terminal failure; later calls return [`VortexExportError::Poisoned`].
+    poisoned: bool,
 }
 
 impl StreamingVortexWriter {
@@ -260,8 +298,8 @@ impl StreamingVortexWriter {
             .map_err(VortexExportError::from)?;
 
         let final_path = path.as_ref().to_path_buf();
-        let tmp_path = tmp_sibling_path(&final_path);
-        let file = tokio::fs::File::create(&tmp_path).await?;
+        let (std_file, tmp_path) = create_unique_tmp(&final_path)?;
+        let file = tokio::fs::File::from_std(std_file);
         let writer = session.write_options().writer(file, dtype);
 
         Ok(Self {
@@ -275,6 +313,7 @@ impl StreamingVortexWriter {
             row_group_size: options.row_group_size,
             rows_written: 0,
             batches_pushed: 0,
+            poisoned: false,
         })
     }
 
@@ -283,6 +322,9 @@ impl StreamingVortexWriter {
     /// Returns the number of rows pushed to the writer in this call (rows remaining in the
     /// buffer are pushed by [`finalize`](Self::finalize)).
     pub async fn write_chunk(&mut self, rows: &[QueryRow]) -> Result<usize, VortexExportError> {
+        if self.poisoned {
+            return Err(VortexExportError::Poisoned);
+        }
         self.row_buffer.extend(rows.iter().cloned());
         self.rows_written += rows.len() as u64;
 
@@ -290,7 +332,7 @@ impl StreamingVortexWriter {
         while self.row_buffer.len() >= self.row_group_size {
             let chunk: Vec<QueryRow> = self.row_buffer.drain(..self.row_group_size).collect();
             if let Err(e) = self.push_batch(&chunk).await {
-                self.cleanup_tmp().await;
+                self.abandon().await;
                 return Err(e);
             }
             pushed += self.row_group_size;
@@ -305,10 +347,13 @@ impl StreamingVortexWriter {
     /// calling `finalize` leaves only the `.tmp` sibling on disk, never a file at the destination
     /// path (R4 — fail closed).
     pub async fn finalize(&mut self) -> Result<(), VortexExportError> {
+        if self.poisoned {
+            return Err(VortexExportError::Poisoned);
+        }
         if !self.row_buffer.is_empty() {
             let remaining = std::mem::take(&mut self.row_buffer);
             if let Err(e) = self.push_batch(&remaining).await {
-                self.cleanup_tmp().await;
+                self.abandon().await;
                 return Err(e);
             }
         }
@@ -323,11 +368,14 @@ impl StreamingVortexWriter {
         };
 
         if let Err(e) = writer.finish().await {
-            self.cleanup_tmp().await;
+            self.abandon().await;
             return Err(VortexExportError::Vortex(e));
         }
 
-        tokio::fs::rename(&self.tmp_path, &self.final_path).await?;
+        if let Err(e) = tokio::fs::rename(&self.tmp_path, &self.final_path).await {
+            self.abandon().await;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -369,14 +417,17 @@ impl StreamingVortexWriter {
         Ok(())
     }
 
-    /// Best-effort removal of the `.tmp` sibling on a failure path. Never propagates its own
-    /// error — the ORIGINAL failure is what the caller needs to see.
-    async fn cleanup_tmp(&self) {
+    /// Terminal-failure path: DROP the writer (closing its open temp file) BEFORE unlinking
+    /// the temp, then poison. Never propagates its own error — the ORIGINAL failure is what
+    /// the caller needs to see.
+    async fn abandon(&mut self) {
+        drop(self.writer.take());
         let _ = tokio::fs::remove_file(&self.tmp_path).await;
+        self.poisoned = true;
     }
 }
 
-/// Fail-closed cleanup for every path `write_chunk`/`finalize`'s own `cleanup_tmp` calls above
+/// Fail-closed cleanup for every path `write_chunk`/`finalize`'s own `abandon` calls above
 /// do NOT cover (review finding, R4): an error from the CALLER's side of `write_chunk` — e.g.
 /// `collect_chunk_within`'s deadline/query-timeout path in `cqlite-cli/src/commands/export.rs`
 /// — propagates via `?` straight past this writer with no chance to run its own async cleanup.
@@ -405,6 +456,12 @@ mod tests {
     use crate::types::{DataType, Value};
     use crate::RowKey;
     use std::collections::HashMap;
+
+    fn no_tmp_left(path: &Path) -> bool {
+        std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+    }
 
     fn metadata_two_cols() -> QueryMetadata {
         QueryMetadata {
@@ -478,7 +535,7 @@ mod tests {
             "finalize must rename the temp file into place"
         );
         assert!(
-            !tmp_sibling_path(&path).exists(),
+            no_tmp_left(&path),
             "no .tmp sibling should remain after a successful finalize"
         );
     }
@@ -618,8 +675,88 @@ mod tests {
             "R4.1: a failed export must leave no readable file at the destination path"
         );
         assert!(
-            !tmp_sibling_path(&path).exists(),
+            no_tmp_left(&path),
             "R4.1: the .tmp sibling must be cleaned up on a mid-stream failure"
         );
+    }
+
+    /// Review finding 1: a pre-existing symlink at the OLD predictable `<dest>.tmp` name must be
+    /// left untouched (its target never truncated), and the export must still succeed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preexisting_symlink_at_old_tmp_name_is_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"precious").unwrap();
+        let path = dir.path().join("out.vortex");
+        std::os::unix::fs::symlink(&victim, dir.path().join("out.vortex.tmp")).unwrap();
+        let mut w = StreamingVortexWriter::create(&path, &metadata_two_cols(), &Default::default())
+            .await
+            .expect("create");
+        w.write_chunk(&[row(1, Some("a"))]).await.expect("chunk");
+        w.finalize().await.expect("finalize");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+        assert!(path.exists());
+    }
+
+    /// Review finding 1: concurrent exports into one directory both succeed and leave no tmp.
+    #[tokio::test]
+    async fn concurrent_exports_in_one_dir_do_not_clobber_each_other() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |name: &'static str, n: i64| {
+            let path = dir.path().join(name);
+            async move {
+                let mut w =
+                    StreamingVortexWriter::create(&path, &metadata_two_cols(), &Default::default())
+                        .await?;
+                let rows: Vec<_> = (0..n).map(|i| row(i, Some("x"))).collect();
+                w.write_chunk(&rows).await?;
+                w.finalize().await?;
+                Ok::<_, VortexExportError>(w.rows_written())
+            }
+        };
+        let (a, b) = tokio::join!(run("a.vortex", 3), run("b.vortex", 5));
+        assert_eq!((a.expect("a"), b.expect("b")), (3, 5));
+        assert!(dir.path().join("a.vortex").exists() && dir.path().join("b.vortex").exists());
+        assert!(no_tmp_left(&dir.path().join("a.vortex")));
+    }
+
+    /// Review finding 2: a terminal failure drops the writer, removes the temp and poisons the
+    /// writer: the next `write_chunk`/`finalize` returns `Poisoned`, deterministically.
+    #[tokio::test]
+    async fn terminal_failure_poisons_the_writer_and_leaves_no_tmp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.vortex");
+        let mut w = StreamingVortexWriter::create(
+            &path,
+            &metadata_two_cols(),
+            &VortexExportOptions { row_group_size: 1 },
+        )
+        .await
+        .expect("create");
+        let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+        values.insert(Arc::<str>::from("id"), Value::Text("not-a-bigint".into()));
+        values.insert(Arc::<str>::from("name"), Value::Text("c".into()));
+        let bad = crate::query::QueryRow {
+            values,
+            key: RowKey::new(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        };
+        let err = w.write_chunk(&[bad]).await.expect_err("conversion fails");
+        assert!(
+            matches!(err, VortexExportError::BatchConversion { .. }),
+            "{err:?}"
+        );
+        assert!(no_tmp_left(&path) && !path.exists());
+        assert!(matches!(
+            w.write_chunk(&[row(1, None)]).await,
+            Err(VortexExportError::Poisoned)
+        ));
+        assert!(matches!(
+            w.finalize().await,
+            Err(VortexExportError::Poisoned)
+        ));
+        assert!(no_tmp_left(&path) && !path.exists());
     }
 }
