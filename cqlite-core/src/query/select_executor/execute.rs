@@ -393,6 +393,15 @@ impl SelectExecutor {
         // forcing plan_type to "unknown").
         let plan_info = Self::select_plan_info(&plan, context.access_path.as_ref());
 
+        // Issue #4256: TEST-ONLY seam (feature `result-corruption-injection`; absent
+        // from every default build) that corrupts one decoded cell of the final rows,
+        // so a differential suite can prove it goes red on a wrong read-path value.
+        #[cfg(feature = "result-corruption-injection")]
+        crate::query::result_corruption::maybe_corrupt(
+            &mut intermediate_results,
+            context.access_path.as_ref(),
+        );
+
         Ok(QueryResult {
             rows: intermediate_results,
             rows_affected: total_rows, // Use actual number of rows returned
