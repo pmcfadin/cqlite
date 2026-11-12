@@ -135,6 +135,10 @@ fn cold_miss_violation_fires_on_a_warm_hit_and_on_no_cache_traffic() {
         cold_miss_violation("t", "q", (0, 0, 0)).is_err(),
         "no miss means the probe never consulted the cache, so cold is unproven"
     );
+    assert!(
+        cold_miss_violation("t", "q", (0, 1, 0)).is_err(),
+        "a miss that populated no entry never proved the cold descent filled the cache"
+    );
 }
 
 /// A probe forced through a NON-targeted shape (the FULL path over a
