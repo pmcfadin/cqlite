@@ -28678,23 +28678,23 @@ dispatch_component() {
     #      sets nothing itself — see the header note above run_feature_iso).
     # `check_no_unexpected_zero_tests` at the end reads the ONE combined log
     # `run_component` already writes this whole block's output to (issue #1978's guard,
-    # every SIBLING executing lane — feature-iso-delta-scan, legacy-heuristics,
-    # flight-tests, binding-rust-tests — calls it; this one previously did not, roborev
-    # job 4372 finding, Medium): an empty allowed-zero list, since neither `--test` pass
-    # (2 or 3) may legitimately produce zero tests here. SCOPE, stated so this is not
-    # over-trusted: that guard keys on `Running tests/<name>.rs` and explicitly
-    # disclaims unit runs (`Running unittests src/lib.rs`), so pass 1's name-filtered
-    # `--lib "export::vortex::"` run is NOT covered by it — a regression that silently
-    # dropped that filter to something matching zero tests would not be caught here.
-    # Closing that residual needs `check_unittest_targets_ran` with a cargo-metadata-
-    # derived unittest source path (the `--lib`/`--bins` analogue, #3384, e.g.
-    # feature-iso-delta-scan's `ds_unit_srcs`) — left as a follow-up rather than
-    # implemented here without the ability to verify it against a live gate run in
-    # this session (disk/build-slot contention on the Mac gate box).
+    # every SIBLING executing lane calls it): an empty allowed-zero list, since neither
+    # `--test` pass (2 or 3) may legitimately produce zero tests here. That guard keys on
+    # `Running tests/<name>.rs` and disclaims unit runs, so pass 1's name-filtered
+    # `--lib "export::vortex::"` is covered by `check_unittest_targets_ran` instead
+    # (#3384, same pairing legacy-heuristics uses): cqlite-core's lib unittest src path is
+    # DERIVED from cargo metadata (`_package_unittest_srcs`, fail-closed when it cannot be),
+    # and the guard requires `Running unittests <src>` to be observed with a NON-ZERO
+    # `running N tests` — a filter that silently matches nothing now FAILs the lane.
     vortex-parquet-differential)
       local vpd_core_pkg=cqlite-core vpd_core_feats=parquet,vortex
       local vpd_cli_pkg=cqlite-cli vpd_cli_feats=vortex
-      local vpd_log="$LOG_DIR/vortex-parquet-differential.log"
+      local vpd_log="$LOG_DIR/vortex-parquet-differential.log" vpd_unit_srcs
+      vpd_unit_srcs=$(_package_unittest_srcs cqlite-core lib "parquet vortex") || vpd_unit_srcs=""
+      if [ -z "$vpd_unit_srcs" ]; then
+        # Fail closed: without the derived lib src path the --lib leg would run unguarded.
+        run_component vortex-parquet-differential bash -c 'echo "vortex-parquet-differential: FAIL-CLOSED -- could not derive cqlite-core lib unittest target from cargo metadata; the --lib export::vortex:: leg would run under NO zero-test guard" >&2; exit 1'
+      else
       run_component vortex-parquet-differential bash -c '
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' &&
   cargo test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' --lib "export::vortex::" &&
@@ -28702,7 +28702,9 @@ dispatch_component() {
   cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test export_integration_tests test_export_sstable_to_vortex &&
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
   cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test issue_4237_vortex_parquet_differential &&
-  check_no_unexpected_zero_tests vortex-parquet-differential '"$vpd_log"'' ;;
+  check_no_unexpected_zero_tests vortex-parquet-differential '"$vpd_log"' &&
+  check_unittest_targets_ran vortex-parquet-differential '"$vpd_log"' '"$vpd_unit_srcs"''
+      fi ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     binding-rust-tests) run_binding_rust_tests ;;
