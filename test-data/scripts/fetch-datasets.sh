@@ -115,11 +115,13 @@ guard_git() {
     git "$@"
   )
 }
+. "$(dirname "${BASH_SOURCE[0]}")/lib/dataset-warm-restore.sh"   # warm-cache reconcile (#4508)
 
 canonicalize_dataset_root() {
   local raw_root="$1"
   local abs_root parent base parent_abs repo_root
 
+  raw_root="$(git_posix_path "${raw_root}")"   # Git Bash: C:\... / D:/... -> /c/... (#4508)
   case "${raw_root}" in
     ""|"/"|".")
       fail_unsafe_dataset_root "must point at a dataset directory, not a filesystem root"
@@ -153,7 +155,7 @@ canonicalize_dataset_root() {
   abs_root="${parent_abs}/${base}"
 
   if repo_root="$(guard_git rev-parse --show-toplevel 2>/dev/null)"; then
-    repo_root="$(cd "${repo_root}" && pwd -P)"
+    repo_root="$(cd "$(git_posix_path "${repo_root}")" && pwd -P)"
     [ "${abs_root}" != "${repo_root}" ] \
       || fail_unsafe_dataset_root "refusing to replace the repository root"
   fi
@@ -316,6 +318,7 @@ refuse_unprotected_dataset_root() {
 # restore.
 physical_path() {
   local target="$1" suffix="" head resolved
+  target="$(git_posix_path "${target}")"   # Git for Windows prints D:/a/x, which is NOT relative (#4508)
   case "${target}" in
     /*) ;;
     "") return 1 ;;
@@ -374,12 +377,11 @@ path_relative_inside() {
   esac
 }
 
-# Prints WHY the given directory is itself a git repository, else fails. Purely a
-# filesystem probe (no git binary needed), and it must recognise a BARE repository
-# too: `git init --bare .../datasets` leaves NO `.git` entry, so an
-# `-e "$dir/.git"` test alone classified it as an ordinary directory and the
-# `rm -rf` deleted the whole repository while REPORTING SUCCESS. A bare repo has
-# `HEAD` + `objects/` at its top level, and its `config` declares `bare = true`;
+# Prints WHY the given directory is itself a git repository, else fails. Purely a filesystem
+# probe (no git binary needed), and it must recognise a BARE repository too: `git init --bare
+# .../datasets` leaves NO `.git` entry, so an `-e "$dir/.git"` test alone classified it as an
+# ordinary directory and the `rm -rf` deleted the whole repository while REPORTING SUCCESS. A
+# bare repo has `HEAD` + `objects/` at its top level, and its `config` declares `bare = true`;
 # either signature is enough, and over-refusing here is the safe direction.
 git_repository_reason() {
   local dir="$1"
@@ -399,15 +401,14 @@ git_repository_reason() {
   return 1
 }
 
-# Prints the git ADMINISTRATIVE directory at or above the given path, else fails.
-# A target inside git's own storage (`/repo/.git/…`, `/mirror.git/objects/…`, a
-# submodule's `.git/modules/…`, a linked worktree's `.git/worktrees/…`) holds no
-# tracked files, so it used to classify as "nothing to protect" — and the `rm -rf`
-# then deleted the object store that the restore strategy itself depends on: the
-# guard destroying its own recovery source while reporting success. Filesystem-only
-# (a directory named `.git`, or the admin layout HEAD+objects/) so it fires even
-# when git is absent — a missing git binary must never downgrade a STRUCTURAL
-# refusal into an overridable one.
+# Prints the git ADMINISTRATIVE directory at or above the given path, else fails. A target
+# inside git's own storage (`/repo/.git/…`, `/mirror.git/objects/…`, a submodule's
+# `.git/modules/…`, a linked worktree's `.git/worktrees/…`) holds no tracked files, so it used
+# to classify as "nothing to protect" — and the `rm -rf` then deleted the object store that the
+# restore strategy itself depends on: the guard destroying its own recovery source while
+# reporting success. Filesystem-only (a directory named `.git`, or the admin layout
+# HEAD+objects/) so it fires even when git is absent — a missing git binary must never downgrade
+# a STRUCTURAL refusal into an overridable one.
 git_admin_dir_at_or_above() {
   local head="$1"
   while :; do
@@ -423,15 +424,13 @@ git_admin_dir_at_or_above() {
   done
 }
 
-# Prints the path of the first git repository found STRICTLY BENEATH the given
-# directory (depth >= 2 — a nested checkout, submodule or bare mirror, not the
-# directory's own repository), else fails. `rm -rf` on such a target destroys a
-# repository whose index we do not have, so restoration is impossible and the
-# guard's premise is void. Uses only `find` so it applies whether or not git is
-# installed and regardless of whether the target is itself inside a checkout. One
-# NUL-safe walk, matching the two entries that mark a repository root (`.git` for
-# a checkout, `HEAD` for a bare one); ~16ms over the real dataset tree, which
-# contains neither.
+# Prints the path of the first git repository found STRICTLY BENEATH the given directory (depth
+# >= 2 — a nested checkout, submodule or bare mirror, not the directory's own repository), else
+# fails. `rm -rf` on such a target destroys a repository whose index we do not have, so
+# restoration is impossible and the guard's premise is void. Uses only `find` so it applies
+# whether or not git is installed and regardless of whether the target is itself inside a
+# checkout. One NUL-safe walk, matching the two entries that mark a repository root (`.git` for
+# a checkout, `HEAD` for a bare one); ~16ms over the real dataset tree, which contains neither.
 nested_repo_under() {
   local dir="$1" candidate parent scan_out scan_err detail
   [ -d "${dir}" ] || return 1
@@ -715,7 +714,7 @@ capture_tracked_dataset_files() {
   while IFS= read -r -d '' record; do
     tag="${record%% *}"
     case "${tag}" in
-      S | [a-z])
+      S | [[:lower:]])
         blind_count=$((blind_count + 1))
         if [ -z "${blind_sample}" ]; then
           blind_sample="${record#* }"
@@ -985,29 +984,27 @@ restore_tracked_dataset_files() {
   [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
   [ -n "${TRACKED_GUARD_LIST}" ] && [ -s "${TRACKED_GUARD_LIST}" ] || return 0
 
-  local -a pathspecs=()
-  local rel_path
-  while IFS= read -r -d '' rel_path; do
-    if [ "${mode}" = "missing-only" ] && [ -e "${TRACKED_GUARD_REPO}/${rel_path}" ]; then
-      continue
-    fi
-    pathspecs+=( ":(literal)${rel_path}" )
-  done <"${TRACKED_GUARD_LIST}"
-
-  if [ "${#pathspecs[@]}" -gt 0 ]; then
-    echo "Restoring ${#pathspecs[@]} git-tracked file(s) under ${TRACKED_GUARD_REL} (of ${TRACKED_GUARD_COUNT} tracked; mode=${mode})"
-    # Batch so a very large fixture set cannot hit ARG_MAX.
-    local batch=400 i
-    for (( i = 0; i < ${#pathspecs[@]}; i += batch )); do
-      # Restore from the INDEX (not HEAD): the index is what `git ls-files`
-      # enumerated, so this reproduces the checkout's intended content and cannot
-      # clobber a developer's STAGED edit to a tracked reference file.
-      if ! guard_git -C "${TRACKED_GUARD_REPO}" restore --worktree -- "${pathspecs[@]:i:batch}"; then
-        echo "ERROR: failed to restore git-tracked files under ${TRACKED_GUARD_REL} in ${TRACKED_GUARD_REPO} (issue #2878)" >&2
-        return 1
-      fi
-    done
+  # The pathspecs travel on STDIN (--pathspec-from-file, NUL-separated, --literal-pathspecs), NEVER as
+  # argv: Windows caps a command line near 32 KB and 925 tracked paths overflowed it (ARG_MAX class).
+  local todo="${TRACKED_GUARD_LIST}" rel_path n
+  if [ "${mode}" = "missing-only" ]; then
+    todo="$(mktemp "${TRACKED_GUARD_STATE_DIR:-${TMPDIR:-/tmp}}/cqlite-restore-todo.XXXXXX")" || return 1
+    while IFS= read -r -d '' rel_path; do
+      [ -e "${TRACKED_GUARD_REPO}/${rel_path}" ] || printf '%s\0' "${rel_path}"
+    done <"${TRACKED_GUARD_LIST}" >"${todo}"
   fi
+  n="$(tr -cd '\0' <"${todo}" | wc -c | tr -d ' ')"
+  if [ "${n}" -gt 0 ]; then
+    echo "Restoring ${n} git-tracked file(s) under ${TRACKED_GUARD_REL} (of ${TRACKED_GUARD_COUNT} tracked; mode=${mode})"
+    # Restore from the INDEX (not HEAD): the index is what `git ls-files` enumerated, so this reproduces
+    # the checkout's intended content and cannot clobber a developer's STAGED edit to a tracked file.
+    if ! guard_git --literal-pathspecs -C "${TRACKED_GUARD_REPO}" restore --worktree --pathspec-from-file=- --pathspec-file-nul <"${todo}"; then
+      [ "${todo}" = "${TRACKED_GUARD_LIST}" ] || rm -f "${todo}"
+      echo "ERROR: failed to restore git-tracked files under ${TRACKED_GUARD_REL} in ${TRACKED_GUARD_REPO} (issue #2878)" >&2
+      return 1
+    fi
+  fi
+  [ "${todo}" = "${TRACKED_GUARD_LIST}" ] || rm -f "${todo}"
 
   # Post-condition (only meaningful for the post-destruction restore): no tracked
   # file under the dataset dir may be left deleted or modified relative to the
@@ -1151,7 +1148,7 @@ guarantee_usable_root() {
   # like a valid choice and yield a corpus-less root (the #3131 report).
   local repo_root repo_default
   if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-    repo_default="$(cd "${repo_root}" && pwd -P)/test-data/datasets"
+    repo_default="$(cd "$(git_posix_path "${repo_root}")" && pwd -P)/test-data/datasets"
     if [ "${DATASET_ROOT}" != "${repo_default}" ]; then
       echo "NOTE: this run populated ${DATASET_ROOT}, NOT the checkout default"
       echo "NOTE:   ${repo_default}"
@@ -1565,7 +1562,7 @@ report_orphaned_tracked_fixtures() {
       continue
     fi
     case "${tag}" in
-      S | [a-z])
+      S | [[:lower:]])
         # ABSENT *and* flagged is the genuinely ambiguous case: for a sparse
         # checkout the absence is INTENTIONAL, for a lost fixture it is damage, and
         # git reports neither — nor could `git restore` rebuild a sparse-excluded
@@ -1786,9 +1783,10 @@ trap 'exit 129' HUP
 # intentional local edit to a tracked reference file survives, then let
 # has_required_dataset judge.
 capture_tracked_dataset_files
-restore_tracked_dataset_files missing-only || exit 1
+restore_tracked_dataset_files "$(_dataset_restore_mode && echo all || echo missing-only)" || exit 1   # CI: ALL, before the pin decision (#4508)
 
-if has_required_dataset; then
+if has_required_dataset && warm_cache_usable; then
+  warm_cache_reconcile
   write_pin
   echo "Dataset ${ASSET} (tag ${TAG}) already present in ${DATASET_ROOT}; skipping download"
   guarantee_usable_root "warm cache, download skipped"
@@ -1832,12 +1830,11 @@ capture_tracked_dataset_files
 # before the deletion, rather than discovering it afterwards.
 verify_captured_blobs_readable
 
-# ...and refuse outright if any tracked fixture carries a LOCAL modification: the
-# restore rebuilds from the INDEX, so the delete-and-restore would silently REVERT
-# it and still report success (issue #3245). Placed here — after the re-capture,
-# immediately before the destructive window opens — so the verdict is about the
-# tree state at deletion time; the warm-cache and --verify-only paths exit above
-# and are unaffected.
+# ...and refuse outright if any tracked fixture carries a LOCAL modification: the restore
+# rebuilds from the INDEX, so the delete-and-restore would silently REVERT it and still report
+# success (issue #3245). Placed here — after the re-capture, immediately before the destructive
+# window opens — so the verdict is about the tree state at deletion time; the warm-cache and
+# --verify-only paths exit above and are unaffected.
 refuse_modified_tracked_dataset_files
 
 # From here until the restore below verifies the tracked subtree clean, an abort
@@ -1886,6 +1883,8 @@ if ! has_required_content; then
   exit 1
 fi
 
+write_bundle_manifest "${ASSET_PATH}" || echo "WARNING: could not write ${DATASET_ROOT}/.dataset-manifest; stale files cannot be classified (CI refuses)" >&2
+warm_cache_reconcile   # twins of tracked files the PR deleted/renamed come out of a cold extract too (#4508)
 write_pin
 echo "Dataset extracted to ${DATASET_ROOT}"
 guarantee_usable_root "fresh extraction"

@@ -185,13 +185,13 @@ make_repo() {
 *.db
 test-data/datasets/metadata.yml
 test-data/datasets/sstables/
-test-data/datasets/.dataset-pin
+test-data/datasets/.dataset-*
 IGN
   for rel in "${TRACKED_RELATIVE[@]}"; do
     mkdir -p "$dir/test-data/datasets/$(dirname "$rel")"
     committed_content "$rel" >"$dir/test-data/datasets/$rel"
   done
-  git -C "$dir" add .gitignore
+  printf "# sha256=%s\n" "$SHA" >"$dir/test-data/dataset-bundle-tracked.txt"; git -C "$dir" add .gitignore test-data/dataset-bundle-tracked.txt   # #4508 twin list
   for rel in "${TRACKED_RELATIVE[@]}"; do
     git -C "$dir" add -f "test-data/datasets/$rel"
   done
@@ -361,7 +361,7 @@ assert_archive_extracted "$R1A/test-data/datasets" "default-root"
 # Mutant: the two `capture_tracked_dataset_files` call sites become no-ops, which
 # reproduces the pre-#2878 behaviour (no capture -> nothing to restore). If the
 # assertions above can also pass here, they prove nothing.
-MUTANT="$T/fetch-datasets-mutant.sh"
+MUTANT="$T/fetch-datasets-mutant.sh"; ln -s "$REPO_ROOT/test-data/scripts/lib" "$T/lib"  # mutant copies source lib/ beside themselves (#4508)
 sed 's/^capture_tracked_dataset_files$/: mutant-disabled/' "$FETCH" >"$MUTANT"
 if grep -q ': mutant-disabled' "$MUTANT"; then
   ok "non-vacuity: built a guard-disabled mutant"

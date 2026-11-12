@@ -183,4 +183,7 @@ if [[ -n "$others" ]]; then
   echo "$others" | sed 's/^/     /'
 fi
 
+echo "⚠️  Now regenerate the bundle's tracked-class list from the NEW bundle (check-dataset-pin.sh reds otherwise):"
+echo "     bash test-data/scripts/gen-dataset-tracked-manifest.sh <new bundle .tar.gz>   (#4508)"
+
 echo "✅ Pin bump complete. Review 'git diff', then open a PR."

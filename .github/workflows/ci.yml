@@ -133,9 +133,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: test-data/datasets
-          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+          key: datasets-fmt2-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
-      - name: Fetch datasets if required fixture data missing
+      - name: Fetch and reconcile datasets (unconditional, #4508)
         run: >-
           bash scripts/ci/ci-timing-summary.sh measure
           "fetch datasets"

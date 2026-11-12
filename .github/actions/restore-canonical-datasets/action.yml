@@ -32,9 +32,9 @@ runs:
       uses: actions/cache@v5
       with:
         path: ${{ inputs.dataset-root }}
-        key: datasets-${{ inputs.dataset-tag }}-${{ inputs.dataset-sha256 }}
+        key: datasets-fmt2-${{ inputs.dataset-tag }}-${{ inputs.dataset-sha256 }}
         restore-keys: |
-          datasets-${{ inputs.dataset-tag }}-
+          datasets-fmt2-${{ inputs.dataset-tag }}-
 
     - name: Fetch or repair canonical datasets
       shell: bash
@@ -44,3 +44,23 @@ runs:
         DATASET_SHA256: ${{ inputs.dataset-sha256 }}
         CQLITE_DATASETS_ROOT: ${{ inputs.dataset-root }}
       run: bash ./test-data/scripts/fetch-datasets.sh
+
+    # The cache restore above extracts over the checkout and overwrites same-named tracked files with
+    # the cached bundle's bytes (#4508). fetch-datasets.sh restores them from the index on every path
+    # (`restore_tracked_dataset_files all` in CI); this step proves it, so a PR can never be tested
+    # against stale tracked bytes while reading green.
+    - name: Assert tracked datasets are byte-identical to the checkout
+      shell: bash
+      env:
+        DATASET_ROOT: ${{ inputs.dataset-root }}
+      run: |
+        set -euo pipefail
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+          echo "::notice::not inside a git work tree; tracked-dataset drift check skipped"
+          exit 0
+        fi
+        if ! git diff --exit-code --stat -- "$DATASET_ROOT"; then
+          echo "::error::tracked files under $DATASET_ROOT differ from the checkout after the dataset restore (#4508): the restored cache overwrote them with other bytes"
+          exit 1
+        fi
+        echo "tracked files under $DATASET_ROOT are byte-identical to the checkout"
