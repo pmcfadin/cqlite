@@ -360,7 +360,7 @@ impl SSTableReader {
     /// offset is, by construction, the next partition's exact start
     /// (`partition_successor.rs` takes the minimum index offset strictly greater
     /// than this one), so a well-formed pair cannot produce it.
-    async fn seek_partition_compaction_rows(
+    pub(crate) async fn seek_partition_compaction_rows(
         &self,
         offset: u64,
         end_bound: Option<u64>,

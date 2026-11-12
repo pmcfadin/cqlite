@@ -113,7 +113,7 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
     let mut all_updates_complete = true;
     let mut last_mutation_partial = false;
     let mut it = reader.mutations();
-    for res in it.by_ref() {
+    for (_pos, res) in it.by_ref() {
         match res {
             Ok(mutation) => {
                 mutation_count += 1;

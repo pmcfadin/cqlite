@@ -93,6 +93,8 @@ pub use data_access::{QueryRowBatch, QueryRowStream, ScanTokenBound, QUERY_ROWS_
 // Single-partition compaction seek outcome (issue #2207). `not(tombstones)` like
 // the seek path it wraps.
 #[cfg(not(feature = "tombstones"))]
+pub use data_access::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
+#[cfg(not(feature = "tombstones"))]
 pub use data_access::SinglePartitionCompaction;
 // Decode-at-offset outcome for `salvage_sstable`'s recovery loop (issue
 // #4196). `write-support`-gated (its only consumer needs the feature) in

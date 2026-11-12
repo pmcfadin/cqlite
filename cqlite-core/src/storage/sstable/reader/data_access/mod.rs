@@ -94,6 +94,8 @@ mod partition_boundaries;
 // compaction-row seek for one partition. Gated `not(tombstones)` like the seek
 // primitives it composes (`successor_partition_offset`, `point_read_whole_section`).
 #[cfg(not(feature = "tombstones"))]
+mod find_probe;
+#[cfg(not(feature = "tombstones"))]
 mod point_compaction;
 // Fail-safe proof (issue #2207, roborev IMPORTANT-1): a corrupt/unreadable BTI
 // Partitions.db must degrade the point-read primitive to a scan-fallback signal,
@@ -113,6 +115,8 @@ mod sequential;
 // Public surface re-export (unchanged: `reader::mod` re-exports
 // `data_access::ClusteringSlice`).
 pub use model::ClusteringSlice;
+#[cfg(not(feature = "tombstones"))]
+pub use find_probe::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
 #[cfg(not(feature = "tombstones"))]
 pub use point_compaction::SinglePartitionCompaction;
 // Crate-internal decode-at-offset primitive salvage's recovery loop is built

@@ -132,14 +132,17 @@ impl MutationIter<'_> {
 }
 
 impl Iterator for MutationIter<'_> {
-    type Item = Result<Mutation>;
+    /// `(position, mutation)`: `position` is the record's byte offset within the segment file.
+    type Item = (u64, Result<Mutation>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
         }
         match self.walker.next_frame() {
-            Ok(FrameStep::Record(body)) => Some(decode_mutation(body, self.schemas)),
+            Ok(FrameStep::Record { offset, body }) => {
+                Some((offset as u64, decode_mutation(body, self.schemas)))
+            }
             Ok(FrameStep::End) => {
                 self.done = true;
                 None
@@ -151,7 +154,9 @@ impl Iterator for MutationIter<'_> {
             }
             Err(e) => {
                 self.done = true;
-                Some(Err(e))
+                // A framing error has no trustworthy record offset; 0 is never a valid
+                // record position (the descriptor header precedes every record).
+                Some((0, Err(e)))
             }
         }
     }
@@ -282,6 +287,7 @@ mod tests {
             let mutation = mutations
                 .next()
                 .expect("one framed mutation")
+                .1
                 .expect("valid mutation body");
             assert_eq!(mutation.updates.len(), 1);
             assert!(mutation.updates_complete);

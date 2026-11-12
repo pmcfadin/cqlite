@@ -52,6 +52,8 @@ pub mod work_counters;
 #[cfg(feature = "zstd")]
 pub mod zstd_frame;
 pub use reader::SSTableReader;
+#[cfg(not(feature = "tombstones"))]
+pub use reader::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
 /// Explicit directory refresh (issue #1749): re-scan + atomic diff-and-swap of
 /// the held reader set. Not `state_machine`-gated — meaningful for minimal builds.
 pub mod refresh;
