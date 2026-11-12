@@ -274,3 +274,88 @@ fn hex(s: &str) -> Vec<u8> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
         .collect()
 }
+
+// ---- #4205: writetime reconstruction -----------------------------------------------------
+
+#[test]
+fn alice_body_writetime_is_epoch_plus_stats_plus_delta() {
+    // Hand-decoded from ALICE_BODY: EncodingStats.minTimestamp uvint = 0xfd 36c1327cb48c
+    // = (1<<48)|0x36c1327cb48c = 341678380332172; + TIMESTAMP_EPOCH (cassandra-5.0.8
+    // EncodingStats: 2015-09-22T00:00:00Z = 1442880000000000) = 1784558380332172. The row
+    // carries ROW_HAS_TIMESTAMP with delta 0, and both cells set CELL_USE_ROW_TIMESTAMP.
+    const EXPECTED: i64 = 1_784_558_380_332_172;
+    let body = hex(ALICE_BODY);
+    let id = parse_table_id("d6de7150-8448-11f1-bf5a-bf4cbc47cb4a").unwrap();
+    let mut schemas: SchemaSet = HashMap::new();
+    schemas.insert(id, users_schema());
+    let m = decode_mutation(&body, &schemas).expect("decode");
+    let u = &m.updates[0];
+    assert_eq!(u.min_timestamp, Some(EXPECTED));
+    assert_eq!(u.rows[0].writetime, Some(EXPECTED));
+    assert!(u.rows[0]
+        .cells
+        .iter()
+        .all(|c| c.writetime == Some(EXPECTED)));
+    assert_eq!(
+        crate::storage::commitlog::mutation_writetime(u),
+        crate::storage::commitlog::Writetime::Known(EXPECTED)
+    );
+}
+
+#[test]
+fn undecodable_shapes_report_a_named_cause_never_a_value() {
+    use crate::storage::commitlog::{mutation_writetime, Writetime};
+    let body = hex(ALICE_BODY);
+    let id = parse_table_id("d6de7150-8448-11f1-bf5a-bf4cbc47cb4a").unwrap();
+
+    // No schema supplied.
+    let m = decode_mutation(&body, &HashMap::new()).expect("decode");
+    assert_eq!(
+        mutation_writetime(&m.updates[0]),
+        Writetime::Unmeasured("table schema not supplied")
+    );
+
+    // Clustered declaration of the same table.
+    let mut clustered = users_schema();
+    clustered.clustering = vec![ColumnSpec::new("seq", "int")];
+    let mut schemas: SchemaSet = HashMap::new();
+    schemas.insert(id, clustered);
+    let m = decode_mutation(&body, &schemas).expect("decode");
+    assert_eq!(
+        mutation_writetime(&m.updates[0]),
+        Writetime::Unmeasured("clustered table not decoded")
+    );
+
+    // Complex (collection) column declared for a name the header carries.
+    let mut complex = users_schema();
+    complex.columns = vec![
+        ColumnSpec::new("age", "list<int>"),
+        ColumnSpec::new("name", "text"),
+    ];
+    let mut schemas: SchemaSet = HashMap::new();
+    schemas.insert(id, complex);
+    let m = decode_mutation(&body, &schemas).expect("decode");
+    assert_eq!(
+        mutation_writetime(&m.updates[0]),
+        Writetime::Unmeasured("complex column not decoded")
+    );
+}
+
+#[test]
+fn partition_deletion_flag_yields_the_partition_deletion_cause() {
+    use crate::storage::commitlog::{mutation_writetime, Writetime};
+    // ALICE_BODY with the iterator flags byte (offset 22) changed from 0x10 to 0x14: the
+    // HAS_PARTITION_DELETION bit. decode_partition_update bails before reading rows.
+    let mut body = hex(ALICE_BODY);
+    assert_eq!(body[22], 0x10, "fixture shape");
+    body[22] |= 0x04;
+    let id = parse_table_id("d6de7150-8448-11f1-bf5a-bf4cbc47cb4a").unwrap();
+    let mut schemas: SchemaSet = HashMap::new();
+    schemas.insert(id, users_schema());
+    let m = decode_mutation(&body, &schemas).expect("decode");
+    assert!(m.updates[0].has_partition_deletion);
+    assert_eq!(
+        mutation_writetime(&m.updates[0]),
+        Writetime::Unmeasured("partition-deletion timestamp not decoded")
+    );
+}

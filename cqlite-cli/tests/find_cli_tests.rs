@@ -11,6 +11,8 @@
 //!
 //! Every fixture used here is git-COMMITTED, so absence fails closed unconditionally (#3220).
 
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
