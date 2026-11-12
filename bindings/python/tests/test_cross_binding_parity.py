@@ -97,8 +97,8 @@ DECLARED_GAPS: Tuple[str, ...] = (
     "tuple vs list is UNDETECTABLE here: the node and cli legs both emit a plain array — and "
     "the CLI leg cannot tell set from list either, so F4's type-specific container check is "
     "enforced on the python and node legs ONLY.",
-    "no `varint` column exists in the committed schema corpus; the rule is pinned by "
-    "canonical-vectors.json alone.",
+    "the `varint_values` fixture's explicit-NULL row is dropped by CQLite's SELECT on all "
+    "three legs alike (class of #2189), so a varint NULL is not compared live.",
     "UDT columns are REFUSED by the canonicalizer, not compared; no fixture uses one.",
     "non-finite floats are a real 3-way asymmetry (python nan / node NaN / cli null) and "
     "are avoided rather than reconciled.",
