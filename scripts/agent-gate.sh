@@ -16656,9 +16656,28 @@ run_component() { # run_component <name> <cmd...>
   AGENT_GATE_FM_COMPONENT="$name"
   local log="$LOG_DIR/$name.log"
   local start end status
+  # #4230: these dataset-backed components run strict on the FULL gate (and --recertify,
+  # via _gate_is_strict): corpus-gated tests FAIL on an absent fixture instead of
+  # skip-passing. Scoped to the child with `env` so it cannot leak into a dataset-free
+  # component; it reaches every child under the `bash -c` bodies by inheritance. Tests
+  # that may legitimately skip use skip_or_require. --only/--lite probes and
+  # AGENT_GATE_ALLOW_MISSING_FIXTURES=1 keep the caller's own policy. CI's
+  # core-tests-ci.yml deliberately stays unset (#1995, it does not provision the
+  # Docker/corruption/byte-oracle fixtures), so the gate is the stricter of the two.
+  # A SUBSHELL export, not `env`: the fallback core-tests command is `cargo ...`, and
+  # `cargo` is a shell function here (the feature-matrix observer, #3453) that `env`
+  # would bypass.
+  local strict_fixtures=0
+  case "$name" in
+    core-tests|write-tests|cli-tests|integration-tests)
+      if _gate_is_strict && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+        strict_fixtures=1
+      fi
+      ;;
+  esac
   echo ">>> [$name] $*"
   start=$(date +%s)
-  if "$@" >"$log" 2>&1; then
+  if ( [ "$strict_fixtures" -eq 1 ] && export CQLITE_REQUIRE_FIXTURES=1; "$@" ) >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
