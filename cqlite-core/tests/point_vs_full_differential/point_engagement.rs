@@ -92,20 +92,26 @@ pub(super) async fn point_leg_cold(
     Ok((result, delta))
 }
 
-/// The first point probe of a case must be a cache MISS and never a hit: it proves
-/// the leg ran cold. `delta` is `(hits, misses, entries)` from [`point_leg_cold`].
+/// The first point probe of a case must start with a key-offset-cache MISS: after
+/// [`point_leg_cold`]'s invalidation, a probe that saw zero misses was served from
+/// somewhere other than a cold index descent (a warm hit, or no cache consultation
+/// at all, in which case "cold" is unproven). Hits AFTER that first miss are
+/// legitimate and expected: the BTI path consults the cache for the prune and again
+/// for the seek, and the first consult has just populated it. `delta` is
+/// `(hits, misses, entries gained)` from [`point_leg_cold`].
 pub(super) fn cold_miss_violation(
     label: &str,
     query: &str,
     delta: (u64, u64, usize),
 ) -> Result<(), String> {
-    let (hits, misses, _) = delta;
-    if hits == 0 && misses >= 1 {
+    let (hits, misses, entries) = delta;
+    if misses >= 1 && entries >= 1 {
         return Ok(());
     }
     Err(format!(
-        "COLD-START FAIL: {label}: the first point probe `{query}` saw {hits} key-offset-cache \
-         hit(s) and {misses} miss(es) — expected 0 hits and >=1 miss after invalidation"
+        "COLD-START FAIL: {label}: the first point probe `{query}` saw {hits} hit(s), \
+         {misses} miss(es), {entries} new entr(ies) in the key-offset cache — expected >=1 \
+         miss and >=1 populated entry after invalidation"
     ))
 }
 
@@ -118,8 +124,12 @@ pub(super) fn cold_miss_violation(
 fn cold_miss_violation_fires_on_a_warm_hit_and_on_no_cache_traffic() {
     assert!(cold_miss_violation("t", "q", (0, 1, 1)).is_ok());
     assert!(
-        cold_miss_violation("t", "q", (1, 1, 1)).is_err(),
-        "a hit means warm"
+        cold_miss_violation("t", "q", (1, 1, 1)).is_ok(),
+        "a BTI probe hits on its own second consult after the first miss populated it"
+    );
+    assert!(
+        cold_miss_violation("t", "q", (1, 0, 0)).is_err(),
+        "a pure hit means warm"
     );
     assert!(
         cold_miss_violation("t", "q", (0, 0, 0)).is_err(),
