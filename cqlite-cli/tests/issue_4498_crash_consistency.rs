@@ -1,0 +1,591 @@
+//! Issue #4498 — crash-consistency harness for the SSTable WRITE verbs (`salvage`,
+//! `rebuild`; each later write verb adds a `Verb` entry).
+//!
+//! # Mechanism
+//!
+//! The shipped `cqlite` binary is run under `tests/support/crash_fault_shim.c`, an
+//! `LD_PRELOAD` interposer on the libc calls every writer bottoms out in (`write`,
+//! `pwrite`, `copy_file_range`/`sendfile` for `fs::copy`, `fsync`, `ftruncate`,
+//! `rename`, `open(O_CREAT)`, `unlink`, `mkdir`). A counting run enumerates EVERY such
+//! boundary under the work directory (so the set is enumerated from the real run, never
+//! sampled); then one run per `(boundary, mode)` faults exactly one of them:
+//!
+//! * `crash`  — SIGKILL before the boundary takes effect (no destructor or cleanup runs),
+//! * `enospc` — the boundary fails with `ENOSPC`,
+//! * `short`  — a write persists half its bytes and returns the short count, after which the
+//!   disk is "full" (`write_all` retries a bare short write, so the full disk is what makes
+//!   it observable).
+//!
+//! No fault code exists in the product: nothing to compile out of release builds, and
+//! `release_cli_binary_contains_no_fault_hook` proves it on a release build (AC7).
+//!
+//! # What is asserted after every injected fault
+//!
+//! * AC3  the input is byte-identical;
+//! * AC5  `enospc`/`short` exit non-zero NAMING the cause ("No space left on device");
+//!   `crash` dies by SIGKILL (proving the fault fired);
+//! * AC2  the CQLite publication contract: a `*-TOC.txt` is the publication barrier
+//!   (`discover_salvage_inputs`; rebuild design D2/D4 "always written LAST"), so if any
+//!   TOC exists the generation next to it must be COMPLETE (byte-equal to an uninterrupted
+//!   run) and `verify --mode full`-clean;
+//! * AC4  re-running the verb into the same `--out` after the failure exits 0 and leaves
+//!   exactly the uninterrupted run's bytes.
+//!
+//! # Cassandra's discoverability rule (cassandra-5.0.8)
+//!
+//! `Directories.SSTableLister.getFilter` groups EVERY file whose name parses as an SSTable
+//! component into a `Descriptor`; there is no "needs a TOC" filter — only the lifecycle
+//! transaction log (`LifecycleTransaction`) decides what is live, and `TOCComponent.loadOrCreate`
+//! REBUILDS a missing TOC from whatever components are on disk. So against Cassandra's rules
+//! the TOC barrier is a CQLite convention, and any final-named component left behind by a
+//! crash is discoverable as a (partial) SSTable. `cassandra_discoverable_partial_sets_*`
+//! measures that stricter property.
+
+#![cfg(all(
+    feature = "write-support",
+    not(feature = "tombstones"),
+    target_os = "linux"
+))]
+
+use std::collections::BTreeMap;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::OnceLock;
+
+use tempfile::TempDir;
+
+#[derive(Clone, Copy)]
+struct Fixture {
+    /// Directory under `sstables/` (committed generation directory).
+    relative: &'static str,
+    schema_file: &'static str,
+    table: &'static str,
+    /// The Data.db to rebuild.
+    data_db: &'static str,
+    /// `rebuild --components` for this format (BTI has no Index/Summary/CRC here).
+    rebuild_components: &'static str,
+}
+
+const BIG_SMALL: Fixture = Fixture {
+    relative: "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77",
+    schema_file: "compression-parity.cql",
+    table: "lz4_table",
+    data_db: "nb-1-big-Data.db",
+    rebuild_components: "index,summary,filter,digest,toc,statistics",
+};
+const BTI_SMALL: Fixture = Fixture {
+    relative: "sstables/test_da/multiclustering_table-fd74ad508d2311f1a29b6d2c15dcffdf",
+    schema_file: "multiclustering-table-bti.cql",
+    table: "multiclustering_table",
+    data_db: "da-2-bti-Data.db",
+    rebuild_components: "filter,digest,toc,statistics",
+};
+const BIG_LARGE: Fixture = Fixture {
+    relative: "sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294",
+    schema_file: "wide-partition-big.cql",
+    table: "wide_partition",
+    data_db: "nb-2-big-Data.db",
+    rebuild_components: "index,summary,filter,digest,toc,statistics",
+};
+
+/// Nightly tier knob: `CQLITE_CRASH_CONSISTENCY_LARGE=1` adds the large fixtures.
+fn fixtures() -> Vec<Fixture> {
+    let mut v = vec![BIG_SMALL, BTI_SMALL];
+    if std::env::var("CQLITE_CRASH_CONSISTENCY_LARGE").as_deref() == Ok("1") {
+        v.push(BIG_LARGE);
+    }
+    v
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verb {
+    Salvage,
+    Rebuild,
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf()
+}
+
+/// COMMITTED fixture: absence is a broken checkout and fails closed unconditionally (#3220).
+fn fixture_dir(f: &Fixture) -> PathBuf {
+    let mut roots = Vec::new();
+    if let Ok(r) = std::env::var("CQLITE_DATASETS_ROOT") {
+        roots.push(PathBuf::from(r));
+    }
+    roots.push(repo_root().join("test-data/datasets"));
+    for r in roots {
+        let d = r.join(f.relative);
+        if d.join(f.data_db).is_file() {
+            return d;
+        }
+    }
+    panic!(
+        "COMMITTED fixture {} is absent under every candidate root",
+        f.relative
+    );
+}
+
+/// Compile the fault shim once per test process (fails closed: no `cc`, no harness).
+fn shim() -> &'static Path {
+    static SHIM: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+    &SHIM
+        .get_or_init(|| {
+            let dir = TempDir::new().expect("shim tempdir");
+            let so = dir.path().join("crash_fault_shim.so");
+            let src =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/crash_fault_shim.c");
+            let out = Command::new("cc")
+                .args(["-shared", "-fPIC", "-O1", "-o"])
+                .arg(&so)
+                .arg(&src)
+                .arg("-ldl")
+                .output()
+                .expect("`cc` is required to build the crash-fault shim");
+            assert!(
+                out.status.success(),
+                "crash_fault_shim.c failed to compile:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            (dir, so)
+        })
+        .1
+}
+
+/// The staged INPUT, created once per fixture and shared by every run. Sharing matters for
+/// determinism: `rebuild` copies the untouched components in `read_dir` order, which depends on
+/// the directory's on-disk state, so re-staging per run would renumber the boundaries.
+struct Staged {
+    _tmp: TempDir,
+    input: PathBuf,
+}
+
+fn stage_input(f: &Fixture) -> Staged {
+    let tmp = TempDir::new().expect("tempdir");
+    // canonicalize: the shim compares the process's real (/proc) paths against the root.
+    let base = tmp.path().canonicalize().expect("canonical tempdir");
+    let input = base.join("input").join(f.table);
+    std::fs::create_dir_all(&input).expect("mkdir input");
+    for e in std::fs::read_dir(fixture_dir(f))
+        .expect("read fixture")
+        .flatten()
+    {
+        if e.path().is_file() {
+            std::fs::copy(e.path(), input.join(e.file_name())).expect("stage copy");
+        }
+    }
+    Staged { _tmp: tmp, input }
+}
+
+/// One run's work area: `work/` is the fault root (holds `--out` and the manifest); the
+/// boundary log sits next to it, outside the root.
+struct Area<'a> {
+    _tmp: TempDir,
+    input: &'a Path,
+    work: PathBuf,
+}
+
+fn new_area(staged: &Staged) -> Area<'_> {
+    let tmp = TempDir::new().expect("tempdir");
+    let base = tmp.path().canonicalize().expect("canonical tempdir");
+    let work = base.join("work");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+    Area {
+        _tmp: tmp,
+        input: &staged.input,
+        work,
+    }
+}
+
+/// Every file under `dir` (recursive) -> bytes. Used for input immutability and output sets.
+fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else {
+                out.insert(
+                    p.strip_prefix(base).unwrap().to_path_buf(),
+                    std::fs::read(&p).unwrap_or_default(),
+                );
+            }
+        }
+    }
+    let mut m = BTreeMap::new();
+    walk(dir, dir, &mut m);
+    m
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Crash,
+    Enospc,
+    Short,
+}
+
+impl Mode {
+    fn env(self) -> &'static str {
+        match self {
+            Mode::Crash => "crash",
+            Mode::Enospc => "enospc",
+            Mode::Short => "short",
+        }
+    }
+}
+
+struct Run {
+    out: Output,
+}
+
+impl Run {
+    fn code(&self) -> Option<i32> {
+        self.out.status.code()
+    }
+    fn signal(&self) -> Option<i32> {
+        self.out.status.signal()
+    }
+    fn text(&self) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&self.out.stdout),
+            String::from_utf8_lossy(&self.out.stderr)
+        )
+    }
+}
+
+fn out_dir(area: &Area<'_>) -> PathBuf {
+    area.work.join("out")
+}
+
+/// Run `verb` on the staged fixture into `work/out` (+ `work/manifest.json`), optionally under
+/// the shim.
+fn run_verb(
+    verb: Verb,
+    f: &Fixture,
+    area: &Area<'_>,
+    shim_env: Option<(&Path, Option<(usize, Mode)>)>,
+) -> Run {
+    let schema = repo_root().join("test-data/schemas").join(f.schema_file);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cqlite"));
+    cmd.arg("--schema").arg(&schema);
+    match verb {
+        Verb::Salvage => {
+            cmd.arg("salvage").arg(area.input);
+        }
+        Verb::Rebuild => {
+            cmd.arg("rebuild")
+                .arg(area.input.join(f.data_db))
+                .args(["--components", f.rebuild_components]);
+        }
+    }
+    cmd.args(["--table", f.table, "--out"])
+        .arg(out_dir(area))
+        .arg("--manifest")
+        .arg(area.work.join("manifest.json"))
+        .args(["--out-format", "json"]);
+    if let Some((so, fault)) = shim_env {
+        cmd.env("LD_PRELOAD", so)
+            .env("CQLITE_FAULT_ROOT", &area.work)
+            .env(
+                "CQLITE_FAULT_LOG",
+                area.work.parent().unwrap().join("boundaries.log"),
+            );
+        if let Some((at, mode)) = fault {
+            cmd.env("CQLITE_FAULT_AT", at.to_string())
+                .env("CQLITE_FAULT_MODE", mode.env());
+        }
+    }
+    Run {
+        out: cmd.output().expect("run cqlite"),
+    }
+}
+
+/// The ordered boundary list of an uninterrupted run: `(kind, path-relative-to-work)`.
+fn boundaries(area: &Area<'_>) -> Vec<(String, String)> {
+    let log = area.work.parent().unwrap().join("boundaries.log");
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let prefix = area.work.display().to_string();
+    text.lines()
+        .map(|l| {
+            let mut it = l.splitn(3, ' ');
+            let _n = it.next();
+            let kind = it.next().unwrap_or("?").to_string();
+            let path = it
+                .next()
+                .unwrap_or("?")
+                .replace(&prefix, "")
+                .trim_start_matches('/')
+                .to_string();
+            (kind, path)
+        })
+        .collect()
+}
+
+/// Component files (not the manifest) of the output tree, relative to `out/`.
+fn output_set(area: &Area<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
+    snapshot(&out_dir(area))
+}
+
+fn tocs(set: &BTreeMap<PathBuf, Vec<u8>>) -> Vec<PathBuf> {
+    set.keys()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-TOC.txt"))
+        })
+        .cloned()
+        .collect()
+}
+
+fn verify_clean(dir: &Path, f: &Fixture) -> bool {
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
+        .arg("--schema")
+        .arg(repo_root().join("test-data/schemas").join(f.schema_file))
+        .args(["verify"])
+        .arg(dir)
+        .args(["--mode", "full"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Which slice of the boundary x mode matrix a sweep exercises.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Everything EXCEPT the known defects: the property the CLI must hold today.
+    Enforced,
+    /// ONLY the known defects (driven by the `#[ignore]`d reproducers).
+    KnownDefects,
+    /// Crash mode only, against Cassandra's discoverability rule (see module doc).
+    CassandraStrict,
+}
+
+/// A boundary x mode combination with a confirmed, un-fixed product defect. Each is
+/// reproduced by an `#[ignore = "#<tbd>"]` test below; the enforced sweep skips them so the
+/// rest of the matrix stays a live regression net.
+fn known_defect(kind: &str, path: &str, mode: Mode) -> Option<&'static str> {
+    let is_write = matches!(kind, "write" | "pwrite");
+    if is_write && path.ends_with("-TOC.txt") && matches!(mode, Mode::Crash | Mode::Short) {
+        return Some("torn-toc: TOC.txt is created in place and written non-atomically, so a crash or short write mid-write publishes a partial barrier");
+    }
+    if is_write && path.ends_with("-Filter.db") && mode == Mode::Enospc {
+        return Some("swallowed-filter-write-error: an ENOSPC on Filter.db's write is not propagated (exit 0, TOC published over an incomplete set)");
+    }
+    if is_write && path.ends_with("manifest.json") && matches!(mode, Mode::Enospc | Mode::Short) {
+        return Some("swallowed-manifest-write-error: an ENOSPC on the --manifest write is not propagated (exit 0)");
+    }
+    None
+}
+
+/// The per-verb, per-fixture sweep. Returns `(boundary_count, runs, failures)`.
+fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
+    // Reference: counting run, twice (the boundary list must be deterministic or the
+    // enumeration is meaningless).
+    let staged = stage_input(f);
+    let area = new_area(&staged);
+    let r = run_verb(verb, f, &area, Some((shim(), None)));
+    assert_eq!(
+        r.code(),
+        Some(0),
+        "uninterrupted {verb:?} must succeed: {}",
+        r.text()
+    );
+    let bounds = boundaries(&area);
+    let reference = output_set(&area);
+    assert!(
+        !reference.is_empty() && !tocs(&reference).is_empty(),
+        "reference run produced no TOC"
+    );
+    let area2 = new_area(&staged);
+    let r2 = run_verb(verb, f, &area2, Some((shim(), None)));
+    assert_eq!(r2.code(), Some(0));
+    assert_eq!(
+        bounds,
+        boundaries(&area2),
+        "boundary enumeration must be deterministic"
+    );
+    assert_eq!(
+        reference,
+        output_set(&area2),
+        "two uninterrupted runs must produce identical bytes"
+    );
+    assert!(
+        bounds.len() >= 8,
+        "implausibly few boundaries ({}): shim not interposing?",
+        bounds.len()
+    );
+
+    let mut failures = Vec::new();
+    let mut runs = 0usize;
+    for (i, (kind, path)) in bounds.iter().enumerate() {
+        let n = i + 1;
+        let is_write = matches!(kind.as_str(), "write" | "pwrite" | "copy");
+        for mode in [Mode::Crash, Mode::Enospc, Mode::Short] {
+            if mode == Mode::Short && !is_write {
+                continue; // identical to Enospc for a non-write boundary
+            }
+            let defect = known_defect(kind, path, mode);
+            match scope {
+                Scope::Enforced if defect.is_some() => continue,
+                Scope::KnownDefects if defect.is_none() => continue,
+                Scope::CassandraStrict if mode != Mode::Crash => continue,
+                _ => {}
+            }
+            runs += 1;
+            let tag = format!("{verb:?}/{}#{n} {kind} {path} [{}]", f.table, mode.env());
+            let a = new_area(&staged);
+            let input_before = snapshot(a.input);
+            let run = run_verb(verb, f, &a, Some((shim(), Some((n, mode)))));
+
+            // AC5 / the fault actually fired.
+            match mode {
+                Mode::Crash => {
+                    if run.signal() != Some(9) {
+                        failures.push(format!(
+                            "{tag}: expected SIGKILL, got code={:?} signal={:?}",
+                            run.code(),
+                            run.signal()
+                        ));
+                    }
+                }
+                Mode::Enospc | Mode::Short => {
+                    if run.code().is_none_or(|c| c == 0) {
+                        failures.push(format!(
+                            "{tag}: injected ENOSPC but exit was {:?}/{:?} (must be non-zero)",
+                            run.code(),
+                            run.signal()
+                        ));
+                    } else if !run.text().contains("No space left on device") {
+                        failures.push(format!("{tag}: non-zero exit {:?} but the cause (\"No space left on device\") is not named: {}", run.code(), run.text().lines().last().unwrap_or("")));
+                    }
+                }
+            }
+            // AC3
+            if snapshot(a.input) != input_before {
+                failures.push(format!("{tag}: INPUT CHANGED"));
+            }
+            // AC2 (CQLite publication contract)
+            let after = output_set(&a);
+            for toc in tocs(&after) {
+                let gen = toc.parent().unwrap_or(Path::new(""));
+                let have: BTreeMap<_, _> = after
+                    .iter()
+                    .filter(|(p, _)| p.parent() == Some(gen))
+                    .collect();
+                let want: BTreeMap<_, _> = reference
+                    .iter()
+                    .filter(|(p, _)| p.parent() == Some(gen))
+                    .collect();
+                if have != want {
+                    failures.push(format!("{tag}: TOC published ({}) but the generation is not the complete reference set", toc.display()));
+                } else if !verify_clean(&out_dir(&a).join(gen), f) {
+                    failures.push(format!("{tag}: TOC published and set complete but `verify --mode full` is not clean"));
+                }
+            }
+            if scope == Scope::CassandraStrict {
+                // Cassandra (5.0.8) groups EVERY component-named file into a Descriptor, so any
+                // final-named file left behind is a discoverable (partial) SSTable.
+                if !after.is_empty() && after != reference {
+                    failures.push(format!("{tag}: crash left {} final-named file(s) = a Cassandra-discoverable PARTIAL SSTable", after.len()));
+                }
+                continue;
+            }
+            // AC4: re-run after the failure. Both verbs REFUSE a non-empty --out by contract
+            // ("--out ... is not empty"), so the operator clears it first; the retry must then
+            // succeed and reproduce the uninterrupted run byte-for-byte.
+            let leftover = run_verb(verb, f, &a, Some((shim(), None)));
+            if after.is_empty() {
+                // nothing left behind: the retry must simply succeed
+            } else if leftover.code() == Some(0) {
+                failures.push(format!("{tag}: retry into a populated --out unexpectedly succeeded (the non-empty guard is part of the contract)"));
+            } else if !leftover.text().contains("not empty") {
+                failures.push(format!(
+                    "{tag}: retry into a populated --out failed without naming the cause: {}",
+                    leftover.text().lines().last().unwrap_or("")
+                ));
+            }
+            let _ = std::fs::remove_dir_all(out_dir(&a));
+            let _ = std::fs::remove_file(a.work.join("manifest.json"));
+            let again = run_verb(verb, f, &a, Some((shim(), None)));
+            if again.code() != Some(0) {
+                failures.push(format!(
+                    "{tag}: re-run after failure did not succeed: code={:?} {}",
+                    again.code(),
+                    again.text().lines().last().unwrap_or("")
+                ));
+            } else if output_set(&a) != reference {
+                failures.push(format!(
+                    "{tag}: re-run output differs from the uninterrupted run"
+                ));
+            }
+        }
+    }
+    (bounds.len(), runs, failures)
+}
+
+fn report(verb: Verb, f: &Fixture, n: usize, runs: usize, failures: &[String]) {
+    eprintln!(
+        "CRASH-CONSISTENCY {verb:?} {}: {n} boundaries, {runs} injected runs, {} failure(s)",
+        f.table,
+        failures.len()
+    );
+    for x in failures {
+        eprintln!("  FAIL {x}");
+    }
+}
+
+fn check(verb: Verb, scope: Scope, fixtures: Vec<Fixture>) {
+    let mut all = Vec::new();
+    for f in fixtures {
+        let (n, runs, failures) = sweep(verb, &f, scope);
+        report(verb, &f, n, runs, &failures);
+        all.extend(failures);
+    }
+    assert!(all.is_empty(), "{} failure(s); see stderr", all.len());
+}
+
+#[test]
+fn rebuild_survives_a_fault_at_every_boundary() {
+    check(Verb::Rebuild, Scope::Enforced, fixtures());
+}
+
+#[test]
+fn salvage_survives_a_fault_at_every_boundary() {
+    check(Verb::Salvage, Scope::Enforced, fixtures());
+}
+
+// ---- Confirmed product defects, reproduced here and NOT fixed in this change (#4498
+// asks for the harness; the fixes need the owner's call). Each runs ONLY the matrix cells
+// `known_defect` names, so removing `#[ignore]` after a fix proves the fix.
+
+#[test]
+#[ignore = "#<tbd> torn/in-place TOC.txt, swallowed Filter.db and manifest ENOSPC"]
+fn rebuild_known_defects_reproduce() {
+    check(Verb::Rebuild, Scope::KnownDefects, vec![BIG_SMALL]);
+}
+
+#[test]
+#[ignore = "#<tbd> torn/in-place TOC.txt, swallowed Filter.db and manifest ENOSPC"]
+fn salvage_known_defects_reproduce() {
+    check(Verb::Salvage, Scope::KnownDefects, vec![BIG_SMALL]);
+}
+
+#[test]
+#[ignore = "#<tbd> output uses final SSTable names in place; a crash leaves a Cassandra-discoverable partial set"]
+fn cassandra_discoverable_partial_sets_after_crash_rebuild() {
+    check(Verb::Rebuild, Scope::CassandraStrict, vec![BIG_SMALL]);
+}
+
+#[test]
+#[ignore = "#<tbd> output uses final SSTable names in place; a crash leaves a Cassandra-discoverable partial set"]
+fn cassandra_discoverable_partial_sets_after_crash_salvage() {
+    check(Verb::Salvage, Scope::CassandraStrict, vec![BIG_SMALL]);
+}
