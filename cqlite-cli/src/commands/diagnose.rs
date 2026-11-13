@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+use cqlite_core::storage::sstable::diagnose::reclaim_prediction::UPPER_BOUND_REASON;
 use cqlite_core::storage::sstable::diagnose::{
     diagnose_table, DeepGenerationReport, DiagnoseOptions, DiagnoseReport, FieldSource,
     GenerationDiagnosis, SourcedField,
@@ -159,8 +160,10 @@ fn deep_json(d: &DeepGenerationReport) -> Value {
         "top_tombstone_heaviest_partitions".into(),
         ranked(&d.top_tombstone_heaviest_partitions, "tombstones"),
     );
-    let reclaim = match &d.reclaim_at_now {
-        SourcedField::Measured { value: Some(r), .. } => {
+    // ONE envelope `{value, source, cause?}` for measured and unmeasured alike (R1). A measured
+    // prediction additionally carries `bound` + `bound_reason` (it is a per-generation estimate).
+    let reclaim = {
+        let mut env = sourced(&d.reclaim_at_now, |r| {
             let mut r_m = Map::new();
             r_m.insert("rows_in".into(), json!(r.rows_in));
             r_m.insert("rows_out".into(), json!(r.rows_out));
@@ -174,8 +177,12 @@ fn deep_json(d: &DeepGenerationReport) -> Value {
             );
             r_m.insert("tombstones_purged".into(), Value::Object(purged));
             Value::Object(r_m)
+        });
+        if d.reclaim_at_now.is_measured() {
+            env.insert("bound".into(), json!("upper"));
+            env.insert("bound_reason".into(), json!(UPPER_BOUND_REASON));
         }
-        other => Value::Object(sourced(other, |_| Value::Null)),
+        Value::Object(env)
     };
     m.insert("reclaim_at_now".into(), reclaim);
     Value::Object(m)
@@ -244,18 +251,12 @@ pub(crate) fn render_json(r: &DiagnoseReport) -> Result<String, String> {
     );
     let mut overlap = Map::new();
     overlap.insert("buckets".into(), json!(r.token_overlap.buckets));
-    match &r.token_overlap.counts {
-        SourcedField::Measured { value, .. } => {
-            overlap.insert("counts".into(), json!(value));
-        }
-        // Partial coverage would undercount: the whole histogram is unmeasured, cause names the
-        // generations (never a bare zero array).
-        SourcedField::Unmeasured { cause } => {
-            overlap.insert("counts".into(), Value::Null);
-            overlap.insert("source".into(), json!("unmeasured"));
-            overlap.insert("cause".into(), json!(cause));
-        }
-    }
+    // Same `{value, source, cause?}` envelope as every other leaf; a partial histogram would
+    // undercount, so unmeasured is the WHOLE value (cause names the generations).
+    overlap.insert(
+        "counts".into(),
+        Value::Object(sourced(&r.token_overlap.counts, |c| json!(c))),
+    );
     m.insert("token_overlap".into(), Value::Object(overlap));
     m.insert("now_used_for_gc_before".into(), json!(rfc3339(r.now_secs)?));
     // R6: not part of D5's list; appended LAST so D5's order is a prefix of the report.
@@ -360,8 +361,8 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
             ));
             match &d.reclaim_at_now {
                 SourcedField::Measured { value: Some(rc), .. } => o.push_str(&format!(
-                    "    reclaim at now: {} rows in -> {} rows out (dry compaction; purged-tombstone count unmeasured)\n",
-                    rc.rows_in, rc.rows_out
+                    "    reclaim at now: {} rows in -> {} rows out (dry compaction; UPPER BOUND on reclaim: {}; purged-tombstone count unmeasured)\n",
+                    rc.rows_in, rc.rows_out, UPPER_BOUND_REASON
                 )),
                 other => o.push_str(&format!("    reclaim at now: {}\n", text_sourced(other, |_| String::new()))),
             }
