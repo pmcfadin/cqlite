@@ -372,6 +372,11 @@ for f in sorted(glob.glob(root + "/.github/workflows/*.y*ml") + glob.glob(root +
 print(seen)
 for b in bad: print("BAD " + b)
 '
+# #4518: the guard parses workflow YAML with PyYAML. A runner without it must FAIL CLOSED naming the module, not
+# surface as `seen=` plus a wall of "mutation NOT caught" rows (gate.yml provisions pyyaml==6.0.2).
+if ! yaml_err="$(python3 -c "import yaml" 2>&1)"; then
+  bad "17: python3 cannot import the yaml module (PyYAML); install pyyaml==6.0.2 (gate.yml provisions it); the standalone-fetch guard and its mutations cannot run: $(tail -n 1 <<<"$yaml_err")"
+else
 guard_out="$(python3 -c "$GUARD_PY" "$REPO_ROOT")"
 guard_seen="$(head -1 <<<"$guard_out")"; guard_bad="$(grep '^BAD ' <<<"$guard_out" || true)"
 [ -z "$guard_bad" ] && [ "${guard_seen:-0}" -ge 17 ] && ok "every fetch-datasets.sh invocation ($guard_seen) is a standalone command: no shell-level if/case/loop/||/&& guard" \
@@ -391,6 +396,7 @@ PY
   mut_out="$(python3 -c "$GUARD_PY" "$MUT")"
   case "$mut_out" in *"BAD observability-gate.yml"*) ok "mutation caught: $shape" ;; *) bad "mutation NOT caught: $shape => $mut_out" ;; esac
 done
+fi
 
 # 18. roborev job 208 (2): write_bundle_manifest must not leave a partial manifest when a stage fails. A failing `sort -u`
 #     stub on a COLD run: no manifest and no temp file remain; CI refuses (exit 1), a local run continues with a note.
