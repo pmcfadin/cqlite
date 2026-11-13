@@ -1400,145 +1400,38 @@ impl V5CompressedLegacyParser {
         offset: usize,
         col: &crate::schema::ClusteringColumn,
     ) -> Result<(Value, usize)> {
-        let normalized = col.data_type.to_lowercase();
+        let ty = Self::clustering_cql_type(col)?;
         tracing::debug!(
             "V5CompressedLegacy: Parsing clustering value '{}' type '{}' at offset {}",
             col.name,
-            normalized,
+            col.data_type,
             offset
         );
+        let ctx = format!("V5CompressedLegacy: Clustering '{}'", col.name);
 
-        match normalized.as_str() {
-            "timestamp" | "reversedtype(timestamptype)" => {
-                // Fixed 8-byte timestamp (big-endian i64)
-                if offset + 8 > data.len() {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': need 8 bytes for timestamp, only {} available",
-                        col.name,
-                        data.len() - offset
-                    )));
-                }
-                let ts = i64::from_be_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                    data[offset + 4],
-                    data[offset + 5],
-                    data[offset + 6],
-                    data[offset + 7],
-                ]);
-                Ok((Value::Timestamp(ts), offset + 8))
-            }
-
-            "text" | "utf8type" | "varchar" => {
-                // VInt length + UTF-8 bytes
-                let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': failed to parse text length: {:?}",
-                        col.name, e
-                    ))
-                })?;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-                let len_offset = offset + bytes_consumed;
-
-                let len = checked_vuint_length(
-                    len,
-                    data.len() - len_offset,
-                    "V5CompressedLegacy: Clustering",
-                    &col.name,
-                    "text",
-                )?;
-
-                let text = String::from_utf8(data[len_offset..len_offset + len].to_vec()).map_err(
-                    |e| {
+        // Fixed vs variable width is the TYPE's property (Cassandra 5.0.8
+        // `AbstractType.valueLengthIfFixed`), never a guess from the bytes: a fixed-width type's
+        // clustering value has NO length prefix; every other type is a VInt length + that many
+        // bytes (`ClusteringPrefix.Serializer.deserializeValuesWithoutSize`).
+        let (start, end) = match Self::clustering_fixed_width(&ty) {
+            Some(width) => {
+                let end = offset
+                    .checked_add(width)
+                    .filter(|e| *e <= data.len())
+                    .ok_or_else(|| {
                         Error::corruption(format!(
-                            "V5CompressedLegacy: Clustering '{}': invalid UTF-8: {:?}",
-                            col.name, e
+                            "{ctx}: need {width} bytes for {}, only {} available",
+                            col.data_type,
+                            data.len().saturating_sub(offset)
                         ))
-                    },
-                )?;
-                Ok((Value::Text(text.into()), len_offset + len))
+                    })?;
+                (offset, end)
             }
-
-            "int" => {
-                // Issue #258 fix: Fixed 4-byte int (big-endian i32) - NO length prefix
-                // Per Cassandra format, fixed-width clustering types have no VInt length prefix
-                if offset + 4 > data.len() {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': need 4 bytes for int, only {} available",
-                        col.name,
-                        data.len() - offset
-                    )));
-                }
-
-                let val = i32::from_be_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]);
-                Ok((Value::Integer(val), offset + 4))
-            }
-
-            "uuid" | "timeuuid" => {
-                // Issue #258 fix: Fixed 16-byte UUID - NO length prefix
-                // Per Cassandra format, fixed-width clustering types have no VInt length prefix
-                if offset + 16 > data.len() {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': need 16 bytes for UUID, only {} available",
-                        col.name,
-                        data.len() - offset
-                    )));
-                }
-
-                let uuid_bytes: [u8; 16] = data[offset..offset + 16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-
-                Ok((Value::Uuid(uuid_bytes), offset + 16))
-            }
-
-            "bigint" | "counter" => {
-                // Issue #258 fix: Fixed 8-byte bigint (big-endian i64) - NO length prefix
-                // Per Cassandra format, fixed-width clustering types have no VInt length prefix
-                if offset + 8 > data.len() {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': need 8 bytes for bigint, only {} available",
-                        col.name,
-                        data.len() - offset
-                    )));
-                }
-
-                let val = i64::from_be_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                    data[offset + 4],
-                    data[offset + 5],
-                    data[offset + 6],
-                    data[offset + 7],
-                ]);
-                Ok((Value::BigInt(val), offset + 8))
-            }
-
-            _ => {
-                // For other types, read VInt length + skip that many bytes
-                // Return as blob for now
-                warn!(
-                    "V5CompressedLegacy: Clustering '{}' has unsupported type '{}', treating as blob",
-                    col.name, col.data_type
-                );
+            None => {
                 let (remaining, len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': failed to parse blob length: {:?}",
-                        col.name, e
-                    ))
+                    Error::corruption(format!("{ctx}: failed to parse the value length: {e:?}"))
                 })?;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-                let len_offset = offset + bytes_consumed;
-
+                let len_offset = offset + (data[offset..].len() - remaining.len());
                 let len = checked_vuint_length(
                     len,
                     data.len() - len_offset,
@@ -1546,12 +1439,53 @@ impl V5CompressedLegacyParser {
                     &col.name,
                     "value",
                 )?;
-
-                Ok((
-                    Value::blob(data[len_offset..len_offset + len].to_vec()),
-                    len_offset + len,
-                ))
+                (len_offset, len_offset + len)
             }
+        };
+        // ONE schema-driven decoder shared with the cell paths; it never degrades to a blob for a
+        // non-blob type -- a type it cannot express is an error naming it.
+        let value = self.parse_typed_value(&data[start..end], &ty, &ctx, 0)?;
+        Ok((value, end))
+    }
+
+    /// The clustering column's declared type: the schema string, with a `ReversedType(..)`
+    /// (DESC) wrapper removed -- order is not part of the value's encoding.
+    fn clustering_cql_type(
+        col: &crate::schema::ClusteringColumn,
+    ) -> Result<crate::schema::CqlType> {
+        let lower = col.data_type.trim().to_lowercase();
+        let inner = lower
+            .strip_prefix("reversedtype(")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap_or(&lower);
+        // Marshal short names the legacy schema JSON used for the two it always spelled that way.
+        let inner = match inner {
+            "timestamptype" => "timestamp",
+            "utf8type" => "text",
+            other => other,
+        };
+        crate::schema::CqlType::parse(inner).map_err(|e| {
+            Error::schema(format!(
+                "V5CompressedLegacy: Clustering '{}' has a type this decoder cannot resolve ('{}'): {e}",
+                col.name, col.data_type
+            ))
+        })
+    }
+
+    /// `Some(width)` for the types Cassandra 5.0.8 declares fixed-width
+    /// (`valueLengthIfFixed()`: BooleanType 1, Int32Type 4, FloatType 4, LongType 8, DoubleType 8,
+    /// TimestampType 8, UUIDType 16, LexicalUUIDType 16, AbstractTimeUUIDType 16). Every other type
+    /// -- including tinyint, smallint, date, time, decimal, varint, duration, inet and every
+    /// collection/tuple/UDT -- has no override and is length-prefixed.
+    fn clustering_fixed_width(ty: &crate::schema::CqlType) -> Option<usize> {
+        use crate::schema::CqlType as T;
+        match ty {
+            T::Boolean => Some(1),
+            T::Int | T::Float => Some(4),
+            T::BigInt | T::Double | T::Timestamp => Some(8),
+            T::Uuid | T::TimeUuid => Some(16),
+            T::Frozen(inner) => Self::clustering_fixed_width(inner),
+            _ => None,
         }
     }
 }
