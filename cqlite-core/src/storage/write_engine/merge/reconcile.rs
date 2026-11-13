@@ -347,26 +347,26 @@ impl ReconcileState {
     /// data (phantom-row guard).
     pub(super) fn shadow_by_row_deletion(&mut self, purges: &mut PurgeCounts) {
         let row_del = self.row_del;
-        // Issue #2163 (roborev r5): clustering-key pseudo-cells are intentionally
-        // RETAINED in the cell list for read-back (see `extract_clustering_key`
-        // and the `had_data_before` computation in `filter_dropped_columns`
-        // below) — they are not real data, so shadowing one must not inflate
-        // `tombstones_suppressed`. Build the SAME `is_data_cell` exclusion
-        // `filter_dropped_columns`/`build` already use, computed here (before the
-        // mutable `winners` borrow) so a clustering-key cell shadowed by the row
-        // tombstone is excluded from the count.
+        // #2163: key pseudo-cells are not real data: shadowing one must not count as suppressed.
         let ck_names: HashSet<&str> = self
             .clustering_key
             .as_ref()
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
+        // #4545: a key pseudo-cell (ts = row marker's, or 0) is kept while the row has surviving data.
+        let data_survives = row_del.is_none_or(|d| {
+            self.winners
+                .values()
+                .any(|c| !ck_names.contains(c.column.as_str()) && c.timestamp > d)
+        });
         let winners = &mut self.winners;
         self.after_row_del = std::mem::take(&mut self.order)
             .into_iter()
             .filter_map(|cell_key| winners.remove(&cell_key))
             .filter(|cell| match row_del {
                 Some(d) => {
-                    let survives = cell.timestamp > d;
+                    let survives = cell.timestamp > d
+                        || (data_survives && ck_names.contains(cell.column.as_str()));
                     // Issue #2163: a LIVE DATA cell dropped here was SHADOWED by
                     // the row tombstone (suppressed) — count it, distinct from a
                     // gc/overlap-safe purge. A cell that is itself a tombstone,
