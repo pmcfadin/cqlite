@@ -396,29 +396,45 @@ int symlink(const char *a, const char *b2) {
   return real(a, b2);
 }
 
-/* `syscall(2)` itself: std and third-party crates call it directly for some operations (e.g.
- * copy_file_range / renameat2 fallbacks), bypassing every libc wrapper above. Route the
- * mutating numbers through the wrappers so they are counted and faulted identically. */
-long syscall(long num, ...) {
-  va_list ap;
-  va_start(ap, num);
-  long a0 = va_arg(ap, long), a1 = va_arg(ap, long), a2 = va_arg(ap, long);
-  long a3 = va_arg(ap, long), a4 = va_arg(ap, long), a5 = va_arg(ap, long);
-  va_end(ap);
+/* `syscall(2)` itself: std and third-party crates call it directly for some operations,
+ * bypassing every libc wrapper above. The mutating numbers are decoded with their RAW kernel ABI
+ * (x86_64 / aarch64 argument order, which differs from the libc wrappers for the *v2 calls) and
+ * routed through the wrappers so they are counted and faulted identically.
+ *
+ * Defined with a FIXED arity under the symbol name `syscall` (`__asm__` label) instead of as a C
+ * variadic: a variadic definition that va_arg's six longs reads arguments the caller never
+ * supplied (undefined behaviour), whereas on the SysV x86_64/aarch64 ABIs a fixed seven-register
+ * signature merely reads registers the caller left unspecified and then ignores the unused ones.
+ * That is also what makes forwarding an unhandled number to the real `syscall` register-exact.
+ *
+ * Mutating numbers the shim does NOT handle (below) ABORT the run loudly: a harness that cannot
+ * see a write boundary must fail, never go green blind. */
+long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5) __asm__("syscall");
+static void blind_abort(long num) {
+  static const char msg[] = "crash_fault_shim: UNHANDLED mutating syscall number ";
+  char buf[sizeof msg + 24];
+  int len = snprintf(buf, sizeof buf, "%s%ld\n", msg, num);
+  real_syscall()(SYS_write, 2, buf, len);
+  real_syscall()(SYS_exit_group, 97);
+}
+long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5) {
   long r;
   switch (num) {
 #define RET(call) do { r = (long)(call); return r; } while (0)
     case SYS_write: RET(write((int)a0, (const void *)a1, (size_t)a2));
     case SYS_pwrite64: RET(pwrite64((int)a0, (const void *)a1, (size_t)a2, (off64_t)a3));
     case SYS_writev: RET(writev((int)a0, (const struct iovec *)a1, (int)a2));
+    /* raw pwritev(fd, iov, cnt, pos_l, pos_h); pos_h is 0 on 64-bit. */
     case SYS_pwritev: RET(pwritev((int)a0, (const struct iovec *)a1, (int)a2, (off_t)a3));
-    case SYS_pwritev2: RET(pwritev2((int)a0, (const struct iovec *)a1, (int)a2, (off_t)a3, (int)a4));
+    /* raw pwritev2(fd, iov, cnt, pos_l, pos_h, flags): flags is the SIXTH argument. */
+    case SYS_pwritev2: RET(pwritev2((int)a0, (const struct iovec *)a1, (int)a2, (off_t)a3, (int)a5));
     case SYS_copy_file_range: RET(copy_file_range((int)a0, (off_t *)a1, (int)a2, (off_t *)a3, (size_t)a4, (unsigned)a5));
     case SYS_sendfile: RET(sendfile((int)a0, (int)a1, (off_t *)a2, (size_t)a3));
     case SYS_splice: RET(splice((int)a0, (off64_t *)a1, (int)a2, (off64_t *)a3, (size_t)a4, (unsigned)a5));
     case SYS_fsync: RET(fsync((int)a0));
     case SYS_fdatasync: RET(fdatasync((int)a0));
     case SYS_ftruncate: RET(ftruncate((int)a0, (off_t)a1));
+    case SYS_fallocate: RET(fallocate((int)a0, (int)a1, (off_t)a2, (off_t)a3));
     case SYS_renameat: RET(renameat((int)a0, (const char *)a1, (int)a2, (const char *)a3));
     case SYS_renameat2: RET(renameat2((int)a0, (const char *)a1, (int)a2, (const char *)a3, (unsigned)a4));
     case SYS_unlinkat: RET(unlinkat((int)a0, (const char *)a1, (int)a2));
@@ -430,13 +446,45 @@ long syscall(long num, ...) {
 #ifdef SYS_unlink
     case SYS_unlink: RET(unlink((const char *)a0));
 #endif
+#ifdef SYS_rmdir
+    case SYS_rmdir: RET(rmdir((const char *)a0));
+#endif
 #ifdef SYS_mkdir
     case SYS_mkdir: RET(mkdir((const char *)a0, (mode_t)a1));
 #endif
 #ifdef SYS_open
     case SYS_open: RET(open((const char *)a0, (int)a1, (mode_t)a2));
 #endif
+#ifdef SYS_creat
+    case SYS_creat: RET(creat((const char *)a0, (mode_t)a1));
+#endif
 #undef RET
+    /* Mutating calls with no wrapper above: abort rather than be blind to them. */
+    case SYS_truncate:
+    case SYS_linkat:
+    case SYS_symlinkat:
+    case SYS_openat2:
+    case SYS_utimensat:
+    case SYS_io_uring_setup:
+    case SYS_io_uring_enter:
+    case SYS_io_uring_register:
+#ifdef SYS_link
+    case SYS_link:
+#endif
+#ifdef SYS_symlink
+    case SYS_symlink:
+#endif
+#ifdef SYS_utime
+    case SYS_utime:
+#endif
+#ifdef SYS_utimes
+    case SYS_utimes:
+#endif
+#ifdef SYS_futimesat
+    case SYS_futimesat:
+#endif
+      blind_abort(num);
+      return -1;
     default: return real_syscall()(num, a0, a1, a2, a3, a4, a5);
   }
 }

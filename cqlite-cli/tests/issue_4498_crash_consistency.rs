@@ -313,15 +313,24 @@ fn run_verb(
     }
 }
 
-/// The ordered boundary list of an uninterrupted run: `(kind, path-relative-to-work)`.
+/// The boundary list of an uninterrupted run: `(kind, path-relative-to-work)`, indexed by the
+/// boundary NUMBER the shim assigned (`CQLITE_FAULT_AT` addresses that number). The shim assigns
+/// numbers atomically but appends log lines separately, so concurrent threads can write lines out
+/// of numeric order; the parser therefore sorts by the RECORDED number and requires the sequence
+/// to be exactly `1..=N` (a gap or duplicate means a lost or doubled log line, and would let a
+/// fault index point at the wrong operation), failing loudly otherwise.
 fn boundaries(area: &Area<'_>) -> Vec<(String, String)> {
     let log = area.work.parent().unwrap().join("boundaries.log");
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let prefix = area.work.display().to_string();
-    text.lines()
+    let mut rows: Vec<(usize, String, String)> = text
+        .lines()
         .map(|l| {
             let mut it = l.splitn(3, ' ');
-            let _n = it.next();
+            let n: usize = it
+                .next()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or_else(|| panic!("unparseable boundary log line: {l:?}"));
             let kind = it.next().unwrap_or("?").to_string();
             let path = it
                 .next()
@@ -329,9 +338,20 @@ fn boundaries(area: &Area<'_>) -> Vec<(String, String)> {
                 .replace(&prefix, "")
                 .trim_start_matches('/')
                 .to_string();
-            (kind, path)
+            (n, kind, path)
         })
-        .collect()
+        .collect();
+    rows.sort_by_key(|(n, _, _)| *n);
+    for (i, (n, _, _)) in rows.iter().enumerate() {
+        assert_eq!(
+            *n,
+            i + 1,
+            "boundary log numbers must be contiguous 1..=N (line {} carries number {n}): a lost or \
+             duplicated log line would misattribute faults",
+            i + 1
+        );
+    }
+    rows.into_iter().map(|(_, k, p)| (k, p)).collect()
 }
 
 /// The `--manifest` JSON of a run, normalised for comparison across runs. Exactly two things are
@@ -852,6 +872,10 @@ const NOT_A_WRITE_BOUNDARY: &[(&str, &str)] = &[
     ("posix_spawn", "process spawn"),
 ];
 
+/// `syscall` is listed as interposed but the shim handles only the mutating raw numbers it has
+/// wrappers for; every OTHER mutating number aborts the run (exit 97, see
+/// `unhandled_mutating_raw_syscall_aborts_the_run`), so it can never be a silent blind spot.
+///
 /// The CLI binary must not import an I/O-mutating libc symbol the shim does not interpose: a
 /// future writer using a new call (`pwritev2`, `linkat`, ...) would otherwise go invisible to the
 /// whole matrix. Lists what it checked on stderr.
@@ -885,6 +909,99 @@ fn every_imported_io_symbol_is_interposed_by_the_shim() {
          not in NOT_A_WRITE_BOUNDARY: {unaccounted:?} — add them to tests/support/crash_fault_shim.c \
          (or, if provably not a write boundary, to NOT_A_WRITE_BOUNDARY with the reason)"
     );
+}
+
+// ---- `syscall(2)` interposer: raw-ABI decode and the blind-spot abort --------------------
+
+/// Compile `src` (a one-file C program) and run it under the shim with the fault root `root`.
+/// Returns `(exit status, boundary log text)`.
+fn run_c_under_shim(
+    tag: &str,
+    src: &str,
+    root: &Path,
+) -> (std::process::ExitStatus, String, String) {
+    let tmp = TempDir::new().expect("tempdir");
+    let c = tmp.path().join(format!("{tag}.c"));
+    let exe = tmp.path().join(tag);
+    std::fs::write(&c, src).expect("write c");
+    let out = Command::new("cc")
+        .arg(&c)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap_or_else(|e| panic!("FAIL CLOSED: `cc` could not be run ({e})"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = tmp.path().join("log");
+    let run = Command::new(&exe)
+        .env("LD_PRELOAD", shim())
+        .env("CQLITE_FAULT_ROOT", root)
+        .env("CQLITE_FAULT_LOG", &log)
+        .output()
+        .expect("run c program");
+    (
+        run.status,
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        String::from_utf8_lossy(&run.stderr).into_owned(),
+    )
+}
+
+/// A raw `syscall(SYS_pwritev2, ...)` is decoded with the KERNEL's argument order (flags is the
+/// sixth argument, after the split offset) and counted as one write-class boundary; the data is
+/// still written.
+#[test]
+fn raw_pwritev2_syscall_is_decoded_with_the_kernel_abi_and_counted() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let file = root.join("f.bin");
+    let src = format!(
+        r#"#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
+int main(void) {{
+  int fd = open("{}", O_CREAT | O_WRONLY, 0644);
+  struct iovec iov[2] = {{ {{ "ab", 2 }}, {{ "cd", 2 }} }};
+  long r = syscall(SYS_pwritev2, fd, iov, 2, 0L, 0L, 0L);
+  return r == 4 ? 0 : 3;
+}}"#,
+        file.display()
+    );
+    let (status, log, _) = run_c_under_shim("pwritev2", &src, &root);
+    assert!(status.success(), "pwritev2 program failed: {status:?}");
+    assert!(
+        log.lines()
+            .any(|l| l.contains(" pwrite ") && l.ends_with("f.bin")),
+        "raw pwritev2 was not counted as a write-class boundary: {log:?}"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"abcd");
+}
+
+/// A mutating raw syscall the shim has no wrapper for must ABORT the run loudly (exit 97 plus a
+/// message), never pass unseen.
+#[test]
+fn unhandled_mutating_raw_syscall_aborts_the_run() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let src = format!(
+        r#"#define _GNU_SOURCE
+#include <sys/syscall.h>
+#include <unistd.h>
+int main(void) {{ syscall(SYS_truncate, "{}/x", 0L); return 0; }}"#,
+        root.display()
+    );
+    let (status, _, stderr) = run_c_under_shim("truncate", &src, &root);
+    assert_eq!(
+        status.code(),
+        Some(97),
+        "expected the blind-spot abort, got {status:?}"
+    );
+    assert!(stderr.contains("UNHANDLED mutating syscall"), "{stderr:?}");
 }
 
 // ---- AC7: the shipped CLI contains no fault hook ----------------------------------------
