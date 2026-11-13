@@ -244,7 +244,9 @@ pub struct StreamingVortexWriter {
     columns: Vec<ColumnInfo>,
     /// `None` after `finalize` (or after an error has already cleaned up the temp file).
     writer: Option<vortex::file::Writer<'static>>,
-    tmp_path: PathBuf,
+    /// The temp file this writer still OWNS; `None` once it was renamed into place or
+    /// removed, so `Drop` never unlinks a path another process may since have created.
+    tmp_path: Option<PathBuf>,
     final_path: PathBuf,
     row_buffer: Vec<QueryRow>,
     row_group_size: usize,
@@ -307,7 +309,7 @@ impl StreamingVortexWriter {
             schema,
             columns: metadata.columns.clone(),
             writer: Some(writer),
-            tmp_path,
+            tmp_path: Some(tmp_path),
             final_path,
             row_buffer: Vec::with_capacity(options.row_group_size),
             row_group_size: options.row_group_size,
@@ -390,10 +392,14 @@ impl StreamingVortexWriter {
         // on drop to report errors (the paths where tokio parks the error), and the file handle
         // is owned by vortex's writer, so no other terminal path exists. Pinned on Linux by
         // `write_error_on_dev_full_fails_finish`.
-        if let Err(e) = tokio::fs::rename(&self.tmp_path, &self.final_path).await {
+        let Some(tmp_path) = self.tmp_path.clone() else {
+            return Err(VortexExportError::Poisoned);
+        };
+        if let Err(e) = tokio::fs::rename(&tmp_path, &self.final_path).await {
             self.abandon().await;
             return Err(e.into());
         }
+        self.tmp_path = None;
         Ok(())
     }
 
@@ -440,7 +446,9 @@ impl StreamingVortexWriter {
     /// the caller needs to see.
     async fn abandon(&mut self) {
         drop(self.writer.take());
-        let _ = tokio::fs::remove_file(&self.tmp_path).await;
+        if let Some(tmp_path) = self.tmp_path.take() {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+        }
         self.poisoned = true;
     }
 }
@@ -463,7 +471,9 @@ impl StreamingVortexWriter {
 impl Drop for StreamingVortexWriter {
     fn drop(&mut self) {
         drop(self.writer.take());
-        let _ = std::fs::remove_file(&self.tmp_path);
+        if let Some(tmp_path) = self.tmp_path.take() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
     }
 }
 

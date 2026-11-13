@@ -375,3 +375,38 @@ async fn write_error_on_dev_full_fails_finish() {
     let _ = writer.push(array).await;
     assert!(writer.finish().await.is_err(), "ENOSPC must fail finish()");
 }
+
+/// After `finalize` renamed the temp into place, the writer no longer owns that temp NAME:
+/// an entry another process creates there must survive the writer's `Drop` (roborev #4237 r5).
+#[tokio::test]
+async fn drop_after_finalize_never_unlinks_a_path_it_no_longer_owns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("owned.vortex");
+    let metadata = metadata_two_cols();
+
+    let mut writer =
+        StreamingVortexWriter::create(&path, &metadata, &VortexExportOptions::default())
+            .await
+            .expect("create");
+    let tmp = writer
+        .tmp_path
+        .clone()
+        .expect("a fresh writer owns its temp");
+    writer
+        .write_chunk(&[row(1, Some("a"))])
+        .await
+        .expect("write_chunk");
+    writer.finalize().await.expect("finalize");
+    assert!(
+        writer.tmp_path.is_none(),
+        "ownership released after the rename"
+    );
+
+    std::fs::write(&tmp, b"someone else's file")
+        .expect("plant a foreign file at the old temp name");
+    drop(writer);
+    assert_eq!(
+        std::fs::read(&tmp).expect("the foreign file must survive Drop"),
+        b"someone else's file"
+    );
+}
