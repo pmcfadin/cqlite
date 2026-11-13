@@ -645,7 +645,9 @@ pub async fn dispatch_explain(cli: &crate::cli_types::Cli, config: &Config) -> R
         out,
     }) = &cli.command
     else {
-        return Err(anyhow::anyhow!("dispatch_explain called for a non-explain command"));
+        return Err(anyhow::anyhow!(
+            "dispatch_explain called for a non-explain command"
+        ));
     };
     let effective_format = out.unwrap_or_else(|| match cli.out {
         Some(OutputMode::Table) => OutputFormat::Table,

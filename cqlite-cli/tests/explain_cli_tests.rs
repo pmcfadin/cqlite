@@ -71,18 +71,26 @@ fn snapshot_dir(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 }
 
 fn explain_command() -> Command {
+    explain_command_with_globals(&[])
+}
+
+/// `globals` are GLOBAL flags, so they must precede the `explain` subcommand.
+fn explain_command_with_globals(globals: &[&str]) -> Command {
     let mut command = Command::cargo_bin("cqlite").expect("cqlite binary is built");
-    command.env("CQLITE_DATASETS_ROOT", datasets_root()).args([
-        "--schema",
-        schema_path().to_str().expect("schema path is UTF-8"),
-        "--dataset",
-        "test_explain",
-        "explain",
-        "test_explain.trace_decisions",
-        "1",
-        "--now",
-        "1789963136",
-    ]);
+    command
+        .env("CQLITE_DATASETS_ROOT", datasets_root())
+        .args(globals)
+        .args([
+            "--schema",
+            schema_path().to_str().expect("schema path is UTF-8"),
+            "--dataset",
+            "test_explain",
+            "explain",
+            "test_explain.trace_decisions",
+            "1",
+            "--now",
+            "1789963136",
+        ]);
     command
 }
 
@@ -315,10 +323,7 @@ fn explain_table_output_renders_the_documented_per_cell_line_shape() {
         .lines()
         .find(|line| line.starts_with("v  "))
         .unwrap_or_else(|| panic!("no `v` cell line in table output:\n{stdout}"));
-    assert!(
-        cell_line.contains("writetime="),
-        "cell line: {cell_line}"
-    );
+    assert!(cell_line.contains("writetime="), "cell line: {cell_line}");
     assert!(
         cell_line.contains("winner") || cell_line.contains("shadowed-by-timestamp"),
         "cell line: {cell_line}"
@@ -331,7 +336,9 @@ fn explain_table_output_renders_the_documented_per_cell_line_shape() {
 #[test]
 fn explain_unreadable_generation_is_exit_two_naming_the_path() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let staged = temp.path().join("trace_decisions-c2f35e90b57011f183ec5947a78bc662");
+    let staged = temp
+        .path()
+        .join("trace_decisions-c2f35e90b57011f183ec5947a78bc662");
     copy_dir_recursive(&fixture_generation_dir(), &staged);
     let truncated = staged.join("nb-1-big-Statistics.db");
     assert!(truncated.exists(), "expected {truncated:?} to exist");
@@ -409,7 +416,9 @@ fn explain_key_absent_from_every_generation_is_exit_zero() {
 #[test]
 fn explain_never_mutates_the_input_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let staged = temp.path().join("trace_decisions-c2f35e90b57011f183ec5947a78bc662");
+    let staged = temp
+        .path()
+        .join("trace_decisions-c2f35e90b57011f183ec5947a78bc662");
     copy_dir_recursive(&fixture_generation_dir(), &staged);
     let before = snapshot_dir(&staged);
     assert!(!before.is_empty(), "staged fixture copy must be non-empty");
@@ -457,11 +466,9 @@ fn explain_ignores_the_global_output_flag_and_never_creates_it() {
     let temp = tempfile::tempdir().expect("tempdir");
     let would_be_output = temp.path().join("should-never-exist.txt");
 
-    let mut command = explain_command();
-    let output = command
-        .args(["--output", would_be_output.to_str().expect("utf-8 path")])
-        .output()
-        .expect("explain process starts");
+    let mut command =
+        explain_command_with_globals(&["--output", would_be_output.to_str().expect("utf-8 path")]);
+    let output = command.output().expect("explain process starts");
 
     assert!(
         output.status.success(),

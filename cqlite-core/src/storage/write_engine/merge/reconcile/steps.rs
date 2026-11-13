@@ -249,10 +249,8 @@ impl<S: TraceSink> ReconcileState<S> {
                                                     KWayMerger::<NoTrace>::cell_effective_ldt(cell)
                                                         .unwrap_or(0),
                                                 droppable_at_now: self.tombstone_droppable(
-                                                    KWayMerger::<NoTrace>::cell_effective_ldt(
-                                                        cell,
-                                                    )
-                                                    .unwrap_or(0),
+                                                    KWayMerger::<NoTrace>::cell_effective_ldt(cell)
+                                                        .unwrap_or(0),
                                                 ),
                                             },
                                         )

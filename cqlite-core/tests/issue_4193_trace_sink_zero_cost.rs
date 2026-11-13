@@ -242,7 +242,8 @@ fn seeked_and_reader_constructors_are_declared_no_trace() {
     let _ = accepts_no_trace_by_value as fn(KWayMerger<NoTrace>);
 }
 
-/// Pins `size_of::<MergeEntry>()` (issue #4193, requirement R1: "`MergeEntry`
+/// Pins `size_of::<MergeEntry>()` at 296 bytes — the size on `origin/main` 7f9abe36 (`merge/model.rs`
+/// is untouched by #4193; the earlier branch pinned a stale 288) (issue #4193, requirement R1: "`MergeEntry`
 /// ... SHALL gain no field"). A value change here means either a legitimate,
 /// reviewed size change to `MergeEntry` (update the literal) or a regression
 /// that added a trace-only field to the hot-path egress type, which R1
@@ -253,8 +254,8 @@ fn seeked_and_reader_constructors_are_declared_no_trace() {
 fn merge_entry_size_is_pinned() {
     let actual = size_of::<MergeEntry>();
     assert_eq!(
-        actual, 288,
-        "size_of::<MergeEntry>() changed from the pinned 288 bytes (measured on \
+        actual, 296,
+        "size_of::<MergeEntry>() changed from the pinned 296 bytes (measured on \
          a 64-bit target, cargo test -p cqlite-core --test \
          issue_4193_trace_sink_zero_cost) to {actual}. If this is a reviewed, \
          intentional change to MergeEntry itself, update this literal. If it \
