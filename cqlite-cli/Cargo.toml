@@ -384,3 +384,10 @@ observability = ["cqlite-core/observability"]
 name = "issue_4498_crash_consistency"
 path = "tests/issue_4498_crash_consistency.rs"
 required-features = ["write-support"]
+
+# Issue #4498: the crash-consistency harness is Linux-only (LD_PRELOAD shim); on other platforms
+# this sibling target runs instead and names the gap, so the harness never vanishes silently.
+[[test]]
+name = "issue_4498_non_linux_notice"
+path = "tests/issue_4498_non_linux_notice.rs"
+required-features = ["write-support"]

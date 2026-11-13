@@ -145,7 +145,12 @@ fn shim() -> &'static Path {
                 .arg(&src)
                 .arg("-ldl")
                 .output()
-                .expect("`cc` is required to build the crash-fault shim");
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "FAIL CLOSED: the C compiler `cc` is required to build the #4498 crash-fault \
+                         shim and could not be run ({e}); install a C toolchain (gcc/clang)"
+                    )
+                });
             assert!(
                 out.status.success(),
                 "crash_fault_shim.c failed to compile:\n{}",
@@ -329,6 +334,37 @@ fn boundaries(area: &Area<'_>) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The `--manifest` JSON of a run, normalised for comparison across runs. Exactly two things are
+/// normalised, each provably not a property of the tool's output: (1) the run-specific temp
+/// directories (`<WORK>`/`<INPUT>`), which differ per harness area by construction, and (2) every
+/// `"now"` field, the wall-clock RFC 3339 timestamp the report stamps at run time
+/// (verified by diffing two clean runs: it is the only differing field). `None` = no manifest.
+fn manifest_normalised(area: &Area<'_>) -> Option<String> {
+    let text = std::fs::read_to_string(area.work.join("manifest.json")).ok()?;
+    let mut v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    fn scrub(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, x) in m.iter_mut() {
+                    if k == "now" {
+                        *x = serde_json::Value::String("<now>".into());
+                    } else {
+                        scrub(x);
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(scrub),
+            _ => {}
+        }
+    }
+    scrub(&mut v);
+    let out = serde_json::to_string_pretty(&v).ok()?;
+    Some(
+        out.replace(&area.work.display().to_string(), "<WORK>")
+            .replace(&area.input.display().to_string(), "<INPUT>"),
+    )
+}
+
 /// Component files (not the manifest) of the output tree, relative to `out/`.
 fn output_set(area: &Area<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
     snapshot(&out_dir(area))
@@ -355,6 +391,51 @@ fn verify_clean(dir: &Path, f: &Fixture) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Whether an uninterrupted run is expected to contain a `rename` boundary (the atomic-publication
+/// step). Flips to `true` with the TOC fix (#4526).
+const EXPECT_RENAME: bool = false;
+
+/// The enumerated boundaries must contain every syscall CATEGORY an SSTable write verb performs,
+/// per output file, so a shim that stopped seeing (say) `copy_file_range` or vectored writes
+/// cannot shrink the matrix unnoticed behind a "enough boundaries" count:
+/// every output component file needs a `create` and, when non-empty, at least one `write`/`pwrite`/`copy`, the
+/// manifest needs the same, and the run needs >= 1 `mkdir`, >= 1 `fsync` (and a `rename` when
+/// [`EXPECT_RENAME`]).
+fn assert_expected_categories(
+    verb: Verb,
+    bounds: &[(String, String)],
+    reference: &BTreeMap<PathBuf, Vec<u8>>,
+) {
+    let has = |kinds: &[&str], path: &str| {
+        bounds
+            .iter()
+            .any(|(k, p)| kinds.contains(&k.as_str()) && p == path)
+    };
+    let mut files: Vec<(String, bool)> = reference
+        .iter()
+        .map(|(rel, bytes)| (format!("out/{}", rel.display()), !bytes.is_empty()))
+        .collect();
+    files.push(("manifest.json".to_string(), true));
+    for (f, non_empty) in &files {
+        assert!(
+            has(&["create"], f),
+            "{verb:?}: no `create` boundary enumerated for {f} — shim blind to file creation?"
+        );
+        // A legitimately EMPTY output (e.g. an empty BTI Rows.db) has a create and no write.
+        assert!(
+            !non_empty || has(&["write", "pwrite", "copy"], f),
+            "{verb:?}: no write-class boundary (write/pwrite/copy) enumerated for {f} — shim blind \
+             to the call this writer uses?"
+        );
+    }
+    let any = |kind: &str| bounds.iter().any(|(k, _)| k == kind);
+    assert!(any("mkdir"), "{verb:?}: no `mkdir` boundary enumerated");
+    assert!(any("fsync"), "{verb:?}: no `fsync` boundary enumerated");
+    if EXPECT_RENAME {
+        assert!(any("rename"), "{verb:?}: no `rename` boundary enumerated");
+    }
 }
 
 /// Which slice of the boundary x mode matrix a sweep exercises.
@@ -471,11 +552,18 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
         output_set(&area2),
         "two uninterrupted runs must produce identical bytes"
     );
+    let reference_manifest = manifest_normalised(&area);
     assert!(
-        bounds.len() >= 8,
-        "implausibly few boundaries ({}): shim not interposing?",
-        bounds.len()
+        reference_manifest.is_some(),
+        "the uninterrupted run wrote no parseable --manifest"
     );
+    assert_eq!(
+        reference_manifest,
+        manifest_normalised(&area2),
+        "two uninterrupted runs must produce the same manifest (after normalising only <now> and \
+         the temp dirs)"
+    );
+    assert_expected_categories(verb, &bounds, &reference);
 
     let mut failures = Vec::new();
     let mut runs = 0usize;
@@ -579,6 +667,11 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
                 failures.push(format!(
                     "{tag}: re-run output differs from the uninterrupted run"
                 ));
+            } else if manifest_normalised(&a) != reference_manifest {
+                failures.push(format!(
+                    "{tag}: re-run --manifest differs from (or is missing against) the \
+                     uninterrupted run's"
+                ));
             }
         }
     }
@@ -664,6 +757,136 @@ fn issue_4529_cassandra_discoverable_partial_sets_salvage() {
     check(Verb::Salvage, Scope::CassandraStrict, vec![BIG_SMALL]);
 }
 
+// ---- Shim coverage guard ---------------------------------------------------------------
+
+/// Run `nm -D` and return the symbol names (version suffix stripped). Fails closed, naming `nm`.
+fn dynamic_symbols(bin: &Path, which: &str) -> Vec<String> {
+    let out = Command::new("nm")
+        .args(["-D", which])
+        .arg(bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("FAIL CLOSED: `nm` (binutils) is required for the shim-coverage guard ({e})")
+        });
+    assert!(
+        out.status.success(),
+        "nm -D {which} {} failed",
+        bin.display()
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .map(|n| n.split('@').next().unwrap_or(n).to_string())
+        .collect()
+}
+
+/// Imported libc symbols that mutate or may mutate the filesystem. Anything the CLI imports that
+/// matches is a potential write boundary and MUST be interposed by the shim, or be listed in
+/// [`NOT_A_WRITE_BOUNDARY`] with a reason.
+fn is_io_mutating(sym: &str) -> bool {
+    [
+        "write",
+        "pwrite",
+        "fwrite",
+        "fsync",
+        "fdatasync",
+        "rename",
+        "open",
+        "creat",
+        "unlink",
+        "mkdir",
+        "rmdir",
+        "truncate",
+        "ftruncate",
+        "copy_file_range",
+        "sendfile",
+        "splice",
+        "link",
+        "symlink",
+        "fallocate",
+        "posix_fallocate",
+        "chmod",
+        "fchmod",
+        "chown",
+        "fchown",
+        "lchown",
+        "utime",
+        "futimens",
+        "utimensat",
+        "mmap",
+        "msync",
+        "remove",
+        "syscall",
+        "aio_",
+        "io_uring",
+        "fputs",
+        "fputc",
+        "putc",
+        "fprintf",
+        "dprintf",
+    ]
+    .iter()
+    .any(|k| sym.starts_with(k))
+}
+
+/// Matched by [`is_io_mutating`] but not a data/directory-entry write boundary, each with the reason.
+const NOT_A_WRITE_BOUNDARY: &[(&str, &str)] = &[
+    ("opendir", "directory read"),
+    ("fdopendir", "directory read"),
+    ("readlink", "read-only"),
+    ("fchmod", "permission bits only; no data or directory-entry change a crash could tear"),
+    ("mmap64", "read-only mappings (memmap2::Mmap) for the readers; no MAP_SHARED writable map in the verbs"),
+    ("mmap", "as mmap64"),
+    ("munmap", "unmaps"),
+    ("posix_spawn_file_actions_addchdir_np", "process spawn plumbing"),
+    ("posix_spawn_file_actions_addchdir", "process spawn plumbing"),
+    ("posix_spawn_file_actions_adddup2", "process spawn plumbing"),
+    ("posix_spawn_file_actions_destroy", "process spawn plumbing"),
+    ("posix_spawn_file_actions_init", "process spawn plumbing"),
+    ("posix_spawnattr_destroy", "process spawn plumbing"),
+    ("posix_spawnattr_init", "process spawn plumbing"),
+    ("posix_spawnattr_setflags", "process spawn plumbing"),
+    ("posix_spawnattr_setpgroup", "process spawn plumbing"),
+    ("posix_spawnattr_setsigdefault", "process spawn plumbing"),
+    ("posix_spawnp", "process spawn"),
+    ("posix_spawn", "process spawn"),
+];
+
+/// The CLI binary must not import an I/O-mutating libc symbol the shim does not interpose: a
+/// future writer using a new call (`pwritev2`, `linkat`, ...) would otherwise go invisible to the
+/// whole matrix. Lists what it checked on stderr.
+#[test]
+fn every_imported_io_symbol_is_interposed_by_the_shim() {
+    let cli = PathBuf::from(env!("CARGO_BIN_EXE_cqlite"));
+    let imported: Vec<String> = dynamic_symbols(&cli, "--undefined-only")
+        .into_iter()
+        .filter(|s| is_io_mutating(s))
+        .collect();
+    let interposed = dynamic_symbols(shim(), "--defined-only");
+    let mut checked = Vec::new();
+    let mut unaccounted = Vec::new();
+    for sym in &imported {
+        if interposed.contains(sym) {
+            checked.push(format!("{sym}=interposed"));
+        } else if let Some((_, why)) = NOT_A_WRITE_BOUNDARY.iter().find(|(n, _)| n == sym) {
+            checked.push(format!("{sym}=exempt({why})"));
+        } else {
+            unaccounted.push(sym.clone());
+        }
+    }
+    eprintln!("shim coverage: {}", checked.join(", "));
+    assert!(
+        !imported.is_empty() && !checked.is_empty(),
+        "no I/O imports found in the CLI: the guard's symbol scan is broken"
+    );
+    assert!(
+        unaccounted.is_empty(),
+        "the cqlite binary imports I/O symbol(s) the fault shim does NOT interpose and that are \
+         not in NOT_A_WRITE_BOUNDARY: {unaccounted:?} — add them to tests/support/crash_fault_shim.c \
+         (or, if provably not a write boundary, to NOT_A_WRITE_BOUNDARY with the reason)"
+    );
+}
+
 // ---- AC7: the shipped CLI contains no fault hook ----------------------------------------
 
 /// Env-var names of the fault protocol (`tests/support/crash_fault_shim.c`). The product has no
@@ -684,6 +907,59 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
     haystack.windows(n.len()).any(|w| w == n)
 }
 
+fn assert_no_markers(bin: &Path) {
+    let bytes = std::fs::read(bin).unwrap_or_else(|e| panic!("read {}: {e}", bin.display()));
+    for m in HOOK_MARKERS {
+        assert!(
+            !contains(&bytes, m),
+            "{} contains fault-hook marker {m:?}",
+            bin.display()
+        );
+    }
+}
+
+/// The RELEASE `cqlite` the AC7 scan reads, resolved deterministically and never skipped:
+/// 1. `CQLITE_RELEASE_CLI_BINARY` (a CI job that already built it), else
+/// 2. `<target dir>/release/cqlite` built NOW with `cargo build --release -p cqlite-cli --bin
+///    cqlite` (incremental after the first build; default features = what ships).
+fn release_cli_binary() -> PathBuf {
+    if let Ok(p) = std::env::var("CQLITE_RELEASE_CLI_BINARY") {
+        let p = PathBuf::from(p);
+        assert!(
+            p.is_file(),
+            "CQLITE_RELEASE_CLI_BINARY={} is not a file",
+            p.display()
+        );
+        return p;
+    }
+    let cli = PathBuf::from(env!("CARGO_BIN_EXE_cqlite"));
+    // <target>/<profile>/cqlite -> <target>
+    let target = cli
+        .parent()
+        .and_then(Path::parent)
+        .expect("CARGO_BIN_EXE_cqlite has a target dir")
+        .to_path_buf();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = Command::new(cargo)
+        .args(["build", "--release", "-p", "cqlite-cli", "--bin", "cqlite"])
+        .env("CARGO_TARGET_DIR", &target)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .status()
+        .unwrap_or_else(|e| panic!("AC7: could not run cargo to build the release CLI: {e}"));
+    assert!(
+        status.success(),
+        "AC7: `cargo build --release -p cqlite-cli --bin cqlite` failed; set \
+         CQLITE_RELEASE_CLI_BINARY to a release build to skip building"
+    );
+    let bin = target.join("release").join("cqlite");
+    assert!(
+        bin.is_file(),
+        "AC7: release CLI not found at {} after building",
+        bin.display()
+    );
+    bin
+}
+
 #[test]
 fn shipped_cli_contains_no_fault_hook() {
     // Positive control: the scan must find every marker in the shim, or it proves nothing.
@@ -694,19 +970,7 @@ fn shipped_cli_contains_no_fault_hook() {
             "scan positive control: {m} not found in the shim"
         );
     }
-    // The CLI under test, plus (when the gate/nightly provides one) a RELEASE build of it.
-    let mut binaries = vec![PathBuf::from(env!("CARGO_BIN_EXE_cqlite"))];
-    if let Ok(rel) = std::env::var("CQLITE_RELEASE_CLI_BINARY") {
-        binaries.push(PathBuf::from(rel));
-    }
-    for bin in binaries {
-        let bytes = std::fs::read(&bin).unwrap_or_else(|e| panic!("read {}: {e}", bin.display()));
-        for m in HOOK_MARKERS {
-            assert!(
-                !contains(&bytes, m),
-                "{} contains fault-hook marker {m:?}",
-                bin.display()
-            );
-        }
-    }
+    // The CLI under test (test profile) AND the release build: both MANDATORY.
+    assert_no_markers(&PathBuf::from(env!("CARGO_BIN_EXE_cqlite")));
+    assert_no_markers(&release_cli_binary());
 }
