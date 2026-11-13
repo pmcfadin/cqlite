@@ -27,3 +27,15 @@ CREATE TABLE IF NOT EXISTS test_uuid_bti.timeuuid_clustering_desc (
 CREATE TABLE IF NOT EXISTS test_uuid_bti.uuid_clustering (
     pk int, ck uuid, payload text, PRIMARY KEY (pk, ck)
 ) WITH compression = {'class': 'LZ4Compressor'};
+
+-- Oracle for the lsb path (cqlite review of PR #4539): v1 timeuuids that SHARE a timestamp and
+-- differ only in the lsb (clock_seq/node), spread over 0x00..0xFF so the signed-per-byte compare
+-- (CASSANDRA-8730) and the asComparableBytes lsb XOR 0x8080808080808080 decide the order and the
+-- Rows.db separators; `tags` is a multicell set<timeuuid> of tied values (cell-path order).
+CREATE TABLE IF NOT EXISTS test_uuid_bti.timeuuid_ties (
+    pk int, ck timeuuid, tags set<timeuuid>, payload text, PRIMARY KEY (pk, ck)
+) WITH compression = {'class': 'LZ4Compressor'};
+
+CREATE TABLE IF NOT EXISTS test_uuid_bti.timeuuid_ties_desc (
+    pk int, ck timeuuid, tags set<timeuuid>, payload text, PRIMARY KEY (pk, ck)
+) WITH CLUSTERING ORDER BY (ck DESC) AND compression = {'class': 'LZ4Compressor'};

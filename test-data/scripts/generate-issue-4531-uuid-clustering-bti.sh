@@ -28,7 +28,7 @@ CONTAINER_NAME="cqlite-issue4531-uuidbti"
 . "$SCRIPT_DIR/lib/cassandra-image.sh"
 CASSANDRA_IMAGE="$CQLITE_CASSANDRA_IMAGE"
 KEYSPACE="test_uuid_bti"
-TABLES=(timeuuid_clustering timeuuid_clustering_desc uuid_clustering)
+TABLES=(timeuuid_clustering timeuuid_clustering_desc uuid_clustering timeuuid_ties timeuuid_ties_desc)
 SCHEMA_FILE="$ROOT/schemas/issue-4531-uuid-clustering-bti.cql"
 BIG_ROWS="${BIG_ROWS:-480}"; SMALL_ROWS="${SMALL_ROWS:-8}"; PAYLOAD_BYTES="${PAYLOAD_BYTES:-100}"
 COLUMN_INDEX_SIZE="${COLUMN_INDEX_SIZE:-2KiB}"
@@ -94,8 +94,27 @@ def payload(seed):
     return (s * (pbytes // len(s) + 1))[:pbytes]
 with open(out, "w") as f:
     f.write(f"USE {ks};\n")
-    for table in ("timeuuid_clustering", "timeuuid_clustering_desc", "uuid_clustering"):
+    # TIE tables: v1 timeuuids that SHARE a timestamp (identical msb) and differ only in
+    # clock_seq/node (the lsb). The lsb's bytes are spread over 0x00..0xFF so the signed/unsigned
+    # split (CASSANDRA-8730: `TimeUUIDType` compares the lsb SIGNED per byte) and the
+    # `asComparableBytes` lsb XOR 0x8080808080808080 decide the order and the row-index
+    # separators. `tags` is a multicell set<timeuuid> holding 4 such tied values per row.
+    trng = random.Random(45310)
+    def tie_uuid(group, k):
+        ts = 0x01EF000000000000 + group * 10_000_000
+        lsb = bytes([(k * 37 + group * 11) % 256]) + bytes(trng.getrandbits(8) for _ in range(7))
+        msb = ((ts & 0xFFFFFFFF) << 32) | (((ts >> 32) & 0xFFFF) << 16) | 0x1000 | ((ts >> 48) & 0x0FFF)
+        return uuid.UUID(int=(msb << 64) | int.from_bytes(lsb, "big"))
+    for table in ("timeuuid_clustering", "timeuuid_clustering_desc", "uuid_clustering", "timeuuid_ties", "timeuuid_ties_desc"):
         for pk, n in ((1, big), (2, small)):
+            if table.startswith("timeuuid_ties"):
+                groups = 12 if pk == 1 else 2
+                for i in range(n):
+                    g, k = i % groups, i // groups
+                    ck = tie_uuid(g, k)
+                    tags = "{" + ", ".join(str(tie_uuid(g, k * 4 + j + 1000)) for j in range(4)) + "}"
+                    f.write(f"INSERT INTO {table} (pk, ck, tags, payload) VALUES ({pk}, {ck}, {tags}, '{payload(f'{table}{pk}-{i}')}') USING TIMESTAMP 1000;\n")
+                continue
             for i in range(n):
                 if table == "uuid_clustering":
                     ck = v1(i, pk) if i % 2 == 0 else v4()

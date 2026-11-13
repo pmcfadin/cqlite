@@ -93,3 +93,66 @@ fn declared_type_detection_looks_through_frozen_and_ignores_values_and_non_uuid(
     assert!(!d("set<int>", false));
     assert!(!d("not a type", false));
 }
+
+/// ORACLE: the Cassandra-5.0.8-written `set<timeuuid>` cell paths of the committed
+/// `timeuuid_ties` fixture (tied v1 timestamps, lsb bytes across 0x7f/0x80) are in Cassandra's
+/// order in the `sstabledump` golden. The writer, given the same elements SHUFFLED, must emit
+/// exactly that order for a declared `set<timeuuid>`; declared `set<uuid>` must NOT (negative
+/// control — a flag swap or dropped signed-lsb compare turns this red).
+#[test]
+fn writer_reproduces_cassandra_set_timeuuid_order_from_the_committed_golden() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-data/fixtures/issue_4531/test_uuid_bti");
+    let table_dir = std::fs::read_dir(&dir)
+        .expect("fixture dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("timeuuid_ties-"))
+        })
+        .expect("committed timeuuid_ties fixture");
+    let golden = std::fs::read_to_string(table_dir.join("da-2-bti-Data.db.jsonl")).expect("golden");
+    let parse = |s: &str| -> [u8; 16] {
+        let hex: String = s.chars().filter(|c| *c != '-').collect();
+        let mut u = [0u8; 16];
+        for (i, b) in u.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex");
+        }
+        u
+    };
+    let (mut rows, mut differs_for_uuid) = (0, 0);
+    for line in golden.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("json");
+        for r in v["rows"].as_array().expect("rows") {
+            let in_cassandra_order: Vec<[u8; 16]> = r["cells"]
+                .as_array()
+                .expect("cells")
+                .iter()
+                .filter(|c| c["name"] == "tags" && c.get("path").is_some())
+                .map(|c| parse(c["path"][0].as_str().expect("path")))
+                .collect();
+            assert_eq!(in_cassandra_order.len(), 4, "four tied elements per row");
+            let mut shuffled = in_cassandra_order.clone();
+            shuffled.reverse();
+            shuffled.rotate_left(1);
+            let value = Value::Set(shuffled.iter().map(|u| Value::Uuid(*u)).collect());
+            let want: Vec<Vec<u8>> = in_cassandra_order.iter().map(|u| u.to_vec()).collect();
+            assert_eq!(cell_paths("set<timeuuid>", &value), want, "row {rows}");
+            if cell_paths("set<uuid>", &value) != want {
+                differs_for_uuid += 1;
+            }
+            rows += 1;
+        }
+    }
+    assert!(
+        rows >= 400,
+        "golden must carry the big partition's rows, got {rows}"
+    );
+    assert!(
+        differs_for_uuid > 0,
+        "negative control: the uuid order must differ from Cassandra's timeuuid order on SOME row"
+    );
+    eprintln!(
+        "set<timeuuid> golden: {rows} rows checked, uuid-order differs on {differs_for_uuid}"
+    );
+}

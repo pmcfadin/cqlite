@@ -162,7 +162,11 @@ fn run_presort_is_ascending_under_the_heap_order_not_the_schema_free_order() {
             Some(ClusteringKey::single("ck", Value::Uuid(ck))),
             1000,
             RowData::Live {
-                cells: vec![CellData::new("name".into(), Value::text("x".to_string()), 1000)],
+                cells: vec![CellData::new(
+                    "name".into(),
+                    Value::text("x".to_string()),
+                    1000,
+                )],
             },
         )
     };

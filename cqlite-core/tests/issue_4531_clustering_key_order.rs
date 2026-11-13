@@ -23,7 +23,7 @@ mod datasets_root;
 
 const KEYSPACE: &str = "test_uuid_bti";
 /// `(table, cql type, order)`.
-const TABLES: [(&str, &str, ClusteringOrder); 3] = [
+const TABLES: [(&str, &str, ClusteringOrder); 5] = [
     ("timeuuid_clustering", "timeuuid", ClusteringOrder::Asc),
     (
         "timeuuid_clustering_desc",
@@ -31,6 +31,10 @@ const TABLES: [(&str, &str, ClusteringOrder); 3] = [
         ClusteringOrder::Desc,
     ),
     ("uuid_clustering", "uuid", ClusteringOrder::Asc),
+    // v1 timeuuids with EQUAL timestamps and lsb bytes spread across 0x7f/0x80: only the signed
+    // lsb compare of `TimeUUIDType` orders them as Cassandra did.
+    ("timeuuid_ties", "timeuuid", ClusteringOrder::Asc),
+    ("timeuuid_ties_desc", "timeuuid", ClusteringOrder::Desc),
 ];
 
 fn golden_keys(table: &str) -> Vec<[u8; 16]> {
@@ -62,7 +66,7 @@ fn golden_keys(table: &str) -> Vec<[u8; 16]> {
     out
 }
 
-fn schema(cql_type: &str, order: ClusteringOrder) -> TableSchema {
+fn make_schema(cql_type: &str, order: ClusteringOrder) -> TableSchema {
     TableSchema {
         keyspace: KEYSPACE.to_string(),
         table: "t".to_string(),
@@ -108,7 +112,7 @@ fn shuffled(keys: &[[u8; 16]]) -> Vec<[u8; 16]> {
 fn schema_aware_clustering_compare_reproduces_cassandra_order() {
     for (table, cql_type, order) in TABLES {
         let golden = golden_keys(table);
-        let schema = schema(cql_type, order.clone());
+        let schema = make_schema(cql_type, order.clone());
         let mut v = shuffled(&golden);
         assert_ne!(v, golden, "{table}: shuffle must actually permute");
         v.sort_by(|a, b| key(*a).compare(&key(*b), &schema).expect("compare"));
@@ -116,6 +120,18 @@ fn schema_aware_clustering_compare_reproduces_cassandra_order() {
             v, golden,
             "{table}: ClusteringKey::compare order != Cassandra's clustering order"
         );
+
+        // negative control (flag swap): declared `uuid` instead of `timeuuid` orders the SAME
+        // tied keys differently from Cassandra, so a swapped flag cannot pass this test.
+        if table.starts_with("timeuuid_ties") {
+            let wrong = make_schema("uuid", order.clone());
+            let mut w = shuffled(&golden);
+            w.sort_by(|a, b| key(*a).compare(&key(*b), &wrong).expect("compare"));
+            assert_ne!(
+                w, golden,
+                "{table}: the uuid order coincides with Cassandra's timeuuid order - fixture would not detect a flag swap"
+            );
+        }
 
         // negative control: the pre-fix raw-byte order is NOT Cassandra's order here.
         let mut raw = golden.clone();

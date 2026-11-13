@@ -38,10 +38,14 @@ mod datasets_root;
 
 const KEYSPACE: &str = "test_uuid_bti";
 /// `(table, clustering DESC, clustering is timeuuid)`.
-const TABLES: [(&str, bool, bool); 3] = [
+const TABLES: [(&str, bool, bool); 5] = [
     ("timeuuid_clustering", false, true),
     ("timeuuid_clustering_desc", true, true),
     ("uuid_clustering", false, false),
+    // TIE tables: v1 timeuuids sharing a timestamp, differing only in the lsb (0x00..0xFF), so
+    // the separators are cut INSIDE the lsb and pin the signed-lsb XOR (CASSANDRA-8730).
+    ("timeuuid_ties", false, true),
+    ("timeuuid_ties_desc", true, true),
 ];
 
 fn component(table: &str, suffix: &str) -> Vec<u8> {
@@ -148,7 +152,7 @@ fn cassandra_written_separators_equal_separator_gt_of_cqlite_key_encodings() {
                 .position(|(a, b)| a != b)
                 .expect("distinct keys");
             let mut s = p[..d].to_vec();
-            s.push(p[d] + 1);
+            s.push(p[d].wrapping_add(1));
             s
         };
         let candidates: Vec<Vec<u8>> = enc.windows(2).map(|w| sep_gt(&w[0], &w[1])).collect();
@@ -198,6 +202,34 @@ fn cassandra_written_separators_equal_separator_gt_of_cqlite_key_encodings() {
             "{table}: raw bytes matched {raw_hits}/{} separators - the oracle would not detect the bug",
             inter.len()
         );
+        // NEGATIVE CONTROL 2 (flag swap): the same keys encoded with the WRONG uuid-vs-timeuuid
+        // declaration. On the tie tables the separators are cut inside the lsb, where the two
+        // swizzles differ by the 0x80 XOR, so almost none may match; on the other tables the
+        // common prefix ends before the lsb and the swap is invisible (so no assertion there).
+        if table.starts_with("timeuuid_ties") {
+            let swapped: Vec<Vec<u8>> = keys
+                .iter()
+                .map(|k| {
+                    encode_clustering_bound_oss50_typed(&[Value::Uuid(*k)], &[desc], &[!timeuuid])
+                        .expect("uuid encodes")
+                })
+                .collect();
+            let swapped_candidates: Vec<Vec<u8>> = swapped
+                .windows(2)
+                .filter(|w| w[0] != w[1])
+                .map(|w| sep_gt(&w[0], &w[1]))
+                .collect();
+            let swapped_hits = inter
+                .iter()
+                .filter(|s| swapped_candidates.contains(s))
+                .count();
+            assert!(
+                swapped_hits * 2 < inter.len(),
+                "{table}: the WRONG uuid/timeuuid flag still matched {swapped_hits}/{} separators - \
+                 the oracle would not detect a flag swap or a dropped lsb XOR",
+                inter.len()
+            );
+        }
         let tail = seps.last().expect("trailing separator");
         assert!(
             tail.as_slice() > enc[enc.len() - 1].as_slice() || enc[enc.len() - 1].starts_with(tail),
