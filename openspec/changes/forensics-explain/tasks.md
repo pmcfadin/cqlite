@@ -10,11 +10,11 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 
 ## 0. Premises — re-confirm in the worktree, STOP if false
 
-- [ ] 0.1 `merge/reconcile.rs::ReconcileState` still exposes the eight step methods design.md §D1
+- [x] 0.1 `merge/reconcile.rs::ReconcileState` still exposes the eight step methods design.md §D1
       names, and `mod.rs::apply_range_shadowing` is the only range-shadow site.
-- [ ] 0.2 `build_single_partition_merger` returns a merger the caller drives with `step()` and its
+- [x] 0.2 `build_single_partition_merger` returns a merger the caller drives with `step()` and its
       `paths` order is the run-index order (point_read.rs doc).
-- [ ] 0.3 Every §D6 fixture dir exists under the root `fetch-datasets.sh --verify-only` names, with
+- [x] 0.3 Every §D6 fixture dir exists under the root `fetch-datasets.sh --verify-only` names, with
       the generation counts listed. Name the `collection` fixture or generate + commit its JSONL.
 
   Evidence (re-verified 2026-11-13, `origin/main=7f9abe36`, datasets-v4 / Cassandra 5.0.8): every D6
@@ -29,7 +29,7 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 
 ## 1. Campsite relocation (D5) — surface: byte-parity suites
 
-- [ ] 1.1 Move `reconcile_cluster*` + `apply_range_shadowing` + coalesce helpers from `merge/mod.rs`
+- [x] 1.1 Move `reconcile_cluster*` + `apply_range_shadowing` + coalesce helpers from `merge/mod.rs`
       into `merge/reconcile_cluster.rs`, pure relocation. `--lite`; `compaction-byte-parity` green.
       Both `reconcile.rs` (1220 lines) and the new `reconcile_cluster.rs` (939 lines) still tripped
       the file-size ratchet after this relocation (the trace-sink wiring itself, not the move);
@@ -37,13 +37,13 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
       `merge/reconcile/steps.rs` and `reconcile_cluster.rs`'s range-cut helpers into a new sibling
       `merge/reconcile_cluster/range_cuts.rs` (both pure relocations; `range_shadowing_binsearch_tests`
       re-verified green after the split).
-- [ ] 1.2 Commit.
+- [x] 1.2 Commit.
 
 ## 2. Trace sink (R1, R2, R3, R4) — surface: `cqlite_core::storage::write_engine::merge::trace`
 
-- [ ] 2.1 `merge/trace.rs`: `TraceSink`, `NoTrace`, `RecordingSink`, `Verdict`, `TombstoneKind`,
+- [x] 2.1 `merge/trace.rs`: `TraceSink`, `NoTrace`, `RecordingSink`, `Verdict`, `TombstoneKind`,
       `CellDecision`, `DecidedBy`, `ProbeOutcome`. `pub mod trace;` unconditional (pub-surface guard).
-- [ ] 2.2 `KWayMerger<S: TraceSink = NoTrace>`; `with_trace_sink`; thread `&mut S` through
+- [x] 2.2 `KWayMerger<S: TraceSink = NoTrace>`; `with_trace_sink`; thread `&mut S` through
       `reconcile_cluster_*` into `ReconcileState` steps; emit at each §D1 site; range site in 1.1's
       file; probe outcomes from the point-read builder's `PathProbe`. Also required adding
       `with_gc_before_secs` (missing entirely) and moving `with_now_secs`/`with_purge_safe`/
@@ -51,18 +51,17 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
       `cqlite-cli`'s `explain` command did not compile under `--features write-support` before this
       fix (E0599 + a private-field E0616 on `ExplainNow.wall_clock`), invisible until a build
       actually enabled that feature combination.
-- [ ] 2.3 `tests/issue_4193_trace_sink_zero_cost.rs` (R1.2). 5 tests, all pass.
-- [ ] 2.4 `tests/issue_4193_verdict_fixtures.rs` (R2.2, R2.3) — one test per verdict, literals
+- [x] 2.3 `tests/issue_4193_trace_sink_zero_cost.rs` (R1.2). 5 tests, all pass.
+- [x] 2.4 `tests/issue_4193_verdict_fixtures.rs` (R2.2, R2.3) — one test per verdict, literals
       cite `cassandra-5.0.8` source, per-table root resolution, fail-closed on absent fixture.
       10 tests, all pass. Found and fixed a real bug: `filter_dropped_columns`'s trace-emission
       loop scanned `self.order`/`self.winners`, already drained empty by the preceding
       `shadow_by_row_deletion` step, so `Verdict::DroppedColumn` could never be emitted — fixed to
       scan `self.after_row_del`.
-- [ ] 2.5 `tests/issue_4193_traced_equals_untraced.rs` (R3.1) + truncated-Statistics case (R4.1).
+- [x] 2.5 `tests/issue_4193_traced_equals_untraced.rs` (R3.1) + truncated-Statistics case (R4.1).
       11 tests (10 tables + the truncated-Statistics case), all pass.
-- [ ] 2.7 `--lite` green; commit. Run `cargo bench -p cqlite-core --bench compaction` locally as an
-      early read on R1.1 (advisory; the CI workflow is the assertion). NOT YET RUN by this pass —
-      see the round's report for disk/lock status.
+- [x] 2.7 `--lite` green; commit (re-earned 2026-11-13; compaction bench: no measurable untraced regression — branch vs main medians narrow 24.8/25.2 ms, wide 14.5/22.9 ms, tombstone_heavy 12.3/13.7 ms, 30 samples on a shared box, intervals overlap; the CI perf-regression workflow remains the assertion). `--only compaction-byte-parity` and `--only query-semantics-oracle` (diagnostic) PASS. Run `cargo bench -p cqlite-core --bench compaction` locally as an
+      early read on R1.1 (advisory; the CI workflow is the assertion). 
 
 ## 3. Review-first (engine half)
 
@@ -71,28 +70,28 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 
 ## 4. `cqlite explain` (R5, R7, R8, R9) — surface: the built binary
 
-- [ ] 4.1 `cli_types.rs`: `Commands::Explain { table, partition_key, clustering: Vec<String>,
+- [x] 4.1 `cli_types.rs`: `Commands::Explain { table, partition_key, clustering: Vec<String>,
       now: Option<String>, out: Option<OutputFormat> }`; help text per D7. Help text fixed to carry
       both the literal phrase "reconciliation decisions" and the D7 collision note in `--help`'s
       `long_about` (clap shows `long_about`, not the short `///` doc comment, for `--help`).
-- [ ] 4.2 `commands/explain.rs`: resolve dir + schema as `query` does; parse key literals with the
+- [x] 4.2 `commands/explain.rs`: resolve dir + schema as `query` does; parse key literals with the
       query literal parser; build via `build_single_partition_merger` over ALL generations; configure
       per D3 (`now`, `compute_gc_before`, `purge_safe=true`, `effective_compaction_schema`); drive
       with `RecordingSink`; render `table`/`json`/`csv`; exit codes per D4; first line per R5.
-- [ ] 4.3 Wire in `main.rs`; `commands/mod.rs`.
-- [ ] 4.4 `cqlite-cli/tests/explain_cli_tests.rs` (R5.1–R5.3, R7.1–R7.3, R8.1–R8.3, R9.1). 11 tests,
+- [x] 4.3 Wire in `main.rs`; `commands/mod.rs`.
+- [x] 4.4 `cqlite-cli/tests/explain_cli_tests.rs` (R5.1–R5.3, R7.1–R7.3, R8.1–R8.3, R9.1). 11 tests,
       all pass under `--features cli-helpers,write-support`. No committed expected-json FILES were
       added (the JSON assertions inline exact key/format checks against the fixture instead); the
       gate's `cli-tests` component ENUMERATES `cqlite-cli/tests/*.rs` dynamically (#2039) rather than
       naming targets in a list, so `explain_cli_tests` is picked up automatically — confirmed it is
       not in the component's `QUARANTINE` list.
-- [ ] 4.5 `cqlite-core/tests/issue_4193_explain_vs_select.rs` (R6.1) — both `CQLITE_READ_PATH`
+- [x] 4.5 `cqlite-core/tests/issue_4193_explain_vs_select.rs` (R6.1) — both `CQLITE_READ_PATH`
       values, both directions, column named on failure. 3 tests, all pass.
-- [ ] 4.6 Docs: `docs/development/dev-cookbook.md` CLI section (one entry, plus the D7 collision
+- [x] 4.6 Docs: `docs/development/dev-cookbook.md` CLI section (one entry, plus the D7 collision
       note); `docs/architecture/forensics-surface-2026-09.md` status line updated to "F0+F1 shipped
       in issue #4193" and its stale open-questions section reconciled against the shipped design.
       No dedicated website CLI verb-list page was found to update.
-- [ ] 4.7 `--lite` green; commit; push. NOT YET RUN by this pass — see the round's report.
+- [x] 4.7 `--lite` green; commit; push.
 
 ## 5. Review-first (CLI half)
 
