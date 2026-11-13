@@ -463,8 +463,8 @@ fn verify_clean(dir: &Path, f: &Fixture) -> bool {
 }
 
 /// Whether an uninterrupted run is expected to contain a `rename` boundary (the atomic-publication
-/// step). Flips to `true` with the TOC fix (#4526).
-const EXPECT_RENAME: bool = false;
+/// step). `true` since the TOC fix (#4526) publishes TOC.txt by rename.
+const EXPECT_RENAME: bool = true;
 
 /// The enumerated boundaries must contain every syscall CATEGORY an SSTable write verb performs,
 /// per output file, so a shim that stopped seeing (say) `copy_file_range` or vectored writes
@@ -488,15 +488,23 @@ fn assert_expected_categories(
         .collect();
     files.push(("manifest.json".to_string(), true));
     for (f, non_empty) in &files {
+        // A file published by rename (TOC.txt since #4526) is created and written under its
+        // dot-prefixed temp sibling; the final name is then the target of a `rename` boundary.
+        let tmp = match f.rsplit_once('/') {
+            Some((dir, name)) => format!("{dir}/.{name}.tmp"),
+            None => format!(".{f}.tmp"),
+        };
+        let renamed = has(&["rename"], f);
+        let site = if renamed { &tmp } else { f };
         assert!(
-            has(&["create"], f),
-            "{verb:?}: no `create` boundary enumerated for {f} — shim blind to file creation?"
+            has(&["create"], site),
+            "{verb:?}: no `create` boundary enumerated for {site} — shim blind to file creation?"
         );
         // A legitimately EMPTY output (e.g. an empty BTI Rows.db) has a create and no write.
         assert!(
-            !non_empty || has(&["write", "pwrite", "copy"], f),
-            "{verb:?}: no write-class boundary (write/pwrite/copy) enumerated for {f} — shim blind \
-             to the call this writer uses?"
+            !non_empty || has(&["write", "pwrite", "copy"], site),
+            "{verb:?}: no write-class boundary (write/pwrite/copy) enumerated for {site} — shim \
+             blind to the call this writer uses?"
         );
     }
     let any = |kind: &str| bounds.iter().any(|(k, _)| k == kind);
