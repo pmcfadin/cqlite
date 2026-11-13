@@ -230,13 +230,23 @@ fi
 # fixture: the clustering-slice row-count anchor (`must yield exactly N`, the one that
 # fires while `probe_keys` are declared) or the partition-key discovery guard. Both are
 # required to name the case on the SAME line, so a sibling's failure cannot satisfy it.
+# #4159: a 0-byte Data.db is now REFUSED AT OPEN (an unreadable SSTable fails reads closed
+# instead of reading as an empty table), which is an equally legitimate rejection and happens
+# BEFORE the slice-count anchors can run. It is accepted only in the shape that names THIS
+# case's own staged fixture file on one line (`table '...' is unreadable: SSTable(s) refused:
+# <...>/test_da/multiclustering_table-<id>/da-2-bti-Data.db ...`), so a sibling's refusal or a
+# refusal of a different file cannot satisfy it.
 if grep -qE "case test_da\.multiclustering_table: .*(must yield exactly [0-9]+|no partition keys to probe)" "$empty_out"; then
   ok "empty: the rejection is THIS case's anti-vacuous anchor (slice row count or \
 partition-key discovery), not merely a nonzero exit"
+elif grep -qE "is unreadable: SSTable\(s\) refused: [^;]*test_da/multiclustering_table-[0-9a-f]+/${DATA_DB}" "$empty_out"; then
+  ok "empty: the rejection is THIS case's own refused fixture file (#4159: a 0-byte \
+Data.db is refused at open, fail-closed), not merely a nonzero exit"
 else
   bad "empty: no 'case test_da.multiclustering_table: … must yield exactly N' (or \
-'… no partition keys to probe') line — the run failed for some OTHER reason, which \
-does not prove the empty fixture was rejected; see $empty_out"
+'… no partition keys to probe'), and no #4159 'unreadable: SSTable(s) refused: …\
+test_da/multiclustering_table-<id>/${DATA_DB}' line — the run failed for some OTHER \
+reason, which does not prove the empty fixture was rejected; see $empty_out"
 fi
 
 # ---------------------------------------------------------------------------
