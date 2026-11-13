@@ -695,6 +695,7 @@ async fn vortex_dtype_uuid_flags(
         let dtype = fields
             .field(name.as_ref())
             .ok_or_else(|| format!("no field dtype for {name}"))?;
+        eprintln!("vortex dtype {name}: {dtype}");
         out.push((
             name.to_string(),
             dtype.as_extension_opt().map(|e| e.is::<Uuid>()),
@@ -848,12 +849,16 @@ fn r3_1_desc_clustering_order_matches_the_sstabledump_golden() {
                 dir.display()
             )
         });
-    let golden: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&golden_path).expect("golden"))
-            .expect("golden json");
+    // The golden is JSON Lines: one partition object per line.
+    let golden: Vec<serde_json::Value> = std::fs::read_to_string(&golden_path)
+        .expect("golden")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("golden line is json"))
+        .collect();
     // Expected sequence: (partition uuid, timestamp millis), in the golden's own order.
     let mut expected: Vec<(String, i64)> = Vec::new();
-    for part in golden.as_array().expect("golden is an array of partitions") {
+    for part in &golden {
         let key = part["partition"]["key"][0]
             .as_str()
             .expect("partition key")
