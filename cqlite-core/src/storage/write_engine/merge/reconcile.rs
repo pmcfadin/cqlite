@@ -659,7 +659,12 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
-    pub(super) fn build(self, purges: &mut PurgeCounts, keep_marker: bool) -> Option<MergeEntry> {
+    pub(super) fn build(
+        self,
+        purges: &mut PurgeCounts,
+        keep_marker: bool,
+        now_secs: Option<i64>,
+    ) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
@@ -682,10 +687,7 @@ impl ReconcileState {
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
         if let Some(d) = row_del {
-            let tomb = |c: &CellData| KWayMerger::is_cell_tombstone(c) || c.is_deleted;
-            if !surviving.iter().any(|c| is_data_cell(c) && !tomb(c)) {
-                surviving.retain(|c| is_data_cell(c) || c.timestamp > d);
-            }
+            super::model::shed_key_cells(&mut surviving, &ck_names, &row_liveness, d, now_secs);
         }
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;

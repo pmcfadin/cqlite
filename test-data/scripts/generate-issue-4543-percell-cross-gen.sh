@@ -58,6 +58,7 @@ cql "UPDATE pcell USING TIMESTAMP 100 SET a = 'a-gen1' WHERE pk = 1 AND ck = 3"
 cql "DELETE FROM pcell USING TIMESTAMP 200 WHERE pk = 1 AND ck = 4"
 cql "UPDATE pcell USING TIMESTAMP 100 SET a = 'p2-gen1' WHERE pk = 2 AND ck = 1"
 cql "DELETE FROM pcell USING TIMESTAMP 200 WHERE pk = 1 AND ck = 5"
+cql "DELETE FROM pcell USING TIMESTAMP 200 WHERE pk = 1 AND ck = 6"
 cx nodetool flush "$KEYSPACE" "$TABLE"
 sleep 2
 log "generation 2 (NEWER file; some cells carry OLDER timestamps)"
@@ -69,6 +70,8 @@ cql "DELETE a FROM pcell USING TIMESTAMP 50 WHERE pk = 1 AND ck = 3"
 cql "UPDATE pcell USING TIMESTAMP 100 SET a = 'a-gen2' WHERE pk = 1 AND ck = 4"
 cql "UPDATE pcell USING TIMESTAMP 100 SET b = 'p2-b-gen2' WHERE pk = 3 AND ck = 1"
 cql "DELETE a FROM pcell USING TIMESTAMP 300 WHERE pk = 1 AND ck = 5"
+cql "INSERT INTO pcell (pk, ck) VALUES (1, 6) USING TIMESTAMP 300 AND TTL 5"
+sleep 8   # the row MARKER (ck=6) expires BEFORE the flush and before Cassandra's SELECT
 cx nodetool flush "$KEYSPACE" "$TABLE"
 
 INDIR="/var/lib/cassandra/data/$KEYSPACE"
