@@ -535,6 +535,113 @@
         "rows, so neither case can pass by a reader that always returns a constant."
       ],
       "expected_rows": []
+    },
+    {
+      "id": "null_only_row__flat_select_star",
+      "keyspace": "test_nullrow",
+      "table": "flat_rows",
+      "fixture_dir_prefix": "flat_rows-",
+      "sstable_prefix": "nb-1-big",
+      "fixtures_dir": "test-data/fixtures/issue_4524",
+      "schema": "issue-4524-null-only-row.cql",
+      "query": "SELECT id, v FROM test_nullrow.flat_rows",
+      "reconciliation": [
+        "row_liveness",
+        "cell_deletion"
+      ],
+      "pinned_now_secs": 1800000000,
+      "pinned_now_note": "No TTL in this fixture; the pin only removes wall-clock nondeterminism (every statement used USING TIMESTAMP 1000..2000).",
+      "physical_row_count": 6,
+      "note": [
+        "Issue #4524 (rows with NO live regular cell). Expected rows are CASSANDRA 5.0.8's own cqlsh SELECT output,",
+        "captured verbatim in the fixture's cqlsh-select.txt (generator test-data/scripts/generate-issue-4524-null-only-row.sh):",
+        "a row with LIVENESS (primary-key INSERT, an explicit null, or a cell tombstone over a live insert) is RETURNED with v = null",
+        "(Cassandra BTreeRow.hasLiveData: primaryKeyLivenessInfo live); a row with NO liveness whose only cell is deleted, and a",
+        "row-deleted row, are NOT. Physical-dump parity lists every one of those rows, so it cannot tell these apart."
+      ],
+      "expected_rows": [
+        {
+          "id": 1,
+          "v": null
+        },
+        {
+          "id": 2,
+          "v": null
+        },
+        {
+          "id": 3,
+          "v": null
+        },
+        {
+          "id": 4,
+          "v": null
+        },
+        {
+          "id": 6,
+          "v": "live"
+        }
+      ]
+    },
+    {
+      "id": "null_only_row__clustered_select_star",
+      "keyspace": "test_nullrow",
+      "table": "clustered_rows",
+      "fixture_dir_prefix": "clustered_rows-",
+      "sstable_prefix": "nb-1-big",
+      "fixtures_dir": "test-data/fixtures/issue_4524",
+      "schema": "issue-4524-null-only-row.cql",
+      "query": "SELECT pk, ck, v FROM test_nullrow.clustered_rows",
+      "reconciliation": [
+        "row_liveness",
+        "cell_deletion"
+      ],
+      "pinned_now_secs": 1800000000,
+      "pinned_now_note": "No TTL in this fixture; the pin only removes wall-clock nondeterminism (every statement used USING TIMESTAMP 1000..2000).",
+      "physical_row_count": 9,
+      "note": [
+        "Issue #4524 (rows with NO live regular cell). Expected rows are CASSANDRA 5.0.8's own cqlsh SELECT output,",
+        "captured verbatim in the fixture's cqlsh-select.txt (generator test-data/scripts/generate-issue-4524-null-only-row.sh):",
+        "a row with LIVENESS (primary-key INSERT, an explicit null, or a cell tombstone over a live insert) is RETURNED with v = null",
+        "(Cassandra BTreeRow.hasLiveData: primaryKeyLivenessInfo live); a row with NO liveness whose only cell is deleted, and a",
+        "row-deleted row, are NOT. Physical-dump parity lists every one of those rows, so it cannot tell these apart."
+      ],
+      "expected_rows": [
+        {
+          "pk": 1,
+          "ck": 1,
+          "v": null
+        },
+        {
+          "pk": 2,
+          "ck": 1,
+          "v": null
+        },
+        {
+          "pk": 3,
+          "ck": 1,
+          "v": null
+        },
+        {
+          "pk": 4,
+          "ck": 1,
+          "v": null
+        },
+        {
+          "pk": 6,
+          "ck": 1,
+          "v": "live"
+        },
+        {
+          "pk": 8,
+          "ck": 1,
+          "v": null
+        },
+        {
+          "pk": 8,
+          "ck": 2,
+          "v": "live"
+        }
+      ]
     }
   ]
 }

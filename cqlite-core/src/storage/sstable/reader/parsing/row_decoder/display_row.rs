@@ -168,12 +168,33 @@ pub(super) fn build_display_row_read_path(
     row_header_opt: Option<&RowHeader>,
     schema: &TableSchema,
 ) -> ScanRow {
+    // Issue #4524: the user-facing visibility rule is Cassandra's `BTreeRow.purge`: a row
+    // survives iff it has live PRIMARY-KEY LIVENESS (`HAS_TIMESTAMP` in the row header: an
+    // `INSERT`, including `INSERT (pk, ck)` with no regular cell and `INSERT ... v = null`) OR
+    // at least one live non-key cell. `build_display_row` knows only the cells, so on a row
+    // WITH a header it needs the liveness half of the rule applied here, read path only
+    // (physical consumers keep the byte-pinned historical shape):
+    //
+    //  * liveness, no live cell  -> an empty `Row` (v = null on every regular column), NOT a
+    //    `Marker(Null)`: the explicit-null / liveness-only row Cassandra returns;
+    //  * NO liveness, no live cell -> `Marker(Null)`: an `UPDATE`-created row whose every cell
+    //    was deleted; only its clustering pseudo-cells remain, which must not make it a row.
+    let has_liveness = row_header_opt.is_some_and(|h| h.timestamp.is_some());
+    let live_cell = |cells: &RowCells| row_has_non_key_cell(cells, schema);
     match build_display_row(cells, row_header_opt, schema) {
+        ScanRow::Row(kept) if row_header_opt.is_some() && !has_liveness && !live_cell(&kept) => {
+            ScanRow::Marker(Value::Null)
+        }
         ScanRow::Row(mut kept) => {
             merge_static_cells(&mut kept, static_cells);
             ScanRow::Row(kept)
         }
-        // A pure row tombstone (or an empty row): statics do not revive it.
+        ScanRow::Marker(Value::Null) if has_liveness => {
+            let mut kept: RowCells = Vec::new();
+            merge_static_cells(&mut kept, static_cells);
+            ScanRow::Row(kept)
+        }
+        // A pure row tombstone (or an empty row without liveness): statics do not revive it.
         other => other,
     }
 }

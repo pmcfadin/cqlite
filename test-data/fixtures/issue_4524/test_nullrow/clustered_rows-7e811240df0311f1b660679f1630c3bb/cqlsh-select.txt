@@ -1,0 +1,12 @@
+
+ pk | ck | v
+----+----+------
+  1 |  1 | null
+  8 |  1 | null
+  8 |  2 | live
+  2 |  1 | null
+  4 |  1 | null
+  6 |  1 | live
+  3 |  1 | null
+
+(7 rows)
