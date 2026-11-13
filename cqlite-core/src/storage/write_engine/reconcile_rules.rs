@@ -109,6 +109,16 @@ pub(crate) fn deletion_supersedes(candidate: (i64, i32), current: (i64, i32)) ->
         || (candidate.0 == current.0 && (candidate.1 as u32) > (current.1 as u32))
 }
 
+/// `supersedes` or equal (`>=`): the newest deletion of a group, last of equals.
+pub(crate) fn deletion_ge(candidate: (i64, i32), current: (i64, i32)) -> bool {
+    candidate == current || deletion_supersedes(candidate, current)
+}
+
+/// [`deletion_ge`] against a possibly-absent current deletion.
+pub(crate) fn ge_opt(current: Option<(i64, i32)>, candidate: (i64, i32)) -> bool {
+    current.is_none_or(|c| deletion_ge(candidate, c))
+}
+
 /// [`deletion_supersedes`] for a possibly-absent current deletion `(markedForDeleteAt)` paired with
 /// its `localDeletionTime` (the merge keeps the two in separate fields).
 pub(crate) fn supersedes_opt(

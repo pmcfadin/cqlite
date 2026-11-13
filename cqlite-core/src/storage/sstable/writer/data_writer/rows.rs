@@ -117,10 +117,10 @@ impl DataWriter {
                 .any(|op| matches!(op, CellOperation::DeleteRow));
             if has_delete_row
                 && shadow_floor.is_none_or(|floor| m.timestamp_micros > floor)
-                && row_deletion.is_none_or(|cur| {
-                    let cand = (m.timestamp_micros, m.effective_local_deletion_time());
-                    reconcile_rules::deletion_supersedes(cand, cur) || cand == cur
-                })
+                && reconcile_rules::ge_opt(
+                    row_deletion,
+                    (m.timestamp_micros, m.effective_local_deletion_time()),
+                )
             {
                 // Issue #764: honor the mutation's explicit local_deletion_time.
                 row_deletion = Some((m.timestamp_micros, m.effective_local_deletion_time()));
@@ -134,9 +134,7 @@ impl DataWriter {
             // time) — the row keeps both the deletion AND the newer cells.
             if let Some((del_ts, del_ldt)) = m.row_tombstone {
                 if shadow_floor.is_none_or(|floor| del_ts > floor)
-                    && row_deletion.is_none_or(|cur| {
-                        reconcile_rules::deletion_supersedes((del_ts, del_ldt), cur)
-                    })
+                    && reconcile_rules::ge_opt(row_deletion, (del_ts, del_ldt))
                 {
                     row_deletion = Some((del_ts, del_ldt));
                 }
@@ -191,10 +189,7 @@ impl DataWriter {
     ) -> Option<RowWrite<'a>> {
         use crate::storage::write_engine::mutation::CellOperation;
 
-        // ONE clock reading for this whole row group: ranks every implicit-LDT expiring cell in
-        // `cell_wins` AND is carried on the `RowWrite` so emission stamps the same value (#4530).
         let now_seconds = super::types::wall_clock_seconds();
-
         // Cells and liveness are shadowed by the strongest covering deletion:
         // the row deletion (issue #4246 roborev finding: also exposed via
         // `resolve_row_deletion`/`combine_deletion_ts` so a stats-fold caller
@@ -528,8 +523,6 @@ impl DataWriter {
                     }
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         let existing = entry.get();
-                        // Cassandra `Cells.resolveRegular` (the SHARED rule, #947/#4530): a
-                        // TOTAL order, so a later-applied mutation no longer wins a tie.
                         let wins = reconcile_rules::cell_wins(&candidate, existing);
                         if wins {
                             entry.insert(candidate);
