@@ -247,6 +247,7 @@ impl SSTableReader {
     /// order — the primitive `cqlite diagnose --deep` (issue #4204) builds its size / width /
     /// tombstone rankings on. `on_partition` always fires BEFORE the rows of that partition.
     /// Nothing is reconciled and nothing is written; one structure is resident at a time.
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     pub(crate) async fn scan_rows_with_partition_starts(
         &self,
         schema: Option<&crate::schema::TableSchema>,

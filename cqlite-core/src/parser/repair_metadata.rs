@@ -1316,7 +1316,7 @@ fn read_tombstone_histogram(c: &mut Cursor, modern: bool) -> Result<Vec<(i64, u6
     }
     Ok(out)
 }
-
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub(crate) mod diagnose_fields; // #4204 diagnose STATS decoders
 #[cfg(test)]
 mod tests {
