@@ -69,11 +69,13 @@ impl crate::storage::write_engine::reconcile_rules::ReconcileCell for MergedOp<'
     }
     fn expiring_ttl(&self) -> Option<u32> {
         use crate::storage::write_engine::mutation::CellOperation as Op;
-        match self.op {
+        // TTL 0 is Cassandra's `NO_TTL` (`LivenessInfo.NO_TTL`): not an expiring cell.
+        let ttl = match self.op {
             Op::WriteWithTtl { ttl_seconds, .. } => Some(*ttl_seconds),
             Op::Write { .. } => self.row_ttl_seconds,
             _ => None,
-        }
+        };
+        ttl.filter(|t| *t != 0)
     }
     fn local_deletion_time(&self) -> i32 {
         use crate::storage::write_engine::mutation::CellOperation as Op;

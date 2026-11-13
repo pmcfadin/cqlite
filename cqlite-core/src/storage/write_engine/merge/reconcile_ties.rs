@@ -316,3 +316,34 @@ fn partition_deletion_vs_partition_deletion_larger_ldt_wins() {
         }
     }
 }
+
+/// `TTL 0` is Cassandra's `NO_TTL` (`LivenessInfo.NO_TTL`; `AbstractCell.isExpiring()` is
+/// `ttl() != NO_TTL`), so a `TTL 0` cell is LIVE: against a plain live cell at an equal
+/// timestamp the larger value wins, in either order — never the "expiring" one (roborev #4530 r3).
+#[test]
+fn ttl_zero_is_live_not_expiring() {
+    let ttl_zero = |value: u8| {
+        let mut c = CellData::new("c0".into(), Value::text(format!("v{value}")), TS);
+        c.ttl = Some(0);
+        MergeEntry::new(0, pkey(), Some(ck()), TS, RowData::Live { cells: vec![c] })
+    };
+    for zero_value in 0..3u8 {
+        for live_value in 0..3u8 {
+            let want = zero_value.max(live_value);
+            for zero_first in [true, false] {
+                let (x, y) = (ttl_zero(zero_value), C::Live { value: live_value }.entry());
+                let rows = if zero_first { vec![x, y] } else { vec![y, x] };
+                let got = survivor(&merge(rows));
+                let got_value = match &got.value {
+                    Value::Text(b) => b[1] - b'0',
+                    other => panic!("unexpected value {other:?}"),
+                };
+                assert_eq!(
+                    got_value, want,
+                    "TTL-0 v{zero_value} vs live v{live_value} (ttl0 first: {zero_first}): \
+                     Cassandra keeps the larger value"
+                );
+            }
+        }
+    }
+}

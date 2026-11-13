@@ -512,11 +512,11 @@ impl crate::storage::write_engine::reconcile_rules::ReconcileCell for CellData {
         super::KWayMerger::is_cell_tombstone(self)
     }
     fn expiring_ttl(&self) -> Option<u32> {
-        // `Cell.isExpiring()`: a live cell that carries a TTL.
+        // `Cell.isExpiring()`: a live cell that carries a TTL. TTL 0 is `NO_TTL`.
         if super::KWayMerger::is_cell_tombstone(self) {
             None
         } else {
-            self.ttl
+            self.ttl.filter(|t| *t != 0)
         }
     }
     fn local_deletion_time(&self) -> i32 {
