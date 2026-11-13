@@ -39,11 +39,9 @@ pub enum ComparatorType {
     Blob,
     /// Timestamp comparator (chronological)
     Timestamp,
-    /// `uuid` comparator: `UUIDType.compareCustom` (version, then v1 timestamp / unsigned msb,
-    /// then unsigned lsb) — NOT byte-wise (#4534; see `crate::uuid_order`).
+    /// `uuid` comparator: `UUIDType.compareCustom`, NOT byte-wise (#4534)
     Uuid,
-    /// `timeuuid` comparator: `AbstractTimeUUIDType.compareCustom` (reordered timestamp, then the
-    /// lsb with signed per-byte semantics). Distinct from [`Self::Uuid`] by SCHEMA type (#4534).
+    /// `timeuuid` comparator: `AbstractTimeUUIDType.compareCustom`, chosen by SCHEMA type (#4534)
     TimeUuid,
     /// Variable-length integer comparator
     Varint,
@@ -371,8 +369,11 @@ impl ComparatorType {
             ComparatorType::Text => self.compare_text(left, right),
             ComparatorType::Blob => self.compare_blob(left, right),
             ComparatorType::Timestamp => self.compare_timestamp(left, right),
-            ComparatorType::Uuid => self.compare_uuid(left, right, false),
-            ComparatorType::TimeUuid => self.compare_uuid(left, right, true),
+            ComparatorType::Uuid | ComparatorType::TimeUuid => crate::uuid_order::compare_values(
+                left,
+                right,
+                matches!(self, ComparatorType::TimeUuid),
+            ),
             ComparatorType::Varint => self.compare_varint(left, right),
             ComparatorType::Decimal => self.compare_decimal(left, right),
             ComparatorType::Duration => self.compare_duration(left, right),
@@ -624,19 +625,6 @@ impl ComparatorType {
             (Value::Date(l), Value::Date(r)) => Ok(l.cmp(r)),
             _ => Err(Error::Schema(
                 "Type mismatch: expected date values".to_string(),
-            )),
-        }
-    }
-
-    fn compare_uuid(&self, left: &Value, right: &Value, timeuuid: bool) -> Result<Ordering> {
-        match (left, right) {
-            (Value::Uuid(l), Value::Uuid(r)) => Ok(if timeuuid {
-                crate::uuid_order::timeuuid_type_cmp(l, r)
-            } else {
-                crate::uuid_order::uuid_type_cmp(l, r)
-            }),
-            _ => Err(Error::Schema(
-                "Type mismatch: expected uuid values".to_string(),
             )),
         }
     }

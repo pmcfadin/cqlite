@@ -433,7 +433,6 @@ fn assemble_complex(
                 elements.into_iter().map(|e| e.value).collect(),
             )))
         }
-        // List position = timeuuid cell_path (`TimeUUIDType`): timestamp order, NOT raw bytes (#4534).
         CqlType::List(_) => {
             elements.sort_by(|a, b| {
                 crate::uuid_order::timeuuid_path_cmp(cell_path_bytes(a), cell_path_bytes(b))

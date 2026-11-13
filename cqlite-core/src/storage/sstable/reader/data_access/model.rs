@@ -75,6 +75,27 @@ const OSS50_LT_NEXT_COMPONENT: u8 = 0x20;
 #[cfg(not(feature = "tombstones"))]
 const OSS50_GT_NEXT_COMPONENT: u8 = 0x60;
 
+/// Per-clustering-column `(is_reversed, is_timeuuid)` flags from the schema. A missing schema
+/// yields empty vectors (ascending, plain `uuid`). `is_timeuuid` is the DECLARED type (#4531):
+/// `Value::Uuid` cannot tell `uuid` from `timeuuid`, and the bytes must never be inspected (#28).
+#[cfg(not(feature = "tombstones"))]
+pub(super) fn clustering_flags(
+    schema: Option<&crate::schema::TableSchema>,
+) -> (Vec<bool>, Vec<bool>) {
+    let cols = schema
+        .map(|s| s.clustering_keys.as_slice())
+        .unwrap_or_default();
+    let rev = |c: &crate::schema::ClusteringColumn| {
+        matches!(c.order, crate::schema::ClusteringOrder::Desc)
+    };
+    let tu =
+        |c: &crate::schema::ClusteringColumn| c.data_type.trim().eq_ignore_ascii_case("timeuuid");
+    (
+        cols.iter().map(rev).collect(),
+        cols.iter().map(tu).collect(),
+    )
+}
+
 /// Normalize a CQL [`ClusteringSlice`] into the `(physical_lower, physical_upper)`
 /// byte-comparable bounds that [`select_row_index_blocks_for_range`] consumes
 /// (issue #954 High-severity correctness fix).

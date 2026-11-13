@@ -63,6 +63,24 @@ pub(crate) fn timeuuid_type_cmp(a: &[u8; 16], b: &[u8; 16]) -> Ordering {
     })
 }
 
+/// Order two `Value::Uuid`s as a declared `uuid` (`timeuuid == false`) or `timeuuid`.
+pub(crate) fn compare_values(
+    left: &crate::types::Value,
+    right: &crate::types::Value,
+    timeuuid: bool,
+) -> crate::Result<Ordering> {
+    match (left, right) {
+        (crate::types::Value::Uuid(l), crate::types::Value::Uuid(r)) => Ok(if timeuuid {
+            timeuuid_type_cmp(l, r)
+        } else {
+            uuid_type_cmp(l, r)
+        }),
+        _ => Err(crate::Error::Schema(
+            "Type mismatch: expected uuid values".to_string(),
+        )),
+    }
+}
+
 /// `timeuuid` order of two serialized cell paths (a list element's position). A path that is not
 /// 16 bytes (never produced for a list) falls back to raw bytes.
 pub(crate) fn timeuuid_path_cmp(a: &[u8], b: &[u8]) -> Ordering {
