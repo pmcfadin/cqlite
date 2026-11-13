@@ -325,6 +325,13 @@ impl StreamingVortexWriter {
         if self.poisoned {
             return Err(VortexExportError::Poisoned);
         }
+        // After `finalize` the writer is gone: rows accepted now could never reach the file,
+        // so refuse them before buffering or counting (no silent loss).
+        if self.writer.is_none() {
+            return Err(VortexExportError::InvalidOptions(
+                "writer already finalized - cannot write more rows".to_string(),
+            ));
+        }
         self.row_buffer.extend(rows.iter().cloned());
         self.rows_written += rows.len() as u64;
 

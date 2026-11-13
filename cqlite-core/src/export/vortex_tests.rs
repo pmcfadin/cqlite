@@ -137,6 +137,31 @@ async fn double_finalize_is_invalid_options_not_a_panic() {
     assert!(matches!(err, VortexExportError::InvalidOptions(_)));
 }
 
+/// A chunk written after `finalize` (smaller than a row group, so it would only be
+/// buffered) must be refused, not silently accepted and counted (roborev #4237 r3).
+#[tokio::test]
+async fn write_after_finalize_is_refused_not_silently_buffered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("after.vortex");
+    let metadata = metadata_two_cols();
+
+    let mut writer =
+        StreamingVortexWriter::create(&path, &metadata, &VortexExportOptions::default())
+            .await
+            .expect("create");
+    writer
+        .write_chunk(&[row(1, Some("a"))])
+        .await
+        .expect("write_chunk");
+    writer.finalize().await.expect("finalize");
+
+    let err = writer
+        .write_chunk(&[row(2, Some("b"))])
+        .await
+        .expect_err("a write after finalize must be rejected");
+    assert!(matches!(err, VortexExportError::InvalidOptions(_)));
+}
+
 /// R4.1: a conversion failure in a LATER batch (not the first) names its batch index,
 /// leaves no readable file at the destination, and cleans up the `.tmp` sibling.
 /// row_group_size=2 so the first `write_chunk` call flushes batch 0 (2 valid rows)
