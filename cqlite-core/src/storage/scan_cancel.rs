@@ -23,8 +23,24 @@ use std::sync::Arc;
 /// All clones share one `AtomicBool`, so cancelling any clone is observed by a
 /// scan polling another. A default (never-cancelled) flag makes every threaded
 /// call site a no-op, so non-cancellable callers pass `ScanCancel::default()`.
-#[derive(Clone, Debug, Default)]
-pub struct ScanCancel(Arc<AtomicBool>);
+#[derive(Clone, Debug)]
+pub struct ScanCancel(
+    Arc<AtomicBool>,
+    // TEST-ONLY deterministic trip (issue #4538): the number of `check()` polls left before the
+    // flag trips itself (`i64::MAX` = never). Lets a test cancel "during the Nth poll" with no
+    // wall-clock race; compiled out of every non-test build.
+    #[cfg(test)] Arc<std::sync::atomic::AtomicI64>,
+);
+
+impl Default for ScanCancel {
+    fn default() -> Self {
+        Self(
+            Arc::default(),
+            #[cfg(test)]
+            Arc::new(std::sync::atomic::AtomicI64::new(i64::MAX)),
+        )
+    }
+}
 
 impl ScanCancel {
     /// Create a fresh, un-cancelled flag.
@@ -33,6 +49,15 @@ impl ScanCancel {
     }
 
     /// Request cancellation. Idempotent.
+    /// TEST-ONLY: trip this flag on the `polls`-th [`check`](Self::check) (1-based), so a test can
+    /// cancel a loop deterministically at a chosen poll instead of racing a timer (issue #4538).
+    #[cfg(test)]
+    pub(crate) fn cancel_on_poll(polls: i64) -> Self {
+        let this = Self::default();
+        this.1.store(polls, Ordering::Relaxed);
+        this
+    }
+
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Relaxed);
     }
@@ -45,6 +70,10 @@ impl ScanCancel {
     /// Return `Err(Error::Cancelled)` if cancellation has been requested, else
     /// `Ok(())`. The polling helper scan loops call at a bounded interval.
     pub fn check(&self) -> crate::Result<()> {
+        #[cfg(test)]
+        if self.1.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.cancel();
+        }
         if self.is_cancelled() {
             Err(crate::Error::Cancelled)
         } else {
