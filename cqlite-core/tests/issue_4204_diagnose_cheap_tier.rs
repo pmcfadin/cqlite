@@ -10,6 +10,8 @@
 //! replaced by an EMPTY file, and the cheap tier must produce the identical report — it cannot
 //! have read a byte of Data.db.
 
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
+
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
 
