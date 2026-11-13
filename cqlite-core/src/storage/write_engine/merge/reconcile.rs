@@ -83,8 +83,7 @@ pub(super) struct ReconcileState {
     row_del: Option<i64>,
     /// `localDeletionTime` (GC-clock seconds) paired with the winning `row_del`.
     row_del_ldt: i32,
-    /// Row deletion timestamp after `purge_gc_grace` cleared it: `build` still sheds key cells (#4545).
-    purged_row_del: Option<i64>,
+    purged_row_del: Option<i64>, // cleared by purge; build still sheds key cells (#4545)
     /// First-seen cell-key order for deterministic output.
     order: Vec<CellKey>,
     /// Winning cell per `(column, cell_path)`.
