@@ -191,7 +191,7 @@ impl SSTableManager {
                     }
                     let mut entries = match self.platform.fs().read_dir(dir).await {
                         Ok(entries) => entries,
-                        Err(_) => continue,
+                        Err(e) => return Err(self.refuse_dir(dir, e)),
                     };
                     while let Some(entry) = entries.next_entry().await? {
                         let path = entry.path();

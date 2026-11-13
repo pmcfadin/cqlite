@@ -271,3 +271,83 @@ async fn deleted_refused_sstable_is_reconciled_by_refresh() {
         .expect("bystander")
         .is_empty());
 }
+
+// ---- directory-level refusals + unresolvable keys (roborev round 2) --------------
+
+async fn dirs_manager(base: &Path, dirs: Vec<PathBuf>) -> SSTableManager {
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    SSTableManager::new_from_discovered_paths(base, dirs, &config, platform, None)
+        .await
+        .expect("new_from_discovered_paths stays Ok")
+}
+
+/// Restores a directory's mode on drop (also on a failing assertion).
+struct ModeGuard(PathBuf, u32);
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+    }
+}
+
+/// An existing table directory that cannot be listed is `Err` (not empty); once it
+/// is readable again a refresh clears that directory-level refusal.
+#[tokio::test]
+async fn unreadable_table_dir_recovers_after_refresh() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = stage(tmp.path(), TABLE, false);
+    let guard = ModeGuard(dir.clone(), 0o755);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    if std::fs::read_dir(&dir).is_ok() {
+        return; // running as root: mode bits do not apply; nothing to prove here
+    }
+    let m = dirs_manager(tmp.path(), vec![dir.clone()]).await;
+    assert!(
+        m.scan(&tid(TABLE), None, None, None, None).await.is_err(),
+        "unlistable dir must be Err"
+    );
+    assert!(
+        m.refresh_tables().await.is_err(),
+        "refresh over a still-unlistable dir must fail closed"
+    );
+    assert!(m.scan(&tid(TABLE), None, None, None, None).await.is_err());
+
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
+    m.refresh_tables().await.expect("refresh once readable");
+    assert!(!m
+        .scan(&tid(TABLE), None, None, None, None)
+        .await
+        .expect("recovered")
+        .is_empty());
+    drop(guard);
+}
+
+/// A refused SSTable whose table cannot be derived from its (non-UTF-8) directory
+/// name is recorded as UNRESOLVED and fails EVERY read on the manager.
+#[tokio::test]
+async fn unresolvable_path_fails_every_read() {
+    use std::os::unix::ffi::OsStrExt;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let healthy = stage(tmp.path(), BYSTANDER, false);
+    let odd = tmp
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"\xff\xfe-not-utf8"));
+    copy_dir(&generation_dir(TABLE), &odd);
+    damage_stats(&odd);
+    let m = dirs_manager(tmp.path(), vec![healthy, odd]).await;
+    for t in [TABLE, BYSTANDER, "no_such_table"] {
+        let e = m
+            .scan(&tid(t), None, None, None, None)
+            .await
+            .expect_err("unresolved refusal fails all reads");
+        assert!(e.to_string().contains("unreadable"), "{t}: {e}");
+    }
+}
+
+fn damage_stats(dir: &Path) {
+    let stats = dir.join("nb-1-big-Statistics.db");
+    let bytes = std::fs::read(&stats).expect("read stats");
+    std::fs::write(&stats, &bytes[..20.min(bytes.len())]).expect("truncate stats");
+}

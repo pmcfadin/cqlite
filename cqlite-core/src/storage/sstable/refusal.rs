@@ -60,6 +60,16 @@ fn unqualified(name: &str) -> &str {
 /// Ledger key for a refused file whose reader never existed, so its header
 /// table name is unavailable: path-derived, never "no key" (a refusal must not
 /// be droppable for lack of a name).
+/// Ledger key for a refusal whose table cannot be derived from its path
+/// (non-standard or non-UTF-8 directory names). It matches EVERY read: when the
+/// affected table is unknowable, no table can be proven unaffected (#4159).
+pub(crate) const UNRESOLVED_KEY: &str = "\u{0}unresolved";
+
+/// [`table_dir_table_key`](super::refresh::table_dir_table_key) or [`UNRESOLVED_KEY`].
+pub(crate) fn table_dir_key_or_unresolved(path: &Path) -> String {
+    super::refresh::table_dir_table_key(path).unwrap_or_else(|| UNRESOLVED_KEY.to_string())
+}
+
 pub(crate) fn refusal_key(path: &Path, base_dir_name: &str) -> String {
     super::refresh::base_path_table_key(path, base_dir_name, "")
         .or_else(|| super::refresh::table_dir_table_key(path))
@@ -69,7 +79,7 @@ pub(crate) fn refusal_key(path: &Path, base_dir_name: &str) -> String {
                 .and_then(|n| n.to_str())
                 .map(str::to_string)
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|| UNRESOLVED_KEY.to_string())
 }
 
 impl RefusalLedger {
@@ -104,13 +114,16 @@ impl RefusalLedger {
         }
     }
 
-    /// Drop refusals of `Data.db` files that are no longer in the discovered set
-    /// (deleted since they were refused). Directory-level entries are kept.
+    /// Reconcile after a SUCCESSFUL refresh: keep a refusal only for a `Data.db`
+    /// still in the discovered set. Directory-level refusals are all dropped:
+    /// discovery fails the refresh when an existing directory cannot be listed, so
+    /// reaching the commit means every configured directory was enumerated (or is
+    /// gone), and a still-unreadable one is re-recorded by the next load/refresh.
     pub(crate) fn retain_discovered(&self, discovered: &[PathBuf]) {
         if let Ok(mut map) = self.by_table.lock() {
             for list in map.values_mut() {
                 list.retain(|r| {
-                    !r.path.to_string_lossy().ends_with("-Data.db") || discovered.contains(&r.path)
+                    r.path.to_string_lossy().ends_with("-Data.db") && discovered.contains(&r.path)
                 });
             }
             map.retain(|_, l| !l.is_empty());
@@ -132,6 +145,7 @@ impl RefusalLedger {
         for (key, list) in map.iter() {
             let both_qualified = key.contains('.') && table_name.contains('.');
             let matches = key == table_name
+                || key == UNRESOLVED_KEY
                 || (!both_qualified && unqualified(key) == unqualified(table_name));
             if matches {
                 hits.extend(list.iter());
@@ -192,6 +206,15 @@ impl super::SSTableManager {
         Ok(self.resolve_table_readers(table_id).await)
     }
 
+    /// Record that an EXISTING table directory could not be listed, and hand the
+    /// error back for the caller to return (refresh) or drop (initial load).
+    pub(super) fn refuse_dir(&self, dir: &Path, e: crate::Error) -> crate::Error {
+        let probe = dir.join("unreadable-Data.db");
+        self.refusals
+            .record(table_dir_key_or_unresolved(&probe), dir, &e);
+        e
+    }
+
     /// Hint-only form: a refused table yields no readers.
     #[cfg(not(feature = "tombstones"))]
     pub(super) async fn readers_if_readable(
@@ -219,7 +242,7 @@ impl super::SSTableManager {
                         let base = self.base_path.file_name().and_then(|n| n.to_str());
                         refusal_key(path, base.unwrap_or(""))
                     }
-                    _ => super::refresh::table_dir_table_key(path).unwrap_or_default(),
+                    _ => table_dir_key_or_unresolved(path),
                 };
                 self.refusals.record(key, path, &e);
                 Err(e)

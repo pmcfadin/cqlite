@@ -191,9 +191,7 @@ impl SSTableManager {
                 Err(e) => {
                     // An EXISTING directory we cannot list is unreadable, not
                     // empty: record it so reads of the table fail closed (#4159).
-                    let probe = table_dir.join("unreadable-Data.db");
-                    let key = refresh::table_dir_table_key(&probe).unwrap_or_default();
-                    self.refusals.record(key, &table_dir, &e);
+                    self.refuse_dir(&table_dir, e);
                     continue;
                 }
             };
@@ -247,7 +245,7 @@ impl SSTableManager {
                                 // Keep loading the OTHER SSTables, but RECORD the
                                 // refusal so reads of this table fail closed
                                 // instead of answering `Ok(empty)` (#4159).
-                                let key = refresh::table_dir_table_key(&path).unwrap_or_default();
+                                let key = super::refusal::table_dir_key_or_unresolved(&path);
                                 self.refusals.record(key, &path, &e);
                             }
                         }
