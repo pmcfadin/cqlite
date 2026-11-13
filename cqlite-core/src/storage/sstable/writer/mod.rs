@@ -1330,7 +1330,7 @@ impl SSTableWriter {
         }
 
         // Partition-level TTL (top-level ttl_seconds on the Mutation)
-        if let Some(ttl) = mutation.ttl_seconds {
+        if let Some(ttl) = mutation.ttl_seconds.filter(|t| *t != 0) {
             let ttl = ttl as i32;
             if ttl > 0 {
                 *min_ttl = (*min_ttl).min(ttl);

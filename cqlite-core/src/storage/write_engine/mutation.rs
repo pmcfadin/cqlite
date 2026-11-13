@@ -152,7 +152,7 @@ impl Mutation {
             clustering_key,
             operations,
             timestamp_micros,
-            ttl_seconds,
+            ttl_seconds: ttl_seconds.filter(|t| *t != 0), // TTL 0 = NO_TTL (#4530)
             partition_tombstone: None,
             range_tombstones: Vec::new(),
             local_deletion_time: None,

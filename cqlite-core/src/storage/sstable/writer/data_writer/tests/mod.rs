@@ -31,6 +31,7 @@ mod scenarios_6;
 /// straight through, and both must byte-match the whole-slice path.
 mod streaming_partition;
 mod support;
+mod ttl_zero_4530;
 /// DIFFERENTIAL pin between the writer's two independent sorted-collection
 /// comparators (issue #3935) — `collection_order::compare_collection_elements`
 /// (variant-driven) vs `marshal_comparator::compare_for_marshal`

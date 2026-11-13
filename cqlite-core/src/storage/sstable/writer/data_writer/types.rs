@@ -200,3 +200,24 @@ pub(crate) struct RowWrite<'a> {
     /// every implicit expiration from THIS value. `0` on rows with no expiring cells.
     pub(crate) now_seconds: i32,
 }
+
+impl super::DataWriter {
+    /// Write a plain (non-expiring) scalar cell: `USE_ROW_TIMESTAMP` when it carries the row's
+    /// liveness timestamp, an explicit timestamp delta otherwise. Used for ordinary writes AND for
+    /// a `WriteWithTtl { ttl_seconds: 0 }`, because TTL 0 is `NO_TTL` (Cassandra 5.0.8
+    /// `Attributes.getTimeToLive`) and must never be serialized as an expiring cell (#4530).
+    pub(super) fn write_scalar_cell_no_ttl(
+        &self,
+        buf: &mut Vec<u8>,
+        row: &RowWrite<'_>,
+        mop: &MergedOp<'_>,
+        column: &str,
+        value: &crate::types::Value,
+    ) -> crate::Result<()> {
+        if row.liveness_ts == Some(mop.timestamp_micros) {
+            self.write_cell(buf, column, value, mop.timestamp_micros)
+        } else {
+            self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)
+        }
+    }
+}
