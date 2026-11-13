@@ -564,14 +564,11 @@ const CORPUS: &[GenerationCase] = &[
         divergence_classes: &["ttl"],
         // FETCHED (sidecars only in git).
         must_run: false,
-        known_divergent: Some(
-            "issue #2189: the 2-gen arm resurrects the TTL-EXPIRED rows ck=1,ck=2 as all-null \
-             phantom rows. Root cause is that `MergeEntry` carries no primary-key row-liveness \
-             marker, so the multi-generation kernel has no row-liveness rule at all and cannot \
-             tell an expired row from a live one. NOT fixed by the #3129 partition-shadow work \
-             (PR #3122): `merged_row_shadowed_by_partition` short-circuits on `cover = None` and \
-             this fixture has no partition deletion. Flip to None when #2189 lands",
-        ),
+        // Issue #2189's 2-gen phantom rows (an expired-TTL row resurrected as all-null) are gone:
+        // #4524 gave the multi-generation kernel the row-liveness rule (`ReadShadow::filter_visible`:
+        // a row is returned iff it has a LIVE liveness marker or a live data cell), so the
+        // ENFORCING lane now guards this case.
+        known_divergent: None,
     },
     // TTL expired-vs-live: same class as `gc_before_boundary`, on the
     // post-major-compaction fixture (1 live row at the pinned `now`, 2 at 3 gens).
@@ -588,13 +585,10 @@ const CORPUS: &[GenerationCase] = &[
         // COMMITTED (nb-3-big-* in `git ls-files`) — quarantined, so the
         // expected-divergence pin is what must not let it skip.
         must_run: true,
-        known_divergent: Some(
-            "issue #2189: the 3-gen arm returns 2 rows where the 1-gen arm returns 1 — the same \
-             missing multi-generation row-liveness rule as gc_before_boundary (`MergeEntry` has no \
-             primary-key liveness marker), reached through an already-expired TTL cell rather than \
-             a cell tombstone. Not addressed by PR #3122 (no partition deletion here, so the \
-             partition-shadow decision is `cover = None`). Flip to None when #2189 lands",
-        ),
+        // Issue #2189's 3-gen extra row (an already-expired TTL cell resurrecting the row) is gone:
+        // #4524 gave the multi-generation kernel the row-liveness rule (`ReadShadow::filter_visible`),
+        // so the ENFORCING lane now guards this case.
+        known_divergent: None,
     },
     // Live static cell surviving adjacent row/cell/range tombstones: a DIFFERENT
     // mechanism — the N-gen arm emits a separate static-only row AND strips
