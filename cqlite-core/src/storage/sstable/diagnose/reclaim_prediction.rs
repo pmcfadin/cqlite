@@ -4,11 +4,13 @@
 //! parallel re-implementation. Requires the table schema (the merge is schema-driven); without one
 //! the prediction is honestly `unmeasured`.
 //!
-//! `rows_in` is the merger's row count with purging OFF (`gc_before = None`), `rows_out` the same
-//! generation merged at `gcBefore`/`now` with `purge_safe(true)` (a single generation is the whole
-//! input set, so the overlap gate is open — an optimistic, stated assumption: other generations of
-//! the table may still hold shadowed data). The per-tombstone purge tally is internal to the merge
-//! and not exposed, so it is reported unmeasured rather than approximated.
+//! `rows_in` is NOT re-counted here: `--deep` already traverses the generation once through the
+//! same merge-stream (purging OFF), and that traversal's row count is passed in — so the dry
+//! compaction adds exactly ONE merger traversal (`gc_before`/`now` with `purge_safe(true)`; a
+//! single generation is the whole input set, so the overlap gate is open — an optimistic, stated
+//! assumption: other generations of the table may still hold shadowed data) instead of two. The
+//! per-tombstone purge tally is internal to the merge and not exposed, so it is reported
+//! unmeasured rather than approximated.
 
 use std::path::Path;
 
@@ -34,22 +36,22 @@ fn count_rows(mut merger: KWayMerger) -> Result<u64> {
 }
 
 /// Dry-run prediction for `data_path` (never writes, never touches other generations).
+/// `rows_in` is the deep scan's unpurged row count over the same generation.
 pub(crate) fn predict_reclaim(
     data_path: &Path,
     schema: &TableSchema,
     gc_before_secs: Option<i64>,
     now_secs: i64,
+    rows_in: u64,
 ) -> Result<ReclaimPrediction> {
-    let paths = vec![data_path.to_path_buf()];
-    let rows_in = count_rows(KWayMerger::new_with_gc(
-        paths.clone(),
-        schema,
-        None,
-        Some(now_secs),
-    )?)?;
     let rows_out = count_rows(
-        KWayMerger::new_with_gc(paths, schema, gc_before_secs, Some(now_secs))?
-            .with_purge_safe(true),
+        KWayMerger::new_with_gc(
+            vec![data_path.to_path_buf()],
+            schema,
+            gc_before_secs,
+            Some(now_secs),
+        )?
+        .with_purge_safe(true),
     )?;
     Ok(ReclaimPrediction { rows_in, rows_out })
 }

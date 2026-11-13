@@ -183,7 +183,13 @@ fn deep_json(d: &DeepGenerationReport) -> Value {
 
 fn generation_json(g: &GenerationDiagnosis) -> Value {
     let mut m = Map::new();
-    m.insert("generation".into(), json!(g.generation));
+    // Classic integer ids are JSON numbers (D5); a UUID-based id is its exact on-disk string.
+    m.insert(
+        "generation".into(),
+        g.generation
+            .parse::<u64>()
+            .map_or_else(|_| json!(g.generation), |n| json!(n)),
+    );
     m.insert("format".into(), json!(g.format));
     m.insert("source".into(), json!(FieldSource::Statistics.as_str()));
     m.insert("min_timestamp".into(), json!(g.min_timestamp));
@@ -236,10 +242,21 @@ pub(crate) fn render_json(r: &DiagnoseReport) -> Result<String, String> {
         "generations".into(),
         Value::Array(r.generations.iter().map(generation_json).collect()),
     );
-    m.insert(
-        "token_overlap".into(),
-        json!({ "buckets": r.token_overlap.buckets, "counts": r.token_overlap.counts }),
-    );
+    let mut overlap = Map::new();
+    overlap.insert("buckets".into(), json!(r.token_overlap.buckets));
+    match &r.token_overlap.counts {
+        SourcedField::Measured { value, .. } => {
+            overlap.insert("counts".into(), json!(value));
+        }
+        // Partial coverage would undercount: the whole histogram is unmeasured, cause names the
+        // generations (never a bare zero array).
+        SourcedField::Unmeasured { cause } => {
+            overlap.insert("counts".into(), Value::Null);
+            overlap.insert("source".into(), json!("unmeasured"));
+            overlap.insert("cause".into(), json!(cause));
+        }
+    }
+    m.insert("token_overlap".into(), Value::Object(overlap));
     m.insert("now_used_for_gc_before".into(), json!(rfc3339(r.now_secs)?));
     // R6: not part of D5's list; appended LAST so D5's order is a prefix of the report.
     m.insert(
@@ -351,8 +368,9 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
         }
     }
     o.push_str(&format!(
-        "\ntoken overlap ({} buckets, generations per bucket): {:?}\n",
-        r.token_overlap.buckets, r.token_overlap.counts
+        "\ntoken overlap ({} buckets, generations per bucket): {}\n",
+        r.token_overlap.buckets,
+        text_sourced(&r.token_overlap.counts, |c| format!("{c:?}"))
     ));
     for u in &r.unreadable_generations {
         o.push_str(&format!(

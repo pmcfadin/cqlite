@@ -164,7 +164,7 @@ fn measured<T: Clone>(f: &SourcedField<T>, what: &str) -> Option<T> {
 
 fn gen_of<'a>(gens: &'a [GenerationDiagnosis], o: &Oracle) -> &'a GenerationDiagnosis {
     gens.iter()
-        .find(|g| g.generation == o.generation && g.format == o.format)
+        .find(|g| g.generation == o.generation.to_string() && g.format == o.format)
         .unwrap_or_else(|| {
             panic!(
                 "{}.{}: no {}-{} generation in the report",
