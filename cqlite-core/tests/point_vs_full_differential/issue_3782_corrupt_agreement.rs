@@ -90,6 +90,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use serial_test::serial;
+
 use cqlite_core::config::ReadPathMode;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::QueryRow;
@@ -183,7 +185,10 @@ fn normalize(rows: &[QueryRow]) -> Vec<String> {
     out
 }
 
+// `#[serial]` (issue #4255): this test opens Databases that touch the process-global
+// key-offset cache whose counters the point-engagement cold-start proof reads.
 #[tokio::test]
+#[serial]
 async fn full_read_refuses_a_corrupt_partition_and_neither_arm_fabricates() {
     let schema =
         datasets_root::schema_path(fixture::SCHEMA_FILE).expect("committed CQL schema (#3148)");
