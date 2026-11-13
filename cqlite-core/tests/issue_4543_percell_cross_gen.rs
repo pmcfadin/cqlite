@@ -159,9 +159,11 @@ async fn full_path_per_cell_reconcile_matches_cassandra() {
 
 /// The prepared-statement route (`Database::prepare` -> `PreparedQuery::execute`), the only place
 /// the legacy `QueryExecutor` -> `SSTableManager::get` -> `TombstoneMerger` chain could be reached
-/// from the public API (ad-hoc SELECTs have used `SelectExecutor` since #1750).
+/// from the public API (ad-hoc SELECTs have used `SelectExecutor` since #1750). Cell values only
+/// (see `surviving_row_keeps_its_clustering_value` for the `ck` finding).
 #[tokio::test]
 async fn prepared_point_lookup_per_cell_reconcile_matches_cassandra() {
+    type Cells = (Option<String>, Option<String>, Option<String>);
     let db = open(ReadPathMode::Point).await;
     let all = oracle();
     for pk in [1, 2, 3] {
@@ -173,36 +175,23 @@ async fn prepared_point_lookup_per_cell_reconcile_matches_cassandra() {
             .execute(&[Value::Integer(pk)])
             .await
             .expect("execute");
-        let mut got: Vec<(i32, Option<String>, Option<String>, Option<String>)> = res
+        let t = |r: &cqlite_core::query::result::QueryRow, c: &str| match r.values.get(c) {
+            Some(Value::Text(b)) => Some(String::from_utf8_lossy(b).into_owned()),
+            _ => None,
+        };
+        let mut got: Vec<Cells> = res
             .rows
             .iter()
-            .map(|r| {
-                let t = |c: &str| match r.values.get(c) {
-                    Some(Value::Text(b)) => Some(String::from_utf8_lossy(b).into_owned()),
-                    _ => None,
-                };
-                let ck = match r.values.get("ck") {
-                    Some(Value::Integer(i)) => *i,
-                    _ => -1,
-                };
-                (ck, t("a"), t("b"), t("c"))
-            })
+            .map(|r| (t(r, "a"), t(r, "b"), t(r, "c")))
             .collect();
-        got.sort();
-        let mut want: Vec<_> = all
+        let mut want: Vec<Cells> = all
             .iter()
             .filter(|r| r.0 == pk)
-            .map(|r| (r.1, r.2.clone(), r.3.clone(), r.4.clone()))
+            .map(|r| (r.2.clone(), r.3.clone(), r.4.clone()))
             .collect();
+        got.sort();
         want.sort();
-        eprintln!(
-            "[Prepared] pk = {pk}: {}",
-            if got == want {
-                "PASS".to_string()
-            } else {
-                format!("FAIL got {got:?} want {want:?}")
-            }
-        );
+        assert_eq!(got, want, "[Prepared] pk = {pk}: cell values");
     }
 }
 
