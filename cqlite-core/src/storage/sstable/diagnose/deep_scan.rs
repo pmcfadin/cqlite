@@ -135,6 +135,9 @@ struct Current {
 struct Accumulator {
     top_n: usize,
     current: Option<Current>,
+    /// Rows already seen for a partition whose boundary has NOT been reported yet (the driver
+    /// emits a partition-level deletion row before it reports that partition's start).
+    ahead: Option<Current>,
     rows_scanned: u64,
     partitions: u64,
     tombstones_total: u64,
@@ -149,6 +152,7 @@ impl Accumulator {
         Self {
             top_n,
             current: None,
+            ahead: None,
             rows_scanned: 0,
             partitions: 0,
             tombstones_total: 0,
@@ -176,23 +180,41 @@ impl Accumulator {
 
     fn open(&mut self, start: u64, key: &[u8]) {
         self.close(start);
-        self.current = Some(Current {
-            key: key.to_vec(),
-            start,
-            rows: 0,
-            tombstones: 0,
-        });
+        let mut cur = match self.ahead.take() {
+            Some(a) if a.key == key => a,
+            other => {
+                // Rows buffered for a DIFFERENT key cannot exist (partitions are sequential);
+                // keep them out of this partition rather than mis-attribute them.
+                self.ahead = other;
+                Current {
+                    key: key.to_vec(),
+                    start,
+                    rows: 0,
+                    tombstones: 0,
+                }
+            }
+        };
+        cur.start = start;
+        self.current = Some(cur);
     }
 
     fn row(&mut self, row: &CompactionRow) {
         self.rows_scanned += 1;
         let tombs = raw_tombstones_in_row(row);
         self.tombstones_total += tombs;
-        if let Some(cur) = self.current.as_mut() {
-            cur.tombstones += tombs;
-            if is_row(row) {
-                cur.rows += 1;
-            }
+        let key = row.key.as_bytes();
+        let target = match self.current.as_mut() {
+            Some(cur) if cur.key == key => cur,
+            _ => self.ahead.get_or_insert_with(|| Current {
+                key: key.to_vec(),
+                start: 0,
+                rows: 0,
+                tombstones: 0,
+            }),
+        };
+        target.tombstones += tombs;
+        if is_row(row) {
+            target.rows += 1;
         }
     }
 }
