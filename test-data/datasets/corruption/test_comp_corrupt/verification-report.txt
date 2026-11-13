@@ -96,6 +96,8 @@ uncompressed_data_bit_flip     nb-1-big-Data.db     bitflip      70000     OK
 [audit-corrupt] bti_data_offset_out_of_bounds        Partitions.db        @5        second leaf DataOffset(46) -> DataOffset(127)
 [audit-corrupt] compression_info_short_coverage      CompressionInfo.db   @27       data_length 195018 -> 211402 (+ one chunk_length 16384): 12 declared chunks, ceil(data_length/chunk_length) = 13
 [audit-corrupt] statistics_partition_count_mismatch  Statistics.db        @1141     estimatedPartitionSize bucket 63 count 1 -> 2; the STATS component CRC32 at byte 4697 recomputed so the file stays valid
+[audit-corrupt] compression_info_offsets_non_monotonic CompressionInfo.db   @55       chunk offsets[2] and offsets[3] swapped: an EARLIER offset is now larger than its successor
+[audit-corrupt] compression_info_first_offset_nonzero CompressionInfo.db   @46       chunk offsets[0] 0 -> 1: the table is still strictly ascending and in bounds, but the first chunk no longer starts at byte 0
 ----------------------------------------------------------------------------------------
 active fixtures : 12  (data_db_bit_flip data_db_truncation compression_info_bad_offset index_db_bit_flip_big filter_db_bit_flip bti_partitions_footer_flip bti_rows_truncation statistics_db_header_damage summary_db_truncation toc_missing_component digest_crc32_mismatch uncompressed_data_bit_flip)
 planned fixtures: 0  (none)
