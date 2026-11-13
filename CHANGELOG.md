@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet`). Export-only in this slice (reading `.vortex` files is a later slice); consumes the
   same reconciled query row stream and CQL→Arrow type mapping the Parquet writer uses, so the two
   formats agree by construction. See [Output Formats: vortex](https://pmcfadin.github.io/cqlite/user-docs/output-formats/#vortex--vortex-columnar-file-format-export-only).
+- **Parquet output change:** a `TIMEUUID` column (e.g. `session_id TIMEUUID`) is now exported as the
+  Arrow UUID extension (`FixedSizeBinary(16)` + `arrow.uuid`), like a `UUID` column, instead of
+  `Utf8` text. Cause: the query-metadata type parser matched `time` before `timeuuid`, so the column's
+  schema type was lost and it degraded to text; this affected Parquet and Arrow Flight/Trino
+  consumers of `SELECT *` metadata, and Vortex export (#4237) shares the fix.
 - Fixed a latent bug the above work surfaced: a UUID/TimeUUID column nested inside a
   `list`/`set`/`map`/tuple/UDT lost its `arrow.uuid` Arrow extension metadata (harmless for
   Parquet, which does not require it; user-visible for Arrow Flight / the Trino connector, where a

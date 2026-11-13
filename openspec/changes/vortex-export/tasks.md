@@ -58,9 +58,10 @@ after every fix round; ONE full gate in `flow-closer`.
       differential is the fixture-backed confirmation). Evidence:
       `export::vortex_tests::uuid_and_timeuuid_columns_are_the_vortex_uuid_extension_dtype` (reads the
       written file's dtype, uuid AND timeuuid) and, fixture-backed, the CLI test
-      `r2_1_vortex_dtype_is_the_uuid_extension_for_uuid_and_timeuuid` (`simple_table`: `id UUID` is
-      the UUID extension). OPEN FINDING: through the CLI, `session_id TIMEUUID` exports as `Utf8` in
-      both Parquet and Vortex, so R2.1's timeuuid clause holds at the writer level only.
+      `r2_1_vortex_dtype_is_the_uuid_extension_for_uuid_and_timeuuid` (`simple_table`: `id UUID` and
+      `session_id TIMEUUID` are both the UUID extension, and Parquet carries `arrow.uuid` on both).
+      Found and fixed on the way: the shared query-metadata path degraded a `TIMEUUID` column to text
+      (the primitive-type parser listed `time` before `timeuuid`), so BOTH formats exported it as Utf8.
 - [x] 2.6 `--lite`; commit.
 
 ## 3. CLI wiring — surface: `cqlite-cli` (R6–R8)
