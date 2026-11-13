@@ -41,10 +41,14 @@
 //! crash is discoverable as a (partial) SSTable. `cassandra_discoverable_partial_sets_*`
 //! measures that stricter property.
 
+// Linux on x86_64/aarch64 only: the shim's fixed-arity `syscall` interposer and its raw-offset
+// decoding (`pwritev`/`pwritev2` split offsets) are written for the 64-bit SysV argument order.
+// Every other platform is named by `issue_4498_non_linux_notice`.
 #![cfg(all(
     feature = "write-support",
     not(feature = "tombstones"),
-    target_os = "linux"
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 
 use std::collections::BTreeMap;
@@ -385,6 +389,29 @@ fn manifest_normalised(area: &Area<'_>) -> Option<String> {
     )
 }
 
+/// `None` when the post-fault manifest is acceptable: absent, or complete valid JSON equal to the
+/// reference. `Some(reason)` for a truncated/malformed file or a complete-but-different one.
+fn manifest_violation(area: &Area<'_>, reference: &Option<String>) -> Option<String> {
+    let path = area.work.join("manifest.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return if path.exists() {
+            Some("manifest.json exists but is unreadable".to_string())
+        } else {
+            None
+        };
+    };
+    match manifest_normalised(area) {
+        None => Some(format!(
+            "manifest.json is TORN/malformed ({} bytes, not valid JSON)",
+            raw.len()
+        )),
+        Some(m) if reference.as_ref() != Some(&m) => {
+            Some("manifest.json is valid JSON but differs from the uninterrupted run's".to_string())
+        }
+        Some(_) => None,
+    }
+}
+
 /// Component files (not the manifest) of the output tree, relative to `out/`.
 fn output_set(area: &Area<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
     snapshot(&out_dir(area))
@@ -521,9 +548,29 @@ fn defects() -> Vec<Defect> {
             modes: &[Mode::Enospc, Mode::Short],
             issue: 4528,
         });
+        // TORN_MANIFEST (issue number to be filed): `--manifest` is written in place
+        // (`File::create`/`fs::write`, not temp + rename), so a crash mid-write leaves a 0-byte or
+        // truncated manifest, and rebuild also leaves one after an ENOSPC/short write.
+        v.push(Defect {
+            verb: Verb::Salvage,
+            fixture,
+            path_suffix: "manifest.json",
+            modes: &[Mode::Crash],
+            issue: TORN_MANIFEST,
+        });
+        v.push(Defect {
+            verb: Verb::Rebuild,
+            fixture,
+            path_suffix: "manifest.json",
+            modes: &[Mode::Crash, Mode::Enospc, Mode::Short],
+            issue: TORN_MANIFEST,
+        });
     }
     v
 }
+
+/// Placeholder issue number for the torn-`--manifest` defect until it is filed.
+const TORN_MANIFEST: u32 = 0;
 
 fn known_defect(verb: Verb, f: &Fixture, kind: &str, path: &str, mode: Mode) -> Option<u32> {
     if !matches!(kind, "write" | "pwrite") {
@@ -633,6 +680,12 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             // AC3
             if snapshot(a.input) != input_before {
                 failures.push(format!("{tag}: INPUT CHANGED"));
+            }
+            // The --manifest after a fault: absent, or a COMPLETE valid JSON document equal (after
+            // the normalisation documented on `manifest_normalised`) to the uninterrupted run's.
+            // Never truncated or malformed (roborev r3).
+            if let Some(why) = manifest_violation(&a, &reference_manifest) {
+                failures.push(format!("{tag}: {why}"));
             }
             // AC2 (CQLite publication contract)
             let after = output_set(&a);
@@ -763,6 +816,16 @@ fn issue_4527_filter_write_error_swallowed() {
 #[ignore = "#4528 salvage swallows a --manifest write error"]
 fn issue_4528_salvage_manifest_write_error_swallowed() {
     check(Verb::Salvage, Scope::KnownDefects(4528), fixtures());
+}
+
+#[test]
+#[ignore = "#<to-be-filed> --manifest is written in place: a crash (or rebuild's ENOSPC/short write) leaves a torn manifest.json"]
+fn torn_manifest_after_a_fault() {
+    check_verbs(
+        &[Verb::Rebuild, Verb::Salvage],
+        Scope::KnownDefects(TORN_MANIFEST),
+        fixtures(),
+    );
 }
 
 #[test]
