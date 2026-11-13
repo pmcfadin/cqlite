@@ -241,4 +241,26 @@ impl SSTableReader {
         }
         Ok(result)
     }
+
+    /// ONE streaming pass over every partition, handing the caller BOTH each partition's start
+    /// offset (decompressed domain, with its raw key) and every raw [`CompactionRow`] in on-disk
+    /// order — the primitive `cqlite diagnose --deep` (issue #4204) builds its size / width /
+    /// tombstone rankings on. `on_partition` always fires BEFORE the rows of that partition.
+    /// Nothing is reconciled and nothing is written; one structure is resident at a time.
+    pub(crate) async fn scan_rows_with_partition_starts(
+        &self,
+        schema: Option<&crate::schema::TableSchema>,
+        on_partition: &mut (dyn FnMut(u64, &RowKey) -> Result<()> + Send),
+        emit: impl FnMut(
+            crate::storage::sstable::reader::compaction_row::CompactionRow,
+        ) -> Result<std::ops::ControlFlow<()>>,
+    ) -> Result<()> {
+        self.stream_all_partitions_for_compaction_observed(
+            schema,
+            &self.scan_cancel,
+            PartitionBoundaryObserver::reporting(on_partition),
+            emit,
+        )
+        .await
+    }
 }
