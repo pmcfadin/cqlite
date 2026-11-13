@@ -88,6 +88,20 @@ pub(super) fn build_display_row(
     }
 }
 
+impl RowHeader {
+    /// Whether the row's PRIMARY-KEY liveness marker is present AND still live at `now_secs`
+    /// (the single-generation twin of `RowLiveness::marker_live_at`): present iff `HAS_TIMESTAMP`;
+    /// live-forever when it carries no TTL expiry, otherwise live strictly before its expiry
+    /// (`Cell.isLive`: `now < localExpirationTime`). The ONE predicate behind both the row-hide
+    /// decision and the liveness-only display rule (issue #4524).
+    fn liveness_live_at(&self, now_secs: i64) -> bool {
+        self.timestamp.is_some()
+            && self
+                .liveness_expires_at_seconds
+                .is_none_or(|s| s > now_secs)
+    }
+}
+
 /// Issue #1741: extract a clustering row's clustering-key values (in schema
 /// clustering order) from its decoded cell map. Only called when a range
 /// tombstone is currently OPEN in the partition, so the per-row clone is off the

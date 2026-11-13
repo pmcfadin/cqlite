@@ -518,8 +518,7 @@ impl V5CompressedLegacyParser {
 
                                     // Issue #505/#932: row-tombstone display rule lives
                                     // in the shared `build_display_row` helper. Issue
-                                    // #480/#1642: static cells are merged in
-                                    // (positional, clustering-row-wins).
+                                    // #480/#1642: static cells are merged in (positional).
                                     //
                                     // Issue #3095: on a user-facing SELECT read the
                                     // tombstone decision is taken over the row's OWN
