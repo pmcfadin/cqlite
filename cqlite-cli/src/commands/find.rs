@@ -174,7 +174,11 @@ pub fn encode_partition_key(schema: &TableSchema, arg: &str) -> anyhow::Result<V
     }
     let mut values = Vec::with_capacity(lits.len());
     for (col, lit) in schema.partition_keys.iter().zip(&lits) {
-        let sql = format!("SELECT * FROM t WHERE {} = {lit}", col.name);
+        // A FIXED synthetic column name: the real name (quoted identifier, reserved word, spaces,
+        // embedded quotes) never enters the query text, so it cannot break the parse. The
+        // value is encoded against the schema column by position below.
+        let _ = col;
+        let sql = format!("SELECT * FROM t WHERE k = {lit}");
         let stmt = cqlite_core::query::parse_select(&sql)
             .map_err(|e| anyhow::anyhow!("cannot parse key literal {lit:?}: {e}"))?;
         let value = match stmt.where_clause {

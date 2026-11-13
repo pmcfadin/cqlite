@@ -62,13 +62,29 @@ fn json_of(stdout: &str) -> Value {
     serde_json::from_str(line).expect("valid JSON")
 }
 
+/// Parse a committed `*-Data.db.jsonl`: genuine JSONL (one object per line) OR sstabledump's
+/// raw pretty-printed JSON array — whichever the file actually is. Never empty.
+fn golden_objects(jsonl: &Path) -> Vec<Value> {
+    let text = std::fs::read_to_string(jsonl).unwrap_or_else(|e| panic!("{jsonl:?}: {e}"));
+    let objs: Vec<Value> = if text.trim_start().starts_with('[') {
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{jsonl:?} as a JSON array: {e}"))
+    } else {
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{jsonl:?} line: {e}")))
+            .collect()
+    };
+    assert!(
+        !objs.is_empty(),
+        "{jsonl:?} parsed to zero partitions: the oracle would be vacuous"
+    );
+    objs
+}
+
 fn golden(jsonl: &Path) -> Vec<(String, u64)> {
-    std::fs::read_to_string(jsonl)
-        .unwrap_or_else(|e| panic!("{jsonl:?}: {e}"))
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            let v: Value = serde_json::from_str(l).expect("golden json");
+    golden_objects(jsonl)
+        .iter()
+        .map(|v| {
             (
                 v["partition"]["key"][0].as_str().expect("key").to_string(),
                 v["partition"]["position"].as_u64().expect("position"),
@@ -345,4 +361,40 @@ fn usage_errors_exit_one() {
     let (code, _, err) = find("commitlog-find.cql", &t.dir, "1, 2", &[]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("partition key has 1 column"), "{err}");
+}
+
+/// The committed `commitlog_find` SSTable's own sstabledump golden is the oracle for what the
+/// flushed generation holds: `find` hits exactly the golden's keys at the golden's offsets.
+#[test]
+fn commitlog_find_generation_hits_match_its_own_golden() {
+    let t = truth();
+    let golden_file = std::fs::read_dir(&t.dir)
+        .expect("fixture dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.to_string_lossy().ends_with("-Data.db.jsonl"))
+        .expect("committed golden");
+    let g = golden(&golden_file);
+    let flushed: Vec<String> = t.gt["inserts"]
+        .as_array()
+        .expect("inserts")
+        .iter()
+        .filter(|i| i["flushed"] == true)
+        .map(|i| i["id"].to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut golden_keys: Vec<String> = g.iter().map(|(k, _)| k.clone()).collect();
+    golden_keys.sort();
+    assert_eq!(
+        golden_keys, flushed,
+        "golden holds exactly the flushed keys"
+    );
+    for (key, position) in &g {
+        let (code, out, err) = find("commitlog-find.cql", &t.dir, key, &["--out", "json"]);
+        assert_eq!(code, 0, "{err}");
+        let gen = &json_of(&out)["generations"][0];
+        assert_eq!(gen["probe"], "hit", "key {key}");
+        assert_eq!(gen["data_offset"], position - (2 + 4 + 12), "key {key}");
+    }
+    eprintln!("commitlog_find golden: {} partitions checked", g.len());
 }

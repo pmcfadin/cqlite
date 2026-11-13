@@ -154,9 +154,17 @@ struct GoldenPartition {
 /// One generation's golden: partitions in file order with authoritative starts.
 fn read_golden(jsonl: &Path, schema: &TableSchema, bti: bool) -> Vec<GoldenPartition> {
     let text = std::fs::read_to_string(jsonl).expect("read golden");
+    // Genuine JSONL (one object per line) OR sstabledump's raw pretty-printed JSON array.
+    let objs: Vec<Json> = if text.trim_start().starts_with('[') {
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{jsonl:?} as a JSON array: {e}"))
+    } else {
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{jsonl:?} line: {e}")))
+            .collect()
+    };
     let mut out = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let v: Json = serde_json::from_str(line).expect("golden line json");
+    for v in objs {
         let part = &v["partition"];
         let key_parts = part["key"].as_array().expect("key array");
         let key = encode_key(schema, key_parts);
@@ -312,6 +320,13 @@ async fn probe_generation_matches_sstabledump_goldens_per_key_per_generation() {
             "{}.{}: no Hit was ever produced",
             case.keyspace,
             case.table
+        );
+        eprintln!(
+            "{}.{}: {} generation(s), {} golden key(s), {hits} hit(s), {negatives} negative(s)",
+            case.keyspace,
+            case.table,
+            gens.len(),
+            universe.len()
         );
         // Only a multi-generation table can produce a cross-generation negative; the others
         // are covered by the absent-key test below.

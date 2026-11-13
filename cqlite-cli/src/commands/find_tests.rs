@@ -136,3 +136,34 @@ fn key_literals_respect_tuple_collection_map_and_udt_nesting() {
     assert_eq!(split_key_literals("\"a,b\", 2"), vec!["\"a,b\"", "2"]);
     assert_eq!(split_key_literals("42"), vec!["42"]);
 }
+
+fn schema_for(cql: &str) -> TableSchema {
+    cqlite_core::schema::parse_cql_schema(cql).unwrap_or_else(|e| panic!("{cql}: {e}"))
+}
+
+#[test]
+fn key_encoding_does_not_depend_on_the_partition_key_column_name() {
+    // The CQL schema parser cannot itself read every identifier (e.g. an embedded `""`), so
+    // parse a plain schema and RENAME the key column to the raw, unquoted names a quoted
+    // identifier denotes: reserved word, space, embedded double quote, mixed case, and a name
+    // that would inject CQL if it were interpolated into the synthetic query.
+    for name in [
+        "select",
+        "my col",
+        "a\"b",
+        "MixedCase",
+        "k = 1 OR x",
+        "'; DROP",
+    ] {
+        let mut schema = schema_for("CREATE TABLE ks.t (k int PRIMARY KEY, v text);");
+        schema.partition_keys[0].name = name.to_string();
+        let got = encode_partition_key(&schema, "42")
+            .unwrap_or_else(|e| panic!("partition key column {name:?}: {e:#}"));
+        assert_eq!(got, 42i32.to_be_bytes().to_vec(), "column {name:?}");
+    }
+    // Composite key: both literals are encoded whatever the columns are called.
+    let mut schema = schema_for("CREATE TABLE ks.t (a int, b text, v int, PRIMARY KEY ((a, b)));");
+    schema.partition_keys[0].name = "a b".into();
+    schema.partition_keys[1].name = "sel\"ect".into();
+    assert!(encode_partition_key(&schema, "1, 'x'").is_ok());
+}
