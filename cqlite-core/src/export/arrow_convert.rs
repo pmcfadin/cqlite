@@ -286,9 +286,17 @@ pub fn rows_to_record_batch_with_schema(
     columns: &[ColumnInfo],
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
+    #[cfg(test)]
+    PRODUCER_CALLS.with(|c| c.set(c.get() + 1));
     check_schema_matches_columns(&schema, columns)?;
     // The precondition is now PROVEN, not assumed, so the shared tail may trust it.
     rows_to_record_batch_trusted_schema(schema, columns, rows)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook (#4237 R1.1): how many times THIS thread called the shared producer.
+    pub(crate) static PRODUCER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Reject a caller-supplied `schema` that is not [`build_arrow_schema`]'s output

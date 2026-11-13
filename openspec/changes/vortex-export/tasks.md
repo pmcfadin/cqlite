@@ -33,7 +33,9 @@ after every fix round; ONE full gate in `flow-closer`.
       Parquet's existing internal batch construction is refactored to call it — no change to
       `arrow_convert`'s conversion logic itself.
 - [x] 1.2 Unit test: R1.1 (both writers receive the same batch), R1.2 (no Vortex-specific CQL→Arrow
-      `match`).
+      `match`). Evidence: `export::vortex_tests::both_writers_build_their_batches_through_the_one_shared_producer`
+      (a producer-call hook on `rows_to_record_batch_with_schema`: exactly one call per writer) and
+      `vortex_source_has_no_cql_to_arrow_mapping_of_its_own` (source-level pin).
 - [x] 1.3 `--lite`; commit.
 
 ## 2. Core Vortex writer — surface: `cqlite_core::export::vortex` (R2–R5)
@@ -42,7 +44,7 @@ after every fix round; ONE full gate in `flow-closer`.
       dependency with `default-features = false, features = ["vortex-file"]` (vortex-cloud,
       vortex-tensor OFF), pinned `=0.86.1`.
 - [x] 2.2 `cqlite-core/src/export/vortex.rs`: `VortexExportOptions`, `VortexExportError`
-      (`thiserror`, batch-index + column context per R4.2), `write_vortex(...)` consuming the
+      (`thiserror`, batch-index + column context per R4.2), `StreamingVortexWriter` (create → `write_chunk` → `finalize`) consuming the
       shared producer's batches through
       `session.arrow().from_arrow_record_batch(...)` → `session.write_options().write(...)`.
       Chunked shape mirrors `create_streaming_parquet_writer`/`write_chunk`/`finalize` (one batch
@@ -53,24 +55,32 @@ after every fix round; ONE full gate in `flow-closer`.
 - [x] 2.4 Fail-closed path: write-to-temp-then-rename (or delete-on-error), tested per R4.1.
 - [x] 2.5 UUID extension unit test (R2.1) at the writer level if feasible without a full fixture
       read-back (a synthetic batch with `arrow.uuid` metadata is enough for THIS unit test; R9's CLI
-      differential is the fixture-backed confirmation).
+      differential is the fixture-backed confirmation). Evidence:
+      `export::vortex_tests::uuid_and_timeuuid_columns_are_the_vortex_uuid_extension_dtype` (reads the
+      written file's dtype) and, fixture-backed, the CLI test
+      `r2_1_vortex_dtype_is_the_uuid_extension_for_uuid_and_timeuuid` (`simple_table`: `id UUID`,
+      `session_id TIMEUUID`).
 - [x] 2.6 `--lite`; commit.
 
 ## 3. CLI wiring — surface: `cqlite-cli` (R6–R8)
 
-- [x] 3.1 `cqlite-cli/Cargo.toml`: `vortex = ["cqlite-core/vortex"]` feature (forwarding only, no
-      bundling into `state_machine` or any other default-adjacent feature — deliberate, see
-      proposal's Non-goals framing: strictly opt-in like `parquet`).
+- [x] 3.1 `cqlite-cli/Cargo.toml`: `vortex = ["state_machine", "cqlite-core/vortex", "dep:vortex"]`
+      (strictly opt-in like `parquet`: `state_machine` does NOT enable `vortex`, and `vortex` is in no
+      default feature set). Correction to the original "forwarding only" wording: the CLI's whole
+      export module (`commands/export.rs`, `export_sstable.rs`) is `#[cfg(feature = "state_machine")]`,
+      so `vortex` must imply `state_machine` or `--features vortex` alone would not compile the
+      command; `dep:vortex` is the reader half the differential test needs.
 - [x] 3.2 `ExportFormat::Vortex` added to the enum in `cli.rs` (`Display` arm too); every existing
       `match format { ... }` in `export.rs`, `export_sstable.rs`, `read_sstable.rs` gains an
       explicit arm — confirm the compiler enforces exhaustiveness (no `_ =>` anywhere in those
       matches) as the design's own check.
-- [x] 3.3 `export.rs`: `ExportFormat::Vortex` arm — require `--out`/`--output` (R6.2), call the
-      shared producer + `write_vortex`.
+- [x] 3.3 `export.rs`: `ExportFormat::Vortex` arm — the destination is the mandatory positional `<FILE>` (no
+      separate `--out`/`--output`; see the R6 correction), call the shared producer through
+      `StreamingVortexWriter`.
 - [x] 3.4 `export_sstable.rs`: `ExportFormat::Vortex` arm on the `export_sstable` LIBRARY function
       (not a CLI verb — lead ruling 2026-09-24, R7), mirroring the `Parquet` arm shape.
 - [x] 3.5 `read_sstable.rs`: reject `vortex` with the R8.1 message shape.
-- [x] 3.6 CLI-level tests: R6.1, R6.2, R8.1 (`cqlite-cli/tests/`, named `--test` targets with
+- [x] 3.6 CLI-level tests: R6.1, R8.1 (`cqlite-cli/tests/`; the original draft's "R6.2" was removed from the spec during implementation — `<FILE>` is a mandatory positional, so there is nothing Vortex-specific to test), named `--test` targets with
       `required-features = ["vortex"]` or `["parquet", "vortex"]` as each needs). R7.1 is a
       LIBRARY-level test instead (`test_export_sstable_to_vortex` in
       `export_integration_tests.rs`), mirroring `test_export_sstable_to_parquet` exactly.

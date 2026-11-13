@@ -108,3 +108,11 @@ tests and `cqlite-cli/tests/*parquet*` integration coverage.
   Not re-litigated here.
 - **A Vortex-specific CQL→Arrow type map** — rejected; verified unnecessary against
   `vortex-arrow/src/convert.rs` (design doc, "Type map: NONE added").
+
+## Nested UUID extension metadata (implementation note, #4237)
+
+The nested-UUID `arrow.uuid` metadata fix (list/set/map/tuple/UDT element, key and field positions) is
+requirement R2 ("UUID keeps its extension type") applied to nested positions, not a new requirement:
+the shared Arrow schema is the single source of the extension metadata, so a nested UUID that lost it
+would reach Vortex (and Arrow Flight) as a bare `FixedSizeBinary(16)`. No requirement or scenario
+changes; the CHANGELOG records the user-visible effect on the other Arrow consumers.
