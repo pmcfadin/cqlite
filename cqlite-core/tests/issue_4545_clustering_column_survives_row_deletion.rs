@@ -213,6 +213,17 @@ async fn untouched_rows_keep_their_exact_column_sets() {
 /// Cassandra's SELECT - the surviving row keeps `ck`, the tombstone-only row stays hidden.
 #[test]
 fn compaction_output_keeps_the_clustering_column_and_hides_the_tombstone_only_row() {
+    compact_and_check(None, None);
+}
+
+/// Round-3 (roborev): with gc-grace purging the row deletion is CLEARED before `build`; the key cells
+/// of a row with no live data must still be shed (no phantom key-only row), live rows keep `ck`.
+#[test]
+fn compaction_with_gc_purge_leaves_no_key_only_phantom_row() {
+    compact_and_check(Some(i64::from(i32::MAX)), Some(i64::from(i32::MAX)));
+}
+
+fn compact_and_check(gc_before: Option<i64>, now: Option<i64>) {
     use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
     use cqlite_core::storage::write_engine::merge::compact_sstables;
 
@@ -260,8 +271,10 @@ fn compaction_output_keeps_the_clustering_column_and_hides_the_tombstone_only_ro
         src[0].join("nb-2-big-Data.db"),
         src[0].join("nb-1-big-Data.db"),
     ];
-    rt.block_on(compact_sstables(inputs, &out, &schema, 3, None, None, true))
-        .expect("compaction");
+    rt.block_on(compact_sstables(
+        inputs, &out, &schema, 3, gc_before, now, true,
+    ))
+    .expect("compaction");
 
     // Read the OUTPUT back through the merge reader (the layout `<out>/<ks>/<table>/nb-3-big-*`).
     use cqlite_core::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
@@ -310,6 +323,10 @@ fn compaction_output_keeps_the_clustering_column_and_hides_the_tombstone_only_ro
     assert!(
         key_cell_cks.contains(&2),
         "ck=2 must keep its clustering key cell: {key_cell_cks:?}"
+    );
+    assert!(
+        !key_cell_cks.contains(&4),
+        "ck=4 (row deleted, only an older cell) must not keep a key-only row: {key_cell_cks:?}"
     );
     assert!(!key_cell_cks.contains(&5), "ck=5 (row deleted, only a newer cell tombstone) must not keep a key-only row: {key_cell_cks:?}");
 }
