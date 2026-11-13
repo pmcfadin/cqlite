@@ -515,6 +515,9 @@ enum Scope {
     Enforced,
     /// ONLY the cells [`DEFECTS`] lists for this issue (driven by the `#[ignore]`d reproducers).
     KnownDefects(u32),
+    /// Only the `write` boundaries on paths ending in this suffix, in this mode (a named
+    /// regression for a fixed defect; the cells run are NOT in [`DEFECTS`]).
+    Only(&'static str, Mode),
     /// Crash mode only, against Cassandra's discoverability rule (see module doc; #4529).
     CassandraStrict,
 }
@@ -541,15 +544,6 @@ fn defects() -> Vec<Defect> {
     let mut v = Vec::new();
     for verb in [Verb::Rebuild, Verb::Salvage] {
         for fixture in ALL_FIXTURES {
-            // #4526: TOC.txt is created in place and written non-atomically, so a crash or short
-            // write mid-write publishes a partial barrier.
-            v.push(Defect {
-                verb,
-                fixture,
-                path_suffix: "-TOC.txt",
-                modes: &[Mode::Crash, Mode::Short],
-                issue: 4526,
-            });
             // #4527: an ENOSPC on Filter.db's write is not propagated (exit 0, TOC published over
             // an incomplete set).
             v.push(Defect {
@@ -667,6 +661,9 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
                 Scope::KnownDefects(issue) if defect != Some(issue) => continue,
+                Scope::Only(suffix, m) if !(is_write && path.ends_with(suffix) && mode == m) => {
+                    continue
+                }
                 Scope::CassandraStrict if mode != Mode::Crash => continue,
                 _ => {}
             }
@@ -812,6 +809,15 @@ fn check_verbs(verbs: &[Verb], scope: Scope, fixtures: Vec<Fixture>) {
         for f in &fixtures {
             let (n, runs, failures) = sweep(*verb, f, scope);
             report(*verb, f, n, runs, &failures);
+            if matches!(scope, Scope::Only(..)) {
+                // A named regression that matches no boundary proves nothing (e.g. after a
+                // rename of the file it targets): fail closed.
+                assert!(
+                    runs >= 1,
+                    "{verb:?}/{}: the Only scope matched no boundary",
+                    f.table
+                );
+            }
             all.extend(failures);
         }
     }
@@ -832,14 +838,18 @@ fn salvage_survives_a_fault_at_every_boundary() {
 // matrix cells `defects()` lists for it. Removing `#[ignore]` (and the entries) after a fix
 // proves the fix.
 
+/// Regression for #4526 (fixed): `TOC.txt` is published by temp-write + fsync + rename, so a crash
+/// or short write while writing it can no longer leave a torn barrier. The write boundary is now on
+/// the dot-prefixed `.<name>-TOC.txt.tmp` sibling, which is never a discoverable component.
 #[test]
-#[ignore = "#4526 TOC.txt is written in place, non-atomically"]
-fn issue_4526_torn_toc() {
-    check_verbs(
-        &[Verb::Rebuild, Verb::Salvage],
-        Scope::KnownDefects(4526),
-        fixtures(),
-    );
+fn issue_4526_toc_is_published_atomically() {
+    for mode in [Mode::Crash, Mode::Short] {
+        check_verbs(
+            &[Verb::Rebuild, Verb::Salvage],
+            Scope::Only("TOC.txt.tmp", mode),
+            fixtures(),
+        );
+    }
 }
 
 #[test]

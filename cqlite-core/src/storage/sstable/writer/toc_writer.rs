@@ -140,38 +140,89 @@ impl TocWriter {
         final_components.sort_by(|a, b| a.filename().cmp(b.filename()));
         final_components.dedup_by(|a, b| a.filename() == b.filename());
 
-        // Create file with buffered writing
-        let file = File::create(&self.path).map_err(|e| {
-            Error::storage(format!(
-                "Failed to create TOC.txt file {:?}: {}",
-                self.path, e
-            ))
-        })?;
+        // ATOMIC PUBLICATION (issue #4526). TOC.txt is the publication barrier (written LAST), so it
+        // must appear whole or not at all. Writing it in place (`File::create` truncates, then
+        // `write`) lets a crash or short write publish a torn barrier: an empty or partial TOC next
+        // to a generation that is not complete. So: write a DOT-prefixed temp sibling (never parses
+        // as an SSTable component, so neither CQLite nor Cassandra's `tryComponentFromFilename`
+        // lists it), fsync it, `rename` it over the final name (atomic on POSIX), then fsync the
+        // directory so the rename itself is durable.
+        //
+        // Cassandra 5.0.8 comparison: `TOCComponent.updateTOC` writes IN PLACE
+        // (`FileUtils.write(tocFile, lines, CREATE, TRUNCATE_EXISTING, SYNC)`) and gets its
+        // atomicity from the lifecycle transaction log, which these offline verbs do not have. The
+        // BYTES here are identical to Cassandra's; only the way they reach the final name differs.
+        let file_name = self
+            .path
+            .file_name()
+            .ok_or_else(|| {
+                Error::storage(format!("TOC.txt path {:?} has no file name", self.path))
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let tmp_path = self.path.with_file_name(format!(".{file_name}.tmp"));
 
-        let mut writer = BufWriter::new(file);
-
-        // Write each component filename on its own line
-        for entry in &final_components {
-            writeln!(writer, "{}", entry.filename()).map_err(|e| {
+        let result = (|| -> Result<()> {
+            let file = File::create(&tmp_path).map_err(|e| {
                 Error::storage(format!(
-                    "Failed to write component {} to TOC.txt: {}",
-                    entry.filename(),
-                    e
+                    "Failed to create TOC.txt temp file {:?}: {}",
+                    tmp_path, e
                 ))
             })?;
+
+            let mut writer = BufWriter::new(file);
+
+            // Write each component filename on its own line
+            for entry in &final_components {
+                writeln!(writer, "{}", entry.filename()).map_err(|e| {
+                    Error::storage(format!(
+                        "Failed to write component {} to TOC.txt: {}",
+                        entry.filename(),
+                        e
+                    ))
+                })?;
+            }
+
+            // Flush buffer and sync to disk (durability requirement)
+            writer
+                .flush()
+                .map_err(|e| Error::storage(format!("Failed to flush TOC.txt: {}", e)))?;
+
+            let file = writer.into_inner().map_err(|e| {
+                Error::storage(format!("Failed to extract file from buffer: {}", e))
+            })?;
+
+            file.sync_all()
+                .map_err(|e| Error::storage(format!("Failed to sync TOC.txt to disk: {}", e)))?;
+            drop(file);
+
+            std::fs::rename(&tmp_path, &self.path).map_err(|e| {
+                Error::storage(format!(
+                    "Failed to publish TOC.txt (rename {:?} -> {:?}): {}",
+                    tmp_path, self.path, e
+                ))
+            })?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            // Best effort: never leave the temp sibling behind after a reported failure.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
         }
 
-        // Flush buffer and sync to disk (durability requirement)
-        writer
-            .flush()
-            .map_err(|e| Error::storage(format!("Failed to flush TOC.txt: {}", e)))?;
-
-        let file = writer
-            .into_inner()
-            .map_err(|e| Error::storage(format!("Failed to extract file from buffer: {}", e)))?;
-
-        file.sync_all()
-            .map_err(|e| Error::storage(format!("Failed to sync TOC.txt to disk: {}", e)))?;
+        // Make the rename durable. Directory fsync is a POSIX facility; elsewhere the rename is
+        // as durable as the platform makes it.
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            let dir = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            File::open(dir).and_then(|d| d.sync_all()).map_err(|e| {
+                Error::storage(format!("Failed to sync directory {:?}: {}", dir, e))
+            })?;
+        }
 
         Ok(())
     }
@@ -328,5 +379,34 @@ mod tests {
 
         let toc_entry = ComponentEntry::new(SSTableComponent::TOC);
         assert_eq!(toc_entry.filename(), "TOC.txt");
+    }
+
+    /// Issue #4526: TOC.txt is published by rename, so a successful write leaves no temp sibling
+    /// and a failed one (missing directory) publishes nothing.
+    #[test]
+    fn write_publishes_atomically_and_leaves_no_temp_sibling() {
+        let temp = TempDir::new().unwrap();
+        let toc_path = temp.path().join("nb-1-big-TOC.txt");
+        let writer = TocWriter::new(toc_path.clone());
+        writer
+            .write(&[ComponentEntry::new(SSTableComponent::Data)])
+            .unwrap();
+        assert!(toc_path.is_file());
+        let leftovers: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "nb-1-big-TOC.txt")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp sibling left behind: {leftovers:?}"
+        );
+
+        let missing = temp.path().join("no-such-dir").join("nb-2-big-TOC.txt");
+        assert!(TocWriter::new(missing.clone())
+            .write(&[ComponentEntry::new(SSTableComponent::Data)])
+            .is_err());
+        assert!(!missing.exists());
     }
 }
