@@ -384,3 +384,29 @@ async fn refused_sstable_without_a_layout_derived_table_fails_reads() {
         assert!(e.to_string().contains("unreadable"), "{t}: {e}");
     }
 }
+
+/// A `*-Data.db` entry that is NOT a regular file (a directory, a symlink) is not a generation
+/// and not a refusal: the table still reads, from both the initial load and a refresh.
+#[cfg(unix)]
+#[tokio::test]
+async fn non_regular_data_db_entries_are_neither_generations_nor_refusals() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = stage(tmp.path(), TABLE, false);
+    std::fs::create_dir(dir.join("nb-9-big-Data.db")).expect("dir named Data.db");
+    std::os::unix::fs::symlink(dir.join("nb-1-big-Data.db"), dir.join("nb-8-big-Data.db"))
+        .expect("symlink named Data.db");
+    let m = manager(tmp.path()).await;
+    assert!(!m
+        .scan(&tid(TABLE), None, None, None, None)
+        .await
+        .expect("initial load reads")
+        .is_empty());
+    m.refresh_tables()
+        .await
+        .expect("refresh ignores the look-alikes");
+    assert!(!m
+        .scan(&tid(TABLE), None, None, None, None)
+        .await
+        .expect("after refresh")
+        .is_empty());
+}

@@ -619,9 +619,8 @@ impl SSTableManager {
             while let Some(entry) = dir_entries.next_entry().await? {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
-                    // See Issue #481.
-                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
+                    // Regular `*-Data.db` only (AppleDouble #481 / non-regular look-alikes skipped).
+                    if refusal::is_generation_entry(filename, &entry).await {
                         results.push(path);
                     } else if max_depth > 0 {
                         // Check if it's a directory and recurse

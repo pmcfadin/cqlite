@@ -95,6 +95,17 @@ fn name_failure(e: Error, what: &str) -> Error {
     }
 }
 
+/// Is this directory entry a GENERATION? A `*-Data.db` name alone is not enough: only a REGULAR
+/// file is one (`DirEntry::file_type` does not follow symlinks), so a directory or symlink that
+/// merely carries the name is ignored -- not a generation and not a refusal (roborev #3234 r12).
+/// If the type cannot be observed the entry stays a candidate, so the failure surfaces as a
+/// refusal on open instead of the entry silently vanishing.
+pub(crate) async fn is_generation_entry(filename: &str, entry: &tokio::fs::DirEntry) -> bool {
+    filename.ends_with("-Data.db")
+        && !super::is_apple_double_sidecar(filename)
+        && entry.file_type().await.map(|t| t.is_file()).unwrap_or(true)
+}
+
 impl RefusalLedger {
     /// Record that `path` (belonging to table `key`) was refused with `cause`.
     pub(crate) fn record(&self, key: String, path: &Path, cause: &Error) {
@@ -273,7 +284,7 @@ impl super::SSTableManager {
             };
             let path = entry.path();
             let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if fname.ends_with("-Data.db") && !super::is_apple_double_sidecar(fname) {
+            if is_generation_entry(fname, &entry).await {
                 out.push(path);
             }
         }

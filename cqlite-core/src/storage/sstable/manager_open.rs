@@ -8,10 +8,7 @@
 //! (a per-file reader error is LOGGED AND SKIPPED, so nothing else would report a
 //! systematically failing open) in one readable place.
 
-use super::{
-    build_chunk_cache, is_apple_double_sidecar, refresh, SSTableId, SSTableManager,
-    MAX_SSTABLE_SCAN_DEPTH,
-};
+use super::{build_chunk_cache, refresh, SSTableId, SSTableManager, MAX_SSTABLE_SCAN_DEPTH};
 use crate::platform::Platform;
 use crate::{Config, Result};
 use std::collections::HashMap;
@@ -202,9 +199,9 @@ impl SSTableManager {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                     // Check for Cassandra SSTable data files using the *-Data.db pattern.
-                    // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
-                    // See Issue #481.
-                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
+                    // Regular `*-Data.db` files only; AppleDouble sidecars (#481) and
+                    // non-regular look-alikes are not generations (`is_generation_entry`).
+                    if super::refusal::is_generation_entry(filename, &entry).await {
                         files_found += 1;
                         tracing::debug!("SSTableManager found SSTable file: {:?}", path);
 
