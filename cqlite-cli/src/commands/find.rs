@@ -60,15 +60,20 @@ pub struct FindReport {
 
 impl FindReport {
     /// F5: 0 when the report completed (including "absent everywhere"), 2 when any generation
-    /// or CommitLog segment could not be read.
+    /// or CommitLog segment could not be read in full (a torn tail included).
     pub fn exit_code(&self) -> i32 {
         let gen_fail = self
             .generations
             .iter()
             .any(|g| matches!(g.outcome, GenOutcome::Unreadable(_)));
+        // A torn tail hides records that might touch the key: fail closed like a failure.
         let seg_fail = self.commitlog.as_ref().is_some_and(|c| {
-            c.iter()
-                .any(|e| matches!(e, CommitEntry::SegmentFailure { .. }))
+            c.iter().any(|e| {
+                matches!(
+                    e,
+                    CommitEntry::SegmentFailure { .. } | CommitEntry::SegmentTruncated { .. }
+                )
+            })
         });
         if gen_fail || seg_fail {
             2
@@ -113,20 +118,36 @@ pub fn unflushed(mutation: Writetime, gens: &[GenRow]) -> Unflushed {
     Unflushed::Yes
 }
 
-/// Split a `<partition-key>` argument into its per-column CQL literals: top-level commas,
-/// outside single-quoted strings (`''` is an escaped quote).
-fn split_key_literals(arg: &str) -> Vec<String> {
+/// Split a `<partition-key>` argument into its per-column CQL literals: commas at nesting depth
+/// zero, outside quoted text. `(`/`[`/`{` nest (tuple, list/set, map/UDT literals); `'...'`
+/// (with `''` escaped) and `"..."` quoted text is opaque.
+pub(crate) fn split_key_literals(arg: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
-    let mut in_quote = false;
+    let mut quote: Option<char> = None;
+    let mut depth: usize = 0;
     for ch in arg.chars() {
-        match ch {
-            '\'' => {
-                in_quote = !in_quote;
+        match (quote, ch) {
+            (Some(q), c) if c == q => {
+                // `''` inside a string toggles twice, which is exactly an escaped quote.
+                quote = None;
+                cur.push(c);
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(ch);
                 cur.push(ch);
             }
-            ',' if !in_quote => parts.push(std::mem::take(&mut cur)),
-            _ => cur.push(ch),
+            (None, '(' | '[' | '{') => {
+                depth = depth.saturating_add(1);
+                cur.push(ch);
+            }
+            (None, ')' | ']' | '}') => {
+                depth = depth.saturating_sub(1);
+                cur.push(ch);
+            }
+            (None, ',') if depth == 0 => parts.push(std::mem::take(&mut cur)),
+            (None, c) => cur.push(c),
         }
     }
     parts.push(cur);

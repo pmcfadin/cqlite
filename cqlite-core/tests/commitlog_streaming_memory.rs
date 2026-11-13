@@ -105,7 +105,7 @@ fn streaming_decode_peak_heap_tracks_file_not_mutation_set() {
     let reader = CommitLogReader::open(&path).expect("open synthetic segment");
     let mut decoded = 0usize;
     // Stream: drop each mutation immediately (never collect into a Vec).
-    for (_pos, res) in reader.mutations() {
+    for res in reader.mutations() {
         let m = res.expect("valid record decodes");
         decoded += m.updates.len();
     }

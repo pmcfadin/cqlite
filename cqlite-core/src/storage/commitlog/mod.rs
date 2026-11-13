@@ -37,7 +37,7 @@ pub mod schema;
 pub use descriptor::{CommitLogDescriptor, CommitLogVersionGates, SUPPORTED_COMMITLOG_VERSION};
 pub use mutation::{DecodedCell, DecodedRow, Mutation, PartitionUpdate};
 pub use mutation_writetime::{mutation_writetime, Writetime};
-pub use reader::{CommitLogReader, MutationIter, MAX_SEGMENT_BYTES};
+pub use reader::{CommitLogReader, MutationIter, PositionedMutationIter, MAX_SEGMENT_BYTES};
 pub use schema::{
     cql_fixed_len, format_table_id, parse_table_id, ColumnSpec, CommitLogSchema, SchemaSet,
 };

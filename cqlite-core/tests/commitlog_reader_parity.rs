@@ -131,7 +131,7 @@ fn decoded_mutations_match_inserted_set() {
     let mut decoded_ids = BTreeSet::new();
     let mut decoded_count = 0usize;
     let mut it = reader.mutations();
-    for (_pos, res) in it.by_ref() {
+    for res in it.by_ref() {
         let mutation = res.expect("mutation decode must not error on the clean segment");
         for upd in &mutation.updates {
             if upd.table_id != table_id {
@@ -224,7 +224,7 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
     let mut decoded_ids = BTreeSet::new();
     let mut decoded_count = 0usize;
     let mut it = reader.mutations();
-    for (_pos, res) in it.by_ref() {
+    for res in it.by_ref() {
         let mutation = res.expect("truncated fixture must not yield typed errors");
         for update in &mutation.updates {
             if update.table_id != table_id {
@@ -268,7 +268,7 @@ fn corrupt_crc_segment_returns_typed_error_without_panic() {
     let reader = CommitLogReader::open(&corrupt).expect("descriptor still parses");
 
     let mut saw_error = false;
-    for (_pos, res) in reader.mutations() {
+    for res in reader.mutations() {
         if res.is_err() {
             saw_error = true;
             break;

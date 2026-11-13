@@ -60,12 +60,12 @@ fn commitlog_find_fixture_writetimes_and_positions_equal_the_ground_truth() {
         .join(gt["segment"]["file"].as_str().expect("file"));
     let reader = CommitLogReader::open_with_schemas(&seg, set).expect("open segment");
     let mut got: Vec<(u64, i64, i32)> = Vec::new();
-    for (position, res) in reader.mutations() {
+    for (position, res) in reader.mutations_with_positions() {
         let m = res.expect("decode");
         for u in m.updates.iter().filter(|u| u.table_id == id) {
             let key = i32::from_be_bytes(u.partition_key.clone().try_into().expect("int key"));
             match mutation_writetime(u) {
-                Writetime::Known(t) => got.push((position, t, key)),
+                Writetime::Known(t) => got.push((position.expect("record position"), t, key)),
                 other => panic!("measurable insert reported {other:?}"),
             }
         }
@@ -97,7 +97,7 @@ fn older_fixture_writetimes_follow_the_segment_creation_time() {
         .expect("clean file");
     let reader = CommitLogReader::open_with_schemas(root.join(file), set).expect("open");
     let mut times = Vec::new();
-    for (_, res) in reader.mutations() {
+    for (_, res) in reader.mutations_with_positions() {
         for u in res
             .expect("decode")
             .updates

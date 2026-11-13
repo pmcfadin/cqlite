@@ -73,7 +73,7 @@ fn d5_an_unreadable_generation_blocks_yes_but_not_a_proven_no() {
 }
 
 #[test]
-fn exit_code_is_2_only_for_unreadable_generation_or_segment() {
+fn exit_code_is_2_for_unreadable_generation_segment_or_torn_tail() {
     let ok = FindReport {
         generations: vec![miss()],
         commitlog: None,
@@ -98,7 +98,7 @@ fn exit_code_is_2_only_for_unreadable_generation_or_segment() {
             segment: "x.log".into(),
         }]),
     };
-    assert_eq!(t.exit_code(), 0);
+    assert_eq!(t.exit_code(), 2, "a torn tail hides records: fail closed");
 }
 
 #[test]
@@ -116,4 +116,23 @@ fn table_dir_name_yields_table_and_dashed_id() {
     assert_eq!(id, "dc2d1cf0-dcc8-11f1-be1b-6d4cbb83f4d8");
     assert!(parse_table_dir_name(Path::new("/x/users")).is_none());
     assert!(parse_table_dir_name(Path::new("/x/users-nothex")).is_none());
+}
+
+#[test]
+fn key_literals_respect_tuple_collection_map_and_udt_nesting() {
+    assert_eq!(split_key_literals("(1, 'a'), 7"), vec!["(1, 'a')", "7"]);
+    assert_eq!(
+        split_key_literals("[1, 2, 3], 'x'"),
+        vec!["[1, 2, 3]", "'x'"]
+    );
+    assert_eq!(
+        split_key_literals("{1: 'a', 2: 'b'}, 3"),
+        vec!["{1: 'a', 2: 'b'}", "3"]
+    );
+    assert_eq!(
+        split_key_literals("{street: 'a,b', zip: 1}, [(1,2),(3,4)]"),
+        vec!["{street: 'a,b', zip: 1}", "[(1,2),(3,4)]"]
+    );
+    assert_eq!(split_key_literals("\"a,b\", 2"), vec!["\"a,b\"", "2"]);
+    assert_eq!(split_key_literals("42"), vec!["42"]);
 }

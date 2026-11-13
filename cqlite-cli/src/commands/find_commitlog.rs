@@ -6,8 +6,8 @@ use std::path::Path;
 
 use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::commitlog::{
-    mutation_writetime, parse_table_id, ColumnSpec, CommitLogReader, CommitLogSchema, SchemaSet,
-    Writetime,
+    mutation_writetime, parse_table_id, ColumnSpec, CommitLogReader, CommitLogSchema, Mutation,
+    SchemaSet, Writetime,
 };
 
 use super::find::{unflushed, GenRow, Unflushed};
@@ -91,11 +91,25 @@ pub fn scan_commitlog(
     let mut schemas = SchemaSet::new();
     schemas.insert(table_id, commitlog_schema(schema));
 
-    let mut segments: Vec<_> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "log"))
-            .collect(),
+    let mut segments: Vec<std::path::PathBuf> = Vec::new();
+    match std::fs::read_dir(dir) {
+        Ok(rd) => {
+            for entry in rd {
+                match entry {
+                    Ok(e) => {
+                        let p = e.path();
+                        if p.extension().is_some_and(|x| x == "log") {
+                            segments.push(p);
+                        }
+                    }
+                    // An entry that cannot be enumerated might be a segment: name it.
+                    Err(e) => out.push(CommitEntry::SegmentFailure {
+                        segment: dir.display().to_string(),
+                        cause: format!("directory entry could not be read: {e}"),
+                    }),
+                }
+            }
+        }
         Err(e) => {
             out.push(CommitEntry::SegmentFailure {
                 segment: dir.display().to_string(),
@@ -103,7 +117,7 @@ pub fn scan_commitlog(
             });
             return out;
         }
-    };
+    }
     segments.sort();
     for path in segments {
         let segment = path
@@ -120,10 +134,21 @@ pub fn scan_commitlog(
                 continue;
             }
         };
-        let mut it = reader.mutations();
+        let mut it = reader.mutations_with_positions();
         for (position, res) in it.by_ref() {
             match res {
                 Ok(mutation) => {
+                    let position = position.unwrap_or(0);
+                    if membership_undecidable(&mutation, &table_id, key) {
+                        out.push(CommitEntry::SegmentFailure {
+                            segment: segment.clone(),
+                            cause: format!(
+                                "mutation at position {position} touches this key but declares \
+                                 updates this decoder cannot walk past; whether it also updates \
+                                 the target table is undecidable"
+                            ),
+                        });
+                    }
                     for update in &mutation.updates {
                         if update.table_id != table_id || update.partition_key != key {
                             continue;
@@ -138,9 +163,11 @@ pub fn scan_commitlog(
                     }
                 }
                 Err(e) => {
+                    let at = position
+                        .map_or_else(|| "framing error".to_string(), |p| format!("position {p}"));
                     out.push(CommitEntry::SegmentFailure {
                         segment: segment.clone(),
-                        cause: format!("record at position {position} could not be read: {e}"),
+                        cause: format!("record at {at} could not be read: {e}"),
                     });
                     break;
                 }
@@ -151,4 +178,75 @@ pub fn scan_commitlog(
         }
     }
     out
+}
+
+/// Whether an INCOMPLETE mutation leaves "does it update the target table for this key?"
+/// undecidable.
+///
+/// A Cassandra `Mutation` is ONE keyspace + ONE partition key with at most one
+/// `PartitionUpdate` per table (`Mutation(String, DecoratedKey, ImmutableMap<TableId,
+/// PartitionUpdate>, …)`, cassandra-5.0.8), so every update — decoded or hidden behind the
+/// decoder's stopping point — carries the first visible update's partition key. A mutation for
+/// another key therefore cannot match; one for THIS key whose visible updates do not include
+/// the target table might still carry it in a hidden update.
+pub(crate) fn membership_undecidable(m: &Mutation, table_id: &[u8; 16], key: &[u8]) -> bool {
+    if m.updates_complete {
+        return false;
+    }
+    let same_key = m.updates.first().is_some_and(|u| u.partition_key == key);
+    let target_visible = m.updates.iter().any(|u| &u.table_id == table_id);
+    same_key && !target_visible
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cqlite_core::storage::commitlog::PartitionUpdate;
+
+    fn upd(table: u8, key: &[u8]) -> PartitionUpdate {
+        PartitionUpdate {
+            table_id: [table; 16],
+            partition_key: key.to_vec(),
+            columns_read: false,
+            column_names: vec![],
+            has_partition_deletion: false,
+            rows: vec![],
+            rows_decoded: false,
+            min_timestamp: None,
+            undecoded_cause: Some("table schema not supplied"),
+        }
+    }
+
+    fn mutation(updates: Vec<PartitionUpdate>, complete: bool) -> Mutation {
+        Mutation {
+            updates,
+            updates_complete: complete,
+        }
+    }
+
+    #[test]
+    fn complete_mutations_never_leave_membership_undecidable() {
+        let m = mutation(vec![upd(1, b"k")], true);
+        assert!(!membership_undecidable(&m, &[9; 16], b"k"));
+    }
+
+    #[test]
+    fn incomplete_mutation_for_another_key_cannot_match() {
+        // All updates of a Mutation share the key, so hidden updates cannot be for `k`.
+        let m = mutation(vec![upd(1, b"other")], false);
+        assert!(!membership_undecidable(&m, &[9; 16], b"k"));
+    }
+
+    #[test]
+    fn incomplete_mutation_for_this_key_without_the_target_table_is_undecidable() {
+        let m = mutation(vec![upd(1, b"k")], false);
+        assert!(membership_undecidable(&m, &[9; 16], b"k"));
+    }
+
+    #[test]
+    fn incomplete_mutation_whose_visible_update_is_the_target_table_is_decided() {
+        // One update per table per mutation: the target table is already visible.
+        let m = mutation(vec![upd(9, b"k")], false);
+        assert!(!membership_undecidable(&m, &[9; 16], b"k"));
+    }
 }
