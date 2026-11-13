@@ -28698,6 +28698,7 @@ dispatch_component() {
       run_component vortex-parquet-differential bash -c '
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' &&
   cargo test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' --lib "export::vortex::" &&
+  cargo test --package '"$vpd_core_pkg"' --features '"$vpd_core_feats"' --lib "export::arrow_schema::" &&
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
   cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test export_integration_tests test_export_sstable_to_vortex &&
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
