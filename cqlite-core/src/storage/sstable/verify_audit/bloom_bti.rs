@@ -70,18 +70,21 @@ pub(super) fn check_bloom_bti(
         return skip(format!("{BOUNDARY_SOURCE_UNREADABLE}: {why}"));
     }
     let mut false_negatives = 0usize;
+    let mut unresolved: Option<String> = None;
     for leaf in leaves {
         let key = match &leaf.inline_raw_key {
             Some(k) => k.clone(),
             None => match view.key_at(leaf.data_position) {
                 Ok(k) => k,
-                // Not resolvable here: the bounds/identity row reports it. An
-                // unresolvable key cannot be probed, so the row is unmeasured.
+                // Not resolvable here (the bounds/identity row reports it). Keep
+                // probing the rest: a proven false negative must never be hidden by
+                // an unresolved leaf that happens to come first.
                 Err(why) => {
-                    return skip(format!(
+                    unresolved.get_or_insert(format!(
                         "partition key at Data.db offset {} unresolvable: {why}",
                         leaf.data_position
-                    ))
+                    ));
+                    continue;
                 }
             },
         };
@@ -96,6 +99,9 @@ pub(super) fn check_bloom_bti(
             "keys from BTI trie leaves",
         ));
         return AuditVerdict::Fail;
+    }
+    if let Some(cause) = unresolved {
+        return skip(cause);
     }
     AuditVerdict::Pass
 }

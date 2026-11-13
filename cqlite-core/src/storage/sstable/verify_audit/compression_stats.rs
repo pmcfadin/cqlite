@@ -2,11 +2,11 @@
 //! invariant 8 (`Statistics.db` agrees with a real scan; `--deep` only).
 
 use super::{skip, AuditVerdict};
-use crate::parser::header::CassandraVersion;
 use crate::platform::Platform;
 use crate::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use crate::storage::sstable::statistics_reader::StatisticsReader;
 use crate::storage::sstable::verify::{CompressionState, VerifyErrorClass, VerifyFinding};
+use crate::storage::sstable::version_gate::SsTableFormat;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,6 +36,7 @@ fn coverage_gap(detail: String) -> VerifyFinding {
 pub(super) fn check_compression_coverage(
     state: &CompressionState,
     data_path: &Path,
+    format: SsTableFormat,
     findings: &mut Vec<VerifyFinding>,
 ) -> AuditVerdict {
     let info = match state {
@@ -62,7 +63,7 @@ pub(super) fn check_compression_coverage(
     }
     let decode = |index: usize| -> Result<usize, String> {
         let mut file = std::fs::File::open(data_path).map_err(|e| e.to_string())?;
-        let mut dec = ChunkDecompressor::new(info.clone(), CassandraVersion::V5_0Release)
+        let mut dec = ChunkDecompressor::new(info.clone(), super::decompressor_version(format))
             .map_err(|e| e.to_string())?;
         dec.decompress_chunk_by_index(&mut file, index)
             .map(|v| v.len())

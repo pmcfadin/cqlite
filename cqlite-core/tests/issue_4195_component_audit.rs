@@ -196,16 +196,12 @@ fn manifest_field(name: &str, field: &str) -> String {
 }
 
 fn sha256_hex(path: &Path) -> String {
-    use std::process::Command;
-    let out = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .expect("sha256sum");
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string()
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The six audit-only fixtures, generated ONCE by the committed generator from
@@ -768,4 +764,49 @@ async fn new_fixtures_are_invisible_to_existing_checks_except_the_documented_one
             assert_eq!(classes, expected, "{name} under {mode:?}: {}", describe(&r));
         }
     }
+}
+
+/// Order dependence (roborev r1): a PROVEN false negative must not be hidden by an
+/// unresolved leaf that comes first. Test-side edits of a Cassandra-written `test_da`
+/// table: the FIRST leaf's DataOffset is pointed past Data.db (unresolvable) and the
+/// Filter.db bit array is zeroed (every resolvable key is then a false negative).
+#[tokio::test]
+async fn bti_bloom_false_negative_is_not_hidden_by_an_earlier_unresolved_leaf() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let src = clean_dir("test_da", "ttl_table");
+    for e in std::fs::read_dir(&src).expect("src") {
+        let e = e.expect("entry");
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.ends_with(".jsonl") || (n.ends_with(".txt") && !n.ends_with("TOC.txt")) {
+            continue;
+        }
+        std::fs::copy(e.path(), tmp.path().join(&n)).expect("copy");
+    }
+    let parts = component(tmp.path(), "-Partitions.db");
+    let mut b = std::fs::read(&parts).expect("partitions");
+    assert_eq!(
+        (b[0], b[3]),
+        (0x08, 0x08),
+        "premise: two leading 1-byte-payload leaves"
+    );
+    b[2] = 0x80; // first leaf: DataOffset(127), past the 93-byte logical Data.db
+    std::fs::write(&parts, b).expect("write");
+    let filt = component(tmp.path(), "-Filter.db");
+    let mut f = std::fs::read(&filt).expect("filter");
+    for x in f.iter_mut().skip(8) {
+        *x = 0;
+    }
+    std::fs::write(&filt, f).expect("write");
+    let r = audit_generation(&data_db(tmp.path()), false).await;
+    assert_eq!(
+        verdict(&r, "bloom-no-false-negative"),
+        AuditVerdict::Fail,
+        "{}",
+        describe(&r)
+    );
+    assert!(
+        !only_class(&r, VerifyErrorClass::FilterFalseNegative).is_empty(),
+        "{}",
+        describe(&r)
+    );
 }
