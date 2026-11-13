@@ -15,9 +15,9 @@
 //! located through `CompressionInfo` and decompressed with its inline CRC
 //! checked; for an uncompressed one they are file offsets.
 
-use crate::parser::header::CassandraVersion;
 use crate::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use crate::storage::sstable::verify::CompressionState;
+use crate::storage::sstable::version_gate::SsTableFormat;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -47,7 +47,7 @@ pub(super) struct DataView {
 }
 
 impl DataView {
-    pub(super) fn open(path: &Path, compression: &CompressionState) -> Self {
+    pub(super) fn open(path: &Path, compression: &CompressionState, format: SsTableFormat) -> Self {
         let state = (|| {
             let file = File::open(path).map_err(|e| format!("cannot open Data.db: {e}"))?;
             match compression {
@@ -60,8 +60,9 @@ impl DataView {
                 }
                 CompressionState::Compressed(info) => {
                     let len = info.data_length;
-                    let dec = ChunkDecompressor::new(info.clone(), CassandraVersion::V5_0Release)
-                        .map_err(|e| format!("cannot build chunk decompressor: {e}"))?;
+                    let dec =
+                        ChunkDecompressor::new(info.clone(), super::decompressor_version(format))
+                            .map_err(|e| format!("cannot build chunk decompressor: {e}"))?;
                     Ok((file, Backing::Chunked(Box::new(dec)), len))
                 }
                 CompressionState::Unreadable => {

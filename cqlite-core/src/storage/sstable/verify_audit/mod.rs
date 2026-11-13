@@ -106,6 +106,21 @@ impl AuditSummary {
 
 /// What `verify_components` hands the audit. Built there because
 /// `ComponentSet`'s fields are private to `verify.rs`.
+/// The decompressor's format tag for this SSTable's detected format. Every
+/// supported format (BIG `na`/`nb`/`oa`, BTI `da`) decompresses through the same
+/// path (the argument is accepted for API compatibility and unused by
+/// `ChunkDecompressor`), but the detected format is propagated rather than a
+/// constant so a future format-dependent path cannot be silently skipped here.
+pub(super) fn decompressor_version(
+    format: SsTableFormat,
+) -> crate::parser::header::CassandraVersion {
+    use crate::parser::header::CassandraVersion;
+    match format {
+        SsTableFormat::Big => CassandraVersion::V5_0NewBig,
+        SsTableFormat::Bti => CassandraVersion::V5_0Bti,
+    }
+}
+
 pub(crate) struct AuditInputs<'a> {
     pub format: SsTableFormat,
     pub data_path: PathBuf,
@@ -169,7 +184,7 @@ pub(crate) async fn run(input: AuditInputs<'_>, findings: &mut Vec<VerifyFinding
         None
     };
 
-    let mut view = data_view::DataView::open(&input.data_path, input.compression);
+    let mut view = data_view::DataView::open(&input.data_path, input.compression, input.format);
 
     let (identity, summary_corr) = if big {
         match &walk {
@@ -263,6 +278,7 @@ pub(crate) async fn run(input: AuditInputs<'_>, findings: &mut Vec<VerifyFinding
     let compression = compression_stats::check_compression_coverage(
         input.compression,
         &input.data_path,
+        input.format,
         findings,
     );
     let statistics = compression_stats::check_statistics_vs_scan(
