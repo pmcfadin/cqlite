@@ -304,7 +304,9 @@ pub use types::PartitionEmitCounts;
 pub(crate) use cell_path::{
     serialize_map_cell_path_key_into, serialize_set_cell_path_element_into,
 };
-pub(crate) use collection_order::compare_collection_elements;
+pub(crate) use collection_order::{
+    compare_collection_elements, compare_collection_elements_typed, declared_element_is_timeuuid,
+};
 pub(crate) use encoding::*;
 pub(crate) use incremental_partition::IncrementalPartitionWriter;
 pub(crate) use index_prefix::*;
