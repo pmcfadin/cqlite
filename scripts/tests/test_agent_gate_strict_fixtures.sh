@@ -21,6 +21,9 @@ LOG_DIR="$TMP"; RESULTS="$TMP/results"
 record_result() { RECORDED_STATUS="$2"; }
 AGENT_GATE_FM_COMPONENT=""
 eval "$src" || { bad "run_component() does not parse"; exit 1; }
+# Hermetic: CI jobs may export CQLITE_REQUIRE_FIXTURES=1; the leak check below must see only
+# what run_component() does, not what this script inherited.
+unset CQLITE_REQUIRE_FIXTURES
 
 # probe <mode> <component> -> prints the child's view of CQLITE_REQUIRE_FIXTURES
 probe() { # ONLY LITE RECERTIFY ALLOW component [inherited]
@@ -42,6 +45,11 @@ for c in core-tests write-tests cli-tests integration-tests; do
   want "$c: --only keeps caller's =1"        seen=1     "$(probe "$c" 0 0 0 $c 1)"
 done
 want "fmt: dataset-free component never gets it" seen=unset "$(probe '' 0 0 0 fmt)"
+# Every probe above runs in a $(...) subshell, so call run_component in THIS shell once
+# (full-gate strict mode, dataset component) before checking for a leak.
+ONLY=""; LITE=0; RECERTIFY=0
+_gate_is_strict() { [ "$LITE" -eq 0 ] && { [ -z "$ONLY" ] || [ "$RECERTIFY" -eq 1 ]; }; }
+AGENT_GATE_ALLOW_MISSING_FIXTURES=0 run_component core-tests bash -c 'exit 0' >/dev/null
 want "no leak into the parent shell" unset "${CQLITE_REQUIRE_FIXTURES:-unset}"
 # the gate must keep the cargo-function path: `env` would bypass the observer function.
 if awk '/^run_component\(\) \{/,/^\}$/' "$GATE" | grep -q 'env .*"\$@"'; then
