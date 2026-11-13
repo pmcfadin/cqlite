@@ -272,6 +272,12 @@ fn column_values_as_strings(batches: &[RecordBatch], column: &str) -> Vec<String
         };
         let col = batch.column(idx);
         for row in 0..batch.num_rows() {
+            // Null validity is compared explicitly: `array_value_to_string` renders a null and an
+            // empty value alike, so a null must never be able to pass for "".
+            if col.is_null(row) {
+                out.push("\u{0}<NULL>".to_string());
+                continue;
+            }
             out.push(
                 array_value_to_string(col.as_ref(), row)
                     .unwrap_or_else(|e| format!("<display-error: {e}>")),
@@ -279,6 +285,49 @@ fn column_values_as_strings(batches: &[RecordBatch], column: &str) -> Vec<String
         }
     }
     out
+}
+
+/// The LOGICAL Arrow type of a field: physical encodings either format may legitimately pick
+/// (dictionary vs plain; view / large / small offset widths) are collapsed, everything that
+/// carries meaning (the primitive kind, temporal unit, decimal precision/scale, nested shape,
+/// child nullability) is kept. Compared per field so that e.g. `Int64` vs `Utf8` reds.
+fn logical_type(dt: &arrow::datatypes::DataType) -> String {
+    use arrow::datatypes::DataType as D;
+    match dt {
+        D::Dictionary(_, value) => logical_type(value),
+        D::Utf8 | D::LargeUtf8 | D::Utf8View => "Utf8".to_string(),
+        D::Binary | D::LargeBinary | D::BinaryView => "Binary".to_string(),
+        D::List(f) | D::LargeList(f) | D::ListView(f) | D::LargeListView(f) => {
+            format!("List<{}>", logical_field(f))
+        }
+        D::FixedSizeList(f, n) => format!("FixedSizeList<{}; {n}>", logical_field(f)),
+        D::Struct(fields) => format!(
+            "Struct<{}>",
+            fields
+                .iter()
+                .map(|f| logical_field(f))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        D::Map(f, sorted) => format!("Map<{}; sorted={sorted}>", logical_field(f)),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Name, logical type, nullability and Arrow extension name of a (possibly nested) field.
+fn logical_field(f: &arrow::datatypes::Field) -> String {
+    let ext = f
+        .metadata()
+        .get("ARROW:extension:name")
+        .map(|e| format!(" ext={e}"))
+        .unwrap_or_default();
+    format!(
+        "{}: {}{}{}",
+        f.name(),
+        logical_type(f.data_type()),
+        if f.is_nullable() { "?" } else { "" },
+        ext
+    )
 }
 
 fn total_rows(batches: &[RecordBatch]) -> usize {
@@ -372,6 +421,22 @@ fn diff_one_table(datasets_root: &Path, table: &FixtureTable) -> Result<usize, B
             "{qualified}: column order diverges — parquet: {parquet_order:?}, vortex: {vortex_order:?}"
         )
         .into());
+    }
+
+    // Same names in the same order, so now each field's LOGICAL type, nullability and
+    // extension metadata (roborev #4237 r6): string-rendered values alone would let
+    // `Int64(1)` vs `Utf8("1")` pass.
+    for (pf, vf) in parquet_schema
+        .fields()
+        .iter()
+        .zip(vortex_schema.fields().iter())
+    {
+        let (p, v) = (logical_field(pf), logical_field(vf));
+        if p != v {
+            return Err(
+                format!("{qualified}: field type diverges — parquet {p}, vortex {v}").into(),
+            );
+        }
     }
 
     for column in &parquet_cols {
