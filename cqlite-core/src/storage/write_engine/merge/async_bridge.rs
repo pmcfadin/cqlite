@@ -251,20 +251,30 @@ mod tests {
         let _: Result<u64> = block_on_async(async { Ok(0u64) });
         let build_before = runtime_build_count();
 
-        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
-        let start = std::time::Instant::now();
+        // Concurrency is proven by a RENDEZVOUS, not by wall time (issue #4538): every future waits
+        // on an async barrier of THREADS parties, which can only trip when all THREADS futures are
+        // in flight AT THE SAME TIME on the shared runtime. A serializing runtime (one future at a
+        // time, e.g. a shared `current_thread` runtime or a lock around `block_on`) never trips it,
+        // so the bounded wait below fails the test with a clear message; a slow or loaded host only
+        // delays the rendezvous and cannot change the verdict. The ceiling is a deadlock guard, not
+        // a latency budget.
+        let rendezvous = Arc::new(tokio::sync::Barrier::new(THREADS));
         let handles: Vec<_> = (0..THREADS)
             .map(|i| {
-                let barrier = Arc::clone(&barrier);
+                let rendezvous = Arc::clone(&rendezvous);
                 std::thread::spawn(move || {
-                    barrier.wait();
                     block_on_async(async move {
-                        // Inner task fan-out: joined concurrently on the shared
-                        // worker pool, then a short timer to keep each future
-                        // in-flight while its peers run.
+                        // Inner task fan-out: joined concurrently on the shared worker pool.
                         let a = tokio::spawn(async move { i });
                         let b = tokio::spawn(async move { i * 2 });
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        tokio::time::timeout(std::time::Duration::from_secs(60), rendezvous.wait())
+                            .await
+                            .map_err(|_| {
+                                Error::Storage(format!(
+                                    "concurrent calls appear serialized: the {THREADS} futures \
+                                     never all became in-flight together"
+                                ))
+                            })?;
                         let (a, b) = (
                             a.await.map_err(|e| Error::Storage(e.to_string()))?,
                             b.await.map_err(|e| Error::Storage(e.to_string()))?,
@@ -279,19 +289,10 @@ mod tests {
             let got = h
                 .join()
                 .expect("worker thread did not panic")
-                .expect("concurrent block_on_async succeeds");
+                .expect("concurrent block_on_async succeeds (all futures in flight together)");
             assert_eq!(got, (i * 3) as u64, "wrong result on thread {i}");
         }
 
-        // All THREADS futures sleep 100ms and ran concurrently on the shared
-        // runtime; if they were serialized (a single-threaded scheduler) the
-        // wall time would approach THREADS * 100ms. A generous ceiling well
-        // below that proves non-serialization without being flake-prone.
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_millis(100 * THREADS as u64 / 2),
-            "concurrent calls appear serialized: {elapsed:?} for {THREADS} x 100ms sleeps"
-        );
         // Still the single cached runtime — no per-thread rebuild.
         assert_eq!(
             runtime_build_count(),
