@@ -22,6 +22,7 @@ on:
       - 'fuzz/**'
       - 'cqlite-core/src/parser/**'
       - 'cqlite-core/src/storage/sstable/**'
+      - 'cqlite-core/src/storage/commitlog/**'
       - 'cqlite-core/src/schema/**'
       - 'cqlite-core/src/types.rs'
       - 'cqlite-core/src/types/**'
@@ -32,6 +33,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/fuzz.yml'
+      - '.github/actions/restore-canonical-datasets/**'
   schedule:
     # Nightly long-run, 04:07 UTC (off-peak, between gate 03:37 and
     # cql-type-parity 04:31).
@@ -61,19 +63,19 @@ jobs:
       fail-fast: false
       matrix:
         # STATIC, literal target list (never derived from untrusted input).
-        # `fuzz_block_emit` is intentionally EXCLUDED from CI: it requires a real
-        # SSTable fixture via `CQLITE_DATASETS_ROOT` (its driver no-ops without
-        # one), and once datasets are fetched it deterministically reproduces the
-        # decimal length add-overflow crash (#1795) — so it would be
-        # red-by-construction until that fix lands. Running it here without
-        # datasets would report false-green coverage. It remains a standing
-        # target exercised by `fuzz/smoke.sh` locally; re-add it to this matrix
-        # (with a dataset fetch) after #1795 is fixed.
+        # `fuzz_block_emit` needs a real SSTable fixture (`test_basic/simple_table`, via
+        # `CQLITE_DATASETS_ROOT`; its driver no-ops without one), so its leg restores the
+        # canonical datasets first (issue #4502). It was excluded while it reproduced the decimal
+        # length add-overflow crash (#1795); that is fixed (closed 2026-07-15), a 120 s local run
+        # on the datasets-v4 fixture executed ~840k inputs with no finding, and an excluded
+        # target reports false-green coverage.
         target:
           - fuzz_vint
           - fuzz_value_decode
           - fuzz_bti
           - fuzz_schema_parse
+          - fuzz_block_emit
+          - fuzz_commitlog_frame
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -87,12 +89,18 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked
 
+      - name: Restore canonical datasets (fuzz_block_emit fixture, issue #4502)
+        if: matrix.target == 'fuzz_block_emit'
+        uses: ./.github/actions/restore-canonical-datasets
+
       - name: Run bounded fuzz smoke
         # matrix.target is a trusted static literal, but pass it via a quoted env
         # var (never inline `${{ }}` in the shell) per the command-injection
         # doctrine.
         env:
           TARGET: ${{ matrix.target }}
+          # Read only by fuzz_block_emit's driver (a no-op for every other target).
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         working-directory: fuzz
         run: |
           cargo +nightly fuzz run "$TARGET" -- \
@@ -117,13 +125,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `fuzz_block_emit` excluded from CI — see the pr-smoke matrix comment
-        # (needs datasets + red-by-construction on #1795; re-add after the fix).
+        # Same list as the pr-smoke matrix (issue #4502): `fuzz_block_emit` runs with the
+        # canonical datasets restored, `fuzz_commitlog_frame` needs no fixture.
         target:
           - fuzz_vint
           - fuzz_value_decode
           - fuzz_bti
           - fuzz_schema_parse
+          - fuzz_block_emit
+          - fuzz_commitlog_frame
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -137,9 +147,15 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked
 
+      - name: Restore canonical datasets (fuzz_block_emit fixture, issue #4502)
+        if: matrix.target == 'fuzz_block_emit'
+        uses: ./.github/actions/restore-canonical-datasets
+
       - name: Run long fuzz budget
         env:
           TARGET: ${{ matrix.target }}
+          # Read only by fuzz_block_emit's driver (a no-op for every other target).
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         working-directory: fuzz
         run: |
           cargo +nightly fuzz run "$TARGET" -- \
