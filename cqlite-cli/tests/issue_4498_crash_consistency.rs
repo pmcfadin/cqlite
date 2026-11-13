@@ -572,7 +572,7 @@ fn defects() -> Vec<Defect> {
             verb: Verb::Salvage,
             fixture,
             path_suffix: "manifest.json",
-            modes: &[Mode::Crash],
+            modes: &[Mode::Crash, Mode::Short],
             issue: TORN_MANIFEST,
         });
         v.push(Defect {
