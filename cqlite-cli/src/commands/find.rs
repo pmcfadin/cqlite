@@ -212,27 +212,48 @@ pub fn parse_table_dir_name(dir: &Path) -> Option<(String, String)> {
     Some((table.to_string(), dashed))
 }
 
-/// `*-Data.db` files of a table directory ordered by generation number (name tie-break).
-fn list_generations(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut gens: Vec<(u64, PathBuf)> = Vec::new();
+/// Component names (after the `<version>-<generation>-<format>-` prefix) that mark a file as part
+/// of an SSTable generation.
+const GENERATION_COMPONENTS: &[&str] = &[
+    "Data.db",
+    "Index.db",
+    "Statistics.db",
+    "Summary.db",
+    "Filter.db",
+    "TOC.txt",
+    "CompressionInfo.db",
+    "Digest.crc32",
+    "CRC.db",
+    "Partitions.db",
+    "Rows.db",
+];
+
+/// The expected `*-Data.db` of EVERY generation that has any recognised component in `dir`,
+/// ordered by generation number (name tie-break). A generation whose `Data.db` is gone but whose
+/// `TOC.txt`/`Index.db`/`Statistics.db` remain is still listed — it is then probed and reported
+/// as UNREADABLE, never silently omitted.
+fn list_generations(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut prefixes: std::collections::BTreeSet<(u64, String)> = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        // `<version>-<generation>-<format>-<Component>`
+        let mut parts = name.splitn(4, '-');
+        let (Some(ver), Some(gen), Some(fmt), Some(component)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
             continue;
         };
-        if !name.ends_with("-Data.db") {
+        if !GENERATION_COMPONENTS.contains(&component) {
             continue;
         }
-        // `<version>-<generation>-<format>-Data.db`; a non-numeric generation sorts last.
-        let gen = name
-            .split('-')
-            .nth(1)
-            .and_then(|g| g.parse::<u64>().ok())
-            .unwrap_or(u64::MAX);
-        gens.push((gen, path));
+        // A non-numeric generation sorts last.
+        let order = gen.parse::<u64>().unwrap_or(u64::MAX);
+        prefixes.insert((order, format!("{ver}-{gen}-{fmt}")));
     }
-    gens.sort();
-    Ok(gens.into_iter().map(|(_, p)| p).collect())
+    Ok(prefixes
+        .into_iter()
+        .map(|(_, prefix)| dir.join(format!("{prefix}-Data.db")))
+        .collect())
 }
 
 /// Probe every generation. Never short-circuits: each failure becomes its own named row.
@@ -250,6 +271,12 @@ pub async fn probe_generations(gens: &[PathBuf], key: &[u8], schema: &TableSchem
 }
 
 async fn probe_one(path: &Path, key: &[u8], schema: &TableSchema) -> GenOutcome {
+    if !path.exists() {
+        return GenOutcome::Unreadable(
+            "Data.db is missing although other components of this generation are present"
+                .to_string(),
+        );
+    }
     let config = Config::default();
     let platform = match Platform::new(&config).await {
         Ok(p) => Arc::new(p),
@@ -305,7 +332,11 @@ pub async fn execute_find_command(
         // A never-flushed table has no generation: a legitimate "where did my write go"
         // answer (everything is in the CommitLog), not a usage error.
         Ok(g) => g,
-        Err(e) => usage(&format!("cannot list {}: {e}", args.table_dir.display())),
+        // An operational read failure, not a usage error: exit 2 with the cause named.
+        Err(e) => {
+            eprintln!("cqlite find: cannot list {}: {e}", args.table_dir.display());
+            std::process::exit(2);
+        }
     };
     let generations = probe_generations(&gens, &key, &schema).await;
     let commitlog = args

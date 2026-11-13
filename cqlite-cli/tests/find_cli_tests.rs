@@ -398,3 +398,68 @@ fn commitlog_find_generation_hits_match_its_own_golden() {
     }
     eprintln!("commitlog_find golden: {} partitions checked", g.len());
 }
+
+/// A generation whose `Data.db` is gone but whose other components remain is NOT silently
+/// omitted: it is an UNREADABLE row (exit 2), and the generation that is complete is still probed.
+#[test]
+fn generation_missing_its_data_db_is_reported_unreadable() {
+    let t = truth();
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp
+        .path()
+        .join(t.gt["table_dir"].as_str().expect("table_dir"));
+    std::fs::create_dir(&dir).expect("mkdir");
+    for e in std::fs::read_dir(&t.dir).expect("read fixture") {
+        let p = e.expect("entry").path();
+        let name = p.file_name().expect("name").to_string_lossy().into_owned();
+        // Generation 1 complete; generation 2 = the same Cassandra-written components with
+        // the Data.db withheld.
+        std::fs::copy(&p, dir.join(&name)).expect("copy");
+        if name.starts_with("nb-1-big-") && !name.ends_with(".jsonl") {
+            std::fs::copy(&p, dir.join(name.replace("nb-1-big-", "nb-2-big-")))
+                .expect("copy gen 2");
+        }
+    }
+    std::fs::remove_file(dir.join("nb-2-big-Data.db")).expect("remove Data.db");
+    let (code, out, _) = find("commitlog-find.cql", &dir, "1", &[]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("nb-2-big-Data.db: UNREADABLE"), "{out}");
+    assert!(out.contains("Data.db is missing"), "{out}");
+    assert!(out.contains("nb-1-big-Data.db: hit"), "{out}");
+}
+
+/// Restores a directory's permissions when dropped, so a failing assertion cannot leave an
+/// unlistable directory behind.
+#[cfg(unix)]
+struct RestoreMode(PathBuf, u32);
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+    }
+}
+
+/// A table directory that cannot be listed is an operational read failure: exit 2 naming the
+/// underlying error, not a usage error (exit 1).
+#[cfg(unix)]
+#[test]
+fn unlistable_table_directory_exits_two_naming_the_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp.path().join("users-dc2d1cf0dcc811f1be1b6d4cbb83f4d8");
+    std::fs::create_dir(&dir).expect("mkdir");
+    let _restore = RestoreMode(dir.clone(), 0o755);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::read_dir(&dir).is_ok() {
+        // Running as a user that ignores permission bits (root): the failure cannot be staged.
+        eprintln!("SKIP unlistable-dir case: directory permissions are not enforced here");
+        return;
+    }
+    let (code, _, err) = find("commitlog-find.cql", &dir, "1", &[]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("cannot list") && err.to_lowercase().contains("permission denied"),
+        "{err}"
+    );
+}
