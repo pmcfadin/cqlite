@@ -529,8 +529,8 @@ line marks the wall-clock value. `table`, `json`, and `csv` are supported, and
 the command fails closed with exit 1 for usage/schema/table errors or exit 2
 for generation read/render errors. The configured `max_result_bytes` budget
 applies to the rendered report just as it does to a materialized query; it is set by
-`performance.max_result_bytes` in the CLI config or `CQLITE_MAX_RESULT_BYTES` (added with this verb,
-and shared by every materializing CLI query).
+`performance.max_result_bytes` in the CLI config file (added with this verb; shared by every
+materializing CLI query).
 
 **Limits:** `explain` reports the decision CQLite's merge actually makes. At EQUAL write timestamps
 CQLite keeps the first-seen cell for live-vs-live, expiring and same-kind-deletion ties (open: #4530;

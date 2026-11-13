@@ -236,9 +236,16 @@ fn explain_without_now_marks_wall_clock_in_metadata() {
 
 #[test]
 fn explain_budget_failure_is_exit_two_without_partial_stdout() {
-    let mut command = explain_command();
+    // R9: the budget is `performance.max_result_bytes` in the CLI config file.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("cqlite.toml");
+    std::fs::write(
+        &cfg,
+        "[performance]\nquery_timeout_ms = 30000\ncache_size_mb = 64\nmax_result_bytes = 1\n",
+    )
+    .expect("write config");
+    let mut command = explain_command_with_globals(&["--config", cfg.to_str().expect("utf-8")]);
     let output = command
-        .env("CQLITE_MAX_RESULT_BYTES", "1")
         .args(["--clustering", "1", "--out", "json"])
         .output()
         .expect("explain process starts");

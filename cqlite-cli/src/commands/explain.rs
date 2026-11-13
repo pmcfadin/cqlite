@@ -172,7 +172,7 @@ fn run_explain(
         now_value.epoch_secs,
     );
     // The ONE bounded-result budget every materializing CLI surface shares (core default, or the
-    // `CQLITE_MAX_RESULT_BYTES` override `to_core_config` applies).
+    // `performance.max_result_bytes` config key, mapped by `to_core_config`).
     let max_result_bytes = crate::core_config::to_core_config(config)
         .map_err(|error| ExplainFailure::Usage(format!("invalid configuration: {error:#}")))?
         .query
