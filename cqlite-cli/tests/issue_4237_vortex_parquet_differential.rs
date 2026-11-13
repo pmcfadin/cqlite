@@ -356,6 +356,23 @@ fn diff_one_table(datasets_root: &Path, table: &FixtureTable) -> Result<usize, B
         )
         .into());
     }
+    // Same set, so now the ORDER: a Vortex export with reordered columns must not pass.
+    let parquet_order: Vec<&str> = parquet_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    let vortex_order: Vec<&str> = vortex_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    if parquet_order != vortex_order {
+        return Err(format!(
+            "{qualified}: column order diverges — parquet: {parquet_order:?}, vortex: {vortex_order:?}"
+        )
+        .into());
+    }
 
     for column in &parquet_cols {
         let p_values = column_values_as_strings(&parquet_batches, column);
