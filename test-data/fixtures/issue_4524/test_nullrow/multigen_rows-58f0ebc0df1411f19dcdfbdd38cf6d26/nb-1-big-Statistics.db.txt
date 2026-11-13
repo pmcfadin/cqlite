@@ -1,4 +1,4 @@
-SSTable: /var/lib/cassandra/data/test_nullrow/multigen_rows-99abea80df0411f1a9cfa170acc55494/nb-1-big
+SSTable: /var/lib/cassandra/data/test_nullrow/multigen_rows-58f0ebc0df1411f19dcdfbdd38cf6d26/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (1000)
@@ -16,9 +16,9 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 2dfdaf98-72c7-4e65-ae94-e4f0f85e02bd
+Originating host id: c1650b55-2440-4b6d-9bcf-dd7f69511bb9
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1794534560885, position=65871)=CommitLogPosition(segmentId=1794534560885, position=69131)}
+Replay positions covered: {CommitLogPosition(segmentId=1794541318132, position=65858)=CommitLogPosition(segmentId=1794541318132, position=72305)}
 totalColumnsSet: 3
 totalRows: 5
 Estimated tombstone drop times: 

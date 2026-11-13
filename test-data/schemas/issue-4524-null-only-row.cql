@@ -30,3 +30,10 @@ CREATE TABLE IF NOT EXISTS test_nullrow.multigen_rows (
     id int PRIMARY KEY,
     v  text
 );
+
+-- Expiring primary-key liveness (roborev r1): a pk-only INSERT USING TTL. The row is returned until
+-- its liveness marker expires and NOT after; the generator captures cqlsh both before and after.
+CREATE TABLE IF NOT EXISTS test_nullrow.ttl_liveness (
+    id int PRIMARY KEY,
+    v  text
+);

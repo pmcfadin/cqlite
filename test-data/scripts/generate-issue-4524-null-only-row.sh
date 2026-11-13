@@ -156,8 +156,19 @@ cql "DELETE v FROM multigen_rows USING TIMESTAMP 2000 WHERE id = 2"
 cql "UPDATE multigen_rows USING TIMESTAMP 2000 SET v = 'w' WHERE id = 3"
 cql "DELETE FROM multigen_rows USING TIMESTAMP 2000 WHERE id = 4"
 cql "INSERT INTO multigen_rows (id) VALUES (5) USING TIMESTAMP 2000"
+# TTL_LIVENESS: an expiring primary-key marker (no regular cell). id 1 expires TTL seconds after
+# the write (wall clock); id 2 is the no-TTL control. cqlsh is captured BEFORE expiry right after the
+# flush, and AFTER expiry at the very end (cqlsh-select-after-expiry.txt).
+TTL_SECS=45
+cql "INSERT INTO ttl_liveness (id) VALUES (1) USING TTL $TTL_SECS"
+cql "INSERT INTO ttl_liveness (id) VALUES (2)"
+TTL_WRITTEN_AT=$(date +%s)
 log "Flushing $KEYSPACE (phase B)..."
 run "${ENGINE[@]}" exec "$CONTAINER_NAME" nodetool flush "$KEYSPACE"
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  TTL_BEFORE="$(cx cqlsh -k "$KEYSPACE" -e "SELECT * FROM ttl_liveness;")" || fail "cqlsh (before expiry) failed"
+  [[ $(( $(date +%s) - TTL_WRITTEN_AT )) -lt $(( TTL_SECS - 5 )) ]] || fail "the BEFORE-expiry cqlsh capture ran too late (>$((TTL_SECS-5))s after the write)"
+fi
 
 [[ "$DRY_RUN" -eq 0 ]] || { log "dry-run complete"; exit 0; }
 
@@ -173,6 +184,8 @@ cntm=$(find "$OUT_DIR/$KEYSPACE/multigen_rows"* -name '*-Data.db' | wc -l | tr -
 [[ "$cntm" -eq 2 ]] || fail "multigen_rows: expected exactly TWO Data.db (two generations), found $cntm."
 dm=$(dirname "$(find "$OUT_DIR/$KEYSPACE/multigen_rows"* -name '*-Data.db' | head -1)")
 cx cqlsh -k "$KEYSPACE" -e "SELECT * FROM multigen_rows;" > "$dm/cqlsh-select.txt" || fail "cqlsh SELECT failed for multigen_rows"
+dt=$(dirname "$(find "$OUT_DIR/$KEYSPACE/ttl_liveness"* -name '*-Data.db' | head -1)")
+printf '%s\n' "$TTL_BEFORE" > "$dt/cqlsh-select.txt"
 for t in flat_rows clustered_rows; do
   cnt=$(find "$OUT_DIR/$KEYSPACE/$t"* -name '*-Data.db' | wc -l | tr -d ' ')
   [[ "$cnt" -eq 1 ]] || fail "$t: expected exactly ONE Data.db, found $cnt."
@@ -196,5 +209,9 @@ for line in sys.stdin:
   cx bash -lc "/opt/cassandra/tools/bin/sstablemetadata '$inpath'" > "${data_file%Data.db}Statistics.db.txt" 2>/dev/null || true
 done < <(find "$OUT_DIR/$KEYSPACE" -name '*-Data.db' -print0)
 
+# AFTER expiry: wait out the TTL, then capture cqlsh again (the expired marker's row must be gone).
+while [[ $(( $(date +%s) - TTL_WRITTEN_AT )) -le $(( TTL_SECS + 3 )) ]]; do sleep 1; done
+cx cqlsh -k "$KEYSPACE" -e "SELECT * FROM ttl_liveness;" > "$dt/cqlsh-select-after-expiry.txt" || fail "cqlsh (after expiry) failed"
+
 echo "  git -C '$REPO_ROOT' add -f '$OUT_DIR'/$KEYSPACE/*/*.db"
-echo "  git -C '$REPO_ROOT' add '$OUT_DIR'/$KEYSPACE/*/*.jsonl '$OUT_DIR'/$KEYSPACE/*/*TOC.txt '$OUT_DIR'/$KEYSPACE/*/*.crc32 '$OUT_DIR'/$KEYSPACE/*/*.db.txt '$OUT_DIR'/$KEYSPACE/*/cqlsh-select.txt"
+echo "  git -C '$REPO_ROOT' add '$OUT_DIR'/$KEYSPACE/*/*.jsonl '$OUT_DIR'/$KEYSPACE/*/*TOC.txt '$OUT_DIR'/$KEYSPACE/*/*.crc32 '$OUT_DIR'/$KEYSPACE/*/*.db.txt '$OUT_DIR'/$KEYSPACE/*/cqlsh-select*.txt"
