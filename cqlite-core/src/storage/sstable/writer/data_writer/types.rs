@@ -38,7 +38,7 @@ pub(crate) struct MergedOp<'a> {
 pub(crate) fn wall_clock_seconds() -> i32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i32)
+        .map(|d| i32::try_from(d.as_secs()).unwrap_or(i32::MAX))
         .unwrap_or(0)
 }
 
