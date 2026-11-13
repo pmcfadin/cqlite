@@ -317,6 +317,28 @@ fn run_verb(
     }
 }
 
+/// The `(kind, path-relative-to-work)` the shim logged for boundary number `n` in THIS run, if
+/// any. Lenient (no contiguity requirement): a fault run stops mid-sequence.
+fn boundary_hit(area: &Area<'_>, n: usize) -> Option<(String, String)> {
+    let log = area.work.parent().unwrap().join("boundaries.log");
+    let text = std::fs::read_to_string(&log).ok()?;
+    let prefix = area.work.display().to_string();
+    text.lines().find_map(|l| {
+        let mut it = l.splitn(3, ' ');
+        let num: usize = it.next()?.parse().ok()?;
+        if num != n {
+            return None;
+        }
+        let kind = it.next()?.to_string();
+        let path = it
+            .next()?
+            .replace(&prefix, "")
+            .trim_start_matches('/')
+            .to_string();
+        Some((kind, path))
+    })
+}
+
 /// The boundary list of an uninterrupted run: `(kind, path-relative-to-work)`, indexed by the
 /// boundary NUMBER the shim assigned (`CQLITE_FAULT_AT` addresses that number). The shim assigns
 /// numbers atomically but appends log lines separately, so concurrent threads can write lines out
@@ -650,9 +672,27 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             }
             runs += 1;
             let tag = format!("{verb:?}/{}#{n} {kind} {path} [{}]", f.table, mode.env());
-            let a = new_area(&staged);
-            let input_before = snapshot(a.input);
-            let run = run_verb(verb, f, &a, Some((shim(), Some((n, mode)))));
+            // The fault is addressed by boundary NUMBER; boundary numbering is assigned atomically
+            // but the numbered operation can differ between runs if threads interleave. So the shim's
+            // own log of THIS run must show boundary `n` is the same (kind, path) the reference
+            // enumerated; on a mismatch the run is retried once on a fresh area, then fails closed
+            // naming both (roborev r4).
+            let mut attempt = 0;
+            let (a, run, input_before) = loop {
+                let a = new_area(&staged);
+                let input_before = snapshot(a.input);
+                let run = run_verb(verb, f, &a, Some((shim(), Some((n, mode)))));
+                let hit = boundary_hit(&a, n);
+                if hit.as_ref() == Some(&(kind.clone(), path.clone())) {
+                    break (a, run, input_before);
+                }
+                attempt += 1;
+                assert!(
+                    attempt < 2,
+                    "{tag}: boundary numbering is not stable: the reference enumerated boundary {n} \
+                     as ({kind}, {path}) but the faulted run's own log shows {hit:?} (retried once)"
+                );
+            };
 
             // AC5 / the fault actually fired.
             match mode {
