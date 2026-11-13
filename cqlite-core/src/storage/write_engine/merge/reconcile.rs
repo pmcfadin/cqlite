@@ -660,11 +660,7 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
-    pub(super) fn build(
-        self,
-        purges: &mut PurgeCounts,
-        now_secs: Option<i64>,
-    ) -> Option<MergeEntry> {
+    pub(super) fn build(self, purges: &mut PurgeCounts, now: Option<i64>) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
@@ -687,7 +683,7 @@ impl ReconcileState {
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
         if let Some(d) = row_del {
-            super::model::shed_key_cells(&mut surviving, &ck_names, &row_liveness, d, now_secs);
+            super::model::shed_key_cells(&mut surviving, &ck_names, &row_liveness, d, now);
         }
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;
