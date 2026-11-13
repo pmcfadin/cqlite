@@ -497,3 +497,40 @@ pub struct MergeStats {
     /// behavior). Paths are input Data.db paths.
     pub dropped_whole: Vec<PathBuf>,
 }
+
+/// Adapt a merge-path [`CellData`] into the shared
+/// [`ReconcileCell`](crate::storage::write_engine::reconcile_rules::ReconcileCell) view (issues
+/// #947, #4530) so per-cell winner resolution calls the one `Cells.resolveRegular` rule. How a
+/// tombstone is RECOGNIZED stays here (`Value::Tombstone` payload / IS_DELETED via
+/// `KWayMerger::is_cell_tombstone`), since that is genuinely type-specific.
+#[cfg(feature = "write-support")]
+impl crate::storage::write_engine::reconcile_rules::ReconcileCell for CellData {
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+    fn is_tombstone(&self) -> bool {
+        super::KWayMerger::is_cell_tombstone(self)
+    }
+    fn expiring_ttl(&self) -> Option<u32> {
+        // `Cell.isExpiring()`: a live cell that carries a TTL.
+        if super::KWayMerger::is_cell_tombstone(self) {
+            None
+        } else {
+            self.ttl
+        }
+    }
+    fn local_deletion_time(&self) -> i32 {
+        super::KWayMerger::cell_effective_ldt(self).unwrap_or(0)
+    }
+    fn value_bytes(&self) -> Vec<u8> {
+        // `Cells.compareValues`: the serialized cell value. A tombstone has none.
+        let mut out = Vec::new();
+        if !super::KWayMerger::is_cell_tombstone(self) {
+            let _ = crate::storage::sstable::writer::data_writer::encoding::serialize_value_into(
+                &self.value,
+                &mut out,
+            );
+        }
+        out
+    }
+}

@@ -161,7 +161,7 @@ impl ReconcileState {
             if let Some(rd) = &entry.range_deletion {
                 let replace = match &self.range_deletion {
                     None => true,
-                    Some(current) => rd.deletion_time > current.deletion_time,
+                    Some(current) => reconcile_rules::rt_supersedes(rd, current),
                 };
                 if replace {
                     self.range_deletion = Some(rd.clone());
@@ -175,7 +175,8 @@ impl ReconcileState {
             // it sets the new max so the rebuilt deletion preserves its
             // wall-clock `localDeletionTime` (#873).
             if let Some((del_ts, del_ldt)) = entry.row_deletion {
-                if self.row_del.is_none_or(|d| del_ts > d) {
+                let cand = (del_ts, del_ldt);
+                if reconcile_rules::supersedes_opt(self.row_del, self.row_del_ldt, cand) {
                     self.row_del = Some(del_ts);
                     self.row_del_ldt = del_ldt;
                 }
@@ -186,10 +187,9 @@ impl ReconcileState {
                 local_deletion_time,
             } = &entry.row_data
             {
-                // When this tombstone's deletion_time becomes (or sets) the new
-                // max, capture its paired LDT too so the winning tombstone's
-                // source `localDeletionTime` survives reconciliation (#873).
-                if self.row_del.is_none_or(|d| *deletion_time > d) {
+                // `DeletionTime.supersedes` (#4530); keep the winner's paired source LDT (#873).
+                let cand = (*deletion_time, *local_deletion_time);
+                if reconcile_rules::supersedes_opt(self.row_del, self.row_del_ldt, cand) {
                     self.row_del = Some(*deletion_time);
                     self.row_del_ldt = *local_deletion_time;
                 }
@@ -201,10 +201,10 @@ impl ReconcileState {
     /// each element of a multi-cell column reconciles independently (epic #899).
     /// Preserves first-seen key order while resolving winners in `winners`.
     ///
-    /// `cluster_rows` is in heap-routing order (run_index ascending within equal
-    /// keys), so when two cells tie on both timestamp and liveness the
-    /// first-seen (newer file) is kept (see
-    /// [`reconcile_rules::cell_wins`], the shared tie-break rule).
+    /// `cluster_rows` arrives in heap-routing order, but the winner no longer
+    /// depends on it: [`reconcile_rules::cell_wins`] is Cassandra's TOTAL
+    /// `Cells.resolveRegular` order (#4530), so a full tie means the two
+    /// cells are indistinguishable and first-seen is irrelevant.
     pub(super) fn resolve_cell_winners(&mut self, cluster_rows: &[MergeEntry]) {
         for entry in cluster_rows {
             if let RowData::Live { cells } = &entry.row_data {
@@ -223,15 +223,14 @@ impl ReconcileState {
                             slot.insert(cell.clone());
                         }
                         Entry::Occupied(mut slot) => {
-                            // Higher timestamp wins. At EQUAL timestamp a cell
-                            // DELETION (tombstone) beats a LIVE or EXPIRING
-                            // (TTL) cell, decided BEFORE any localDeletionTime
-                            // compare (parity Cassandra `a62c749`,
-                            // `Cells#reconcile`; issue #848 / #498). At equal ts
-                            // + equal deletion-status, keep the first-seen
-                            // (newer file) winner. The tie-break is the SHARED
-                            // [`reconcile_rules::cell_wins`] rule (issue #947),
-                            // also used by the flush/write path.
+                            // Cassandra `Cells.resolveRegular` (cassandra-5.0.8
+                            // `Cells.java:79-129`): higher timestamp; at EQUAL
+                            // timestamp tombstone > expiring > live, then larger
+                            // LDT, lower TTL, larger value (#4530, #848 / #498).
+                            // The SHARED [`reconcile_rules::cell_wins`] rule
+                            // (issue #947) also used by the read and flush paths.
+                            // Order-independent: no first-seen tie-break remains.
+                            //
                             if reconcile_rules::cell_wins(cell, slot.get()) {
                                 slot.insert(cell.clone());
                             }

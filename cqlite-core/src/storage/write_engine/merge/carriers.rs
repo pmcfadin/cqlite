@@ -98,8 +98,13 @@ pub(super) fn scan_partition_carriers(rows: &[MergeEntry]) -> PartitionCarriers 
                 carriers
                     .partition_delete_key
                     .get_or_insert_with(|| row.key.clone());
+                // `DeletionTime.supersedes` (#4530): equal mfda is broken by the larger LDT.
                 match carriers.max_partition_deletion {
-                    Some((cur_mfda, _)) if cur_mfda >= mfda => {}
+                    Some(cur)
+                        if !super::super::reconcile_rules::deletion_supersedes(
+                            (mfda, ldt),
+                            cur,
+                        ) => {}
                     _ => carriers.max_partition_deletion = Some((mfda, ldt)),
                 }
                 continue;
