@@ -17,7 +17,7 @@
 //! ```
 //!
 //! `estimatedColumnCount`'s two histogram statistics come from
-//! [`crate::parser::repair_metadata::read_cell_per_partition_stats`] (a NEW
+//! [`crate::parser::repair_metadata::diagnose_fields::read_cell_per_partition_stats`] (a NEW
 //! read-side decode this change adds — task 0.1 confirmed the read side did not
 //! previously decode `estimatedCellPerPartitionCount`'s raw buckets back out,
 //! only `estimatedPartitionSize`'s bucket SUM via `read_table_counts`).
@@ -25,7 +25,7 @@
 //! [`crate::parser::statistics::SSTableStatistics::tombstone_drop_times`]
 //! (issue #1073).
 
-use crate::parser::repair_metadata::CellPerPartitionStats;
+use crate::parser::repair_metadata::diagnose_fields::CellPerPartitionStats;
 
 /// A `--now`-independent gc_grace cutoff formula, factored out of
 /// `write_engine::merge::compute_gc_before` so `diagnose`'s cheap tier (which the

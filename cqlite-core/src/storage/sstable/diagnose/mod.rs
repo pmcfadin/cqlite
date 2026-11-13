@@ -33,9 +33,10 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
-use crate::parser::repair_metadata::{
-    parse_repair_metadata, read_cell_per_partition_stats, read_compression_ratio, RepairField,
+use crate::parser::repair_metadata::diagnose_fields::{
+    read_cell_per_partition_stats, read_compression_ratio, read_stats_minimums,
 };
+use crate::parser::repair_metadata::{parse_repair_metadata, RepairField};
 use crate::parser::statistics::SSTableStatistics;
 use crate::platform::Platform;
 use crate::schema::TableSchema;
@@ -185,6 +186,16 @@ pub struct DiagnoseReport {
     pub top_n: usize,
     pub generations: Vec<GenerationDiagnosis>,
     pub token_overlap: TokenOverlap,
+    /// Generations this run could not read, each with its cause (spec R6: a field of the
+    /// report, never a refusal). Never silently absent.
+    pub unreadable_generations: Vec<UnreadableGeneration>,
+}
+
+/// A generation `diagnose` could not read, and why.
+#[derive(Debug, Clone)]
+pub struct UnreadableGeneration {
+    pub data_path: PathBuf,
+    pub cause: String,
 }
 
 /// Discover every `*-Data.db` generation directly under `table_dir` (no
@@ -231,15 +242,23 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
     let platform = Arc::new(Platform::new(&config).await?);
 
     let mut generations = Vec::with_capacity(data_paths.len());
+    let mut unreadable_generations = Vec::new();
     let mut token_spans: Vec<(i64, i64)> = Vec::new();
 
     for data_path in &data_paths {
-        let (gen_report, token_span) =
-            diagnose_generation(data_path, options, gc_before, &config, platform.clone()).await?;
-        if let Some(span) = token_span {
-            token_spans.push(span);
+        match diagnose_generation(data_path, options, gc_before, &config, platform.clone()).await {
+            Ok((gen_report, token_span)) => {
+                if let Some(span) = token_span {
+                    token_spans.push(span);
+                }
+                generations.push(gen_report);
+            }
+            // R6: an unreadable generation is a field in the report, not a refusal.
+            Err(e) => unreadable_generations.push(UnreadableGeneration {
+                data_path: data_path.clone(),
+                cause: e.to_string(),
+            }),
         }
-        generations.push(gen_report);
     }
 
     let counts = compute_token_overlap(&token_spans, TOKEN_OVERLAP_BUCKETS);
@@ -254,6 +273,7 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
             buckets: TOKEN_OVERLAP_BUCKETS,
             counts,
         },
+        unreadable_generations,
     })
 }
 
@@ -322,6 +342,12 @@ async fn diagnose_generation(
         None => bti_endpoint_tokens(data_path).await,
     };
 
+    // The STATS component's OWN minimums (what `sstablemetadata` prints) — not the
+    // serialization-header EncodingStats baselines `timestamp_stats` carries.
+    let (min_timestamp, min_local_deletion_time) =
+        read_stats_minimums(&stats_bytes, gates.as_ref())?.ok_or_else(|| {
+            Error::corruption("Statistics.db carries no STATS component".to_string())
+        })?;
     let max_timestamp = max_timestamp_field(&stats);
     let estimated_partition_count = estimated_partition_count_field(&stats);
 
@@ -378,9 +404,9 @@ async fn diagnose_generation(
         GenerationDiagnosis {
             generation,
             format,
-            min_timestamp: stats.timestamp_stats.min_timestamp,
+            min_timestamp,
             max_timestamp,
-            min_local_deletion_time: stats.timestamp_stats.min_deletion_time,
+            min_local_deletion_time,
             max_local_deletion_time: stats.timestamp_stats.max_deletion_time,
             estimated_partition_count,
             estimated_droppable_tombstone_ratio,
@@ -426,7 +452,9 @@ pub fn estimated_partition_count_field(stats: &SSTableStatistics) -> SourcedFiel
 /// `design.md` D3), plus the `gcBefore` it was computed against.
 pub fn droppable_tombstone_ratio_field(
     stats: &SSTableStatistics,
-    cell_per_partition: Option<&crate::parser::repair_metadata::CellPerPartitionStats>,
+    cell_per_partition: Option<
+        &crate::parser::repair_metadata::diagnose_fields::CellPerPartitionStats,
+    >,
     gc_before: Option<i64>,
     fallback_gc_before: i64,
 ) -> (SourcedField<f64>, i64) {
@@ -478,13 +506,18 @@ pub fn pending_repair_field(
 /// `compression_ratio`'s [`SourcedField`] mapping (spec R1.1/R2.1 shape).
 ///
 /// `ratio` is the STATS component's own `compressionRatio` `f64` field (decoded
-/// by [`crate::parser::repair_metadata::read_compression_ratio`]) — a DIFFERENT,
+/// by [`crate::parser::repair_metadata::diagnose_fields::read_compression_ratio`]) — a DIFFERENT,
 /// unconditionally-written field from `SSTableStatistics::compression_stats`
 /// (the richer algorithm-name/speed structure the enhanced `nb` parser leaves
 /// `None`, issue #1653). `sstablemetadata`'s own "Compression ratio: …" line
 /// prints this same STATS field.
 pub fn compression_ratio_field(ratio: Option<f64>) -> SourcedField<f64> {
     match ratio {
+        // cassandra-5.0.8 `MetadataCollector.NO_COMPRESSION_RATIO = -1.0`: the SSTable is not
+        // compressed. `sstablemetadata` prints no ratio line then; the sentinel is never a value.
+        Some(r) if r < 0.0 => SourcedField::unmeasured(
+            "SSTable is not compressed (STATS compressionRatio is the NO_COMPRESSION_RATIO sentinel)",
+        ),
         Some(r) => SourcedField::measured(r, FieldSource::Statistics),
         None => SourcedField::unmeasured("Statistics.db carries no STATS component"),
     }
