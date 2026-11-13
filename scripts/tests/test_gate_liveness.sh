@@ -192,7 +192,7 @@ mk_beat() {
     echo "host: $(uname -n 2>/dev/null || echo unknown)"
     echo "interval: $iv"
     echo "beat-seq: 7"
-    echo "beat-epoch: $(( $(date +%s) - $3 ))"
+    echo "beat-epoch: $(( ${MK_NOW:-$(date +%s)} - $3 ))"
     echo "==== END AGENT-GATE HEARTBEAT ===="
   } > "$1"
 }
@@ -354,8 +354,11 @@ if grep -q 'STALE_AFTER=$(( HB_INTERVAL \* 3 ))' "$READER" && grep -q '\[ "$STAL
 else
   bad "5.6 the staleness window is max(3 x interval, 90s)" "formula not found"
 fi
-mk_beat "$TMP/a.txt.heartbeat" run-a 179 60
-expect_reader "5.4 interval 60 => window 180, age 179 RUNNING" RUNNING 2 "window 180s" -- "$TMP/a.txt"
+# The reader's clock is PINNED (GATE_LIVENESS_NOW, issue #4538) to the instant the beat was written
+# (MK_NOW), so the age is EXACTLY 179 whatever the host's load: a real-clock age of 179 against a 180
+# window flaked whenever the reader started >1s after the fixture was written.
+MK_NOW=1800000000 mk_beat "$TMP/a.txt.heartbeat" run-a 179 60
+GATE_LIVENESS_NOW=1800000000 expect_reader "5.4 interval 60 => window 180, age 179 RUNNING" RUNNING 2 "window 180s" -- "$TMP/a.txt"
 # (The old 5.5 asserted the same 3x-interval derivation from the STALLED side with interval 60,
 # which after the clock-independent confirmation would cost a 65s wait for coverage 5.4 already
 # provides: age 179 can only read RUNNING if the window is >=179, i.e. 3x60. Dropped rather
@@ -1269,23 +1272,33 @@ _mkbeat_r() { # _mkbeat_r <beat-seq> <beater-pid>
     echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/restart.txt.heartbeat"
 }
 _mkbeat_r 57 1111
-# During the reader's wait, a NEW beater incarnation appears with a LOWER counter.
-( sleep 1; _mkbeat_r 1 2222; sleep 1; _mkbeat_r 2 2222 ) &
+# During the reader's wait, a NEW beater incarnation appears with a LOWER counter. The change is
+# made strictly AFTER the reader has taken its first sample (marker hand-off, issue #4538): a timed
+# `sleep 1` let a loaded host start the reader late, so the restart landed BEFORE the first sample
+# and the reader never saw a pid change (no RELAUNCHED).
+_wait_first_sample() { # _wait_first_sample <marker>  (bounded: 60s)
+  local _i=0
+  while [ ! -e "$1" ] && [ "$_i" -lt 1200 ]; do sleep 0.05; _i=$((_i + 1)); done
+}
+rm -f "$TMP/m113"
+( _wait_first_sample "$TMP/m113"; _mkbeat_r 1 2222; _mkbeat_r 2 2222 ) &
 _rp=$!; remember_pid "$_rp"
-expect_reader "11j.3 a beater RESTART mid-window => RUNNING, not a false STALLED" \
+GATE_LIVENESS_FIRST_SAMPLE_MARKER="$TMP/m113" expect_reader "11j.3 a beater RESTART mid-window => RUNNING, not a false STALLED" \
   RUNNING 2 "RELAUNCHED" -- "$TMP/restart.txt"
 wait "$_rp" 2>/dev/null || true
 # CONTROL: a lower counter under the SAME beater incarnation is NOT progress (that is a peer or a
 # corrupt write, not a restart).
 _mkbeat_r 57 1111
-( sleep 1; _mkbeat_r 3 1111 ) &
+rm -f "$TMP/m114"
+( _wait_first_sample "$TMP/m114"; _mkbeat_r 3 1111 ) &
 _rp2=$!; remember_pid "$_rp2"
-expect_reader "11j.4 control: a LOWER counter under the same beater-pid is not progress" \
+GATE_LIVENESS_FIRST_SAMPLE_MARKER="$TMP/m114" expect_reader "11j.4 control: a LOWER counter under the same beater-pid is not progress" \
   STALLED 3 "did NOT advance" -- "$TMP/restart.txt"
 wait "$_rp2" 2>/dev/null || true
 # CONTROL: a changed beater-pid under a DIFFERENT run-id is a peer, not our gate.
 _mkbeat_r 57 1111
-( sleep 1
+rm -f "$TMP/m115"
+( _wait_first_sample "$TMP/m115"
   { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: SOMEONE-ELSE"; echo "gate-pid: 4242"
     echo "beater-pid: 9999"; echo "host: $(uname -n 2>/dev/null || echo unknown)"
     echo "parent-check: starttime"; echo "interval: 1"; echo "beat-seq: 1"
@@ -1296,7 +1309,7 @@ _rp3=$!; remember_pid "$_rp3"
 # correct verdict became UNKNOWN in job 198: a second sample belonging to another run means we could
 # not measure OUR run, and STALLED (a positive claim) must not be derived from that. This case
 # expected STALLED, which was the defect; it now pins the honest answer.
-expect_reader "11j.5 control: a new beater-pid under a FOREIGN run-id is not credited as progress" \
+GATE_LIVENESS_FIRST_SAMPLE_MARKER="$TMP/m115" expect_reader "11j.5 control: a new beater-pid under a FOREIGN run-id is not credited as progress" \
   UNKNOWN 4 "belongs to run 'SOMEONE-ELSE'" -- "$TMP/restart.txt"
 wait "$_rp3" 2>/dev/null || true
 

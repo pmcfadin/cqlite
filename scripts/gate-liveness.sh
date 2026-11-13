@@ -818,7 +818,11 @@ fi
 STALE_AFTER=$(( HB_INTERVAL * 3 ))
 [ "$STALE_AFTER" -ge 90 ] || STALE_AFTER=90
 
+# TEST SEAM (issue #4538, inert unless set): GATE_LIVENESS_NOW pins the reader's clock for the AGE
+# computation so a self-test can assert an exact age boundary (e.g. age 179 vs a 180s window)
+# without racing the host's load. Digits only; anything else is ignored.
 NOW=$(date +%s)
+case "${GATE_LIVENESS_NOW:-}" in ''|*[!0-9]*) : ;; *) NOW="$GATE_LIVENESS_NOW" ;; esac
 AGE=$(( NOW - HB_EPOCH ))
 # A beat dated in the FUTURE is unmeasurable, not fresh — otherwise a clock step (or a
 # hand-edited artifact) would read as RUNNING indefinitely. One interval of slop
@@ -928,6 +932,10 @@ _confirm_wait=$(( HB_INTERVAL + 5 ))
 if [ -n "$NO_WAIT" ]; then
   verdict UNKNOWN 4 "confirmation-skipped; this beat is not fresh and --no-wait forbids the second sample that would distinguish a stalled run from a slow one, so no STALLED claim is supportable. run-id ${HB_RUN_ID:-?}, beat ${HB_SEQ:-?}, age ${AGE}s, window ${STALE_AFTER}s"
 fi
+# TEST SEAM (issue #4538, inert unless set): touch this marker file once the FIRST sample is taken,
+# so a self-test can change the beat strictly AFTER it (a deterministic hand-off instead of a timed
+# `sleep` that a loaded host can reorder).
+[ -n "${GATE_LIVENESS_FIRST_SAMPLE_MARKER:-}" ] && : > "$GATE_LIVENESS_FIRST_SAMPLE_MARKER" 2>/dev/null
 sleep "$_confirm_wait"
 # THE GATE MAY HAVE FINISHED DURING THE WAIT (roborev job 228), AND THE RE-DECISION MUST USE THE REAL
 # GRAMMAR (roborev job 231). If the gate completed and stopped its beater before another beat, the
