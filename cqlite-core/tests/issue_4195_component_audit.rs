@@ -171,7 +171,9 @@ async fn healthy_corpus_has_no_findings_and_no_failed_rows() {
 // Corruption fixtures
 // ---------------------------------------------------------------------------
 
-const NEW_FIXTURES: [&str; 6] = [
+const NEW_FIXTURES: [&str; 8] = [
+    "compression_info_offsets_non_monotonic",
+    "compression_info_first_offset_nonzero",
     "index_entry_offset_swap",
     "summary_sample_position_corrupt",
     "filter_db_bit_flip_bti",
@@ -764,7 +766,10 @@ async fn a10_1_a_vacuous_audit_is_not_ok_and_names_zero_measured() {
 async fn new_fixtures_are_invisible_to_existing_checks_except_the_documented_one() {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
-    for name in NEW_FIXTURES {
+    // The first two entries (offset-table fixtures, roborev r4) are deliberately NOT
+    // isolated: the existing parse already reports the non-monotonic table; what the
+    // audit adds there is the row's Fail (not a Skip). Isolation is pinned for the rest.
+    for name in &NEW_FIXTURES[2..] {
         let dir = fixture(name);
         for mode in [VerifyMode::Quick, VerifyMode::Full] {
             let r = verify_sstable(&dir, mode, &config, platform.clone())
@@ -774,7 +779,7 @@ async fn new_fixtures_are_invisible_to_existing_checks_except_the_documented_one
             classes.sort();
             classes.dedup();
             let expected: &[&str] =
-                if name == "bti_data_offset_out_of_bounds" && mode == VerifyMode::Full {
+                if *name == "bti_data_offset_out_of_bounds" && mode == VerifyMode::Full {
                     &["BtiRootPointerCorrupt"]
                 } else {
                     &[]
@@ -858,4 +863,35 @@ async fn deep_scan_failure_is_a_finding_and_fails_the_scan_dependent_row() {
         describe(&deep)
     );
     assert!(!deep.is_ok());
+}
+
+/// Roborev r4: the WHOLE offset table is validated against the physical Data.db,
+/// not just the count and the last chunk.
+#[tokio::test]
+async fn compression_offset_table_corruption_fails_the_coverage_row() {
+    // An EARLIER offset larger than its successor (non-monotonic table).
+    let r = audit_fixture("compression_info_offsets_non_monotonic", false).await;
+    assert_eq!(
+        verdict(&r, "compression-coverage"),
+        AuditVerdict::Fail,
+        "{}",
+        describe(&r)
+    );
+    assert!(
+        !only_class(&r, VerifyErrorClass::CompressionInfoCorrupt).is_empty(),
+        "{}",
+        describe(&r)
+    );
+    assert!(!r.is_ok());
+    // First chunk not at byte 0 although the table is ascending and in bounds.
+    let r = audit_fixture("compression_info_first_offset_nonzero", false).await;
+    assert_eq!(
+        verdict(&r, "compression-coverage"),
+        AuditVerdict::Fail,
+        "{}",
+        describe(&r)
+    );
+    let f = only_class(&r, VerifyErrorClass::CompressionCoverageGap);
+    assert_eq!(f.len(), 1, "{}", describe(&r));
+    assert!(f[0].detail.contains("not 0"), "{}", f[0].detail);
 }

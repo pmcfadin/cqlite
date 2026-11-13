@@ -18,6 +18,51 @@ fn coverage_gap(detail: String) -> VerifyFinding {
     )
 }
 
+/// Bytes Cassandra appends after every compressed chunk (inline CRC32):
+/// `CompressedSequentialWriter` advances `chunkOffset += compressedLength + 4`.
+const CHUNK_CHECKSUM_BYTES: u64 = 4;
+
+/// Validate the WHOLE offset table against the physical `Data.db`: the first
+/// chunk starts at 0, offsets strictly increase, every record (to the next
+/// offset, or to the end of the file for the last) is at least the checksum
+/// long, and the last record ends exactly at the file boundary. No declared
+/// chunks is only valid for an empty `Data.db`.
+fn offset_table_problem(offsets: &[u64], file_len: u64) -> Option<String> {
+    let Some(&first) = offsets.first() else {
+        return (file_len != 0)
+            .then(|| format!("no chunks are declared but Data.db holds {file_len} bytes"));
+    };
+    if first != 0 {
+        return Some(format!("the first chunk starts at byte {first}, not 0"));
+    }
+    for (i, w) in offsets.windows(2).enumerate() {
+        if w[1] <= w[0] {
+            return Some(format!(
+                "chunk offsets are not strictly increasing: offsets[{}]={} <= offsets[{i}]={}",
+                i + 1,
+                w[1],
+                w[0]
+            ));
+        }
+        if w[1] - w[0] < CHUNK_CHECKSUM_BYTES {
+            return Some(format!(
+                "chunk {i} spans {} byte(s), fewer than its {CHUNK_CHECKSUM_BYTES}-byte checksum",
+                w[1] - w[0]
+            ));
+        }
+    }
+    let last = offsets.len() - 1;
+    let end = offsets[last];
+    if end >= file_len || file_len - end < CHUNK_CHECKSUM_BYTES {
+        return Some(format!(
+            "the last chunk (index {last}) starts at byte {end}, leaving {} byte(s) to the end of \
+             Data.db ({file_len} bytes), fewer than its {CHUNK_CHECKSUM_BYTES}-byte checksum",
+            file_len.saturating_sub(end)
+        ));
+    }
+    None
+}
+
 /// Invariant 7. `data_length` is the LOGICAL (uncompressed) size and the number
 /// of chunks that carry data is `ceil(data_length / chunk_length)`
 /// (cassandra-5.0.8 `CompressionMetadata.Writer.open`, lines 447-449).
@@ -41,9 +86,20 @@ pub(super) fn check_compression_coverage(
 ) -> AuditVerdict {
     let info = match state {
         CompressionState::Uncompressed => return skip("no CompressionInfo: uncompressed"),
-        CompressionState::Unreadable => return skip(super::BOUNDARY_SOURCE_UNREADABLE),
+        // The chunk table IS this invariant's subject: an unparseable or non-monotonic
+        // one (already a `CompressionInfoCorrupt` / `ChunkOffsetOutOfBounds` finding)
+        // fails the row rather than reading as an unmeasured Skip.
+        CompressionState::Unreadable => return AuditVerdict::Fail,
         CompressionState::Compressed(info) => info,
     };
+    let file_len = match std::fs::metadata(data_path) {
+        Ok(m) => m.len(),
+        Err(e) => return skip(format!("Data.db unreadable: {e}")),
+    };
+    if let Some(problem) = offset_table_problem(&info.chunk_offsets, file_len) {
+        findings.push(coverage_gap(problem));
+        return AuditVerdict::Fail;
+    }
     let chunk_len = u64::from(info.chunk_length);
     if chunk_len == 0 {
         return skip("CompressionInfo.db declares chunk_length 0; coverage is not computable");

@@ -461,3 +461,51 @@ fixtures:
     verdict_parity: "n/a: no Cassandra-side check for this invariant"
     verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
     fixture_dir_sha256: "d952670989b481d2bc74360e331cdc2e66744d493bccf5e08787d924ed8dfb51"
+  - name: compression_info_offsets_non_monotonic
+    manifest_key: cass.corruption.audit.compression_info_offsets_non_monotonic
+    status: audit
+    component: nb-1-big-CompressionInfo.db
+    clean_source_table: "lz4_table"
+    clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db"
+    corrupted_path: "corruption/test_comp_corrupt/compression_info_offsets_non_monotonic/nb-1-big-CompressionInfo.db"
+    mutation_type: swap_adjacent_int64
+    byte_offset: 55
+    original_bytes_hex: "00000000000004a1,00000000000006ee"
+    mutated_bytes_hex: "00000000000006ee,00000000000004a1"
+    original_sha256: "4af98f424e68f72b2c78d0f0d78c01117a6dca4f732a3571a3ecaa09a2c77b26"
+    corrupted_sha256: "aa59064adc01f61a84b09eeef2a69f3d7b9e2117cf1cb955eee150c5027e184a"
+    original_size_bytes: 135
+    corrupted_size_bytes: 135
+    expected_failing_component: CompressionInfo.db
+    expected_error_class: CompressionInfoCorrupt
+    audit_invariant: compression-coverage
+    mutation_detail: "chunk offsets[2] and offsets[3] swapped: an EARLIER offset is now larger than its successor"
+    rationale: "Two adjacent chunk offsets are swapped, so an EARLIER offset exceeds its successor (the table is no longer monotonic)."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "c158b6f45dd306039fd74fbe3bdf26782b52990748d1411f132147227f4f911e"
+  - name: compression_info_first_offset_nonzero
+    manifest_key: cass.corruption.audit.compression_info_first_offset_nonzero
+    status: audit
+    component: nb-1-big-CompressionInfo.db
+    clean_source_table: "lz4_table"
+    clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db"
+    corrupted_path: "corruption/test_comp_corrupt/compression_info_first_offset_nonzero/nb-1-big-CompressionInfo.db"
+    mutation_type: setbyte
+    byte_offset: 46
+    original_bytes_hex: "00"
+    mutated_bytes_hex: "01"
+    original_sha256: "4af98f424e68f72b2c78d0f0d78c01117a6dca4f732a3571a3ecaa09a2c77b26"
+    corrupted_sha256: "2ad94c42668ffe49732f487c2388e5da5af2d6da85706b905ecc3121b1675ffe"
+    original_size_bytes: 135
+    corrupted_size_bytes: 135
+    expected_failing_component: CompressionInfo.db
+    expected_error_class: CompressionCoverageGap
+    audit_invariant: compression-coverage
+    mutation_detail: "chunk offsets[0] 0 -> 1: the table is still strictly ascending and in bounds, but the first chunk no longer starts at byte 0"
+    rationale: "The first chunk offset is 1 instead of 0: still ascending and in bounds, but the table no longer starts at the beginning of Data.db."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "2a1bcd98357b23557b66a4b73bf96e2dc7383e116e0eac264d48dcd178928514"

@@ -161,6 +161,49 @@ def m_compression_info_short_coverage(files):
     }
 
 
+def _ci_layout(b):
+    """(offsets_at, count, chunk_length) of a CompressionInfo.db."""
+    i = 0
+    n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
+    o = struct.unpack(">I", b[i:i + 4])[0]; i += 4
+    for _ in range(o):
+        n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
+        n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
+    cl, mx, dl, cnt = struct.unpack(">IIqI", b[i:i + 20])
+    assert len(b) == i + 20 + 8 * cnt and cnt >= 6, "premise: exact table with >= 6 chunks"
+    return i + 20, cnt, cl
+
+
+def m_compression_info_offsets_non_monotonic(files):
+    b = bytearray(files["CompressionInfo.db"])
+    at, cnt, cl = _ci_layout(bytes(b))
+    a2, a3 = at + 8 * 2, at + 8 * 3
+    o2, o3 = bytes(b[a2:a2 + 8]), bytes(b[a3:a3 + 8])
+    assert o2 < o3
+    b[a2:a2 + 8], b[a3:a3 + 8] = o3, o2
+    return "CompressionInfo.db", bytes(b), {
+        "mutation_type": "swap_adjacent_int64",
+        "byte_offset": a2,
+        "original_bytes_hex": o2.hex() + "," + o3.hex(),
+        "mutated_bytes_hex": o3.hex() + "," + o2.hex(),
+        "detail": "chunk offsets[2] and offsets[3] swapped: an EARLIER offset is now larger than its successor",
+    }
+
+
+def m_compression_info_first_offset_nonzero(files):
+    b = bytearray(files["CompressionInfo.db"])
+    at, cnt, cl = _ci_layout(bytes(b))
+    assert struct.unpack(">q", b[at:at + 8])[0] == 0
+    b[at + 7] = 1
+    return "CompressionInfo.db", bytes(b), {
+        "mutation_type": "setbyte",
+        "byte_offset": at + 7,
+        "original_bytes_hex": "00",
+        "mutated_bytes_hex": "01",
+        "detail": "chunk offsets[0] 0 -> 1: the table is still strictly ascending and in bounds, but the first chunk no longer starts at byte 0",
+    }
+
+
 def m_statistics_partition_count_mismatch(files):
     b = bytearray(files["Statistics.db"])
     n = struct.unpack(">i", b[:4])[0]
@@ -208,6 +251,12 @@ FIXTURES = [
     ("statistics_partition_count_mismatch", "cass.corruption.audit.statistics_partition_count_mismatch", "test_comp", "lz4_table", "nb-1-big",
      ["Statistics.db"], m_statistics_partition_count_mismatch, "StatisticsScanMismatch", "statistics-vs-scan",
      "One estimatedPartitionSize bucket count is raised by 1 (component CRC32 recomputed): the file stays valid but declares one more partition than a scan finds."),
+    ("compression_info_offsets_non_monotonic", "cass.corruption.audit.compression_info_offsets_non_monotonic", "test_comp", "lz4_table", "nb-1-big",
+     ["CompressionInfo.db"], m_compression_info_offsets_non_monotonic, "CompressionInfoCorrupt", "compression-coverage",
+     "Two adjacent chunk offsets are swapped, so an EARLIER offset exceeds its successor (the table is no longer monotonic)."),
+    ("compression_info_first_offset_nonzero", "cass.corruption.audit.compression_info_first_offset_nonzero", "test_comp", "lz4_table", "nb-1-big",
+     ["CompressionInfo.db"], m_compression_info_first_offset_nonzero, "CompressionCoverageGap", "compression-coverage",
+     "The first chunk offset is 1 instead of 0: still ascending and in bounds, but the table no longer starts at the beginning of Data.db."),
 ]
 
 
