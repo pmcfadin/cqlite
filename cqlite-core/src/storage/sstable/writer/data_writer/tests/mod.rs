@@ -18,6 +18,7 @@ mod incremental_partition;
 /// per-column `is_complex` classification are computed once per writer, never
 /// per row (issue #1674, R3).
 mod issue_1674_column_cache;
+mod reconcile_implicit_ldt_4530;
 mod scenarios_1;
 mod scenarios_2;
 mod scenarios_3;

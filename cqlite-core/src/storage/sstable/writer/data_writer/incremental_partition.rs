@@ -239,6 +239,7 @@ impl<'w, 'r> IncrementalPartitionWriter<'w, 'r> {
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),
+            now_seconds: 0, // no expiring cells on a marker/comparison row
         });
         while let Some(marker) = self.sorted_markers.get(self.marker_cursor).copied() {
             if marker_merge::partition_item_cmp(&marker.as_partition_item(), &row_item, schema)
