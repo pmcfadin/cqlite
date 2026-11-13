@@ -198,7 +198,14 @@ impl super::SSTableManager {
         table_id: &crate::types::TableId,
     ) -> crate::Result<(Vec<std::sync::Arc<super::reader::SSTableReader>>, bool)> {
         self.refusals.ensure_readable(table_id.name())?;
-        Ok(self.resolve_reader_snapshot(table_id).await)
+        #[cfg(test)]
+        race_hook::pause_if_probe(table_id.name()).await;
+        let snapshot = self.resolve_reader_snapshot(table_id).await;
+        // The consistency point: a refusal recorded (by a concurrent refresh) while
+        // the snapshot was being taken is visible HERE, so a result is never
+        // returned after the refusal it should have reported.
+        self.refusals.ensure_readable(table_id.name())?;
+        Ok(snapshot)
     }
 
     /// [`checked_snapshot`](Self::checked_snapshot) for the streaming scans.
@@ -208,7 +215,11 @@ impl super::SSTableManager {
         table_id: &crate::types::TableId,
     ) -> crate::Result<Vec<std::sync::Arc<super::reader::SSTableReader>>> {
         self.refusals.ensure_readable(table_id.name())?;
-        Ok(self.resolve_table_readers(table_id).await)
+        #[cfg(test)]
+        race_hook::pause_if_probe(table_id.name()).await;
+        let readers = self.resolve_table_readers(table_id).await;
+        self.refusals.ensure_readable(table_id.name())?; // consistency point, as above
+        Ok(readers)
     }
 
     /// Record that an EXISTING table directory could not be listed, and hand the
@@ -289,9 +300,81 @@ impl super::SSTableManager {
     }
 }
 
+/// Test-only deterministic pause between the first ledger check and the reader
+/// snapshot (no sleeps): active only for the reserved probe table name.
+#[cfg(test)]
+pub(crate) mod race_hook {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    pub(crate) const PROBE: &str = "__race_probe__";
+    type Gate = (Arc<Notify>, Arc<Notify>); // (reached, release)
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    pub(crate) fn arm() -> Gate {
+        let gate = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        if let Ok(mut g) = GATE.lock() {
+            *g = Some(gate.clone());
+        }
+        gate
+    }
+
+    pub(crate) async fn pause_if_probe(name: &str) {
+        if name != PROBE {
+            return;
+        }
+        let gate = GATE.lock().ok().and_then(|g| g.clone());
+        if let Some((reached, release)) = gate {
+            reached.notify_one();
+            release.notified().await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal recorded between the ledger check and the snapshot (a concurrent
+    /// refresh) must turn the read into an `Err`, never an empty/partial `Ok`.
+    #[tokio::test]
+    async fn refusal_recorded_during_snapshot_fails_the_read() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let config = crate::Config::default();
+        let platform = std::sync::Arc::new(crate::Platform::new(&config).await.expect("platform"));
+        let manager = std::sync::Arc::new(
+            super::super::SSTableManager::new(
+                tmp.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let (reached, release) = race_hook::arm();
+        let reader = {
+            let m = manager.clone();
+            tokio::spawn(async move {
+                m.checked_snapshot(&crate::types::TableId::from(race_hook::PROBE))
+                    .await
+                    .map(|_| ())
+            })
+        };
+        reached.notified().await; // the read has passed its first ledger check
+        manager.refusals.record(
+            race_hook::PROBE.to_string(),
+            Path::new("/d/ks/probe-1/nb-1-big-Data.db"),
+            &Error::Corruption("refused by a concurrent refresh".into()),
+        );
+        release.notify_one();
+        let result = reader.await.expect("join");
+        assert!(
+            result.is_err(),
+            "the read must observe the refusal recorded mid-read: {result:?}"
+        );
+    }
 
     #[test]
     fn coexisting_refusal_classes_report_deterministically() {
