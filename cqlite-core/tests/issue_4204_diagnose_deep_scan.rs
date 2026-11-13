@@ -9,6 +9,7 @@
 //!    (cassandra-5.0.8): partition-level deletion +1, each range-tombstone marker row +1, each
 //!    cell tombstone +1 (a cell with `deletion_info` that is not a complex-column header); row
 //!    deletions are rows with no tombstone count.
+//!
 //! The bucket edges are the module's documented constants; the histograms/rankings are rebuilt
 //! here from those per-partition values.
 
@@ -167,7 +168,7 @@ fn assert_ranking(
         .zip(keys)
         .filter(|(m, _)| !skip_zero || *m > 0)
         .collect();
-    all.sort_by(|a, b| b.0.cmp(&a.0));
+    all.sort_by_key(|x| std::cmp::Reverse(x.0));
     let want_metrics: Vec<u64> = all.iter().take(n).map(|x| x.0).collect();
     let got_metrics: Vec<u64> = got.iter().map(|p| p.metric).collect();
     assert_eq!(got_metrics, want_metrics, "{case}: {what} metrics");
