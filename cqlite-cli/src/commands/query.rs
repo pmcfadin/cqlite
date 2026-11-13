@@ -113,7 +113,7 @@ pub async fn execute_query(
             // actual writer surface rather than silently producing bytes nobody asked
             // for a second time.
             return Err(anyhow::anyhow!(
-                "Vortex format is not supported for `cqlite query --out`. Use `cqlite export --format vortex --out <file>` instead."
+                "Vortex format is not supported for `cqlite query --out`. Use `cqlite export <file> --format vortex --table <keyspace.table>` instead."
             ));
         }
     };

@@ -239,6 +239,25 @@ mod cli_parsing_tests {
         Ok(())
     }
 
+    /// #4537: the invocation the `query --out vortex` rejection points users at must actually
+    /// parse: destination is the positional `<file>`, not an `--out` flag.
+    #[test]
+    fn test_export_vortex_invocation_in_the_rejection_message_parses() {
+        let parsed = Cli::try_parse_from([
+            "cqlite",
+            "export",
+            "out.vortex",
+            "--format",
+            "vortex",
+            "--table",
+            "ks.t",
+        ]);
+        assert!(
+            parsed.is_ok(),
+            "`export <file> --format vortex --table ks.t` must parse"
+        );
+    }
+
     #[test]
     fn test_query_with_flags() -> Result<()> {
         let args = vec!["cqlite", "query", "--explain", "--timing", "SELECT 1"];
