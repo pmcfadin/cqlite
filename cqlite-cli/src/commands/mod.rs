@@ -37,6 +37,9 @@ pub mod read_sstable;
 // under `--all-features`, or `cqlite-cli/tombstones` (which forwards
 // `cqlite-core/tombstones`, see `Cargo.toml`) would compile against a core
 // item that no longer exists.
+// Atomic `--manifest` publication shared by salvage and rebuild (issue #4549).
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub(crate) mod atomic_write;
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod salvage;
 // `cqlite rebuild` (issue #4197): mirrors `salvage`'s own module-gating

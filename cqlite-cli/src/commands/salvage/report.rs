@@ -383,9 +383,13 @@ pub(super) fn write_manifest_file(
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
     }
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-    write_manifest_json(std::io::BufWriter::new(file), reports, is_table_dir)
+    // Issue #4549: serialise in memory, then publish ATOMICALLY (temp + fsync + rename + dir fsync)
+    // so a crash or short write can never leave a torn manifest. Every I/O step is checked, which
+    // also closes the `BufWriter`-dropped-unflushed error swallow (#4528).
+    let mut bytes = Vec::new();
+    write_manifest_json(&mut bytes, reports, is_table_dir)
+        .with_context(|| format!("failed to serialise the manifest for {}", path.display()))?;
+    super::super::atomic_write::write_atomic(path, &bytes)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }

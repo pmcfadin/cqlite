@@ -170,7 +170,8 @@ fn render_and_write_reports(
         if let Some(parent) = manifest_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(manifest_path, json)?;
+        // Atomic (temp + fsync + rename + dir fsync): never a torn manifest (issue #4549).
+        super::atomic_write::write_atomic(manifest_path, json.as_bytes())?;
     }
     Ok(())
 }

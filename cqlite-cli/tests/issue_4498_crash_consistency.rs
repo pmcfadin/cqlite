@@ -463,8 +463,8 @@ fn verify_clean(dir: &Path, f: &Fixture) -> bool {
 }
 
 /// Whether an uninterrupted run is expected to contain a `rename` boundary (the atomic-publication
-/// step). Flips to `true` with the TOC fix (#4526).
-const EXPECT_RENAME: bool = false;
+/// step). `true` since the TOC fix (#4526) publishes TOC.txt by rename.
+const EXPECT_RENAME: bool = true;
 
 /// The enumerated boundaries must contain every syscall CATEGORY an SSTable write verb performs,
 /// per output file, so a shim that stopped seeing (say) `copy_file_range` or vectored writes
@@ -488,15 +488,23 @@ fn assert_expected_categories(
         .collect();
     files.push(("manifest.json".to_string(), true));
     for (f, non_empty) in &files {
+        // A file published by rename (TOC.txt since #4526) is created and written under its
+        // dot-prefixed temp sibling; the final name is then the target of a `rename` boundary.
+        let tmp = match f.rsplit_once('/') {
+            Some((dir, name)) => format!("{dir}/.{name}.tmp"),
+            None => format!(".{f}.tmp"),
+        };
+        let renamed = has(&["rename"], f);
+        let site = if renamed { &tmp } else { f };
         assert!(
-            has(&["create"], f),
-            "{verb:?}: no `create` boundary enumerated for {f} — shim blind to file creation?"
+            has(&["create"], site),
+            "{verb:?}: no `create` boundary enumerated for {site} — shim blind to file creation?"
         );
         // A legitimately EMPTY output (e.g. an empty BTI Rows.db) has a create and no write.
         assert!(
-            !non_empty || has(&["write", "pwrite", "copy"], f),
-            "{verb:?}: no write-class boundary (write/pwrite/copy) enumerated for {f} — shim blind \
-             to the call this writer uses?"
+            !non_empty || has(&["write", "pwrite", "copy"], site),
+            "{verb:?}: no write-class boundary (write/pwrite/copy) enumerated for {site} — shim \
+             blind to the call this writer uses?"
         );
     }
     let any = |kind: &str| bounds.iter().any(|(k, _)| k == kind);
@@ -515,6 +523,9 @@ enum Scope {
     Enforced,
     /// ONLY the cells [`DEFECTS`] lists for this issue (driven by the `#[ignore]`d reproducers).
     KnownDefects(u32),
+    /// Only the `write` boundaries on paths ending in this suffix, in this mode (a named
+    /// regression for a fixed defect; the cells run are NOT in [`DEFECTS`]).
+    Only(&'static str, Mode),
     /// Crash mode only, against Cassandra's discoverability rule (see module doc; #4529).
     CassandraStrict,
 }
@@ -570,29 +581,9 @@ fn defects() -> Vec<Defect> {
             modes: &[Mode::Enospc, Mode::Short],
             issue: 4528,
         });
-        // TORN_MANIFEST (#4549): `--manifest` is written in place
-        // (`File::create`/`fs::write`, not temp + rename), so a crash mid-write leaves a 0-byte or
-        // truncated manifest, and rebuild also leaves one after an ENOSPC/short write.
-        v.push(Defect {
-            verb: Verb::Salvage,
-            fixture,
-            path_suffix: "manifest.json",
-            modes: &[Mode::Crash],
-            issue: TORN_MANIFEST,
-        });
-        v.push(Defect {
-            verb: Verb::Rebuild,
-            fixture,
-            path_suffix: "manifest.json",
-            modes: &[Mode::Crash, Mode::Enospc, Mode::Short],
-            issue: TORN_MANIFEST,
-        });
     }
     v
 }
-
-/// Issue number of the torn-`--manifest` defect.
-const TORN_MANIFEST: u32 = 4549;
 
 fn known_defect(verb: Verb, f: &Fixture, kind: &str, path: &str, mode: Mode) -> Option<u32> {
     if !matches!(kind, "write" | "pwrite") {
@@ -667,6 +658,9 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
                 Scope::KnownDefects(issue) if defect != Some(issue) => continue,
+                Scope::Only(suffix, m) if !(is_write && path.ends_with(suffix) && mode == m) => {
+                    continue
+                }
                 Scope::CassandraStrict if mode != Mode::Crash => continue,
                 _ => {}
             }
@@ -812,6 +806,14 @@ fn check_verbs(verbs: &[Verb], scope: Scope, fixtures: Vec<Fixture>) {
         for f in &fixtures {
             let (n, runs, failures) = sweep(*verb, f, scope);
             report(*verb, f, n, runs, &failures);
+            if matches!(scope, Scope::Only(..)) {
+                // A named regression that matches no boundary proves nothing: fail closed.
+                assert!(
+                    runs >= 1,
+                    "{verb:?}/{}: the Only scope matched no boundary",
+                    f.table
+                );
+            }
             all.extend(failures);
         }
     }
@@ -858,14 +860,19 @@ fn issue_4528_salvage_manifest_write_error_swallowed() {
     check(Verb::Salvage, Scope::KnownDefects(4528), fixtures());
 }
 
+/// Regression for #4549 (fixed): `--manifest` is published by temp + fsync + rename, so a crash,
+/// ENOSPC or short write while writing it can no longer leave a torn manifest (the post-fault
+/// manifest check in `sweep` requires absent-or-complete). The write boundary is now on the
+/// dot-prefixed `.manifest.json.tmp` sibling.
 #[test]
-#[ignore = "#4549 --manifest is written in place: a crash (or rebuild's ENOSPC/short write) leaves a torn manifest.json"]
-fn issue_4549_torn_manifest_after_a_fault() {
-    check_verbs(
-        &[Verb::Rebuild, Verb::Salvage],
-        Scope::KnownDefects(TORN_MANIFEST),
-        fixtures(),
-    );
+fn issue_4549_manifest_is_published_atomically() {
+    for mode in [Mode::Crash, Mode::Enospc, Mode::Short] {
+        check_verbs(
+            &[Verb::Rebuild, Verb::Salvage],
+            Scope::Only("manifest.json.tmp", mode),
+            fixtures(),
+        );
+    }
 }
 
 #[test]
