@@ -8,14 +8,15 @@ goldens were not regenerated.
 Generate with `bash test-data/scripts/generate-explain-trace.sh`. The schema is
 `test-data/schemas/explain-trace.cql`. Each table directory retains the exact
 mutations, Cassandra version and image digest, `sstabledump` JSONL,
-`sstablemetadata` output, and SHA-256 inventory. The generator is Cassandra 5.0.2;
-format and reconciliation authority is the `cassandra-5.0.8` tag, commit
-`bc1db9ce043cc13a1b2fe9d3f4e2c7ad7e552021`.
+`sstablemetadata` output, and SHA-256 inventory. The generator is Cassandra 5.0.8
+(`cassandra@sha256:259578bb…`, regenerated 2026-11-13 on the Cassandra VM; the earlier 5.0.2 set had an identical
+structure and verdicts, only the wall-clock deletion/expiry times differ); format and reconciliation authority is
+the `cassandra-5.0.8` tag.
 
 For the committed fixture, generation A is `nb-1-big` and B is `nb-2-big`.
 Ordinary cells use writetime 1000 in A and 2000 in B. B's tombstones have local
-deletion time **1789963135**; `gc_grace_seconds` is **864000**. Evaluate ordinary
-cases at `now=1789963136`. Expected decisions below come from the mutations and
+deletion time **1794535357**; `gc_grace_seconds` is **864000**. Evaluate ordinary
+cases at `now=1794535358`. Expected decisions below come from the mutations and
 Cassandra rules, not from CQLite output.
 
 | Partition | Cell/version | Expected decision |
@@ -28,8 +29,8 @@ Cassandra rules, not from CQLite output.
 | 5 | A `v='partition-shadowed'` | Shadowed by B's partition deletion at 2000 |
 | 6 | A `m['old']=1` | Shadowed by B's complex deletion at 1999 |
 | 6 | B `m['new']=2` | Winner at 2000 |
-| 7 | A `v='expires'` | Expired at `now=1789966735`, after stored expiry 1789966734 |
-| 8 | B cell tombstone | Retained at `now=1790827135`; purgeable at 1790827136 |
+| 7 | A `v='expires'` | Expired at `now=1794538957`, after stored expiry 1794538956 |
+| 8 | B cell tombstone | Retained at `now=1795399357`; purgeable at 1795399358 |
 
 Cassandra source anchors: `db/rows/Cells.java::reconcile` and
 `resolveRegular` for timestamp and equal-timestamp tombstone precedence;

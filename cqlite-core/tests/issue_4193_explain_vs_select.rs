@@ -294,7 +294,7 @@ async fn assert_explain_matches_select(id: i32, now: i64) {
 #[tokio::test]
 #[serial]
 async fn winners_match_select_shadowed_by_timestamp() {
-    assert_explain_matches_select(1, 1_789_963_136).await;
+    assert_explain_matches_select(1, 1_794_535_358).await;
 }
 
 /// Partition 6: a full-map complex-column overwrite, exercising the ONE case
@@ -303,7 +303,7 @@ async fn winners_match_select_shadowed_by_timestamp() {
 #[tokio::test]
 #[serial]
 async fn winners_match_select_collection_overwrite() {
-    assert_explain_matches_select(6, 1_789_963_136).await;
+    assert_explain_matches_select(6, 1_794_535_358).await;
 }
 
 /// Partition 7: TTL expiry. Evaluated one second past the on-disk expiry
@@ -314,6 +314,6 @@ async fn winners_match_select_collection_overwrite() {
 #[tokio::test]
 #[serial]
 async fn winners_match_select_expired_cell_is_absent_on_both() {
-    const EXPIRES_AT: i64 = 1_789_966_734;
+    const EXPIRES_AT: i64 = 1_794_538_956;
     assert_explain_matches_select(7, EXPIRES_AT + 1).await;
 }

@@ -519,7 +519,7 @@ cargo run --package cqlite-cli --features write-support -- \
   --schema test-data/schemas/explain-trace.cql \
   --dataset test_explain \
   explain test_explain.trace_decisions 1 \
-  --clustering 1 --now 1789963136 --out json
+  --clustering 1 --now 1794535358 --out json
 ```
 
 `explain` resolves all generations for the requested `keyspace.table` and

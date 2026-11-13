@@ -2,7 +2,7 @@
 //! verdict has a Cassandra-written fixture where it is the only correct
 //! answer (spec `reconcile-decision-trail` R2.2, R2.3).
 //!
-//! Primary fixture: `test_explain/trace_decisions-c2f35e90b57011f183ec5947a78bc662`
+//! Primary fixture: `test_explain/trace_decisions-4ad336f0df0611f181786327fffcebdf`
 //! (design.md §D6), a purpose-built 2-generation table covering 7 of the 8
 //! verdicts in ONE table; `test_tomb/dropped_regular_col` supplies the 8th
 //! (`dropped-column`). Every expected literal below is read from
@@ -46,16 +46,16 @@ mod datasets_root;
 
 /// Every fixture's `local_deletion_time` for a tombstone written by generation
 /// B (`nb-2-big`), re-derived from `nb-2-big-Data.db.jsonl`
-/// (`"local_delete_time": "2026-09-21T03:58:55Z"`) — the README states this
-/// value once ("B's tombstones have local deletion time 1789963135") and this
+/// (`"local_delete_time": "2026-11-13T02:02:37Z"`) — the README states this
+/// value once ("B's tombstones have local deletion time 1794535357") and this
 /// re-derivation confirms it independently for every case that cites it.
-const GEN_B_LDT: i32 = 1_789_963_135;
+const GEN_B_LDT: i32 = 1_794_535_357;
 /// `gc_grace_seconds` declared on `test_explain.trace_decisions`
 /// (`test-data/schemas/explain-trace.cql`).
 const GC_GRACE_SECONDS: i64 = 864_000;
 /// The pinned `now` for every "ordinary" (non-TTL, non-boundary) case
-/// (README: "Evaluate ordinary cases at now=1789963136").
-const NOW_ORDINARY: i64 = 1_789_963_136;
+/// (README: "Evaluate ordinary cases at now=1794535358").
+const NOW_ORDINARY: i64 = 1_794_535_358;
 
 /// Selects the ONE `CREATE TABLE` statement for `table` out of a
 /// multi-statement `.cql` fixture file, setting `keyspace` explicitly since
@@ -565,15 +565,15 @@ fn verdict_shadowed_by_tombstone_collection() {
 // ===========================================================================
 // Partition 7 (id=7): expired.
 // A `v='expires'` (ts=1000) carries TTL=3600, on-disk `expires_at` (LDT) =
-// 1789966734 (nb-1-big-Data.db.jsonl). Evaluated one second after expiry
-// (`now=1789966735`): `AbstractCell.isLive` is `nowInSec < localDeletionTime`,
+// 1794538956 (nb-1-big-Data.db.jsonl). Evaluated one second after expiry
+// (`now=1794538957`): `AbstractCell.isLive` is `nowInSec < localDeletionTime`,
 // so `now == expires_at` is ALREADY expired and `now == expires_at + 1` is
 // unambiguously so.
 // ===========================================================================
 
 #[test]
 fn verdict_expired() {
-    const EXPIRES_AT: i64 = 1_789_966_734;
+    const EXPIRES_AT: i64 = 1_794_538_956;
     let (cells, _tombstones) = explain_partition(7, EXPIRES_AT + 1);
     let cell = only_cell(&cells, "v", 1, 1);
     assert_eq!(cell.verdict, Verdict::Expired);

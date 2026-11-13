@@ -15,7 +15,8 @@ mkdir -p "$OUT_DIR/sstables"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 STAGE="$(mktemp -d "$OUT_DIR/.explain-export.XXXXXX")"
 CONTAINER_NAME="${CONTAINER_NAME:-cqlite-explain-$$}"
-IMAGE="cassandra:5.0.2"
+. "$SCRIPT_DIR/lib/cassandra-image.sh"
+IMAGE="$CQLITE_CASSANDRA_IMAGE"   # cassandra:5.0.8 (the canonical oracle, #4482)
 OWN_CONTAINER=0
 cleanup() {
   if [[ "$OWN_CONTAINER" == 1 ]]; then docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; fi

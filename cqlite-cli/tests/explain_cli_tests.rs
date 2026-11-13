@@ -23,7 +23,7 @@ fn fixture_generation_dir() -> PathBuf {
     datasets_root()
         .join("sstables")
         .join("test_explain")
-        .join("trace_decisions-c2f35e90b57011f183ec5947a78bc662")
+        .join("trace_decisions-4ad336f0df0611f181786327fffcebdf")
 }
 
 /// Recursively copy `src` into `dst` (created if absent). Used to stage a
@@ -89,7 +89,7 @@ fn explain_command_with_globals(globals: &[&str]) -> Command {
             "test_explain.trace_decisions",
             "1",
             "--now",
-            "1789963136",
+            "1794535358",
         ]);
     command
 }
@@ -109,7 +109,7 @@ fn explain_json_reports_all_generations_and_stable_keys() {
     let lines = String::from_utf8(output.stdout).expect("stdout is UTF-8");
     let mut lines = lines.lines();
     let metadata = lines.next().expect("metadata line");
-    assert!(metadata.contains("now=1789963136"));
+    assert!(metadata.contains("now=1794535358"));
     assert!(metadata.contains("generations=2"));
     let report: Value =
         serde_json::from_str(lines.next().expect("JSON report")).expect("second line is JSON");
@@ -117,7 +117,7 @@ fn explain_json_reports_all_generations_and_stable_keys() {
     for key in ["now", "generations", "cells", "tombstones"] {
         assert!(object.contains_key(key), "missing report key {key}");
     }
-    assert_eq!(object["now"], 1_789_963_136_i64);
+    assert_eq!(object["now"], 1_794_535_358_i64);
     assert_eq!(object["generations"].as_array().unwrap().len(), 2);
     assert!(object["cells"].as_array().unwrap().iter().all(|cell| {
         [
@@ -157,7 +157,7 @@ fn explain_csv_keeps_tombstones_in_the_render_only_filter() {
             "test_explain.trace_decisions",
             "3",
             "--now",
-            "1789963136",
+            "1794535358",
             "--clustering",
             "3",
             "--out",
@@ -290,7 +290,7 @@ fn explain_first_line_matches_the_documented_format_exactly() {
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
     let first_line = stdout.lines().next().expect("first line");
     assert!(
-        first_line.starts_with("now=1789963136 ("),
+        first_line.starts_with("now=1794535358 ("),
         "first line: {first_line}"
     );
     assert!(
@@ -345,7 +345,7 @@ fn explain_unreadable_generation_is_exit_two_naming_the_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let staged = temp
         .path()
-        .join("trace_decisions-c2f35e90b57011f183ec5947a78bc662");
+        .join("trace_decisions-4ad336f0df0611f181786327fffcebdf");
     copy_dir_recursive(&fixture_generation_dir(), &staged);
     let truncated = staged.join("nb-1-big-Statistics.db");
     assert!(truncated.exists(), "expected {truncated:?} to exist");
@@ -362,7 +362,7 @@ fn explain_unreadable_generation_is_exit_two_naming_the_path() {
             "test_explain.trace_decisions",
             "1",
             "--now",
-            "1789963136",
+            "1794535358",
         ])
         .output()
         .expect("explain process starts");
@@ -400,7 +400,7 @@ fn explain_key_absent_from_every_generation_is_exit_zero() {
             "test_explain.trace_decisions",
             "999999",
             "--now",
-            "1789963136",
+            "1794535358",
         ])
         .output()
         .expect("explain process starts");
@@ -425,7 +425,7 @@ fn explain_never_mutates_the_input_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
     let staged = temp
         .path()
-        .join("trace_decisions-c2f35e90b57011f183ec5947a78bc662");
+        .join("trace_decisions-4ad336f0df0611f181786327fffcebdf");
     copy_dir_recursive(&fixture_generation_dir(), &staged);
     let before = snapshot_dir(&staged);
     assert!(!before.is_empty(), "staged fixture copy must be non-empty");
@@ -442,7 +442,7 @@ fn explain_never_mutates_the_input_directory() {
                 "test_explain.trace_decisions",
                 "1",
                 "--now",
-                "1789963136",
+                "1794535358",
                 "--out",
                 out_format,
             ])
