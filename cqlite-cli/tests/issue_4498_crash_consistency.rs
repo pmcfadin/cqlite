@@ -722,8 +722,13 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             // The --manifest after a fault: absent, or a COMPLETE valid JSON document equal (after
             // the normalisation documented on `manifest_normalised`) to the uninterrupted run's.
             // Never truncated or malformed (roborev r3).
-            if let Some(why) = manifest_violation(&a, &reference_manifest) {
-                failures.push(format!("{tag}: {why}"));
+            // A cell listed as the known torn-manifest defect is checked only by that defect's own
+            // reproducer, so a regression test for ANOTHER property of the same cell stays green.
+            let torn_known = defect == Some(TORN_MANIFEST);
+            if !torn_known || scope == Scope::KnownDefects(TORN_MANIFEST) {
+                if let Some(why) = manifest_violation(&a, &reference_manifest) {
+                    failures.push(format!("{tag}: {why}"));
+                }
             }
             // AC2 (CQLite publication contract)
             let after = output_set(&a);
