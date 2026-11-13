@@ -11,6 +11,8 @@
 //! helper, and the per-bucket intersection counts are computed HERE (`D4`: `K = 16` equal-width
 //! buckets over the union of the spans). Data.db is never needed — it is replaced by an empty file.
 
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
+
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
 
