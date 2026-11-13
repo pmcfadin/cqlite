@@ -38,7 +38,14 @@ use crate::parser::statistics::TimestampStatistics;
 /// data) surfaces from the parser as `i64::MAX`, which is never `< gcBefore`, so
 /// such an SSTable is correctly NOT classified fully expired — the sentinel falls
 /// out of the comparison naturally with no special-casing.
-pub(super) fn is_fully_expired(stats: &TimestampStatistics, gc_before_secs: i64) -> bool {
+///
+/// `pub(crate)` (widened from `pub(super)`, issue #4204 task 0.2): `cqlite
+/// diagnose`'s cheap tier (`storage::sstable::diagnose`) reuses this EXACT
+/// predicate, READ-ONLY, for its `fully_expired_at_now` prediction — it asks
+/// "would this generation be dropped whole at gcBefore", it never compacts. No
+/// other behavior changes; this is the minimal visibility widening the task
+/// asked to confirm rather than a reimplementation.
+pub(crate) fn is_fully_expired(stats: &TimestampStatistics, gc_before_secs: i64) -> bool {
     stats.max_deletion_time < gc_before_secs
 }
 
