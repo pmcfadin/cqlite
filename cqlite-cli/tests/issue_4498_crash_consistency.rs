@@ -982,26 +982,64 @@ int main(void) {{
     assert_eq!(std::fs::read(&file).unwrap(), b"abcd");
 }
 
-/// A mutating raw syscall the shim has no wrapper for must ABORT the run loudly (exit 97 plus a
-/// message), never pass unseen.
+/// A raw syscall that is neither handled nor on the non-mutating allowlist must ABORT the run
+/// loudly (exit 97, number named), never pass unseen. The allowlist is an ALLOWlist: mutating
+/// calls nobody thought of (mknodat, fchmodat, fchownat, setxattr, ...) are covered by default.
 #[test]
-fn unhandled_mutating_raw_syscall_aborts_the_run() {
-    let dir = TempDir::new().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
-    let src = format!(
-        r#"#define _GNU_SOURCE
+fn unlisted_raw_syscalls_abort_the_run_including_mutating_ones_nobody_listed() {
+    for (name, call) in [
+        ("truncate", r#"syscall(SYS_truncate, "ROOT/x", 0L)"#),
+        (
+            "mknodat",
+            r#"syscall(SYS_mknodat, AT_FDCWD, "ROOT/n", 0100644, 0L)"#,
+        ),
+        (
+            "fchmodat",
+            r#"syscall(SYS_fchmodat, AT_FDCWD, "ROOT/x", 0600, 0L)"#,
+        ),
+        (
+            "fchownat",
+            r#"syscall(SYS_fchownat, AT_FDCWD, "ROOT/x", 0L, 0L, 0L)"#,
+        ),
+        (
+            "setxattr",
+            r#"syscall(SYS_setxattr, "ROOT/x", "user.k", "v", 1L, 0L)"#,
+        ),
+    ] {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().canonicalize().unwrap();
+        let src = format!(
+            r#"#define _GNU_SOURCE
+#include <fcntl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-int main(void) {{ syscall(SYS_truncate, "{}/x", 0L); return 0; }}"#,
-        root.display()
-    );
-    let (status, _, stderr) = run_c_under_shim("truncate", &src, &root);
-    assert_eq!(
-        status.code(),
-        Some(97),
-        "expected the blind-spot abort, got {status:?}"
-    );
-    assert!(stderr.contains("UNHANDLED mutating syscall"), "{stderr:?}");
+int main(void) {{ {} ; return 0; }}"#,
+            call.replace("ROOT", &root.display().to_string())
+        );
+        let (status, _, stderr) = run_c_under_shim(name, &src, &root);
+        assert_eq!(
+            status.code(),
+            Some(97),
+            "{name}: expected the blind-spot abort, got {status:?}"
+        );
+        assert!(
+            stderr.contains("UNHANDLED raw syscall"),
+            "{name}: {stderr:?}"
+        );
+    }
+}
+
+/// The allowlist forwards a futex untouched (the one raw number the real verbs issue).
+#[test]
+fn allowlisted_raw_syscall_is_forwarded() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let src = r#"#define _GNU_SOURCE
+#include <sys/syscall.h>
+#include <unistd.h>
+int main(void) { return syscall(SYS_gettid) > 0 ? 0 : 5; }"#;
+    let (status, _, _) = run_c_under_shim("gettid", src, &root);
+    assert!(status.success(), "{status:?}");
 }
 
 // ---- AC7: the shipped CLI contains no fault hook ----------------------------------------
