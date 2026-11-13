@@ -1,0 +1,10 @@
+
+ pk | ck | a       | b         | c      | writetime(a) | writetime(b) | writetime(c)
+----+----+---------+-----------+--------+--------------+--------------+--------------
+  1 |  1 |  a-gen1 |    b-gen2 | c-gen1 |          300 |          400 |          500
+  1 |  2 |    null |    b-gen2 |   null |         null |          300 |         null
+  1 |  3 |  a-gen1 |      null |   null |          100 |         null |         null
+  2 |  1 | p2-gen1 |      null |   null |          100 |         null |         null
+  3 |  1 |    null | p2-b-gen2 |   null |         null |          100 |         null
+
+(5 rows)
