@@ -58,7 +58,7 @@ pub(super) fn check_compression_coverage(
         )));
         return AuditVerdict::Fail;
     }
-    if expected == 0 {
+    if expected == 0 && declared == 0 {
         return AuditVerdict::Pass;
     }
     let decode = |index: usize| -> Result<usize, String> {
@@ -69,11 +69,13 @@ pub(super) fn check_compression_coverage(
             .map(|v| v.len())
             .map_err(|e| e.to_string())
     };
-    let last_data = (expected - 1) as usize;
-    let want = info
-        .data_length
-        .saturating_sub(chunk_len.saturating_mul(expected - 1));
-    let mut checks = vec![(last_data, want, "last data chunk")];
+    let mut checks = Vec::new();
+    if expected > 0 {
+        let want = info
+            .data_length
+            .saturating_sub(chunk_len.saturating_mul(expected - 1));
+        checks.push(((expected - 1) as usize, want, "last data chunk"));
+    }
     if declared == expected + 1 {
         checks.push((expected as usize, 0, "terminal chunk"));
     }
@@ -120,7 +122,10 @@ pub(super) async fn check_statistics_vs_scan(
     }
     let observed = match observed {
         Some(Ok(n)) => *n as u64,
-        Some(Err(why)) => return skip(format!("scan failed: {why}")),
+        // The scan failed: the failure itself is the finding `run_audit` pushed
+        // (classified exactly as FULL mode does). The comparison was NOT made, so
+        // the row cannot Pass and must not read as an unmeasured Skip either.
+        Some(Err(_)) => return AuditVerdict::Fail,
         None => return skip("no scan result"),
     };
     let declared = match StatisticsReader::open(stats_path, platform.clone()).await {

@@ -798,7 +798,11 @@ async fn run_audit(
                     }
                     Ok(partitions.len())
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => {
+                    // Same classification FULL mode applies to a failed scan.
+                    findings.push(classify_scan_error(components, &e));
+                    Err(e.to_string())
+                }
             },
         );
     }

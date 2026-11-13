@@ -810,3 +810,34 @@ async fn bti_bloom_false_negative_is_not_hidden_by_an_earlier_unresolved_leaf() 
         describe(&r)
     );
 }
+
+/// Roborev r2: a `--deep` scan failure is a finding (classified as FULL mode does)
+/// and the scan-dependent row FAILS naming it; it is never a silent Skip.
+/// Fixture: the committed `data_db_bit_flip` (one bit of a Cassandra-written
+/// compressed Data.db flipped; every metadata component stays structurally valid).
+#[tokio::test]
+async fn deep_scan_failure_is_a_finding_and_fails_the_scan_dependent_row() {
+    let shallow = audit_fixture("data_db_bit_flip", false).await;
+    assert_eq!(
+        verdict(&shallow, "statistics-vs-scan"),
+        AuditVerdict::Skip("requires --deep".into())
+    );
+    let deep = audit_fixture("data_db_bit_flip", true).await;
+    assert_eq!(
+        verdict(&deep, "statistics-vs-scan"),
+        AuditVerdict::Fail,
+        "{}",
+        describe(&deep)
+    );
+    let scan_findings: Vec<_> = deep
+        .findings
+        .iter()
+        .filter(|f| f.component == "Data.db" && f.class != VerifyErrorClass::DigestMismatch)
+        .collect();
+    assert!(
+        !scan_findings.is_empty(),
+        "the scan failure must be reported: {}",
+        describe(&deep)
+    );
+    assert!(!deep.is_ok());
+}
