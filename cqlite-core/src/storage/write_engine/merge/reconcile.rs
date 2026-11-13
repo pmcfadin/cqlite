@@ -687,7 +687,7 @@ impl ReconcileState {
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
         if let Some(d) = row_del {
-            super::model::shed_key_cells(&mut surviving, &ck_names, &row_liveness, d, now_secs);
+            super::model::shed_key_cells(&mut surviving, &ck_names, &row_liveness, d, now);
         }
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;
