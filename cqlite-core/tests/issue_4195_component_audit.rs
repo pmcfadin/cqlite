@@ -117,6 +117,14 @@ async fn healthy_corpus_has_no_findings_and_no_failed_rows() {
             if a.any_fail() {
                 bad.push("a row Failed".into());
             }
+            match (deep, r.rows_scanned) {
+                (true, Some(_)) => {} // some system tables decode 0 rows schema-less, as in FULL mode
+                (false, None) => {}
+                _ => bad.push(format!(
+                    "rows_scanned {:?} wrong for deep={deep}",
+                    r.rows_scanned
+                )),
+            }
             if a.vacuous() {
                 bad.push("vacuous (0 measured)".into());
             }
@@ -692,6 +700,16 @@ async fn a0_audit_is_always_eight_rows_in_fixed_order_and_none_for_other_modes()
             "statistics-vs-scan"
         ]
     );
+    // A deep audit reports the scan's row count (non-zero on a healthy user table).
+    let deep = verify_sstable_audit(&dir, true, &config, platform.clone())
+        .await
+        .expect("deep");
+    assert!(
+        deep.rows_scanned.is_some_and(|n| n > 0),
+        "{:?}",
+        deep.rows_scanned
+    );
+    assert_eq!(audit.rows_scanned, None);
     // A8.1 / A7: shallow audit of the healthy compressed BIG fixture.
     assert_eq!(
         verdict(&audit, "statistics-vs-scan"),

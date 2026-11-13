@@ -717,25 +717,26 @@ async fn verify_components_with(
 
     // ---- Audit mode (#4195): eight named cross-component invariants -------
     let audit = if mode == VerifyMode::Audit {
-        Some(
-            run_audit(
-                dir,
-                &components,
-                deep,
-                AuditRanges {
-                    toc_findings,
-                    digest_findings,
-                    structure_findings,
-                },
-                &compression_info,
-                bti_leaves.as_deref(),
-                &toc_components,
-                config,
-                platform_for_audit,
-                &mut findings,
-            )
-            .await,
+        let (summary, deep_rows) = run_audit(
+            dir,
+            &components,
+            deep,
+            AuditRanges {
+                toc_findings,
+                digest_findings,
+                structure_findings,
+            },
+            &compression_info,
+            bti_leaves.as_deref(),
+            &toc_components,
+            config,
+            platform_for_audit,
+            &mut findings,
         )
+        .await;
+        // The `--deep` scan's row count is the report's `rows_scanned` (it ran).
+        rows_scanned = rows_scanned.or(deep_rows);
+        Some(summary)
     } else {
         None
     };
@@ -773,7 +774,7 @@ async fn run_audit(
     config: &Config,
     platform: Arc<Platform>,
     findings: &mut Vec<VerifyFinding>,
-) -> AuditSummary {
+) -> (AuditSummary, Option<usize>) {
     // Parse-level checks Quick lacks: a corrupt Summary.db / Statistics.db is a
     // finding with its cause, not merely a Skip.
     if components.format == SsTableFormat::Big {
@@ -781,11 +782,13 @@ async fn run_audit(
     }
     check_statistics(dir, components, platform.clone(), findings).await;
     let mut observed = None;
+    let mut rows = None;
     let mut bti_identity_failed = false;
     if deep {
         observed = Some(
             match full_row_scan_partitions(&components.data_path, config, platform.clone()).await {
-                Ok((_, partitions)) => {
+                Ok((n_rows, partitions)) => {
+                    rows = Some(n_rows);
                     if let Some(detail) = bti_leaves
                         .and_then(|leaves| bti_partition_identity_mismatch(leaves, &partitions))
                     {
@@ -825,7 +828,7 @@ async fn run_audit(
         bti_identity_failed,
         platform,
     };
-    verify_audit::run(input, findings).await
+    (verify_audit::run(input, findings).await, rows)
 }
 
 /// Read all regular files in `dir`, returning `(all_files, data_files)` where
