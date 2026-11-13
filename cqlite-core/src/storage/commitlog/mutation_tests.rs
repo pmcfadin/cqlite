@@ -167,7 +167,7 @@ fn tinyint_cell_stays_aligned_into_following_int_cell() {
     let mut c = Cursor::new(&bytes);
     let rows = match decode_rows(&mut c, &schema, &column_names, 0) {
         Ok(rows) => rows,
-        Err(Unsupported(_)) => panic!("row with a variable-length tinyint cell must decode"),
+        Err(_) => panic!("row with a variable-length tinyint cell must decode"),
     };
     assert_eq!(rows.len(), 1);
     let cells = &rows[0].cells;
@@ -358,4 +358,24 @@ fn partition_deletion_flag_yields_the_partition_deletion_cause() {
         mutation_writetime(&m.updates[0]),
         Writetime::Unmeasured("partition-deletion timestamp not decoded")
     );
+}
+
+#[test]
+fn a_body_truncated_mid_row_is_an_error_not_an_unmeasured_update() {
+    // ALICE_BODY with its trailing END_OF_PARTITION + last cell bytes cut: the row decoder runs
+    // out of bytes. That is malformed input, so `decode_mutation` must fail (find => exit 2),
+    // not return an incomplete update with an `unmeasured` writetime.
+    let id = parse_table_id("d6de7150-8448-11f1-bf5a-bf4cbc47cb4a").unwrap();
+    let mut schemas: SchemaSet = HashMap::new();
+    schemas.insert(id, users_schema());
+    let full = hex(ALICE_BODY);
+    for cut in 1..=6 {
+        let body = &full[..full.len() - cut];
+        let err =
+            decode_mutation(body, &schemas).expect_err("a truncated row body must be an error");
+        assert!(
+            matches!(err, Error::CorruptCommitLogFrame(_)),
+            "cut {cut}: {err:?}"
+        );
+    }
 }

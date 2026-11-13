@@ -463,3 +463,51 @@ fn unlistable_table_directory_exits_two_naming_the_error() {
         "{err}"
     );
 }
+
+/// DOCUMENTED BYTE EDIT of the Cassandra-written segment: the record for the last `users` insert
+/// (`position` from the independent ground truth, key 2 @T6) has its body truncated by 6 bytes
+/// (the row's trailing cell bytes + END_OF_PARTITION) and BOTH CRCs recomputed, so the frame is
+/// perfectly valid while the mutation body ends mid-row. The bytes after it are zeroed (a clean
+/// section end). `find` must report that segment UNREADABLE (exit 2) — never exit 0 with an
+/// `unmeasured` writetime.
+#[test]
+fn truncated_row_body_is_a_segment_failure_not_an_unmeasured_success() {
+    let t = truth();
+    let seg = t.gt["segment"]["file"].as_str().expect("segment file");
+    let mut bytes = std::fs::read(t.commitlog.join(seg)).expect("segment");
+    let last = t.gt["inserts"]
+        .as_array()
+        .expect("inserts")
+        .last()
+        .expect("last insert");
+    let pos = last["position"].as_u64().expect("position") as usize;
+    let size = i32::from_be_bytes(bytes[pos..pos + 4].try_into().expect("size")) as usize;
+    let new_size = size - 6;
+    let size_bytes = (new_size as i32).to_be_bytes();
+    let body = bytes[pos + 8..pos + 8 + new_size].to_vec();
+    let size_crc = crc32fast::hash(&size_bytes);
+    let mut h = crc32fast::Hasher::new();
+    h.update(&size_bytes);
+    h.update(&body);
+    let body_crc = h.finalize();
+    let end_old = pos + 8 + size + 4;
+    bytes[pos..pos + 4].copy_from_slice(&size_bytes);
+    bytes[pos + 4..pos + 8].copy_from_slice(&size_crc.to_be_bytes());
+    bytes[pos + 8 + new_size..pos + 8 + new_size + 4].copy_from_slice(&body_crc.to_be_bytes());
+    for b in &mut bytes[pos + 8 + new_size + 4..end_old] {
+        *b = 0;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(tmp.path().join(seg), &bytes).expect("write edited segment");
+    let (code, out, _) = find(
+        "commitlog-find.cql",
+        &t.dir,
+        "2",
+        &["--commitlog", tmp.path().to_str().expect("utf8")],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains(&format!("{seg}: UNREADABLE")), "{out}");
+    assert!(out.contains("malformed mutation body"), "{out}");
+    // The unedited earlier mutation for key 2 is still reported.
+    assert!(out.contains(&format!("{seg}@62415")), "{out}");
+}

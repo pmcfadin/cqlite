@@ -288,7 +288,11 @@ fn decode_partition_update(
             // decode_rows consumed through END_OF_PARTITION.
             Ok((update, true))
         }
-        Err(Unsupported(cause)) => {
+        Err(RowBail::Malformed(cause)) => Err(Error::CorruptCommitLogFrame(format!(
+            "malformed mutation body for table {}: {cause}",
+            update.table_id_uuid()
+        ))),
+        Err(RowBail::Unsupported(cause)) => {
             // A construct beyond this decoder's model was hit; keep the
             // structural fields and report rows as not decoded.
             update.rows.clear();
@@ -299,10 +303,14 @@ fn decode_partition_update(
     }
 }
 
-/// A sentinel error used internally to bail out of the full row decode into the
-/// structural-only path without treating it as a hard corruption error.
-struct Unsupported(&'static str);
-type RowResult<T> = std::result::Result<T, Unsupported>;
+/// Why the row decode stopped: a shape the decoder deliberately does not model (surfaced as an
+/// incomplete, `unmeasured` update) versus a structurally MALFORMED body (truncated mid-row, a
+/// timestamp delta out of range) that must be a commit-log error, never a quiet success.
+enum RowBail {
+    Unsupported(&'static str),
+    Malformed(&'static str),
+}
+type RowResult<T> = std::result::Result<T, RowBail>;
 
 fn decode_rows(
     c: &mut Cursor<'_>,
@@ -322,7 +330,7 @@ fn decode_rows(
     // tombstone markers, partition/static-row deletions) — decoding it is a
     // follow-up, not a v1 requirement.
     if !schema.clustering.is_empty() {
-        return Err(Unsupported("clustered table not decoded"));
+        return Err(RowBail::Unsupported("clustered table not decoded"));
     }
     // Complex columns (collection/tuple/UDT/vector): NOT modeled. Cassandra
     // serializes a complex column as an entirely different wire shape (an
@@ -338,7 +346,7 @@ fn decode_rows(
         .iter()
         .any(|name| !schema.column_type(name).is_some_and(is_simple_scalar_type))
     {
-        return Err(Unsupported("complex column not decoded"));
+        return Err(RowBail::Unsupported("complex column not decoded"));
     }
     let mut rows = Vec::new();
     loop {
@@ -348,7 +356,7 @@ fn decode_rows(
         }
         if flags & ROW_IS_MARKER != 0 {
             // Range tombstone marker — not modeled.
-            return Err(Unsupported("range tombstone marker not decoded"));
+            return Err(RowBail::Unsupported("range tombstone marker not decoded"));
         }
         if flags & ROW_EXTENSION_FLAG != 0 {
             let _ext = c.u8().map_err(|_| short_row())?;
@@ -382,12 +390,12 @@ fn decode_rows(
             is_row_deletion = true;
         }
         if flags & ROW_HAS_COMPLEX_DELETION != 0 {
-            return Err(Unsupported("complex column not decoded"));
+            return Err(RowBail::Unsupported("complex column not decoded"));
         }
 
         // Column subset — not modeled; only the all-columns case is decoded.
         if flags & ROW_HAS_ALL_COLUMNS == 0 {
-            return Err(Unsupported("column-subset row not decoded"));
+            return Err(RowBail::Unsupported("column-subset row not decoded"));
         }
 
         // One simple cell per regular column, in header order.
@@ -395,7 +403,7 @@ fn decode_rows(
         for name in column_names {
             let type_name = schema
                 .column_type(name)
-                .ok_or(Unsupported("column type not in schema"))?;
+                .ok_or(RowBail::Unsupported("column type not in schema"))?;
             let cell = read_cell(c, name, type_name, base_ts, row_writetime)?;
             cells.push(cell);
         }
@@ -460,11 +468,11 @@ fn add_delta(base: i64, delta: u64) -> RowResult<i64> {
     i64::try_from(delta)
         .ok()
         .and_then(|d| base.checked_add(d))
-        .ok_or(Unsupported("timestamp delta overflows i64"))
+        .ok_or(RowBail::Malformed("timestamp delta overflows i64"))
 }
 
-fn short_row() -> Unsupported {
-    Unsupported("mutation body ended mid-row")
+fn short_row() -> RowBail {
+    RowBail::Malformed("mutation body ended mid-row")
 }
 
 /// Read one CQL value: fixed-length types have no length prefix; variable
