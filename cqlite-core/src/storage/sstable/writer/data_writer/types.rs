@@ -44,6 +44,39 @@ impl crate::storage::write_engine::reconcile_rules::ReconcileCell for MergedOp<'
             crate::storage::write_engine::mutation::CellOperation::Delete { .. }
         )
     }
+    fn expiring_ttl(&self) -> Option<u32> {
+        use crate::storage::write_engine::mutation::CellOperation as Op;
+        match self.op {
+            Op::WriteWithTtl { ttl_seconds, .. } => Some(*ttl_seconds),
+            Op::Write { .. } => self.row_ttl_seconds,
+            _ => None,
+        }
+    }
+    fn local_deletion_time(&self) -> i32 {
+        use crate::storage::write_engine::mutation::CellOperation as Op;
+        match self.op {
+            Op::Delete { .. } => self.cell_local_deletion_time,
+            // The authoritative per-cell LDT when surfaced; otherwise the write's own expiry
+            // `writetime_seconds + ttl` (the fresh-write path derives it from "now", which a
+            // tie cannot observe, so the timestamp stands in deterministically).
+            Op::WriteWithTtl {
+                local_deletion_time: Some(l),
+                ..
+            } => *l,
+            _ => self
+                .expiring_ttl()
+                .map(|t| (self.timestamp_micros / 1_000_000 + i64::from(t)) as i32)
+                .unwrap_or(0),
+        }
+    }
+    fn value_bytes(&self) -> Vec<u8> {
+        use crate::storage::write_engine::mutation::CellOperation as Op;
+        let mut out = Vec::new();
+        if let Op::Write { value, .. } | Op::WriteWithTtl { value, .. } = self.op {
+            let _ = super::encoding::serialize_value_into(value, &mut out);
+        }
+        out
+    }
 }
 
 /// One element to emit inside a per-element complex column (epic #899, Phase B).

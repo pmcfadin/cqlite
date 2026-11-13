@@ -13,7 +13,7 @@
 use super::*;
 
 // Shared reconcile rules (issue #947); `ReconcileCell` in scope for `.is_tombstone()`.
-use crate::storage::write_engine::reconcile_rules::{self, ReconcileCell};
+use crate::storage::write_engine::reconcile_rules;
 
 impl DataWriter {
     /// Write a single row
@@ -117,7 +117,10 @@ impl DataWriter {
                 .any(|op| matches!(op, CellOperation::DeleteRow));
             if has_delete_row
                 && shadow_floor.is_none_or(|floor| m.timestamp_micros > floor)
-                && row_deletion.is_none_or(|(ts, _)| m.timestamp_micros >= ts)
+                && row_deletion.is_none_or(|cur| {
+                    let cand = (m.timestamp_micros, m.effective_local_deletion_time());
+                    reconcile_rules::deletion_supersedes(cand, cur) || cand == cur
+                })
             {
                 // Issue #764: honor the mutation's explicit local_deletion_time.
                 row_deletion = Some((m.timestamp_micros, m.effective_local_deletion_time()));
@@ -131,7 +134,9 @@ impl DataWriter {
             // time) — the row keeps both the deletion AND the newer cells.
             if let Some((del_ts, del_ldt)) = m.row_tombstone {
                 if shadow_floor.is_none_or(|floor| del_ts > floor)
-                    && row_deletion.is_none_or(|(ts, _)| del_ts >= ts)
+                    && row_deletion.is_none_or(|cur| {
+                        reconcile_rules::deletion_supersedes((del_ts, del_ldt), cur)
+                    })
                 {
                     row_deletion = Some((del_ts, del_ldt));
                 }
@@ -514,18 +519,9 @@ impl DataWriter {
                     }
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         let existing = entry.get();
-                        // Per-cell winner resolution. The SHARED Cassandra
-                        // `Cells#reconcile` tie-break (`reconcile_rules::cell_wins`,
-                        // issue #947) decides the load-bearing axes (#848/#498). The
-                        // writer then overlays its WRITER-ONLY, order-dependent
-                        // last-write-wins for the one case the shared rule leaves to
-                        // the caller — EQUAL timestamp + EQUAL liveness keeps the
-                        // later-applied mutation (Cassandra's reconcile is
-                        // order-independent and the merge path keeps first-seen). The
-                        // overlay reproduces the writer's historical bytes exactly.
-                        let wins = reconcile_rules::cell_wins(&candidate, existing)
-                            || (candidate.timestamp_micros == existing.timestamp_micros
-                                && candidate.is_tombstone() == existing.is_tombstone());
+                        // Cassandra `Cells.resolveRegular` (the SHARED rule, #947/#4530): a
+                        // TOTAL order, so a later-applied mutation no longer wins a tie.
+                        let wins = reconcile_rules::cell_wins(&candidate, existing);
                         if wins {
                             entry.insert(candidate);
                         }

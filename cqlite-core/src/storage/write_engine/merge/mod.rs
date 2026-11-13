@@ -78,8 +78,6 @@ use crate::schema::TableSchema;
 use crate::storage::write_engine::mutation::{
     ClusteringKey, DecoratedKey, PartitionTombstone, RangeTombstone,
 };
-#[cfg(feature = "write-support")]
-use crate::storage::write_engine::reconcile_rules;
 // `Value` is no longer used by this file's production code (#2820 moved the
 // per-value size walk to `entry_size`), but the in-file test modules reach it
 // through `use super::*`.
@@ -195,22 +193,6 @@ pub use streaming::{StreamingMerger, StreamingStep};
 /// [`schema_order::schema_ordered_pop_all`].
 #[cfg(feature = "write-support")]
 mod schema_order;
-
-/// Adapt a merge-path [`CellData`] into the shared [`ReconcileCell`] view
-/// (issue #947) so per-cell winner resolution calls
-/// [`reconcile_rules::cell_wins`] — the one shared `Cells#reconcile` tie-break —
-/// instead of a hand-synced copy. How a tombstone is RECOGNIZED stays here
-/// (`Value::Tombstone` payload / IS_DELETED via [`KWayMerger::is_cell_tombstone`]),
-/// since that is genuinely type-specific.
-#[cfg(feature = "write-support")]
-impl reconcile_rules::ReconcileCell for CellData {
-    fn timestamp(&self) -> i64 {
-        self.timestamp
-    }
-    fn is_tombstone(&self) -> bool {
-        KWayMerger::is_cell_tombstone(self)
-    }
-}
 
 /// A cut position on the clustering axis, used to coalesce range tombstones
 /// into a NON-OVERLAPPING canonical sequence (issue #933 / roborev #959 High

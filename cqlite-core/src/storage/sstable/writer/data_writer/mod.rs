@@ -259,7 +259,7 @@ mod complex;
 // out of `complex.rs` — the two whose CELL PATH carries a declared-type
 // component. See that module's header.
 mod complex_collections;
-mod encoding;
+pub(crate) mod encoding;
 /// Incremental partition-write entry point (issue #1668, stage 5c-iv, part
 /// 1 — build + prove, not yet wired). See
 /// [`incremental_partition::IncrementalPartitionWriter`].
