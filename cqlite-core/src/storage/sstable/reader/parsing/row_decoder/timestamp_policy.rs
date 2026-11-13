@@ -245,6 +245,7 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                             &self.static_cells,
                             row_header_opt.as_ref(),
                             schema,
+                            self.shadow.as_ref().map_or(0, |sh| sh.now_secs()),
                         )
                     } else {
                         merge_static_cells(&mut cells, &self.static_cells);

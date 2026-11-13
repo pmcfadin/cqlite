@@ -1,0 +1,2 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":18},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"2026-11-13T03:43:53.384797Z","ttl":45,"expires_at":"2026-11-13T03:44:38Z","expired":false},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":43},"rows":[{"type":"row","position":43,"liveness_info":{"tstamp":"2026-11-13T03:43:54.519431Z"},"cells":[]}]}

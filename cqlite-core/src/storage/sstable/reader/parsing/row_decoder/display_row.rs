@@ -167,6 +167,7 @@ pub(super) fn build_display_row_read_path(
     static_cells: &RowCells,
     row_header_opt: Option<&RowHeader>,
     schema: &TableSchema,
+    now_secs: i64,
 ) -> ScanRow {
     // Issue #4524: the user-facing visibility rule is Cassandra's `BTreeRow.purge`: a row
     // survives iff it has live PRIMARY-KEY LIVENESS (`HAS_TIMESTAMP` in the row header: an
@@ -179,7 +180,8 @@ pub(super) fn build_display_row_read_path(
     //    `Marker(Null)`: the explicit-null / liveness-only row Cassandra returns;
     //  * NO liveness, no live cell -> `Marker(Null)`: an `UPDATE`-created row whose every cell
     //    was deleted; only its clustering pseudo-cells remain, which must not make it a row.
-    let has_liveness = row_header_opt.is_some_and(|h| h.timestamp.is_some());
+    // TTL-aware (`liveness_live_at`): an EXPIRED marker is no liveness (roborev r1).
+    let has_liveness = row_header_opt.is_some_and(|h| h.liveness_live_at(now_secs));
     let live_cell = |cells: &RowCells| row_has_non_key_cell(cells, schema);
     match build_display_row(cells, row_header_opt, schema) {
         ScanRow::Row(kept) if row_header_opt.is_some() && !has_liveness && !live_cell(&kept) => {

@@ -534,6 +534,7 @@ impl V5CompressedLegacyParser {
                                             &static_cells,
                                             row_header_opt.as_ref(),
                                             schema,
+                                            shadow.as_ref().map_or(0, |sh| sh.now_secs()),
                                         )
                                     } else {
                                         merge_static_cells(&mut cells, &static_cells);

@@ -525,6 +525,18 @@ impl RowHeader {
     /// AND every piece of its data (primary-key liveness + cells) has expired at
     /// `now_secs`, matching what a Cassandra `SELECT` hides. Returns `false` for any
     /// row with no TTL at all (never touches the tombstone-free common case).
+    /// Whether the row's PRIMARY-KEY liveness marker is present AND still live at `now_secs`
+    /// (the single-generation twin of `RowLiveness::marker_live_at`): present iff `HAS_TIMESTAMP`;
+    /// live-forever when it carries no TTL expiry, otherwise live strictly before its expiry
+    /// (`Cell.isLive`: `now < localExpirationTime`). The ONE predicate behind both the row-hide
+    /// decision and the liveness-only display rule (issue #4524).
+    fn liveness_live_at(&self, now_secs: i64) -> bool {
+        self.timestamp.is_some()
+            && self
+                .liveness_expires_at_seconds
+                .is_none_or(|s| s > now_secs)
+    }
+
     fn row_liveness_expired(&self, now_secs: i64) -> bool {
         let has_ttl =
             self.liveness_expires_at_seconds.is_some() || self.max_data_cell_expires_at.is_some();
@@ -537,11 +549,7 @@ impl RowHeader {
         }
         // Primary-key liveness still live? Present iff HAS_TIMESTAMP; live-forever
         // when it carries no TTL expiry, otherwise live until its expiry passes.
-        let liveness_live = self.timestamp.is_some()
-            && self
-                .liveness_expires_at_seconds
-                .is_none_or(|s| s > now_secs);
-        if liveness_live {
+        if self.liveness_live_at(now_secs) {
             return false;
         }
         // Any expiring data cell still live keeps the row visible.

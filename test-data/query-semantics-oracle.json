@@ -642,6 +642,66 @@
           "v": "live"
         }
       ]
+    },
+    {
+      "id": "ttl_liveness__before_expiry",
+      "keyspace": "test_nullrow",
+      "table": "ttl_liveness",
+      "fixture_dir_prefix": "ttl_liveness-",
+      "sstable_prefix": "nb-1-big",
+      "fixtures_dir": "test-data/fixtures/issue_4524",
+      "schema": "issue-4524-null-only-row.cql",
+      "query": "SELECT id, v FROM test_nullrow.ttl_liveness",
+      "reconciliation": [
+        "row_liveness",
+        "ttl"
+      ],
+      "pinned_now_secs": 1794541468,
+      "pinned_now_note": "golden expires_at 1794541478 -10s",
+      "physical_row_count": 2,
+      "note": [
+        "Issue #4524 roborev r1 (expiring primary-key liveness). id 1 is `INSERT (id) USING TTL 45` (liveness-only, marker",
+        "expires_at = 1794541478s per the sstabledump golden), id 2 the no-TTL control. cqlsh-select.txt (BEFORE expiry) returns ids 1 and 2;",
+        "cqlsh-select-after-expiry.txt (45 s later) returns id 2 only. `pinned_now_secs` is the golden's expires_at -10 s / +10 s."
+      ],
+      "expected_rows": [
+        {
+          "id": 1,
+          "v": null
+        },
+        {
+          "id": 2,
+          "v": null
+        }
+      ]
+    },
+    {
+      "id": "ttl_liveness__after_expiry",
+      "keyspace": "test_nullrow",
+      "table": "ttl_liveness",
+      "fixture_dir_prefix": "ttl_liveness-",
+      "sstable_prefix": "nb-1-big",
+      "fixtures_dir": "test-data/fixtures/issue_4524",
+      "schema": "issue-4524-null-only-row.cql",
+      "query": "SELECT id, v FROM test_nullrow.ttl_liveness",
+      "reconciliation": [
+        "row_liveness",
+        "ttl"
+      ],
+      "pinned_now_secs": 1794541488,
+      "pinned_now_note": "golden expires_at 1794541478 +10s",
+      "physical_row_count": 2,
+      "note": [
+        "Issue #4524 roborev r1 (expiring primary-key liveness). id 1 is `INSERT (id) USING TTL 45` (liveness-only, marker",
+        "expires_at = 1794541478s per the sstabledump golden), id 2 the no-TTL control. cqlsh-select.txt (BEFORE expiry) returns ids 1 and 2;",
+        "cqlsh-select-after-expiry.txt (45 s later) returns id 2 only. `pinned_now_secs` is the golden's expires_at -10 s / +10 s."
+      ],
+      "expected_rows": [
+        {
+          "id": 2,
+          "v": null
+        }
+      ]
     }
   ]
 }
