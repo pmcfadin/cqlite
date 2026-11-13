@@ -94,7 +94,7 @@ impl RowHeader {
     /// live-forever when it carries no TTL expiry, otherwise live strictly before its expiry
     /// (`Cell.isLive`: `now < localExpirationTime`). The ONE predicate behind both the row-hide
     /// decision and the liveness-only display rule (issue #4524).
-    fn liveness_live_at(&self, now_secs: i64) -> bool {
+    pub(super) fn liveness_live_at(&self, now_secs: i64) -> bool {
         self.timestamp.is_some()
             && self
                 .liveness_expires_at_seconds
