@@ -548,7 +548,7 @@ fn defects() -> Vec<Defect> {
             modes: &[Mode::Enospc, Mode::Short],
             issue: 4528,
         });
-        // TORN_MANIFEST (issue number to be filed): `--manifest` is written in place
+        // TORN_MANIFEST (#4549): `--manifest` is written in place
         // (`File::create`/`fs::write`, not temp + rename), so a crash mid-write leaves a 0-byte or
         // truncated manifest, and rebuild also leaves one after an ENOSPC/short write.
         v.push(Defect {
@@ -569,8 +569,8 @@ fn defects() -> Vec<Defect> {
     v
 }
 
-/// Placeholder issue number for the torn-`--manifest` defect until it is filed.
-const TORN_MANIFEST: u32 = 0;
+/// Issue number of the torn-`--manifest` defect.
+const TORN_MANIFEST: u32 = 4549;
 
 fn known_defect(verb: Verb, f: &Fixture, kind: &str, path: &str, mode: Mode) -> Option<u32> {
     if !matches!(kind, "write" | "pwrite") {
@@ -819,8 +819,8 @@ fn issue_4528_salvage_manifest_write_error_swallowed() {
 }
 
 #[test]
-#[ignore = "#<to-be-filed> --manifest is written in place: a crash (or rebuild's ENOSPC/short write) leaves a torn manifest.json"]
-fn torn_manifest_after_a_fault() {
+#[ignore = "#4549 --manifest is written in place: a crash (or rebuild's ENOSPC/short write) leaves a torn manifest.json"]
+fn issue_4549_torn_manifest_after_a_fault() {
     check_verbs(
         &[Verb::Rebuild, Verb::Salvage],
         Scope::KnownDefects(TORN_MANIFEST),
