@@ -470,7 +470,9 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
     // >= one native `next()` per row; a batch issues ~ceil(rows / bufferSize) + 1 (the terminal
     // done-call). The wall-clock throughput is still logged for visibility but is not asserted.
     test('batched streaming issues one native next() per batch, not per row', async () => {
-      const native = require('../cqlite-node.linux-x64-gnu.node');
+      // The package's platform-aware loader (generated `index.js`), not a hardcoded per-platform
+      // `.node` path, so the spy works on every platform the suite runs on.
+      const native = require('../index.js');
       const proto = native.StreamingResult.prototype;
       const realNext = proto.next;
       let calls = 0;

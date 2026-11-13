@@ -51,6 +51,10 @@ const TARGET_ROWS = 50000;
 // load. The run is also extended until it lasts at least MIN_RUN_MS so a single scheduler/GC stall is a
 // small share of it.
 const MAX_GAP_FRACTION = 0.4;
+// ABSOLUTE ceiling alongside the ratio (a regression tripwire, NOT a latency SLO): a purely relative
+// bound would let a multi-second freeze pass on a long run. 5 s is far above any scheduler jitter
+// yet far below what an unbounded O(total) burst costs.
+const MAX_GAP_CEILING_MS = 5000;
 const MIN_RUN_MS = 1500;
 const TIMER_INTERVAL_MS = 10;
 // Keep the child process below jest's 30s worker/test default so a hung child
@@ -116,6 +120,10 @@ describe('executeNative event-loop latency (issue #1442)', () => {
       }
       runMs = performance.now() - runStart;
     } finally {
+      // Yield once so an OVERDUE tick runs before the interval is cleared: a blocking
+      // materialization at the very end of the run would otherwise leave its stall unrecorded
+      // (the timer never got to fire), and the gap list would miss the worst one.
+      await new Promise((resolve) => setTimeout(resolve, TIMER_INTERVAL_MS * 2));
       clearInterval(timer);
     }
 
@@ -133,6 +141,7 @@ describe('executeNative event-loop latency (issue #1442)', () => {
     // eslint-disable-next-line no-console
     console.log(`event-loop max gap ${maxGap.toFixed(1)}ms of a ${runMs.toFixed(0)}ms run`);
     expect(maxGap).toBeLessThan(runMs * MAX_GAP_FRACTION);
+    expect(maxGap).toBeLessThan(MAX_GAP_CEILING_MS);
   });
 
   test('oversized executeNative rejects with a typed executeStreaming error, not a freeze', () => {
