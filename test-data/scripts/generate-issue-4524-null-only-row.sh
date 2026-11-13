@@ -137,7 +137,26 @@ cql "DELETE FROM clustered_rows USING TIMESTAMP 2000 WHERE pk = 7 AND ck = 1"
 cql "INSERT INTO clustered_rows (pk, ck) VALUES (8, 1) USING TIMESTAMP 1000"
 cql "INSERT INTO clustered_rows (pk, ck, v) VALUES (8, 2, 'live') USING TIMESTAMP 1000"
 
-log "Flushing $KEYSPACE..."
+# MULTIGEN table (two SSTables): phase A is flushed together with the tables above, phase B is
+# written AFTER that flush and flushed on its own, so liveness and cells land in different generations.
+#  1 INSERT v@1000 | DELETE v@2000           -> ROW, v null  (liveness from gen 1 survives the gen-2 cell tombstone)
+#  2 UPDATE v@1000 | DELETE v@2000           -> NO ROW       (no liveness anywhere)
+#  3 INSERT (id)@1000 | UPDATE v@2000        -> ROW, v 'w'
+#  4 INSERT (id)@1000 | DELETE row@2000      -> NO ROW       (row deletion shadows the liveness)
+#  5 INSERT v@1000 | INSERT (id)@2000        -> ROW, v 'x'   (older cell survives, newer liveness-only row)
+cql "INSERT INTO multigen_rows (id, v) VALUES (1, 'x') USING TIMESTAMP 1000"
+cql "UPDATE multigen_rows USING TIMESTAMP 1000 SET v = 'y' WHERE id = 2"
+cql "INSERT INTO multigen_rows (id) VALUES (3) USING TIMESTAMP 1000"
+cql "INSERT INTO multigen_rows (id) VALUES (4) USING TIMESTAMP 1000"
+cql "INSERT INTO multigen_rows (id, v) VALUES (5, 'x') USING TIMESTAMP 1000"
+log "Flushing $KEYSPACE (phase A)..."
+run "${ENGINE[@]}" exec "$CONTAINER_NAME" nodetool flush "$KEYSPACE"
+cql "DELETE v FROM multigen_rows USING TIMESTAMP 2000 WHERE id = 1"
+cql "DELETE v FROM multigen_rows USING TIMESTAMP 2000 WHERE id = 2"
+cql "UPDATE multigen_rows USING TIMESTAMP 2000 SET v = 'w' WHERE id = 3"
+cql "DELETE FROM multigen_rows USING TIMESTAMP 2000 WHERE id = 4"
+cql "INSERT INTO multigen_rows (id) VALUES (5) USING TIMESTAMP 2000"
+log "Flushing $KEYSPACE (phase B)..."
 run "${ENGINE[@]}" exec "$CONTAINER_NAME" nodetool flush "$KEYSPACE"
 
 [[ "$DRY_RUN" -eq 0 ]] || { log "dry-run complete"; exit 0; }
@@ -150,6 +169,10 @@ cx bash -lc 'tar -C /var/lib/cassandra -cf - data' | tar -C "$TMPX" -xf - || fai
 rm -rf "${OUT_DIR:?}/$KEYSPACE"; mkdir -p "$OUT_DIR/$KEYSPACE"
 cp -r "$TMPX/data/$KEYSPACE/." "$OUT_DIR/$KEYSPACE/"; rm -rf "$TMPX"
 
+cntm=$(find "$OUT_DIR/$KEYSPACE/multigen_rows"* -name '*-Data.db' | wc -l | tr -d ' ')
+[[ "$cntm" -eq 2 ]] || fail "multigen_rows: expected exactly TWO Data.db (two generations), found $cntm."
+dm=$(dirname "$(find "$OUT_DIR/$KEYSPACE/multigen_rows"* -name '*-Data.db' | head -1)")
+cx cqlsh -k "$KEYSPACE" -e "SELECT * FROM multigen_rows;" > "$dm/cqlsh-select.txt" || fail "cqlsh SELECT failed for multigen_rows"
 for t in flat_rows clustered_rows; do
   cnt=$(find "$OUT_DIR/$KEYSPACE/$t"* -name '*-Data.db' | wc -l | tr -d ' ')
   [[ "$cnt" -eq 1 ]] || fail "$t: expected exactly ONE Data.db, found $cnt."
