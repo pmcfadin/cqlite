@@ -141,16 +141,26 @@ impl RefusalLedger {
                 "refused-SSTable ledger lock poisoned; cannot prove the table readable".into(),
             ));
         };
-        let mut hits: Vec<&Refusal> = Vec::new();
+        // Deterministic report: exact-key refusals first, then unqualified matches,
+        // then UNRESOLVED; within a class, sorted by path. Never HashMap order.
+        let mut ranked: Vec<(u8, &Refusal)> = Vec::new();
         for (key, list) in map.iter() {
             let both_qualified = key.contains('.') && table_name.contains('.');
-            let matches = key == table_name
-                || key == UNRESOLVED_KEY
-                || (!both_qualified && unqualified(key) == unqualified(table_name));
-            if matches {
-                hits.extend(list.iter());
+            let class = if key == table_name {
+                Some(0)
+            } else if key == UNRESOLVED_KEY {
+                Some(2)
+            } else if !both_qualified && unqualified(key) == unqualified(table_name) {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(c) = class {
+                ranked.extend(list.iter().map(|r| (c, r)));
             }
         }
+        ranked.sort_by(|a, b| (a.0, &a.1.path).cmp(&(b.0, &b.1.path)));
+        let hits: Vec<&Refusal> = ranked.into_iter().map(|(_, r)| r).collect();
         let Some(first) = hits.first() else {
             return Ok(());
         };
@@ -215,6 +225,31 @@ impl super::SSTableManager {
         e
     }
 
+    /// List the `Data.db` files of one existing table directory. EVERY failure --
+    /// opening the listing or advancing it -- is recorded as a directory refusal
+    /// before it is returned, so a partial enumeration can never be mistaken for a
+    /// complete one (refresh would otherwise drop the readers it did not see).
+    pub(super) async fn list_data_files(&self, dir: &Path) -> crate::Result<Vec<PathBuf>> {
+        let mut entries = match self.platform.fs().read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) => return Err(self.refuse_dir(dir, e)),
+        };
+        let mut out = Vec::new();
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(e) => return Err(self.refuse_dir(dir, e.into())),
+            };
+            let path = entry.path();
+            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if fname.ends_with("-Data.db") && !super::is_apple_double_sidecar(fname) {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+
     /// Hint-only form: a refused table yields no readers.
     #[cfg(not(feature = "tombstones"))]
     pub(super) async fn readers_if_readable(
@@ -262,6 +297,47 @@ impl super::SSTableManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coexisting_refusal_classes_report_deterministically() {
+        // Exact key (Schema) outranks unqualified (Corruption) outranks UNRESOLVED
+        // (InvalidFormat), whatever the insertion order.
+        let rec = |l: &RefusalLedger, k: &str, p: &str, e: Error| {
+            l.record(k.to_string(), Path::new(p), &e)
+        };
+        for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0], [1, 0, 2]] {
+            let ledger = RefusalLedger::default();
+            for i in order {
+                match i {
+                    0 => rec(
+                        &ledger,
+                        "ks.t",
+                        "/d/ks/t-1/nb-1-big-Data.db",
+                        Error::Schema("a".into()),
+                    ),
+                    1 => rec(
+                        &ledger,
+                        "t",
+                        "/d/other/t-2/nb-2-big-Data.db",
+                        Error::Corruption("b".into()),
+                    ),
+                    _ => rec(
+                        &ledger,
+                        UNRESOLVED_KEY,
+                        "/d/\u{fffd}/nb-3-big-Data.db",
+                        Error::InvalidFormat("c".into()),
+                    ),
+                }
+            }
+            match ledger.ensure_readable("ks.t") {
+                Err(Error::Schema(m)) => assert!(
+                    m.find("t-1").unwrap_or(usize::MAX) < m.find("t-2").unwrap_or(0),
+                    "{m}"
+                ),
+                other => panic!("expected the exact-key Schema refusal first, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn unsupported_version_keeps_its_kind_and_names_the_file() {

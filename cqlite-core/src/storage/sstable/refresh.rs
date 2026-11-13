@@ -41,8 +41,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    extract_keyspace_and_table_name, extract_table_name, is_apple_double_sidecar, reader,
-    SSTableId, SSTableManager, MAX_SSTABLE_SCAN_DEPTH,
+    extract_keyspace_and_table_name, extract_table_name, reader, SSTableId, SSTableManager,
+    MAX_SSTABLE_SCAN_DEPTH,
 };
 use crate::Result;
 
@@ -189,18 +189,7 @@ impl SSTableManager {
                     if !self.platform.fs().exists(dir).await? {
                         continue;
                     }
-                    let mut entries = match self.platform.fs().read_dir(dir).await {
-                        Ok(entries) => entries,
-                        Err(e) => return Err(self.refuse_dir(dir, e)),
-                    };
-                    while let Some(entry) = entries.next_entry().await? {
-                        let path = entry.path();
-                        if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                            if fname.ends_with("-Data.db") && !is_apple_double_sidecar(fname) {
-                                out.push(path);
-                            }
-                        }
-                    }
+                    out.extend(self.list_data_files(dir).await?);
                 }
                 Ok(out)
             }

@@ -274,6 +274,7 @@ async fn deleted_refused_sstable_is_reconciled_by_refresh() {
 
 // ---- directory-level refusals + unresolvable keys (roborev round 2) --------------
 
+#[cfg(unix)]
 async fn dirs_manager(base: &Path, dirs: Vec<PathBuf>) -> SSTableManager {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
@@ -283,7 +284,9 @@ async fn dirs_manager(base: &Path, dirs: Vec<PathBuf>) -> SSTableManager {
 }
 
 /// Restores a directory's mode on drop (also on a failing assertion).
+#[cfg(unix)]
 struct ModeGuard(PathBuf, u32);
+#[cfg(unix)]
 impl Drop for ModeGuard {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt;
@@ -293,6 +296,7 @@ impl Drop for ModeGuard {
 
 /// An existing table directory that cannot be listed is `Err` (not empty); once it
 /// is readable again a refresh clears that directory-level refusal.
+#[cfg(unix)]
 #[tokio::test]
 async fn unreadable_table_dir_recovers_after_refresh() {
     use std::os::unix::fs::PermissionsExt;
@@ -326,6 +330,7 @@ async fn unreadable_table_dir_recovers_after_refresh() {
 
 /// A refused SSTable whose table cannot be derived from its (non-UTF-8) directory
 /// name is recorded as UNRESOLVED and fails EVERY read on the manager.
+#[cfg(unix)]
 #[tokio::test]
 async fn unresolvable_path_fails_every_read() {
     use std::os::unix::ffi::OsStrExt;
@@ -346,6 +351,7 @@ async fn unresolvable_path_fails_every_read() {
     }
 }
 
+#[cfg(unix)]
 fn damage_stats(dir: &Path) {
     let stats = dir.join("nb-1-big-Statistics.db");
     let bytes = std::fs::read(&stats).expect("read stats");
