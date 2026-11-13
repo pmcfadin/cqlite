@@ -531,10 +531,10 @@ async fn multigen_partition_deleted_markerless_tombstone_row_is_hidden_but_its_l
     let live_cks = multigen_ck_values(&live_root, &schema).await;
     assert_eq!(
         live_cks,
-        vec![2, 9],
-        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): both \
-         merged rows must be present and decodable BEFORE the partition tombstone is \
-         patched in — got {live_cks:?}"
+        vec![9],
+        "parity probe (#4524, the purge #3121 asked for): only the live sibling ck=9 is \
+         returned BEFORE the partition tombstone is patched in — the marker-less \
+         tombstone-only ck=2 is purged exactly as Cassandra does — got {live_cks:?}"
     );
 
     // (2) THE PIN: the partition deletion hides the marker-less tombstone-only row and
@@ -614,16 +614,15 @@ async fn multigen_partition_delete_hides_the_markerless_row_and_keeps_the_newer_
         "test must exercise a multi-generation directory (the KWayMerger path)"
     );
 
-    // (1) ANTI-VACUITY decode probe: both rows are physically present and decodable
-    //     before the deletion is patched in (`ck = 2` only because CQLite does not yet
-    //     purge a marker-less tombstone-only row — #3121).
+    // (1) PARITY probe (#4524): before the deletion is patched in only the marked sibling
+    //     is returned (the marker-less tombstone-only `ck = 2` is purged as in Cassandra).
     let live_cks = multigen_ck_values(&live_root, &schema).await;
     assert_eq!(
         live_cks,
-        vec![2, 4],
-        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): both \
-         merged rows must be present and decodable BEFORE the partition tombstone is \
-         patched in — got {live_cks:?}"
+        vec![4],
+        "parity probe (#4524, the purge #3121 asked for): only the marked sibling ck=4 is \
+         returned BEFORE the partition tombstone is patched in — the marker-less \
+         tombstone-only ck=2 is purged as in Cassandra — got {live_cks:?}"
     );
 
     // (2) THE PIN: one deletion, opposite answers.
@@ -798,10 +797,11 @@ async fn multigen_metadata_projection_partition_deleted_markerless_tombstone_row
     let live = multigen_metadata_ck_and_v_writetime(&live_root, &schema).await;
     assert_eq!(
         live,
-        vec![(2, None), (9, Some(T_SIBLING_LIVE_MICROS))],
-        "decode probe: BEFORE the partition tombstone is patched in, the metadata merge \
-         must emit both merged rows, and ck=9's `v` must carry its authoritative \
-         WRITETIME @{T_SIBLING_LIVE_MICROS}µs — got {live:?}"
+        vec![(9, Some(T_SIBLING_LIVE_MICROS))],
+        "parity probe (#4524): BEFORE the partition tombstone is patched in, the metadata \
+         merge emits only ck=9 (the marker-less tombstone-only ck=2 is purged as in \
+         Cassandra) and its `v` carries its authoritative WRITETIME \
+         @{T_SIBLING_LIVE_MICROS}µs — got {live:?}"
     );
 
     // (2) THE PIN: the marker-less tombstone-only row is not resurrected, and the live
@@ -837,17 +837,16 @@ async fn multigen_streaming_scan_partition_deleted_markerless_tombstone_row_is_h
     let schema = parse_cql_schema(&schema_cql()).expect("parse fixture schema");
     let (temp, live_root, deleted_root) = build_markerless_ac1_fixture(&schema).await;
 
-    // (1) ANTI-VACUITY (decode probe, #3121): the stream really carries both merged
-    //     rows before the deletion is patched in — so a stream that ended early, or
-    //     one that never engaged the merge, fails here rather than making the pin
-    //     below trivially true.
+    // (1) PARITY probe (#4524): the stream carries the live sibling before the deletion is
+    //     patched in (the marker-less tombstone-only row is purged as in Cassandra) — so a
+    //     stream that ended early, or never engaged the merge, fails here.
     let live_cks = multigen_stream_ck_values(&live_root, &schema).await;
     assert_eq!(
         live_cks,
-        vec![2, 9],
-        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): the \
-         streaming merge must emit both merged rows BEFORE the partition tombstone is \
-         patched in — got {live_cks:?}"
+        vec![9],
+        "parity probe (#4524): the streaming merge emits only ck=9 BEFORE the partition \
+         tombstone is patched in (ck=2 is a marker-less tombstone-only row, purged as in \
+         Cassandra) — got {live_cks:?}"
     );
 
     // (2) THE PIN.
@@ -903,15 +902,15 @@ async fn multigen_partition_seek_partition_deleted_markerless_tombstone_row_is_h
          {PK_VALUE} as 4-byte BE) — emitted {emitted_keys:?}"
     );
 
-    // (1) ANTI-VACUITY (decode probe, #3121): the seek really reaches both merged rows
-    //     before the deletion is patched in.
+    // (1) PARITY probe (#4524): the seek reaches the live sibling before the deletion is
+    //     patched in (the marker-less tombstone-only row is purged as in Cassandra).
     let (live_cks, live_engaged) = multigen_seek_ck_values(&live_root, &schema).await;
     assert_eq!(
         live_cks,
-        vec![2, 9],
-        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): the \
-         seeking merge must reach both merged rows BEFORE the partition tombstone is \
-         patched in — got {live_cks:?}"
+        vec![9],
+        "parity probe (#4524): the seeking merge returns only ck=9 BEFORE the partition \
+         tombstone is patched in (ck=2 is a marker-less tombstone-only row, purged as in \
+         Cassandra) — got {live_cks:?}"
     );
     assert!(
         !live_engaged,
