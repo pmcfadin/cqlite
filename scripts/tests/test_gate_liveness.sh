@@ -26,6 +26,9 @@ set -uo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 READER="$REPO_ROOT/scripts/gate-liveness.sh"
+# The reader's two test seams (GATE_LIVENESS_NOW, GATE_LIVENESS_FIRST_SAMPLE_MARKER) are honoured only
+# under this explicit switch; this suite is the only thing that sets it (issue #4538).
+export GATE_LIVENESS_SELFTEST=1
 BEATER="$REPO_ROOT/scripts/lib/gate-heartbeat.sh"
 GATE="$REPO_ROOT/scripts/agent-gate.sh"
 
@@ -1312,6 +1315,55 @@ _rp3=$!; remember_pid "$_rp3"
 GATE_LIVENESS_FIRST_SAMPLE_MARKER="$TMP/m115" expect_reader "11j.5 control: a new beater-pid under a FOREIGN run-id is not credited as progress" \
   UNKNOWN 4 "belongs to run 'SOMEONE-ELSE'" -- "$TMP/restart.txt"
 wait "$_rp3" 2>/dev/null || true
+# ---- the test seams are INERT unless the self-test switch is set, and never clobber (issue #4538) ----
+# An inherited GATE_LIVENESS_NOW / GATE_LIVENESS_FIRST_SAMPLE_MARKER must not skew a real gate's answer
+# or truncate a file: both are honoured only under GATE_LIVENESS_SELFTEST=1, the marker only inside
+# ${TMPDIR:-/tmp} (no `..`), only when it does not exist yet, and via noclobber.
+MK_NOW=1800000000 mk_beat "$TMP/inert.txt.heartbeat" run-a 179 60
+mk_summary "$TMP/inert.txt" run-a "INCOMPLETE (gate did not finish)"
+_inert_out=$(env -u GATE_LIVENESS_SELFTEST GATE_LIVENESS_NOW=1800000000 bash "$READER" --no-wait "$TMP/inert.txt" 2>&1 || true)
+if ! grep -q 'age 179s' <<<"$_inert_out"; then
+  ok "11z.1 GATE_LIVENESS_NOW is IGNORED without the self-test switch"
+else
+  bad "11z.1 GATE_LIVENESS_NOW is IGNORED without the self-test switch" "$(head -1 <<<"$_inert_out")"
+fi
+_seam_run() { # _seam_run <switch|none> <marker>   (stale beat, interval 1 -> reaches the confirmation sleep)
+  _mkbeat_r 57 1111
+  if [ "$1" = none ]; then
+    env -u GATE_LIVENESS_SELFTEST GATE_LIVENESS_FIRST_SAMPLE_MARKER="$2" bash "$READER" "$TMP/restart.txt" >/dev/null 2>&1 || true
+  else
+    GATE_LIVENESS_FIRST_SAMPLE_MARKER="$2" bash "$READER" "$TMP/restart.txt" >/dev/null 2>&1 || true
+  fi
+}
+rm -f "$TMP/m_inert"
+_seam_run none "$TMP/m_inert"
+if [ ! -e "$TMP/m_inert" ]; then
+  ok "11z.2 the first-sample marker is NOT created without the self-test switch"
+else
+  bad "11z.2 the first-sample marker is NOT created without the self-test switch" "created"
+fi
+printf 'KEEP-ME\n' > "$TMP/m_exists"
+_seam_run on "$TMP/m_exists"
+if [ "$(cat "$TMP/m_exists")" = "KEEP-ME" ]; then
+  ok "11z.3 with the switch set, an EXISTING file is not overwritten or truncated"
+else
+  bad "11z.3 with the switch set, an EXISTING file is not overwritten or truncated" "content now: $(head -c 40 "$TMP/m_exists")"
+fi
+rm -f "$TMP/../gl-marker-dotdot"
+_seam_run on "$TMP/../gl-marker-dotdot"
+if [ ! -e "$TMP/../gl-marker-dotdot" ]; then
+  ok "11z.4 a marker path containing '..' (outside TMPDIR) is refused"
+else
+  bad "11z.4 a marker path containing '..' (outside TMPDIR) is refused" "created"; rm -f "$TMP/../gl-marker-dotdot"
+fi
+rm -f "$TMP/m_ok"
+_seam_run on "$TMP/m_ok"
+if [ -e "$TMP/m_ok" ]; then
+  ok "11z.5 control: with the switch set, a fresh path inside TMPDIR IS created"
+else
+  bad "11z.5 control: with the switch set, a fresh path inside TMPDIR IS created" "not created"
+fi
+
 
 # Portability: no external `seq`. Whether stock macOS ships it is arguable; a bash arithmetic loop
 # needs no external utility at all, so there is nothing left to argue about (job 191).
