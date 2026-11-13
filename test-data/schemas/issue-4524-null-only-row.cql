@@ -23,3 +23,10 @@ CREATE TABLE IF NOT EXISTS test_nullrow.clustered_rows (
     v  text,
     PRIMARY KEY (pk, ck)
 );
+
+-- Two SSTables (a flush between the two write phases): the row's liveness and its cells live in
+-- DIFFERENT generations, so the k-way merge arm must reconcile them (issue #4524, sibling audit).
+CREATE TABLE IF NOT EXISTS test_nullrow.multigen_rows (
+    id int PRIMARY KEY,
+    v  text
+);

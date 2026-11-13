@@ -44,7 +44,11 @@ fn fixture_root() -> PathBuf {
 
 fn generation_dir(table: &str) -> PathBuf {
     let dirs = datasets_root::table_generation_dirs(&fixture_root(), KEYSPACE, table);
-    assert_eq!(dirs.len(), 1, "{table}: expected ONE committed generation, got {dirs:?}");
+    assert_eq!(
+        dirs.len(),
+        1,
+        "{table}: expected ONE committed generation, got {dirs:?}"
+    );
     dirs.into_iter().next().unwrap()
 }
 
@@ -71,7 +75,10 @@ fn cassandra_rows(table: &str, clustered: bool) -> BTreeSet<Key> {
         };
         out.insert((pk, ck, v.to_string()));
     }
-    assert!(!out.is_empty(), "{table}: the cqlsh oracle parsed to zero rows");
+    assert!(
+        !out.is_empty(),
+        "{table}: the cqlsh oracle parsed to zero rows"
+    );
     out
 }
 
@@ -85,7 +92,11 @@ fn as_i64(v: Option<&Value>) -> i64 {
 
 fn key_of(row: &QueryRow, clustered: bool) -> Key {
     let pk = as_i64(row.values.get("pk").or_else(|| row.values.get("id")));
-    let ck = if clustered { as_i64(row.values.get("ck")) } else { 0 };
+    let ck = if clustered {
+        as_i64(row.values.get("ck"))
+    } else {
+        0
+    };
     let v = match row.values.get("v") {
         None | Some(Value::Null) => "null".to_string(),
         Some(Value::Text(_)) => row.values["v"].as_str().expect("text").to_string(),
@@ -111,7 +122,10 @@ async fn open(mode: ReadPathMode) -> Database {
 }
 
 async fn rows(db: &Database, sql: &str, clustered: bool) -> BTreeSet<Key> {
-    let r = db.execute(sql).await.unwrap_or_else(|e| panic!("`{sql}`: {e}"));
+    let r = db
+        .execute(sql)
+        .await
+        .unwrap_or_else(|e| panic!("`{sql}`: {e}"));
     r.rows.iter().map(|row| key_of(row, clustered)).collect()
 }
 
@@ -124,7 +138,7 @@ fn pk_col(clustered: bool) -> &'static str {
 }
 
 /// Every surface, both tables, against Cassandra's own answer.
-async fn check_table(table: &str, clustered: bool) {
+async fn check_table(table: &str, clustered: bool, min_null_rows: usize) {
     let oracle = cassandra_rows(table, clustered);
     let pk = pk_col(clustered);
     let full_sql = format!("SELECT * FROM {KEYSPACE}.{table}");
@@ -132,14 +146,18 @@ async fn check_table(table: &str, clustered: bool) {
     // The oracle must itself contain the subject (rows with no live regular cell) so the
     // comparison below cannot pass vacuously.
     assert!(
-        oracle.iter().filter(|(_, _, v)| v == "null").count() >= 4,
+        oracle.iter().filter(|(_, _, v)| v == "null").count() >= min_null_rows,
         "{table}: the Cassandra oracle lost its null-only rows"
     );
 
     for mode in [ReadPathMode::Auto, ReadPathMode::Full] {
         let db = open(mode).await;
         // Full scan.
-        assert_eq!(rows(&db, &full_sql, clustered).await, oracle, "{table} full scan [{mode:?}]");
+        assert_eq!(
+            rows(&db, &full_sql, clustered).await,
+            oracle,
+            "{table} full scan [{mode:?}]"
+        );
         // Per-partition point read, including the partitions Cassandra returns NOTHING for.
         for k in PARTITION_KEYS {
             let want: BTreeSet<Key> = oracle.iter().filter(|(p, _, _)| *p == k).cloned().collect();
@@ -147,9 +165,17 @@ async fn check_table(table: &str, clustered: bool) {
             assert_eq!(got, want, "{table} {pk} = {k} [{mode:?}]");
         }
         // Multi-partition IN.
-        let list = PARTITION_KEYS.map(|k| k.to_string()).collect::<Vec<_>>().join(", ");
+        let list = PARTITION_KEYS
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         assert_eq!(
-            rows(&db, &format!("{full_sql} WHERE {pk} IN ({list})"), clustered).await,
+            rows(
+                &db,
+                &format!("{full_sql} WHERE {pk} IN ({list})"),
+                clustered
+            )
+            .await,
             oracle,
             "{table} IN [{mode:?}]"
         );
@@ -176,10 +202,19 @@ async fn check_table(table: &str, clustered: bool) {
 
 #[tokio::test]
 async fn flat_table_returns_null_only_rows_and_hides_the_deleted_ones() {
-    check_table("flat_rows", false).await;
+    check_table("flat_rows", false, 4).await;
 }
 
 #[tokio::test]
 async fn clustered_table_returns_null_only_rows_and_hides_the_deleted_ones() {
-    check_table("clustered_rows", true).await;
+    check_table("clustered_rows", true, 4).await;
+}
+
+/// Two generations (`nb-1`, `nb-2`): the row's liveness and its cells live in DIFFERENT
+/// SSTables, so the k-way merge arm must reconcile them — gen-1 liveness survives a gen-2 cell
+/// tombstone (id 1 -> ROW null), an older cell survives a newer liveness-only INSERT (id 5 ->
+/// 'x'), and a gen-2 row deletion shadows gen-1 liveness (id 4 -> no row).
+#[tokio::test]
+async fn two_generation_table_reconciles_liveness_and_cells_across_sstables() {
+    check_table("multigen_rows", false, 1).await;
 }
