@@ -351,9 +351,27 @@ async fn unresolvable_path_fails_every_read() {
     }
 }
 
-#[cfg(unix)]
 fn damage_stats(dir: &Path) {
     let stats = dir.join("nb-1-big-Statistics.db");
     let bytes = std::fs::read(&stats).expect("read stats");
     std::fs::write(&stats, &bytes[..20.min(bytes.len())]).expect("truncate stats");
+}
+
+/// A refused SSTable whose table the layout helpers cannot name (here: files laid
+/// directly in the scan base directory, so the only path-derived "name" would be the
+/// base directory's own) must not be keyed by a parent-directory name: it is
+/// UNRESOLVED and fails reads for every table, never `Ok(empty)`.
+#[tokio::test]
+async fn refused_sstable_without_a_layout_derived_table_fails_reads() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    copy_dir(&generation_dir(TABLE), tmp.path());
+    damage_stats(tmp.path());
+    let m = manager(tmp.path()).await;
+    for t in [TABLE, "anything_else"] {
+        let e = m
+            .scan(&tid(t), None, None, None, None)
+            .await
+            .expect_err("must be Err, not Ok(empty)");
+        assert!(e.to_string().contains("unreadable"), "{t}: {e}");
+    }
 }

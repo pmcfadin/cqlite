@@ -57,9 +57,6 @@ fn unqualified(name: &str) -> &str {
     name.rfind('.').map_or(name, |dot| &name[dot + 1..])
 }
 
-/// Ledger key for a refused file whose reader never existed, so its header
-/// table name is unavailable: path-derived, never "no key" (a refusal must not
-/// be droppable for lack of a name).
 /// Ledger key for a refusal whose table cannot be derived from its path
 /// (non-standard or non-UTF-8 directory names). It matches EVERY read: when the
 /// affected table is unknowable, no table can be proven unaffected (#4159).
@@ -70,15 +67,13 @@ pub(crate) fn table_dir_key_or_unresolved(path: &Path) -> String {
     super::refresh::table_dir_table_key(path).unwrap_or_else(|| UNRESOLVED_KEY.to_string())
 }
 
+/// Ledger key for a refused file whose reader never existed (no header table
+/// name): derived ONLY through `base_path_table_key`, the helper (with its base-directory
+/// exclusion) the manager keys base-path readers with;
+/// anything else is [`UNRESOLVED_KEY`]. An arbitrary parent-directory name is not
+/// authoritative for a nonstandard layout, so it is deliberately not a fallback.
 pub(crate) fn refusal_key(path: &Path, base_dir_name: &str) -> String {
     super::refresh::base_path_table_key(path, base_dir_name, "")
-        .or_else(|| super::refresh::table_dir_table_key(path))
-        .or_else(|| {
-            path.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .map(str::to_string)
-        })
         .unwrap_or_else(|| UNRESOLVED_KEY.to_string())
 }
 
