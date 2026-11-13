@@ -410,3 +410,136 @@ async fn drop_after_finalize_never_unlinks_a_path_it_no_longer_owns() {
         b"someone else's file"
     );
 }
+
+/// R1.1: the Parquet writer and the Vortex writer BOTH build their `RecordBatch` through the one
+/// shared producer, `rows_to_record_batch_with_schema` — one producer call per writer for the same
+/// rows, counted by a test hook on the producer itself (thread-local; `#[tokio::test]` runs on one
+/// thread, so the async Vortex path is counted too).
+#[cfg(feature = "parquet")]
+#[tokio::test]
+async fn both_writers_build_their_batches_through_the_one_shared_producer() {
+    use crate::export::arrow_convert::PRODUCER_CALLS;
+    use crate::export::parquet::{create_streaming_parquet_writer, ParquetExportOptions};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let metadata = metadata_two_cols();
+    let rows = vec![row(1, Some("a")), row(2, None)];
+    let calls = || PRODUCER_CALLS.with(|c| c.get());
+
+    let start = calls();
+    let file = std::fs::File::create(dir.path().join("p.parquet")).expect("parquet file");
+    let mut pw = create_streaming_parquet_writer(file, &metadata, &ParquetExportOptions::default())
+        .expect("parquet writer");
+    pw.write_chunk(&rows).expect("parquet write_chunk");
+    pw.finalize().expect("parquet finalize");
+    let after_parquet = calls();
+    assert_eq!(
+        after_parquet - start,
+        1,
+        "Parquet must call the shared producer exactly once"
+    );
+
+    let mut vw = StreamingVortexWriter::create(
+        dir.path().join("v.vortex"),
+        &metadata,
+        &VortexExportOptions::default(),
+    )
+    .await
+    .expect("vortex writer");
+    vw.write_chunk(&rows).await.expect("vortex write_chunk");
+    vw.finalize().await.expect("vortex finalize");
+    assert_eq!(
+        calls() - after_parquet,
+        1,
+        "Vortex must call the shared producer exactly once"
+    );
+}
+
+/// R1.2: the writer's source holds no CQL-type mapping of its own (no `CqlType`, no Arrow array
+/// builders) — values reach Arrow only through the shared producer. A source-level pin, so adding a
+/// Vortex-private mapping fails this test.
+#[test]
+fn vortex_source_has_no_cql_to_arrow_mapping_of_its_own() {
+    let src = include_str!("vortex.rs");
+    for forbidden in [
+        "CqlType",
+        "arrow::array::builder",
+        "Builder::",
+        "Value::Text",
+        "Value::Int",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "vortex.rs must not contain `{forbidden}`"
+        );
+    }
+    assert!(src.contains("rows_to_record_batch_with_schema("));
+}
+
+/// R2.1 (writer level): a `uuid` and a `timeuuid` column come out of the Vortex WRITER as Vortex's
+/// UUID extension DType, read from the written file's own dtype (a text column is not an
+/// extension). The fixture-backed confirmation is the CLI differential's
+/// `r2_1_vortex_dtype_is_the_uuid_extension_for_uuid_and_timeuuid`.
+#[tokio::test]
+async fn uuid_and_timeuuid_columns_are_the_vortex_uuid_extension_dtype() {
+    use crate::schema::CqlType;
+    use vortex::array::extension::uuid::Uuid as VortexUuid;
+    use vortex::file::OpenOptionsSessionExt;
+
+    let col = |name: &str, dt: DataType, cql: CqlType, pos: usize| ColumnInfo {
+        name: name.to_string(),
+        data_type: dt,
+        nullable: false,
+        position: pos,
+        table_name: None,
+        cql_type: Some(cql),
+    };
+    let metadata = QueryMetadata {
+        columns: vec![
+            col("u", DataType::Uuid, CqlType::Uuid, 0),
+            col("tu", DataType::Uuid, CqlType::TimeUuid, 1),
+            col("t", DataType::Text, CqlType::Text, 2),
+        ],
+        ..Default::default()
+    };
+    let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+    values.insert(Arc::<str>::from("u"), Value::Uuid([7u8; 16]));
+    values.insert(Arc::<str>::from("tu"), Value::Uuid([9u8; 16]));
+    values.insert(Arc::<str>::from("t"), Value::Text("x".into()));
+    let rows = vec![QueryRow {
+        values,
+        key: RowKey::new(Vec::new()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    }];
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("u.vortex");
+    let mut w = StreamingVortexWriter::create(&path, &metadata, &VortexExportOptions::default())
+        .await
+        .expect("create");
+    w.write_chunk(&rows).await.expect("write_chunk");
+    w.finalize().await.expect("finalize");
+
+    let session = VortexSession::default();
+    let file = session.open_options().open_path(path).await.expect("open");
+    let fields = file.dtype().as_struct_fields();
+    let is_uuid = |name: &str| {
+        fields
+            .field(name)
+            .unwrap_or_else(|| panic!("no field {name}"))
+            .as_extension_opt()
+            .map(|e| e.is::<VortexUuid>())
+    };
+    assert_eq!(
+        is_uuid("u"),
+        Some(true),
+        "uuid must be the UUID extension DType"
+    );
+    assert_eq!(
+        is_uuid("tu"),
+        Some(true),
+        "timeuuid must be the UUID extension DType"
+    );
+    assert_eq!(is_uuid("t"), None, "text must not be an extension type");
+}

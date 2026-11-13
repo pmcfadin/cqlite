@@ -672,3 +672,277 @@ fn differential_read_sstable_rejects_vortex() {
         "expected the deliberate Vortex-rejection message, got stderr: {stderr}"
     );
 }
+
+// ============================================================================
+// R2.1 — the Vortex DType itself carries the UUID extension
+// ============================================================================
+
+/// Per top-level column: `Some(is_uuid_extension)` if the Vortex DType is an extension type,
+/// `None` otherwise. Read from the FILE's own dtype, not from an Arrow read-back.
+async fn vortex_dtype_uuid_flags(
+    path: &Path,
+) -> Result<Vec<(String, Option<bool>)>, Box<dyn StdError>> {
+    use vortex::array::extension::uuid::Uuid;
+    use vortex::file::OpenOptionsSessionExt;
+    use vortex::session::VortexSession;
+    use vortex::VortexSessionDefault;
+
+    let session = VortexSession::default();
+    let file = session.open_options().open_path(path.to_path_buf()).await?;
+    let fields = file.dtype().as_struct_fields();
+    let mut out = Vec::new();
+    for name in fields.names().iter() {
+        let dtype = fields
+            .field(name.as_ref())
+            .ok_or_else(|| format!("no field dtype for {name}"))?;
+        out.push((
+            name.to_string(),
+            dtype.as_extension_opt().map(|e| e.is::<Uuid>()),
+        ));
+    }
+    Ok(out)
+}
+
+/// R2.1: a `uuid` and a `timeuuid` column both arrive as Vortex's UUID extension DType (inspected
+/// on the file's dtype), a non-UUID column does not, and the values match Parquet's
+/// (`diff_one_table`, which also compares the Arrow extension names). `test_basic.simple_table`
+/// carries `id UUID` and `session_id TIMEUUID` (`basic-types.cql`).
+#[test]
+fn r2_1_vortex_dtype_is_the_uuid_extension_for_uuid_and_timeuuid() {
+    let strict = require_fixtures_strict();
+    let Some(root) = datasets_root() else {
+        assert!(
+            !strict,
+            "CQLITE_REQUIRE_FIXTURES=1 but the dataset root is unset"
+        );
+        eprintln!("dataset root not set, skipping");
+        return;
+    };
+    let table = FixtureTable {
+        keyspace: "test_basic",
+        table: "simple_table".to_string(),
+        schema: schemas_dir().join("basic-types.cql"),
+    };
+    if table_dir_has_data_db(&root, &table).is_none() {
+        assert!(
+            !strict,
+            "CQLITE_REQUIRE_FIXTURES=1 but test_basic.simple_table has no Data.db"
+        );
+        eprintln!("test_basic.simple_table: no Data.db, skipping");
+        return;
+    }
+    let tmp = TempDir::new().expect("tmp");
+    let vortex_path = tmp.path().join("out.vortex");
+    let (_, stderr, ok) = run_cli(&[
+        "--schema",
+        table.schema.to_str().unwrap(),
+        "--data-dir",
+        root.join("sstables").to_str().unwrap(),
+        "export",
+        vortex_path.to_str().unwrap(),
+        "--format",
+        "vortex",
+        "--table",
+        "test_basic.simple_table",
+    ]);
+    assert!(ok, "vortex export failed: {stderr}");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let flags = runtime
+        .block_on(vortex_dtype_uuid_flags(&vortex_path))
+        .expect("read the vortex dtype");
+    let flag = |name: &str| {
+        flags
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("column {name} missing from the vortex dtype: {flags:?}"))
+            .1
+    };
+    assert_eq!(
+        flag("id"),
+        Some(true),
+        "uuid column must be the UUID extension DType: {flags:?}"
+    );
+    assert_eq!(
+        flag("session_id"),
+        Some(true),
+        "timeuuid column must be the UUID extension DType: {flags:?}"
+    );
+    assert_eq!(
+        flag("name"),
+        None,
+        "a text column must not be an extension type"
+    );
+    // Values: byte-identical to Parquet's (and Arrow extension names equal), via the differential.
+    let rows = diff_one_table(&root, &table).unwrap_or_else(|e| panic!("{e}"));
+    assert!(rows > 0, "simple_table exported 0 rows");
+}
+
+// ============================================================================
+// R3.1 — DESC clustering order against the sstabledump golden
+// ============================================================================
+
+/// `YYYY-MM-DD HH:MM:SS.mmmZ` (sstabledump's timestamp spelling) -> epoch milliseconds.
+fn golden_ts_millis(s: &str) -> i64 {
+    let (date, time) = s.trim_end_matches('Z').split_once(' ').expect("date time");
+    let d: Vec<i64> = date
+        .split('-')
+        .map(|p| p.parse().expect("date part"))
+        .collect();
+    let (hms, ms) = time.split_once('.').unwrap_or((time, "0"));
+    let t: Vec<i64> = hms
+        .split(':')
+        .map(|p| p.parse().expect("time part"))
+        .collect();
+    let (y, m, day) = (d[0], d[1], d[2]);
+    // days from civil (Howard Hinnant)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    ((days * 86400 + t[0] * 3600 + t[1] * 60 + t[2]) * 1000) + ms.parse::<i64>().expect("millis")
+}
+
+/// R3.1: for a table with a DESC clustering column (`test_timeseries.sensor_data`,
+/// `clustering ORDER BY (timestamp DESC)`, ~200 rows per partition) the exported Vortex rows are in
+/// EXACTLY the order the sstabledump golden lists them — partition by partition, each partition's
+/// timestamps descending — not merely equal to Parquet's order. `diff_one_table` (the same table is
+/// in the 31-table sweep) separately pins Parquet == Vortex.
+#[test]
+fn r3_1_desc_clustering_order_matches_the_sstabledump_golden() {
+    let strict = require_fixtures_strict();
+    let Some(root) = datasets_root() else {
+        assert!(
+            !strict,
+            "CQLITE_REQUIRE_FIXTURES=1 but the dataset root is unset"
+        );
+        eprintln!("dataset root not set, skipping");
+        return;
+    };
+    let table = FixtureTable {
+        keyspace: "test_timeseries",
+        table: "sensor_data".to_string(),
+        schema: schemas_dir().join("time-series.cql"),
+    };
+    let Some(dir) = table_dir_has_data_db(&root, &table) else {
+        assert!(
+            !strict,
+            "CQLITE_REQUIRE_FIXTURES=1 but test_timeseries.sensor_data has no Data.db"
+        );
+        eprintln!("test_timeseries.sensor_data: no Data.db, skipping");
+        return;
+    };
+    let golden_path = std::fs::read_dir(&dir)
+        .expect("table dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with("-Data.db.jsonl"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no sstabledump golden (*-Data.db.jsonl) in {}",
+                dir.display()
+            )
+        });
+    let golden: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&golden_path).expect("golden"))
+            .expect("golden json");
+    // Expected sequence: (partition uuid, timestamp millis), in the golden's own order.
+    let mut expected: Vec<(String, i64)> = Vec::new();
+    for part in golden.as_array().expect("golden is an array of partitions") {
+        let key = part["partition"]["key"][0]
+            .as_str()
+            .expect("partition key")
+            .to_string();
+        for row in part["rows"].as_array().expect("rows") {
+            if row["type"] == "row" {
+                expected.push((
+                    key.clone(),
+                    golden_ts_millis(row["clustering"][0].as_str().expect("ck")),
+                ));
+            }
+        }
+    }
+    assert!(
+        expected.len() > 1000,
+        "golden unexpectedly small: {}",
+        expected.len()
+    );
+    // The golden itself must exercise DESC: some partition has strictly decreasing timestamps.
+    assert!(
+        expected
+            .windows(2)
+            .any(|w| w[0].0 == w[1].0 && w[0].1 > w[1].1),
+        "the golden shows no descending clustering step"
+    );
+
+    let tmp = TempDir::new().expect("tmp");
+    let vortex_path = tmp.path().join("out.vortex");
+    let (_, stderr, ok) = run_cli(&[
+        "--schema",
+        table.schema.to_str().unwrap(),
+        "--data-dir",
+        root.join("sstables").to_str().unwrap(),
+        "export",
+        vortex_path.to_str().unwrap(),
+        "--format",
+        "vortex",
+        "--table",
+        "test_timeseries.sensor_data",
+    ]);
+    assert!(ok, "vortex export failed: {stderr}");
+    let batch = read_vortex_file(&vortex_path).expect("read back vortex");
+
+    let id_col = batch.column(batch.schema().index_of("sensor_id").expect("sensor_id"));
+    let ts_col = batch.column(batch.schema().index_of("timestamp").expect("timestamp"));
+    let ids = id_col
+        .as_any()
+        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+        .expect("uuid is FixedSizeBinary(16)");
+    let ts_i64 =
+        arrow::compute::cast(ts_col, &arrow::datatypes::DataType::Int64).expect("ts as i64");
+    let ts_i64 = ts_i64
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("i64");
+    let divisor = match ts_col.data_type() {
+        arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => 1,
+        arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => 1_000,
+        arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _) => {
+            1_000_000
+        }
+        other => panic!("unexpected timestamp type {other:?}"),
+    };
+    let uuid_str = |b: &[u8]| {
+        let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        format!(
+            "{}-{}-{}-{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..32]
+        )
+    };
+    let actual: Vec<(String, i64)> = (0..batch.num_rows())
+        .map(|i| (uuid_str(ids.value(i)), ts_i64.value(i) / divisor))
+        .collect();
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "row count differs from the sstabledump golden"
+    );
+    let first_diff = actual.iter().zip(expected.iter()).position(|(a, e)| a != e);
+    assert_eq!(
+        first_diff,
+        None,
+        "Vortex row order diverges from the sstabledump golden at row {first_diff:?}: \
+         vortex={:?} golden={:?}",
+        first_diff.map(|i| &actual[i]),
+        first_diff.map(|i| &expected[i])
+    );
+}
