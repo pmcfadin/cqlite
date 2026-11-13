@@ -40,12 +40,14 @@ use crate::parser::repair_metadata::diagnose_fields::CellPerPartitionStats;
 /// not a divergent formula). Returns `None` only when a caller-declared value is
 /// invalid (negative), which disables purging (a strict no-op) — garbage
 /// metadata must never cause a tombstone to read as droppable.
+/// An out-of-range `now - gc_grace` is rejected up front by `diagnose_table` (usage error), so the
+/// `checked_sub` `None` here is unreachable in a report; it is never a wrapped value.
 pub(crate) fn compute_gc_before_secs(gc_grace_seconds: Option<i64>, now_secs: i64) -> Option<i64> {
     /// Cassandra's `TableParams.DEFAULT_GC_GRACE_SECONDS` (10 days).
     const DEFAULT_GC_GRACE_SECONDS: i64 = 864_000;
     match gc_grace_seconds {
-        None => Some(now_secs - DEFAULT_GC_GRACE_SECONDS),
-        Some(gc_grace_seconds) if gc_grace_seconds >= 0 => Some(now_secs - gc_grace_seconds),
+        None => now_secs.checked_sub(DEFAULT_GC_GRACE_SECONDS),
+        Some(gc_grace_seconds) if gc_grace_seconds >= 0 => now_secs.checked_sub(gc_grace_seconds),
         Some(_) => None,
     }
 }

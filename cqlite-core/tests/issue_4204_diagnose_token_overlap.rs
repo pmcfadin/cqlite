@@ -18,7 +18,9 @@ mod datasets_root;
 
 use std::path::{Path, PathBuf};
 
-use cqlite_core::storage::sstable::diagnose::{diagnose_table, DiagnoseOptions};
+use cqlite_core::storage::sstable::diagnose::{
+    diagnose_table, DiagnoseOptions, FieldSource, SourcedField,
+};
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use serde_json::Value as Json;
 
@@ -182,7 +184,11 @@ async fn run(case: &str, a: (&str, &str), b: (&str, &str), b_gen: &str) {
     assert_eq!(report.generations.len(), 2, "{case}: two generations");
     assert_eq!(report.token_overlap.buckets, K);
     let want = expected_counts(&spans);
-    assert_eq!(report.token_overlap.counts, want, "{case}: spans {spans:?}");
+    assert_eq!(
+        report.token_overlap.counts,
+        SourcedField::measured(want.clone(), FieldSource::Index),
+        "{case}: spans {spans:?}"
+    );
     assert!(
         want.iter().any(|c| *c == 2) || want.iter().any(|c| *c == 1),
         "{case}: non-vacuous"

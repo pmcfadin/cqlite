@@ -269,7 +269,7 @@ async fn deep_scan_matches_values_derived_from_the_goldens() {
             let g = report
                 .generations
                 .iter()
-                .find(|g| g.generation == gen)
+                .find(|g| g.generation == gen.to_string())
                 .unwrap_or_else(|| panic!("{ks}.{table}: no generation {gen}"));
             let deep = g
                 .deep

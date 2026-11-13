@@ -139,7 +139,9 @@ impl<T> SourcedField<T> {
 /// One generation's cheap-tier diagnosis, plus its `--deep` results when run.
 #[derive(Debug, Clone)]
 pub struct GenerationDiagnosis {
-    pub generation: u64,
+    /// The real on-disk sstable id: Cassandra's sequential integer (`"12"`) or a UUID-based id
+    /// (`"3gkx_1f1t_2z5ah8vjn8sd9d8sjh"`), exactly as it appears in the file name.
+    pub generation: String,
     /// Two-letter on-disk format version, e.g. `"nb"`, `"oa"`, `"da"`.
     pub format: String,
     pub min_timestamp: i64,
@@ -174,7 +176,9 @@ pub struct DeepGenerationReport {
 #[derive(Debug, Clone)]
 pub struct TokenOverlap {
     pub buckets: usize,
-    pub counts: Vec<u64>,
+    /// Per-bucket generation counts, or `unmeasured: <cause naming the generations>` when ANY
+    /// generation's endpoint tokens could not be read (a partial histogram would undercount).
+    pub counts: SourcedField<Vec<u64>>,
 }
 
 /// The full `diagnose` report (spec R1-R5).
@@ -236,7 +240,18 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
         )));
     }
 
+    // `now - gc_grace` must be representable: an out-of-range cutoff is a usage error, never a
+    // wrapped or silently-saturated value (a negative gc_grace legitimately disables purging).
     let gc_before = compute_gc_before_secs(options.gc_grace_seconds, options.now_secs);
+    if gc_before.is_none() && options.gc_grace_seconds.is_none_or(|g| g >= 0) {
+        return Err(Error::InvalidInput(format!(
+            "gcBefore is out of range: now {} minus gc_grace_seconds {} overflows",
+            options.now_secs,
+            options
+                .gc_grace_seconds
+                .map_or_else(|| "864000 (default)".to_string(), |g| g.to_string())
+        )));
+    }
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
@@ -244,24 +259,41 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
     let mut generations = Vec::with_capacity(data_paths.len());
     let mut unreadable_generations = Vec::new();
     let mut token_spans: Vec<(i64, i64)> = Vec::new();
+    // Generations contributing NO token span (unreadable, or endpoint tokens not decodable): the
+    // histogram would silently undercount them, so any entry makes it `unmeasured`.
+    let mut without_span: Vec<String> = Vec::new();
 
     for data_path in &data_paths {
         match diagnose_generation(data_path, options, gc_before, &config, platform.clone()).await {
             Ok((gen_report, token_span)) => {
-                if let Some(span) = token_span {
-                    token_spans.push(span);
+                match token_span {
+                    Some(span) => token_spans.push(span),
+                    None => without_span.push(gen_report.generation.clone()),
                 }
                 generations.push(gen_report);
             }
             // R6: an unreadable generation is a field in the report, not a refusal.
-            Err(e) => unreadable_generations.push(UnreadableGeneration {
-                data_path: data_path.clone(),
-                cause: e.to_string(),
-            }),
+            Err(e) => {
+                without_span.push(data_path.display().to_string());
+                unreadable_generations.push(UnreadableGeneration {
+                    data_path: data_path.clone(),
+                    cause: e.to_string(),
+                });
+            }
         }
     }
 
-    let counts = compute_token_overlap(&token_spans, TOKEN_OVERLAP_BUCKETS);
+    let counts = if without_span.is_empty() {
+        SourcedField::measured(
+            compute_token_overlap(&token_spans, TOKEN_OVERLAP_BUCKETS),
+            FieldSource::Index,
+        )
+    } else {
+        SourcedField::unmeasured(format!(
+            "endpoint tokens unavailable for generation(s) {}; a partial histogram would undercount",
+            without_span.join(", ")
+        ))
+    };
 
     Ok(DiagnoseReport {
         table_dir: table_dir.to_path_buf(),
@@ -319,17 +351,19 @@ async fn diagnose_generation(
         .as_ref()
         .map(|d| d.version.clone())
         .unwrap_or_default();
-    // The generation number comes from the FILENAME's own sstable-id segment
-    // (spec R5.1: `Data.db` is never opened in the cheap tier — not even for
-    // its header — so `generation` cannot come from `SSTableReader::generation`,
-    // which is decoded from the Data.db header). Every committed fixture this
-    // change targets uses Cassandra's sequential-integer id form (`nb-1-big-…`);
-    // a hex-UUID id (also legal) falls back to `0` here — a display label, not a
-    // measured value, so it does not need a `SourcedField`.
+    // The generation id comes from the FILENAME's own sstable-id segment (spec R5.1: `Data.db`
+    // is never opened in the cheap tier, so not from its header), kept as the STRING Cassandra
+    // wrote — an integer id (`nb-12-big-…`) or a UUID-based id (`nb-3gkx_…-big-…`); never
+    // coerced to a number, which would collapse every UUID id to one label.
     let generation = descriptor
         .as_ref()
-        .and_then(|d| d.sstable_id.parse::<u64>().ok())
-        .unwrap_or(0);
+        .map(|d| d.sstable_id.clone())
+        .ok_or_else(|| {
+            Error::corruption(format!(
+                "{} is not a valid SSTable file name (no parseable sstable id)",
+                data_path.display()
+            ))
+        })?;
 
     // First/last partition-key tokens for the table-wide token-overlap
     // histogram (spec R4, D4) come from `Summary.db` ALONE (BIG only — BTI has
@@ -379,9 +413,11 @@ async fn diagnose_generation(
             ),
             Some(schema) => {
                 let path = data_path.to_path_buf();
-                let (now, gcb) = (options.now_secs, gc_before);
-                match tokio::task::spawn_blocking(move || predict_reclaim(&path, &schema, gcb, now))
-                    .await
+                let (now, gcb, rows_in) = (options.now_secs, gc_before, scan.rows_scanned);
+                match tokio::task::spawn_blocking(move || {
+                    predict_reclaim(&path, &schema, gcb, now, rows_in)
+                })
+                .await
                 {
                     Ok(Ok(p)) => SourcedField::measured(p, FieldSource::Scan),
                     Ok(Err(e)) => SourcedField::unmeasured(format!("dry compaction failed: {e}")),
