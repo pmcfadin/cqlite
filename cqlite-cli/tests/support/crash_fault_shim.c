@@ -407,11 +407,12 @@ int symlink(const char *a, const char *b2) {
  * signature merely reads registers the caller left unspecified and then ignores the unused ones.
  * That is also what makes forwarding an unhandled number to the real `syscall` register-exact.
  *
- * Mutating numbers the shim does NOT handle (below) ABORT the run loudly: a harness that cannot
- * see a write boundary must fail, never go green blind. */
+ * Every raw number that is neither handled above nor on the non-mutating ALLOWLIST below ABORTS
+ * the run loudly (exit 97, number named): a harness that cannot see a write boundary must fail,
+ * never go green blind. */
 long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5) __asm__("syscall");
 static void blind_abort(long num) {
-  static const char msg[] = "crash_fault_shim: UNHANDLED mutating syscall number ";
+  static const char msg[] = "crash_fault_shim: UNHANDLED raw syscall number ";
   char buf[sizeof msg + 24];
   int len = snprintf(buf, sizeof buf, "%s%ld\n", msg, num);
   real_syscall()(SYS_write, 2, buf, len);
@@ -459,32 +460,127 @@ long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5
     case SYS_creat: RET(creat((const char *)a0, (mode_t)a1));
 #endif
 #undef RET
-    /* Mutating calls with no wrapper above: abort rather than be blind to them. */
-    case SYS_truncate:
-    case SYS_linkat:
-    case SYS_symlinkat:
-    case SYS_openat2:
-    case SYS_utimensat:
-    case SYS_io_uring_setup:
-    case SYS_io_uring_enter:
-    case SYS_io_uring_register:
-#ifdef SYS_link
-    case SYS_link:
+    /* ALLOWLIST of raw syscalls that cannot mutate the filesystem: forwarded uncounted. This is
+     * deliberately NOT a denylist - a mutating call nobody listed (mknodat, fchmodat, fchownat,
+     * the xattr family, ...) must never pass unseen. MEASURED: a counting run of rebuild and
+     * salvage over every harness fixture issues exactly one raw number through `syscall()` -
+     * futex (the rest of the process's I/O goes through the libc wrappers interposed above).
+     * The remaining entries are the usual read-only / time / memory / scheduling numbers a
+     * runtime may use. Anything else (incl. ioctl, which can clone/dedupe file data) aborts. */
+#define ALLOW(nr) case nr:
+#ifdef SYS_futex
+    ALLOW(SYS_futex)
 #endif
-#ifdef SYS_symlink
-    case SYS_symlink:
+#ifdef SYS_futex_waitv
+    ALLOW(SYS_futex_waitv)
 #endif
-#ifdef SYS_utime
-    case SYS_utime:
+#ifdef SYS_getrandom
+    ALLOW(SYS_getrandom)
 #endif
-#ifdef SYS_utimes
-    case SYS_utimes:
+#ifdef SYS_gettid
+    ALLOW(SYS_gettid)
 #endif
-#ifdef SYS_futimesat
-    case SYS_futimesat:
+#ifdef SYS_getpid
+    ALLOW(SYS_getpid)
 #endif
+#ifdef SYS_getcpu
+    ALLOW(SYS_getcpu)
+#endif
+#ifdef SYS_rseq
+    ALLOW(SYS_rseq)
+#endif
+#ifdef SYS_membarrier
+    ALLOW(SYS_membarrier)
+#endif
+#ifdef SYS_sched_yield
+    ALLOW(SYS_sched_yield)
+#endif
+#ifdef SYS_sched_getaffinity
+    ALLOW(SYS_sched_getaffinity)
+#endif
+#ifdef SYS_clock_gettime
+    ALLOW(SYS_clock_gettime)
+#endif
+#ifdef SYS_clock_nanosleep
+    ALLOW(SYS_clock_nanosleep)
+#endif
+#ifdef SYS_nanosleep
+    ALLOW(SYS_nanosleep)
+#endif
+#ifdef SYS_read
+    ALLOW(SYS_read)
+#endif
+#ifdef SYS_pread64
+    ALLOW(SYS_pread64)
+#endif
+#ifdef SYS_lseek
+    ALLOW(SYS_lseek)
+#endif
+#ifdef SYS_close
+    ALLOW(SYS_close)
+#endif
+#ifdef SYS_getdents64
+    ALLOW(SYS_getdents64)
+#endif
+#ifdef SYS_statx
+    ALLOW(SYS_statx)
+#endif
+#ifdef SYS_newfstatat
+    ALLOW(SYS_newfstatat)
+#endif
+#ifdef SYS_fstat
+    ALLOW(SYS_fstat)
+#endif
+#ifdef SYS_readlinkat
+    ALLOW(SYS_readlinkat)
+#endif
+#ifdef SYS_faccessat
+    ALLOW(SYS_faccessat)
+#endif
+#ifdef SYS_getcwd
+    ALLOW(SYS_getcwd)
+#endif
+#ifdef SYS_mmap
+    ALLOW(SYS_mmap)
+#endif
+#ifdef SYS_munmap
+    ALLOW(SYS_munmap)
+#endif
+#ifdef SYS_mprotect
+    ALLOW(SYS_mprotect)
+#endif
+#ifdef SYS_madvise
+    ALLOW(SYS_madvise)
+#endif
+#ifdef SYS_epoll_ctl
+    ALLOW(SYS_epoll_ctl)
+#endif
+#ifdef SYS_epoll_pwait
+    ALLOW(SYS_epoll_pwait)
+#endif
+#ifdef SYS_eventfd2
+    ALLOW(SYS_eventfd2)
+#endif
+#ifdef SYS_prlimit64
+    ALLOW(SYS_prlimit64)
+#endif
+#ifdef SYS_uname
+    ALLOW(SYS_uname)
+#endif
+#undef ALLOW
+    {
+      /* AUDIT hook: record every allow-listed raw number the process issues (the measurement). */
+      const char *audit = getenv("CQLITE_FAULT_SYSCALL_AUDIT");
+      if (audit) {
+        char buf[32];
+        int len = snprintf(buf, sizeof buf, "%ld\n", num);
+        int fd = (int)real_syscall()(SYS_openat, AT_FDCWD, audit, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) { real_syscall()(SYS_write, fd, buf, len); real_syscall()(SYS_close, fd); }
+      }
+      return real_syscall()(num, a0, a1, a2, a3, a4, a5);
+    }
+    default:
       blind_abort(num);
       return -1;
-    default: return real_syscall()(num, a0, a1, a2, a3, a4, a5);
   }
 }
