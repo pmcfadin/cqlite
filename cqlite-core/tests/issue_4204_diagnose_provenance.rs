@@ -14,6 +14,8 @@
 //!   generation, proving the MEASURED path is wired through `diagnose_table`
 //!   itself (wiring evidence, not just unit coverage of the mapping helper).
 
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
+
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
 
