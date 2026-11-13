@@ -353,20 +353,14 @@ impl ReconcileState {
             .as_ref()
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
-        // #4545: a key pseudo-cell (ts = row marker's, or 0) is kept while the row has surviving data.
-        let data_survives = row_del.is_none_or(|d| {
-            self.winners
-                .values()
-                .any(|c| !ck_names.contains(c.column.as_str()) && c.timestamp > d)
-        });
+        // #4545: key pseudo-cells are kept here; `build` drops them again if no LIVE data survives.
         let winners = &mut self.winners;
         self.after_row_del = std::mem::take(&mut self.order)
             .into_iter()
             .filter_map(|cell_key| winners.remove(&cell_key))
             .filter(|cell| match row_del {
                 Some(d) => {
-                    let survives = cell.timestamp > d
-                        || (data_survives && ck_names.contains(cell.column.as_str()));
+                    let survives = cell.timestamp > d || ck_names.contains(cell.column.as_str());
                     // Issue #2163: a LIVE DATA cell dropped here was SHADOWED by
                     // the row tombstone (suppressed) — count it, distinct from a
                     // gc/overlap-safe purge. A cell that is itself a tombstone,
@@ -675,7 +669,7 @@ impl ReconcileState {
             row_del_ldt,
             complex_deletions,
             range_deletion,
-            surviving,
+            mut surviving,
             had_data_before,
             row_liveness,
             ..
@@ -688,6 +682,12 @@ impl ReconcileState {
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
+        if let Some(d) = row_del {
+            let tomb = |c: &CellData| KWayMerger::is_cell_tombstone(c) || c.is_deleted;
+            if !surviving.iter().any(|c| is_data_cell(c) && !tomb(c)) {
+                surviving.retain(|c| is_data_cell(c) || c.timestamp > d);
+            }
+        }
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;
         drop(ck_names);

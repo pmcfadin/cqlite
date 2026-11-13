@@ -59,7 +59,28 @@ fn want_cols() -> Cols {
     ["pk", "ck", "b"].iter().map(|s| s.to_string()).collect()
 }
 
+/// pk=1 returns EXACTLY ck 1, 2, 3: ck=4 (row deleted, only an older cell) and ck=5 (row deleted at
+/// 200, then only a newer cell TOMBSTONE at 300 - no live data) are NOT rows in Cassandra's SELECT,
+/// and must not materialise as phantom key-only rows.
+fn assert_exact_rows(path: &str, rows: &[std::collections::HashMap<String, Value>]) {
+    let mut cks: Vec<i32> = rows
+        .iter()
+        .filter(|r| r.get("pk") == Some(&Value::Integer(1)))
+        .map(|r| match r.get("ck") {
+            Some(Value::Integer(i)) => *i,
+            _ => -1,
+        })
+        .collect();
+    cks.sort();
+    assert_eq!(
+        cks,
+        vec![1, 2, 3],
+        "[{path}] pk=1 clustering keys (no phantom key-only rows)"
+    );
+}
+
 fn assert_ck2_row(path: &str, rows: &[std::collections::HashMap<String, Value>]) {
+    assert_exact_rows(path, rows);
     let row = rows
         .iter()
         .find(|r| {
@@ -185,4 +206,110 @@ async fn untouched_rows_keep_their_exact_column_sets() {
         3,
         "ck=4 stays invisible (row deleted, only an older cell)"
     );
+}
+
+/// The COMPACTION WRITE PATH (`compact_sstables` -> `merge_entry_to_mutation` -> writer) for both
+/// shapes: compact the two Cassandra generations with CQLite, read the OUTPUT back, and compare with
+/// Cassandra's SELECT - the surviving row keeps `ck`, the tombstone-only row stays hidden.
+#[test]
+fn compaction_output_keeps_the_clustering_column_and_hides_the_tombstone_only_row() {
+    use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+    use cqlite_core::storage::write_engine::merge::compact_sstables;
+
+    let schema = TableSchema {
+        keyspace: "test_percell".into(),
+        table: "pcell".into(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".into(),
+            data_type: "int".into(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".into(),
+            data_type: "int".into(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: ["a", "b", "c"]
+            .iter()
+            .map(|n| Column {
+                name: (*n).into(),
+                data_type: "text".into(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            })
+            .collect(),
+        comments: Default::default(),
+        dropped_columns: Default::default(),
+    };
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let src =
+        datasets_root::table_generation_dirs(&fixture().join("ordered"), "test_percell", "pcell");
+    assert_eq!(src.len(), 1);
+    let out = tmp
+        .path()
+        .join("test_percell")
+        .join("pcell-00000000000000000000000000000000");
+    std::fs::create_dir_all(&out).expect("out dir");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    let inputs = vec![
+        src[0].join("nb-2-big-Data.db"),
+        src[0].join("nb-1-big-Data.db"),
+    ];
+    rt.block_on(compact_sstables(inputs, &out, &schema, 3, None, None, true))
+        .expect("compaction");
+
+    // Read the OUTPUT back through the merge reader (the layout `<out>/<ks>/<table>/nb-3-big-*`).
+    use cqlite_core::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
+    let mut merger = KWayMerger::new(
+        vec![out.join("test_percell/pcell/nb-3-big-Data.db")],
+        &schema,
+    )
+    .expect("merger");
+    let (mut live_cks, mut key_cell_cks) = (Vec::new(), Vec::new());
+    loop {
+        match merger.step().expect("step") {
+            MergeStep::Complete => break,
+            MergeStep::Partition { rows, .. } => {
+                for e in rows {
+                    let ck = match e.clustering_key.as_ref().and_then(|c| c.columns.first()) {
+                        Some((_, Value::Integer(i))) => *i,
+                        _ => continue,
+                    };
+                    let RowData::Live { cells } = &e.row_data else {
+                        continue;
+                    };
+                    let has_key = cells.iter().any(|c| c.column == "ck");
+                    let has_live = cells.iter().any(|c| {
+                        c.column != "ck" && !matches!(c.value, Value::Tombstone(_)) && !c.is_deleted
+                    });
+                    if has_key {
+                        key_cell_cks.push(ck);
+                    }
+                    if has_live {
+                        live_cks.push(ck);
+                    }
+                }
+            }
+        }
+    }
+    live_cks.sort();
+    // pk=1 rows with live data: ck 1, 2, 3 (pk 2/3 rows also appear, with ck=1 - filter by count below)
+    assert!(
+        live_cks.contains(&2),
+        "ck=2 must survive compaction: {live_cks:?}"
+    );
+    assert!(
+        !live_cks.contains(&4) && !live_cks.contains(&5),
+        "tombstone-only rows are not live: {live_cks:?}"
+    );
+    assert!(
+        key_cell_cks.contains(&2),
+        "ck=2 must keep its clustering key cell: {key_cell_cks:?}"
+    );
+    assert!(!key_cell_cks.contains(&5), "ck=5 (row deleted, only a newer cell tombstone) must not keep a key-only row: {key_cell_cks:?}");
 }
