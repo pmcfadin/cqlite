@@ -116,11 +116,8 @@ impl DataWriter {
                     return Ok(0);
                 }
                 if is_complex {
-                    // Issue #2038 (Scope B): thread the mutation's row-level
-                    // `USING TTL` (`mop.row_ttl_seconds`) instead of dropping it
-                    // (`None`), mirroring the scalar arm below. Every element cell
-                    // is stamped IS_EXPIRING with localDeletionTime = now + ttl, so
-                    // a row-level `USING TTL` collection/UDT write round-trips.
+                    // Issue #2038 (Scope B): thread the row-level `USING TTL` (`mop.row_ttl_seconds`)
+                    // so every element is IS_EXPIRING with localDeletionTime = now + ttl.
                     let row_ttl = mop.row_ttl_seconds;
                     self.write_complex_column(
                         buf,
@@ -163,10 +160,8 @@ impl DataWriter {
                                 now_seconds,
                             )?;
                         }
-                    } else if row.liveness_ts == Some(mop.timestamp_micros) {
-                        self.write_cell(buf, column, value, mop.timestamp_micros)?;
                     } else {
-                        self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
+                        self.write_scalar_cell_no_ttl(buf, row, mop, column, value)?;
                     }
                 }
                 Ok(1)
@@ -181,15 +176,20 @@ impl DataWriter {
                 if matches!(value, Value::Null) {
                     return Ok(0);
                 }
+                // TTL 0 is NO_TTL (Cassandra `Attributes.getTimeToLive`): never an expiring cell (#4530).
+                let ttl_opt = Some(*ttl_seconds).filter(|t| *t != 0);
                 if is_complex {
                     self.write_complex_column(
                         buf,
                         col,
                         value,
                         mop.timestamp_micros,
-                        Some(*ttl_seconds),
+                        ttl_opt,
                         now_seconds,
                     )?;
+                } else if ttl_opt.is_none() {
+                    let canon = canonicalize_udt_value(&col.data_type, value)?;
+                    self.write_scalar_cell_no_ttl(buf, row, mop, column, canon.as_ref())?;
                 } else {
                     // roborev #1020 Finding 1: schema-aware frozen-UDT value.
                     let canon = canonicalize_udt_value(&col.data_type, value)?;

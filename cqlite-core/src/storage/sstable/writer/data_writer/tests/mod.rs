@@ -33,6 +33,7 @@ mod streaming_partition;
 mod support;
 /// `set<timeuuid>` / `map<timeuuid,…>` element order (issue #4534).
 mod timeuuid_collection_write;
+mod ttl_zero_4530;
 /// DIFFERENTIAL pin between the writer's two independent sorted-collection
 /// comparators (issue #3935) — `collection_order::compare_collection_elements`
 /// (variant-driven) vs `marshal_comparator::compare_for_marshal`

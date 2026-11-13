@@ -238,9 +238,9 @@ impl DataWriter {
         // directly below and is never shadowed by complex-deletion markers.
 
         for m in group {
-            // Shadowed by the row deletion (or partition/range floor): cells,
-            // liveness, and row-level writes of this mutation written at
-            // `timestamp <= deletion_ts` are dead.
+            // TTL 0 is NO_TTL (Cassandra `Attributes.getTimeToLive`), never an expiring cell (#4530).
+            let m_ttl = m.ttl_seconds.filter(|t| *t != 0);
+            // Shadowed by the row deletion/floor: cells, liveness and row writes at `ts <= deletion_ts` die.
             //
             // Issue #887: a `ComplexDeletion` marker is itself a deletion with its OWN
             // `marked_for_delete_at`, NOT the mutation's row timestamp. A marker whose
@@ -280,7 +280,7 @@ impl DataWriter {
                                 now_seconds,
                                 op,
                                 timestamp_micros: *marked_for_delete_at,
-                                row_ttl_seconds: m.ttl_seconds,
+                                row_ttl_seconds: m_ttl,
                                 cell_local_deletion_time: m.effective_local_deletion_time(),
                             });
                         }
@@ -295,7 +295,7 @@ impl DataWriter {
                                 now_seconds,
                                 op,
                                 timestamp_micros: *elem_ts,
-                                row_ttl_seconds: m.ttl_seconds,
+                                row_ttl_seconds: m_ttl,
                                 cell_local_deletion_time: m.effective_local_deletion_time(),
                             });
                         }
@@ -361,7 +361,7 @@ impl DataWriter {
                             now_seconds,
                             op,
                             timestamp_micros: *elem_ts,
-                            row_ttl_seconds: m.ttl_seconds,
+                            row_ttl_seconds: m_ttl,
                             cell_local_deletion_time: m.effective_local_deletion_time(),
                         });
                         continue;
@@ -393,7 +393,7 @@ impl DataWriter {
                             now_seconds,
                             op,
                             timestamp_micros: *marked_for_delete_at,
-                            row_ttl_seconds: m.ttl_seconds,
+                            row_ttl_seconds: m_ttl,
                             cell_local_deletion_time: m.effective_local_deletion_time(),
                         });
                         continue;
@@ -498,11 +498,11 @@ impl DataWriter {
                 ) {
                     match whole_col_liveness.entry(column) {
                         std::collections::hash_map::Entry::Vacant(entry) => {
-                            entry.insert((cell_ts, m.ttl_seconds));
+                            entry.insert((cell_ts, m_ttl));
                         }
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                             if cell_ts >= entry.get().0 {
-                                entry.insert((cell_ts, m.ttl_seconds));
+                                entry.insert((cell_ts, m_ttl));
                             }
                         }
                     }
@@ -512,7 +512,7 @@ impl DataWriter {
                     now_seconds,
                     op,
                     timestamp_micros: cell_ts,
-                    row_ttl_seconds: m.ttl_seconds,
+                    row_ttl_seconds: m_ttl,
                     // #921 finding 2: a surviving `Delete` cell tombstone keeps its
                     // OWN surfaced LDT; other ops fall back to the mutation's LDT.
                     cell_local_deletion_time: op_cell_local_deletion_time(op, m),
@@ -550,7 +550,7 @@ impl DataWriter {
             });
             if let Some(pk_ts) = pk_liveness_ts {
                 if liveness.is_none_or(|(ts, _)| pk_ts >= ts) {
-                    liveness = Some((pk_ts, m.ttl_seconds));
+                    liveness = Some((pk_ts, m_ttl));
                 }
             }
         }
@@ -744,7 +744,7 @@ impl DataWriter {
                     continue;
                 }
                 if liveness.is_none_or(|(ts, _)| *elem_ts >= ts) {
-                    liveness = Some((*elem_ts, *ttl_seconds));
+                    liveness = Some((*elem_ts, ttl_seconds.filter(|t| *t != 0)));
                 }
             }
         }
@@ -887,7 +887,7 @@ impl DataWriter {
         let row = Self::merge_row_group(&[mutation], schema, false, None).unwrap_or(RowWrite {
             clustering_key: mutation.clustering_key.as_ref(),
             liveness_ts: Some(mutation.timestamp_micros),
-            ttl_seconds: mutation.ttl_seconds,
+            ttl_seconds: mutation.ttl_seconds.filter(|t| *t != 0),
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),

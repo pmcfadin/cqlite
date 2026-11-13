@@ -3523,7 +3523,7 @@ impl KWayMerger {
                         };
                     }
                 }
-                if let Some(ttl) = cell.ttl {
+                if let Some(ttl) = cell.ttl.filter(|t| *t != 0) {
                     // #1538: preserve the SOURCE expiring cell's authoritative
                     // on-disk `localDeletionTime` (= writetime_s + ttl) so a live
                     // TTL cell that survives THIS compaction is re-emitted
