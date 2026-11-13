@@ -42,7 +42,7 @@ use crate::platform::Platform;
 use crate::schema::TableSchema;
 use crate::storage::sstable::reader::SSTableReader;
 use crate::storage::sstable::version_gate::{SsTableDescriptor, VersionGates};
-use crate::storage::write_engine::merge::is_fully_expired;
+use crate::storage::write_engine::merge::fully_expired::is_fully_expired;
 use crate::Config;
 
 use droppable_ratio::{
@@ -513,10 +513,10 @@ pub fn pending_repair_field(
 /// prints this same STATS field.
 pub fn compression_ratio_field(ratio: Option<f64>) -> SourcedField<f64> {
     match ratio {
-        // cassandra-5.0.8 `MetadataCollector.NO_COMPRESSION_RATIO = -1.0`: the SSTable is not
+        // cassandra-5.0.8 `MetadataCollector`'s no-compression sentinel (-1.0): the SSTable is not
         // compressed. `sstablemetadata` prints no ratio line then; the sentinel is never a value.
         Some(r) if r < 0.0 => SourcedField::unmeasured(
-            "SSTable is not compressed (STATS compressionRatio is the NO_COMPRESSION_RATIO sentinel)",
+            "SSTable is not compressed (STATS compressionRatio is the no-compression sentinel)",
         ),
         Some(r) => SourcedField::measured(r, FieldSource::Statistics),
         None => SourcedField::unmeasured("Statistics.db carries no STATS component"),
