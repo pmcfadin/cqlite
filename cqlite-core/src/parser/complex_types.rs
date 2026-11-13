@@ -344,9 +344,9 @@ impl ComplexTypeParser {
                 map(tag_no_case("blob"), |_| CqlType::Blob),
                 map(tag_no_case("timestamp"), |_| CqlType::Timestamp),
                 map(tag_no_case("date"), |_| CqlType::Date),
+                map(tag_no_case("timeuuid"), |_| CqlType::TimeUuid), // BEFORE `time` (a prefix of it): #4237
                 map(tag_no_case("time"), |_| CqlType::Time),
                 map(tag_no_case("uuid"), |_| CqlType::Uuid),
-                map(tag_no_case("timeuuid"), |_| CqlType::TimeUuid),
                 map(tag_no_case("inet"), |_| CqlType::Inet),
                 map(tag_no_case("duration"), |_| CqlType::Duration),
             ))(input)
