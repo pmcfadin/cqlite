@@ -174,10 +174,16 @@ async fn diagnose_table_end_to_end_every_field_carries_a_source() {
         &match datasets_root::sstables_root_for_table("test_basic", "simple_table") {
             Some(root) => root,
             None => {
-                eprintln!(
-                    "skip: {}",
-                    datasets_root::describe_search("test_basic", "simple_table")
-                );
+                let why = datasets_root::describe_search("test_basic", "simple_table");
+                // Fail closed: under CQLITE_REQUIRE_FIXTURES a missing fixture is a failure,
+                // never a green run that checked nothing.
+                if matches!(
+                    std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+                    Ok("1") | Ok("true")
+                ) {
+                    panic!("CQLITE_REQUIRE_FIXTURES=1 but fixture missing: {why}");
+                }
+                eprintln!("skip: {why}");
                 return;
             }
         },

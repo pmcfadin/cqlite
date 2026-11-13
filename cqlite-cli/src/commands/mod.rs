@@ -44,6 +44,9 @@ pub mod salvage;
 // `cqlite_core::storage::write_engine::rebuild`, carries the identical
 // `all(write-support, not(tombstones))` gate.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod diagnose;
+pub mod diagnose_args;
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod rebuild;
 pub mod sweep;
 pub mod verify;
@@ -140,6 +143,29 @@ pub async fn dispatch_rebuild(
             "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
              the rebuild module cannot be built against, mirroring issue #4196 round-7). Build \
              with --features write-support (and without --features tombstones) to enable rebuild."
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Dispatch `cqlite diagnose` (issue #4204), or the informative "not built" error. Mirrors
+/// [`dispatch_rebuild`]'s gate (the dry-compaction reclaim prediction needs `write-support`).
+/// `execute_diagnose_command` owns its exit codes (0 report / 1 usage).
+pub async fn dispatch_diagnose(
+    schema: Option<&std::path::Path>,
+    args: &diagnose_args::DiagnoseArgs,
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    {
+        diagnose::execute_diagnose_command(schema, args).await;
+        Ok(())
+    }
+    #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
+    {
+        let _ = (schema, args);
+        eprintln!(
+            "diagnose is not built into this binary (it needs the write-support feature and \
+             cqlite-core without tombstones). Rebuild with --features write-support."
         );
         std::process::exit(1);
     }
