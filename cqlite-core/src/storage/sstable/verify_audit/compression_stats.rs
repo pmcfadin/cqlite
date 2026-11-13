@@ -35,19 +35,19 @@ fn offset_table_problem(offsets: &[u64], file_len: u64) -> Option<String> {
     if first != 0 {
         return Some(format!("the first chunk starts at byte {first}, not 0"));
     }
-    for (i, w) in offsets.windows(2).enumerate() {
-        if w[1] <= w[0] {
+    for (i, (prev, next)) in offsets.iter().zip(offsets.iter().skip(1)).enumerate() {
+        if next <= prev {
             return Some(format!(
                 "chunk offsets are not strictly increasing: offsets[{}]={} <= offsets[{i}]={}",
                 i + 1,
-                w[1],
-                w[0]
+                next,
+                prev
             ));
         }
-        if w[1] - w[0] < CHUNK_CHECKSUM_BYTES {
+        if next - prev < CHUNK_CHECKSUM_BYTES {
             return Some(format!(
                 "chunk {i} spans {} byte(s), fewer than its {CHUNK_CHECKSUM_BYTES}-byte checksum",
-                w[1] - w[0]
+                next - prev
             ));
         }
     }
