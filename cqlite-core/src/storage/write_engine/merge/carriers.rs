@@ -46,6 +46,10 @@ pub(super) struct PartitionCarriers {
     /// first-seen (heap) order. Coalesced into a non-overlapping canonical
     /// sequence by the caller (issue #933 / #959).
     pub range_tombstones: Vec<(DecoratedKey, RangeTombstone)>,
+    /// Source generation for each entry in [`Self::range_tombstones`]. Kept
+    /// parallel until coalescing so the explain sink can identify the marker
+    /// that shadowed a cell; the write path never consults this side channel.
+    pub range_tombstone_run_indices: Option<Vec<usize>>,
     /// MAX partition deletion `(markedForDeleteAt µs, localDeletionTime s)`
     /// across all sources — the partition's outermost shadow floor (issue
     /// #1072). `None` when no partition-deletion carrier is present.
@@ -54,6 +58,8 @@ pub(super) struct PartitionCarriers {
     /// so the surviving partition tombstone can be re-emitted (issue #1072).
     /// `None` when no partition-deletion carrier is present.
     pub partition_delete_key: Option<DecoratedKey>,
+    /// Source generation of the winning partition-deletion carrier.
+    pub partition_delete_run_index: Option<usize>,
 }
 
 /// True when this entry is a range-tombstone carrier (issue #933): an empty
@@ -86,9 +92,18 @@ pub(super) fn is_range_marker_carrier(entry: &MergeEntry) -> bool {
 ///     contributes its `(key, range)` to `range_tombstones` in first-seen order.
 ///   * Every other entry is a normal `(pk, ck)` row and is ignored here (the
 ///     caller buffers it into `clustered_rows`).
+///
+/// `trace_enabled` (issue #4193) is the caller's `TraceSink::ENABLED`: only then
+/// are the per-carrier source generations (`range_tombstone_run_indices`,
+/// `partition_delete_run_index`) recorded, so the untraced merge keeps the
+/// original carrier allocation profile.
 #[cfg(feature = "write-support")]
-pub(super) fn scan_partition_carriers(rows: &[MergeEntry]) -> PartitionCarriers {
+pub(super) fn scan_partition_carriers(
+    rows: &[MergeEntry],
+    trace_enabled: bool,
+) -> PartitionCarriers {
     let mut carriers = PartitionCarriers::default();
+    let mut range_tombstone_run_indices = trace_enabled.then(Vec::new);
 
     for row in rows {
         // Partition-deletion carriers take precedence over range markers,
@@ -100,7 +115,12 @@ pub(super) fn scan_partition_carriers(rows: &[MergeEntry]) -> PartitionCarriers 
                     .get_or_insert_with(|| row.key.clone());
                 match carriers.max_partition_deletion {
                     Some((cur_mfda, _)) if cur_mfda >= mfda => {}
-                    _ => carriers.max_partition_deletion = Some((mfda, ldt)),
+                    _ => {
+                        carriers.max_partition_deletion = Some((mfda, ldt));
+                        if trace_enabled {
+                            carriers.partition_delete_run_index = Some(row.run_index);
+                        }
+                    }
                 }
                 continue;
             }
@@ -108,10 +128,14 @@ pub(super) fn scan_partition_carriers(rows: &[MergeEntry]) -> PartitionCarriers 
         if is_range_marker_carrier(row) {
             if let Some(rt) = row.range_deletion.clone() {
                 carriers.range_tombstones.push((row.key.clone(), rt));
+                if let Some(run_indices) = &mut range_tombstone_run_indices {
+                    run_indices.push(row.run_index);
+                }
             }
         }
     }
 
+    carriers.range_tombstone_run_indices = range_tombstone_run_indices;
     carriers
 }
 
@@ -174,7 +198,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_no_carriers() {
-        let carriers = scan_partition_carriers(&[]);
+        let carriers = scan_partition_carriers(&[], false);
         assert!(carriers.range_tombstones.is_empty());
         assert_eq!(carriers.max_partition_deletion, None);
         assert!(carriers.partition_delete_key.is_none());
@@ -183,7 +207,7 @@ mod tests {
     #[test]
     fn plain_rows_yield_no_carriers() {
         let rows = vec![live_row(1), live_row(1), live_row(1)];
-        let carriers = scan_partition_carriers(&rows);
+        let carriers = scan_partition_carriers(&rows, false);
         assert!(carriers.range_tombstones.is_empty());
         assert_eq!(carriers.max_partition_deletion, None);
         assert!(carriers.partition_delete_key.is_none());
@@ -196,7 +220,7 @@ mod tests {
             live_row(1),
             range_carrier(1, 100, 10),
         ];
-        let carriers = scan_partition_carriers(&rows);
+        let carriers = scan_partition_carriers(&rows, false);
         assert_eq!(carriers.range_tombstones.len(), 2);
         // First-seen (heap) order preserved: 200 before 100.
         assert_eq!(carriers.range_tombstones[0].1.deletion_time, 200);
@@ -215,7 +239,7 @@ mod tests {
             partition_carrier(7, 300, 30),
             partition_carrier(7, 200, 20),
         ];
-        let carriers = scan_partition_carriers(&rows);
+        let carriers = scan_partition_carriers(&rows, false);
         assert_eq!(carriers.max_partition_deletion, Some((300, 30)));
         // First-seen carrier's key is retained.
         assert_eq!(carriers.partition_delete_key, Some(key(7)));
@@ -226,7 +250,7 @@ mod tests {
     fn equal_mfda_keeps_first_seen_local_deletion_time() {
         // On an mfda tie the FIRST-seen (mfda, ldt) is kept (>= guard).
         let rows = vec![partition_carrier(3, 100, 11), partition_carrier(3, 100, 22)];
-        let carriers = scan_partition_carriers(&rows);
+        let carriers = scan_partition_carriers(&rows, false);
         assert_eq!(carriers.max_partition_deletion, Some((100, 11)));
     }
 
@@ -239,12 +263,39 @@ mod tests {
             live_row(5),
             range_carrier(5, 150, 15),
         ];
-        let carriers = scan_partition_carriers(&rows);
+        let carriers = scan_partition_carriers(&rows, false);
         assert_eq!(carriers.range_tombstones.len(), 2);
         assert_eq!(carriers.range_tombstones[0].1.deletion_time, 400);
         assert_eq!(carriers.range_tombstones[1].1.deletion_time, 150);
         assert_eq!(carriers.max_partition_deletion, Some((250, 25)));
         assert_eq!(carriers.partition_delete_key, Some(key(5)));
+    }
+
+    #[test]
+    fn trace_flag_records_carrier_source_generations_only_when_enabled() {
+        // Issue #4193: the source-generation side channel is populated only
+        // for an enabled trace sink; the untraced scan allocates nothing.
+        let mut newer = range_carrier(5, 400, 40);
+        newer.run_index = 0;
+        let mut older = partition_carrier(5, 250, 25);
+        older.run_index = 2;
+        let mut oldest = range_carrier(5, 150, 15);
+        oldest.run_index = 1;
+        let rows = vec![newer, older, oldest];
+
+        let traced = scan_partition_carriers(&rows, true);
+        assert_eq!(traced.range_tombstone_run_indices, Some(vec![0, 1]));
+        assert_eq!(traced.partition_delete_run_index, Some(2));
+
+        let untraced = scan_partition_carriers(&rows, false);
+        assert_eq!(untraced.range_tombstone_run_indices, None);
+        assert_eq!(untraced.partition_delete_run_index, None);
+        // The carrier set itself is identical either way.
+        assert_eq!(untraced.range_tombstones, traced.range_tombstones);
+        assert_eq!(
+            untraced.max_partition_deletion,
+            traced.max_partition_deletion
+        );
     }
 
     #[test]

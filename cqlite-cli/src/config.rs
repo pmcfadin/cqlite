@@ -87,6 +87,16 @@ pub struct PerformanceConfig {
     pub query_timeout_ms: u64,
     pub memory_limit_mb: Option<u64>,
     pub cache_size_mb: u64,
+    /// Maximum logical bytes materialized by a query or explain rendering.
+    ///
+    /// This is kept in the CLI performance section so the query and explain
+    /// surfaces share one operator-controlled result budget.
+    #[serde(default = "default_max_result_bytes")]
+    pub max_result_bytes: u64,
+}
+
+fn default_max_result_bytes() -> u64 {
+    cqlite_core::config::DEFAULT_MAX_RESULT_BYTES
 }
 
 impl Default for PerformanceConfig {
@@ -95,6 +105,7 @@ impl Default for PerformanceConfig {
             query_timeout_ms: 30000,
             memory_limit_mb: None,
             cache_size_mb: 64,
+            max_result_bytes: default_max_result_bytes(),
         }
     }
 }
@@ -790,6 +801,17 @@ impl ConfigBuilder {
                 return Err(anyhow::anyhow!("CQLITE_PAGE_SIZE must be greater than 0"));
             }
             self.config.repl.page_size = page_size;
+        }
+
+        // CQLITE_MAX_RESULT_BYTES — the same logical materialization budget
+        // enforced by the core query engine. Keep parsing here instead of
+        // relying on serde so environment precedence matches the other CLI
+        // performance controls.
+        if let Ok(val) = env::var("CQLITE_MAX_RESULT_BYTES") {
+            let max_result_bytes: u64 = val
+                .parse()
+                .with_context(|| "Invalid CQLITE_MAX_RESULT_BYTES value")?;
+            self.config.performance.max_result_bytes = max_result_bytes;
         }
 
         // CQLITE_NO_COLOR

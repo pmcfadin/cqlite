@@ -13,6 +13,7 @@
 //! | `memory_limit_mb`      | `memory.max_memory`                 |
 //! | `cache_size_mb`        | `memory.block_cache.max_size`       |
 //! | `query_timeout_ms`     | `query.max_execution_time` (#1695)  |
+//! | `max_result_bytes`    | `query.max_result_bytes`             |
 //!
 //! `query_timeout_ms` is the operator's query execution budget, ENFORCED at the
 //! query-engine chokepoint (`cqlite_core::query::engine::deadline`). **`0` means
@@ -49,6 +50,10 @@ pub fn to_core_config(cli_config: &CliConfig) -> Result<CoreConfig> {
     // `Duration::ZERO`, the core's documented "no timeout" sentinel.
     core_config.query.max_execution_time =
         std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
+
+    // Keep every materializing CLI surface on the core's one bounded-result
+    // budget. `explain` uses the same setting as ordinary query execution.
+    core_config.query.max_result_bytes = cli_config.performance.max_result_bytes;
 
     // Validate the configuration
     core_config
@@ -93,5 +98,13 @@ mod tests {
     fn shipped_default_is_thirty_seconds() {
         let core = to_core_config(&CliConfig::default()).expect("valid config");
         assert_eq!(core.query.max_execution_time, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn max_result_bytes_maps_to_core_query_budget() {
+        let mut cli = CliConfig::default();
+        cli.performance.max_result_bytes = 1234;
+        let core = to_core_config(&cli).expect("valid config");
+        assert_eq!(core.query.max_result_bytes, 1234);
     }
 }

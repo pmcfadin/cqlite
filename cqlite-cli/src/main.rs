@@ -125,6 +125,11 @@ async fn run_main() -> Result<()> {
         return commands::sweep::execute_sweep_command(args).await;
     }
 
+    // `explain` (issue #4193): read-only forensic surface; files only, no Database init.
+    if let Some(Commands::Explain { .. }) = &cli.command {
+        return commands::explain::dispatch_explain(&cli, &config).await;
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
@@ -894,6 +899,10 @@ async fn run_main() -> Result<()> {
                 &output_config,
             )
             .await
+        }
+        Some(Commands::Explain { .. }) => {
+            // Handled by the short-circuit before database initialization.
+            unreachable!("Commands::Explain is dispatched before database initialization")
         }
         Some(Commands::Import {
             file,
