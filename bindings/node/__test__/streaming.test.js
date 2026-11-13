@@ -463,45 +463,53 @@ describe('Streaming Iterator Tests (Issue #305)', () => {
   // brittle absolute wall-clock bound.
   // ==========================================================================
   describe('Batch Fetching (Issue #1443)', () => {
-    test('batched streaming throughput beats the per-row baseline', async () => {
-      await withDatabase(async (db) => {
-        // Warm up file handles / caches so neither measurement pays first-touch.
-        await timedDrain(db, BATCH_QUERY, { bufferSize: 1024 });
+    // Issue #4538: this guard used to assert a THROUGHPUT ratio (batched >= 1.1x per-row) measured
+    // in wall time, which collapsed toward 1.0 on a loaded host regardless of the code under test.
+    // The mechanism #1443 introduced is "one libuv AsyncTask (native `next()`) per BATCH, not per
+    // row", and that is exactly countable: no clock, so no load sensitivity. Per-row dispatch issues
+    // >= one native `next()` per row; a batch issues ~ceil(rows / bufferSize) + 1 (the terminal
+    // done-call). The wall-clock throughput is still logged for visibility but is not asserted.
+    test('batched streaming issues one native next() per batch, not per row', async () => {
+      const native = require('../cqlite-node.linux-x64-gnu.node');
+      const proto = native.StreamingResult.prototype;
+      const realNext = proto.next;
+      let calls = 0;
+      proto.next = function countedNext(...args) {
+        calls++;
+        return realNext.apply(this, args);
+      };
+      try {
+        await withDatabase(async (db) => {
+          // Warm up so neither drain pays first-touch costs.
+          await timedDrain(db, BATCH_QUERY, { bufferSize: 1024 });
 
-        // Median-of-3 to damp scheduler jitter; compare batched vs per-row.
-        const speedups = [];
-        let rowCount = 0;
-        for (let i = 0; i < 3; i++) {
+          calls = 0;
           const perRow = await timedDrain(db, BATCH_QUERY, { bufferSize: 1 });
+          const perRowCalls = calls;
+          calls = 0;
           const batched = await timedDrain(db, BATCH_QUERY, { bufferSize: 1024 });
+          const batchedCalls = calls;
 
           // FAIL LOUDLY if the table yields no rows (data expected).
           expect(perRow.count).toBeGreaterThan(0);
           expect(batched.count).toBe(perRow.count);
-          rowCount = batched.count;
+          const rows = batched.count;
 
-          const perRowThroughput = perRow.count / (perRow.ms / 1000);
-          const batchedThroughput = batched.count / (batched.ms / 1000);
-          speedups.push(batchedThroughput / perRowThroughput);
-        }
-        speedups.sort((a, b) => a - b);
-        const medianSpeedup = speedups[1];
-
-        // Measured baseline on this machine (unloaded): per-row ~57k rows/s,
-        // batched ~120k rows/s -> ~2.0x. Both terms are measured in the SAME
-        // window so the ratio is load-robust, but under heavy concurrent load
-        // (this repo runs many gates at once) both measurements collapse toward
-        // scheduler-dominated times and the ratio drifts toward ~1.0. The floor
-        // is therefore a conservative 1.1x: still strictly above the ~1.0x a
-        // per-row implementation could ever reach against itself (so it remains
-        // a real regression guard that batching helps), but with enough headroom
-        // that scheduler jitter cannot invert it. The observed ~2x is logged for
-        // visibility (issue #1443 de-flake).
-        // eslint-disable-next-line no-console
-        console.log(`batched-vs-per-row median speedup: ${medianSpeedup.toFixed(2)}x`);
-        expect(rowCount).toBeGreaterThan(0);
-        expect(medianSpeedup).toBeGreaterThanOrEqual(1.1);
-      });
+          // Per-row baseline: at least one native dispatch per row.
+          expect(perRowCalls).toBeGreaterThanOrEqual(rows);
+          // Batched: ceil(rows / 1024) data batches + the terminal done-call.
+          expect(batchedCalls).toBeLessThanOrEqual(Math.ceil(rows / 1024) + 1);
+          // And decisively fewer dispatches than the per-row path.
+          expect(batchedCalls * 10).toBeLessThanOrEqual(perRowCalls);
+          // eslint-disable-next-line no-console
+          console.log(
+            `native next() calls for ${rows} rows: per-row ${perRowCalls}, batched ${batchedCalls}; ` +
+              `drain ms per-row ${perRow.ms.toFixed(1)}, batched ${batched.ms.toFixed(1)} (informational)`
+          );
+        });
+      } finally {
+        proto.next = realNext;
+      }
     });
 
     test('a single batched stream does not starve concurrent fs I/O', async () => {
