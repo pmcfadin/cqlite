@@ -4,6 +4,13 @@
 //! parallel re-implementation. Requires the table schema (the merge is schema-driven); without one
 //! the prediction is honestly `unmeasured`.
 //!
+//! **This is a per-generation UPPER BOUND on reclaim, not a table-wide compaction result.**
+//! design.md D1 places `reclaim_at_now` under EACH generation's `--deep` report ("full-compaction-
+//! at-`--now` reclaim prediction"), so one generation is merged alone with `purge_safe(true)`:
+//! the overlap gate is assumed open. A tombstone that shadows data in ANOTHER generation would be
+//! kept by a real table compaction, so `rows_out` here can be LOWER (more reclaim) than the real
+//! one. The report labels it so (`bound: upper`, [`UPPER_BOUND_REASON`]).
+//!
 //! `rows_in` is NOT re-counted here: `--deep` already traverses the generation once through the
 //! same merge-stream (purging OFF), and that traversal's row count is passed in — so the dry
 //! compaction adds exactly ONE merger traversal (`gc_before`/`now` with `purge_safe(true)`; a
@@ -17,6 +24,11 @@ use std::path::Path;
 use crate::schema::TableSchema;
 use crate::storage::write_engine::merge::{KWayMerger, MergeStep};
 use crate::Result;
+
+/// Why [`ReclaimPrediction`] is an upper bound on reclaimed rows (rendered in text and JSON).
+pub const UPPER_BOUND_REASON: &str = "this generation is merged alone with its overlap gate \
+assumed open; tombstones shadowing data in other generations would be kept by a real compaction, \
+so rows_out is a lower bound and the reclaim an upper bound";
 
 /// Rows a dry compaction of one generation would read and keep at `now`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

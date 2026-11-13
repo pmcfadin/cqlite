@@ -69,6 +69,27 @@ fn run(args: &[&str]) -> Output {
         .expect("spawn cqlite")
 }
 
+/// R1, one shape everywhere: any object carrying a `source` is the envelope `{value, source,
+/// cause?}` — measured or unmeasured, no leaf-specific variants.
+fn assert_envelopes(v: &Value, path: &str) {
+    match v {
+        Value::Object(m) => {
+            // The generation object carries its own D5 `source` (a label, not a leaf).
+            if m.contains_key("source") && !m.contains_key("generation") {
+                assert_sourced(v, path);
+            }
+            for (k, c) in m {
+                assert_envelopes(c, &format!("{path}.{k}"));
+            }
+        }
+        Value::Array(a) => a
+            .iter()
+            .enumerate()
+            .for_each(|(i, c)| assert_envelopes(c, &format!("{path}[{i}]"))),
+        _ => {}
+    }
+}
+
 fn run_json(dir: &Path, extra: &[&str]) -> Value {
     let mut args = vec![
         "diagnose",
@@ -86,12 +107,14 @@ fn run_json(dir: &Path, extra: &[&str]) -> Value {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
             "stdout is not one JSON document: {e}\n{}",
             String::from_utf8_lossy(&out.stdout)
         )
-    })
+    });
+    assert_envelopes(&v, "$");
+    v
 }
 
 fn keys(v: &Value) -> Vec<&str> {
@@ -338,10 +361,11 @@ fn report_schema_matches_design() {
     );
     assert_eq!(keys(&r["token_overlap"]), ["buckets", "counts"]);
     assert_eq!(r["token_overlap"]["buckets"], 16);
+    assert_sourced(&r["token_overlap"]["counts"], "token_overlap.counts");
     assert_eq!(
-        r["token_overlap"]["counts"]
+        r["token_overlap"]["counts"]["value"]
             .as_array()
-            .expect("counts")
+            .expect("counts value")
             .len(),
         16
     );
@@ -453,4 +477,65 @@ fn text_names_cqlite_tombstones_where_diagnose_stops_short() {
     let out = run(&["diagnose", dir.to_str().expect("utf8"), "--deep"]);
     let t = String::from_utf8_lossy(&out.stdout);
     assert!(t.contains("cqlite tombstones"), "{t}");
+}
+
+/// Measured reclaim uses the SAME envelope as every other leaf, and states it is an upper bound.
+#[test]
+fn measured_reclaim_is_enveloped_and_labelled_an_upper_bound() {
+    let Some(dir) = table_dir("test_wide_rows", "chat_messages") else {
+        return;
+    };
+    let cql = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo")
+            .join("test-data/schemas/wide-rows.cql"),
+    )
+    .expect("schema");
+    let start = cql
+        .find("CREATE TABLE IF NOT EXISTS chat_messages")
+        .expect("table");
+    let end = start + cql[start..].find(';').expect("terminator") + 1;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let schema = tmp.path().join("chat.cql");
+    std::fs::write(&schema, &cql[start..end]).expect("write");
+    let out = run(&[
+        "--schema",
+        schema.to_str().expect("utf8"),
+        "diagnose",
+        dir.to_str().expect("utf8"),
+        "--now",
+        "1794545000",
+        "--deep",
+        "--out",
+        "json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r: Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_envelopes(&r, "$");
+    let rc = &r["generations"][0]["deep"]["reclaim_at_now"];
+    assert_eq!(rc["source"], "scan", "{rc}");
+    assert_eq!(rc["value"]["rows_in"], 50);
+    assert_eq!(rc["value"]["rows_out"], 50);
+    assert_eq!(rc["bound"], "upper");
+    assert!(rc["bound_reason"]
+        .as_str()
+        .is_some_and(|b| b.contains("overlap gate")));
+    assert_eq!(rc["value"]["tombstones_purged"]["source"], "unmeasured");
+    let text = run(&[
+        "--schema",
+        schema.to_str().expect("utf8"),
+        "diagnose",
+        dir.to_str().expect("utf8"),
+        "--deep",
+    ]);
+    assert!(
+        String::from_utf8_lossy(&text.stdout).contains("UPPER BOUND"),
+        "text must label the bound"
+    );
 }

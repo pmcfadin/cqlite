@@ -24,7 +24,8 @@
 //! know" (issue #1653's honest `Option` fields feed this directly).
 
 pub mod deep_scan;
-pub mod droppable_ratio;
+mod discover;
+mod droppable_ratio;
 pub mod reclaim_prediction;
 pub mod token_overlap;
 
@@ -202,38 +203,18 @@ pub struct UnreadableGeneration {
     pub cause: String,
 }
 
-/// Discover every `*-Data.db` generation directly under `table_dir` (no
-/// recursion), sorted for a deterministic report order. Never opens any file.
-fn discover_generations(table_dir: &Path) -> Result<Vec<PathBuf>> {
-    let entries = std::fs::read_dir(table_dir).map_err(|e| {
+/// Run `diagnose` over every SSTable generation directly under `table_dir`
+/// (spec R1-R5, plus R3/R4 under `--deep`).
+pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Result<DiagnoseReport> {
+    let discovered = discover::discover(table_dir).map_err(|e| {
         Error::invalid_path(format!(
             "Cannot read SSTable table dir {}: {}",
             table_dir.display(),
             e
         ))
     })?;
-
-    let mut data_paths = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with("-Data.db") {
-                data_paths.push(path);
-            }
-        }
-    }
-    data_paths.sort();
-    Ok(data_paths)
-}
-
-/// Run `diagnose` over every SSTable generation directly under `table_dir`
-/// (spec R1-R5, plus R3/R4 under `--deep`).
-pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Result<DiagnoseReport> {
-    let data_paths = discover_generations(table_dir)?;
-    if data_paths.is_empty() {
+    let data_paths = discovered.data_paths;
+    if data_paths.is_empty() && discovered.unreadable_entries.is_empty() {
         return Err(Error::not_found(format!(
             "no SSTable generations (*-Data.db) found under {}",
             table_dir.display()
@@ -262,6 +243,15 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
     // Generations contributing NO token span (unreadable, or endpoint tokens not decodable): the
     // histogram would silently undercount them, so any entry makes it `unmeasured`.
     let mut without_span: Vec<String> = Vec::new();
+    // An unreadable directory entry may have been a generation: report it and keep the token
+    // histogram honest about it.
+    for cause in discovered.unreadable_entries {
+        without_span.push("<unreadable directory entry>".to_string());
+        unreadable_generations.push(UnreadableGeneration {
+            data_path: table_dir.to_path_buf(),
+            cause,
+        });
+    }
 
     for data_path in &data_paths {
         match diagnose_generation(data_path, options, gc_before, &config, platform.clone()).await {
