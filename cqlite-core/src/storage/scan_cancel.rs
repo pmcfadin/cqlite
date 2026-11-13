@@ -23,7 +23,10 @@ use std::sync::Arc;
 /// All clones share one `AtomicBool`, so cancelling any clone is observed by a
 /// scan polling another. A default (never-cancelled) flag makes every threaded
 /// call site a no-op, so non-cancellable callers pass `ScanCancel::default()`.
+// `Default` is derived in every non-test build; the test build carries an extra field whose default
+// is "never trips", so it gets a manual impl below.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(test), derive(Default))]
 pub struct ScanCancel(
     Arc<AtomicBool>,
     // TEST-ONLY deterministic trip (issue #4538): the number of `check()` polls left before the
@@ -32,6 +35,7 @@ pub struct ScanCancel(
     #[cfg(test)] Arc<std::sync::atomic::AtomicI64>,
 );
 
+#[cfg(test)]
 impl Default for ScanCancel {
     fn default() -> Self {
         Self(
