@@ -534,3 +534,11 @@ impl crate::storage::write_engine::reconcile_rules::ReconcileCell for CellData {
         out
     }
 }
+
+// Issue #4530: equal-timestamp reconcile tie tests (Cassandra `Cells.resolveRegular` /
+// `DeletionTime.supersedes`). Declared here, not in the 12k-line `merge/mod.rs` the file-size
+// ratchet forbids growing; still a descendant of `merge`, so it reaches the private
+// `KWayMerger::merge_partition_rows`.
+#[cfg(all(test, feature = "write-support"))]
+#[path = "reconcile_ties.rs"]
+mod reconcile_ties;
