@@ -259,6 +259,11 @@ mod tests {
         // delays the rendezvous and cannot change the verdict. The ceiling is a deadlock guard, not
         // a latency budget.
         let rendezvous = Arc::new(tokio::sync::Barrier::new(THREADS));
+        // ONE shared deadline for the whole rendezvous (not a fresh timeout per future): in the
+        // serialized-regression case the futures run one after another, so per-future timeouts
+        // would add up to THREADS x the guard; with a shared instant every later wait finds the
+        // deadline already passed and the test fails within ~one guard period.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let handles: Vec<_> = (0..THREADS)
             .map(|i| {
                 let rendezvous = Arc::clone(&rendezvous);
@@ -267,14 +272,17 @@ mod tests {
                         // Inner task fan-out: joined concurrently on the shared worker pool.
                         let a = tokio::spawn(async move { i });
                         let b = tokio::spawn(async move { i * 2 });
-                        tokio::time::timeout(std::time::Duration::from_secs(60), rendezvous.wait())
-                            .await
-                            .map_err(|_| {
-                                Error::Storage(format!(
-                                    "concurrent calls appear serialized: the {THREADS} futures \
+                        tokio::time::timeout(
+                            deadline.saturating_duration_since(std::time::Instant::now()),
+                            rendezvous.wait(),
+                        )
+                        .await
+                        .map_err(|_| {
+                            Error::Storage(format!(
+                                "concurrent calls appear serialized: the {THREADS} futures \
                                      never all became in-flight together"
-                                ))
-                            })?;
+                            ))
+                        })?;
                         let (a, b) = (
                             a.await.map_err(|e| Error::Storage(e.to_string()))?,
                             b.await.map_err(|e| Error::Storage(e.to_string()))?,
