@@ -13,7 +13,7 @@
 //! | `memory_limit_mb`      | `memory.max_memory`                 |
 //! | `cache_size_mb`        | `memory.block_cache.max_size`       |
 //! | `query_timeout_ms`     | `query.max_execution_time` (#1695)  |
-//! | `max_result_bytes`    | `query.max_result_bytes`             |
+//! | env `CQLITE_MAX_RESULT_BYTES` | `query.max_result_bytes`     |
 //!
 //! `query_timeout_ms` is the operator's query execution budget, ENFORCED at the
 //! query-engine chokepoint (`cqlite_core::query::engine::deadline`). **`0` means
@@ -51,9 +51,13 @@ pub fn to_core_config(cli_config: &CliConfig) -> Result<CoreConfig> {
     core_config.query.max_execution_time =
         std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
 
-    // Keep every materializing CLI surface on the core's one bounded-result
-    // budget. `explain` uses the same setting as ordinary query execution.
-    core_config.query.max_result_bytes = cli_config.performance.max_result_bytes;
+    // Keep every materializing CLI surface on the core's one bounded-result budget (`explain`
+    // uses the same setting as ordinary query execution). Unset => the core default.
+    if let Some(bytes) =
+        max_result_bytes_override(std::env::var("CQLITE_MAX_RESULT_BYTES").ok().as_deref())?
+    {
+        core_config.query.max_result_bytes = bytes;
+    }
 
     // Validate the configuration
     core_config
@@ -61,6 +65,15 @@ pub fn to_core_config(cli_config: &CliConfig) -> Result<CoreConfig> {
         .map_err(|e| anyhow::anyhow!("Invalid database configuration: {}", e))?;
 
     Ok(core_config)
+}
+
+/// Parse the optional `CQLITE_MAX_RESULT_BYTES` override (`None` = unset).
+fn max_result_bytes_override(raw: Option<&str>) -> Result<Option<u64>> {
+    raw.map(|v| {
+        v.parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("Invalid CQLITE_MAX_RESULT_BYTES value {v:?}: {e}"))
+    })
+    .transpose()
 }
 
 #[cfg(test)]
@@ -101,10 +114,12 @@ mod tests {
     }
 
     #[test]
-    fn max_result_bytes_maps_to_core_query_budget() {
-        let mut cli = CliConfig::default();
-        cli.performance.max_result_bytes = 1234;
-        let core = to_core_config(&cli).expect("valid config");
-        assert_eq!(core.query.max_result_bytes, 1234);
+    fn max_result_bytes_override_parses_or_rejects() {
+        assert_eq!(max_result_bytes_override(None).expect("unset"), None);
+        assert_eq!(
+            max_result_bytes_override(Some("1234")).expect("number"),
+            Some(1234)
+        );
+        assert!(max_result_bytes_override(Some("lots")).is_err());
     }
 }

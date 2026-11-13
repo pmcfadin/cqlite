@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::cli::{ExportFormat, ImportFormat, InfoOutputFormat, OutputFormat};
+pub use crate::commands::explain_args::ExplainArgs;
 
 /// Verification depth for the `verify` subcommand (epic #970, issue #1000).
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -259,21 +260,7 @@ pub enum Commands {
     #[command(
         long_about = "Render the per-generation reconciliation decisions (winner, shadowed-by-timestamp/tombstone, expired, purgeable, dropped-column) for one partition without opening the database or mutating SSTables. Partition-key and clustering arguments use CQL literal syntax; comma-separated literals are accepted for composite keys. Note: this is distinct from `query --explain`, which shows a query plan; for a query plan use `query --explain`."
     )]
-    Explain {
-        /// Fully-qualified keyspace.table name.
-        table: String,
-        /// Partition-key literal(s), in schema order.
-        partition_key: String,
-        /// Render only cells for this clustering row. Repeat for composite keys.
-        #[arg(long)]
-        clustering: Vec<String>,
-        /// Reconciliation clock as epoch seconds or RFC3339. Defaults to wall clock.
-        #[arg(long)]
-        now: Option<String>,
-        /// Explain output format. Defaults to the global --out/--format setting.
-        #[arg(long, value_enum)]
-        out: Option<OutputFormat>,
-    },
+    Explain(ExplainArgs),
     /// Import data from file
     Import {
         /// Input file path

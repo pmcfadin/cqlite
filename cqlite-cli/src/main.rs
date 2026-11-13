@@ -126,7 +126,7 @@ async fn run_main() -> Result<()> {
     }
 
     // `explain` (issue #4193): read-only forensic surface; files only, no Database init.
-    if let Some(Commands::Explain { .. }) = &cli.command {
+    if let Some(Commands::Explain(_)) = &cli.command {
         return commands::explain::dispatch_explain(&cli, &config).await;
     }
 
@@ -900,10 +900,6 @@ async fn run_main() -> Result<()> {
             )
             .await
         }
-        Some(Commands::Explain { .. }) => {
-            // Handled by the short-circuit before database initialization.
-            unreachable!("Commands::Explain is dispatched before database initialization")
-        }
         Some(Commands::Import {
             file,
             format,
@@ -1086,21 +1082,15 @@ async fn run_main() -> Result<()> {
                 ))
             }
         }
-        Some(Commands::Verify { .. }) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Verify is dispatched before database initialization")
-        }
-        Some(Commands::Salvage(_)) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Salvage is dispatched before database initialization")
-        }
-        Some(Commands::Rebuild(_)) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Rebuild is dispatched before database initialization")
-        }
-        Some(Commands::Sweep(_)) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Sweep is dispatched before database initialization")
+        // All dispatched by the short-circuits before database init (see above).
+        Some(
+            Commands::Verify { .. }
+            | Commands::Salvage(_)
+            | Commands::Rebuild(_)
+            | Commands::Sweep(_)
+            | Commands::Explain(_),
+        ) => {
+            unreachable!("file-only verbs are dispatched before database initialization")
         }
         None => {
             // Issue #1693 (AG4): with `--writable` and no one-shot operation

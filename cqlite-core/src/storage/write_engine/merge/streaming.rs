@@ -183,6 +183,8 @@
 use super::model::{MergeEntry, RowData};
 use super::trace::NoTrace;
 #[cfg(feature = "write-support")]
+type Untraced = KWayMerger<NoTrace>;
+#[cfg(feature = "write-support")]
 use super::{carriers, KWayMerger, PurgeCounts};
 #[cfg(feature = "write-support")]
 use crate::error::{Error, Result};
@@ -490,10 +492,7 @@ impl<'a> StreamingMerger<'a> {
         max_purgeable_timestamp: i64,
     ) {
         self.state.range_tombstones_emitted = true;
-        KWayMerger::<NoTrace>::coalesce_range_tombstones(
-            &mut self.state.range_tombstones,
-            &self.merger.schema,
-        );
+        Untraced::coalesce_range_tombstones(&mut self.state.range_tombstones, &self.merger.schema);
 
         if let Some((pmfda, _)) = self.state.max_partition_deletion {
             self.state
@@ -535,20 +534,16 @@ impl<'a> StreamingMerger<'a> {
         if self.state.awaiting_flush.is_empty() {
             return;
         }
-        KWayMerger::<NoTrace>::coalesce_range_tombstones(
-            &mut self.state.range_tombstones,
-            &self.merger.schema,
-        );
+        Untraced::coalesce_range_tombstones(&mut self.state.range_tombstones, &self.merger.schema);
         for entry in std::mem::take(&mut self.state.awaiting_flush) {
-            if let Some(shadowed) = KWayMerger::<NoTrace>::apply_range_shadowing(
+            if let Some(shadowed) = Untraced::apply_range_shadowing(
                 entry,
                 &self.state.range_tombstones,
                 &self.merger.schema,
             ) {
-                if let Some(survivor) = KWayMerger::<NoTrace>::apply_partition_shadowing(
-                    shadowed,
-                    self.state.max_partition_deletion,
-                ) {
+                if let Some(survivor) =
+                    Untraced::apply_partition_shadowing(shadowed, self.state.max_partition_deletion)
+                {
                     self.state.pending_rows.push_back(survivor);
                 }
             }
@@ -573,7 +568,7 @@ impl<'a> StreamingMerger<'a> {
         self.resolve_partition_prefix();
 
         let (effective_gc_before, max_purgeable_timestamp) = self.merger.effective_gc_settings();
-        if let Some(entry) = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap_counted(
+        if let Some(entry) = Untraced::reconcile_cluster_with_overlap_counted(
             ck,
             rows,
             &self.merger.schema.dropped_columns,
@@ -588,10 +583,9 @@ impl<'a> StreamingMerger<'a> {
                 // applies (it resolves fully during the prefix, unlike
                 // range tombstones), then flush straight through with zero
                 // extra buffering.
-                if let Some(survivor) = KWayMerger::<NoTrace>::apply_partition_shadowing(
-                    entry,
-                    self.state.max_partition_deletion,
-                ) {
+                if let Some(survivor) =
+                    Untraced::apply_partition_shadowing(entry, self.state.max_partition_deletion)
+                {
                     self.state.pending_rows.push_back(survivor);
                 }
             } else {

@@ -171,7 +171,13 @@ fn run_explain(
         &effective_schema,
         now_value.epoch_secs,
     );
-    let sink = BudgetedTraceSink::new(config.performance.max_result_bytes);
+    // The ONE bounded-result budget every materializing CLI surface shares (core default, or the
+    // `CQLITE_MAX_RESULT_BYTES` override `to_core_config` applies).
+    let max_result_bytes = crate::core_config::to_core_config(config)
+        .map_err(|error| ExplainFailure::Usage(format!("invalid configuration: {error:#}")))?
+        .query
+        .max_result_bytes;
+    let sink = BudgetedTraceSink::new(max_result_bytes);
     let merger =
         cqlite_core::storage::write_engine::merge::build_single_partition_merger_with_trace(
             input_paths.clone(),
@@ -203,7 +209,7 @@ fn run_explain(
         if sink.overflowed {
             return Err(ExplainFailure::Read(format!(
                 "explain trace exceeded the {}-byte materialization budget; add a clustering filter or raise max_result_bytes",
-                config.performance.max_result_bytes
+                max_result_bytes
             )));
         }
         sink.into_parts()
@@ -242,10 +248,10 @@ fn run_explain(
         gc_grace_seconds(&effective_schema),
     )
     .map_err(ExplainFailure::Read)?;
-    if rendered.len() as u64 > config.performance.max_result_bytes {
+    if rendered.len() as u64 > max_result_bytes {
         return Err(ExplainFailure::Read(format!(
             "result set exceeded the {}-byte materialization budget (estimated {} bytes); add a clustering filter or raise max_result_bytes",
-            config.performance.max_result_bytes,
+            max_result_bytes,
             rendered.len()
         )));
     }
@@ -637,13 +643,13 @@ impl cqlite_core::storage::write_engine::merge::trace::TraceSink for BudgetedTra
 /// so that already-oversized file does not grow, #1116).
 pub async fn dispatch_explain(cli: &crate::cli_types::Cli, config: &Config) -> Result<()> {
     use crate::cli_types::{Commands, OutputMode};
-    let Some(Commands::Explain {
+    let Some(Commands::Explain(crate::cli_types::ExplainArgs {
         table,
         partition_key,
         clustering,
         now,
         out,
-    }) = &cli.command
+    })) = &cli.command
     else {
         return Err(anyhow::anyhow!(
             "dispatch_explain called for a non-explain command"

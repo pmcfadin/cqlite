@@ -28,7 +28,7 @@ use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
 use std::collections::{BinaryHeap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 // Unconditional (issue #2346): `build_single_partition_merger_from_readers`
 // takes `Vec<Arc<SSTableReader>>` regardless of the `tombstones` feature (its
 // `NeedsScan` fail-safe still needs `SSTableReader`/`Arc` either way).
@@ -39,13 +39,7 @@ use std::sync::Arc;
 #[cfg(not(feature = "tombstones"))]
 use super::block_on_async;
 #[cfg(not(feature = "tombstones"))]
-use crate::config::DiskAccessMode;
-#[cfg(not(feature = "tombstones"))]
-use crate::platform::Platform;
-#[cfg(not(feature = "tombstones"))]
 use crate::storage::sstable::reader::SinglePartitionCompaction;
-#[cfg(not(feature = "tombstones"))]
-use crate::Config;
 
 impl KWayMerger {
     /// Build a k-way merger from pre-constructed run iterators (issue #2207).
@@ -740,92 +734,7 @@ fn record_logical_accesses(
     }
 }
 
-/// Open `path` ONCE and probe it for every requested key, delegating to
-/// [`probe_reader_async`] (issue #2346) once the reader is open.
-///
-/// Runs the async open + seek on the shared bridge runtime. The reader is opened
-/// with buffered I/O (never mmap/direct — the file may be deleted after the
-/// read), matching the full-scan producer's file-lifetime contract (issue #591).
-#[cfg(not(feature = "tombstones"))]
-fn probe_path(
-    path: &Path,
-    keys: &[Vec<u8>],
-    schema: &TableSchema,
-    udt_registry: Option<&UdtRegistry>,
-    scan_cancel: ScanCancel,
-    collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    let path = path.to_path_buf();
-    let schema = schema.clone();
-    let keys: Vec<Vec<u8>> = keys.to_vec();
-    let udt_registry = udt_registry.cloned();
-    block_on_async(async move {
-        let mut config = Config::default();
-        config.storage.use_mmap = false;
-        config.storage.disk_access_mode = DiskAccessMode::Buffered;
-        let platform = Arc::new(Platform::new(&config).await?);
-        let mut reader = SSTableReader::open(&path, &config, platform).await?;
-        // Issue #2349: decode a `frozen<UDT>`-in-collection cell structurally on the
-        // point-read seek path too, matching the full-scan cold reader.
-        if let Some(registry) = udt_registry {
-            reader.set_udt_registry(registry);
-        }
-        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
-    })
-}
-
-/// Probe an ALREADY-OPEN, possibly-SHARED `reader` (issue #2346) — the
-/// reader-based analogue of [`probe_path`], used by
-/// [`build_single_partition_merger_from_readers`]. `reader` is an `Arc` clone
-/// (the caller keeps the original for the `NeedsScan` fail-safe path), moved
-/// into the bridged future so no borrow needs to outlive this call.
-#[cfg(not(feature = "tombstones"))]
-fn probe_reader(
-    reader: Arc<SSTableReader>,
-    keys: &[Vec<u8>],
-    schema: &TableSchema,
-    scan_cancel: ScanCancel,
-    collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    let schema = schema.clone();
-    let keys: Vec<Vec<u8>> = keys.to_vec();
-    block_on_async(async move {
-        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
-    })
-}
-
-/// Tombstones-build fallback: the single-partition SEEK machinery
-/// (`successor_partition_offset`, `point_read_whole_section`, …) is
-/// `not(tombstones)` only, so under the alternate `tombstones` feature every
-/// candidate degrades to a full scan filtered to the key set — correct, just
-/// without the seek speedup. Keeps the public builder API identical across builds.
-#[cfg(feature = "tombstones")]
-fn probe_path(
-    _path: &Path,
-    _keys: &[Vec<u8>],
-    _schema: &TableSchema,
-    _udt_registry: Option<&UdtRegistry>,
-    _scan_cancel: ScanCancel,
-    _collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    Ok(ProbeOutcome {
-        probe: PathProbe::NeedsScan,
-        notes: Vec::new(),
-    })
-}
-
-/// Tombstones-build fallback for the reader-based probe (issue #2346) — mirrors
-/// [`probe_path`]'s `tombstones` fallback above.
-#[cfg(feature = "tombstones")]
-fn probe_reader(
-    _reader: Arc<SSTableReader>,
-    _keys: &[Vec<u8>],
-    _schema: &TableSchema,
-    _scan_cancel: ScanCancel,
-    _collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    Ok(ProbeOutcome {
-        probe: PathProbe::NeedsScan,
-        notes: Vec::new(),
-    })
-}
+// The path/reader open+probe wrappers (and their `tombstones` fallbacks) live in a child module
+// to keep this file under the #1116 size threshold.
+mod open;
+use open::{probe_path, probe_reader};
