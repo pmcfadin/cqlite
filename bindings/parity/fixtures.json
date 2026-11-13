@@ -18,12 +18,10 @@
     "landed -- #1450 IS landed, and all three legs were measured to agree",
     "exactly on both, so nothing is allowlisted.",
     "",
-    "DECLARED CORPUS GAP: there is NO `varint` column anywhere in the committed",
-    "CQL schema corpus (test-data/schemas/**), so the issue's requested",
-    "timestamp+blob+varint+decimal fixture is covered for timestamp, blob and",
-    "decimal ONLY. The varint canonicalization rule is exercised by",
-    "canonical-vectors.json, not by any live fixture. No fixture was fabricated",
-    "to close this.",
+    "`sstables_root` (optional, checkout-relative): the SSTables root this fixture reads",
+    "INSTEAD of the shared datasets root. Used by `varint_values` (#4360), whose",
+    "Cassandra 5.0.8-written table lives under test-data/fixtures/issue_4360 and is",
+    "therefore visible whatever CQLITE_DATASETS_ROOT points at.",
     "",
     "`floor` (issue #1455, B2) is the case floor: an empty or truncated fixture",
     "list would otherwise produce an EMPTY pytest parametrize \u2014 one skipped",
@@ -32,12 +30,13 @@
     "substitute is caught too."
   ],
   "floor": {
-    "min_fixtures": 4,
+    "min_fixtures": 5,
     "required_names": [
       "basic_types",
       "collections",
       "typed_collections",
-      "signed_special_decimals"
+      "signed_special_decimals",
+      "varint_values"
     ]
   },
   "fixtures": [
@@ -114,6 +113,20 @@
       "columns": {
         "id": "int",
         "sd": "set<decimal>"
+      },
+      "known_divergence": []
+    },
+    {
+      "name": "varint_values",
+      "_why": "Issue #4360: a top-level `varint` column with values beyond 2^64, negatives, sign-byte edges (127/128/-128/-129) and a no-cell NULL, Cassandra 5.0.8-written (test-data/scripts/generate-issue-4360-varint-column.sh). The CLI emits a varint as an UNQUOTED JSON integer (IntegerType.toJSONString), which must compare EXACTLY with the bindings' bigint/int. DECLARED GAP: the fixture's explicit-NULL row (id 100) is dropped by CQLite's SELECT on all three legs alike (a row with only a null cell; class of #2189), so the NULL case is NOT compared here; it is pinned by the ignored cqlite-core test issue_4360_varint_column_oracle::null_varint_row_is_returned_as_null.",
+      "keyspace": "test_varint",
+      "table": "varint_regular",
+      "sstables_root": "test-data/fixtures/issue_4360",
+      "schema": "test-data/schemas/issue-4360-varint-column.cql",
+      "query": "SELECT id, v FROM test_varint.varint_regular",
+      "columns": {
+        "id": "int",
+        "v": "varint"
       },
       "known_divergence": []
     }

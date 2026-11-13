@@ -57,6 +57,7 @@ from canonical import (  # noqa: E402
     subtree_has_udt,
 )
 from driver import (  # noqa: E402
+    fixture_sstables_root,
     check_fixture_floor,
     fixture_types,
     load_fixture_file,
@@ -96,8 +97,8 @@ DECLARED_GAPS: Tuple[str, ...] = (
     "tuple vs list is UNDETECTABLE here: the node and cli legs both emit a plain array — and "
     "the CLI leg cannot tell set from list either, so F4's type-specific container check is "
     "enforced on the python and node legs ONLY.",
-    "no `varint` column exists in the committed schema corpus; the rule is pinned by "
-    "canonical-vectors.json alone.",
+    "the `varint_values` fixture's explicit-NULL row is dropped by CQLite's SELECT on all "
+    "three legs alike (class of #2189), so a varint NULL is not compared live.",
     "UDT columns are REFUSED by the canonicalizer, not compared; no fixture uses one.",
     "non-finite floats are a real 3-way asymmetry (python nan / node NaN / cli null) and "
     "are avoided rather than reconciled.",
@@ -313,7 +314,7 @@ def run_cli_leg(fixture: dict, cli_binary: Path, out_dir: Path) -> dict:
     cmd = [
         str(cli_binary),
         "--data-dir",
-        str(DATASETS),
+        str(fixture_sstables_root(fixture, DATASETS)),
         "--schema",
         str(PROJECT_ROOT / fixture["schema"]),
         "--query",
