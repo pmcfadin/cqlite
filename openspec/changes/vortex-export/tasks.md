@@ -57,9 +57,10 @@ after every fix round; ONE full gate in `flow-closer`.
       read-back (a synthetic batch with `arrow.uuid` metadata is enough for THIS unit test; R9's CLI
       differential is the fixture-backed confirmation). Evidence:
       `export::vortex_tests::uuid_and_timeuuid_columns_are_the_vortex_uuid_extension_dtype` (reads the
-      written file's dtype) and, fixture-backed, the CLI test
-      `r2_1_vortex_dtype_is_the_uuid_extension_for_uuid_and_timeuuid` (`simple_table`: `id UUID`,
-      `session_id TIMEUUID`).
+      written file's dtype, uuid AND timeuuid) and, fixture-backed, the CLI test
+      `r2_1_vortex_dtype_is_the_uuid_extension_for_uuid_and_timeuuid` (`simple_table`: `id UUID` is
+      the UUID extension). OPEN FINDING: through the CLI, `session_id TIMEUUID` exports as `Utf8` in
+      both Parquet and Vortex, so R2.1's timeuuid clause holds at the writer level only.
 - [x] 2.6 `--lite`; commit.
 
 ## 3. CLI wiring — surface: `cqlite-cli` (R6–R8)
