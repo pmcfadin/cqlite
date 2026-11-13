@@ -292,7 +292,7 @@ impl SSTableManager {
                 continue;
             };
             let sstable_id = SSTableId::from_filename(filename);
-            let reader_arc = self.open_candidate_recording(path).await?;
+            let reader_arc = self.open_candidate(path).await?;
             let key = self.table_key_for(path, &reader_arc);
             opened.push((canon_of(path), sstable_id, key, reader_arc));
         }

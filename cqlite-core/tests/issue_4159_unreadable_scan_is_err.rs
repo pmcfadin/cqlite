@@ -200,11 +200,13 @@ fn repair(dir: &Path, table: &str) {
     std::fs::copy(src, dir.join("nb-1-big-Statistics.db")).expect("restore stats");
 }
 
-/// A (previously refused) now opens, B (new) fails: refresh aborts, the failing
-/// candidate is NAMED, and A is not cleared ahead of a reader set that never
-/// installed — reads of both tables stay `Err`.
+/// A (previously refused) now opens, B (new) fails: the refresh `Err`s NAMING B and changes
+/// NOTHING (storage-freshness spec: a failed refresh leaves the reader set AND the refusal
+/// ledger exactly as they were). Reads afterwards are exactly the pre-refresh state: A is still
+/// refused (`Err`), B was never recorded (its table is simply absent, `Ok(empty)`). A later
+/// successful refresh installs both and clears A.
 #[tokio::test]
-async fn aborted_refresh_keeps_refusals_and_names_the_failing_candidate() {
+async fn failed_refresh_changes_nothing_and_names_the_failing_candidate() {
     let tmp = tempfile::tempdir().expect("tmp");
     let a = stage(tmp.path(), TABLE, true);
     let m = manager(tmp.path()).await;
@@ -214,24 +216,31 @@ async fn aborted_refresh_keeps_refusals_and_names_the_failing_candidate() {
     let b = stage(tmp.path(), BYSTANDER, true);
     let b_name = b.file_name().expect("b name").to_string_lossy().to_string();
 
-    let refreshed = m.refresh_tables().await;
-    assert!(refreshed.is_err(), "refresh must abort on candidate B");
+    let refreshed = m
+        .refresh_tables()
+        .await
+        .expect_err("refresh must abort on candidate B");
+    assert!(
+        refreshed.to_string().contains(&b_name),
+        "the Err must name B: {refreshed}"
+    );
 
     let ea = m
         .scan(&tid(TABLE), None, None, None, None)
         .await
-        .expect_err("A stays Err");
+        .expect_err("A stays refused");
     assert!(ea.to_string().contains("unreadable"), "{ea}");
-    let eb = m
+    assert!(
+        !ea.to_string().contains(&b_name),
+        "B must NOT have been recorded by the failed refresh: {ea}"
+    );
+    let pre = m
         .scan(&tid(BYSTANDER), None, None, None, None)
         .await
-        .expect_err("B is Err");
-    assert!(
-        eb.to_string().contains(&b_name),
-        "failing candidate must be named: {eb}"
-    );
+        .expect("B's table is unchanged by a failed refresh (absent, not unreadable)");
+    assert!(pre.is_empty());
 
-    // Once B is repaired, the next refresh installs both and clears both refusals.
+    // Once B is repaired, the next refresh installs both and clears A's refusal.
     repair(&b, BYSTANDER);
     m.refresh_tables().await.expect("refresh after repair");
     assert!(!m

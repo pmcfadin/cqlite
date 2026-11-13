@@ -77,6 +77,24 @@ pub(crate) fn refusal_key(path: &Path, base_dir_name: &str) -> String {
         .unwrap_or_else(|| UNRESOLVED_KEY.to_string())
 }
 
+/// `e` rebuilt as the SAME kind with `what` named in its message, so a failure that returns
+/// to a caller says which file or directory it concerns without changing how it matches.
+fn name_failure(e: Error, what: &str) -> Error {
+    let msg = format!("{what}: {e}");
+    match e {
+        Error::Schema(_) => Error::Schema(msg),
+        Error::Corruption(_) => Error::Corruption(msg),
+        Error::InvalidFormat(_) => Error::InvalidFormat(msg),
+        Error::UnsupportedFormat(_) => Error::UnsupportedFormat(msg),
+        Error::UnsupportedVersion { version, floor } => Error::UnsupportedVersion {
+            version: format!("{version} ({what})"),
+            floor,
+        },
+        Error::Io(io) => Error::Io(std::io::Error::new(io.kind(), msg)),
+        other => Error::Storage(format!("{what}: {other}")),
+    }
+}
+
 impl RefusalLedger {
     /// Record that `path` (belonging to table `key`) was refused with `cause`.
     pub(crate) fn record(&self, key: String, path: &Path, cause: &Error) {
@@ -231,21 +249,27 @@ impl super::SSTableManager {
         e
     }
 
-    /// List the `Data.db` files of one existing table directory. EVERY failure --
-    /// opening the listing or advancing it -- is recorded as a directory refusal
-    /// before it is returned, so a partial enumeration can never be mistaken for a
-    /// complete one (refresh would otherwise drop the readers it did not see).
+    /// List the `Data.db` files of one existing table directory for a REFRESH. EVERY
+    /// failure -- opening the listing or advancing it -- is returned (naming the
+    /// directory), so a partial enumeration can never be mistaken for a complete one.
+    /// A failed refresh changes NOTHING (storage-freshness spec): neither the reader
+    /// set nor the refusal ledger; its `Err` is the loud signal.
     pub(super) async fn list_data_files(&self, dir: &Path) -> crate::Result<Vec<PathBuf>> {
         let mut entries = match self.platform.fs().read_dir(dir).await {
             Ok(entries) => entries,
-            Err(e) => return Err(self.refuse_dir(dir, e)),
+            Err(e) => return Err(name_failure(e, &format!("directory {}", dir.display()))),
         };
         let mut out = Vec::new();
         loop {
             let entry = match entries.next_entry().await {
                 Ok(Some(entry)) => entry,
                 Ok(None) => break,
-                Err(e) => return Err(self.refuse_dir(dir, e.into())),
+                Err(e) => {
+                    return Err(name_failure(
+                        e.into(),
+                        &format!("directory {}", dir.display()),
+                    ))
+                }
             };
             let path = entry.path();
             let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -267,28 +291,19 @@ impl super::SSTableManager {
             .unwrap_or_default()
     }
 
-    /// Open a refresh candidate. A failure is RECORDED before it is returned, so
-    /// an aborted refresh can never leave the failing file unnamed. A success does
-    /// NOT clear anything here: stale refusals are cleared together with the reader
-    /// set swap, by [`commit_refusals`](Self::commit_refusals).
-    pub(super) async fn open_candidate_recording(
+    /// Open a refresh candidate. A failure is returned NAMING the candidate (same error
+    /// kind) and records nothing: a failed refresh changes neither the reader set nor
+    /// the refusal ledger (storage-freshness spec, "Corrupt new generation rejects the
+    /// whole refresh"). A success does not clear anything here either: stale refusals
+    /// are cleared together with the reader-set swap, by
+    /// [`commit_refusals`](Self::commit_refusals).
+    pub(super) async fn open_candidate(
         &self,
         path: &Path,
     ) -> crate::Result<std::sync::Arc<super::reader::SSTableReader>> {
-        match self.open_reader_with_schema(path).await {
-            Ok(r) => Ok(r),
-            Err(e) => {
-                let key = match &self.discovery_source {
-                    super::refresh::DiscoverySource::BasePath => {
-                        let base = self.base_path.file_name().and_then(|n| n.to_str());
-                        refusal_key(path, base.unwrap_or(""))
-                    }
-                    _ => table_dir_key_or_unresolved(path),
-                };
-                self.refusals.record(key, path, &e);
-                Err(e)
-            }
-        }
+        self.open_reader_with_schema(path)
+            .await
+            .map_err(|e| name_failure(e, &format!("refresh candidate {}", path.display())))
     }
 
     /// Commit a SUCCESSFUL refresh's ledger changes with the reader-set swap:
