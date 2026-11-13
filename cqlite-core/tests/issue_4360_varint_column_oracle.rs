@@ -199,11 +199,9 @@ async fn null_varint_row_is_returned_as_null() {
     );
 }
 
-/// KNOWN DEFECT, NOT WEAKENED: CQLite decodes a `varint` CLUSTERING column as `Value::Blob`
-/// (the CLI prints it as `"0x0100"`), the same non-int/uuid/bigint-clustering-decodes-as-blob
-/// class as #4279 (DATE). The oracle below is correct and fails today with
-/// `expected Value::Varint, got Blob(..)`; un-ignore it when that is fixed.
-#[ignore = "varint clustering column decodes as Blob - same class as #4279; fixture and oracle are real"]
+/// Fixed by #4279: a `varint` CLUSTERING column used to decode as `Value::Blob` (the CLI printed
+/// `"0x0100"`) because the legacy clustering decoder only knew int/uuid/bigint; it now decodes every
+/// type by schema. The oracle below is the sstabledump golden.
 #[tokio::test]
 async fn clustering_varint_equals_the_sstabledump_oracle_in_numeric_order() {
     let golden = golden("varint_clustered");
