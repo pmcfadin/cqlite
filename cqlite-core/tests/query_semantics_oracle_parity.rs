@@ -85,6 +85,11 @@ struct Case {
     table: String,
     fixture_dir_prefix: String,
     sstable_prefix: String,
+    /// Optional checkout-relative sstables root (e.g. `test-data/fixtures/issue_4524`) holding
+    /// this case's fixture instead of the datasets corpus: committed per-issue fixtures live
+    /// outside the dataset bundle so `fetch-datasets.sh`/the bundle manifest never see them.
+    #[serde(default)]
+    fixtures_dir: Option<String>,
     schema: String,
     query: String,
     pinned_now_secs: i64,
@@ -134,7 +139,11 @@ use datasets_root::{repo_root, schema_path};
 /// fixture, a root merely holding the keyspace is returned so the caller's
 /// "dir absent" / "not fetched" messages still name a real path.
 fn sstables_root_for_case(case: &Case) -> Option<PathBuf> {
-    let candidates = datasets_root::sstables_root_candidates();
+    let mut candidates = datasets_root::sstables_root_candidates();
+    if let Some(dir) = &case.fixtures_dir {
+        // The case's own committed fixture root wins: it is git-tracked source.
+        candidates.insert(0, repo_root().join(dir));
+    }
     let data_db = format!("{}-Data.db", case.sstable_prefix);
     candidates
         .iter()
@@ -616,6 +625,7 @@ fn synthetic_case(
         table: "does_not_matter".to_string(),
         fixture_dir_prefix: "does_not_matter".to_string(),
         sstable_prefix: "does_not_matter".to_string(),
+        fixtures_dir: None,
         schema: "does_not_matter.cql".to_string(),
         query: "SELECT 1".to_string(),
         pinned_now_secs: 0,
