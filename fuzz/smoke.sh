@@ -29,6 +29,7 @@ TARGETS=(
   fuzz_block_emit
   fuzz_bti
   fuzz_schema_parse
+  fuzz_commitlog_frame
 )
 
 if ! cargo fuzz --version >/dev/null 2>&1; then
