@@ -83,6 +83,8 @@ pub(super) struct ReconcileState {
     row_del: Option<i64>,
     /// `localDeletionTime` (GC-clock seconds) paired with the winning `row_del`.
     row_del_ldt: i32,
+    /// Row deletion timestamp after `purge_gc_grace` cleared it: `build` still sheds key cells (#4545).
+    purged_row_del: Option<i64>,
     /// First-seen cell-key order for deterministic output.
     order: Vec<CellKey>,
     /// Winning cell per `(column, cell_path)`.
@@ -114,6 +116,7 @@ impl ReconcileState {
             run_index: usize::MAX,
             row_del: None,
             row_del_ldt: 0,
+            purged_row_del: None,
             order: Vec::new(),
             winners: HashMap::new(),
             complex_deletions: Vec::new(),
@@ -627,7 +630,7 @@ impl ReconcileState {
                 && i64::from(self.row_del_ldt as u32) < gc_before
                 && self.row_del.is_some_and(|d| d < max_purgeable_timestamp)
             {
-                self.row_del = None;
+                self.purged_row_del = self.row_del.take();
                 // True gc/overlap-safe purge of a row tombstone (issue #1037).
                 purges.row_tombstones += 1;
             }
@@ -666,6 +669,7 @@ impl ReconcileState {
             key,
             run_index,
             row_del,
+            purged_row_del,
             row_del_ldt,
             complex_deletions,
             range_deletion,
@@ -682,7 +686,7 @@ impl ReconcileState {
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
-        if let Some(d) = row_del {
+        if let Some(d) = row_del.or(purged_row_del) {
             super::model::shed_key_cells(&mut surviving, &ck_names, &row_liveness, d, now);
         }
         let has_data_after = surviving.iter().any(is_data_cell);
