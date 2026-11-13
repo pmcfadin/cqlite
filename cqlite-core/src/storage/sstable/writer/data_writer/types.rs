@@ -26,6 +26,29 @@ pub(crate) struct MergedOp<'a> {
     /// honoring the originating mutation's explicit `local_deletion_time` when
     /// present (Issue #764). Derived from the timestamp otherwise.
     pub(crate) cell_local_deletion_time: i32,
+    /// The ONE wall-clock reading (GC-clock seconds) captured when this row group was merged
+    /// (#4530, roborev). An expiring cell WITHOUT an explicit LDT gets
+    /// `implicit_expiration(now_seconds, ttl)` - the SAME value is used to rank it in
+    /// `cell_wins` and to stamp it on disk (the row's `RowWrite::now_seconds` carries this
+    /// reading to the emission), so the reconcile winner is exactly the cell that is written.
+    pub(crate) now_seconds: i32,
+}
+
+/// The wall clock, in GC-clock seconds (`FBUtilities.nowInSeconds()`); `0` before the epoch.
+pub(crate) fn wall_clock_seconds() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i32)
+        .unwrap_or(0)
+}
+
+/// Expiration instant of an expiring write that carries no explicit LDT: `now + ttl`, CAPPED at
+/// the maximum deletion time. Cassandra 5.0.8 applies the same cap by default
+/// (`ExpirationDateOverflowHandling.ExpirationDateOverflowPolicy.CAP`; the cap is
+/// `Cell.MAX_DELETION_TIME`, `MAX_DELETION_TIME_2038_LEGACY_CAP` = `i32::MAX` in 4.x-compatible
+/// mode), so ranking and emission saturate identically instead of wrapping.
+pub(crate) fn implicit_expiration(now_seconds: i32, ttl_seconds: u32) -> i32 {
+    now_seconds.saturating_add(i32::try_from(ttl_seconds).unwrap_or(i32::MAX))
 }
 
 /// Adapt a writer-path [`MergedOp`] into the shared
@@ -56,16 +79,15 @@ impl crate::storage::write_engine::reconcile_rules::ReconcileCell for MergedOp<'
         use crate::storage::write_engine::mutation::CellOperation as Op;
         match self.op {
             Op::Delete { .. } => self.cell_local_deletion_time,
-            // The authoritative per-cell LDT when surfaced; otherwise the write's own expiry
-            // `writetime_seconds + ttl` (the fresh-write path derives it from "now", which a
-            // tie cannot observe, so the timestamp stands in deterministically).
+            // The authoritative per-cell LDT when surfaced; otherwise `now + ttl` from the
+            // clock reading captured once for this row group - the value emission stamps.
             Op::WriteWithTtl {
                 local_deletion_time: Some(l),
                 ..
             } => *l,
             _ => self
                 .expiring_ttl()
-                .map(|t| (self.timestamp_micros / 1_000_000 + i64::from(t)) as i32)
+                .map(|t| implicit_expiration(self.now_seconds, t))
                 .unwrap_or(0),
         }
     }
@@ -172,4 +194,7 @@ pub(crate) struct RowWrite<'a> {
     /// the real pipeline (`merge_entry_to_mutation`) does not yet emit these
     /// ops, so this stays empty until Phase C (keeping output byte-neutral).
     pub(crate) complex_element_ops: Vec<MergedOp<'a>>,
+    /// The clock reading `ops` were ranked with (see [`MergedOp::now_seconds`]); emission derives
+    /// every implicit expiration from THIS value. `0` on rows with no expiring cells.
+    pub(crate) now_seconds: i32,
 }

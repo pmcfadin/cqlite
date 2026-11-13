@@ -191,6 +191,10 @@ impl DataWriter {
     ) -> Option<RowWrite<'a>> {
         use crate::storage::write_engine::mutation::CellOperation;
 
+        // ONE clock reading for this whole row group: ranks every implicit-LDT expiring cell in
+        // `cell_wins` AND is carried on the `RowWrite` so emission stamps the same value (#4530).
+        let now_seconds = super::types::wall_clock_seconds();
+
         // Cells and liveness are shadowed by the strongest covering deletion:
         // the row deletion (issue #4246 roborev finding: also exposed via
         // `resolve_row_deletion`/`combine_deletion_ts` so a stats-fold caller
@@ -278,6 +282,7 @@ impl DataWriter {
                                 continue;
                             }
                             complex_element_ops.push(MergedOp {
+                                now_seconds,
                                 op,
                                 timestamp_micros: *marked_for_delete_at,
                                 row_ttl_seconds: m.ttl_seconds,
@@ -292,6 +297,7 @@ impl DataWriter {
                                 continue;
                             }
                             complex_element_ops.push(MergedOp {
+                                now_seconds,
                                 op,
                                 timestamp_micros: *elem_ts,
                                 row_ttl_seconds: m.ttl_seconds,
@@ -357,6 +363,7 @@ impl DataWriter {
                         // `WriteComplexElement` payload, so the emitted cell timestamp
                         // is unaffected.
                         complex_element_ops.push(MergedOp {
+                            now_seconds,
                             op,
                             timestamp_micros: *elem_ts,
                             row_ttl_seconds: m.ttl_seconds,
@@ -388,6 +395,7 @@ impl DataWriter {
                         // `write_complex_element_columns`), so this only affects the
                         // RECONCILE COMPARISON, never the serialized marker.
                         complex_element_ops.push(MergedOp {
+                            now_seconds,
                             op,
                             timestamp_micros: *marked_for_delete_at,
                             row_ttl_seconds: m.ttl_seconds,
@@ -506,6 +514,7 @@ impl DataWriter {
                 }
 
                 let candidate = MergedOp {
+                    now_seconds,
                     op,
                     timestamp_micros: cell_ts,
                     row_ttl_seconds: m.ttl_seconds,
@@ -762,6 +771,7 @@ impl DataWriter {
             row_deletion,
             ops,
             complex_element_ops,
+            now_seconds,
         })
     }
 
@@ -888,6 +898,7 @@ impl DataWriter {
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),
+            now_seconds: super::types::wall_clock_seconds(),
         });
         let _cells = self.build_merged_row_body(&row, schema, flags)?;
         Ok(self.row_scratch.clone())
@@ -922,7 +933,7 @@ impl DataWriter {
         // share it with every expiring cell derived below (row liveness AND,
         // via `write_merged_cells`, every complex-column element / UDT field) —
         // see `DataWriter::capture_now_seconds`.
-        let now_seconds = self.capture_now_seconds()?;
+        let now_seconds = row.now_seconds;
 
         // Write timestamp delta (if HAS_TIMESTAMP)
         //
