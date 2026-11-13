@@ -109,7 +109,7 @@ fn filter_dropped_columns_does_not_clone_survivors() {
     state.filter_dropped_columns(&dropped_columns);
     state.expire_ttl_cells(None);
     state.purge_gc_grace(None, i64::MAX, &mut purges);
-    let built = state.build(&mut purges);
+    let built = state.build(&mut purges, None);
 
     let clones = scope.count();
     drop(scope);

@@ -59,8 +59,8 @@ fn want_cols() -> Cols {
     ["pk", "ck", "b"].iter().map(|s| s.to_string()).collect()
 }
 
-/// pk=1 returns EXACTLY ck 1, 2, 3: ck=4 (row deleted, only an older cell) and ck=5 (row deleted at
-/// 200, then only a newer cell TOMBSTONE at 300 - no live data) are NOT rows in Cassandra's SELECT,
+/// pk=1 returns EXACTLY ck 1, 2, 3: ck=4 (row deleted, only an older cell), ck=5 (row deleted at 200,
+/// then only a newer cell TOMBSTONE at 300) and ck=6 (then only a row MARKER at 300 that has EXPIRED) are NOT rows in Cassandra's SELECT,
 /// and must not materialise as phantom key-only rows.
 fn assert_exact_rows(path: &str, rows: &[std::collections::HashMap<String, Value>]) {
     let mut cks: Vec<i32> = rows
