@@ -234,7 +234,8 @@ pub(crate) async fn run(input: AuditInputs<'_>, findings: &mut Vec<VerifyFinding
             &mut view,
             findings,
         );
-        if input.bti_identity_failed {
+        // `--deep` on BTI: a failed scan means the identity cross-check never ran.
+        if input.bti_identity_failed || matches!(input.observed_partitions, Some(Err(_))) {
             AuditVerdict::Fail
         } else {
             v
