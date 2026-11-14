@@ -1,0 +1,69 @@
+# oracle: sstablemetadata from image cassandra:5.0.8 (sha256:259578bbeac315a7326c2a99e60eab86f3415e9e895207bf2a032af4de8c16b5), default flags (-g 0)
+# captured_epoch: 1794545634  (the tool's gcBefore = this instant: 'Estimated droppable tombstones' is evaluated at it)
+# generator: test-data/scripts/capture-issue-4204-sstablemetadata.sh
+SSTable: /d/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 01/01/2021 00:00:00 (1609459200000000)
+Maximum timestamp: 01/02/2021 00:00:00 (1609545600000000)
+Duration: Days: 1 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 11/11/2026 00:53:40 (1794358420)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.04022499295748772
+TTL min: 0
+TTL max: 0
+First token: -4069959284402364209 (1)
+Last token: -4069959284402364209 (1)
+Covered clusterings: [1, 4000]
+Estimated droppable tombstones: 0.001812141347025068
+SSTable Level: 0
+Repaired at: 0
+Originating host id: e33b9fb6-0352-4ef9-873c-b5e1135345e9
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1794358348643, position=82972)=CommitLogPosition(segmentId=1794358348643, position=1152806)}
+totalColumnsSet: 2987
+totalRows: 2987
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1794358440 (11/11/2026 00:54:00) |     6 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes)      | Count  (%)  Histogram 
+   654949 (639.6 kB) |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      654949 (639.6 kB)
+   75th      654949 (639.6 kB)
+   95th      654949 (639.6 kB)
+   98th      654949 (639.6 kB)
+   99th      654949 (639.6 kB)
+   Min       545792 (533.0 kB)
+   Max       654949 (639.6 kB)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   3311    |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      3311
+   75th      3311
+   95th      3311
+   98th      3311
+   99th      3311
+   Min       2760
+   Max       3311
+Local token space coverage: NaN
+Estimated cardinality: 1
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 11/11/2026 00:53:40 (1794358420)
+EncodingStats minTimestamp: 01/01/2021 00:00:00 (1609459200000000)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]
+StaticColumns: 
+RegularColumns: val:org.apache.cassandra.db.marshal.UTF8Type
+IsTransient: false

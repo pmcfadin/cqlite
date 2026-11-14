@@ -117,12 +117,12 @@ async fn run_main() -> Result<()> {
         return commands::dispatch_rebuild(cli.schema.as_deref(), args).await;
     }
 
-    // `sweep` (issue #4194) likewise operates directly on a data directory and
-    // needs no Database/schema/write-engine; short-circuit before database
-    // init like `verify`/`salvage`. Owns its own exit-code space (0/1/2, see
-    // `execute_sweep_command`'s doc) via `std::process::exit`.
+    // `sweep` (#4194)/`diagnose` (#4204): file-level verbs, dispatched before database init.
     if let Some(Commands::Sweep(args)) = &cli.command {
         return commands::sweep::execute_sweep_command(args).await;
+    }
+    if let Some(Commands::Diagnose(args)) = &cli.command {
+        return commands::dispatch_diagnose(cli.schema.as_deref(), args).await;
     }
 
     // Initialize database connection
@@ -1089,9 +1089,9 @@ async fn run_main() -> Result<()> {
             // Handled by the short-circuit before database init; see above.
             unreachable!("Commands::Rebuild is dispatched before database initialization")
         }
-        Some(Commands::Sweep(_)) => {
+        Some(Commands::Sweep(_)) | Some(Commands::Diagnose(_)) => {
             // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Sweep is dispatched before database initialization")
+            unreachable!("sweep/diagnose are dispatched before database initialization")
         }
         None => {
             // Issue #1693 (AG4): with `--writable` and no one-shot operation

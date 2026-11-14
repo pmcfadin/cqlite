@@ -153,7 +153,7 @@ mod from_readers;
 /// `fully_expired_sstables` drop-set used by both compaction surfaces to skip
 /// reading SSTables that are entirely past `gcBefore` and overlap-safe.
 #[cfg(feature = "write-support")]
-mod fully_expired;
+pub(crate) mod fully_expired;
 #[cfg(feature = "write-support")]
 pub use fully_expired::fully_expired_sstables;
 #[cfg(feature = "write-support")]

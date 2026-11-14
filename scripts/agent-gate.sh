@@ -90,7 +90,7 @@
 #                      target can't read as PASS.
 #   memory-budget      dhat allocation/peak-heap regression nets (dhat-heap;
 #                      --test-threads=1 since dhat::Profiler is a process-global
-#                      singleton). FIVE lanes: (a) read path — memory_budget.rs
+#                      singleton). SIX lanes: (a) read path — memory_budget.rs
 #                      (issue #1565, Epic A/A4), pinning full-scan total-bytes
 #                      (~209 MB, ceiling 252 MB) + materializing peak (~4.9 MB,
 #                      ceiling 6 MB, also < 128 MiB); (b) export converter —
@@ -107,7 +107,11 @@
 #                      (incl. statistics) rebuild_components run over EVERY
 #                      test_wide_rows table, peak live heap <= the 128 MiB budget
 #                      a single-input compaction is held to, plus a pinned
-#                      ~2.6 MB measured ceiling.
+#                      ~2.6 MB measured ceiling; (f) `diagnose --deep` — issue_4204_
+#                      diagnose_deep_memory_budget.rs (issue #4204, spec R3.3), a
+#                      deep scan (+ dry-compaction reclaim with a schema) over EVERY
+#                      test_wide_rows table, corpus-wide peak live heap <= 128 MiB
+#                      plus a pinned 1 MiB ceiling (measured 381 KB).
 #                      dhat counts are machine-independent, so this is the hard,
 #                      load-deterministic export/Flight/read signal. Dataset-
 #                      dependent lanes fail closed on empty (assert >=1 row/cell/
@@ -28327,6 +28331,11 @@ dispatch_component() {
   _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
   env CQLITE_REQUIRE_FIXTURES=1 cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_4197_rebuild_memory_budget -- --test-threads=1 || rc=1
+  # (f) `cqlite diagnose --deep` (#4204, spec R3.3): same feature set / fixtures contract as (e);
+  # CQLITE_REQUIRE_FIXTURES=1 turns an absent test_wide_rows corpus into a failure, not a skip.
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
+  env CQLITE_REQUIRE_FIXTURES=1 cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
+    --test issue_4204_diagnose_deep_memory_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
     integration-tests)
       # #3453: see the memory-budget branch — package hoisted so the recorded scope and
