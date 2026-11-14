@@ -1453,23 +1453,43 @@ impl V5CompressedLegacyParser {
     fn clustering_cql_type(
         col: &crate::schema::ClusteringColumn,
     ) -> Result<crate::schema::CqlType> {
-        let lower = col.data_type.trim().to_lowercase();
-        let inner = lower
-            .strip_prefix("reversedtype(")
-            .and_then(|r| r.strip_suffix(')'))
-            .unwrap_or(&lower);
-        // Marshal short names the legacy schema JSON used for the two it always spelled that way.
-        let inner = match inner {
-            "timestamptype" => "timestamp",
-            "utf8type" => "text",
-            other => other,
-        };
-        crate::schema::CqlType::parse(inner).map_err(|e| {
+        Self::resolve_clustering_type(&col.data_type).map_err(|e| {
             Error::schema(format!(
                 "V5CompressedLegacy: Clustering '{}' has a type this decoder cannot resolve ('{}'): {e}",
                 col.name, col.data_type
             ))
         })
+    }
+
+    /// Type-string resolution behind [`Self::clustering_cql_type`].
+    ///
+    /// Only the wrapper and the two legacy marshal aliases are matched case-insensitively. The
+    /// rest of the string is handed to `CqlType::parse` with its ORIGINAL spelling, because a
+    /// quoted CQL identifier is case-sensitive: Cassandra 5.0.8 `ColumnIdentifier.java`
+    /// (`maybeQuote` / `ColumnIdentifier.getInterned`) keeps a double-quoted name verbatim and
+    /// folds only UNquoted names to lowercase. Lowercasing the whole string turned
+    /// `frozen<"PostalAddress">` into a different (nonexistent) UDT. `CqlType::parse` already
+    /// matches built-in keywords (`INT`, `FROZEN<..>`) case-insensitively and keeps custom/UDT
+    /// names as written.
+    pub(super) fn resolve_clustering_type(declared: &str) -> Result<crate::schema::CqlType> {
+        const REVERSED: &str = "reversedtype(";
+        let declared = declared.trim();
+        let inner = match declared.get(..REVERSED.len()) {
+            Some(head) if head.eq_ignore_ascii_case(REVERSED) => declared[REVERSED.len()..]
+                .strip_suffix(')')
+                .unwrap_or(declared),
+            _ => declared,
+        }
+        .trim();
+        // Marshal short names the legacy schema JSON used for the two it always spelled that way.
+        let inner = if inner.eq_ignore_ascii_case("timestamptype") {
+            "timestamp"
+        } else if inner.eq_ignore_ascii_case("utf8type") {
+            "text"
+        } else {
+            inner
+        };
+        crate::schema::CqlType::parse(inner)
     }
 
     /// `Some(width)` for the types Cassandra 5.0.8 declares fixed-width
@@ -1496,6 +1516,44 @@ mod tests {
     use super::super::test_support::helpers::*;
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn clustering_type_resolution_preserves_quoted_identifier_case_4279() {
+        use crate::schema::CqlType;
+        let resolve = V5CompressedLegacyParser::resolve_clustering_type;
+        // The schema stores a quoted UDT name WITHOUT its quotes and with its case intact
+        // (`cql_parser::identifier`), so `frozen<"PostalAddress">` reaches here as below. The
+        // registry is keyed by that exact spelling; the old whole-string `to_lowercase()` turned
+        // it into `postaladdress`, which names no UDT.
+        let stored = resolve("frozen<PostalAddress>").unwrap();
+        assert_eq!(
+            stored,
+            CqlType::Frozen(Box::new(CqlType::Custom("udt:PostalAddress".to_string())))
+        );
+        // Qualified form and a ReversedType wrapper in any case keep the spelling too.
+        assert_eq!(
+            resolve("ReversedType(frozen<PostalAddress>)").unwrap(),
+            stored
+        );
+        assert_eq!(
+            resolve("frozen<MyKs.PostalAddress>").unwrap(),
+            CqlType::Frozen(Box::new(CqlType::Custom(
+                "udt:MyKs.PostalAddress".to_string()
+            )))
+        );
+        // A literally quoted spelling is never case-folded either (it is refused as a frozen
+        // scalar by the parser, not silently rewritten to another identifier).
+        let err = resolve("frozen<\"PostalAddress\">")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"PostalAddress\""), "{err}");
+        // Built-ins and marshal aliases still normalize.
+        assert_eq!(resolve("ReversedType(Int)").unwrap(), CqlType::Int);
+        assert_eq!(resolve("REVERSEDTYPE(INT)").unwrap(), CqlType::Int);
+        assert_eq!(resolve("INT").unwrap(), CqlType::Int);
+        assert_eq!(resolve("UTF8Type").unwrap(), CqlType::Text);
+        assert_eq!(resolve("TimestampType").unwrap(), CqlType::Timestamp);
+    }
 
     #[test]
     fn test_partition_header_parsing() {
