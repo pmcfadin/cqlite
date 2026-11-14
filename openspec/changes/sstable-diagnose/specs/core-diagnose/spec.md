@@ -62,12 +62,17 @@ histograms and `--top N` rankings in that SAME pass, and SHALL NOT write any out
 #### Scenario: R3.2 top-N tombstone-heaviest is the RAW per-generation count, not #4200's reconciled report
 - **Given** `test_tomb/*`
 - **When** `cqlite diagnose <table-dir> --deep --top 5` runs
-- **Then** `top_tombstone_heaviest_partitions` matches a flat per-partition marker count computed
-  independently by the test from the golden (partition/range/row/cell tombstone markers summed, NO
-  `gcBefore` filtering, NO cross-generation reconciliation) — matching `sstablemetadata -s`'s
-  `mostTombstones` definition exactly (`design.md` D2), and the report's own field description names
-  `cqlite tombstones` (#4200) as the authoritative, reconciled alternative
+- **Then** `top_tombstone_heaviest_partitions` matches a flat per-partition count computed
+  independently by the test from the golden, counting **partition deletions, range-tombstone markers
+  and tombstoned cells, and NOT row deletions** (NO `gcBefore` filtering, NO cross-generation
+  reconciliation) — exactly `sstablemetadata -s`'s `ptombcount` in `SSTableMetadataViewer.printScannedOverview`
+  (`cassandra-5.0.8`, `SSTableMetadataViewer.java` lines 205-262: `+1` for a non-live partition-level
+  deletion, `+1` per `RANGE_TOMBSTONE_MARKER`, `+1` per cell where `cell.isTombstone()`; a row
+  deletion is a row with no cells and counts nothing) (`design.md` D2), and the report's own field
+  description states that the figure is a **raw, per-generation, unreconciled count**
   (`cqlite-core/tests/issue_4204_diagnose_deep_scan.rs`).
+  - *Owner ruling 2026-11-14:* the description does NOT name `cqlite tombstones` yet — that verb
+    ships in 0.20 (#4200). The pointer returns when #4200 lands (tracked on #4200).
 
 #### Scenario: R3.3 bounded memory, no write
 - **Given** `test_wide_rows` under the memory-budget dhat lane
