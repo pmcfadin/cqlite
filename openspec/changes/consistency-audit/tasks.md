@@ -81,8 +81,8 @@ full gate in `flow-closer`.
       `BtiDataOffsetOutOfBounds` finding when `data_position >= data_len`. Fold into the
       `bti-trie-bounds` audit row alongside the existing reachability/identity checks (wired as-is,
       D1's already-correct half).
-- [x] 3.3 `check_compression_coverage` (design.md §D6): `ceil(data_length/chunk_length)` vs
-      `chunk_offsets.len()`, plus the last-chunk-physical-end-equals-file-size check.
+- [x] 3.3 `check_compression_coverage` (design.md §D6): `ceil(data_length/chunk_length)` (or that
+      plus ONE zero-byte terminal chunk, spec A7/A7.4) vs `chunk_offsets.len()`, plus the last-chunk-physical-end-equals-file-size check.
       `CompressionCoverageGap` finding on mismatch; `Skip("no CompressionInfo: uncompressed")` when
       absent.
 - [x] 3.4 `check_statistics_vs_scan` (design.md §D7, `--deep` only): scope per 0.5's finding — either

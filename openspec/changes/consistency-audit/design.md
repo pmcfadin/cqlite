@@ -160,11 +160,14 @@ new I/O beyond what `check_compression_info` already reads:
 
 ```
 expected_chunk_count = ceil(data_length / chunk_length as u64)   # data_length: LOGICAL uncompressed size
-chunk_offsets.len() == expected_chunk_count?
+chunk_offsets.len() == expected_chunk_count
+   or == expected_chunk_count + 1 (ONE terminal chunk that decodes to zero bytes — Cassandra's
+      CompressedSequentialWriter writes it, cassandra-5.0.8 lines 183 and 357; owner ruling 2026-11-14)?
    no -> Fail (CompressionCoverageGap: "declared N chunks, data_length implies M")
-   yes -> the LAST chunk's physical range end (chunk_offsets.last() + its compressed size, i.e. the
-          next boundary or Data.db's actual on-disk length for the final chunk) must equal Data.db's
-          real file size (already read for the existing bounds check) -> mismatch is the same Fail
+   yes -> the last DATA chunk must decode to exactly the logical remainder, and the LAST physical
+          range end (the next boundary, or Data.db's actual on-disk length for the final chunk) must
+          equal Data.db's real file size (already read for the existing bounds check) -> mismatch is
+          the same Fail
 ```
 
 Uncompressed SSTables: `Skip("no CompressionInfo: uncompressed")` — matches the existing
@@ -287,8 +290,9 @@ chunk-CRC-adjacent invariants).
 ## D14. Measured against real Cassandra data (implementation findings, for owner review)
 
 Recorded during implementation of #4195; each is a place where the design's wording and
-Cassandra-written bytes disagree, with the choice taken and the evidence. None changes a requirement
-or scenario; the first four narrow or complete a rule so the audit reports ZERO findings on all 149
+Cassandra-written bytes disagree, with the choice taken and the evidence. Items 1 and 9 were ruled by
+the owner on 2026-11-14 and are now written into spec.md (A7 and scenario A7.4; scenario A3.4); the
+rest change no requirement or scenario. The first four narrow or complete a rule so the audit reports ZERO findings on all 149
 healthy datasets-v4 generations (298 audits, shallow + `--deep`).
 
 1. **D6 / A7 — the chunk table is not always exactly `ceil(data_length / chunk_length)`.** 17 healthy
@@ -298,7 +302,7 @@ healthy datasets-v4 generations (298 audits, shallow + `--deep`).
    (cassandra-5.0.8 line 183) and `doFlush(0)` at finish (line 357) can run on an empty buffer. Accepted
    shapes: `ceil` records, or `ceil` data records plus ONE terminal record decoding to zero bytes. The
    last data chunk must decode to exactly the logical remainder. Strict equality would fail 34 of 298
-   healthy audits. Format authority for `ceil`: `CompressionMetadata.Writer.open`, lines 447-449.
+   healthy audits. Format authority for `ceil`: `CompressionMetadata.Writer.open`, lines 447-449. Now spec.md A7 + scenario A7.4, pinned by `a7_4_cassandras_terminal_empty_chunk_is_healthy_on_both_formats` (`test_da/simple_table` BTI, `test_big/wide_partition` BIG).
 2. **D12 `compression_info_short_coverage`** — "drop the LAST `chunk_offsets` entry" is not isolating:
    the surviving final record then spans two chunks and `--mode full`'s inline chunk-CRC check also
    fires (task 4.2). The fixture instead raises `data_length` by one `chunk_length` (declared chunks ==
@@ -326,4 +330,4 @@ healthy datasets-v4 generations (298 audits, shallow + `--deep`).
    parameter is carried by additive `verify_sstable_audit` / `verify_sstable_generation_audit`;
    `verify_sstable(.., VerifyMode::Audit, ..)` is the shallow audit.
 9. **Unparseable `Filter.db`** — `Skip("Filter.db unreadable: <cause>")`, no finding: Cassandra rebuilds
-   a filter it cannot read, and the spec names no finding class for it. Flagged as an open question.
+   a filter it cannot read, and the spec names no finding class for it. RESOLVED by the owner's 2026-11-14 ruling: spec.md scenario A3.4 (`Skip`, naming the cause; the read path ignores an unparseable filter, so A3's invariant cannot be violated through it, and A10's all-Skip exit still fails a run that measured nothing). Pinned on both formats by `a3_4_unparseable_filter_db_skips_naming_the_cause_on_both_formats`.
