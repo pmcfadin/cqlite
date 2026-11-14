@@ -19,6 +19,7 @@ fn shadow(now_secs: i64) -> ReadShadow {
     ReadShadow {
         now_secs,
         key_columns: HashSet::new(),
+        static_columns: HashSet::new(),
     }
 }
 
@@ -26,6 +27,7 @@ fn shadow_with_keys(now_secs: i64, keys: &[&str]) -> ReadShadow {
     ReadShadow {
         now_secs,
         key_columns: keys.iter().map(|k| k.to_string()).collect(),
+        static_columns: HashSet::new(),
     }
 }
 
@@ -256,4 +258,53 @@ fn cell_expiry_secs_reinterprets_post_2038_unsigned() {
     );
     // A non-expiring (no-TTL) cell has no expiry.
     assert_eq!(cell_expiry_secs(&live_cell("x", 100)), None);
+}
+
+use crate::storage::sstable::reader::compaction_row::RowLiveness;
+
+fn static_shadow(now_secs: i64) -> ReadShadow {
+    ReadShadow {
+        now_secs,
+        key_columns: ["pk", "ck"].iter().map(|k| k.to_string()).collect(),
+        static_columns: ["s"].iter().map(|k| k.to_string()).collect(),
+    }
+}
+
+/// Issue #4524 (roborev job 297): a live STATIC cell must not keep a clustering row visible.
+/// Cassandra 5.0.8 `AbstractRow.hasLiveData` consults only the row's OWN liveness and cells; the
+/// static cells belong to the separate static row. A markerless clustering row whose only
+/// regular cell is tombstoned stays hidden even beside a live static value.
+#[test]
+fn a_live_static_cell_never_keeps_a_markerless_tombstone_only_clustering_row() {
+    let cells = vec![
+        live_cell("pk", 1000),
+        live_cell("ck", 1000),
+        live_cell("s", 1000), // live static value (display-merged beside the clustering row)
+        tombstone_cell("v", 2000),
+    ];
+    let sh = static_shadow(2_000_000);
+    assert!(
+        sh.filter_visible(None, RowLiveness::default(), cells.clone(), false)
+            .is_none(),
+        "clustering row: a live static cell is not row data"
+    );
+    // The static row ITSELF (no clustering key) is its own row: its static cells are its data.
+    let static_cells = vec![live_cell("pk", 1000), live_cell("s", 1000)];
+    assert!(
+        sh.filter_visible(None, RowLiveness::default(), static_cells, true)
+            .is_some(),
+        "the static row is visible on its own live static cell"
+    );
+    // A live REGULAR cell, or a live liveness marker, still keeps the clustering row.
+    let mut with_data = cells.clone();
+    with_data.push(live_cell("v2", 1000));
+    assert!(sh
+        .filter_visible(None, RowLiveness::default(), with_data, false)
+        .is_some());
+    let marker = RowLiveness {
+        has_marker: true,
+        marker_timestamp: Some(1000),
+        ..RowLiveness::default()
+    };
+    assert!(sh.filter_visible(None, marker, cells, false).is_some());
 }
