@@ -169,7 +169,13 @@ pub fn scan_commitlog(
                         segment: segment.clone(),
                         cause: format!("record at {at} could not be read: {e}"),
                     });
-                    break;
+                    // A body-decode error carries the record's offset and the frame walker has
+                    // already advanced past that CRC-valid record: keep scanning, so later
+                    // matching mutations and a torn tail are still reported. A framing error
+                    // (`position == None`) ends the iterator itself.
+                    if position.is_none() {
+                        break;
+                    }
                 }
             }
         }

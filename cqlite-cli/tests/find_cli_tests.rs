@@ -511,3 +511,54 @@ fn truncated_row_body_is_a_segment_failure_not_an_unmeasured_success() {
     // The unedited earlier mutation for key 2 is still reported.
     assert!(out.contains(&format!("{seg}@62415")), "{out}");
 }
+
+/// M2 (roborev PR #4535): a mutation-body DECODE error does not end the segment scan. DOCUMENTED
+/// BYTE EDIT of the Cassandra-written segment: the record for key 2 @T2 (`position` 62415, from
+/// the independent ground truth) has its first nine body bytes overwritten with `0xFF` (a
+/// `num_updates` unsigned VInt of `u64::MAX`, impossible for the body length) and its body CRC
+/// recomputed, so the frame stays CRC-valid and the SAME SIZE (every later record keeps its
+/// offset). The later, unedited key-2 mutation (@T6, position 62887) must still be reported, and
+/// the edited record is its own named failure with exit 2 (never exit 0).
+#[test]
+fn body_decode_error_is_named_and_later_matching_mutations_are_still_reported() {
+    let t = truth();
+    let seg = t.gt["segment"]["file"].as_str().expect("segment file");
+    let mut bytes = std::fs::read(t.commitlog.join(seg)).expect("segment");
+    let inserts = t.gt["inserts"].as_array().expect("inserts");
+    let pos = inserts[1]["position"].as_u64().expect("position") as usize;
+    let later = inserts[5]["position"].as_u64().expect("position");
+    assert_eq!(pos, 62415, "ground truth: key 2 @T2");
+    assert_eq!(later, 62887, "ground truth: key 2 @T6");
+    let size_bytes: [u8; 4] = bytes[pos..pos + 4].try_into().expect("size");
+    let size = i32::from_be_bytes(size_bytes) as usize;
+    for b in &mut bytes[pos + 8..pos + 8 + 9] {
+        *b = 0xFF;
+    }
+    let mut h = crc32fast::Hasher::new();
+    h.update(&size_bytes);
+    h.update(&bytes[pos + 8..pos + 8 + size]);
+    let body_crc = h.finalize();
+    bytes[pos + 8 + size..pos + 8 + size + 4].copy_from_slice(&body_crc.to_be_bytes());
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(tmp.path().join(seg), &bytes).expect("write edited segment");
+    let (code, out, _) = find(
+        "commitlog-find.cql",
+        &t.dir,
+        "2",
+        &["--commitlog", tmp.path().to_str().expect("utf8")],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains(&format!("{seg}: UNREADABLE")), "{out}");
+    assert!(
+        out.contains("record at position 62415 could not be read"),
+        "{out}"
+    );
+    assert!(
+        !out.contains(&format!("{seg}@62415")),
+        "the edited record is a failure, not a mutation: {out}"
+    );
+    assert!(
+        out.contains(&format!("{seg}@62887")),
+        "the later valid matching mutation must still be reported: {out}"
+    );
+}
