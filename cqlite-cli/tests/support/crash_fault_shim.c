@@ -576,6 +576,33 @@ int link(const char *a, const char *b2) {
   if (abs_path(AT_FDCWD, b2, p, sizeof p) == 0) { int b = boundary("create", p, 0); if (b > 0) { errno = b; return -1; } }
   return real(a, b2);
 }
+int linkat(int d1, const char *a, int d2, const char *b2, int flags) {
+  REAL(linkat);
+  char p[PATH_MAX];
+  if (abs_path(d2, b2, p, sizeof p) == 0) { int b = boundary("create", p, 0); if (b > 0) { errno = b; return -1; } }
+  return real(d1, a, d2, b2, flags);
+}
+/* stdio: glibc flushes a FILE through its INTERNAL write, never the interposed write(2), so the
+ * stdio writers are boundaries in their own right (counted per call, "write" class). */
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f) {
+  REAL(fwrite);
+  char p[PATH_MAX];
+  if (fd_path(fileno(f), p, sizeof p) == 0) {
+    int b = boundary("write", p, 1);
+    if (b > 0) { errno = b; return 0; }
+    if (b < 0) { if (nmemb < 2) { errno = ENOSPC; return 0; } return real(ptr, size, nmemb / 2, f); }
+  }
+  return real(ptr, size, nmemb, f);
+}
+int fputc(int c, FILE *f) {
+  REAL(fputc);
+  char p[PATH_MAX];
+  if (fd_path(fileno(f), p, sizeof p) == 0) {
+    int b = boundary("write", p, 1);
+    if (b != 0) { errno = b > 0 ? b : ENOSPC; return EOF; }
+  }
+  return real(c, f);
+}
 int symlink(const char *a, const char *b2) {
   REAL(symlink);
   char p[PATH_MAX];
