@@ -1000,14 +1000,21 @@ fn is_io_mutating(sym: &str) -> bool {
 }
 
 /// Matched by [`is_io_mutating`] but not a data/directory-entry write boundary, each with the reason.
+const META: &str = "metadata only; no data or directory-entry change a crash could tear";
+const MAP: &str = "acts on a mapping already checked (writable shared aborts at mmap)";
 const NOT_A_WRITE_BOUNDARY: &[(&str, &str)] = &[
     ("opendir", "directory read"),
     ("fdopendir", "directory read"),
     ("readlink", "read-only"),
-    (
-        "fchmod",
-        "permission bits only; no data or directory-entry change a crash could tear",
-    ),
+    ("fchmod", META),
+    ("chmod", META),
+    ("chown", META),
+    ("fchown", META),
+    ("lchown", META),
+    ("futimens", META),
+    ("utimensat", META),
+    ("msync", MAP),
+    ("mremap", MAP),
     (
         "posix_spawn_file_actions_addchdir_np",
         "process spawn plumbing",
@@ -1028,13 +1035,11 @@ const NOT_A_WRITE_BOUNDARY: &[(&str, &str)] = &[
     ("posix_spawn", "process spawn"),
 ];
 
-/// `syscall` is listed as interposed but the shim handles only the mutating raw numbers it has
-/// wrappers for; every OTHER mutating number aborts the run (exit 97, see
-/// `unhandled_mutating_raw_syscall_aborts_the_run`), so it can never be a silent blind spot.
+/// `syscall` is interposed but only for the mutating raw numbers it has wrappers for; every OTHER
+/// mutating number aborts the run (exit 97, `unhandled_mutating_raw_syscall_aborts_the_run`).
 ///
-/// The CLI binary must not import an I/O-mutating libc symbol the shim does not interpose: a
-/// future writer using a new call (`pwritev2`, `linkat`, ...) would otherwise go invisible to the
-/// whole matrix. Lists what it checked on stderr.
+/// The CLI must not import an I/O-mutating libc symbol the shim does not interpose: a future
+/// writer using a new call (`pwritev2`, `linkat`, ...) would otherwise go invisible to the matrix.
 #[test]
 fn every_imported_io_symbol_is_interposed_by_the_shim() {
     let cli = PathBuf::from(env!("CARGO_BIN_EXE_cqlite"));
@@ -1067,6 +1072,8 @@ fn every_imported_io_symbol_is_interposed_by_the_shim() {
     );
 }
 
+#[path = "issue_4498_crash_consistency/stdio_and_linkat.rs"]
+mod stdio_and_linkat;
 // ---- `syscall(2)` interposer: raw-ABI decode and the blind-spot abort --------------------
 
 /// Compile `src` (a one-file C program) and run it under the shim with the fault root `root`.
