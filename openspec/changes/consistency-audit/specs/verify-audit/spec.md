@@ -94,6 +94,14 @@ Every `Summary.db` sample's `(partition_key, position)` SHALL resolve, at `posit
 - **Then** `Fail`, a `FilterFalseNegative` finding names the affected key, sourced from the resolved
   BTI trie leaves rather than `Index.db`.
 
+#### Scenario: A3.4 a present but unparseable Filter.db Skips, naming the parse error
+- **Given** a generation whose `Filter.db` is present but cannot be deserialized (a real
+  Cassandra-written generation with `Filter.db` truncated)
+- **When** `bloom-no-false-negative` runs
+- **Then** `Skip("Filter.db unreadable: <error>")`, never `Pass` and never `Fail`. The read path
+  ignores an unparseable filter and still finds every key, so A3's false-negative invariant cannot be
+  violated through it, and A10's all-Skip exit still fails a run that measured nothing.
+
 ### Requirement: A4 — BTI trie leaves are reachable, in-bounds, and identity-correct
 
 Every `Partitions.db` leaf reachable from the trie root SHALL resolve to a raw partition key matching the corresponding `Data.db`/`Rows.db` content (issue #1103, already implemented), and every `DataOffset` leaf's payload position SHALL be within `Data.db`'s bounds BEFORE any scan is attempted.
@@ -138,7 +146,7 @@ The `digest-matches-data` audit row SHALL reflect the EXISTING `check_digest` re
 
 ### Requirement: A7 — CompressionInfo chunk table covers exactly Data.db's length
 
-For a compressed SSTable, `CompressionInfo.db`'s declared chunk count SHALL equal `ceil(data_length / chunk_length)`, and the last chunk's physical range SHALL end exactly at Data.db's real file size.
+For a compressed SSTable, `CompressionInfo.db` SHALL declare either `ceil(data_length / chunk_length)` chunks, or that many data chunks plus exactly ONE terminal chunk that decodes to zero bytes (Cassandra's `CompressedSequentialWriter` writes that record: cassandra-5.0.8 lines 183 and 357). The last DATA chunk SHALL decode to exactly the logical remainder, and the physical range SHALL end at Data.db's real file size. Any other shape is a `CompressionCoverageGap`.
 
 #### Scenario: A7.1 healthy compressed fixture — exact coverage
 - **Given** a committed healthy compressed BIG fixture (e.g. `lz4_table`)
@@ -155,6 +163,12 @@ For a compressed SSTable, `CompressionInfo.db`'s declared chunk count SHALL equa
 - **Given** a committed healthy uncompressed fixture (no `CompressionInfo.db`)
 - **When** `compression-coverage` runs
 - **Then** `Skip("no CompressionInfo: uncompressed")`.
+
+#### Scenario: A7.4 Cassandra's terminal empty chunk is healthy
+- **Given** a committed healthy compressed generation that carries the terminal empty chunk
+  (`test_da/simple_table`, BTI, and `test_big/wide_partition`, BIG: each declares `ceil + 1` records)
+- **When** `compression-coverage` runs
+- **Then** `Pass`.
 
 ### Requirement: A8 — Statistics.db's declared values agree with a real scan (`--deep` only)
 

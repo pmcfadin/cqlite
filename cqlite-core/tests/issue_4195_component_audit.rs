@@ -895,3 +895,107 @@ async fn compression_offset_table_corruption_fails_the_coverage_row() {
     assert_eq!(f.len(), 1, "{}", describe(&r));
     assert!(f[0].detail.contains("not 0"), "{}", f[0].detail);
 }
+
+/// `(declared chunk records, ceil(data_length / chunk_length))` of a generation, read straight
+/// from its own `CompressionInfo.db` (independent of the audit's verdict).
+fn chunk_counts(dir: &Path) -> (u64, u64) {
+    let bytes = std::fs::read(component(dir, "-CompressionInfo.db")).expect("CompressionInfo.db");
+    let info = cqlite_core::storage::sstable::compression_info::CompressionInfo::parse(&bytes)
+        .expect("parse CompressionInfo.db");
+    (
+        info.chunk_offsets.len() as u64,
+        info.data_length.div_ceil(u64::from(info.chunk_length)),
+    )
+}
+
+/// A7.4 — Cassandra's terminal empty chunk is healthy (cassandra-5.0.8
+/// `CompressedSequentialWriter` lines 183 and 357). Both fixtures are Cassandra-written and
+/// committed-corpus bytes, unedited; the precondition (`ceil + 1` declared records) is read from
+/// each `CompressionInfo.db` here, not assumed.
+#[tokio::test]
+async fn a7_4_cassandras_terminal_empty_chunk_is_healthy_on_both_formats() {
+    for (ks, table, what) in [
+        ("test_da", "simple_table", "BTI da"),
+        ("test_big", "wide_partition", "BIG nb"),
+    ] {
+        let dir = clean_dir(ks, table);
+        let (declared, expected) = chunk_counts(&dir);
+        assert_eq!(
+            declared,
+            expected + 1,
+            "{ks}.{table} ({what}) precondition: ceil data records + ONE terminal record"
+        );
+        let r = audit_generation(&data_db(&dir), false).await;
+        assert_eq!(
+            verdict(&r, "compression-coverage"),
+            AuditVerdict::Pass,
+            "{ks}.{table} ({what}): {}",
+            describe(&r)
+        );
+        assert!(
+            only_class(&r, VerifyErrorClass::CompressionCoverageGap).is_empty(),
+            "{ks}.{table}: {}",
+            describe(&r)
+        );
+    }
+}
+
+/// Copy a generation's components into a tempdir (jsonl/txt oracles left behind).
+fn copy_generation(src: &Path) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for e in std::fs::read_dir(src).expect("dir").flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if e.path().is_file() && !name.ends_with(".jsonl") && !name.ends_with(".txt.jsonl") {
+            std::fs::copy(e.path(), tmp.path().join(&name)).expect("copy");
+        }
+    }
+    tmp
+}
+
+/// A3.4 — a present but unparseable `Filter.db` Skips, naming the parse error; never Pass/Fail.
+/// Input: a real Cassandra-written generation copied to a tempdir with `Filter.db` TRUNCATED to 5
+/// bytes (a documented edit of real bytes, not synthesis).
+#[tokio::test]
+async fn a3_4_unparseable_filter_db_skips_naming_the_cause_on_both_formats() {
+    for (ks, table, what) in [
+        ("test_basic", "simple_table", "BIG nb"),
+        ("test_da", "simple_table", "BTI da"),
+    ] {
+        let tmp = copy_generation(&clean_dir(ks, table));
+        let filter = component(tmp.path(), "-Filter.db");
+        let original = std::fs::read(&filter).expect("Filter.db");
+        assert!(
+            original.len() > 5,
+            "{ks}.{table}: precondition, a real filter"
+        );
+        std::fs::write(&filter, &original[..5]).expect("truncate");
+        let cause = cqlite_core::storage::sstable::bloom::BloomFilter::deserialize(&original[..5])
+            .err()
+            .unwrap_or_else(|| panic!("{ks}.{table}: the truncated filter must not deserialize"))
+            .to_string();
+
+        let r = audit_generation(&data_db(tmp.path()), false).await;
+        match verdict(&r, "bloom-no-false-negative") {
+            AuditVerdict::Skip(msg) => {
+                assert!(
+                    msg.starts_with("Filter.db unreadable: ")
+                        && msg.len() > "Filter.db unreadable: ".len(),
+                    "{ks}.{table} ({what}): {msg}"
+                );
+                assert_eq!(
+                    msg,
+                    format!("Filter.db unreadable: {cause}"),
+                    "{ks}.{table} ({what})"
+                );
+            }
+            other => panic!(
+                "{ks}.{table} ({what}): expected Skip, got {other:?}\n{}",
+                describe(&r)
+            ),
+        }
+        assert!(
+            only_class(&r, VerifyErrorClass::FilterFalseNegative).is_empty(),
+            "{ks}.{table}: no finding for an unreadable filter"
+        );
+    }
+}
