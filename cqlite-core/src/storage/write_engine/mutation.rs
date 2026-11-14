@@ -11,7 +11,7 @@
 //! - `CellOperation`: Cell-level write/delete operations
 
 mod clustering_order;
-use self::clustering_order::compare_values;
+use self::clustering_order::{compare_values, compare_values_typed};
 use crate::error::{Error, Result};
 use crate::schema::{ClusteringOrder, TableSchema};
 use crate::types::{ComparatorType, Value};
@@ -602,7 +602,7 @@ impl ClusteringKey {
                 // Both present: compare through the type, then apply DESC
                 // reversal so empty-vs-valued ordering matches Cassandra.
                 (_, _) => {
-                    let ordering = compare_values(a_val, b_val)?;
+                    let ordering = compare_values_typed(a_val, b_val, &cluster_col.data_type)?;
                     if cluster_col.order == ClusteringOrder::Desc {
                         ordering.reverse()
                     } else {
@@ -768,7 +768,7 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
             Ok(stored.to_be_bytes().to_vec())
         }
 
-        (Value::Uuid(bytes), ComparatorType::Uuid) => Ok(bytes.to_vec()),
+        (Value::Uuid(bytes), ComparatorType::Uuid | ComparatorType::TimeUuid) => Ok(bytes.to_vec()),
 
         // Time and Inet are mapped to Custom types in ComparatorType
         (Value::Time(nanos), ComparatorType::Custom(name)) if name == "time" => {

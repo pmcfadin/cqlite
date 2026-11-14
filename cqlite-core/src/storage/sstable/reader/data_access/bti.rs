@@ -20,7 +20,9 @@ use tokio::io::AsyncSeekExt;
 // `not(tombstones)`-gated; the point-read decoders that also used them moved to
 // `bti_point.rs` (issue #1599 / G3 split).
 #[cfg(not(feature = "tombstones"))]
-use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
+use super::model::{
+    clustering_flags, physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice,
+};
 #[cfg(not(feature = "tombstones"))]
 use crate::types::TableId;
 #[cfg(not(feature = "tombstones"))]
@@ -362,14 +364,7 @@ impl SSTableReader {
 
         // Per-column reverse order for the FIRST clustering column (single-column
         // scope per #954). A missing/absent schema treats it as ascending.
-        let is_reversed: Vec<bool> = schema
-            .map(|s| {
-                s.clustering_keys
-                    .iter()
-                    .map(|c| matches!(c.order, crate::schema::ClusteringOrder::Desc))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let (is_reversed, is_timeuuid) = clustering_flags(schema);
 
         // Encode the CQL bounds into the PHYSICAL byte-comparable order the row
         // index uses, normalizing for a DESC first clustering column (issue #954
@@ -379,7 +374,8 @@ impl SSTableReader {
         // For a DESC column those roles SWAP (see `physical_byte_bounds_for_slice`).
         // An un-encodable bound makes the narrowing unsafe → decode the whole
         // partition (honest fallback).
-        let Some((start_bytes, end_bytes)) = physical_byte_bounds_for_slice(slice, &is_reversed)?
+        let Some((start_bytes, end_bytes)) =
+            physical_byte_bounds_for_slice(slice, &is_reversed, &is_timeuuid)?
         else {
             return Ok(None);
         };

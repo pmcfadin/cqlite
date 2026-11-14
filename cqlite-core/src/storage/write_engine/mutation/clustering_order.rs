@@ -23,6 +23,18 @@ use std::cmp::Ordering;
 use crate::types::Value;
 use crate::{Error, Result};
 
+/// [`compare_values`] with the clustering column's DECLARED CQL type (#4534): a `timeuuid`
+/// orders by `AbstractTimeUUIDType.compareCustom`, which differs from `uuid`'s only in the lsb
+/// tie-break. `Value::Uuid` carries no type tag, so the schema decides — never the bytes (#28).
+pub(super) fn compare_values_typed(a: &Value, b: &Value, cql_type: &str) -> Result<Ordering> {
+    match (a, b) {
+        (Value::Uuid(x), Value::Uuid(y)) if cql_type.trim().eq_ignore_ascii_case("timeuuid") => {
+            Ok(crate::uuid_order::timeuuid_type_cmp(x, y))
+        }
+        _ => compare_values(a, b),
+    }
+}
+
 /// Compare two values for ordering
 pub(super) fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
     use Value::*;
@@ -87,7 +99,9 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         // is trivially total (antisymmetric, transitive, no incomparable pair),
         // so this is safe; the total-order hazard lives in the float arms above.
         (Time(a), Time(b)) => Ok(a.to_be_bytes().cmp(&b.to_be_bytes())),
-        (Uuid(a), Uuid(b)) => Ok(a.cmp(b)),
+        // #4534: `UUIDType.compareCustom`, not raw bytes. This schema-free arm cannot know a
+        // `timeuuid`; `ClusteringKey::compare` (which has the schema) overrides it for those.
+        (Uuid(a), Uuid(b)) => Ok(crate::uuid_order::uuid_type_cmp(a, b)),
         (Inet(a), Inet(b)) => Ok(a.cmp(b)),
 
         // Collection types (element-wise lexicographic comparison)

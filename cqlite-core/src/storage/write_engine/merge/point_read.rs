@@ -344,15 +344,15 @@ pub fn build_single_partition_merger_with_registry(
                 }
                 // BLOCKER fix (roborev, issue #2207): `rows` was accumulated in
                 // REQUESTED-KEY order (IN-list / Or order), not token order. Every
-                // `SSTableRowIterator` MUST yield entries in ascending `MergeEntry`
-                // order (token, key, clustering) — `refill_heap` buffers only ONE
+                // `SSTableRowIterator` MUST yield entries in ascending SCHEMA-AWARE heap
+                // order (token, key, clustering — `schema_order::schema_entry_cmp`) — `refill_heap` buffers only ONE
                 // entry per run at a time and relies on that invariant (mod.rs
                 // `step`/`refill_heap`). An out-of-order run causes `step()` to
                 // silently split one run's contribution across two heap pops,
                 // duplicating rows and breaking cross-generation reconciliation
                 // (a newer generation's overwrite/tombstone no longer shadows the
                 // older one). Sort once, here, before wrapping in `VecRun`.
-                entries.sort();
+                super::schema_order::sort_entries_schema_ordered(&mut entries, schema);
                 runs.push(Box::new(VecRun {
                     entries: entries.into(),
                 }));
@@ -490,7 +490,7 @@ pub fn build_single_partition_merger_from_readers(
                 }
                 // See `build_single_partition_merger`'s identical sort — every
                 // `SSTableRowIterator` MUST yield ascending `MergeEntry` order.
-                entries.sort();
+                super::schema_order::sort_entries_schema_ordered(&mut entries, schema);
                 runs.push(Box::new(VecRun {
                     entries: entries.into(),
                 }));
@@ -774,3 +774,7 @@ fn probe_reader(
         notes: Vec::new(),
     })
 }
+
+#[cfg(test)]
+#[path = "point_read/timeuuid_tests.rs"]
+mod timeuuid_tests;

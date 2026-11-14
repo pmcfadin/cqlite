@@ -696,7 +696,7 @@ pub(crate) fn serialize_value_for_clustering(
             result.extend_from_slice(&stored.to_be_bytes());
             Ok(result)
         }
-        (Value::Uuid(bytes), ComparatorType::Uuid) => Ok(bytes.to_vec()),
+        (Value::Uuid(bytes), ComparatorType::Uuid | ComparatorType::TimeUuid) => Ok(bytes.to_vec()),
 
         // Variable-width types (VInt length + bytes)
         (Value::Text(s), ComparatorType::Text) => {
