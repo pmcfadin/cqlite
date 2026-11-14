@@ -305,32 +305,43 @@ static int abs_path(int dirfd, const char *path, char *out, size_t cap) {
   snprintf(out + l, cap - l, "/%s", path);
   return 0;
 }
+/* O_TMPFILE is `__O_TMPFILE | O_DIRECTORY`: it must be tested as a whole, not as one bit. */
+#define OPENS_NEW_FILE(flags) (((flags) & O_CREAT) || (((flags) & O_TMPFILE) == O_TMPFILE))
 static int create_boundary(int dirfd, const char *path, int flags) {
   char p[PATH_MAX];
-  if ((flags & O_CREAT) && abs_path(dirfd, path, p, sizeof p) == 0) return boundary("create", p, 0);
+  if (abs_path(dirfd, path, p, sizeof p) != 0) return 0;
+  /* O_CREAT / O_TMPFILE: a create (O_TMPFILE reads its mode argument like O_CREAT does). */
+  if (OPENS_NEW_FILE(flags)) return boundary("create", p, 0);
+  /* O_TRUNC on an EXISTING file opened writable destroys its contents without an O_CREAT: a
+   * truncate-class boundary, faultable. (With O_CREAT the create boundary above already counts it.)
+   * Existence is probed with a raw faccessat so this check is not itself interposed. */
+  int acc = flags & O_ACCMODE;
+  if ((flags & O_TRUNC) && (acc == O_WRONLY || acc == O_RDWR)
+      && real_syscall()(SYS_faccessat, AT_FDCWD, p, F_OK, 0) == 0)
+    return boundary("truncate", p, 0);
   return 0;
 }
 int open(const char *path, int flags, ...) {
   REAL(open);
-  mode_t m = 0; if (flags & O_CREAT) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
+  mode_t m = 0; if (OPENS_NEW_FILE(flags)) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
   int b = create_boundary(AT_FDCWD, path, flags); if (b > 0) { errno = b; return -1; }
   return real(path, flags, m);
 }
 int open64(const char *path, int flags, ...) {
   REAL(open64);
-  mode_t m = 0; if (flags & O_CREAT) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
+  mode_t m = 0; if (OPENS_NEW_FILE(flags)) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
   int b = create_boundary(AT_FDCWD, path, flags); if (b > 0) { errno = b; return -1; }
   return real(path, flags, m);
 }
 int openat(int dfd, const char *path, int flags, ...) {
   REAL(openat);
-  mode_t m = 0; if (flags & O_CREAT) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
+  mode_t m = 0; if (OPENS_NEW_FILE(flags)) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
   int b = create_boundary(dfd, path, flags); if (b > 0) { errno = b; return -1; }
   return real(dfd, path, flags, m);
 }
 int openat64(int dfd, const char *path, int flags, ...) {
   REAL(openat64);
-  mode_t m = 0; if (flags & O_CREAT) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
+  mode_t m = 0; if (OPENS_NEW_FILE(flags)) { va_list ap; va_start(ap, flags); m = va_arg(ap, mode_t); va_end(ap); }
   int b = create_boundary(dfd, path, flags); if (b > 0) { errno = b; return -1; }
   return real(dfd, path, flags, m);
 }
