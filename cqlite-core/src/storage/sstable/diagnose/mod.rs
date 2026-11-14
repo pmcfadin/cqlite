@@ -358,7 +358,7 @@ async fn table_reclaim(
             }
         }
     }
-    keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    keyed.sort_by_key(|k| std::cmp::Reverse(k.0));
     let inputs: Vec<ReclaimInput> = keyed.into_iter().map(|(_, i)| i).collect();
     let now = options.now_secs;
     match tokio::task::spawn_blocking(move || {
