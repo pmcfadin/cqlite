@@ -68,12 +68,24 @@ fn fixture_dir(f: &Fixture) -> PathBuf {
 }
 
 fn run(verb: Verb, f: &Fixture, out: &Path, abort_at: Option<usize>) -> Output {
+    run_on(verb, f, &fixture_dir(f), None, out, abort_at)
+}
+
+/// `table_dir`: when set, rebuild is pointed at this TABLE DIRECTORY (several generations).
+fn run_on(
+    verb: Verb,
+    f: &Fixture,
+    input_dir: &Path,
+    table_dir: Option<&Path>,
+    out: &Path,
+    abort_at: Option<usize>,
+) -> Output {
     let schema = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("test-data/schemas")
         .join(f.schema_file);
-    let input = fixture_dir(f);
+    let input = input_dir.to_path_buf();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cqlite"));
     cmd.arg("--schema").arg(&schema);
     match verb {
@@ -82,7 +94,7 @@ fn run(verb: Verb, f: &Fixture, out: &Path, abort_at: Option<usize>) -> Output {
         }
         Verb::Rebuild => {
             cmd.arg("rebuild")
-                .arg(input.join(f.data_db))
+                .arg(table_dir.map_or_else(|| input.join(f.data_db), Path::to_path_buf))
                 .args(["--components", f.rebuild_components]);
         }
     }
@@ -214,4 +226,60 @@ fn salvage_big_publish_window_never_leaves_a_discoverable_partial_set() {
 #[test]
 fn salvage_bti_publish_window_never_leaves_a_discoverable_partial_set() {
     check(Verb::Salvage, &BTI);
+}
+
+/// A TABLE DIRECTORY with two generations: the Cassandra-written one plus a copy renamed to the
+/// next generation number (`rebuild` then stages each under `<out>/<generation>/`).
+fn two_generation_table_dir(f: &Fixture, root: &Path) -> PathBuf {
+    let src = fixture_dir(f);
+    let dst = root.join("table");
+    std::fs::create_dir_all(&dst).unwrap();
+    let (old, new) = if f.data_db.starts_with("nb-1-") {
+        ("nb-1-big-", "nb-2-big-")
+    } else {
+        ("da-2-bti-", "da-3-bti-")
+    };
+    for e in std::fs::read_dir(&src).unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.ends_with(".jsonl") || !name.starts_with(old) {
+            continue;
+        }
+        std::fs::copy(e.path(), dst.join(&name)).unwrap();
+        std::fs::copy(e.path(), dst.join(name.replacen(old, new, 1))).unwrap();
+    }
+    dst
+}
+
+/// AC2 on a multi-generation table directory: the leftover stage is in a per-generation
+/// subdirectory, and the re-run must still refuse NAMING it (not the generic "is not empty").
+fn check_table_dir(f: &Fixture) {
+    let tmp = TempDir::new().unwrap();
+    let table = two_generation_table_dir(f, tmp.path());
+    let out = tmp.path().join("out");
+    let c = run_on(Verb::Rebuild, f, &table, Some(&table), &out, Some(0));
+    assert!(
+        c.status.code().is_none(),
+        "expected an abort, got {:?}",
+        c.status
+    );
+    assert!(
+        final_named(&out).iter().all(|n| !n.ends_with("-Data.db")),
+        "no final-named Data.db before the first rename"
+    );
+    let again = run_on(Verb::Rebuild, f, &table, Some(&table), &out, None);
+    assert_eq!(again.status.code(), Some(1), "re-run must refuse");
+    let err = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        err.contains(".cqlite-publish-") && err.contains("interrupted run"),
+        "refusal must name the leftover stage: {err}"
+    );
+}
+
+#[test]
+fn rebuild_table_dir_big_leftover_stage_is_named_on_rerun() {
+    check_table_dir(&BIG);
+}
+#[test]
+fn rebuild_table_dir_bti_leftover_stage_is_named_on_rerun() {
+    check_table_dir(&BTI);
 }

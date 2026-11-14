@@ -53,16 +53,26 @@ pub fn is_stage_name(name: &str) -> bool {
     name.starts_with(STAGE_PREFIX) && name.ends_with(STAGE_SUFFIX)
 }
 
-/// The first staging directory (an interrupted run's leftover) directly under `root`, if any.
+/// The first staging directory (an interrupted run's leftover) under `root` or any directory
+/// below it, if any. Searched recursively because `cqlite rebuild` on a multi-generation table
+/// directory stages each generation under its own `<out>/<generation>/` subdirectory.
 pub fn find_leftover(root: &Path) -> Option<PathBuf> {
-    let mut found: Vec<PathBuf> = std::fs::read_dir(root)
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
         .ok()?
         .flatten()
-        .filter(|e| e.file_name().to_str().is_some_and(is_stage_name))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
         .collect();
-    found.sort();
-    found.into_iter().next()
+    dirs.sort();
+    for d in &dirs {
+        if d.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_stage_name)
+        {
+            return Some(d.clone());
+        }
+    }
+    dirs.iter().find_map(|d| find_leftover(d))
 }
 
 /// A generation being written under a staging directory, awaiting [`publish`](Self::publish).
