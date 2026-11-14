@@ -22,6 +22,11 @@ libfuzzer-sys = "0.4"
 # Reach the internal parser entry points through the feature-gated,
 # `#[doc(hidden)]` fuzz-support surface — NOT the default public API.
 cqlite-core = { path = "../cqlite-core", features = ["fuzz", "all-compression"] }
+# `fuzz_audit` / `fuzz_find` (issue #4502) drive whole generation directories through the real
+# tool entry points; `find`'s probe and CommitLog scan live in the CLI crate's library.
+cqlite-cli = { path = "../cqlite-cli", default-features = false, features = ["tui", "cli-helpers", "write-support"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [[bin]]
 name = "fuzz_vint"
@@ -61,6 +66,20 @@ bench = false
 [[bin]]
 name = "fuzz_commitlog_frame"
 path = "fuzz_targets/fuzz_commitlog_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_audit"
+path = "fuzz_targets/fuzz_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_find"
+path = "fuzz_targets/fuzz_find.rs"
 test = false
 doc = false
 bench = false
