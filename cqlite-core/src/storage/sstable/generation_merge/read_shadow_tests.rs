@@ -260,6 +260,7 @@ fn cell_expiry_secs_reinterprets_post_2038_unsigned() {
     assert_eq!(cell_expiry_secs(&live_cell("x", 100)), None);
 }
 
+use crate::storage::sstable::generation_merge::row_visibility::RowVis;
 use crate::storage::sstable::reader::compaction_row::RowLiveness;
 
 fn static_shadow(now_secs: i64) -> ReadShadow {
@@ -284,14 +285,18 @@ fn a_live_static_cell_never_keeps_a_markerless_tombstone_only_clustering_row() {
     ];
     let sh = static_shadow(2_000_000);
     assert!(
-        sh.filter_visible(None, RowLiveness::default(), cells.clone(), false)
-            .is_none(),
+        sh.filter_visible(
+            None,
+            vis(RowLiveness::default(), false, None),
+            cells.clone()
+        )
+        .is_none(),
         "clustering row: a live static cell is not row data"
     );
     // The static row ITSELF (no clustering key) is its own row: its static cells are its data.
     let static_cells = vec![live_cell("pk", 1000), live_cell("s", 1000)];
     assert!(
-        sh.filter_visible(None, RowLiveness::default(), static_cells, true)
+        sh.filter_visible(None, vis(RowLiveness::default(), true, None), static_cells)
             .is_some(),
         "the static row is visible on its own live static cell"
     );
@@ -299,12 +304,57 @@ fn a_live_static_cell_never_keeps_a_markerless_tombstone_only_clustering_row() {
     let mut with_data = cells.clone();
     with_data.push(live_cell("v2", 1000));
     assert!(sh
-        .filter_visible(None, RowLiveness::default(), with_data, false)
+        .filter_visible(None, vis(RowLiveness::default(), false, None), with_data)
         .is_some());
     let marker = RowLiveness {
         has_marker: true,
         marker_timestamp: Some(1000),
         ..RowLiveness::default()
     };
-    assert!(sh.filter_visible(None, marker, cells, false).is_some());
+    assert!(sh
+        .filter_visible(None, vis(marker, false, None), cells)
+        .is_some());
+}
+
+fn vis(liveness: RowLiveness, static_row: bool, row_deletion: Option<(i64, i32)>) -> RowVis {
+    RowVis {
+        liveness,
+        static_row,
+        row_deletion,
+    }
+}
+
+/// Issue #4524 (roborev job 307): a liveness marker counts only if it SURVIVES the row's
+/// coexisting deletion. Cassandra 5.0.8 `DeletionTime.deletes(ts)` is `ts <= markedForDeleteAt`
+/// (`db/DeletionTime.java`) and `BTreeRow.Merger.merge` empties a covered marker, so an older or
+/// EQUAL-timestamp marker is deleted and only a strictly newer one keeps the (cell-less) row.
+#[test]
+fn a_liveness_marker_survives_a_row_deletion_only_when_strictly_newer() {
+    let sh = static_shadow(2_000_000);
+    let marker = |ts| RowLiveness {
+        has_marker: true,
+        marker_timestamp: Some(ts),
+        ..RowLiveness::default()
+    };
+    // Only key pseudo-cells survive (the deleted cell is a tombstone dropped by `filter_live`).
+    let cells = || {
+        vec![
+            live_cell("pk", 3000),
+            live_cell("ck", 3000),
+            tombstone_cell("v", 3000),
+        ]
+    };
+    let del = Some((2000, 1_700_000_000));
+    for (marker_ts, visible) in [(1000, false), (2000, false), (2001, true)] {
+        assert_eq!(
+            sh.filter_visible(None, vis(marker(marker_ts), false, del), cells())
+                .is_some(),
+            visible,
+            "marker@{marker_ts} vs row deletion@2000"
+        );
+    }
+    // No coexisting deletion: the marker keeps the row (unchanged #4524 rule).
+    assert!(sh
+        .filter_visible(None, vis(marker(1000), false, None), cells())
+        .is_some());
 }

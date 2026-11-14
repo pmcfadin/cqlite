@@ -220,14 +220,12 @@ fn partition_live_rows(
     let cover = partition_cover(&rows);
     let mut out = Vec::new();
     for entry in rows {
-        let static_row = entry.clustering_key.is_none(); // before `row_data` is moved out
+        let vis = row_visibility::RowVis::of(&entry); // before `row_data` is moved out
         match entry.row_data {
             RowData::Live { cells } => {
                 // Read-time visibility: drop cell tombstones + TTL-expired /
                 // partition-shadowed data cells; `None` hides the whole row.
-                let Some(surviving) =
-                    shadow.filter_visible(cover, entry.row_liveness, cells, static_row)
-                else {
+                let Some(surviving) = shadow.filter_visible(cover, vis, cells) else {
                     continue;
                 };
                 let row_cells: RowCells = surviving
@@ -605,13 +603,11 @@ fn push_metadata_rows(
     // plain path, so the WRITETIME/TTL projection agrees with `SELECT *`.
     let cover = partition_cover(&rows);
     for entry in rows {
-        let static_row = entry.clustering_key.is_none(); // before `row_data` is moved out
+        let vis = row_visibility::RowVis::of(&entry); // before `row_data` is moved out
         if let RowData::Live { cells } = entry.row_data {
             // `filter_live` drops cell tombstones + TTL-expired / partition-shadowed
             // data cells; `None` hides the whole row (partition-shadowed).
-            let Some(surviving) =
-                shadow.filter_visible(cover, entry.row_liveness, cells, static_row)
-            else {
+            let Some(surviving) = shadow.filter_visible(cover, vis, cells) else {
                 continue;
             };
             let mut row_cells: RowCells = Vec::with_capacity(surviving.len());

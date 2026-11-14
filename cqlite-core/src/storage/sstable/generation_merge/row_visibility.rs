@@ -11,6 +11,27 @@ pub(super) fn static_column_names(schema: &crate::schema::TableSchema) -> HashSe
         .collect()
 }
 
+/// The per-entry facts [`ReadShadow::filter_visible`] needs besides the cells (all `Copy`, read
+/// off the `MergeEntry` BEFORE its `row_data` is moved out).
+#[derive(Clone, Copy)]
+pub(super) struct RowVis {
+    pub(super) liveness: RowLiveness,
+    /// `entry.clustering_key.is_none()`: the partition's static row.
+    pub(super) static_row: bool,
+    /// The entry's coexisting row deletion `(markedForDeleteAt µs, localDeletionTime s)`.
+    pub(super) row_deletion: Option<(i64, i32)>,
+}
+
+impl RowVis {
+    pub(super) fn of(entry: &super::MergeEntry) -> Self {
+        Self {
+            liveness: entry.row_liveness,
+            static_row: entry.clustering_key.is_none(),
+            row_deletion: entry.row_deletion,
+        }
+    }
+}
+
 impl ReadShadow {
     /// [`ReadShadow::filter_live`] plus the row-level visibility rule: `None` also when the row
     /// has neither a LIVE primary-key liveness marker nor a live non-key (data) cell.
@@ -29,18 +50,31 @@ impl ReadShadow {
     /// emits on its own. So a live static value must not keep a markerless, tombstone-only or
     /// expired clustering row visible. `static_row` is the static row itself (no clustering
     /// key), whose own static cells ARE its data.
+    ///
+    /// `row_deletion` is the entry's coexisting row deletion (`MergeEntry::row_deletion`, kept only
+    /// when newer than some surviving cell): a marker it covers is NOT liveness.
     pub(super) fn filter_visible(
         &self,
         cover: Option<i64>,
-        liveness: RowLiveness,
+        vis: RowVis,
         cells: Vec<CellData>,
-        static_row: bool,
     ) -> Option<Vec<CellData>> {
+        let RowVis {
+            liveness,
+            static_row,
+            row_deletion,
+        } = vis;
         let surviving = self.filter_live(cover, liveness.marker_timestamp, cells)?;
         let has_data = surviving.iter().any(|c| {
             !self.key_columns.contains(&c.column)
                 && (static_row || !self.static_columns.contains(&c.column))
         });
-        (has_data || liveness.marker_live_at(self.now_secs)).then_some(surviving)
+        // Roborev job 307: the marker counts only if it survives the row's coexisting deletion —
+        // Cassandra 5.0.8 `DeletionTime.deletes(ts)` is `ts <= markedForDeleteAt` (equal loses).
+        let marker_survives = row_deletion
+            .zip(liveness.marker_timestamp)
+            .is_none_or(|((deleted_at, _), marker)| marker > deleted_at);
+        (has_data || (marker_survives && liveness.marker_live_at(self.now_secs)))
+            .then_some(surviving)
     }
 }
