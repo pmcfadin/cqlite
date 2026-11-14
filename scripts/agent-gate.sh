@@ -28388,7 +28388,11 @@ dispatch_component() {
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_bti_scope &&
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
-  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_baseline_provenance' ;;
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4197_rebuild_baseline_provenance &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --lib reconcile_laws &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4497_byte_comparable_order' ;;
     cli-tests)
       # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
       # write-support) and a single-value annotation would be false for it — each pass

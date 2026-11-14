@@ -423,3 +423,55 @@ jobs:
       # the split-out lane. RUSTFLAGS=-D warnings makes any lint a hard failure.
       - name: Full-matrix clippy
         run: env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+
+  # Issue #4497: nightly HIGH-VOLUME sweep of the reconciliation-law and byte-comparable
+  # order property suites. The PR tier runs each property at a fixed small case count
+  # (`PR_TIER_CASES`, tests/support/proptest_cfg.rs) inside the gate's write-tests /
+  # core-tests components; this job re-runs the SAME tests with PROPTEST_CASES raised, on
+  # the existing nightly schedule (no new workflow). Every property prints its seed
+  # (`[name] seed=N cases=C`), so a red night is reproducible with
+  # `LAWS_SEED=N PROPTEST_CASES=C cargo test ...`. `#[ignore]`d tests are KNOWN findings
+  # (tracked by #4530 and #4531) and are deliberately not run here.
+  property-laws-sweep:
+    name: Property laws sweep (reconcile + byte-comparable, high volume)
+    # Nightly only: PROPTEST_CASES=20000 must never run on a PR or a dispatch, where the
+    # bounded PR tier is the contract (#4497 AC4).
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      PROPTEST_CASES: '20000'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: gate-property-laws-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
+
+      - name: Reconcile laws (lib) at nightly volume
+        run: cargo test -p cqlite-core --features write-support --lib reconcile_laws -- --nocapture
+
+      - name: Byte-comparable order at nightly volume
+        run: cargo test -p cqlite-core --test issue_4497_byte_comparable_order -- --nocapture
+
+      # A failing property writes its `cc <seed>` line to proptest-regressions/; surface
+      # it so the case can be committed as a permanent regression.
+      - name: Upload proptest regressions
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: proptest-regressions
+          path: |
+            cqlite-core/proptest-regressions/
+            cqlite-core/tests/*.proptest-regressions
+          if-no-files-found: ignore
