@@ -11,6 +11,7 @@
 //! reproduce that order exactly, for ASC and DESC, `uuid` (mixed v1/v4) and `timeuuid`. A negative
 //! control proves the raw-byte order differs from the golden on the same data, i.e. the pre-fix
 //! comparator would have mis-ordered it.
+#![cfg(feature = "write-support")]
 
 use std::path::PathBuf;
 

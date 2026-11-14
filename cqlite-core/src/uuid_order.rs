@@ -82,7 +82,9 @@ pub(crate) fn compare_values(
 }
 
 /// `timeuuid` order of two serialized cell paths (a list element's position). A path that is not
-/// 16 bytes (never produced for a list) falls back to raw bytes.
+/// 16 bytes (never produced for a list) falls back to raw bytes. Only the write-engine merge
+/// (`write-support`) orders list cells by path.
+#[cfg(feature = "write-support")]
 pub(crate) fn timeuuid_path_cmp(a: &[u8], b: &[u8]) -> Ordering {
     match (<[u8; 16]>::try_from(a), <[u8; 16]>::try_from(b)) {
         (Ok(x), Ok(y)) => timeuuid_type_cmp(&x, &y),
