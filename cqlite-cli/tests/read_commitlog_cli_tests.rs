@@ -452,3 +452,28 @@ fn read_commitlog_all_updates_complete_accepts_a_final_partial_update() {
     assert_eq!(json["all_updates_complete"], true);
     assert_eq!(json["last_mutation_partial"], false);
 }
+
+/// Issue #4237 review: a binary columnar format is rejected by NAME on `read-commitlog`, never
+/// silently rendered as text.
+#[test]
+fn read_commitlog_rejects_vortex_and_parquet_formats_by_name() {
+    for fmt in ["vortex", "parquet"] {
+        let out = Command::cargo_bin("cqlite")
+            .expect("cqlite binary")
+            .arg("read-commitlog")
+            .arg(clean_fixture())
+            .args(["--format", fmt])
+            .output()
+            .expect("spawn");
+        assert!(!out.status.success(), "{fmt} must be rejected");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(&format!("{fmt} output is not supported by read-commitlog")),
+            "{fmt}: stderr must name the unsupported format: {err}"
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "{fmt}: nothing may be rendered on stdout"
+        );
+    }
+}

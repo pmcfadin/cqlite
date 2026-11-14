@@ -101,9 +101,14 @@ pub enum ArrowConvertError {
     ///
     /// The two in-crate error-conversion boundaries (`ParquetExportError`,
     /// `DeltaParquetError`) carry it as their `InvalidValue` **through `Display`**,
-    /// so the prefix above survives the hop. Neither writer supplies its own
-    /// schema today, so neither can raise it; they map it rather than drop it so a
-    /// future caller that does gets the reason instead of a bare Arrow error.
+    /// so the prefix above survives the hop. (Stale as of issue #4237: both the
+    /// streaming Parquet writer and the Vortex writer now DO supply their own
+    /// pre-built schema via `rows_to_record_batch_with_schema` — design.md D1's
+    /// shared-producer requirement — so this variant CAN fire on the writer path
+    /// too, though never in practice, since each writer's schema is
+    /// `build_arrow_schema` of its own `columns` by construction; they map it
+    /// rather than drop it so any future caller whose precondition genuinely
+    /// breaks gets the reason instead of a bare Arrow error.)
     #[error("Arrow schema does not match the column set: {0}")]
     SchemaMismatch(String),
 }
@@ -281,9 +286,17 @@ pub fn rows_to_record_batch_with_schema(
     columns: &[ColumnInfo],
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
+    #[cfg(test)]
+    PRODUCER_CALLS.with(|c| c.set(c.get() + 1));
     check_schema_matches_columns(&schema, columns)?;
     // The precondition is now PROVEN, not assumed, so the shared tail may trust it.
     rows_to_record_batch_trusted_schema(schema, columns, rows)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook (#4237 R1.1): how many times THIS thread called the shared producer.
+    pub(crate) static PRODUCER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Reject a caller-supplied `schema` that is not [`build_arrow_schema`]'s output

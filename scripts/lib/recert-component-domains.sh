@@ -198,7 +198,7 @@ _recert_component_domain_patterns_raw() {
     # direction this file already takes elsewhere (only ever REFUSES an
     # eligible recert, never admits an ineligible one). bti-multiclustering
     # is split into its own arm below (job 119).
-    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan|compaction-byte-parity|write-tests|all-features-check)
+    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard|byte-budget-guard|arrow-parity-guard|legacy-heuristics|feature-iso-parquet|feature-iso-vortex|feature-iso-delta-scan|compaction-byte-parity|write-tests|all-features-check)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" "${_RECERT_DOM_TESTDATA[@]}" ;;
     # memory-budget (job 112 roborev finding, Medium): split out of the shared
     # arm above — its Flight lane runs `cargo test --package cqlite-flight
@@ -235,7 +235,7 @@ _recert_component_domain_patterns_raw() {
     # CARGO_ANY added (job 110 Medium): this arm ran cargo but never carried it.
     format-compat)
       printf '%s\n' 'tests/format-compatibility/*' "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
-    cli-tests|smoke)
+    cli-tests|smoke|vortex-parquet-differential)
       printf '%s\n' "${_RECERT_DOM_CLI[@]}" "${_RECERT_DOM_CORE[@]}" "${_RECERT_DOM_TESTDATA[@]}" "${_RECERT_DOM_CARGO_ANY[@]}" ;;
     query-semantics-oracle)
       printf '%s\n' "${_RECERT_DOM_CORE[@]}" 'test-data/query-semantics-oracle.json' "${_RECERT_DOM_CARGO_ANY[@]}" ;;
