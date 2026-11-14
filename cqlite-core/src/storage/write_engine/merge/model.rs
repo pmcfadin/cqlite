@@ -497,3 +497,27 @@ pub struct MergeStats {
     /// behavior). Paths are input Data.db paths.
     pub dropped_whole: Vec<PathBuf>,
 }
+
+/// #4545: after a row deletion `d`, the primary-key pseudo-cells of a row survive ONLY beside a LIVE
+/// data cell (not a cell tombstone) or a still-live row marker NEWER than the deletion; otherwise
+/// they are shed so the row collapses to its deletion instead of a phantom key-only row. Marker
+/// liveness is TTL-aware at `now_secs` (else the read-time clock): `RowLiveness::marker_live_at`.
+#[cfg(feature = "write-support")]
+pub(super) fn shed_key_cells(
+    surviving: &mut Vec<CellData>,
+    ck_names: &std::collections::HashSet<&str>,
+    liveness: &crate::storage::sstable::reader::compaction_row::RowLiveness,
+    d: i64,
+    now_secs: Option<i64>,
+) {
+    let is_key = |c: &CellData| ck_names.contains(c.column.as_str());
+    let tomb = |c: &CellData| super::KWayMerger::is_cell_tombstone(c) || c.is_deleted;
+    let ts = liveness
+        .marker_timestamp
+        .or_else(|| surviving.iter().map(|c| c.timestamp).max());
+    let now = now_secs.unwrap_or_else(crate::storage::write_engine::read_time_now_secs);
+    let marker = ts.is_some_and(|t| t > d) && liveness.marker_live_at(now);
+    if !marker && !surviving.iter().any(|c| !is_key(c) && !tomb(c)) {
+        surviving.retain(|c| !is_key(c));
+    }
+}

@@ -3460,7 +3460,7 @@ impl KWayMerger {
         state.purge_gc_grace(gc_before_secs, max_purgeable_timestamp, purges);
         // Step 4: phantom-row guard + emit the merged entry (tallies #2163
         // emitted row-tombstone markers).
-        state.build(purges)
+        state.build(purges, now_secs)
     }
 
     /// Convert reconciled `CellData`s into writer `CellOperation`s (epic #899,

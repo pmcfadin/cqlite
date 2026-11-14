@@ -83,6 +83,7 @@ pub(super) struct ReconcileState {
     row_del: Option<i64>,
     /// `localDeletionTime` (GC-clock seconds) paired with the winning `row_del`.
     row_del_ldt: i32,
+    purged_row_del: Option<i64>, // cleared by purge; build still sheds key cells (#4545)
     /// First-seen cell-key order for deterministic output.
     order: Vec<CellKey>,
     /// Winning cell per `(column, cell_path)`.
@@ -114,6 +115,7 @@ impl ReconcileState {
             run_index: usize::MAX,
             row_del: None,
             row_del_ldt: 0,
+            purged_row_del: None,
             order: Vec::new(),
             winners: HashMap::new(),
             complex_deletions: Vec::new(),
@@ -347,26 +349,20 @@ impl ReconcileState {
     /// data (phantom-row guard).
     pub(super) fn shadow_by_row_deletion(&mut self, purges: &mut PurgeCounts) {
         let row_del = self.row_del;
-        // Issue #2163 (roborev r5): clustering-key pseudo-cells are intentionally
-        // RETAINED in the cell list for read-back (see `extract_clustering_key`
-        // and the `had_data_before` computation in `filter_dropped_columns`
-        // below) — they are not real data, so shadowing one must not inflate
-        // `tombstones_suppressed`. Build the SAME `is_data_cell` exclusion
-        // `filter_dropped_columns`/`build` already use, computed here (before the
-        // mutable `winners` borrow) so a clustering-key cell shadowed by the row
-        // tombstone is excluded from the count.
+        // #2163: key pseudo-cells are not real data: shadowing one must not count as suppressed.
         let ck_names: HashSet<&str> = self
             .clustering_key
             .as_ref()
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
+        // #4545: key pseudo-cells are kept here; `build` drops them again if no LIVE data survives.
         let winners = &mut self.winners;
         self.after_row_del = std::mem::take(&mut self.order)
             .into_iter()
             .filter_map(|cell_key| winners.remove(&cell_key))
             .filter(|cell| match row_del {
                 Some(d) => {
-                    let survives = cell.timestamp > d;
+                    let survives = cell.timestamp > d || ck_names.contains(cell.column.as_str());
                     // Issue #2163: a LIVE DATA cell dropped here was SHADOWED by
                     // the row tombstone (suppressed) — count it, distinct from a
                     // gc/overlap-safe purge. A cell that is itself a tombstone,
@@ -633,7 +629,7 @@ impl ReconcileState {
                 && i64::from(self.row_del_ldt as u32) < gc_before
                 && self.row_del.is_some_and(|d| d < max_purgeable_timestamp)
             {
-                self.row_del = None;
+                self.purged_row_del = self.row_del.take();
                 // True gc/overlap-safe purge of a row tombstone (issue #1037).
                 purges.row_tombstones += 1;
             }
@@ -666,16 +662,17 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
-    pub(super) fn build(self, purges: &mut PurgeCounts) -> Option<MergeEntry> {
+    pub(super) fn build(self, purges: &mut PurgeCounts, now: Option<i64>) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
             run_index,
             row_del,
+            purged_row_del,
             row_del_ldt,
             complex_deletions,
             range_deletion,
-            surviving,
+            mut surviving,
             had_data_before,
             row_liveness,
             ..
@@ -688,6 +685,9 @@ impl ReconcileState {
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
+        if let Some(d) = row_del.or(purged_row_del) {
+            super::model::shed_key_cells(&mut surviving, &ck_names, &row_liveness, d, now);
+        }
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;
         drop(ck_names);
