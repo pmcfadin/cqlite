@@ -15,7 +15,7 @@ bits0-3 component index), bytes 1.. = the replacement component. Seeds, per BASE
     truncations, and the `commitlog/` corruption corpus segments (corrupt-crc, truncated).
 
 Seeds are small (largest component ~28 KB). Re-run with CQLITE_DATASETS_ROOT set; the output is
-committed. Deterministic: names are content hashes.
+committed. Deterministic: names are `seed_<control byte>_<content hash>`.
 """
 import glob
 import hashlib
@@ -56,7 +56,8 @@ def emit(corpus, ctl, payload):
     if len(payload) > MAX:
         return 0
     data = bytes([ctl]) + payload
-    path = os.path.join(corpus, hashlib.sha1(data).hexdigest())
+    # `seed_` prefix: fuzz/.gitignore keeps `corpus/*/seed_*` and ignores fuzzer-grown inputs.
+    path = os.path.join(corpus, f"seed_{ctl:02x}_{hashlib.sha1(data).hexdigest()[:12]}")
     if not os.path.exists(path):
         open(path, "wb").write(data)
         return 1
