@@ -31,12 +31,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 enum { M_COUNT = 0, M_CRASH = 1, M_ENOSPC = 2, M_SHORT = 3 };
@@ -227,10 +230,26 @@ static int track_overlaps(unsigned long a, size_t len) {
   track_unlock();
   return hit;
 }
-static void track_remove(unsigned long a, size_t len) {
+/* Drop [a, a+len) from the tracked mappings AFTER a successful unmap: an entry that only partly
+ * overlaps keeps its retained left and/or right part (a partial unmap leaves a live shared file
+ * mapping that a later mprotect(PROT_WRITE) must still be refused on). */
+static void track_unmap(unsigned long a, size_t len) {
+  unsigned long end = a + len;
   track_lock();
-  for (int i = 0; i < MAX_TRACKED; i++)
-    if (tracked[i].len && a < tracked[i].addr + tracked[i].len && tracked[i].addr < a + len) tracked[i].len = 0;
+  for (int i = 0; i < MAX_TRACKED; i++) {
+    if (!tracked[i].len) continue;
+    unsigned long ea = tracked[i].addr, ee = ea + tracked[i].len;
+    if (!(a < ee && ea < end)) continue;
+    int keep_left = ea < a, keep_right = ee > end;
+    if (keep_left) tracked[i].len = a - ea; else tracked[i].len = 0;
+    if (keep_right) {
+      int placed = 0;
+      if (!keep_left) { tracked[i].addr = end; tracked[i].len = ee - end; placed = 1; }
+      for (int j = 0; j < MAX_TRACKED && !placed; j++)
+        if (!tracked[j].len) { tracked[j].addr = end; tracked[j].len = ee - end; placed = 1; }
+      if (!placed) { track_unlock(); mapping_abort("tracking table full after a partial unmap", "(cannot prove later mprotect safety)"); }
+    }
+  }
   track_unlock();
 }
 static void *mmap_checked(void *(*real)(void *, size_t, int, int, int, off_t), void *addr, size_t len, int prot,
@@ -260,8 +279,9 @@ int mprotect(void *addr, size_t len, int prot) {
 }
 int munmap(void *addr, size_t len) {
   REAL(munmap);
-  track_remove((unsigned long)addr, len);
-  return real(addr, len);
+  int r = real(addr, len);
+  if (r == 0) track_unmap((unsigned long)addr, len); /* only a SUCCESSFUL unmap changes what is mapped */
+  return r;
 }
 int madvise(void *addr, size_t len, int advice) {
   REAL(madvise);
@@ -364,6 +384,78 @@ int rmdir(const char *path) {
   char p[PATH_MAX];
   if (abs_path(AT_FDCWD, path, p, sizeof p) == 0) { int b = boundary("unlink", p, 0); if (b > 0) { errno = b; return -1; } }
   return real(path);
+}
+/* Node creation and extended attributes mutate the namespace / inode without a data write:
+ * counted as boundaries (create / xattr) and faultable, like mkdir. */
+int mknodat(int dfd, const char *path, mode_t m, dev_t d) {
+  REAL(mknodat);
+  char p[PATH_MAX];
+  if (abs_path(dfd, path, p, sizeof p) == 0) { int b = boundary("create", p, 0); if (b > 0) { errno = b; return -1; } }
+  return real(dfd, path, m, d);
+}
+int mknod(const char *path, mode_t m, dev_t d) {
+  REAL(mknod);
+  char p[PATH_MAX];
+  if (abs_path(AT_FDCWD, path, p, sizeof p) == 0) { int b = boundary("create", p, 0); if (b > 0) { errno = b; return -1; } }
+  return real(path, m, d);
+}
+int mkfifoat(int dfd, const char *path, mode_t m) {
+  REAL(mkfifoat);
+  char p[PATH_MAX];
+  if (abs_path(dfd, path, p, sizeof p) == 0) { int b = boundary("create", p, 0); if (b > 0) { errno = b; return -1; } }
+  return real(dfd, path, m);
+}
+int mkfifo(const char *path, mode_t m) {
+  REAL(mkfifo);
+  char p[PATH_MAX];
+  if (abs_path(AT_FDCWD, path, p, sizeof p) == 0) { int b = boundary("create", p, 0); if (b > 0) { errno = b; return -1; } }
+  return real(path, m);
+}
+#define XATTR_PATH(NAME, ...) do { char p[PATH_MAX]; \
+  if (abs_path(AT_FDCWD, path, p, sizeof p) == 0) { int b = boundary("xattr", p, 0); if (b > 0) { errno = b; return -1; } } } while (0)
+int setxattr(const char *path, const char *name, const void *v, size_t n, int fl) {
+  REAL(setxattr); XATTR_PATH(setxattr); return real(path, name, v, n, fl);
+}
+int lsetxattr(const char *path, const char *name, const void *v, size_t n, int fl) {
+  REAL(lsetxattr); XATTR_PATH(lsetxattr); return real(path, name, v, n, fl);
+}
+int removexattr(const char *path, const char *name) {
+  REAL(removexattr); XATTR_PATH(removexattr); return real(path, name);
+}
+int lremovexattr(const char *path, const char *name) {
+  REAL(lremovexattr); XATTR_PATH(lremovexattr); return real(path, name);
+}
+int fsetxattr(int fd, const char *name, const void *v, size_t n, int fl) {
+  REAL(fsetxattr);
+  char p[PATH_MAX];
+  if (fd_path(fd, p, sizeof p) == 0) { int b = boundary("xattr", p, 0); if (b > 0) { errno = b; return -1; } }
+  return real(fd, name, v, n, fl);
+}
+int fremovexattr(int fd, const char *name) {
+  REAL(fremovexattr);
+  char p[PATH_MAX];
+  if (fd_path(fd, p, sizeof p) == 0) { int b = boundary("xattr", p, 0); if (b > 0) { errno = b; return -1; } }
+  return real(fd, name);
+}
+/* ioctl: almost every request is harmless (tty, FIONREAD, ...), but a few rewrite file data or
+ * inode flags with no write(2) at all (reflink / dedupe / flag and extended-attribute setters).
+ * Under the fault root those FAIL CLOSED (exit 97, request named); everything else passes through. */
+static int ioctl_mutates_file(unsigned long req) {
+  return req == FICLONE || req == FICLONERANGE || req == FIDEDUPERANGE || req == FS_IOC_SETFLAGS ||
+         req == FS_IOC_FSSETXATTR || req == FS_IOC_SETVERSION || req == FS_IOC32_SETFLAGS ||
+         req == FS_IOC32_SETVERSION;
+}
+int ioctl(int fd, unsigned long req, ...) {
+  REAL(ioctl);
+  va_list ap;
+  va_start(ap, req);
+  void *arg = va_arg(ap, void *);
+  va_end(ap);
+  if (root_len && ioctl_mutates_file(req)) {
+    char p[PATH_MAX];
+    if (fd_path(fd, p, sizeof p) == 0 && under_root(p)) mapping_abort("file-mutating ioctl", p);
+  }
+  return real(fd, req, arg);
 }
 /* Vectored writes: a short fault persists the first half of the TOTAL byte count. */
 static size_t iov_total(const struct iovec *iov, int n) {
@@ -509,7 +601,10 @@ long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5
     case SYS_write: RET(write((int)a0, (const void *)a1, (size_t)a2));
     case SYS_pwrite64: RET(pwrite64((int)a0, (const void *)a1, (size_t)a2, (off64_t)a3));
     case SYS_writev: RET(writev((int)a0, (const struct iovec *)a1, (int)a2));
-    /* raw pwritev(fd, iov, cnt, pos_l, pos_h); pos_h is 0 on 64-bit. */
+    /* raw pwritev(fd, iov, cnt, pos_l, pos_h). On LP64 (x86_64/aarch64) the KERNEL's pos_from_hilo()
+     * computes ((loff_t)pos_h << 32 << 32) | pos_l, i.e. pos_h is shifted out and pos_l carries the
+     * WHOLE 64-bit offset -- so forwarding a3 alone is exact; OR-ing pos_h<<32 in would invent an
+     * offset the kernel would not use (probed: raw_pwritev_offsets_follow_the_lp64_kernel_abi). */
     case SYS_pwritev: RET(pwritev((int)a0, (const struct iovec *)a1, (int)a2, (off_t)a3));
     /* raw pwritev2(fd, iov, cnt, pos_l, pos_h, flags): flags is the SIXTH argument. */
     case SYS_pwritev2: RET(pwritev2((int)a0, (const struct iovec *)a1, (int)a2, (off_t)a3, (int)a5));
@@ -525,6 +620,7 @@ long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5
     case SYS_unlinkat: RET(unlinkat((int)a0, (const char *)a1, (int)a2));
     case SYS_mkdirat: RET(mkdirat((int)a0, (const char *)a1, (mode_t)a2));
     case SYS_openat: RET(openat((int)a0, (const char *)a1, (int)a2, (mode_t)a3));
+    case SYS_ioctl: RET(ioctl((int)a0, (unsigned long)a1, a2));
 #ifdef SYS_mmap
     case SYS_mmap: RET(mmap((void *)a0, (size_t)a1, (int)a2, (int)a3, (int)a4, (off_t)a5));
 #endif

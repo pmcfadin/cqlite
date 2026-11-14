@@ -964,6 +964,18 @@ fn is_io_mutating(sym: &str) -> bool {
         "utime",
         "futimens",
         "utimensat",
+        "mknod",
+        "mkfifo",
+        "setxattr",
+        "fsetxattr",
+        "lsetxattr",
+        "removexattr",
+        "fremovexattr",
+        "lremovexattr",
+        "ioctl",
+        "utimes",
+        "futimes",
+        "lutimes",
         "mmap",
         "mprotect",
         "munmap",
@@ -1219,6 +1231,160 @@ int main(void) {
                 "{name}: aborted without naming the cause: {stderr:?}"
             );
         }
+    }
+}
+
+/// Roborev r6 #1: the raw `pwritev`/`pwritev2` offset. On LP64 the kernel's `pos_from_hilo` shifts
+/// `pos_h` out entirely (`(hi << 32 << 32) | lo`), so `pos_l` carries the WHOLE 64-bit offset and
+/// forwarding it alone is exact. Probed against the real kernel through the shim: a 5 GiB offset
+/// in `pos_l` lands at 5 GiB, and a nonzero `pos_h` does NOT move the write (offset 1 stays 1).
+#[test]
+fn raw_pwritev_offsets_follow_the_lp64_kernel_abi() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let src = format!(
+        r#"#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
+int main(void) {{
+  int fd = open("{root}/big.bin", O_CREAT | O_RDWR, 0644);
+  int fd2 = open("{root}/hi.bin", O_CREAT | O_RDWR, 0644);
+  struct iovec iov[1] = {{ {{ "ab", 2 }} }};
+  long five_gib = 5L << 30;
+  if (syscall(SYS_pwritev, fd, iov, 1, five_gib, 0L) != 2) return 3;
+  if (syscall(SYS_pwritev2, fd, iov, 1, five_gib + 4096, 0L, 0L) != 2) return 4;
+  /* nonzero pos_h on LP64 is shifted out by the kernel: the write lands at pos_l = 1 */
+  if (syscall(SYS_pwritev, fd2, iov, 1, 1L, 1L) != 2) return 5;
+  char buf[2];
+  if (pread(fd, buf, 2, five_gib) != 2 || buf[0] != 'a') return 6;
+  if (pread(fd, buf, 2, five_gib + 4096) != 2 || buf[1] != 'b') return 7;
+  struct stat st;
+  if (fstat(fd2, &st) != 0 || st.st_size != 3) return 8; /* offset 1 + 2 bytes */
+  return 0;
+}}"#,
+        root = root.display()
+    );
+    let (status, log, stderr) = run_c_under_shim("pwritev_hilo", &src, &root);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "raw pwritev offset probe failed: {status:?} {stderr}"
+    );
+    assert!(
+        log.lines().filter(|l| l.contains(" pwrite ")).count() >= 3,
+        "{log:?}"
+    );
+}
+
+/// Roborev r6 #2: tracking changes only on a SUCCESSFUL unmap, and a partial unmap keeps the
+/// retained part tracked, so `mprotect(PROT_WRITE)` on it still aborts.
+#[test]
+fn failed_and_partial_unmaps_keep_the_shared_mapping_tracked() {
+    const PRELUDE: &str = r#"#define _GNU_SOURCE
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+int main(void) {
+  int fd = open("ROOT/f", O_RDWR | O_CREAT, 0644);
+  if (fd < 0 || ftruncate(fd, 8192) != 0) return 3;
+  char *m = mmap(0, 8192, PROT_READ, MAP_SHARED, fd, 0);
+  if (m == MAP_FAILED) return 4;
+"#;
+    for (name, body, want) in [
+        // munmap FAILS (unaligned address): the mapping is still live and still tracked
+        ("failed_unmap_then_mprotect", "if (munmap(m + 1, 4096) == 0) return 5; mprotect(m, 4096, PROT_READ | PROT_WRITE); return 0;", 97),
+        // unmap the FIRST page: the retained SECOND page is still a shared file mapping
+        ("partial_unmap_then_mprotect_retained", "if (munmap(m, 4096) != 0) return 5; mprotect(m + 4096, 4096, PROT_READ | PROT_WRITE); return 0;", 97),
+        // unmap the SECOND page: the retained FIRST page likewise
+        ("partial_unmap_tail_then_mprotect_retained", "if (munmap(m + 4096, 4096) != 0) return 5; mprotect(m, 4096, PROT_READ | PROT_WRITE); return 0;", 97),
+        // control: after unmapping EVERYTHING nothing is tracked, so a fresh anonymous mprotect is fine
+        ("full_unmap_then_unrelated_mprotect_ok", "if (munmap(m, 8192) != 0) return 5; char *a = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); if (a == MAP_FAILED) return 6; return mprotect(a, 4096, PROT_READ | PROT_WRITE) == 0 ? 0 : 7;", 0),
+    ] {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().canonicalize().unwrap();
+        let src = format!("{}{}\n}}", PRELUDE.replace("ROOT", &root.display().to_string()), body);
+        let (status, _, stderr) = run_c_under_shim(name, &src, &root);
+        assert_eq!(status.code(), Some(want), "{name}: {status:?}; stderr: {stderr}");
+        if want == 97 {
+            assert!(stderr.contains("WRITABLE FILE MAPPING UNDER THE FAULT ROOT"), "{name}: {stderr:?}");
+        }
+    }
+}
+
+/// Roborev r6 #3: filesystem-mutating libc entry points that are not write(2): node creation and
+/// extended attributes are counted, faultable boundaries; `ioctl` fails closed on the file-mutating
+/// requests under the fault root and passes everything else. All probes call libc DIRECTLY.
+#[test]
+fn node_creation_xattr_and_mutating_ioctls_are_boundaries_or_fail_closed() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let src = format!(
+        r#"#define _GNU_SOURCE
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/xattr.h>
+#include <unistd.h>
+int main(void) {{
+  int fd = open("{root}/f", O_RDWR | O_CREAT, 0644);
+  if (fd < 0) return 3;
+  mknod("{root}/node", S_IFREG | 0644, 0);
+  mkfifo("{root}/fifo", 0644);
+  setxattr("{root}/f", "user.k", "v", 1, 0);
+  fsetxattr(fd, "user.k", "v", 1, 0);
+  removexattr("{root}/f", "user.k");
+  int n = 0;
+  if (ioctl(fd, FIONREAD, &n) != 0 && n != 0) return 4; /* harmless request: passes through */
+  return 0;
+}}"#,
+        root = root.display()
+    );
+    let (status, log, stderr) = run_c_under_shim("libc_mutators", &src, &root);
+    assert_eq!(status.code(), Some(0), "{status:?} {stderr}");
+    for (kind, tail) in [("create", "/node"), ("create", "/fifo"), ("xattr", "/f")] {
+        assert!(
+            log.lines()
+                .any(|l| l.contains(&format!(" {kind} ")) && l.ends_with(tail)),
+            "no counted `{kind}` boundary for {tail}: {log:?}"
+        );
+    }
+    assert!(
+        log.lines().filter(|l| l.contains(" xattr ")).count() >= 3,
+        "{log:?}"
+    );
+
+    // Fail closed: reflink/dedupe/flag-setting ioctls under the fault root abort, named.
+    for (name, call) in [
+        ("ficlone", "ioctl(fd, FICLONE, fd2)"),
+        (
+            "setflags",
+            "{ int fl = 0; ioctl(fd, FS_IOC_SETFLAGS, &fl); }",
+        ),
+    ] {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().canonicalize().unwrap();
+        let src = format!(
+            r#"#define _GNU_SOURCE
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+int main(void) {{
+  int fd = open("{root}/a", O_RDWR | O_CREAT, 0644);
+  int fd2 = open("{root}/b", O_RDWR | O_CREAT, 0644);
+  {call};
+  return 0;
+}}"#,
+            root = root.display()
+        );
+        let (status, _, stderr) = run_c_under_shim(name, &src, &root);
+        assert_eq!(status.code(), Some(97), "{name}: {status:?} {stderr}");
+        assert!(stderr.contains("file-mutating ioctl"), "{name}: {stderr:?}");
     }
 }
 
