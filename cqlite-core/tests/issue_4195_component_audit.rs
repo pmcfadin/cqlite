@@ -999,3 +999,22 @@ async fn a3_4_unparseable_filter_db_skips_naming_the_cause_on_both_formats() {
         );
     }
 }
+
+/// A5.2 — a TOC naming only `Data.db`/`TOC.txt` measures nothing: the `toc` row Skips with the
+/// spec's exact text (owner ruling 2026-11-14), and a Pass is not an option.
+#[tokio::test]
+async fn a5_2_a_toc_naming_only_data_db_skips_with_the_exact_text() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let src = data_db(&clean_dir("test_comp", "uncompressed_table"));
+    std::fs::copy(&src, tmp.path().join("nb-1-big-Data.db")).expect("copy");
+    std::fs::write(tmp.path().join("nb-1-big-TOC.txt"), "Data.db\nTOC.txt\n").expect("toc");
+    let r = audit_generation(&tmp.path().join("nb-1-big-Data.db"), false).await;
+    assert_eq!(
+        verdict(&r, "toc-exact-listing"),
+        AuditVerdict::Skip(
+            "TOC.txt lists only Data.db: no cross-component listing to check".into()
+        ),
+        "{}",
+        describe(&r)
+    );
+}
