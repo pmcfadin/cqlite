@@ -1034,7 +1034,7 @@ Parsed once per process; unset = shipped default (behavior unchanged).
 
 Policy (nightly-only, out of the stable gate, workspace-excluded) is in `CLAUDE.md`. Run details:
 
-- Five targets prove the parser never panics/hangs/OOMs on arbitrary bytes
+- Targets prove the parser never panics/hangs/OOMs on arbitrary bytes
   (returns `Ok` or `Err`): `fuzz_vint`, `fuzz_value_decode`, `fuzz_block_emit`,
   `fuzz_bti`, `fuzz_schema_parse`. They reach `cqlite-core` internals via the
   feature-gated `#[doc(hidden)] cqlite_core::fuzz_support` module (build with
@@ -1046,6 +1046,17 @@ Policy (nightly-only, out of the stable gate, workspace-excluded) is in `CLAUDE.
   Or all targets: `fuzz/smoke.sh`. `fuzz_block_emit` fully exercises the
   block-emit path only when `CQLITE_DATASETS_ROOT` points at the test datasets
   (a real `test_basic/simple_table` fixture); otherwise it no-ops.
+- Toolbox-verb targets (issue #4502): `fuzz_audit` (`verify --mode audit`, #4195) and `fuzz_find`
+  (`find`'s per-generation probe and CommitLog scan, #4205) fuzz a whole generation DIRECTORY. Each
+  exec copies a real Cassandra-written base generation (`CQLITE_DATASETS_ROOT`; a no-op without one),
+  replaces ONE component with the fuzz bytes (control byte + payload, layout in
+  `fuzz/fuzz_targets/support/mod.rs`) and drives the real entry point. Beyond never panic/hang/OOM
+  they ASSERT the #4159 property on the tool's own result: a component that could not be read
+  (`< 4` bytes, empty `TOC.txt`) never lets a dependent audit row `Pass`, never reads as an
+  index/bloom miss in `find`, and a too-short CommitLog segment never scans as "nothing found".
+  Seeds come from the corruption corpus: `CQLITE_DATASETS_ROOT=<root> python3 fuzz/seed_audit_find.py`
+  (output committed under `fuzz/corpus/`). LeakSanitizer needs ptrace; where that is blocked add
+  `-detect_leaks=0` locally (CI leaves it on).
 - CI: `.github/workflows/fuzz.yml` runs a bounded per-target PR smoke lane and a
   nightly long-run (both nightly + cargo-fuzz, isolated from the stable gate). A
   crash fails the job and uploads the reproducer artifact; crashes are filed as

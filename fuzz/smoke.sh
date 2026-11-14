@@ -30,6 +30,8 @@ TARGETS=(
   fuzz_bti
   fuzz_schema_parse
   fuzz_commitlog_frame
+  fuzz_audit
+  fuzz_find
 )
 
 if ! cargo fuzz --version >/dev/null 2>&1; then
