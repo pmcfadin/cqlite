@@ -37,12 +37,11 @@
 //! The whole module is gated on `write-support` at its `mod` declaration in the
 //! parent (`sstable/mod.rs`).
 //!
-//! NOTE (#1116 file-size): this file was over the 800-line target on `origin/main`.
-//! Touching it for issue #3124 split two responsibilities out into child modules —
-//! the streaming path's setup-outcome type (`merge_stream_setup`) and the
-//! read-visibility filter's unit pins (`read_shadow_tests`) — which brings it back
-//! under the target.
+//! NOTE (#1116 file-size): issue #3124 split the streaming setup-outcome type
+//! (`merge_stream_setup`) and the filter's unit pins (`read_shadow_tests`) out into
+//! child modules; the file-size ratchet forbids growing this file.
 
+mod row_visibility;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -98,6 +97,8 @@ struct ReadShadow {
     /// timestamp aggregate so only real data cells drive the partition-shadow row
     /// decision — matching the single-gen fold, which ignores pk/ck pseudo-cells.
     key_columns: HashSet<String>,
+    /// Schema STATIC columns (never data of a clustering row; `row_visibility.rs`).
+    static_columns: HashSet<String>,
 }
 
 impl ReadShadow {
@@ -110,9 +111,11 @@ impl ReadShadow {
         for k in &schema.clustering_keys {
             key_columns.insert(k.name.clone());
         }
+        let static_columns = row_visibility::static_column_names(schema);
         Self {
             now_secs,
             key_columns,
+            static_columns,
         }
     }
 
@@ -217,23 +220,19 @@ fn partition_live_rows(
     let cover = partition_cover(&rows);
     let mut out = Vec::new();
     for entry in rows {
-        // Read BEFORE `row_data` is moved out of `entry` below (`RowLiveness` is
-        // `Copy`): the surviving marker's write ts, #2374/#2789.
-        let marker_ts = entry.row_liveness.marker_timestamp;
+        let vis = row_visibility::RowVis::of(&entry); // before `row_data` is moved out
         match entry.row_data {
             RowData::Live { cells } => {
                 // Read-time visibility: drop cell tombstones + TTL-expired /
                 // partition-shadowed data cells; `None` hides the whole row.
-                let Some(surviving) = shadow.filter_live(cover, marker_ts, cells) else {
+                let Some(surviving) = shadow.filter_visible(cover, vis, cells) else {
                     continue;
                 };
                 let row_cells: RowCells = surviving
                     .into_iter()
                     .map(|c| (Arc::from(c.column.as_str()), c.value))
                     .collect();
-                if !row_cells.is_empty() {
-                    out.push((row_key.clone(), ScanRow::Row(row_cells)));
-                }
+                out.push((row_key.clone(), ScanRow::Row(row_cells)));
             }
             // Row tombstone: the row is deleted across all generations — suppress.
             RowData::Tombstone { .. } => {}
@@ -604,12 +603,11 @@ fn push_metadata_rows(
     // plain path, so the WRITETIME/TTL projection agrees with `SELECT *`.
     let cover = partition_cover(&rows);
     for entry in rows {
-        // Read BEFORE `row_data` is moved out of `entry` (`RowLiveness` is `Copy`).
-        let marker_ts = entry.row_liveness.marker_timestamp;
+        let vis = row_visibility::RowVis::of(&entry); // before `row_data` is moved out
         if let RowData::Live { cells } = entry.row_data {
             // `filter_live` drops cell tombstones + TTL-expired / partition-shadowed
             // data cells; `None` hides the whole row (partition-shadowed).
-            let Some(surviving) = shadow.filter_live(cover, marker_ts, cells) else {
+            let Some(surviving) = shadow.filter_visible(cover, vis, cells) else {
                 continue;
             };
             let mut row_cells: RowCells = Vec::with_capacity(surviving.len());
@@ -618,9 +616,7 @@ fn push_metadata_rows(
                 timestamps.push((c.column.clone(), c.timestamp));
                 row_cells.push((Arc::from(c.column.as_str()), c.value));
             }
-            if !row_cells.is_empty() {
-                out.push((key_bytes.to_vec(), ScanRow::Row(row_cells), timestamps));
-            }
+            out.push((key_bytes.to_vec(), ScanRow::Row(row_cells), timestamps));
         }
         // Row tombstones suppress the row entirely (no emission).
     }

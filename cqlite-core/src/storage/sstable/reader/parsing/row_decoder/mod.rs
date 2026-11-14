@@ -537,11 +537,7 @@ impl RowHeader {
         }
         // Primary-key liveness still live? Present iff HAS_TIMESTAMP; live-forever
         // when it carries no TTL expiry, otherwise live until its expiry passes.
-        let liveness_live = self.timestamp.is_some()
-            && self
-                .liveness_expires_at_seconds
-                .is_none_or(|s| s > now_secs);
-        if liveness_live {
+        if self.liveness_live_at(now_secs) {
             return false;
         }
         // Any expiring data cell still live keeps the row visible.

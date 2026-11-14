@@ -303,21 +303,18 @@ async fn partition_deleted_update_only_row_is_not_resurrected() {
     copy_table_dir(&data_dir, &live_root);
     let deleted_table_dir = copy_table_dir(&data_dir, &deleted_root);
 
-    // (1) DECODE PROBE (anti-vacuity) — asserts CQLite's CURRENT behaviour, NOT
-    //     Cassandra parity. Without the partition tombstone this row still has no
-    //     liveness marker and no live cell: Cassandra purges its lone cell
-    //     tombstone (`Filter.applyToRow` → `row.purge(PURGE_ALL)`, guide Ch.11)
-    //     and drops the resulting EMPTY row, so a real `SELECT` returns 0 rows.
-    //     CQLite returns 1 because it has no `Row.hasLiveData` purge yet — tracked
-    //     as issue #3121, which will INVERT this expectation to 0.
-    //     Its purpose here is solely to prove the row is physically present and
-    //     decodable, so the 0-row assertion below is not vacuous.
+    // (1) PARITY PROBE (issue #4524, which delivered the `Row.hasLiveData` purge #3121 asked
+    //     for). Without the partition tombstone this row has no liveness marker and no live
+    //     cell: Cassandra purges its lone cell tombstone (`Filter.applyToRow` →
+    //     `row.purge(PURGE_ALL)`, guide Ch.11) and drops the emptied row, so a real `SELECT`
+    //     returns 0 rows — and so does CQLite now. (This probe used to pin CQLite's old
+    //     non-parity `1`.) Physical presence of the partition is still proven structurally by
+    //     `patch_partition_deletion`, which asserts the Data.db's partition header holds the LIVE
+    //     `DeletionTime` sentinels before patching.
     let live_rows = select_row_count(&live_root, &schema_path).await;
     assert_eq!(
-        live_rows, 1,
-        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): the \
-         UPDATE-only row must be physically present and decodable BEFORE the partition \
-         tombstone is patched in — got {live_rows} rows"
+        live_rows, 0,
+        "parity probe (#4524): the UPDATE-only row whose lone cell is a tombstone has no          liveness and no live cell, so it is not returned even BEFORE the partition tombstone          is patched in — got {live_rows} rows"
     );
 
     // (2) THE PIN: patch a partition tombstone strictly NEWER than the row's cell

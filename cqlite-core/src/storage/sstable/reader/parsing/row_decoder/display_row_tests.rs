@@ -18,6 +18,8 @@ use super::*;
 
 use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 
+const NOW: i64 = 1_800_000_000;
+
 /// `(pk int, ck int, s text static, v text, PRIMARY KEY (pk, ck))`.
 fn schema() -> TableSchema {
     let col = |name: &str, ty: &str, is_static: bool| Column {
@@ -150,6 +152,7 @@ fn statics_do_not_revive_a_row_tombstoned_clustering_row() {
         &statics,
         Some(&header(None, true)),
         &schema,
+        NOW,
     );
     assert!(
         matches!(built, ScanRow::Marker(_)),
@@ -188,6 +191,7 @@ fn a_surviving_row_receives_the_static_values() {
         &statics,
         Some(&header(Some(1_000), false)),
         &schema,
+        NOW,
     );
     let ScanRow::Row(out) = built else {
         panic!("a live row must stay a row: {built:?}");
@@ -224,6 +228,7 @@ fn the_static_merge_is_a_plain_append_over_disjoint_names() {
         &statics,
         Some(&header(Some(1_000), false)),
         &schema,
+        NOW,
     );
     let ScanRow::Row(out) = built else {
         panic!("expected a row: {built:?}");
@@ -242,6 +247,7 @@ fn the_static_merge_is_a_plain_append_over_disjoint_names() {
         &statics,
         Some(&header(Some(1_000), false)),
         &schema,
+        NOW,
     );
     let ScanRow::Row(out) = built else {
         panic!("expected a row: {built:?}");
@@ -269,6 +275,7 @@ fn no_static_values_leaves_the_row_unchanged() {
         &Vec::new(),
         Some(&header(Some(1_000), false)),
         &schema,
+        NOW,
     );
     let ScanRow::Row(out) = built else {
         panic!("expected a row: {built:?}");
@@ -390,4 +397,111 @@ fn on_partition_open_resets_partition_scoped_state() {
          `emitted_clustering_row` from A would have suppressed it: {pending:?}"
     );
     assert_eq!(pending[0].3, 2_000, "with B's OWN static write timestamp");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4524: a liveness-only row is displayed iff its marker is LIVE at `now`
+// ---------------------------------------------------------------------------
+
+fn liveness_header(expires_at: Option<i64>) -> RowHeader {
+    let mut h = header(Some(1_000), false);
+    h.liveness_expires_at_seconds = expires_at;
+    h
+}
+
+/// The single TTL-aware predicate (`liveness_live_at`): present iff HAS_TIMESTAMP, live-forever
+/// with no expiry, otherwise live strictly before the expiry.
+#[test]
+fn liveness_live_at_honours_the_marker_ttl() {
+    assert!(
+        liveness_header(None).liveness_live_at(NOW),
+        "no TTL: live forever"
+    );
+    assert!(
+        liveness_header(Some(NOW + 1)).liveness_live_at(NOW),
+        "expires in the future"
+    );
+    assert!(
+        !liveness_header(Some(NOW)).liveness_live_at(NOW),
+        "now == expiry is expired"
+    );
+    assert!(
+        !liveness_header(Some(NOW - 1)).liveness_live_at(NOW),
+        "already expired"
+    );
+    assert!(
+        !header(None, false).liveness_live_at(NOW),
+        "no HAS_TIMESTAMP: no liveness"
+    );
+}
+
+/// A pk-only INSERT row (no regular cell) with a live marker displays as an empty `Row`; with an
+/// EXPIRED marker it is NOT resurrected (a `Marker`), and without any marker it is a `Marker`.
+#[test]
+fn liveness_only_row_display_follows_the_marker_ttl() {
+    let schema = schema();
+    let statics = cells(&[]);
+    let live = build_display_row_read_path(
+        cells(&[]),
+        &statics,
+        Some(&liveness_header(Some(NOW + 10))),
+        &schema,
+        NOW,
+    );
+    assert!(
+        matches!(live, ScanRow::Row(ref c) if c.is_empty()),
+        "live marker -> empty Row: {live:?}"
+    );
+    let expired = build_display_row_read_path(
+        cells(&[]),
+        &statics,
+        Some(&liveness_header(Some(NOW - 10))),
+        &schema,
+        NOW,
+    );
+    assert!(
+        matches!(expired, ScanRow::Marker(_)),
+        "expired marker must not display: {expired:?}"
+    );
+    let none = build_display_row_read_path(
+        cells(&[]),
+        &statics,
+        Some(&header(None, false)),
+        &schema,
+        NOW,
+    );
+    assert!(
+        matches!(none, ScanRow::Marker(_)),
+        "no marker -> Marker: {none:?}"
+    );
+}
+
+/// Roborev job 307: a marker must SURVIVE the row's own deletion to count as liveness. Cassandra
+/// 5.0.8 `DeletionTime.deletes(ts)` is `ts <= markedForDeleteAt` (`db/DeletionTime.java`) and
+/// `BTreeRow.Merger.merge` empties a covered marker, so an older or EQUAL-timestamp marker is
+/// deleted (the row stays a tombstone `Marker`) and only a strictly newer one yields the empty
+/// live `Row`. (`header(_, true)` carries `markedForDeleteAt = 2_000`.)
+#[test]
+fn a_liveness_marker_older_or_equal_to_the_row_deletion_does_not_resurrect_the_row() {
+    let schema = schema();
+    let statics = cells(&[]);
+    let keys = || cells(&[("pk", Value::Integer(1)), ("ck", Value::Integer(1))]);
+    for (marker_ts, visible) in [(1_000, false), (2_000, false), (2_001, true)] {
+        let out = build_display_row_read_path(
+            keys(),
+            &statics,
+            Some(&header(Some(marker_ts), true)),
+            &schema,
+            NOW,
+        );
+        assert_eq!(
+            matches!(out, ScanRow::Row(_)),
+            visible,
+            "marker@{marker_ts} vs row deletion@2000: {out:?}"
+        );
+    }
+    // No marker at all under a row deletion: a pure tombstone.
+    let pure =
+        build_display_row_read_path(keys(), &statics, Some(&header(None, true)), &schema, NOW);
+    assert!(matches!(pure, ScanRow::Marker(_)), "{pure:?}");
 }

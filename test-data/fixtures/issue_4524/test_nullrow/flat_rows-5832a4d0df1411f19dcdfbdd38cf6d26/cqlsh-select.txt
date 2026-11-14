@@ -1,0 +1,10 @@
+
+ id | v
+----+------
+  1 | null
+  2 | null
+  4 | null
+  6 | live
+  3 | null
+
+(5 rows)
