@@ -44,8 +44,14 @@ env:
   # Tolerated median overhead of the export-disabled observability build over the
   # default build (see benches/observability_overhead.rs OVERHEAD_THRESHOLD_PCT).
   OVERHEAD_THRESHOLD_PCT: "2.0"
-  # Keep CI bench runs short but stable.
-  BENCH_ARGS: "--sample-size 30 --warm-up-time 1 --measurement-time 5"
+  # Keep CI bench runs short but stable. warm-up/measurement are deliberately
+  # longer than a local run (issue #4456): the write_merge arm warms up slowly
+  # and at --measurement-time 5 criterion could not complete its 30 samples
+  # ("Unable to complete 30 samples; increase target time"), which is a primary
+  # source of the single-shot timing noise that false-failed this gate. The
+  # compare script also takes a best-of-N median per arm (OVERHEAD_BENCH_REPEATS)
+  # so one noisy sample window cannot decide the verdict.
+  BENCH_ARGS: "--sample-size 30 --warm-up-time 3 --measurement-time 10"
 
 jobs:
   classify:
