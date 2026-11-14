@@ -18,9 +18,9 @@
 //! `CQLITE_REQUIRE_FIXTURES=1` turns a missing dataset root / table into a hard failure; without
 //! it, a missing corpus is a clean skip (ordinary local dev).
 //!
-//! Two tables are QUARANTINED (`QUARANTINED_TABLES`), both the SAME pre-existing,
-//! format-independent row-decoder gap this test discovered (issue #4279) — see that constant's
-//! doc comment. 31 of the 33 committed fixture tables are swept unconditionally.
+//! All 33 committed fixture tables are swept (R9.1). Two tables were quarantined while the
+//! clustering-column decoder gap this test discovered (issue #4279) was open; #4279 fixed it and
+//! they are back in the sweep.
 
 #![cfg(all(feature = "state_machine", feature = "vortex"))]
 
@@ -89,30 +89,6 @@ struct FixtureTable {
     keyspace: &'static str,
     table: String,
     schema: PathBuf,
-}
-
-/// QUARANTINE (issue #4279, discovered by this test): the `V5CompressedLegacy` row decoder
-/// (`row_decoder/row_framing.rs`) has explicit fixed-width clustering-column decode arms only
-/// for `int`/`uuid`/`bigint`/`counter`, falling through to a generic "treat as blob" branch for
-/// EVERY other CQL type. Both tables below trip that same fallback, on two different clustering
-/// types (`DATE`, `FROZEN<LIST<TEXT>>`): `test_wide_rows.wide_partition_table`
-/// (`clustering_col5 DATE`) and `test_collections.collection_clustering_table`
-/// (`clustering_key FROZEN<LIST<TEXT>>`).
-///
-/// This is FORMAT-INDEPENDENT (verified against plain `--out json`) and pre-existing — NOT a
-/// Vortex-specific defect: the Parquet writer hits the identical `expected <T> value, got
-/// Blob(...)` failure at the SAME shared `rows_to_record_batch_with_schema` step Vortex uses
-/// (design.md D1), before any Vortex-specific code runs. Quarantined here (not silently dropped —
-/// named, with the citing issue) until #4279 lands; every OTHER fixture table is swept normally.
-const QUARANTINED_TABLES: &[(&str, &str)] = &[
-    ("test_wide_rows", "wide_partition_table"),
-    ("test_collections", "collection_clustering_table"),
-];
-
-fn is_quarantined(table: &FixtureTable) -> bool {
-    QUARANTINED_TABLES
-        .iter()
-        .any(|(ks, t)| *ks == table.keyspace && *t == table.table)
 }
 
 /// Tables where `SELECT *` legitimately returns ZERO rows against the committed fixture —
@@ -491,14 +467,8 @@ fn differential_all_fixture_tables_agree() {
     let mut total_rows_compared = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
-    let mut quarantined = 0usize;
     for table in &tables {
         let qualified = format!("{}.{}", table.keyspace, table.table);
-        if is_quarantined(table) {
-            quarantined += 1;
-            eprintln!("{qualified}: QUARANTINED (issue #4279), skipping");
-            continue;
-        }
         let Some(_data_db_dir) = table_dir_has_data_db(&root, table) else {
             assert!(
                 !strict,
@@ -551,42 +521,28 @@ fn differential_all_fixture_tables_agree() {
          CQLITE_DATASETS_ROOT points at a corpus-less root"
     );
     // Corpus-wide floor (review finding): swept-table count and total rows compared must
-    // both clear a floor derived from a real run (31 tables, 6096 rows) so a regression
+    // both clear a floor derived from a real run (33 tables) so a regression
     // that drops most tables to 0 rows (which the per-table check above already refuses)
     // or silently skips most tables cannot pass by accumulating just enough from a few.
     // Only enforced under CQLITE_REQUIRE_FIXTURES=1 — an intentionally partial local
     // corpus (a subset of keyspaces fetched) is a legitimate non-strict state.
     if strict {
         assert!(
-            swept >= 31,
-            "strict mode: only {swept} tables swept (expected >= 31 of 33, 2 quarantined \
-             behind issue #4279) — a table silently dropped out of the sweep?"
+            swept >= 33,
+            "strict mode: only {swept} tables swept (expected all 33, R9.1) — a table \
+             silently dropped out of the sweep?"
         );
         assert!(
             total_rows_compared >= 1000,
             "strict mode: only {total_rows_compared} total rows compared across {swept} \
-             tables (expected >= 1000; a real run compares 6096) — a shared row-decode \
+             tables (expected >= 1000; a real run compares thousands) — a shared row-decode \
              regression yielding near-empty results would still pass the per-table \
              zero-row check if EVERY table returned exactly 1 row, so this floor is a \
              second, independent net"
         );
     }
-    // Review finding: only enforced under `strict` — a partial local corpus (e.g. only
-    // `test_basic` fetched) legitimately discovers 0 of the 2 quarantined tables (their
-    // KEYSPACE directories are absent, so `discover_fixture_tables` never sees them at
-    // all), which is not "a table added/removed from the corpus", just an incomplete
-    // local root. Under CQLITE_REQUIRE_FIXTURES=1 the full corpus is expected, so the
-    // exact count is meaningful there.
-    if strict {
-        assert_eq!(
-            quarantined,
-            QUARANTINED_TABLES.len(),
-            "strict mode: quarantined-table count drifted from QUARANTINED_TABLES — a table \
-             was added/removed from the corpus without updating this list"
-        );
-    }
     eprintln!(
-        "vortex-parquet differential: {swept}/{} tables swept ({quarantined} quarantined, issue #4279), \
+        "vortex-parquet differential: {swept}/{} tables swept \
          {total_rows_compared} total rows compared, all agree",
         tables.len()
     );
