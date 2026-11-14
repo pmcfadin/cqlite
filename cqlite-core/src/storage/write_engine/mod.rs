@@ -59,6 +59,10 @@ pub mod salvage;
 // see `salvage`'s own gate comment above.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod rebuild;
+// Crash-safe publication of a verb's output generation (issue #4529), shared by `salvage` and
+// `rebuild`; carries their identical gate.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod staged_publish;
 #[cfg(feature = "write-support")]
 pub mod wal;
 
