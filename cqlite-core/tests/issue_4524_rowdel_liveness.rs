@@ -188,23 +188,12 @@ async fn check_table(table: &str, clustered: bool, min_null_rows: usize) {
         assert_eq!(streamed, oracle, "{table} streaming [{mode:?}]");
     }
 
-    // Forced POINT: a partition holding tombstones is REFUSED by the point path
-    // (`tombstones_build_no_prune`, fail-closed — never a wrong answer). Every partition it DOES
-    // serve must match Cassandra, and the refusal must be that explicit one.
+    // Forced POINT: every single-partition read must serve (no fallback) and match.
     let point = open(ReadPathMode::Point).await;
     for k in PARTITION_KEYS {
         let want: BTreeSet<Key> = oracle.iter().filter(|(p, _, _)| *p == k).cloned().collect();
-        let sql = format!("{full_sql} WHERE {pk} = {k}");
-        match point.execute(&sql).await {
-            Ok(r) => {
-                let got: BTreeSet<Key> = r.rows.iter().map(|row| key_of(row, clustered)).collect();
-                assert_eq!(got, want, "{table} {pk} = {k} [forced point]");
-            }
-            Err(e) => assert!(
-                e.to_string().contains("tombstones_build_no_prune"),
-                "{table} {pk} = {k} [forced point]: unexpected error {e}"
-            ),
-        }
+        let got = rows(&point, &format!("{full_sql} WHERE {pk} = {k}"), clustered).await;
+        assert_eq!(got, want, "{table} {pk} = {k} [forced point]");
     }
 }
 
