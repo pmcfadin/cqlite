@@ -140,7 +140,9 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             if rd.next().is_some() {
                 // Issue #4529 (AC2): name an interrupted run's staging directory (unpublished,
                 // incomplete files) so the operator knows what the leftover is.
-                match cqlite_core::storage::write_engine::staged_publish::find_leftover(&args.out) {
+                match cqlite_core::storage::write_engine::rebuild::staged_publish::find_leftover(
+                    &args.out,
+                ) {
                     Some(left) => eprintln!(
                         "cqlite salvage: --out {} is not empty: it holds a staging directory from \
                          an interrupted run ({}), whose files are unpublished and incomplete — \

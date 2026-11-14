@@ -36,7 +36,10 @@ mod boundaries;
 mod components;
 mod decode;
 mod partition_stats;
+// Issue #4529: crash-safe publication shared by rebuild and salvage.
+mod publish;
 mod simple;
+pub mod staged_publish;
 mod statistics;
 
 pub use components::rebuild_components;
