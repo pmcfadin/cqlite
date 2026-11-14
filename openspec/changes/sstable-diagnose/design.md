@@ -53,10 +53,14 @@ CHEAP (default) — per generation, Statistics.db + Index/Summary + CompressionI
         ├─ top-N tombstone-heaviest partitions           (mirrors `mostTombstones` — RAW per-generation
         │                                                 marker count, see D2; NOT #4200's reconciled
         │                                                 report)
-        └─ full-compaction-at-`--now` reclaim prediction  (reuses the existing `MergeStats`/purge tally
-                                                            CODE PATH in a dry, no-write invocation —
-                                                            same numbers `compact --major` would produce,
-                                                            computed without writing anything)
+        └─ full-compaction-at-`--now` reclaim prediction  (TABLE-WIDE, reported once per table, not per
+                                                            generation: the dry KWayMerger runs ONCE over
+                                                            ALL of the table's generations — the same input
+                                                            set, newest first, fully-expired drop, effective
+                                                            schema and gc/now/purge_safe settings that
+                                                            `compact --major` uses — and counts rows in/out
+                                                            without writing; it IS the major-compaction
+                                                            prediction, not a bound)
 ```
 
 `--deep` NEVER writes. There is no `--out <dir>` write destination anywhere in this verb — `--out`
@@ -162,6 +166,7 @@ online, reconstructed here from files alone.
       "deep": null },
   ],
   "token_overlap": { "buckets": 16, "counts": [1,1,2,2,3,3,2,2,1,1,1,1,1,1,1,1] },
+  "reclaim_at_now": null,
   "now_used_for_gc_before": "<RFC3339>" }
 ```
 
@@ -172,10 +177,24 @@ When `--deep` runs, each generation's `deep` field is populated:
   "partition_size_histogram": [[0,1024,412],[1024,4096,88], "..."],
   "clustering_width_histogram": [["..."]],
   "top_largest_partitions": [{"key_hex":"…","bytes":88192}, "..."],
-  "top_tombstone_heaviest_partitions": [{"key_hex":"…","tombstones":412}, "..."],
-  "reclaim_at_now": {"rows_in": 40231, "rows_out": 39998, "tombstones_purged": 233}
+  "top_tombstone_heaviest_partitions": [{"key_hex":"…","tombstones":412}, "..."]
 }
 ```
+
+`reclaim_at_now` is TABLE-LEVEL (owner ruling 2026-11-14), `null` without `--deep`, and with `--deep`
+the usual `{value, source, cause?}` envelope — `unmeasured: <cause>` without a schema, with an
+unreadable generation, or with non-integer generation ids (the newest-first merge order of a major
+compaction cannot be derived). It carries NO `bound`:
+
+```json
+"reclaim_at_now": { "value": { "rows_in": 11, "rows_out": 4,
+                               "merged_generations": [2, 1], "dropped_whole": [],
+                               "tombstones_purged": {"value": null, "source": "unmeasured", "cause": "…"} },
+                    "source": "scan" }
+```
+
+`rows_in` is the rows of the generations the major compaction actually merges (dropped-whole
+generations are not read); `rows_out` is what it keeps and would write.
 
 Every leaf value that can be absent (an older layout, a `None` from issue #1653's honest-`Option`
 fields) is `{"value": null, "source": "unmeasured", "cause": "<why>"}` — never a bare `0` or `null`

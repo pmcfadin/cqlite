@@ -74,6 +74,22 @@ histograms and `--top N` rankings in that SAME pass, and SHALL NOT write any out
   - *Owner ruling 2026-11-14:* the description does NOT name `cqlite tombstones` yet — that verb
     ships in 0.20 (#4200). The pointer returns when #4200 lands (tracked on #4200).
 
+#### Scenario: R3.4 `reclaim_at_now` is the TABLE-WIDE major-compaction prediction
+- **Given** a real Cassandra-written, multi-generation `test_tomb` table (a newer generation's
+  tombstones shadowing an older generation's rows), copied to a temp dir
+- **When** `diagnose_table` runs with `--deep`, a schema, and a pinned `now`/`gc_grace`, and the REAL
+  major compaction (`compact_sstables`, `purge_safe = true`, the path `compact --major` calls) runs
+  over the same inputs with the same gc/now
+- **Then** the report's table-level `reclaim_at_now` has `rows_out` equal to the rows the real
+  compaction wrote (confirmed by an independent scan of its output), `rows_in` equal to the rows of the
+  generations it merged (computed from the sstabledump goldens), and `dropped_whole` equal to the
+  generations it dropped; both counts are asserted per row on non-empty tables
+  (`cqlite-core/tests/issue_4204_diagnose_major_compaction_oracle.rs`: `resurrection_gc0` 11 in /
+  4 out, `skipped_partition_delete` 12 in / 0 out). The dry merge runs ONCE over ALL generations with
+  the real path's input order, fully-expired drop, effective schema and gc/now/purge settings (never
+  per generation), the value carries no `bound`, and a table without a schema, with an unreadable
+  generation, or with non-integer generation ids is `unmeasured: <cause>`, never `0`.
+
 #### Scenario: R3.3 bounded memory, no write
 - **Given** `test_wide_rows` under the memory-budget dhat lane
 - **When** `--deep` runs
