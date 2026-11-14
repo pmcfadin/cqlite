@@ -24,7 +24,7 @@ use crate::storage::sstable::reader::{
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::storage::sstable::writer::{SSTableFormat as WriterFormat, SSTableWriter};
 use crate::storage::write_engine::merge::{classify_inputs, compute_baseline_min};
-use crate::storage::write_engine::staged_publish::StagedPublish;
+use crate::storage::write_engine::rebuild::staged_publish::StagedPublish;
 use std::path::Path;
 
 /// The largest number of [`Loss`] entries [`salvage_sstable`] holds resident
