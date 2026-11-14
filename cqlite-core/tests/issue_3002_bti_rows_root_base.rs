@@ -45,6 +45,12 @@ use cqlite_core::storage::sstable::bti::{
 };
 use cqlite_core::types::Value;
 use std::io::Cursor;
+
+// Committed-schema resolution (#3131/#3148/#4230): the schemas root is never derived from
+// CQLITE_DATASETS_ROOT by climbing `..`, so a fetched cache root without a sibling
+// `schemas/` dir still works.
+#[path = "support/datasets_root.rs"]
+mod schema_support;
 use std::path::{Path, PathBuf};
 
 /// Relative path of the wide-partition BTI fixture directory.
@@ -995,12 +1001,11 @@ mod wiring {
     /// Ingest `test_da` from an arbitrary `sstables` directory (the committed corpus,
     /// or a patched copy of it).
     async fn open_db_from(data_dir: &Path) -> Option<Database> {
-        let root = datasets_root()?;
-        let schema = root
-            .parent()
-            .expect("datasets has a parent")
-            .join("schemas")
-            .join("wide-table-bti.cql");
+        datasets_root()?;
+        let schema =
+            super::schema_support::schema_path("wide-table-bti.cql").unwrap_or_else(|| {
+                super::schema_support::fixture_roots::schemas_root().join("wide-table-bti.cql")
+            });
         if !schema.exists() {
             assert!(
                 !require_fixtures(),

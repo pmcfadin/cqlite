@@ -96,8 +96,8 @@ async fn run_main() -> Result<()> {
     // schema / write-engine, so short-circuit before any database init (epic
     // #970, issue #1000). On a failing verification the handler prints the
     // report and exits non-zero.
-    if let Some(Commands::Verify { path, mode, out }) = &cli.command {
-        return commands::verify::execute_verify_command(path, *mode, *out).await;
+    if let Some(cmd @ Commands::Verify { .. }) = &cli.command {
+        return commands::verify::dispatch_verify(cmd).await;
     }
 
     // `salvage` (issue #4196) likewise operates directly on files and needs no

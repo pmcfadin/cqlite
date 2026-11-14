@@ -15,6 +15,8 @@ pub enum VerifyModeArg {
     Quick,
     /// Quick checks plus inline chunk-CRC, Statistics/Summary parse, and a full row scan.
     Full,
+    /// Cross-component consistency audit: eight named invariants as pass/fail/skip (issue #4195).
+    Audit,
 }
 
 /// Output format for the `verify` subcommand report.
@@ -395,7 +397,7 @@ pub enum Commands {
     Rebuild(RebuildArgs),
     /// Verify SSTable integrity (compressed + corrupted) — epic #970, issue #1000
     #[command(
-        long_about = "Enforce the CQLite verifier contract on one SSTable generation directory. QUICK mode checks component presence, TOC.txt completeness, Digest.crc32, CompressionInfo.db (+ chunk-offset bounds) and BTI trie structure. FULL mode adds inline Data.db chunk-CRC validation, Statistics.db/Summary.db parse, and a complete row scan that fails loudly on corrupt index/BTI components (no silent empty results). Exit code is non-zero when verification fails. Example: cqlite verify ./test-data/datasets/sstables/test_comp/lz4_table-xxx --mode full --out json"
+        long_about = "Enforce the CQLite verifier contract on one SSTable generation directory. QUICK mode checks component presence, TOC.txt completeness, Digest.crc32, CompressionInfo.db (+ chunk-offset bounds) and BTI trie structure. FULL mode adds inline Data.db chunk-CRC validation, Statistics.db/Summary.db parse, and a complete row scan that fails loudly on corrupt index/BTI components (no silent empty results). Exit code is non-zero when verification fails. AUDIT mode (`--mode audit`, issue #4195) checks that the components agree with EACH OTHER and prints a fixed eight-row checklist (index-data-identity, summary-index-correlation, bloom-no-false-negative, bti-trie-bounds, toc-exact-listing, digest-matches-data, compression-coverage, statistics-vs-scan), each `pass`, `fail` (with a finding) or `skip` naming why; a skip is never a pass, and an audit that MEASURED nothing exits 2 and says `0 invariants MEASURED`. `--deep` is only meaningful with `--mode audit` (a usage error, exit 1, otherwise); it adds the Statistics.db-vs-scan comparison and the BTI identity cross-check, which need a full scan. Without `--deep` the audit never reads a whole partition. Example: cqlite verify ./test-data/datasets/sstables/test_comp/lz4_table-xxx --mode full --out json; cqlite verify <dir> --mode audit --deep"
     )]
     Verify {
         /// SSTable generation directory (the dir containing *-Data.db)
@@ -406,6 +408,10 @@ pub enum Commands {
         /// Output format for the verification report
         #[arg(long, value_enum, default_value = "text")]
         out: VerifyOutputArg,
+        /// With `--mode audit` only: also run the invariant that needs a full scan
+        /// (Statistics.db vs a real scan) and the BTI trie-vs-Data.db identity check
+        #[arg(long)]
+        deep: bool,
     },
     /// Verify every SSTable table directory under a data directory in one pass (issue #4194)
     #[command(

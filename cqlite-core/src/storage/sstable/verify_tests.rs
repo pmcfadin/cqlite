@@ -11,6 +11,9 @@
 //! private items unchanged.
 
 use super::*;
+use crate::storage::sstable::verify_order::{
+    classify_clustering_row_order, classify_order_and_ldt,
+};
 
 #[test]
 fn error_class_codes_are_stable() {
@@ -200,6 +203,7 @@ fn report_summary_line_distinguishes_ok_and_fail() {
         findings: vec![],
         toc_components: vec![],
         rows_scanned: Some(3),
+        audit: None,
     };
     assert!(ok.is_ok());
     assert!(ok.summary_line().contains("VERIFY OK"));
@@ -216,6 +220,7 @@ fn report_summary_line_distinguishes_ok_and_fail() {
         )],
         toc_components: vec![],
         rows_scanned: None,
+        audit: None,
     };
     assert!(!fail.is_ok());
     assert_eq!(fail.primary_class(), Some(VerifyErrorClass::DigestMismatch));

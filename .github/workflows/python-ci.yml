@@ -67,6 +67,9 @@ on:
       # table directory changes what the parity legs read and whether the
       # completeness check passes at all.
       - 'test-data/datasets/**'
+      # Checkout-relative Cassandra-written fixtures a parity fixture may name via
+      # `sstables_root` (issue_4360 varint, #4360).
+      - 'test-data/fixtures/issue_4360/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -145,6 +148,9 @@ on:
       # table directory changes what the parity legs read and whether the
       # completeness check passes at all.
       - 'test-data/datasets/**'
+      # Checkout-relative Cassandra-written fixtures a parity fixture may name via
+      # `sstables_root` (issue_4360 varint, #4360).
+      - 'test-data/fixtures/issue_4360/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the

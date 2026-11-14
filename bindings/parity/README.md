@@ -118,12 +118,19 @@ README list in step.
    enforced on the python and node legs only: `cqlite-cli`'s JSON writer
    renders `list`, `set` and `tuple` all as a bare array, so that leg cannot
    distinguish any of them.
-2. **No `varint` fixture exists.** No committed schema under `test-data/schemas/`
-   declares a `varint` column (the only occurrence of the word is a comment in
-   `cql-type-parity.cql`). The issue's requested
-   timestamp+blob+varint+decimal fixture is therefore covered for timestamp,
-   blob and decimal only; the varint rule is pinned by `canonical-vectors.json`
-   alone. No fixture was fabricated to close this.
+2. **A varint NULL is not compared live (#4360).** The Cassandra 5.0.8-written
+   `varint_values` fixture (`test-data/fixtures/issue_4360`, generator
+   `test-data/scripts/generate-issue-4360-varint-column.sh`) runs 15 varints on all
+   three legs, including 2^64, 2^64+1, -(2^64), a 40-digit positive and negative, the
+   sign-byte edges and -1. Its 16th row (an explicit `v = null`) is dropped by CQLite's
+   `SELECT` on every leg alike (a row with only a null cell; class of #2189), so the
+   legs agree by all omitting it and the NULL is pinned only by the ignored
+   `cqlite-core/tests/issue_4360_varint_column_oracle.rs::null_varint_row_is_returned_as_null`.
+   The CLI emits a `varint` as an UNQUOTED JSON integer (`IntegerType.toJSONString`),
+   read ONLY through `load_cli_json` as a `CliJsonInteger` (exact, no float path); a
+   quoted string or a fractional token is refused. `canonical.mjs` has no CLI adapter
+   (the CLI leg is Python-only); its varint rule (a JS `bigint`) is pinned by the same
+   vectors' `node` leg and by the live Node leg.
 3. **UDT columns are refused, not canonicalized.** A UDT needs its declared
    field types, and inferring them from the value would be the heuristic issue
    #28 forbids. `parse_type` raises on a UDT name; no fixture uses one.
@@ -223,7 +230,7 @@ The **nested** `duration.nanos` is the one easiest to miss — `months` and
 **This is node-only**, the same asymmetry the container table has one row up,
 and for a matching reason: the **Python** binding returns a plain `int` for
 every integer kind, so there is nothing to distinguish; the **CLI** emits a
-JSON number for all of them (a decimal string for `varint`), so nothing there
+JSON number for all of them (an unquoted integer for `varint` too, #4360), so nothing there
 either. The enforcement lives where the surface is unambiguous, which is the
 only place a strictness rule can be added without risking a false red.
 

@@ -16,7 +16,8 @@
  * result at ~100 rows, so a single executeNative can never do an O(total)
  * on-loop freeze here. Instead we fire MANY bounded native calls (accumulating
  * >= 50,000 materialized rows total) while a 10ms timer runs, and assert the
- * timer never stalls beyond MAX_GAP_MS. This validates that per-call
+ * timer never stalls beyond MAX_GAP_CEILING_MS (issue #4538: a generous regression TRIPWIRE, not a
+ * latency SLO). This validates that per-call
  * materialization stays bounded and interleaves cleanly with the event loop —
  * i.e. the loop of many small calls exercises bounded per-call interleaving
  * with the timer. It is NOT a single-call O(total) freeze test (the fixtures
@@ -24,7 +25,7 @@
  * single result is covered separately by the oversized-rejection test below.
  * The bound is still meaningful: if a change made per-call materialization
  * super-linear or removed the interleaving, the accumulated on-loop time would
- * push the max timer gap past MAX_GAP_MS.
+ * push the max timer gap past the ceiling.
  *
  * Per the Node test doctrine (no strict-fixtures flag): this test THROWS
  * (does not skip) if data is missing or a query yields 0 rows when rows are
@@ -41,17 +42,14 @@ const SCHEMA = global.testPaths.SCHEMA_WIDE_ROWS;
 // A wide table with the most rows available in the fixture set.
 const QUERY = 'SELECT * FROM test_wide_rows.wide_partition_table';
 const TARGET_ROWS = 50000;
-// Tolerant bound chosen to cleanly separate scheduler jitter from a genuine
-// regression. A 10ms setInterval routinely drifts tens of ms under real load
-// (GC pauses, OS scheduling, concurrent gate/build processes), so a tight
-// bound near the interval would flake and block unrelated PRs (the exact
-// wall-clock-race hazard the repo pre-roborev checklist and #1774 warn about).
-// A REAL regression here — reintroducing an unbounded O(total) on-loop
-// materialization burst over 50k rows — freezes the loop for hundreds of ms to
-// seconds, an order of magnitude above jitter. 400ms sits well above realistic
-// jitter yet far below any genuine O(total) freeze, so the test stays reliable
-// while still failing hard on a real regression.
-const MAX_GAP_MS = 400;
+// Merge-path TRIPWIRE only (issue #4538, test-oracles lesson 3). A tight latency bound is a wall-clock
+// assertion and flakes on a loaded host (a 10ms timer drifts by hundreds of ms under a 150-load box),
+// and a ratio-to-run bound is just as load-sensitive. So the ONLY assertion is a deliberately generous
+// absolute ceiling: an unbounded O(total) on-loop materialization burst freezes the loop for many
+// seconds on this fixture, which is the regression this guards; ordinary scheduler jitter, GC and
+// concurrent builds stay orders of magnitude below it. It is NOT a latency SLO — fine-grained latency
+// belongs in a perf lane, not on the merge path.
+const MAX_GAP_CEILING_MS = 5000;
 const TIMER_INTERVAL_MS = 10;
 // Keep the child process below jest's 30s worker/test default so a hung child
 // fails fast (with diagnostics) instead of blocking the worker forever.
@@ -71,7 +69,7 @@ describe('executeNative event-loop latency (issue #1442)', () => {
     }
   });
 
-  test(`materializing >= 50k rows keeps the event loop responsive (< ${MAX_GAP_MS}ms max gap)`, async () => {
+  test(`materializing >= 50k rows keeps the event loop responsive (max timer gap < ${MAX_GAP_CEILING_MS}ms)`, async () => {
     // Establish per-call row count and fail loudly if the source is empty.
     const probe = await db.executeNative(QUERY);
     if (probe.rowCount === 0) {
@@ -83,9 +81,9 @@ describe('executeNative event-loop latency (issue #1442)', () => {
     const iterations = Math.ceil(TARGET_ROWS / perCall);
 
     const gaps = [];
-    let last = Date.now();
+    let last = performance.now();
     const timer = setInterval(() => {
-      const now = Date.now();
+      const now = performance.now();
       gaps.push(now - last);
       last = now;
     }, TIMER_INTERVAL_MS);
@@ -108,27 +106,27 @@ describe('executeNative event-loop latency (issue #1442)', () => {
           processed += r.rowCount;
         }
       }
+      // Workload endpoint: record the FINAL gap and stop the timer in the same synchronous step, so
+      // a stall at the very end (a tick that never got to fire) is measured against this boundary
+      // and is not lost.
+      gaps.push(performance.now() - last);
     } finally {
       clearInterval(timer);
     }
 
     expect(processed).toBeGreaterThanOrEqual(TARGET_ROWS);
-    // We need at least two recorded gaps to assert on the 2nd-largest; throw
-    // (never silently skip) if the run was too short to sample enough ticks.
+    // At least two gap samples must exist (never silently skip).
     if (gaps.length < 2) {
       throw new Error(
         `Expected at least 2 timer gaps to assess responsiveness but recorded ${gaps.length}.`
       );
     }
-    // The event loop must not have frozen. We assert on the 2nd-largest gap
-    // (not the single max) to tolerate exactly one isolated outlier tick: a
-    // genuine O(total) on-loop freeze stalls MANY consecutive ticks, so the
-    // 2nd-largest gap would ALSO blow past the bound; a one-off GC/scheduler
-    // stall touches only a single tick. Asserting on the 2nd-largest therefore
-    // still fails hard on a real regression while shrugging off isolated jitter
-    // that would otherwise flake and block unrelated PRs.
-    const sorted = [...gaps].sort((a, b) => b - a);
-    expect(sorted[1]).toBeLessThan(MAX_GAP_MS);
+    // The event loop must not have frozen: the largest gap (including the final one recorded at the
+    // workload endpoint) stays under the generous tripwire ceiling.
+    const maxGap = Math.max(...gaps);
+    // eslint-disable-next-line no-console
+    console.log(`event-loop max gap ${maxGap.toFixed(1)}ms (ceiling ${MAX_GAP_CEILING_MS}ms)`);
+    expect(maxGap).toBeLessThan(MAX_GAP_CEILING_MS);
   });
 
   test('oversized executeNative rejects with a typed executeStreaming error, not a freeze', () => {

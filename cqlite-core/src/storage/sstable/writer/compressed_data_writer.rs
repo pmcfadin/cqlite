@@ -40,7 +40,6 @@ use crate::storage::sstable::writer::compression_info_writer::{
     CompressionAlgorithm, CompressionMetadata,
 };
 use crc32fast::Hasher;
-use std::io::Write;
 
 /// Compressor trait for algorithm implementations
 pub trait Compressor: Send + Sync {
@@ -127,6 +126,9 @@ impl Compressor for DeflateCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
         use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        // Only the deflate encoder needs `Write` (issue #4557: a file-level import was unused —
+        // `-D warnings` red — under `--no-default-features --features write-support`).
+        use std::io::Write;
 
         // Cassandra's DeflateCompressor uses java.util.zip.Deflater, which emits a
         // ZLIB-wrapped stream (2-byte header + DEFLATE body + Adler-32 trailer),

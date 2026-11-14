@@ -506,7 +506,7 @@ impl super::SelectExecutor {
         was_qualified: bool,
     ) -> Result<Vec<Arc<crate::storage::sstable::reader::SSTableReader>>> {
         let (readers, fully_qualified_match) =
-            self.storage.raw_view_reader_snapshot(base_table_id).await;
+            self.storage.raw_view_reader_snapshot(base_table_id).await?;
         cross_keyspace_guard(was_qualified, fully_qualified_match, readers.is_empty()).map_err(
             |_| {
                 Error::Table(format!(

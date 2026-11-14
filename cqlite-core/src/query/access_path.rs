@@ -227,7 +227,28 @@ impl std::fmt::Display for AccessPath {
 /// It is not gated behind `cfg(test)` because integration tests in `tests/` compile
 /// against the library crate without its `test` cfg (same rationale as
 /// `SCAN_FOR_KEY_CALLS`, issue #831).
-static LAST_ACCESS_PATH: ArcSwapOption<AccessPath> = ArcSwapOption::const_empty();
+static LAST_ACCESS_PATH: ProbeCell = ProbeCell::new();
+
+/// The lock-free cell behind the process-global probe. A named type (not a bare `ArcSwapOption`
+/// static) so its store / load / clear round trip can be unit-tested on a PRIVATE instance: the
+/// global is written by every `SELECT` in the process, so a test on the global races every other
+/// test that executes a query (issue #4538).
+struct ProbeCell(ArcSwapOption<AccessPath>);
+
+impl ProbeCell {
+    const fn new() -> Self {
+        Self(ArcSwapOption::const_empty())
+    }
+    fn set(&self, path: AccessPath) {
+        self.0.store(Some(Arc::new(path)));
+    }
+    fn get(&self) -> Option<AccessPath> {
+        self.0.load_full().map(|path| (*path).clone())
+    }
+    fn clear(&self) {
+        self.0.store(None);
+    }
+}
 
 /// Record the access path chosen by a SELECT SSTable-scan step.
 ///
@@ -253,7 +274,7 @@ pub fn record(path: AccessPath) {
             )],
         );
     }
-    LAST_ACCESS_PATH.store(Some(Arc::new(path)));
+    LAST_ACCESS_PATH.set(path);
 }
 
 /// Read the most recently recorded access path, or `None` if none was recorded
@@ -262,13 +283,13 @@ pub fn record(path: AccessPath) {
 /// Tests assert against this after running a query. Mirrors
 /// `SSTableReader::scan_for_key_call_count` (issue #831).
 pub fn last() -> Option<AccessPath> {
-    LAST_ACCESS_PATH.load_full().map(|path| (*path).clone())
+    LAST_ACCESS_PATH.get()
 }
 
 /// Clear the recorded access path. Tests call this before a query so a stale
 /// value from a previous query cannot satisfy the assertion.
 pub fn reset() {
-    LAST_ACCESS_PATH.store(None);
+    LAST_ACCESS_PATH.clear();
 }
 
 #[cfg(test)]
@@ -323,13 +344,37 @@ mod tests {
         assert_eq!(serde_json::from_str::<AccessPath>(&json).unwrap(), p);
     }
 
+    /// The probe's store / load / clear round trip, on a PRIVATE [`ProbeCell`] — the very type the
+    /// process-global `LAST_ACCESS_PATH` is — so it cannot race the many tests that execute a
+    /// `SELECT` (each of which writes the global). Issue #4538.
     #[test]
     fn probe_round_trips() {
-        reset();
-        assert_eq!(last(), None);
-        record(AccessPath::PartitionLookup);
-        assert_eq!(last(), Some(AccessPath::PartitionLookup));
-        reset();
-        assert_eq!(last(), None);
+        let cell = ProbeCell::new();
+        assert_eq!(cell.get(), None);
+        cell.set(AccessPath::PartitionLookup);
+        assert_eq!(cell.get(), Some(AccessPath::PartitionLookup));
+        cell.set(AccessPath::FallbackFullScan {
+            reason: FallbackReason::NoSchema,
+        });
+        assert_eq!(
+            cell.get(),
+            Some(AccessPath::FallbackFullScan {
+                reason: FallbackReason::NoSchema
+            }),
+            "a later record replaces the earlier one"
+        );
+        cell.clear();
+        assert_eq!(cell.get(), None);
+    }
+
+    /// The public `record` / `last` / `reset` are thin delegates to the global cell. Checked only
+    /// for compile-time wiring (no assertion on the global's VALUE, which concurrent tests write).
+    #[test]
+    fn global_probe_functions_are_wired() {
+        let _ = (
+            record as fn(AccessPath),
+            last as fn() -> Option<AccessPath>,
+            reset as fn(),
+        );
     }
 }

@@ -55,6 +55,7 @@ pub use reader::SSTableReader;
 /// Explicit directory refresh (issue #1749): re-scan + atomic diff-and-swap of
 /// the held reader set. Not `state_machine`-gated — meaningful for minimal builds.
 pub mod refresh;
+pub(crate) mod refusal; // Refused-SSTable ledger: unreadable != empty (issue #4159).
 pub use refresh::RefreshReport;
 mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod row_cell_state_machine;
@@ -71,15 +72,15 @@ pub mod tombstone_merger;
 pub mod validation;
 pub mod verify; // Verifier contract for compressed + corrupted SSTables (epic #970, issue #1000).
 pub use verify::{
-    verify_sstable, verify_sstable_generation, VerifyErrorClass, VerifyFinding, VerifyMode,
-    VerifyReport,
+    verify_sstable, verify_sstable_audit, verify_sstable_generation,
+    verify_sstable_generation_audit, VerifyErrorClass, VerifyFinding, VerifyMode, VerifyReport,
 };
-// Corruption-location resolution for `VerifyFinding` (issue #4194): a sibling
-// of `verify` rather than added to it, since `verify.rs` is already well over
-// the ~800-line campsite target (epic #1116). Its types are re-exported
-// through `verify` (see `verify.rs`'s own re-export) so `VerifyFinding.location`
-// stays reachable via the existing `verify` module path.
+// Siblings of `verify` rather than additions to it (`verify.rs` is far over the
+// campsite target, epic #1116): corruption location (#4194, its types re-exported
+// via `verify`), the cross-component audit (#4195) and Check 8 (relocated).
+pub mod verify_audit;
 mod verify_location;
+mod verify_order;
 
 // M5: SSTable writer components (Issue #359)
 #[cfg(feature = "write-support")]
@@ -480,6 +481,8 @@ pub struct SSTableManager {
     /// refresh; queries never take this lock (they use the `RwLock` read guards).
     refresh_lock: Arc<Mutex<()>>,
 
+    refusals: refusal::RefusalLedger, // refused SSTables + causes; reads fail closed (#4159)
+
     /// Schema registry for schema-aware operations (feature-gated)
     #[cfg(feature = "state_machine")]
     schema_registry: Arc<RwLock<Option<Arc<RwLock<crate::schema::SchemaRegistry>>>>>,
@@ -616,9 +619,8 @@ impl SSTableManager {
             while let Some(entry) = dir_entries.next_entry().await? {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
-                    // See Issue #481.
-                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
+                    // Regular `*-Data.db` only (AppleDouble #481 / non-regular look-alikes skipped).
+                    if refusal::is_generation_entry(filename, &entry).await {
                         results.push(path);
                     } else if max_depth > 0 {
                         // Check if it's a directory and recurse
@@ -751,13 +753,9 @@ impl SSTableManager {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O. Holding it across the whole scan let one queued writer FIFO-park
         // every later point read behind the slowest in-flight scan.
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.checked_snapshot(table_id).await?;
 
         if reader_list.is_empty() {
-            tracing::debug!(
-                "SSTableManager::scan - No readers found for table '{}'",
-                table_id
-            );
             return Ok(Vec::new());
         }
 
@@ -1087,7 +1085,7 @@ impl SSTableManager {
 
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (bloom/BTI prune, per-candidate decode, cross-generation merge).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.checked_snapshot(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), true));
         }
@@ -1232,7 +1230,7 @@ impl SSTableManager {
         // Format-agnostic: the operation spans a table's generations.
         let mut meter = ReadOpMeter::start(None);
 
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, fully_qualified_match) = self.checked_snapshot(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), false));
         }
@@ -1470,7 +1468,7 @@ impl SSTableManager {
     ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (per-reader metadata decode and cross-generation merge).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.checked_snapshot(table_id).await?;
         if reader_list.is_empty() {
             return Ok(Vec::new());
         }
@@ -1699,7 +1697,8 @@ impl SSTableManager {
         table_id: &TableId,
         _schema: Option<&crate::schema::TableSchema>,
     ) -> bool {
-        let readers = self.resolve_table_readers(table_id).await;
+        // Refused => no readers => `false` (the stream constructor itself Errs).
+        let readers = self.readers_if_readable(table_id).await;
 
         // Issue #1577: any BTI (`da`) reader makes `scan_stream` pre-materialize
         // (the trie-walk BTI branch decodes the whole reconciled table before
@@ -1780,7 +1779,7 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::RowScanStream> {
-        let readers = self.resolve_table_readers(table_id).await;
+        let readers = self.checked_table_readers(table_id).await?;
 
         // Issue #957: keep the materializing `scan` and this streaming path in lockstep
         // ON THE SUCCESS PATH. Reuse the EXACT guard `scan` uses for cross-generation
@@ -1881,7 +1880,7 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::BatchedScanStream> {
-        let readers = self.resolve_table_readers(table_id).await;
+        let readers = self.checked_table_readers(table_id).await?;
 
         if readers.len() == 1 {
             if let Some(reader) = readers.into_iter().next() {

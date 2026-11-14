@@ -92,6 +92,12 @@ mod issue_3782_corrupt_agreement;
 #[path = "point_vs_full_differential/uuid_keyed_axis.rs"]
 mod uuid_keyed_axis;
 
+// Issue #4255: the point leg's ENGAGEMENT (targeted access_path) and COLD-START
+// (key-offset cache emptied, first probe a proven MISS) guards, plus their seeded
+// can-fail checks. Same `#[path]` rationale as above.
+#[path = "point_vs_full_differential/point_engagement.rs"]
+mod point_engagement;
+
 // TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
 // (issue #3220). Declared BEFORE first use so both this file and the submodule
 // (`use super::…`) resolve fixtures the same way.
@@ -560,10 +566,9 @@ async fn assert_point_full_equal(
     full_db: &Database,
     query: &str,
 ) -> Result<usize, String> {
-    let point = point_db
-        .execute(query)
-        .await
-        .map_err(|e| format!("point path failed for `{query}`: {e}"))?;
+    // COLD + ENGAGED point leg (issue #4255): the process-global key-offset cache is
+    // emptied first and the result must carry a targeted `access_path`.
+    let (point, _cache_delta) = point_engagement::point_leg_cold(point_db, query).await?;
     let full = full_db
         .execute(query)
         .await
@@ -600,7 +605,13 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     let full_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Full).await?;
     let point_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Point).await?;
 
+    // Issue #4255 (AC2) MEASUREMENT: does the discovery full scan leave entries in the
+    // process-global key-offset cache that the point leg could then read? Recorded per
+    // case on the PASS line; the point leg is cold regardless (see below).
+    let cache_before_discovery = point_engagement::CacheCounters::now();
     let discovered = discover_pk_ints(&full_db, case.keyspace, case.table, case.pk_column).await?;
+    let (disc_hits, disc_misses, disc_entries) =
+        point_engagement::CacheCounters::now().since(cache_before_discovery);
     // Merge discovered (live) keys with the always-probe keys, deduplicated and
     // sorted so the probe set is deterministic.
     let mut key_set: BTreeMap<i64, ()> = BTreeMap::new();
@@ -620,6 +631,36 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
             case.keyspace, case.table
         ));
     }
+
+    // Issue #4255 (AC3) COLD-START PROOF: the very first point probe of the case, run
+    // after the full-scan discovery above, must be a key-offset-cache MISS (and never
+    // a hit) — i.e. the point leg exercised the cold index descent.
+    //
+    // The proof key is the smallest DISCOVERED (live) key, not `keys[0]`: an
+    // always-probe key can sort first and may name a partition absent from every
+    // SSTable, which a bloom-filter reject answers without consulting the cache, so it
+    // would fail the `entries >= 1` leg for a reason unrelated to warmth.
+    //
+    // With no live partition, the first declared probe key is used instead: those keys
+    // name shadowed partitions that normally still have an index entry (e.g.
+    // `test_tomb.skipped_partition_delete`). If that probe never touches the cache at
+    // all — (0, 0, 0): a bloom reject, or an empty `Data.db` as in the fail-closed
+    // self-test — warmth is UNMEASURABLE, and it is recorded so with its cause instead
+    // of failing ahead of the case's own anti-vacuous anchors. Any cache traffic is
+    // still held to the full rule, so a warm hit (1, 0, 0) always fails.
+    let live_key = discovered.iter().min().copied();
+    let first_key = live_key.unwrap_or(keys[0]);
+    let first_query = format!(
+        "SELECT * FROM {}.{} WHERE {} = {}",
+        case.keyspace, case.table, case.pk_column, first_key
+    );
+    let (_, first_delta) = point_engagement::point_leg_cold(&point_db, &first_query).await?;
+    let cold_start = if live_key.is_none() && first_delta == (0, 0, 0) {
+        "unmeasured: no live partition and the probe key touched no cache entry".to_string()
+    } else {
+        point_engagement::cold_miss_violation(&case_id(case), &first_query, first_delta)?;
+        format!("{first_delta:?}")
+    };
 
     // Single-key `=` equality for every discovered partition. The agreed row count is
     // RETAINED per key: it is exactly the reference the clustering-slice block below
@@ -695,12 +736,15 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     }
 
     eprintln!(
-        "PASS {}.{} — {} point queries + {} clustering slices/key + IN, point == full \
+        "PASS {}.{} — {} point queries + {} clustering slices/key + IN, point == full, every \
+         point leg targeted+cold; first probe cache hits/misses/entries = {}; discovery scan \
+         cache hits/misses/entries-added = ({disc_hits}, {disc_misses}, {disc_entries}) \
          (classes: {:?})",
         case.keyspace,
         case.table,
         keys.len(),
         case.clustering_slice_predicates.len(),
+        cold_start,
         case.divergence_classes
     );
     Ok(true)

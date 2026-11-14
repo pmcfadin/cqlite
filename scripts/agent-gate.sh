@@ -902,7 +902,9 @@
 #                      would satisfy them all. And case 26: THIS component must not
 #                      report PASS on a guard that exited 0 having measured nothing.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
-#                      -p cqlite-core --no-default-features --features all-compression
+#                      -p cqlite-core --no-default-features --features all-compression,
+#                      plus a `cargo build` at --no-default-features --features
+#                      write-support (issue #4557)
 #   all-features-check cargo check + cargo clippy (-D warnings), BOTH at
 #                      -p cqlite-core --all-features --all-targets (issue #3453).
 #                      THE ONE COMPONENT THAT ENABLES THE OTLP STACK. `clippy` above
@@ -15616,12 +15618,19 @@ run_clippy() {
 #     that exists to catch it. `roborev-lints` is UNSCOPED (it runs on every --lite round and
 #     in the full gate whatever the diff touches), which is the property this guard needs.
 #     Pure grep over one committed file: no cargo/python3/network, ~0s.
+#   * test_verify_audit_no_resync_scan.sh — the same #28 class for `cqlite verify --mode
+#     audit` (issue #4195, spec verify-audit A11): every audit invariant reads decoded
+#     structures only (plus a header-only read at an Index-named offset), never a
+#     byte-pattern search of Data.db. A copy of the #4194 guard over
+#     `cqlite-core/src/storage/sstable/verify_audit/`, registered HERE for the same reason
+#     (UNSCOPED, so a core-only diff cannot skip it).
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh" &&
-    bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh"
+    bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh" &&
+    bash "$REPO_ROOT/scripts/tests/test_verify_audit_no_resync_scan.sh"
 }
 
 # check_no_unexpected_zero_tests <label> <logfile> [allowed-zero-target...]
@@ -16656,9 +16665,28 @@ run_component() { # run_component <name> <cmd...>
   AGENT_GATE_FM_COMPONENT="$name"
   local log="$LOG_DIR/$name.log"
   local start end status
+  # #4230: these dataset-backed components run strict on the FULL gate (and --recertify,
+  # via _gate_is_strict): corpus-gated tests FAIL on an absent fixture instead of
+  # skip-passing. Scoped to the child with `env` so it cannot leak into a dataset-free
+  # component; it reaches every child under the `bash -c` bodies by inheritance. Tests
+  # that may legitimately skip use skip_or_require. --only/--lite probes and
+  # AGENT_GATE_ALLOW_MISSING_FIXTURES=1 keep the caller's own policy. CI's
+  # core-tests-ci.yml deliberately stays unset (#1995, it does not provision the
+  # Docker/corruption/byte-oracle fixtures), so the gate is the stricter of the two.
+  # A SUBSHELL export, not `env`: the fallback core-tests command is `cargo ...`, and
+  # `cargo` is a shell function here (the feature-matrix observer, #3453) that `env`
+  # would bypass.
+  local strict_fixtures=0
+  case "$name" in
+    core-tests|write-tests|cli-tests|integration-tests)
+      if _gate_is_strict && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+        strict_fixtures=1
+      fi
+      ;;
+  esac
   echo ">>> [$name] $*"
   start=$(date +%s)
-  if "$@" >"$log" 2>&1; then
+  if ( [ "$strict_fixtures" -eq 1 ] && export CQLITE_REQUIRE_FIXTURES=1; "$@" ) >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -23732,6 +23760,8 @@ run_tooling_tests() {
   # target instead of a hardcoded allowlist, and exercises the fail-closed guard; no
   # cargo). A failure FAILs the component, mirroring the delta/parity-report guards.
   _tt_add P 'cli-tests enumeration self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_cli_tests_enum.sh"'
+  # strict-fixture export self-test (#4230): hermetic, drives the shipped run_component() with stub children
+  _tt_add P 'strict-fixture export self-test' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_strict_fixtures.sh"'
 
   # per-gate CPU-budget derivation self-test (#2640): no python3 needed, always
   # runs (hermetic — drives the --cpu-budget hook with a pinned ncpu, asserts the
@@ -28604,7 +28634,7 @@ dispatch_component() {
       # SUMMARY must say so; hoisted here and expanded into both invocations below AND
       # into the in-body record preceding each (a failed `cargo build` must not leave the
       # block claiming the test-compile pass ran too — job 269 blocker 2).
-      local mn_pkg=cqlite-core mn_feats=all-compression
+      local mn_pkg=cqlite-core mn_feats=all-compression mn_wfeats=write-support
       run_component minimal-build bash -c '
   # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
   # that job sets RUSTFLAGS=-D warnings, so a warning-class error (e.g. an unused
@@ -28623,7 +28653,14 @@ dispatch_component() {
   # storage::serialization) silently escaped this gate. Compile-only (--no-run)
   # keeps it fast; no data fixtures needed for a compile check.
   _fm_observe_child minimal-build test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run &&
-  cargo test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run' ;;
+  cargo test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run &&
+  # The write-support-only combination (issue #4557): `--no-default-features --features
+  # write-support` builds the write engine WITHOUT any compression feature, so an import used only
+  # by a feature-gated compressor (compressed_data_writer.rs `std::io::Write`) is unused there and
+  # `-D warnings` (exported above) fails. Neither the all-compression lane above nor the
+  # all-features lane compiles it, so it escaped until a reviewer stumbled on it.
+  _fm_observe_child minimal-build build --package '"$mn_pkg"' --no-default-features --features '"$mn_wfeats"' &&
+  cargo build --package '"$mn_pkg"' --no-default-features --features '"$mn_wfeats"'' ;;
     all-features-check) run_all_features_check ;;
     smoke)
       # #3453: smoke builds the CLI at DEFAULT features and then runs a shell script.

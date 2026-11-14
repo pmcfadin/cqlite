@@ -79,10 +79,11 @@ impl super::StorageEngine {
     pub(crate) async fn raw_view_reader_snapshot(
         &self,
         table_id: &crate::TableId,
-    ) -> (
+    ) -> crate::Result<(
         Vec<std::sync::Arc<super::sstable::reader::SSTableReader>>,
         bool,
-    ) {
-        self.sstables.resolve_reader_snapshot(table_id).await
+    )> {
+        // Checked: a table with a refused SSTable is an `Err`, never an empty view (#4159).
+        self.sstables.checked_snapshot(table_id).await
     }
 }

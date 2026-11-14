@@ -818,7 +818,15 @@ fi
 STALE_AFTER=$(( HB_INTERVAL * 3 ))
 [ "$STALE_AFTER" -ge 90 ] || STALE_AFTER=90
 
+# TEST SEAM (issue #4538): GATE_LIVENESS_NOW pins the reader's clock for the AGE computation so a
+# self-test can assert an exact age boundary (e.g. age 179 vs a 180s window) without racing the
+# host's load. Honoured ONLY under the explicit self-test switch GATE_LIVENESS_SELFTEST=1 (exported by
+# test_gate_liveness.sh alone), and digits only; otherwise inert, so an inherited variable can never
+# skew a real gate's liveness answer.
 NOW=$(date +%s)
+if [ "${GATE_LIVENESS_SELFTEST:-}" = 1 ]; then
+  case "${GATE_LIVENESS_NOW:-}" in ''|*[!0-9]*) : ;; *) NOW="$GATE_LIVENESS_NOW" ;; esac
+fi
 AGE=$(( NOW - HB_EPOCH ))
 # A beat dated in the FUTURE is unmeasurable, not fresh — otherwise a clock step (or a
 # hand-edited artifact) would read as RUNNING indefinitely. One interval of slop
@@ -927,6 +935,17 @@ _confirm_wait=$(( HB_INTERVAL + 5 ))
 [ "$_confirm_wait" -le 65 ] || _confirm_wait=65
 if [ -n "$NO_WAIT" ]; then
   verdict UNKNOWN 4 "confirmation-skipped; this beat is not fresh and --no-wait forbids the second sample that would distinguish a stalled run from a slow one, so no STALLED claim is supportable. run-id ${HB_RUN_ID:-?}, beat ${HB_SEQ:-?}, age ${AGE}s, window ${STALE_AFTER}s"
+fi
+# TEST SEAM (issue #4538): create GATE_LIVENESS_FIRST_SAMPLE_MARKER once the FIRST sample is taken, so
+# a self-test can change the beat strictly AFTER it (a deterministic hand-off instead of a timed
+# `sleep` a loaded host can reorder). Honoured ONLY under GATE_LIVENESS_SELFTEST=1, and even then
+# the path must lie under ${TMPDIR:-/tmp}/ with no `..`, must NOT already exist, and is created with
+# noclobber (`set -C`), so an inherited variable can never truncate or overwrite an existing file.
+if [ "${GATE_LIVENESS_SELFTEST:-}" = 1 ] && [ -n "${GATE_LIVENESS_FIRST_SAMPLE_MARKER:-}" ]; then
+  case "$GATE_LIVENESS_FIRST_SAMPLE_MARKER" in
+    *..*) : ;;
+    "${TMPDIR:-/tmp}"/*) [ -e "$GATE_LIVENESS_FIRST_SAMPLE_MARKER" ] || ( set -C; : > "$GATE_LIVENESS_FIRST_SAMPLE_MARKER" ) 2>/dev/null ;;
+  esac
 fi
 sleep "$_confirm_wait"
 # THE GATE MAY HAVE FINISHED DURING THE WAIT (roborev job 228), AND THE RE-DECISION MUST USE THE REAL

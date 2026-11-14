@@ -41,8 +41,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    extract_keyspace_and_table_name, extract_table_name, is_apple_double_sidecar, reader,
-    SSTableId, SSTableManager, MAX_SSTABLE_SCAN_DEPTH,
+    extract_keyspace_and_table_name, extract_table_name, reader, SSTableId, SSTableManager,
+    MAX_SSTABLE_SCAN_DEPTH,
 };
 use crate::Result;
 
@@ -189,18 +189,7 @@ impl SSTableManager {
                     if !self.platform.fs().exists(dir).await? {
                         continue;
                     }
-                    let mut entries = match self.platform.fs().read_dir(dir).await {
-                        Ok(entries) => entries,
-                        Err(_) => continue,
-                    };
-                    while let Some(entry) = entries.next_entry().await? {
-                        let path = entry.path();
-                        if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                            if fname.ends_with("-Data.db") && !is_apple_double_sidecar(fname) {
-                                out.push(path);
-                            }
-                        }
-                    }
+                    out.extend(self.list_data_files(dir).await?);
                 }
                 Ok(out)
             }
@@ -290,8 +279,8 @@ impl SSTableManager {
             .cloned()
             .collect();
 
-        // 4. Open every added generation OUTSIDE the write guard. Fail-closed:
-        //    the first open error aborts the whole refresh, mutating nothing.
+        // 4. Open added generations OUTSIDE the write guard; the first open error
+        //    (recorded in the refusal ledger) aborts the refresh, mutating nothing.
         let mut opened: Vec<(
             PathBuf,
             SSTableId,
@@ -303,7 +292,7 @@ impl SSTableManager {
                 continue;
             };
             let sstable_id = SSTableId::from_filename(filename);
-            let reader_arc = self.open_reader_with_schema(path).await?;
+            let reader_arc = self.open_candidate(path).await?;
             let key = self.table_key_for(path, &reader_arc);
             opened.push((canon_of(path), sstable_id, key, reader_arc));
         }
@@ -370,8 +359,7 @@ impl SSTableManager {
             if after_removal_canon.contains(&cpath) {
                 continue;
             }
-            // Guard against inserting the same freshly-opened path twice if the
-            // discovery listed a duplicate (defensive; discovery does not).
+            // Defensive: never insert the same freshly-opened path twice.
             if readers.values().any(|r| canon_of(&r.file_path()) == cpath) {
                 continue;
             }
@@ -382,6 +370,7 @@ impl SSTableManager {
             readers_added += 1;
         }
 
+        self.commit_refusals(&added_paths, &discovered_paths); // ledger follows the swap (#4159)
         let tables_scanned = table_readers.len();
 
         Ok(RefreshReport {

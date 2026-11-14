@@ -191,6 +191,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      # #4518: tooling-tests' fetch-datasets warm-overlay guard (test_fetch_datasets_warm_overlay.sh,
+      # case 17) parses workflow YAML with PyYAML and now fails closed, naming the module, when it is
+      # absent. Pinned like exhaustive-regeneration.yml (pyyaml==6.0.2).
+      - name: Install PyYAML (tooling-tests)
+        run: python3 -m pip install --quiet 'pyyaml==6.0.2'
+
       - name: Restore dataset cache
         id: dataset-cache
         uses: actions/cache@v5
