@@ -354,7 +354,16 @@ fn parse_summary_data(input: &[u8]) -> Result<SummaryData> {
     })?;
 
     // Calculate entry data size (total - offset table size)
-    let entry_data_size = header.summary_entries_size as usize - offset_table_size;
+    // A damaged header can declare an entries size smaller than its own offset table; an unchecked
+    // subtraction panics under overflow checks and wraps (to a huge size) without them (#4573).
+    let entry_data_size = (header.summary_entries_size as usize)
+        .checked_sub(offset_table_size)
+        .ok_or_else(|| {
+            Error::corruption(format!(
+                "Summary.db entries size {} is smaller than its offset table {}",
+                header.summary_entries_size, offset_table_size
+            ))
+        })?;
 
     if after_offsets.len() < entry_data_size {
         return Err(Error::corruption(format!(
