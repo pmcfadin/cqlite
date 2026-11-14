@@ -444,7 +444,7 @@ pub(crate) fn fold_row_content_stats(
 
     if !mutation_shadowed {
         stats.update_timestamp(mutation.timestamp_micros);
-        if let Some(ttl) = mutation.ttl_seconds {
+        if let Some(ttl) = mutation.ttl_seconds.filter(|t| *t != 0) {
             stats.update_ttl(ttl as i32);
             let now_seconds = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -597,7 +597,9 @@ pub(crate) fn fold_row_content_stats(
                     continue;
                 }
                 stats.update_timestamp(cell_ts);
-                if mutation.ttl_seconds.is_none() && !matches!(value, crate::types::Value::Null) {
+                if matches!(mutation.ttl_seconds, None | Some(0))
+                    && !matches!(value, crate::types::Value::Null)
+                {
                     stats.note_live_local_deletion_time();
                 }
             }

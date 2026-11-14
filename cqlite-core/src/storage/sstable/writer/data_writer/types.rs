@@ -26,6 +26,29 @@ pub(crate) struct MergedOp<'a> {
     /// honoring the originating mutation's explicit `local_deletion_time` when
     /// present (Issue #764). Derived from the timestamp otherwise.
     pub(crate) cell_local_deletion_time: i32,
+    /// The ONE wall-clock reading (GC-clock seconds) captured when this row group was merged
+    /// (#4530, roborev). An expiring cell WITHOUT an explicit LDT gets
+    /// `implicit_expiration(now_seconds, ttl)` - the SAME value is used to rank it in
+    /// `cell_wins` and to stamp it on disk (the row's `RowWrite::now_seconds` carries this
+    /// reading to the emission), so the reconcile winner is exactly the cell that is written.
+    pub(crate) now_seconds: i32,
+}
+
+/// The wall clock, in GC-clock seconds (`FBUtilities.nowInSeconds()`); `0` before the epoch.
+pub(crate) fn wall_clock_seconds() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i32::try_from(d.as_secs()).unwrap_or(i32::MAX))
+        .unwrap_or(0)
+}
+
+/// Expiration instant of an expiring write that carries no explicit LDT: `now + ttl`, CAPPED at
+/// the maximum deletion time. Cassandra 5.0.8 applies the same cap by default
+/// (`ExpirationDateOverflowHandling.ExpirationDateOverflowPolicy.CAP`; the cap is
+/// `Cell.MAX_DELETION_TIME`, `MAX_DELETION_TIME_2038_LEGACY_CAP` = `i32::MAX` in 4.x-compatible
+/// mode), so ranking and emission saturate identically instead of wrapping.
+pub(crate) fn implicit_expiration(now_seconds: i32, ttl_seconds: u32) -> i32 {
+    now_seconds.saturating_add(i32::try_from(ttl_seconds).unwrap_or(i32::MAX))
 }
 
 /// Adapt a writer-path [`MergedOp`] into the shared
@@ -43,6 +66,40 @@ impl crate::storage::write_engine::reconcile_rules::ReconcileCell for MergedOp<'
             self.op,
             crate::storage::write_engine::mutation::CellOperation::Delete { .. }
         )
+    }
+    fn expiring_ttl(&self) -> Option<u32> {
+        use crate::storage::write_engine::mutation::CellOperation as Op;
+        // TTL 0 is Cassandra's `NO_TTL` (`LivenessInfo.NO_TTL`): not an expiring cell.
+        let ttl = match self.op {
+            Op::WriteWithTtl { ttl_seconds, .. } => Some(*ttl_seconds),
+            Op::Write { .. } => self.row_ttl_seconds,
+            _ => None,
+        };
+        ttl.filter(|t| *t != 0)
+    }
+    fn local_deletion_time(&self) -> i32 {
+        use crate::storage::write_engine::mutation::CellOperation as Op;
+        match self.op {
+            Op::Delete { .. } => self.cell_local_deletion_time,
+            // The authoritative per-cell LDT when surfaced; otherwise `now + ttl` from the
+            // clock reading captured once for this row group - the value emission stamps.
+            Op::WriteWithTtl {
+                local_deletion_time: Some(l),
+                ..
+            } => *l,
+            _ => self
+                .expiring_ttl()
+                .map(|t| implicit_expiration(self.now_seconds, t))
+                .unwrap_or(0),
+        }
+    }
+    fn value_bytes(&self) -> Vec<u8> {
+        use crate::storage::write_engine::mutation::CellOperation as Op;
+        let mut out = Vec::new();
+        if let Op::Write { value, .. } | Op::WriteWithTtl { value, .. } = self.op {
+            let _ = super::encoding::serialize_value_into(value, &mut out);
+        }
+        out
     }
 }
 
@@ -139,4 +196,28 @@ pub(crate) struct RowWrite<'a> {
     /// the real pipeline (`merge_entry_to_mutation`) does not yet emit these
     /// ops, so this stays empty until Phase C (keeping output byte-neutral).
     pub(crate) complex_element_ops: Vec<MergedOp<'a>>,
+    /// The clock reading `ops` were ranked with (see [`MergedOp::now_seconds`]); emission derives
+    /// every implicit expiration from THIS value. `0` on rows with no expiring cells.
+    pub(crate) now_seconds: i32,
+}
+
+impl super::DataWriter {
+    /// Write a plain (non-expiring) scalar cell: `USE_ROW_TIMESTAMP` when it carries the row's
+    /// liveness timestamp, an explicit timestamp delta otherwise. Used for ordinary writes AND for
+    /// a `WriteWithTtl { ttl_seconds: 0 }`, because TTL 0 is `NO_TTL` (Cassandra 5.0.8
+    /// `Attributes.getTimeToLive`) and must never be serialized as an expiring cell (#4530).
+    pub(super) fn write_scalar_cell_no_ttl(
+        &self,
+        buf: &mut Vec<u8>,
+        row: &RowWrite<'_>,
+        mop: &MergedOp<'_>,
+        column: &str,
+        value: &crate::types::Value,
+    ) -> crate::Result<()> {
+        if row.liveness_ts == Some(mop.timestamp_micros) {
+            self.write_cell(buf, column, value, mop.timestamp_micros)
+        } else {
+            self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)
+        }
+    }
 }

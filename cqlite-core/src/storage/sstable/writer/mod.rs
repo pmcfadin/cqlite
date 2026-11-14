@@ -656,7 +656,7 @@ impl SSTableWriter {
         let partition_tombstone = mutations
             .iter()
             .filter_map(|m| m.partition_tombstone.as_ref())
-            .max_by_key(|pt| pt.deletion_time);
+            .max_by_key(|pt| (pt.deletion_time, pt.local_deletion_time as u32));
 
         // Collect all range tombstones from mutations
         let range_tombstones: Vec<_> = mutations
@@ -1330,7 +1330,7 @@ impl SSTableWriter {
         }
 
         // Partition-level TTL (top-level ttl_seconds on the Mutation)
-        if let Some(ttl) = mutation.ttl_seconds {
+        if let Some(ttl) = mutation.ttl_seconds.filter(|t| *t != 0) {
             let ttl = ttl as i32;
             if ttl > 0 {
                 *min_ttl = (*min_ttl).min(ttl);

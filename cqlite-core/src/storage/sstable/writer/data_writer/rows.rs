@@ -13,7 +13,7 @@
 use super::*;
 
 // Shared reconcile rules (issue #947); `ReconcileCell` in scope for `.is_tombstone()`.
-use crate::storage::write_engine::reconcile_rules::{self, ReconcileCell};
+use crate::storage::write_engine::reconcile_rules;
 
 impl DataWriter {
     /// Write a single row
@@ -117,7 +117,10 @@ impl DataWriter {
                 .any(|op| matches!(op, CellOperation::DeleteRow));
             if has_delete_row
                 && shadow_floor.is_none_or(|floor| m.timestamp_micros > floor)
-                && row_deletion.is_none_or(|(ts, _)| m.timestamp_micros >= ts)
+                && reconcile_rules::ge_opt(
+                    row_deletion,
+                    (m.timestamp_micros, m.effective_local_deletion_time()),
+                )
             {
                 // Issue #764: honor the mutation's explicit local_deletion_time.
                 row_deletion = Some((m.timestamp_micros, m.effective_local_deletion_time()));
@@ -131,7 +134,7 @@ impl DataWriter {
             // time) — the row keeps both the deletion AND the newer cells.
             if let Some((del_ts, del_ldt)) = m.row_tombstone {
                 if shadow_floor.is_none_or(|floor| del_ts > floor)
-                    && row_deletion.is_none_or(|(ts, _)| del_ts >= ts)
+                    && reconcile_rules::ge_opt(row_deletion, (del_ts, del_ldt))
                 {
                     row_deletion = Some((del_ts, del_ldt));
                 }
@@ -186,6 +189,7 @@ impl DataWriter {
     ) -> Option<RowWrite<'a>> {
         use crate::storage::write_engine::mutation::CellOperation;
 
+        let now_seconds = super::types::wall_clock_seconds();
         // Cells and liveness are shadowed by the strongest covering deletion:
         // the row deletion (issue #4246 roborev finding: also exposed via
         // `resolve_row_deletion`/`combine_deletion_ts` so a stats-fold caller
@@ -234,9 +238,9 @@ impl DataWriter {
         // directly below and is never shadowed by complex-deletion markers.
 
         for m in group {
-            // Shadowed by the row deletion (or partition/range floor): cells,
-            // liveness, and row-level writes of this mutation written at
-            // `timestamp <= deletion_ts` are dead.
+            // TTL 0 is NO_TTL (Cassandra `Attributes.getTimeToLive`), never an expiring cell (#4530).
+            let m_ttl = m.ttl_seconds.filter(|t| *t != 0);
+            // Shadowed by the row deletion/floor: cells, liveness and row writes at `ts <= deletion_ts` die.
             //
             // Issue #887: a `ComplexDeletion` marker is itself a deletion with its OWN
             // `marked_for_delete_at`, NOT the mutation's row timestamp. A marker whose
@@ -273,9 +277,10 @@ impl DataWriter {
                                 continue;
                             }
                             complex_element_ops.push(MergedOp {
+                                now_seconds,
                                 op,
                                 timestamp_micros: *marked_for_delete_at,
-                                row_ttl_seconds: m.ttl_seconds,
+                                row_ttl_seconds: m_ttl,
                                 cell_local_deletion_time: m.effective_local_deletion_time(),
                             });
                         }
@@ -287,9 +292,10 @@ impl DataWriter {
                                 continue;
                             }
                             complex_element_ops.push(MergedOp {
+                                now_seconds,
                                 op,
                                 timestamp_micros: *elem_ts,
-                                row_ttl_seconds: m.ttl_seconds,
+                                row_ttl_seconds: m_ttl,
                                 cell_local_deletion_time: m.effective_local_deletion_time(),
                             });
                         }
@@ -352,9 +358,10 @@ impl DataWriter {
                         // `WriteComplexElement` payload, so the emitted cell timestamp
                         // is unaffected.
                         complex_element_ops.push(MergedOp {
+                            now_seconds,
                             op,
                             timestamp_micros: *elem_ts,
-                            row_ttl_seconds: m.ttl_seconds,
+                            row_ttl_seconds: m_ttl,
                             cell_local_deletion_time: m.effective_local_deletion_time(),
                         });
                         continue;
@@ -383,9 +390,10 @@ impl DataWriter {
                         // `write_complex_element_columns`), so this only affects the
                         // RECONCILE COMPARISON, never the serialized marker.
                         complex_element_ops.push(MergedOp {
+                            now_seconds,
                             op,
                             timestamp_micros: *marked_for_delete_at,
-                            row_ttl_seconds: m.ttl_seconds,
+                            row_ttl_seconds: m_ttl,
                             cell_local_deletion_time: m.effective_local_deletion_time(),
                         });
                         continue;
@@ -490,20 +498,21 @@ impl DataWriter {
                 ) {
                     match whole_col_liveness.entry(column) {
                         std::collections::hash_map::Entry::Vacant(entry) => {
-                            entry.insert((cell_ts, m.ttl_seconds));
+                            entry.insert((cell_ts, m_ttl));
                         }
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                             if cell_ts >= entry.get().0 {
-                                entry.insert((cell_ts, m.ttl_seconds));
+                                entry.insert((cell_ts, m_ttl));
                             }
                         }
                     }
                 }
 
                 let candidate = MergedOp {
+                    now_seconds,
                     op,
                     timestamp_micros: cell_ts,
-                    row_ttl_seconds: m.ttl_seconds,
+                    row_ttl_seconds: m_ttl,
                     // #921 finding 2: a surviving `Delete` cell tombstone keeps its
                     // OWN surfaced LDT; other ops fall back to the mutation's LDT.
                     cell_local_deletion_time: op_cell_local_deletion_time(op, m),
@@ -514,18 +523,7 @@ impl DataWriter {
                     }
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         let existing = entry.get();
-                        // Per-cell winner resolution. The SHARED Cassandra
-                        // `Cells#reconcile` tie-break (`reconcile_rules::cell_wins`,
-                        // issue #947) decides the load-bearing axes (#848/#498). The
-                        // writer then overlays its WRITER-ONLY, order-dependent
-                        // last-write-wins for the one case the shared rule leaves to
-                        // the caller — EQUAL timestamp + EQUAL liveness keeps the
-                        // later-applied mutation (Cassandra's reconcile is
-                        // order-independent and the merge path keeps first-seen). The
-                        // overlay reproduces the writer's historical bytes exactly.
-                        let wins = reconcile_rules::cell_wins(&candidate, existing)
-                            || (candidate.timestamp_micros == existing.timestamp_micros
-                                && candidate.is_tombstone() == existing.is_tombstone());
+                        let wins = reconcile_rules::cell_wins(&candidate, existing);
                         if wins {
                             entry.insert(candidate);
                         }
@@ -552,7 +550,7 @@ impl DataWriter {
             });
             if let Some(pk_ts) = pk_liveness_ts {
                 if liveness.is_none_or(|(ts, _)| pk_ts >= ts) {
-                    liveness = Some((pk_ts, m.ttl_seconds));
+                    liveness = Some((pk_ts, m_ttl));
                 }
             }
         }
@@ -746,7 +744,7 @@ impl DataWriter {
                     continue;
                 }
                 if liveness.is_none_or(|(ts, _)| *elem_ts >= ts) {
-                    liveness = Some((*elem_ts, *ttl_seconds));
+                    liveness = Some((*elem_ts, ttl_seconds.filter(|t| *t != 0)));
                 }
             }
         }
@@ -766,6 +764,7 @@ impl DataWriter {
             row_deletion,
             ops,
             complex_element_ops,
+            now_seconds,
         })
     }
 
@@ -888,10 +887,11 @@ impl DataWriter {
         let row = Self::merge_row_group(&[mutation], schema, false, None).unwrap_or(RowWrite {
             clustering_key: mutation.clustering_key.as_ref(),
             liveness_ts: Some(mutation.timestamp_micros),
-            ttl_seconds: mutation.ttl_seconds,
+            ttl_seconds: mutation.ttl_seconds.filter(|t| *t != 0),
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),
+            now_seconds: super::types::wall_clock_seconds(),
         });
         let _cells = self.build_merged_row_body(&row, schema, flags)?;
         Ok(self.row_scratch.clone())
@@ -926,7 +926,7 @@ impl DataWriter {
         // share it with every expiring cell derived below (row liveness AND,
         // via `write_merged_cells`, every complex-column element / UDT field) —
         // see `DataWriter::capture_now_seconds`.
-        let now_seconds = self.capture_now_seconds()?;
+        let now_seconds = row.now_seconds;
 
         // Write timestamp delta (if HAS_TIMESTAMP)
         //

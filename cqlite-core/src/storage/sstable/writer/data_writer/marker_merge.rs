@@ -222,6 +222,7 @@ mod tests {
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),
+            now_seconds: 0, // no expiring cells on a marker/comparison row
         })
     }
 

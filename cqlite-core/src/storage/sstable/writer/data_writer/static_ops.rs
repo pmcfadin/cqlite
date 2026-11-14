@@ -100,7 +100,7 @@ impl StaticOpsTracker {
                 cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
                 op: op.clone(),
                 timestamp_micros: candidate_ts,
-                row_ttl_seconds: mutation.ttl_seconds,
+                row_ttl_seconds: mutation.ttl_seconds.filter(|t| *t != 0),
             };
             match self.best.entry(col_name) {
                 std::collections::hash_map::Entry::Vacant(entry) => {

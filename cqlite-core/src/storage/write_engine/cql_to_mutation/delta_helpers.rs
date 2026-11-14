@@ -390,7 +390,8 @@ pub(super) fn extract_ttl(using: &Option<CqlUsing>) -> Result<Option<u32>, Error
                     let v = u32::try_from(*ttl).map_err(|_| {
                         Error::InvalidInput(format!("TTL value {} is out of range for u32", ttl))
                     })?;
-                    return Ok(Some(v));
+                    // Cassandra `Attributes.getTimeToLive`: `USING TTL 0` means NO TTL (`NO_TTL`).
+                    return Ok((v != 0).then_some(v));
                 }
                 _ => {
                     return Err(Error::InvalidInput(
@@ -406,6 +407,19 @@ pub(super) fn extract_ttl(using: &Option<CqlUsing>) -> Result<Option<u32>, Error
 #[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
+
+    /// `USING TTL 0` is NO_TTL (Cassandra 5.0.8 `Attributes.getTimeToLive`), never an expiring write.
+    #[test]
+    fn using_ttl_zero_is_no_ttl() {
+        let using = |n: i64| {
+            Some(CqlUsing {
+                ttl: Some(CqlExpression::Literal(CqlLiteral::Integer(n))),
+                timestamp: None,
+            })
+        };
+        assert_eq!(extract_ttl(&using(0)).unwrap(), None);
+        assert_eq!(extract_ttl(&using(5)).unwrap(), Some(5));
+    }
     use crate::cql::ast::{CqlBinaryOperator, CqlExpression, CqlIdentifier, CqlLiteral};
 
     // ── shared WHERE-clause fixture (used across binding tests) ────────────────

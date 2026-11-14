@@ -27,53 +27,117 @@
 //! * [`element_survives_complex_deletion`] — shadow-before-purge boundary
 //!   (commit `f66fa14f`; the `<=` element-vs-marker rule, #498).
 
-/// Minimal common view of a reconcilable cell.
+/// Common view of a reconcilable cell: exactly the fields Cassandra's
+/// `Cells.resolveRegular` (`db/rows/Cells.java:79-129`, cassandra-5.0.8) consults.
 ///
-/// The only two accessors BOTH write paths share for the `Cells#reconcile`
-/// tie-break: the cell's write timestamp and whether it is a deletion
-/// (tombstone). Each call site implements this over its concrete type
-/// ([`CellData`](super::merge::CellData) on the merge path, `MergedOp` on the
-/// writer path) and how it RECOGNIZES a tombstone — a `Value::Tombstone`
-/// payload vs. a `CellOperation::Delete` op — stays with the type, since that
-/// recognition is genuinely type-specific.
-///
-/// The on-disk `localDeletionTime` is intentionally NOT part of this view: it
-/// is consulted only by the merge path's gc-grace purge stage (which the flush
-/// path has no analogue for), so sharing it here would force a meaningless
-/// accessor on the writer type. The tie-break itself never consults LDT — a
-/// same-timestamp tombstone wins BEFORE any LDT compare.
+/// Each call site implements this over its concrete type
+/// ([`CellData`](super::merge::CellData) on the merge path, `MergedOp` on the writer path).
+/// How a site RECOGNIZES a tombstone — a `Value::Tombstone` payload vs. a
+/// `CellOperation::Delete` op — stays with the type.
 pub(crate) trait ReconcileCell {
     /// Cell write timestamp in microseconds (`markedForDeleteAt` for a deletion).
     fn timestamp(&self) -> i64;
-    /// Whether this cell is a deletion (tombstone) rather than a live/expiring
-    /// value.
+    /// Whether this cell is a deletion (tombstone) rather than a live/expiring value.
     fn is_tombstone(&self) -> bool;
+    /// `Some(ttl)` for an EXPIRING cell (`Cell.isExpiring()`, `ttl != NO_TTL`); `None` for a
+    /// plain live cell or a tombstone.
+    fn expiring_ttl(&self) -> Option<u32> {
+        None
+    }
+    /// The on-disk `localDeletionTime` (unsigned GC-clock seconds, carried in an `i32`): the
+    /// EXPIRY instant of an expiring cell, the deletion instant of a tombstone. Unused for a
+    /// plain live cell.
+    fn local_deletion_time(&self) -> i32 {
+        0
+    }
+    /// The serialized value bytes `Cells.compareValues` (`ValueAccessor.compare`: unsigned
+    /// lexicographic) orders by. Only consulted on a full tie, so it may allocate.
+    fn value_bytes(&self) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
-/// Cassandra `Cells#reconcile` replace decision (parity commit `a62c749`):
-/// returns `true` when `candidate` should replace the current `existing` winner.
+/// Cassandra `Cells.resolveRegular` (cassandra-5.0.8 `db/rows/Cells.java:79-129`): returns
+/// `true` when `candidate` should replace the current `existing` winner. It is a TOTAL order, so
+/// the winner is the same whichever cell arrives first (`Cells.reconcile` javadoc, `:59`:
+/// "commutative over its cells arguments"). Decided IN THIS ORDER, short-circuiting:
 ///
-/// Decided IN THIS ORDER, short-circuiting:
-/// 1. **timestamp** — a strictly higher write timestamp always wins.
-/// 2. **deletion vs live/expiring at EQUAL timestamp** — a cell DELETION
-///    (tombstone) beats a LIVE or EXPIRING (TTL) cell, decided BEFORE any
-///    `localDeletionTime` compare, so an expiring cell can never resurrect data
-///    over a same-timestamp tombstone (issues #848 / #498). An expiring cell is
-///    treated as LIVE (it carries a real value + a TTL, not a tombstone), so
-///    this one rule subsumes both tombstone-beats-live and
-///    tombstone-beats-expiring.
-/// 3. **equal timestamp + equal liveness** — returns `false`. Cassandra's
-///    reconcile is order-independent and equivalent here, so the caller keeps
-///    its first-seen winner. (The writer path overlays an order-dependent
-///    last-write-wins tie-break for this single case at its call site; that
-///    overlay is writer-only and NOT part of this shared rule.)
+/// 1. **timestamp** — strictly higher wins.
+/// 2. **expiring-or-tombstone beats live** at equal timestamp (`:93-98`; CASSANDRA-14592 — an
+///    expiring cell is treated like a tombstone because it becomes one).
+/// 3. **tombstone beats expiring** (`:100-108`).
+/// 4. both tombstones, or both expiring: the larger `localDeletionTime` wins (`:111-118`).
+/// 5. both expiring with equal `localDeletionTime`: the LOWER TTL wins (`:120-125`).
+/// 6. otherwise the larger serialized value (`compareValues(left, right) >= 0`, `:128`); a full
+///    tie keeps `existing` (the two cells are then indistinguishable).
 pub(crate) fn cell_wins<C: ReconcileCell + ?Sized>(candidate: &C, existing: &C) -> bool {
     if candidate.timestamp() != existing.timestamp() {
         return candidate.timestamp() > existing.timestamp();
     }
-    // Equal timestamp: a deletion wins over a live/expiring cell, BEFORE any
-    // localDeletionTime compare (parity `a62c749`).
-    candidate.is_tombstone() && !existing.is_tombstone()
+    let cand_flagged = candidate.is_tombstone() || candidate.expiring_ttl().is_some();
+    let exist_flagged = existing.is_tombstone() || existing.expiring_ttl().is_some();
+    if cand_flagged != exist_flagged {
+        return cand_flagged;
+    }
+    if cand_flagged {
+        if candidate.is_tombstone() != existing.is_tombstone() {
+            return candidate.is_tombstone();
+        }
+        // localDeletionTime is an UNSIGNED 32-bit GC-clock value carried in an i32.
+        let (cl, el) = (
+            candidate.local_deletion_time() as u32,
+            existing.local_deletion_time() as u32,
+        );
+        if cl != el {
+            return cl > el;
+        }
+        if let (Some(ct), Some(et)) = (candidate.expiring_ttl(), existing.expiring_ttl()) {
+            if ct != et {
+                return ct < et;
+            }
+        }
+    }
+    candidate.value_bytes() > existing.value_bytes()
+}
+
+/// Cassandra `DeletionTime.supersedes` (cassandra-5.0.8 `db/DeletionTime.java:158`): a deletion
+/// `(markedForDeleteAt, localDeletionTime)` supersedes another when its `markedForDeleteAt` is
+/// higher, or EQUAL with a higher `localDeletionTime` (unsigned GC-clock seconds). Used for ROW,
+/// RANGE and PARTITION deletions, so equal-timestamp deletions resolve by LDT in either order.
+pub(crate) fn deletion_supersedes(candidate: (i64, i32), current: (i64, i32)) -> bool {
+    candidate.0 > current.0
+        || (candidate.0 == current.0 && (candidate.1 as u32) > (current.1 as u32))
+}
+
+/// `supersedes` or equal (`>=`): the newest deletion of a group, last of equals.
+pub(crate) fn deletion_ge(candidate: (i64, i32), current: (i64, i32)) -> bool {
+    candidate == current || deletion_supersedes(candidate, current)
+}
+
+/// [`deletion_ge`] against a possibly-absent current deletion.
+pub(crate) fn ge_opt(current: Option<(i64, i32)>, candidate: (i64, i32)) -> bool {
+    current.is_none_or(|c| deletion_ge(candidate, c))
+}
+
+/// [`deletion_supersedes`] for a possibly-absent current deletion `(markedForDeleteAt)` paired with
+/// its `localDeletionTime` (the merge keeps the two in separate fields).
+pub(crate) fn supersedes_opt(
+    current_mfda: Option<i64>,
+    current_ldt: i32,
+    candidate: (i64, i32),
+) -> bool {
+    current_mfda.is_none_or(|d| deletion_supersedes(candidate, (d, current_ldt)))
+}
+
+/// [`deletion_supersedes`] for two range tombstones.
+pub(crate) fn rt_supersedes(
+    candidate: &crate::storage::write_engine::mutation::RangeTombstone,
+    current: &crate::storage::write_engine::mutation::RangeTombstone,
+) -> bool {
+    deletion_supersedes(
+        (candidate.deletion_time, candidate.local_deletion_time),
+        (current.deletion_time, current.local_deletion_time),
+    )
 }
 
 /// Strict-supersede predicate for complex (collection / UDT) deletion markers

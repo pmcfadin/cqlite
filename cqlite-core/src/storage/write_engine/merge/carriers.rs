@@ -98,8 +98,13 @@ pub(super) fn scan_partition_carriers(rows: &[MergeEntry]) -> PartitionCarriers 
                 carriers
                     .partition_delete_key
                     .get_or_insert_with(|| row.key.clone());
+                // `DeletionTime.supersedes` (#4530): equal mfda is broken by the larger LDT.
                 match carriers.max_partition_deletion {
-                    Some((cur_mfda, _)) if cur_mfda >= mfda => {}
+                    Some(cur)
+                        if !super::super::reconcile_rules::deletion_supersedes(
+                            (mfda, ldt),
+                            cur,
+                        ) => {}
                     _ => carriers.max_partition_deletion = Some((mfda, ldt)),
                 }
                 continue;
@@ -223,11 +228,16 @@ mod tests {
     }
 
     #[test]
-    fn equal_mfda_keeps_first_seen_local_deletion_time() {
-        // On an mfda tie the FIRST-seen (mfda, ldt) is kept (>= guard).
-        let rows = vec![partition_carrier(3, 100, 11), partition_carrier(3, 100, 22)];
-        let carriers = scan_partition_carriers(&rows);
-        assert_eq!(carriers.max_partition_deletion, Some((100, 11)));
+    fn equal_mfda_keeps_larger_local_deletion_time_in_either_order() {
+        // `DeletionTime.supersedes` (cassandra-5.0.8 `DeletionTime.java:158`, #4530): an mfda
+        // tie is broken by the LARGER localDeletionTime, whichever carrier arrives first.
+        for rows in [
+            vec![partition_carrier(3, 100, 11), partition_carrier(3, 100, 22)],
+            vec![partition_carrier(3, 100, 22), partition_carrier(3, 100, 11)],
+        ] {
+            let carriers = scan_partition_carriers(&rows);
+            assert_eq!(carriers.max_partition_deletion, Some((100, 22)));
+        }
     }
 
     #[test]
