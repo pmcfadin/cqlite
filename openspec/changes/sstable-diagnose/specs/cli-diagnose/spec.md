@@ -52,10 +52,14 @@ compiled binary's actual output.
   against the COMPILED BINARY's actual output, not read off the Rust struct definition in isolation
   (`cqlite-cli/tests/diagnose_cli_tests.rs::report_schema_matches_design`).
 
-#### Scenario: R7.2 text rendering names #4200/#4195 where diagnose stops short
+#### Scenario: R7.2 text rendering says the figures are raw / per-generation / unreconciled
 - **Given** any run whose report includes `estimated_droppable_tombstone_ratio` or
   `top_tombstone_heaviest_partitions`
 - **When** rendered as text
-- **Then** the field's description names `cqlite tombstones` as the authoritative, reconciled
-  alternative — never silently presenting the estimate/raw count as if it were the reconciled
-  answer (`cqlite-cli/tests/diagnose_cli_tests.rs`).
+- **Then** each field's description states what the figure is — for the ranking, a **raw,
+  per-generation, unreconciled** tombstone count; for the ratio, a per-generation **estimate** that
+  is **not reconciled across generations** — never silently presenting it as the reconciled answer
+  (`cqlite-cli/tests/diagnose_cli_tests.rs::text_says_the_tombstone_figures_are_raw_and_unreconciled`).
+  - *Owner ruling 2026-11-14:* the text does NOT name `cqlite tombstones` yet (that verb ships in
+    0.20, #4200); adding the pointer is tracked on #4200 and does not change this requirement's
+    wording test beyond adding the pointer.

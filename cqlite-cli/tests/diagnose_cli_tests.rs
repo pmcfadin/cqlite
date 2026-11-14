@@ -463,20 +463,29 @@ fn text_rendering_carries_the_same_facts() {
     assert!(t.contains("[statistics]"));
 }
 
-/// R7.2 — text names `cqlite tombstones` where diagnose stops short.
-///
-/// TODO(#4200, owner ruling pending): #4200 moved to 0.20, so the pointer text is deliberately
-/// not emitted yet. When the owner rules, delete the `#[ignore]` (and add the pointer to
-/// `commands/diagnose.rs`'s two marked sites); this test is the one-line flip.
+/// R7.2 (amended, owner ruling 2026-11-14) — the text says what each tombstone figure IS: the
+/// ranking is a RAW, per-generation, UNRECONCILED count; the ratio is a per-generation ESTIMATE that
+/// is NOT reconciled across generations. It does not name `cqlite tombstones` yet (#4200, 0.20).
 #[test]
-#[ignore = "R7.2 pending owner ruling on #4200 (cqlite tombstones moved to 0.20)"]
-fn text_names_cqlite_tombstones_where_diagnose_stops_short() {
+fn text_says_the_tombstone_figures_are_raw_and_unreconciled() {
     let Some(dir) = table_dir("test_tomb", "skipped_partition_delete") else {
         return;
     };
     let out = run(&["diagnose", dir.to_str().expect("utf8"), "--deep"]);
+    assert!(out.status.success(), "{out:?}");
     let t = String::from_utf8_lossy(&out.stdout);
-    assert!(t.contains("cqlite tombstones"), "{t}");
+    assert!(
+        t.contains("tombstone-heaviest partitions (raw tombstone count, unreconciled)"),
+        "ranking description must say raw + unreconciled:\n{t}"
+    );
+    assert!(
+        t.contains("a per-generation estimate") && t.contains("not reconciled across generations"),
+        "ratio description must say per-generation estimate, not reconciled:\n{t}"
+    );
+    assert!(
+        !t.contains("cqlite tombstones"),
+        "the pointer is deliberately absent until #4200 lands (0.20):\n{t}"
+    );
 }
 
 /// Measured reclaim uses the SAME envelope as every other leaf, and states it is an upper bound.

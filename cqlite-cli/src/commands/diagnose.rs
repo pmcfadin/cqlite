@@ -316,10 +316,7 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
             "  estimated partitions: {}\n",
             text_sourced(&g.estimated_partition_count, |v| v.to_string())
         ));
-        // TODO(#4200, owner ruling pending): R7.2 requires this line to name `cqlite tombstones`
-        // as the authoritative, reconciled alternative. #4200 moved to 0.20, so the pointer text
-        // is deliberately OMITTED until the owner rules; the description below only states what
-        // the number is.
+        // #4200 (0.20): add the cqlite tombstones pointer.
         o.push_str(&format!(
             "  estimated droppable tombstones: {} (a per-generation estimate from the Statistics.db \
              drop-time histogram at gcBefore {}; not reconciled across generations)\n",
@@ -353,8 +350,7 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
                 "largest partitions (bytes)",
                 &d.top_largest_partitions,
             ));
-            // TODO(#4200, owner ruling pending): R7.2 — same omission as above; this ranking is
-            // the RAW per-partition tombstone count (design D2), not a reconciled answer.
+            // #4200 (0.20): add the cqlite tombstones pointer.
             o.push_str(&text_ranking(
                 "tombstone-heaviest partitions (raw tombstone count, unreconciled)",
                 &d.top_tombstone_heaviest_partitions,
