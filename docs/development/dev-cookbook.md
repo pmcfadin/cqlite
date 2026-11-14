@@ -878,6 +878,31 @@ cargo run --package cqlite-cli --features cli-helpers -- \
 # missing or not a directory).
 ```
 
+## Find which generations hold a key (issue #4205, epic #4192)
+
+`cqlite find` answers "where did my write go": for ONE partition key it reports, per SSTable
+generation of a table directory, which layer answered, and (with `--commitlog`) which CommitLog
+mutations touch the key and whether any is still unflushed. Read-only; needs the global
+`--schema` and a build with `write-support` (default) and without `tombstones`.
+
+```bash
+# BIG (nb) or BTI (da); <partition-key> is a CQL literal (comma-separated for composite keys)
+cqlite --schema ks.cql find ./data/ks/users-<32hex table id> 42
+cqlite --schema ks.cql find ./data/ks/users-<id> 42 --commitlog ./commitlog --out json
+```
+
+Per generation: `hit  offset=<N> len=<N|to-eof> max_writetime=<µs> partition_deletion=<yes|no>`,
+`bloom-negative` (BIG `Filter.db` said no), `index-miss` (`Index.db` / the BTI trie said no — also
+what an absent `Filter.db` degrades to, never "unmeasured"), `scanned result=hit|miss` (no usable
+index; a full schema-driven scan decided), or `UNREADABLE <cause>`. With `--commitlog`, one line
+per mutation: `<segment>@<position>: writetime=<µs|unmeasured(cause)> unflushed=<yes|no|unmeasured(cause)>`;
+shapes the CommitLog decoder does not model (clustered tables, complex columns, partition
+deletions) are `unmeasured(<cause>)`, and an unreadable segment is its own line. Exit `0` = report
+complete (including "absent everywhere"), `1` = usage error, `2` = a generation or segment could not
+be read. Writetimes are `EncodingStats.minTimestamp + TIMESTAMP_EPOCH(2015-09-22Z) + delta`
+(cassandra-5.0.8 `EncodingStats`/`SerializationHeader`). Fixture: `test-data/datasets/commitlog_find/`
+(regenerate with `test-data/scripts/generate-commitlog-find-fixtures.sh`, run in the Cassandra VM).
+
 ## Delta-export (CDC Parquet, Issue #705 / Epic #696 DS9)
 
 Requires `--features delta-export`. Schema must be a bare `CREATE TABLE` statement

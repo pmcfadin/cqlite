@@ -261,7 +261,7 @@ pub fn fuzz_commitlog_segment(data: &[u8]) {
     while guard < 1_000_000 {
         guard += 1;
         match walker.next_frame() {
-            Ok(FrameStep::Record(body)) => {
+            Ok(FrameStep::Record { body, .. }) => {
                 let _ = decode_mutation(body, &schemas);
             }
             _ => break,

@@ -126,6 +126,7 @@ duckdb = { version = "1.1", features = ["bundled", "parquet"], optional = true }
 # Arrow/Parquet readers for Parquet output validation tests (the writer itself
 # lives in cqlite-core behind its `parquet` feature, Epic #682)
 arrow = { workspace = true }
+crc32fast = { workspace = true }
 parquet = { workspace = true }
 # Issue #1490: the Parquet-vs-sstabledump-JSONL value-parity harness parses the
 # goldens' float literals with serde_json, and serde_json's DEFAULT float parser

@@ -15618,12 +15618,16 @@ run_clippy() {
 #     that exists to catch it. `roborev-lints` is UNSCOPED (it runs on every --lite round and
 #     in the full gate whatever the diff touches), which is the property this guard needs.
 #     Pure grep over one committed file: no cargo/python3/network, ~0s.
+#   * test_find_no_resync_scan.sh — the same #28 class for `cqlite find`'s per-generation
+#     probe (issue #4205, spec F6): `find_probe.rs` reads only decoded structures, never a
+#     byte-pattern search. Here for the identical diff-scoping reason as the guard above.
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh" &&
-    bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh"
+    bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh" &&
+    bash "$REPO_ROOT/scripts/tests/test_find_no_resync_scan.sh"
 }
 
 # check_no_unexpected_zero_tests <label> <logfile> [allowed-zero-target...]

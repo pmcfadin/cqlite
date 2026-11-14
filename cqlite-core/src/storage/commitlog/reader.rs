@@ -107,6 +107,14 @@ impl CommitLogReader {
     /// reports whether the segment ended on a torn tail.
     pub fn mutations(&self) -> MutationIter<'_> {
         MutationIter {
+            inner: self.mutations_with_positions(),
+        }
+    }
+
+    /// Like [`mutations`](Self::mutations), but each item also carries the record's byte
+    /// offset within the segment file (issue #4205: `cqlite find` reports it).
+    pub fn mutations_with_positions(&self) -> PositionedMutationIter<'_> {
+        PositionedMutationIter {
             walker: FrameWalker::new(&self.bytes, self.descriptor.id, self.descriptor.header_len),
             schemas: &self.schemas,
             truncated: false,
@@ -117,17 +125,14 @@ impl CommitLogReader {
 
 /// Lazy iterator over decoded mutations (see [`CommitLogReader::mutations`]).
 pub struct MutationIter<'a> {
-    walker: FrameWalker<'a>,
-    schemas: &'a SchemaSet,
-    truncated: bool,
-    done: bool,
+    inner: PositionedMutationIter<'a>,
 }
 
 impl MutationIter<'_> {
     /// Whether the segment ended on a torn/truncated tail. Meaningful only once
     /// iteration has finished.
     pub fn truncated(&self) -> bool {
-        self.truncated
+        self.inner.truncated()
     }
 }
 
@@ -135,11 +140,40 @@ impl Iterator for MutationIter<'_> {
     type Item = Result<Mutation>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(_, m)| m)
+    }
+}
+
+/// Lazy iterator over `(record byte offset, decoded mutation)` (see
+/// [`CommitLogReader::mutations_with_positions`]).
+pub struct PositionedMutationIter<'a> {
+    walker: FrameWalker<'a>,
+    schemas: &'a SchemaSet,
+    truncated: bool,
+    done: bool,
+}
+
+impl PositionedMutationIter<'_> {
+    /// Whether the segment ended on a torn/truncated tail. Meaningful only once
+    /// iteration has finished.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+impl Iterator for PositionedMutationIter<'_> {
+    /// `(position, mutation)`: `position` is the record's byte offset within the segment file;
+    /// it is `None` for a framing error, which has no trustworthy record offset.
+    type Item = (Option<u64>, Result<Mutation>);
+
+    fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
         }
         match self.walker.next_frame() {
-            Ok(FrameStep::Record(body)) => Some(decode_mutation(body, self.schemas)),
+            Ok(FrameStep::Record { offset, body }) => {
+                Some((Some(offset as u64), decode_mutation(body, self.schemas)))
+            }
             Ok(FrameStep::End) => {
                 self.done = true;
                 None
@@ -151,7 +185,7 @@ impl Iterator for MutationIter<'_> {
             }
             Err(e) => {
                 self.done = true;
-                Some(Err(e))
+                Some((None, Err(e)))
             }
         }
     }

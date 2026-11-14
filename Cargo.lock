@@ -1248,6 +1248,7 @@ dependencies = [
  "colored",
  "console 0.15.11",
  "cqlite-core",
+ "crc32fast",
  "criterion",
  "crossterm",
  "csv",
