@@ -41,7 +41,7 @@
 //! ## What these tests exercise
 //!
 //! They drive the REAL production reconcile pipeline
-//! ([`KWayMerger::reconcile_cluster_with_overlap_counted`], the same entry the
+//! ([`KWayMerger::<NoTrace>::reconcile_cluster_with_overlap_counted`], the same entry the
 //! compactor's `merge_partition_rows` calls) with a PINNED `now_secs`/`gc_before`
 //! and a `MergeEntry` carrying an expiring complex-element [`CellData`] (the shape
 //! the reader surfaces for a non-frozen collection element on the compaction read
@@ -59,6 +59,7 @@
 
 use std::collections::HashMap;
 
+use super::super::trace::NoTrace;
 use super::super::{CellData, KWayMerger, MergeEntry, PurgeCounts, RowData};
 use crate::storage::write_engine::mutation::DecoratedKey;
 use crate::types::{TombstoneType, Value};
@@ -122,7 +123,7 @@ fn reconcile_with_purges(
 ) -> (Vec<CellData>, PurgeCounts) {
     let row = MergeEntry::new(0, dk(1), None, row_ts, RowData::Live { cells });
     let mut purges = PurgeCounts::default();
-    let merged = KWayMerger::reconcile_cluster_with_overlap_counted(
+    let merged = KWayMerger::<NoTrace>::reconcile_cluster_with_overlap_counted(
         None,
         vec![row],
         &HashMap::new(),

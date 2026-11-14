@@ -22,6 +22,7 @@
 use std::collections::BinaryHeap;
 use std::path::PathBuf;
 
+use super::trace::NoTrace;
 use super::{egress_budget, KWayMerger, RunReader, SSTableRowIteratorAdapter};
 use crate::schema::TableSchema;
 use crate::storage::sstable::reader::OpenErrorReporting;
@@ -136,6 +137,7 @@ impl KWayMerger {
             // timestamp via `with_max_purgeable_timestamp`.
             max_purgeable_timestamp: None,
             _egress_slot: Some(egress_slot),
+            trace: NoTrace,
         })
     }
 }

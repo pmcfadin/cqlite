@@ -18,6 +18,7 @@
 //! `paths` list, identical to the full-scan merger, so reconciliation ties break
 //! the same way.
 
+use super::trace::{NoTrace, ProbeOutcome as TraceProbeOutcome, TraceSink};
 use super::{
     egress_budget, KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter,
 };
@@ -27,7 +28,7 @@ use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
 use std::collections::{BinaryHeap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 // Unconditional (issue #2346): `build_single_partition_merger_from_readers`
 // takes `Vec<Arc<SSTableReader>>` regardless of the `tombstones` feature (its
 // `NeedsScan` fail-safe still needs `SSTableReader`/`Arc` either way).
@@ -38,13 +39,7 @@ use std::sync::Arc;
 #[cfg(not(feature = "tombstones"))]
 use super::block_on_async;
 #[cfg(not(feature = "tombstones"))]
-use crate::config::DiskAccessMode;
-#[cfg(not(feature = "tombstones"))]
-use crate::platform::Platform;
-#[cfg(not(feature = "tombstones"))]
 use crate::storage::sstable::reader::SinglePartitionCompaction;
-#[cfg(not(feature = "tombstones"))]
-use crate::Config;
 
 impl KWayMerger {
     /// Build a k-way merger from pre-constructed run iterators (issue #2207).
@@ -92,6 +87,7 @@ impl KWayMerger {
             // attach the matching slot guard via `with_egress_slot`. A merger
             // built directly from pre-supplied runs registers no slot.
             _egress_slot: None,
+            trace: NoTrace,
         })
     }
 }
@@ -266,6 +262,50 @@ pub fn build_single_partition_merger_with_registry(
     udt_registry: Option<&UdtRegistry>,
     scan_cancel: ScanCancel,
 ) -> Result<Option<KWayMerger>> {
+    build_single_partition_merger_with_registry_and_sink(
+        paths,
+        keys,
+        schema,
+        udt_registry,
+        scan_cancel,
+        NoTrace,
+    )
+}
+
+/// Traced counterpart of [`build_single_partition_merger`].  Probe outcomes
+/// are recorded while the candidates are still in their authoritative path
+/// order, before absent candidates are pruned from the run list.  This keeps
+/// `run_index` equal to the caller's generation list even when a generation
+/// contributes no `SSTableRowIterator`.
+pub fn build_single_partition_merger_with_trace<S: TraceSink>(
+    paths: Vec<PathBuf>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    scan_cancel: ScanCancel,
+    sink: S,
+) -> Result<Option<KWayMerger<S>>> {
+    build_single_partition_merger_with_registry_and_sink(
+        paths,
+        keys,
+        schema,
+        None,
+        scan_cancel,
+        sink,
+    )
+}
+
+/// Shared path-builder implementation.  The public untraced wrapper passes a
+/// `NoTrace`; the explain path passes its caller-owned sink.  Probe failures
+/// return before the sink can escape, so a failed build cannot expose a
+/// partially populated trail.
+fn build_single_partition_merger_with_registry_and_sink<S: TraceSink>(
+    paths: Vec<PathBuf>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    udt_registry: Option<&UdtRegistry>,
+    scan_cancel: ScanCancel,
+    mut trace: S,
+) -> Result<Option<KWayMerger<S>>> {
     schema.validate_dropped_columns()?;
     if keys.is_empty() {
         return Ok(None);
@@ -322,6 +362,14 @@ pub fn build_single_partition_merger_with_registry(
             collect,
         )?;
         fold_size_notes(&mut weights, &notes);
+        trace.generation_probe(
+            run_index,
+            match &probe {
+                PathProbe::Empty => TraceProbeOutcome::Absent,
+                PathProbe::Seeked(_) => TraceProbeOutcome::Hit,
+                PathProbe::NeedsScan => TraceProbeOutcome::Scanned,
+            },
+        );
         match probe {
             PathProbe::Empty => {
                 // Pruned / absent for every key. No run.
@@ -398,10 +446,11 @@ pub fn build_single_partition_merger_with_registry(
     let merger = KWayMerger::from_row_iterators(runs, schema)?;
     // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened;
     // an all-`Seeked` (channel-less) point read registers no slot.
-    Ok(Some(match egress {
+    let merger = match egress {
         Some((_, guard)) => merger.with_egress_slot(guard),
         None => merger,
-    }))
+    };
+    Ok(Some(merger.with_trace_sink(trace)))
 }
 
 /// Reader-based analogue of [`build_single_partition_merger`] (issue #2346):
@@ -685,92 +734,7 @@ fn record_logical_accesses(
     }
 }
 
-/// Open `path` ONCE and probe it for every requested key, delegating to
-/// [`probe_reader_async`] (issue #2346) once the reader is open.
-///
-/// Runs the async open + seek on the shared bridge runtime. The reader is opened
-/// with buffered I/O (never mmap/direct — the file may be deleted after the
-/// read), matching the full-scan producer's file-lifetime contract (issue #591).
-#[cfg(not(feature = "tombstones"))]
-fn probe_path(
-    path: &Path,
-    keys: &[Vec<u8>],
-    schema: &TableSchema,
-    udt_registry: Option<&UdtRegistry>,
-    scan_cancel: ScanCancel,
-    collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    let path = path.to_path_buf();
-    let schema = schema.clone();
-    let keys: Vec<Vec<u8>> = keys.to_vec();
-    let udt_registry = udt_registry.cloned();
-    block_on_async(async move {
-        let mut config = Config::default();
-        config.storage.use_mmap = false;
-        config.storage.disk_access_mode = DiskAccessMode::Buffered;
-        let platform = Arc::new(Platform::new(&config).await?);
-        let mut reader = SSTableReader::open(&path, &config, platform).await?;
-        // Issue #2349: decode a `frozen<UDT>`-in-collection cell structurally on the
-        // point-read seek path too, matching the full-scan cold reader.
-        if let Some(registry) = udt_registry {
-            reader.set_udt_registry(registry);
-        }
-        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
-    })
-}
-
-/// Probe an ALREADY-OPEN, possibly-SHARED `reader` (issue #2346) — the
-/// reader-based analogue of [`probe_path`], used by
-/// [`build_single_partition_merger_from_readers`]. `reader` is an `Arc` clone
-/// (the caller keeps the original for the `NeedsScan` fail-safe path), moved
-/// into the bridged future so no borrow needs to outlive this call.
-#[cfg(not(feature = "tombstones"))]
-fn probe_reader(
-    reader: Arc<SSTableReader>,
-    keys: &[Vec<u8>],
-    schema: &TableSchema,
-    scan_cancel: ScanCancel,
-    collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    let schema = schema.clone();
-    let keys: Vec<Vec<u8>> = keys.to_vec();
-    block_on_async(async move {
-        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
-    })
-}
-
-/// Tombstones-build fallback: the single-partition SEEK machinery
-/// (`successor_partition_offset`, `point_read_whole_section`, …) is
-/// `not(tombstones)` only, so under the alternate `tombstones` feature every
-/// candidate degrades to a full scan filtered to the key set — correct, just
-/// without the seek speedup. Keeps the public builder API identical across builds.
-#[cfg(feature = "tombstones")]
-fn probe_path(
-    _path: &Path,
-    _keys: &[Vec<u8>],
-    _schema: &TableSchema,
-    _udt_registry: Option<&UdtRegistry>,
-    _scan_cancel: ScanCancel,
-    _collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    Ok(ProbeOutcome {
-        probe: PathProbe::NeedsScan,
-        notes: Vec::new(),
-    })
-}
-
-/// Tombstones-build fallback for the reader-based probe (issue #2346) — mirrors
-/// [`probe_path`]'s `tombstones` fallback above.
-#[cfg(feature = "tombstones")]
-fn probe_reader(
-    _reader: Arc<SSTableReader>,
-    _keys: &[Vec<u8>],
-    _schema: &TableSchema,
-    _scan_cancel: ScanCancel,
-    _collect_notes: bool,
-) -> Result<ProbeOutcome> {
-    Ok(ProbeOutcome {
-        probe: PathProbe::NeedsScan,
-        notes: Vec::new(),
-    })
-}
+// The path/reader open+probe wrappers (and their `tombstones` fallbacks) live in a child module
+// to keep this file under the #1116 size threshold.
+mod open;
+use open::{probe_path, probe_reader};
