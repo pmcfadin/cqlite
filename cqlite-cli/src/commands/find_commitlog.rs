@@ -6,8 +6,8 @@ use std::path::Path;
 
 use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::commitlog::{
-    mutation_writetime, parse_table_id, ColumnSpec, CommitLogReader, CommitLogSchema, Mutation,
-    SchemaSet, Writetime,
+    mutation_needs, mutation_writetime, parse_table_id, ColumnSpec, CommitLogReader,
+    CommitLogSchema, Mutation, SchemaSet, Writetime,
 };
 
 use super::find::{unflushed, GenRow, Unflushed};
@@ -158,7 +158,7 @@ pub fn scan_commitlog(
                             segment: segment.clone(),
                             position,
                             writetime,
-                            unflushed: unflushed(writetime, generations),
+                            unflushed: unflushed(writetime, mutation_needs(update), generations),
                         });
                     }
                 }

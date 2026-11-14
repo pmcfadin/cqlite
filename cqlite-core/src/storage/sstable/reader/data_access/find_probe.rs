@@ -42,6 +42,62 @@ pub struct HitDetail {
     pub max_writetime: i64,
     /// Whether the partition carries a partition-level deletion.
     pub has_partition_deletion: bool,
+    /// What the decoded rows prove is present, for proving a CommitLog mutation flushed.
+    pub coverage: CellCoverage,
+}
+
+/// What a generation's decoded rows for one partition prove is present, kept just fine enough
+/// to decide whether a given CommitLog mutation's cells and tombstones are covered (issue #4205,
+/// roborev job 299 M1). Per-column / per-kind MAXIMA across the partition's rows are only a sound
+/// proof for a table WITHOUT clustering columns (one row per partition), which is the only shape
+/// the CommitLog decoder models; callers must not use it for a clustered table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CellCoverage {
+    /// Simple column name -> max cell timestamp (a cell tombstone's timestamp included).
+    pub cell_timestamps: std::collections::BTreeMap<String, i64>,
+    /// Max row primary-key liveness-marker timestamp.
+    pub liveness_timestamp: Option<i64>,
+    /// Max timestamp of a partition deletion, row tombstone or row deletion: anything a mutation
+    /// at or below it is shadowed by.
+    pub deletion_timestamp: Option<i64>,
+}
+
+fn coverage_of(rows: &[CompactionRow]) -> CellCoverage {
+    fn bump(slot: &mut Option<i64>, t: i64) {
+        *slot = Some(slot.map_or(t, |m| m.max(t)));
+    }
+    let mut cov = CellCoverage::default();
+    for row in rows {
+        match &row.row_data {
+            CompactionRowData::PartitionDelete { deletion_time, .. }
+            | CompactionRowData::Tombstone { deletion_time, .. } => {
+                bump(&mut cov.deletion_timestamp, *deletion_time)
+            }
+            // A range marker covers only a clustering range: never a proof for a cell.
+            CompactionRowData::RangeMarker { .. } => {}
+            CompactionRowData::Live {
+                simple,
+                row_deletion,
+                row_liveness,
+                ..
+            } => {
+                for c in simple {
+                    let e = cov
+                        .cell_timestamps
+                        .entry(c.column.clone())
+                        .or_insert(c.timestamp);
+                    *e = (*e).max(c.timestamp);
+                }
+                if let Some((ts, _)) = row_deletion {
+                    bump(&mut cov.deletion_timestamp, *ts);
+                }
+                if let Some(ts) = row_liveness.marker_timestamp {
+                    bump(&mut cov.liveness_timestamp, ts);
+                }
+            }
+        }
+    }
+    cov
 }
 
 /// Result of the fail-safe scan used when no index layer could answer.
@@ -193,6 +249,7 @@ impl SSTableReader {
                         },
                         max_writetime,
                         has_partition_deletion,
+                        coverage: coverage_of(&rows),
                     }))
                 }
                 None => {
@@ -247,6 +304,7 @@ impl SSTableReader {
                 byte_length: ByteLength::Unmeasured("fail-safe scan resolves no end bound"),
                 max_writetime,
                 has_partition_deletion,
+                coverage: coverage_of(&rows),
             }),
         }))
     }

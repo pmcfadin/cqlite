@@ -111,7 +111,7 @@ mod sequential;
 
 // Public surface re-export (`reader::mod` re-exports `data_access::ClusteringSlice`).
 #[cfg(not(feature = "tombstones"))]
-pub use find_probe::{ByteLength, GenerationProbe, HitDetail, ScanOutcome};
+pub use find_probe::{ByteLength, CellCoverage, GenerationProbe, HitDetail, ScanOutcome};
 pub use model::ClusteringSlice;
 #[cfg(not(feature = "tombstones"))]
 pub use point_compaction::SinglePartitionCompaction;

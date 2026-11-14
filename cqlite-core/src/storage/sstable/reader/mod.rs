@@ -92,7 +92,7 @@ pub use data_access::{QueryRowBatch, QueryRowStream, ScanTokenBound, QUERY_ROWS_
 // Single-partition seek outcome (#2207) + find's probe (#4205); `not(tombstones)` like the seek.
 #[cfg(not(feature = "tombstones"))]
 pub use data_access::{
-    ByteLength, GenerationProbe, HitDetail, ScanOutcome, SinglePartitionCompaction,
+    ByteLength, CellCoverage, GenerationProbe, HitDetail, ScanOutcome, SinglePartitionCompaction,
 };
 // Decode-at-offset outcome for `salvage_sstable`'s recovery loop (issue
 // #4196). `write-support`-gated (its only consumer needs the feature) in

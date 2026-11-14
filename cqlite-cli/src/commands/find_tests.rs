@@ -1,10 +1,24 @@
 //! Unit tests for `find.rs`: the D5 comparison table, key-literal splitting, table-dir parsing.
 
 use super::*;
-use cqlite_core::storage::sstable::reader::ByteLength;
+use cqlite_core::storage::commitlog::Need;
 use cqlite_core::storage::sstable::reader::HitDetail;
+use cqlite_core::storage::sstable::reader::{ByteLength, CellCoverage};
 
+/// A hit whose cell `a` and liveness marker are at `ts` (so a mutation of exactly those at or
+/// below `ts` is provably flushed).
 fn hit(ts: i64) -> GenRow {
+    hit_with(
+        ts,
+        CellCoverage {
+            cell_timestamps: [("a".to_string(), ts)].into_iter().collect(),
+            liveness_timestamp: Some(ts),
+            deletion_timestamp: None,
+        },
+    )
+}
+
+fn hit_with(ts: i64, coverage: CellCoverage) -> GenRow {
     GenRow {
         basename: "g-hit".into(),
         outcome: GenOutcome::Probe(GenerationProbe::Hit(HitDetail {
@@ -12,8 +26,16 @@ fn hit(ts: i64) -> GenRow {
             byte_length: ByteLength::ToEof,
             max_writetime: ts,
             has_partition_deletion: false,
+            coverage,
         })),
     }
+}
+
+fn cell(column: &str, timestamp: i64) -> Result<Vec<Need>, &'static str> {
+    Ok(vec![Need::Cell {
+        column: column.into(),
+        timestamp,
+    }])
 }
 
 fn miss() -> GenRow {
@@ -34,6 +56,7 @@ fn bad() -> GenRow {
 fn d5_unmeasured_mutation_propagates_its_cause() {
     let u = unflushed(
         Writetime::Unmeasured("clustered table not decoded"),
+        cell("a", 5),
         &[hit(5)],
     );
     assert_eq!(
@@ -45,29 +68,102 @@ fn d5_unmeasured_mutation_propagates_its_cause() {
 #[test]
 fn d5_at_or_below_max_is_no_above_is_yes_absent_everywhere_is_yes() {
     assert_eq!(
-        unflushed(Writetime::Known(5), &[hit(5), miss()]),
+        unflushed(Writetime::Known(5), cell("a", 5), &[hit(5), miss()]),
         Unflushed::No
     );
-    assert_eq!(unflushed(Writetime::Known(4), &[hit(5)]), Unflushed::No);
-    assert_eq!(unflushed(Writetime::Known(6), &[hit(5)]), Unflushed::Yes);
     assert_eq!(
-        unflushed(Writetime::Known(1), &[miss(), miss()]),
+        unflushed(Writetime::Known(4), cell("a", 4), &[hit(5)]),
+        Unflushed::No
+    );
+    assert_eq!(
+        unflushed(Writetime::Known(6), cell("a", 6), &[hit(5)]),
         Unflushed::Yes
+    );
+    assert_eq!(
+        unflushed(Writetime::Known(1), cell("a", 1), &[miss(), miss()]),
+        Unflushed::Yes
+    );
+}
+
+/// Roborev job 299 M1: the SSTables hold column `a` at ts 100; a CommitLog-only write of column
+/// `b` at ts 90 is at or below the partition max but NOT covered, so it is `Unmeasured`, never
+/// a guessed "flushed". Minimal synthetic case (no Cassandra fixture has a partial-column
+/// shape): the coverage struct is built by hand in the shape `probe_generation` produces.
+#[test]
+fn d5_a_lower_timestamp_other_column_is_not_proven_flushed() {
+    let sst = hit_with(
+        100,
+        CellCoverage {
+            cell_timestamps: [("a".to_string(), 100)].into_iter().collect(),
+            liveness_timestamp: None,
+            deletion_timestamp: None,
+        },
+    );
+    assert_eq!(
+        unflushed(Writetime::Known(90), cell("b", 90), &[sst.clone()]),
+        Unflushed::Unmeasured(
+            "mutation coverage not proven by SSTable cells: column b @ 90".into()
+        )
+    );
+    // Same column, lower timestamp: proven (the SSTable cell wins reconciliation).
+    assert_eq!(
+        unflushed(Writetime::Known(90), cell("a", 90), &[sst.clone()]),
+        Unflushed::No
+    );
+    // Same column but the mutation's cell is NEWER than the SSTable's: not proven either.
+    assert_eq!(
+        unflushed(
+            Writetime::Known(100),
+            Ok(vec![
+                Need::Cell {
+                    column: "a".into(),
+                    timestamp: 100
+                },
+                Need::Liveness(100)
+            ]),
+            &[sst.clone()]
+        ),
+        Unflushed::Unmeasured(
+            "mutation coverage not proven by SSTable cells: row liveness marker @ 100".into()
+        )
+    );
+    // A covering deletion at or above the mutation proves it shadowed.
+    let shadow = hit_with(
+        100,
+        CellCoverage {
+            deletion_timestamp: Some(95),
+            ..CellCoverage::default()
+        },
+    );
+    assert_eq!(
+        unflushed(Writetime::Known(90), cell("b", 90), &[shadow]),
+        Unflushed::No
+    );
+    // An undecodable shape names its cause.
+    assert_eq!(
+        unflushed(
+            Writetime::Known(90),
+            Err("a cell carries no timestamp"),
+            &[sst]
+        ),
+        Unflushed::Unmeasured(
+            "mutation coverage not proven by SSTable cells: a cell carries no timestamp".into()
+        )
     );
 }
 
 #[test]
 fn d5_an_unreadable_generation_blocks_yes_but_not_a_proven_no() {
     assert_eq!(
-        unflushed(Writetime::Known(4), &[hit(5), bad()]),
+        unflushed(Writetime::Known(4), cell("a", 4), &[hit(5), bad()]),
         Unflushed::No
     );
     assert_eq!(
-        unflushed(Writetime::Known(6), &[hit(5), bad()]),
+        unflushed(Writetime::Known(6), cell("a", 6), &[hit(5), bad()]),
         Unflushed::Unmeasured("generation g-bad could not be probed".into())
     );
     assert_eq!(
-        unflushed(Writetime::Known(1), &[bad()]),
+        unflushed(Writetime::Known(1), cell("a", 1), &[bad()]),
         Unflushed::Unmeasured("generation g-bad could not be probed".into())
     );
 }

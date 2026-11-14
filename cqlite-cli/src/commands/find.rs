@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use cqlite_core::platform::Platform;
 use cqlite_core::schema::TableSchema;
-use cqlite_core::storage::commitlog::Writetime;
+use cqlite_core::storage::commitlog::{Need, Writetime};
 use cqlite_core::storage::scan_cancel::ScanCancel;
-use cqlite_core::storage::sstable::reader::{GenerationProbe, ScanOutcome};
+use cqlite_core::storage::sstable::reader::{CellCoverage, GenerationProbe, ScanOutcome};
 use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::Config;
 
@@ -43,7 +43,7 @@ pub struct GenRow {
 pub enum Unflushed {
     /// Newer than everything any generation holds for the key.
     Yes,
-    /// At or below the max writetime a generation holds.
+    /// Every cell, liveness marker and deletion of the mutation is proven present in the SSTables.
     No,
     /// Not decidable; the cause is stated.
     Unmeasured(String),
@@ -96,18 +96,67 @@ fn max_generation_writetime(gens: &[GenRow]) -> Option<i64> {
         .max()
 }
 
-/// The fail-closed comparison of design D5.
+/// The first of `needs` no hit generation proves present, or `None` when every one is proven.
 ///
-/// A generation that could not be probed might hold a NEWER write, so it only blocks a `yes`;
-/// a mutation already at or below a proven hit is `no` regardless.
-pub fn unflushed(mutation: Writetime, gens: &[GenRow]) -> Unflushed {
+/// A need is proven by ONE hit generation holding the same column at a timestamp at or above the
+/// mutation's (or the liveness marker / a covering deletion likewise). The comparison is per
+/// cell, never the partition's max timestamp: a later write of column `a` says nothing about an
+/// earlier-timestamped write of column `b` (roborev job 299 M1, issue #4205).
+fn first_unproven<'a>(needs: &'a [Need], gens: &[GenRow]) -> Option<&'a Need> {
+    let covers: Vec<&CellCoverage> = gens
+        .iter()
+        .filter_map(|g| match &g.outcome {
+            GenOutcome::Probe(GenerationProbe::Hit(d))
+            | GenOutcome::Probe(GenerationProbe::Scanned(ScanOutcome::Hit(d))) => Some(&d.coverage),
+            _ => None,
+        })
+        .collect();
+    let shadowed = |c: &CellCoverage, t: i64| c.deletion_timestamp.is_some_and(|d| d >= t);
+    needs.iter().find(|n| {
+        !covers.iter().any(|c| match n {
+            Need::Cell { column, timestamp } => {
+                shadowed(c, *timestamp)
+                    || c.cell_timestamps
+                        .get(column)
+                        .is_some_and(|t| t >= timestamp)
+            }
+            Need::Liveness(t) => shadowed(c, *t) || c.liveness_timestamp.is_some_and(|l| l >= *t),
+            Need::Deletion(t) => shadowed(c, *t),
+        })
+    })
+}
+
+/// The fail-closed verdict of design D5.
+///
+/// `Yes` (unflushed) needs only the newest write to be above everything any generation holds: its
+/// own cell then cannot be in any SSTable. `No` (flushed) is a PROOF obligation: every cell,
+/// liveness marker and deletion of the mutation must be present in the SSTables (see
+/// [`first_unproven`]); a mutation at or below the partition's max timestamp whose cells are not
+/// all proven is `Unmeasured`, never a guessed `No`. A generation that could not be probed might
+/// hold a newer write, so it only blocks a `Yes`.
+pub fn unflushed(
+    mutation: Writetime,
+    needs: Result<Vec<Need>, &'static str>,
+    gens: &[GenRow],
+) -> Unflushed {
     let w = match mutation {
         Writetime::Unmeasured(cause) => return Unflushed::Unmeasured(cause.to_string()),
         Writetime::Known(w) => w,
     };
     let max_hit = max_generation_writetime(gens);
     if max_hit.is_some_and(|m| w <= m) {
-        return Unflushed::No;
+        return match needs {
+            Err(cause) => Unflushed::Unmeasured(format!(
+                "mutation coverage not proven by SSTable cells: {cause}"
+            )),
+            Ok(needs) => match first_unproven(&needs, gens) {
+                None => Unflushed::No,
+                Some(n) => Unflushed::Unmeasured(format!(
+                    "mutation coverage not proven by SSTable cells: {}",
+                    describe(n)
+                )),
+            },
+        };
     }
     if let Some(bad) = gens
         .iter()
@@ -116,6 +165,14 @@ pub fn unflushed(mutation: Writetime, gens: &[GenRow]) -> Unflushed {
         return Unflushed::Unmeasured(format!("generation {} could not be probed", bad.basename));
     }
     Unflushed::Yes
+}
+
+fn describe(n: &Need) -> String {
+    match n {
+        Need::Cell { column, timestamp } => format!("column {column} @ {timestamp}"),
+        Need::Liveness(t) => format!("row liveness marker @ {t}"),
+        Need::Deletion(t) => format!("row deletion @ {t}"),
+    }
 }
 
 /// Split a `<partition-key>` argument into its per-column CQL literals: commas at nesting depth
