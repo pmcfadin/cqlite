@@ -303,6 +303,33 @@ fn alice_body_writetime_is_epoch_plus_stats_plus_delta() {
 }
 
 #[test]
+fn pre_epoch_min_timestamp_decodes_with_cassandra_wrapping_semantics() {
+    // cassandra-5.0.8 `EncodingStats.Serializer`: `writeUnsignedVInt(minTimestamp - TIMESTAMP_EPOCH)`
+    // / `readUnsignedVInt() + TIMESTAMP_EPOCH` as Java longs, so a timestamp 1_000_000 us BEFORE
+    // the epoch is a delta of -1_000_000, written as its 64-bit two's-complement pattern (a 9-byte
+    // vint: 0xFF + 8 big-endian bytes). Built from ALICE_BODY by replacing ONLY its 7-byte
+    // minTimestamp uvint (`fd36c1327cb48c`); every other byte is the real Cassandra-written one.
+    const EXPECTED: i64 = 1_442_880_000_000_000 - 1_000_000;
+    let mut hexs = ALICE_BODY.to_string();
+    let at = hexs
+        .find("fd36c1327cb48c")
+        .expect("ALICE_BODY carries the minTimestamp uvint");
+    let mut repl = String::from("ff");
+    for b in (-1_000_000i64 as u64).to_be_bytes() {
+        repl.push_str(&format!("{b:02x}"));
+    }
+    hexs.replace_range(at..at + 14, &repl);
+    let body = hex(&hexs);
+    let id = parse_table_id("d6de7150-8448-11f1-bf5a-bf4cbc47cb4a").unwrap();
+    let mut schemas: SchemaSet = HashMap::new();
+    schemas.insert(id, users_schema());
+    let m = decode_mutation(&body, &schemas).expect("decode");
+    let u = &m.updates[0];
+    assert_eq!(u.min_timestamp, Some(EXPECTED));
+    assert_eq!(u.rows[0].writetime, Some(EXPECTED));
+}
+
+#[test]
 fn undecodable_shapes_report_a_named_cause_never_a_value() {
     use crate::storage::commitlog::{mutation_writetime, Writetime};
     let body = hex(ALICE_BODY);

@@ -231,9 +231,13 @@ fn decode_partition_update(
     let min_ts_raw = c.uvint()?;
     let _min_ldt = c.uvint()?;
     let _min_ttl = c.uvint()?;
-    let min_timestamp = i64::try_from(min_ts_raw)
-        .ok()
-        .and_then(|d| d.checked_add(TIMESTAMP_EPOCH_MICROS));
+    // cassandra-5.0.8 `EncodingStats.Serializer.serialize` writes
+    // `out.writeUnsignedVInt(stats.minTimestamp - TIMESTAMP_EPOCH)` and `deserialize` reads
+    // `in.readUnsignedVInt() + TIMESTAMP_EPOCH` — Java `long` arithmetic. A pre-2015-09-22
+    // timestamp therefore has a NEGATIVE delta, written as its two's-complement 64-bit pattern
+    // (a 9-byte vint); reading those bits as `i64` and adding with wrap-around reproduces
+    // Cassandra exactly. (`i64::try_from` wrongly rejected every such valid timestamp.)
+    let min_timestamp = Some((min_ts_raw as i64).wrapping_add(TIMESTAMP_EPOCH_MICROS));
     update.min_timestamp = min_timestamp;
 
     let has_static = iter_flags & ITER_HAS_STATIC_ROW != 0;
@@ -277,7 +281,7 @@ fn decode_partition_update(
     };
 
     let Some(base_ts) = min_timestamp else {
-        update.undecoded_cause = Some("EncodingStats minTimestamp out of range");
+        update.undecoded_cause = Some("EncodingStats minTimestamp not decoded");
         return Ok((update, false));
     };
     match decode_rows(c, schema, &update.column_names, base_ts) {
