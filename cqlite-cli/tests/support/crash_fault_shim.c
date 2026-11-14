@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -189,6 +190,89 @@ int ftruncate64(int fd, off64_t len) {
   if (fd_path(fd, p, sizeof p) == 0) { int b = boundary("truncate", p, 0); if (b > 0) { errno = b; return -1; } }
   return real(fd, len);
 }
+
+/* ---- Memory mappings (roborev r5) ------------------------------------------------------------
+ * A writable MAP_SHARED mapping of a file turns plain stores into file writes that no libc call
+ * ever sees, so a fault boundary cannot intercept them. Fail CLOSED: a writable shared file mapping
+ * under the fault root aborts the run (exit 97, cause named). Read-only mappings, MAP_PRIVATE
+ * mappings (copy-on-write: stores never reach the file) and anonymous mappings stay allowed.
+ * The two ways to make an allowed mapping writable later are guarded too: mprotect(PROT_WRITE) on a
+ * tracked shared file mapping under the root aborts, and madvise(MADV_REMOVE) (punches a hole in
+ * the backing file) aborts whenever a fault root is active. */
+static void mapping_abort(const char *what, const char *path) {
+  char buf[PATH_MAX + 200];
+  int len = snprintf(buf, sizeof buf,
+                     "crash_fault_shim: WRITABLE FILE MAPPING UNDER THE FAULT ROOT (%s): %s -- a store through it "
+                     "mutates the file without crossing any fault boundary\n", what, path ? path : "(unknown)");
+  real_syscall()(SYS_write, 2, buf, len);
+  real_syscall()(SYS_exit_group, 97);
+}
+#define MAX_TRACKED 256
+static struct { unsigned long addr, len; } tracked[MAX_TRACKED];
+static atomic_flag tracked_lock = ATOMIC_FLAG_INIT;
+static void track_lock(void) { while (atomic_flag_test_and_set(&tracked_lock)) {} }
+static void track_unlock(void) { atomic_flag_clear(&tracked_lock); }
+static void track_add(void *a, size_t len) {
+  track_lock();
+  for (int i = 0; i < MAX_TRACKED; i++)
+    if (!tracked[i].len) { tracked[i].addr = (unsigned long)a; tracked[i].len = len; track_unlock(); return; }
+  track_unlock();
+  mapping_abort("tracking table full (cannot prove later mprotect safety)", "(too many shared file mappings)");
+}
+static int track_overlaps(unsigned long a, size_t len) {
+  int hit = 0;
+  track_lock();
+  for (int i = 0; i < MAX_TRACKED; i++)
+    if (tracked[i].len && a < tracked[i].addr + tracked[i].len && tracked[i].addr < a + len) hit = 1;
+  track_unlock();
+  return hit;
+}
+static void track_remove(unsigned long a, size_t len) {
+  track_lock();
+  for (int i = 0; i < MAX_TRACKED; i++)
+    if (tracked[i].len && a < tracked[i].addr + tracked[i].len && tracked[i].addr < a + len) tracked[i].len = 0;
+  track_unlock();
+}
+static void *mmap_checked(void *(*real)(void *, size_t, int, int, int, off_t), void *addr, size_t len, int prot,
+                          int flags, int fd, off_t off) {
+  char p[PATH_MAX];
+  int file_under_root = 0;
+  if (!(flags & MAP_ANONYMOUS) && fd >= 0 && root_len && fd_path(fd, p, sizeof p) == 0 && under_root(p))
+    file_under_root = 1;
+  if (file_under_root && (flags & MAP_SHARED) && (prot & PROT_WRITE)) mapping_abort("mmap PROT_WRITE|MAP_SHARED", p);
+  void *r = real(addr, len, prot, flags, fd, off);
+  if (file_under_root && (flags & MAP_SHARED) && r != MAP_FAILED) track_add(r, len);
+  return r;
+}
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+  REAL(mmap);
+  return mmap_checked(real, addr, len, prot, flags, fd, off);
+}
+void *mmap64(void *addr, size_t len, int prot, int flags, int fd, off64_t off) {
+  REAL(mmap64);
+  return mmap_checked((void *(*)(void *, size_t, int, int, int, off_t))real, addr, len, prot, flags, fd, (off_t)off);
+}
+int mprotect(void *addr, size_t len, int prot) {
+  REAL(mprotect);
+  if ((prot & PROT_WRITE) && track_overlaps((unsigned long)addr, len))
+    mapping_abort("mprotect PROT_WRITE on a shared file mapping", "(tracked mapping under the fault root)");
+  return real(addr, len, prot);
+}
+int munmap(void *addr, size_t len) {
+  REAL(munmap);
+  track_remove((unsigned long)addr, len);
+  return real(addr, len);
+}
+int madvise(void *addr, size_t len, int advice) {
+  REAL(madvise);
+  if (root_len && advice == MADV_REMOVE) mapping_abort("madvise MADV_REMOVE (punches a hole in the backing file)", "(file-mutating advice)");
+  return real(addr, len, advice);
+}
+int posix_madvise(void *addr, size_t len, int advice) {
+  REAL(posix_madvise);
+  return real(addr, len, advice); /* POSIX advice values (NORMAL/SEQUENTIAL/RANDOM/WILLNEED/DONTNEED) never mutate a file */
+}
+
 /* Absolute path of (dirfd, path) when it is absolute or AT_FDCWD-relative. */
 static int abs_path(int dirfd, const char *path, char *out, size_t cap) {
   if (path[0] == '/') { strncpy(out, path, cap - 1); out[cap - 1] = 0; return 0; }
@@ -441,6 +525,18 @@ long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5
     case SYS_unlinkat: RET(unlinkat((int)a0, (const char *)a1, (int)a2));
     case SYS_mkdirat: RET(mkdirat((int)a0, (const char *)a1, (mode_t)a2));
     case SYS_openat: RET(openat((int)a0, (const char *)a1, (int)a2, (mode_t)a3));
+#ifdef SYS_mmap
+    case SYS_mmap: RET(mmap((void *)a0, (size_t)a1, (int)a2, (int)a3, (int)a4, (off_t)a5));
+#endif
+#ifdef SYS_mprotect
+    case SYS_mprotect: RET(mprotect((void *)a0, (size_t)a1, (int)a2));
+#endif
+#ifdef SYS_munmap
+    case SYS_munmap: RET(munmap((void *)a0, (size_t)a1));
+#endif
+#ifdef SYS_madvise
+    case SYS_madvise: RET(madvise((void *)a0, (size_t)a1, (int)a2));
+#endif
 #ifdef SYS_rename
     case SYS_rename: RET(rename((const char *)a0, (const char *)a1));
 #endif
@@ -539,18 +635,6 @@ long shim_syscall(long num, long a0, long a1, long a2, long a3, long a4, long a5
 #endif
 #ifdef SYS_getcwd
     ALLOW(SYS_getcwd)
-#endif
-#ifdef SYS_mmap
-    ALLOW(SYS_mmap)
-#endif
-#ifdef SYS_munmap
-    ALLOW(SYS_munmap)
-#endif
-#ifdef SYS_mprotect
-    ALLOW(SYS_mprotect)
-#endif
-#ifdef SYS_madvise
-    ALLOW(SYS_madvise)
 #endif
 #ifdef SYS_epoll_ctl
     ALLOW(SYS_epoll_ctl)
