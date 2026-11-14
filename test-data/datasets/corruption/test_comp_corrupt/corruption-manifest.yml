@@ -317,3 +317,195 @@ fixtures:
     verdict_byte_stable: yes
     fixture_dir_sha256: "9c3272181fb473d685e52d2b75ca40d7f38161ae42e771aeb647bcaa0d18f87f"
     verdict_captured_for_dir_sha256: "9c3272181fb473d685e52d2b75ca40d7f38161ae42e771aeb647bcaa0d18f87f"
+  - name: index_entry_offset_swap
+    manifest_key: cass.corruption.audit.index_entry_offset_swap
+    status: audit
+    component: nb-1-big-Index.db
+    clean_source_table: "simple_table"
+    clean_source_path: "datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Index.db"
+    corrupted_path: "corruption/test_comp_corrupt/index_entry_offset_swap/nb-1-big-Index.db"
+    mutation_type: swap_adjacent_vints
+    byte_offset: 38
+    original_bytes_hex: "827d,86b9"
+    mutated_bytes_hex: "86b9,827d"
+    original_sha256: "3f8563d5a2d3efcbe7eca64f42e0f12c4992058c8437ef954772a1c084818b61"
+    corrupted_sha256: "1e41bf50d33f00e222e0f906b3eb8e25a07de7235fd41591b50e39e9083f2e08"
+    original_size_bytes: 21975
+    corrupted_size_bytes: 21975
+    expected_failing_component: Index.db
+    expected_error_class: IndexPositionKeyMismatch
+    audit_invariant: index-data-identity
+    mutation_detail: "data_offset VInts of Index.db entries at byte offsets 20 and 41 swapped"
+    rationale: "Two adjacent Index.db entries' data_offset VInts (equal length) are swapped: each entry stays structurally valid, so check_big_index stays green, but each key now names the other partition's Data.db offset."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "0062d63f50152b9d4bc8cec94288d5abcdaed841776b882de900c01bba26e800"
+  - name: summary_sample_position_corrupt
+    manifest_key: cass.corruption.audit.summary_sample_position_corrupt
+    status: audit
+    component: nb-1-big-Summary.db
+    clean_source_table: "simple_table"
+    clean_source_path: "datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Summary.db"
+    corrupted_path: "corruption/test_comp_corrupt/summary_sample_position_corrupt/nb-1-big-Summary.db"
+    mutation_type: setint64_le
+    byte_offset: 96
+    original_bytes_hex: "e70a000000000000"
+    mutated_bytes_hex: "1400000000000000"
+    original_sha256: "d936bdc38b85c104a0fc8b1b2e4f3958df4eb86b0a4ae57c393c2c3da523fae7"
+    corrupted_sha256: "efad83072cbd91adaec752380600d9275e732dd3fced80e9d905446a4ff00386"
+    original_size_bytes: 288
+    corrupted_size_bytes: 288
+    expected_failing_component: Summary.db
+    expected_error_class: SummarySampleMismatch
+    audit_invariant: summary-index-correlation
+    mutation_detail: "sample 1 position 2791 -> 20 (start of Index.db entry 1)"
+    rationale: "One Summary.db sample's position is rewritten to the start of a DIFFERENT, in-bounds Index.db entry."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "14532e5677dfdd0062d3a3ebb2f4d901ec6d1f23f5f95978272a7046c1552839"
+  - name: filter_db_bit_flip_bti
+    manifest_key: cass.corruption.audit.filter_db_bit_flip_bti
+    status: audit
+    component: da-2-bti-Filter.db
+    clean_source_table: "wide_table"
+    clean_source_path: "datasets/sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786/da-2-bti-Filter.db"
+    corrupted_path: "corruption/test_comp_corrupt/filter_db_bit_flip_bti/da-2-bti-Filter.db"
+    mutation_type: bitflip
+    byte_offset: 8
+    original_bytes_hex: "12"
+    mutated_bytes_hex: "10"
+    original_sha256: "c8beb6fbfd763f005e510bbe42b20ec147948cb5cbeeedabe795439f33d5080e"
+    corrupted_sha256: "f687d5be3079baa9c67fc7ba8cf17a89254851fe1263a4195d8ba34638e243f2"
+    original_size_bytes: 16
+    corrupted_size_bytes: 16
+    expected_failing_component: Filter.db
+    expected_error_class: FilterFalseNegative
+    audit_invariant: bloom-no-false-negative
+    mutation_detail: "lowest set bit of the first non-zero bit-array byte cleared 1->0"
+    rationale: "BTI analogue of filter_db_bit_flip: one bit-array bit cleared 1->0 so a present partition key hashes to an unset bit."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "acf76c26ac4eaeb86b793a6a346e1260e5381450f2911f09a94be9d67b61b6e9"
+  - name: bti_data_offset_out_of_bounds
+    manifest_key: cass.corruption.audit.bti_data_offset_out_of_bounds
+    status: audit
+    component: da-2-bti-Partitions.db
+    clean_source_table: "ttl_table"
+    clean_source_path: "datasets/sstables/test_da/ttl_table-de3b579064e711f19ad401a8c8227b11/da-2-bti-Partitions.db"
+    corrupted_path: "corruption/test_comp_corrupt/bti_data_offset_out_of_bounds/da-2-bti-Partitions.db"
+    mutation_type: setbyte
+    byte_offset: 5
+    original_bytes_hex: "d1"
+    mutated_bytes_hex: "80"
+    original_sha256: "1c5ac5884b133efed2472d04d5f3fa8f072fabf74afde4084c0afb462e68ddcd"
+    corrupted_sha256: "e92ca8f9072b1854a60828fce178b04a8d9fd5acd08495b99c9f7c8e301cf714"
+    original_size_bytes: 74
+    corrupted_size_bytes: 74
+    expected_failing_component: Partitions.db
+    expected_error_class: BtiDataOffsetOutOfBounds
+    audit_invariant: bti-trie-bounds
+    mutation_detail: "second leaf DataOffset(46) -> DataOffset(127)"
+    rationale: "A DataOffset leaf's payload is rewritten to a position past the end of Data.db."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "1a05630db2a09aeda8aba9cc80eaaa12ff8e436864e44d9f52b588cec7d3fd2b"
+  - name: compression_info_short_coverage
+    manifest_key: cass.corruption.audit.compression_info_short_coverage
+    status: audit
+    component: nb-1-big-CompressionInfo.db
+    clean_source_table: "lz4_table"
+    clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db"
+    corrupted_path: "corruption/test_comp_corrupt/compression_info_short_coverage/nb-1-big-CompressionInfo.db"
+    mutation_type: setint64_be
+    byte_offset: 27
+    original_bytes_hex: "000000000002f9ca"
+    mutated_bytes_hex: "00000000000339ca"
+    original_sha256: "4af98f424e68f72b2c78d0f0d78c01117a6dca4f732a3571a3ecaa09a2c77b26"
+    corrupted_sha256: "168f5f51d8a50ed8810d5cd1852d9553f867d8ce81a48f591b29fa55e6bdaee6"
+    original_size_bytes: 135
+    corrupted_size_bytes: 135
+    expected_failing_component: CompressionInfo.db
+    expected_error_class: CompressionCoverageGap
+    audit_invariant: compression-coverage
+    mutation_detail: "data_length 195018 -> 211402 (+ one chunk_length 16384): 12 declared chunks, ceil(data_length/chunk_length) = 13"
+    rationale: "data_length is raised by one chunk_length: the chunk table declares one chunk fewer than ceil(data_length/chunk_length) while its own bytes stay valid (dropping the last offset instead also trips the existing inline-CRC check)."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "09a3ec627f2e5f47c419b1cc83d52fa7fbc84872a158dd58fd8e056486423f3a"
+  - name: statistics_partition_count_mismatch
+    manifest_key: cass.corruption.audit.statistics_partition_count_mismatch
+    status: audit
+    component: nb-1-big-Statistics.db
+    clean_source_table: "lz4_table"
+    clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Statistics.db"
+    corrupted_path: "corruption/test_comp_corrupt/statistics_partition_count_mismatch/nb-1-big-Statistics.db"
+    mutation_type: setint64_be+crc
+    byte_offset: 1141
+    original_bytes_hex: "0000000000000001"
+    mutated_bytes_hex: "0000000000000002"
+    original_sha256: "02f636e457c199296987c8d75de516d0e84b98b7fb41ee9e869d9a15457c1dde"
+    corrupted_sha256: "3b36395dfaa2bce28f958d644aae5af7ff781ef309b7e0df67f37404ded0dd76"
+    original_size_bytes: 4847
+    corrupted_size_bytes: 4847
+    expected_failing_component: Statistics.db
+    expected_error_class: StatisticsScanMismatch
+    audit_invariant: statistics-vs-scan
+    mutation_detail: "estimatedPartitionSize bucket 63 count 1 -> 2; the STATS component CRC32 at byte 4697 recomputed so the file stays valid"
+    rationale: "One estimatedPartitionSize bucket count is raised by 1 (component CRC32 recomputed): the file stays valid but declares one more partition than a scan finds."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "d952670989b481d2bc74360e331cdc2e66744d493bccf5e08787d924ed8dfb51"
+  - name: compression_info_offsets_non_monotonic
+    manifest_key: cass.corruption.audit.compression_info_offsets_non_monotonic
+    status: audit
+    component: nb-1-big-CompressionInfo.db
+    clean_source_table: "lz4_table"
+    clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db"
+    corrupted_path: "corruption/test_comp_corrupt/compression_info_offsets_non_monotonic/nb-1-big-CompressionInfo.db"
+    mutation_type: swap_adjacent_int64
+    byte_offset: 55
+    original_bytes_hex: "00000000000004a1,00000000000006ee"
+    mutated_bytes_hex: "00000000000006ee,00000000000004a1"
+    original_sha256: "4af98f424e68f72b2c78d0f0d78c01117a6dca4f732a3571a3ecaa09a2c77b26"
+    corrupted_sha256: "aa59064adc01f61a84b09eeef2a69f3d7b9e2117cf1cb955eee150c5027e184a"
+    original_size_bytes: 135
+    corrupted_size_bytes: 135
+    expected_failing_component: CompressionInfo.db
+    expected_error_class: CompressionInfoCorrupt
+    audit_invariant: compression-coverage
+    mutation_detail: "chunk offsets[2] and offsets[3] swapped: an EARLIER offset is now larger than its successor"
+    rationale: "Two adjacent chunk offsets are swapped, so an EARLIER offset exceeds its successor (the table is no longer monotonic)."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "c158b6f45dd306039fd74fbe3bdf26782b52990748d1411f132147227f4f911e"
+  - name: compression_info_first_offset_nonzero
+    manifest_key: cass.corruption.audit.compression_info_first_offset_nonzero
+    status: audit
+    component: nb-1-big-CompressionInfo.db
+    clean_source_table: "lz4_table"
+    clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db"
+    corrupted_path: "corruption/test_comp_corrupt/compression_info_first_offset_nonzero/nb-1-big-CompressionInfo.db"
+    mutation_type: setbyte
+    byte_offset: 46
+    original_bytes_hex: "00"
+    mutated_bytes_hex: "01"
+    original_sha256: "4af98f424e68f72b2c78d0f0d78c01117a6dca4f732a3571a3ecaa09a2c77b26"
+    corrupted_sha256: "2ad94c42668ffe49732f487c2388e5da5af2d6da85706b905ecc3121b1675ffe"
+    original_size_bytes: 135
+    corrupted_size_bytes: 135
+    expected_failing_component: CompressionInfo.db
+    expected_error_class: CompressionCoverageGap
+    audit_invariant: compression-coverage
+    mutation_detail: "chunk offsets[0] 0 -> 1: the table is still strictly ascending and in bounds, but the first chunk no longer starts at byte 0"
+    rationale: "The first chunk offset is 1 instead of 0: still ascending and in bounds, but the table no longer starts at the beginning of Data.db."
+    cassandra_verdict: n/a
+    verdict_parity: "n/a: no Cassandra-side check for this invariant"
+    verdict_note: "Audit-only fixture (issue #4195): not part of the sstableverify parity set; status audit keeps sstable_parity_corruption_verify (status active only) unaffected."
+    fixture_dir_sha256: "2a1bcd98357b23557b66a4b73bf96e2dc7383e116e0eac264d48dcd178928514"
