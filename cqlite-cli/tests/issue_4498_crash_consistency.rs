@@ -439,6 +439,16 @@ fn output_set(area: &Area<'_>) -> BTreeMap<PathBuf, Vec<u8>> {
     snapshot(&out_dir(area))
 }
 
+/// Whether the `--out` directory holds NO entry at all (a missing directory counts as empty).
+/// Unlike [`output_set`], which lists files only, this sees directory-only debris, so a fault that
+/// left an empty sub-directory behind is not mistaken for a clean slate (roborev r5).
+fn out_is_genuinely_empty(area: &Area<'_>) -> bool {
+    match std::fs::read_dir(out_dir(area)) {
+        Ok(mut rd) => rd.next().is_none(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 fn tocs(set: &BTreeMap<PathBuf, Vec<u8>>) -> Vec<PathBuf> {
     set.keys()
         .filter(|p| {
@@ -756,9 +766,27 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             // AC4: re-run after the failure. Both verbs REFUSE a non-empty --out by contract
             // ("--out ... is not empty"), so the operator clears it first; the retry must then
             // succeed and reproduce the uninterrupted run byte-for-byte.
+            let genuinely_empty = out_is_genuinely_empty(&a);
             let leftover = run_verb(verb, f, &a, Some((shim(), None)));
-            if after.is_empty() {
-                // nothing left behind: the retry must simply succeed
+            if genuinely_empty {
+                // Nothing at all was left behind (no file, no directory): the IMMEDIATE retry
+                // must succeed on its own and reproduce the uninterrupted run -- asserted here,
+                // not left to the later clean re-run.
+                if leftover.code() != Some(0) {
+                    failures.push(format!(
+                        "{tag}: --out was genuinely empty after the fault but the immediate retry failed: code={:?} {}",
+                        leftover.code(),
+                        leftover.text().lines().last().unwrap_or("")
+                    ));
+                } else if output_set(&a) != reference {
+                    failures.push(format!(
+                        "{tag}: immediate retry into an empty --out differs from the uninterrupted run"
+                    ));
+                } else if manifest_normalised(&a) != reference_manifest {
+                    failures.push(format!(
+                        "{tag}: immediate retry --manifest differs from (or is missing against) the uninterrupted run's"
+                    ));
+                }
             } else if leftover.code() == Some(0) {
                 failures.push(format!("{tag}: retry into a populated --out unexpectedly succeeded (the non-empty guard is part of the contract)"));
             } else if !leftover.text().contains("not empty") {
@@ -937,6 +965,10 @@ fn is_io_mutating(sym: &str) -> bool {
         "futimens",
         "utimensat",
         "mmap",
+        "mprotect",
+        "munmap",
+        "madvise",
+        "mremap",
         "msync",
         "remove",
         "syscall",
@@ -957,12 +989,18 @@ const NOT_A_WRITE_BOUNDARY: &[(&str, &str)] = &[
     ("opendir", "directory read"),
     ("fdopendir", "directory read"),
     ("readlink", "read-only"),
-    ("fchmod", "permission bits only; no data or directory-entry change a crash could tear"),
-    ("mmap64", "read-only mappings (memmap2::Mmap) for the readers; no MAP_SHARED writable map in the verbs"),
-    ("mmap", "as mmap64"),
-    ("munmap", "unmaps"),
-    ("posix_spawn_file_actions_addchdir_np", "process spawn plumbing"),
-    ("posix_spawn_file_actions_addchdir", "process spawn plumbing"),
+    (
+        "fchmod",
+        "permission bits only; no data or directory-entry change a crash could tear",
+    ),
+    (
+        "posix_spawn_file_actions_addchdir_np",
+        "process spawn plumbing",
+    ),
+    (
+        "posix_spawn_file_actions_addchdir",
+        "process spawn plumbing",
+    ),
     ("posix_spawn_file_actions_adddup2", "process spawn plumbing"),
     ("posix_spawn_file_actions_destroy", "process spawn plumbing"),
     ("posix_spawn_file_actions_init", "process spawn plumbing"),
@@ -1129,6 +1167,58 @@ int main(void) {{ {} ; return 0; }}"#,
             stderr.contains("UNHANDLED raw syscall"),
             "{name}: {stderr:?}"
         );
+    }
+}
+
+/// Roborev r5: memory mappings are not a blanket exemption. A writable shared file mapping under
+/// the fault root (or making one writable later, or hole-punching the file) bypasses every write
+/// boundary, so the shim ABORTS the run, naming the cause; read-only, private and anonymous
+/// mappings stay allowed. The positive and negative probes run the real shim.
+#[test]
+fn writable_file_mappings_under_the_fault_root_abort_and_harmless_ones_pass() {
+    const PRELUDE: &str = r#"#define _GNU_SOURCE
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+int main(void) {
+  int fd = open("ROOT/f", O_RDWR | O_CREAT, 0644);
+  if (fd < 0 || ftruncate(fd, 4096) != 0) return 3;
+"#;
+    let cases: &[(&str, &str, Option<i32>)] = &[
+        // NEGATIVE evidence: each of these must abort with exit 97 and the named cause.
+        ("shared_rw", "void *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); (void)m; return 0;", Some(97)),
+        ("shared_w_only", "void *m = mmap(0, 4096, PROT_WRITE, MAP_SHARED, fd, 0); (void)m; return 0;", Some(97)),
+        ("raw_syscall_shared_rw", "long m = syscall(SYS_mmap, 0L, 4096L, (long)(PROT_READ | PROT_WRITE), (long)MAP_SHARED, (long)fd, 0L); (void)m; return 0;", Some(97)),
+        ("mprotect_upgrade", "void *m = mmap(0, 4096, PROT_READ, MAP_SHARED, fd, 0); if (m == MAP_FAILED) return 4; mprotect(m, 4096, PROT_READ | PROT_WRITE); return 0;", Some(97)),
+        ("madvise_remove", "void *m = mmap(0, 4096, PROT_READ, MAP_SHARED, fd, 0); if (m == MAP_FAILED) return 4; madvise(m, 4096, MADV_REMOVE); return 0;", Some(97)),
+        // POSITIVE controls: harmless mappings are untouched (exit 0), so the guard is not "abort on everything".
+        ("shared_readonly", "void *m = mmap(0, 4096, PROT_READ, MAP_SHARED, fd, 0); if (m == MAP_FAILED) return 4; munmap(m, 4096); return 0;", Some(0)),
+        ("private_writable", "void *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0); if (m == MAP_FAILED) return 4; ((char *)m)[0] = 1; munmap(m, 4096); return 0;", Some(0)),
+        ("anonymous_writable", "void *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0); if (m == MAP_FAILED) return 4; ((char *)m)[0] = 1; return 0;", Some(0)),
+        ("madvise_dontneed_ok", "void *m = mmap(0, 4096, PROT_READ, MAP_SHARED, fd, 0); if (m == MAP_FAILED) return 4; madvise(m, 4096, MADV_DONTNEED); munmap(m, 4096); return 0;", Some(0)),
+        ("mprotect_after_unmap_ok", "void *m = mmap(0, 4096, PROT_READ, MAP_SHARED, fd, 0); if (m == MAP_FAILED) return 4; munmap(m, 4096); void *a = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); if (a == MAP_FAILED) return 5; return mprotect(a, 4096, PROT_READ | PROT_WRITE) == 0 ? 0 : 6;", Some(0)),
+    ];
+    for (name, body, want) in cases {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().canonicalize().unwrap();
+        let src = format!(
+            "{}{}\n}}",
+            PRELUDE.replace("ROOT", &root.display().to_string()),
+            body
+        );
+        let (status, _, stderr) = run_c_under_shim(name, &src, &root);
+        assert_eq!(
+            status.code(),
+            *want,
+            "{name}: unexpected status {status:?}; stderr: {stderr}"
+        );
+        if *want == Some(97) {
+            assert!(
+                stderr.contains("WRITABLE FILE MAPPING UNDER THE FAULT ROOT"),
+                "{name}: aborted without naming the cause: {stderr:?}"
+            );
+        }
     }
 }
 
