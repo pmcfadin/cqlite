@@ -128,7 +128,8 @@ impl StagedPublish {
                 })?;
         }
         let mut dest_dirs: Vec<PathBuf> = Vec::new();
-        for (file, rel) in &staged {
+        for (renamed, (file, rel)) in staged.iter().enumerate() {
+            test_abort_before_rename(renamed);
             let dest = self.root.join(rel);
             if dest.symlink_metadata().is_ok() {
                 return Err(Error::Storage(format!(
@@ -150,6 +151,7 @@ impl StagedPublish {
                 ))
             })?;
         }
+        test_abort_before_rename(staged.len());
         for dir in &dest_dirs {
             fsync_dir(dir)?;
         }
@@ -173,6 +175,21 @@ impl Drop for StagedPublish {
         }
     }
 }
+
+/// Debug-build-only crash seam for the #4529 tests: `CQLITE_TEST_PUBLISH_ABORT=<n>` aborts the
+/// process (no unwinding, no `Drop`: a faithful stand-in for SIGKILL) just before the `n`-th rename
+/// of the publish window (`n == 0`: after everything is staged and fsynced, before any rename;
+/// `n == <file count>`: after the last rename). Compiled out of release builds.
+#[cfg(debug_assertions)]
+fn test_abort_before_rename(renamed: usize) {
+    if let Ok(v) = std::env::var("CQLITE_TEST_PUBLISH_ABORT") {
+        if v.parse::<usize>() == Ok(renamed) {
+            std::process::abort();
+        }
+    }
+}
+#[cfg(not(debug_assertions))]
+fn test_abort_before_rename(_renamed: usize) {}
 
 fn rank(rel: &Path) -> u8 {
     let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
