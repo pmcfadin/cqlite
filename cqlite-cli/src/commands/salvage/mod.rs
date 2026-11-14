@@ -138,7 +138,20 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     match std::fs::read_dir(&args.out) {
         Ok(mut rd) => {
             if rd.next().is_some() {
-                eprintln!("cqlite salvage: --out {} is not empty", args.out.display());
+                // Issue #4529 (AC2): name an interrupted run's staging directory (unpublished,
+                // incomplete files) so the operator knows what the leftover is.
+                match cqlite_core::storage::write_engine::rebuild::staged_publish::find_leftover(
+                    &args.out,
+                ) {
+                    Some(left) => eprintln!(
+                        "cqlite salvage: --out {} is not empty: it holds a staging directory from \
+                         an interrupted run ({}), whose files are unpublished and incomplete — \
+                         remove it (or the whole directory) and re-run",
+                        args.out.display(),
+                        left.display()
+                    ),
+                    None => eprintln!("cqlite salvage: --out {} is not empty", args.out.display()),
+                }
                 std::process::exit(1);
             }
         }
