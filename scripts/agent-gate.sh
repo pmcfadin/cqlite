@@ -902,7 +902,9 @@
 #                      would satisfy them all. And case 26: THIS component must not
 #                      report PASS on a guard that exited 0 having measured nothing.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
-#                      -p cqlite-core --no-default-features --features all-compression
+#                      -p cqlite-core --no-default-features --features all-compression,
+#                      plus a `cargo build` at --no-default-features --features
+#                      write-support (issue #4557)
 #   all-features-check cargo check + cargo clippy (-D warnings), BOTH at
 #                      -p cqlite-core --all-features --all-targets (issue #3453).
 #                      THE ONE COMPONENT THAT ENABLES THE OTLP STACK. `clippy` above
@@ -28604,7 +28606,7 @@ dispatch_component() {
       # SUMMARY must say so; hoisted here and expanded into both invocations below AND
       # into the in-body record preceding each (a failed `cargo build` must not leave the
       # block claiming the test-compile pass ran too — job 269 blocker 2).
-      local mn_pkg=cqlite-core mn_feats=all-compression
+      local mn_pkg=cqlite-core mn_feats=all-compression mn_wfeats=write-support
       run_component minimal-build bash -c '
   # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
   # that job sets RUSTFLAGS=-D warnings, so a warning-class error (e.g. an unused
@@ -28623,7 +28625,14 @@ dispatch_component() {
   # storage::serialization) silently escaped this gate. Compile-only (--no-run)
   # keeps it fast; no data fixtures needed for a compile check.
   _fm_observe_child minimal-build test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run &&
-  cargo test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run' ;;
+  cargo test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run &&
+  # The write-support-only combination (issue #4557): `--no-default-features --features
+  # write-support` builds the write engine WITHOUT any compression feature, so an import used only
+  # by a feature-gated compressor (compressed_data_writer.rs `std::io::Write`) is unused there and
+  # `-D warnings` (exported above) fails. Neither the all-compression lane above nor the
+  # all-features lane compiles it, so it escaped until a reviewer stumbled on it.
+  _fm_observe_child minimal-build build --package '"$mn_pkg"' --no-default-features --features '"$mn_wfeats"' &&
+  cargo build --package '"$mn_pkg"' --no-default-features --features '"$mn_wfeats"'' ;;
     all-features-check) run_all_features_check ;;
     smoke)
       # #3453: smoke builds the CLI at DEFAULT features and then runs a shell script.
