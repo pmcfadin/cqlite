@@ -190,18 +190,49 @@ async fn engagement_assertion_reds_a_probe_served_by_the_full_path() {
     );
 }
 
+/// Issue #4256: the corruption the meta-test wants armed for the COMPARISON phase of
+/// the next `run_case` only. `run_case` first runs an integer-key discovery scan on the
+/// full leg; arming before `run_case` would corrupt THAT scan (it reads the partition
+/// key through the same chokepoint) and fail the case before any point-vs-full
+/// comparison ran, proving nothing about the comparison. So the meta-test parks the
+/// filter here and `run_case` arms it right after discovery.
+#[cfg(feature = "result-corruption-injection")]
+static ARM_AFTER_DISCOVERY: parking_lot::Mutex<
+    Option<cqlite_core::query::result_corruption::ArmFilter>,
+> = parking_lot::Mutex::new(None);
+
+#[cfg(feature = "result-corruption-injection")]
+pub(super) type LateArm = Option<cqlite_core::query::result_corruption::CorruptionArm>;
+#[cfg(not(feature = "result-corruption-injection"))]
+pub(super) type LateArm = ();
+
+/// Called by `run_case` immediately after key discovery: arms (and hands back the guard
+/// for) any filter the meta-test parked. No-op without the feature or when nothing is parked.
+pub(super) fn arm_after_discovery() -> LateArm {
+    #[cfg(feature = "result-corruption-injection")]
+    {
+        ARM_AFTER_DISCOVERY
+            .lock()
+            .take()
+            .map(cqlite_core::query::result_corruption::arm)
+    }
+}
+
 /// Issue #4256 META-TEST: the point-vs-full suite must go RED when ONE decoded cell
 /// on the path under test is wrong. The comparator's synthetic-diff test
 /// (`comparison_detects_a_seeded_divergence`) cannot see a suite whose legs quietly
 /// stopped being compared; this corrupts one cell of the REAL point-leg output (then,
 /// separately, of the full-leg output) via the feature-gated seam and asserts the
 /// suite's own per-case assertion (`run_case`, which the suite's `failures.is_empty()`
-/// assertion is built on) reports a DIVERGENCE. The unarmed control must pass.
+/// assertion is built on) fails with its own `point-vs-full DIVERGENCE` error. Each
+/// leg is armed only AFTER key discovery (see [`ARM_AFTER_DISCOVERY`]), so discovery is
+/// untouched and the only way to go red is the comparison itself. The unarmed control
+/// must pass.
 #[cfg(feature = "result-corruption-injection")]
 #[tokio::test]
 #[serial]
 async fn corrupted_decoded_cell_turns_the_differential_red() {
-    use cqlite_core::query::result_corruption::{arm, corrupted_count, ArmFilter};
+    use cqlite_core::query::result_corruption::{corrupted_count, ArmFilter};
 
     let case = super::CORPUS
         .iter()
@@ -223,24 +254,18 @@ async fn corrupted_decoded_cell_turns_the_differential_red() {
         ("full leg", ArmFilter::FullScanOnly),
     ] {
         let before = corrupted_count();
-        let armed = arm(filter);
+        *ARM_AFTER_DISCOVERY.lock() = Some(filter);
         let outcome = super::run_case(case).await;
-        drop(armed);
+        *ARM_AFTER_DISCOVERY.lock() = None;
         assert!(
             corrupted_count() > before,
             "{leg}: the corruption seam never fired — the meta-test would prove nothing"
         );
         let err = outcome.expect_err("a corrupted decoded cell must turn the differential red");
-        // The point leg is only compared, so it must fail with the suite's own
-        // DIVERGENCE assertion. A full-scan corruption additionally poisons the
-        // discovery scan (it reads the partition-key column through the same chokepoint),
-        // which the suite rejects first with its integer-key check — still red, by the
-        // suite's own assertion, so only "red" is required of that leg.
-        if matches!(filter, ArmFilter::TargetedOnly) {
-            assert!(
-                err.contains("point-vs-full DIVERGENCE"),
-                "{leg}: the suite must fail with its own DIVERGENCE assertion, got: {err}"
-            );
-        }
+        assert!(
+            err.contains("point-vs-full DIVERGENCE"),
+            "{leg}: the suite must fail with its own DIVERGENCE assertion (not a \
+             discovery/engagement/cold-start error), got: {err}"
+        );
     }
 }

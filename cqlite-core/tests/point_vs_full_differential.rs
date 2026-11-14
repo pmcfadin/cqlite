@@ -805,6 +805,9 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     let discovered = discover_pk_ints(&full_db, case.keyspace, case.table, case.pk_column).await?;
     let (disc_hits, disc_misses, disc_entries) =
         point_engagement::CacheCounters::now().since(cache_before_discovery);
+    // Issue #4256: a meta-test may park a corruption filter to be armed only now, so
+    // the discovery scan above is never the thing that fails. Guard lives to fn end.
+    let _late_arm = point_engagement::arm_after_discovery();
     // Merge discovered (live) keys with the always-probe keys, deduplicated and
     // sorted so the probe set is deterministic.
     let mut key_set: BTreeMap<i64, ()> = BTreeMap::new();
