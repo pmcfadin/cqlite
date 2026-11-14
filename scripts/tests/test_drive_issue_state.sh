@@ -1466,7 +1466,27 @@ run "$L31D" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" 
 ap_dupfail=0
 for dk in prior-session-pid prior-ts adopt-reason; do
   cp "$L31D/$MARKER" "$T/m31d.bak"
-  awk -v k="$dk" '{print} $0 ~ "^"k": " && !d {print; d=1}' "$T/m31d.bak" >"$L31D/$MARKER"
+  # Build the mutated marker in a scratch file, check awk's OWN exit status, and move it into place.
+  # The old `awk ... >"$L31D/$MARKER"` ignored awk's status: when the host failed the write
+  # ("awk: close failed on /dev/stdout (Input/output error)": a full/quota'd volume under load) the
+  # marker was left TRUNCATED, `show` then answered something other than MALFORMED, and the test
+  # blamed the product ("keys accept a duplicate") for a host I/O error (issue #4538). A failed
+  # fixture write is retried and, if it persists, reported as what it is — an infrastructure
+  # failure — never as a verdict about the product.
+  ap_mut_ok=0
+  for _try in 1 2 3; do
+    if awk -v k="$dk" '{print} $0 ~ "^"k": " && !d {print; d=1}' "$T/m31d.bak" >"$T/m31d.new" 2>"$T/m31d.awkerr" \
+       && cp "$T/m31d.new" "$L31D/$MARKER" 2>>"$T/m31d.awkerr"; then
+      ap_mut_ok=1; break
+    fi
+    sleep 1
+  done
+  if [ "$ap_mut_ok" -ne 1 ]; then
+    ap_dupfail=$((ap_dupfail + 1))
+    printf 'note   duplicate %s: the FIXTURE WRITE failed 3x (host I/O error, not a product verdict): %s\n' "$dk" "$(head -c 200 "$T/m31d.awkerr")"
+    cp "$T/m31d.bak" "$L31D/$MARKER" 2>/dev/null || true
+    continue
+  fi
   ap_du=$(run "$L31D" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- show 3822 2>&1); ap_durc=$?
   if [ "$ap_durc" -ne 0 ] && [ "$(verdict_of "$ap_du")" = MALFORMED ]; then :; else
     ap_dupfail=$((ap_dupfail + 1))

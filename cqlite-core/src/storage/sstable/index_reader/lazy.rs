@@ -492,18 +492,17 @@ mod tests {
     /// `index_reader/parse.rs`). This test proves that cancel-poll survived the
     /// move to the deferred/lazy call site.
     ///
-    /// Same calibrated-margin convention as
-    /// `cqlite-flight::warm::registry::spin_tests_2383::cancel_during_large_index_parse_aborts_promptly`
-    /// (issue #2383 roborev-1653 NIT 5 — no wall-clock races: the margin is a
-    /// small fraction of a JUST-measured baseline for this exact fixture on this
-    /// exact host, not a fixed sleep constant that flakes on a fast host).
+    /// Deterministic (issue #4538): the cancel is tripped ON A CHOSEN POLL of the parse loop's own
+    /// `ScanCancel::check`, never by a wall-clock race. The loop polls once before the header (1),
+    /// at entry 0 (2) and again every `CANCEL_POLL_INTERVAL` entries (3, 4, ...). Tripping on poll 3
+    /// can only be observed if the loop genuinely parsed a full interval and then polled again — so
+    /// a loop that polled only at the coarse pre-check (or never) would run all the way to completion
+    /// and fail the assertion below, however fast or loaded the host.
     #[tokio::test]
     async fn ensure_materialized_cancel_mid_parse_aborts_promptly() {
         use crate::storage::scan_cancel::ScanCancel;
 
-        // Large enough to span several `CANCEL_POLL_INTERVAL` (65536) windows, so
-        // the parse loop polls cancel multiple times before completing — proving
-        // "aborts DURING the parse", not merely at the coarse pre-check.
+        // Large enough to span several `CANCEL_POLL_INTERVAL` (65536) windows.
         const N: usize = 400_000;
         let mut bytes = Vec::new();
         for i in 0..N {
@@ -519,44 +518,18 @@ mod tests {
                 .expect("platform must initialize"),
         );
 
-        // Calibrate: fully materialize the SAME fixture once, uncancelled — also
-        // warms the OS page cache ahead of the timed run below (biasing it
-        // FASTER, never slower, than this baseline).
-        let calib_start = std::time::Instant::now();
-        let calib_reader = IndexReader::open_lazy(&path, platform.clone())
-            .await
-            .expect("calibration open_lazy");
-        calib_reader
-            .ensure_materialized(&ScanCancel::default())
-            .await
-            .expect("calibration materialize (uncancelled) completes");
-        let baseline = calib_start.elapsed();
-        // 1/20th of the measured baseline (same fraction as the flight-level
-        // sibling test): small enough to land inside the timed run, large enough
-        // to dwarf the coarse pre-parse check's same-thread, no-I/O comparison.
-        let margin = baseline / 20;
-
         let reader = IndexReader::open_lazy(&path, platform)
             .await
             .expect("timed open_lazy");
-        let cancel = ScanCancel::new();
-        let canceller = {
-            let cancel = cancel.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(margin);
-                cancel.cancel();
-            })
-        };
+        let cancel = ScanCancel::cancel_on_poll(3);
 
         let result = reader.ensure_materialized(&cancel).await;
-        canceller.join().expect("canceller");
 
         assert!(
             matches!(result, Err(Error::Cancelled)),
             "a cancel tripped DURING ensure_materialized's deferred Index.db parse \
-             must abort promptly with Error::Cancelled (calibrated margin {margin:?} \
-             from baseline {baseline:?}), got {result:?} (issue #2412 re-anchor of \
-             #2383 fix C)"
+             must abort with Error::Cancelled on the loop's third poll (after a full \
+             interval was parsed), got {result:?} (issue #2412 re-anchor of #2383 fix C)"
         );
         // The aborted materialize must NOT have left a poisoned "materialized"
         // state: entries stay empty/not-fully-parsed, matching `open_lazy`'s
