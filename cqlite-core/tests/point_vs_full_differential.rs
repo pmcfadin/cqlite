@@ -48,6 +48,32 @@
 //! different row sets must report a mismatch), complementing the manual
 //! seed-a-real-divergence verification recorded in the PR.
 //!
+//! ## Declared outcomes and the reverse-direction axis (issue #4256)
+//!
+//! Every `TableCase` DECLARES its expected outcome (`DeclaredOutcome`): `Served`
+//! (a partition-targeted path, the default), `SupportedButUnserved` (forced `Point`
+//! fails closed with an exact `ForcedReadPathUnavailable` reason), or
+//! `SanctionedFallback` (`auto` full-scans with an exact `FallbackReason`). The
+//! declaration is authored from the access-path contract and is NEVER detected from
+//! the result. Cases reuse real datasets-v4 tables; reasons the lane cannot reach on a
+//! real table (`NoSchema`, `PartitionKeyEncodingFailed`, `LegacyExecutorPath`,
+//! `TombstonesBuildNoPrune`) are not declared rather than fabricated.
+//!
+//! Reverse reads (`ORDER BY <clustering> DESC`) are a separate axis whose bugs live in
+//! its INTERACTIONS with other axes, so the interacting pairs are named here and each
+//! has a real fixture:
+//!   * **direction × format** — BIG (`nb`): `test_compaction_tombstone_ttl.shadow_row_delete`,
+//!     `test_tomb.*`; BTI (`da`): `test_da.wide_table` (single `int` clustering column,
+//!     `Rows.db` row index), `test_da.multiclustering_table` (compound `text`,`int`).
+//!   * **direction × compression** — compressed BIG: `test_big.wide_partition` (LZ4, 114
+//!     chunks) and `test_tomb.static_with_tombstones`; compressed BTI:
+//!     `test_da.wide_table` (115 chunks); UNCOMPRESSED BIG:
+//!     `test_compaction_tombstone_ttl.shadow_row_delete`. There is NO uncompressed BTI
+//!     fixture in datasets-v4 (every `da` table carries `CompressionInfo.db`), so that
+//!     pair is declared absent rather than synthesized.
+//!   * **direction × clustering slice** — every case's slice predicates are re-run with
+//!     the DESC ordering and the same exact row counts.
+//!
 //! ## Second axis: 1 generation vs N generations (issue #3129)
 //!
 //! `one_vs_n_generation` (submodule, same target) adds the orthogonal axis this
@@ -98,6 +124,11 @@ mod uuid_keyed_axis;
 #[path = "point_vs_full_differential/point_engagement.rs"]
 mod point_engagement;
 
+// Issue #4256: DECLARED per-case outcomes (served / supported-but-unserved /
+// sanctioned fallback) and the REVERSE-direction axis. Same `#[path]` rationale.
+#[path = "point_vs_full_differential/declared_outcomes.rs"]
+mod declared_outcomes;
+
 // TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
 // (issue #3220). Declared BEFORE first use so both this file and the submodule
 // (`use super::…`) resolve fixtures the same way.
@@ -111,6 +142,7 @@ use serial_test::serial;
 
 use cqlite_core::config::ReadPathMode;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::query::access_path::FallbackReason;
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::{Config, Database};
 
@@ -174,6 +206,43 @@ fn require_fixtures() -> bool {
     std::env::var("CQLITE_REQUIRE_FIXTURES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// The outcome a corpus case DECLARES for its probe (issue #4256). Declared by the
+/// case author from the access-path contract (`query::access_path`), NEVER detected
+/// from the result: a case that auto-detected its outcome would pass whatever the
+/// engine did. `{t}` in a query template is replaced by `<keyspace>.<table>`.
+#[derive(Debug, Clone, Copy)]
+enum DeclaredOutcome {
+    /// Served: forced-`Point` `WHERE pk = k` runs a partition-TARGETED path (asserted
+    /// per probe by the engagement guard, #4255), and equals the forced-`Full` result.
+    Served,
+    /// Supported-but-unserved: the point path is a supported mode, yet the declared
+    /// query shape cannot be point-served, so forced `Point` FAILS CLOSED with
+    /// `Error::ForcedReadPathUnavailable { forced: "point", reason }` (exact label)
+    /// instead of silently full-scanning. The same query under `Full` must still
+    /// succeed with rows.
+    SupportedButUnserved {
+        query: &'static str,
+        reason: FallbackReason,
+    },
+    /// Sanctioned fallback: under `Auto` the declared query takes
+    /// `AccessPath::FallbackFullScan { reason }` with EXACTLY this closed
+    /// `FallbackReason`, and returns the same rows as forced `Full`.
+    SanctionedFallback {
+        query: &'static str,
+        reason: FallbackReason,
+    },
+}
+
+impl DeclaredOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            DeclaredOutcome::Served => "served",
+            DeclaredOutcome::SupportedButUnserved { .. } => "supported_but_unserved",
+            DeclaredOutcome::SanctionedFallback { .. } => "sanctioned_fallback",
+        }
+    }
 }
 
 /// One corpus table: a single-column INT partition key (so a `WHERE pk = <int>`
@@ -240,6 +309,12 @@ struct TableCase {
     /// predicate is anchored to the row count its slice must yield. Empty =
     /// partition-key equality only.
     clustering_slice_predicates: &'static [(&'static str, usize)],
+    /// The DECLARED outcome of this case's probe (issue #4256); see [`DeclaredOutcome`].
+    outcome: DeclaredOutcome,
+    /// Reverse-direction axis (issue #4256): the `ORDER BY` clause (all clustering
+    /// columns `DESC`) that runs every probed partition — and every clustering slice —
+    /// in reverse through BOTH paths. `None` for a table with no clustering column.
+    reverse_order_by: Option<&'static str>,
 }
 
 /// The corpus. Every table has a single INT partition key. Collectively they
@@ -258,6 +333,8 @@ const CORPUS: &[TableCase] = &[
         // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
         // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
+        outcome: DeclaredOutcome::Served,
+        reverse_order_by: Some("ck DESC"),
         clustering_slice_predicates: &[],
     },
     TableCase {
@@ -270,6 +347,8 @@ const CORPUS: &[TableCase] = &[
         // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
         // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
+        outcome: DeclaredOutcome::Served,
+        reverse_order_by: Some("ck DESC"),
         clustering_slice_predicates: &[],
     },
     // Cross-generation partition tombstone + a tombstone-only partition.
@@ -283,6 +362,10 @@ const CORPUS: &[TableCase] = &[
         // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
         // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
+        outcome: DeclaredOutcome::Served,
+        // Single-row partitions only: a reverse comparison here would be vacuous (the
+        // run_reverse guard rejects it), so this table carries no reverse axis.
+        reverse_order_by: None,
         clustering_slice_predicates: &[],
     },
     // TTL localDeletionTime boundary (expired vs live cells).
@@ -296,6 +379,10 @@ const CORPUS: &[TableCase] = &[
         // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
         // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
+        outcome: DeclaredOutcome::Served,
+        // Single-row partitions only: a reverse comparison here would be vacuous (the
+        // run_reverse guard rejects it), so this table carries no reverse axis.
+        reverse_order_by: None,
         clustering_slice_predicates: &[],
     },
     // Live static cell surviving adjacent row/cell/range tombstones.
@@ -312,6 +399,8 @@ const CORPUS: &[TableCase] = &[
         // the ONLY test_tomb table in this corpus whose binaries are in git. Present in
         // every checkout, so a SKIP can only mean the lane failed to RESOLVE it.
         must_run: true,
+        outcome: DeclaredOutcome::Served,
+        reverse_order_by: Some("ck DESC"),
         clustering_slice_predicates: &[],
     },
     // Post-major-compaction tombstone/TTL fixtures (single output SSTable).
@@ -323,6 +412,8 @@ const CORPUS: &[TableCase] = &[
         probe_keys: &[],
         divergence_classes: &["tombstone"],
         must_run: true,
+        outcome: DeclaredOutcome::Served,
+        reverse_order_by: Some("ck DESC"),
         clustering_slice_predicates: &[],
     },
     TableCase {
@@ -333,6 +424,10 @@ const CORPUS: &[TableCase] = &[
         probe_keys: &[],
         divergence_classes: &["ttl"],
         must_run: true,
+        outcome: DeclaredOutcome::Served,
+        // Single-row partitions only: a reverse comparison here would be vacuous (the
+        // run_reverse guard rejects it), so this table carries no reverse axis.
+        reverse_order_by: None,
         clustering_slice_predicates: &[],
     },
     // BTI (`da`) WIDE partition with a per-partition `Rows.db` row index (issue
@@ -351,6 +446,8 @@ const CORPUS: &[TableCase] = &[
         probe_keys: &[1, 2, 3],
         divergence_classes: &["bti_clustering_slice"],
         must_run: true,
+        outcome: DeclaredOutcome::Served,
+        reverse_order_by: Some("ck DESC"),
         // Every partition holds ck=0..=299, so each slice's row count is exact and
         // identical for pk=1/2/3 — and every one of them is strictly between 0 and the
         // partition's 300 rows, so neither an empty nor an unnarrowed result can pass.
@@ -381,6 +478,8 @@ const CORPUS: &[TableCase] = &[
         probe_keys: &[1, 2, 3],
         divergence_classes: &["bti_clustering_slice", "compound_clustering"],
         must_run: true,
+        outcome: DeclaredOutcome::Served,
+        reverse_order_by: Some("bucket DESC, seq DESC"),
         // The fixture's partitions are DELIBERATELY non-uniform (pk=1: 3 buckets x
         // 60 rows = 180; pk=2: 5 x 32 = 160; pk=3: 8 x 16 = 128), which is what makes
         // their row-index tries differ structurally. This lane applies one expected
@@ -430,6 +529,8 @@ const CORPUS: &[TableCase] = &[
         // COMMITTED: `git ls-files` lists
         // test-data/datasets/sstables/test_big/wide_partition-ffe2ee50…/nb-2-big-Data.db.
         must_run: true,
+        outcome: DeclaredOutcome::Served,
+        reverse_order_by: Some("ck DESC"),
         // A single `int` clustering column, like `wide_table`. The partition sizes
         // are NOT uniform across pk values here, so every predicate is confined to
         // the low `ck` range every partition is known to hold (the fixture's
@@ -437,11 +538,91 @@ const CORPUS: &[TableCase] = &[
         // count valid for every probed key.
         clustering_slice_predicates: &[("ck < 8", 8), ("ck >= 2 AND ck < 5", 3)],
     },
+    // ---- Declared NON-served outcomes (issue #4256). Same real fixtures as above, probed
+    // with a query shape whose outcome is a property of the engine's contract, DECLARED
+    // here and never read back from the result. ----
+    //
+    // Sanctioned fallback #1: a partition-key RANGE restriction is not an equality on
+    // the full key, so `auto` full-scans with exactly `PartitionKeyNotFullyConstrained`
+    // (mirroring Cassandra's single-partition-read requirement). BIG, committed,
+    // UNCOMPRESSED (`compression = {'enabled': 'false'}`).
+    TableCase {
+        keyspace: "test_compaction_tombstone_ttl",
+        table: "ttl_expired_live",
+        schema: "compaction-tombstone-ttl-parity.cql",
+        pk_column: "id",
+        probe_keys: &[],
+        divergence_classes: &["ttl"],
+        must_run: true,
+        clustering_slice_predicates: &[],
+        outcome: DeclaredOutcome::SanctionedFallback {
+            query: "SELECT * FROM {t} WHERE id > 0",
+            reason: FallbackReason::PartitionKeyNotFullyConstrained,
+        },
+        reverse_order_by: None,
+    },
+    // Sanctioned fallback #2: a WRITETIME() metadata projection with NO partition-key
+    // restriction has no key to target — `MetadataScanPath`. BIG, committed, compressed.
+    TableCase {
+        keyspace: "test_tomb",
+        table: "static_with_tombstones",
+        schema: "tombstone-parity.cql",
+        pk_column: "pk",
+        probe_keys: &[],
+        divergence_classes: &["tombstone"],
+        must_run: true,
+        clustering_slice_predicates: &[],
+        outcome: DeclaredOutcome::SanctionedFallback {
+            query: "SELECT WRITETIME(row_col) FROM {t}",
+            reason: FallbackReason::MetadataScanPath,
+        },
+        reverse_order_by: None,
+    },
+    // Supported-but-unserved: the unconstrained `SELECT *` is not point-servable, so
+    // forced `Point` fails closed naming `partition_key_not_fully_constrained` rather
+    // than silently full-scanning. BIG, committed, UNCOMPRESSED.
+    TableCase {
+        keyspace: "test_compaction_tombstone_ttl",
+        table: "shadow_row_delete",
+        schema: "compaction-tombstone-ttl-parity.cql",
+        pk_column: "id",
+        probe_keys: &[],
+        divergence_classes: &["tombstone"],
+        must_run: true,
+        clustering_slice_predicates: &[],
+        outcome: DeclaredOutcome::SupportedButUnserved {
+            query: "SELECT * FROM {t}",
+            reason: FallbackReason::PartitionKeyNotFullyConstrained,
+        },
+        reverse_order_by: None,
+    },
+    // Supported-but-unserved on the BTI (`da`) format, so the fail-closed contract is
+    // pinned on both formats.
+    TableCase {
+        keyspace: "test_da",
+        table: "wide_table",
+        schema: "wide-table-bti.cql",
+        pk_column: "pk",
+        probe_keys: &[],
+        divergence_classes: &["bti_clustering_slice"],
+        must_run: true,
+        clustering_slice_predicates: &[],
+        outcome: DeclaredOutcome::SupportedButUnserved {
+            query: "SELECT * FROM {t} WHERE pk > 0",
+            reason: FallbackReason::PartitionKeyNotFullyConstrained,
+        },
+        reverse_order_by: None,
+    },
 ];
 
 /// Stable identity of a corpus case, used by the per-case must-run bookkeeping.
 fn case_id(case: &TableCase) -> String {
-    format!("{}.{}", case.keyspace, case.table)
+    match case.outcome {
+        DeclaredOutcome::Served => format!("{}.{}", case.keyspace, case.table),
+        // Distinct id per declared non-served outcome: the same real table may be
+        // probed once per outcome class, and must-run bookkeeping keys on this id.
+        other => format!("{}.{}#{}", case.keyspace, case.table, other.label()),
+    }
 }
 
 /// PURE decision behind the must-run assertion: every `must_run` case absent from
@@ -602,6 +783,18 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
         return skip_or_fail(&format!("schema {} absent", case.schema));
     };
 
+    // Issue #4256: a case that DECLARES a non-served outcome is checked against that
+    // declaration (exact FallbackReason) instead of the served-path comparison below.
+    if !matches!(case.outcome, DeclaredOutcome::Served) {
+        declared_outcomes::run_non_served(case, &root, &schema).await?;
+        eprintln!(
+            "PASS {} — declared outcome {:?} held (exact reason, rows agree with full)",
+            case_id(case),
+            case.outcome
+        );
+        return Ok(true);
+    }
+
     let full_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Full).await?;
     let point_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Point).await?;
 
@@ -720,6 +913,14 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
         }
     }
 
+    // Reverse direction (issue #4256): every partition and slice, ORDER BY ... DESC.
+    let reverse_comparisons = match case.reverse_order_by {
+        Some(order_by) => {
+            declared_outcomes::run_reverse(case, order_by, &point_db, &full_db, &keys).await?
+        }
+        None => 0,
+    };
+
     // `IN (...)` over the complete partition key (when ≥2 keys exist): the union
     // of targeted lookups (point) must equal the full-scan + in-memory IN filter.
     if keys.len() >= 2 {
@@ -737,7 +938,7 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
 
     eprintln!(
         "PASS {}.{} — {} point queries + {} clustering slices/key + IN, point == full, every \
-         point leg targeted+cold; first probe cache hits/misses/entries = {}; discovery scan \
+         point leg targeted+cold; {reverse_comparisons} reverse (DESC) comparisons; first probe cache hits/misses/entries = {}; discovery scan \
          cache hits/misses/entries-added = ({disc_hits}, {disc_misses}, {disc_entries}) \
          (classes: {:?})",
         case.keyspace,
@@ -794,6 +995,13 @@ async fn point_vs_full_differential_equality() {
             "corpus must cover the {required:?} reconciliation class (issue #1741 divergence set)"
         );
     }
+
+    // Every declared outcome class (issue #4256) must keep at least one case.
+    assert!(
+        declared_outcomes::outcome_coverage_violations(CORPUS).is_empty(),
+        "corpus lost an outcome class: {:?}",
+        declared_outcomes::outcome_coverage_violations(CORPUS)
+    );
 
     // Pin the read-time TTL clock for the whole run. The seam is process-global, so
     // the pin is held by an RAII guard (restores the previous value, even on panic)

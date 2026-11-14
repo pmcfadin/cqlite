@@ -95,10 +95,6 @@ path = "src/bin/complex_type_validation_runner.rs"
 # required-features = ["sstable-writer"]   # feature deleted in #1698 (gated nothing)
 
 [[bin]]
-name = "property_based_test_runner"
-path = "src/bin/property_based_test_runner.rs"
-
-[[bin]]
 name = "performance_regression_test_runner"
 path = "src/bin/performance_regression_test_runner.rs"
 

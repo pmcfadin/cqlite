@@ -30,6 +30,10 @@ pub mod prepared;
 pub(crate) mod raw_view_naming;
 pub mod result;
 pub(crate) mod result_budget;
+/// TEST-ONLY decoded-cell corruption seam (issue #4256); feature-gated, doc-hidden.
+#[cfg(feature = "result-corruption-injection")]
+#[doc(hidden)]
+pub mod result_corruption;
 pub mod writetime_ttl_validator;
 
 // Advanced SELECT query components
