@@ -126,13 +126,19 @@ Every `Partitions.db` leaf reachable from the trie root SHALL resolve to a raw p
 
 ### Requirement: A5 — TOC.txt exact listing (reused, unchanged)
 
-The `toc-exact-listing` audit row SHALL reflect the EXISTING `check_toc_and_presence` result (both directions: listed-but-absent, present-but-unlisted) with no new checking logic.
+The `toc-exact-listing` audit row SHALL reflect the EXISTING `check_toc_and_presence` result (both directions: listed-but-absent, present-but-unlisted) with no new checking logic. A TOC naming no component besides `Data.db`/`TOC.txt` gives the row nothing to cross-check: it measures nothing and SHALL `Skip("TOC.txt lists only Data.db: no cross-component listing to check")`, never `Pass`.
 
 #### Scenario: A5.1 existing TOC coverage maps onto the audit row unchanged
 - **Given** `test_comp_corrupt/toc_missing_component`
 - **When** `toc-exact-listing` runs
 - **Then** `Fail`, reusing the EXISTING `MissingComponent` finding(s) — no new detection logic added
   by this change for this invariant.
+
+#### Scenario: A5.2 a TOC naming only Data.db and TOC.txt Skips
+- **Given** a temp dir holding `Data.db` and a `TOC.txt` that lists only `Data.db` and `TOC.txt`
+- **When** `toc-exact-listing` runs
+- **Then** `Skip("TOC.txt lists only Data.db: no cross-component listing to check")` — this is what
+  lets A10.1's bare-directory fixture reach all-Skip (exit `2`).
 
 ### Requirement: A6 — Digest.crc32 matches Data.db (reused, unchanged)
 
@@ -225,7 +231,7 @@ Whenever an invariant's own authoritative source is itself the corrupt component
 
 #### Scenario: A10.1 all-Skip is its own failing exit, not a false clean bill of health
 - **Given** a temp dir holding only a bare `Data.db` with `TOC.txt` present but every OTHER
-  component absent (so every invariant Skips: no `Index.db`, no `Summary.db`, no `Filter.db`, no
+  component absent (so every invariant Skips, `toc-exact-listing` included per A5.2: no `Index.db`, no `Summary.db`, no `Filter.db`, no
   `CompressionInfo.db`, wrong-format `Partitions.db`/`Rows.db` absent, no `--deep`)
 - **When** `cqlite verify <dir> --mode audit` runs
 - **Then** exit `2`, and the text/JSON output names `audit: 0 invariants MEASURED` —

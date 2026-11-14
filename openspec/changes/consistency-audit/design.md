@@ -57,7 +57,11 @@ correct today and require **no new checking logic** — `Audit` mode calls them 
 `Full` already do (they already run unconditionally in `verify_components`, outside the mode match)
 and maps their existing pass/fail state onto `AuditRow`s 5 and 6. This is the one part of the change
 that is pure wiring: read whether a `MissingComponent`/`DigestMismatch` finding was pushed for the
-relevant component, and set `Pass`/`Fail` accordingly.
+relevant component, and set `Pass`/`Fail` accordingly. **One exception (owner ruling 2026-11-14):** a
+TOC naming no component besides `Data.db`/`TOC.txt` agrees with the directory trivially, so the `toc`
+row measures nothing and Skips (`Skip("TOC.txt lists only Data.db: no cross-component listing to
+check")`) instead of Passing; this keeps A10.1's bare-directory fixture reaching all-Skip and exit 2.
+Spec scenario A5.2, pinned by `a5_2_a_toc_naming_only_data_db_skips_with_the_exact_text`.
 
 ## D2. Invariant 1 (BIG): Index.db position → Data.db partition-header key match
 
@@ -318,7 +322,7 @@ healthy datasets-v4 generations (298 audits, shallow + `--deep`).
    `--deep`. Both push the existing `BtiRootPointerCorrupt`.
 5. **D5** — `bti_data_offset_out_of_bounds` is the one new fixture an existing check also sees under
    `--mode full` (the scan-based identity check), exactly the gap A4 names; Quick is clean.
-6. **A10.1** — a TOC that names only `Data.db` (and `TOC.txt`) agrees with the directory trivially, so
+6. **A10.1** (ruled by the owner 2026-11-14; see D1 and spec A5.2) — a TOC that names only `Data.db` (and `TOC.txt`) agrees with the directory trivially, so
    `toc-exact-listing` is `Skip` there; otherwise the scenario's own fixture could not reach "every row
    Skips".
 7. **Header read** — invariant 1 reads `u16 BE length + key` at the index-named offset, per
