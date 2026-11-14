@@ -89,6 +89,25 @@ pub(super) fn build_display_row(
 }
 
 impl RowHeader {
+    /// Whether the row's liveness marker survives THIS row's own deletion: Cassandra 5.0.8
+    /// `Row.Deletion.deletes(LivenessInfo)` -> `DeletionTime.deletes(long ts)` is
+    /// `ts <= markedForDeleteAt` (`db/DeletionTime.java`), and `BTreeRow.Merger`/`Builder` empty a
+    /// covered marker (`if (rowDeletion.deletes(livenessInfo)) livenessInfo = EMPTY`). So an
+    /// older OR equal-timestamp marker is deleted; only a strictly newer one survives. A header
+    /// without `HAS_DELETION` (or without a marker timestamp) is not covered.
+    fn liveness_survives_row_deletion(&self) -> bool {
+        match (self.timestamp, self.marked_for_delete_at) {
+            (Some(marker), Some(deleted_at)) if self.is_row_tombstone() => marker > deleted_at,
+            _ => true,
+        }
+    }
+
+    /// The liveness predicate of the user-facing read rule (issue #4524): a marker is present,
+    /// unexpired ([`Self::liveness_live_at`]) AND not covered by the row's own deletion.
+    pub(super) fn liveness_visible_at(&self, now_secs: i64) -> bool {
+        self.liveness_live_at(now_secs) && self.liveness_survives_row_deletion()
+    }
+
     /// Whether the row's PRIMARY-KEY liveness marker is present AND still live at `now_secs`
     /// (the single-generation twin of `RowLiveness::marker_live_at`): present iff `HAS_TIMESTAMP`;
     /// live-forever when it carries no TTL expiry, otherwise live strictly before its expiry
@@ -195,8 +214,17 @@ pub(super) fn build_display_row_read_path(
     //  * NO liveness, no live cell -> `Marker(Null)`: an `UPDATE`-created row whose every cell
     //    was deleted; only its clustering pseudo-cells remain, which must not make it a row.
     // TTL-aware (`liveness_live_at`): an EXPIRED marker is no liveness (roborev r1).
-    let has_liveness = row_header_opt.is_some_and(|h| h.liveness_live_at(now_secs));
+    // Roborev job 307: the marker must also survive the row's OWN deletion (`ts > markedForDeleteAt`;
+    // equal timestamps: the deletion wins) or an older marker would resurrect a deleted row.
+    let has_liveness = row_header_opt.is_some_and(|h| h.liveness_visible_at(now_secs));
     let live_cell = |cells: &RowCells| row_has_non_key_cell(cells, schema);
+    // A marker NEWER than the row deletion keeps the row: it displays as an empty live row even
+    // though `build_display_row` would call a deletion-without-data header a pure tombstone.
+    if has_liveness && row_header_opt.is_some_and(|h| h.is_row_tombstone()) && !live_cell(&cells) {
+        let mut kept = cells;
+        merge_static_cells(&mut kept, static_cells);
+        return ScanRow::Row(kept);
+    }
     match build_display_row(cells, row_header_opt, schema) {
         ScanRow::Row(kept) if row_header_opt.is_some() && !has_liveness && !live_cell(&kept) => {
             ScanRow::Marker(Value::Null)
