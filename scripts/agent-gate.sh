@@ -15624,13 +15624,17 @@ run_clippy() {
 #     byte-pattern search of Data.db. A copy of the #4194 guard over
 #     `cqlite-core/src/storage/sstable/verify_audit/`, registered HERE for the same reason
 #     (UNSCOPED, so a core-only diff cannot skip it).
+#   * test_find_no_resync_scan.sh — the same #28 class for `cqlite find`'s per-generation
+#     probe (issue #4205, spec F6): `find_probe.rs` reads only decoded structures, never a
+#     byte-pattern search. Here for the identical diff-scoping reason as the guard above.
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_verify_location_no_resync_scan.sh" &&
-    bash "$REPO_ROOT/scripts/tests/test_verify_audit_no_resync_scan.sh"
+    bash "$REPO_ROOT/scripts/tests/test_verify_audit_no_resync_scan.sh" &&
+    bash "$REPO_ROOT/scripts/tests/test_find_no_resync_scan.sh"
 }
 
 # check_no_unexpected_zero_tests <label> <logfile> [allowed-zero-target...]
