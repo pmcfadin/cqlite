@@ -98,10 +98,15 @@ fn max_generation_writetime(gens: &[GenRow]) -> Option<i64> {
 
 /// The first of `needs` no hit generation proves present, or `None` when every one is proven.
 ///
-/// A need is proven by ONE hit generation holding the same column at a timestamp at or above the
-/// mutation's (or the liveness marker / a covering deletion likewise). The comparison is per
-/// cell, never the partition's max timestamp: a later write of column `a` says nothing about an
-/// earlier-timestamped write of column `b` (roborev job 299 M1, issue #4205).
+/// A need is proven by ONE hit generation holding, per cell, a STRICTLY newer cell of the same
+/// column, or a cell at the SAME timestamp in exactly the same reconciliation-relevant state
+/// (both live and non-expiring, with identical value bytes); likewise a newer or an equal
+/// non-expiring liveness marker; or a covering deletion at or above the mutation's timestamp.
+/// An equal timestamp alone proves nothing: `Cells.resolveRegular` breaks ties by
+/// tombstone/expiring state, local deletion time, TTL and value bytes (cassandra-5.0.8). The
+/// comparison is per cell, never the partition's max timestamp: a later write of column `a`
+/// says nothing about an earlier-timestamped write of column `b` (roborev job 299 M1, issue
+/// #4205).
 fn first_unproven<'a>(needs: &'a [Need], gens: &[GenRow]) -> Option<&'a Need> {
     let covers: Vec<&CellCoverage> = gens
         .iter()
@@ -114,13 +119,31 @@ fn first_unproven<'a>(needs: &'a [Need], gens: &[GenRow]) -> Option<&'a Need> {
     let shadowed = |c: &CellCoverage, t: i64| c.deletion_timestamp.is_some_and(|d| d >= t);
     needs.iter().find(|n| {
         !covers.iter().any(|c| match n {
-            Need::Cell { column, timestamp } => {
+            Need::Cell {
+                column,
+                timestamp,
+                value,
+            } => {
                 shadowed(c, *timestamp)
-                    || c.cell_timestamps
-                        .get(column)
-                        .is_some_and(|t| t >= timestamp)
+                    || match c.cell_timestamps.get(column) {
+                        Some(t) if t > timestamp => true,
+                        Some(t) if t == timestamp => {
+                            value.is_some() && c.cell_values.get(column) == Some(value)
+                        }
+                        _ => false,
+                    }
             }
-            Need::Liveness(t) => shadowed(c, *t) || c.liveness_timestamp.is_some_and(|l| l >= *t),
+            Need::Liveness {
+                timestamp,
+                expiring,
+            } => {
+                shadowed(c, *timestamp)
+                    || match c.liveness_timestamp {
+                        Some(l) if l > *timestamp => true,
+                        Some(l) if l == *timestamp => c.liveness_plain && !*expiring,
+                        _ => false,
+                    }
+            }
             Need::Deletion(t) => shadowed(c, *t),
         })
     })
@@ -169,8 +192,12 @@ pub fn unflushed(
 
 fn describe(n: &Need) -> String {
     match n {
-        Need::Cell { column, timestamp } => format!("column {column} @ {timestamp}"),
-        Need::Liveness(t) => format!("row liveness marker @ {t}"),
+        Need::Cell {
+            column, timestamp, ..
+        } => format!("column {column} @ {timestamp} (no newer or exactly equal SSTable cell)"),
+        Need::Liveness { timestamp, .. } => {
+            format!("row liveness marker @ {timestamp} (no newer or exactly equal SSTable marker)")
+        }
         Need::Deletion(t) => format!("row deletion @ {t}"),
     }
 }

@@ -55,14 +55,46 @@ pub struct HitDetail {
 pub struct CellCoverage {
     /// Simple column name -> max cell timestamp (a cell tombstone's timestamp included).
     pub cell_timestamps: std::collections::BTreeMap<String, i64>,
+    /// Column name -> the state of the cell at that maximum timestamp: `Some(value bytes)` for a
+    /// live, non-expiring cell, `None` for a tombstone, an expiring cell, an unserializable value,
+    /// or two rows' cells tied at the maximum with different states. Only a `Some` can prove a
+    /// CommitLog cell at the SAME timestamp is the one flushed: `Cells.resolveRegular`
+    /// (cassandra-5.0.8) breaks timestamp ties by tombstone/expiring state, local deletion time,
+    /// TTL and finally value bytes.
+    pub cell_values: std::collections::BTreeMap<String, Option<Vec<u8>>>,
     /// Max row primary-key liveness-marker timestamp.
     pub liveness_timestamp: Option<i64>,
+    /// Whether every marker at [`Self::liveness_timestamp`] is non-expiring (no TTL): only then
+    /// can an equal-timestamp, non-expiring CommitLog marker be proven the one flushed
+    /// (`LivenessInfo.supersedes`, cassandra-5.0.8).
+    pub liveness_plain: bool,
     /// Max timestamp of a partition deletion, row tombstone or row deletion: anything a mutation
     /// at or below it is shadowed by.
     pub deletion_timestamp: Option<i64>,
 }
 
-fn coverage_of(rows: &[CompactionRow]) -> CellCoverage {
+/// The serialized value of a live, non-expiring simple cell; `None` for a tombstone, an
+/// expiring cell, or a value this schema cannot serialize back to its on-disk bytes (never a
+/// guess: an unprovable state fails closed to "not proven equal").
+fn cell_state(
+    c: &crate::storage::sstable::reader::compaction_row::SimpleCell,
+    schema: Option<&crate::schema::TableSchema>,
+) -> Option<Vec<u8>> {
+    use crate::types::Value;
+    if c.ttl.is_some() || c.local_deletion_time.is_some() || matches!(c.value, Value::Tombstone(_))
+    {
+        return None;
+    }
+    let column = schema?.get_column(&c.column)?;
+    crate::storage::serialization::types::TypeSerializer::new()
+        .serialize_value(&c.value, &column.data_type)
+        .ok()
+}
+
+fn coverage_of(
+    rows: &[CompactionRow],
+    schema: Option<&crate::schema::TableSchema>,
+) -> CellCoverage {
     fn bump(slot: &mut Option<i64>, t: i64) {
         *slot = Some(slot.map_or(t, |m| m.max(t)));
     }
@@ -82,17 +114,34 @@ fn coverage_of(rows: &[CompactionRow]) -> CellCoverage {
                 ..
             } => {
                 for c in simple {
-                    let e = cov
-                        .cell_timestamps
-                        .entry(c.column.clone())
-                        .or_insert(c.timestamp);
-                    *e = (*e).max(c.timestamp);
+                    let state = cell_state(c, schema);
+                    match cov.cell_timestamps.get(&c.column).copied() {
+                        Some(t) if t > c.timestamp => {}
+                        Some(t) if t == c.timestamp => {
+                            if cov.cell_values.get(&c.column) != Some(&state) {
+                                cov.cell_values.insert(c.column.clone(), None);
+                            }
+                        }
+                        _ => {
+                            cov.cell_timestamps.insert(c.column.clone(), c.timestamp);
+                            cov.cell_values.insert(c.column.clone(), state);
+                        }
+                    }
                 }
                 if let Some((ts, _)) = row_deletion {
                     bump(&mut cov.deletion_timestamp, *ts);
                 }
                 if let Some(ts) = row_liveness.marker_timestamp {
-                    bump(&mut cov.liveness_timestamp, ts);
+                    let plain = row_liveness.expires_at_seconds.is_none()
+                        && row_liveness.ttl_seconds.is_none();
+                    match cov.liveness_timestamp {
+                        Some(m) if m > ts => {}
+                        Some(m) if m == ts => cov.liveness_plain &= plain,
+                        _ => {
+                            cov.liveness_timestamp = Some(ts);
+                            cov.liveness_plain = plain;
+                        }
+                    }
                 }
             }
         }
@@ -249,7 +298,7 @@ impl SSTableReader {
                         },
                         max_writetime,
                         has_partition_deletion,
-                        coverage: coverage_of(&rows),
+                        coverage: coverage_of(&rows, schema),
                     }))
                 }
                 None => {
@@ -304,7 +353,7 @@ impl SSTableReader {
                 byte_length: ByteLength::Unmeasured("fail-safe scan resolves no end bound"),
                 max_writetime,
                 has_partition_deletion,
-                coverage: coverage_of(&rows),
+                coverage: coverage_of(&rows, schema),
             }),
         }))
     }

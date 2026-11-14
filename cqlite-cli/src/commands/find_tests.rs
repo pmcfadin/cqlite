@@ -12,7 +12,11 @@ fn hit(ts: i64) -> GenRow {
         ts,
         CellCoverage {
             cell_timestamps: [("a".to_string(), ts)].into_iter().collect(),
+            cell_values: [("a".to_string(), Some(b"v".to_vec()))]
+                .into_iter()
+                .collect(),
             liveness_timestamp: Some(ts),
+            liveness_plain: true,
             deletion_timestamp: None,
         },
     )
@@ -35,6 +39,7 @@ fn cell(column: &str, timestamp: i64) -> Result<Vec<Need>, &'static str> {
     Ok(vec![Need::Cell {
         column: column.into(),
         timestamp,
+        value: Some(b"v".to_vec()),
     }])
 }
 
@@ -95,14 +100,20 @@ fn d5_a_lower_timestamp_other_column_is_not_proven_flushed() {
         100,
         CellCoverage {
             cell_timestamps: [("a".to_string(), 100)].into_iter().collect(),
+            cell_values: [("a".to_string(), Some(b"v".to_vec()))]
+                .into_iter()
+                .collect(),
             liveness_timestamp: None,
+            liveness_plain: false,
             deletion_timestamp: None,
         },
     );
     assert_eq!(
         unflushed(Writetime::Known(90), cell("b", 90), &[sst.clone()]),
         Unflushed::Unmeasured(
-            "mutation coverage not proven by SSTable cells: column b @ 90".into()
+            "mutation coverage not proven by SSTable cells: column b @ 90 \
+             (no newer or exactly equal SSTable cell)"
+                .into()
         )
     );
     // Same column, lower timestamp: proven (the SSTable cell wins reconciliation).
@@ -117,14 +128,20 @@ fn d5_a_lower_timestamp_other_column_is_not_proven_flushed() {
             Ok(vec![
                 Need::Cell {
                     column: "a".into(),
-                    timestamp: 100
+                    timestamp: 100,
+                    value: Some(b"v".to_vec())
                 },
-                Need::Liveness(100)
+                Need::Liveness {
+                    timestamp: 100,
+                    expiring: false
+                }
             ]),
             &[sst.clone()]
         ),
         Unflushed::Unmeasured(
-            "mutation coverage not proven by SSTable cells: row liveness marker @ 100".into()
+            "mutation coverage not proven by SSTable cells: row liveness marker @ 100 \
+             (no newer or exactly equal SSTable marker)"
+                .into()
         )
     );
     // A covering deletion at or above the mutation proves it shadowed.
@@ -149,6 +166,100 @@ fn d5_a_lower_timestamp_other_column_is_not_proven_flushed() {
         Unflushed::Unmeasured(
             "mutation coverage not proven by SSTable cells: a cell carries no timestamp".into()
         )
+    );
+}
+
+/// Roborev PR #4535 M1: at an EQUAL timestamp `Cells.resolveRegular` / `LivenessInfo.supersedes`
+/// (cassandra-5.0.8) decide by tombstone/expiring state, local deletion time, TTL and value
+/// bytes, so an equal timestamp proves the mutation flushed ONLY when that state is identical.
+/// Minimal synthetic coverage in the shape `probe_generation` produces (no Cassandra fixture has
+/// two writes of one cell at one timestamp).
+#[test]
+fn d5_equal_timestamp_requires_identical_cell_state() {
+    let sst = hit(100); // cell a = "v" live, marker plain, both @ 100
+    let need = |value: Option<&[u8]>| -> Result<Vec<Need>, &'static str> {
+        Ok(vec![Need::Cell {
+            column: "a".into(),
+            timestamp: 100,
+            value: value.map(<[u8]>::to_vec),
+        }])
+    };
+    let unproven = "mutation coverage not proven by SSTable cells: column a @ 100 \
+                    (no newer or exactly equal SSTable cell)";
+    // Same timestamp, same live state, same value bytes: proven flushed.
+    assert_eq!(
+        unflushed(Writetime::Known(100), need(Some(b"v")), &[sst.clone()]),
+        Unflushed::No
+    );
+    // Same timestamp, different value bytes: the winner is decided by byte order, not proven.
+    assert_eq!(
+        unflushed(Writetime::Known(100), need(Some(b"w")), &[sst.clone()]),
+        Unflushed::Unmeasured(unproven.into())
+    );
+    // Same timestamp, the mutation's cell is a tombstone / expiring (`None`): not proven.
+    assert_eq!(
+        unflushed(Writetime::Known(100), need(None), &[sst.clone()]),
+        Unflushed::Unmeasured(unproven.into())
+    );
+    // Same timestamp, the SSTable's cell is a tombstone / expiring (`None`): not proven either,
+    // even against a `None` mutation cell (two tombstones differ by local deletion time).
+    let tomb = hit_with(
+        100,
+        CellCoverage {
+            cell_timestamps: [("a".to_string(), 100)].into_iter().collect(),
+            cell_values: [("a".to_string(), None)].into_iter().collect(),
+            ..CellCoverage::default()
+        },
+    );
+    assert_eq!(
+        unflushed(Writetime::Known(100), need(Some(b"v")), &[tomb.clone()]),
+        Unflushed::Unmeasured(unproven.into())
+    );
+    assert_eq!(
+        unflushed(Writetime::Known(100), need(None), &[tomb]),
+        Unflushed::Unmeasured(unproven.into())
+    );
+    // A STRICTLY newer SSTable cell proves it whatever the mutation's state.
+    assert_eq!(
+        unflushed(
+            Writetime::Known(99),
+            Ok(vec![Need::Cell {
+                column: "a".into(),
+                timestamp: 99,
+                value: None
+            }]),
+            &[sst.clone()]
+        ),
+        Unflushed::No
+    );
+    // Liveness marker at an equal timestamp: only plain-vs-plain is proven.
+    let marker = |expiring| {
+        Ok(vec![Need::Liveness {
+            timestamp: 100,
+            expiring,
+        }])
+    };
+    assert_eq!(
+        unflushed(Writetime::Known(100), marker(false), &[sst.clone()]),
+        Unflushed::No
+    );
+    let unproven_marker = "mutation coverage not proven by SSTable cells: row liveness marker \
+                           @ 100 (no newer or exactly equal SSTable marker)";
+    assert_eq!(
+        unflushed(Writetime::Known(100), marker(true), &[sst.clone()]),
+        Unflushed::Unmeasured(unproven_marker.into())
+    );
+    let expiring_marker = hit_with(
+        100,
+        CellCoverage {
+            liveness_timestamp: Some(100),
+            liveness_plain: false,
+            ..CellCoverage::default()
+        },
+    );
+    assert_eq!(
+        unflushed(Writetime::Known(100), marker(false), &[expiring_marker]),
+        Unflushed::Unmeasured(unproven_marker.into())
     );
 }
 

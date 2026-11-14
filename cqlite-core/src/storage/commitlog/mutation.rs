@@ -124,6 +124,9 @@ pub struct DecodedRow {
     /// The row deletion's `markedForDeleteAt` (`min_timestamp + delta`) when the row is a
     /// deletion, else `None`.
     pub deletion_timestamp: Option<i64>,
+    /// Whether the row's primary-key liveness marker carries a TTL (`ROW_HAS_TTL`), i.e. it is
+    /// an expiring marker. Needed to reconcile equal-timestamp markers exactly.
+    pub liveness_expiring: bool,
 }
 
 /// A decoded cell (one column value within a row).
@@ -138,6 +141,9 @@ pub struct DecodedCell {
     /// Cell timestamp (`min_timestamp + delta`, or the row's when `CELL_USE_ROW_TIMESTAMP`);
     /// `None` only when the cell inherits from a row that has no timestamp.
     pub writetime: Option<i64>,
+    /// Whether the cell is expiring (`CELL_IS_EXPIRING`): it carries a TTL and a local
+    /// deletion time that this decoder does not retain.
+    pub expiring: bool,
 }
 
 /// Decode a mutation record body into a [`Mutation`].
@@ -380,7 +386,8 @@ fn decode_rows(
         if flags & ROW_HAS_TIMESTAMP != 0 {
             row_writetime = Some(add_delta(base_ts, c.uvint().map_err(|_| short_row())?)?);
         }
-        if flags & ROW_HAS_TTL != 0 {
+        let liveness_expiring = flags & ROW_HAS_TTL != 0;
+        if liveness_expiring {
             let _ttl = c.uvint().map_err(|_| short_row())?;
             let _ldt = c.uvint().map_err(|_| short_row())?;
         }
@@ -418,6 +425,7 @@ fn decode_rows(
             is_row_deletion,
             writetime: row_writetime,
             deletion_timestamp,
+            liveness_expiring,
         });
     }
     Ok(rows)
@@ -460,6 +468,7 @@ fn read_cell(
         value,
         deleted,
         writetime,
+        expiring,
     })
 }
 

@@ -42,9 +42,13 @@ pub fn mutation_writetime(update: &PartitionUpdate) -> Writetime {
 }
 
 /// One fact a CommitLog mutation must have in the SSTables for the mutation to count as flushed
-/// (issue #4205, roborev job 299 M1): the SSTables must hold the same column at a timestamp at or
-/// above the mutation's, or a covering deletion at or above it. Only meaningful for a table
-/// without clustering columns (the only shape the decoder models).
+/// (issue #4205, roborev job 299 M1): the SSTables must hold the same column at a timestamp
+/// STRICTLY above the mutation's, or an EXACTLY equal cell (see the `state` fields), or a
+/// covering deletion at or above it. At an equal timestamp Cassandra resolves cells by
+/// tombstone/expiring state, local deletion time, TTL and then value bytes
+/// (`Cells.resolveRegular`, `LivenessInfo.supersedes`, cassandra-5.0.8), so an equal timestamp
+/// alone proves nothing. Only meaningful for a table without clustering columns (the only shape
+/// the decoder models).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Need {
     /// A cell (or cell tombstone) of `column` written at `timestamp`.
@@ -53,9 +57,18 @@ pub enum Need {
         column: String,
         /// Cell timestamp.
         timestamp: i64,
+        /// `Some(value bytes)` for a live, non-expiring cell; `None` for a tombstone or an
+        /// expiring cell (whose TTL / local deletion time the decoder does not retain), which
+        /// can never be proven equal to an SSTable cell at the same timestamp.
+        value: Option<Vec<u8>>,
     },
     /// The row's primary-key liveness marker written at this timestamp.
-    Liveness(i64),
+    Liveness {
+        /// Marker timestamp.
+        timestamp: i64,
+        /// Whether the marker carries a TTL (an expiring marker cannot be proven equal).
+        expiring: bool,
+    },
     /// A row deletion with this `markedForDeleteAt`.
     Deletion(i64),
 }
@@ -73,7 +86,10 @@ pub fn mutation_needs(update: &PartitionUpdate) -> Result<Vec<Need>, &'static st
             return Err("clustered row: SSTable cell coverage is not modeled");
         }
         if let Some(t) = row.writetime {
-            needs.push(Need::Liveness(t));
+            needs.push(Need::Liveness {
+                timestamp: t,
+                expiring: row.liveness_expiring,
+            });
         }
         if let Some(t) = row.deletion_timestamp {
             needs.push(Need::Deletion(t));
@@ -85,6 +101,11 @@ pub fn mutation_needs(update: &PartitionUpdate) -> Result<Vec<Need>, &'static st
             needs.push(Need::Cell {
                 column: cell.column.clone(),
                 timestamp,
+                value: if cell.deleted || cell.expiring {
+                    None
+                } else {
+                    Some(cell.value.clone().unwrap_or_default())
+                },
             });
         }
     }
