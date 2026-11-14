@@ -330,8 +330,20 @@ impl BloomFilter {
     pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
         let mut data = Vec::new();
         tokio::io::AsyncReadExt::read_to_end(reader, &mut data).await?;
+        // An EMPTY filter file is NOT a filter with no keys: building a fresh, bit-less
+        // `BloomFilter::new(..)` here made `might_contain` false for EVERY key, so a generation
+        // whose `Filter.db` was empty read as holding nothing (issue #4572, the #4159 class).
+        // Cassandra 5.0.8 loads a zero-length `Filter.db` as `FilterFactory.AlwaysPresent`
+        // (`FilterComponent.load`, `if (filterFile.length() == 0) return AlwaysPresent`) and
+        // falls back to `AlwaysPresent` for any filter it cannot load
+        // (`BigSSTableReaderLoadingBuilder`/`BtiTableReaderLoadingBuilder`: `if (getFilter() ==
+        // null) setFilter(AlwaysPresent)`). Here "always present" is "no filter": the caller
+        // treats this `Err` as an absent bloom (every key is probed), with the cause logged.
         if data.is_empty() {
-            return Self::new(1000, 0.01);
+            return Err(Error::corruption(
+                "Filter.db is empty (0 bytes): treated as an always-present filter, never as an \
+                 all-negative one",
+            ));
         }
         Self::deserialize(&data)
     }
