@@ -552,12 +552,15 @@ fn defects() -> Vec<Defect> {
     for verb in [Verb::Rebuild, Verb::Salvage] {
         for fixture in ALL_FIXTURES {
             // #4526: TOC.txt is created in place and written non-atomically, so a crash or short
-            // write mid-write publishes a partial barrier.
+            // write mid-write publishes a partial barrier. `Mode::Enospc` belongs here too: the TOC
+            // file has already been created when its write is faulted, so an immediate ENOSPC
+            // leaves an EMPTY published TOC — the same AC2 violation as the short-write case. All
+            // three modes go away once #4529 makes publication atomic (roborev r7).
             v.push(Defect {
                 verb,
                 fixture,
                 path_suffix: "-TOC.txt",
-                modes: &[Mode::Crash, Mode::Short],
+                modes: &[Mode::Crash, Mode::Enospc, Mode::Short],
                 issue: 4526,
             });
             // #4527: an ENOSPC on Filter.db's write is not propagated (exit 0, TOC published over
