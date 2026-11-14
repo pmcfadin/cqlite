@@ -57,6 +57,7 @@ use crate::storage::sstable::writer::data_writer::PartitionEmitCounts;
 use crate::storage::sstable::writer::{
     DataWriter, FilterWriter, IndexWriter, SSTableWriter, StatisticsMetadata, SummaryWriter,
 };
+use crate::storage::write_engine::staged_publish::StagedPublish;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -180,6 +181,43 @@ pub async fn rebuild_components(
 /// committed corpus uses. Crate-internal on purpose: it is a test seam for
 /// an in-crate assertion, not a second public entry point.
 pub(crate) async fn rebuild_components_capturing_stats(
+    data_db_path: &Path,
+    schema: &TableSchema,
+    requested: &[Component],
+    options: &RebuildOptions,
+    stats_acc: &mut StatisticsMetadata,
+) -> Result<RebuildReport> {
+    // Issue #4529: crash-safe publication. Every component is written under a hidden staging
+    // directory and renamed into `--out` only once the whole set is on disk (Data.db last), so a
+    // crash can never leave a final-named partial set that Cassandra's `SSTableLister` would
+    // discover. See `staged_publish`'s module doc for the Cassandra citations and the order.
+    let tag = extract_sstable_base_name(data_db_path).unwrap_or_else(|| "rebuild".to_string());
+    let stage = StagedPublish::begin(&options.out_dir, &tag)?;
+    let mut staged_options = options.clone();
+    staged_options.out_dir = stage.dir().to_path_buf();
+    let outcome =
+        rebuild_components_into_stage(data_db_path, schema, requested, &staged_options, stats_acc)
+            .await;
+    match outcome {
+        Ok(mut report) => {
+            report.output = options.out_dir.display().to_string();
+            if report.refused.is_none() {
+                stage.publish()?;
+            } else {
+                stage.discard();
+            }
+            Ok(report)
+        }
+        Err(e) => {
+            stage.discard();
+            Err(e)
+        }
+    }
+}
+
+/// The original rebuild body, writing into `options.out_dir` — which [`rebuild_components_capturing_stats`]
+/// points at a STAGING directory (issue #4529).
+async fn rebuild_components_into_stage(
     data_db_path: &Path,
     schema: &TableSchema,
     requested: &[Component],
