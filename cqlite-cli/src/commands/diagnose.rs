@@ -12,7 +12,6 @@
 
 use std::path::Path;
 
-use cqlite_core::storage::sstable::diagnose::reclaim_prediction::UPPER_BOUND_REASON;
 use cqlite_core::storage::sstable::diagnose::{
     diagnose_table, DeepGenerationReport, DiagnoseOptions, DiagnoseReport, FieldSource,
     GenerationDiagnosis, SourcedField,
@@ -160,32 +159,12 @@ fn deep_json(d: &DeepGenerationReport) -> Value {
         "top_tombstone_heaviest_partitions".into(),
         ranked(&d.top_tombstone_heaviest_partitions, "tombstones"),
     );
-    // ONE envelope `{value, source, cause?}` for measured and unmeasured alike (R1). A measured
-    // prediction additionally carries `bound` + `bound_reason` (it is a per-generation estimate).
-    let reclaim = {
-        let mut env = sourced(&d.reclaim_at_now, |r| {
-            let mut r_m = Map::new();
-            r_m.insert("rows_in".into(), json!(r.rows_in));
-            r_m.insert("rows_out".into(), json!(r.rows_out));
-            // The dry merge reports rows, not a per-kind purge tally: stated, never a `0`.
-            let mut purged = Map::new();
-            purged.insert("value".into(), Value::Null);
-            purged.insert("source".into(), json!("unmeasured"));
-            purged.insert(
-                "cause".into(),
-                json!("the dry compaction counts rows in/out; it does not tally purged tombstones"),
-            );
-            r_m.insert("tombstones_purged".into(), Value::Object(purged));
-            Value::Object(r_m)
-        });
-        if d.reclaim_at_now.is_measured() {
-            env.insert("bound".into(), json!("upper"));
-            env.insert("bound_reason".into(), json!(UPPER_BOUND_REASON));
-        }
-        Value::Object(env)
-    };
-    m.insert("reclaim_at_now".into(), reclaim);
     Value::Object(m)
+}
+
+/// Classic integer ids are JSON numbers (D5); a UUID-based id is its exact on-disk string.
+fn generation_id_json(id: &str) -> Value {
+    id.parse::<u64>().map_or_else(|_| json!(id), |n| json!(n))
 }
 
 fn generation_json(g: &GenerationDiagnosis) -> Value {
@@ -258,6 +237,31 @@ pub(crate) fn render_json(r: &DiagnoseReport) -> Result<String, String> {
         Value::Object(sourced(&r.token_overlap.counts, |c| json!(c))),
     );
     m.insert("token_overlap".into(), Value::Object(overlap));
+    // TABLE-WIDE dry major-compaction prediction (`--deep` only; `null` otherwise): the same
+    // `{value, source, cause?}` envelope as every leaf. No `bound`: this IS the prediction.
+    m.insert(
+        "reclaim_at_now".into(),
+        r.reclaim_at_now.as_ref().map_or(Value::Null, |f| {
+            Value::Object(sourced(f, |rc| {
+                let mut r_m = Map::new();
+                r_m.insert("rows_in".into(), json!(rc.rows_in));
+                r_m.insert("rows_out".into(), json!(rc.rows_out));
+                let ids = |v: &[String]| Value::Array(v.iter().map(|g| generation_id_json(g)).collect());
+                r_m.insert("merged_generations".into(), ids(&rc.merged_generations));
+                r_m.insert("dropped_whole".into(), ids(&rc.dropped_whole));
+                // The dry merge reports rows, not a per-kind purge tally: stated, never a `0`.
+                let mut purged = Map::new();
+                purged.insert("value".into(), Value::Null);
+                purged.insert("source".into(), json!("unmeasured"));
+                purged.insert(
+                    "cause".into(),
+                    json!("the dry compaction counts rows in/out; it does not tally purged tombstones"),
+                );
+                r_m.insert("tombstones_purged".into(), Value::Object(purged));
+                Value::Object(r_m)
+            }))
+        }),
+    );
     m.insert("now_used_for_gc_before".into(), json!(rfc3339(r.now_secs)?));
     // R6: not part of D5's list; appended LAST so D5's order is a prefix of the report.
     m.insert(
@@ -355,13 +359,18 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
                 "tombstone-heaviest partitions (raw tombstone count, unreconciled)",
                 &d.top_tombstone_heaviest_partitions,
             ));
-            match &d.reclaim_at_now {
-                SourcedField::Measured { value: Some(rc), .. } => o.push_str(&format!(
-                    "    reclaim at now: {} rows in -> {} rows out (dry compaction; UPPER BOUND on reclaim: {}; purged-tombstone count unmeasured)\n",
-                    rc.rows_in, rc.rows_out, UPPER_BOUND_REASON
-                )),
-                other => o.push_str(&format!("    reclaim at now: {}\n", text_sourced(other, |_| String::new()))),
-            }
+        }
+    }
+    if let Some(f) = &r.reclaim_at_now {
+        match f {
+            SourcedField::Measured { value: Some(rc), .. } => o.push_str(&format!(
+                "\nreclaim at now (table-wide dry major compaction, same inputs and settings as `compact --major`): {} rows in -> {} rows out; merged generations {:?}, dropped whole {:?}; purged-tombstone count unmeasured\n",
+                rc.rows_in, rc.rows_out, rc.merged_generations, rc.dropped_whole
+            )),
+            other => o.push_str(&format!(
+                "\nreclaim at now (table-wide): {}\n",
+                text_sourced(other, |_| String::new())
+            )),
         }
     }
     o.push_str(&format!(

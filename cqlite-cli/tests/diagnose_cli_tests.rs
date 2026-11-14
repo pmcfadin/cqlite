@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn strict() -> bool {
     matches!(
@@ -242,9 +242,10 @@ fn deep_top_n_populates_histograms_and_bounded_rankings() {
                 .len()
                 <= 5
         );
-        assert_sourced(&d["reclaim_at_now"], "reclaim_at_now (no --schema)");
+        let rc = &r["reclaim_at_now"];
+        assert_sourced(rc, "table-level reclaim_at_now (no --schema)");
         assert_eq!(
-            d["reclaim_at_now"]["source"], "unmeasured",
+            rc["source"], "unmeasured",
             "reclaim without a schema is unmeasured, never 0"
         );
     }
@@ -355,6 +356,7 @@ fn report_schema_matches_design() {
             "top_n",
             "generations",
             "token_overlap",
+            "reclaim_at_now",
             "now_used_for_gc_before",
             "unreadable_generations"
         ]
@@ -401,8 +403,7 @@ fn report_schema_matches_design() {
             "partition_size_histogram",
             "clustering_width_histogram",
             "top_largest_partitions",
-            "top_tombstone_heaviest_partitions",
-            "reclaim_at_now"
+            "top_tombstone_heaviest_partitions"
         ]
     );
     let first = &g["deep"]["top_largest_partitions"][0];
@@ -488,9 +489,10 @@ fn text_says_the_tombstone_figures_are_raw_and_unreconciled() {
     );
 }
 
-/// Measured reclaim uses the SAME envelope as every other leaf, and states it is an upper bound.
+/// Measured reclaim is TABLE-WIDE, uses the SAME envelope as every other leaf, and carries no
+/// `bound` (it is the major-compaction prediction itself).
 #[test]
-fn measured_reclaim_is_enveloped_and_labelled_an_upper_bound() {
+fn measured_reclaim_is_table_wide_enveloped_and_not_a_bound() {
     let Some(dir) = table_dir("test_wide_rows", "chat_messages") else {
         return;
     };
@@ -527,14 +529,20 @@ fn measured_reclaim_is_enveloped_and_labelled_an_upper_bound() {
     );
     let r: Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_envelopes(&r, "$");
-    let rc = &r["generations"][0]["deep"]["reclaim_at_now"];
+    assert!(
+        r["generations"][0]["deep"].get("reclaim_at_now").is_none(),
+        "reclaim is table-level now, not per generation"
+    );
+    let rc = &r["reclaim_at_now"];
     assert_eq!(rc["source"], "scan", "{rc}");
     assert_eq!(rc["value"]["rows_in"], 50);
     assert_eq!(rc["value"]["rows_out"], 50);
-    assert_eq!(rc["bound"], "upper");
-    assert!(rc["bound_reason"]
-        .as_str()
-        .is_some_and(|b| b.contains("overlap gate")));
+    assert!(
+        rc.get("bound").is_none() && rc.get("bound_reason").is_none(),
+        "{rc}"
+    );
+    assert_eq!(rc["value"]["merged_generations"], json!([1]));
+    assert_eq!(rc["value"]["dropped_whole"], json!([]));
     assert_eq!(rc["value"]["tombstones_purged"]["source"], "unmeasured");
     let text = run(&[
         "--schema",
@@ -544,7 +552,8 @@ fn measured_reclaim_is_enveloped_and_labelled_an_upper_bound() {
         "--deep",
     ]);
     assert!(
-        String::from_utf8_lossy(&text.stdout).contains("UPPER BOUND"),
-        "text must label the bound"
+        String::from_utf8_lossy(&text.stdout)
+            .contains("reclaim at now (table-wide dry major compaction"),
+        "text must say the prediction is the table-wide major compaction"
     );
 }

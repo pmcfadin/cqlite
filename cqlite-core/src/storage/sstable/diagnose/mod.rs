@@ -50,7 +50,7 @@ use droppable_ratio::{
     compute_gc_before_secs, estimated_droppable_tombstone_ratio as compute_droppable_ratio,
     DroppableRatio,
 };
-use reclaim_prediction::{predict_reclaim, ReclaimPrediction};
+use reclaim_prediction::{predict_table_reclaim, ReclaimInput, ReclaimPrediction};
 use token_overlap::{compute_token_overlap, TOKEN_OVERLAP_BUCKETS};
 
 /// Options controlling a `diagnose_table` run.
@@ -169,8 +169,9 @@ pub struct DeepGenerationReport {
     pub clustering_width_histogram: Vec<deep_scan::HistogramBucket>,
     pub top_largest_partitions: Vec<deep_scan::RankedPartition>,
     pub top_tombstone_heaviest_partitions: Vec<deep_scan::RankedPartition>,
-    /// Dry full-compaction-at-`now` prediction; `unmeasured` without a schema.
-    pub reclaim_at_now: SourcedField<ReclaimPrediction>,
+    /// Rows this generation streamed (unpurged); the dry major compaction's `rows_in` is the sum
+    /// over the generations it merges.
+    pub rows_scanned: u64,
 }
 
 /// Table-wide token-overlap histogram (spec R4, `design.md` D4).
@@ -191,6 +192,10 @@ pub struct DiagnoseReport {
     pub top_n: usize,
     pub generations: Vec<GenerationDiagnosis>,
     pub token_overlap: TokenOverlap,
+    /// `--deep` only (`None` otherwise): the TABLE-WIDE dry major-compaction prediction at `now`
+    /// (the same input set and gc/now/purge settings as `compact --major`); `unmeasured: <cause>`
+    /// without a schema, with an unreadable generation, or with non-integer generation ids.
+    pub reclaim_at_now: Option<SourcedField<ReclaimPrediction>>,
     /// Generations this run could not read, each with its cause (spec R6: a field of the
     /// report, never a refusal). Never silently absent.
     pub unreadable_generations: Vec<UnreadableGeneration>,
@@ -238,6 +243,7 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
     let platform = Arc::new(Platform::new(&config).await?);
 
     let mut generations = Vec::with_capacity(data_paths.len());
+    let mut reclaim_inputs: Vec<ReclaimInput> = Vec::new();
     let mut unreadable_generations = Vec::new();
     let mut token_spans: Vec<(i64, i64)> = Vec::new();
     // Generations contributing NO token span (unreadable, or endpoint tokens not decodable): the
@@ -259,6 +265,13 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
                 match token_span {
                     Some(span) => token_spans.push(span),
                     None => without_span.push(gen_report.generation.clone()),
+                }
+                if let Some(d) = &gen_report.deep {
+                    reclaim_inputs.push(ReclaimInput {
+                        data_path: data_path.clone(),
+                        generation: gen_report.generation.clone(),
+                        rows_scanned: d.rows_scanned,
+                    });
                 }
                 generations.push(gen_report);
             }
@@ -285,6 +298,12 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
         ))
     };
 
+    let reclaim_at_now = if options.deep {
+        Some(table_reclaim(reclaim_inputs, &unreadable_generations, options, gc_before).await)
+    } else {
+        None
+    };
+
     Ok(DiagnoseReport {
         table_dir: table_dir.to_path_buf(),
         now_secs: options.now_secs,
@@ -295,8 +314,62 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
             buckets: TOKEN_OVERLAP_BUCKETS,
             counts,
         },
+        reclaim_at_now,
         unreadable_generations,
     })
+}
+
+/// The table-wide dry major-compaction prediction (owner ruling 2026-11-14): every generation
+/// merged together, newest first, exactly as `compact --major` does. Any reason it cannot be a
+/// faithful prediction is a stated `unmeasured` cause, never a partial number.
+async fn table_reclaim(
+    mut inputs: Vec<ReclaimInput>,
+    unreadable: &[UnreadableGeneration],
+    options: &DiagnoseOptions,
+    gc_before: Option<i64>,
+) -> SourcedField<ReclaimPrediction> {
+    let Some(schema) = options.schema.clone() else {
+        return SourcedField::unmeasured(
+            "the dry compaction is schema-driven; pass --schema to predict reclaim",
+        );
+    };
+    if !unreadable.is_empty() {
+        return SourcedField::unmeasured(format!(
+            "a major compaction reads every generation, and {} could not be read: {}",
+            unreadable.len(),
+            unreadable
+                .iter()
+                .map(|u| format!("{} ({})", u.data_path.display(), u.cause))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    // Newest first = generation id descending (`compact` orders its inputs the same way).
+    let mut keyed = Vec::with_capacity(inputs.len());
+    for i in inputs.drain(..) {
+        match i.generation.parse::<u64>() {
+            Ok(n) => keyed.push((n, i)),
+            Err(_) => {
+                return SourcedField::unmeasured(format!(
+                    "generation id '{}' is not an integer, so the newest-first merge order of a \
+                     major compaction cannot be derived",
+                    i.generation
+                ))
+            }
+        }
+    }
+    keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    let inputs: Vec<ReclaimInput> = keyed.into_iter().map(|(_, i)| i).collect();
+    let now = options.now_secs;
+    match tokio::task::spawn_blocking(move || {
+        predict_table_reclaim(&inputs, &schema, gc_before, now)
+    })
+    .await
+    {
+        Ok(Ok(p)) => SourcedField::measured(p, FieldSource::Scan),
+        Ok(Err(e)) => SourcedField::unmeasured(format!("dry compaction failed: {e}")),
+        Err(e) => SourcedField::unmeasured(format!("dry compaction task failed: {e}")),
+    }
 }
 
 /// Diagnose exactly one generation (cheap tier, plus `--deep` when requested).
@@ -397,30 +470,12 @@ async fn diagnose_generation(
         let reader = SSTableReader::open(data_path, config, platform.clone()).await?;
         let scan = deep_scan::deep_scan_generation(&reader, options.schema.as_ref(), options.top_n)
             .await?;
-        let reclaim_at_now = match options.schema.clone() {
-            None => SourcedField::unmeasured(
-                "the dry compaction is schema-driven; pass --schema to predict reclaim",
-            ),
-            Some(schema) => {
-                let path = data_path.to_path_buf();
-                let (now, gcb, rows_in) = (options.now_secs, gc_before, scan.rows_scanned);
-                match tokio::task::spawn_blocking(move || {
-                    predict_reclaim(&path, &schema, gcb, now, rows_in)
-                })
-                .await
-                {
-                    Ok(Ok(p)) => SourcedField::measured(p, FieldSource::Scan),
-                    Ok(Err(e)) => SourcedField::unmeasured(format!("dry compaction failed: {e}")),
-                    Err(e) => SourcedField::unmeasured(format!("dry compaction task failed: {e}")),
-                }
-            }
-        };
         Some(DeepGenerationReport {
             partition_size_histogram: scan.partition_size_histogram,
             clustering_width_histogram: scan.clustering_width_histogram,
             top_largest_partitions: scan.top_largest_partitions,
             top_tombstone_heaviest_partitions: scan.top_tombstone_heaviest_partitions,
-            reclaim_at_now,
+            rows_scanned: scan.rows_scanned,
         })
     } else {
         None

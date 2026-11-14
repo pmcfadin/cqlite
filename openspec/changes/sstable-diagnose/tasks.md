@@ -42,8 +42,9 @@ Ordered. Group 0 is premises, 1–3 the library, 4 the CLI, 5 the endgame. Commi
 
 - [x] 2.1 `diagnose/deep_scan.rs`: one streaming pass producing partition-size/clustering-width
       histograms and `--top N` rankings (largest, most-tombstoned — RAW count, D2) — R3.1, R3.2.
-- [x] 2.2 `diagnose/reclaim_prediction.rs`: dry full-compaction-at-`--now` tally reusing the existing
-      `MergeStats`/purge counters, no write — D1's `reclaim_at_now`.
+- [x] 2.2 `diagnose/reclaim_prediction.rs`: dry TABLE-WIDE major-compaction prediction at `--now`
+      (one `KWayMerger` over all generations with `compact --major`'s input set and settings, no
+      write) — D1's `reclaim_at_now`; oracle `issue_4204_diagnose_major_compaction_oracle.rs` (R3.4).
 - [x] 2.3 `diagnose/token_overlap.rs`: fixed-`K`-bucket generation-overlap computation from
       `first_key`/`last_key` alone — R4.1.
 - [x] 2.4 Memory-budget lane entry for `test_wide_rows` under `--deep` — R3.3. Name the new target in
