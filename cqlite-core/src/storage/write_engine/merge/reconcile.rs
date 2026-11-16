@@ -665,7 +665,7 @@ impl ReconcileState {
         self,
         purges: &mut PurgeCounts,
         keep_marker: bool,
-        now_secs: Option<i64>,
+        now: Option<i64>,
     ) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
@@ -696,19 +696,10 @@ impl ReconcileState {
         let purged_to_empty = had_data_before && !has_data_after;
         drop(ck_names);
 
-        // Issue #2163 (roborev r7): a cell tombstone (simple or complex-element,
-        // the SAME predicate `purge_gc_grace`'s retain closure uses) that
-        // SURVIVES into `surviving` — whether because gc-grace/overlap kept it,
-        // or because purging was inactive for this merge entirely (no
-        // `gc_before_secs`, e.g. an unbounded partial compaction) — is a marker
-        // RETAINED into the output, matching the row/range/partition tombstone
-        // "emitted" contract established above. Counted here from the FINAL
-        // surviving set (not inside `purge_gc_grace`'s conditional retain) so a
-        // merge with purging disabled still counts its retained cell
-        // tombstones; a cell tombstone always satisfies `is_data_cell` (it is
-        // never a clustering-key pseudo-cell), so its presence here already
-        // implies `purged_to_empty == false` and the row below is genuinely
-        // emitted with it intact.
+        // Issue #2163 (roborev r7): a cell tombstone (same predicate as `purge_gc_grace`) that SURVIVES
+        // into `surviving` (kept by gc-grace/overlap, or purging inactive) is a marker RETAINED into the
+        // output. Counted from the FINAL set so a merge with purging off still counts it; it is never a
+        // key pseudo-cell, so `purged_to_empty == false` and the row is emitted with it.
         let retained_cell_tombstones = surviving
             .iter()
             .filter(|cell| KWayMerger::is_cell_tombstone(cell) || cell.is_deleted)
