@@ -561,7 +561,11 @@ fi
 # Snapshot the COMMITTED manifest before regeneration wipes $CORRUPT_DIR: the audit
 # generator reads its pinned original/corrupted sha256 (issue #4583).
 PINNED_MANIFEST_COPY="$(mktemp)"
-if [[ -f "$MANIFEST" ]]; then cp "$MANIFEST" "$PINNED_MANIFEST_COPY"; else : >"$PINNED_MANIFEST_COPY"; fi
+# MANIFEST_EXISTED, not the snapshot size, decides whether pins are enforced: an EXISTING but
+# empty or truncated manifest must still be passed so the generator refuses it with a named
+# cause (fail closed); only a first-ever generation, with no committed manifest, runs unpinned.
+MANIFEST_EXISTED=0
+if [[ -f "$MANIFEST" ]]; then MANIFEST_EXISTED=1; cp "$MANIFEST" "$PINNED_MANIFEST_COPY"; else : >"$PINNED_MANIFEST_COPY"; fi
 if [[ "$VERIFY_ONLY" -eq 0 ]]; then
   rm -rf "$CORRUPT_DIR"
   mkdir -p "$CORRUPT_DIR"
@@ -989,7 +993,7 @@ AUDIT_ARGS+=(--root "$REPO_ROOT/../cqlite/test-data/datasets/sstables")
 #                     non-deterministic; the generator re-applies the byte edits, re-asserts
 #                     every premise and reports sha drift as a ::notice::.
 # Pins come from the snapshot of the COMMITTED manifest taken before regeneration.
-[[ -s "$PINNED_MANIFEST_COPY" ]] && AUDIT_ARGS+=(--pinned-manifest "$PINNED_MANIFEST_COPY")
+[[ "$MANIFEST_EXISTED" -eq 1 ]] && AUDIT_ARGS+=(--pinned-manifest "$PINNED_MANIFEST_COPY")
 [[ "$VERIFY_ONLY" -eq 1 ]] && AUDIT_ARGS+=(--verify-only)
 AUDIT_ERR="$(mktemp)"
 if ! python3 "$SCRIPT_DIR/generate_audit_corruption_fixtures.py" "${AUDIT_ARGS[@]}" >>"$MANIFEST_TMP" 2>"$AUDIT_ERR"; then
