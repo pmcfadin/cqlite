@@ -140,7 +140,7 @@ mod tests {
     fn row(v: i32) -> QueryRow {
         let mut r = QueryRow::new(crate::types::RowKey(std::sync::Arc::from(&b"k"[..])));
         r.values
-            .insert(std::sync::Arc::from("a"), Value::Integer(v.into()));
+            .insert(std::sync::Arc::from("a"), Value::Integer(v));
         r
     }
 
