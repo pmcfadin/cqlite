@@ -579,9 +579,7 @@ impl<'a> StreamingMerger<'a> {
             effective_gc_before,
             max_purgeable_timestamp,
             self.merger.now_secs,
-            self.merger
-                .purpose
-                .keeps_marker_only_rows(&self.merger.schema),
+            self.merger.keeps_marker_only_rows(),
             &mut self.state.purges,
         ) {
             if self.state.range_tombstones.is_empty() {

@@ -54,6 +54,11 @@ impl MergePurpose {
 }
 
 impl KWayMerger {
+    /// Whether this merge emits marker-only rows (see [`MergePurpose::keeps_marker_only_rows`]).
+    pub(super) fn keeps_marker_only_rows(&self) -> bool {
+        self.purpose.keeps_marker_only_rows(&self.schema)
+    }
+
     /// Declare whether this merge serves a read or a compaction (see [`MergePurpose`]).
     #[must_use]
     pub fn with_purpose(mut self, purpose: MergePurpose) -> Self {
