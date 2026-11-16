@@ -67,7 +67,7 @@ histograms and `--top N` rankings in that SAME pass, and SHALL NOT write any out
   and tombstoned cells, and NOT row deletions** (NO `gcBefore` filtering, NO cross-generation
   reconciliation) — exactly `sstablemetadata -s`'s `ptombcount` in `SSTableMetadataViewer.printScannedOverview`
   (`cassandra-5.0.8`, `SSTableMetadataViewer.java` lines 205-262: `+1` for a non-live partition-level
-  deletion, `+1` per `RANGE_TOMBSTONE_MARKER`, `+1` per cell where `cell.isTombstone()`; a row
+  deletion, `+1` per `RANGE_TOMBSTONE_MARKER` unfiltered — a start bound, an end bound and a BOUNDARY (end+start) each count 1, `+1` per cell where `cell.isTombstone()`; a row
   deletion is a row with no cells and counts nothing) (`design.md` D2), and the report's own field
   description states that the figure is a **raw, per-generation, unreconciled count**
   (`cqlite-core/tests/issue_4204_diagnose_deep_scan.rs`).
@@ -107,7 +107,8 @@ the table's token union.
 - **Given** a multi-generation table with distinct, committed first/last keys per generation
 - **When** `diagnose_table` runs
 - **Then** `token_overlap.counts` equals the TEST's own independently-computed per-bucket
-  intersection count, and no component beyond each generation's reader-exposed `first_key`/
+  intersection count (reported as `{value, source, cause?}`, `unmeasured` as a whole when any
+  generation's endpoint tokens are unreadable), and no component beyond each generation's reader-exposed `first_key`/
   `last_key` is read for this field
   (`cqlite-core/tests/issue_4204_diagnose_token_overlap.rs`).
 

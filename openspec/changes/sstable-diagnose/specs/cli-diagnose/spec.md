@@ -9,11 +9,10 @@ verbs, stated in `--help`). All requirements are ADDED.
 ### Requirement: R6 — The verb, its inputs, and its (trivial) exit contract
 
 The CLI SHALL provide `cqlite diagnose <table-dir> [--now <ts>] [--deep] [--top N] [--out
-text|json]`, resolving generations from the table dir directly (no `--schema` required for the
-cheap tier — Statistics.db/Index.db need no schema; `--deep`'s partition/clustering rendering uses
-`--schema` when given, and renders raw key bytes when it is not, never refusing for its absence).
-Exit `0` for any successful report (a generation this run cannot read is a field in the report, not
-a refusal); `1` only for usage errors.
+text|json]`, resolving generations from the table dir without `--schema` for the cheap tier (`--deep`
+uses `--schema` when given and never refuses for its absence). It SHALL exit `0` for any successful
+report and `1` only for usage errors. A generation this run cannot read is an entry in the report's
+top-level `unreadable_generations` array (`{data_path, cause}`), never a refusal.
 
 #### Scenario: R6.1 cheap-tier default run
 - **Given** the built binary, `--dataset test_basic`, a healthy multi-generation table

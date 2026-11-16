@@ -64,9 +64,11 @@ Ordered. Group 0 is premises, 1–3 the library, 4 the CLI, 5 the endgame. Commi
       shape, not `SalvageOutFormatArg`'s) — D7.
 - [x] 4.2 `cli_types.rs`: `Commands::Diagnose(DiagnoseArgs)`, one variant; `--help` states plainly
       that `--out` never writes a file and that this verb never modifies anything.
-- [ ] 4.3 (PARTIAL — R7.2 pointer text deferred, owner ruling on #4200 pending; marked TODO in commands/diagnose.rs) Text rendering: every `estimated_droppable_tombstone_ratio` /
-      `top_tombstone_heaviest_partitions` field's description names `cqlite tombstones` (#4200) —
-      R7.2.
+- [x] 4.3 Text rendering: every `estimated_droppable_tombstone_ratio` /
+      `top_tombstone_heaviest_partitions` field's description states what the figure IS — a **raw,
+      per-generation, unreconciled** tombstone count, and a per-generation **estimate** that is not
+      reconciled across generations — R7.2. Per the owner ruling (2026-11-14) the text does NOT name or
+      point to `cqlite tombstones`; follow-up: add the pointer when that verb ships (#4200, 0.20).
 - [x] 4.4 `cqlite-cli/tests/diagnose_cli_tests.rs` — R6.1–R6.4, R7.1, R7.2 (name every target in
       `cli-tests`).
 
@@ -83,3 +85,9 @@ Ordered. Group 0 is premises, 1–3 the library, 4 the CLI, 5 the endgame. Commi
       `gh pr merge --auto --squash --delete-branch`.
 - [ ] 5.5 `flow-finalize`: archive this change (sync delta specs into `openspec/specs/`), remove the
       worktree + branch, close #4204 with a traceable comment, record delivery telemetry.
+
+## Known gaps
+
+- R1.1's `None` case is exercised with a synthetic (hand-built) Statistics layout in
+  `issue_4204_diagnose_provenance.rs`, not a Cassandra-written file whose layout lacks
+  `max_timestamp`; no such real fixture exists in `datasets-v4`. Accepted as a known gap.

@@ -97,8 +97,16 @@ requires the full reconciliation machinery `diagnose` deliberately does not invo
 for the same partition can legitimately differ**: `diagnose`'s count is "how many tombstone markers
 does generation N physically contain," `tombstones`' count is "how many of this partition's
 tombstones, across every generation, are live/droppable-at-now, after reconciliation." `diagnose`'s
-report text says so plainly next to the field, and names `cqlite tombstones` as the authoritative
-follow-up — it does not attempt to approximate #4200's number.
+report text says so plainly next to the field (a **raw, per-generation, unreconciled** count) and
+does not attempt to approximate #4200's number. *Owner ruling 2026-11-14:* the text does NOT name or
+point to `cqlite tombstones` yet (that verb ships in 0.20); adding the pointer is tracked on #4200.
+
+Counting is **per unfiltered**, as `printScannedOverview` does: a range-tombstone start bound is 1,
+an end bound is 1, and a BOUNDARY marker (end+start in one unfiltered) is also 1. CQLite's reader
+pairs markers into start+end `RangeMarker` rows, so the scan counts each row's closing unfiltered
+plus its start only when the start was its own marker (`separate_start_marker`); a boundary-opened
+start is the previous row's closing unfiltered. A bound/boundary/bound chain is thus 3, not 4
+(pinned on the real `test_compaction_tombstone_ttl.rt_cross_gen` / `rt_open_ended_boundary`).
 
 ## D3. `getEstimatedDroppableTombstoneRatio`, ported exactly
 
@@ -165,10 +173,23 @@ online, reconstructed here from files alone.
       "fully_expired_at_now": false,
       "deep": null },
   ],
-  "token_overlap": { "buckets": 16, "counts": [1,1,2,2,3,3,2,2,1,1,1,1,1,1,1,1] },
+  "token_overlap": { "buckets": 16, "counts": {"value": [1,1,2,2,3,3,2,2,1,1,1,1,1,1,1,1], "source": "index"} },
   "reclaim_at_now": null,
-  "now_used_for_gc_before": "<RFC3339>" }
+  "now_used_for_gc_before": "<RFC3339>",
+  "unreadable_generations": [ {"data_path": "<path>", "cause": "<why>"} ] }
 ```
+
+Implemented-shape notes (spec drift recorded, verified against the compiled binary):
+
+- `unreadable_generations` is a TOP-LEVEL array appended LAST (D5's order stays a prefix). A
+  generation this run cannot read is an entry here (`data_path`, `cause`), never a refusal and never
+  a generation entry with zeroed fields (R6).
+- `token_overlap.counts` uses the same `{value, source, cause?}` envelope as every leaf (R4.1): a
+  partial histogram would undercount, so when any generation's endpoint tokens are unreadable the
+  WHOLE value is `unmeasured` with a cause naming the generations.
+- `compression_ratio` is `{"value": null, "source": "unmeasured", "cause": "SSTable is not
+  compressed ..."}` for an uncompressed table: Cassandra's `-1.0` no-compression sentinel in
+  `STATS` is never reported as a value, and `sstablemetadata` prints no ratio line either.
 
 When `--deep` runs, each generation's `deep` field is populated:
 
@@ -202,6 +223,15 @@ with no `source`/`cause` (the #4159 class this doctrine names explicitly). Field
 `DiagnoseReport`'s serialization order (`cqlite-core/src/storage/sstable/diagnose/mod.rs`), verified
 against the compiled binary's real output, not read off the struct in isolation (the #4196 C-audit
 discipline, applied from the first PR here too).
+
+### Reader primitive added for `--deep`
+
+`SSTableReader::scan_rows_with_partition_starts` (`pub(crate)`, in `data_access/partition_boundaries.rs`)
+is ONE streaming pass over the existing compaction streaming driver that hands the caller each
+partition's start offset (uncompressed domain) and raw key via `on_partition` (always fired before
+that partition's rows) plus every raw `CompactionRow`, unreconciled and unwritten. It is the single
+traversal that D1 requires, so size, width and tombstone counters share one pass. It rides
+`CompactionRowData::RangeMarker`, which gained `separate_start_marker` (see D2).
 
 ## D6. Oracles (all Cassandra-written; never CQLite round-trip alone, #3042)
 
