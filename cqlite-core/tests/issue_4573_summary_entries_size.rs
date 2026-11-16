@@ -18,24 +18,25 @@ use cqlite_core::storage::sstable::summary_reader::SummaryReader;
 use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyMode};
 use cqlite_core::Config;
 
-fn strict() -> bool {
-    matches!(
-        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
-        Ok("1") | Ok("true")
-    )
-}
-
-fn fixture() -> Option<PathBuf> {
-    match datasets_root::resolve_table_generation_dir("test_comp", "lz4_table") {
-        Ok(d) => Some(d),
-        Err(e) if strict() => {
-            panic!("test_comp.lz4_table missing under CQLITE_REQUIRE_FIXTURES: {e}")
-        }
-        Err(e) => {
-            eprintln!("SKIP: {e}");
-            None
-        }
-    }
+/// Fail closed (CLAUDE.md "Testing", #3220): a missing fixture is a FAILURE, never a silent pass.
+fn fixture() -> PathBuf {
+    let (ks, table) = ("test_comp", "lz4_table");
+    let root = datasets_root::sstables_root_for_table(ks, table).unwrap_or_else(|| {
+        panic!(
+            "{ks}.{table}: required fixture is missing (no *-Data.db under any candidate root; \
+             set CQLITE_DATASETS_ROOT, see test-data/scripts/fetch-datasets.sh): {}",
+            datasets_root::describe_search(ks, table)
+        )
+    });
+    datasets_root::table_generation_dirs(&root, ks, table)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            panic!(
+                "{ks}.{table}: no generation directory under {}",
+                root.display()
+            )
+        })
 }
 
 fn summary_path(dir: &Path) -> PathBuf {
@@ -69,7 +70,7 @@ async fn open_err(dir: &Path) -> Result<(), String> {
 
 #[tokio::test]
 async fn an_entries_size_below_the_offset_table_is_a_named_error_not_a_panic() {
-    let Some(src) = fixture() else { return };
+    let src = fixture();
     let real = std::fs::read(summary_path(&src)).expect("real Summary.db");
     assert_eq!(
         &real[4..8],

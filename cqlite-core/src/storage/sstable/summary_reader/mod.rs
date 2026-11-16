@@ -730,4 +730,22 @@ mod tests {
         assert_eq!(summary.entries[0].position, 0);
         assert_eq!(summary.entries[1].position, 100);
     }
+
+    /// #4573: the 31-byte minimised `fuzz_audit` reproducer (control byte stripped). Header declares
+    /// `entries_count = 1` (offset table 4 bytes) but `summary_entries_size = 0`: the unchecked
+    /// `summary_entries_size - offset_table_size` underflowed and panicked. Fixture-independent.
+    #[test]
+    fn test_entries_size_below_offset_table_is_named_corruption_not_panic() {
+        let input: [u8; 31] = [
+            0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00,
+            0x00, 0x00, 0x01,
+        ];
+        let err = parse_summary_data(&input).expect_err("damaged Summary.db must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("entries size 0 is smaller than its offset table 4"),
+            "must be the named corruption error, got: {msg}"
+        );
+    }
 }
