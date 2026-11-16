@@ -356,7 +356,7 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
             ));
             // #4200 (0.20): add the cqlite tombstones pointer.
             o.push_str(&text_ranking(
-                "tombstone-heaviest partitions (raw tombstone count, unreconciled)",
+                "tombstone-heaviest partitions (raw tombstone count, per-generation, unreconciled)",
                 &d.top_tombstone_heaviest_partitions,
             ));
         }

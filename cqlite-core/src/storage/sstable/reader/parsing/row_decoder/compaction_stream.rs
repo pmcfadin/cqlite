@@ -359,6 +359,7 @@ pub struct CompactionPartitionState {
         crate::storage::sstable::reader::compaction_row::CompactionBound,
         i64,
         i32,
+        bool,
     )>,
 }
 

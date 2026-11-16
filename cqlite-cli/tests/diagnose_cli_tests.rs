@@ -476,7 +476,9 @@ fn text_says_the_tombstone_figures_are_raw_and_unreconciled() {
     assert!(out.status.success(), "{out:?}");
     let t = String::from_utf8_lossy(&out.stdout);
     assert!(
-        t.contains("tombstone-heaviest partitions (raw tombstone count, unreconciled)"),
+        t.contains(
+            "tombstone-heaviest partitions (raw tombstone count, per-generation, unreconciled)"
+        ),
         "ranking description must say raw + unreconciled:\n{t}"
     );
     assert!(
@@ -556,4 +558,108 @@ fn measured_reclaim_is_table_wide_enveloped_and_not_a_bound() {
             .contains("reclaim at now (table-wide dry major compaction"),
         "text must say the prediction is the table-wide major compaction"
     );
+}
+
+/// Write the single `CREATE TABLE` for `table` out of a committed schema file into a temp `.cql`.
+fn table_schema_file(cql_file: &str, table: &str) -> (tempfile::TempDir, PathBuf) {
+    let cql = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo")
+            .join("test-data/schemas")
+            .join(cql_file),
+    )
+    .expect("schema file");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {table} "))
+        .expect("table");
+    let end = start + cql[start..].find(';').expect("terminator") + 1;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let schema = tmp.path().join(format!("{table}.cql"));
+    std::fs::write(&schema, &cql[start..end]).expect("write");
+    (tmp, schema)
+}
+
+/// R3.4 through the real binary: the table-wide dry-major-compaction prediction for the
+/// multi-generation Cassandra-written `test_tomb.resurrection_gc0` is 11 rows in -> 4 rows out
+/// (gc_grace_seconds = 0 from the schema, `--now 1794545000`). The expectation is the REAL major
+/// compaction's output, pinned by the core oracle `issue_4204_diagnose_major_compaction_oracle.rs`
+/// (`check("resurrection_gc0", 11, 4)`); the goldens hold 11 physical rows across the 2 generations.
+#[test]
+fn cli_deep_reclaim_at_now_matches_the_major_compaction_oracle_resurrection_gc0() {
+    let Some(dir) = table_dir("test_tomb", "resurrection_gc0") else {
+        return;
+    };
+    let (_tmp, schema) = table_schema_file("tombstone-parity.cql", "resurrection_gc0");
+    let out = run(&[
+        "--schema",
+        schema.to_str().expect("utf8"),
+        "diagnose",
+        dir.to_str().expect("utf8"),
+        "--now",
+        "1794545000",
+        "--deep",
+        "--out",
+        "json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let rc = &r["reclaim_at_now"];
+    assert_eq!(rc["source"], "scan", "{rc}");
+    assert_eq!(rc["value"]["rows_in"], 11, "{rc}");
+    assert_eq!(rc["value"]["rows_out"], 4, "{rc}");
+    // newest first, the order a major compaction merges in
+    assert_eq!(rc["value"]["merged_generations"], json!([2, 1]), "{rc}");
+}
+
+/// R3.2 through the real binary, with a value derived INDEPENDENTLY of the code: the committed
+/// sstabledump goldens of `test_tomb.skipped_partition_delete`. Generation 1 holds 10 live rows
+/// and no tombstone; generation 2 holds two partition deletions (pk 1 and pk 2, each carrying a
+/// partition-level `deletion_info`). Cassandra's `SSTableMetadataViewer.printScannedOverview`
+/// (5.0.8) counts +1 per partition deletion, so generation 2's raw tombstones are 1 per partition
+/// (two partitions ranked at 1) and generation 1 has none.
+#[test]
+fn cli_deep_raw_tombstone_counts_match_the_sstabledump_goldens_skipped_partition_delete() {
+    let Some(dir) = table_dir("test_tomb", "skipped_partition_delete") else {
+        return;
+    };
+    let out = run(&[
+        "diagnose",
+        dir.to_str().expect("utf8"),
+        "--deep",
+        "--out",
+        "json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let gens = r["generations"].as_array().expect("generations");
+    assert_eq!(gens.len(), 2, "{r}");
+    for g in gens {
+        let ranked = &g["deep"]["top_tombstone_heaviest_partitions"];
+        let counts: Vec<u64> = ranked
+            .as_array()
+            .expect("ranking array")
+            .iter()
+            .map(|p| p["tombstones"].as_u64().expect("count"))
+            .collect();
+        match g["generation"].as_u64() {
+            Some(1) => assert!(counts.is_empty(), "gen 1 has no tombstones: {ranked}"),
+            Some(2) => assert_eq!(
+                counts,
+                vec![1, 1],
+                "gen 2: two partition deletions: {ranked}"
+            ),
+            other => panic!("unexpected generation {other:?}"),
+        }
+    }
 }

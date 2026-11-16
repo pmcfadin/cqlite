@@ -45,6 +45,10 @@ const CASES: &[(&str, &str)] = &[
     ("test_tomb", "static_with_tombstones"),
     ("test_tomb", "resurrection_gc_positive"),
     ("test_tomb", "dropped_regular_col"),
+    // Real Cassandra-written `range_tombstone_boundary` (golden: bound, boundary, bound = 3
+    // unfiltered markers, each counted ONCE by SSTableMetadataViewer 5.0.8).
+    ("test_compaction_tombstone_ttl", "rt_cross_gen"),
+    ("test_compaction_tombstone_ttl", "rt_open_ended_boundary"),
 ];
 
 struct Expected {
@@ -332,4 +336,65 @@ async fn deep_scan_matches_values_derived_from_the_goldens() {
         cases_run == 0 || tomb_cases >= 3,
         "the tombstone ranking must be exercised on real tombstones, got {tomb_cases} cases"
     );
+}
+
+/// R3.2 range-tombstone BOUNDARY counting. `SSTableMetadataViewer.printScannedOverview`
+/// (cassandra-5.0.8, lines 205-262) counts ONE per RANGE_TOMBSTONE_MARKER unfiltered: a start
+/// bound is 1, an end bound is 1, and a BOUNDARY (end+start in one unfiltered) is also 1. The
+/// Cassandra-written goldens of these two tables each hold `bound(start)`, `boundary`,
+/// `bound(end)` for partition 1 (3 unfiltereds, counted from the sstabledump golden below), and
+/// the reader pairs them into TWO `RangeMarker` rows; counting 2 per pair would report 4.
+#[tokio::test]
+async fn range_tombstone_boundary_counts_once_like_cassandra() {
+    for table in ["rt_cross_gen", "rt_open_ended_boundary"] {
+        let ks = "test_compaction_tombstone_ttl";
+        let dir = match datasets_root::resolve_table_generation_dir(ks, table) {
+            Ok(d) => d,
+            Err(e) if strict() => panic!("{ks}.{table}: fixture missing: {e}"),
+            Err(e) => {
+                eprintln!("SKIP {ks}.{table}: {e}");
+                continue;
+            }
+        };
+        let db = data_dbs(&dir).into_iter().next().expect("Data.db");
+        // Independent expectation: count the golden's marker objects (no code under test).
+        let golden = golden_objects(&PathBuf::from(format!("{}.jsonl", db.display())));
+        let markers: usize = golden
+            .iter()
+            .flat_map(|p| p["rows"].as_array().expect("rows").iter())
+            .filter(|r| {
+                matches!(
+                    r["type"].as_str(),
+                    Some("range_tombstone_bound") | Some("range_tombstone_boundary")
+                )
+            })
+            .count();
+        assert_eq!(markers, 3, "{table}: golden shape (bound, boundary, bound)");
+        assert!(
+            golden
+                .iter()
+                .flat_map(|p| p["rows"].as_array().expect("rows").iter())
+                .any(|r| r["type"] == "range_tombstone_boundary"),
+            "{table}: fixture must contain a range_tombstone_boundary"
+        );
+        let report = diagnose_table(
+            &dir,
+            &DiagnoseOptions {
+                now_secs: 1_794_545_000,
+                deep: true,
+                top_n: 5,
+                gc_grace_seconds: Some(864_000),
+                schema: None,
+            },
+        )
+        .await
+        .expect("diagnose --deep");
+        let deep = report.generations[0].deep.as_ref().expect("deep");
+        let metrics: Vec<u64> = deep
+            .top_tombstone_heaviest_partitions
+            .iter()
+            .map(|p| p.metric)
+            .collect();
+        assert_eq!(metrics, vec![3], "{table}: raw marker count");
+    }
 }

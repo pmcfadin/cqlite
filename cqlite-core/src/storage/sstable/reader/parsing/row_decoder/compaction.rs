@@ -321,6 +321,7 @@ pub(super) struct CompactionPolicy<'a> {
         crate::storage::sstable::reader::compaction_row::CompactionBound,
         i64,
         i32,
+        bool,
     )>,
 }
 
@@ -357,6 +358,7 @@ impl<'a> CompactionPolicy<'a> {
         crate::storage::sstable::reader::compaction_row::CompactionBound,
         i64,
         i32,
+        bool,
     )> {
         &self.pending_range_start
     }
@@ -374,6 +376,7 @@ impl<'a> CompactionPolicy<'a> {
             crate::storage::sstable::reader::compaction_row::CompactionBound,
             i64,
             i32,
+            bool,
         )>,
     ) {
         self.pending_range_start = pending;
@@ -493,7 +496,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
             1 | 7 => {
                 // Simple start bound: buffer until the matching end.
                 let start = self.make_bound(schema, bound_values, bound_kind == 1, true);
-                self.pending_range_start = Some((start, mfda_p, ldt_p));
+                self.pending_range_start = Some((start, mfda_p, ldt_p, true));
             }
             0 | 6 => {
                 // Simple end bound: close the buffered start.
@@ -501,8 +504,9 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 let start = self
                     .pending_range_start
                     .take()
-                    .map(|(s, _, _)| s)
-                    .unwrap_or(CompactionBound::Bottom);
+                    .map(|(s, _, _, separate)| (s, separate))
+                    .unwrap_or((CompactionBound::Bottom, false));
+                let (start, separate_start_marker) = start;
                 pending.push(CompactionRow {
                     key: self.partition_key.clone(),
                     row_timestamp: mfda_p,
@@ -511,6 +515,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                         end,
                         deletion_time: mfda_p,
                         local_deletion_time: ldt_p,
+                        separate_start_marker,
                     },
                 });
             }
@@ -519,7 +524,8 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 // secondary opens the next. kind 2 = EXCL_END + INCL_START,
                 // kind 5 = INCL_END + EXCL_START.
                 let end_inclusive = bound_kind == 5;
-                if let Some((start, _, _)) = self.pending_range_start.take() {
+                if let Some((start, _, _, separate_start_marker)) = self.pending_range_start.take()
+                {
                     let end = self.make_bound(schema, bound_values.clone(), end_inclusive, false);
                     pending.push(CompactionRow {
                         key: self.partition_key.clone(),
@@ -529,12 +535,13 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                             end,
                             deletion_time: mfda_p,
                             local_deletion_time: ldt_p,
+                            separate_start_marker,
                         },
                     });
                 }
                 let (new_mfda, new_ldt) = secondary.unwrap_or((mfda_p, ldt_p));
                 let new_start = self.make_bound(schema, bound_values, bound_kind == 2, true);
-                self.pending_range_start = Some((new_start, new_mfda, new_ldt));
+                self.pending_range_start = Some((new_start, new_mfda, new_ldt, false));
             }
             unknown => {
                 // Issue #3808: an unrecognised `ClusteringPrefix.Kind` ordinal is

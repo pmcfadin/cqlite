@@ -13,7 +13,9 @@
 //!   `sstablemetadata -s`'s `rowCount`/`pcount`.
 //! * **tombstones** = EXACTLY `printScannedOverview`'s `ptombcount` (cassandra-5.0.8
 //!   `SSTableMetadataViewer.java`): +1 for a partition-level deletion, +1 per range-tombstone
-//!   marker (a paired [`CompactionRowData::RangeMarker`] is its start and end bound = 2), +1 per
+//!   marker UNFILTERED (start bound 1, end bound 1, a boundary 1; a paired
+//!   [`CompactionRowData::RangeMarker`] counts its closing unfiltered plus its start when that was
+//!   a separate marker, see [`raw_tombstones_in_row`]), +1 per
 //!   cell tombstone (simple cell holding a tombstone, or a deleted complex element). A row
 //!   deletion, an expired TTL cell and a complex-column deletion are NOT counted by Cassandra's
 //!   tool, so they are not counted here. No `gcBefore` filter, no cross-generation reconciliation
@@ -96,7 +98,15 @@ fn insert_ranked(list: &mut Vec<RankedPartition>, top_n: usize, key: &[u8], metr
 pub(crate) fn raw_tombstones_in_row(row: &CompactionRow) -> u64 {
     match &row.row_data {
         CompactionRowData::PartitionDelete { .. } => 1,
-        CompactionRowData::RangeMarker { .. } => 2,
+        // Cassandra counts one per range-tombstone-marker UNFILTERED (`SSTableMetadataViewer`
+        // 5.0.8 lines 205-262): a simple start bound is 1, a simple end bound is 1 and a BOUNDARY
+        // (end+start in one unfiltered) is 1. The reader pairs markers into start+end rows, so a
+        // `RangeMarker` is its closing unfiltered (1) plus its own start unfiltered when the
+        // start was a separate marker; a boundary-opened start is the previous row's closing one.
+        CompactionRowData::RangeMarker {
+            separate_start_marker,
+            ..
+        } => 1 + u64::from(*separate_start_marker),
         // A row deletion is a ROW with no cells: Cassandra counts no tombstone for it.
         CompactionRowData::Tombstone { .. } => 0,
         CompactionRowData::Live {

@@ -93,6 +93,7 @@ impl SSTableRowIteratorAdapter {
             end,
             deletion_time,
             local_deletion_time,
+            ..
         } = row_data
         {
             let range = RangeTombstone {
