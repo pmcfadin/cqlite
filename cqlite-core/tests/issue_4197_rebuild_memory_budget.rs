@@ -168,16 +168,15 @@ const ALL_COMPONENTS: [Component; 7] = [
 /// Tables whose FULL DECODE hits a PRE-EXISTING gap unrelated to rebuild, so
 /// `rebuild_components` returns `Err` rather than a measurable run.
 ///
-/// `wide_partition_table` has 5 clustering columns including a `DATE` one and
-/// hits the shared clustering-comparator's "Type mismatch … comparator=Date"
-/// error in `ClusteringKey::compare`/`merge_entry_to_mutation` — the same path
-/// a COMPACTION of this table would take, documented in
-/// `issue_4197_rebuild_index_parity.rs` and out of scope for #4197.
+/// Empty since #4279: `wide_partition_table` (5 clustering columns including a
+/// `DATE` one) used to hit the clustering comparator's "Type mismatch …
+/// comparator=Date" error; #4279 decodes every clustering type by schema, so it
+/// now rebuilds and is measured like every other table.
 ///
 /// This list is a fail-closed reconciliation, not an excusal: the test FAILs if
 /// any OTHER table errors, and FAILs just as loudly if a table named here
 /// succeeds (the declaration is then stale and must be deleted).
-const DECODE_GAP_TABLES: [&str; 1] = ["wide_partition_table"];
+const DECODE_GAP_TABLES: [&str; 0] = [];
 
 /// Every `test_wide_rows` table name present on disk, discovered from the
 /// dataset corpus (issue #1229 — never a hard-coded list/count). A generation
