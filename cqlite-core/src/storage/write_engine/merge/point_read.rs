@@ -87,6 +87,8 @@ impl KWayMerger {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            // Callers that serve a read (the point path) opt in via `with_purpose` (#4524).
+            purpose: super::MergePurpose::Compaction,
             // Issue #2765: the point-read builders open their fail-safe adapters
             // (and snapshot the shared capacity) OUTSIDE this constructor, then
             // attach the matching slot guard via `with_egress_slot`. A merger
@@ -395,7 +397,8 @@ pub fn build_single_partition_merger_with_registry(
         // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
-    let merger = KWayMerger::from_row_iterators(runs, schema)?;
+    let merger =
+        KWayMerger::from_row_iterators(runs, schema)?.with_purpose(super::MergePurpose::Read);
     // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened;
     // an all-`Seeked` (channel-less) point read registers no slot.
     Ok(Some(match egress {
@@ -532,7 +535,8 @@ pub fn build_single_partition_merger_from_readers(
         // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
-    let merger = KWayMerger::from_row_iterators(runs, schema)?;
+    let merger =
+        KWayMerger::from_row_iterators(runs, schema)?.with_purpose(super::MergePurpose::Read);
     // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened.
     Ok(Some(match egress {
         Some((_, guard)) => merger.with_egress_slot(guard),

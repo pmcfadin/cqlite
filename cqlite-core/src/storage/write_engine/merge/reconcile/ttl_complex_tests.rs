@@ -129,6 +129,7 @@ fn reconcile_with_purges(
         gc_before,
         i64::MAX,
         now,
+        false,
         &mut purges,
     );
     let out = match merged {

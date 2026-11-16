@@ -579,14 +579,14 @@ impl<'a> StreamingMerger<'a> {
             effective_gc_before,
             max_purgeable_timestamp,
             self.merger.now_secs,
+            self.merger
+                .purpose
+                .keeps_marker_only_rows(&self.merger.schema),
             &mut self.state.purges,
         ) {
             if self.state.range_tombstones.is_empty() {
-                // Common case: nothing has EVER shadowed anything in this
-                // partition so far — partition-shadowing alone still
-                // applies (it resolves fully during the prefix, unlike
-                // range tombstones), then flush straight through with zero
-                // extra buffering.
+                // Common case: no range tombstone seen yet — partition-shadowing alone
+                // applies (resolved during the prefix); flush straight through, no buffering.
                 if let Some(survivor) =
                     KWayMerger::apply_partition_shadowing(entry, self.state.max_partition_deletion)
                 {
@@ -947,6 +947,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            purpose: crate::storage::write_engine::merge::MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
