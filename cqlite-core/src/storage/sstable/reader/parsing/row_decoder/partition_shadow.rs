@@ -135,6 +135,11 @@ impl PartitionShadow {
     /// older than the deletion), or it is TTL-expired. `clustering` is the row's
     /// clustering-key values (needed only for range coverage; pass an empty slice
     /// when [`Self::needs_clustering`] is `false`).
+    /// The read-time clock (epoch seconds) this shadow evaluates TTL expiry against.
+    pub(super) fn now_secs(&self) -> i64 {
+        self.now_secs
+    }
+
     pub(super) fn row_hidden(&self, header: &RowHeader, clustering: &[Value]) -> bool {
         // Partition-level deletion shadows every row whose data predates it.
         if let Some(d) = self.partition_deletion {

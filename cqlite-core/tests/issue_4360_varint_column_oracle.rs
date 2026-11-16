@@ -129,35 +129,58 @@ fn regular_oracle() -> Vec<(i32, Option<String>)> {
     expected
 }
 
+/// Every golden row is expected, null-valued ones included (#4524).
+///
+/// Cassandra evidence: row id=100 in `varint_regular-*/nb-1-big-Data.db.jsonl` carries
+/// `liveness_info` (tstamp 1970-01-01T00:00:00.001Z, the primary-key liveness marker) plus a
+/// `v` cell with only `deletion_info`. A row with live PK liveness is returned by SELECT with
+/// the dead cell as null (Cassandra 5.0.8 `AbstractRow.hasLiveData`: live `primaryKeyLivenessInfo()` short-circuits true),
+/// the same behaviour recorded by `test-data/fixtures/issue_4524/test_nullrow/*/cqlsh-select.txt`
+/// (rows with `v = null` listed). So the decoded set must equal ALL 16 golden rows.
 #[tokio::test]
 async fn regular_varint_column_equals_the_sstabledump_oracle_per_row() {
     let oracle = regular_oracle();
-    let expected: Vec<&(i32, Option<String>)> =
-        oracle.iter().filter(|(_, t)| t.is_some()).collect();
-    assert_eq!(expected.len(), 15);
+    let expected: Vec<&(i32, Option<String>)> = oracle.iter().collect();
+    assert_eq!(expected.len(), 16);
+    assert_eq!(
+        expected.iter().filter(|(_, t)| t.is_none()).count(),
+        1,
+        "exactly the id=100 row is null-valued in the golden"
+    );
 
     let rows = select_star("varint_regular").await;
-    // Every non-null oracle row must be present; the NULL row is the separate ignored test.
     assert_eq!(
         rows.len(),
         expected.len(),
-        "row count must equal the golden's non-null rows"
+        "row count must equal the golden's rows (null-valued included)"
     );
     for (id, want) in expected {
         let row = rows
             .iter()
             .find(|r| int_of(r, "id") == *id)
             .unwrap_or_else(|| panic!("row id={id} missing from the decoded result"));
-        // Both directions of the column set (#3890).
+        // Both directions of the column set (#3890). A null cell is absent from the row map
+        // (the engine omits null columns), so the null row's set is `["id"]`.
         let mut cols: Vec<&str> = row.keys().map(String::as_str).collect();
         cols.sort_unstable();
-        assert_eq!(cols, ["id", "v"], "id={id}: column set");
-        let v = row.get("v").unwrap_or_else(|| panic!("id={id}: no v"));
-        assert_eq!(
-            &varint_text(v),
-            want.as_ref().expect("filtered to Some"),
-            "id={id}: decoded varint != sstabledump oracle"
-        );
+        match want {
+            Some(text) => {
+                assert_eq!(cols, ["id", "v"], "id={id}: column set");
+                let v = row.get("v").unwrap_or_else(|| panic!("id={id}: no v"));
+                assert_eq!(
+                    &varint_text(v),
+                    text,
+                    "id={id}: decoded varint != sstabledump oracle"
+                );
+            }
+            None => {
+                assert_eq!(cols, ["id"], "id={id}: null cell must be absent");
+                assert!(
+                    matches!(row.get("v"), None | Some(Value::Null)),
+                    "id={id}: golden cell is a tombstone, v must be null"
+                );
+            }
+        }
     }
     // The subject must really be in the fixture: beyond 2^64 and negative.
     let texts: Vec<&str> = oracle.iter().filter_map(|(_, t)| t.as_deref()).collect();
@@ -175,11 +198,8 @@ async fn regular_varint_column_equals_the_sstabledump_oracle_per_row() {
     );
 }
 
-/// KNOWN DEFECT, NOT WEAKENED: a row whose only regular cell is a null (here an explicit
-/// `v = null` cell tombstone, row id 100) is not returned by `SELECT` at all, although Cassandra
-/// returns `(100, null)` and the golden has the row with its `liveness_info`. Same class as
-/// #2189 (primary-key row-liveness marker). Un-ignore when fixed.
-#[ignore = "row with liveness but only a null cell is dropped from SELECT - class of #2189; fixture and oracle are real"]
+/// A row whose only regular cell is a null (explicit `v = null` cell tombstone, id 100) keeps its
+/// live primary-key liveness and is returned as `(100, null)` (#4524, class of #2189).
 #[tokio::test]
 async fn null_varint_row_is_returned_as_null() {
     let oracle = regular_oracle();

@@ -665,7 +665,7 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
-    pub(super) fn build(self, purges: &mut PurgeCounts) -> Option<MergeEntry> {
+    pub(super) fn build(self, purges: &mut PurgeCounts, keep_marker: bool) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
@@ -713,6 +713,8 @@ impl ReconcileState {
         // Attach the carried deletion metadata to whichever entry is emitted so it
         // is not dropped by reconciliation (#886 plumbing preservation).
         let has_carried_metadata = !complex_deletions.is_empty() || range_deletion.is_some();
+        let marker_only =
+            keep_marker && clustering_key.is_none() && !had_data_before && row_liveness.has_marker;
 
         // Emit a live row only when real data survives. `!purged_to_empty`
         // suppresses a clustered row whose only data was a dropped column (phantom
@@ -767,11 +769,9 @@ impl ReconcileState {
                     local_deletion_time: row_del_ldt,
                 },
             ))
-        } else if has_carried_metadata {
-            // No surviving data AND no row tombstone, but the cluster still carries
-            // complex/range deletion metadata. Emit a metadata-only entry (an empty
-            // `Live` row) so it survives reconciliation and reaches downstream
-            // consumers (#844/#846/#899).
+        } else if has_carried_metadata || marker_only {
+            // No data/row tombstone, but carried deletion metadata (#844/#846/#899) or a READ-merge
+            // marker-only row (#4524): emit an empty `Live` row (read visibility applies marker TTL).
             Some(MergeEntry::new(
                 run_index,
                 key,

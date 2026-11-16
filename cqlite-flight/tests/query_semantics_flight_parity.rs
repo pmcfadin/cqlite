@@ -82,6 +82,11 @@ struct Case {
     table: String,
     fixture_dir_prefix: String,
     sstable_prefix: String,
+    /// Optional checkout-relative sstables root (e.g. `test-data/fixtures/issue_4524`) holding
+    /// this case's committed fixture instead of the datasets corpus (same field the in-core
+    /// lane reads; #4524). It is git-tracked source, so it wins over every corpus root.
+    #[serde(default)]
+    fixtures_dir: Option<String>,
     schema: String,
     #[allow(dead_code)]
     query: String,
@@ -140,24 +145,41 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The `sstables/` root. Prefer `CQLITE_DATASETS_ROOT` when it actually holds the
-/// committed keyspace; otherwise fall back to the in-repo committed corpus.
-fn sstables_root(keyspace: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .map(|r| PathBuf::from(r).join("sstables")),
-        Some(
-            repo_root()
-                .join("test-data")
-                .join("datasets")
-                .join("sstables"),
-        ),
-    ];
+/// The candidate `sstables/` root that actually carries THIS case's fixture.
+///
+/// Table-granular like the in-core lane (#3220): each candidate is probed with the case's
+/// own `fixture_dir_prefix`/`sstable_prefix` and the first holding the `Data.db` wins, so a
+/// root holding the keyspace but not the table is never committed to. A case's own
+/// `fixtures_dir` (committed per-issue fixture) is tried first. With no match, a root merely
+/// holding the keyspace is returned so the caller's "not fetched" message names a real path.
+fn sstables_root_for_case(case: &Case) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = &case.fixtures_dir {
+        candidates.push(repo_root().join(dir));
+    }
+    if let Ok(r) = std::env::var("CQLITE_DATASETS_ROOT") {
+        candidates.push(PathBuf::from(r).join("sstables"));
+    }
+    candidates.push(
+        repo_root()
+            .join("test-data")
+            .join("datasets")
+            .join("sstables"),
+    );
+    let data_db = format!("{}-Data.db", case.sstable_prefix);
     candidates
-        .into_iter()
-        .flatten()
-        .find(|root| root.join(keyspace).is_dir())
+        .iter()
+        .find(|root| {
+            fixture_dir(
+                root,
+                &case.keyspace,
+                &case.fixture_dir_prefix,
+                &case.sstable_prefix,
+            )
+            .is_some_and(|dir| dir.join(&data_db).exists())
+        })
+        .or_else(|| candidates.iter().find(|r| r.join(&case.keyspace).is_dir()))
+        .cloned()
 }
 
 fn schema_path(file: &str) -> Option<PathBuf> {
@@ -310,7 +332,9 @@ fn ddl_for(
     let text = std::fs::read_to_string(schema_file)
         .map_err(|e| format!("read schema {}: {e}", schema_file.display()))?;
     let declared = text.contains(&format!("TABLE IF NOT EXISTS {table} "))
-        || text.contains(&format!("TABLE {table} "));
+        || text.contains(&format!("TABLE {table} "))
+        || text.contains(&format!("TABLE IF NOT EXISTS {keyspace}.{table} "))
+        || text.contains(&format!("TABLE {keyspace}.{table} "));
     if !declared {
         return Err(format!(
             "table {table} is not declared in {}",
@@ -508,7 +532,7 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         return Ok(false);
     }
 
-    let Some(root) = sstables_root(&case.keyspace) else {
+    let Some(root) = sstables_root_for_case(case) else {
         let msg = format!("case {}: keyspace {} absent", case.id, case.keyspace);
         if require_fixtures() {
             return Err(format!("REQUIRE_FIXTURES: {msg}"));
@@ -660,6 +684,7 @@ fn synthetic_case(
         table: "does_not_matter".to_string(),
         fixture_dir_prefix: "does_not_matter".to_string(),
         sstable_prefix: "does_not_matter".to_string(),
+        fixtures_dir: None,
         schema: "does_not_matter.cql".to_string(),
         query: "SELECT 1".to_string(),
         pinned_now_secs: 0,
