@@ -15,16 +15,6 @@ The CLI SHALL accept `--format vortex` (alias/spelling matching the existing `Ex
 enum casing, i.e. `vortex`) on `cqlite export <FILE> --table <TABLE> --format vortex`, forwarding
 through the existing `--schema` resolution and streaming chunk/backpressure path unchanged.
 
-Corrected during implementation (the ORIGINAL R6.2 below described a non-existent code path):
-`export`'s destination is the MANDATORY positional `<FILE>` argument (`cli_types.rs`'s `Export`
-variant), not a separate `--out`/`--output` flag — that flag pattern belongs to the SEPARATE
-`query`/one-shot surface (`cqlite --query "..." --out <fmt> --output <file>`), which R6 does not
-touch (`query`'s own `OutputFormat::Vortex` arm always REJECTS, per the proposal's design choice —
-see `cqlite-cli/src/commands/query.rs`). Since `<FILE>` is mandatory for every `export` format
-alike, clap itself refuses `cqlite export --format vortex` with no `<FILE>` before any
-format-specific code runs — that is pre-existing, unconditional clap behavior, not something this
-change adds or could usefully re-test as Vortex-specific.
-
 #### Scenario: R6.1 query export produces a file Vortex's own reader opens
 - **Given** the built `cqlite` binary with the `vortex` feature enabled, a real fixture table, and
   its resolved schema
@@ -39,10 +29,7 @@ The `export_sstable` LIBRARY function (`cqlite_cli::commands::export_sstable::ex
 accept `ExportFormat::Vortex`, following the same dispatch shape as `ExportFormat::Parquet` in
 `export_sstable.rs` (schema resolution, progress bar, single-generation export), tested at the
 library level exactly as the pre-existing Parquet arm already is (`test_export_sstable_to_parquet`)
-— not through a CLI subprocess. Lead ruling 2026-09-24, correcting this requirement's original
-wording: `export_sstable` is NOT a CLI verb — the `export-sstable` subcommand documented in
-`cli-reference.md` is a DIFFERENT code path (the write engine's own SSTable-format exporter,
-`commands::write::handle_export`).
+— not through a CLI subprocess. 
 
 #### Scenario: R7.1 direct SSTable export to Vortex via the library function
 - **Given** a real fixture table directory (`test_basic.simple_table`) and its resolved schema
@@ -74,9 +61,7 @@ The SAME `SELECT *` query SHALL be exported to Parquet and to Vortex from the co
 each of the 33 committed fixture tables (`test_basic`, `test_collections`, `test_timeseries`,
 `test_wide_rows`), both read back to Arrow with their own readers, and compared equal on schema
 (modulo extension-metadata spelling differences) and every value, asserting the full column set
-present in BOTH directions (#3890: no column absent from one side compared only on the columns the
-test happens to name). This test is gated `CQLITE_REQUIRE_FIXTURES=1` with no per-case skip, and
-runs in the mandatory full gate — not CI-only.
+present in BOTH directions (#3890).
 
 #### Scenario: R9.1 all 33 fixture tables agree, full column set, both directions
 - **Given** the fetched dataset root (`CQLITE_DATASETS_ROOT`) with all 33 fixture tables present
@@ -113,15 +98,12 @@ solely by the cross-format differential (R9) and the value/type-level requiremen
 
 ### Requirement: R11 — Gate wiring: a compile-only isolation lane plus one executing differential lane
 
-The full gate SHALL gain `feature-iso-vortex` as a **compile-only** lane (vortex enabled, parquet
-and delta-scan disabled, `--no-run`, mirroring `feature-iso-parquet` exactly — owner Seam-1 ruling
-2026-09-23: slim gate wiring) and `vortex-parquet-differential` as the sole new EXECUTING
-component, enabling `parquet` AND `vortex` together to run both the writer's own unit-level
-coverage and R9's CLI-level differential target (`CQLITE_REQUIRE_FIXTURES=1`, added to
-`DATASET_COMPONENTS`; see design.md D3). `features-load-bearing` SHALL pass (the `vortex` feature
-has real `cfg` reference sites — the writer module itself) and `dep-duplicates` SHALL show no
-`ADVISORY-INCREASE` (Vortex's `parquet ^59.2`/`tokio` dependencies are already in the tree after
-#4236's arrow-59 rev).
+The full gate SHALL gain `feature-iso-vortex` as a **compile-only** lane and
+`vortex-parquet-differential` as the sole new EXECUTING component, which enables `parquet` AND
+`vortex` together (`CQLITE_REQUIRE_FIXTURES=1`, added to `DATASET_COMPONENTS`; see design.md D3).
+`features-load-bearing` SHALL pass and `dep-duplicates` SHALL report `PASS` or, at worst, an
+`ADVISORY-INCREASE` block naming exactly which new duplicate Vortex's dependency tree introduced
+(never a silent `FAIL`).
 
 #### Scenario: R11.1 `feature-iso-vortex` compiles, without `parquet` or `delta-scan`, and runs nothing
 - **Given** the full gate
@@ -135,15 +117,18 @@ has real `cfg` reference sites — the writer module itself) and `dep-duplicates
 #### Scenario: R11.2 `vortex-parquet-differential` is the sole executing lane, named, fixture-required, and zero-tests-guarded
 - **Given** the full gate's `AGENT-GATE SUMMARY`
 - **When** the `vortex-parquet-differential` component's line is read
-- **Then** it names all three passes it ran — a name-filtered `cargo test -p cqlite-core --features
+- **Then** it names all four passes it ran — a name-filtered `cargo test -p cqlite-core --features
   parquet,vortex --lib export::vortex::` (not a bare `--lib`, to bound gate cost to the writer's own
-  tests), `--test export_integration_tests test_export_sstable_to_vortex` (R7's library-level
-  coverage), and the CLI-level differential target — states `CQLITE_REQUIRE_FIXTURES=1` for the
-  fixture-backed pass, runs `check_no_unexpected_zero_tests` (empty allowed-zero list) over the
-  combined log so a target compiling out to 0 tests FAILs rather than PASSing having executed
-  nothing (review finding, Medium — every sibling executing lane already has this guard), and its
-  pass/fail is not silently absorbed into an existing component's line (#3522's per-component naming
-  discipline); no other new component executes any `vortex`-gated test.
+  tests), a second name-filtered `--lib export::arrow_schema::` pass (the shared Arrow schema's
+  nested-UUID extension coverage), `--test export_integration_tests test_export_sstable_to_vortex`
+  (R7's library-level coverage), and the CLI-level targets `--test
+  issue_4237_vortex_parquet_differential --test issue_4237_vortex_type_coverage` — states
+  `CQLITE_REQUIRE_FIXTURES=1` for the fixture-backed pass, runs `check_no_unexpected_zero_tests`
+  (empty allowed-zero list) over the combined log so a target compiling out to 0 tests FAILs rather
+  than PASSing having executed nothing (review finding, Medium — every sibling executing lane
+  already has this guard), and its pass/fail is not silently absorbed into an existing component's
+  line (#3522's per-component naming discipline); no other new component executes any
+  `vortex`-gated test.
 
 #### Scenario: R11.3 `features-load-bearing` and `dep-duplicates` stay green
 - **Given** the full gate
@@ -158,11 +143,6 @@ has real `cfg` reference sites — the writer module itself) and `dep-duplicates
 Documentation SHALL name Vortex as a new export target: `output-formats.md`, `cli-reference.md`,
 `docs/development/dev-cookbook.md` (a `--features vortex` build/test recipe mirroring the existing
 `--features parquet` one), and `CHANGELOG.md`'s `[Unreleased]` section each gain a Vortex entry.
-`CHANGELOG.md`, not the README formats table, is this change's record of an UNSHIPPED feature —
-README's "Features" section is a per-shipped-milestone changelog (`### ✅ M3 Complete`, `### ✅
-v0.17.0`, …) and Vortex is not shipped as of this change; a README edit implying otherwise would be
-false. The eventual 0.18 release notes (owned by whichever issue assembles them, not this one) name
-Vortex export, the arrow 59 rev, and the Rust 1.95 floor.
 
 #### Scenario: R12.0 CHANGELOG.md names Vortex under Unreleased, not as a shipped release
 - **Given** `CHANGELOG.md`'s `## [Unreleased]` section (previously `_Nothing yet._`)

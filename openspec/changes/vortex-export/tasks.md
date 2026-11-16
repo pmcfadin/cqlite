@@ -91,18 +91,26 @@ after every fix round; ONE full gate in `flow-closer`.
 ## 4. Cross-format differential + gate wiring (R9–R11, design.md D3)
 
 - [x] 4.1 `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`,
-      `required-features = ["parquet", "vortex"]`: loop over the 33 fixture tables (R9.1), export
-      both formats, read both back to Arrow, assert full-column-set equality both directions
+      `required-features = ["state_machine", "vortex"]`: loop over the 33 fixture tables (R9.1),
+      export both formats, read both back to Arrow, assert full-column-set equality both directions
       (#3890 shape — reuse the `issue_3890_point_read_column_parity_sweep.rs` pattern for asserting
-      both directions, not its subject matter). Split into a sibling
-      `issue_4237_vortex_type_coverage.rs` for the per-CQL-type-family cases (R2.2/R2.3) if the
-      first file approaches the ~1500-line campsite threshold.
+      both directions, not its subject matter). The per-CQL-type-family cases (R2.2/R2.3) live in the
+      sibling `cqlite-cli/tests/issue_4237_vortex_type_coverage.rs` (same `required-features`), both
+      sharing the harness in `cqlite-cli/tests/support/vortex_differential.rs`: tuple
+      (`test_types.cx_tuple_field_order`), varint (`issue_4360` fixture; ids 1..=13 compared, the
+      40-digit rows refused identically by both formats since varint maps to `Decimal128(38,0)`),
+      nested UDT keys (`test_nested_udt_keys`), duration (`Utf8` in both, values from the golden).
+      The top-level UDT-as-struct case (`issue_3722` fixture) is `#[ignore]`d: query metadata does not
+      resolve a UDT column to a struct (no `UdtRegistry` reaches `ColumnInfo.cql_type`), so Parquet
+      AND Vortex both fail `column 'w': expected Blob value` — a shared defect needing its own issue.
 - [x] 4.2 `scripts/agent-gate.sh` (owner Seam-1 ruling 2026-09-23: slim gate wiring — see design.md
       D3): add `feature-iso-vortex` (R11.1) as **compile-only**, mirroring `feature-iso-parquet`'s
       existing form exactly (`--no-run`, no execution), and `vortex-parquet-differential` (R11.2) —
-      the SOLE new executing component, running both `cargo test -p cqlite-core --features
-      parquet,vortex --lib` (writer unit tests) and the CLI-level fixture-required differential
-      target — to `COMPONENTS=(...)`, `DATASET_COMPONENTS`, and the dispatch `case` — following the
+      the SOLE new executing component, running four passes (`cargo test -p cqlite-core
+      --features parquet,vortex --lib export::vortex::` and `--lib export::arrow_schema::`,
+      `--test export_integration_tests test_export_sstable_to_vortex`, and the CLI-level
+      fixture-required `--features vortex --test issue_4237_vortex_parquet_differential --test
+      issue_4237_vortex_type_coverage`) — to `COMPONENTS=(...)`, `DATASET_COMPONENTS`, and the dispatch `case` — following the
       exact pattern of the #1699 / #3453 prior additions (grep those issues' landed diffs for the
       touch-point list: `COMPONENTS`, dispatch `case`, cost-model `case`
       (`printf 'cargo'`/`'libtest'`), and the summary-line emission).
