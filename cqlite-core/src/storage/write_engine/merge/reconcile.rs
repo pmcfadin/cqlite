@@ -779,6 +779,22 @@ impl ReconcileState {
                 0,
                 RowData::Live { cells: vec![] },
             ))
+        } else if clustering_key.is_none() && !had_data_before && row_liveness.has_marker {
+            // Issue #4524: a row of a table WITHOUT clustering columns whose only content is a
+            // primary-key liveness marker (`INSERT (pk) ...` with no regular cell). It has no
+            // cell and no clustering pseudo-cell, so `surviving` is empty and the row used to
+            // vanish here, although Cassandra returns it (`BTreeRow.hasLiveData`: a live
+            // `primaryKeyLivenessInfo` suffices) and a compaction must carry its marker. Emit
+            // it as an empty `Live` row carrying the marker; the read path's visibility rule
+            // still hides it once the marker's TTL has expired. A clustered liveness-only row
+            // is already kept through its clustering pseudo-cells.
+            Some(MergeEntry::new(
+                run_index,
+                key,
+                clustering_key,
+                row_liveness.marker_timestamp.unwrap_or(0),
+                RowData::Live { cells: vec![] },
+            ))
         } else {
             // Truly empty/absent row.
             None

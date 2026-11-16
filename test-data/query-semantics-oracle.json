@@ -543,6 +543,7 @@
       "fixture_dir_prefix": "flat_rows-",
       "sstable_prefix": "nb-1-big",
       "fixtures_dir": "test-data/fixtures/issue_4524",
+      "ddl": "CREATE TABLE test_nullrow.flat_rows (id int PRIMARY KEY, v text)",
       "schema": "issue-4524-null-only-row.cql",
       "query": "SELECT id, v FROM test_nullrow.flat_rows",
       "reconciliation": [
@@ -589,6 +590,7 @@
       "fixture_dir_prefix": "clustered_rows-",
       "sstable_prefix": "nb-1-big",
       "fixtures_dir": "test-data/fixtures/issue_4524",
+      "ddl": "CREATE TABLE test_nullrow.clustered_rows (pk int, ck int, v text, PRIMARY KEY (pk, ck))",
       "schema": "issue-4524-null-only-row.cql",
       "query": "SELECT pk, ck, v FROM test_nullrow.clustered_rows",
       "reconciliation": [
@@ -650,6 +652,7 @@
       "fixture_dir_prefix": "ttl_liveness-",
       "sstable_prefix": "nb-1-big",
       "fixtures_dir": "test-data/fixtures/issue_4524",
+      "ddl": "CREATE TABLE test_nullrow.ttl_liveness (id int PRIMARY KEY, v text)",
       "schema": "issue-4524-null-only-row.cql",
       "query": "SELECT id, v FROM test_nullrow.ttl_liveness",
       "reconciliation": [
@@ -682,6 +685,7 @@
       "fixture_dir_prefix": "ttl_liveness-",
       "sstable_prefix": "nb-1-big",
       "fixtures_dir": "test-data/fixtures/issue_4524",
+      "ddl": "CREATE TABLE test_nullrow.ttl_liveness (id int PRIMARY KEY, v text)",
       "schema": "issue-4524-null-only-row.cql",
       "query": "SELECT id, v FROM test_nullrow.ttl_liveness",
       "reconciliation": [
