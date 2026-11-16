@@ -83,6 +83,9 @@ pub struct StagedPublish {
     /// `root` did not exist before [`begin`](StagedPublish::begin): an unpublished run removes it
     /// again (when empty), so a refused run leaves `--out` exactly as it found it.
     created_root: bool,
+    /// The stage was removed by a completed publish: `Drop` has nothing left to clean (and must
+    /// not issue further, un-checked removals after the run's last checked step).
+    published: bool,
 }
 
 impl StagedPublish {
@@ -106,6 +109,7 @@ impl StagedPublish {
             root: root.to_path_buf(),
             stage,
             created_root,
+            published: false,
         })
     }
 
@@ -116,7 +120,7 @@ impl StagedPublish {
 
     /// Fsync every staged file, rename each into the final tree under `root` (Data.db last, TOC.txt
     /// second to last), fsync the destination directories, then remove the staging directory.
-    pub fn publish(self) -> Result<()> {
+    pub fn publish(mut self) -> Result<()> {
         let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new(); // (staged file, relative path)
         collect_files(&self.stage, &self.stage, &mut staged)?;
         if staged.is_empty() {
@@ -166,6 +170,7 @@ impl StagedPublish {
             fsync_dir(dir)?;
         }
         remove_stage_tree(&self.stage)?;
+        self.published = true;
         fsync_dir(&self.root)
     }
 
@@ -179,6 +184,9 @@ impl StagedPublish {
 /// run) removes its staging directory, so only a hard kill (SIGKILL, power loss) can leave one.
 impl Drop for StagedPublish {
     fn drop(&mut self) {
+        if self.published {
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.stage);
         if self.created_root {
             let _ = std::fs::remove_dir(&self.root); // only if empty (i.e. nothing was published)
