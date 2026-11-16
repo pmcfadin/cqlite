@@ -84,6 +84,10 @@ runs in the mandatory full gate — not CI-only.
 - **Then** for every table, every column present in the Parquet read-back is present with an equal
   value in the Vortex read-back and vice versa, and row order matches positionally (R3 in
   `export-vortex`); the test fails closed (not silently skips) if any fixture table is missing.
+- **And** there is no quarantine and no exception: all 33 tables are swept, including
+  `test_wide_rows.wide_partition_table` and `test_collections.collection_clustering_table`, whose
+  clustering columns of every CQL type are decoded by schema since #4279 (PR #4558). A table that
+  fails to export or disagrees is a failure, never a skip.
 
 #### Scenario: R9.2 the differential is a named, required-features `--test` target
 - **Given** `cqlite-cli/Cargo.toml`
