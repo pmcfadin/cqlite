@@ -368,6 +368,34 @@ pub struct BloomFilterStats {
     pub fill_ratio: f64,
 }
 
+/// Fixture-independent regression for #4572: an empty `Filter.db` is never an all-negative filter.
+#[cfg(test)]
+mod empty_filter_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn zero_length_filter_is_never_loaded_as_an_all_negative_filter() {
+        let mut empty: &[u8] = &[];
+        // `Err` is the "no filter" signal the reader maps to always-present (every key probed).
+        // The #4572 defect was `Ok(BloomFilter::new(..))`, whose `might_contain` is false for all.
+        let loaded = BloomFilter::load(&mut empty).await;
+        let err =
+            loaded.expect_err("a 0-byte Filter.db must not yield a usable (all-negative) filter");
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn non_empty_valid_filter_still_loads_and_answers_normally() {
+        let mut bloom = BloomFilter::new(100, 0.01).expect("new");
+        bloom.insert(b"present-key");
+        let bytes = bloom.serialize().expect("serialize");
+        let mut r: &[u8] = &bytes;
+        let loaded = BloomFilter::load(&mut r).await.expect("valid filter loads");
+        assert!(loaded.might_contain(b"present-key"));
+        assert!(!loaded.might_contain(b"definitely-absent-key-0123456789"));
+    }
+}
+
 // Issue #65: Bloom filter tests gated behind experimental feature
 // Tests pass (overflow fixed with wrapping arithmetic) but gated for M3 scope
 #[cfg(all(test, feature = "experimental"))]

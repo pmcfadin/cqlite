@@ -23,13 +23,6 @@ use cqlite_core::{Config, Database};
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
 
-fn strict() -> bool {
-    matches!(
-        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
-        Ok("1") | Ok("true")
-    )
-}
-
 /// Every partition key literal of the generation's golden, in file order.
 fn golden_keys(dir: &Path) -> Vec<String> {
     let jsonl = std::fs::read_dir(dir)
@@ -98,16 +91,24 @@ async fn open(root: &Path, schema_file: &str, ks: &str, mode: ReadPathMode) -> D
 }
 
 async fn check(ks: &str, table: &str, schema_file: &str, max_keys: usize) {
-    let src = match datasets_root::resolve_table_generation_dir(ks, table) {
-        Ok(d) => d,
-        Err(e) if strict() => {
-            panic!("{ks}.{table}: fixture missing under CQLITE_REQUIRE_FIXTURES: {e}")
-        }
-        Err(e) => {
-            eprintln!("SKIP {ks}.{table}: {e}");
-            return;
-        }
-    };
+    // Fail closed (CLAUDE.md "Testing", #3220): a missing committed/fetched fixture is a FAILURE,
+    // never a silent success. Resolution is table-granular via `sstables_root_for_table`.
+    let root = datasets_root::sstables_root_for_table(ks, table).unwrap_or_else(|| {
+        panic!(
+            "{ks}.{table}: required fixture is missing (no *-Data.db under any candidate root; \
+             set CQLITE_DATASETS_ROOT, see test-data/scripts/fetch-datasets.sh): {}",
+            datasets_root::describe_search(ks, table)
+        )
+    });
+    let src = datasets_root::table_generation_dirs(&root, ks, table)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            panic!(
+                "{ks}.{table}: no generation directory under {}",
+                root.display()
+            )
+        });
     let keys: Vec<String> = golden_keys(&src).into_iter().take(max_keys).collect();
     let real_filter = std::fs::read_dir(&src)
         .expect("dir")
