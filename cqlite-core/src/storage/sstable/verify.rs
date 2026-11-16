@@ -42,7 +42,9 @@
 use crate::platform::Platform;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
+use crate::storage::sstable::verify_audit::{self, AuditInputs, AuditSummary};
 use crate::storage::sstable::verify_location::{self, PendingLocation};
+use crate::storage::sstable::verify_order::check_key_order_and_ldt;
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Config, Error, Result};
 use std::collections::BTreeMap;
@@ -72,6 +74,9 @@ pub enum VerifyMode {
     /// QUICK plus inline chunk-CRC validation, Statistics.db parse, and a full
     /// row scan.
     Full,
+    /// Cross-component consistency audit (issue #4195): QUICK's structural
+    /// checks plus eight named invariants reported as `Pass | Fail | Skip`.
+    Audit,
 }
 
 impl VerifyMode {
@@ -80,6 +85,7 @@ impl VerifyMode {
         match self {
             VerifyMode::Quick => "quick",
             VerifyMode::Full => "full",
+            VerifyMode::Audit => "audit",
         }
     }
 }
@@ -169,6 +175,20 @@ pub enum VerifyErrorClass {
     /// so this is a detection tool Cassandra's `sstableverify` lacks — Cassandra
     /// does not verify Filter.db contents and would report the same fixture clean.
     FilterFalseNegative,
+    /// `Index.db` names a `Data.db` offset whose partition header carries a
+    /// different key (audit invariant 1, #4195).
+    IndexPositionKeyMismatch,
+    /// A `Summary.db` sample does not resolve to the claimed `Index.db` entry
+    /// (audit invariant 2, #4195).
+    SummarySampleMismatch,
+    /// A BTI `DataOffset` leaf points past the end of `Data.db` (audit
+    /// invariant 4, #4195).
+    BtiDataOffsetOutOfBounds,
+    /// `CompressionInfo.db`'s chunk table does not cover `Data.db` exactly
+    /// (audit invariant 7, #4195).
+    CompressionCoverageGap,
+    /// `Statistics.db` disagrees with a real scan (audit invariant 8, #4195).
+    StatisticsScanMismatch,
 }
 
 impl VerifyErrorClass {
@@ -192,6 +212,11 @@ impl VerifyErrorClass {
             VerifyErrorClass::OutOfOrderKeyOrRow => "OutOfOrderKeyOrRow",
             VerifyErrorClass::InvalidLocalDeletionTime => "InvalidLocalDeletionTime",
             VerifyErrorClass::FilterFalseNegative => "FilterFalseNegative",
+            VerifyErrorClass::IndexPositionKeyMismatch => "IndexPositionKeyMismatch",
+            VerifyErrorClass::SummarySampleMismatch => "SummarySampleMismatch",
+            VerifyErrorClass::BtiDataOffsetOutOfBounds => "BtiDataOffsetOutOfBounds",
+            VerifyErrorClass::CompressionCoverageGap => "CompressionCoverageGap",
+            VerifyErrorClass::StatisticsScanMismatch => "StatisticsScanMismatch",
         }
     }
 }
@@ -223,7 +248,7 @@ pub struct VerifyFinding {
 }
 
 impl VerifyFinding {
-    fn new(
+    pub(crate) fn new(
         class: VerifyErrorClass,
         component: impl Into<String>,
         detail: impl Into<String>,
@@ -274,12 +299,19 @@ pub struct VerifyReport {
     pub toc_components: Vec<String>,
     /// Number of rows seen during the FULL-mode scan (`None` in QUICK mode).
     pub rows_scanned: Option<usize>,
+    /// The audit checklist; `Some` only for [`VerifyMode::Audit`] (#4195).
+    pub audit: Option<AuditSummary>,
 }
 
 impl VerifyReport {
-    /// `true` when no findings were recorded (verification passed).
+    /// `true` when no findings were recorded (verification passed). An audit is
+    /// additionally not OK when it measured nothing (all rows `Skip`).
     pub fn is_ok(&self) -> bool {
         self.findings.is_empty()
+            && !self
+                .audit
+                .as_ref()
+                .is_some_and(|a| a.any_fail() || a.vacuous())
     }
 
     /// The first finding's error class, if any.
@@ -357,6 +389,21 @@ pub async fn verify_sstable(
     verify_components(dir, components, mode, config, platform).await
 }
 
+/// Run [`VerifyMode::Audit`] (issue #4195). `deep` additionally runs the one
+/// invariant that needs a full scan (`statistics-vs-scan`) and the BTI trie
+/// identity cross-check. Additive companion to [`verify_sstable`], whose
+/// signature is unchanged for its many existing callers; `verify_sstable(..,
+/// VerifyMode::Audit, ..)` is the same audit with `deep == false`.
+pub async fn verify_sstable_audit(
+    dir: &Path,
+    deep: bool,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
+    let components = resolve_components(dir)?;
+    verify_components_with(dir, components, VerifyMode::Audit, deep, config, platform).await
+}
+
 /// Verify the EXACT SSTable generation identified by `data_db_path`.
 ///
 /// Additive companion to [`verify_sstable`] (issue #1283, roborev). `verify_sstable`
@@ -379,6 +426,20 @@ pub async fn verify_sstable_generation(
     let dir = generation_dir(data_db_path);
     let components = resolve_components_for_data_path(dir, data_db_path)?;
     verify_components(dir, components, mode, config, platform).await
+}
+
+/// [`verify_sstable_audit`] for the EXACT generation named by `data_db_path`
+/// (the multi-generation-directory companion, as `verify_sstable_generation` is
+/// to `verify_sstable`).
+pub async fn verify_sstable_generation_audit(
+    data_db_path: &Path,
+    deep: bool,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
+    let dir = generation_dir(data_db_path);
+    let components = resolve_components_for_data_path(dir, data_db_path)?;
+    verify_components_with(dir, components, VerifyMode::Audit, deep, config, platform).await
 }
 
 /// Resolve the directory that holds `data_db_path`'s sibling components.
@@ -408,6 +469,17 @@ async fn verify_components(
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
+    verify_components_with(dir, components, mode, false, config, platform).await
+}
+
+async fn verify_components_with(
+    dir: &Path,
+    components: ComponentSet,
+    mode: VerifyMode,
+    deep: bool,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
     let mut findings: Vec<VerifyFinding> = Vec::new();
     // Issue #4194: chunk/offset-anchored findings awaiting location
     // resolution, resolved in one pass at the end (`finalize_locations`) once
@@ -417,12 +489,15 @@ async fn verify_components(
     // move into `full_row_scan_partitions` below, for `finalize_locations`'s
     // own `IndexReader::open` re-read of `Index.db` (BIG).
     let platform_for_location = platform.clone();
+    let platform_for_audit = platform.clone();
 
     // ---- Check 1: TOC.txt completeness + component presence ----------------
     let toc_components = check_toc_and_presence(dir, &components, &mut findings)?;
+    let toc_findings = 0..findings.len();
 
     // ---- Check 2: Digest.crc32 vs CRC32(Data.db) ---------------------------
     check_digest(dir, &components, &mut findings)?;
+    let digest_findings = toc_findings.end..findings.len();
 
     // ---- Check 3: CompressionInfo.db parse + chunk-offset bounds -----------
     let compression_info =
@@ -448,10 +523,12 @@ async fn verify_components(
     // payload resolved back to a raw partition key by AUTHORITATIVE data (issue
     // #1103).
     let mut bti_leaves: Option<Vec<BtiResolvedLeaf>> = None;
+    let structure_start = findings.len();
     match components.format {
         SsTableFormat::Bti => bti_leaves = check_bti_structure(dir, &components, &mut findings)?,
         SsTableFormat::Big => check_big_index(dir, &components, &mut findings)?,
     }
+    let structure_findings = structure_start..findings.len();
 
     let mut rows_scanned = None;
 
@@ -638,6 +715,32 @@ async fn verify_components(
         .await;
     }
 
+    // ---- Audit mode (#4195): eight named cross-component invariants -------
+    let audit = if mode == VerifyMode::Audit {
+        let (summary, deep_rows) = run_audit(
+            dir,
+            &components,
+            deep,
+            AuditRanges {
+                toc_findings,
+                digest_findings,
+                structure_findings,
+            },
+            &compression_info,
+            bti_leaves.as_deref(),
+            &toc_components,
+            config,
+            platform_for_audit,
+            &mut findings,
+        )
+        .await;
+        // The `--deep` scan's row count is the report's `rows_scanned` (it ran).
+        rows_scanned = rows_scanned.or(deep_rows);
+        Some(summary)
+    } else {
+        None
+    };
+
     Ok(VerifyReport {
         directory: dir.to_path_buf(),
         base_name: components.base_name,
@@ -646,7 +749,86 @@ async fn verify_components(
         findings,
         toc_components,
         rows_scanned,
+        audit,
     })
+}
+
+/// Finding ranges attributing each structural check's output (audit rows 4-6).
+struct AuditRanges {
+    toc_findings: std::ops::Range<usize>,
+    digest_findings: std::ops::Range<usize>,
+    structure_findings: std::ops::Range<usize>,
+}
+
+/// Audit-mode tail of `verify_components_with` (#4195): the cheap parse checks
+/// the audit's rows depend on, the `--deep` scan, then the eight invariants.
+#[allow(clippy::too_many_arguments)]
+async fn run_audit(
+    dir: &Path,
+    components: &ComponentSet,
+    deep: bool,
+    ranges: AuditRanges,
+    compression: &CompressionState,
+    bti_leaves: Option<&[BtiResolvedLeaf]>,
+    toc_components: &[String],
+    config: &Config,
+    platform: Arc<Platform>,
+    findings: &mut Vec<VerifyFinding>,
+) -> (AuditSummary, Option<usize>) {
+    // Parse-level checks Quick lacks: a corrupt Summary.db / Statistics.db is a
+    // finding with its cause, not merely a Skip.
+    if components.format == SsTableFormat::Big {
+        check_summary(dir, components, platform.clone(), findings).await;
+    }
+    check_statistics(dir, components, platform.clone(), findings).await;
+    let mut observed = None;
+    let mut rows = None;
+    let mut bti_identity_failed = false;
+    if deep {
+        observed = Some(
+            match full_row_scan_partitions(&components.data_path, config, platform.clone()).await {
+                Ok((n_rows, partitions)) => {
+                    rows = Some(n_rows);
+                    if let Some(detail) = bti_leaves
+                        .and_then(|leaves| bti_partition_identity_mismatch(leaves, &partitions))
+                    {
+                        bti_identity_failed = true;
+                        findings.push(VerifyFinding::new(
+                            VerifyErrorClass::BtiRootPointerCorrupt,
+                            "Partitions.db",
+                            detail,
+                        ));
+                    }
+                    Ok(partitions.len())
+                }
+                Err(e) => {
+                    // Same classification FULL mode applies to a failed scan.
+                    findings.push(classify_scan_error(components, &e));
+                    Err(e.to_string())
+                }
+            },
+        );
+    }
+    let input = AuditInputs {
+        format: components.format,
+        data_path: components.data_path.clone(),
+        index_path: components.path(dir, "Index.db"),
+        summary_path: components.path(dir, "Summary.db"),
+        filter_path: components.path(dir, "Filter.db"),
+        digest_path: components.path(dir, "Digest.crc32"),
+        statistics_path: components.path(dir, "Statistics.db"),
+        deep,
+        compression,
+        bti_leaves,
+        toc_components,
+        toc_findings: ranges.toc_findings,
+        digest_findings: ranges.digest_findings,
+        structure_findings: ranges.structure_findings,
+        observed_partitions: observed,
+        bti_identity_failed,
+        platform,
+    };
+    (verify_audit::run(input, findings).await, rows)
 }
 
 /// Read all regular files in `dir`, returning `(all_files, data_files)` where
@@ -945,7 +1127,7 @@ fn check_digest(
 /// extent, checked against a chunk grid that is not its grid, with a
 /// confidently-resolved partition list attached. A wrong answer presented as
 /// a right one, which §D2 exists to prevent.
-enum CompressionState {
+pub(crate) enum CompressionState {
     /// No `CompressionInfo.db` on disk: a genuinely uncompressed table. Its
     /// `CRC.db` (BIG) IS the authoritative chunk grid.
     Uncompressed,
@@ -1132,6 +1314,13 @@ pub(crate) struct BtiResolvedLeaf {
     /// `RowsOffset` row-index entry. Resolved to a raw key via the Data.db scan's
     /// position map in [`bti_partition_identity_mismatch`].
     pub(crate) data_position: u64,
+}
+
+impl BtiResolvedLeaf {
+    /// The emitted byte-comparable trie prefix.
+    pub(crate) fn prefix(&self) -> &[u8] {
+        &self.prefix
+    }
 }
 
 /// Check 4 (BTI): structurally validate the `Partitions.db` and `Rows.db`
@@ -2066,244 +2255,6 @@ fn bti_partition_identity_mismatch(
     }
 
     None
-}
-
-/// Check 8 (FULL): partition key/row ordering + partition-level
-/// `localDeletionTime` validity (issue #1282).
-///
-/// Two corruption classes Cassandra's `sstableverify` rejects that the earlier
-/// checks did not classify:
-///
-/// * **Out-of-order key/row** ([`VerifyErrorClass::OutOfOrderKeyOrRow`]).
-///   Cassandra stores partitions in ascending **Murmur3 token** order (ties
-///   broken by the raw key bytes). We recompute each partition's token with the
-///   authoritative [`cassandra_murmur3_token`] (Murmur3Partitioner, matching the
-///   rest of CQLite's BTI read path, issue #755) and flag the first
-///   `(token, key)` pair that is not strictly greater than its predecessor.
-///
-/// * **Invalid partition-level local-deletion-time**
-///   ([`VerifyErrorClass::InvalidLocalDeletionTime`]). `localDeletionTime` is
-///   seconds since the Unix epoch; the only special non-negative value is the
-///   live sentinel `i32::MAX`. On the legacy signed (`nb`) `DeletionTime` form a
-///   NEGATIVE partition-level value is unambiguously corrupt (Cassandra's
-///   `DeletionTime`/`Verifier` rejects it). The unsigned `oa`/`da` form
-///   legitimately represents far-future times in `[2^31, 2^32)` as a negative
-///   `i32`, so we ONLY flag a negative value when the on-disk format is the
-///   signed legacy form — the format, not a heuristic, decides.
-///
-/// Both facts come from the SAME authoritative partition-header decode the scan
-/// already performs (see [`SSTableReader::partition_verify_scan`]); this is not a
-/// second guessing pass. Environmental errors (reader open) are surfaced through
-/// the existing scan-error classifier rather than aborting verification.
-async fn check_key_order_and_ldt(
-    data_path: &Path,
-    config: &Config,
-    platform: Arc<Platform>,
-    findings: &mut Vec<VerifyFinding>,
-) {
-    let reader = match SSTableReader::open(data_path, config, platform).await {
-        Ok(r) => r,
-        Err(_) => {
-            // A reader-open failure here is already surfaced by the Check 7 scan
-            // (it opens the same reader first); do not double-report it.
-            return;
-        }
-    };
-    let signed_ldt = !reader.has_uint_deletion_time();
-    let partitions = match reader.partition_verify_scan().await {
-        Ok(p) => p,
-        Err(_) => {
-            // A parse failure is Check 7's territory (RowScanFailed / decode);
-            // avoid a duplicate, differently-classed finding for the same cause.
-            return;
-        }
-    };
-
-    findings.extend(classify_order_and_ldt(&partitions, signed_ldt));
-
-    // Row-order half of OutOfOrderKeyOrRow (issue #1282 roborev follow-up):
-    // Cassandra's Verifier also rejects out-of-order CLUSTERING rows within a
-    // partition. Decode each partition's clustering rows in on-disk order and flag
-    // a non-increasing clustering step using the authoritative schema comparator
-    // (which respects reversed/DESC clustering order). A table with no clustering
-    // columns yields an empty scan and produces no findings.
-    if let Some(schema) = reader.effective_schema() {
-        // A decode failure is Check 7's territory; do not double-report. Only a
-        // successful scan feeds the clustering-order classifier.
-        if !schema.clustering_keys.is_empty() {
-            if let Ok(partition_rows) = reader.partition_clustering_verify_scan().await {
-                findings.extend(classify_clustering_row_order(&partition_rows, &schema));
-            }
-        }
-    }
-}
-
-/// Compare two clustering-key tuples in the authoritative schema clustering
-/// order (issue #1282 roborev follow-up).
-///
-/// Each column is compared with its non-gated [`ComparatorType`] (derived from the
-/// schema clustering type) and the result reversed for a DESC column, mirroring
-/// Cassandra's reversed-type ordering. An absent trailing component (a shorter
-/// tuple) is treated as NULL, which sorts first regardless of ASC/DESC — matching
-/// `ClusteringKey::compare`. NO heuristics: the format-derived comparator and the
-/// schema's ASC/DESC flag decide.
-fn compare_clustering_tuples(
-    a: &[crate::types::Value],
-    b: &[crate::types::Value],
-    schema: &crate::schema::TableSchema,
-) -> Result<std::cmp::Ordering> {
-    use crate::types::Value;
-    use std::cmp::Ordering;
-
-    let comparators = schema.get_clustering_key_comparators()?;
-    for (i, ck) in schema.clustering_keys.iter().enumerate() {
-        let av = a.get(i).unwrap_or(&Value::Null);
-        let bv = b.get(i).unwrap_or(&Value::Null);
-        // NULL/absent component sorts first regardless of ASC/DESC (no reversal).
-        let ord = match (av, bv) {
-            (Value::Null, Value::Null) => Ordering::Equal,
-            (Value::Null, _) => Ordering::Less,
-            (_, Value::Null) => Ordering::Greater,
-            (_, _) => {
-                let cmp = comparators
-                    .get(i)
-                    .ok_or_else(|| {
-                        Error::Schema(format!(
-                            "missing clustering comparator for column {}",
-                            ck.name
-                        ))
-                    })?
-                    .compare(av, bv)?;
-                if ck.order == crate::schema::ClusteringOrder::Desc {
-                    cmp.reverse()
-                } else {
-                    cmp
-                }
-            }
-        };
-        if ord != Ordering::Equal {
-            return Ok(ord);
-        }
-    }
-    Ok(Ordering::Equal)
-}
-
-/// Pure classifier for the ROW half of Check 8 (issue #1282 roborev follow-up):
-/// given each partition's clustering-key tuples in on-disk order and the
-/// authoritative schema, flag the first partition whose clustering rows are not in
-/// strictly ascending schema order as [`VerifyErrorClass::OutOfOrderKeyOrRow`].
-///
-/// The comparison applies each clustering column's ASC/DESC order via
-/// [`compare_clustering_tuples`] — NO heuristics. A non-increasing step (a row
-/// equal to or before its predecessor) is corruption Cassandra's `Verifier`
-/// rejects.
-///
-/// Kept side-effect-free so the public verify path and the unit tests drive the
-/// EXACT same classification (wiring evidence: `check_key_order_and_ldt` calls
-/// this, and `verify_sstable` calls that in FULL mode).
-fn classify_clustering_row_order(
-    partition_rows: &[(usize, Vec<Vec<crate::types::Value>>)],
-    schema: &crate::schema::TableSchema,
-) -> Vec<VerifyFinding> {
-    use std::cmp::Ordering;
-
-    let mut findings = Vec::new();
-    for (part_idx, rows) in partition_rows {
-        for pair in rows.windows(2) {
-            let (prev, cur) = (&pair[0], &pair[1]);
-            // A comparator error (schema/type mismatch) is not an ordering fault;
-            // Check 7 owns decode/type failures, so skip rather than misclassify.
-            let ord = match compare_clustering_tuples(cur, prev, schema) {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
-            // On disk a later clustering row MUST be strictly greater than its
-            // predecessor; Equal or Less is out-of-order corruption.
-            if ord != Ordering::Greater {
-                findings.push(VerifyFinding::new(
-                    VerifyErrorClass::OutOfOrderKeyOrRow,
-                    "Data.db",
-                    format!(
-                        "partition {} has an out-of-order clustering row: {:?} is not strictly after the previous row {:?} in schema clustering order",
-                        part_idx, cur, prev,
-                    ),
-                ));
-                break;
-            }
-        }
-    }
-    findings
-}
-
-/// Pure classifier for Check 8 (issue #1282): given the on-disk-ordered
-/// `(raw_partition_key, partition_local_deletion_time)` list from
-/// [`SSTableReader::partition_verify_scan`] and whether the on-disk
-/// `DeletionTime` is the legacy SIGNED form, return any order / LDT findings.
-///
-/// Kept side-effect-free so both the public verify path and the unit tests drive
-/// the EXACT same classification (wiring evidence: `check_key_order_and_ldt`
-/// calls this, and `verify_sstable` calls that in FULL mode).
-fn classify_order_and_ldt(
-    partitions: &[(Vec<u8>, Option<i32>)],
-    signed_ldt: bool,
-) -> Vec<VerifyFinding> {
-    use crate::util::cassandra_murmur3::cassandra_murmur3_token;
-
-    let mut findings = Vec::new();
-    let hex = |b: &[u8]| b.iter().map(|x| format!("{:02x}", x)).collect::<String>();
-
-    // ---- Out-of-order partition keys (Murmur3 token order) -----------------
-    let mut prev: Option<(i64, Vec<u8>)> = None;
-    for (idx, (key, _ldt)) in partitions.iter().enumerate() {
-        let token = cassandra_murmur3_token(key);
-        if let Some((prev_token, prev_key)) = prev.as_ref() {
-            // Cassandra orders by (token, key bytes). A later partition MUST be
-            // strictly greater; equal or lesser is out-of-order corruption.
-            let ordered = (*prev_token, prev_key.as_slice()) < (token, key.as_slice());
-            if !ordered {
-                findings.push(VerifyFinding::new(
-                    VerifyErrorClass::OutOfOrderKeyOrRow,
-                    "Data.db",
-                    format!(
-                        "partition {} (key {}, token {}) is not strictly after the previous partition (key {}, token {}) — partitions are stored out of Murmur3 token order",
-                        idx,
-                        hex(key),
-                        token,
-                        hex(prev_key),
-                        prev_token,
-                    ),
-                ));
-                break;
-            }
-        }
-        prev = Some((token, key.clone()));
-    }
-
-    // ---- Negative (invalid) partition-level localDeletionTime (nb) ---------
-    if signed_ldt {
-        for (key, ldt) in partitions {
-            if let Some(ldt) = ldt {
-                // A deleted partition's localDeletionTime is epoch-seconds; it
-                // cannot be negative. (The live sentinel i32::MAX is positive and
-                // is already resolved to `None` by the header parser.)
-                if *ldt < 0 {
-                    findings.push(VerifyFinding::new(
-                        VerifyErrorClass::InvalidLocalDeletionTime,
-                        "Data.db",
-                        format!(
-                            "partition (key {}) has a negative localDeletionTime {} (0x{:08x}) on the signed (nb) DeletionTime form — a valid deletion time is >= 0 seconds since epoch",
-                            hex(key),
-                            ldt,
-                            *ldt as u32,
-                        ),
-                    ));
-                    break;
-                }
-            }
-        }
-    }
-
-    findings
 }
 
 /// Map an error surfaced by the inline-CRC / decompression path onto a stable

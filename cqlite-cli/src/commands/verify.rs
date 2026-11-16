@@ -10,12 +10,30 @@ use std::sync::Arc;
 use anyhow::Result;
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
-    format_location, verify_sstable, Location, PartitionResolution, PhysicalAnchor, VerifyFinding,
-    VerifyMode, VerifyReport,
+    format_location, verify_sstable, verify_sstable_audit, Location, PartitionResolution,
+    PhysicalAnchor, VerifyFinding, VerifyMode, VerifyReport,
 };
+use cqlite_core::storage::sstable::verify_audit::{AuditSummary, AuditVerdict};
 use cqlite_core::Config;
 
 use crate::cli_types::{VerifyModeArg, VerifyOutputArg};
+
+/// Destructure a `Commands::Verify` and run it (keeps `main.rs`'s dispatch block
+/// one line regardless of how many flags `verify` grows; file-size ratchet).
+pub async fn dispatch_verify(cmd: &crate::cli_types::Commands) -> Result<()> {
+    let crate::cli_types::Commands::Verify {
+        path,
+        mode,
+        out,
+        deep,
+    } = cmd
+    else {
+        return Err(anyhow::anyhow!(
+            "dispatch_verify called with a non-verify command"
+        ));
+    };
+    execute_verify_command(path, *mode, *out, *deep).await
+}
 
 /// Execute `cqlite verify <path> --mode <quick|full> --out <text|json>`.
 ///
@@ -27,16 +45,27 @@ pub async fn execute_verify_command(
     path: &Path,
     mode: VerifyModeArg,
     out: VerifyOutputArg,
+    deep: bool,
 ) -> Result<()> {
+    // `--deep` is only meaningful for the audit: fail closed BEFORE any file is
+    // opened (usage error, exit 1), rather than silently ignoring it (#4195).
+    if deep && !matches!(mode, VerifyModeArg::Audit) {
+        // Exit 1 = usage error, the same space `sweep` uses (a generic `Err`
+        // would be mapped to an environment-failure code by `main`).
+        eprintln!(
+            "error: --deep requires --mode audit (it adds the full-scan invariants of the \
+             audit); it has no meaning for --mode quick or --mode full"
+        );
+        std::process::exit(1);
+    }
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let mode = match mode {
-        VerifyModeArg::Quick => VerifyMode::Quick,
-        VerifyModeArg::Full => VerifyMode::Full,
+    let report = match mode {
+        VerifyModeArg::Quick => verify_sstable(path, VerifyMode::Quick, &config, platform).await?,
+        VerifyModeArg::Full => verify_sstable(path, VerifyMode::Full, &config, platform).await?,
+        VerifyModeArg::Audit => verify_sstable_audit(path, deep, &config, platform).await?,
     };
-
-    let report = verify_sstable(path, mode, &config, platform).await?;
 
     match out {
         VerifyOutputArg::Text => print_text(&report),
@@ -53,7 +82,10 @@ pub async fn execute_verify_command(
 
 fn print_text(report: &VerifyReport) {
     println!("{}", report.summary_line());
-    if !report.is_ok() {
+    if let Some(audit) = &report.audit {
+        print_audit_text(audit);
+    }
+    if !report.findings.is_empty() {
         println!("findings ({}):", report.findings.len());
         for f in &report.findings {
             println!("  - [{}] {}: {}", f.class.code(), f.component, f.detail);
@@ -70,6 +102,58 @@ fn print_text(report: &VerifyReport) {
     }
 }
 
+/// The audit checklist: always eight rows, then the MEASURED count. A skip is
+/// printed with its cause and is never rendered as a pass.
+fn print_audit_text(audit: &AuditSummary) {
+    println!(
+        "audit (deep: {}): {} invariants MEASURED of {}",
+        if audit.deep { "yes" } else { "no" },
+        audit.measured(),
+        audit.rows.len()
+    );
+    for row in &audit.rows {
+        match &row.verdict {
+            AuditVerdict::Pass => println!("  [PASS] {}", row.invariant),
+            AuditVerdict::Fail => println!("  [FAIL] {}", row.invariant),
+            AuditVerdict::Skip(cause) => println!("  [SKIP] {}: {}", row.invariant, cause),
+        }
+    }
+    if audit.vacuous() {
+        println!(
+            "audit: 0 invariants MEASURED -- nothing was verified; this is not a clean result"
+        );
+    }
+}
+
+fn audit_to_json(audit: Option<&AuditSummary>) -> String {
+    let Some(audit) = audit else {
+        return "null".to_string();
+    };
+    let rows: Vec<String> = audit
+        .rows
+        .iter()
+        .map(|r| {
+            let (verdict, cause) = match &r.verdict {
+                AuditVerdict::Pass => ("pass", "null".to_string()),
+                AuditVerdict::Fail => ("fail", "null".to_string()),
+                AuditVerdict::Skip(c) => ("skip", json_str(c)),
+            };
+            format!(
+                "{{\"invariant\":{},\"verdict\":{},\"cause\":{}}}",
+                json_str(r.invariant),
+                json_str(verdict),
+                cause
+            )
+        })
+        .collect();
+    format!(
+        "{{\"deep\":{},\"measured\":{},\"rows\":[{}]}}",
+        audit.deep,
+        audit.measured(),
+        rows.join(",")
+    )
+}
+
 fn print_json(report: &VerifyReport) {
     // Hand-rolled JSON keeps the verifier free of a serde dependency in the
     // core API while still emitting a stable, CI-consumable artifact.
@@ -81,7 +165,7 @@ fn print_json(report: &VerifyReport) {
         .unwrap_or_else(|| "null".to_string());
 
     println!(
-        "{{\"directory\":{},\"base_name\":{},\"format\":{},\"mode\":{},\"ok\":{},\"rows_scanned\":{},\"toc_components\":[{}],\"findings\":[{}]}}",
+        "{{\"directory\":{},\"base_name\":{},\"format\":{},\"mode\":{},\"ok\":{},\"rows_scanned\":{},\"toc_components\":[{}],\"findings\":[{}],\"audit\":{}}}",
         json_str(&report.directory.display().to_string()),
         json_str(&report.base_name),
         json_str(report.format.as_str()),
@@ -90,6 +174,7 @@ fn print_json(report: &VerifyReport) {
         rows,
         toc.join(","),
         findings.join(","),
+        audit_to_json(report.audit.as_ref()),
     );
 }
 

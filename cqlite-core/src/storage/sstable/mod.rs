@@ -72,15 +72,15 @@ pub mod tombstone_merger;
 pub mod validation;
 pub mod verify; // Verifier contract for compressed + corrupted SSTables (epic #970, issue #1000).
 pub use verify::{
-    verify_sstable, verify_sstable_generation, VerifyErrorClass, VerifyFinding, VerifyMode,
-    VerifyReport,
+    verify_sstable, verify_sstable_audit, verify_sstable_generation,
+    verify_sstable_generation_audit, VerifyErrorClass, VerifyFinding, VerifyMode, VerifyReport,
 };
-// Corruption-location resolution for `VerifyFinding` (issue #4194): a sibling
-// of `verify` rather than added to it, since `verify.rs` is already well over
-// the ~800-line campsite target (epic #1116). Its types are re-exported
-// through `verify` (see `verify.rs`'s own re-export) so `VerifyFinding.location`
-// stays reachable via the existing `verify` module path.
+// Siblings of `verify` rather than additions to it (`verify.rs` is far over the
+// campsite target, epic #1116): corruption location (#4194, its types re-exported
+// via `verify`), the cross-component audit (#4195) and Check 8 (relocated).
+pub mod verify_audit;
 mod verify_location;
+mod verify_order;
 
 // M5: SSTable writer components (Issue #359)
 #[cfg(feature = "write-support")]
