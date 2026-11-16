@@ -335,20 +335,44 @@ def _ci_geometry(b):
 
 
 def load_pinned(path):
-    """{fixture name: {field: value}} from a committed corruption-manifest.yml (regex, no PyYAML)."""
+    """{fixture name: {field: sha}} from a committed corruption-manifest.yml (regex, no PyYAML).
+
+    Fails closed (#4583 review): an unreadable file is fatal; a malformed pin (present but not
+    64 lowercase hex) is fatal here. A fixture with no entry, or a missing field, is reported by
+    require_pin() once the generator knows which fixtures it emits."""
+    try:
+        txt = open(path).read()
+    except (OSError, UnicodeDecodeError) as e:
+        sys.exit("--pinned-manifest %s is unreadable: %s" % (path, e))
     pinned = {}
-    if not path or not os.path.isfile(path):
-        return pinned
-    txt = open(path).read()
     for blk in re.split(r"\n  - name: ", txt)[1:]:
         nm = blk.splitlines()[0].strip()
         d = {}
-        for k in ("original_sha256", "corrupted_sha256"):
-            m = re.search(r"^    %s: \"?([0-9a-f]{64})\"?\s*$" % k, blk, re.M)
-            if m:
-                d[k] = m.group(1)
+        for k in PIN_FIELDS:
+            m = re.search(r"^    %s:[ \t]*(.*?)\s*$" % k, blk, re.M)
+            if not m:
+                continue
+            v = m.group(1).strip("\"'")
+            if not re.fullmatch(r"[0-9a-f]{64}", v):
+                sys.exit("--pinned-manifest %s: %s.%s is malformed (want 64 hex characters, got %r)" % (path, nm, k, m.group(1)))
+            d[k] = v
         pinned[nm] = d
+    if not pinned:
+        sys.exit("--pinned-manifest %s: no manifest entries found (unparsable or empty)" % path)
     return pinned
+
+
+PIN_FIELDS = ("original_sha256", "corrupted_sha256")
+
+
+def require_pin(pinned, name):
+    """Every emitted fixture must be pinned with both shas when a pinned manifest was supplied."""
+    if name not in pinned:
+        sys.exit("%s: no entry in the pinned manifest (--pinned-manifest supplied, pins must cover every emitted fixture)" % name)
+    for k in PIN_FIELDS:
+        if k not in pinned[name]:
+            sys.exit("%s: pinned manifest entry is missing %s" % (name, k))
+    return pinned[name]
 
 
 def fixture_dir_sha256(d):
@@ -405,7 +429,9 @@ def main():
     ap.add_argument("--pinned-manifest", default=None,
                     help="committed corruption-manifest.yml whose audit entries pin original/corrupted sha256")
     a = ap.parse_args()
-    pinned = load_pinned(a.pinned_manifest)
+    if a.verify_only and not a.pinned_manifest:
+        ap.error("--verify-only requires --pinned-manifest (without pins the sha check would be vacuous)")
+    pinned = load_pinned(a.pinned_manifest) if a.pinned_manifest else None
     for (name, key, ks, table, prefix, comps, mut, errc, inv, why) in FIXTURES:
         src = find_source(a.root, ks, table)
         if src is None:
@@ -436,7 +462,7 @@ def main():
                 continue
             if open(os.path.join(dest, f), "rb").read() != open(os.path.join(src, f), "rb").read():
                 sys.exit("%s: component %s changed besides %s" % (name, f, comp))
-        pin = pinned.get(name, {})
+        pin = require_pin(pinned, name) if pinned is not None else {}
         report_drift(a.verify_only, name, pin, sha(clean), sha(mutated))
         print("  - name: %s" % name)
         print("    manifest_key: %s" % key)
