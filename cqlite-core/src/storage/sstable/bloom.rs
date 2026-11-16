@@ -330,8 +330,20 @@ impl BloomFilter {
     pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
         let mut data = Vec::new();
         tokio::io::AsyncReadExt::read_to_end(reader, &mut data).await?;
+        // An EMPTY filter file is NOT a filter with no keys: building a fresh, bit-less
+        // `BloomFilter::new(..)` here made `might_contain` false for EVERY key, so a generation
+        // whose `Filter.db` was empty read as holding nothing (issue #4572, the #4159 class).
+        // Cassandra 5.0.8 loads a zero-length `Filter.db` as `FilterFactory.AlwaysPresent`
+        // (`FilterComponent.load`, `if (filterFile.length() == 0) return AlwaysPresent`) and
+        // falls back to `AlwaysPresent` for any filter it cannot load
+        // (`BigSSTableReaderLoadingBuilder`/`BtiTableReaderLoadingBuilder`: `if (getFilter() ==
+        // null) setFilter(AlwaysPresent)`). Here "always present" is "no filter": the caller
+        // treats this `Err` as an absent bloom (every key is probed), with the cause logged.
         if data.is_empty() {
-            return Self::new(1000, 0.01);
+            return Err(Error::corruption(
+                "Filter.db is empty (0 bytes): treated as an always-present filter, never as an \
+                 all-negative one",
+            ));
         }
         Self::deserialize(&data)
     }
@@ -354,6 +366,34 @@ pub struct BloomFilterStats {
     pub bits_set: u64,
     /// Ratio of bits set (0.0 to 1.0)
     pub fill_ratio: f64,
+}
+
+/// Fixture-independent regression for #4572: an empty `Filter.db` is never an all-negative filter.
+#[cfg(test)]
+mod empty_filter_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn zero_length_filter_is_never_loaded_as_an_all_negative_filter() {
+        let mut empty: &[u8] = &[];
+        // `Err` is the "no filter" signal the reader maps to always-present (every key probed).
+        // The #4572 defect was `Ok(BloomFilter::new(..))`, whose `might_contain` is false for all.
+        let loaded = BloomFilter::load(&mut empty).await;
+        let err =
+            loaded.expect_err("a 0-byte Filter.db must not yield a usable (all-negative) filter");
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn non_empty_valid_filter_still_loads_and_answers_normally() {
+        let mut bloom = BloomFilter::new(100, 0.01).expect("new");
+        bloom.insert(b"present-key");
+        let bytes = bloom.serialize().expect("serialize");
+        let mut r: &[u8] = &bytes;
+        let loaded = BloomFilter::load(&mut r).await.expect("valid filter loads");
+        assert!(loaded.might_contain(b"present-key"));
+        assert!(!loaded.might_contain(b"definitely-absent-key-0123456789"));
+    }
 }
 
 // Issue #65: Bloom filter tests gated behind experimental feature
