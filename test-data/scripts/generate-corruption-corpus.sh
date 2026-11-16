@@ -558,6 +558,10 @@ fi
 # ---------------------------------------------------------------------------
 # (Re)generate corpus
 # ---------------------------------------------------------------------------
+# Snapshot the COMMITTED manifest before regeneration wipes $CORRUPT_DIR: the audit
+# generator reads its pinned original/corrupted sha256 (issue #4583).
+PINNED_MANIFEST_COPY="$(mktemp)"
+if [[ -f "$MANIFEST" ]]; then cp "$MANIFEST" "$PINNED_MANIFEST_COPY"; else : >"$PINNED_MANIFEST_COPY"; fi
 if [[ "$VERIFY_ONLY" -eq 0 ]]; then
   rm -rf "$CORRUPT_DIR"
   mkdir -p "$CORRUPT_DIR"
@@ -567,7 +571,7 @@ fi
 # Manifest + report accumulate as we go.
 MANIFEST_TMP="$(mktemp)"
 REPORT_TMP="$(mktemp)"
-trap 'rm -f "$MANIFEST_TMP" "$REPORT_TMP"' EXIT
+trap 'rm -f "$MANIFEST_TMP" "$REPORT_TMP" "$PINNED_MANIFEST_COPY"' EXIT
 
 {
   echo "# corruption-manifest.yml — deterministic corrupted-component corpus"
@@ -979,9 +983,23 @@ AUDIT_ARGS=(--corrupt-dir "$CORRUPT_DIR" --root "$SSTABLES_DIR")
 [[ -n "${CQLITE_DATASETS_ROOT:-}" ]] && AUDIT_ARGS+=(--root "$CQLITE_DATASETS_ROOT/sstables")
 [[ -n "$BTI_SOURCE_ROOT" ]] && AUDIT_ARGS+=(--root "$BTI_SOURCE_ROOT/sstables")
 AUDIT_ARGS+=(--root "$REPO_ROOT/../cqlite/test-data/datasets/sstables")
+# Same two-mode convention as the fixtures above (issue #1294 MODE 1 / MODE 2, issue #4583):
+#   --verify-only  -> MODE 1: pinned sha drift vs the committed manifest is FATAL.
+#   default (regen)-> MODE 2: clean sources are re-derived from live cassandra and are
+#                     non-deterministic; the generator re-applies the byte edits, re-asserts
+#                     every premise and reports sha drift as a ::notice::.
+# Pins come from the snapshot of the COMMITTED manifest taken before regeneration.
+[[ -s "$PINNED_MANIFEST_COPY" ]] && AUDIT_ARGS+=(--pinned-manifest "$PINNED_MANIFEST_COPY")
 [[ "$VERIFY_ONLY" -eq 1 ]] && AUDIT_ARGS+=(--verify-only)
-python3 "$SCRIPT_DIR/generate_audit_corruption_fixtures.py" "${AUDIT_ARGS[@]}" >>"$MANIFEST_TMP" 2>>"$REPORT_TMP" \
-  || fail "audit fixtures (issue #4195) failed to generate/verify"
+AUDIT_ERR="$(mktemp)"
+if ! python3 "$SCRIPT_DIR/generate_audit_corruption_fixtures.py" "${AUDIT_ARGS[@]}" >>"$MANIFEST_TMP" 2>"$AUDIT_ERR"; then
+  cat "$AUDIT_ERR" >&2
+  rm -f "$AUDIT_ERR"
+  fail "audit fixtures (issue #4195) failed to generate/verify"
+fi
+grep '^::notice::' "$AUDIT_ERR" | while IFS= read -r _line; do log "$_line"; done || true
+cat "$AUDIT_ERR" >>"$REPORT_TMP"
+rm -f "$AUDIT_ERR"
 
 {
   echo "----------------------------------------------------------------------------------------"
@@ -994,6 +1012,7 @@ python3 "$SCRIPT_DIR/generate_audit_corruption_fixtures.py" "${AUDIT_ARGS[@]}" >
 mv "$MANIFEST_TMP" "$MANIFEST"
 mv "$REPORT_TMP" "$REPORT"
 trap - EXIT
+rm -f "$PINNED_MANIFEST_COPY"
 
 # Committed machine-readable SHA256 record (clean -> corrupt) per fixture.
 SHA_RECORD="$CORRUPT_DIR/corruption-sha256.txt"
