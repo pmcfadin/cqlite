@@ -78,8 +78,6 @@ use crate::schema::TableSchema;
 use crate::storage::write_engine::mutation::{
     ClusteringKey, DecoratedKey, PartitionTombstone, RangeTombstone,
 };
-#[cfg(feature = "write-support")]
-use crate::storage::write_engine::reconcile_rules;
 // `Value` is no longer used by this file's production code (#2820 moved the
 // per-value size walk to `entry_size`), but the in-file test modules reach it
 // through `use super::*`.
@@ -195,22 +193,6 @@ pub use streaming::{StreamingMerger, StreamingStep};
 /// [`schema_order::schema_ordered_pop_all`].
 #[cfg(feature = "write-support")]
 mod schema_order;
-
-/// Adapt a merge-path [`CellData`] into the shared [`ReconcileCell`] view
-/// (issue #947) so per-cell winner resolution calls
-/// [`reconcile_rules::cell_wins`] — the one shared `Cells#reconcile` tie-break —
-/// instead of a hand-synced copy. How a tombstone is RECOGNIZED stays here
-/// (`Value::Tombstone` payload / IS_DELETED via [`KWayMerger::is_cell_tombstone`]),
-/// since that is genuinely type-specific.
-#[cfg(feature = "write-support")]
-impl reconcile_rules::ReconcileCell for CellData {
-    fn timestamp(&self) -> i64 {
-        self.timestamp
-    }
-    fn is_tombstone(&self) -> bool {
-        KWayMerger::is_cell_tombstone(self)
-    }
-}
 
 /// A cut position on the clustering axis, used to coalesce range tombstones
 /// into a NON-OVERLAPPING canonical sequence (issue #933 / roborev #959 High
@@ -3541,7 +3523,7 @@ impl KWayMerger {
                         };
                     }
                 }
-                if let Some(ttl) = cell.ttl {
+                if let Some(ttl) = cell.ttl.filter(|t| *t != 0) {
                     // #1538: preserve the SOURCE expiring cell's authoritative
                     // on-disk `localDeletionTime` (= writetime_s + ttl) so a live
                     // TTL cell that survives THIS compaction is re-emitted
@@ -4479,33 +4461,22 @@ mod tests {
     }
 
     #[test]
-    fn test_real_merger_value_tiebreak_diverges_from_cassandra() {
-        // VERIFICATION (cursor-compaction findings #4 / #21): documents that CQLite's
-        // equal-timestamp cell tie-break for two LIVE values of the SAME column
-        // DIVERGES from Cassandra.
+    fn test_real_merger_value_tiebreak_converges_with_cassandra() {
+        // Issue #4530 (was the cursor-compaction #4/#21 DIVERGENCE test): on an equal-timestamp
+        // tie between two LIVE cells of the SAME column, Cassandra's `Cells.resolveRegular`
+        // (cassandra-5.0.8 `Cells.java:128`, `compareValues(left, right) >= 0 ? left : right`)
+        // keeps the cell whose raw value bytes are GREATER (unsigned lexicographic). File / run
+        // order is NOT consulted, so the winner is the same in either arrival order.
         //
-        // Cassandra `Cells.resolveRegular` (cursor findings #4/#21): on a timestamp
-        // tie between two live cells, the cell whose **raw value bytes** are strictly
-        // greater (unsigned lexicographic compare, length prefix excluded) wins —
-        // file/run order is NOT consulted.
-        //
-        // CQLite `reconcile_cluster` (merge.rs): on a timestamp tie between two live
-        // cells it keeps the FIRST-SEEN cell, i.e. the lower run_index (newer file).
-        // Raw value bytes are never compared.
+        // CQLite now implements that rule (`reconcile_rules::cell_wins`), so this test
+        // asserts CONVERGENCE in both orders.
         //
         // Fixture (same pk, no clustering, SAME timestamp, DIFFERENT values):
         //   A (run_index 0, NEWER file): {v: "apple"}    raw bytes 0x61 70 70 6C 65
         //   B (run_index 1, OLDER file): {v: "banana"}   raw bytes 0x62 ...  (GREATER)
         //
-        // Cassandra would keep "banana" (greater raw bytes, from the older file).
-        // CQLite keeps "apple" (first-seen / newer file). The two rules pick
-        // DIFFERENT winners here, so the surviving value is byte-divergent.
-        //
-        // This test ASSERTS CQLite's current behavior and asserts that it differs
-        // from the Cassandra winner. If CQLite is later changed to match Cassandra
-        // (compare raw value bytes), THIS TEST WILL FAIL and must be updated to
-        // reflect the new, convergent behavior. See
-        // docs/garbage-free-compaction-improvements/cqlite-findings-and-applicability.md.
+        // Cassandra keeps "banana" whichever file CQLite sees first. The previous first-seen
+        // rule kept "apple" (the newer file).
         use crate::schema::{Column, KeyColumn, TableSchema};
         use std::collections::HashMap;
 
@@ -4624,23 +4595,15 @@ mod tests {
             other => panic!("expected Text value, got {:?}", other),
         };
 
-        // 1) CQLite's actual behavior: first-seen (newer file / lower run_index) wins.
+        // The Cassandra winner (greater raw value bytes) survives, from the OLDER file.
         assert_eq!(
-            surviving, newer_file_value,
-            "CQLite reconcile_cluster keeps the first-seen (newer file) cell on a \
-             timestamp tie; got {:?}",
-            surviving
-        );
-
-        // 2) The divergence itself, made executable: CQLite's winner is NOT the value
-        //    Cassandra's raw-value-bytes rule (#4/#21) would have kept.
-        assert_ne!(
             surviving, cassandra_winner,
-            "EXPECTED DIVERGENCE (#4/#21): CQLite kept {:?} but Cassandra's \
-             Cells.resolveRegular keeps the greater raw value {:?}. If this assertion \
-             fails, CQLite now matches Cassandra and the finding is RESOLVED — update \
-             cqlite-findings-and-applicability.md and convert this into a convergence test.",
-            surviving, cassandra_winner
+            "Cells.resolveRegular keeps the greater raw value {:?}; CQLite kept {:?}",
+            cassandra_winner, surviving
+        );
+        assert_ne!(
+            surviving, newer_file_value,
+            "first-seen (newer file) must no longer win"
         );
     }
 

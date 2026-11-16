@@ -54,13 +54,13 @@ impl DataWriter {
                 op: op.clone(),
                 // #1196: carry statement-level TTL so a static `USING TTL` Write
                 // is emitted as an expiring cell, not a non-expiring one.
-                row_ttl_seconds: mutation.ttl_seconds,
+                row_ttl_seconds: mutation.ttl_seconds.filter(|t| *t != 0),
             })
             .collect();
         self.write_static_row_with_prev_size(
             &static_ops,
             mutation.timestamp_micros,
-            mutation.ttl_seconds,
+            mutation.ttl_seconds.filter(|t| *t != 0),
             schema,
             0,
         )?;
@@ -418,7 +418,7 @@ impl DataWriter {
                                              // dropped and the cell serialized as non-expiring (lives
                                              // forever) — a data-liveness regression. The no-TTL path
                                              // stays byte-identical (explicit-ts, flags 0x00).
-                        match mop.row_ttl_seconds {
+                        match mop.row_ttl_seconds.filter(|t| *t != 0) {
                             // Row-level `USING TTL` static write (no per-cell LDT
                             // source): derive `now_seconds + ttl` (historical
                             // behavior).
@@ -452,15 +452,25 @@ impl DataWriter {
                         // roborev #1020 Finding 1: schema-aware frozen-UDT value.
                         let canon = canonicalize_static_value(schema, column, value)?;
                         // Issue #1538: honor the authoritative per-cell LDT verbatim.
-                        self.write_cell_with_ttl(
-                            buf,
-                            column,
-                            canon.as_ref(),
-                            mop.timestamp_micros,
-                            *ttl_seconds,
-                            *local_deletion_time,
-                            now_seconds,
-                        )?;
+                        if *ttl_seconds == 0 {
+                            // TTL 0 is NO_TTL (Cassandra `Attributes.getTimeToLive`): plain cell (#4530).
+                            self.write_cell_explicit_ts(
+                                buf,
+                                column,
+                                canon.as_ref(),
+                                mop.timestamp_micros,
+                            )?;
+                        } else {
+                            self.write_cell_with_ttl(
+                                buf,
+                                column,
+                                canon.as_ref(),
+                                mop.timestamp_micros,
+                                *ttl_seconds,
+                                *local_deletion_time,
+                                now_seconds,
+                            )?;
+                        }
                     }
                 }
                 crate::storage::write_engine::mutation::CellOperation::Delete {

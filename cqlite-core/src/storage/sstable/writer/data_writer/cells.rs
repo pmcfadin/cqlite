@@ -259,7 +259,7 @@ impl DataWriter {
     /// infallible now that the clock read happens exactly once per write,
     /// upstream of every call site.
     pub(super) fn expiring_local_deletion_time(&self, now_seconds: i32, ttl_seconds: u32) -> i32 {
-        now_seconds.saturating_add(ttl_seconds as i32)
+        super::types::implicit_expiration(now_seconds, ttl_seconds)
     }
 
     /// Write a tombstone cell

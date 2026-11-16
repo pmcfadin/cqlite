@@ -18,6 +18,7 @@ mod incremental_partition;
 /// per-column `is_complex` classification are computed once per writer, never
 /// per row (issue #1674, R3).
 mod issue_1674_column_cache;
+mod reconcile_implicit_ldt_4530;
 mod scenarios_1;
 mod scenarios_2;
 mod scenarios_3;
@@ -32,6 +33,7 @@ mod streaming_partition;
 mod support;
 /// `set<timeuuid>` / `map<timeuuid,…>` element order (issue #4534).
 mod timeuuid_collection_write;
+mod ttl_zero_4530;
 /// DIFFERENTIAL pin between the writer's two independent sorted-collection
 /// comparators (issue #3935) — `collection_order::compare_collection_elements`
 /// (variant-driven) vs `marshal_comparator::compare_for_marshal`
