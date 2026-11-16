@@ -44,6 +44,40 @@ use std::cmp::Ordering;
 mod composite;
 mod scalar;
 
+/// [`compare_collection_elements`] with the DECLARED element/key type known to be `timeuuid`
+/// (issue #4534): a `set<timeuuid>` element / `map<timeuuid,…>` key orders by
+/// `AbstractTimeUUIDType.compareCustom`, which differs from `uuid`'s only in the lsb tie-break
+/// at an equal v1 timestamp. `Value::Uuid` carries no tag, so the caller passes the schema's
+/// declared type (never inferred from the bytes, #28).
+pub(crate) fn compare_collection_elements_typed(a: &Value, b: &Value, timeuuid: bool) -> Ordering {
+    match (a, b) {
+        (Value::Uuid(x), Value::Uuid(y)) if timeuuid => crate::uuid_order::timeuuid_type_cmp(x, y),
+        _ => compare_collection_elements(a, b),
+    }
+}
+
+/// Whether a column's DECLARED type is a set whose element (or, with `map_key`, a map whose key)
+/// is `timeuuid`; `frozen<…>` wrappers are looked through. Unparseable => `false` (plain order).
+pub(crate) fn declared_element_is_timeuuid(declared: &str, map_key: bool) -> bool {
+    use crate::schema::CqlType;
+    let mut t = match CqlType::parse(declared) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    while let CqlType::Frozen(inner) = t {
+        t = *inner;
+    }
+    let mut elem = match (t, map_key) {
+        (CqlType::Set(e), false) => *e,
+        (CqlType::Map(k, _), true) => *k,
+        _ => return false,
+    };
+    while let CqlType::Frozen(inner) = elem {
+        elem = *inner;
+    }
+    matches!(elem, CqlType::TimeUuid)
+}
+
 /// Total-order comparator for two SET elements / MAP keys, matching the
 /// element/key type's Cassandra `AbstractType.compare` (issue #1275, composites
 /// #1296).

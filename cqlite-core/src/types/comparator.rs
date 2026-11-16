@@ -39,8 +39,10 @@ pub enum ComparatorType {
     Blob,
     /// Timestamp comparator (chronological)
     Timestamp,
-    /// UUID comparator (byte-wise)
+    /// `uuid` comparator: `UUIDType.compareCustom`, NOT byte-wise (#4534)
     Uuid,
+    /// `timeuuid` comparator: `AbstractTimeUUIDType.compareCustom`, chosen by SCHEMA type (#4534)
+    TimeUuid,
     /// Variable-length integer comparator
     Varint,
     /// Decimal type comparator
@@ -135,7 +137,7 @@ impl ComparatorType {
             CqlType::Blob => ComparatorType::Blob,
             CqlType::Timestamp => ComparatorType::Timestamp,
             CqlType::Uuid => ComparatorType::Uuid,
-            CqlType::TimeUuid => ComparatorType::Uuid, // Map TimeUuid to Uuid for simplicity
+            CqlType::TimeUuid => ComparatorType::TimeUuid,
             CqlType::Varint => ComparatorType::Varint,
             CqlType::List(element_type) => {
                 let element_comparator = Self::from_cql_type(element_type)?;
@@ -245,7 +247,7 @@ impl ComparatorType {
             CqlType::Blob => ComparatorType::Blob,
             CqlType::Timestamp => ComparatorType::Timestamp,
             CqlType::Uuid => ComparatorType::Uuid,
-            CqlType::TimeUuid => ComparatorType::Uuid,
+            CqlType::TimeUuid => ComparatorType::TimeUuid,
             CqlType::Varint => ComparatorType::Varint,
             CqlType::Decimal => ComparatorType::Decimal,
             CqlType::Duration => ComparatorType::Duration,
@@ -367,7 +369,11 @@ impl ComparatorType {
             ComparatorType::Text => self.compare_text(left, right),
             ComparatorType::Blob => self.compare_blob(left, right),
             ComparatorType::Timestamp => self.compare_timestamp(left, right),
-            ComparatorType::Uuid => self.compare_uuid(left, right),
+            ComparatorType::Uuid | ComparatorType::TimeUuid => crate::uuid_order::compare_values(
+                left,
+                right,
+                matches!(self, ComparatorType::TimeUuid),
+            ),
             ComparatorType::Varint => self.compare_varint(left, right),
             ComparatorType::Decimal => self.compare_decimal(left, right),
             ComparatorType::Duration => self.compare_duration(left, right),
@@ -441,6 +447,7 @@ impl ComparatorType {
             ComparatorType::Blob => "blob",
             ComparatorType::Timestamp => "timestamp",
             ComparatorType::Uuid => "uuid",
+            ComparatorType::TimeUuid => "timeuuid",
             ComparatorType::Varint => "varint",
             ComparatorType::Decimal => "decimal",
             ComparatorType::Duration => "duration",
@@ -473,6 +480,7 @@ impl ComparatorType {
             | ComparatorType::Blob
             | ComparatorType::Timestamp
             | ComparatorType::Uuid
+            | ComparatorType::TimeUuid
             | ComparatorType::Varint
             | ComparatorType::Decimal
             | ComparatorType::Duration
@@ -617,15 +625,6 @@ impl ComparatorType {
             (Value::Date(l), Value::Date(r)) => Ok(l.cmp(r)),
             _ => Err(Error::Schema(
                 "Type mismatch: expected date values".to_string(),
-            )),
-        }
-    }
-
-    fn compare_uuid(&self, left: &Value, right: &Value) -> Result<Ordering> {
-        match (left, right) {
-            (Value::Uuid(l), Value::Uuid(r)) => Ok(l.cmp(r)),
-            _ => Err(Error::Schema(
-                "Type mismatch: expected uuid values".to_string(),
             )),
         }
     }

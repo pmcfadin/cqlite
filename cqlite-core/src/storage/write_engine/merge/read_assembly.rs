@@ -433,11 +433,10 @@ fn assemble_complex(
                 elements.into_iter().map(|e| e.value).collect(),
             )))
         }
-        // A list element's `cell_path` is its position timeuuid, which orders by
-        // raw byte comparison — sort by `cell_path` bytes so multi-SSTable list
-        // elements land in authoritative position order, not arrival order.
         CqlType::List(_) => {
-            elements.sort_by(|a, b| cell_path_bytes(a).cmp(cell_path_bytes(b)));
+            elements.sort_by(|a, b| {
+                crate::uuid_order::timeuuid_path_cmp(cell_path_bytes(a), cell_path_bytes(b))
+            });
             Ok(Some(Value::List(
                 elements.into_iter().map(|e| e.value).collect(),
             )))
@@ -564,6 +563,7 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
         | ComparatorType::Timestamp
         | ComparatorType::Date
         | ComparatorType::Uuid
+        | ComparatorType::TimeUuid
         | ComparatorType::Varint
         | ComparatorType::Decimal
         | ComparatorType::Duration => false,

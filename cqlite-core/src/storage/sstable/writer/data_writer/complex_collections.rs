@@ -52,7 +52,8 @@ impl DataWriter {
         // collection_order: SIGNED numerics, unsigned-byte otherwise) decided from
         // the element `Value`s. Null is rejected by the cell-path serializer.
         let mut ordered: Vec<&Value> = elements.iter().collect();
-        ordered.sort_by(|a, b| compare_collection_elements(a, b));
+        let timeuuid = declared_element_is_timeuuid(set_data_type, false);
+        ordered.sort_by(|a, b| compare_collection_elements_typed(a, b, timeuuid));
         let mut serialized: Vec<Vec<u8>> = Vec::with_capacity(ordered.len());
         for element in &ordered {
             let mut path = Vec::new();
@@ -114,7 +115,8 @@ impl DataWriter {
         // collection_order: SIGNED numerics so negative keys sort -1 before 0/1,
         // unsigned-byte otherwise) from the key `Value`s. Null keys rejected inline.
         let mut ordered: Vec<&(Value, Value)> = entries.iter().collect();
-        ordered.sort_by(|a, b| compare_collection_elements(&a.0, &b.0));
+        let timeuuid = declared_element_is_timeuuid(map_data_type, true);
+        ordered.sort_by(|a, b| compare_collection_elements_typed(&a.0, &b.0, timeuuid));
 
         // Reusable per-entry scratch (issue #1672): one alloc for the whole map,
         // not a Vec-of-Vecs holding every key/value.

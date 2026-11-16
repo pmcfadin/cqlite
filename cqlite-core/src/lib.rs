@@ -19,6 +19,7 @@ pub(crate) mod float_cmp;
 pub mod parser;
 pub mod types;
 pub mod util;
+pub(crate) mod uuid_order;
 pub mod version_hints;
 
 #[cfg(feature = "benchmarks")]

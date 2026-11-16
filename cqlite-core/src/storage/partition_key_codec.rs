@@ -208,7 +208,9 @@ fn coerce_value_for_comparator(value: &Value, comparator: &ComparatorType) -> Va
         (Value::BigInt(n), ComparatorType::Timestamp) => Value::Timestamp(*n),
         (Value::Integer(n), ComparatorType::BigInt) => Value::BigInt(*n as i64),
         // UUID / TIMEUUID literal -> already in the serializer's expected shape.
-        (Value::Uuid(bytes), ComparatorType::Uuid) => Value::Uuid(*bytes),
+        (Value::Uuid(bytes), ComparatorType::Uuid | ComparatorType::TimeUuid) => {
+            Value::Uuid(*bytes)
+        }
         // Blob literal (0x...) -> matches the `blob` serializer directly.
         (Value::Blob(bytes), ComparatorType::Blob) => Value::blob(bytes.clone()),
         _ => value.clone(),
@@ -238,7 +240,7 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
             let stored = days.wrapping_sub(i32::MIN) as u32;
             Ok(stored.to_be_bytes().to_vec())
         }
-        (Value::Uuid(bytes), ComparatorType::Uuid) => Ok(bytes.to_vec()),
+        (Value::Uuid(bytes), ComparatorType::Uuid | ComparatorType::TimeUuid) => Ok(bytes.to_vec()),
         (Value::Time(nanos), ComparatorType::Custom(name)) if name == "time" => {
             Ok(nanos.to_be_bytes().to_vec())
         }
@@ -344,7 +346,7 @@ pub fn deserialize_value_bytes(data: &[u8], comparator: &ComparatorType) -> Resu
             let stored = u32::from_be_bytes(bytes);
             Ok(Value::Date((stored as i32).wrapping_add(i32::MIN)))
         }
-        ComparatorType::Uuid => {
+        ComparatorType::Uuid | ComparatorType::TimeUuid => {
             let bytes: [u8; 16] = data.try_into().map_err(|_| {
                 Error::InvalidInput(format!("UUID requires 16 bytes, got {}", data.len()))
             })?;

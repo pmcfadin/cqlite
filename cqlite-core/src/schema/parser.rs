@@ -554,6 +554,7 @@ impl SchemaParser {
             ComparatorType::Blob => Ok(CqlType::Blob),
             ComparatorType::Timestamp => Ok(CqlType::Timestamp),
             ComparatorType::Uuid => Ok(CqlType::Uuid),
+            ComparatorType::TimeUuid => Ok(CqlType::TimeUuid),
             ComparatorType::Varint => Ok(CqlType::Custom("varint".to_string())),
             ComparatorType::Decimal => Ok(CqlType::Decimal),
             ComparatorType::Duration => Ok(CqlType::Duration),

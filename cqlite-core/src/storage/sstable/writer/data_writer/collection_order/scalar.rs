@@ -50,77 +50,10 @@ pub(super) fn compare_signed_varint(a: &[u8], b: &[u8]) -> Ordering {
     Ordering::Equal
 }
 
-/// Cassandra `UUIDType.compareCustom` for two 16-byte UUID values (issue #1275).
-///
-/// Matches `org.apache.cassandra.db.marshal.UUIDType.compareCustom`
-/// (`~/projects/cassandra/.../db/marshal/UUIDType.java`) exactly:
-///   1. Compare the 4-bit version nibble (top nibble of byte 6). If versions
-///      differ, order by `version1 - version2`.
-///   2. If both are version 1, compare the most-significant 64 bits AFTER
-///      `reorderTimestampBytes` (the time-UUID timestamp reshuffle, copied from
-///      `AbstractTimeUUIDType.reorderTimestampBytes`); the reordered value is
-///      `>= 0` so `Long.compare` of the reordered longs is correct.
-///      Otherwise compare the MSB 64 bits as an UNSIGNED long
-///      (`UnsignedLongs.compare`).
-///   3. Tie-break on the least-significant 64 bits as an UNSIGNED long.
-///
-/// WHY `UUIDType` and not `TimeUUIDType`: the writer's `Value::Uuid([u8; 16])`
-/// carries NO uuid-vs-timeuuid discriminator, and this shared comparator only
-/// receives `&Value` — the declared CQL element/key type (`uuid` vs `timeuuid`)
-/// is NOT threaded to this layer (no-heuristics forbids inferring it from the
-/// version nibble: a v1 UUID is legal in a `set<uuid>`). `UUIDType.compareCustom`
-/// is the universal comparator that correctly orders UUIDs of EVERY version
-/// (Cassandra "freely takes time UUIDs" in `UUIDType`), so it is the correct
-/// order for a declared `uuid` element for all versions. For a declared
-/// `timeuuid`, `AbstractTimeUUIDType.compareCustom` agrees on steps 1-2 and
-/// differs ONLY in the v1 LSB tie-break, where `TimeUUIDType` compares the low
-/// 64 bits with SIGNED-per-byte semantics rather than unsigned (the documented
-/// CASSANDRA-8730 discrepancy). That tie-break only changes the relative order of
-/// two UUIDs sharing an identical version-1 timestamp — vanishingly rare and not
-/// representable without the missing type tag — so we apply the `uuid` order
-/// uniformly and document the one-case divergence here rather than guess.
+/// Cassandra `UUIDType.compareCustom` (a declared `uuid`). Delegates to the ONE port in
+/// [`crate::uuid_order`] (issue #4534) instead of keeping a second copy.
 pub(super) fn compare_uuid_cassandra(a: &[u8; 16], b: &[u8; 16]) -> Ordering {
-    let msb1 = read_be_u64(&a[0..8]);
-    let msb2 = read_be_u64(&b[0..8]);
-
-    let version1 = ((msb1 >> 12) & 0xf) as i32;
-    let version2 = ((msb2 >> 12) & 0xf) as i32;
-    if version1 != version2 {
-        return version1.cmp(&version2);
-    }
-
-    let msb_cmp = if version1 == 1 {
-        // Reordered timestamp longs are non-negative; signed Long.compare ==
-        // their natural numeric order.
-        reorder_timestamp_bytes(msb1).cmp(&reorder_timestamp_bytes(msb2))
-    } else {
-        // UnsignedLongs.compare(msb1, msb2)
-        msb1.cmp(&msb2)
-    };
-    if msb_cmp != Ordering::Equal {
-        return msb_cmp;
-    }
-
-    // UnsignedLongs.compare of the least-significant 64 bits.
-    read_be_u64(&a[8..16]).cmp(&read_be_u64(&b[8..16]))
-}
-
-/// Big-endian read of an 8-byte slice as a `u64` (mirrors Java `getLong`). The
-/// slice is always exactly 8 bytes at the call sites; a short slice pads with
-/// zeros to stay panic-free, but that never happens for a 16-byte UUID.
-fn read_be_u64(bytes: &[u8]) -> u64 {
-    let mut buf = [0u8; 8];
-    let n = bytes.len().min(8);
-    buf[..n].copy_from_slice(&bytes[..n]);
-    u64::from_be_bytes(buf)
-}
-
-/// `AbstractTimeUUIDType.reorderTimestampBytes`, copied verbatim from
-/// `~/projects/cassandra/.../db/marshal/AbstractTimeUUIDType.java`:
-/// reshuffles the version-1 timestamp halves so a plain long compare orders by
-/// time. All shifts are on `u64` to match Java `>>>` (unsigned) and `<<`.
-fn reorder_timestamp_bytes(input: u64) -> u64 {
-    (input << 48) | ((input << 16) & 0xFFFF_0000_0000) | (input >> 32)
+    crate::uuid_order::uuid_type_cmp(a, b)
 }
 
 /// Java `Float.compare` total order for two `f32`, matching Cassandra

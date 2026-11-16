@@ -75,6 +75,27 @@ const OSS50_LT_NEXT_COMPONENT: u8 = 0x20;
 #[cfg(not(feature = "tombstones"))]
 const OSS50_GT_NEXT_COMPONENT: u8 = 0x60;
 
+/// Per-clustering-column `(is_reversed, is_timeuuid)` flags from the schema. A missing schema
+/// yields empty vectors (ascending, plain `uuid`). `is_timeuuid` is the DECLARED type (#4531):
+/// `Value::Uuid` cannot tell `uuid` from `timeuuid`, and the bytes must never be inspected (#28).
+#[cfg(not(feature = "tombstones"))]
+pub(super) fn clustering_flags(
+    schema: Option<&crate::schema::TableSchema>,
+) -> (Vec<bool>, Vec<bool>) {
+    let cols = schema
+        .map(|s| s.clustering_keys.as_slice())
+        .unwrap_or_default();
+    let rev = |c: &crate::schema::ClusteringColumn| {
+        matches!(c.order, crate::schema::ClusteringOrder::Desc)
+    };
+    let tu =
+        |c: &crate::schema::ClusteringColumn| c.data_type.trim().eq_ignore_ascii_case("timeuuid");
+    (
+        cols.iter().map(rev).collect(),
+        cols.iter().map(tu).collect(),
+    )
+}
+
 /// Normalize a CQL [`ClusteringSlice`] into the `(physical_lower, physical_upper)`
 /// byte-comparable bounds that [`select_row_index_blocks_for_range`] consumes
 /// (issue #954 High-severity correctness fix).
@@ -114,8 +135,12 @@ const OSS50_GT_NEXT_COMPONENT: u8 = 0x60;
 pub(super) fn physical_byte_bounds_for_slice(
     slice: &ClusteringSlice,
     is_reversed: &[bool],
+    // `is_timeuuid[i]`: clustering column `i` is DECLARED `timeuuid` (#4531). `Value::Uuid`
+    // is the same variant for `uuid` and `timeuuid`, so the schema — never the bytes —
+    // selects Cassandra's `asComparableBytes` swizzle.
+    is_timeuuid: &[bool],
 ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    use crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order;
+    use crate::storage::sstable::bti::encode_clustering_bound_oss50_typed;
 
     // The physical-low sentinel: empty sorts before every separator (-∞).
     let neg_inf = Vec::<u8>::new();
@@ -128,7 +153,7 @@ pub(super) fn physical_byte_bounds_for_slice(
     // partition), but the encoder's error text is the ONLY diagnosis of WHICH
     // clustering type is unsupported, so log it rather than dropping it silently.
     let encode = |values: &[Value]| -> Option<Vec<u8>> {
-        match encode_clustering_bound_oss50_with_order(values, is_reversed) {
+        match encode_clustering_bound_oss50_typed(values, is_reversed, is_timeuuid) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
                 tracing::debug!(

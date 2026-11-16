@@ -83,30 +83,44 @@ impl PartialOrd for SchemaOrderedEntry {
     }
 }
 
+/// THE heap order, as a free function over borrowed entries: token, key bytes, then the
+/// schema-aware clustering compare (falling back to the plain `Ord` on error), then `run_index`.
+/// [`SchemaOrderedEntry`]'s `Ord` and every pre-sorted run feeding the heap
+/// ([`sort_entries_schema_ordered`]) use this ONE definition, so a run is ascending under exactly
+/// the order the heap pops by (issue #4534: a schema-free sort of timeuuid clustering keys is
+/// not that order when two v1 UUIDs share a timestamp and their lsb crosses 0x7f/0x80).
+#[cfg(feature = "write-support")]
+pub(crate) fn schema_entry_cmp(a: &MergeEntry, b: &MergeEntry, schema: &TableSchema) -> Ordering {
+    match a.key.token.cmp(&b.key.token) {
+        Ordering::Equal => match a.key.key.cmp(&b.key.key) {
+            Ordering::Equal => match (&a.clustering_key, &b.clustering_key) {
+                (None, None) => a.run_index.cmp(&b.run_index),
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+                (Some(x), Some(y)) => {
+                    // THE schema-aware substitution for MergeEntry's fallback `x.cmp(y)`.
+                    match x.compare(y, schema).unwrap_or_else(|_| x.cmp(y)) {
+                        Ordering::Equal => a.run_index.cmp(&b.run_index),
+                        other_ord => other_ord,
+                    }
+                }
+            },
+            other_ord => other_ord,
+        },
+        other_ord => other_ord,
+    }
+}
+
+/// Sort a run's entries ascending under the heap's own order (see [`schema_entry_cmp`]).
+#[cfg(feature = "write-support")]
+pub(crate) fn sort_entries_schema_ordered(entries: &mut [MergeEntry], schema: &TableSchema) {
+    entries.sort_by(|a, b| schema_entry_cmp(a, b, schema));
+}
+
 #[cfg(feature = "write-support")]
 impl Ord for SchemaOrderedEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.entry.key.token.cmp(&other.entry.key.token) {
-            Ordering::Equal => match self.entry.key.key.cmp(&other.entry.key.key) {
-                Ordering::Equal => {
-                    match (&self.entry.clustering_key, &other.entry.clustering_key) {
-                        (None, None) => self.entry.run_index.cmp(&other.entry.run_index),
-                        (None, Some(_)) => Ordering::Less,
-                        (Some(_), None) => Ordering::Greater,
-                        (Some(a), Some(b)) => {
-                            // THE schema-aware substitution for MergeEntry's
-                            // fallback `a.cmp(b)`.
-                            match a.compare(b, &self.schema).unwrap_or_else(|_| a.cmp(b)) {
-                                Ordering::Equal => self.entry.run_index.cmp(&other.entry.run_index),
-                                other_ord => other_ord,
-                            }
-                        }
-                    }
-                }
-                other_ord => other_ord,
-            },
-            other_ord => other_ord,
-        }
+        schema_entry_cmp(&self.entry, &other.entry, &self.schema)
     }
 }
 

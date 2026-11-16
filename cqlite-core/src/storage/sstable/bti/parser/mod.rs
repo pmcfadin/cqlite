@@ -68,7 +68,10 @@ mod slice_walk;
 mod traversal;
 
 // Public surface — re-exported unchanged so `bti::parser::X` paths keep working.
-pub use encoding::{encode_clustering_bound_oss50, encode_clustering_bound_oss50_with_order};
+pub use encoding::{
+    encode_clustering_bound_oss50, encode_clustering_bound_oss50_typed,
+    encode_clustering_bound_oss50_with_order,
+};
 pub use partitions::{
     decode_bti_partition_payload, encode_bti_trie_key_from_token,
     encode_partition_key_for_bti_trie, lookup_partition_in_bti_file,

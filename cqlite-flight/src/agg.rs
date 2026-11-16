@@ -698,7 +698,9 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Float32(x), Value::Float32(y)) => Some(cmp_f64_trino(*x as f64, *y as f64)),
         (Value::Text(x), Value::Text(y)) => Some(x.cmp(y)),
         (Value::Blob(x), Value::Blob(y)) => Some(x.cmp(y)),
-        (Value::Uuid(x), Value::Uuid(y)) => Some(x.cmp(y)),
+        // #4534: Cassandra's `UUIDType` order (version, then v1 timestamp, ...), not raw bytes;
+        // `Value::partial_cmp` implements it.
+        (Value::Uuid(_), Value::Uuid(_)) => a.partial_cmp(b),
         // Mixed integer widths (defensive — Min/Max source type is fixed).
         (lhs, rhs) => match (as_i64(lhs), as_i64(rhs)) {
             (Some(x), Some(y)) => Some(x.cmp(&y)),
