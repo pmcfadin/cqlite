@@ -43,7 +43,9 @@
 //! (This is process-kill safety, not power-loss durability: there is no `fsync` before the
 //! rename, so an OS/power failure mid-write is a separate, unaddressed concern.)
 
-use crate::export::arrow_convert::{rows_to_record_batch_with_schema, ArrowConvertError};
+use crate::export::arrow_convert::{
+    rows_to_record_batch_with_schema_attributed, ArrowConvertError,
+};
 use crate::query::{ColumnInfo, QueryMetadata, QueryRow};
 use arrow::array::ArrayRef as ArrowArrayRef;
 use arrow::datatypes::Schema as ArrowSchema;
@@ -413,12 +415,17 @@ impl StreamingVortexWriter {
     async fn push_batch(&mut self, rows: &[QueryRow]) -> Result<(), VortexExportError> {
         let batch_index = self.batches_pushed;
 
-        let batch = rows_to_record_batch_with_schema(Arc::clone(&self.schema), &self.columns, rows)
-            .map_err(|e| VortexExportError::BatchConversion {
-                batch_index,
-                column: "<row-to-arrow-conversion>".to_string(),
-                message: e.to_string(),
-            })?;
+        let batch = rows_to_record_batch_with_schema_attributed(
+            Arc::clone(&self.schema),
+            &self.columns,
+            rows,
+        )
+        .map_err(|(column, e)| VortexExportError::BatchConversion {
+            batch_index,
+            // The offending column where the builder knows it; else the failing phase.
+            column: column.unwrap_or_else(|| "<row-to-arrow-conversion>".to_string()),
+            message: e.to_string(),
+        })?;
 
         let array = convert_batch_to_vortex(&self.session, &self.schema, &batch, batch_index)?;
 

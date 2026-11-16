@@ -226,10 +226,19 @@ async fn conversion_failure_in_a_later_batch_names_batch_index_and_cleans_up() {
         .expect_err("finalize's flush of the buffered bad row must fail");
 
     match &err {
-        VortexExportError::BatchConversion { batch_index, .. } => {
+        VortexExportError::BatchConversion {
+            batch_index,
+            column,
+            ..
+        } => {
             assert_eq!(
                 *batch_index, 1,
                 "the failure is in the SECOND pushed batch (index 1), not the first"
+            );
+            assert_eq!(
+                column, "id",
+                "R4.1: the error must name the offending column (the Text-for-BigInt `id`), \
+                 not a phase placeholder"
             );
         }
         other => panic!("expected VortexExportError::BatchConversion, got {other:?}"),
@@ -363,7 +372,7 @@ async fn write_error_on_dev_full_fails_finish() {
         .await
         .expect("open /dev/full");
     let mut writer = session.write_options().writer(file, dtype);
-    let batch = rows_to_record_batch_with_schema(
+    let batch = crate::export::arrow_convert::rows_to_record_batch_with_schema(
         std::sync::Arc::clone(&schema),
         &metadata.columns,
         &[row(1, Some("a"))],
@@ -473,7 +482,7 @@ fn vortex_source_has_no_cql_to_arrow_mapping_of_its_own() {
             "vortex.rs must not contain `{forbidden}`"
         );
     }
-    assert!(src.contains("rows_to_record_batch_with_schema("));
+    assert!(src.contains("rows_to_record_batch_with_schema_attributed("));
 }
 
 /// R2.1 (writer level): a `uuid` and a `timeuuid` column come out of the Vortex WRITER as Vortex's
@@ -542,4 +551,72 @@ async fn uuid_and_timeuuid_columns_are_the_vortex_uuid_extension_dtype() {
         "timeuuid must be the UUID extension DType"
     );
     assert_eq!(is_uuid("t"), None, "text must not be an extension type");
+}
+
+/// R3.2: the exported field order is `QueryMetadata.columns` order — NOT alphabetical and not a
+/// hash order — and is identical across two exports of the same table. The column names are
+/// deliberately declared in non-sorted order.
+#[tokio::test]
+async fn r3_2_field_order_is_query_metadata_order_and_stable_across_exports() {
+    use vortex::file::OpenOptionsSessionExt;
+
+    let names = ["zeta", "alpha", "mid", "beta"];
+    let metadata = QueryMetadata {
+        columns: names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| ColumnInfo {
+                name: (*n).to_string(),
+                data_type: DataType::Text,
+                nullable: true,
+                position: i,
+                table_name: None,
+                cql_type: None,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mk_rows = || {
+        let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+        for n in &names {
+            values.insert(Arc::<str>::from(*n), Value::Text(format!("v-{n}").into()));
+        }
+        vec![QueryRow {
+            values,
+            key: RowKey::new(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }]
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut orders: Vec<Vec<String>> = Vec::new();
+    for i in 0..2 {
+        let path = dir.path().join(format!("order-{i}.vortex"));
+        let mut w =
+            StreamingVortexWriter::create(&path, &metadata, &VortexExportOptions::default())
+                .await
+                .expect("create");
+        w.write_chunk(&mk_rows()).await.expect("write_chunk");
+        w.finalize().await.expect("finalize");
+        let session = VortexSession::default();
+        let file = session.open_options().open_path(path).await.expect("open");
+        orders.push(
+            file.dtype()
+                .as_struct_fields()
+                .names()
+                .iter()
+                .map(|n| n.to_string())
+                .collect(),
+        );
+    }
+    let expected: Vec<String> = names.iter().map(|n| (*n).to_string()).collect();
+    assert_eq!(
+        orders[0], expected,
+        "field order must be QueryMetadata.columns order"
+    );
+    assert_eq!(
+        orders[0], orders[1],
+        "two exports of the same table must agree on field order"
+    );
 }

@@ -922,8 +922,7 @@
 #                      issue_4237_vortex_parquet_differential` — the cross-format
 #                      differential, the PRIMARY oracle for Vortex export: the SAME
 #                      `SELECT *` exported to Parquet and Vortex from the compiled CLI
-#                      for all 33 fixture tables (2 quarantined behind issue #4279, a
-#                      pre-existing row-decoder gap unrelated to Vortex), both read back
+#                      for all 33 fixture tables (no quarantine since #4279 was fixed), both read back
 #                      with their OWN readers, compared on full column set (both
 #                      directions) and every value. Fixture-required via the FULL gate's
 #                      global CQLITE_REQUIRE_FIXTURES=1 export. Ends with
@@ -28697,7 +28696,8 @@ dispatch_component() {
     #      wiring-evidence gap; `export_sstable` has no CLI-verb caller, only this test).
     #   3. the CLI-level cross-format differential (R9, the PRIMARY oracle for Vortex
     #      export) over all 33 fixture tables,
-    #      `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs`, fixture-required
+    #      `cqlite-cli/tests/issue_4237_vortex_parquet_differential.rs` (plus the per-type-family
+    #      R2.2/R2.3 cases in `issue_4237_vortex_type_coverage.rs`, same pass), fixture-required
     #      via the FULL gate's global CQLITE_REQUIRE_FIXTURES=1 export (this component
     #      sets nothing itself — see the header note above run_feature_iso).
     # `check_no_unexpected_zero_tests` at the end reads the ONE combined log
@@ -28726,7 +28726,7 @@ dispatch_component() {
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
   cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test export_integration_tests test_export_sstable_to_vortex &&
   _fm_observe_child vortex-parquet-differential test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' &&
-  cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test issue_4237_vortex_parquet_differential &&
+  cargo test --package '"$vpd_cli_pkg"' --features '"$vpd_cli_feats"' --test issue_4237_vortex_parquet_differential --test issue_4237_vortex_type_coverage &&
   check_no_unexpected_zero_tests vortex-parquet-differential '"$vpd_log"' &&
   check_unittest_targets_ran vortex-parquet-differential '"$vpd_log"' '"$vpd_unit_srcs"''
       fi ;;

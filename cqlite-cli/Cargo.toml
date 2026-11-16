@@ -313,6 +313,13 @@ name = "issue_4237_vortex_parquet_differential"
 path = "tests/issue_4237_vortex_parquet_differential.rs"
 required-features = ["state_machine", "vortex"]
 
+# Issue #4237 (R2.2/R2.3): per-CQL-type-family Vortex-vs-Parquet cases (tuple, UDT, varint,
+# nested UDT keys, duration) on real Cassandra-written fixtures; shares the differential's harness.
+[[test]]
+name = "issue_4237_vortex_type_coverage"
+path = "tests/issue_4237_vortex_type_coverage.rs"
+required-features = ["state_machine", "vortex"]
+
 # Issue #1494 (AD5): CSV export-writer throughput bench. Hosted here (not in
 # cqlite-core) because the real public writer is cqlite_cli::output::CSVWriter;
 # core carries no csv dependency. Registered STRICT (id export/csv) in

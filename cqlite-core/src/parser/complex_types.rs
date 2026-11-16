@@ -337,6 +337,7 @@ impl ComplexTypeParser {
                 map(tag_no_case("float"), |_| CqlType::Float),
                 map(tag_no_case("double"), |_| CqlType::Double),
                 map(tag_no_case("decimal"), |_| CqlType::Decimal),
+                map(tag_no_case("varint"), |_| CqlType::Varint), // was missing: parsed as Custom("varint") (#4237 R2.2)
                 map(alt((tag_no_case("text"), tag_no_case("varchar"))), |_| {
                     CqlType::Text
                 }),
@@ -638,6 +639,22 @@ impl Default for ComplexTypeParser {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// `varint` is a primitive: it must parse to `CqlType::Varint`, not `Custom("varint")` (which
+    /// made `SELECT *` metadata type a varint column as an opaque blob, so Parquet/Vortex export of
+    /// it failed with "expected Blob value, got Varint" — #4237 R2.2).
+    #[test]
+    fn test_varint_is_a_primitive_type() {
+        let parser = ComplexTypeParser::new();
+        assert_eq!(
+            parser.parse_type("varint").unwrap().cql_type,
+            CqlType::Varint
+        );
+        assert_eq!(
+            parser.parse_type("frozen<list<varint>>").unwrap().cql_type,
+            CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Varint))))
+        );
+    }
 
     #[test]
     fn test_primitive_type_parsing() {

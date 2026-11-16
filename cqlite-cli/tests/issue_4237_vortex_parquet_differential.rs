@@ -25,15 +25,8 @@
 #![cfg(all(feature = "state_machine", feature = "vortex"))]
 
 use arrow::array::Array;
-use arrow::datatypes::Schema as ArrowSchema;
-use arrow::record_batch::RecordBatch;
-use arrow::util::display::array_value_to_string;
-use bytes::Bytes;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::collections::BTreeSet;
 use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tempfile::TempDir;
 
 // ============================================================================
@@ -161,279 +154,18 @@ fn table_dir_has_data_db(datasets_root: &Path, table: &FixtureTable) -> Option<P
     None
 }
 
-// ============================================================================
-// CLI invocation + readers
-// ============================================================================
+#[path = "support/vortex_differential.rs"]
+mod vortex_differential;
+use vortex_differential::*;
 
-fn run_cli(args: &[&str]) -> (String, String, bool) {
-    let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
-        .args(args)
-        .output()
-        .expect("failed to spawn cqlite");
-    (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-        output.status.success(),
-    )
-}
-
-/// Returns the file-level schema (from the Parquet FOOTER, always present regardless of row
-/// count — issue #4237 test-harness fix: deriving the column set from `batches.first()` reads
-/// `None` on a genuinely 0-row table and misreports an empty column set as a real divergence)
-/// plus every row-group batch.
-fn read_parquet_file(
-    path: &Path,
-) -> Result<(std::sync::Arc<ArrowSchema>, Vec<RecordBatch>), Box<dyn StdError>> {
-    let bytes = std::fs::read(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))?;
-    let schema = builder.schema().clone();
-    let reader = builder.build()?;
-    let batches = reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| Box::new(e) as Box<dyn StdError>)?;
-    Ok((schema, batches))
-}
-
-/// Read a `.vortex` file back to ONE Arrow `RecordBatch` via Vortex's own reader — the format's
-/// own official Arrow bridge, exactly as `read_parquet_file` above uses the `parquet` crate's own
-/// reader. `vortex::file::Writer`/`Reader` are natively async, so this helper is too; the caller
-/// drives it on a throwaway current-thread runtime (test code only — the production writer in
-/// `cqlite-core::export::vortex` uses `tokio` because it is called from the CLI's own async
-/// context; this test binary has no ambient runtime, so it builds its own).
-async fn read_vortex_file_async(path: &Path) -> Result<RecordBatch, Box<dyn StdError>> {
-    use vortex::array::stream::ArrayStreamExt;
-    use vortex::array::VortexSessionExecute;
-    use vortex::arrow::ArrowSessionExt;
-    use vortex::file::OpenOptionsSessionExt;
-    use vortex::session::VortexSession;
-    use vortex::VortexSessionDefault;
-
-    let session = VortexSession::default();
-    let file = session.open_options().open_path(path.to_path_buf()).await?;
-    let array = file.scan()?.into_array_stream()?.read_all().await?;
-
-    let mut ctx = session.create_execution_ctx();
-    let arrow_array = session.arrow().execute_arrow(array, None, &mut ctx)?;
-    let struct_array = arrow_array
-        .as_any()
-        .downcast_ref::<arrow::array::StructArray>()
-        .ok_or("Vortex read-back did not yield a top-level struct array")?;
-    Ok(RecordBatch::from(struct_array.clone()))
-}
-
-fn read_vortex_file(path: &Path) -> Result<RecordBatch, Box<dyn StdError>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(read_vortex_file_async(path))
-}
-
-// ============================================================================
-// Comparison — full column set both directions (#3890), order-sensitive values
-// ============================================================================
-
-fn column_name_set(schema: &ArrowSchema) -> BTreeSet<String> {
-    schema.fields().iter().map(|f| f.name().clone()).collect()
-}
-
-/// Every value in `column`, across all `batches`, as its `array_value_to_string` rendering —
-/// value-level (not physical-encoding-level) comparison, so a schema-legal re-encoding (e.g.
-/// dictionary vs plain, or a different Vortex/Parquet chunk boundary — design.md D2) between the
-/// two formats' read-backs is not mistaken for a value divergence.
-fn column_values_as_strings(batches: &[RecordBatch], column: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for batch in batches {
-        let Ok(idx) = batch.schema().index_of(column) else {
-            continue;
-        };
-        let col = batch.column(idx);
-        for row in 0..batch.num_rows() {
-            // Null validity is compared explicitly: `array_value_to_string` renders a null and an
-            // empty value alike, so a null must never be able to pass for "".
-            if col.is_null(row) {
-                out.push("\u{0}<NULL>".to_string());
-                continue;
-            }
-            out.push(
-                array_value_to_string(col.as_ref(), row)
-                    .unwrap_or_else(|e| format!("<display-error: {e}>")),
-            );
-        }
-    }
-    out
-}
-
-/// The LOGICAL Arrow type of a field: physical encodings either format may legitimately pick
-/// (dictionary vs plain; view / large / small offset widths) are collapsed, everything that
-/// carries meaning (the primitive kind, temporal unit, decimal precision/scale, nested shape,
-/// child nullability) is kept. Compared per field so that e.g. `Int64` vs `Utf8` reds.
-fn logical_type(dt: &arrow::datatypes::DataType) -> String {
-    use arrow::datatypes::DataType as D;
-    match dt {
-        D::Dictionary(_, value) => logical_type(value),
-        D::Utf8 | D::LargeUtf8 | D::Utf8View => "Utf8".to_string(),
-        D::Binary | D::LargeBinary | D::BinaryView => "Binary".to_string(),
-        D::List(f) | D::LargeList(f) | D::ListView(f) | D::LargeListView(f) => {
-            format!("List<{}>", logical_field(f))
-        }
-        D::FixedSizeList(f, n) => format!("FixedSizeList<{}; {n}>", logical_field(f)),
-        D::Struct(fields) => format!(
-            "Struct<{}>",
-            fields
-                .iter()
-                .map(|f| logical_field(f))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        D::Map(f, sorted) => format!("Map<{}; sorted={sorted}>", logical_field(f)),
-        other => format!("{other:?}"),
-    }
-}
-
-/// Name, logical type, nullability and Arrow extension name of a (possibly nested) field.
-fn logical_field(f: &arrow::datatypes::Field) -> String {
-    let ext = f
-        .metadata()
-        .get("ARROW:extension:name")
-        .map(|e| format!(" ext={e}"))
-        .unwrap_or_default();
-    format!(
-        "{}: {}{}{}",
-        f.name(),
-        logical_type(f.data_type()),
-        if f.is_nullable() { "?" } else { "" },
-        ext
-    )
-}
-
-fn total_rows(batches: &[RecordBatch]) -> usize {
-    batches.iter().map(|b| b.num_rows()).sum()
-}
-
-/// Run the differential for one table. Returns `Ok(row_count)` or a descriptive `Err` naming the
-/// table and the exact divergence (column-set direction, row count, or the first mismatching
-/// column + row).
+/// `diff_table` over a [`FixtureTable`] of the 33-table sweep (`datasets_root` holds `sstables/`).
 fn diff_one_table(datasets_root: &Path, table: &FixtureTable) -> Result<usize, Box<dyn StdError>> {
-    let sstables = datasets_root.join("sstables");
-    let qualified = format!("{}.{}", table.keyspace, table.table);
-    let tmp = TempDir::new()?;
-    let parquet_path = tmp.path().join("out.parquet");
-    let vortex_path = tmp.path().join("out.vortex");
-
-    let (_, stderr, ok) = run_cli(&[
-        "--schema",
-        table.schema.to_str().unwrap(),
-        "--data-dir",
-        sstables.to_str().unwrap(),
-        "export",
-        parquet_path.to_str().unwrap(),
-        "--format",
-        "parquet",
-        "--table",
-        &qualified,
-    ]);
-    if !ok {
-        return Err(format!("{qualified}: parquet export failed: {stderr}").into());
-    }
-
-    let (_, stderr, ok) = run_cli(&[
-        "--schema",
-        table.schema.to_str().unwrap(),
-        "--data-dir",
-        sstables.to_str().unwrap(),
-        "export",
-        vortex_path.to_str().unwrap(),
-        "--format",
-        "vortex",
-        "--table",
-        &qualified,
-    ]);
-    if !ok {
-        return Err(format!("{qualified}: vortex export failed: {stderr}").into());
-    }
-
-    let (parquet_schema, parquet_batches) = read_parquet_file(&parquet_path)
-        .map_err(|e| format!("{qualified}: failed to read back parquet: {e}"))?;
-    let vortex_batch = read_vortex_file(&vortex_path)
-        .map_err(|e| format!("{qualified}: failed to read back vortex: {e}"))?;
-    let vortex_schema = vortex_batch.schema();
-    let vortex_batches = [vortex_batch];
-
-    let parquet_row_count = total_rows(&parquet_batches);
-    let vortex_row_count = total_rows(&vortex_batches);
-    if parquet_row_count != vortex_row_count {
-        return Err(format!(
-            "{qualified}: row count diverges — parquet {parquet_row_count}, vortex {vortex_row_count}"
-        )
-        .into());
-    }
-
-    // Derived from the FILE-LEVEL schema (present even for a genuinely 0-row table), not
-    // `batches.first()` — see `read_parquet_file`'s doc comment.
-    let parquet_cols = column_name_set(&parquet_schema);
-    let vortex_cols = column_name_set(&vortex_schema);
-
-    let parquet_only: Vec<_> = parquet_cols.difference(&vortex_cols).cloned().collect();
-    let vortex_only: Vec<_> = vortex_cols.difference(&parquet_cols).cloned().collect();
-    if !parquet_only.is_empty() || !vortex_only.is_empty() {
-        return Err(format!(
-            "{qualified}: column set diverges — only in parquet: {parquet_only:?}, only in vortex: {vortex_only:?}"
-        )
-        .into());
-    }
-    // Same set, so now the ORDER: a Vortex export with reordered columns must not pass.
-    let parquet_order: Vec<&str> = parquet_schema
-        .fields()
-        .iter()
-        .map(|f| f.name().as_str())
-        .collect();
-    let vortex_order: Vec<&str> = vortex_schema
-        .fields()
-        .iter()
-        .map(|f| f.name().as_str())
-        .collect();
-    if parquet_order != vortex_order {
-        return Err(format!(
-            "{qualified}: column order diverges — parquet: {parquet_order:?}, vortex: {vortex_order:?}"
-        )
-        .into());
-    }
-
-    // Same names in the same order, so now each field's LOGICAL type, nullability and
-    // extension metadata (roborev #4237 r6): string-rendered values alone would let
-    // `Int64(1)` vs `Utf8("1")` pass.
-    for (pf, vf) in parquet_schema
-        .fields()
-        .iter()
-        .zip(vortex_schema.fields().iter())
-    {
-        let (p, v) = (logical_field(pf), logical_field(vf));
-        if p != v {
-            return Err(
-                format!("{qualified}: field type diverges — parquet {p}, vortex {v}").into(),
-            );
-        }
-    }
-
-    for column in &parquet_cols {
-        let p_values = column_values_as_strings(&parquet_batches, column);
-        let v_values = column_values_as_strings(&vortex_batches, column);
-        if p_values != v_values {
-            let first_mismatch = p_values
-                .iter()
-                .zip(v_values.iter())
-                .position(|(p, v)| p != v);
-            return Err(format!(
-                "{qualified}.{column}: value diverges at row {:?} (parquet={:?}, vortex={:?})",
-                first_mismatch,
-                first_mismatch.map(|i| &p_values[i]),
-                first_mismatch.map(|i| &v_values[i]),
-            )
-            .into());
-        }
-    }
-
-    Ok(parquet_row_count)
+    diff_table(
+        &datasets_root.join("sstables"),
+        table.keyspace,
+        &table.table,
+        &table.schema,
+    )
 }
 
 // ============================================================================
@@ -792,7 +524,7 @@ fn golden_ts_millis(s: &str) -> i64 {
 /// `clustering ORDER BY (timestamp DESC)`, ~200 rows per partition) the exported Vortex rows are in
 /// EXACTLY the order the sstabledump golden lists them — partition by partition, each partition's
 /// timestamps descending — not merely equal to Parquet's order. `diff_one_table` (the same table is
-/// in the 31-table sweep) separately pins Parquet == Vortex.
+/// in the 33-table sweep) separately pins Parquet == Vortex.
 #[test]
 fn r3_1_desc_clustering_order_matches_the_sstabledump_golden() {
     let strict = require_fixtures_strict();

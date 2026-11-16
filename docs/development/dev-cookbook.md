@@ -978,7 +978,7 @@ cargo test --package cqlite-core --features vortex
 cargo build --package cqlite-cli --features vortex
 env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
   cargo test --package cqlite-cli --features vortex \
-  --test issue_4237_vortex_parquet_differential
+  --test issue_4237_vortex_parquet_differential --test issue_4237_vortex_type_coverage
 
 # Flight server with the LINKED non-glibc allocator (issue #3997) — Linux only,
 # NON-DEFAULT. `default = []`, so every ordinary build (and the GHCR image) links

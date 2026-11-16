@@ -286,11 +286,32 @@ pub fn rows_to_record_batch_with_schema(
     columns: &[ColumnInfo],
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
+    rows_to_record_batch_with_schema_attributed(schema, columns, rows).map_err(|(_, e)| e)
+}
+
+/// [`rows_to_record_batch_with_schema`] that also reports WHICH column a per-column conversion
+/// failure belongs to (`Some(name)`), so a writer can name it (#4237 R4.1: the Vortex export
+/// error carries the offending column). Failures that are not attributable to one column — the
+/// schema check, `RecordBatch::try_new` — carry `None`. The shared producer is unchanged: the
+/// plain entry point above is this one with the attribution dropped.
+pub(crate) fn rows_to_record_batch_with_schema_attributed(
+    schema: Arc<Schema>,
+    columns: &[ColumnInfo],
+    rows: &[QueryRow],
+) -> Result<RecordBatch, (Option<String>, ArrowConvertError)> {
     #[cfg(test)]
     PRODUCER_CALLS.with(|c| c.set(c.get() + 1));
-    check_schema_matches_columns(&schema, columns)?;
+    check_schema_matches_columns(&schema, columns).map_err(|e| (None, e))?;
     // The precondition is now PROVEN, not assumed, so the shared tail may trust it.
-    rows_to_record_batch_trusted_schema(schema, columns, rows)
+    let columnar = super::arrow_columnar::transpose_columns(columns, rows);
+    let arrays = columns
+        .iter()
+        .zip(columnar.iter())
+        .map(|(col, cells)| {
+            convert_column_to_array(col, cells).map_err(|e| (Some(col.name.to_string()), e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    RecordBatch::try_new(schema, arrays).map_err(|e| (None, e.into()))
 }
 
 #[cfg(test)]
