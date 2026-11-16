@@ -192,10 +192,10 @@ async fn engagement_assertion_reds_a_probe_served_by_the_full_path() {
 
 /// Issue #4256: the corruption the meta-test wants armed for the COMPARISON phase of
 /// the next `run_case` only. `run_case` first runs an integer-key discovery scan on the
-/// full leg; arming before `run_case` would corrupt THAT scan (it reads the partition
-/// key through the same chokepoint) and fail the case before any point-vs-full
-/// comparison ran, proving nothing about the comparison. So the meta-test parks the
-/// filter here and `run_case` arms it right after discovery.
+/// full leg and an uncompared cold-start point probe. Arms are one-shot (the first
+/// matching result consumes them), so arming before `run_case` would spend the arm on
+/// one of those uncompared reads and prove nothing about the comparison. The meta-test
+/// therefore parks the filter here and `run_case` arms it after both.
 #[cfg(feature = "result-corruption-injection")]
 static ARM_AFTER_DISCOVERY: parking_lot::Mutex<
     Option<cqlite_core::query::result_corruption::ArmFilter>,
@@ -206,7 +206,7 @@ pub(super) type LateArm = Option<cqlite_core::query::result_corruption::Corrupti
 #[cfg(not(feature = "result-corruption-injection"))]
 pub(super) type LateArm = ();
 
-/// Called by `run_case` immediately after key discovery: arms (and hands back the guard
+/// Called by `run_case` after key discovery and the cold-start probe: arms (and hands back the guard
 /// for) any filter the meta-test parked. No-op without the feature or when nothing is parked.
 pub(super) fn arm_after_discovery() -> LateArm {
     #[cfg(feature = "result-corruption-injection")]
@@ -225,8 +225,8 @@ pub(super) fn arm_after_discovery() -> LateArm {
 /// separately, of the full-leg output) via the feature-gated seam and asserts the
 /// suite's own per-case assertion (`run_case`, which the suite's `failures.is_empty()`
 /// assertion is built on) fails with its own `point-vs-full DIVERGENCE` error. Each
-/// leg is armed only AFTER key discovery (see [`ARM_AFTER_DISCOVERY`]), so discovery is
-/// untouched and the only way to go red is the comparison itself. The unarmed control
+/// leg is armed only AFTER key discovery and the cold-start probe (see
+/// [`ARM_AFTER_DISCOVERY`]), so neither is touched and the only way to go red is the comparison itself. The unarmed control
 /// must pass.
 #[cfg(feature = "result-corruption-injection")]
 #[tokio::test]

@@ -61,13 +61,16 @@ impl ArmFilter {
 struct Arm {
     id: u64,
     filter: ArmFilter,
+    /// Set once the arm has corrupted a result; a fired arm never matches again.
+    fired: bool,
 }
 
 static ARMS: Mutex<Vec<Arm>> = Mutex::new(Vec::new());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static CORRUPTED: AtomicU64 = AtomicU64::new(0);
 
-/// RAII arm: corrupts matching results until dropped.
+/// RAII arm: corrupts exactly ONE matching, non-empty result, then is spent (and
+/// disarmed for good when dropped).
 #[must_use = "the arm is disarmed as soon as the guard is dropped"]
 pub struct CorruptionArm {
     id: u64,
@@ -82,7 +85,11 @@ impl Drop for CorruptionArm {
 /// Arm the seam for results matching `filter`.
 pub fn arm(filter: ArmFilter) -> CorruptionArm {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    ARMS.lock().push(Arm { id, filter });
+    ARMS.lock().push(Arm {
+        id,
+        filter,
+        fired: false,
+    });
     CorruptionArm { id }
 }
 
@@ -93,24 +100,90 @@ pub fn corrupted_count() -> u64 {
     CORRUPTED.load(Ordering::Relaxed)
 }
 
-/// The executor's call site: corrupt one cell of `rows` if an arm matches `path`.
+/// The executor's call site: corrupt one cell of `rows` if an unfired arm matches `path`.
 pub(crate) fn maybe_corrupt(rows: &mut [QueryRow], path: Option<&AccessPath>) {
-    let armed = ARMS.lock().iter().any(|a| a.filter.matches(path));
-    if !armed {
-        return;
+    if corrupt_with(&ARMS, rows, path) {
+        CORRUPTED.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Consume the first unfired matching arm in `arms` by corrupting the first cell of
+/// `rows`. The arm is marked fired under the same lock hold, and only after a cell was
+/// actually corrupted: empty / non-matching results leave every arm live.
+fn corrupt_with(arms: &Mutex<Vec<Arm>>, rows: &mut [QueryRow], path: Option<&AccessPath>) -> bool {
+    let mut arms = arms.lock();
+    let Some(arm) = arms.iter_mut().find(|a| !a.fired && a.filter.matches(path)) else {
+        return false;
+    };
     let Some(row) = rows.first_mut() else {
-        return;
+        return false;
     };
     let Some(name) = row.values.keys().min().cloned() else {
-        return;
+        return false;
     };
-    if let Some(value) = row.values.get_mut(&name) {
-        *value = if matches!(value, Value::Null) {
-            Value::Integer(0xBAD)
-        } else {
-            Value::Null
-        };
-        CORRUPTED.fetch_add(1, Ordering::Relaxed);
+    let Some(value) = row.values.get_mut(&name) else {
+        return false;
+    };
+    *value = if matches!(value, Value::Null) {
+        Value::Integer(0xBAD)
+    } else {
+        Value::Null
+    };
+    arm.fired = true;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(v: i32) -> QueryRow {
+        let mut r = QueryRow::new(crate::types::RowKey(std::sync::Arc::from(&b"k"[..])));
+        r.values
+            .insert(std::sync::Arc::from("a"), Value::Integer(v.into()));
+        r
+    }
+
+    fn arms_with(filter: ArmFilter) -> Mutex<Vec<Arm>> {
+        Mutex::new(vec![Arm {
+            id: 1,
+            filter,
+            fired: false,
+        }])
+    }
+
+    #[test]
+    fn an_arm_corrupts_exactly_one_result_and_empty_results_do_not_consume_it() {
+        let arms = arms_with(ArmFilter::Any);
+        let path = AccessPath::FullScan;
+
+        // An empty matching result must not consume the arm.
+        assert!(!corrupt_with(&arms, &mut [], Some(&path)));
+        assert!(!arms.lock()[0].fired);
+
+        // Two matching results: exactly the first is corrupted.
+        let (mut first, mut second) = ([row(7)], [row(7)]);
+        assert!(corrupt_with(&arms, &mut first, Some(&path)));
+        assert!(!corrupt_with(&arms, &mut second, Some(&path)));
+        let corrupted = [&first[0], &second[0]]
+            .iter()
+            .filter(|r| !matches!(r.values.get("a"), Some(Value::Integer(7))))
+            .count();
+        assert_eq!(corrupted, 1, "exactly one result may be corrupted per arm");
+        assert!(matches!(first[0].values.get("a"), Some(Value::Null)));
+    }
+
+    #[test]
+    fn a_non_matching_result_does_not_consume_the_arm() {
+        let arms = arms_with(ArmFilter::TargetedOnly);
+        let mut rows = [row(7)];
+        assert!(!corrupt_with(&arms, &mut rows, Some(&AccessPath::FullScan)));
+        assert!(!corrupt_with(&arms, &mut rows, None));
+        assert!(!arms.lock()[0].fired);
+        assert!(corrupt_with(
+            &arms,
+            &mut rows,
+            Some(&AccessPath::PartitionLookup)
+        ));
     }
 }
