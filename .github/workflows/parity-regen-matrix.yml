@@ -131,6 +131,14 @@ jobs:
             features: write-support,cli-helpers
             generate: |
               set -euo pipefail
+              # The #4195 audit fixtures (index_entry_offset_swap,
+              # summary_sample_position_corrupt) mutate the published datasets-v4
+              # test_basic/simple_table, which no Docker generator here produces (#4583).
+              # Fetch the pinned bundle first so that clean source is deterministic;
+              # generators below only add/overwrite their own keyspaces.
+              echo "::group::fetch published datasets (test_basic simple_table, audit clean source)"
+              bash test-data/scripts/fetch-datasets.sh
+              echo "::endgroup::"
               echo "::group::generate compression parity fixtures (test_comp, epic #970)"
               bash test-data/scripts/generate-compression-parity.sh
               echo "::endgroup::"
