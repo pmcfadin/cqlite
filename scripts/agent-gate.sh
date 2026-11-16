@@ -15538,7 +15538,7 @@ run_clippy() {
   #     (the OpenTelemetry stack). Keep this in sync with cqlite-core/Cargo.toml when
   #     features are added; the nightly CQLITE_CLIPPY_FULL=1 pass is the drift guard.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features \
-"all-compression,arrow,bench-internals,benchmarks,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-infrastructure,tombstones,work-counters,write-support,zstd" \
+"all-compression,arrow,bench-internals,benchmarks,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,result-corruption-injection,scan-offload-probe,snappy,state_machine,test-infrastructure,tombstones,work-counters,write-support,zstd" \
     || return 1
 
   # (3) cqlite-cli: every feature EXCEPT duckdb-tests + observability. Pulls in
@@ -18390,6 +18390,11 @@ run_compaction_byte_parity() {
 # two #3032 targets to CQLITE_REQUIRE_FIXTURES=1, under which every absence path in
 # both files asserts instead of skipping.
 #
+# The point_vs_full_differential and query-semantics-oracle invocations below ALSO enable
+# `result-corruption-injection` (issue #4256): its meta-tests corrupt one decoded cell of a
+# real SELECT result and require each suite to go red, so a suite that stopped comparing the
+# path's real output cannot stay green. Unarmed, the feature changes no behaviour.
+#
 # point_vs_full_differential is run in a SECOND invocation, deliberately WITHOUT
 # CQLITE_REQUIRE_FIXTURES — enforced with `env -u`, not merely by omitting it: plain
 # `env` INHERITS an exported value, and exporting CQLITE_REQUIRE_FIXTURES=1 is routine
@@ -18461,7 +18466,7 @@ run_bti_multiclustering() {
         --test issue_3032_multiclustering_rows_trie_shape \
         --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1 \
     && env -u CQLITE_REQUIRE_FIXTURES "${ds_env[@]}" \
-      cargo test -p cqlite-core --features "state_machine cli-helpers" \
+      cargo test -p cqlite-core --features "state_machine cli-helpers result-corruption-injection" \
         --test point_vs_full_differential >>"$log" 2>&1 \
     && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1 \
     && bash "$REPO_ROOT/scripts/tests/test_issue_3358_failclosed.sh" >>"$log" 2>&1; then
@@ -18511,7 +18516,7 @@ run_query_semantics_oracle() {
   fi
   echo ">>> [$name] query-semantics parity oracle vs Cassandra SELECT (#1742)"
   if env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-      cargo test -p cqlite-core --features "state_machine cli-helpers" \
+      cargo test -p cqlite-core --features "state_machine cli-helpers result-corruption-injection" \
         --test query_semantics_oracle_parity >"$log" 2>&1; then
     status=PASS
   else

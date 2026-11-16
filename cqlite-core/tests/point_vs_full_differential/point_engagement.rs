@@ -189,3 +189,83 @@ async fn engagement_assertion_reds_a_probe_served_by_the_full_path() {
         "failure must name the table and key, got: {err}"
     );
 }
+
+/// Issue #4256: the corruption the meta-test wants armed for the COMPARISON phase of
+/// the next `run_case` only. `run_case` first runs an integer-key discovery scan on the
+/// full leg and an uncompared cold-start point probe. Arms are one-shot (the first
+/// matching result consumes them), so arming before `run_case` would spend the arm on
+/// one of those uncompared reads and prove nothing about the comparison. The meta-test
+/// therefore parks the filter here and `run_case` arms it after both.
+#[cfg(feature = "result-corruption-injection")]
+static ARM_AFTER_DISCOVERY: parking_lot::Mutex<
+    Option<cqlite_core::query::result_corruption::ArmFilter>,
+> = parking_lot::Mutex::new(None);
+
+#[cfg(feature = "result-corruption-injection")]
+pub(super) type LateArm = Option<cqlite_core::query::result_corruption::CorruptionArm>;
+#[cfg(not(feature = "result-corruption-injection"))]
+pub(super) type LateArm = ();
+
+/// Called by `run_case` after key discovery and the cold-start probe: arms (and hands back the guard
+/// for) any filter the meta-test parked. No-op without the feature or when nothing is parked.
+pub(super) fn arm_after_discovery() -> LateArm {
+    #[cfg(feature = "result-corruption-injection")]
+    {
+        ARM_AFTER_DISCOVERY
+            .lock()
+            .take()
+            .map(cqlite_core::query::result_corruption::arm)
+    }
+}
+
+/// Issue #4256 META-TEST: the point-vs-full suite must go RED when ONE decoded cell
+/// on the path under test is wrong. The comparator's synthetic-diff test
+/// (`comparison_detects_a_seeded_divergence`) cannot see a suite whose legs quietly
+/// stopped being compared; this corrupts one cell of the REAL point-leg output (then,
+/// separately, of the full-leg output) via the feature-gated seam and asserts the
+/// suite's own per-case assertion (`run_case`, which the suite's `failures.is_empty()`
+/// assertion is built on) fails with its own `point-vs-full DIVERGENCE` error. Each
+/// leg is armed only AFTER key discovery and the cold-start probe (see
+/// [`ARM_AFTER_DISCOVERY`]), so neither is touched and the only way to go red is the comparison itself. The unarmed control
+/// must pass.
+#[cfg(feature = "result-corruption-injection")]
+#[tokio::test]
+#[serial]
+async fn corrupted_decoded_cell_turns_the_differential_red() {
+    use cqlite_core::query::result_corruption::{corrupted_count, ArmFilter};
+
+    let case = super::CORPUS
+        .iter()
+        .find(|c| {
+            c.table == "shadow_row_delete" && matches!(c.outcome, super::DeclaredOutcome::Served)
+        })
+        .expect("corpus has the committed shadow_row_delete served case");
+    let _clock = pin_read_clock();
+
+    assert!(
+        super::run_case(case)
+            .await
+            .unwrap_or_else(|e| panic!("control run must pass unarmed: {e}")),
+        "control case SKIPped; the meta-test needs the committed fixture"
+    );
+
+    for (leg, filter) in [
+        ("point leg", ArmFilter::TargetedOnly),
+        ("full leg", ArmFilter::FullScanOnly),
+    ] {
+        let before = corrupted_count();
+        *ARM_AFTER_DISCOVERY.lock() = Some(filter);
+        let outcome = super::run_case(case).await;
+        *ARM_AFTER_DISCOVERY.lock() = None;
+        assert!(
+            corrupted_count() > before,
+            "{leg}: the corruption seam never fired — the meta-test would prove nothing"
+        );
+        let err = outcome.expect_err("a corrupted decoded cell must turn the differential red");
+        assert!(
+            err.contains("point-vs-full DIVERGENCE"),
+            "{leg}: the suite must fail with its own DIVERGENCE assertion (not a \
+             discovery/engagement/cold-start error), got: {err}"
+        );
+    }
+}

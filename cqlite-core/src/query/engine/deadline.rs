@@ -300,8 +300,21 @@ impl AdvancedQueryEngine {
         )
     )]
     pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
-        self.bounded("query.execute", Box::pin(self.execute_inner(cql)))
-            .await
+        let result = self
+            .bounded("query.execute", Box::pin(self.execute_inner(cql)))
+            .await;
+        // Issue #4256: TEST-ONLY seam (feature `result-corruption-injection`; absent
+        // from every default build) corrupting one decoded cell of the final rows, so
+        // a differential suite can prove it goes red on a wrong read-path value.
+        #[cfg(feature = "result-corruption-injection")]
+        let result = result.map(|mut r| {
+            crate::query::result_corruption::maybe_corrupt(
+                &mut r.rows,
+                r.metadata.access_path.as_ref(),
+            );
+            r
+        });
+        result
     }
 
     /// Execute a CQL query with streaming results (Issue #280).

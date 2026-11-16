@@ -53,6 +53,7 @@ use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::types::Value;
 use cqlite_core::Database;
 use serde::Deserialize;
+use serial_test::serial;
 
 /// Debug-only reader seam (see `now_clock.rs`): pins the read-time TTL "now"
 /// clock (epoch seconds) so a long-expired fixture is read deterministically
@@ -705,7 +706,10 @@ fn empty_declared_projection_fails_loudly() {
     );
 }
 
+// `#[serial]` (issue #4256): the corruption meta-test below arms a PROCESS-GLOBAL seam
+// that would corrupt this test's results if they ran concurrently.
 #[tokio::test]
+#[serial]
 async fn query_semantics_oracle_matches_cassandra_select() {
     let oracle_path = repo_root()
         .join("test-data")
@@ -759,4 +763,59 @@ async fn query_semantics_oracle_matches_cassandra_select() {
     } else if ran == 0 {
         eprintln!("SKIP query_semantics_oracle: no fixtures present (set CQLITE_REQUIRE_FIXTURES=1 to fail-close)");
     }
+}
+
+/// Issue #4256 META-TEST: the oracle suite must go RED when the real read path hands
+/// back one wrong decoded cell. `synthetic_case`-style tests prove the comparator can
+/// fail on a made-up diff; this corrupts the actual `SELECT` output (one cell of the
+/// first row, via the feature-gated `result-corruption-injection` seam) and asserts
+/// `run_case` — the unit the suite's own `failures.is_empty()` assertion is built on —
+/// reports a query-semantics MISMATCH. The control run (seam unarmed) must pass, so the
+/// failure is attributable to the corruption and nothing else.
+///
+/// Runs only where the seam exists (the gate's `query-semantics-oracle` component
+/// enables the feature); without it the test is compiled out.
+#[cfg(feature = "result-corruption-injection")]
+#[tokio::test]
+#[serial]
+async fn corrupted_decoded_cell_turns_the_oracle_red() {
+    use cqlite_core::query::result_corruption::{arm, corrupted_count, ArmFilter};
+
+    let oracle_path = repo_root()
+        .join("test-data")
+        .join("query-semantics-oracle.json");
+    let text = std::fs::read_to_string(&oracle_path)
+        .unwrap_or_else(|e| panic!("read oracle {}: {e}", oracle_path.display()));
+    let oracle: Oracle = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("parse oracle {}: {e}", oracle_path.display()));
+    let case = oracle
+        .cases
+        .iter()
+        .find(|c| !c.expected_rows.is_empty())
+        .expect("oracle has a case with expected rows to corrupt");
+
+    // Control: unarmed, the case passes (and actually ran).
+    assert!(
+        run_case(case)
+            .await
+            .unwrap_or_else(|e| panic!("control run must pass unarmed: {e}")),
+        "control case {} SKIPped; the meta-test needs a present fixture",
+        case.id
+    );
+
+    let before = corrupted_count();
+    let armed = arm(ArmFilter::Any);
+    let outcome = run_case(case).await;
+    drop(armed);
+
+    assert!(
+        corrupted_count() > before,
+        "the corruption seam never fired for case {} — the meta-test would prove nothing",
+        case.id
+    );
+    let err = outcome.expect_err("a corrupted decoded cell must turn the oracle red");
+    assert!(
+        err.contains("query-semantics MISMATCH"),
+        "the oracle must fail with its own MISMATCH assertion, got: {err}"
+    );
 }
