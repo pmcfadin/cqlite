@@ -1,7 +1,7 @@
 # verify-audit Specification
 
 ## Purpose
-TBD - created by archiving change consistency-audit. Update Purpose after archive.
+`cqlite verify --audit` (#4195): a fixed 8-row cross-component consistency checklist (Index/Data, Summary, bloom filter, BTI trie, compression coverage, Statistics) that reports each invariant as Pass, Fail or Skip(cause) and never omits a row.
 
 ## Requirements
 
