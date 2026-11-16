@@ -93,6 +93,7 @@ fn range_marker_becomes_two_bound_rows_with_prefix_clustering() {
             end: CompactionBound::Inclusive(vec![("ck1".to_string(), Value::Integer(2))]),
             deletion_time: 1_700_000_000_000_000,
             local_deletion_time: 1_700_000_000,
+            separate_start_marker: true,
         },
     };
     let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");
@@ -143,6 +144,7 @@ fn range_marker_preserves_mixed_inclusivity_per_bound() {
             end: CompactionBound::Inclusive(vec![("ck1".to_string(), Value::Integer(3))]),
             deletion_time: 1,
             local_deletion_time: 1,
+            separate_start_marker: true,
         },
     };
     let rows = map_compaction_row(row, &schema(), &source()).expect("mapping must succeed");

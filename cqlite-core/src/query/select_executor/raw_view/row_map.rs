@@ -262,6 +262,7 @@ pub(in crate::query::select_executor) fn map_compaction_row(
             end,
             deletion_time,
             local_deletion_time,
+            ..
         } => {
             vec![
                 range_bound_row(

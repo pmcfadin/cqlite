@@ -3,13 +3,13 @@
 pub mod bloom;
 pub mod bti;
 pub mod bulletproof_reader;
-/// The cell-path component kinds and their ONE shared resolver (#4106); the
-/// module header carries the reasoning.
-pub(crate) mod cell_path_component;
+pub(crate) mod cell_path_component; // The ONE shared cell-path resolver (#4106)
 pub mod chunk_decompressor;
 pub mod chunk_reader;
 pub mod compression;
 pub mod compression_info;
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod diagnose; // `cqlite diagnose` (#4204): read-only report library, see `diagnose_table`
 pub mod directory;
 pub mod directory_integration_tests;
 pub mod format_detector;

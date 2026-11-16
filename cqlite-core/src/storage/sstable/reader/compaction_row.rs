@@ -345,6 +345,13 @@ pub enum CompactionRowData {
         deletion_time: i64,
         /// `localDeletionTime` in seconds (GC-grace clock).
         local_deletion_time: i32,
+        /// Whether the `start` bound was its OWN on-disk range-tombstone-marker
+        /// unfiltered (a simple start bound). `false` when the start came from a
+        /// BOUNDARY marker (it is the previous range's closing unfiltered, one
+        /// unfiltered for end+start) or when no start marker preceded the end. Lets a
+        /// physical scan count Cassandra's per-unfiltered markers (#4204): a marker
+        /// is 1 closing unfiltered, plus 1 when `separate_start_marker`.
+        separate_start_marker: bool,
     },
     /// Partition-level tombstone (whole-partition delete) carrying its
     /// authoritative timestamps (issue #1072).
