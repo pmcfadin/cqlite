@@ -28573,13 +28573,16 @@ dispatch_component() {
   cargo test --package '"$ct_pkg"' "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "cli-tests Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
+  # issue_4498_non_linux_notice is #[cfg]-empty on a default Linux x86_64/aarch64 build BY DESIGN: it
+  # only compiles where the #4498 crash harness does not (non-Linux, other CPUs, `tombstones`), to
+  # name that gap. Here the harness itself runs, so zero tests from the notice is correct.
+  check_no_unexpected_zero_tests "cli-tests Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests issue_4498_non_linux_notice || exit 1
 
   _fm_observe_child cli-tests test --package '"$ct_pkg"' --features '"$ct_ws_feats"'
   cargo test --package '"$ct_pkg"' --features '"$ct_ws_feats"' "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2" || exit 1
+  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2" issue_4498_non_linux_notice || exit 1
 
   # PASS 3 — READ-ONLY build (issue #4379): `--no-default-features --features
   # tui,cli-helpers`, the pre-#4379 default set. Passes 1 and 2 both build a

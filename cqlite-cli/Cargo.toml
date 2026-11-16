@@ -375,3 +375,19 @@ duckdb-tests = ["dep:duckdb"]
 # composition is compiled out). Config plumbing (CQLITE_OTEL_*/--otel-*) is
 # always available because ObservabilityConfig/init() are always compiled.
 observability = ["cqlite-core/observability"]
+
+# Issue #4498: crash-consistency harness for the write verbs. Drives the compiled `cqlite`
+# binary under an LD_PRELOAD fault shim (tests/support/crash_fault_shim.c, built with `cc`),
+# so it carries the same feature requirement as the other salvage/rebuild CLI targets.
+# Declared explicitly so a default-feature build cannot compile it to a silent 0-test target.
+[[test]]
+name = "issue_4498_crash_consistency"
+path = "tests/issue_4498_crash_consistency.rs"
+required-features = ["write-support"]
+
+# Issue #4498: the crash-consistency harness is Linux-only (LD_PRELOAD shim); on other platforms
+# this sibling target runs instead and names the gap, so the harness never vanishes silently.
+[[test]]
+name = "issue_4498_non_linux_notice"
+path = "tests/issue_4498_non_linux_notice.rs"
+required-features = ["write-support"]
