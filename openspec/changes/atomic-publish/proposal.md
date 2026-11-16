@@ -2,7 +2,7 @@
 
 **Milestone:** 0.19. **Routing:** OpenSpec — it changes the on-disk failure behaviour of two shipped
 verbs (`cqlite salvage`, `cqlite rebuild`). Owner approved the remedy and both acceptance criteria
-2026-11-14.
+2026-11-14; AC1 was reworded by the owner ruling of 2026-11-16 (see design.md).
 
 ## Why
 
@@ -26,6 +26,7 @@ Every component is written under a hidden staging directory `<out>/.cqlite-publi
 (Cassandra's lister does not descend into it; the name fails `Descriptor.filenameTokens` /
 `Version.validate`). When the whole set is on disk each file is fsynced, renamed into place with
 `Data.db` LAST and `TOC.txt` second to last, the directories are fsynced and the staging directory is
-removed. A crash before the first rename leaves only the staging directory; a crash inside the rename
-window leaves a final-named set WITHOUT `Data.db`, which Cassandra refuses. A re-run refuses, naming
+removed. A crash before the first rename leaves only the staging directory. During the rename window
+final-named files may exist, but never `Data.db` until the set is identical to an uninterrupted run;
+Cassandra refuses a Data.db-less set. AC1 (owner ruling 2026-11-16): "After a crash at any boundary, Cassandra never loads a partial set: any final-named partial set lacks `Data.db`." A re-run refuses, naming
 the leftover.

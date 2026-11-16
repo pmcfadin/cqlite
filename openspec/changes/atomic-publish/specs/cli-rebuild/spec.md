@@ -2,7 +2,7 @@
 
 ## ADDED Requirements
 
-### Requirement: R11 — Output is published by rename; a crash never leaves a Cassandra-discoverable partial set
+### Requirement: R11 — Output is published by rename; a crash never leaves a partial set Cassandra would load
 
 `cqlite rebuild` SHALL write every regenerated and copied component under a staging directory
 `<out>/.cqlite-publish-<tag>.tmp/`, fsync each file, rename each into place with `TOC.txt` second to
@@ -10,11 +10,12 @@ last and `Data.db` last, fsync the destination directory, and remove the staging
 Cassandra 5.0.8 citations and ordering rationale are those of cli-salvage R10. A refused or failed
 run removes its staging directory and leaves `--out` as it found it.
 
-#### Scenario: R11.1 a crash at any point of the publish window leaves nothing Cassandra would open
+#### Scenario: R11.1 a crash at any point of the publish window never leaves a loadable partial set
 - **Given** a Cassandra-written BIG or BTI input
 - **When** the process is killed before the n-th rename, for every n from 0 to the file count
-- **Then** no file under `<out>` outside the staging directory parses as a Cassandra component name
-  unless `Data.db` is absent from them or the set equals an uninterrupted run's
+- **Then** during the rename window final-named files may exist, but never `Data.db` until the set is
+  identical to an uninterrupted run's; Cassandra never loads a partial set (AC1, owner ruling
+  2026-11-16, as cli-salvage R10.1)
 
 #### Scenario: R11.2 leftovers are recognisable and a re-run refuses naming them
 - **Given** `<out>` holding a `.cqlite-publish-*.tmp` directory from a killed run
