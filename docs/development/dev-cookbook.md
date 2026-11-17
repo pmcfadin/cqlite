@@ -512,7 +512,34 @@ cargo run --package cqlite-cli -- \
   --data-dir test-data/datasets/sstables \
   --query "SELECT * FROM test_basic.simple_table LIMIT 5" \
   --out json
+
+# Explain one partition across every published generation (issue #4193).
+# The command is read-only and uses the same CQL literal grammar as SELECT.
+cargo run --package cqlite-cli --features write-support -- \
+  --schema test-data/schemas/explain-trace.cql \
+  --dataset test_explain \
+  explain test_explain.trace_decisions 1 \
+  --clustering 1 --now 1794535358 --out json
 ```
+
+`explain` resolves all generations for the requested `keyspace.table` and
+prints the reconciliation clock, generation probes, cell versions, and
+tombstones. `--now` accepts epoch seconds or RFC3339; without it the first
+line marks the wall-clock value. `table`, `json`, and `csv` are supported, and
+the command fails closed with exit 1 for usage/schema/table errors or exit 2
+for generation read/render errors. The configured `max_result_bytes` budget
+applies to the rendered report just as it does to a materialized query; it is set by
+`performance.max_result_bytes` in the CLI config file (added with this verb; shared by every
+materializing CLI query).
+
+**Limits:** `explain` reports the decision CQLite's merge actually makes. At EQUAL write timestamps
+CQLite keeps the first-seen cell for live-vs-live, expiring and same-kind-deletion ties (open: #4530;
+Cassandra resolves those by value / local deletion time), so the trail's `winner` for such a tie can
+reflect generation order. The committed fixtures pin only the tie both agree on (a cell tombstone
+beats a live cell).
+`explain` is a distinct verb from the pre-existing `query --explain` flag (a
+query-PLAN display, unrelated to reconciliation) — the naming collision is
+intentional (owner ruling, design.md §D7) and `cqlite explain --help` says so.
 
 ### Output format precedence
 

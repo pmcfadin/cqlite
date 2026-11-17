@@ -130,6 +130,11 @@ async fn run_main() -> Result<()> {
         return commands::dispatch_find(cli.schema.as_deref(), args).await;
     }
 
+    // `explain` (issue #4193): read-only forensic surface; files only, no Database init.
+    if let Some(Commands::Explain(_)) = &cli.command {
+        return commands::explain::dispatch_explain(&cli, &config).await;
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
@@ -1089,7 +1094,8 @@ async fn run_main() -> Result<()> {
             | Commands::Rebuild(_)
             | Commands::Sweep(_)
             | Commands::Diagnose(_)
-            | Commands::Find(_),
+            | Commands::Find(_)
+            | Commands::Explain(_),
         ) => {
             unreachable!("file-only verbs are dispatched before database initialization")
         }

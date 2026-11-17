@@ -257,6 +257,9 @@ pub enum Commands {
         #[arg(long)]
         timing: bool,
     },
+    /// Explain reconciliation decisions for one partition across all generations.
+    #[command(long_about = crate::commands::explain_args::EXPLAIN_LONG_ABOUT)]
+    Explain(crate::commands::explain_args::ExplainArgs),
     /// Import data from file
     Import {
         /// Input file path

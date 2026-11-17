@@ -99,6 +99,7 @@ use crate::storage::sstable::reader::SSTableReader;
 use super::egress_batch::EgressBatcher;
 use super::producer_iter::RunState;
 use super::producer_msg::{panicked_producer_error, MergeMsg, MergeProducerError};
+use super::trace::NoTrace;
 use super::{
     egress_batch, egress_budget, producer_gauge, KWayMerger, RunReader, SSTableRowIterator,
     SSTableRowIteratorAdapter,
@@ -493,6 +494,7 @@ impl KWayMerger {
             max_purgeable_timestamp: None,
             // The warm shared-reader merge is the Flight READ route (#4524).
             _egress_slot: Some(egress_slot),
+            trace: NoTrace,
         })
     }
 }

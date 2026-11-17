@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use super::super::trace::NoTrace;
 use super::super::{CellData, KWayMerger, MergeEntry, PurgeCounts, RowData};
 use crate::storage::sstable::reader::compaction_row::RowLiveness;
 use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey};
@@ -60,7 +61,7 @@ fn reconcile(
     now: Option<i64>,
     max_purgeable: i64,
 ) -> Option<MergeEntry> {
-    KWayMerger::reconcile_cluster_with_overlap_counted(
+    KWayMerger::<NoTrace>::reconcile_cluster_with_overlap_counted(
         None,
         rows,
         &HashMap::new(),
@@ -238,7 +239,7 @@ fn an_expired_purged_marker_removes_a_clustered_key_only_row() {
     };
     let past_grace = marker(500, Some(NOW - 200));
     let reconciled = |m| {
-        KWayMerger::reconcile_cluster_with_overlap_counted(
+        KWayMerger::<NoTrace>::reconcile_cluster_with_overlap_counted(
             Some(ck.clone()),
             vec![entry(m)],
             &HashMap::new(),
