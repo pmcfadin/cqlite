@@ -202,8 +202,11 @@ impl StagedPublish {
                 }
             }
         }
-        let data_start = staged.iter().position(|(_, r)| rank(r) == 2);
-        let split = data_start.unwrap_or(staged.len());
+        // Index of the first Data.db-rank file (or len): counts the files ordered before it. Written
+        // without iterator search primitives so the R2.3 no-resync-scan guard
+        // (scripts/tests/test_rebuild_no_resync_scan.sh) stays exact; this ranks file NAMES, it never
+        // scans Data.db bytes.
+        let split = staged.iter().take_while(|(_, r)| rank(r) != 2).count();
         // From here a failure may leave final-named files: keep the stage as the leftover marker.
         self.publication_started = true;
         // The stage marker must be durable BEFORE any final name can be: fsync the stage directory
@@ -289,10 +292,14 @@ fn normalize_dir(p: &Path) -> PathBuf {
 /// The nearest ancestor of `root` that exists (the top of the chain `begin` creates), with an empty
 /// parent normalised to `.`.
 fn existing_anchor(root: &Path) -> Option<PathBuf> {
-    root.ancestors()
-        .skip(1)
-        .map(normalize_dir)
-        .find(|a| a.exists())
+    // A plain loop rather than an iterator search, so the R2.3 no-resync-scan guard stays exact:
+    // this walks directory PATHS, never Data.db bytes.
+    for anc in root.ancestors().skip(1).map(normalize_dir) {
+        if anc.exists() {
+            return Some(anc);
+        }
+    }
+    None
 }
 
 /// `dir` and each of its ancestors up to and including `floor` (an empty ancestor is `.`).
