@@ -27,45 +27,7 @@ use crate::schema::TableSchema;
 use crate::storage::sstable::reader::OpenErrorReporting;
 use crate::{Error, Result};
 
-/// Why a [`KWayMerger`] is merging. An explicit, typed signal (never inferred from the gc
-/// settings): the two consumers diverge on rows that carry only a primary-key liveness marker.
-///
-/// A liveness-only row of a clustering-less table is RETURNED by a Cassandra read
-/// (`AbstractRow.hasLiveData`, issue #4524), and the read path carries the real marker in
-/// `row_liveness`. The compaction write path ignores `row_liveness`, so emitting such an
-/// entry there would write a ts=0, TTL-less row (resurrecting an expired TTL'd row); a
-/// compaction therefore keeps its pre-#4524 behaviour and drops it (separate issue).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MergePurpose {
-    /// Compaction / rewrite. The default of every constructor except the read ones.
-    Compaction,
-    /// Query read (Flight `do_get`, cross-generation merge, warm shared-reader merge).
-    Read,
-}
-
-impl MergePurpose {
-    /// Whether a marker-only row (no surviving cells, no deletion) must be emitted.
-    /// Only a READ of a table WITHOUT clustering columns: a static row also has no
-    /// clustering key, but a static row never carries a marker and only exists on a
-    /// table with clustering columns, so the clustering-less guard excludes it explicitly.
-    pub(crate) fn keeps_marker_only_rows(self, schema: &TableSchema) -> bool {
-        self == Self::Read && schema.clustering_keys.is_empty()
-    }
-}
-
 impl KWayMerger {
-    /// Whether this merge emits marker-only rows (see [`MergePurpose::keeps_marker_only_rows`]).
-    pub(super) fn keeps_marker_only_rows(&self) -> bool {
-        self.purpose.keeps_marker_only_rows(&self.schema)
-    }
-
-    /// Declare whether this merge serves a read or a compaction (see [`MergePurpose`]).
-    #[must_use]
-    pub fn with_purpose(mut self, purpose: MergePurpose) -> Self {
-        self.purpose = purpose;
-        self
-    }
-
     /// K-way merge constructor that opens the input SSTables under a cooperative
     /// [`ScanCancel`](crate::storage::scan_cancel::ScanCancel) (issue #2264).
     ///
@@ -173,7 +135,6 @@ impl KWayMerger {
             // conservative (no purging) until a caller supplies the min outside
             // timestamp via `with_max_purgeable_timestamp`.
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             _egress_slot: Some(egress_slot),
         })
     }
@@ -203,5 +164,4 @@ pub(crate) fn merger_deferring_opens(
         crate::storage::scan_cancel::ScanCancel::default(),
         OpenErrorReporting::DeferredToCaller,
     )
-    .map(|m| m.with_purpose(MergePurpose::Read))
 }

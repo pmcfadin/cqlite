@@ -1,0 +1,2 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":18},"rows":[{"type":"row","position":18,"cells":[{"name":"v","value":"n","tstamp":"1970-01-01T00:00:00.002Z"}]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":44},"rows":[{"type":"row","position":44,"cells":[{"name":"v","value":"n","tstamp":"1970-01-01T00:00:00.002Z"}]}]}

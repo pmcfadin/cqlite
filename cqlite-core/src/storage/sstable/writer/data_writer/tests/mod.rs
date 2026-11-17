@@ -19,6 +19,8 @@ mod incremental_partition;
 /// per row (issue #1674, R3).
 mod issue_1674_column_cache;
 mod reconcile_implicit_ldt_4530;
+/// A compacted row's liveness marker is written verbatim (issue #4581).
+mod row_marker_4581;
 mod scenarios_1;
 mod scenarios_2;
 mod scenarios_3;

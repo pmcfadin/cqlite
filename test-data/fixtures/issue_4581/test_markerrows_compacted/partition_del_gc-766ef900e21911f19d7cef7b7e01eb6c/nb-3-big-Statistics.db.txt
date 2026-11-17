@@ -1,0 +1,64 @@
+SSTable: /var/lib/cassandra/data/test_markerrows/partition_del_gc-766ef900e21911f19d7cef7b7e01eb6c/nb-3-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 01/01/1970 00:00:00 (1000)
+Maximum timestamp: 01/01/1970 00:00:00 (1000)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: -
+TTL min: 0
+TTL max: 0
+First token: -3248873570005575792 (2)
+Last token: -3248873570005575792 (2)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: c81ae01a-1559-429d-b44a-c4265f226925
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1794873362537, position=73474)=CommitLogPosition(segmentId=1794873362537, position=82442)}
+totalColumnsSet: 0
+totalRows: 1
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   24 (24 B)    |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      24 (24 B)
+   75th      24 (24 B)
+   95th      24 (24 B)
+   98th      24 (24 B)
+   99th      24 (24 B)
+   Min       21 (21 B)
+   Max       24 (24 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   1       |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1
+   75th      1
+   95th      1
+   98th      1
+   99th      1
+   Min       0
+   Max       1
+Local token space coverage: NaN
+Estimated cardinality: 1
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 11/16/2026 23:58:17 (1794873497)
+EncodingStats minTimestamp: 01/01/1970 00:00:00 (1000)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: 
+IsTransient: false

@@ -1,24 +1,31 @@
-//! Issue #4524 — the marker-only row is a READ-path rule; COMPACTION keeps its pre-change behaviour.
+//! Issues #4524 / #4581 — the marker-only row is ONE rule for reads AND compactions.
 //!
 //! A liveness-only row of a clustering-less table (a pk-only `INSERT`, an explicit `null`) is
-//! RETURNED by a Cassandra read (`AbstractRow.hasLiveData`), so the read merge emits an empty
-//! `Live` entry carrying the real marker in `row_liveness`. The compaction write path ignores
-//! `row_liveness`, so the same entry there would be written as a ts=0, TTL-less pk-only row (an
-//! expired TTL'd row resurrected as an immortal one). Compaction therefore must NOT emit it; a
-//! separate issue owns compaction correctness for these rows.
+//! RETURNED by a Cassandra read (`AbstractRow.hasLiveData`) and KEPT by a Cassandra compaction
+//! (`Row.Merger.merge` returns null only when liveness, deletion and data are all empty;
+//! `BTreeRow.purge` keeps a live marker). #4524 fixed the read path first and had to keep
+//! compaction DROPPING such rows, because the compaction write path ignored `row_liveness` and
+//! would have rewritten the row as ts=0 with no TTL (resurrecting an expired TTL'd row as an
+//! immortal one). That split (`MergePurpose::{Read, Compaction}`) is gone as of #4581: the writer
+//! now carries the marker's real timestamp, TTL and `localExpirationTime`
+//! (`Mutation::row_marker`), so there is nothing left to gate and the merge no longer knows why it
+//! runs.
+//!
+//! This target pins what that split used to pin, inverted: the merge emits the marker-only
+//! entries, the compaction OUTPUT holds each of them with its input liveness VERBATIM (never
+//! ts=0, never TTL-less), and the clustered control is unchanged. The Cassandra-compacted
+//! oracle for these shapes is `issue_4581_compaction_marker_rows.rs`.
 //!
 //! Inputs: real Cassandra 5.0.8-written SSTables (`test-data/fixtures/issue_4524/test_nullrow`).
-//! The compaction expectations below are the OUTPUT OF `origin/main` (built in a separate worktree
-//! and target dir) for the same inputs, pinned as PROPERTIES (partition count, no ts=0 liveness
-//! row, no empty row) rather than raw bytes.
 
 #![cfg(all(feature = "state_machine", feature = "write-support", feature = "lz4"))]
 
 use std::path::{Path, PathBuf};
 
 use cqlite_core::schema::TableSchema;
+use cqlite_core::storage::sstable::reader::compaction_row::RowLiveness;
 use cqlite_core::storage::write_engine::merge::{
-    compact_sstables, KWayMerger, MergeEntry, MergePurpose, MergeStep, RowData,
+    compact_sstables, KWayMerger, MergeEntry, MergeStep, RowData,
 };
 
 #[path = "support/datasets_root.rs"]
@@ -77,98 +84,93 @@ fn is_marker_only(e: &MergeEntry) -> bool {
     matches!(&e.row_data, RowData::Live { cells } if cells.is_empty()) && e.row_liveness.has_marker
 }
 
-fn open(paths: &[PathBuf], schema: &TableSchema, purpose: MergePurpose) -> KWayMerger {
-    KWayMerger::new(paths.to_vec(), schema)
-        .expect("merger")
-        .with_purpose(purpose)
-}
-
-/// `(marker_only entries from a READ merge, marker_only entries from a COMPACTION merge)`.
-fn marker_only_counts(table: &str) -> (usize, usize) {
-    let (schema, paths) = (schema_of(table), inputs(table));
-    let count = |p| {
-        drain(open(&paths, &schema, p))
-            .iter()
-            .filter(|e| is_marker_only(e))
-            .count()
-    };
-    (count(MergePurpose::Read), count(MergePurpose::Compaction))
-}
-
-/// Compact `table`'s committed inputs and describe the output as `(partitions, rows)` after
-/// asserting its row-level properties.
-async fn compact_output(table: &str) -> (usize, usize) {
-    let (schema, paths) = (schema_of(table), inputs(table));
-    let out = tempfile::tempdir().expect("tempdir");
-    let report = compact_sstables(paths, out.path(), &schema, 9, None, None, true)
-        .await
-        .expect("compaction");
-    // Everything dropped => a zero-byte Data.db (no partitions to read back).
-    let data = report.output.data_path;
-    let rows = if std::fs::metadata(&data).expect("output Data.db").len() == 0 {
-        Vec::new()
-    } else {
-        drain(KWayMerger::new(vec![data], &schema).expect("reopen"))
-    };
-    for r in &rows {
-        // The pre-change output of a clustering-less table never holds a liveness-only row:
-        // no empty row and no ts=0 marker (a clustered table's writer legitimately emits ts=0
-        // liveness on rows WITH data, so that half is asserted for clustering-less tables only).
-        assert!(
-            !matches!(&r.row_data, RowData::Live { cells } if cells.is_empty()),
-            "{table}: compaction wrote an empty (liveness-only) row"
-        );
-        if schema.clustering_keys.is_empty() {
-            assert_ne!(
-                r.row_liveness.marker_timestamp,
-                Some(0),
-                "{table}: compaction wrote a ts=0 liveness marker"
-            );
-        }
-    }
-    let partitions = rows
+/// Marker-only entries (ordered by partition token) of a merge over `paths`, as
+/// `(partition token, row_liveness)`.
+fn marker_only_rows(paths: &[PathBuf], schema: &TableSchema) -> Vec<(i64, RowLiveness)> {
+    drain(KWayMerger::new(paths.to_vec(), schema).expect("merger"))
         .iter()
-        .map(|r| r.key.token)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
-    (partitions, rows.len())
+        .filter(|e| is_marker_only(e))
+        .map(|e| (e.key.token, e.row_liveness))
+        .collect()
 }
 
-/// The split on real Cassandra-written bytes: the READ merge emits liveness-only entries for the
-/// null-only rows, the COMPACTION merge of the same inputs emits none.
+/// The merge emits the liveness-only rows of the null-only tables, and none for a table WITH
+/// clustering columns (its marker rides the clustering pseudo-cells).
 #[test]
-fn read_merge_emits_marker_only_rows_and_compaction_merge_does_not() {
+fn the_merge_emits_marker_only_rows_of_clustering_less_tables_only() {
     for table in ["flat_rows", "ttl_liveness"] {
-        let (read, compaction) = marker_only_counts(table);
+        let found = marker_only_rows(&inputs(table), &schema_of(table));
         assert!(
-            read > 0,
-            "{table}: the read merge must emit its liveness-only rows"
+            !found.is_empty(),
+            "{table}: the merge must emit its liveness-only rows"
         );
-        assert_eq!(
-            compaction, 0,
-            "{table}: the compaction merge must not emit them"
+        assert!(
+            found
+                .iter()
+                .all(|(_, l)| l.marker_timestamp.is_some_and(|ts| ts != 0)),
+            "{table}: a marker-only entry carries the marker's REAL timestamp, never ts=0"
         );
     }
-    // A table WITH clustering columns never takes the marker-only branch in either mode.
-    let (read, compaction) = marker_only_counts("clustered_rows");
-    assert_eq!((read, compaction), (0, 0), "clustered_rows");
+    let clustered = marker_only_rows(&inputs("clustered_rows"), &schema_of("clustered_rows"));
+    assert!(clustered.is_empty(), "clustered_rows");
 }
 
-/// End-to-end `compact_sstables` over real inputs: output pinned to what `origin/main` writes.
+/// End-to-end `compact_sstables` over real inputs: every marker-only row of the merged inputs is
+/// in the output with its liveness VERBATIM (ts, TTL, expiry). `gc_before`/`now` are unset, so
+/// nothing is purged or expired (the purge rules are pinned against Cassandra in
+/// `issue_4581_compaction_marker_rows.rs`).
 #[tokio::test]
-async fn compaction_output_is_unchanged_for_liveness_only_rows() {
-    for (table, partitions, rows) in EXPECTED_COMPACTION {
-        let got = compact_output(table).await;
-        assert_eq!(got, (*partitions, *rows), "{table}: (partitions, rows)");
+async fn compaction_keeps_marker_only_rows_with_their_input_liveness() {
+    for table in ["flat_rows", "ttl_liveness"] {
+        let (schema, paths) = (schema_of(table), inputs(table));
+        let expected = marker_only_rows(&paths, &schema);
+        assert!(
+            !expected.is_empty(),
+            "{table}: fixture must hold marker-only rows"
+        );
+
+        let out = tempfile::tempdir().expect("tempdir");
+        let report = compact_sstables(paths, out.path(), &schema, 9, None, None, true)
+            .await
+            .expect("compaction");
+        let got = marker_only_rows(std::slice::from_ref(&report.output.data_path), &schema);
+        assert_eq!(
+            got, expected,
+            "{table}: compaction must keep every marker-only row verbatim"
+        );
     }
 }
 
-/// `(table, partitions, rows)` of the compaction output, as produced by `origin/main`.
+/// `(table, partitions, rows)` of the compaction output. Unlike the pre-#4581 pins these include
+/// the marker-only rows Cassandra keeps (`flat_rows`: 6 data rows + the null-only ones).
+#[tokio::test]
+async fn compaction_output_row_counts() {
+    for (table, partitions, rows) in EXPECTED_COMPACTION {
+        let (schema, paths) = (schema_of(table), inputs(table));
+        let out = tempfile::tempdir().expect("tempdir");
+        let report = compact_sstables(paths, out.path(), &schema, 9, None, None, true)
+            .await
+            .expect("compaction");
+        let entries =
+            drain(KWayMerger::new(vec![report.output.data_path.clone()], &schema).expect("reopen"));
+        let parts = entries
+            .iter()
+            .map(|r| r.key.token)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(
+            (parts, entries.len()),
+            (*partitions, *rows),
+            "{table}: (partitions, rows)"
+        );
+    }
+}
+
 const EXPECTED_COMPACTION: &[(&str, usize, usize)] = &[
-    ("flat_rows", 6, 6),
+    ("flat_rows", 7, 7),
     ("multigen_rows", 5, 5),
-    // The lone pk-only TTL'd row: pre-change compaction writes an EMPTY Data.db, not an
-    // immortal ts=0 row.
-    ("ttl_liveness", 0, 0),
+    // Both pk-only rows (id 1 USING TTL, id 2 live): kept, the TTL'd one with its TTL and LDT (an
+    // immortal ts=0 row would be the bug). Pre-#4581 compaction wrote an EMPTY Data.db.
+    ("ttl_liveness", 2, 2),
     ("clustered_rows", 8, 9),
 ];

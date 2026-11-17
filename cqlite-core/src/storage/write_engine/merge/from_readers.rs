@@ -492,7 +492,6 @@ impl KWayMerger {
             purge_safe: false,
             max_purgeable_timestamp: None,
             // The warm shared-reader merge is the Flight READ route (#4524).
-            purpose: super::MergePurpose::Read,
             _egress_slot: Some(egress_slot),
         })
     }

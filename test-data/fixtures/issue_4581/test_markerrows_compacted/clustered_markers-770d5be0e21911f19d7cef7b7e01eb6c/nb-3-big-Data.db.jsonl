@@ -1,0 +1,4 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":18},"rows":[{"type":"row","position":18,"clustering":[1],"deletion_info":{"marked_deleted":"1970-01-01T00:00:00.002Z","local_delete_time":"2026-11-16T23:58:18Z"},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":48},"rows":[{"type":"row","position":48,"clustering":[1],"liveness_info":{"tstamp":"1970-01-01T00:00:00.003Z"},"deletion_info":{"marked_deleted":"1970-01-01T00:00:00.002Z","local_delete_time":"2026-11-16T23:58:00Z"},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["4"],"position":80},"rows":[{"type":"row","position":80,"clustering":[1],"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z","ttl":3,"expires_at":"2026-11-16T23:58:04Z","expired":true},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["3"],"position":110},"rows":[{"type":"row","position":110,"clustering":[1],"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[]}]}

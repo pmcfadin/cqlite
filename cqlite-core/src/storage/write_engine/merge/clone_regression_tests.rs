@@ -73,7 +73,6 @@ fn merger_over_runs(runs: Vec<Vec<MergeEntry>>, schema: TableSchema) -> KWayMerg
         now_secs: None,
         purge_safe: false,
         max_purgeable_timestamp: None,
-        purpose: super::MergePurpose::Compaction,
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
         _egress_slot: None,

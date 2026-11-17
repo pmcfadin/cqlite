@@ -13,7 +13,9 @@
 //! [`SSTableWriter::write_partition`]: super::SSTableWriter::write_partition
 
 use crate::schema::TableSchema;
-use crate::storage::sstable::writer::data_writer::DataWriter;
+use crate::storage::sstable::writer::data_writer::{
+    implicit_expiration, wall_clock_seconds, DataWriter,
+};
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
 use crate::storage::write_engine::mutation::{CellOperation, Mutation};
 
@@ -442,8 +444,18 @@ pub(crate) fn fold_row_content_stats(
 ) {
     let mutation_shadowed = shadow_boundary.is_some_and(|dts| mutation.timestamp_micros <= dts);
 
+    // #4581: a compaction (`Explicit`) row's timestamp is the max of its marker and cells, but the
+    // marker may have been purged or shadowed and so is not emitted; every emitted cell and the
+    // marker fold their OWN timestamp below, so only a row tombstone folds the row timestamp.
+    let derive_row_ts = !mutation.marker_mode.is_explicit()
+        || mutation
+            .operations
+            .iter()
+            .any(|op| matches!(op, CellOperation::DeleteRow));
     if !mutation_shadowed {
-        stats.update_timestamp(mutation.timestamp_micros);
+        if derive_row_ts {
+            stats.update_timestamp(mutation.timestamp_micros);
+        }
         if let Some(ttl) = mutation.ttl_seconds.filter(|t| *t != 0) {
             stats.update_ttl(ttl as i32);
             let now_seconds = std::time::SystemTime::now()
@@ -452,6 +464,27 @@ pub(crate) fn fold_row_content_stats(
                 .unwrap_or(0);
             let local_deletion_time = now_seconds.saturating_add(ttl as i32);
             stats.update_local_deletion_time(local_deletion_time);
+        }
+    }
+    // #4581: the compaction path's authoritative liveness marker, folded exactly when
+    // `DataWriter::explicit_row_marker` emits it (same `ts > shadow` test). Cassandra
+    // `MetadataCollector.update(LivenessInfo)`: timestamp, ttl, localExpirationTime.
+    if let Some(mk) = mutation
+        .marker_mode
+        .marker()
+        .filter(|mk| shadow_boundary.is_none_or(|dts| mk.timestamp_micros > dts))
+    {
+        stats.update_timestamp(mk.timestamp_micros);
+        match mk.ttl_seconds {
+            Some(ttl) => {
+                stats.update_ttl(ttl as i32);
+                let now = wall_clock_seconds();
+                stats.update_local_deletion_time(
+                    mk.local_expiration_time
+                        .unwrap_or_else(|| implicit_expiration(now, ttl)),
+                );
+            }
+            None => stats.note_live_local_deletion_time(),
         }
     }
     // Track local deletion times for tombstones and TTL cells. Issue #764:

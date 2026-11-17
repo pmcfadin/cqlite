@@ -579,7 +579,6 @@ impl<'a> StreamingMerger<'a> {
             effective_gc_before,
             max_purgeable_timestamp,
             self.merger.now_secs,
-            self.merger.keeps_marker_only_rows(),
             &mut self.state.purges,
         ) {
             if self.state.range_tombstones.is_empty() {
@@ -945,7 +944,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: crate::storage::write_engine::merge::MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,

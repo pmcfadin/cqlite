@@ -199,10 +199,12 @@ impl MergeEntry {
     }
 
     /// True when this entry has NO writer-emittable content at all — an empty
-    /// `RowData::Live { cells: vec![] }` with no row tombstone and no carried
-    /// deletion metadata. Routing such an entry to the writer would create a
-    /// PHANTOM live empty (pure-PK) row at timestamp 0 (`DataWriter::merge_row_group`
-    /// treats a no-op mutation as a primary-key insert), so `merge` filters it.
+    /// `RowData::Live { cells: vec![] }` with no row tombstone, no carried
+    /// deletion metadata and NO primary-key marker. Routing such an entry to the writer
+    /// would create a PHANTOM live empty (pure-PK) row at timestamp 0
+    /// (`DataWriter::merge_row_group` treats a no-op mutation as a primary-key
+    /// insert), so `merge` filters it. A marker-only row is NOT a no-op (#4581): it
+    /// carries the marker's real ts/TTL/LDT (`Mutation::row_marker`).
     ///
     /// Epic #899 Phase C: a COMPLEX DELETION is consumed by the writer (a real
     /// `CellOperation::ComplexDeletion` marker), so a complex-deletion-only entry
@@ -225,6 +227,7 @@ impl MergeEntry {
             && self.range_deletion.is_none()
             && self.row_deletion.is_none()
             && self.partition_deletion.is_none()
+            && !self.row_liveness.has_marker
     }
 
     /// True when this entry is a synthetic partition-tombstone carrier (issue

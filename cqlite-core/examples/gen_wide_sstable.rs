@@ -90,6 +90,7 @@ async fn main() -> cqlite_core::error::Result<()> {
             local_deletion_time: None,
             row_tombstone: None,
             cell_write_timestamps: None,
+            marker_mode: Default::default(),
         };
         engine.write_async(mutation).await?;
     }

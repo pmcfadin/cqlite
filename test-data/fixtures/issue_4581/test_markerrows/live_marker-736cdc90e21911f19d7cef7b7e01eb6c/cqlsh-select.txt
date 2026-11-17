@@ -1,0 +1,12 @@
+
+ id | v
+----+------
+  5 | null
+  1 | null
+  2 | null
+  4 | null
+  7 | null
+  6 |    u
+  3 |    x
+
+(7 rows)

@@ -11,7 +11,9 @@
 //! - `CellOperation`: Cell-level write/delete operations
 
 mod clustering_order;
+mod row_marker;
 use self::clustering_order::{compare_values, compare_values_typed};
+pub use self::row_marker::{MarkerMode, RowMarker};
 use crate::error::{Error, Result};
 use crate::schema::{ClusteringOrder, TableSchema};
 use crate::types::{ComparatorType, Value};
@@ -86,15 +88,10 @@ pub struct Mutation {
     /// Explicit local deletion time (seconds since Unix epoch) for the row and
     /// cell tombstones (`DeleteRow`, `Delete`) produced by this mutation.
     ///
-    /// `None` (the default) preserves historical behavior: the writer derives
-    /// the local deletion time from `timestamp_micros` (`timestamp_micros /
-    /// 1_000_000`). When `Some(ldt)`, the writer emits exactly `ldt` as the
-    /// `localDeletionTime` of every row/cell tombstone in this mutation, and
-    /// feeds it into the Statistics.db min/max `localDeletionTime` aggregates.
-    ///
-    /// Partition and range tombstones carry their own `local_deletion_time`
-    /// inside [`PartitionTombstone`] / [`RangeTombstone`] and are unaffected by
-    /// this field. (Issue #764)
+    /// `None` (the default): the writer derives it from `timestamp_micros /
+    /// 1_000_000`. `Some(ldt)`: emitted verbatim and fed into the Statistics.db
+    /// min/max `localDeletionTime`. Partition and range tombstones carry their
+    /// own `local_deletion_time` and are unaffected. (Issue #764)
     #[serde(default)]
     pub local_deletion_time: Option<i32>,
     /// Row-level deletion that COEXISTS with the live cells produced by this
@@ -110,8 +107,7 @@ pub struct Mutation {
     /// deletion time IS the mutation timestamp; `row_tombstone` is used only on
     /// the compaction merge→mutation path where the two diverge.
     ///
-    /// `None` (the default) preserves historical behavior: a row deletion, when
-    /// present, rides as `CellOperation::DeleteRow` at `timestamp_micros`.
+    /// `None` (the default): a row deletion rides as `CellOperation::DeleteRow`.
     #[serde(default)]
     pub row_tombstone: Option<(i64, i32)>,
     /// Per-column write timestamps (microseconds) for the simple-cell
@@ -127,13 +123,15 @@ pub struct Mutation {
     /// it verbatim (clearing `USE_ROW_TIMESTAMP` when it differs from the row
     /// marker).
     ///
-    /// `None` / absent column (the default) preserves historical behavior: the
-    /// cell inherits `timestamp_micros`. Populated only by
-    /// `merge_entry_to_mutation`; the WAL / CQL-INSERT paths leave it unset (their
-    /// cells genuinely share one writetime). `#[serde(default)]` keeps backward
-    /// compatibility with mutations serialized before this field existed.
+    /// `None` / absent column (the default): the cell inherits `timestamp_micros`.
+    /// Populated only by `merge_entry_to_mutation`; the WAL / CQL-INSERT paths
+    /// leave it unset (their cells genuinely share one writetime).
     #[serde(default)]
     pub cell_write_timestamps: Option<std::collections::HashMap<String, i64>>,
+    /// Who decides the primary-key liveness marker (#4581). `Derive` (default; flush/WAL) derives it
+    /// from cells; `Explicit` (compaction) is authoritative, including "no marker". Never serialized.
+    #[serde(skip)]
+    pub marker_mode: MarkerMode,
 }
 
 impl Mutation {
@@ -158,6 +156,7 @@ impl Mutation {
             local_deletion_time: None,
             row_tombstone: None,
             cell_write_timestamps: None,
+            marker_mode: MarkerMode::Derive,
         }
     }
 

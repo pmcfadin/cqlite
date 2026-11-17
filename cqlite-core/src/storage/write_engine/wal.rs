@@ -430,13 +430,12 @@ impl From<LegacyMutation> for Mutation {
             ttl_seconds: m.ttl_seconds,
             partition_tombstone: m.partition_tombstone,
             range_tombstones: m.range_tombstones,
-            // Pre-#764 records had no explicit local deletion time; preserving
-            // None means the writer derives it from the timestamp as before.
+            // Pre-#764: no explicit LDT; None keeps the timestamp-derived LDT.
             local_deletion_time: None,
             // Pre-#932 records had no coexisting row tombstone field.
             row_tombstone: None,
-            // Pre-#1018 records had no per-cell write-timestamp side-channel.
-            cell_write_timestamps: None,
+            cell_write_timestamps: None, // pre-#1018: no side-channel
+            marker_mode: Default::default(),
         }
     }
 }
@@ -486,13 +485,12 @@ impl From<LegacyMutationWithLdt> for Mutation {
             ttl_seconds: m.ttl_seconds,
             partition_tombstone: m.partition_tombstone,
             range_tombstones: m.range_tombstones,
-            // Preserve the mutation-level LDT that layout (B) carries; only the
-            // pre-#921 cell `Delete` ops lose their (never-present) LDT to None.
+            // Layout (B) carries the mutation-level LDT; pre-#921 cell `Delete`s have none.
             local_deletion_time: m.local_deletion_time,
             // Layout (B) predates #932; no coexisting row tombstone field.
             row_tombstone: None,
-            // Layout (B) predates #1018; no per-cell write-timestamp side-channel.
-            cell_write_timestamps: None,
+            cell_write_timestamps: None, // pre-#1018: no side-channel
+            marker_mode: Default::default(),
         }
     }
 }
@@ -542,8 +540,8 @@ impl From<PreRowTombstoneMutation> for Mutation {
             local_deletion_time: m.local_deletion_time,
             // Pre-#932 records carry no coexisting row tombstone.
             row_tombstone: None,
-            // Pre-#1018 records carry no per-cell write-timestamp side-channel.
-            cell_write_timestamps: None,
+            cell_write_timestamps: None, // pre-#1018: no side-channel
+            marker_mode: Default::default(),
         }
     }
 }
@@ -593,8 +591,8 @@ impl From<PreCellWriteTimestampsMutation> for Mutation {
             range_tombstones: m.range_tombstones,
             local_deletion_time: m.local_deletion_time,
             row_tombstone: m.row_tombstone,
-            // Pre-#1018 records carry no per-cell write-timestamp side-channel.
-            cell_write_timestamps: None,
+            cell_write_timestamps: None, // pre-#1018: no side-channel
+            marker_mode: Default::default(),
         }
     }
 }
@@ -756,6 +754,7 @@ impl From<PreCellLdtWriteTtlMutation> for Mutation {
             local_deletion_time: m.local_deletion_time,
             row_tombstone: m.row_tombstone,
             cell_write_timestamps: m.cell_write_timestamps,
+            marker_mode: Default::default(),
         }
     }
 }

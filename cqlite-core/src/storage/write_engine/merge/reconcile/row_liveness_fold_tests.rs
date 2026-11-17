@@ -175,11 +175,9 @@ fn reconcile_folds_newer_live_forever_wins() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Issue #4524: the marker-only row is a READ-merge rule; a COMPACTION merge keeps dropping it.
+// Issues #4524 / #4581: the marker-only row is ONE rule for reads and compactions.
 // ---------------------------------------------------------------------------------------------
 
-use super::super::MergePurpose;
-use crate::schema::TableSchema;
 use crate::storage::write_engine::merge::PurgeCounts;
 
 /// A liveness-only entry: no cells, only a primary-key marker (`INSERT (id)`), `ck = None`.
@@ -188,7 +186,7 @@ fn marker_only_entry() -> MergeEntry {
         .with_row_liveness(live_forever(100))
 }
 
-fn reconcile_marker_only(entry: MergeEntry, keep_marker_only: bool) -> Option<MergeEntry> {
+fn reconcile_marker_only(entry: MergeEntry) -> Option<MergeEntry> {
     KWayMerger::reconcile_cluster_with_overlap_counted(
         None,
         vec![entry],
@@ -196,36 +194,30 @@ fn reconcile_marker_only(entry: MergeEntry, keep_marker_only: bool) -> Option<Me
         None,
         i64::MAX,
         None,
-        keep_marker_only,
         &mut PurgeCounts::default(),
     )
 }
 
-fn schema_of(cql: &str) -> TableSchema {
-    crate::schema::cql_parser::parse_cql_schema(cql).expect("schema")
-}
-
-/// Compaction (`keep_marker_only == false`) drops the row, exactly as before #4524 (it would
-/// otherwise be rewritten as a ts=0, TTL-less row); a read (`true`) keeps it as an empty `Live`
-/// entry carrying the REAL marker for the visibility decision.
+/// Cassandra keeps a row whose only content is its live marker (`Row.Merger.merge` returns null
+/// only when liveness, deletion AND data are all empty, Row.java:778). The merge no longer
+/// distinguishes a read from a compaction (#4581; #4524 had to drop the row on compaction only
+/// because the writer rewrote it as ts=0): the emitted entry carries the marker's REAL timestamp
+/// both as `row_liveness` and as the entry timestamp the writer turns into the mutation's.
 #[test]
-fn marker_only_row_is_kept_by_a_read_merge_and_dropped_by_a_compaction_merge() {
-    assert!(
-        reconcile_marker_only(marker_only_entry(), false).is_none(),
-        "compaction must keep dropping a liveness-only row"
-    );
-    let kept = reconcile_marker_only(marker_only_entry(), true).expect("read keeps it");
+fn a_marker_only_row_is_kept_with_its_real_timestamp() {
+    let kept = reconcile_marker_only(marker_only_entry()).expect("a live marker is a live row");
     assert!(matches!(&kept.row_data, RowData::Live { cells } if cells.is_empty()));
     assert_eq!(kept.row_liveness.marker_timestamp, Some(100));
+    assert_eq!(kept.timestamp, 100, "never the ts=0 placeholder");
 }
 
 /// A STATIC entry (`ck = None`, static cells, NO marker: a static row never carries
-/// `HAS_TIMESTAMP`) never triggers `marker_only`: with no surviving data it is dropped even on a
-/// read merge, and with data it is emitted as a normal data row, not an empty one.
+/// `HAS_TIMESTAMP`) never takes the marker-only branch: with no surviving data it is dropped, and
+/// with data it is emitted as a normal data row, not an empty one.
 #[test]
 fn a_static_entry_never_triggers_marker_only() {
     let no_marker = MergeEntry::new(0, dk(1), None, 100, RowData::Live { cells: vec![] });
-    assert!(reconcile_marker_only(no_marker, true).is_none());
+    assert!(reconcile_marker_only(no_marker).is_none());
     let with_static = MergeEntry::new(
         0,
         dk(1),
@@ -235,20 +227,6 @@ fn a_static_entry_never_triggers_marker_only() {
             cells: vec![CellData::new("s".to_string(), Value::Integer(7), 100)],
         },
     );
-    let out = reconcile_marker_only(with_static, true).expect("static data survives");
+    let out = reconcile_marker_only(with_static).expect("static data survives");
     assert!(matches!(&out.row_data, RowData::Live { cells } if cells.len() == 1));
-}
-
-/// The guard behind that: the merger's own decision keeps marker-only rows ONLY for a READ of a
-/// table WITHOUT clustering columns (a static row exists only on a clustered table, so it is
-/// excluded explicitly, not by inference from the row).
-#[test]
-fn only_a_read_of_a_clustering_less_table_keeps_marker_only_rows() {
-    let flat = schema_of("CREATE TABLE ks.flat (id int PRIMARY KEY, v text)");
-    let clustered =
-        schema_of("CREATE TABLE ks.c (pk int, ck int, s int static, v text, PRIMARY KEY (pk, ck))");
-    assert!(MergePurpose::Read.keeps_marker_only_rows(&flat));
-    assert!(!MergePurpose::Compaction.keeps_marker_only_rows(&flat));
-    assert!(!MergePurpose::Read.keeps_marker_only_rows(&clustered));
-    assert!(!MergePurpose::Compaction.keeps_marker_only_rows(&clustered));
 }

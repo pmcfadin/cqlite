@@ -84,7 +84,7 @@ impl DataWriter {
                     col,
                     complex_deletion,
                     &elements,
-                    row.liveness_ts.unwrap_or(0),
+                    row.liveness_ts.unwrap_or(i64::MIN), // marker-less row: no element may borrow a row ts
                 )?;
                 cells_written += 1;
             }
