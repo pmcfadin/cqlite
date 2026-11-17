@@ -150,7 +150,8 @@ proptest! {
 ///   `db/rows/Cells.java:79`, "leftLocalDeletionTime > rightLocalDeletionTime"): ldt 988.
 /// * `b` merged WITH `c` first: the pure tombstone beats the expiring cell
 ///   (`Cells.java` "we still prefer tombstones over expiring cells"): ldt 501.
-/// Cassandra yields both, so the law is scoped, not CQLite's reconcile changed.
+///
+/// Cassandra yields both, so the law is scoped and the production reconcile is unchanged.
 #[test]
 fn expiry_between_merges_is_order_dependent_in_cassandra() {
     let b = [Spec::Cell(super::generators::CellSpec {
