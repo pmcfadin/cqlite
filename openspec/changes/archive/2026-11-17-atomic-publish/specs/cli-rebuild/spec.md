@@ -7,8 +7,9 @@
 `cqlite rebuild` SHALL write every regenerated and copied component under a staging directory
 `<out>/.cqlite-publish-<tag>.tmp/`, fsync each file, rename each into place with `TOC.txt` second to
 last and `Data.db` last, fsync the destination directory, and remove the staging directory. The
-Cassandra 5.0.8 citations and ordering rationale are those of cli-salvage R10. A refused or failed
-run removes its staging directory and leaves `--out` as it found it.
+Cassandra 5.0.8 citations and ordering rationale are those of cli-salvage R10. Before publication starts, a refused or
+failed run removes its staging directory and leaves `--out` as it found it; once publication has
+started, a failed run keeps its staging directory so the leftover stays recognisable (R11.2).
 
 #### Scenario: R11.1 a crash at any point of the publish window never leaves a loadable partial set
 - **Given** a Cassandra-written BIG or BTI input
