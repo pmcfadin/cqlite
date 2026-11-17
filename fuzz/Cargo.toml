@@ -22,6 +22,9 @@ libfuzzer-sys = "0.4"
 # Reach the internal parser entry points through the feature-gated,
 # `#[doc(hidden)]` fuzz-support surface — NOT the default public API.
 cqlite-core = { path = "../cqlite-core", features = ["fuzz", "all-compression"] }
+# `fuzz_audit` (issue #4502) drives whole generation directories through the real audit entry point.
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [[bin]]
 name = "fuzz_vint"
@@ -61,6 +64,13 @@ bench = false
 [[bin]]
 name = "fuzz_commitlog_frame"
 path = "fuzz_targets/fuzz_commitlog_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_audit"
+path = "fuzz_targets/fuzz_audit.rs"
 test = false
 doc = false
 bench = false
