@@ -63,5 +63,6 @@ creation) still removes the stage and leaves `--out` as found. After a fully suc
 pre-`Data.db` directory fsync, and by the #4498 harness, which injects ENOSPC and short writes at
 every boundary from the first rename on and requires the re-run diagnostic to name the stage.
 
-**Deferred (#4592).** The non-Unix directory fsync (a no-op today) and concurrent publishes into one
-`--out` (no-replace rename plus a root lock) are tracked in #4592, not this change.
+**Deferred (#4592).** The non-Unix directory fsync (a no-op today) concurrent publishes into one
+`--out` (no-replace rename plus a root lock), and the fail-open leftover scan (`find_leftover` treats
+`read_dir`/`file_type` errors as "no leftover"; roborev job 353) are tracked in #4592, not this change.
