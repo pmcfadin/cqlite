@@ -291,9 +291,11 @@ fn normalize_dir(p: &Path) -> PathBuf {
 
 /// The nearest ancestor of `root` that exists (the top of the chain `begin` creates), with an empty
 /// parent normalised to `.`.
+// The R2.3 no-resync-scan guard (scripts/tests/test_rebuild_no_resync_scan.sh) bans the iterator
+// search primitives in rebuild/ outright; clippy's manual_find would rewrite this loop into one. The loop walks
+// directory PATHS, never Data.db bytes (#4598).
+#[allow(clippy::manual_find)]
 fn existing_anchor(root: &Path) -> Option<PathBuf> {
-    // A plain loop rather than an iterator search, so the R2.3 no-resync-scan guard stays exact:
-    // this walks directory PATHS, never Data.db bytes.
     for anc in root.ancestors().skip(1).map(normalize_dir) {
         if anc.exists() {
             return Some(anc);
