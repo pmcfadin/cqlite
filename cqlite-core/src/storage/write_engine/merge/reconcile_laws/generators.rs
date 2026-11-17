@@ -125,8 +125,6 @@ pub(super) fn merger(expire: bool) -> KWayMerger {
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
         _egress_slot: None,
-        // The laws model compaction-time reconciliation (#4548).
-        purpose: crate::storage::write_engine::merge::MergePurpose::Compaction,
     }
 }
 
