@@ -27,8 +27,11 @@ use cqlite_core::{platform::Platform, Config};
 /// Format-aware: a BTI (`da`) generation has no `Index.db` / `Summary.db`, and a BIG (`nb`) one has
 /// no `Partitions.db` / `Rows.db` — a replacement for a component the format never reads is a
 /// stray file, not an unreadable input, so no audit row depends on it.
-fn dependent_rows(component: &str, bti: bool) -> &'static [&'static str] {
+fn dependent_rows(component: &str, bti: bool, deep: bool) -> &'static [&'static str] {
     match (component, bti) {
+        // Statistics.db feeds only the `--deep` row (roborev job 357); without `--deep` no row
+        // depends on it.
+        ("Statistics.db", _) if deep => &["statistics-vs-scan"],
         ("Index.db" | "Summary.db", true) | ("Partitions.db" | "Rows.db", false) => &[],
         _ => dependent_rows_any(component),
     }
@@ -44,7 +47,7 @@ fn dependent_rows_any(component: &str) -> &'static [&'static str] {
         "Digest.crc32" => &["digest-matches-data"],
         "TOC.txt" => &["toc-exact-listing"],
         "Partitions.db" | "Rows.db" => &["bti-trie-bounds"],
-        // Statistics.db feeds only the `--deep` row, and a missing one is a documented Skip.
+        // Statistics.db: handled by `dependent_rows` (deep only).
         _ => &[],
     }
 }
@@ -90,7 +93,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(!report.is_ok(), "a vacuous audit (0 invariants measured) must not read as OK");
     }
     if support::is_unreadable(input.component, input.bytes) {
-        for id in dependent_rows(input.component, input.high) {
+        for id in dependent_rows(input.component, input.high, deep) {
             // A format-applicable dependent row must be present: an omitted row would let
             // unrelated rows keep the audit non-vacuous and OK (false green, roborev job 355).
             let v = audit.verdict(id).unwrap_or_else(|| {
