@@ -23,7 +23,18 @@ use cqlite_core::{platform::Platform, Config};
 
 /// Audit rows whose verdict depends on a component, per invariant id. A row listed for a
 /// component MUST NOT `Pass` when that component is unreadable.
-fn dependent_rows(component: &str) -> &'static [&'static str] {
+///
+/// Format-aware: a BTI (`da`) generation has no `Index.db` / `Summary.db`, and a BIG (`nb`) one has
+/// no `Partitions.db` / `Rows.db` — a replacement for a component the format never reads is a
+/// stray file, not an unreadable input, so no audit row depends on it.
+fn dependent_rows(component: &str, bti: bool) -> &'static [&'static str] {
+    match (component, bti) {
+        ("Index.db" | "Summary.db", true) | ("Partitions.db" | "Rows.db", false) => &[],
+        _ => dependent_rows_any(component),
+    }
+}
+
+fn dependent_rows_any(component: &str) -> &'static [&'static str] {
     match component {
         "Data.db" => &["index-data-identity", "digest-matches-data", "compression-coverage"],
         "Index.db" => &["index-data-identity", "summary-index-correlation", "bloom-no-false-negative"],
@@ -79,7 +90,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(!report.is_ok(), "a vacuous audit (0 invariants measured) must not read as OK");
     }
     if support::is_unreadable(input.component, input.bytes) {
-        for id in dependent_rows(input.component) {
+        for id in dependent_rows(input.component, input.high) {
             if let Some(v) = audit.verdict(id) {
                 assert!(
                     *v != AuditVerdict::Pass,
