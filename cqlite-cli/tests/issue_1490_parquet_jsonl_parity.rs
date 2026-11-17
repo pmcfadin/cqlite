@@ -46,10 +46,10 @@
 //!
 //! ## `test_basic` (8 tables, `basic-types.cql`)
 //!
-//! * `simple_table` — INCLUDED (the full scalar zoo; carries the #3563 timeuuid type gap).
+//! * `simple_table` — INCLUDED (the full scalar zoo; the #3563 timeuuid type gap is fixed by #4237).
 //! * `composite_key_table` — INCLUDED (two-component clustering key).
 //! * `multi_partition_table` — undeclared: composite (2-component) partition key + timeuuid
-//!   clustering. High value; expect the #3563 timeuuid type gap on `item_id`.
+//!   clustering. High value; the #3563 timeuuid type gap on `item_id` is fixed by #4237.
 //! * `compression_test_table` — redundant: text/blob only, a subset of `simple_table`'s scalars.
 //! * `uncompressed_table` — redundant: text/int/timestamp subset; the uncompressed read path is
 //!   covered by `test_comp.uncompressed_table`.
@@ -93,7 +93,7 @@
 //! * `wide_partition_table` — undeclared: FIVE clustering components (mixed ASC/DESC).
 //!   HIGH value; nothing else covers a clustering key that wide.
 //! * `many_columns_table` — undeclared: 100 columns spanning every scalar plus five
-//!   collections. Highest single-table value in the corpus; expect the #3563 timeuuid gap.
+//!   collections. Highest single-table value in the corpus; the #3563 timeuuid gap is fixed by #4237.
 //! * `product_catalog` — undeclared: `map<text,float>`, `map<text,double>`,
 //!   `map<text,frozen<set<text>>>`, decimal.
 //! * `chat_messages` — undeclared: `map<text,frozen<set<uuid>>>` + timeuuid clustering.
