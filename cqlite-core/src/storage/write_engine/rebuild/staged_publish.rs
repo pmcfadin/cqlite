@@ -120,10 +120,7 @@ impl StagedPublish {
     pub fn begin(root: &Path, tag: &str) -> Result<Self> {
         let created_root = !root.exists();
         let anchor = if created_root {
-            root.ancestors()
-                .skip(1)
-                .find(|a| a.exists())
-                .map(Path::to_path_buf)
+            existing_anchor(root)
         } else {
             None
         };
@@ -198,12 +195,9 @@ impl StagedPublish {
         for (_, rel) in &staged {
             if let Some(parent) = self.root.join(rel).parent() {
                 std::fs::create_dir_all(parent)?;
-                for anc in parent.ancestors() {
-                    if !anc.starts_with(floor) {
-                        break;
-                    }
-                    if !sync_dirs.iter().any(|d| d == anc) {
-                        sync_dirs.push(anc.to_path_buf());
+                for anc in dir_chain(parent, floor) {
+                    if !sync_dirs.contains(&anc) {
+                        sync_dirs.push(anc);
                     }
                 }
             }
@@ -212,6 +206,14 @@ impl StagedPublish {
         let split = data_start.unwrap_or(staged.len());
         // From here a failure may leave final-named files: keep the stage as the leftover marker.
         self.publication_started = true;
+        // The stage marker must be durable BEFORE any final name can be: fsync the stage directory
+        // (its staged subtree entries), then its parent (the stage's own entry), then every newly
+        // created ancestor up to the anchor. Otherwise a power loss could persist destination
+        // renames while the `.cqlite-publish-*.tmp` entry is lost, leaving an unidentifiable
+        // final-named partial set (#4529, AC2).
+        let mut stage_durable = vec![self.stage.clone()];
+        stage_durable.extend(dir_chain(&self.root, floor));
+        sync_all_dirs(&stage_durable, obs)?;
         for (renamed, (file, rel)) in staged.iter().enumerate() {
             if renamed == split {
                 // Barrier: every non-Data.db rename is durable before Data.db can appear.
@@ -273,6 +275,39 @@ fn test_abort_before_rename(renamed: usize) {
 }
 #[cfg(not(debug_assertions))]
 fn test_abort_before_rename(_renamed: usize) {}
+
+/// `p`, or `.` when `p` is the empty path (the parent of a single-component relative path such as
+/// `out`): the empty path names no directory, so it can be neither tested for existence nor fsynced.
+fn normalize_dir(p: &Path) -> PathBuf {
+    if p.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// The nearest ancestor of `root` that exists (the top of the chain `begin` creates), with an empty
+/// parent normalised to `.`.
+fn existing_anchor(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .skip(1)
+        .map(normalize_dir)
+        .find(|a| a.exists())
+}
+
+/// `dir` and each of its ancestors up to and including `floor` (an empty ancestor is `.`).
+fn dir_chain(dir: &Path, floor: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for anc in dir.ancestors() {
+        let anc = normalize_dir(anc);
+        let at_floor = anc == floor;
+        out.push(anc);
+        if at_floor {
+            break;
+        }
+    }
+    out
+}
 
 fn rank(rel: &Path) -> u8 {
     let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -477,6 +512,54 @@ mod tests {
     }
 
     #[test]
+    fn stage_and_created_chain_are_fsynced_before_the_first_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("a").join("out"); // `a` and `out` are both newly created
+        let mut sp = StagedPublish::begin(&root, "1").unwrap();
+        stage_set(sp.dir(), "nb-1-big", &["Data.db", "Index.db", "TOC.txt"]);
+        let stage = sp.dir().to_path_buf();
+        let (r, ops) = observe(&mut sp);
+        r.unwrap();
+        let first = ops.iter().position(|o| matches!(o, Op::Rename(_))).unwrap();
+        let pos = |d: &Path| ops.iter().position(|o| *o == Op::SyncDir(d.to_path_buf()));
+        let a = tmp.path().join("a");
+        for d in [&stage, &root, &a, &tmp.path().to_path_buf()] {
+            assert!(
+                pos(d).is_some_and(|i| i < first),
+                "{} not fsynced before the first rename: {ops:?}",
+                d.display()
+            );
+        }
+        // Stage first, then its parent (the stage's own entry), then the chain above it.
+        assert!(pos(&stage) < pos(&root) && pos(&root) < pos(&a));
+    }
+
+    #[test]
+    fn single_component_relative_out_anchors_at_dot_and_is_fsynced() {
+        // Pure helpers: no process-cwd change. `out` has the empty path as its parent.
+        let out = Path::new("out");
+        assert_eq!(existing_anchor(out), Some(PathBuf::from(".")));
+        assert_eq!(
+            existing_anchor(Path::new("./out")),
+            Some(PathBuf::from("."))
+        );
+        let floor = Path::new(".");
+        assert_eq!(
+            dir_chain(Path::new("out/ks/t"), floor),
+            vec![
+                PathBuf::from("out/ks/t"),
+                PathBuf::from("out/ks"),
+                PathBuf::from("out"),
+                PathBuf::from("."),
+            ]
+        );
+        assert_eq!(
+            dir_chain(out, floor),
+            vec![PathBuf::from("out"), floor.to_path_buf()]
+        );
+    }
+
+    #[test]
     fn collision_is_found_before_any_rename_and_leaves_out_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let table = tmp.path().join("ks/t");
@@ -563,7 +646,9 @@ mod tests {
 
     #[test]
     fn failure_on_the_pre_data_db_directory_fsync_retains_the_stage() {
-        failed_mid_window(|o| matches!(o, Op::SyncDir(_)), 1);
+        // First fsync of the destination table directory = the pre-Data.db barrier (the earlier
+        // stage/chain fsyncs precede the first rename).
+        failed_mid_window(|o| matches!(o, Op::SyncDir(p) if p.ends_with("ks/t")), 1);
     }
 
     #[test]

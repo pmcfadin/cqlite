@@ -34,7 +34,14 @@ stage is removed, so `--out` (and the existing file) is left exactly as found. A
 would already have moved earlier files.
 
 **Directory fsync barrier.** Rename order alone is not durability order: under power loss a
-filesystem may persist the `Data.db` rename before the others. `publish` therefore: (1) creates the
+filesystem may persist the `Data.db` rename before the others. `publish` therefore: (0) makes the
+stage marker durable BEFORE any final name can be: fsyncs the stage directory, then its parent (the
+stage's own entry), then every ancestor `begin` newly created up to the nearest pre-existing anchor
+(a single-component relative `--out` such as `out` has the empty path as parent, normalised to `.`,
+so `.` is the anchor and is fsynced) — otherwise a power loss could persist destination renames
+while the `.cqlite-publish-*.tmp` entry is lost, leaving an unidentifiable final-named partial set
+(AC2), pinned by an operation-order test (stage, parent and chain `SyncDir` precede the first
+`Rename`) and a pure-helper test of the anchor; (1) creates the
 destination directories; (2) renames every component except `Data.db` (`TOC.txt` last of those);
 (3) fsyncs each destination directory, each intermediate directory up to the sync floor (e.g.
 `out/ks`), and, when this run created `--out`, the chain up to its nearest pre-existing ancestor, so
