@@ -472,62 +472,6 @@ fn verify_clean(dir: &Path, f: &Fixture) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether an uninterrupted run is expected to contain a `rename` boundary (the atomic-publication
-/// step): `true` since #4529 publishes by rename.
-const EXPECT_RENAME: bool = true;
-
-/// The enumerated boundaries must contain every syscall CATEGORY an SSTable write verb performs,
-/// per output file, so a shim that stopped seeing (say) `copy_file_range` or vectored writes
-/// cannot shrink the matrix unnoticed behind a "enough boundaries" count:
-/// every output component file needs a `create` and, when non-empty, at least one `write`/`pwrite`/`copy`, the
-/// manifest needs the same, and the run needs >= 1 `mkdir`, >= 1 `fsync` (and a `rename` when
-/// [`EXPECT_RENAME`]).
-fn assert_expected_categories(
-    verb: Verb,
-    bounds: &[(String, String)],
-    reference: &BTreeMap<PathBuf, Vec<u8>>,
-) {
-    // A component is created and written in the `.cqlite-publish-*.tmp` stage and renamed into
-    // place (#4529), so its create/write boundaries sit on the staged path with the same
-    // basename; the manifest is still written directly.
-    let has = |kinds: &[&str], path: &str| {
-        let base = path.rsplit('/').next().unwrap_or(path);
-        bounds.iter().any(|(k, p)| {
-            kinds.contains(&k.as_str())
-                && (p == path
-                    || (path.starts_with("out/")
-                        && p.contains("/.cqlite-publish-")
-                        && (p.ends_with(&format!(".tmp/{base}"))
-                            || path
-                                .strip_prefix("out/")
-                                .is_some_and(|rel| p.ends_with(&format!(".tmp/{rel}"))))))
-        })
-    };
-    let mut files: Vec<(String, bool)> = reference
-        .iter()
-        .map(|(rel, bytes)| (format!("out/{}", rel.display()), !bytes.is_empty()))
-        .collect();
-    files.push(("manifest.json".to_string(), true));
-    for (f, non_empty) in &files {
-        assert!(
-            has(&["create"], f),
-            "{verb:?}: no `create` boundary enumerated for {f} — shim blind to file creation?"
-        );
-        // A legitimately EMPTY output (e.g. an empty BTI Rows.db) has a create and no write.
-        assert!(
-            !non_empty || has(&["write", "pwrite", "copy"], f),
-            "{verb:?}: no write-class boundary (write/pwrite/copy) enumerated for {f} — shim blind \
-             to the call this writer uses?"
-        );
-    }
-    let any = |kind: &str| bounds.iter().any(|(k, _)| k == kind);
-    assert!(any("mkdir"), "{verb:?}: no `mkdir` boundary enumerated");
-    assert!(any("fsync"), "{verb:?}: no `fsync` boundary enumerated");
-    if EXPECT_RENAME {
-        assert!(any("rename"), "{verb:?}: no `rename` boundary enumerated");
-    }
-}
-
 /// Which slice of the boundary x mode matrix a sweep exercises.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -664,7 +608,7 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
         "two uninterrupted runs must produce the same manifest (after normalising only <now> and \
          the temp dirs)"
     );
-    assert_expected_categories(verb, &bounds, &reference);
+    strict_publish::assert_expected_categories(verb, &bounds, &reference);
 
     let mut failures = Vec::new();
     let mut runs = 0usize;
@@ -739,7 +683,14 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
                 // final-named partial set lacks `Data.db` (`SSTableReaderLoadingBuilder.java:74`
                 // at cassandra-5.0.8). (2) AC2: every other leftover is identifiable as a
                 // `.cqlite-publish-*.tmp` stage, and a re-run into it refuses naming the cause.
-                strict_publish_contract(&tag, &a, &reference, &mut failures, verb, f);
+                strict_publish::strict_publish_contract(
+                    &tag,
+                    &a,
+                    &reference,
+                    &mut failures,
+                    verb,
+                    f,
+                );
                 continue;
             }
             // The --manifest after a fault: absent, or a COMPLETE valid JSON document equal (after
@@ -750,12 +701,11 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             }
             // AC2 (CQLite publication contract)
             let after = output_set(&a);
-            // A TOC is "published" only outside a `.cqlite-publish-*.tmp` stage, and (owner ruling
-            // 2026-11-16, #4529) the barrier is the final-named `Data.db`, renamed LAST: a final
-            // TOC without it is a partial set Cassandra refuses to load, not a published one.
+            // "Published" = outside a stage AND a final `Data.db` (renamed LAST; owner ruling
+            // 2026-11-16, #4529): a final TOC without it is a partial set Cassandra refuses.
             for toc in tocs(&after) {
                 let gen = toc.parent().unwrap_or(Path::new(""));
-                if is_stage_path(&toc)
+                if strict_publish::is_stage_path(&toc)
                     || !after.keys().any(|p| {
                         p.parent() == Some(gen)
                             && p.file_name()
@@ -833,63 +783,6 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
         }
     }
     (bounds.len(), runs, failures)
-}
-
-/// Whether a path (relative to `out/`) lies inside a `.cqlite-publish-*.tmp` staging directory.
-fn is_stage_path(p: &Path) -> bool {
-    p.components().any(|c| {
-        c.as_os_str()
-            .to_str()
-            .is_some_and(|n| n.starts_with(".cqlite-publish-") && n.ends_with(".tmp"))
-    })
-}
-
-/// `#4529` contract for one crashed run (see the `Scope::CassandraStrict` call site).
-fn strict_publish_contract(
-    tag: &str,
-    a: &Area<'_>,
-    reference: &BTreeMap<PathBuf, Vec<u8>>,
-    failures: &mut Vec<String>,
-    verb: Verb,
-    f: &Fixture,
-) {
-    let is_stage = |p: &Path| is_stage_path(p);
-    let after = output_set(a);
-    let finals: BTreeMap<_, _> = after.iter().filter(|(p, _)| !is_stage(p)).collect();
-    let want: BTreeMap<_, _> = reference.iter().collect();
-    let complete = finals == want;
-    if !complete
-        && finals.keys().any(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with("-Data.db"))
-        })
-    {
-        failures.push(format!(
-            "{tag}: a final-named Data.db exists in a partial set ({} final file(s)) -> Cassandra loads it",
-            finals.len()
-        ));
-    }
-    let unnamed: Vec<_> = finals
-        .keys()
-        .filter(|p| !reference.contains_key(**p))
-        .collect();
-    if !unnamed.is_empty() {
-        failures.push(format!("{tag}: unidentifiable leftover(s) outside a `.cqlite-publish-*.tmp` stage: {unnamed:?}"));
-    }
-    if !complete && !out_is_genuinely_empty(a) {
-        let again = run_verb(verb, f, a, Some((shim(), None)));
-        let text = again.text();
-        if again.code() == Some(0)
-            || !(text.contains("not empty") || text.contains(".cqlite-publish-"))
-        {
-            failures.push(format!(
-                "{tag}: re-run into the leftovers must refuse naming the cause; got code={:?}: {}",
-                again.code(),
-                text.lines().last().unwrap_or("")
-            ));
-        }
-    }
 }
 
 fn report(verb: Verb, f: &Fixture, n: usize, runs: usize, failures: &[String]) {
@@ -1132,6 +1025,8 @@ fn every_imported_io_symbol_is_interposed_by_the_shim() {
 
 #[path = "issue_4498_crash_consistency/stdio_and_linkat.rs"]
 mod stdio_and_linkat;
+#[path = "issue_4498_crash_consistency/strict_publish.rs"]
+mod strict_publish;
 // ---- `syscall(2)` interposer: raw-ABI decode and the blind-spot abort --------------------
 
 /// Compile `src` (a one-file C program) and run it under the shim with the fault root `root`.
