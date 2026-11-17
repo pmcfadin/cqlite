@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed `fuzz/corpus/fuzz_audit` and `fuzz/corpus/fuzz_find` from the corruption corpus
+"""Seed `fuzz/corpus/fuzz_audit` (and `fuzz_find` once #4205/#4535 lands) from the corruption corpus
 (issue #4502, criterion 2).
 
 Input layout (see `fuzz_targets/support/mod.rs`): byte 0 = control (bit7 high/mode, bit6 flag,
@@ -11,8 +11,8 @@ bits0-3 component index), bytes 1.. = the replacement component. Seeds, per BASE
   * the clean components themselves (the fuzzer mutates from valid structure), and each
     component truncated to 0, 1 and 3 bytes and to half its length (the unreadable shapes the
     property asserts on);
-  * for `fuzz_find` CommitLog mode: the committed `commitlog_find` segment (clean), its
-    truncations, and the `commitlog/` corruption corpus segments (corrupt-crc, truncated).
+  * for `fuzz_find` CommitLog mode (only when a find target exists): the `commitlog_find` segment
+    and the `commitlog/` corruption corpus segments.
 
 Seeds are small (largest component ~28 KB). Re-run with CQLITE_DATASETS_ROOT set; the output is
 committed. Deterministic: names are `seed_<control byte>_<content hash>`.
@@ -89,7 +89,10 @@ corrupt = sorted(glob.glob(f"{ROOT}/corruption/test_comp_corrupt/*/"))
 big_corrupt = [d for d in corrupt if glob.glob(d + "nb-*-big-Data.db")]
 bti_corrupt = [d for d in corrupt if glob.glob(d + "da-*-bti-Data.db")]
 total = {}
-for tool in ("fuzz_audit", "fuzz_find"):
+TOOLS = ["fuzz_audit"]
+if os.path.exists(os.path.join(REPO, "fuzz", "fuzz_targets", "fuzz_find.rs")):
+    TOOLS.append("fuzz_find")
+for tool in TOOLS:
     corpus = os.path.join(REPO, "fuzz", "corpus", tool)
     os.makedirs(corpus, exist_ok=True)
     n = 0

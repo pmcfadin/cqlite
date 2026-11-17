@@ -1047,14 +1047,13 @@ Policy (nightly-only, out of the stable gate, workspace-excluded) is in `CLAUDE.
   Or all targets: `fuzz/smoke.sh`. `fuzz_block_emit` fully exercises the
   block-emit path only when `CQLITE_DATASETS_ROOT` points at the test datasets
   (a real `test_basic/simple_table` fixture); otherwise it no-ops.
-- Toolbox-verb targets (issue #4502): `fuzz_audit` (`verify --mode audit`, #4195) and `fuzz_find`
-  (`find`'s per-generation probe and CommitLog scan, #4205) fuzz a whole generation DIRECTORY. Each
+- Toolbox-verb targets (issue #4502): `fuzz_audit` (`verify --mode audit`, #4195) fuzzes a whole generation DIRECTORY (`fuzz_find`, for
+  `cqlite find` #4205, follows once #4535 merges). Each
   exec copies a real Cassandra-written base generation (`CQLITE_DATASETS_ROOT`; a no-op without one),
   replaces ONE component with the fuzz bytes (control byte + payload, layout in
   `fuzz/fuzz_targets/support/mod.rs`) and drives the real entry point. Beyond never panic/hang/OOM
   they ASSERT the #4159 property on the tool's own result: a component that could not be read
-  (`< 4` bytes, empty `TOC.txt`) never lets a dependent audit row `Pass`, never reads as an
-  index/bloom miss in `find`, and a too-short CommitLog segment never scans as "nothing found".
+  (`< 4` bytes, empty `TOC.txt`) never lets a dependent audit row `Pass`.
   Seeds come from the corruption corpus: `CQLITE_DATASETS_ROOT=<root> python3 fuzz/seed_audit_find.py`
   (output committed under `fuzz/corpus/`). LeakSanitizer needs ptrace; where that is blocked add
   `-detect_leaks=0` locally (CI leaves it on).
