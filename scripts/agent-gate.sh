@@ -23109,6 +23109,13 @@ run_tooling_tests() {
   _tt_add P 'BTI perf-corpus generator guard' 'bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh"'
   _tt_add P 'generator driver-requirements guard #4482' 'bash "$REPO_ROOT/scripts/tests/test_cassandra_driver_requirements.sh"'
 
+  # Audit-corruption regeneration guard (#4583): hermetic (python3 only). Drives
+  # generate_audit_corruption_fixtures.py over committed clean sources whose bytes are then
+  # drifted like a live-Cassandra re-derivation: regeneration must exit 0 with ::notice::
+  # lines and rebound shas, --verify-only must stay fatal on the pinned sha, and a broken
+  # premise must still fail regeneration.
+  _tt_add P 'audit-corruption regen drift guard #4583' 'bash "$REPO_ROOT/scripts/tests/test_audit_corruption_regen_drift.sh"'
+
   # AC3 warm-scan harness guard (#3234): the automated executor for
   # cqlite-core/examples/bti_perf_scan/, the instrument every #3234 throughput
   # number comes from. Its guards had never been OBSERVED to fire, and its worst

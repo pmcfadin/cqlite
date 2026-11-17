@@ -11,11 +11,28 @@ mutation arithmetic below are committed.
 Every mutation is computed from the clean file's OWN structure (never from
 CQLite's verifier output), and asserts its structural premises before editing.
 
+Two modes, the same two as generate-corruption-corpus.sh (issue #1294 MODE 1 /
+MODE 2; issue #4583):
+
+  * VERIFY-ONLY (--verify-only; MODE 1): the clean sources are the committed,
+    byte-stable bundle. The on-disk fixture must equal the deterministic mutation
+    AND (when --pinned-manifest is given) the mutated sha256 must equal the pinned
+    `corrupted_sha256`. Any drift is FATAL.
+  * REGENERATION (default; MODE 2): clean sources were re-derived from a live
+    Cassandra and are NOT byte-deterministic (Statistics.db / BTI / Summary.db).
+    The documented byte edits are re-applied to the freshly derived clean source,
+    every premise is re-asserted (structural premise before the edit, structural
+    effect after it, every other component byte-identical to the new clean
+    source), and a drift of original_sha256 / corrupted_sha256 against the pinned
+    manifest is reported as a `::notice::` on stderr, not an error. The new shas
+    are rebound in the emitted manifest entries.
+
 Usage: generate_audit_corruption_fixtures.py --corrupt-dir D --root R [--root R ...]
-                                             [--verify-only]
-Exit 0 on success. YAML for the manifest goes to stdout; the report to stderr.
+                                             [--verify-only] [--pinned-manifest M]
+Exit 0 on success. YAML for the manifest goes to stdout; the report (and any
+`::notice::` lines) to stderr.
 """
-import argparse, hashlib, os, shutil, struct, sys, zlib
+import argparse, hashlib, os, re, shutil, struct, sys, zlib
 
 
 def sha(b):
@@ -120,7 +137,11 @@ def m_bti_data_offset_out_of_bounds(files):
     assert b[0] == 0x08 and b[3] == 0x08, "premise: two leading 1-byte-payload leaves"
     orig = b[5]
     assert orig >= 0x80, "premise: second leaf is a DataOffset leaf"
-    b[5] = 0x80  # -128 => DataOffset(127), past this table's 93-byte logical Data.db
+    # -128 => DataOffset(127). Premise (re-asserted on every regeneration): 127 is
+    # past the END of this table's Data.db, else the leaf would still be in bounds.
+    if "Data.db" in files:
+        assert 127 >= len(files["Data.db"]), "premise: DataOffset(127) is past Data.db (%d bytes)" % len(files["Data.db"])
+    b[5] = 0x80
     return "Partitions.db", bytes(b), {
         "mutation_type": "setbyte",
         "byte_offset": 5,
@@ -159,6 +180,18 @@ def m_compression_info_short_coverage(files):
         "mutated_bytes_hex": struct.pack(">q", dl + cl).hex(),
         "detail": "data_length %d -> %d (+ one chunk_length %d): %d declared chunks, ceil(data_length/chunk_length) = %d" % (dl, dl + cl, cl, cnt, cnt + 1),
     }
+
+
+def _ci_layout_any(b):
+    """(offsets_at, count, chunk_length) of a CompressionInfo.db, with no size premise."""
+    i = 0
+    n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
+    o = struct.unpack(">I", b[i:i + 4])[0]; i += 4
+    for _ in range(o):
+        n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
+        n = struct.unpack(">H", b[i:i + 2])[0]; i += 2 + n
+    cl, mx, dl, cnt = struct.unpack(">IIqI", b[i:i + 20])
+    return i + 20, cnt, cl
 
 
 def _ci_layout(b):
@@ -243,7 +276,7 @@ FIXTURES = [
      ["Filter.db"], m_filter_db_bit_flip_bti, "FilterFalseNegative", "bloom-no-false-negative",
      "BTI analogue of filter_db_bit_flip: one bit-array bit cleared 1->0 so a present partition key hashes to an unset bit."),
     ("bti_data_offset_out_of_bounds", "cass.corruption.audit.bti_data_offset_out_of_bounds", "test_da", "ttl_table", "da-2-bti",
-     ["Partitions.db"], m_bti_data_offset_out_of_bounds, "BtiDataOffsetOutOfBounds", "bti-trie-bounds",
+     ["Partitions.db", "Data.db"], m_bti_data_offset_out_of_bounds, "BtiDataOffsetOutOfBounds", "bti-trie-bounds",
      "A DataOffset leaf's payload is rewritten to a position past the end of Data.db."),
     ("compression_info_short_coverage", "cass.corruption.audit.compression_info_short_coverage", "test_comp", "lz4_table", "nb-1-big",
      ["CompressionInfo.db"], m_compression_info_short_coverage, "CompressionCoverageGap", "compression-coverage",
@@ -258,6 +291,88 @@ FIXTURES = [
      ["CompressionInfo.db"], m_compression_info_first_offset_nonzero, "CompressionCoverageGap", "compression-coverage",
      "The first chunk offset is 1 instead of 0: still ascending and in bounds, but the table no longer starts at the beginning of Data.db."),
 ]
+
+
+def check_effect(name, files, comp, mutated):
+    """Post-edit structural premise: the edit still produces the invariant violation.
+
+    Computed from the file's own structure (never from CQLite's verifier). The
+    end-to-end 'the verifier flags it' proof stays in the cqlite-core audit tests;
+    this keeps a regeneration from silently emitting a fixture that no longer
+    violates (or that violates more than) its one invariant.
+    """
+    clean = files[comp]
+    assert len(mutated) == len(clean), "edit must not change the component size"
+    assert mutated != clean, "edit must change the component"
+    if name == "index_entry_offset_swap":
+        # still structurally parseable, same entry count, same keys
+        a, b = index_entries(clean), index_entries(mutated)
+        assert len(a) == len(b), "Index.db entry count changed"
+    elif name == "compression_info_short_coverage":
+        cl, dl, cnt = _ci_geometry(mutated)
+        assert cnt == -(-dl // cl) - 1, "declared chunks must be ceil(data_length/chunk_length) - 1"
+    elif name == "compression_info_offsets_non_monotonic":
+        at, cnt, cl = _ci_layout(mutated)
+        offs = struct.unpack(">%dq" % cnt, mutated[at:at + 8 * cnt])
+        assert offs[2] > offs[3], "an earlier chunk offset must now exceed its successor"
+    elif name == "compression_info_first_offset_nonzero":
+        at, cnt, cl = _ci_layout(mutated)
+        offs = struct.unpack(">%dq" % cnt, mutated[at:at + 8 * cnt])
+        assert offs[0] != 0 and all(x < y for x, y in zip(offs, offs[1:])), "first offset non-zero but table still strictly ascending"
+    elif name == "statistics_partition_count_mismatch":
+        n = struct.unpack(">i", mutated[:4])[0]
+        toc = [struct.unpack(">ii", mutated[8 + 8 * k:16 + 8 * k]) for k in range(n)]
+        starts = [t[1] for t in toc] + [len(mutated)]
+        k = [t[0] for t in toc].index(2)
+        s0, e0 = starts[k], starts[k + 1] - 4
+        assert zlib.crc32(mutated[s0:e0]) == struct.unpack(">I", mutated[e0:e0 + 4])[0], "STATS CRC must stay valid"
+
+
+def _ci_geometry(b):
+    at, cnt, cl = _ci_layout_any(b)
+    dl = struct.unpack(">q", b[at - 20 + 8:at - 20 + 16])[0]
+    return cl, dl, cnt
+
+
+def load_pinned(path):
+    """{fixture name: {field: sha}} from a committed corruption-manifest.yml (regex, no PyYAML).
+
+    Fails closed (#4583 review): an unreadable file is fatal; a malformed pin (present but not
+    64 lowercase hex) is fatal here. A fixture with no entry, or a missing field, is reported by
+    require_pin() once the generator knows which fixtures it emits."""
+    try:
+        txt = open(path).read()
+    except (OSError, UnicodeDecodeError) as e:
+        sys.exit("--pinned-manifest %s is unreadable: %s" % (path, e))
+    pinned = {}
+    for blk in re.split(r"\n  - name: ", txt)[1:]:
+        nm = blk.splitlines()[0].strip()
+        d = {}
+        for k in PIN_FIELDS:
+            m = re.search(r"^    %s:[ \t]*(.*?)\s*$" % k, blk, re.M)
+            if not m:
+                continue
+            v = m.group(1).strip("\"'")
+            if not re.fullmatch(r"[0-9a-f]{64}", v):
+                sys.exit("--pinned-manifest %s: %s.%s is malformed (want 64 hex characters, got %r)" % (path, nm, k, m.group(1)))
+            d[k] = v
+        pinned[nm] = d
+    if not pinned:
+        sys.exit("--pinned-manifest %s: no manifest entries found (unparsable or empty)" % path)
+    return pinned
+
+
+PIN_FIELDS = ("original_sha256", "corrupted_sha256")
+
+
+def require_pin(pinned, name):
+    """Every emitted fixture must be pinned with both shas when a pinned manifest was supplied."""
+    if name not in pinned:
+        sys.exit("%s: no entry in the pinned manifest (--pinned-manifest supplied, pins must cover every emitted fixture)" % name)
+    for k in PIN_FIELDS:
+        if k not in pinned[name]:
+            sys.exit("%s: pinned manifest entry is missing %s" % (name, k))
+    return pinned[name]
 
 
 def fixture_dir_sha256(d):
@@ -291,12 +406,32 @@ def rel_clean(p):
     return p
 
 
+def report_drift(verify_only, name, pin, clean_sha, corrupted_sha):
+    """MODE 1 (verify-only): a pinned sha that moved is FATAL. MODE 2 (regeneration): a notice."""
+    for field, now in (("original_sha256", clean_sha), ("corrupted_sha256", corrupted_sha)):
+        was = pin.get(field)
+        if was is None or was == now:
+            continue
+        if verify_only:
+            sys.exit("%s: %s drifted from its pinned value (%s -> %s) on a byte-stable source (--verify-only)" % (name, field, was, now))
+        sys.stderr.write(
+            "::notice::%s: %s drifted on regeneration (%s -> %s) - clean source re-derived from live "
+            "cassandra and is not byte-deterministic. The documented edit was re-applied, every premise "
+            "re-asserted and every other component is byte-identical to the new clean source; the new "
+            "sha is rebound in the emitted manifest entry.\n" % (name, field, was, now))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--corrupt-dir", required=True)
     ap.add_argument("--root", action="append", required=True)
     ap.add_argument("--verify-only", action="store_true")
+    ap.add_argument("--pinned-manifest", default=None,
+                    help="committed corruption-manifest.yml whose audit entries pin original/corrupted sha256")
     a = ap.parse_args()
+    if a.verify_only and not a.pinned_manifest:
+        ap.error("--verify-only requires --pinned-manifest (without pins the sha check would be vacuous)")
+    pinned = load_pinned(a.pinned_manifest) if a.pinned_manifest else None
     for (name, key, ks, table, prefix, comps, mut, errc, inv, why) in FIXTURES:
         src = find_source(a.root, ks, table)
         if src is None:
@@ -304,9 +439,11 @@ def main():
         files = {}
         for c in comps:
             files[c] = open(os.path.join(src, "%s-%s" % (prefix, c)), "rb").read()
-        if name == "bti_data_offset_out_of_bounds":
-            files = {"Partitions.db": files["Partitions.db"]}
-        comp, mutated, info = mut(files)
+        try:
+            comp, mutated, info = mut(files)
+            check_effect(name, files, comp, mutated)
+        except AssertionError as e:
+            sys.exit("%s: premise failed on clean source %s: %s" % (name, src, e))
         dest = os.path.join(a.corrupt_dir, name)
         target = os.path.join(dest, "%s-%s" % (prefix, comp))
         if a.verify_only:
@@ -325,6 +462,8 @@ def main():
                 continue
             if open(os.path.join(dest, f), "rb").read() != open(os.path.join(src, f), "rb").read():
                 sys.exit("%s: component %s changed besides %s" % (name, f, comp))
+        pin = require_pin(pinned, name) if pinned is not None else {}
+        report_drift(a.verify_only, name, pin, sha(clean), sha(mutated))
         print("  - name: %s" % name)
         print("    manifest_key: %s" % key)
         print("    status: audit")
