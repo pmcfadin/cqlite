@@ -38,6 +38,8 @@ use std::error::Error as StdError;
 
 #[path = "support/parquet_decimal_scale_tests.rs"]
 mod parquet_decimal_scale_tests;
+#[path = "support/parquet_uuid_schema_tests.rs"]
+mod parquet_uuid_schema_tests;
 
 // ============================================================================
 // Helper Functions
@@ -2035,32 +2037,6 @@ fn test_set_int_roundtrip() {
 // ----------------------------------------
 
 #[test]
-fn test_set_uuid_schema_is_list_fixedsizebinary16() {
-    use arrow::datatypes::DataType as ArrowDataType;
-
-    let col = set_col_with_cql_type(
-        "uuids",
-        cqlite_core::schema::CqlType::Set(Box::new(cqlite_core::schema::CqlType::Uuid)),
-    );
-    let uuid1 = [0x01u8; 16];
-    let result = single_cql_typed_result(col, Value::Set(vec![Value::Uuid(uuid1)]));
-
-    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
-    let batch = read_parquet_back(&bytes).unwrap();
-
-    let schema = batch.schema();
-    let field = schema.field(0);
-    assert_eq!(
-        field.data_type(),
-        &ArrowDataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
-            "item",
-            ArrowDataType::FixedSizeBinary(16),
-            true
-        )))
-    );
-}
-
-#[test]
 fn test_set_uuid_roundtrip() {
     let col = set_col_with_cql_type(
         "uuids",
@@ -2732,50 +2708,6 @@ fn test_map_int_text_roundtrip() {
 // ----------------------------------------
 // map<uuid,timestamp>
 // ----------------------------------------
-
-#[test]
-fn test_map_uuid_timestamp_schema() {
-    use arrow::datatypes::{DataType as ArrowDataType, Fields, TimeUnit};
-    use std::sync::Arc;
-
-    let col = map_col_with_cql_type(
-        "events",
-        cqlite_core::schema::CqlType::Map(
-            Box::new(cqlite_core::schema::CqlType::Uuid),
-            Box::new(cqlite_core::schema::CqlType::Timestamp),
-        ),
-    );
-    let result = single_cql_typed_result(
-        col,
-        Value::Map(vec![(
-            Value::Uuid([0xABu8; 16]),
-            Value::Timestamp(1_000_000_000),
-        )]),
-    );
-
-    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
-    let batch = read_parquet_back(&bytes).unwrap();
-
-    let schema = batch.schema();
-    let field = schema.field(0);
-
-    let expected_entries = Arc::new(arrow::datatypes::Field::new(
-        "entries",
-        ArrowDataType::Struct(Fields::from(vec![
-            arrow::datatypes::Field::new("key", ArrowDataType::FixedSizeBinary(16), false),
-            arrow::datatypes::Field::new(
-                "value",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-                true,
-            ),
-        ])),
-        false,
-    ));
-    assert_eq!(
-        field.data_type(),
-        &ArrowDataType::Map(expected_entries, false)
-    );
-}
 
 #[test]
 fn test_map_uuid_timestamp_roundtrip() {

@@ -101,9 +101,14 @@ pub enum ArrowConvertError {
     ///
     /// The two in-crate error-conversion boundaries (`ParquetExportError`,
     /// `DeltaParquetError`) carry it as their `InvalidValue` **through `Display`**,
-    /// so the prefix above survives the hop. Neither writer supplies its own
-    /// schema today, so neither can raise it; they map it rather than drop it so a
-    /// future caller that does gets the reason instead of a bare Arrow error.
+    /// so the prefix above survives the hop. (Stale as of issue #4237: both the
+    /// streaming Parquet writer and the Vortex writer now DO supply their own
+    /// pre-built schema via `rows_to_record_batch_with_schema` — design.md D1's
+    /// shared-producer requirement — so this variant CAN fire on the writer path
+    /// too, though never in practice, since each writer's schema is
+    /// `build_arrow_schema` of its own `columns` by construction; they map it
+    /// rather than drop it so any future caller whose precondition genuinely
+    /// breaks gets the reason instead of a bare Arrow error.)
     #[error("Arrow schema does not match the column set: {0}")]
     SchemaMismatch(String),
 }
@@ -281,9 +286,38 @@ pub fn rows_to_record_batch_with_schema(
     columns: &[ColumnInfo],
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
-    check_schema_matches_columns(&schema, columns)?;
+    rows_to_record_batch_with_schema_attributed(schema, columns, rows).map_err(|(_, e)| e)
+}
+
+/// [`rows_to_record_batch_with_schema`] that also reports WHICH column a per-column conversion
+/// failure belongs to (`Some(name)`), so a writer can name it (#4237 R4.1: the Vortex export
+/// error carries the offending column). Failures that are not attributable to one column — the
+/// schema check, `RecordBatch::try_new` — carry `None`. The shared producer is unchanged: the
+/// plain entry point above is this one with the attribution dropped.
+pub(crate) fn rows_to_record_batch_with_schema_attributed(
+    schema: Arc<Schema>,
+    columns: &[ColumnInfo],
+    rows: &[QueryRow],
+) -> Result<RecordBatch, (Option<String>, ArrowConvertError)> {
+    #[cfg(test)]
+    PRODUCER_CALLS.with(|c| c.set(c.get() + 1));
+    check_schema_matches_columns(&schema, columns).map_err(|e| (None, e))?;
     // The precondition is now PROVEN, not assumed, so the shared tail may trust it.
-    rows_to_record_batch_trusted_schema(schema, columns, rows)
+    let columnar = super::arrow_columnar::transpose_columns(columns, rows);
+    let arrays = columns
+        .iter()
+        .zip(columnar.iter())
+        .map(|(col, cells)| {
+            convert_column_to_array(col, cells).map_err(|e| (Some(col.name.to_string()), e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    RecordBatch::try_new(schema, arrays).map_err(|e| (None, e.into()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook (#4237 R1.1): how many times THIS thread called the shared producer.
+    pub(crate) static PRODUCER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Reject a caller-supplied `schema` that is not [`build_arrow_schema`]'s output

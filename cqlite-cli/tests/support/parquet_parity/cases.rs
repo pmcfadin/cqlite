@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 use super::failure::Stage;
-use super::{ExpectedFailure, KnownGap, KnownTypeGap, ParityCase, SchemaCheck};
+use super::{ExpectedFailure, KnownGap, ParityCase, SchemaCheck};
 
 pub const DA_SIMPLE: ParityCase = ParityCase {
     keyspace: "test_da",
@@ -238,21 +238,10 @@ pub const BASIC_SIMPLE: ParityCase = ParityCase {
     must_run: false,
     covers: "the full scalar zoo: float/double/decimal/date/time/blob/inet/duration/timeuuid",
     known_gap: None,
-    // FOUND BY THIS CHECK on its first run: `session_id timeuuid` is exported as
-    // `Utf8` while `id uuid` — the identical 128-bit domain — is exported as
-    // `FixedSizeBinary(16)`. The VALUES compare equal (both sides render the
-    // UUID text), which is precisely why only a type assertion can see it.
-    //
-    // Recorded per COLUMN rather than as a whole-case `known_gap`: this table's
-    // other 18 columns and all 19,000 cell comparisons — session_id's included —
-    // still run.
-    known_type_gaps: &[KnownTypeGap {
-        column: "session_id",
-        issue: "#3563",
-        actual: "utf8",
-        what: "'timeuuid' never parses (the scalar `alt` matches `time` first), so the \
-               column's declared type is dropped and it degrades to Text",
-    }],
+    // #3563 (timeuuid exported as Utf8 because `timeuuid` never parsed) is fixed by #4237's
+    // parser change, so `session_id` now exports with its real uuid extension type and is
+    // asserted like every other column — no per-column type gap remains.
+    known_type_gaps: &[],
 };
 
 pub const BASIC_COMPOSITE_KEY: ParityCase = ParityCase {

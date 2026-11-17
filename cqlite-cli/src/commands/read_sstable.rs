@@ -140,6 +140,9 @@ pub async fn execute_read_sstable_command(
         OutputFormat::Parquet => {
             return Err(anyhow::anyhow!("Parquet format is not supported for this command. Use --out json or --out csv instead."));
         }
+        OutputFormat::Vortex => {
+            return Err(anyhow::anyhow!("Vortex format is not supported for this command. Use --out json or --out csv instead."));
+        }
     }
 
     if show_status {

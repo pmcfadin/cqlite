@@ -173,6 +173,15 @@ napi-build = "2.1"
 arrow = { version = "59", default-features = false }
 parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
 
+# Vortex export (issue #4237). Pinned EXACT: the on-disk format is stable from
+# 0.36, but the crate API is not — bump deliberately per release, one
+# workspace edit at a time, never a caret range (owner ruling 2026-09-18,
+# docs/plans/2026-09-18-vortex-export-arrow59-design.md). `default-features =
+# false` + explicit `files`/`zstd` keeps `wasm-bindgen` (irrelevant to every
+# native target this workspace builds) and `vortex-cloud`/`vortex-tensor`
+# (explicitly out of scope) out of the dependency tree.
+vortex = { version = "=0.86.1", default-features = false, features = ["files", "zstd", "tokio"] }
+
 # WASM (M6 placeholders — no workspace member references these yet. The
 # wasm-bindgen/js-sys/web-sys pins were dropped in #1698 with cqlite-core's `wasm`
 # feature, which pulled them and gated nothing; M6 re-adds them when the bindings

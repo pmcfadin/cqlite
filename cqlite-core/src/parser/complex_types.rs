@@ -1,5 +1,4 @@
 //! Complex Type Parsing for Cassandra Data Types
-//!
 //! This module provides comprehensive parsing support for all Cassandra data types
 //! including collections, UDTs, tuples, frozen types, and nested complex structures.
 //! It handles type inference, validation, and conversion between different representations.
@@ -337,6 +336,7 @@ impl ComplexTypeParser {
                 map(tag_no_case("float"), |_| CqlType::Float),
                 map(tag_no_case("double"), |_| CqlType::Double),
                 map(tag_no_case("decimal"), |_| CqlType::Decimal),
+                map(tag_no_case("varint"), |_| CqlType::Varint),
                 map(alt((tag_no_case("text"), tag_no_case("varchar"))), |_| {
                     CqlType::Text
                 }),
@@ -344,9 +344,9 @@ impl ComplexTypeParser {
                 map(tag_no_case("blob"), |_| CqlType::Blob),
                 map(tag_no_case("timestamp"), |_| CqlType::Timestamp),
                 map(tag_no_case("date"), |_| CqlType::Date),
+                map(tag_no_case("timeuuid"), |_| CqlType::TimeUuid), // BEFORE `time` (a prefix of it): #4237
                 map(tag_no_case("time"), |_| CqlType::Time),
                 map(tag_no_case("uuid"), |_| CqlType::Uuid),
-                map(tag_no_case("timeuuid"), |_| CqlType::TimeUuid),
                 map(tag_no_case("inet"), |_| CqlType::Inet),
                 map(tag_no_case("duration"), |_| CqlType::Duration),
             ))(input)
