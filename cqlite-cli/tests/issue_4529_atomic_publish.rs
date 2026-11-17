@@ -200,8 +200,14 @@ fn check(verb: Verb, f: &Fixture) {
                 1,
                 "n={n}: one recognisable staging dir"
             );
+            let before = snapshot(&out);
             let again = run(verb, f, &out, None);
             assert_eq!(again.status.code(), Some(1), "n={n}: re-run must refuse");
+            assert_eq!(
+                snapshot(&out),
+                before,
+                "n={n}: a refused re-run must not touch --out"
+            );
             let err = String::from_utf8_lossy(&again.stderr);
             assert!(
                 err.contains(".cqlite-publish-") && err.contains("interrupted run"),
@@ -226,6 +232,29 @@ fn salvage_big_publish_window_never_leaves_a_discoverable_partial_set() {
 #[test]
 fn salvage_bti_publish_window_never_leaves_a_discoverable_partial_set() {
     check(Verb::Salvage, &BTI);
+}
+
+/// Every file and directory under `root` (relative path -> content hash, `None` for a directory).
+/// A re-run that refuses a leftover must leave `--out` byte-for-byte as it found it.
+fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<u64>> {
+    use std::hash::{Hash, Hasher};
+    fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, Option<u64>>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            let rel = path.strip_prefix(base).unwrap().to_path_buf();
+            if e.file_type().unwrap().is_dir() {
+                out.insert(rel, None);
+                walk(base, &path, out);
+            } else {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::fs::read(&path).unwrap().hash(&mut h);
+                out.insert(rel, Some(h.finish()));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
 }
 
 /// A TABLE DIRECTORY with two generations: the Cassandra-written one plus a copy renamed to the
@@ -266,8 +295,14 @@ fn check_table_dir(f: &Fixture) {
         final_named(&out).iter().all(|n| !n.ends_with("-Data.db")),
         "no final-named Data.db before the first rename"
     );
+    let before = snapshot(&out);
     let again = run_on(Verb::Rebuild, f, &table, Some(&table), &out, None);
     assert_eq!(again.status.code(), Some(1), "re-run must refuse");
+    assert_eq!(
+        snapshot(&out),
+        before,
+        "a refused re-run must not touch --out"
+    );
     let err = String::from_utf8_lossy(&again.stderr);
     assert!(
         err.contains(".cqlite-publish-") && err.contains("interrupted run"),

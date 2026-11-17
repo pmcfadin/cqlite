@@ -86,6 +86,24 @@ pub struct StagedPublish {
     /// The stage was removed by a completed publish: `Drop` has nothing left to clean (and must
     /// not issue further, un-checked removals after the run's last checked step).
     published: bool,
+    /// The nearest ancestor of `root` that existed before [`begin`](StagedPublish::begin) created it
+    /// (`Some` only when `root` was created): the top of the directory chain that must be fsynced.
+    anchor: Option<PathBuf>,
+}
+
+/// A filesystem operation of the publish window, reported to a test observer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Op {
+    Rename(PathBuf),
+    SyncDir(PathBuf),
+}
+
+fn sync_all_dirs(dirs: &[PathBuf], obs: &mut dyn FnMut(&Op)) -> Result<()> {
+    for d in dirs {
+        obs(&Op::SyncDir(d.clone()));
+        fsync_dir(d)?;
+    }
+    Ok(())
 }
 
 impl StagedPublish {
@@ -94,6 +112,14 @@ impl StagedPublish {
     /// `root`: an interrupted earlier run left it.
     pub fn begin(root: &Path, tag: &str) -> Result<Self> {
         let created_root = !root.exists();
+        let anchor = if created_root {
+            root.ancestors()
+                .skip(1)
+                .find(|a| a.exists())
+                .map(Path::to_path_buf)
+        } else {
+            None
+        };
         std::fs::create_dir_all(root)?;
         if let Some(left) = find_leftover(root) {
             return Err(Error::InvalidInput(format!(
@@ -110,6 +136,7 @@ impl StagedPublish {
             stage,
             created_root,
             published: false,
+            anchor,
         })
     }
 
@@ -118,9 +145,17 @@ impl StagedPublish {
         &self.stage
     }
 
-    /// Fsync every staged file, rename each into the final tree under `root` (Data.db last, TOC.txt
-    /// second to last), fsync the destination directories, then remove the staging directory.
+    /// Fsync every staged file, refuse (before ANY rename) if a destination already exists, rename
+    /// everything except `Data.db` (TOC.txt last of those), fsync the destination directories (the
+    /// barrier), rename `Data.db`, fsync the directories again, then remove the staging directory.
+    ///
+    /// The barrier matters under power loss: without it a filesystem may persist the `Data.db` rename
+    /// before the others, leaving a final-named set that HAS `Data.db` but lacks components.
     pub fn publish(mut self) -> Result<()> {
+        self.publish_observed(&mut |_| {})
+    }
+
+    fn publish_observed(&mut self, obs: &mut dyn FnMut(&Op)) -> Result<()> {
         let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new(); // (staged file, relative path)
         collect_files(&self.stage, &self.stage, &mut staged)?;
         if staged.is_empty() {
@@ -131,6 +166,16 @@ impl StagedPublish {
         }
         // Publish order: everything else, then TOC.txt, then Data.db (see the module doc).
         staged.sort_by(|a, b| rank(&a.1).cmp(&rank(&b.1)).then_with(|| a.1.cmp(&b.1)));
+        // Pre-flight: a collision refuses with nothing renamed (the stage is removed by `Drop`).
+        for (_, rel) in &staged {
+            let dest = self.root.join(rel);
+            if dest.symlink_metadata().is_ok() {
+                return Err(Error::Storage(format!(
+                    "refusing to publish over an existing {}",
+                    dest.display()
+                )));
+            }
+        }
         for (file, _) in &staged {
             std::fs::OpenOptions::new()
                 .read(true)
@@ -141,22 +186,33 @@ impl StagedPublish {
                     Error::Storage(format!("failed to fsync staged {}: {e}", file.display()))
                 })?;
         }
-        let mut dest_dirs: Vec<PathBuf> = Vec::new();
-        for (renamed, (file, rel)) in staged.iter().enumerate() {
-            test_abort_before_rename(renamed);
-            let dest = self.root.join(rel);
-            if dest.symlink_metadata().is_ok() {
-                return Err(Error::Storage(format!(
-                    "refusing to publish over an existing {}",
-                    dest.display()
-                )));
-            }
-            if let Some(parent) = dest.parent() {
+        // Create the destination directories; every directory from a destination up to the sync
+        // floor is fsynced so the new entries (`out/ks`, `out/ks/t`, a created `out`) are durable.
+        let floor: &Path = self.anchor.as_deref().unwrap_or(&self.root);
+        let mut sync_dirs: Vec<PathBuf> = Vec::new();
+        for (_, rel) in &staged {
+            if let Some(parent) = self.root.join(rel).parent() {
                 std::fs::create_dir_all(parent)?;
-                if !dest_dirs.iter().any(|d| d == parent) {
-                    dest_dirs.push(parent.to_path_buf());
+                for anc in parent.ancestors() {
+                    if !anc.starts_with(floor) {
+                        break;
+                    }
+                    if !sync_dirs.iter().any(|d| d == anc) {
+                        sync_dirs.push(anc.to_path_buf());
+                    }
                 }
             }
+        }
+        let data_start = staged.iter().position(|(_, r)| rank(r) == 2);
+        let split = data_start.unwrap_or(staged.len());
+        for (renamed, (file, rel)) in staged.iter().enumerate() {
+            if renamed == split {
+                // Barrier: every non-Data.db rename is durable before Data.db can appear.
+                sync_all_dirs(&sync_dirs, obs)?;
+            }
+            test_abort_before_rename(renamed);
+            let dest = self.root.join(rel);
+            obs(&Op::Rename(dest.clone()));
             std::fs::rename(file, &dest).map_err(|e| {
                 Error::Storage(format!(
                     "failed to publish {} -> {}: {e}",
@@ -166,11 +222,10 @@ impl StagedPublish {
             })?;
         }
         test_abort_before_rename(staged.len());
-        for dir in &dest_dirs {
-            fsync_dir(dir)?;
-        }
+        sync_all_dirs(&sync_dirs, obs)?;
         remove_stage_tree(&self.stage)?;
         self.published = true;
+        obs(&Op::SyncDir(self.root.clone()));
         fsync_dir(&self.root)
     }
 
@@ -335,5 +390,111 @@ mod tests {
         assert!(is_stage_name(&name));
         let tokens: Vec<&str> = name.split('-').collect();
         assert!(tokens.len() != 4 || !tokens[0].chars().all(|c| c.is_ascii_lowercase()));
+    }
+
+    /// Run `publish_observed` on `sp`, returning the result and the recorded operation sequence.
+    fn observe(sp: &mut StagedPublish) -> (Result<()>, Vec<Op>) {
+        let mut ops = Vec::new();
+        let r = sp.publish_observed(&mut |o| ops.push(o.clone()));
+        (r, ops)
+    }
+
+    #[test]
+    fn dir_fsync_barrier_precedes_data_db_rename_and_follows_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("out");
+        let mut sp = StagedPublish::begin(&root, "1").unwrap();
+        stage_set(sp.dir(), "nb-1-big", &["Data.db", "Index.db", "TOC.txt"]);
+        let (r, ops) = observe(&mut sp);
+        r.unwrap();
+        let data = ops
+            .iter()
+            .position(|o| matches!(o, Op::Rename(p) if p.ends_with("nb-1-big-Data.db")))
+            .unwrap();
+        let toc = ops
+            .iter()
+            .position(|o| matches!(o, Op::Rename(p) if p.ends_with("nb-1-big-TOC.txt")))
+            .unwrap();
+        let table = root.join("ks").join("t");
+        let sync_before = ops[toc..data]
+            .iter()
+            .any(|o| *o == Op::SyncDir(table.clone()));
+        assert!(
+            sync_before,
+            "dir fsync between TOC.txt and Data.db: {ops:?}"
+        );
+        assert_eq!(
+            ops[data + 1],
+            Op::SyncDir(table.clone()),
+            "dir fsync right after Data.db: {ops:?}"
+        );
+        // Intermediate and created directories are durable too (out/ks, out, and out's parent).
+        for d in [root.join("ks"), root.clone(), tmp.path().to_path_buf()] {
+            assert!(
+                ops.contains(&Op::SyncDir(d.clone())),
+                "{} unsynced: {ops:?}",
+                d.display()
+            );
+        }
+        // No rename follows Data.db.
+        assert!(!ops[data + 1..].iter().any(|o| matches!(o, Op::Rename(_))));
+    }
+
+    #[test]
+    fn collision_is_found_before_any_rename_and_leaves_out_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let table = tmp.path().join("ks/t");
+        std::fs::create_dir_all(&table).unwrap();
+        // The collision is the LAST file in publish order (Data.db): a per-rename check would
+        // already have renamed Index.db and TOC.txt.
+        std::fs::write(table.join("nb-1-big-Data.db"), b"old").unwrap();
+        let mut sp = StagedPublish::begin(tmp.path(), "1").unwrap();
+        stage_set(sp.dir(), "nb-1-big", &["Data.db", "Index.db", "TOC.txt"]);
+        let (r, ops) = observe(&mut sp);
+        let err = r.unwrap_err().to_string();
+        assert!(
+            err.contains("refusing to publish over") && err.contains("nb-1-big-Data.db"),
+            "{err}"
+        );
+        assert!(
+            ops.is_empty(),
+            "no rename or fsync before the refusal: {ops:?}"
+        );
+        let stage = sp.dir().to_path_buf();
+        drop(sp);
+        assert!(!stage.exists(), "stage removed");
+        assert!(!table.join("nb-1-big-Index.db").exists());
+        assert!(!table.join("nb-1-big-TOC.txt").exists());
+        assert_eq!(
+            std::fs::read(table.join("nb-1-big-Data.db")).unwrap(),
+            b"old"
+        );
+        let mut names: Vec<_> = std::fs::read_dir(&table)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![std::ffi::OsString::from("nb-1-big-Data.db")]);
+    }
+
+    #[test]
+    fn drop_after_a_completed_publish_touches_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("out"); // created by the run, so Drop would try remove_dir(root)
+        let mut sp = StagedPublish::begin(&root, "1").unwrap();
+        stage_set(sp.dir(), "nb-1-big", &["Data.db", "TOC.txt"]);
+        let (r, _) = observe(&mut sp);
+        r.unwrap();
+        assert!(sp.published);
+        // After the last checked step something else appears where the stage / root were: an
+        // unrelated tree at the stage path, and an unrelated file in the root.
+        let stage = sp.dir().to_path_buf();
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("unrelated"), b"keep").unwrap();
+        std::fs::write(root.join("other.txt"), b"keep").unwrap();
+        drop(sp);
+        assert_eq!(std::fs::read(stage.join("unrelated")).unwrap(), b"keep");
+        assert_eq!(std::fs::read(root.join("other.txt")).unwrap(), b"keep");
+        assert!(root.join("ks/t/nb-1-big-Data.db").is_file());
     }
 }
