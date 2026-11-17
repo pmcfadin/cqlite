@@ -38,6 +38,8 @@
 //! A crash before publication leaves only the staging directory. [`StagedPublish::begin`] REFUSES
 //! to run while one exists, naming it (a re-run must not interleave with an interrupted one's files);
 //! the operator removes it (or the whole `--out`, which both verbs already require to be empty).
+//! The same holds for a failed rename or directory fsync once publication has STARTED: the stage is
+//! retained (never removed by `Drop`) so the final-named partial set is identifiable.
 
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
@@ -86,6 +88,11 @@ pub struct StagedPublish {
     /// The stage was removed by a completed publish: `Drop` has nothing left to clean (and must
     /// not issue further, un-checked removals after the run's last checked step).
     published: bool,
+    /// The rename window was entered (the first rename may have happened): a failure from here on
+    /// RETAINS the stage so the final-named partial set stays recognisable as an interrupted run's
+    /// (`begin` then refuses, naming it). Before this, a failure removes the stage and leaves
+    /// `--out` as found.
+    publication_started: bool,
     /// The nearest ancestor of `root` that existed before [`begin`](StagedPublish::begin) created it
     /// (`Some` only when `root` was created): the top of the directory chain that must be fsynced.
     anchor: Option<PathBuf>,
@@ -98,9 +105,9 @@ enum Op {
     SyncDir(PathBuf),
 }
 
-fn sync_all_dirs(dirs: &[PathBuf], obs: &mut dyn FnMut(&Op)) -> Result<()> {
+fn sync_all_dirs(dirs: &[PathBuf], obs: &mut dyn FnMut(&Op) -> Result<()>) -> Result<()> {
     for d in dirs {
-        obs(&Op::SyncDir(d.clone()));
+        obs(&Op::SyncDir(d.clone()))?;
         fsync_dir(d)?;
     }
     Ok(())
@@ -136,6 +143,7 @@ impl StagedPublish {
             stage,
             created_root,
             published: false,
+            publication_started: false,
             anchor,
         })
     }
@@ -152,10 +160,10 @@ impl StagedPublish {
     /// The barrier matters under power loss: without it a filesystem may persist the `Data.db` rename
     /// before the others, leaving a final-named set that HAS `Data.db` but lacks components.
     pub fn publish(mut self) -> Result<()> {
-        self.publish_observed(&mut |_| {})
+        self.publish_observed(&mut |_| Ok(()))
     }
 
-    fn publish_observed(&mut self, obs: &mut dyn FnMut(&Op)) -> Result<()> {
+    fn publish_observed(&mut self, obs: &mut dyn FnMut(&Op) -> Result<()>) -> Result<()> {
         let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new(); // (staged file, relative path)
         collect_files(&self.stage, &self.stage, &mut staged)?;
         if staged.is_empty() {
@@ -205,6 +213,8 @@ impl StagedPublish {
         }
         let data_start = staged.iter().position(|(_, r)| rank(r) == 2);
         let split = data_start.unwrap_or(staged.len());
+        // From here a failure may leave final-named files: keep the stage as the leftover marker.
+        self.publication_started = true;
         for (renamed, (file, rel)) in staged.iter().enumerate() {
             if renamed == split {
                 // Barrier: every non-Data.db rename is durable before Data.db can appear.
@@ -212,7 +222,7 @@ impl StagedPublish {
             }
             test_abort_before_rename(renamed);
             let dest = self.root.join(rel);
-            obs(&Op::Rename(dest.clone()));
+            obs(&Op::Rename(dest.clone()))?;
             std::fs::rename(file, &dest).map_err(|e| {
                 Error::Storage(format!(
                     "failed to publish {} -> {}: {e}",
@@ -225,7 +235,7 @@ impl StagedPublish {
         sync_all_dirs(&sync_dirs, obs)?;
         remove_stage_tree(&self.stage)?;
         self.published = true;
-        obs(&Op::SyncDir(self.root.clone()));
+        obs(&Op::SyncDir(self.root.clone()))?;
         fsync_dir(&self.root)
     }
 
@@ -235,11 +245,14 @@ impl StagedPublish {
     }
 }
 
-/// A `StagedPublish` that is dropped without being published (an early `return`, a `?`, a refused
-/// run) removes its staging directory, so only a hard kill (SIGKILL, power loss) can leave one.
+/// A `StagedPublish` dropped without being published BEFORE the rename window (an early `return`, a
+/// `?`, a refused run) removes its staging directory. A failure INSIDE the window, or a hard kill
+/// (SIGKILL, power loss), leaves it.
 impl Drop for StagedPublish {
     fn drop(&mut self) {
-        if self.published {
+        // Published: nothing to clean. Publication started: a partial final-named set may exist,
+        // so the stage (and `root`) stay as the recognisable leftover (#4529, AC2).
+        if self.published || self.publication_started {
             return;
         }
         let _ = std::fs::remove_dir_all(&self.stage);
@@ -395,7 +408,10 @@ mod tests {
     /// Run `publish_observed` on `sp`, returning the result and the recorded operation sequence.
     fn observe(sp: &mut StagedPublish) -> (Result<()>, Vec<Op>) {
         let mut ops = Vec::new();
-        let r = sp.publish_observed(&mut |o| ops.push(o.clone()));
+        let r = sp.publish_observed(&mut |o| {
+            ops.push(o.clone());
+            Ok(())
+        });
         (r, ops)
     }
 
@@ -475,6 +491,74 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec![std::ffi::OsString::from("nb-1-big-Data.db")]);
+    }
+
+    /// Fail the `n`-th observed op matching `pick`, then drop and check the leftover is identifiable.
+    fn failed_mid_window(pick: impl Fn(&Op) -> bool, nth: usize) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("out");
+        let mut sp = StagedPublish::begin(&root, "1").unwrap();
+        stage_set(
+            sp.dir(),
+            "nb-1-big",
+            &[
+                "Data.db",
+                "Index.db",
+                "Statistics.db",
+                "Summary.db",
+                "TOC.txt",
+            ],
+        );
+        let mut seen = 0;
+        let r = sp.publish_observed(&mut |o| {
+            if pick(o) {
+                seen += 1;
+                if seen == nth {
+                    return Err(Error::Storage("injected fault".into()));
+                }
+            }
+            Ok(())
+        });
+        assert!(r.unwrap_err().to_string().contains("injected fault"));
+        let stage = sp.dir().to_path_buf();
+        drop(sp);
+        assert!(stage.is_dir(), "stage retained after a mid-window failure");
+        assert!(is_stage_name(stage.file_name().unwrap().to_str().unwrap()));
+        assert!(
+            !root.join("ks/t/nb-1-big-Data.db").exists(),
+            "no final Data.db"
+        );
+        assert_eq!(find_leftover(&root), Some(stage));
+        let err = StagedPublish::begin(&root, "2").unwrap_err().to_string();
+        assert!(
+            err.contains(".cqlite-publish-1.tmp") && err.contains("interrupted run"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn failure_on_a_mid_window_rename_retains_the_stage() {
+        failed_mid_window(|o| matches!(o, Op::Rename(_)), 3);
+    }
+
+    #[test]
+    fn failure_on_the_pre_data_db_directory_fsync_retains_the_stage() {
+        failed_mid_window(|o| matches!(o, Op::SyncDir(_)), 1);
+    }
+
+    #[test]
+    fn failure_before_any_rename_removes_the_stage_and_leaves_out_as_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("out");
+        let mut sp = StagedPublish::begin(&root, "1").unwrap();
+        stage_set(sp.dir(), "nb-1-big", &["Data.db", "TOC.txt"]);
+        std::fs::create_dir_all(root.join("ks/t")).unwrap();
+        std::fs::write(root.join("ks/t/nb-1-big-Data.db"), b"old").unwrap();
+        assert!(sp.publish_observed(&mut |_| Ok(())).is_err());
+        let stage = sp.dir().to_path_buf();
+        drop(sp);
+        assert!(!stage.exists());
+        assert!(find_leftover(&root).is_none());
     }
 
     #[test]

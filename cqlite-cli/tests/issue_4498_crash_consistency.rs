@@ -319,6 +319,14 @@ fn run_verb(
 
 /// The `(kind, path-relative-to-work)` the shim logged for boundary number `n` in THIS run, if
 /// any. Lenient (no contiguity requirement): a fault run stops mid-sequence.
+/// Whether boundary `i` is at or after the first `rename` boundary (the #4529 publish window).
+fn in_publish_window(bounds: &[(String, String)], i: usize) -> bool {
+    bounds
+        .iter()
+        .position(|(k, _)| k == "rename")
+        .is_some_and(|r| i >= r)
+}
+
 fn boundary_hit(area: &Area<'_>, n: usize) -> Option<(String, String)> {
     let log = area.work.parent().unwrap().join("boundaries.log");
     let text = std::fs::read_to_string(&log).ok()?;
@@ -623,7 +631,11 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
                 Scope::KnownDefects(issue) if defect != Some(issue) => continue,
-                Scope::CassandraStrict if mode != Mode::Crash => continue,
+                // #4529: ENOSPC / short-write faults only matter INSIDE the publish window (from
+                // the first rename on); a failure there must retain the stage (AC2).
+                Scope::CassandraStrict if mode != Mode::Crash && !in_publish_window(&bounds, i) => {
+                    continue
+                }
                 _ => {}
             }
             runs += 1;

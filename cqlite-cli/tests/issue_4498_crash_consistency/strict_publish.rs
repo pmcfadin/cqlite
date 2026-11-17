@@ -45,14 +45,27 @@ pub(super) fn strict_publish_contract(
     if !unnamed.is_empty() {
         failures.push(format!("{tag}: unidentifiable leftover(s) outside a `.cqlite-publish-*.tmp` stage: {unnamed:?}"));
     }
+    let stage_present = after.keys().any(|p| is_stage(p));
+    // A failure after publication started leaves final-named files: the stage MUST be retained so
+    // the leftover is identifiable (roborev job 350).
+    if !complete && !finals.is_empty() && !stage_present {
+        failures.push(format!(
+            "{tag}: final-named partial set ({} file(s)) with NO retained `.cqlite-publish-*.tmp` stage",
+            finals.len()
+        ));
+    }
     if !complete && !out_is_genuinely_empty(a) {
         let again = run_verb(verb, f, a, Some((shim(), None)));
         let text = again.text();
-        if again.code() == Some(0)
-            || !(text.contains("not empty") || text.contains(".cqlite-publish-"))
-        {
+        // With a stage present the diagnostic must NAME it, not merely say "not empty".
+        let names_cause = if stage_present {
+            text.contains(".cqlite-publish-")
+        } else {
+            text.contains("not empty")
+        };
+        if again.code() == Some(0) || !names_cause {
             failures.push(format!(
-                "{tag}: re-run into the leftovers must refuse naming the cause; got code={:?}: {}",
+                "{tag}: re-run into the leftovers must refuse naming the cause (stage present: {stage_present}); got code={:?}: {}",
                 again.code(),
                 text.lines().last().unwrap_or("")
             ));
