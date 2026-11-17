@@ -43,3 +43,18 @@ the new directory entries are durable; (4) renames `Data.db`; (5) fsyncs those d
 which preserves AC1. The order is pinned by a unit test recording the operation sequence
 (dir-fsync, Data.db rename, dir-fsync). After step (6) `Drop` performs no filesystem operation
 (the `published` flag), also pinned by a test.
+
+## Publication started: the stage is retained
+
+Once `publish` enters the rename window (the `publication_started` flag, set before the first
+rename), a failed rename or directory fsync must not make the leftover anonymous: `Drop` then leaves
+the stage directory (even when empty) and `--out`'s directory in place, so the final-named partial
+set (never containing `Data.db`) sits next to a recognisable `.cqlite-publish-*.tmp` stage, and a
+re-run refuses naming it. A failure BEFORE the first rename (collision, staged-file fsync, directory
+creation) still removes the stage and leaves `--out` as found. After a fully successful publish
+`published` keeps `Drop` inert. Pinned by unit tests that inject a failure on the 3rd rename and on the
+pre-`Data.db` directory fsync, and by the #4498 harness, which injects ENOSPC and short writes at
+every boundary from the first rename on and requires the re-run diagnostic to name the stage.
+
+**Deferred (#4592).** The non-Unix directory fsync (a no-op today) and concurrent publishes into one
+`--out` (no-replace rename plus a root lock) are tracked in #4592, not this change.

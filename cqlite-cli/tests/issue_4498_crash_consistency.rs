@@ -317,16 +317,18 @@ fn run_verb(
     }
 }
 
-/// The `(kind, path-relative-to-work)` the shim logged for boundary number `n` in THIS run, if
-/// any. Lenient (no contiguity requirement): a fault run stops mid-sequence.
 /// Whether boundary `i` is at or after the first `rename` boundary (the #4529 publish window).
+/// The `--manifest` write follows publication and is not part of the window.
 fn in_publish_window(bounds: &[(String, String)], i: usize) -> bool {
-    bounds
-        .iter()
-        .position(|(k, _)| k == "rename")
-        .is_some_and(|r| i >= r)
+    !bounds[i].1.ends_with("manifest.json")
+        && bounds
+            .iter()
+            .position(|(k, _)| k == "rename")
+            .is_some_and(|r| i >= r)
 }
 
+/// The `(kind, path-relative-to-work)` the shim logged for boundary number `n` in THIS run, if
+/// any. Lenient (no contiguity requirement): a fault run stops mid-sequence.
 fn boundary_hit(area: &Area<'_>, n: usize) -> Option<(String, String)> {
     let log = area.work.parent().unwrap().join("boundaries.log");
     let text = std::fs::read_to_string(&log).ok()?;
