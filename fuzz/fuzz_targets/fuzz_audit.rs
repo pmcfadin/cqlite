@@ -91,14 +91,17 @@ fuzz_target!(|data: &[u8]| {
     }
     if support::is_unreadable(input.component, input.bytes) {
         for id in dependent_rows(input.component, input.high) {
-            if let Some(v) = audit.verdict(id) {
-                assert!(
-                    *v != AuditVerdict::Pass,
-                    "{id} reports Pass although {} was replaced by {} unreadable byte(s)",
-                    input.component,
-                    input.bytes.len()
-                );
-            }
+            // A format-applicable dependent row must be present: an omitted row would let
+            // unrelated rows keep the audit non-vacuous and OK (false green, roborev job 355).
+            let v = audit.verdict(id).unwrap_or_else(|| {
+                panic!("{id} is missing although {} is unreadable and the row applies", input.component)
+            });
+            assert!(
+                *v != AuditVerdict::Pass,
+                "{id} reports Pass although {} was replaced by {} unreadable byte(s)",
+                input.component,
+                input.bytes.len()
+            );
         }
     }
 });
