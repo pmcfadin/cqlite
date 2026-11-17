@@ -23,18 +23,21 @@
 //! - [`descriptor`] — `CommitLogDescriptor` header + `CommitLogVersionGates`.
 //! - [`frame`] — sync markers + per-record CRC framing + truncation tolerance.
 //! - [`mutation`] — decoded mutation representation + the mutation-body decoder.
+//! - [`mutation_writetime`] — the closed "mutation writetime" rule (`find`, #4205).
 //! - [`schema`] — minimal per-table schema for schema-aware value decode.
 //! - [`reader`] — [`CommitLogReader`], the streaming public entry point.
 
 pub mod descriptor;
 pub mod frame;
 pub mod mutation;
+pub mod mutation_writetime;
 pub mod reader;
 pub mod schema;
 
 pub use descriptor::{CommitLogDescriptor, CommitLogVersionGates, SUPPORTED_COMMITLOG_VERSION};
 pub use mutation::{DecodedCell, DecodedRow, Mutation, PartitionUpdate};
-pub use reader::{CommitLogReader, MutationIter, MAX_SEGMENT_BYTES};
+pub use mutation_writetime::{mutation_needs, mutation_writetime, Need, Writetime};
+pub use reader::{CommitLogReader, MutationIter, PositionedMutationIter, MAX_SEGMENT_BYTES};
 pub use schema::{
     cql_fixed_len, format_table_id, parse_table_id, ColumnSpec, CommitLogSchema, SchemaSet,
 };

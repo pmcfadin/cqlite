@@ -49,6 +49,15 @@ pub mod diagnose_args;
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod rebuild;
 pub mod sweep;
+// `cqlite find` (issue #4205): reads generations through core's `probe_generation`
+// (`not(tombstones)`) and resolves its schema via the write-support schema loader.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod find;
+pub mod find_args;
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod find_commitlog;
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub mod find_render;
 pub mod verify;
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).
@@ -171,6 +180,26 @@ pub async fn dispatch_diagnose(
         eprintln!(
             "diagnose is not built into this binary (it needs the write-support feature and \
              cqlite-core without tombstones). Rebuild with --features write-support."
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Dispatch the `cqlite find` verb (issue #4205), or the informative "not built" error.
+pub async fn dispatch_find(
+    schema: Option<&std::path::Path>,
+    args: &find_args::FindArgs,
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    {
+        find::execute_find_command(schema, args).await
+    }
+    #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
+    {
+        let _ = (schema, args);
+        eprintln!(
+            "cqlite find needs a build with --features write-support and without \
+             cqlite-core/tombstones."
         );
         std::process::exit(1);
     }

@@ -1,0 +1,63 @@
+{
+  "cassandra_image": "cassandra:5.0.8",
+  "keyspace": "commitlog_test",
+  "table": "users",
+  "table_id": "5ed10960-dee9-11f1-92e1-a170acc55494",
+  "table_dir": "users-5ed10960dee911f192e1a170acc55494",
+  "schema": "CREATE TABLE commitlog_test.users (id int PRIMARY KEY, name text, age int)",
+  "segment": {
+    "file": "CommitLog-7-1794522866554.log",
+    "id": 1794522866554,
+    "version": 7
+  },
+  "inserts": [
+    {
+      "id": 1,
+      "name": "alice",
+      "age": 30,
+      "timestamp": 1794300001000000,
+      "flushed": true,
+      "position": 62337
+    },
+    {
+      "id": 2,
+      "name": "bob",
+      "age": 25,
+      "timestamp": 1794300002000000,
+      "flushed": true,
+      "position": 62415
+    },
+    {
+      "id": 3,
+      "name": "carol",
+      "age": 42,
+      "timestamp": 1794300003000000,
+      "flushed": true,
+      "position": 62656
+    },
+    {
+      "id": 4,
+      "name": "dave",
+      "age": 37,
+      "timestamp": 1794300004000000,
+      "flushed": false,
+      "position": 62734
+    },
+    {
+      "id": 5,
+      "name": "eve",
+      "age": 29,
+      "timestamp": 1794300005000000,
+      "flushed": false,
+      "position": 62811
+    },
+    {
+      "id": 2,
+      "name": "bobby",
+      "age": 26,
+      "timestamp": 1794300006000000,
+      "flushed": false,
+      "position": 62887
+    }
+  ]
+}
