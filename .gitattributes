@@ -2,3 +2,5 @@
 *.sh text eol=lf
 # Parsed with exact line compares (sha header + one path per line): never CRLF.
 test-data/dataset-bundle-tracked.txt text eol=lf
+# Fuzz seeds are raw bytes: never diff them as text (a review prompt must stay UTF-8; #4593).
+fuzz/corpus/** binary
