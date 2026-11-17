@@ -185,14 +185,11 @@ impl StagedPublish {
             }
         }
         for (file, _) in &staged {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(file)?
-                .sync_all()
-                .map_err(|e| {
-                    Error::Storage(format!("failed to fsync staged {}: {e}", file.display()))
-                })?;
+            // Opened read-only on purpose: fsync(2) (and F_FULLFSYNC on macOS) is valid on an
+            // O_RDONLY descriptor, so a staged file that is read-only (mode 0o444) still publishes.
+            std::fs::File::open(file)?.sync_all().map_err(|e| {
+                Error::Storage(format!("failed to fsync staged {}: {e}", file.display()))
+            })?;
         }
         // Create the destination directories; every directory from a destination up to the sync
         // floor is fsynced so the new entries (`out/ks`, `out/ks/t`, a created `out`) are durable.
@@ -353,6 +350,29 @@ mod tests {
             assert!(dir.join(format!("nb-1-big-{c}")).is_file(), "{c}");
         }
         assert!(find_leftover(tmp.path()).is_none(), "staging dir removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_staged_files_publish_and_stay_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let sp = StagedPublish::begin(tmp.path(), "1").unwrap();
+        stage_set(sp.dir(), "nb-1-big", &["Data.db", "TOC.txt"]);
+        for c in ["Data.db", "TOC.txt"] {
+            let f = sp.dir().join("ks").join("t").join(format!("nb-1-big-{c}"));
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        sp.publish().unwrap();
+        for c in ["Data.db", "TOC.txt"] {
+            let f = tmp
+                .path()
+                .join("ks")
+                .join("t")
+                .join(format!("nb-1-big-{c}"));
+            let mode = std::fs::metadata(&f).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o444, "{c} must stay read-only");
+        }
     }
 
     #[test]

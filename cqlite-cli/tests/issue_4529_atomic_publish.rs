@@ -15,7 +15,14 @@
 //! Real Cassandra-written fixtures: `test_comp.lz4_table` (BIG) and `test_da.multiclustering_table`
 //! (BTI). The in-process kill-at-every-boundary proof is #4498's `issue_4529_*` harness tests.
 
-#![cfg(all(unix, feature = "write-support", not(feature = "tombstones")))]
+// Every test here depends on the debug-build abort seam (`cfg(debug_assertions)`), so a release
+// build compiles the file to nothing instead of seeing successful runs where aborts are expected.
+#![cfg(all(
+    unix,
+    feature = "write-support",
+    not(feature = "tombstones"),
+    debug_assertions
+))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
