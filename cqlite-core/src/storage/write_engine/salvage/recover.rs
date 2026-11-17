@@ -24,6 +24,7 @@ use crate::storage::sstable::reader::{
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::storage::sstable::writer::{SSTableFormat as WriterFormat, SSTableWriter};
 use crate::storage::write_engine::merge::{classify_inputs, compute_baseline_min};
+use crate::storage::write_engine::rebuild::staged_publish::StagedPublish;
 use std::path::Path;
 
 /// The largest number of [`Loss`] entries [`salvage_sstable`] holds resident
@@ -321,8 +322,13 @@ pub async fn salvage_sstable(
     // `report` already exists at this point (unlike the `open_reader` site),
     // so it is populated with what was already discovered (component
     // findings, `partitions.total`) rather than dropped.
+    // Issue #4529: crash-safe publication. The generation is written under a hidden staging
+    // directory and renamed into `output_dir` only once complete (Data.db last), so a crash can
+    // never leave a final-named partial set that Cassandra's `SSTableLister` would discover.
+    // Dropping `stage` on any early return removes it (a refused / failed run publishes nothing).
+    let stage = StagedPublish::begin(output_dir, &format!("gen{generation}"))?;
     let mut writer = match SSTableWriter::with_format(
-        output_dir.to_path_buf(),
+        stage.dir().to_path_buf(),
         generation,
         schema,
         boundaries.entries.len().max(1),
@@ -729,6 +735,7 @@ pub async fn salvage_sstable(
     if written > 0 {
         let output = writer.finish().await?;
         let _ = output; // SSTableInfo carries stats the manifest does not restate.
+        stage.publish()?;
     } else {
         drop(writer);
     }

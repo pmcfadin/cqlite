@@ -242,7 +242,18 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
     // silently.
     if let Ok(mut rd) = std::fs::read_dir(out) {
         if rd.next().is_some() {
-            eprintln!("cqlite rebuild: --out {} is not empty", out.display());
+            // Issue #4529 (AC2): an interrupted run leaves a recognisably-named staging directory;
+            // name it so the operator knows the contents are unpublished and incomplete.
+            match cqlite_core::storage::write_engine::rebuild::staged_publish::find_leftover(out) {
+                Some(left) => eprintln!(
+                    "cqlite rebuild: --out {} is not empty: it holds a staging directory from an \
+                     interrupted run ({}), whose files are unpublished and incomplete — remove it \
+                     (or the whole directory) and re-run",
+                    out.display(),
+                    left.display()
+                ),
+                None => eprintln!("cqlite rebuild: --out {} is not empty", out.display()),
+            }
             std::process::exit(1);
         }
     }

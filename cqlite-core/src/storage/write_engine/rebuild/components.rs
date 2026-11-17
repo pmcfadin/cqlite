@@ -163,9 +163,7 @@ pub async fn rebuild_components(
     requested: &[Component],
     options: &RebuildOptions,
 ) -> Result<RebuildReport> {
-    let mut discarded = StatisticsMetadata::default();
-    rebuild_components_capturing_stats(data_db_path, schema, requested, options, &mut discarded)
-        .await
+    super::publish::rebuild_components_published(data_db_path, schema, requested, options).await
 }
 
 /// [`rebuild_components`], additionally handing back the `StatisticsMetadata`
@@ -179,7 +177,7 @@ pub async fn rebuild_components(
 /// F6) cannot be asserted from the output bytes of the format the whole
 /// committed corpus uses. Crate-internal on purpose: it is a test seam for
 /// an in-crate assertion, not a second public entry point.
-pub(crate) async fn rebuild_components_capturing_stats(
+pub(super) async fn rebuild_components_capturing_stats(
     data_db_path: &Path,
     schema: &TableSchema,
     requested: &[Component],

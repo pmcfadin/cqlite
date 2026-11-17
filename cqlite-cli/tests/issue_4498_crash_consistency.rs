@@ -317,6 +317,16 @@ fn run_verb(
     }
 }
 
+/// Whether boundary `i` is at or after the first `rename` boundary (the #4529 publish window).
+/// The `--manifest` write follows publication and is not part of the window.
+fn in_publish_window(bounds: &[(String, String)], i: usize) -> bool {
+    !bounds[i].1.ends_with("manifest.json")
+        && bounds
+            .iter()
+            .position(|(k, _)| k == "rename")
+            .is_some_and(|r| i >= r)
+}
+
 /// The `(kind, path-relative-to-work)` the shim logged for boundary number `n` in THIS run, if
 /// any. Lenient (no contiguity requirement): a fault run stops mid-sequence.
 fn boundary_hit(area: &Area<'_>, n: usize) -> Option<(String, String)> {
@@ -472,51 +482,6 @@ fn verify_clean(dir: &Path, f: &Fixture) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether an uninterrupted run is expected to contain a `rename` boundary (the atomic-publication
-/// step). Flips to `true` with the TOC fix (#4526).
-const EXPECT_RENAME: bool = false;
-
-/// The enumerated boundaries must contain every syscall CATEGORY an SSTable write verb performs,
-/// per output file, so a shim that stopped seeing (say) `copy_file_range` or vectored writes
-/// cannot shrink the matrix unnoticed behind a "enough boundaries" count:
-/// every output component file needs a `create` and, when non-empty, at least one `write`/`pwrite`/`copy`, the
-/// manifest needs the same, and the run needs >= 1 `mkdir`, >= 1 `fsync` (and a `rename` when
-/// [`EXPECT_RENAME`]).
-fn assert_expected_categories(
-    verb: Verb,
-    bounds: &[(String, String)],
-    reference: &BTreeMap<PathBuf, Vec<u8>>,
-) {
-    let has = |kinds: &[&str], path: &str| {
-        bounds
-            .iter()
-            .any(|(k, p)| kinds.contains(&k.as_str()) && p == path)
-    };
-    let mut files: Vec<(String, bool)> = reference
-        .iter()
-        .map(|(rel, bytes)| (format!("out/{}", rel.display()), !bytes.is_empty()))
-        .collect();
-    files.push(("manifest.json".to_string(), true));
-    for (f, non_empty) in &files {
-        assert!(
-            has(&["create"], f),
-            "{verb:?}: no `create` boundary enumerated for {f} — shim blind to file creation?"
-        );
-        // A legitimately EMPTY output (e.g. an empty BTI Rows.db) has a create and no write.
-        assert!(
-            !non_empty || has(&["write", "pwrite", "copy"], f),
-            "{verb:?}: no write-class boundary (write/pwrite/copy) enumerated for {f} — shim blind \
-             to the call this writer uses?"
-        );
-    }
-    let any = |kind: &str| bounds.iter().any(|(k, _)| k == kind);
-    assert!(any("mkdir"), "{verb:?}: no `mkdir` boundary enumerated");
-    assert!(any("fsync"), "{verb:?}: no `fsync` boundary enumerated");
-    if EXPECT_RENAME {
-        assert!(any("rename"), "{verb:?}: no `rename` boundary enumerated");
-    }
-}
-
 /// Which slice of the boundary x mode matrix a sweep exercises.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -551,18 +516,6 @@ fn defects() -> Vec<Defect> {
     let mut v = Vec::new();
     for verb in [Verb::Rebuild, Verb::Salvage] {
         for fixture in ALL_FIXTURES {
-            // #4526: TOC.txt is created in place and written non-atomically, so a crash or short
-            // write mid-write publishes a partial barrier. `Mode::Enospc` belongs here too: the TOC
-            // file has already been created when its write is faulted, so an immediate ENOSPC
-            // leaves an EMPTY published TOC — the same AC2 violation as the short-write case. All
-            // three modes go away once #4529 makes publication atomic (roborev r7).
-            v.push(Defect {
-                verb,
-                fixture,
-                path_suffix: "-TOC.txt",
-                modes: &[Mode::Crash, Mode::Enospc, Mode::Short],
-                issue: 4526,
-            });
             // #4527: an ENOSPC on Filter.db's write is not propagated (exit 0, TOC published over
             // an incomplete set).
             v.push(Defect {
@@ -665,7 +618,7 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
         "two uninterrupted runs must produce the same manifest (after normalising only <now> and \
          the temp dirs)"
     );
-    assert_expected_categories(verb, &bounds, &reference);
+    strict_publish::assert_expected_categories(verb, &bounds, &reference);
 
     let mut failures = Vec::new();
     let mut runs = 0usize;
@@ -680,7 +633,11 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
                 Scope::KnownDefects(issue) if defect != Some(issue) => continue,
-                Scope::CassandraStrict if mode != Mode::Crash => continue,
+                // #4529: ENOSPC / short-write faults only matter INSIDE the publish window (from
+                // the first rename on); a failure there must retain the stage (AC2).
+                Scope::CassandraStrict if mode != Mode::Crash && !in_publish_window(&bounds, i) => {
+                    continue
+                }
                 _ => {}
             }
             runs += 1;
@@ -734,6 +691,22 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             if snapshot(a.input) != input_before {
                 failures.push(format!("{tag}: INPUT CHANGED"));
             }
+            if scope == Scope::CassandraStrict {
+                // ONLY the #4529 contract (nothing about the manifest or CQLite's TOC barrier):
+                // (1) AC1 (owner ruling 2026-11-16): Cassandra never loads a partial set, i.e. any
+                // final-named partial set lacks `Data.db` (`SSTableReaderLoadingBuilder.java:74`
+                // at cassandra-5.0.8). (2) AC2: every other leftover is identifiable as a
+                // `.cqlite-publish-*.tmp` stage, and a re-run into it refuses naming the cause.
+                strict_publish::strict_publish_contract(
+                    &tag,
+                    &a,
+                    &reference,
+                    &mut failures,
+                    verb,
+                    f,
+                );
+                continue;
+            }
             // The --manifest after a fault: absent, or a COMPLETE valid JSON document equal (after
             // the normalisation documented on `manifest_normalised`) to the uninterrupted run's.
             // Never truncated or malformed (roborev r3).
@@ -742,8 +715,20 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             }
             // AC2 (CQLite publication contract)
             let after = output_set(&a);
+            // "Published" = outside a stage AND a final `Data.db` (renamed LAST; owner ruling
+            // 2026-11-16, #4529): a final TOC without it is a partial set Cassandra refuses.
             for toc in tocs(&after) {
                 let gen = toc.parent().unwrap_or(Path::new(""));
+                if strict_publish::is_stage_path(&toc)
+                    || !after.keys().any(|p| {
+                        p.parent() == Some(gen)
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.ends_with("-Data.db"))
+                    })
+                {
+                    continue;
+                }
                 let have: BTreeMap<_, _> = after
                     .iter()
                     .filter(|(p, _)| p.parent() == Some(gen))
@@ -757,14 +742,6 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
                 } else if !verify_clean(&out_dir(&a).join(gen), f) {
                     failures.push(format!("{tag}: TOC published and set complete but `verify --mode full` is not clean"));
                 }
-            }
-            if scope == Scope::CassandraStrict {
-                // Cassandra (5.0.8) groups EVERY component-named file into a Descriptor, so any
-                // final-named file left behind is a discoverable (partial) SSTable.
-                if !after.is_empty() && after != reference {
-                    failures.push(format!("{tag}: crash left {} final-named file(s) = a Cassandra-discoverable PARTIAL SSTable", after.len()));
-                }
-                continue;
             }
             // AC4: re-run after the failure. Both verbs REFUSE a non-empty --out by contract
             // ("--out ... is not empty"), so the operator clears it first; the retry must then
@@ -864,16 +841,6 @@ fn salvage_survives_a_fault_at_every_boundary() {
 // proves the fix.
 
 #[test]
-#[ignore = "#4526 TOC.txt is written in place, non-atomically"]
-fn issue_4526_torn_toc() {
-    check_verbs(
-        &[Verb::Rebuild, Verb::Salvage],
-        Scope::KnownDefects(4526),
-        fixtures(),
-    );
-}
-
-#[test]
 #[ignore = "#4527 an ENOSPC on Filter.db's write exits 0"]
 fn issue_4527_filter_write_error_swallowed() {
     check_verbs(
@@ -900,15 +867,13 @@ fn issue_4549_torn_manifest_after_a_fault() {
 }
 
 #[test]
-#[ignore = "#4529 final SSTable names in place: a crash leaves a Cassandra-discoverable partial set (owner decision pending)"]
 fn issue_4529_cassandra_discoverable_partial_sets_rebuild() {
-    check(Verb::Rebuild, Scope::CassandraStrict, vec![BIG_SMALL]);
+    check(Verb::Rebuild, Scope::CassandraStrict, fixtures());
 }
 
 #[test]
-#[ignore = "#4529 final SSTable names in place: a crash leaves a Cassandra-discoverable partial set (owner decision pending)"]
 fn issue_4529_cassandra_discoverable_partial_sets_salvage() {
-    check(Verb::Salvage, Scope::CassandraStrict, vec![BIG_SMALL]);
+    check(Verb::Salvage, Scope::CassandraStrict, fixtures());
 }
 
 // ---- Shim coverage guard ---------------------------------------------------------------
@@ -1074,6 +1039,8 @@ fn every_imported_io_symbol_is_interposed_by_the_shim() {
 
 #[path = "issue_4498_crash_consistency/stdio_and_linkat.rs"]
 mod stdio_and_linkat;
+#[path = "issue_4498_crash_consistency/strict_publish.rs"]
+mod strict_publish;
 // ---- `syscall(2)` interposer: raw-ABI decode and the blind-spot abort --------------------
 
 /// Compile `src` (a one-file C program) and run it under the shim with the fault root `root`.
