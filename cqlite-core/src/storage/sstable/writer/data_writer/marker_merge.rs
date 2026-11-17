@@ -219,6 +219,7 @@ mod tests {
             clustering_key: Some(Box::leak(Box::new(ck(v)))),
             liveness_ts: Some(0),
             ttl_seconds: None,
+            liveness_ldt: None,
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),

@@ -1,0 +1,7 @@
+{"table kind":"REGULAR","partition":{"key":["5"],"position":18},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z","ttl":864000,"expires_at":"2026-11-26T23:57:32Z","expired":false},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["1"],"position":46},"rows":[{"type":"row","position":46,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":70},"rows":[{"type":"row","position":70,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["4"],"position":94},"rows":[{"type":"row","position":94,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[{"name":"v","deletion_info":{"local_delete_time":"2026-11-16T23:57:30Z"}}]}]}
+{"table kind":"REGULAR","partition":{"key":["7"],"position":119},"rows":[{"type":"row","position":119,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["6"],"position":143},"rows":[{"type":"row","position":143,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[]}]}
+{"table kind":"REGULAR","partition":{"key":["3"],"position":167},"rows":[{"type":"row","position":167,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[{"name":"v","value":"x"}]}]}

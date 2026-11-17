@@ -1,0 +1,4 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":18},"rows":[{"type":"row","position":18,"cells":[{"name":"v","value":"a2","tstamp":"1970-01-01T00:00:00.002Z"}]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":46},"rows":[{"type":"row","position":46,"cells":[{"name":"v","value":"b","tstamp":"1970-01-01T00:00:00.001Z","ttl":864000,"expires_at":"2026-11-27T00:54:32Z","expired":false}]}]}
+{"table kind":"REGULAR","partition":{"key":["4"],"position":78},"rows":[{"type":"row","position":78,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[{"name":"v","value":"e","tstamp":"1970-01-01T00:00:00.002Z"}]}]}
+{"table kind":"REGULAR","partition":{"key":["3"],"position":106},"rows":[{"type":"row","position":106,"cells":[{"name":"v","deletion_info":{"local_delete_time":"2026-11-17T00:54:32Z"},"tstamp":"1970-01-01T00:00:00.001Z"}]}]}

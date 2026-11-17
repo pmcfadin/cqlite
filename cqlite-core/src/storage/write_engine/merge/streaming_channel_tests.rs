@@ -158,7 +158,6 @@ fn test_kway_merge_with_streaming_sources_preserves_order() {
         now_secs: None,
         purge_safe: false,
         max_purgeable_timestamp: None,
-        purpose: super::MergePurpose::Compaction,
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
         _egress_slot: None,

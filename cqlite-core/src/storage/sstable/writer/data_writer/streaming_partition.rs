@@ -191,6 +191,7 @@ impl StreamingPartitionSession {
             clustering_key,
             liveness_ts: None,
             ttl_seconds: None,
+            liveness_ldt: None,
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),

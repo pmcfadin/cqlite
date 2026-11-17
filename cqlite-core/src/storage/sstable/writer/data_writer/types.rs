@@ -184,6 +184,8 @@ pub(crate) struct RowWrite<'a> {
     pub(crate) liveness_ts: Option<i64>,
     /// Row-level TTL from the liveness-providing mutation.
     pub(crate) ttl_seconds: Option<u32>,
+    /// The liveness marker's authoritative `localExpirationTime` (#4581); `None` derives `now + ttl`.
+    pub(crate) liveness_ldt: Option<i32>,
     /// Row deletion as (marked_for_delete_at µs, local_deletion_time s).
     pub(crate) row_deletion: Option<(i64, i32)>,
     /// Surviving WHOLE-COLUMN cell operations (already reconciled, unsorted).
@@ -202,6 +204,33 @@ pub(crate) struct RowWrite<'a> {
 }
 
 impl super::DataWriter {
+    /// The compaction path's decision (`MarkerMode::Explicit`, #4581): `None` when the group is
+    /// flush/WAL (liveness is cell-derived), else `Some(marker)` where `marker` may be `None`
+    /// ("no marker": a row that never had one, or whose marker was purged or shadowed).
+    pub(crate) fn authoritative_marker(
+        group: &[&super::Mutation],
+        deletion_ts: Option<i64>,
+    ) -> Option<Option<crate::storage::write_engine::mutation::RowMarker>> {
+        group
+            .iter()
+            .any(|m| m.marker_mode.is_explicit())
+            .then(|| Self::explicit_row_marker(group, deletion_ts))
+    }
+
+    /// The group's authoritative liveness marker (compaction path, #4581): the newest explicit
+    /// [`RowMarker`] strictly newer than `deletion_ts`. A marker at or below the covering
+    /// deletion is shadowed (`DeletionTime.deletes`: `ts <= markedForDeleteAt`).
+    pub(crate) fn explicit_row_marker(
+        group: &[&super::Mutation],
+        deletion_ts: Option<i64>,
+    ) -> Option<crate::storage::write_engine::mutation::RowMarker> {
+        group
+            .iter()
+            .filter_map(|m| m.marker_mode.marker())
+            .filter(|mk| deletion_ts.is_none_or(|dts| mk.timestamp_micros > dts))
+            .max_by_key(|mk| mk.timestamp_micros)
+    }
+
     /// Write a plain (non-expiring) scalar cell: `USE_ROW_TIMESTAMP` when it carries the row's
     /// liveness timestamp, an explicit timestamp delta otherwise. Used for ordinary writes AND for
     /// a `WriteWithTtl { ttl_seconds: 0 }`, because TTL 0 is `NO_TTL` (Cassandra 5.0.8

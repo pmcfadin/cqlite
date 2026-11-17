@@ -186,7 +186,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: crate::storage::write_engine::merge::MergePurpose::Compaction,
             schema_arc: Arc::new(schema.clone()),
             schema,
             _egress_slot: None,

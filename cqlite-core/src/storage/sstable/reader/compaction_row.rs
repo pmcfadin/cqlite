@@ -281,46 +281,38 @@ impl RowLiveness {
         }
     }
 
-    /// Fold two liveness markers across generations by Cassandra
-    /// last-write-wins on the marker WRITE timestamp (issue #2374/#2789): the
-    /// marker with the higher [`marker_timestamp`](Self::marker_timestamp) wins
-    /// OUTRIGHT — its expiry / live-forever state is taken as-is, so a newer
-    /// TTL'd marker supersedes an older live-forever one (and vice-versa). Later
-    /// expiry is only a TIE-BREAK when the timestamps compare equal (or both are
-    /// absent). A generation with no marker contributes nothing, so the surviving
-    /// marker (if any) is carried through unchanged — including its
-    /// [`ttl_seconds`](Self::ttl_seconds), which rides along with whichever
-    /// marker wins rather than being folded independently.
-    ///
-    /// This replaces the former most-permissive union, which unconditionally let
-    /// a live-forever marker win regardless of write order and diverged from
-    /// Cassandra for a reverse-timestamp reinsertion (older live-forever, newer
-    /// expired TTL): the union reported the row VISIBLE where Cassandra keeps the
-    /// newer expired liveness and HIDES it.
+    /// Fold two liveness markers across generations by Cassandra `LivenessInfo.supersedes`
+    /// (`cassandra-5.0.8` `db/LivenessInfo.java:219-232`, folded by `Row.Merger.merge`,
+    /// `Row.java:743-752`): the higher WRITE timestamp wins outright (issue #2374/#2789 — a newer
+    /// TTL'd marker supersedes an older live-forever one and vice-versa, never a permissive
+    /// union); at an EQUAL timestamp an expiring marker beats a live-forever one, of two expiring
+    /// markers the later `localExpirationTime` wins, then the lower TTL (#4581 — the earlier
+    /// "live-forever wins a tie" was not Cassandra: `nodetool compact` of `INSERT ..@1000` and
+    /// `INSERT .. USING TTL 3 @1000` keeps the TTL'd marker). A generation with no marker
+    /// contributes nothing; the winner's `ttl_seconds` rides along with it.
     pub fn merge(self, other: RowLiveness) -> RowLiveness {
         match (self.has_marker, other.has_marker) {
             (false, false) => RowLiveness::default(),
             (true, false) => self,
             (false, true) => other,
-            (true, true) => {
-                // Both generations carry a marker: last-write-wins on the
-                // authoritative write timestamp; later expiry breaks a tie.
-                let self_wins = match (self.marker_timestamp, other.marker_timestamp) {
-                    (Some(a), Some(b)) if a != b => a > b,
-                    // Equal (or one/both absent) timestamps → tie-break on the
-                    // later expiry, treating live-forever (`None`) as the latest.
-                    _ => match (self.expires_at_seconds, other.expires_at_seconds) {
-                        (None, _) => true,
-                        (_, None) => false,
-                        (Some(a), Some(b)) => a >= b,
-                    },
-                };
-                if self_wins {
-                    self
-                } else {
-                    other
-                }
-            }
+            (true, true) if other.supersedes(&self) => other,
+            (true, true) => self,
+        }
+    }
+
+    /// `LivenessInfo.supersedes`: `self` replaces `other` in a merge. An MV "expired" liveness
+    /// (`ttl == Integer.MAX_VALUE`, `EXPIRED_LIVENESS_TTL`) wins an equal-timestamp tie first.
+    fn supersedes(&self, other: &RowLiveness) -> bool {
+        if self.marker_timestamp != other.marker_timestamp {
+            return self.marker_timestamp > other.marker_timestamp;
+        }
+        let expired = |l: &RowLiveness| l.ttl_seconds == Some(i32::MAX);
+        if expired(self) != expired(other) {
+            return expired(self);
+        }
+        match (self.expires_at_seconds, other.expires_at_seconds) {
+            (Some(a), Some(b)) => a > b || (a == b && self.ttl_seconds < other.ttl_seconds),
+            (a, b) => a.is_some() && b.is_none(),
         }
     }
 }
@@ -725,13 +717,15 @@ mod row_liveness_tests {
         assert!(gen_b.merge(gen_a).marker_live_at(2_000));
     }
 
-    /// Equal timestamps → tie-break on the later expiry (live-forever latest).
+    /// Equal timestamps (`LivenessInfo.supersedes`, issue #4581): an EXPIRING marker beats a
+    /// live-forever one (confirmed against `nodetool compact`, `test_markerrows.ttl_within_grace`
+    /// pk 4/5); of two expiring markers the later expiry wins.
     #[test]
-    fn equal_timestamps_tie_break_on_later_expiry() {
+    fn equal_timestamps_expiring_beats_live_forever_then_later_expiry_wins() {
         let live_forever = marker(300, None);
         let ttl = marker(300, Some(500));
-        assert_eq!(live_forever.merge(ttl).expires_at_seconds, None);
-        assert_eq!(ttl.merge(live_forever).expires_at_seconds, None);
+        assert_eq!(live_forever.merge(ttl).expires_at_seconds, Some(500));
+        assert_eq!(ttl.merge(live_forever).expires_at_seconds, Some(500));
 
         let earlier = marker(300, Some(400));
         let later = marker(300, Some(900));

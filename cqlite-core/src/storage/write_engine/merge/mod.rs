@@ -404,7 +404,6 @@ pub(crate) use async_bridge::block_on_async;
 /// stays in [`from_readers`].
 #[cfg(feature = "write-support")]
 mod constructors;
-pub use constructors::MergePurpose;
 // Matches `mod constructors` above: the item cannot exist without `write-support`,
 // so the re-export must not claim otherwise. Not currently reachable as a break —
 // `write_engine` is itself `#[cfg(feature = "write-support")]`, so this file only
@@ -589,8 +588,6 @@ pub struct KWayMerger {
     /// "now" (epoch seconds) used to evaluate TTL expiry during merge (#848).
     #[allow(dead_code)]
     now_secs: Option<i64>,
-    /// Read vs compaction (#4524); decides marker-only rows. See [`MergePurpose`].
-    purpose: MergePurpose,
     /// Overlap-safety gate for tombstone purging (#921 finding 1).
     ///
     /// A partial compaction may leave data shadowed by a tombstone in a NON-included
@@ -1649,7 +1646,6 @@ impl KWayMerger {
             None,
             scan_cancel,
         )
-        .map(|m| m.with_purpose(MergePurpose::Read))
     }
 
     /// Create a new k-way merger with explicit purge parameters.
@@ -2349,7 +2345,6 @@ impl KWayMerger {
                 max_purgeable_timestamp,
                 // #1382: TTL expiry uses the SAME pinned `now` as `compute_gc_before`.
                 self.now_secs,
-                self.purpose.keeps_marker_only_rows(&self.schema),
                 &mut purges,
             ) {
                 // Issue #933: shadow cells covered by a range tombstone. The merge
@@ -3351,7 +3346,6 @@ impl KWayMerger {
             // TTL expiry (`now_secs = None` = strict no-op). Tests that exercise
             // TTL expiry drive the real `compact_sstables` surface instead.
             None,
-            false,
             &mut sink,
         )
     }
@@ -3382,8 +3376,6 @@ impl KWayMerger {
         // and then purged by the SAME gc/overlap gate as any other cell tombstone.
         // `None` disables expiry (a strict no-op), preserving pre-#1382 behavior.
         now_secs: Option<i64>,
-        // READ-merge only (#4524): keep a liveness-only row of a clustering-less table.
-        keep_marker_only: bool,
         // Tombstone-purge tally accumulated at the true purge decision points
         // (issue #1037). Never read here; only incremented.
         purges: &mut PurgeCounts,
@@ -3410,6 +3402,8 @@ impl KWayMerger {
         state.apply_complex_deletions();
         // Step 3: row-tombstone shadowing (tallies #2163 suppression).
         state.shadow_by_row_deletion(purges);
+        // Step 3m (#4581): the marker is shadowed BEFORE any row-deletion gc purge (Row.java:762).
+        state.shadow_marker_by_row_deletion();
         // Step 3b: dropped-column filtering (captures the phantom-row guard).
         state.filter_dropped_columns(dropped_columns);
         // Step 3b′ (#1382): TTL expiry — convert expired live cells to cell
@@ -3419,9 +3413,11 @@ impl KWayMerger {
         state.expire_ttl_cells(now_secs);
         // Step 3c: gc_grace / overlap-aware tombstone purging (tallies #1037).
         state.purge_gc_grace(gc_before_secs, max_purgeable_timestamp, purges);
+        // Step 3d (#4581): purge an expired, gc-able primary-key marker (BTreeRow.java:464).
+        state.purge_marker(now_secs, gc_before_secs, max_purgeable_timestamp);
         // Step 4: phantom-row guard + emit the merged entry (tallies #2163
         // emitted row-tombstone markers).
-        state.build(purges, keep_marker_only, now_secs)
+        state.build(purges, now_secs)
     }
 
     /// Convert reconciled `CellData`s into writer `CellOperation`s (epic #899,
@@ -3532,7 +3528,7 @@ impl KWayMerger {
         schema: &TableSchema,
     ) -> Result<crate::storage::write_engine::mutation::Mutation> {
         use crate::storage::write_engine::mutation::{
-            CellOperation, Mutation, PartitionKey, TableId,
+            CellOperation, MarkerMode, Mutation, PartitionKey, RowMarker, TableId,
         };
 
         let partition_key = PartitionKey::from_bytes(&entry.key.key, schema)?;
@@ -3653,6 +3649,11 @@ impl KWayMerger {
                 RowData::Tombstone { .. } => None,
             };
 
+        // #4581: the reconciled marker rides to the writer verbatim (ts/TTL/LDT), never re-derived.
+        let marker_mode = MarkerMode::Explicit(match &entry.row_data {
+            RowData::Live { .. } => RowMarker::from_liveness(&entry.row_liveness),
+            RowData::Tombstone { .. } => None,
+        });
         let mut operations = match entry.row_data {
             RowData::Live { cells } => Self::cells_to_cell_operations(cells),
             RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
@@ -3723,6 +3724,7 @@ impl KWayMerger {
         // surviving sibling cell's own timestamp instead of the row max — for
         // BOTH a live cell's writetime AND a cell tombstone's markedForDeleteAt.
         mutation.cell_write_timestamps = cell_write_timestamps;
+        mutation.marker_mode = marker_mode;
         Ok(mutation)
     }
 }
@@ -4134,7 +4136,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -4259,7 +4260,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -4409,7 +4409,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -4550,7 +4549,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -4693,7 +4691,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -4829,7 +4826,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -4927,7 +4923,6 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -6330,7 +6325,6 @@ mod merge_property_tests {
                     now_secs: None,
                     purge_safe: false,
                     max_purgeable_timestamp: None,
-                    purpose: MergePurpose::Compaction,
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
                     _egress_slot: None,
@@ -6459,7 +6453,6 @@ mod merge_property_tests {
                     now_secs: None,
                     purge_safe: false,
                     max_purgeable_timestamp: None,
-                    purpose: MergePurpose::Compaction,
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
                     _egress_slot: None,
@@ -8459,7 +8452,6 @@ mod issue_822_merge_ordering_semantics {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -9359,7 +9351,6 @@ mod issue_886_empty_partition_skip {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
@@ -9660,7 +9651,6 @@ mod issue_912_row_tombstone_clustering_identity {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema: schema.clone(),
             schema_arc: std::sync::Arc::new(schema.clone()),
             _egress_slot: None,
@@ -10055,7 +10045,6 @@ mod issue_873_preserve_row_tombstone_ldt {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema: schema.clone(),
             schema_arc: std::sync::Arc::new(schema.clone()),
             _egress_slot: None,
@@ -10607,7 +10596,6 @@ mod issue_845_gc_grace_purge {
             now_secs: None,
             purge_safe,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             _egress_slot: None,
         };
 
@@ -10664,7 +10652,6 @@ mod issue_845_gc_grace_purge {
             now_secs: None,
             purge_safe,
             max_purgeable_timestamp: bound,
-            purpose: MergePurpose::Compaction,
             _egress_slot: None,
         };
 
@@ -11175,7 +11162,6 @@ mod issue_845_gc_grace_purge {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
-            purpose: MergePurpose::Compaction,
             schema: write_schema.clone(),
             schema_arc: std::sync::Arc::new(write_schema.clone()),
             _egress_slot: None,

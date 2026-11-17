@@ -118,6 +118,14 @@ impl V5CompressedLegacyParser {
             .collect();
         simple_cells.sort_by(|a, b| a.column.cmp(&b.column));
 
+        // Issue #4581: the row's primary-key marker, read BEFORE the deletion arm so a marker strictly
+        // newer than the row deletion is not lost to it (`Row.Merger` keeps a regular deletion AND the
+        // newer marker; `activeDeletion.deletes(rowInfo)` is `ts <= markedForDeleteAt`, Row.java:762).
+        let row_liveness = row_header_opt
+            .as_ref()
+            .map(|h| h.row_liveness())
+            .unwrap_or_default();
+
         // Issue #932: a row deletion either COEXISTS with surviving data cells
         // (kept as `Live { row_deletion: Some(..) }`) or — when no NON-primary-key
         // cell and no complex element survives — is a pure row tombstone (kept as
@@ -187,7 +195,11 @@ impl V5CompressedLegacyParser {
                 clustering.len(),
             )?;
 
-            if !has_simple_data && !has_complex_data {
+            let marker_outlives_deletion = row_liveness.has_marker
+                && row_liveness
+                    .marker_timestamp
+                    .is_some_and(|ts| ts > deletion_time);
+            if !has_simple_data && !has_complex_data && !marker_outlives_deletion {
                 // Pure row tombstone: emit the clustering prefix rebuilt above.
                 //
                 // A static row reaches here with `clustering` already EMPTY (it
@@ -202,14 +214,9 @@ impl V5CompressedLegacyParser {
             }
         }
 
-        // Issue #2374/#2789: carry the row-marker liveness so the READ path can
-        // hide a row whose only content is an expired liveness marker + already-
-        // tombstoned cells (carry-only; the write path ignores it).
-        let row_liveness = row_header_opt
-            .as_ref()
-            .map(|h| h.row_liveness())
-            .unwrap_or_default();
-
+        // Issue #2374/#2789: `row_liveness` (above) rides on the `Live` row so the READ path can hide a
+        // row whose only content is an expired marker + tombstoned cells, and (#4581) so compaction
+        // re-emits the marker with its real ts/TTL/LDT.
         Ok(CompactionRowData::Live {
             simple: simple_cells,
             complex: complex_cols,

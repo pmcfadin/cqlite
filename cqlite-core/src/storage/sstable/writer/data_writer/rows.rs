@@ -166,21 +166,16 @@ impl DataWriter {
     ///   `timestamp <= markedForDeleteAt`).
     /// - Cells: last-write-wins per column by timestamp; a tombstone wins a
     ///   timestamp tie (Cassandra cell reconciliation).
-    /// - Liveness: from the newest surviving mutation that writes cells, or
-    ///   a pure primary-key insert (no ops and no tombstone payload). Pure
-    ///   row tombstones carry NO liveness, matching Cassandra's serializer.
+    /// - Liveness: an explicit compaction `row_marker` (#4581), else the newest surviving
+    ///   mutation that writes cells or a pure primary-key insert. Row tombstones carry none.
     ///
     /// Returns `None` when the group produces no row at all (e.g. a mutation
     /// that exists only to carry a partition or range tombstone, or a row
     /// fully shadowed by the partition/range tombstone `shadow_floor`).
     ///
-    /// `pub(crate)` (widened from `pub(super)`, issue #4246): also called as
-    /// a pure pre-check from `stats_fold::row_group_survives`/
-    /// `row_group_survival`, which live in `writer` (the grandparent of this
-    /// module) so BOTH the buffered and incremental writer paths can gate
-    /// their persisted `StatisticsMetadata` fold on this SAME shadow-drop
-    /// decision — see [`Self::resolve_row_deletion`]'s own doc comment for
-    /// how the group-level row-deletion marker specifically is shared.
+    /// `pub(crate)` (issue #4246): also the pure pre-check of `stats_fold::row_group_survival`, so
+    /// both writer paths gate their persisted stats fold on this SAME shadow-drop decision
+    /// (see [`Self::resolve_row_deletion`]).
     pub(crate) fn merge_row_group<'a>(
         group: &[&'a Mutation],
         schema: &TableSchema,
@@ -190,12 +185,8 @@ impl DataWriter {
         use crate::storage::write_engine::mutation::CellOperation;
 
         let now_seconds = super::types::wall_clock_seconds();
-        // Cells and liveness are shadowed by the strongest covering deletion:
-        // the row deletion (issue #4246 roborev finding: also exposed via
-        // `resolve_row_deletion`/`combine_deletion_ts` so a stats-fold caller
-        // can gate an individual mutation's own contribution against it, not
-        // just the whole group's survival) or the partition/range tombstone
-        // floor.
+        // Cells and liveness are shadowed by the strongest covering deletion (row deletion or
+        // partition/range floor); also exposed via `resolve_row_deletion`/`combine_deletion_ts` (#4246).
         let row_deletion = Self::resolve_row_deletion(group, shadow_floor);
         let deletion_ts = Self::combine_deletion_ts(row_deletion, shadow_floor);
 
@@ -749,6 +740,12 @@ impl DataWriter {
             }
         }
 
+        // Compaction (`MarkerMode::Explicit`, #4581): the reconciled marker is authoritative, even
+        // when absent (UPDATE-created, purged or shadowed), and is never cell-derived.
+        let marker = Self::authoritative_marker(group, deletion_ts);
+        if let Some(mk) = marker {
+            liveness = mk.map(|mk| (mk.timestamp_micros, mk.ttl_seconds));
+        }
         if ops.is_empty()
             && complex_element_ops.is_empty()
             && row_deletion.is_none()
@@ -761,6 +758,7 @@ impl DataWriter {
             clustering_key: group[0].clustering_key.as_ref(),
             liveness_ts: liveness.map(|(ts, _)| ts),
             ttl_seconds: liveness.and_then(|(_, ttl)| ttl),
+            liveness_ldt: marker.flatten().and_then(|mk| mk.local_expiration_time),
             row_deletion,
             ops,
             complex_element_ops,
@@ -888,6 +886,7 @@ impl DataWriter {
             clustering_key: mutation.clustering_key.as_ref(),
             liveness_ts: Some(mutation.timestamp_micros),
             ttl_seconds: mutation.ttl_seconds.filter(|t| *t != 0),
+            liveness_ldt: None,
             row_deletion: None,
             ops: Vec::new(),
             complex_element_ops: Vec::new(),
@@ -958,7 +957,8 @@ impl DataWriter {
                 }
                 encode_unsigned(ttl_delta as u64, &mut body);
 
-                let local_deletion_time = self.expiring_local_deletion_time(now_seconds, ttl);
+                let local_deletion_time = (row.liveness_ldt)
+                    .unwrap_or_else(|| self.expiring_local_deletion_time(now_seconds, ttl));
                 let ldt_delta =
                     (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
                 if ldt_delta < 0 {
