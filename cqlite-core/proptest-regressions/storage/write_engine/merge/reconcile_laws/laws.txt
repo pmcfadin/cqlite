@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 01f9207e02499086474f35eb0b5c20fcd341de377aec3a9aa90f3b11f50587f9 # shrinks to a = [], b = [Cell(CellSpec { ck: 2, col: 1, ts: 1, value: 11, expiring: Some((10, 998)) })], c = [CellTomb { ck: 2, col: 1, ts: 1, ldt: 501 }], expire = true

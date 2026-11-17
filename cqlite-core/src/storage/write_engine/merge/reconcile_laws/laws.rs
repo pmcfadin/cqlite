@@ -92,6 +92,13 @@ proptest! {
     }
 
     /// merge(merge(a, b), c) == merge(a, merge(b, c))
+    ///
+    /// Only the FINAL merge applies TTL expiry; the intermediate merge is expiry-free.
+    /// Cassandra itself is not associative across an intermediate expiry conversion
+    /// (`AbstractCell.purge` turns an expired expiring cell into a tombstone with
+    /// `localDeletionTime - ttl`, and `Cells.resolveRegular` then orders two tombstones by
+    /// LDT), so staging a conversion before a tie changes the winning LDT. See
+    /// [`expiry_between_merges_is_order_dependent_in_cassandra`].
     #[test]
     fn merge_is_associative(
         a in arb_stream(Profile::Clean),
@@ -99,8 +106,8 @@ proptest! {
         c in arb_stream(Profile::Clean),
         expire in any::<bool>(),
     ) {
-        let left = merge_entries(expire, vec![merge(expire, &[&a, &b]), build_all(&c)]);
-        let right = merge_entries(expire, vec![build_all(&a), merge(expire, &[&b, &c])]);
+        let left = merge_entries(expire, vec![merge(false, &[&a, &b]), build_all(&c)]);
+        let right = merge_entries(expire, vec![build_all(&a), merge(false, &[&b, &c])]);
         prop_assert_eq!(norm(&left), norm(&right));
     }
 
@@ -132,6 +139,42 @@ proptest! {
     ) {
         prop_assert_eq!(norm(&merge(expire, &[&a])), norm(&merge(expire, &[&a, &a])));
     }
+}
+
+/// Pins why `merge_is_associative` keeps the intermediate merge expiry-free (#4497,
+/// counterexample seed 1794880512231984570). At an equal timestamp, an expired expiring
+/// cell `b` (ldt 998, ttl 10) and a cell tombstone `c` (ldt 501):
+/// * `b` merged ALONE first is converted to a tombstone with ldt `998 - 10 = 988`
+///   (`AbstractCell.purge`, `db/rows/AbstractCell.java:95`); it then meets `c` as
+///   tombstone-vs-tombstone and the higher LDT wins (`Cells.resolveRegular`,
+///   `db/rows/Cells.java:79`, "leftLocalDeletionTime > rightLocalDeletionTime"): ldt 988.
+/// * `b` merged WITH `c` first: the pure tombstone beats the expiring cell
+///   (`Cells.java` "we still prefer tombstones over expiring cells"): ldt 501.
+/// Cassandra yields both, so the law is scoped, not CQLite's reconcile changed.
+#[test]
+fn expiry_between_merges_is_order_dependent_in_cassandra() {
+    let b = [Spec::Cell(super::generators::CellSpec {
+        ck: 2,
+        col: 1,
+        ts: 1,
+        value: 11,
+        expiring: Some((10, 998)),
+    })];
+    let c = [Spec::CellTomb {
+        ck: 2,
+        col: 1,
+        ts: 1,
+        ldt: 501,
+    }];
+    let left = merge_entries(true, vec![merge(true, &[&b]), build_all(&c)]);
+    let right = merge_entries(true, vec![merge(true, &[&b, &c])]);
+    let l = norm(&left).join("");
+    let r = norm(&right).join("");
+    assert!(l.contains("local_deletion_time: Some(988)"), "{l}");
+    assert!(r.contains("local_deletion_time: Some(501)"), "{r}");
+    // With the intermediate merge expiry-free (the law's form) both orders agree.
+    let l2 = merge_entries(true, vec![merge(false, &[&b]), build_all(&c)]);
+    assert_eq!(norm(&l2), norm(&right));
 }
 
 /// The generator must actually exercise every stream feature the issue lists (AC 1);
