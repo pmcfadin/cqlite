@@ -125,6 +125,11 @@ async fn run_main() -> Result<()> {
         return commands::dispatch_diagnose(cli.schema.as_deref(), args).await;
     }
 
+    // `find` (issue #4205): files only, no Database; owns its 0/1/2 exit codes.
+    if let Some(Commands::Find(args)) = &cli.command {
+        return commands::dispatch_find(cli.schema.as_deref(), args).await;
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
@@ -1077,21 +1082,16 @@ async fn run_main() -> Result<()> {
                 ))
             }
         }
-        Some(Commands::Verify { .. }) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Verify is dispatched before database initialization")
-        }
-        Some(Commands::Salvage(_)) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Salvage is dispatched before database initialization")
-        }
-        Some(Commands::Rebuild(_)) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("Commands::Rebuild is dispatched before database initialization")
-        }
-        Some(Commands::Sweep(_)) | Some(Commands::Diagnose(_)) => {
-            // Handled by the short-circuit before database init; see above.
-            unreachable!("sweep/diagnose are dispatched before database initialization")
+        // All dispatched by the short-circuits before database init (see above).
+        Some(
+            Commands::Verify { .. }
+            | Commands::Salvage(_)
+            | Commands::Rebuild(_)
+            | Commands::Sweep(_)
+            | Commands::Diagnose(_)
+            | Commands::Find(_),
+        ) => {
+            unreachable!("file-only verbs are dispatched before database initialization")
         }
         None => {
             // Issue #1693 (AG4): with `--writable` and no one-shot operation

@@ -42,8 +42,14 @@ pub const RECORD_OVERHEAD: usize = 12;
 /// One step of a frame walk.
 #[derive(Debug)]
 pub enum FrameStep<'a> {
-    /// A validated mutation record body (the serialized `Mutation` bytes).
-    Record(&'a [u8]),
+    /// A validated mutation record: `offset` is the record header's byte offset WITHIN THE
+    /// SEGMENT FILE (usable with `dd`/`hexdump`), `body` the serialized `Mutation` bytes.
+    Record {
+        /// Byte offset of the record's `int32 size` field within the segment file.
+        offset: usize,
+        /// The CRC-validated mutation bytes.
+        body: &'a [u8],
+    },
     /// Clean end of the written segment (padding / zeroed pre-allocation).
     End,
     /// Torn tail: a record or marker ran past end-of-file. Records already
@@ -120,7 +126,9 @@ impl<'a> FrameWalker<'a> {
 
             // Within the open section, read the next record.
             match self.read_record()? {
-                RecordOutcome::Body(b) => return Ok(FrameStep::Record(b)),
+                RecordOutcome::Body { offset, body } => {
+                    return Ok(FrameStep::Record { offset, body })
+                }
                 RecordOutcome::SectionDone => {
                     // Advance to the next marker.
                     self.in_section = false;
@@ -326,12 +334,12 @@ impl<'a> FrameWalker<'a> {
         }
 
         self.cursor = end;
-        Ok(RecordOutcome::Body(body))
+        Ok(RecordOutcome::Body { offset: cur, body })
     }
 }
 
 enum RecordOutcome<'a> {
-    Body(&'a [u8]),
+    Body { offset: usize, body: &'a [u8] },
     SectionDone,
     CleanEnd,
     Truncated,
@@ -418,7 +426,7 @@ mod tests {
         let mut records = Vec::new();
         loop {
             match walker.next_frame().expect("no corruption in this fixture") {
-                FrameStep::Record(b) => records.push(b.to_vec()),
+                FrameStep::Record { body, .. } => records.push(body.to_vec()),
                 FrameStep::End => break,
                 FrameStep::Truncated => panic!("expected a clean end, not Truncated"),
             }
@@ -452,7 +460,7 @@ mod tests {
 
         let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
         match walker.next_frame().expect("valid record") {
-            FrameStep::Record(_) => {}
+            FrameStep::Record { .. } => {}
             other => panic!("expected the one record, got {other:?}"),
         }
         match walker.next_frame().expect("no corruption") {

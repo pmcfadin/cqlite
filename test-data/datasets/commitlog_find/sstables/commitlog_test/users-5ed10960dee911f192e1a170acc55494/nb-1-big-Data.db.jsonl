@@ -1,0 +1,3 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":18},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"2026-11-10T08:40:01Z"},"cells":[{"name":"age","value":30},{"name":"name","value":"alice"}]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":53},"rows":[{"type":"row","position":53,"liveness_info":{"tstamp":"2026-11-10T08:40:02Z"},"cells":[{"name":"age","value":25},{"name":"name","value":"bob"}]}]}
+{"table kind":"REGULAR","partition":{"key":["3"],"position":88},"rows":[{"type":"row","position":88,"liveness_info":{"tstamp":"2026-11-10T08:40:03Z"},"cells":[{"name":"age","value":42},{"name":"name","value":"carol"}]}]}
