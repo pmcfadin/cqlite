@@ -254,7 +254,11 @@ pub(super) fn exit_after_partial_failure(
     // here to stderr; a second failure writing/rendering what WAS gathered
     // is not separately fatal — `reports` being non-empty already means
     // there is something worth a manifest, either way below.
-    let _ = write_manifest_file(reports, args, is_table_dir, guard);
+    // The failure is reported (never swallowed, issue #4528); the exit code below is unchanged:
+    // the run already failed, and `reports` having output still means 3.
+    if let Err(e) = write_manifest_file(reports, args, is_table_dir, guard) {
+        eprintln!("cqlite salvage: failed to write manifest: {e:#}");
+    }
     render_console(reports, args, is_table_dir);
     let any_output_written = out_has_data_db || reports.iter().any(|r| r.refused.is_none());
     if any_output_written {
@@ -383,10 +387,14 @@ pub(super) fn write_manifest_file(
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
     }
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-    write_manifest_json(std::io::BufWriter::new(file), reports, is_table_dir)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    // Issues #4528/#4549: serialise in memory, then publish atomically (temp + fsync + rename +
+    // dir fsync). Every I/O step is checked, so nothing is swallowed by a dropped BufWriter and a
+    // crash or short write never leaves a torn manifest.
+    let mut bytes = Vec::new();
+    write_manifest_json(&mut bytes, reports, is_table_dir)
+        .with_context(|| format!("failed to serialise the manifest for {}", path.display()))?;
+    cqlite_core::storage::write_engine::rebuild::staged_publish::write_file_atomic(path, &bytes)
+        .map_err(|e| anyhow::anyhow!("failed to write manifest {}: {e}", path.display()))?;
     Ok(())
 }
 

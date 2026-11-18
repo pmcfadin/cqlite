@@ -318,9 +318,10 @@ fn run_verb(
 }
 
 /// Whether boundary `i` is at or after the first `rename` boundary (the #4529 publish window).
-/// The `--manifest` write follows publication and is not part of the window.
+/// The `--manifest` write (its `.manifest.json.tmp` and the rename) follows publication and is not
+/// part of the window.
 fn in_publish_window(bounds: &[(String, String)], i: usize) -> bool {
-    !bounds[i].1.ends_with("manifest.json")
+    !bounds[i].1.contains("manifest.json")
         && bounds
             .iter()
             .position(|(k, _)| k == "rename")
@@ -502,6 +503,7 @@ enum Scope {
 /// exactly these cells and nothing else, so an unlisted failure always reds; each listed issue is
 /// reproduced by its own `#[ignore = "#<issue>"]` test below. Fixing an issue means deleting its
 /// entries and its `#[ignore]`.
+#[allow(dead_code)] // no entries while the registry is empty
 struct Defect {
     verb: Verb,
     fixture: &'static str,
@@ -513,42 +515,14 @@ struct Defect {
 
 /// Fixture tables a defect applies to (all the harness fixtures: Filter/TOC/manifest writes are
 /// format-independent).
+#[allow(dead_code)] // used by entries when the registry is non-empty
 const ALL_FIXTURES: [&str; 3] = ["lz4_table", "multiclustering_table", "wide_partition"];
 
+/// The registry is EMPTY: #4527, #4528 and #4549 are all fixed and pinned by their `Scope::Only`
+/// regressions. A new confirmed defect is listed here with an `#[ignore]`d reproducer.
 fn defects() -> Vec<Defect> {
-    let mut v = Vec::new();
-    for fixture in ALL_FIXTURES {
-        // #4528: salvage swallows an ENOSPC on the --manifest write (exit 0).
-        v.push(Defect {
-            verb: Verb::Salvage,
-            fixture,
-            path_suffix: "manifest.json",
-            modes: &[Mode::Enospc, Mode::Short],
-            issue: 4528,
-        });
-        // TORN_MANIFEST (#4549): `--manifest` is written in place
-        // (`File::create`/`fs::write`, not temp + rename), so a crash mid-write leaves a 0-byte or
-        // truncated manifest, and rebuild also leaves one after an ENOSPC/short write.
-        v.push(Defect {
-            verb: Verb::Salvage,
-            fixture,
-            path_suffix: "manifest.json",
-            modes: &[Mode::Crash],
-            issue: TORN_MANIFEST,
-        });
-        v.push(Defect {
-            verb: Verb::Rebuild,
-            fixture,
-            path_suffix: "manifest.json",
-            modes: &[Mode::Crash, Mode::Enospc, Mode::Short],
-            issue: TORN_MANIFEST,
-        });
-    }
-    v
+    Vec::new()
 }
-
-/// Issue number of the torn-`--manifest` defect.
-const TORN_MANIFEST: u32 = 4549;
 
 fn known_defect(verb: Verb, f: &Fixture, kind: &str, path: &str, mode: Mode) -> Option<u32> {
     if !matches!(kind, "write" | "pwrite") {
@@ -813,6 +787,14 @@ fn check_verbs(verbs: &[Verb], scope: Scope, fixtures: Vec<Fixture>) {
         for f in &fixtures {
             let (n, runs, failures) = sweep(*verb, f, scope);
             report(*verb, f, n, runs, &failures);
+            if matches!(scope, Scope::Only(..)) {
+                // A named regression that matches no boundary proves nothing: fail closed.
+                assert!(
+                    runs >= 1,
+                    "{verb:?}/{}: the Only scope matched no boundary",
+                    f.table
+                );
+            }
             all.extend(failures);
         }
     }
@@ -844,20 +826,32 @@ fn issue_4527_filter_enospc_exits_nonzero() {
     );
 }
 
+/// Regression for #4528 (fixed): salvage's `--manifest` write error (ENOSPC / short write) fails
+/// the run non-zero instead of exiting 0 with no manifest. The write boundary is on the
+/// dot-prefixed `.manifest.json.tmp` sibling (#4549).
 #[test]
-#[ignore = "#4528 salvage swallows a --manifest write error"]
-fn issue_4528_salvage_manifest_write_error_swallowed() {
-    check(Verb::Salvage, Scope::KnownDefects(4528), fixtures());
+fn issue_4528_salvage_manifest_write_error_fails_the_run() {
+    for mode in [Mode::Enospc, Mode::Short] {
+        check(
+            Verb::Salvage,
+            Scope::Only("manifest.json.tmp", mode),
+            fixtures(),
+        );
+    }
 }
 
+/// Regression for #4549 (fixed): `--manifest` is published by temp + fsync + rename + directory
+/// fsync, so a crash, ENOSPC or short write can never leave a torn manifest (the post-fault
+/// manifest check in `sweep` requires absent-or-complete).
 #[test]
-#[ignore = "#4549 --manifest is written in place: a crash (or rebuild's ENOSPC/short write) leaves a torn manifest.json"]
-fn issue_4549_torn_manifest_after_a_fault() {
-    check_verbs(
-        &[Verb::Rebuild, Verb::Salvage],
-        Scope::KnownDefects(TORN_MANIFEST),
-        fixtures(),
-    );
+fn issue_4549_manifest_is_published_atomically() {
+    for mode in [Mode::Crash, Mode::Enospc, Mode::Short] {
+        check_verbs(
+            &[Verb::Rebuild, Verb::Salvage],
+            Scope::Only("manifest.json.tmp", mode),
+            fixtures(),
+        );
+    }
 }
 
 #[test]

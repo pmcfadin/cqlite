@@ -89,7 +89,7 @@ pub(super) fn assert_expected_categories(
     reference: &BTreeMap<PathBuf, Vec<u8>>,
 ) {
     // Components are created/written in the `.cqlite-publish-*.tmp` stage (#4529), so match the
-    // staged path; the manifest is written directly.
+    // staged path; the manifest is written to `.manifest.json.tmp` and renamed (#4549).
     let has = |kinds: &[&str], path: &str| {
         let base = path.rsplit('/').next().unwrap_or(path);
         bounds.iter().any(|(k, p)| {
@@ -109,6 +109,19 @@ pub(super) fn assert_expected_categories(
         .collect();
     files.push(("manifest.json".to_string(), true));
     for (f, non_empty) in &files {
+        // The manifest is created and written under its temp sibling; its final name is only the
+        // target of a `rename` boundary (#4549).
+        let tmp_name;
+        let f = if f == "manifest.json" {
+            tmp_name = ".manifest.json.tmp".to_string();
+            assert!(
+                has(&["rename"], f),
+                "{verb:?}: no `rename` boundary enumerated for {f} — manifest not published by rename?"
+            );
+            &tmp_name
+        } else {
+            f
+        };
         assert!(
             has(&["create"], f),
             "{verb:?}: no `create` boundary enumerated for {f} — shim blind to file creation?"

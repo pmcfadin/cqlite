@@ -170,7 +170,15 @@ fn render_and_write_reports(
         if let Some(parent) = manifest_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(manifest_path, json)?;
+        // Atomic (temp + fsync + rename + dir fsync, the staged_publish order); a failure names
+        // the path and cause and fails the run (issues #4528, #4549).
+        cqlite_core::storage::write_engine::rebuild::staged_publish::write_file_atomic(
+            manifest_path,
+            json.as_bytes(),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("failed to write manifest {}: {e}", manifest_path.display())
+        })?;
     }
     Ok(())
 }

@@ -358,6 +358,46 @@ fn remove_stage_tree(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Publish ONE file (e.g. a `--manifest` report) atomically at `dest` (issues #4528, #4549), in the
+/// same durability order as [`StagedPublish`]: write a non-component temp sibling
+/// (`.<name>.tmp`, as `TocWriter` does for TOC.txt) in the same directory, fsync the file, `rename` it over `dest`, then
+/// fsync the parent directory. After a fault at any point `dest` is absent, the previous content,
+/// or the complete new content, never a torn file. Every step's error is returned naming the path
+/// and cause; on failure before the rename the temp is removed. The parent must exist.
+pub fn write_file_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| Error::Storage(format!("{} has no file name", dest.display())))?;
+    let tmp = dest.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
+    let staged = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()
+    })();
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp); // best effort; the write error is what is reported
+        return Err(Error::Storage(format!(
+            "failed to write and fsync {}: {e}",
+            tmp.display()
+        )));
+    }
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Storage(format!(
+            "failed to rename {} -> {}: {e}",
+            tmp.display(),
+            dest.display()
+        )));
+    }
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    fsync_dir(parent)
+}
+
 fn fsync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     {
