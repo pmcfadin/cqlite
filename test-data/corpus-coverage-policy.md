@@ -83,8 +83,9 @@ and local dev `.git` is always present.
 | `test_signed_coll` | parity-fixture | signed set/map element-order byte-parity fixtures (dedicated Rust parity test issue_1295_*). |
 | `test_compaction_tombstone_ttl` | parity-fixture | tombstone/TTL compaction byte-parity fixtures validated by dedicated Rust parity test `issue_1387_tombstone_ttl_compaction_byte_parity.rs`, not the read-parity corpus. |
 | `test_comparator_order` | parity-fixture | `inet`/`time` multicell-collection ORDERING fixture (issue #3790): `SET<INET>`, `SET<TIME>`, `MAP<INET,TEXT>`, `MAP<TIME,TEXT>` and `SET<FROZEN<TUPLE<INET,TIME>>>`, validated by the dedicated Rust ordering test `issue_3790_*`. Excluded for two reasons: a row-count smoke pass over it proves nothing about element ORDER, and the ordering it pins is the very property that was wrong — enrolling a known-divergent fixture as enforced would red every lane's gate for a defect the fixture documents rather than regresses. See the README beside the fixture. |
+| `test_explain` | parity-fixture | `cqlite explain` decision-trail fixture (issue #4193): seven partitions, one per reconciliation verdict (timestamp, row, range, cell, partition, collection, expired), validated by the dedicated Rust tests `issue_4193_*`. Not read-parity data: the dump keeps the shadowed and expired cells a SELECT drops. |
 
-`test_comparator_order` (#3790) is the newest member of that table; like the
+`test_explain` (#4193) is the newest member of that table; like the
 `*parity` keyspaces it is matched by exact name in each harness's skip constant.
 
 `system*` keyspaces are matched by the `system` **prefix** in every harness
