@@ -422,9 +422,7 @@ pub enum Commands {
     )]
     Sweep(SweepArgs),
     /// Read-only health report for a table's SSTable generations (issue #4204)
-    #[command(
-        long_about = "Report per-generation Statistics.db facts (timestamps, deletion times, droppable-tombstone estimate, repair state, compression ratio, fully-expired-at-now) and the table's token-range overlap, every number tagged with its source (statistics|index|scan) or `unmeasured: <cause>`. The default tier never opens Data.db. --deep adds one bounded scan per generation (histograms, --top N rankings, raw tombstone counts, a dry-compaction reclaim prediction when --schema is given). --out selects a rendering on stdout and NEVER writes a file; this verb modifies nothing. Exit 0 for any successful report (an unreadable generation is a field in it); 1 for usage errors. Example: cqlite diagnose ./test-data/datasets/sstables/test_basic/simple_table-xxx --deep --top 5 --out json"
-    )]
+    #[command(long_about = crate::commands::diagnose_args::DIAGNOSE_LONG_ABOUT)]
     Diagnose(crate::commands::diagnose_args::DiagnoseArgs),
     /// Find which generations hold a partition key, and unflushed CommitLog mutations (issue #4205)
     #[command(long_about = crate::commands::find_args::FIND_LONG_ABOUT)]
