@@ -360,8 +360,8 @@ fn remove_stage_tree(dir: &Path) -> Result<()> {
 
 /// Publish ONE file (e.g. a `--manifest` report) atomically at `dest` (issues #4528, #4549), in the
 /// same durability order as [`StagedPublish`]: write a non-component temp sibling
-/// (`.<name>.tmp`, as `TocWriter` does for TOC.txt) in the same directory, fsync the file, `rename` it over `dest`, then
-/// fsync the parent directory. After a fault at any point `dest` is absent, the previous content,
+/// (`.<name>.tmp`, as `TocWriter` does for TOC.txt) in the same directory, fsync the file, `rename`
+/// it over `dest`, then fsync the parent directory. After a fault at any point `dest` is absent, the previous content,
 /// or the complete new content, never a torn file. Every step's error is returned naming the path
 /// and cause; on failure before the rename the temp is removed. The parent must exist.
 pub fn write_file_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
@@ -734,5 +734,29 @@ mod tests {
         assert_eq!(std::fs::read(stage.join("unrelated")).unwrap(), b"keep");
         assert_eq!(std::fs::read(root.join("other.txt")).unwrap(), b"keep");
         assert!(root.join("ks/t/nb-1-big-Data.db").is_file());
+    }
+
+    #[test]
+    fn write_file_atomic_publishes_whole_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("manifest.json");
+        std::fs::write(&p, b"old").unwrap();
+        write_file_atomic(&p, b"{\"new\":true}").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"{\"new\":true}");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["manifest.json".to_string()]);
+    }
+
+    #[test]
+    fn write_file_atomic_failure_names_the_path_and_publishes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("no-such-dir").join("manifest.json");
+        let err = write_file_atomic(&p, b"x").unwrap_err().to_string();
+        assert!(err.contains("manifest.json"), "{err}");
+        assert!(!p.exists());
     }
 }
