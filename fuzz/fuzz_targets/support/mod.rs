@@ -1,6 +1,6 @@
-//! Shared harness for the `fuzz_audit` target (and `fuzz_find`, once #4535 lands) (issue #4502, criteria 2-4).
+//! Shared harness for the `fuzz_audit` / `fuzz_find` targets (issue #4502, criteria 2-4).
 //!
-//! The targets fuzz a whole generation DIRECTORY, so each execution:
+//! Both targets fuzz a whole generation DIRECTORY, so each execution:
 //! 1. copies a small, real, Cassandra-written BASE generation (resolved from
 //!    `CQLITE_DATASETS_ROOT`; the target is a no-op without one, like `fuzz_block_emit`),
 //! 2. replaces (or creates) exactly ONE component with the fuzz bytes, and
