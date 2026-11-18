@@ -44,14 +44,61 @@ use std::collections::BTreeSet;
 struct Excluded {
     keyspace: &'static str,
     table: &'static str,
-    /// The shapes EVERY committed generation of this table carries. VERIFIED
-    /// per generation by [`census`] against that generation's own paired golden —
-    /// declaring the wrong set, or a set that has gone stale for any one of them,
-    /// fails.
+    /// The shapes EVERY committed generation of this table carries, when they all
+    /// carry the SAME set. VERIFIED per generation by [`census`] against that
+    /// generation's own paired golden — declaring the wrong set, or a set that has
+    /// gone stale for any one of them, fails. Must be empty exactly when
+    /// [`Excluded::per_generation`] is non-empty.
     shapes: &'static [Unsupported],
+    /// The shapes of each committed generation, when generations carry DIFFERENT
+    /// sets (so no single `shapes` fits). Keys are generation labels: the
+    /// `*-Data.db` name without its `-<format>-Data.db` tail, e.g. `"nb-1"` for
+    /// `nb-1-big-Data.db`. Used INSTEAD of `shapes`, never alongside it.
+    ///
+    /// Not a union and not a loosening: each generation is still checked for
+    /// EQUALITY against its OWN paired golden, with the set declared for it. It is
+    /// fail-closed three ways — a committed generation the entry does not name is
+    /// refused (a new generation must be declared), a named generation that is not
+    /// committed is refused (stale), and a label listed twice or with an empty set
+    /// is refused (ambiguous / no reason).
+    per_generation: &'static [(&'static str, &'static [Unsupported])],
     /// Human context for the census line. Never load-bearing: the `shapes` set is
     /// what is checked.
     note: &'static str,
+}
+
+impl Excluded {
+    /// The generation label of a committed `*-Data.db` file name: `nb-1-big-Data.db`
+    /// is `nb-1`, `da-3-bti-Data.db` is `da-3`.
+    fn generation_label(file: &str) -> &str {
+        let stem = file.strip_suffix("-Data.db").unwrap_or(file);
+        stem.rsplit_once('-').map_or(stem, |(label, _format)| label)
+    }
+
+    /// The shape set this entry declares for the committed generation `file`, or why
+    /// it declares none: an entry using `per_generation` that does not name the
+    /// generation is refused rather than falling back to anything.
+    fn declared_for(&self, file: &str) -> Result<BTreeSet<Unsupported>, String> {
+        if self.per_generation.is_empty() {
+            return Ok(self.shapes.iter().copied().collect());
+        }
+        let label = Self::generation_label(file);
+        self.per_generation
+            .iter()
+            .find(|(g, _)| *g == label)
+            .map(|(_, shapes)| shapes.iter().copied().collect())
+            .ok_or_else(|| {
+                format!(
+                    "the entry declares shapes per generation ({}) but does not name \
+                     generation `{label}`",
+                    self.per_generation
+                        .iter()
+                        .map(|(g, _)| *g)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
 }
 
 /// Committed tables that CANNOT be compared this way, and why.
@@ -77,23 +124,32 @@ struct Excluded {
 /// goldens let one committed generation supply the shape for another whose golden is
 /// comparable and untested (round 21). An entry therefore excludes a table only while
 /// every committed generation of it is genuinely not comparable.
+///
+/// When a table's generations carry DIFFERENT shapes, an entry declares them with
+/// `per_generation` (see [`Excluded`]) instead of `shapes`: the same per-generation
+/// equality, against the same own-paired golden, with the set named for that
+/// generation. It is never a union — a generation the entry does not name, or names
+/// with the wrong set, fails.
 const NOT_COMPARABLE: &[Excluded] = &[
     Excluded {
         keyspace: "test_big",
         table: "wide_partition",
         shapes: &[Unsupported::RangeTombstone],
+        per_generation: &[],
         note: "range tombstone bounds in the dump",
     },
     Excluded {
         keyspace: "test_compaction_tombstone_ttl",
         table: "rt_cross_gen",
         shapes: &[Unsupported::RangeTombstone],
+        per_generation: &[],
         note: "range tombstone bounds and boundaries across two generations",
     },
     Excluded {
         keyspace: "test_compaction_tombstone_ttl",
         table: "rt_open_ended_boundary",
         shapes: &[Unsupported::RangeTombstone],
+        per_generation: &[],
         // Issue #4246 committed this #1383/#4243 oracle fixture. Its golden
         // carries two range-tombstone BOUNDS and one BOUNDARY (the synthesized
         // [Bottom,5)/[3,Top] open-ended pair) which the dump keeps and a SELECT
@@ -105,12 +161,14 @@ const NOT_COMPARABLE: &[Excluded] = &[
         keyspace: "test_compaction_tombstone_ttl",
         table: "shadow_row_delete",
         shapes: &[Unsupported::RowDeletion],
+        per_generation: &[],
         note: "a row deletion marker the dump keeps and a SELECT drops",
     },
     Excluded {
         keyspace: "test_compaction_tombstone_ttl",
         table: "ttl_expired_live",
         shapes: &[Unsupported::Ttl],
+        per_generation: &[],
         // The golden also carries cell deletions, which are NOT listed: a cell
         // tombstone reconciles to null and this lane compares it (see
         // `test_types.nb_absent_vs_null_regular`), so it is not a reason to
@@ -121,13 +179,37 @@ const NOT_COMPARABLE: &[Excluded] = &[
         keyspace: "test_da",
         table: "ttl_table",
         shapes: &[Unsupported::Ttl],
+        per_generation: &[],
         note: "row TTL",
     },
     Excluded {
         keyspace: "test_deltas",
         table: "static_with_rows",
         shapes: &[Unsupported::StaticBlock],
+        per_generation: &[],
         note: "static block: static-column projection is reconciliation",
+    },
+    Excluded {
+        keyspace: "test_explain",
+        table: "trace_decisions",
+        shapes: &[],
+        // The two generations carry DIFFERENT shapes (issue #4193), so the set is
+        // declared per generation; each is still verified for equality against its
+        // own paired golden.
+        per_generation: &[
+            ("nb-1", &[Unsupported::Ttl]),
+            (
+                "nb-2",
+                &[
+                    Unsupported::PartitionDeletion,
+                    Unsupported::RangeTombstone,
+                    Unsupported::RowDeletion,
+                ],
+            ),
+        ],
+        note: "explain's committed fixture of seven decision partitions (timestamp, row, \
+               range, cell, partition, collection, expired) is exercised by `issue_4193_*`; \
+               the dump keeps tombstones and expired cells that a SELECT drops",
     },
     Excluded {
         keyspace: "test_tomb",
@@ -137,12 +219,14 @@ const NOT_COMPARABLE: &[Excluded] = &[
             Unsupported::RowDeletion,
             Unsupported::StaticBlock,
         ],
+        per_generation: &[],
         note: "static block, row deletions and range tombstone bounds together",
     },
     Excluded {
         keyspace: "test_writeparity",
         table: "static_clustering_shape",
         shapes: &[Unsupported::StaticBlock],
+        per_generation: &[],
         note: "static block",
     },
 ];
@@ -290,10 +374,47 @@ fn census(
             ));
             continue;
         }
-        if entry.shapes.is_empty() {
+        if entry.shapes.is_empty() && entry.per_generation.is_empty() {
             out.stale.push(format!(
                 "{qualified}: an exclusion with no declared shape states no reason at all"
             ));
+        }
+        if !entry.shapes.is_empty() && !entry.per_generation.is_empty() {
+            out.stale.push(format!(
+                "{qualified}: declares both `shapes` and `per_generation` — which one \
+                 describes a generation is ambiguous"
+            ));
+        }
+        // Per-generation declarations: a label listed twice, an empty set, or a label
+        // no committed generation of the table carries is a stale declaration.
+        let committed: BTreeSet<&str> = tracked
+            .tables
+            .get(&(entry.keyspace.to_string(), entry.table.to_string()))
+            .map(|s| {
+                s.iter()
+                    .map(|(_, f)| Excluded::generation_label(f))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for (label, shapes) in entry.per_generation {
+            if !seen.insert(label) {
+                out.stale.push(format!(
+                    "{qualified}: generation `{label}` is declared more than once"
+                ));
+            }
+            if shapes.is_empty() {
+                out.stale.push(format!(
+                    "{qualified}: generation `{label}` declares no shape, which states no \
+                     reason at all"
+                ));
+            }
+            if !committed.contains(label) {
+                out.stale.push(format!(
+                    "{qualified}: declares generation `{label}`, which no committed \
+                     *-Data.db of the table carries"
+                ));
+            }
         }
     }
     out
@@ -312,7 +433,9 @@ fn verify_exclusion(
     tracked: &CommittedSet,
     read_golden: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<String, String> {
-    let declared: BTreeSet<Unsupported> = entry.shapes.iter().copied().collect();
+    let declared = entry
+        .declared_for(&id.file)
+        .map_err(|why| format!("{}: {why}", id.describe()))?;
     let Some(file) = tracked.goldens.get(id) else {
         return Err(format!(
             "{}: no committed *-Data.db.jsonl golden PAIRED with THIS *-Data.db, so the \
@@ -524,6 +647,7 @@ mod per_fixture {
         keyspace: "ks",
         table: "t",
         shapes: &[Unsupported::StaticBlock],
+        per_generation: &[],
         note: "static block",
     }];
 
@@ -743,6 +867,7 @@ mod per_fixture {
             keyspace: "ks",
             table: "t",
             shapes: &[],
+            per_generation: &[],
             note: "declares nothing",
         }];
         let tracked = committed_set(&listing(&[
@@ -860,5 +985,185 @@ mod per_fixture {
             "{:?}",
             report.untracked_oracle
         );
+    }
+
+    const PER_GEN: &[Excluded] = &[Excluded {
+        keyspace: "ks",
+        table: "t",
+        shapes: &[],
+        per_generation: &[
+            ("nb-1", &[Unsupported::StaticBlock]),
+            ("nb-9", &[Unsupported::Ttl]),
+        ],
+        note: "different shapes per generation",
+    }];
+
+    /// Two generations in two directories, each with its own paired golden.
+    fn two_generations() -> CommittedSet {
+        committed_set(&listing(&[
+            &format!("{DIR}/nb-1-big-Data.db"),
+            &format!("{DIR}/nb-1-big-Data.db.jsonl"),
+            &format!("{DIR2}/nb-9-big-Data.db"),
+            &format!("{DIR2}/nb-9-big-Data.db.jsonl"),
+        ]))
+        .expect("classifies")
+    }
+
+    /// A per-generation entry whose every generation matches ITS OWN declared set
+    /// verifies, though no single set fits both and their union is neither.
+    #[test]
+    fn a_per_generation_entry_matching_each_generation_verifies() {
+        let tracked = two_generations();
+        let texts = [
+            (
+                format!("{DIR}/nb-1-big-Data.db.jsonl"),
+                static_block_golden(),
+            ),
+            (
+                format!("{DIR2}/nb-9-big-Data.db.jsonl"),
+                Unsupported::Ttl.minimal_golden(),
+            ),
+        ];
+        let injected: Vec<(&str, &str)> = texts.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+
+        let report = census(&tracked, &NO_CASES(), PER_GEN, &reader(&injected));
+        assert_eq!(report.excluded, 2);
+        assert_eq!(report.lines.len(), 2);
+        assert!(report.stale.is_empty(), "{:?}", report.stale);
+        assert!(report.unclassified.is_empty(), "{:?}", report.unclassified);
+    }
+
+    /// A wrong set for ONE generation fails that generation (equality against its own
+    /// golden), while the other still verifies. Here nb-9's golden carries the shape
+    /// declared for nb-1 — correct for the table's union, wrong for the generation.
+    #[test]
+    fn a_wrong_shape_for_one_generation_is_refused() {
+        let tracked = two_generations();
+        let texts = [
+            (
+                format!("{DIR}/nb-1-big-Data.db.jsonl"),
+                static_block_golden(),
+            ),
+            (
+                format!("{DIR2}/nb-9-big-Data.db.jsonl"),
+                static_block_golden(),
+            ),
+        ];
+        let injected: Vec<(&str, &str)> = texts.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+
+        let report = census(&tracked, &NO_CASES(), PER_GEN, &reader(&injected));
+        assert_eq!(report.excluded, 1, "nb-1 still verifies");
+        assert_eq!(report.stale.len(), 1, "{:?}", report.stale);
+        assert!(
+            report.stale[0].contains("t-def/nb-9-big-Data.db")
+                && report.stale[0].contains("declares [TTL]")
+                && report.stale[0].contains("does not describe this generation"),
+            "{}",
+            report.stale[0]
+        );
+    }
+
+    /// A committed generation the per-generation entry does not name is refused: a new
+    /// generation must be declared, not inherit a neighbour's set.
+    #[test]
+    fn a_committed_generation_the_entry_does_not_name_is_refused() {
+        const ONLY_NB1: &[Excluded] = &[Excluded {
+            keyspace: "ks",
+            table: "t",
+            shapes: &[],
+            per_generation: &[("nb-1", &[Unsupported::StaticBlock])],
+            note: "names only nb-1",
+        }];
+        let tracked = two_generations();
+        let texts = [
+            (
+                format!("{DIR}/nb-1-big-Data.db.jsonl"),
+                static_block_golden(),
+            ),
+            (
+                format!("{DIR2}/nb-9-big-Data.db.jsonl"),
+                static_block_golden(),
+            ),
+        ];
+        let injected: Vec<(&str, &str)> = texts.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+
+        let report = census(&tracked, &NO_CASES(), ONLY_NB1, &reader(&injected));
+        assert_eq!(report.excluded, 1);
+        assert_eq!(report.stale.len(), 1, "{:?}", report.stale);
+        assert!(
+            report.stale[0].contains("t-def/nb-9-big-Data.db")
+                && report.stale[0].contains("does not name generation `nb-9`"),
+            "{}",
+            report.stale[0]
+        );
+    }
+
+    /// A generation the entry names that no committed `*-Data.db` carries is stale,
+    /// even though every committed generation still verifies.
+    #[test]
+    fn an_extra_unknown_generation_is_refused() {
+        const EXTRA: &[Excluded] = &[Excluded {
+            keyspace: "ks",
+            table: "t",
+            shapes: &[],
+            per_generation: &[
+                ("nb-1", &[Unsupported::StaticBlock]),
+                ("nb-9", &[Unsupported::Ttl]),
+                ("nb-77", &[Unsupported::Ttl]),
+            ],
+            note: "names a generation nothing commits",
+        }];
+        let tracked = two_generations();
+        let texts = [
+            (
+                format!("{DIR}/nb-1-big-Data.db.jsonl"),
+                static_block_golden(),
+            ),
+            (
+                format!("{DIR2}/nb-9-big-Data.db.jsonl"),
+                Unsupported::Ttl.minimal_golden(),
+            ),
+        ];
+        let injected: Vec<(&str, &str)> = texts.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+
+        let report = census(&tracked, &NO_CASES(), EXTRA, &reader(&injected));
+        assert_eq!(report.excluded, 2, "the committed generations verify");
+        assert_eq!(report.stale.len(), 1, "{:?}", report.stale);
+        assert!(
+            report.stale[0].contains("`nb-77`")
+                && report.stale[0].contains("no committed *-Data.db"),
+            "{}",
+            report.stale[0]
+        );
+    }
+
+    /// `nb-1` must not match `nb-10`, and `shapes` beside `per_generation` is
+    /// ambiguous, as is a label declared twice.
+    #[test]
+    fn per_generation_labels_are_exact_and_unambiguous() {
+        assert_eq!(Excluded::generation_label("nb-1-big-Data.db"), "nb-1");
+        assert_eq!(Excluded::generation_label("nb-10-big-Data.db"), "nb-10");
+        assert_eq!(Excluded::generation_label("da-3-bti-Data.db"), "da-3");
+
+        const BOTH: &[Excluded] = &[Excluded {
+            keyspace: "ks",
+            table: "t",
+            shapes: &[Unsupported::Ttl],
+            per_generation: &[
+                ("nb-1", &[Unsupported::Ttl]),
+                ("nb-1", &[Unsupported::Ttl]),
+                ("nb-9", &[]),
+            ],
+            note: "ambiguous",
+        }];
+        let tracked = two_generations();
+        let report = census(&tracked, &NO_CASES(), BOTH, &reader(&[]));
+        let all = report.stale.join("\n");
+        assert!(
+            all.contains("declares both `shapes` and `per_generation`"),
+            "{all}"
+        );
+        assert!(all.contains("`nb-1` is declared more than once"), "{all}");
+        assert!(all.contains("`nb-9` declares no shape"), "{all}");
     }
 }
