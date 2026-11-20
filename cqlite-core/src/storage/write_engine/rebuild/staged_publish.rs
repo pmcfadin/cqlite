@@ -358,19 +358,8 @@ fn remove_stage_tree(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn fsync_dir(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(|e| {
-                Error::Storage(format!("failed to fsync directory {}: {e}", dir.display()))
-            })?;
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
-}
+use super::atomic_file::fsync_dir;
+pub use super::atomic_file::{write_file_atomic, write_file_atomic_with};
 
 #[cfg(test)]
 mod tests {
