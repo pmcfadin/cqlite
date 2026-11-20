@@ -367,7 +367,7 @@ fn r2_3_duration_is_utf8_in_both_formats_with_golden_text() {
         for n in &golden {
             let expect = format!("{n}ns");
             assert!(
-                values.iter().any(|v| *v == expect),
+                values.contains(&expect),
                 "{which}: golden duration {expect} missing (first values: {:?})",
                 &values[..values.len().min(5)]
             );
