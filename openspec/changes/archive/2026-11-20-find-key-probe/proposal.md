@@ -87,7 +87,7 @@ pub struct HitDetail {
     pub byte_length: ByteLength,
     pub max_writetime: i64,
     pub has_partition_deletion: bool,
-    pub coverage: CellCoverage,      // AC change pending owner approval (2026-11-16): proves "flushed"
+    pub coverage: CellCoverage,      // AC change approved by the owner on 2026-11-16: proves "flushed"
 }
 pub enum ByteLength {
     Known(u64),                      // successor_start - start
@@ -117,7 +117,7 @@ this raises for the owner. `CommitLogReader`/`mutation.rs` gain: `PartitionUpdat
 `minTimestamp` decode is `uvint (as i64).wrapping_add(TIMESTAMP_EPOCH)` per cassandra-5.0.8
 `EncodingStats.Serializer` (design D4).
 
-**AC change pending owner approval (2026-11-16): stricter flushed proof.** `unflushed: no` no longer means "the
+**AC change approved by the owner on 2026-11-16: stricter flushed proof.** `unflushed: no` no longer means "the
 mutation's writetime is at or below the generation max". It requires every cell, liveness marker and deletion
 of the mutation to be PROVEN present in the SSTables (a strictly newer cell, a covering deletion, or an equal
 timestamp on an exact state match per `Cells.resolveRegular`); otherwise `unflushed: unmeasured(<cause>)` naming
@@ -167,7 +167,7 @@ call, surfaced to the owner rather than picked here.
    the mutation still counts as "touching the key" (partition-key match is unaffected by the
    clustering restriction), it simply cannot report a writetime (#4159 class, matching this epic's
    "unmeasured never 0" mandate verbatim).
-5. **`unflushed` is a strict, propagating PROOF** (AC change pending owner approval, 2026-11-16) — `no` requires
+5. **`unflushed` is a strict, propagating PROOF** (AC change approved by the owner on 2026-11-16) — `no` requires
    every cell, marker and deletion of the mutation proven present in the SSTables; an unmeasured writetime, an
    unprovable cell (an equal timestamp without an exact state match included), or an unreadable generation
    yields `unflushed: unmeasured(<cause>)`, never a guessed yes/no.
