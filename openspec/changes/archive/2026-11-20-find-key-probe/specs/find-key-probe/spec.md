@@ -109,7 +109,7 @@ With `--commitlog <dir>`, every mutation across every segment whose partition ke
 
 ### Requirement: F4 — `unflushed` is a fail-closed PROOF, not a timestamp comparison
 
-AC change pending owner approval (2026-11-16): stricter flushed proof
+AC change approved by the owner on 2026-11-16: stricter flushed proof
 
 `unflushed` SHALL be `yes` when the mutation's writetime exceeds every generation's max for the key, `no` ONLY when every cell, liveness marker and deletion of the mutation is PROVEN present in the SSTables, and `unmeasured(<cause>)` otherwise. "At or below the generation max" alone SHALL NOT yield `no`.
 

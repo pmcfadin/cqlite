@@ -96,7 +96,7 @@ every fix round; ONE full gate in `flow-closer`.
       `IndexMiss`, never `Hit`; the SAME table with `Filter.db` deleted (temp copy) → `IndexMiss`
       (never `unmeasured`) — pins proposal.md establishment 2 / AC2.
 - [x] 4.3 CommitLog: using 3.1/3.2's fixture, the unflushed insert → `unflushed: yes` with correct
-      segment/position/writetime; the flushed ones → `unflushed: no` (DRAFT, AC change pending owner approval
+      segment/position/writetime; the flushed ones → `unflushed: no` (DRAFT, AC change approved by the owner on 2026-11-16
       2026-11-16: `no` now requires every cell proven present — F4; the CLI oracle derives `no` from the ground
       truth's own `flushed` flag, not from the timestamp rule).
 - [x] 4.4 A clustered-table (or complex-column) CommitLog mutation → `writetime: unmeasured(<cause>)`, — DONE at unit level (`mutation_tests.rs`: clustered / complex / partition-deletion / no-schema causes) and end to end in `find_cli_tests.rs` (clustered declaration of the committed segment).

@@ -42,7 +42,7 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
 ## 2. Trace sink (R1, R2, R3, R4) — surface: `cqlite_core::storage::write_engine::merge::trace`
 
 - [x] 2.1 `merge/trace.rs`: `TraceSink`, `NoTrace`, `RecordingSink`, `Verdict`, `TombstoneKind`,
-      `CellDecision`, `DecidedBy`, `ProbeOutcome`. `pub mod trace;` unconditional (pub-surface guard).
+      `CellDecision`, `DecidedBy` (including `DecidedBy.rule`; label rename tracked in #4587), `ProbeOutcome`. `pub mod trace;` unconditional (pub-surface guard).
 - [x] 2.2 `KWayMerger<S: TraceSink = NoTrace>`; `with_trace_sink`; thread `&mut S` through
       `reconcile_cluster_*` into `ReconcileState` steps; emit at each §D1 site; range site in 1.1's
       file; probe outcomes from the point-read builder's `PathProbe`. Also required adding
@@ -85,6 +85,8 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
       gate's `cli-tests` component ENUMERATES `cqlite-cli/tests/*.rs` dynamically (#2039) rather than
       naming targets in a list, so `explain_cli_tests` is picked up automatically — confirmed it is
       not in the component's `QUARANTINE` list.
+      Note: R5.1, R7.3 and R9.1 were verified on `test_explain`, not on the spec-named `test_tomb`,
+      `test_da` and `test_wide_rows` fixtures.
 - [x] 4.5 `cqlite-core/tests/issue_4193_explain_vs_select.rs` (R6.1) — both `CQLITE_READ_PATH`
       values, both directions, column named on failure. 3 tests, all pass.
 - [x] 4.6 Docs: `docs/development/dev-cookbook.md` CLI section (one entry, plus the D7 collision
@@ -92,6 +94,7 @@ Ordered. Groups 1–3 are F0 (engine), 4–5 are F1 (CLI), 6 is the endgame. Com
       in issue #4193" and its stale open-questions section reconciled against the shipped design.
       No dedicated website CLI verb-list page was found to update.
 - [x] 4.7 `--lite` green; commit; push.
+- [x] Post-audit fixes: keyspace-qualified resolution, live-generation discovery excluding snapshots/backups/index dirs (per Cassandra Directories.java), UDT registry in the traced read. Follow-ups: #4601 (RowDecision trace event, `rows` array), #4602 (wider R6 corpus).
 
 ## 5. Review-first (CLI half)
 

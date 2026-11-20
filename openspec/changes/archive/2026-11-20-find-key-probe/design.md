@@ -67,7 +67,7 @@ I/O:
   `data_offset: Option<u64>` (a fail-safe-scan hit may report no partition boundary), and
   `ByteLength::Unmeasured(&'static str)` as a third variant (a fail-safe-scan hit resolves no end bound, and a
   guess is forbidden). Both render as `unmeasured(<cause>)` in text and `{"unmeasured": …}` / `null` in JSON.
-- **`coverage: CellCoverage` (AC change pending owner approval, 2026-11-16 — see D5).** The same decode also
+- **`coverage: CellCoverage` (AC change approved by the owner on 2026-11-16 — see D5).** The same decode also
   fills a `CellCoverage` per hit, kept just fine enough to PROVE a CommitLog mutation's cells are in the SSTables:
   - `cell_timestamps: BTreeMap<column, i64>` — max cell timestamp per simple column (a cell tombstone's included);
   - `cell_values: BTreeMap<column, Option<Vec<u8>>>` — the state of the cell at that max timestamp: `Some(serialized
@@ -151,7 +151,7 @@ a pre-epoch unit test.
 
 ## D5. `unflushed` — a fail-closed PROOF, not a guess
 
-**AC change pending owner approval (2026-11-16): stricter flushed proof.** The first draft decided `no` by
+**AC change approved by the owner on 2026-11-16: stricter flushed proof.** The first draft decided `no` by
 `mutation_writetime <= max_generation_writetime`. That is unsound: a later write of column `a` says nothing
 about an earlier-timestamped write of column `b`, and an equal timestamp can be a different cell (roborev job
 299 M1). `no` is now a PROOF obligation.
