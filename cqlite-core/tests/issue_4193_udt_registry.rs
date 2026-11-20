@@ -99,7 +99,7 @@ async fn explain_matches_select_for_frozen_udt_inside_collections() {
         let run = |reg: Option<&cqlite_core::schema::UdtRegistry>| {
             let mut merger = build_traced_merger_with_registry(
                 paths.clone(),
-                &[key.clone()],
+                std::slice::from_ref(&key),
                 &effective,
                 reg,
                 ScanCancel::default(),
