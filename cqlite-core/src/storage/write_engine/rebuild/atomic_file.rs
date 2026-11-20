@@ -63,14 +63,36 @@ where
         .ok_or_else(|| Error::Storage(format!("{} has no file name", dest.display())))?
         .to_string_lossy()
         .into_owned();
+    // Unix: refuse a symlink destination; for an existing regular file remember its mode so the
+    // replacement keeps it (a 0600 manifest must not become 0644 under a 022 umask). Only the mode
+    // is preserved, never ownership (no chown). A new destination keeps the umask default.
     #[cfg(unix)]
-    if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(Error::Storage(format!(
-            "refusing to write {}: the destination is a symlink",
-            dest.display()
-        )));
-    }
+    let existing_mode = match std::fs::symlink_metadata(dest) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(Error::Storage(format!(
+                "refusing to write {}: the destination is a symlink",
+                dest.display()
+            )));
+        }
+        Ok(m) if m.file_type().is_file() => {
+            use std::os::unix::fs::PermissionsExt;
+            Some(m.permissions().mode() & 0o7777)
+        }
+        _ => None,
+    };
     let (file, tmp) = create_unique_temp(dest, &name)?;
+    #[cfg(unix)]
+    if let Some(mode) = existing_mode {
+        use std::os::unix::fs::PermissionsExt;
+        // Applied while the temp is still empty, before any content is written.
+        if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(mode)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Storage(format!(
+                "failed to set mode {mode:o} on {}: {e}",
+                tmp.display()
+            )));
+        }
+    }
     let staged = (|| -> std::io::Result<()> {
         let mut w = std::io::BufWriter::new(file);
         write(&mut w)?;
@@ -233,6 +255,38 @@ mod tests {
         let err = write_file_atomic(&p, b"new").unwrap_err().to_string();
         assert!(err.contains("symlink"), "{err}");
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+    }
+
+    #[cfg(unix)]
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_preserves_the_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o600, 0o640] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("manifest.json");
+            std::fs::write(&p, b"old").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            write_file_atomic(&p, b"new").unwrap();
+            assert_eq!(std::fs::read(&p).unwrap(), b"new");
+            assert_eq!(mode_of(&p), mode);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_destination_gets_the_umask_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference");
+        std::fs::File::create(&reference).unwrap(); // what plain creation yields under this umask
+        let p = dir.path().join("manifest.json");
+        write_file_atomic(&p, b"new").unwrap();
+        assert_eq!(mode_of(&p), mode_of(&reference));
     }
 
     #[test]
