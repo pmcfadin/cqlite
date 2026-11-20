@@ -32,6 +32,7 @@
 //! `cqlite-core/tests/issue_4197_rebuild_bti_scope.rs`, which is the test to
 //! replace when #4336 lands.
 
+mod atomic_file;
 mod boundaries;
 mod components;
 mod decode;

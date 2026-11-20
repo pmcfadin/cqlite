@@ -318,7 +318,7 @@ fn run_verb(
 }
 
 /// Whether boundary `i` is at or after the first `rename` boundary (the #4529 publish window).
-/// The `--manifest` write (its `.manifest.json.tmp` and the rename) follows publication and is not
+/// The `--manifest` write (its unique `.manifest.json.<pid>-<n>.wtmp` and the rename) follows publication and is not
 /// part of the window.
 fn in_publish_window(bounds: &[(String, String)], i: usize) -> bool {
     !bounds[i].1.contains("manifest.json")
@@ -326,6 +326,28 @@ fn in_publish_window(bounds: &[(String, String)], i: usize) -> bool {
             .iter()
             .position(|(k, _)| k == "rename")
             .is_some_and(|r| i >= r)
+}
+
+/// Collapse the per-run unique temp name of an atomic single-file publish
+/// (`<dir>/.<name>.<pid>-<counter>.wtmp`, from `write_file_atomic_with`) to `.<name>.<tmp>.wtmp`
+/// so boundary identity is comparable across runs. EXACT: only a final path component of that
+/// shape with a purely numeric `<pid>-<counter>` is rewritten; everything else is unchanged.
+fn normalise_unique_temp(path: String) -> String {
+    let (dir, file) = match path.rfind('/') {
+        Some(i) => (&path[..=i], &path[i + 1..]),
+        None => ("", path.as_str()),
+    };
+    let Some(inner) = file.strip_prefix('.').and_then(|f| f.strip_suffix(".wtmp")) else {
+        return path;
+    };
+    let Some((name, ids)) = inner.rsplit_once('.') else {
+        return path;
+    };
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    match ids.split_once('-') {
+        Some((pid, ctr)) if numeric(pid) && numeric(ctr) => format!("{dir}.{name}.<tmp>.wtmp"),
+        _ => path,
+    }
 }
 
 /// The `(kind, path-relative-to-work)` the shim logged for boundary number `n` in THIS run, if
@@ -346,7 +368,7 @@ fn boundary_hit(area: &Area<'_>, n: usize) -> Option<(String, String)> {
             .replace(&prefix, "")
             .trim_start_matches('/')
             .to_string();
-        Some((kind, path))
+        Some((kind, normalise_unique_temp(path)))
     })
 }
 
@@ -375,7 +397,7 @@ fn boundaries(area: &Area<'_>) -> Vec<(String, String)> {
                 .replace(&prefix, "")
                 .trim_start_matches('/')
                 .to_string();
-            (n, kind, path)
+            (n, kind, normalise_unique_temp(path))
         })
         .collect();
     rows.sort_by_key(|(n, _, _)| *n);
@@ -828,13 +850,13 @@ fn issue_4527_filter_enospc_exits_nonzero() {
 
 /// Regression for #4528 (fixed): salvage's `--manifest` write error (ENOSPC / short write) fails
 /// the run non-zero instead of exiting 0 with no manifest. The write boundary is on the
-/// dot-prefixed `.manifest.json.tmp` sibling (#4549).
+/// dot-prefixed `.manifest.json.<pid>-<n>.wtmp` unique sibling (#4549).
 #[test]
 fn issue_4528_salvage_manifest_write_error_fails_the_run() {
     for mode in [Mode::Enospc, Mode::Short] {
         check(
             Verb::Salvage,
-            Scope::Only("manifest.json.tmp", mode),
+            Scope::Only(".manifest.json.<tmp>.wtmp", mode),
             fixtures(),
         );
     }
@@ -848,7 +870,7 @@ fn issue_4549_manifest_is_published_atomically() {
     for mode in [Mode::Crash, Mode::Enospc, Mode::Short] {
         check_verbs(
             &[Verb::Rebuild, Verb::Salvage],
-            Scope::Only("manifest.json.tmp", mode),
+            Scope::Only(".manifest.json.<tmp>.wtmp", mode),
             fixtures(),
         );
     }
