@@ -128,8 +128,10 @@ fn run_explain(
         .ok_or_else(|| ExplainFailure::Usage("--schema is required for explain".to_string()))?;
     let (keyspace, table_name) = split_table_name(table)?;
     let root = resolve_data_root(data_dir, dataset)?;
-    let table_dir = resolve_table_dir(&root, table_name)?;
-    let input_paths = crate::commands::write::discover_input_sstables(&table_dir)
+    let table_dir =
+        crate::commands::explain_resolve::resolve_table_dir(&root, keyspace, table_name)
+            .map_err(ExplainFailure::Usage)?;
+    let input_paths = crate::commands::explain_resolve::discover_live_generations(&table_dir)
         .map_err(|error| read_failure(&input_paths_for_error(&table_dir), error))?;
     if input_paths.is_empty() {
         return Err(ExplainFailure::Usage(format!(
@@ -138,8 +140,9 @@ fn run_explain(
         )));
     }
 
-    let schema = crate::commands::write::load_compaction_table_schema_for_table(
+    let schema = crate::commands::write::load_compaction_table_schema_in_keyspace(
         schema_path,
+        Some(keyspace),
         Some(table_name),
     )
     .map_err(|error| ExplainFailure::Usage(format!("could not load schema: {error}")))?;
@@ -178,15 +181,19 @@ fn run_explain(
         .query
         .max_result_bytes;
     let sink = BudgetedTraceSink::new(max_result_bytes);
-    let merger =
-        cqlite_core::storage::write_engine::merge::build_single_partition_merger_with_trace(
-            input_paths.clone(),
-            &[raw_partition_key],
-            &effective_schema,
-            cqlite_core::storage::scan_cancel::ScanCancel::default(),
-            sink,
-        )
-        .map_err(|error| read_failure(&input_paths, error))?;
+    // The SAME registry a schema-aware read builds from the schema's CREATE TYPE statements
+    // (#2349), so a frozen UDT inside a collection decodes as it does for SELECT (R6).
+    let udt_registry =
+        crate::commands::write::udt_registry_from_schema_file(schema_path, &schema.keyspace);
+    let merger = cqlite_core::storage::write_engine::merge::build_traced_merger_with_registry(
+        input_paths.clone(),
+        &[raw_partition_key],
+        &effective_schema,
+        Some(&udt_registry),
+        cqlite_core::storage::scan_cancel::ScanCancel::default(),
+        sink,
+    )
+    .map_err(|error| read_failure(&input_paths, error))?;
 
     let (cells, tombstones, probes) = if let Some(merger) = merger {
         // These setters intentionally run on the traced merger. The core API
@@ -318,98 +325,6 @@ fn resolve_data_root(
             "one of --data-dir or --dataset is required for explain".to_string(),
         )),
     }
-}
-
-#[cfg(feature = "write-support")]
-fn resolve_table_dir(
-    root: &Path,
-    table_name: &str,
-) -> std::result::Result<std::path::PathBuf, ExplainFailure> {
-    let root_name_matches = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| table_directory_name_matches(name, table_name))
-        .unwrap_or(false);
-    if root_name_matches {
-        let generations =
-            crate::commands::write::discover_input_sstables(root).map_err(|error| {
-                ExplainFailure::Usage(format!("could not inspect {}: {error}", root.display()))
-            })?;
-        if !generations.is_empty() {
-            return Ok(root.to_path_buf());
-        }
-    }
-
-    let mut candidates = Vec::new();
-    collect_table_dirs(root, table_name, 8, &mut candidates)?;
-    candidates.sort();
-    candidates.dedup();
-    match candidates.as_slice() {
-        [] => Err(ExplainFailure::Usage(format!(
-            "table '{}' has no published SSTable directory below {}",
-            table_name,
-            root.display()
-        ))),
-        [only] => Ok(only.clone()),
-        many => Err(ExplainFailure::Usage(format!(
-            "table '{}' resolves to multiple SSTable directories: {}",
-            table_name,
-            many.iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
-}
-
-#[cfg(feature = "write-support")]
-fn collect_table_dirs(
-    root: &Path,
-    table_name: &str,
-    depth: usize,
-    out: &mut Vec<std::path::PathBuf>,
-) -> std::result::Result<(), ExplainFailure> {
-    if depth == 0 {
-        return Ok(());
-    }
-    let entries = std::fs::read_dir(root).map_err(|error| {
-        ExplainFailure::Usage(format!(
-            "could not read data directory {}: {error}",
-            root.display()
-        ))
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| ExplainFailure::Usage(error.to_string()))?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let matches = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| table_directory_name_matches(name, table_name))
-            .unwrap_or(false);
-        if matches {
-            let generations =
-                crate::commands::write::discover_input_sstables(&path).map_err(|error| {
-                    ExplainFailure::Usage(format!("could not inspect {}: {error}", path.display()))
-                })?;
-            if !generations.is_empty() {
-                out.push(path.clone());
-            }
-        }
-        collect_table_dirs(&path, table_name, depth - 1, out)?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "write-support")]
-fn table_directory_name_matches(name: &str, table_name: &str) -> bool {
-    name.eq_ignore_ascii_case(table_name)
-        || name
-            .strip_prefix(table_name)
-            .map(|suffix| suffix.starts_with('-'))
-            .unwrap_or(false)
 }
 
 #[cfg(feature = "write-support")]

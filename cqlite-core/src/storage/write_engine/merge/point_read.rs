@@ -284,11 +284,26 @@ pub fn build_single_partition_merger_with_trace<S: TraceSink>(
     scan_cancel: ScanCancel,
     sink: S,
 ) -> Result<Option<KWayMerger<S>>> {
+    build_traced_merger_with_registry(paths, keys, schema, None, scan_cancel, sink)
+}
+
+/// Traced counterpart of [`build_single_partition_merger_with_registry`]: threads the same
+/// authoritative [`UdtRegistry`] a schema-aware read uses onto every candidate reader, so a
+/// `frozen<UDT>` inside a collection decodes structurally and `explain` cannot diverge from
+/// `SELECT` (#4193 R6).
+pub fn build_traced_merger_with_registry<S: TraceSink>(
+    paths: Vec<PathBuf>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    udt_registry: Option<&UdtRegistry>,
+    scan_cancel: ScanCancel,
+    sink: S,
+) -> Result<Option<KWayMerger<S>>> {
     build_single_partition_merger_with_registry_and_sink(
         paths,
         keys,
         schema,
-        None,
+        udt_registry,
         scan_cancel,
         sink,
     )
