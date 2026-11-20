@@ -125,6 +125,7 @@ pub(super) fn merger(expire: bool) -> KWayMerger {
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
         _egress_slot: None,
+        trace: crate::storage::write_engine::merge::trace::NoTrace,
     }
 }
 

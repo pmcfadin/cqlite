@@ -27,6 +27,8 @@
 //! * [`element_survives_complex_deletion`] — shadow-before-purge boundary
 //!   (commit `f66fa14f`; the `<=` element-vs-marker rule, #498).
 
+use crate::storage::write_engine::merge::trace::ReconcileRule;
+
 /// Common view of a reconcilable cell: exactly the fields Cassandra's
 /// `Cells.resolveRegular` (`db/rows/Cells.java:79-129`, cassandra-5.0.8) consults.
 ///
@@ -71,17 +73,39 @@ pub(crate) trait ReconcileCell {
 /// 6. otherwise the larger serialized value (`compareValues(left, right) >= 0`, `:128`); a full
 ///    tie keeps `existing` (the two cells are then indistinguishable).
 pub(crate) fn cell_wins<C: ReconcileCell + ?Sized>(candidate: &C, existing: &C) -> bool {
+    resolve_cell(candidate, existing).0
+}
+
+/// [`cell_wins`] plus the [`ReconcileRule`] that decided it (issue #4193 review M2). This is the
+/// ONE implementation of `Cells.resolveRegular`; `cell_wins` is its first component, so the
+/// decision trail can only DESCRIBE the rule the merge actually applied, never re-decide it.
+pub(crate) fn resolve_cell<C: ReconcileCell + ?Sized>(
+    candidate: &C,
+    existing: &C,
+) -> (bool, ReconcileRule) {
     if candidate.timestamp() != existing.timestamp() {
-        return candidate.timestamp() > existing.timestamp();
+        return (
+            candidate.timestamp() > existing.timestamp(),
+            ReconcileRule::Timestamp,
+        );
     }
     let cand_flagged = candidate.is_tombstone() || candidate.expiring_ttl().is_some();
     let exist_flagged = existing.is_tombstone() || existing.expiring_ttl().is_some();
     if cand_flagged != exist_flagged {
-        return cand_flagged;
+        let flagged = if cand_flagged { candidate } else { existing };
+        let rule = if flagged.is_tombstone() {
+            ReconcileRule::TombstoneOverLive
+        } else {
+            ReconcileRule::ExpiringOverLive
+        };
+        return (cand_flagged, rule);
     }
     if cand_flagged {
         if candidate.is_tombstone() != existing.is_tombstone() {
-            return candidate.is_tombstone();
+            return (
+                candidate.is_tombstone(),
+                ReconcileRule::TombstoneOverExpiring,
+            );
         }
         // localDeletionTime is an UNSIGNED 32-bit GC-clock value carried in an i32.
         let (cl, el) = (
@@ -89,15 +113,18 @@ pub(crate) fn cell_wins<C: ReconcileCell + ?Sized>(candidate: &C, existing: &C) 
             existing.local_deletion_time() as u32,
         );
         if cl != el {
-            return cl > el;
+            return (cl > el, ReconcileRule::LaterLocalDeletionTime);
         }
         if let (Some(ct), Some(et)) = (candidate.expiring_ttl(), existing.expiring_ttl()) {
             if ct != et {
-                return ct < et;
+                return (ct < et, ReconcileRule::LowerTtl);
             }
         }
     }
-    candidate.value_bytes() > existing.value_bytes()
+    (
+        candidate.value_bytes() > existing.value_bytes(),
+        ReconcileRule::GreaterValue,
+    )
 }
 
 /// Cassandra `DeletionTime.supersedes` (cassandra-5.0.8 `db/DeletionTime.java:158`): a deletion

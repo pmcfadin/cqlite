@@ -172,6 +172,7 @@ fn lazy_merger_over_wide_partition(schema: TableSchema) -> KWayMerger {
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
         _egress_slot: None,
+        trace: NoTrace,
     }
 }
 

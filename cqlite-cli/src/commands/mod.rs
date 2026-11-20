@@ -17,11 +17,18 @@
 // Existing per-subcommand modules.
 pub mod admin;
 pub mod bench;
+#[cfg(feature = "write-support")]
+pub(crate) mod explain_resolve;
 pub mod schema;
+#[cfg(feature = "write-support")]
+pub(crate) mod sstable_inputs;
 pub mod write;
 
 pub mod delta_export;
 pub mod docker;
+pub mod explain;
+pub mod explain_args;
+pub(crate) mod explain_render;
 pub mod info;
 pub mod read_commitlog;
 pub mod read_sstable;

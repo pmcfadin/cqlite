@@ -19,6 +19,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "write-support")]
+pub(crate) use crate::commands::sstable_inputs::discover_input_sstables;
+#[cfg(feature = "write-support")]
 use cqlite_core::storage::write_engine::{ExportOptions, MaintenanceReport, Mutation, WriteEngine};
 
 /// Result of a single write operation
@@ -490,7 +492,19 @@ pub(crate) fn load_compaction_table_schema_for_table(
     schema_path: &Path,
     target_table: Option<&str>,
 ) -> Result<cqlite_core::schema::TableSchema> {
-    let schema = load_compaction_table_schema_selected(schema_path, target_table)?;
+    load_compaction_table_schema_in_keyspace(schema_path, None, target_table)
+}
+
+/// [`load_compaction_table_schema_for_table`] restricted to one keyspace: a CQL file declaring
+/// the same table name in two keyspaces selects the `target_keyspace` one instead of failing as
+/// a duplicate (#4193 roborev: keyspace-qualified resolution). `None` is the unrestricted form.
+#[cfg(feature = "write-support")]
+pub(crate) fn load_compaction_table_schema_in_keyspace(
+    schema_path: &Path,
+    target_keyspace: Option<&str>,
+    target_table: Option<&str>,
+) -> Result<cqlite_core::schema::TableSchema> {
+    let schema = load_compaction_table_schema_selected(schema_path, target_keyspace, target_table)?;
     crate::commands::schema_load::assert_table_matches(&schema, target_table, schema_path)?;
     Ok(schema)
 }
@@ -502,6 +516,7 @@ pub(crate) fn load_compaction_table_schema_for_table(
 #[cfg(feature = "write-support")]
 fn load_compaction_table_schema_selected(
     schema_path: &Path,
+    target_keyspace: Option<&str>,
     target_table: Option<&str>,
 ) -> Result<cqlite_core::schema::TableSchema> {
     use cqlite_core::schema::cql_parser::{
@@ -588,8 +603,19 @@ fn load_compaction_table_schema_selected(
             }
             StatementType::CreateTable => {
                 if let Ok((_, mut ts)) = parse_create_table(&stmt) {
+                    let in_keyspace = target_keyspace.is_none_or(|k| {
+                        let unset = ts.keyspace.is_empty()
+                            || ts.keyspace == "unknown"
+                            || ts.keyspace == "default";
+                        let ks = if unset {
+                            file_keyspace.as_deref().unwrap_or(&ts.keyspace)
+                        } else {
+                            &ts.keyspace
+                        };
+                        ks.eq_ignore_ascii_case(k)
+                    });
                     let selected = match target_table {
-                        Some(t) => ts.table.eq_ignore_ascii_case(t),
+                        Some(t) => in_keyspace && ts.table.eq_ignore_ascii_case(t),
                         None => matched.is_none(), // first table wins
                     };
                     if target_table.is_some() {
@@ -659,58 +685,6 @@ pub(crate) fn udt_registry_from_schema_file(
         Ok(content) => cqlite_core::schema::udt_registry_from_cql(&content, default_keyspace),
         Err(_) => cqlite_core::schema::UdtRegistry::new(),
     }
-}
-
-/// Recursively discover published input SSTables under `dir`, ordered
-/// newest-to-oldest by generation (the order `compact_sstables` expects).
-#[cfg(feature = "write-support")]
-fn discover_input_sstables(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut found: Vec<(u64, std::path::PathBuf)> = Vec::new();
-    collect_data_files(dir, &mut found, 8)?;
-    // Highest generation first: run_index 0 must be the newest run.
-    found.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(found.into_iter().map(|(_, p)| p).collect())
-}
-
-/// Recursively collect `nb-<gen>-big-Data.db` files that have a sibling
-/// `TOC.txt` (the publication barrier), pairing each with its generation.
-#[cfg(feature = "write-support")]
-fn collect_data_files(
-    dir: &Path,
-    out: &mut Vec<(u64, std::path::PathBuf)>,
-    depth: usize,
-) -> Result<()> {
-    for entry in std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read input directory: {}", dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        if name.starts_with("nb-") && name.ends_with("-big-Data.db") {
-            // Honor the TOC.txt publication barrier: a Data.db without a sibling
-            // TOC.txt is an unpublished/partial SSTable and must not be compacted.
-            let base = name.trim_end_matches("-Data.db");
-            let toc = path.with_file_name(format!("{base}-TOC.txt"));
-            if !toc.exists() {
-                continue;
-            }
-            // Parse generation from nb-<gen>-big-Data.db
-            let generation = name
-                .strip_prefix("nb-")
-                .and_then(|s| s.split("-big-").next())
-                .and_then(|g| g.parse::<u64>().ok())
-                .unwrap_or(0);
-            out.push((generation, path));
-        } else if depth > 0 && path.is_dir() {
-            collect_data_files(&path, out, depth - 1)?;
-        }
-    }
-    Ok(())
 }
 
 /// Handle the flush operation

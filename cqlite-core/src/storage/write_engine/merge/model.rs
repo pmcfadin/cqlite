@@ -512,23 +512,23 @@ impl crate::storage::write_engine::reconcile_rules::ReconcileCell for CellData {
         self.timestamp
     }
     fn is_tombstone(&self) -> bool {
-        super::KWayMerger::is_cell_tombstone(self)
+        super::KWayMerger::<super::NoTrace>::is_cell_tombstone(self)
     }
     fn expiring_ttl(&self) -> Option<u32> {
         // `Cell.isExpiring()`: a live cell that carries a TTL. TTL 0 is `NO_TTL`.
-        if super::KWayMerger::is_cell_tombstone(self) {
+        if super::KWayMerger::<super::NoTrace>::is_cell_tombstone(self) {
             None
         } else {
             self.ttl.filter(|t| *t != 0)
         }
     }
     fn local_deletion_time(&self) -> i32 {
-        super::KWayMerger::cell_effective_ldt(self).unwrap_or(0)
+        super::KWayMerger::<super::NoTrace>::cell_effective_ldt(self).unwrap_or(0)
     }
     fn value_bytes(&self) -> Vec<u8> {
         // `Cells.compareValues`: the serialized cell value. A tombstone has none.
         let mut out = Vec::new();
-        if !super::KWayMerger::is_cell_tombstone(self) {
+        if !super::KWayMerger::<super::NoTrace>::is_cell_tombstone(self) {
             let _ = crate::storage::sstable::writer::data_writer::encoding::serialize_value_into(
                 &self.value,
                 &mut out,

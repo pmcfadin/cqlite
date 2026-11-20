@@ -79,6 +79,7 @@ KEYSPACES=()
 SKIP_KEYSPACE_NAMES=(
     "test_writeparity" "test_compactionparity" "test_compactionparityudt"
     "test_signed_coll" "test_compaction_tombstone_ttl" "test_comparator_order"
+    "test_explain"
 )
 SKIP_KEYSPACE_REASONS=(
     "write byte-parity fixtures (dedicated Rust parity tests)"
@@ -87,6 +88,7 @@ SKIP_KEYSPACE_REASONS=(
     "signed set/map element-order byte-parity fixtures (dedicated Rust parity test issue_1295_*)"
     "tombstone/TTL compaction byte-parity fixtures (dedicated Rust parity test issue_1387_*)"
     "inet/time multicell-collection ORDERING fixture (dedicated Rust ordering test issue_3790_*); a row-count smoke pass proves nothing about element order"
+    "explain decision-trail fixture (dedicated Rust tests issue_4193_*; the dump keeps shadowed/expired data a SELECT drops)"
 )
 
 # Return 0 if $1 is a system* keyspace (Cassandra-internal metadata, excluded

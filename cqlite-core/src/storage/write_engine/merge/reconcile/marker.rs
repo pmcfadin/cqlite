@@ -22,8 +22,9 @@
 
 use super::ReconcileState;
 use crate::storage::sstable::reader::compaction_row::RowLiveness;
+use crate::storage::write_engine::merge::trace::TraceSink;
 
-impl ReconcileState {
+impl<S: TraceSink> ReconcileState<S> {
     /// Drop the marker when the winning row deletion covers it (`marker_ts <= markedForDeleteAt`).
     /// A strictly newer marker is kept and coexists with the deletion.
     pub(in crate::storage::write_engine::merge) fn shadow_marker_by_row_deletion(&mut self) {

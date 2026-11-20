@@ -157,7 +157,7 @@ mod tests {
     use super::*;
     use crate::schema::{ClusteringColumn, ClusteringOrder, KeyColumn};
     use crate::storage::write_engine::merge::model::{CellData, RowData};
-    use crate::storage::write_engine::merge::{KWayMerger, RunReader, SSTableRowIterator};
+    use crate::storage::write_engine::merge::{KWayMerger, NoTrace, RunReader, SSTableRowIterator};
     use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey};
     use crate::types::Value;
     use std::collections::HashMap;
@@ -189,6 +189,7 @@ mod tests {
             schema_arc: Arc::new(schema.clone()),
             schema,
             _egress_slot: None,
+            trace: NoTrace,
         }
     }
 

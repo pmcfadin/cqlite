@@ -6,10 +6,11 @@
 
 use std::collections::HashSet;
 
+use super::super::trace::{NoTrace, TraceSink};
 use super::super::{CellData, KWayMerger, MergeEntry, PurgeCounts, RowData};
-use super::ReconcileState;
+use super::{ReconcileState, ReconcileTraceMetadata};
 
-impl ReconcileState {
+impl<S: TraceSink> ReconcileState<S> {
     /// Step 4 — build the merged result, applying the phantom key-only-row guard
     /// (#921 finding 3): recompute `purged_to_empty` AFTER the gc-grace
     /// cell-tombstone purge, so a CLUSTERED row whose only non-key data was a
@@ -19,11 +20,30 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
+    #[allow(dead_code)]
     pub(in crate::storage::write_engine::merge) fn build(
         self,
         purges: &mut PurgeCounts,
         now: Option<i64>,
     ) -> Option<MergeEntry> {
+        self.build_with_trace_metadata(purges, now).0
+    }
+
+    /// Build the merged row and return the trace-only source map alongside it.
+    /// The map is moved out before the behavior-preserving build body consumes
+    /// the state, so untraced builds never clone cell keys or allocate a side
+    /// channel.
+    pub(in crate::storage::write_engine::merge) fn build_with_trace_metadata(
+        mut self,
+        purges: &mut PurgeCounts,
+        now: Option<i64>,
+    ) -> (Option<MergeEntry>, ReconcileTraceMetadata) {
+        let winner_runs = self.winner_runs.take();
+        let built = self.build_inner(purges, now);
+        (built, ReconcileTraceMetadata { winner_runs })
+    }
+
+    fn build_inner(self, purges: &mut PurgeCounts, now: Option<i64>) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
@@ -74,7 +94,7 @@ impl ReconcileState {
         // emitted with it intact.
         let retained_cell_tombstones = surviving
             .iter()
-            .filter(|cell| KWayMerger::is_cell_tombstone(cell) || cell.is_deleted)
+            .filter(|cell| KWayMerger::<NoTrace>::is_cell_tombstone(cell) || cell.is_deleted)
             .count() as u64;
         purges.emitted += retained_cell_tombstones;
 

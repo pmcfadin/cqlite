@@ -161,6 +161,7 @@ fn test_kway_merge_with_streaming_sources_preserves_order() {
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
         _egress_slot: None,
+        trace: NoTrace,
     };
 
     // Drain all partitions and verify ordering + completeness.

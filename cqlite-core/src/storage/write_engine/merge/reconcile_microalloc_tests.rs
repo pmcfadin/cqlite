@@ -144,3 +144,71 @@ fn filter_dropped_columns_does_not_clone_survivors() {
          filter_dropped_columns regressed (main-today was 9)"
     );
 }
+
+/// Issue #4193 review M1: the UNTRACED reconcile path must do NO trace work. Before the fix the six
+/// `emit_tombstone(TombstoneRecord { clustering: ..clone(), .. })` sites built (and cloned the
+/// clustering key / range bounds / column into) a record BEFORE `emit_tombstone` checked
+/// `S::ENABLED`, so every tombstone cost heap allocations even with `NoTrace`.
+///
+/// Runtime proof (not a structural ZST check): heap allocations of `fold_row_deletions` over
+/// tombstone-bearing entries with heap-heavy clustering keys are measured at 1 and at 21 entries.
+/// Untraced, the DIFFERENCE must be zero (the only allocation is the once-per-group key clone);
+/// traced (`RecordingSink`) it must be strictly positive, which proves the workload really does
+/// reach the record-building sites.
+#[cfg(all(feature = "state_machine", not(feature = "dhat-heap")))]
+#[test]
+fn untraced_fold_row_deletions_does_no_trace_allocation() {
+    use super::trace::RecordingSink;
+    use crate::storage::write_engine::mutation::ClusteringKey;
+    use crate::test_alloc_probe::measure;
+
+    fn entries(n: usize) -> Vec<MergeEntry> {
+        (0..n)
+            .map(|i| {
+                let ck = ClusteringKey::new(vec![
+                    (
+                        "c1".to_string(),
+                        Value::text("a-long-clustering-value-0123456789"),
+                    ),
+                    (
+                        "c2".to_string(),
+                        Value::text("another-long-clustering-value-9876543210"),
+                    ),
+                ]);
+                let mut e = MergeEntry::new(
+                    i,
+                    DecoratedKey::new(1, vec![0, 0, 0, 1]),
+                    Some(ck),
+                    100,
+                    RowData::Tombstone {
+                        deletion_time: 100,
+                        local_deletion_time: 1_000,
+                    },
+                );
+                e.partition_deletion = Some((90, 900));
+                e.row_deletion = Some((95, 950));
+                e
+            })
+            .collect()
+    }
+
+    fn untraced(rows: &[MergeEntry]) -> u64 {
+        let mut state = ReconcileState::new(None);
+        measure(|| state.fold_row_deletions(rows)).0
+    }
+    fn traced(rows: &[MergeEntry]) -> u64 {
+        let mut state = ReconcileState::with_trace(None, RecordingSink::new(), None, None);
+        measure(|| state.fold_row_deletions(rows)).0
+    }
+
+    let (few, many) = (entries(1), entries(21));
+    assert_eq!(
+        untraced(&few),
+        untraced(&many),
+        "untraced fold_row_deletions must not allocate per tombstone (trace records are built only when tracing)"
+    );
+    assert!(
+        traced(&many) > traced(&few) + 20,
+        "control: the traced path builds records per tombstone, so the workload reaches the sites"
+    );
+}

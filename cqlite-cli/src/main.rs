@@ -100,19 +100,12 @@ async fn run_main() -> Result<()> {
         return commands::verify::dispatch_verify(cmd).await;
     }
 
-    // `salvage` (issue #4196) likewise operates directly on files and needs no
-    // Database/ingestion; short-circuit before database init like `verify`.
-    // The cfg-gated body (write-support/tombstones, roborev round-7 High
-    // finding) lives in `commands::dispatch_salvage` (round-8 Low finding —
-    // keeps this file's dispatch block to one line regardless of which arm
-    // compiles).
+    // `salvage` (#4196) and `rebuild` (#4197) operate directly on files: short-circuit before
+    // database init like `verify`. Their cfg-gated bodies live in `commands::dispatch_*`.
     if let Some(Commands::Salvage(args)) = &cli.command {
         return commands::dispatch_salvage(cli.schema.as_deref(), args).await;
     }
 
-    // `rebuild` (issue #4197) likewise operates directly on files and needs
-    // no Database/ingestion; short-circuit before database init like
-    // `salvage`. See `commands::dispatch_rebuild`'s doc.
     if let Some(Commands::Rebuild(args)) = &cli.command {
         return commands::dispatch_rebuild(cli.schema.as_deref(), args).await;
     }
@@ -125,9 +118,12 @@ async fn run_main() -> Result<()> {
         return commands::dispatch_diagnose(cli.schema.as_deref(), args).await;
     }
 
-    // `find` (issue #4205): files only, no Database; owns its 0/1/2 exit codes.
+    // `find` (#4205, owns its 0/1/2 exit codes) and `explain` (#4193): files only, no Database.
     if let Some(Commands::Find(args)) = &cli.command {
         return commands::dispatch_find(cli.schema.as_deref(), args).await;
+    }
+    if let Some(Commands::Explain(_)) = &cli.command {
+        return commands::explain::dispatch_explain(&cli, &config).await;
     }
 
     // Initialize database connection
@@ -1089,7 +1085,8 @@ async fn run_main() -> Result<()> {
             | Commands::Rebuild(_)
             | Commands::Sweep(_)
             | Commands::Diagnose(_)
-            | Commands::Find(_),
+            | Commands::Find(_)
+            | Commands::Explain(_),
         ) => {
             unreachable!("file-only verbs are dispatched before database initialization")
         }

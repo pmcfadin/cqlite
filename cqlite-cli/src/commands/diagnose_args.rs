@@ -29,3 +29,6 @@ pub struct DiagnoseArgs {
     #[arg(long, value_enum, default_value = "text")]
     pub out: VerifyOutputArg,
 }
+
+/// `cqlite diagnose --help` long description (kept here so `cli_types.rs` stays under its size ratchet).
+pub const DIAGNOSE_LONG_ABOUT: &str = "Report per-generation Statistics.db facts (timestamps, deletion times, droppable-tombstone estimate, repair state, compression ratio, fully-expired-at-now) and the table's token-range overlap, every number tagged with its source (statistics|index|scan) or `unmeasured: <cause>`. The default tier never opens Data.db. --deep adds one bounded scan per generation (histograms, --top N rankings, raw tombstone counts, a dry-compaction reclaim prediction when --schema is given). --out selects a rendering on stdout and NEVER writes a file; this verb modifies nothing. Exit 0 for any successful report (an unreadable generation is a field in it); 1 for usage errors. Example: cqlite diagnose ./test-data/datasets/sstables/test_basic/simple_table-xxx --deep --top 5 --out json";

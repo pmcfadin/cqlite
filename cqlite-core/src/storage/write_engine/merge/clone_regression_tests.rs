@@ -10,6 +10,7 @@
 //! inside a [`MergeEntryCloneScope`](crate::storage::sstable::work_counters::merge_entry_clone_scope::MergeEntryCloneScope)
 //! and assert the observed clone count stays low.
 
+use super::trace::NoTrace;
 use super::{KWayMerger, MergeEntry, MergeStep, RowData, RunReader, SSTableRowIterator};
 use crate::error::Result;
 use crate::schema::{KeyColumn, TableSchema};
@@ -76,6 +77,7 @@ fn merger_over_runs(runs: Vec<Vec<MergeEntry>>, schema: TableSchema) -> KWayMerg
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
         _egress_slot: None,
+        trace: NoTrace,
     }
 }
 
