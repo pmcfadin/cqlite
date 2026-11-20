@@ -511,8 +511,6 @@ enum Scope {
     /// Everything EXCEPT the listed [`DEFECTS`]: the property the CLI must hold today. Any
     /// failure not listed there reds the test.
     Enforced,
-    /// ONLY the cells [`DEFECTS`] lists for this issue (driven by the `#[ignore]`d reproducers).
-    KnownDefects(u32),
     /// Only the `write` boundaries on paths ending in this suffix, in this mode (a named
     /// regression for a fixed defect; the cells run are NOT in [`DEFECTS`]).
     Only(&'static str, Mode),
@@ -618,7 +616,6 @@ fn sweep(verb: Verb, f: &Fixture, scope: Scope) -> (usize, usize, Vec<String>) {
             let defect = known_defect(verb, f, kind, path, mode);
             match scope {
                 Scope::Enforced if defect.is_some() => continue,
-                Scope::KnownDefects(issue) if defect != Some(issue) => continue,
                 Scope::Only(suffix, m) if !(is_write && path.ends_with(suffix) && mode == m) => {
                     continue
                 }
