@@ -497,6 +497,108 @@ roborev_push_assert() {
   PUSH_ASSERT="PASS"
 }
 
+# roborev_code_census_lines: sets CODE_CENSUS_LINES (#4608) — the number of changed CODE lines
+# (added + deleted, over `census_code_paths` only) in the range under review, which the
+# `vacuity-tier2` small-census rule reads. THE COUNT IS BUILT FROM THE NUMSTAT RECORDS the census
+# loop already parsed (`census_code_line_counts`, parallel to `census_code_paths`), so it can never
+# disagree with `census:` / `prompt-content:` about which paths are code.
+#   * A PURE RENAME (git similarity 100%) counts as ZERO. The census runs with `--no-renames`
+#     (a rename is a delete+add pair), which would otherwise bill a moved file at its full size
+#     twice. Both halves of every R100 pair are excluded; a rename WITH edits (R<100) keeps its
+#     full add+del count, because the edits are reviewable code.
+#   * A BINARY code path counts as ROBOREV_CENSUS_BINARY_LINES (unbounded), never as 0.
+#   * FAIL-CLOSED: if the rename probe itself fails, nothing is discounted (a bigger number can
+#     only turn a SKIP back into the original token-floor FAIL, never the reverse).
+ROBOREV_CENSUS_BINARY_LINES=1000000
+# roborev_is_census_code_path <raw path>: 0 iff the path is in `census_code_paths` (the census's own
+# CODE classification — the one `prompt-content:` uses), so rename endpoints are judged by the SAME classifier.
+roborev_is_census_code_path() {
+  local _p
+  for _p in ${census_code_paths[@]+"${census_code_paths[@]}"}; do
+    if [ "$_p" = "$1" ]; then return 0; fi
+  done
+  return 1
+}
+roborev_code_census_lines() {
+  local _rcl_status _rcl_old _rcl_new _rcl_i _rcl_j _rcl_skip _rcl_total=0
+  local _rcl_renamed=() _rcl_measure=()
+  CODE_CENSUS_LINES=""
+  if git -C "$REPO" diff --name-status -z -M100% "$RANGE_BASE_SHA" HEAD >"$LOG.namestatus" 2>/dev/null; then
+    while IFS= read -r -d '' _rcl_status; do
+      case "$_rcl_status" in
+        R*|C*)
+          IFS= read -r -d '' _rcl_old || break
+          IFS= read -r -d '' _rcl_new || break
+          # A pure rename is discounted ONLY when BOTH endpoints are CODE paths under the census
+          # classifier (a genuine code move). A non-code -> code rename (a large `.md` becoming `.rs`)
+          # puts brand-new code in front of the reviewer, so the destination keeps its full added
+          # lines/bytes; a code -> non-code rename is a deletion of code and keeps its deleted lines.
+          if [ "$_rcl_status" = R100 ] \
+            && roborev_is_census_code_path "$_rcl_old" && roborev_is_census_code_path "$_rcl_new"; then
+            _rcl_renamed+=("$_rcl_old" "$_rcl_new")
+          fi
+          ;;
+        *) IFS= read -r -d '' _rcl_old || break ;;
+      esac
+    done <"$LOG.namestatus"
+  fi
+  for _rcl_i in "${!census_code_paths[@]}"; do
+    _rcl_skip=0
+    for _rcl_j in ${_rcl_renamed[@]+"${_rcl_renamed[@]}"}; do
+      if [ "$_rcl_j" = "${census_code_paths[$_rcl_i]}" ]; then _rcl_skip=1; break; fi
+    done
+    if [ "$_rcl_skip" -eq 1 ]; then continue; fi
+    _rcl_total=$((_rcl_total + ${census_code_line_counts[$_rcl_i]:-$ROBOREV_CENSUS_BINARY_LINES}))
+    if [ "${census_code_line_counts[$_rcl_i]:-1}" -gt 0 ]; then _rcl_measure+=("${census_code_paths[$_rcl_i]}"); fi
+  done
+  CODE_CENSUS_LINES="$_rcl_total"
+  # BYTES (#4608 review job 386): "few lines" is not "small" — one minified or generated line can hold
+  # megabytes, and if that content is truncated out of the prompt while its `diff --git` header stays,
+  # `prompt-content:` still passes. So the byte size of the changed code is measured too, but only when
+  # the line count could already qualify (otherwise the original guard applies and the number is unused).
+  # MEASURE: the bytes of every added/deleted content line (marker excluded, newline included) of the
+  # non-renamed CODE paths, read from `git diff --no-renames -U0` per path with a literal pathspec; the
+  # file headers are skipped positionally (everything between `diff --git` and the first `@@`), so a
+  # content line that itself begins `---`/`+++` is still counted. A pure rename has no content lines, so
+  # it counts 0. ANY measurement failure leaves CODE_CENSUS_BYTES empty, which the tier2 rule reads as
+  # "no skip" (fail closed).
+  # PATHS (#4608 review job 388): zero-line changes — pure renames, mode-only flips, empty-file
+  # additions — contribute 0 lines and 0 bytes at ANY count, so the review scope could be large while
+  # both counts stay 0. The number of CODE census paths is therefore a third bound. It counts EVERY code
+  # path the census holds, renamed, mode-only and empty ones included (a rename is two census paths, the
+  # census runs `--no-renames`); it is derived from the same array `prompt-content:` iterates.
+  CODE_CENSUS_PATHS="${#census_code_paths[@]}"
+  CODE_CENSUS_BYTES=""
+  if [ "$_rcl_total" -le "${ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES:-0}" ]; then
+    local _rcl_bytes=0 _rcl_b _rcl_p
+    for _rcl_p in ${_rcl_measure[@]+"${_rcl_measure[@]}"}; do
+      # EVERY STAGE IS CHECKED (review job 389). This was a `git | awk` pipeline whose exit status was
+      # read from PIPESTATUS[0] alone, so a failing awk (or an empty/partial result) read as 0 or
+      # undercounted bytes and ENABLED the skip. Now: git writes a file and its own status is tested; awk
+      # reads that file and ITS status is tested; and the output must be exactly one non-empty run of
+      # digits. Any failure leaves CODE_CENSUS_BYTES empty, which tier2 reads as "no skip".
+      if ! git -C "$REPO" diff --no-renames --no-color --no-ext-diff -U0 "$RANGE_BASE_SHA" HEAD -- ":(literal)$_rcl_p" >"$LOG.bytes-diff" 2>/dev/null; then
+        _rcl_bytes=""; break
+      fi
+      if ! _rcl_b=$(LC_ALL=C awk 'BEGIN { n = 0; inh = 0 }
+            /^diff --git / { inh = 0; next }
+            /^@@/ { inh = 1; next }
+            inh && /^[-+]/ { n += length($0) }
+            # `\ No newline at end of file` follows the line it describes: that line has no newline
+            # byte, so take back the one length($0) (marker byte standing in for the newline) added.
+            inh && /^\\ No newline at end of file/ { n -= 1 }
+            END { print n }' "$LOG.bytes-diff"); then
+        _rcl_bytes=""; break
+      fi
+      case "$_rcl_b" in
+        ''|*[!0-9]*) _rcl_bytes=""; break ;;
+      esac
+      _rcl_bytes=$((_rcl_bytes + _rcl_b))
+    done
+    CODE_CENSUS_BYTES="$_rcl_bytes"
+  fi
+}
+
 # roborev_census: sets BASE_TIP_SHA, RANGE_BASE_SHA, CENSUS, CENSUS_CHECK, CODE_FREE and the
 # census_* / census_paths state; calls `finish` on failure or an empty census.
 roborev_census() {
@@ -644,6 +746,10 @@ roborev_census() {
     del="${path%%$'\t'*}"
     path="${path#*$'\t'}"
     [ -n "$path" ] || continue
+    # A BINARY path reports `-`; it is flagged (not just zeroed) so the tier2 small-census rule
+    # (#4608) can count it as UNBOUNDED rather than as 0 lines.
+    path_binary=0
+    if [ "$add" = "-" ] || [ "$del" = "-" ]; then path_binary=1; fi
     if [ "$add" = "-" ]; then add=0; fi
     if [ "$del" = "-" ]; then del=0; fi
     census_files=$((census_files + 1))
@@ -725,8 +831,16 @@ roborev_census() {
     # exclusion note near the top of this file, and #3283); it is checked AFTER the fact by
     # `prompt-content:`, against the prompt the reviewer actually received.
     census_code_paths+=("$path")
+    # Changed lines of this CODE path (added + deleted), for roborev_code_census_lines (#4608).
+    # A binary path is recorded as the sentinel ROBOREV_CENSUS_BINARY_LINES, never as 0.
+    if [ "$path_binary" -eq 1 ]; then
+      census_code_line_counts+=("$ROBOREV_CENSUS_BINARY_LINES")
+    else
+      census_code_line_counts+=("$((add + del))")
+    fi
   fi
   done <"$numstat_file"
+  roborev_code_census_lines
 
   census_noun="files"
   if [ "$census_files" -eq 1 ]; then census_noun="file"; fi

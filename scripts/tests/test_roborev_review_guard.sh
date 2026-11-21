@@ -745,6 +745,21 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   newline-name    a file literally named `a` beside one named `a<LF>b.rs` — a newline in
 #                   a path, which a newline-DELIMITED prompt path set splits into two
 #                   records so `grep -Fxq` treats them as ALTERNATIVES (a false PASS)
+#   --- the #4608 small-census family -----------------------------------------------
+#   code-lines-<N>  N added lines of CODE (main.rs), nothing else: the census size knob for
+#                   the tier2 small-census rule (ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20)
+#   bytes-<N>       ONE added code line whose content is exactly N bytes (`fn x...() {}` padded with
+#                   a comment), for the byte half of the tier2 small-census rule
+#   bytes-nonl-<N> ONE added code line of exactly N bytes with NO trailing newline
+#   rename-md-to-rs a 60-line `big.md` (non-code) at the BASE renamed 100% to `big.rs` (CODE)
+#   renames-<N>     N pure `.rs` -> `.rs` renames (r<i>.rs -> s<i>.rs, 100% similarity): N*2 census paths,
+#                   0 changed lines and 0 bytes
+#   mode-only-<N>   N existing `.rs` files whose recorded mode flips to 755: N census paths, 0 lines
+#   empty-<N>       N EMPTY `.rs` files added: N census paths, 0 lines
+#   rename-large    a 60-line `big.rs` that exists at the BASE and is RENAMED (100% similarity)
+#                   on the branch: the census (`--no-renames`) bills it +60/-60, a rename-aware
+#                   count bills it 0
+#   rename-edited   the same rename WITH 30 added lines (similarity < 100%): reviewable code
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
   # NOTE: separate statements on purpose — `local` is a builtin, so ALL of its
   # arguments are expanded before any assignment takes effect; `local a=$1 b=$a`
@@ -819,6 +834,21 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
       git_q "$work" commit -q -m 'base: an extensionless harness executable under docs/'
       ;;
+    renames-* | mode-only-*)
+      for _i in $(seq 1 "${mode##*-}"); do printf 'fn a%s() {}\nfn b() {}\n' "$_i" >"$work/r$_i.rs"; done
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'base: small code files'
+      ;;
+    rename-md-to-rs)
+      seq 1 60 | sed 's/^/fn f/; s/$/() {}/' >"$work/big.md"
+      git_q "$work" add big.md
+      git_q "$work" commit -q -m 'base: a 60-line prose file'
+      ;;
+    rename-large | rename-edited)
+      seq 1 60 | sed 's/^/fn f/; s/$/() {}/' >"$work/big.rs"
+      git_q "$work" add big.rs
+      git_q "$work" commit -q -m 'base: a 60-line code file'
+      ;;
     rename-ambiguous)
       # The OTHER direction of the header ambiguity (#3229 blocker 1): a rename whose
       # header `diff --git a/p b/x b/p b/x` admits an EQUAL split (`p b/x` == `p b/x`)
@@ -845,6 +875,50 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       # while the reviewer's diff may carry ONE `diff --git a/old b/new` header.
       git_q "$work" mv main.rs renamed.rs
       git_q "$work" commit -q -m 'rename main.rs'
+      ;;
+    code-lines-*)
+      seq 1 "${mode#code-lines-}" | sed 's/^/fn g/; s/$/() {}/' >>"$work/main.rs"
+      git_q "$work" add main.rs
+      git_q "$work" commit -q -m "code change (${mode#code-lines-} lines)"
+      ;;
+    bytes-[0-9]*)
+      # one line of exactly N content bytes (marker excluded, newline included)
+      _bn="${mode#bytes-}"
+      { printf '//'; head -c "$((_bn - 3))" /dev/zero | tr '\0' 'x'; printf '\n'; } >>"$work/main.rs"
+      git_q "$work" add main.rs
+      git_q "$work" commit -q -m "one code line of $_bn bytes"
+      ;;
+    bytes-nonl-*)
+      # the base main.rs ends with a newline; the new file has ONE line and no final newline
+      _bn="${mode#bytes-nonl-}"
+      { printf '//'; head -c "$((_bn - 2))" /dev/zero | tr '\0' 'x'; } >"$work/nonl.rs"
+      git_q "$work" add nonl.rs
+      git_q "$work" commit -q -m "one code line of $_bn bytes, no trailing newline"
+      ;;
+    renames-*)
+      for _i in $(seq 1 "${mode##*-}"); do git_q "$work" mv "r$_i.rs" "s$_i.rs"; done
+      git_q "$work" commit -q -m 'pure renames'
+      ;;
+    mode-only-*)
+      for _i in $(seq 1 "${mode##*-}"); do git_q "$work" update-index --chmod=+x "r$_i.rs"; done
+      git_q "$work" commit -q -m 'mode-only changes'
+      ;;
+    empty-*)
+      for _i in $(seq 1 "${mode##*-}"); do : >"$work/e$_i.rs"; done
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'empty files'
+      ;;
+    rename-md-to-rs)
+      git_q "$work" mv big.md big.rs
+      git_q "$work" commit -q -m 'rename big.md to big.rs'
+      ;;
+    rename-large | rename-edited)
+      git_q "$work" mv big.rs moved.rs
+      if [ "$mode" = rename-edited ]; then
+        seq 1 30 | sed 's/^/fn h/; s/$/() {}/' >>"$work/moved.rs"
+        git_q "$work" add moved.rs
+      fi
+      git_q "$work" commit -q -m 'rename big.rs'
       ;;
     two-code-commits)
       # Two commits touching DIFFERENT code files: a single-commit review would cover
@@ -2721,7 +2795,7 @@ cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-check
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
-work=$(make_fixture case_d pushed)
+work=$(make_fixture case_d code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
@@ -2847,7 +2921,7 @@ reset_stub
 # The regression that made tier 2 dead code: token_usage is a JSON-ENCODED STRING
 # (decode twice) whose output field is total_output_tokens. These are the EXACT
 # numbers measured on the real job (67387 / 43520 / 2232).
-work=$(make_fixture case_l pushed)
+work=$(make_fixture case_l code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE="$TOKENS_GENUINE_SMALL"
 run_wrapper "$work"
@@ -2867,14 +2941,14 @@ assert_says 'case (l2) output_tokens read as a fallback' '^tokens: input=505625 
 
 printf '== case (l3): the input floor is pinned at exactly 25000 ==\n'
 reset_stub
-work=$(make_fixture case_l3 pushed)
+work=$(make_fixture case_l3 code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE="$TOKENS_INPUT_BELOW_FLOOR"
 run_wrapper "$work"
 assert_verdict 'case (l3) below the floor' FAIL 1
 assert_says 'case (l3) names the floor and the observation' 'observed input=24999 < ROBOREV_VACUITY_MIN_INPUT_TOKENS=25000'
 reset_stub
-work=$(make_fixture case_l3b pushed)
+work=$(make_fixture case_l3b code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE="$TOKENS_INPUT_AT_FLOOR"
 run_wrapper "$work"
@@ -2884,7 +2958,7 @@ printf '== case (l4): a low output count NEVER fails a genuine clean review ==\n
 reset_stub
 # A genuine CLEAN review and a vacuous one emit near-identical output counts, so an
 # output floor would false-FAIL exactly the case we care most about.
-work=$(make_fixture case_l4 pushed)
+work=$(make_fixture case_l4 code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE="$TOKENS_CLEAN_LOW_OUTPUT"
 run_wrapper "$work"
@@ -2973,7 +3047,7 @@ fi  # HAVE_PYTHON3
 
 printf '== case (f): genuine review with matching sha + healthy accounting ==\n'
 reset_stub
-work=$(make_fixture case_f pushed)
+work=$(make_fixture case_f code-lines-60)
 head_sha=$(git -C "$work" rev-parse HEAD)
 STUB_ANNOUNCE_SHA="$head_sha"
 STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -3097,7 +3171,7 @@ reset_stub
 # roborev exits non-zero when the review REPORTS FINDINGS. Calling that a reviewer
 # malfunction is dangerous in the opposite direction from the vacuity bug: an agent
 # told the reviewer broke retries or bypasses instead of FIXING THE FINDINGS.
-work=$(make_fixture case_j pushed)
+work=$(make_fixture case_j code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_VERDICT=$'Review complete.\nFindings:\n[Medium] scripts/flow/roborev-review.sh:350 the fast path bypasses the authoritative remote check\nSummary: 1 finding.'
 STUB_STATUS="done"
@@ -3360,7 +3434,7 @@ printf '== case (u2): RENAMED token fields resolve via the alias sets ==\n'
 reset_stub
 # The vacuous baseline hiding behind renamed fields: aliases must resolve it so the
 # vacuity check still fires instead of degrading to UNAVAILABLE + PASS.
-work=$(make_fixture case_u2 pushed)
+work=$(make_fixture case_u2 code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE='{\"prompt_tokens\":18700,\"cache_read_tokens\":0,\"completion_tokens\":53}'
 run_wrapper "$work"
@@ -3370,7 +3444,7 @@ assert_says 'case (u2) the vacuous signature fires' '^vacuity-tier2: FAIL \(vacu
 
 printf '== case (u3): has_token_data=false beside real counts is a drift NOTICE, not a bypass ==\n'
 reset_stub
-work=$(make_fixture case_u3 pushed)
+work=$(make_fixture case_u3 code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
 STUB_HAS_TOKEN_DATA=false
@@ -3458,7 +3532,7 @@ reset_stub
 # retry covers a TRANSIENT READ, not an asynchronous write — the round-5 "written
 # asynchronously" diagnosis was wrong and is retracted; the real cause was the two
 # payload shapes (see case (x10)).
-work=$(make_fixture case_y1 pushed)
+work=$(make_fixture case_y1 code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
 STUB_RECORD_BLANK_FOR=2
 run_wrapper "$work"
@@ -3765,7 +3839,7 @@ reset_stub
 # wrapper used to accept the first payload that merely PARSED, so the richer `list
 # --json` source was never consulted and the record looked permanently incomplete,
 # silently downgrading sha-assert, tier 2 and model on every real run.
-work=$(make_fixture case_x8 pushed)
+work=$(make_fixture case_x8 code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
 STUB_SHOW_JSON=review-row
 run_wrapper "$work"
@@ -3867,7 +3941,7 @@ reset_stub
 # DEGRADED — so this case goes RED on job-record / sha-assert / tier 2 / model at once. (That
 # break reds the equal-id shape too; what is new here is the payload shape, not the tie-break.)
 # `list --json` is disabled so `show` is the ONLY source.
-work=$(make_fixture case_x10 pushed)
+work=$(make_fixture case_x10 code-lines-60)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
 STUB_SHOW_JSON=nested
 STUB_REVIEW_ROW_ID=$((STUB_JOB - 1))   # the measured divergence: review row 4655, job 4656
@@ -9348,6 +9422,273 @@ if [ -r "$_rc4050_checks" ] && [ -r "$_rc4050_wrapper" ] && [ -r "$_rc4050_bindi
   _rc4050_uniq "$_rc4050_binding" 'python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" "$tmp/review"' 'the merge point'"'"'s review-text request'
 fi
 [ "$_rc4050_ok" -eq 1 ] || printf 'NOTICE - structural (#4050): the merge-point count argument rests on the two properties above; treat any FAIL here as invalidating premerge-review-binding.sh'"'"'s AC5 declaration, not merely as a lint\n'
+
+# ======================================================================================
+# #4608 — vacuity-tier2 SKIPs a genuinely SMALL code census (observed: PRs #4605 and #4607,
+# findings NONE, ~15.7k input tokens, both failed the absolute 25000 floor). Every case below
+# can fail: the large-census pair pins that the original guard is intact, the boundary pair
+# pins the threshold exactly (ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20), and the last pair
+# pins that a SKIP never rescues a review whose OTHER checks fail.
+# ======================================================================================
+printf '== case (t2s-1): tiny census + vacuous tokens => tier2 SKIP and RESULT PASS ==\n'
+reset_stub
+work=$(make_fixture case_t2s1 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-1)' PASS 0
+assert_says 'case (t2s-1) tier2 SKIPs with the reason and the counted lines' '^vacuity-tier2: SKIP \(small census: 1 changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and 15 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 and 1 code paths <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3 — the tier2 floor is not meaningful\)$'
+assert_says 'case (t2s-1) the tokens are still reported' '^tokens: input=18700 cached=0 output=53$'
+assert_lacks 'case (t2s-1) no tier2 FAIL' '^vacuity-tier2: FAIL'
+
+printf '== case (t2s-2): LARGE census + vacuous tokens still FAILS (original guard intact) ==\n'
+reset_stub
+work=$(make_fixture case_t2s2 code-lines-60)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-2)' FAIL 1
+assert_says 'case (t2s-2) tier2 FAIL' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+assert_says 'case (t2s-2) cached == 0 still trips' 'observed cached=0 == 0'
+assert_lacks 'case (t2s-2) not a SKIP' '^vacuity-tier2: SKIP'
+
+printf '== case (t2s-2b): LARGE census, healthy input but cached == 0 still FAILS ==\n'
+reset_stub
+work=$(make_fixture case_t2s2b code-lines-60)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE='{\"input_tokens\":300000,\"cached_input_tokens\":0,\"total_output_tokens\":2000,\"usage_source\":\"job_log_turn_completed\"}'
+run_wrapper "$work"
+assert_verdict 'case (t2s-2b)' FAIL 1
+assert_says 'case (t2s-2b) the cached==0 clause alone fails it' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (t2s-3): a RENAME-ONLY diff (60-line file moved) is small => SKIP ==\n'
+reset_stub
+work=$(make_fixture case_t2s3 rename-large)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/big.rs b/moved.rs\nsimilarity index 100%'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-3)' PASS 0
+assert_says 'case (t2s-3) the rename counts as 0 lines even though --no-renames bills +60/-60' '^census: 2 files, \+60/-60$'
+assert_says 'case (t2s-3) tier2 SKIPs on 0 changed code lines' '^vacuity-tier2: SKIP \(small census: 0 changed code lines '
+
+printf '== case (t2s-3b): a rename WITH 30 edited lines is NOT a pure rename => FAIL ==\n'
+reset_stub
+work=$(make_fixture case_t2s3b rename-edited)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/big.rs b/moved.rs\nsimilarity index 80%'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-3b)' FAIL 1
+assert_says 'case (t2s-3b) tier2 FAIL: the edits are reviewable code' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (t2s-4): the boundary is EXACT — 20 lines SKIP, 21 lines FAIL ==\n'
+reset_stub
+work=$(make_fixture case_t2s4a code-lines-20)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-4) threshold lines' PASS 0
+assert_says 'case (t2s-4) 20 lines SKIPs' '^vacuity-tier2: SKIP \(small census: 20 changed code lines '
+reset_stub
+work=$(make_fixture case_t2s4b code-lines-21)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-4) threshold+1 lines' FAIL 1
+assert_says 'case (t2s-4) 21 lines is the original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (t2s-7): ONE line over the byte cap + low tokens FAILS; the cap is exact ==\n'
+reset_stub
+work=$(make_fixture case_t2s7a bytes-4096)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-7) max bytes' PASS 0
+assert_says 'case (t2s-7) 1 line / 4096 bytes SKIPs and names both counts' '^vacuity-tier2: SKIP \(small census: 1 changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and 4096 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 '
+reset_stub
+work=$(make_fixture case_t2s7b bytes-4097)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-7) max+1 bytes' FAIL 1
+assert_says 'case (t2s-7) 1 line of 4097 bytes is the original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+reset_stub
+work=$(make_fixture case_t2s7c bytes-100000)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-7) a 100 KB single line' FAIL 1
+assert_says 'case (t2s-7) a minified-style single line cannot ride the line count' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (t2s-8): a NON-code -> CODE exact rename is new code, not a move ==\n'
+reset_stub
+work=$(make_fixture case_t2s8 rename-md-to-rs)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/big.md b/big.rs\nsimilarity index 100%'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-8) md -> rs rename' FAIL 1
+assert_says 'case (t2s-8) the 60-line destination is counted in full: original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+assert_lacks 'case (t2s-8) not a SKIP' '^vacuity-tier2: SKIP'
+# the control: rs -> rs (case t2s-3) still SKIPs, asserted there.
+
+printf '== case (t2s-9): bytes are EXACT for a final line with no trailing newline ==\n'
+reset_stub
+work=$(make_fixture case_t2s9a bytes-nonl-4096)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/nonl.rs b/nonl.rs'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-9) 4096 bytes, no final newline' PASS 0
+assert_says 'case (t2s-9) counted as exactly 4096, not 4097' 'and 4096 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 '
+reset_stub
+work=$(make_fixture case_t2s9b bytes-nonl-4097)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/nonl.rs b/nonl.rs'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-9) 4097 bytes, no final newline' FAIL 1
+assert_says 'case (t2s-9) 4097 FAILs' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+# t2s-10: zero-line changes at any count. A prompt naming every path keeps prompt-content PASS, so the
+# ONLY thing that can turn the verdict is the path bound.
+t2s_prompt() { # t2s_prompt <old-prefix> <new-prefix> <n>
+  local _i _p='Review this diff:'
+  for _i in $(seq 1 "$3"); do _p="$_p\ndiff --git a/$1$_i.rs b/$2$_i.rs"; done
+  printf '%s' "$_p"
+}
+printf '== case (t2s-10): zero-line changes still bound the scope by CODE PATHS ==\n'
+reset_stub
+work=$(make_fixture case_t2s10a renames-1)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r s 1)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) ONE rename (2 census paths)' PASS 0
+assert_says 'case (t2s-10) one rename SKIPs on 0 lines, 0 bytes, 2 paths' '^vacuity-tier2: SKIP \(small census: 0 changed code lines <= .* and 0 changed code bytes <= .* and 2 code paths <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3 '
+reset_stub
+work=$(make_fixture case_t2s10b renames-4)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r s 4)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) FOUR pure renames (8 census paths)' FAIL 1
+assert_says 'case (t2s-10) four renames fall to the original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+assert_says 'case (t2s-10) and prompt-content was not what failed it' '^prompt-content: PASS'
+reset_stub
+work=$(make_fixture case_t2s10c empty-3)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt e e 3)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 3 empty files (max paths)' PASS 0
+assert_says 'case (t2s-10) exactly the max paths SKIPs' ' and 3 code paths <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3 '
+reset_stub
+work=$(make_fixture case_t2s10d empty-4)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt e e 4)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 4 empty files (max+1 paths)' FAIL 1
+assert_says 'case (t2s-10) max+1 empty files FAIL' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+reset_stub
+work=$(make_fixture case_t2s10e mode-only-3)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r r 3)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 3 mode-only changes (max paths)' PASS 0
+reset_stub
+work=$(make_fixture case_t2s10f mode-only-4)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r r 4)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 4 mode-only changes (max+1 paths)' FAIL 1
+assert_says 'case (t2s-10) mode-only changes above the max FAIL' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (t2s-11): a FAILING or EMPTY byte measurement never enables the SKIP (job 389) ==\n'
+# A stub `awk`/`git` placed first on PATH misbehaves ONLY for the byte-measurement invocation (the awk
+# program containing `No newline at end of file`; the `git diff ... -U0`), and delegates to the real tool
+# for everything else, so the rest of the wrapper is unaffected.
+t2s_stubdir="$tmp/t2s11-bin"
+mkdir -p "$t2s_stubdir"
+t2s_real_awk=$(command -v awk)
+t2s_real_git=$(command -v git)
+cat >"$t2s_stubdir/awk" <<STUB
+#!/bin/bash
+case "\$*" in
+  *'No newline at end of file'*)
+    case "\${STUB_T2_MODE:-}" in
+      awk-fail)    exit 3 ;;
+      awk-empty)   exit 0 ;;
+      awk-partial) printf '3'; exit 2 ;;
+      awk-garbage) printf 'abc\\n'; exit 0 ;;
+      awk-multi)   printf '3\\n4\\n'; exit 0 ;;
+    esac ;;
+esac
+exec "$t2s_real_awk" "\$@"
+STUB
+cat >"$t2s_stubdir/git" <<STUB
+#!/bin/bash
+case "\$*" in
+  *' -U0 '*) if [ "\${STUB_T2_MODE:-}" = git-fail ]; then exit 4; fi ;;
+esac
+exec "$t2s_real_git" "\$@"
+STUB
+chmod +x "$t2s_stubdir/awk" "$t2s_stubdir/git"
+for t2s_mode in awk-fail awk-empty awk-partial awk-garbage awk-multi git-fail; do
+  reset_stub
+  work=$(make_fixture "case_t2s11_$t2s_mode" pushed)
+  STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+  STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+  STUB_T2_MODE="$t2s_mode" WRAPPER_PATH_PREFIX="$t2s_stubdir" run_wrapper "$work"
+  assert_verdict "case (t2s-11 $t2s_mode)" FAIL 1
+  assert_says "case (t2s-11 $t2s_mode) a tiny census with an unmeasurable byte count falls to the original guard" '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+  assert_lacks "case (t2s-11 $t2s_mode) never a SKIP" '^vacuity-tier2: SKIP'
+done
+# CONTROL: the same stubs in pass-through mode must still SKIP, so the six FAILs above are the stub's
+# doing and not a broken fixture or a stub that breaks the wrapper.
+reset_stub
+work=$(make_fixture case_t2s11_control pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+STUB_T2_MODE=none WRAPPER_PATH_PREFIX="$t2s_stubdir" run_wrapper "$work"
+assert_verdict 'case (t2s-11 control) pass-through stubs' PASS 0
+assert_says 'case (t2s-11 control) still SKIPs' '^vacuity-tier2: SKIP \(small census: 1 changed code lines '
+
+printf '== case (t2s-5): a tiny census whose findings / review-completed FAIL still gives RESULT FAIL ==\n'
+reset_stub
+work=$(make_fixture case_t2s5a pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+STUB_VERDICT=$'Review complete.\nFindings:\n[Medium] main.rs:1 helper has no body\nSummary: 1 finding.'
+STUB_STATUS="done"
+STUB_REVIEW_RC=1
+run_wrapper "$work"
+STUB_REVIEW_RC=0
+assert_verdict 'case (t2s-5) findings' FAIL 1
+assert_says 'case (t2s-5) tier2 still SKIPs' '^vacuity-tier2: SKIP \(small census: 1 changed code lines '
+assert_says 'case (t2s-5) findings PRESENT fails the run' '^findings: PRESENT \(1\)$'
+reset_stub
+work=$(make_fixture case_t2s5b pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+STUB_VERDICT='Waiting for job 4656 to complete...'
+run_wrapper "$work"
+assert_verdict 'case (t2s-5) review-completed' FAIL 1
+assert_says 'case (t2s-5) tier2 still SKIPs' '^vacuity-tier2: SKIP \(small census: 1 changed code lines '
+assert_says 'case (t2s-5) review-completed FAILs' '^review-completed: FAIL \(no terminal verdict marker\)$'
+
+printf '== case (t2s-6): the SKIP does not paper over token DRIFT (unparseable accounting) ==\n'
+reset_stub
+work=$(make_fixture case_t2s6 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE='{\"tokens_in\":\"many\",\"tokens_out\":\"few\"}'
+run_wrapper "$work"
+assert_verdict 'case (t2s-6)' FAIL 1
+assert_says 'case (t2s-6) drift still FAILs on a tiny census' '^vacuity-tier2: FAIL \(token accounting present but unparseable'
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
