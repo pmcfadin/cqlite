@@ -426,14 +426,21 @@ fn risk_cases_text_report_names_the_resurrection_verdicts() {
             .iter()
             .filter(|l| l.contains("resurrection_risk=yes (past-gc-grace)"))
             .count(),
-        1
+        3,
+        "ids 3, 11 (ties) and 16 (element tombstone)"
     );
     assert_eq!(
         lines
             .iter()
             .filter(|l| l.contains("resurrection_risk=no"))
             .count(),
-        3
+        4
+    );
+    // Conflicts name both values and the side Cassandra keeps.
+    assert!(
+        text.contains("zebra@1970-01-01T00:00:00.005Z  b=apple@1970-01-01T00:00:00.005Z")
+            && text.contains("conflict  resolves_to=a"),
+        "{text}"
     );
     assert!(
         text.lines().last().unwrap().starts_with("summary  "),
