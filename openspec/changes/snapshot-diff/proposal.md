@@ -1,32 +1,39 @@
 # snapshot-diff — issue #4201 (epic #4192)
 
-**Milestone:** unmilestoned (owner convention; board `Backlog` pending #4193 — see Scheduling below).
+**Milestone:** 0.19 (owner ruling 2026-11-21: `cqlite diff` joins 0.19, the SSTable utility release; the
+tombstones report #4200 stays in 0.20 beside purge #4276).
 **Priority:** P2. **Routing:** design-driven (OpenSpec + Seam 1) — a new read-only verb whose input
 shape, tombstone-identity matching and report granularity have real latitude, built on top of #4193's
-reconciliation trail; the resurrection-risk classification itself is oracle-bound to Cassandra's own
+reconciliation trail (merged, #4546); the resurrection-risk classification itself is oracle-bound to Cassandra's own
 purge/reconciliation rules (`cassandra-5.0.8` source), never invented.
 
-## Scheduling note (read before approving) — do not call #4193 approved
+## Status refresh (2026-11-21, mechanical; Seam 1 approval of 2026-09-23 stands)
 
-Issue #4201 depends on #4193 (F0 decision trail + `cqlite explain`). At spec time #4193's OpenSpec
-change is **drafted and `openspec validate --strict` clean on branch `issue-4193-forensics-explain`**
-but the epic's own tracking line (#4192, 2026-09-23) reads *"parked in Backlog, re-activate by
-adopting the branch"* — **#4193 is NOT confirmed Seam-1 approved as of this drafting.** This worktree
-branches from `origin/main` and therefore contains none of #4193's `merge/trace.rs`
-(`TraceSink`/`RecordingSink`/`CellDecision`/`TombstoneRecord`/`compute_gc_before`) or `explain`'s CLI
-scaffolding. This spec is written against #4193's committed design
-(`openspec/changes/forensics-explain/design.md` on that branch) so review can proceed in parallel,
-but `tasks.md` Group 0 makes **both** re-confirming #4193's approval status **and** landing it on
-`origin/main` explicit, re-checked premises — implementation cannot start until #4193 is actually
-Seam-1 approved, merged, and this branch rebases onto it.
+#4193 (`cqlite explain` and the F0 decision trail) is **merged to `origin/main`** (#4546, `7dd80495a`)
+and its OpenSpec change is archived. The primitives this spec was drafted against exist under their
+real names:
 
-**#4200 (tombstone-surgery) is a sibling, not a foundation.** It depends on the same #4193 primitives
-and this proposal reuses several of its *conventions* (per-side full-compaction scan, `--now`-first
-output, fold-and-drop memory bound, affirmative-truncation pattern) — but #4201 has no code
-dependency on #4200's `tombstone_density` module, since #4200 is itself unmerged and diffing two
-independently-reconciled sides is a different mechanism than aggregating one side's density. Where
-#4201 needs a capability #4200's design sketched (a range tombstone's clustering-span predicate), it
-is implemented directly in this change rather than imported from an unmerged sibling.
+- `merge::trace::{TraceSink, RecordingSink, CellDecision, TombstoneRecord, TombstoneKind, DecidedBy,
+  Verdict, ProbeOutcome}` (`cqlite-core/src/storage/write_engine/merge/trace.rs`);
+- `merge::build_traced_merger_with_registry(paths, keys, schema, Some(&udt_registry), scan_cancel,
+  sink)` (the traced point-read builder; it supersedes the draft's `build_single_partition_merger`,
+  whose untraced form `explain` does not use), then `KWayMerger::with_now_secs` /
+  `with_gc_before_secs` / `with_purge_safe(true)`; the sink rides the merger (`with_trace_sink` to
+  attach one, `into_trace_sink` to take the recorded trail back);
+- `merge::{compute_gc_before, effective_compaction_schema}`;
+- `cqlite-cli/src/commands/explain_resolve.rs::{resolve_table_dir, discover_live_generations}` —
+  keyspace-qualified table-directory resolution and live-generation discovery that follows
+  Cassandra's `Directories.SSTableLister` (flat listing; `snapshots/`, `backups/` and `.<index>`
+  subdirectories are never live). `diff` reuses both; it does NOT reintroduce recursive discovery.
+
+The fixture and oracle version is **Cassandra 5.0.8** (`datasets-v4`); the reconciliation layout the
+trail is wired into is the post-#4551/#4589 one (`merge/reconcile/build.rs`,
+`merge/reconcile/marker.rs`, `merge/reconcile/steps.rs`, `merge/reconcile_cluster.rs`). None of this
+changes a requirement, a scenario outcome or the CLI surface.
+
+**#4200 (tombstone-surgery) is a sibling, not a foundation.** It reuses the same #4193 primitives;
+#4201 has no code dependency on #4200's `tombstone_density` module and implements the one
+capability it needs from #4200's sketch (a range tombstone's clustering-span predicate) directly.
 
 ## Why
 
@@ -51,21 +58,22 @@ CQLite already has every primitive this needs, all from #4193: the closed verdic
 (`winner` / `shadowed-by-timestamp` / `shadowed-by-tombstone{kind}` / `expired` / `purgeable` /
 `dropped-column`), the `RecordingSink` that captures one `CellDecision`/`TombstoneRecord` per
 decision at zero cost on the production path, `compute_gc_before(schema, now)`, and the same
-per-partition merger `explain`/`tombstones` drive. `diff` adds nothing new to the reconciliation
-engine — it drives that SAME merger once per side (each side's own generation set, independently),
+per-partition merger `explain` drives. `diff` adds nothing new to the reconciliation
+engine — it drives that SAME traced merger once per side (each side's own generation set, independently),
 then compares the two sides' winner sets and tombstone trails instead of rendering one side's trail
 alone.
 
 ## What changes
 
 **Library (`cqlite-core`).** A `snapshot_diff` module under `storage/write_engine/` exposing
-`diff_table(dir_a, dir_b, table, schema, options) -> Result<DiffReport>` (full-table) and
-`diff_partition(dir_a, dir_b, schema, partition_key, options) -> Result<PartitionDiff>`
-(`--partition`-scoped). For each side independently: build the per-partition merger across THAT
-side's own generations via `build_single_partition_merger`, run it in full-compaction configuration
-at the pinned `now` (`purge_safe(true)`, `gc_before_secs = compute_gc_before(schema, now)`) with a
-`RecordingSink` — the identical mechanism #4193's `explain` and #4200's `tombstones` use, applied to
-two independent inputs rather than one. Compare the two sides' winner cells (`equal` /
+`diff_table(side_a, side_b, schema, udt_registry, options) -> Result<DiffReport>` (full-table) and
+`diff_partition(side_a, side_b, schema, udt_registry, partition_key, options) -> Result<PartitionDiff>`
+(`--partition`-scoped), where each side is its label plus the live generations the CLI resolved
+(`explain_resolve`). For each side independently: build the per-partition merger across THAT
+side's own generations via `build_traced_merger_with_registry`, run it in full-compaction
+configuration at the pinned `now` (`purge_safe(true)`, `gc_before_secs = compute_gc_before(schema,
+now)`) with a `RecordingSink` — the identical mechanism #4193's `explain` uses, applied to two
+independent inputs rather than one. Compare the two sides' winner cells (`equal` /
 `only-a`/`only-b` / `newer-in-a`/`newer-in-b`, by writetime) and the two sides' tombstone sets
 (`only-a`/`only-b`; a tombstone present, with matching scope and deletion time, on both sides is
 already-reconciled knowledge and is not reported as a divergence). For every `only-a`/`only-b`
@@ -85,7 +93,7 @@ literal Cassandra shadow rule (`DeletionPurger#shouldPurge`, `AbstractCell.purge
    rules, at the pinned `cassandra-5.0.8` tag** (`DeletionPurger#shouldPurge`,
    `ColumnFamilyStore#gcBefore(long)`, `CompactionController#getPurgeEvaluator`) — never invented,
    never from CQLite's own prior behavior (#3041/#3042). The `resurrection_gc_positive` fixture (2
-   generations, `test_tomb`, `gc_grace_seconds=864000`) pins the boundary to the second, mirroring
+   generations, `test_tomb`, `gc_grace_seconds=864000`, `datasets-v4` / Cassandra 5.0.8) pins the boundary to the second, mirroring
    #1385's `gc_before_boundary` convention.
 2. **The trail agrees with itself across sides**: each side's `winner`/`purgeable` classification is
    produced by the SAME unmodified #4193 mechanism `explain` uses; `diff` adds a comparison layer,
@@ -112,30 +120,33 @@ literal Cassandra shadow rule (`DeletionPurger#shouldPurge`, `AbstractCell.purge
 ## Doctrine impact
 
 - **No-heuristics (#28):** every classification comes from the reconciliation trail's own decisions,
-  driven by the SAME merger `explain`/`tombstones`/`compact` use; no independent byte-pattern
+  driven by the SAME merger `explain`/`compact` use; no independent byte-pattern
   divergence heuristic.
 - **Uncompressed-write claim boundary (#1406):** not engaged — this change writes nothing to either
   input or to a new output; it only reads.
 - **Cassandra 5.0 only:** `na`/`nb` BIG, `da` BTI; partition enumeration for the un-scoped case reuses
-  the same boundary-source primitive salvage/`tombstones` use, already format-gated.
+  the structural Data.db partition walk `rebuild` uses
+  (`SSTableReader::distinct_partition_keys_with_positions`), already format-gated by
+  `SSTableReader::open`.
 - **Oracles:** the fixture's expected `only-a`/`only-b`/`resurrection_risk` values are derived from
-  the Cassandra-written JSONL goldens plus `cassandra-5.0.8` purge-evaluator source, independently of
+  the Cassandra-written JSONL goldens (`datasets-v4`, Cassandra 5.0.8) plus `cassandra-5.0.8` purge-evaluator source, independently of
   `diff_table`'s own output (#3041/#3042).
 
-## Open product decisions for the owner (do not decide here)
+## Product decisions — RESOLVED by the owner at Seam 1, 2026-09-23 (all three adopted as recommended)
 
 1. **Input shape (epic #4192 NEEDS-YOU #2).** Should `<snapshot-a-dir>`/`<snapshot-b-dir>` each be a
-   *flat table directory* — the exact shape `--data-dir` already resolves for `query`/`explain`/
-   `tombstones`, "two local dirs" being the epic's stated first cut, zero new resolution code — or a
+   *flat table directory* — the exact shape `explain_resolve::resolve_table_dir` /
+   `discover_live_generations` already resolve, "two local dirs" being the epic's stated first cut,
+   zero new resolution code — or a
    *real `nodetool snapshot`-shaped root* (`<dir>/<keyspace>/<table>-<uuid>/[snapshots/<tag>/]`) that
    `--table` walks to find the right subdirectory on each side, closer to what an operator actually
    has on disk but requiring new directory-walking code this change would otherwise not need.
-   **Recommendation: flat table directory for this slice** (matches every sibling verb's resolution
+   **Ruling: flat table directory for this slice** (matches every sibling verb's resolution
    convention exactly); file the nodetool-layout resolver as a follow-up once this ships, since it is
    additive (a resolution-layer change, not a report-shape change).
 2. **Are tombstones consistent across both sides rendered at all?** A tombstone present, with
    matching scope and deletion time, on both sides carries no divergence and no resurrection risk.
-   **Recommendation: omit it from `tombstones[]` entirely** (matches "diff" semantics — the report
+   **Ruling: omit it from `tombstones[]` entirely** (matches "diff" semantics — the report
    shows disagreement, not a full inventory); the alternative (list every tombstone with a `status:
    both` entry) is easy to add later if an operator wants the full picture, but changes the JSON
    shape, so it is called out here rather than decided silently.
@@ -145,6 +156,6 @@ literal Cassandra shadow rule (`DeletionPurger#shouldPurge`, `AbstractCell.purge
    writetime `<=` deletion_time" predicate #4200's design sketched, implemented directly here since
    #4200 is unmerged) or defer range-tombstone resurrection-risk to a follow-up and report range
    tombstones as `only-a`/`only-b` without a risk classification in this slice?
-   **Recommendation: include it** — the predicate is small (~30–50 lines) and its absence would leave
+   **Ruling: include it (R5 in scope)** — the predicate is small (~30–50 lines) and its absence would leave
    the single tombstone kind most likely to shadow a lot of data unclassified in the tool built
    specifically to classify this hazard.

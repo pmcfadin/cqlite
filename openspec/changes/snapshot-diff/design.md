@@ -3,10 +3,13 @@
 ## D1. Mechanism — two independent full-compaction trails, then a comparison fold
 
 ```
-side A: build_single_partition_merger(A's generations) ──► with_trace_sink(RecordingSink)
-           ──► full-compaction config: purge_safe(true), gc_before_secs = compute_gc_before(schema, now),
-               now_secs = Some(now)
-           ──► RecordingSink_A { cells, tombstones }        (#4193's own mechanism, unmodified)
+side A: build_traced_merger_with_registry(A's generations, [key], effective schema, UDT registry,
+                                          ScanCancel, RecordingSink)
+           ──► full-compaction config: with_purge_safe(true),
+               with_gc_before_secs(compute_gc_before(schema, now)), with_now_secs(Some(now))
+           ──► step() to Complete ──► into_trace_sink() = RecordingSink_A { cells, tombstones }
+                                                    (#4193's own mechanism, unmodified; `explain` drives
+                                                    exactly this sequence)
 
 side B: identical, over B's own generations           ──► RecordingSink_B { cells, tombstones }
 
@@ -41,7 +44,8 @@ partition at a time (D3).
 
 ## D2. Why this predicate is the correct resurrection-risk rule, cited at the pinned tag
 
-Three facts, all read from `cassandra-5.0.8` (never a CQLite `file:line` — #3041):
+Three facts, all read from `cassandra-5.0.8` (never a CQLite `file:line` — #3041; the exact source
+locations the implementation cites are recorded in the module docs and the PR):
 
 1. **A tombstone becomes purge-eligible once its `localDeletionTime` is older than `gcBefore`.**
    `ColumnFamilyStore#gcBefore(long nowInSec)`:
@@ -65,9 +69,9 @@ Three facts, all read from `cassandra-5.0.8` (never a CQLite `file:line` — #30
        }
    }
    ```
-   — the same `markedForDeleteAt` (writetime) vs. cell-timestamp comparison #4193's `cell_wins`/
-   `shadow_by_row_deletion` steps already implement for a single side's own reconciliation
-   (design.md §D1 of `forensics-explain`). `diff` applies the identical comparison across sides: a
+   — the same `markedForDeleteAt` (writetime) vs. cell-timestamp comparison #4193's reconcile steps
+   (`merge/reconcile/steps.rs`, `merge/reconcile/marker.rs`) already implement for a single side's own
+   reconciliation (design.md §D1 of the archived `forensics-explain`). `diff` applies the identical comparison across sides: a
    cell in the OTHER side's winner set is shadowed by THIS side's tombstone under the same rule.
 3. **This is exactly why Cassandra itself will not purge past that boundary when an older source is
    still outstanding.** `CompactionController#getPurgeEvaluator`:
@@ -97,15 +101,15 @@ Three facts, all read from `cassandra-5.0.8` (never a CQLite `file:line` — #30
 
 ## D3. Memory bound and streaming (matches #4200 D2's "fold, don't accumulate" posture)
 
-Full-table `diff` enumerates partitions from the same authoritative boundary source `salvage`/
-`tombstones` use (BIG `Index.db` entries; BTI `Partitions.db` trie leaves), read-only, over the UNION
-of keys present on either side (a key present in only one side's boundary source is compared against
+Full-table `diff` enumerates partitions with the structural Data.db walk `rebuild` uses
+(`SSTableReader::distinct_partition_keys_with_positions`, decompression-transparent, BIG and BTI alike,
+never a byte-pattern scan), read-only, over the UNION of keys present on either side (a key present on only one side is compared against
 an empty winner/tombstone set on the other — this is itself a legitimate `only-a`/`only-b` finding at
-the partition level, not an error). For each partition: build both sides' tries, fold into the
-running `DiffReport` (respecting `max_result_bytes`, the same budget `query`/`tombstones` honor), and
+the partition level, not an error). For each partition: build both sides' traced mergers, fold into the
+running `DiffReport` (respecting `max_result_bytes`, the same budget `query`/`explain` honor), and
 drop both sides' `RecordingSink` output before the next partition — no whole-table `Vec` of either
 side's cells is ever resident. `--partition <key>` skips enumeration entirely and drives both sides
-through `build_single_partition_merger` directly (the point-read path), per issue AC 4.
+through `build_traced_merger_with_registry` directly (the point-read path), per issue AC 4.
 
 ## D4. Report shape
 
@@ -125,7 +129,7 @@ through `build_single_partition_merger` directly (the point-read path), per issu
       ],
       "tombstones": [
         { "kind": "row", "clustering": "2", "side": "a", "deletion_time": "2021-01-02T00:00:00Z",
-          "local_deletion_time": "2026-06-24T22:59:14Z",
+          "local_deletion_time": "2026-11-11T00:53:44Z",
           "resurrection_risk": { "status": "yes", "phase": "past-gc-grace",
                                   "shadowed_cells": [{"clustering":"2","column":"extra","side":"b"},
                                                       {"clustering":"2","column":"val","side":"b"}] } }
@@ -155,21 +159,24 @@ fixture without being re-derived per case.
 
 ## D6. Fixture (issue AC 1) — `test_tomb/resurrection_gc_positive`, staged as two directories
 
-Already committed, 2 generations, `gc_grace_seconds = 864000` (`test-data/schemas/tombstone-parity.cql`
+Already published in `datasets-v4` (Cassandra 5.0.8; the 5.0.2 set this spec was first drafted against
+carried different wall-clock deletion times, so every literal below was re-read from the 5.0.8
+`*.jsonl` goldens and `nb-2-big-Statistics.db.txt`: "SSTable min/max local deletion time" 1794358424),
+2 generations, `gc_grace_seconds = 864000` (`test-data/schemas/tombstone-parity.cql`
 table 5). Generation 1 (`nb-1-big`): partition `1` clustering 1–5 all live; partition `2` clustering
 1–3 all live. Generation 2 (`nb-2-big`): partition `1` — a ROW tombstone at clustering `2`
-(`marked_deleted=2021-01-02T00:00:00Z`, `local_delete_time=2026-06-24T22:59:14Z`) and a CELL
+(`marked_deleted=2021-01-02T00:00:00Z`, `local_delete_time=2026-11-11T00:53:44Z`) and a CELL
 tombstone on column `val` at clustering `3` (same times); partition `2` — a PARTITION tombstone
 (same times). Read directly from the committed `*.jsonl` sstabledump goldens next to each
 generation's `Data.db` (never re-derived from CQLite output, #3042).
 
 Stage: **A** = a temp copy of the table dir with BOTH generations; **B** = a temp copy with ONLY
 `nb-1-big-*`. `gc_before_boundary_epoch = local_delete_time_epoch + gc_grace_seconds =
-1782341954 + 864000 = 1783205954` (2026-07-04T22:59:14Z). Per #1385's strict-`<` convention:
-`--now 1783205954` (exactly the boundary) ⇒ **not yet** purge-eligible ⇒ `before-gc-grace`;
-`--now 1783205955` (boundary + 1s) ⇒ `past-gc-grace`.
+1794358424 + 864000 = 1795222424` (2026-11-21T00:53:44Z). Per #1385's strict-`<` convention:
+`--now 1795222424` (exactly the boundary) ⇒ **not yet** purge-eligible ⇒ `before-gc-grace`;
+`--now 1795222425` (boundary + 1s) ⇒ `past-gc-grace`.
 
-Expected `diff(A, B)` at `--now 1783205955`:
+Expected `diff(A, B)` at `--now 1795222425`:
 - partition `1`, clustering `2`: tombstone `only-a` (row); cells `extra`/`val` `only-b`
   (`extra_2`/`live_2`, both older than the deletion) ⇒ `resurrection_risk: yes, past-gc-grace`.
 - partition `1`, clustering `3`, column `val`: tombstone `only-a` (cell); cell `val` `only-b`
@@ -180,15 +187,29 @@ Expected `diff(A, B)` at `--now 1783205955`:
 - partition `2`: tombstone `only-a` (partition); all 6 cells (`extra`/`val` × clustering 1–3)
   `only-b` ⇒ `resurrection_risk: yes, past-gc-grace` for every shadowed cell named.
 
-At `--now 1783205954` the same tombstones classify `resurrection_risk: yes, before-gc-grace` (the
+At `--now 1795222424` the same tombstones classify `resurrection_risk: yes, before-gc-grace` (the
 shadow relationship is identical — B's data is still older than the deletion — only the gc_grace
 phase changes), proving the boundary is exact to the second, matching #1385 and #4193's R2.3.
+
+### D6b. Range-tombstone fixture (R5.1) — `test_explain/trace_decisions`
+
+`test_tomb/wide_range_tombstone` (named in the first draft of R5.1) is a SINGLE-generation table: its
+range tombstone and the cells it covers sit in the same `Data.db`, so the "withhold the tombstone's
+generation" staging R5.1 describes is impossible there. The committed 2-generation Cassandra-5.0.8
+fixture `test-data/datasets/sstables/test_explain/trace_decisions-*` (issue #4193; mutations in
+`generation-a.cql`/`generation-b.cql`, pinned `USING TIMESTAMP`) already holds exactly the shape R5.1
+needs: partition `3` has A (`nb-1-big`) cells `ck=1 v='range-shadowed'` (ts 1000) and `ck=3
+v='outside-range'` (ts 1000), and B (`nb-2-big`) the inclusive range tombstone `[1,2]` at ts 2000
+(`local_delete_time` 1794535357, `gc_grace_seconds` 864000 ⇒ boundary 1795399357). Staged as side A =
+both generations, side B = `nb-1-big` only, the range tombstone is `only-a`, and the cell
+`ck=1 v` is shadowed (1000 `<=` 2000, inside `[1,2]`) while `ck=3 v` is not (outside the span) — a
+positive and a negative case in one partition.
 
 ## D7. Sizing
 
 One new core module (per-side trail drive is a direct call into #4193's mechanism; the comparison
 fold plus the range-tombstone span predicate is the new code, ~350–500 lines), one CLI verb
-(~150–200 lines matching `explain`/`tombstones`' shape), tests against the one mandatory fixture plus
+(~150–200 lines matching `explain`'s shape), tests against the one mandatory fixture plus
 a synthetic identical-snapshot case and a truncated-generation failure case (~700–1000 lines, matching
 sibling per-scenario density). **Total estimate: ~1.4–2k lines including tests** — within the
 single-PR budget the issue's own "Medium" sizing calls for.

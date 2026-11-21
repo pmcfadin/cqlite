@@ -1,27 +1,28 @@
 # snapshot-diff-scan — new capability (snapshot-diff, issue #4201)
 
 `cqlite-core` SHALL expose a read-only, two-source diff of the same table's reconciled state, built
-entirely on top of #4193's reconciliation trail (`merge::trace::{TraceSink, RecordingSink,
-CellDecision, TombstoneRecord}`, `merge::compute_gc_before`), with resurrection-risk classification
-derived from Cassandra's own purge/shadow rules at the pinned `cassandra-5.0.8` tag. All requirements
-are ADDED.
+entirely on top of #4193's merged reconciliation trail (`merge::trace::{TraceSink, RecordingSink,
+CellDecision, TombstoneRecord}`, `merge::build_traced_merger_with_registry`,
+`merge::compute_gc_before`), with resurrection-risk classification derived from Cassandra's own
+purge/shadow rules at the pinned `cassandra-5.0.8` tag. All requirements are ADDED.
 
 ## ADDED Requirements
 
 ### Requirement: R1 — Each side is reconciled independently by the unmodified #4193 mechanism
 
-`diff_table`/`diff_partition` SHALL drive `build_single_partition_merger` once per side, over that
-side's own generation set only, in full-compaction configuration (`purge_safe(true)`,
+`diff_table`/`diff_partition` SHALL drive `build_traced_merger_with_registry` (the traced point-read
+builder, with the table's UDT registry) once per side, over that side's own generation set only, in full-compaction configuration (`purge_safe(true)`,
 `gc_before_secs = compute_gc_before(schema, now)`, `now_secs = Some(now)`) with a `RecordingSink`,
 at the same pinned `now` for both sides. No new reconciliation rule is introduced.
 
 #### Scenario: R1.1 both sides use the same `now` and the same merger
 - **Given** `cqlite-core/tests/issue_4201_diff_resurrection.rs` and `test_tomb/resurrection_gc_positive`
   staged as two directories (A = both generations, B = generation 1 only, design.md §D6)
-- **When** `diff_table` runs at `--now 1783205955`
-- **Then** side A's own winner/tombstone trail equals what `explain`'s library entry point would
-  compute for A alone at the same `now`, and likewise for B (asserted by calling both entry points
-  and comparing, not by re-implementing reconciliation).
+- **When** `diff_table` runs at `--now 1795222425`
+- **Then** side A's own winner/tombstone trail equals what `explain` computes for A alone at the same
+  `now` (the same builder, the same `with_now_secs`/`with_gc_before_secs`/`with_purge_safe(true)`
+  configuration, driven independently by the test), and likewise for B (asserted by driving both and
+  comparing, not by re-implementing reconciliation).
 
 ### Requirement: R2 — Cell status is one of `equal`, `only-a`, `only-b`, `newer-in-a`, `newer-in-b`
 
@@ -37,7 +38,7 @@ exactly one of the five statuses, per design.md §D1's fold.
 
 #### Scenario: R2.2 cell-granularity divergence within one row
 - **Given** the `resurrection_gc_positive` fixture staged per §D6
-- **When** `diff_table` runs at `--now 1783205955`
+- **When** `diff_table` runs at `--now 1795222425`
 - **Then** partition `1` clustering `3`: column `val` is `only-b`, column `extra` is `equal` — proving
   classification is per-cell, not per-row (design.md §D6).
 
@@ -45,7 +46,7 @@ exactly one of the five statuses, per design.md §D1's fold.
 
 `diff_table` SHALL classify each tombstone as `only-a` or `only-b`. A tombstone whose
 `(kind, scope, deletion_time, local_deletion_time)` matches on both sides SHALL NOT appear in the
-report (proposal.md open decision 2's adopted default); a tombstone present on exactly one side
+report (proposal.md decision 2's adopted default); a tombstone present on exactly one side
 SHALL be reported with that side and, per R4, a `resurrection_risk`.
 
 #### Scenario: R3.1 divergent tombstones only
@@ -55,30 +56,20 @@ SHALL be reported with that side and, per R4, a `resurrection_risk`.
   (clustering `3`, column `val`) and the partition tombstone (partition `2`), each `side: "a"` — no
   entry for a tombstone that does not exist on side B, since none does.
 
-### Requirement: R4 — Resurrection-risk classification derives from Cassandra's purge/shadow rules
+### Requirement: R4 — Resurrection risk is decided by Cassandra's shadow rule
 
 For every `only-a`/`only-b` tombstone `T`, `diff_table` SHALL check the OTHER side's winner set for
 any cell within `T`'s scope with `writetime <= T.deletion_time` (the shadow rule,
-`DeletionPurger#shouldPurge`, `cassandra-5.0.8`). If none exists, `resurrection_risk.status = "no"`.
-If at least one exists, `resurrection_risk.status = "yes"` and `.phase` SHALL be `"past-gc-grace"`
-when `T.local_deletion_time < now - gc_grace_seconds` (strict `<`, the SAME boundary #1385/#4193's
-`purgeable` verdict uses, `ColumnFamilyStore#gcBefore(long)`, `cassandra-5.0.8`) and
-`"before-gc-grace"` otherwise. Every shadowed cell SHALL be named in `shadowed_cells`, never just
-counted.
+`DeletionPurger#shouldPurge`, `cassandra-5.0.8`). If none exists, `resurrection_risk.status = "no"`;
+if at least one exists it is `"yes"`. Every shadowed cell SHALL be named in `shadowed_cells`, never
+just counted.
 
 #### Scenario: R4.1 past-gc-grace, named cells, all three tombstone kinds
-- **Given** the §D6 fixture at `--now 1783205955` (one second past the boundary, design.md §D6)
+- **Given** the §D6 fixture at `--now 1795222425` (one second past the boundary, design.md §D6)
 - **When** `diff_table` runs
 - **Then** all three tombstones (row, cell, partition) report `resurrection_risk: {status: "yes",
   phase: "past-gc-grace"}`, and the partition tombstone's `shadowed_cells` names all 6 cells
   (`extra`/`val` × clustering 1–3) it shadows on side B.
-
-#### Scenario: R4.2 before-gc-grace at the exact boundary second
-- **Given** the same fixture at `--now 1783205954` (exactly `local_deletion_time + gc_grace_seconds`)
-- **When** `diff_table` runs
-- **Then** all three tombstones report `resurrection_risk: {status: "yes", phase: "before-gc-grace"}`
-  — the shadow relationship is unchanged; only the gc_grace phase flips, exact to the second
-  (mirrors #4193's R2.3 boundary test).
 
 #### Scenario: R4.3 no resurrection risk when nothing is shadowed
 - **Given** a synthetic two-generation fixture where side A's tombstone covers a key side B never
@@ -87,6 +78,20 @@ counted.
 - **Then** the tombstone is reported `only-a` with `resurrection_risk: {status: "no"}` — the field is
   always present, never omitted, so silence after a `grep` means "checked, none found" (#4159 class).
 
+### Requirement: R4A — The gc_grace phase of a risk is the strict-`<` purge boundary
+
+When `resurrection_risk.status` is `"yes"`, `.phase` SHALL be `"past-gc-grace"` when
+`T.local_deletion_time < now - gc_grace_seconds` (strict `<`, the SAME boundary #1385/#4193's
+`purgeable` verdict uses, `ColumnFamilyStore#gcBefore(long)`, `cassandra-5.0.8`) and
+`"before-gc-grace"` otherwise.
+
+#### Scenario: R4.2 before-gc-grace at the exact boundary second
+- **Given** the same fixture at `--now 1795222424` (exactly `local_deletion_time + gc_grace_seconds`)
+- **When** `diff_table` runs
+- **Then** all three tombstones report `resurrection_risk: {status: "yes", phase: "before-gc-grace"}`
+  — the shadow relationship is unchanged; only the gc_grace phase flips, exact to the second
+  (mirrors #4193's R2.3 boundary test).
+
 ### Requirement: R5 — Range tombstones are cross-checked the same way
 
 A RANGE tombstone `only-a`/`only-b` SHALL be checked against the other side's winner set for any
@@ -94,10 +99,12 @@ cell whose clustering falls within the tombstone's span AND whose writetime is `
 time — the same shadow rule as R4, applied over a span instead of one coordinate.
 
 #### Scenario: R5.1 range tombstone shadows live cells on the other side
-- **Given** `test_tomb/wide_range_tombstone` staged as side A (the generation carrying the range
-  tombstone) and an independently-staged side B built from the SAME base generation with the range
-  tombstone's generation withheld (so B still holds the cells the range would shadow)
-- **When** `diff_table` runs at a `now` past the tombstone's gc_grace boundary
+- **Given** `test_explain/trace_decisions` partition `3` (design.md §D6b; `test_tomb/wide_range_tombstone`
+  is single-generation and cannot be staged this way) staged as side A (both generations, the second
+  carrying the range tombstone) and an independently-staged side B built from the SAME base
+  generation with the range tombstone's generation withheld (so B still holds the cells the range
+  would shadow)
+- **When** `diff_table` runs at a `now` past the tombstone's gc_grace boundary (1795399358)
 - **Then** the range tombstone reports `only-a`, `resurrection_risk: {status: "yes",
   phase: "past-gc-grace"}`, and `shadowed_cells` names every clustering row inside the span that B
   still holds live, derived independently from the golden JSONL's writetimes (never from

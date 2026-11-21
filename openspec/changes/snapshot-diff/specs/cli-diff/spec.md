@@ -1,8 +1,10 @@
 # cli-diff — new capability (snapshot-diff, issue #4201)
 
 `cqlite diff` SHALL expose the two-source diff scan from the binary, read-only, with `--now` stated
-first in every output, resolving each side exactly the way `query`/`explain`/`tombstones` resolve a
-single `--data-dir`. All requirements are ADDED.
+first in every output, resolving each side exactly the way `explain` resolves a table directory
+(`explain_resolve::{resolve_table_dir, discover_live_generations}`). Live generations are the files
+directly in the table directory: `snapshots/`, `backups/` and secondary-index subdirectories are never
+read. `--schema` resolves the table exactly as `explain` does. All requirements are ADDED.
 
 ## ADDED Requirements
 
@@ -10,23 +12,22 @@ single `--data-dir`. All requirements are ADDED.
 
 The CLI SHALL expose `cqlite diff <snapshot-a-dir> <snapshot-b-dir> --table <ks.table> [--schema
 <path>] [--partition <key>]... [--now <ts>] [--out text|json]`. Each of `<snapshot-a-dir>` and
-`<snapshot-b-dir>` SHALL be resolved as a flat table directory of generations — the same shape
-`--data-dir` already resolves for `query`/`explain`/`tombstones` (proposal.md open decision 1,
-adopted for this slice). `--schema` resolves the table exactly as those verbs do.
+`<snapshot-b-dir>` SHALL be resolved as a flat table directory of live generations, exactly as
+`explain` resolves one (proposal.md decision 1, adopted for this slice).
 
 #### Scenario: R9.1 first line states the clock and both sides' generations
 - **Given** the built `cqlite` binary and `test_tomb/resurrection_gc_positive` staged as two
   directories per design.md §D6
-- **When** `cqlite diff <a-dir> <b-dir> --table test_tomb.resurrection_gc_positive --now 1783205955`
+- **When** `cqlite diff <a-dir> <b-dir> --table test_tomb.resurrection_gc_positive --now 1795222425`
   runs
-- **Then** the first line states `now=1783205955 (<RFC3339>)`, `side_a: generations=2 [nb-1-big,
+- **Then** the first line states `now=1795222425 (<RFC3339>)`, `side_a: generations=2 [nb-1-big,
   nb-2-big]`, `side_b: generations=1 [nb-1-big]`, exit code `0`
   (`cqlite-cli/tests/diff_cli_tests.rs`, named in the gate's `cli-tests` target list).
 
 #### Scenario: R9.2 `--now` absent is wall clock and says so
 - **When** the same command runs without `--now`
 - **Then** the first line carries the wall-clock value and the suffix `(wall clock)`, matching
-  `explain`/`tombstones`' convention exactly; tests never assert on its value.
+  `explain`'s convention exactly; tests never assert on its value.
 
 ### Requirement: R10 — Output matches design.md §D4 exactly and is machine-readable
 
@@ -34,7 +35,7 @@ adopted for this slice). `--schema` resolves the table exactly as those verbs do
 data as human-readable text, one finding per line, `summary` last.
 
 #### Scenario: R10.1 json shape matches §D4
-- **When** `cqlite diff <a-dir> <b-dir> --table test_tomb.resurrection_gc_positive --now 1783205955
+- **When** `cqlite diff <a-dir> <b-dir> --table test_tomb.resurrection_gc_positive --now 1795222425
   --out json` runs
 - **Then** stdout after the first line is one JSON object with exactly the keys `now`, `table`,
   `gc_grace_seconds`, `side_a`, `side_b`, `partitions`, `summary`, deep-equal (volatile fields
@@ -57,7 +58,7 @@ honors.
 #### Scenario: R11.1 `--partition` scopes to one partition
 - **Given** the §D6 fixture
 - **When** `cqlite diff <a-dir> <b-dir> --table test_tomb.resurrection_gc_positive --partition 2
-  --now 1783205955` runs
+  --now 1795222425` runs
 - **Then** `partitions[]` contains exactly partition `2`'s findings (the partition tombstone and its
   6 shadowed cells), and no data from partition `1` is read or reported.
 
@@ -99,7 +100,7 @@ Running `diff <a-dir> <b-dir>` and `diff <b-dir> <a-dir>` SHALL produce label-sw
 
 #### Scenario: R13.1 CLI-level mirror
 - **Given** the §D6 fixture
-- **When** both `cqlite diff <a-dir> <b-dir> --table ... --now 1783205955 --out json` and
-  `cqlite diff <b-dir> <a-dir> --table ... --now 1783205955 --out json` run
+- **When** both `cqlite diff <a-dir> <b-dir> --table ... --now 1795222425 --out json` and
+  `cqlite diff <b-dir> <a-dir> --table ... --now 1795222425 --out json` run
 - **Then** relabeling one output's `a`/`b` tags (per core R6's rule) and comparing to the other
   yields structural equality.

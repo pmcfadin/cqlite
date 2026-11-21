@@ -5,32 +5,28 @@ Commit after every group (#3042). `--lite` after every fix round; ONE full gate 
 
 ## 0. Blocking dependency + premises — re-confirm in the worktree, STOP and report if false
 
-- [ ] 0.0 **BLOCKING: #4193 must be Seam-1 approved AND merged to `origin/main` before any task
-      below starts.** At spec time #4193's OpenSpec change is drafted and `openspec validate --strict`
-      clean on branch `issue-4193-forensics-explain`, but epic #4192's own tracking line reads
-      "parked in Backlog, re-activate by adopting the branch" — **do not treat #4193 as approved.**
-      Confirm current status (`gh issue view 4193 --json labels,state`) before doing anything else;
-      if still unapproved/unmerged, stop and report back rather than implementing against a moving
-      branch. Once merged, rebase this branch onto `origin/main` and re-run 0.1–0.4 against the
-      merged code, not the branch snapshot this spec was written against.
-- [ ] 0.1 Confirm `merge::trace::{TraceSink, RecordingSink, CellDecision, TombstoneRecord,
-      TombstoneKind, DecidedBy}` visibility from a new sibling module under `write_engine/` — if
-      private to `merge`, the first library task is a minimal `pub(crate)` widening, not a design
-      change (design.md §D1).
-- [ ] 0.2 Confirm `build_single_partition_merger`'s exact signature and how #4193's `explain` drives
-      it over ALL of one table's generations — `diff` calls it twice (once per side), never merging
-      the two sides' generation lists together.
-- [ ] 0.3 Confirm the authoritative partition enumeration primitive `salvage`/#4200's `tombstones`
-      use (BIG `Index.db` entries; BTI `Partitions.db` trie walk) is reusable read-only, over TWO
-      independent table directories, for the un-scoped (no `--partition`) full-table case.
-- [ ] 0.4 Confirm `compute_gc_before(schema, now)` visibility from the new module (same check #4200's
-      Group 0 makes; do not duplicate its confirmation if #4200 has already landed and settled it —
-      cite that instead of re-deriving).
-- [ ] 0.5 Fixture check: `test_tomb/resurrection_gc_positive` (2 generations) present under the
-      fetched `CQLITE_DATASETS_ROOT` with its `*.jsonl` goldens for both generations; confirm the
-      exact `local_delete_time`/`marked_deleted` values design.md §D6 cites still match the committed
-      fixture (re-derive the epoch arithmetic if the fixture has changed since this spec was written).
-- [ ] 0.6 If proposal.md open decision 3 (range-tombstone resurrection-risk scope) is ruled OUT at
+- [x] 0.0 **#4193 merged to `origin/main`** (#4546, `7dd80495a`; OpenSpec change archived
+      2026-11-20). This branch is rebased on it; premises 0.1-0.4 below were re-checked against the
+      merged code, not the draft branch.
+- [x] 0.1 `merge::trace::{TraceSink, RecordingSink, CellDecision, TombstoneRecord, TombstoneKind,
+      DecidedBy, Verdict, ProbeOutcome}` are `pub` (`merge/trace.rs`, an unconditional module);
+      nothing to widen.
+- [x] 0.2 The traced builder is `merge::build_traced_merger_with_registry(paths, keys, schema,
+      udt_registry, scan_cancel, sink)`; `explain` then applies `with_now_secs`,
+      `with_gc_before_secs(compute_gc_before(..))`, `with_purge_safe(true)`, loops `step()` to
+      `MergeStep::Complete` and takes the sink back with `into_trace_sink()`. `diff` runs that
+      sequence once per side, never merging the two sides' generation lists.
+- [x] 0.3 Partition enumeration for the un-scoped case: `SSTableReader::open` +
+      `distinct_partition_keys_with_positions(Some(schema))` (the structural walk `rebuild` uses),
+      read-only, once per side; the key union is the scan set. (The draft named Index.db / Partitions.db
+      boundary sources; those walkers are `pub(super)` inside salvage.)
+- [x] 0.4 `merge::{compute_gc_before, effective_compaction_schema}` are `pub`.
+- [x] 0.5 Fixture check: `test_tomb/resurrection_gc_positive` (2 generations) present under the
+      `datasets-v4` (Cassandra 5.0.8) root with its `*.jsonl` goldens; design.md §D6's literals were
+      re-derived (`local_delete_time` 1794358424, boundary 1795222424). R5.1 uses the committed
+      2-generation `test_explain/trace_decisions` (design.md §D6b) because
+      `test_tomb/wide_range_tombstone` is single-generation.
+- [x] 0.6 (Moot: owner ruled R5 IN at Seam 1, 2026-09-23.) If proposal.md decision 3 (range-tombstone resurrection-risk scope) is ruled OUT at
       activation, drop R5/R5.1 from `specs/snapshot-diff-scan/spec.md` and re-run
       `openspec validate --strict` before implementing; do not silently under-implement an unrevised
       spec.
@@ -39,14 +35,14 @@ Commit after every group (#3042). `--lite` after every fix round; ONE full gate 
 
 - [ ] 1.1 `snapshot_diff/mod.rs`: `DiffOptions`, `DiffReport`, `PartitionDiff`, `CellDiffEntry`,
       `TombstoneDiffEntry`, `ResurrectionRisk` (design.md §D4 shape, serde).
-- [ ] 1.2 `snapshot_diff/scan.rs`: drive both sides' `build_single_partition_merger` +
+- [ ] 1.2 `snapshot_diff/scan.rs`: drive both sides' `build_traced_merger_with_registry` +
       `RecordingSink` independently (R1); fold into winner sets; cell-status classification (R2);
       tombstone-status classification with same-both-sides omission (R3).
 - [ ] 1.3 `snapshot_diff/resurrection.rs`: the shadow-check predicate (R4) — partition/row/cell/
       collection scope match plus writetime `<=` deletion_time — and the range-tombstone span variant
       (R5, if 0.6 keeps it in scope), both citing `DeletionPurger#shouldPurge` /
       `ColumnFamilyStore#gcBefore` in a doc comment (design.md §D2).
-- [ ] 1.4 Partition enumeration for the un-scoped path: union of both sides' boundary-source keys,
+- [ ] 1.4 Partition enumeration for the un-scoped path: union of both sides' enumerated keys,
       fold-and-drop per partition (R8); `diff_partition` for the `--partition` path bypasses
       enumeration entirely.
 - [ ] 1.5 `tests/issue_4201_diff_resurrection.rs` (R1.1, R2.1, R2.2, R3.1, R4.1, R4.2, R4.3, and R5.1
@@ -65,8 +61,8 @@ Commit after every group (#3042). `--lite` after every fix round; ONE full gate 
 - [ ] 2.1 `cli_types.rs`: `Commands::Diff(DiffArgs { dir_a, dir_b, table, schema, partition:
       Vec<String>, now: Option<String>, out: Option<OutputFormat> })`; help text states the read-only
       guarantee and that `--partition` restricts the point-read path (R9, R11).
-- [ ] 2.2 `commands/diff.rs`: resolve each side's table dir independently via the same helpers
-      `query`/`explain`/`tombstones` use (per proposal.md decision 1's flat-dir adoption); render the
+- [ ] 2.2 `commands/diff.rs`: resolve each side's table dir independently via
+      `explain_resolve::{resolve_table_dir, discover_live_generations}` (per proposal.md decision 1's flat-dir adoption); render the
       first line before anything else (R9.1/R9.2); call `diff_table`/`diff_partition`; render
       `text`/`json` per design.md §D4; exit codes per R12.
 - [ ] 2.3 Wire in `main.rs`; `commands/mod.rs`.
@@ -84,8 +80,7 @@ Commit after every group (#3042). `--lite` after every fix round; ONE full gate 
 - [ ] 3.2 Fix rounds: `--lite` re-cert + diff-scoped targets after each fix; never a full gate per
       round. Batch nits into one follow-up issue at merge time; blockers trigger
       `fix → --lite → re-review`.
-- [ ] 3.3 Open the PR once review-first is clean; the PR body states the #4193 dependency (merged
-      SHA) explicitly.
+- [ ] 3.3 Open the PR once review-first is clean.
 - [ ] 3.4 Hand to `flow-closer`: rebase → ONE full gate → C (spec-auditor intent audit against
       `specs/snapshot-diff-scan/spec.md` + `specs/cli-diff/spec.md`) → roborev LAST →
       `premerge-assert` → arm `gh pr merge --auto` → finalize.
