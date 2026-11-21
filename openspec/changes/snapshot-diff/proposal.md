@@ -105,6 +105,12 @@ literal Cassandra shadow rule (`DeletionPurger#shouldPurge`, `AbstractCell.purge
 5. **Wiring evidence from the binary**, against the committed `resurrection_gc_positive` fixture
    staged as two directories (A = both generations, B = generation 1 only) per the issue's own AC 1.
 
+## Owner amendments
+
+- **Q21=b (2026-11-21):** a sixth cell status `conflict` (equal timestamp, differing content) with
+  both values and `resolves_to`, and per-element keying of collections by `cell_path`.
+- Declared scope limit (design §D2b): a liveness-only row reports no resurrection risk (#4601).
+
 ## Non-goals
 
 - **Repairing either side.** The report is input to `sstableloader`/repair, never a write path. No

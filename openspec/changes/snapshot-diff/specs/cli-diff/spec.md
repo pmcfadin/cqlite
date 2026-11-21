@@ -48,6 +48,16 @@ data as human-readable text, one finding per line, `summary` last.
   `summary.partitions_compared` names the true count — never a report indistinguishable from "the
   scan did not run" (issue AC 2).
 
+### Requirement: R10A — Text output is one finding per line, whatever the data holds
+
+In `--out text`, values, keys, column names and paths SHALL be escaped so that newlines, tabs,
+control characters and the two-space field separator cannot split or fuse findings.
+
+#### Scenario: R10.3 hostile values
+- **Given** a report holding a value with a newline, a tab and a double space
+- **When** it is rendered as text
+- **Then** every finding is exactly one line and each hostile value is a single quoted, escaped field.
+
 ### Requirement: R11 — `--partition` restricts the scan through the point-read path
 
 When `--partition <key>` is given, `diff` SHALL resolve and compare only that partition through the

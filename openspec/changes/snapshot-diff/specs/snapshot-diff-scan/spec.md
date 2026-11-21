@@ -24,10 +24,11 @@ at the same pinned `now` for both sides. No new reconciliation rule is introduce
   configuration, driven independently by the test), and likewise for B (asserted by driving both and
   comparing, not by re-implementing reconciliation).
 
-### Requirement: R2 — Cell status is one of `equal`, `only-a`, `only-b`, `newer-in-a`, `newer-in-b`
+### Requirement: R2 — Cell status is one of `equal`, `only-a`, `only-b`, `newer-in-a`, `newer-in-b`, `conflict`
 
-For every `(clustering, column)` key present in either side's winner set, `diff_table` SHALL report
-exactly one of the five statuses, per design.md §D1's fold.
+For every `(clustering, column, cell_path)` key present in either side's winner set, `diff_table`
+SHALL report exactly one of the six statuses, per design.md §D1's fold. A non-frozen collection
+element is its own cell, keyed by its `cell_path`. (Six statuses: owner Q21=b, 2026-11-21.)
 
 #### Scenario: R2.1 identical snapshots — every cell equal, exit affirmatively
 - **Given** the same table staged identically as both A and B (same generations, same bytes)
@@ -41,6 +42,42 @@ exactly one of the five statuses, per design.md §D1's fold.
 - **When** `diff_table` runs at `--now 1795222425`
 - **Then** partition `1` clustering `3`: column `val` is `only-b`, column `extra` is `equal` — proving
   classification is per-cell, not per-row (design.md §D6).
+
+### Requirement: R2A — Equal-timestamp disagreement is a `conflict`, resolved as Cassandra would
+
+When the two sides hold a cell at the same key and the SAME write timestamp but differing content
+(value bytes, expiry, or live-vs-tombstone), `diff_table` SHALL report status `conflict` with both
+sides' values and `resolves_to: "a"|"b"` — the side `Cells.resolveRegular` keeps
+(`cassandra-5.0.8` `db/rows/Cells.java:79-128`), compared on typed bytes. The report SHALL continue;
+no abort.
+
+#### Scenario: R2.3 scalar conflict and its mirror
+- **Given** `test_diff.risk_cases` ids 9 and 10 (same `USING TIMESTAMP 5000`, `'zebra'` vs `'apple'`
+  in opposite generations), side A = generation 2, side B = generation 1
+- **When** `diff_table` runs
+- **Then** id 9 is `conflict` with `resolves_to: "a"` (`'zebra'` > `'apple'` by unsigned bytes) and id
+  10 is `conflict` with `resolves_to: "b"`; both values are named and the report is complete.
+
+#### Scenario: R2.4 tombstone-vs-live and expiring-vs-live ties
+- **Given** `risk_cases` id 11 (A: cell tombstone @5000, B: live @5000) and id 12 (A: expiring
+  @5000 with TTL, B: live @5000)
+- **When** `diff_table` runs
+- **Then** both are `conflict` with `resolves_to: "a"` (tombstone beats live, expiring beats live at
+  equal timestamp, `Cells.java:93-98`).
+
+### Requirement: R2B — Collection elements are compared per element, on typed bytes
+
+Elements of a non-frozen collection SHALL be compared per `(clustering, column, cell_path)`; frozen
+values and element values SHALL be compared by serialized bytes, never by formatted text. An element
+tombstone SHALL shadow only its own element.
+
+#### Scenario: R2.5 map, set, frozen list and element tombstone
+- **Given** `risk_cases` ids 13-16 (map `{'k1':7}` vs `{'k2':7}` at one timestamp; set `{x}` vs
+  `{y}`; frozen list `['a, b']` vs `['a','b']`; a map element tombstone)
+- **When** `diff_table` runs
+- **Then** the map gives `only-b` for `k1` and `only-a` for `k2`; the set gives per-element
+  `only-a`/`only-b` with no conflict; the frozen lists are NOT equal (`conflict`); the element
+  tombstone shadows only its own element and not the surviving `k3`.
 
 ### Requirement: R3 — Tombstone status is `only-a` or `only-b`; a tombstone consistent on both sides is omitted
 
@@ -92,6 +129,17 @@ When `resurrection_risk.status` is `"yes"`, `.phase` SHALL be `"past-gc-grace"` 
   — the shadow relationship is unchanged; only the gc_grace phase flips, exact to the second
   (mirrors #4193's R2.3 boundary test).
 
+### Requirement: R4B — Declared scope limit: a liveness-only row (issue #4601)
+
+A row whose only victim is its liveness marker (no cell) reports `resurrection_risk: no`, because the
+marker is not a cell in the reconciliation trail. `--help` SHALL state this declared limit.
+
+#### Scenario: R4.4 liveness-only row
+- **Given** `risk_cases` id 17 (B: `INSERT` with no regular column @5000; A: row tombstone @6000)
+- **When** `diff_table` runs
+- **Then** the row tombstone is `only-a` with `resurrection_risk: {status: "no"}` (documented limit,
+  #4601), never an error.
+
 ### Requirement: R5 — Range tombstones are cross-checked the same way
 
 A RANGE tombstone `only-a`/`only-b` SHALL be checked against the other side's winner set for any
@@ -133,6 +181,16 @@ class) — no diff is computed from a shorter trail on one side.
 - **Given** a temp copy of the §D6 fixture with side B's `nb-1-big-Statistics.db` truncated
 - **When** `diff_table` runs
 - **Then** it returns `Err` naming `side=b` and the truncated path, and no `DiffReport` is produced.
+
+### Requirement: R14 — The returned report never exceeds `max_result_bytes`
+
+The serialized report INCLUDING its metadata, generation lists and summary SHALL NOT exceed
+`DiffOptions.max_result_bytes`; exceeding it is `Error::ResultTooLarge`, never a larger report.
+
+#### Scenario: R14.1 exact budget boundary
+- **Given** a report whose full JSON length is `N`
+- **When** `diff_table` runs with `max_result_bytes = N` and again with `N - 1`
+- **Then** the first returns the report and the second returns `ResultTooLarge`.
 
 ### Requirement: R8 — Memory bound: one partition's pair of trails resident at a time
 

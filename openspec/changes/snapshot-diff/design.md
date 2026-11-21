@@ -16,11 +16,21 @@ side B: identical, over B's own generations           ──► RecordingSink_B 
 winners_A = { (clustering, column) -> (value, writetime, run_index) : cell.verdict == Winner }
 winners_B = same, from RecordingSink_B
 
-cell diff, key = (clustering, column), over winners_A ∪ winners_B:
-   in both, same value+writetime         -> equal
-   in both, different writetime          -> newer-in-a | newer-in-b  (whichever ts is greater)
-   in A only                             -> only-a
-   in B only                             -> only-b
+cell diff, key = (clustering, column, cell_path), over winners_A ∪ winners_B
+(owner Q21=b 2026-11-21: each element of a non-frozen collection is its own cell, as in Cassandra;
+ `cell_path` is the element's path bytes, absent for a simple cell or a frozen collection):
+   in both, same value bytes + writetime (+ ttl/expiry)      -> equal
+   in both, different writetime                              -> newer-in-a | newer-in-b  (greater ts)
+   in both, SAME writetime, different value/ttl/tombstone    -> conflict, resolves_to: a|b
+        (resolves_to = the side Cassandra keeps: Cells.resolveRegular, cassandra-5.0.8
+         db/rows/Cells.java:79-128 — higher ts; equal ts: tombstone or expiring beats live,
+         tombstone beats expiring, larger localDeletionTime, lower TTL, then the larger serialized
+         value by unsigned-lexicographic ValueAccessor.compare; compared on bytes, never on
+         formatted strings)
+   in A only                                                 -> only-a
+   in B only                                                 -> only-b
+   a cell TOMBSTONE on one side at the same key and the SAME writetime as a live cell on the other
+   side counts as "in both" (tombstone value, resolves_to the tombstone side by the rule above).
 
 tombstone diff, key = (kind, scope, deletion_time, local_deletion_time), over
    tombstones_A ∪ tombstones_B:
@@ -99,6 +109,13 @@ locations the implementation cites are recorded in the module docs and the PR):
    `sstableloader`, a restored snapshot) without ever having received the tombstone, it resurfaces.
    `diff` cannot see or prevent that compaction — it names the hazard before it happens.
 
+### D2b. Declared scope limit — a liveness-only row (issue #4601)
+
+A row's liveness marker (the `INSERT` primary-key timestamp) is not a cell in the reconciliation
+trail. A row tombstone whose only victim is a row that holds ONLY a liveness marker therefore
+reports `resurrection_risk: no`. This is a declared limit, stated in `--help` and the cookbook,
+tracked by #4601; it is never silently "checked, none found" for such a row (R4.4 pins it).
+
 ## D3. Memory bound and streaming (matches #4200 D2's "fold, don't accumulate" posture)
 
 Full-table `diff` enumerates partitions with the structural Data.db walk `rebuild` uses
@@ -125,7 +142,10 @@ through `build_traced_merger_with_registry` directly (the point-read path), per 
       "partition_key": "<rendered>",
       "cells": [
         { "clustering": "2", "column": "extra", "status": "only-b", "a": null,
-          "b": { "value": "extra_2", "writetime": "2021-01-01T00:00:00Z" } }
+          "b": { "value": "extra_2", "writetime": "2021-01-01T00:00:00Z" } },
+        { "clustering": "9", "column": "v", "status": "conflict", "resolves_to": "a",
+          "a": { "value": "zebra", "writetime": "1970-01-01T00:00:00.005Z" },
+          "b": { "value": "apple", "writetime": "1970-01-01T00:00:00.005Z" } }
       ],
       "tombstones": [
         { "kind": "row", "clustering": "2", "side": "a", "deletion_time": "2021-01-02T00:00:00Z",
@@ -136,13 +156,14 @@ through `build_traced_merger_with_registry` directly (the point-read path), per 
       ]
     }
   ],
-  "summary": { "partitions_compared": 2, "equal": 7, "only_a": 0, "only_b": 9,
+  "summary": { "partitions_compared": 2, "equal": 7, "conflicts": 0, "only_a": 0, "only_b": 9,
                "newer_in_a": 0, "newer_in_b": 0, "tombstones_only_a": 3, "tombstones_only_b": 0,
                "resurrection_risk_before_gc_grace": 0, "resurrection_risk_past_gc_grace": 3 }
 }
 ```
 
-`text` renders the same data one finding per line, `summary` last. `resurrection_risk.status` is
+A collection element carries `cell_path` (hex of the element's path bytes) on its cell entries and on
+`shadowed_cells`; `resolves_to` is present only on `conflict`. `text` renders the same data one finding per line, `summary` last. `resurrection_risk.status` is
 always present (`"yes"` or `"no"`) on every `only-a`/`only-b` tombstone entry — never omitted, so a
 reader can `grep resurrection_risk` and trust silence means "checked, none found," not "not
 computed" (the #4159 class: an unmeasured value is never indistinguishable from a measured zero).
