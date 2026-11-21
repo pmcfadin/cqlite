@@ -87,7 +87,7 @@ fn side_of(dir: &std::path::Path) -> DiffSide {
             Some((stem.split('-').nth(1)?.parse::<u64>().ok()?, path))
         })
         .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     DiffSide {
         dir: dir.to_path_buf(),
         generations: found.into_iter().map(|(_, p)| p).collect(),

@@ -72,29 +72,29 @@ fn cmp_clustering(
     }
 }
 
-/// Identity of a cell for comparison: exact (JSON) clustering plus column. The trail does not
+/// Identity of a cell for comparison: exact (`Debug`) clustering plus column. The trail does not
 /// expose a collection element's path, so the elements of one non-frozen collection column share
 /// one key and are compared as a multiset of `(value, writetime)`.
 type CellKey = (String, String);
 
+/// One cell's reconciled winners on one side: the clustering and the sorted `(value, writetime)`
+/// versions (one for a simple cell, several for the elements of a non-frozen collection).
+type CellVersions = (Option<ClusteringKey>, Vec<(String, i64)>);
+
 #[derive(Default)]
 struct SideCells {
-    cells: BTreeMap<CellKey, (Option<ClusteringKey>, Vec<(String, i64)>)>,
+    cells: BTreeMap<CellKey, CellVersions>,
 }
 
 impl SideCells {
     fn from_trail(trail: &SideTrail) -> Self {
-        let mut cells: BTreeMap<CellKey, (Option<ClusteringKey>, Vec<(String, i64)>)> =
-            BTreeMap::new();
+        let mut cells: BTreeMap<CellKey, CellVersions> = BTreeMap::new();
         for cell in trail
             .cells
             .iter()
             .filter(|cell| cell.verdict == Verdict::Winner)
         {
-            let key = (
-                serde_json::to_string(&cell.clustering).unwrap_or_default(),
-                cell.column.clone(),
-            );
+            let key = (format!("{:?}", cell.clustering), cell.column.clone());
             let rendered =
                 ValueFormatter::format_value(cell.value.as_ref().unwrap_or(&Value::Null));
             cells
@@ -217,16 +217,20 @@ fn tombstone_identity(tombstone: &TombstoneRecord) -> String {
     } else {
         tombstone.clustering.as_ref()
     };
-    serde_json::to_string(&(
-        kind_name(tombstone.kind),
-        clustering,
-        &tombstone.column,
-        &tombstone.range_start,
-        &tombstone.range_end,
-        tombstone.deletion_time,
-        tombstone.local_deletion_time,
-    ))
-    .unwrap_or_default()
+    // `Debug` is infallible and exact for these plain-data types, so two distinct tombstones can
+    // never collapse onto one identity (a fallible serializer defaulting to "" could).
+    format!(
+        "{:?}",
+        (
+            kind_name(tombstone.kind),
+            clustering,
+            &tombstone.column,
+            &tombstone.range_start,
+            &tombstone.range_end,
+            tombstone.deletion_time,
+            tombstone.local_deletion_time,
+        )
+    )
 }
 
 fn distinct_tombstones(trail: &SideTrail) -> BTreeMap<String, &TombstoneRecord> {

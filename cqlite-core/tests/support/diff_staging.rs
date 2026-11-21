@@ -121,7 +121,7 @@ pub fn side_of(dir: &Path) -> DiffSide {
             .unwrap_or(0);
         found.push((generation, path));
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     assert!(
         !found.is_empty(),
         "no generations staged in {}",

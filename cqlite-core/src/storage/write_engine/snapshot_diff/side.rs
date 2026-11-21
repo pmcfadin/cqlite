@@ -154,11 +154,7 @@ pub(super) async fn preflight_generations(
     let mut config = Config::default();
     config.storage.use_mmap = false;
     config.storage.disk_access_mode = DiskAccessMode::Buffered;
-    let platform = Arc::new(
-        Platform::new(&config)
-            .await
-            .map_err(|source| DiffError::Core(source))?,
-    );
+    let platform = Arc::new(Platform::new(&config).await.map_err(DiffError::Core)?);
     for generation in &input.generations {
         let name = generation
             .file_name()

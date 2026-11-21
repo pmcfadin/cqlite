@@ -10,7 +10,8 @@
 //! count and every pair, then each component's bytes followed by a `crc32` of those bytes; a
 //! component's length is the next offset minus its own (the last one runs to end of file). Every
 //! checksum mismatch is a `CorruptSSTableException` (`:214-227`). `hasMetadataChecksum()` is true
-//! for every in-scope format (BIG `na`+ at `format/big/BigFormat.java:404`; BTI `da`).
+//! for every in-scope format (BIG `na`+ at `format/big/BigFormat.java:404`; BTI `da` at
+//! `format/bti/BtiFormat.java:349-352`).
 
 /// Why a `Statistics.db` failed the strict check.
 pub(super) fn validate_metadata_layout(bytes: &[u8]) -> Result<(), String> {
