@@ -9608,6 +9608,56 @@ run_wrapper "$work"
 assert_verdict 'case (t2s-10) 4 mode-only changes (max+1 paths)' FAIL 1
 assert_says 'case (t2s-10) mode-only changes above the max FAIL' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
 
+printf '== case (t2s-11): a FAILING or EMPTY byte measurement never enables the SKIP (job 389) ==\n'
+# A stub `awk`/`git` placed first on PATH misbehaves ONLY for the byte-measurement invocation (the awk
+# program containing `No newline at end of file`; the `git diff ... -U0`), and delegates to the real tool
+# for everything else, so the rest of the wrapper is unaffected.
+t2s_stubdir="$tmp/t2s11-bin"
+mkdir -p "$t2s_stubdir"
+t2s_real_awk=$(command -v awk)
+t2s_real_git=$(command -v git)
+cat >"$t2s_stubdir/awk" <<STUB
+#!/bin/bash
+case "\$*" in
+  *'No newline at end of file'*)
+    case "\${STUB_T2_MODE:-}" in
+      awk-fail)    exit 3 ;;
+      awk-empty)   exit 0 ;;
+      awk-partial) printf '3'; exit 2 ;;
+      awk-garbage) printf 'abc\\n'; exit 0 ;;
+      awk-multi)   printf '3\\n4\\n'; exit 0 ;;
+    esac ;;
+esac
+exec "$t2s_real_awk" "\$@"
+STUB
+cat >"$t2s_stubdir/git" <<STUB
+#!/bin/bash
+case "\$*" in
+  *' -U0 '*) if [ "\${STUB_T2_MODE:-}" = git-fail ]; then exit 4; fi ;;
+esac
+exec "$t2s_real_git" "\$@"
+STUB
+chmod +x "$t2s_stubdir/awk" "$t2s_stubdir/git"
+for t2s_mode in awk-fail awk-empty awk-partial awk-garbage awk-multi git-fail; do
+  reset_stub
+  work=$(make_fixture "case_t2s11_$t2s_mode" pushed)
+  STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+  STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+  STUB_T2_MODE="$t2s_mode" WRAPPER_PATH_PREFIX="$t2s_stubdir" run_wrapper "$work"
+  assert_verdict "case (t2s-11 $t2s_mode)" FAIL 1
+  assert_says "case (t2s-11 $t2s_mode) a tiny census with an unmeasurable byte count falls to the original guard" '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+  assert_lacks "case (t2s-11 $t2s_mode) never a SKIP" '^vacuity-tier2: SKIP'
+done
+# CONTROL: the same stubs in pass-through mode must still SKIP, so the six FAILs above are the stub's
+# doing and not a broken fixture or a stub that breaks the wrapper.
+reset_stub
+work=$(make_fixture case_t2s11_control pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+STUB_T2_MODE=none WRAPPER_PATH_PREFIX="$t2s_stubdir" run_wrapper "$work"
+assert_verdict 'case (t2s-11 control) pass-through stubs' PASS 0
+assert_says 'case (t2s-11 control) still SKIPs' '^vacuity-tier2: SKIP \(small census: 1 changed code lines '
+
 printf '== case (t2s-5): a tiny census whose findings / review-completed FAIL still gives RESULT FAIL ==\n'
 reset_stub
 work=$(make_fixture case_t2s5a pushed)

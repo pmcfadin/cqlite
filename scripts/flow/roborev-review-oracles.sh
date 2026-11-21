@@ -572,15 +572,27 @@ roborev_code_census_lines() {
   if [ "$_rcl_total" -le "${ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES:-0}" ]; then
     local _rcl_bytes=0 _rcl_b _rcl_p
     for _rcl_p in ${_rcl_measure[@]+"${_rcl_measure[@]}"}; do
-      _rcl_b=$(git -C "$REPO" diff --no-renames --no-color --no-ext-diff -U0 "$RANGE_BASE_SHA" HEAD -- ":(literal)$_rcl_p" 2>/dev/null \
-        | LC_ALL=C awk 'BEGIN { n = 0; inh = 0 }
+      # EVERY STAGE IS CHECKED (review job 389). This was a `git | awk` pipeline whose exit status was
+      # read from PIPESTATUS[0] alone, so a failing awk (or an empty/partial result) read as 0 or
+      # undercounted bytes and ENABLED the skip. Now: git writes a file and its own status is tested; awk
+      # reads that file and ITS status is tested; and the output must be exactly one non-empty run of
+      # digits. Any failure leaves CODE_CENSUS_BYTES empty, which tier2 reads as "no skip".
+      if ! git -C "$REPO" diff --no-renames --no-color --no-ext-diff -U0 "$RANGE_BASE_SHA" HEAD -- ":(literal)$_rcl_p" >"$LOG.bytes-diff" 2>/dev/null; then
+        _rcl_bytes=""; break
+      fi
+      if ! _rcl_b=$(LC_ALL=C awk 'BEGIN { n = 0; inh = 0 }
             /^diff --git / { inh = 0; next }
             /^@@/ { inh = 1; next }
             inh && /^[-+]/ { n += length($0) }
             # `\ No newline at end of file` follows the line it describes: that line has no newline
             # byte, so take back the one length($0) (marker byte standing in for the newline) added.
             inh && /^\\ No newline at end of file/ { n -= 1 }
-            END { print n }'; [ "${PIPESTATUS[0]}" -eq 0 ]) || { _rcl_bytes=""; break; }
+            END { print n }' "$LOG.bytes-diff"); then
+        _rcl_bytes=""; break
+      fi
+      case "$_rcl_b" in
+        ''|*[!0-9]*) _rcl_bytes=""; break ;;
+      esac
       _rcl_bytes=$((_rcl_bytes + _rcl_b))
     done
     CODE_CENSUS_BYTES="$_rcl_bytes"

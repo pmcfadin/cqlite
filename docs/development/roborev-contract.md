@@ -712,7 +712,7 @@ stops loading on every agent turn.
   has none, so counts 0 **only when both endpoints are CODE paths** under the census classifier (a genuine
   code move; a large `.md` renamed 100% to `.rs` is new code and keeps its full added lines and bytes, a
   code-to-non-code rename keeps its deleted lines; roborev job 387), a final line with no trailing
-  newline is counted without the newline byte it does not have, and an unmeasurable byte count never skips (fail closed). **How lines are counted**
+  newline is counted without the newline byte it does not have, and an unmeasurable (git fails, awk fails, or the output is empty or not exactly one run of digits; every stage's status is checked, never just the first of a pipeline, job 389) byte count never skips (fail closed). **How lines are counted**
   (`roborev_code_census_lines`, in `roborev-review-oracles.sh`): added plus deleted lines from the same
   `--numstat -z` records `census:` uses, over the CODE paths only (the paths `prompt-content:` expects),
   so the two can never disagree about what is code; a 100%-similarity rename counts as 0 (the census runs
