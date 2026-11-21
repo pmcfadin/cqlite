@@ -330,6 +330,10 @@ ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20
 # The SKIP therefore also needs the changed code content (added + deleted line bytes, see
 # roborev_code_census_lines) to be at or below this many bytes; an unmeasurable byte count never skips.
 ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096
+# ...AND small in FILE COUNT: pure renames, mode-only changes and empty-file additions contribute 0 lines
+# and 0 bytes at any number, so without this a large scope could ride two zero counts. It counts every
+# CODE census path (a rename is TWO: the census runs --no-renames). An unmeasurable count never skips.
+ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3
 
 # (The former PROMPT_CONTENT_MAX_PATHS_CHECKED sampling cap is gone: every code path is
 # now checked against its exact `diff --git` header, cheap even for a 500-file diff, and
@@ -859,6 +863,7 @@ census_code_paths=()
 census_code_line_counts=()
 CODE_CENSUS_LINES=""
 CODE_CENSUS_BYTES=""
+CODE_CENSUS_PATHS=""
 # The paths whose recorded mode `git ls-tree` could not measure at all (#3229). Declared here
 # for the same reason as the arrays above: the fail-closed check reads `${#...[@]}`, and an
 # array that does not exist would abort under `set -u` — or, worse, be treated as empty.

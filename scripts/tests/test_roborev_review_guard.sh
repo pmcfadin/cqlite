@@ -752,6 +752,10 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   a comment), for the byte half of the tier2 small-census rule
 #   bytes-nonl-<N> ONE added code line of exactly N bytes with NO trailing newline
 #   rename-md-to-rs a 60-line `big.md` (non-code) at the BASE renamed 100% to `big.rs` (CODE)
+#   renames-<N>     N pure `.rs` -> `.rs` renames (r<i>.rs -> s<i>.rs, 100% similarity): N*2 census paths,
+#                   0 changed lines and 0 bytes
+#   mode-only-<N>   N existing `.rs` files whose recorded mode flips to 755: N census paths, 0 lines
+#   empty-<N>       N EMPTY `.rs` files added: N census paths, 0 lines
 #   rename-large    a 60-line `big.rs` that exists at the BASE and is RENAMED (100% similarity)
 #                   on the branch: the census (`--no-renames`) bills it +60/-60, a rename-aware
 #                   count bills it 0
@@ -830,6 +834,11 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
       git_q "$work" commit -q -m 'base: an extensionless harness executable under docs/'
       ;;
+    renames-* | mode-only-*)
+      for _i in $(seq 1 "${mode##*-}"); do printf 'fn a%s() {}\nfn b() {}\n' "$_i" >"$work/r$_i.rs"; done
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'base: small code files'
+      ;;
     rename-md-to-rs)
       seq 1 60 | sed 's/^/fn f/; s/$/() {}/' >"$work/big.md"
       git_q "$work" add big.md
@@ -885,6 +894,19 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       { printf '//'; head -c "$((_bn - 2))" /dev/zero | tr '\0' 'x'; } >"$work/nonl.rs"
       git_q "$work" add nonl.rs
       git_q "$work" commit -q -m "one code line of $_bn bytes, no trailing newline"
+      ;;
+    renames-*)
+      for _i in $(seq 1 "${mode##*-}"); do git_q "$work" mv "r$_i.rs" "s$_i.rs"; done
+      git_q "$work" commit -q -m 'pure renames'
+      ;;
+    mode-only-*)
+      for _i in $(seq 1 "${mode##*-}"); do git_q "$work" update-index --chmod=+x "r$_i.rs"; done
+      git_q "$work" commit -q -m 'mode-only changes'
+      ;;
+    empty-*)
+      for _i in $(seq 1 "${mode##*-}"); do : >"$work/e$_i.rs"; done
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'empty files'
       ;;
     rename-md-to-rs)
       git_q "$work" mv big.md big.rs
@@ -9415,7 +9437,7 @@ STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
 run_wrapper "$work"
 assert_verdict 'case (t2s-1)' PASS 0
-assert_says 'case (t2s-1) tier2 SKIPs with the reason and the counted lines' '^vacuity-tier2: SKIP \(small census: 1 changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and 15 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 — the tier2 floor is not meaningful\)$'
+assert_says 'case (t2s-1) tier2 SKIPs with the reason and the counted lines' '^vacuity-tier2: SKIP \(small census: 1 changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and 15 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 and 1 code paths <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3 — the tier2 floor is not meaningful\)$'
 assert_says 'case (t2s-1) the tokens are still reported' '^tokens: input=18700 cached=0 output=53$'
 assert_lacks 'case (t2s-1) no tier2 FAIL' '^vacuity-tier2: FAIL'
 
@@ -9528,6 +9550,63 @@ STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
 run_wrapper "$work"
 assert_verdict 'case (t2s-9) 4097 bytes, no final newline' FAIL 1
 assert_says 'case (t2s-9) 4097 FAILs' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+# t2s-10: zero-line changes at any count. A prompt naming every path keeps prompt-content PASS, so the
+# ONLY thing that can turn the verdict is the path bound.
+t2s_prompt() { # t2s_prompt <old-prefix> <new-prefix> <n>
+  local _i _p='Review this diff:'
+  for _i in $(seq 1 "$3"); do _p="$_p\ndiff --git a/$1$_i.rs b/$2$_i.rs"; done
+  printf '%s' "$_p"
+}
+printf '== case (t2s-10): zero-line changes still bound the scope by CODE PATHS ==\n'
+reset_stub
+work=$(make_fixture case_t2s10a renames-1)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r s 1)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) ONE rename (2 census paths)' PASS 0
+assert_says 'case (t2s-10) one rename SKIPs on 0 lines, 0 bytes, 2 paths' '^vacuity-tier2: SKIP \(small census: 0 changed code lines <= .* and 0 changed code bytes <= .* and 2 code paths <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3 '
+reset_stub
+work=$(make_fixture case_t2s10b renames-4)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r s 4)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) FOUR pure renames (8 census paths)' FAIL 1
+assert_says 'case (t2s-10) four renames fall to the original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+assert_says 'case (t2s-10) and prompt-content was not what failed it' '^prompt-content: PASS'
+reset_stub
+work=$(make_fixture case_t2s10c empty-3)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt e e 3)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 3 empty files (max paths)' PASS 0
+assert_says 'case (t2s-10) exactly the max paths SKIPs' ' and 3 code paths <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3 '
+reset_stub
+work=$(make_fixture case_t2s10d empty-4)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt e e 4)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 4 empty files (max+1 paths)' FAIL 1
+assert_says 'case (t2s-10) max+1 empty files FAIL' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+reset_stub
+work=$(make_fixture case_t2s10e mode-only-3)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r r 3)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 3 mode-only changes (max paths)' PASS 0
+reset_stub
+work=$(make_fixture case_t2s10f mode-only-4)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT=$(t2s_prompt r r 4)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-10) 4 mode-only changes (max+1 paths)' FAIL 1
+assert_says 'case (t2s-10) mode-only changes above the max FAIL' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
 
 printf '== case (t2s-5): a tiny census whose findings / review-completed FAIL still gives RESULT FAIL ==\n'
 reset_stub

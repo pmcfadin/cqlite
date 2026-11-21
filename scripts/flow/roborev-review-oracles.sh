@@ -562,6 +562,12 @@ roborev_code_census_lines() {
   # content line that itself begins `---`/`+++` is still counted. A pure rename has no content lines, so
   # it counts 0. ANY measurement failure leaves CODE_CENSUS_BYTES empty, which the tier2 rule reads as
   # "no skip" (fail closed).
+  # PATHS (#4608 review job 388): zero-line changes — pure renames, mode-only flips, empty-file
+  # additions — contribute 0 lines and 0 bytes at ANY count, so the review scope could be large while
+  # both counts stay 0. The number of CODE census paths is therefore a third bound. It counts EVERY code
+  # path the census holds, renamed, mode-only and empty ones included (a rename is two census paths, the
+  # census runs `--no-renames`); it is derived from the same array `prompt-content:` iterates.
+  CODE_CENSUS_PATHS="${#census_code_paths[@]}"
   CODE_CENSUS_BYTES=""
   if [ "$_rcl_total" -le "${ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES:-0}" ]; then
     local _rcl_bytes=0 _rcl_b _rcl_p

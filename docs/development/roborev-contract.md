@@ -696,10 +696,15 @@ stops loading on every agent turn.
   tokens, nightly stayed red 2026-11-17 to 2026-11-21) and **#4607** (spec-archive renames, 15696 and
   15807 tokens). **The rule:** when the reviewed CODE census is at or below
   `ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20` changed lines **and** at or below
-  `ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096` changed bytes, `vacuity-tier2:` reads
+  `ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096` changed bytes **and** at or below
+  `ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3` CODE census paths, `vacuity-tier2:` reads
   `SKIP (small census: <N> changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and <B> changed
-  code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 — the tier2 floor is not meaningful)` instead
-  of applying the token floor. **Why bytes too** (roborev job 386): one minified or generated line can hold
+  code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 and <P> code paths <=
+  ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=3 — the tier2 floor is not meaningful)` instead of applying the
+  token floor. **Why paths too** (roborev job 388): pure renames, mode-only flips and empty-file additions
+  contribute 0 lines and 0 bytes at ANY count, so a large review scope would otherwise ride two zero
+  counts. The path count is every CODE census path, renamed, mode-only and empty ones included; a rename is
+  two (the census runs `--no-renames`), so one rename fits under the bound and four do not. **Why bytes too** (roborev job 386): one minified or generated line can hold
   megabytes, and if that content were truncated out of the prompt while its `diff --git` header stayed,
   `prompt-content:` would still pass and a vacuous review would ride the line count. The byte measure is
   the content bytes of every added/deleted line (marker excluded, newline included) of the non-renamed

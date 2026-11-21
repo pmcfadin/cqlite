@@ -629,14 +629,17 @@ roborev_check_tier2() {
       # CODE_CENSUS_LINES (empty / non-numeric) never skips — it falls through to the original guard.
       _t2_small=0
       # SMALL MEANS SMALL IN LINES AND IN BYTES (review job 386); either count unmeasured => no skip.
-      case "${CODE_CENSUS_LINES:-}:${CODE_CENSUS_BYTES:-}" in
-        *[!0-9:]*|:*|*:) ;;
+      # ...AND IN CODE PATHS (review job 388): zero-line changes (renames, mode flips, empty files) add 0
+      # lines and 0 bytes at any count.
+      case "${CODE_CENSUS_LINES:-}:${CODE_CENSUS_BYTES:-}:${CODE_CENSUS_PATHS:-}" in
+        *[!0-9:]*|:*|*::*|*:) ;;
         *) if [ "$CODE_CENSUS_LINES" -le "$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES" ] \
-             && [ "$CODE_CENSUS_BYTES" -le "$ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES" ]; then _t2_small=1; fi ;;
+             && [ "$CODE_CENSUS_BYTES" -le "$ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES" ] \
+             && [ "$CODE_CENSUS_PATHS" -le "$ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS" ]; then _t2_small=1; fi ;;
       esac
       if [ "$_t2_small" -eq 1 ]; then
-        TIER2="SKIP (small census: $CODE_CENSUS_LINES changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES and $CODE_CENSUS_BYTES changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=$ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES — the tier2 floor is not meaningful)"
-        DETAILS+=("NOTICE: vacuity-tier2: SKIP — the CODE census has $CODE_CENSUS_LINES changed line(s) and $CODE_CENSUS_BYTES changed byte(s) (pure renames count 0), at or below ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES and ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=$ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES, so the absolute token floor (input=$TOK_IN cached=$TOK_CACHED) is not meaningful for a diff this small (#4608). prompt-content, review-completed and findings still gate; a SKIP never turns one of their FAILs into a PASS.")
+        TIER2="SKIP (small census: $CODE_CENSUS_LINES changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES and $CODE_CENSUS_BYTES changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=$ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES and $CODE_CENSUS_PATHS code paths <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=$ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS — the tier2 floor is not meaningful)"
+        DETAILS+=("NOTICE: vacuity-tier2: SKIP — the CODE census has $CODE_CENSUS_LINES changed line(s) and $CODE_CENSUS_BYTES changed byte(s) over $CODE_CENSUS_PATHS code path(s) (pure renames count 0 lines), at or below ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES, ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=$ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES and ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS=$ROBOREV_VACUITY_TIER2_MAX_CENSUS_PATHS, so the absolute token floor (input=$TOK_IN cached=$TOK_CACHED) is not meaningful for a diff this small (#4608). prompt-content, review-completed and findings still gate; a SKIP never turns one of their FAILs into a PASS.")
       elif [ "$TOK_IN" -lt "$ROBOREV_VACUITY_MIN_INPUT_TOKENS" ]; then
         tier2_trips+=("observed input=$TOK_IN < ROBOREV_VACUITY_MIN_INPUT_TOKENS=$ROBOREV_VACUITY_MIN_INPUT_TOKENS (highest observed VACUOUS run: 18801)")
       fi
