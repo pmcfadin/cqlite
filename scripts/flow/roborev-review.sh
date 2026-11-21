@@ -325,6 +325,11 @@ ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=200
 # deterministic keys (`prompt-content`, `review-completed`, `findings`) still gate. One more line
 # than this and the original guard applies unchanged, `cached == 0` included.
 ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20
+# ...AND small in BYTES: one minified/generated line can hold megabytes, and if that content were
+# truncated out of the prompt while its `diff --git` header stayed, `prompt-content` would still pass.
+# The SKIP therefore also needs the changed code content (added + deleted line bytes, see
+# roborev_code_census_lines) to be at or below this many bytes; an unmeasurable byte count never skips.
+ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096
 
 # (The former PROMPT_CONTENT_MAX_PATHS_CHECKED sampling cap is gone: every code path is
 # now checked against its exact `diff --git` header, cheap even for a 500-file diff, and
@@ -853,6 +858,7 @@ census_code_paths=()
 # Changed lines per CODE path (parallel to census_code_paths) and their total (#4608).
 census_code_line_counts=()
 CODE_CENSUS_LINES=""
+CODE_CENSUS_BYTES=""
 # The paths whose recorded mode `git ls-tree` could not measure at all (#3229). Declared here
 # for the same reason as the arrays above: the fail-closed check reads `${#...[@]}`, and an
 # array that does not exist would abort under `set -u` — or, worse, be treated as empty.

@@ -695,9 +695,16 @@ stops loading on every agent turn.
   and the owner had to merge by hand. Observed on **#4605** (a one-line clippy fix, 15728 and 15839
   tokens, nightly stayed red 2026-11-17 to 2026-11-21) and **#4607** (spec-archive renames, 15696 and
   15807 tokens). **The rule:** when the reviewed CODE census is at or below
-  `ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20` changed lines, `vacuity-tier2:` reads
-  `SKIP (small census: <N> changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 — the tier2
-  floor is not meaningful)` instead of applying the token floor. **How lines are counted**
+  `ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20` changed lines **and** at or below
+  `ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096` changed bytes, `vacuity-tier2:` reads
+  `SKIP (small census: <N> changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and <B> changed
+  code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 — the tier2 floor is not meaningful)` instead
+  of applying the token floor. **Why bytes too** (roborev job 386): one minified or generated line can hold
+  megabytes, and if that content were truncated out of the prompt while its `diff --git` header stayed,
+  `prompt-content:` would still pass and a vacuous review would ride the line count. The byte measure is
+  the content bytes of every added/deleted line (marker excluded, newline included) of the non-renamed
+  CODE paths, from `git diff --no-renames -U0` per path (file headers skipped positionally); a pure rename
+  has none, so counts 0, and an unmeasurable byte count never skips (fail closed). **How lines are counted**
   (`roborev_code_census_lines`, in `roborev-review-oracles.sh`): added plus deleted lines from the same
   `--numstat -z` records `census:` uses, over the CODE paths only (the paths `prompt-content:` expects),
   so the two can never disagree about what is code; a 100%-similarity rename counts as 0 (the census runs

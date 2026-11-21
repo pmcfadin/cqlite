@@ -748,6 +748,8 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   --- the #4608 small-census family -----------------------------------------------
 #   code-lines-<N>  N added lines of CODE (main.rs), nothing else: the census size knob for
 #                   the tier2 small-census rule (ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20)
+#   bytes-<N>       ONE added code line whose content is exactly N bytes (`fn x...() {}` padded with
+#                   a comment), for the byte half of the tier2 small-census rule
 #   rename-large    a 60-line `big.rs` that exists at the BASE and is RENAMED (100% similarity)
 #                   on the branch: the census (`--no-renames`) bills it +60/-60, a rename-aware
 #                   count bills it 0
@@ -862,6 +864,13 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       seq 1 "${mode#code-lines-}" | sed 's/^/fn g/; s/$/() {}/' >>"$work/main.rs"
       git_q "$work" add main.rs
       git_q "$work" commit -q -m "code change (${mode#code-lines-} lines)"
+      ;;
+    bytes-*)
+      # one line of exactly N content bytes (marker excluded, newline included)
+      _bn="${mode#bytes-}"
+      { printf '//'; head -c "$((_bn - 3))" /dev/zero | tr '\0' 'x'; printf '\n'; } >>"$work/main.rs"
+      git_q "$work" add main.rs
+      git_q "$work" commit -q -m "one code line of $_bn bytes"
       ;;
     rename-large | rename-edited)
       git_q "$work" mv big.rs moved.rs
@@ -9388,7 +9397,7 @@ STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
 run_wrapper "$work"
 assert_verdict 'case (t2s-1)' PASS 0
-assert_says 'case (t2s-1) tier2 SKIPs with the reason and the counted lines' '^vacuity-tier2: SKIP \(small census: 1 changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 — the tier2 floor is not meaningful\)$'
+assert_says 'case (t2s-1) tier2 SKIPs with the reason and the counted lines' '^vacuity-tier2: SKIP \(small census: 1 changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and 15 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 — the tier2 floor is not meaningful\)$'
 assert_says 'case (t2s-1) the tokens are still reported' '^tokens: input=18700 cached=0 output=53$'
 assert_lacks 'case (t2s-1) no tier2 FAIL' '^vacuity-tier2: FAIL'
 
@@ -9448,6 +9457,29 @@ STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
 run_wrapper "$work"
 assert_verdict 'case (t2s-4) threshold+1 lines' FAIL 1
 assert_says 'case (t2s-4) 21 lines is the original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (t2s-7): ONE line over the byte cap + low tokens FAILS; the cap is exact ==\n'
+reset_stub
+work=$(make_fixture case_t2s7a bytes-4096)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-7) max bytes' PASS 0
+assert_says 'case (t2s-7) 1 line / 4096 bytes SKIPs and names both counts' '^vacuity-tier2: SKIP \(small census: 1 changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 and 4096 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 '
+reset_stub
+work=$(make_fixture case_t2s7b bytes-4097)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-7) max+1 bytes' FAIL 1
+assert_says 'case (t2s-7) 1 line of 4097 bytes is the original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+reset_stub
+work=$(make_fixture case_t2s7c bytes-100000)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-7) a 100 KB single line' FAIL 1
+assert_says 'case (t2s-7) a minified-style single line cannot ride the line count' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
 
 printf '== case (t2s-5): a tiny census whose findings / review-completed FAIL still gives RESULT FAIL ==\n'
 reset_stub

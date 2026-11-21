@@ -512,7 +512,7 @@ roborev_push_assert() {
 ROBOREV_CENSUS_BINARY_LINES=1000000
 roborev_code_census_lines() {
   local _rcl_status _rcl_old _rcl_new _rcl_i _rcl_j _rcl_skip _rcl_total=0
-  local _rcl_renamed=()
+  local _rcl_renamed=() _rcl_measure=()
   CODE_CENSUS_LINES=""
   if git -C "$REPO" diff --name-status -z -M100% "$RANGE_BASE_SHA" HEAD >"$LOG.namestatus" 2>/dev/null; then
     while IFS= read -r -d '' _rcl_status; do
@@ -533,8 +533,33 @@ roborev_code_census_lines() {
     done
     if [ "$_rcl_skip" -eq 1 ]; then continue; fi
     _rcl_total=$((_rcl_total + ${census_code_line_counts[$_rcl_i]:-$ROBOREV_CENSUS_BINARY_LINES}))
+    if [ "${census_code_line_counts[$_rcl_i]:-1}" -gt 0 ]; then _rcl_measure+=("${census_code_paths[$_rcl_i]}"); fi
   done
   CODE_CENSUS_LINES="$_rcl_total"
+  # BYTES (#4608 review job 386): "few lines" is not "small" — one minified or generated line can hold
+  # megabytes, and if that content is truncated out of the prompt while its `diff --git` header stays,
+  # `prompt-content:` still passes. So the byte size of the changed code is measured too, but only when
+  # the line count could already qualify (otherwise the original guard applies and the number is unused).
+  # MEASURE: the bytes of every added/deleted content line (marker excluded, newline included) of the
+  # non-renamed CODE paths, read from `git diff --no-renames -U0` per path with a literal pathspec; the
+  # file headers are skipped positionally (everything between `diff --git` and the first `@@`), so a
+  # content line that itself begins `---`/`+++` is still counted. A pure rename has no content lines, so
+  # it counts 0. ANY measurement failure leaves CODE_CENSUS_BYTES empty, which the tier2 rule reads as
+  # "no skip" (fail closed).
+  CODE_CENSUS_BYTES=""
+  if [ "$_rcl_total" -le "${ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES:-0}" ]; then
+    local _rcl_bytes=0 _rcl_b _rcl_p
+    for _rcl_p in ${_rcl_measure[@]+"${_rcl_measure[@]}"}; do
+      _rcl_b=$(git -C "$REPO" diff --no-renames --no-color --no-ext-diff -U0 "$RANGE_BASE_SHA" HEAD -- ":(literal)$_rcl_p" 2>/dev/null \
+        | LC_ALL=C awk 'BEGIN { n = 0; inh = 0 }
+            /^diff --git / { inh = 0; next }
+            /^@@/ { inh = 1; next }
+            inh && /^[-+]/ { n += length($0) }
+            END { print n }'; [ "${PIPESTATUS[0]}" -eq 0 ]) || { _rcl_bytes=""; break; }
+      _rcl_bytes=$((_rcl_bytes + _rcl_b))
+    done
+    CODE_CENSUS_BYTES="$_rcl_bytes"
+  fi
 }
 
 # roborev_census: sets BASE_TIP_SHA, RANGE_BASE_SHA, CENSUS, CENSUS_CHECK, CODE_FREE and the
