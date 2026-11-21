@@ -147,6 +147,8 @@
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
 #   vacuity-tier2     PASS | FAIL (...) | UNAVAILABLE | SKIP
+#                     `SKIP (small census: <N> changed code lines <= <T> ...)` (#4608) when the
+#                     CODE census is at or below ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES (20).
 #   findings          NONE | PRESENT [(<n>)] | INCONSISTENT (...) | UNKNOWN | SKIP |
 #                     DEFERRED (<n>, issues=#<N>[,#<N>...], authorized @<login>, job <id>)
 #                     ONLY an affirmative `NONE` permits a PASS, IN EVERY MODE including
@@ -314,6 +316,15 @@ set -euo pipefail
 ROBOREV_VACUITY_MIN_INPUT_TOKENS=25000
 # Advisory only (see above): reported next to the observed value, never a FAIL.
 ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=200
+# SMALL-CENSUS RULE (#4608). The input floor above is ABSOLUTE but a genuine review's size grows
+# with the diff: a one-line fix or a rename-only diff measures ~15.7k input tokens (PRs #4605,
+# #4607), under the floor, and the only waiver channel (`prompt-content-absent`) does not cover
+# `vacuity-tier2`, so such a PR could never pass. When the reviewed CODE census is at or below this
+# many changed lines (added + deleted, code paths only, pure renames counted as 0 — see
+# roborev_code_census_lines), `vacuity-tier2` reports SKIP instead of applying the token floor. The
+# deterministic keys (`prompt-content`, `review-completed`, `findings`) still gate. One more line
+# than this and the original guard applies unchanged, `cached == 0` included.
+ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20
 
 # (The former PROMPT_CONTENT_MAX_PATHS_CHECKED sampling cap is gone: every code path is
 # now checked against its exact `diff --git` header, cheap even for a 500-file diff, and
@@ -839,6 +850,9 @@ census_files=0
 census_non_code_files=0
 census_paths=()
 census_code_paths=()
+# Changed lines per CODE path (parallel to census_code_paths) and their total (#4608).
+census_code_line_counts=()
+CODE_CENSUS_LINES=""
 # The paths whose recorded mode `git ls-tree` could not measure at all (#3229). Declared here
 # for the same reason as the arrays above: the fail-closed check reads `${#...[@]}`, and an
 # array that does not exist would abort under `set -u` — or, worse, be treated as empty.

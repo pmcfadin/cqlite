@@ -687,3 +687,27 @@ stops loading on every agent turn.
   the repo via `repos.root_path` and reads the **ROOT checkout's** `.roborev.toml`, so editing it inside a
   worktree is a silent no-op that looks exactly like "`exclude_patterns` doesn't work" — and `roborev
   config get` answers differently depending on cwd. Edit the root checkout's file and restart the daemon.
+- **`vacuity-tier2` SKIPs a genuinely small code census (#4608).** The tier2 input floor
+  (`ROBOREV_VACUITY_MIN_INPUT_TOKENS=25000`, and `cached == 0`) is ABSOLUTE, but the size of a genuine
+  review grows with the diff. A one-line fix or a rename-only diff measures about 15.7k input tokens
+  with `findings: NONE`, so it failed the floor every time, and since the only waiver channel
+  (`prompt-content-absent`) does not cover `vacuity-tier2`, such a PR could never pass `premerge-assert`
+  and the owner had to merge by hand. Observed on **#4605** (a one-line clippy fix, 15728 and 15839
+  tokens, nightly stayed red 2026-11-17 to 2026-11-21) and **#4607** (spec-archive renames, 15696 and
+  15807 tokens). **The rule:** when the reviewed CODE census is at or below
+  `ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20` changed lines, `vacuity-tier2:` reads
+  `SKIP (small census: <N> changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20 — the tier2
+  floor is not meaningful)` instead of applying the token floor. **How lines are counted**
+  (`roborev_code_census_lines`, in `roborev-review-oracles.sh`): added plus deleted lines from the same
+  `--numstat -z` records `census:` uses, over the CODE paths only (the paths `prompt-content:` expects),
+  so the two can never disagree about what is code; a 100%-similarity rename counts as 0 (the census runs
+  `--no-renames`, which would otherwise bill a moved file at its full size twice), while a rename with
+  edits keeps its edited lines; a binary code path counts as unbounded; and a failed rename probe
+  discounts nothing. **What does NOT change:** one line over the threshold is the original guard,
+  `cached == 0` included; an unreadable token payload (`unparseable`, drift) still FAILs on a tiny census;
+  and `prompt-content`, `review-completed` and `findings` gate exactly as before, so `RESULT` reaches PASS
+  with a tier2 SKIP only when every other check passes. `SKIP` is already in the documented value set and
+  the verdict grammar's non-failing set. `premerge-assert.sh` and `premerge-review-binding.sh` read the
+  job record (verdict, `git_ref`, review text), never the wrapper's `vacuity-tier2:` line, so they accept
+  such a review with no change. Pinned by the `case (t2s-*)` family in
+  `scripts/tests/test_roborev_review_guard.sh`, including the exact 20/21 boundary.

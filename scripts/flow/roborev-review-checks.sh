@@ -625,13 +625,25 @@ roborev_check_tier2() {
         DETAILS+=("NOTICE: vacuity-tier2: the job record says has_token_data=false yet readable counts are present — a payload inconsistency (drift signal). The counts are used, because they are what the vacuity check asserts on.")
       fi
       tier2_trips=()
-      if [ "$TOK_IN" -lt "$ROBOREV_VACUITY_MIN_INPUT_TOKENS" ]; then
+      # SMALL-CENSUS RULE (#4608): the floor is calibrated on reviews of non-trivial diffs. An unmeasured
+      # CODE_CENSUS_LINES (empty / non-numeric) never skips — it falls through to the original guard.
+      _t2_small=0
+      case "${CODE_CENSUS_LINES:-}" in
+        ''|*[!0-9]*) ;;
+        *) if [ "$CODE_CENSUS_LINES" -le "$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES" ]; then _t2_small=1; fi ;;
+      esac
+      if [ "$_t2_small" -eq 1 ]; then
+        TIER2="SKIP (small census: $CODE_CENSUS_LINES changed code lines <= ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES — the tier2 floor is not meaningful)"
+        DETAILS+=("NOTICE: vacuity-tier2: SKIP — the CODE census has $CODE_CENSUS_LINES changed line(s) (pure renames count 0), at or below ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=$ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES, so the absolute token floor (input=$TOK_IN cached=$TOK_CACHED) is not meaningful for a diff this small (#4608). prompt-content, review-completed and findings still gate; a SKIP never turns one of their FAILs into a PASS.")
+      elif [ "$TOK_IN" -lt "$ROBOREV_VACUITY_MIN_INPUT_TOKENS" ]; then
         tier2_trips+=("observed input=$TOK_IN < ROBOREV_VACUITY_MIN_INPUT_TOKENS=$ROBOREV_VACUITY_MIN_INPUT_TOKENS (highest observed VACUOUS run: 18801)")
       fi
       if [ "$TOK_CACHED" -eq 0 ]; then
         tier2_trips+=("observed cached=$TOK_CACHED == 0 (every observed vacuous run reports exactly 0; the most false-positive-prone term, retained fail-closed)")
       fi
-      if [ "${#tier2_trips[@]}" -gt 0 ]; then
+      if [ "$_t2_small" -eq 1 ]; then
+        :  # TIER2 already set to the SKIP line above
+      elif [ "${#tier2_trips[@]}" -gt 0 ]; then
         TIER2="FAIL (vacuous token signature)"
         DETAILS+=("ERROR: vacuity-tier2: the token accounting for job '$JOB' carries the vacuous signature against a NON-EMPTY census ($CENSUS):")
         for trip in "${tier2_trips[@]}"; do
