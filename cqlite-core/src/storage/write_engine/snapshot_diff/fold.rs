@@ -89,6 +89,7 @@ fn tombstone_identity(tombstone: &TombstoneRecord) -> String {
             kind_name(tombstone.kind),
             clustering,
             &tombstone.column,
+            &tombstone.cell_path,
             &tombstone.range_start,
             &tombstone.range_end,
             tombstone.deletion_time,

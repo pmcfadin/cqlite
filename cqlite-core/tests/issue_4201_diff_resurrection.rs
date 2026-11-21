@@ -96,7 +96,7 @@ fn risk_schema() -> cqlite_core::schema::TableSchema {
 
 /// Tombstones' local deletion time, from `nb-2-big-Statistics.db.txt` ("SSTable min local
 /// deletion time", written by Cassandra's own `sstablemetadata`).
-const RISK_LDT: i64 = 1_795_303_684;
+const RISK_LDT: i64 = 1_795_305_334;
 const RISK_BOUNDARY: i64 = RISK_LDT + 864_000;
 
 async fn risk_report(sides: &(DiffSide, DiffSide), now: i64) -> Json {
@@ -479,7 +479,7 @@ async fn r2_newer_in_a_newer_in_b_only_a_only_b() {
     );
     assert_eq!(report["summary"]["newer_in_a"], 1);
     assert_eq!(report["summary"]["newer_in_b"], 1);
-    assert_eq!(report["summary"]["partitions_compared"], 17);
+    assert_eq!(report["summary"]["partitions_compared"], 18);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -576,7 +576,10 @@ async fn r4_1_past_gc_grace_names_every_shadowed_cell_for_all_three_kinds() {
         shadowed(tombstones_of(partition(&report, "2"), "partition")[0]),
         expected
     );
-    assert_eq!(report["summary"]["resurrection_risk_past_gc_grace"], 3);
+    assert_eq!(
+        report["summary"]["resurrection_risk_past_gc_grace"], 5,
+        "+ the two id-18 element tombstones"
+    );
     assert_eq!(report["summary"]["resurrection_risk_before_gc_grace"], 0);
     // Every shadowed cell is attributed to side B (the side that still holds the data).
     for tombstone in report["partitions"]
@@ -650,8 +653,11 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         vec![("1".to_string(), "v".to_string())]
     );
     // ids 3 (tie), 11 (tie) and 16 (element tombstone over k1) are the three `yes` risks.
-    assert_eq!(report["summary"]["resurrection_risk_past_gc_grace"], 3);
-    assert_eq!(report["summary"]["tombstones_only_a"], 7);
+    assert_eq!(
+        report["summary"]["resurrection_risk_past_gc_grace"], 5,
+        "+ the two id-18 element tombstones"
+    );
+    assert_eq!(report["summary"]["tombstones_only_a"], 9);
     // The tie's phase flips exactly at ldt + gc_grace too (PurgeFunction.java:41-42).
     let at = risk_report(&sides, RISK_BOUNDARY).await;
     assert_eq!(
@@ -659,7 +665,7 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         "before-gc-grace"
     );
     // A `no` risk is never counted into a phase.
-    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 3);
+    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 5);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -871,7 +877,7 @@ async fn r2_3_scalar_conflict_resolves_to_the_larger_bytes_and_mirrors() {
         (Some("apple"), Some("zebra"))
     );
     // The report is complete: the conflict did not abort the run, and is counted.
-    assert_eq!(report["summary"]["partitions_compared"], 17);
+    assert_eq!(report["summary"]["partitions_compared"], 18);
     assert_eq!(report["summary"]["conflicts"], 5, "ids 9, 10, 11, 12, 15");
     // A non-conflict cell carries no `resolves_to`.
     assert!(cell(partition(&report, "4"), "1", "v")
@@ -1012,4 +1018,66 @@ async fn r14_1_the_report_never_exceeds_the_budget_metadata_included() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn r2_6_two_elements_deleted_by_one_statement_are_two_distinct_tombstones() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
+    // id 18: B holds m['k1'], m['k2'], m['k3'] @5000; A deleted k1 and k2 in ONE statement @6000, so
+    // both element tombstones share row, column, timestamp and local deletion time and differ only
+    // in their cell path. Each must be its own `only-a` tombstone shadowing only its own element.
+    let p18 = partition(&report, "18");
+    let tombstones = tombstones_of(p18, "cell");
+    assert_eq!(tombstones.len(), 2, "{p18}");
+    let mut paths: Vec<&str> = tombstones
+        .iter()
+        .map(|t| t["cell_path"].as_str().unwrap())
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(paths, [K1, K2]);
+    for tombstone in &tombstones {
+        assert_eq!(tombstone["side"], "a");
+        assert_eq!(tombstone["resurrection_risk"]["status"], "yes");
+        let own = tombstone["cell_path"].as_str().unwrap().to_string();
+        assert_eq!(
+            shadowed_paths(tombstone),
+            vec![("1".to_string(), "m".to_string(), Some(own))]
+        );
+    }
+    assert_eq!(element(p18, "1", "m", K3)["status"], "only-b");
+}
+
+#[tokio::test]
+async fn r14_1_single_partition_report_at_exactly_the_budget_is_accepted() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let schema = risk_schema();
+    let run = |budget: u64| {
+        let (a, b, schema) = (&sides.0, &sides.1, &schema);
+        async move {
+            diff_partitions(
+                a,
+                b,
+                "test_diff.risk_cases",
+                schema,
+                None,
+                &DiffOptions {
+                    now_secs: RISK_BOUNDARY + 1,
+                    max_result_bytes: budget,
+                },
+                &[int_key(9)],
+            )
+            .await
+        }
+    };
+    let exact = serde_json::to_vec(&run(BUDGET).await.unwrap())
+        .unwrap()
+        .len() as u64;
+    assert!(
+        run(exact).await.is_ok(),
+        "exactly the budget (one partition, no separator)"
+    );
+    assert!(run(exact - 1).await.is_err(), "one byte under is refused");
 }

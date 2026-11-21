@@ -259,7 +259,12 @@ async fn run(
             schema,
         )?;
         // Both trails are dropped here, before the next partition (R8).
-        estimated = estimated.saturating_add(encoded_len_of(&partition).saturating_add(1));
+        // JSON array arithmetic: `[]` already counted; the first element adds only its own bytes,
+        // each later one adds a `,` too, so the running estimate equals the final length.
+        let separator = u64::from(!report.partitions.is_empty());
+        estimated = estimated
+            .saturating_add(encoded_len_of(&partition))
+            .saturating_add(separator);
         if estimated > options.max_result_bytes {
             return Err(too_large(estimated, report.partitions.len() + 1));
         }

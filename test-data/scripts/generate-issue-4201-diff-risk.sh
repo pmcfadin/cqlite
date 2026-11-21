@@ -61,7 +61,8 @@ UPDATE risk_cases USING TIMESTAMP 5000 SET m['k1']=7 WHERE id=13 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET s = s + {'x'} WHERE id=14 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET fl = ['a, b'] WHERE id=15 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET m['k1']=1, m['k3']=3 WHERE id=16 AND ck=1;
-INSERT INTO risk_cases (id,ck) VALUES (17,1) USING TIMESTAMP 5000;"
+INSERT INTO risk_cases (id,ck) VALUES (17,1) USING TIMESTAMP 5000;
+UPDATE risk_cases USING TIMESTAMP 5000 SET m['k1']=1, m['k2']=2, m['k3']=3 WHERE id=18 AND ck=1;"
 G2="DELETE FROM risk_cases USING TIMESTAMP 2000 WHERE id=1 AND ck=1;
 DELETE FROM risk_cases USING TIMESTAMP 2000 WHERE id=2;
 DELETE FROM risk_cases USING TIMESTAMP 2000 WHERE id=3 AND ck=1;
@@ -78,7 +79,8 @@ UPDATE risk_cases USING TIMESTAMP 5000 SET s = s + {'y'} WHERE id=14 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET fl = ['a','b'] WHERE id=15 AND ck=1;
 DELETE m['k1'] FROM risk_cases USING TIMESTAMP 6000 WHERE id=16 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET m['k3']=3 WHERE id=16 AND ck=1;
-DELETE FROM risk_cases USING TIMESTAMP 6000 WHERE id=17 AND ck=1;"
+DELETE FROM risk_cases USING TIMESTAMP 6000 WHERE id=17 AND ck=1;
+DELETE m['k1'], m['k2'] FROM risk_cases USING TIMESTAMP 6000 WHERE id=18 AND ck=1;"
 log "generation 1"; run_cql "$G1"; cx nodetool flush "$KEYSPACE" "$TABLE"
 sleep 3
 log "generation 2"; run_cql "$G2"; cx nodetool flush "$KEYSPACE" "$TABLE"

@@ -10,8 +10,8 @@ Backs **#4201** (`cqlite diff`: replica divergence and resurrection risk).
   `test-data/scripts/generate-issue-4201-diff-risk.sh`; every mutation pins `USING TIMESTAMP`
   (`generation-1.cql`, `generation-2.cql`), `sstabledump` goldens (`*-Data.db.jsonl`) and
   `sstablemetadata` (`*-Statistics.db.txt`) sit next to the bytes. The tombstones' local deletion
-  time is `1795303684` (2026-11-21T23:28:04Z, `nb-2-big-Statistics.db.txt`); with
-  `gc_grace_seconds = 864000` the strict-`<` purge boundary is `1796167684`.
+  time is `1795305334` (2026-11-21T23:55:34Z, `nb-2-big-Statistics.db.txt`); with
+  `gc_grace_seconds = 864000` the strict-`<` purge boundary is `1796169334`.
 - Checkout-relative on purpose (an sstables root, like `issue_4530`); `*.db` are force-added.
 - Consumers: `cqlite-core/tests/issue_4201_diff_resurrection.rs`, `issue_4201_diff_symmetry.rs`,
   `cqlite-cli/tests/diff_cli_tests.rs`.
@@ -40,3 +40,4 @@ cassandra-5.0.8 `db/DeletionTime.java:173-175`), never from CQLite output:
 | 15 | frozen `['a','b']` @5000 | frozen `['a, b']` @5000 | cell `conflict` (not equal), `resolves_to: a` (element count 2 > 1 leads the serialized bytes) |
 | 16 | element tombstone `m['k1']` @6000, `m['k3']=3` @5000 | `m['k1']=1`, `m['k3']=3` @5000 | `k1`: tombstone `only-a` (risk **yes**, shadows only `k1`), cell `only-b`; `k3` `equal` |
 | 17 | row tombstone @6000 | liveness-only row @5000 | tombstone `only-a`, risk **no** (declared limit #4601: a row marker is not a cell) |
+| 18 | element tombstones `m['k1']`, `m['k2']` (ONE statement) @6000 | `m['k1']`, `m['k2']`, `m['k3']` @5000 | two distinct `only-a` cell tombstones (same ts and ldt, different `cell_path`), each shadowing only its own element; `k3` `only-b` |

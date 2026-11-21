@@ -405,13 +405,13 @@ fn risk_cases_text_report_names_the_resurrection_verdicts() {
     let src = risk_src();
     let a = stage(root.path(), "a", &src, "test_diff", &["nb-2-big-"]);
     let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
-    // risk_cases boundary = 1795303684 + 864000 = 1796167684.
+    // risk_cases boundary = 1795305334 + 864000 = 1796169334.
     let output = diff(
         "issue-4201-diff-risk.cql",
         &a,
         &b,
         "test_diff.risk_cases",
-        &["--now", "1796167685"],
+        &["--now", "1796169335"],
     );
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
@@ -420,14 +420,14 @@ fn risk_cases_text_report_names_the_resurrection_verdicts() {
         .lines()
         .filter(|l| l.starts_with("tombstone"))
         .collect();
-    assert_eq!(lines.len(), 7, "{text}");
+    assert_eq!(lines.len(), 9, "{text}");
     assert_eq!(
         lines
             .iter()
             .filter(|l| l.contains("resurrection_risk=yes (past-gc-grace)"))
             .count(),
-        3,
-        "ids 3, 11 (ties) and 16 (element tombstone)"
+        5,
+        "ids 3, 11 (ties), 16 (element tombstone) and 18 (two element tombstones)"
     );
     assert_eq!(
         lines
@@ -508,7 +508,7 @@ fn r11_2_the_byte_budget_is_exit_two_with_no_partial_stdout() {
         &a,
         &b,
         "test_diff.risk_cases",
-        &["--now", "1796167685", "--out", "json"],
+        &["--now", "1796169335", "--out", "json"],
     );
     let (_, full) = json_report(&unbounded);
     assert!(full["summary"]["only_b"].as_u64().unwrap() > 0);
@@ -528,7 +528,7 @@ fn r11_2_the_byte_budget_is_exit_two_with_no_partial_stdout() {
             "--table",
             "test_diff.risk_cases",
             "--now",
-            "1796167685",
+            "1796169335",
             "--out",
             "json",
         ])
@@ -944,7 +944,7 @@ fn conflicts_are_reported_with_both_values_and_resolves_to() {
     let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
     let args = [
         "--now",
-        "1796167685",
+        "1796169335",
         "--out",
         "json",
         "--partition",

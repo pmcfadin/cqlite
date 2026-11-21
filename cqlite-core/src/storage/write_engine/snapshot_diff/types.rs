@@ -203,6 +203,19 @@ pub enum DiffError {
         #[source]
         source: crate::Error,
     },
+    /// A cell value could not be serialized for comparison. The diff refuses rather than compare a
+    /// partial or empty buffer (which could call two different values `equal`).
+    #[error(
+        "partition {partition} clustering {clustering} column {column}: the value cannot be \
+         serialized for comparison: {source}"
+    )]
+    CellSerialization {
+        partition: String,
+        clustering: String,
+        column: String,
+        #[source]
+        source: crate::Error,
+    },
     /// Any other failure (schema, budget, partition-key encoding).
     #[error(transparent)]
     Core(#[from] crate::Error),

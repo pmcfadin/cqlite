@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use super::fold::{cmp_clustering, fmt_clustering, fmt_micros};
 use super::side::SideTrail;
-use super::types::{CellDiffEntry, CellSide, CellStatus, Side};
+use super::types::{CellDiffEntry, CellSide, CellStatus, DiffError, Side};
 use crate::schema::TableSchema;
 use crate::storage::sstable::writer::data_writer::encoding::serialize_value_into;
 use crate::storage::write_engine::merge::trace::{TombstoneKind, Verdict};
@@ -88,7 +88,7 @@ fn key_of(clustering: &Option<ClusteringKey>, column: &str, path: &Option<Vec<u8
 }
 
 impl SideCells {
-    fn from_trail(trail: &SideTrail) -> Self {
+    fn from_trail(partition: &str, trail: &SideTrail) -> Result<Self, DiffError> {
         let mut out = Self::default();
         for cell in trail
             .cells
@@ -97,10 +97,20 @@ impl SideCells {
         {
             let value = cell.value.as_ref().unwrap_or(&Value::Null);
             let mut bytes = Vec::new();
-            // A value the writer cannot serialize is compared as empty bytes; it still differs
-            // from a serializable one by timestamp/expiry, and never silently equals it unless the
-            // bytes truly match.
-            let _ = serialize_value_into(value, &mut bytes);
+            // Fail closed: a value the writer rejects (e.g. `Value::Json`) must never be compared
+            // as an empty or partial buffer.
+            serialize_value_into(value, &mut bytes).map_err(|source| {
+                DiffError::CellSerialization {
+                    partition: partition.to_string(),
+                    clustering: cell
+                        .clustering
+                        .as_ref()
+                        .map(fmt_clustering)
+                        .unwrap_or_else(|| "<static>".to_string()),
+                    column: cell.column.clone(),
+                    source,
+                }
+            })?;
             out.winners.insert(
                 key_of(&cell.clustering, &cell.column, &cell.cell_path),
                 Version {
@@ -139,7 +149,7 @@ impl SideCells {
                 display: "<tombstone>".to_string(),
             });
         }
-        out
+        Ok(out)
     }
 
     /// This side's version of `key` for comparison against `other_ts`: its live winner, or — only
@@ -179,12 +189,15 @@ fn entry(
 
 /// Compare the two sides' winner sets: one status per `(clustering, column, cell_path)`.
 pub(super) fn fold_cells(
-    _partition: &str,
+    partition: &str,
     a: &SideTrail,
     b: &SideTrail,
     schema: &TableSchema,
-) -> crate::Result<Vec<CellDiffEntry>> {
-    let (a, b) = (SideCells::from_trail(a), SideCells::from_trail(b));
+) -> Result<Vec<CellDiffEntry>, DiffError> {
+    let (a, b) = (
+        SideCells::from_trail(partition, a)?,
+        SideCells::from_trail(partition, b)?,
+    );
     let keys: std::collections::BTreeSet<&CellKey> =
         a.winners.keys().chain(b.winners.keys()).collect();
     let mut out = Vec::new();
@@ -226,4 +239,50 @@ pub(super) fn fold_cells(
             .then_with(|| x.1.cmp(&y.1))
     });
     Ok(out.into_iter().map(|(_, _, entry)| entry).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::write_engine::merge::trace::{CellDecision, DecidedBy};
+
+    fn trail_with(value: Value) -> SideTrail {
+        SideTrail {
+            cells: vec![CellDecision {
+                run_index: 0,
+                clustering: None,
+                column: "j".to_string(),
+                cell_path: None,
+                value: Some(value),
+                writetime: 5,
+                ttl: None,
+                expires_at: None,
+                verdict: Verdict::Winner,
+                decided_by: DecidedBy::None,
+            }],
+            tombstones: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_value_that_cannot_be_serialized_fails_closed_and_names_the_cell() {
+        // `Value::Empty` is a value the writer rejects (`encoding.rs`, InvalidInput). It must be a
+        // named error, never an empty buffer that compares `equal` to another unserializable one.
+        let json = Value::Empty(crate::types::empty_value::EmptyValueType::Int);
+        let mut probe = Vec::new();
+        assert!(
+            serialize_value_into(&json, &mut probe).is_err(),
+            "premise: the writer rejects it"
+        );
+        let schema = TableSchema::new_for_testing("ks", "t");
+        let outcome = fold_cells("p1", &trail_with(json.clone()), &trail_with(json), &schema);
+        match outcome {
+            Err(DiffError::CellSerialization {
+                partition, column, ..
+            }) => {
+                assert_eq!((partition.as_str(), column.as_str()), ("p1", "j"));
+            }
+            other => panic!("expected CellSerialization, got {other:?}"),
+        }
+    }
 }

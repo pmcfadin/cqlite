@@ -13,3 +13,4 @@ UPDATE risk_cases USING TIMESTAMP 5000 SET s = s + {'x'} WHERE id=14 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET fl = ['a, b'] WHERE id=15 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET m['k1']=1, m['k3']=3 WHERE id=16 AND ck=1;
 INSERT INTO risk_cases (id,ck) VALUES (17,1) USING TIMESTAMP 5000;
+UPDATE risk_cases USING TIMESTAMP 5000 SET m['k1']=1, m['k2']=2, m['k3']=3 WHERE id=18 AND ck=1;
