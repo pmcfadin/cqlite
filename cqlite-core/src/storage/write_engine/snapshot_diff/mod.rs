@@ -40,6 +40,7 @@
 //!   five cell statuses; it is [`DiffError::SameTimestampConflict`], never `equal`.
 
 mod fold;
+mod metadata_check;
 pub mod resurrection;
 mod side;
 mod types;
@@ -111,6 +112,8 @@ pub async fn diff_table(
     options: &DiffOptions,
 ) -> Result<DiffReport, DiffError> {
     check_sides(side_a, side_b)?;
+    side::preflight_generations(Side::A, side_a).await?;
+    side::preflight_generations(Side::B, side_b).await?;
     let schema_a = effective_compaction_schema(schema, &side_a.generations);
     let schema_b = effective_compaction_schema(schema, &side_b.generations);
     let mut keys: BTreeMap<(i64, Vec<u8>), ()> = BTreeMap::new();
@@ -147,6 +150,8 @@ pub async fn diff_partitions(
     keys: &[Vec<u8>],
 ) -> Result<DiffReport, DiffError> {
     check_sides(side_a, side_b)?;
+    side::preflight_generations(Side::A, side_a).await?;
+    side::preflight_generations(Side::B, side_b).await?;
     let mut ordered: BTreeMap<(i64, Vec<u8>), ()> = BTreeMap::new();
     for key in keys {
         let token = crate::util::cassandra_murmur3::cassandra_murmur3_token(key);
