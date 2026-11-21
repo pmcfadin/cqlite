@@ -72,8 +72,11 @@ pub(super) fn shadows(
             cell.clustering == tombstone.clustering
                 && tombstone.column.as_deref() == Some(cell.column.as_str())
         }
-        TombstoneKind::Range => match (&cell.clustering, &tombstone.range_start, &tombstone.range_end)
-        {
+        TombstoneKind::Range => match (
+            &cell.clustering,
+            &tombstone.range_start,
+            &tombstone.range_end,
+        ) {
             (Some(ck), Some(start), Some(end)) => range_covers(start, end, ck, schema)?,
             _ => false,
         },

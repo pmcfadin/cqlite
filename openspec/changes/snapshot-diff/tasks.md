@@ -33,43 +33,46 @@ Commit after every group (#3042). `--lite` after every fix round; ONE full gate 
 
 ## 1. Diff scan — surface: `write_engine::snapshot_diff::{diff_table, diff_partition}`
 
-- [ ] 1.1 `snapshot_diff/mod.rs`: `DiffOptions`, `DiffReport`, `PartitionDiff`, `CellDiffEntry`,
-      `TombstoneDiffEntry`, `ResurrectionRisk` (design.md §D4 shape, serde).
-- [ ] 1.2 `snapshot_diff/scan.rs`: drive both sides' `build_traced_merger_with_registry` +
+- [x] 1.1 `snapshot_diff/{mod,types}.rs`: `DiffOptions`, `DiffSide`, `DiffReport`, `PartitionDiff`,
+      `CellDiffEntry`, `TombstoneDiffEntry`, `ResurrectionRisk` (design.md §D4 shape, serde).
+- [x] 1.2 `snapshot_diff/{side,fold}.rs`: drive both sides' `build_traced_merger_with_registry` +
       `RecordingSink` independently (R1); fold into winner sets; cell-status classification (R2);
       tombstone-status classification with same-both-sides omission (R3).
-- [ ] 1.3 `snapshot_diff/resurrection.rs`: the shadow-check predicate (R4) — partition/row/cell/
+- [x] 1.3 `snapshot_diff/resurrection.rs`: the shadow-check predicate (R4) — partition/row/cell/
       collection scope match plus writetime `<=` deletion_time — and the range-tombstone span variant
       (R5, if 0.6 keeps it in scope), both citing `DeletionPurger#shouldPurge` /
       `ColumnFamilyStore#gcBefore` in a doc comment (design.md §D2).
-- [ ] 1.4 Partition enumeration for the un-scoped path: union of both sides' enumerated keys,
+- [x] 1.4 Partition enumeration for the un-scoped path: union of both sides' enumerated keys,
       fold-and-drop per partition (R8); `diff_partition` for the `--partition` path bypasses
       enumeration entirely.
-- [ ] 1.5 `tests/issue_4201_diff_resurrection.rs` (R1.1, R2.1, R2.2, R3.1, R4.1, R4.2, R4.3, and R5.1
+- [x] 1.5 `tests/issue_4201_diff_resurrection.rs` (R1.1, R2.1, R2.2, R3.1, R4.1, R4.2, R4.3, and R5.1
       if in scope) — expected values derived independently from the JSONL goldens and re-derived
       `compute_gc_before`/shadow arithmetic per design.md §D6, never from `diff_table`'s own output.
-- [ ] 1.6 `tests/issue_4201_diff_symmetry.rs` (R6.1) — the generic mirror-property test, run over
+- [x] 1.6 `tests/issue_4201_diff_symmetry.rs` (R6.1) — the generic mirror-property test, run over
       every fixture the other tests use.
-- [ ] 1.7 `tests/issue_4201_diff_unreadable_generation.rs` (R7.1).
-- [ ] 1.8 R8.1 memory-budget lane entry for `test_wide_rows`, matching salvage's/#4200's established
+- [x] 1.7 R7.1 lives in `tests/issue_4201_diff_resurrection.rs::r7_1_*` (plus the strict Statistics.db
+      check, `snapshot_diff/metadata_check.rs`, because the production reader degrades silently).
+- [x] 1.8 R8.1 memory-budget lane entry for `test_wide_rows`, matching salvage's/#4200's established
       pattern.
-- [ ] 1.9 Name the new test targets in the gate's `core-tests` list (#3522).
+- [x] 1.9 New targets named in the gate lists (#3522): `write-tests` (`issue_4201_diff_resurrection`,
+      `issue_4201_diff_symmetry`), `memory-budget` lane (g) (`issue_4201_diff_memory_budget`); `cli-tests`
+      enumerates `tests/*.rs` (`diff_cli_tests`, `required-features = ["write-support"]`).
 - [ ] 1.10 `--lite`; commit.
 
 ## 2. `cqlite diff` (R9–R13) — surface: the built binary
 
-- [ ] 2.1 `cli_types.rs`: `Commands::Diff(DiffArgs { dir_a, dir_b, table, schema, partition:
+- [x] 2.1 `cli_types.rs`: `Commands::Diff(DiffArgs { dir_a, dir_b, table, schema, partition:
       Vec<String>, now: Option<String>, out: Option<OutputFormat> })`; help text states the read-only
       guarantee and that `--partition` restricts the point-read path (R9, R11).
-- [ ] 2.2 `commands/diff.rs`: resolve each side's table dir independently via
+- [x] 2.2 `commands/diff.rs`: resolve each side's table dir independently via
       `explain_resolve::{resolve_table_dir, discover_live_generations}` (per proposal.md decision 1's flat-dir adoption); render the
       first line before anything else (R9.1/R9.2); call `diff_table`/`diff_partition`; render
       `text`/`json` per design.md §D4; exit codes per R12.
-- [ ] 2.3 Wire in `main.rs`; `commands/mod.rs`.
-- [ ] 2.4 `cqlite-cli/tests/diff_cli_tests.rs`: R9.1, R9.2, R10.1, R10.2, R11.1, R11.2, R12.1, R12.2,
+- [x] 2.3 Wire in `main.rs`; `commands/mod.rs`.
+- [x] 2.4 `cqlite-cli/tests/diff_cli_tests.rs`: R9.1, R9.2, R10.1, R10.2, R11.1, R11.2, R12.1, R12.2,
       R12.3, R13.1, with committed expected-json files under `cqlite-cli/tests/fixtures/diff/`.
       **Add the target to the gate's `cli-tests` list** (#3522) and confirm it runs.
-- [ ] 2.5 Docs: `docs/development/dev-cookbook.md` CLI section (one entry); epic #4192 checklist tick
+- [x] 2.5 Docs: `docs/development/dev-cookbook.md` CLI section (one entry); epic #4192 checklist tick
       deferred to the closer/finalize step.
 - [ ] 2.6 `--lite` green; commit; push.
 

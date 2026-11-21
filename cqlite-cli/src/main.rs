@@ -100,30 +100,29 @@ async fn run_main() -> Result<()> {
         return commands::verify::dispatch_verify(cmd).await;
     }
 
-    // `salvage` (#4196) and `rebuild` (#4197) operate directly on files: short-circuit before
-    // database init like `verify`. Their cfg-gated bodies live in `commands::dispatch_*`.
+    // File-level verbs (no Database): `salvage` (#4196) and `rebuild` (#4197) short-circuit like
+    // `verify`, their cfg-gated bodies in `commands::dispatch_*`; `sweep` (#4194), `diagnose`
+    // (#4204), `find` (#4205, own 0/1/2 exit codes), `explain` (#4193), `diff` (#4201, read-only).
     if let Some(Commands::Salvage(args)) = &cli.command {
         return commands::dispatch_salvage(cli.schema.as_deref(), args).await;
     }
-
     if let Some(Commands::Rebuild(args)) = &cli.command {
         return commands::dispatch_rebuild(cli.schema.as_deref(), args).await;
     }
-
-    // `sweep` (#4194)/`diagnose` (#4204): file-level verbs, dispatched before database init.
     if let Some(Commands::Sweep(args)) = &cli.command {
         return commands::sweep::execute_sweep_command(args).await;
     }
     if let Some(Commands::Diagnose(args)) = &cli.command {
         return commands::dispatch_diagnose(cli.schema.as_deref(), args).await;
     }
-
-    // `find` (#4205, owns its 0/1/2 exit codes) and `explain` (#4193): files only, no Database.
     if let Some(Commands::Find(args)) = &cli.command {
         return commands::dispatch_find(cli.schema.as_deref(), args).await;
     }
     if let Some(Commands::Explain(_)) = &cli.command {
         return commands::explain::dispatch_explain(&cli, &config).await;
+    }
+    if let Some(Commands::Diff(args)) = &cli.command {
+        return commands::diff::dispatch_diff(&cli, &config, args).await;
     }
 
     // Initialize database connection
@@ -1086,7 +1085,8 @@ async fn run_main() -> Result<()> {
             | Commands::Sweep(_)
             | Commands::Diagnose(_)
             | Commands::Find(_)
-            | Commands::Explain(_),
+            | Commands::Explain(_)
+            | Commands::Diff(_),
         ) => {
             unreachable!("file-only verbs are dispatched before database initialization")
         }

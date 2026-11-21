@@ -122,7 +122,11 @@ pub fn side_of(dir: &Path) -> DiffSide {
         found.push((generation, path));
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
-    assert!(!found.is_empty(), "no generations staged in {}", dir.display());
+    assert!(
+        !found.is_empty(),
+        "no generations staged in {}",
+        dir.display()
+    );
     DiffSide {
         dir: dir.to_path_buf(),
         generations: found.into_iter().map(|(_, p)| p).collect(),
@@ -134,7 +138,12 @@ pub fn side_of(dir: &Path) -> DiffSide {
 pub fn risk_cases_dir() -> PathBuf {
     let root = datasets_root::repo_root().join("test-data/fixtures/issue_4201");
     let mut dirs = datasets_root::table_generation_dirs(&root, "test_diff", "risk_cases");
-    assert_eq!(dirs.len(), 1, "committed risk_cases fixture under {}", root.display());
+    assert_eq!(
+        dirs.len(),
+        1,
+        "committed risk_cases fixture under {}",
+        root.display()
+    );
     dirs.remove(0)
 }
 
@@ -182,7 +191,10 @@ pub fn cell<'a>(
 }
 
 /// Tombstone entries of one kind within a partition entry.
-pub fn tombstones_of<'a>(partition: &'a serde_json::Value, kind: &str) -> Vec<&'a serde_json::Value> {
+pub fn tombstones_of<'a>(
+    partition: &'a serde_json::Value,
+    kind: &str,
+) -> Vec<&'a serde_json::Value> {
     partition["tombstones"]
         .as_array()
         .expect("tombstones array")

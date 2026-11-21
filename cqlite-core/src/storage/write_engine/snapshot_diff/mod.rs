@@ -48,9 +48,8 @@ mod types;
 use std::collections::BTreeMap;
 
 pub use types::{
-    CellDiffEntry, CellSide, CellStatus, DiffError, DiffOptions, DiffReport, DiffSide,
-    DiffSummary, PartitionDiff, ResurrectionRisk, ShadowedCell, Side, SideInfo,
-    TombstoneDiffEntry,
+    CellDiffEntry, CellSide, CellStatus, DiffError, DiffOptions, DiffReport, DiffSide, DiffSummary,
+    PartitionDiff, ResurrectionRisk, ShadowedCell, Side, SideInfo, TombstoneDiffEntry,
 };
 
 use crate::schema::{TableSchema, UdtRegistry};
@@ -59,12 +58,14 @@ use crate::storage::write_engine::merge::{compute_gc_before, effective_compactio
 use crate::util::value_fmt::ValueFormatter;
 use crate::Error;
 
+/// The side's header: its directory and generation names, oldest first (the input is newest first).
 fn side_info(side: &DiffSide) -> SideInfo {
     SideInfo {
         dir: side.dir.display().to_string(),
         generations: side
             .generations
             .iter()
+            .rev()
             .map(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
@@ -120,16 +121,7 @@ pub async fn diff_table(
     side::enumerate_keys(Side::A, side_a, &schema_a, &mut keys).await?;
     side::enumerate_keys(Side::B, side_b, &schema_b, &mut keys).await?;
     let keys: Vec<Vec<u8>> = keys.into_keys().map(|(_, key)| key).collect();
-    run(
-        side_a,
-        side_b,
-        table,
-        schema,
-        udt_registry,
-        options,
-        &keys,
-    )
-    .await
+    run(side_a, side_b, table, schema, udt_registry, options, &keys).await
 }
 
 /// Compare only the requested partitions through the point-read path (spec R11): no enumeration,

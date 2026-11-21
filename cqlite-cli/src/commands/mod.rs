@@ -25,6 +25,10 @@ pub(crate) mod sstable_inputs;
 pub mod write;
 
 pub mod delta_export;
+pub mod diff;
+pub mod diff_args;
+#[cfg(feature = "write-support")]
+pub(crate) mod diff_render;
 pub mod docker;
 pub mod explain;
 pub mod explain_args;

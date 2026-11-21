@@ -1,0 +1,312 @@
+{
+  "gc_grace_seconds": 864000,
+  "now": "2026-11-21T00:53:44Z",
+  "partitions": [
+    {
+      "cells": [
+        {
+          "a": {
+            "value": "extra_1",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "b": {
+            "value": "extra_1",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "1",
+          "column": "extra",
+          "status": "equal"
+        },
+        {
+          "a": {
+            "value": "live_1",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "b": {
+            "value": "live_1",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "1",
+          "column": "val",
+          "status": "equal"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "extra_2",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "2",
+          "column": "extra",
+          "status": "only-b"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "live_2",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "2",
+          "column": "val",
+          "status": "only-b"
+        },
+        {
+          "a": {
+            "value": "extra_3",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "b": {
+            "value": "extra_3",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "3",
+          "column": "extra",
+          "status": "equal"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "live_3",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "3",
+          "column": "val",
+          "status": "only-b"
+        },
+        {
+          "a": {
+            "value": "extra_4",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "b": {
+            "value": "extra_4",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "4",
+          "column": "extra",
+          "status": "equal"
+        },
+        {
+          "a": {
+            "value": "live_4",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "b": {
+            "value": "live_4",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "4",
+          "column": "val",
+          "status": "equal"
+        },
+        {
+          "a": {
+            "value": "extra_5",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "b": {
+            "value": "extra_5",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "5",
+          "column": "extra",
+          "status": "equal"
+        },
+        {
+          "a": {
+            "value": "live_5",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "b": {
+            "value": "live_5",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "5",
+          "column": "val",
+          "status": "equal"
+        }
+      ],
+      "partition_key": "1",
+      "tombstones": [
+        {
+          "clustering": "2",
+          "deletion_time": "2021-01-02T00:00:00Z",
+          "kind": "row",
+          "local_deletion_time": "2026-11-11T00:53:44Z",
+          "resurrection_risk": {
+            "phase": "before-gc-grace",
+            "shadowed_cells": [
+              {
+                "clustering": "2",
+                "column": "extra",
+                "side": "b"
+              },
+              {
+                "clustering": "2",
+                "column": "val",
+                "side": "b"
+              }
+            ],
+            "status": "yes"
+          },
+          "side": "a"
+        },
+        {
+          "clustering": "3",
+          "column": "val",
+          "deletion_time": "2021-01-02T00:00:00Z",
+          "kind": "cell",
+          "local_deletion_time": "2026-11-11T00:53:44Z",
+          "resurrection_risk": {
+            "phase": "before-gc-grace",
+            "shadowed_cells": [
+              {
+                "clustering": "3",
+                "column": "val",
+                "side": "b"
+              }
+            ],
+            "status": "yes"
+          },
+          "side": "a"
+        }
+      ]
+    },
+    {
+      "cells": [
+        {
+          "a": null,
+          "b": {
+            "value": "p2_extra_1",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "1",
+          "column": "extra",
+          "status": "only-b"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "p2_live_1",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "1",
+          "column": "val",
+          "status": "only-b"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "p2_extra_2",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "2",
+          "column": "extra",
+          "status": "only-b"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "p2_live_2",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "2",
+          "column": "val",
+          "status": "only-b"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "p2_extra_3",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "3",
+          "column": "extra",
+          "status": "only-b"
+        },
+        {
+          "a": null,
+          "b": {
+            "value": "p2_live_3",
+            "writetime": "2021-01-01T00:00:00Z"
+          },
+          "clustering": "3",
+          "column": "val",
+          "status": "only-b"
+        }
+      ],
+      "partition_key": "2",
+      "tombstones": [
+        {
+          "clustering": null,
+          "deletion_time": "2021-01-02T00:00:00Z",
+          "kind": "partition",
+          "local_deletion_time": "2026-11-11T00:53:44Z",
+          "resurrection_risk": {
+            "phase": "before-gc-grace",
+            "shadowed_cells": [
+              {
+                "clustering": "1",
+                "column": "extra",
+                "side": "b"
+              },
+              {
+                "clustering": "1",
+                "column": "val",
+                "side": "b"
+              },
+              {
+                "clustering": "2",
+                "column": "extra",
+                "side": "b"
+              },
+              {
+                "clustering": "2",
+                "column": "val",
+                "side": "b"
+              },
+              {
+                "clustering": "3",
+                "column": "extra",
+                "side": "b"
+              },
+              {
+                "clustering": "3",
+                "column": "val",
+                "side": "b"
+              }
+            ],
+            "status": "yes"
+          },
+          "side": "a"
+        }
+      ]
+    }
+  ],
+  "side_a": {
+    "dir": "<a>",
+    "generations": [
+      "nb-1-big",
+      "nb-2-big"
+    ]
+  },
+  "side_b": {
+    "dir": "<b>",
+    "generations": [
+      "nb-1-big"
+    ]
+  },
+  "summary": {
+    "equal": 7,
+    "newer_in_a": 0,
+    "newer_in_b": 0,
+    "only_a": 0,
+    "only_b": 9,
+    "partitions_compared": 2,
+    "resurrection_risk_before_gc_grace": 3,
+    "resurrection_risk_past_gc_grace": 0,
+    "tombstones_only_a": 3,
+    "tombstones_only_b": 0
+  },
+  "table": "test_tomb.resurrection_gc_positive"
+}

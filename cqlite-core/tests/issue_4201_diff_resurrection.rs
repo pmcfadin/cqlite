@@ -67,10 +67,7 @@ fn gc_positive_schema() -> cqlite_core::schema::TableSchema {
     )
 }
 
-async fn gc_positive_report(
-    sides: &(DiffSide, DiffSide),
-    now: i64,
-) -> Json {
+async fn gc_positive_report(sides: &(DiffSide, DiffSide), now: i64) -> Json {
     let report = diff_table(
         &sides.0,
         &sides.1,
@@ -176,7 +173,10 @@ fn goldens_anchor_the_literals() {
         assert_eq!(p1["partition"]["key"][0], "1");
         let row = &p1["rows"][0];
         assert_eq!(row["clustering"][0], 2);
-        assert_eq!(row["deletion_info"]["marked_deleted"], "2021-01-02T00:00:00Z");
+        assert_eq!(
+            row["deletion_info"]["marked_deleted"],
+            "2021-01-02T00:00:00Z"
+        );
         assert_eq!(
             rfc3339_secs(row["deletion_info"]["local_delete_time"].as_str().unwrap()),
             GC_POSITIVE_LDT
@@ -206,7 +206,10 @@ fn goldens_anchor_the_literals() {
     // risk_cases: gen 2's tombstones' local_delete_time is RISK_LDT.
     let src = risk_cases_dir();
     let stats = std::fs::read_to_string(src.join("nb-2-big-Statistics.db.txt")).unwrap();
-    assert!(stats.contains(&format!("({RISK_LDT})")), "sstablemetadata local deletion time");
+    assert!(
+        stats.contains(&format!("({RISK_LDT})")),
+        "sstablemetadata local deletion time"
+    );
     for partition in golden_partitions(&src, "nb-2-big") {
         let text = partition.to_string();
         if text.contains("local_delete_time") {
@@ -302,18 +305,40 @@ async fn r1_1_both_sides_use_the_explain_mechanism_at_the_same_now() {
         let a = explain_trail(&sides.0, &int_key(key), now, &schema);
         let b = explain_trail(&sides.1, &int_key(key), now, &schema);
         let name = key.to_string();
-        assert_eq!(reported_winners(&report, &name, "a"), winner_set(&a), "A winners, partition {key}");
-        assert_eq!(reported_winners(&report, &name, "b"), winner_set(&b), "B winners, partition {key}");
+        assert_eq!(
+            reported_winners(&report, &name, "a"),
+            winner_set(&a),
+            "A winners, partition {key}"
+        );
+        assert_eq!(
+            reported_winners(&report, &name, "b"),
+            winner_set(&b),
+            "B winners, partition {key}"
+        );
         // B (generation 1 only) holds no tombstone at all; A's distinct tombstones are exactly the
         // report's one-sided tombstones (B holds none to cancel them).
         assert!(b.tombstones().is_empty(), "B has no tombstones");
         let distinct_a: BTreeSet<String> = a
             .tombstones()
             .iter()
-            .map(|t| format!("{:?}/{:?}/{}", t.kind, t.clustering, t.column.clone().unwrap_or_default()))
+            .map(|t| {
+                format!(
+                    "{:?}/{:?}/{}",
+                    t.kind,
+                    t.clustering,
+                    t.column.clone().unwrap_or_default()
+                )
+            })
             .collect();
-        let reported = partition(&report, &name)["tombstones"].as_array().unwrap().len();
-        assert_eq!(reported, distinct_a.len(), "partition {key}: one-sided tombstones == A's");
+        let reported = partition(&report, &name)["tombstones"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(
+            reported,
+            distinct_a.len(),
+            "partition {key}: one-sided tombstones == A's"
+        );
     }
 }
 
@@ -327,8 +352,18 @@ async fn r2_1_identical_snapshots_every_cell_equal() {
     let Some(src) = fixture_dir("test_tomb", "resurrection_gc_positive") else {
         return;
     };
-    let a = side_of(&stage(root.path(), "same-a", &src, &["nb-1-big-", "nb-2-big-"]));
-    let b = side_of(&stage(root.path(), "same-b", &src, &["nb-1-big-", "nb-2-big-"]));
+    let a = side_of(&stage(
+        root.path(),
+        "same-a",
+        &src,
+        &["nb-1-big-", "nb-2-big-"],
+    ));
+    let b = side_of(&stage(
+        root.path(),
+        "same-b",
+        &src,
+        &["nb-1-big-", "nb-2-big-"],
+    ));
     let report = diff_table(
         &a,
         &b,
@@ -346,12 +381,18 @@ async fn r2_1_identical_snapshots_every_cell_equal() {
     assert_eq!(report.summary.equal, 7);
     assert_eq!(report.summary.only_a + report.summary.only_b, 0);
     assert_eq!(report.summary.newer_in_a + report.summary.newer_in_b, 0);
-    assert_eq!(report.summary.tombstones_only_a + report.summary.tombstones_only_b, 0);
+    assert_eq!(
+        report.summary.tombstones_only_a + report.summary.tombstones_only_b,
+        0
+    );
     for p in json["partitions"].as_array().unwrap() {
         for c in p["cells"].as_array().unwrap() {
             assert_eq!(c["status"], "equal", "{c}");
         }
-        assert!(p["tombstones"].as_array().unwrap().is_empty(), "shared tombstones are omitted");
+        assert!(
+            p["tombstones"].as_array().unwrap().is_empty(),
+            "shared tombstones are omitted"
+        );
     }
 }
 
@@ -402,7 +443,11 @@ async fn r2_2_classification_is_per_cell_not_per_row() {
     // Golden gen 2: partition 2 is wholly deleted: all six cells exist only on B.
     let p2 = partition(&report, "2");
     assert_eq!(p2["cells"].as_array().unwrap().len(), 6);
-    assert!(p2["cells"].as_array().unwrap().iter().all(|c| c["status"] == "only-b"));
+    assert!(p2["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["status"] == "only-b"));
     assert_eq!(report["summary"]["equal"], 7);
     assert_eq!(report["summary"]["only_b"], 9);
     assert_eq!(report["summary"]["only_a"], 0);
@@ -414,12 +459,24 @@ async fn r2_newer_in_a_newer_in_b_only_a_only_b() {
     let sides = risk_sides(root.path());
     let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
     // README (mutations): id4 A@2000 vs B@3000; id6 A@4000 vs B@3000; id7 only B; id8 only A.
-    assert_eq!(cell(partition(&report, "4"), "1", "v")["status"], "newer-in-b");
-    assert_eq!(cell(partition(&report, "6"), "1", "v")["status"], "newer-in-a");
+    assert_eq!(
+        cell(partition(&report, "4"), "1", "v")["status"],
+        "newer-in-b"
+    );
+    assert_eq!(
+        cell(partition(&report, "6"), "1", "v")["status"],
+        "newer-in-a"
+    );
     assert_eq!(cell(partition(&report, "7"), "1", "v")["status"], "only-b");
     assert_eq!(cell(partition(&report, "8"), "1", "v")["status"], "only-a");
-    assert_eq!(cell(partition(&report, "4"), "1", "v")["a"]["writetime"], "1970-01-01T00:00:00.002Z");
-    assert_eq!(cell(partition(&report, "4"), "1", "v")["b"]["writetime"], "1970-01-01T00:00:00.003Z");
+    assert_eq!(
+        cell(partition(&report, "4"), "1", "v")["a"]["writetime"],
+        "1970-01-01T00:00:00.002Z"
+    );
+    assert_eq!(
+        cell(partition(&report, "4"), "1", "v")["b"]["writetime"],
+        "1970-01-01T00:00:00.003Z"
+    );
     assert_eq!(report["summary"]["newer_in_a"], 1);
     assert_eq!(report["summary"]["newer_in_b"], 1);
     assert_eq!(report["summary"]["partitions_compared"], 8);
@@ -446,7 +503,10 @@ async fn r3_1_only_divergent_tombstones_are_reported() {
     assert_eq!(rows[0]["side"], "a");
     let cells = tombstones_of(p1, "cell");
     assert_eq!(cells.len(), 1);
-    assert_eq!((cells[0]["clustering"].as_str(), cells[0]["column"].as_str()), (Some("3"), Some("val")));
+    assert_eq!(
+        (cells[0]["clustering"].as_str(), cells[0]["column"].as_str()),
+        (Some("3"), Some("val"))
+    );
     assert_eq!(cells[0]["side"], "a");
     assert_eq!(p1["tombstones"].as_array().unwrap().len(), 2);
     let partitions = tombstones_of(p2, "partition");
@@ -492,7 +552,10 @@ async fn r4_1_past_gc_grace_names_every_shadowed_cell_for_all_three_kinds() {
     // 2021-01-02, DeletionTime.java:173-175).
     assert_eq!(
         shadowed(tombstones_of(p1, "row")[0]),
-        vec![("2".to_string(), "extra".to_string()), ("2".to_string(), "val".to_string())]
+        vec![
+            ("2".to_string(), "extra".to_string()),
+            ("2".to_string(), "val".to_string())
+        ]
     );
     // Cell tombstone shadows exactly (ck 3, val) — NOT `extra`.
     assert_eq!(
@@ -502,14 +565,30 @@ async fn r4_1_past_gc_grace_names_every_shadowed_cell_for_all_three_kinds() {
     // Partition tombstone names all six cells of partition 2.
     let expected: Vec<(String, String)> = ["1", "2", "3"]
         .iter()
-        .flat_map(|ck| [(ck.to_string(), "extra".to_string()), (ck.to_string(), "val".to_string())])
+        .flat_map(|ck| {
+            [
+                (ck.to_string(), "extra".to_string()),
+                (ck.to_string(), "val".to_string()),
+            ]
+        })
         .collect();
-    assert_eq!(shadowed(tombstones_of(partition(&report, "2"), "partition")[0]), expected);
+    assert_eq!(
+        shadowed(tombstones_of(partition(&report, "2"), "partition")[0]),
+        expected
+    );
     assert_eq!(report["summary"]["resurrection_risk_past_gc_grace"], 3);
     assert_eq!(report["summary"]["resurrection_risk_before_gc_grace"], 0);
     // Every shadowed cell is attributed to side B (the side that still holds the data).
-    for tombstone in report["partitions"].as_array().unwrap().iter().flat_map(|p| p["tombstones"].as_array().unwrap()) {
-        for cell in tombstone["resurrection_risk"]["shadowed_cells"].as_array().unwrap() {
+    for tombstone in report["partitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["tombstones"].as_array().unwrap())
+    {
+        for cell in tombstone["resurrection_risk"]["shadowed_cells"]
+            .as_array()
+            .unwrap()
+        {
             assert_eq!(cell["side"], "b");
         }
     }
@@ -525,7 +604,10 @@ async fn r4_2_phase_flips_exactly_at_the_boundary_second() {
     for now in [GC_POSITIVE_BOUNDARY - 1, GC_POSITIVE_BOUNDARY] {
         let report = gc_positive_report(&sides, now).await;
         for risk in all_risks(&report) {
-            assert_eq!(risk["status"], "yes", "shadow relationship is unchanged at now={now}");
+            assert_eq!(
+                risk["status"], "yes",
+                "shadow relationship is unchanged at now={now}"
+            );
             assert_eq!(risk["phase"], "before-gc-grace", "now={now}");
         }
         assert_eq!(report["summary"]["resurrection_risk_before_gc_grace"], 3);
@@ -549,15 +631,24 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         assert_eq!(tombstones.len(), 1, "id {key}");
         assert_eq!(tombstones[0]["side"], "a");
         let risk = &tombstones[0]["resurrection_risk"];
-        assert_eq!(risk["status"], "no", "id {key}: field present and `no`, never omitted");
-        assert!(risk.get("phase").is_none() && risk.get("shadowed_cells").is_none(), "{risk}");
+        assert_eq!(
+            risk["status"], "no",
+            "id {key}: field present and `no`, never omitted"
+        );
+        assert!(
+            risk.get("phase").is_none() && risk.get("shadowed_cells").is_none(),
+            "{risk}"
+        );
     }
     // id3: row tombstone @2000 vs B cell @2000 — equal timestamps: the tombstone wins
     // (DeletionTime.deletes `<=`, Cells.resolveRegular tie) => yes.
     let tie = &tombstones_of(partition(&report, "3"), "row")[0]["resurrection_risk"];
     assert_eq!(tie["status"], "yes");
     assert_eq!(tie["phase"], "past-gc-grace");
-    assert_eq!(shadowed(tombstones_of(partition(&report, "3"), "row")[0]), vec![("1".to_string(), "v".to_string())]);
+    assert_eq!(
+        shadowed(tombstones_of(partition(&report, "3"), "row")[0]),
+        vec![("1".to_string(), "v".to_string())]
+    );
     assert_eq!(report["summary"]["resurrection_risk_past_gc_grace"], 1);
     assert_eq!(report["summary"]["tombstones_only_a"], 4);
     // The tie's phase flips exactly at ldt + gc_grace too (PurgeFunction.java:41-42).
@@ -590,7 +681,10 @@ async fn r5_1_range_tombstone_shadows_only_cells_inside_its_span() {
     assert_eq!(ranges[0]["resurrection_risk"]["status"], "yes");
     assert_eq!(ranges[0]["resurrection_risk"]["phase"], "past-gc-grace");
     // ck 1 is inside [1,2] (1000 <= 2000): named. ck 3 is outside: NOT named, and equal on both.
-    assert_eq!(shadowed(ranges[0]), vec![("1".to_string(), "v".to_string())]);
+    assert_eq!(
+        shadowed(ranges[0]),
+        vec![("1".to_string(), "v".to_string())]
+    );
     assert_eq!(cell(p3, "1", "v")["status"], "only-b");
     assert_eq!(cell(p3, "3", "v")["status"], "equal");
     // ...and before the boundary the phase flips, shadow unchanged.
@@ -606,11 +700,23 @@ async fn every_tombstone_kind_is_classified_on_the_decision_trail_fixture() {
     let sides = trace_sides(root.path());
     let report = trace_report(&sides, TD_BOUNDARY + 1).await;
     // README rows (mutations @1000 in A, deletions @2000 in B), each against B = generation 1 only:
-    for (key, kind) in [("2", "row"), ("4", "cell"), ("5", "partition"), ("8", "cell")] {
+    for (key, kind) in [
+        ("2", "row"),
+        ("4", "cell"),
+        ("5", "partition"),
+        ("8", "cell"),
+    ] {
         let tombstones = tombstones_of(partition(&report, key), kind);
         assert_eq!(tombstones.len(), 1, "partition {key} {kind}");
-        assert_eq!(tombstones[0]["resurrection_risk"]["status"], "yes", "partition {key}");
-        assert_eq!(shadowed(tombstones[0]), vec![("1".to_string(), "v".to_string())], "partition {key}");
+        assert_eq!(
+            tombstones[0]["resurrection_risk"]["status"], "yes",
+            "partition {key}"
+        );
+        assert_eq!(
+            shadowed(tombstones[0]),
+            vec![("1".to_string(), "v".to_string())],
+            "partition {key}"
+        );
     }
     // Partition 4: the cell tombstone is @1000 and B's cell is @1000 — an equal-timestamp tie that
     // the tombstone wins (Cells.java:92-98).
@@ -618,13 +724,22 @@ async fn every_tombstone_kind_is_classified_on_the_decision_trail_fixture() {
     // @999 that both generations carry is held by BOTH sides and therefore omitted (R3).
     let collections = tombstones_of(partition(&report, "6"), "collection");
     assert_eq!(collections.len(), 1, "only the @1999 deletion diverges");
-    assert_eq!(shadowed(collections[0]), vec![("1".to_string(), "m".to_string())]);
+    assert_eq!(
+        shadowed(collections[0]),
+        vec![("1".to_string(), "m".to_string())]
+    );
     // Partition 1: 'newer'@2000 vs 'older'@1000.
-    assert_eq!(cell(partition(&report, "1"), "1", "v")["status"], "newer-in-a");
+    assert_eq!(
+        cell(partition(&report, "1"), "1", "v")["status"],
+        "newer-in-a"
+    );
     // Partition 7: the TTL cell (expires 2026-11-13) is expired on BOTH sides at this `now`; the
     // partition is compared and reports nothing.
     let p7 = partition(&report, "7");
-    assert!(p7["cells"].as_array().unwrap().is_empty() && p7["tombstones"].as_array().unwrap().is_empty());
+    assert!(
+        p7["cells"].as_array().unwrap().is_empty()
+            && p7["tombstones"].as_array().unwrap().is_empty()
+    );
     assert_eq!(report["summary"]["partitions_compared"], 8);
 }
 
@@ -694,8 +809,14 @@ async fn r7_1_truncated_statistics_on_side_b_names_side_and_path() {
     match outcome {
         Err(DiffError::SideRead { side, path, .. }) => {
             assert_eq!(side, Side::B);
-            assert!(path.ends_with("nb-1-big-Statistics.db"), "names the truncated component: {path}");
-            assert!(path.contains("r7-b"), "names side B's copy, not A's: {path}");
+            assert!(
+                path.ends_with("nb-1-big-Statistics.db"),
+                "names the truncated component: {path}"
+            );
+            assert!(
+                path.contains("r7-b"),
+                "names side B's copy, not A's: {path}"
+            );
         }
         other => panic!("expected SideRead on side b, got {other:?}"),
     }

@@ -80,7 +80,13 @@ async fn report(a: &DiffSide, b: &DiffSide, table: &str, schema: &TableSchema, n
 /// Diff `(a, b)` and `(b, a)` and require the mirror property. Returns the A-vs-B report so the
 /// caller can assert the fixture actually produced divergence (a mirror of two empty reports is
 /// trivially equal).
-async fn assert_mirror(a: &DiffSide, b: &DiffSide, table: &str, schema: &TableSchema, now: i64) -> Json {
+async fn assert_mirror(
+    a: &DiffSide,
+    b: &DiffSide,
+    table: &str,
+    schema: &TableSchema,
+    now: i64,
+) -> Json {
     let forward = report(a, b, table, schema, now).await;
     let backward = report(b, a, table, schema, now).await;
     assert_eq!(
@@ -89,7 +95,10 @@ async fn assert_mirror(a: &DiffSide, b: &DiffSide, table: &str, schema: &TableSc
         "{table} @ now={now}: diff(B, A) must be the label-swapped mirror of diff(A, B)"
     );
     // The mirror also holds for the phase: only the labels move.
-    assert_eq!(forward["summary"]["partitions_compared"], backward["summary"]["partitions_compared"]);
+    assert_eq!(
+        forward["summary"]["partitions_compared"],
+        backward["summary"]["partitions_compared"]
+    );
     forward
 }
 
@@ -101,10 +110,18 @@ async fn mirror_holds_for_resurrection_gc_positive_either_side_of_the_boundary()
     let root = tempfile::tempdir().unwrap();
     let a = side_of(&stage(root.path(), "a", &src, &["nb-1-big-", "nb-2-big-"]));
     let b = side_of(&stage(root.path(), "b", &src, &["nb-1-big-"]));
-    let schema = load_schema("tombstone-parity.cql", "test_tomb", "resurrection_gc_positive");
+    let schema = load_schema(
+        "tombstone-parity.cql",
+        "test_tomb",
+        "resurrection_gc_positive",
+    );
     for now in [GC_POSITIVE_BOUNDARY, GC_POSITIVE_BOUNDARY + 1] {
-        let forward = assert_mirror(&a, &b, "test_tomb.resurrection_gc_positive", &schema, now).await;
-        assert_eq!(forward["summary"]["tombstones_only_a"], 3, "non-vacuous: real divergence");
+        let forward =
+            assert_mirror(&a, &b, "test_tomb.resurrection_gc_positive", &schema, now).await;
+        assert_eq!(
+            forward["summary"]["tombstones_only_a"], 3,
+            "non-vacuous: real divergence"
+        );
     }
 }
 
@@ -131,8 +148,18 @@ async fn mirror_holds_for_every_tombstone_kind_on_the_decision_trail_fixture() {
     let a = side_of(&stage(root.path(), "a", &src, &["nb-1-big-", "nb-2-big-"]));
     let b = side_of(&stage(root.path(), "b", &src, &["nb-1-big-"]));
     let schema = load_schema("explain-trace.cql", "test_explain", "trace_decisions");
-    let forward = assert_mirror(&a, &b, "test_explain.trace_decisions", &schema, 1_795_399_358).await;
-    assert_eq!(forward["summary"]["tombstones_only_a"], 6, "non-vacuous: real divergence");
+    let forward = assert_mirror(
+        &a,
+        &b,
+        "test_explain.trace_decisions",
+        &schema,
+        1_795_399_358,
+    )
+    .await;
+    assert_eq!(
+        forward["summary"]["tombstones_only_a"], 6,
+        "non-vacuous: real divergence"
+    );
 }
 
 #[tokio::test]
@@ -142,7 +169,14 @@ async fn mirror_holds_for_identical_snapshots_and_the_report_is_unchanged() {
     let a = side_of(&stage(root.path(), "a", &src, &["nb-1-big-", "nb-2-big-"]));
     let b = side_of(&stage(root.path(), "b", &src, &["nb-1-big-", "nb-2-big-"]));
     let schema = load_schema("explain-trace.cql", "test_explain", "trace_decisions");
-    let forward = assert_mirror(&a, &b, "test_explain.trace_decisions", &schema, 1_795_399_358).await;
+    let forward = assert_mirror(
+        &a,
+        &b,
+        "test_explain.trace_decisions",
+        &schema,
+        1_795_399_358,
+    )
+    .await;
     assert_eq!(forward["summary"]["only_a"], 0);
     assert_eq!(forward["summary"]["only_b"], 0);
 }
@@ -162,7 +196,10 @@ fn relabel_is_an_involution_and_swaps_every_label_family() {
     assert_eq!(swapped["partitions"][0]["cells"][0]["status"], "newer-in-b");
     assert_eq!(swapped["partitions"][0]["cells"][0]["b"]["value"], "1");
     assert_eq!(swapped["partitions"][0]["tombstones"][0]["side"], "b");
-    assert_eq!(swapped["partitions"][0]["tombstones"][0]["resurrection_risk"]["shadowed_cells"][0]["side"], "a");
+    assert_eq!(
+        swapped["partitions"][0]["tombstones"][0]["resurrection_risk"]["shadowed_cells"][0]["side"],
+        "a"
+    );
     assert_eq!(swapped["summary"]["only_a"], 2);
     assert_eq!(swapped["summary"]["tombstones_only_b"], 5);
     assert_eq!(relabel(&swapped), sample);

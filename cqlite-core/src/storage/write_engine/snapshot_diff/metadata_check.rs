@@ -18,7 +18,12 @@ pub(super) fn validate_metadata_layout(bytes: &[u8]) -> Result<(), String> {
         bytes
             .get(at..at + 4)
             .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-            .ok_or_else(|| format!("truncated: needs 4 bytes at offset {at}, file is {} bytes", bytes.len()))
+            .ok_or_else(|| {
+                format!(
+                    "truncated: needs 4 bytes at offset {at}, file is {} bytes",
+                    bytes.len()
+                )
+            })
     };
     let mut crc = crc32fast::Hasher::new();
 
@@ -27,7 +32,9 @@ pub(super) fn validate_metadata_layout(bytes: &[u8]) -> Result<(), String> {
     let expected = int_at(4)?;
     let actual = crc.clone().finalize() as i32;
     if actual != expected {
-        return Err(format!("TOC count checksum mismatch (stored {expected:#x}, computed {actual:#x})"));
+        return Err(format!(
+            "TOC count checksum mismatch (stored {expected:#x}, computed {actual:#x})"
+        ));
     }
     if count < 1 {
         return Err(format!("TOC declares {count} components"));
@@ -51,12 +58,16 @@ pub(super) fn validate_metadata_layout(bytes: &[u8]) -> Result<(), String> {
         crc.update(&int_at(at)?.to_be_bytes());
         let offset = int_at(at + 4)?;
         crc.update(&offset.to_be_bytes());
-        offsets.push(usize::try_from(offset).map_err(|_| format!("component {i} has a negative offset"))?);
+        offsets.push(
+            usize::try_from(offset).map_err(|_| format!("component {i} has a negative offset"))?,
+        );
     }
     let expected = int_at(8 + 8 * count)?;
     let actual = crc.finalize() as i32;
     if actual != expected {
-        return Err(format!("TOC checksum mismatch (stored {expected:#x}, computed {actual:#x})"));
+        return Err(format!(
+            "TOC checksum mismatch (stored {expected:#x}, computed {actual:#x})"
+        ));
     }
 
     for (i, &start) in offsets.iter().enumerate() {
@@ -109,7 +120,10 @@ mod tests {
 
     #[test]
     fn a_well_formed_file_passes() {
-        assert_eq!(validate_metadata_layout(&build(&[b"abc", b"defgh", b"i"])), Ok(()));
+        assert_eq!(
+            validate_metadata_layout(&build(&[b"abc", b"defgh", b"i"])),
+            Ok(())
+        );
     }
 
     #[test]

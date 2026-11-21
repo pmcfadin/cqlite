@@ -136,7 +136,7 @@ through `build_traced_merger_with_registry` directly (the point-read path), per 
       ]
     }
   ],
-  "summary": { "partitions_compared": 2, "equal": 3, "only_a": 0, "only_b": 8,
+  "summary": { "partitions_compared": 2, "equal": 7, "only_a": 0, "only_b": 9,
                "newer_in_a": 0, "newer_in_b": 0, "tombstones_only_a": 3, "tombstones_only_b": 0,
                "resurrection_risk_before_gc_grace": 0, "resurrection_risk_past_gc_grace": 3 }
 }

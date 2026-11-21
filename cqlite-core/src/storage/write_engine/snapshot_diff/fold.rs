@@ -2,8 +2,8 @@
 //! one [`PartitionDiff`]. No reconciliation happens here — every winner and every tombstone was
 //! produced by the traced merger; this file only compares them (spec R2, R3, R4).
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::resurrection::{gc_phase, shadows};
 use super::side::SideTrail;
@@ -95,7 +95,8 @@ impl SideCells {
                 serde_json::to_string(&cell.clustering).unwrap_or_default(),
                 cell.column.clone(),
             );
-            let rendered = ValueFormatter::format_value(cell.value.as_ref().unwrap_or(&Value::Null));
+            let rendered =
+                ValueFormatter::format_value(cell.value.as_ref().unwrap_or(&Value::Null));
             cells
                 .entry(key)
                 .or_insert_with(|| (cell.clustering.clone(), Vec::new()))
@@ -202,10 +203,7 @@ fn fold_cells(
             },
         ));
     }
-    out.sort_by(|x, y| {
-        cmp_clustering(&x.0, &y.0, schema)
-            .then_with(|| x.1.cmp(&y.1))
-    });
+    out.sort_by(|x, y| cmp_clustering(&x.0, &y.0, schema).then_with(|| x.1.cmp(&y.1)));
     Ok(out.into_iter().map(|(_, _, entry)| entry).collect())
 }
 
@@ -234,7 +232,8 @@ fn tombstone_identity(tombstone: &TombstoneRecord) -> String {
 fn distinct_tombstones(trail: &SideTrail) -> BTreeMap<String, &TombstoneRecord> {
     let mut out = BTreeMap::new();
     for tombstone in &trail.tombstones {
-        out.entry(tombstone_identity(tombstone)).or_insert(tombstone);
+        out.entry(tombstone_identity(tombstone))
+            .or_insert(tombstone);
     }
     out
 }
@@ -270,7 +269,8 @@ fn tombstone_entry(
     shadowed.sort_by(|x, y| {
         cmp_clustering(&x.0, &y.0, schema).then_with(|| x.1.column.cmp(&y.1.column))
     });
-    let mut shadowed_cells: Vec<ShadowedCell> = shadowed.into_iter().map(|(_, cell)| cell).collect();
+    let mut shadowed_cells: Vec<ShadowedCell> =
+        shadowed.into_iter().map(|(_, cell)| cell).collect();
     shadowed_cells.dedup();
     let resurrection_risk = if shadowed_cells.is_empty() {
         ResurrectionRisk {

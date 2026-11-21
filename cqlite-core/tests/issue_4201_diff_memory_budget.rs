@@ -81,7 +81,9 @@ fn side_of(dir: &std::path::Path) -> DiffSide {
             let path = entry.path();
             let name = path.file_name()?.to_str()?.to_string();
             let stem = name.strip_suffix("-Data.db")?;
-            dir.join(format!("{stem}-TOC.txt")).is_file().then_some(())?;
+            dir.join(format!("{stem}-TOC.txt"))
+                .is_file()
+                .then_some(())?;
             Some((stem.split('-').nth(1)?.parse::<u64>().ok()?, path))
         })
         .collect();
@@ -117,7 +119,10 @@ fn diff_every_wide_rows_table_within_the_heap_budget() {
                 .next()
                 .unwrap_or_else(|| panic!("{KEYSPACE}.{t}: no generation directory"));
             let side = side_of(&dir);
-            assert!(!side.generations.is_empty(), "{KEYSPACE}.{t}: no live generation");
+            assert!(
+                !side.generations.is_empty(),
+                "{KEYSPACE}.{t}: no live generation"
+            );
             (t.clone(), side, table_schema(SCHEMA_FILE, t, KEYSPACE))
         })
         .collect();
@@ -139,8 +144,14 @@ fn diff_every_wide_rows_table_within_the_heap_budget() {
                 &options,
             ))
             .unwrap_or_else(|e| panic!("{KEYSPACE}.{table}: {e}"));
-        assert!(report.summary.partitions_compared > 0, "{table}: compared no partition");
-        assert!(report.summary.equal > 0, "{table}: no equal cell (scanned nothing)");
+        assert!(
+            report.summary.partitions_compared > 0,
+            "{table}: compared no partition"
+        );
+        assert!(
+            report.summary.equal > 0,
+            "{table}: no equal cell (scanned nothing)"
+        );
         assert_eq!(
             report.summary.only_a
                 + report.summary.only_b
