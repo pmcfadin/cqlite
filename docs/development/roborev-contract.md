@@ -704,7 +704,10 @@ stops loading on every agent turn.
   `prompt-content:` would still pass and a vacuous review would ride the line count. The byte measure is
   the content bytes of every added/deleted line (marker excluded, newline included) of the non-renamed
   CODE paths, from `git diff --no-renames -U0` per path (file headers skipped positionally); a pure rename
-  has none, so counts 0, and an unmeasurable byte count never skips (fail closed). **How lines are counted**
+  has none, so counts 0 **only when both endpoints are CODE paths** under the census classifier (a genuine
+  code move; a large `.md` renamed 100% to `.rs` is new code and keeps its full added lines and bytes, a
+  code-to-non-code rename keeps its deleted lines; roborev job 387), a final line with no trailing
+  newline is counted without the newline byte it does not have, and an unmeasurable byte count never skips (fail closed). **How lines are counted**
   (`roborev_code_census_lines`, in `roborev-review-oracles.sh`): added plus deleted lines from the same
   `--numstat -z` records `census:` uses, over the CODE paths only (the paths `prompt-content:` expects),
   so the two can never disagree about what is code; a 100%-similarity rename counts as 0 (the census runs

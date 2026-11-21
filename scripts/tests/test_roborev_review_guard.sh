@@ -750,6 +750,8 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   the tier2 small-census rule (ROBOREV_VACUITY_TIER2_MIN_CENSUS_LINES=20)
 #   bytes-<N>       ONE added code line whose content is exactly N bytes (`fn x...() {}` padded with
 #                   a comment), for the byte half of the tier2 small-census rule
+#   bytes-nonl-<N> ONE added code line of exactly N bytes with NO trailing newline
+#   rename-md-to-rs a 60-line `big.md` (non-code) at the BASE renamed 100% to `big.rs` (CODE)
 #   rename-large    a 60-line `big.rs` that exists at the BASE and is RENAMED (100% similarity)
 #                   on the branch: the census (`--no-renames`) bills it +60/-60, a rename-aware
 #                   count bills it 0
@@ -828,6 +830,11 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
       git_q "$work" commit -q -m 'base: an extensionless harness executable under docs/'
       ;;
+    rename-md-to-rs)
+      seq 1 60 | sed 's/^/fn f/; s/$/() {}/' >"$work/big.md"
+      git_q "$work" add big.md
+      git_q "$work" commit -q -m 'base: a 60-line prose file'
+      ;;
     rename-large | rename-edited)
       seq 1 60 | sed 's/^/fn f/; s/$/() {}/' >"$work/big.rs"
       git_q "$work" add big.rs
@@ -865,12 +872,23 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add main.rs
       git_q "$work" commit -q -m "code change (${mode#code-lines-} lines)"
       ;;
-    bytes-*)
+    bytes-[0-9]*)
       # one line of exactly N content bytes (marker excluded, newline included)
       _bn="${mode#bytes-}"
       { printf '//'; head -c "$((_bn - 3))" /dev/zero | tr '\0' 'x'; printf '\n'; } >>"$work/main.rs"
       git_q "$work" add main.rs
       git_q "$work" commit -q -m "one code line of $_bn bytes"
+      ;;
+    bytes-nonl-*)
+      # the base main.rs ends with a newline; the new file has ONE line and no final newline
+      _bn="${mode#bytes-nonl-}"
+      { printf '//'; head -c "$((_bn - 2))" /dev/zero | tr '\0' 'x'; } >"$work/nonl.rs"
+      git_q "$work" add nonl.rs
+      git_q "$work" commit -q -m "one code line of $_bn bytes, no trailing newline"
+      ;;
+    rename-md-to-rs)
+      git_q "$work" mv big.md big.rs
+      git_q "$work" commit -q -m 'rename big.md to big.rs'
       ;;
     rename-large | rename-edited)
       git_q "$work" mv big.rs moved.rs
@@ -9480,6 +9498,36 @@ STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
 run_wrapper "$work"
 assert_verdict 'case (t2s-7) a 100 KB single line' FAIL 1
 assert_says 'case (t2s-7) a minified-style single line cannot ride the line count' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (t2s-8): a NON-code -> CODE exact rename is new code, not a move ==\n'
+reset_stub
+work=$(make_fixture case_t2s8 rename-md-to-rs)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/big.md b/big.rs\nsimilarity index 100%'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-8) md -> rs rename' FAIL 1
+assert_says 'case (t2s-8) the 60-line destination is counted in full: original guard' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+assert_lacks 'case (t2s-8) not a SKIP' '^vacuity-tier2: SKIP'
+# the control: rs -> rs (case t2s-3) still SKIPs, asserted there.
+
+printf '== case (t2s-9): bytes are EXACT for a final line with no trailing newline ==\n'
+reset_stub
+work=$(make_fixture case_t2s9a bytes-nonl-4096)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/nonl.rs b/nonl.rs'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-9) 4096 bytes, no final newline' PASS 0
+assert_says 'case (t2s-9) counted as exactly 4096, not 4097' 'and 4096 changed code bytes <= ROBOREV_VACUITY_TIER2_MAX_CENSUS_BYTES=4096 '
+reset_stub
+work=$(make_fixture case_t2s9b bytes-nonl-4097)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/nonl.rs b/nonl.rs'
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+run_wrapper "$work"
+assert_verdict 'case (t2s-9) 4097 bytes, no final newline' FAIL 1
+assert_says 'case (t2s-9) 4097 FAILs' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
 
 printf '== case (t2s-5): a tiny census whose findings / review-completed FAIL still gives RESULT FAIL ==\n'
 reset_stub

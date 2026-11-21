@@ -510,6 +510,15 @@ roborev_push_assert() {
 #   * FAIL-CLOSED: if the rename probe itself fails, nothing is discounted (a bigger number can
 #     only turn a SKIP back into the original token-floor FAIL, never the reverse).
 ROBOREV_CENSUS_BINARY_LINES=1000000
+# roborev_is_census_code_path <raw path>: 0 iff the path is in `census_code_paths` (the census's own
+# CODE classification — the one `prompt-content:` uses), so rename endpoints are judged by the SAME classifier.
+roborev_is_census_code_path() {
+  local _p
+  for _p in ${census_code_paths[@]+"${census_code_paths[@]}"}; do
+    if [ "$_p" = "$1" ]; then return 0; fi
+  done
+  return 1
+}
 roborev_code_census_lines() {
   local _rcl_status _rcl_old _rcl_new _rcl_i _rcl_j _rcl_skip _rcl_total=0
   local _rcl_renamed=() _rcl_measure=()
@@ -520,7 +529,14 @@ roborev_code_census_lines() {
         R*|C*)
           IFS= read -r -d '' _rcl_old || break
           IFS= read -r -d '' _rcl_new || break
-          if [ "$_rcl_status" = R100 ]; then _rcl_renamed+=("$_rcl_old" "$_rcl_new"); fi
+          # A pure rename is discounted ONLY when BOTH endpoints are CODE paths under the census
+          # classifier (a genuine code move). A non-code -> code rename (a large `.md` becoming `.rs`)
+          # puts brand-new code in front of the reviewer, so the destination keeps its full added
+          # lines/bytes; a code -> non-code rename is a deletion of code and keeps its deleted lines.
+          if [ "$_rcl_status" = R100 ] \
+            && roborev_is_census_code_path "$_rcl_old" && roborev_is_census_code_path "$_rcl_new"; then
+            _rcl_renamed+=("$_rcl_old" "$_rcl_new")
+          fi
           ;;
         *) IFS= read -r -d '' _rcl_old || break ;;
       esac
@@ -555,6 +571,9 @@ roborev_code_census_lines() {
             /^diff --git / { inh = 0; next }
             /^@@/ { inh = 1; next }
             inh && /^[-+]/ { n += length($0) }
+            # `\ No newline at end of file` follows the line it describes: that line has no newline
+            # byte, so take back the one length($0) (marker byte standing in for the newline) added.
+            inh && /^\\ No newline at end of file/ { n -= 1 }
             END { print n }'; [ "${PIPESTATUS[0]}" -eq 0 ]) || { _rcl_bytes=""; break; }
       _rcl_bytes=$((_rcl_bytes + _rcl_b))
     done
