@@ -192,7 +192,6 @@ async fn run_diff(
     };
     let report = outcome.map_err(|error| match error {
         DiffError::SideRead { .. } => Failure::read(error.to_string()),
-        DiffError::SameTimestampConflict { .. } => Failure::read(error.to_string()),
         DiffError::Core(inner) => match inner {
             cqlite_core::Error::ResultTooLarge { .. }
             | cqlite_core::Error::Cancelled

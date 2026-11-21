@@ -219,3 +219,39 @@ pub fn shadowed(tombstone: &serde_json::Value) -> Vec<(String, String)> {
         })
         .unwrap_or_default()
 }
+
+/// `(clustering, column, cell_path)` of every shadowed cell, for element-level assertions.
+pub fn shadowed_paths(tombstone: &serde_json::Value) -> Vec<(String, String, Option<String>)> {
+    tombstone["resurrection_risk"]["shadowed_cells"]
+        .as_array()
+        .map(|cells| {
+            cells
+                .iter()
+                .map(|c| {
+                    (
+                        c["clustering"].as_str().unwrap_or("<static>").to_string(),
+                        c["column"].as_str().unwrap_or_default().to_string(),
+                        c["cell_path"].as_str().map(str::to_string),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The cell entry at `(clustering, column, cell_path)`.
+pub fn element<'a>(
+    partition: &'a serde_json::Value,
+    clustering: &str,
+    column: &str,
+    path_hex: &str,
+) -> &'a serde_json::Value {
+    partition["cells"]
+        .as_array()
+        .expect("cells array")
+        .iter()
+        .find(|c| {
+            c["clustering"] == clustering && c["column"] == column && c["cell_path"] == path_hex
+        })
+        .unwrap_or_else(|| panic!("element ({clustering}, {column}, {path_hex}) not in partition"))
+}

@@ -405,13 +405,13 @@ fn risk_cases_text_report_names_the_resurrection_verdicts() {
     let src = risk_src();
     let a = stage(root.path(), "a", &src, "test_diff", &["nb-2-big-"]);
     let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
-    // risk_cases boundary = 1795281617 + 864000 = 1796145617.
+    // risk_cases boundary = 1795303684 + 864000 = 1796167684.
     let output = diff(
         "issue-4201-diff-risk.cql",
         &a,
         &b,
         "test_diff.risk_cases",
-        &["--now", "1796145618"],
+        &["--now", "1796167685"],
     );
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
@@ -420,7 +420,7 @@ fn risk_cases_text_report_names_the_resurrection_verdicts() {
         .lines()
         .filter(|l| l.starts_with("tombstone"))
         .collect();
-    assert_eq!(lines.len(), 4, "{text}");
+    assert_eq!(lines.len(), 7, "{text}");
     assert_eq!(
         lines
             .iter()
@@ -495,6 +495,17 @@ fn r11_2_the_byte_budget_is_exit_two_with_no_partial_stdout() {
         "[performance]\nquery_timeout_ms = 30000\ncache_size_mb = 64\nmax_result_bytes = 64\n",
     )
     .unwrap();
+    // The sides really diverge (so the budget bites on a real report, not an empty one).
+    let unbounded = diff(
+        "issue-4201-diff-risk.cql",
+        &a,
+        &b,
+        "test_diff.risk_cases",
+        &["--now", "1796167685", "--out", "json"],
+    );
+    let (_, full) = json_report(&unbounded);
+    assert!(full["summary"]["only_b"].as_u64().unwrap() > 0);
+    assert!(full["summary"]["tombstones_only_a"].as_u64().unwrap() > 0);
     let output = Command::cargo_bin("cqlite")
         .expect("cqlite binary is built")
         .args([
@@ -510,7 +521,7 @@ fn r11_2_the_byte_budget_is_exit_two_with_no_partial_stdout() {
             "--table",
             "test_diff.risk_cases",
             "--now",
-            "1796145618",
+            "1796167685",
             "--out",
             "json",
         ])
@@ -793,7 +804,7 @@ fn relabel(value: &Value) -> Value {
                     other => other,
                 };
                 let new_value = match (key.as_str(), inner) {
-                    ("status" | "side", Value::String(text)) => Value::String(
+                    ("status" | "side" | "resolves_to", Value::String(text)) => Value::String(
                         match text.as_str() {
                             "a" => "b",
                             "b" => "a",
@@ -912,4 +923,67 @@ fn each_sides_winners_equal_what_explain_reports_for_that_side() {
     // (partition 1: 5 rows x 2 columns, partition 2: 3 x 2): 7 + 16 = 23. Never a vacuous
     // comparison of two empty sets.
     assert_eq!(compared, 7 + 16);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Conflicts (owner Q21=b): named from the binary, JSON and text.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn conflicts_are_reported_with_both_values_and_resolves_to() {
+    let root = tempfile::tempdir().unwrap();
+    let src = risk_src();
+    let a = stage(root.path(), "a", &src, "test_diff", &["nb-2-big-"]);
+    let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
+    let args = [
+        "--now",
+        "1796167685",
+        "--out",
+        "json",
+        "--partition",
+        "9",
+        "--partition",
+        "11",
+    ];
+    let (_, report) = json_report(&diff(
+        "issue-4201-diff-risk.cql",
+        &a,
+        &b,
+        "test_diff.risk_cases",
+        &args,
+    ));
+    let by_key = |key: &str| {
+        report["partitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["partition_key"] == key)
+            .unwrap()["cells"][0]
+            .clone()
+    };
+    // README: id 9 zebra@5000 (A) vs apple@5000 (B): conflict, A keeps (larger bytes). id 11: A cell
+    // tombstone @5000 vs B live @5000: conflict, the tombstone side keeps.
+    let nine = by_key("9");
+    assert_eq!(
+        (nine["status"].as_str(), nine["resolves_to"].as_str()),
+        (Some("conflict"), Some("a"))
+    );
+    assert_eq!(
+        (nine["a"]["value"].as_str(), nine["b"]["value"].as_str()),
+        (Some("zebra"), Some("apple"))
+    );
+    let eleven = by_key("11");
+    assert_eq!(eleven["status"], "conflict");
+    assert_eq!(eleven["resolves_to"], "a");
+    assert_eq!(eleven["a"]["value"], "<tombstone>");
+    assert_eq!(report["summary"]["conflicts"], 2);
+    // Swapping the directories flips resolves_to (and only the labels).
+    let (_, swapped) = json_report(&diff(
+        "issue-4201-diff-risk.cql",
+        &b,
+        &a,
+        "test_diff.risk_cases",
+        &args,
+    ));
+    assert_eq!(swapped["partitions"][0]["cells"][0]["resolves_to"], "b");
 }

@@ -68,7 +68,14 @@ pub(super) fn shadows(
     Ok(match tombstone.kind {
         TombstoneKind::Partition => true,
         TombstoneKind::Row => cell.clustering == tombstone.clustering,
-        TombstoneKind::Cell | TombstoneKind::Collection => {
+        // A cell tombstone on a collection element covers ONLY that element's path.
+        TombstoneKind::Cell => {
+            cell.clustering == tombstone.clustering
+                && tombstone.column.as_deref() == Some(cell.column.as_str())
+                && cell.cell_path == tombstone.cell_path
+        }
+        // A complex deletion covers every element of its column.
+        TombstoneKind::Collection => {
             cell.clustering == tombstone.clustering
                 && tombstone.column.as_deref() == Some(cell.column.as_str())
         }

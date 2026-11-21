@@ -32,13 +32,11 @@
 //!
 //! # Declared gaps
 //!
-//! * The trail does not expose a collection element's path, so the elements of one non-frozen
-//!   collection column are compared as a multiset of `(value, writetime)` under one
-//!   `(clustering, column)` key.
 //! * A row's liveness marker is not a cell in the trail (see [`resurrection`]).
-//! * Two sides holding different values at one identical write timestamp cannot be expressed in the
-//!   five cell statuses; it is [`DiffError::SameTimestampConflict`], never `equal`.
+//! * Two sides holding different content at one identical write timestamp are a `conflict` cell
+//!   (owner Q21=b), resolved by `Cells.resolveRegular`; see `cells.rs`.
 
+mod cells;
 mod fold;
 mod metadata_check;
 pub mod resurrection;
@@ -102,7 +100,7 @@ fn check_sides(side_a: &DiffSide, side_b: &DiffSide) -> crate::Result<()> {
 /// # Errors
 ///
 /// [`DiffError::SideRead`] when a generation of either side cannot be read (no report is produced
-/// from a shorter trail), [`DiffError::SameTimestampConflict`], or [`DiffError::Core`] for a schema
+/// from a shorter trail), or [`DiffError::Core`] for a schema
 /// problem or when the report would exceed `options.max_result_bytes`.
 pub async fn diff_table(
     side_a: &DiffSide,
@@ -191,6 +189,12 @@ pub async fn diff_partition(
         .ok_or_else(|| DiffError::Core(Error::Internal("diff produced no partition entry".into())))
 }
 
+fn encoded_len_of(partition: &PartitionDiff) -> u64 {
+    serde_json::to_vec(partition)
+        .map(|encoded| encoded.len() as u64)
+        .unwrap_or(u64::MAX)
+}
+
 async fn run(
     side_a: &DiffSide,
     side_b: &DiffSide,
@@ -220,7 +224,22 @@ async fn run(
         partitions: Vec::new(),
         summary: DiffSummary::default(),
     };
-    let mut estimated: u64 = 0;
+    // The budget covers the WHOLE serialized report (metadata, generation lists, summary, JSON
+    // punctuation), so the API never returns more than `max_result_bytes`. Start from the empty
+    // report's size; each partition adds its own size plus one separator.
+    let encoded_len = |report: &DiffReport| -> u64 {
+        serde_json::to_vec(report)
+            .map(|encoded| encoded.len() as u64)
+            .unwrap_or(u64::MAX)
+    };
+    let too_large = |estimated: u64, rows: usize| {
+        DiffError::Core(Error::ResultTooLarge {
+            budget_bytes: usize::try_from(options.max_result_bytes).unwrap_or(usize::MAX),
+            estimated_bytes: usize::try_from(estimated).unwrap_or(usize::MAX),
+            rows,
+        })
+    };
+    let mut estimated: u64 = encoded_len(&report);
     for key in keys {
         let trail_a = side::trace_partition(side_a, key, &schema_a, udt_registry, options);
         let trail_a = match trail_a {
@@ -240,20 +259,17 @@ async fn run(
             schema,
         )?;
         // Both trails are dropped here, before the next partition (R8).
-        estimated = estimated.saturating_add(
-            serde_json::to_vec(&partition)
-                .map(|encoded| encoded.len() as u64)
-                .unwrap_or(u64::MAX),
-        );
+        estimated = estimated.saturating_add(encoded_len_of(&partition).saturating_add(1));
         if estimated > options.max_result_bytes {
-            return Err(DiffError::Core(Error::ResultTooLarge {
-                budget_bytes: usize::try_from(options.max_result_bytes).unwrap_or(usize::MAX),
-                estimated_bytes: usize::try_from(estimated).unwrap_or(usize::MAX),
-                rows: report.partitions.len() + 1,
-            }));
+            return Err(too_large(estimated, report.partitions.len() + 1));
         }
         report.summary.add(&partition);
         report.partitions.push(partition);
+    }
+    // The exact serialized size (the summary's digits grew while folding).
+    let exact = encoded_len(&report);
+    if exact > options.max_result_bytes {
+        return Err(too_large(exact, report.partitions.len()));
     }
     Ok(report)
 }

@@ -211,6 +211,7 @@ impl<S: TraceSink> ReconcileState<S> {
             run_index,
             clustering: self.clustering_key.clone(),
             column: cell.column.clone(),
+            cell_path: cell.cell_path.clone(),
             value: (!KWayMerger::<NoTrace>::is_cell_tombstone(cell) && !cell.is_deleted)
                 .then(|| cell.value.clone()),
             writetime: cell.timestamp,

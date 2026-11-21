@@ -96,7 +96,7 @@ fn risk_schema() -> cqlite_core::schema::TableSchema {
 
 /// Tombstones' local deletion time, from `nb-2-big-Statistics.db.txt` ("SSTable min local
 /// deletion time", written by Cassandra's own `sstablemetadata`).
-const RISK_LDT: i64 = 1_795_281_617;
+const RISK_LDT: i64 = 1_795_303_684;
 const RISK_BOUNDARY: i64 = RISK_LDT + 864_000;
 
 async fn risk_report(sides: &(DiffSide, DiffSide), now: i64) -> Json {
@@ -479,7 +479,7 @@ async fn r2_newer_in_a_newer_in_b_only_a_only_b() {
     );
     assert_eq!(report["summary"]["newer_in_a"], 1);
     assert_eq!(report["summary"]["newer_in_b"], 1);
-    assert_eq!(report["summary"]["partitions_compared"], 8);
+    assert_eq!(report["summary"]["partitions_compared"], 17);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -649,8 +649,9 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         shadowed(tombstones_of(partition(&report, "3"), "row")[0]),
         vec![("1".to_string(), "v".to_string())]
     );
-    assert_eq!(report["summary"]["resurrection_risk_past_gc_grace"], 1);
-    assert_eq!(report["summary"]["tombstones_only_a"], 4);
+    // ids 3 (tie), 11 (tie) and 16 (element tombstone over k1) are the three `yes` risks.
+    assert_eq!(report["summary"]["resurrection_risk_past_gc_grace"], 3);
+    assert_eq!(report["summary"]["tombstones_only_a"], 7);
     // The tie's phase flips exactly at ldt + gc_grace too (PurgeFunction.java:41-42).
     let at = risk_report(&sides, RISK_BOUNDARY).await;
     assert_eq!(
@@ -658,7 +659,7 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         "before-gc-grace"
     );
     // A `no` risk is never counted into a phase.
-    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 1);
+    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 3);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -835,4 +836,180 @@ async fn r7_1_truncated_statistics_on_side_b_names_side_and_path() {
         matches!(&point, Err(DiffError::SideRead { side: Side::B, .. })),
         "point path: {point:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// R2A / R2B / R4B / R14 — conflicts, per-element cells, the declared liveness limit, the budget
+// (owner Q21=b 2026-11-21). Fixture: test_diff.risk_cases ids 9-17 (README case table).
+// ---------------------------------------------------------------------------------------------
+
+/// "k1" / "k2" / "k3" / "x" / "y" as the hex of the element path bytes.
+const K1: &str = "6b31";
+const K2: &str = "6b32";
+const K3: &str = "6b33";
+const X: &str = "78";
+const Y: &str = "79";
+
+#[tokio::test]
+async fn r2_3_scalar_conflict_resolves_to_the_larger_bytes_and_mirrors() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
+    // Same `USING TIMESTAMP 5000`. Cells.resolveRegular (Cells.java:79-128) at equal timestamps with
+    // two live cells: the larger serialized value wins (`compareValues`, :128) — 'zebra' > 'apple'.
+    let nine = cell(partition(&report, "9"), "1", "v");
+    assert_eq!(nine["status"], "conflict");
+    assert_eq!(nine["resolves_to"], "a");
+    assert_eq!(nine["a"]["value"], "zebra");
+    assert_eq!(nine["b"]["value"], "apple");
+    assert_eq!(nine["a"]["writetime"], "1970-01-01T00:00:00.005Z");
+    let ten = cell(partition(&report, "10"), "1", "v");
+    assert_eq!(ten["status"], "conflict");
+    assert_eq!(ten["resolves_to"], "b");
+    assert_eq!(
+        (ten["a"]["value"].as_str(), ten["b"]["value"].as_str()),
+        (Some("apple"), Some("zebra"))
+    );
+    // The report is complete: the conflict did not abort the run, and is counted.
+    assert_eq!(report["summary"]["partitions_compared"], 17);
+    assert_eq!(report["summary"]["conflicts"], 5, "ids 9, 10, 11, 12, 15");
+    // A non-conflict cell carries no `resolves_to`.
+    assert!(cell(partition(&report, "4"), "1", "v")
+        .get("resolves_to")
+        .is_none());
+}
+
+#[tokio::test]
+async fn r2_4_tombstone_and_expiring_beat_live_at_an_equal_timestamp() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
+    // id 11: A cell tombstone @5000 vs B live @5000: a tombstone beats a live cell (Cells.java:93-98).
+    let tie = cell(partition(&report, "11"), "1", "v");
+    assert_eq!(tie["status"], "conflict");
+    assert_eq!(tie["resolves_to"], "a");
+    assert_eq!(tie["a"]["value"], "<tombstone>");
+    assert_eq!(tie["b"]["value"], "live-tie");
+    // ...and the tombstone is still reported, with the tie's resurrection risk.
+    let tombstones = tombstones_of(partition(&report, "11"), "cell");
+    assert_eq!(tombstones.len(), 1);
+    assert_eq!(tombstones[0]["resurrection_risk"]["status"], "yes");
+    // id 12: A expiring (TTL) @5000 vs B live @5000: an expiring cell beats a live one (:93-98).
+    let expiring = cell(partition(&report, "12"), "1", "v");
+    assert_eq!(expiring["status"], "conflict");
+    assert_eq!(expiring["resolves_to"], "a");
+    assert_eq!(expiring["a"]["value"], "expiring-wins");
+    assert_eq!(expiring["b"]["value"], "live-loses");
+    // The mirror flips resolves_to (symmetry holds for conflicts).
+    let swapped = diff_table(
+        &sides.1,
+        &sides.0,
+        "test_diff.risk_cases",
+        &risk_schema(),
+        None,
+        &options(RISK_BOUNDARY + 1),
+    )
+    .await
+    .unwrap();
+    let swapped = serde_json::to_value(swapped).unwrap();
+    assert_eq!(
+        cell(partition(&swapped, "11"), "1", "v")["resolves_to"],
+        "b"
+    );
+    assert_eq!(cell(partition(&swapped, "9"), "1", "v")["resolves_to"], "b");
+}
+
+#[tokio::test]
+async fn r2_5_collections_are_compared_per_element_on_typed_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
+    // id 13: A m['k2']=7, B m['k1']=7, same value and timestamp: DIFFERENT elements.
+    let p13 = partition(&report, "13");
+    assert_eq!(element(p13, "1", "m", K2)["status"], "only-a");
+    assert_eq!(element(p13, "1", "m", K1)["status"], "only-b");
+    assert_eq!(p13["cells"].as_array().unwrap().len(), 2);
+    // id 14: set {y} vs {x} at one timestamp: per-element only-a / only-b, never a conflict.
+    let p14 = partition(&report, "14");
+    assert_eq!(element(p14, "1", "s", Y)["status"], "only-a");
+    assert_eq!(element(p14, "1", "s", X)["status"], "only-b");
+    // id 15: frozen ['a, b'] vs ['a','b']: NOT equal. Serialized collections lead with the element
+    // count (2 > 1), so A's bytes are the larger and Cassandra keeps A.
+    let frozen = cell(partition(&report, "15"), "1", "fl");
+    assert_ne!(frozen["status"], "equal");
+    assert_eq!(frozen["status"], "conflict");
+    assert_eq!(frozen["resolves_to"], "a");
+    assert!(
+        frozen.get("cell_path").is_none(),
+        "a frozen value has no element path"
+    );
+    // id 16: an element tombstone m['k1'] @6000 shadows ONLY k1 (5000 <= 6000), never k3.
+    let p16 = partition(&report, "16");
+    let tombstone = tombstones_of(p16, "cell");
+    assert_eq!(tombstone.len(), 1);
+    assert_eq!(tombstone[0]["cell_path"], K1);
+    assert_eq!(
+        shadowed_paths(tombstone[0]),
+        vec![("1".to_string(), "m".to_string(), Some(K1.to_string()))],
+        "only the deleted element is shadowed"
+    );
+    assert_eq!(tombstone[0]["resurrection_risk"]["status"], "yes");
+    assert_eq!(element(p16, "1", "m", K1)["status"], "only-b");
+    assert_eq!(element(p16, "1", "m", K3)["status"], "equal");
+}
+
+#[tokio::test]
+async fn r4_4_liveness_only_row_reports_no_risk_a_declared_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
+    // id 17 (#4601): B holds only a row liveness marker @5000, A a row tombstone @6000. The marker
+    // is not a cell in the trail, so the tombstone is `no` — documented in --help, never an error.
+    let p17 = partition(&report, "17");
+    assert!(p17["cells"].as_array().unwrap().is_empty());
+    let rows = tombstones_of(p17, "row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["resurrection_risk"]["status"], "no");
+}
+
+#[tokio::test]
+async fn r14_1_the_report_never_exceeds_the_budget_metadata_included() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let schema = risk_schema();
+    let run = |budget: u64| {
+        let (a, b, schema) = (&sides.0, &sides.1, &schema);
+        async move {
+            diff_table(
+                a,
+                b,
+                "test_diff.risk_cases",
+                schema,
+                None,
+                &DiffOptions {
+                    now_secs: RISK_BOUNDARY + 1,
+                    max_result_bytes: budget,
+                },
+            )
+            .await
+        }
+    };
+    let full = run(BUDGET).await.expect("fits");
+    let exact = serde_json::to_vec(&full).unwrap().len() as u64;
+    // The partitions alone are smaller than the whole report: the header, generation lists and
+    // summary count against the budget too.
+    let partitions_only = serde_json::to_vec(&full.partitions).unwrap().len() as u64;
+    assert!(partitions_only < exact);
+    assert!(
+        run(exact).await.is_ok(),
+        "a report of exactly the budget is returned"
+    );
+    for budget in [exact - 1, partitions_only + 1] {
+        match run(budget).await {
+            Err(DiffError::Core(cqlite_core::Error::ResultTooLarge { .. })) => {}
+            other => {
+                panic!("budget {budget} < report {exact} must be ResultTooLarge, got {other:?}")
+            }
+        }
+    }
 }

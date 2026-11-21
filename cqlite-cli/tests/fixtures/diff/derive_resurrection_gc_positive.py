@@ -91,7 +91,7 @@ def main():
     a = {key: value for key, value in b.items() if not any(covers(t, key) for t in tombs)}
 
     partitions = []
-    summary = dict(partitions_compared=0, equal=0, only_a=0, only_b=0, newer_in_a=0, newer_in_b=0,
+    summary = dict(partitions_compared=0, equal=0, conflicts=0, only_a=0, only_b=0, newer_in_a=0, newer_in_b=0,
                    tombstones_only_a=0, tombstones_only_b=0,
                    resurrection_risk_before_gc_grace=0, resurrection_risk_past_gc_grace=0)
     kind_rank = {"partition": 0, "range": 1, "row": 2, "collection": 3, "cell": 4}

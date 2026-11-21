@@ -52,7 +52,9 @@ fn relabel(value: &Json) -> Json {
                     other => other,
                 };
                 let new_value = match (key.as_str(), inner) {
-                    ("status" | "side", Json::String(text)) => Json::String(swap_label(text)),
+                    ("status" | "side" | "resolves_to", Json::String(text)) => {
+                        Json::String(swap_label(text))
+                    }
                     _ => relabel(inner),
                 };
                 out.insert(new_key.to_string(), new_value);
@@ -132,12 +134,17 @@ async fn mirror_holds_for_risk_cases_including_newer_in_either_side() {
     let a = side_of(&stage(root.path(), "a", &src, &["nb-2-big-"]));
     let b = side_of(&stage(root.path(), "b", &src, &["nb-1-big-"]));
     let schema = load_schema("issue-4201-diff-risk.cql", "test_diff", "risk_cases");
-    let forward = assert_mirror(&a, &b, "test_diff.risk_cases", &schema, 1_796_145_618).await;
+    let forward = assert_mirror(&a, &b, "test_diff.risk_cases", &schema, 1_796_167_685).await;
     assert_eq!(forward["summary"]["newer_in_a"], 1);
     assert_eq!(forward["summary"]["newer_in_b"], 1);
     // In the mirror the tombstones belong to side b.
-    let backward = report(&b, &a, "test_diff.risk_cases", &schema, 1_796_145_618).await;
-    assert_eq!(backward["summary"]["tombstones_only_b"], 4);
+    let backward = report(&b, &a, "test_diff.risk_cases", &schema, 1_796_167_685).await;
+    assert_eq!(backward["summary"]["tombstones_only_b"], 7);
+    assert_eq!(
+        forward["summary"]["conflicts"], 5,
+        "non-vacuous: conflicts mirror with resolves_to flipped"
+    );
+    assert_eq!(backward["summary"]["conflicts"], 5);
     assert_eq!(backward["summary"]["tombstones_only_a"], 0);
 }
 
@@ -185,7 +192,7 @@ async fn mirror_holds_for_identical_snapshots_and_the_report_is_unchanged() {
 fn relabel_is_an_involution_and_swaps_every_label_family() {
     let sample = serde_json::json!({
         "side_a": {"dir": "x"}, "side_b": {"dir": "y"},
-        "partitions": [{"cells": [{"status": "newer-in-a", "a": {"value": "1"}, "b": null}],
+        "partitions": [{"cells": [{"status": "conflict", "resolves_to": "a", "a": {"value": "1"}, "b": null}],
                         "tombstones": [{"side": "a", "resurrection_risk":
                             {"shadowed_cells": [{"side": "b"}]}}]}],
         "summary": {"only_a": 1, "only_b": 2, "newer_in_a": 3, "newer_in_b": 4,
@@ -193,7 +200,7 @@ fn relabel_is_an_involution_and_swaps_every_label_family() {
     });
     let swapped = relabel(&sample);
     assert_eq!(swapped["side_a"]["dir"], "y");
-    assert_eq!(swapped["partitions"][0]["cells"][0]["status"], "newer-in-b");
+    assert_eq!(swapped["partitions"][0]["cells"][0]["resolves_to"], "b");
     assert_eq!(swapped["partitions"][0]["cells"][0]["b"]["value"], "1");
     assert_eq!(swapped["partitions"][0]["tombstones"][0]["side"], "b");
     assert_eq!(

@@ -1,0 +1,15 @@
+INSERT INTO risk_cases (id,ck,v) VALUES (1,1,'newer-than-row-tombstone') USING TIMESTAMP 3000;
+INSERT INTO risk_cases (id,ck,v) VALUES (3,1,'tie-with-row-tombstone') USING TIMESTAMP 2000;
+INSERT INTO risk_cases (id,ck,v) VALUES (4,1,'b-newer') USING TIMESTAMP 3000;
+INSERT INTO risk_cases (id,ck,v) VALUES (5,1,'newer-than-cell-tombstone') USING TIMESTAMP 3000;
+INSERT INTO risk_cases (id,ck,v) VALUES (6,1,'b-older') USING TIMESTAMP 3000;
+INSERT INTO risk_cases (id,ck,v) VALUES (7,1,'only-in-b') USING TIMESTAMP 3000;
+INSERT INTO risk_cases (id,ck,v) VALUES (9,1,'apple') USING TIMESTAMP 5000;
+INSERT INTO risk_cases (id,ck,v) VALUES (10,1,'zebra') USING TIMESTAMP 5000;
+INSERT INTO risk_cases (id,ck,v) VALUES (11,1,'live-tie') USING TIMESTAMP 5000;
+INSERT INTO risk_cases (id,ck,v) VALUES (12,1,'live-loses') USING TIMESTAMP 5000;
+UPDATE risk_cases USING TIMESTAMP 5000 SET m['k1']=7 WHERE id=13 AND ck=1;
+UPDATE risk_cases USING TIMESTAMP 5000 SET s = s + {'x'} WHERE id=14 AND ck=1;
+UPDATE risk_cases USING TIMESTAMP 5000 SET fl = ['a, b'] WHERE id=15 AND ck=1;
+UPDATE risk_cases USING TIMESTAMP 5000 SET m['k1']=1, m['k3']=3 WHERE id=16 AND ck=1;
+INSERT INTO risk_cases (id,ck) VALUES (17,1) USING TIMESTAMP 5000;

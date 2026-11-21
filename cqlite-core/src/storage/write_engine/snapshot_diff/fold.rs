@@ -3,13 +3,13 @@
 //! produced by the traced merger; this file only compares them (spec R2, R3, R4).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use super::resurrection::{gc_phase, shadows};
 use super::side::SideTrail;
 use super::types::{
-    CellDiffEntry, CellSide, CellStatus, DiffError, DiffSummary, PartitionDiff, ResurrectionRisk,
-    ShadowedCell, Side, TombstoneDiffEntry,
+    CellStatus, DiffError, DiffSummary, PartitionDiff, ResurrectionRisk, ShadowedCell, Side,
+    TombstoneDiffEntry,
 };
 use crate::schema::TableSchema;
 use crate::storage::write_engine::merge::trace::{
@@ -17,7 +17,6 @@ use crate::storage::write_engine::merge::trace::{
 };
 use crate::storage::write_engine::mutation::{ClusteringBound, ClusteringKey};
 use crate::util::value_fmt::ValueFormatter;
-use crate::Value;
 
 pub(super) fn fmt_micros(micros: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_micros(micros)
@@ -31,7 +30,7 @@ pub(super) fn fmt_secs(secs: i64) -> String {
         .unwrap_or_else(|| secs.to_string())
 }
 
-fn fmt_clustering(key: &ClusteringKey) -> String {
+pub(super) fn fmt_clustering(key: &ClusteringKey) -> String {
     key.columns
         .iter()
         .map(|(_, value)| ValueFormatter::format_value(value))
@@ -59,7 +58,7 @@ fn kind_name(kind: TombstoneKind) -> &'static str {
 }
 
 /// Total order on optional clustering keys: static (`None`) first, then schema order.
-fn cmp_clustering(
+pub(super) fn cmp_clustering(
     a: &Option<ClusteringKey>,
     b: &Option<ClusteringKey>,
     schema: &TableSchema,
@@ -70,141 +69,6 @@ fn cmp_clustering(
         (Some(_), None) => Ordering::Greater,
         (Some(a), Some(b)) => a.compare(b, schema).unwrap_or(Ordering::Equal),
     }
-}
-
-/// Identity of a cell for comparison: exact (`Debug`) clustering plus column. The trail does not
-/// expose a collection element's path, so the elements of one non-frozen collection column share
-/// one key and are compared as a multiset of `(value, writetime)`.
-type CellKey = (String, String);
-
-/// One cell's reconciled winners on one side: the clustering and the sorted `(value, writetime)`
-/// versions (one for a simple cell, several for the elements of a non-frozen collection).
-type CellVersions = (Option<ClusteringKey>, Vec<(String, i64)>);
-
-#[derive(Default)]
-struct SideCells {
-    cells: BTreeMap<CellKey, CellVersions>,
-}
-
-impl SideCells {
-    fn from_trail(trail: &SideTrail) -> Self {
-        let mut cells: BTreeMap<CellKey, CellVersions> = BTreeMap::new();
-        for cell in trail
-            .cells
-            .iter()
-            .filter(|cell| cell.verdict == Verdict::Winner)
-        {
-            let key = (format!("{:?}", cell.clustering), cell.column.clone());
-            let rendered =
-                ValueFormatter::format_value(cell.value.as_ref().unwrap_or(&Value::Null));
-            cells
-                .entry(key)
-                .or_insert_with(|| (cell.clustering.clone(), Vec::new()))
-                .1
-                .push((rendered, cell.writetime));
-        }
-        for (_, versions) in cells.values_mut() {
-            versions.sort();
-        }
-        Self { cells }
-    }
-}
-
-fn side_view(versions: &[(String, i64)]) -> CellSide {
-    let value = match versions {
-        [(value, _)] => value.clone(),
-        many => format!(
-            "{{{}}}",
-            many.iter()
-                .map(|(value, _)| value.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    };
-    let writetime = versions.iter().map(|(_, ts)| *ts).max().unwrap_or(0);
-    CellSide {
-        value,
-        writetime: fmt_micros(writetime),
-    }
-}
-
-fn multiset_minus(left: &[(String, i64)], right: &[(String, i64)]) -> Vec<(String, i64)> {
-    let mut remaining: Vec<&(String, i64)> = right.iter().collect();
-    let mut out = Vec::new();
-    for item in left {
-        if let Some(position) = remaining.iter().position(|candidate| *candidate == item) {
-            remaining.swap_remove(position);
-        } else {
-            out.push(item.clone());
-        }
-    }
-    out
-}
-
-/// Compare the two sides' winner sets (spec R2): one status per `(clustering, column)`.
-fn fold_cells(
-    partition: &str,
-    a: &SideCells,
-    b: &SideCells,
-    schema: &TableSchema,
-) -> std::result::Result<Vec<CellDiffEntry>, DiffError> {
-    let keys: BTreeSet<&CellKey> = a.cells.keys().chain(b.cells.keys()).collect();
-    let mut out: Vec<(Option<ClusteringKey>, CellKey, CellDiffEntry)> = Vec::new();
-    for key in keys {
-        let left = a.cells.get(key);
-        let right = b.cells.get(key);
-        let clustering = left
-            .map(|(ck, _)| ck.clone())
-            .or_else(|| right.map(|(ck, _)| ck.clone()))
-            .unwrap_or(None);
-        let (status, a_side, b_side) = match (left, right) {
-            (Some((_, lv)), None) => (CellStatus::OnlyA, Some(side_view(lv)), None),
-            (None, Some((_, rv))) => (CellStatus::OnlyB, None, Some(side_view(rv))),
-            (Some((_, lv)), Some((_, rv))) => {
-                let a_only = multiset_minus(lv, rv);
-                let b_only = multiset_minus(rv, lv);
-                let status = match (a_only.is_empty(), b_only.is_empty()) {
-                    (true, true) => CellStatus::Equal,
-                    (false, true) => CellStatus::OnlyA,
-                    (true, false) => CellStatus::OnlyB,
-                    (false, false) => {
-                        let a_ts = a_only.iter().map(|(_, ts)| *ts).max().unwrap_or(0);
-                        let b_ts = b_only.iter().map(|(_, ts)| *ts).max().unwrap_or(0);
-                        match a_ts.cmp(&b_ts) {
-                            Ordering::Greater => CellStatus::NewerInA,
-                            Ordering::Less => CellStatus::NewerInB,
-                            Ordering::Equal => {
-                                return Err(DiffError::SameTimestampConflict {
-                                    partition: partition.to_string(),
-                                    clustering: clustering
-                                        .as_ref()
-                                        .map(fmt_clustering)
-                                        .unwrap_or_else(|| "<static>".to_string()),
-                                    column: key.1.clone(),
-                                    writetime: fmt_micros(a_ts),
-                                })
-                            }
-                        }
-                    }
-                };
-                (status, Some(side_view(lv)), Some(side_view(rv)))
-            }
-            (None, None) => continue,
-        };
-        out.push((
-            clustering.clone(),
-            key.clone(),
-            CellDiffEntry {
-                clustering: clustering.as_ref().map(fmt_clustering),
-                column: key.1.clone(),
-                status,
-                a: a_side,
-                b: b_side,
-            },
-        ));
-    }
-    out.sort_by(|x, y| cmp_clustering(&x.0, &y.0, schema).then_with(|| x.1.cmp(&y.1)));
-    Ok(out.into_iter().map(|(_, _, entry)| entry).collect())
 }
 
 /// Identity of a tombstone for the both-sides test (spec R3): kind, scope, deletion time and local
@@ -265,13 +129,18 @@ fn tombstone_entry(
                 ShadowedCell {
                     clustering: cell.clustering.as_ref().map(fmt_clustering),
                     column: cell.column.clone(),
+                    cell_path: cell.cell_path.as_ref().map(hex::encode),
                     side: holder.other(),
                 },
             ));
         }
     }
     shadowed.sort_by(|x, y| {
-        cmp_clustering(&x.0, &y.0, schema).then_with(|| x.1.column.cmp(&y.1.column))
+        cmp_clustering(&x.0, &y.0, schema).then_with(|| {
+            x.1.column
+                .cmp(&y.1.column)
+                .then_with(|| x.1.cell_path.cmp(&y.1.cell_path))
+        })
     });
     let mut shadowed_cells: Vec<ShadowedCell> =
         shadowed.into_iter().map(|(_, cell)| cell).collect();
@@ -298,6 +167,7 @@ fn tombstone_entry(
             tombstone.clustering.as_ref().map(fmt_clustering)
         },
         column: tombstone.column.clone(),
+        cell_path: tombstone.cell_path.as_ref().map(hex::encode),
         range_start: tombstone.range_start.as_ref().map(fmt_bound),
         range_end: tombstone.range_end.as_ref().map(fmt_bound),
         side: holder,
@@ -366,12 +236,7 @@ pub(super) fn fold_partition(
     gc_before: i64,
     schema: &TableSchema,
 ) -> std::result::Result<PartitionDiff, DiffError> {
-    let cells = fold_cells(
-        &partition_key,
-        &SideCells::from_trail(a),
-        &SideCells::from_trail(b),
-        schema,
-    )?;
+    let cells = super::cells::fold_cells(&partition_key, a, b, schema)?;
     let tombstones = fold_tombstones(a, b, gc_before, schema)?;
     Ok(PartitionDiff {
         partition_key,
@@ -391,6 +256,7 @@ impl DiffSummary {
                 CellStatus::OnlyB => self.only_b += 1,
                 CellStatus::NewerInA => self.newer_in_a += 1,
                 CellStatus::NewerInB => self.newer_in_b += 1,
+                CellStatus::Conflict => self.conflicts += 1,
             }
         }
         for tombstone in &partition.tombstones {

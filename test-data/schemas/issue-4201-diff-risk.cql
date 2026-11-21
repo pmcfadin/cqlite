@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS test_diff.risk_cases (
     id int,
     ck int,
     v  text,
+    m  map<text, int>,
+    s  set<text>,
+    fl frozen<list<text>>,
     PRIMARY KEY (id, ck)
 ) WITH compression = {'enabled': false}
   AND gc_grace_seconds = 864000;

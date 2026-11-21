@@ -2365,10 +2365,8 @@ impl<S: TraceSink> KWayMerger<S> {
             partition_delete_run_index,
         } = carriers::scan_partition_carriers(&rows, S::ENABLED);
 
-        // Carrier rows are split out before cluster reconciliation, so emit
-        // their marker observations at the split boundary. Their source
-        // generation is otherwise lost when a retained marker is rebuilt
-        // with the synthetic output run index.
+        // Carrier rows are split out before cluster reconciliation: emit their marker
+        // observations here (their source generation is otherwise lost on rebuild).
         if S::ENABLED {
             if let Some(run_indices) = range_tombstone_run_indices.as_ref() {
                 for ((_, range), run_index) in range_tombstones.iter().zip(run_indices.iter()) {
@@ -2377,6 +2375,7 @@ impl<S: TraceSink> KWayMerger<S> {
                         run_index: *run_index,
                         clustering: None,
                         column: None,
+                        cell_path: None,
                         deletion_time: range.deletion_time,
                         local_deletion_time: range.local_deletion_time,
                         range_start: Some(range.start.clone()),
@@ -2394,6 +2393,7 @@ impl<S: TraceSink> KWayMerger<S> {
                     run_index,
                     clustering: None,
                     column: None,
+                    cell_path: None,
                     deletion_time,
                     local_deletion_time,
                     range_start: None,

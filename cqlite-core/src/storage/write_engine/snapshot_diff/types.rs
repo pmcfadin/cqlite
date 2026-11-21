@@ -77,6 +77,8 @@ pub enum CellStatus {
     OnlyB,
     NewerInA,
     NewerInB,
+    /// Same key, same write timestamp, differing content (owner Q21=b); see `resolves_to`.
+    Conflict,
 }
 
 /// One side's reconciled winner for a cell.
@@ -92,7 +94,14 @@ pub struct CellSide {
 pub struct CellDiffEntry {
     pub clustering: Option<String>,
     pub column: String,
+    /// Hex of a collection element's path bytes; absent for a simple cell or a frozen value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_path: Option<String>,
     pub status: CellStatus,
+    /// On `conflict` only: the side `Cells.resolveRegular` keeps (cassandra-5.0.8
+    /// `db/rows/Cells.java:79-128`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolves_to: Option<Side>,
     pub a: Option<CellSide>,
     pub b: Option<CellSide>,
 }
@@ -102,6 +111,8 @@ pub struct CellDiffEntry {
 pub struct ShadowedCell {
     pub clustering: Option<String>,
     pub column: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_path: Option<String>,
     pub side: Side,
 }
 
@@ -127,6 +138,9 @@ pub struct TombstoneDiffEntry {
     pub clustering: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
+    /// Hex of the element path of a cell tombstone on a collection element.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +165,7 @@ pub struct PartitionDiff {
 pub struct DiffSummary {
     pub partitions_compared: u64,
     pub equal: u64,
+    pub conflicts: u64,
     pub only_a: u64,
     pub only_b: u64,
     pub newer_in_a: u64,
@@ -187,20 +202,6 @@ pub enum DiffError {
         path: String,
         #[source]
         source: crate::Error,
-    },
-    /// The same `(clustering, column)` holds different values at one identical write timestamp on
-    /// the two sides. The five cell statuses cannot express that, so it is refused rather than
-    /// reported as `equal`.
-    #[error(
-        "partition {partition} clustering {clustering} column {column}: the two sides hold \
-         different values at the same write timestamp {writetime}; the report's cell statuses \
-         cannot express this, so the diff refuses instead of calling it equal"
-    )]
-    SameTimestampConflict {
-        partition: String,
-        clustering: String,
-        column: String,
-        writetime: String,
     },
     /// Any other failure (schema, budget, partition-key encoding).
     #[error(transparent)]

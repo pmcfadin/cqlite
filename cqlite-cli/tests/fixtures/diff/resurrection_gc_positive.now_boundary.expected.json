@@ -297,6 +297,7 @@
     ]
   },
   "summary": {
+    "conflicts": 0,
     "equal": 7,
     "newer_in_a": 0,
     "newer_in_b": 0,

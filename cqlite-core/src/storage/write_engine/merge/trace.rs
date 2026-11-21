@@ -99,6 +99,10 @@ pub struct CellDecision {
     pub run_index: usize,
     pub clustering: Option<ClusteringKey>,
     pub column: String,
+    /// The element path of a non-frozen collection cell (`CellData::cell_path`); `None` for a
+    /// simple cell or a frozen value. Carried for `cqlite diff` (#4201); `explain` does not render it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_path: Option<Vec<u8>>,
     pub value: Option<Value>,
     pub writetime: i64,
     /// The CQL TTL is rendered as a signed value in the public trace schema,
@@ -118,6 +122,9 @@ pub struct TombstoneRecord {
     pub run_index: usize,
     pub clustering: Option<ClusteringKey>,
     pub column: Option<String>,
+    /// The element path of a CELL tombstone on a collection element (`cell_path`), else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_path: Option<Vec<u8>>,
     pub deletion_time: i64,
     pub local_deletion_time: i32,
     pub range_start: Option<ClusteringBound>,
