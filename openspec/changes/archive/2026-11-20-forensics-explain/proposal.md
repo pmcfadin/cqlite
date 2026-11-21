@@ -76,6 +76,7 @@ no `unknown`.
 - Distinguishing `bloom-negative` from `index-miss` for a generation that does not hold the key
   (F4 `find`); F1 reports `hit | absent | scanned` per generation.
 - A `--as-of` writetime cutoff (F6). `--now` is the reconciliation clock (TTL + gc_grace), not time travel.
+- Row-level liveness decisions: marker-only rows, marker shadowing or purging, the equal-timestamp LivenessInfo tie-break, and key-cell shedding (#4581, #4545) are made without a trace event. Follow-up #4601: a `RowDecision` trace event and a `rows` array in the JSON output, with its own OpenSpec delta.
 
 ## Impact statements (openspec rules)
 
