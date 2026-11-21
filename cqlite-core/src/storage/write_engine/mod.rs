@@ -49,16 +49,15 @@ pub(crate) mod reconcile_rules;
 // one coherent module rather than splitting a type-only sibling.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod salvage;
-// `cqlite rebuild` (issue #4197, epic #4192): regenerates requested derived
-// SSTable components (Index.db, Summary.db, Filter.db, Digest.crc32,
-// TOC.txt, CRC.db, Statistics.db) from a healthy, UNCHANGED Data.db. Built
-// on the SAME decode primitives `salvage` uses
-// (`SSTableReader::decode_partition_at_offset_for_salvage`,
-// `write_engine::merge`'s `KWayMerger`/`SSTableRowIteratorAdapter`), so it
-// carries the identical `not(tombstones)` gate for the identical reason —
-// see `salvage`'s own gate comment above.
+// `cqlite rebuild` (issue #4197, epic #4192): regenerates derived SSTable components (Index.db,
+// Summary.db, Filter.db, Digest.crc32, TOC.txt, CRC.db, Statistics.db) from a healthy, UNCHANGED
+// Data.db, on the SAME decode primitives `salvage` uses, so it carries the identical
+// `not(tombstones)` gate for the identical reason (see `salvage`'s gate comment above).
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod rebuild;
+// `cqlite diff` (issue #4201): read-only two-snapshot comparison on the traced merger.
+#[cfg(feature = "write-support")]
+pub mod snapshot_diff;
 #[cfg(feature = "write-support")]
 pub mod wal;
 
