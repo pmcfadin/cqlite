@@ -386,6 +386,14 @@ async fn diagnose_generation(
     platform: Arc<Platform>,
 ) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
     let stats_path = stats_path_for(data_path);
+    // #1249 floor gate: derive from the filename BEFORE any parse, mirroring
+    // `StatisticsReader::open`.
+    let gates = match VersionGates::from_path(&stats_path) {
+        Ok(g) => Some(g),
+        Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
+        Err(_) => None,
+    };
+
     // #4612: read under the strict TOC/CRC check, so a truncated or corrupt Statistics.db makes
     // this generation an `unreadable_generations` entry (R6) naming the path, never a report
     // computed from a partial parse. Absence keeps its existing wording.
@@ -405,14 +413,6 @@ async fn diagnose_generation(
             }
             Err(e) => return Err(e),
         };
-
-    // #1249 floor gate: derive from the filename BEFORE any parse, mirroring
-    // `StatisticsReader::open`.
-    let gates = match VersionGates::from_path(&stats_path) {
-        Ok(g) => Some(g),
-        Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
-        Err(_) => None,
-    };
 
     let (_, stats): (&[u8], SSTableStatistics) =
         parse_statistics_with_fallback_detailed(&stats_bytes, gates.as_ref())?;

@@ -445,3 +445,9 @@ required-features = ["write-support"]
 name = "issue_4612_statistics_fail_closed"
 path = "tests/issue_4612_statistics_fail_closed.rs"
 required-features = ["write-support"]
+
+# Issue #4612 (roborev round 1): drives `handle_compact` over damaged inputs.
+[[test]]
+name = "issue_4612_compaction_inputs"
+path = "tests/issue_4612_compaction_inputs.rs"
+required-features = ["write-support"]

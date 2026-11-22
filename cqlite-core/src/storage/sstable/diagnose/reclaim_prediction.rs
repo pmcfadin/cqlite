@@ -71,6 +71,7 @@ pub(crate) fn predict_table_reclaim(
     now_secs: i64,
 ) -> Result<ReclaimPrediction> {
     let paths: Vec<PathBuf> = inputs.iter().map(|i| i.data_path.clone()).collect();
+    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(&paths)?;
     let drop_set = if gc_before_secs.is_some() {
         fully_expired_sstables(&paths, &[], gc_before_secs)
     } else {
@@ -78,9 +79,6 @@ pub(crate) fn predict_table_reclaim(
     };
     let (merge_inputs, dropped) = split_merge_and_dropped(&paths, drop_set);
 
-    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(
-        &merge_inputs,
-    )?;
     let mut effective = effective_compaction_schema(schema, &merge_inputs);
     apply_udt_marshals_from_inputs(&mut effective, &merge_inputs, None)?;
     let merger = KWayMerger::new_with_gc_and_registry(

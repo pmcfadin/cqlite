@@ -303,6 +303,19 @@ pub(super) fn write_statistics_component(
     Ok(())
 }
 
+/// A damaged sibling `Statistics.db` stops `rebuild`'s open (#4612). Name both remedies; the
+/// sibling behaviour itself is an open owner decision and is not changed here.
+pub(super) fn explain_damaged_sibling(e: crate::error::Error) -> crate::error::Error {
+    use crate::error::Error;
+    match e {
+        Error::Corruption(m) if m.contains("Statistics.db") => Error::Corruption(format!(
+            "{m} - remedy: rename the damaged Statistics.db aside, or pass \
+             statistics_recovery_source (the renamed-aside file) and re-run"
+        )),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

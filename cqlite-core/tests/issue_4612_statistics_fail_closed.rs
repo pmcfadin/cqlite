@@ -384,3 +384,72 @@ async fn rebuild_classifies_a_damaged_recovery_source_lost() {
         }
     }
 }
+
+/// `rebuild` with a damaged SIBLING Statistics.db stops at open (an owner decision on tolerating
+/// it is pending); the error must name both ways out.
+#[tokio::test]
+async fn rebuild_damaged_sibling_error_names_both_remedies() {
+    use cqlite_core::storage::write_engine::rebuild::{
+        rebuild_components, Component, RebuildOptions,
+    };
+    let Some(copy) = stage(BIG) else { return };
+    let schema = big_schema();
+    let (label, bytes) = damaged_variants(&copy.pristine).remove(8);
+    std::fs::write(&copy.stats, &bytes).expect("damage");
+    let options = RebuildOptions {
+        out_dir: copy.dir.join("out"),
+        statistics_recovery_source: None,
+    };
+    let err = rebuild_components(&copy.data, &schema, &[Component::Statistics], &options)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{label}: a damaged sibling must stop rebuild"))
+        .to_string();
+    assert_named(&err, &copy.stats, &label);
+    assert!(
+        err.contains("rename the damaged Statistics.db aside"),
+        "{err}"
+    );
+    assert!(err.contains("statistics_recovery_source"), "{err}");
+}
+
+/// The version-floor gate runs BEFORE the integrity check: a pre-`na` generation (no metadata
+/// checksums) is `UnsupportedVersion`, never reported as a corrupt Statistics.db.
+#[tokio::test]
+async fn diagnose_reports_unsupported_version_before_integrity_for_pre_na() {
+    use cqlite_core::storage::sstable::diagnose::{diagnose_table, DiagnoseOptions};
+    let Some(copy) = stage(BIG) else { return };
+    let ma = copy.dir.join("ma-1-big");
+    for e in std::fs::read_dir(&copy.dir).expect("dir").flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(rest) = name.strip_prefix("nb-1-big-") {
+            std::fs::rename(
+                e.path(),
+                copy.dir.join(format!(
+                    "{}-{rest}",
+                    ma.file_name().unwrap().to_string_lossy()
+                )),
+            )
+            .expect("rename");
+        }
+    }
+    std::fs::write(copy.dir.join("ma-1-big-Statistics.db"), b"\0\0\0\0").expect("stats");
+    let options = DiagnoseOptions {
+        now_secs: 1_700_000_000,
+        deep: false,
+        top_n: 5,
+        gc_grace_seconds: None,
+        schema: None,
+    };
+    let report = diagnose_table(&copy.dir, &options).await.expect("report");
+    let cause = &report
+        .unreadable_generations
+        .first()
+        .expect("unreadable")
+        .cause;
+    assert!(
+        cause.to_lowercase().contains("unsupported"),
+        "expected UnsupportedVersion, got: {cause}"
+    );
+    assert!(!cause.contains("integrity"), "{cause}");
+}

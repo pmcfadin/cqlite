@@ -909,7 +909,7 @@ pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64>
         if !stats_path.exists() {
             return None;
         }
-        let stats_bytes = match std::fs::read(&stats_path) {
+        let stats_bytes = match fully_expired::read_checked_stats(&stats_path) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
@@ -1382,6 +1382,7 @@ pub async fn compact_sstables_with_registry(
     // the merger's input list BEFORE building the merger, so dropped SSTables are
     // never read/decoded (the perf win); their components are deleted only after
     // the output publishes. `split_merge_and_dropped` handles the all-dropped guard.
+    fully_expired::require_checked_inputs(&input_paths)?; // #4612: damaged Statistics.db
     let drop_set: Vec<PathBuf> = if purge_safe {
         fully_expired_sstables(&input_paths, &[], gc_before_secs)
     } else {
@@ -1400,7 +1401,6 @@ pub async fn compact_sstables_with_registry(
     // #847/#904 dropped-column flow below: the effective schema keeps `schema`'s
     // `dropped_columns` map, so the retained-dropped pre-pass and write-schema
     // derivation operate on it unchanged.
-    fully_expired::require_checked_inputs(&input_paths)?; // #4612: damaged Statistics.db
     let mut effective_schema = effective_compaction_schema(schema, &input_paths);
     // #929: copy each UDT column's exact UserType(...) marshal from the input
     // headers onto the EFFECTIVE (decode) schema so the compaction reader treats
