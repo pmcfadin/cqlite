@@ -28,7 +28,10 @@ fn damaged(pristine: &[u8]) -> Vec<(String, Vec<u8>)> {
     let n = pristine.len();
     let mut out = Vec::new();
     for len in [0, 4, 8, 40, n / 2, n - 5, n - 1] {
-        out.push((format!("truncated to {len} of {n}"), pristine[..len].to_vec()));
+        out.push((
+            format!("truncated to {len} of {n}"),
+            pristine[..len].to_vec(),
+        ));
     }
     for at in [0, 9, n / 2, n - 6, n - 1] {
         let mut b = pristine.to_vec();
@@ -52,7 +55,9 @@ fn explain_refuses_every_damaged_statistics_db_naming_the_path() {
     let src = td()
         .join("datasets/sstables/test_explain/trace_decisions-4ad336f0df0611f181786327fffcebdf");
     let tmp = tempfile::tempdir().expect("tempdir");
-    let staged = tmp.path().join("trace_decisions-4ad336f0df0611f181786327fffcebdf");
+    let staged = tmp
+        .path()
+        .join("trace_decisions-4ad336f0df0611f181786327fffcebdf");
     copy_dir(&src, &staged);
     let stats = stats_of(&staged);
     let pristine = std::fs::read(&stats).expect("read");
@@ -62,13 +67,24 @@ fn explain_refuses_every_damaged_statistics_db_naming_the_path() {
             .arg(td().join("schemas/explain-trace.cql"))
             .arg("--data-dir")
             .arg(&staged)
-            .args(["explain", "test_explain.trace_decisions", "1", "--now", "1794535358"])
+            .args([
+                "explain",
+                "test_explain.trace_decisions",
+                "1",
+                "--now",
+                "1794535358",
+            ])
             .output()
             .expect("spawn")
     };
     // Control: the pristine copy explains, so a refusal below is caused by the damage alone.
     let ok = run();
-    assert_eq!(ok.status.code(), Some(0), "{}", String::from_utf8_lossy(&ok.stderr));
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
     for (label, bytes) in damaged(&pristine) {
         std::fs::write(&stats, &bytes).expect("damage");
         let out = run();
@@ -90,7 +106,10 @@ fn find_reports_a_damaged_generation_unreadable_with_its_path_and_exits_two() {
         .expect("test_comp")
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("lz4_table-")))
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("lz4_table-"))
+        })
         .expect("lz4_table fixture");
     let tmp = tempfile::tempdir().expect("tempdir");
     let staged = tmp.path().join(src.file_name().expect("name"));
@@ -108,7 +127,12 @@ fn find_reports_a_damaged_generation_unreadable_with_its_path_and_exits_two() {
             .expect("spawn")
     };
     let ok = run();
-    assert_eq!(ok.status.code(), Some(0), "{}", String::from_utf8_lossy(&ok.stderr));
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
     for (label, bytes) in damaged(&pristine) {
         std::fs::write(&stats, &bytes).expect("damage");
         let out = run();

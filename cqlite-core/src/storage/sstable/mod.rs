@@ -65,7 +65,6 @@ mod scan_merge;
 /// source of truth for deriving `{keyspace}.{table}` identity from a Data.db path,
 /// transparently resolving Cassandra `snapshots/{tag}` layouts.
 pub(crate) mod snapshot_path;
-pub mod statistics_integrity; // strict Statistics.db layout + CRC check (#4612)
 pub mod statistics_reader;
 pub mod stream_merge_probe; // Multi-generation streaming-merge resident-rows probe (issue #1579, D3).
 #[cfg(feature = "tombstones")]

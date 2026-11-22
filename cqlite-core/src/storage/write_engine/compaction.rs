@@ -165,7 +165,9 @@ impl WriteEngine {
         //
         // #4612: refuse a damaged input Statistics.db first — the normalizer and the baseline
         // seeding below read it leniently and would otherwise re-order columns / re-base timestamps.
-        crate::storage::sstable::statistics_integrity::require_checked_statistics(&input_paths)?;
+        crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(
+            &input_paths,
+        )?;
         let mut effective_schema =
             merge::effective_compaction_schema(&self.config.schema, &input_paths);
         // #929: normalize bare-name UDT columns to their UserType(...) marshal on

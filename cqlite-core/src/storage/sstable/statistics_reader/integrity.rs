@@ -46,10 +46,18 @@ fn checked(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>> {
 /// checksum check. A missing or unreadable file is an [`Error::Io`]; a damaged one is an
 /// [`Error::Corruption`] naming `path`.
 pub fn read_checked_statistics(path: &Path) -> Result<Vec<u8>> {
+    checked(path, read_bounded_statistics(path)?)
+}
+
+/// Read `path` under [`MAX_STATISTICS_BYTES`] + 1 bytes (the extra byte lets [`checked`] tell an
+/// oversize file from one exactly at the cap) with no integrity check, for callers that apply
+/// their own classification (`verify`).
+pub fn read_bounded_statistics(path: &Path) -> std::io::Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
-    file.take(MAX_STATISTICS_BYTES + 1).read_to_end(&mut bytes)?;
-    checked(path, bytes)
+    file.take(MAX_STATISTICS_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// [`read_checked_statistics`] for async callers.

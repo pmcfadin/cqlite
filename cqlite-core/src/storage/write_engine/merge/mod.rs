@@ -1388,8 +1388,7 @@ pub async fn compact_sstables_with_registry(
         Vec::new()
     };
     let (merge_inputs, dropped_whole) = split_merge_and_dropped(&input_paths, drop_set);
-    // From here on, decode/merge only the (drop-filtered) `merge_inputs`. The
-    // dropped SSTables are reclaimed after the output publishes.
+    // Merge only the drop-filtered `merge_inputs`; dropped ones are reclaimed after publish.
     let input_paths = merge_inputs;
 
     // #850: read static-row presence from the input SSTable headers. If a static
@@ -1401,8 +1400,7 @@ pub async fn compact_sstables_with_registry(
     // #847/#904 dropped-column flow below: the effective schema keeps `schema`'s
     // `dropped_columns` map, so the retained-dropped pre-pass and write-schema
     // derivation operate on it unchanged.
-    // #4612: a damaged input Statistics.db is refused up front, never degraded past.
-    crate::storage::sstable::statistics_integrity::require_checked_statistics(&input_paths)?;
+    fully_expired::require_checked_inputs(&input_paths)?; // #4612: damaged Statistics.db
     let mut effective_schema = effective_compaction_schema(schema, &input_paths);
     // #929: copy each UDT column's exact UserType(...) marshal from the input
     // headers onto the EFFECTIVE (decode) schema so the compaction reader treats

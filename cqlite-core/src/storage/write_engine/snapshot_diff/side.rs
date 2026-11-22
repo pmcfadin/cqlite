@@ -180,7 +180,7 @@ async fn open_generation(path: &std::path::Path) -> Result<SSTableReader> {
 /// degrades to the caller's schema, which silently re-orders columns and re-bases every write
 /// timestamp, and the merge still "succeeds" with a wrong answer — exactly the report this tool
 /// must never emit. So every generation of both sides is pre-flighted once, up front, against
-/// Cassandra's own layout and checksums (`statistics_integrity`, via the reader) and then parsed (every Cassandra 5.0
+/// Cassandra's own layout and checksums (`statistics_reader::integrity`, via the reader) and then parsed (every Cassandra 5.0
 /// format writes a `Statistics.db`).
 pub(super) async fn preflight_generations(
     side: Side,

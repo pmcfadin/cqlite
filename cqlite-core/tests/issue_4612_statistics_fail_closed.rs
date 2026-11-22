@@ -91,8 +91,24 @@ fn stage((keyspace, table): (&str, &str)) -> Option<Copy> {
 fn damaged_variants(pristine: &[u8]) -> Vec<(String, Vec<u8>)> {
     let n = pristine.len();
     let mut out = Vec::new();
-    for len in [0, 3, 4, 8, 12, 40, n / 4, n / 2, n - 40, n - 5, n - 4, n - 1] {
-        out.push((format!("truncated to {len} of {n} bytes"), pristine[..len].to_vec()));
+    for len in [
+        0,
+        3,
+        4,
+        8,
+        12,
+        40,
+        n / 4,
+        n / 2,
+        n - 40,
+        n - 5,
+        n - 4,
+        n - 1,
+    ] {
+        out.push((
+            format!("truncated to {len} of {n} bytes"),
+            pristine[..len].to_vec(),
+        ));
     }
     for at in [0, 5, 9, 17, n / 3, n / 2, 2 * n / 3, n - 6, n - 1] {
         let mut b = pristine.to_vec();
@@ -165,10 +181,14 @@ async fn files_the_lenient_parser_accepts_no_longer_open() {
                 != pristine_stats.timestamp_stats.min_timestamp
                 || stats.serialization_header_columns.len()
                     != pristine_stats.serialization_header_columns.len()
-                || stats.serialization_header_columns.iter().map(|c| &c.name).ne(pristine_stats
+                || stats
                     .serialization_header_columns
                     .iter()
-                    .map(|c| &c.name));
+                    .map(|c| &c.name)
+                    .ne(pristine_stats
+                        .serialization_header_columns
+                        .iter()
+                        .map(|c| &c.name));
             std::fs::write(&copy.stats, &bytes).expect("write damaged Statistics.db");
             let label = format!("{fixture:?} {label} (lenient parse differs: {differs})");
             let err = open_err(&copy.data)
@@ -201,11 +221,19 @@ async fn compaction_refuses_a_damaged_input_naming_the_path() {
     for (label, bytes) in damaged_variants(&copy.pristine) {
         std::fs::write(&copy.stats, &bytes).expect("write damaged Statistics.db");
         let out = TempDir::new().expect("out");
-        let err = compact_sstables(vec![copy.data.clone()], out.path(), &schema, 1, None, None, false)
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{label}: compaction must refuse, it returned Ok"))
-            .to_string();
+        let err = compact_sstables(
+            vec![copy.data.clone()],
+            out.path(),
+            &schema,
+            1,
+            None,
+            None,
+            false,
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{label}: compaction must refuse, it returned Ok"))
+        .to_string();
         assert_named(&err, &copy.stats, &label);
     }
 }
@@ -224,7 +252,10 @@ async fn audit_reports_a_named_finding_for_a_damaged_statistics_db() {
         let report = verify_sstable_generation_audit(&copy.data, false, &config, platform.clone())
             .await
             .unwrap_or_else(|e| panic!("{label}: audit must report, not abort: {e}"));
-        assert!(!report.is_ok(), "{label}: a damaged Statistics.db must not audit clean");
+        assert!(
+            !report.is_ok(),
+            "{label}: a damaged Statistics.db must not audit clean"
+        );
         assert!(
             report
                 .findings
@@ -248,14 +279,19 @@ async fn diagnose_names_the_generation_as_unreadable() {
         gc_grace_seconds: None,
         schema: None,
     };
-    let clean = diagnose_table(&copy.dir, &options).await.expect("pristine diagnose");
+    let clean = diagnose_table(&copy.dir, &options)
+        .await
+        .expect("pristine diagnose");
     assert!(clean.unreadable_generations.is_empty() && clean.generations.len() == 1);
     for (label, bytes) in damaged_variants(&copy.pristine) {
         std::fs::write(&copy.stats, &bytes).expect("write damaged Statistics.db");
         let report = diagnose_table(&copy.dir, &options)
             .await
             .unwrap_or_else(|e| panic!("{label}: diagnose must report, not abort: {e}"));
-        assert!(report.generations.is_empty(), "{label}: no values from a damaged file");
+        assert!(
+            report.generations.is_empty(),
+            "{label}: no values from a damaged file"
+        );
         let gen = report
             .unreadable_generations
             .first()
@@ -290,7 +326,13 @@ async fn salvage_refuses_with_a_classified_manifest() {
             .refused
             .unwrap_or_else(|| panic!("{label}: salvage must refuse a damaged Statistics.db"));
         let text = format!("{refusal:?}");
-        assert!(text.contains("Statistics.db"), "{label}: refusal must name the component: {text}");
-        assert_eq!(report.partitions.written, 0, "{label}: nothing may be written");
+        assert!(
+            text.contains("Statistics.db"),
+            "{label}: refusal must name the component: {text}"
+        );
+        assert_eq!(
+            report.partitions.written, 0,
+            "{label}: nothing may be written"
+        );
     }
 }
