@@ -128,6 +128,12 @@ drop both sides' `RecordingSink` output before the next partition — no whole-t
 side's cells is ever resident. `--partition <key>` skips enumeration entirely and drives both sides
 through `build_traced_merger_with_registry` directly (the point-read path), per issue AC 4.
 
+**Effective budget and whole-report rule (R8/R11/R14; C re-check L3).** The effective result budget is
+`max_result_bytes` capped at 32 MiB (`MAX_EFFECTIVE_BUDGET`). The cap exists so both trails, the fold and
+the report all stay under the 128 MiB memory target (roborev job 393). R14 is a whole-report rule: the
+serialized report, metadata included, never exceeds the effective budget. The remaining memory edges
+are deferred to follow-up #4613.
+
 ## D4. Report shape
 
 ```json

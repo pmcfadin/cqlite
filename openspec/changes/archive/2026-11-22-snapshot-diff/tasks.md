@@ -78,12 +78,14 @@ Commit after every group (#3042). `--lite` after every fix round; ONE full gate 
 
 ## 3. Endgame
 
-- [ ] 3.1 Review-first: `rust-reviewer` + `bash scripts/flow/roborev-review.sh --agent claude-code
+- [x] 3.1 Review-first: `rust-reviewer` + `bash scripts/flow/roborev-review.sh --agent claude-code
       --model claude-opus-5` on the lite-green diff, BEFORE the first full gate.
-- [ ] 3.2 Fix rounds: `--lite` re-cert + diff-scoped targets after each fix; never a full gate per
+- [x] 3.2 Fix rounds: `--lite` re-cert + diff-scoped targets after each fix; never a full gate per
       round. Batch nits into one follow-up issue at merge time; blockers trigger
       `fix → --lite → re-review`.
-- [ ] 3.3 Open the PR once review-first is clean.
-- [ ] 3.4 Hand to `flow-closer`: rebase → ONE full gate → C (spec-auditor intent audit against
+- [x] 3.3 Open the PR once review-first is clean.
+- [x] 3.4 Hand to `flow-closer`: rebase → ONE full gate → C (spec-auditor intent audit against
       `specs/snapshot-diff-scan/spec.md` + `specs/cli-diff/spec.md`) → roborev LAST →
       `premerge-assert` → arm `gh pr merge --auto` → finalize.
+      Done: full gate PASS at 26026b5d, C intent re-check PASS, roborev clean (job 396, deferrals #4613),
+      merged as #4611.
