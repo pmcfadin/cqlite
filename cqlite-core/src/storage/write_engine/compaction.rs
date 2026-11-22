@@ -117,6 +117,11 @@ impl WriteEngine {
         // input is droppable. These SSTables are EXCLUDED from the merger's input
         // list below (never read/decoded — the perf win) and reclaimed after the
         // merged output publishes.
+        // #4612: refuse a damaged input Statistics.db BEFORE the drop-set (and every lenient
+        // baseline/normalizer read after it) trusts it; nothing is deleted or published.
+        crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(
+            &input_paths,
+        )?;
         let drop_set = merge::fully_expired_sstables(&input_paths, &outside_paths, gc_before_secs);
         // Subtract the drop-set from the merger inputs (with the all-dropped guard);
         // shared with the CLI one-shot path.

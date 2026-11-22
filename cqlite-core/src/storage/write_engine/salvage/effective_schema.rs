@@ -91,6 +91,16 @@ pub(super) fn effective_salvage_schema(
     schema: &TableSchema,
     input_paths: &[PathBuf],
 ) -> std::result::Result<(TableSchema, Vec<ComponentFinding>), Refusal> {
+    if let Err(e) =
+        crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(
+            input_paths,
+        )
+    {
+        return Err(component_unreadable_refusal(
+            "reading the input's serialization header (Statistics.db)",
+            &e,
+        ));
+    }
     let mut effective = effective_compaction_schema(schema, input_paths);
     if let Err(e) = apply_udt_marshals_from_inputs(&mut effective, input_paths, None) {
         // The shared normalizer's message says "compaction inputs" because

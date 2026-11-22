@@ -79,7 +79,9 @@ fn read_timestamp_stats(data_path: &Path) -> Option<TimestampStatistics> {
     if !stats_path.exists() {
         return None;
     }
-    let stats_bytes = match std::fs::read(&stats_path) {
+    // #4612: checked read. A damaged file is UNKNOWN facts => `None` => candidate retained
+    // (Cassandra `getFullyExpiredSSTables` :183-216 drops only when maxTimestamp < minTimestamp).
+    let stats_bytes = match read_checked_stats(&stats_path) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
@@ -314,6 +316,23 @@ pub(crate) fn reclaim_dropped_whole<F: FnMut(&Path)>(
         }
         delete(dropped);
     }
+}
+
+/// Checked read of one `Statistics.db` for the overlap/expiry gates (#4612). `Err` means UNKNOWN:
+/// callers return `None` (retain the candidate; disable overlap-aware purging), which is the
+/// conservative side of Cassandra's `getPurgeEvaluator` (`CompactionController.java:245-281`,
+/// purge only below the minimum overlapping timestamp) and `getFullyExpiredSSTables` (`:183-216`).
+pub(crate) fn read_checked_stats(path: &Path) -> crate::error::Result<Vec<u8>> {
+    crate::storage::sstable::statistics_reader::integrity::read_checked_statistics(path)
+}
+
+/// Refuse a damaged input `Statistics.db` before any lenient reader (schema normalization,
+/// baseline seeding) touches it (#4612): those degrade a partial parse into re-ordered columns
+/// and re-based timestamps. A missing file keeps its existing handling; the error names the path.
+pub(crate) fn require_checked_inputs(
+    input_paths: &[std::path::PathBuf],
+) -> crate::error::Result<()> {
+    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(input_paths)
 }
 
 #[cfg(test)]

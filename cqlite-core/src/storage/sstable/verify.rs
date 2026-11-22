@@ -2040,7 +2040,7 @@ async fn check_statistics(
     // emits 4 metadata components (VALIDATION/COMPACTION/STATS/HEADER); a count
     // outside [1,100] means the header is corrupt (e.g. the high byte flipped
     // to 0xFF -> ~4.28e9 components).
-    match std::fs::read(&stats_path) {
+    match super::statistics_reader::integrity::read_bounded_statistics(&stats_path) {
         Ok(bytes) if bytes.len() >= 8 => {
             let num_components = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             if num_components == 0 || num_components > 100 {

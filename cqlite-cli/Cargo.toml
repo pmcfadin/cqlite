@@ -437,3 +437,17 @@ required-features = ["write-support"]
 name = "issue_4498_non_linux_notice"
 path = "tests/issue_4498_non_linux_notice.rs"
 required-features = ["write-support"]
+
+# Issue #4612: `explain` and `find` spawn the compiled binary against a Cassandra-written
+# generation whose Statistics.db is damaged; the explain half needs the write-engine merge, so
+# the target carries write support (declared explicitly: see the #2039 zero-tests guard above).
+[[test]]
+name = "issue_4612_statistics_fail_closed"
+path = "tests/issue_4612_statistics_fail_closed.rs"
+required-features = ["write-support"]
+
+# Issue #4612 (roborev round 1): drives `handle_compact` over damaged inputs.
+[[test]]
+name = "issue_4612_compaction_inputs"
+path = "tests/issue_4612_compaction_inputs.rs"
+required-features = ["write-support"]

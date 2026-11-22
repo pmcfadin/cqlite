@@ -909,7 +909,7 @@ pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64>
         if !stats_path.exists() {
             return None;
         }
-        let stats_bytes = match std::fs::read(&stats_path) {
+        let stats_bytes = match fully_expired::read_checked_stats(&stats_path) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
@@ -1382,14 +1382,14 @@ pub async fn compact_sstables_with_registry(
     // the merger's input list BEFORE building the merger, so dropped SSTables are
     // never read/decoded (the perf win); their components are deleted only after
     // the output publishes. `split_merge_and_dropped` handles the all-dropped guard.
+    fully_expired::require_checked_inputs(&input_paths)?; // #4612: damaged Statistics.db
     let drop_set: Vec<PathBuf> = if purge_safe {
         fully_expired_sstables(&input_paths, &[], gc_before_secs)
     } else {
         Vec::new()
     };
     let (merge_inputs, dropped_whole) = split_merge_and_dropped(&input_paths, drop_set);
-    // From here on, decode/merge only the (drop-filtered) `merge_inputs`. The
-    // dropped SSTables are reclaimed after the output publishes.
+    // Merge only the drop-filtered `merge_inputs`; dropped ones are reclaimed after publish.
     let input_paths = merge_inputs;
 
     // #850: read static-row presence from the input SSTable headers. If a static

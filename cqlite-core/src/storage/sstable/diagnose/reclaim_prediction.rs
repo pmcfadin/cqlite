@@ -71,6 +71,7 @@ pub(crate) fn predict_table_reclaim(
     now_secs: i64,
 ) -> Result<ReclaimPrediction> {
     let paths: Vec<PathBuf> = inputs.iter().map(|i| i.data_path.clone()).collect();
+    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(&paths)?;
     let drop_set = if gc_before_secs.is_some() {
         fully_expired_sstables(&paths, &[], gc_before_secs)
     } else {

@@ -418,11 +418,11 @@ fn fold_counts(
 fn read_one_sstable_counts(
     path: &Path,
 ) -> Result<cqlite_core::parser::repair_metadata::TableCounts, CoreError> {
-    // Gates from the filename (na+ floor enforced by from_path); on an
-    // unparseable descriptor fall back to None — partition_count is still
-    // decodable self-describingly, total_rows is then reported as None.
+    // Gates from the filename (na+ floor enforced by from_path); an unparseable descriptor falls back
+    // to None (total_rows then None). Strict, bounded read (#4612): a damaged file => `complete=false`.
     let gates = VersionGates::from_path(path).ok();
-    let bytes = std::fs::read(path)?;
+    let bytes =
+        cqlite_core::storage::sstable::statistics_reader::integrity::read_checked_statistics(path)?;
     read_table_counts(&bytes, gates.as_ref())
 }
 

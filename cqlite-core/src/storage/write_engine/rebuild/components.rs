@@ -61,16 +61,15 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 async fn open_reader(input: &Path) -> Result<SSTableReader> {
-    use crate::config::DiskAccessMode;
-    use crate::platform::Platform;
-    use crate::Config;
+    use crate::{config::DiskAccessMode, platform::Platform, Config};
     use std::sync::Arc;
 
     let mut config = Config::default();
     config.storage.use_mmap = false;
     config.storage.disk_access_mode = DiskAccessMode::Buffered;
     let platform = Arc::new(Platform::new(&config).await?);
-    SSTableReader::open(input, &config, platform).await
+    let opened = SSTableReader::open(input, &config, platform).await;
+    opened.map_err(super::statistics::explain_damaged_sibling)
 }
 
 /// The total decompressed data-section length — needed only to derive the

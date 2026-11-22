@@ -1,0 +1,368 @@
+//! The strict `Statistics.db` layout + checksum check, shared by every reader (#4612).
+//!
+//! `StatisticsReader` used to parse whatever it could from a damaged file, and the merge then
+//! silently re-ordered columns and re-based every write timestamp onto the wrong
+//! `EncodingStats` baseline. Every in-scope consumer now reads the file through this module, so
+//! a truncated or corrupt `Statistics.db` is a named [`Error::Corruption`] carrying the path,
+//! never a degraded open. The layout check is a port of Cassandra's own integrity rules:
+//!
+//! `cassandra-5.0.8` `io/sstable/metadata/MetadataSerializer.java:146-212` (`deserialize`):
+//! `[i32 count][crc32]`, then `count` x `[i32 type][i32 offset]` followed by a `crc32` over the
+//! count and every pair, then each component's bytes followed by a `crc32` of those bytes; a
+//! component's length is the next offset minus its own (the last one runs to end of file). Every
+//! checksum mismatch is a `CorruptSSTableException` (`:214-227`). `hasMetadataChecksum()` is true
+//! for every in-scope format (BIG `na`+ at `format/big/BigFormat.java:404`; BTI `da` at
+//! `format/bti/BtiFormat.java:349-352`).
+
+use crate::error::{Error, Result};
+use std::io::Read;
+use std::path::Path;
+
+/// The most bytes read from one `Statistics.db`. A real file is a few KiB (a TOC, a handful of
+/// histograms and the serialization header); the cap only bounds a hostile or runaway file so the
+/// read can never be unbounded (#4613 item 5). A file larger than this is refused, never
+/// truncated to fit.
+pub const MAX_STATISTICS_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Number of `MetadataType` constants in `cassandra-5.0.8` (`MetadataType.java:28-34`).
+const METADATA_TYPE_COUNT: i32 = 4;
+
+fn corrupt(path: &Path, reason: impl std::fmt::Display) -> Error {
+    Error::corruption(format!(
+        "Statistics.db {} failed Cassandra's integrity check: {reason}",
+        path.display()
+    ))
+}
+
+fn checked(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.len() as u64 > MAX_STATISTICS_BYTES {
+        return Err(corrupt(
+            path,
+            format!("larger than the {MAX_STATISTICS_BYTES} byte cap"),
+        ));
+    }
+    validate_metadata_layout(&bytes).map_err(|reason| corrupt(path, reason))?;
+    Ok(bytes)
+}
+
+/// Read `path` under [`MAX_STATISTICS_BYTES`] and refuse it unless it passes the strict layout and
+/// checksum check. A missing or unreadable file is an [`Error::Io`]; a damaged one is an
+/// [`Error::Corruption`] naming `path`.
+pub fn read_checked_statistics(path: &Path) -> Result<Vec<u8>> {
+    checked(path, read_bounded_statistics(path)?)
+}
+
+/// Read `path` under [`MAX_STATISTICS_BYTES`] + 1 bytes (the extra byte lets [`checked`] tell an
+/// oversize file from one exactly at the cap) with no integrity check, for callers that apply
+/// their own classification (`verify`).
+pub fn read_bounded_statistics(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_STATISTICS_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// [`read_checked_statistics`] for async callers.
+pub async fn read_checked_statistics_async(path: &Path) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await?;
+    let hint = file
+        .metadata()
+        .await
+        .map_or(0, |m| m.len().min(MAX_STATISTICS_BYTES + 1));
+    let mut bytes = Vec::with_capacity(hint as usize);
+    file.take(MAX_STATISTICS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    checked(path, bytes)
+}
+
+/// Refuse the whole input set unless every PRESENT generation's `Statistics.db` passes the
+/// strict check (a missing one is left to its existing handling). For the entry points whose downstream helpers (baseline seeding, schema
+/// normalization) must never run on a degraded read. The error names the failing path.
+pub fn require_checked_statistics(data_paths: &[std::path::PathBuf]) -> Result<()> {
+    for data_path in data_paths {
+        let name = data_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let Some(stem) = name.strip_suffix("Data.db") else {
+            continue;
+        };
+        match read_checked_statistics(&data_path.with_file_name(format!("{stem}Statistics.db"))) {
+            Ok(_) => {}
+            // A genuinely missing Statistics.db keeps its prior, separately-handled behaviour
+            // (the reader proceeds without it); only a PRESENT damaged one is refused here.
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// `MetadataType` ordinals (`MetadataType.java:28-34`, cassandra-5.0.8).
+const VALIDATION: i32 = 0;
+const STATS: i32 = 2;
+const HEADER: i32 = 3;
+
+/// Every TOC ordinal must be a known `MetadataType` (Cassandra indexes
+/// `MetadataType.values()[ordinal]`, so an unknown one cannot be read), each at most once
+/// (`serialize` writes one entry per type from an `EnumMap`), and VALIDATION, STATS and HEADER
+/// must be present: `MetadataCollector.finalizeMetadata` (`:362-390`) always writes all four and
+/// `BigSSTableReaderLoadingBuilder:77` / `BtiTableReaderLoadingBuilder:63` load exactly
+/// STATS + HEADER + VALIDATION. COMPACTION is written but not required by any loader, so a file
+/// without it is accepted. Without HEADER the parser would fall back and rebuild the wrong
+/// EncodingStats / column baselines, which is the defect this module exists to refuse.
+fn check_component_types(ordinals: &[i32]) -> std::result::Result<(), String> {
+    let mut seen = [false; METADATA_TYPE_COUNT as usize];
+    for &ordinal in ordinals {
+        let slot = usize::try_from(ordinal)
+            .ok()
+            .and_then(|i| seen.get_mut(i))
+            .ok_or_else(|| format!("TOC names unknown metadata type ordinal {ordinal}"))?;
+        if std::mem::replace(slot, true) {
+            return Err(format!("TOC names metadata type ordinal {ordinal} twice"));
+        }
+    }
+    for (required, name) in [
+        (VALIDATION, "VALIDATION"),
+        (STATS, "STATS"),
+        (HEADER, "HEADER"),
+    ] {
+        if !seen[required as usize] {
+            return Err(format!(
+                "TOC has no {name} component (required by Cassandra's loaders)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Why a `Statistics.db` failed the strict check.
+pub fn validate_metadata_layout(bytes: &[u8]) -> std::result::Result<(), String> {
+    let int_at = |at: usize| -> std::result::Result<i32, String> {
+        bytes
+            .get(at..at + 4)
+            .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(|| {
+                format!(
+                    "truncated: needs 4 bytes at offset {at}, file is {} bytes",
+                    bytes.len()
+                )
+            })
+    };
+    let mut crc = crc32fast::Hasher::new();
+
+    let count = int_at(0)?;
+    crc.update(&count.to_be_bytes());
+    let expected = int_at(4)?;
+    let actual = crc.clone().finalize() as i32;
+    if actual != expected {
+        return Err(format!(
+            "TOC count checksum mismatch (stored {expected:#x}, computed {actual:#x})"
+        ));
+    }
+    if count < 1 {
+        return Err(format!("TOC declares {count} components"));
+    }
+    // `MetadataType` (`io/sstable/metadata/MetadataType.java`, cassandra-5.0.8) has exactly
+    // VALIDATION, COMPACTION, STATS, HEADER; `deserialize` fills one entry per type, so a larger
+    // count cannot be a Cassandra file. Refuse it BEFORE any allocation or per-pair work.
+    if count > METADATA_TYPE_COUNT {
+        return Err(format!(
+            "TOC declares {count} components but Cassandra defines only {METADATA_TYPE_COUNT} \
+             metadata types (VALIDATION, COMPACTION, STATS, HEADER)"
+        ));
+    }
+    let count = usize::try_from(count).map_err(|_| "TOC count overflows".to_string())?;
+    // 4 (count) + 4 (crc) + 8 per pair + 4 (crc): reject a count the file cannot hold before
+    // looking at any pair.
+    let toc_end = count
+        .checked_mul(8)
+        .and_then(|pairs| pairs.checked_add(12))
+        .ok_or_else(|| "TOC size overflows".to_string())?;
+    if toc_end > bytes.len() {
+        return Err(format!(
+            "truncated: TOC of {count} components needs {toc_end} bytes, file is {} bytes",
+            bytes.len()
+        ));
+    }
+    let mut offsets = Vec::new(); // never pre-sized from an untrusted count
+    let mut ordinals = Vec::new();
+    for i in 0..count {
+        let at = 8 + 8 * i;
+        let ordinal = int_at(at)?;
+        ordinals.push(ordinal);
+        crc.update(&ordinal.to_be_bytes());
+        let offset = int_at(at + 4)?;
+        crc.update(&offset.to_be_bytes());
+        offsets.push(
+            usize::try_from(offset).map_err(|_| format!("component {i} has a negative offset"))?,
+        );
+    }
+    let expected = int_at(8 + 8 * count)?;
+    let actual = crc.finalize() as i32;
+    if actual != expected {
+        return Err(format!(
+            "TOC checksum mismatch (stored {expected:#x}, computed {actual:#x})"
+        ));
+    }
+    check_component_types(&ordinals)?;
+
+    for (i, &start) in offsets.iter().enumerate() {
+        let end = offsets.get(i + 1).copied().unwrap_or(bytes.len());
+        if start < toc_end || end < start + 4 || end > bytes.len() {
+            return Err(format!(
+                "component {i} spans {start}..{end}, outside the {} byte file or shorter than its checksum",
+                bytes.len()
+            ));
+        }
+        let body = &bytes[start..end - 4];
+        let expected = int_at(end - 4)?;
+        let actual = crc32fast::hash(body) as i32;
+        if actual != expected {
+            return Err(format!(
+                "component {i} checksum mismatch (stored {expected:#x}, computed {actual:#x})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_metadata_layout;
+
+    /// Build a file the way `MetadataSerializer.serialize` (`:67-112`) lays it out.
+    fn build(components: &[&[u8]]) -> Vec<u8> {
+        let typed: Vec<(i32, &[u8])> = components
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i as i32, *b))
+            .collect();
+        build_typed(&typed)
+    }
+
+    /// As [`build`], with explicit type ordinals (checksums recomputed so the file reaches the
+    /// ordinal check).
+    fn build_typed(components: &[(i32, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let count = components.len() as i32;
+        out.extend(count.to_be_bytes());
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&count.to_be_bytes());
+        out.extend((crc.clone().finalize() as i32).to_be_bytes());
+        let mut position = 4 + 8 * components.len() + 8;
+        for (ordinal, body) in components.iter() {
+            out.extend(ordinal.to_be_bytes());
+            crc.update(&ordinal.to_be_bytes());
+            out.extend((position as i32).to_be_bytes());
+            crc.update(&(position as i32).to_be_bytes());
+            position += body.len() + 4;
+        }
+        out.extend((crc.finalize() as i32).to_be_bytes());
+        for (_, body) in components {
+            out.extend(*body);
+            out.extend((crc32fast::hash(body) as i32).to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn a_well_formed_file_passes() {
+        assert_eq!(
+            validate_metadata_layout(&build(&[b"abc", b"defgh", b"i", b"jk"])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn truncation_at_every_length_is_refused() {
+        let file = build(&[b"abc", b"defgh", b"i", b"jk"]);
+        for len in 0..file.len() {
+            assert!(validate_metadata_layout(&file[..len]).is_err(), "len {len}");
+        }
+    }
+
+    #[test]
+    fn any_single_bit_flip_is_refused() {
+        let file = build(&[b"abc", b"defgh", b"i", b"jk"]);
+        for byte in 0..file.len() {
+            let mut damaged = file.clone();
+            damaged[byte] ^= 0x01;
+            assert!(validate_metadata_layout(&damaged).is_err(), "byte {byte}");
+        }
+    }
+
+    #[test]
+    fn a_count_above_the_metadata_type_count_is_refused_before_any_allocation() {
+        // Valid count CRC, count = 5 (> the 4 MetadataType constants), nothing else.
+        for count in [5_i32, 1_000, 8_400_000, i32::MAX] {
+            let mut file = count.to_be_bytes().to_vec();
+            file.extend((crc32fast::hash(&count.to_be_bytes()) as i32).to_be_bytes());
+            file.extend([0u8; 64]);
+            let err = validate_metadata_layout(&file).expect_err("must refuse");
+            assert!(
+                err.contains("only 4 metadata types"),
+                "count {count}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_the_toc_cannot_fit_is_refused() {
+        // count = 4 is allowed, but the file holds fewer bytes than 12 + 8 * 4.
+        let count = 4_i32;
+        let mut file = count.to_be_bytes().to_vec();
+        file.extend((crc32fast::hash(&count.to_be_bytes()) as i32).to_be_bytes());
+        file.extend([0u8; 16]);
+        let err = validate_metadata_layout(&file).expect_err("must refuse");
+        assert!(err.contains("truncated: TOC of 4 components"), "{err}");
+    }
+
+    #[test]
+    fn component_type_ordinals_are_validated() {
+        let ok = [(0, &b"v"[..]), (1, b"c"), (2, b"s"), (3, b"h")];
+        assert_eq!(validate_metadata_layout(&build_typed(&ok)), Ok(()));
+        // COMPACTION is written by Cassandra but required by no loader.
+        let no_compaction = [(0, &b"v"[..]), (2, b"s"), (3, b"h")];
+        assert_eq!(
+            validate_metadata_layout(&build_typed(&no_compaction)),
+            Ok(())
+        );
+
+        type Case<'a> = (&'a str, Vec<(i32, &'a [u8])>, &'a str);
+        let cases: [Case; 5] = [
+            (
+                "duplicate STATS",
+                vec![(0, b"v"), (2, b"s"), (2, b"s"), (3, b"h")],
+                "twice",
+            ),
+            (
+                "unknown ordinal 7",
+                vec![(0, b"v"), (2, b"s"), (7, b"x"), (3, b"h")],
+                "unknown metadata type ordinal 7",
+            ),
+            (
+                "negative ordinal",
+                vec![(0, b"v"), (2, b"s"), (-1, b"x"), (3, b"h")],
+                "unknown metadata type ordinal -1",
+            ),
+            (
+                "HEADER missing",
+                vec![(0, b"v"), (1, b"c"), (2, b"s")],
+                "no HEADER component",
+            ),
+            (
+                "STATS missing",
+                vec![(0, b"v"), (1, b"c"), (3, b"h")],
+                "no STATS component",
+            ),
+        ];
+        for (label, comps, want) in cases {
+            let err = validate_metadata_layout(&build_typed(&comps)).expect_err(label);
+            assert!(err.contains(want), "{label}: {err}");
+        }
+    }
+}

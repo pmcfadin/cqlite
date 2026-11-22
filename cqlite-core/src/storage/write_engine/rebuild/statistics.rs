@@ -8,6 +8,7 @@ use super::{Component, FieldProvenance, RebuildOptions, RebuildReport};
 use crate::error::Result;
 use crate::parser::repair_metadata::{parse_repair_metadata, RepairField};
 use crate::schema::TableSchema;
+use crate::storage::sstable::statistics_reader::integrity::read_checked_statistics;
 use crate::storage::sstable::version_gate::VersionGates;
 use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
 use std::collections::BTreeMap;
@@ -48,7 +49,8 @@ impl RecoveredRepairState {
 /// never silently reported as `recovered` with a default value (spec
 /// R4.3's core assertion).
 pub(super) fn recover_repair_state(stats_path: &Path) -> RecoveredRepairState {
-    let Ok(bytes) = std::fs::read(stats_path) else {
+    // #4612: a truncated/corrupt file is unreadable (-> `lost`), never a partial parse.
+    let Ok(bytes) = read_checked_statistics(stats_path) else {
         return RecoveredRepairState::lost();
     };
     let Ok(gates) = VersionGates::from_path(stats_path) else {
@@ -117,7 +119,7 @@ pub(super) struct RecoveredBaseline {
 /// `components`'s module doc for why circularity, not mere imprecision, is
 /// the reason).
 pub(super) fn recover_encoding_stats_baseline(stats_path: &Path) -> Option<RecoveredBaseline> {
-    let bytes = std::fs::read(stats_path).ok()?;
+    let bytes = read_checked_statistics(stats_path).ok()?; // #4612: strict, as above
     let (min_timestamp, min_local_deletion_time, min_ttl) =
         crate::parser::enhanced_statistics_parser::read_encoding_stats_baseline(&bytes)?;
     // A value outside `i32` cannot be the baseline Cassandra wrote:
@@ -299,6 +301,19 @@ pub(super) fn write_statistics_component(
         .classification
         .insert("statistics".to_string(), fields);
     Ok(())
+}
+
+/// A damaged sibling `Statistics.db` stops `rebuild`'s open (#4612). Name both remedies; the
+/// sibling behaviour itself is an open owner decision and is not changed here.
+pub(super) fn explain_damaged_sibling(e: crate::error::Error) -> crate::error::Error {
+    use crate::error::Error;
+    match e {
+        Error::Corruption(m) if m.contains("Statistics.db") => Error::Corruption(format!(
+            "{m} - remedy: rename the damaged Statistics.db aside, or pass \
+             statistics_recovery_source (the renamed-aside file) and re-run"
+        )),
+        other => other,
+    }
 }
 
 #[cfg(test)]

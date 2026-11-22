@@ -166,6 +166,12 @@ fn run_explain(
     let clustering_key = parse_clustering_key(clustering, &schema)
         .map_err(|error| ExplainFailure::Usage(format!("invalid clustering key: {error}")))?;
     let now_value = resolve_now(now).map_err(|error| ExplainFailure::Usage(error.to_string()))?;
+    // #4612: a truncated or corrupt Statistics.db would silently re-order columns and re-base
+    // every timestamp in the trace, so it is a named read failure instead.
+    cqlite_core::storage::sstable::statistics_reader::integrity::require_checked_statistics(
+        &input_paths,
+    )
+    .map_err(|error| read_failure(&input_paths, error))?;
     let effective_schema = cqlite_core::storage::write_engine::merge::effective_compaction_schema(
         &schema,
         &input_paths,

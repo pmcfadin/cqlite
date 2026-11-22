@@ -11,26 +11,8 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
 
-/// Calculate CRC32 checksum for data validation
-fn crc32_checksum(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff_u32;
-
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xedb8_8320_u32;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-
-    !crc
-}
+pub mod integrity; // strict TOC/CRC layout check, shared by every reader (#4612)
 
 /// High-level Statistics.db file reader
 pub struct StatisticsReader {
@@ -85,12 +67,11 @@ impl StatisticsReader {
             )));
         }
 
-        // Read the entire file (Statistics.db files are typically small).
-        // Reached only for at-or-above-floor (or structurally-unparseable)
-        // descriptors — a below-floor version was already rejected above.
-        let mut file = File::open(path).await?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        // Read under a size cap and refuse the file unless it passes Cassandra's own TOC/CRC
+        // integrity rules (#4612): a truncated or bit-flipped file must be a named error, never a
+        // partial parse that silently re-bases every timestamp. Reached only for at-or-above-floor
+        // (or structurally-unparseable) descriptors — below-floor was rejected above.
+        let buffer = integrity::read_checked_statistics_async(path).await?;
 
         // `_detailed` keeps the TYPED error, so a SEMANTIC refusal keeps its own
         // kind and its column-naming message instead of becoming `code: Verify`
@@ -105,18 +86,6 @@ impl StatisticsReader {
                 )))
             }
         };
-
-        // Checksum validation: DEFERRED TO M2 MILESTONE
-        //
-        // The nb-format Statistics.db checksum algorithm is not yet implemented (Issue #28).
-        // The checksum field (header.checksum) contains a value but we cannot validate it
-        // without knowing the exact algorithm Cassandra 5.0+ uses for this file format.
-        //
-        // Known limitations: corrupt data may be silently accepted, there is no
-        // integrity guarantee for Statistics.db parsing, and M2 will implement the
-        // real CRC32/Adler32 validation. Documented rather than silently ignored;
-        // Statistics.db is metadata-only, so the M1 risk is acceptable. (An empty
-        // `if header.checksum != 0 {}` used to stand here and executed nothing.)
 
         Ok(Self {
             file_path: path.to_path_buf(),
@@ -140,34 +109,15 @@ impl StatisticsReader {
         &self.file_path
     }
 
-    /// Validate checksum for parsed statistics
+    /// Validate the file's checksums: `Ok(true)` when it passes Cassandra's TOC/component CRC
+    /// check (#4612, the shared [`integrity`] validator), `Ok(false)` when a checksum or the
+    /// layout is wrong, `Err` only when the file cannot be read.
     pub async fn validate_checksum(&self) -> Result<bool> {
-        // Read the raw file data for checksum calculation
-        let mut file = File::open(&self.file_path).await?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
-
-        if buffer.len() < 4 {
-            return Err(Error::corruption(
-                "Statistics file too small for checksum validation".to_string(),
-            ));
+        match integrity::read_checked_statistics_async(&self.file_path).await {
+            Ok(_) => Ok(true),
+            Err(Error::Corruption(_)) => Ok(false),
+            Err(e) => Err(e),
         }
-
-        // Extract the stored checksum from header
-        let stored_checksum = self.statistics.header.checksum;
-
-        // Calculate CRC32 checksum of the data section (excluding the checksum field itself)
-        let data_section = if buffer.len() >= 32 {
-            &buffer[28..buffer.len() - 4] // Skip header to checksum field, then skip checksum
-        } else {
-            return Err(Error::corruption(
-                "Invalid Statistics file format for checksum validation".to_string(),
-            ));
-        };
-
-        let calculated_checksum = crc32_checksum(data_section);
-
-        Ok(calculated_checksum == stored_checksum)
     }
 
     /// Check if the Statistics.db corresponds to a specific table
