@@ -295,6 +295,8 @@ fn help_says_the_verb_is_read_only_and_never_writes() {
         if flag == "--help" {
             assert!(text.contains("never writes to"), "{text}");
             assert!(text.contains("no repair or apply mode"), "{text}");
+            // R11.3: the effective result budget cap is stated.
+            assert!(text.contains("capped at 32 MiB"), "{text}");
         }
     }
 }

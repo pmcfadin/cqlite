@@ -79,6 +79,12 @@ honors.
 - **Then** it terminates with the same budget-exceeded error the query surface emits, never OOM, and
   never a truncated-but-`0`-exit report.
 
+#### Scenario: R11.3 the effective budget is capped at 32 MiB
+
+- **Given** a `max_result_bytes` above 32 MiB (including `u64::MAX`)
+- **When** `diff` runs
+- **Then** the effective result budget is 32 MiB (`MAX_EFFECTIVE_BUDGET`), so both sides' trails, the fold and the report stay under the 128 MiB memory target (roborev job 393), and `--help` states the cap
+
 ### Requirement: R12 — Exit codes and read-only guarantee
 
 `diff` SHALL exit `0` when the report renders (including when divergence or resurrection risk is
