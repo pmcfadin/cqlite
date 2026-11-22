@@ -134,17 +134,17 @@ async fn mirror_holds_for_risk_cases_including_newer_in_either_side() {
     let a = side_of(&stage(root.path(), "a", &src, &["nb-2-big-", "nb-3-big-"]));
     let b = side_of(&stage(root.path(), "b", &src, &["nb-1-big-"]));
     let schema = load_schema("issue-4201-diff-risk.cql", "test_diff", "risk_cases");
-    let forward = assert_mirror(&a, &b, "test_diff.risk_cases", &schema, 1_796_171_391).await;
+    let forward = assert_mirror(&a, &b, "test_diff.risk_cases", &schema, 1_796_172_806).await;
     assert_eq!(forward["summary"]["newer_in_a"], 2);
     assert_eq!(forward["summary"]["newer_in_b"], 1);
     // In the mirror the tombstones belong to side b.
-    let backward = report(&b, &a, "test_diff.risk_cases", &schema, 1_796_171_391).await;
-    assert_eq!(backward["summary"]["tombstones_only_b"], 10);
+    let backward = report(&b, &a, "test_diff.risk_cases", &schema, 1_796_172_806).await;
+    assert_eq!(backward["summary"]["tombstones_only_b"], 12);
     assert_eq!(
-        forward["summary"]["conflicts"], 5,
+        forward["summary"]["conflicts"], 6,
         "non-vacuous: conflicts mirror with resolves_to flipped"
     );
-    assert_eq!(backward["summary"]["conflicts"], 5);
+    assert_eq!(backward["summary"]["conflicts"], 6);
     assert_eq!(backward["summary"]["tombstones_only_a"], 0);
 }
 

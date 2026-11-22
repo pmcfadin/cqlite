@@ -205,11 +205,32 @@ async fn run_diff(
     let rendered =
         crate::commands::diff_render::render(&report, args.out == DiffOutput::Json, &now)
             .map_err(Failure::read)?;
-    if rendered.len() as u64 > max_result_bytes {
+    let limit = render_limit(max_result_bytes);
+    if rendered.len() as u64 > limit {
         return Err(Failure::read(format!(
-            "result set exceeded the {max_result_bytes}-byte materialization budget (estimated {} bytes); restrict with --partition or raise max_result_bytes",
+            "result set exceeded the {limit}-byte materialization budget (estimated {} bytes); restrict with --partition or raise max_result_bytes",
             rendered.len()
         )));
     }
     Ok(rendered)
+}
+
+/// The rendered report's limit: the configured budget, never above the core's effective cap
+/// (`MAX_EFFECTIVE_BUDGET`), so the CLI and the library agree on one ceiling.
+#[cfg(feature = "write-support")]
+fn render_limit(configured: u64) -> u64 {
+    configured.min(cqlite_core::storage::write_engine::snapshot_diff::MAX_EFFECTIVE_BUDGET)
+}
+
+#[cfg(all(test, feature = "write-support"))]
+mod tests {
+    use super::render_limit;
+
+    #[test]
+    fn the_render_limit_never_exceeds_the_effective_cap() {
+        let cap = cqlite_core::storage::write_engine::snapshot_diff::MAX_EFFECTIVE_BUDGET;
+        assert_eq!(render_limit(u64::MAX), cap);
+        assert_eq!(render_limit(cap + 1), cap);
+        assert_eq!(render_limit(1000), 1000);
+    }
 }

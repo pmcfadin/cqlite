@@ -162,7 +162,7 @@ through `build_traced_merger_with_registry` directly (the point-read path), per 
 }
 ```
 
-A collection element carries `cell_path` (hex of the element's path bytes) on its cell entries and on
+A cell side carries `ttl`/`expires_at` (expiring cell) or `local_deletion_time` (tombstone) when present, so a conflict that differs only in expiry is visible. A collection element carries `cell_path` (hex of the element's path bytes) on its cell entries and on
 `shadowed_cells`; `resolves_to` is present only on `conflict`. `text` renders the same data one finding per line, `summary` last. `resurrection_risk.status` is
 always present (`"yes"` or `"no"`) on every `only-a`/`only-b` tombstone entry — never omitted, so a
 reader can `grep resurrection_risk` and trust silence means "checked, none found," not "not

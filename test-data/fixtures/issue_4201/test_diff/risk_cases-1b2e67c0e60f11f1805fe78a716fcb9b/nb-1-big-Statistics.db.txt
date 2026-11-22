@@ -1,8 +1,8 @@
-SSTable: /var/lib/cassandra/data/test_diff/risk_cases-d0520160e60b11f1bfdcef7b7e01eb6c/nb-1-big
+SSTable: /var/lib/cassandra/data/test_diff/risk_cases-1b2e67c0e60f11f1805fe78a716fcb9b/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (2000)
-Maximum timestamp: 01/01/1970 00:00:00 (5000)
+Maximum timestamp: 01/01/1970 00:00:00 (6000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
 SSTable min local deletion time: no tombstones (9223372036854775807)
 SSTable max local deletion time: no tombstones (9223372036854775807)
@@ -15,11 +15,11 @@ Covered clusterings: [1, 1]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 3e73be72-1524-4ab7-9064-c285682ee286
+Originating host id: 82007b4c-7731-4dd9-b5d8-3220bb1beb08
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1795307318504, position=61452)=CommitLogPosition(segmentId=1795307318504, position=63678)}
-totalColumnsSet: 16
-totalRows: 17
+Replay positions covered: {CommitLogPosition(segmentId=1795308733229, position=61437)=CommitLogPosition(segmentId=1795308733229, position=63793)}
+totalColumnsSet: 18
+totalRows: 19
 Estimated tombstone drop times: 
    Drop Time | Count  (%)  Histogram 
    Percentiles
@@ -32,11 +32,11 @@ Estimated tombstone drop times:
    Max       0 
 Partition Size: 
    Size (bytes) | Count  (%)  Histogram 
-   35 (35 B)    |     2 ( 11) OOOOOO.
-   42 (42 B)    |     9 ( 52) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
-   50 (50 B)    |     1 (  5) OOO.
-   60 (60 B)    |     4 ( 23) OOOOOOOOOOOOO.
-   72 (72 B)    |     1 (  5) OOO.
+   35 (35 B)    |     2 ( 10) OOOOO.
+   42 (42 B)    |    11 ( 57) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   50 (50 B)    |     1 (  5) OO.
+   60 (60 B)    |     4 ( 21) OOOOOOOOOOo
+   72 (72 B)    |     1 (  5) OO.
    Percentiles
    50th      42 (42 B)
    75th      60 (60 B)
@@ -47,9 +47,9 @@ Partition Size:
    Max       72 (72 B)
 Column Count: 
    Columns | Count  (%)  Histogram 
-   1       |    15 ( 88) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
-   2       |     1 (  5) OO
-   3       |     1 (  5) OO
+   1       |    17 ( 89) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   2       |     1 (  5) Oo
+   3       |     1 (  5) Oo
    Percentiles
    50th      1
    75th      1
@@ -59,7 +59,7 @@ Column Count:
    Min       0
    Max       3
 Local token space coverage: NaN
-Estimated cardinality: 17
+Estimated cardinality: 19
 EncodingStats minTTL: 0
 EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (2000)

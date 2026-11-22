@@ -6,6 +6,8 @@ INSERT INTO risk_cases (id,ck,v) VALUES (6,1,'b-older') USING TIMESTAMP 3000;
 INSERT INTO risk_cases (id,ck,v) VALUES (7,1,'only-in-b') USING TIMESTAMP 3000;
 INSERT INTO risk_cases (id,ck,v) VALUES (9,1,'apple') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (19,1,'old-value') USING TIMESTAMP 5000;
+INSERT INTO risk_cases (id,ck,v) VALUES (20,1,'b-live') USING TIMESTAMP 6000;
+INSERT INTO risk_cases (id,ck,v) VALUES (21,1,'same') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (10,1,'zebra') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (11,1,'live-tie') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (12,1,'live-loses') USING TIMESTAMP 5000;

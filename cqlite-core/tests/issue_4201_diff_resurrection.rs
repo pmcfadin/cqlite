@@ -96,7 +96,7 @@ fn risk_schema() -> cqlite_core::schema::TableSchema {
 
 /// Tombstones' local deletion time, from `nb-2-big-Statistics.db.txt` ("SSTable min local
 /// deletion time", written by Cassandra's own `sstablemetadata`).
-const RISK_LDT: i64 = 1_795_307_390;
+const RISK_LDT: i64 = 1_795_308_805;
 const RISK_BOUNDARY: i64 = RISK_LDT + 864_000;
 
 async fn risk_report(sides: &(DiffSide, DiffSide), now: i64) -> Json {
@@ -479,7 +479,7 @@ async fn r2_newer_in_a_newer_in_b_only_a_only_b() {
     );
     assert_eq!(report["summary"]["newer_in_a"], 2, "ids 6 and 19");
     assert_eq!(report["summary"]["newer_in_b"], 1);
-    assert_eq!(report["summary"]["partitions_compared"], 19);
+    assert_eq!(report["summary"]["partitions_compared"], 21);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -654,7 +654,7 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         report["summary"]["resurrection_risk_past_gc_grace"], 5,
         "+ the two id-18 element tombstones"
     );
-    assert_eq!(report["summary"]["tombstones_only_a"], 10);
+    assert_eq!(report["summary"]["tombstones_only_a"], 12);
     // The tie's phase flips exactly at ldt + gc_grace too (PurgeFunction.java:41-42).
     let at = risk_report(&sides, RISK_BOUNDARY).await;
     assert_eq!(
@@ -662,7 +662,7 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         "before-gc-grace"
     );
     // A `no` risk is never counted into a phase.
-    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 5);
+    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 7);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -874,8 +874,11 @@ async fn r2_3_scalar_conflict_resolves_to_the_larger_bytes_and_mirrors() {
         (Some("apple"), Some("zebra"))
     );
     // The report is complete: the conflict did not abort the run, and is counted.
-    assert_eq!(report["summary"]["partitions_compared"], 19);
-    assert_eq!(report["summary"]["conflicts"], 5, "ids 9, 10, 11, 12, 15");
+    assert_eq!(report["summary"]["partitions_compared"], 21);
+    assert_eq!(
+        report["summary"]["conflicts"], 6,
+        "ids 9, 10, 11, 12, 15, 21"
+    );
     // A non-conflict cell carries no `resolves_to`.
     assert!(cell(partition(&report, "4"), "1", "v")
         .get("resolves_to")
@@ -1135,4 +1138,47 @@ async fn an_out_of_range_now_is_a_named_error_never_a_panic_or_a_wrap() {
         .await
         .unwrap_or_else(|error| panic!("now={now}: {error}"));
     }
+}
+
+#[tokio::test]
+async fn r2_7_the_tombstone_cassandra_keeps_is_chosen_not_the_first_in_the_trace() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
+    // id 20: A holds TWO cell tombstones for (1, v): @8000 (generation 2) and a BACKDATED @6000
+    // (generation 3, flushed later, so it comes first in the newest-first trace). Cassandra keeps
+    // the higher timestamp (Cells.resolveRegular, Cells.java:79-84): @8000. B holds a live cell
+    // @6000, which @8000 beats outright — no equal-timestamp tie, hence NO conflict; picking the
+    // @6000 tombstone by trace order would have faked a tie.
+    let p20 = partition(&report, "20");
+    let v = cell(p20, "1", "v");
+    assert_eq!(v["status"], "only-b", "{v}");
+    assert_eq!(v["b"]["value"], "b-live");
+    assert_eq!(
+        tombstones_of(p20, "cell").len(),
+        2,
+        "both tombstones are A's own, reported"
+    );
+}
+
+#[tokio::test]
+async fn r2_8_ttl_and_expiry_are_visible_on_the_cell_sides() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let report = risk_report(&sides, RISK_BOUNDARY + 1).await;
+    // id 12: A expiring (TTL 1e8, written with generation 2's mutation) vs B live, same timestamp.
+    let twelve = cell(partition(&report, "12"), "1", "v");
+    assert_eq!(twelve["a"]["ttl"], 100_000_000);
+    assert!(twelve["a"]["expires_at"].is_string(), "{twelve}");
+    assert!(twelve["b"].get("ttl").is_none() && twelve["b"].get("expires_at").is_none());
+    // id 21: SAME value and timestamp, differing only in TTL: a conflict whose payloads now differ.
+    let same = cell(partition(&report, "21"), "1", "v");
+    assert_eq!(same["status"], "conflict");
+    assert_eq!(
+        same["resolves_to"], "a",
+        "expiring beats live at equal timestamp"
+    );
+    assert_eq!(same["a"]["value"], same["b"]["value"]);
+    assert_eq!(same["a"]["ttl"], 100_000_000);
+    assert!(same["b"].get("ttl").is_none());
 }

@@ -1,1 +1,2 @@
 INSERT INTO risk_cases (id,ck,v) VALUES (19,1,'reinserted') USING TIMESTAMP 7000;
+DELETE v FROM risk_cases USING TIMESTAMP 6000 WHERE id=20 AND ck=1;

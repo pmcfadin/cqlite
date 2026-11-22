@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use super::fold::{cmp_clustering, fmt_clustering, fmt_micros};
+use super::fold::{cmp_clustering, fmt_clustering, fmt_micros, fmt_secs};
 use super::side::SideTrail;
 use super::types::{CellDiffEntry, CellSide, CellStatus, DiffError, Side};
 use crate::schema::TableSchema;
@@ -89,9 +89,16 @@ impl Version {
     }
 
     fn view(&self) -> CellSide {
+        // The expiry fields take part in `same_as` and in conflict resolution, so they are shown.
+        let expiring = self.ttl.is_some();
         CellSide {
             value: self.display.clone(),
             writetime: fmt_micros(self.timestamp),
+            ttl: self.ttl,
+            expires_at: expiring.then(|| fmt_secs(i64::from(self.local_deletion_time as u32))),
+            local_deletion_time: self
+                .tombstone
+                .then(|| fmt_secs(i64::from(self.local_deletion_time as u32))),
         }
     }
 }
@@ -159,7 +166,7 @@ impl SideCells {
             if out.winners.contains_key(&key) {
                 continue;
             }
-            out.tombstones.entry(key).or_insert(Version {
+            let candidate = Version {
                 clustering: tombstone.clustering.clone(),
                 timestamp: tombstone.deletion_time,
                 tombstone: true,
@@ -167,7 +174,21 @@ impl SideCells {
                 local_deletion_time: tombstone.local_deletion_time,
                 bytes: Vec::new(),
                 display: "<tombstone>".to_string(),
-            });
+            };
+            // Several tombstones for one key: keep the one Cassandra's reconciliation keeps, not
+            // the first in the trace. `Cells.resolveRegular` (cassandra-5.0.8
+            // `db/rows/Cells.java:79-129`): the higher timestamp wins (`:83-84`); two tombstones at
+            // one timestamp: the larger `localDeletionTime` (`:111-115`).
+            match out.tombstones.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(candidate);
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    if resolve_cell(&candidate, slot.get()).0 {
+                        slot.insert(candidate);
+                    }
+                }
+            }
         }
         Ok(out)
     }

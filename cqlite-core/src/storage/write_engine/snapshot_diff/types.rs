@@ -87,6 +87,15 @@ pub struct CellSide {
     pub value: String,
     /// RFC3339 with up to microsecond precision.
     pub writetime: String,
+    /// The cell's TTL in seconds, for an expiring cell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u32>,
+    /// RFC3339 expiry of an expiring cell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// RFC3339 local deletion time of a tombstone side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_deletion_time: Option<String>,
 }
 
 /// One compared cell.

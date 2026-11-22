@@ -59,7 +59,19 @@ fn field(text: &str) -> String {
 
 fn cell_side(side: &Option<CellSide>) -> String {
     match side {
-        Some(cell) => format!("{}@{}", field(&cell.value), cell.writetime),
+        Some(cell) => {
+            let mut text = format!("{}@{}", field(&cell.value), cell.writetime);
+            if let Some(ttl) = cell.ttl {
+                text.push_str(&format!(";ttl={ttl}"));
+            }
+            if let Some(expires) = &cell.expires_at {
+                text.push_str(&format!(";expires={expires}"));
+            }
+            if let Some(ldt) = &cell.local_deletion_time {
+                text.push_str(&format!(";ldt={ldt}"));
+            }
+            text
+        }
         None => "-".to_string(),
     }
 }
