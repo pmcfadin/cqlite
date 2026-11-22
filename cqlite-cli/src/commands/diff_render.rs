@@ -213,6 +213,9 @@ mod tests {
             a: Some(CellSide {
                 value: hostile.to_string(),
                 writetime: "t".into(),
+                ttl: None,
+                expires_at: None,
+                local_deletion_time: None,
             }),
             b: None,
         };
