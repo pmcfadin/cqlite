@@ -585,7 +585,7 @@ async fn damaged_compression_info_db_refuses_as_classified() {
 }
 
 /// A corrupt `Statistics.db` header is a component failure salvage meets
-/// while classifying the input's repair state (`classify_inputs`) — must
+/// while opening the input (#4612: formerly in `classify_inputs`) — must
 /// classify, not hard-error.
 #[tokio::test]
 async fn damaged_statistics_db_refuses_as_classified() {
@@ -604,34 +604,26 @@ async fn damaged_statistics_db_refuses_as_classified() {
     let out_root = temp.path().join("out");
     let report =
         assert_component_unreadable_refusal("statistics_db_header_damage", &out_root).await;
-    // Roborev, issue #4196, round-9 Low finding: `classify_inputs` (this
-    // fixture's failure point) fires AFTER `report.partitions.total` is
-    // already set (boundary enumeration succeeded) — round-8's
-    // `partitions.total > 0` heuristic read this as "measured" and printed
-    // the (misleadingly zero-but-real-looking) partition numbers — but the
-    // per-partition loop itself NEVER RAN (`classify_inputs` fires BEFORE
-    // `report.attempted = true`, which sits immediately before the loop).
-    // MEASURED (empirically, this round): `partitions.total == 1` here
-    // (boundary enumeration DID succeed) while `attempted == false` (the
-    // loop never started) — exactly the divergence that made round-8's
-    // heuristic wrong, and exactly what `attempted` is for.
+    // #4612 (CHANGED EXPECTATION): the failure point moved. `SSTableReader::open` now runs
+    // Cassandra's TOC/CRC check on Statistics.db (this fixture's flipped TOC byte fails the
+    // count checksum), so the refusal fires at `open_reader` — BEFORE `partitions.total` is
+    // populated — where it used to survive `open_reader` and fail later in `classify_inputs`
+    // (total == 1). The CONTRACT is unchanged: a classified `ComponentUnreadable` refusal with a
+    // manifest (asserted above), nothing attempted, partitions/losses rendered NOT MEASURED.
     assert_eq!(
-        report.partitions.total, 1,
-        "boundary enumeration must have succeeded (this fixture's corruption is in \
-         Statistics.db, not Index.db); got {:?}",
+        report.partitions.total, 0,
+        "the refusal fires before boundary enumeration is counted; got {:?}",
         report
     );
     assert!(
         !report.attempted,
-        "classify_inputs fires BEFORE the per-partition loop's report.attempted = true, even \
-         though partitions.total is already populated; got {:?}",
+        "the per-partition loop must never start; got {:?}",
         report
     );
     let text = report.render_text();
     assert!(
         text.contains("NOT MEASURED"),
-        "attempted=false must render NOT MEASURED even though partitions.total > 0 — this is \
-         the EXACT case round-8's `partitions.total > 0` heuristic got wrong; got:\n{text}"
+        "attempted=false must render NOT MEASURED, never zero partition numbers; got:\n{text}"
     );
     eprintln!(
         "[issue_4196] statistics_db_header_damage: salvage refused as expected ({report:?})."

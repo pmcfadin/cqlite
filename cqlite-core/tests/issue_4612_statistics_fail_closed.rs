@@ -118,6 +118,18 @@ fn damaged_variants(pristine: &[u8]) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+fn big_schema() -> cqlite_core::schema::TableSchema {
+    let p = datasets_root::schema_path("basic-types.cql").expect("committed schema");
+    let cql = std::fs::read_to_string(p).expect("schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {}", BIG.1))
+        .expect("create table");
+    let end = start + cql[start..].find(';').unwrap() + 1;
+    let mut t = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end]).unwrap();
+    t.keyspace = BIG.0.to_string();
+    t
+}
+
 async fn platform() -> (Config, Arc<Platform>) {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
@@ -207,17 +219,7 @@ async fn files_the_lenient_parser_accepts_no_longer_open() {
 #[tokio::test]
 async fn compaction_refuses_a_damaged_input_naming_the_path() {
     let Some(copy) = stage(BIG) else { return };
-    let schema = {
-        let p = datasets_root::schema_path("basic-types.cql").expect("committed schema");
-        let cql = std::fs::read_to_string(p).expect("schema");
-        let start = cql
-            .find(&format!("CREATE TABLE IF NOT EXISTS {}", BIG.1))
-            .expect("create table");
-        let end = start + cql[start..].find(';').unwrap() + 1;
-        let mut t = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end]).unwrap();
-        t.keyspace = BIG.0.to_string();
-        t
-    };
+    let schema = big_schema();
     for (label, bytes) in damaged_variants(&copy.pristine) {
         std::fs::write(&copy.stats, &bytes).expect("write damaged Statistics.db");
         let out = TempDir::new().expect("out");
@@ -305,17 +307,7 @@ async fn diagnose_names_the_generation_as_unreadable() {
 #[tokio::test]
 async fn salvage_refuses_with_a_classified_manifest() {
     let Some(copy) = stage(BIG) else { return };
-    let schema = {
-        let p = datasets_root::schema_path("basic-types.cql").expect("committed schema");
-        let cql = std::fs::read_to_string(p).expect("schema");
-        let start = cql
-            .find(&format!("CREATE TABLE IF NOT EXISTS {}", BIG.1))
-            .expect("create table");
-        let end = start + cql[start..].find(';').unwrap() + 1;
-        let mut t = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end]).unwrap();
-        t.keyspace = BIG.0.to_string();
-        t
-    };
+    let schema = big_schema();
     for (label, bytes) in damaged_variants(&copy.pristine) {
         std::fs::write(&copy.stats, &bytes).expect("write damaged Statistics.db");
         let out = TempDir::new().expect("out");
@@ -334,5 +326,58 @@ async fn salvage_refuses_with_a_classified_manifest() {
             report.partitions.written, 0,
             "{label}: nothing may be written"
         );
+    }
+}
+
+/// `rebuild`'s documented recovery outcome for an unreadable ORIGINAL Statistics.db (spec
+/// rebuild-components R4.2/R4.3): the repair fields are `lost`, the baseline falls back to the
+/// decode derivation — never a value read out of a partially-parsed file. Here the original is
+/// renamed aside (the sibling is then absent, rebuild's headline case) and the recovery source is
+/// the DAMAGED copy.
+#[tokio::test]
+async fn rebuild_classifies_a_damaged_recovery_source_lost() {
+    use cqlite_core::storage::write_engine::rebuild::{
+        rebuild_components, Component, RebuildOptions,
+    };
+    let Some(copy) = stage(BIG) else { return };
+    let schema = big_schema();
+    let prefix = copy
+        .data
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .trim_end_matches("Data.db")
+        .to_string();
+    let aside_dir = copy.dir.join("aside");
+    std::fs::create_dir_all(&aside_dir).expect("aside dir");
+    let aside = aside_dir.join(format!("{prefix}Statistics.db"));
+    std::fs::remove_file(&copy.stats).expect("remove sibling");
+    for (label, bytes) in damaged_variants(&copy.pristine) {
+        std::fs::write(&aside, &bytes).expect("write damaged recovery source");
+        let out = copy.dir.join("out");
+        let _ = std::fs::remove_dir_all(&out);
+        let options = RebuildOptions {
+            out_dir: out,
+            statistics_recovery_source: Some(aside.clone()),
+        };
+        let report = rebuild_components(&copy.data, &schema, &[Component::Statistics], &options)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: rebuild must classify, not abort: {e}"));
+        assert!(
+            report.refused.is_none(),
+            "{label}: refused: {:?}",
+            report.refused
+        );
+        let classification = report
+            .classification
+            .get("statistics")
+            .expect("classification");
+        for field in ["repaired_at", "pending_repair", "is_transient"] {
+            assert_eq!(
+                classification.get(field).map(String::as_str),
+                Some("lost"),
+                "{label}: field {field} must be `lost` from a damaged source, report={report:?}"
+            );
+        }
     }
 }

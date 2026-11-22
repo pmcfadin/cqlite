@@ -128,11 +128,13 @@ struct InputRepairFields {
 /// * its descriptor / STATS component is malformed (parse fails closed).
 fn read_repair_fields(data_path: &Path) -> Result<InputRepairFields> {
     let stats_path = stats_path_for(data_path);
-    let bytes = std::fs::read(&stats_path).map_err(|e| {
-        Error::Compaction(format!(
-            "cannot read {stats_path:?} to classify repair state for compaction: {e}"
-        ))
-    })?;
+    let bytes =
+        crate::storage::sstable::statistics_reader::integrity::read_checked_statistics(&stats_path)
+            .map_err(|e| {
+                Error::Compaction(format!(
+                    "cannot read {stats_path:?} to classify repair state for compaction: {e}"
+                ))
+            })?;
     let gates = VersionGates::from_path(&stats_path).map_err(|e| {
         Error::Compaction(format!(
             "cannot derive version gates from {stats_path:?} for repair-state classification: {e:?}"
