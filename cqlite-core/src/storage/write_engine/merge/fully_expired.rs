@@ -316,6 +316,15 @@ pub(crate) fn reclaim_dropped_whole<F: FnMut(&Path)>(
     }
 }
 
+/// Refuse a damaged input `Statistics.db` before any lenient reader (schema normalization,
+/// baseline seeding) touches it (#4612): those degrade a partial parse into re-ordered columns
+/// and re-based timestamps. A missing file keeps its existing handling; the error names the path.
+pub(crate) fn require_checked_inputs(
+    input_paths: &[std::path::PathBuf],
+) -> crate::error::Result<()> {
+    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(input_paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,13 +670,4 @@ mod tests {
             "an unknown outside bound in a partial compaction must retain all candidates"
         );
     }
-}
-
-/// Refuse a damaged input `Statistics.db` before any lenient reader (schema normalization,
-/// baseline seeding) touches it (#4612): those degrade a partial parse into re-ordered columns
-/// and re-based timestamps. A missing file keeps its existing handling; the error names the path.
-pub(crate) fn require_checked_inputs(
-    input_paths: &[std::path::PathBuf],
-) -> crate::error::Result<()> {
-    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(input_paths)
 }
