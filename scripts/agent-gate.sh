@@ -90,7 +90,7 @@
 #                      target can't read as PASS.
 #   memory-budget      dhat allocation/peak-heap regression nets (dhat-heap;
 #                      --test-threads=1 since dhat::Profiler is a process-global
-#                      singleton). SIX lanes: (a) read path — memory_budget.rs
+#                      singleton). SEVEN lanes: (a) read path — memory_budget.rs
 #                      (issue #1565, Epic A/A4), pinning full-scan total-bytes
 #                      (~209 MB, ceiling 252 MB) + materializing peak (~4.9 MB,
 #                      ceiling 6 MB, also < 128 MiB); (b) export converter —
@@ -111,7 +111,11 @@
 #                      diagnose_deep_memory_budget.rs (issue #4204, spec R3.3), a
 #                      deep scan (+ dry-compaction reclaim with a schema) over EVERY
 #                      test_wide_rows table, corpus-wide peak live heap <= 128 MiB
-#                      plus a pinned 1 MiB ceiling (measured 381 KB).
+#                      plus a pinned 1 MiB ceiling (measured 381 KB); (g) `cqlite
+#                      diff` — issue_4201_diff_memory_budget.rs (issue #4201, spec
+#                      R8.1), `diff_table` over EVERY test_wide_rows table staged
+#                      identically on both sides, corpus-wide peak live heap <= 128
+#                      MiB plus a pinned 3 MiB ceiling (measured 936 KB).
 #                      dhat counts are machine-independent, so this is the hard,
 #                      load-deterministic export/Flight/read signal. Dataset-
 #                      dependent lanes fail closed on empty (assert >=1 row/cell/
@@ -28403,6 +28407,12 @@ dispatch_component() {
   _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
   env CQLITE_REQUIRE_FIXTURES=1 cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_4204_diagnose_deep_memory_budget -- --test-threads=1 || rc=1
+  # (g) `cqlite diff` (#4201, spec R8.1): `diff_table` over EVERY test_wide_rows table staged
+  # identically on both sides, corpus-wide peak live heap under the 128 MiB budget and a pinned
+  # ~936 KB-measured ceiling. Same feature set / CQLITE_REQUIRE_FIXTURES=1 contract as (e)/(f).
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
+  env CQLITE_REQUIRE_FIXTURES=1 cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
+    --test issue_4201_diff_memory_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
     integration-tests)
       # #3453: see the memory-budget branch — package hoisted so the recorded scope and
@@ -28468,7 +28478,11 @@ dispatch_component() {
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --lib reconcile_laws &&
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
-  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4497_byte_comparable_order' ;;
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4497_byte_comparable_order &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4201_diff_resurrection &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4201_diff_symmetry' ;;
     cli-tests)
       # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
       # write-support) and a single-value annotation would be false for it — each pass

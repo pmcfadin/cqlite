@@ -251,6 +251,13 @@ name = "explain_cli_tests"
 path = "tests/explain_cli_tests.rs"
 required-features = ["write-support"]
 
+# Issue #4201: `cqlite diff` drives the traced write-engine merge and owns its 0/1/2 exit-code
+# contract, so this target must use write support (cli-tests enumerates tests/*.rs).
+[[test]]
+name = "diff_cli_tests"
+path = "tests/diff_cli_tests.rs"
+required-features = ["write-support"]
+
 # Issue #4196 (roborev L3): the publication-barrier cases drive the compiled
 # binary the same way salvage_cli_tests does, so they carry the same feature
 # requirement. Declared EXPLICITLY rather than left to cargo's auto-discovery:

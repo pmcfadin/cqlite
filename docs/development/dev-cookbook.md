@@ -541,6 +541,32 @@ beats a live cell).
 query-PLAN display, unrelated to reconciliation) — the naming collision is
 intentional (owner ruling, design.md §D7) and `cqlite explain --help` says so.
 
+### Diff two snapshots of a table (issue #4201)
+
+```bash
+# READ-ONLY: never writes to, creates a file in, or modifies either directory.
+cargo run --package cqlite-cli --features write-support -- \
+  --schema ks.tbl.cql \
+  diff ./node1/ks/tbl-<id> ./node2/ks/tbl-<id> --table ks.tbl --now 1795222425 --out json
+```
+
+`diff` compares the same table's reconciled state in two flat table directories (each resolved
+exactly as `explain` resolves one: live generations only, never `snapshots/` or `backups/`). It
+reports, per `(clustering, column)`, `equal | only-a | only-b | newer-in-a | newer-in-b` and, per
+tombstone held by exactly one side, `only-a | only-b` plus an always-present `resurrection_risk`:
+`yes` when the other side still holds live data the tombstone shadows (named in `shadowed_cells`),
+qualified `before-gc-grace` or `past-gc-grace` at `--now` (strict `local_deletion_time < now -
+gc_grace_seconds`; `past-gc-grace` means its holder may purge it and the other side's data would
+return on the next repair or restore). A tombstone both sides hold is omitted. `--partition <key>`
+(repeatable) restricts the scan through the point-read path; `--out text|json`. Exit 0 = a report
+rendered (divergence is a finding, not a failure), 1 = usage error, 2 = a generation on either side
+cannot be read (the message names `side=a|b` and the path; every generation's `Statistics.db` is
+checked against Cassandra's checksums first, because the reader would otherwise degrade silently)
+or the report exceeds `performance.max_result_bytes`. Declared gaps: a non-frozen collection's
+elements are compared as a multiset under one `(clustering, column)` key, a row's liveness marker
+is not a cell in the trail, and two sides holding different values at one identical write
+timestamp is refused (exit 2) because the five cell statuses cannot express it.
+
 ### Output format precedence
 
 - `--out` takes precedence over `--format` when both specified

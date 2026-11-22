@@ -328,7 +328,7 @@ fn resolve_data_root(
 }
 
 #[cfg(feature = "write-support")]
-fn parse_literal_values(raw: &str) -> Result<Vec<cqlite_core::Value>> {
+pub(super) fn parse_literal_values(raw: &str) -> Result<Vec<cqlite_core::Value>> {
     use cqlite_core::query::select_ast::{SelectClause, SelectExpression};
     use cqlite_core::query::select_parser::parse_select;
 
@@ -412,7 +412,7 @@ pub(super) struct ExplainNow {
 }
 
 #[cfg(feature = "write-support")]
-fn resolve_now(raw: Option<&str>) -> Result<ExplainNow> {
+pub(super) fn resolve_now(raw: Option<&str>) -> Result<ExplainNow> {
     if let Some(raw) = raw {
         let raw = raw.trim();
         if let Ok(epoch_secs) = raw.parse::<i64>() {

@@ -31,6 +31,9 @@
 //! file, and a table directory with zero `*-Data.db` files is still exactly
 //! one `unreadable` row.
 
+/// `sweep --help` long description (moved out of `cli_types.rs`, #1116 file-size ratchet).
+pub const SWEEP_LONG_ABOUT: &str = "Walk every <keyspace>/<table>-<id>/ directory under <data-dir> (exactly two levels; a `.<index-name>/` secondary-index subdirectory, `snapshots/`, or `backups/` is NOT descended into and contributes no row -- out of scope for this verb), verify EVERY SSTable generation found there (not just the first) with the same check pipeline as `cqlite verify`, and report one row per generation: severity ok|degraded|corrupt|unreadable, plus a data-dir-wide exit code. `degraded` names a CQLite-only detection (e.g. a Filter.db false negative) that is not proof of unreadability -- it alone never trips a non-zero exit. A table directory with zero readable generations (no readable Data.db, unopenable directory, OR a table that has genuinely never been flushed -- e.g. sweeping a live Cassandra data directory will report many such rows for untouched system tables) is a row with severity `unreadable`, never a silently-dropped entry. Exit 0 = every row ok; 2 = any row corrupt or unreadable, OR zero generations were found under <data-dir> at all (degraded rows are OK-adjacent, see design.md S2); 1 = usage error (<data-dir> missing or not a directory). --jobs bounds how many generations verify concurrently on the blocking thread pool. Omitting it means 1 -- SEQUENTIAL, one table open at a time; passing --jobs N opts in to parallelism and is clamped to a fixed maximum of 8 (peak memory scales with jobs -- verification reads a whole Data.db into memory even in quick mode) -- it never changes which rows appear or their severities. Example: cqlite sweep ./test-data/datasets/sstables --mode full --out json --jobs 4";
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
