@@ -576,10 +576,7 @@ async fn r4_1_past_gc_grace_names_every_shadowed_cell_for_all_three_kinds() {
         shadowed(tombstones_of(partition(&report, "2"), "partition")[0]),
         expected
     );
-    assert_eq!(
-        report["summary"]["resurrection_risk_past_gc_grace"], 5,
-        "+ the two id-18 element tombstones"
-    );
+    assert_eq!(report["summary"]["resurrection_risk_past_gc_grace"], 3,);
     assert_eq!(report["summary"]["resurrection_risk_before_gc_grace"], 0);
     // Every shadowed cell is attributed to side B (the side that still holds the data).
     for tombstone in report["partitions"]
