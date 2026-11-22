@@ -230,45 +230,6 @@ fn encoded_len_of<T: serde::Serialize>(value: &T) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-
-    #[test]
-    fn trails_never_take_more_than_half_of_what_is_left() {
-        for (budget, used) in [(100, 0), (100, 60), (100, 100), (100, 500), (u64::MAX, 0)] {
-            let each = trail_budget(budget, used);
-            let left = budget.saturating_sub(used);
-            assert!(each <= (left / 4).max(TRAIL_FLOOR));
-            assert!(each.saturating_mul(2) <= left / 2 || each == TRAIL_FLOOR);
-        }
-        assert_eq!(trail_budget(100, 100), TRAIL_FLOOR);
-        assert_eq!(
-            trail_budget(MAX_EFFECTIVE_BUDGET, 0),
-            MAX_EFFECTIVE_BUDGET / 4
-        );
-    }
-
-    #[test]
-    fn the_effective_budget_is_capped_below_the_heap_target() {
-        assert!(MAX_EFFECTIVE_BUDGET * 4 <= 128 * 1024 * 1024);
-    }
-
-    #[test]
-    fn gc_grace_parsing_mirrors_the_merge() {
-        let mut schema = TableSchema::new_for_testing("ks", "t");
-        assert_eq!(declared_gc_grace(&schema), Some(864_000));
-        schema
-            .comments
-            .insert("gc_grace_seconds".into(), "0".into());
-        assert_eq!(declared_gc_grace(&schema), Some(0));
-        schema
-            .comments
-            .insert("gc_grace_seconds".into(), "-1".into());
-        assert_eq!(declared_gc_grace(&schema), None);
-    }
-}
-
 async fn run(
     side_a: &DiffSide,
     side_b: &DiffSide,
@@ -372,4 +333,43 @@ async fn run(
         return Err(too_large(exact, report.partitions.len()));
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn trails_never_take_more_than_half_of_what_is_left() {
+        for (budget, used) in [(100, 0), (100, 60), (100, 100), (100, 500), (u64::MAX, 0)] {
+            let each = trail_budget(budget, used);
+            let left = budget.saturating_sub(used);
+            assert!(each <= (left / 4).max(TRAIL_FLOOR));
+            assert!(each.saturating_mul(2) <= left / 2 || each == TRAIL_FLOOR);
+        }
+        assert_eq!(trail_budget(100, 100), TRAIL_FLOOR);
+        assert_eq!(
+            trail_budget(MAX_EFFECTIVE_BUDGET, 0),
+            MAX_EFFECTIVE_BUDGET / 4
+        );
+    }
+
+    #[test]
+    fn the_effective_budget_is_capped_below_the_heap_target() {
+        assert!(MAX_EFFECTIVE_BUDGET * 4 <= 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn gc_grace_parsing_mirrors_the_merge() {
+        let mut schema = TableSchema::new_for_testing("ks", "t");
+        assert_eq!(declared_gc_grace(&schema), Some(864_000));
+        schema
+            .comments
+            .insert("gc_grace_seconds".into(), "0".into());
+        assert_eq!(declared_gc_grace(&schema), Some(0));
+        schema
+            .comments
+            .insert("gc_grace_seconds".into(), "-1".into());
+        assert_eq!(declared_gc_grace(&schema), None);
+    }
 }

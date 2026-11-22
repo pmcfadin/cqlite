@@ -261,6 +261,19 @@ pub(super) fn fold_cells(
     Ok(out.into_iter().map(|(_, _, entry)| entry).collect())
 }
 
+/// Whether the tombstone HOLDER's own live winner `holder` supersedes the other side's older
+/// cell `remote` once the two sides are merged: `Cells.resolveRegular` (cassandra-5.0.8
+/// `db/rows/Cells.java:79-128`) keeps `holder` over `remote`. If it does, the remote value cannot
+/// resurrect after the tombstone is purged — repair reconciles it away (`DeletionTime.deletes` only
+/// speaks about the tombstone; the surviving newer cell wins the merge).
+pub(super) fn holder_supersedes(
+    holder: &crate::storage::write_engine::merge::trace::CellDecision,
+    remote: &crate::storage::write_engine::merge::trace::CellDecision,
+) -> crate::Result<bool> {
+    let (h, r) = (Version::from_winner(holder)?, Version::from_winner(remote)?);
+    Ok(resolve_cell(&h, &r).0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,17 +318,4 @@ mod tests {
             other => panic!("expected CellSerialization, got {other:?}"),
         }
     }
-}
-
-/// Whether the tombstone HOLDER's own live winner `holder` supersedes the other side's older
-/// cell `remote` once the two sides are merged: `Cells.resolveRegular` (cassandra-5.0.8
-/// `db/rows/Cells.java:79-128`) keeps `holder` over `remote`. If it does, the remote value cannot
-/// resurrect after the tombstone is purged — repair reconciles it away (`DeletionTime.deletes` only
-/// speaks about the tombstone; the surviving newer cell wins the merge).
-pub(super) fn holder_supersedes(
-    holder: &crate::storage::write_engine::merge::trace::CellDecision,
-    remote: &crate::storage::write_engine::merge::trace::CellDecision,
-) -> crate::Result<bool> {
-    let (h, r) = (Version::from_winner(holder)?, Version::from_winner(remote)?);
-    Ok(resolve_cell(&h, &r).0)
 }
