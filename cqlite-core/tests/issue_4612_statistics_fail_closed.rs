@@ -10,6 +10,9 @@
 //! failure into their documented outcome, never abort or give a confident wrong answer.
 //! Every case asserts independently; there is no suite-wide `ran > 0`.
 
+// salvage / rebuild / diagnose carry this gate (their decode primitives are not tombstones-aware).
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
+
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
 
