@@ -16,7 +16,11 @@ fn first_line(report: &DiffReport, now: &ExplainNow) -> String {
         format!(
             "side_{label}: generations={} [{}]",
             info.generations.len(),
-            info.generations.join(", ")
+            info.generations
+                .iter()
+                .map(|name| field(name))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     };
     format!(
@@ -274,6 +278,38 @@ mod tests {
             lines[1].contains(r"line1\nline2\tcol  b=c\r\u{7}"),
             "{}",
             lines[1]
+        );
+    }
+
+    #[test]
+    fn hostile_generation_names_cannot_break_the_first_line() {
+        let report = DiffReport {
+            now: "n".into(),
+            table: "t".into(),
+            gc_grace_seconds: 1,
+            side_a: SideInfo {
+                dir: "a".into(),
+                generations: vec!["nb-1\nforged  line".into(), "ok-2".into()],
+            },
+            side_b: SideInfo {
+                dir: "b".into(),
+                generations: vec![],
+            },
+            partitions: vec![],
+            summary: DiffSummary::default(),
+        };
+        let now = ExplainNow {
+            epoch_secs: 1,
+            wall_clock: false,
+        };
+        let text = render(&report, false, &now).unwrap();
+        assert_eq!(text.lines().count(), 2, "first line + summary: {text}");
+        assert!(
+            text.lines()
+                .next()
+                .unwrap()
+                .contains(r#"["nb-1\nforged  line", ok-2]"#),
+            "{text}"
         );
     }
 

@@ -8,7 +8,7 @@ use crate::schema::{TableSchema, UdtRegistry};
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::SSTableReader;
 use crate::storage::write_engine::merge::trace::{
-    CellDecision, ProbeOutcome, RecordingSink, TombstoneRecord, TraceSink,
+    CellDecision, ProbeOutcome, RecordingSink, TombstoneKind, TombstoneRecord, TraceSink, Verdict,
 };
 use crate::storage::write_engine::merge::{
     build_traced_merger_with_registry, compute_gc_before, MergeStep,
@@ -117,8 +117,48 @@ pub(super) fn trace_partition(
             rows: sink.inner.cells().len(),
         });
     }
-    let (cells, tombstones, _probes) = sink.inner.into_parts();
+    let (cells, mut tombstones, _probes) = sink.inner.into_parts();
+    tombstones.extend(expiry_tombstones(
+        &cells,
+        compute_gc_before(schema, options.now_secs),
+    ));
     Ok(SideTrail { cells, tombstones })
+}
+
+/// The tombstone Cassandra turns each expired TTL cell into, as a [`TombstoneRecord`] the shadow
+/// and resurrection rules can see.
+///
+/// A cell that is not live at `now` is "equivalent to a tombstone": `AbstractCell.purge`
+/// (cassandra-5.0.8 `db/rows/AbstractCell.java:78-97`) replaces an expired, not-yet-purgeable
+/// expiring cell with `BufferCell.tombstone(column, timestamp(), localDeletionTime() - ttl(), path())`
+/// — the SAME write timestamp, and a local deletion time of the cell's creation instant
+/// (`expiry - ttl`, `:95`). That tombstone is what repair propagates, and it is purgeable under the
+/// ordinary strict `localDeletionTime < gcBefore` rule (`PurgeFunction.java:41-42`), so its gc
+/// phase is that of the creation time, not of the expiry. The merge already decided the cell
+/// expired (`Verdict::Expired`, `reconcile.rs` Step 3b'); this only mirrors that decision, and only
+/// for cells that survived reconciliation (the merge emits `Expired` for survivors alone).
+fn expiry_tombstones(cells: &[CellDecision], gc_before: Option<i64>) -> Vec<TombstoneRecord> {
+    cells
+        .iter()
+        .filter(|cell| cell.verdict == Verdict::Expired)
+        .filter_map(|cell| {
+            let (ttl, expires_at) = (i64::from(cell.ttl?), cell.expires_at?);
+            let creation = expires_at.checked_sub(ttl)?;
+            let ldt = u32::try_from(creation).ok()? as i32;
+            Some(TombstoneRecord {
+                kind: TombstoneKind::Cell,
+                run_index: cell.run_index,
+                clustering: cell.clustering.clone(),
+                column: Some(cell.column.clone()),
+                cell_path: cell.cell_path.clone(),
+                deletion_time: cell.writetime,
+                local_deletion_time: ldt,
+                range_start: None,
+                range_end: None,
+                droppable_at_now: gc_before.is_some_and(|gc| creation < gc),
+            })
+        })
+        .collect()
 }
 
 async fn open_generation(path: &std::path::Path) -> Result<SSTableReader> {

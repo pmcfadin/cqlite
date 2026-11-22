@@ -58,6 +58,7 @@ INSERT INTO risk_cases (id,ck,v) VALUES (9,1,'apple') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (19,1,'old-value') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (20,1,'b-live') USING TIMESTAMP 6000;
 INSERT INTO risk_cases (id,ck,v) VALUES (21,1,'same') USING TIMESTAMP 5000;
+INSERT INTO risk_cases (id,ck,v) VALUES (22,1,'older') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (10,1,'zebra') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (11,1,'live-tie') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (12,1,'live-loses') USING TIMESTAMP 5000;
@@ -91,7 +92,8 @@ DELETE m['k1'], m['k2'] FROM risk_cases USING TIMESTAMP 6000 WHERE id=18 AND ck=
 log "generation 1"; run_cql "$G1"; cx nodetool flush "$KEYSPACE" "$TABLE"
 sleep 3
 G3="INSERT INTO risk_cases (id,ck,v) VALUES (19,1,'reinserted') USING TIMESTAMP 7000;
-DELETE v FROM risk_cases USING TIMESTAMP 6000 WHERE id=20 AND ck=1;"
+DELETE v FROM risk_cases USING TIMESTAMP 6000 WHERE id=20 AND ck=1;
+INSERT INTO risk_cases (id,ck,v) VALUES (22,1,'expiring') USING TIMESTAMP 9000 AND TTL 5;"
 log "generation 2"; run_cql "$G2"; cx nodetool flush "$KEYSPACE" "$TABLE"
 sleep 3
 log "generation 3"; run_cql "$G3"; cx nodetool flush "$KEYSPACE" "$TABLE"

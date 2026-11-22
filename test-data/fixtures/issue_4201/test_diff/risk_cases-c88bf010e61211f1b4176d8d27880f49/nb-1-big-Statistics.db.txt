@@ -1,4 +1,4 @@
-SSTable: /var/lib/cassandra/data/test_diff/risk_cases-1b2e67c0e60f11f1805fe78a716fcb9b/nb-1-big
+SSTable: /var/lib/cassandra/data/test_diff/risk_cases-c88bf010e61211f1b4176d8d27880f49/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (2000)
@@ -15,11 +15,11 @@ Covered clusterings: [1, 1]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 82007b4c-7731-4dd9-b5d8-3220bb1beb08
+Originating host id: 39e02de6-aef3-492f-bfb6-e4384c750dd5
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1795308733229, position=61437)=CommitLogPosition(segmentId=1795308733229, position=63793)}
-totalColumnsSet: 18
-totalRows: 19
+Replay positions covered: {CommitLogPosition(segmentId=1795310312243, position=61437)=CommitLogPosition(segmentId=1795310312243, position=63858)}
+totalColumnsSet: 19
+totalRows: 20
 Estimated tombstone drop times: 
    Drop Time | Count  (%)  Histogram 
    Percentiles
@@ -32,34 +32,34 @@ Estimated tombstone drop times:
    Max       0 
 Partition Size: 
    Size (bytes) | Count  (%)  Histogram 
-   35 (35 B)    |     2 ( 10) OOOOO.
-   42 (42 B)    |    11 ( 57) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   35 (35 B)    |     2 ( 10) OOOOO
+   42 (42 B)    |    12 ( 60) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    50 (50 B)    |     1 (  5) OO.
-   60 (60 B)    |     4 ( 21) OOOOOOOOOOo
+   60 (60 B)    |     4 ( 20) OOOOOOOOOO
    72 (72 B)    |     1 (  5) OO.
    Percentiles
    50th      42 (42 B)
-   75th      60 (60 B)
-   95th      72 (72 B)
+   75th      50 (50 B)
+   95th      60 (60 B)
    98th      72 (72 B)
    99th      72 (72 B)
    Min       30 (30 B)
    Max       72 (72 B)
 Column Count: 
    Columns | Count  (%)  Histogram 
-   1       |    17 ( 89) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
-   2       |     1 (  5) Oo
-   3       |     1 (  5) Oo
+   1       |    18 ( 90) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   2       |     1 (  5) O.
+   3       |     1 (  5) O.
    Percentiles
    50th      1
    75th      1
-   95th      3
+   95th      2
    98th      3
    99th      3
    Min       0
    Max       3
 Local token space coverage: NaN
-Estimated cardinality: 19
+Estimated cardinality: 20
 EncodingStats minTTL: 0
 EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (2000)

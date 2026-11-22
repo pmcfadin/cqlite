@@ -10,8 +10,8 @@ Backs **#4201** (`cqlite diff`: replica divergence and resurrection risk).
   `test-data/scripts/generate-issue-4201-diff-risk.sh`; every mutation pins `USING TIMESTAMP`
   (`generation-1.cql`, `generation-2.cql`), `sstabledump` goldens (`*-Data.db.jsonl`) and
   `sstablemetadata` (`*-Statistics.db.txt`) sit next to the bytes. The tombstones' local deletion
-  time is `1795308805` (2026-11-22T00:53:25Z, `nb-2-big-Statistics.db.txt`); with
-  `gc_grace_seconds = 864000` the strict-`<` purge boundary is `1796172805`.
+  time is `1795310384` (2026-11-22T01:19:44Z, `nb-2-big-Statistics.db.txt`); with
+  `gc_grace_seconds = 864000` the strict-`<` purge boundary is `1796174384`.
 - Checkout-relative on purpose (an sstables root, like `issue_4530`); `*.db` are force-added.
 - Consumers: `cqlite-core/tests/issue_4201_diff_resurrection.rs`, `issue_4201_diff_symmetry.rs`,
   `cqlite-cli/tests/diff_cli_tests.rs`.
@@ -44,3 +44,4 @@ cassandra-5.0.8 `db/DeletionTime.java:173-175`), never from CQLite output:
 | 19 | cell tombstone `v` @6000 (gen 2), then re-insert `v='reinserted'` @7000 (gen 3) | `v='old-value'` @5000 | cell `newer-in-a`; the tombstone is `only-a` with risk **no**: A's own newer live cell wins the merge (`Cells.resolveRegular`), so the old value cannot resurrect |
 | 20 | cell tombstones `v` @8000 (gen 2) and a BACKDATED @6000 (gen 3) | `v='b-live'` @6000 | cell `only-b` (Cassandra keeps the @8000 tombstone, which beats @6000 outright; NOT a conflict) |
 | 21 | `v='same'` @5000 TTL 1e8 | `v='same'` @5000 | cell `conflict`, `resolves_to: a`; payloads differ only in `ttl`/`expires_at` |
+| 22 | `v='expiring'` @9000 TTL 5 (gen 3; expired in the dump) | `v='older'` @5000 | A's expired cell is the tombstone Cassandra turns it into (`AbstractCell.purge`, same ts, ldt = expiry - ttl): tombstone `only-a`, risk **yes**, phase from that creation-time ldt; cell `only-b` |

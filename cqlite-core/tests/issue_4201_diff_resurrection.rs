@@ -96,7 +96,7 @@ fn risk_schema() -> cqlite_core::schema::TableSchema {
 
 /// Tombstones' local deletion time, from `nb-2-big-Statistics.db.txt` ("SSTable min local
 /// deletion time", written by Cassandra's own `sstablemetadata`).
-const RISK_LDT: i64 = 1_795_308_805;
+const RISK_LDT: i64 = 1_795_310_384;
 const RISK_BOUNDARY: i64 = RISK_LDT + 864_000;
 
 async fn risk_report(sides: &(DiffSide, DiffSide), now: i64) -> Json {
@@ -479,7 +479,7 @@ async fn r2_newer_in_a_newer_in_b_only_a_only_b() {
     );
     assert_eq!(report["summary"]["newer_in_a"], 2, "ids 6 and 19");
     assert_eq!(report["summary"]["newer_in_b"], 1);
-    assert_eq!(report["summary"]["partitions_compared"], 21);
+    assert_eq!(report["summary"]["partitions_compared"], 22);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -653,7 +653,7 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         report["summary"]["resurrection_risk_past_gc_grace"], 6,
         "ids 3, 11, 16, 18 (two) and 20 @8000; id 20 @6000 has a later ldt (before-gc-grace)"
     );
-    assert_eq!(report["summary"]["tombstones_only_a"], 12);
+    assert_eq!(report["summary"]["tombstones_only_a"], 13);
     // The tie's phase flips exactly at ldt + gc_grace too (PurgeFunction.java:41-42).
     let at = risk_report(&sides, RISK_BOUNDARY).await;
     assert_eq!(
@@ -661,7 +661,7 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         "before-gc-grace"
     );
     // A `no` risk is never counted into a phase.
-    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 7);
+    assert_eq!(at["summary"]["resurrection_risk_before_gc_grace"], 8);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -873,7 +873,7 @@ async fn r2_3_scalar_conflict_resolves_to_the_larger_bytes_and_mirrors() {
         (Some("apple"), Some("zebra"))
     );
     // The report is complete: the conflict did not abort the run, and is counted.
-    assert_eq!(report["summary"]["partitions_compared"], 21);
+    assert_eq!(report["summary"]["partitions_compared"], 22);
     assert_eq!(
         report["summary"]["conflicts"], 6,
         "ids 9, 10, 11, 12, 15, 21"
@@ -1180,4 +1180,58 @@ async fn r2_8_ttl_and_expiry_are_visible_on_the_cell_sides() {
     assert_eq!(same["a"]["value"], same["b"]["value"]);
     assert_eq!(same["a"]["ttl"], 100_000_000);
     assert!(same["b"].get("ttl").is_none());
+}
+
+/// The creation instant of id 22's TTL cell, from Cassandra's own dump: `expires_at - ttl` of the
+/// row's `liveness_info` in generation 3 (`risk_cases` README).
+fn id22_creation_secs() -> i64 {
+    let src = risk_cases_dir();
+    let partition = golden_partitions(&src, "nb-3-big")
+        .into_iter()
+        .find(|p| p["partition"]["key"][0] == "22")
+        .expect("id 22 is in generation 3");
+    let info = &partition["rows"][0]["liveness_info"];
+    assert_eq!(
+        info["expired"], true,
+        "the dump itself says the cell is expired"
+    );
+    rfc3339_secs(info["expires_at"].as_str().unwrap()) - info["ttl"].as_i64().unwrap()
+}
+
+#[tokio::test]
+async fn r2_9_an_expired_ttl_cell_is_the_tombstone_cassandra_turns_it_into() {
+    let root = tempfile::tempdir().unwrap();
+    let sides = risk_sides(root.path());
+    let creation = id22_creation_secs();
+    // AbstractCell.purge (cassandra-5.0.8 db/rows/AbstractCell.java:78-97): an expired expiring cell
+    // becomes a tombstone with the SAME write timestamp (9000) and local deletion time
+    // `expiry - ttl` (= creation, :95), purgeable iff that time < now - gc_grace (strict,
+    // PurgeFunction.java:41-42). B holds 'older' @5000, which a tombstone @9000 shadows.
+    for (now, phase) in [
+        (creation + GC_POSITIVE_GC_GRACE, "before-gc-grace"),
+        (creation + GC_POSITIVE_GC_GRACE + 1, "past-gc-grace"),
+        (creation + 100, "before-gc-grace"),
+    ] {
+        let report = risk_report(&sides, now).await;
+        let p22 = partition(&report, "22");
+        let tombstones = tombstones_of(p22, "cell");
+        assert_eq!(tombstones.len(), 1, "now={now}: {p22}");
+        assert_eq!(tombstones[0]["side"], "a");
+        assert_eq!(tombstones[0]["deletion_time"], "1970-01-01T00:00:00.009Z");
+        assert_eq!(
+            tombstones[0]["resurrection_risk"]["status"], "yes",
+            "now={now}"
+        );
+        assert_eq!(
+            tombstones[0]["resurrection_risk"]["phase"], phase,
+            "now={now}"
+        );
+        assert_eq!(
+            shadowed(tombstones[0]),
+            vec![("1".to_string(), "v".to_string())]
+        );
+        // A's expired cell is not a live winner; B's older value is.
+        assert_eq!(cell(p22, "1", "v")["status"], "only-b");
+        assert_eq!(cell(p22, "1", "v")["b"]["value"], "older");
+    }
 }
