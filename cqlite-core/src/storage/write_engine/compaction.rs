@@ -162,6 +162,10 @@ impl WriteEngine {
         // merger decodes the static cells and the writer emits the static prelude
         // (header-driven static presence). Byte-identical to `config.schema` when
         // no such column exists.
+        //
+        // #4612: refuse a damaged input Statistics.db first — the normalizer and the baseline
+        // seeding below read it leniently and would otherwise re-order columns / re-base timestamps.
+        crate::storage::sstable::statistics_integrity::require_checked_statistics(&input_paths)?;
         let mut effective_schema =
             merge::effective_compaction_schema(&self.config.schema, &input_paths);
         // #929: normalize bare-name UDT columns to their UserType(...) marshal on

@@ -1401,6 +1401,8 @@ pub async fn compact_sstables_with_registry(
     // #847/#904 dropped-column flow below: the effective schema keeps `schema`'s
     // `dropped_columns` map, so the retained-dropped pre-pass and write-schema
     // derivation operate on it unchanged.
+    // #4612: a damaged input Statistics.db is refused up front, never degraded past.
+    crate::storage::sstable::statistics_integrity::require_checked_statistics(&input_paths)?;
     let mut effective_schema = effective_compaction_schema(schema, &input_paths);
     // #929: copy each UDT column's exact UserType(...) marshal from the input
     // headers onto the EFFECTIVE (decode) schema so the compaction reader treats

@@ -38,7 +38,6 @@
 
 mod cells;
 mod fold;
-mod metadata_check;
 pub mod resurrection;
 mod side;
 mod types;

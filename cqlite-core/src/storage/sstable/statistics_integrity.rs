@@ -1,9 +1,10 @@
-//! A strict `Statistics.db` layout + checksum check (spec R7), written from Cassandra's reader.
+//! The strict `Statistics.db` layout + checksum check, shared by every reader (#4612).
 //!
-//! The production `StatisticsReader` is deliberately lenient: it degrades a damaged file to
-//! whatever it could parse, and the merge then silently re-orders columns and re-bases every
-//! timestamp. `diff` must never emit a report computed that way, so each generation is checked
-//! against Cassandra's own integrity rules before anything is read:
+//! `StatisticsReader` used to parse whatever it could from a damaged file, and the merge then
+//! silently re-ordered columns and re-based every write timestamp onto the wrong
+//! `EncodingStats` baseline. Every in-scope consumer now reads the file through this module, so
+//! a truncated or corrupt `Statistics.db` is a named [`Error::Corruption`] carrying the path,
+//! never a degraded open. The layout check is a port of Cassandra's own integrity rules:
 //!
 //! `cassandra-5.0.8` `io/sstable/metadata/MetadataSerializer.java:146-212` (`deserialize`):
 //! `[i32 count][crc32]`, then `count` x `[i32 type][i32 offset]` followed by a `crc32` over the
@@ -13,9 +14,81 @@
 //! for every in-scope format (BIG `na`+ at `format/big/BigFormat.java:404`; BTI `da` at
 //! `format/bti/BtiFormat.java:349-352`).
 
+use crate::error::{Error, Result};
+use std::io::Read;
+use std::path::Path;
+
+/// The most bytes read from one `Statistics.db`. A real file is a few KiB (a TOC, a handful of
+/// histograms and the serialization header); the cap only bounds a hostile or runaway file so the
+/// read can never be unbounded (#4613 item 5). A file larger than this is refused, never
+/// truncated to fit.
+pub const MAX_STATISTICS_BYTES: u64 = 64 * 1024 * 1024;
+
+fn corrupt(path: &Path, reason: impl std::fmt::Display) -> Error {
+    Error::corruption(format!(
+        "Statistics.db {} failed Cassandra's integrity check: {reason}",
+        path.display()
+    ))
+}
+
+fn checked(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.len() as u64 > MAX_STATISTICS_BYTES {
+        return Err(corrupt(
+            path,
+            format!("larger than the {MAX_STATISTICS_BYTES} byte cap"),
+        ));
+    }
+    validate_metadata_layout(&bytes).map_err(|reason| corrupt(path, reason))?;
+    Ok(bytes)
+}
+
+/// Read `path` under [`MAX_STATISTICS_BYTES`] and refuse it unless it passes the strict layout and
+/// checksum check. A missing or unreadable file is an [`Error::Io`]; a damaged one is an
+/// [`Error::Corruption`] naming `path`.
+pub fn read_checked_statistics(path: &Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_STATISTICS_BYTES + 1).read_to_end(&mut bytes)?;
+    checked(path, bytes)
+}
+
+/// [`read_checked_statistics`] for async callers.
+pub async fn read_checked_statistics_async(path: &Path) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::new();
+    file.take(MAX_STATISTICS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    checked(path, bytes)
+}
+
+/// Refuse the whole input set unless every PRESENT generation's `Statistics.db` passes the
+/// strict check (a missing one is left to its existing handling). For the entry points whose downstream helpers (baseline seeding, schema
+/// normalization) must never run on a degraded read. The error names the failing path.
+pub fn require_checked_statistics(data_paths: &[std::path::PathBuf]) -> Result<()> {
+    for data_path in data_paths {
+        let name = data_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let Some(stem) = name.strip_suffix("Data.db") else {
+            continue;
+        };
+        match read_checked_statistics(&data_path.with_file_name(format!("{stem}Statistics.db"))) {
+            Ok(_) => {}
+            // A genuinely missing Statistics.db keeps its prior, separately-handled behaviour
+            // (the reader proceeds without it); only a PRESENT damaged one is refused here.
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Why a `Statistics.db` failed the strict check.
-pub(super) fn validate_metadata_layout(bytes: &[u8]) -> Result<(), String> {
-    let int_at = |at: usize| -> Result<i32, String> {
+pub fn validate_metadata_layout(bytes: &[u8]) -> std::result::Result<(), String> {
+    let int_at = |at: usize| -> std::result::Result<i32, String> {
         bytes
             .get(at..at + 4)
             .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))

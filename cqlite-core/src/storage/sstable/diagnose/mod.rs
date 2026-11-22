@@ -386,13 +386,24 @@ async fn diagnose_generation(
     platform: Arc<Platform>,
 ) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
     let stats_path = stats_path_for(data_path);
-    let stats_bytes = tokio::fs::read(&stats_path).await.map_err(|e| {
-        Error::not_found(format!(
-            "Statistics.db not found/readable for {}: {}",
-            data_path.display(),
-            e
-        ))
-    })?;
+    // #4612: read under the strict TOC/CRC check, so a truncated or corrupt Statistics.db makes
+    // this generation an `unreadable_generations` entry (R6) naming the path, never a report
+    // computed from a partial parse. Absence keeps its existing wording.
+    let stats_bytes = match crate::storage::sstable::statistics_integrity::read_checked_statistics_async(
+        &stats_path,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(Error::Io(e)) => {
+            return Err(Error::not_found(format!(
+                "Statistics.db not found/readable for {}: {}",
+                data_path.display(),
+                e
+            )))
+        }
+        Err(e) => return Err(e),
+    };
 
     // #1249 floor gate: derive from the filename BEFORE any parse, mirroring
     // `StatisticsReader::open`.

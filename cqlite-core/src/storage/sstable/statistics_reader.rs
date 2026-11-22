@@ -85,12 +85,14 @@ impl StatisticsReader {
             )));
         }
 
-        // Read the entire file (Statistics.db files are typically small).
-        // Reached only for at-or-above-floor (or structurally-unparseable)
-        // descriptors — a below-floor version was already rejected above.
-        let mut file = File::open(path).await?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        // Read under a size cap and refuse the file unless it passes Cassandra's own TOC/CRC
+        // integrity rules (#4612): a truncated or bit-flipped file must be a named error, never a
+        // partial parse that silently re-bases every timestamp. Reached only for at-or-above-floor
+        // (or structurally-unparseable) descriptors — below-floor was rejected above.
+        let buffer = crate::storage::sstable::statistics_integrity::read_checked_statistics_async(
+            path,
+        )
+        .await?;
 
         // `_detailed` keeps the TYPED error, so a SEMANTIC refusal keeps its own
         // kind and its column-naming message instead of becoming `code: Verify`
@@ -143,9 +145,11 @@ impl StatisticsReader {
     /// Validate checksum for parsed statistics
     pub async fn validate_checksum(&self) -> Result<bool> {
         // Read the raw file data for checksum calculation
-        let mut file = File::open(&self.file_path).await?;
+        let file = File::open(&self.file_path).await?;
         let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        file.take(super::statistics_integrity::MAX_STATISTICS_BYTES)
+            .read_to_end(&mut buffer)
+            .await?;
 
         if buffer.len() < 4 {
             return Err(Error::corruption(

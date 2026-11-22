@@ -78,6 +78,7 @@ pub(crate) fn predict_table_reclaim(
     };
     let (merge_inputs, dropped) = split_merge_and_dropped(&paths, drop_set);
 
+    crate::storage::sstable::statistics_integrity::require_checked_statistics(&merge_inputs)?;
     let mut effective = effective_compaction_schema(schema, &merge_inputs);
     apply_udt_marshals_from_inputs(&mut effective, &merge_inputs, None)?;
     let merger = KWayMerger::new_with_gc_and_registry(
