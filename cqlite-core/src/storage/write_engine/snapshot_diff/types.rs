@@ -214,7 +214,7 @@ pub enum DiffError {
         clustering: String,
         column: String,
         #[source]
-        source: crate::Error,
+        source: Box<crate::Error>,
     },
     /// Any other failure (schema, budget, partition-key encoding).
     #[error(transparent)]

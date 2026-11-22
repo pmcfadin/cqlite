@@ -108,7 +108,7 @@ impl SideCells {
                         .map(fmt_clustering)
                         .unwrap_or_else(|| "<static>".to_string()),
                     column: cell.column.clone(),
-                    source,
+                    source: Box::new(source),
                 }
             })?;
             out.winners.insert(
