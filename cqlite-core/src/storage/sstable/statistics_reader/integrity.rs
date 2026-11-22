@@ -24,6 +24,9 @@ use std::path::Path;
 /// truncated to fit.
 pub const MAX_STATISTICS_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Number of `MetadataType` constants in `cassandra-5.0.8` (`MetadataType.java:28-34`).
+const METADATA_TYPE_COUNT: i32 = 4;
+
 fn corrupt(path: &Path, reason: impl std::fmt::Display) -> Error {
     Error::corruption(format!(
         "Statistics.db {} failed Cassandra's integrity check: {reason}",
@@ -64,7 +67,11 @@ pub fn read_bounded_statistics(path: &Path) -> std::io::Result<Vec<u8>> {
 pub async fn read_checked_statistics_async(path: &Path) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     let file = tokio::fs::File::open(path).await?;
-    let mut bytes = Vec::new();
+    let hint = file
+        .metadata()
+        .await
+        .map_or(0, |m| m.len().min(MAX_STATISTICS_BYTES + 1));
+    let mut bytes = Vec::with_capacity(hint as usize);
     file.take(MAX_STATISTICS_BYTES + 1)
         .read_to_end(&mut bytes)
         .await?;
@@ -121,6 +128,15 @@ pub fn validate_metadata_layout(bytes: &[u8]) -> std::result::Result<(), String>
     if count < 1 {
         return Err(format!("TOC declares {count} components"));
     }
+    // `MetadataType` (`io/sstable/metadata/MetadataType.java`, cassandra-5.0.8) has exactly
+    // VALIDATION, COMPACTION, STATS, HEADER; `deserialize` fills one entry per type, so a larger
+    // count cannot be a Cassandra file. Refuse it BEFORE any allocation or per-pair work.
+    if count > METADATA_TYPE_COUNT {
+        return Err(format!(
+            "TOC declares {count} components but Cassandra defines only {METADATA_TYPE_COUNT} \
+             metadata types (VALIDATION, COMPACTION, STATS, HEADER)"
+        ));
+    }
     let count = usize::try_from(count).map_err(|_| "TOC count overflows".to_string())?;
     // 4 (count) + 4 (crc) + 8 per pair + 4 (crc): reject a count the file cannot hold before
     // looking at any pair.
@@ -134,7 +150,7 @@ pub fn validate_metadata_layout(bytes: &[u8]) -> std::result::Result<(), String>
             bytes.len()
         ));
     }
-    let mut offsets = Vec::with_capacity(count);
+    let mut offsets = Vec::new(); // never pre-sized from an untrusted count
     for i in 0..count {
         let at = 8 + 8 * i;
         crc.update(&int_at(at)?.to_be_bytes());
@@ -224,5 +240,31 @@ mod tests {
             damaged[byte] ^= 0x01;
             assert!(validate_metadata_layout(&damaged).is_err(), "byte {byte}");
         }
+    }
+
+    #[test]
+    fn a_count_above_the_metadata_type_count_is_refused_before_any_allocation() {
+        // Valid count CRC, count = 5 (> the 4 MetadataType constants), nothing else.
+        for count in [5_i32, 1_000, 8_400_000, i32::MAX] {
+            let mut file = count.to_be_bytes().to_vec();
+            file.extend((crc32fast::hash(&count.to_be_bytes()) as i32).to_be_bytes());
+            file.extend([0u8; 64]);
+            let err = validate_metadata_layout(&file).expect_err("must refuse");
+            assert!(
+                err.contains("only 4 metadata types"),
+                "count {count}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_the_toc_cannot_fit_is_refused() {
+        // count = 4 is allowed, but the file holds fewer bytes than 12 + 8 * 4.
+        let count = 4_i32;
+        let mut file = count.to_be_bytes().to_vec();
+        file.extend((crc32fast::hash(&count.to_be_bytes()) as i32).to_be_bytes());
+        file.extend([0u8; 16]);
+        let err = validate_metadata_layout(&file).expect_err("must refuse");
+        assert!(err.contains("truncated: TOC of 4 components"), "{err}");
     }
 }
