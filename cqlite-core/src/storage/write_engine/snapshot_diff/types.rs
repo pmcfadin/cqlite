@@ -203,6 +203,9 @@ pub enum DiffError {
         #[source]
         source: crate::Error,
     },
+    /// `now` is outside the GC-clock range (or `now - gc_grace_seconds` would overflow).
+    #[error("--now {value} is out of range: {reason}")]
+    InvalidNow { value: i64, reason: String },
     /// A cell value could not be serialized for comparison. The diff refuses rather than compare a
     /// partial or empty buffer (which could call two different values `equal`).
     #[error(

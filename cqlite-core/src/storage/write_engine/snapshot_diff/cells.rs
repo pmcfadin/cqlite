@@ -68,6 +68,26 @@ impl Version {
             && self.bytes == other.bytes
     }
 
+    fn from_winner(
+        cell: &crate::storage::write_engine::merge::trace::CellDecision,
+    ) -> crate::Result<Self> {
+        let value = cell.value.as_ref().unwrap_or(&Value::Null);
+        let mut bytes = Vec::new();
+        serialize_value_into(value, &mut bytes)?;
+        Ok(Self {
+            clustering: cell.clustering.clone(),
+            timestamp: cell.writetime,
+            tombstone: false,
+            ttl: cell
+                .ttl
+                .and_then(|t| u32::try_from(t).ok())
+                .filter(|t| *t != 0),
+            local_deletion_time: cell.expires_at.map_or(0, |e| e as u32 as i32),
+            bytes,
+            display: String::new(),
+        })
+    }
+
     fn view(&self) -> CellSide {
         CellSide {
             value: self.display.clone(),
@@ -285,4 +305,17 @@ mod tests {
             other => panic!("expected CellSerialization, got {other:?}"),
         }
     }
+}
+
+/// Whether the tombstone HOLDER's own live winner `holder` supersedes the other side's older
+/// cell `remote` once the two sides are merged: `Cells.resolveRegular` (cassandra-5.0.8
+/// `db/rows/Cells.java:79-128`) keeps `holder` over `remote`. If it does, the remote value cannot
+/// resurrect after the tombstone is purged — repair reconciles it away (`DeletionTime.deletes` only
+/// speaks about the tombstone; the surviving newer cell wins the merge).
+pub(super) fn holder_supersedes(
+    holder: &crate::storage::write_engine::merge::trace::CellDecision,
+    remote: &crate::storage::write_engine::merge::trace::CellDecision,
+) -> crate::Result<bool> {
+    let (h, r) = (Version::from_winner(holder)?, Version::from_winner(remote)?);
+    Ok(resolve_cell(&h, &r).0)
 }

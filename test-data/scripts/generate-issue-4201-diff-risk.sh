@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# generate-issue-4201-diff-risk.sh — Cassandra 5.0.8-written two-generation fixture for
+# generate-issue-4201-diff-risk.sh — Cassandra 5.0.8-written three-generation fixture for
 # `cqlite diff` (issue #4201). Schema: test-data/schemas/issue-4201-diff-risk.cql.
 #
-# Two flushes with autocompaction OFF, so both generations stay on disk:
+# Three flushes with autocompaction OFF, so all generations stay on disk:
 #   generation 1 = the data side (what a replica that missed the deletes still holds)
 #   generation 2 = the tombstone/newer side
-# Tests stage generation 2 as side A and generation 1 as side B. Every mutation pins its client
+#   generation 3 = a later re-insert on the tombstone side (id 19 only)
+# Tests stage generations 2+3 as side A and generation 1 as side B. Every mutation pins its client
 # timestamp; the case table is in README.md next to the output.
 #
 # CONTAINER ENGINE: `docker` by default; the owner-authorized VM is driven with
@@ -54,6 +55,7 @@ INSERT INTO risk_cases (id,ck,v) VALUES (5,1,'newer-than-cell-tombstone') USING 
 INSERT INTO risk_cases (id,ck,v) VALUES (6,1,'b-older') USING TIMESTAMP 3000;
 INSERT INTO risk_cases (id,ck,v) VALUES (7,1,'only-in-b') USING TIMESTAMP 3000;
 INSERT INTO risk_cases (id,ck,v) VALUES (9,1,'apple') USING TIMESTAMP 5000;
+INSERT INTO risk_cases (id,ck,v) VALUES (19,1,'old-value') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (10,1,'zebra') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (11,1,'live-tie') USING TIMESTAMP 5000;
 INSERT INTO risk_cases (id,ck,v) VALUES (12,1,'live-loses') USING TIMESTAMP 5000;
@@ -80,13 +82,17 @@ UPDATE risk_cases USING TIMESTAMP 5000 SET fl = ['a','b'] WHERE id=15 AND ck=1;
 DELETE m['k1'] FROM risk_cases USING TIMESTAMP 6000 WHERE id=16 AND ck=1;
 UPDATE risk_cases USING TIMESTAMP 5000 SET m['k3']=3 WHERE id=16 AND ck=1;
 DELETE FROM risk_cases USING TIMESTAMP 6000 WHERE id=17 AND ck=1;
+DELETE v FROM risk_cases USING TIMESTAMP 6000 WHERE id=19 AND ck=1;
 DELETE m['k1'], m['k2'] FROM risk_cases USING TIMESTAMP 6000 WHERE id=18 AND ck=1;"
 log "generation 1"; run_cql "$G1"; cx nodetool flush "$KEYSPACE" "$TABLE"
 sleep 3
+G3="INSERT INTO risk_cases (id,ck,v) VALUES (19,1,'reinserted') USING TIMESTAMP 7000;"
 log "generation 2"; run_cql "$G2"; cx nodetool flush "$KEYSPACE" "$TABLE"
+sleep 3
+log "generation 3"; run_cql "$G3"; cx nodetool flush "$KEYSPACE" "$TABLE"
 
 TDIR="$(cx bash -lc "ls -d /var/lib/cassandra/data/$KEYSPACE/$TABLE-* | head -1" | tr -d '\r')"
-[[ "$(cx bash -lc "ls $TDIR/nb-*-big-Data.db | wc -l" | tr -d '\r')" -eq 2 ]] || fail "expected exactly two Data.db generations"
+[[ "$(cx bash -lc "ls $TDIR/nb-*-big-Data.db | wc -l" | tr -d '\r')" -eq 3 ]] || fail "expected exactly three Data.db generations"
 DEST="$OUT_DIR/$KEYSPACE/$(basename "$TDIR")"
 mkdir -p "$DEST"
 cx bash -lc "tar -C $TDIR -cf - ." | tar -C "$DEST" -xf - || fail "export failed"
@@ -99,7 +105,7 @@ for p in json.load(sys.stdin): print(json.dumps(p, separators=(',', ':')))
   [[ -s "$data.jsonl" ]] || fail "empty sstabledump golden for $base"
   cx bash -lc "/opt/cassandra/tools/bin/sstablemetadata '$TDIR/$base'" 2>/dev/null > "${data%Data.db}Statistics.db.txt"
 done
-printf '%s\n' "$G1" > "$DEST/generation-1.cql"; printf '%s\n' "$G2" > "$DEST/generation-2.cql"
+printf '%s\n' "$G1" > "$DEST/generation-1.cql"; printf '%s\n' "$G2" > "$DEST/generation-2.cql"; printf '%s\n' "$G3" > "$DEST/generation-3.cql"
 printf '%s\n' "$VERSION" > "$DEST/cassandra-version.txt"
 "${ENGINE[@]}" image inspect "$IMAGE" --format '{{json .RepoDigests}}' > "$DEST/image-digests.json"
 find "$OUT_DIR" -name '._*' -delete 2>/dev/null || true

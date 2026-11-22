@@ -24,7 +24,9 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-use cqlite_core::storage::write_engine::snapshot_diff::{diff_table, DiffOptions, DiffSide};
+use cqlite_core::storage::write_engine::snapshot_diff::{
+    diff_table, DiffOptions, DiffSide, MAX_EFFECTIVE_BUDGET,
+};
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
@@ -128,41 +130,50 @@ fn diff_every_wide_rows_table_within_the_heap_budget() {
         .collect();
 
     let _profiler = dhat::Profiler::builder().testing().build();
-    let options = DiffOptions {
-        now_secs: 1_794_545_000,
-        max_result_bytes: 64 * 1024 * 1024,
-    };
+    // Both the default budget and the LARGEST request (`u64::MAX`, clamped to
+    // `MAX_EFFECTIVE_BUDGET`): the peak must stay inside the 128 MiB target either way.
+    assert!(
+        MAX_EFFECTIVE_BUDGET * 4 <= HEAP_BUDGET_BYTES,
+        "cap leaves room for trails + fold"
+    );
     let mut compared = 0u64;
-    for (table, side, schema) in &cases {
-        let report = rt
-            .block_on(diff_table(
-                side,
-                side,
-                &format!("{KEYSPACE}.{table}"),
-                schema,
-                None,
-                &options,
-            ))
-            .unwrap_or_else(|e| panic!("{KEYSPACE}.{table}: {e}"));
-        assert!(
-            report.summary.partitions_compared > 0,
-            "{table}: compared no partition"
-        );
-        assert!(
-            report.summary.equal > 0,
-            "{table}: no equal cell (scanned nothing)"
-        );
-        assert_eq!(
-            report.summary.only_a
-                + report.summary.only_b
-                + report.summary.newer_in_a
-                + report.summary.newer_in_b
-                + report.summary.tombstones_only_a
-                + report.summary.tombstones_only_b,
-            0,
-            "{table}: identical sides must not diverge"
-        );
-        compared += report.summary.partitions_compared;
+    for budget in [64 * 1024 * 1024, u64::MAX] {
+        let options = DiffOptions {
+            now_secs: 1_794_545_000,
+            max_result_bytes: budget,
+        };
+        for (table, side, schema) in &cases {
+            let report = rt
+                .block_on(diff_table(
+                    side,
+                    side,
+                    &format!("{KEYSPACE}.{table}"),
+                    schema,
+                    None,
+                    &options,
+                ))
+                .unwrap_or_else(|e| panic!("{KEYSPACE}.{table}: {e}"));
+            assert!(
+                report.summary.partitions_compared > 0,
+                "{table}: compared no partition"
+            );
+            assert!(
+                report.summary.equal > 0,
+                "{table}: no equal cell (scanned nothing)"
+            );
+            assert_eq!(
+                report.summary.only_a
+                    + report.summary.only_b
+                    + report.summary.newer_in_a
+                    + report.summary.newer_in_b
+                    + report.summary.conflicts
+                    + report.summary.tombstones_only_a
+                    + report.summary.tombstones_only_b,
+                0,
+                "{table}: identical sides must not diverge"
+            );
+            compared += report.summary.partitions_compared;
+        }
     }
     let stats = dhat::HeapStats::get();
     eprintln!(

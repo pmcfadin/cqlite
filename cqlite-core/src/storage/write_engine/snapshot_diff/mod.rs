@@ -189,10 +189,84 @@ pub async fn diff_partition(
         .ok_or_else(|| DiffError::Core(Error::Internal("diff produced no partition entry".into())))
 }
 
-fn encoded_len_of(partition: &PartitionDiff) -> u64 {
-    serde_json::to_vec(partition)
-        .map(|encoded| encoded.len() as u64)
+/// The most any report may use, whatever `max_result_bytes` asks for: with each trail capped at a
+/// quarter of the remaining budget, the worst-case peak (report + two trails + fold copies) stays
+/// well inside the project's 128 MiB target.
+pub const MAX_EFFECTIVE_BUDGET: u64 = 32 * 1024 * 1024;
+
+/// What one side's trail may record for the next partition (see `run`).
+fn trail_budget(budget: u64, estimated: u64) -> u64 {
+    (budget.saturating_sub(estimated) / 4).max(TRAIL_FLOOR)
+}
+
+/// A trail's serialized events are far more verbose than the report entries they fold into, so
+/// even a tiny report budget leaves a trail this much room (one partition's decisions).
+const TRAIL_FLOOR: u64 = 1024 * 1024;
+
+/// The table's declared `gc_grace_seconds` (Cassandra's default 864000 when absent); `None` when
+/// unparseable or negative. Mirrors `compute_gc_before`.
+fn declared_gc_grace(schema: &TableSchema) -> Option<i64> {
+    match schema.comments.get("gc_grace_seconds") {
+        None => Some(864_000),
+        Some(text) => text.trim().parse::<i64>().ok().filter(|grace| *grace >= 0),
+    }
+}
+
+/// Serialized JSON length without materializing the bytes (a counting writer, no copy).
+fn encoded_len_of<T: serde::Serialize>(value: &T) -> u64 {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.0)
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn trails_never_take_more_than_half_of_what_is_left() {
+        for (budget, used) in [(100, 0), (100, 60), (100, 100), (100, 500), (u64::MAX, 0)] {
+            let each = trail_budget(budget, used);
+            let left = budget.saturating_sub(used);
+            assert!(each <= (left / 4).max(TRAIL_FLOOR));
+            assert!(each.saturating_mul(2) <= left / 2 || each == TRAIL_FLOOR);
+        }
+        assert_eq!(trail_budget(100, 100), TRAIL_FLOOR);
+        assert_eq!(
+            trail_budget(MAX_EFFECTIVE_BUDGET, 0),
+            MAX_EFFECTIVE_BUDGET / 4
+        );
+    }
+
+    #[test]
+    fn the_effective_budget_is_capped_below_the_heap_target() {
+        assert!(MAX_EFFECTIVE_BUDGET * 4 <= 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn gc_grace_parsing_mirrors_the_merge() {
+        let mut schema = TableSchema::new_for_testing("ks", "t");
+        assert_eq!(declared_gc_grace(&schema), Some(864_000));
+        schema
+            .comments
+            .insert("gc_grace_seconds".into(), "0".into());
+        assert_eq!(declared_gc_grace(&schema), Some(0));
+        schema
+            .comments
+            .insert("gc_grace_seconds".into(), "-1".into());
+        assert_eq!(declared_gc_grace(&schema), None);
+    }
 }
 
 async fn run(
@@ -207,11 +281,30 @@ async fn run(
     // One source for the boundary: `compute_gc_before` is what the merger purges with, and the
     // report's `gc_grace_seconds` is derived from it so the two cannot drift. `None` means the
     // table's declared gc_grace_seconds is unparseable or negative.
-    let gc_before = compute_gc_before(schema, options.now_secs).ok_or_else(|| {
+    // `now` is a GC-clock second: Cassandra bounds a local deletion time to `[0, MAX_DELETION_TIME]`
+    // (`db/DeletionTime.java:57`, unsigned 32-bit), and `now - gc_grace_seconds` must not overflow.
+    // Checked here so no `--now` can panic a debug build or wrap a release one.
+    let now = options.now_secs;
+    let gc_grace = declared_gc_grace(schema).ok_or_else(|| {
         Error::Schema(format!(
             "table '{table}' declares an invalid gc_grace_seconds; refusing to classify purge phases"
         ))
     })?;
+    if !(0..=i64::from(u32::MAX)).contains(&now) || now.checked_sub(gc_grace).is_none() {
+        return Err(DiffError::InvalidNow {
+            value: now,
+            reason: format!(
+                "outside the GC-clock range 0..={} for gc_grace_seconds={gc_grace}",
+                u32::MAX
+            ),
+        });
+    }
+    let gc_before = compute_gc_before(schema, now).ok_or_else(|| {
+        Error::Schema(format!(
+            "table '{table}' declares an invalid gc_grace_seconds; refusing to classify purge phases"
+        ))
+    })?;
+    let budget = options.max_result_bytes.min(MAX_EFFECTIVE_BUDGET);
     let schema_a = effective_compaction_schema(schema, &side_a.generations);
     let schema_b = effective_compaction_schema(schema, &side_b.generations);
 
@@ -227,26 +320,28 @@ async fn run(
     // The budget covers the WHOLE serialized report (metadata, generation lists, summary, JSON
     // punctuation), so the API never returns more than `max_result_bytes`. Start from the empty
     // report's size; each partition adds its own size plus one separator.
-    let encoded_len = |report: &DiffReport| -> u64 {
-        serde_json::to_vec(report)
-            .map(|encoded| encoded.len() as u64)
-            .unwrap_or(u64::MAX)
-    };
+    let encoded_len = |report: &DiffReport| encoded_len_of(report);
     let too_large = |estimated: u64, rows: usize| {
         DiffError::Core(Error::ResultTooLarge {
-            budget_bytes: usize::try_from(options.max_result_bytes).unwrap_or(usize::MAX),
+            budget_bytes: usize::try_from(budget).unwrap_or(usize::MAX),
             estimated_bytes: usize::try_from(estimated).unwrap_or(usize::MAX),
             rows,
         })
     };
     let mut estimated: u64 = encoded_len(&report);
     for key in keys {
-        let trail_a = side::trace_partition(side_a, key, &schema_a, udt_registry, options);
+        // Peak memory: the report so far, both trails and the fold's working copies are alive at
+        // once. Each trail may use at most a quarter of what the report has left, so the two
+        // trails together take half and the fold structures the rest.
+        let trail_budget = trail_budget(budget, estimated);
+        let trail_a =
+            side::trace_partition(side_a, key, &schema_a, udt_registry, options, trail_budget);
         let trail_a = match trail_a {
             Ok(trail) => trail,
             Err(error) => return Err(side::locate_failure(Side::A, side_a, error).await),
         };
-        let trail_b = side::trace_partition(side_b, key, &schema_b, udt_registry, options);
+        let trail_b =
+            side::trace_partition(side_b, key, &schema_b, udt_registry, options, trail_budget);
         let trail_b = match trail_b {
             Ok(trail) => trail,
             Err(error) => return Err(side::locate_failure(Side::B, side_b, error).await),
@@ -265,7 +360,7 @@ async fn run(
         estimated = estimated
             .saturating_add(encoded_len_of(&partition))
             .saturating_add(separator);
-        if estimated > options.max_result_bytes {
+        if estimated > budget {
             return Err(too_large(estimated, report.partitions.len() + 1));
         }
         report.summary.add(&partition);
@@ -273,7 +368,7 @@ async fn run(
     }
     // The exact serialized size (the summary's digits grew while folding).
     let exact = encoded_len(&report);
-    if exact > options.max_result_bytes {
+    if exact > budget {
         return Err(too_large(exact, report.partitions.len()));
     }
     Ok(report)

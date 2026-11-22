@@ -79,10 +79,11 @@ pub(super) fn trace_partition(
     schema: &TableSchema,
     udt_registry: Option<&UdtRegistry>,
     options: &DiffOptions,
+    trail_budget: u64,
 ) -> Result<SideTrail> {
     let sink = BoundedSink {
         inner: RecordingSink::new(),
-        budget: options.max_result_bytes,
+        budget: trail_budget,
         estimated: 0,
         overflowed: false,
     };

@@ -118,13 +118,27 @@ fn winners(trail: &SideTrail) -> Vec<&CellDecision> {
 fn tombstone_entry(
     tombstone: &TombstoneRecord,
     holder: Side,
+    holder_winners: &[&CellDecision],
     other_winners: &[&CellDecision],
     gc_before: i64,
     schema: &TableSchema,
 ) -> crate::Result<TombstoneDiffEntry> {
     let mut shadowed: Vec<(Option<ClusteringKey>, ShadowedCell)> = Vec::new();
     for cell in other_winners {
-        if shadows(tombstone, cell, schema)? {
+        if !shadows(tombstone, cell, schema)? {
+            continue;
+        }
+        // Not at risk when the holder itself holds a live cell at the same key that wins the merge
+        // against the remote value (`Cells.resolveRegular`): the remote cannot resurrect.
+        let mut superseded = false;
+        for own in holder_winners.iter().filter(|own| {
+            own.clustering == cell.clustering
+                && own.column == cell.column
+                && own.cell_path == cell.cell_path
+        }) {
+            superseded |= super::cells::holder_supersedes(own, cell)?;
+        }
+        if !superseded {
             shadowed.push((
                 cell.clustering.clone(),
                 ShadowedCell {
@@ -194,7 +208,14 @@ fn fold_tombstones(
         if !b_set.contains_key(identity) {
             out.push((
                 tombstone,
-                tombstone_entry(tombstone, Side::A, &b_winners, gc_before, schema)?,
+                tombstone_entry(
+                    tombstone,
+                    Side::A,
+                    &a_winners,
+                    &b_winners,
+                    gc_before,
+                    schema,
+                )?,
             ));
         }
     }
@@ -202,7 +223,14 @@ fn fold_tombstones(
         if !a_set.contains_key(identity) {
             out.push((
                 tombstone,
-                tombstone_entry(tombstone, Side::B, &a_winners, gc_before, schema)?,
+                tombstone_entry(
+                    tombstone,
+                    Side::B,
+                    &b_winners,
+                    &a_winners,
+                    gc_before,
+                    schema,
+                )?,
             ));
         }
     }

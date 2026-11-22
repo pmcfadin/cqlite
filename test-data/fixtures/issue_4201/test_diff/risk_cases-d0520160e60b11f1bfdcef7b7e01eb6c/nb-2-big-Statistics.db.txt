@@ -1,10 +1,10 @@
-SSTable: /var/lib/cassandra/data/test_diff/risk_cases-061f2520e60711f19938ef7b7e01eb6c/nb-2-big
+SSTable: /var/lib/cassandra/data/test_diff/risk_cases-d0520160e60b11f1bfdcef7b7e01eb6c/nb-2-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (2000)
 Maximum timestamp: 01/01/1970 00:00:00 (6000)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: 11/21/2026 23:55:34 (1795305334)
+SSTable min local deletion time: 11/22/2026 00:29:50 (1795307390)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
@@ -12,18 +12,18 @@ TTL max: 100000000 (1157 days 9 hours 46 minutes 40 seconds)
 First token: -7509452495886106294 (5)
 Last token: 9010454139840013625 (3)
 Covered clusterings: [1, 1]
-Estimated droppable tombstones: 0.0
+Estimated droppable tombstones: 0.1388888999999976
 SSTable Level: 0
 Repaired at: 0
-Originating host id: be292417-1de3-4fc4-8d6c-c249d2e7d513
+Originating host id: 3e73be72-1524-4ab7-9064-c285682ee286
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1795305261835, position=63610)=CommitLogPosition(segmentId=1795305261835, position=64979)}
-totalColumnsSet: 13
-totalRows: 16
+Replay positions covered: {CommitLogPosition(segmentId=1795307318504, position=63678)=CommitLogPosition(segmentId=1795307318504, position=65111)}
+totalColumnsSet: 14
+totalRows: 17
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1795305360 (11/21/2026 23:56:00) |     9 ( 81) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
-   1895305380 (01/22/2030 09:43:00) |     2 ( 18) OOOOOO.
+   1795307400 (11/22/2026 00:30:00) |    10 ( 83) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1895307420 (01/22/2030 10:17:00) |     2 ( 16) OOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -34,10 +34,10 @@ Estimated tombstone drop times:
    Max       1996099046 (04/02/2033 23:57:26)
 Partition Size: 
    Size (bytes) | Count  (%)  Histogram 
-   20 (20 B)    |     1 (  5) OOOOO
-   35 (35 B)    |     6 ( 35) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
-   42 (42 B)    |     6 ( 35) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
-   50 (50 B)    |     4 ( 23) OOOOOOOOOOOOOOOOOOOO
+   20 (20 B)    |     1 (  5) OOOO
+   35 (35 B)    |     7 ( 38) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   42 (42 B)    |     6 ( 33) OOOOOOOOOOOOOOOOOOOOOOOOO.
+   50 (50 B)    |     4 ( 22) OOOOOOOOOOOOOOOOO
    Percentiles
    50th      42 (42 B)
    75th      42 (42 B)
@@ -48,8 +48,8 @@ Partition Size:
    Max       50 (50 B)
 Column Count: 
    Columns | Count  (%)  Histogram 
-   1       |    15 ( 88) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
-   2       |     2 ( 11) OOOO
+   1       |    16 ( 88) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   2       |     2 ( 11) OOOo
    Percentiles
    50th      1
    75th      1
@@ -59,9 +59,9 @@ Column Count:
    Min       0
    Max       2
 Local token space coverage: NaN
-Estimated cardinality: 17
+Estimated cardinality: 18
 EncodingStats minTTL: 100000000 (1157 days 9 hours 46 minutes 40 seconds)
-EncodingStats minLocalDeletionTime: 11/21/2026 23:55:34 (1795305334)
+EncodingStats minLocalDeletionTime: 11/22/2026 00:29:50 (1795307390)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (2000)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]

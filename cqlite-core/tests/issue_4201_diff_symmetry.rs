@@ -131,15 +131,15 @@ async fn mirror_holds_for_resurrection_gc_positive_either_side_of_the_boundary()
 async fn mirror_holds_for_risk_cases_including_newer_in_either_side() {
     let src = risk_cases_dir();
     let root = tempfile::tempdir().unwrap();
-    let a = side_of(&stage(root.path(), "a", &src, &["nb-2-big-"]));
+    let a = side_of(&stage(root.path(), "a", &src, &["nb-2-big-", "nb-3-big-"]));
     let b = side_of(&stage(root.path(), "b", &src, &["nb-1-big-"]));
     let schema = load_schema("issue-4201-diff-risk.cql", "test_diff", "risk_cases");
-    let forward = assert_mirror(&a, &b, "test_diff.risk_cases", &schema, 1_796_169_335).await;
+    let forward = assert_mirror(&a, &b, "test_diff.risk_cases", &schema, 1_796_171_391).await;
     assert_eq!(forward["summary"]["newer_in_a"], 1);
     assert_eq!(forward["summary"]["newer_in_b"], 1);
     // In the mirror the tombstones belong to side b.
-    let backward = report(&b, &a, "test_diff.risk_cases", &schema, 1_796_169_335).await;
-    assert_eq!(backward["summary"]["tombstones_only_b"], 9);
+    let backward = report(&b, &a, "test_diff.risk_cases", &schema, 1_796_171_391).await;
+    assert_eq!(backward["summary"]["tombstones_only_b"], 10);
     assert_eq!(
         forward["summary"]["conflicts"], 5,
         "non-vacuous: conflicts mirror with resolves_to flipped"

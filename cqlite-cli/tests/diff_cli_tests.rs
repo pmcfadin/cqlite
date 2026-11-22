@@ -403,15 +403,21 @@ fn r10_2_identical_snapshots_render_an_affirmative_non_vacuous_report() {
 fn risk_cases_text_report_names_the_resurrection_verdicts() {
     let root = tempfile::tempdir().unwrap();
     let src = risk_src();
-    let a = stage(root.path(), "a", &src, "test_diff", &["nb-2-big-"]);
+    let a = stage(
+        root.path(),
+        "a",
+        &src,
+        "test_diff",
+        &["nb-2-big-", "nb-3-big-"],
+    );
     let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
-    // risk_cases boundary = 1795305334 + 864000 = 1796169334.
+    // risk_cases boundary = 1795307390 + 864000 = 1796171390.
     let output = diff(
         "issue-4201-diff-risk.cql",
         &a,
         &b,
         "test_diff.risk_cases",
-        &["--now", "1796169335"],
+        &["--now", "1796171391"],
     );
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
@@ -420,7 +426,7 @@ fn risk_cases_text_report_names_the_resurrection_verdicts() {
         .lines()
         .filter(|l| l.starts_with("tombstone"))
         .collect();
-    assert_eq!(lines.len(), 9, "{text}");
+    assert_eq!(lines.len(), 10, "{text}");
     assert_eq!(
         lines
             .iter()
@@ -434,7 +440,7 @@ fn risk_cases_text_report_names_the_resurrection_verdicts() {
             .iter()
             .filter(|l| l.contains("resurrection_risk=no"))
             .count(),
-        4
+        5
     );
     // Conflicts name both values and the side Cassandra keeps.
     assert!(
@@ -494,7 +500,13 @@ fn r11_1_partition_scopes_the_report_to_that_partition() {
 fn r11_2_the_byte_budget_is_exit_two_with_no_partial_stdout() {
     let root = tempfile::tempdir().unwrap();
     let src = risk_src();
-    let a = stage(root.path(), "a", &src, "test_diff", &["nb-2-big-"]);
+    let a = stage(
+        root.path(),
+        "a",
+        &src,
+        "test_diff",
+        &["nb-2-big-", "nb-3-big-"],
+    );
     let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
     let cfg = root.path().join("cqlite.toml");
     std::fs::write(
@@ -508,7 +520,7 @@ fn r11_2_the_byte_budget_is_exit_two_with_no_partial_stdout() {
         &a,
         &b,
         "test_diff.risk_cases",
-        &["--now", "1796169335", "--out", "json"],
+        &["--now", "1796171391", "--out", "json"],
     );
     let (_, full) = json_report(&unbounded);
     assert!(full["summary"]["only_b"].as_u64().unwrap() > 0);
@@ -528,7 +540,7 @@ fn r11_2_the_byte_budget_is_exit_two_with_no_partial_stdout() {
             "--table",
             "test_diff.risk_cases",
             "--now",
-            "1796169335",
+            "1796171391",
             "--out",
             "json",
         ])
@@ -940,11 +952,17 @@ fn each_sides_winners_equal_what_explain_reports_for_that_side() {
 fn conflicts_are_reported_with_both_values_and_resolves_to() {
     let root = tempfile::tempdir().unwrap();
     let src = risk_src();
-    let a = stage(root.path(), "a", &src, "test_diff", &["nb-2-big-"]);
+    let a = stage(
+        root.path(),
+        "a",
+        &src,
+        "test_diff",
+        &["nb-2-big-", "nb-3-big-"],
+    );
     let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
     let args = [
         "--now",
-        "1796169335",
+        "1796171391",
         "--out",
         "json",
         "--partition",
@@ -993,4 +1011,34 @@ fn conflicts_are_reported_with_both_values_and_resolves_to() {
         &args,
     ));
     assert_eq!(swapped["partitions"][0]["cells"][0]["resolves_to"], "b");
+}
+
+#[test]
+fn an_out_of_range_now_is_a_usage_error_naming_the_value() {
+    let root = tempfile::tempdir().unwrap();
+    let src = risk_src();
+    let a = stage(
+        root.path(),
+        "a",
+        &src,
+        "test_diff",
+        &["nb-2-big-", "nb-3-big-"],
+    );
+    let b = stage(root.path(), "b", &src, "test_diff", &["nb-1-big-"]);
+    for now in ["9223372036854775807", "-9223372036854775808"] {
+        let output = diff(
+            "issue-4201-diff-risk.cql",
+            &a,
+            &b,
+            "test_diff.risk_cases",
+            &["--now", now],
+        );
+        assert_eq!(output.status.code(), Some(1), "{now}: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains(now),
+            "names the value: {}",
+            stderr(&output)
+        );
+        assert!(stdout(&output).is_empty());
+    }
 }

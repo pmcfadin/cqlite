@@ -191,6 +191,7 @@ async fn run_diff(
         .await
     };
     let report = outcome.map_err(|error| match error {
+        DiffError::InvalidNow { .. } => Failure::usage(error.to_string()),
         DiffError::SideRead { .. } | DiffError::CellSerialization { .. } => {
             Failure::read(error.to_string())
         }

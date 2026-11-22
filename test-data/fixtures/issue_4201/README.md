@@ -10,13 +10,13 @@ Backs **#4201** (`cqlite diff`: replica divergence and resurrection risk).
   `test-data/scripts/generate-issue-4201-diff-risk.sh`; every mutation pins `USING TIMESTAMP`
   (`generation-1.cql`, `generation-2.cql`), `sstabledump` goldens (`*-Data.db.jsonl`) and
   `sstablemetadata` (`*-Statistics.db.txt`) sit next to the bytes. The tombstones' local deletion
-  time is `1795305334` (2026-11-21T23:55:34Z, `nb-2-big-Statistics.db.txt`); with
-  `gc_grace_seconds = 864000` the strict-`<` purge boundary is `1796169334`.
+  time is `1795307390` (2026-11-22T00:29:50Z, `nb-2-big-Statistics.db.txt`); with
+  `gc_grace_seconds = 864000` the strict-`<` purge boundary is `1796171390`.
 - Checkout-relative on purpose (an sstables root, like `issue_4530`); `*.db` are force-added.
 - Consumers: `cqlite-core/tests/issue_4201_diff_resurrection.rs`, `issue_4201_diff_symmetry.rs`,
   `cqlite-cli/tests/diff_cli_tests.rs`.
 
-Staging: **side A = generation 2 only** (`nb-2-big`), **side B = generation 1 only** (`nb-1-big`).
+Staging: **side A = generations 2 + 3** (`nb-2-big`, `nb-3-big`; generation 3 holds only id 19's re-insert), **side B = generation 1 only** (`nb-1-big`).
 Expected outcomes follow from the mutations and Cassandra's shadow rule
 (`DeletionTime.deletes`: a cell is deleted iff `timestamp <= markedForDeleteAt`,
 cassandra-5.0.8 `db/DeletionTime.java:173-175`), never from CQLite output:
@@ -41,3 +41,4 @@ cassandra-5.0.8 `db/DeletionTime.java:173-175`), never from CQLite output:
 | 16 | element tombstone `m['k1']` @6000, `m['k3']=3` @5000 | `m['k1']=1`, `m['k3']=3` @5000 | `k1`: tombstone `only-a` (risk **yes**, shadows only `k1`), cell `only-b`; `k3` `equal` |
 | 17 | row tombstone @6000 | liveness-only row @5000 | tombstone `only-a`, risk **no** (declared limit #4601: a row marker is not a cell) |
 | 18 | element tombstones `m['k1']`, `m['k2']` (ONE statement) @6000 | `m['k1']`, `m['k2']`, `m['k3']` @5000 | two distinct `only-a` cell tombstones (same ts and ldt, different `cell_path`), each shadowing only its own element; `k3` `only-b` |
+| 19 | cell tombstone `v` @6000 (gen 2), then re-insert `v='reinserted'` @7000 (gen 3) | `v='old-value'` @5000 | cell `newer-in-a`; the tombstone is `only-a` with risk **no**: A's own newer live cell wins the merge (`Cells.resolveRegular`), so the old value cannot resurrect |
