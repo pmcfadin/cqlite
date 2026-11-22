@@ -453,3 +453,29 @@ async fn diagnose_reports_unsupported_version_before_integrity_for_pre_na() {
     );
     assert!(!cause.contains("integrity"), "{cause}");
 }
+
+/// `validate_checksum` delegates to the shared integrity validator: a Cassandra-written file
+/// validates (the old code hashed an unrelated slice), a damaged one does not.
+#[tokio::test]
+async fn validate_checksum_agrees_with_the_integrity_check() {
+    use cqlite_core::storage::sstable::statistics_reader::StatisticsReader;
+    for fixture in [BIG, BTI] {
+        let Some(copy) = stage(fixture) else { continue };
+        let (_, platform) = platform().await;
+        let reader = StatisticsReader::open(&copy.stats, platform)
+            .await
+            .expect("open");
+        assert!(
+            reader.validate_checksum().await.expect("validate"),
+            "{fixture:?}"
+        );
+        let mut damaged = copy.pristine.clone();
+        let n = damaged.len();
+        damaged[n - 1] ^= 1;
+        std::fs::write(&copy.stats, &damaged).expect("damage");
+        assert!(
+            !reader.validate_checksum().await.expect("validate"),
+            "{fixture:?}"
+        );
+    }
+}

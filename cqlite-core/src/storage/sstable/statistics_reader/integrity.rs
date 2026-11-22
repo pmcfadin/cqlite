@@ -101,6 +101,44 @@ pub fn require_checked_statistics(data_paths: &[std::path::PathBuf]) -> Result<(
     Ok(())
 }
 
+/// `MetadataType` ordinals (`MetadataType.java:28-34`, cassandra-5.0.8).
+const VALIDATION: i32 = 0;
+const STATS: i32 = 2;
+const HEADER: i32 = 3;
+
+/// Every TOC ordinal must be a known `MetadataType` (Cassandra indexes
+/// `MetadataType.values()[ordinal]`, so an unknown one cannot be read), each at most once
+/// (`serialize` writes one entry per type from an `EnumMap`), and VALIDATION, STATS and HEADER
+/// must be present: `MetadataCollector.finalizeMetadata` (`:362-390`) always writes all four and
+/// `BigSSTableReaderLoadingBuilder:77` / `BtiTableReaderLoadingBuilder:63` load exactly
+/// STATS + HEADER + VALIDATION. COMPACTION is written but not required by any loader, so a file
+/// without it is accepted. Without HEADER the parser would fall back and rebuild the wrong
+/// EncodingStats / column baselines, which is the defect this module exists to refuse.
+fn check_component_types(ordinals: &[i32]) -> std::result::Result<(), String> {
+    let mut seen = [false; METADATA_TYPE_COUNT as usize];
+    for &ordinal in ordinals {
+        let slot = usize::try_from(ordinal)
+            .ok()
+            .and_then(|i| seen.get_mut(i))
+            .ok_or_else(|| format!("TOC names unknown metadata type ordinal {ordinal}"))?;
+        if std::mem::replace(slot, true) {
+            return Err(format!("TOC names metadata type ordinal {ordinal} twice"));
+        }
+    }
+    for (required, name) in [
+        (VALIDATION, "VALIDATION"),
+        (STATS, "STATS"),
+        (HEADER, "HEADER"),
+    ] {
+        if !seen[required as usize] {
+            return Err(format!(
+                "TOC has no {name} component (required by Cassandra's loaders)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Why a `Statistics.db` failed the strict check.
 pub fn validate_metadata_layout(bytes: &[u8]) -> std::result::Result<(), String> {
     let int_at = |at: usize| -> std::result::Result<i32, String> {
@@ -151,9 +189,12 @@ pub fn validate_metadata_layout(bytes: &[u8]) -> std::result::Result<(), String>
         ));
     }
     let mut offsets = Vec::new(); // never pre-sized from an untrusted count
+    let mut ordinals = Vec::new();
     for i in 0..count {
         let at = 8 + 8 * i;
-        crc.update(&int_at(at)?.to_be_bytes());
+        let ordinal = int_at(at)?;
+        ordinals.push(ordinal);
+        crc.update(&ordinal.to_be_bytes());
         let offset = int_at(at + 4)?;
         crc.update(&offset.to_be_bytes());
         offsets.push(
@@ -167,6 +208,7 @@ pub fn validate_metadata_layout(bytes: &[u8]) -> std::result::Result<(), String>
             "TOC checksum mismatch (stored {expected:#x}, computed {actual:#x})"
         ));
     }
+    check_component_types(&ordinals)?;
 
     for (i, &start) in offsets.iter().enumerate() {
         let end = offsets.get(i + 1).copied().unwrap_or(bytes.len());
@@ -194,6 +236,17 @@ mod tests {
 
     /// Build a file the way `MetadataSerializer.serialize` (`:67-112`) lays it out.
     fn build(components: &[&[u8]]) -> Vec<u8> {
+        let typed: Vec<(i32, &[u8])> = components
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i as i32, *b))
+            .collect();
+        build_typed(&typed)
+    }
+
+    /// As [`build`], with explicit type ordinals (checksums recomputed so the file reaches the
+    /// ordinal check).
+    fn build_typed(components: &[(i32, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         let count = components.len() as i32;
         out.extend(count.to_be_bytes());
@@ -201,15 +254,15 @@ mod tests {
         crc.update(&count.to_be_bytes());
         out.extend((crc.clone().finalize() as i32).to_be_bytes());
         let mut position = 4 + 8 * components.len() + 8;
-        for (ordinal, body) in components.iter().enumerate() {
-            out.extend((ordinal as i32).to_be_bytes());
-            crc.update(&(ordinal as i32).to_be_bytes());
+        for (ordinal, body) in components.iter() {
+            out.extend(ordinal.to_be_bytes());
+            crc.update(&ordinal.to_be_bytes());
             out.extend((position as i32).to_be_bytes());
             crc.update(&(position as i32).to_be_bytes());
             position += body.len() + 4;
         }
         out.extend((crc.finalize() as i32).to_be_bytes());
-        for body in components {
+        for (_, body) in components {
             out.extend(*body);
             out.extend((crc32fast::hash(body) as i32).to_be_bytes());
         }
@@ -219,14 +272,14 @@ mod tests {
     #[test]
     fn a_well_formed_file_passes() {
         assert_eq!(
-            validate_metadata_layout(&build(&[b"abc", b"defgh", b"i"])),
+            validate_metadata_layout(&build(&[b"abc", b"defgh", b"i", b"jk"])),
             Ok(())
         );
     }
 
     #[test]
     fn truncation_at_every_length_is_refused() {
-        let file = build(&[b"abc", b"defgh", b"i"]);
+        let file = build(&[b"abc", b"defgh", b"i", b"jk"]);
         for len in 0..file.len() {
             assert!(validate_metadata_layout(&file[..len]).is_err(), "len {len}");
         }
@@ -234,7 +287,7 @@ mod tests {
 
     #[test]
     fn any_single_bit_flip_is_refused() {
-        let file = build(&[b"abc", b"defgh", b"i"]);
+        let file = build(&[b"abc", b"defgh", b"i", b"jk"]);
         for byte in 0..file.len() {
             let mut damaged = file.clone();
             damaged[byte] ^= 0x01;
@@ -266,5 +319,50 @@ mod tests {
         file.extend([0u8; 16]);
         let err = validate_metadata_layout(&file).expect_err("must refuse");
         assert!(err.contains("truncated: TOC of 4 components"), "{err}");
+    }
+
+    #[test]
+    fn component_type_ordinals_are_validated() {
+        let ok = [(0, &b"v"[..]), (1, b"c"), (2, b"s"), (3, b"h")];
+        assert_eq!(validate_metadata_layout(&build_typed(&ok)), Ok(()));
+        // COMPACTION is written by Cassandra but required by no loader.
+        let no_compaction = [(0, &b"v"[..]), (2, b"s"), (3, b"h")];
+        assert_eq!(
+            validate_metadata_layout(&build_typed(&no_compaction)),
+            Ok(())
+        );
+
+        type Case<'a> = (&'a str, Vec<(i32, &'a [u8])>, &'a str);
+        let cases: [Case; 5] = [
+            (
+                "duplicate STATS",
+                vec![(0, b"v"), (2, b"s"), (2, b"s"), (3, b"h")],
+                "twice",
+            ),
+            (
+                "unknown ordinal 7",
+                vec![(0, b"v"), (2, b"s"), (7, b"x"), (3, b"h")],
+                "unknown metadata type ordinal 7",
+            ),
+            (
+                "negative ordinal",
+                vec![(0, b"v"), (2, b"s"), (-1, b"x"), (3, b"h")],
+                "unknown metadata type ordinal -1",
+            ),
+            (
+                "HEADER missing",
+                vec![(0, b"v"), (1, b"c"), (2, b"s")],
+                "no HEADER component",
+            ),
+            (
+                "STATS missing",
+                vec![(0, b"v"), (1, b"c"), (3, b"h")],
+                "no STATS component",
+            ),
+        ];
+        for (label, comps, want) in cases {
+            let err = validate_metadata_layout(&build_typed(&comps)).expect_err(label);
+            assert!(err.contains(want), "{label}: {err}");
+        }
     }
 }
