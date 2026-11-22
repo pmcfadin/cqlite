@@ -649,10 +649,9 @@ async fn r4_3_no_risk_when_nothing_is_shadowed_and_ties_go_to_the_tombstone() {
         shadowed(tombstones_of(partition(&report, "3"), "row")[0]),
         vec![("1".to_string(), "v".to_string())]
     );
-    // ids 3 (tie), 11 (tie) and 16 (element tombstone over k1) are the three `yes` risks.
     assert_eq!(
-        report["summary"]["resurrection_risk_past_gc_grace"], 5,
-        "+ the two id-18 element tombstones"
+        report["summary"]["resurrection_risk_past_gc_grace"], 6,
+        "ids 3, 11, 16, 18 (two) and 20 @8000; id 20 @6000 has a later ldt (before-gc-grace)"
     );
     assert_eq!(report["summary"]["tombstones_only_a"], 12);
     // The tie's phase flips exactly at ldt + gc_grace too (PurgeFunction.java:41-42).
