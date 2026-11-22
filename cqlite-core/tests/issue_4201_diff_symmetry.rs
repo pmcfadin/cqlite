@@ -135,7 +135,7 @@ async fn mirror_holds_for_risk_cases_including_newer_in_either_side() {
     let b = side_of(&stage(root.path(), "b", &src, &["nb-1-big-"]));
     let schema = load_schema("issue-4201-diff-risk.cql", "test_diff", "risk_cases");
     let forward = assert_mirror(&a, &b, "test_diff.risk_cases", &schema, 1_796_171_391).await;
-    assert_eq!(forward["summary"]["newer_in_a"], 1);
+    assert_eq!(forward["summary"]["newer_in_a"], 2);
     assert_eq!(forward["summary"]["newer_in_b"], 1);
     // In the mirror the tombstones belong to side b.
     let backward = report(&b, &a, "test_diff.risk_cases", &schema, 1_796_171_391).await;

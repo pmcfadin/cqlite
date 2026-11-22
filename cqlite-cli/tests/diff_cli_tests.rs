@@ -1031,7 +1031,7 @@ fn an_out_of_range_now_is_a_usage_error_naming_the_value() {
             &a,
             &b,
             "test_diff.risk_cases",
-            &["--now", now],
+            &[format!("--now={now}").as_str()],
         );
         assert_eq!(output.status.code(), Some(1), "{now}: {}", stderr(&output));
         assert!(
