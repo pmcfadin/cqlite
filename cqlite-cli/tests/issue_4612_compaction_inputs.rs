@@ -217,8 +217,7 @@ fn damaged_fully_expired_candidate_stops_compaction_and_nothing_is_deleted_or_pu
     let out = temp.path().join("out");
     let err = rt()
         .block_on(handle_compact(&args(&input_dir, &out, schema_path)))
-        .err()
-        .expect("a damaged Statistics.db must stop compaction");
+        .expect_err("a damaged Statistics.db must stop compaction");
     let err = format!("{err:#}");
     assert!(
         err.contains(&stats.display().to_string()),
