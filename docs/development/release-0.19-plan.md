@@ -1,23 +1,23 @@
 # 0.19 release plan and testing regimen
 
-Owner rulings from the roadmap evaluation of 2026-11-10. This file records what was decided and why.
+Owner rulings from the roadmap evaluation of 2026-11-10, updated 2026-11-23 for the later rulings (diff in, extract/split and #4496 out, five-tool field round on freeside). This file records what was decided and why.
 [Tracker state](#tracker-state) lists what was applied to GitHub and what was not.
 
 ## What 0.19 is
 
-A scope-driven, read-only forensics release. It ships when the required items are done; there is no date.
+A scope-driven, read-only forensics release (the "SSTable utility release"). It ships when the required items are done; there is no date.
 
 | Tier | Items |
 |---|---|
-| Required | Vortex export #4237, audit #4195, find #4205, diagnose #4204, explain #4193 |
-| Stretch (does not hold the release) | extract/split #4199, with the write-verb contract #4496 |
-| Moved to 0.20 | scrub #4198, convert #4202, rekey #4203, tombstones #4200, diff #4201, purge #4276, BTI locator follow-up #4337 |
+| Required | Vortex export #4237, audit #4195, find #4205, diagnose #4204, explain #4193, diff #4201 (merged #4611, spec archived #4614; owner 2026-11-21, "SSTable utility release"), the Statistics.db fail-closed fix #4612 (merged #4615; owner Q22=a, 2026-11-22), release prep #4618 |
+| Moved to 0.20 | extract/split #4199 and the write-verb contract #4496 (owner 2026-11-21; formerly the 0.19 stretch), scrub #4198, convert #4202, rekey #4203, tombstones #4200, purge #4276, BTI locator follow-up #4337 |
 | Out of the release | CEP-11 memtable plugin #1807, which continues as an unmilestoned research spike |
 
 Why the cut: 0.18 planned the whole of epic #4192 and shipped four tools. At evaluation time the 0.19
 milestone held 38 open issues, about 14 on theme, and no on-theme work had landed since v0.18.0. The five
-required items are read-only and each has an oracle that exists today. Scrub and convert have no
-Cassandra-side oracle commissioned; diff and tombstones have no spec.
+original required items are read-only and each has an oracle that exists today. Scrub and convert have no
+Cassandra-side oracle commissioned; tombstones has no spec. (At evaluation time diff also had no spec, so it
+was cut to 0.20; it later gained an approved spec and moved back in, see the first table.)
 
 ## Order of work
 
@@ -37,7 +37,7 @@ Cassandra-side oracle commissioned; diff and tombstones have no spec.
    hot path, so it goes last, with the reconciliation-law tests (#4497) landing just before it.
 4. **Alongside the tools:** the fuzzing additions below, #4498 on `salvage` and `rebuild`, #4360
    (cross-binding varint).
-5. **Stretch:** extract/split #4199 with #4496.
+5. **Moved out:** extract/split #4199 with #4496 went to 0.20 (owner 2026-11-21). `diff` #4201 landed after explain; #4612 and the release prep #4618 close the milestone.
 6. **Release criteria**, below.
 
 ## Rulings on scope questions
@@ -85,7 +85,7 @@ Still open:
 |---|---|---|
 | #4497 | Property tests: reconciliation is commutative, associative, idempotent; byte-comparable encoding preserves order | 0.19, required |
 | #4498 | Crash-consistency harness: inject a failure at every write, fsync and rename boundary | 0.19, required, scoped to `salvage` and `rebuild`; covers extract/split if it lands |
-| #4496 | Write-verb contract: metamorphic relations, a Cassandra-reads-our-output leg, self-verifying writers | 0.19 stretch, ships with extract/split or moves to 0.20 with it |
+| #4496 | Write-verb contract: metamorphic relations, a Cassandra-reads-our-output leg, self-verifying writers | Moved to 0.20 with extract/split (owner 2026-11-21); was 0.19 stretch |
 | #4499 | Kani bounded proofs on the vint codec, ending in an adopt/drop recommendation | 0.20 |
 | #4500 | Weekly advisory `cargo-mutants` over writer and reconcile; never a gate (#4259 non-goal respected) | Unmilestoned tooling, Ready |
 | #4042 | Complexity as a ratchet: baseline today's scores, fail on growth or a new function over 30 | Unmilestoned tooling, Ready |
@@ -119,11 +119,12 @@ Considered and deferred:
 
 ## Release criteria
 
-- Every required item merged through the normal endgame.
-- A field round on easy-db-lab: audit, find, diagnose and explain run against snapshots from a real
-  multi-node Cassandra 5.0.8 cluster. Each completes on every table, reports no false corruption on
-  healthy data, and stays under the 128 MB budget. It needs a new test plan (#4503); the existing
-  plans cover only Flight/Trino load testing. Vortex is exempt.
+- Every required item merged through the normal endgame (now including diff #4201, #4612 and #4618).
+- A field round on the local LAN testbed freeside (owner Q24=b; no longer easy-db-lab/AWS): the FIVE tools
+  audit, find, diagnose, explain and diff (owner Q25=a) run against snapshots from a real multi-node
+  Cassandra 5.0.8 cluster. Each completes on every table, reports no false corruption on healthy data, and
+  stays under the 128 MB budget. It needs a new test plan (#4503); the existing plans cover only
+  Flight/Trino load testing. Vortex is exempt.
 - The nightly full gate is green for the seven consecutive nights before the tag; a red night is triaged
   the next day.
 - The release commit itself gets a full gate of record on Linux, run on main after the last merge.
