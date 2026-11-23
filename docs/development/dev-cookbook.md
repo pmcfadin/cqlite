@@ -532,11 +532,14 @@ applies to the rendered report just as it does to a materialized query; it is se
 `performance.max_result_bytes` in the CLI config file (added with this verb; shared by every
 materializing CLI query).
 
-**Limits:** `explain` reports the decision CQLite's merge actually makes. At EQUAL write timestamps
-CQLite keeps the first-seen cell for live-vs-live, expiring and same-kind-deletion ties (open: #4530;
-Cassandra resolves those by value / local deletion time), so the trail's `winner` for such a tie can
-reflect generation order. The committed fixtures pin only the tie both agree on (a cell tombstone
-beats a live cell).
+**Limits:** `explain` reports the decision CQLite's merge actually makes. Equal-timestamp ties are
+resolved as Cassandra 5.0.8 resolves them (`Cells.resolveRegular`, `DeletionTime.supersedes`; #4530),
+and a cell-versus-cell decision carries the deciding rule in `decided_by.rule` (for example `timestamp`,
+`greater_value`, `expiring_over_live`, `tombstone_over_live`, `later_local_deletion_time`). The trail
+reports **cell decisions only**: row-level facts (primary-key marker survival, purge or shadowing, and
+key-cell shedding) are not traced, so a marker-only row prints no cell lines although `SELECT` returns
+it (#4601; wider corpus #4602). A generation whose `Statistics.db` is truncated or corrupt is exit 2
+naming the path, with no trail (#4612).
 `explain` is a distinct verb from the pre-existing `query --explain` flag (a
 query-PLAN display, unrelated to reconciliation) — the naming collision is
 intentional (owner ruling, design.md §D7) and `cqlite explain --help` says so.
@@ -551,21 +554,27 @@ cargo run --package cqlite-cli --features write-support -- \
 ```
 
 `diff` compares the same table's reconciled state in two flat table directories (each resolved
-exactly as `explain` resolves one: live generations only, never `snapshots/` or `backups/`). It
-reports, per `(clustering, column)`, `equal | only-a | only-b | newer-in-a | newer-in-b` and, per
-tombstone held by exactly one side, `only-a | only-b` plus an always-present `resurrection_risk`:
-`yes` when the other side still holds live data the tombstone shadows (named in `shadowed_cells`),
-qualified `before-gc-grace` or `past-gc-grace` at `--now` (strict `local_deletion_time < now -
-gc_grace_seconds`; `past-gc-grace` means its holder may purge it and the other side's data would
-return on the next repair or restore). A tombstone both sides hold is omitted. `--partition <key>`
-(repeatable) restricts the scan through the point-read path; `--out text|json`. Exit 0 = a report
-rendered (divergence is a finding, not a failure), 1 = usage error, 2 = a generation on either side
-cannot be read (the message names `side=a|b` and the path; every generation's `Statistics.db` is
-checked against Cassandra's checksums first, because the reader would otherwise degrade silently)
-or the report exceeds `performance.max_result_bytes`. Declared gaps: a non-frozen collection's
-elements are compared as a multiset under one `(clustering, column)` key, a row's liveness marker
-is not a cell in the trail, and two sides holding different values at one identical write
-timestamp is refused (exit 2) because the five cell statuses cannot express it.
+exactly as `explain` resolves one: live generations only, never `snapshots/` or `backups/`), driving
+`explain`'s merger once per side at the same `--now`. It reports, per `(clustering, column, cell_path)`,
+`equal | only-a | only-b | newer-in-a | newer-in-b | conflict`. `conflict` means the same key and the
+SAME write timestamp with differing content (value, expiry, or live versus tombstone); both values are
+shown with `resolves_to: a|b`, the side Cassandra keeps by `Cells.resolveRegular`, and the report
+continues. Per tombstone held by exactly one side it reports `only-a | only-b` plus an always-present
+`resurrection_risk`: `yes` when the other side still holds live data the tombstone shadows (named in
+`shadowed_cells`), qualified `before-gc-grace` or `past-gc-grace` at `--now` (strict
+`local_deletion_time < now - gc_grace_seconds`; `past-gc-grace` means its holder may purge it and the
+other side's data would return on the next repair or restore). A tombstone both sides hold is omitted.
+`--partition <key>` (repeatable) restricts the scan through the point-read path; `--out text|json`
+(text escapes hostile values so each finding stays on one line). Exit 0 = a report rendered
+(divergence is a finding, not a failure), 1 = usage error, 2 = a generation on either side cannot be
+read (the message names `side=a|b` and the path; a truncated or corrupt `Statistics.db` is refused by
+the reader itself, #4612) or the whole serialized report exceeds `max_result_bytes`, which `diff` caps
+at 32 MiB.
+
+**Declared limits:** a row whose only victim is its primary-key liveness marker (no cell) reports no
+resurrection risk, because the marker is not a cell in the trail (#4601; `--help` says so). Elements of
+a non-frozen collection are compared per element (`cell_path`), by serialized bytes, and an element
+tombstone shadows only its own element. Shared tombstones are not reported. Read-only on both inputs.
 
 ### Output format precedence
 
