@@ -7,22 +7,155 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.19.0] - TBD
+
+The SSTable utility release: detect, diagnose, compare, recover and export. Every new verb is
+read-only on its input files; `salvage` and `rebuild` write only to a separate `--out`. Narrative
+and limits: the [release page](https://pmcfadin.github.io/cqlite/releases/v0-19-0/) and the
+[SSTable toolbox guide](https://pmcfadin.github.io/cqlite/user-docs/sstable-toolbox/).
+
+### BREAKING and behaviour changes
+
+Read these before upgrading.
+
+- **A damaged `Statistics.db` now fails closed everywhere** (#4612, PR #4615). `SSTableReader::open`
+  used to accept a truncated or bit-flipped file when the lenient parser could still decode a prefix,
+  which produced wrong baselines (swapped columns, 2015 timestamps) with an `Ok` result. The reader
+  now returns `Error::Corruption("Statistics.db <path> failed Cassandra's integrity check: ...")`.
+  Every read of `Statistics.db` is bounded to 64 MiB; an oversize file is refused. A genuinely
+  missing file keeps its previous handling. Per consumer:
+  - open, `SELECT`, point and scan reads: `Err(Corruption)` naming the path;
+  - **compaction and merge refuse a damaged input** up front, and a damaged **overlapping** SSTable
+    makes the overlap bound unknown, so purging is **disabled** (the candidate is retained);
+  - **`rebuild` fails closed on a damaged sibling `Statistics.db`** (owner decision Q23): it stops
+    instead of half-reading the file. Rename the damaged file aside to rebuild without it;
+  - `salvage` refuses with a classified `ComponentUnreadable` and writes a manifest;
+  - `explain` and `diff` exit 2 naming the path; `find` marks the generation `UNREADABLE`;
+    `diagnose` lists it in `unreadable_generations`; `verify`/`sweep` report a finding.
+- **A read over an unreadable SSTable is an `Err` naming the table, file and cause, never
+  `Ok(empty)`** (#4159, PR #4522). An empty result and an unreadable one are now distinguishable at
+  the public API. A table that was never discovered is still an empty result.
+- **`cqlite diff` caps its result at 32 MiB** (#4201, PR #4611): the effective `max_result_bytes` is
+  `min(configured, 32 MiB)`, and `--help` says so. Exceeding the budget is exit 2, never a truncated
+  report with exit 0.
+- **Parquet and Vortex: `TIMEUUID` columns export as the Arrow UUID extension** (`FixedSizeBinary(16)`
+  + `arrow.uuid`), like `UUID`, instead of `Utf8` text (#4237, PR #4523). Cause: the query-metadata
+  type parser matched `time` before `timeuuid`. Arrow Flight and Trino consumers of `SELECT *`
+  metadata see the same correction, and a UUID/TimeUUID nested inside a `list`/`set`/`map`/tuple/UDT
+  now also keeps its `arrow.uuid` metadata.
+- **`uuid` and `timeuuid` ordering and byte-comparable encoding follow Cassandra 5.0.8** (#4531,
+  #4534, PR #4539). Clustering slices on these types returned wrong rows on every read path, BTI
+  row-index seeks could skip blocks holding matching rows, and **CQLite-written SSTables with
+  uuid/timeuuid clustering carried rows in an order Cassandra rejects**; re-write any such SSTable.
+  `verify` no longer flags valid Cassandra uuid order. `timeuuid` versus `uuid` is chosen by schema,
+  never by bytes.
+- **Equal-timestamp reconcile ties follow Cassandra 5.0.8** (#4530, PR #4542): `Cells.resolveRegular`
+  for cells and `DeletionTime.supersedes` for deletions, on read, compaction and flush. Results for
+  conflicting equal-timestamp writes can change; they now match Cassandra's own `SELECT`.
+- **`explain` and `diff` rule labels.** `explain` cell-versus-cell decisions carry an optional
+  snake_case `decided_by.rule` naming the `Cells.resolveRegular` rule that decided them. `diff` has
+  six cell statuses (`equal`, `only-a`, `only-b`, `newer-in-a`, `newer-in-b`, `conflict`); `conflict`
+  means the same key and write timestamp with different content, reported with both values and
+  `resolves_to: a|b`. Consume the JSON, not the text rendering.
+- **`cell_path` on trail records.** `CellDecision` and `TombstoneRecord` in `cqlite-core` gain a
+  `cell_path` field (used by `diff` to compare collections per element; `explain`'s rendering is
+  unchanged). Rust code that constructs these structs literally must add the field.
+- **Config.** `explain` shares the query surface's byte budget: the config key
+  `performance.max_result_bytes` is carried to `query.max_result_bytes` (#4193).
+
 ### Added
 
-- **Vortex columnar export** (`cqlite export --format vortex`, issue #4237) — a second binary
-  export format alongside Parquet, behind the off-by-default `vortex` cargo feature (mirrors
-  `parquet`). Export-only in this slice (reading `.vortex` files is a later slice); consumes the
-  same reconciled query row stream and CQL→Arrow type mapping the Parquet writer uses, so the two
-  formats agree by construction. See [Output Formats: vortex](https://pmcfadin.github.io/cqlite/user-docs/output-formats/#vortex--vortex-columnar-file-format-export-only).
-- **Parquet output change:** a `TIMEUUID` column (e.g. `session_id TIMEUUID`) is now exported as the
-  Arrow UUID extension (`FixedSizeBinary(16)` + `arrow.uuid`), like a `UUID` column, instead of
-  `Utf8` text. Cause: the query-metadata type parser matched `time` before `timeuuid`, so the column's
-  schema type was lost and it degraded to text; this affected Parquet and Arrow Flight/Trino
-  consumers of `SELECT *` metadata, and Vortex export (#4237) shares the fix.
-- Fixed a latent bug the above work surfaced: a UUID/TimeUUID column nested inside a
-  `list`/`set`/`map`/tuple/UDT lost its `arrow.uuid` Arrow extension metadata (harmless for
-  Parquet, which does not require it; user-visible for Arrow Flight / the Trino connector, where a
-  nested UUID column's logical type is now correctly reported instead of raw binary).
+- **`cqlite verify --mode audit [--deep]`: cross-component consistency audit** (#4195, PR #4536). A
+  fixed eight-row checklist per generation: Index-to-Data identity (BIG), Summary-to-Index
+  correlation (BIG), bloom filter has no false negative (BIG and BTI), BTI trie reachability and
+  bounds, `TOC.txt` exact listing, `Digest.crc32`, `CompressionInfo.db` coverage, and `Statistics.db`
+  versus a scan. Each row is `pass`, `fail` (with a finding) or `skip` naming the cause; a skip is
+  never a pass, and an audit that measured nothing exits 2 saying `0 invariants MEASURED`. `--deep`
+  (audit only, otherwise exit 1) adds the full-scan rows. `sweep --mode audit` applies it to a data
+  directory. Zero findings on all 149 healthy datasets-v4 generations.
+- **`cqlite find <table-dir> <partition-key> [--commitlog <dir>]`** (#4205, PR #4535): which
+  generations hold a key and how each answered (`hit`, `bloom-negative`, `index-miss`, `scanned`), with
+  offset, length and maximum writetime for a hit; with `--commitlog`, the CommitLog mutations that
+  touch the key and whether each is `unflushed` (`yes`, `no` only when every cell is proven present,
+  else `unmeasured(<cause>)`). Exit 0 report complete (including absent everywhere), 1 usage, 2 a
+  generation or segment could not be read.
+- **`cqlite diagnose <table-dir> [--now] [--deep] [--top N]`** (#4204, PR #4559): a files-only
+  performance report. The default tier reads only `Statistics.db`, `Summary.db` and `Partitions.db`;
+  `--deep` adds one bounded scan per generation (histograms, rankings, raw tombstone counts and, with
+  `--schema`, a dry-compaction reclaim prediction). Every number carries its source or
+  `unmeasured: <cause>`. Exit 0 for any successful report, 1 usage.
+- **`cqlite explain <ks.table> <partition-key>`** (#4193, PR #4546): the reconciliation decision
+  trail: per generation and cell, the winner and why (`winner`, shadowed by timestamp or tombstone,
+  `expired`, `purgeable`, dropped column), plus the tombstones in play. `--clustering`, `--now`,
+  `--out table|json|csv`. Limit: the trail reports **cell decisions only**; row-level facts (marker
+  survival or purge, key-cell shedding) are not traced (#4601). Exit 0, 1 usage or schema error, 2 a
+  generation cannot be read.
+- **`cqlite diff <dir-a> <dir-b> --table <ks.table>`** (#4201, PR #4611): compares one table's
+  reconciled state in two flat table directories per `(clustering, column, cell_path)` and reports
+  tombstones held by only one side with an always-present `resurrection_risk`
+  (`before-gc-grace` or `past-gc-grace`, shadowed cells named). `--partition` (repeatable), `--now`,
+  `--out text|json`. Read-only on both inputs. Declared limits: a **row whose only victim is its
+  liveness marker reports no risk** (#4601), the result is capped at **32 MiB**, collections are
+  compared **per element**, and tombstones both sides hold are omitted. Exit 0 whenever a report
+  renders (a finding is not a failure), 1 usage, 2 unreadable generation (naming the side) or budget
+  exceeded.
+- **Vortex columnar export** (`cqlite export --format vortex`, #4237, PR #4523), behind the
+  off-by-default `vortex` cargo feature. Export only: it consumes the same reconciled row stream and
+  CQL-to-Arrow mapping as Parquet, and a differential test over 31 of the 33 fixture tables agrees on
+  every value (the other two failed on #4279 and now pass). `read-sstable --format vortex` is
+  rejected. Building the feature needs a libclang shared library on the build host. See
+  [Output Formats: vortex](https://pmcfadin.github.io/cqlite/user-docs/output-formats/#vortex--vortex-columnar-file-format-export-only).
+- Fuzz targets for audit, find, block emit and CommitLog framing in the PR smoke and nightly runs
+  (#4502), and a crash-consistency harness that faults `salvage` and `rebuild` at every write, fsync
+  and rename boundary (#4498).
+
+### Changed
+
+- **Crash-safe `salvage` and `rebuild`.** Output is staged under `<out>/.cqlite-publish-<tag>.tmp/`,
+  fsynced and published by rename (`TOC.txt` first, `Data.db` last, directories fsynced), so a crash
+  never leaves a component set that Cassandra can discover as complete (#4529, PR #4568). A leftover
+  stage is recognisable, and a re-run refuses naming it.
+- **`--manifest` is published atomically and its failure fails the run.** The manifest is serialised in
+  memory and published by temp sibling, fsync, rename and directory fsync; a failed write now exits
+  non-zero naming the path and cause instead of being dropped (#4528, #4549, PR #4604).
+- `salvage` and `rebuild` still write **uncompressed** SSTables only (#1406).
+- `TOC.txt` is written in Cassandra 5.0.8 component order (#4486).
+
+### Fixed
+
+- **A full disk during `Filter.db` write was silently lost** (#4527, PR #4603): the writer queued the
+  write and `sync_all` dropped its error, so the run reported success. It now flushes first and the run
+  fails non-zero before anything is published.
+- **Empty `Filter.db`** is an always-present filter, not an all-negative one (#4572, PR #4575): BIG
+  point reads returned no rows for keys that exist.
+- **`Summary.db` whose entries size is below its offset table** is a named corruption error, not an
+  arithmetic-overflow panic (#4573, PR #4576; found by `fuzz_audit`).
+- **Clustering columns of every CQL type decode by schema** (#4279, PR #4558): `date`, `time`,
+  `decimal`, `varint`, `duration`, frozen collections and others no longer fall back to a blob
+  (no-heuristics, #28). Tables with such clustering columns now export to Parquet.
+- **Rows with a live primary-key marker and no live cell are returned**, and rows whose only content
+  was shadowed are not, matching Cassandra 5.0.8 (#4524, PR #4548).
+- **A row deletion no longer strips the clustering columns of a row that still has a newer surviving
+  cell** (#4545, PR #4551).
+- **Compaction keeps liveness-only rows and writes the marker's real timestamp and TTL** (#4581, PR
+  #4589). A clustering-less row whose only content is its primary-key marker was dropped on compaction
+  (data loss), a marker newer than a row deletion was lost, and the marker was rewritten with
+  timestamp 0 and no TTL. An expired marker is purged only under Cassandra's rule; no tombstone is
+  invented.
+- The `deflate` compressor imports `std::io::Write` itself, and the minimal
+  `--no-default-features --features write-support` build compiles (#4557).
+
+### Removed
+
+- Nothing from the public surface. Internally, a never-compiled CLI module (`select_query_engine.rs`,
+  #4544) and fleet-only tooling (#4413) were deleted.
+
+### Notes
+
+- Flush, compaction, `salvage` and `rebuild` emit **uncompressed** SSTables; no compressed-write
+  support is claimed (#1406).
+- The target Cassandra version is 5.0.8 (`na`/`nb` BIG, `oa`/`da` BTI), and the test oracle bundle
+  is `datasets-v4`.
 
 ## [v0.18.0] - 2026-10-30
 

@@ -23,6 +23,7 @@ daemon required.
 ### Reference
 
 - [CLI Reference](/cqlite/user-docs/cli-reference/) — all flags, subcommands, and one-shot / REPL / TUI modes
+- [SSTable Toolbox](/cqlite/user-docs/sstable-toolbox/) — verify, audit, find, explain, diagnose, diff, salvage, rebuild and Vortex export for damaged or divergent SSTables
 - [Output Formats](/cqlite/user-docs/output-formats/) — JSON, CSV, Parquet
 - [Python Bindings](/cqlite/user-docs/python/) — `cqlite-py` API reference
 - [Node.js Bindings](/cqlite/user-docs/nodejs/) — `@cqlite/node` API reference

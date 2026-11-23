@@ -417,6 +417,146 @@ cqlite \
 
 ---
 
+### SSTable toolbox verbs
+
+Offline verbs for detecting, diagnosing, comparing and recovering SSTables. Behaviour, exit codes,
+read-only guarantees and declared limits are on the
+[SSTable Toolbox](/cqlite/user-docs/sstable-toolbox/) page; the flags are listed here. Verbs that
+need a schema take the global `--schema` flag before the subcommand.
+
+#### `verify` — Verify one SSTable generation
+
+```
+Usage: cqlite verify [OPTIONS] <PATH>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<PATH>` | — | SSTable generation directory (the dir containing `*-Data.db`) |
+| `--mode <MODE>` | `full` | `quick` (metadata-only structural checks), `full` (adds chunk CRCs, `Statistics.db`/`Summary.db` parse and a row scan), `audit` (cross-component consistency audit, eight named invariants as `pass`/`fail`/`skip`) |
+| `--out <OUT>` | `text` | `text` or `json` |
+| `--deep` | — | With `--mode audit` only (usage error otherwise): also run the `Statistics.db`-vs-scan and BTI identity checks, which need a full scan |
+
+Exit: `0` pass, `1` usage error, `2` verification failed (in audit mode: any `fail`, or nothing measured).
+
+#### `sweep` — Verify every generation under a data directory
+
+```
+Usage: cqlite sweep [OPTIONS] <DATA_DIR>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<DATA_DIR>` | — | Data directory; every `<keyspace>/<table>-<id>/` is walked (two levels) |
+| `--mode <MODE>` | `full` | Same values as `verify --mode` |
+| `--out <OUT>` | `text` | `text` or `json` |
+| `--jobs <JOBS>` | `1` | Concurrent generations; clamped to a maximum of 8 |
+
+Exit: `0` every row `ok` (`degraded` alone does not trip it), `1` usage error, `2` any row `corrupt` or `unreadable`, or none found.
+
+#### `find` — Which generations hold a key
+
+```
+Usage: cqlite find [OPTIONS] <TABLE_DIR> <PARTITION_KEY>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<TABLE_DIR>` | — | Table directory (`<table>-<32 hex table id>`) |
+| `<PARTITION_KEY>` | — | CQL literal; comma-separated literals for a composite key |
+| `--commitlog <DIR>` | — | Directory of CommitLog `*.log` segments to scan for mutations touching the key |
+| `--out <OUT>` | `text` | `text` or `json` |
+
+Needs the global `--schema`. Exit: `0` report complete (including absent everywhere), `1` usage error, `2` a generation or segment could not be read.
+
+#### `diagnose` — Files-only health report
+
+```
+Usage: cqlite diagnose [OPTIONS] <TABLE_DIR>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<TABLE_DIR>` | — | Table directory holding the generations; no schema needed for the cheap tier |
+| `--now <TS>` | wall clock | Instant for `gcBefore`, `fully_expired_at_now` and `reclaim_at_now`: epoch seconds or RFC 3339 |
+| `--deep` | — | One bounded scan per generation: histograms, rankings, raw tombstone counts (reads `Data.db`) |
+| `--top <N>` | `5` | Length cap of each `--deep` ranking |
+| `--out <OUT>` | `text` | `text` or `json`; selects a rendering on stdout, never writes a file |
+
+Exit: `0` for any successful report (an unreadable generation is a field in it), `1` usage error.
+
+#### `explain` — Reconciliation decisions for one partition
+
+```
+Usage: cqlite explain [OPTIONS] <TABLE> <PARTITION_KEY>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<TABLE>` | — | Fully-qualified `keyspace.table` |
+| `<PARTITION_KEY>` | — | Partition-key literal(s), in schema order |
+| `--clustering <CLUSTERING>` | — | Render only cells for this clustering row; repeat for composite keys |
+| `--now <NOW>` | wall clock | Reconciliation clock as epoch seconds or RFC 3339 |
+| `--out <OUT>` | global `--out`/`--format` | `table`, `json` or `csv`; `parquet` and `vortex` exit 1 |
+
+Resolves the table through the global `--schema` / `--data-dir` / `--dataset`, like `query`. Not `query --explain` (a query plan). Exit: `0`, `1` usage/schema/table error, `2` a generation cannot be read or rendered. Reports cell decisions only (#4601).
+
+#### `diff` — Compare two snapshots of a table
+
+```
+Usage: cqlite diff [OPTIONS] --table <TABLE> <DIR_A> <DIR_B>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<DIR_A>`, `<DIR_B>` | — | Flat table directories of generations (the table's own directory, or a data root holding exactly one `<keyspace>/<table>-<id>`) |
+| `--table <TABLE>` | — | Fully-qualified `keyspace.table` |
+| `--partition <PARTITION>` | all partitions | Restrict to this partition (CQL literal); repeatable |
+| `--now <NOW>` | wall clock | Reconciliation clock as epoch seconds or RFC 3339 |
+| `--out <OUT>` | `text` | `text` (one finding per line, summary last) or `json` |
+
+Read-only. Exit: `0` report rendered (divergence is a finding), `1` usage error, `2` unreadable generation on either side (names the side and path) or the result exceeds `max_result_bytes`, capped at 32 MiB. Liveness-only rows report no resurrection risk (#4601).
+
+#### `salvage` — Recover decodable partitions
+
+```
+Usage: cqlite salvage [OPTIONS] --out <OUT> <INPUT>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<INPUT>` | — | `Data.db` file or a table directory (one output generation per input generation) |
+| `--table <TABLE>` | derived from the directory name | Table to salvage when `--schema` declares more than one |
+| `--out <OUT>` | — | Output directory (`keyspace/table/` is appended); refused (exit 1) inside the input tree |
+| `--manifest <MANIFEST>` | — | Write the JSON loss manifest here (recommended `<out>/salvage.json`); refused inside the input, the planned output generation, or onto an SSTable component |
+| `--out-format <OUT_FORMAT>` | `text` | `text` (to stderr) or `json` (manifest to stdout) |
+
+Output is uncompressed. Exit: `0` all recovered and every verification ran, `1` usage error, `2` refused (nothing written), `3` written with losses or a verification gap.
+
+#### `rebuild` — Regenerate derived components
+
+```
+Usage: cqlite rebuild [OPTIONS] --components <COMPONENTS> <INPUT>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<INPUT>` | — | `Data.db` file or a table directory (one component set per generation) |
+| `--table <TABLE>` | derived from the directory name | Same rule as `salvage --table` |
+| `--components <COMPONENTS>` | — (required) | Comma-separated: `index,summary,filter,digest,toc,crc,statistics`; `statistics` must be named and is lossy by declaration |
+| `--out <OUT>` | — | Output directory receiving a complete component set (untouched originals copied verbatim) |
+| `--in-place` | — | Refuses today (exit 1) |
+| `--manifest <MANIFEST>` | — | Write the JSON manifest here |
+| `--out-format <OUT_FORMAT>` | `text` | `text` (stderr trace only) or `json` (manifest also to stdout) |
+
+Exit: `0` every requested component regenerated or correctly skipped, `1` usage error, `2` refused (nothing written). Refuses on a damaged `Data.db` and fails closed on a damaged sibling `Statistics.db`.
+
+#### `export --format vortex` — Vortex columnar export
+
+`export` takes `--format vortex` (export only; needs a build with `--features vortex`; file destination required). See [Output Formats: vortex](/cqlite/user-docs/output-formats/#vortex--vortex-columnar-file-format-export-only).
+
+---
+
 ## One-shot mode
 
 The top-level `--execute` flag (short: `-e`) and its alias `--query` execute a single CQL statement and exit. This is the most common usage pattern for scripting and automation.
