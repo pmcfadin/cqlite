@@ -65,6 +65,10 @@ reconciliation before rebuild decodes it — so a re-derivation can only come ou
 narrowing every delta. A re-derivation from the decoded content is the DOCUMENTED FALLBACK, used
 only when the original `Statistics.db`/header is genuinely unreadable (rebuild's own headline case
 is a MISSING `Statistics.db`), and it never certifies byte parity.
+A `Statistics.db` that is PRESENT but fails Cassandra's metadata integrity check (#4612) is NOT
+treated as missing: `rebuild_components` SHALL fail closed, naming the path and both remedies (move
+the file aside so the missing-file fallback applies, or supply `statistics_recovery_source`). Owner
+ruling 2026-11-23 (Q23).
 
 Independently of which baseline is in force, `rebuild_components` SHALL refuse an `index`/`summary`
 request whenever a partition that CARRIES a promoted-index payload (≥ 2 blocks, the gate
