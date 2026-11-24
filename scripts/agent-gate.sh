@@ -7059,6 +7059,24 @@ _run_shell_selftest_files() {
   return "$rc"
 }
 
+# _pbv_ensure_venv <venv> (issue #4624): the ONE rule for whether a shared/private python
+# venv may be reused. Reusable only if `<venv>/bin/python -c 'import sys'` succeeds AND
+# `<venv>/bin/activate` is a regular file; anything else (a partial venv restored from a CI
+# cache with bin/python but no bin/activate, a dangling interpreter symlink, a half-created
+# dir) is removed and recreated with `python3 -m venv`. rc!=0 = venv creation failed.
+_pbv_ensure_venv() {
+  local venv="$1"
+  if [ -x "$venv/bin/python" ] && "$venv/bin/python" -c 'import sys' >/dev/null 2>&1 \
+     && [ -f "$venv/bin/activate" ]; then
+    return 0
+  fi
+  if [ -e "$venv" ] || [ -L "$venv" ]; then
+    echo "[python-bindings] venv $venv is missing or partial (no working bin/python + bin/activate) — recreating (issue #4624)" >&2
+    rm -rf "$venv"
+  fi
+  python3 -m venv "$venv"
+}
+
 # _python_build_verify_venv <venv> <maturin-develop-cmd> [<active-venv-out-file>]
 # (issue #1803): build the cqlite python extension into <venv> and GUARANTEE it
 # imports, self-healing a stale/half-built editable install EXACTLY ONCE. The
@@ -7107,7 +7125,7 @@ _python_build_verify_venv() {
   }
   # venv + pip deps (rc!=0 = toolchain gap). Reuses an existing venv (speed).
   _pbv_setup() {
-    [ -x "$active_venv/bin/python" ] || python3 -m venv "$active_venv" || return 1
+    _pbv_ensure_venv "$active_venv" || return 1
     (
       set -euo pipefail
       # shellcheck disable=SC1091

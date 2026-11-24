@@ -468,7 +468,9 @@ run_selfheal_privatevenv_scenario() {
   local counter="$tmp/counter-$RANDOM$RANDOM"
   local out_file="$tmp/outfile-$RANDOM$RANDOM"
   rm -rf "$venv"; rm -f "$counter" "$out_file"
-  mkdir -p "$venv"
+  mkdir -p "$venv/bin"
+  : >"$venv/bin/python"; chmod +x "$venv/bin/python"
+  : >"$venv/bin/activate"
   : >"$venv/SHARED_SENTINEL"
   OUT=$(
     PATH="$stub:$stub_tc:$PATH" \
@@ -505,6 +507,49 @@ if [ "$SHARED_SENTINEL_OK" -eq 1 ]; then
   ok "private-heal: the SHARED venv's sentinel survives (no rm -rf of shared mutable state — race-free)"
 else
   bad "private-heal: the shared venv's sentinel was removed — the shared venv was destroyed (the exact race Finding B forbids)"
+fi
+
+# ---- (k) partial venv (#4624): executable bin/python but NO bin/activate (what a
+#     rust-cache restore produced) must be REBUILT, not reused. A stale marker in the
+#     dir proves the partial dir was removed; python3 -m venv must run exactly once.
+#     Control: a healthy venv (python + activate) is reused (see (e) above).
+run_partial_venv_scenario() {
+  local venv="$tmp/venv-partial-$RANDOM$RANDOM"
+  local counter="$tmp/counter-$RANDOM$RANDOM"
+  local py3_counter="$tmp/py3counter-$RANDOM$RANDOM"
+  rm -rf "$venv"; rm -f "$counter" "$py3_counter"
+  mkdir -p "$venv/bin"
+  : >"$venv/bin/python"; chmod +x "$venv/bin/python"
+  : >"$venv/STALE_MARKER"
+  OUT=$(
+    PATH="$stub:$stub_tc:$PATH" \
+    PBV_TEST_COUNTER="$counter" \
+    PBV_TEST_PY3_COUNTER="$py3_counter" \
+    PBV_TEST_PASS_ON_ATTEMPT=1 \
+    MATURIN_RC=0 \
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
+  )
+  RC=$?
+  PY3_COUNTER=0; [ -f "$py3_counter" ] && PY3_COUNTER=$(cat "$py3_counter")
+  STALE_GONE=0; [ -e "$venv/STALE_MARKER" ] || STALE_GONE=1
+  ACTIVATE_NOW=0; [ -f "$venv/bin/activate" ] && ACTIVATE_NOW=1
+}
+run_partial_venv_scenario
+if [ "$RC" -eq 0 ]; then
+  ok "partial-venv: bin/python without bin/activate is rebuilt and the run passes → exit 0"
+else
+  bad "partial-venv: expected exit 0, got $RC"
+  echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
+fi
+if [ "$PY3_COUNTER" -eq 1 ]; then
+  ok "partial-venv: python3 -m venv invoked exactly ONCE (partial venv rebuilt, not reused)"
+else
+  bad "partial-venv: expected 1 'python3 -m venv' call, got $PY3_COUNTER"
+fi
+if [ "$STALE_GONE" -eq 1 ] && [ "$ACTIVATE_NOW" -eq 1 ]; then
+  ok "partial-venv: the partial dir was removed and recreated with bin/activate"
+else
+  bad "partial-venv: stale marker gone=$STALE_GONE, activate present=$ACTIVATE_NOW (expected 1/1)"
 fi
 
 echo "----"
