@@ -7198,6 +7198,10 @@ _python_build_verify_venv() {
   local heal_venv="${venv}.heal.$$"
   while [ -e "$heal_venv" ]; do heal_venv="${venv}.heal.$$.$RANDOM"; done
   echo "[python-bindings] cqlite._cqlite did not import after 'maturin develop' (exit 0) — self-healing into a private venv ($heal_venv, issue #1803); the shared venv is left untouched to avoid a cross-run teardown race" >&2
+  # A private venv _pbv_ensure_venv made (partial shared venv, #4624) is THIS run's own
+  # state: remove it before switching, or the caller (which cleans only the final
+  # reported path) would leak it under target/. The shared $venv is never removed.
+  if [ "$active_venv" != "$venv" ]; then rm -rf "$active_venv"; fi
   active_venv="$heal_venv"
   _pbv_setup || { _pbv_write_active; return 1; }
   build_rc=0; _pbv_build || build_rc=$?

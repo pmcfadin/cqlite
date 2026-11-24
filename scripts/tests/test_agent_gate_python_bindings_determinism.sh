@@ -509,6 +509,39 @@ else
   bad "private-heal: the shared venv's sentinel was removed — the shared venv was destroyed (the exact race Finding B forbids)"
 fi
 
+# ---- (l) partial SHARED venv + first-attempt import miss (#4624, roborev r2): the run
+#     builds a .priv.* venv, then self-heals into .heal.*; the .priv.* venv must be removed
+#     (the caller cleans only the final reported path), the shared venv still untouched.
+run_partial_then_heal_scenario() {
+  local venv="$tmp/venv-ph-$RANDOM$RANDOM"
+  local counter="$tmp/counter-$RANDOM$RANDOM"
+  local out_file="$tmp/outfile-$RANDOM$RANDOM"
+  rm -rf "$venv"; rm -f "$counter" "$out_file"
+  mkdir -p "$venv/bin"
+  : >"$venv/bin/python"; chmod +x "$venv/bin/python"
+  : >"$venv/STALE_MARKER"
+  OUT=$(
+    PATH="$stub:$stub_tc:$PATH" \
+    PBV_TEST_COUNTER="$counter" \
+    PBV_TEST_PASS_ON_ATTEMPT=2 \
+    MATURIN_RC=0 \
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" "$out_file" 2>&1
+  )
+  RC=$?
+  ACTIVE_VENV=""; [ -f "$out_file" ] && ACTIVE_VENV=$(cat "$out_file")
+  PRIV_LEFT=$(find "$(dirname "$venv")" -maxdepth 1 -name "$(basename "$venv").priv.*" | wc -l | tr -d ' ')
+  STALE_KEPT=0; [ -e "$venv/STALE_MARKER" ] && STALE_KEPT=1
+  SHARED_VENV="$venv"
+}
+run_partial_then_heal_scenario
+if [ "$RC" -eq 0 ]; then ok "partial+heal: self-heals to exit 0"; else bad "partial+heal: expected exit 0, got $RC"; printf '%s\n' "$OUT"; fi
+case "$ACTIVE_VENV" in
+  "$SHARED_VENV".heal.*) ok "partial+heal: final active venv is the private heal venv" ;;
+  *) bad "partial+heal: expected '\$venv.heal.*', got '$ACTIVE_VENV'" ;;
+esac
+if [ "$PRIV_LEFT" -eq 0 ]; then ok "partial+heal: the intermediate .priv.* venv was removed (no leak)"; else bad "partial+heal: $PRIV_LEFT .priv.* venv(s) leaked"; fi
+if [ "$STALE_KEPT" -eq 1 ]; then ok "partial+heal: the shared venv is untouched"; else bad "partial+heal: the shared venv was modified"; fi
+
 # ---- (k) partial SHARED venv (#4624, roborev): executable bin/python but NO bin/activate
 #     (what a rust-cache restore produced) must NOT be reused and must NEVER be deleted
 #     (a concurrent gate may be using it). The run bypasses it via a PRIVATE venv: the
