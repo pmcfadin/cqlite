@@ -7059,6 +7059,34 @@ _run_shell_selftest_files() {
   return "$rc"
 }
 
+# _pbv_ensure_venv <venv> (issue #4624): the ONE rule for whether a shared/private python
+# venv may be used. Prints the venv path to USE on stdout (all other output goes to stderr);
+# rc!=0 = venv creation failed. A venv is healthy only if `<venv>/bin/python -c 'import sys'`
+# succeeds AND `<venv>/bin/activate` is a regular file.
+#   - <venv> does not exist      -> create it with `python3 -m venv` and use it.
+#   - <venv> exists and is healthy -> reuse it.
+#   - <venv> exists but is partial (e.g. bin/python without bin/activate restored from a CI
+#     cache) -> LEAVE IT ALONE and build a PRIVATE venv beside it (mktemp -d "<venv>.priv.XXXXXX")
+#     and print that path instead. This is the race-free rule: a shared venv is NEVER deleted,
+#     because a concurrent same-checkout gate may be creating or using it. Only a private venv
+#     this function created may be removed (the caller rm -rf's any active venv != the shared
+#     one, the same cleanup contract as the #1803 heal venv).
+_pbv_ensure_venv() {
+  local venv="$1" priv
+  if [ -x "$venv/bin/python" ] && "$venv/bin/python" -c 'import sys' >/dev/null 2>&1 \
+     && [ -f "$venv/bin/activate" ]; then
+    printf '%s\n' "$venv"; return 0
+  fi
+  if [ ! -e "$venv" ] && [ ! -L "$venv" ]; then
+    python3 -m venv "$venv" >&2 || return 1
+    printf '%s\n' "$venv"; return 0
+  fi
+  priv=$(mktemp -d "${venv}.priv.XXXXXX") || return 1
+  echo "[python-bindings] venv $venv is partial (no working bin/python + bin/activate) — leaving it untouched and using a private venv $priv (issue #4624)" >&2
+  python3 -m venv "$priv" >&2 || { rm -rf "$priv"; return 1; }
+  printf '%s\n' "$priv"
+}
+
 # _python_build_verify_venv <venv> <maturin-develop-cmd> [<active-venv-out-file>]
 # (issue #1803): build the cqlite python extension into <venv> and GUARANTEE it
 # imports, self-healing a stale/half-built editable install EXACTLY ONCE. The
@@ -7107,7 +7135,7 @@ _python_build_verify_venv() {
   }
   # venv + pip deps (rc!=0 = toolchain gap). Reuses an existing venv (speed).
   _pbv_setup() {
-    [ -x "$active_venv/bin/python" ] || python3 -m venv "$active_venv" || return 1
+    active_venv=$(_pbv_ensure_venv "$active_venv") || return 1
     (
       set -euo pipefail
       # shellcheck disable=SC1091
@@ -7170,6 +7198,10 @@ _python_build_verify_venv() {
   local heal_venv="${venv}.heal.$$"
   while [ -e "$heal_venv" ]; do heal_venv="${venv}.heal.$$.$RANDOM"; done
   echo "[python-bindings] cqlite._cqlite did not import after 'maturin develop' (exit 0) — self-healing into a private venv ($heal_venv, issue #1803); the shared venv is left untouched to avoid a cross-run teardown race" >&2
+  # A private venv _pbv_ensure_venv made (partial shared venv, #4624) is THIS run's own
+  # state: remove it before switching, or the caller (which cleans only the final
+  # reported path) would leak it under target/. The shared $venv is never removed.
+  if [ "$active_venv" != "$venv" ]; then rm -rf "$active_venv"; fi
   active_venv="$heal_venv"
   _pbv_setup || { _pbv_write_active; return 1; }
   build_rc=0; _pbv_build || build_rc=$?
