@@ -7060,21 +7060,31 @@ _run_shell_selftest_files() {
 }
 
 # _pbv_ensure_venv <venv> (issue #4624): the ONE rule for whether a shared/private python
-# venv may be reused. Reusable only if `<venv>/bin/python -c 'import sys'` succeeds AND
-# `<venv>/bin/activate` is a regular file; anything else (a partial venv restored from a CI
-# cache with bin/python but no bin/activate, a dangling interpreter symlink, a half-created
-# dir) is removed and recreated with `python3 -m venv`. rc!=0 = venv creation failed.
+# venv may be used. Prints the venv path to USE on stdout (all other output goes to stderr);
+# rc!=0 = venv creation failed. A venv is healthy only if `<venv>/bin/python -c 'import sys'`
+# succeeds AND `<venv>/bin/activate` is a regular file.
+#   - <venv> does not exist      -> create it with `python3 -m venv` and use it.
+#   - <venv> exists and is healthy -> reuse it.
+#   - <venv> exists but is partial (e.g. bin/python without bin/activate restored from a CI
+#     cache) -> LEAVE IT ALONE and build a PRIVATE venv beside it (mktemp -d "<venv>.priv.XXXXXX")
+#     and print that path instead. This is the race-free rule: a shared venv is NEVER deleted,
+#     because a concurrent same-checkout gate may be creating or using it. Only a private venv
+#     this function created may be removed (the caller rm -rf's any active venv != the shared
+#     one, the same cleanup contract as the #1803 heal venv).
 _pbv_ensure_venv() {
-  local venv="$1"
+  local venv="$1" priv
   if [ -x "$venv/bin/python" ] && "$venv/bin/python" -c 'import sys' >/dev/null 2>&1 \
      && [ -f "$venv/bin/activate" ]; then
-    return 0
+    printf '%s\n' "$venv"; return 0
   fi
-  if [ -e "$venv" ] || [ -L "$venv" ]; then
-    echo "[python-bindings] venv $venv is missing or partial (no working bin/python + bin/activate) — recreating (issue #4624)" >&2
-    rm -rf "$venv"
+  if [ ! -e "$venv" ] && [ ! -L "$venv" ]; then
+    python3 -m venv "$venv" >&2 || return 1
+    printf '%s\n' "$venv"; return 0
   fi
-  python3 -m venv "$venv"
+  priv=$(mktemp -d "${venv}.priv.XXXXXX") || return 1
+  echo "[python-bindings] venv $venv is partial (no working bin/python + bin/activate) — leaving it untouched and using a private venv $priv (issue #4624)" >&2
+  python3 -m venv "$priv" >&2 || { rm -rf "$priv"; return 1; }
+  printf '%s\n' "$priv"
 }
 
 # _python_build_verify_venv <venv> <maturin-develop-cmd> [<active-venv-out-file>]
@@ -7125,7 +7135,7 @@ _python_build_verify_venv() {
   }
   # venv + pip deps (rc!=0 = toolchain gap). Reuses an existing venv (speed).
   _pbv_setup() {
-    _pbv_ensure_venv "$active_venv" || return 1
+    active_venv=$(_pbv_ensure_venv "$active_venv") || return 1
     (
       set -euo pipefail
       # shellcheck disable=SC1091

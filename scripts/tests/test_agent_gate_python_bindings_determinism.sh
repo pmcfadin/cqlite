@@ -509,15 +509,17 @@ else
   bad "private-heal: the shared venv's sentinel was removed — the shared venv was destroyed (the exact race Finding B forbids)"
 fi
 
-# ---- (k) partial venv (#4624): executable bin/python but NO bin/activate (what a
-#     rust-cache restore produced) must be REBUILT, not reused. A stale marker in the
-#     dir proves the partial dir was removed; python3 -m venv must run exactly once.
-#     Control: a healthy venv (python + activate) is reused (see (e) above).
+# ---- (k) partial SHARED venv (#4624, roborev): executable bin/python but NO bin/activate
+#     (what a rust-cache restore produced) must NOT be reused and must NEVER be deleted
+#     (a concurrent gate may be using it). The run bypasses it via a PRIVATE venv: the
+#     stale marker survives, the reported active venv is a different path with bin/activate,
+#     and python3 -m venv runs exactly once. Control: a healthy venv is reused (see (e)).
 run_partial_venv_scenario() {
   local venv="$tmp/venv-partial-$RANDOM$RANDOM"
   local counter="$tmp/counter-$RANDOM$RANDOM"
   local py3_counter="$tmp/py3counter-$RANDOM$RANDOM"
-  rm -rf "$venv"; rm -f "$counter" "$py3_counter"
+  local out_file="$tmp/outfile-$RANDOM$RANDOM"
+  rm -rf "$venv"; rm -f "$counter" "$py3_counter" "$out_file"
   mkdir -p "$venv/bin"
   : >"$venv/bin/python"; chmod +x "$venv/bin/python"
   : >"$venv/STALE_MARKER"
@@ -527,29 +529,36 @@ run_partial_venv_scenario() {
     PBV_TEST_PY3_COUNTER="$py3_counter" \
     PBV_TEST_PASS_ON_ATTEMPT=1 \
     MATURIN_RC=0 \
-    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" "$out_file" 2>&1
   )
   RC=$?
   PY3_COUNTER=0; [ -f "$py3_counter" ] && PY3_COUNTER=$(cat "$py3_counter")
-  STALE_GONE=0; [ -e "$venv/STALE_MARKER" ] || STALE_GONE=1
-  ACTIVATE_NOW=0; [ -f "$venv/bin/activate" ] && ACTIVATE_NOW=1
+  STALE_KEPT=0; [ -e "$venv/STALE_MARKER" ] && STALE_KEPT=1
+  ACTIVE_VENV=""; [ -f "$out_file" ] && ACTIVE_VENV=$(cat "$out_file")
+  ACTIVATE_NOW=0; [ -n "$ACTIVE_VENV" ] && [ -f "$ACTIVE_VENV/bin/activate" ] && ACTIVATE_NOW=1
+  SHARED_VENV="$venv"
 }
 run_partial_venv_scenario
 if [ "$RC" -eq 0 ]; then
-  ok "partial-venv: bin/python without bin/activate is rebuilt and the run passes → exit 0"
+  ok "partial-venv: bin/python without bin/activate is bypassed via a private venv and the run passes → exit 0"
 else
   bad "partial-venv: expected exit 0, got $RC"
   echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
 fi
 if [ "$PY3_COUNTER" -eq 1 ]; then
-  ok "partial-venv: python3 -m venv invoked exactly ONCE (partial venv rebuilt, not reused)"
+  ok "partial-venv: python3 -m venv invoked exactly ONCE (private venv built, partial one not reused)"
 else
   bad "partial-venv: expected 1 'python3 -m venv' call, got $PY3_COUNTER"
 fi
-if [ "$STALE_GONE" -eq 1 ] && [ "$ACTIVATE_NOW" -eq 1 ]; then
-  ok "partial-venv: the partial dir was removed and recreated with bin/activate"
+if [ "$STALE_KEPT" -eq 1 ]; then
+  ok "partial-venv: the partial SHARED venv is untouched (stale marker survives — never deleted)"
 else
-  bad "partial-venv: stale marker gone=$STALE_GONE, activate present=$ACTIVATE_NOW (expected 1/1)"
+  bad "partial-venv: the shared venv's stale marker was removed — a shared venv was deleted (race)"
+fi
+if [ -n "$ACTIVE_VENV" ] && [ "$ACTIVE_VENV" != "$SHARED_VENV" ] && [ "$ACTIVATE_NOW" -eq 1 ]; then
+  ok "partial-venv: reported active venv is a different private path with bin/activate ($ACTIVE_VENV)"
+else
+  bad "partial-venv: active venv '$ACTIVE_VENV' (shared '$SHARED_VENV', activate=$ACTIVATE_NOW) is not a distinct private venv with bin/activate"
 fi
 
 echo "----"
