@@ -161,3 +161,81 @@ impl Generation {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::sstable::generation::{list_generations, Scope, TocPolicy};
+    use std::cell::Cell;
+
+    /// A one-generation directory. The `Data.db` is a placeholder the listing only measures; no
+    /// test here parses it.
+    fn one_generation(prefix: &str, statistics: Option<&[u8]>) -> (tempfile::TempDir, Generation) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(format!("{prefix}-Data.db")), b"x").unwrap();
+        std::fs::write(dir.path().join(format!("{prefix}-TOC.txt")), b"Data.db\n").unwrap();
+        if let Some(bytes) = statistics {
+            std::fs::write(dir.path().join(format!("{prefix}-Statistics.db")), bytes).unwrap();
+        }
+        let mut listing = list_generations(dir.path(), &Scope::Live, TocPolicy::Accept).unwrap();
+        assert_eq!(listing.live.len(), 1);
+        let generation = listing.live.remove(0);
+        (dir, generation)
+    }
+
+    fn forbidden(_: &Path) -> Result<Vec<u8>> {
+        panic!("a component was opened");
+    }
+
+    /// G9.1: below the floor, with no `Statistics.db` beside it, and a reader that fails on any
+    /// open.
+    #[test]
+    fn below_floor_returns_unsupported_version_without_any_open() {
+        let (_dir, generation) = one_generation("ma-1-big", None);
+        match generation.trusted_metadata_with(&forbidden) {
+            Err(MetadataFailure::UnsupportedVersion { version, floor }) => {
+                assert_eq!((version.as_str(), floor), ("ma", "na"));
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+        assert!(generation.has_condition(Condition::UnsupportedVersion));
+    }
+
+    /// G11.3: a truncated `ma-*` Statistics.db is still `UnsupportedVersion`, never `Corrupt`.
+    #[test]
+    fn floor_is_checked_before_integrity() {
+        let (_dir, generation) = one_generation("ma-1-big", Some(b"truncated"));
+        let reads = Cell::new(0);
+        let counting = |p: &Path| {
+            reads.set(reads.get() + 1);
+            read_checked(p)
+        };
+        let outcome = generation.trusted_metadata_with(&counting);
+        assert_eq!(outcome.unwrap_err().condition(), Condition::UnsupportedVersion);
+        assert_eq!(reads.get(), 0);
+    }
+
+    /// G11.2: a failure is cached, so the file is read once and both calls agree.
+    #[test]
+    fn a_failure_is_cached_and_the_file_is_read_once() {
+        let (_dir, generation) = one_generation("nb-1-big", Some(b"truncated"));
+        let reads = Cell::new(0);
+        let counting = |p: &Path| {
+            reads.set(reads.get() + 1);
+            read_checked(p)
+        };
+        let first = generation.trusted_metadata_with(&counting).unwrap_err();
+        let second = generation.trusted_metadata_with(&forbidden).unwrap_err();
+        assert_eq!(reads.get(), 1);
+        assert_eq!(first.condition(), Condition::Corrupt);
+        assert_eq!(first.to_string(), second.to_string());
+        assert!(first.to_string().contains("nb-1-big-Statistics.db"));
+    }
+
+    #[test]
+    fn no_statistics_component_is_absent() {
+        let (_dir, generation) = one_generation("nb-1-big", None);
+        let failure = generation.trusted_metadata_with(&forbidden).unwrap_err();
+        assert_eq!(failure.condition(), Condition::Absent);
+    }
+}

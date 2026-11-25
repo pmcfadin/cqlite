@@ -442,6 +442,28 @@ mod tests {
         assert_eq!(record.compute_checksum(), i64::from(expected.finalize()));
     }
 
+    /// The committed log Cassandra 5.0.8 wrote for `gd4626.txn_compaction`
+    /// (`test-data/fixtures/issue_4626/txn_committed`), byte for byte. Its record paths are the
+    /// container's, so no file is found for the REMOVE records and only the checksums are
+    /// exercised: every one must verify against `computeChecksum`.
+    #[test]
+    fn cassandra_written_records_verify_their_checksums() {
+        let dir = "/var/lib/cassandra/data/gd4626/txn_compaction-d2afe860e89911f18c249315fc18c6f9";
+        let lines = [
+            format!("ADD:[{dir}/nb-4-big-,0,8][2436736489]"),
+            format!("REMOVE:[{dir}/nb-3-big-,1795588286893,8][1736859284]"),
+            format!("REMOVE:[{dir}/nb-2-big-,1795588283873,8][3206408674]"),
+            format!("REMOVE:[{dir}/nb-1-big-,1795588282962,8][1949738987]"),
+            "COMMIT:[,0,0][2613697770]".to_string(),
+        ];
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let log = verify(&refs);
+        assert!(log.problems.is_empty(), "{:?}", log.problems);
+        assert!(log.records.iter().all(Record::is_valid));
+        assert!(log.completed && log.committed());
+        assert_eq!(log.records.len(), 5);
+    }
+
     #[test]
     fn parses_cassandras_documented_forms() {
         let r = Record::parse("ADD:[/data/ks/t-1/nb-3-big-,0,8][2633027732]");
