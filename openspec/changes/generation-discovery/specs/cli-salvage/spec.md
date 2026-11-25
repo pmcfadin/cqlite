@@ -23,7 +23,9 @@ with the condition, not silently.
 - **When** salvage runs again
 - **Then** only the generations directly in `<table-dir>` are inputs.
 
-#### Scenario: GD10.3 UUID-id generation is salvaged
-- **Given** `nb-3gb2_0rbd_2lhua2pw7a2hlyvbsp-big-*`
+#### Scenario: GD10.3 UUID-id generation is refused by name, not skipped
+- **Given** `nb-3gb2_0rbd_2lhua2pw7a2hlyvbsp-big-*` beside `nb-1-big-*`
 - **When** salvage runs
-- **Then** the output carries the same id text.
+- **Then** it refuses naming the UUID-id generation and the unsupported id form (salvage's existing
+  sequence-id requirement, `salvage/recover.rs`, now raised from the module's typed id per owner Q41),
+  and does not proceed with `nb-1-big` alone.
