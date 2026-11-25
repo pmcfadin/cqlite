@@ -12,10 +12,10 @@ are ADDED.
 `verify` classifies damage itself (verdict rows and the parity guard), so it SHALL map the module's
 typed outcomes to its existing verdicts and SHALL NOT change any verdict: `TocMissing` is the existing
 A5 missing-`TOC.txt` finding; `Corrupt` is the existing Statistics integrity finding; `UnsupportedVersion`
-is a refusal naming the floor; `Orphan` is reported, not verified as live. A directory input SHALL be
-Scope Live, and verify SHALL NOT enter `snapshots/` or `backups/` unless the caller names that Scope.
+is a refusal naming the floor; `Orphan` is reported, not verified as live.
 
 #### Scenario: GD11.1 verdicts are unchanged on the corrupted-component corpus
+- **Rule detail and Cassandra reference**: A directory input SHALL be Scope Live, and verify SHALL NOT enter `snapshots/` or `backups/` unless the caller names that Scope.
 - **Given** the `sstable-verify-parity` Cassandra-written corrupted-component fixtures
 - **When** `verify` runs after the migration
 - **Then** every per-fixture verdict equals the verdict recorded before the migration.

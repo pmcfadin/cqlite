@@ -10,12 +10,10 @@ Statistics through its trusted-metadata accessor. R6 and R7 are unchanged. All r
 `diagnose` SHALL list the table directory with Scope Live and TocMissing accepted. A generation whose
 trusted metadata is `Corrupt`, `Unreadable` or `UnsupportedVersion` SHALL be an entry in
 `unreadable_generations` (`{data_path, cause}`) with the condition named in `cause`, per R6, and SHALL
-NOT make the run exit non-zero. A `TocMissing` generation SHALL be reported in `generations[]` with a
-`conditions` array containing `"TocMissing"`. An `Orphan` SHALL appear in `unreadable_generations` with
-cause `Orphan`. A `TxnInconsistent` directory SHALL exit `1` (usage error: the directory cannot be
-resolved to a table state) naming the log.
+NOT make the run exit non-zero.
 
 #### Scenario: GD8.1 TocMissing reported, exit 0
+- **Rule detail and Cassandra reference**: A `TocMissing` generation SHALL be reported in `generations[]` with a `conditions` array containing `"TocMissing"`. An `Orphan` SHALL appear in `unreadable_generations` with cause `Orphan`. A `TxnInconsistent` directory SHALL exit `1` (usage error: the directory cannot be resolved to a table state) naming the log.
 - **Given** `nb-1-big-TOC.txt` deleted from a `test_basic` copy
 - **When** `cqlite diagnose <table-dir> --out json` runs
 - **Then** exit `0` and `generations[]` carries `nb-1-big` with `conditions: ["TocMissing"]`.

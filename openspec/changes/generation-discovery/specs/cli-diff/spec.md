@@ -10,10 +10,10 @@ All requirements are ADDED.
 `diff` SHALL list `<snapshot-a-dir>` and `<snapshot-b-dir>` independently with Scope Live and
 TocMissing accepted. R9's "flat table directory" becomes: exactly the module's Scope Live. A condition
 that refuses on one side (below-floor, `Corrupt`, `Unreadable`, `TxnInconsistent`) SHALL exit `2` with
-`side=a` or `side=b`, as R12 states for an unreadable generation. When a side is a snapshot directory
-(a path that is itself `<table-dir>/snapshots/<tag>`), its generations are its own Live set.
+`side=a` or `side=b`, as R12 states for an unreadable generation.
 
 #### Scenario: GD6.1 TocMissing on side B is visible
+- **Rule detail and Cassandra reference**: When a side is a snapshot directory (a path that is itself `<table-dir>/snapshots/<tag>`), its generations are its own Live set.
 - **Given** side B's `nb-1-big-TOC.txt` deleted
 - **When** `diff` runs
 - **Then** the first-line `side_b: generations=1 [nb-1-big]` is shown and the exit code is `0`.

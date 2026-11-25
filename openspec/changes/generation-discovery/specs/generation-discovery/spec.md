@@ -10,16 +10,10 @@ All requirements are ADDED.
 
 ### Requirement: G1 — A committed transaction hides its REMOVE files, an uncommitted one hides its ADD files
 
-The Live set SHALL be computed from the directory's transaction logs, as `LogAwareFileLister` does.
-A log named like `nb_txn_compaction_<uuid>.log` matches `LogFile.FILE_REGEX`
-(`db/lifecycle/LogFile.java:80`). When the log is complete, the files of its REMOVE records are not live
-if the transaction committed, and the files of its ADD records are not live if it did not, whatever is
-on disk (`db/lifecycle/LogAwareFileLister.java:144-148`, `setTemporary` `:197-203`). When the log is
-incomplete but every file its REMOVE records name is present, the transaction is in progress and is
-treated as aborted: its ADD files are not live (`:150-154`). The module SHALL list non-log files before
-reading logs (`:88-95`). A transaction log SHALL never appear as a component (`db/Directories.java:1121-1122`).
+The Live set SHALL be computed from the directory's transaction logs: a committed transaction hides its REMOVE files and an uncommitted one hides its ADD files, as `LogAwareFileLister` does (`db/lifecycle/LogAwareFileLister.java:144-148`, `setTemporary` `:197-203`). A log such as `nb_txn_compaction_<uuid>.log` matches `LogFile.FILE_REGEX` (`db/lifecycle/LogFile.java:80`).
 
 #### Scenario: G1.1 committed compaction hides the inputs
+- **Rule detail and Cassandra reference**: When the log is complete, the files of its REMOVE records are not live if the transaction committed, and the files of its ADD records are not live if it did not, whatever is on disk (`db/lifecycle/LogAwareFileLister.java:144-148`, `setTemporary` `:197-203`). When the log is incomplete but every file its REMOVE records name is present, the transaction is in progress and is treated as aborted: its ADD files are not live (`:150-154`). The module SHALL list non-log files before reading logs (`:88-95`). A transaction log SHALL never appear as a component (`db/Directories.java:1121-1122`).
 - **Given** a Cassandra-written directory holding `nb-1-big-*`, `nb-2-big-*`, `nb-3-big-*` and a complete
   committed `nb_txn_compaction_<uuid>.log` whose REMOVE records name generations 1 and 2 and whose ADD
   record names generation 3
@@ -45,12 +39,10 @@ reading logs (`:88-95`). A transaction log SHALL never appear as a component (`d
 When a transaction log is not complete, some file its REMOVE records name is missing, and after one
 re-read the log is still not complete, the listing SHALL fail with the named error `TxnInconsistent`
 carrying the directory and the log file name, and SHALL return no partial set
-(`db/lifecycle/LogAwareFileLister.java:156-186`, the "inconsistent disk state" throw at `:184`). If the log
-file is gone on the re-read, the transaction finished concurrently and the listing continues without
-it (`:159-161`). A log with records that fail verification SHALL be reported the same way, never applied
-silently (`:133-137`, the `OnTxnErr.THROW` path).
+(`db/lifecycle/LogAwareFileLister.java:156-186`, the "inconsistent disk state" throw at `:184`).
 
 #### Scenario: G2.1 old file missing, log incomplete
+- **Rule detail and Cassandra reference**: If the log file is gone on the re-read, the transaction finished concurrently and the listing continues without it (`:159-161`). A log with records that fail verification SHALL be reported the same way, never applied silently (`:133-137`, the `OnTxnErr.THROW` path).
 - **Given** a directory with `nb-3-big-*` and an incomplete `nb_txn_compaction_<uuid>.log` whose REMOVE
   record names `nb-1-big` and `nb-2-big`, both absent from disk
 - **When** the Live set is listed
@@ -106,13 +98,10 @@ A Generation id token SHALL be parsed as a UUID id if it is exactly 28 character
 `([0-9a-z]{4})_([0-9a-z]{4})_([0-9a-z]{5})([0-9a-z]{13})` case-insensitively
 (`io/sstable/UUIDBasedSSTableId.java:41,114,130`), otherwise as a sequence id if it is 1 to 10 ASCII
 digits (`io/sstable/SequenceBasedSSTableId.java:90,112`) whose value fits in `0..=2147483647`
-(`Integer.parseInt`, `:124`; the constructor asserts non-negative, `:40`). UUID is tried first
-(`io/sstable/SSTableIdFactory.java:38-45`). A token matching neither makes the file not an SSTable
-component of this table (`io/sstable/Descriptor.java:392-400`) and it is ignored. Ids SHALL order by
-`SSTableIdFactory.COMPARATOR` (`:81-96`): sequence ids by integer value, UUID ids by TimeUUID, and every
-sequence id before every UUID id. The listing SHALL be in that order (`db/Directories.java:1058-1063`).
+(`Integer.parseInt`, `:124`; the constructor asserts non-negative, `:40`).
 
 #### Scenario: G5.1 UUID id accepted
+- **Rule detail and Cassandra reference**: UUID is tried first (`io/sstable/SSTableIdFactory.java:38-45`). A token matching neither makes the file not an SSTable component of this table (`io/sstable/Descriptor.java:392-400`) and it is ignored. Ids SHALL order by `SSTableIdFactory.COMPARATOR` (`:81-96`): sequence ids by integer value, UUID ids by TimeUUID, and every sequence id before every UUID id. The listing SHALL be in that order (`db/Directories.java:1058-1063`).
 - **Given** a Cassandra 5.0.8 table written with `uuid_sstable_identifiers_enabled: true`, with
   `nb-3gb2_0rbd_2lhua2pw7a2hlyvbsp-big-Data.db`
 - **When** listed
@@ -139,13 +128,10 @@ sequence id before every UUID id. The listing SHALL be in that order (`db/Direct
 
 The module SHALL provide the next sequence id for a table as the maximum sequence id found across the
 Live set and `backups/`, over every descriptor whatever its format (`big`, `bti`) and version letter
-(`na`, `nb`, `oa`, `da`), plus one, and 1 when there is none. UUID ids do not contribute to the maximum
-(`io/sstable/SequenceBasedSSTableId.java:97-107`, filter at `:99`; `db/Directories.java:1394-1405`,
-`includeBackups(true)` at `:1398`). A listing used for allocation SHALL ignore transaction-log errors
-as Cassandra's generator does (`OnTxnErr.IGNORE`, `:1397`), so a damaged log never blocks allocation
-but also never lowers the maximum.
+(`na`, `nb`, `oa`, `da`), plus one, and 1 when there is none.
 
 #### Scenario: G6.1 format and version do not separate ids
+- **Rule detail and Cassandra reference**: UUID ids do not contribute to the maximum (`io/sstable/SequenceBasedSSTableId.java:97-107`, filter at `:99`; `db/Directories.java:1394-1405`, `includeBackups(true)` at `:1398`). A listing used for allocation SHALL ignore transaction-log errors as Cassandra's generator does (`OnTxnErr.IGNORE`, `:1397`), so a damaged log never blocks allocation but also never lowers the maximum.
 - **Given** `nb-1-big-*`, `oa-4-big-*` and `da-6-bti-*` in the Live set
 - **When** the next id is requested
 - **Then** it is 7.
@@ -184,17 +170,12 @@ exists.
 
 ### Requirement: G8 — Each Scope lists exactly one directory and never recurses
 
-Scope SHALL be one of `Live` (the default), `Backups`, `LiveAndBackups`, or `Snapshot(tag)`.
-`Live` lists the table directory itself; `Backups` lists `<table-dir>/backups`; `LiveAndBackups` lists
+Scope SHALL be one of `Live` (the default), `Backups`, `LiveAndBackups`, or `Snapshot(tag)`. `Live` lists the table directory itself; `Backups` lists `<table-dir>/backups`; `LiveAndBackups` lists
 both; `Snapshot(tag)` lists `<table-dir>/snapshots/<tag>` and nothing else
-(`db/Directories.java:1094-1108`; names `:119-120`). No Scope SHALL descend into a subdirectory it was
-not named for: directory entries are skipped when listing
-(`db/lifecycle/LogAwareFileLister.java:110`), so a secondary-index subdirectory such as `.idx_name` and
-the `snapshots/` and `backups/` directories are never entered by `Live`. A Scope whose directory does not
-exist yields an empty listing, not an error (`getSnapshotDirectoryIfExists` /
-`getBackupsDirectoryIfExists`, `:1096,1106`). Transaction logs apply within the one directory only.
+(`db/Directories.java:1094-1108`; names `:119-120`).
 
 #### Scenario: G8.1 Live does not read snapshots or backups
+- **Rule detail and Cassandra reference**: No Scope SHALL descend into a subdirectory it was not named for: directory entries are skipped when listing (`db/lifecycle/LogAwareFileLister.java:110`), so a secondary-index subdirectory such as `.idx_name` and the `snapshots/` and `backups/` directories are never entered by `Live`. A Scope whose directory does not exist yields an empty listing, not an error (`getSnapshotDirectoryIfExists` / `getBackupsDirectoryIfExists`, `:1096,1106`). Transaction logs apply within the one directory only.
 - **Given** a table directory with `nb-1-big-*`, `snapshots/pre/nb-1-big-*` and `backups/nb-2-big-*`
 - **When** listed with Scope Live
 - **Then** only `nb-1-big` in the table directory itself is returned.
@@ -220,12 +201,10 @@ exist yields an empty listing, not an error (`getSnapshotDirectoryIfExists` /
 The module SHALL decide the version-floor condition from the filename descriptor alone, before opening
 any component of the generation. A generation whose version is below the floor, or whose version string
 the format does not define, SHALL carry `UnsupportedVersion` and every metadata request for it SHALL
-return that condition without reading any file. The floor is `na`/`nb` and `oa` for BIG and `da` for
-BTI (`sstable-version-floor`); a version `Version.validate` or `isCompatible` rejects is invalid in
-Cassandra (`io/sstable/Descriptor.java:388-407`). Each verb maps this condition to a refusal in its
-own wording, not to a degraded or empty result.
+return that condition without reading any file.
 
 #### Scenario: G9.1 pre-na version, no I/O
+- **Rule detail and Cassandra reference**: The floor is `na`/`nb` and `oa` for BIG and `da` for BTI (`sstable-version-floor`); a version `Version.validate` or `isCompatible` rejects is invalid in Cassandra (`io/sstable/Descriptor.java:388-407`). Each verb maps this condition to a refusal in its own wording, not to a degraded or empty result.
 - **Given** `ma-1-big-Data.db` with no `Statistics.db` beside it, and a test that fails on any
   `open` of a component of that generation
 - **When** its trusted metadata is requested
@@ -261,10 +240,10 @@ A generation SHALL expose one accessor for its `Statistics.db` content. On first
 the floor (G9); (2) read the file under `MAX_STATISTICS_BYTES`; (3) apply the strict layout and checksum
 check of `statistics_reader/integrity.rs` (the port of `MetadataSerializer.deserialize`,
 `io/sstable/metadata/MetadataSerializer.java:146-227`); (4) parse once; (5) cache the value or the typed
-failure. A later request SHALL return the cached outcome and SHALL NOT read the file again. The lenient
-parse SHALL be private to the module.
+failure.
 
 #### Scenario: G11.1 second request does not touch the disk
+- **Rule detail and Cassandra reference**: A later request SHALL return the cached outcome and SHALL NOT read the file again. The lenient parse SHALL be private to the module.
 - **Given** a generation whose trusted metadata was requested once
 - **When** it is requested again after `nb-1-big-Statistics.db` is deleted
 - **Then** the same value is returned.
@@ -305,11 +284,10 @@ type, and a `match` on the type SHALL be exhaustive.
 Every file in a Scope directory SHALL be accounted for as exactly one of: a component of a listed
 generation, a component of an Orphan, a transaction log, or a file whose name is not an SSTable
 component (ignored as Cassandra ignores it, `db/Directories.java:1128-1130`). The listing SHALL expose
-the ignored set so a verb can report it. A file that parses as an SSTable component but belongs to a
-different table than the requested one SHALL be ignored on the same rule
-(`db/Directories.java:1135-1138`).
+the ignored set so a verb can report it.
 
 #### Scenario: G13.1 unrelated file is counted, not hidden
+- **Rule detail and Cassandra reference**: A file that parses as an SSTable component but belongs to a different table than the requested one SHALL be ignored on the same rule (`db/Directories.java:1135-1138`).
 - **Given** a table directory with `nb-1-big-*`, `.gitignore` and `notes.txt`
 - **When** listed
 - **Then** one generation is returned and the ignored set is `{.gitignore, notes.txt}`.

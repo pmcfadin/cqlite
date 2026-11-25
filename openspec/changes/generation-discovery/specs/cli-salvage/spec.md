@@ -10,11 +10,10 @@
 `salvage <table-dir>` SHALL salvage each generation of the module's Live set (Scope Live, TocMissing
 accepted: a table with a lost `TOC.txt` is a salvage input). A below-floor generation SHALL be refused
 as `UnsupportedVersion`; salvage SHALL NOT attempt to read it. An Orphan SHALL be named and skipped
-with the condition, not silently. Because Scope Live never recurses, an `--out` directory placed inside
-the input tree SHALL NOT be rediscovered as an additional generation, closing the loop R9's third bullet
-describes.
+with the condition, not silently.
 
 #### Scenario: GD10.1 TocMissing generation is salvaged
+- **Rule detail and Cassandra reference**: Because Scope Live never recurses, an `--out` directory placed inside the input tree SHALL NOT be rediscovered as an additional generation, closing the loop R9's third bullet describes.
 - **Given** `nb-1-big-TOC.txt` deleted
 - **When** `cqlite salvage <table-dir>` runs
 - **Then** the generation is salvaged and the manifest records `TocMissing`.

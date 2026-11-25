@@ -10,12 +10,10 @@ requirements are ADDED.
 
 `explain` SHALL list the table directory with Scope Live and TocMissing accepted. The first line's
 `generations=<n> [<basename>…]` (R5) SHALL list every generation in id order, UUID ids included, sequence
-ids first. A `TocMissing` generation SHALL be listed with the suffix `(toc-missing)`. A below-floor
-generation, a `Corrupt` or `Unreadable` generation, and a `TxnInconsistent` directory SHALL exit `2`
-naming the path (R8), with stdout carrying no cell lines. An `Orphan` SHALL be named on stderr and
-SHALL NOT appear in the generation list.
+ids first. A `TocMissing` generation SHALL be listed with the suffix `(toc-missing)`.
 
 #### Scenario: GD5.1 committed compaction's inputs are not read
+- **Rule detail and Cassandra reference**: A below-floor generation, a `Corrupt` or `Unreadable` generation, and a `TxnInconsistent` directory SHALL exit `2` naming the path (R8), with stdout carrying no cell lines. An `Orphan` SHALL be named on stderr and SHALL NOT appear in the generation list.
 - **Given** a Cassandra-written directory with `nb-1-big`, `nb-2-big`, `nb-3-big` and a committed
   `nb_txn_compaction_<uuid>.log` removing 1 and 2
 - **When** `explain` runs
