@@ -13,6 +13,7 @@ pub mod diagnose; // `cqlite diagnose` (#4204): read-only report library, see `d
 pub mod directory;
 pub mod directory_integration_tests;
 pub mod format_detector;
+pub mod generation; // Generation discovery: listing, ids, trusted metadata, txn-log liveness (#4626)
 #[cfg(feature = "write-support")]
 mod generation_merge; // Cross-generation read reconciliation (issues #883/#885/#957/#1579).
                       // The ≠1-generation streaming read path (issue #3124): the lazy fan-out k-way
