@@ -58,9 +58,10 @@ is `LogAwareFileLister`. The module mirrors the parts that decide liveness:
   files are missing and the log is not complete after one re-read, the directory is inconsistent
   (`:172-186`), and the listing fails with the named error `TxnInconsistent`.
 - **Corrupt log records.** Cassandra's `OnTxnErr` chooses between throwing and logging
-  (`LogAwareFileLister.java:133-137`). CQLite is a forensics reader and always uses the stricter
-  setting: a log with records that fail verification is reported through `TxnInconsistent`, never
-  silently applied.
+  (`LogAwareFileLister.java:133-137`). The module follows the setting Cassandra uses to load a table,
+  `IGNORE` (`ColumnFamilyStore.java:519`): it classifies from the readable records and names the corrupt
+  log in a directory-level note of the listing result, which a verb may refuse on (owner ruling Q44).
+  Beat: always `THROW`, which would refuse a directory Cassandra opens and serves.
 
 ### Conditions (Q38)
 
@@ -73,7 +74,7 @@ requested one that is not there.
 | `Orphan` | `Data.db` missing or zero-length, other components present | not live, reported |
 | `UnsupportedVersion` | version below the floor, or not a version the format defines | live-listed, refused on use |
 | `Unreadable` | a component could not be read (I/O error) | live |
-| `Corrupt` | `Statistics.db` failed the integrity check (#4612) or a log record failed | live |
+| `Corrupt` | `Statistics.db` failed the integrity check (#4612) | live |
 | `Absent` | the requested generation or component does not exist | n/a |
 
 `TocMissing`: Cassandra includes such a generation (`TOCComponent.loadOrCreate` falls back to
@@ -87,9 +88,10 @@ and never deletes them.
 Callers choose only:
 
 1. **Scope.** The default is Live.
-2. **Whether to accept TocMissing.** Forensics tools and `rebuild` accept it (its purpose is to
-   regenerate a missing TOC). `compact` does not (it keeps today's publication barrier). See the
-   open item in "Seam 1 notes".
+2. **Whether to accept TocMissing.** The read-only verbs (`explain`, `find`, `diagnose`, `diff`,
+   `verify`, `salvage`) and `rebuild` accept it and show the condition. `compact` and the 0.20 write
+   verbs refuse it by name, because their output depends on CQLite's TOC-last publication barrier
+   (owner ruling Q43, 2026-11-25, amending Q41).
 
 Anything a verb cannot handle (a BTI input to a BIG-only path, a UUID id to a path that has not been
 migrated) is a **named refusal in that verb**, raised from the module's typed list. The module never
@@ -195,11 +197,9 @@ Each phase ends with the full gate on Linux, the C intent audit, roborev through
 These are not new options; they are places where the approved design leaves a per-verb value to fill in
 and this spec filled it with the lowest-change choice. The owner may overrule at Seam 1.
 
-- **Which verbs accept TocMissing.** Q41 says callers choose; the issue does not say which. The specs
-  state: compact does not (it keeps today's `TOC.txt` publication barrier); `explain`, `find`,
-  `diagnose`, `diff`, `rebuild`, `salvage`, `verify` do, and show the condition.
-- **`TxnInconsistent` and `Corrupt` log records.** The issue names the error for an inconsistent
-  state. Treating a log with failed records the same way (not Cassandra's `OnTxnErr.IGNORE` path) is the
-  conservative reading.
+- **Which verbs accept TocMissing.** Settled by owner ruling Q43 (2026-11-25): the read-only verbs and
+  `rebuild` accept; `compact` and the write verbs refuse.
+- **Corrupt log records.** Settled by owner ruling Q44 (2026-11-25): Cassandra's startup `IGNORE`
+  behaviour plus a named directory-level note; not `TxnInconsistent`.
 - **`UnsupportedVersion` is listed, not dropped.** A below-floor generation appears in the listing with
   its condition so `rebuild` and `explain` can refuse it by name.

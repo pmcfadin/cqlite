@@ -42,17 +42,19 @@ carrying the directory and the log file name, and SHALL return no partial set
 (`db/lifecycle/LogAwareFileLister.java:156-186`, the "inconsistent disk state" throw at `:184`).
 
 #### Scenario: G2.1 old file missing, log incomplete
-- **Rule detail and Cassandra reference**: If the log file is gone on the re-read, the transaction finished concurrently and the listing continues without it (`:159-161`). A log with records that fail verification SHALL be reported the same way, never applied silently (`:133-137`, the `OnTxnErr.THROW` path).
+- **Rule detail and Cassandra reference**: If the log file is gone on the re-read, the transaction finished concurrently and the listing continues without it (`:159-161`). Records that fail verification are not this error; see G2.2.
 - **Given** a directory with `nb-3-big-*` and an incomplete `nb_txn_compaction_<uuid>.log` whose REMOVE
   record names `nb-1-big` and `nb-2-big`, both absent from disk
 - **When** the Live set is listed
 - **Then** the result is `Err(TxnInconsistent)` naming the directory and the log, and no generation is
   returned.
 
-#### Scenario: G2.2 corrupt log record
-- **Given** a transaction log whose record checksum does not verify
+#### Scenario: G2.2 corrupt log record follows Cassandra's startup lister
+- **Rule detail and Cassandra reference**: Cassandra throws on records that fail verification only under `OnTxnErr.THROW` (`db/lifecycle/LogAwareFileLister.java:133-137`); the lister it uses to load a table at startup is `OnTxnErr.IGNORE` (`db/ColumnFamilyStore.java:519`), as is next-id allocation (`db/Directories.java:1397`). The module SHALL classify from the readable records as IGNORE does, and the listing result SHALL carry a directory-level note naming the corrupt log path. The note is not a generation Condition; a verb MAY refuse on it (owner ruling Q44, 2026-11-25). The inconsistent-state check of G2.1 still applies after classification.
+- **Given** a completed transaction log one of whose records fails checksum verification, beside `nb-3-big-*`
 - **When** the Live set is listed
-- **Then** the result is `Err(TxnInconsistent)`, not a Live set computed from the readable records.
+- **Then** the result is `Ok`: the Live set is computed from the readable records exactly as Cassandra's
+  IGNORE lister computes it, and the result's directory notes name the corrupt log path.
 
 ### Requirement: G3 — A generation without TOC.txt is live, carrying the condition TocMissing
 
