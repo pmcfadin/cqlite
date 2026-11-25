@@ -284,9 +284,10 @@ type, and a `match` on the type SHALL be exhaustive.
 ### Requirement: G13 — No silent filtering anywhere
 
 Every file in a Scope directory SHALL be accounted for as exactly one of: a component of a listed
-generation, a component of an Orphan, a transaction log, or a file whose name is not an SSTable
-component (ignored as Cassandra ignores it, `db/Directories.java:1128-1130`). The listing SHALL expose
-the ignored set so a verb can report it.
+generation, a component of an Orphan, a component a transaction log hides (G1, exposed with the log that
+hides it), a transaction log, or a file whose name is not an SSTable component (ignored as Cassandra
+ignores it, `db/Directories.java:1128-1130`). The listing SHALL expose the hidden and ignored sets so a
+verb can report them.
 
 #### Scenario: G13.1 unrelated file is counted, not hidden
 - **Rule detail and Cassandra reference**: A file that parses as an SSTable component but belongs to a different table than the requested one SHALL be ignored on the same rule (`db/Directories.java:1135-1138`).
@@ -297,4 +298,5 @@ the ignored set so a verb can report it.
 #### Scenario: G13.2 every Data.db is accounted for
 - **Given** the committed corpus tables
 - **When** each is listed
-- **Then** every `*-Data.db` file on disk is a Live generation or an Orphan; none is absent from both.
+- **Then** every `*-Data.db` file on disk is a Live generation, an Orphan, or hidden by a named
+  transaction log; none is in none of them.
