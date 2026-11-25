@@ -168,8 +168,6 @@ pub enum DirectoryNote {
 /// Everything one directory contributed, with every file accounted for (G13).
 #[derive(Debug, Clone, Default)]
 pub(super) struct DirectoryListing {
-    /// The directory.
-    pub directory: PathBuf,
     /// Live generations, sorted by `SSTableIdFactory.COMPARATOR`.
     pub live: Vec<Generation>,
     /// Orphans: reported, not live.

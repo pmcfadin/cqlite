@@ -211,7 +211,10 @@ mod tests {
             read_checked(p)
         };
         let outcome = generation.trusted_metadata_with(&counting);
-        assert_eq!(outcome.unwrap_err().condition(), Condition::UnsupportedVersion);
+        assert_eq!(
+            outcome.unwrap_err().condition(),
+            Condition::UnsupportedVersion
+        );
         assert_eq!(reads.get(), 0);
     }
 

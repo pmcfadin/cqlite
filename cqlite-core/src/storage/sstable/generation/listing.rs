@@ -127,10 +127,7 @@ fn read_entries(dir: &Path) -> GenerationResult<(Vec<String>, Vec<PathBuf>)> {
 
 /// List one directory.
 fn list_directory(dir: &Path, must_exist: bool) -> GenerationResult<DirectoryListing> {
-    let mut out = DirectoryListing {
-        directory: dir.to_path_buf(),
-        ..DirectoryListing::default()
-    };
+    let mut out = DirectoryListing::default();
     if !dir.is_dir() {
         if must_exist {
             return Err(io_error(

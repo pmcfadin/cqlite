@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn complete_committed_log_verifies() {
-        let l = vec![
+        let l = [
             record_line("ADD", "/x/nb-3-big-", 0, 8),
             record_line("REMOVE", "/nonexistent/nb-1-big-", 5, 0),
             record_line("COMMIT", "", 0, 0),
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn bad_checksum_on_final_record_is_completed_but_not_committed() {
-        let l = vec![
+        let l = [
             record_line("ADD", "/x/nb-3-big-", 0, 8),
             "COMMIT:[,0,0][12345]".to_string(),
         ];
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn corrupt_middle_record_is_invalid_and_reported() {
-        let l = vec![
+        let l = [
             "ADD:[/x/nb-3-big-,0,8][1]".to_string(),
             record_line("COMMIT", "", 0, 0),
         ];
