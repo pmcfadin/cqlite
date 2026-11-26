@@ -258,38 +258,58 @@ async fn assert_explain_matches_select(id: i32, now: i64) {
         );
         let row = &result.rows[0];
 
-        // Direction 1: every winner must have a matching SELECT column+value.
+        // Group winners by column: a non-frozen collection has ONE winner per element
+        // (per cell path), and SELECT returns the reassembled collection (#4640), so a
+        // collection column agrees when SELECT's elements equal the winners' values as a
+        // multiset; a simple column has exactly one winner equal to the SELECT value.
+        let mut by_column: std::collections::BTreeMap<&str, Vec<&Value>> = Default::default();
         for (column, value) in &winners {
-            match row.values.get(column.as_str()) {
-                Some(select_value) => assert_eq!(
-                    select_value, value,
+            by_column.entry(column.as_str()).or_default().push(value);
+        }
+
+        // Direction 1: every winner column must have a matching SELECT column+value.
+        for (column, values) in &by_column {
+            let Some(select_value) = row.values.get(*column) else {
+                panic!(
                     "winner-without-column: column `{column}` (id={id}, {mode_name}) has \
-                     winner value {value:?} but SELECT returned {select_value:?}"
-                ),
-                None => panic!(
-                    "winner-without-column: column `{column}` (id={id}, {mode_name}) has a \
-                     winner ({value:?}) but is ABSENT from the SELECT row: {:?}",
+                     winners {values:?} but is ABSENT from the SELECT row: {:?}",
                     row.values
+                );
+            };
+            match collection_elements(select_value) {
+                Some(elements) => assert_eq!(
+                    sorted_debug(&elements),
+                    sorted_debug(values),
+                    "winner-without-column: collection `{column}` (id={id}, {mode_name}) \
+                     SELECT elements disagree with the per-element winners"
                 ),
+                None => {
+                    assert_eq!(
+                        values.len(),
+                        1,
+                        "simple column `{column}` (id={id}, {mode_name}) must have one winner"
+                    );
+                    assert_eq!(
+                        select_value, values[0],
+                        "winner-without-column: column `{column}` (id={id}, {mode_name}) has \
+                         winner value {:?} but SELECT returned {select_value:?}",
+                        values[0]
+                    );
+                }
             }
         }
 
         // Direction 2: every non-key SELECT column must have a matching winner.
-        for (column, select_value) in &row.values {
+        for column in row.values.keys() {
             if column.as_ref() == "id" || column.as_ref() == "ck" {
                 continue; // partition/clustering key columns are out of scope (see module doc)
             }
-            match winners.iter().find(|(c, _)| c == column.as_ref()) {
-                Some((_, winner_value)) => assert_eq!(
-                    winner_value, select_value,
-                    "column-without-winner: column `{column}` (id={id}, {mode_name}) SELECT \
-                     value {select_value:?} disagrees with winner {winner_value:?}"
-                ),
-                None => panic!(
-                    "column-without-winner: column `{column}` (id={id}, {mode_name}) is in the \
-                     SELECT row ({select_value:?}) but has no matching winner in {winners:?}"
-                ),
-            }
+            assert!(
+                by_column.contains_key(column.as_ref()),
+                "column-without-winner: column `{column}` (id={id}, {mode_name}) is in the \
+                 SELECT row ({:?}) but has no matching winner in {winners:?}",
+                row.values.get(column.as_ref())
+            );
         }
     }
 }
@@ -321,4 +341,21 @@ async fn winners_match_select_collection_overwrite() {
 async fn winners_match_select_expired_cell_is_absent_on_both() {
     const EXPIRES_AT: i64 = 1_794_538_956;
     assert_explain_matches_select(7, EXPIRES_AT + 1).await;
+}
+
+/// The element values of a reassembled non-frozen collection (map values, list or set
+/// elements), or `None` for a simple value.
+fn collection_elements(value: &Value) -> Option<Vec<&Value>> {
+    match value {
+        Value::List(xs) | Value::Set(xs) => Some(xs.iter().collect()),
+        Value::Map(entries) => Some(entries.iter().map(|(_, v)| v).collect()),
+        _ => None,
+    }
+}
+
+/// Values rendered and sorted, for a multiset comparison of collection elements.
+fn sorted_debug(values: &[&Value]) -> Vec<String> {
+    let mut out: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
+    out.sort();
+    out
 }

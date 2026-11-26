@@ -1,0 +1,20 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "6" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "filler" }
+        ]
+      }
+    ]
+  }
+]

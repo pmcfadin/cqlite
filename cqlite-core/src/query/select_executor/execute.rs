@@ -50,7 +50,7 @@ impl SelectExecutor {
             cqlite.query.rows = tracing::field::Empty,
         )
     )]
-    pub async fn execute(&self, plan: OptimizedQueryPlan) -> Result<QueryResult> {
+    pub(super) async fn execute_inner(&self, plan: OptimizedQueryPlan) -> Result<QueryResult> {
         // Issue #960: clear the global access-path probe so a stale value from a
         // previous query cannot satisfy a test assertion against this one.
         crate::query::access_path::reset();

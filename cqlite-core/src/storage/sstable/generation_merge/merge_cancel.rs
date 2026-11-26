@@ -249,7 +249,8 @@ mod tests {
         let src = include_str!("../generation_merge.rs");
 
         assert_eq!(
-            src.matches("KWayMerger::new_cancellable(").count(),
+            src.matches("KWayMerger::new_cancellable_with_registry(")
+                .count(),
             2,
             "`merge_generations_for_read` and `merge_generations_for_read_with_metadata` \
              must each build a CANCELLABLE merger; a plain `KWayMerger::new` there installs \

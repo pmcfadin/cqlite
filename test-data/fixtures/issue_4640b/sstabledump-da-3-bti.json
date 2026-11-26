@@ -1,0 +1,52 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "4" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "ak", "path" : [ "k6:6" ], "value" : 60, "tstamp" : "1795716990449762" },
+          { "name" : "am", "path" : [ "6" ], "value" : {"street": "m6", "num": 66}, "tstamp" : "1795716990449762" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 72
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 72,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "al", "path" : [ "80d55610-e9c5-11f1-bfef-fdd6f8afe4e2" ], "value" : {"street": "d", "num": 4}, "tstamp" : "1795716990449238" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 115,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795716990450227" },
+        "cells" : [
+          { "name" : "v", "value" : "g3" },
+          { "name" : "ak", "deletion_info" : { "marked_deleted" : "1795716990450226", "local_delete_time" : "1795716990" } },
+          { "name" : "ak", "path" : [ "kz:9" ], "value" : 90 },
+          { "name" : "al", "deletion_info" : { "marked_deleted" : "1795716990450226", "local_delete_time" : "1795716990" } },
+          { "name" : "al", "path" : [ "80d57d20-e9c5-11f1-bfef-fdd6f8afe4e2" ], "value" : {"street": "z", "num": 9} },
+          { "name" : "am", "deletion_info" : { "marked_deleted" : "1795716990450226", "local_delete_time" : "1795716990" } },
+          { "name" : "am", "path" : [ "9" ], "value" : {"street": "m9", "num": 99} }
+        ]
+      }
+    ]
+  }
+]

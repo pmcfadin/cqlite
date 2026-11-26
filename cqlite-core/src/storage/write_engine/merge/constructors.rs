@@ -66,6 +66,24 @@ impl KWayMerger {
     ///
     /// Pass [`OpenErrorReporting::DeferredToCaller`] only from a call site that can
     /// name the seam which will count the failure instead. See the module doc.
+    /// [`KWayMerger::new_cancellable`] with the authoritative UDT registry wired onto
+    /// every input reader, so a frozen UDT nested in a collection decodes (issue #4640).
+    pub(crate) fn new_cancellable_with_registry(
+        input_paths: Vec<PathBuf>,
+        schema: &TableSchema,
+        udt_registry: Option<crate::schema::UdtRegistry>,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Self> {
+        Self::new_with_gc_and_registry_cancellable(
+            input_paths,
+            schema,
+            None,
+            None,
+            udt_registry,
+            scan_cancel,
+        )
+    }
+
     pub(crate) fn new_with_open_reporting(
         input_paths: Vec<PathBuf>,
         schema: &TableSchema,
@@ -156,13 +174,14 @@ impl KWayMerger {
 pub(crate) fn merger_deferring_opens(
     input_paths: Vec<PathBuf>,
     schema: &TableSchema,
+    udt_registry: Option<crate::schema::UdtRegistry>,
 ) -> Result<KWayMerger> {
     KWayMerger::new_with_open_reporting(
         input_paths,
         schema,
         None,
         None,
-        None,
+        udt_registry,
         crate::storage::scan_cancel::ScanCancel::default(),
         OpenErrorReporting::DeferredToCaller,
     )

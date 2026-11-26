@@ -52,6 +52,7 @@ mod predicate;
 mod raw_view;
 mod row_build;
 mod schemaless_point;
+mod scoped;
 mod stream_agg;
 mod streaming;
 pub(in crate::query) mod value_ops;
@@ -577,7 +578,8 @@ impl SelectExecutor {
 
         let columns = self.get_result_columns(&plan.statement, query_schema.as_deref())?;
 
-        // Create bounded channel for backpressure
+        let needed = scoped::needed_columns(&plan.statement); // #4640
+                                                              // Create bounded channel for backpressure
         let (tx, rx) = mpsc::channel(config.buffer_size);
 
         // Determine execution steps
@@ -621,11 +623,8 @@ impl SelectExecutor {
         // into (and consumed/dropped by) that call, so it is gone by the time we
         // observe its `Err`.
         //
-        // File-size note (campsite rule, epic #1116): this file is already over
-        // the 800-line threshold; this fix's +18 lines are acknowledged via
-        // CQLITE_ALLOW_FILE_GROWTH=1 rather than a split, since a sibling lane
-        // (#1578) is concurrently editing this same file — restructuring it now
-        // would conflict with that in-flight work. A split is tracked under #1116.
+        // File-size note (epic #1116): over the 800-line threshold; a split is tracked
+        // under #1116 (growth was acknowledged via CQLITE_ALLOW_FILE_GROWTH=1, #1581).
         let error_tx = tx.clone();
         // #1695 (roborev round 13): ONE cancellation race covering the WHOLE producer.
         // `execute_streaming_background` has three branches — targeted,
@@ -651,7 +650,7 @@ impl SelectExecutor {
                 // Dropping the producer future IS the cancellation: it releases the
                 // readers, buffers and the storage stream it was holding.
                 _ = closed_tx.closed() => None,
-                result = Self::execute_streaming_background(
+                result = crate::storage::read_projection::with_needed(needed, Self::execute_streaming_background(
                     storage,
                     query_schema,
                     table_id,
@@ -659,7 +658,7 @@ impl SelectExecutor {
                     tx,
                     buffer_size,
                     mode,
-                ) => Some(result),
+                )) => Some(result),
             };
             if let Some(Err(e)) = outcome {
                 tracing::error!("Streaming execution error: {}", e);
