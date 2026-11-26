@@ -279,6 +279,11 @@ required-features = ["arrow"]
 name = "issue_3790_merged_read_time_order"
 required-features = ["write-support"]
 
+# Issue #4628: SELECT vs live CL=ALL over the cross-generation tombstone fixture.
+[[test]]
+name = "issue_4628_cross_generation_select"
+required-features = ["write-support", "cli-helpers"]
+
 # Full-Index.db partition-enumeration regression (issue #2302). It is
 # `#![cfg(all(feature = "work-counters", feature = "write-support"))]` — the
 # `read_work_counters` probe gauge AND the `SSTableWriter`/mutation write API — so
