@@ -150,6 +150,23 @@ Read these before upgrading.
 - Nothing from the public surface. Internally, a never-compiled CLI module (`select_query_engine.rs`,
   #4544) and fleet-only tooling (#4413) were deleted.
 
+### Known limitations
+
+Measured by the 0.19 freeside field round (#4503, three-node Cassandra 5.0.8, 128 MiB limit), which
+failed; two of its correctness findings are fixed (#4627, #4629), the `explain` cross-generation tombstone fix is in review (#4628, #4639), and its report is in
+`easy-db-lab-kits/test-plans/`.
+
+- **Memory.** On large generations `verify --mode audit` (1.66 GiB on a 1.79 GB generation; 167 to
+  264 MiB on 167 to 264 MiB ones), `--deep` in `verify --mode audit` and `diagnose` (195 MiB on a
+  2.5 MB generation; `diagnose --deep` 173 to 269 MiB on 280 to 630 MB tables), `verify --mode full`,
+  `diff` on healthy full tables (86 to 283 MiB) and `find`/`explain` on a very large partition (over
+  1.7 GiB on a 223.9 MB partition) can exceed 128 MiB. Plain `diagnose` (9.5 MiB or less) and
+  `find`/`explain` on typical partitions (19 to 33 MiB) stay small. Streaming reads are planned for
+  0.20 (#4630).
+- `find --commitlog` cannot read Cassandra 5.0.8 CommitLog version 8 segments (#4632).
+- `sweep --mode audit` is rejected at runtime although `--help` lists it, and `verify <table-dir>`
+  checks only the first generation (#4631).
+
 ### Notes
 
 - Flush, compaction, `salvage` and `rebuild` emit **uncompressed** SSTables; no compressed-write
