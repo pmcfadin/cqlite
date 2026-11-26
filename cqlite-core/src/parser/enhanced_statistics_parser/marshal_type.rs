@@ -73,6 +73,43 @@ fn split_type_arguments(input: &str) -> Vec<&str> {
     args
 }
 
+/// Strict variant of [`split_type_arguments`] for `TupleType(..)` (issue #4627,
+/// roborev round 2): every slot must be non-empty. The lenient splitter drops empty
+/// components, so `TupleType(Int32Type,,UTF8Type)` would silently change arity.
+/// Cassandra's WRITER (`TypeParser.stringifyTypeParameters`, pinned 5.0.8) joins
+/// exactly the printed element types with one `,` and never emits an empty slot, so
+/// refusing a leading, trailing, repeated or whitespace-only slot cannot reject a
+/// form Cassandra wrote. (Its reader, `getTypeParameters`/`skipBlankAndComma`, is
+/// more tolerant, which is why strictness is chosen here rather than inherited.)
+/// `Map`/`UDT` callers keep the lenient splitter: they are untouched by this issue.
+fn split_tuple_arguments(input: &str) -> crate::error::Result<Vec<&str>> {
+    let mut slots: Vec<&str> = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut bounds: Vec<usize> = Vec::new();
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => bounds.push(idx),
+            _ => {}
+        }
+    }
+    bounds.push(input.len());
+    for end in bounds {
+        let slot = input[start..end].trim();
+        if slot.is_empty() {
+            return Err(crate::error::Error::schema(format!(
+                "malformed TupleType arguments '{input}': empty element slot \
+                 (leading, trailing or repeated comma)"
+            )));
+        }
+        slots.push(slot);
+        start = end + 1;
+    }
+    Ok(slots)
+}
+
 /// Detect whether a clustering comparator class denotes descending order.
 ///
 /// Issue #759: Cassandra encodes a DESC clustering column by wrapping its
@@ -156,10 +193,15 @@ fn validate_marshal_tuples(marshal_type: &str) -> crate::error::Result<()> {
             if rest.len() != inner.len() + 1 {
                 return Err(malformed("trailing text after the closing parenthesis"));
             }
-            return split_type_arguments(inner)
+            return split_tuple_arguments(inner)?
                 .into_iter()
                 .try_for_each(validate_marshal_tuples);
         }
+    }
+    // Same container set the converter recurses through: Vector (element) ...
+    if let Ok(Some(args)) = crate::schema::vector_type::marshal_vector_kind(value).into_args(value)
+    {
+        return validate_marshal_tuples(args.element);
     }
     for prefix in WRAP {
         if let Some(rest) = value.strip_prefix(prefix) {
@@ -223,7 +265,8 @@ fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
     for prefix in ["org.apache.cassandra.db.marshal.TupleType(", "TupleType("] {
         if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
             if let Some(inner) = extract_inner_type(params_with_close) {
-                let elements: Vec<String> = split_type_arguments(inner)
+                let elements: Vec<String> = split_tuple_arguments(inner)
+                    .unwrap_or_default()
                     .into_iter()
                     .map(convert_marshal_type_to_cql)
                     .collect();
@@ -697,5 +740,25 @@ mod tuple_header_tests_4627 {
             conv(&nested).is_err(),
             "nested trailing text must fail closed"
         );
+    }
+
+    #[test]
+    fn tuple_with_an_empty_slot_is_refused() {
+        for bad in [
+            format!("{M}TupleType({M}Int32Type,,{M}UTF8Type)"),
+            format!("{M}TupleType(,{M}Int32Type)"),
+            format!("{M}TupleType({M}Int32Type,)"),
+            format!("{M}TupleType({M}Int32Type, ,{M}UTF8Type)"),
+        ] {
+            assert!(conv(&bad).is_err(), "must fail closed: {bad}");
+        }
+    }
+
+    #[test]
+    fn malformed_tuple_inside_a_vector_is_refused() {
+        let bad = format!("{M}VectorType({M}TupleType({M}Int32Type,,{M}UTF8Type) , 3)");
+        assert!(conv(&bad).is_err(), "{bad}");
+        let good = format!("{M}VectorType({M}TupleType({M}Int32Type,{M}UTF8Type) , 3)");
+        assert!(conv(&good).is_ok());
     }
 }
