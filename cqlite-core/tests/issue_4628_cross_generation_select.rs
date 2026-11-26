@@ -36,7 +36,10 @@ async fn open(mode: ReadPathMode) -> Database {
 }
 
 /// `id -> [(c1, c2, v, l)]` parsed from the committed CL=ALL oracle, in clustering order.
-fn live_rows() -> BTreeMap<i32, Vec<(i32, i32, String, Vec<i32>)>> {
+/// One live row: `(c1, c2, v, l)`.
+type LiveRow = (i32, i32, String, Vec<i32>);
+
+fn live_rows() -> BTreeMap<i32, Vec<LiveRow>> {
     let text = std::fs::read_to_string(fixture().join("live-select-consistency-all.txt"))
         .expect("committed live oracle");
     let mut rows: BTreeMap<i32, Vec<_>> = BTreeMap::new();
@@ -107,7 +110,7 @@ async fn select_matches_live_cl_all_for_cross_generation_tombstones() {
                 .execute(&format!("SELECT * FROM fix4628.t WHERE id = {key}"))
                 .await
                 .unwrap_or_else(|e| panic!("SELECT key {key} ({name}) failed: {e}"));
-            let got: Vec<(i32, i32, String, Vec<i32>)> = result
+            let got: Vec<LiveRow> = result
                 .rows
                 .iter()
                 .map(|row| {
