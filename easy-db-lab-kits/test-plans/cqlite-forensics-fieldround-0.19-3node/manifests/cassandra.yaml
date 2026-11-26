@@ -35,6 +35,7 @@ spec:
           cp -a /etc/cassandra/. /conf/
           if [ "$(cat /fmt/format)" = bti ]; then
             printf '\nsstable:\n  selected_format: bti\n' >> /conf/cassandra.yaml
+            sed -i 's/^storage_compatibility_mode:.*/storage_compatibility_mode: NONE/' /conf/cassandra.yaml
           fi
           sed -i 's/^# *concurrent_compactors:.*/concurrent_compactors: 1/' /conf/cassandra.yaml
         securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}

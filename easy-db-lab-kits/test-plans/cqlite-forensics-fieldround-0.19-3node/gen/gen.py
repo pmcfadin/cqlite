@@ -33,7 +33,7 @@ def connect():
     c = Cluster([host], execution_profiles={EXEC_PROFILE_DEFAULT: prof}, protocol_version=5)
     return c, c.connect()
 
-def run(session, stmt, rows, conc=64, chunk=20000):
+def run(session, stmt, rows, conc=64, chunk=2000):
     it = iter(rows); n = 0; t0 = time.time()
     while True:
         part = [x for _, x in zip(range(chunk), it)]
@@ -41,7 +41,7 @@ def run(session, stmt, rows, conc=64, chunk=20000):
         for ok, res in execute_concurrent_with_args(session, stmt, part, concurrency=conc, raise_on_first_error=False):
             if not ok: raise res
         n += len(part)
-        print(f'{n} ops {n/(time.time()-t0):.0f}/s', flush=True)
+        if n % 20000 == 0: print(f'{n} ops {n/(time.time()-t0):.0f}/s', flush=True)
     return n
 
 journal = None
@@ -122,7 +122,7 @@ def load_wide(s, phase, shard):
     for pk, tot in [(0, big)] + [(p, small) for p in range(1, 40)]:
         lo, hi = (0, tot // 2) if phase == 'A' else (tot // 2, tot)
         lo2 = lo + (shard[0] * (hi - lo)) // shard[1]; hi2 = lo + ((shard[0] + 1) * (hi - lo)) // shard[1]
-        run(s, stmt, rows(pk, lo2, hi2), conc=100, chunk=50000)
+        run(s, stmt, rows(pk, lo2, hi2), conc=100, chunk=2000)
 
 def load_static(s, phase, shard):
     n = SIZES['static']; half = n // 2
