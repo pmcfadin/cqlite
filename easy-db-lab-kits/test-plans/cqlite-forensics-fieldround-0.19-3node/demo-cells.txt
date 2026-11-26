@@ -1,0 +1,7 @@
+db0	t_basic	audit-da-430-bti
+db0	t_basic	diagnose-deep
+db0	t_static	audit-deep-da-13-bti
+db0	t_udt	audit-deep-da-37-bti
+db0	t_wide	audit-da-53-bti
+db0	t_wide	explain-001
+db0	t_wide	find-001

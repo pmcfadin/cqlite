@@ -1,0 +1,19 @@
+apiVersion: batch/v1
+kind: Job
+metadata: {name: live-c3, namespace: fr}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: live
+        image: python:3.12-slim
+        env: [{name: HOME, value: /tmp}]
+        command: ["bash","-c"]
+        args: ["pip install -q --user cassandra-driver 2>&1 | grep -v -i -E 'notice|warning'; for t in t_basic t_coll t_udt t_wide t_static t_tomb t_resurrect t_resurrect_purged; do echo \"=====TABLE $t\"; python /gen/live.py $t; done"]
+        resources: {requests: {cpu: 250m, memory: 192Mi}, limits: {cpu: 500m, memory: 384Mi}}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: gen, mountPath: /gen}, {name: samples, mountPath: /samples}]
+      volumes: [{name: gen, configMap: {name: gen}}, {name: samples, configMap: {name: samples}}]

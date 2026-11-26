@@ -11,5 +11,5 @@ ulimit -f 400000   # cap any single output file at ~400 MB (explain of the 2.5M-
 /work/bin/rtime $base.time "$@" > $base.out 2> $base.err
 ec=$?
 . $base.time 2>/dev/null
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$node" "$table" "$tool${id:+-$id}" "$exit" "$wall_s" "$maxrss_kib" "$signaled" "$(stat -c %s $base.out)" >> $OUT_ROOT/results.tsv
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$node" "$table" "$tool${id:+-$id}" "$exit" "$wall_s" "$maxrss_kib" "$signaled" "$(stat -c %s $base.out)" "$anon_kib" "$file_kib" "$capped" >> $OUT_ROOT/results.tsv
 exit 0

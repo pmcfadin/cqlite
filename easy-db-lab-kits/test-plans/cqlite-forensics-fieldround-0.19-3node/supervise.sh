@@ -5,7 +5,7 @@ O=$1
 while true; do
   if $K exec tools -c runner -- bash -c "grep -q ALL-DONE $O/done.log 2>/dev/null" 2>/dev/null; then echo "$(date -u +%T) ALL-DONE"; exit 0; fi
   if ! $K exec tools -c runner -- bash -c "pgrep -f '[b]in/runall.sh' >/dev/null" 2>/dev/null; then
-    echo "$(date -u +%T) (re)starting runall"; $K exec tools -c runner -- bash -c "OUT_ROOT=$O nohup bash /work/bin/runall.sh > $O/runall.log 2>&1 &" 2>&1 | tail -1
+    echo "$(date -u +%T) (re)starting runall"; $K exec tools -c runner -- bash -c "OUT_ROOT=$O SKIPLIST=${SKIPLIST:-} nohup bash /work/bin/runall.sh > $O/runall.log 2>&1 &" 2>&1 | tail -1
   fi
   sleep 30
 done
