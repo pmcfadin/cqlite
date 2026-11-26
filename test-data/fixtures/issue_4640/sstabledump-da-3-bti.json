@@ -1,0 +1,70 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "5" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "s", "deletion_info" : { "marked_deleted" : "1795707817124114", "local_delete_time" : "1795707817" } }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "4" ],
+      "position" : 28
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 28,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795707817123383", "local_delete_time" : "1795707817" } },
+          { "name" : "l", "path" : [ "251adf30-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 99, "tstamp" : "1795707817123384" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 74
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 74,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "m", "path" : [ "1" ], "value" : "a2", "tstamp" : "1795707817122755" },
+          { "name" : "s", "path" : [ "5" ], "value" : "", "tstamp" : "1795707817122755" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 102,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795707817123751" },
+        "cells" : [
+          { "name" : "v", "value" : "g3" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795707817123750", "local_delete_time" : "1795707817" } },
+          { "name" : "l", "path" : [ "251adf3a-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 110 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795707817123750", "local_delete_time" : "1795707817" } },
+          { "name" : "m", "path" : [ "11" ], "value" : "z" },
+          { "name" : "s", "deletion_info" : { "marked_deleted" : "1795707817123750", "local_delete_time" : "1795707817" } },
+          { "name" : "s", "path" : [ "11" ], "value" : "" }
+        ]
+      }
+    ]
+  }
+]

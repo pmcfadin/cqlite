@@ -1,0 +1,101 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "5" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795707810200278" },
+        "cells" : [
+          { "name" : "v", "value" : "g1" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795707810200277", "local_delete_time" : "1795707810" } },
+          { "name" : "l", "path" : [ "20fa818a-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 5 },
+          { "name" : "l", "path" : [ "20fa8194-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 6 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795707810200277", "local_delete_time" : "1795707810" } },
+          { "name" : "m", "path" : [ "5" ], "value" : "p" },
+          { "name" : "m", "path" : [ "6" ], "value" : "q" },
+          { "name" : "s", "deletion_info" : { "marked_deleted" : "1795707810200277", "local_delete_time" : "1795707810" } },
+          { "name" : "s", "path" : [ "5" ], "value" : "" },
+          { "name" : "s", "path" : [ "6" ], "value" : "" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "4" ],
+      "position" : 115
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 115,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795707810199794" },
+        "cells" : [
+          { "name" : "v", "value" : "g1" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795707810199793", "local_delete_time" : "1795707810" } },
+          { "name" : "l", "path" : [ "20fa8180-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795707810199793", "local_delete_time" : "1795707810" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "only" },
+          { "name" : "s", "deletion_info" : { "marked_deleted" : "1795707810199793", "local_delete_time" : "1795707810" } },
+          { "name" : "s", "path" : [ "1" ], "value" : "" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 189
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 189,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795707810197786" },
+        "cells" : [
+          { "name" : "v", "value" : "g1" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795707810197785", "local_delete_time" : "1795707810" } },
+          { "name" : "l", "path" : [ "20fa3360-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 10 },
+          { "name" : "l", "path" : [ "20fa336a-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 20 },
+          { "name" : "l", "path" : [ "20fa3374-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 30 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795707810197785", "local_delete_time" : "1795707810" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b" },
+          { "name" : "m", "path" : [ "3" ], "value" : "c" },
+          { "name" : "s", "deletion_info" : { "marked_deleted" : "1795707810197785", "local_delete_time" : "1795707810" } },
+          { "name" : "s", "path" : [ "1" ], "value" : "" },
+          { "name" : "s", "path" : [ "2" ], "value" : "" },
+          { "name" : "s", "path" : [ "3" ], "value" : "" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 322,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795707810199370" },
+        "cells" : [
+          { "name" : "v", "value" : "g1" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795707810199369", "local_delete_time" : "1795707810" } },
+          { "name" : "l", "path" : [ "20fa5a70-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 70 },
+          { "name" : "l", "path" : [ "20fa5a7a-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 80 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795707810199369", "local_delete_time" : "1795707810" } },
+          { "name" : "m", "path" : [ "7" ], "value" : "x" },
+          { "name" : "m", "path" : [ "8" ], "value" : "y" },
+          { "name" : "s", "deletion_info" : { "marked_deleted" : "1795707810199369", "local_delete_time" : "1795707810" } },
+          { "name" : "s", "path" : [ "7" ], "value" : "" },
+          { "name" : "s", "path" : [ "8" ], "value" : "" }
+        ]
+      }
+    ]
+  }
+]

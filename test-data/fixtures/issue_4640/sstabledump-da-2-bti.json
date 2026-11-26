@@ -1,0 +1,66 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "5" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "m", "path" : [ "6" ], "deletion_info" : { "local_delete_time" : "1795707813" },
+            "tstamp" : "1795707813438258"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "4" ],
+      "position" : 34
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 34,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "s", "path" : [ "9" ], "value" : "", "tstamp" : "1795707813437915" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 60
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 60,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "l", "path" : [ "20fa336a-e9b0-11f1-bfef-fdd6f8afe4e2" ], "deletion_info" : { "local_delete_time" : "1795707813" },
+            "tstamp" : "1795707813432966"
+          },
+          { "name" : "l", "path" : [ "22e86ed0-e9b0-11f1-bfef-fdd6f8afe4e2" ], "value" : 40, "tstamp" : "1795707813437384" },
+          { "name" : "m", "path" : [ "2" ], "deletion_info" : { "local_delete_time" : "1795707813" },
+            "tstamp" : "1795707813432966"
+          },
+          { "name" : "m", "path" : [ "4" ], "value" : "d", "tstamp" : "1795707813437384" },
+          { "name" : "s", "path" : [ "2" ], "deletion_info" : { "local_delete_time" : "1795707813" },
+            "tstamp" : "1795707813432966"
+          },
+          { "name" : "s", "path" : [ "4" ], "value" : "", "tstamp" : "1795707813437384" }
+        ]
+      }
+    ]
+  }
+]
