@@ -9,6 +9,7 @@ use super::*;
 mod cell_path_key;
 // Issues #3747/#4106: the shared zero-length CELL PATH admission gate.
 mod cell_path_empty;
+mod read_shape; // #4645: SELECT-path shaping of a decoded collection
 
 #[cfg(test)]
 mod cell_path_key_tests;
@@ -193,7 +194,7 @@ impl V5CompressedLegacyParser {
         // byte-unchanged.
         element_filter: Option<ElementShadow>,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
-        self.parse_complex_column_inner(
+        self.parse_complex_column_impl(
             data,
             offset,
             column,
@@ -202,6 +203,7 @@ impl V5CompressedLegacyParser {
             0,
             None,
             element_filter,
+            true,
         )
     }
 
@@ -225,7 +227,7 @@ impl V5CompressedLegacyParser {
     /// by elements that carry the `USE_ROW_TIMESTAMP` (0x08) flag — only read
     /// when collecting elements. On the user-facing read path `elements_out` is
     /// `None`, `row_timestamp` is `0`, and no per-element collection occurs.
-    pub(crate) fn parse_complex_column_inner(
+    fn parse_complex_column_impl(
         &self,
         data: &[u8],
         mut offset: usize,
@@ -241,6 +243,8 @@ impl V5CompressedLegacyParser {
         // `None` on every physical consumer (compaction / delta-scan / unit tests),
         // where no element is ever dropped so output is byte-unchanged.
         element_filter: Option<ElementShadow>,
+        // #4645: `true` = SELECT decode, Cassandra read shape (see `read_shape`).
+        user_read: bool,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
         use crate::storage::sstable::reader::compaction_row::ComplexElement;
 
@@ -495,7 +499,7 @@ impl V5CompressedLegacyParser {
         {
             // Parse list elements
             let element_type = self.extract_collection_element_type(&column.data_type, "list")?;
-            let mut elements = Vec::with_capacity(prealloc_cap);
+            let mut elements: Vec<(Vec<u8>, Value)> = Vec::with_capacity(prealloc_cap);
 
             for i in 0..cell_count_usize {
                 let cell =
@@ -555,13 +559,13 @@ impl V5CompressedLegacyParser {
                     row_timestamp,
                 );
 
-                // Add non-null values to the list
+                // Add non-null values to the list, with the path `finish_list` orders by.
                 if let Some(val) = cell.value {
-                    elements.push(val);
+                    elements.push((cell.path_bytes, val));
                 }
             }
 
-            Value::List(elements)
+            Value::List(read_shape::finish_list(elements, user_read))
         } else if dt.starts_with("set<")
             || dt.starts_with("org.apache.cassandra.db.marshal.settype(")
         {
@@ -732,10 +736,8 @@ impl V5CompressedLegacyParser {
                 // Parse the path as the key using the key type
                 // Note: Cell path keys are stored WITHOUT length prefixes (raw bytes only)
                 //
-                // Map semantics are intentionally unchanged for Issue #493: a deleted
-                // entry already surfaces as `cell.value == None` and is emitted as
-                // (key, Value::Null), preserving existing behavior. Only set/list
-                // element tombstones are skipped.
+                // A deleted entry is `(key, Null)` for physical consumers (#493) and
+                // OMITTED on the SELECT read (#4645), like set/list element tombstones.
                 // DS4: For maps with IS_DELETED entries, count them for the scan summary.
                 // Tombstoned entries must NOT contribute to max_element_writetime so that
                 // the reported writetime only reflects live content (roborev Finding 2).
@@ -747,6 +749,9 @@ impl V5CompressedLegacyParser {
                         i,
                         column.name
                     );
+                    if user_read {
+                        continue;
+                    }
                 } else {
                     // DS4: Track element timestamp for live map entries only.
                     // ALWAYS folded (even for a shadow-dropped entry) so the row
@@ -1038,20 +1043,6 @@ impl V5CompressedLegacyParser {
             None
         };
         PartitionShadow::cell_shadowed_or_expired(f.cover, f.now, eff_ts, eff_exp)
-    }
-
-    /// Issue #1741 (per-element filtering): whether a parsed non-frozen collection
-    /// value emitted ZERO surviving elements (so the read path treats it as absent /
-    /// null). Only the collection variants are meaningful; any other value returns
-    /// `false` (never treated as an empty collection).
-    pub(super) fn complex_value_is_empty(value: &Value) -> bool {
-        match value {
-            Value::List(v) => v.is_empty(),
-            Value::Set(v) => v.is_empty(),
-            Value::Map(v) => v.is_empty(),
-            Value::Udt(u) => u.fields.iter().all(|f| f.value.is_none()),
-            _ => false,
-        }
     }
 
     /// Parse a single complex cell and extract its value.
