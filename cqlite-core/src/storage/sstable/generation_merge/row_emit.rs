@@ -9,19 +9,70 @@
 //! fails closed on a column that mixes simple and complex cells or whose elements cannot
 //! be ordered (no heuristics, #28).
 //!
-//! The manager-level read drivers carry neither a projection nor a UDT registry, so the
-//! assembly is column-complete (`needed = None`) and registry-less
-//! ([`assemble_read_cells`]); a collection whose element/key is a bare UDT reference
-//! fails closed rather than collapsing.
+//! The assembly is projection-scoped and UDT-aware (owner ruling Q51): [`ReadAssembly`]
+//! carries the SELECT's needed columns (`storage::read_projection`) and the reader's
+//! UDT registry, and calls [`assemble_read_cells_with_udts`], the assembler the Flight
+//! producer uses. Columns the query does not read are never assembled, so a table that
+//! merely HAS a UDT collection cannot fail a query that selects other columns.
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::{partition_cover, row_visibility, ReadShadow};
-use crate::storage::write_engine::merge::{assemble_read_cells, MergeEntry, RowData};
+use crate::schema::UdtRegistry;
+use crate::storage::sstable::reader::SSTableReader;
+use crate::storage::write_engine::merge::{
+    assemble_read_cells_with_udts, MergeEntry, RowData, UdtScope,
+};
 use crate::{Result, RowCells, RowKey, ScanRow};
 
 /// One reconciled metadata row inside the merge task, before per-cell metadata is
 /// attached: `(partition key bytes, ScanRow row carrier, [(column,
 /// write_timestamp_micros)])`.
 pub(super) type MergedMetaRow = (Vec<u8>, ScanRow, Vec<(String, i64)>);
+
+/// What the merged read needs to reassemble collections, captured ONCE per read on the
+/// caller's task (before any hop to a blocking thread).
+#[derive(Clone)]
+pub(super) struct ReadAssembly {
+    /// The SELECT's columns plus the key columns; `None` = every column.
+    needed: Option<HashSet<String>>,
+    /// The readers' UDT registry (the manager's; no second registry is built).
+    pub(super) registry: Option<UdtRegistry>,
+    keyspace: String,
+}
+
+impl ReadAssembly {
+    pub(super) fn capture(
+        readers: &[Arc<SSTableReader>],
+        schema: &crate::schema::TableSchema,
+    ) -> Self {
+        let needed = crate::storage::read_projection::current().map(|n| {
+            let mut set: HashSet<String> = (*n).clone();
+            // Key columns surface as pseudo-cells the row needs regardless of projection.
+            set.extend(schema.partition_keys.iter().map(|k| k.name.clone()));
+            set.extend(schema.clustering_keys.iter().map(|k| k.name.clone()));
+            set
+        });
+        Self {
+            needed,
+            registry: readers.iter().find_map(|r| r.udt_registry.clone()),
+            keyspace: schema.keyspace.clone(),
+        }
+    }
+
+    fn assemble(
+        &self,
+        cells: Vec<crate::storage::write_engine::merge::CellData>,
+        schema: &crate::schema::TableSchema,
+    ) -> Result<RowCells> {
+        let scope = self.registry.as_ref().map(|registry| UdtScope {
+            registry,
+            keyspace: &self.keyspace,
+        });
+        assemble_read_cells_with_udts(cells, schema, self.needed.as_ref(), scope)
+    }
+}
 
 /// Convert one reconciled partition's merge rows into the live scan rows the read
 /// path emits: drop cell tombstones, drop row tombstones, drop rows left empty,
@@ -35,6 +86,7 @@ pub(super) fn partition_live_rows(
     rows: Vec<MergeEntry>,
     shadow: &ReadShadow,
     schema: &crate::schema::TableSchema,
+    asm: &ReadAssembly,
 ) -> Result<Vec<(RowKey, ScanRow)>> {
     // Issue #1849: partition-tombstone cover for this partition's rows, applied as a
     // read-side shadow floor alongside per-cell read-time TTL expiry (post-merge).
@@ -49,7 +101,7 @@ pub(super) fn partition_live_rows(
                 let Some(surviving) = shadow.filter_visible(cover, vis, cells) else {
                     continue;
                 };
-                let row_cells: RowCells = assemble_read_cells(surviving, schema, None)?;
+                let row_cells: RowCells = asm.assemble(surviving, schema)?;
                 out.push((row_key.clone(), ScanRow::Row(row_cells)));
             }
             // Row tombstone: the row is deleted across all generations — suppress.
@@ -69,6 +121,7 @@ pub(super) fn push_metadata_rows(
     out: &mut Vec<MergedMetaRow>,
     shadow: &ReadShadow,
     schema: &crate::schema::TableSchema,
+    asm: &ReadAssembly,
 ) -> Result<()> {
     // Issue #1849: same read-side partition cover + per-cell TTL/shadow filter as the
     // plain path, so the WRITETIME/TTL projection agrees with `SELECT *`.
@@ -86,7 +139,7 @@ pub(super) fn push_metadata_rows(
                 .iter()
                 .map(|c| (c.column.clone(), c.timestamp))
                 .collect();
-            let row_cells: RowCells = assemble_read_cells(surviving, schema, None)?;
+            let row_cells: RowCells = asm.assemble(surviving, schema)?;
             out.push((key_bytes.to_vec(), ScanRow::Row(row_cells), timestamps));
         }
         // Row tombstones suppress the row entirely (no emission).

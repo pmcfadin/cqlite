@@ -1,0 +1,8 @@
+Consistency level set to ALL.
+ id | c | v  | al                                                                    | am                                                        | ak
+----+---+----+-----------------------------------------------------------------------+-----------------------------------------------------------+----------------------------------------------------------
+  4 | 0 | g1 |                                               [{street: 'p', num: 5}] |  {5: {street: 'm5', num: 55}, 6: {street: 'm6', num: 66}} | {{street: 'k5', num: 5}: 50, {street: 'k6', num: 6}: 60}
+  3 | 0 | g1 | [{street: 'b', num: 2}, {street: 'c', num: 3}, {street: 'd', num: 4}] | {2: {street: 'm2b', num: 22}, 3: {street: 'm3', num: 13}} | {{street: 'k2', num: 2}: 20, {street: 'k3', num: 3}: 30}
+  3 | 1 | g1 |                                               [{street: 'x', num: 7}] |                              {7: {street: 'm7', num: 77}} |                                                     null
+  3 | 2 | g3 |                                               [{street: 'z', num: 9}] |                              {9: {street: 'm9', num: 99}} |                             {{street: 'kz', num: 9}: 90}
+(4 rows)

@@ -1,0 +1,31 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "cells" : [
+          { "name" : "ak", "path" : [ "k1:1" ], "deletion_info" : { "local_delete_time" : "1795716987" },
+            "tstamp" : "1795716987326412"
+          },
+          { "name" : "ak", "path" : [ "k3:3" ], "value" : 30, "tstamp" : "1795716987324709" },
+          { "name" : "al", "path" : [ "7d1dcc50-e9c5-11f1-bfef-fdd6f8afe4e2" ], "deletion_info" : { "local_delete_time" : "1795716987" },
+            "tstamp" : "1795716987325426"
+          },
+          { "name" : "al", "path" : [ "7ef8a6d0-e9c5-11f1-bfef-fdd6f8afe4e2" ], "value" : {"street": "c", "num": 3}, "tstamp" : "1795716987324709" },
+          { "name" : "am", "path" : [ "1" ], "deletion_info" : { "local_delete_time" : "1795716987" },
+            "tstamp" : "1795716987326094"
+          },
+          { "name" : "am", "path" : [ "2" ], "value" : {"street": "m2b", "num": 22}, "tstamp" : "1795716987326719" },
+          { "name" : "am", "path" : [ "3" ], "value" : {"street": "m3", "num": 13}, "tstamp" : "1795716987324709" }
+        ]
+      }
+    ]
+  }
+]

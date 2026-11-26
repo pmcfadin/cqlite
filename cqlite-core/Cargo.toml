@@ -70,6 +70,8 @@ exclude = [
     "tests/issue_4629_ttl_tie_explain.rs",
     # Resolves `test-data/fixtures/issue_4628/` checkout-relative and fails closed (same class).
     "tests/issue_4640_collection_assembly.rs",
+    # Resolves `test-data/fixtures/issue_4640b/` checkout-relative and fails closed (same class).
+    "tests/issue_4640_udt_collections.rs",
 ]
 
 # docs.rs build: document the commonly used features.
@@ -364,6 +366,10 @@ required-features = ["state_machine", "cli-helpers"]
 # (`cli-helpers`) and the write-support merge path.
 [[test]]
 name = "issue_4640_collection_assembly"
+required-features = ["write-support", "cli-helpers"]
+
+[[test]]
+name = "issue_4640_udt_collections"
 required-features = ["write-support", "cli-helpers"]
 
 [[test]]

@@ -1,0 +1,66 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "4" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795716984214522" },
+        "cells" : [
+          { "name" : "v", "value" : "g1" },
+          { "name" : "ak", "deletion_info" : { "marked_deleted" : "1795716984214521", "local_delete_time" : "1795716984" } },
+          { "name" : "ak", "path" : [ "k5:5" ], "value" : 50 },
+          { "name" : "al", "deletion_info" : { "marked_deleted" : "1795716984214521", "local_delete_time" : "1795716984" } },
+          { "name" : "al", "path" : [ "7d1df36a-e9c5-11f1-bfef-fdd6f8afe4e2" ], "value" : {"street": "p", "num": 5} },
+          { "name" : "am", "deletion_info" : { "marked_deleted" : "1795716984214521", "local_delete_time" : "1795716984" } },
+          { "name" : "am", "path" : [ "5" ], "value" : {"street": "m5", "num": 55} }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 115
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 115,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795716984213322" },
+        "cells" : [
+          { "name" : "v", "value" : "g1" },
+          { "name" : "ak", "deletion_info" : { "marked_deleted" : "1795716984213321", "local_delete_time" : "1795716984" } },
+          { "name" : "ak", "path" : [ "k1:1" ], "value" : 10 },
+          { "name" : "ak", "path" : [ "k2:2" ], "value" : 20 },
+          { "name" : "al", "deletion_info" : { "marked_deleted" : "1795716984213321", "local_delete_time" : "1795716984" } },
+          { "name" : "al", "path" : [ "7d1dcc50-e9c5-11f1-bfef-fdd6f8afe4e2" ], "value" : {"street": "a", "num": 1} },
+          { "name" : "al", "path" : [ "7d1dcc5a-e9c5-11f1-bfef-fdd6f8afe4e2" ], "value" : {"street": "b", "num": 2} },
+          { "name" : "am", "deletion_info" : { "marked_deleted" : "1795716984213321", "local_delete_time" : "1795716984" } },
+          { "name" : "am", "path" : [ "1" ], "value" : {"street": "m1", "num": 11} },
+          { "name" : "am", "path" : [ "2" ], "value" : {"street": "m2", "num": 12} }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 286,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795716984214119" },
+        "cells" : [
+          { "name" : "v", "value" : "g1" },
+          { "name" : "al", "deletion_info" : { "marked_deleted" : "1795716984214118", "local_delete_time" : "1795716984" } },
+          { "name" : "al", "path" : [ "7d1df360-e9c5-11f1-bfef-fdd6f8afe4e2" ], "value" : {"street": "x", "num": 7} },
+          { "name" : "am", "deletion_info" : { "marked_deleted" : "1795716984214118", "local_delete_time" : "1795716984" } },
+          { "name" : "am", "path" : [ "7" ], "value" : {"street": "m7", "num": 77} }
+        ]
+      }
+    ]
+  }
+]

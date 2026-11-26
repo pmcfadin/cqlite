@@ -43,7 +43,7 @@
 
 mod row_emit;
 mod row_visibility;
-use row_emit::{partition_live_rows, push_metadata_rows, MergedMetaRow};
+use row_emit::{partition_live_rows, push_metadata_rows, MergedMetaRow, ReadAssembly};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -252,6 +252,7 @@ pub(super) async fn merge_generations_for_read(
     let target_key = target_key.map(|k| k.as_bytes().to_vec());
 
     let paths = ordered_generation_paths(reader_list);
+    let asm = ReadAssembly::capture(reader_list, schema); // #4640 (Q51): projection + UDTs
     let schema = schema.clone();
 
     let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
@@ -259,7 +260,12 @@ pub(super) async fn merge_generations_for_read(
                                     // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         // #1695: readers get the token too — `merge_cancel` "Two granularities".
-        let mut merger = KWayMerger::new_cancellable(paths, &schema, cancel.clone())?;
+        let mut merger = KWayMerger::new_cancellable_with_registry(
+            paths,
+            &schema,
+            asm.registry.clone(),
+            cancel.clone(),
+        )?;
         let mut out = Vec::new();
         loop {
             // #1695: caller's future gone — abandon rather than finish a `Vec` nobody
@@ -275,7 +281,7 @@ pub(super) async fn merge_generations_for_read(
                 if row_key.as_bytes() != target.as_slice() {
                     continue;
                 }
-                out.extend(partition_live_rows(&row_key, rows, &shadow, &schema)?);
+                out.extend(partition_live_rows(&row_key, rows, &shadow, &schema, &asm)?);
                 break;
             }
 
@@ -290,7 +296,7 @@ pub(super) async fn merge_generations_for_read(
                     continue;
                 }
             }
-            out.extend(partition_live_rows(&row_key, rows, &shadow, &schema)?);
+            out.extend(partition_live_rows(&row_key, rows, &shadow, &schema, &asm)?);
         }
         Ok(out)
     })
@@ -347,6 +353,7 @@ pub(super) async fn seek_merge_generations_for_read(
     let mut ordered: Vec<Arc<reader::SSTableReader>> = candidates.to_vec();
     ordered.sort_by_key(|b| std::cmp::Reverse(b.generation));
 
+    let asm = ReadAssembly::capture(&ordered, schema); // #4640 (Q51)
     let schema = schema.clone();
     let target_bytes = target_key.as_bytes().to_vec();
 
@@ -382,7 +389,7 @@ pub(super) async fn seek_merge_generations_for_read(
             if row_key.as_bytes() != target_bytes.as_slice() {
                 continue;
             }
-            out.extend(partition_live_rows(&row_key, rows, &shadow, &schema)?);
+            out.extend(partition_live_rows(&row_key, rows, &shadow, &schema, &asm)?);
             break;
         }
         Ok(out)
@@ -474,6 +481,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     }
 
     let paths = ordered_generation_paths(reader_list);
+    let asm = ReadAssembly::capture(reader_list, schema); // #4640 (Q51)
     let merge_schema = schema.clone();
     let start_key = owned_start;
     let end_key = owned_end;
@@ -483,7 +491,12 @@ pub(super) async fn merge_generations_for_read_with_metadata(
         let _admission = admission; // #2063: hold across the detached blocking work.
                                     // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&merge_schema, now_epoch_secs());
-        let mut merger = KWayMerger::new_cancellable(paths, &merge_schema, cancel.clone())?;
+        let mut merger = KWayMerger::new_cancellable_with_registry(
+            paths,
+            &merge_schema,
+            asm.registry.clone(),
+            cancel.clone(),
+        )?;
         let mut out = Vec::new();
         loop {
             // #1695: abandon at the next partition once the caller's future is gone.
@@ -498,7 +511,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
                 if row_key.as_bytes() != target.as_slice() {
                     continue;
                 }
-                push_metadata_rows(&key.key, rows, &mut out, &shadow, &merge_schema)?;
+                push_metadata_rows(&key.key, rows, &mut out, &shadow, &merge_schema, &asm)?;
                 break;
             }
 
@@ -513,7 +526,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
                     continue;
                 }
             }
-            push_metadata_rows(&key.key, rows, &mut out, &shadow, &merge_schema)?;
+            push_metadata_rows(&key.key, rows, &mut out, &shadow, &merge_schema, &asm)?;
         }
         Ok(out)
     })
@@ -615,6 +628,7 @@ pub(super) async fn stream_generations_for_read(
     let start_key = start_key.cloned();
     let end_key = end_key.cloned();
     let paths = ordered_generation_paths(reader_list);
+    let asm = ReadAssembly::capture(reader_list, schema); // #4640 (Q51)
     let schema = schema.clone();
 
     // Issue #3124 (site 5): this task's ONE test-only fault checkpoint needs the
@@ -643,7 +657,11 @@ pub(super) async fn stream_generations_for_read(
         // every production build. Issue #1704: the merger DEFERS open counting here.
         let constructed = match fault_scope.injected_construction_error() {
             Some(injected) => Err(injected),
-            None => crate::storage::write_engine::merge::merger_deferring_opens(paths, &schema),
+            None => crate::storage::write_engine::merge::merger_deferring_opens(
+                paths,
+                &schema,
+                asm.registry.clone(),
+            ),
         };
         let mut merger = match constructed {
             Ok(m) => {
@@ -700,7 +718,7 @@ pub(super) async fn stream_generations_for_read(
                 }
             }
 
-            let live = match partition_live_rows(&row_key, rows, &shadow, &schema) {
+            let live = match partition_live_rows(&row_key, rows, &shadow, &schema, &asm) {
                 Ok(l) => l,
                 Err(e) => {
                     let _ = out_tx.blocking_send(Err(e));

@@ -19,6 +19,7 @@ pub mod producer_fault;
 /// Always-on read-path ARM probes (issue #3058): explicit markers for
 /// "the k-way merge ran" vs "the single-generation query scan ran".
 pub mod read_path_probe;
+pub(crate) mod read_projection; // the SELECT's needed columns for the merged read (#4640)
 /// Cooperative cancellation for long-running synchronous scans (issue #2264).
 pub mod scan_cancel;
 pub mod sstable;

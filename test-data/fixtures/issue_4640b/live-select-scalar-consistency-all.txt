@@ -1,0 +1,8 @@
+Consistency level set to ALL.
+ id | c | v
+----+---+----
+  4 | 0 | g1
+  3 | 0 | g1
+  3 | 1 | g1
+  3 | 2 | g3
+(4 rows)
