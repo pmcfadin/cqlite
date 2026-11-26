@@ -125,11 +125,12 @@ Considered and deferred:
   Cassandra 5.0.8 cluster. Each completes on every table, reports no false corruption on healthy data, and
   stays under the 128 MB budget. It needs a new test plan (#4503); the existing plans cover only
   Flight/Trino load testing. Vortex is exempt.
-  **Status (2026-11-26): the round FAILED.** The report is
-  `easy-db-lab-kits/test-plans/cqlite-forensics-fieldround-0.19-3node-report.md`. Fixes: F7 #4627 and F9 #4629 merged (#4636, #4637);
-  F8 #4628 (fix and test #4639) and #4640 (collections across generations) are in progress. Owner ruling Q48: 0.19 ships with
-  documented memory limits and memory streaming (#4630) moves to 0.20; the re-run of the failed cells is
-  pending.
+  **Status (2026-11-27): first run FAILED (2026-11-26); re-run of the failed cells PASSED.** The report is
+  `easy-db-lab-kits/test-plans/cqlite-forensics-fieldround-0.19-3node-report.md`. Correctness fixes merged:
+  F7 #4627 (#4636), F8 #4628 and F9 #4629 (#4637, tests #4639), and the SELECT collection defects found
+  while fixing them, #4640 (#4644) and #4645 (#4646). Owner ruling Q48: 0.19 ships with documented memory
+  limits and memory streaming (#4630) moves to 0.20; #4643 (compaction list-cell byte order) moves to
+  0.20 (Q53).
 - The nightly full gate is green for the seven consecutive nights before the tag; a red night is triaged
   the next day. **Status: the soak is waived (owner Q46).**
 - The release commit itself gets a full gate of record on Linux, run on main after the last merge.

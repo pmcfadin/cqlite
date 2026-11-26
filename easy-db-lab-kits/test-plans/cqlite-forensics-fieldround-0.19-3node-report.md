@@ -1,15 +1,14 @@
 # 0.19 forensics field round: run report (#4503)
 
-> **Outcome (2026-11-26).** The round FAILED. Findings were filed as #4627 to #4635 (F7 #4627, F8 #4628,
-> F9 #4629, F1 to F5 memory #4630, F6 #4631, F10 #4632). Fixes merged: #4636 (tuple false corruption) and
-> #4637; #4640 (query collapses collections across generations) and #4639 are pending. The re-run of the
-> failed cells is pending. Owner ruling Q48: 0.19 ships with documented memory limits; memory streaming
-> (#4630) is deferred to 0.20. The text below is the original report, written before filing, so its
-> "none filed yet" lines are superseded. The artifacts dir
-> `cqlite-forensics-fieldround-0.19-3node/` (findings, results tables, scripts, manifests; 10 MB in
-> all) is not part of this docs-only commit, because the docs-only classifier treats scripts and
-> data files outside `docs/` as code. It is kept on the branch `fieldround-0.19-report` (commit
-> b8109fb51); paths below that start with `findings/`, `results/` or `samples/` refer to it.
+> **Outcome (updated 2026-11-27).** The first run on 2026-11-26 FAILED (13 findings, filed as #4627 to
+> #4635). The correctness findings are fixed on main: F7 by #4636, F8 and F9 by #4637 (tests #4639),
+> plus two SELECT collection defects found while fixing them (#4640 by #4644, #4645 by #4646). The
+> re-run of the failed cells at e573ff8 PASSED C2, C3 and the C6 cell F7 had broken, and a new SELECT
+> collection check passed against live CL=ALL (section "Re-run 2026-11-27" at the end). The memory
+> findings F1 to F5 remain and are deferred to 0.20 (#4630, owner ruling Q48). The artifacts dirs are
+> kept on branches `fieldround-0.19-report` (b8109fb51) and `fieldround-0.19-rerun` (09b80b1b), not in
+> this docs-only change; paths starting `findings/`, `results/`, `samples/` or `rerun-2026-11-27/`
+> refer to them.
 
 - Plan: `easy-db-lab-kits/test-plans/cqlite-forensics-fieldround-0.19-3node.md` @ 5b7d76d77
 - cqlite binary: built from 5b7d76d77, `cqlite 0.19.0`, sha256 `6bbe033aec4e4684da2cf84a4aa80f4857b5732212eb590dd62f248c527b1acc` on the dev box and in the pod (match: yes). Not rebuilt.
@@ -175,3 +174,65 @@ See the return message; summarised in `results/freeside-notes.txt`.
 
 ## Teardown
 Not performed: the cluster `claude-cqlite-fieldround-019` still exists (expires 2026-12-03). Everything needed is copied out to Git on branch `fieldround-0.19-report` (small files) and the dev box scratch (raw outputs). The cluster can be deleted: results are saved, except the raw per-invocation `.out/.err` trees (about 3.5 GB, in `/work/outM` and `/work/out` on the tools PVC) which are not retained anywhere else; copy them first if wanted.
+
+---
+
+## Re-run 2026-11-27 (fixes at e573ff8)
+
+Scope (owner ruling Q48): only the cells that FAILED in the round above, plus a new query/SELECT check. The memory-budget findings F1-F5 are knowingly deferred to 0.20 (#4630) and were not re-run, except the peak-RSS re-measure of `find`/`explain` (cell R5). No code was changed; no pod, node or cluster was created, deleted or restarted; keyspace `fr` data and the `/snap` snapshots are untouched.
+
+- Code: detached worktree of `e573ff8f1832993869ca7263f036daf44e4bb2ef` (F7 #4627, F8 #4628, F9 #4629, #4640, #4645), `cargo build --release -p cqlite-cli`, 3 min 04 s.
+- Binary: `cqlite 0.19.0`, sha256 `77eeec4a815ce146fd4c9658f760ac9cbe7c56adb238c019259053e6b19dfc73`, at `/work/bin/cqlite-e573ff8` in the `runner` container of pod `tools` (sha verified in the pod). The original binary (`6bbe033a...`, 5b7d76d77) is still at `/work/bin/cqlite`.
+- Runner memory limit 1800 MiB (cannot shrink), sampler cap 1.7 GiB. Cassandra 5.0.8 on 3 pods, unchanged.
+- Oracles unchanged: `compare_c3.py` against the original `results/live/*.jsonl` (live CL=ALL; the data was not written to since), `sstableverify` verdict from the first round. Artifacts: `rerun-2026-11-27/` (compare outputs, per-invocation rows, scripts).
+
+### Per-cell result
+
+| Cell | Original | Re-run | Evidence |
+|---|---|---|---|
+| C2 `find` t_udt key 56440 (exact original command) | FAIL (F7, `unreadable`) | **PASS** | both generations `hit`, exit 0, no corruption message; 360/360 `find` cells on t_udt exit 0 (were 318 exit 2), 0 `unreadable` anywhere in 2496 find runs |
+| C2 `explain` t_udt key 56440 (exact original command) | FAIL (F7) | **PASS** | exit 0, both generations `hit`, full trace; 360/360 on t_udt exit 0 (were 318 exit 2) |
+| C2 `diff` t_udt, full table db0 vs db1 | FAIL (F7, exit 2 in 0.1 s) | **FAIL, different cause (F5, deferred)** | no corruption message; exit 2 after 120-232 s: "result set exceeded the 33554432-byte materialization budget" (115 MiB RSS). Not F7 |
+| C3 explain vs live CL=ALL, t_tomb key 24100 (F8) | FAIL (133 winners vs 0 live rows) | **PASS** | 0 winner cells, 0 live rows, on db0, db1 and db2 |
+| C3 t_tomb all 120 keys | 78/120 db0, 78 db1, 80 db2 | **PASS 120/120 on db0, db1, db2** | the 40 cross-generation tombstone keys (partition 8, range c1 8, range c1c2 8, row 8, collection overwrite 8) all match |
+| C3 t_tomb F9 TTL-tie keys 27757 and 36387 | FAIL (two winners per cell) | **PASS** | one winner per cell, TTL and value agree with live, all 3 nodes |
+| C3 t_udt (was unreadable) | 15/120 | **PASS 120/120 on db0, db1, db2** | |
+| C3 t_basic, t_coll, t_static (were PASS) | 112, 120, 120 | PASS 112/120/120 on all 3 nodes | no regression |
+| C3 t_resurrect (`/snap/rsA0..2`) | db0/db1 120/120, db2 stale | PASS rsA0 and rsA1 120/120, rsA2 80/120 (40 mismatches = the 40 deleted partitions the stale replica still holds, as before) | by construction |
+| C3 t_resurrect_purged (`/snap/rsB0..2`) | db2 120/120, db0/db1 differ | PASS rsB2 120/120, rsB0 and rsB1 80/120 (purged vs live) | by construction |
+| C3 `find` vs original binary, db0 | | t_basic, t_coll, t_static, t_tomb: 0 of 448 outputs differ byte for byte | no change on tables that were not affected |
+| C6 `diff` t_udt healthy pairs db0-db1, db0-db2, db1-db2, db1-db0 at NOW and NOWFAR, self-diff db0 (restricted with `--partition` to the 120 sample keys) | FAIL (F7) | **PASS** | 9 of 9 exit 0, 4-8 s, 20-23 MiB; every run `partitions_compared` 120, `equal` 2258, 0 only-a/only-b/newer/conflict/tombstone/risk, symmetric; the self-diff gives the same 2258 (not vacuous) |
+| C6 `diff` t_udt full-table, healthy | FAIL (F7) | FAIL (F5, see above) | same as the C2 diff row; the other six core tables' full-table healthy diffs were not re-run: they failed on F5, not F7, and F5 is deferred |
+| NEW SELECT t_coll, `query "SELECT * ... WHERE id = k"` vs live `SELECT JSON *` at CL ALL, 120 keys (100 present, 20 absent), element by element, lists in order, db0, db1 and db2 | not tested | **PASS 120/120 on each of the 3 nodes** | 4 collection columns (`l`, `s`, `m`, `nested`) plus `fl`, `fm`; 400 non-empty collections, 3975 elements on db0; `elem-delete` and `coll-overwrite` keys included. t_coll is 5 generations (LCS) |
+| NEW SELECT t_udt, same, 120 keys (`ps` list of UDT, `p`, `tp`) | not tested | **PASS 120/120 on each of the 3 nodes** | t_udt is 2 to 3 generations; rows matched by `ck`, row sets equal both ways |
+| NEW SELECT negative control (original binary 6bbe033, db0) | | t_coll 54 of 120 mismatch (e.g. key 00000000-0000-0000-0000-00000002f224: `l` 4 elements vs live 1, `m` and `s` empty vs live 10 and 11); t_udt 100 of 120 error (F7) | the oracle does see the #4640/#4645 class; a hand-mutated output (swapped list elements, one map entry removed) is also reported |
+| R5 peak RSS `find` / `explain`, typical partitions (original peak in brackets) | | t_basic 29.7 / 31.1 MiB (29 / 30), t_coll 16.4 / 16.6 (15 / 16), t_static 17.0 / 19.3 (16 / 19), t_tomb 12.2 / 15.2 (11 / 14), t_udt 15.7 / 13.9 (14 / 13) | **PASS, no regression** (within 1 to 2 MiB); mean wall 0.04 to 0.27 s per call. `explain` at NOWFAR (first 10 keys) the same |
+
+Counts: `find` 2496 runs and `explain` 2496 + 210 NOWFAR runs on the node snapshots, all exit 0 except the first-pass runs aimed at `/snap/db*/t_resurrect*` (those tables live only under `/snap/rsA*`, `/snap/rsB*`; exit 1 "not found", a harness mistake that I repeated on the right paths). Raw rows: `rerun-2026-11-27/results-find-explain.tsv`.
+
+### Criteria
+
+| # | Criterion | Original | Re-run |
+|---|---|---|---|
+| C2 | no false corruption on healthy data | FAIL for find/explain/diff (t_udt) | **PASS**: no false corruption in find, explain or diff; `diff` t_udt full table still fails on the F5 budget (deferred), partition-restricted diff passes |
+| C3 | find/explain vs live | FAIL (t_tomb F8/F9, t_udt F7) | **PASS** on every table with a live oracle, all 3 nodes (t_wide still not value-compared, as before) |
+| C6 | diff replica comparison | healthy cell FAIL | **PASS** for t_udt (F7 cell); full-table healthy diff remains F5 (deferred) |
+| new | SELECT collection correctness | not tested | **PASS** on t_coll and t_udt, 3 nodes |
+
+### New findings
+
+No new correctness finding. Observations (none blocks):
+- N1 (informational, F5/F13 class): the partition-less `diff` on t_udt wrote 8 MB of stderr in 2 minutes (38,692 lines): `INFO Loaded CompressionInfo.db` and the F13 `WARN Missing critical component files: ["Index"]` once per partition per generation. The log volume scales with the partition count; the F13 warning is still present on every BTI open.
+- N2 (oracle note, not CQLite): `cqlsh` 5.0.8 `SELECT JSON *` printed blank lines instead of JSON for 3 of the 5 rows of a multi-row `t_udt` partition (rows with a populated `ps` list of UDTs), which would have produced a false "extra rows" finding; the live oracle for the SELECT check therefore uses the Python driver bundled with the oracle container (`livejson.py`, `SELECT JSON *`, CL ALL). Not investigated further.
+- N3: the snapshot of node db1 has three t_udt generations (`da-37`, `da-38`, `da-39`) where db0 has two; the diffs above show them equal.
+
+### Timings
+
+Build 3 min 04 s. Per-key `find`/`explain` 0.04 to 0.27 s mean at 0.5 CPU; the 5,202 find/explain invocations took about 1 h 20 min wall with the SELECT runs in parallel. `query` per key about 0.3 to 0.5 s. `diff` t_udt: partition-restricted 4 to 8 s, full table 120 to 232 s then exit 2 (F5).
+
+### Freeside notes (re-run)
+
+- The cluster was still up at the start and end; nothing was created or restarted. Runner stayed at 1800 MiB with no OOM during this re-run (all peaks under 31 MiB for the cells run).
+- `kubectl exec -i` with a heredoc in the command but no stdin redirect blocks until the client is killed: when staging a script by `cat >`, always pass `< file`.
+- The `runner` container has no python3, curl or bc: compare and parsing ran on the dev box on files fetched with `tar` over `kubectl exec`; the `oracle` container has python3 3.11 and the Cassandra driver as a zip under `/opt/cassandra/lib` (add `<zip>/cassandra-driver-3.29.0` to `sys.path`).
+- Throughput at the 0.5 CPU runner limit: about 1 find/explain call per second per stream; two concurrent streams slowed each other about 2x.

@@ -153,8 +153,11 @@ Read these before upgrading.
 ### Known limitations
 
 Measured by the 0.19 freeside field round (#4503, three-node Cassandra 5.0.8, 128 MiB limit), which
-failed; two of its correctness findings are fixed (#4627, #4629), the `explain` cross-generation tombstone fix is in review (#4628, #4639), and its report is in
-`easy-db-lab-kits/test-plans/`.
+failed on first run. Every correctness finding it raised is fixed (false corruption on tuple columns
+#4627; cross-generation tombstones and equal-timestamp ties in point reads #4628/#4629), as are two
+SELECT collection defects found while fixing them (#4640, #4645). A re-run of the failed cells on
+2026-11-27 passed against live Cassandra at CONSISTENCY ALL. The report is in
+`easy-db-lab-kits/test-plans/`. The memory limits below remain and are planned for 0.20 (#4630).
 
 - **Memory.** On large generations `verify --mode audit` (1.66 GiB on a 1.79 GB generation; 167 to
   264 MiB on 167 to 264 MiB ones), `--deep` in `verify --mode audit` and `diagnose` (195 MiB on a
