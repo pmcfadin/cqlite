@@ -70,6 +70,8 @@ exclude = [
     "tests/issue_4629_ttl_tie_explain.rs",
     # Resolves `test-data/fixtures/issue_4628/` checkout-relative and fails closed (same class).
     "tests/issue_4640_collection_assembly.rs",
+    # Resolves `test-data/fixtures/issue_4645/` and `issue_4640/` checkout-relative and fails closed (same class).
+    "tests/issue_4645_single_generation_collections.rs",
     # Resolves `test-data/fixtures/issue_4640b/` checkout-relative and fails closed (same class).
     "tests/issue_4640_udt_collections.rs",
 ]
@@ -370,6 +372,12 @@ required-features = ["write-support", "cli-helpers"]
 
 [[test]]
 name = "issue_4640_udt_collections"
+required-features = ["write-support", "cli-helpers"]
+
+# A single generation's collection element tombstones (issue #4645): Cassandra's own compacted
+# `issue_4645` generation plus `issue_4640`'s `da-2-bti` alone, against the live CL=ALL read.
+[[test]]
+name = "issue_4645_single_generation_collections"
 required-features = ["write-support", "cli-helpers"]
 
 [[test]]
