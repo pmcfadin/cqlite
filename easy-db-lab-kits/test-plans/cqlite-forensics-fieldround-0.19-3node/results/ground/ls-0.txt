@@ -1,0 +1,72 @@
+== t_basic-af86aa20e93611f1b8dc39584808be3e/
+-rw-r--r-- 1 cassandra cassandra 1778340084  da-430-bti-Data.db
+== t_coll-b0fe7d10e93611f1828c53bf15351c72/
+-rw-r--r-- 1 cassandra cassandra 167776948  da-250-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 167773261  da-253-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 167775126  da-255-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra  10629020  da-257-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 109311951  da-307-bti-Data.db
+== t_resurrect-b9a43bd0e93611f1b8dc39584808be3e/
+== t_resurrect_purged-bb19c4d0e93611f1828c53bf15351c72/
+== t_static-b63b6e50e93611f1828c53bf15351c72/
+-rw-r--r-- 1 cassandra cassandra 1114313  da-10-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1005804  da-11-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1218665  da-12-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2482035  da-13-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1998586  da-14-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1648572  da-9-bti-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1358599  nb-1-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra  953116  nb-2-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra  252212  nb-3-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1362925  nb-4-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra  900393  nb-5-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 2109728  nb-6-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra  405994  nb-7-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 2175168  nb-8-big-Data.db
+== t_tomb-b7d10270e93611f1b013b3b9e413504c/
+-rw-r--r-- 1 cassandra cassandra 2525636  da-19-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2746621  da-20-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2802683  da-21-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2805289  da-22-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1423123  da-23-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2225110  da-24-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2472716  da-25-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2323300  da-26-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2140930  da-27-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1991323  da-28-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1851069  da-29-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1067179  da-30-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2239266  da-31-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2437360  da-32-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2288877  da-33-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2109537  da-34-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1956193  da-35-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 2929820  da-36-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra 1844329  da-37-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra  575621  da-38-bti-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1835551  nb-1-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1306486  nb-10-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1871469  nb-11-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1855493  nb-12-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra  872787  nb-13-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 2424050  nb-14-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 2071707  nb-15-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1929372  nb-16-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1057010  nb-17-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra  231207  nb-18-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1590968  nb-2-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1340985  nb-3-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1631152  nb-4-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 2395313  nb-5-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1858856  nb-6-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 1805604  nb-7-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 2177288  nb-8-big-Data.db
+-rw-rw-r-- 1 cassandra cassandra 2018582  nb-9-big-Data.db
+== t_udt-b2d2a0d0e93611f1b013b3b9e413504c/
+-rw-r--r-- 1 cassandra cassandra 269317798  da-37-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra   9779813  da-38-bti-Data.db
+== t_wide-b468aa20e93611f1b8dc39584808be3e/
+-rw-r--r-- 1 cassandra cassandra 247353184  da-53-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra  64614767  da-66-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra  65421811  da-79-bti-Data.db
+-rw-r--r-- 1 cassandra cassandra   1220079  da-80-bti-Data.db

@@ -1,13 +1,15 @@
 #!/bin/bash
-# usage: run-tool.sh NODE TABLE TOOL [ID] -- cmd args...   (runs in the 128 MiB runner container)
-# Records stdout/stderr/rtime and the container's memory.events oom_kill before/after; appends a row to /work/out/results.tsv
+# usage: run-tool.sh NODE TABLE TOOL [ID] -- cmd args...   (runs in the runner container)
+# OUT_ROOT (default /work/out) selects the result tree: /work/out = enforce run (128 MiB limit), /work/outM = measurement run (raised limit).
+# A START row is written first so a container-wide OOM kill (which also kills this wrapper) is detectable.
+OUT_ROOT=${OUT_ROOT:-/work/out}
 node=$1; table=$2; tool=$3; shift 3; id=""; if [ "$1" != "--" ]; then id=$1; shift; fi; shift
-out=/work/out/$node/$table; mkdir -p $out; base=$out/$tool${id:+-$id}
-oom() { awk '/^oom_kill /{print $2}' /sys/fs/cgroup/memory.events; }
-o0=$(oom); printf '%s\n' "$*" > $base.cmd
+out=$OUT_ROOT/$node/$table; mkdir -p $out; base=$out/$tool${id:+-$id}
+printf '%s\t%s\t%s\t%s\n' "$(date -u +%T)" "$node" "$table" "$tool${id:+-$id}" >> $OUT_ROOT/started.tsv
+printf '%s\n' "$*" > $base.cmd; rm -f $base.time
+ulimit -f 400000   # cap any single output file at ~400 MB (explain of the 2.5M-row partition)
 /work/bin/rtime $base.time "$@" > $base.out 2> $base.err
-ec=$?; o1=$(oom)
+ec=$?
 . $base.time 2>/dev/null
-peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null)
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$node" "$table" "$tool${id:+-$id}" "$exit" "$wall_s" "$maxrss_kib" "$((o1-o0))" "$signaled" "$(stat -c %s $base.out)" >> /work/out/results.tsv
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$node" "$table" "$tool${id:+-$id}" "$exit" "$wall_s" "$maxrss_kib" "$signaled" "$(stat -c %s $base.out)" >> $OUT_ROOT/results.tsv
 exit 0
