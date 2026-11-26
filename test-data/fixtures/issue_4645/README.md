@@ -14,4 +14,5 @@ generated 2026-11-26 (keyspace dropped, data dir removed afterwards). Keys 3, 4,
 
 Oracles: `live-select-consistency-all.txt` (`SELECT *` at `CONSISTENCY ALL`, read semantics),
 `sstabledump-da-3-bti.json` (`sstabledump -t`), `schema.cql`.
+`cqlite_compacted_4640/` is CQLite's own compacted output of the `issue_4640` fixture (`nb-10-big`, valid under Cassandra 5.0.8 `sstableverify`; list cells not in comparator order on disk), read against `issue_4640`'s CL=ALL oracle.
 Consumer: `cqlite-core/tests/issue_4645_single_generation_collections.rs`. `*.db` files are force-added.

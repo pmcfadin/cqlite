@@ -592,19 +592,14 @@ impl V5CompressedLegacyParser {
                             let coll_eff_ts = col_meta
                                 .max_element_writetime
                                 .max(row_header.timestamp.unwrap_or(i64::MIN));
-                            // Issue #1741 (per-element filtering): the shadowed/expired
-                            // elements have ALREADY been skipped from `value` inside
-                            // `parse_complex_column_inner`. The collection now reads as
-                            // ABSENT (null) iff the read-side filter EMPTIED it (every
-                            // element was shadowed/expired: `shadow_filtered_element_count
-                            // > 0` AND the container is empty). A collection empty for any
-                            // OTHER reason (genuinely empty / all element-tombstones, where
-                            // `shadow_filtered_element_count == 0`) keeps its prior
-                            // behavior, so tombstone-free reads and physical consumers are
-                            // byte-unchanged. `cover == None` never filters an element, so
-                            // a non-shadowing read never treats a collection as absent.
-                            let collection_absent = col_meta.shadow_filtered_element_count > 0
-                                && Self::complex_value_is_empty(&value);
+                            // Absent (null) when no element survives: the #1741 filter EMPTIED it
+                            // (`shadow_filtered_element_count > 0`), or (#4645) this is the SELECT
+                            // decode (`compaction_complex_out` is `None`), where Cassandra reads an
+                            // empty non-frozen collection (all deleted / whole-delete) as null.
+                            // Physical consumers keep the empty value. `cover == None` never filters.
+                            let collection_absent = Self::complex_value_is_empty(&value)
+                                && (col_meta.shadow_filtered_element_count > 0
+                                    || compaction_complex_out.is_none());
                             // Fold the collection into the ROW aggregate REGARDLESS of
                             // absence (so a wholly-shadowed collection is still recognised
                             // as shadowed by `row_hidden`, and Finding 2's newest-element ts

@@ -87,8 +87,14 @@ fn render(v: Option<&Value>, nested: bool) -> String {
 /// The CL=ALL oracle file, parsed to `key columns -> rendered data columns` in `DATA_COLS`
 /// order (the file's own column order is `l | m | s | v`).
 fn oracle() -> Rows {
+    oracle_at("issue_4645", [5, 4, 2, 3], 4)
+}
+
+/// `file`'s `<dir>/live-select-consistency-all.txt`; `order` = the file columns holding
+/// `v, s, l, m`.
+fn oracle_at(dir: &str, order: [usize; 4], rows: usize) -> Rows {
     let text =
-        std::fs::read_to_string(fixtures().join("issue_4645/live-select-consistency-all.txt"))
+        std::fs::read_to_string(fixtures().join(dir).join("live-select-consistency-all.txt"))
             .expect("oracle file is committed (must_run)");
     let mut out = Rows::new();
     for line in text.lines() {
@@ -98,14 +104,10 @@ fn oracle() -> Rows {
         }
         assert_eq!(cells.len(), 6, "oracle row: {line}");
         let key = vec![cells[0].parse().unwrap(), cells[1].parse().unwrap()];
-        // file order: id c l m s v  ->  v s l m
-        let data = [cells[5], cells[4], cells[2], cells[3]]
-            .iter()
-            .map(|c| c.to_string())
-            .collect();
+        let data = order.iter().map(|&i| cells[i].to_string()).collect();
         out.insert(key, data);
     }
-    assert_eq!(out.len(), 4, "the CL=ALL oracle row count");
+    assert_eq!(out.len(), rows, "the CL=ALL oracle row count");
     out
 }
 
@@ -131,7 +133,10 @@ fn rows_of(result: &cqlite_core::QueryResult, want: &Rows, ctx: &str) -> Rows {
                 other => panic!("{ctx}: {c} is {other:?}"),
             })
             .collect();
-        let data: Vec<String> = DATA_COLS.iter().map(|c| render(row.get(c), false)).collect();
+        let data: Vec<String> = DATA_COLS
+            .iter()
+            .map(|c| render(row.get(c), false))
+            .collect();
         if let Some(expected) = want.get(&key) {
             for (i, c) in DATA_COLS.iter().enumerate() {
                 let live = expected[i] != "null";
@@ -181,7 +186,10 @@ async fn assert_every_read_path(
                 .unwrap_or_else(|e| panic!("{ctx} id={id}: {e}"));
             union.extend(rows_of(&r, want, &format!("{ctx} id={id}")));
         }
-        assert_eq!(&union, want, "{ctx}: partition reads differ from the oracle");
+        assert_eq!(
+            &union, want,
+            "{ctx}: partition reads differ from the oracle"
+        );
 
         for (key, data) in want {
             let r = db
@@ -208,7 +216,12 @@ async fn cassandra_compacted_single_generation_matches_live_cl_all() {
     // Sanity that the oracle really exercises the cases (not a vacuous pass).
     assert_eq!(
         want[&vec![3, 0]],
-        ["g1", "{1, 3, 4}", "[10, 30, 40]", "{1: 'a', 3: 'c', 4: 'd'}"]
+        [
+            "g1",
+            "{1, 3, 4}",
+            "[10, 30, 40]",
+            "{1: 'a', 3: 'c', 4: 'd'}"
+        ]
     );
     assert_eq!(want[&vec![3, 1]], ["g1", "{7, 8}", "[70, 80]", "{9: 'z'}"]);
     assert_eq!(want[&vec![4, 0]], ["g1", "null", "null", "null"]);
@@ -256,7 +269,9 @@ async fn cassandra_written_da2_alone_omits_deleted_elements() {
     let mut want = Rows::new();
     want.insert(
         vec![3, 0],
-        ["null", "{4}", "[40]", "{4: 'd'}"].map(String::from).to_vec(),
+        ["null", "{4}", "[40]", "{4: 'd'}"]
+            .map(String::from)
+            .to_vec(),
     );
     want.insert(
         vec![4, 0],
@@ -269,6 +284,34 @@ async fn cassandra_written_da2_alone_omits_deleted_elements() {
         &want,
         &[5],
         "4640-da2",
+    )
+    .await;
+}
+
+/// CQLite's own compacted output of the #4640 fixture (a single BIG `nb-10-big`, which Cassandra
+/// 5.0.8 `sstableverify` accepts and whose live CL=ALL read is the #4640 oracle). Its list cells
+/// are NOT in comparator order on disk (`[40, 10, 30]` before #4645) and its map holds the
+/// element tombstone for key 2: the read must give `[10, 30, 40]` and omit the entry.
+#[tokio::test]
+async fn cqlite_compacted_single_generation_reads_in_cell_path_order() {
+    let root = fixtures().join("issue_4645/cqlite_compacted_4640");
+    let want = oracle_at("issue_4640", [2, 3, 4, 5], 5);
+    assert_eq!(
+        want[&vec![3, 0]],
+        [
+            "g1",
+            "{1, 3, 4, 5}",
+            "[10, 30, 40]",
+            "{1: 'a2', 3: 'c', 4: 'd'}"
+        ]
+    );
+    assert_every_read_path(
+        &fixtures().join("issue_4640/schema.cql"),
+        &root.join("sstables"),
+        "fix4640.t",
+        &want,
+        &[1],
+        "4640-cqlite-compacted",
     )
     .await;
 }
