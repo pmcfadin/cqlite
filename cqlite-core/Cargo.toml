@@ -72,6 +72,7 @@ exclude = [
     "tests/issue_4640_collection_assembly.rs",
     # Resolves `test-data/fixtures/issue_4640b/` checkout-relative and fails closed (same class).
     "tests/issue_4640_udt_collections.rs",
+    "tests/issue_4628_cross_generation_select.rs",
 ]
 
 # docs.rs build: document the commonly used features.
