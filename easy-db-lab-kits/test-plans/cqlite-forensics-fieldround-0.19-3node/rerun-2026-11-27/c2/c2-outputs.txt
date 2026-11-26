@@ -1,0 +1,6 @@
+{"generations":[{"data_offset":86464939,"byte_length":2074,"max_writetime":1795600000000000,"partition_deletion":false,"basename":"da-37-bti-Data.db","probe":"hit"},{"data_offset":3148523,"byte_length":115,"max_writetime":1795600010000000,"partition_deletion":false,"basename":"da-38-bti-Data.db","probe":"hit"}],"commitlog":null}
+
+now=1795662946 (2026-11-26T03:15:46+00:00)  generations=2 [da-38-bti-Data.db,da-37-bti-Data.db]  gc_grace_seconds=864000
+{"now":1795662946,"generations":[{"run_index":0,"sstable":"da-38-bti-Data.db","probe":"hit"},{"run_index":1,"sstable":"da-37-bti-Data.db","probe":"hit"}],"cells":[{"column":"p","clustering":{"columns":[["ck",{"Integer":0}]]},"generation":1,"writetime":1795600000000000,"ttl":null,"expires_at":null,"value":{"Frozen":{"Udt":{"type_name":"person","keyspace":"fr","fields":[{"name":"name","value":{"Text":"xtVqoqW4"}},{"name":"born","value":{"Date":-4937}},{"name":"home","value":{"Frozen":{"Udt":{"type_name":"addr","keyspace":"fr","fields":[{"name":"street","value":{"Text":"DyjYzKAu3n8="}},{"name":"c
+
+cqlite diff: result set exceeded the 33554432-byte materialization budget (estimated 33561841 bytes across 3868 rows so far); add a LIMIT clause to bound the result, or use the streaming query API (e.g. execute_streaming) to consume rows incrementally

@@ -1,0 +1,121 @@
+001 coll-overwrite 00000000-0000-0000-0000-00000002f224: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=10; ck=None nested: cqlite n=3 live n=6; ck=None s: cqlite n=- live n=11
+002 coll-overwrite 00000000-0000-0000-0000-00000000305c: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=9; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=10
+003 coll-overwrite 00000000-0000-0000-0000-00000001a284: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=20; ck=None nested: cqlite n=3 live n=11; ck=None s: cqlite n=- live n=21
+004 coll-overwrite 00000000-0000-0000-0000-0000000113a0: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=12; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=13
+005 coll-overwrite 00000000-0000-0000-0000-000000014988: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=10; ck=None nested: cqlite n=3 live n=6; ck=None s: cqlite n=- live n=11
+006 coll-overwrite 00000000-0000-0000-0000-00000003bc7c: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=5; ck=None nested: cqlite n=3 live n=3; ck=None s: cqlite n=- live n=6
+007 coll-overwrite 00000000-0000-0000-0000-0000000150b8: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=20; ck=None nested: cqlite n=3 live n=11; ck=None s: cqlite n=- live n=21
+008 coll-overwrite 00000000-0000-0000-0000-000000027d1c: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=12; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=13
+009 coll-overwrite 00000000-0000-0000-0000-000000006f04: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=18; ck=None nested: cqlite n=3 live n=10; ck=None s: cqlite n=- live n=19
+010 coll-overwrite 00000000-0000-0000-0000-000000017070: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=5; ck=None nested: cqlite n=3 live n=3; ck=None s: cqlite n=- live n=6
+011 coll-overwrite 00000000-0000-0000-0000-000000063ec0: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=6; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=7
+012 coll-overwrite 00000000-0000-0000-0000-000000058048: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=7; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=8
+013 coll-overwrite 00000000-0000-0000-0000-000000068010: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=10; ck=None nested: cqlite n=3 live n=6; ck=None s: cqlite n=- live n=11
+014 coll-overwrite 00000000-0000-0000-0000-000000069bf4: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=19; ck=None nested: cqlite n=3 live n=10; ck=None s: cqlite n=- live n=20
+015 coll-overwrite 00000000-0000-0000-0000-000000056fcc: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=13; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=14
+016 coll-overwrite 00000000-0000-0000-0000-0000000606d0: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=8; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=9
+017 coll-overwrite 00000000-0000-0000-0000-00000002d230: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=13; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=14
+018 coll-overwrite 00000000-0000-0000-0000-000000007800: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=7; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=8
+019 coll-overwrite 00000000-0000-0000-0000-000000017a0c: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=16; ck=None nested: cqlite n=3 live n=9; ck=None s: cqlite n=- live n=17
+020 coll-overwrite 00000000-0000-0000-0000-00000004653c: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=13; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=14
+021 coll-overwrite 00000000-0000-0000-0000-000000044200: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=6; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=7
+022 coll-overwrite 00000000-0000-0000-0000-000000062e94: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=6; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=7
+023 coll-overwrite 00000000-0000-0000-0000-000000046ce4: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=7; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=8
+024 coll-overwrite 00000000-0000-0000-0000-000000060748: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=19; ck=None nested: cqlite n=3 live n=10; ck=None s: cqlite n=- live n=20
+025 coll-overwrite 00000000-0000-0000-0000-000000066634: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=10; ck=None nested: cqlite n=3 live n=6; ck=None s: cqlite n=- live n=11
+026 elem-delete 00000000-0000-0000-0000-00000001d8f8: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=15; ck=None nested: cqlite n=3 live n=8; ck=None s: cqlite n=- live n=16
+027 elem-delete 00000000-0000-0000-0000-000000073bcc: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=9; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=10
+028 elem-delete 00000000-0000-0000-0000-000000070ff8: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=14; ck=None nested: cqlite n=3 live n=8; ck=None s: cqlite n=- live n=15
+029 elem-delete 00000000-0000-0000-0000-0000000798d8: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=11; ck=None nested: cqlite n=3 live n=6; ck=None s: cqlite n=- live n=12
+030 elem-delete 00000000-0000-0000-0000-000000006d1a: MISMATCH ck=None l: cqlite n=8 live n=9; ck=None m: cqlite n=- live n=9; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=9
+031 elem-delete 00000000-0000-0000-0000-00000001d1f0: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=8; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=9
+032 elem-delete 00000000-0000-0000-0000-000000024cde: MISMATCH ck=None l: cqlite n=8 live n=15; ck=None m: cqlite n=- live n=15; ck=None nested: cqlite n=3 live n=8; ck=None s: cqlite n=- live n=15
+033 elem-delete 00000000-0000-0000-0000-0000000418d4: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=14; ck=None nested: cqlite n=3 live n=8; ck=None s: cqlite n=- live n=15
+034 elem-delete 00000000-0000-0000-0000-00000003663c: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=8; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=9
+035 elem-delete 00000000-0000-0000-0000-000000068952: MISMATCH ck=None l: cqlite n=8 live n=20; ck=None m: cqlite n=- live n=20; ck=None nested: cqlite n=3 live n=11; ck=None s: cqlite n=- live n=20
+036 elem-delete 00000000-0000-0000-0000-0000000604aa: MISMATCH ck=None l: cqlite n=8 live n=17; ck=None m: cqlite n=- live n=17; ck=None nested: cqlite n=3 live n=9; ck=None s: cqlite n=- live n=17
+037 elem-delete 00000000-0000-0000-0000-00000001a8ec: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=13; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=14
+038 elem-delete 00000000-0000-0000-0000-00000000212a: MISMATCH ck=None l: cqlite n=8 live n=24; ck=None m: cqlite n=- live n=12; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=12
+039 elem-delete 00000000-0000-0000-0000-000000073320: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=9; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=10
+040 elem-delete 00000000-0000-0000-0000-000000073d52: MISMATCH ck=None l: cqlite n=8 live n=17; ck=None m: cqlite n=- live n=17; ck=None nested: cqlite n=3 live n=9; ck=None s: cqlite n=- live n=17
+041 elem-delete 00000000-0000-0000-0000-00000005573a: MISMATCH ck=None l: cqlite n=8 live n=7; ck=None m: cqlite n=- live n=7; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=7
+042 elem-delete 00000000-0000-0000-0000-00000002f850: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=19; ck=None nested: cqlite n=3 live n=10; ck=None s: cqlite n=- live n=20
+043 elem-delete 00000000-0000-0000-0000-000000004b00: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=8; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=9
+044 elem-delete 00000000-0000-0000-0000-00000005dc78: MISMATCH ck=None l: cqlite n=4 live n=1; ck=None m: cqlite n=- live n=11; ck=None nested: cqlite n=3 live n=6; ck=None s: cqlite n=- live n=12
+045 elem-delete 00000000-0000-0000-0000-00000006c426: MISMATCH ck=None l: cqlite n=8 live n=15; ck=None m: cqlite n=- live n=15; ck=None nested: cqlite n=3 live n=8; ck=None s: cqlite n=- live n=15
+046 plainA 00000000-0000-0000-0000-00000002d8f2: MATCH (1 rows)
+047 plainA 00000000-0000-0000-0000-000000025379: MATCH (1 rows)
+048 plainA 00000000-0000-0000-0000-0000000100bc: MATCH (1 rows)
+049 plainA 00000000-0000-0000-0000-00000001d018: MATCH (1 rows)
+050 plainA 00000000-0000-0000-0000-000000035be4: MATCH (1 rows)
+051 plainA 00000000-0000-0000-0000-000000041659: MATCH (1 rows)
+052 plainA 00000000-0000-0000-0000-000000051e95: MATCH (1 rows)
+053 plainA 00000000-0000-0000-0000-00000006bf01: MISMATCH ck=None l: cqlite n=8 live n=20; ck=None m: cqlite n=- live n=20; ck=None nested: cqlite n=3 live n=11; ck=None s: cqlite n=- live n=20
+054 plainA 00000000-0000-0000-0000-0000000502e6: MATCH (1 rows)
+055 plainA 00000000-0000-0000-0000-0000000541ec: MATCH (1 rows)
+056 plainA 00000000-0000-0000-0000-0000000512bb: MATCH (1 rows)
+057 plainA 00000000-0000-0000-0000-00000004ba2c: MATCH (1 rows)
+058 plainA 00000000-0000-0000-0000-000000004a06: MISMATCH ck=None l: cqlite n=8 live n=16; ck=None m: cqlite n=- live n=16; ck=None nested: cqlite n=3 live n=9; ck=None s: cqlite n=- live n=16
+059 plainA 00000000-0000-0000-0000-000000064b09: MATCH (1 rows)
+060 plainA 00000000-0000-0000-0000-0000000406eb: MISMATCH ck=None l: cqlite n=8 live n=15; ck=None m: cqlite n=- live n=15; ck=None nested: cqlite n=3 live n=8; ck=None s: cqlite n=- live n=15
+061 plainA 00000000-0000-0000-0000-00000004b9ae: MATCH (1 rows)
+062 plainA 00000000-0000-0000-0000-0000000496d3: MISMATCH ck=None l: cqlite n=8 live n=11; ck=None m: cqlite n=- live n=11; ck=None nested: cqlite n=3 live n=6; ck=None s: cqlite n=- live n=11
+063 plainA 00000000-0000-0000-0000-000000066dc0: MATCH (1 rows)
+064 plainA 00000000-0000-0000-0000-00000006748c: MATCH (1 rows)
+065 plainA 00000000-0000-0000-0000-00000000ff32: MISMATCH ck=None l: cqlite n=8 live n=13; ck=None m: cqlite n=- live n=13; ck=None nested: cqlite n=3 live n=7; ck=None s: cqlite n=- live n=13
+066 plainA 00000000-0000-0000-0000-00000003b110: MISMATCH ck=None l: cqlite n=8 live n=9; ck=None m: cqlite n=- live n=9; ck=None nested: cqlite n=3 live n=5; ck=None s: cqlite n=- live n=9
+067 plainA 00000000-0000-0000-0000-0000000542b6: MISMATCH ck=None l: cqlite n=8 live n=16; ck=None m: cqlite n=- live n=16; ck=None nested: cqlite n=3 live n=9; ck=None s: cqlite n=- live n=16
+068 plainA 00000000-0000-0000-0000-000000003f06: MATCH (1 rows)
+069 plainA 00000000-0000-0000-0000-000000003768: MATCH (1 rows)
+070 plainA 00000000-0000-0000-0000-00000003117c: MATCH (1 rows)
+071 plainB 00000000-0000-0000-0000-00000008fdf6: MATCH (1 rows)
+072 plainB 00000000-0000-0000-0000-0000000a9f13: MATCH (1 rows)
+073 plainB 00000000-0000-0000-0000-0000000ee155: MATCH (1 rows)
+074 plainB 00000000-0000-0000-0000-0000000b5732: MATCH (1 rows)
+075 plainB 00000000-0000-0000-0000-0000000dc90c: MATCH (1 rows)
+076 plainB 00000000-0000-0000-0000-00000008bbbd: MATCH (1 rows)
+077 plainB 00000000-0000-0000-0000-0000000a9912: MATCH (1 rows)
+078 plainB 00000000-0000-0000-0000-0000000a38ed: MISMATCH ck=None l: cqlite n=8 live n=6; ck=None m: cqlite n=- live n=6; ck=None nested: cqlite n=3 live n=4; ck=None s: cqlite n=- live n=6
+079 plainB 00000000-0000-0000-0000-0000000cce74: MATCH (1 rows)
+080 plainB 00000000-0000-0000-0000-0000000dad8c: MATCH (1 rows)
+081 plainB 00000000-0000-0000-0000-0000000eaf97: MATCH (1 rows)
+082 plainB 00000000-0000-0000-0000-0000000e5919: MATCH (1 rows)
+083 plainB 00000000-0000-0000-0000-0000000cec74: MATCH (1 rows)
+084 plainB 00000000-0000-0000-0000-0000000ed376: MATCH (1 rows)
+085 plainB 00000000-0000-0000-0000-0000000d2fd9: MATCH (1 rows)
+086 plainB 00000000-0000-0000-0000-0000000833ae: MISMATCH ck=None l: cqlite n=8 live n=15; ck=None m: cqlite n=- live n=15; ck=None nested: cqlite n=3 live n=8; ck=None s: cqlite n=- live n=15
+087 plainB 00000000-0000-0000-0000-0000000e1279: MATCH (1 rows)
+088 plainB 00000000-0000-0000-0000-0000000aeff1: MATCH (1 rows)
+089 plainB 00000000-0000-0000-0000-0000000ce21d: MATCH (1 rows)
+090 plainB 00000000-0000-0000-0000-00000008eeb7: MATCH (1 rows)
+091 plainB 00000000-0000-0000-0000-0000000b3836: MATCH (1 rows)
+092 plainB 00000000-0000-0000-0000-0000000e3a61: MATCH (1 rows)
+093 plainB 00000000-0000-0000-0000-0000000e33f8: MATCH (1 rows)
+094 plainB 00000000-0000-0000-0000-0000000e1b93: MATCH (1 rows)
+095 plainB 00000000-0000-0000-0000-000000097208: MATCH (1 rows)
+096 plainB 00000000-0000-0000-0000-0000000f0e34: MATCH (1 rows)
+097 plainB 00000000-0000-0000-0000-00000009177b: MATCH (1 rows)
+098 plainB 00000000-0000-0000-0000-0000000e2058: MATCH (1 rows)
+099 plainB 00000000-0000-0000-0000-0000000bb475: MATCH (1 rows)
+100 plainB 00000000-0000-0000-0000-0000000c1081: MATCH (1 rows)
+101 absent 00000000-0000-0000-0000-0000004c4b40: MATCH (0 rows)
+102 absent 00000000-0000-0000-0000-0000004c4b41: MATCH (0 rows)
+103 absent 00000000-0000-0000-0000-0000004c4b42: MATCH (0 rows)
+104 absent 00000000-0000-0000-0000-0000004c4b43: MATCH (0 rows)
+105 absent 00000000-0000-0000-0000-0000004c4b44: MATCH (0 rows)
+106 absent 00000000-0000-0000-0000-0000004c4b45: MATCH (0 rows)
+107 absent 00000000-0000-0000-0000-0000004c4b46: MATCH (0 rows)
+108 absent 00000000-0000-0000-0000-0000004c4b47: MATCH (0 rows)
+109 absent 00000000-0000-0000-0000-0000004c4b48: MATCH (0 rows)
+110 absent 00000000-0000-0000-0000-0000004c4b49: MATCH (0 rows)
+111 absent 00000000-0000-0000-0000-0000004c4b4a: MATCH (0 rows)
+112 absent 00000000-0000-0000-0000-0000004c4b4b: MATCH (0 rows)
+113 absent 00000000-0000-0000-0000-0000004c4b4c: MATCH (0 rows)
+114 absent 00000000-0000-0000-0000-0000004c4b4d: MATCH (0 rows)
+115 absent 00000000-0000-0000-0000-0000004c4b4e: MATCH (0 rows)
+116 absent 00000000-0000-0000-0000-0000004c4b4f: MATCH (0 rows)
+117 absent 00000000-0000-0000-0000-0000004c4b50: MATCH (0 rows)
+118 absent 00000000-0000-0000-0000-0000004c4b51: MATCH (0 rows)
+119 absent 00000000-0000-0000-0000-0000004c4b52: MATCH (0 rows)
+120 absent 00000000-0000-0000-0000-0000004c4b53: MATCH (0 rows)
+SUMMARY t_coll {'mismatch': 54, 'match': 66}

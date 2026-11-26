@@ -1,0 +1,10 @@
+diff	t_udt	diff-healthy-t_udt-db0-db1-now	0	6.69	20244	0	875299	8332	11672	0
+diff	t_udt	diff-healthy-t_udt-db0-db1-far	0	6.81	19836	0	875299	8388	11448	0
+diff	t_udt	diff-healthy-t_udt-db0-db2-now	0	7.42	21772	0	875322	9880	11592	0
+diff	t_udt	diff-healthy-t_udt-db0-db2-far	0	7.52	22440	0	875322	9832	11684	0
+diff	t_udt	diff-healthy-t_udt-db1-db2-now	0	7.74	22368	0	875345	9684	11728	0
+diff	t_udt	diff-healthy-t_udt-db1-db2-far	0	7.82	23452	0	875345	11308	11660	0
+diff	t_udt	diff-healthy-t_udt-db1-db0-now	0	6.70	20580	0	875299	8492	11768	0
+diff	t_udt	diff-healthy-t_udt-db1-db0-far	0	4.31	20392	0	875299	8212	11680	0
+diff	t_udt	diff-self-t_udt-db0	0	4.00	19840	0	875276	8036	11544	0
+diff	t_udt	diff-full-t_udt-db0-db1-now	2	232.49	115544	0	0	103488	12056	0

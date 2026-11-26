@@ -1,0 +1,1 @@
+/work/bin/cqlite-e573ff8 --schema /work/schema/fr.t_udt.cql diff /snap/db0/fr/t_udt-b2d2a0d0e93611f1b013b3b9e413504c /snap/db1/fr/t_udt-b2d2a0d0e93611f1b013b3b9e413504c --table fr.t_udt --now 1795662946 --out json
