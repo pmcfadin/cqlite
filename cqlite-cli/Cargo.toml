@@ -451,3 +451,10 @@ required-features = ["write-support"]
 name = "issue_4612_compaction_inputs"
 path = "tests/issue_4612_compaction_inputs.rs"
 required-features = ["write-support"]
+
+# Issue #4628: field-round F8 cross-generation tombstone fixture; explain drives the traced
+# write-engine point merge, so this target must use write support.
+[[test]]
+name = "issue_4628_explain_cross_generation"
+path = "tests/issue_4628_explain_cross_generation.rs"
+required-features = ["write-support"]

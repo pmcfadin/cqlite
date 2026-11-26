@@ -74,6 +74,7 @@ exclude = [
     "tests/issue_4645_single_generation_collections.rs",
     # Resolves `test-data/fixtures/issue_4640b/` checkout-relative and fails closed (same class).
     "tests/issue_4640_udt_collections.rs",
+    "tests/issue_4628_cross_generation_select.rs",
 ]
 
 # docs.rs build: document the commonly used features.
@@ -279,6 +280,11 @@ required-features = ["arrow"]
 [[test]]
 name = "issue_3790_merged_read_time_order"
 required-features = ["write-support"]
+
+# Issue #4628: SELECT vs live CL=ALL over the cross-generation tombstone fixture.
+[[test]]
+name = "issue_4628_cross_generation_select"
+required-features = ["write-support", "cli-helpers"]
 
 # Full-Index.db partition-enumeration regression (issue #2302). It is
 # `#![cfg(all(feature = "work-counters", feature = "write-support"))]` — the
