@@ -386,3 +386,33 @@ async fn compacted_multi_generation_collections_stay_intact() {
         );
     }
 }
+
+/// The `WRITETIME`/`TTL` projection reads through the metadata-carrying merge, which had
+/// the same flattening: a projected scalar writetime must not collapse the collections.
+#[tokio::test]
+async fn writetime_projection_keeps_collections_whole() {
+    let want = oracle(&F4628);
+    for (mode, name) in [(ReadPathMode::Auto, "auto"), (ReadPathMode::Full, "full")] {
+        let db = open_at(&F4628, &fixture_root(&F4628).join("sstables"), mode).await;
+        for id in [3, 4, 5, 9] {
+            let r = db
+                .execute(&format!(
+                    "SELECT id, c1, c2, v, writetime(v), l, m FROM fix4628.t WHERE id = {id}"
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("{name} id={id}: {e}"));
+            let wanted: Vec<_> = want.iter().filter(|(k, _)| k[0] == id).collect();
+            assert_eq!(r.rows.len(), wanted.len(), "{name} id={id}: row count");
+            for row in &r.rows {
+                let int = |c: &str| match row.get(c) {
+                    Some(Value::Integer(n)) => *n,
+                    other => panic!("{name}: {c} is {other:?}"),
+                };
+                let data = &want[&vec![int("id"), int("c1"), int("c2")]];
+                assert_eq!(render(row.get("v"), false), data[0], "{name} id={id} v");
+                assert_eq!(render(row.get("l"), false), data[1], "{name} id={id} l");
+                assert_eq!(render(row.get("m"), false), data[2], "{name} id={id} m");
+            }
+        }
+    }
+}
