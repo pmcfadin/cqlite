@@ -272,6 +272,25 @@ fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
         }
     }
 
+    // `TupleType(T1,T2,...)` -> CQL `tuple<t1, t2, ...>` (issue #4627). Cassandra
+    // prints a tuple as `getClass().getName() + stringifyTypeParameters(types,
+    // true)` (`TupleType.java` `toString`), never wrapped in `FrozenType` because
+    // a tuple is implicitly frozen. Before this arm the string fell through to
+    // the `other => other.to_lowercase()` fallback below, which (after
+    // `strip_namespace` took the text after the LAST '.') produced the junk
+    // type `uuidtype` for `TupleType(Int32Type,UTF8Type,UUIDType)`.
+    for prefix in ["org.apache.cassandra.db.marshal.TupleType(", "TupleType("] {
+        if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
+            if let Some(inner) = extract_inner_type(params_with_close) {
+                let elements: Vec<String> = split_type_arguments(inner)
+                    .into_iter()
+                    .map(convert_marshal_type_to_cql)
+                    .collect();
+                return format!("tuple<{}>", elements.join(", "));
+            }
+        }
+    }
+
     cleaned = strip_wrapping_parens(cleaned);
     let base = strip_type_suffix(strip_namespace(cleaned)).trim_end_matches(')');
 
@@ -580,5 +599,25 @@ mod tests {
                 "the fail-closed spelling '{converted}' must not parse as any type"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tuple_header_tests_4627 {
+    use super::convert_marshal_type_to_cql_checked as conv;
+
+    const M: &str = "org.apache.cassandra.db.marshal.";
+
+    /// Strings are verbatim from a Cassandra 5.0.8 `Statistics.db` (fixture
+    /// `test-data/fixtures/issue_4627`). Before #4627 a tuple converted to the junk
+    /// type `uuidtype` (the text after the last '.').
+    #[test]
+    fn tuple_header_type_converts_to_a_cql_tuple() {
+        let flat = format!("{M}TupleType({M}Int32Type,{M}UTF8Type,{M}UUIDType)");
+        assert_eq!(conv(&flat).unwrap(), "tuple<int, text, uuid>");
+        let nested = format!("{M}TupleType({M}Int32Type,{M}TupleType({M}UTF8Type,{M}UUIDType))");
+        assert_eq!(conv(&nested).unwrap(), "tuple<int, tuple<text, uuid>>");
+        let in_list = format!("{M}ListType({M}TupleType({M}Int32Type,{M}UTF8Type))");
+        assert_eq!(conv(&in_list).unwrap(), "list<tuple<int, text>>");
     }
 }

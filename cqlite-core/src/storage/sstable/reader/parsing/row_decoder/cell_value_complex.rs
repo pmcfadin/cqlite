@@ -81,6 +81,19 @@ impl V5CompressedLegacyParser {
                 let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key);
                 let value_type = Self::prefer_udt_marshal_element(marshal_val, &schema_val);
                 self.parse_frozen_map_value(data, off, &key_type, value_type, column)?
+            } else if inner_type.starts_with("tuple<") {
+                // `frozen<tuple<..>>` (issue #4627). The cell flags byte was already
+                // consumed by `parse_cell_value_schema_order`, so the value starts
+                // AT `off`: decode the tuple directly. The generic recursion below
+                // re-enters `parse_cell_value_schema_order`, which would read ANOTHER
+                // cell-flags byte -- the tuple's own VUInt length prefix -- and fail
+                // with a false "invalid cell flags". A tuple is implicitly frozen
+                // (`CQL3Type.Raw.freeze()`), so `frozen<tuple<..>>` and a bare
+                // `tuple<..>` are the same on-disk cell.
+                let mut tuple_off = off;
+                let tuple_value =
+                    self.parse_tuple_value(data, &mut tuple_off, &inner_type, column)?;
+                (tuple_value, tuple_off)
             } else if Self::is_udt_type(&column.data_type) {
                 // Frozen UDT - parse using UDT parser
                 // The column.data_type contains the full Cassandra type string including UserType
