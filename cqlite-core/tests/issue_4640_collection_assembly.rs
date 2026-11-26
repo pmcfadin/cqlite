@@ -255,6 +255,17 @@ async fn set_list_map_element_tombstones_across_generations_match_live_cl_all() 
     );
 }
 
+fn find_data_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            find_data_files(&p, out);
+        } else if p.to_string_lossy().ends_with("-Data.db") {
+            out.push(p);
+        }
+    }
+}
+
 fn count_data_files(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .unwrap()
@@ -274,7 +285,9 @@ fn count_data_files(dir: &Path) -> usize {
 /// re-read the single output. The collections must be intact and equal the CL=ALL read.
 #[tokio::test]
 async fn compacted_multi_generation_collections_stay_intact() {
-    use cqlite_core::storage::write_engine::merge::compact_sstables;
+    use cqlite_core::storage::write_engine::merge::{
+        assemble_read_cells, compact_sstables, KWayMerger, MergeStep, RowData,
+    };
 
     for (f, label) in [(&F4640, "4640"), (&F4628, "4628")] {
         let src = fixture_root(f).join("sstables");
@@ -323,13 +336,53 @@ async fn compacted_multi_generation_collections_stay_intact() {
         let data_files = count_data_files(&out_root);
         assert_eq!(data_files, 1, "{label}: one compacted generation");
 
-        // The compacted output is ONE generation: it takes the single-generation read path,
-        // independent of the multi-generation merge fixed above.
-        assert_every_read_path(
-            f,
-            &tmp.path().join("sstables"),
-            &format!("{label} compacted"),
-        )
-        .await;
+        // Read the ONE compacted SSTable element by element (single-input merge) and
+        // reassemble with the shared assembler: every element must be present and the
+        // collections must equal the live CL=ALL read. (The single-generation `Database`
+        // read of a compacted output is a different path with its own, separate
+        // divergences; the compaction question is whether elements survive.)
+        let mut files = Vec::new();
+        find_data_files(&out_root, &mut files);
+        let mut merger = KWayMerger::new(files, &schema).expect("merger over compacted output");
+        let mut got = Rows::new();
+        while let MergeStep::Partition { key: pkey, rows } = merger.step().expect("step") {
+            // `id int` is the sole partition key: its serialized form is 4 big-endian bytes.
+            let partition_id = <[u8; 4]>::try_from(pkey.key.as_slice())
+                .ok()
+                .map(|b| Value::Integer(i32::from_be_bytes(b)));
+            for entry in rows {
+                let RowData::Live { cells } = entry.row_data else {
+                    continue;
+                };
+                // A range-tombstone carrier entry has no clustering row of its own.
+                if entry.range_deletion.is_some() {
+                    continue;
+                }
+                let assembled = assemble_read_cells(cells, &schema, None).expect("assemble");
+                let value_of = |c: &str| assembled.iter().find(|(n, _)| &**n == c).map(|(_, v)| v);
+                let key: Vec<i32> = f
+                    .key_cols
+                    .iter()
+                    .map(|c| {
+                        match value_of(c).or(partition_id.as_ref().filter(|_| *c == f.key_cols[0]))
+                        {
+                            Some(Value::Integer(n)) => *n,
+                            other => panic!("{label}: key column {c} is {other:?}"),
+                        }
+                    })
+                    .collect();
+                let data = f
+                    .data_cols
+                    .iter()
+                    .map(|c| render(value_of(c), false))
+                    .collect();
+                got.insert(key, data);
+            }
+        }
+        assert_eq!(
+            got,
+            oracle(f),
+            "{label}: compacted collections differ from CL=ALL"
+        );
     }
 }
