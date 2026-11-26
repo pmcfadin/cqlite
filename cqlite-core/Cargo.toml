@@ -66,6 +66,8 @@ exclude = [
     # counted three because this entry and #3722's landed in the same window.
     "tests/issue_3805_empty_fixedwidth_map_key.rs",
     "tests/issue_4114_vector_float_cassandra_golden.rs",
+    # Resolves `test-data/fixtures/issue_4629/` checkout-relative and fails closed (same class).
+    "tests/issue_4629_ttl_tie_explain.rs",
 ]
 
 # docs.rs build: document the commonly used features.

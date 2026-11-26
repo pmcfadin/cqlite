@@ -27,7 +27,7 @@ use crate::schema::{TableSchema, UdtRegistry};
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::BinaryHeap;
 use std::path::PathBuf;
 // Unconditional (issue #2346): `build_single_partition_merger_from_readers`
 // takes `Vec<Arc<SSTableReader>>` regardless of the `tombstones` feature (its
@@ -89,22 +89,6 @@ impl KWayMerger {
             _egress_slot: None,
             trace: NoTrace,
         })
-    }
-}
-
-/// A run backed by a pre-built `Vec` of merge entries — the seeked single
-/// partition. Yields each entry once, in order, then reports exhaustion.
-///
-/// Only the default `not(tombstones)` build seeks (the alternate build always
-/// scan-falls-back), so this is dead there.
-#[cfg_attr(feature = "tombstones", allow(dead_code))]
-struct VecRun {
-    entries: VecDeque<MergeEntry>,
-}
-
-impl SSTableRowIterator for VecRun {
-    fn next(&mut self) -> Option<Result<MergeEntry>> {
-        self.entries.pop_front().map(Ok)
     }
 }
 
@@ -349,7 +333,12 @@ fn build_single_partition_merger_with_registry_and_sink<S: TraceSink>(
     // snapshot so every channel in THIS merge still shares ONE capacity.
     let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
+    // #4629: `runs[i]` MUST be candidate `i`. `MergeEntry::run_index` is the candidate's position in the
+    // caller's list, and `KWayMerger::refill_heap` indexes `runs` by it, so a candidate that holds none of
+    // the keys keeps an empty slot instead of being dropped. `produced_entries` still lets an all-empty
+    // read report `None`.
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
+    let mut produced_entries = false;
     // Byte weights for the partition access-distribution probe (issue #2827), one
     // accumulator per requested key, summed across the candidates that resolved it.
     // Allocated only when the probe is enabled (it is OFF by default).
@@ -380,12 +369,15 @@ fn build_single_partition_merger_with_registry_and_sink<S: TraceSink>(
         trace.generation_probe(run_index, trace_probe_outcome(&probe));
         match probe {
             PathProbe::Empty => {
-                // Pruned / absent for every key. No run.
+                // Pruned / absent for every key: an EMPTY run keeps its slot (#4629).
+                runs.push(empty_run());
             }
             PathProbe::Seeked(rows) => {
                 if rows.is_empty() {
+                    runs.push(empty_run());
                     continue;
                 }
+                produced_entries = true;
                 let mut entries: Vec<MergeEntry> = Vec::with_capacity(rows.len());
                 for row in rows {
                     // Issue #2096: one merge entry decoded from `Data.db` by the
@@ -430,6 +422,7 @@ fn build_single_partition_merger_with_registry_and_sink<S: TraceSink>(
                     // `merge::constructors`' module doc for why the caller states it.
                     crate::storage::sstable::reader::OpenErrorReporting::SelfReported,
                 )?;
+                produced_entries = true;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,
                     keys: key_set.clone(),
@@ -447,7 +440,7 @@ fn build_single_partition_merger_with_registry_and_sink<S: TraceSink>(
     // bucket. A no-op when the probe is disabled.
     record_logical_accesses(schema, keys, weights);
 
-    if runs.is_empty() {
+    if !produced_entries {
         // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
@@ -513,7 +506,12 @@ pub fn build_single_partition_merger_from_readers(
         Vec::new()
     };
 
+    // #4629: `runs[i]` MUST be candidate `i`. `MergeEntry::run_index` is the candidate's position in the
+    // caller's list, and `KWayMerger::refill_heap` indexes `runs` by it, so a candidate that holds none of
+    // the keys keeps an empty slot instead of being dropped. `produced_entries` still lets an all-empty
+    // read report `None`.
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
+    let mut produced_entries = false;
     for (run_index, reader) in readers.into_iter().enumerate() {
         // Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
         // probe, so a disconnected point read does no further per-SSTable work.
@@ -529,12 +527,15 @@ pub fn build_single_partition_merger_from_readers(
         fold_size_notes(&mut weights, &notes);
         match probe {
             PathProbe::Empty => {
-                // Pruned / absent for every key. No run.
+                // Pruned / absent for every key: an EMPTY run keeps its slot (#4629).
+                runs.push(empty_run());
             }
             PathProbe::Seeked(rows) => {
                 if rows.is_empty() {
+                    runs.push(empty_run());
                     continue;
                 }
+                produced_entries = true;
                 let mut entries: Vec<MergeEntry> = Vec::with_capacity(rows.len());
                 for row in rows {
                     // Issue #2096: one merge entry decoded from `Data.db` by the
@@ -570,6 +571,7 @@ pub fn build_single_partition_merger_from_readers(
                     None,
                     channel_capacity,
                 )?;
+                produced_entries = true;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,
                     keys: key_set.clone(),
@@ -585,7 +587,7 @@ pub fn build_single_partition_merger_from_readers(
         record_logical_accesses(schema, keys, weights);
     }
 
-    if runs.is_empty() {
+    if !produced_entries {
         // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
@@ -745,7 +747,9 @@ fn record_logical_accesses(
 // The path/reader open+probe wrappers (and their `tombstones` fallbacks) live in a child module
 // to keep this file under the #1116 size threshold.
 mod open;
+mod vec_run;
 use open::{probe_path, probe_reader};
+use vec_run::{empty_run, VecRun};
 
 /// The trail's per-generation probe outcome for a [`PathProbe`] (issue #4193 review L5).
 ///
