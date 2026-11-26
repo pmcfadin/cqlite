@@ -255,8 +255,14 @@ fn untraced_point_merge_emits_one_reconciled_row_per_clustering_key() {
             steps, 1,
             "id {id}: one partition step, not one per displaced run"
         );
-        for (c, v) in seen {
-            assert_eq!(Some(&v), live[&(id, c)].0.as_ref(), "id {id} c {c}");
+        let keys: Vec<_> = seen.keys().copied().collect();
+        assert_eq!(
+            keys,
+            vec![0, 1, 2],
+            "id {id}: every clustering key 0..3 emitted exactly once"
+        );
+        for c in 0..3 {
+            assert_eq!(Some(&seen[&c]), live[&(id, c)].0.as_ref(), "id {id} c {c}");
         }
     }
 }
