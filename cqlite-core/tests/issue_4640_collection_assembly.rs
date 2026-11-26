@@ -79,7 +79,11 @@ fn oracle() -> BTreeMap<(i32, i32, i32), [String; 3]> {
         let key = (id, cells[1].parse().unwrap(), cells[2].parse().unwrap());
         out.insert(
             key,
-            [cells[3].to_string(), cells[4].to_string(), cells[5].to_string()],
+            [
+                cells[3].to_string(),
+                cells[4].to_string(),
+                cells[5].to_string(),
+            ],
         );
     }
     assert_eq!(out.len(), 22, "the CL=ALL oracle holds 22 rows");
@@ -87,10 +91,7 @@ fn oracle() -> BTreeMap<(i32, i32, i32), [String; 3]> {
 }
 
 /// Render the result into `(id, c1, c2) -> [v, l, m]`, asserting the column set both ways.
-fn rows_of(
-    result: &cqlite_core::QueryResult,
-    ctx: &str,
-) -> BTreeMap<(i32, i32, i32), [String; 3]> {
+fn rows_of(result: &cqlite_core::QueryResult, ctx: &str) -> BTreeMap<(i32, i32, i32), [String; 3]> {
     let mut out = BTreeMap::new();
     for row in &result.rows {
         let present: BTreeSet<&str> = row.values.keys().map(|k| &**k).collect();
@@ -112,7 +113,10 @@ fn rows_of(
             render(row.get("l"), false),
             render(row.get("m"), false),
         ];
-        assert!(out.insert(key, cells).is_none(), "{ctx}: duplicate row {key:?}");
+        assert!(
+            out.insert(key, cells).is_none(),
+            "{ctx}: duplicate row {key:?}"
+        );
     }
     out
 }
@@ -127,7 +131,10 @@ async fn select_full_rows_match_live_cl_all_on_every_read_path() {
         // Whole-table scan (streaming merge).
         let all = db.execute("SELECT * FROM fix4628.t").await.expect("scan");
         let got = rows_of(&all, &format!("{name} scan"));
-        assert_eq!(got, want, "{name}: SELECT * differs from the live CL=ALL read");
+        assert_eq!(
+            got, want,
+            "{name}: SELECT * differs from the live CL=ALL read"
+        );
 
         // Partition-targeted reads, one per key (key 1 is wholly deleted: no rows).
         let mut union = BTreeMap::new();
@@ -150,7 +157,11 @@ async fn select_full_rows_match_live_cl_all_on_every_read_path() {
                 .unwrap_or_else(|e| panic!("{name} point {id},{c1},{c2}: {e}"));
             let got = rows_of(&r, &format!("{name} point {id},{c1},{c2}"));
             assert_eq!(got.len(), 1, "{name} point {id},{c1},{c2}: one row");
-            assert_eq!(got.values().next(), Some(cells), "{name} point {id},{c1},{c2}");
+            assert_eq!(
+                got.values().next(),
+                Some(cells),
+                "{name} point {id},{c1},{c2}"
+            );
         }
     }
 }

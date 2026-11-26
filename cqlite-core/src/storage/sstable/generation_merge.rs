@@ -41,7 +41,9 @@
 //! (`merge_stream_setup`) and the filter's unit pins (`read_shadow_tests`) out into
 //! child modules; the file-size ratchet forbids growing this file.
 
+mod row_emit;
 mod row_visibility;
+use row_emit::{partition_live_rows, push_metadata_rows, MergedMetaRow};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,20 +58,15 @@ use super::reader::parsing::row_decoder::partition_shadow::{
 #[cfg(not(feature = "tombstones"))]
 use super::stream_merge_probe;
 use super::{reader, scan_merge};
-use crate::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, MergeStep, RowData};
+use crate::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, MergeStep};
 use crate::types::{CellWriteMetadata, TableId as CqlTableId};
-use crate::{Result, RowCells, RowKey, ScanRow, Value};
+use crate::{Result, RowKey, ScanRow, Value};
 
 mod merge_cancel;
 #[cfg(not(feature = "tombstones"))]
 mod merge_stream_setup;
 #[cfg(not(feature = "tombstones"))]
 pub(super) use merge_stream_setup::MergeStreamSetupError;
-
-/// One reconciled metadata row inside the merge task, before per-cell metadata is
-/// attached: `(partition key bytes, ScanRow row carrier, [(column,
-/// write_timestamp_micros)])`.
-type MergedMetaRow = (Vec<u8>, ScanRow, Vec<(String, i64)>);
 
 /// Post-merge read-time visibility for the multi-generation read path (issue #1849).
 ///
@@ -204,43 +201,6 @@ fn partition_cover(rows: &[MergeEntry]) -> Option<i64> {
         .find_map(|e| e.partition_deletion.map(|(mfda, _ldt)| mfda))
 }
 
-/// Convert one reconciled partition's merge rows into the live scan rows the read
-/// path emits: drop cell tombstones, drop row tombstones, drop rows left empty.
-///
-/// The single emission kernel shared by the materializing plain merge and the
-/// streaming driver so tombstone filtering can never drift between them (issue
-/// #1334: emit the interned-name `ScanRow` carrier the read path consumes).
-fn partition_live_rows(
-    row_key: &RowKey,
-    rows: Vec<MergeEntry>,
-    shadow: &ReadShadow,
-) -> Vec<(RowKey, ScanRow)> {
-    // Issue #1849: partition-tombstone cover for this partition's rows, applied as a
-    // read-side shadow floor alongside per-cell read-time TTL expiry (post-merge).
-    let cover = partition_cover(&rows);
-    let mut out = Vec::new();
-    for entry in rows {
-        let vis = row_visibility::RowVis::of(&entry); // before `row_data` is moved out
-        match entry.row_data {
-            RowData::Live { cells } => {
-                // Read-time visibility: drop cell tombstones + TTL-expired /
-                // partition-shadowed data cells; `None` hides the whole row.
-                let Some(surviving) = shadow.filter_visible(cover, vis, cells) else {
-                    continue;
-                };
-                let row_cells: RowCells = surviving
-                    .into_iter()
-                    .map(|c| (Arc::from(c.column.as_str()), c.value))
-                    .collect();
-                out.push((row_key.clone(), ScanRow::Row(row_cells)));
-            }
-            // Row tombstone: the row is deleted across all generations — suppress.
-            RowData::Tombstone { .. } => {}
-        }
-    }
-    out
-}
-
 /// Reconcile multiple SSTable generations into the single authoritative live-row
 /// set, returning them materialized in Cassandra token order (issue #883).
 ///
@@ -315,7 +275,7 @@ pub(super) async fn merge_generations_for_read(
                 if row_key.as_bytes() != target.as_slice() {
                     continue;
                 }
-                out.extend(partition_live_rows(&row_key, rows, &shadow));
+                out.extend(partition_live_rows(&row_key, rows, &shadow, &schema)?);
                 break;
             }
 
@@ -330,7 +290,7 @@ pub(super) async fn merge_generations_for_read(
                     continue;
                 }
             }
-            out.extend(partition_live_rows(&row_key, rows, &shadow));
+            out.extend(partition_live_rows(&row_key, rows, &shadow, &schema)?);
         }
         Ok(out)
     })
@@ -422,7 +382,7 @@ pub(super) async fn seek_merge_generations_for_read(
             if row_key.as_bytes() != target_bytes.as_slice() {
                 continue;
             }
-            out.extend(partition_live_rows(&row_key, rows, &shadow));
+            out.extend(partition_live_rows(&row_key, rows, &shadow, &schema)?);
             break;
         }
         Ok(out)
@@ -538,7 +498,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
                 if row_key.as_bytes() != target.as_slice() {
                     continue;
                 }
-                push_metadata_rows(&key.key, rows, &mut out, &shadow);
+                push_metadata_rows(&key.key, rows, &mut out, &shadow, &merge_schema)?;
                 break;
             }
 
@@ -553,7 +513,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
                     continue;
                 }
             }
-            push_metadata_rows(&key.key, rows, &mut out, &shadow);
+            push_metadata_rows(&key.key, rows, &mut out, &shadow, &merge_schema)?;
         }
         Ok(out)
     })
@@ -587,39 +547,6 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     // plain merge path; the metadata payload rides in the tuple's tail.
     scan_merge::sort_by_token_order(&mut results, limit, |(k, _, _)| k);
     Ok(results)
-}
-
-/// Convert one reconciled partition's merge rows into metadata-carrying rows: the
-/// live cells plus each surviving cell's `(column, write_timestamp)`. Shared by the
-/// range and point-targeted branches of the metadata merge so the tombstone
-/// filtering + timestamp capture live once.
-fn push_metadata_rows(
-    key_bytes: &[u8],
-    rows: Vec<MergeEntry>,
-    out: &mut Vec<MergedMetaRow>,
-    shadow: &ReadShadow,
-) {
-    // Issue #1849: same read-side partition cover + per-cell TTL/shadow filter as the
-    // plain path, so the WRITETIME/TTL projection agrees with `SELECT *`.
-    let cover = partition_cover(&rows);
-    for entry in rows {
-        let vis = row_visibility::RowVis::of(&entry); // before `row_data` is moved out
-        if let RowData::Live { cells } = entry.row_data {
-            // `filter_live` drops cell tombstones + TTL-expired / partition-shadowed
-            // data cells; `None` hides the whole row (partition-shadowed).
-            let Some(surviving) = shadow.filter_visible(cover, vis, cells) else {
-                continue;
-            };
-            let mut row_cells: RowCells = Vec::with_capacity(surviving.len());
-            let mut timestamps: Vec<(String, i64)> = Vec::with_capacity(surviving.len());
-            for c in surviving {
-                timestamps.push((c.column.clone(), c.timestamp));
-                row_cells.push((Arc::from(c.column.as_str()), c.value));
-            }
-            out.push((key_bytes.to_vec(), ScanRow::Row(row_cells), timestamps));
-        }
-        // Row tombstones suppress the row entirely (no emission).
-    }
 }
 
 /// STREAMING cross-generation reconciliation for `scan_stream` (issue #1579 / D3).
@@ -773,7 +700,13 @@ pub(super) async fn stream_generations_for_read(
                 }
             }
 
-            let live = partition_live_rows(&row_key, rows, &shadow);
+            let live = match partition_live_rows(&row_key, rows, &shadow, &schema) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = out_tx.blocking_send(Err(e));
+                    return;
+                }
+            };
             // Issue #1579: the streaming producer holds ONE partition's rows
             // resident at a time — record the window (not the whole table) so the
             // memory guard observes O(window).
