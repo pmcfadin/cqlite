@@ -81,6 +81,26 @@ impl V5CompressedLegacyParser {
                 let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key);
                 let value_type = Self::prefer_udt_marshal_element(marshal_val, &schema_val);
                 self.parse_frozen_map_value(data, off, &key_type, value_type, column)?
+            } else if inner_type.starts_with("tuple<") {
+                // `frozen<tuple<..>>` (issue #4627). The cell flags byte was already
+                // consumed by `parse_cell_value_schema_order`, so the value starts
+                // AT `off`: decode the tuple directly. The generic recursion below
+                // re-enters `parse_cell_value_schema_order`, which would read ANOTHER
+                // cell-flags byte -- the tuple's own VUInt length prefix -- and fail
+                // with a false "invalid cell flags". A tuple is implicitly frozen
+                // (`CQL3Type.Raw.freeze()`), so `frozen<tuple<..>>` and a bare
+                // `tuple<..>` are the same on-disk cell.
+                //
+                // `inner_type` is LOWERCASED (dispatch only). A header-derived or
+                // dropped column carries a case-sensitive marshal tuple
+                // (`FrozenType(UserType(..))`, `Int32Type`), so the elements are
+                // extracted from the ORIGINAL declared string (roborev round 3).
+                let original_inner =
+                    self.extract_frozen_inner_type(Self::original_declared_type(column, type_str))?;
+                let mut tuple_off = off;
+                let tuple_value =
+                    self.parse_tuple_value(data, &mut tuple_off, &original_inner, column)?;
+                (tuple_value, tuple_off)
             } else if Self::is_udt_type(&column.data_type) {
                 // Frozen UDT - parse using UDT parser
                 // The column.data_type contains the full Cassandra type string including UserType
@@ -273,7 +293,14 @@ impl V5CompressedLegacyParser {
             Value::Frozen(Box::new(inner_value))
         } else if type_str.starts_with("tuple<") {
             // Tuple types: parse fixed number of elements
-            self.parse_tuple_value(data, &mut off, type_str, column)?
+            // Elements come from the ORIGINAL-case declared type (marshal UDT
+            // definitions are case-sensitive); `type_str` is lowercased dispatch.
+            self.parse_tuple_value(
+                data,
+                &mut off,
+                Self::original_declared_type(column, type_str),
+                column,
+            )?
         }
         // Non-frozen collections: list, set, map
         // TODO(Issue #162, Task 3): Multi-cell collection parsing
@@ -399,5 +426,18 @@ impl V5CompressedLegacyParser {
 
         *offset = off;
         Ok(value)
+    }
+}
+
+impl V5CompressedLegacyParser {
+    /// The original-case declared type of `column` when it is the source of the
+    /// lowercased dispatch string `lowered` (always true on the per-column path:
+    /// `ColumnToParse.kind` is built from `column.data_type`); else `lowered`.
+    fn original_declared_type<'a>(column: &'a crate::schema::Column, lowered: &'a str) -> &'a str {
+        if column.data_type.to_lowercase() == lowered {
+            &column.data_type
+        } else {
+            lowered
+        }
     }
 }

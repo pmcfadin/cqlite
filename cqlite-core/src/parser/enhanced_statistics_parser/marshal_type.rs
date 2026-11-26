@@ -73,6 +73,43 @@ fn split_type_arguments(input: &str) -> Vec<&str> {
     args
 }
 
+/// Strict variant of [`split_type_arguments`] for `TupleType(..)` (issue #4627,
+/// roborev round 2): every slot must be non-empty. The lenient splitter drops empty
+/// components, so `TupleType(Int32Type,,UTF8Type)` would silently change arity.
+/// Cassandra's WRITER (`TypeParser.stringifyTypeParameters`, pinned 5.0.8) joins
+/// exactly the printed element types with one `,` and never emits an empty slot, so
+/// refusing a leading, trailing, repeated or whitespace-only slot cannot reject a
+/// form Cassandra wrote. (Its reader, `getTypeParameters`/`skipBlankAndComma`, is
+/// more tolerant, which is why strictness is chosen here rather than inherited.)
+/// `Map`/`UDT` callers keep the lenient splitter: they are untouched by this issue.
+fn split_tuple_arguments(input: &str) -> crate::error::Result<Vec<&str>> {
+    let mut slots: Vec<&str> = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut bounds: Vec<usize> = Vec::new();
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => bounds.push(idx),
+            _ => {}
+        }
+    }
+    bounds.push(input.len());
+    for end in bounds {
+        let slot = input[start..end].trim();
+        if slot.is_empty() {
+            return Err(crate::error::Error::schema(format!(
+                "malformed TupleType arguments '{input}': empty element slot \
+                 (leading, trailing or repeated comma)"
+            )));
+        }
+        slots.push(slot);
+        start = end + 1;
+    }
+    Ok(slots)
+}
+
 /// Detect whether a clustering comparator class denotes descending order.
 ///
 /// Issue #759: Cassandra encodes a DESC clustering column by wrapping its
@@ -115,7 +152,81 @@ pub(super) fn convert_marshal_type_to_cql_checked(
     marshal_type: &str,
 ) -> crate::error::Result<String> {
     validate_marshal_frozen(marshal_type)?;
+    validate_marshal_tuples(marshal_type)?;
     Ok(convert_marshal_type_to_cql(marshal_type))
+}
+
+/// Fail-closed structural check of every `TupleType(..)` claim in a header type
+/// (issue #4627, roborev round 1). A string that claims to be a tuple but whose
+/// parentheses do not balance, or that has text after the matching `)`, is refused
+/// with a schema error: the converter is infallible and would otherwise fall into
+/// the scalar fallback and pick a framing (#28). Recurses through the wrappers and
+/// collections the converter recurses through; `UserType(..)` is preserved verbatim
+/// by the converter and is not descended into here.
+fn validate_marshal_tuples(marshal_type: &str) -> crate::error::Result<()> {
+    const TUPLE: [&str; 2] = ["org.apache.cassandra.db.marshal.TupleType(", "TupleType("];
+    const WRAP: [&str; 10] = [
+        "org.apache.cassandra.db.marshal.ReversedType(",
+        "ReversedType(",
+        "org.apache.cassandra.db.marshal.FrozenType(",
+        "FrozenType(",
+        "org.apache.cassandra.db.marshal.ListType(",
+        "ListType(",
+        "org.apache.cassandra.db.marshal.SetType(",
+        "SetType(",
+        "org.apache.cassandra.db.marshal.MapType(",
+        "MapType(",
+    ];
+    let mut value = marshal_type.trim().trim_start_matches('[').trim_start();
+    while value.starts_with('(') && value.ends_with(')') && value.len() > 2 {
+        value = value[1..value.len() - 1].trim();
+    }
+    let malformed = |why: &str| {
+        crate::error::Error::schema(format!(
+            "malformed TupleType in SerializationHeader type '{marshal_type}': {why}"
+        ))
+    };
+    for prefix in TUPLE {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            let inner =
+                extract_inner_type(rest).ok_or_else(|| malformed("unbalanced parentheses"))?;
+            if rest.len() != inner.len() + 1 {
+                return Err(malformed("trailing text after the closing parenthesis"));
+            }
+            return split_tuple_arguments(inner)?
+                .into_iter()
+                .try_for_each(validate_marshal_tuples);
+        }
+    }
+    // Same container set the converter recurses through: Vector (element) ...
+    match crate::schema::vector_type::marshal_vector_kind(value).into_args(value) {
+        Ok(Some(args)) => return validate_marshal_tuples(args.element),
+        Ok(None) => {}
+        // A malformed vector is spelled fail-closed by the converter itself; only a
+        // tuple claim inside it is refused here (it can no longer be located).
+        Err(_) if value.contains("TupleType(") => {
+            return Err(malformed(
+                "unterminated or malformed VectorType around a tuple",
+            ));
+        }
+        Err(_) => {}
+    }
+    // ... and the single-parameter / map wrappers. A recognised wrapper whose
+    // parameter list does not close, or that has text after the matching `)`,
+    // fails closed: it can hide a tuple claim.
+    for prefix in WRAP {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            let inner =
+                extract_inner_type(rest).ok_or_else(|| malformed("unbalanced parentheses"))?;
+            if rest.len() != inner.len() + 1 {
+                return Err(malformed("trailing text after the closing parenthesis"));
+            }
+            return split_type_arguments(inner)
+                .into_iter()
+                .try_for_each(validate_marshal_tuples);
+        }
+    }
+    Ok(())
 }
 
 // REMOVED with #4104's job-119 fix: `convert_marshal_type_to_cql_logged`, which
@@ -157,6 +268,26 @@ fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
     }
 
     let mut cleaned = strip_wrapping_parens(marshal_type);
+
+    // `TupleType(T1,T2,...)` -> CQL `tuple<t1, t2, ...>` (issue #4627). Cassandra
+    // prints a tuple as `getClass().getName() + stringifyTypeParameters(types,
+    // true)` (`TupleType.java:557-560`), never wrapped in `FrozenType` because a
+    // tuple is implicitly frozen. Handled BEFORE the `UserType` preservation below
+    // so a tuple with a UDT element converts element by element (the UDT element
+    // keeps its definition verbatim via the recursion). A malformed tuple never
+    // reaches here: `validate_marshal_tuples` (gate 2) refuses it first.
+    for prefix in ["org.apache.cassandra.db.marshal.TupleType(", "TupleType("] {
+        if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
+            if let Some(inner) = extract_inner_type(params_with_close) {
+                let elements: Vec<String> = split_tuple_arguments(inner)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(convert_marshal_type_to_cql)
+                    .collect();
+                return format!("tuple<{}>", elements.join(", "));
+            }
+        }
+    }
 
     // Special case: Preserve UserType definitions unchanged
     // UserType contains critical metadata (keyspace, type name, field definitions) that must
@@ -579,6 +710,82 @@ mod tests {
                 crate::schema::CqlType::parse(&converted).is_err(),
                 "the fail-closed spelling '{converted}' must not parse as any type"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tuple_header_tests_4627 {
+    use super::convert_marshal_type_to_cql_checked as conv;
+
+    const M: &str = "org.apache.cassandra.db.marshal.";
+
+    /// Strings are verbatim from a Cassandra 5.0.8 `Statistics.db` (fixture
+    /// `test-data/fixtures/issue_4627`). Before #4627 a tuple converted to the junk
+    /// type `uuidtype` (the text after the last '.').
+    #[test]
+    fn tuple_header_type_converts_to_a_cql_tuple() {
+        let flat = format!("{M}TupleType({M}Int32Type,{M}UTF8Type,{M}UUIDType)");
+        assert_eq!(conv(&flat).unwrap(), "tuple<int, text, uuid>");
+        let nested = format!("{M}TupleType({M}Int32Type,{M}TupleType({M}UTF8Type,{M}UUIDType))");
+        assert_eq!(conv(&nested).unwrap(), "tuple<int, tuple<text, uuid>>");
+        let in_list = format!("{M}ListType({M}TupleType({M}Int32Type,{M}UTF8Type))");
+        assert_eq!(conv(&in_list).unwrap(), "list<tuple<int, text>>");
+    }
+
+    #[test]
+    fn tuple_with_a_udt_element_converts_elementwise() {
+        let udt = format!("{M}FrozenType({M}UserType(ks,7474,61:{M}Int32Type))");
+        let t = format!("{M}TupleType({M}Int32Type,{udt})");
+        assert_eq!(conv(&t).unwrap(), format!("tuple<int, {udt}>"));
+    }
+
+    #[test]
+    fn malformed_tuple_is_refused_not_framed() {
+        let unmatched = format!("{M}TupleType({M}Int32Type,{M}UTF8Type");
+        assert!(
+            conv(&unmatched).is_err(),
+            "unmatched paren must fail closed"
+        );
+        let trailing = format!("{M}TupleType({M}Int32Type,{M}UTF8Type)garbage");
+        assert!(conv(&trailing).is_err(), "trailing text must fail closed");
+        let nested = format!("{M}ListType({M}TupleType({M}Int32Type)x)");
+        assert!(
+            conv(&nested).is_err(),
+            "nested trailing text must fail closed"
+        );
+    }
+
+    #[test]
+    fn tuple_with_an_empty_slot_is_refused() {
+        for bad in [
+            format!("{M}TupleType({M}Int32Type,,{M}UTF8Type)"),
+            format!("{M}TupleType(,{M}Int32Type)"),
+            format!("{M}TupleType({M}Int32Type,)"),
+            format!("{M}TupleType({M}Int32Type, ,{M}UTF8Type)"),
+        ] {
+            assert!(conv(&bad).is_err(), "must fail closed: {bad}");
+        }
+    }
+
+    #[test]
+    fn malformed_tuple_inside_a_vector_is_refused() {
+        let bad = format!("{M}VectorType({M}TupleType({M}Int32Type,,{M}UTF8Type) , 3)");
+        assert!(conv(&bad).is_err(), "{bad}");
+        let good = format!("{M}VectorType({M}TupleType({M}Int32Type,{M}UTF8Type) , 3)");
+        assert!(conv(&good).is_ok());
+    }
+
+    #[test]
+    fn unterminated_wrapper_around_a_tuple_is_refused() {
+        for bad in [
+            format!("{M}ListType({M}TupleType({M}Int32Type"),
+            format!("{M}MapType({M}UTF8Type,{M}TupleType({M}Int32Type"),
+            format!("{M}FrozenType({M}TupleType({M}Int32Type"),
+            format!("{M}VectorType({M}TupleType({M}Int32Type,{M}UTF8Type) , 3"),
+            format!("{M}ListType({M}TupleType({M}Int32Type))x"),
+        ] {
+            assert!(conv(&bad).is_err(), "must fail closed: {bad}");
         }
     }
 }
