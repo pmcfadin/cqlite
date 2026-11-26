@@ -1,0 +1,10 @@
+# t_udt find/explain false "Data corruption" on a healthy generation (db0 snapshot fr1)
+/work/bin/cqlite --schema /work/schema/fr.t_udt.cql find /snap/db0/fr/t_udt-b2d2a0d0e93611f1b013b3b9e413504c 56440 --out json
+{"generations":[{"basename":"da-37-bti-Data.db","probe":"unreadable","cause":"probe failed: column 'tp' (column type frozen<tuple<int, text, uuid>> (on-disk uuidtype)) failed to decode at byte offset 111 of the row: Data corruption: Cell 'tp': invalid cell flags 0x24 at offset 112 (bits 0x20/0x40/0x80 indicate offset misalignment)"},{"data_offset":3148523,"byte_length":115,"max_writetime":1795600010000000,"partition_deletion":false,"basename":"da-38-bti-Data.db","probe":"hit"}],"commitlog":null}
+
+/work/bin/cqlite --schema /work/schema/fr.t_udt.cql --data-dir /snap/db0 explain fr.t_udt 56440 --now 1795662946 --out json
+cqlite explain: generation read failed for [da-38-bti-Data.db, da-37-bti-Data.db]: column 'tp' (column type frozen<tuple<int, text, uuid>> (on-disk uuidtype)) failed to decode at byte offset 111 of the row: Data corruption: Cell 'tp': invalid cell flags 0x24 at offset 112 (bits 0x20/0x40/0x80 indicate offset misalignment)
+
+# sstableverify -f -e fr t_udt (Cassandra 5.0.8) on the same files: exit 0, all rows read
+db0	t_udt	plain	0	generations=2	succeeded=0	14s
+db0	t_udt	ext	0	generations=2	succeeded=2	19s

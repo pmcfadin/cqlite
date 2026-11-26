@@ -1,0 +1,121 @@
+001 partition-delete 24100: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+002 partition-delete 13940: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+003 partition-delete 2330: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+004 partition-delete 18870: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+005 partition-delete 19980: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+006 partition-delete 8100: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+007 partition-delete 5830: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+008 partition-delete 18280: MISMATCH explain-only ('0', '1') v; explain-only coll ('0', '1')l; explain-only coll ('0', '1')m; explain-only ('0', '2') v
+009 range-delete-c1 15721: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+010 range-delete-c1 21691: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+011 range-delete-c1 15171: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+012 range-delete-c1 751: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+013 range-delete-c1 8411: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+014 range-delete-c1 13901: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+015 range-delete-c1 14471: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+016 range-delete-c1 4211: MISMATCH explain-only ('2', '0') v; explain-only ('2', '1') v; explain-only ('2', '2') v; explain-only ('2', '3') v
+017 range-delete-c1c2 22562: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+018 range-delete-c1c2 13802: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+019 range-delete-c1c2 3672: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+020 range-delete-c1c2 7232: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+021 range-delete-c1c2 8722: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+022 range-delete-c1c2 19882: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+023 range-delete-c1c2 12152: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+024 range-delete-c1c2 8742: MISMATCH explain-only ('3', '2') v; explain-only ('3', '3') v
+025 row-delete 6033: MISMATCH explain-only ('1', '1') v
+026 row-delete 18973: MISMATCH explain-only ('1', '1') v
+027 row-delete 443: MISMATCH explain-only ('1', '1') v
+028 row-delete 523: MISMATCH explain-only ('1', '1') v
+029 row-delete 1043: MISMATCH explain-only ('1', '1') v
+030 row-delete 5663: MISMATCH explain-only ('1', '1') v
+031 row-delete 16553: MISMATCH explain-only ('1', '1') v
+032 row-delete 9423: MISMATCH explain-only ('1', '1') v
+033 cell-delete 7014: MATCH (59 winner cells, 20 live rows)
+034 cell-delete 7834: MATCH (59 winner cells, 20 live rows)
+035 cell-delete 6254: MATCH (59 winner cells, 20 live rows)
+036 cell-delete 11894: MATCH (59 winner cells, 20 live rows)
+037 cell-delete 7124: MATCH (59 winner cells, 20 live rows)
+038 cell-delete 23914: MATCH (59 winner cells, 20 live rows)
+039 cell-delete 12914: MATCH (59 winner cells, 20 live rows)
+040 cell-delete 2514: MATCH (59 winner cells, 20 live rows)
+041 collection-overwrite 23135: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+042 collection-overwrite 14425: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+043 collection-overwrite 9245: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+044 collection-overwrite 15915: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+045 collection-overwrite 16705: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+046 collection-overwrite 12995: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+047 collection-overwrite 16305: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+048 collection-overwrite 18675: MISMATCH coll ('4', '3')l winners 5 != live 2; coll ('4', '3')m winners 3 != live 2
+049 short-ttl 15496: MATCH (8 winner cells, 8 live rows)
+050 short-ttl 24116: MATCH (8 winner cells, 8 live rows)
+051 short-ttl 5596: MATCH (8 winner cells, 8 live rows)
+052 short-ttl 19106: MATCH (8 winner cells, 8 live rows)
+053 short-ttl 24686: MATCH (8 winner cells, 8 live rows)
+054 short-ttl 9526: MATCH (8 winner cells, 8 live rows)
+055 short-ttl 4186: MATCH (8 winner cells, 8 live rows)
+056 short-ttl 9416: MATCH (8 winner cells, 8 live rows)
+057 ttl-30d 4807: MATCH (60 winner cells, 20 live rows)
+058 ttl-30d 16007: MATCH (60 winner cells, 20 live rows)
+059 ttl-30d 11017: MATCH (60 winner cells, 20 live rows)
+060 ttl-30d 22677: MATCH (60 winner cells, 20 live rows)
+061 ttl-30d 1327: MATCH (60 winner cells, 20 live rows)
+062 ttl-30d 22067: MATCH (60 winner cells, 20 live rows)
+063 ttl-30d 12077: MATCH (60 winner cells, 20 live rows)
+064 ttl-30d 477: MATCH (60 winner cells, 20 live rows)
+065 older-insert-shadowed 9188: MATCH (60 winner cells, 20 live rows)
+066 older-insert-shadowed 13498: MATCH (60 winner cells, 20 live rows)
+067 older-insert-shadowed 19038: MATCH (60 winner cells, 20 live rows)
+068 older-insert-shadowed 16628: MATCH (60 winner cells, 20 live rows)
+069 older-insert-shadowed 1088: MATCH (60 winner cells, 20 live rows)
+070 older-insert-shadowed 7238: MATCH (60 winner cells, 20 live rows)
+071 older-insert-shadowed 2278: MATCH (60 winner cells, 20 live rows)
+072 older-insert-shadowed 19788: MATCH (60 winner cells, 20 live rows)
+073 plain 7489: MATCH (60 winner cells, 20 live rows)
+074 plain 5409: MATCH (60 winner cells, 20 live rows)
+075 plain 13429: MATCH (60 winner cells, 20 live rows)
+076 plain 4539: MATCH (60 winner cells, 20 live rows)
+077 plain 1309: MATCH (60 winner cells, 20 live rows)
+078 plain 6769: MATCH (60 winner cells, 20 live rows)
+079 plain 21349: MATCH (60 winner cells, 20 live rows)
+080 plain 22179: MATCH (60 winner cells, 20 live rows)
+081 plainB 40388: MATCH (60 winner cells, 20 live rows)
+082 plainB 26368: MATCH (60 winner cells, 20 live rows)
+083 plainB 27757: MATCH (60 winner cells, 20 live rows)
+084 plainB 47282: MATCH (60 winner cells, 20 live rows)
+085 plainB 41669: MATCH (60 winner cells, 20 live rows)
+086 plainB 33448: MATCH (60 winner cells, 20 live rows)
+087 plainB 45620: MATCH (60 winner cells, 20 live rows)
+088 plainB 45532: MATCH (60 winner cells, 20 live rows)
+089 plainB 43698: MATCH (60 winner cells, 20 live rows)
+090 plainB 25622: MATCH (60 winner cells, 20 live rows)
+091 plainB 40150: MATCH (60 winner cells, 20 live rows)
+092 plainB 34555: MATCH (60 winner cells, 20 live rows)
+093 plainB 43951: MATCH (60 winner cells, 20 live rows)
+094 plainB 34253: MATCH (60 winner cells, 20 live rows)
+095 plainB 32469: MATCH (60 winner cells, 20 live rows)
+096 plainB 43581: MATCH (60 winner cells, 20 live rows)
+097 plainB 30354: MATCH (60 winner cells, 20 live rows)
+098 plainB 36387: MATCH (60 winner cells, 20 live rows)
+099 plainB 43242: MATCH (60 winner cells, 20 live rows)
+100 plainB 37840: MATCH (60 winner cells, 20 live rows)
+101 absent 1000000: MATCH (0 winner cells, 0 live rows)
+102 absent 1000001: MATCH (0 winner cells, 0 live rows)
+103 absent 1000002: MATCH (0 winner cells, 0 live rows)
+104 absent 1000003: MATCH (0 winner cells, 0 live rows)
+105 absent 1000004: MATCH (0 winner cells, 0 live rows)
+106 absent 1000005: MATCH (0 winner cells, 0 live rows)
+107 absent 1000006: MATCH (0 winner cells, 0 live rows)
+108 absent 1000007: MATCH (0 winner cells, 0 live rows)
+109 absent 1000008: MATCH (0 winner cells, 0 live rows)
+110 absent 1000009: MATCH (0 winner cells, 0 live rows)
+111 absent 1000010: MATCH (0 winner cells, 0 live rows)
+112 absent 1000011: MATCH (0 winner cells, 0 live rows)
+113 absent 1000012: MATCH (0 winner cells, 0 live rows)
+114 absent 1000013: MATCH (0 winner cells, 0 live rows)
+115 absent 1000014: MATCH (0 winner cells, 0 live rows)
+116 absent 1000015: MATCH (0 winner cells, 0 live rows)
+117 absent 1000016: MATCH (0 winner cells, 0 live rows)
+118 absent 1000017: MATCH (0 winner cells, 0 live rows)
+119 absent 1000018: MATCH (0 winner cells, 0 live rows)
+120 absent 1000019: MATCH (0 winner cells, 0 live rows)
+SUMMARY t_tomb {'mismatch': 40, 'match': 80}

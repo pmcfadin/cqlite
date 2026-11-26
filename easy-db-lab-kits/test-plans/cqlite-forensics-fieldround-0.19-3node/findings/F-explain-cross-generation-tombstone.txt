@@ -1,0 +1,8 @@
+# explain does not apply a partition tombstone held in another generation to all rows (t_tomb key 24100, db0 snapshot)
+/work/bin/cqlite --schema /work/schema/fr.t_tomb.cql --data-dir /snap/db0 explain fr.t_tomb 24100 --now 1795662946 --out json
+{('v', 'shadowed-by-tombstone:partition'): 1, ('l', 'shadowed-by-tombstone:partition'): 3, ('m', 'shadowed-by-tombstone:partition'): 3, ('v', 'winner'): 19, ('l', 'winner'): 57, ('m', 'winner'): 57}
+tombstones[0]= {'kind': 'partition', 'generation': 0, 'deletion_time': 1795600010000000, 'local_deletion_time': 1795658931, 'range_start': None, 'range_end': None, 'droppable_at_now': False}
+# live, CONSISTENCY ALL: SELECT * FROM fr.t_tomb WHERE id=24100  -> 0 rows (results/live/t_tomb.jsonl line 1)
+{"cat": "partition-delete", "key": "24100", "rows": []}
+{"cat": "partition-delete", "key": "13940", "rows": []}
+{"cat": 

@@ -1,0 +1,5 @@
+# sweep --mode audit accepted by clap, rejected at runtime
+/work/bin/cqlite sweep /work/sweep/db0/t_static --mode audit --out json
+Error: sweep does not support --mode audit (use `cqlite verify <dir> --mode audit` per generation)
+
+Hint: Check query syntax and ensure required data is available

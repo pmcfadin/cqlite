@@ -1,0 +1,12 @@
+- kubectl get storageclass shows nothing inside the vcluster, yet PVCs without storageClassName bind (Cassandra RWO PVCs and the tools PVC bound within seconds; STORAGECLASS column shows <unset>).
+- A second pod cannot mount a PVC that another pod already mounts, even on the same (single) node: "verifyMount: device already mounted". RWO on lvm-local is exclusive per pod (matters for the plan's scratch-pod fallback in 6.2).
+- Tenant quota is on limits (memory 14Gi, cpu 12) and about 2.2 GiB / 1.25 CPU are already used by vcluster system pods, so "14 GiB granted" leaves about 11.8 GiB for workloads. A pod over quota stays Pending with a pod-syncer SyncError and is not retried; delete the pod to retry.
+- StatefulSet rolling update does not replace a Pending (quota-blocked) pod; delete it manually.
+- Pod resize (kubectl patch --subresource resize) can grow a container, but shrinking is refused while page cache is charged to the cgroup; recreate the pod to get a small limit back.
+- A container OOM kill is a whole-container group kill (shell and kubectl exec sessions die); restarts go through CrashLoopBackOff (10 s doubling to 5 min).
+- No metrics API (kubectl top fails).
+- Image pulls work (cassandra:5.0.8 169 MB in about 20 s, python:3.12-slim, ubuntu:24.04) and PyPI is reachable; no registry needed. DNS for the headless service works.
+- One node ("freeside", v1.36.6, fake kernel string 4.19.76-fakelinux), cgroup v2, memory.events/memory.peak visible in containers.
+- kubectl exec streams drop with i/o timeout when idle for a couple of minutes; long runs must be nohup'd inside the pod and polled.
+- Bring-up of the 3 ordered Cassandra pods about 6 minutes; rolling restart about 14 minutes with a drain preStop.
+- LoadBalancer, NodePort/hostPort and sleep/wake not used or hit.

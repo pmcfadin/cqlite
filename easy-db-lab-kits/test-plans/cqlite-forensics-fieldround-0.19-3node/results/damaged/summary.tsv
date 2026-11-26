@@ -1,0 +1,217 @@
+case	tool	exit	verdict/first-line
+D10-big-control	audit	0	ok=True fails=[] skips=[]
+D10-big-control	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D10-big-control	diagnose-deep	0	g5:ok g6:ok UNREADABLE=[]
+D10-big-control	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D10-big-control	explain	0	explain ok, 45820 bytes
+D10-big-control	diff	137	
+D10-big-control	query	0	
+D10-bti-control	audit	0	ok=True fails=[] skips=[]
+D10-bti-control	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D10-bti-control	diagnose-deep	0	g10:ok g11:ok UNREADABLE=[]
+D10-bti-control	find	0	da-10-bti:hit da-11-bti:index-miss
+D10-bti-control	explain	0	explain ok, 4515 bytes
+D10-bti-control	diff	0	
+D10-bti-control	query	0	
+D1a-big-stats-half	audit	2	ok=False fails=[] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': "Statistics. skips=[]
+D1a-big-stats-half	diagnose	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Data corruption: Statistics.db /dmg/D1a-big-stats-half/fr/t_tomb-b7d10')]
+D1a-big-stats-half	diagnose-deep	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Data corruption: Statistics.db /dmg/D1a-big-stats-half/fr/t_tomb-b7d10')]
+D1a-big-stats-half	find	2	nb-5-big:bloom-negative nb-6-big:unreadable(open failed: Data corruption: Failed to load Statistics.db f)
+D1a-big-stats-half	explain	2	cqlite explain: generation read failed for [nb-6-big-Data.db, nb-5-big-Data.db]: Data corruption: Statistics.db /dmg/D1a-big-stats-half/fr/t_tomb-b7d1
+D1a-big-stats-half	diff	2	cqlite diff: side=a: generation read failed for /dmg/D1a-big-stats-half/fr/t_tomb-b7d10270e93611f1b013b3b9e413504c/nb-6-big-Statistics.db: Data corrup
+D1a-big-stats-half	query	5	Hint: Check query syntax and ensure required data is available
+D1a-bti-stats-half	audit	2	ok=False fails=[] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': "Statistics. skips=[]
+D1a-bti-stats-half	diagnose	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Data corruption: Statistics.db /dmg/D1a-bti-stats-half/fr/t_static-b63')]
+D1a-bti-stats-half	diagnose-deep	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Data corruption: Statistics.db /dmg/D1a-bti-stats-half/fr/t_static-b63')]
+D1a-bti-stats-half	find	2	da-10-bti:unreadable(open failed: Data corruption: Failed to load Statistics.db f) da-11-bti:index-miss
+D1a-bti-stats-half	explain	2	cqlite explain: generation read failed for [da-11-bti-Data.db, da-10-bti-Data.db]: Data corruption: Statistics.db /dmg/D1a-bti-stats-half/fr/t_static-
+D1a-bti-stats-half	diff	2	cqlite diff: side=a: generation read failed for /dmg/D1a-bti-stats-half/fr/t_static-b63b6e50e93611f1828c53bf15351c72/da-10-bti-Statistics.db: Data cor
+D1a-bti-stats-half	query	5	Hint: Check query syntax and ensure required data is available
+D1b-big-stats-zero	audit	2	ok=False fails=[] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1b-big-stats-zero	diagnose	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Data corruption: Statistics.db /dmg/D1b-big-stats-zero/fr/t_tomb-b7d10')]
+D1b-big-stats-zero	diagnose-deep	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Data corruption: Statistics.db /dmg/D1b-big-stats-zero/fr/t_tomb-b7d10')]
+D1b-big-stats-zero	find	2	nb-5-big:bloom-negative nb-6-big:unreadable(open failed: Data corruption: Failed to load Statistics.db f)
+D1b-big-stats-zero	explain	2	cqlite explain: generation read failed for [nb-6-big-Data.db, nb-5-big-Data.db]: Data corruption: Statistics.db /dmg/D1b-big-stats-zero/fr/t_tomb-b7d1
+D1b-big-stats-zero	diff	2	cqlite diff: side=a: generation read failed for /dmg/D1b-big-stats-zero/fr/t_tomb-b7d10270e93611f1b013b3b9e413504c/nb-6-big-Statistics.db: Data corrup
+D1b-big-stats-zero	query	5	Hint: Check query syntax and ensure required data is available
+D1b-bti-stats-zero	audit	2	ok=False fails=[] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1b-bti-stats-zero	diagnose	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Data corruption: Statistics.db /dmg/D1b-bti-stats-zero/fr/t_static-b63')]
+D1b-bti-stats-zero	diagnose-deep	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Data corruption: Statistics.db /dmg/D1b-bti-stats-zero/fr/t_static-b63')]
+D1b-bti-stats-zero	find	2	da-10-bti:unreadable(open failed: Data corruption: Failed to load Statistics.db f) da-11-bti:index-miss
+D1b-bti-stats-zero	explain	2	cqlite explain: generation read failed for [da-11-bti-Data.db, da-10-bti-Data.db]: Data corruption: Statistics.db /dmg/D1b-bti-stats-zero/fr/t_static-
+D1b-bti-stats-zero	diff	2	cqlite diff: side=a: generation read failed for /dmg/D1b-bti-stats-zero/fr/t_static-b63b6e50e93611f1828c53bf15351c72/da-10-bti-Statistics.db: Data cor
+D1b-bti-stats-zero	query	5	Hint: Check query syntax and ensure required data is available
+D1c-big-stats-4b	audit	2	ok=False fails=[] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1c-big-stats-4b	diagnose	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Data corruption: Statistics.db /dmg/D1c-big-stats-4b/fr/t_tomb-b7d1027')]
+D1c-big-stats-4b	diagnose-deep	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Data corruption: Statistics.db /dmg/D1c-big-stats-4b/fr/t_tomb-b7d1027')]
+D1c-big-stats-4b	find	2	nb-5-big:bloom-negative nb-6-big:unreadable(open failed: Data corruption: Failed to load Statistics.db f)
+D1c-big-stats-4b	explain	2	cqlite explain: generation read failed for [nb-6-big-Data.db, nb-5-big-Data.db]: Data corruption: Statistics.db /dmg/D1c-big-stats-4b/fr/t_tomb-b7d102
+D1c-big-stats-4b	diff	2	cqlite diff: side=a: generation read failed for /dmg/D1c-big-stats-4b/fr/t_tomb-b7d10270e93611f1b013b3b9e413504c/nb-6-big-Statistics.db: Data corrupti
+D1c-big-stats-4b	query	5	Hint: Check query syntax and ensure required data is available
+D1c-bti-stats-4b	audit	2	ok=False fails=[] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1c-bti-stats-4b	diagnose	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Data corruption: Statistics.db /dmg/D1c-bti-stats-4b/fr/t_static-b63b6')]
+D1c-bti-stats-4b	diagnose-deep	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Data corruption: Statistics.db /dmg/D1c-bti-stats-4b/fr/t_static-b63b6')]
+D1c-bti-stats-4b	find	2	da-10-bti:unreadable(open failed: Data corruption: Failed to load Statistics.db f) da-11-bti:index-miss
+D1c-bti-stats-4b	explain	2	cqlite explain: generation read failed for [da-11-bti-Data.db, da-10-bti-Data.db]: Data corruption: Statistics.db /dmg/D1c-bti-stats-4b/fr/t_static-b6
+D1c-bti-stats-4b	diff	2	cqlite diff: side=a: generation read failed for /dmg/D1c-bti-stats-4b/fr/t_static-b63b6e50e93611f1828c53bf15351c72/da-10-bti-Statistics.db: Data corru
+D1c-bti-stats-4b	query	5	Hint: Check query syntax and ensure required data is available
+D2-big-filter-empty	audit	0	ok=True fails=[] skips=[('bloom-no-false-negative', 'Filter.db unreadable: Serialization erro')]
+D2-big-filter-empty	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D2-big-filter-empty	diagnose-deep	0	g5:ok g6:ok UNREADABLE=[]
+D2-big-filter-empty	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D2-big-filter-empty	explain	0	explain ok, 45820 bytes
+D2-big-filter-empty	diff	0	
+D2-big-filter-empty	query	0	
+D3-big-data-flip	audit	2	ok=False fails=['index-data-identity', 'digest-matches-data'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[]
+D3-big-data-flip	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D3-big-data-flip	diagnose-deep	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Invalid format: CRC32 mismatch for chunk 118 at offset 0xe20c1: expect')]
+D3-big-data-flip	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D3-big-data-flip	explain	0	explain ok, 45820 bytes
+D3-big-data-flip	diff	0	
+D3-big-data-flip	query	0	
+D3-bti-data-flip	audit	2	ok=False fails=['bti-trie-bounds', 'digest-matches-data'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[('bloom-no-false-negative', 'partition key at Data.db offset 2736
+D3-bti-data-flip	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D3-bti-data-flip	diagnose-deep	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Invalid format: CRC32 mismatch for chunk 167 at offset 0x87b3a: expect')]
+D3-bti-data-flip	find	0	da-10-bti:hit da-11-bti:index-miss
+D3-bti-data-flip	explain	0	explain ok, 4515 bytes
+D3-bti-data-flip	diff	0	
+D3-bti-data-flip	query	0	
+D4-big-data-trunc4k	audit	2	ok=False fails=['digest-matches-data', 'compression-coverage'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[('index-data-identity', 'boundary source unreadable: Compres
+D4-big-data-trunc4k	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D4-big-data-trunc4k	diagnose-deep	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Invalid format: Chunk 236 at offset 0x1c3e52 with size 7834 exceeds Da')]
+D4-big-data-trunc4k	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D4-big-data-trunc4k	explain	0	explain ok, 45820 bytes
+D4-big-data-trunc4k	diff	0	
+D4-big-data-trunc4k	query	0	
+D4-bti-data-trunc4k	audit	2	ok=False fails=['digest-matches-data', 'compression-coverage'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[('bloom-no-false-negative', 'boundary source unreadable: Com
+D4-bti-data-trunc4k	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D4-bti-data-trunc4k	diagnose-deep	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Invalid format: Chunk 333 at offset 0x10e958 with size 3341 exceeds Da')]
+D4-bti-data-trunc4k	find	0	da-10-bti:hit da-11-bti:index-miss
+D4-bti-data-trunc4k	explain	0	explain ok, 4515 bytes
+D4-bti-data-trunc4k	diff	0	
+D4-bti-data-trunc4k	query	0	
+D5-big-index-flip	audit	2	ok=False fails=['index-data-identity'] findings=[{'class': 'IndexPositionKeyMismatch', 'component': 'Index.db', 'detail': 'Index.db entry  skips=[]
+D5-big-index-flip	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D5-big-index-flip	diagnose-deep	0	g5:ok g6:ok UNREADABLE=[]
+D5-big-index-flip	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D5-big-index-flip	explain	0	explain ok, 45820 bytes
+D5-big-index-flip	diff	0	
+D5-big-index-flip	query	0	
+D5-bti-partitions-flip	audit	2	ok=False fails=['bti-trie-bounds'] findings=[{'class': 'BtiRootPointerCorrupt', 'component': 'Partitions.db', 'detail': "Partitions.db skips=[]
+D5-bti-partitions-flip	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D5-bti-partitions-flip	diagnose-deep	0	g10:ok g11:ok UNREADABLE=[]
+D5-bti-partitions-flip	find	0	da-10-bti:hit da-11-bti:index-miss
+D5-bti-partitions-flip	explain	0	explain ok, 4515 bytes
+D5-bti-partitions-flip	diff	0	
+D5-bti-partitions-flip	query	0	
+D6-big-digest-edit	audit	2	ok=False fails=['digest-matches-data'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[]
+D6-big-digest-edit	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D6-big-digest-edit	diagnose-deep	0	g5:ok g6:ok UNREADABLE=[]
+D6-big-digest-edit	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D6-big-digest-edit	explain	0	explain ok, 45820 bytes
+D6-big-digest-edit	diff	0	
+D6-big-digest-edit	query	0	
+D6-bti-digest-edit	audit	2	ok=False fails=['digest-matches-data'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[]
+D6-bti-digest-edit	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D6-bti-digest-edit	diagnose-deep	0	g10:ok g11:ok UNREADABLE=[]
+D6-bti-digest-edit	find	0	da-10-bti:hit da-11-bti:index-miss
+D6-bti-digest-edit	explain	0	explain ok, 4515 bytes
+D6-bti-digest-edit	diff	0	
+D6-bti-digest-edit	query	0	
+D7a-big-toc-missing-file	audit	2	ok=False fails=['index-data-identity', 'toc-exact-listing'] findings=[{'class': 'MissingComponent', 'component': 'CompressionInfo.db', 'detail': "TOC.txt lists skips=[('compression-coverage', 'no CompressionInfo: uncompressed')]
+D7a-big-toc-missing-file	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D7a-big-toc-missing-file	diagnose-deep	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', "column '<no column decoded>' (column type <row body>) failed to decode")]
+D7a-big-toc-missing-file	find	2	nb-5-big:bloom-negative nb-6-big:unreadable(probe failed: column '<no column decoded>' (column type <row)
+D7a-big-toc-missing-file	explain	2	cqlite explain: generation read failed for [nb-6-big-Data.db, nb-5-big-Data.db]: Storage error: streaming merge producer error: column '<no column dec
+D7a-big-toc-missing-file	diff	2	cqlite diff: side=a: generation read failed for /dmg/D7a-big-toc-missing-file/fr/t_tomb-b7d10270e93611f1b013b3b9e413504c/nb-6-big-Data.db, /dmg/D7a-bi
+D7a-big-toc-missing-file	query	4	Hint: Use ':config data-dir <path>' or '--data-dir <path>' to set data directory
+D7a-bti-toc-missing-file	audit	2	ok=False fails=['bloom-no-false-negative', 'bti-trie-bounds', 'toc-exact-listing'] findings=[{'class': 'MissingComponent', 'component': 'CompressionInfo.db', 'detail': "TOC.txt lists skips=[('compression-coverage', 'no Compression
+D7a-bti-toc-missing-file	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D7a-bti-toc-missing-file	diagnose-deep	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', "Data corruption: Frozen element 'V5CompressedLegacy: Clustering 'clust")]
+D7a-bti-toc-missing-file	find	2	da-10-bti:unreadable(probe failed: Data corruption: Frozen element 'V5CompressedL) da-11-bti:index-miss
+D7a-bti-toc-missing-file	explain	2	cqlite explain: generation read failed for [da-11-bti-Data.db, da-10-bti-Data.db]: Data corruption: Frozen element 'V5CompressedLegacy: Clustering 'c3
+D7a-bti-toc-missing-file	diff	2	cqlite diff: side=a: generation read failed for /dmg/D7a-bti-toc-missing-file/fr/t_static-b63b6e50e93611f1828c53bf15351c72/da-11-bti-Data.db, /dmg/D7a
+D7a-bti-toc-missing-file	query	4	Hint: Use ':config data-dir <path>' or '--data-dir <path>' to set data directory
+D7b-big-toc-extra-file	audit	2	ok=False fails=['toc-exact-listing'] findings=[{'class': 'MissingComponent', 'component': 'Extra.db', 'detail': "component 'Extra.db' is skips=[]
+D7b-big-toc-extra-file	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D7b-big-toc-extra-file	diagnose-deep	0	g5:ok g6:ok UNREADABLE=[]
+D7b-big-toc-extra-file	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D7b-big-toc-extra-file	explain	0	explain ok, 45820 bytes
+D7b-big-toc-extra-file	diff	0	
+D7b-big-toc-extra-file	query	0	
+D7b-bti-toc-extra-file	audit	2	ok=False fails=['toc-exact-listing'] findings=[{'class': 'MissingComponent', 'component': 'Extra.db', 'detail': "component 'Extra.db' is skips=[]
+D7b-bti-toc-extra-file	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D7b-bti-toc-extra-file	diagnose-deep	0	g10:ok g11:ok UNREADABLE=[]
+D7b-bti-toc-extra-file	find	0	da-10-bti:hit da-11-bti:index-miss
+D7b-bti-toc-extra-file	explain	0	explain ok, 4515 bytes
+D7b-bti-toc-extra-file	diff	0	
+D7b-bti-toc-extra-file	query	0	
+D8-big-summary-trunc	audit	2	ok=False fails=[] findings=[{'class': 'SummaryCorrupt', 'component': 'Summary.db', 'detail': 'Summary.db failed to pa skips=[('summary-index-correlation', 'Summary.db unreadable: Data corruption: ')]
+D8-big-summary-trunc	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D8-big-summary-trunc	diagnose-deep	0	g5:ok g6:ok UNREADABLE=[]
+D8-big-summary-trunc	find	0	nb-5-big:bloom-negative nb-6-big:hit
+D8-big-summary-trunc	explain	0	explain ok, 45820 bytes
+D8-big-summary-trunc	diff	0	
+D8-big-summary-trunc	query	0	
+D9-big-compinfo-trunc	audit	2	ok=False fails=['compression-coverage'] findings=[{'class': 'CompressionInfoCorrupt', 'component': 'CompressionInfo.db', 'detail': 'Compres skips=[('index-data-identity', 'boundary source unreadable: CompressionI')]
+D9-big-compinfo-trunc	diagnose	0	g5:ok g6:ok UNREADABLE=[]
+D9-big-compinfo-trunc	diagnose-deep	0	g5:ok UNREADABLE=[('nb-6-big-Data.db', 'Unsupported format: Failed to parse CompressionInfo.db at /dmg/D9-big-')]
+D9-big-compinfo-trunc	find	2	nb-5-big:bloom-negative nb-6-big:unreadable(open failed: Unsupported format: Failed to parse Compression)
+D9-big-compinfo-trunc	explain	2	cqlite explain: generation read failed for [nb-6-big-Data.db, nb-5-big-Data.db]: Unsupported format: Failed to parse CompressionInfo.db at /dmg/D9-big
+D9-big-compinfo-trunc	diff	2	cqlite diff: side=a: generation read failed for /dmg/D9-big-compinfo-trunc/fr/t_tomb-b7d10270e93611f1b013b3b9e413504c/nb-6-big-Data.db: Unsupported fo
+D9-big-compinfo-trunc	query	5	Hint: Check query syntax and ensure required data is available
+D9-bti-compinfo-trunc	audit	2	ok=False fails=['compression-coverage'] findings=[{'class': 'CompressionInfoCorrupt', 'component': 'CompressionInfo.db', 'detail': 'Compres skips=[('bloom-no-false-negative', 'boundary source unreadable: CompressionI'), ('bti-trie
+D9-bti-compinfo-trunc	diagnose	0	g10:ok g11:ok UNREADABLE=[]
+D9-bti-compinfo-trunc	diagnose-deep	0	g11:ok UNREADABLE=[('da-10-bti-Data.db', 'Unsupported format: Failed to parse CompressionInfo.db at /dmg/D9-bti-')]
+D9-bti-compinfo-trunc	find	2	da-10-bti:unreadable(open failed: Unsupported format: Failed to parse Compression) da-11-bti:index-miss
+D9-bti-compinfo-trunc	explain	2	cqlite explain: generation read failed for [da-11-bti-Data.db, da-10-bti-Data.db]: Unsupported format: Failed to parse CompressionInfo.db at /dmg/D9-b
+D9-bti-compinfo-trunc	diff	2	cqlite diff: side=a: generation read failed for /dmg/D9-bti-compinfo-trunc/fr/t_static-b63b6e50e93611f1828c53bf15351c72/da-10-bti-Data.db: Unsupported
+D9-bti-compinfo-trunc	query	5	Hint: Check query syntax and ensure required data is available
+D10-big-control	audit-deep	0	ok=True fails=[] skips=[]
+D10-big-control	verify-full	0	ok=True
+D10-bti-control	audit-deep	0	ok=True fails=[] skips=[]
+D10-bti-control	verify-full	0	ok=True
+D1a-big-stats-half	audit-deep	2	ok=False fails=['statistics-vs-scan'] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': "Statistics. skips=[]
+D1a-big-stats-half	verify-full	2	ok=False findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': "Statistics.
+D1a-bti-stats-half	audit-deep	2	ok=False fails=['bti-trie-bounds', 'statistics-vs-scan'] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': "Statistics. skips=[]
+D1a-bti-stats-half	verify-full	2	ok=False findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': "Statistics.
+D1b-big-stats-zero	audit-deep	2	ok=False fails=['statistics-vs-scan'] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1b-big-stats-zero	verify-full	2	ok=False findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics.
+D1b-bti-stats-zero	audit-deep	2	ok=False fails=['bti-trie-bounds', 'statistics-vs-scan'] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1b-bti-stats-zero	verify-full	2	ok=False findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics.
+D1c-big-stats-4b	audit-deep	2	ok=False fails=['statistics-vs-scan'] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1c-big-stats-4b	verify-full	2	ok=False findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics.
+D1c-bti-stats-4b	audit-deep	2	ok=False fails=['bti-trie-bounds', 'statistics-vs-scan'] findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics. skips=[]
+D1c-bti-stats-4b	verify-full	2	ok=False findings=[{'class': 'StatisticsHeaderCorrupt', 'component': 'Statistics.db', 'detail': 'Statistics.
+D2-big-filter-empty	audit-deep	0	ok=True fails=[] skips=[('bloom-no-false-negative', 'Filter.db unreadable: Serialization erro')]
+D2-big-filter-empty	verify-full	0	ok=True
+D3-big-data-flip	audit-deep	2	ok=False fails=['index-data-identity', 'digest-matches-data', 'statistics-vs-scan'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[]
+D3-big-data-flip	verify-full	2	ok=False findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch
+D3-bti-data-flip	audit-deep	2	ok=False fails=['bti-trie-bounds', 'digest-matches-data', 'statistics-vs-scan'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[('bloom-no-false-negative', 'partition key 
+D3-bti-data-flip	verify-full	2	ok=False findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch
+D4-big-data-trunc4k	audit-deep	2	ok=False fails=['digest-matches-data', 'compression-coverage', 'statistics-vs-scan'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[('index-data-identity', 'boundary sour
+D4-big-data-trunc4k	verify-full	2	ok=False findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch
+D4-bti-data-trunc4k	audit-deep	2	ok=False fails=['bti-trie-bounds', 'digest-matches-data', 'compression-coverage', 'statistics-vs-scan'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[('bloom-no-false-ne
+D4-bti-data-trunc4k	verify-full	2	ok=False findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch
+D5-big-index-flip	audit-deep	2	ok=False fails=['index-data-identity'] findings=[{'class': 'IndexPositionKeyMismatch', 'component': 'Index.db', 'detail': 'Index.db entry  skips=[]
+D5-big-index-flip	verify-full	0	ok=True
+D5-bti-partitions-flip	audit-deep	2	ok=False fails=['bti-trie-bounds'] findings=[{'class': 'BtiRootPointerCorrupt', 'component': 'Partitions.db', 'detail': 'Partitions.db skips=[]
+D5-bti-partitions-flip	verify-full	2	ok=False findings=[{'class': 'BtiRootPointerCorrupt', 'component': 'Partitions.db', 'detail': 'Partitions.db
+D6-big-digest-edit	audit-deep	2	ok=False fails=['digest-matches-data'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[]
+D6-big-digest-edit	verify-full	2	ok=False findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch
+D6-bti-digest-edit	audit-deep	2	ok=False fails=['digest-matches-data'] findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch skips=[]
+D6-bti-digest-edit	verify-full	2	ok=False findings=[{'class': 'DigestMismatch', 'component': 'Digest.crc32', 'detail': 'Digest.crc32 mismatch
+D7a-big-toc-missing-file	audit-deep	2	ok=False fails=['index-data-identity', 'toc-exact-listing', 'statistics-vs-scan'] findings=[{'class': 'MissingComponent', 'component': 'CompressionInfo.db', 'detail': "TOC.txt lists skips=[('compression-coverage', 'no CompressionI
+D7a-big-toc-missing-file	verify-full	2	ok=False findings=[{'class': 'MissingComponent', 'component': 'CompressionInfo.db', 'detail': "TOC.txt lists
+D7a-bti-toc-missing-file	audit-deep	2	ok=False fails=['bloom-no-false-negative', 'bti-trie-bounds', 'toc-exact-listing', 'statistics-vs-scan'] findings=[{'class': 'MissingComponent', 'component': 'CompressionInfo.db', 'detail': "TOC.txt lists skips=[('compression-cove
+D7a-bti-toc-missing-file	verify-full	2	ok=False findings=[{'class': 'MissingComponent', 'component': 'CompressionInfo.db', 'detail': "TOC.txt lists
+D7b-big-toc-extra-file	audit-deep	2	ok=False fails=['toc-exact-listing'] findings=[{'class': 'MissingComponent', 'component': 'Extra.db', 'detail': "component 'Extra.db' is skips=[]
+D7b-big-toc-extra-file	verify-full	2	ok=False findings=[{'class': 'MissingComponent', 'component': 'Extra.db', 'detail': "component 'Extra.db' is
+D7b-bti-toc-extra-file	audit-deep	2	ok=False fails=['toc-exact-listing'] findings=[{'class': 'MissingComponent', 'component': 'Extra.db', 'detail': "component 'Extra.db' is skips=[]
+D7b-bti-toc-extra-file	verify-full	2	ok=False findings=[{'class': 'MissingComponent', 'component': 'Extra.db', 'detail': "component 'Extra.db' is
+D8-big-summary-trunc	audit-deep	2	ok=False fails=[] findings=[{'class': 'SummaryCorrupt', 'component': 'Summary.db', 'detail': 'Summary.db failed to pa skips=[('summary-index-correlation', 'Summary.db unreadable: Data corruption: ')]
+D8-big-summary-trunc	verify-full	2	ok=False findings=[{'class': 'SummaryCorrupt', 'component': 'Summary.db', 'detail': 'Summary.db failed to pa
+D9-big-compinfo-trunc	audit-deep	2	ok=False fails=['compression-coverage', 'statistics-vs-scan'] findings=[{'class': 'CompressionInfoCorrupt', 'component': 'CompressionInfo.db', 'detail': 'Compres skips=[('index-data-identity', 'boundary source unreadable: Compress
+D9-big-compinfo-trunc	verify-full	2	ok=False findings=[{'class': 'CompressionInfoCorrupt', 'component': 'CompressionInfo.db', 'detail': 'Compres
+D9-bti-compinfo-trunc	audit-deep	2	ok=False fails=['bti-trie-bounds', 'compression-coverage', 'statistics-vs-scan'] findings=[{'class': 'CompressionInfoCorrupt', 'component': 'CompressionInfo.db', 'detail': 'Compres skips=[('bloom-no-false-negative', 'boundary sour
+D9-bti-compinfo-trunc	verify-full	2	ok=False findings=[{'class': 'CompressionInfoCorrupt', 'component': 'CompressionInfo.db', 'detail': 'Compres

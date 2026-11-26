@@ -1,0 +1,16 @@
+== t_static
+{'gen-agree': 1680, 'maxts-agree': 185, 'pdel-agree': 185}
+== t_tomb
+{'gen-agree': 4560, 'maxts-agree': 174, 'pdel-agree': 174}
+== t_udt
+{'gen-agree': 125, 'maxts-agree': 30, 'pdel-agree': 30, 'find-unreadable': 115}
+(1, 'udt-overwrite', '56440', 'da-37-bti', "find UNREADABLE: probe failed: column 'tp' (column type frozen<tuple<int, text, uuid>> (on-disk uuidtype)) failed to ")
+(2, 'udt-overwrite', '56360', 'da-37-bti', "find UNREADABLE: probe failed: column 'tp' (column type frozen<tuple<int, text, uuid>> (on-disk uuidtype)) failed to ")
+== t_coll
+{'gen-agree': 600, 'maxts-agree': 145, 'pdel-agree': 145}
+== t_wide
+{'unparseable': 2, 'gen-agree': 232, 'maxts-agree': 80, 'pdel-agree': 80}
+(1, 'giant', '0', 'find output unparseable')
+(58, 'absent', '1017', 'find output unparseable')
+== t_basic
+{'gen-agree': 112, 'maxts-agree': 92, 'pdel-agree': 92}

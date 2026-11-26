@@ -1,0 +1,8 @@
+diffH	t_coll	diff-healthy-db0-db1	2	267.87	205612	0	0	194732	10944	0
+diffH	t_basic	diff-healthy-db0-db1	2	239.59	282644	0	0	272540	11432	0
+db1	t_basic	find-commitlog-20000000	2	0.29	45784	0	737	36560	9224	0
+db1	t_basic	find-commitlog-20000007	2	0.27	46048	0	737	36560	9488	0
+db1	t_basic	find-commitlog-20000049	2	0.29	45648	0	737	36560	9088	0
+db1	t_basic	find-commitlog-1500000	2	0.28	46228	0	834	36572	9656	0
+db1	t_basic	find-commitlog-20000050	2	0.22	45816	0	737	36560	9256	0
+db0	sweep	full-all	137	2.48	1739872	9	0	1737640	7084	1

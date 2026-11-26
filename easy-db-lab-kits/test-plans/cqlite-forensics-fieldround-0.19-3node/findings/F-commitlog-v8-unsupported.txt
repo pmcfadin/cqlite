@@ -1,0 +1,4 @@
+# find --commitlog on real Cassandra 5.0.8 segments
+/work/bin/cqlite --schema /work/schema/fr.t_basic.cql find /snap/db1/fr/t_basic-af86aa20e93611f1b8dc39584808be3e 20000007 --commitlog /snap/commitlog1 --out json
+{"generations":[{"basename":"da-428-bti-Data.db","probe":"index-miss"}],"commitlog":[{"segment":"CommitLog-8-1795657630906.log","unreadable":"open failed: Unsupported CommitLog version 8: supported range is 7..=7"},{"segment":"CommitLog-8-1795657630907.log","unreadable":"open failed: Unsupported CommitLog version 8: supported range is 7..=7"},{"segment":"CommitLog-8-1795657630908.log","unreadable":"open failed: Unsupported CommitLog version 8: supported range is 7..=7"},{"segment":"CommitLog-8-1795657630909.log","unreadable":"open failed: Unsupported CommitLog version 8: supported range is 7..=7"},{"segment":"CommitLog-8-1795657630910.log","unreadable":"open failed: Unsupported CommitLog version 8: supported range is 7..=7"}]}
+

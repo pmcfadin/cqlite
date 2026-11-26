@@ -1,0 +1,14 @@
+resA-db0-db2-in: summary={'partitions_compared': 1000, 'equal': 2300, 'only_b': 700, 'tombstones_only_a': 400, 'resurrection_risk_before_gc_grace': 400} -> PASS
+resA-db0-db2-past: summary={'partitions_compared': 1000, 'equal': 2300, 'only_b': 700, 'tombstones_only_a': 400, 'resurrection_risk_past_gc_grace': 400} -> PASS
+resA-db2-db0-in: summary={'partitions_compared': 1000, 'equal': 2300, 'only_a': 700, 'tombstones_only_b': 400, 'resurrection_risk_before_gc_grace': 400} -> PASS
+resA-db2-db0-past: summary={'partitions_compared': 1000, 'equal': 2300, 'only_a': 700, 'tombstones_only_b': 400, 'resurrection_risk_past_gc_grace': 400} -> PASS
+resA-db0-db1-in: {'partitions_compared': 1000, 'equal': 2300} PASS
+p5 partitions_compared 1 {'only_b': 3, 'tombstones_only_a': 1, 'resurrection_risk_before_gc_grace': 1}
+p150 partitions_compared 1 {'equal': 2, 'only_b': 1, 'tombstones_only_a': 1, 'resurrection_risk_before_gc_grace': 1}
+p350 partitions_compared 1 {'equal': 1, 'only_b': 2, 'tombstones_only_a': 1, 'resurrection_risk_before_gc_grace': 1}
+p700 partitions_compared 1 {'equal': 3}
+resA-self-db2: {'partitions_compared': 1000, 'equal': 3000}
+resB-db0-db2-in: summary={'partitions_compared': 1000, 'equal': 2300, 'only_b': 700} -> PASS
+resB-db0-db2-past: summary={'partitions_compared': 1000, 'equal': 2300, 'only_b': 700} -> PASS
+resB-db2-db0-in: summary={'partitions_compared': 1000, 'equal': 2300, 'only_a': 700} -> PASS
+resB-db0-db1-in: {'partitions_compared': 900, 'equal': 2300}
