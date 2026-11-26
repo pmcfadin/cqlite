@@ -169,7 +169,11 @@ fn one_winner_per_cell_equal_to_the_live_answer() {
                         1,
                         "id {id} c {c}: exactly one winner for v, got {winners:?}"
                     );
-                    assert_eq!(&text(&winners[0].value), want, "id {id} c {c}: winner value");
+                    assert_eq!(
+                        &text(&winners[0].value),
+                        want,
+                        "id {id} c {c}: winner value"
+                    );
                     assert_eq!(
                         winners[0].ttl.is_some(),
                         *want_ttl,
@@ -201,6 +205,58 @@ fn losers_cite_the_rule_that_decided_them() {
         assert!(!losers.is_empty(), "id {id}: a tie has at least one loser");
         for loser in losers {
             assert_eq!(rule_of(loser), Some(rule), "id {id}: {loser:?}");
+        }
+    }
+}
+
+/// The same defect hit the UNTRACED point builder (same run list): the whole partition must come
+/// out of ONE step as exactly one reconciled row per clustering key, each holding the live answer.
+#[test]
+fn untraced_point_merge_emits_one_reconciled_row_per_clustering_key() {
+    use cqlite_core::storage::write_engine::merge::{build_single_partition_merger, RowData};
+
+    let live = live_answer();
+    let schema = schema();
+    let paths = generations_newest_first();
+    let effective = effective_compaction_schema(&schema, &paths);
+    for id in [1, 3, 4, 5, 11, 13] {
+        let key = encode_partition_key_columns(&[Value::Integer(id)], &effective).expect("key");
+        let mut merger =
+            build_single_partition_merger(paths.clone(), &[key], &effective, ScanCancel::default())
+                .expect("build merger")
+                .unwrap_or_else(|| panic!("partition {id} is held by a generation"))
+                .with_now_secs(Some(NOW))
+                .with_gc_before_secs(Some(NOW - GC_GRACE_SECONDS))
+                .with_purge_safe(true);
+        let mut steps = 0;
+        let mut seen: BTreeMap<i32, String> = BTreeMap::new();
+        loop {
+            match merger.step().expect("merge step") {
+                MergeStep::Complete => break,
+                MergeStep::Partition { rows, .. } => {
+                    steps += 1;
+                    for row in rows {
+                        let c = match row.clustering_key.as_ref().and_then(|k| k.columns.first()) {
+                            Some((_, Value::Integer(c))) => *c,
+                            other => panic!("unexpected clustering {other:?}"),
+                        };
+                        let RowData::Live { cells } = &row.row_data else {
+                            panic!("id {id} c {c}: expected a live row");
+                        };
+                        let v: Vec<_> = cells.iter().filter(|cell| cell.column == "v").collect();
+                        assert_eq!(v.len(), 1, "id {id} c {c}: one v cell per merged row");
+                        let prior = seen.insert(c, text(&Some(v[0].value.clone())));
+                        assert!(prior.is_none(), "id {id} c {c}: row emitted twice");
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            steps, 1,
+            "id {id}: one partition step, not one per displaced run"
+        );
+        for (c, v) in seen {
+            assert_eq!(Some(&v), live[&(id, c)].0.as_ref(), "id {id} c {c}");
         }
     }
 }
