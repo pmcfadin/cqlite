@@ -27,7 +27,7 @@ use crate::schema::{TableSchema, UdtRegistry};
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::BinaryHeap;
 use std::path::PathBuf;
 // Unconditional (issue #2346): `build_single_partition_merger_from_readers`
 // takes `Vec<Arc<SSTableReader>>` regardless of the `tombstones` feature (its
@@ -90,29 +90,6 @@ impl KWayMerger {
             trace: NoTrace,
         })
     }
-}
-
-/// A run backed by a pre-built `Vec` of merge entries — the seeked single
-/// partition. Yields each entry once, in order, then reports exhaustion.
-///
-/// Only the default `not(tombstones)` build seeks (the alternate build always
-/// scan-falls-back), so this is dead there.
-#[cfg_attr(feature = "tombstones", allow(dead_code))]
-struct VecRun {
-    entries: VecDeque<MergeEntry>,
-}
-
-impl SSTableRowIterator for VecRun {
-    fn next(&mut self) -> Option<Result<MergeEntry>> {
-        self.entries.pop_front().map(Ok)
-    }
-}
-
-/// A run that yields nothing: the slot of a candidate that holds none of the requested keys (#4629).
-fn empty_run() -> Box<dyn SSTableRowIterator> {
-    Box::new(VecRun {
-        entries: VecDeque::new(),
-    })
 }
 
 /// A run that forwards ONLY the target partitions' entries from an SSTable's full
@@ -770,7 +747,9 @@ fn record_logical_accesses(
 // The path/reader open+probe wrappers (and their `tombstones` fallbacks) live in a child module
 // to keep this file under the #1116 size threshold.
 mod open;
+mod vec_run;
 use open::{probe_path, probe_reader};
+use vec_run::{empty_run, VecRun};
 
 /// The trail's per-generation probe outcome for a [`PathProbe`] (issue #4193 review L5).
 ///
