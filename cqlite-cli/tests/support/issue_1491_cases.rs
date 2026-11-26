@@ -450,34 +450,12 @@ pub(crate) const CASES: &[Case] = &[
             ("ms", Multicell::Set),
             ("mm", Multicell::Map),
         ],
-        // MEASURED DIVERGENCE: for the row whose multicell collections were
-        // written EMPTY, the golden carries a complex deletion and no cells — i.e.
-        // the column is absent, and Cassandra's `SELECT` returns `null` (the DDL
-        // comment in cql-type-parity.cql states this, and the same on-disk shape is
-        // what `DELETE ml FROM …` writes). Both CQLite egress formats instead
-        // render a PRESENT empty container (`[]`, `{}`), which is a different
-        // value. Non-empty multicell rendering stays covered by four other cases
-        // (test_da.collection_table and the three test_signed_coll tables).
-        skips: &[
-            Skip {
-                path: "ml",
-                formats: BOTH,
-                divergence: Divergence::AbsentMulticellRendersEmpty,
-                why: "empty multicell list renders as [] where Cassandra reads null",
-            },
-            Skip {
-                path: "ms",
-                formats: BOTH,
-                divergence: Divergence::AbsentMulticellRendersEmpty,
-                why: "empty multicell set renders as {} where Cassandra reads null",
-            },
-            Skip {
-                path: "mm",
-                formats: BOTH,
-                divergence: Divergence::AbsentMulticellRendersEmpty,
-                why: "empty multicell map renders as {} where Cassandra reads null",
-            },
-        ],
+        // RECOVERED (#4645): for the row whose multicell collections were written
+        // EMPTY, the golden carries a complex deletion and no cells, so the column is
+        // absent and Cassandra's `SELECT` returns `null`. CQLite now reads an empty
+        // multicell collection as absent too, so `ml`/`ms`/`mm` are compared, not
+        // skipped (the former `AbsentMulticellRendersEmpty` gaps).
+        skips: &[],
     },
     // test-data/schemas/time-series.cql — the ONLY `FLOAT` column this lane can
     // reach (issue #3777). NO committed `*-Data.db` fixture declares a `float`
