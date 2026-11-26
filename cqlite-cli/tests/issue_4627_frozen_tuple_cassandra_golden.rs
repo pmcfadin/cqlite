@@ -35,10 +35,14 @@ fn fixture(rel: &str) -> PathBuf {
 }
 
 fn cqlite(data_dir: &str, args: &[&str]) -> std::process::Output {
+    cqlite_with_schema("schema.cql", data_dir, args)
+}
+
+fn cqlite_with_schema(schema: &str, data_dir: &str, args: &[&str]) -> std::process::Output {
     Command::cargo_bin("cqlite")
         .expect("cqlite binary")
         .arg("--schema")
-        .arg(fixture("schema.cql"))
+        .arg(fixture(schema))
         .arg("--data-dir")
         .arg(fixture(data_dir))
         .args(args)
@@ -134,4 +138,38 @@ fn bti_frozen_tuple_explain_reads_the_generation() {
     assert!(!stderr.contains("Data corruption"), "{stderr}");
     let body = String::from_utf8_lossy(&out.stdout);
     assert!(body.contains("\"probe\":\"hit\""), "{body}");
+}
+
+/// Roborev round 3: with NO schema type for `tu` (a dropped-column path), the
+/// tuple-with-UDT cell is decoded from the case-sensitive on-disk marshal type
+/// `TupleType(Int32Type,FrozenType(UserType(..)))`. Lowercasing it broke the decode
+/// of the whole row. The other columns must still match the Cassandra golden.
+#[test]
+fn header_derived_tuple_with_udt_column_decodes_without_a_schema_type() {
+    for (dir, golden) in [
+        ("sstables", "goldens/da-2-bti-Data.db.sstabledump.json"),
+        ("sstables_big", "goldens/nb-3-big-Data.db.sstabledump.json"),
+    ] {
+        let out = cqlite_with_schema(
+            "schema_without_tu.cql",
+            dir,
+            &["--out", "json", "query", "select * from fix4627.t_tuple"],
+        );
+        assert!(
+            out.status.success(),
+            "{dir}: dropped tuple-with-UDT column must not fail the read; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rows: Value = serde_json::from_slice(&out.stdout).expect("query JSON");
+        let expected = golden_rows(golden);
+        let rows = rows.as_array().expect("rows");
+        assert_eq!(rows.len(), expected.len());
+        for row in rows {
+            let key = (row["id"].as_i64().unwrap(), row["ck"].as_i64().unwrap());
+            for col in ["tp", "nt", "p", "lt"] {
+                let exp = expected[&key].get(col).unwrap_or(&Value::Null);
+                assert_eq!(&row[col], exp, "{dir} {key:?} {col}");
+            }
+        }
+    }
 }

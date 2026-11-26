@@ -199,17 +199,31 @@ fn validate_marshal_tuples(marshal_type: &str) -> crate::error::Result<()> {
         }
     }
     // Same container set the converter recurses through: Vector (element) ...
-    if let Ok(Some(args)) = crate::schema::vector_type::marshal_vector_kind(value).into_args(value)
-    {
-        return validate_marshal_tuples(args.element);
+    match crate::schema::vector_type::marshal_vector_kind(value).into_args(value) {
+        Ok(Some(args)) => return validate_marshal_tuples(args.element),
+        Ok(None) => {}
+        // A malformed vector is spelled fail-closed by the converter itself; only a
+        // tuple claim inside it is refused here (it can no longer be located).
+        Err(_) if value.contains("TupleType(") => {
+            return Err(malformed(
+                "unterminated or malformed VectorType around a tuple",
+            ));
+        }
+        Err(_) => {}
     }
+    // ... and the single-parameter / map wrappers. A recognised wrapper whose
+    // parameter list does not close, or that has text after the matching `)`,
+    // fails closed: it can hide a tuple claim.
     for prefix in WRAP {
         if let Some(rest) = value.strip_prefix(prefix) {
-            if let Some(inner) = extract_inner_type(rest) {
-                return split_type_arguments(inner)
-                    .into_iter()
-                    .try_for_each(validate_marshal_tuples);
+            let inner =
+                extract_inner_type(rest).ok_or_else(|| malformed("unbalanced parentheses"))?;
+            if rest.len() != inner.len() + 1 {
+                return Err(malformed("trailing text after the closing parenthesis"));
             }
+            return split_type_arguments(inner)
+                .into_iter()
+                .try_for_each(validate_marshal_tuples);
         }
     }
     Ok(())
@@ -760,5 +774,18 @@ mod tuple_header_tests_4627 {
         assert!(conv(&bad).is_err(), "{bad}");
         let good = format!("{M}VectorType({M}TupleType({M}Int32Type,{M}UTF8Type) , 3)");
         assert!(conv(&good).is_ok());
+    }
+
+    #[test]
+    fn unterminated_wrapper_around_a_tuple_is_refused() {
+        for bad in [
+            format!("{M}ListType({M}TupleType({M}Int32Type"),
+            format!("{M}MapType({M}UTF8Type,{M}TupleType({M}Int32Type"),
+            format!("{M}FrozenType({M}TupleType({M}Int32Type"),
+            format!("{M}VectorType({M}TupleType({M}Int32Type,{M}UTF8Type) , 3"),
+            format!("{M}ListType({M}TupleType({M}Int32Type))x"),
+        ] {
+            assert!(conv(&bad).is_err(), "must fail closed: {bad}");
+        }
     }
 }
