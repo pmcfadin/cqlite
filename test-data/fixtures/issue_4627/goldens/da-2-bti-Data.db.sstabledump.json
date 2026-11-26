@@ -10,27 +10,29 @@
         "type" : "row",
         "position" : 7,
         "clustering" : [ 1 ],
-        "liveness_info" : { "tstamp" : "2026-11-26T06:17:24.959989Z" },
+        "liveness_info" : { "tstamp" : "2026-11-26T06:42:43.968994Z" },
         "cells" : [
           { "name" : "nt", "value" : [3, ["y", "123e4567-e89b-12d3-a456-426614174002"]] },
           { "name" : "p", "value" : {"a": 1, "b": [2, "x", "123e4567-e89b-12d3-a456-426614174001"]} },
           { "name" : "tp", "value" : [7, "hello", "123e4567-e89b-12d3-a456-426614174000"] },
-          { "name" : "lt", "deletion_info" : { "marked_deleted" : "2026-11-26T06:17:24.959988Z", "local_delete_time" : "2026-11-26T06:17:24Z" } },
-          { "name" : "lt", "path" : [ "0c1ea330-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : [1, "a"] },
-          { "name" : "lt", "path" : [ "0c1ea33a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : [2, "b"] }
+          { "name" : "tu", "value" : [11, {"a": 9, "b": [1, "u", "123e4567-e89b-12d3-a456-426614174008"]}] },
+          { "name" : "lt", "deletion_info" : { "marked_deleted" : "2026-11-26T06:42:43.968993Z", "local_delete_time" : "2026-11-26T06:42:43Z" } },
+          { "name" : "lt", "path" : [ "95848f10-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : [1, "a"] },
+          { "name" : "lt", "path" : [ "95848f1a-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : [2, "b"] }
         ]
       },
       {
         "type" : "row",
-        "position" : 209,
+        "position" : 268,
         "clustering" : [ 2 ],
-        "liveness_info" : { "tstamp" : "2026-11-26T06:17:24.964156Z" },
+        "liveness_info" : { "tstamp" : "2026-11-26T06:42:43.970514Z" },
         "cells" : [
           { "name" : "nt", "value" : [4, [null, "123e4567-e89b-12d3-a456-426614174004"]] },
           { "name" : "p", "value" : {"a": 2, "b": [null, "z", null]} },
           { "name" : "tp", "value" : [8, null, "123e4567-e89b-12d3-a456-426614174003"] },
-          { "name" : "lt", "deletion_info" : { "marked_deleted" : "2026-11-26T06:17:24.964155Z", "local_delete_time" : "2026-11-26T06:17:24Z" } },
-          { "name" : "lt", "path" : [ "0c1eca40-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : [null, "c"] }
+          { "name" : "tu", "value" : [null, {"a": 3, "b": [null, null, null]}] },
+          { "name" : "lt", "deletion_info" : { "marked_deleted" : "2026-11-26T06:42:43.970513Z", "local_delete_time" : "2026-11-26T06:42:43Z" } },
+          { "name" : "lt", "path" : [ "9584b620-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : [null, "c"] }
         ]
       }
     ]
@@ -39,25 +41,26 @@
     "table kind" : "REGULAR",
     "partition" : {
       "key" : [ "2" ],
-      "position" : 360
+      "position" : 453
     },
     "rows" : [
       {
         "type" : "row",
-        "position" : 360,
+        "position" : 453,
         "clustering" : [ 1 ],
-        "liveness_info" : { "tstamp" : "2026-11-26T06:18:00.516322Z" },
+        "liveness_info" : { "tstamp" : "2026-11-26T06:42:43.971562Z" },
         "cells" : [
           { "name" : "tp", "value" : [9, "only", "123e4567-e89b-12d3-a456-426614174005"] }
         ]
       },
       {
         "type" : "row",
-        "position" : 411,
+        "position" : 502,
         "clustering" : [ 2 ],
-        "liveness_info" : { "tstamp" : "2026-11-26T06:18:00.520805Z" },
+        "liveness_info" : { "tstamp" : "2026-11-26T06:42:43.972016Z" },
         "cells" : [
-          { "name" : "tp", "value" : [null, null, null] }
+          { "name" : "tp", "value" : [null, null, null] },
+          { "name" : "tu", "value" : [12, null] }
         ]
       }
     ]
@@ -66,14 +69,14 @@
     "table kind" : "REGULAR",
     "partition" : {
       "key" : [ "3" ],
-      "position" : 446
+      "position" : 549
     },
     "rows" : [
       {
         "type" : "row",
-        "position" : 446,
+        "position" : 549,
         "clustering" : [ 1 ],
-        "liveness_info" : { "tstamp" : "2026-11-26T06:18:00.522633Z" },
+        "liveness_info" : { "tstamp" : "2026-11-26T06:42:43.972473Z" },
         "cells" : [
           { "name" : "p", "value" : {"a": 5, "b": [6, "q", "123e4567-e89b-12d3-a456-426614174007"]} },
           { "name" : "tp", "value" : [10, "abc", "123e4567-e89b-12d3-a456-426614174006"] }

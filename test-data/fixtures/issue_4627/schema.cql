@@ -10,5 +10,6 @@ CREATE TABLE fix4627.t_tuple (
     p frozen<tt>,
     tp frozen<tuple<int, text, uuid>>,
     lt list<frozen<tuple<int, text>>>,
+    tu frozen<tuple<int, frozen<tt>>>,
     PRIMARY KEY (id, ck)
 ) WITH CLUSTERING ORDER BY (ck ASC);

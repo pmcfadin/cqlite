@@ -4,8 +4,8 @@
 //!
 //! # Oracle (#3041/#3042: Cassandra-written bytes, never a CQLite round trip)
 //! `test-data/fixtures/issue_4627/` holds a Cassandra 5.0.8 generation of
-//! `fix4627.t_tuple` in BOTH formats (`sstables/` = BTI `da-4-bti`, written by the
-//! node; `sstables_big/` = BIG `nb-5-big`, written by Cassandra 5.0.8 `sstablescrub`
+//! `fix4627.t_tuple` in BOTH formats (`sstables/` = BTI `da-2-bti`, written by the
+//! node; `sstables_big/` = BIG `nb-3-big`, written by Cassandra 5.0.8 `sstablescrub`
 //! of that BTI generation) and the `sstabledump` of each under `goldens/`. The
 //! expectations below are PARSED from those goldens at run time. Commands and
 //! versions: `test-data/fixtures/issue_4627/REGEN-NOTES.md`.
@@ -101,7 +101,7 @@ fn assert_query_matches_golden(data_dir: &str, golden: &str) {
     for row in rows {
         let key = (row["id"].as_i64().unwrap(), row["ck"].as_i64().unwrap());
         let want = expected.get(&key).unwrap_or_else(|| panic!("row {key:?}"));
-        for col in ["tp", "nt", "p", "lt"] {
+        for col in ["tp", "nt", "p", "lt", "tu"] {
             let got = &row[col];
             let exp = want.get(col).unwrap_or(&Value::Null);
             assert_eq!(got, exp, "{data_dir} row {key:?} column {col}");
@@ -111,12 +111,12 @@ fn assert_query_matches_golden(data_dir: &str, golden: &str) {
 
 #[test]
 fn bti_frozen_tuple_query_matches_sstabledump() {
-    assert_query_matches_golden("sstables", "goldens/da-4-bti-Data.db.sstabledump.json");
+    assert_query_matches_golden("sstables", "goldens/da-2-bti-Data.db.sstabledump.json");
 }
 
 #[test]
 fn big_frozen_tuple_query_matches_sstabledump() {
-    assert_query_matches_golden("sstables_big", "goldens/nb-5-big-Data.db.sstabledump.json");
+    assert_query_matches_golden("sstables_big", "goldens/nb-3-big-Data.db.sstabledump.json");
 }
 
 /// The reported verb: `explain` read every generation of the partition and died.
