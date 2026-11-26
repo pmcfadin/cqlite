@@ -68,6 +68,8 @@ exclude = [
     "tests/issue_4114_vector_float_cassandra_golden.rs",
     # Resolves `test-data/fixtures/issue_4629/` checkout-relative and fails closed (same class).
     "tests/issue_4629_ttl_tie_explain.rs",
+    # Resolves `test-data/fixtures/issue_4628/` checkout-relative and fails closed (same class).
+    "tests/issue_4640_collection_assembly.rs",
 ]
 
 # docs.rs build: document the commonly used features.
@@ -357,6 +359,13 @@ required-features = ["state_machine", "cli-helpers"]
 # feature. The lite gate's blast-radius scoping runs cqlite-core `--lib` +
 # `--features cli-helpers`, which compiles and runs this changed `--test` target;
 # the full gate's core-tests (`--features cli-helpers`) also picks it up.
+# Non-frozen collections must survive a multi-generation merge (issue #4640). Reads the
+# committed Cassandra-written `issue_4628` fixture through `ingest` + `Database::execute`
+# (`cli-helpers`) and the write-support merge path.
+[[test]]
+name = "issue_4640_collection_assembly"
+required-features = ["write-support", "cli-helpers"]
+
 [[test]]
 name = "issue_2148_statistics_toc_single_walk"
 required-features = ["cli-helpers"]

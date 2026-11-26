@@ -1,0 +1,497 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "5" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v500" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dd510-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939dd51a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 96,
+        "clustering" : [ 0, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v501" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dd524-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939dd52e-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 185,
+        "clustering" : [ 1, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v510" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dd538-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939dd542-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 274,
+        "clustering" : [ 1, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v511" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dfc20-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939dfc2a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 363,
+        "clustering" : [ 2, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v520" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dfc34-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939dfc3e-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 452,
+        "clustering" : [ 2, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v521" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939e2330-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939e233a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "1" ],
+      "position" : 549
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 549,
+        "clustering" : [ 0, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v100" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939c9c90-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939c9c9a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 638,
+        "clustering" : [ 0, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v101" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939cc3a0-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939cc3aa-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 727,
+        "clustering" : [ 1, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v110" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939ceab0-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939ceaba-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 816,
+        "clustering" : [ 1, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v111" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939ceac4-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939ceace-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 905,
+        "clustering" : [ 2, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v120" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939cead8-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939ceae2-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 994,
+        "clustering" : [ 2, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v121" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d11c0-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939d11ca-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "4" ],
+      "position" : 1091
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 1091,
+        "clustering" : [ 0, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v400" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d6008-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939d6012-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1180,
+        "clustering" : [ 0, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v401" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d86f0-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939d86fa-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1269,
+        "clustering" : [ 1, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v410" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d8704-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939d870e-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1358,
+        "clustering" : [ 1, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v411" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dae00-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939dae0a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1447,
+        "clustering" : [ 2, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v420" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dae14-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939dae1e-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1536,
+        "clustering" : [ 2, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v421" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939dae28-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939dae32-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "9" ],
+      "position" : 1633
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 1633,
+        "clustering" : [ 0, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v900" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939e2344-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939e234e-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1722,
+        "clustering" : [ 0, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v901" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939e2358-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939e2362-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1811,
+        "clustering" : [ 1, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v910" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939e4a40-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939e4a4a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1900,
+        "clustering" : [ 1, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v911" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939e4a54-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939e4a5e-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 1989,
+        "clustering" : [ 2, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v920" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939e4a68-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939e4a72-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 2078,
+        "clustering" : [ 2, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v921" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939e7150-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939e715a-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 2175
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 2175,
+        "clustering" : [ 0, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v300" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d11d4-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939d11de-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 2264,
+        "clustering" : [ 0, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v301" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d38d0-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "l", "path" : [ "939d38da-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b0" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 2353,
+        "clustering" : [ 1, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v310" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d38e4-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939d38ee-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 2442,
+        "clustering" : [ 1, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v311" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d38f8-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "939d3902-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b1" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 2531,
+        "clustering" : [ 2, 0 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v320" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d5fe0-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939d5fea-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 0 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a0" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 2620,
+        "clustering" : [ 2, 1 ],
+        "liveness_info" : { "tstamp" : "1000" },
+        "cells" : [
+          { "name" : "v", "value" : "v321" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "l", "path" : [ "939d5ff4-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "l", "path" : [ "939d5ffe-e961-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "999", "local_delete_time" : "1795674072" } },
+          { "name" : "m", "path" : [ "1" ], "value" : "a1" },
+          { "name" : "m", "path" : [ "2" ], "value" : "b2" }
+        ]
+      }
+    ]
+  }
+]
