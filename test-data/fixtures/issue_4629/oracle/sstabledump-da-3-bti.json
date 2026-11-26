@@ -1,0 +1,38 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "16" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "other" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 23,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "other" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 39,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "other" }
+        ]
+      }
+    ]
+  }
+]

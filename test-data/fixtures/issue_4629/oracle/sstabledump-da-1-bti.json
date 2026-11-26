@@ -1,0 +1,284 @@
+[
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "5" ],
+      "position" : 7
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 7,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 3000000, "expires_at" : "1798675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl_long" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 37,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 3000000, "expires_at" : "1798675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl_long" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 67,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 3000000, "expires_at" : "1798675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl_long" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "13" ],
+      "position" : 105
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 105,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "zz_ttl" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 127,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "zz_ttl" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 149,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "zz_ttl" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "11" ],
+      "position" : 179
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 179,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "x_plain" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "l", "path" : [ "33e393f0-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "33e393fa-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "m", "path" : [ "0" ], "value" : "a" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 257,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "x_plain" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "l", "path" : [ "33e40920-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "33e4092a-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "m", "path" : [ "0" ], "value" : "a" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 335,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "x_plain" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "l", "path" : [ "33e45740-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "33e4574a-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "m", "path" : [ "0" ], "value" : "a" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "1" ],
+      "position" : 421
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 421,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "zz_plain" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "l", "path" : [ "33e345d0-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "33e345da-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "m", "path" : [ "0" ], "value" : "a" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 500,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "zz_plain" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "l", "path" : [ "33e3bb00-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "33e3bb0a-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "m", "path" : [ "0" ], "value" : "a" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 579,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000" },
+        "cells" : [
+          { "name" : "v", "value" : "zz_plain" },
+          { "name" : "l", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "l", "path" : [ "33e43030-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 1 },
+          { "name" : "l", "path" : [ "33e4303a-e964-11f1-bfef-fdd6f8afe4e2" ], "value" : 2 },
+          { "name" : "m", "deletion_info" : { "marked_deleted" : "1795599999999999", "local_delete_time" : "1795675200" } },
+          { "name" : "m", "path" : [ "0" ], "value" : "a" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "4" ],
+      "position" : 666
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 666,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "zz_ttl_short" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 694,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "zz_ttl_short" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 722,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "zz_ttl_short" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "6" ],
+      "position" : 758
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 758,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 780,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 802,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl" }
+        ]
+      }
+    ]
+  },
+  {
+    "table kind" : "REGULAR",
+    "partition" : {
+      "key" : [ "3" ],
+      "position" : 832
+    },
+    "rows" : [
+      {
+        "type" : "row",
+        "position" : 832,
+        "clustering" : [ 0 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 854,
+        "clustering" : [ 1 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl" }
+        ]
+      },
+      {
+        "type" : "row",
+        "position" : 876,
+        "clustering" : [ 2 ],
+        "liveness_info" : { "tstamp" : "1795600000000000", "ttl" : 1000000, "expires_at" : "1796675200", "expired" : false },
+        "cells" : [
+          { "name" : "v", "value" : "aa_ttl" }
+        ]
+      }
+    ]
+  }
+]
