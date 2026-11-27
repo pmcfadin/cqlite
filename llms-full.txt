@@ -6111,18 +6111,18 @@ Primary source paths:
 
 Release announcements for CQLite. Each page covers what shipped and how to get it. For the complete, granular change list, see the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
 
-| Version                              | Date       | Highlights                                                                                                                                                                                                                     |
-| ------------------------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [v0.19.0](/cqlite/releases/v0-19-0/) | TBD        | The SSTable utility release — detect (`verify --mode audit`) · diagnose (`find`, `diagnose`, `explain`) · compare (`diff`) · recover (crash-safe `salvage`/`rebuild`) · export (Vortex) · damaged `Statistics.db` fails closed |
-| [v0.18.0](/cqlite/releases/v0-18-0/) | 2026-10-30 | The SSTable toolbox — `verify` locations · `sweep` · `salvage` · `rebuild` · raw SSTable view of unreconciled rows · Arrow 59 · Rust 1.95 floor                                                                                |
-| [v0.17.0](/cqlite/releases/v0-17-0/) | 2026-09-08 | Read correctness + read-path performance vs stock Cassandra 5 — 97 issues · 3.06× Flight single-SSTable fast path · one value/error contract across Python/Node/CLI · breaking JSON + config changes                           |
-| [v0.16.1](/cqlite/releases/v0-16-1/) | 2026-07-23 | Reads a second Cassandra on-disk format — CommitLog segment files — via a library API and a `read-commitlog` CLI                                                                                                               |
-| [v0.16.0](/cqlite/releases/v0-16-0/) | 2026-07-22 | Trino connector completeness — typed collection columns (array/row/map) · weight-balanced split fan-out · `LIMIT`-cancellation hang fixed                                                                                      |
-| [v0.15.0](/cqlite/releases/v0-15-0/) | 2026-07-17 | Trino latency/throughput/ops — \~15× warm throughput · admission control · saturation gauges · P0 silent-row-loss fix                                                                                                          |
-| [v0.14.1](/cqlite/releases/v0-14-1/) | 2026-07-13 | Cold-start parse fix — `Index.db` parsed once per open · 200k-entry index build \~100× faster                                                                                                                                  |
-| [v0.14.0](/cqlite/releases/v0-14-0/) | 2026-07-13 | Flight field-readiness — Arrow Flight + Trino read path validated against a live at-scale Cassandra deployment · 2 breaking changes                                                                                            |
-| [v0.13.0](/cqlite/releases/v0-13-0/) | 2026-07-05 | Performance release — read-path + point-read + compressed-chunk wins · byte-bounded results · `Database.refresh()` · 3 breaking changes                                                                                        |
-| [v0.12.0](/cqlite/releases/v0-12-0/) | 2026-06-22 | Arrow Flight + Trino connector · CDC delta-export to Parquet · byte-for-byte compaction parity                                                                                                                                 |
+| Version                                           | Date       | Highlights                                                                                                                                                                                                                     |
+| ------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [v0.19.0](/cqlite/releases/v0-19-0/) **(latest)** | 2026-11-27 | The SSTable utility release — detect (`verify --mode audit`) · diagnose (`find`, `diagnose`, `explain`) · compare (`diff`) · recover (crash-safe `salvage`/`rebuild`) · export (Vortex) · damaged `Statistics.db` fails closed |
+| [v0.18.0](/cqlite/releases/v0-18-0/)              | 2026-10-30 | The SSTable toolbox — `verify` locations · `sweep` · `salvage` · `rebuild` · raw SSTable view of unreconciled rows · Arrow 59 · Rust 1.95 floor                                                                                |
+| [v0.17.0](/cqlite/releases/v0-17-0/)              | 2026-09-08 | Read correctness + read-path performance vs stock Cassandra 5 — 97 issues · 3.06× Flight single-SSTable fast path · one value/error contract across Python/Node/CLI · breaking JSON + config changes                           |
+| [v0.16.1](/cqlite/releases/v0-16-1/)              | 2026-07-23 | Reads a second Cassandra on-disk format — CommitLog segment files — via a library API and a `read-commitlog` CLI                                                                                                               |
+| [v0.16.0](/cqlite/releases/v0-16-0/)              | 2026-07-22 | Trino connector completeness — typed collection columns (array/row/map) · weight-balanced split fan-out · `LIMIT`-cancellation hang fixed                                                                                      |
+| [v0.15.0](/cqlite/releases/v0-15-0/)              | 2026-07-17 | Trino latency/throughput/ops — \~15× warm throughput · admission control · saturation gauges · P0 silent-row-loss fix                                                                                                          |
+| [v0.14.1](/cqlite/releases/v0-14-1/)              | 2026-07-13 | Cold-start parse fix — `Index.db` parsed once per open · 200k-entry index build \~100× faster                                                                                                                                  |
+| [v0.14.0](/cqlite/releases/v0-14-0/)              | 2026-07-13 | Flight field-readiness — Arrow Flight + Trino read path validated against a live at-scale Cassandra deployment · 2 breaking changes                                                                                            |
+| [v0.13.0](/cqlite/releases/v0-13-0/)              | 2026-07-05 | Performance release — read-path + point-read + compressed-chunk wins · byte-bounded results · `Database.refresh()` · 3 breaking changes                                                                                        |
+| [v0.12.0](/cqlite/releases/v0-12-0/)              | 2026-06-22 | Arrow Flight + Trino connector · CDC delta-export to Parquet · byte-for-byte compaction parity                                                                                                                                 |
 
 <!-- Convention: newest release first. Give each new release page a lower
      sidebar.order than the previous one so it sorts above older releases
@@ -6700,11 +6700,15 @@ The field-round report is [in the repository](https://github.com/pmcfadin/cqlite
 [Section titled “Get it”](#get-it)
 
 ```bash
-brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
-cargo add cqlite-core                     # Rust library
-pip install cqlite-py                     # Python
-npm install @cqlite/node                  # Node.js
+pip install cqlite-py==0.19.0             # Python
+npm install @cqlite/node@0.19.0           # Node.js
 ```
+
+The Linux CLI binaries are attached to the [v0.19.0 GitHub release](https://github.com/pmcfadin/cqlite/releases/tag/v0.19.0), or build the CLI from source (see [Installation](/cqlite/user-docs/installation/#build-from-source-rust)).
+
+As of 2026-11-27
+
+macOS/Windows binaries, crates.io and Homebrew for 0.19.0 are being completed; until then use pip/npm or the Linux binary, or build from source.
 
 # SSTable Format Guide
 
@@ -17512,7 +17516,7 @@ tasks.register<Sync>("assemblePlugin") {
 If you would rather fetch **one** file by version than resolve \~50 runtime artifacts — a container build, an air-gapped host, a per-node `hostPath` cache — a shaded jar is published as a GitHub Release asset, with a `.sha256` sidecar:
 
 ```bash
-V=0.18.0
+V=0.19.0
 BASE=https://github.com/pmcfadin/cqlite/releases/download/v$V
 curl -fLO "$BASE/cqlite-trino-$V-all.jar"
 curl -fLO "$BASE/cqlite-trino-$V-all.jar.sha256"
@@ -17596,6 +17600,16 @@ The Flight server + Trino connector are one of several CQLite read surfaces. For
 
 CQLite ships in four forms: a prebuilt CLI binary (the fastest way to start), a Rust library crate, a Python package, and a Node.js package.
 
+## Current release
+
+[Section titled “Current release”](#current-release)
+
+The current release is [v0.19.0](/cqlite/releases/v0-19-0/) (2026-11-27).
+
+As of 2026-11-27
+
+macOS/Windows binaries, crates.io and Homebrew for 0.19.0 are being completed; until then use pip/npm or the Linux binary, or build from source.
+
 ## Homebrew (macOS + Linux)
 
 [Section titled “Homebrew (macOS + Linux)”](#homebrew-macos--linux)
@@ -17607,13 +17621,13 @@ brew install pmcfadin/cqlite/cqlite
 cqlite --version
 ```
 
-Upgrade to the latest release with `brew upgrade cqlite`. To pin or inspect the tap explicitly, run `brew tap pmcfadin/cqlite` first, then `brew install cqlite`.
+Until the tap carries 0.19.0 (see the note above), `brew` installs the previous release. Upgrade to the latest release with `brew upgrade cqlite`. To pin or inspect the tap explicitly, run `brew tap pmcfadin/cqlite` first, then `brew install cqlite`.
 
 ## Prebuilt CLI binaries
 
 [Section titled “Prebuilt CLI binaries”](#prebuilt-cli-binaries)
 
-Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a prebuilt `cqlite` binary and a `.sha256` checksum sidecar for six platforms:
+Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a prebuilt `cqlite` binary and a `.sha256` checksum sidecar for six platforms. For v0.19.0 only the Linux assets are attached so far; the macOS and Windows assets are being completed (see the note above):
 
 | Platform                    | Asset                                     |
 | --------------------------- | ----------------------------------------- |
