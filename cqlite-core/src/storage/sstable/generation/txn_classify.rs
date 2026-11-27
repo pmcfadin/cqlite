@@ -110,7 +110,7 @@ pub(super) struct Classification {
 }
 
 /// One log read from disk: `None` when the file is gone.
-fn read_log(path: &Path) -> GenerationResult<Option<TxnLog>> {
+fn read_log(path: &Path, folder: &Path, relocatable: bool) -> GenerationResult<Option<TxnLog>> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         // `FileUtils.readLines` returns no lines for a file that vanished.
@@ -126,7 +126,9 @@ fn read_log(path: &Path) -> GenerationResult<Option<TxnLog>> {
         path: path.to_path_buf(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
     })?;
-    Ok(Some(verify(&split_lines(&text))))
+    Ok(Some(verify(&split_lines(&text), &|r| {
+        disk_path(folder, r, relocatable)
+    })))
 }
 
 /// How a record's path relates to the listed directory.
@@ -142,20 +144,31 @@ enum Applies {
     Relocated(PathBuf),
 }
 
-/// `PathUtils.isContained(folder, record path)` on canonical paths, then the Q47 relocation rule.
-/// A record path names a file that need not exist, so its parent is canonicalised and the name
-/// re-attached for the exact test.
-fn applies_to_folder(canonical_folder: &Path, record: &Record) -> Applies {
+/// The record applies to the directory when its file is a DIRECT child of the canonical folder
+/// (a transaction log applies within its one directory only, G8; Cassandra's `isContained` also
+/// accepts a deeper path, which this module does not). A record path names a file that need not
+/// exist, so its parent is canonicalised.
+///
+/// `relocatable` is true only when the listed directory IS the table directory (`Scope::Live`):
+/// then the Q47 rule also accepts a record whose keyspace and table directory names match. For a
+/// snapshot or backups directory the last two components are not (keyspace, table), so only the
+/// exact rule is sound there.
+fn applies_to_folder(canonical_folder: &Path, record: &Record, relocatable: bool) -> Applies {
     let Some(abs) = record.absolute_path.as_deref() else {
         return Applies::No;
     };
     let p = Path::new(abs);
-    let canonical = match (p.parent().map(std::fs::canonicalize), p.file_name()) {
-        (Some(Ok(parent)), Some(name)) => parent.join(name),
-        _ => p.to_path_buf(),
+    // `new File(path).name()`: a path with no final element names no file.
+    let (Some(_), Some(record_table)) = (p.file_name(), p.parent()) else {
+        return Applies::No;
     };
-    if canonical.starts_with(canonical_folder) {
+    let canonical_parent =
+        std::fs::canonicalize(record_table).unwrap_or_else(|_| record_table.to_path_buf());
+    if canonical_parent == canonical_folder {
         return Applies::Exact;
+    }
+    if !relocatable {
+        return Applies::No;
     }
     // Q47: the table id in the directory name is authoritative metadata, so matching the keyspace
     // and table directory names (the file name is matched by the caller) is not a heuristic.
@@ -163,9 +176,6 @@ fn applies_to_folder(canonical_folder: &Path, record: &Record) -> Applies {
         canonical_folder.file_name(),
         canonical_folder.parent().and_then(Path::file_name),
     ) else {
-        return Applies::No;
-    };
-    let Some(record_table) = p.parent() else {
         return Applies::No;
     };
     let Some(record_ks) = record_table.parent() else {
@@ -183,6 +193,17 @@ fn applies_to_folder(canonical_folder: &Path, record: &Record) -> Applies {
     }
 }
 
+/// Where a record's files are checked on disk: inside the listed directory, whatever prefix the
+/// record names (a relocated record is re-rooted, G8), or nowhere when it does not apply.
+pub(super) fn disk_path(folder: &Path, record: &Record, relocatable: bool) -> Option<PathBuf> {
+    match applies_to_folder(folder, record, relocatable) {
+        Applies::No => None,
+        Applies::Exact | Applies::Relocated(_) => {
+            Some(folder.join(Path::new(record.absolute_path.as_deref()?).file_name()?))
+        }
+    }
+}
+
 /// One applicable record: the record, the directory files its name prefixes, and the original
 /// prefix when the record applied through the Q47 relocation rule.
 type Applied<'a> = (&'a Record, Vec<String>, Option<PathBuf>);
@@ -192,6 +213,7 @@ type Applied<'a> = (&'a Record, Vec<String>, Option<PathBuf>);
 fn files_of_type<'a>(
     log: &'a TxnLog,
     folder: &Path,
+    relocatable: bool,
     files: &BTreeSet<String>,
     ty: RecordType,
 ) -> Vec<Applied<'a>> {
@@ -199,7 +221,7 @@ fn files_of_type<'a>(
         .iter()
         .filter(|r| r.ty == ty && r.is_valid())
         .filter_map(|r| {
-            let relocated = match applies_to_folder(folder, r) {
+            let relocated = match applies_to_folder(folder, r, relocatable) {
                 Applies::No => return None,
                 Applies::Exact => None,
                 Applies::Relocated(prefix) => Some(prefix),
@@ -214,11 +236,12 @@ fn files_of_type<'a>(
         .collect()
 }
 
-/// Classify `logs` (names in `dir`) against `files` (every non-log, non-directory name in `dir`).
+/// Classify `logs` (names in `dir`; `table_dir` when `dir` is the table directory itself) against `files` (every non-log, non-directory name in `dir`).
 pub(super) fn classify(
     dir: &Path,
     files: &BTreeSet<String>,
     logs: &[String],
+    table_dir: bool,
 ) -> GenerationResult<Classification> {
     let folder = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut out = Classification::default();
@@ -230,14 +253,14 @@ pub(super) fn classify(
         if let Some((operation, id)) = match_log_name(name) {
             check_log_name(&path, operation, id)?;
         }
-        let Some(mut log) = read_log(&path)? else {
+        let Some(mut log) = read_log(&path, &folder, table_dir)? else {
             // gone between the listing and the read: nothing to apply
             continue;
         };
         note_problems(&mut out, &path, &log);
 
-        let old = files_of_type(&log, &folder, files, RecordType::Remove);
-        let new = files_of_type(&log, &folder, files, RecordType::Add);
+        let old = files_of_type(&log, &folder, table_dir, files, RecordType::Remove);
+        let new = files_of_type(&log, &folder, table_dir, files, RecordType::Add);
         note_relocation(&mut out, &path, old.iter().chain(new.iter()));
         let old_files: Vec<String> = old.iter().flat_map(|(_, f, _)| f.clone()).collect();
         let new_files: Vec<String> = new.iter().flat_map(|(_, f, _)| f.clone()).collect();
@@ -253,7 +276,7 @@ pub(super) fn classify(
 
         // Some old files are missing and the log is not complete: re-read once
         // (`LogAwareFileLister.java:163-169`).
-        let Some(reread) = read_log(&path)? else {
+        let Some(reread) = read_log(&path, &folder, table_dir)? else {
             continue; // the log is gone: the transaction finished, nothing to hide
         };
         log = reread;
@@ -358,5 +381,32 @@ mod tests {
         assert!(check_log_name(p, "compaction", id).is_ok());
         assert!(check_log_name(p, "bogus", id).is_err());
         assert!(check_log_name(p, "compaction", "not-a-uuid").is_err());
+    }
+
+    fn remove_record(path: &str) -> Record {
+        Record::parse(&super::super::txn_log::record_line("REMOVE", path, 0, 1))
+    }
+
+    /// `new File("<dir>/").name()` is the last element, never "": an empty name would prefix-match
+    /// every file in the directory.
+    #[test]
+    fn record_file_name_is_the_last_element_even_after_a_trailing_slash() {
+        assert_eq!(remove_record("/a/b/").file_name(), "b");
+        assert_eq!(remove_record("/a/b/nb-1-big-").file_name(), "nb-1-big-");
+        assert_eq!(remove_record("").file_name(), "");
+    }
+
+    #[test]
+    fn a_record_without_a_file_name_never_applies() {
+        let folder = Path::new("/nonexistent-4626/ks/t-1");
+        for path in [
+            "",
+            "/",
+            "/nonexistent-4626/ks/t-1/..",
+            "/nonexistent-4626/ks/t-1/",
+        ] {
+            let r = remove_record(path);
+            assert_eq!(applies_to_folder(folder, &r, true), Applies::No, "{path:?}");
+        }
     }
 }

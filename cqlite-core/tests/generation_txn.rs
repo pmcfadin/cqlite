@@ -336,26 +336,243 @@ fn record_naming_another_table_id_does_not_apply() {
     assert_eq!(l.txn_logs.len(), 1);
 }
 
+/// A copy of a committed fixture (same keyspace and table directory names, another absolute
+/// prefix) with each REMOVE record's files given the record's `updateTime` as their mtime: a git
+/// checkout loses the mtimes Cassandra's verification compares, so without this the copy's REMOVE
+/// records fail verification, exactly as they would for Cassandra.
+fn stamped_fixture_copy(state: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let src = fixture_table(state, "txn_compaction");
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("gd4626").join(src.file_name().unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut stamps: Vec<(String, u64)> = Vec::new();
+    for entry in std::fs::read_dir(&src).unwrap().filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        std::fs::copy(entry.path(), dir.join(&name)).unwrap();
+        if name.ends_with(".log") {
+            for line in std::fs::read_to_string(entry.path()).unwrap().lines() {
+                if let Some(rest) = line.strip_prefix("REMOVE:[") {
+                    let mut parts = rest.split(',');
+                    let path = parts.next().unwrap();
+                    let ms: u64 = parts.next().unwrap().parse().unwrap();
+                    stamps.push((path.rsplit('/').next().unwrap().to_string(), ms));
+                }
+            }
+        }
+    }
+    for entry in std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some((_, ms)) = stamps.iter().find(|(p, _)| name.starts_with(p.as_str())) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(entry.path())
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_millis(*ms))
+                .unwrap();
+        }
+    }
+    (root, dir)
+}
+
 /// G1.1 on the Cassandra-written fixture itself.
 #[test]
 fn spec_g1_1_on_the_cassandra_written_fixture() {
-    let l = list(&fixture_table("txn_committed", "txn_compaction"));
+    let (_root, dir) = stamped_fixture_copy("txn_committed");
+    let l = list(&dir);
     assert_eq!(live(&l), vec!["nb-4-big"]);
 }
 
 /// G1.2 on the Cassandra-derived fixture.
 #[test]
 fn spec_g1_2_on_the_derived_fixture() {
-    let l = list(&fixture_table("txn_incomplete", "txn_compaction"));
+    let (_root, dir) = stamped_fixture_copy("txn_incomplete");
+    let l = list(&dir);
     assert_eq!(live(&l), vec!["nb-1-big", "nb-2-big", "nb-3-big"]);
 }
 
 /// G2.1 on the Cassandra-derived fixture.
 #[test]
 fn spec_g2_1_on_the_derived_fixture() {
-    let dir = fixture_table("txn_inconsistent", "txn_compaction");
+    let (_root, dir) = stamped_fixture_copy("txn_inconsistent");
     assert!(matches!(
         list_generations(&dir, &Scope::Live, TocPolicy::Accept),
         Err(GenerationError::TxnInconsistent { .. })
     ));
+}
+
+/// Stage `root/<base>/gd4626/txn_compaction-<id>` with the compaction fixture's generations 1-4.
+/// The REMOVE inputs are stamped with the record time only when `stamp` is true.
+fn stage_under(root: &Path, base: &str, stamp: bool) -> std::path::PathBuf {
+    let src = fixture_table("txn_committed", "txn_compaction");
+    let dir = root
+        .join(base)
+        .join("gd4626")
+        .join(src.file_name().unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    for entry in std::fs::read_dir(&src).unwrap().filter_map(|e| e.ok()) {
+        if !entry.file_name().to_string_lossy().ends_with(".log") {
+            std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+        }
+    }
+    if stamp {
+        stamp_inputs(&dir);
+    }
+    dir
+}
+
+/// The committed compaction log of `LOG_NAME`, its records naming `prefix_dir`, written into `into`.
+fn write_log_naming(into: &Path, prefix_dir: &Path, commit: bool) {
+    let prefix = |n: u32| format!("{}/nb-{n}-big-", prefix_dir.display());
+    let n = FILES_PER_GENERATION as i32;
+    let mut lines = vec![
+        record("ADD", &prefix(4), 0, n),
+        record("REMOVE", &prefix(3), STAMP_MS, n),
+        record("REMOVE", &prefix(2), STAMP_MS, n),
+        record("REMOVE", &prefix(1), STAMP_MS, n),
+    ];
+    if commit {
+        lines.push(record("COMMIT", "", 0, 0));
+    }
+    std::fs::write(into.join(LOG_NAME), lines.join("\n") + "\n").unwrap();
+}
+
+fn corrupt_note(l: &Listing) -> bool {
+    l.notes
+        .iter()
+        .any(|n| matches!(n, DirectoryNote::CorruptTxnLog { .. }))
+}
+
+/// Q47 + G8: a relocated record is verified against the COPY. The original path does not exist
+/// here, and the copy's mtimes disagree with the records, so verification must say so.
+#[test]
+fn relocated_record_verifies_against_the_copy_when_the_original_is_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let copy = stage_under(root.path(), "copy", false); // unstamped: mtimes differ from the log
+                                                        // names the same table dir, under an absolute prefix that is not there
+    let named = root
+        .path()
+        .join("gone")
+        .join("gd4626")
+        .join(copy.file_name().unwrap());
+    write_log_naming(&copy, &named, true);
+    let l = list(&copy);
+    assert!(corrupt_note(&l), "{:?}", l.notes);
+}
+
+/// Q47 + G8: when the original path DOES exist on this host the module never reads it. The
+/// original holds files stamped to match the records; the copy does not, so the copy decides.
+#[test]
+fn relocated_record_never_reads_the_original_that_exists() {
+    let root = tempfile::tempdir().unwrap();
+    let original = stage_under(root.path(), "orig", true); // would verify cleanly
+    let copy = stage_under(root.path(), "copy", false);
+    write_log_naming(&copy, &original, true);
+    let l = list(&copy);
+    assert!(corrupt_note(&l), "{:?}", l.notes);
+    // and the converse: the copy is stamped, the original is not
+    let root = tempfile::tempdir().unwrap();
+    let original = stage_under(root.path(), "orig", false);
+    let copy = stage_under(root.path(), "copy", true);
+    write_log_naming(&copy, &original, true);
+    let l = list(&copy);
+    assert!(!corrupt_note(&l), "{:?}", l.notes);
+    assert_eq!(live(&l), vec!["nb-4-big"]);
+}
+
+fn snapshot_with_log(
+    records_dir: &str,
+    scope_sub: &str,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let table = root.path().join("gd4626").join("txn_compaction-aaaa");
+    let sub = table.join(scope_sub);
+    std::fs::create_dir_all(&sub).unwrap();
+    let src = fixture_table("txn_committed", "txn_compaction");
+    for entry in std::fs::read_dir(&src).unwrap().filter_map(|e| e.ok()) {
+        if !entry.file_name().to_string_lossy().ends_with(".log") {
+            std::fs::copy(entry.path(), sub.join(entry.file_name())).unwrap();
+        }
+    }
+    let prefix = |n: u32| format!("{records_dir}/nb-{n}-big-");
+    let lines = [
+        record("REMOVE", &prefix(1), 0, 8),
+        record("COMMIT", "", 0, 0),
+    ];
+    std::fs::write(sub.join(LOG_NAME), lines.join("\n") + "\n").unwrap();
+    (root, table)
+}
+
+/// Q47 applies to Scope::Live only: another table's `snapshots/<tag>` names the same last two
+/// components as the listed snapshot directory but is not this directory's record.
+#[test]
+fn snapshot_scope_record_naming_another_tables_snapshot_does_not_apply() {
+    let (_root, table) = snapshot_with_log("/x/gd4626/other-bbbb/snapshots/tag", "snapshots/tag");
+    let l = list_generations(&table, &Scope::Snapshot("tag".into()), TocPolicy::Accept).unwrap();
+    assert_eq!(l.live.len(), 4);
+    assert!(l.hidden.is_empty() && l.notes.is_empty(), "{:?}", l.notes);
+}
+
+/// Neither does a backups record under another keyspace.
+#[test]
+fn backups_scope_record_under_another_keyspace_does_not_apply() {
+    let (_root, table) = snapshot_with_log("/x/otherks/txn_compaction-aaaa/backups", "backups");
+    let l = list_generations(&table, &Scope::Backups, TocPolicy::Accept).unwrap();
+    assert_eq!(l.live.len(), 4);
+    assert!(l.hidden.is_empty() && l.notes.is_empty(), "{:?}", l.notes);
+}
+
+/// G8: a log applies within its one directory. A record for a file in a subdirectory is not a
+/// record for the directory's files, exact or relocated.
+#[test]
+fn record_for_a_file_in_a_subdirectory_does_not_apply() {
+    let tmp = staged();
+    let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+    let lines = [
+        record(
+            "REMOVE",
+            &format!("{}/sub/nb-1-big-", canonical.display()),
+            0,
+            0,
+        ),
+        record("COMMIT", "", 0, 0),
+    ];
+    std::fs::write(tmp.path().join(LOG_NAME), lines.join("\n") + "\n").unwrap();
+    let l = list(tmp.path());
+    assert!(l.hidden.is_empty(), "{:?}", l.hidden);
+
+    let dir = fixture_table("txn_committed", "txn_compaction");
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let root = tempfile::tempdir().unwrap();
+    let copy = root.path().join("gd4626").join(&name);
+    std::fs::create_dir_all(&copy).unwrap();
+    for e in std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()) {
+        if !e.file_name().to_string_lossy().ends_with(".log") {
+            std::fs::copy(e.path(), copy.join(e.file_name())).unwrap();
+        }
+    }
+    let lines = [
+        record("REMOVE", &format!("/o/gd4626/{name}/sub/nb-1-big-"), 0, 0),
+        record("COMMIT", "", 0, 0),
+    ];
+    std::fs::write(copy.join(LOG_NAME), lines.join("\n") + "\n").unwrap();
+    let l = list(&copy);
+    assert!(l.hidden.is_empty() && l.notes.is_empty(), "{:?}", l.notes);
+}
+
+/// Pin (`LogFile.java:195-198` vs `:214-217`): `completed` is decided before checksums are
+/// verified, so a final COMMIT with a bad checksum IS complete, but is not `committed()` (which
+/// re-reads validity after verification): the ADD files are hidden, the REMOVE inputs are not.
+#[test]
+fn final_commit_with_a_bad_checksum_is_complete_but_not_committed() {
+    let tmp = staged();
+    write_log(tmp.path(), true);
+    let path = tmp.path().join(LOG_NAME);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    let last = lines.last_mut().unwrap();
+    *last = "COMMIT:[,0,0][1]".to_string();
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let l = list(tmp.path());
+    assert!(corrupt_note(&l));
+    assert_eq!(live(&l), vec!["nb-1-big", "nb-2-big", "nb-3-big"]);
 }

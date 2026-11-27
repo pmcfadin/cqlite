@@ -476,3 +476,16 @@ fn condition_set_is_closed() {
     }
     assert_eq!(name(Condition::Orphan), "Orphan");
 }
+
+/// A 28-byte id token whose multi-byte char straddles the slice offsets of the UUID layout must not
+/// panic; a non-ASCII name is not an SSTable (`UUIDBasedSSTableId.java:41`), so it is ignored.
+#[test]
+fn non_ascii_28_byte_id_is_ignored_without_panicking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = "abcd_efgh_abcd\u{e9}abcdefghijkl";
+    assert_eq!(id.len(), 28);
+    touch(&tmp.path().join(format!("nb-{id}-big-Data.db")));
+    let listing = list(tmp.path(), Scope::Live);
+    assert!(listing.live.is_empty() && listing.orphans.is_empty());
+    assert_eq!(listing.ignored.len(), 1);
+}

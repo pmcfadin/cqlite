@@ -80,6 +80,8 @@ fn sort_generations(generations: &mut [Generation]) {
     });
 }
 
+/// The directories a scope lists, each with whether it is the table directory itself (which must
+/// exist, and to which transaction-log relocation, Q47, applies).
 fn scope_directories(table_dir: &Path, scope: &Scope) -> GenerationResult<Vec<(PathBuf, bool)>> {
     Ok(match scope {
         Scope::Live => vec![(table_dir.to_path_buf(), true)],
@@ -92,6 +94,8 @@ fn scope_directories(table_dir: &Path, scope: &Scope) -> GenerationResult<Vec<(P
             if tag.is_empty() || tag == "." || tag == ".." || tag.contains(['/', '\\', '\0']) {
                 return Err(GenerationError::InvalidSnapshotTag { tag: tag.clone() });
             }
+            // A symlinked `snapshots/<tag>` is followed, as `Directories` does: the listed
+            // directory is whatever the link resolves to.
             vec![(table_dir.join(SNAPSHOT_SUBDIR).join(tag), false)]
         }
     })
@@ -155,7 +159,7 @@ fn list_directory(dir: &Path, must_exist: bool) -> GenerationResult<DirectoryLis
         .collect();
     out.txn_logs = logs.iter().map(|l| dir.join(l)).collect();
 
-    let classification = classify(dir, &files, &logs)?;
+    let classification = classify(dir, &files, &logs, must_exist)?;
     out.hidden = hidden_files(dir, &classification);
     out.notes = classification.notes.clone();
 

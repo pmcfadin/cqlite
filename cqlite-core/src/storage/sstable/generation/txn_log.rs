@@ -14,7 +14,7 @@
 //! preserved therefore has stale REMOVE records, which follow the IGNORE path: classification
 //! continues from the other records and the listing carries a directory note (G2.2).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crc32fast::Hasher;
 
@@ -150,9 +150,11 @@ impl Record {
 
     /// `LogRecord.fileName`: the last path element, e.g. `nb-1-big-`.
     pub(super) fn file_name(&self) -> &str {
+        // `new File(path).name()`: the last element, so a trailing `/` does not make it empty.
         self.absolute_path
             .as_deref()
-            .and_then(|p| p.rsplit('/').next())
+            .and_then(|p| Path::new(p).file_name())
+            .and_then(|n| n.to_str())
             .unwrap_or("")
     }
 
@@ -228,8 +230,7 @@ struct ExistingFile {
     modified_ms: i64,
 }
 
-fn existing_files(absolute_path: &str) -> Vec<ExistingFile> {
-    let path = Path::new(absolute_path);
+fn existing_files(path: &Path) -> Vec<ExistingFile> {
     let (Some(parent), Some(prefix)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
     else {
         return Vec::new();
@@ -292,7 +293,7 @@ fn truncate_millis(ms: i64) -> i64 {
 /// `LogFile.verify()` for a single replica, in IGNORE mode: returns the log as far as it could be
 /// read and verified, with `problems` listing what failed. The caller classifies from
 /// [`Record::is_valid`] records exactly as `LogAwareFileLister` does.
-pub(super) fn verify(lines: &[&str]) -> TxnLog {
+pub(super) fn verify(lines: &[&str], disk_path: &dyn Fn(&Record) -> Option<PathBuf>) -> TxnLog {
     let mut log = TxnLog::default();
 
     // `LogReplicaSet.readRecords`
@@ -321,7 +322,8 @@ pub(super) fn verify(lines: &[&str]) -> TxnLog {
     }
 
     for record in &mut log.records {
-        verify_record(record);
+        let on_disk = disk_path(record);
+        verify_record(record, on_disk.as_deref());
     }
 
     let Some(failed_on) = log.records.iter().position(|r| !r.is_valid()) else {
@@ -359,7 +361,7 @@ pub(super) fn verify(lines: &[&str]) -> TxnLog {
 /// `LogFile.verifyRecord` (`LogFile.java:243-300`): checksum first, then for a REMOVE record the
 /// update time of what is on disk now. A record whose files are not where it says (nothing found,
 /// time 0) passes the time comparison, as in Cassandra.
-fn verify_record(record: &mut Record) {
+fn verify_record(record: &mut Record, disk_path: Option<&Path>) {
     if record.error.is_some() || record.ty == RecordType::Unknown {
         return;
     }
@@ -376,10 +378,9 @@ fn verify_record(record: &mut Record) {
     if record.ty != RecordType::Remove {
         return;
     }
-    let Some(path) = record.absolute_path.clone() else {
-        return;
-    };
-    let files = existing_files(&path);
+    // Only the listed directory is ever read (G8): a record that does not apply, or names no
+    // file, finds nothing on disk.
+    let files = disk_path.map(existing_files).unwrap_or_default();
     let (disk_time, disk_count) = on_disk_record(&files, 0, false);
     record.on_disk_files = Some(disk_count);
     if truncate_millis(record.update_time) != truncate_millis(disk_time) && disk_time > 0 {
@@ -457,7 +458,7 @@ mod tests {
             "COMMIT:[,0,0][2613697770]".to_string(),
         ];
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let log = verify(&refs);
+        let log = verify(&refs, &|_| None);
         assert!(log.problems.is_empty(), "{:?}", log.problems);
         assert!(log.records.iter().all(Record::is_valid));
         assert!(log.completed && log.committed());
@@ -517,7 +518,7 @@ mod tests {
             record_line("COMMIT", "", 0, 0),
         ];
         let refs: Vec<&str> = l.iter().map(String::as_str).collect();
-        let log = verify(&refs);
+        let log = verify(&refs, &|_| None);
         assert!(log.completed && log.committed());
         assert!(log.problems.is_empty(), "{:?}", log.problems);
     }
@@ -529,7 +530,7 @@ mod tests {
             "COMMIT:[,0,0][12345]".to_string(),
         ];
         let refs: Vec<&str> = l.iter().map(String::as_str).collect();
-        let log = verify(&refs);
+        let log = verify(&refs, &|_| None);
         assert!(log.completed);
         assert!(!log.committed());
         assert!(!log.problems.is_empty());
@@ -542,7 +543,7 @@ mod tests {
             record_line("COMMIT", "", 0, 0),
         ];
         let refs: Vec<&str> = l.iter().map(String::as_str).collect();
-        let log = verify(&refs);
+        let log = verify(&refs, &|_| None);
         assert!(!log.records[0].is_valid());
         assert!(log.records[1].is_valid());
         assert!(log.committed());
@@ -552,7 +553,7 @@ mod tests {
     #[test]
     fn duplicate_record_stops_the_read() {
         let a = record_line("ADD", "/x/nb-3-big-", 0, 8);
-        let log = verify(&[a.as_str(), a.as_str()]);
+        let log = verify(&[a.as_str(), a.as_str()], &|_| None);
         assert_eq!(log.records.len(), 1);
         assert!(!log.completed);
         assert!(!log.problems.is_empty());
@@ -562,7 +563,7 @@ mod tests {
     fn final_record_that_is_not_last_stops_the_read() {
         let c = record_line("COMMIT", "", 0, 0);
         let a = record_line("ADD", "/x/nb-3-big-", 0, 8);
-        let log = verify(&[c.as_str(), a.as_str()]);
+        let log = verify(&[c.as_str(), a.as_str()], &|_| None);
         assert!(!log.completed);
         assert!(!log.records[0].is_valid());
     }

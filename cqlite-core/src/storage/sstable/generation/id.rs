@@ -143,6 +143,11 @@ fn parse_sequence(token: &str) -> Option<u32> {
 }
 
 fn parse_uuid(token: &str) -> Option<UuidGenerationId> {
+    // A non-ASCII token is not an id (`UUIDBasedSSTableId.java:41` matches `[0-9a-z]` only), and
+    // slicing it at byte offsets below could split a character.
+    if !token.is_ascii() {
+        return None;
+    }
     let bytes = token.as_bytes();
     // Layout: 4 '_' 4 '_' 5 13 (`UUIDBasedSSTableId.Builder.PATTERN`).
     if bytes.get(4) != Some(&b'_') || bytes.get(9) != Some(&b'_') {
@@ -270,5 +275,13 @@ mod tests {
             id("3gb2_0rbd_2lhua2pw7a2hlyvbsp"),
             id("3GB2_0RBD_2LHUA2PW7A2HLYVBSP")
         );
+    }
+
+    #[test]
+    fn a_non_ascii_token_is_not_an_id_and_never_panics() {
+        // 28 bytes, '_' at 4 and 9, and a two-byte char straddling the slice offset 15.
+        let token = "abcd_efgh_abcd\u{e9}abcdefghijkl";
+        assert_eq!(token.len(), 28);
+        assert!(GenerationId::parse(token).is_none());
     }
 }

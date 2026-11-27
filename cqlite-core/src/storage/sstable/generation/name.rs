@@ -25,6 +25,10 @@ pub(super) struct ComponentName {
 
 /// Parse `name` as an SSTable component file name, or `None` if it is not one.
 pub(super) fn parse_component_name(name: &str) -> Option<ComponentName> {
+    // A non-ASCII name is not an SSTable component (the id and version patterns are ASCII).
+    if !name.is_ascii() {
+        return None;
+    }
     let mut tokens = name.split('-');
     let (version, id, format, component) = (
         tokens.next()?,
