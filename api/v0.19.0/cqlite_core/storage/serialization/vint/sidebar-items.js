@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["encode_signed","encode_unsigned","signed_len","unsigned_len"]};

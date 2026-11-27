@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TableDirSelection"],"fn":["ingest","ingest_with_selection"],"struct":["DiscoverySummary","IngestionConfig","IngestionResult"]};

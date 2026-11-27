@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["capture_spans","metrics_capture"],"struct":["CapturedMetrics","CapturedSpan","CapturedSpans","MetricEntry","MetricPoint","MetricsCapture"]};

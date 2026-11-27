@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_BUDGET_BYTES","DEFAULT_SHARDS"],"mod":["global_key_offset"],"struct":["ChunkKey","DecompressedChunkCache"]};

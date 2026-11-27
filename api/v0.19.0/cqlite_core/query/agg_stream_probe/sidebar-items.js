@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["buffered_rows","record_buffered_rows","reset"]};

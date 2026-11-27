@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COMMITTED_DOC_REL","WEBSITE_DOC_REL"],"enum":["DocGenError","MetricKind"],"fn":["operator_metric_docs","render_markdown","render_website_markdown"],"struct":["MetricDoc"]};

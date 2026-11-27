@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ExecutionStep","SSTableFilterOp"],"struct":["AggregateComputation","AggregationPlan","OptimizedQueryPlan","SSTablePredicate","SelectOptimizer"]};

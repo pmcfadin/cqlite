@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["QueryContext","QueryContextUpdate","QueryMetadata","ReplDataApi","ReplDataConfig","ReplQueryResult","SystemInfo","TableListing","TableSummary"]};

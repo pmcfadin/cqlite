@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BtiError","BtiNodeData","BtiNodeType"],"struct":["BtiNode","PayloadRef","SizedPointer","Transition"],"type":["BtiResult"]};

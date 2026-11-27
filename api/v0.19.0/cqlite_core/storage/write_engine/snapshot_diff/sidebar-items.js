@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_EFFECTIVE_BUDGET"],"enum":["CellStatus","DiffError","Side"],"fn":["diff_partition","diff_partitions","diff_table"],"mod":["resurrection"],"struct":["CellDiffEntry","CellSide","DiffOptions","DiffReport","DiffSide","DiffSummary","PartitionDiff","ResurrectionRisk","ShadowedCell","SideInfo","TombstoneDiffEntry"]};

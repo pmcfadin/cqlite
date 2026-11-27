@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CellOperation","ClusteringBound","MarkerMode"],"struct":["ClusteringKey","DecoratedKey","Mutation","PartitionKey","PartitionTombstone","RangeTombstone","RowMarker","TableId"]};

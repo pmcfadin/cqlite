@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MemoryAllocationStrategy","ParserBackend","ParserFeature"],"struct":["ErrorHandlingSettings","MemoryLimits","MemorySettings","ParserConfig","PerformanceSettings","SecuritySettings"]};

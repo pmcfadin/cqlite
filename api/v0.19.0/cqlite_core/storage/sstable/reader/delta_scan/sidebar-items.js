@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DeltaRecord"],"fn":["scan_delta"],"struct":["CellDelta","CellMeta","RangeBound","RowKeys","ScanSummary","ScanSummaryHandle"],"type":["ScanDeltaOutput"]};

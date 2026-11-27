@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_decompressor_from_file"],"struct":["ChunkDecompressor"]};

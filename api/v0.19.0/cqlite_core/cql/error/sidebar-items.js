@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ErrorCategory","ErrorSeverity","ParserError"],"mod":["utils"],"struct":["ErrorContext","ParserWarning"],"type":["ParserResult"]};
