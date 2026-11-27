@@ -710,6 +710,25 @@ assert_mdx "plain pathspec-like name, prose"     pre-weird weird-names $':(top)p
 assert_mdx "pathspec-like name adding an import" pathspec-prose pathspec-import $':(top)q.mdx\n' full
 assert_mdx "binary attr cannot hide an import"   docs-page-import binary-attr-import $'docs/page.mdx\n' full
 
+# A grep without -P support (BSD/macOS grep) exits 2 on the PCRE matcher. That is NOT "no match":
+# the content was not measured, so even a prose-only .mdx must fail CLOSED (roborev r3, #4649).
+GREPSHIM="$TMPROOT/grep-shim"
+mkdir -p "$GREPSHIM"
+REALGREP=$(command -v grep)
+cat >"$GREPSHIM/grep" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do case "\$a" in -P*|-*P*) [ "\${a#--}" = "\$a" ] && exit 2 ;; esac; done
+exec "$REALGREP" "\$@"
+SHIM
+chmod +x "$GREPSHIM/grep"
+out=$(cd "$MDXREPO" && PATH="$GREPSHIM:$PATH" CLASSIFY_DIFF_FROM=base CLASSIFY_DIFF_TO=prose-mdx bash "$CLASSIFY" 2>/dev/null < <(printf 'website/src/content/docs/index.mdx\n'))
+rc=$?
+if [ "$out" = "full" ] && [ "$rc" -eq 1 ]; then
+  ok "a grep without -P fails closed even on prose-only .mdx (#4649: full)"
+else
+  bad "a grep without -P fails closed even on prose-only .mdx (#4649: expected full, got exit $rc/'$out')"
+fi
+
 echo
 echo "==== classify-docs-only self-test: PASS=$PASS FAIL=$FAIL ===="
 [ "$FAIL" -eq 0 ]

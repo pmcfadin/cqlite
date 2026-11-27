@@ -80,10 +80,15 @@ roborev_mdx_adds_module_lines() {
   # Leading blanks include a UTF-8 BOM and every ECMAScript WhiteSpace (TAB VT FF SP, NBSP U+00A0,
   # U+FEFF, U+1680, U+2000-200A, U+202F, U+205F, U+3000) plus U+2028/2029, matched as BYTES (C locale).
   local _ws='(?:[ \t\x0b\x0c\r]|\xC2\xA0|\xEF\xBB\xBF|\xE1\x9A\x80|\xE2\x80[\x80-\x8A\xA8\xA9\xAF]|\xE2\x81\x9F|\xE3\x80\x80)*'
-  if LC_ALL=C grep -Pq "^\\+${_ws}(?:import|export)(?:[^A-Za-z0-9_]|\$)" <<<"$_out"; then
-    return 0
-  fi
-  return 1
+  # grep's status is captured explicitly: 0 = a match (CODE), 1 = no match (PROSE), anything else
+  # (an unsupported -P on a non-GNU grep, a bad pattern) = NOT MEASURED, so fail closed.
+  local _rc=0
+  LC_ALL=C grep -Pq "^\\+${_ws}(?:import|export)(?:[^A-Za-z0-9_]|\$)" <<<"$_out" || _rc=$?
+  case "$_rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 # THE PROSE PREFIXES, and the RULE that applies under them: an extensionless path under one
 # of these directories is CODE **iff git records it EXECUTABLE AT EITHER ENDPOINT of the
