@@ -57,6 +57,10 @@ is `LogAwareFileLister`. The module mirrors the parts that decide liveness:
   old file is present, the transaction is in progress and is treated as aborted (`:150-154`). If old
   files are missing and the log is not complete after one re-read, the directory is inconsistent
   (`:172-186`), and the listing fails with the named error `TxnInconsistent`.
+- **Relocated table directories.** Settled by owner ruling Q47 (2026-11-27): a txn log record applies
+  when its keyspace directory, table directory and file name match the listed directory's, whatever its
+  absolute prefix, and the listing carries a note naming the original prefix. A deliberate deviation from
+  Cassandra's `isInFolder` (`LogFile.getFilesOfType`), which would hide nothing in a copied directory.
 - **Corrupt log records.** Cassandra's `OnTxnErr` chooses between throwing and logging
   (`LogAwareFileLister.java:133-137`). The module follows the setting Cassandra uses to load a table,
   `IGNORE` (`ColumnFamilyStore.java:519`): it classifies from the readable records and names the corrupt
@@ -127,7 +131,7 @@ reaches a parser that would mis-read it (`sstable-version-floor` requirement 2).
   TimeUUID, and every sequence id sorts before every UUID id. `sortedList` uses it
   (`Directories.java:1058-1063`).
 - **One id space.** The id is the second token and the format is independent
-  (`Descriptor.java:402`). BIG and BTI, and `na`, `nb`, `oa`, `da`, share one id space, so `nb-1-big`
+  (`Descriptor.java:402`). BIG (`na`, `nb`, `oa`) and BTI (`da` only) share one id space, so `nb-1-big`
   and `da-1-bti` collide in id even though the names differ. `getUIDGenerator` scans every descriptor
   in the directory with `includeBackups(true)` (`Directories.java:1394-1405`).
 - **Next id.** The maximum sequence id over the Live set and `backups/`, plus one

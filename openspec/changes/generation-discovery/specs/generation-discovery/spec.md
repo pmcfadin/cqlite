@@ -13,7 +13,7 @@ All requirements are ADDED.
 The Live set SHALL be computed from the directory's transaction logs: a committed transaction hides its REMOVE files and an uncommitted one hides its ADD files, as `LogAwareFileLister` does (`db/lifecycle/LogAwareFileLister.java:144-148`, `setTemporary` `:197-203`). A log such as `nb_txn_compaction_<uuid>.log` matches `LogFile.FILE_REGEX` (`db/lifecycle/LogFile.java:80`).
 
 #### Scenario: G1.1 committed compaction hides the inputs
-- **Rule detail and Cassandra reference**: When the log is complete, the files of its REMOVE records are not live if the transaction committed, and the files of its ADD records are not live if it did not, whatever is on disk (`db/lifecycle/LogAwareFileLister.java:144-148`, `setTemporary` `:197-203`). When the log is incomplete but every file its REMOVE records name is present, the transaction is in progress and is treated as aborted: its ADD files are not live (`:150-154`). The module SHALL list non-log files before reading logs (`:88-95`). A transaction log SHALL never appear as a component (`db/Directories.java:1121-1122`).
+- **Rule detail and Cassandra reference**: When the log is complete, the files of its REMOVE records are not live if the transaction committed, and the files of its ADD records are not live if it did not, whatever is on disk (`db/lifecycle/LogAwareFileLister.java:144-148`, `setTemporary` `:197-203`). When the log is incomplete but every file its REMOVE records name is present, the transaction is in progress and is treated as aborted: its ADD files are not live (`:150-154`). The module SHALL list non-log files before reading logs (`:88-95`). A transaction log SHALL never appear as a component (`db/Directories.java:1121-1122`). A record names its file by absolute path; the module SHALL apply a record to the listed directory when the record's path is inside it, or when the record's keyspace directory name, then its `<table>-<tableid>` directory name, then its file name match the listed directory's (the absolute prefix MAY differ), and a record naming a different keyspace or table directory SHALL NOT apply. When any applied record's absolute prefix differs from the listed directory, the listing result SHALL carry a directory-level note saying the log came from a relocated path and naming the original prefix. This is a deliberate, documented deviation from Cassandra, whose `LogFile.getFilesOfType` filters with `isInFolder`, a canonical-path compare that hides nothing in a relocated or copied directory (owner ruling Q47, 2026-11-27); the table id in the directory name is authoritative metadata, not a heuristic.
 - **Given** a Cassandra-written directory holding `nb-1-big-*`, `nb-2-big-*`, `nb-3-big-*` and a complete
   committed `nb_txn_compaction_<uuid>.log` whose REMOVE records name generations 1 and 2 and whose ADD
   record names generation 3
@@ -33,6 +33,15 @@ The Live set SHALL be computed from the directory's transaction logs: a committe
 - **When** the Live set is listed
 - **Then** it contains every generation that has a `Data.db`, and no log file is returned as a
   component.
+
+#### Scenario: G1.4 relocated table directory
+- **Given** a Cassandra-written table directory copied away from the path its committed
+  `nb_txn_compaction_<uuid>.log` records name, with the keyspace and `<table>-<tableid>` directory names
+  unchanged
+- **When** the Live set is listed
+- **Then** the log applies exactly as in G1.1, and the listing carries a note naming the log and the
+  original absolute prefix; the same log in a directory whose table id differs hides nothing and
+  produces no note.
 
 ### Requirement: G2 — An inconsistent transaction state fails the whole listing with TxnInconsistent
 
@@ -129,8 +138,8 @@ digits (`io/sstable/SequenceBasedSSTableId.java:90,112`) whose value fits in `0.
 ### Requirement: G6 — BIG and BTI, across every version letter, share one id space; the next id is max(live+backups)+1
 
 The module SHALL provide the next sequence id for a table as the maximum sequence id found across the
-Live set and `backups/`, over every descriptor whatever its format (`big`, `bti`) and version letter
-(`na`, `nb`, `oa`, `da`), plus one, and 1 when there is none.
+Live set and `backups/`, plus Orphans, below-floor generations and files a transaction log hides (Cassandra's allocator lists without `skipTemporary`, so none of them is skipped), over every descriptor whatever its format (`big`, `bti`) and version letter
+(BIG `na`, `nb`, `oa`; BTI `da` only), plus one, and 1 when there is none.
 
 #### Scenario: G6.1 format and version do not separate ids
 - **Rule detail and Cassandra reference**: UUID ids do not contribute to the maximum (`io/sstable/SequenceBasedSSTableId.java:97-107`, filter at `:99`; `db/Directories.java:1394-1405`, `includeBackups(true)` at `:1398`). A listing used for allocation SHALL ignore transaction-log errors as Cassandra's generator does (`OnTxnErr.IGNORE`, `:1397`), so a damaged log never blocks allocation but also never lowers the maximum.
@@ -177,7 +186,7 @@ both; `Snapshot(tag)` lists `<table-dir>/snapshots/<tag>` and nothing else
 (`db/Directories.java:1094-1108`; names `:119-120`).
 
 #### Scenario: G8.1 Live does not read snapshots or backups
-- **Rule detail and Cassandra reference**: No Scope SHALL descend into a subdirectory it was not named for: directory entries are skipped when listing (`db/lifecycle/LogAwareFileLister.java:110`), so a secondary-index subdirectory such as `.idx_name` and the `snapshots/` and `backups/` directories are never entered by `Live`. A Scope whose directory does not exist yields an empty listing, not an error (`getSnapshotDirectoryIfExists` / `getBackupsDirectoryIfExists`, `:1096,1106`). Transaction logs apply within the one directory only.
+- **Rule detail and Cassandra reference**: No Scope SHALL descend into a subdirectory it was not named for: directory entries are skipped when listing (`db/lifecycle/LogAwareFileLister.java:110`), so a secondary-index subdirectory such as `.idx_name` and the `snapshots/` and `backups/` directories are never entered by `Live`. A missing table directory under Scope `Live` is an error; a missing `backups/` or `snapshots/<tag>` directory under Scope `Backups` or `Snapshot(tag)` yields an empty listing (`getSnapshotDirectoryIfExists` / `getBackupsDirectoryIfExists`, `:1096,1106`). Transaction logs apply within the one directory only.
 - **Given** a table directory with `nb-1-big-*`, `snapshots/pre/nb-1-big-*` and `backups/nb-2-big-*`
 - **When** listed with Scope Live
 - **Then** only `nb-1-big` in the table directory itself is returned.
