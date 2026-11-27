@@ -633,6 +633,102 @@ else
   bad "pr-gate.yml not found at $WORKFLOW"
 fi
 
+# ===========================================================================
+# ISSUE #4649 — `.mdx` is prose unless the diff ADDS an import/export.
+#
+# The rule lives ONCE, in roborev_mdx_adds_module_lines (scripts/flow/roborev-review-oracles.sh),
+# shared with roborev's census. The classifier needs the diff CONTENT, so it is handed the range
+# via CLASSIFY_DIFF_FROM/CLASSIFY_DIFF_TO; with no range an `.mdx` stays CODE (fail-closed).
+# ===========================================================================
+MDXREPO="$TMPROOT/mdx-repo"
+mkdir -p "$MDXREPO/website/src/content/docs" "$MDXREPO/docs"
+(
+  cd "$MDXREPO" || exit 1
+  git init -q -b main . && git config user.email t@t && git config user.name t
+  printf 'import Card from "../Card.astro";\n\n# Home\n\nhello\n' >website/src/content/docs/index.mdx
+  printf 'base\n' >docs/a.md
+  printf 'import Card from "../Card.astro";\n\nbody\n' >docs/page.mdx
+  git add -A && git commit -q -m base && git tag base
+  printf 'import Card from "../Card.astro";\n\n# Home\n\nhello, with a [link](/x).\n' >website/src/content/docs/index.mdx
+  git commit -qam prose-mdx
+  git tag prose-mdx
+  printf 'import Other from "../Other.astro";\n\n# Home\n\nhello, with a [link](/x).\n' >website/src/content/docs/index.mdx
+  git commit -qam import-mdx
+  git tag import-mdx
+  printf 'export const x = 1;\n' >website/src/content/docs/new.mdx
+  git add -A && git commit -q -m export-mdx
+  git tag export-mdx
+  printf 'more\n' >>docs/a.md
+  printf 'prose only line\n' >>website/src/content/docs/index.mdx
+  git commit -qam mixed
+  git tag mixed
+  printf 'import Card from "../Card.astro";\n\nbody, edited\n' >docs/page.mdx
+  git commit -qam docs-page-prose && git tag docs-page-prose
+  printf 'import Extra from "../Extra.astro";\n\nbody, edited\n' >docs/page.mdx
+  git commit -qam docs-page-import && git tag docs-page-import
+  printf '*.mdx binary\n' >.gitattributes
+  printf 'import Bin from "../Bin.astro";\n\nbody, edited\n' >docs/page.mdx
+  git add -A && git commit -q -m binary-attr-import && git tag binary-attr-import
+  printf '\xef\xbb\xbfimport Bom from "../Bom.astro";\n' >bom.mdx
+  printf '\xc2\xa0export const n = 1;\n' >nbsp.mdx
+  printf '# plain\n' >':(top)p.mdx'
+  git add -A && git commit -q -m weird-names && git tag weird-names
+  git tag pre-weird weird-names~1
+  printf '# plain\n\nprose\n' >':(top)q.mdx'
+  git add -A && git commit -q -m pathspec-prose && git tag pathspec-prose
+  printf 'import Magic from "../M.astro";\n' >>':(top)q.mdx'
+  git commit -qam pathspec-import && git tag pathspec-import
+) >/dev/null 2>&1
+
+# assert_mdx <label> <from> <to> <file-list> <docs-only|full>
+assert_mdx() {
+  local label="$1" from="$2" to="$3" input="$4" want="$5" out rc
+  out=$(cd "$MDXREPO" && CLASSIFY_DIFF_FROM="$from" CLASSIFY_DIFF_TO="$to" bash "$CLASSIFY" 2>/dev/null < <(printf '%s' "$input"))
+  rc=$?
+  local want_rc=1
+  [ "$want" = "docs-only" ] && want_rc=0
+  if [ "$out" = "$want" ] && [ "$rc" -eq "$want_rc" ]; then
+    ok "$label (#4649: $want)"
+  else
+    bad "$label (#4649: expected $want, got exit $rc/'$out')"
+  fi
+}
+echo "== (d) #4649: .mdx is prose unless it adds an import/export =="
+assert_mdx "prose-only .mdx edit"                base        prose-mdx  $'website/src/content/docs/index.mdx\n' docs-only
+assert_mdx "mdx adding an import"                prose-mdx   import-mdx $'website/src/content/docs/index.mdx\n' full
+assert_mdx "new mdx adding an export"            import-mdx  export-mdx $'website/src/content/docs/new.mdx\n'   full
+assert_mdx "mixed .md and prose .mdx"            export-mdx  mixed      $'docs/a.md\nwebsite/src/content/docs/index.mdx\n' docs-only
+assert_mdx "prose .mdx beside real code"         base        prose-mdx  $'website/src/content/docs/index.mdx\ncqlite-core/src/lib.rs\n' full
+assert_mdx "unresolvable range fails closed"     nosuchref   prose-mdx  $'website/src/content/docs/index.mdx\n' full
+assert_full "no range: .mdx stays code"          $'website/src/content/docs/index.mdx\n'
+assert_full "no range: .mdx under docs/"         $'docs/page.mdx\n'
+assert_mdx "docs/ .mdx prose-only edit"          base        docs-page-prose $'docs/page.mdx\n' docs-only
+assert_mdx "docs/ .mdx adding an import"         docs-page-prose docs-page-import $'docs/page.mdx\n' full
+assert_mdx "BOM-prefixed new .mdx adding an import" pre-weird weird-names $'bom.mdx\n' full
+assert_mdx "NBSP-prefixed export is code"        pre-weird weird-names $'nbsp.mdx\n' full
+assert_mdx "plain pathspec-like name, prose"     pre-weird weird-names $':(top)p.mdx\n' docs-only
+assert_mdx "pathspec-like name adding an import" pathspec-prose pathspec-import $':(top)q.mdx\n' full
+assert_mdx "binary attr cannot hide an import"   docs-page-import binary-attr-import $'docs/page.mdx\n' full
+
+# A grep without -P support (BSD/macOS grep) exits 2 on the PCRE matcher. That is NOT "no match":
+# the content was not measured, so even a prose-only .mdx must fail CLOSED (roborev r3, #4649).
+GREPSHIM="$TMPROOT/grep-shim"
+mkdir -p "$GREPSHIM"
+REALGREP=$(command -v grep)
+cat >"$GREPSHIM/grep" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do case "\$a" in -P*|-*P*) [ "\${a#--}" = "\$a" ] && exit 2 ;; esac; done
+exec "$REALGREP" "\$@"
+SHIM
+chmod +x "$GREPSHIM/grep"
+out=$(cd "$MDXREPO" && PATH="$GREPSHIM:$PATH" CLASSIFY_DIFF_FROM=base CLASSIFY_DIFF_TO=prose-mdx bash "$CLASSIFY" 2>/dev/null < <(printf 'website/src/content/docs/index.mdx\n'))
+rc=$?
+if [ "$out" = "full" ] && [ "$rc" -eq 1 ]; then
+  ok "a grep without -P fails closed even on prose-only .mdx (#4649: full)"
+else
+  bad "a grep without -P fails closed even on prose-only .mdx (#4649: expected full, got exit $rc/'$out')"
+fi
+
 echo
 echo "==== classify-docs-only self-test: PASS=$PASS FAIL=$FAIL ===="
 [ "$FAIL" -eq 0 ]

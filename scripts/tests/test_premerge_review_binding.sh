@@ -465,6 +465,40 @@ if run_binding 0 "code-free: a code-free PR diff with no job is NOT-APPLICABLE" 
   esac
 fi
 
+# --- Case 6b/6c (#4649): an .mdx is prose unless the PR diff ADDS an import/export ----
+# One shared rule (roborev_mdx_adds_module_lines) decides this for the classifier AND the
+# roborev census; the binding must therefore treat a prose .mdx PR as NOT-APPLICABLE and an
+# import-adding one as code (UNBOUND with no record).
+(
+  cd "$WORK" || exit 1
+  git checkout -q -b mdx-main main
+  printf 'import Card from "../Card.astro";\n\n# Home\n\nhello\n' >index.mdx
+  git add -A && git commit -qm "base: an mdx page"
+  git checkout -q -b mdx-prose mdx-main
+  printf 'import Card from "../Card.astro";\n\n# Home\n\nhello, with a [link](/x).\n' >index.mdx
+  git commit -qam "prose-only mdx edit"
+  git rev-parse HEAD >"$T/mdx-prose-head"
+  git checkout -q -b mdx-import mdx-main
+  printf 'import Other from "../Other.astro";\n\n# Home\n\nhello\n' >index.mdx
+  git commit -qam "mdx adds an import"
+  git rev-parse HEAD >"$T/mdx-import-head"
+) >/dev/null 2>&1
+pr_payload "$MOCK_GH_DIR/pr.json" mdx-main "no review recorded here"
+if run_binding 0 "mdx-prose: a prose-only .mdx PR diff with no job is NOT-APPLICABLE" \
+  review-binding 1 pmcfadin/cqlite "$(cat "$T/mdx-prose-head")"; then
+  case "$OUT" in
+    *"verdict NOT-APPLICABLE"*) ok "mdx-prose: verdict NOT-APPLICABLE (#4649)" ;;
+    *) bad "mdx-prose: expected 'verdict NOT-APPLICABLE' (got: $OUT)" ;;
+  esac
+fi
+if run_binding 4 "mdx-import: an .mdx that adds an import is code, so no record is UNBOUND" \
+  review-binding 1 pmcfadin/cqlite "$(cat "$T/mdx-import-head")"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*) ok "mdx-import: verdict UNBOUND (#4649)" ;;
+    *) bad "mdx-import: expected 'verdict UNBOUND' (got: $OUT)" ;;
+  esac
+fi
+
 # --- Case 7: an unretrievable job record ---------------------------------------
 pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 999)"
 rm -f "$MOCK_ROBOREV_DIR/job-999.json" "$MOCK_ROBOREV_DIR/list.json"

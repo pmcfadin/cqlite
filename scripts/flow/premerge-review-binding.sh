@@ -383,7 +383,7 @@ print_self_check() {
   say "self-check still reflog-reachable and answers \`commit\`):"
   say "self-check   git merge-base --is-ancestor $(sane "$1") $(sane "$2") \\"
   say "self-check     && git diff --name-only $(sane "$1")..$(sane "$2") \\"
-  say "self-check          | bash scripts/ci/classify-docs-only.sh"
+  say "self-check          | CLASSIFY_DIFF_FROM=$(sane "$1") CLASSIFY_DIFF_TO=$(sane "$2") bash scripts/ci/classify-docs-only.sh"
 }
 
 # classify_paths <from> <to> — 0 when the range adds no reviewable code, 1 when
@@ -407,7 +407,9 @@ classify_paths() {
   # this leg's own three-valued rule violated by the plumbing: "the consumer
   # decided early" is not "the measurement failed". A here-string has no such
   # race, and the byte stream is identical (both append one newline).
-  bash "$CLASSIFY_TOOL" >/dev/null 2>&1 <<<"$paths"
+  # #4649: hand the range to the classifier so an `.mdx` is judged by its CONTENT (prose unless it
+  # adds an import/export) through the ONE shared rule, rather than failing closed unconditionally.
+  CLASSIFY_DIFF_FROM="$1" CLASSIFY_DIFF_TO="$2" bash "$CLASSIFY_TOOL" >/dev/null 2>&1 <<<"$paths"
   case "$?" in
     0) return 0 ;;
     1) return 1 ;;

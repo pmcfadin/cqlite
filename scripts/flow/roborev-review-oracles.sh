@@ -46,6 +46,50 @@
 # (`docs/LICENSE`, `openspec/NOTES`). Anything with a code-ish extension anywhere —
 # including `.github/workflows/*.yml` — counts as CODE and does not trip this key.
 CODE_FREE_EXTENSIONS="md markdown mdx txt rst adoc"
+
+# ---------------------------------------------------------------------------
+# THE MDX RULE (issue #4649) — ONE implementation, two callers.
+#
+# `.mdx` is prose EXCEPT that an MDX `import`/`export` EXECUTES at site-build time. So a `.mdx`
+# path is documentation iff the diff ADDS no `import`/`export` line, and CODE otherwise. This
+# function is the ONLY place that decision lives: the roborev census (below, in `roborev_census`)
+# and `scripts/ci/classify-docs-only.sh` (which `premerge-review-binding.sh` runs) BOTH call it.
+# A second copy would let the two disagree again — which is what made an `.mdx` PR unmergeable:
+# the census said docs (no record can be produced) while the classifier said code (a record is
+# required).
+#
+# roborev_mdx_adds_module_lines <repo> <from> <to> <path>
+#   0  the diff <from>..<to> ADDS an import/export line to <path>  -> CODE
+#   1  it adds none                                                -> PROSE
+#   2  the diff could not be measured                              -> callers fail CLOSED (code)
+# A line counts when, after the diff's `+`, it starts with optional blanks (incl. BOM/ECMAScript whitespace) then `import` or
+# `export` followed by a non-identifier character. Over-matching (a prose line "export a ...", or an
+# import inside a code fence) errs toward CODE, the safe side. No rename detection: a new path is
+# all additions.
+# ---------------------------------------------------------------------------
+roborev_mdx_adds_module_lines() {
+  local _repo="$1" _from="$2" _to="$3" _path="$4" _out
+  [ -n "$_repo" ] && [ -n "$_from" ] && [ -n "$_to" ] && [ -n "$_path" ] || return 2
+  # --literal-pathspecs: $_path is a NAME, never pathspec magic (`:(top)x.mdx` must not select another path).
+  _out=$(git --literal-pathspecs -C "$_repo" -c diff.renames=false -c diff.relative=false \
+    diff --text --no-textconv -U0 --no-ext-diff --no-color "$_from" "$_to" -- "$_path" 2>/dev/null) || return 2
+  # --text forces a textual diff even under a `binary` attribute; if git STILL reports a binary
+  # difference the content was not measured, so fail closed (never read as prose).
+  if grep -Eq '^Binary files .* differ$|^GIT binary patch$' <<<"$_out"; then return 2; fi
+  # Here-string, not `printf | grep -q`: grep -q exits on the first hit and would SIGPIPE a producer.
+  # Leading blanks include a UTF-8 BOM and every ECMAScript WhiteSpace (TAB VT FF SP, NBSP U+00A0,
+  # U+FEFF, U+1680, U+2000-200A, U+202F, U+205F, U+3000) plus U+2028/2029, matched as BYTES (C locale).
+  local _ws='(?:[ \t\x0b\x0c\r]|\xC2\xA0|\xEF\xBB\xBF|\xE1\x9A\x80|\xE2\x80[\x80-\x8A\xA8\xA9\xAF]|\xE2\x81\x9F|\xE3\x80\x80)*'
+  # grep's status is captured explicitly: 0 = a match (CODE), 1 = no match (PROSE), anything else
+  # (an unsupported -P on a non-GNU grep, a bad pattern) = NOT MEASURED, so fail closed.
+  local _rc=0
+  LC_ALL=C grep -Pq "^\\+${_ws}(?:import|export)(?:[^A-Za-z0-9_]|\$)" <<<"$_out" || _rc=$?
+  case "$_rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
 # THE PROSE PREFIXES, and the RULE that applies under them: an extensionless path under one
 # of these directories is CODE **iff git records it EXECUTABLE AT EITHER ENDPOINT of the
 # census range** (`${BASE}...HEAD`) — non-code only when it is executable at NEITHER.
@@ -779,6 +823,14 @@ roborev_census() {
       for candidate in $CODE_FREE_EXTENSIONS; do
         if [ "$ext" = "$candidate" ]; then file_non_code=1; fi
       done
+      # #4649: an `.mdx` that ADDS an import/export is CODE (it runs at site build); an
+      # unmeasurable diff is code too. The rule is roborev_mdx_adds_module_lines, shared with
+      # scripts/ci/classify-docs-only.sh.
+      if [ "$file_non_code" -eq 1 ] && [ "$ext" = "mdx" ]; then
+        mdx_rc=0
+        roborev_mdx_adds_module_lines "$REPO" "$RANGE_BASE_SHA" HEAD "$path" || mdx_rc=$?
+        if [ "$mdx_rc" -ne 1 ]; then file_non_code=0; fi
+      fi
       if [ "$file_non_code" -eq 0 ]; then
         artifact_dir=0
         if roborev_path_in_artifact_dir "$path"; then artifact_dir=1; fi

@@ -167,6 +167,20 @@ _ext_in_list() {
   return 1
 }
 
+# mdx_path_is_prose <path> -> 0 when the `.mdx` path is prose (issue #4649). The rule is
+# roborev_mdx_adds_module_lines in the shared declaration — never restated here. It needs the diff
+# CONTENT, so the caller supplies the range as CLASSIFY_DIFF_FROM / CLASSIFY_DIFF_TO (shas or refs,
+# resolved in the current repository). Without a range, or with an unusable import, or an
+# unmeasurable diff, `.mdx` is CODE: fail-closed, exactly as before #4649.
+mdx_path_is_prose() {
+  [ "$ARTIFACT_DECLARATION_STATUS" = "ok" ] || return 1
+  declare -F roborev_mdx_adds_module_lines >/dev/null 2>&1 || return 1
+  [ -n "${CLASSIFY_DIFF_FROM:-}" ] && [ -n "${CLASSIFY_DIFF_TO:-}" ] || return 1
+  local rc=0
+  roborev_mdx_adds_module_lines . "$CLASSIFY_DIFF_FROM" "$CLASSIFY_DIFF_TO" "$1" || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
 # docs_path_is_documentation <path-under-docs/> -> 0 when the path is
 # documentation. THE ONLY place a path under `docs/` is classified (#3250): the
 # defect this replaced was not one wrong `case` arm but a verdict reachable from
@@ -196,6 +210,7 @@ docs_path_is_documentation() {
   # the exact extensionless name, so this regresses nothing real.
   case "$base" in
     *.md | *.markdown) return 0 ;;
+    *.mdx) mdx_path_is_prose "$path"; return $? ;;
     *.png | *.jpg | *.jpeg | *.gif | *.svg | *.webp | *.ico) return 0 ;;
     LICENSE | LICENSE.md | LICENSE.markdown | LICENSE.txt | LICENSE.rst) return 0 ;;
     NOTICE | NOTICE.md | NOTICE.markdown | NOTICE.txt | NOTICE.rst) return 0 ;;
@@ -271,6 +286,7 @@ is_docs_file() {
   # `full` before and after), which is a loosening this change does not make.
   case "$path" in
     *.md | *.markdown) return 0 ;;
+    *.mdx) mdx_path_is_prose "$path"; return $? ;;
     *.png | *.jpg | *.jpeg | *.gif | *.svg | *.webp | *.ico) return 0 ;;
     LICENSE | LICENSE.md | LICENSE.markdown | LICENSE.txt | LICENSE.rst) return 0 ;;
     NOTICE | NOTICE.md | NOTICE.markdown | NOTICE.txt | NOTICE.rst) return 0 ;;
