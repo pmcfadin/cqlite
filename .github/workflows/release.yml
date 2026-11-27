@@ -207,11 +207,25 @@ jobs:
         set -euo pipefail
         case "$TARGET" in *windows*) ext=zip ;; *) ext=tar.gz ;; esac
         archive="cqlite-${TARGET}.${ext}"
-        if gh release view "$TAG" --json assets -q '.assets[].name' | grep -Fxq "$archive"; then
-          echo "::notice::$archive already on release $TAG; skipping archive and checksum"
-          exit 0
+        sidecar="${archive}.sha256"
+        assets="$(gh release view "$TAG" --json assets -q '.assets[].name')"
+        has_archive=false; has_sidecar=false
+        printf '%s\n' "$assets" | grep -Fxq "$archive" && has_archive=true
+        printf '%s\n' "$assets" | grep -Fxq "$sidecar" && has_sidecar=true
+        if [ "$has_archive" = false ]; then
+          # Missing archive: publish the fresh build with its matching sidecar.
+          gh release upload "$TAG" "./$archive" "./$sidecar" --clobber
+        elif [ "$has_sidecar" = false ]; then
+          # Archive published, sidecar missing: hash the PUBLISHED bytes (rebuilds
+          # are not byte-reproducible) and upload only the sidecar.
+          dl="$(mktemp -d)"
+          gh release download "$TAG" --pattern "$archive" --dir "$dl"
+          (cd "$dl" && sha256sum "$archive" > "$sidecar")
+          cat "$dl/$sidecar"
+          gh release upload "$TAG" "$dl/$sidecar"
+        else
+          echo "::notice::$archive and $sidecar already on release $TAG; nothing to do"
         fi
-        gh release upload "$TAG" "./$archive" "./${archive}.sha256" --clobber
 
   # Append the changelog + hosted API-docs links to the auto-generated release
   # notes. Runs once per tag (no matrix) so the body is set a single time (#563).
