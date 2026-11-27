@@ -804,6 +804,13 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add docs
       git_q "$work" commit -q -m 'base: an ASCII harness script'
       ;;
+    mdx-prose | mdx-import | md-mdx-prose)
+      # #4649: the page must exist at the BASE so the branch EDITS it (an edit adds no import).
+      mkdir -p "$work/website/src/content/docs"
+      printf 'import Card from "../Card.astro";\n\n# Home\n\nhello\n' >"$work/website/src/content/docs/index.mdx"
+      git_q "$work" add website
+      git_q "$work" commit -q -m 'base: an mdx page'
+      ;;
     docs-extensionless-exec-unset | docs-extensionless-exec-set)
       # A MODE CHANGE is only expressible in `origin/main...HEAD` when the path exists at the
       # BASE, so it is created here with the STARTING mode; the branch flips it below. Both the
@@ -949,6 +956,16 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf 'BEGIN { exit(); }\n' >"$work/docs/reports/x-artifacts/harness/offcpu.bt"
       git_q "$work" add docs
       git_q "$work" commit -q -m 'harness executables under docs/'
+      ;;
+    mdx-prose | mdx-import | md-mdx-prose)
+      if [ "$mode" = mdx-import ]; then
+        printf 'import Other from "../Other.astro";\n\n# Home\n\nhello\n' >"$work/website/src/content/docs/index.mdx"
+      else
+        printf 'import Card from "../Card.astro";\n\n# Home\n\nhello, with a [link](/x).\n' >"$work/website/src/content/docs/index.mdx"
+      fi
+      if [ "$mode" = md-mdx-prose ]; then printf '# notes\n' >"$work/docs-notes.md"; git_q "$work" add docs-notes.md; fi
+      git_q "$work" add website
+      git_q "$work" commit -q -m 'mdx change'
       ;;
     docs-prose)
       mkdir -p "$work/docs/reports"
@@ -1702,6 +1719,33 @@ run_wrapper "$work"
 assert_verdict 'case (cx2)' FAIL 1
 assert_says 'case (cx2) code-free still FAILs on prose under docs/' '^code-free: FAIL \(code-free census: 2/2 files are documentation/specification text\)$'
 assert_never_enqueued 'case (cx2)'
+
+printf '== case (mdx1): a PROSE-only .mdx edit is code-free (#4649) ==\n'
+reset_stub
+work=$(make_fixture case_mdx1 mdx-prose)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (mdx1)' FAIL 1
+assert_says 'case (mdx1) prose .mdx is documentation, same as the classifier' '^code-free: FAIL \(code-free census: 1/1 files are documentation/specification text\)$'
+assert_never_enqueued 'case (mdx1)'
+
+printf '== case (mdx2): an .mdx that ADDS an import is CODE (#4649) ==\n'
+reset_stub
+work=$(make_fixture case_mdx2 mdx-import)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/website/src/content/docs/index.mdx b/website/src/content/docs/index.mdx'
+run_wrapper "$work"
+assert_verdict 'case (mdx2)' PASS 0
+assert_says 'case (mdx2) an import-adding .mdx is not code-free' '^code-free: PASS$'
+
+printf '== case (mdx3): .md plus prose .mdx is code-free (#4649) ==\n'
+reset_stub
+work=$(make_fixture case_mdx3 md-mdx-prose)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (mdx3)' FAIL 1
+assert_says 'case (mdx3) both files are documentation' '^code-free: FAIL \(code-free census: 2/2 files are documentation/specification text\)$'
+assert_never_enqueued 'case (mdx3)'
 
 printf '== case (cx3): docs-scoped ARTIFACTS with no executables are still code-free ==\n'
 reset_stub

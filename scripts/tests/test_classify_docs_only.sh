@@ -633,6 +633,60 @@ else
   bad "pr-gate.yml not found at $WORKFLOW"
 fi
 
+# ===========================================================================
+# ISSUE #4649 — `.mdx` is prose unless the diff ADDS an import/export.
+#
+# The rule lives ONCE, in roborev_mdx_adds_module_lines (scripts/flow/roborev-review-oracles.sh),
+# shared with roborev's census. The classifier needs the diff CONTENT, so it is handed the range
+# via CLASSIFY_DIFF_FROM/CLASSIFY_DIFF_TO; with no range an `.mdx` stays CODE (fail-closed).
+# ===========================================================================
+MDXREPO="$TMPROOT/mdx-repo"
+mkdir -p "$MDXREPO/website/src/content/docs" "$MDXREPO/docs"
+(
+  cd "$MDXREPO" || exit 1
+  git init -q -b main . && git config user.email t@t && git config user.name t
+  printf 'import Card from "../Card.astro";\n\n# Home\n\nhello\n' >website/src/content/docs/index.mdx
+  printf 'base\n' >docs/a.md
+  git add -A && git commit -q -m base && git tag base
+  printf 'import Card from "../Card.astro";\n\n# Home\n\nhello, with a [link](/x).\n' >website/src/content/docs/index.mdx
+  git commit -qam prose-mdx
+  git tag prose-mdx
+  printf 'import Other from "../Other.astro";\n\n# Home\n\nhello, with a [link](/x).\n' >website/src/content/docs/index.mdx
+  git commit -qam import-mdx
+  git tag import-mdx
+  printf 'export const x = 1;\n' >website/src/content/docs/new.mdx
+  git add -A && git commit -q -m export-mdx
+  git tag export-mdx
+  printf 'more\n' >>docs/a.md
+  printf 'prose only line\n' >>website/src/content/docs/index.mdx
+  git commit -qam mixed
+  git tag mixed
+) >/dev/null 2>&1
+
+# assert_mdx <label> <from> <to> <file-list> <docs-only|full>
+assert_mdx() {
+  local label="$1" from="$2" to="$3" input="$4" want="$5" out rc
+  out=$(cd "$MDXREPO" && CLASSIFY_DIFF_FROM="$from" CLASSIFY_DIFF_TO="$to" bash "$CLASSIFY" 2>/dev/null < <(printf '%s' "$input"))
+  rc=$?
+  local want_rc=1
+  [ "$want" = "docs-only" ] && want_rc=0
+  if [ "$out" = "$want" ] && [ "$rc" -eq "$want_rc" ]; then
+    ok "$label (#4649: $want)"
+  else
+    bad "$label (#4649: expected $want, got exit $rc/'$out')"
+  fi
+}
+echo "== (d) #4649: .mdx is prose unless it adds an import/export =="
+assert_mdx "prose-only .mdx edit"                base        prose-mdx  $'website/src/content/docs/index.mdx\n' docs-only
+assert_mdx "mdx adding an import"                prose-mdx   import-mdx $'website/src/content/docs/index.mdx\n' full
+assert_mdx "new mdx adding an export"            import-mdx  export-mdx $'website/src/content/docs/new.mdx\n'   full
+assert_mdx "mixed .md and prose .mdx"            export-mdx  mixed      $'docs/a.md\nwebsite/src/content/docs/index.mdx\n' docs-only
+assert_mdx "prose .mdx beside real code"         base        prose-mdx  $'website/src/content/docs/index.mdx\ncqlite-core/src/lib.rs\n' full
+assert_mdx "unresolvable range fails closed"     nosuchref   prose-mdx  $'website/src/content/docs/index.mdx\n' full
+assert_full "no range: .mdx stays code"          $'website/src/content/docs/index.mdx\n'
+assert_full "no range: .mdx under docs/"         $'docs/page.mdx\n'
+assert_mdx "docs/ .mdx with no added import"      base        prose-mdx  $'docs/page.mdx\n' docs-only
+
 echo
 echo "==== classify-docs-only self-test: PASS=$PASS FAIL=$FAIL ===="
 [ "$FAIL" -eq 0 ]
