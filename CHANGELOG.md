@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.19.0] - TBD
+## [v0.19.0] - 2026-11-27
 
 The SSTable utility release: detect, diagnose, compare, recover and export. Every new verb is
 read-only on its input files; `salvage` and `rebuild` write only to a separate `--out`. Narrative
