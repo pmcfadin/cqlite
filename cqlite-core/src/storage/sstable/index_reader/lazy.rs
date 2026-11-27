@@ -11,6 +11,7 @@ use super::parse::{parse_big_index_entry_framing, parse_index_data_cancellable};
 use super::{IndexData, IndexReader};
 use crate::error::{Error, Result};
 use crate::platform::Platform;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File;
@@ -43,6 +44,35 @@ pub(super) struct MaterializedIndex {
     /// separately at the enumeration site). Only the completeness-sensitive full
     /// enumeration consults it; point-lookup callers tolerate a partial prefix.
     pub(super) fully_parsed: bool,
+    /// Private copy of `index_data.key_lookup` under a fast non-keyed hasher,
+    /// read by [`IndexReader::lookup_partition`]. The keys are partition keys
+    /// stored in this SSTable's own `Index.db`, so SipHash's flooding defence
+    /// buys nothing on this per-request path. `key_lookup` (a `pub` field) is
+    /// left unchanged; the keys share their bytes with it through the `Arc`.
+    fast_lookup: FxHashMap<Arc<[u8]>, usize>,
+}
+
+impl MaterializedIndex {
+    /// Build the cell, deriving the fast lookup map from `index_data.key_lookup`
+    /// entry for entry, so both maps hold the same key-to-index pairs.
+    pub(super) fn new(index_data: IndexData, fully_parsed: bool) -> Self {
+        let mut fast_lookup =
+            FxHashMap::with_capacity_and_hasher(index_data.key_lookup.len(), Default::default());
+        for (key, &index) in &index_data.key_lookup {
+            fast_lookup.insert(Arc::clone(key), index);
+        }
+        Self {
+            index_data,
+            fully_parsed,
+            fast_lookup,
+        }
+    }
+
+    /// Index into `index_data.partition_entries` for `key_digest`; the same
+    /// answer `index_data.key_lookup.get(key_digest)` gives.
+    pub(super) fn entry_index(&self, key_digest: &[u8]) -> Option<usize> {
+        self.fast_lookup.get(key_digest).copied()
+    }
 }
 
 impl IndexReader {
@@ -232,10 +262,7 @@ impl IndexReader {
                         }
                     };
                 let fully_parsed = remaining.is_empty();
-                Ok(MaterializedIndex {
-                    index_data,
-                    fully_parsed,
-                })
+                Ok(MaterializedIndex::new(index_data, fully_parsed))
             })
             .await?;
         Ok(())
@@ -475,6 +502,47 @@ mod tests {
         out.extend_from_slice(&crate::parser::vint::encode_vuint(data_offset));
         out.extend_from_slice(&crate::parser::vint::encode_vuint(0));
         out
+    }
+
+    /// The private fast-hash map read by `lookup_partition` must hold exactly the
+    /// key-to-index pairs of the public `key_lookup` map, including which index a
+    /// repeated key resolves to, and must miss on keys `key_lookup` misses.
+    #[tokio::test]
+    async fn fast_lookup_matches_key_lookup() {
+        let keys: Vec<Vec<u8>> = (0..64u32)
+            .map(|i| format!("pk{i:04}").into_bytes())
+            .chain([b"pk0007".to_vec()])
+            .collect();
+        let mut bytes = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            bytes.extend_from_slice(&encode_entry(key, i as u64 * 100));
+        }
+        let (dir, path) = temp_index_file("fast-lookup", &bytes);
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("platform must initialize"),
+        );
+        let reader = IndexReader::open(&path, platform).await.unwrap();
+        let m = reader.materialized.get().expect("eager open materializes");
+        assert_eq!(m.fast_lookup.len(), m.index_data.key_lookup.len());
+        for key in &keys {
+            let want = m.index_data.key_lookup.get(key.as_slice()).copied();
+            assert!(want.is_some(), "key {key:?} must be in key_lookup");
+            assert_eq!(m.entry_index(key), want, "key {key:?}");
+            let via_reader = reader.lookup_partition(key).map(|e| e.data_offset);
+            let via_public = want.map(|i| m.index_data.partition_entries[i].data_offset);
+            assert_eq!(via_reader, via_public, "key {key:?}");
+        }
+        for missing in [&b"pk9999"[..], b"pk000", b"pk00070"] {
+            assert_eq!(m.index_data.key_lookup.get(missing), None);
+            assert_eq!(m.entry_index(missing), None);
+            assert!(reader.lookup_partition(missing).is_none());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Issue #2412 (coordinator-flagged regression, re-anchor of the #2383 fix-C
