@@ -220,7 +220,12 @@ jobs:
           # are not byte-reproducible) and upload only the sidecar.
           dl="$(mktemp -d)"
           gh release download "$TAG" --pattern "$archive" --dir "$dl"
-          (cd "$dl" && sha256sum "$archive" > "$sidecar")
+          # Portable: sha256sum on Linux, shasum on macOS (same as the build step).
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$dl" && sha256sum "$archive" > "$sidecar")
+          else
+            (cd "$dl" && shasum -a 256 "$archive" > "$sidecar")
+          fi
           cat "$dl/$sidecar"
           gh release upload "$TAG" "$dl/$sidecar"
         else
