@@ -2,9 +2,10 @@
 //! `LogAwareFileLister` semantics.
 //!
 //! The SSTable bytes are Cassandra-written (copied from `test-data/fixtures/issue_4626/txn_*`).
-//! Cassandra's own log records carry the container's absolute paths, which Cassandra refuses to
-//! apply to any other directory (`LogRecord.isInFolder`), so the cases that need a log to take
-//! effect rebuild the SAME five records for the tempdir's path (the checksum function was proven
+//! Cassandra's own log records carry the container's absolute paths. Cassandra refuses to apply
+//! them to another directory (`LogRecord.isInFolder`); the module applies them when the keyspace
+//! and table directory names match (owner ruling Q47). The cases that need a log with a
+//! tempdir's own prefix rebuild the SAME five records for the tempdir's path (the checksum function was proven
 //! against Cassandra-written records in the module's unit tests) and set each REMOVE input's
 //! mtime to the record's `updateTime`, restoring the state Cassandra wrote.
 
@@ -17,8 +18,8 @@ use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use cqlite_core::storage::sstable::generation::{
-    list_generations, next_generation_id, Condition, DirectoryNote, GenerationError, GenerationId,
-    HiddenBy, Listing, Scope, TocPolicy,
+    list_generations, next_generation_id, DirectoryNote, GenerationError, GenerationId, HiddenBy,
+    Listing, Scope, TocPolicy,
 };
 use generation_fixtures::*;
 
@@ -213,7 +214,10 @@ fn corrupt_record_follows_ignore_and_is_named_in_a_note() {
     let DirectoryNote::CorruptTxnLog {
         path: noted,
         reasons,
-    } = &l.notes[0];
+    } = &l.notes[0]
+    else {
+        panic!("expected CorruptTxnLog, got {:?}", l.notes[0]);
+    };
     assert_eq!(noted, &path);
     assert!(
         reasons.iter().any(|r| r.contains("Invalid checksum")),
@@ -243,7 +247,9 @@ fn stale_mtime_remove_records_follow_ignore() {
     );
     assert!(l.hidden.is_empty());
     assert_eq!(l.notes.len(), 1);
-    let DirectoryNote::CorruptTxnLog { path, reasons } = &l.notes[0];
+    let DirectoryNote::CorruptTxnLog { path, reasons } = &l.notes[0] else {
+        panic!("expected CorruptTxnLog, got {:?}", l.notes[0]);
+    };
     assert_eq!(path, &tmp.path().join(LOG_NAME));
     assert!(
         reasons
@@ -289,59 +295,63 @@ fn allocation_counts_hidden_generations_and_ignores_a_damaged_log() {
     assert_eq!(l.notes.len(), 1);
 }
 
-/// What Cassandra itself does with its own committed log in a directory it was not written for:
-/// `LogRecord.isInFolder` is false for every record, so nothing is hidden. This pins the faithful
-/// port against the Cassandra-written bytes; see the report for the consequence.
+/// Q47 (owner ruling 2026-11-27): a Cassandra-written log whose records name another absolute
+/// prefix applies when the keyspace directory, the `<table>-<tableid>` directory and the file name
+/// match, and the listing says the log came from a relocated path.
 #[test]
-fn cassandra_written_log_in_a_relocated_directory_hides_nothing() {
-    for (state, expected) in [
-        (
-            "txn_committed",
-            vec!["nb-1-big", "nb-2-big", "nb-3-big", "nb-4-big"],
-        ),
-        (
-            "txn_incomplete",
-            vec!["nb-1-big", "nb-2-big", "nb-3-big", "nb-4-big"],
-        ),
-    ] {
-        let dir = fixture_table(state, "txn_compaction");
-        let l = list(&dir);
-        assert_eq!(live(&l), expected, "{state}");
-        assert!(l.hidden.is_empty() && l.notes.is_empty(), "{state}");
-        assert_eq!(l.txn_logs.len(), 1, "{state}");
-        assert!(l
-            .live
-            .iter()
-            .all(|g| g.components().iter().all(|c| !c.name.ends_with(".log"))));
-        assert!(l.live.iter().all(|g| !g.has_condition(Condition::Orphan)));
-    }
+fn relocated_log_applies_and_emits_the_relocated_path_note() {
+    let dir = fixture_table("txn_committed", "txn_compaction");
+    let l = list(&dir);
+    assert!(
+        l.notes.iter().any(|n| matches!(
+            n,
+            DirectoryNote::RelocatedTxnLog { original_prefix, .. }
+                if original_prefix == Path::new("/var/lib/cassandra/data")
+        )),
+        "{:?}",
+        l.notes
+    );
+    assert_eq!(l.txn_logs.len(), 1);
 }
 
-const BLOCKED: &str =
-    "blocked on an owner decision (#4626 report): Cassandra's isInFolder makes its \
-own log inert outside the directory it was written for, so the spec outcome on the committed \
-fixture cannot hold under a faithful port";
-
-/// G1.1 as the spec states it, on the Cassandra-written fixture itself.
+/// Q47 negative: a record naming a different table id (or keyspace) never applies.
 #[test]
-#[ignore = "blocked on an owner decision (#4626 report): isInFolder vs spec G1.1 on relocated fixtures"]
+fn record_naming_another_table_id_does_not_apply() {
+    let src = fixture_table("txn_committed", "txn_compaction");
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp
+        .path()
+        .join("gd4626")
+        .join("txn_compaction-ffffffffffffffffffffffffffffffff");
+    std::fs::create_dir_all(&dir).unwrap();
+    for entry in std::fs::read_dir(&src).unwrap().filter_map(|e| e.ok()) {
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let l = list(&dir);
+    assert_eq!(
+        live(&l),
+        vec!["nb-1-big", "nb-2-big", "nb-3-big", "nb-4-big"]
+    );
+    assert!(l.hidden.is_empty() && l.notes.is_empty(), "{:?}", l.notes);
+    assert_eq!(l.txn_logs.len(), 1);
+}
+
+/// G1.1 on the Cassandra-written fixture itself.
+#[test]
 fn spec_g1_1_on_the_cassandra_written_fixture() {
-    let _ = BLOCKED;
     let l = list(&fixture_table("txn_committed", "txn_compaction"));
     assert_eq!(live(&l), vec!["nb-4-big"]);
 }
 
-/// G1.2 as the spec states it, on the Cassandra-derived fixture.
+/// G1.2 on the Cassandra-derived fixture.
 #[test]
-#[ignore = "blocked on an owner decision (#4626 report): isInFolder vs spec G1.2 on relocated fixtures"]
 fn spec_g1_2_on_the_derived_fixture() {
     let l = list(&fixture_table("txn_incomplete", "txn_compaction"));
     assert_eq!(live(&l), vec!["nb-1-big", "nb-2-big", "nb-3-big"]);
 }
 
-/// G2.1 as the spec states it, on the Cassandra-derived fixture.
+/// G2.1 on the Cassandra-derived fixture.
 #[test]
-#[ignore = "blocked on an owner decision (#4626 report): isInFolder vs spec G2.1 on relocated fixtures"]
 fn spec_g2_1_on_the_derived_fixture() {
     let dir = fixture_table("txn_inconsistent", "txn_compaction");
     assert!(matches!(

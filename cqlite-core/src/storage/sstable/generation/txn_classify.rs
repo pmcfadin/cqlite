@@ -129,38 +129,87 @@ fn read_log(path: &Path) -> GenerationResult<Option<TxnLog>> {
     Ok(Some(verify(&split_lines(&text))))
 }
 
-/// `PathUtils.isContained(folder, record path)` on canonical paths. A record path names a file
-/// that need not exist, so its parent is canonicalised and the name re-attached.
-fn is_in_folder(canonical_folder: &Path, record: &Record) -> bool {
+/// How a record's path relates to the listed directory.
+#[derive(Debug, PartialEq, Eq)]
+enum Applies {
+    /// Not this directory's record.
+    No,
+    /// The record's path is inside the canonical directory (Cassandra's `isInFolder`).
+    Exact,
+    /// Owner ruling Q47 (2026-11-27), a deliberate deviation from `isInFolder`: the record's last
+    /// path components (keyspace directory, `<table>-<tableid>` directory) equal the listed
+    /// directory's, only the absolute prefix differs. Carries the record's original prefix.
+    Relocated(PathBuf),
+}
+
+/// `PathUtils.isContained(folder, record path)` on canonical paths, then the Q47 relocation rule.
+/// A record path names a file that need not exist, so its parent is canonicalised and the name
+/// re-attached for the exact test.
+fn applies_to_folder(canonical_folder: &Path, record: &Record) -> Applies {
     let Some(abs) = record.absolute_path.as_deref() else {
-        return false;
+        return Applies::No;
     };
     let p = Path::new(abs);
     let canonical = match (p.parent().map(std::fs::canonicalize), p.file_name()) {
         (Some(Ok(parent)), Some(name)) => parent.join(name),
         _ => p.to_path_buf(),
     };
-    canonical.starts_with(canonical_folder)
+    if canonical.starts_with(canonical_folder) {
+        return Applies::Exact;
+    }
+    // Q47: the table id in the directory name is authoritative metadata, so matching the keyspace
+    // and table directory names (the file name is matched by the caller) is not a heuristic.
+    let (Some(table_dir), Some(folder_ks)) = (
+        canonical_folder.file_name(),
+        canonical_folder.parent().and_then(Path::file_name),
+    ) else {
+        return Applies::No;
+    };
+    let Some(record_table) = p.parent() else {
+        return Applies::No;
+    };
+    let Some(record_ks) = record_table.parent() else {
+        return Applies::No;
+    };
+    if record_table.file_name() == Some(table_dir) && record_ks.file_name() == Some(folder_ks) {
+        Applies::Relocated(
+            record_ks
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+        )
+    } else {
+        Applies::No
+    }
 }
 
-/// `LogFile.getFilesOfType`: valid records of `ty` inside the folder, each with the files (from
+/// One applicable record: the record, the directory files its name prefixes, and the original
+/// prefix when the record applied through the Q47 relocation rule.
+type Applied<'a> = (&'a Record, Vec<String>, Option<PathBuf>);
+
+/// `LogFile.getFilesOfType`: valid records of `ty` for this folder, each with the files (from
 /// `files`) whose names start with the record's file name.
 fn files_of_type<'a>(
     log: &'a TxnLog,
     folder: &Path,
     files: &BTreeSet<String>,
     ty: RecordType,
-) -> Vec<(&'a Record, Vec<String>)> {
+) -> Vec<Applied<'a>> {
     log.records
         .iter()
-        .filter(|r| r.ty == ty && r.is_valid() && is_in_folder(folder, r))
-        .map(|r| {
+        .filter(|r| r.ty == ty && r.is_valid())
+        .filter_map(|r| {
+            let relocated = match applies_to_folder(folder, r) {
+                Applies::No => return None,
+                Applies::Exact => None,
+                Applies::Relocated(prefix) => Some(prefix),
+            };
             let matched = files
                 .iter()
                 .filter(|f| f.starts_with(r.file_name()))
                 .cloned()
                 .collect();
-            (r, matched)
+            Some((r, matched, relocated))
         })
         .collect()
 }
@@ -189,12 +238,13 @@ pub(super) fn classify(
 
         let old = files_of_type(&log, &folder, files, RecordType::Remove);
         let new = files_of_type(&log, &folder, files, RecordType::Add);
-        let old_files: Vec<String> = old.iter().flat_map(|(_, f)| f.clone()).collect();
-        let new_files: Vec<String> = new.iter().flat_map(|(_, f)| f.clone()).collect();
+        note_relocation(&mut out, &path, old.iter().chain(new.iter()));
+        let old_files: Vec<String> = old.iter().flat_map(|(_, f, _)| f.clone()).collect();
+        let new_files: Vec<String> = new.iter().flat_map(|(_, f, _)| f.clone()).collect();
         // `allFilesPresent`: every old record has at least `numFiles` files.
         let all_old_present = old
             .iter()
-            .all(|(r, f)| i64::from(r.num_files) <= f.len() as i64);
+            .all(|(r, f, _)| i64::from(r.num_files) <= f.len() as i64);
 
         if log.completed || all_old_present {
             set_temporary(&mut out, &path, &log, &old_files, &new_files);
@@ -236,6 +286,22 @@ fn set_temporary(
         out.hidden
             .entry(file.clone())
             .or_insert_with(|| (log_path.to_path_buf(), reason));
+    }
+}
+
+/// Q47: one note per log whose applied records carry an absolute prefix other than the listed
+/// directory's, naming the first such original prefix.
+fn note_relocation<'a>(
+    out: &mut Classification,
+    log_path: &Path,
+    applied: impl Iterator<Item = &'a Applied<'a>>,
+) {
+    let original = applied.into_iter().find_map(|(_, _, rel)| rel.clone());
+    if let Some(original_prefix) = original {
+        out.notes.push(DirectoryNote::RelocatedTxnLog {
+            path: log_path.to_path_buf(),
+            original_prefix,
+        });
     }
 }
 

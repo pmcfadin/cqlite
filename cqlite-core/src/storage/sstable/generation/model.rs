@@ -163,6 +163,15 @@ pub enum DirectoryNote {
         /// What failed, in Cassandra's words where it has them.
         reasons: Vec<String>,
     },
+    /// A transaction log applied to this directory although its records name another absolute
+    /// prefix: the table directory was relocated or copied. Owner ruling Q47 (2026-11-27), a
+    /// documented deviation from Cassandra's `LogRecord.isInFolder`.
+    RelocatedTxnLog {
+        /// The log.
+        path: PathBuf,
+        /// The absolute prefix (the directory above the keyspace directory) its records name.
+        original_prefix: PathBuf,
+    },
 }
 
 /// Everything one directory contributed, with every file accounted for (G13).
