@@ -11,6 +11,14 @@ sidebar:
 CQLite ships in four forms: a prebuilt CLI binary (the fastest way to start), a
 Rust library crate, a Python package, and a Node.js package.
 
+## Current release
+
+The current release is [v0.19.0](/cqlite/releases/v0-19-0/) (2026-11-27).
+
+:::note[As of 2026-11-27]
+macOS/Windows binaries, crates.io and Homebrew for 0.19.0 are being completed; until then use pip/npm or the Linux binary, or build from source.
+:::
+
 ## Homebrew (macOS + Linux)
 
 On macOS (Apple Silicon or Intel) and Linux (x86_64 or arm64), the quickest way
@@ -23,13 +31,15 @@ brew install pmcfadin/cqlite/cqlite
 cqlite --version
 ```
 
-Upgrade to the latest release with `brew upgrade cqlite`. To pin or inspect the
+Until the tap carries 0.19.0 (see the note above), `brew` installs the previous release. Upgrade to the latest release with `brew upgrade cqlite`. To pin or inspect the
 tap explicitly, run `brew tap pmcfadin/cqlite` first, then `brew install cqlite`.
 
 ## Prebuilt CLI binaries
 
 Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a
-prebuilt `cqlite` binary and a `.sha256` checksum sidecar for six platforms:
+prebuilt `cqlite` binary and a `.sha256` checksum sidecar for six platforms. For
+v0.19.0 only the Linux assets are attached so far; the macOS and Windows assets
+are being completed (see the note above):
 
 | Platform | Asset |
 |----------|-------|
