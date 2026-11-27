@@ -438,11 +438,14 @@ fi
 # What this trades into is strictly smaller and recoverable: if the removal succeeds and the
 # release then fails, the record is ORPHANED (it names a lane directory that is gone) rather
 # than a peer's work being deleted. That is clearable with `release --force`.
+# #4641: derive the lane's gate build dir NOW, with the lane's own cargo config (the gate resolves
+# it from the worktree; once the worktree is gone that config is unreadable). Read-only, and kept
+# OUT of the removal block below so the release-abort / removal ordering is untouched.
 lane_builddir=""
 if [ -n "$target_wt" ]; then
-  # #4641: derive the lane's gate build dir NOW, with the lane's own cargo config (the gate resolves
-  # it from the worktree); once the worktree is gone that config is unreadable.
   lane_builddir=$(bash "$(dirname "${BASH_SOURCE[0]}")/lane-builddir.sh" path "$target_wt" 2>/dev/null || true)
+fi
+if [ -n "$target_wt" ]; then
   run git_root worktree remove "$target_wt"
   [ "$DRY_RUN" -eq 1 ] || note "removed worktree $target_wt"
   # #4641: the lane's gate build dir (<CARGO_TARGET_DIR>/wt/<hash>, ~25 GiB) outlives the
