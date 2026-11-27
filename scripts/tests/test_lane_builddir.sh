@@ -39,8 +39,8 @@ check "path ends in wt/<hash of physical root>" '[ "$out" = "$CARGO_TARGET_DIR/w
 gate_cli=$(bash "$REPO_ROOT/scripts/lib/worktree-target-dir.sh" "$live")
 check "path == scripts/lib/worktree-target-dir.sh CLI output" '[ "$out" = "$gate_cli" ]'
 run path "$tmp/wts/never-existed"
-check "path works for a nonexistent worktree" '[ "$rc" = 0 ] && [ "$out" = "$CARGO_TARGET_DIR/wt/$(hash_of "$tmp/wts/never-existed")" ]'
-check "path has no side effects (no dir created)" '[ ! -e "$out" ]'
+check "path REFUSES a nonexistent worktree, naming --dir and target-dir:" '[ "$rc" = 2 ] && grep -q -- "--dir" <<<"$out" && grep -q "target-dir:" <<<"$out"'
+check "path has no side effects (no dir created)" '[ ! -e "$CARGO_TARGET_DIR/wt/$(hash_of "$tmp/wts/never-existed")" ]'
 # The gate must build in the dir the helper names (agent-gate.sh sources the same lib).
 check "agent-gate.sh sources the shared lib" 'grep -q "gate_worktree_target_dir \"\$REPO_ROOT\"" "$REPO_ROOT/scripts/agent-gate.sh"'
 
@@ -78,12 +78,23 @@ check "stale reports a total" 'grep -q "total: 2 stale dir" <<<"$out"'
 
 # 5. remove after the worktree is gone deletes exactly its dir.
 run remove "$gone"
-check "remove deletes the removed worktree's dir" '[ "$rc" = 0 ] && [ ! -e "$gone_dir" ]'
+check "remove <removed-worktree-path> REFUSES and deletes nothing" '[ "$rc" = 2 ] && [ -d "$gone_dir" ] && [ -d "$orphan_dir" ] && [ -d "$live_dir" ] && grep -q -- "--dir" <<<"$out"'
+run remove --dir "$gone_dir" --worktree-removed
+check "remove --dir deletes the removed worktree's dir" '[ "$rc" = 0 ] && [ ! -e "$gone_dir" ]'
 check "remove left the orphan and the live dir alone" '[ -d "$orphan_dir" ] && [ -d "$live_dir" ]'
-run remove "$gone"
-check "remove is idempotent (absent dir is rc 0)" '[ "$rc" = 0 ]'
+run remove --dir "$gone_dir" --worktree-removed
+check "remove --dir is idempotent (absent dir is rc 0)" '[ "$rc" = 0 ]'
 run remove --dir "$orphan_dir"
 check "remove --dir deletes an orphan whose marker root is gone" '[ "$rc" = 0 ] && [ ! -e "$orphan_dir" ]'
+
+# 5b. markerless dirs get their own guidance line matching what remove demands.
+nm="$CARGO_TARGET_DIR/wt/1111111111111111"; mkdir -p "$nm"; echo x >"$nm/f"
+run stale
+check "stale gives markerless dirs their own guidance line" 'grep -Fq "$nm" <<<"$out" && grep -F "$nm" <<<"$out" | grep -q "no .worktree-root marker; inspect, then \`remove --dir $nm --worktree-removed\`"'
+run remove --dir "$nm"
+check "remove refuses that markerless dir without --worktree-removed" '[ "$rc" = 2 ] && [ -d "$nm" ]'
+run remove --dir "$nm" --worktree-removed
+check "remove --dir --worktree-removed deletes it" '[ "$rc" = 0 ] && [ ! -e "$nm" ]'
 
 # 6. #4641 review: a stale scan must not report another clone's LIVE worktree sharing the base.
 other="$tmp/otherclone"; mkdir -p "$other" && : >"$other/.git"
@@ -116,7 +127,7 @@ if command -v cargo >/dev/null 2>&1; then
   pre=$(cd "$main" && bash "$SCRIPT" path "$clane")
   git -C "$crepo" worktree remove --force "$clane"
   post=$(cd "$main" && bash "$SCRIPT" path "$clane" 2>&1)
-  check "after the worktree is gone, path-by-fallback would pick a DIFFERENT dir (why finalize derives first)" '[ "$post" != "$pre" ]'
+  check "after the worktree is gone, path-by-worktree can no longer name the dir (why finalize derives first)" '[ "$post" != "$pre" ]'
   out=$(cd "$main" && bash "$SCRIPT" remove --dir "$pre" --worktree-removed 2>&1); rc=$?
   check "remove --dir deletes the pre-derived dir under the lane's own base" '[ "$rc" = 0 ] && [ ! -e "$pre" ] && [ -d "$cbase" ]'
   export CARGO_TARGET_DIR=$saved_target

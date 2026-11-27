@@ -53,9 +53,13 @@ base_dir() {
 # lane_dir <worktree path>: the wt dir for that path (no side effects, path need not exist).
 lane_dir() {
   case "$1" in /*) ;; *) set -- "$(pwd -P)/$1" ;; esac
-  # Resolve cargo's target dir from the LANE (its .cargo/config.toml), as the gate does; only a
-  # removed worktree falls back to this script's repo.
-  if [ -f "$1/Cargo.toml" ]; then gate_worktree_target_path "$1" "$1"; else gate_worktree_target_path "$1" "$SCRIPT_REPO"; fi
+  # NEVER fall back to another checkout's cargo config: a removed worktree's target dir cannot be
+  # derived from here, and guessing could name an unrelated build dir (#4641).
+  if [ ! -d "$1" ]; then
+    echo "$prog: REFUSED -- worktree $1 does not exist, so its cargo config (and so its build dir) cannot be derived. Use --dir with the path derived before removal (finalize-cleanup.sh does this) or the gate summary's target-dir: line." >&2
+    return 3
+  fi
+  gate_worktree_target_path "$1" "$1"
 }
 
 is_hex16() { case "$1" in *[!0-9a-f]*|'') return 1 ;; esac; [ "${#1}" = 16 ]; }
@@ -68,12 +72,12 @@ cmd_path() {
   [ $# -eq 1 ] || die "usage: path <worktree-path>"
   local d rc
   d=$(lane_dir "$1"); rc=$?
-  [ "$rc" = 0 ] || { echo "$prog: no per-worktree target dir applies (rc=$rc)" >&2; exit 2; }
+  [ "$rc" = 0 ] || { [ "$rc" = 3 ] || echo "$prog: no per-worktree target dir applies (rc=$rc)" >&2; exit 2; }
   printf '%s\n' "$d"
 }
 
 cmd_remove() {
-  local wt="" dir="" removed=0 live marker root
+  local wt="" dir="" removed=0 live marker root rc
   while [ $# -gt 0 ]; do
     case "$1" in
       --worktree-removed) removed=1; shift ;;
@@ -85,7 +89,8 @@ cmd_remove() {
   [ -n "$wt" ] || [ -n "$dir" ] || die "usage: remove <worktree-path>|--dir <wt-dir> [--worktree-removed]"
   [ -z "$wt" ] || [ -z "$dir" ] || die "give a worktree path OR --dir, not both"
   if [ -n "$wt" ]; then
-    dir=$(lane_dir "$wt") || refuse "no per-worktree target dir applies to $wt"
+    dir=$(lane_dir "$wt"); rc=$?
+    [ "$rc" = 0 ] || { [ "$rc" = 3 ] && exit 2; refuse "no per-worktree target dir applies to $wt"; }
     root=$(gate_worktree_canon "$(case "$wt" in /*) printf '%s' "$wt" ;; *) printf '%s/%s' "$(pwd -P)" "$wt" ;; esac)")
   fi
   # Containment: a direct `<base>/wt/<16 hex>` child, never a symlink, nothing else.
@@ -127,7 +132,7 @@ cmd_stale() {
   [ "$rc" = 0 ] || { echo "$prog: cannot establish the shared target base (rc=$rc)" >&2; exit 2; }
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
-    d=$(gate_worktree_target_path "$wt" "$SCRIPT_REPO") || continue
+    d=$(lane_dir "$wt") || continue
     live_hashes="$live_hashes ${d##*/}"
   done < <(live_worktrees)
   echo "stale gate build dirs under $base/wt (no matching live worktree; REPORT ONLY, nothing deleted):"
@@ -143,10 +148,14 @@ cmd_stale() {
     kb=$(du -sk "$d" 2>/dev/null | cut -f1); kb=${kb:-0}
     mt=$(stat -c %Y "$d" 2>/dev/null || echo "$now")
     age=$(( (now - mt) / 86400 ))
-    printf '  %s  %s  untouched %sd  root=%s\n' "$(human "$kb")" "$d" "$age" "$(head -1 "$d/.worktree-root" 2>/dev/null || echo '?')"
+    if [ -z "$mroot" ]; then
+      printf '  %s  %s  untouched %sd  no .worktree-root marker; inspect, then `remove --dir %s --worktree-removed`\n' "$(human "$kb")" "$d" "$age" "$d"
+    else
+      printf '  %s  %s  untouched %sd  root=%s\n' "$(human "$kb")" "$d" "$age" "$mroot"
+    fi
     total=$((total + kb)); n=$((n + 1))
   done
-  echo "  total: $n stale dir(s), $(human "$total") reclaimable; free one with: bash scripts/flow/lane-builddir.sh remove --dir <dir>"
+  echo "  total: $n stale dir(s), $(human "$total") reclaimable; free one with: bash scripts/flow/lane-builddir.sh remove --dir <dir> (markerless entries: see their own line)"
 }
 
 sub=${1:-}; [ $# -gt 0 ] && shift
