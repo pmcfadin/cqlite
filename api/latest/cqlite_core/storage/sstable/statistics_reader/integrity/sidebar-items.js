@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_STATISTICS_BYTES"],"fn":["read_bounded_statistics","read_checked_statistics","read_checked_statistics_async","require_checked_statistics","validate_metadata_layout"]};

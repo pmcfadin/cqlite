@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_SEGMENT_BYTES"],"struct":["CommitLogReader","MutationIter"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_SEGMENT_BYTES"],"struct":["CommitLogReader","MutationIter","PositionedMutationIter"]};

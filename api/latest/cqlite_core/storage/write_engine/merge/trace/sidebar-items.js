@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DecidedBy","ProbeOutcome","ReconcileRule","TombstoneKind","Verdict"],"struct":["CellDecision","NoTrace","RecordingSink","TombstoneRecord"],"trait":["TraceSink"]};

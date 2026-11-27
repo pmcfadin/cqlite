@@ -1,0 +1,469 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/refusal.rs`."><title>refusal.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.100.0 (0ef1bc386 2026-11-09)" data-channel="1.100.0" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/</div>refusal.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Refused-SSTable ledger (issue #4159).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! The initial load paths open each `Data.db` best-effort: one file that cannot
+<a href=#4 id=4 data-nosnippet>4</a>//! be opened (metadata/header refusal, bad `Statistics.db`, unsupported version,
+<a href=#5 id=5 data-nosnippet>5</a>//! I/O error) must not make every OTHER table in the directory unreadable. But
+<a href=#6 id=6 data-nosnippet>6</a>//! the old code logged the error and dropped it, so a table whose every
+<a href=#7 id=7 data-nosnippet>7</a>//! generation was refused had ZERO readers and `scan` answered `Ok(vec![])` —
+<a href=#8 id=8 data-nosnippet>8</a>//! indistinguishable from an empty table (the #3721 swallow class at SSTable
+<a href=#9 id=9 data-nosnippet>9</a>//! granularity).
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! The manager now RECORDS each refusal here, keyed by the table the file
+<a href=#12 id=12 data-nosnippet>12</a>//! belongs to, and every read entry point consults the ledger before it
+<a href=#13 id=13 data-nosnippet>13</a>//! answers: `Ok(empty)` means "no data", `Err` means "unreadable". Partial
+<a href=#14 id=14 data-nosnippet>14</a>//! refusals (some generations opened, one did not) also error, because a
+<a href=#15 id=15 data-nosnippet>15</a>//! partial answer presented as complete is the same silent data loss.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! The recorded cause keeps its error KIND (a `Schema` refusal stays `Schema`,
+<a href=#18 id=18 data-nosnippet>18</a>//! #4139) rather than being flattened to text.
+<a href=#19 id=19 data-nosnippet>19</a>
+<a href=#20 id=20 data-nosnippet>20</a></span><span class="kw">use </span><span class="kw">crate</span>::Error;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span>std::collections::HashMap;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span>std::path::{Path, PathBuf};
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use </span>std::sync::Mutex;
+<a href=#24 id=24 data-nosnippet>24</a>
+<a href=#25 id=25 data-nosnippet>25</a><span class="doccomment">/// One refused `Data.db`: where, and the cause (kind-preserving).
+<a href=#26 id=26 data-nosnippet>26</a></span><span class="attr">#[derive(Debug)]
+<a href=#27 id=27 data-nosnippet>27</a></span><span class="kw">struct </span>Refusal {
+<a href=#28 id=28 data-nosnippet>28</a>    path: PathBuf,
+<a href=#29 id=29 data-nosnippet>29</a>    cause: Error,
+<a href=#30 id=30 data-nosnippet>30</a>}
+<a href=#31 id=31 data-nosnippet>31</a>
+<a href=#32 id=32 data-nosnippet>32</a><span class="doccomment">/// Table key -&gt; refused generations.
+<a href=#33 id=33 data-nosnippet>33</a></span><span class="attr">#[derive(Debug, Default)]
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>RefusalLedger {
+<a href=#35 id=35 data-nosnippet>35</a>    by_table: Mutex&lt;HashMap&lt;String, Vec&lt;Refusal&gt;&gt;&gt;,
+<a href=#36 id=36 data-nosnippet>36</a>}
+<a href=#37 id=37 data-nosnippet>37</a>
+<a href=#38 id=38 data-nosnippet>38</a><span class="doccomment">/// Rebuild `e` as an owned error of the SAME kind (`Error` is not `Clone`
+<a href=#39 id=39 data-nosnippet>39</a>/// because it can carry an `io::Error`); kinds that carry no structure fold into
+<a href=#40 id=40 data-nosnippet>40</a>/// `Storage`, which still names the full cause text.
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">fn </span>clone_kind(e: <span class="kw-2">&amp;</span>Error) -&gt; Error {
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="kw">match </span>e {
+<a href=#43 id=43 data-nosnippet>43</a>        Error::Schema(m) =&gt; Error::Schema(m.clone()),
+<a href=#44 id=44 data-nosnippet>44</a>        Error::Corruption(m) =&gt; Error::Corruption(m.clone()),
+<a href=#45 id=45 data-nosnippet>45</a>        Error::InvalidFormat(m) =&gt; Error::InvalidFormat(m.clone()),
+<a href=#46 id=46 data-nosnippet>46</a>        Error::UnsupportedFormat(m) =&gt; Error::UnsupportedFormat(m.clone()),
+<a href=#47 id=47 data-nosnippet>47</a>        Error::UnsupportedVersion { version, floor } =&gt; Error::UnsupportedVersion {
+<a href=#48 id=48 data-nosnippet>48</a>            version: version.clone(),
+<a href=#49 id=49 data-nosnippet>49</a>            floor: floor.clone(),
+<a href=#50 id=50 data-nosnippet>50</a>        },
+<a href=#51 id=51 data-nosnippet>51</a>        other =&gt; Error::Storage(other.to_string()),
+<a href=#52 id=52 data-nosnippet>52</a>    }
+<a href=#53 id=53 data-nosnippet>53</a>}
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a><span class="doccomment">/// Unqualified table name of a (possibly `keyspace.table`) key.
+<a href=#56 id=56 data-nosnippet>56</a></span><span class="kw">fn </span>unqualified(name: <span class="kw-2">&amp;</span>str) -&gt; <span class="kw-2">&amp;</span>str {
+<a href=#57 id=57 data-nosnippet>57</a>    name.rfind(<span class="string">'.'</span>).map_or(name, |dot| <span class="kw-2">&amp;</span>name[dot + <span class="number">1</span>..])
+<a href=#58 id=58 data-nosnippet>58</a>}
+<a href=#59 id=59 data-nosnippet>59</a>
+<a href=#60 id=60 data-nosnippet>60</a><span class="doccomment">/// Ledger key for a refusal whose table cannot be derived from its path
+<a href=#61 id=61 data-nosnippet>61</a>/// (non-standard or non-UTF-8 directory names). It matches EVERY read: when the
+<a href=#62 id=62 data-nosnippet>62</a>/// affected table is unknowable, no table can be proven unaffected (#4159).
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">const </span>UNRESOLVED_KEY: <span class="kw-2">&amp;</span>str = <span class="string">"\u{0}unresolved"</span>;
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="doccomment">/// [`table_dir_table_key`](super::refresh::table_dir_table_key) or [`UNRESOLVED_KEY`].
+<a href=#66 id=66 data-nosnippet>66</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>table_dir_key_or_unresolved(path: <span class="kw-2">&amp;</span>Path) -&gt; String {
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="kw">super</span>::refresh::table_dir_table_key(path).unwrap_or_else(|| UNRESOLVED_KEY.to_string())
+<a href=#68 id=68 data-nosnippet>68</a>}
+<a href=#69 id=69 data-nosnippet>69</a>
+<a href=#70 id=70 data-nosnippet>70</a><span class="doccomment">/// Ledger key for a refused file whose reader never existed (no header table
+<a href=#71 id=71 data-nosnippet>71</a>/// name): derived ONLY through `base_path_table_key`, the helper (with its base-directory
+<a href=#72 id=72 data-nosnippet>72</a>/// exclusion) the manager keys base-path readers with;
+<a href=#73 id=73 data-nosnippet>73</a>/// anything else is [`UNRESOLVED_KEY`]. An arbitrary parent-directory name is not
+<a href=#74 id=74 data-nosnippet>74</a>/// authoritative for a nonstandard layout, so it is deliberately not a fallback.
+<a href=#75 id=75 data-nosnippet>75</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>refusal_key(path: <span class="kw-2">&amp;</span>Path, base_dir_name: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="kw">super</span>::refresh::base_path_table_key(path, base_dir_name, <span class="string">""</span>)
+<a href=#77 id=77 data-nosnippet>77</a>        .unwrap_or_else(|| UNRESOLVED_KEY.to_string())
+<a href=#78 id=78 data-nosnippet>78</a>}
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a><span class="doccomment">/// `e` rebuilt as the SAME kind with `what` named in its message, so a failure that returns
+<a href=#81 id=81 data-nosnippet>81</a>/// to a caller says which file or directory it concerns without changing how it matches.
+<a href=#82 id=82 data-nosnippet>82</a></span><span class="kw">fn </span>name_failure(e: Error, what: <span class="kw-2">&amp;</span>str) -&gt; Error {
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="kw">let </span>msg = <span class="macro">format!</span>(<span class="string">"{what}: {e}"</span>);
+<a href=#84 id=84 data-nosnippet>84</a>    <span class="kw">match </span>e {
+<a href=#85 id=85 data-nosnippet>85</a>        Error::Schema(<span class="kw">_</span>) =&gt; Error::Schema(msg),
+<a href=#86 id=86 data-nosnippet>86</a>        Error::Corruption(<span class="kw">_</span>) =&gt; Error::Corruption(msg),
+<a href=#87 id=87 data-nosnippet>87</a>        Error::InvalidFormat(<span class="kw">_</span>) =&gt; Error::InvalidFormat(msg),
+<a href=#88 id=88 data-nosnippet>88</a>        Error::UnsupportedFormat(<span class="kw">_</span>) =&gt; Error::UnsupportedFormat(msg),
+<a href=#89 id=89 data-nosnippet>89</a>        Error::UnsupportedVersion { version, floor } =&gt; Error::UnsupportedVersion {
+<a href=#90 id=90 data-nosnippet>90</a>            version: <span class="macro">format!</span>(<span class="string">"{version} ({what})"</span>),
+<a href=#91 id=91 data-nosnippet>91</a>            floor,
+<a href=#92 id=92 data-nosnippet>92</a>        },
+<a href=#93 id=93 data-nosnippet>93</a>        Error::Io(io) =&gt; Error::Io(std::io::Error::new(io.kind(), msg)),
+<a href=#94 id=94 data-nosnippet>94</a>        other =&gt; Error::Storage(<span class="macro">format!</span>(<span class="string">"{what}: {other}"</span>)),
+<a href=#95 id=95 data-nosnippet>95</a>    }
+<a href=#96 id=96 data-nosnippet>96</a>}
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a><span class="doccomment">/// Is this directory entry a GENERATION? A `*-Data.db` name alone is not enough: only a REGULAR
+<a href=#99 id=99 data-nosnippet>99</a>/// file is one (`DirEntry::file_type` does not follow symlinks), so a directory or symlink that
+<a href=#100 id=100 data-nosnippet>100</a>/// merely carries the name is ignored -- not a generation and not a refusal (roborev #3234 r12).
+<a href=#101 id=101 data-nosnippet>101</a>/// If the type cannot be observed the entry stays a candidate, so the failure surfaces as a
+<a href=#102 id=102 data-nosnippet>102</a>/// refusal on open instead of the entry silently vanishing.
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>is_generation_entry(filename: <span class="kw-2">&amp;</span>str, entry: <span class="kw-2">&amp;</span>tokio::fs::DirEntry) -&gt; bool {
+<a href=#104 id=104 data-nosnippet>104</a>    filename.ends_with(<span class="string">"-Data.db"</span>)
+<a href=#105 id=105 data-nosnippet>105</a>        &amp;&amp; !<span class="kw">super</span>::is_apple_double_sidecar(filename)
+<a href=#106 id=106 data-nosnippet>106</a>        &amp;&amp; entry.file_type().<span class="kw">await</span>.map(|t| t.is_file()).unwrap_or(<span class="bool-val">true</span>)
+<a href=#107 id=107 data-nosnippet>107</a>}
+<a href=#108 id=108 data-nosnippet>108</a>
+<a href=#109 id=109 data-nosnippet>109</a><span class="kw">impl </span>RefusalLedger {
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="doccomment">/// Record that `path` (belonging to table `key`) was refused with `cause`.
+<a href=#111 id=111 data-nosnippet>111</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>record(<span class="kw-2">&amp;</span><span class="self">self</span>, key: String, path: <span class="kw-2">&amp;</span>Path, cause: <span class="kw-2">&amp;</span>Error) {
+<a href=#112 id=112 data-nosnippet>112</a>        <span class="macro">tracing::warn!</span>(<span class="string">"SSTable {:?} refused ({}): {}"</span>, path, key, cause);
+<a href=#113 id=113 data-nosnippet>113</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(<span class="kw-2">mut </span>map) = <span class="self">self</span>.by_table.lock() {
+<a href=#114 id=114 data-nosnippet>114</a>            <span class="kw">let </span>list = map.entry(key).or_default();
+<a href=#115 id=115 data-nosnippet>115</a>            list.retain(|r| r.path != path);
+<a href=#116 id=116 data-nosnippet>116</a>            list.push(Refusal {
+<a href=#117 id=117 data-nosnippet>117</a>                path: path.to_path_buf(),
+<a href=#118 id=118 data-nosnippet>118</a>                cause: clone_kind(cause),
+<a href=#119 id=119 data-nosnippet>119</a>            });
+<a href=#120 id=120 data-nosnippet>120</a>        }
+<a href=#121 id=121 data-nosnippet>121</a>    }
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="doccomment">/// Forget any refusal recorded for `path` (it was re-opened successfully).
+<a href=#124 id=124 data-nosnippet>124</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>clear_path(<span class="kw-2">&amp;</span><span class="self">self</span>, path: <span class="kw-2">&amp;</span>Path) {
+<a href=#125 id=125 data-nosnippet>125</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(<span class="kw-2">mut </span>map) = <span class="self">self</span>.by_table.lock() {
+<a href=#126 id=126 data-nosnippet>126</a>            <span class="kw">for </span>list <span class="kw">in </span>map.values_mut() {
+<a href=#127 id=127 data-nosnippet>127</a>                list.retain(|r| r.path != path);
+<a href=#128 id=128 data-nosnippet>128</a>            }
+<a href=#129 id=129 data-nosnippet>129</a>            map.retain(|<span class="kw">_</span>, l| !l.is_empty());
+<a href=#130 id=130 data-nosnippet>130</a>        }
+<a href=#131 id=131 data-nosnippet>131</a>    }
+<a href=#132 id=132 data-nosnippet>132</a>
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="doccomment">/// Forget the refusals of every path in `paths` (they opened, and the refresh
+<a href=#134 id=134 data-nosnippet>134</a>    /// that opened them has been committed).
+<a href=#135 id=135 data-nosnippet>135</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>clear_paths(<span class="kw-2">&amp;</span><span class="self">self</span>, paths: <span class="kw-2">&amp;</span>[PathBuf]) {
+<a href=#136 id=136 data-nosnippet>136</a>        <span class="kw">for </span>p <span class="kw">in </span>paths {
+<a href=#137 id=137 data-nosnippet>137</a>            <span class="self">self</span>.clear_path(p);
+<a href=#138 id=138 data-nosnippet>138</a>        }
+<a href=#139 id=139 data-nosnippet>139</a>    }
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="doccomment">/// Reconcile after a SUCCESSFUL refresh: keep a refusal only for a `Data.db`
+<a href=#142 id=142 data-nosnippet>142</a>    /// still in the discovered set. Directory-level refusals are all dropped:
+<a href=#143 id=143 data-nosnippet>143</a>    /// discovery fails the refresh when an existing directory cannot be listed, so
+<a href=#144 id=144 data-nosnippet>144</a>    /// reaching the commit means every configured directory was enumerated (or is
+<a href=#145 id=145 data-nosnippet>145</a>    /// gone), and a still-unreadable one is re-recorded by the next load/refresh.
+<a href=#146 id=146 data-nosnippet>146</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>retain_discovered(<span class="kw-2">&amp;</span><span class="self">self</span>, discovered: <span class="kw-2">&amp;</span>[PathBuf]) {
+<a href=#147 id=147 data-nosnippet>147</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(<span class="kw-2">mut </span>map) = <span class="self">self</span>.by_table.lock() {
+<a href=#148 id=148 data-nosnippet>148</a>            <span class="kw">for </span>list <span class="kw">in </span>map.values_mut() {
+<a href=#149 id=149 data-nosnippet>149</a>                list.retain(|r| {
+<a href=#150 id=150 data-nosnippet>150</a>                    r.path.to_string_lossy().ends_with(<span class="string">"-Data.db"</span>) &amp;&amp; discovered.contains(<span class="kw-2">&amp;</span>r.path)
+<a href=#151 id=151 data-nosnippet>151</a>                });
+<a href=#152 id=152 data-nosnippet>152</a>            }
+<a href=#153 id=153 data-nosnippet>153</a>            map.retain(|<span class="kw">_</span>, l| !l.is_empty());
+<a href=#154 id=154 data-nosnippet>154</a>        }
+<a href=#155 id=155 data-nosnippet>155</a>    }
+<a href=#156 id=156 data-nosnippet>156</a>
+<a href=#157 id=157 data-nosnippet>157</a>    <span class="doccomment">/// `Err` naming the cause when any generation of `table_name` was refused.
+<a href=#158 id=158 data-nosnippet>158</a>    ///
+<a href=#159 id=159 data-nosnippet>159</a>    /// Matching mirrors the reader resolution: exact key first; otherwise the
+<a href=#160 id=160 data-nosnippet>160</a>    /// unqualified names must agree and at most one side may carry a keyspace
+<a href=#161 id=161 data-nosnippet>161</a>    /// (two different keyspaces never bleed into one another).
+<a href=#162 id=162 data-nosnippet>162</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>ensure_readable(<span class="kw-2">&amp;</span><span class="self">self</span>, table_name: <span class="kw-2">&amp;</span>str) -&gt; <span class="kw">crate</span>::Result&lt;()&gt; {
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="kw">let </span><span class="prelude-val">Ok</span>(map) = <span class="self">self</span>.by_table.lock() <span class="kw">else </span>{
+<a href=#164 id=164 data-nosnippet>164</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Internal(
+<a href=#165 id=165 data-nosnippet>165</a>                <span class="string">"refused-SSTable ledger lock poisoned; cannot prove the table readable"</span>.into(),
+<a href=#166 id=166 data-nosnippet>166</a>            ));
+<a href=#167 id=167 data-nosnippet>167</a>        };
+<a href=#168 id=168 data-nosnippet>168</a>        <span class="comment">// Deterministic report: exact-key refusals first, then unqualified matches,
+<a href=#169 id=169 data-nosnippet>169</a>        // then UNRESOLVED; within a class, sorted by path. Never HashMap order.
+<a href=#170 id=170 data-nosnippet>170</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>ranked: Vec&lt;(u8, <span class="kw-2">&amp;</span>Refusal)&gt; = Vec::new();
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">for </span>(key, list) <span class="kw">in </span>map.iter() {
+<a href=#172 id=172 data-nosnippet>172</a>            <span class="kw">let </span>both_qualified = key.contains(<span class="string">'.'</span>) &amp;&amp; table_name.contains(<span class="string">'.'</span>);
+<a href=#173 id=173 data-nosnippet>173</a>            <span class="kw">let </span>class = <span class="kw">if </span>key == table_name {
+<a href=#174 id=174 data-nosnippet>174</a>                <span class="prelude-val">Some</span>(<span class="number">0</span>)
+<a href=#175 id=175 data-nosnippet>175</a>            } <span class="kw">else if </span>key == UNRESOLVED_KEY {
+<a href=#176 id=176 data-nosnippet>176</a>                <span class="prelude-val">Some</span>(<span class="number">2</span>)
+<a href=#177 id=177 data-nosnippet>177</a>            } <span class="kw">else if </span>!both_qualified &amp;&amp; unqualified(key) == unqualified(table_name) {
+<a href=#178 id=178 data-nosnippet>178</a>                <span class="prelude-val">Some</span>(<span class="number">1</span>)
+<a href=#179 id=179 data-nosnippet>179</a>            } <span class="kw">else </span>{
+<a href=#180 id=180 data-nosnippet>180</a>                <span class="prelude-val">None
+<a href=#181 id=181 data-nosnippet>181</a>            </span>};
+<a href=#182 id=182 data-nosnippet>182</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(c) = class {
+<a href=#183 id=183 data-nosnippet>183</a>                ranked.extend(list.iter().map(|r| (c, r)));
+<a href=#184 id=184 data-nosnippet>184</a>            }
+<a href=#185 id=185 data-nosnippet>185</a>        }
+<a href=#186 id=186 data-nosnippet>186</a>        ranked.sort_by(|a, b| (a.<span class="number">0</span>, <span class="kw-2">&amp;</span>a.<span class="number">1</span>.path).cmp(<span class="kw-2">&amp;</span>(b.<span class="number">0</span>, <span class="kw-2">&amp;</span>b.<span class="number">1</span>.path)));
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="kw">let </span>hits: Vec&lt;<span class="kw-2">&amp;</span>Refusal&gt; = ranked.into_iter().map(|(<span class="kw">_</span>, r)| r).collect();
+<a href=#188 id=188 data-nosnippet>188</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(first) = hits.first() <span class="kw">else </span>{
+<a href=#189 id=189 data-nosnippet>189</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#190 id=190 data-nosnippet>190</a>        };
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="comment">// Name EVERY refused file (capped) so no cause is hidden behind another.
+<a href=#192 id=192 data-nosnippet>192</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>names: Vec&lt;String&gt; = hits
+<a href=#193 id=193 data-nosnippet>193</a>            .iter()
+<a href=#194 id=194 data-nosnippet>194</a>            .take(<span class="number">4</span>)
+<a href=#195 id=195 data-nosnippet>195</a>            .map(|r| r.path.display().to_string())
+<a href=#196 id=196 data-nosnippet>196</a>            .collect();
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">if </span>hits.len() &gt; <span class="number">4 </span>{
+<a href=#198 id=198 data-nosnippet>198</a>            names.push(<span class="macro">format!</span>(<span class="string">"and {} more"</span>, hits.len() - <span class="number">4</span>));
+<a href=#199 id=199 data-nosnippet>199</a>        }
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">let </span>msg = <span class="macro">format!</span>(
+<a href=#201 id=201 data-nosnippet>201</a>            <span class="string">"table '{}' is unreadable: SSTable(s) refused: {}; first cause: {}"</span>,
+<a href=#202 id=202 data-nosnippet>202</a>            table_name,
+<a href=#203 id=203 data-nosnippet>203</a>            names.join(<span class="string">", "</span>),
+<a href=#204 id=204 data-nosnippet>204</a>            first.cause
+<a href=#205 id=205 data-nosnippet>205</a>        );
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="prelude-val">Err</span>(<span class="kw">match </span><span class="kw-2">&amp;</span>first.cause {
+<a href=#207 id=207 data-nosnippet>207</a>            Error::UnsupportedVersion { version, floor } =&gt; Error::UnsupportedVersion {
+<a href=#208 id=208 data-nosnippet>208</a>                version: <span class="macro">format!</span>(<span class="string">"{version} ({msg})"</span>),
+<a href=#209 id=209 data-nosnippet>209</a>                floor: floor.clone(),
+<a href=#210 id=210 data-nosnippet>210</a>            },
+<a href=#211 id=211 data-nosnippet>211</a>            Error::Schema(<span class="kw">_</span>) =&gt; Error::Schema(msg),
+<a href=#212 id=212 data-nosnippet>212</a>            Error::Corruption(<span class="kw">_</span>) =&gt; Error::Corruption(msg),
+<a href=#213 id=213 data-nosnippet>213</a>            Error::InvalidFormat(<span class="kw">_</span>) =&gt; Error::InvalidFormat(msg),
+<a href=#214 id=214 data-nosnippet>214</a>            Error::UnsupportedFormat(<span class="kw">_</span>) =&gt; Error::UnsupportedFormat(msg),
+<a href=#215 id=215 data-nosnippet>215</a>            <span class="kw">_ </span>=&gt; Error::Storage(msg),
+<a href=#216 id=216 data-nosnippet>216</a>        })
+<a href=#217 id=217 data-nosnippet>217</a>    }
+<a href=#218 id=218 data-nosnippet>218</a>}
+<a href=#219 id=219 data-nosnippet>219</a>
+<a href=#220 id=220 data-nosnippet>220</a><span class="kw">impl </span><span class="kw">super</span>::SSTableManager {
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="doccomment">/// Reader snapshot for a read that returns rows: `Err` naming the cause when
+<a href=#222 id=222 data-nosnippet>222</a>    /// any SSTable of the table was refused, else
+<a href=#223 id=223 data-nosnippet>223</a>    /// [`resolve_reader_snapshot`](Self::resolve_reader_snapshot). Probes and shape
+<a href=#224 id=224 data-nosnippet>224</a>    /// hints keep the unchecked form (they are fail-safe: the real read errs).
+<a href=#225 id=225 data-nosnippet>225</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>checked_snapshot(
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#227 id=227 data-nosnippet>227</a>        table_id: <span class="kw-2">&amp;</span><span class="kw">crate</span>::types::TableId,
+<a href=#228 id=228 data-nosnippet>228</a>    ) -&gt; <span class="kw">crate</span>::Result&lt;(Vec&lt;std::sync::Arc&lt;<span class="kw">super</span>::reader::SSTableReader&gt;&gt;, bool)&gt; {
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="self">self</span>.refusals.ensure_readable(table_id.name())<span class="question-mark">?</span>;
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="attr">#[cfg(test)]
+<a href=#231 id=231 data-nosnippet>231</a>        </span>race_hook::pause_if_probe(table_id.name()).<span class="kw">await</span>;
+<a href=#232 id=232 data-nosnippet>232</a>        <span class="kw">let </span>snapshot = <span class="self">self</span>.resolve_reader_snapshot(table_id).<span class="kw">await</span>;
+<a href=#233 id=233 data-nosnippet>233</a>        <span class="comment">// The consistency point: a refusal recorded (by a concurrent refresh) while
+<a href=#234 id=234 data-nosnippet>234</a>        // the snapshot was being taken is visible HERE, so a result is never
+<a href=#235 id=235 data-nosnippet>235</a>        // returned after the refusal it should have reported.
+<a href=#236 id=236 data-nosnippet>236</a>        </span><span class="self">self</span>.refusals.ensure_readable(table_id.name())<span class="question-mark">?</span>;
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="prelude-val">Ok</span>(snapshot)
+<a href=#238 id=238 data-nosnippet>238</a>    }
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a>    <span class="doccomment">/// [`checked_snapshot`](Self::checked_snapshot) for the streaming scans.
+<a href=#241 id=241 data-nosnippet>241</a>    </span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#242 id=242 data-nosnippet>242</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>checked_table_readers(
+<a href=#243 id=243 data-nosnippet>243</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#244 id=244 data-nosnippet>244</a>        table_id: <span class="kw-2">&amp;</span><span class="kw">crate</span>::types::TableId,
+<a href=#245 id=245 data-nosnippet>245</a>    ) -&gt; <span class="kw">crate</span>::Result&lt;Vec&lt;std::sync::Arc&lt;<span class="kw">super</span>::reader::SSTableReader&gt;&gt;&gt; {
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="self">self</span>.refusals.ensure_readable(table_id.name())<span class="question-mark">?</span>;
+<a href=#247 id=247 data-nosnippet>247</a>        <span class="attr">#[cfg(test)]
+<a href=#248 id=248 data-nosnippet>248</a>        </span>race_hook::pause_if_probe(table_id.name()).<span class="kw">await</span>;
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">let </span>readers = <span class="self">self</span>.resolve_table_readers(table_id).<span class="kw">await</span>;
+<a href=#250 id=250 data-nosnippet>250</a>        <span class="self">self</span>.refusals.ensure_readable(table_id.name())<span class="question-mark">?</span>; <span class="comment">// consistency point, as above
+<a href=#251 id=251 data-nosnippet>251</a>        </span><span class="prelude-val">Ok</span>(readers)
+<a href=#252 id=252 data-nosnippet>252</a>    }
+<a href=#253 id=253 data-nosnippet>253</a>
+<a href=#254 id=254 data-nosnippet>254</a>    <span class="doccomment">/// Record that an EXISTING table directory could not be listed, and hand the
+<a href=#255 id=255 data-nosnippet>255</a>    /// error back for the caller to return (refresh) or drop (initial load).
+<a href=#256 id=256 data-nosnippet>256</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>refuse_dir(<span class="kw-2">&amp;</span><span class="self">self</span>, dir: <span class="kw-2">&amp;</span>Path, e: <span class="kw">crate</span>::Error) -&gt; <span class="kw">crate</span>::Error {
+<a href=#257 id=257 data-nosnippet>257</a>        <span class="kw">let </span>probe = dir.join(<span class="string">"unreadable-Data.db"</span>);
+<a href=#258 id=258 data-nosnippet>258</a>        <span class="self">self</span>.refusals
+<a href=#259 id=259 data-nosnippet>259</a>            .record(table_dir_key_or_unresolved(<span class="kw-2">&amp;</span>probe), dir, <span class="kw-2">&amp;</span>e);
+<a href=#260 id=260 data-nosnippet>260</a>        e
+<a href=#261 id=261 data-nosnippet>261</a>    }
+<a href=#262 id=262 data-nosnippet>262</a>
+<a href=#263 id=263 data-nosnippet>263</a>    <span class="doccomment">/// List the `Data.db` files of one existing table directory for a REFRESH. EVERY
+<a href=#264 id=264 data-nosnippet>264</a>    /// failure -- opening the listing or advancing it -- is returned (naming the
+<a href=#265 id=265 data-nosnippet>265</a>    /// directory), so a partial enumeration can never be mistaken for a complete one.
+<a href=#266 id=266 data-nosnippet>266</a>    /// A failed refresh changes NOTHING (storage-freshness spec): neither the reader
+<a href=#267 id=267 data-nosnippet>267</a>    /// set nor the refusal ledger; its `Err` is the loud signal.
+<a href=#268 id=268 data-nosnippet>268</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>list_data_files(<span class="kw-2">&amp;</span><span class="self">self</span>, dir: <span class="kw-2">&amp;</span>Path) -&gt; <span class="kw">crate</span>::Result&lt;Vec&lt;PathBuf&gt;&gt; {
+<a href=#269 id=269 data-nosnippet>269</a>        <span class="kw">let </span><span class="kw-2">mut </span>entries = <span class="kw">match </span><span class="self">self</span>.platform.fs().read_dir(dir).<span class="kw">await </span>{
+<a href=#270 id=270 data-nosnippet>270</a>            <span class="prelude-val">Ok</span>(entries) =&gt; entries,
+<a href=#271 id=271 data-nosnippet>271</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(name_failure(e, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"directory {}"</span>, dir.display()))),
+<a href=#272 id=272 data-nosnippet>272</a>        };
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::new();
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">loop </span>{
+<a href=#275 id=275 data-nosnippet>275</a>            <span class="kw">let </span>entry = <span class="kw">match </span>entries.next_entry().<span class="kw">await </span>{
+<a href=#276 id=276 data-nosnippet>276</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(entry)) =&gt; entry,
+<a href=#277 id=277 data-nosnippet>277</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">break</span>,
+<a href=#278 id=278 data-nosnippet>278</a>                <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#279 id=279 data-nosnippet>279</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(name_failure(
+<a href=#280 id=280 data-nosnippet>280</a>                        e.into(),
+<a href=#281 id=281 data-nosnippet>281</a>                        <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"directory {}"</span>, dir.display()),
+<a href=#282 id=282 data-nosnippet>282</a>                    ))
+<a href=#283 id=283 data-nosnippet>283</a>                }
+<a href=#284 id=284 data-nosnippet>284</a>            };
+<a href=#285 id=285 data-nosnippet>285</a>            <span class="kw">let </span>path = entry.path();
+<a href=#286 id=286 data-nosnippet>286</a>            <span class="kw">let </span>fname = path.file_name().and_then(|n| n.to_str()).unwrap_or(<span class="string">""</span>);
+<a href=#287 id=287 data-nosnippet>287</a>            <span class="kw">if </span>is_generation_entry(fname, <span class="kw-2">&amp;</span>entry).<span class="kw">await </span>{
+<a href=#288 id=288 data-nosnippet>288</a>                out.push(path);
+<a href=#289 id=289 data-nosnippet>289</a>            }
+<a href=#290 id=290 data-nosnippet>290</a>        }
+<a href=#291 id=291 data-nosnippet>291</a>        <span class="prelude-val">Ok</span>(out)
+<a href=#292 id=292 data-nosnippet>292</a>    }
+<a href=#293 id=293 data-nosnippet>293</a>
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="doccomment">/// Hint-only form: a refused table yields no readers.
+<a href=#295 id=295 data-nosnippet>295</a>    </span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#296 id=296 data-nosnippet>296</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>readers_if_readable(
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#298 id=298 data-nosnippet>298</a>        table_id: <span class="kw-2">&amp;</span><span class="kw">crate</span>::types::TableId,
+<a href=#299 id=299 data-nosnippet>299</a>    ) -&gt; Vec&lt;std::sync::Arc&lt;<span class="kw">super</span>::reader::SSTableReader&gt;&gt; {
+<a href=#300 id=300 data-nosnippet>300</a>        <span class="self">self</span>.checked_table_readers(table_id)
+<a href=#301 id=301 data-nosnippet>301</a>            .<span class="kw">await
+<a href=#302 id=302 data-nosnippet>302</a>            </span>.unwrap_or_default()
+<a href=#303 id=303 data-nosnippet>303</a>    }
+<a href=#304 id=304 data-nosnippet>304</a>
+<a href=#305 id=305 data-nosnippet>305</a>    <span class="doccomment">/// Open a refresh candidate. A failure is returned NAMING the candidate (same error
+<a href=#306 id=306 data-nosnippet>306</a>    /// kind) and records nothing: a failed refresh changes neither the reader set nor
+<a href=#307 id=307 data-nosnippet>307</a>    /// the refusal ledger (storage-freshness spec, "Corrupt new generation rejects the
+<a href=#308 id=308 data-nosnippet>308</a>    /// whole refresh"). A success does not clear anything here either: stale refusals
+<a href=#309 id=309 data-nosnippet>309</a>    /// are cleared together with the reader-set swap, by
+<a href=#310 id=310 data-nosnippet>310</a>    /// [`commit_refusals`](Self::commit_refusals).
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>open_candidate(
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#313 id=313 data-nosnippet>313</a>        path: <span class="kw-2">&amp;</span>Path,
+<a href=#314 id=314 data-nosnippet>314</a>    ) -&gt; <span class="kw">crate</span>::Result&lt;std::sync::Arc&lt;<span class="kw">super</span>::reader::SSTableReader&gt;&gt; {
+<a href=#315 id=315 data-nosnippet>315</a>        <span class="self">self</span>.open_reader_with_schema(path)
+<a href=#316 id=316 data-nosnippet>316</a>            .<span class="kw">await
+<a href=#317 id=317 data-nosnippet>317</a>            </span>.map_err(|e| name_failure(e, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"refresh candidate {}"</span>, path.display())))
+<a href=#318 id=318 data-nosnippet>318</a>    }
+<a href=#319 id=319 data-nosnippet>319</a>
+<a href=#320 id=320 data-nosnippet>320</a>    <span class="doccomment">/// Commit a SUCCESSFUL refresh's ledger changes with the reader-set swap:
+<a href=#321 id=321 data-nosnippet>321</a>    /// the candidates that opened lose their refusals, and refusals of files no
+<a href=#322 id=322 data-nosnippet>322</a>    /// longer on disk are reconciled away.
+<a href=#323 id=323 data-nosnippet>323</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>commit_refusals(<span class="kw-2">&amp;</span><span class="self">self</span>, opened: <span class="kw-2">&amp;</span>[PathBuf], discovered: <span class="kw-2">&amp;</span>[PathBuf]) {
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="self">self</span>.refusals.clear_paths(opened);
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="self">self</span>.refusals.retain_discovered(discovered);
+<a href=#326 id=326 data-nosnippet>326</a>    }
+<a href=#327 id=327 data-nosnippet>327</a>}
+<a href=#328 id=328 data-nosnippet>328</a>
+<a href=#329 id=329 data-nosnippet>329</a><span class="doccomment">/// Test-only deterministic pause between the first ledger check and the reader
+<a href=#330 id=330 data-nosnippet>330</a>/// snapshot (no sleeps): active only for the reserved probe table name.
+<a href=#331 id=331 data-nosnippet>331</a></span><span class="attr">#[cfg(test)]
+<a href=#332 id=332 data-nosnippet>332</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span>race_hook {
+<a href=#333 id=333 data-nosnippet>333</a>    <span class="kw">use </span>std::sync::{Arc, Mutex};
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="kw">use </span>tokio::sync::Notify;
+<a href=#335 id=335 data-nosnippet>335</a>
+<a href=#336 id=336 data-nosnippet>336</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">const </span>PROBE: <span class="kw-2">&amp;</span>str = <span class="string">"__race_probe__"</span>;
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="kw">type </span>Gate = (Arc&lt;Notify&gt;, Arc&lt;Notify&gt;); <span class="comment">// (reached, release)
+<a href=#338 id=338 data-nosnippet>338</a>    </span><span class="kw">static </span>GATE: Mutex&lt;<span class="prelude-ty">Option</span>&lt;Gate&gt;&gt; = Mutex::new(<span class="prelude-val">None</span>);
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>arm() -&gt; Gate {
+<a href=#341 id=341 data-nosnippet>341</a>        <span class="kw">let </span>gate = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+<a href=#342 id=342 data-nosnippet>342</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(<span class="kw-2">mut </span>g) = GATE.lock() {
+<a href=#343 id=343 data-nosnippet>343</a>            <span class="kw-2">*</span>g = <span class="prelude-val">Some</span>(gate.clone());
+<a href=#344 id=344 data-nosnippet>344</a>        }
+<a href=#345 id=345 data-nosnippet>345</a>        gate
+<a href=#346 id=346 data-nosnippet>346</a>    }
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>pause_if_probe(name: <span class="kw-2">&amp;</span>str) {
+<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">if </span>name != PROBE {
+<a href=#350 id=350 data-nosnippet>350</a>            <span class="kw">return</span>;
+<a href=#351 id=351 data-nosnippet>351</a>        }
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="kw">let </span>gate = GATE.lock().ok().and_then(|g| g.clone());
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>((reached, release)) = gate {
+<a href=#354 id=354 data-nosnippet>354</a>            reached.notify_one();
+<a href=#355 id=355 data-nosnippet>355</a>            release.notified().<span class="kw">await</span>;
+<a href=#356 id=356 data-nosnippet>356</a>        }
+<a href=#357 id=357 data-nosnippet>357</a>    }
+<a href=#358 id=358 data-nosnippet>358</a>}
+<a href=#359 id=359 data-nosnippet>359</a>
+<a href=#360 id=360 data-nosnippet>360</a><span class="attr">#[cfg(test)]
+<a href=#361 id=361 data-nosnippet>361</a></span><span class="kw">mod </span>tests {
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#363 id=363 data-nosnippet>363</a>
+<a href=#364 id=364 data-nosnippet>364</a>    <span class="doccomment">/// A refusal recorded between the ledger check and the snapshot (a concurrent
+<a href=#365 id=365 data-nosnippet>365</a>    /// refresh) must turn the read into an `Err`, never an empty/partial `Ok`.
+<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="attr">#[tokio::test]
+<a href=#367 id=367 data-nosnippet>367</a>    </span><span class="kw">async fn </span>refusal_recorded_during_snapshot_fails_the_read() {
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="kw">let </span>tmp = tempfile::tempdir().expect(<span class="string">"tmp"</span>);
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="kw">let </span>config = <span class="kw">crate</span>::Config::default();
+<a href=#370 id=370 data-nosnippet>370</a>        <span class="kw">let </span>platform = std::sync::Arc::new(<span class="kw">crate</span>::Platform::new(<span class="kw-2">&amp;</span>config).<span class="kw">await</span>.expect(<span class="string">"platform"</span>));
+<a href=#371 id=371 data-nosnippet>371</a>        <span class="kw">let </span>manager = std::sync::Arc::new(
+<a href=#372 id=372 data-nosnippet>372</a>            <span class="kw">super</span>::<span class="kw">super</span>::SSTableManager::new(
+<a href=#373 id=373 data-nosnippet>373</a>                tmp.path(),
+<a href=#374 id=374 data-nosnippet>374</a>                <span class="kw-2">&amp;</span>config,
+<a href=#375 id=375 data-nosnippet>375</a>                platform,
+<a href=#376 id=376 data-nosnippet>376</a>                <span class="attr">#[cfg(feature = <span class="string">"state_machine"</span>)]
+<a href=#377 id=377 data-nosnippet>377</a>                </span><span class="prelude-val">None</span>,
+<a href=#378 id=378 data-nosnippet>378</a>            )
+<a href=#379 id=379 data-nosnippet>379</a>            .<span class="kw">await
+<a href=#380 id=380 data-nosnippet>380</a>            </span>.expect(<span class="string">"manager"</span>),
+<a href=#381 id=381 data-nosnippet>381</a>        );
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="kw">let </span>(reached, release) = race_hook::arm();
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="kw">let </span>reader = {
+<a href=#384 id=384 data-nosnippet>384</a>            <span class="kw">let </span>m = manager.clone();
+<a href=#385 id=385 data-nosnippet>385</a>            tokio::spawn(<span class="kw">async move </span>{
+<a href=#386 id=386 data-nosnippet>386</a>                m.checked_snapshot(<span class="kw-2">&amp;</span><span class="kw">crate</span>::types::TableId::from(race_hook::PROBE))
+<a href=#387 id=387 data-nosnippet>387</a>                    .<span class="kw">await
+<a href=#388 id=388 data-nosnippet>388</a>                    </span>.map(|<span class="kw">_</span>| ())
+<a href=#389 id=389 data-nosnippet>389</a>            })
+<a href=#390 id=390 data-nosnippet>390</a>        };
+<a href=#391 id=391 data-nosnippet>391</a>        reached.notified().<span class="kw">await</span>; <span class="comment">// the read has passed its first ledger check
+<a href=#392 id=392 data-nosnippet>392</a>        </span>manager.refusals.record(
+<a href=#393 id=393 data-nosnippet>393</a>            race_hook::PROBE.to_string(),
+<a href=#394 id=394 data-nosnippet>394</a>            Path::new(<span class="string">"/d/ks/probe-1/nb-1-big-Data.db"</span>),
+<a href=#395 id=395 data-nosnippet>395</a>            <span class="kw-2">&amp;</span>Error::Corruption(<span class="string">"refused by a concurrent refresh"</span>.into()),
+<a href=#396 id=396 data-nosnippet>396</a>        );
+<a href=#397 id=397 data-nosnippet>397</a>        release.notify_one();
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="kw">let </span>result = reader.<span class="kw">await</span>.expect(<span class="string">"join"</span>);
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="macro">assert!</span>(
+<a href=#400 id=400 data-nosnippet>400</a>            result.is_err(),
+<a href=#401 id=401 data-nosnippet>401</a>            <span class="string">"the read must observe the refusal recorded mid-read: {result:?}"
+<a href=#402 id=402 data-nosnippet>402</a>        </span>);
+<a href=#403 id=403 data-nosnippet>403</a>    }
+<a href=#404 id=404 data-nosnippet>404</a>
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="attr">#[test]
+<a href=#406 id=406 data-nosnippet>406</a>    </span><span class="kw">fn </span>coexisting_refusal_classes_report_deterministically() {
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="comment">// Exact key (Schema) outranks unqualified (Corruption) outranks UNRESOLVED
+<a href=#408 id=408 data-nosnippet>408</a>        // (InvalidFormat), whatever the insertion order.
+<a href=#409 id=409 data-nosnippet>409</a>        </span><span class="kw">let </span>rec = |l: <span class="kw-2">&amp;</span>RefusalLedger, k: <span class="kw-2">&amp;</span>str, p: <span class="kw-2">&amp;</span>str, e: Error| {
+<a href=#410 id=410 data-nosnippet>410</a>            l.record(k.to_string(), Path::new(p), <span class="kw-2">&amp;</span>e)
+<a href=#411 id=411 data-nosnippet>411</a>        };
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="kw">for </span>order <span class="kw">in </span>[[<span class="number">0</span>, <span class="number">1</span>, <span class="number">2</span>], [<span class="number">2</span>, <span class="number">1</span>, <span class="number">0</span>], [<span class="number">1</span>, <span class="number">2</span>, <span class="number">0</span>], [<span class="number">1</span>, <span class="number">0</span>, <span class="number">2</span>]] {
+<a href=#413 id=413 data-nosnippet>413</a>            <span class="kw">let </span>ledger = RefusalLedger::default();
+<a href=#414 id=414 data-nosnippet>414</a>            <span class="kw">for </span>i <span class="kw">in </span>order {
+<a href=#415 id=415 data-nosnippet>415</a>                <span class="kw">match </span>i {
+<a href=#416 id=416 data-nosnippet>416</a>                    <span class="number">0 </span>=&gt; rec(
+<a href=#417 id=417 data-nosnippet>417</a>                        <span class="kw-2">&amp;</span>ledger,
+<a href=#418 id=418 data-nosnippet>418</a>                        <span class="string">"ks.t"</span>,
+<a href=#419 id=419 data-nosnippet>419</a>                        <span class="string">"/d/ks/t-1/nb-1-big-Data.db"</span>,
+<a href=#420 id=420 data-nosnippet>420</a>                        Error::Schema(<span class="string">"a"</span>.into()),
+<a href=#421 id=421 data-nosnippet>421</a>                    ),
+<a href=#422 id=422 data-nosnippet>422</a>                    <span class="number">1 </span>=&gt; rec(
+<a href=#423 id=423 data-nosnippet>423</a>                        <span class="kw-2">&amp;</span>ledger,
+<a href=#424 id=424 data-nosnippet>424</a>                        <span class="string">"t"</span>,
+<a href=#425 id=425 data-nosnippet>425</a>                        <span class="string">"/d/other/t-2/nb-2-big-Data.db"</span>,
+<a href=#426 id=426 data-nosnippet>426</a>                        Error::Corruption(<span class="string">"b"</span>.into()),
+<a href=#427 id=427 data-nosnippet>427</a>                    ),
+<a href=#428 id=428 data-nosnippet>428</a>                    <span class="kw">_ </span>=&gt; rec(
+<a href=#429 id=429 data-nosnippet>429</a>                        <span class="kw-2">&amp;</span>ledger,
+<a href=#430 id=430 data-nosnippet>430</a>                        UNRESOLVED_KEY,
+<a href=#431 id=431 data-nosnippet>431</a>                        <span class="string">"/d/\u{fffd}/nb-3-big-Data.db"</span>,
+<a href=#432 id=432 data-nosnippet>432</a>                        Error::InvalidFormat(<span class="string">"c"</span>.into()),
+<a href=#433 id=433 data-nosnippet>433</a>                    ),
+<a href=#434 id=434 data-nosnippet>434</a>                }
+<a href=#435 id=435 data-nosnippet>435</a>            }
+<a href=#436 id=436 data-nosnippet>436</a>            <span class="kw">match </span>ledger.ensure_readable(<span class="string">"ks.t"</span>) {
+<a href=#437 id=437 data-nosnippet>437</a>                <span class="prelude-val">Err</span>(Error::Schema(m)) =&gt; <span class="macro">assert!</span>(
+<a href=#438 id=438 data-nosnippet>438</a>                    m.find(<span class="string">"t-1"</span>).unwrap_or(usize::MAX) &lt; m.find(<span class="string">"t-2"</span>).unwrap_or(<span class="number">0</span>),
+<a href=#439 id=439 data-nosnippet>439</a>                    <span class="string">"{m}"
+<a href=#440 id=440 data-nosnippet>440</a>                </span>),
+<a href=#441 id=441 data-nosnippet>441</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"expected the exact-key Schema refusal first, got {other:?}"</span>),
+<a href=#442 id=442 data-nosnippet>442</a>            }
+<a href=#443 id=443 data-nosnippet>443</a>        }
+<a href=#444 id=444 data-nosnippet>444</a>    }
+<a href=#445 id=445 data-nosnippet>445</a>
+<a href=#446 id=446 data-nosnippet>446</a>    <span class="attr">#[test]
+<a href=#447 id=447 data-nosnippet>447</a>    </span><span class="kw">fn </span>unsupported_version_keeps_its_kind_and_names_the_file() {
+<a href=#448 id=448 data-nosnippet>448</a>        <span class="kw">let </span>ledger = RefusalLedger::default();
+<a href=#449 id=449 data-nosnippet>449</a>        ledger.record(
+<a href=#450 id=450 data-nosnippet>450</a>            <span class="string">"ks.t"</span>.to_string(),
+<a href=#451 id=451 data-nosnippet>451</a>            Path::new(<span class="string">"/d/ks/t-1/nb-1-big-Data.db"</span>),
+<a href=#452 id=452 data-nosnippet>452</a>            <span class="kw-2">&amp;</span>Error::UnsupportedVersion {
+<a href=#453 id=453 data-nosnippet>453</a>                version: <span class="string">"ma"</span>.into(),
+<a href=#454 id=454 data-nosnippet>454</a>                floor: <span class="string">"na"</span>.into(),
+<a href=#455 id=455 data-nosnippet>455</a>            },
+<a href=#456 id=456 data-nosnippet>456</a>        );
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">match </span>ledger.ensure_readable(<span class="string">"ks.t"</span>) {
+<a href=#458 id=458 data-nosnippet>458</a>            <span class="prelude-val">Err</span>(Error::UnsupportedVersion { version, floor }) =&gt; {
+<a href=#459 id=459 data-nosnippet>459</a>                <span class="macro">assert!</span>(
+<a href=#460 id=460 data-nosnippet>460</a>                    version.starts_with(<span class="string">"ma"</span>) &amp;&amp; version.contains(<span class="string">"nb-1-big-Data.db"</span>),
+<a href=#461 id=461 data-nosnippet>461</a>                    <span class="string">"{version}"
+<a href=#462 id=462 data-nosnippet>462</a>                </span>);
+<a href=#463 id=463 data-nosnippet>463</a>                <span class="macro">assert_eq!</span>(floor, <span class="string">"na"</span>);
+<a href=#464 id=464 data-nosnippet>464</a>            }
+<a href=#465 id=465 data-nosnippet>465</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected UnsupportedVersion, got {other:?}"</span>),
+<a href=#466 id=466 data-nosnippet>466</a>        }
+<a href=#467 id=467 data-nosnippet>467</a>    }
+<a href=#468 id=468 data-nosnippet>468</a>}
+</code></pre></div></section></main></body></html>
