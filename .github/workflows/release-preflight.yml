@@ -32,6 +32,11 @@ on:
         description: 'Release version or tag to assert against every manifest (leading v tolerated, e.g. v0.15.0 or 0.15.0).'
         required: true
         type: string
+      ref:
+        description: 'Git ref to check out (e.g. refs/tags/v0.19.0); empty = the triggering ref.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -44,6 +49,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
 
       # bump-version.sh check fails closed on: any manifest missing/empty, the
       # four fields disagreeing, or the resolved version != the tag. VERSION is
