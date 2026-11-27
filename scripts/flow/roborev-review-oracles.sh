@@ -71,7 +71,10 @@ roborev_mdx_adds_module_lines() {
   local _repo="$1" _from="$2" _to="$3" _path="$4" _out
   [ -n "$_repo" ] && [ -n "$_from" ] && [ -n "$_to" ] && [ -n "$_path" ] || return 2
   _out=$(git -C "$_repo" -c diff.renames=false -c diff.relative=false \
-    diff -U0 --no-ext-diff --no-color "$_from" "$_to" -- "$_path" 2>/dev/null) || return 2
+    diff --text --no-textconv -U0 --no-ext-diff --no-color "$_from" "$_to" -- "$_path" 2>/dev/null) || return 2
+  # --text forces a textual diff even under a `binary` attribute; if git STILL reports a binary
+  # difference the content was not measured, so fail closed (never read as prose).
+  if grep -Eq '^Binary files .* differ$|^GIT binary patch$' <<<"$_out"; then return 2; fi
   # Here-string, not `printf | grep -q`: grep -q exits on the first hit and would SIGPIPE a producer.
   if grep -Eq '^\+[[:space:]]*(import|export)([^[:alnum:]_]|$)' <<<"$_out"; then
     return 0

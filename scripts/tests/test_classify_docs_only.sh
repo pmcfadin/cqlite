@@ -647,6 +647,7 @@ mkdir -p "$MDXREPO/website/src/content/docs" "$MDXREPO/docs"
   git init -q -b main . && git config user.email t@t && git config user.name t
   printf 'import Card from "../Card.astro";\n\n# Home\n\nhello\n' >website/src/content/docs/index.mdx
   printf 'base\n' >docs/a.md
+  printf 'import Card from "../Card.astro";\n\nbody\n' >docs/page.mdx
   git add -A && git commit -q -m base && git tag base
   printf 'import Card from "../Card.astro";\n\n# Home\n\nhello, with a [link](/x).\n' >website/src/content/docs/index.mdx
   git commit -qam prose-mdx
@@ -661,6 +662,13 @@ mkdir -p "$MDXREPO/website/src/content/docs" "$MDXREPO/docs"
   printf 'prose only line\n' >>website/src/content/docs/index.mdx
   git commit -qam mixed
   git tag mixed
+  printf 'import Card from "../Card.astro";\n\nbody, edited\n' >docs/page.mdx
+  git commit -qam docs-page-prose && git tag docs-page-prose
+  printf 'import Extra from "../Extra.astro";\n\nbody, edited\n' >docs/page.mdx
+  git commit -qam docs-page-import && git tag docs-page-import
+  printf '*.mdx binary\n' >.gitattributes
+  printf 'import Bin from "../Bin.astro";\n\nbody, edited\n' >docs/page.mdx
+  git add -A && git commit -q -m binary-attr-import && git tag binary-attr-import
 ) >/dev/null 2>&1
 
 # assert_mdx <label> <from> <to> <file-list> <docs-only|full>
@@ -685,7 +693,9 @@ assert_mdx "prose .mdx beside real code"         base        prose-mdx  $'websit
 assert_mdx "unresolvable range fails closed"     nosuchref   prose-mdx  $'website/src/content/docs/index.mdx\n' full
 assert_full "no range: .mdx stays code"          $'website/src/content/docs/index.mdx\n'
 assert_full "no range: .mdx under docs/"         $'docs/page.mdx\n'
-assert_mdx "docs/ .mdx with no added import"      base        prose-mdx  $'docs/page.mdx\n' docs-only
+assert_mdx "docs/ .mdx prose-only edit"          base        docs-page-prose $'docs/page.mdx\n' docs-only
+assert_mdx "docs/ .mdx adding an import"         docs-page-prose docs-page-import $'docs/page.mdx\n' full
+assert_mdx "binary attr cannot hide an import"   docs-page-import binary-attr-import $'docs/page.mdx\n' full
 
 echo
 echo "==== classify-docs-only self-test: PASS=$PASS FAIL=$FAIL ===="
