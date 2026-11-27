@@ -287,6 +287,29 @@ export and leaves no partial file. Type mapping, `TIMEUUID` handling and the no-
 on the [Output Formats](/cqlite/user-docs/output-formats/#vortex--vortex-columnar-file-format-export-only)
 page.
 
+## Known limitations
+
+Measured by the 0.19 field round (#4503) on snapshots of a three-node Cassandra 5.0.8 cluster with a
+128 MiB memory limit. The round failed; two of its correctness findings are fixed (#4627, #4629); the `explain` cross-generation tombstone fix is in review (#4628, #4639).
+
+**Memory.** On large generations the following can exceed 128 MiB: `verify --mode audit` (it reads the
+whole `Data.db`: 1.66 GiB on a 1.79 GB generation, 167 to 264 MiB on 167 to 264 MiB generations),
+`--deep` on `verify --mode audit` and `diagnose` (195 MiB on a 2.5 MB generation; `diagnose --deep`
+173 to 269 MiB on 280 to 630 MB tables, over 1.7 GiB on the 1.79 GB one), `verify --mode full`,
+`diff` on healthy full tables (86 to 283 MiB, some did not finish), and `find`/`explain` on a very
+large partition (over 1.7 GiB on a 223.9 MB, 2.5-million-row partition). Plain `diagnose` (9.5 MiB or
+less on every table), `diff --partition` on one key (15 to 31 MiB) and `find`/`explain` on typical
+partitions (19 to 33 MiB) stay small. Run the heavy modes one generation at a time and size the host
+for the largest generation. Streaming reads are planned for 0.20 (#4630).
+
+**Other known issues.**
+
+- `find --commitlog` cannot read Cassandra 5.0.8 CommitLog version 8 segments; CQLite supports
+  version 7 only (#4632).
+- `sweep --mode audit` is rejected at runtime although `--help` lists it, and `verify <table-dir>`
+  checks only the first generation when the directory holds several (#4631). Use
+  `verify --mode audit` on each generation.
+
 ## Where to go next
 
 - [CLI Reference](/cqlite/user-docs/cli-reference/) — every flag of each verb.

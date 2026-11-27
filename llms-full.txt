@@ -6672,6 +6672,29 @@ Storage fixes that came out of the oracle work: an empty `Filter.db` no longer h
 * CQLite-written SSTables with `uuid`/`timeuuid` clustering columns were written in an order Cassandra rejects (#4539); re-write them.
 * `explain` and `diff` JSON carry rule labels and a `conflict` cell status; `CellDecision` and `TombstoneRecord` gain a `cell_path` field.
 
+## Known limitations
+
+[Section titled “Known limitations”](#known-limitations)
+
+These are measured, not predicted. The 0.19 freeside field round (#4503) ran the 0.19 tools against snapshots of a real three-node Cassandra 5.0.8 cluster with a 128 MiB memory limit, and **it failed**. Every correctness finding it raised is now fixed: false corruption on tuple columns (#4627), and point reads that ignored a tombstone in another generation or returned duplicate winners on an equal-timestamp tie (#4628, #4629). Fixing those also exposed and fixed two SELECT defects with non-frozen collections: collections collapsing to one element across generations (#4640) and deleted elements showing in single-generation reads (#4645). A re-run of the failed cells on 2026-11-27 passed against live Cassandra at CONSISTENCY ALL. Memory streaming is not fixed, and is planned for 0.20 (#4630).
+
+**Memory.** On large generations these can exceed 128 MiB of memory:
+
+* `verify --mode audit` reads the whole `Data.db` into memory: 1.66 GiB on a 1.79 GB generation, and 167 to 264 MiB on generations of 167 to 264 MiB. It was OOM-killed at a 128 MiB limit.
+* `verify --mode audit --deep` and `verify --mode full` used about 195 MiB on a 2.5 MB generation and 311 to 737 MiB on 264 to 300 MB generations.
+* `diagnose --deep` used 173 to 269 MiB on 280 to 630 MB tables and over 1.7 GiB on the 1.79 GB one.
+* `diff` on healthy full tables used 86 to 283 MiB and did not finish on some tables; one-partition `diff` stayed at 15 to 31 MiB.
+* `find` and `explain` on a very large partition (223.9 MB, 2.5 million rows) exceeded 1.7 GiB.
+
+Plain `diagnose` stayed at 9.5 MiB or less on every table, and `find`/`explain` on typical partitions used 19 to 33 MiB. Where a limit matters, run the heavy modes on one generation at a time and size the host for the generation. Fix: streaming reads, tracked in #4630 for 0.20.
+
+**Other known issues.**
+
+* `find --commitlog` cannot read Cassandra 5.0.8 CommitLog segments: they are version 8 and CQLite supports version 7 only (#4632).
+* `sweep --mode audit` is rejected at runtime although `--help` lists it, and `verify <table-dir>` checks only the first generation when the directory holds several (#4631). Run `verify --mode audit` per generation.
+
+The field-round report is [in the repository](https://github.com/pmcfadin/cqlite/blob/main/easy-db-lab-kits/test-plans/cqlite-forensics-fieldround-0.19-3node-report.md).
+
 ## Get it
 
 [Section titled “Get it”](#get-it)
@@ -20076,6 +20099,19 @@ cqlite --schema basic-types.cql --data-dir <data-dir> \
 ```
 
 Writes the reconciled `SELECT` row stream to a [Vortex](https://github.com/spiraldb/vortex) columnar file through the same Arrow layer as Parquet, so the two formats agree value for value. It is an **export target only**: it requires a build with the off-by-default `vortex` feature (and a libclang shared library on the build host), needs a file destination (not stdout), and is rejected by `query` and `read-sstable`. The writer is fail-closed: a conversion or write error aborts the export and leaves no partial file. Type mapping, `TIMEUUID` handling and the no-byte-golden note are on the [Output Formats](/cqlite/user-docs/output-formats/#vortex--vortex-columnar-file-format-export-only) page.
+
+## Known limitations
+
+[Section titled “Known limitations”](#known-limitations)
+
+Measured by the 0.19 field round (#4503) on snapshots of a three-node Cassandra 5.0.8 cluster with a 128 MiB memory limit. The round failed; two of its correctness findings are fixed (#4627, #4629); the `explain` cross-generation tombstone fix is in review (#4628, #4639).
+
+**Memory.** On large generations the following can exceed 128 MiB: `verify --mode audit` (it reads the whole `Data.db`: 1.66 GiB on a 1.79 GB generation, 167 to 264 MiB on 167 to 264 MiB generations), `--deep` on `verify --mode audit` and `diagnose` (195 MiB on a 2.5 MB generation; `diagnose --deep` 173 to 269 MiB on 280 to 630 MB tables, over 1.7 GiB on the 1.79 GB one), `verify --mode full`, `diff` on healthy full tables (86 to 283 MiB, some did not finish), and `find`/`explain` on a very large partition (over 1.7 GiB on a 223.9 MB, 2.5-million-row partition). Plain `diagnose` (9.5 MiB or less on every table), `diff --partition` on one key (15 to 31 MiB) and `find`/`explain` on typical partitions (19 to 33 MiB) stay small. Run the heavy modes one generation at a time and size the host for the largest generation. Streaming reads are planned for 0.20 (#4630).
+
+**Other known issues.**
+
+* `find --commitlog` cannot read Cassandra 5.0.8 CommitLog version 8 segments; CQLite supports version 7 only (#4632).
+* `sweep --mode audit` is rejected at runtime although `--help` lists it, and `verify <table-dir>` checks only the first generation when the directory holds several (#4631). Use `verify --mode audit` on each generation.
 
 ## Where to go next
 
