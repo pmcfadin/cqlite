@@ -20,7 +20,19 @@ import { Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/comp
 
 CQLite is a Rust library for reading Apache Cassandra 5.0 SSTable files directly — no Cassandra cluster required. It provides a CQL query interface over local data files, making it ideal for offline analysis, migrations, testing, and backup inspection.
 
+## Current release: v0.19.0
+
+[v0.19.0](/cqlite/releases/v0-19-0/) (2026-11-27) is the SSTable utility release: read, inspect and
+recover Cassandra 5.0 SSTables offline. It adds `verify --mode audit`, `find`, `diagnose`, `explain`
+and `diff`, makes `salvage` and `rebuild` crash-safe, and adds Vortex export, alongside the 0.18
+`verify`/`sweep` verbs. See the [release page](/cqlite/releases/v0-19-0/) for the limits, and the
+[SSTable Toolbox](/cqlite/user-docs/sstable-toolbox/) guide for the verbs.
+
 ## Install the CLI
+
+:::note[As of 2026-11-27]
+macOS/Windows binaries, crates.io and Homebrew for 0.19.0 are being completed; until then use pip/npm or the Linux binary, or build from source.
+:::
 
 <Tabs>
   <TabItem label="Homebrew">
