@@ -149,6 +149,14 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
    `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
    (Regression coverage: `scripts/flow/tests/finalize-cleanup.test.sh` encodes the #1143 scenario.)
+   The same script then removes the lane's gate build dir (`$CARGO_TARGET_DIR/wt/<16 hex>`, ~25 GiB, #4641)
+   through `scripts/flow/lane-builddir.sh remove <worktree> --worktree-removed`, which derives the hash with
+   the gate's own function. If that step reports a failure (or you finalized by hand), run it yourself:
+   ```bash
+   bash scripts/flow/lane-builddir.sh remove <worktree-path> --worktree-removed   # or: remove --dir <target-dir: from the gate summary>
+   bash scripts/flow/lane-builddir.sh stale    # report-only: orphaned wt/* dirs and what they would free
+   ```
+   It refuses a worktree that is still live and any path outside `<base>/wt/`; never `rm -rf` a `wt/` dir by hand.
    Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap
    window (issue #2089):
    ```bash

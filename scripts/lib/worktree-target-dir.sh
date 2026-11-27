@@ -97,11 +97,18 @@ gate_worktree_target_effective() {
   esac
 }
 
-gate_worktree_target_dir() {
-  local root base h dir rc
+# gate_worktree_target_path <root> [<cargo-config-root>]: the PURE half of the derivation (#4641).
+# Prints `<base>/wt/<hash of root>` with NO side effect (no mkdir, no marker), and does not need
+# <root> to exist: the hash input is the physical path (gate_worktree_canon), so a removed
+# worktree still maps to the dir its gate runs built in. <cargo-config-root> (default <root>) is
+# only where `cargo metadata` runs when no CARGO_TARGET_DIR is set. Same rc contract as
+# gate_worktree_target_dir (1 not applicable, 2 cannot resolve). The gate and
+# scripts/flow/lane-builddir.sh BOTH go through this function, so they cannot disagree.
+gate_worktree_target_path() {
+  local root base h rc
   [ "${CQLITE_SHARED_TARGET:-0}" = 1 ] && return 1
-  root=$(cd "${1:-.}" 2>/dev/null && pwd -P) || return 1
-  base=$(gate_worktree_target_effective "$root"); rc=$?
+  root=$(gate_worktree_canon "${1:-.}") || return 1
+  base=$(gate_worktree_target_effective "${2:-$root}"); rc=$?
   [ "$rc" = 0 ] || return "$rc"
   case "$base/" in "$root"/*) return 1 ;; esac   # checkout-local default: already per-worktree
   h=$(gate_worktree_target_hash "$root")
@@ -110,7 +117,16 @@ gate_worktree_target_dir() {
     */wt/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
       [ -f "$base/.worktree-root" ] && base=${base%/wt/*} ;;
   esac
-  dir="$base/wt/$h"
+  printf '%s' "$base/wt/$h"
+}
+
+gate_worktree_target_dir() {
+  local root base dir rc
+  [ "${CQLITE_SHARED_TARGET:-0}" = 1 ] && return 1
+  root=$(cd "${1:-.}" 2>/dev/null && pwd -P) || return 1
+  dir=$(gate_worktree_target_path "$root"); rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  base=${dir%/wt/*}
   # The prune refuses a dir without cargo's CACHEDIR.TAG, and cargo only writes one inside the
   # dir it builds in, so a fresh base needs the standard tag from us.
   if [ ! -f "$base/CACHEDIR.TAG" ]; then

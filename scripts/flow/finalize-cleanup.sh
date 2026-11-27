@@ -441,6 +441,12 @@ fi
 if [ -n "$target_wt" ]; then
   run git_root worktree remove "$target_wt"
   [ "$DRY_RUN" -eq 1 ] || note "removed worktree $target_wt"
+  # #4641: the lane's gate build dir (<CARGO_TARGET_DIR>/wt/<hash>, ~25 GiB) outlives the
+  # worktree unless removed here. The hash comes from the gate's own derivation (lane-builddir.sh
+  # sources it), never a glob. Non-fatal: a failure here must not abort the teardown.
+  if ! run bash "$(dirname "${BASH_SOURCE[0]}")/lane-builddir.sh" remove "$target_wt" --worktree-removed; then
+    note "could not remove the lane build dir for $target_wt — free it with: bash scripts/flow/lane-builddir.sh stale"
+  fi
 elif [ "$stale_wt" -eq 1 ]; then
   run git_root worktree prune
   [ "$DRY_RUN" -eq 1 ] || note "pruned stale worktree entry for '$MERGED_BRANCH'"

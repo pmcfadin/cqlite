@@ -23071,6 +23071,10 @@ run_tooling_tests() {
   # component, mirroring the keyspace-scoping guard.
   _tt_add P 'agent-gate LOG_DIR cleanup guard' 'bash "$REPO_ROOT/scripts/tests/test_agent_gate_logdir_cleanup.sh"'
 
+  # lane build-dir cleanup (#4641): lane-builddir.sh derives the wt dir with the gate's own function
+  # and refuses a live worktree or anything outside <base>/wt/. Hermetic (fake CARGO_TARGET_DIR).
+  _tt_add P 'lane build-dir cleanup' 'bash "$REPO_ROOT/scripts/tests/test_lane_builddir.sh"'
+
   _tt_add P 'flight Dockerfile rust-pin lockstep' 'bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh"'
 
   # auto-loaded-skill flag-table drift guard (#3054): no python3/Docker/cargo
@@ -27672,6 +27676,13 @@ _gate_disk_admission_refuse() {
   echo "agent-gate: FAIL: ${_DA_REFUSE_LEAD:-the admission check refused} — refusing to start a build that cannot finish (#3755)" >&2
   echo "agent-gate: $_DA_SLOT_NOTE." >&2
   echo "agent-gate: remedy: ${_DA_REFUSE_REMEDY:-free space on the target filesystem, then re-run}." >&2
+  # #4641: show what can be freed. Report only (the helper never deletes), bounded, and never fatal.
+  case "${_DA_REFUSE_VERDICT:-}" in
+    BAR-*) ;;   # an unusable bar is a configuration error; space is not the problem
+    *) if [ -f "$REPO_ROOT/scripts/flow/lane-builddir.sh" ]; then
+         timeout 60 bash "$REPO_ROOT/scripts/flow/lane-builddir.sh" stale 2>&1 | sed 's/^/agent-gate: /' >&2 || true
+       fi ;;
+  esac
   echo "agent-gate: $DISK_ADMISSION_LINE" >&2
   # A complete, well-formed terminal block — the refusal must not be information-poorer
   # than any other FAIL. _tree_commit_meta runs BEFORE _tree_meta_array so the `commit:`
