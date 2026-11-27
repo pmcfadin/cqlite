@@ -248,10 +248,7 @@ impl IndexReader {
 
         // Eager: populate the cell immediately (fresh cell, `set` always succeeds).
         let materialized = tokio::sync::OnceCell::new();
-        let _ = materialized.set(MaterializedIndex {
-            index_data,
-            fully_parsed,
-        });
+        let _ = materialized.set(MaterializedIndex::new(index_data, fully_parsed));
 
         Ok(Self {
             file_path: arc_swap::ArcSwap::from_pointee(path.to_path_buf()),
@@ -282,10 +279,8 @@ impl IndexReader {
     /// #107). `None` until materialized (`lazy.rs`, #2412).
     pub fn lookup_partition(&self, key_digest: &[u8]) -> Option<&PartitionIndexEntry> {
         let m = self.materialized.get()?;
-        m.index_data
-            .key_lookup
-            .get(key_digest)
-            .and_then(|&index| m.index_data.partition_entries.get(index))
+        m.entry_index(key_digest)
+            .and_then(|index| m.index_data.partition_entries.get(index))
     }
 
     /// Get statistics about the index
