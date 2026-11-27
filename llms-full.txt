@@ -6700,15 +6700,13 @@ The field-round report is [in the repository](https://github.com/pmcfadin/cqlite
 [Section titled “Get it”](#get-it)
 
 ```bash
+brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
+cargo add cqlite-core@0.19.0              # Rust library
 pip install cqlite-py==0.19.0             # Python
 npm install @cqlite/node@0.19.0           # Node.js
 ```
 
-The Linux CLI binaries are attached to the [v0.19.0 GitHub release](https://github.com/pmcfadin/cqlite/releases/tag/v0.19.0), or build the CLI from source (see [Installation](/cqlite/user-docs/installation/#build-from-source-rust)).
-
-As of 2026-11-27
-
-macOS/Windows binaries, crates.io and Homebrew for 0.19.0 are being completed; until then use pip/npm or the Linux binary, or build from source.
+Prebuilt CLI binaries for macOS, Linux and Windows are attached to the [v0.19.0 GitHub release](https://github.com/pmcfadin/cqlite/releases/tag/v0.19.0).
 
 # SSTable Format Guide
 
@@ -17606,10 +17604,6 @@ CQLite ships in four forms: a prebuilt CLI binary (the fastest way to start), a 
 
 The current release is [v0.19.0](/cqlite/releases/v0-19-0/) (2026-11-27).
 
-As of 2026-11-27
-
-macOS/Windows binaries, crates.io and Homebrew for 0.19.0 are being completed; until then use pip/npm or the Linux binary, or build from source.
-
 ## Homebrew (macOS + Linux)
 
 [Section titled “Homebrew (macOS + Linux)”](#homebrew-macos--linux)
@@ -17621,13 +17615,13 @@ brew install pmcfadin/cqlite/cqlite
 cqlite --version
 ```
 
-Until the tap carries 0.19.0 (see the note above), `brew` installs the previous release. Upgrade to the latest release with `brew upgrade cqlite`. To pin or inspect the tap explicitly, run `brew tap pmcfadin/cqlite` first, then `brew install cqlite`.
+Upgrade to the latest release with `brew upgrade cqlite`. To pin or inspect the tap explicitly, run `brew tap pmcfadin/cqlite` first, then `brew install cqlite`.
 
 ## Prebuilt CLI binaries
 
 [Section titled “Prebuilt CLI binaries”](#prebuilt-cli-binaries)
 
-Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a prebuilt `cqlite` binary and a `.sha256` checksum sidecar for six platforms. For v0.19.0 only the Linux assets are attached so far; the macOS and Windows assets are being completed (see the note above):
+Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a prebuilt `cqlite` binary and a `.sha256` checksum sidecar for six platforms:
 
 | Platform                    | Asset                                     |
 | --------------------------- | ----------------------------------------- |
