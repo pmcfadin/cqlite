@@ -62,7 +62,7 @@ CODE_FREE_EXTENSIONS="md markdown mdx txt rst adoc"
 #   0  the diff <from>..<to> ADDS an import/export line to <path>  -> CODE
 #   1  it adds none                                                -> PROSE
 #   2  the diff could not be measured                              -> callers fail CLOSED (code)
-# A line counts when, after the diff's `+`, it starts with optional blanks then `import` or
+# A line counts when, after the diff's `+`, it starts with optional blanks (incl. BOM/ECMAScript whitespace) then `import` or
 # `export` followed by a non-identifier character. Over-matching (a prose line "export a ...", or an
 # import inside a code fence) errs toward CODE, the safe side. No rename detection: a new path is
 # all additions.
@@ -70,13 +70,17 @@ CODE_FREE_EXTENSIONS="md markdown mdx txt rst adoc"
 roborev_mdx_adds_module_lines() {
   local _repo="$1" _from="$2" _to="$3" _path="$4" _out
   [ -n "$_repo" ] && [ -n "$_from" ] && [ -n "$_to" ] && [ -n "$_path" ] || return 2
-  _out=$(git -C "$_repo" -c diff.renames=false -c diff.relative=false \
+  # --literal-pathspecs: $_path is a NAME, never pathspec magic (`:(top)x.mdx` must not select another path).
+  _out=$(git --literal-pathspecs -C "$_repo" -c diff.renames=false -c diff.relative=false \
     diff --text --no-textconv -U0 --no-ext-diff --no-color "$_from" "$_to" -- "$_path" 2>/dev/null) || return 2
   # --text forces a textual diff even under a `binary` attribute; if git STILL reports a binary
   # difference the content was not measured, so fail closed (never read as prose).
   if grep -Eq '^Binary files .* differ$|^GIT binary patch$' <<<"$_out"; then return 2; fi
   # Here-string, not `printf | grep -q`: grep -q exits on the first hit and would SIGPIPE a producer.
-  if grep -Eq '^\+[[:space:]]*(import|export)([^[:alnum:]_]|$)' <<<"$_out"; then
+  # Leading blanks include a UTF-8 BOM and every ECMAScript WhiteSpace (TAB VT FF SP, NBSP U+00A0,
+  # U+FEFF, U+1680, U+2000-200A, U+202F, U+205F, U+3000) plus U+2028/2029, matched as BYTES (C locale).
+  local _ws='(?:[ \t\x0b\x0c\r]|\xC2\xA0|\xEF\xBB\xBF|\xE1\x9A\x80|\xE2\x80[\x80-\x8A\xA8\xA9\xAF]|\xE2\x81\x9F|\xE3\x80\x80)*'
+  if LC_ALL=C grep -Pq "^\\+${_ws}(?:import|export)(?:[^A-Za-z0-9_]|\$)" <<<"$_out"; then
     return 0
   fi
   return 1

@@ -669,6 +669,15 @@ mkdir -p "$MDXREPO/website/src/content/docs" "$MDXREPO/docs"
   printf '*.mdx binary\n' >.gitattributes
   printf 'import Bin from "../Bin.astro";\n\nbody, edited\n' >docs/page.mdx
   git add -A && git commit -q -m binary-attr-import && git tag binary-attr-import
+  printf '\xef\xbb\xbfimport Bom from "../Bom.astro";\n' >bom.mdx
+  printf '\xc2\xa0export const n = 1;\n' >nbsp.mdx
+  printf '# plain\n' >':(top)p.mdx'
+  git add -A && git commit -q -m weird-names && git tag weird-names
+  git tag pre-weird weird-names~1
+  printf '# plain\n\nprose\n' >':(top)q.mdx'
+  git add -A && git commit -q -m pathspec-prose && git tag pathspec-prose
+  printf 'import Magic from "../M.astro";\n' >>':(top)q.mdx'
+  git commit -qam pathspec-import && git tag pathspec-import
 ) >/dev/null 2>&1
 
 # assert_mdx <label> <from> <to> <file-list> <docs-only|full>
@@ -695,6 +704,10 @@ assert_full "no range: .mdx stays code"          $'website/src/content/docs/inde
 assert_full "no range: .mdx under docs/"         $'docs/page.mdx\n'
 assert_mdx "docs/ .mdx prose-only edit"          base        docs-page-prose $'docs/page.mdx\n' docs-only
 assert_mdx "docs/ .mdx adding an import"         docs-page-prose docs-page-import $'docs/page.mdx\n' full
+assert_mdx "BOM-prefixed new .mdx adding an import" pre-weird weird-names $'bom.mdx\n' full
+assert_mdx "NBSP-prefixed export is code"        pre-weird weird-names $'nbsp.mdx\n' full
+assert_mdx "plain pathspec-like name, prose"     pre-weird weird-names $':(top)p.mdx\n' docs-only
+assert_mdx "pathspec-like name adding an import" pathspec-prose pathspec-import $':(top)q.mdx\n' full
 assert_mdx "binary attr cannot hide an import"   docs-page-import binary-attr-import $'docs/page.mdx\n' full
 
 echo
