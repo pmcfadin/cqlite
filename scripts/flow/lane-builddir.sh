@@ -77,7 +77,7 @@ cmd_path() {
 }
 
 cmd_remove() {
-  local wt="" dir="" removed=0 live marker root rc
+  local wt="" dir="" removed=0 live marker root rc cwtp cbase cdir
   while [ $# -gt 0 ]; do
     case "$1" in
       --worktree-removed) removed=1; shift ;;
@@ -96,13 +96,23 @@ cmd_remove() {
   # Containment: a direct `<base>/wt/<16 hex>` child, never a symlink, nothing else.
   case "$dir" in /*) ;; *) refuse "$dir is not an absolute path" ;; esac
   dir=${dir%/}
-  # The base is the lane's own cargo config's, which this script may not share, so containment is
-  # structural: a direct `wt/<16 hex>` child of a base the gate stamped with CACHEDIR.TAG.
+  # Containment is checked on CANONICAL paths and deletion uses the canonical path only (#4641):
+  # a lexical check let a symlinked `wt/` (or base) redirect `rm -rf` to a same-hash dir elsewhere.
+  # Neither `wt` nor the lane may be a symlink; the canonical base must carry the gate's CACHEDIR.TAG
+  # (a symlinked base is resolved, and its real target must be the stamped one).
   [ "$(basename "$(dirname "$dir")")" = wt ] || refuse "$dir is not directly under a wt/ dir"
-  [ -f "$(dirname "$(dirname "$dir")")/CACHEDIR.TAG" ] || refuse "$dir is not under a gate-stamped target base (no CACHEDIR.TAG)"
   is_hex16 "$(basename "$dir")" || refuse "$dir is not a <16 hex> lane dir"
+  [ ! -L "$(dirname "$dir")" ] || refuse "$(dirname "$dir") (the wt/ parent) is a symlink"
   [ ! -L "$dir" ] || refuse "$dir is a symlink"
   [ -d "$dir" ] || { echo "$prog: nothing to remove ($dir absent)"; exit 0; }
+  cwtp=$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd -P) || refuse "cannot canonicalise $(dirname "$dir")"
+  cbase=$(dirname "$cwtp")
+  [ "$(basename "$cwtp")" = wt ] || refuse "canonical parent $cwtp is not a wt/ dir"
+  [ -f "$cbase/CACHEDIR.TAG" ] || refuse "$dir is not under a gate-stamped target base (no CACHEDIR.TAG in $cbase)"
+  cdir="$cwtp/$(basename "$dir")"
+  [ ! -L "$cdir" ] && [ -d "$cdir" ] || refuse "canonical lane dir $cdir is not a plain directory"
+  [ "$(cd -P "$cdir" && pwd -P)" = "$cdir" ] || refuse "canonical lane dir $cdir does not resolve to itself"
+  dir=$cdir
   if [ -z "$wt" ]; then
     marker=$(head -1 "$dir/.worktree-root" 2>/dev/null || true)
     root=$marker

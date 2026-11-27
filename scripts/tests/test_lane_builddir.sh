@@ -56,6 +56,20 @@ ln -s "$outside" "$CARGO_TARGET_DIR/wt/aaaaaaaaaaaaaaaa"; run remove --dir "$CAR
 check "remove refuses a symlinked lane dir and keeps its target" '[ "$rc" = 2 ] && [ -f "$outside/keep" ]'
 rm -f "$CARGO_TARGET_DIR/wt/aaaaaaaaaaaaaaaa"; rm -rf "$CARGO_TARGET_DIR/wt/notahash" "$CARGO_TARGET_DIR/wt/0123456789abcdef"
 
+# 2b. #4641 round 3: symlinked wt/ parent and symlinked base.
+sb="$tmp/symbase"; mkdir -p "$sb" "$tmp/victim/0123456789abcdef"
+echo "Signature: x" >"$sb/CACHEDIR.TAG"; echo keep >"$tmp/victim/0123456789abcdef/keep"
+ln -s "$tmp/victim" "$sb/wt"
+run remove --dir "$sb/wt/0123456789abcdef" --worktree-removed
+check "remove refuses a symlinked wt/ parent pointing outside; nothing deleted" '[ "$rc" = 2 ] && [ -f "$tmp/victim/0123456789abcdef/keep" ] && grep -q symlink <<<"$out"'
+realb="$tmp/realbase"; mkdir -p "$realb/wt/0123456789abcdef"; echo keep >"$realb/wt/0123456789abcdef/keep"
+echo "Signature: x" >"$realb/CACHEDIR.TAG"; ln -s "$realb" "$tmp/linkbase"
+run remove --dir "$tmp/linkbase/wt/0123456789abcdef" --worktree-removed
+check "symlinked base is resolved safely: only the real stamped base's lane dir goes" '[ "$rc" = 0 ] && [ ! -e "$realb/wt/0123456789abcdef" ] && [ -d "$realb/wt" ] && [ -f "$tmp/victim/0123456789abcdef/keep" ]'
+mkdir -p "$tmp/unstamped/wt/0123456789abcdef"; ln -s "$tmp/unstamped" "$tmp/linkunstamped"
+run remove --dir "$tmp/linkunstamped/wt/0123456789abcdef" --worktree-removed
+check "symlinked base to an unstamped target is refused" '[ "$rc" = 2 ] && [ -d "$tmp/unstamped/wt/0123456789abcdef" ]'
+
 # 3. remove refuses a live worktree.
 live_dir=$(mkdir_lane "$live")
 run remove "$live"
