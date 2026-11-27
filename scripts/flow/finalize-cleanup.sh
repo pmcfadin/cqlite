@@ -438,13 +438,19 @@ fi
 # What this trades into is strictly smaller and recoverable: if the removal succeeds and the
 # release then fails, the record is ORPHANED (it names a lane directory that is gone) rather
 # than a peer's work being deleted. That is clearable with `release --force`.
+lane_builddir=""
 if [ -n "$target_wt" ]; then
+  # #4641: derive the lane's gate build dir NOW, with the lane's own cargo config (the gate resolves
+  # it from the worktree); once the worktree is gone that config is unreadable.
+  lane_builddir=$(bash "$(dirname "${BASH_SOURCE[0]}")/lane-builddir.sh" path "$target_wt" 2>/dev/null || true)
   run git_root worktree remove "$target_wt"
   [ "$DRY_RUN" -eq 1 ] || note "removed worktree $target_wt"
   # #4641: the lane's gate build dir (<CARGO_TARGET_DIR>/wt/<hash>, ~25 GiB) outlives the
   # worktree unless removed here. The hash comes from the gate's own derivation (lane-builddir.sh
   # sources it), never a glob. Non-fatal: a failure here must not abort the teardown.
-  if ! run bash "$(dirname "${BASH_SOURCE[0]}")/lane-builddir.sh" remove "$target_wt" --worktree-removed; then
+  if [ -z "$lane_builddir" ]; then
+    note "no per-worktree build dir applies to $target_wt — nothing to remove"
+  elif ! run bash "$(dirname "${BASH_SOURCE[0]}")/lane-builddir.sh" remove --dir "$lane_builddir" --worktree-removed; then
     note "could not remove the lane build dir for $target_wt — free it with: bash scripts/flow/lane-builddir.sh stale"
   fi
 elif [ "$stale_wt" -eq 1 ]; then

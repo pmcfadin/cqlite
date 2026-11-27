@@ -13,7 +13,7 @@ check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 tmp=$(cd "$(mktemp -d)" && pwd -P); trap 'rm -rf "$tmp"' EXIT
 export CARGO_TARGET_DIR="$tmp/cache/cargo-target"
 unset CQLITE_SHARED_TARGET CARGO_BUILD_TARGET_DIR
-mkdir -p "$CARGO_TARGET_DIR/wt"
+mkdir -p "$CARGO_TARGET_DIR/wt"; echo "Signature: 8a477f597d28d172789f06886806bc55" >"$CARGO_TARGET_DIR/CACHEDIR.TAG"
 
 # A throwaway repo with one live linked worktree.
 main="$tmp/repo"; live="$tmp/wts/live"; gone="$tmp/wts/gone"
@@ -84,6 +84,45 @@ run remove "$gone"
 check "remove is idempotent (absent dir is rc 0)" '[ "$rc" = 0 ]'
 run remove --dir "$orphan_dir"
 check "remove --dir deletes an orphan whose marker root is gone" '[ "$rc" = 0 ] && [ ! -e "$orphan_dir" ]'
+
+# 6. #4641 review: a stale scan must not report another clone's LIVE worktree sharing the base.
+other="$tmp/otherclone"; mkdir -p "$other" && : >"$other/.git"
+other_dir=$(mkdir_lane "$other")
+run stale
+check "stale excludes a candidate whose marker root still has a .git entry" '! grep -Fq "$other_dir" <<<"$out"'
+rm -f "$other/.git"
+run stale
+check "stale lists it once that checkout's .git is gone" 'grep -Fq "$other_dir" <<<"$out"'
+rm -rf "$other_dir" "$other"
+
+# 7. #4641 review: the lane's OWN cargo config decides the dir (as in the gate), and finalize derives
+# it BEFORE the worktree is removed, then removes via --dir.
+if command -v cargo >/dev/null 2>&1; then
+  crepo="$tmp/crepo"; clane="$tmp/wts/cfglane"; cbase="$tmp/cfgbase"
+  git init -q "$crepo"
+  mkdir -p "$crepo/src" "$crepo/.cargo"
+  printf '[package]\nname = "lanefix"\nversion = "0.0.0"\nedition = "2021"\n' >"$crepo/Cargo.toml"
+  : >"$crepo/src/lib.rs"
+  printf '[build]\ntarget-dir = "%s"\n' "$cbase" >"$crepo/.cargo/config.toml"
+  (cd "$crepo" && cargo generate-lockfile --offline -q 2>/dev/null)
+  git -C "$crepo" add -A && git -C "$crepo" -c user.name=t -c user.email=t@t commit -q -m init
+  git -C "$crepo" worktree add -q "$clane" -b cfglane
+  saved_target=$CARGO_TARGET_DIR; unset CARGO_TARGET_DIR
+  gate_cfg=$(gate_worktree_target_dir "$clane")
+  main_path=$(cd "$main" && bash "$SCRIPT" path "$clane" 2>&1)
+  check "gate derives the dir from the lane's .cargo/config.toml" '[ "$gate_cfg" = "$cbase/wt/$(hash_of "$clane")" ]'
+  check "path matches the gate for a lane with its own target config" '[ "$main_path" = "$gate_cfg" ]'
+  # finalize order: derive first, remove worktree, then --dir
+  pre=$(cd "$main" && bash "$SCRIPT" path "$clane")
+  git -C "$crepo" worktree remove --force "$clane"
+  post=$(cd "$main" && bash "$SCRIPT" path "$clane" 2>&1)
+  check "after the worktree is gone, path-by-fallback would pick a DIFFERENT dir (why finalize derives first)" '[ "$post" != "$pre" ]'
+  out=$(cd "$main" && bash "$SCRIPT" remove --dir "$pre" --worktree-removed 2>&1); rc=$?
+  check "remove --dir deletes the pre-derived dir under the lane's own base" '[ "$rc" = 0 ] && [ ! -e "$pre" ] && [ -d "$cbase" ]'
+  export CARGO_TARGET_DIR=$saved_target
+else
+  echo "skip - cargo absent: lane-config case not run"
+fi
 
 echo "lane-builddir: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

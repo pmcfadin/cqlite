@@ -53,7 +53,9 @@ base_dir() {
 # lane_dir <worktree path>: the wt dir for that path (no side effects, path need not exist).
 lane_dir() {
   case "$1" in /*) ;; *) set -- "$(pwd -P)/$1" ;; esac
-  gate_worktree_target_path "$1" "$SCRIPT_REPO"
+  # Resolve cargo's target dir from the LANE (its .cargo/config.toml), as the gate does; only a
+  # removed worktree falls back to this script's repo.
+  if [ -f "$1/Cargo.toml" ]; then gate_worktree_target_path "$1" "$1"; else gate_worktree_target_path "$1" "$SCRIPT_REPO"; fi
 }
 
 is_hex16() { case "$1" in *[!0-9a-f]*|'') return 1 ;; esac; [ "${#1}" = 16 ]; }
@@ -71,7 +73,7 @@ cmd_path() {
 }
 
 cmd_remove() {
-  local wt="" dir="" removed=0 base rc live marker root
+  local wt="" dir="" removed=0 live marker root
   while [ $# -gt 0 ]; do
     case "$1" in
       --worktree-removed) removed=1; shift ;;
@@ -82,8 +84,6 @@ cmd_remove() {
   done
   [ -n "$wt" ] || [ -n "$dir" ] || die "usage: remove <worktree-path>|--dir <wt-dir> [--worktree-removed]"
   [ -z "$wt" ] || [ -z "$dir" ] || die "give a worktree path OR --dir, not both"
-  base=$(base_dir); rc=$?
-  [ "$rc" = 0 ] || refuse "cannot establish the shared target base (rc=$rc)"
   if [ -n "$wt" ]; then
     dir=$(lane_dir "$wt") || refuse "no per-worktree target dir applies to $wt"
     root=$(gate_worktree_canon "$(case "$wt" in /*) printf '%s' "$wt" ;; *) printf '%s/%s' "$(pwd -P)" "$wt" ;; esac)")
@@ -91,7 +91,10 @@ cmd_remove() {
   # Containment: a direct `<base>/wt/<16 hex>` child, never a symlink, nothing else.
   case "$dir" in /*) ;; *) refuse "$dir is not an absolute path" ;; esac
   dir=${dir%/}
-  [ "$(dirname "$dir")" = "$base/wt" ] || refuse "$dir is not directly under $base/wt/"
+  # The base is the lane's own cargo config's, which this script may not share, so containment is
+  # structural: a direct `wt/<16 hex>` child of a base the gate stamped with CACHEDIR.TAG.
+  [ "$(basename "$(dirname "$dir")")" = wt ] || refuse "$dir is not directly under a wt/ dir"
+  [ -f "$(dirname "$(dirname "$dir")")/CACHEDIR.TAG" ] || refuse "$dir is not under a gate-stamped target base (no CACHEDIR.TAG)"
   is_hex16 "$(basename "$dir")" || refuse "$dir is not a <16 hex> lane dir"
   [ ! -L "$dir" ] || refuse "$dir is a symlink"
   [ -d "$dir" ] || { echo "$prog: nothing to remove ($dir absent)"; exit 0; }
@@ -119,7 +122,7 @@ cmd_remove() {
 
 cmd_stale() {
   [ $# -eq 0 ] || die "usage: stale"
-  local base rc d h wt live_hashes="" total=0 n=0 kb age now mt
+  local base rc d h wt mroot live_hashes="" total=0 n=0 kb age now mt
   base=$(base_dir); rc=$?
   [ "$rc" = 0 ] || { echo "$prog: cannot establish the shared target base (rc=$rc)" >&2; exit 2; }
   while IFS= read -r wt; do
@@ -134,6 +137,9 @@ cmd_stale() {
     h=${d##*/}
     is_hex16 "$h" || continue
     case "$live_hashes " in *" $h "*) continue ;; esac
+    # Another clone's worktree sharing this base: its marker root still has a .git entry.
+    mroot=$(head -1 "$d/.worktree-root" 2>/dev/null || true)
+    if [ -n "$mroot" ] && [ -e "$mroot/.git" ]; then continue; fi
     kb=$(du -sk "$d" 2>/dev/null | cut -f1); kb=${kb:-0}
     mt=$(stat -c %Y "$d" 2>/dev/null || echo "$now")
     age=$(( (now - mt) / 86400 ))
