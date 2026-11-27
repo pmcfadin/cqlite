@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.19.0] - TBD
+## [v0.19.0] - 2026-11-27
 
 The SSTable utility release: detect, diagnose, compare, recover and export. Every new verb is
 read-only on its input files; `salvage` and `rebuild` write only to a separate `--out`. Narrative
@@ -149,6 +149,26 @@ Read these before upgrading.
 
 - Nothing from the public surface. Internally, a never-compiled CLI module (`select_query_engine.rs`,
   #4544) and fleet-only tooling (#4413) were deleted.
+
+### Known limitations
+
+Measured by the 0.19 freeside field round (#4503, three-node Cassandra 5.0.8, 128 MiB limit), which
+failed on first run. Every correctness finding it raised is fixed (false corruption on tuple columns
+#4627; cross-generation tombstones and equal-timestamp ties in point reads #4628/#4629), as are two
+SELECT collection defects found while fixing them (#4640, #4645). A re-run of the failed cells on
+2026-11-27 passed against live Cassandra at CONSISTENCY ALL. The report is in
+`easy-db-lab-kits/test-plans/`. The memory limits below remain and are planned for 0.20 (#4630).
+
+- **Memory.** On large generations `verify --mode audit` (1.66 GiB on a 1.79 GB generation; 167 to
+  264 MiB on 167 to 264 MiB ones), `--deep` in `verify --mode audit` and `diagnose` (195 MiB on a
+  2.5 MB generation; `diagnose --deep` 173 to 269 MiB on 280 to 630 MB tables), `verify --mode full`,
+  `diff` on healthy full tables (86 to 283 MiB) and `find`/`explain` on a very large partition (over
+  1.7 GiB on a 223.9 MB partition) can exceed 128 MiB. Plain `diagnose` (9.5 MiB or less) and
+  `find`/`explain` on typical partitions (19 to 33 MiB) stay small. Streaming reads are planned for
+  0.20 (#4630).
+- `find --commitlog` cannot read Cassandra 5.0.8 CommitLog version 8 segments (#4632).
+- `sweep --mode audit` is rejected at runtime although `--help` lists it, and `verify <table-dir>`
+  checks only the first generation (#4631).
 
 ### Notes
 
