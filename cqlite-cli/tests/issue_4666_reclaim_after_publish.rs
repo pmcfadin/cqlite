@@ -19,7 +19,6 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-const GC_BEFORE: i64 = 5_000;
 const TOMB_LDT: i32 = 100;
 
 fn schema() -> TableSchema {
@@ -207,14 +206,26 @@ fn compact_bin(input: &Path, out: &Path, schema: &Path, abort_at: Option<usize>)
 
 /// Every component of the generation `data` belongs to.
 fn components(data: &Path) -> Vec<PathBuf> {
-    let base = data.to_string_lossy().trim_end_matches("Data.db").to_string();
+    let base = data
+        .to_string_lossy()
+        .trim_end_matches("Data.db")
+        .to_string();
     let dir = data.parent().unwrap();
-    let prefix = Path::new(&base).file_name().unwrap().to_string_lossy().into_owned();
+    let prefix = Path::new(&base)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     std::fs::read_dir(dir)
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&prefix))
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
         .collect()
 }
 
@@ -244,8 +255,16 @@ fn publish_failure_keeps_fully_expired_input() {
     let o = compact_bin(&input_dir, &out, &schema, Some(0));
     assert!(!o.status.success(), "the seam must kill the publish");
     assert!(out_published(&out).is_empty(), "nothing was published");
-    assert_eq!(components(&expired), before_expired, "fully-expired input survives a failed publish");
-    assert_eq!(components(&live), before_live, "live input survives a failed publish");
+    assert_eq!(
+        components(&expired),
+        before_expired,
+        "fully-expired input survives a failed publish"
+    );
+    assert_eq!(
+        components(&live),
+        before_live,
+        "live input survives a failed publish"
+    );
 }
 
 /// Crash AFTER the last link (n = file count) but before removal: inputs AND output exist
@@ -253,15 +272,24 @@ fn publish_failure_keeps_fully_expired_input() {
 #[test]
 fn crash_after_publish_leaves_inputs_and_output() {
     let (temp, input_dir, expired, live, schema) = stage();
-    let out = temp.path().join("out");
     // Count the staged files: a clean run in a scratch output names them.
     let scratch = temp.path().join("scratch");
     let ok = compact_bin(&input_dir, &scratch, &schema, None);
-    assert!(ok.status.success(), "{}", String::from_utf8_lossy(&ok.stderr));
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
     let n = components(&out_published(&scratch)[0]).len();
     // The clean run reclaimed the expired input (publish success => removal, as before).
-    assert!(!expired.exists(), "successful publish reclaims the dropped input");
-    assert!(live.exists(), "the live input is the operator's and is never removed");
+    assert!(
+        !expired.exists(),
+        "successful publish reclaims the dropped input"
+    );
+    assert!(
+        live.exists(),
+        "the live input is the operator's and is never removed"
+    );
     // Rebuild the expired input for the crash run.
     let (temp2, input2, expired2, live2, schema2) = stage();
     let out2 = temp2.path().join("out");
@@ -269,9 +297,12 @@ fn crash_after_publish_leaves_inputs_and_output() {
     let o = compact_bin(&input2, &out2, &schema2, Some(n));
     assert!(!o.status.success(), "seam aborts after the last link");
     assert!(!out_published(&out2).is_empty(), "output is published");
-    assert_eq!(components(&expired2), before, "crash before removal keeps the input");
+    assert_eq!(
+        components(&expired2),
+        before,
+        "crash before removal keeps the input"
+    );
     assert!(live2.exists());
-    let _ = out;
 }
 
 #[test]
@@ -281,6 +312,9 @@ fn publish_success_removes_dropped_input() {
     let o = compact_bin(&input_dir, &out, &schema, None);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(out_published(&out).len(), 1);
-    assert!(components(&expired).is_empty(), "dropped input fully reclaimed after publish");
+    assert!(
+        components(&expired).is_empty(),
+        "dropped input fully reclaimed after publish"
+    );
     assert!(live.exists());
 }

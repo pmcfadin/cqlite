@@ -33,7 +33,7 @@ pub(crate) fn resolve_generation(dest_dir: &Path, requested: Option<u64>) -> Res
 ///
 /// The id is resolved and checked BEFORE any byte is written; `StagedPublish::publish` then
 /// refuses, with nothing renamed, if any final name already exists. Returns the report and the
-/// published Data.db path.
+/// published Data.db path. Fully-expired inputs are removed only AFTER the publish (#4666).
 pub(crate) async fn compact_and_publish(
     inputs: Vec<std::path::PathBuf>,
     args: &crate::cli_types::CompactArgs,
@@ -89,6 +89,8 @@ pub(crate) async fn compact_and_publish(
             },
         )
         .with_context(|| format!("cannot publish compaction output to {}", dest_dir.display()))?;
+    // Published and fsynced (TOC last): only now may the dropped inputs go (#4666).
+    report.reclaim_dropped_inputs();
     let output_path = report
         .output
         .data_path

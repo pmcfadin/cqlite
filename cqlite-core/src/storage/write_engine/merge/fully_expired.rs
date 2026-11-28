@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{compute_max_purgeable_timestamp, stats_path_for};
+use super::{compute_max_purgeable_timestamp, stats_path_for, CompactReport};
 use crate::parser::statistics::TimestampStatistics;
 
 /// Classify a candidate SSTable as *fully expired* for a compaction with cutoff
@@ -315,6 +315,31 @@ pub(crate) fn reclaim_dropped_whole<F: FnMut(&Path)>(
             continue;
         }
         delete(dropped);
+    }
+}
+
+#[cfg(feature = "write-support")]
+impl CompactReport {
+    /// Remove the fully-expired inputs the compaction dropped whole (`stats.dropped_whole`).
+    ///
+    /// Call ONLY after the output is durably published (#4666): compaction itself never removes an
+    /// input, so a failed publish loses nothing. Best-effort per component (TOC.txt first, so a
+    /// leftover is an invisible orphan); failures are logged, never returned. The one-shot surface
+    /// merges and removes nothing else (the operator owns the rest of the input directory), so the
+    /// retained all-dropped input is reclaimed here too (roborev #1388 Medium).
+    pub fn reclaim_dropped_inputs(&self) {
+        reclaim_dropped_whole(&self.stats.dropped_whole, &[], |dropped| {
+            if let Err(e) =
+                crate::storage::write_engine::WriteEngine::delete_sstable_files_static(dropped)
+            {
+                tracing::warn!(
+                    "Failed to delete dropped-whole compaction input {:?}: {} \
+                     (output is valid; leftover is an invisible orphan)",
+                    dropped,
+                    e
+                );
+            }
+        });
     }
 }
 
