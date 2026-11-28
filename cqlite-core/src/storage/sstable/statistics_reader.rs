@@ -17,12 +17,12 @@ pub mod integrity; // strict TOC/CRC layout check, shared by every reader (#4612
 /// High-level Statistics.db file reader
 pub struct StatisticsReader {
     /// Path to the Statistics.db file
-    file_path: PathBuf,
+    pub(crate) file_path: PathBuf,
     /// Parsed statistics data
-    statistics: SSTableStatistics,
+    pub(crate) statistics: Arc<SSTableStatistics>,
     /// Platform abstraction for file operations
     #[allow(dead_code)]
-    platform: Arc<Platform>,
+    pub(crate) platform: Arc<Platform>,
 }
 
 impl StatisticsReader {
@@ -89,7 +89,7 @@ impl StatisticsReader {
 
         Ok(Self {
             file_path: path.to_path_buf(),
-            statistics,
+            statistics: Arc::new(statistics),
             platform,
         })
     }
@@ -495,7 +495,7 @@ impl StatisticsReader {
             std::sync::Arc::new(crate::Platform::new(&config).await.expect("test platform"));
         Self {
             file_path: PathBuf::from("in-memory-test-Statistics.db"),
-            statistics,
+            statistics: Arc::new(statistics),
             platform,
         }
     }

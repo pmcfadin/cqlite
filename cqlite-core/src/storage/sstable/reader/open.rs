@@ -106,6 +106,37 @@ impl SSTableReader {
             cache,
             cancel,
             OpenErrorReporting::SelfReported,
+            None,
+        )
+        .await
+    }
+
+    /// [`open`](Self::open) over a listed generation's `Data.db`, handing the reader the
+    /// generation's already-trusted `Statistics.db` so the open does not read the file a second
+    /// time (G11, GD9.1: one read per generation per run).
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    pub(crate) async fn open_with_trusted_statistics(
+        generation: &crate::storage::sstable::generation::Generation,
+        config: &Config,
+        platform: Arc<Platform>,
+    ) -> Result<Self> {
+        // The path and the statistics both come from the generation, so they cannot be paired
+        // wrongly; `trusted_metadata` is the generation's cached read (or fails by name).
+        let path = generation.component_path("Data.db").ok_or_else(|| {
+            crate::Error::not_found(format!("{} has no Data.db", generation.base_name()))
+        })?;
+        let statistics = generation
+            .trusted_metadata()
+            .map_err(|e| crate::Error::corruption(e.to_string()))?;
+        let cache = super::super::build_chunk_cache(config);
+        Self::open_instrumented(
+            path,
+            config,
+            platform,
+            cache,
+            crate::storage::scan_cancel::ScanCancel::default(),
+            OpenErrorReporting::SelfReported,
+            Some(statistics),
         )
         .await
     }
@@ -147,6 +178,7 @@ impl SSTableReader {
             cache,
             crate::storage::scan_cancel::ScanCancel::default(),
             reporting,
+            None,
         )
         .await
     }
@@ -160,6 +192,7 @@ impl SSTableReader {
         cache: Arc<crate::storage::cache::DecompressedChunkCache>,
         cancel: crate::storage::scan_cancel::ScanCancel,
         reporting: OpenErrorReporting,
+        trusted_statistics: Option<Arc<crate::parser::statistics::SSTableStatistics>>,
     ) -> Result<Self> {
         use crate::observability::{self as obs, catalog};
         use tracing::Instrument as _;
@@ -174,7 +207,7 @@ impl SSTableReader {
         // `.await`: entering a span guard and then awaiting can attach unrelated
         // async work scheduled on this task to the span. `Instrument` enters the
         // span only while this specific future is polled.
-        let result = Self::open_inner(path, config, platform, cache, cancel)
+        let result = Self::open_inner(path, config, platform, cache, cancel, trusted_statistics)
             .instrument(span.clone())
             .await;
         match &result {

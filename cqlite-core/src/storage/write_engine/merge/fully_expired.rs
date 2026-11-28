@@ -20,7 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{compute_max_purgeable_timestamp, stats_path_for, CompactReport};
+use super::input_stats::{Input, InputStats};
+use super::{compute_max_purgeable_timestamp_in, CompactReport};
 use crate::parser::statistics::TimestampStatistics;
 
 /// Classify a candidate SSTable as *fully expired* for a compaction with cutoff
@@ -74,35 +75,20 @@ fn authoritative_max_timestamp(stats: &TimestampStatistics) -> Option<i64> {
 /// conservative signal that its expiry/timestamp facts are UNKNOWN, so the
 /// candidate must NOT be dropped (matches `compute_max_purgeable_timestamp`
 /// degradation). Authoritative metadata only (no cell scan).
-fn read_timestamp_stats(data_path: &Path) -> Option<TimestampStatistics> {
-    let stats_path = stats_path_for(data_path);
-    if !stats_path.exists() {
-        return None;
-    }
-    // #4612: checked read. A damaged file is UNKNOWN facts => `None` => candidate retained
-    // (Cassandra `getFullyExpiredSSTables` :183-216 drops only when maxTimestamp < minTimestamp).
-    let stats_bytes = match read_checked_stats(&stats_path) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(
-                "Could not read Statistics.db {:?} for fully-expired check: {}",
-                stats_path,
-                e
-            );
-            return None;
-        }
-    };
-    match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-        &stats_bytes,
-        None,
-    ) {
-        Ok((_, sstable_stats)) => Some(sstable_stats.timestamp_stats),
-        Err(e) => {
-            tracing::warn!(
-                "Could not parse Statistics.db {:?} for fully-expired check: {:?}",
-                stats_path,
-                e
-            );
+fn read_timestamp_stats(input: Input<'_>) -> Option<TimestampStatistics> {
+    // #4612: trusted read through the generation module. A damaged file is UNKNOWN facts =>
+    // `None` => candidate retained (Cassandra `getFullyExpiredSSTables` :183-216 drops only when
+    // maxTimestamp < minTimestamp).
+    match input.statistics() {
+        Ok(sstable_stats) => Some(sstable_stats.timestamp_stats.clone()),
+        Err(u) => {
+            if !u.is_absent() {
+                tracing::warn!(
+                    "Could not read Statistics.db for {:?} for fully-expired check: {}",
+                    input.path(),
+                    u
+                );
+            }
             None
         }
     }
@@ -164,6 +150,19 @@ pub fn fully_expired_sstables(
     outside_paths: &[PathBuf],
     gc_before_secs: Option<i64>,
 ) -> Vec<PathBuf> {
+    fully_expired_sstables_in(
+        &InputStats::resolve(input_paths),
+        &InputStats::resolve(outside_paths),
+        gc_before_secs,
+    )
+}
+
+/// [`fully_expired_sstables`] over inputs already resolved to generations (G11, GD9.1).
+pub(crate) fn fully_expired_sstables_in(
+    inputs: &InputStats,
+    outside: &InputStats,
+    gc_before_secs: Option<i64>,
+) -> Vec<PathBuf> {
     // No cutoff ⇒ purging is disabled ⇒ never drop (conservative, matches
     // compute_gc_before degradation).
     let Some(gc_before) = gc_before_secs else {
@@ -174,19 +173,20 @@ pub fn fully_expired_sstables(
     // is unreadable is treated as non-expired (not droppable) AND, because its
     // min_timestamp is then unknown, it cannot be safely folded into the overlap
     // bound — so an unreadable INPUT disables the whole drop-set (conservative).
+    let input_paths: Vec<PathBuf> = inputs.iter().map(|i| i.path().to_path_buf()).collect();
     let mut input_stats: Vec<(&PathBuf, Option<TimestampStatistics>)> =
         Vec::with_capacity(input_paths.len());
-    for p in input_paths {
-        input_stats.push((p, read_timestamp_stats(p)));
+    for (p, input) in input_paths.iter().zip(inputs.iter()) {
+        input_stats.push((p, read_timestamp_stats(input)));
     }
 
     // Outside overlap bound (non-compacting overlapping SSTables). An empty outside
     // set contributes +inf; a non-empty set with an UNKNOWN bound (an outside
     // Statistics.db unreadable) ⇒ cannot prove safety ⇒ drop nothing.
-    let outside_bound: Option<i64> = if outside_paths.is_empty() {
+    let outside_bound: Option<i64> = if outside.iter().next().is_none() {
         Some(i64::MAX)
     } else {
-        match compute_max_purgeable_timestamp(outside_paths) {
+        match compute_max_purgeable_timestamp_in(outside) {
             Some(bound) => Some(bound),
             None => return Vec::new(),
         }
@@ -341,23 +341,6 @@ impl CompactReport {
             }
         });
     }
-}
-
-/// Checked read of one `Statistics.db` for the overlap/expiry gates (#4612). `Err` means UNKNOWN:
-/// callers return `None` (retain the candidate; disable overlap-aware purging), which is the
-/// conservative side of Cassandra's `getPurgeEvaluator` (`CompactionController.java:245-281`,
-/// purge only below the minimum overlapping timestamp) and `getFullyExpiredSSTables` (`:183-216`).
-pub(crate) fn read_checked_stats(path: &Path) -> crate::error::Result<Vec<u8>> {
-    crate::storage::sstable::statistics_reader::integrity::read_checked_statistics(path)
-}
-
-/// Refuse a damaged input `Statistics.db` before any lenient reader (schema normalization,
-/// baseline seeding) touches it (#4612): those degrade a partial parse into re-ordered columns
-/// and re-based timestamps. A missing file keeps its existing handling; the error names the path.
-pub(crate) fn require_checked_inputs(
-    input_paths: &[std::path::PathBuf],
-) -> crate::error::Result<()> {
-    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(input_paths)
 }
 
 #[cfg(test)]

@@ -18,8 +18,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use super::model::{Condition, Generation};
+#[cfg(feature = "write-support")]
+use super::name::check_floor;
 use crate::error::{Error, Result};
 use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
+#[cfg(feature = "write-support")]
+use crate::parser::repair_metadata::{
+    parse_repair_metadata, parse_stats_extras, RepairMetadata, StatsExtras,
+};
 use crate::parser::statistics::SSTableStatistics;
 use crate::storage::sstable::statistics_reader::integrity;
 use crate::storage::sstable::version_gate::{
@@ -39,6 +45,14 @@ pub(super) type MetadataCell = Arc<OnceLock<std::result::Result<Loaded, Metadata
 #[derive(Debug, Clone)]
 pub(super) struct Loaded {
     stats: Arc<SSTableStatistics>,
+    /// The repair fields (`repairedAt`, `pendingRepair`, `isTransient`) decoded from the same
+    /// bytes with the descriptor's gates (compaction's repair-state classification, #4626).
+    #[cfg(feature = "write-support")]
+    repair: std::result::Result<Arc<RepairMetadata>, String>,
+    /// The STATS-extras histograms decoded from the same bytes; compaction's baseline seeding
+    /// reads the tombstone-drop-time histogram as its authoritative "has a tombstone" signal.
+    #[cfg(feature = "write-support")]
+    extras: std::result::Result<Arc<StatsExtras>, String>,
     #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     facts: std::result::Result<Arc<StatisticsFacts>, String>,
     /// The `SerializationHeader.EncodingStats` triple `(minTimestamp, minLocalDeletionTime,
@@ -127,6 +141,67 @@ impl MetadataFailure {
     }
 }
 
+/// The trusted values of one `Statistics.db` read by path, for a `Data.db` the listing does not
+/// return (hidden by a transaction log, a refused listing, a name that is not an SSTable
+/// component). The same order as [`Generation::trusted_metadata`]: the floor from the file name,
+/// then the bounded read, the strict integrity check and one parse. Gates come from the name when
+/// it has a descriptor, else the parser's nb-compatible default (as `StatisticsReader::open`).
+#[derive(Debug, Clone)]
+#[cfg(feature = "write-support")]
+pub(crate) struct DirectStatistics {
+    pub(crate) stats: Arc<SSTableStatistics>,
+    pub(crate) repair: std::result::Result<Arc<RepairMetadata>, String>,
+    pub(crate) extras: std::result::Result<Arc<StatsExtras>, String>,
+}
+
+#[cfg(feature = "write-support")]
+pub(crate) fn read_direct(path: &Path) -> std::result::Result<DirectStatistics, MetadataFailure> {
+    // The format and version come from the FILE NAME's parsed descriptor, the parser the rest of
+    // the module uses, never from the directory path. A name with no parseable descriptor has no
+    // authoritative version, so it gets no gates and the parser's nb-compatible defaults (as
+    // `StatisticsReader::open` does); guessing a format from other text would be a heuristic (#28).
+    let descriptor = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(super::name::parse_component_name);
+    let gates = match descriptor {
+        None => None,
+        Some(d) => {
+            if let Err(below) = check_floor(&d.version, d.format) {
+                return Err(MetadataFailure::UnsupportedVersion {
+                    version: below.version,
+                    floor: below.floor,
+                });
+            }
+            match d.format {
+                SsTableFormat::Big => {
+                    BigVersionGates::from_version(&d.version).map(VersionGates::Big)
+                }
+                SsTableFormat::Bti => {
+                    BtiVersionGates::from_version(&d.version).map(VersionGates::Bti)
+                }
+            }
+            .ok()
+        }
+    };
+    let bytes = read_checked(path).map_err(|e| classify_read_error(path, e))?;
+    let corrupt = |e: Error| MetadataFailure::Corrupt {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
+    let (_, stats) =
+        parse_statistics_with_fallback_detailed(&bytes, gates.as_ref()).map_err(corrupt)?;
+    Ok(DirectStatistics {
+        stats: Arc::new(stats),
+        repair: parse_repair_metadata(&bytes, gates.as_ref())
+            .map(Arc::new)
+            .map_err(|e| e.to_string()),
+        extras: parse_stats_extras(&bytes, gates.as_ref())
+            .map(Arc::new)
+            .map_err(|e| e.to_string()),
+    })
+}
+
 /// The production read: bounded, then the strict integrity check.
 pub(super) fn read_checked(path: &Path) -> Result<Vec<u8>> {
     integrity::read_checked_statistics(path)
@@ -165,6 +240,36 @@ impl Generation {
         self.metadata
             .get_or_init(|| self.load_metadata(read))
             .clone()
+    }
+
+    /// The repair fields of the trusted `Statistics.db`, from the same single read (G11). A decode
+    /// failure is `Corrupt`, naming the file.
+    #[cfg(feature = "write-support")]
+    pub(crate) fn repair_metadata(
+        &self,
+    ) -> std::result::Result<Arc<RepairMetadata>, MetadataFailure> {
+        self.loaded_with(&read_checked)?
+            .repair
+            .map_err(|detail| self.corrupt_decode(detail))
+    }
+
+    /// The STATS-extras histograms of the trusted `Statistics.db`, from the same single read
+    /// (G11). A decode failure is `Corrupt`, naming the file.
+    #[cfg(feature = "write-support")]
+    pub(crate) fn stats_extras(&self) -> std::result::Result<Arc<StatsExtras>, MetadataFailure> {
+        self.loaded_with(&read_checked)?
+            .extras
+            .map_err(|detail| self.corrupt_decode(detail))
+    }
+
+    #[cfg(feature = "write-support")]
+    fn corrupt_decode(&self, detail: String) -> MetadataFailure {
+        MetadataFailure::Corrupt {
+            path: self
+                .directory
+                .join(format!("{}-{STATISTICS_COMPONENT}", self.base_name())),
+            detail,
+        }
     }
 
     /// The STATS fields `diagnose` reports beyond the typed value, from the same single read
@@ -250,6 +355,14 @@ impl Generation {
             detail: e.to_string(),
         })?;
         let parsed = parse_statistics_with_fallback_detailed(&bytes, Some(&gates)).map(|(_, s)| s);
+        #[cfg(feature = "write-support")]
+        let repair = parse_repair_metadata(&bytes, Some(&gates))
+            .map(Arc::new)
+            .map_err(|e| e.to_string());
+        #[cfg(feature = "write-support")]
+        let extras = parse_stats_extras(&bytes, Some(&gates))
+            .map(Arc::new)
+            .map_err(|e| e.to_string());
         // The facts are decoded from the same buffer; it is dropped when this function returns.
         #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
         let facts = decode_facts(&bytes, &gates).map(Arc::new);
@@ -259,6 +372,10 @@ impl Generation {
         match parsed {
             Ok(stats) => Ok(Loaded {
                 stats: Arc::new(stats),
+                #[cfg(feature = "write-support")]
+                repair,
+                #[cfg(feature = "write-support")]
+                extras,
                 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
                 facts,
                 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
@@ -350,5 +467,23 @@ mod tests {
         let (_dir, generation) = one_generation("nb-1-big", None);
         let failure = generation.trusted_metadata_with(&forbidden).unwrap_err();
         assert_eq!(failure.condition(), Condition::Absent);
+    }
+
+    /// The direct read's floor follows the file name's descriptor, not a `-bti-` in the directory.
+    #[cfg(feature = "write-support")]
+    #[test]
+    fn direct_read_floor_comes_from_the_file_name_not_the_directory() {
+        let dir = tempfile::tempdir().unwrap().keep().join("x-bti-y");
+        std::fs::create_dir_all(&dir).unwrap();
+        match read_direct(&dir.join("ma-1-big-Statistics.db")) {
+            Err(MetadataFailure::UnsupportedVersion { version, floor }) => {
+                assert_eq!((version.as_str(), floor), ("ma", "na"));
+            }
+            other => panic!("expected the BIG floor, got {other:?}"),
+        }
+        match read_direct(&dir.join("na-1-bti-Statistics.db")) {
+            Err(MetadataFailure::UnsupportedVersion { floor, .. }) => assert_eq!(floor, "da"),
+            other => panic!("expected the BTI floor, got {other:?}"),
+        }
     }
 }

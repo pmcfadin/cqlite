@@ -290,6 +290,7 @@ pub async fn diagnose_table_with(
                     reclaim_inputs.push(ReclaimInput {
                         data_path: data_path.clone(),
                         generation: gen_report.generation.clone(),
+                        resolved: generation.clone(),
                         rows_scanned: d.rows_scanned,
                     });
                 }
@@ -452,7 +453,7 @@ async fn diagnose_generation(
     .await
     .map_err(|e| format!("Statistics.db load task failed: {e}"))??;
     diagnose_loaded_generation(
-        generation, data_path, options, gc_before, config, platform, &stats, &facts,
+        generation, data_path, options, gc_before, config, platform, stats, &facts,
     )
     .await
     .map_err(|e| e.to_string())
@@ -467,7 +468,7 @@ async fn diagnose_loaded_generation(
     gc_before: Option<i64>,
     config: &Config,
     platform: Arc<Platform>,
-    stats: &SSTableStatistics,
+    stats: Arc<SSTableStatistics>,
     facts: &StatisticsFacts,
 ) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
     let repair = &facts.repair;
@@ -497,12 +498,12 @@ async fn diagnose_loaded_generation(
     let (min_timestamp, min_local_deletion_time) = facts
         .minimums
         .ok_or_else(|| Error::corruption("Statistics.db carries no STATS component".to_string()))?;
-    let max_timestamp = max_timestamp_field(stats);
-    let estimated_partition_count = estimated_partition_count_field(stats);
+    let max_timestamp = max_timestamp_field(&stats);
+    let estimated_partition_count = estimated_partition_count_field(&stats);
 
     let (estimated_droppable_tombstone_ratio, gc_before_for_ratio) =
         droppable_tombstone_ratio_field(
-            stats,
+            &stats,
             cell_per_partition.as_ref(),
             gc_before,
             options.now_secs,
@@ -519,7 +520,11 @@ async fn diagnose_loaded_generation(
     let deep = if options.deep {
         // `Data.db` is opened HERE, and only here — the one place in the whole
         // cheap-vs-deep split where that is allowed (spec R3/R5.1).
-        let reader = SSTableReader::open(data_path, config, platform.clone()).await?;
+        // The reader takes the generation's already-trusted statistics: no second read of
+        // `Statistics.db` (G11, GD9.1).
+        let reader =
+            SSTableReader::open_with_trusted_statistics(generation, config, platform.clone())
+                .await?;
         let scan = deep_scan::deep_scan_generation(&reader, options.schema.as_ref(), options.top_n)
             .await?;
         Some(DeepGenerationReport {

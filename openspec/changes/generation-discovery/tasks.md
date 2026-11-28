@@ -81,9 +81,9 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
 
 ## 5. merge/mod.rs Statistics reads, and the file split (PR 5)
 
-- [ ] 5.1 Move the raw `Statistics.db` reads in `write_engine/merge/mod.rs` to the accessor (G11). Surface:
+- [x] 5.1 Move the raw `Statistics.db` reads in `write_engine/merge/mod.rs` to the accessor (G11). Surface:
       `compact_sstables` over a corrupt-Statistics fixture (fails closed as today, #4612).
-- [ ] 5.2 Split `merge/mod.rs` by responsibility under the #1116/#1135 `file-size` ratchet (no
+- [x] 5.2 Split `merge/mod.rs` by responsibility under the #1116/#1135 `file-size` ratchet (no
       `CQLITE_ALLOW_FILE_GROWTH`). Surface: the gate's `file-size` component.
 - [ ] 5.3 Phase closing tasks.
 

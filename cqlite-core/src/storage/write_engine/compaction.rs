@@ -119,13 +119,18 @@ impl WriteEngine {
         // merged output publishes.
         // #4612: refuse a damaged input Statistics.db BEFORE the drop-set (and every lenient
         // baseline/normalizer read after it) trusts it; nothing is deleted or published.
-        crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(
-            &input_paths,
-        )?;
-        let drop_set = merge::fully_expired_sstables(&input_paths, &outside_paths, gc_before_secs);
+        // Each input's Statistics.db is read once through the generation module (G11, GD9.1).
+        let all_inputs = merge::InputStats::resolve(&input_paths);
+        all_inputs.require_trusted()?;
+        let drop_set = merge::fully_expired_sstables_in(
+            &all_inputs,
+            &merge::InputStats::resolve(&outside_paths),
+            gc_before_secs,
+        );
         // Subtract the drop-set from the merger inputs (with the all-dropped guard);
         // shared with the CLI one-shot path.
         let (input_paths, dropped_whole) = merge::split_merge_and_dropped(&input_paths, drop_set);
+        let inputs = all_inputs.subset(&input_paths);
 
         // Measure total bytes read (sum of Data.db file sizes as an approximation)
         let bytes_read: u64 = input_paths
@@ -170,7 +175,7 @@ impl WriteEngine {
         // (header-driven static presence). Byte-identical to `config.schema` when
         // no such column exists.
         let mut effective_schema =
-            merge::effective_compaction_schema(&self.config.schema, &input_paths);
+            merge::effective_compaction_schema_in(&self.config.schema, &inputs);
         // #929: normalize bare-name UDT columns to their UserType(...) marshal on
         // the EFFECTIVE (decode) schema by copying each column's exact UserType
         // marshal from the input headers. The compaction reader decides complex-
@@ -183,9 +188,9 @@ impl WriteEngine {
         // configured registry handles a UDT column added after the inputs were
         // written (absent from every input header) so the output is not emitted
         // as a bare/BytesType column (roborev #1023).
-        merge::apply_udt_marshals_from_inputs(
+        merge::apply_udt_marshals_from_inputs_in(
             &mut effective_schema,
-            &input_paths,
+            &inputs,
             self.config.udt_registry.as_ref(),
         )?;
 
@@ -271,7 +276,7 @@ impl WriteEngine {
         // each input's persisted repair state from its Statistics.db, reject a
         // mixed set with a typed error, and PRESERVE the single shared state into
         // the merged output below. Authoritative metadata only (no heuristics).
-        let repair_state = merge::classify_inputs(&input_paths)?;
+        let repair_state = merge::classify_inputs_in(&inputs)?;
 
         // Point the SSTableWriter at the tmp root; it will write to
         // tmp_dir/keyspace/table/nb-{gen}-big-*.db. Use the post-drop
@@ -300,7 +305,7 @@ impl WriteEngine {
         // by reading the minimum values from each input SSTable's Statistics.db.
         // The output baseline must be ≤ all per-partition values from all inputs.
         let (baseline_min_ts, mut baseline_min_ldt, baseline_min_ttl) =
-            merge::compute_baseline_min(&input_paths);
+            merge::compute_baseline_min_in(&inputs);
         // Issue #2299: capture the raw pre-floor LDT baseline. `i32::MAX` is
         // Cassandra's `NO_DELETION_TIME` sentinel; when it survives the min over
         // EVERY input's Statistics.db, no input carries ANY deletion (partition/
@@ -318,7 +323,7 @@ impl WriteEngine {
         // input's authoritative deletion metadata was actually observed; otherwise
         // we take the always-correct buffered path.
         let no_deletions_in_any_input =
-            baseline_min_ldt == i32::MAX && merge::all_input_stats_readable(&input_paths);
+            baseline_min_ldt == i32::MAX && merge::all_input_stats_readable_in(&inputs);
         // Issue #1537: unlike `compact_sstables_with_registry` — whose
         // `now_secs: Option<i64>` parameter can be `None` (expiry disabled), so it
         // gates the floor application on `now_secs.is_some()` — this WriteEngine
@@ -332,7 +337,7 @@ impl WriteEngine {
         // so lower the LDT baseline to a provably-safe floor so the DataWriter's
         // unsigned LDT-delta never underflows. No-op when no input carries
         // expiring cells.
-        if let Some(floor) = merge::compute_expiry_ttl_ldt_floor(&input_paths) {
+        if let Some(floor) = merge::compute_expiry_ttl_ldt_floor_in(&inputs) {
             baseline_min_ldt = baseline_min_ldt.min(floor);
         }
         writer.pre_seed_encoding_baselines(baseline_min_ts, baseline_min_ldt, baseline_min_ttl);

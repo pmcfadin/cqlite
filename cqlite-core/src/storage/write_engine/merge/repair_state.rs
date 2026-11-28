@@ -25,9 +25,9 @@
 
 use std::path::{Path, PathBuf};
 
+use super::input_stats::{Input, InputStats};
 use crate::error::{Error, Result};
-use crate::parser::repair_metadata::{parse_repair_metadata, RepairField};
-use crate::storage::sstable::version_gate::VersionGates;
+use crate::parser::repair_metadata::RepairField;
 
 /// The persisted repair state of an SSTable, decoded from its `Statistics.db`
 /// STATS component. Two SSTables are compaction-compatible iff their
@@ -86,13 +86,6 @@ fn uuid_hex(u: &[u8; 16]) -> String {
     s
 }
 
-/// Derive the sibling `Statistics.db` path for an SSTable `Data.db` path.
-fn stats_path_for(data_path: &Path) -> PathBuf {
-    let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let stats_filename = filename.replace("Data.db", "Statistics.db");
-    data_path.parent().unwrap_or(data_path).join(stats_filename)
-}
-
 /// The AUTHORITATIVELY decoded repair fields of one compaction input, preserving
 /// the `Decoded` vs `Unparsed` distinction from [`parse_repair_metadata`] so the
 /// classifier can reason about what was actually proven from bytes rather than
@@ -126,30 +119,17 @@ struct InputRepairFields {
 ///
 /// * the `Statistics.db` sibling cannot be read, or
 /// * its descriptor / STATS component is malformed (parse fails closed).
-fn read_repair_fields(data_path: &Path) -> Result<InputRepairFields> {
-    let stats_path = stats_path_for(data_path);
-    let bytes =
-        crate::storage::sstable::statistics_reader::integrity::read_checked_statistics(&stats_path)
-            .map_err(|e| {
-                Error::Compaction(format!(
-                    "cannot read {stats_path:?} to classify repair state for compaction: {e}"
-                ))
-            })?;
-    let gates = VersionGates::from_path(&stats_path).map_err(|e| {
+fn read_repair_fields(input: Input<'_>) -> Result<InputRepairFields> {
+    let path = input.path();
+    let md = input.repair_metadata().map_err(|e| {
         Error::Compaction(format!(
-            "cannot derive version gates from {stats_path:?} for repair-state classification: {e:?}"
+            "cannot read the Statistics.db of {path:?} to classify repair state for compaction: {e}"
         ))
     })?;
-    let md = parse_repair_metadata(&bytes, Some(&gates)).map_err(|e| {
-        Error::Compaction(format!(
-            "cannot decode repair metadata from {stats_path:?} for compaction: {e:?}"
-        ))
-    })?;
-
     Ok(InputRepairFields {
         repaired_at: md.repaired_at,
-        pending_repair: md.pending_repair,
-        is_transient: md.is_transient,
+        pending_repair: md.pending_repair.clone(),
+        is_transient: md.is_transient.clone(),
     })
 }
 
@@ -208,6 +188,12 @@ fn read_repair_fields(data_path: &Path) -> Result<InputRepairFields> {
 ///   rather than producing an output that silently merges across the repair
 ///   boundary.
 pub fn classify_inputs(input_paths: &[PathBuf]) -> Result<RepairState> {
+    classify_inputs_in(&InputStats::resolve(input_paths))
+}
+
+/// [`classify_inputs`] over inputs already resolved to generations, so the repair fields come
+/// from the same single `Statistics.db` read as the rest of the run (G11, GD9.1).
+pub(crate) fn classify_inputs_in(inputs: &InputStats) -> Result<RepairState> {
     // Authoritative repairedAt: always decoded, always compared.
     let mut common_repaired_at: Option<i64> = None;
     // The single agreed decoded pendingRepair / isTransient (all inputs agree by
@@ -216,8 +202,9 @@ pub fn classify_inputs(input_paths: &[PathBuf]) -> Result<RepairState> {
     let mut decoded_pending: Option<Option<[u8; 16]>> = None;
     let mut decoded_transient: Option<bool> = None;
 
-    for path in input_paths {
-        let fields = read_repair_fields(path)?;
+    for input in inputs.iter() {
+        let path = input.path();
+        let fields = read_repair_fields(input)?;
 
         // repairedAt: authoritative for every format → reject a genuine mismatch.
         match common_repaired_at {
