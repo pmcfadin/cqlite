@@ -183,7 +183,7 @@ pub struct RebuildOptions {
     /// input's own expected sibling `Statistics.db` path.
     ///
     /// MUST keep the Cassandra `<version>-<generation>-<format>-` filename
-    /// convention (e.g. `nb-1-big-Statistics.db`) — `VersionGates::from_path`
+    /// convention (e.g. `nb-1-big-Statistics.db`) — the generation module
     /// derives the version/format gates needed to decode repair metadata
     /// from the FILENAME itself, so an arbitrarily-renamed file (verified
     /// empirically) is read as `lost` rather than `recovered`, even though
