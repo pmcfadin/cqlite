@@ -409,7 +409,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     let inputs = discover_input_sstables(&args.input_dir)?;
     if inputs.is_empty() {
         return Err(anyhow::anyhow!(
-            "No published SSTables (nb-*-big-Data.db with a sibling TOC.txt) found under {}",
+            "No live nb-*-big SSTables found in {} (compact reads one table directory and does not recurse)",
             args.input_dir.display()
         ));
     }
@@ -418,11 +418,24 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     // explicit `--major` opt-in to `purge_safe`. Default (flag absent) is
     // conservative — see `compact_purge_safe`.
     let purge_safe = compact_purge_safe(args);
+
+    // #4623: the output id is the module's next id unless given, and an id that an existing
+    // SSTable of the destination directory already uses is refused BEFORE any byte is written.
+    let dest_dir = args.output.join(&schema.keyspace).join(&schema.table);
+    let generation = crate::commands::compact_output::resolve_generation(&dest_dir, args.generation)?;
+
+    // Publish through `StagedPublish` (#4623): the writers fill a stage under `--output`, and
+    // `publish` refuses with nothing renamed if any final name already exists.
+    let stage = cqlite_core::storage::write_engine::rebuild::staged_publish::StagedPublish::begin(
+        &args.output,
+        &format!("compact-{generation}"),
+    )
+    .with_context(|| format!("cannot stage compaction output under {}", args.output.display()))?;
     let report = cqlite_core::storage::write_engine::merge::compact_sstables_with_registry(
         inputs,
-        &args.output,
+        stage.dir(),
         &schema,
-        args.generation,
+        generation,
         args.gc_before,
         args.now_sec,
         purge_safe,
@@ -430,9 +443,18 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     )
     .await
     .with_context(|| "compaction failed")?;
+    stage
+        .publish()
+        .with_context(|| format!("cannot publish compaction output to {}", dest_dir.display()))?;
+    let output_path = report
+        .output
+        .data_path
+        .file_name()
+        .map(|n| dest_dir.join(n))
+        .unwrap_or_else(|| report.output.data_path.clone());
 
     Ok(CompactResult {
-        output_path: report.output.data_path,
+        output_path,
         input_files: report.stats.input_files,
         output_partitions: report.stats.output_partitions,
         output_rows: report.stats.output_rows,

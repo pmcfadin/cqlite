@@ -32,17 +32,29 @@
 //! `cqlite-core/tests/issue_4197_rebuild_bti_scope.rs`, which is the test to
 //! replace when #4336 lands.
 
+// `atomic_file` and `staged_publish` are the crash-safe publication primitives shared by rebuild,
+// salvage and `cqlite compact` (#4529, #4623). They carry no `Data.db` decode dependency, so they
+// exist in every `write-support` build; the rest of rebuild keeps the `not(tombstones)` gate its
+// declaration in `write_engine/mod.rs` used to impose on the whole module.
 mod atomic_file;
+#[cfg(not(feature = "tombstones"))]
 mod boundaries;
+#[cfg(not(feature = "tombstones"))]
 mod components;
+#[cfg(not(feature = "tombstones"))]
 mod decode;
+#[cfg(not(feature = "tombstones"))]
 mod partition_stats;
 // Issue #4529: crash-safe publication shared by rebuild and salvage.
+#[cfg(not(feature = "tombstones"))]
 mod publish;
+#[cfg(not(feature = "tombstones"))]
 mod simple;
 pub mod staged_publish;
+#[cfg(not(feature = "tombstones"))]
 mod statistics;
 
+#[cfg(not(feature = "tombstones"))]
 pub use components::rebuild_components;
 
 use serde::{Deserialize, Serialize};

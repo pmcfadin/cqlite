@@ -53,7 +53,9 @@ pub mod salvage;
 // Summary.db, Filter.db, Digest.crc32, TOC.txt, CRC.db, Statistics.db) from a healthy, UNCHANGED
 // Data.db, on the SAME decode primitives `salvage` uses, so it carries the identical
 // `not(tombstones)` gate for the identical reason (see `salvage`'s gate comment above).
-#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+// The module is always present under `write-support`: `cqlite compact` publishes through its
+// `staged_publish` (#4623). Its rebuild-specific submodules keep the `not(tombstones)` gate inside.
+#[cfg(feature = "write-support")]
 pub mod rebuild;
 // `cqlite diff` (issue #4201): read-only two-snapshot comparison on the traced merger.
 #[cfg(feature = "write-support")]
@@ -98,6 +100,8 @@ mod compaction;
 pub(crate) mod durability;
 #[cfg(feature = "write-support")]
 mod maintenance;
+#[cfg(feature = "write-support")]
+mod next_generation;
 #[cfg(feature = "write-support")]
 mod stats;
 // WAL size + replay-duration observability gauges (issue #1707), in a sibling file
@@ -715,8 +719,8 @@ impl WriteEngine {
             );
         }
 
-        // Determine next generation number by scanning data directory
-        let generation = Self::determine_next_generation(&config.data_dir)?;
+        // Next id over the table directory's Live set plus backups, all formats (#4623).
+        let generation = next_generation::next_flush_generation(&config.data_dir, &config.schema)?;
 
         // Install the default STCS compaction policy so `maintenance_step`
         // performs size-tiered compaction out of the box (issue #1619). The
@@ -1315,6 +1319,9 @@ impl WriteEngine {
             self.memtable.size_bytes()
         );
 
+        // G7: never emit a sequence id outside the Java int range.
+        next_generation::ensure_flushable(self.generation)?;
+
         // Create SSTable writer with hint for Bloom filter sizing
         let partition_count_hint = self.memtable.iter().count();
         let mut writer =
@@ -1521,58 +1528,6 @@ impl WriteEngine {
     /// Supports INSERT, UPDATE, and DELETE statements.
     fn parse_cql_to_mutation(&self, statement: &str) -> Result<Mutation> {
         cql_to_mutation::convert_cql_to_mutation(statement, &self.config.schema)
-    }
-
-    /// Determine the next SSTable generation number
-    ///
-    /// Scans the data directory for existing SSTable files and returns
-    /// the next generation number.
-    fn determine_next_generation(data_dir: &Path) -> Result<u64> {
-        let mut max_generation = 0u64;
-
-        if !data_dir.exists() {
-            return Ok(1);
-        }
-
-        // Recursively scan for SSTable files (writer places them in keyspace/table/ subdirs)
-        Self::scan_generations(
-            data_dir,
-            &mut max_generation,
-            crate::storage::sstable::MAX_SSTABLE_SCAN_DEPTH,
-        )?;
-
-        Ok(max_generation + 1)
-    }
-
-    /// Recursively scan directory for SSTable generation numbers
-    fn scan_generations(dir: &Path, max_generation: &mut u64, depth: usize) -> Result<()> {
-        for entry in std::fs::read_dir(dir)
-            .map_err(|e| Error::Storage(format!("Failed to read data directory: {}", e)))?
-        {
-            let entry = entry
-                .map_err(|e| Error::Storage(format!("Failed to read directory entry: {}", e)))?;
-
-            let filename = entry.file_name();
-            let filename_str = filename.to_string_lossy();
-
-            // Parse generation from filename: nb-{generation}-big-{Component}.db
-            if filename_str.starts_with("nb-") && filename_str.contains("-big-") {
-                if let Some(gen_str) = filename_str
-                    .strip_prefix("nb-")
-                    .and_then(|s| s.split('-').next())
-                {
-                    if let Ok(gen) = gen_str.parse::<u64>() {
-                        *max_generation = (*max_generation).max(gen);
-                    }
-                }
-            } else if depth > 0 {
-                let path = entry.path();
-                if path.is_dir() {
-                    Self::scan_generations(&path, max_generation, depth - 1)?;
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -2509,31 +2464,6 @@ mod tests {
         assert_eq!(engine.memtable_row_count(), 1);
     }
 
-    #[test]
-    fn test_determine_next_generation_empty_dir() {
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let generation = WriteEngine::determine_next_generation(&data_dir).unwrap();
-        assert_eq!(generation, 1);
-    }
-
-    #[test]
-    fn test_determine_next_generation_with_sstables() {
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        // Create dummy SSTable files
-        std::fs::write(data_dir.join("nb-1-big-Data.db"), b"").unwrap();
-        std::fs::write(data_dir.join("nb-2-big-Data.db"), b"").unwrap();
-        std::fs::write(data_dir.join("nb-5-big-Data.db"), b"").unwrap();
-
-        let generation = WriteEngine::determine_next_generation(&data_dir).unwrap();
-        assert_eq!(generation, 6);
-    }
-
     #[tokio::test]
     async fn test_write_engine_close_idempotent() {
         let temp_dir = TempDir::new().unwrap();
@@ -2946,23 +2876,6 @@ mod tests {
         let large_generation: u64 = u32::MAX as u64 + 1000;
         assert!(large_generation > u32::MAX as u64);
         assert_eq!(large_generation, 4_294_968_295u64);
-    }
-
-    #[test]
-    fn test_determine_next_generation_large_numbers() {
-        // Verify that generation parsing handles large u64 values (Issue #410)
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        // Create dummy SSTable files with large generation numbers
-        // These would overflow if we used u32 (max: 4,294,967,295)
-        let large_gen: u64 = u32::MAX as u64 + 100;
-        std::fs::write(data_dir.join(format!("nb-{}-big-Data.db", large_gen)), b"").unwrap();
-
-        let generation = WriteEngine::determine_next_generation(&data_dir).unwrap();
-        assert_eq!(generation, large_gen + 1);
-        assert!(generation > u32::MAX as u64);
     }
 
     // ============================================================================

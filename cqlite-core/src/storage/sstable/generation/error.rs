@@ -60,6 +60,29 @@ pub enum GenerationError {
         highest: u32,
     },
 
+    /// An explicitly requested sequence id is outside the Java `int` range (G7).
+    #[error("sequence id {requested} is outside the Java int range 0..=2147483647")]
+    SequenceIdOutOfRange {
+        /// The id requested.
+        requested: u64,
+    },
+
+    /// An explicitly requested sequence id is already used by a descriptor in the directory (any
+    /// format, version or state), so a writer would publish onto an existing name.
+    #[error(
+        "sequence id {id} is already in use in {}: {}",
+        directory.display(),
+        generations.join(", ")
+    )]
+    IdInUse {
+        /// The id requested.
+        id: u32,
+        /// The directory a writer would publish into.
+        directory: PathBuf,
+        /// The base names (or hidden file names) that hold the id.
+        generations: Vec<String>,
+    },
+
     /// A snapshot tag that is not a single directory name.
     #[error("snapshot tag {tag:?} is not a single directory name")]
     InvalidSnapshotTag {

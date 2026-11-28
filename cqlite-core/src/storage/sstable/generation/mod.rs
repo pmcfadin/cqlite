@@ -28,7 +28,7 @@ mod name;
 mod txn_classify;
 mod txn_log;
 
-pub use alloc::{next_generation_id, next_sequence_after};
+pub use alloc::{ensure_sequence_id_free, next_generation_id, next_sequence_after};
 pub use error::{GenerationError, GenerationResult};
 pub use id::{GenerationId, UuidGenerationId, MAX_SEQUENCE_ID};
 pub use listing::list_generations;
