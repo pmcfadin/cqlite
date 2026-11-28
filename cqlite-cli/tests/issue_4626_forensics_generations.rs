@@ -275,10 +275,7 @@ fn find_lists_a_corrupt_generation_with_its_condition() {
         .find(|r| r["basename"] == "nb-2-big-Data.db")
         .expect("nb-2-big is in the report");
     assert_eq!(bad["probe"], "unreadable");
-    assert!(
-        bad["cause"].as_str().unwrap().contains("Corrupt"),
-        "{bad}"
-    );
+    assert!(bad["cause"].as_str().unwrap().contains("Corrupt"), "{bad}");
     assert_eq!(rows.len(), 5, "every generation is reported");
 }
 
@@ -343,7 +340,10 @@ fn diagnose_reports_toc_missing_with_exit_zero() {
     assert_eq!(gens.len(), 5);
     assert_eq!(gens[0]["generation"], 1);
     assert_eq!(gens[0]["conditions"], serde_json::json!(["TocMissing"]));
-    assert!(gens[1].get("conditions").is_none(), "healthy keeps R7.1's keys");
+    assert!(
+        gens[1].get("conditions").is_none(),
+        "healthy keeps R7.1's keys"
+    );
     assert!(v["unreadable_generations"].as_array().unwrap().is_empty());
 }
 
@@ -358,8 +358,14 @@ fn diagnose_lists_a_below_floor_generation_as_unreadable() {
     assert_eq!(code, Some(0), "{e}");
     let bad = v["unreadable_generations"].as_array().unwrap();
     assert_eq!(bad.len(), 1, "{v}");
-    assert!(bad[0]["data_path"].as_str().unwrap().ends_with("ma-1-big-Data.db"));
-    assert!(bad[0]["cause"].as_str().unwrap().contains("UnsupportedVersion"));
+    assert!(bad[0]["data_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("ma-1-big-Data.db"));
+    assert!(bad[0]["cause"]
+        .as_str()
+        .unwrap()
+        .contains("UnsupportedVersion"));
     assert_eq!(v["generations"].as_array().unwrap().len(), 5);
 }
 
@@ -373,7 +379,10 @@ fn diagnose_lists_an_orphan_as_unreadable() {
     assert_eq!(code, Some(0), "{e}");
     let bad = v["unreadable_generations"].as_array().unwrap();
     assert_eq!(bad.len(), 1, "{v}");
-    assert!(bad[0]["data_path"].as_str().unwrap().ends_with("nb-3-big-Data.db"));
+    assert!(bad[0]["data_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("nb-3-big-Data.db"));
     assert!(bad[0]["cause"].as_str().unwrap().starts_with("Orphan"));
     assert_eq!(v["generations"].as_array().unwrap().len(), 4);
 }
@@ -447,7 +456,10 @@ fn diff(a: &Path, b: &Path, schema: &Path) -> Output {
 /// A side holding only generation `nb-1-big` of the `snap_backup` fixture.
 fn single_generation_side(root: &Path, name: &str) -> PathBuf {
     let src = fixture_table("snap_backup", "snap_backup");
-    let dir = root.join(name).join("gd4626").join(src.file_name().unwrap());
+    let dir = root
+        .join(name)
+        .join("gd4626")
+        .join(src.file_name().unwrap());
     copy_generation_as(&src, "nb-1-big", &dir, "nb-1-big");
     dir
 }
@@ -464,7 +476,10 @@ fn diff_shows_a_toc_missing_generation_on_side_b() {
     let o = diff(&a, &b, &schema);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
     let first = first_line(&o);
-    assert!(first.contains("side_b: generations=1 [nb-1-big]"), "{first}");
+    assert!(
+        first.contains("side_b: generations=1 [nb-1-big]"),
+        "{first}"
+    );
 }
 
 /// GD6.2: a below-floor generation on side A exits 2 naming `side=a` and the condition.

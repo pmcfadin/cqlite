@@ -39,11 +39,22 @@ mod tests {
         let generations = scan::scan_sstable_files(temp_dir.path(), "t").unwrap();
         let seen: Vec<(u32, &str, &str, usize)> = generations
             .iter()
-            .map(|g| (g.generation, g.version.as_str(), g.format.as_str(), g.components.len()))
+            .map(|g| {
+                (
+                    g.generation,
+                    g.version.as_str(),
+                    g.format.as_str(),
+                    g.components.len(),
+                )
+            })
             .collect();
         assert_eq!(
             seen,
-            vec![(3, "da", "bti", 2), (2, "oa", "big", 1), (1, "nb", "big", 1)]
+            vec![
+                (3, "da", "bti", 2),
+                (2, "oa", "big", 1),
+                (1, "nb", "big", 1)
+            ]
         );
     }
 
@@ -59,7 +70,9 @@ mod tests {
         }
         let error = scan::scan_sstable_files(temp_dir.path(), "t").unwrap_err();
         assert!(
-            error.to_string().contains("nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big"),
+            error
+                .to_string()
+                .contains("nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big"),
             "{error}"
         );
     }

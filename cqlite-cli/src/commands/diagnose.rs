@@ -3,7 +3,8 @@
 //!
 //! * **Exit codes (R6):** `0` for any successful report (a generation this run cannot read is a
 //!   field of the report, `unreadable_generations`, never a refusal); `1` for usage errors
-//!   (missing/non-directory path, no generations, bad `--now`, unreadable `--schema`).
+//!   (missing/non-directory path, no generations, bad `--now`, unreadable `--schema`, or a
+//!   directory the generation module cannot resolve: an inconsistent transaction state, Q45).
 //! * **`--out` is a rendering, never a destination (R6.4):** the report goes to STDOUT; this verb
 //!   creates, modifies and deletes nothing.
 //! * **JSON (R7.1, design D5):** field order is built here, explicitly, in D5's order
@@ -223,7 +224,12 @@ fn generation_json(g: &GenerationDiagnosis) -> Value {
     if !g.conditions.is_empty() {
         m.insert(
             "conditions".into(),
-            Value::Array(g.conditions.iter().map(|c| json!(format!("{c:?}"))).collect()),
+            Value::Array(
+                g.conditions
+                    .iter()
+                    .map(|c| json!(format!("{c:?}")))
+                    .collect(),
+            ),
         );
     }
     Value::Object(m)

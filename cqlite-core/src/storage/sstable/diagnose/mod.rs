@@ -269,7 +269,17 @@ pub async fn diagnose_table_with(
     let mut without_span: Vec<String> = Vec::new();
     for generation in &listing.live {
         let data_path = data_path_of(generation);
-        match diagnose_generation(generation, &data_path, options, gc_before, &config, platform.clone(), read).await {
+        match diagnose_generation(
+            generation,
+            &data_path,
+            options,
+            gc_before,
+            &config,
+            platform.clone(),
+            read,
+        )
+        .await
+        {
             Ok((gen_report, token_span)) => {
                 match token_span {
                     Some(span) => token_spans.push(span),
@@ -432,7 +442,14 @@ async fn diagnose_generation(
     let stats = generation.trusted_metadata_via(read).map_err(named)?;
     let stats_bytes = generation.trusted_statistics_bytes().map_err(named)?;
     diagnose_loaded_generation(
-        generation, data_path, options, gc_before, config, platform, &stats, &stats_bytes,
+        generation,
+        data_path,
+        options,
+        gc_before,
+        config,
+        platform,
+        &stats,
+        &stats_bytes,
     )
     .await
     .map_err(|e| e.to_string())

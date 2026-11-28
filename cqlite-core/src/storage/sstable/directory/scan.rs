@@ -4,9 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
-use crate::storage::sstable::generation::{
-    list_generations, GenerationId, Scope, TocPolicy,
-};
+use crate::storage::sstable::generation::{list_generations, GenerationId, Scope, TocPolicy};
 
 use super::types::{SSTableComponent, SSTableGeneration, SecondaryIndex};
 

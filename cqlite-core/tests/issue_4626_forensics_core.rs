@@ -15,7 +15,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use cqlite_core::storage::sstable::diagnose::{diagnose_table, diagnose_table_with, DiagnoseOptions};
+use cqlite_core::storage::sstable::diagnose::{
+    diagnose_table, diagnose_table_with, DiagnoseOptions,
+};
 use cqlite_core::storage::sstable::directory::SSTableDirectory;
 use cqlite_core::storage::sstable::generation::Condition;
 use generation_fixtures::*;
@@ -63,7 +65,12 @@ async fn each_statistics_db_is_read_once_per_diagnose_run() {
     let report = diagnose_table_with(&dir, &options(true), &counting)
         .await
         .expect("diagnose --deep");
-    assert_eq!(report.generations.len(), 5, "{:?}", report.unreadable_generations);
+    assert_eq!(
+        report.generations.len(),
+        5,
+        "{:?}",
+        report.unreadable_generations
+    );
     let opens = opens.into_inner();
     assert_eq!(opens.len(), 5, "{opens:?}");
     for (name, n) in &opens {
@@ -77,7 +84,9 @@ async fn each_statistics_db_is_read_once_per_diagnose_run() {
 async fn toc_missing_is_reported_and_the_generation_is_still_diagnosed() {
     let (_root, dir) = copy_fixture("snap_backup", "snap_backup");
     std::fs::remove_file(dir.join("nb-2-big-TOC.txt")).unwrap();
-    let report = diagnose_table(&dir, &options(false)).await.expect("diagnose");
+    let report = diagnose_table(&dir, &options(false))
+        .await
+        .expect("diagnose");
     assert_eq!(report.generations.len(), 5);
     let conditions: Vec<(&str, Vec<Condition>)> = report
         .generations
@@ -101,14 +110,20 @@ async fn a_corrupt_statistics_db_is_an_unreadable_generation_not_a_refusal() {
         .unwrap()
         .set_len(len - 5)
         .unwrap();
-    let report = diagnose_table(&dir, &options(false)).await.expect("diagnose");
+    let report = diagnose_table(&dir, &options(false))
+        .await
+        .expect("diagnose");
     assert_eq!(report.generations.len(), 4);
     let [bad] = report.unreadable_generations.as_slice() else {
         panic!("{:?}", report.unreadable_generations);
     };
     assert!(bad.data_path.ends_with("nb-4-big-Data.db"));
     assert!(bad.cause.starts_with("Corrupt"), "{}", bad.cause);
-    assert!(bad.cause.contains("nb-4-big-Statistics.db"), "{}", bad.cause);
+    assert!(
+        bad.cause.contains("nb-4-big-Statistics.db"),
+        "{}",
+        bad.cause
+    );
 }
 
 /// Q45 / G2.1: an inconsistent transaction state is an `Err` naming the log (the CLI exits 1).
@@ -128,8 +143,14 @@ async fn an_inconsistent_transaction_state_is_an_error_naming_the_log() {
 #[tokio::test]
 async fn a_committed_compaction_hides_its_inputs_and_notes_the_relocated_log() {
     let (_root, dir) = stamped_fixture_copy("txn_committed");
-    let report = diagnose_table(&dir, &options(false)).await.expect("diagnose");
-    let ids: Vec<&str> = report.generations.iter().map(|g| g.generation.as_str()).collect();
+    let report = diagnose_table(&dir, &options(false))
+        .await
+        .expect("diagnose");
+    let ids: Vec<&str> = report
+        .generations
+        .iter()
+        .map(|g| g.generation.as_str())
+        .collect();
     assert_eq!(ids, ["4"]);
     assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
 }
@@ -147,12 +168,18 @@ fn the_directory_scan_follows_the_generation_module() {
     let (_root, dir) = copy_fixture("snap_backup", "snap_backup");
     let scanned = SSTableDirectory::scan(&dir).expect("scan");
     let ids: Vec<u32> = scanned.generations.iter().map(|g| g.generation).collect();
-    assert_eq!(ids, [5, 4, 3, 2, 1], "snapshots/ and backups/ are never read");
+    assert_eq!(
+        ids,
+        [5, 4, 3, 2, 1],
+        "snapshots/ and backups/ are never read"
+    );
 
     let (_root, dir) = copy_fixture("uuid_ids", "uuid_mixed");
     let error = SSTableDirectory::scan(&dir).unwrap_err();
     assert!(
-        error.to_string().contains("nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big"),
+        error
+            .to_string()
+            .contains("nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big"),
         "{error}"
     );
 }
