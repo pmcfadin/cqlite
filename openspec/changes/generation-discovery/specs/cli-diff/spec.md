@@ -16,7 +16,7 @@ that refuses on one side (below-floor, `Corrupt`, `Unreadable`, `TxnInconsistent
 - **Rule detail and Cassandra reference**: When a side is a snapshot directory (a path that is itself `<table-dir>/snapshots/<tag>`), its generations are its own Live set.
 - **Given** side B's `nb-1-big-TOC.txt` deleted
 - **When** `diff` runs
-- **Then** the first-line `side_b: generations=1 [nb-1-big]` is shown and the exit code is `0`.
+- **Then** the first line reads `side_b: generations=1 ["nb-1-big (toc-missing)"]` (the condition is shown; a name containing a space is quoted) and the exit code is `0`.
 
 #### Scenario: GD6.2 below-floor on side A
 - **Given** side A holds `ma-1-big-Data.db`
